@@ -116,7 +116,7 @@ def serialized_objects(d, common, want=None, trees=None):
     serialized file → yields (class ID, path ID, object dict); want = only decode these class IDs.
     trees = {(class ID, type hash): type tree}: files with type trees record theirs, files without (the game's own data.unity3d and so on) borrow one of the same class and hash -- the same hash means the same layout"""
     msz, fsz, ver, doff = struct.unpack_from('>IIII', d, 0)
-    if not 19 <= ver <= 22: raise ValueError(f'序列化文件格式 {ver} 未支持')
+    if not 17 <= ver <= 22: raise ValueError(f'序列化文件格式 {ver} 未支持')
     p = 16; le = d[p] == 0; p += 4
     if ver >= 22: msz, fsz, doff, _ = struct.unpack_from('>Iqqq', d, p); p += 28
     r = Reader(d, le); r.p = p
@@ -128,13 +128,18 @@ def serialized_objects(d, common, want=None, trees=None):
         h = d[r.p:r.p + 16]; r.p += 16
         root = None
         if tt:
-            nn, sb = r.u('i'), r.u('i'); raw = [r.u('HBBIIiiiQ') for _ in range(nn)]
+            nn, sb = r.u('i'), r.u('i')
+            # 2019.3 之前（序列化格式 < 21）的 TypeTreeNode 没有末尾的 refTypeHash(u64)：节点 24 字节，不是 32
+            # before 2019.3 (serialized format < 21) the TypeTreeNode has no trailing refTypeHash(u64): the node is 24 bytes, not 32
+            nfmt = 'HBBIIiiiQ' if ver >= 21 else 'HBBIIiii'
+            raw = [r.u(nfmt) for _ in range(nn)]
             buf = d[r.p:r.p + sb]; r.p += sb
             def st(o):
                 if o & 0x80000000: return common.get(o & 0x7fffffff, f'?{o & 0x7fffffff}')
                 return buf[o:buf.index(b'\0', o)].decode('utf-8', 'replace')
             stack = []
-            for _v, lv, _tf, to, no, bs, _ix, mf, _h in raw:
+            for row in raw:
+                _v, lv, _tf, to, no, bs, _ix, mf = row[:8]
                 nd = Node(st(to), st(no), bs, mf)
                 del stack[lv:]
                 if stack: stack[-1].kids.append(nd)
@@ -159,7 +164,7 @@ def is_serialized(d):
     """像不像序列化文件（大端头：格式 19..22，22 起长度在 +0x14 之后）| does it look like a serialized file (big-endian header: format 19..22; from 22 the sizes follow +0x14)"""
     if len(d) < 48: return False
     ver = struct.unpack_from('>I', d, 8)[0]
-    if not 19 <= ver <= 22 or d[16] not in (0, 1): return False
+    if not 17 <= ver <= 22 or d[16] not in (0, 1): return False
     if ver >= 22: msz, fsz, doff = struct.unpack_from('>Iqq', d, 20)
     else: msz, fsz, _, doff = struct.unpack_from('>IIII', d, 0)
     return fsz == len(d) and 0 < msz < fsz and doff <= fsz
@@ -169,13 +174,23 @@ def shader_programs(sh):
     blob = sh['compressedBlob']
     for i, plat in enumerate(sh['platforms']):
         offs, clen, dlen = sh['offsets'][i], sh['compressedLengths'][i], sh['decompressedLengths'][i]
-        if not isinstance(offs, list): offs, clen, dlen = [offs], [clen], [dlen]   # 2019.3 之前每平台一段 | before 2019.3: one segment per platform
-        segs = [_lz4(blob[o:o + c], u) for o, c, u in zip(offs, clen, dlen)]
-        if not segs: continue
-        s0 = segs[0]; n = struct.unpack_from('<I', s0, 0)[0]
-        for k in range(n):
-            off, ln, seg = struct.unpack_from('<III', s0, 4 + 12 * k)
-            yield plat, k, segs[seg][off:off + ln]
+        if isinstance(offs, list):
+            # 2019.3 起：每平台多段，表项 12 字节 {偏移, 长度, 段号}
+            # 2019.3 and later: several segments per platform, 12-byte table entries {offset, length, segment}
+            segs = [_lz4(blob[o:o + c], u) for o, c, u in zip(offs, clen, dlen)]
+            if not segs: continue
+            s0 = segs[0]; n = struct.unpack_from('<I', s0, 0)[0]
+            for k in range(n):
+                off, ln, seg = struct.unpack_from('<III', s0, 4 + 12 * k)
+                yield plat, k, segs[seg][off:off + ln]
+        else:
+            # 2019.3 之前：每平台一段，表项 8 字节 {偏移, 长度}，子程序都在这一段里（Cuphead，Unity 2017.4）
+            # before 2019.3: one segment per platform, 8-byte table entries {offset, length}, all subprograms inside that segment (Cuphead, Unity 2017.4)
+            seg = _lz4(blob[offs:offs + clen], dlen)
+            n = struct.unpack_from('<I', seg, 0)[0]
+            for k in range(n):
+                off, ln = struct.unpack_from('<II', seg, 4 + 8 * k)
+                yield plat, k, seg[off:off + ln]
 
 def subprogram(b):
     """子程序头 → (版本, 程序类型, 关键字, 局部关键字, 程序代码, 代码后偏移) | subprogram header → (version, program type, keywords, local keywords, program code, offset after the code)"""

@@ -694,12 +694,18 @@ def jump_offsets(insl, j):
     The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
     For the table base xB, search back for the nearest writer: it must be add xB,xB,#lo, and the writer before it must be adrp xB. Returns all targets, or None if not recognized"""
     ctx = insl[max(0, j - 16):j]
-    add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, x18, x\d+', p.op_str)), None)
+    # 偏移表形的通用识别 | generic offset-table recognition
+    #   cmp w<idx>,#N ; ldrsw <t>,[<base>,<idx>,lsl #2] ; add x18,<t>,<base> ; br x18
+    # <t> 不一定是 x18，<idx> 也不一定是 x18（Cuphead 三种形状都用到了）
+    # <t> is not necessarily x18 and neither is <idx> (Cuphead uses three shapes)
+    add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, (x\d+), (x\d+)', p.op_str)), None)
     if not add: return None
-    rb = add.op_str.split(', ')[2]
-    ld = next((p for p in reversed(ctx) if p.mnemonic == 'ldrsw' and p.op_str == f'x18, [{rb}, x18, lsl #2]'), None)
-    cmp = next((p for p in reversed(ctx) if p.mnemonic == 'cmp' and re.fullmatch(r'w18, #(0x[0-9a-f]+|\d+)', p.op_str)), None)
-    if not ld or not cmp: return None
+    t, rb = add.op_str.split(', ')[1], add.op_str.split(', ')[2]
+    ld = next((p for p in reversed(ctx) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{t}, \[{rb}, (x\d+), lsl #2\]', p.op_str)), None)
+    if not ld: return None
+    idx = re.fullmatch(rf'{t}, \[{rb}, (x\d+), lsl #2\]', ld.op_str).group(1)
+    cmp = next((p for p in reversed(ctx) if p.mnemonic == 'cmp' and re.fullmatch(rf'w{idx[1:]}, #(0x[0-9a-f]+|\d+)', p.op_str)), None)
+    if not cmp: return None
     n = int(cmp.op_str.split('#')[1], 0) + 1
     k = insl.index(ld); lo = page = None
     for p in reversed(insl[max(0, k - 256):k]):   # 表基的写者链 | the writer chain of the table base

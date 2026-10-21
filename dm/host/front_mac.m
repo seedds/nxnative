@@ -87,6 +87,13 @@ void front_run(void (*guest)(void)) {
         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1)
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (win.screen) g_screen_fps = (int)win.screen.maximumFramesPerSecond; }];
+        // Drawable size follows the view in pixels (resize, fullscreen, a screen of another scale): otherwise the layer keeps its first size and the window server stretches it,
+        // and the present's upscaler (nvn_mtl.m present_upscale) never sees the real output size (a 4K fullscreen got a 2560x1440 drawable)
+        void (^fit)(NSNotification *) = ^(NSNotification *n) { (void)n; CGFloat sc = win.backingScaleFactor; NSSize sz = v.bounds.size;
+            if (sz.width > 0 && sz.height > 0) { g_layer.contentsScale = sc; g_layer.drawableSize = CGSizeMake(round(sz.width * sc), round(sz.height * sc)); } };
+        for (NSNotificationName nm in @[NSWindowDidResizeNotification, NSWindowDidChangeBackingPropertiesNotification, NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification])
+            [nc addObserverForName:nm object:win queue:nil usingBlock:fit];
+        fit(nil);
         [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (!win.miniaturized) dm_focus_set(2); }];
         [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];

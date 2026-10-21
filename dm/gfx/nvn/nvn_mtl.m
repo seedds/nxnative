@@ -7455,7 +7455,42 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     [en endEncoding];
     return 1;
 }
-static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int uv_i) {
+#if TARGET_OS_OSX
+#import <MetalFX/MetalFX.h>
+// MetalFX spatial upscaling of the game picture when the drawable is much larger (a 1080p game in a 4K fullscreen or a large window): the picture goes through
+// MTL4FXSpatialScaler into a texture of the size it will cover, then the usual present copies that 1:1 instead of stretching it bilinearly. DM_PRESENT_UPSCALE=0 turns it off
+static id<MTLTexture> present_upscale(id<MTL4CommandBuffer> cb, id<MTLTexture> src, NSUInteger ow, NSUInteger oh) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_PRESENT_UPSCALE"); on = !(e && !strcmp(e, "0")); }
+    if (!on || ow * 4 < src.width * 5 || oh * 4 < src.height * 5 || ow > 16384 || oh > 16384) return nil;   // at least 1.25x on both axes
+    static __strong id<MTL4FXSpatialScaler> sc; static __strong id<MTLTexture> out; static __strong id<MTL4Compiler> comp; static NSUInteger iw, ih; static MTLPixelFormat ipf; static int failed;
+    if (failed) return nil;
+    if (!sc || iw != src.width || ih != src.height || ipf != src.pixelFormat || out.width != ow || out.height != oh) {
+        NSError *e = nil; if (!comp) comp = [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&e];
+        MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
+        d.inputWidth = src.width; d.inputHeight = src.height; d.outputWidth = ow; d.outputHeight = oh;
+        d.colorTextureFormat = src.pixelFormat; d.outputTextureFormat = src.pixelFormat; d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+        sc = comp ? [d newSpatialScalerWithDevice:g_dev compiler:comp] : nil;
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:ow height:oh mipmapped:NO];
+        td.usage = sc ? sc.outputTextureUsage | MTLTextureUsageShaderRead : MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
+        out = sc ? [g_dev newTextureWithDescriptor:td] : nil;
+        if (!sc || !out) { failed = 1; MLOG("[RED] MetalFX spatial upscaler unavailable (%s): the present stretches the picture", e ? e.localizedDescription.UTF8String : "scaler or texture creation failed"); return nil; }
+        res_add(out); iw = src.width; ih = src.height; ipf = src.pixelFormat;
+        MLOG("present: MetalFX spatial upscaling %lux%lu -> %lux%lu", (unsigned long)iw, (unsigned long)ih, (unsigned long)ow, (unsigned long)oh);
+    }
+    sc.colorTexture = src; sc.outputTexture = out; sc.inputContentWidth = src.width; sc.inputContentHeight = src.height;
+    [sc encodeToCommandBuffer:cb];
+    return out;
+}
+#endif
+static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src0, id<MTLTexture> dst, const int crop[4], int uv_i) {
+    __unsafe_unretained id<MTLTexture> src = src0;
+#if TARGET_OS_OSX
+    if (!(crop && (crop[2] || crop[3]))) {   // whole picture: upscale it to the size the viewport below gives it
+        double s0 = fmin((double)dst.width / src.width, (double)dst.height / src.height); int fill = fabs(((double)dst.width / dst.height) / ((double)src.width / src.height) - 1) < 0.01;
+        id<MTLTexture> up = present_upscale(cb, src, fill ? dst.width : (NSUInteger)round(src.width * s0), fill ? dst.height : (NSUInteger)round(src.height * s0));
+        if (up) src = up;
+    }
+#endif
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
     if (crop && (crop[2] || crop[3])) {
         if (crop[0] < 0 || crop[1] < 0 || crop[2] <= 0 || crop[3] <= 0 ||

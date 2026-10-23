@@ -32,6 +32,14 @@ int main(void) {
     {   sim m = {0}; run(&m, 120, 0.5, 1, 3, 0); run(&m, 300, 1.12, 1, 3, 0);   // 18.7 ms frames: 53 fps
         check(m.s.k == 2 && m.s.ups == 1, "steady 18.7 ms frames (53 fps): 30 fps, not 53 with a payback every 8 frames");
     }
+    {   sim m = {0}; run(&m, 120, 0.5, 1, 3, 0);   // present snapshots: the caller judges lateness by the screen
+        for (int i = 0; i < 20; i++) { m.s.screen = 1; m.next = nvn_fstep_next(&m.s, 1.0, 1.3, 1, 3, 0, 0); }
+        check(m.s.k == 1 && m.s.ups == 0, "snapshots: costly frames the screen shows on time keep hold 1");
+        for (int i = 0; i < 3; i++) { m.s.screen = 2; m.next = nvn_fstep_next(&m.s, 1.0, 0.8, 1, 3, 0, 0); }
+        check(m.s.k == 2 && m.s.ups == 1, "  three frames late on screen step up, whatever their cost");
+        m.next = nvn_fstep_next(&m.s, 2.0, 0.5, 1, 3, 0, 0);
+        check(m.s.screen == 0, "  the screen verdict holds for one call");
+    }
     {   sim m = {0}; run(&m, 60, 0.5, 1, 3, 0);
         m.real += 6; m.game += m.next; m.next = nvn_fstep_next(&m.s, 6, 6, 1, 3, 0, 0);   // one 100 ms hitch
         check(m.next == 2 && m.s.k == 1, "100 ms hitch: the next step pays back one vsync, hold stays 1");

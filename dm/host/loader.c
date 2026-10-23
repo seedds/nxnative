@@ -191,6 +191,12 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+        else if (!strcmp(key, "VAR_STEP")) m->var_step = v;
+        else if (!strcmp(key, "RENDER_POOL")) m->render_pool = v;
+        else if (!strcmp(key, "VIEW_W")) m->view_w = v;
+        else if (!strcmp(key, "VIEW_H")) m->view_h = v;
+        else if (!strcmp(key, "OUTPUT_W")) m->out_w = v;
+        else if (!strcmp(key, "OUTPUT_H")) m->out_h = v;
         else if (!strcmp(key, "BUILD_ID")) sscanf(line, "# %*s %32s", m->build_id);
         else for (int k = 0; k < KEY_N; k++) {
             size_t n = strlen(kn[k]);
@@ -207,28 +213,61 @@ static void read_layout(module_t *m, const char *dir) {
 }
 
 // Frame step state (the page after the key page, read-write; layout in patch_nso.py FRAME_STEP): the rewriter's stubs step the game by the host's whole vsyncs capped at this
-// target, 0 = the game's own interval logic. The profile's fps_target, overridden by DM_FPS_TARGET (0, 30 or 60); the graphics layer decides the steps and paces presents
-// (hle_nvn.c fstep_tick)
+// target, 0 = the game's own interval logic. The profile's fps_target, overridden by DM_FPS_TARGET (0, 30 or 60; 61 to 240 on a build with a variable frame step); the graphics
+// layer decides the steps and paces presents (hle_nvn.c fstep_tick, vstep_tick)
 uint8_t *dm_fps_state;
-static const char *g_fps_mod;   // the module holding the state page (for the log)
+int dm_fps_var_cap;   // a variable frame step capped at this frame rate (VAR_STEP builds, DM_FPS_TARGET 61 to 240; hle_nvn.c vstep_tick); 0 = whole vsyncs
+uint64_t dm_mem_extra;   // bytes a render scale above 1.0 adds to the application pool and the alias region for the game's larger render buffer pool (hle_svc.c)
+static const module_t *g_fps_m;   // the module holding the state page
 static void install_fps_state(module_t *m) {
-    if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
-    dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name;
+    if (m->fps_state_off + 0x60 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+    dm_fps_state = m->base + m->fps_state_off; g_fps_m = m;
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
-// DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
+// DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs. The fields beyond +0x40 are written only for a build whose rewriter table names their stubs
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
+    const module_t *m = g_fps_m; const char *name = m->name;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-    if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
+    if (t != 0 && t != 30 && t != 60 && !(m->var_step && t > 60 && t <= 240)) {
+        LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60%s; using the game's own frame step", e, m->var_step ? " or 61 to 240" : " (above 60 only on a build with a variable frame step)"); t = 0;
+    }
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
+    dm_fps_var_cap = t > 60 ? t : 0;
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880): 1.0 keeps the game's own size and dynamic resolution;
-    // another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to 1.0). Independent of the frame step: written at target 0 too
+    // another factor fixes the size at that multiple (DM_RENDER_SCALE, 0.5 to 1.0). Independent of the frame step: written at target 0 too. Above 1.0 (up to 3.0) only on a build whose
+    // stubs grow its render buffer pool (RENDER_POOL), and only on the Mac: the pool's growth comes on top of the guest's address space, which iOS caps at a 6 GB reservation (hle_svc.c)
+#if TARGET_OS_OSX
+    const float hi = m->render_pool ? 3.0f : 1.0f;
+#else
+    const float hi = 1.0f;
+#endif
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f;
-    if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
+    if (rs) {
+        char *end; sc = strtof(rs, &end);
+        if (end == rs || *end || !(sc >= 0.5f && sc <= hi)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to %.1f%s; keeping the game's size", rs, hi, hi > 1.0f ? "" : " (above 1.0 only on the Mac, for a build whose stubs grow its render buffer pool)"); sc = 1.0f; }
+        else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", name, sc);
+    }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
+    if (m->render_pool && sc > 1.0f) {
+        // The game's render buffer pool grows by the factor's square, rounded up (+0x4c); the application pool and the alias region (where its virtual range lives) grow by what the
+        // pool adds plus 64 MB, and so do the game's fixed heaps around the pool (+0x58). Breath of the Wild's 115 MB held up to a factor of about 1.3
+        float sq = sc * sc; uint32_t k = (uint32_t)sq + (sq > (float)(uint32_t)sq);
+        uint64_t x = ((k - 1) * m->render_pool + (64ull << 20) + 0x1fffff) & ~0x1fffffull;
+        int dm_mem_started(void);
+        if (dm_mem_started()) { LOG("[RED] %s: render scale %.2f needs %.0f MB more application memory, but guest memory is already laid out; render buffer pool kept", name, sc, x / 1048576.0); k = 0; x = 0; }
+        else LOG("%s: render buffer pool ×%u, %.0f MB more application memory (DM_RENDER_SCALE %.2f)", name, k, x / 1048576.0, sc);
+        memcpy(dm_fps_state + 0x4c, &k, sizeof k); memcpy(dm_fps_state + 0x58, &x, sizeof x); dm_mem_extra = x;
+        // Where the views outgrow the game's output (its base view width × the factor), the output takes their size, so the frame is composed and shown at it rather than scaled down
+        if (k && m->view_w && m->out_w && sc * m->view_w > m->out_w + 0.5f) {
+            uint32_t ow = ((uint32_t)(sc * m->view_w + 0.5f) + 1) & ~1u, oh = ((uint32_t)(sc * m->view_h + 0.5f) + 1) & ~1u;
+            uint64_t osz = (uint64_t)oh << 32 | ow; float owf = (float)ow;
+            memcpy(dm_fps_state + 0x40, &osz, sizeof osz); memcpy(dm_fps_state + 0x48, &owf, sizeof owf);
+            LOG("%s: output %ux%u in place of %llux%llu (DM_RENDER_SCALE %.2f)", name, ow, oh, (unsigned long long)m->out_w, (unsigned long long)m->out_h, sc);
+        }
+    }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
-    LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
+    LOG("%s: frame step %s%s (%s)", name, !t ? "as the game sets it" : t > 60 ? "variable, the time each frame took" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
 }
 static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);

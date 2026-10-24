@@ -79,6 +79,8 @@ t_rt_depth_ro: t_rt_depth_ro.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_depth_ro.m $(MTL_T_SRC) $(FW)
 t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_pending.m $(MTL_T_SRC) $(FW)
+t_pso_archive: t_pso_archive.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_archive.m $(MTL_T_SRC) $(FW)
 t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_skey.m -framework Foundation
 t_view_swizzle: t_view_swizzle.m $(MTL_T_DEP)
@@ -106,7 +108,7 @@ t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
-run: t_nvn t_dirty_slots t_dirty_race t_builtin t_vin t_tbuf2d t_deswz_gpu t_pace t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_vbuf t_geometry t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pso_pending t_pfv t_view_levels t_view_swizzle t_vk_desc t_integer_blend t_primitive_restart t_clear_ds t_upgrade_alias t_stencil_view
+run: t_nvn t_dirty_slots t_dirty_race t_builtin t_vin t_tbuf2d t_deswz_gpu t_pace t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_vbuf t_geometry t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pso_archive t_pso_pending t_pfv t_view_levels t_view_swizzle t_vk_desc t_integer_blend t_primitive_restart t_clear_ds t_upgrade_alias t_stencil_view
 	./t_nvn
 	./t_dirty_slots
 	./t_dirty_race
@@ -141,6 +143,7 @@ run: t_nvn t_dirty_slots t_dirty_race t_builtin t_vin t_tbuf2d t_deswz_gpu t_pac
 	DM_NVN_UNWRITTEN_DC=0 MTL_DEBUG_LAYER=1 ./t_rt_range --sample-attachment --both-flags
 	./t_pso_skey
 	./t_pso_pending
+	MTL_DEBUG_LAYER=1 ./t_pso_archive
 	MTL_DEBUG_LAYER=1 ./t_pfv
 	MTL_DEBUG_LAYER=1 ./t_view_levels
 	MTL_DEBUG_LAYER=1 ./t_view_swizzle

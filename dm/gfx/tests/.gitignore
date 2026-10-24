@@ -74,3 +74,5 @@ t_upgrade_alias
 t_upgrade_alias.dSYM/
 t_stencil_view
 t_stencil_view.dSYM/
+t_pso_archive
+t_pso_archive.dSYM/

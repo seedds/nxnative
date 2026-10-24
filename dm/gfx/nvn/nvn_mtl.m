@@ -8556,7 +8556,9 @@ uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_v
     if (ev && !g_ext_ev) g_ext_ev = (__bridge id<MTLSharedEvent>)ev;
     return present_enqueue(&t, period, crop, ev ? ev_val : 0);
 }
+extern _Atomic uint64_t dm_present_ns;   // hle_thread.c (DM_HITCH_DUMP); the NVN, Vulkan and GL presents all come through present_enqueue
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val) {
+    atomic_store(&dm_present_ns, now_ns());
     if (g_classic || atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on)
     if (t) { xv_check(t->serial, 0, 0, "present"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial; }
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, present_start);

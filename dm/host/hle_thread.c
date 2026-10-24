@@ -339,51 +339,73 @@ static void ctx_fill(const thr_t *t, hz_ctx_t *o) {   // holding G, t is stopped
 // DM_HITCH_DUMP=<ms>[:<s>] (diagnostic): when no frame has been presented for <ms>, from <s> seconds after the start on, log every guest thread once per stall: priority, core and
 // mask, what it waits on, its last SVC and call site, and where it is (pc, lr and the frame-pointer chain: up to 8 guest frames, the host frames above them; x0-x2 and x19-x25
 // when it runs guest code), read with the thread suspended for a moment. At most 24 stalls per run. It found Breath of the Wild's job queue poll (patch_nso.py "Spin waits")
-_Atomic uint64_t dm_present_ns;   // hle_nvn.c: when the last present was made (host monotonic ns)
-static void hitch_where(thr_t *t, char *o, size_t n) {
-    size_t q = 0; o[0] = 0;
-    if (!t->mport || t->exited || thread_suspend(t->mport) != KERN_SUCCESS) return;
-    arm_thread_state64_t st; mach_msg_type_number_t c = ARM_THREAD_STATE64_COUNT;
+_Atomic uint64_t dm_present_ns;   // nvn_mtl.m present_enqueue (every graphics API): when the last present was made (host monotonic ns)
+typedef struct {   // what one dump line needs, copied under G so that a thread that exits meanwhile is not read
+    uint32_t handle, svc; int prio, core, rs, sleeping, host_work, wkind;
+    uint64_t mask, waddr, wkey, lr;
+    char name[48];
+    int have, npc, guest;   // have: the registers were read; guest: pc is in a guest module
+    uint64_t x[10], pc[24];   // x0-x2, x19-x25; the pc, the lr and the frame-pointer chain
+} hitch_t;
+// Holding G (thr_free and the exit flag need it, so no thread in the list is freed or leaves meanwhile). Between the suspend and the resume only mach calls and memory reads
+// run: no malloc, no stdio, no dladdr (the suspended thread may hold their locks). The symbols are looked up after every thread runs again
+static void hitch_grab(thr_t *t, hitch_t *h) {
+    memset(h, 0, sizeof *h);
+    h->handle = t->handle; h->svc = t->last_svc; h->prio = t->prio; h->core = t->core; h->mask = t->mask; h->wkind = t->wkind & 7; h->waddr = t->waddr; h->wkey = t->wkey;
+    h->lr = t->last_lr; h->sleeping = t->sleeping; h->host_work = t->host_work && *t->host_work; h->rs = -1;
+    char nb[48]; snprintf(h->name, sizeof h->name, "%s", thr_name(t, nb, sizeof nb));
+    if (!t->mport) return;
+    thread_basic_info_data_t bi; mach_msg_type_number_t c = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(t->mport, THREAD_BASIC_INFO, (thread_info_t)&bi, &c) == KERN_SUCCESS) h->rs = bi.run_state;
+    if (thread_suspend(t->mport) != KERN_SUCCESS) return;
+    arm_thread_state64_t st; c = ARM_THREAD_STATE64_COUNT;
     if (thread_get_state(t->mport, ARM_THREAD_STATE64, (thread_state_t)&st, &c) == KERN_SUCCESS) {
-        uint64_t pc = __darwin_arm_thread_state64_get_pc(st), fp = __darwin_arm_thread_state64_get_fp(st), lr = __darwin_arm_thread_state64_get_lr(st);
-        if (module_of((void *)pc)) { q += (size_t)snprintf(o + q, n - q, " [x0=%#llx x1=%#llx x2=%#llx", (unsigned long long)st.__x[0], (unsigned long long)st.__x[1], (unsigned long long)st.__x[2]);
-            for (int i = 19; i <= 25; i++) q += (size_t)snprintf(o + q, n - q, " x%d=%#llx", i, (unsigned long long)st.__x[i]);
-            q += (size_t)snprintf(o + q, n - q, "]"); }
-        for (int k = 0, g = 0; k < 24 && g < 8 && q < n - 80; k++) {
-            uint64_t a = k == 0 ? pc : k == 1 ? lr : 0;
-            if (k >= 2) { uint64_t fr[2]; vm_size_t got = 0; if (!fp || vm_read_overwrite(mach_task_self(), fp, 16, (vm_address_t)fr, &got) || got != 16) break; a = fr[1]; fp = fr[0]; }
-            module_t *m = module_of((void *)a); Dl_info di;
-            if (m) { q += (size_t)snprintf(o + q, n - q, " %s+%#llx", m->name, (unsigned long long)(a - (uint64_t)m->base)); g++; }
-            else if (k > 5) continue;
-            else if (dladdr((void *)a, &di) && di.dli_sname) q += (size_t)snprintf(o + q, n - q, " %s", di.dli_sname);
-            else q += (size_t)snprintf(o + q, n - q, " %#llx", (unsigned long long)a);
+        uint64_t pc = __darwin_arm_thread_state64_get_pc(st), fp = __darwin_arm_thread_state64_get_fp(st);
+        h->have = 1; h->guest = module_of((void *)pc) != NULL;
+        h->x[0] = st.__x[0]; h->x[1] = st.__x[1]; h->x[2] = st.__x[2]; for (int i = 19; i <= 25; i++) h->x[3 + i - 19] = st.__x[i];
+        h->pc[h->npc++] = pc; h->pc[h->npc++] = __darwin_arm_thread_state64_get_lr(st);
+        while (h->npc < 24) {
+            uint64_t fr[2]; vm_size_t got = 0; if (!fp || vm_read_overwrite(mach_task_self(), fp, 16, (vm_address_t)fr, &got) || got != 16) break;
+            h->pc[h->npc++] = fr[1]; fp = fr[0];
         }
     }
     thread_resume(t->mport);
+}
+static void hitch_log(const hitch_t *h) {
+    static const char *kinds[] = {"run", "mutex", "condvar", "address", "sync"};
+    char w[900]; size_t q = 0, n = sizeof w; w[0] = 0;
+    if (h->have) {
+        if (h->guest) { q += (size_t)snprintf(w + q, n - q, " [x0=%#llx x1=%#llx x2=%#llx", (unsigned long long)h->x[0], (unsigned long long)h->x[1], (unsigned long long)h->x[2]);
+            for (int i = 0; i < 7; i++) q += (size_t)snprintf(w + q, n - q, " x%d=%#llx", 19 + i, (unsigned long long)h->x[3 + i]);
+            q += (size_t)snprintf(w + q, n - q, "]"); }
+        for (int k = 0, g = 0; k < h->npc && g < 8 && q < n - 80; k++) {
+            uint64_t a = h->pc[k]; module_t *m = module_of((void *)a); Dl_info di;
+            if (m) { q += (size_t)snprintf(w + q, n - q, " %s+%#llx", m->name, (unsigned long long)(a - (uint64_t)m->base)); g++; }
+            else if (k > 5) continue;
+            else if (dladdr((void *)a, &di) && di.dli_sname) q += (size_t)snprintf(w + q, n - q, " %s", di.dli_sname);
+            else q += (size_t)snprintf(w + q, n - q, " %#llx", (unsigned long long)a);
+        }
+    }
+    module_t *m = module_of((void *)h->lr);
+    LOG("  %#x '%s' prio %d core %d mask %#llx %s %#llx/%#llx%s%s state %d svc %#x lr=%s+%#llx at:%s", h->handle, h->name, h->prio, h->core, (unsigned long long)h->mask,
+        kinds[h->wkind], (unsigned long long)h->waddr, (unsigned long long)h->wkey, h->sleeping ? " sleeping" : "", h->host_work ? " host-work" : "", h->rs, h->svc, m ? m->name : "?",
+        (unsigned long long)(m ? h->lr - (uint64_t)m->base : h->lr), w);
 }
 static void *hitch_main(void *arg) {
     pthread_setname_np("dm hitch dump");
     const char *e = arg; uint64_t lim = (uint64_t)atoi(e) * 1000000ull, seen = 0, skip = 0; int n = 0;
     if (strchr(e, ':')) skip = (uint64_t)atoi(strchr(e, ':') + 1) * 1000000000ull;
     extern uint64_t g_t0_ns;
+    static hitch_t hs[256];
     while (n < 24) {
         { struct timespec ts = {0, 2000000}; nanosleep(&ts, 0); }
         uint64_t p = atomic_load(&dm_present_ns), now = now_ns();
         if (!p || p == seen || now - p < lim || now - g_t0_ns < skip) continue;
         seen = p; n++;
-        static const char *kinds[] = {"run", "mutex", "condvar", "address", "sync"};
         LOG("hitch dump %d: no present for %.1f ms", n, (now - p) / 1e6);
-        thr_t *ts[256]; int nt = 0;
-        pthread_mutex_lock(&G); for (thr_t *t = g_all; t && nt < 256; t = t->all) if (t->started && !t->exited) ts[nt++] = t; pthread_mutex_unlock(&G);   // not held while threads are suspended
-        for (int k = 0; k < nt; k++) { thr_t *t = ts[k];
-            char nb[32], w[900]; module_t *m = module_of((void *)t->last_lr);
-            thread_basic_info_data_t bi; mach_msg_type_number_t c = THREAD_BASIC_INFO_COUNT; int rs = -1;
-            if (t->mport && thread_info(t->mport, THREAD_BASIC_INFO, (thread_info_t)&bi, &c) == KERN_SUCCESS) rs = bi.run_state;
-            hitch_where(t, w, sizeof w);
-            LOG("  %#x '%s' prio %d core %d mask %#llx %s %#llx/%#llx%s%s state %d svc %#x lr=%s+%#llx at:%s", t->handle, thr_name(t, nb, sizeof nb), t->prio, t->core, (unsigned long long)t->mask,
-                kinds[t->wkind & 7], (unsigned long long)t->waddr, (unsigned long long)t->wkey, t->sleeping ? " sleeping" : "", t->host_work && *t->host_work ? " host-work" : "", rs, t->last_svc, m ? m->name : "?",
-                (unsigned long long)(m ? t->last_lr - (uint64_t)m->base : t->last_lr), w);
-        }
+        int nt = 0;
+        pthread_mutex_lock(&G); for (thr_t *t = g_all; t && nt < 256; t = t->all) if (t->started && !t->exited) hitch_grab(t, &hs[nt++]); pthread_mutex_unlock(&G);
+        for (int k = 0; k < nt; k++) hitch_log(&hs[k]);
     }
     return NULL;
 }

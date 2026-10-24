@@ -120,5 +120,78 @@ class EnvFile(Base):
         with self.assertRaises(nsp.BuildError): nsp.env_file_pairs(self.tmp / 'none.txt')
 
 
+class AppBundle(Base):
+    def test_thin_bundle_structure_and_symlinks(self):
+        from dm.tools.pack_mac_app import build_app_bundle
+        work = self.tmp / 'work'; work.mkdir()
+        host = work / 'dmhost'; host.write_bytes(b'host')
+        patched = work / 'patched'; patched.mkdir(); (patched / 'main.fixups.tsv').write_text('table')
+        romfs = work / 'RomFS'; romfs.mkdir(); (romfs / 'game.data').write_bytes(b'data')
+        msl = work / 'msl'; msl.mkdir(); (msl / 'shader.metallib').write_bytes(b'shader')
+        font = work / 'font'; font.mkdir(); (font / 'font.ttf').write_bytes(b'font')
+        shmap = work / 'shader_map.tsv'; shmap.write_text('shmap')
+        out_app = self.tmp / 'TestGame.app'
+
+        with mock.patch('subprocess.run'):
+            app = build_app_bundle(
+                game_id='0100000000000001',
+                work_dir=work,
+                host_bin=host,
+                patched_dir=patched,
+                romfs_dir=romfs,
+                msl_dir=msl,
+                font_dir=font,
+                shmap_path=shmap,
+                control_nacp=work / 'control.nacp',
+                icon_jpg=None,
+                out_app=out_app,
+                mode='thin'
+            )
+        self.assertEqual(app, out_app.resolve())
+        self.assertTrue((out_app / 'Contents/MacOS/Game').is_file())
+        self.assertTrue((out_app / 'Contents/Info.plist').is_file())
+        self.assertTrue((out_app / 'Contents/PkgInfo').is_file())
+
+        # Thin mode: proves large assets are symlinked, not duplicated
+        res = out_app / 'Contents/Resources'
+        self.assertTrue((res / 'romfs').is_symlink())
+        self.assertEqual((res / 'romfs').resolve(), romfs.resolve())
+        self.assertTrue((res / 'msl').is_symlink())
+        self.assertEqual((res / 'msl').resolve(), msl.resolve())
+        self.assertTrue((res / 'dm/font').is_symlink())
+        self.assertEqual((res / 'dm/font').resolve(), font.resolve())
+        self.assertTrue((res / 'dm/main.fixups.tsv').is_symlink())
+
+    def test_standalone_bundle_copies(self):
+        from dm.tools.pack_mac_app import build_app_bundle
+        work = self.tmp / 'work'; work.mkdir()
+        host = work / 'dmhost'; host.write_bytes(b'host')
+        patched = work / 'patched'; patched.mkdir(); (patched / 'main.fixups.tsv').write_text('table')
+        romfs = work / 'RomFS'; romfs.mkdir(); (romfs / 'game.data').write_bytes(b'data')
+        msl = work / 'msl'; msl.mkdir(); (msl / 'shader.metallib').write_bytes(b'shader')
+        out_app = self.tmp / 'StandaloneGame.app'
+
+        with mock.patch('subprocess.run'):
+            app = build_app_bundle(
+                game_id='0100000000000001',
+                work_dir=work,
+                host_bin=host,
+                patched_dir=patched,
+                romfs_dir=romfs,
+                msl_dir=msl,
+                font_dir=None,
+                shmap_path=None,
+                control_nacp=work / 'control.nacp',
+                icon_jpg=None,
+                out_app=out_app,
+                mode='standalone'
+            )
+        res = out_app / 'Contents/Resources'
+        self.assertFalse((res / 'romfs').is_symlink())
+        self.assertTrue((res / 'romfs/game.data').is_file())
+        self.assertFalse((res / 'msl').is_symlink())
+        self.assertTrue((res / 'msl/shader.metallib').is_file())
+
+
 if __name__ == '__main__':
     unittest.main()

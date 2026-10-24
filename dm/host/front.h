@@ -1,5 +1,12 @@
 // Host front end (Mac: front_mac.m; iOS: dm/ios separately implements the same-named interface).
 #pragma once
+#include <TargetConditionals.h>
+// When launched from a macOS .app bundle without arguments, configure paths and environment from Contents/Resources.
+#if !TARGET_OS_IPHONE
+void front_mac_bundle_setup(int *argc, char ***argv);
+#else
+static inline void front_mac_bundle_setup(int *argc, char ***argv) { (void)argc; (void)argv; }
+#endif
 // Run the guest: with a window the guest runs on its own thread and the main thread belongs to the system UI; without a window it runs directly on the current thread.
 void front_run(void (*guest)(void));
 // The CAMetalLayer the graphics backend presents frames to (NULL when there is no window)

@@ -20,7 +20,7 @@ For the build steps of the whole project see [README.md](../../README.md) and [d
   - Memory pools are created as zero-copy `MTLBuffer`s, with the GPU address equal to the CPU address, so only unified-memory devices are supported.
   - The visible effects of "GPU completion" (sync objects becoming ready, events writing their value, counters) happen only after the Metal command buffer has actually completed.
   - Pipeline states and depth-stencil states are cached by state hash; at startup, shaders and pipelines are pre-built in the background according to the warm-up manifests (the bundled seed `pso_manifest.tsv`, then this device's `pso_user.tsv`; see below). A pipeline that fails to build is cached as failed and reported once with its shader keys.
-  - Render pipelines are made through `MTL4Compiler` from a base whose colour state is left unspecialized, one base per pipeline less its colour state, specialized per colour state; the bases are kept in the per-game pipeline archive (`pso_archive/` beside `pso_user.tsv`) and taken from it at the next start (`pso_build`; see docs/development.md, "Pipeline bases and the pipeline archive").
+  - Render pipelines are made through `MTL4Compiler` from a base whose colour state is left unspecialized, one base per pipeline less its colour state, specialized per colour state; the bases are kept in the per-game pipeline archive (`pso_archive/` beside `pso_user.tsv`) and taken from it at the next start (`pso_build`; see docs/development.md, "Pipeline bases and the pipeline archive"). A draw whose pipeline is not built yet draws with its shader pair's pulling pipeline (no vertex descriptor) while its own is built in the background (docs/development.md, "Hybrid pipelines").
   - The game's packaged textures are in Tegra block-linear layout and are deswizzled before upload (see `tex/README.md`).
   - Presentation: the game's swapchain texture is drawn to a `CAMetalLayer`, and presentation timing is scheduled by the pacer in `nvn/nvn_pace.h`.
 
@@ -153,6 +153,9 @@ Resource locations:
 | `DM_PSO_USER=path` | Where to keep the per-device list of shaders and pipelines built on the spot (default: `pso_user.tsv` in the parent of `DM_SAVE`) |
 | `DM_PSO_ARCHIVE=folder` or `off` | Where to keep the per-game pipeline archive of pipeline bases (default: `pso_archive/` beside `pso_user.tsv`), or no archive |
 | `DM_PSO_MTL4=0` / `=1` | `0`: build render pipelines through the `MTLDevice` as before, with no unspecialized bases and no archive (the Mac's default is on). `1`: turn them on on iOS, where they are off by default |
+| `DM_PSO_HYBRID=0` | A draw whose pipeline is not built yet waits for it, instead of drawing with the pair's pulling pipeline meanwhile (docs/development.md, "Hybrid pipelines") |
+| `DM_PSO_WAITLOG=1` | Log each draw that waited more than 20 ms for its pipeline, with why no stand-in served it |
+| `DM_PSO_PULL_ALL=1` | Diagnostic: every draw that has a pulling pipeline draws with it |
 
 Logging and capture:
 

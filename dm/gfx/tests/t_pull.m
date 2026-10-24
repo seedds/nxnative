@@ -1,7 +1,7 @@
 // The pulling vertex fetch (dm/gfx/tools/dmsh_pull.metal) against Metal's own: for every NVN vertex format the host knows (nvn_mtl.m vfmt), the words dm_fetch gives must be bit
 // for bit the ones Metal's vertex-descriptor fetch gives an input of the format's class (float4, uint4 or int4); for the formats Metal has no fetch for (integers read as floats,
 // vconv_i2f), the ones the host's CPU conversion gives (vconv_fill). Every byte value, half and float specials, snorm -128, 10:10:10:2 extremes, 8-bit attributes at aligned and
-// at 2-byte offsets, a stride-1 stream; then stride 0 and a divisor with a base instance, which must pick the elements Metal's step functions pick
+// at 2-byte offsets, a stride-1 stream; then stride 0 and a divisor with a base instance, which must pick the elements Metal's step functions pick; then the host's layout block
 #include "../nvn/nvn_mtl.m"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
@@ -138,6 +138,37 @@ int main(void) { @autoreleasepool {
         for (int i = binst; i < binst + ninst; i++) {
             char name[96]; snprintf(name, sizeof name, "%s, base instance 5: element instance %d reads", zero ? "stride 0" : divisor == 1 ? "divisor 1" : divisor == 2 ? "divisor 2" : "divisor 3", i);
             EXPECT(name, a[i][0], b[i][0]);
+        }
+    }
+    // the host's layout block (pull_layout_fill): a stream whose base is not 4-byte aligned, its low bits folded into the attribute offsets. Each element must read as the same bytes
+    // copied to an aligned place do. Elements keep their components' alignment, as for Metal's fetch (16-bit components at even addresses, packed 32-bit words at multiples of 4;
+    // 8-bit ones anywhere); an attribute whose stream has no buffer reads zeros
+    {
+        size_t pg = (size_t)getpagesize(); uint8_t *mem; if (posix_memalign((void **)&mem, pg, pg)) abort();
+        for (size_t i = 0; i < pg; i++) mem[i] = (uint8_t)rand();
+        mtl_pool_add(mem, pg);
+        enum { ST = 24, NE = 32 };
+        int fmts[4] = { 0x29, 0x69, 0x25, 0x0F }, size[4] = { 8, 4, 4, 2 };   // RGBA16F, RGB10A2 snorm, RGBA8 unorm, RG8UI
+        void *mb; uint64_t mo, gpu0; mtl_gpu_addr((uint64_t)(uintptr_t)mem, 1, &mb, &mo, &gpu0);
+        id<MTLBuffer> one = [g_dev newBufferWithLength:sizeof(dm_vlayout_c) options:MTLResourceStorageModeShared], ref = [g_dev newBufferWithLength:NE * 16 options:MTLResourceStorageModeShared];
+        for (int mis = 1; mis < 4; mis++) {
+            int offs[4] = { mis & 1, 12 - mis, 13, 17 };   // element addresses base + mis + offset: even, a multiple of 4, odd, odd
+            state_reset(); S.nattr = 5; S.vbuf[2].address = (uint64_t)(uintptr_t)(mem + 64 + mis); S.stream[2].stride = ST;
+            for (int a = 0; a < 4; a++) { S.attr[a].fmt = (uint32_t)fmts[a]; S.attr[a].offset = (uint32_t)offs[a]; S.attr[a].stream = 2; }
+            S.attr[4].fmt = 0x2E; S.attr[4].stream = 5;   // stream 5 has no buffer
+            pull_layout P; pull_layout_fill(&P);
+            EXPECT("base kept 4-byte aligned", 0, P.s[2].base & 3);
+            EXPECT("attribute with no buffer reads zeros", 0, P.attr[4]);
+            for (int a = 0; a < 4; a++) {
+                uint32_t got[NE][4], want[NE][4];
+                dm_vlayout_c L1; memset(&L1, 0, sizeof L1); L1.s[2].base = P.s[2].base; L1.s[2].stride = P.s[2].stride; L1.attr[0] = P.attr[a]; memcpy(one.contents, &L1, sizeof L1);
+                memset(out.contents, 0, NV * 16); run(pull, (__bridge id<MTLBuffer>)mb, -1, one, out, 0, NE, 1, 0); memcpy(got, out.contents, sizeof got);
+                for (int v = 0; v < NE; v++) memcpy((uint8_t *)ref.contents + v * 16, mem + 64 + mis + v * ST + offs[a], (size_t)size[a]);   // each element at an aligned place
+                dm_vlayout_c L2; memset(&L2, 0, sizeof L2); L2.s[2].base = ref.gpuAddress; L2.s[2].stride = 16; L2.attr[0] = (uint32_t)fmts[a] | 2u << 27; memcpy(one.contents, &L2, sizeof L2);
+                memset(out.contents, 0, NV * 16); run(pull, ref, -1, one, out, 0, NE, 1, 0); memcpy(want, out.contents, sizeof want);
+                char name[96]; snprintf(name, sizeof name, "base +%d, format %#x at offset %d: words as from an aligned copy", mis, fmts[a], offs[a]);
+                EXPECT(name, 0, (uint64_t)(memcmp(got, want, sizeof got) != 0));
+            }
         }
     }
     printf("t_pull: %d checks, %d failed\n", checks, failed);

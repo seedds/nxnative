@@ -76,3 +76,7 @@ t_stencil_view
 t_stencil_view.dSYM/
 t_pso_archive
 t_pso_archive.dSYM/
+t_pull
+t_pull.dSYM/
+t_pull_inv
+t_pull_inv.dSYM/

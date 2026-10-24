@@ -217,6 +217,23 @@ A draw whose pipeline is not built yet no longer waits for the Metal compiler wh
 
 The hybrid keeps the demand-first order above (PR #75). A draw that gets a stand-in queues its own pipeline first (`pso_pend_demand`), before the prediction runs. Such demanded builds are outside the speculative limit and go to serial queues at utility QoS, one per two performance cores (`pp_bg_queue`), so they never wait behind speculation and speculation never waits behind them. The prediction's budget of two speculative builds goes only to draws that will have no stand-in, because those would wait. A draw that would wait for a build still queued makes the pipeline itself at once, instead of waiting behind the queue (`pso_pend_take`). When the table is full, the oldest finished entry no draw took is reclaimed, as for the speculative builds. The first pipeline miss of a submission also loads, in parallel, the shader libraries the rest of the submission binds (`shader_prefetch_rest`). For the frame that entered Zora's Domain in Breath of the Wild that was 248 libraries in about 210 ms, where loading them one by one on the submit thread took about 1 s.
 
+The path of a draw whose pipeline is not in the cache:
+
+```mermaid
+flowchart TD
+    D[Draw needs a pipeline] --> C{In the cache?}
+    C -- yes --> R[Draw with it]
+    C -- no --> B{Base made already<br/>or in the archive?}
+    B -- yes --> S[Specialize, a few µs] --> R
+    B -- no --> P{Pulling stand-in<br/>for the pair?}
+    P -- yes --> H[Draw with the pulling pipeline now]
+    H --> Q[Queue the draw's own pipeline first<br/>pso_pend_demand, low priority]
+    Q -. later draws .-> R
+    P -- no --> W[Build at once and wait]
+    W --> R
+    W --> K[Then predict: at most 2 speculative builds,<br/>only for draws without a stand-in]
+```
+
 Every 300 frames the log has a `pipelines up to frame` line. It gives the submit thread's pipeline, library and prediction time; archive lookups that found the base or none; specializations and base compiles on all threads; draws with a hybrid pipeline; background builds; and the draws that waited, by why no stand-in served them. `DM_PSO_WAITLOG=1` logs every wait over 20 ms with its shader pair. `DM_PSO_PULL_ALL=1` (diagnostic) draws every draw that has a pulling pipeline with it. In steady state the GPU time is the same with and without the hybrid: in Breath of the Wild, mean GPU p50 over frames 2,400–5,100 was 8.98 ms with it, 8.98 ms on the Metal 4 path without it, and 9.35 ms through the `MTLDevice`.
 
 ## Power

@@ -1,4 +1,5 @@
-// iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides) + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture).
+// iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides), or the whole screen for a game that renders at any aspect (profile key aspect any),
+// + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture).
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -8,6 +9,7 @@
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
+#include "game_profile.h"
 #include "haptics_apple.h"
 
 UIView *dm_gamepad_view(CGRect frame);
@@ -20,6 +22,20 @@ static CAMetalLayer *g_layer;
 static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
+
+// The canvas the game picture fills: 16:9, or for a game whose output size stub takes any size (profile key aspect any) with DM_ASPECT not 16:9 (the launcher's Wide, its default), the
+// screen's own aspect, never narrower than 16:9 (an iPad keeps 16:9). The canvas covers the whole screen, behind the Dynamic Island and the rounded corners, as the 16:9 picture
+// covers the screen's whole height: only the controls keep to the safe area (DmGamepad.m). The host sizes the game's output to the canvas (loader.c output_aspect)
+static int g_wide = -1; static double g_canvas_aspect;   // written on the main thread before front_ios_boot starts the host thread
+static int front_ios_wide(void) {
+    if (g_wide < 0) { const char *e = getenv("DM_ASPECT"); g_wide = DM_GAME_ASPECT_ANY && !(e && !strcmp(e, "16:9")); }
+    return g_wide;
+}
+double front_ios_canvas_aspect(CGSize b) {   // DmGamepad.m maps touches on the same canvas
+    double a = b.width > 0 && b.height > 0 ? fmax(b.width, b.height) / fmin(b.width, b.height) : 16.0 / 9.0;
+    return front_ios_wide() ? fmax(a, 16.0 / 9.0) : 16.0 / 9.0;
+}
+double front_screen_aspect(void) { return front_ios_wide() ? g_canvas_aspect : 0; }   // set on the main thread before the host starts the game (startGame)
 
 @interface DmGameView : UIView
 @end
@@ -68,6 +84,8 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)startGame {
     if (self.game) return;
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) setenv("MTL_HUD_ENABLED", "1", 0);   // Metal reads it when a device is made: before the game view makes its own (an env file's DM_METAL_HUD sets it in main.m already)
+    g_wide = -1; g_canvas_aspect = front_ios_canvas_aspect(self.view.bounds.size);   // the launcher has set DM_ASPECT by now
+    if (front_ios_wide()) LOG("front end: wide canvas, aspect %.3f (%.0fx%.0f points; DM_ASPECT %s)", g_canvas_aspect, self.view.bounds.size.width, self.view.bounds.size.height, getenv("DM_ASPECT") ?: "wide by the game profile");
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
@@ -85,8 +103,8 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    CGFloat w = b.size.width, h = b.size.height;   // Fit 16:9 into the whole screen
-    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
+    CGFloat w = b.size.width, h = b.size.height, a = front_ios_canvas_aspect(b.size);   // Fit the canvas (16:9, or the screen's aspect for a wide game) into the whole screen
+    if (w / h > a) w = h * a; else h = w / a;
     self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);

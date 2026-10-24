@@ -34,6 +34,7 @@ def build(gid, patched, control):
         return macros[name].strip('"')
 
     def shown(cond, n):
+        if '&' in cond: return all(shown(c, n) for c in cond.split('&'))
         if cond == 'always': return True
         if cond == 'languages>1': return len(langs) > 1
         if cond.startswith('fixups:'): return cond[7:] in keys

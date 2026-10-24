@@ -97,6 +97,8 @@ def header(g):
     if pi not in ('game', 'display'): sys.exit(f'{g.id}: present_interval must be game or display: {pi}')
     ft = g.get('fps_target', '0')   # frame rate cap of the rewriter's frame step (FRAME_STEP in the profile's patches.py: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0) or of the engine's own frame limit (hle_fpslock.c): 0 = the game's own step, 30 / 60
     if ft not in ('0', '30', '60'): sys.exit(f'{g.id}: fps_target must be 0, 30 or 60: {ft}')
+    asp = g.get('aspect', '16:9')   # 16:9 = the game's own picture; any = its output size stub renders any aspect ratio, so the host gives it the screen's (loader.c, iOS front end)
+    if asp not in ('16:9', 'any'): sys.exit(f'{g.id}: aspect must be 16:9 or any: {asp}')
     fh = g.get('fps_hold', 'on')   # whether the frame step may hold a frame longer than the cap's vsyncs when frames come late (hle_nvn.c fstep_tick): on / off
     if fh not in ('on', 'off'): sys.exit(f'{g.id}: fps_hold must be on or off: {fh}')
     cp = g.get('core_preempt', 'off')   # same-core preemption approximation (hle_thread.c): on / off
@@ -156,6 +158,7 @@ def header(g):
          f'#define DM_GAME_ALLOC_BIG_ALIGN {int(aba == "on")}',
          f'#define DM_GAME_FPS_TARGET {int(ft)}',
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
+         f'#define DM_GAME_ASPECT_ANY {int(asp == "any")}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',

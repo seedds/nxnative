@@ -9,6 +9,9 @@ int front_screen_max_fps(void);
 // The frame rate the display link paces the game at (60, 30, 120; nvn_mtl.m link_sync): in fullscreen, a screen whose refresh rate is not a multiple of it is switched, while the game runs,
 // to a mode of the same size whose rate is, and back when the window leaves fullscreen or that screen (front_mac.m; none on iOS). Called from the present thread
 void front_screen_match(int fps);
+// The landscape aspect ratio (width / height) of the canvas a game with the profile key aspect any fills, 0 = not known (iOS front_ios.m: the screen; the Mac has none, loader.c's weak
+// default). Read by loader.c when the game starts, to size a wide output
+double front_screen_aspect(void);
 #include <stdint.h>
 // Text input box (for the software keyboard swkbd): the main thread shows a native input box and the calling thread blocks until the user confirms / cancels.
 // All text is UTF-8; max_chars is the maximum character count (0 = unlimited, only a hint for the front end; truncation is done uniformly by the caller hle_swkbd.c in UTF-16 units).

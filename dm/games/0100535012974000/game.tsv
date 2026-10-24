@@ -21,6 +21,10 @@ package	v589824
 shader_versions	v589824
 
 # ---- Graphics ----
+# its output size stub (patches.py) renders any size, and at a wider one the game uses its own ultrawide layout (the PC version's): the 16:9 view and HUD in the middle, its side
+# bar art (Launch/SideBars_01, sgg's CalculateViewportForAspectRatio at main+0x47c1b0) on both sides, so the picture fills the screen with no black bars, crop or stretch (checked on the
+# Mac at 2868x1320 and 1568x720). On an iPhone the output takes the screen's aspect (loader.c output_aspect; the launcher's Picture switch, Wide by default)
+aspect	any
 # main imports Vulkan, not NVN: the host's Vulkan layer (dm/gfx/vk/hle_vk.m); dm/gfx/tools/vk_shaders.py translates the SPIR-V shaders into <shader dir>/vk/
 
 # ---- Files ----

@@ -201,6 +201,27 @@ The lines name shaders by content key and hold no compiled code and nothing pers
 Record on the game version you ship. At launch the log names each list it read and its line count (`pipeline prewarm list …: N lines`), or says that `pso_user.tsv` does not exist yet.
 
 During rendering, a pipeline miss compiles and caches the demanded pipeline before scanning subsequent draws for speculative work. The scan admits at most two new jobs, with at most two speculative compilations outstanding; completed predictions remain available by exact key. This limit does not apply to the startup warmer. `t_pso_pending` checks scheduling and ownership with a gated compiler; it does not establish that the two-job budget is optimal on every device or remove the cost of compiling an unseen pipeline.
+
+### The prepare step
+
+With a window (the Mac host with `DM_WINDOW`, the iOS app), the game waits for the prewarm before its first frame: the first submission (`mtl_sub_begin`) runs every line of both lists and goes on only when the shaders are loaded and the pipelines built (`warm_prepare` in `dm/gfx/nvn/nvn_mtl.m`). The workers are as many as the device has cores (`hw.activecpu`; `DM_PSO_PREPARE_THREADS=<n>`), at user-initiated QoS, since the game draws nothing meanwhile. Each task is a shader, a compute pipeline, or all render pipelines of one shader pair, which share their bases, so no two workers compile the same base. A vertex shader's pulling entry is loaded with it, so neither a listed draw nor its hybrid stand-in loads a library on the submit thread; the shaders and pipelines go into the caches the draws use, which keep them for the whole run. The step runs at the first submission and not before the game starts because the vertex entry each pipeline is built with follows the depth mode the game sets (`nvnDeviceSetDepthMode`).
+
+It runs at every start. When the Metal shader cache and the pipeline archive hold everything it takes well under a second, and the front end shows its screen only past 0.5 s, and only when the rate so far leaves 0.3 s or more to go (no screen that flashes up and goes): a dark view over the game's with "Preparing shaders", a progress bar and a count (`front_progress` in `front_mac.m` and `front_ios.m`). A stamp saying that the step ran would skip it exactly when the system has dropped the Metal cache (an OS update, or storage pressure on iOS), which is when it is needed. The log has `pipeline prepare: N lines (… shaders, … render pipelines, … compute pipelines) in … s on N workers before the first frame, progress screen shown / not shown; bases … compiled, … from the archive, … reused`. Without a window, or with `DM_PSO_PREPARE=0`, the prewarm runs in the background on one worker, as before; `DM_PSO_PREPARE=1` makes a windowless run wait too.
+
+The step covers what the lists name: a first start as far as the profile's `pso_manifest.tsv` covers the route (record it as above, over the scenes a new player reaches first and a save load), every later start through `pso_user.tsv`. A shader or pipeline no list names yet is built when first drawn, served meanwhile by the hybrid pipelines below. It is NVN only: the Vulkan and GL layers keep no prewarm lists (Hades creates its pipelines itself while it loads, 1,856 before its first frame).
+
+Breath of the Wild, Mac (M2 Max), runs started at a 1-minute load average below 4: Metal cache empty (a new bundle ID per run), the prebuilt archive, its `pso_manifest.tsv` (1,789 lines: New Game to the Shrine of Resurrection, then a Zora's Domain save load), that save loaded. Frames over 25 ms with new pipelines or shader library loads, in the 60 s after the last menu press:
+
+| Start | Before the first frame | Frames with pipelines / library loads |
+|---|---|---|
+| No list (the profile before its list) | – | 4 / 5 (75 libraries), 168 ms of that work, worst frame 128 ms |
+| The list, background prewarm (`DM_PSO_PREPARE=0`) | – (14.6 and 16.0 s on one worker, during boot) | 0 / 0 (two runs) |
+| The list, prepare step | 5.2 and 2.2 s on 12 workers, 3.3 s on 8 (872 bases compiled) | 0 / 0 (three runs) |
+| Second start (Metal cache and archive warm) | 0.08 s, no screen | 0 / 0 |
+| A player's list (5,783 lines with the manifest), warm | 0.23 s, no screen (2.7 s in the background) | 0 / 0 |
+
+On this Mac the background prewarm also ends before the save loads, so the step changes the first minute only where the prewarm is slower than the way into play: a slower device, fewer cores, a longer list, a player who skips through the title. The compiles scale with the workers only about three to seven times over one, since the Metal compiler service is shared. Frames over 25 ms without pipeline work (20–71 per run) are the game's own and vary with the machine's other load.
+
 ### Pipeline bases and the pipeline archive
 
 Render pipelines are built through Metal 4's `MTL4Compiler` (`pso_build` in `dm/gfx/nvn/nvn_mtl.m`). `pso_desc` still describes each pipeline; from it the host builds a *base* whose colour attachments (format, blending, write mask) are left unspecialized, once per base, and makes every pipeline from its base by specialization, which takes a few microseconds instead of the 3–5 ms of a pipeline build. Metal 4 pipelines name no depth or stencil format, so one base serves every depth/stencil attachment. Breath of the Wild's 4,829 recorded pipeline keys came from 1,818 bases; 2,845 of the keys differed only in the blend factors of targets whose blending was off, which the key no longer holds (`pso_key_norm`).

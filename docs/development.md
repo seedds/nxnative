@@ -287,6 +287,7 @@ The game's own work and its frame rate stay as they are; the host avoids work of
 - **Notification event:** the game polls `oe::GetNotificationMessageEvent` every frame; the SDK's own event was never created (the host's `oe::Initialize` is a no-op), so the host now hands out an event of its own, signalled while a notification is queued.
 - **Online:** its `EOS_*` imports (Epic Online Services, an NRO it would load through `nn::ro`) stay offline.
 - **Mac input:** `DM_KEYS="f800:A,f1000:A,f1200:A,f1500:A,f1900:A"` goes through the title and the intro into Tartarus.
+- **Resolution:** the game sets its window size once at startup (1280x720, docked too; `main+0x2492b0`), and The Forge makes the swap chain and render targets from it, ignoring the Vulkan surface's extent. A stub in its `patches.py` takes the host's size (`DM_OUTPUT_SIZE=1080p` / `1440p` / `4k` / `WxH`; the rewriter's table names it by `OUTPUT_W` / `OUTPUT_H`), and the whole frame renders at that size. The characters and enemies are prerendered sprites, and the Switch build ships only their 720p packages (`Content/Win/Packages/720p`), so they are scaled up while the UI, text and effects are drawn at the full size.
 - **Packing:** for a Vulkan game the NSP script runs `vk_shaders.py` (Mac and iOS libraries in `<id>_build/shader/vk` and `shader/ios/vk`) in place of the NVN shader split and chain build.
 
 **Hades II (`0100A00019DE0000`)**

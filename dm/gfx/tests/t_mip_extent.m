@@ -1,8 +1,10 @@
 // Real NVN recording entry → production Metal replay; each mip of 8x6 is hand-calculated independently; with no viewport set, an explicit viewport is not used to dodge it.
 // nvn_mtl.m's nvn_game_fps is a weak default and hle_nvn.c gives the strong definition; in one translation unit the weak one is renamed (as in t_present_crop.m)
 #define nvn_game_fps nvn_game_fps_mtl_default
+#define nvn_var_fps nvn_var_fps_mtl_default   // the same for nvn_var_fps (a variable frame step)
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
+#undef nvn_var_fps
 #define g_ft g_ft_hle   // both files have a static g_ft, so hle_nvn.c's is renamed too (as in t_present_crop.m)
 #include "../nvn/hle_nvn.c"
 #undef g_ft

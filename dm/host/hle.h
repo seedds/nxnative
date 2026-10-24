@@ -53,6 +53,8 @@ void dm_set_opmode(int m);          // On change, push notification 30 / 31 acco
 void dm_focus_set(int st);
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
 extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag, +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
+extern int dm_fps_var_cap;   // a variable frame step capped at this frame rate (loader.c; 0 = whole vsyncs)
+extern uint64_t dm_mem_extra;   // application memory added for a larger render buffer pool (loader.c; hle_svc.c)
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)

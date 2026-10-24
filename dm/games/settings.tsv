@@ -4,10 +4,11 @@
 #   variable  the environment variable the setting sets
 #   kind      choice: values value=label,... (languages: the game's own, from its control data); range: values low:high:step, shown as a percentage; toggle: 1 / 0, values -
 #   default   a value; DM_GAME_<NAME>: the host's own default from the game profile (game_profile.h, game.py); build:<VAR>: the IPA build's setting (build_ipa.sh)
-#   shown     always; DM_GAME_<NAME>!=<value> or ==<value>; fixups:<KEY>: main's rewriter table has that key (a stub in the game's build, patch_nso.py); languages>1
+#   shown     always; DM_GAME_<NAME>!=<value> or ==<value>; fixups:<KEY>: main's rewriter table has that key (a stub in the game's build, patch_nso.py); languages>1; several joined by & must all hold
 #   label, note  the setting's name and the line under it (the note may be empty)
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Frame rate
 DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Render scale
+DM_ASPECT	choice	wide=Wide,16:9=16:9	wide	DM_GAME_ASPECT_ANY==1&fixups:OUTPUT_W	Picture	Wide renders the game at the screen's aspect, edge to edge; 16:9 keeps the Switch picture with bars at the sides.
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Console mode
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game language
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	always	Frame-rate counter

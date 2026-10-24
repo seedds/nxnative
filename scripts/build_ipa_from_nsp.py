@@ -1710,10 +1710,34 @@ def main(args=None):
         own = bool(provisional or derived)   # the shader tables come from this build's split (the profile's are checked otherwise)
         pkey = split_shaders(py, repo, [dirs[v] / 'RomFS' for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own, oodle)
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac)
-    if mac:   # a Mac-only build ends with the Mac host and the command that runs the game
+    if mac:   # a Mac-only build ends with a native macOS .app bundle and the Mac host
         cmd = mac_run(py, repo, work, game, patched, ios, aoc, gfx, lang, env, logs, g, args.env_file or DM_ENV_FILE)
+        from dm.tools.pack_mac_app import build_app_bundle
+        font_dir = work / 'font'
+        shmap = g.table('shader_map.tsv')
+        nacp_file = (game / 'control.nacp') if (game / 'control.nacp').exists() else (base / 'control.nacp')
+        icon_file = (game / 'icon.jpg') if (game / 'icon.jpg').exists() else (base / 'icon.jpg')
+        out_app = out_ipa.with_suffix('.app')
+        host_bin = work / 'tools/dmhost'
+        app_bundle = build_app_bundle(
+            game_id=g.id,
+            work_dir=work,
+            host_bin=host_bin,
+            patched_dir=patched,
+            romfs_dir=game / 'RomFS',
+            msl_dir=ios,
+            font_dir=font_dir,
+            shmap_path=shmap,
+            control_nacp=nacp_file,
+            icon_jpg=icon_file,
+            out_app=out_app,
+            mode='thin',
+            aoc_dir=aoc
+        )
         rmtree(work / 'tmp')
-        say(f'done: the game runs on the Mac with this command (its save in {work / "run/save"}, kept from run to run; DM_WINDOW=1 opens a window, DM_AUDIO=1 plays sound):')
+        say(f'packed macOS application: {app_bundle}')
+        say(f'run directly from Finder or terminal with: open "{app_bundle}"')
+        say('or run the host binary directly from the terminal:')
         PROG.say(cmd)
         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Mac build')
         return

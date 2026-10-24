@@ -108,6 +108,19 @@ static void t_npads(void) {
     CHECK(info[0] == 2 && info[1] == NPAD_HANDHELD, "handheld: the applet selects the handheld controller");
 }
 
+static void t_focus_release(void) {
+    g_mode = 1; ids((uint32_t[]){0, 1, 2}, 3); dm_pad_players(7);
+    dm_input_set(DM_BTN_A, 32767, 0, 0, 0);
+    dm_pad_set_player(0, DM_BTN_B, 0, 32767, 0, 0);
+    dm_pad_set_player(1, DM_BTN_X, 0, 0, 32767, 0);
+    dm_pad_set_player(2, DM_BTN_Y, 0, 0, 0, 32767);
+    dm_input_set(0, 0, 0, 0, 0);
+    for (int p = 0; p < 3; p++) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    CHECK(atomic_load(&g_btn) == 0 && atomic_load(&g_axes) == 0, "released input clears keyboard buttons and axes");
+    for (int p = 0; p < 3; p++)
+        CHECK(atomic_load(&g_pad_btn[p]) == 0 && atomic_load(&g_pad_axes[p]) == 0, "released input clears each player's physical pad");
+}
+
 static dm_haptic_state vibration[DM_PLAYERS];
 static int vibration_calls;
 static void vibration_sink(dm_haptic_state s) { vibration[s.player] = s; vibration_calls++; }
@@ -149,6 +162,7 @@ static void t_vibration(void) {
 int main(void) {
     t_slots();
     t_npads();
+    t_focus_release();
     t_vibration();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;

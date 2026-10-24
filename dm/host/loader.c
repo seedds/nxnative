@@ -191,6 +191,8 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+        else if (!strcmp(key, "OUTPUT_W")) m->out_w = v;
+        else if (!strcmp(key, "OUTPUT_H")) m->out_h = v;
         else if (!strcmp(key, "BUILD_ID")) sscanf(line, "# %*s %32s", m->build_id);
         else for (int k = 0; k < KEY_N; k++) {
             size_t n = strlen(kn[k]);
@@ -210,25 +212,38 @@ static void read_layout(module_t *m, const char *dir) {
 // target, 0 = the game's own interval logic. The profile's fps_target, overridden by DM_FPS_TARGET (0, 30 or 60); the graphics layer decides the steps and paces presents
 // (hle_nvn.c fstep_tick)
 uint8_t *dm_fps_state;
-static const char *g_fps_mod;   // the module holding the state page (for the log)
+static const module_t *g_fps_m;   // the module holding the state page
 static void install_fps_state(module_t *m) {
-    if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
-    dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name;
+    if (m->fps_state_off + 0x50 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+    dm_fps_state = m->base + m->fps_state_off; g_fps_m = m;
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
-// DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
+// DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs. The fields beyond +0x40 are written only for a build whose rewriter table names their stubs
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
+    const module_t *m = g_fps_m; const char *name = m->name;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880): 1.0 keeps the game's own size and dynamic resolution;
     // another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to 1.0). Independent of the frame step: written at target 0 too
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f;
-    if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
+    if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", name, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
+    // Any output size, for a build whose stubs take it (OUTPUT_W / OUTPUT_H in its rewriter table, the game's own size): DM_OUTPUT_SIZE=WxH (640x360 to 7680x4320), 1080p, 1440p or 4k,
+    // at +0x40 (u64 width | height << 32) and +0x48 (float width); 0 = the game's size
+    const char *os = getenv("DM_OUTPUT_SIZE");
+    if (os && m->out_w) {
+        unsigned w = 0, h = 0;
+        if (!strcmp(os, "1080p")) w = 1920, h = 1080; else if (!strcmp(os, "1440p")) w = 2560, h = 1440; else if (!strcmp(os, "4k") || !strcmp(os, "4K")) w = 3840, h = 2160; else sscanf(os, "%ux%u", &w, &h);
+        if (w >= 640 && h >= 360 && w <= 7680 && h <= 4320) {
+            uint64_t osz = (uint64_t)h << 32 | w; float owf = (float)w;
+            memcpy(dm_fps_state + 0x40, &osz, sizeof osz); memcpy(dm_fps_state + 0x48, &owf, sizeof owf);
+            LOG("%s: output %ux%u in place of %llux%llu (DM_OUTPUT_SIZE)", name, w, h, (unsigned long long)m->out_w, (unsigned long long)m->out_h);
+        } else LOG("[RED] DM_OUTPUT_SIZE=%s: must be WxH (640x360 to 7680x4320), 1080p, 1440p or 4k; keeping %llux%llu", os, (unsigned long long)m->out_w, (unsigned long long)m->out_h);
+    } else if (os) LOG("[RED] DM_OUTPUT_SIZE=%s: this build has no output size stub; keeping the game's size", os);
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
-    LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
+    LOG("%s: frame step %s%s (%s)", name, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
 }
 static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);

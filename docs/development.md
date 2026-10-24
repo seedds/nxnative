@@ -134,7 +134,7 @@ The unsigned IPA build still uses the repository's `dm/ios/DmIOS.xcodeproj`, ski
 
 Each game has a profile in `dm/games/<id>/`:
 - `game.tsv` holds the title ID, known builds, code modules, RomFS marker, memory split, app name and bundle ID;
-- the shader tables: `shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `pso_manifest.tsv`, and `c1_full.tsv` / `cb_extent.tsv`, which each checkout's full shader build makes (not committed);
+- the shader tables: `shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `pso_pairs.tsv` (pairs only the pipeline prebuild reads), `pso_manifest.tsv`, and `c1_full.tsv` / `cb_extent.tsv`, which each checkout's full shader build makes (not committed);
 - `patches.py` (when there are any): the rewriter's patches of the game's own builds.
 
 The shader translation chain has one version for every game, in `dm/gfx/nvn/dmsh_chain.h`.
@@ -235,6 +235,21 @@ flowchart TD
 ```
 
 Every 300 frames the log has a `pipelines up to frame` line. It gives the submit thread's pipeline, library and prediction time; archive lookups that found the base or none; specializations and base compiles on all threads; draws with a hybrid pipeline; background builds; and the draws that waited, by why no stand-in served them. `DM_PSO_WAITLOG=1` logs every wait over 20 ms with its shader pair. `DM_PSO_PULL_ALL=1` (diagnostic) draws every draw that has a pulling pipeline with it. In steady state the GPU time is the same with and without the hybrid: in Breath of the Wild, mean GPU p50 over frames 2,400–5,100 was 8.98 ms with it, 8.98 ms on the Metal 4 path without it, and 9.35 ms through the `MTLDevice`.
+
+The **prebuild** puts the pulling base of every known shader pair into the archive (`pso_prebuild`), so a cold start's draws have stand-ins. The pairs come from the profile's `shader_pairs.tsv` and `pso_pairs.tsv`. `shader_pairs.tsv` pairs the stages of one BNSH variation (and the other readers' programs). It held none of the pairs from agl's BAHS shader archives (`.sharcb`, the agl / gsys / terrain resource packs), and in Breath of the Wild 109 of the 543 pairs drawn on entering Zora's Domain came from those. `shader_split.py` now reads the binary and program arrays of a BAHS file (`bahs_variations`) and pairs the n-th vertex binary of a program with its n-th fragment binary. Those pairs go to `pso_pairs.tsv`, which only the prebuild reads. `vs_pad` keeps reading `shader_pairs.tsv`, so the shader libraries, the inputs digest and the other profiles' tables are unchanged. For Breath of the Wild that is 3,012 more pairs, and all 543 pairs drawn are now known. A profile made before the table existed still packs: the NSP script then keeps the table beside the shader package and hands it to the prebuild (`DM_PSO_PAIRS`). Super Mario Odyssey, Mario Bros. Wonder, Mario Kart 8 Deluxe, 3D World, Animal Crossing, Captain Toad and Tears of the Kingdom have BAHS files too; their tables are made at their next pack.
+
+The prebuild runs in the app after the prewarm, on a utility queue on half the performance cores, flushing every 1,000 bases (`DM_PSO_PREBUILD=0` turns it off). On the Mac it also runs as a tool, `DM_PSO_PREBUILD=tool`: build, write, exit. The NSP script runs the tool in a `--platform mac` build, into `<id>_build/run/pso_archive` (log `pso_prebuild.log`). It runs once per chain version, depth mode and pair list (`pso_archive/prebuilt.tsv`). `DM_PSO_PREBUILD_DEPTH=zero` serves a game that sets the near=0 depth mode; `DM_PSO_PREBUILD_THREADS=<n>` sets the workers. Its files hold bases without a vertex layout only, and are named `pNNNNN.mtl4a`; a base with a vertex layout is never looked up in them, and compaction leaves them alone. Breath of the Wild on an M2 Max: 15,767 bases, 910 MB in 16 files, 187 s with 7 workers for the first 12,755 and 19 s for the 3,012 more. Opening the files took 2.2 s on the first start (0.25 s from the file cache). The host's footprint is about 850 MB larger with them open (2,067 against 1,215 MiB at the title), which is one reason the Metal 4 path stays off on iOS. iOS archives cannot be made offline either: `metal-tt` rejects the pipeline script the Metal 4 serializer writes (format 0.1: "expecting [ instead got {"). On iOS this is a later step.
+
+Breath of the Wild, Mac (M2 Max), the Zora's Domain save, Metal shader cache empty (a new bundle ID per run):
+
+| Start | Frame entering the area | Draws that waited, entering it |
+|---|---|---|
+| `DM_PSO_MTL4=0`, no `pso_user.tsv` | 990 ms, then 535 / 738 / 496 ms frames | 512 draws, 3,325 ms |
+| Hybrid, archive prebuilt from `shader_pairs.tsv`, no `pso_user.tsv` | 830 ms, no other frame over 250 ms | 102 draws, 650 ms |
+| Hybrid, archive prebuilt with `pso_pairs.tsv` too, no `pso_user.tsv` | 340 ms, no other frame over 150 ms | 50 draws, 20 ms (no pair without its pulling base) |
+| Hybrid, archive and `pso_user.tsv` of an earlier run | no frame over 100 ms | 17 draws, 4.6 ms |
+
+Every kind of cold start also shows the game's own 130–220 ms frames every 9–13 frames for a while after the load, with no pipeline work in them.
 
 ## Power
 

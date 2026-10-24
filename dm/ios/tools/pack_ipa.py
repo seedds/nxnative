@@ -6,6 +6,7 @@
 # bigger files are streamed here, their CRC patched into the local header afterwards (no data descriptors). Zip64 fields wherever a size, an offset or the entry count passes its 32 / 16-bit field.
 # Usage: pack_ipa.py <out.ipa> [--store .a:.b] [--skip <archive path>]... <archive path>=<source folder>...
 #   --skip: an archive path left out of the walk of the folder that holds it (folders a stale app build still has, the signature); a mapping of its own still adds it
+#   --skip-suffix: files whose names end so are left out of every walk (build_ipa.sh: the pulling vertex libraries _bp.metallib, which the iOS app does not use by default)
 #   Writes <out.ipa>.partial and renames it at the end; prints "pack: N entries, X bytes" first (the NSP script's progress total, X = the files' bytes) and a summary line last
 import argparse, collections, concurrent.futures as cf, os, stat, struct, sys, time, zlib
 
@@ -18,7 +19,7 @@ DIR_MODE = stat.S_IFDIR | 0o755   # a parent folder no source folder stands for 
 Entry = collections.namedtuple('Entry', 'name path st')   # st None: such a parent folder
 
 
-def entries(maps, skip):
+def entries(maps, skip, skip_suffix=()):
     """The archive's entries in order: for each mapping its parent folders (unless an earlier entry gave them), its root, then its tree depth first, sorted by name,
     without the skipped paths and without other mappings' roots (each adds its own)"""
     roots, out, seen = {a for a, _ in maps}, [], set()
@@ -29,7 +30,7 @@ def entries(maps, skip):
         with os.scandir(d) as it: es = sorted(it, key=lambda e: e.name)
         for e in es:
             name = f'{arc}/{e.name}'
-            if name in skip or name in roots: continue
+            if name in skip or name in roots or (skip_suffix and e.name.endswith(skip_suffix) and not e.is_dir(follow_symlinks=False)): continue
             st = e.stat(follow_symlinks=False)
             if stat.S_ISDIR(st.st_mode): add(name + '/', e.path, st); walk(e.path, name)
             elif stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode): add(name, e.path, st)
@@ -127,6 +128,7 @@ def main():
     ap.add_argument('out'); ap.add_argument('maps', nargs='+', metavar='archive_path=folder')
     ap.add_argument('--store', default='', help='suffixes stored without compressing, separated by ":"')
     ap.add_argument('--skip', action='append', default=[], help='an archive path left out of the folder walk that would add it')
+    ap.add_argument('--skip-suffix', action='append', default=[], help='files whose names end so are left out of every folder walk')
     a = ap.parse_args()
     maps = []
     for m in a.maps:
@@ -135,7 +137,7 @@ def main():
         maps.append((arc.strip('/'), src))
     store = tuple(s.lower() for s in a.store.split(':') if s)
     t0 = time.time()
-    es = entries(maps, {s.strip('/') for s in a.skip})
+    es = entries(maps, {s.strip('/') for s in a.skip}, tuple(a.skip_suffix))
     total = sum(e.st.st_size for e in es if e.st and stat.S_ISREG(e.st.st_mode))
     print(f'pack: {len(es)} entries, {total} bytes', flush=True)
     part = a.out + '.partial'

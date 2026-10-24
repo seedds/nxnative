@@ -38,6 +38,55 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
+
+def image_atomic_3d(msl):
+    """Flatten SPIRV-Cross's 3D image-atomic pointer index for Metal.
+
+    MSL accepts a scalar index for a device pointer, while SPIRV-Cross 2.3
+    emits the image coordinate as int3. The host binds image atomics to a
+    linear storage buffer, so a row-pitch-aligned width and a height-sized
+    slice pitch are sufficient here.
+    """
+    marker = '_atomic[int3('
+    if marker not in msl:
+        return msl
+    replacements = []
+    pos = 0
+    while True:
+        match = re.search(r'(?P<prefix>(?:\b[A-Za-z_]\w*\.)?)(?P<pointer>\b[A-Za-z_]\w*_atomic)\[int3\(', msl[pos:])
+        if not match:
+            break
+        start = pos + match.start()
+        coord_start = pos + match.end()
+        depth = 1
+        i = coord_start
+        while i < len(msl) and depth:
+            if msl[i] == '(':
+                depth += 1
+            elif msl[i] == ')':
+                depth -= 1
+            i += 1
+        if depth or i >= len(msl) or msl[i] != ']':
+            pos = coord_start
+            continue
+        prefix = match.group('prefix')
+        pointer = prefix + match.group('pointer')
+        coord = msl[coord_start:i - 1]
+        image = pointer[:-len('_atomic')]
+        replacement = f'{pointer}[spvImage3DAtomicCoord(int3({coord}), {image})]'
+        replacements.append((start, i + 1, replacement))
+        pos = i + 1
+    if not replacements:
+        return msl
+    for start, end, replacement in reversed(replacements):
+        msl = msl[:start] + replacement + msl[end:]
+    macro = (
+        '\n// Returns a linear storage-buffer index for 3D image atomics.\n'
+        '#define spvImage3DAtomicCoord(tc, tex) '
+        '((tc).x + (tex).get_width() * ((tc).y + '
+        '(tex).get_height() * (tc).z))\n'
+    )
+    return msl.replace('\nusing namespace metal;\n', '\nusing namespace metal;\n' + macro, 1)
 CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
@@ -823,7 +872,7 @@ def finish(key, w, j, c1):
             r = subprocess.run(['spirv-cross', *XC, os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
             if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
             src = open(msl).read()
-    src = precise(src); open(msl, 'w').write(src)   # min / max / clamp with Maxwell's NaN results (see precise)
+    src = precise(src); src = image_atomic_3d(src); open(msl, 'w').write(src)   # min / max / clamp with Maxwell's NaN results (see precise)
     pad = []
     if j['stage'] == 'vs':   # outputs start as (0,0,0,1) (see vs_init); no point size beside a layer output (see vs_layer)
         src = vs_layer(vs_init(src)); open(msl, 'w').write(src)

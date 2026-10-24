@@ -35,6 +35,8 @@ typedef struct {
     int probe, grace;         // 1: the trial in progress is a probe; 2: a probe held and its run at kmin has not ended yet; frames left of the probe's grace
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
     double shown_slack;       // vsyncs a frame on time may show longer than k (set by the caller): one refresh on screens whose rate is not a multiple of 60; the cost keeps FSTEP_LATE
+    int screen;               // set by the caller before each call, then cleared: 0 = judge lateness by shown and cost; 1 = the screen showed a recent frame on time, 2 = late. With present
+                              // snapshots (nvn_mtl.m) the game runs ahead of the screen and a frame that runs long is absorbed, so only what the screen shows counts
     double run, crun, cref;   // vsyncs at kmin in a row; the cost of its frames on time (running mean; not during a probe's trial, whose frames run while the clock rises);
                               // crun when the last run of FSTEP_HOLD_MAX or more ended in a step up (0 = none yet)
     double ccur; int ck, cn;  // the cost of the frames on time at the longer hold ck (running mean) and their count
@@ -69,16 +71,19 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (kmin < s->kmin || s->k < kmin) s->k = kmin;   // the cap rose (a movie or the game's own step ended) or fell
     if (s->k > kmax) s->k = kmax;
     s->kmin = kmin;
-    int late = shown > held + FSTEP_LATE + s->shown_slack || cost > held + FSTEP_LATE, grace = s->grace > 0;
+    int scr = s->screen; s->screen = 0;
+    int late = scr ? scr == 2 : shown > held + FSTEP_LATE + s->shown_slack || cost > held + FSTEP_LATE, grace = s->grace > 0;
     if (grace) s->grace--;
     if (late) { s->late++; s->late_run = grace ? 0 : s->late_run + 1; s->fit_run = 0; } else s->late_run = 0;
     // The cost of the frames on time (a hitch is not what the scene costs): at kmin, and at the longer hold
     if (kmin != s->ckmin) { s->ckmin = kmin; s->run = s->crun = s->cref = 0; }
-    if (held <= kmin) { s->run += shown; s->cn = 0; if (!late && s->probe != 1) s->crun = s->crun > 0 ? s->crun + (cost - s->crun) / 32 : cost; }
+    // A frame the screen showed on time while its cost did not fit (absorbed by present snapshots) is not what the hold costs: the probes would take it for the scene that held kmin
+    int fits = !scr || cost <= held;
+    if (held <= kmin) { s->run += shown; s->cn = 0; if (!late && fits && s->probe != 1) s->crun = s->crun > 0 ? s->crun + (cost - s->crun) / 32 : cost; }
     else {
         s->run = 0;
         if (held != s->ck) { s->ck = held; s->cn = 0; }
-        if (!late) { s->ccur = s->cn ? s->ccur + (cost - s->ccur) / 8 : cost; s->cn++; }
+        if (!late && fits) { s->ccur = s->cn ? s->ccur + (cost - s->ccur) / 8 : cost; s->cn++; }
     }
     if (s->late_run >= 3 && s->k < kmax) {   // step up to the cost, at least one vsync
         int want = (int)ceil(cost - 0.05);

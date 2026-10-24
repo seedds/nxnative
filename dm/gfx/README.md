@@ -70,7 +70,7 @@ Binding conventions followed during translation (the NVN driver's layout, the sa
 | Location | Contents |
 |---|---|
 | `nvn/hle_nvn.c` | Interface layer: NVN takeover, object implementations, command recording, presentation pacing |
-| `nvn/nvn_mtl.m`, `nvn/nvn_mtl.h` | Replay layer: Metal device, memory pools, textures, shader loading, pipelines, drawing, presentation |
+| `nvn/nvn_mtl.m`, `nvn/nvn_mtl.h`, `nvn/nvn_mtl_*.inc` | Replay layer: Metal device, memory pools, textures, shader loading, pipelines, drawing, presentation. `nvn_mtl.m` is the only compiled file; it `#include`s the `nvn_mtl_*.inc` parts (see "The parts of `nvn_mtl.m`" below) |
 | `nvn/nvn_obj.h` | Host-side object layouts and the command record format, shared by both layers |
 | `nvn/nvn_entry.S`, `nvn/nvn_thunks.S` | Entries for the unimplemented stub and the timing wrapper, per-function thunks |
 | `nvn/nvn_tex.c`, `nvn/nvn_tex.h` | Storage size, alignment and per-level offsets of block-linear textures (ported from deko3d) |
@@ -103,6 +103,28 @@ The scripts in `tools/`; usage is written in each file's header:
 | `gen_protos.py` | Generates `nvn_protos.h` / the thunks |
 | `tbdr_budget.py`, `tbdr_load_dead.py`, `tbdr_store_dead.py`, `tbdr_pass_merge.py` | Read the `DM_NVN_PASSDUMP` log and analyze the load / store volume of each render pass's attachments per frame |
 | `passgpu_top.py` | Reads the `DM_NVN_PASSGPU` output and lists GPU time by pass |
+
+### The parts of `nvn_mtl.m`
+
+`nvn/nvn_mtl.m` is one translation unit and the only file the Makefiles, the tests (`MTL_T_SRC`) and the iOS project compile. The `nvn_mtl_*.inc` files beside it are textual parts of it, `#include`d in their original order, so every `static` stays shared and visible to the parts after it. They carry the `.inc` extension, as `nvn_geometry.inc` and `rt_range_check.inc` do, because the Makefiles compile every `nvn/*.m` and the iOS project links every `.m` they list (`.inc` files are only dependencies: `GFX_H` in the Makefiles, `HOST_DIRS` in the NSP script). Each part opens with a comment saying what it holds. A part is read after the ones above it: a function can use only what an earlier part (or the core) declared, as before. `__LINE__` in a part counts from the part's own top (`res_add` keys the residency statistics by it).
+
+| File | Holds |
+|---|---|
+| `nvn_mtl.m` | includes, texture slot and driver segment layout, the residency set, deferred release, `mtl_init`, memory pools and address lookup |
+| `nvn_mtl_submit.inc` | conditional rendering, occlusion queries, pending-write tracking, the submission's start, barriers, GPU profile counters, encoder wrappers (`enc_r_*`, `enc_c_*`, `enc_b_*`), blit helpers |
+| `nvn_mtl_ubuf.inc` | inline uniform updates (the deferred shadow, partial reads), fill / event / counter, boot and A/B instrumentation, commit, wait, finish |
+| `nvn_mtl_tex.inc` | NVN texture to `MTLTexture`, alias and sharing tables, upgrades, upload paths, zero fill, sparse views, release |
+| `nvn_mtl_pass.inc` | render passes: open / close, zero-source skip, pass dumps and per-pass GPU time, store lookahead, validity ledger, attachments, `rp_begin` |
+| `nvn_mtl_shader.inc` | shader map, c1 banks, shader and program loading, the descriptor pool (texture and sampler IDs), argument buffer arenas |
+| `nvn_mtl_state.inc` | draw state: vertex buffers, pull layout, stage binding, vertex format conversion, `pso_desc` |
+| `nvn_mtl_pso.inc` | Metal 4 base pipelines and the archive, parallel precompile, hybrid pipelines, prebuild, `pso_get`, warm-up |
+| `nvn_mtl_args.inc` | depth-stencil states, dummy resources, scratch buffers, `encode_args`, quad / fan index buffers |
+| `nvn_mtl_lookahead.inc` | pass lookahead, hoisting, shader prefetch and pipeline prediction, render-target range checks, the store lookahead index |
+| `nvn_mtl_merge.inc` | readable tile pass merge, deferred passes, fusing, zero-skip, kd / ms draws, feedback snapshots |
+| `nvn_mtl_indirect.inc` | indirect and 8-bit index draws, masked multi-draws, transform feedback, the last-use cache |
+| `nvn_mtl_draw.inc` | `draw`, `dispatch`, copies, clears a load action cannot express, `mtl_exec` |
+| `nvn_mtl_shot.inc` | swapchain blit state, screenshots, texture dumps and lists |
+| `nvn_mtl_present.inc` | the present path: blit encoders, display link, present thread, external textures, snapshots, present queue and wait |
 
 ## Building
 

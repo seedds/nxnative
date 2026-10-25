@@ -1,4 +1,5 @@
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
+// DM_UPSCALE=1|1.5|2: resolution upscaling, the game's render targets at that multiple of its size (see the section before tex_desc; the Mac's Upscaling menu saves the same choice).
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
@@ -2096,6 +2097,61 @@ static MTLTextureUsage img_usage(const tex_t *t, MTLPixelFormat pf) {
 // Metal leaves MTLTextureUsageShaderAtomic out of a texture's usage property (0x3 for a texture made with 0x23), so it cannot be read back: every shader-writable R32Uint / R32Sint
 // texture the host makes has it (img_usage, tex_upgrade, dummy_img_atomic), and that is what this tests
 static int tex_atomic_capable(id<MTLTexture> base) { return pf_r32i(base.pixelFormat) && (base.usage & MTLTextureUsageShaderWrite); }
+// ---------- Resolution upscaling (DM_UPSCALE; the Mac window's Upscaling menu) ----------
+// The game's 3D is rendered at a multiple of its own resolution (1×, 1.5× or 2×) and presented to the window sharper, after Ryujinx's resolution scaling: a texture the game renders
+// into whose size is screen-like is allocated at its size × the factor (ups_pick, at its first resolution in tex_mtl_), and everything that addresses it in the game's pixels converts:
+// a render pass on scaled attachments multiplies viewports and scissors (g_pass.ups, draw / clears), shaders that read gl_FragCoord divide it by render_scale[0] of the support buffer
+// (the translator emits that, InstEmitAttribute.cs; support_buf_for), texture copies multiply their regions (copy_t2t), and copies to and from buffers and CPU reads go through an
+// unscaled copy (ups_down_*, ups_up_b2t). The present scales the window texture to the drawable as it always did, with its crop multiplied (present_now).
+// Texture size queries in shaders see the scaled size; the translated shaders that use them derive their texel coordinates from it, so their render_scale[1 + i] entries stay 1.
+// Not scaled: textures with mip levels, arrays, 3D, cubes, compressed / linear / image (shader-written) / sparse ones, square ones (shadow maps), sizes under 320x180 or not of a
+// screen's aspect (1.4 to 1.9: lookup tables, atlases, small effect buffers), and textures that are neither COMPRESSIBLE, DISPLAY nor depth (uploaded data rather than render targets).
+// The factor is fixed for the run (textures already made keep their size): DM_UPSCALE=1|1.5|2, else 1. A Mac app's launcher sets DM_UPSCALE from the player's saved choice
+// (launcher.DM_UPSCALE, the Render Resolution menu in front_mac.m and the settings window write it; docs/frontends.md, Saved choices). At 1 none of this runs: ups_pick and the conversions are gated on g_ups > 1, so allocations and passes are as without it
+static float g_ups = 1;   // the factor of this run (1 = off), set once by ups_init
+static pthread_once_t g_ups_once = PTHREAD_ONCE_INIT;
+static uint64_t g_ups_made;   // textures allocated scaled so far (log only)
+// A factor from text: exactly 1, 1.5 or 2 (others → 0 = invalid)
+static float ups_parse(const char *s) {
+    char *end; float f = s ? strtof(s, &end) : 0;
+    if (!s || end == s) return 0;
+    while (*end == ' ' || *end == '\n' || *end == '\r' || *end == 'x' || *end == 'X') end++;   // "2x" and a trailing newline are accepted
+    return *end ? 0 : f == 1.0f || f == 1.5f || f == 2.0f ? f : 0;
+}
+static void ups_init(void) {
+    const char *e = getenv("DM_UPSCALE"); float f = 0;
+    if (e) { f = ups_parse(e); if (!f) MLOG("[RED] DM_UPSCALE=%s: must be 1, 1.5 or 2; rendering at the game's resolution", e); }
+    g_ups = f > 1 ? f : 1;
+    if (g_ups > 1) MLOG("resolution upscaling: render targets at %gx the game's size (DM_UPSCALE)", g_ups);
+}
+static inline float ups_factor(void) { pthread_once(&g_ups_once, ups_init); return g_ups; }
+float dm_gfx_upscale(void) { return ups_factor(); }
+// A scaled dimension: the game's size × the factor, rounded (1.5 × 1080 = 1620)
+static inline NSUInteger ups_dim(NSUInteger n) { return (NSUInteger)MAX(lround((double)n * g_ups), 1L); }
+// Whether a texture about to be made from descriptor d is allocated scaled (see the section comment for the classes left out and why)
+static int ups_pick(const tex_t *t, MTLTextureDescriptor *d) {
+    if (ups_factor() <= 1) return 0;
+    if (t->d.target != NVN_TEXTURE_TARGET_2D && t->d.target != NVN_TEXTURE_TARGET_2D_MULTISAMPLE) return 0;
+    if (d.mipmapLevelCount > 1 || d.arrayLength > 1 || d.depth > 1 || !(d.usage & MTLTextureUsageRenderTarget)) return 0;
+    if (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_VIDEO_DECODE)) return 0;
+    int depth = (int)d.pixelFormat >= 250 && (int)d.pixelFormat <= 262;   // Depth16Unorm … X24_Stencil8, as tex_init_fill
+    if (!depth && !(t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY))) return 0;   // a render target is made COMPRESSIBLE (or DISPLAY: the window's); a plain one is data copied in
+    NSUInteger w = d.width, h = d.height;
+    if (w < 320 || h < 180 || (double)w / h < 1.4 || (double)w / h > 1.9) return 0;
+    if (ups_dim(w) > 16384 || ups_dim(h) > 16384) return 0;
+    return 1;
+}
+// The factor a texture was made at: g_ups for one ups_pick took (its Metal texture is wider than the game's), else 1. mt may be a view of it (views keep the size)
+// (a texture description with no size, as the Vulkan / GL presents pass, counts as unscaled: those layers never scale)
+// t is never NULL here: every caller passes a command's texture or an attachment it has checked (a NULL test would only tell the analyzer the callers may dereference NULL)
+static inline float ups_of(const tex_t *t, id<MTLTexture> mt) { return g_ups > 1 && t->d.width && mt && mt.width > t->d.width ? g_ups : 1; }   // NOLINT(clang-analyzer-core.NullDereference): copy_t2t and the clear test c->src / c->dst / c->tex only on their trace lines, which the analyzer carries into every later use (its path for upstream's own dereferences there too)
+// A copy region in the game's pixels → the scaled texture's (offsets rounded down, ends up), depth untouched
+static NVNcopyRegion ups_region(NVNcopyRegion r, float f) {
+    if (f <= 1) return r;
+    long x0 = (long)floor(r.xoffset * (double)f), y0 = (long)floor(r.yoffset * (double)f), x1 = (long)ceil((r.xoffset + r.width) * (double)f), y1 = (long)ceil((r.yoffset + r.height) * (double)f);
+    r.xoffset = (int)x0; r.yoffset = (int)y0; r.width = (int)(x1 - x0); r.height = (int)(y1 - y0); return r;
+}
+
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
@@ -3405,10 +3461,14 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);
         if (!d) return nil;
-        mt = image_texture(t, d);
+        int up = ups_pick(t, d);   // resolution upscaling: a screen-like render target is made at its size × the factor
+        if (up) { d.width = ups_dim(d.width); d.height = ups_dim(d.height); }
+        mt = up ? nil : image_texture(t, d);   // a scaled texture never joins an alias family (image_texture): its texels are not laid out at the game's size
         if (!mt) { mt = [g_dev newTextureWithDescriptor:d];
-            if (mt) { res_add(mt); if (!tex_init_fill(t, mt)) tex_zero_fill(mt); } }
+            if (mt) { res_add(mt); if (up || !tex_init_fill(t, mt)) tex_zero_fill(mt); } }   // residency before the fill; a scaled one is not filled from its storage, whose layout is the game's size
         if (!mt) { RED_ONCE(2, "failed to create MTLTexture %ux%u format %#x target %d", t->d.width, t->d.height, t->d.format, t->d.target); return nil; }
+        if (up && (g_ups_made++ < 24 || g_ups_made % 200 == 0)) MLOG("resolution upscaling: ser=%llu %ux%u format %#x flags %#x samples %d made %lux%lu (%llu scaled so far)", (unsigned long long)t->serial, t->d.width, t->d.height,
+                                                               t->d.format, t->d.flags, t->d.samples, (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long long)g_ups_made);
     }
     if (mt.allocatedSize >= (256u << 20)) { static int nb; if (nb++ < 20)   // the textures that take most of the GPU's memory (a GPU out-of-memory error says nothing of which)
         MLOG("large texture ser=%llu %ux%ux%u format %#x target %d levels %u: %llu MB%s", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels,
@@ -3523,7 +3583,8 @@ static void rr_reset(void);
 static id<MTL4RenderCommandEncoder> g_enc;
 static int enc_open(void) { return g_enc != nil; }
 // Target info of the current render pass: determined once from the attachments at rp_begin and shared by all draws in the pass (pipeline key, depth-stencil, viewport / scissor all depend only on it)
-static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro, layered; __unsafe_unretained id<MTLTexture> range_color, range_depth; } g_pass;
+static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro, layered; __unsafe_unretained id<MTLTexture> range_color, range_depth;
+                 float ups; } g_pass;   // ups: the resolution upscaling factor of the pass's attachments (0 or 1 = the game's size; see ups_pick)
 static int g_rp_layered;   // the pass about to open is for a vertex shader that writes the layer (draw → rp_begin_ex)
 // Slice-merged passes (DM_NVN_SLICE_MERGE, on by default; 0 off): consecutive passes that each draw into another layer of one level of the same array or cube texture,
 // with nothing between them but state, uniform updates and draws (no game barrier, clear, copy or dispatch: sm_scan), run as one layered pass. Each draw reaches its layer through a vertex
@@ -4048,6 +4109,24 @@ static NSUInteger att_layers(MTLRenderPassAttachmentDescriptor *a, const view_t 
     if (has_v && v->set_layers && v->nlayers) n = MIN(n, (NSUInteger)v->nlayers);
     return MAX(n, 1u);
 }
+// Resolution upscaling of a pass being opened: its factor is that of its attachments (ups_of). A pass that mixes scaled and unscaled attachments covers the smaller (pass_dims), and is
+// drawn at the factor of its first attachment, as a game's targets of one pass are all screen-sized or all not (logged once if not)
+static void ups_pass(MTL4RenderPassDescriptor *pd) {
+    float f = 0; int mixed = 0;
+    for (int i = 0; i <= R.rt.n && i <= 8; i++) {
+        const tex_t *t = i < R.rt.n && i < 8 ? R.rt.color[i] : R.rt.depth;
+        id<MTLTexture> a = i < R.rt.n && i < 8 ? pd.colorAttachments[i].texture : (pd.depthAttachment.texture ?: pd.stencilAttachment.texture);
+        if (!t || !a || bcrt_is(a)) continue;
+        float g = ups_of(t, a); if (!f) f = g; else mixed |= g != f;
+    }
+    g_pass.ups = f > 1 ? f : 1;
+    if (mixed) { static int once; if (!once++) MLOG("resolution upscaling: a pass mixes scaled and unscaled attachments, drawn at %gx (first case pass %llu)", g_pass.ups, g_stat_pass + 1); }
+}
+// A rectangle in the game's pixels → the open pass's (rounded outwards), before it is clamped to the pass: viewports and scissors of draws and clears on scaled attachments
+static inline void ups_rect(long *x0, long *y0, long *x1, long *y1) {
+    if (g_pass.ups <= 1) return;
+    double f = g_pass.ups; *x0 = (long)floor(*x0 * f); *y0 = (long)floor(*y0 * f); *x1 = (long)ceil(*x1 * f); *y1 = (long)ceil(*y1 * f);
+}
 static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const view_t *v, int has_v) {
     id<MTLTexture> base = tex_mtl(t); sparse_gpu_wrote(t);
     // A texture made without render-target use (packaged or CPU-written, uploaded from its storage) drawn into: give it that use, as a clear of one does (clear_tex). Metal's validation
@@ -4262,6 +4341,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
            R.rt.has_dview && R.rt.dview.set_format ? R.rt.dview.format : 0, g_pass.dfmt, g_pass.sfmt, g_pass.hd, g_pass.hs, clear_only);
         if (dt || stt) g_pass.samples = (uint32_t)(dt ? dt : stt).sampleCount;
         pass_dims(pd, (NSUInteger)R.rt.n, &g_pass.tw, &g_pass.th);
+        if (g_ups > 1) ups_pass(pd);
         if (rt_range_on()) { g_pass.reg_gen = reg0; g_pass.ser_gen = ser0; }
         if (rt_range_on()) { g_pass.range_dirty=dirty0; g_pass.range_color=pd.colorAttachments[0].texture; g_pass.range_depth=pd.depthAttachment.texture; }
         g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
@@ -4328,6 +4408,7 @@ static int clear_rect_zero(int i) {
     NSUInteger lv = hv && v->set_levels ? v->base_level : 0, sl = hv && v->set_layers ? v->min_layer : 0;
     long lw = (long)MAX(mt.width >> lv, 1u), lh = (long)MAX(mt.height >> lv, 1u);
     long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+    if (g_ups > 1) { NVNcopyRegion s = ups_region((NVNcopyRegion){(int)x0, (int)y0, 0, (int)(x1 - x0), (int)(y1 - y0), 1}, ups_of(t, mt)); x0 = s.xoffset; y0 = s.yoffset; x1 = x0 + s.width; y1 = y0 + s.height; }   // a scaled attachment: the scissor in its pixels
     if (x1 > lw) x1 = lw; if (y1 > lh) y1 = lh;
     if (x1 <= x0 || y1 <= y0) return 1;
     size_t row = (size_t)(x1 - x0) * bpp, img = row * (size_t)(y1 - y0);
@@ -8109,6 +8190,16 @@ static uint64_t gml_take(void) {
     [g_commit_blocks addObject:^{ gml_read(b, predict, fence); }];
     return b.gpuAddress;
 }
+// Resolution upscaling: the support buffer of draws in a pass on scaled attachments, with render_scale[0] = the factor, so gl_FragCoord.xy / render_scale[0] stays in the game's pixels.
+// The texture entries (render_scale[1 + i]) stay 1: see the upscaling section before tex_desc
+static id<MTLBuffer> support_buf_scaled(void) {
+    static __strong id<MTLBuffer> b; if (b) return b;
+    b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b);
+    memcpy(b.contents, support_buf().contents, 65536);
+    *(float *)((uint8_t *)b.contents + 192) = g_ups;   // render_scale[0].x (layout in support_buf)
+    return b;
+}
+static uint64_t support_scaled_gpu(void) { static uint64_t gpu; if (!gpu) gpu = support_buf_scaled().gpuAddress; return gpu; }
 static id<MTLBuffer> zero_bank(void) { static __strong id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b); } return b; }
 static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_bank().gpuAddress; return gpu; }
 // Bindless handle (TEXU / SAMPU): the 32-bit word at byte offset off of uniform slot reg = the low 32 bits of the NVN handle the game wrote there (low 20 bits texture ID, high 12 bits sampler ID).
@@ -8367,8 +8458,9 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_GMEML) {   // B: the write log of those stores; their writes are noted as gml_take learned them
             slots[aid] = gml_take();
         } else if (b->kind == NVN_RB_SUPPORT) {   // support_buffer: scale 1.0, BGRA swap 0, viewport transform not disabled (viewport fields are not read)
-            slots[aid] = support_gpu();
-            USE(support_buf(), MTLResourceUsageRead);
+            if (g_pass.ups > 1 && g_enc && nvn_stage != 5 && nvn_stage != 2) { slots[aid] = support_scaled_gpu(); USE(support_buf_scaled(), MTLResourceUsageRead); }   // a draw on scaled attachments (resolution upscaling)
+            else { slots[aid] = support_gpu();
+            USE(support_buf(), MTLResourceUsageRead); }
         } else if (b->kind == NVN_RB_PUSH) {   // NVN2 push constants (c[24]): the stage group's current block
             id<MTLBuffer> db; size_t doff = arena_alloc(DMSH_PUSH_SIZE, &db);
             memcpy(g_cur_arena->cpu + doff, S.push[nvn_stage == 5 ? 1 : 0], DMSH_PUSH_SIZE);
@@ -11045,6 +11137,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // Viewport / scissor (clamped within the target size)
     NSUInteger tw = g_pass.tw, th = g_pass.th;
     { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};
+      if (S.has_vp && g_pass.ups > 1) { v.originX *= g_pass.ups; v.originY *= g_pass.ups; v.width *= g_pass.ups; v.height *= g_pass.ups; }   // resolution upscaling: the game's viewport on scaled attachments
       if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { v.originY += v.height; v.height = -v.height; }   // lower-left origin (see g_origin_ll)
       // Viewport swizzle: NEGATIVE_Y negates clip y, the same as the viewport flipped about its centre; facing is decided after it on the GPU as in Metal, so the winding stays.
       // Other swizzles (axis exchanges, negated x / z / w) are no viewport change and are drawn unswizzled
@@ -11055,6 +11148,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc && !S.rast_discard) {   // raster state cannot suppress vertex storage writes
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+        ups_rect(&x0, &y0, &x1, &y1);
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { PD("Z %llu draw skipped: empty scissor (%d,%d %dx%d, target %lux%lu)", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th); return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
@@ -11407,6 +11501,25 @@ static int rb_swap_gpu(uint64_t src, size_t row, size_t img, uint64_t dst, size_
 // Whether a copy into or out of this host texture crosses between the guest's order and Metal's for the RGB565 family: the red bit position (rb_packed_shift), 0 for other formats and for a
 // texture on a pool's buffer, which holds the guest's bits (linear and buffer textures)
 static int rb_copy_shift(const tex_t *t, id<MTLTexture> mt) { return mt.buffer ? 0 : rb_packed_shift(t->d.format); }
+static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror);
+static int fmt_int_or_ds(MTLPixelFormat f);
+// Resolution upscaling: a temporary single-level 2D texture of a scaled texture's format at w x h, which copies to and from buffers go through (released once this submission has run)
+static id<MTLTexture> ups_temp(id<MTLTexture> like, NSUInteger w, NSUInteger h) {
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:like.pixelFormat width:MAX(w, 1u) height:MAX(h, 1u) mipmapped:NO];
+    d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget | (like.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? MTLTextureUsagePixelFormatView : 0); d.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> t = [g_dev newTextureWithDescriptor:d]; if (!t) return nil;
+    res_add(t); defer_obj_release(t);
+    return t;
+}
+// The region r (the game's pixels) of layer `slice` of a scaled texture, drawn down into a temporary unscaled texture of the region's size (texture → buffer copies read it from 0, 0).
+// nil when the format cannot be drawn (integer formats, copy_t2t_draw): the caller then reads the scaled texels at the scaled origin, logged once
+static id<MTLTexture> ups_down(id<MTLTexture> s, unsigned level, unsigned slice, NVNcopyRegion r) {
+    id<MTLTexture> t = ups_temp(s, (NSUInteger)r.width, (NSUInteger)r.height); if (!t) return nil;
+    NVNcopyRegion sr = ups_region(r, g_ups), dr = {0, 0, 0, r.width, r.height, 1}; sr.zoffset = 0; sr.depth = 1;
+    if (!copy_t2t_draw(s, t, level, slice, 0, 0, &sr, &dr, !fmt_int_or_ds(s.pixelFormat), 0)) return nil;
+    static int once; if (!once++) MLOG("resolution upscaling: first texture → buffer copy of a scaled texture, drawn down to %dx%d first (format %lu)", r.width, r.height, (unsigned long)s.pixelFormat);
+    return t;
+}
 static void copy_t2b(const p_copy_b2t *c) {
     rp_flush();   // Materialize pending clears before reading, matching copy_t2t.
     g_wr_epoch++; g_mdx_epoch++;
@@ -11422,6 +11535,16 @@ static void copy_t2b(const p_copy_b2t *c) {
     void *mb; uint64_t mo;
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(31, "texture→buffer copy destination is in no memory pool"); return; }
     sbw_note(c->src, img * nz, SBW_GPU);
+    if (!is3d && ups_of(c->tex, t) > 1) {   // resolution upscaling: each layer's region is drawn down to the game's size first, and copied from there
+        for (int z = 0; z < nz; z++) {
+            id<MTLTexture> u = ups_down(t, level, layer0 + c->r.zoffset + z, c->r);
+            if (u) { enc_b_copy_texture_buffer(blit(), u, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(c->r.width, c->r.height, 1), (__bridge id<MTLBuffer>)mb, mo + z * img, row, img); continue; }
+            static int once; if (!once++) MLOG("resolution upscaling: a texture → buffer copy of a scaled texture of format %lu cannot be drawn down; its scaled texels are copied (first case ser=%llu)", (unsigned long)t.pixelFormat, (unsigned long long)c->tex->serial);
+            NVNcopyRegion s = ups_region(c->r, g_ups);
+            enc_b_copy_texture_buffer(blit(), t, layer0 + c->r.zoffset + z, level, MTLOriginMake(s.xoffset, s.yoffset, 0), MTLSizeMake(c->r.width, c->r.height, 1), (__bridge id<MTLBuffer>)mb, mo + z * img, row, img);
+        }
+        return;
+    }
     id<MTL4ComputeCommandEncoder> b = blit();
     if (is3d)
         enc_b_copy_texture_buffer(b, t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset), MTLSizeMake(c->r.width, c->r.height, nz), (__bridge id<MTLBuffer>)mb, mo, row, img);
@@ -11472,6 +11595,23 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     id<MTLTexture> mt = tex_mtl(t);
     if (!mt || !tex_level_ok(mt, level, "CPU readback")) { memset(dst, 0, img * nz); return; }
     mtl_finish_gpu_at(WS_READTEX);
+    if (!is3d && ups_of(t, mt) > 1 && bw == 1 && bh == 1) {   // resolution upscaling: the scaled region is read back and each texel of the game's region takes the scaled texel at its centre (any format)
+        NVNcopyRegion s = ups_region(*r, g_ups); size_t sw = (size_t)s.width * bpb;
+        id<MTLBuffer> sbuf = [g_dev newBufferWithLength:sw * s.height * nz options:MTLResourceStorageModeShared];
+        if (!sbuf) { RED_ONCE(95, "CPU readback of a scaled texture: no staging buffer of %zu bytes", sw * s.height * nz); memset(dst, 0, img * nz); return; }   // read as zeros, like a missing texture above
+        id<MTLCommandBuffer> scb = q_cb(); id<MTLBlitCommandEncoder> sb = enc_b_begin(scb);
+        for (int z = 0; z < nz; z++)
+            [sb copyFromTexture:mt sourceSlice:layer0 + r->zoffset + z sourceLevel:level sourceOrigin:MTLOriginMake(s.xoffset, s.yoffset, 0) sourceSize:MTLSizeMake(s.width, s.height, 1)
+                       toBuffer:sbuf destinationOffset:z * sw * s.height destinationBytesPerRow:sw destinationBytesPerImage:sw * s.height];
+        enc_b_end(sb); [scb commit]; [scb waitUntilCompleted];
+        for (int z = 0; z < nz; z++) for (int y = 0; y < r->height; y++) {
+            int sy = MIN((int)((r->yoffset + y + 0.5) * g_ups) - s.yoffset, s.height - 1);
+            for (int x = 0; x < r->width; x++) { int sx = MIN((int)((r->xoffset + x + 0.5) * g_ups) - s.xoffset, s.width - 1);
+                memcpy(dst + z * img + (size_t)y * row + (size_t)x * bpb, (const uint8_t *)sbuf.contents + z * sw * s.height + (size_t)sy * sw + (size_t)sx * bpb, bpb); }
+        }
+        static int once; if (!once++) MLOG("resolution upscaling: first CPU read of a scaled texture (ser=%llu %dx%d), read at its texel centres", (unsigned long long)t->serial, r->width, r->height);
+        return;
+    }
     id<MTLBuffer> buf = [g_dev newBufferWithLength:wb * hb * nz options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = enc_b_begin(cb);
     for (int z = 0; z < nz; z++)
@@ -11605,6 +11745,18 @@ static void copy_b2t(const p_copy_b2t *c) {
         size_t wb = (size_t)((c->r.width + bw - 1) / bw) * bpb; id<MTLBuffer> ab; size_t ao = arena_alloc(wb * rows * nz, &ab);
         if (rb_swap_gpu(sb.gpuAddress + mo, row, img, ab.gpuAddress + ao, wb, wb * rows, wb, rows, nz, shift)) { sb = ab; mo = ao; row = wb; img = wb * rows; }
         else RED_ONCE(7, "RGB565-family buffer→texture copy left in the guest's order: red and blue exchanged");
+    }
+    if (!is3d && ups_of(c->tex, t) > 1) {   // resolution upscaling (after the order conversion above, so sb holds Metal's bytes): each layer goes into a temporary texture of the game's size first, then is drawn up into the scaled region
+        NVNcopyRegion dr = ups_region(c->r, g_ups), sr = {0, 0, 0, c->r.width, c->r.height, 1}; dr.zoffset = 0; dr.depth = 1;
+        for (int z = 0; z < nz; z++) {
+            id<MTLTexture> u = ups_temp(t, (NSUInteger)c->r.width, (NSUInteger)c->r.height);
+            if (u) { enc_b_copy_buffer_texture(blit(), sb, mo + z * img, row, img, MTLSizeMake(c->r.width, c->r.height, 1), u, 0, 0, MTLOriginMake(0, 0, 0));
+                if (copy_t2t_draw(u, t, 0, 0, level, layer0 + c->r.zoffset + z, &sr, &dr, !fmt_int_or_ds(t.pixelFormat), 0)) continue; }
+            static int once; if (!once++) MLOG("resolution upscaling: a buffer → texture copy into a scaled texture of format %lu cannot be drawn up; copied at the scaled origin unscaled (first case ser=%llu)", (unsigned long)t.pixelFormat, (unsigned long long)c->tex->serial);
+            enc_b_copy_buffer_texture(blit(), sb, mo + z * img, row, img, MTLSizeMake(c->r.width, c->r.height, 1), t, layer0 + c->r.zoffset + z, level, MTLOriginMake(dr.xoffset, dr.yoffset, 0));
+        }
+        { static int once; if (!once++) MLOG("resolution upscaling: first buffer → texture copy into a scaled texture (ser=%llu %dx%d), drawn up from the game's size", (unsigned long long)c->tex->serial, c->r.width, c->r.height); }
+        return;
     }
     id<MTL4ComputeCommandEncoder> b = blit();
     if (is3d)
@@ -11772,6 +11924,12 @@ static void copy_t2t(const p_copy_t2t *c) {
     id<MTLTexture> s = tex_mtl(c->src), d = tex_mtl(c->dst); sparse_gpu_wrote(c->dst);
     PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src->serial, c->dst->serial, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
     if (!s || !d) return;
+    // Resolution upscaling: regions in the game's pixels → each texture's own. Between a scaled and an unscaled texture the sizes then differ and the copy is drawn as a scaling one
+    // (copy_t2t_draw), filtered for colour formats
+    p_copy_t2t cu; float ufs = ups_of(c->src, s), ufd = ups_of(c->dst, d);
+    if (ufs > 1 || ufd > 1) { cu = *c; cu.sr = ups_region(c->sr, ufs); cu.dr = ups_region(c->dr, ufd);
+        if (ufs != ufd && !fmt_int_or_ds(s.pixelFormat) && !fmt_int_or_ds(d.pixelFormat)) cu.flags |= NVN_COPY_FLAGS_LINEAR_FILTER_BIT;
+        c = &cu; }
     unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
     unsigned sz0 = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, dz0 = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
     if (!tex_level_ok(s, sl, "texture copy source") || !tex_level_ok(d, dl, "texture copy destination")) return;
@@ -11993,6 +12151,7 @@ static void clear_tex(const p_clear_tex *c) {
     }
     MTLPixelFormat pf = t.pixelFormat;
     int depth = pf == MTLPixelFormatDepth32Float || pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float_Stencil8, stencil = pf == MTLPixelFormatStencil8 || pf == MTLPixelFormatDepth32Float_Stencil8;
+    if (g_ups > 1 && ups_of(c->tex, t) > 1) { w = MAX(c->tex->d.width >> lv, 1u); h = MAX(c->tex->d.height >> lv, 1u); }   // NOLINT(clang-analyzer-core.NullDereference): c->tex exists (its Metal texture t was just found; see ups_of). Resolution upscaling: the whole level in the game's pixels (the clear pass covers the scaled level)
     if (c->r.xoffset || c->r.yoffset || (NSUInteger)c->r.width != w || (NSUInteger)c->r.height != h || (c->mask & mtl_pf_chmask(pf)) != mtl_pf_chmask(pf)
         || !(t.usage & MTLTextureUsageRenderTarget)) {
         if (!depth && !stencil && (t.usage & MTLTextureUsageRenderTarget)) { clear_tex_tri(t, lv, l0, c); return; }
@@ -12121,6 +12280,7 @@ static int clr_scissor(MTLScissorRect *sc) {   // the clear's scissor in the ope
     NSUInteger tw = g_pass.tw, th = g_pass.th; *sc = (MTLScissorRect){0, 0, tw, th};
     if (!R.has_sc) return tw && th;
     long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+    ups_rect(&x0, &y0, &x1, &y1);
     if (x1 > (long)tw) x1 = (long)tw; if (y1 > (long)th) y1 = (long)th;
     if (x1 <= x0 || y1 <= y0) return 0;
     *sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)}; return 1;
@@ -13123,6 +13283,11 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     { static double last; NSUInteger r[4];
       if (present_crop_rect(src, crop, r) && r[2] && r[3]) { double a = (double)r[2] / r[3];
           if (fabs(a - last) > last * 0.001) { last = a; MLOG("present: picture shape %lux%lu (%.3f:1) for the front end's layout", (unsigned long)r[2], (unsigned long)r[3], a); front_picture_shape((int)r[2], (int)r[3]); } } }
+    int ucrop[4];   // resolution upscaling: a scaled window texture's crop in its own pixels (the present then scales it to the drawable as before)
+    if (g_ups > 1 && crop && (crop[2] || crop[3]) && ups_of(t, src) > 1) {
+        NVNcopyRegion r = ups_region((NVNcopyRegion){crop[0], crop[1], 0, crop[2], crop[3], 1}, g_ups);
+        ucrop[0] = r.xoffset; ucrop[1] = r.yoffset; ucrop[2] = MIN(r.width, (int)src.width - r.xoffset); ucrop[3] = MIN(r.height, (int)src.height - r.yoffset); crop = ucrop;
+    }
     // A texture made on first resolution joins the residency set (res_add), which a submission commits; a window texture presented before any submission has used it was still
     // outside the committed set when the display command buffer sampled it. Super Smash Bros. Ultimate presents its window texture in its first frames before drawing into it:
     // the display queue page-faulted (kIOGPUCommandBufferCallbackErrorPageFault) and macOS then ignored every later command buffer of the process, so the window stayed pink

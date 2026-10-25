@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -38,8 +39,10 @@ class Nsz(unittest.TestCase):
         src, out = Path(cmd[-1]), Path(cmd[cmd.index('-o') + 1])
         self.assertTrue(src.is_absolute())
         self.assertTrue(out.is_absolute())
-        self.assertNotIn('--keys', cmd)   # nsz 4.6.1's argument parser rejects it
-        self.assertEqual(cmd[2], nsp.NSZ_MAIN)
+        if cmd[0] != '/tools/nsz':
+            self.assertNotIn('--keys', cmd)   # the module: nsz 4.6.1's argument parser rejects it
+            self.assertEqual(cmd[2], nsp.NSZ_MAIN)
+        else: self.assertEqual([str(x) for x in cmd[1:3]], ['--keys', str(self.keys.resolve())])   # the standalone executable finds no keys in cwd
         self.assertEqual(Path(cwd), out)
         staged = Path(cwd) / 'keys.txt'
         self.assertTrue(staged.is_symlink())
@@ -96,9 +99,28 @@ class Nsz(unittest.TestCase):
 
     def test_missing_nsz(self):
         app, fam = nsp.scan_nsps(self.tmp)
-        with mock.patch.object(importlib.util, 'find_spec', lambda m, *a: None), self.assertRaisesRegex(nsp.BuildError, 'pip install nsz'):
-            nsp.decompress_nsz(self.tmp, app, fam, self.tmp / 'prod.keys', {})
+        with mock.patch.object(importlib.util, 'find_spec', lambda m, *a: None), mock.patch.object(shutil, 'which', lambda *a, **k: None), self.assertRaisesRegex(nsp.BuildError, 'pip install nsz'):
+            nsp.decompress_nsz(self.tmp, app, fam, self.tmp / 'prod.keys', {'PATH': '/nowhere'})
 
+    def standalone(self, help_text):   # no nsz module; a standalone executable on PATH whose --help prints help_text
+        done = mock.Mock(stdout=help_text)
+        return (mock.patch.object(importlib.util, 'find_spec', lambda m, *a: None), mock.patch.object(shutil, 'which', lambda n, path=None: '/tools/nsz' if n == 'nsz' else None),
+                mock.patch.object(subprocess, 'run', lambda *a, **k: done))
+
+    def test_nsz_executable_on_path(self):   # no nsz module: a standalone nsz 5 executable on PATH converts instead, its keys given by --keys
+        app, fam = nsp.scan_nsps(self.tmp); cmds = []
+        fake = lambda cmd, log, env=None, cwd=None, on_line=None: (cmds.append(cmd), self.fake_nsz(cmd, log, env, cwd))
+        a, b, c = self.standalone('usage: nsz [-D] ... --keys KEYS')
+        with a, b, c, mock.patch.object(nsp, 'run', fake):
+            fam = nsp.decompress_nsz(self.tmp, app, fam, self.keys, {'PATH': '/tools'})
+        self.assertEqual({str(c[0]) for c in cmds}, {'/tools/nsz'})
+        self.assertEqual(fam['base'].read_bytes(), b'nsp of Game [v0].nsz')
+
+    def test_nsz_executable_without_keys_option(self):   # an nsz before 5.0 on PATH: it would find no keys, so the build stops and says why
+        app, fam = nsp.scan_nsps(self.tmp)
+        a, b, c = self.standalone('usage: nsz [-D] ...')
+        with a, b, c, self.assertRaisesRegex(nsp.BuildError, 'no --keys option'):
+            nsp.decompress_nsz(self.tmp, app, fam, self.keys, {'PATH': '/tools'})
 
 if __name__ == '__main__':
     unittest.main()

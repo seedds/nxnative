@@ -1,4 +1,5 @@
 # Build outputs (Xcode derived data, produced by the scripts under dm/ios)
+/build/
 .iosdd/
 .iosdd_mac/
 .iosdd_*/

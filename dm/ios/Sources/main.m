@@ -127,11 +127,17 @@ void front_ios_boot(void) {   // Called by front_ios.m once the window and Metal
 }
 int front_ios_boot_ok(void) { return g_boot_ok; }
 
+@class SceneDelegate;
 @interface App : UIResponder <UIApplicationDelegate>
 @end
 @implementation App
 - (UISceneConfiguration *)application:(UIApplication *)a configurationForConnectingSceneSession:(UISceneSession *)s options:(UISceneConnectionOptions *)o {
-    return [[UISceneConfiguration alloc] initWithName:@"Default" sessionRole:s.role];
+    // Returning a newly allocated configuration does not reliably inherit the
+    // delegate named by the Info.plist manifest on iOS 16.  Bind it explicitly;
+    // otherwise UIKit waits for scene creation until the launch watchdog fires.
+    UISceneConfiguration *c = [[UISceneConfiguration alloc] initWithName:@"Default" sessionRole:s.role];
+    c.delegateClass = NSClassFromString(@"SceneDelegate");
+    return c;
 }
 @end
 

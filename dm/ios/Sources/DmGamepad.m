@@ -30,15 +30,22 @@ enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS
 enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8)
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_touch_btn, g_pad_btn, g_shake_btn;
-static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry, g_pad_lx, g_pad_ly, g_pad_rx, g_pad_ry;
+static uint64_t g_touch_btn, g_pad_btn, g_key_btn, g_shake_btn;
+static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry, g_pad_lx, g_pad_ly, g_pad_rx, g_pad_ry, g_key_lx, g_key_ly, g_key_rx, g_key_ry, g_mouse_rx, g_mouse_ry;
+static BOOL g_key_w, g_key_a, g_key_s, g_key_d, g_key_left, g_key_up, g_key_right, g_key_down;
+static double g_mouse_deadline, g_raw_mouse_time;
+static void read_mouse(float dx, float dy);
+static void clear_mouse(void);
 static int tilted(int32_t x, int32_t y) { return (int64_t)x * x + (int64_t)y * y > (int64_t)4000 * 4000; }
 static void publish(void) {
     pthread_mutex_lock(&g_mu);
     int32_t lx = g_touch_lx, ly = g_touch_ly, rx = g_touch_rx, ry = g_touch_ry;
+    if (tilted(g_key_lx, g_key_ly)) { lx = g_key_lx; ly = g_key_ly; }
+    if (tilted(g_key_rx, g_key_ry)) { rx = g_key_rx; ry = g_key_ry; }
+    if (tilted(g_mouse_rx, g_mouse_ry)) { rx = g_mouse_rx; ry = g_mouse_ry; }
     if (tilted(g_pad_lx, g_pad_ly)) { lx = g_pad_lx; ly = g_pad_ly; }   // a tilted physical stick wins
     if (tilted(g_pad_rx, g_pad_ry)) { rx = g_pad_rx; ry = g_pad_ry; }
-    dm_input_set(g_touch_btn | g_pad_btn | g_shake_btn, lx, ly, rx, ry);
+    dm_input_set(g_touch_btn | g_pad_btn | g_key_btn | g_shake_btn, lx, ly, rx, ry);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -143,6 +150,8 @@ static __weak DmGamepad *g_view;
     CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
     BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
+    CGPoint _hoverLast;
+    BOOL _hoverValid;
 }
 
 static UIColor *k_idle, *k_on, *k_line, *k_ringFill, *k_text, *k_textOn;
@@ -191,9 +200,32 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         _full = l == 1; _tap = l == 2;
         [self applyLayout];
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-        [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidConnectNotification object:nil];
-        [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidDisconnectNotification object:nil];
-        [self padsChanged:nil];
+        [nc addObserver:self selector:@selector(inputDevicesChanged:) name:GCControllerDidConnectNotification object:nil];
+        [nc addObserver:self selector:@selector(inputDevicesChanged:) name:GCControllerDidDisconnectNotification object:nil];
+        [nc addObserver:self selector:@selector(inputDevicesChanged:) name:GCKeyboardDidConnectNotification object:nil];
+        [nc addObserver:self selector:@selector(inputDevicesChanged:) name:GCKeyboardDidDisconnectNotification object:nil];
+        [nc addObserver:self selector:@selector(inputDevicesChanged:) name:GCMouseDidConnectNotification object:nil];
+        [nc addObserver:self selector:@selector(inputDevicesChanged:) name:GCMouseDidDisconnectNotification object:nil];
+        [self inputDevicesChanged:nil];
+        UIHoverGestureRecognizer *hover = [[UIHoverGestureRecognizer alloc] initWithTarget:self action:@selector(pointerMoved:)];
+        hover.allowedTouchTypes = @[@(UITouchTypeIndirectPointer)];
+        hover.cancelsTouchesInView = NO;
+        [self addGestureRecognizer:hover];
+        UIPanGestureRecognizer *scroll = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(trackpadScrolled:)];
+        scroll.allowedTouchTypes = @[];  // scroll events only; never steal a finger from either stick
+        scroll.allowedScrollTypesMask = UIScrollTypeMaskAll;
+        scroll.cancelsTouchesInView = NO;
+        [self addGestureRecognizer:scroll];
+        NSTimer *releaseTimer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timer) {
+            (void)timer;
+            pthread_mutex_lock(&g_mu);
+            BOOL expired = g_mouse_deadline > 0 && CACurrentMediaTime() >= g_mouse_deadline;
+            if (expired) { g_mouse_rx = g_mouse_ry = 0; g_mouse_deadline = 0; }
+            pthread_mutex_unlock(&g_mu);
+            if (expired) publish();
+        }];
+        [NSRunLoop.mainRunLoop addTimer:releaseTimer forMode:NSRunLoopCommonModes];
+        LOG("front end: trackpad raw/hover/scroll camera input with bounded release timer");
         motion_start();
         phone_motion_start();
     }
@@ -223,7 +255,10 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGFloat)faceGap { return K_FACE_GAP * self.u; }
 - (CGFloat)faceR { return K_FACE_R * self.u; }
 - (CGPoint)facePos:(int)b { CGPoint c = self.faceCenter; CGFloat g = self.faceGap;
-    switch (b) { case B_A: return CGPointMake(c.x + g, c.y); case B_B: return CGPointMake(c.x, c.y + g); case B_X: return CGPointMake(c.x, c.y - g); default: return CGPointMake(c.x - g, c.y); } }
+    // Present the face diamond as A bottom, B right, X left, Y top.  faceAt
+    // uses these same logical-button coordinates, so the Pokemon skill bound
+    // to each letter moves together with its label rather than only the art.
+    switch (b) { case B_A: return CGPointMake(c.x, c.y + g); case B_B: return CGPointMake(c.x + g, c.y); case B_X: return CGPointMake(c.x - g, c.y); default: return CGPointMake(c.x, c.y - g); } }
 - (CGPoint)stickHome { CGRect s = self.corner; return side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u); }   // the left stick's ring centre
 - (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
 - (CGFloat)stickR:(int)i { return (i ? K_RSTICK_R : K_STICK_R) * self.u; }
@@ -302,7 +337,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     g_touch_btn = face | dpad | btn; g_touch_lx = ax[0]; g_touch_ly = ax[1]; g_touch_rx = ax[2]; g_touch_ry = ax[3];
     pthread_mutex_unlock(&g_mu);
     publish();
-    BOOL stick = _stick[0] != nil;   // only the left stick is drawn: the right one needs no refresh
+    BOOL stick = _stick[0] != nil;
     if (changed || stick || _stickShown) [self refresh];   // also refresh on the stick release so the knob returns to the centre
     _stickShown = stick;
 }
@@ -327,6 +362,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
     BOOL game = NO;
     for (UITouch *t in ts) {
+        if (t.type == UITouchTypeIndirectPointer) continue;
         if (_padOff) { game |= [self gameBegin:t]; continue; }
         CGPoint p = [t locationInView:self]; int hit = _tap ? -1 : [self btnAt:p];
         if (hit >= 0) { [_owner setObject:@(C_BTN | (uint64_t)hit << 8) forKey:t]; continue; }
@@ -337,7 +373,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         CGFloat f = dist(p, self.faceCenter) / (self.faceGap + self.faceR * 1.6); if (f <= best) { best = f; kind = C_FACE; }
         if (_full) { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
         if (!_stick[0]) { CGFloat s = dist(p, self.stickHome) / ([self stickR:0] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
-        if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }   // the right stick: centred where the touch lands
+        if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }
         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
         else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; }
@@ -373,7 +409,26 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
-- (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
+- (void)reset { _hoverValid = NO; [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
+
+// Some keyboard-cover trackpads deliver UIKit pointer/scroll events without
+// appearing in GCMouse.mice. Prefer recent raw motion to avoid double counting.
+- (void)pointerMoved:(UIHoverGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) { _hoverValid = NO; return; }
+    CGPoint p = [g locationInView:self];
+    if (_hoverValid && g.state == UIGestureRecognizerStateChanged) {
+        pthread_mutex_lock(&g_mu); BOOL raw = CACurrentMediaTime() - g_raw_mouse_time < 0.1; pthread_mutex_unlock(&g_mu);
+        if (!raw) { read_mouse((float)(p.x - _hoverLast.x), (float)(_hoverLast.y - p.y));
+            static int once; if (!once++) LOG("front end: UIKit trackpad hover is driving the camera"); }
+    }
+    _hoverLast = p; _hoverValid = YES;
+}
+- (void)trackpadScrolled:(UIPanGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) { clear_mouse(); return; }
+    CGPoint d = [g translationInView:self]; [g setTranslation:CGPointZero inView:self];
+    if (d.x || d.y) { read_mouse((float)d.x, (float)-d.y);
+        static int once; if (!once++) LOG("front end: two-finger trackpad scroll is driving the camera"); }
+}
 
 // ---- Shapes ----
 static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }
@@ -464,18 +519,108 @@ static void read_pad(GCExtendedGamepad *g) {
     pthread_mutex_unlock(&g_mu);
     publish();
 }
-- (void)padsChanged:(NSNotification *)note {
+static uint64_t keyboard_button(GCKeyCode key) {
+    if (key == GCKeyCodeKeyJ) return DM_BTN_A;
+    if (key == GCKeyCodeKeyK) return DM_BTN_B;
+    if (key == GCKeyCodeKeyU) return DM_BTN_X;
+    if (key == GCKeyCodeKeyI) return DM_BTN_Y;
+    if (key == GCKeyCodeKeyF) return DM_BTN_LS;
+    if (key == GCKeyCodeKeyG) return DM_BTN_RS;
+    if (key == GCKeyCodeKeyQ) return DM_BTN_L;
+    if (key == GCKeyCodeKeyE) return DM_BTN_R;
+    if (key == GCKeyCodeKeyZ) return DM_BTN_ZL;
+    if (key == GCKeyCodeKeyC) return DM_BTN_ZR;
+    if (key == GCKeyCodeReturnOrEnter) {
+        // Device automation can inject Return but not letter keys. Keep the
+        // normal Plus mapping unless an on-device diagnostic explicitly asks
+        // for Return to act as the face A button.
+        const char *e = getenv("DM_KEY_ENTER_A");
+        return e && !strcmp(e, "1") ? DM_BTN_A : DM_BTN_PLUS;
+    }
+    if (key == GCKeyCodeTab) return DM_BTN_MINUS;
+    if (key == GCKeyCodeSpacebar) return DM_BTN_SHAKE;
+    return 0;
+}
+static void read_key(GCKeyCode key, BOOL pressed) {
+    pthread_mutex_lock(&g_mu);
+    if (key == GCKeyCodeKeyW) g_key_w = pressed;
+    else if (key == GCKeyCodeKeyA) g_key_a = pressed;
+    else if (key == GCKeyCodeKeyS) g_key_s = pressed;
+    else if (key == GCKeyCodeKeyD) g_key_d = pressed;
+    else if (key == GCKeyCodeLeftArrow) g_key_left = pressed;
+    else if (key == GCKeyCodeUpArrow) g_key_up = pressed;
+    else if (key == GCKeyCodeRightArrow) g_key_right = pressed;
+    else if (key == GCKeyCodeDownArrow) g_key_down = pressed;
+    uint64_t bit = keyboard_button(key);
+    g_key_btn = pressed ? g_key_btn | bit : g_key_btn & ~bit;
+    g_key_lx = ((int)g_key_d - (int)g_key_a) * DM_STICK_MAX;
+    g_key_ly = ((int)g_key_w - (int)g_key_s) * DM_STICK_MAX;
+    g_key_rx = ((int)g_key_right - (int)g_key_left) * DM_STICK_MAX;
+    g_key_ry = ((int)g_key_up - (int)g_key_down) * DM_STICK_MAX;
+    pthread_mutex_unlock(&g_mu);
+    publish();
+}
+static void clear_keyboard(void) {
+    pthread_mutex_lock(&g_mu);
+    g_key_btn = 0; g_key_lx = g_key_ly = g_key_rx = g_key_ry = 0;
+    g_key_w = g_key_a = g_key_s = g_key_d = g_key_left = g_key_up = g_key_right = g_key_down = NO;
+    pthread_mutex_unlock(&g_mu);
+    publish();
+}
+// A mouse or keyboard-cover trackpad supplies relative deltas through
+// GameController.  Turn a short burst into right-stick motion and return the
+// stick to centre shortly after the last delta.  This keeps camera motion
+// responsive without leaving it drifting after the finger stops.
+static int32_t mouse_axis(float v) {
+    static float scale;
+    if (!scale) { const char *e = getenv("DM_MOUSE_LOOK_SCALE"); scale = e && atof(e) > 0 ? (float)atof(e) : 1400.f; }
+    return (int32_t)fmaxf(-DM_STICK_MAX, fminf(DM_STICK_MAX, v * scale));
+}
+static void read_mouse(float dx, float dy) {
+    if (!isfinite(dx) || !isfinite(dy) || (!dx && !dy)) return;
+    pthread_mutex_lock(&g_mu);
+    g_mouse_rx = mouse_axis(dx); g_mouse_ry = mouse_axis(dy);
+    g_mouse_deadline = CACurrentMediaTime() + 0.060;
+    pthread_mutex_unlock(&g_mu);
+    publish();
+}
+static void clear_mouse(void) {
+    pthread_mutex_lock(&g_mu); g_mouse_deadline = 0; g_mouse_rx = g_mouse_ry = 0; pthread_mutex_unlock(&g_mu); publish();
+}
+- (void)inputDevicesChanged:(NSNotification *)note {
+    BOOL controllerEvent = !note || [note.name isEqual:GCControllerDidConnectNotification] || [note.name isEqual:GCControllerDidDisconnectNotification];
     GCController *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? note.object : nil;
     if (gone) { gone.extendedGamepad.valueChangedHandler = nil; dm_motion_detach(gone, 0); }
-    BOOL any = NO; int motion = 0;
+    BOOL controller = NO;
+    int motion = 0;
     for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad) {
+        controller = YES;
         if (c.motion.hasRotationRate) motion = 1;
-        any = YES; c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
-        dm_motion_attach(c, 0);   // all controllers are player 1 on iOS
+        if (controllerEvent) {
+            c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
+            dm_motion_attach(c, 0);   // all controllers are player 1 on iOS
+        }
         read_pad(c.extendedGamepad);
     }
-    if (!any || !motion) dm_motion_clear(0);   // the phone's gyro (if on) takes over from its next sample
-    if (!any) { dm_haptics_apple_controller(0, nil); pthread_mutex_lock(&g_mu); g_pad_btn = 0; g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = 0; pthread_mutex_unlock(&g_mu); publish(); }
+    if (controllerEvent && (!controller || !motion)) dm_motion_clear(0);   // the phone's gyro (if on) takes over from its next sample
+    if (!controller) { dm_haptics_apple_controller(0, nil); pthread_mutex_lock(&g_mu); g_pad_btn = 0; g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = 0; pthread_mutex_unlock(&g_mu); publish(); }
+    GCKeyboard *keyboard = GCKeyboard.coalescedKeyboard;
+    if (keyboard.keyboardInput) {
+        keyboard.keyboardInput.keyChangedHandler = ^(GCKeyboardInput *input, GCDeviceButtonInput *button, GCKeyCode key, BOOL pressed) {
+            (void)input; (void)button; read_key(key, pressed);
+        };
+    } else clear_keyboard();
+    BOOL mouse = NO;
+    for (GCMouse *m in GCMouse.mice) if (m.mouseInput) {
+        mouse = YES;
+        m.mouseInput.mouseMovedHandler = ^(GCMouseInput *input, float dx, float dy) {
+            (void)input; pthread_mutex_lock(&g_mu); g_raw_mouse_time = CACurrentMediaTime(); pthread_mutex_unlock(&g_mu); read_mouse(dx, dy);
+            static int once; if (!once++) LOG("front end: raw mouse/trackpad motion is driving the camera");
+        };
+    }
+    if (!mouse) clear_mouse();
+    BOOL any = controller || keyboard != nil || mouse;
+    LOG("front end: input devices controller=%d keyboard=%d mouse=%d; touch controls %s", controller, keyboard != nil, mouse, any ? "hidden" : "visible");
     dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });
 }
 @end
@@ -483,5 +628,5 @@ static void read_pad(GCExtendedGamepad *g) {
 UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v; return v; }
 void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")
     dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; });
-    pthread_mutex_lock(&g_mu); g_pad_btn = 0; g_shake_btn = 0; g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = 0; pthread_mutex_unlock(&g_mu); publish();
+    pthread_mutex_lock(&g_mu); g_pad_btn = g_key_btn = 0; g_shake_btn = 0; g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = g_key_lx = g_key_ly = g_key_rx = g_key_ry = g_mouse_rx = g_mouse_ry = 0; g_mouse_deadline = g_raw_mouse_time = 0; g_key_w = g_key_a = g_key_s = g_key_d = g_key_left = g_key_up = g_key_right = g_key_down = NO; pthread_mutex_unlock(&g_mu); publish();
 }

@@ -14,7 +14,11 @@ UIView *dm_gamepad_view(CGRect frame);
 void dm_gamepad_reset(void);
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
-bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
+// iPadOS 16 compatibility build: start directly with the generated defaults.
+// This avoids SwiftUI's compiler-plugin macros, which are unavailable in the
+// iPad-hosted macOS build environment. Settings remain overridable through
+// Documents/env.txt exactly as before.
+bool dm_show_launcher(void *view_controller, void (*done)(void)) { (void)view_controller; (void)done; return false; }
 
 static CAMetalLayer *g_layer;
 static void front_ios_power_watch(void);
@@ -169,6 +173,8 @@ void front_progress(const char *title, long done, long total) {
     });
 }
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
+int front_screen_max_fps(void) { return (int)UIScreen.mainScreen.maximumFramesPerSecond; }
+void front_screen_match(int fps) { (void)fps; }   // iOS chooses the display mode; the Metal layer is paced separately.
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 
 // Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result

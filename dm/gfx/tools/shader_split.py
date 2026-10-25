@@ -244,6 +244,17 @@ def glslc_shaders(d, label, need=True):
             if not sec or len(sec) != 1: continue
             (ctl, code), = sec; st = glslc_stage(ctl, code)
             if not st or check(label, st, ctl, code): continue
+        if st and code[:4] not in (GFX_MAGIC, CS_MAGIC):
+            # A code area with no header is expected only for compute (SDK 10's and SDK 6's GLSLC): when the output's own section header (glslc_section)
+            # describes a code area that does start with one, that is the output's layout. SDK 19's GLSLC writes the GPU code section's control length
+            # (+0x30) 0x80 bytes longer than the control section's own length (+0x20), and then the code area begins after the section's control, not after
+            # +0x20 (Trails in the Sky 1st Chapter light_cull.nvn): the rule above read the control's tail as the start of the code, so the key was not the
+            # one the host computes from the control section and code area the game passes. Any other output keeps its pair (the 0x80 in this one is the
+            # largest difference seen; every compute shader of the SDK 10 and 6 games has no header in either reading).
+            sec = glslc_section(d, h, size)
+            if sec and len(sec) == 1 and sec[0][1][:4] in (GFX_MAGIC, CS_MAGIC):
+                ctl, code = sec[0]; st = glslc_stage(ctl, code)
+                if not st or check(label, st, ctl, code): continue
         out.append((f'{label}#GLSLC@{h:#x}', st, ctl, code))
     if not out and need: red(f'{label}: no GLSLC output')
     return out

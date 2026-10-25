@@ -1,0 +1,40 @@
+# Hand-written translation facts, merged over the generated rows of shader_facts.tsv by dm/gfx/tools/shader_split.py: key <TAB> facts JSON (same format)
+# This game has no PC version, so the translator has no fragment output types and declares every output float; Metal refuses a pipeline whose float output meets an integer attachment
+# (the host's red line then prints the row to add here).
+# 567fcd0c97a29418 (pixel, title / UI pass): output 1 is an integer colour target (the host's red line named this row)
+567fcd0c97a29418	{"fout":{"1":"uint"}}
+# The 3D scene's pixel shaders of the MSAA/deferred G-buffer: outputs 1-3 go to integer attachments (RGBA8Uint / R32Uint / RGBA16Uint; the host's red lines
+# named these keys as the pipelines were built on the way into the prologue's cutscene)
+ee5756ef1989d719	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+fbfb9669177a514d	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+e988f8655baebbee	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+9bea711aa494d844	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+90a5e9dfeb72849a	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+499567cfa6cce741	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+58cd5da94d831adc	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+b394cadb60a724fa	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+884774b074760f26	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+8b0849fd77d1d8d8	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+b503751171dcdeff	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+f2e6f8b3abe2214f	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+0028f62efe9e4e36	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+0827f9bcdc47c4b3	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+0c2181e7efb978e8	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+4dbc3a68a99a5e05	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+4ef57d405f87ea31	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+4ff75b6ec9231a3e	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+590313d32e5a20c4	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+6ce42fb660d4733b	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+73feb86ef1c79f13	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+7d509f2fd2352e54	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+89581d9a1de10f6f	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+a36ebdc4ae57913b	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+b22a7d33e67711ec	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+bb46743e79171f4a	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+c08a291e9fc7cd53	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+d165704b67d086ec	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+eb53756b67128246	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+ece606b51bd40ec6	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+f180f4609df4f801	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+f26d46909a5e0f4c	{"fout":{"1":"uint","2":"uint","3":"uint"}}
+fbebc5fe19b041df	{"fout":{"1":"uint","2":"uint","3":"uint"}}

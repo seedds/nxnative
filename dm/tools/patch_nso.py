@@ -374,17 +374,21 @@ def site_window(seg):
         w = struct.unpack('<I', x.bytes)[0]
         if has18(x): w = subst(x, S)
         m = x.mnemonic
-        if m in ('cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
+        if m == 'b' or m in ('cbz', 'cbnz', 'tbz', 'tbnz') or m.startswith('b.'):
             tgt = x.operands[-1].imm
             if lo <= tgt < hi: newt = copy0 + (tgt - lo)
             else: ex_targets.append(tgt); newt = exits + 16 * (len(ex_targets) - 1)
-            pc = copy0 + 4 * k; off = (newt - pc) >> 2
-            if m in ('tbz', 'tbnz'): w = (w & 0xFFF8001F) | ((off & 0x3FFF) << 5)
-            else: w = (w & 0xFF00001F) | ((off & 0x7FFFF) << 5)
+            pc = copy0 + 4 * k
+            # An unconditional branch inside a window (see find_windows: a lock whose clrex path skips the store with a b to the window's end,
+            # Trails in the Sky 1st Chapter main+0x2d6cb0) is re-encoded like the conditional ones: the copy sits in the patch area, so its target
+            # is remapped too, and a target past the window leaves through an exit stub.
+            if m == 'b': w = B(pc, newt)
+            elif m in ('tbz', 'tbnz'): w = (w & 0xFFF8001F) | (((newt - pc) >> 2 & 0x3FFF) << 5)
+            else: w = (w & 0xFF00001F) | (((newt - pc) >> 2 & 0x7FFFF) << 5)
             dd = dis(w, pc); assert dd.operands[-1].imm == newt and dd.mnemonic == m
         elif m == 'adrp': w = window_adrp(x, S, copy0 + 4 * k)
         else:
-            assert m not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret') and not (m == 'ldr' and '[' not in x.op_str), hex(x.address)
+            assert m not in ('adr', 'adrp', 'bl', 'br', 'blr', 'ret') and not (m == 'ldr' and '[' not in x.op_str), hex(x.address)
         words.append(w)
     for w in words: emit(w)
     for t in [hi] + ex_targets:   # fall-through first
@@ -910,12 +914,19 @@ for fa, fb in funcs:
             jumps[ins.address] = (base, width)
     # No jump may land in the middle of a window, except a retry block's branch onto the window's store-exclusive (retry_block), which gets a copy of its own
     inwin = {x.address for wseg in ws for x in wseg}; heads = {wseg[0].address for wseg in ws}
+    win_of = {y.address: wseg for wseg in ws for y in wseg}
     rmid = set()
     for k, x in enumerate(insl):
         if x.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or x.mnemonic.startswith('b.'):
             t = x.operands[-1].imm
             if t in inwin and t not in heads:
-                wseg = next(w for w in ws if any(y.address == t for y in w))
+                wseg = win_of[t]
+                # A window's own branch to its store (ldaxrb; cbz <the stlxrb right after>: a byte lock whose store runs only when the byte was free,
+                # Trails in the Sky 1st Chapter main+0x2d6ca4) is by design inside its window, and site_window remaps it into the copy; only a branch from
+                # outside the window needs a retry block. Read as one, the window's own head overlapped itself and the rewriter asserted.
+                if x.address in win_of:
+                    assert win_of[x.address] is wseg, f'branch from window {x.address:x} into another window {t:x}'
+                    continue
                 rb = retry_block(insl, k, wseg) if x.mnemonic not in ('b', 'bl') else None
                 assert rb, f'branch into window {x.address:x}'
                 assert not any(y.address in done for y in rb[0]), f'retry block overlaps a window {rb[0][0].address:x}'

@@ -1,0 +1,36 @@
+# Trails in the Sky 1st Chapter (01001E9023920000, update 1.0.6.1, v393216), SDK 19.3.13, NVN: Falcom's SORA engine.
+# Brought up from the NSP script's survey and provisional profile on the Mac (docs/agents); the iPhone build has not been run on a device yet.
+
+# ---- Identity ----
+title_id	01001E9023920000
+program_id	01001E9023920000
+
+# ---- App ----
+name	Trails in the Sky 1st Chapter
+ipa	The1st.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v393216	1.0.6.1	main=6656ba1b5b8ac30af10728f8b257a24c	subsdk0=ca7f78a09c547c54beac3a33ed6bf364	sdk=7bba185a35ee9b4d0af66a4df910a823
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+# every module main imports from; subsdk0 is NintendoSDK_movie, sdk is the same SDK 19.3.13 build as Octopath Traveler 0's
+modules	main subsdk0 sdk
+romfs_marker	movie_sc/mp4/sora_1st_ed.mp4
+zip_store	.bmp:.mp4:.otf:.png:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory) and main sets a heap: the heap check reads a 0x81200000 request, so the heap region is 2.125 GB.
+# The engine reserves a 3.375 GB address region for itself at start-up (its own 12.1 GB reservation cut by patches.py), and the SDK's node area sits at the start of
+# the alias region, so the alias region is 4 GB and the guest block 6.625 GB of virtual address space (about 3 GB resident: the heap is what the game touches).
+mem_reserve	0x1A8000000
+mem_alias	0x100000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/asset/=asset /voice/=voice /se/=se /vfx/=vfx /scene/=scene /script_kr/=scriptkr /script_sc/=scriptsc /script_tc/=scripttc /table_kr/=tablekr /table_sc/=tablesc /table_tc/=tabletc /layout/=layout /asset_kr/=assetkr /asset_sc/=assetsc /asset_tc/=assettc /bgm1/=bgm1 /bgm2/=bgm2 /bgm3/=bgm3 /system/=system /movie_kr/=moviekr /movie_sc/=moviesc /movie_tc/=movietc /system_nx/=systemnx
+shader_note	Trails in the Sky 1st Chapter: GLSLC compiler outputs (SDK 19) in /asset/nx/shader/*.nvn and in main

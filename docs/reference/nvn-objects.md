@@ -382,7 +382,10 @@ Games read this count as a position in their own command memory and size their h
   - `nvnCommandBufferDiscardColor`: a discarded target is undefined, so keeping its content is correct.
   - `nvnWindowGetCrop`: read back every few frames; before any `SetCrop` it is the whole first window texture.
   - `nvnSamplerBuilderGetLodClamp`.
-- **Found on:** [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the first two), [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2: the two getters).
+  - `nvnCommandBufferSetZCullZF32CompressionEnable`: the host does no ZCull, so enabling its compression changes nothing.
+  - `nvnCommandBufferSetControlMemoryCallbackEnabled`: a debugger / profiler hook the host has no one to call.
+  - `nvnTextureBuilderGetDepthStencilMode`, `nvnTextureBuilderGetMemoryPool` and `nvnTextureBuilderGetMemoryOffset`: the mode and the storage the builder was given (the texture's own getters answer the built texture).
+- **Found on:** [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the first two), [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2: the two getters); [Trails in the Sky 1st Chapter](../../dm/games/01001E9023920000/README.md) (SDK 19.3.13: the five newer names).
 
 ### `nvnDeviceRegisterFastClearDepth` is a hint
 

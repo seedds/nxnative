@@ -290,6 +290,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `shader_split.py` accepts both; `dmsh_build.py` strips only a header that is there.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (header); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (no header, SDK 10).
 
+### Compute workgroup memory over 32 KB
+
+- **Symptom:** `failed to create compute pipeline: Threadgroup memory size (45056) exceeds the maximum threadgroup memory allowed (32768)` (once per program); the dispatch does nothing, so the instance list its indirect draws read stays empty and instanced objects are missing (the prologue's breakfast table and chairs).
+- **Cause:** Metal allows 32 KB of threadgroup memory per threadgroup; a Switch compute shader may declare more (`instance_cull.nvn`: 11,264 uints, 11 per thread of its 1024-thread group).
+- **Fix:** `dmsh_build.py` (`wg_scratch`) turns the threadgroup arrays of a kernel that has no threadgroup barrier into pointers into a device buffer, one slice per threadgroup picked with `[[threadgroups_per_grid]]` (reflection `wg_scratch`, the bytes one threadgroup needs); the host sizes the buffer from the dispatch's group count, writes the highest slice index into its first word and binds it at argument table index 30 (`nvn_mtl.m`). A kernel with a threadgroup barrier is left unsupported.
+- **Found on:** [Trails in the Sky 1st Chapter](../../dm/games/01001E9023920000/README.md).
+
 ### Exact program start for the decoder
 
 - **Symptom:** 12 compute shaders (particles, post effects) translated into an endless loop that hung the GPU at the first gameplay scene; SPIRV-Cross failed on 7 shaders instead of 2 ([SPIRV-Cross parse failures](#spirv-cross-parse-failures)).
@@ -305,6 +312,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** an output's own section headers say where everything is: the output's +0x4c is the section count, section i's header is at +0x90 + 0x90 i (`{size, data offset from the output, type}`, type 0 = GPU code), and a GPU code header adds +0x30 control offset, +0x34 code offset (both from the section's data), +0x38 code length, +0x3c control length. `glslc_section` reads them for outputs the old rule rejects.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0).
 - **Check:** on every output the old rule keeps (1,073 in 13 Sentinels, Three Houses, FINAL FANTASY TACTICS, Engage and Age of Calamity) both give the same key; the new reading also takes 8 outputs of [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) and 3 of [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) (GLSLC version 0x1d.0, whose control +0x20 holds odd values) that used to be dropped, so those two profiles' tables gained them.
+
+### GLSLC output whose control section is shorter than its code section
+
+- **Symptom:** `[RED] shader <key> is not in the shader map` at run time although the split read every shader file (the tables count it).
+- **Cause:** SDK 19's GLSLC writes the GPU code section's control length (+0x30 of the section header) 0x80 bytes longer than the control section's own length (+0x20): the code area then starts after the section's control section, not after +0x20. The single-stage pairing followed +0x20, so it read the control's tail as the code area and keyed the program differently from the host (`light_cull.nvn`, a compute output).
+- **Fix:** when the single pair's code area starts with no code header magic and the output's section header (`glslc_section`) describes a pair whose code area does, the section-header pair is used.
+- **Found on:** [Trails in the Sky 1st Chapter](../../dm/games/01001E9023920000/README.md).
 
 ### VertexA and VertexB parts merged into one vertex shader
 
@@ -377,6 +391,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** with no PC version the translator types every fragment output float, and the shaders write bit-packed integers through `as_type<float>`. A hand-written row per shader (`shader_facts_manual.tsv`, Breath of the Wild's way, [Integer fragment outputs declared by hand](#integer-fragment-outputs-declared-by-hand)) does not scale.
 - **Fix:** `dmsh_build.py` `fs_uint` gives a pixel shader a second entry point, `main0_u`, with every colour output the unsigned integer vector of the same bits, when it writes an output from integer bits or nothing but constants (a clear drawn into an R32Uint target); the hardware writes the output's bits to an integer target whatever the shader computed, so the copy is exact. The host takes it for a pipeline whose written colour attachments are all unsigned integer formats (`pso_all_uint`). A shader whose outputs are of both kinds also gets a third entry point, `main0_m`, that returns only the outputs written from integer bits as unsigned integers, and records their colour indices (`uint_mask_m` in its reflection); the host takes it for a pipeline whose integer attachments are exactly those (`pso_mixed_uint`). Otherwise a pipeline with a float target as well keeps `main0` and the red line.
 - **Found on:** [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md): `main0_u`; about 1,400 pixel shaders writing its G-buffer of two integer targets (R32Uint, RGBA8Uint), so every scene draw was skipped. [Pokémon Sword](../../dm/games/0100ABF008968000/README.md): `main0_m`; 10 pipelines as the opening's stadium loads; the scene shaders write colour 0 and 2 as floats and colour 1 from integer bits into an RGBA16Uint target (colour 1 in all 336 of Sword's).
+
+### Integer colour outputs written as float constants
+
+- **Symptom:** `failed to create render pipeline (...) output of type float4 is not compatible with a MTLPixelFormatRGBA8Uint color attachment` for many character shaders, each red line asking for a `shader_facts_manual.tsv` row; in the prologue's dialogue portraits the irises are missing (white eyes).
+- **Cause:** the integer-output detection (`fs_uint`) recognised an output written with `as_type<float>(...)`, not one built from float constants whose bit patterns are the integers: the SORA character G-buffer shaders (`chr_eye#*.nvn`) write colour 3 as constants such as 4.4e-41. Such an output stayed float in `main0_m`, so a pipeline whose integer attachments are colours 1-3 never matched it.
+- **Fix:** an output whose every write is a constant and whose non-zero values are below the smallest normal float counts as integer too (1,297 shaders gained the missing mask bit); the hand-written rows the host prints for other patterns still work.
+- **Found on:** [Trails in the Sky 1st Chapter](../../dm/games/01001E9023920000/README.md) (the dialogue portraits).
 
 ### Integer textures and images through float declarations keep their bits
 

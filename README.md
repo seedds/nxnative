@@ -145,6 +145,7 @@ Under each game: the IPA's size, and "60 fps with 1.2.0" where the game runs at 
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/nier-automata.png" width="256" alt="NieR:Automata The End of YoRHa Edition"><br>NieR:Automata The End of YoRHa Edition<br><sub>~10.9 GB · 60 fps with 1.0.3</sub></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/zelda-echoes-of-wisdom.jpg" width="256" alt="The Legend of Zelda: Echoes of Wisdom"><br>The Legend of Zelda: Echoes of Wisdom<br><sub>~7.8 GB</sub></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/trails-in-the-sky-1st.jpg" width="256" alt="Trails in the Sky 1st Chapter"><br>Trails in the Sky 1st Chapter<br><sub>~8.3 GB</sub></td>
 </tr>
 </table>
 

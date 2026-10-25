@@ -148,6 +148,21 @@ To enroll a cut for any game's own module:
 - **Found on:** [Pikmin 4](../../dm/games/0100B7C00933A000/README.md) 1.1.1 (Unreal Engine 4.26.2) `main+0x43da14c`.
 - **Check:** only windows that stopped the rewrite change, so every other module rewrites byte for byte as before.
 
+### A window's own branch onto its store
+
+- **Symptom:** `AssertionError: retry block overlaps a window <addr>` in `patch_nso.py`, and the retry block it reports is the window itself.
+- **Cause:** the pass that looks for branches landing inside a window did not tell a window's own branch from an outside retry block: `ldaxrb w0,[x18]; cbz w0,<the stlxrb right after>` is a byte lock whose store runs when the byte was free, and `site_window` remaps that branch into the copy.
+- **Fix:** a branch whose source is inside the target window is skipped (a branch from one window into another still asserts).
+- **Found on:** [Trails in the Sky 1st Chapter](../../dm/games/01001E9023920000/README.md) `main+0x2d6ca4`.
+
+### An unconditional branch inside a window
+
+- **Symptom:** `AssertionError: 0x…` from `site_window` on a `b` inside an exclusive window.
+- **Cause:** the same byte lock's `clrex` path leaves the window with `b <window end>`: `ldaxrb; cbz <store>; clrex; b <next slot>; stlxrb; cbz`, where the `b` target is the window's end.
+- **Fix:** `site_window` re-encodes a `b` like the conditional branches: a target inside the window is remapped into the copy and one past it leaves through an exit stub.
+- **Found on:** [Trails in the Sky 1st Chapter](../../dm/games/01001E9023920000/README.md) `main+0x2d6cb0`.
+- **Check:** every other module rewrote byte for byte as before (the two rules only fire where the rewriter used to assert).
+
 ## Patch area reach
 
 ### Halfword jump table landing pads sized to the largest entry

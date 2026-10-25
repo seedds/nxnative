@@ -3301,6 +3301,7 @@ static void shmap_load(void) {
     id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass; uint32_t ab_binst;   // ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten)
     id<MTLLibrary> bflib; int bflib_tried; NSMutableDictionary<NSString *, id<MTLFunction>> *bffn;   // bflib: readable-tile version <key>_bf (merge B step 2)
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
+    uint32_t wg_scratch;   // dmsh_build.py wg_scratch: bytes of workgroup memory one threadgroup needs, read from a device buffer at argument table index 30 (0 = the kernel uses no threadgroup memory or it fits Metal's 32 KB)
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
     id<MTLFunction> pfn; int pfn_state, has_pull; } @end   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
 @implementation NvShader
@@ -3464,6 +3465,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     if (layer && !j[@"entry_layer"]) { MLOG("[RED] vertex shader %s has no layer entry points", pc.UTF8String); return nil; }
     NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1;
+    o->wg_scratch = [j[@"wg_scratch"] unsignedIntValue];   // workgroup memory over 32 KB, from a device buffer (dmsh_build.py wg_scratch)
     if (stage == 0 && [j[@"layer_from"] isKindOfClass:[NSDictionary class]]) { o->lay_loc = [j[@"layer_from"][@"loc"] intValue]; o->lay_comp = [[j[@"layer_from"][@"comp"] description] UTF8String][0]; }
     char err[160];
     if (nvn_refl_from_json(j, &o->rf, err, sizeof err)) { MLOG("[RED] shader %s reflection conversion failed: %s", pc.UTF8String, err); return nil; }
@@ -8667,6 +8669,23 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (g_rt_range_pending) { PD("j rt_level_range pass=%llu vc=%u", g_stat_pass, (unsigned)(dw ? dw->count : di->count)); g_rt_range_pending=0; }
 }
 static nvn_hmap g_cps = {.klen = sizeof(void *)};
+// Compute pipelines that cannot be built on this GPU, remembered so that every dispatch of them does not build the pipeline again: Metal allows 32 KB of threadgroup memory, and a Switch
+// compute shader that asks for more (Trails in the Sky 1st Chapter's instance_cull.nvn: 45,056 bytes) never gets one. The dispatch is skipped either way; without the record each
+// dispatch cost a failed pipeline creation (about 20 a second in a cutscene, and the dropped frames that came with it)
+static nvn_hmap g_cps_fail = {.klen = sizeof(void *)};
+// Workgroup memory over Metal's 32 KB comes from a device buffer (dmsh_build.py wg_scratch): word 0 is the highest threadgroup slice index allocated, then one slice of
+// wg_scratch bytes per threadgroup. The kernel declares "device uchar *dm_wg [[buffer(30)]]" and picks its slice by [[threadgroups_per_grid]]; the dispatch sizes this
+// buffer from its group count (indirect dispatches from the counts in guest memory, which the GPU may have written earlier in the submission, plus slack) and binds it.
+static __strong id<MTLBuffer> g_wg_buf; static size_t g_wg_len;
+static id<MTLBuffer> wg_scratch_buf(size_t need, uint32_t per) {
+    if (g_wg_buf && g_wg_len >= need) return g_wg_buf;
+    size_t len = (need + (1u << 20) - 1) & ~(size_t)((1u << 20) - 1);
+    id<MTLBuffer> b = [g_dev newBufferWithLength:len options:MTLResourceStorageModeShared];
+    if (!b) return nil;
+    res_add(b); if (g_wg_buf) defer_obj_release(g_wg_buf); g_wg_buf = b; g_wg_len = len;
+    MLOG("workgroup memory over 32 KB: %u bytes a threadgroup, scratch buffer of %zu MB", per, len >> 20);
+    return b;
+}
 static void warm_claim(void) {
     if (!atomic_exchange_explicit(&g_warm_ready, 0, memory_order_acq_rel)) return;
     os_unfair_lock_lock(&g_warm_lock);
@@ -8721,10 +8740,11 @@ static void dispatch(const p_dispatch *dp) {
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
+    if (!ps && hm_get_id(&g_cps_fail, &k)) return;   // this GPU cannot build it (g_cps_fail): the dispatch is skipped, the log line was printed once
     if (!ps) {
         NSError *e = nil; uint64_t bt = bp_now(); ps = [g_dev newComputePipelineStateWithFunction:cs->fn error:&e];
         g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
-        if (!ps) { MLOG("[RED] failed to create compute pipeline: %s", e.localizedDescription.UTF8String); return; }
+        if (!ps) { MLOG("[RED] failed to create compute pipeline: %s", e.localizedDescription.UTF8String); hm_put_id(&g_cps_fail, &k, NSNull.null); return; }
         pso_record("C\t%s\n", cs->key);
         if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
         hm_put_id(&g_cps, &k, ps);
@@ -8757,6 +8777,18 @@ static void dispatch(const p_dispatch *dp) {
     g_dispatch_dim[0] = (uint32_t)dp->x; g_dispatch_dim[1] = (uint32_t)dp->y; g_dispatch_dim[2] = (uint32_t)dp->z;   // read back by the driver segment c0 (encode_args_)
     g_c0_dim_buf = nil;
     encode_args(ce, cs, 5, 0);
+    if (cs->wg_scratch) {   // workgroup memory over 32 KB, from a device buffer (see wg_scratch_buf / dmsh_build.py wg_scratch)
+        uint32_t groups = dp->ind ? 0 : (uint32_t)dp->x * (uint32_t)dp->y * (uint32_t)dp->z;
+        if (dp->ind && ib) {   // group counts the GPU may have written earlier in this submission: only used to size and clamp the buffer
+            const uint32_t *g = (const uint32_t *)((const uint8_t *)((__bridge id<MTLBuffer>)ib).contents + io);
+            groups = g[0] & 0xffffu; groups *= g[1] & 0xffffu; groups *= g[2] & 0xffffu;
+        }
+        groups += 8;   // slack for a count read before the GPU wrote it
+        id<MTLBuffer> wb = wg_scratch_buf(16 + (size_t)groups * cs->wg_scratch, cs->wg_scratch);
+        if (!wb) { RED_ONCE(96, "workgroup memory over 32 KB: no scratch buffer for %u threadgroups", groups); return; }
+        *(uint32_t *)((uint8_t *)wb.contents) = groups - 1;
+        enc_c_args(ce, wb.gpuAddress, 30);
+    }
     if (dp->ind) {   // The shader reads the group counts from c0 + 0x200: copy the GPU-written ones there first (Metal 4 orders nothing inside an encoder without a barrier)
         if (g_c0_dim_buf) { [(id<MTL4ComputeCommandEncoder>)ce copyFromBuffer:(__bridge id<MTLBuffer>)ib sourceOffset:io toBuffer:g_c0_dim_buf destinationOffset:g_c0_dim_off size:12];
             [(id<MTL4ComputeCommandEncoder>)ce barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice]; }

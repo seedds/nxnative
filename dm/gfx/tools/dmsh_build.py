@@ -712,9 +712,18 @@ def fs_uint(src):
     cols = {nm: ty for ty, nm, at in mem if 'color(' in at and ty.startswith('float')}
     # The hardware writes an output's bits to an integer target whatever the shader computed, so main0_u is right for any pixel shader; only those that look like integer writers get one
     # (the library stays small): an output from integer bits, or nothing but constants (a clear drawn into an integer target, 35e1865e313f0553 writes 0 into Luigi's Mansion 3's R32Uint target)
-    from_int = {nm for nm in cols if re.search(r'\bout\.%s(?:\.\w+)? = as_type<float\d?>\(' % nm, src)}
-    writes = [m.group(1) for nm in cols for m in re.finditer(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, src)]
-    if not from_int and not (writes and all(re.fullmatch(r'-?[0-9.]+f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes)): return None, 0
+    def int_bits(v):   # a constant that is integer bits written as a float: 0, or a magnitude below the smallest normal float (2^-126); the hardware stores its bits as they are
+        try: f = float(v.rstrip('fF'))
+        except ValueError: return False
+        return f == 0.0 or abs(f) < 1.17549435e-38
+    writes_of = {nm: [m.group(1) for m in re.finditer(r'\bout\.%s(?:\.\w+)? = ([^;]+);' % nm, src)] for nm in cols}
+    from_int = set()
+    for nm in cols:
+        if re.search(r'\bout\.%s(?:\.\w+)? = as_type<float\d?>\(' % nm, src): from_int.add(nm); continue
+        ws = writes_of[nm]   # packed from constants: a G-buffer channel written as float bit patterns (Trails in the Sky 1st Chapter's chr_eye shaders: color 3 written as 4.4e-41 etc.)
+        if ws and all(re.fullmatch(r'-?[0-9.]+(?:[eE][-+]?[0-9]+)?f?', w.strip()) for w in ws) and any(int_bits(w) and float(w.rstrip('fF')) != 0.0 for w in ws): from_int.add(nm)
+    writes = [w for nm in cols for w in writes_of[nm]]
+    if not from_int and not (writes and all(re.fullmatch(r'-?[0-9.]+(?:[eE][-+]?[0-9]+)?f?|float\d\([-0-9., ]*\)', w.strip()) for w in writes)): return None, 0
     uty = lambda ty: 'u' + ty.replace('float', 'int')   # float4 → uint4, float → uint
     def entry(sfx, as_uint):   # main0 again as main0_<sfx>, returning the outputs in as_uint as the unsigned integer vectors of their bits (dmsh_fetch.py cuts the source at main0_out_u)
         struct = f'struct main0_out_{sfx}\n{{\n' + ''.join(f'    {uty(cols[nm]) if nm in as_uint else ty} {nm} {at};\n' for ty, nm, at in mem) + '};\n\n'
@@ -725,6 +734,40 @@ def fs_uint(src):
         out += entry('m', from_int)
         mask = sum(1 << int(re.search(r'color\((\d+)\)', at).group(1)) for _, nm, at in mem if nm in from_int)
     return out, mask
+
+WG_LIMIT = 32768   # Metal's threadgroup memory per threadgroup on Apple GPUs
+WG_SIZE = {'bool': 1, 'char': 1, 'uchar': 1, 'short': 2, 'ushort': 2, 'half': 2, 'int': 4, 'uint': 4, 'float': 4,
+           'int2': 8, 'uint2': 8, 'float2': 8, 'int4': 16, 'uint4': 16, 'float4': 16}
+def wg_scratch(src):
+    """Workgroup memory over Metal's 32 KB. A Switch compute shader may declare more (Trails in the Sky 1st Chapter's instance_cull.nvn: 11,264 uints = 45,056 bytes for its
+    1024-thread group, 11 uints per thread) and then no compute pipeline can be built at all, so the dispatch does nothing: the scene's instance list that its indirect draws read
+    stays empty and instanced objects are missing (the prologue's breakfast table). Such a kernel takes its array(s) from a device buffer instead: the host binds it at argument table
+    index 30 (reflection "wg_scratch" = the bytes one threadgroup needs) and the kernel picks its threadgroup's slice with [[threadgroups_per_grid]]; word 0 of the buffer is the
+    highest slice index the host allocated, and a group past it shares that last slice (an indirect dispatch may ask for more groups than the host could size; such groups' threads
+    test their instance index and return before writing there in this game). Only a kernel with no threadgroup barrier is rewritten: a device buffer is not ordered by a threadgroup
+    memory barrier. → (source, bytes, note); bytes 0 = unchanged"""
+    arrs = list(re.finditer(r'[ \t]*threadgroup[ \t]+spvUnsafeArray<', src))
+    if not arrs: return src, 0, None
+    decls, total, off = [], 0, 0
+    for a in arrs:
+        d = re.match(r'[ \t]*threadgroup\s+spvUnsafeArray<\s*([\w:]+)\s*,\s*(\d+)\s*>\s*(\w+)\s*;', src[a.start():])
+        if not d: return src, 0, 'workgroup memory over 32 KB: cannot read its declaration'
+        ty, n, nm = d.group(1), int(d.group(2)), d.group(3)
+        if ty not in WG_SIZE: return src, 0, f'workgroup memory over 32 KB of type {ty}: left as is'
+        nbytes = WG_SIZE[ty] * n; decls.append((d.group(0), ty, nm, total, nbytes)); total += nbytes; off += nbytes
+    if total <= WG_LIMIT: return src, 0, None
+    if 'threadgroup_barrier' in src: return src, 0, 'workgroup memory over 32 KB with a threadgroup barrier: left as is'
+    km = re.search(r'(kernel\s+void\s+\w+\s*\(.*?)(\)\s*\n?\{)', src, re.S)
+    if not km or 'gl_WorkGroupID' not in km.group(1): return src, 0, 'workgroup memory over 32 KB: kernel without gl_WorkGroupID'
+    src = src[:km.end(1)] + ', uint3 dm_wg_groups [[threadgroups_per_grid]], device uchar *dm_wg [[buffer(30)]]' + src[km.end(1):]
+    for d, ty, nm, o, nbytes in decls: src = src.replace(d, '', 1)
+    km = re.search(r'kernel\s+void\s+\w+\s*\(.*?\)\s*\n?\{', src, re.S)
+    pro = ('\n    uint dm_wg_idx = (uint)((gl_WorkGroupID.z * dm_wg_groups.y + gl_WorkGroupID.y) * dm_wg_groups.x + gl_WorkGroupID.x);\n'
+           '    uint dm_wg_n = ((device uint *)dm_wg)[0];\n    if (dm_wg_idx > dm_wg_n) dm_wg_idx = dm_wg_n;\n')
+    for d, ty, nm, o, nbytes in decls:
+        pro += f'    device {ty} *{nm} = (device {ty} *)(dm_wg + 16 + dm_wg_idx * {total}u + {o}u);\n'
+    src = src[:km.end()] + pro + src[km.end():]
+    return src, total, None
 
 SG_OPS = {333: 'true', 334: 'pred', 335: 'pred', 336: 'true', 337: 'value', 338: 'value', 339: 'ballot', 345: 'value', 346: 'value', 347: 'value', 348: 'value'}   # OpGroupNonUniform* → its one-lane value
 SG_BUILTINS = {36: 'one', 41: 'zero', 4416: 'one4', 4417: 'one4', 4418: 'zero4', 4419: 'one4', 4420: 'zero4'}   # SubgroupSize, SubgroupLocalInvocationId, Eq / Ge / Gt / Le / Lt masks
@@ -870,6 +913,10 @@ def finish(key, w, j, c1):
         open(msl, 'w').write(full)
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     if fu: plain = src; open(msl, 'w').write(fu)
+    wgb, wgnote = 0, None
+    if j['stage'] == 'cs':   # workgroup memory over Metal's 32 KB: from a device buffer instead (see wg_scratch)
+        src, wgb, wgnote = wg_scratch(src)
+        if wgb: open(msl, 'w').write(src)
     res = json.load(open(os.path.join(w, key + '.res.json')))
     try: MTL.compile('mac', msl, lib)   # MSL identical to one compiled before takes that library (dmsh_mtlcache.py)
     except subprocess.CalledProcessError as e:
@@ -887,7 +934,8 @@ def finish(key, w, j, c1):
             'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z', 'entry_geometry_capture': 'main0_gs'} if j['stage'] == 'vs' else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e[2] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
             **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u'} if fu else {}), **({'entry_m': 'main0_m', 'uint_mask_m': fmask} if fu and fmask else {}),
-            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr),
+            'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['not in the answer table, queries use defaults'] if j.get('no_facts') else []) + ([wgnote] if wgnote else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr),
+            **({'wg_scratch': wgb} if wgb else {}),
             'bindings': reflect(key, j['stage'], src, res),
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}

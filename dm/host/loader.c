@@ -260,16 +260,16 @@ void dm_fps_state_apply(void) {
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
     // Keyboard and mouse controls (the front end's PC layout with the mouse turning the camera): DM_MOUSE_SENS degrees per mouse count (0.1 by default: about 100 degrees
-    // per inch at 1000 counts per inch), DM_MOUSE_INVERT_Y=1 turns the vertical direction around. Opt in: the game starts with the classic keys, as
-    // every other game; ` in the window or DM_KBM=1 (from the start) switches to them, and DM_KBM=0 takes them away (the camera is then the stick's alone)
+    // per inch at 1000 counts per inch), DM_MOUSE_INVERT_Y=1 turns the vertical direction around. Opt in with DM_KBM=1: otherwise the game keeps the classic keys, as
+    // every other game, and the camera is the stick's alone
     if (g_mouse_stub) {
         const char *me = getenv("DM_KBM"), *ms = getenv("DM_MOUSE_SENS"), *mi = getenv("DM_MOUSE_INVERT_Y");
         float sens = 0.1f;
         if (ms) { char *end; float v = strtof(ms, &end); if (end == ms || *end || !(v > 0 && v <= 10)) LOG("[RED] DM_MOUSE_SENS=%s: must be above 0 and at most 10 degrees per count; using 0.1", ms); else sens = v; }
-        g_mouse_on = !(me && !atoi(me));
+        g_mouse_on = me && atoi(me) > 0;
         float yaw = g_mouse_on ? sens : 0, pitch = g_mouse_on ? (mi && atoi(mi) ? sens : -sens) : 0;   // TotK's player pitch grows as the camera looks down: mouse up looks up (tested in game)
         memcpy(dm_fps_state + 0x50, &yaw, sizeof yaw); memcpy(dm_fps_state + 0x54, &pitch, sizeof pitch);
-        LOG("%s: keyboard and mouse controls %s", g_fps_mod, g_mouse_on ? "available (` in the window switches to them, DM_KBM=1 starts with them)" : "off (DM_KBM=0)");
+        LOG("%s: keyboard and mouse controls %s", g_fps_mod, g_mouse_on ? "on (DM_KBM=1)" : "off (DM_KBM=1 turns them on)");
         if (g_mouse_on) LOG("%s: mouse camera at %.3f degrees per count%s", g_fps_mod, sens, mi && atoi(mi) ? ", vertical inverted (DM_MOUSE_INVERT_Y)" : "");
     }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);

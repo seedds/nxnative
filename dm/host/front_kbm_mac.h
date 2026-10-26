@@ -9,10 +9,10 @@ extern uint64_t front_btn;
 extern int front_input_on;
 void front_push(void);
 // front_kbm_mac.m
-void kbm_start(void);                                                              // at start: hooks the mice; switches the controls on with DM_KBM=1
+void kbm_start(void);                                                              // at start: hooks the mice and switches the controls on (DM_KBM=1)
 int kbm_on(void);                                                                  // the controls are on (not the classic keys)
 void kbm_input(uint64_t *btn, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);  // the mouse's buttons, aim modes, shakes, wheel and quick menu sticks
-int kbm_key(unsigned short code, int down);                                        // a key; 1: taken (` or the controls on)
+int kbm_key(unsigned short code, int down);                                        // a key; 1: taken (the controls on)
 void kbm_flags(NSEvent *e);                                                        // Shift and Ctrl
 int kbm_mouse(int n, int down);                                                    // a button in the game view (0 left, 1 right, 2 middle); 1: taken, not a touch
 void kbm_scroll(NSEvent *e);

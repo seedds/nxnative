@@ -2,9 +2,9 @@
 // with them so far: it switches on only for a game whose patch turns the camera by the mouse (hle.h dm_mouse_camera; the rewriter emits that patch for that game's build alone), so
 // no other game sees it. It stays in this one file, apart from the general front end, until a second game takes keyboard and mouse controls; that game's needs then show which
 // parts are general (capture, contexts, scroll, shake, aim toggles) and which become per-game bindings in the profiles
-// The controls (a game whose stubs turn the camera by the mouse, hle.h dm_mouse_camera) are opt in: the game starts with the classic keys, as every other game (most
-// players use a controller), and ` switches to the controls and back; DM_KBM=1 starts with them. A click in the
-// window captures the mouse (cursor hidden and held still); leaving the window (⌘Tab) or ` lets it go. The keyboard takes a PC layout (kbm_bit) and the captured mouse turns the camera by angle (raw counts from GCMouse to dm_mouse_move): WASD left stick, left click Y,
+// The controls (a game whose stubs turn the camera by the mouse, hle.h dm_mouse_camera) are opt in with DM_KBM=1: otherwise the game keeps the classic keys, as every other game (most
+// players use a controller). A click in the
+// window captures the mouse (cursor hidden and held still); leaving the window (⌘Tab) lets it go. The keyboard takes a PC layout (kbm_bit) and the captured mouse turns the camera by angle (raw counts from GCMouse to dm_mouse_move): WASD left stick, left click Y,
 // right click ZL, middle click R3, F bow mode (ZR held; left click fires, F or right click leaves), R D-pad up,
 // G throw mode (R held; left click throws, G or right click leaves), Space X, Shift B, E or Return A, Q L (while held, the mouse points the right stick, which picks in the ability wheel, and right click is B), Ctrl or C L3, 1-4 D-pad right / left / up / down (Tears of the Kingdom's quick menus:
 // weapons, shields, abilities, whistle; while one is held WASD is the right stick and the scroll wheel flicks it, which pick in them, left click is X, right click B, E Y), Tab or M −, Esc + (with an object held in Ultrahand E is R, Q ZL, the scroll wheel D-pad down / up and left / right, and a shake of the mouse or R shakes the right stick; in the pause menu and the Purah Pad E is R, left click A, right click B; while aiming or using an ability right click is B), arrows D-pad.
@@ -71,9 +71,9 @@ static void shake_start(void) {
     if (now < g_shake_until + 0.4) return;
     g_shake_t0 = now; g_shake_until = now + 0.6; shake_tick();
 }
-// Keyboard and mouse controls (main thread), available when the game's patch reads mouse counts (dm_mouse_camera), on from the start with DM_KBM=1; ` switches between them and the classic keys.
+// Keyboard and mouse controls (main thread), on when the game's patch reads mouse counts and DM_KBM=1 (dm_mouse_camera).
 // A click in the window captures the mouse: the cursor is hidden and detached from it, and it reaches the game only as camera movement and its buttons; leaving the window
-// (input_release) or ` gives the cursor back
+// (input_release) gives the cursor back
 static float g_mrx, g_mry;   // fractions of a count carried to the next movement
 static void mouse_capture(int on) {
     if (on == g_mouse_cap || (on && !dm_mouse_camera())) return;
@@ -81,13 +81,13 @@ static void mouse_capture(int on) {
     g_mbtn = 0; front_push();   // no mouse button stays pressed once the mouse is let go
     CGAssociateMouseAndMouseCursorPosition(!on);
     if (on) [NSCursor hide]; else [NSCursor unhide];
-    LOG("front end: mouse %s", on ? "captured: it turns the camera (⌘Tab or ` gives the cursor back)" : "released (a click in the window captures it again)");
+    LOG("front end: mouse %s", on ? "captured: it turns the camera (⌘Tab gives the cursor back)" : "released (a click in the window captures it again)");
 }
 static void kbm_set(int on) {
     if (on && !dm_mouse_camera()) return;
     g_kbm = on; if (!on) mouse_capture(0);
     front_btn = 0; g_aim = 0; g_aimbits = 0; front_push();   // the two layouts map keys differently: nothing held stays pressed across the switch
-    LOG("front end: %s", on ? "keyboard and mouse controls (click in the window to capture the mouse, ` for the classic keys)" : "classic keys (` for keyboard and mouse controls)");
+    LOG("front end: %s", on ? "keyboard and mouse controls (click in the window to capture the mouse)" : "classic keys");
 }
 // A mouse shake: 4 turns left / right within 0.7 s, each after at least 150 counts the other way (a few centimetres at common resolutions; aiming turns slower)
 static void shake_detect(float dx) {
@@ -185,7 +185,6 @@ void kbm_flags(NSEvent *e) {
     front_push();
 }
 int kbm_key(unsigned short c, int down) {
-    if (c == 50 || c == 10) { if (down && dm_mouse_camera()) kbm_set(!g_kbm); return 1; }   // ` (§ beside it on ISO keyboards) switches between the two layouts
     if (!g_kbm) return 0;
     if (c == 15 && down && dm_mouse_camera_kind() == 5) { shake_start(); g_kmask[c] = 0; return 1; }   // R with an object held: shake the right stick (Ultrahand: pull apart)
     if (c == 3 || c == 5) {                                                                // F: bow mode, G: throw mode, on / off
@@ -227,7 +226,5 @@ void kbm_start(void) {
     void (^hook)(GCMouse *) = ^(GCMouse *m) { m.mouseInput.mouseMovedHandler = ^(GCMouseInput *mi, float dx, float dy) { (void)mi; mouse_moved(dx, dy); }; };
     for (GCMouse *m in GCMouse.mice) hook(m);
     [NSNotificationCenter.defaultCenter addObserverForName:GCMouseDidConnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { hook(n.object); }];
-    const char *e = getenv("DM_KBM");
-    if (e && atoi(e) > 0) kbm_set(1);
-    else LOG("front end: classic keys (` for keyboard and mouse controls, DM_KBM=1 starts with them)");
+    kbm_set(1);
 }

@@ -223,12 +223,12 @@ uint8_t *dm_fps_state;
 static const char *g_fps_mod;   // the module holding the state page (for the log)
 static int g_mouse_stub;        // the module's stubs read the mouse (fixups MOUSE_CAMERA)
 static void install_fps_state(module_t *m) {
-    if (m->fps_state_off + 0x70 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+    if (m->fps_state_off + 0x80 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; g_mouse_stub = m->mouse_camera;
 }
 // Mouse camera (patch_nso.py ctx.mouse_camera; Tears of the Kingdom: patches.py mouse_camera): the front end adds raw mouse counts to the running totals at state +0x40 / +0x44
 // (int32, wrapping; dy up), and the game's stub applies what changed since its last frame (its applied totals at +0x48 / +0x4c) to the camera's angles, at +0x50 / +0x54
-// degrees per count (written by dm_fps_state_apply: 0 = off, the stub then runs the original instruction only); the stub keeps its own state at +0x58 / +0x60 and writes the number of its camera to +0x68
+// degrees per count (written by dm_fps_state_apply: 0 = off, the stub then runs the original instruction only); the stub keeps its own state at +0x58 / +0x60 and writes the number of its camera to +0x68 and Ultrahand's state to +0x70 (8 bytes) / +0x78
 static int g_mouse_on;
 int dm_mouse_camera(void) { return g_mouse_on; }
 void dm_mouse_move(int32_t dx, int32_t dy) {
@@ -241,7 +241,12 @@ double dm_mouse_camera_idle(void) {
     uint64_t last = __atomic_load_n((uint64_t *)(dm_fps_state + 0x60), __ATOMIC_RELAXED), now = __builtin_arm_rsr64("cntvct_el0");   // the stub's last take, in the same counter
     return last ? (double)(now - last) / (double)__builtin_arm_rsr64("cntfrq_el0") : 1e9;
 }
-int dm_mouse_camera_kind(void) { return dm_mouse_camera_idle() < 0.1 ? __atomic_load_n((int32_t *)(dm_fps_state + 0x68), __ATOMIC_RELAXED) : 0; }
+int dm_mouse_camera_kind(void) {
+    if (!g_mouse_on) return 0;
+    uint64_t held = __atomic_load_n((uint64_t *)(dm_fps_state + 0x70), __ATOMIC_RELAXED), now = __builtin_arm_rsr64("cntvct_el0");   // the stub of an object held (Ultrahand)
+    if (held && now - held < __builtin_arm_rsr64("cntfrq_el0") / 8) return 5;
+    return dm_mouse_camera_idle() < 0.1 ? __atomic_load_n((int32_t *)(dm_fps_state + 0x68), __ATOMIC_RELAXED) : 0;
+}
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
 void dm_fps_state_apply(void) {

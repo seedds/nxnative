@@ -118,13 +118,30 @@ static void mouse_moved(float dx, float dy) {
     if (ix || iy) dm_mouse_move(ix, iy);
 }
 static int menu_open(void);
-// Mouse button n (0 left, 1 right, 2 middle): Y, ZL, R3; in the menus left is A and right B, and while aiming (the game's camera 2, Tears of the Kingdom's bow and throw)
-// right is B, which puts the weapon away. Its release lets go of what its press pressed
+// Mouse button n (0 left, 1 right, 2 middle): Y, ZL, R3; in the menus left is A and right B. While aiming (the game's cameras 2 to 4: Tears of the Kingdom's bow and
+// throw, Ultrahand, the other abilities, 5 an object held) right is B, which puts the weapon away or cancels the ability, and with an ability (3 to 5) left is A, which
+// picks or confirms. Its release lets go of what its press pressed
 static void mouse_button(int n, int down) {
     static uint64_t held[3];
     if (!g_mouse_cap || !g_input_on) return;
-    if (down) { int m = menu_open(); held[n] = n == 0 ? (m ? DM_BTN_A : DM_BTN_Y) : n == 1 ? (m || dm_mouse_camera_kind() == 2 ? DM_BTN_B : DM_BTN_ZL) : DM_BTN_RS; }
+    if (down) {
+        int m = menu_open(), k = dm_mouse_camera_kind();
+        held[n] = n == 0 ? (m || k >= 3 ? DM_BTN_A : DM_BTN_Y) : n == 1 ? (m || k >= 2 ? DM_BTN_B : DM_BTN_ZL) : DM_BTN_RS;
+    }
     g_mbtn = down ? (g_mbtn | held[n]) : (g_mbtn & ~held[n]); push();
+}
+// The scroll wheel with an object held (Ultrahand, the game's camera 5): D-pad down (away) or up (toward), which pushes the object away or pulls it in (tested in game). Each notch
+// holds the button for 0.1 s more (at most 0.5 s ahead); a turn the other way switches at once
+static uint64_t g_scroll_bit; static double g_scroll_until; static int g_scroll_gen;
+static void mouse_scroll(double notches) {
+    if (!g_mouse_cap || !g_input_on || notches == 0 || dm_mouse_camera_kind() != 5) return;
+    uint64_t bit = notches > 0 ? DM_BTN_DOWN : DM_BTN_UP; double now = CACurrentMediaTime();
+    if (bit != g_scroll_bit) { g_mbtn &= ~g_scroll_bit; g_scroll_bit = bit; g_scroll_until = now; }
+    g_scroll_until = fmin(fmax(g_scroll_until, now) + 0.1 * fabs(notches), now + 0.5);
+    g_mbtn |= bit; push();
+    int gen = ++g_scroll_gen;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((g_scroll_until - now) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (gen == g_scroll_gen) { g_mbtn &= ~g_scroll_bit; g_scroll_bit = 0; push(); } });
 }
 static int key_bit(unsigned short code) {
     switch (code) {
@@ -172,7 +189,8 @@ static void on_key(NSEvent *e, int down) {
             int m = c == 53 ? DM_BTN_PLUS : DM_BTN_MINUS;
             if (menu_open() == m) g_menu = 0; else { g_menu = m; g_menu_t = CACurrentMediaTime(); }
         }
-        int kb = c == 14 && down && menu_open() ? 7 : kbm_bit(c);   // E: R in the pause menu
+        int held = down && dm_mouse_camera_kind() == 5;
+        int kb = c == 14 && down && (menu_open() || held) ? 7 : c == 12 && held ? 8 : kbm_bit(c);   // E: R in the menus and with an object held (Ultrahand: rotate); Q: ZL with an object held
         if (c >= 128) return;
         if (down) g_kmask[c] = kb >= 0 ? 1ull << kb : 0;
         g_btn = down ? (g_btn | g_kmask[c]) : (g_btn & ~g_kmask[c]); push(); return;
@@ -293,6 +311,11 @@ static void pads_start(void) {
 - (void)rightMouseUp:(NSEvent *)e { (void)e; mouse_button(1, 0); }
 - (void)otherMouseDown:(NSEvent *)e { if (e.buttonNumber == 2) mouse_button(2, 1); }
 - (void)otherMouseUp:(NSEvent *)e { if (e.buttonNumber == 2) mouse_button(2, 0); }
+- (void)scrollWheel:(NSEvent *)e {
+    if (e.momentumPhase != NSEventPhaseNone) return;   // a trackpad's glide after the fingers lift
+    double d = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY / 10 : e.scrollingDeltaY;   // points on a trackpad, lines on a wheel
+    mouse_scroll(e.isDirectionInvertedFromDevice ? -d : d);   // by the wheel's own direction, whatever the natural scrolling setting
+}
 - (void)mouseDragged:(NSEvent *)e {
     if (!g_input_on || g_kbm) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;

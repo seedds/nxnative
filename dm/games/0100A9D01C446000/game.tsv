@@ -15,6 +15,7 @@ app_category	public.app-category.games
 
 # ---- Versions ----
 build	v131072	1.2.0	main=f7ec03e4cb9de3bd8319d4e899d2e9cc	subsdk0=92ef43cb1f9917ab206ac5c9e36240bc	sdk=145dde94fb574acc9e09780a11995bd3
+build	v0	1.0.0	main=ab06020960edd8285b7ff5fad2e3224b	subsdk0=92ef43cb1f9917ab206ac5c9e36240bc	sdk=145dde94fb574acc9e09780a11995bd3
 package	v131072
 shader_versions	v131072
 

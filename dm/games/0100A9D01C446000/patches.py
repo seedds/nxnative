@@ -9,10 +9,18 @@ CUTS = {
   'f7ec03e4cb9de3bd8319d4e899d2e9cc': [
     (0x32758dc, '8e6f4097', '1f2003d5', 'GCreateMalloc: bl 0x291714 (FMallocBinned3 constructor, 37 GB of address space) → nop; the host allocator\'s vtable is put in at the gate after it (hle_uemalloc.c)'),
   ],
+  # DRAGON QUEST VII Reimagined 1.0.0 (v0) main
+  'ab06020960edd8285b7ff5fad2e3224b': [
+    (0x32755bc, '56704097', '1f2003d5', 'GCreateMalloc: bl 0x291714 (FMallocBinned3 constructor, 37 GB of address space) → nop; the host allocator\'s vtable is put in at the gate after it (hle_uemalloc.c)'),
+  ],
 }
 OBS = {
   # DRAGON QUEST VII Reimagined 1.2.0 main: right after the cut FMallocBinned3 constructor call (CUTS above), x19 = the new allocator object; the host writes its vtable there (hle_uemalloc.c)
   'f7ec03e4cb9de3bd8319d4e899d2e9cc': [
     (0x32758e4, 21, 'aa1303e0','GCreateMalloc: the allocator object is in x19, before it is used: the host puts its vtable in; orig mov x0, x19'),
+  ],
+  # DRAGON QUEST VII Reimagined 1.0.0 main
+  'ab06020960edd8285b7ff5fad2e3224b': [
+    (0x32755c4, 21, 'aa1303e0','GCreateMalloc: the allocator object is in x19, before it is used: the host puts its vtable in; orig mov x0, x19'),
   ],
 }

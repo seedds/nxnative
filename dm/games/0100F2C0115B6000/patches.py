@@ -1,7 +1,7 @@
 # The Legend of Zelda: Tears of the Kingdom (0100F2C0115B6000): the rewriter's patches of this game's own builds. dm/tools/patch_nso.py loads every profile's patches.py and applies those of a module's NSO build ID;
 # CUTS, OBS and FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
 import struct
-from nso_asm import ADDI, ADRP, B, NOP, STP_PRE
+from nso_asm import ADDI, ADRP, B, BC, CBZW, EQ, GE, HI, LDRS, LO, LT, NE, NOP, STP_PRE, STRS, STRW
 
 # Tears of the Kingdom picks a present interval each frame (main+0x2db174: 2 = 30 fps, 3 under load) and steps its game time by 60 / fps (int fps at timing +0x50, read at main+0x2daa54
 # and main+0x3e562c). The stub replaces that logic: int fps = 60 / step, and the float fps (timing +0x24, unused, per masagrator's FPSLocker config for this build, which found the
@@ -167,12 +167,6 @@ def frame_step(ctx):
 # (the parameters: the getters main+0x1d3a9a0 to +0x1d3ab98, registered at main+0xbb5898). The turn stub takes the mouse counts there: half angle -= dx * (state +0x50)
 # * pi / 360, and a height change of the same angle at the object's horizontal distance, -dy * (state +0x54) * pi / 180 * distance, which the height stub adds before
 # the clamp (state +0x78). It stamps state +0x70 (8 bytes), and the LockOn stub leaves the mouse alone for 1/8 s after it, so the object moves and the camera follows
-def LDRS(t, n, off): return (0xbd400000 | (off // 4) << 10 if off >= 0 else 0xbc400000 | (off & 0x1ff) << 12) | n << 5 | t   # ldr / ldur st,[xn,#off]
-def STRS(t, n, off): return (0xbd000000 | (off // 4) << 10 if off >= 0 else 0xbc000000 | (off & 0x1ff) << 12) | n << 5 | t   # str / stur st,[xn,#off]
-def STRW(t, n, off): return 0xb9000000 | (off // 4) << 10 | n << 5 | t   # str wt,[xn,#off]
-def BC(cond, frm, to): return 0x54000000 | (((to - frm) // 4) & 0x7ffff) << 5 | cond   # b.cond
-def CBZW(t, frm, to): return 0x34000000 | (((to - frm) // 4) & 0x7ffff) << 5 | t
-EQ, NE, LO, GE, LT, HI = 0, 1, 3, 10, 11, 8
 def mouse_stub(ctx, site, orig, kind, cam, yaw, pitch, bounds=None, yield_held=False):
     """At site (holding the instruction orig, run last): yaw = (register, offset), pitch = (register, [offsets]), bounds = (low, high) offsets in the pitch's register;
     yield_held: nothing while Ultrahand moves an object (state +0x70 stamped within 1/8 s)."""

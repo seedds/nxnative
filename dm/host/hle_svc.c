@@ -1,6 +1,11 @@
 // Horizon kernel system calls (triggered by the SDK runtime once the SDK is loaded). Only what the P1 boot chain needs is implemented: memory layout + heap + query + debug output + timing.
 // Register convention: inputs w1.. / outputs w0=Result, x1=value (GetInfo / SetHeapSize), consistent with the public Horizon ABI.
 #include "dm.h"
+#include "map_headroom.h"
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include <os/proc.h>
+#endif
 #include <sys/mman.h>
 #include <errno.h>
 #include <unistd.h>
@@ -250,6 +255,29 @@ static void map_source_query(uint64_t addr, uint64_t *base, uint64_t *size, uint
     }
     *base = lo; *size = remaining;
 }
+
+#if TARGET_OS_IPHONE
+static pthread_once_t g_map_headroom_once = PTHREAD_ONCE_INIT;
+static uint64_t g_map_headroom;
+static void map_headroom_init(void) {
+    g_map_headroom = dm_map_headroom_default_bytes(TARGET_OS_TV, TARGET_OS_SIMULATOR);
+    const char *text = getenv("DM_MAP_HEADROOM_MB");
+    if (!text || !*text) return;
+    errno = 0; char *end = NULL; unsigned long long mb = strtoull(text, &end, 10);
+    if (errno || end == text || *end || mb > (UINT64_MAX >> 20)) {
+        LOG("[RED] invalid DM_MAP_HEADROOM_MB=%s; using %llu MB", text,
+            (unsigned long long)(g_map_headroom >> 20));
+        return;
+    }
+    g_map_headroom = (uint64_t)mb << 20;
+}
+static uint64_t map_headroom_bytes(void) {
+    pthread_once(&g_map_headroom_once, map_headroom_init);
+    return g_map_headroom;
+}
+#else
+static uint64_t map_headroom_bytes(void) { return 0; }
+#endif
 
 // Diagnostic DM_ALIAS_WINDOWS=<window MB>: every 30 s, the mapped memory of each window of that size in the alias region (windows aligned to the size in absolute addresses, counted from the page
 // bitmap; windows with nothing mapped are left out). For sizing an allocator that reserves fixed, aligned windows and commits pages from each window's start: Unreal's FMallocBinned3 takes
@@ -562,41 +590,48 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // and maps new ones for later allocations, until a map fails: then it unmaps the cached block and retries (measured on the Mac: the refused 4 MB map at +0x43e2c000 was followed by
         // UnmapPhysicalMemory of the 3.15 GB block and the same map again). Without the limit the mapped total went past the pool in the first minute and the freed block stayed mapped.
         // Off by default: Ace Attorney Investigations Collection maps a little more than the 1 GB pool its profile reports
-        if (DM_GAME_MEM_MAP_LIMIT && num == 0x2C) {
-            int64_t room = (int64_t)APP_POOL - (int64_t)(g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes()) - atomic_load(&g_alias_mapped);
-            if (need && need > room) {
-                pthread_mutex_unlock(&g_map_lock);
-                static _Atomic int nref; if (atomic_fetch_add(&nref, 1) < 8) LOG("[mem] MapPhysicalMemory +%#zx refused: %.2f GB mapped, the application pool is full (ResultLimitReached, the SDK frees cached pages and retries)",
-                                                                       size, atomic_load(&g_alias_mapped) / 1073741824.0);
+        uint64_t headroom = num == 0x2C ? map_headroom_bytes() : 0;
+        int guard_map = num == 0x2C && (DM_GAME_MEM_MAP_LIMIT || headroom);
+        if (guard_map) {
+            pthread_mutex_lock(&g_phys_mu);
+            int64_t need = alias_unmapped((uint64_t)(a - g_alias), size) << 12, room = (int64_t)APP_POOL - (int64_t)(g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes()) - atomic_load(&g_alias_mapped);   // the pool less the used memory GetInfo reports
+            int pool_full = DM_GAME_MEM_MAP_LIMIT && need > room;
+            uint64_t available = 0; int process_full = 0;
+#if TARGET_OS_IPHONE
+            if (!pool_full && headroom && need > 0) {
+                available = os_proc_available_memory();
+                process_full = dm_map_headroom_should_refuse(available, (uint64_t)need, headroom);
+            }
+#endif
+            if (pool_full || process_full) {
+                pthread_mutex_unlock(&g_phys_mu);
+                if (pool_full) {
+                    static _Atomic int nref; if (atomic_fetch_add(&nref, 1) < 8) LOG("[mem] MapPhysicalMemory +%#zx refused: %.2f GB mapped, the application pool is full (ResultLimitReached, the SDK frees cached pages and retries)",
+                                                                           size, atomic_load(&g_alias_mapped) / 1073741824.0);
+                } else {
+                    static _Atomic int npressure; if (atomic_fetch_add(&npressure, 1) < 8) LOG("[mem] MapPhysicalMemory +%#zx refused under process pressure: %llu MB available, reserving %llu MB (ResultLimitReached; the SDK may discard cached pages and retry)",
+                                                                                           size, (unsigned long long)(available >> 20), (unsigned long long)(headroom >> 20));
+                }
                 regs[0] = 0x10801; return 0;
             }
         }
         // Host pages are 16 KB, Horizon pages 4 KB: a map is rounded out to host pages (the extra neighboring 4K pages are inside the alias region and merely become writable early, harmless);
         // An edge host page is reclaimed only when no live logical neighbor remains.
         uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)a, hi = (uintptr_t)a + size;
-        uintptr_t mlo = lo & ~(pg - 1), mhi = (hi + pg - 1) & ~(pg - 1);
-        int commit = num == 0x2C;
-        int64_t changed = commit ? need : (int64_t)size - need;
-        if (!commit) {
-            if ((lo - mlo) / 4096 != (uint64_t)alias_unmapped(mlo - (uintptr_t)g_alias, lo - mlo)) mlo += pg;
-            if ((mhi - hi) / 4096 != (uint64_t)alias_unmapped(hi - (uintptr_t)g_alias, mhi - hi)) mhi -= pg;
-        }
-        if (changed && mhi > mlo) {
-            if (mprotect((void *)mlo, mhi - mlo, commit ? PROT_READ | PROT_WRITE : PROT_NONE))
-                die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, errno);
-            if (commit) dm_guest_write_prepare((void *)mlo, mhi - mlo);
-            else (void)madvise((void *)mlo, mhi - mlo, MADV_FREE);
-        }
-        if (commit && changed) alias_initialize(off, size);
-        if (g_flag.svc) LOG("%sPhysicalMemory %p+%#zx", commit ? "Map" : "Unmap", (void *)a, size);
+        uintptr_t mlo = num == 0x2C ? lo & ~(pg - 1) : (lo + pg - 1) & ~(pg - 1), mhi = num == 0x2C ? (hi + pg - 1) & ~(pg - 1) : hi & ~(pg - 1);
+        int rc = 0;
+        if (mhi > mlo) rc = num == 0x2C ? mprotect((void *)mlo, mhi - mlo, PROT_READ | PROT_WRITE)
+                                        : (madvise((void *)mlo, mhi - mlo, MADV_FREE), mprotect((void *)mlo, mhi - mlo, PROT_NONE));
+        if (rc) { if (guard_map) pthread_mutex_unlock(&g_phys_mu); die("SVC %#x mprotect %p+%#zx errno=%d", num, a, size, errno); }
+        if (g_flag.svc) LOG("%sPhysicalMemory %p+%#zx", num == 0x2C ? "Map" : "Unmap", a, size);
         // how deep the alias region is used (one line per 256 MB crossed): for sizing the reservation and alias region (iOS caps a single reservation at 6 GB)
         if (num == 0x2C) { static _Atomic uint64_t hw; uint64_t end = off + size, old = atomic_load(&hw);
             while (end > old && !atomic_compare_exchange_weak(&hw, &old, end)) {}
             if (end > old && end >> 28 != old >> 28) LOG("[mem] alias region mapped up to +%.2f GB (alias region %.2f GB)", end / 1073741824.0, g_alias_cap / 1073741824.0); }
         // Total actually mapped in the alias region (one line per 256 MB crossed, up or down): how much physical memory the game uses and whether it keeps growing. Counted with a page bitmap, only pages whose state really changed --
         // the SDK maps pages that are already mapped and unmaps ranges larger than what it mapped (Engage unmaps 0x1000000 and then 0x103f000 at the same address), so counting requested sizes went negative
-        { int64_t d = alias_pages(off, size, commit) * 4096, before = atomic_fetch_add(&g_alias_mapped, d), after = before + d;
-          pthread_mutex_unlock(&g_map_lock);
+        { int64_t d = alias_pages((uint64_t)(a - g_alias), size, num == 0x2C) << 12, before = atomic_fetch_add(&g_alias_mapped, d), after = before + d;
+          if (guard_map) pthread_mutex_unlock(&g_phys_mu);
           if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB)", after / 1073741824.0, APP_POOL / 1073741824.0); }
         regs[0] = 0; return 0;
     }

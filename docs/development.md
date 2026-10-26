@@ -395,7 +395,7 @@ Notes on these steps:
 - `build_ipa.sh` takes the rewritten modules from `$W/build/patched_<package>` and the RomFS image from `$W/data/<package>/RomFS.img` (legacy folders are also accepted); `PATCHED` and `ROMFS` override them. In unsigned IPA mode, `pack_ipa.py` packs the shader libraries, RomFS and add-on content beside the app Xcode built, as `DmIOS.app/msl/b-<chain version>`, `romfs` and `aoc`. Prepared Xcode projects instead sync these resources into the app before signing.
 - It also bundles a standard font (macOS's Arial Unicode, `STD_FONT=` overrides it) and the generated `nintendo_ext.ttf`.
 - The icon is the `icon.jpg` that `nx_extract` saves next to `RomFS.img`; `DM_ICON=` points at another image.
-- `DM_ENV_FILE=` bakes environment switches into the app, and `DM_DISPLAY_NAME=` renames it.
+- A profile's optional `ios.env` supplies production iOS-only defaults and is bundled as `dm/env.txt`. `DM_ENV_FILE=<file>` replaces it for a build, `DM_ENV_FILE=` disables it, and `Documents/env.txt` has runtime priority over either bundled source. `DM_DISPLAY_NAME=` renames the app.
 - `DM_LANG=<code>` is the game language (`DMLanguage` in `Info.plist`, default `en-US`; `main.m` sets `DM_LANG` from it unless `Documents/env.txt` or the baked env file sets it).
 - `DM_METAL_CAPTURE=1` makes a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`, for `DM_GPU_CAPTURE`, [GPU measurement](#gpu-measurement)).
 - `DM_SHOW_FPS=1` turns the frame-rate counter on (`DMShowFPS` in `Info.plist`, which `front_ios.m` reads; `DM_SHOW_FPS` in `Documents/env.txt` overrides it). It counts the frames put on screen each second (`mtl_present_count`), so frames the display link merges away are not counted.

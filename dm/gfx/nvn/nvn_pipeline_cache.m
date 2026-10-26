@@ -12,7 +12,7 @@
 
 #define PCLOG(...) do { fprintf(stderr, "[pipeline-cache] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 // Bump only when descriptor generation or utility shader semantics change.
-#define CACHE_ABI "nvn-ios17-pso-4"
+#define CACHE_ABI "nvn-ios17-pso-7"
 #define CACHE_MAX_BYTES (256ull << 20)
 #define CACHE_RESERVE_BYTES (128ull << 20)
 static pthread_mutex_t cache_mu = PTHREAD_MUTEX_INITIALIZER;

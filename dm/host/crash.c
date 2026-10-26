@@ -99,6 +99,8 @@ void dm_backtrace(uint64_t fp) {
 static int (*g_fault_hook[MAX_FAULT_HOOK])(void *addr, int is_write, void *uc);
 static void (*g_write_prep[MAX_FAULT_HOOK])(void *addr, size_t len);
 static int g_nfault_hook, g_nwrite_prep;
+static void (*g_fault_diagnostic)(const void *);
+void dm_fault_diagnostic_register(void (*fn)(const void *)) { g_fault_diagnostic = fn; }
 void dm_fault_hook_register(int (*fn)(void *addr, int is_write, void *uc)) {
     if (g_nfault_hook >= MAX_FAULT_HOOK) die("too many page fault hooks");
     g_fault_hook[g_nfault_hook++] = fn;
@@ -153,6 +155,21 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     fprintf(stderr, "[dm] CRASH sig=%d", sig);
     off("addr", (uint64_t)si->si_addr); off("pc", uc->uc_mcontext->__ss.__pc); off("lr", uc->uc_mcontext->__ss.__lr);
     fprintf(stderr, " sp=%#llx\n", uc->uc_mcontext->__ss.__sp);
+    if (sig == SIGSEGV || sig == SIGBUS) {
+        fprintf(stderr, "[dm] fault si_code=%d esr=%#x write=%u\n", si->si_code,
+                uc->uc_mcontext->__es.__esr, (uc->uc_mcontext->__es.__esr >> 6) & 1);
+        vm_address_t a = (vm_address_t)si->si_addr;
+        vm_size_t size = 0; natural_t depth = 0;
+        vm_region_submap_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t kr = vm_region_recurse_64(mach_task_self(), &a, &size, &depth,
+                (vm_region_recurse_info_t)&info, &count);
+        if (kr == KERN_SUCCESS)
+            fprintf(stderr, "[dm] fault VM region=%#llx..%#llx prot=%#x max=%#x submap=%d\n",
+                    (unsigned long long)a, (unsigned long long)(a + size), info.protection, info.max_protection, info.is_submap);
+        else fprintf(stderr, "[dm] fault VM query failed=%d\n", kr);
+        if (g_fault_diagnostic) g_fault_diagnostic(si->si_addr);
+    }
     for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, uc->uc_mcontext->__ss.__x[i], i % 6 == 5 ? "\n" : " ");
     fprintf(stderr, "\n");
     // What the registers point at: the first six words of each readable target (read with vm_read_overwrite, which fails instead of faulting); a word inside a module prints as a module offset, so an object's vtable names its class
@@ -184,6 +201,11 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
 }
 // The signal alternate stack is per thread: every guest thread must call this when it starts running (only then can the crash state be printed on the alternate stack on a stack overflow)
 // The alternate stack is released when the thread exits: the pthread key destructor is called at thread exit (disable the alternate stack first, then free). The game frequently starts short-lived threads, and without releasing each one leaks 64 KiB.
+#if TARGET_OS_TV
+// tvOS does not expose sigaltstack. Keep ordinary signal diagnostics without
+// allocating an alternate stack or calling an unavailable platform API.
+void crash_thread_init(void) {}
+#else
 static pthread_key_t g_altstack_key;
 static pthread_once_t g_altstack_once = PTHREAD_ONCE_INIT;
 static void altstack_free(void *p) { stack_t off = {.ss_flags = SS_DISABLE}; sigaltstack(&off, 0); free(p); }
@@ -194,6 +216,7 @@ void crash_thread_init(void) {
     stack_t ss = {.ss_sp = malloc(65536), .ss_size = 65536}; sigaltstack(&ss, 0);
     pthread_setspecific(g_altstack_key, ss.ss_sp);
 }
+#endif
 void crash_install(void) {
     crash_thread_init();
     struct sigaction sa = {.sa_sigaction = on_crash, .sa_flags = SA_SIGINFO | SA_ONSTACK};

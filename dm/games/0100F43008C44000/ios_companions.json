@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "manifests": [
+    {
+      "directory": "layered-v1",
+      "kind": "layered-slices-v1",
+      "required_records": [
+        "57246f9a04af8529_b",
+        "d7d72bbbb0e32517_b",
+        "b29f08619f379a83_b",
+        "5b931243ad28aeeb_b"
+      ]
+    },
+    {
+      "directory": "nonpoint-v1",
+      "required_records": [
+        "94a4c491a475b170_b",
+        "ce7eacf81c6e4ffc_b"
+      ]
+    },
+    {
+      "directory": "sampler-limit-v1",
+      "kind": "sampler-limit-v1",
+      "limit": 16,
+      "required_records": [
+        "a6c06cda878a4fe0_b"
+      ]
+    },
+    {
+      "directory": "guarded-index-v1",
+      "kind": "guarded-index-v1",
+      "original_directory": "nonpoint-v1",
+      "required_records": [
+        "94a4c491a475b170_b",
+        "ce7eacf81c6e4ffc_b"
+      ]
+    },
+    {
+      "directory": "zero-image-v1",
+      "kind": "zero-image-clear-v1",
+      "required_records": [
+        "5b107ddfd06551fc_b"
+      ]
+    }
+  ],
+  "records": [
+    {
+      "directory": "atomic-v1",
+      "kind": "bounded-image-atomics-v1",
+      "required_records": [
+        "2bd5037003980716_b"
+      ]
+    }
+  ]
+}

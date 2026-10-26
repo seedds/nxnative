@@ -76,7 +76,7 @@ targets:
       TARGETED_DEVICE_FAMILY: "1,2"
       ENABLE_BITCODE: NO
       GCC_C_LANGUAGE_STANDARD: gnu11
-      OTHER_CFLAGS: $(inherited) -mcpu=apple-m2   # The target iPad is M2; the host assembly requires LSE atomics.
+      OTHER_CFLAGS: $(inherited) -mcpu=apple-a10  # Keep the shipped binary on the pre-LSE baseline; newer devices run it unchanged.
       CLANG_ENABLE_OBJC_ARC: YES
       SWIFT_VERSION: "5.0"                         # Launcher.swift (SwiftUI)
       DEBUG_INFORMATION_FORMAT: dwarf

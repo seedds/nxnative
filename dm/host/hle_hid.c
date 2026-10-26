@@ -31,6 +31,47 @@ _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 // their own path because a connected controller publishes its whole state on every change (a DualShock 4's sticks change all the time), which overwrote them on the shared one
 static _Atomic uint64_t g_btn, g_axes, g_latch, g_sc_btn, g_sc_axes, g_sc_latch, g_pad_btn[DM_PLAYERS], g_pad_axes[DM_PLAYERS], g_pad_latch[DM_PLAYERS];
 static _Atomic int64_t g_sampling = 1 << 16;   // starts high so the history entries below the newest keep positive sampling numbers
+// Opt-in observations of the state actually returned to the guest. Keep file
+// I/O and clock reads out of the normal polling path, and bound diagnostics.
+static pthread_once_t g_receipt_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t g_receipt_mu = PTHREAD_MUTEX_INITIALIZER;
+static FILE *g_receipt_file;
+static unsigned g_receipt_count;
+static struct { NpadState state; uint64_t time; int seen; } g_receipt_last[9][5];
+static void receipt_init(void) {
+    const char *path = getenv("DM_HID_RECEIPT_LOG");
+    if (!path || !*path) return;
+    g_receipt_file = fopen(path, "w");
+    if (!g_receipt_file) LOG("[RED] Cannot open HID receipt log: %s", path);
+}
+static int receipt_enabled(void) {
+    pthread_once(&g_receipt_once, receipt_init);
+    return g_receipt_file != NULL;
+}
+static void receipt_note(const NpadState *s, uint32_t id, uint32_t style, uint64_t start) {
+    unsigned row = id < DM_PLAYERS ? id : 8, col = 0;
+    while (col < 4 && style != (1u << col)) col++;
+    uint64_t end = now_ns();
+    pthread_mutex_lock(&g_receipt_mu);
+    if (g_receipt_count < 1024) {
+        NpadState previous = g_receipt_last[row][col].state, current = *s;
+        previous.sampling = current.sampling = 0;
+        int changed = !g_receipt_last[row][col].seen || memcmp(&previous, &current, sizeof current);
+        if (changed || end - g_receipt_last[row][col].time >= 1000000000ull) {
+            fprintf(g_receipt_file, "{\"read_start_ns\":%llu,\"time_ns\":%llu,\"id\":%u,\"style\":%u,\"sampling\":%lld,\"buttons\":%llu,\"axes\":[%d,%d,%d,%d],\"attributes\":%u,\"script_mask\":%llu}\n",
+                (unsigned long long)start, (unsigned long long)end, id, style,
+                (long long)s->sampling, (unsigned long long)s->buttons,
+                s->lx, s->ly, s->rx, s->ry, s->attributes,
+                (unsigned long long)atomic_load(&g_pad_btn[0]));
+            g_receipt_last[row][col].state = *s;
+            g_receipt_last[row][col].time = end;
+            g_receipt_last[row][col].seen = 1;
+            if (++g_receipt_count == 1024) fputs("{\"limit_reached\":true}\n", g_receipt_file);
+            fflush(g_receipt_file);
+        }
+    }
+    pthread_mutex_unlock(&g_receipt_mu);
+}
 static uint64_t pack(int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     return (uint64_t)(uint16_t)lx | (uint64_t)(uint16_t)ly << 16 | (uint64_t)(uint16_t)rx << 32 | (uint64_t)(uint16_t)ry << 48;
 }
@@ -129,7 +170,8 @@ void hid_keys_init(void) {
 // DM_CTL=<file> (Mac, for driving a game step by step from a shell): the host reads the lines appended to the file (polled every 100 ms) and acts on each at once:
 //   "key[+key][~hold]" presses as a DM_KEYS step does (hold 0.15 s by default), "shot <path>" saves the next presented frame as a PNG (dm_gfx_shot_at), "passdump <n>" dumps the
 //   render passes of the next n frames as DM_NVN_PASSDUMP does (to stderr, the run's log), "texdump <path with %d>" saves the colour targets of the next frame as DM_NVN_TEXDUMP does,
-//   "env KEY=VALUE" sets a switch read at the time of use (DM_NVN_SNAPRAW for the next texdump), "cvarf <main offset> <value>" sets an Unreal float console variable
+//   "env KEY=VALUE" sets a switch read at the time of use (DM_NVN_SNAPRAW for the next texdump), and notifies the live conditional-render / force-visible diagnostics;
+//   "cvarf <main offset> <value>" sets an Unreal float console variable
 //   (hle_fpslock.c dm_ctl_cvar_f32; "cvari" an int one), "peek <address> <count>" logs that many floats of guest memory, "memdump <address> <bytes> <path>" saves guest memory
 //   to a file (a buffer texture's storage, which the pass dump's tbuf lines print, holds what the GPU wrote: buffer textures are views of the pool), "texlist <NVN target>" logs the
 //   registered textures of that target (2 = 3D) with storage address and block-linear layout (nvn_mtl.m dm_gfx_texlist), "texraw <serial> <path>"
@@ -153,7 +195,24 @@ static void *ctl_main(void *arg) {
                                                      while (*e3 == ' ') e3++; dm_ctl_memdump(a, n, e3); continue; }
                 if (!strncmp(line, "cvari ", 6)) { void dm_ctl_cvar_i32(uint64_t off, int32_t v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_i32(off, (int32_t)strtol(e2, NULL, 0)); continue; }
                 if (!strncmp(line, "cvarf ", 6)) { void dm_ctl_cvar_f32(uint64_t off, float v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_f32(off, strtof(e2, NULL)); continue; }
-                if (!strncmp(line, "env ", 4)) { char *eq = strchr(line + 4, '='); if (eq) { *eq = 0; setenv(line + 4, eq + 1, 1); LOG("DM_CTL: env %s=%s", line + 4, eq + 1); } continue; }
+                if (!strncmp(line, "env ", 4)) { char *eq = strchr(line + 4, '='); if (eq) {
+                    *eq = 0;
+                    int opmode_change = !strcmp(line + 4, "DM_OPMODE");
+                    if (opmode_change && strcmp(eq + 1, "0") && strcmp(eq + 1, "1")) {
+                        LOG("[RED] DM_CTL: DM_OPMODE must be 0 (handheld) or 1 (console)");
+                        continue;
+                    }
+                    if (!setenv(line + 4, eq + 1, 1)) {
+                        if (opmode_change) dm_set_opmode(eq[1] - '0');
+                        void dm_gfx_env_changed(const char *key, const char *value);
+                        dm_gfx_env_changed(line + 4, eq + 1);
+                        void dm_za_timing_env_changed(const char *key, const char *value);
+                        dm_za_timing_env_changed(line + 4, eq + 1);
+                        void dm_audio_env_changed(const char *key, const char *value);
+                        dm_audio_env_changed(line + 4, eq + 1);
+                        LOG("DM_CTL: env %s=%s", line + 4, eq + 1);
+                    } else LOG("[RED] DM_CTL: failed to set env %s", line + 4);
+                } continue; }
                 if (!strncmp(line, "texdump ", 8)) { void dm_gfx_texdump_next(const char *path); dm_gfx_texdump_next(line + 8); LOG("DM_CTL: colour targets of the next frame → %s (as DM_NVN_TEXDUMP)", line + 8); continue; }
                 if (!strncmp(line, "passdump ", 9)) { void dm_gfx_passdump_next(long n); dm_gfx_passdump_next(atol(line + 9)); LOG("DM_CTL: passes of the next %ld frames (as DM_NVN_PASSDUMP)", atol(line + 9)); continue; }
                 if (!strncmp(line, "drag ", 5)) {   // one finger, a step every 8 ms
@@ -230,10 +289,15 @@ void dm_pad_players(uint32_t mask) {
 }
 
 static void fill(NpadState *s, uint32_t id, uint32_t style) {
+    int receipt = receipt_enabled();
+    uint64_t read_start = receipt ? now_ns() : 0;
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
     int pl = player_of(id);
-    if (!(style_for_player(id, pl) & style)) return;   // no controller of this id / style: attributes = 0
+    if (!(style_for_player(id, pl) & style)) {   // no controller of this id / style: attributes = 0
+        if (receipt) receipt_note(s, id, style, read_start);
+        return;
+    }
     // Player 1: keyboard / touch, script, its controller and the players merged into it; another player: its own controller path
     uint32_t src = pl ? 1u << pl : 1u | merged_players();
     uint64_t b = 0; int32_t a[4] = {0};
@@ -257,6 +321,7 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     if (s->ry < -STICK_THRESH) b |= 1u << 23;
     s->buttons = b;
     s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
+    if (receipt) receipt_note(s, id, style, read_start);
 }
 // GetNpadStates(out, n, id): newest first, n entries: the current state repeated with consecutive sampling numbers. The host keeps no history, but on hardware the
 // 16-entry history is always full, and games read all of it whatever count comes back: Super Mario Odyssey (main+0x93fc20) polls every controller slot each frame, which advances

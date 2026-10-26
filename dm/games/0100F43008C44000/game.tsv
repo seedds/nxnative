@@ -24,6 +24,8 @@ shader_versions	v393216
 modules	main sdk
 romfs_marker	arc/data.trpfs
 zip_store	.bnk:.pck:.trpfd:.trpfs:.metallib
+# Old Apple GPU builds are invalid without this profile's proven shader companions.
+ios_companions	ios_companions.json
 
 # ---- Memory ----
 # nninitStartup (main+0x1b2e650) initializes its StandardAllocator with virtual address memory over 12 GB of address space (StandardAllocator::Initialize(nullptr, 0x300000000), main+0x1b3e3ec),

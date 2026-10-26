@@ -506,6 +506,26 @@ void loader_hash_log(void) {
 // mapping; the code stays in dyld's original signed executable mapping.
 #include <mach/mach.h>
 #define IMAGE_MH (&_mh_execute_header)
+#if TARGET_OS_TV
+// The tvOS packager gives guest data its final, nonexecutable RW segment
+// before signing. Find code sections across the split guest RX segments;
+// all module-relative addresses retain their original contiguous layout.
+static const uint8_t *tv_guest_section(const char *name, unsigned long *size) {
+    const uint8_t *p = (const uint8_t *)IMAGE_MH + sizeof(*IMAGE_MH);
+    for (uint32_t i = 0; i < IMAGE_MH->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg = (const struct segment_command_64 *)p;
+            const struct section_64 *ss = (const struct section_64 *)(sg + 1);
+            for (uint32_t j = 0; j < sg->nsects; j++)
+                if (!strncmp(ss[j].sectname, name, sizeof ss[j].sectname))
+                    return getsectiondata(IMAGE_MH, sg->segname, name, size);
+        }
+        p += lc->cmdsize;
+    }
+    return NULL;
+}
+#endif
 static void remap_at(module_t *m, vm_address_t to, const void *from, unsigned long size, boolean_t copy, vm_prot_t need) {
     vm_address_t a = to; vm_prot_t cur = 0, max = 0;
     kern_return_t kr = vm_remap(mach_task_self(), &a, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)from, copy, &cur, &max, VM_INHERIT_NONE);
@@ -514,6 +534,24 @@ static void remap_at(module_t *m, vm_address_t to, const void *from, unsigned lo
 }
 static void map_image(module_t *m, const char *dir) {
     (void)dir;
+#if TARGET_OS_TV
+    char sx0[17], sx1[17], sd[17];
+    snprintf(sx0, sizeof sx0, "__dm%sx0", m->name);
+    snprintf(sx1, sizeof sx1, "__dm%sx1", m->name);
+    snprintf(sd, sizeof sd, "__DM%sD", m->name);
+    unsigned long z0, z1, zw;
+    const uint8_t *x0 = tv_guest_section(sx0, &z0), *x1 = tv_guest_section(sx1, &z1);
+    const uint8_t *w = getsectiondata(IMAGE_MH, sd, "__data", &zw);
+    if (m->patch_off < 0 || !x0 || !x1 || !w ||
+        z0 != ((m->text_end + 0x3FFF) & ~0x3FFFull) ||
+        x0 + z0 != w || w + zw != x1 || x1 != x0 + m->patch_off ||
+        (((uintptr_t)x0 | z0 | zw | z1) & 0x3FFF))
+        die("%s invalid static tvOS guest segment layout", m->name);
+    m->base = (uint8_t *)x0; m->size = z0 + zw + z1;
+    install_key_page(m);
+    LOG("%s using static signed tvOS RX/RW/RX segments; no TEXT protection change", m->name);
+    return;
+#else
     char sw[17]; snprintf(sw, sizeof sw, "__DM%sW", m->name);
     unsigned long zw; const uint8_t *w = getsectiondata(IMAGE_MH, sw, "__img", &zw);
     if (!w) die("embedded section %s missing", sw);
@@ -549,6 +587,7 @@ static void map_image(module_t *m, const char *dir) {
     remap_at(m, base + zx0, w, zw, TRUE, VM_PROT_READ | VM_PROT_WRITE);
     remap_at(m, base + m->patch_off, x1, zx1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     m->base = (uint8_t *)base; install_key_page(m);
+#endif
 }
 #else
 static uint8_t *slurp(const char *path, size_t *n) {

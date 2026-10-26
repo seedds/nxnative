@@ -21,6 +21,10 @@ static int hid_clock_gettime(clockid_t clock, struct timespec *ts) { (void)clock
 static int hid_usleep(useconds_t usec) { (void)usec; if (script_hold) script_hold(); return 0; }
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__); } } while (0)
 int dm_opmode(void) { return g_mode; }
+void dm_set_opmode(int mode) { g_mode = mode; }
+void dm_gfx_env_changed(const char *key, const char *value) { (void)key; (void)value; }
+void dm_za_timing_env_changed(const char *key, const char *value) { (void)key; (void)value; }
+void dm_audio_env_changed(const char *key, const char *value) { (void)key; (void)value; }
 uint64_t guest_ns(void) { return 1000000000ull; }
 uint64_t now_ns(void) { return motion_now; }
 uint64_t dm_guest_frame(void) { return 0; }

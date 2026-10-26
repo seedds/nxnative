@@ -1,16 +1,18 @@
-// Virtual gamepad (Nintendo button positions) + physical controllers (GameController). Both are merged and handed to the host through dm_input_set (hle_hid.c, bit layout in dm_input.h).
+// Virtual gamepad + physical controllers (GameController). Native face-button
+// functions stay unchanged. Only the virtual diamond's geometry follows the
+// original battle move HUD during explicit skill selection.
 //   Two layouts, three in handheld mode; one tap on the layout button at the top centre (labelled with the current layout, "2D" / "3D" / "Tap") goes to the next, and the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
 //   Tap (touch): no control but the layout button, every other touch goes to the game's touch screen; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
-//     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
-//   3D (full, Pro Controller style): everything in 2D (left stick and diamond keep their place and size), plus a D-pad (inward of and below the left stick, 8-way), a right stick that is not drawn
-//     (a touch landing in the right third of the screen on no control holds it: centred where it lands, the centre dragged along once the finger passes the stick radius) and L3 / R3 (small round keys in the top row, inward of ZL / ZR).
+//     the A (bottom) B (right) X (left) Y (top) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
+//   Both 2D and 3D have camera drag on empty space in the right half: a right stick that is not drawn, centred where the touch lands, with the centre dragged along past the stick radius.
+//   3D (full, Pro Controller style): everything in 2D (left stick and diamond keep their place and size), plus a D-pad (inward of and below the left stick, 8-way) and L3 / R3 (small round keys in the top row, inward of ZL / ZR).
 //     Breath of the Wild crouches with L3 and uses the scope with R3; 3D World and Breath of the Wild turn the camera with the right stick.
 //   Touch-down ownership: locked keys first (shoulders, − / +, the layout button, L3 / R3), then whichever of the diamond, the D-pad and the left stick has the smallest distance / grab radius (the left stick's grab circle borders the D-pad),
-//     then in 3D the right stick for a touch in the right third.
+//     then the camera for an unclaimed touch in the right half. Ownership stays with its original control until release/cancellation; sliding a camera finger over ABXY never presses a skill.
 //   Everything hugs the edges and corners to leave the picture room; controls sit over the picture, one CAShapeLayer each: a press only swaps the fill, a stick only moves its knob, nothing redraws the whole screen.
-//   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen (pushGame; Super Mario Galaxy's pointer in handheld mode).
-//   The virtual gamepad (layout button included) hides while a physical controller is connected and comes back when it is removed; meanwhile every touch goes to the game. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller).
+//   Touches no control takes go to the game's touch screen (pushGame; Super Mario Galaxy's pointer in handheld mode). Tap layout keeps direct game touches everywhere except its layout selector.
+//   Controllers and keyboards hide the pad. Mouse input also hides it, but a direct finger can reclaim touch controls when no controller/keyboard is present; virtual mice may remain connected after a keyboard cover is removed. Physical controllers map by position: bottom = B, right = A, left = Y, top = X.
 //   Shaking the phone shakes the controller (DM_BTN_SHAKE: its six-axis sensor, hle_hid.c), whichever controls are in use; see "Shaking the phone" below.
 #import <UIKit/UIKit.h>
 #import <GameController/GameController.h>
@@ -25,27 +27,55 @@
 #include "motion_apple.h"
 #include "motion_fusion.h"
 #include <stdatomic.h>
+#include "DmFaceLayout.h"
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
-enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8)
+enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME, C_RUN, C_AIM };
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static BOOL g_input_active = YES;
+static uint64_t g_input_epoch;
 static uint64_t g_touch_btn, g_pad_btn, g_key_btn, g_shake_btn;
+static uint64_t g_touch_face, g_touch_native;
 static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry, g_pad_lx, g_pad_ly, g_pad_rx, g_pad_ry, g_key_lx, g_key_ly, g_key_rx, g_key_ry, g_mouse_rx, g_mouse_ry;
 static BOOL g_key_w, g_key_a, g_key_s, g_key_d, g_key_left, g_key_up, g_key_right, g_key_down;
+static BOOL g_shift_left, g_shift_right;
+static BOOL g_command_left, g_command_right;
+static uint64_t g_run_button, g_aim_button;   // native Npad shortcuts, independent of visible face letters
 static double g_mouse_deadline, g_raw_mouse_time;
 static void read_mouse(float dx, float dy);
 static void clear_mouse(void);
 static int tilted(int32_t x, int32_t y) { return (int64_t)x * x + (int64_t)y * y > (int64_t)4000 * 4000; }
 static void publish(void) {
     pthread_mutex_lock(&g_mu);
+    // GC handlers may still deliver global mouse/controller changes while a
+    // visible Stage Manager card is inactive. Never turn its camera off-focus.
+    if (!g_input_active) { dm_input_set(0, 0, 0, 0, 0); pthread_mutex_unlock(&g_mu); return; }
     int32_t lx = g_touch_lx, ly = g_touch_ly, rx = g_touch_rx, ry = g_touch_ry;
     if (tilted(g_key_lx, g_key_ly)) { lx = g_key_lx; ly = g_key_ly; }
     if (tilted(g_key_rx, g_key_ry)) { rx = g_key_rx; ry = g_key_ry; }
     if (tilted(g_mouse_rx, g_mouse_ry)) { rx = g_mouse_rx; ry = g_mouse_ry; }
     if (tilted(g_pad_lx, g_pad_ly)) { lx = g_pad_lx; ly = g_pad_ly; }   // a tilted physical stick wins
     if (tilted(g_pad_rx, g_pad_ry)) { rx = g_pad_rx; ry = g_pad_ry; }
-    dm_input_set(g_touch_btn | g_pad_btn | g_key_btn | g_shake_btn, lx, ly, rx, ry);
+    uint64_t run = (g_shift_left || g_shift_right) ? g_run_button : 0;
+    uint64_t aim = (g_command_left || g_command_right) ? g_aim_button : 0;
+    // Keep A/B/X/Y identical in menus, exploration and battle. Repositioning
+    // our virtual controls must never change keyboard or touch button meaning.
+    g_touch_native = g_touch_face | g_touch_btn;
+    uint64_t keyboard = g_key_btn;
+    dm_input_set(g_touch_native | keyboard | g_pad_btn | g_shake_btn | run | aim, lx, ly, rx, ry);
+    static int records;
+    static uint64_t previousTouch, previousKey;
+    if (records < 128 && (g_touch_face != previousTouch || (g_key_btn & 15) != previousKey)) {
+        const char *diag = getenv("DM_TOUCH_DIAG");
+        if (diag && atoi(diag)) {
+            LOG("[face-input] touch=%#llx -> %#llx keyboard=%#llx -> %#llx",
+                (unsigned long long)g_touch_face, (unsigned long long)(g_touch_native & 15),
+                (unsigned long long)(g_key_btn & 15), (unsigned long long)(keyboard & 15));
+            records++;
+        }
+    }
+    previousTouch = g_touch_face; previousKey = g_key_btn & 15;
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -124,13 +154,15 @@ static const CGFloat
     K_DPAD_R = 48, K_ARM_W = 17, K_ARM_IN = 11,     // D-pad: arm outer edge from the centre, half-width, tip from the centre
     K_DPAD_GRAB = 1.3,                              // D-pad grab radius (times the outer edge)
     K_RSTICK_R = 60,                                // right stick (not drawn): radius around its centre, the touch-down point
-    K_RSWIPE = 1.0 / 3,                             // right stick area: this fraction of the screen width from the right edge (not in u)
+    K_RSWIPE = 0.5,                                 // camera drag area: this fraction of the screen width from the right edge (not in u)
     K_CLICK_X = 102, K_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 
 @interface DmGamepad : UIView
+- (void)mouseMotionX:(float)dx y:(float)dy raw:(BOOL)raw;
+- (void)updateSkillFaceLayout;
 @end
 static __weak DmGamepad *g_view;
 
@@ -140,15 +172,17 @@ static __weak DmGamepad *g_view;
     CGPoint _rCentre;                              // the right stick's centre: where its touch landed, dragged along past K_RSTICK_R
     uint64_t _faceBits, _dpadBits, _btnBits;
     NSMapTable<UITouch *, NSNumber *> *_faceOf;    // which keys each touch on the diamond currently holds
+    dm_face_layout _faceLayout;                  // shared visible/hit-test geometry; native bits remain A/B/X/Y
     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
     CAShapeLayer *_ring, *_knob;                   // the left stick (the right one is not drawn)
     CAShapeLayer *_swap; CATextLayer *_swapLabel; BOOL _swapHeld;
-    UIImpactFeedbackGenerator *_touchFeedback;       // one short feedback per touch-control press edge
-    unsigned _hapticSticks;
+    CAShapeLayer *_run; CATextLayer *_runLabel; BOOL _runHeld;
+    CAShapeLayer *_aim; CATextLayer *_aimLabel; BOOL _aimHeld, _aimLatched;
     BOOL _stickShown;                              // the left stick was held at the last refresh
     BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
     CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
-    BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
+    BOOL _padOff;                                  // physical controls hide the pad: every touch goes to the game
+    BOOL _controllerOrKeyboard, _touchPreferred;    // direct fingers can take over from an idle persistent mouse
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
     CGPoint _hoverLast;
     BOOL _hoverValid;
@@ -194,6 +228,17 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             if (names[b]) _label[b] = label(_key[b], names[b]);   // the D-pad arms carry no label
         }
         _swap = shape(_controls); _swapLabel = label(_swap, @"");
+        // Generic opt-in: games choose their own existing logical run button.
+        // No synthetic skill press is generated by moving or dragging a stick.
+        const char *run = getenv("DM_RUN_BUTTON"); g_run_button = 0;
+        static const char *runNames[] = {"A", "B", "X", "Y", "LS", "RS"};
+        for (int b = 0; run && b < 6; b++) if (!strcmp(run, runNames[b])) g_run_button = 1ull << b;
+        _run = shape(_controls); _runLabel = label(_run, @"Run");
+        const char *aim = getenv("DM_AIM_ZL"); g_aim_button = aim && atoi(aim) ? DM_BTN_ZL : 0;
+        _aim = shape(_controls); _aimLabel = label(_aim, @"Aim");
+        if (g_run_button) LOG("front end: Run touch button and either Shift alias native %s independently of visible face labels", run);
+        if (g_aim_button) LOG("front end: tap Aim toggles ZL; hold either Command to aim; release/focus loss clears modifier input");
+        LOG("front end: native A/B/X/Y unchanged; virtual face geometry alone can follow the original battle skill HUD");
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
         if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
@@ -216,6 +261,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         scroll.allowedScrollTypesMask = UIScrollTypeMaskAll;
         scroll.cancelsTouchesInView = NO;
         [self addGestureRecognizer:scroll];
+        __weak DmGamepad *weakSelf = self;
         NSTimer *releaseTimer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timer) {
             (void)timer;
             pthread_mutex_lock(&g_mu);
@@ -223,6 +269,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             if (expired) { g_mouse_rx = g_mouse_ry = 0; g_mouse_deadline = 0; }
             pthread_mutex_unlock(&g_mu);
             if (expired) publish();
+            [weakSelf updateSkillFaceLayout];   // the main run loop owns geometry and touch routing together
         }];
         [NSRunLoop.mainRunLoop addTimer:releaseTimer forMode:NSRunLoopCommonModes];
         LOG("front end: trackpad raw/hover/scroll camera input with bounded release timer");
@@ -231,10 +278,28 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
     }
     return self;
 }
+- (BOOL)canBecomeFirstResponder { return YES; }
+- (void)didMoveToWindow { [super didMoveToWindow]; if (self.window) [self becomeFirstResponder]; }
+- (NSArray<UIKeyCommand *> *)keyCommands {
+    if (!g_aim_button || !g_input_active) return @[];
+    NSMutableArray<UIKeyCommand *> *commands = [NSMutableArray array];
+    // Consume only game combinations, in particular Command-W, rather than
+    // allowing the system to close a Stage Manager window while moving.
+    for (NSString *key in @[@"w", @"a", @"s", @"d", @"u", @"i", @"j", @"k", @"l", @"q", @"e", @"z", @"c", UIKeyInputUpArrow, UIKeyInputDownArrow, UIKeyInputLeftArrow, UIKeyInputRightArrow])
+        for (NSNumber *extra in @[@0, @(UIKeyModifierShift)]) {
+            UIKeyCommand *command = [UIKeyCommand keyCommandWithInput:key modifierFlags:UIKeyModifierCommand | extra.unsignedIntegerValue action:@selector(gameCommand:)];
+            command.wantsPriorityOverSystemBehavior = YES;
+            [commands addObject:command];
+        }
+    return commands;
+}
+- (void)gameCommand:(UIKeyCommand *)command { (void)command; }   // GCKeyboard supplies down/up; do not synthesize another press here
 - (void)applyLayout {   // show / hide the controls for the current layout
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (int b = 0; b < B_N; b++) _key[b].hidden = _tap || (fullOnly(b) && !_full);
     _ring.hidden = _knob.hidden = _tap;
+    _run.hidden = _tap || !g_run_button;
+    _aim.hidden = _tap || !g_aim_button;
     _swapLabel.string = _tap ? @"Tap" : _full ? @"3D" : @"2D";
     [CATransaction commit];
 }
@@ -255,11 +320,20 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGFloat)faceGap { return K_FACE_GAP * self.u; }
 - (CGFloat)faceR { return K_FACE_R * self.u; }
 - (CGPoint)facePos:(int)b { CGPoint c = self.faceCenter; CGFloat g = self.faceGap;
-    // Present the face diamond as A bottom, B right, X left, Y top.  faceAt
-    // uses these same logical-button coordinates, so the Pokemon skill bound
-    // to each letter moves together with its label rather than only the art.
-    switch (b) { case B_A: return CGPointMake(c.x, c.y + g); case B_B: return CGPointMake(c.x + g, c.y); case B_X: return CGPointMake(c.x - g, c.y); default: return CGPointMake(c.x, c.y - g); } }
+    dm_face_offset offset = dm_face_layout_offset(&_faceLayout, (unsigned)b);
+    return CGPointMake(c.x + offset.x * g, c.y + offset.y * g); }
+- (void)updateSkillFaceLayout {
+    if (!NSThread.isMainThread) return;
+    // Freeze the entire diamond until every face-owned finger releases, even
+    // if a held finger slides into a gap. A UI transition cannot change its key.
+    if (!dm_face_layout_update(&_faceLayout, dm_za_skill_layout_active(), _faceOf.count != 0)) return;
+    [self setNeedsLayout]; [self layoutIfNeeded];
+    LOG("front end: virtual face geometry=%s; native button functions unchanged",
+        _faceLayout.skill ? "skill A right B bottom X top Y left" : "normal A bottom B right X left Y top");
+}
 - (CGPoint)stickHome { CGRect s = self.corner; return side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u); }   // the left stick's ring centre
+- (CGPoint)runCenter { CGPoint c = self.stickHome; return CGPointMake(c.x, c.y - 145 * self.u); }
+- (CGPoint)aimCenter { CGPoint c = self.runCenter; return CGPointMake(c.x + 70 * self.u, c.y); }
 - (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
 - (CGFloat)stickR:(int)i { return (i ? K_RSTICK_R : K_STICK_R) * self.u; }
 - (BOOL)inRightArea:(CGPoint)p { CGRect b = self.bounds; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE; }
@@ -313,11 +387,18 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 // ---- Touch ----
 - (void)recompute {
     uint64_t face = 0; for (UITouch *t in _faceOf) face |= [_faceOf objectForKey:t].unsignedLongLongValue;
-    uint64_t btn = 0, dpad = 0; BOOL swap = NO;
+    uint64_t btn = 0, dpad = 0; BOOL swap = NO, run = NO, aim = NO;
     for (UITouch *t in _owner) { uint64_t v = [_owner objectForKey:t].unsignedLongLongValue; int c = (int)(v & 0xff);
         if (c == C_BTN) btn |= 1ull << (v >> 8);
         else if (c == C_DPAD) dpad |= [self dpadAt:[t locationInView:self]];
         else if (c == C_SWAP) swap = YES; }
+    for (UITouch *t in _owner) {
+        int c = [_owner objectForKey:t].unsignedLongLongValue & 0xff;
+        if (c == C_RUN) run = YES;
+        if (c == C_AIM) aim = YES;
+    }
+    if (run) btn |= g_run_button;
+    if (aim || _aimLatched) btn |= g_aim_button;
     int32_t ax[4] = {0};
     for (int i = 0; i < 2; i++) {
         CGPoint o = [self knobOffset:i]; CGFloat R = [self stickR:i], d = hypot(o.x, o.y), dz = R * K_DEAD;
@@ -325,18 +406,27 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         CGFloat m = fmin((d - dz) / (R * K_FULL - dz), 1) / d;   // outside the dead zone: 0 rising to full at the full-tilt radius
         ax[i * 2] = (int32_t)lrint(o.x * m * 32767); ax[i * 2 + 1] = (int32_t)lrint(-o.y * m * 32767);   // host: up is positive; rounded so full tilt is exactly 32767
     }
-    BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits || swap != _swapHeld;
-    uint64_t pressed = (face | dpad | btn) & ~(_faceBits | _dpadBits | _btnBits);
-    unsigned gripping = (_stick[0] ? 1u : 0) | (_stick[1] ? 2u : 0);
-    if (pressed || (swap && !_swapHeld) || (gripping & ~_hapticSticks)) {
-        [_touchFeedback impactOccurredWithIntensity:0.6]; [_touchFeedback prepare];
-    }
-    _hapticSticks = gripping;
+    BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits || swap != _swapHeld || run != _runHeld || aim != _aimHeld;
     _faceBits = face; _dpadBits = dpad; _btnBits = btn; _swapHeld = swap;
+    _runHeld = run;
+    _aimHeld = aim;
     pthread_mutex_lock(&g_mu);
-    g_touch_btn = face | dpad | btn; g_touch_lx = ax[0]; g_touch_ly = ax[1]; g_touch_rx = ax[2]; g_touch_ry = ax[3];
+    g_touch_face = face; g_touch_btn = dpad | btn; g_touch_lx = ax[0]; g_touch_ly = ax[1]; g_touch_rx = ax[2]; g_touch_ry = ax[3];
     pthread_mutex_unlock(&g_mu);
     publish();
+    pthread_mutex_lock(&g_mu); uint64_t nativeTouch = g_touch_native; pthread_mutex_unlock(&g_mu);
+    // Observe actual UIKit ownership, rather than a separate input model.
+    static int diagnostic = -1, records; static unsigned prior; static uint64_t priorButtons;
+    if (diagnostic < 0) { const char *e = getenv("DM_TOUCH_DIAG"); diagnostic = e && atoi(e) != 0; }
+    unsigned state = (_stick[0] != nil) | ((_stick[1] != nil) << 1) |
+        ((ax[0] != 0 || ax[1] != 0) << 2) | ((ax[2] != 0 || ax[3] != 0) << 3);
+    if (diagnostic && records < 256 && (state != prior || (face | dpad | btn) != priorButtons)) {
+        LOG("[touch-input] owners=%lu left=%d right=%d buttons=%#llx native=%#llx axes=%d,%d,%d,%d", (unsigned long)_owner.count,
+            _stick[0] != nil, _stick[1] != nil, (unsigned long long)(face | dpad | btn),
+            (unsigned long long)nativeTouch, ax[0], ax[1], ax[2], ax[3]);
+        records++;
+    }
+    prior = state; priorButtons = face | dpad | btn;
     BOOL stick = _stick[0] != nil;
     if (changed || stick || _stickShown) [self refresh];   // also refresh on the stick release so the knob returns to the centre
     _stickShown = stick;
@@ -360,12 +450,22 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     return NO;
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+    for (UITouch *t in ts) if (t.type == UITouchTypeDirect && _padOff && !_controllerOrKeyboard) {
+        // A persistent virtual mouse is not evidence that the player still has
+        // a keyboard cover attached. Let the first finger choose touch input.
+        [self reset]; clear_mouse();
+        _touchPreferred = YES; _padOff = NO; _controls.hidden = NO;
+        LOG("front end: direct touch restored controls while only mice remain connected");
+        break;
+    }
     BOOL game = NO;
     for (UITouch *t in ts) {
         if (t.type == UITouchTypeIndirectPointer) continue;
         if (_padOff) { game |= [self gameBegin:t]; continue; }
         CGPoint p = [t locationInView:self]; int hit = _tap ? -1 : [self btnAt:p];
         if (hit >= 0) { [_owner setObject:@(C_BTN | (uint64_t)hit << 8) forKey:t]; continue; }
+        if (!_tap && g_run_button && dist(p, self.runCenter) <= 28 * self.u) { [_owner setObject:@(C_RUN) forKey:t]; continue; }
+        if (!_tap && g_aim_button && dist(p, self.aimCenter) <= 28 * self.u) { [_owner setObject:@(C_AIM) forKey:t]; continue; }
         if ([self inSwap:p]) { [_owner setObject:@(C_SWAP) forKey:t]; continue; }
         if (_tap) { game |= [self gameBegin:t]; continue; }
         // diamond, D-pad, left stick: take the one with the smallest distance / grab radius, if it is <= 1
@@ -373,7 +473,11 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         CGFloat f = dist(p, self.faceCenter) / (self.faceGap + self.faceR * 1.6); if (f <= best) { best = f; kind = C_FACE; }
         if (_full) { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
         if (!_stick[0]) { CGFloat s = dist(p, self.stickHome) / ([self stickR:0] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
-        if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }
+        // Camera is available in Simple too: detaching a keyboard restores the
+        // saved layout, and Simple previously routed every blank-area drag to
+        // the game's touchscreen instead of its right-stick camera. Controls
+        // above always claim first; no gesture recognizer competes for fingers.
+        if (kind == C_NONE && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }
         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
         else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; }
@@ -399,17 +503,22 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     BOOL swap = NO, game = NO;
     for (UITouch *t in ts) {
         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue;
+        if ((v & 0xff) == C_AIM) {
+            if (ended && dist([t locationInView:self], self.aimCenter) <= 28 * self.u) _aimLatched = !_aimLatched;
+            else if (!ended) _aimLatched = NO;
+        }
         if (ended && (v & 0xff) == C_SWAP && [self inSwap:[t locationInView:self]]) swap = YES;   // layout button: counts only when released on the button
         if ((v & 0xff) == C_GAME && (v >> 8) < 16) { _game[v >> 8] = nil; game = YES; }
         [_owner removeObjectForKey:t]; [_faceOf removeObjectForKey:t]; for (int i = 0; i < 2; i++) if (t == _stick[i]) _stick[i] = nil;
     }
     if (game) [self pushGame];
     [self recompute];
+    [self updateSkillFaceLayout];
     if (swap) [self nextLayout];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
-- (void)reset { _hoverValid = NO; [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
+- (void)reset { _hoverValid = NO; _aimLatched = NO; [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; [self updateSkillFaceLayout]; }
 
 // Some keyboard-cover trackpads deliver UIKit pointer/scroll events without
 // appearing in GCMouse.mice. Prefer recent raw motion to avoid double counting.
@@ -418,7 +527,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     CGPoint p = [g locationInView:self];
     if (_hoverValid && g.state == UIGestureRecognizerStateChanged) {
         pthread_mutex_lock(&g_mu); BOOL raw = CACurrentMediaTime() - g_raw_mouse_time < 0.1; pthread_mutex_unlock(&g_mu);
-        if (!raw) { read_mouse((float)(p.x - _hoverLast.x), (float)(_hoverLast.y - p.y));
+        if (!raw) { [self mouseMotionX:(float)(p.x - _hoverLast.x) y:(float)(_hoverLast.y - p.y) raw:NO];
             static int once; if (!once++) LOG("front end: UIKit trackpad hover is driving the camera"); }
     }
     _hoverLast = p; _hoverValid = YES;
@@ -426,7 +535,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 - (void)trackpadScrolled:(UIPanGestureRecognizer *)g {
     if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) { clear_mouse(); return; }
     CGPoint d = [g translationInView:self]; [g setTranslation:CGPointZero inView:self];
-    if (d.x || d.y) { read_mouse((float)d.x, (float)-d.y);
+    if (d.x || d.y) { [self mouseMotionX:(float)d.x y:(float)-d.y raw:NO];
         static int once; if (!once++) LOG("front end: two-finger trackpad scroll is driving the camera"); }
 }
 
@@ -466,6 +575,8 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     CGFloat u = self.u;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     _controls.frame = self.layer.bounds;
+    setPath(_run, circlePath(self.runCenter, 25 * u)); placeLabel(_runLabel, self.runCenter, 14 * u);
+    setPath(_aim, circlePath(self.aimCenter, 25 * u)); placeLabel(_aimLabel, self.aimCenter, 14 * u);
     for (int b = B_A; b <= B_Y; b++) { CGPoint c = [self facePos:b]; setPath(_key[b], circlePath(c, self.faceR)); placeLabel(_label[b], c, 20 * u); }
     for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
         if (isDrop(b)) {
@@ -496,6 +607,9 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     for (int b = 0; b < B_N; b++) { BOOL on = (all >> b) & 1;
         _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; }
     _swap.fillColor = (_swapHeld ? k_on : k_idle).CGColor; _swapLabel.foregroundColor = (_swapHeld ? k_textOn : k_text).CGColor;
+    _run.fillColor = (_runHeld ? k_on : k_idle).CGColor; _runLabel.foregroundColor = (_runHeld ? k_textOn : k_text).CGColor;
+    BOOL aim = _aimHeld || _aimLatched;
+    _aim.fillColor = (aim ? k_on : k_idle).CGColor; _aimLabel.foregroundColor = (aim ? k_textOn : k_text).CGColor;
     CGPoint h = self.stickHome, o = [self knobOffset:0];
     _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
     [CATransaction commit];
@@ -520,6 +634,7 @@ static void read_pad(GCExtendedGamepad *g) {
     publish();
 }
 static uint64_t keyboard_button(GCKeyCode key) {
+    // Preserve the original keyboard bindings independently of screen layout.
     if (key == GCKeyCodeKeyJ) return DM_BTN_A;
     if (key == GCKeyCodeKeyK) return DM_BTN_B;
     if (key == GCKeyCodeKeyU) return DM_BTN_X;
@@ -551,6 +666,10 @@ static void read_key(GCKeyCode key, BOOL pressed) {
     else if (key == GCKeyCodeUpArrow) g_key_up = pressed;
     else if (key == GCKeyCodeRightArrow) g_key_right = pressed;
     else if (key == GCKeyCodeDownArrow) g_key_down = pressed;
+    else if (key == GCKeyCodeLeftShift) g_shift_left = pressed;
+    else if (key == GCKeyCodeRightShift) g_shift_right = pressed;
+    else if (key == GCKeyCodeLeftGUI) g_command_left = pressed;
+    else if (key == GCKeyCodeRightGUI) g_command_right = pressed;
     uint64_t bit = keyboard_button(key);
     g_key_btn = pressed ? g_key_btn | bit : g_key_btn & ~bit;
     g_key_lx = ((int)g_key_d - (int)g_key_a) * DM_STICK_MAX;
@@ -564,6 +683,8 @@ static void clear_keyboard(void) {
     pthread_mutex_lock(&g_mu);
     g_key_btn = 0; g_key_lx = g_key_ly = g_key_rx = g_key_ry = 0;
     g_key_w = g_key_a = g_key_s = g_key_d = g_key_left = g_key_up = g_key_right = g_key_down = NO;
+    g_shift_left = g_shift_right = NO;
+    g_command_left = g_command_right = NO;
     pthread_mutex_unlock(&g_mu);
     publish();
 }
@@ -587,7 +708,41 @@ static void read_mouse(float dx, float dy) {
 static void clear_mouse(void) {
     pthread_mutex_lock(&g_mu); g_mouse_deadline = 0; g_mouse_rx = g_mouse_ry = 0; pthread_mutex_unlock(&g_mu); publish();
 }
+- (void)mouseMotionX:(float)dx y:(float)dy raw:(BOOL)raw {
+    if (!isfinite(dx) || !isfinite(dy) || (!dx && !dy)) return;
+    if (!NSThread.isMainThread) {
+        pthread_mutex_lock(&g_mu); uint64_t epoch = g_input_epoch; BOOL eligible = g_input_active; pthread_mutex_unlock(&g_mu);
+        if (!eligible) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            pthread_mutex_lock(&g_mu); BOOL current = g_input_active && epoch == g_input_epoch; pthread_mutex_unlock(&g_mu);
+            if (current) [self mouseMotionX:dx y:dy raw:raw];
+        });
+        return;
+    }
+    pthread_mutex_lock(&g_mu); BOOL active = g_input_active; pthread_mutex_unlock(&g_mu);
+    if (!active || _owner.count) return;   // never steal a held movement/camera/skill finger
+    if (_touchPreferred || !_padOff) {
+        _touchPreferred = NO; _padOff = YES; _controls.hidden = YES;
+        [self reset];
+        LOG("front end: mouse motion selected pointer input; touch controls hidden");
+    }
+    if (raw) { pthread_mutex_lock(&g_mu); g_raw_mouse_time = CACurrentMediaTime(); pthread_mutex_unlock(&g_mu); }
+    read_mouse(dx, dy);
+    if (raw) { static int once; if (!once++) LOG("front end: raw mouse/trackpad motion is driving the camera"); }
+}
 - (void)inputDevicesChanged:(NSNotification *)note {
+    // Notification delivery need not be on UIKit's queue. Read the latest
+    // device inventory and change touch ownership together on the main queue,
+    // rather than applying a captured, potentially stale disconnect snapshot.
+    if (!NSThread.isMainThread) {
+        if ([note.name isEqual:GCControllerDidDisconnectNotification]) {
+            GCController *gone = note.object;
+            gone.extendedGamepad.valueChangedHandler = nil;
+            dm_motion_detach(gone, 0);
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{ [self inputDevicesChanged:nil]; });
+        return;
+    }
     BOOL controllerEvent = !note || [note.name isEqual:GCControllerDidConnectNotification] || [note.name isEqual:GCControllerDidDisconnectNotification];
     GCController *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? note.object : nil;
     if (gone) { gone.extendedGamepad.valueChangedHandler = nil; dm_motion_detach(gone, 0); }
@@ -605,7 +760,10 @@ static void clear_mouse(void) {
     if (controllerEvent && (!controller || !motion)) dm_motion_clear(0);   // the phone's gyro (if on) takes over from its next sample
     if (!controller) { dm_haptics_apple_controller(0, nil); pthread_mutex_lock(&g_mu); g_pad_btn = 0; g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = 0; pthread_mutex_unlock(&g_mu); publish(); }
     GCKeyboard *keyboard = GCKeyboard.coalescedKeyboard;
-    if (keyboard.keyboardInput) {
+    BOOL hasKeyboard = keyboard.keyboardInput != nil;
+    _controllerOrKeyboard = controller || hasKeyboard;
+    if (_controllerOrKeyboard) _touchPreferred = NO;
+    if (hasKeyboard) {
         keyboard.keyboardInput.keyChangedHandler = ^(GCKeyboardInput *input, GCDeviceButtonInput *button, GCKeyCode key, BOOL pressed) {
             (void)input; (void)button; read_key(key, pressed);
         };
@@ -613,20 +771,47 @@ static void clear_mouse(void) {
     BOOL mouse = NO;
     for (GCMouse *m in GCMouse.mice) if (m.mouseInput) {
         mouse = YES;
+        LOG("front end: mouse inventory vendor=%s category=%s", m.vendorName.UTF8String ?: "unknown", m.productCategory.UTF8String ?: "unknown");
         m.mouseInput.mouseMovedHandler = ^(GCMouseInput *input, float dx, float dy) {
-            (void)input; pthread_mutex_lock(&g_mu); g_raw_mouse_time = CACurrentMediaTime(); pthread_mutex_unlock(&g_mu); read_mouse(dx, dy);
-            static int once; if (!once++) LOG("front end: raw mouse/trackpad motion is driving the camera");
+            (void)input; [g_view mouseMotionX:dx y:dy raw:YES];
         };
     }
     if (!mouse) clear_mouse();
-    BOOL any = controller || keyboard != nil || mouse;
-    LOG("front end: input devices controller=%d keyboard=%d mouse=%d; touch controls %s", controller, keyboard != nil, mouse, any ? "hidden" : "visible");
-    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });
+    BOOL any = _controllerOrKeyboard || (mouse && !_touchPreferred);
+    LOG("front end: input devices controller=%d keyboard=%d mouse=%d; touch controls %s; blank right-half camera %s", controller, hasKeyboard, mouse, any ? "hidden" : "visible", !any && !_tap ? "enabled" : "disabled");
+    BOOL changed = _padOff != any;
+    _padOff = any; _controls.hidden = any;
+    if (changed) [self reset];
 }
 @end
 
 UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v; return v; }
-void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")
-    dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; });
-    pthread_mutex_lock(&g_mu); g_pad_btn = g_key_btn = 0; g_shake_btn = 0; g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = g_key_lx = g_key_ly = g_key_rx = g_key_ry = g_mouse_rx = g_mouse_ry = 0; g_mouse_deadline = g_raw_mouse_time = 0; g_key_w = g_key_a = g_key_s = g_key_d = g_key_left = g_key_up = g_key_right = g_key_down = NO; pthread_mutex_unlock(&g_mu); publish();
+static void clear_input_locked(void) {
+    g_touch_btn = g_pad_btn = g_key_btn = 0; g_shake_btn = 0;
+    g_touch_face = g_touch_native = 0;
+    g_touch_lx = g_touch_ly = g_touch_rx = g_touch_ry = g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = g_key_lx = g_key_ly = g_key_rx = g_key_ry = g_mouse_rx = g_mouse_ry = 0;
+    g_mouse_deadline = g_raw_mouse_time = 0;
+    g_key_w = g_key_a = g_key_s = g_key_d = g_key_left = g_key_up = g_key_right = g_key_down = NO;
+    g_shift_left = g_shift_right = NO;
+    g_command_left = g_command_right = NO;
+}
+static void reset_touch_owners(void) {
+    if (NSThread.isMainThread) [g_view reset];
+    else dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; });
+}
+void dm_gamepad_reset(void) {   // A key held while switching away and released in background gets no "release"
+    // Publish neutral touch axes immediately too: a queued UIKit reset must not
+    // leave the camera turning after focus has already moved to another app.
+    pthread_mutex_lock(&g_mu); clear_input_locked(); g_input_epoch++; pthread_mutex_unlock(&g_mu);
+    publish(); reset_touch_owners();
+}
+void dm_gamepad_set_active(int active) {
+    // Clear old state and change eligibility under the same lock: a late global
+    // callback cannot publish an inactive epoch's held axes on reactivation.
+    pthread_mutex_lock(&g_mu); clear_input_locked(); g_input_epoch++; g_input_active = active != 0; pthread_mutex_unlock(&g_mu);
+    publish(); reset_touch_owners();
+    if (active) dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_input_active && g_view.window) [g_view becomeFirstResponder];
+    });
+    LOG("front end: input focus active=%d; all input neutralized", active != 0);
 }

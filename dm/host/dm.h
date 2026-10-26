@@ -96,7 +96,9 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
 enum { OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)
        OBS_REGION_ASK = 22, OBS_REGION_GOT = 23, OBS_REGION_FREE = 24,   // the SDK's address regions, gates the rewriter places by symbol in every sdk (patch_nso.py "Address regions", hle_svc.c)
        OBS_STDALLOC_INIT = 25,                                         // StandardAllocator::Initialize's entry, the same way: the one gate whose callback writes a register (hle_svc.c)
-       OBS_MAX = 26 };
+       OBS_ZA_CLOCK_DELTA = 26, OBS_ZA_INTERVAL = 27,                  // Pokemon Legends: Z-A 2.0.2 timing diagnostics / optional interval experiment
+       OBS_ZA_SKILL_VISIBILITY = 28, OBS_ZA_SKILL_DESTROY = 29,       // Read-only observation of the actual move layout lifetime
+       OBS_MAX = 30 };
 // A gate number's bits from 8 up are a parameter for its callback (OBS_REGION_GOT: the register that holds the address). Callbacks read the registers; a write to x0–x29 takes
 // effect when the gate returns (entry.S restores them from the frame), which only OBS_STDALLOC_INIT does
 void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));
@@ -129,6 +131,7 @@ uint64_t hle_system_event_binding(void *g);   // Opaque lifetime ID of a binding
 int hle_signal_system_event_binding(uint64_t binding);   // Signal only this binding lifetime (any thread); 0 after its write handle closes
 // Page fault hook / hook before the host writes guest memory (crash.c; used for write-protect dirty page tracking)
 void dm_fault_hook_register(int (*fn)(void *addr, int is_write, void *uc));
+void dm_fault_diagnostic_register(void (*fn)(const void *addr));
 void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len));
 void dm_res_report_register(void (*fn)(uint32_t tick, const char *why));   // Resource count callback (registered by the graphics layer): called every 250 ticks, when the loading screen has been dismissed, and on exit when the record is full
 void (*dm_res_report_cb(void))(uint32_t tick, const char *why);   // Get the registered resource count callback (null if not registered)

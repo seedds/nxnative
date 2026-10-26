@@ -123,9 +123,10 @@ static void prep_write(void *addr, size_t len) {
     }
 }
 
+static void nvn_dirty_fault_diagnostic(const void *addr);
 void nvn_dirty_add_range(const void *mem, size_t size) {
     static int inited;
-    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
+    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); dm_fault_diagnostic_register(nvn_dirty_fault_diagnostic); }
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);
@@ -177,8 +178,15 @@ int nvn_dirty_tracked(const void *addr, size_t len) {
 const void *nvn_dirty_span(const void *addr, size_t len) { return len ? find_span((uintptr_t)addr, len) : NULL; }
 // Set read-only: mark the pages BUSY first and mark them PROT only after mprotect has landed (for the order and the invariant see the state notes at the top of the file)
 void nvn_dirty_protect(const void *addr, size_t len) {
+    // Keep the descriptor live until the final mprotect has landed. Otherwise
+    // retirement can restore RW and publish live=0 between lookup and PG_BUSY,
+    // after which this thread leaves retired guest memory read-only forever.
+    pthread_mutex_lock(&g_slot_mu);
     range_t *r = len ? find_span((uintptr_t)addr, len) : NULL;
-    if (!r) return;
+    if (!r) { pthread_mutex_unlock(&g_slot_mu); return; }
+#ifdef NVN_DIRTY_PROTECT_LOOKUP_HOOK
+    NVN_DIRTY_PROTECT_LOOKUP_HOOK(); // Deterministic pool-retirement race test.
+#endif
     uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
     // Consecutive pages are merged into one mprotect (per-page calls reach thousands per frame on the first upload of large textures; character select page startup frame 5: 4888 calls).
     // Pages already PROT / BUSY break the consecutive run: do not protect again, and do not touch pages another thread is changing.
@@ -192,6 +200,7 @@ void nvn_dirty_protect(const void *addr, size_t len) {
         if (!took && open) { mp(r->base + (run << g_shift), (i - run) << g_shift, PROT_READ); for (uintptr_t k = run; k < i; k++) atomic_store(&r->state[k], PG_PROT); open = 0; }
         if (!took && i <= q && st == PG_BUSY && busy_wait(r, i)) i--;   // this page again
     }
+    pthread_mutex_unlock(&g_slot_mu);
 }
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
 int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_t stamp) {
@@ -210,6 +219,21 @@ void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     *live = active; *used_slots = n; *adds_total = atomic_load(&g_adds_total);
 }
 void nvn_dirty_stats(uint64_t *faults, uint64_t *preps) { *faults = atomic_load(&g_faults); *preps = atomic_load(&g_preps); }
+// Terminal crash diagnostics only: never changes protection or retries a fault.
+static void nvn_dirty_fault_diagnostic(const void *addr) {
+    uintptr_t a = (uintptr_t)addr; int found = 0, n = atomic_load(&g_nr);
+    for (int i = 0; i < n; i++) {
+        range_t *r = rg(i); int live = live_at(i);
+        if (a < r->base || a >= r->end) continue;
+        uintptr_t p = (a - r->base) >> g_shift;
+        if (p >= r->cap) continue;
+        LOG("fault dirty slot=%d live=%d mem=%p range=%p..%p page=%zu state=%u gen=%llu",
+            i, live, (void *)r->mem, (void *)r->base, (void *)r->end, (size_t)p,
+            (unsigned)atomic_load(&r->state[p]), (unsigned long long)atomic_load(&r->gen[p]));
+        found++;
+    }
+    if (!found) LOG("fault dirty: no current or retired slot covers %p (%d slots)", addr, n);
+}
 void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) {
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     *calls = atomic_load(&g_mp_calls); *pages = atomic_load(&g_mp_pages); *ns = atomic_load(&g_mp_ticks) * tb.numer / tb.denom;

@@ -12,12 +12,13 @@ QUIET = $(if $(strip $(SAN)),,2>/dev/null)
 GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 GAME_H = ../gen/$(GAME)/game_profile.h
-run: $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pctl $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple
+run: $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_redirect $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pctl $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_map_headroom za-timing audio-recovery
 	$(B)/t_heap_size
 	$(B)/t_touch
 	$(B)/t_gesture
 	$(B)/t_oe $(QUIET)
 	$(B)/t_fs $(QUIET)
+	$(B)/t_fs_redirect $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_commit_list
 	$(B)/t_thread_leak
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_case $(QUIET)
@@ -46,6 +47,7 @@ run: $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t
 	$(B)/t_hid
 	$(B)/t_haptics
 	$(B)/t_haptics_apple
+	$(B)/t_map_headroom
 	$(B)/t_nro
 	$(B)/t_symbols
 run: $(B)/t_nro
@@ -93,6 +95,8 @@ $(B)/t_thread_leak: t_thread_leak.c ../thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_thread_leak.c
 $(B)/t_fs: t_fs.c t_fs_stub.c ../hle_fs.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs.c t_fs_stub.c ../hle_bigstack.c
+$(B)/t_fs_redirect: t_fs_redirect.c t_fs_stub.c ../hle_fs.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Wextra -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_redirect.c t_fs_stub.c ../hle_bigstack.c
 $(B)/t_fs_commit_list: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_fs_commit_list.c t_fs_stub.c ../hle_bigstack.c
 $(B)/t_fs_commit_list_tsan: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
@@ -117,6 +121,14 @@ $(B)/t_audio_spsc_tsan: t_audio_spsc.c ../hle_audio.c ../hle.h ../dm.h $(GAME_H)
 run: $(B)/t_fpslock
 $(B)/t_fpslock: t_fpslock.c ../hle_fpslock.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function $(GINC) -o $@ t_fpslock.c
+$(B)/t_audio_recovery: t_audio_recovery.c ../hle_audio.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_audio_recovery.c -framework AudioToolbox
+$(B)/t_audio_session_retry: t_audio_session_retry.c ../../ios/Sources/DmAudioRetry.h | $(B)
+	$(CLANG) -O1 -Wall -Wextra -Werror -o $@ t_audio_session_retry.c
+.PHONY: audio-recovery
+audio-recovery: $(B)/t_audio_recovery $(B)/t_audio_session_retry
+	$(B)/t_audio_recovery
+	$(B)/t_audio_session_retry
 $(B)/t_swkbd: t_swkbd.c ../hle_swkbd.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_swkbd.c ../hle_swkbd.c
 $(B)/t_altstack: t_altstack.c t_altstack_stub.c ../crash.c ../dm.h $(GAME_H) | $(B)
@@ -143,8 +155,21 @@ $(B)/t_haptics: t_haptics.c ../hle_haptics.c ../hle_haptics.h ../dm_input.h | $(
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_haptics.c ../hle_haptics.c
 $(B)/t_haptics_apple: t_haptics_apple.m ../haptics_apple.m ../haptics_apple.h ../hle_haptics.c ../hle_haptics.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_haptics_apple.m ../hle_haptics.c -framework Cocoa -framework GameController -framework CoreHaptics -framework IOKit
+$(B)/t_map_headroom: t_map_headroom.c ../map_headroom.h | $(B)
+	$(CLANG) -O1 -Wall -Wextra -Werror -o $@ t_map_headroom.c
 $(B)/t_time: t_time.c ../hle_time.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_time.c
+$(B)/t_za_frame_delta: t_za_frame_delta.c ../za_frame_delta.h | $(B)
+	$(CLANG) -O1 -Wall -Wextra -Werror -o $@ t_za_frame_delta.c
+$(B)/t_za_timing: t_za_timing.c ../hle_za_timing.c ../za_frame_delta.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Wextra -Werror -I.. $(GINC) -o $@ t_za_timing.c
+$(B)/t_za_dynamic: t_za_dynamic.c ../hle_za_timing.c ../za_frame_delta.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Wextra -Werror -I.. $(GINC) -o $@ t_za_dynamic.c
+.PHONY: za-timing
+za-timing: $(B)/t_za_frame_delta $(B)/t_za_timing $(B)/t_za_dynamic
+	$(B)/t_za_frame_delta
+	@set -e; for c in off trace static-fixed static-adaptive native-adaptive wrong-build live concurrent; do $(B)/t_za_timing $$c 2>/dev/null; done
+	@set -e; for c in clock clock120 conflict guard wrong-layout wrong-build wrong-table unaligned detclock readonly executable; do $(B)/t_za_dynamic $$c 2>/dev/null; done
 $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
 $(B)/t_condvar: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)

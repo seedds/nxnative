@@ -58,7 +58,95 @@ static pthread_mutex_t g_path_lock = PTHREAD_MUTEX_INITIALIZER;
 static void path_unlock(pthread_mutex_t **m) { pthread_mutex_unlock(*m); }
 #define PATH_LOCK() pthread_mutex_t *path_guard __attribute__((cleanup(path_unlock))) = &g_path_lock; pthread_mutex_lock(path_guard)
 static uint8_t g_fmode[65536];              // fd → open mode
-static _Atomic uint16_t g_ftxn[65536];       // fd → 1-based canonical transaction index, or 0
+static uint8_t g_fsave[65536];              // fd → whether it is on a transactional save mount (the save write injection point only counts these)
+// DM_ROMFS_REDIRECTS=<TSV>: virtual sequential archives backed by disjoint
+// ranges of one materialized RomFS file.  Some archive formats require their
+// index offsets to stay both sorted and separated by each record's aligned
+// size.  A compact overlay can keep unmodified records in the cloned source,
+// put larger replacements in an inserted range, and describe the resulting
+// logical archive here without physically moving every later record.
+typedef struct {
+    uint64_t virtual_offset, virtual_bytes;
+    uint64_t physical_offset, physical_bytes;
+} rom_redirect_t;
+static rom_redirect_t *g_rom_redirect;
+static size_t g_nrom_redirect;
+static uint64_t g_rom_virtual_bytes, g_rom_physical_bytes;
+static char g_rom_redirect_target[1024];
+static pthread_once_t g_rom_redirect_once = PTHREAD_ONCE_INIT;
+static uint8_t g_fredirect[65536];           // fd -> matches the configured archive
+
+static void rom_redirect_init(void) {
+    const char *path = getenv("DM_ROMFS_REDIRECTS");
+    if (!path) return;
+    if (!*path) die("DM_ROMFS_REDIRECTS is empty");
+    FILE *f = fopen(path, "r");
+    if (!f) die("cannot open DM_ROMFS_REDIRECTS %s (errno=%d)", path, errno);
+    char magic[64], target[sizeof g_rom_redirect_target], newline = 0;
+    unsigned long long count = 0, virtual_bytes = 0, physical_bytes = 0;
+    if (fscanf(f, "%63[^\t]\t%1023[^\t]\t%llu\t%llu\t%llu%c",
+               magic, target, &count, &virtual_bytes, &physical_bytes, &newline) != 6 ||
+        strcmp(magic, "DM_ROMFS_REDIRECTS_V1") || newline != '\n' ||
+        !count || count > 20000 || !virtual_bytes || !physical_bytes ||
+        virtual_bytes > INT64_MAX || physical_bytes > INT64_MAX ||
+        target[0] == '/' || strchr(target, ':') || strstr(target, "..")) {
+        fclose(f); die("invalid DM_ROMFS_REDIRECTS header in %s", path);
+    }
+    rom_redirect_t *rows = calloc((size_t)count, sizeof *rows);
+    if (!rows) { fclose(f); die("DM_ROMFS_REDIRECTS allocation failed"); }
+    uint64_t previous_virtual_end = 0;
+    for (size_t i = 0; i < (size_t)count; i++) {
+        unsigned long long vo, vb, po, pb; newline = 0;
+        if (fscanf(f, "%llu\t%llu\t%llu\t%llu%c", &vo, &vb, &po, &pb, &newline) != 5 ||
+            newline != '\n' || !vb || !pb || pb < vb ||
+            vo > virtual_bytes || vb > virtual_bytes - vo ||
+            po > physical_bytes || pb > physical_bytes - po ||
+            vo != previous_virtual_end) {
+            free(rows); fclose(f); die("invalid DM_ROMFS_REDIRECTS row %zu in %s", i + 1, path);
+        }
+        rows[i] = (rom_redirect_t){vo, vb, po, pb};
+        previous_virtual_end = vo + vb;
+    }
+    if (previous_virtual_end != virtual_bytes || fgetc(f) != EOF || ferror(f)) {
+        free(rows); fclose(f); die("invalid end of DM_ROMFS_REDIRECTS %s", path);
+    }
+    fclose(f);
+    strlcpy(g_rom_redirect_target, target, sizeof g_rom_redirect_target);
+    g_rom_virtual_bytes = virtual_bytes;
+    g_rom_physical_bytes = physical_bytes;
+    g_rom_redirect = rows;
+    g_nrom_redirect = (size_t)count;
+    LOG("fs redirects: %zu virtual ranges for %s from %s", g_nrom_redirect,
+        g_rom_redirect_target, path);
+}
+
+// Translate one bounded part of an arbitrary logical read.  The validated
+// rows cover [0, virtual EOF) without gaps, so a read may start in a row and
+// continue across any number of later rows.
+static int rom_redirect_chunk(uint64_t logical, size_t *bytes, uint64_t *physical) {
+    if (logical >= g_rom_virtual_bytes || !g_nrom_redirect || !*bytes) return 0;
+    size_t lo = 0, hi = g_nrom_redirect;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (g_rom_redirect[mid].virtual_offset <= logical) lo = mid + 1;
+        else hi = mid;
+    }
+    if (!lo) return 0;
+    const rom_redirect_t *row = &g_rom_redirect[lo - 1];
+    uint64_t delta = logical - row->virtual_offset;
+    if (delta >= row->virtual_bytes) return 0;
+    uint64_t available = row->virtual_bytes - delta;
+    if ((uint64_t)*bytes > available) *bytes = (size_t)available;
+    *physical = row->physical_offset + delta;
+    return 1;
+}
+
+static int64_t rom_redirect_reported_size(const char *relative, int64_t physical) {
+    pthread_once(&g_rom_redirect_once, rom_redirect_init);
+    if (!relative || !g_nrom_redirect) return physical;
+    while (*relative == '/') relative++;
+    return !strcmp(relative, g_rom_redirect_target) ? (int64_t)g_rom_virtual_bytes : physical;
+}
 static _Atomic int g_save_writes;           // number of writes on the save mount (shared by the injection point and the commit log)
 static pthread_once_t g_save_test_once = PTHREAD_ONCE_INIT;
 static int g_save_kill_n, g_save_fail_n, g_save_fail_e;
@@ -711,9 +799,26 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     struct stat st; fstat(fd, &st);
     if (S_ISDIR(st.st_mode)) { close(fd); return RES_PATH_NOT_FOUND; }
     if (fd >= (int)sizeof g_fmode) die("fd beyond the table");
-    g_fmode[fd] = (uint8_t)mode; *out = (uint64_t)fd;
-    { const char *c = strchr(path, ':'); size_t ln = c ? (size_t)(c - path) : 0; uint16_t token = 0;
-      for (int i = 0; c && i < g_nmnt; i++) if (strlen(g_mnt[i].name) == ln && !strncmp(g_mnt[i].name, path, ln) && g_mnt[i].txn_root >= 0) { token = (uint16_t)(g_mnt[i].txn_root + 1); break; }
+    g_fmode[fd] = (uint8_t)mode; g_fredirect[fd] = 0; *out = (uint64_t)fd;
+    pthread_once(&g_rom_redirect_once, rom_redirect_init);
+    if (g_nrom_redirect) {
+        const char *colon = strchr(path, ':');
+        const char *relative = colon && colon[1] == '/' ? colon + 2 : NULL;
+        if (relative && !strcmp(relative, g_rom_redirect_target)) {
+            if ((uint64_t)st.st_size != g_rom_physical_bytes) {
+                close(fd); g_fmode[fd] = 0; *out = 0;
+                die("DM_ROMFS_REDIRECTS target %s has %lld bytes, expected %llu", path,
+                    (long long)st.st_size, (unsigned long long)g_rom_physical_bytes);
+            }
+            g_fredirect[fd] = 1;
+        }
+    }
+    { const char *c = strchr(path, ':'); size_t ln = c ? (size_t)(c - path) : 0; uint16_t token = 0; g_fsave[fd] = 0;
+      for (int i = 0; c && i < g_nmnt; i++) if (strlen(g_mnt[i].name) == ln && !strncmp(g_mnt[i].name, path, ln)) {
+          g_fsave[fd] = g_mnt[i].commit[0] != 0;
+          if (g_mnt[i].txn_root >= 0) token = (uint16_t)(g_mnt[i].txn_root + 1);
+          break;
+      }
       atomic_store(&g_ftxn[fd], token); }
     fslog_init();
     if (g_fslog && fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }
@@ -722,15 +827,27 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
 }
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
     if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
-    size_t got = 0; int reprep = 0, fd = (int)h; int64_t base = 0;
-    if (IMG_H(h)) {   // an image entry: read the image's descriptor at the entry's offset, never past its end
+    int image = IMG_H(h); size_t got = 0; int reprep = 0, fd = (int)h; int64_t base = 0;
+    if (image) {   // an image entry: read the image's descriptor at the entry's offset, never past its end
         const img_ent *x = &g_mnt[IMG_M(h)].img->e[IMG_K(h)];
         fd = g_mnt[IMG_M(h)].img->fd; base = (int64_t)x->a;
         sz = off < 0 || (uint64_t)off >= x->b ? 0 : (size_t)(x->b - off) < sz ? (size_t)(x->b - off) : sz;
     }
+    int redirected = !image && g_fredirect[(int)h & 0xffff];
+    if (redirected && (off < 0 || (uint64_t)off > g_rom_virtual_bytes ||
+                       (uint64_t)sz > g_rom_virtual_bytes - (uint64_t)off)) {
+        LOG("[RED] fs virtual read leaves the archive: offset=%lld length=%#zx virtual-bytes=%#llx",
+            (long long)off, sz, (unsigned long long)g_rom_virtual_bytes);
+        *out = 0; errno = EINVAL; return RES_FAIL;
+    }
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
     while (got < sz) {
-        ssize_t r = pread(fd, (uint8_t *)buf + got, sz - got, base + off + got);
+        size_t want = sz - got; uint64_t read_offset = (uint64_t)(base + off + (int64_t)got);
+        if (redirected && !rom_redirect_chunk(read_offset, &want, &read_offset)) {
+            LOG("[RED] fs virtual redirect table has a gap at %#llx", (unsigned long long)(off + (int64_t)got));
+            *out = got; errno = EINVAL; return RES_FAIL;
+        }
+        ssize_t r = pread(fd, (uint8_t *)buf + got, want, (off_t)read_offset);
         if (r < 0) { if (errno == EINTR) continue;
             // The graphics layer write-protects tracked pages again after each upload (nvn_dirty.c), so a page made writable above can be read-only again by the time pread
             // writes it: a plain write would fault into the tracker's handler, a system call gets EFAULT. Prepare the rest again (unprotect, mark dirty) and read on. Monster Train 2
@@ -744,7 +861,10 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
                 LOG("[RED] fs ReadFile into %p+%#zx failed at +%#zx (EFAULT): VM region %#lx+%#lx protection %d%s", buf, sz, got, (unsigned long)ra, (unsigned long)rs, kr == KERN_SUCCESS ? vi.protection : -1, kr == KERN_SUCCESS ? "" : " (none)");
                 errno = e; }
             return err_res("pread", "fd"); }
-        if (r == 0) break;
+        if (r == 0) {
+            if (redirected) { LOG("[RED] fs virtual redirect physical range ended early at %#llx", (unsigned long long)read_offset); *out = got; errno = EIO; return RES_FAIL; }
+            break;
+        }
         got += r;
     }
     *out = got;
@@ -786,6 +906,7 @@ HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp
 HLE_FORCE("_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", "fsp-srv → fstat(2)", Result, h_fs_GetFileSize, int64_t *out, uint64_t h) {
     if (!h) return RES_FAIL;
     if (IMG_H(h)) { *out = (int64_t)g_mnt[IMG_M(h)].img->e[IMG_K(h)].b; return RES_OK; }
+    if (g_fredirect[(int)h & 0xffff]) { *out = (int64_t)g_rom_virtual_bytes; return RES_OK; }
     struct stat st; if (fstat((int)h, &st)) return err_res("fstat", "fd");
     *out = st.st_size; return RES_OK;
 }
@@ -801,7 +922,8 @@ HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)
 HLE_FORCE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", "fsp-srv; host writes are already in the page cache, flushing is a no-op", Result, h_fs_FlushFile, uint64_t h) { (void)h; return RES_OK; }
 HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void, h_fs_CloseFile, uint64_t h) {
     if (!h || IMG_H(h)) return;   // the null handle after a failed open (see ReadFile): do not touch fd 0; an image entry holds no descriptor
-    g_fmode[(int)h & 0xffff] = 0; atomic_store(&g_ftxn[(int)h & 0xffff], 0);
+    g_fmode[(int)h & 0xffff] = 0; g_fsave[(int)h & 0xffff] = 0;
+    atomic_store(&g_ftxn[(int)h & 0xffff], 0); g_fredirect[(int)h & 0xffff] = 0;
     close((int)h); }
 HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mode is recorded by the host", int, h_fs_GetFileOpenMode, uint64_t h) { return IMG_H(h) ? MODE_READ : g_fmode[(int)h & 0xffff]; }
 
@@ -889,7 +1011,7 @@ HLE_FORCE("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", "fsp-srv → 
 }
 
 // ---------- Directories ----------
-typedef struct { DIR *d; char path[1024]; DIR *od; char opath[1024]; DirectoryEntry *snap; int64_t nsnap, psnap; int mode; } dirh_t;
+typedef struct { DIR *d; char path[1024]; char guest[1024]; DIR *od; char opath[1024]; DirectoryEntry *snap; int64_t nsnap, psnap; int mode; } dirh_t;
 static void dir_snapshot(dirh_t *h, const mount_t *m, const char *rest) {
     char *roots = strdup(m->overlay);
     size_t cap = 2048; char (*names)[0x301] = malloc(cap * sizeof *names);
@@ -930,7 +1052,7 @@ static void dir_snapshot(dirh_t *h, const mount_t *m, const char *rest) {
         strlcpy(h->snap[j].name, names[j], sizeof h->snap[j].name);
         snprintf(rel, 2048, "%s/%s", rest, names[j]);
         struct stat st; int64_t k;
-        if (rom_overlay_path(m, rel, resolved, 1024)) { if (!stat(resolved, &st)) { h->snap[j].type = S_ISDIR(st.st_mode) ? ENT_DIR : ENT_FILE; h->snap[j].size = S_ISDIR(st.st_mode) ? 0 : st.st_size; } }
+        if (rom_overlay_path(m, rel, resolved, 1024)) { if (!stat(resolved, &st)) { h->snap[j].type = S_ISDIR(st.st_mode) ? ENT_DIR : ENT_FILE; h->snap[j].size = S_ISDIR(st.st_mode) ? 0 : rom_redirect_reported_size(rel, st.st_size); } }
         else if (m->img && (k = img_find(m->img, rel)) >= 0) { h->snap[j].type = m->img->e[k].type ? ENT_FILE : ENT_DIR; h->snap[j].size = m->img->e[k].type ? (int64_t)m->img->e[k].b : 0; }
     }
     free(resolved); free(rel); free(guest); free(parent); free(all); free(names); free(roots);
@@ -954,6 +1076,7 @@ HLE_FORCE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", "fsp-srv → o
     if (!d) return err_res("opendir", hp);
     dirh_t *h = calloc(1, sizeof *h); h->d = d; strlcpy(h->path, hp, sizeof h->path); h->mode = mode;
     const char *c = strchr(path, ':');
+    if (c) strlcpy(h->guest, c + 1, sizeof h->guest);
     if (c) for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].overlay[0] && strlen(g_mnt[i].name) == (size_t)(c - path) && !strncmp(g_mnt[i].name, path, (size_t)(c - path))) {
         dir_snapshot(h, &g_mnt[i], c + 1); break;
     }
@@ -973,7 +1096,9 @@ HLE_FORCE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandl
         if (!(h->mode & (isdir ? DIRMODE_DIR : DIRMODE_FILE))) continue;
         DirectoryEntry *o = &ents[n++]; memset(o, 0, sizeof *o);
         if (!guest_name(h->path, e->d_name, o->name, sizeof o->name)) { char c[1280]; snprintf(c, sizeof c, "%s/%s", h->path, e->d_name); *count = n - 1; return err_res("directory name", c); }
-        o->type = isdir ? ENT_DIR : ENT_FILE; o->size = isdir ? 0 : st.st_size;
+        o->type = isdir ? ENT_DIR : ENT_FILE;
+        if (isdir) o->size = 0;
+        else { char relative[1400]; snprintf(relative, sizeof relative, "%s/%s", h->guest, o->name); o->size = rom_redirect_reported_size(relative, st.st_size); }
     }
     *count = n; return RES_OK;
 }

@@ -1,0 +1,172 @@
+diff --git a/dm/games/0100A9D01C446000/game.tsv b/dm/games/0100A9D01C446000/game.tsv
+index ac0dcd2..ab09828 100644
+--- a/dm/games/0100A9D01C446000/game.tsv
++++ b/dm/games/0100A9D01C446000/game.tsv
+@@ -15,6 +15,7 @@ app_category	public.app-category.games
+ 
+ # ---- Versions ----
+ build	v131072	1.2.0	main=f7ec03e4cb9de3bd8319d4e899d2e9cc	subsdk0=92ef43cb1f9917ab206ac5c9e36240bc	sdk=145dde94fb574acc9e09780a11995bd3
++build	v0	1.0.0	main=ab06020960edd8285b7ff5fad2e3224b	subsdk0=92ef43cb1f9917ab206ac5c9e36240bc	sdk=145dde94fb574acc9e09780a11995bd3
+ package	v131072
+ shader_versions	v131072
+ 
+diff --git a/dm/games/0100A9D01C446000/patches.py b/dm/games/0100A9D01C446000/patches.py
+index 6791278..c817c66 100644
+--- a/dm/games/0100A9D01C446000/patches.py
++++ b/dm/games/0100A9D01C446000/patches.py
+@@ -9,10 +9,18 @@ CUTS = {
+   'f7ec03e4cb9de3bd8319d4e899d2e9cc': [
+     (0x32758dc, '8e6f4097', '1f2003d5', 'GCreateMalloc: bl 0x291714 (FMallocBinned3 constructor, 37 GB of address space) → nop; the host allocator\'s vtable is put in at the gate after it (hle_uemalloc.c)'),
+   ],
++  # DRAGON QUEST VII Reimagined 1.0.0 (v0) main
++  'ab06020960edd8285b7ff5fad2e3224b': [
++    (0x32755bc, '56704097', '1f2003d5', 'GCreateMalloc: bl 0x291714 (FMallocBinned3 constructor, 37 GB of address space) → nop; the host allocator\'s vtable is put in at the gate after it (hle_uemalloc.c)'),
++  ],
+ }
+ OBS = {
+   # DRAGON QUEST VII Reimagined 1.2.0 main: right after the cut FMallocBinned3 constructor call (CUTS above), x19 = the new allocator object; the host writes its vtable there (hle_uemalloc.c)
+   'f7ec03e4cb9de3bd8319d4e899d2e9cc': [
+     (0x32758e4, 21, 'aa1303e0','GCreateMalloc: the allocator object is in x19, before it is used: the host puts its vtable in; orig mov x0, x19'),
+   ],
++  # DRAGON QUEST VII Reimagined 1.0.0 main
++  'ab06020960edd8285b7ff5fad2e3224b': [
++    (0x32755c4, 21, 'aa1303e0','GCreateMalloc: the allocator object is in x19, before it is used: the host puts its vtable in; orig mov x0, x19'),
++  ],
+ }
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 9137908..b63dc98 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -3231,7 +3231,7 @@ static int clear_rect_zero(int i) {
+ static os_unfair_lock g_rmu = OS_UNFAIR_LOCK_INIT;
+ // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
+ static NSMutableDictionary<NSString *, NSString *> *g_shmap;
+-static NSString *g_shmap_path, *g_msl_dir;
++static NSString *g_shmap_path, *g_msl_dir, *g_active_chain;
+ static NSString *exe_rel(const char *rel) {
+     char buf[4096]; uint32_t n = sizeof buf;
+     if (_NSGetExecutablePath(buf, &n)) return nil;
+@@ -3255,6 +3255,22 @@ static void shmap_load(void) {
+     const char *m = getenv("DM_MSL_DIR");
+     // Library directory = <DM_MSL_DIR or default cache>/b-<translation chain version>: the version comes from dm/gfx/nvn/dmsh_chain.h (tools/dmsh_chain.py), one for every game; a host built from an old source tree only accepts libraries of the old version
+     g_msl_dir = [NSString stringWithFormat:@"%@/b-%s", m ? @(m) : [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work"], DMSH_CHAIN];
++    g_active_chain = @DMSH_CHAIN;
++    if (![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir] && m) {
++        NSArray *sub = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(m) error:nil];
++        for (NSString *s in sub) {
++            if ([s hasPrefix:@"b-"]) {
++                NSString *candidate = [@(m) stringByAppendingPathComponent:s];
++                BOOL isDir = NO;
++                if ([NSFileManager.defaultManager fileExistsAtPath:candidate isDirectory:&isDir] && isDir) {
++                    g_msl_dir = candidate;
++                    g_active_chain = [s substringFromIndex:2];
++                    MLOG("using packaged shader library directory %s (chain %s)", g_msl_dir.UTF8String, g_active_chain.UTF8String);
++                    break;
++                }
++            }
++        }
++    }
+     if (![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir]) MLOG("[RED] shader library directory %s does not exist: translation chain version %s of this source tree has not been built yet (dm/gfx/tools/dmsh_build.py)", g_msl_dir.UTF8String, DMSH_CHAIN);
+     // The library's stamp (inputs.tsv, written by a full dmsh_build.py run): the game and the digest of the profile inputs it was built from. The chain version is the same for every
+     // game and every state of a profile's tables, so the stamp is what ties c1_full.tsv / cb_extent.tsv to these libraries: each names the inputs of the library it was made from
+@@ -3269,7 +3285,7 @@ static void shmap_load(void) {
+     NSString *cp = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"c1_full.tsv"];   // Same directory as the mapping table (Mac: dm/games/<id>; iOS: dm/ inside the App, copied along by build_ipa.sh)
+     NSString *ct = cp ? [NSString stringWithContentsOfFile:cp encoding:NSUTF8StringEncoding error:nil] : nil;
+     NSString *head = ct ? [[ct componentsSeparatedByString:@"\n"] firstObject] : nil;
+-    NSString *want = [NSString stringWithFormat:@"# chain b-%s inputs %@ ", DMSH_CHAIN, st_inputs ?: @"-"];   // a library without a stamp matches no table
++    NSString *want = [NSString stringWithFormat:@"# chain b-%@ inputs %@ ", g_active_chain, st_inputs ?: @"-"];   // a library without a stamp matches no table
+     if (!head || ![head hasPrefix:want]) {
+         MLOG("[RED] c1_full.tsv is stale or missing (its header must name this library's chain and inputs; a full dmsh_build.py run makes it); every c1 gets its own 64 KiB");
+     } else {
+@@ -3450,7 +3466,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
+     NSError *e = nil;
+     NSData *jd = [NSData dataWithContentsOfFile:[NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]];
+     NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
+-    if (j && stage == 2 && [j[@"gs_slice"] isKindOfClass:[NSDictionary class]] && [j[@"chain"] isEqual:@DMSH_CHAIN]) {   // a slice-writing geometry shader has no library: a stub prog_fold_gs replaces
++    if (j && stage == 2 && [j[@"gs_slice"] isKindOfClass:[NSDictionary class]] && ([j[@"chain"] isEqual:g_active_chain] || [j[@"chain"] isEqual:@DMSH_CHAIN])) {   // a slice-writing geometry shader has no library: a stub prog_fold_gs replaces
+         NvShader *o = [NvShader new]; o->stage = 2; o->lay_loc = -1; strlcpy(o->key, pc.UTF8String, sizeof o->key);
+         o->gs_loc = [j[@"gs_slice"][@"loc"] intValue]; o->gs_comp = [[j[@"gs_slice"][@"comp"] description] UTF8String][0];
+         return o;
+@@ -3459,7 +3475,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
+     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
+     id<MTLLibrary> lib = lib_from_file(lp, &e);
+     if (!lib || !j) { MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
+-    if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
++    if (![j[@"chain"] isEqual:g_active_chain] && ![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], g_active_chain.UTF8String); return nil; }
+     if (layer && !j[@"entry_layer"]) { MLOG("[RED] vertex shader %s has no layer entry points", pc.UTF8String); return nil; }
+     NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1;
+     if (stage == 0 && [j[@"layer_from"] isKindOfClass:[NSDictionary class]]) { o->lay_loc = [j[@"layer_from"][@"loc"] intValue]; o->lay_comp = [[j[@"layer_from"][@"comp"] description] UTF8String][0]; }
+@@ -5290,7 +5306,7 @@ static NSDictionary *pre_json(NSString *key) { NSData *d = [NSData dataWithConte
+ // The base of one pair as the draws make it (pso_desc_pull / pso_desc), or nil when the pair is left to the draws. Call inside an autorelease pool
+ static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int zero) {
+     NSDictionary *vj = pre_json(vk), *fj = pre_json(fk);
+-    if (!vj || !fj || ![vj[@"chain"] isEqual:@DMSH_CHAIN] || ![fj[@"chain"] isEqual:@DMSH_CHAIN]) return nil;
++    if (!vj || !fj || (![vj[@"chain"] isEqual:g_active_chain] && ![vj[@"chain"] isEqual:@DMSH_CHAIN]) || (![fj[@"chain"] isEqual:g_active_chain] && ![fj[@"chain"] isEqual:@DMSH_CHAIN])) return nil;
+     NSString *ventry = zero && vj[@"entry_z"] ? vj[@"entry_z"] : vj[@"entry"], *fentry = fj[@"entry"] ?: @"main0";
+     int pull = [vj[@"pull"] isKindOfClass:[NSDictionary class]];
+     if (!pull && [vj[@"vertex_inputs"] count]) return nil;   // stage inputs and no pulling library: its pipelines need the draw's layout
+@@ -5324,7 +5340,7 @@ static void pre_pair(NSString *vk, NSString *fk, int zero) {
+ // the same for the archive it makes offline, from the same files
+ static NSString *pre_stamp(NSString *txt, int zero) {
+     NSData *d = [txt dataUsingEncoding:NSUTF8StringEncoding]; uint8_t h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(d.bytes, (CC_LONG)d.length, h);
+-    return [NSString stringWithFormat:@"chain\t%s\ndepth\t%s\npairs\t%lu\t%02x%02x%02x%02x%02x%02x%02x%02x\n", DMSH_CHAIN, zero ? "near=0" : "near=-w", (unsigned long)d.length,
++    return [NSString stringWithFormat:@"chain\t%s\ndepth\t%s\npairs\t%lu\t%02x%02x%02x%02x%02x%02x%02x%02x\n", g_active_chain ? g_active_chain.UTF8String : DMSH_CHAIN, zero ? "near=0" : "near=-w", (unsigned long)d.length,
+             h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]];
+ }
+ static NSArray<NSArray<NSString *> *> *pre_parse(NSString *txt) {   // (vertex key, pixel key) per line, without empty lines, comments and repeated lines
+diff --git a/dm/host/hle_fpslock.c b/dm/host/hle_fpslock.c
+index be3b622..b163fb2 100644
+--- a/dm/host/hle_fpslock.c
++++ b/dm/host/hle_fpslock.c
+@@ -40,6 +40,9 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
+     // stored at +0x10) and main+0x36164f4 (int, AsVariableInt at +0x10)
+     { "f7ec03e4cb9de3bd8319d4e899d2e9cc", "Unreal t.MaxFPS", 0x7f41908 + 0x10, 0, FPS_F32, 2 },
+     { "f7ec03e4cb9de3bd8319d4e899d2e9cc", "Unreal rhi.SyncInterval", 0x7dedf38 + 0x10, 0, VSYNCS_I32, 2 },
++    // DRAGON QUEST VII Reimagined 1.0.0 (v0): registered at main+0x4a61808 and main+0x36161b8
++    { "ab06020960edd8285b7ff5fad2e3224b", "Unreal t.MaxFPS", 0x7f41908 + 0x10, 0, FPS_F32, 2 },
++    { "ab06020960edd8285b7ff5fad2e3224b", "Unreal rhi.SyncInterval", 0x7dedf38 + 0x10, 0, VSYNCS_I32, 2 },
+     // FINAL FANTASY RESONANCE 1.0.1: Unreal Engine 5.6.1's t.MaxFPS and rhi.SyncInterval, the same layout (names in UTF-16). The engine's Switch device profile sets rhi.syncinterval=2
+     // (BaseSwitchDeviceProfiles.ini). Registered at main+0x33a4dec (float, IConsoleManager slot 2; AsVariableFloat stored at +0x10) and main+0x149e0bc (int, slot 1; AsVariableInt at +0x10)
+     { "84e182f72ee1da4f477804bd05b54c15", "Unreal t.MaxFPS", 0x8c29af0 + 0x10, 0, FPS_F32, 2 },
+diff --git a/dm/host/hle_uemalloc.c b/dm/host/hle_uemalloc.c
+index 9fa54b0..f04a64c 100644
+--- a/dm/host/hle_uemalloc.c
++++ b/dm/host/hle_uemalloc.c
+@@ -34,6 +34,8 @@ static const struct { const char *build, *what; int layout; uint64_t obj, vtable
+     { "9fe60a212cff9b9a3656ab63d4f882e5", "Octopath Traveler 0 1.0.5", UE5, 0x68022c8, 0x5b06f38, 0x12e40 },
+     // DRAGON QUEST VII Reimagined 1.2.0: no fixed object (0: made by GCreateMalloc, given at the gate), its vtable (main+0x5e4c0e8, 21 slots), the cut constructor call (main+0x32758dc)
+     { "f7ec03e4cb9de3bd8319d4e899d2e9cc", "DRAGON QUEST VII Reimagined 1.2.0", UE4_27, 0, 0x5e4c0e8, 0x32758dc },
++    // DRAGON QUEST VII Reimagined 1.0.0 (v0)
++    { "ab06020960edd8285b7ff5fad2e3224b", "DRAGON QUEST VII Reimagined 1.0.0", UE4_27, 0, 0x5e4c018, 0x32755bc },
+     // Pikmin 4 1.1.1 (Unreal Engine 4.26.2, the 4.27 slot layout: TryMalloc / TryRealloc call +0x18 / +0x28, slot 17 returns 1): made by GCreateMalloc, its vtable (main+0x8da4758, 21 slots),
+     // the cut constructor call (main+0x353f788)
+     { "060f827bd2b38703e9ea11e3210d89bc", "Pikmin 4 1.1.1", UE4_27, 0, 0x8da4758, 0x353f788 },
+diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
+index 438e584..7dfeac6 100755
+--- a/scripts/build_ipa_from_nsp.py
++++ b/scripts/build_ipa_from_nsp.py
+@@ -1772,7 +1772,11 @@ def main(args=None):
+         if alias and not derived: derived = f'title {app:016X} is not game profile {g.id}\'s title {g.title_id:016X}'
+         if derived: say(f'{derived}: packing {pkg_ver} from a profile derived from it')
+     versions = [pkg_ver] if derived else need + ([pkg_ver] if pkg_ver not in need else [])
+-    out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else nsp_dir / g.get('ipa')   # by default in the NSP folder, next to the NSPs and <id>_build/
++    if mac_pack:
++        default_name = f'{mac_app_name(g.get("name", g.id))}.app'
++        out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else nsp_dir / default_name
++    else:
++        out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else nsp_dir / (g.get('ipa') or f'{g.id}.ipa')   # by default in the NSP folder, next to the NSPs and <id>_build/
+     if shadowed and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(out_ipa.stem + '-provisional.ipa')   # never over the IPA of the game's real profile
+     if mac_pack and (args.out or OUT_IPA) and out_ipa.suffix != '.app': raise BuildError(f'the Mac app (-o / OUT_IPA) must end in .app: {out_ipa}')
+     work = nsp_dir / f'{g.id}_build'
+@@ -1798,8 +1802,9 @@ def main(args=None):
+     check_prereqs(env, xlate, mac)
+     picks = pick_nsps(fam, have, versions)
+ 
+-    ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
+-    gb = sum({p.stat().st_size for b, u in picks.values() for p in (b, u) if p}) / 2**30 + 6   # extraction + shader cache + slack
++    ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True)
++    rmtree(work / 'tmp'); (work / 'tmp').mkdir(parents=True, exist_ok=True)
++    gb = sum({p.stat().st_size for b, u in picks.values() for p in (b, u) if p}) / 2**30 + 0.3   # extraction + slack
+     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
+     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
+     PROG.plan(1 + len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)

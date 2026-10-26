@@ -1,0 +1,165 @@
+import SwiftUI
+import AppKit
+
+public struct LibraryView: View {
+    @ObservedObject public var viewModel: AppViewModel
+    @State private var gameToDelete: PortedGame? = nil
+    @State private var showDeleteConfirm: Bool = false
+    
+    public init(viewModel: AppViewModel) {
+        self.viewModel = viewModel
+    }
+    
+    private var filteredGames: [PortedGame] {
+        if viewModel.librarySearchText.trimmingCharacters(in: .whitespaces).isEmpty {
+            return viewModel.libraryGames
+        }
+        return viewModel.libraryGames.filter {
+            $0.name.localizedCaseInsensitiveContains(viewModel.librarySearchText)
+        }
+    }
+    
+    private let columns = [
+        GridItem(.adaptive(minimum: 250, maximum: 310), spacing: 18)
+    ]
+    
+    public var body: some View {
+        VStack(spacing: 0) {
+            // MARK: - Library Toolbar (Liquid Glass & Search)
+            HStack(spacing: 12) {
+                // Search Field
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(NXTheme.textSecondary)
+                    TextField("Search ported games...", text: $viewModel.librarySearchText)
+                        .textFieldStyle(.plain)
+                        .foregroundColor(NXTheme.textPrimary)
+                    if !viewModel.librarySearchText.isEmpty {
+                        Button(action: { viewModel.librarySearchText = "" }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(NXTheme.textMuted)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(NXTheme.glassSurfaceElevated.opacity(0.8))
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                    }
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
+                )
+                .frame(maxWidth: 280)
+                
+                Spacer()
+                
+                // Library Folder Indicator
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .foregroundColor(NXTheme.secondary)
+                    Text(viewModel.libraryFolder?.lastPathComponent ?? "Default Games")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(NXTheme.textSecondary)
+                    
+                    Button("Change...") {
+                        viewModel.selectLibraryFolder()
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .controlSize(.small)
+                }
+                
+                Button(action: {
+                    viewModel.refreshLibrary()
+                }) {
+                    HStack(spacing: 4) {
+                        if viewModel.isScanningLibrary {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        Text("Refresh")
+                    }
+                }
+                .buttonStyle(NXSecondaryButtonStyle())
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .background(
+                ZStack {
+                    NXTheme.canvasObsidian.opacity(0.6)
+                    Rectangle().fill(.ultraThinMaterial)
+                }
+            )
+            .overlay(
+                Rectangle()
+                    .frame(height: 1)
+                    .foregroundColor(NXTheme.borderSubtle),
+                alignment: .bottom
+            )
+            
+            // MARK: - Games Grid
+            ScrollView {
+                if filteredGames.isEmpty {
+                    VStack(spacing: 14) {
+                        Image(systemName: "gamecontroller")
+                            .font(.system(size: 44))
+                            .foregroundColor(NXTheme.secondary.opacity(0.4))
+                        
+                        VStack(spacing: 4) {
+                            Text("No Ported Games Found")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .foregroundColor(NXTheme.textPrimary)
+                            Text("Games you convert (.app and .ipa) will automatically appear here.")
+                                .font(.system(size: 12))
+                                .foregroundColor(NXTheme.textSecondary)
+                        }
+                        
+                        Button("Convert a Game Now") {
+                            viewModel.selectedTab = 0
+                        }
+                        .buttonStyle(NXPrimaryButtonStyle())
+                        .controlSize(.regular)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 320)
+                    .padding(40)
+                } else {
+                    LazyVGrid(columns: columns, spacing: 16) {
+                        ForEach(filteredGames) { game in
+                            PortedGameCard(game: game, viewModel: viewModel) { target in
+                                self.gameToDelete = target
+                                self.showDeleteConfirm = true
+                            }
+                        }
+                    }
+                    .padding(20)
+                }
+            }
+        }
+        .sheet(item: $viewModel.gameForSettingsSheet) { game in
+            GameSettingsSheetView(viewModel: viewModel, game: game)
+        }
+        .confirmationDialog(
+            "Delete \(gameToDelete?.name ?? "this game")?",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete File", role: .destructive) {
+                if let g = gameToDelete {
+                    viewModel.deletePortedGame(g)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This action will permanently delete the compiled game file from your storage.")
+        }
+    }
+}

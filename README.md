@@ -16,6 +16,18 @@
 > **NxNative Launcher** is an open-source native graphical interface and console-style game manager built directly on top of the breakthrough native translation engine created by **[seedds](https://github.com/seedds)** in **[nxnative](https://github.com/seedds/nxnative)**.
 > All core translation, Metal host execution architecture, Horizon service simulation, and Maxwell-to-SPIR-V rewriters are developed and maintained by **seedds** and the open-source emulation and systems engineering community. We express our deepest gratitude to seedds for making native execution on Apple Silicon a reality!
 
+<p align="center">
+  <img src="docs/images/screenshots/library.png" width="95%" alt="NxNative Launcher Console Game Library">
+</p>
+
+---
+
+> [!IMPORTANT]
+> ### ⚖️ ZERO COPYRIGHTED ASSETS DISTRIBUTED (Strict Clean-Room Policy)
+> - **No Proprietary Keys**: This repository and application **DO NOT** contain, host, link to, or distribute any Nintendo cryptographic keys (`prod.keys`, `title.keys`), key seeds, or certificates. Users must dump their own keys from their personally owned Nintendo Switch hardware.
+> - **No Games or ROMs**: **NO** game binaries, NSPs, XCIs, DLC files, game updates, or copyrighted assets are provided, distributed, or mirrored. Users must provide their own legally obtained game dumps.
+> - **Independent Interoperability**: NxNative Launcher is purely an open-source graphical orchestration interface and utility tool built for Apple Silicon execution interoperability.
+
 ---
 
 ## 🌟 Overview & Key Features
@@ -63,7 +75,7 @@ Control the entire launcher directly from your couch with your favorite controll
 
 ### Prerequisites
 1. An **Apple Silicon Mac** (M1, M2, M3, M4 or newer) running **macOS 13.0 or later**.
-2. Your **`prod.keys`** file dumped from your own Nintendo Switch console.
+2. Your **`prod.keys`** file dumped from your own physical Nintendo Switch console.
 3. Your legally dumped game files (`.nsp`, `.nsz`, or `.xci`).
 
 ---
@@ -80,32 +92,48 @@ Control the entire launcher directly from your couch with your favorite controll
 ### Step 2: Select Your Game Files
 1. Switch to the **Port Game** tab.
 2. Under **Step 1: Select Game Files**:
-   - Click **"Select Folder"** or drag-and-drop a folder holding your game dumps.
-   - If your folder contains multiple files (e.g., Base game + Update 1.2.0 + DLCs), NxNative Launcher automatically categorizes and links them.
-   - Click on the detected game card to confirm your selection.
-   - Click **"Continue to Configuration →"**.
+   - Drag and drop your game folder into the drop zone, or click **"Choose Folder..."**:
+
+<p align="center">
+  <img src="docs/images/screenshots/PortGame0.png" width="90%" alt="Step 1: Drag & Drop Game Files">
+</p>
+
+3. If your folder contains multiple game files (Base game + Update + DLCs), NxNative Launcher automatically categorizes, calculates file sizes, and performs an automated disk space pre-flight check:
+
+<p align="center">
+  <img src="docs/images/screenshots/PortGame1.png" width="90%" alt="Step 1: Games Detected & Disk Check">
+</p>
+
+4. Click on the detected game card to confirm your selection, then click **"Continue to Configuration →"**.
 
 ---
 
 ### Step 3: Configure Target & Performance Options
 1. Under **Step 2: Configure & Output**:
-   - **Target Platform**: Select **Mac App (.app)** to play natively on your Mac.
-   - **60 FPS Unlock**: Enable to run 30 FPS Switch games at 60 FPS (for titles with supported profiles such as Zelda BOTW, Mario Odyssey, Dragon Quest, etc.).
-   - **MetalFX Upscaling**: Enable for Apple Silicon hardware-accelerated spatial upscaling.
-   - **Docked Mode**: Toggle between 1080p Docked or 720p Handheld performance profiles.
-   - **Output Location**: Defaults to your launcher's `Games/` directory.
+   - **Target Platform**: Select **Mac App (.app)** to play natively on Apple Silicon.
+   - **Destination Directory**: Defaults to your launcher's `Games/` directory (or pick a custom volume).
+   - **Performance Enhancements**: Enable 60 FPS unlock and MetalFX Spatial Upscaling.
+
+<p align="center">
+  <img src="docs/images/screenshots/PortGame2.png" width="90%" alt="Step 2: Configure Target & Performance">
+</p>
+
+2. Click **"Port Game"**.
 
 ---
 
-### Step 4: Build Port
-1. Click **"Build Port"**.
-2. The launcher initiates the conversion process:
+### Step 4: Build Port & System Notifications
+1. The launcher executes the porting pipeline automatically:
    - Stage 1: Surveying code modules and RomFS manifest.
    - Stage 2: ExeFS & code extraction with LibHac.
    - Stage 3: Maxwell shader translation into SPIR-V.
    - Stage 4: SPIRV-Cross translation into Metal Shading Language (`.metal`).
    - Stage 5: Native Mac host compilation (`dmhost`) and bundle packaging.
-3. Once completed, a native **Apple Notification** will chime confirming the port is ready!
+2. When the build finishes, a native **macOS Notification banner** chimes to let you know the game is ready:
+
+<p align="center">
+  <img src="docs/images/screenshots/PortGame.png" width="90%" alt="Step 3: Porting Completed Successfully">
+</p>
 
 ---
 
@@ -116,6 +144,10 @@ Control the entire launcher directly from your couch with your favorite controll
    - Use **D-Pad Left/Right** or analog stick to select your game.
    - Press **`A` / `✕`** or click **"Play Game"**.
    - Inspect installed DLCs or click **"Open Folder"** under Save Files to backup or inspect your save data!
+
+<p align="center">
+  <img src="docs/images/screenshots/library.png" width="90%" alt="Console Library View">
+</p>
 
 ---
 
@@ -157,7 +189,7 @@ bash scripts/build_gui.sh
 bash scripts/create_dmg.sh
 ```
 
-The compiled `NxNative_Launcher.app` will be created in your workspace root, ready to run.
+The compiled `NxNative_Launcher.app` and `NxNative_Launcher.dmg` will be created in your workspace root, ready to run.
 
 ---
 
@@ -178,9 +210,9 @@ This launcher stands on the shoulders of brilliant software engineering across t
 
 ---
 
-## ⚖️ Legal Disclaimer
+## ⚖️ Legal Disclaimer & Fair Use Notice
 
 - **NxNative Launcher** is an open-source research and educational utility designed for interoperability and native software execution on Apple Silicon.
-- This software contains **no copyrighted code, binary assets, game data, or cryptographic keys** from Nintendo or any third-party game publishers.
-- Users must supply their own legally obtained `prod.keys` dumped from their personal Nintendo Switch hardware, as well as their own game files dumped from cartridges or digital purchases they legally own.
-- Nintendo Switch is a registered trademark of Nintendo Co., Ltd. NxNative Launcher is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Nintendo.
+- **NO PROPRIETARY ASSETS DISTRIBUTED**: This software contains **no copyrighted code, binary assets, game data, or cryptographic keys** from Nintendo or any third-party game publishers.
+- **BRING YOUR OWN KEYS & GAMES**: Users must supply their own legally obtained `prod.keys` dumped from their personal Nintendo Switch hardware, as well as their own game files dumped from cartridges or digital purchases they legally own.
+- **TRADEMARKS**: Nintendo Switch is a registered trademark of Nintendo Co., Ltd. NxNative Launcher is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Nintendo.

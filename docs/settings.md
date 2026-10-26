@@ -5,6 +5,8 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Upscaling detail](#upscaling-detail), [Sharpening](#sharpening), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [TV](#tv)
@@ -50,6 +52,24 @@ Breath of the Wild renders 1280x720 in handheld mode. Docked it renders its worl
 - **When to change it:** turn it on if the picture looks soft and the device has GPU time to spare: on a Mac, or on an iPhone in handheld mode at 30 fps. For long sessions at 60 fps on an iPhone leave it at Standard.
 - **Cost:** more GPU time each frame, which can increase heat on an iPhone. [Breath of the Wild's measurements](../dm/games/01007EF00011E000/README.md#upscaling-current) cover Mac and iPhone; the matching iPhone Standard run and MetalFX's share of the thermal cost remain unmeasured. Nothing changes while the game's picture is as large as the screen. Unsupported devices and sizes use Standard scaling.
 - **On the Mac:** choose **MetalFX** under **Upscaling** in the [settings window](#the-mac-settings-window)'s Advanced settings, or set `DM_PRESENT_UPSCALE=metalfx` in its `env.txt` (off by default). It helps in a large window or on a 4K screen.
+
+### Upscaling detail
+
+Only does something with **Upscaling** set to **MetalFX**. MetalFX normally reconstructs the picture at the screen's size. This reconstructs it larger and averages it back down, which is supersampling: thinner edges, less shimmer on fences, grass and distant detail.
+
+**100%**, the default, reconstructs at the screen's size as before. **200%** reconstructs at twice it in each direction and averages four samples per pixel, **400%** sixteen.
+
+- **When to change it:** on a device with GPU time to spare. It is the sharpest the picture gets without the game rendering more.
+- **Cost:** more GPU time each frame, which can increase heat. Nothing above the reconstruction's own size is allocated beyond one larger texture.
+
+### Sharpening
+
+Lifts edges in the finished picture without touching flat areas, and is clamped to the brightness range of the pixels around each one, so it cannot ring or draw halos.
+
+**0%**, the default, is off. It replaces the normal present rather than adding a pass, so it costs no extra draw.
+
+- **When to change it:** a soft picture, especially where the game renders below the screen's size and no upscaler is on.
+- **Cost:** four more texture reads in the final draw.
 
 ### Game language
 
@@ -229,6 +249,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
+| Upscaling detail | `DM_PRESENT_UPSCALE_OUT` | `1.0` to `4.0` |
+| Sharpening | `DM_SHARPEN` | `0` to `1` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |

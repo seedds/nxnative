@@ -87,11 +87,13 @@ void front_screen_match(int fps) {
 static uint64_t g_mbtn;   // buttons held on the captured mouse
 static int g_kbm;   // keyboard and mouse controls (below)
 static double g_shake_t0, g_shake_until;   // a right stick shake played into the game (shake_start)
+static int32_t g_flick_rx;                  // a right stick flick in a quick menu (flick_add)
+#define DPAD (DM_BTN_UP | DM_BTN_RIGHT | DM_BTN_DOWN | DM_BTN_LEFT)
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     double now = CACurrentMediaTime();
     if (now < g_shake_until) dm_input_set(g_btn | g_mbtn, lx, ly, ((int)((now - g_shake_t0) / 0.05) & 1) ? -32767 : 32767, 0);   // full swings, 0.05 s each
-    else if (g_kbm && (g_btn & (DM_BTN_UP | DM_BTN_RIGHT | DM_BTN_DOWN | DM_BTN_LEFT))) dm_input_set(g_btn | g_mbtn, 0, 0, lx, ly);   // a held D-pad opens a quick menu, picked with the right stick
+    else if (g_kbm && (g_btn & DPAD)) dm_input_set(g_btn | g_mbtn, 0, 0, g_flick_rx ? g_flick_rx : lx, ly);   // a held D-pad opens a quick menu, picked with the right stick
     else dm_input_set(g_btn | g_mbtn, lx, ly, 0, 0);
 }
 // Ultrahand pulls apart objects stuck together when the right stick is shaken, which the mouse (camera by angle, not the stick) never does: a shake of the mouse or R
@@ -156,6 +158,24 @@ static void mouse_button(int n, int down) {
     }
     g_mbtn = down ? (g_mbtn | held[n]) : (g_mbtn & ~held[n]); push();
 }
+// The scroll wheel in a quick menu (a D-pad key held): one item per wheel event (macOS accelerates a fast turn into events of several lines) or per 1.5 notches of a
+// trackpad (15 points), away or left the next, toward or right the previous (tested in game): a right stick flick of 0.06 s, centred again for 0.045 s (two frames and
+// one at 30 fps). Scrolling during a flick is
+// dropped, not queued, so a fast turn moves a few items, not a burst
+static int g_flick_busy; static double g_flick_acc;
+static void flick_add(double notches, int precise) {   // > 0: the next item
+    if (g_flick_busy || notches == 0) return;
+    if (precise) {
+        if ((notches > 0) != (g_flick_acc > 0)) g_flick_acc = 0;
+        g_flick_acc += notches;
+        if (fabs(g_flick_acc) < 1.5) return;
+        notches = g_flick_acc; g_flick_acc = 0;
+    }
+    g_flick_busy = 1; g_flick_rx = notches > 0 ? 32767 : -32767; push();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        g_flick_rx = 0; push();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 45 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ g_flick_busy = 0; }); });
+}
 // The scroll wheel with an object held (Ultrahand, the game's camera 5): vertically D-pad down (away) or up (toward), which pushes the object away or pulls it in (tested
 // in game), horizontally D-pad left or right. Each notch holds the button for 0.1 s more (at most 0.5 s ahead); a turn the other way switches at once
 static uint64_t g_scroll_bit[2]; static double g_scroll_until[2]; static int g_scroll_gen[2];
@@ -184,7 +204,7 @@ static int kbm_bit(unsigned short code) {
     switch (code) {
         case 14: case 36: return 0; case 49: return 2; case 3: return 9;                     // E Return → A, Space → X, F → ZR
         case 12: return 6;  case 5: return 7;   case 8: return 4;                             // Q → L, G → R, C → press left stick
-        case 18: return 13; case 19: return 14; case 20: return 15; case 21: return 12;      // 1 2 3 4 → D-pad up right down left
+        case 18: return 14; case 19: return 12; case 20: return 13; case 21: return 15;      // 1 2 3 4 → D-pad right left up down (weapons, shields, abilities, whistle)
         case 53: return 10; case 48: case 46: return 11;                                      // Esc → +, Tab M → −
         case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15;  // ← ↑ → ↓
     }
@@ -343,6 +363,7 @@ static void pads_start(void) {
     double k = (e.hasPreciseScrollingDeltas ? 0.1 : 1) * (e.isDirectionInvertedFromDevice ? -1 : 1);   // points on a trackpad, lines on a wheel; by the device's own direction, whatever the natural scrolling setting
     double y = e.scrollingDeltaY * k, x = -e.scrollingDeltaX * k;
     if (e.hasPreciseScrollingDeltas) { if (fabs(x) < fabs(y) / 2) x = 0; else if (fabs(y) < fabs(x) / 2) y = 0; }   // a trackpad's stray other axis
+    if (g_mouse_cap && g_input_on && g_kbm && (g_btn & DPAD) && dm_mouse_camera_kind() != 5) { flick_add(y - x, e.hasPreciseScrollingDeltas); return; }   // a quick menu: away or left is the next item
     mouse_scroll(0, y); mouse_scroll(1, x);
 }
 - (void)mouseDragged:(NSEvent *)e {

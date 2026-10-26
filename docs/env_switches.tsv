@@ -54,7 +54,7 @@ DM_ICON	path	`=<image>` gives `build_ipa.sh` another app icon (default the `icon
 DM_IMPORTS	diagnostic	When set, logs each import the loader binds to a host function and each forced takeover
 DM_KBD	switch	`=<text>`: the system keyboard returns that text as OK without showing an input box; unset with no window, it returns cancel
 DM_KBD_PLAYER	switch	`own` makes the Mac keyboard player 1 on its own, with controllers from player 2 on (by default the first controller shares player 1 with the keyboard)
-DM_KBM	player	`0` turns the Mac's keyboard and mouse controls off (the mouse camera and the PC layout), leaving the classic keys; only for a build whose patch reads the mouse (Tears of the Kingdom)
+DM_KBM	player	`1` starts the game with the Mac's keyboard and mouse controls (the mouse camera and the PC layout) instead of the classic keys (otherwise ` in the window switches to them); `0` takes them away, so ` does nothing; only for a build whose patch reads the mouse (Tears of the Kingdom)
 DM_KEYS	switch	Scripted input: `<seconds or f<frame>>:<key>[+key][~hold][*count/interval],…` presses buttons, sticks and `Shake` at those times
 DM_LANG	player	Game language as a language code (default `en-US`; the iOS app sets the one the IPA was packed with)
 DM_LAUNCHER	switch	`0` skips the iOS settings screen or the Mac settings window and starts the game at once, with the saved choices (on the Mac also `--no-launcher`)

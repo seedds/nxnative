@@ -54,7 +54,7 @@ void dm_set_opmode(int m);          // On change, push notification 30 / 31 acco
 void dm_focus_set(int st);
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
 extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag, +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
-int dm_mouse_camera(void);             // 1 = the game turns its camera by the mouse (loader.c; a build with a mouse-camera stub, DM_KBM not 0: keyboard and mouse controls)
+int dm_mouse_camera(void);             // 1 = the game turns its camera by the mouse (loader.c; a build with a mouse-camera stub, DM_KBM not 0: keyboard and mouse controls, opt in with ` or DM_KBM=1)
 void dm_mouse_move(int32_t dx, int32_t dy);   // raw mouse counts since the last call, dy up; any thread
 int dm_mouse_camera_kind(void);       // the stubbed camera in play (the game's numbers: Tears of the Kingdom 1 Chase, 2 Aiming, 3 UltraHand, 4 SpecialPower, 5 an object held by Ultrahand), 0 when none ran just now
 double dm_mouse_camera_idle(void);    // seconds since a camera stub last ran (a stubbed camera is in play when small; huge before the first)

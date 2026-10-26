@@ -2,7 +2,8 @@
 // with them so far: it switches on only for a game whose patch turns the camera by the mouse (hle.h dm_mouse_camera; the rewriter emits that patch for that game's build alone), so
 // no other game sees it. It stays in this one file, apart from the general front end, until a second game takes keyboard and mouse controls; that game's needs then show which
 // parts are general (capture, contexts, scroll, shake, aim toggles) and which become per-game bindings in the profiles
-// The controls (a game whose stubs turn the camera by the mouse, hle.h dm_mouse_camera) are on from the start, ` switches to the classic keys and back. A click in the
+// The controls (a game whose stubs turn the camera by the mouse, hle.h dm_mouse_camera) are opt in: the game starts with the classic keys, as every other game (most
+// players use a controller), and ` switches to the controls and back; DM_KBM=1 starts with them. A click in the
 // window captures the mouse (cursor hidden and held still); leaving the window (⌘Tab) or ` lets it go. The keyboard takes a PC layout (kbm_bit) and the captured mouse turns the camera by angle (raw counts from GCMouse to dm_mouse_move): WASD left stick, left click Y,
 // right click ZL, middle click R3, F bow mode (ZR held; left click fires, F or right click leaves), R D-pad up,
 // G throw mode (R held; left click throws, G or right click leaves), Space X, Shift B, E or Return A, Q L (while held, the mouse points the right stick, which picks in the ability wheel, and right click is B), Ctrl or C L3, 1-4 D-pad right / left / up / down (Tears of the Kingdom's quick menus:
@@ -70,7 +71,7 @@ static void shake_start(void) {
     if (now < g_shake_until + 0.4) return;
     g_shake_t0 = now; g_shake_until = now + 0.6; shake_tick();
 }
-// Keyboard and mouse controls (main thread), on from the start when the game's patch reads mouse counts (dm_mouse_camera); ` switches between them and the classic keys.
+// Keyboard and mouse controls (main thread), available when the game's patch reads mouse counts (dm_mouse_camera), on from the start with DM_KBM=1; ` switches between them and the classic keys.
 // A click in the window captures the mouse: the cursor is hidden and detached from it, and it reaches the game only as camera movement and its buttons; leaving the window
 // (input_release) or ` gives the cursor back
 static float g_mrx, g_mry;   // fractions of a count carried to the next movement
@@ -226,5 +227,7 @@ void kbm_start(void) {
     void (^hook)(GCMouse *) = ^(GCMouse *m) { m.mouseInput.mouseMovedHandler = ^(GCMouseInput *mi, float dx, float dy) { (void)mi; mouse_moved(dx, dy); }; };
     for (GCMouse *m in GCMouse.mice) hook(m);
     [NSNotificationCenter.defaultCenter addObserverForName:GCMouseDidConnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { hook(n.object); }];
-    kbm_set(1);
+    const char *e = getenv("DM_KBM");
+    if (e && atoi(e) > 0) kbm_set(1);
+    else LOG("front end: classic keys (` for keyboard and mouse controls, DM_KBM=1 starts with them)");
 }

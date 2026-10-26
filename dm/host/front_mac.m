@@ -86,10 +86,24 @@ void front_screen_match(int fps) {
 }
 static uint64_t g_mbtn;   // buttons held on the captured mouse
 static int g_kbm;   // keyboard and mouse controls (below)
+static double g_shake_t0, g_shake_until;   // a right stick shake played into the game (shake_start)
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    if (g_kbm && (g_btn & (DM_BTN_UP | DM_BTN_RIGHT | DM_BTN_DOWN | DM_BTN_LEFT))) dm_input_set(g_btn | g_mbtn, 0, 0, lx, ly);   // a held D-pad opens a quick menu, picked with the right stick
+    double now = CACurrentMediaTime();
+    if (now < g_shake_until) dm_input_set(g_btn | g_mbtn, lx, ly, ((int)((now - g_shake_t0) / 0.05) & 1) ? -32767 : 32767, 0);   // full swings, 0.05 s each
+    else if (g_kbm && (g_btn & (DM_BTN_UP | DM_BTN_RIGHT | DM_BTN_DOWN | DM_BTN_LEFT))) dm_input_set(g_btn | g_mbtn, 0, 0, lx, ly);   // a held D-pad opens a quick menu, picked with the right stick
     else dm_input_set(g_btn | g_mbtn, lx, ly, 0, 0);
+}
+// Ultrahand pulls apart objects stuck together when the right stick is shaken, which the mouse (camera by angle, not the stick) never does: a shake of the mouse or R
+// with an object held plays 0.6 s of full right stick swings instead (at most one a second)
+static void shake_tick(void) {
+    push();
+    if (CACurrentMediaTime() < g_shake_until) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ shake_tick(); });
+}
+static void shake_start(void) {
+    double now = CACurrentMediaTime();
+    if (now < g_shake_until + 0.4) return;
+    g_shake_t0 = now; g_shake_until = now + 0.6; shake_tick();
 }
 // Keyboard and mouse controls (main thread), on from the start when the game's patch reads mouse counts (dm_mouse_camera); ` switches between them and the classic keys.
 // A click in the window captures the mouse: the cursor is hidden and detached from it, and it reaches the game only as camera movement and its buttons; leaving the window
@@ -110,12 +124,24 @@ static void kbm_set(int on) {
     g_btn = 0; push();   // the two layouts map keys differently: nothing held stays pressed across the switch
     LOG("front end: %s", on ? "keyboard and mouse controls (click in the window to capture the mouse, ` for the classic keys)" : "classic keys (` for keyboard and mouse controls)");
 }
+// A mouse shake: 4 turns left / right within 0.7 s, each after at least 150 counts the other way (a few centimetres at common resolutions; aiming turns slower)
+static void shake_detect(float dx) {
+    static int dir, n; static float run; static double t[4];
+    int d = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+    if (!d) return;
+    if (d == dir) { run += fabsf(dx); return; }
+    double now = CACurrentMediaTime();
+    if (run >= 150) { t[n++ & 3] = now; if (n >= 4 && now - t[n & 3] < 0.7) { n = 0; shake_start(); } }
+    else n = 0;
+    dir = d; run = fabsf(dx);
+}
 static void mouse_moved(float dx, float dy) {
     if (!g_mouse_cap || !g_input_on) return;
     g_mrx += dx; g_mry += dy;
     int32_t ix = (int32_t)g_mrx, iy = (int32_t)g_mry;
     g_mrx -= ix; g_mry -= iy;
     if (ix || iy) dm_mouse_move(ix, iy);
+    if (dm_mouse_camera_kind() == 5) shake_detect(dx);
 }
 static int menu_open(void);
 // Mouse button n (0 left, 1 right, 2 middle): Y, ZL, R3; in the menus left is A and right B. While aiming (the game's cameras 2 to 4: Tears of the Kingdom's bow and
@@ -130,18 +156,18 @@ static void mouse_button(int n, int down) {
     }
     g_mbtn = down ? (g_mbtn | held[n]) : (g_mbtn & ~held[n]); push();
 }
-// The scroll wheel with an object held (Ultrahand, the game's camera 5): D-pad down (away) or up (toward), which pushes the object away or pulls it in (tested in game). Each notch
-// holds the button for 0.1 s more (at most 0.5 s ahead); a turn the other way switches at once
-static uint64_t g_scroll_bit; static double g_scroll_until; static int g_scroll_gen;
-static void mouse_scroll(double notches) {
+// The scroll wheel with an object held (Ultrahand, the game's camera 5): vertically D-pad down (away) or up (toward), which pushes the object away or pulls it in (tested
+// in game), horizontally D-pad left or right. Each notch holds the button for 0.1 s more (at most 0.5 s ahead); a turn the other way switches at once
+static uint64_t g_scroll_bit[2]; static double g_scroll_until[2]; static int g_scroll_gen[2];
+static void mouse_scroll(int axis, double notches) {   // axis 0: away > 0, 1: right > 0
     if (!g_mouse_cap || !g_input_on || notches == 0 || dm_mouse_camera_kind() != 5) return;
-    uint64_t bit = notches > 0 ? DM_BTN_DOWN : DM_BTN_UP; double now = CACurrentMediaTime();
-    if (bit != g_scroll_bit) { g_mbtn &= ~g_scroll_bit; g_scroll_bit = bit; g_scroll_until = now; }
-    g_scroll_until = fmin(fmax(g_scroll_until, now) + 0.1 * fabs(notches), now + 0.5);
+    uint64_t bit = axis ? (notches > 0 ? DM_BTN_RIGHT : DM_BTN_LEFT) : (notches > 0 ? DM_BTN_DOWN : DM_BTN_UP); double now = CACurrentMediaTime();
+    if (bit != g_scroll_bit[axis]) { g_mbtn &= ~g_scroll_bit[axis]; g_scroll_bit[axis] = bit; g_scroll_until[axis] = now; }
+    g_scroll_until[axis] = fmin(fmax(g_scroll_until[axis], now) + 0.1 * fabs(notches), now + 0.5);
     g_mbtn |= bit; push();
-    int gen = ++g_scroll_gen;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((g_scroll_until - now) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (gen == g_scroll_gen) { g_mbtn &= ~g_scroll_bit; g_scroll_bit = 0; push(); } });
+    int gen = ++g_scroll_gen[axis];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((g_scroll_until[axis] - now) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (gen == g_scroll_gen[axis]) { g_mbtn &= ~g_scroll_bit[axis]; g_scroll_bit[axis] = 0; push(); } });
 }
 static int key_bit(unsigned short code) {
     switch (code) {
@@ -185,6 +211,7 @@ static void on_key(NSEvent *e, int down) {
     if (c == 50 || c == 10) { if (down && dm_mouse_camera()) kbm_set(!g_kbm); return; }   // ` (§ beside it on ISO keyboards) switches between the two layouts
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     if (g_kbm) {
+        if (c == 15) { if (down && dm_mouse_camera_kind() == 5) shake_start(); return; }   // R: shake the right stick (Ultrahand: pull apart)
         if (down && (c == 53 || c == 48 || c == 46)) {
             int m = c == 53 ? DM_BTN_PLUS : DM_BTN_MINUS;
             if (menu_open() == m) g_menu = 0; else { g_menu = m; g_menu_t = CACurrentMediaTime(); }
@@ -313,8 +340,10 @@ static void pads_start(void) {
 - (void)otherMouseUp:(NSEvent *)e { if (e.buttonNumber == 2) mouse_button(2, 0); }
 - (void)scrollWheel:(NSEvent *)e {
     if (e.momentumPhase != NSEventPhaseNone) return;   // a trackpad's glide after the fingers lift
-    double d = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY / 10 : e.scrollingDeltaY;   // points on a trackpad, lines on a wheel
-    mouse_scroll(e.isDirectionInvertedFromDevice ? -d : d);   // by the wheel's own direction, whatever the natural scrolling setting
+    double k = (e.hasPreciseScrollingDeltas ? 0.1 : 1) * (e.isDirectionInvertedFromDevice ? -1 : 1);   // points on a trackpad, lines on a wheel; by the device's own direction, whatever the natural scrolling setting
+    double y = e.scrollingDeltaY * k, x = -e.scrollingDeltaX * k;
+    if (e.hasPreciseScrollingDeltas) { if (fabs(x) < fabs(y) / 2) x = 0; else if (fabs(y) < fabs(x) / 2) y = 0; }   // a trackpad's stray other axis
+    mouse_scroll(0, y); mouse_scroll(1, x);
 }
 - (void)mouseDragged:(NSEvent *)e {
     if (!g_input_on || g_kbm) return;

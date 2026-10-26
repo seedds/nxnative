@@ -151,15 +151,18 @@ def frame_step(ctx):
 # yaw -= dx * (state +0x50), wrapped to [-180, 180); pitch += dy * (state +0x54), within the node's bounds. Counts that no camera took for 1/8 s (another camera, a menu;
 # the time of the last take at state +0x60, in system counter ticks) are dropped instead of turning the camera all at once afterwards. With the stick at rest it holds a 0.001
 # stick (both axes: with y at 0 Chase eases the pitch back into its comfort band, and Aiming takes gyro input instead) for 10 frames after the mouse moved (counter at state
-# +0x58), so the camera stays player-controlled instead of following Link. State +0x50 = 0 (the host's default without a mouse camera) runs the original instruction only
+# +0x58), so the camera stays player-controlled instead of following Link. State +0x50 = 0 (the host's default without a mouse camera) runs the original instruction only.
+# Each stub also writes its camera's number to state +0x68 (1 Chase, 2 Aiming), which the front end reads with the time of the last take to map the mouse buttons
 def LDRS(t, n, off): return 0xbd400000 | (off // 4) << 10 | n << 5 | t   # ldr st,[xn,#off]
 def STRS(t, n, off): return 0xbd000000 | (off // 4) << 10 | n << 5 | t   # str st,[xn,#off]
 def STRW(t, n, off): return 0xb9000000 | (off // 4) << 10 | n << 5 | t   # str wt,[xn,#off]
-def mouse_stub(ctx, site, cam, node, pitch, pitch2, lo, hi):
+def mouse_stub(ctx, site, kind, cam, node, pitch, pitch2, lo, hi):
     here, emit = ctx.here, ctx.emit
     ctx.site(site, struct.pack('<I', ADDI(8, cam, 0x40c)).hex())
     start = here(); emit(ADRP(9, here(), ctx.state))
-    for w in (0xbd405130,   # ldr s16,[x9,#0x50]       yaw degrees per count
+    for w in (0x5280000e | kind << 5,   # mov w14,#kind
+              STRW(14, 9, 0x68),        # the camera in play
+              0xbd405130,   # ldr s16,[x9,#0x50]       yaw degrees per count
               0x1e202208,   # fcmp s16,#0.0
               0x540006e0,   # b.eq orig (+55)           mouse camera off
               0x29482d2a,   # ldp w10,w11,[x9,#0x40]   host totals
@@ -221,8 +224,8 @@ def mouse_stub(ctx, site, cam, node, pitch, pitch2, lo, hi):
     emit(B(here(), site + 4))
     ctx.put(site, [B(site, start)], 'mouse camera: host mouse counts added to the camera yaw / pitch')
 def mouse_camera(ctx):
-    mouse_stub(ctx, 0x18e468, cam=26, node=20, pitch=0x108, pitch2=0x108, lo=0xf8, hi=0xfc)     # Chase
-    mouse_stub(ctx, 0x23be9b4, cam=22, node=19, pitch=0x15c, pitch2=0x154, lo=0x1d4, hi=0x1d8)  # Aiming
+    mouse_stub(ctx, 0x18e468, kind=1, cam=26, node=20, pitch=0x108, pitch2=0x108, lo=0xf8, hi=0xfc)     # Chase
+    mouse_stub(ctx, 0x23be9b4, kind=2, cam=22, node=19, pitch=0x15c, pitch2=0x154, lo=0x1d4, hi=0x1d8)  # Aiming
     ctx.mouse_camera = 1
 
 FRAME_STEP = {'277178b7dba1b6d4949a84778d4abc58': frame_step}

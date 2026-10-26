@@ -56,6 +56,8 @@ void dm_focus_set(int st);
 extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag, +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
 int dm_mouse_camera(void);             // 1 = the game turns its camera by the mouse (loader.c; a build with a mouse-camera stub, DM_KBM not 0: keyboard and mouse controls)
 void dm_mouse_move(int32_t dx, int32_t dy);   // raw mouse counts since the last call, dy up; any thread
+int dm_mouse_camera_kind(void);       // the stubbed camera in play (the game's numbers: Tears of the Kingdom 1 Chase, 2 Aiming), 0 when none ran just now
+double dm_mouse_camera_idle(void);    // seconds since a camera stub last ran (a stubbed camera is in play when small; huge before the first)
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)

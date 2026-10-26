@@ -3,10 +3,10 @@
 // original battle move HUD during explicit skill selection.
 //   Two layouts, three in handheld mode; one tap on the layout button at the top centre (labelled with the current layout, "2D" / "3D" / "Tap") goes to the next, and the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
 //   Tap (touch): no control but the layout button, every other touch goes to the game's touch screen; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
-//   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
+//   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone), with a separate 8-way D-pad immediately inward;
 //     the A (bottom) B (right) X (left) Y (top) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
 //   Both 2D and 3D have camera drag on empty space in the right half: a right stick that is not drawn, centred where the touch lands, with the centre dragged along past the stick radius.
-//   3D (full, Pro Controller style): everything in 2D (left stick and diamond keep their place and size), plus a D-pad (inward of and below the left stick, 8-way) and L3 / R3 (small round keys in the top row, inward of ZL / ZR).
+//   3D (full, Pro Controller style): everything in 2D (left stick, D-pad and diamond keep their place and size), plus L3 / R3 (small round keys in the top row, inward of ZL / ZR).
 //     Breath of the Wild crouches with L3 and uses the scope with R3; 3D World and Breath of the Wild turn the camera with the right stick.
 //   Touch-down ownership: locked keys first (shoulders, − / +, the layout button, L3 / R3), then whichever of the diamond, the D-pad and the left stick has the smallest distance / grab radius (the left stick's grab circle borders the D-pad),
 //     then the camera for an unclaimed touch in the right half. Ownership stays with its original control until release/cancellation; sliding a camera finger over ABXY never presses a skill.
@@ -200,7 +200,7 @@ static CATextLayer *label(CALayer *parent, NSString *s) {
     t.string = s; t.alignmentMode = kCAAlignmentCenter; t.foregroundColor = k_text.CGColor; t.contentsScale = UIScreen.mainScreen.scale;
     [parent addSublayer:t]; return t;
 }
-static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   // keys shown only in the 3D layout
+static BOOL fullOnly(int b) { return b == B_LS || b == B_RS; }   // stick clicks are shown only in the 3D layout; directions are always available
 
 - (instancetype)initWithFrame:(CGRect)f {
     if ((self = [super initWithFrame:f])) {
@@ -281,11 +281,18 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
 - (BOOL)canBecomeFirstResponder { return YES; }
 - (void)didMoveToWindow { [super didMoveToWindow]; if (self.window) [self becomeFirstResponder]; }
 - (NSArray<UIKeyCommand *> *)keyCommands {
-    if (!g_aim_button || !g_input_active) return @[];
+    if (!g_input_active) return @[];
     NSMutableArray<UIKeyCommand *> *commands = [NSMutableArray array];
+    // Keep arrows inside the game even when UIKit would otherwise use them for
+    // focus movement. GCKeyboard still supplies the matching down/up events.
+    for (NSString *key in @[UIKeyInputUpArrow, UIKeyInputDownArrow, UIKeyInputLeftArrow, UIKeyInputRightArrow]) {
+        UIKeyCommand *command = [UIKeyCommand keyCommandWithInput:key modifierFlags:0 action:@selector(gameCommand:)];
+        command.wantsPriorityOverSystemBehavior = YES;
+        [commands addObject:command];
+    }
     // Consume only game combinations, in particular Command-W, rather than
     // allowing the system to close a Stage Manager window while moving.
-    for (NSString *key in @[@"w", @"a", @"s", @"d", @"u", @"i", @"j", @"k", @"l", @"q", @"e", @"z", @"c", UIKeyInputUpArrow, UIKeyInputDownArrow, UIKeyInputLeftArrow, UIKeyInputRightArrow])
+    if (g_aim_button) for (NSString *key in @[@"w", @"a", @"s", @"d", @"u", @"i", @"j", @"k", @"l", @"q", @"e", @"z", @"c", UIKeyInputUpArrow, UIKeyInputDownArrow, UIKeyInputLeftArrow, UIKeyInputRightArrow])
         for (NSNumber *extra in @[@0, @(UIKeyModifierShift)]) {
             UIKeyCommand *command = [UIKeyCommand keyCommandWithInput:key modifierFlags:UIKeyModifierCommand | extra.unsignedIntegerValue action:@selector(gameCommand:)];
             command.wantsPriorityOverSystemBehavior = YES;
@@ -471,7 +478,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         // diamond, D-pad, left stick: take the one with the smallest distance / grab radius, if it is <= 1
         CGFloat best = 1; int kind = C_NONE, idx = 0;
         CGFloat f = dist(p, self.faceCenter) / (self.faceGap + self.faceR * 1.6); if (f <= best) { best = f; kind = C_FACE; }
-        if (_full) { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
+        { CGFloat d = dist(p, self.dpadCenter) / (self.dpadR * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
         if (!_stick[0]) { CGFloat s = dist(p, self.stickHome) / ([self stickR:0] * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
         // Camera is available in Simple too: detaching a keyboard restores the
         // saved layout, and Simple previously routed every blank-area drag to
@@ -654,6 +661,10 @@ static uint64_t keyboard_button(GCKeyCode key) {
     }
     if (key == GCKeyCodeTab) return DM_BTN_MINUS;
     if (key == GCKeyCodeSpacebar) return DM_BTN_SHAKE;
+    if (key == GCKeyCodeLeftArrow) return DM_BTN_LEFT;
+    if (key == GCKeyCodeUpArrow) return DM_BTN_UP;
+    if (key == GCKeyCodeRightArrow) return DM_BTN_RIGHT;
+    if (key == GCKeyCodeDownArrow) return DM_BTN_DOWN;
     return 0;
 }
 static void read_key(GCKeyCode key, BOOL pressed) {
@@ -662,10 +673,6 @@ static void read_key(GCKeyCode key, BOOL pressed) {
     else if (key == GCKeyCodeKeyA) g_key_a = pressed;
     else if (key == GCKeyCodeKeyS) g_key_s = pressed;
     else if (key == GCKeyCodeKeyD) g_key_d = pressed;
-    else if (key == GCKeyCodeLeftArrow) g_key_left = pressed;
-    else if (key == GCKeyCodeUpArrow) g_key_up = pressed;
-    else if (key == GCKeyCodeRightArrow) g_key_right = pressed;
-    else if (key == GCKeyCodeDownArrow) g_key_down = pressed;
     else if (key == GCKeyCodeLeftShift) g_shift_left = pressed;
     else if (key == GCKeyCodeRightShift) g_shift_right = pressed;
     else if (key == GCKeyCodeLeftGUI) g_command_left = pressed;
@@ -674,8 +681,9 @@ static void read_key(GCKeyCode key, BOOL pressed) {
     g_key_btn = pressed ? g_key_btn | bit : g_key_btn & ~bit;
     g_key_lx = ((int)g_key_d - (int)g_key_a) * DM_STICK_MAX;
     g_key_ly = ((int)g_key_w - (int)g_key_s) * DM_STICK_MAX;
-    g_key_rx = ((int)g_key_right - (int)g_key_left) * DM_STICK_MAX;
-    g_key_ry = ((int)g_key_up - (int)g_key_down) * DM_STICK_MAX;
+    // Arrow keys are the four digital directions. Camera input remains on the
+    // right-side touch drag, mouse/trackpad, or a physical right stick.
+    g_key_rx = g_key_ry = 0;
     pthread_mutex_unlock(&g_mu);
     publish();
 }

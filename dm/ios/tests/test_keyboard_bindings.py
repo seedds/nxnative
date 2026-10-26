@@ -35,6 +35,10 @@ int main(void) {
     setenv("DM_KEY_ENTER_A", "1", 1);
     assert(keyboard_button(GCKeyCodeReturnOrEnter) == DM_BTN_A);
     assert(keyboard_button(GCKeyCodeTab) == DM_BTN_MINUS);
+    assert(keyboard_button(GCKeyCodeLeftArrow) == DM_BTN_LEFT);
+    assert(keyboard_button(GCKeyCodeUpArrow) == DM_BTN_UP);
+    assert(keyboard_button(GCKeyCodeRightArrow) == DM_BTN_RIGHT);
+    assert(keyboard_button(GCKeyCodeDownArrow) == DM_BTN_DOWN);
     return 0;
 }
 """
@@ -48,6 +52,14 @@ int main(void) {
         self.assertNotIn("dm_za_skill_input_active", publish)
         self.assertIn("g_touch_native = g_touch_face | g_touch_btn;", publish)
         self.assertIn("uint64_t keyboard = g_key_btn;", publish)
+        self.assertIn("g_key_rx = g_key_ry = 0;", source)
+
+    def test_touch_dpad_is_available_in_simple_and_full_layouts(self):
+        source = (ROOT / "dm/ios/Sources/DmGamepad.m").read_text()
+        self.assertIn("static BOOL fullOnly(int b) { return b == B_LS || b == B_RS; }", source)
+        began = source[source.index("- (void)touchesBegan:"):source.index("- (void)touchesMoved:")]
+        self.assertIn("kind = C_DPAD", began)
+        self.assertNotIn("if (_full) { CGFloat d = dist(p, self.dpadCenter)", began)
 
 if __name__ == "__main__":
     unittest.main()

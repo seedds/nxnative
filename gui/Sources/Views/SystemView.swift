@@ -9,27 +9,36 @@ public struct SystemView: View {
     
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 20) {
                 // Header & Action Bar
                 headerView
                 
-                // 1. Decryption Keys (prod.keys)
-                SystemKeysCard(viewModel: viewModel)
+                // MARK: - Category 1: Environment & Decryption Keys
+                categoryHeader(title: "Environment & Decryption Keys", icon: "key.fill")
+                VStack(spacing: 12) {
+                    SystemKeysCard(viewModel: viewModel)
+                    SystemToolsCard(viewModel: viewModel)
+                }
                 
-                // 2. App Icon & Theme Appearance
-                SystemAppearanceCard(viewModel: viewModel)
+                // MARK: - Category 2: Core Engine & Patches
+                categoryHeader(title: "Core Engine & Compatibility Patches", icon: "cpu.fill")
+                VStack(spacing: 12) {
+                    SystemRepoCard(viewModel: viewModel)
+                    SystemPatchesCard(viewModel: viewModel)
+                    SystemCreditsCard()
+                }
                 
-                // 3. nxnative Core Repository & Upstream Updates
-                SystemRepoCard(viewModel: viewModel)
-                
-                // 3. Engine Compatibility Patches
-                SystemPatchesCard(viewModel: viewModel)
-                
-                // 4. Directories & Storage Preferences
+                // MARK: - Category 3: Storage & Working Directories
+                categoryHeader(title: "Storage & Library Directories", icon: "folder.fill")
                 SystemDirectoriesCard(viewModel: viewModel)
                 
-                // 5. System Build Tools & Compilers
-                SystemToolsCard(viewModel: viewModel)
+                // MARK: - Category 4: Gamepad & Audio Experience
+                categoryHeader(title: "Gamepad & Audio Feedback", icon: "gamecontroller.fill")
+                SystemAudioGamepadCard(viewModel: viewModel)
+                
+                // MARK: - Category 5: Personalization & Themes (Placed Last)
+                categoryHeader(title: "Personalization & Appearance", icon: "paintpalette.fill")
+                SystemAppearanceCard(viewModel: viewModel)
             }
             .padding(20)
         }
@@ -58,10 +67,10 @@ public struct SystemView: View {
     private var headerView: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Settings & Environment Diagnostics")
+                Text("Settings & System Architecture")
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
-                Text("Configure workspace directories, decryption keys, and system build dependencies.")
+                Text("Manage decryption keys, toolchains, gamepad mappings, and visual themes.")
                     .font(.system(size: 12))
                     .foregroundColor(NXTheme.textSecondary)
             }
@@ -70,6 +79,7 @@ public struct SystemView: View {
             
             if !viewModel.prerequisites.missingList.isEmpty {
                 Button(action: {
+                    SoundEffectService.shared.play(.click)
                     viewModel.installAllMissingDependencies()
                 }) {
                     HStack(spacing: 6) {
@@ -80,6 +90,7 @@ public struct SystemView: View {
                 .buttonStyle(NXAccentButtonStyle())
             } else {
                 Button(action: {
+                    SoundEffectService.shared.play(.click)
                     viewModel.repairAllDependencies()
                 }) {
                     HStack(spacing: 6) {
@@ -91,6 +102,7 @@ public struct SystemView: View {
             }
             
             Button(action: {
+                SoundEffectService.shared.play(.click)
                 viewModel.detectEnvironment()
                 viewModel.checkForUpdates()
             }) {
@@ -99,12 +111,27 @@ public struct SystemView: View {
                         ProgressView().controlSize(.small)
                     } else {
                         Image(systemName: "arrow.clockwise")
+                        Text("Re-check")
                     }
-                    Text("Re-check")
                 }
             }
             .buttonStyle(NXSecondaryButtonStyle())
-            .disabled(viewModel.isCheckingPrerequisites || viewModel.isCheckingUpdate)
         }
+    }
+    
+    private func categoryHeader(title: String, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(NXTheme.secondary)
+            
+            Text(title.uppercased())
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundColor(NXTheme.textSecondary)
+                .tracking(0.5)
+            
+            Spacer()
+        }
+        .padding(.top, 6)
     }
 }

@@ -95,18 +95,27 @@ public struct PortedGameCard: View {
                 // Action Buttons Row (Play, Settings, Folder, More)
                 HStack(spacing: 8) {
                     if game.isPlayableLocally {
+                        let isLaunching = viewModel.launchingGameId == game.id
                         Button(action: {
+                            SoundEffectService.shared.play(.click)
                             viewModel.launchGame(game)
                         }) {
                             HStack(spacing: 5) {
-                                Image(systemName: "play.fill")
-                                Text("Play")
+                                if isLaunching {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                    Text("Starting...")
+                                } else {
+                                    Image(systemName: "play.fill")
+                                    Text("Play")
+                                }
                             }
                             .font(.system(size: 11, weight: .bold, design: .rounded))
                             .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(NXPrimaryButtonStyle())
                         .controlSize(.regular)
+                        .disabled(isLaunching || viewModel.launchingGameId != nil)
                     }
                     
                     Button(action: {

@@ -2,6 +2,7 @@ import SwiftUI
 
 public struct MainView: View {
     @StateObject private var viewModel = AppViewModel()
+    @State private var windowWidth: CGFloat = 1100
     
     public init() {}
     
@@ -14,13 +15,17 @@ public struct MainView: View {
         (5, "Console", "terminal.fill")
     ]
     
+    private var isCompactNav: Bool {
+        windowWidth < 1000
+    }
+    
     public var body: some View {
-        ZStack {
-            // MARK: - Obsidian Liquid Glass Canvas & Atmospheric Refractions
-            Color.nxCanvas.ignoresSafeArea()
-            
-            // Atmospheric ambient glows
-            GeometryReader { geo in
+        GeometryReader { windowGeo in
+            ZStack {
+                // MARK: - Obsidian Liquid Glass Canvas & Atmospheric Refractions
+                Color.nxCanvas.ignoresSafeArea()
+                
+                // Atmospheric ambient glows
                 ZStack {
                     Circle()
                         .fill(NXTheme.primary.opacity(0.15))
@@ -32,38 +37,44 @@ public struct MainView: View {
                         .fill(NXTheme.tertiary.opacity(0.07))
                         .frame(width: 400, height: 400)
                         .blur(radius: 100)
-                        .position(x: geo.size.width - 80, y: geo.size.height - 60)
+                        .position(x: windowGeo.size.width - 80, y: windowGeo.size.height - 60)
+                }
+                .ignoresSafeArea()
+                
+                VStack(spacing: 0) {
+                    // MARK: - Liquid Glass Navigation Bar
+                    navigationHeader
+                    
+                    // MARK: - Selected Content Surface
+                    Group {
+                        switch viewModel.selectedTab {
+                        case 0:
+                            BuildView(viewModel: viewModel)
+                        case 1:
+                            LibraryView(viewModel: viewModel)
+                        case 2:
+                            CompatibilityView(viewModel: viewModel)
+                        case 3:
+                            ControlsView()
+                        case 4:
+                            SystemView(viewModel: viewModel)
+                        case 5:
+                            LogsView(viewModel: viewModel)
+                        default:
+                            BuildView(viewModel: viewModel)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .ignoresSafeArea()
-            
-            VStack(spacing: 0) {
-                // MARK: - Liquid Glass Navigation Bar
-                navigationHeader
-                
-                // MARK: - Selected Content Surface
-                Group {
-                    switch viewModel.selectedTab {
-                    case 0:
-                        BuildView(viewModel: viewModel)
-                    case 1:
-                        LibraryView(viewModel: viewModel)
-                    case 2:
-                        CompatibilityView(viewModel: viewModel)
-                    case 3:
-                        ControlsView()
-                    case 4:
-                        SystemView(viewModel: viewModel)
-                    case 5:
-                        LogsView(viewModel: viewModel)
-                    default:
-                        BuildView(viewModel: viewModel)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onAppear {
+                self.windowWidth = windowGeo.size.width
+            }
+            .onChange(of: windowGeo.size.width) { newWidth in
+                self.windowWidth = newWidth
             }
         }
-        .frame(minWidth: 920, minHeight: 640)
+        .frame(minWidth: 880, minHeight: 620)
     }
     
     private var navigationHeader: some View {
@@ -94,31 +105,37 @@ public struct MainView: View {
                         }
                     }
                     
-                    Text("Switch Native Port Builder · Apple Silicon")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(NXTheme.textSecondary)
+                    if !isCompactNav {
+                        Text("Switch Native Port Builder · Apple Silicon")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(NXTheme.textSecondary)
+                    }
                 }
             }
             
             Spacer()
             
-            // Epic Liquid Glass Navigation Tabs
-            HStack(spacing: 4) {
+            // Epic Liquid Glass Navigation Tabs (Responsive: Icons only when window is small)
+            HStack(spacing: isCompactNav ? 3 : 4) {
                 ForEach(tabs, id: \.tag) { item in
                     let isSelected = viewModel.selectedTab == item.tag
                     Button(action: {
+                        SoundEffectService.shared.play(.tabSwitch)
                         withAnimation(.easeInOut(duration: 0.18)) {
                             viewModel.selectedTab = item.tag
                         }
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: item.icon)
-                                .font(.system(size: 12, weight: isSelected ? .bold : .medium))
-                            Text(item.title)
-                                .font(.system(size: 12, weight: isSelected ? .bold : .medium, design: .rounded))
+                                .font(.system(size: isCompactNav ? 13 : 12, weight: isSelected ? .bold : .medium))
+                            
+                            if !isCompactNav {
+                                Text(item.title)
+                                    .font(.system(size: 12, weight: isSelected ? .bold : .medium, design: .rounded))
+                            }
                         }
                         .foregroundColor(isSelected ? .white : NXTheme.textSecondary)
-                        .padding(.horizontal, 11)
+                        .padding(.horizontal, isCompactNav ? 9 : 11)
                         .padding(.vertical, 6)
                         .background(
                             ZStack {
@@ -138,6 +155,7 @@ public struct MainView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .help(item.title)
                     .nxNoFocusRing()
                 }
             }

@@ -14,6 +14,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         static let savedKeepExtracted = "NXNative_SavedKeepExtracted"
         static let savedPlatform = "NXNative_SavedPlatform"
         static let savedIconAppearanceMode = "NXNative_SavedIconAppearanceMode"
+        static let savedCompatibilityDisplayMode = "NXNative_SavedCompatibilityDisplayMode"
     }
     
     // MARK: - Workspace & Paths
@@ -201,7 +202,15 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     }
     
     // MARK: - Navigation
-    @Published public var selectedTab: Int = 0 // 0: Convert, 1: Library, 2: Settings, 3: Console
+    @Published public var selectedTab: Int = 0 // 0: Convert, 1: Library, 2: Compatibility, 3: Controls, 4: Settings, 5: Console
+    @Published public var focusedGameIndex: Int = 0
+    @Published public var isFocusOnDeck: Bool = false
+    @Published public var launchingGameId: UUID? = nil
+    @Published public var compatibilityDisplayMode: CompatibilityDisplayMode = .list {
+        didSet {
+            UserDefaults.standard.set(compatibilityDisplayMode.rawValue, forKey: StorageKeys.savedCompatibilityDisplayMode)
+        }
+    }
     
     public let availableLanguages: [(code: String, label: String)] = [
         ("auto", "Game Default"),
@@ -263,6 +272,11 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
             self.iconAppearanceMode = mode
         }
         
+        if let savedDisplay = UserDefaults.standard.string(forKey: StorageKeys.savedCompatibilityDisplayMode),
+           let dispMode = CompatibilityDisplayMode(rawValue: savedDisplay) {
+            self.compatibilityDisplayMode = dispMode
+        }
+        
         detectEnvironment()
         
         // Restore saved game folder if it exists
@@ -277,6 +291,9 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         checkForUpdates()
         loadCompatibleGames()
         updateDockIcon()
+        
+        NotificationService.shared.requestAuthorization()
+        setupControllerNavigation()
     }
     
     // MARK: - Dynamic Dock Icon
@@ -563,14 +580,24 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     }
     
     public func launchGame(_ game: PortedGame) {
+        guard launchingGameId == nil else { return }
+        launchingGameId = game.id
+        SoundEffectService.shared.play(.launch)
+        
         let config = GameRuntimeConfig.load(for: game)
         config.applyToDisk(for: game)
         
         LibraryScanner.shared.launchGame(at: game.url, env: config.toEnvironmentDict()) { [weak self] success, error in
-            if success {
-                self?.logs.append(LogEntry(level: .success, message: "Launched game: \(game.name)"))
-            } else if let err = error {
-                self?.logs.append(LogEntry(level: .error, message: "Failed to launch game: \(err)"))
+            DispatchQueue.main.async {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                    self?.launchingGameId = nil
+                }
+                if success {
+                    self?.logs.append(LogEntry(level: .success, message: "Launched game: \(game.name)"))
+                } else if let err = error {
+                    SoundEffectService.shared.play(.error)
+                    self?.logs.append(LogEntry(level: .error, message: "Failed to launch game: \(err)"))
+                }
             }
         }
     }
@@ -865,6 +892,9 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         self.buildSuccessPath = outputPath
         self.logs.append(LogEntry(level: .success, message: "Build succeeded! Output: \(outputPath ?? "Unknown")"))
         refreshLibrary()
+        
+        SoundEffectService.shared.play(.launch)
+        NotificationService.shared.sendPortSuccessNotification(gameName: appName.isEmpty ? "Ported Game" : appName, outputPath: outputPath)
     }
     
     public func buildRunner(_ runner: BuildRunner, didFinishWithError error: String) {
@@ -875,6 +905,9 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         }
         self.buildError = error
         self.logs.append(LogEntry(level: .error, message: error))
+        
+        SoundEffectService.shared.play(.error)
+        NotificationService.shared.sendPortErrorNotification(gameName: appName.isEmpty ? "Game" : appName, error: error)
     }
     
     public func installerDidProduceOutput(_ line: String) {

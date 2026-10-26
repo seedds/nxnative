@@ -82,7 +82,10 @@ public struct CompatibilityView: View {
                         .textFieldStyle(.plain)
                         .foregroundColor(NXTheme.textPrimary)
                     if !viewModel.compatibilitySearchText.isEmpty {
-                        Button(action: { viewModel.compatibilitySearchText = "" }) {
+                        Button(action: {
+                            SoundEffectService.shared.play(.click)
+                            viewModel.compatibilitySearchText = ""
+                        }) {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(NXTheme.textMuted)
                         }
@@ -103,10 +106,14 @@ public struct CompatibilityView: View {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
                 )
-                .frame(maxWidth: 240)
+                .frame(maxWidth: 220)
+                
+                // List vs Grid Mode Toggle
+                displayModeToggle
                 
                 // Refresh Button
                 Button(action: {
+                    SoundEffectService.shared.play(.click)
                     viewModel.loadCompatibleGames(forceRefresh: true)
                 }) {
                     HStack(spacing: 4) {
@@ -125,6 +132,7 @@ public struct CompatibilityView: View {
                 
                 // External GitHub Link
                 Button(action: {
+                    SoundEffectService.shared.play(.click)
                     if let url = URL(string: "https://github.com/seedds/nxnative/blob/main/dm/games/README.md#games") {
                         NSWorkspace.shared.open(url)
                     }
@@ -167,7 +175,7 @@ public struct CompatibilityView: View {
             
             Divider().opacity(0.2)
             
-            // MARK: - Games List
+            // MARK: - Games Presentation (List or Grid)
             ScrollView {
                 if filteredGames.isEmpty {
                     VStack(spacing: 12) {
@@ -181,23 +189,75 @@ public struct CompatibilityView: View {
                     .frame(maxWidth: .infinity, minHeight: 300)
                     .padding(40)
                 } else {
-                    LazyVStack(spacing: 8) {
-                        ForEach(filteredGames, id: \.id) { game in
-                            CompatibleGameRow(game: game) {
-                                viewModel.selectedTab = 0
+                    if viewModel.compatibilityDisplayMode == .list {
+                        LazyVStack(spacing: 8) {
+                            ForEach(filteredGames, id: \.id) { game in
+                                CompatibleGameRow(game: game) {
+                                    viewModel.selectedTab = 0
+                                }
+                                .id(game.id)
                             }
-                            .id(game.id)
                         }
+                        .padding(18)
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 250, maximum: 330), spacing: 14)], spacing: 14) {
+                            ForEach(filteredGames, id: \.id) { game in
+                                CompatibleGameGridCard(item: game)
+                                    .id(game.id)
+                            }
+                        }
+                        .padding(18)
                     }
-                    .padding(18)
                 }
             }
         }
     }
     
+    private var displayModeToggle: some View {
+        HStack(spacing: 2) {
+            Button(action: {
+                SoundEffectService.shared.play(.click)
+                viewModel.compatibilityDisplayMode = .list
+            }) {
+                Image(systemName: "list.bullet")
+                    .font(.system(size: 11, weight: viewModel.compatibilityDisplayMode == .list ? .bold : .regular))
+                    .foregroundColor(viewModel.compatibilityDisplayMode == .list ? .white : NXTheme.textSecondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 5)
+                    .background(viewModel.compatibilityDisplayMode == .list ? NXTheme.primary.opacity(0.5) : Color.clear)
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            .help("List View")
+            
+            Button(action: {
+                SoundEffectService.shared.play(.click)
+                viewModel.compatibilityDisplayMode = .grid
+            }) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 11, weight: viewModel.compatibilityDisplayMode == .grid ? .bold : .regular))
+                    .foregroundColor(viewModel.compatibilityDisplayMode == .grid ? .white : NXTheme.textSecondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 5)
+                    .background(viewModel.compatibilityDisplayMode == .grid ? NXTheme.primary.opacity(0.5) : Color.clear)
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            .help("Grid View")
+        }
+        .padding(2)
+        .background(NXTheme.glassSurfaceElevated.opacity(0.6))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
+        )
+    }
+    
     private func filterPill(_ name: String, count: Int) -> some View {
         let isSelected = viewModel.compatibilityFilter == name
         return Button(action: {
+            SoundEffectService.shared.play(.click)
             viewModel.compatibilityFilter = name
         }) {
             HStack(spacing: 5) {

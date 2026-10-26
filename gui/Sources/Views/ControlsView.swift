@@ -24,6 +24,9 @@ public struct ControlsView: View {
                 }
                 .padding(.bottom, 4)
                 
+                // MARK: - Live Gamepad Recognition Status
+                ControllerLiveStatusCard()
+                
                 // MARK: - Section 1: Visual Quick Reference Table
                 GlassCard {
                     VStack(alignment: .leading, spacing: 14) {

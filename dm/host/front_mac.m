@@ -88,6 +88,7 @@ static uint64_t g_mbtn;   // buttons held on the captured mouse
 static int g_kbm;   // keyboard and mouse controls (below)
 static double g_shake_t0, g_shake_until;   // a right stick shake played into the game (shake_start)
 static int32_t g_flick_rx;                  // a right stick flick in a quick menu (flick_add)
+static uint64_t g_aim, g_aimbits;            // aim mode (ZR the bow, R a throw; 0 none) and the buttons it holds (aim_set)
 static float g_wx, g_wy;                    // the mouse's sum while the ability wheel is open (wheel_open)
 static int g_mouse_cap;                     // the mouse captured (mouse_capture)
 static int menu_open(void);
@@ -101,16 +102,36 @@ static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     double now = CACurrentMediaTime();
     float wl = sqrtf(g_wx * g_wx + g_wy * g_wy);
-    if (now < g_shake_until) dm_input_set(g_btn | g_mbtn, lx, ly, ((int)((now - g_shake_t0) / 0.05) & 1) ? -32767 : 32767, 0);   // full swings, 0.05 s each
-    else if (wheel_open() && wl >= 60) dm_input_set(g_btn | g_mbtn, lx, ly, (int32_t)(g_wx / wl * 32767), (int32_t)(g_wy / wl * 32767));   // full tilt toward the mouse's direction
-    else if (g_kbm && (g_btn & DPAD)) dm_input_set(g_btn | g_mbtn, 0, 0, g_flick_rx ? g_flick_rx : lx, ly);   // a held D-pad opens a quick menu, picked with the right stick
-    else dm_input_set(g_btn | g_mbtn, lx, ly, 0, 0);
+    if (now < g_shake_until) dm_input_set(g_btn | g_mbtn | g_aimbits, lx, ly, ((int)((now - g_shake_t0) / 0.05) & 1) ? -32767 : 32767, 0);   // full swings, 0.05 s each
+    else if (wheel_open() && wl >= 60) dm_input_set(g_btn | g_mbtn | g_aimbits, lx, ly, (int32_t)(g_wx / wl * 32767), (int32_t)(g_wy / wl * 32767));   // full tilt toward the mouse's direction
+    else if (g_kbm && (g_btn & DPAD)) dm_input_set(g_btn | g_mbtn | g_aimbits, 0, 0, g_flick_rx ? g_flick_rx : lx, ly);   // a held D-pad opens a quick menu, picked with the right stick
+    else dm_input_set(g_btn | g_mbtn | g_aimbits, lx, ly, 0, 0);
 }
 // Ultrahand pulls apart objects stuck together when the right stick is shaken, which the mouse (camera by angle, not the stick) never does: a shake of the mouse or R
 // with an object held plays 0.6 s of full right stick swings instead (at most one a second)
 static void shake_tick(void) {
     push();
     if (CACurrentMediaTime() < g_shake_until) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ shake_tick(); });
+}
+// Aim modes, toggled by a key: F the bow (ZR held draws it and aims), G a throw (R held winds it up). Left click lets the button go, which fires or throws; the bow is
+// drawn again after 0.15 s for the next arrow, a throw ends the mode (the weapon is gone). The same key again or right click leaves without firing: the game's own
+// button + B (B while it is held puts the bow or weapon away; the button let go alone would fire), held 0.1 s, then both let go. The other key leaves, then enters its mode
+static void aim_set(uint64_t bit) {
+    if (bit == g_aim) return;
+    if (g_aim) {
+        g_aim = 0; g_aimbits |= DM_BTN_B; push();   // B added while the button is still held (between shots it is up and B alone puts the bow away)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ if (!g_aim) { g_aimbits = 0; push(); } });
+        if (bit) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ if (!g_aim && g_kbm && g_input_on) aim_set(bit); });
+        return;
+    }
+    if (bit) { g_aim = bit; g_aimbits = bit; push(); }
+}
+static void aim_fire(void) {
+    uint64_t bit = g_aim;
+    if (!(g_aimbits & bit)) return;   // the next arrow is not drawn yet
+    g_aimbits &= ~bit; push();
+    if (bit != DM_BTN_ZR) { g_aim = 0; return; }   // thrown: the mode ends
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ if (g_aim == DM_BTN_ZR) { g_aimbits |= DM_BTN_ZR; push(); } });
 }
 static void shake_start(void) {
     double now = CACurrentMediaTime();
@@ -132,7 +153,7 @@ static void mouse_capture(int on) {
 static void kbm_set(int on) {
     if (on && !dm_mouse_camera()) return;
     g_kbm = on; if (!on) mouse_capture(0);
-    g_btn = 0; push();   // the two layouts map keys differently: nothing held stays pressed across the switch
+    g_btn = 0; g_aim = 0; g_aimbits = 0; push();   // the two layouts map keys differently: nothing held stays pressed across the switch
     LOG("front end: %s", on ? "keyboard and mouse controls (click in the window to capture the mouse, ` for the classic keys)" : "classic keys (` for keyboard and mouse controls)");
 }
 // A mouse shake: 4 turns left / right within 0.7 s, each after at least 150 counts the other way (a few centimetres at common resolutions; aiming turns slower)
@@ -165,6 +186,7 @@ static void mouse_moved(float dx, float dy) {
 static void mouse_button(int n, int down) {
     static uint64_t held[3];
     if (!g_mouse_cap || !g_input_on) return;
+    if (g_aim && n < 2 && down) { if (n == 0) aim_fire(); else aim_set(0); held[n] = 0; return; }   // an aim mode: left fires or throws, right leaves
     if (down) {
         int m = menu_open(), k = dm_mouse_camera_kind();
         int q = quick_open();
@@ -216,8 +238,8 @@ static int key_bit(unsigned short code) {
 // Keyboard and mouse layout; Shift and Ctrl come as modifier changes (on_flags)
 static int kbm_bit(unsigned short code) {
     switch (code) {
-        case 14: case 36: return 0; case 49: return 2; case 3: return 9;                     // E Return → A, Space → X, F → ZR
-        case 12: return 6;  case 5: return 7;   case 8: return 4;                             // Q → L, G → R, C → press left stick
+        case 14: case 36: return 0; case 49: return 2; case 15: return 13;                   // E Return → A, Space → X, R → D-pad up (F: bow mode, on_key)
+        case 12: return 6;  case 8: return 4;                                                 // Q → L, C → press left stick (G: throw mode, on_key)
         case 18: return 14; case 19: return 12; case 20: return 13; case 21: return 15;      // 1 2 3 4 → D-pad right left up down (weapons, shields, abilities, whistle)
         case 53: return 10; case 48: case 46: return 11;                                      // Esc → +, Tab M → −
         case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15;  // ← ↑ → ↓
@@ -245,7 +267,12 @@ static void on_key(NSEvent *e, int down) {
     if (c == 50 || c == 10) { if (down && dm_mouse_camera()) kbm_set(!g_kbm); return; }   // ` (§ beside it on ISO keyboards) switches between the two layouts
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     if (g_kbm) {
-        if (c == 15) { if (down && dm_mouse_camera_kind() == 5) shake_start(); return; }   // R: shake the right stick (Ultrahand: pull apart)
+        if (c == 15 && down && dm_mouse_camera_kind() == 5) { shake_start(); g_kmask[c] = 0; return; }   // R with an object held: shake the right stick (Ultrahand: pull apart)
+        if (c == 3 || c == 5) {                                                                // F: bow mode, G: throw mode, on / off
+            uint64_t bit = c == 3 ? DM_BTN_ZR : DM_BTN_R;
+            if (down && !menu_open()) aim_set(g_aim == bit ? 0 : bit);
+            return;
+        }
         if (down && (c == 53 || c == 48 || c == 46)) {
             int m = c == 53 ? DM_BTN_PLUS : DM_BTN_MINUS;
             if (menu_open() == m) g_menu = 0; else { g_menu = m; g_menu_t = CACurrentMediaTime(); }
@@ -339,7 +366,7 @@ static void input_release(void) {
     mouse_capture(0);
     g_input_on = 0;
     dm_motion_pro_active(0);
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+    g_btn = 0; g_aim = 0; g_aimbits = 0; g_w = g_a = g_s = g_d = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);

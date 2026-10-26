@@ -94,6 +94,9 @@ static int menu_open(void);
 #define DPAD (DM_BTN_UP | DM_BTN_RIGHT | DM_BTN_DOWN | DM_BTN_LEFT)
 // The ability wheel (L held by the keyboard and mouse layout, outside the menus): the mouse points the right stick, which picks in it, instead of turning the camera
 static int wheel_open(void) { return g_kbm && g_mouse_cap && (g_btn & DM_BTN_L) && !menu_open(); }
+// A quick menu (weapons, shields, abilities: a D-pad key held, outside the menus and not with an object held, where the D-pad moves it): left click is X, right click B
+// and E is Y, the menu's own buttons (B closes it)
+static int quick_open(void) { return g_kbm && (g_btn & DPAD) && !menu_open() && dm_mouse_camera_kind() != 5; }
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     double now = CACurrentMediaTime();
@@ -164,7 +167,8 @@ static void mouse_button(int n, int down) {
     if (!g_mouse_cap || !g_input_on) return;
     if (down) {
         int m = menu_open(), k = dm_mouse_camera_kind();
-        held[n] = n == 0 ? (m || k >= 3 ? DM_BTN_A : DM_BTN_Y) : n == 1 ? (m || k >= 2 || wheel_open() ? DM_BTN_B : DM_BTN_ZL) : DM_BTN_RS;   // right: B also in the ability wheel (dismisses it)
+        int q = quick_open();
+        held[n] = n == 0 ? (q ? DM_BTN_X : m || k >= 3 ? DM_BTN_A : DM_BTN_Y) : n == 1 ? (m || q || k >= 2 || wheel_open() ? DM_BTN_B : DM_BTN_ZL) : DM_BTN_RS;   // right: B also in the ability wheel and the quick menus (closes them)
     }
     g_mbtn = down ? (g_mbtn | held[n]) : (g_mbtn & ~held[n]); push();
 }
@@ -247,7 +251,7 @@ static void on_key(NSEvent *e, int down) {
             if (menu_open() == m) g_menu = 0; else { g_menu = m; g_menu_t = CACurrentMediaTime(); }
         }
         int held = down && dm_mouse_camera_kind() == 5;
-        int kb = c == 14 && down && (menu_open() || held) ? 7 : c == 12 && held ? 8 : kbm_bit(c);   // E: R in the menus and with an object held (Ultrahand: rotate); Q: ZL with an object held
+        int kb = c == 14 && down && (menu_open() || held) ? 7 : c == 14 && down && quick_open() ? 3 : c == 12 && held ? 8 : kbm_bit(c);   // E: R in the menus and with an object held (Ultrahand: rotate), Y in a quick menu; Q: ZL with an object held
         if (c >= 128) return;
         if (down) g_kmask[c] = kb >= 0 ? 1ull << kb : 0;
         g_btn = down ? (g_btn | g_kmask[c]) : (g_btn & ~g_kmask[c]);

@@ -64,8 +64,8 @@ Shows the frames per second at the top left.
 ### Swipe camera
 
 Off by default: the right-side touch area acts as a floating right stick, as before.
-Turn this on to pan by moving your finger in the right half of the screen, starting
-off the buttons. It is available in the **3D** touch layout. Holding still stops
+Turn this on to pan by moving your finger in the selected camera touch area,
+starting off the buttons. It is available in the **3D** touch layout. Holding still stops
 camera input within 40 ms of the last touch sample; lifting stops it immediately.
 The game may apply its own camera easing after the input stops.
 
@@ -76,8 +76,17 @@ apply. Physical controllers are unaffected.
 ### Swipe sensitivity
 
 25 to 400 %, default 100 %. Only used with **Swipe camera**. Higher values give
-more right-stick input for the same finger speed; they cannot exceed the game's
-maximum turn speed. Fully close and reopen the game to change launcher settings.
+more right-stick input for the same finger speed. Below 100%, the maximum input
+is reduced too, so even a fast swipe stays weaker at 25%. Above 100%, turning
+can still reach the game's maximum speed. Fully close and reopen the game to change launcher settings.
+
+### Camera touch area
+
+**Right third** (default) keeps the existing camera start area. **Right half**
+extends it to the screen midpoint. This applies to both the floating joystick
+and swipe camera, in the 3D layout. Buttons and the movement stick keep priority
+where their hit areas overlap. A touch stays assigned to the control it started
+on until released.
 
 ### Left-stick dead zone
 
@@ -251,6 +260,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Swipe camera | `DM_TOUCH_SWIPE` | `1` on, `0` off (default) |
 | Swipe sensitivity | `DM_TOUCH_SWIPE_GAIN` | `0.25` to `4`, default `1` |
+| Camera touch area | `DM_TOUCH_RIGHT_AREA` | `third` (default), `half` |
 | Left-stick dead zone | `DM_TOUCH_LEFT_DEADZONE` | `0` to `0.4`, default `0.1` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |

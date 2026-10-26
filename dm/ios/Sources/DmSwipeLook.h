@@ -24,8 +24,14 @@ static inline void dm_swipe_frame(const DmSwipeLook *s, double now, double scale
     // This avoids alternating tilt/neutral when touch, display and game rates differ.
     // Expire within 40 ms of the last sample; release/cancel resets immediately in the view.
     // At 100% sensitivity, full tilt is 180 layout points/second; the game keeps its speed limit.
-    double x = s->vx * gain / (180.0 * scale), y = -s->vy * gain / (180.0 * scale);
+    double x = s->vx / (180.0 * scale), y = -s->vy / (180.0 * scale);
     double magnitude = hypot(x, y);
+    if (magnitude > 1) { x /= magnitude; y /= magnitude; }
+    // Apply sensitivity after normalizing the motion command. Before normalization,
+    // a fast swipe could saturate even at 25%, making it indistinguishable from 400%.
+    // Below 100% this also scales the maximum command; above it the game still caps speed.
+    x *= gain; y *= gain;
+    magnitude = hypot(x, y);
     if (magnitude > 1) { x /= magnitude; y /= magnitude; }
     *rx = (int32_t)lrint(x * 32767); *ry = (int32_t)lrint(y * 32767);
 }

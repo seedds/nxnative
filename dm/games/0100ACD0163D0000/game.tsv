@@ -1,0 +1,58 @@
+# Batman: Arkham Knight (Batman: Arkham Trilogy): Rocksteady's Unreal Engine 3 (loose cooked packages, Oodle-compressed), SDK 14.3.0, NVN, Wwise sound, CRI Sofdec
+# movies (USM) and Scaleform GFx menus; update 1.0.5 (v327680), which holds the whole game (the base NSP is 7 MB).
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (docs/agents) to the title screen; see README.md for what is open
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100ACD0163D0000
+program_id	0100ACD0163D0000
+
+# ---- App ----
+name	Batman: Arkham Knight
+ipa	BatmanArkhamKnight.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v327680	1.0.5	main=feae83dc9e9fb34c77d0a62f1fa9ae9f	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	BmGame/Movies/Ending.usm
+zip_store	.bin:.tfc:.upk:.usm:.wad:.xxx:.metallib
+
+# ---- Graphics ----
+# Unreal Engine 3 fills its textures in memory pools with the CPU and flushes most of them never: without both keys they stayed empty on the host
+# (the colour-grading LUT read back as zeros, so the tone-mapped scene was black, and Scaleform's bitmaps were missing). tex_dirty_upload is the one that matters:
+# with tex_flush_upload alone the LUT stays empty
+tex_flush_upload	on
+tex_dirty_upload	on
+# Presentation and pipelines as Breath of the Wild ships them (dm/games/README.md): present snapshots (a ring of 2 host textures) and render pipelines through MTL4Compiler on iOS with
+# the pipeline archive and the prepare step
+present_snap	on
+pso_mtl4	on
+
+# ---- Input ----
+# a 3D game: D-pad, right stick (camera) and L3 / R3 on the iPhone's virtual gamepad
+pad_layout	full
+
+# ---- Memory ----
+# The NPDM declares 32 MB of system resource (virtual address memory) and main never sets a heap: Engage's 5 GB block with a 4.375 GB alias region, where the game maps its memory itself.
+# Its FMallocBinned3 (1 GB + 37 GB of address regions) is replaced by the host allocator (patches.py, dm/host/hle_uemalloc.c), so the alias region holds only the SDK's and the engine's own maps
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 32 MB of system resource
+sys_resource	0x2000000
+
+# ---- Shader split ----
+# Unreal Engine 3's global shader cache (GlobalShaderCache-Switch.bin) and the material shader cache package (CombinedShaderCache-Switch.xxx; shader_split.py ue3_package / ue3_records)
+shader_groups	GlobalShaderCache=global CombinedShaderCache=material
+# The game keeps one control section for shaders whose control sections differ only from +0x770 on (GLSLC's compile information: the hash at +0x7d0, register counts at +0x790 and a
+# word at +0x778), the first one loaded, so a program's control section is often another shader's (31 of 80 shaders the opening used, more in game); keys leave +0x770..+0x7e8 out
+# (hle_nvn.c keys_hash, shader_split.py key_ctl). Nothing the translation reads lies there (the code size at +0x704, the compute group at +0x748)
+shader_key_skip	0x770+0x78
+shader_note	Batman: Arkham Knight shaders

@@ -1,0 +1,5 @@
+# Benchmark routes for scripts/bench.py: name, DM_KEYS (seconds from host start), measuring window start and length (s), description.
+# From a save past the license text (the user's), with a warm pipeline archive (--pso-archive): the logo movies end at about 85 s (later on a cold archive, whose prebuild competes with
+# the boot), then the warning, the title, the save slot, the main menu's New Story and the opening cutscenes, whose timing moves by 10-20 s from run to run: A every 3 s from 80 to 170 s
+# takes every screen, holding B every 10 s from 175 s burns the Joker at the cremation prompt (and skips what a hold skips), and the diner is playable by about 270 s
+diner	80:A*31/3,175:B~6*8/10,285:LUp~3,289:RRight~2*10/8,293:RLeft~2*10/8	290	75	Pauli's Diner as Officer Owens: a few steps into the room, then the camera turns right and left in turn

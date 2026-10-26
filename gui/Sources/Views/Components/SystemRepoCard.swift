@@ -88,7 +88,16 @@ public struct SystemRepoCard: View {
                     
                     Spacer()
                     
-                    if let update = viewModel.updateInfo, update.hasUpdate {
+                    if viewModel.isApplyingUpdate {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Updating...")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(NXTheme.primary)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                    } else if let update = viewModel.updateInfo, update.hasUpdate {
                         Button("Update Now") {
                             viewModel.applyUpdate()
                         }
@@ -99,6 +108,48 @@ public struct SystemRepoCard: View {
                         }
                         .buttonStyle(NXSecondaryButtonStyle())
                     }
+                }
+                
+                // Live Status / Error feedback
+                if let err = viewModel.updateErrorBanner {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 12))
+                        Text(err)
+                            .font(.system(size: 11))
+                            .foregroundColor(NXTheme.textPrimary)
+                            .lineLimit(2)
+                        Spacer()
+                        Button(action: { viewModel.updateErrorBanner = nil }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(NXTheme.textMuted)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(8)
+                    .background(Color.orange.opacity(0.12))
+                    .cornerRadius(6)
+                }
+                
+                if let succ = viewModel.updateSuccessBanner {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
+                            .font(.system(size: 12))
+                        Text(succ)
+                            .font(.system(size: 11))
+                            .foregroundColor(NXTheme.textPrimary)
+                        Spacer()
+                        Button(action: { viewModel.updateSuccessBanner = nil }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(NXTheme.textMuted)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(8)
+                    .background(Color.green.opacity(0.12))
+                    .cornerRadius(6)
                 }
             }
         }

@@ -25,7 +25,6 @@ public struct SystemView: View {
                 VStack(spacing: 12) {
                     SystemRepoCard(viewModel: viewModel)
                     SystemPatchesCard(viewModel: viewModel)
-                    SystemCreditsCard()
                 }
                 
                 // MARK: - Category 3: Storage & Working Directories
@@ -36,9 +35,13 @@ public struct SystemView: View {
                 categoryHeader(title: "Gamepad & Audio Feedback", icon: "gamecontroller.fill")
                 SystemAudioGamepadCard(viewModel: viewModel)
                 
-                // MARK: - Category 5: Personalization & Themes (Placed Last)
+                // MARK: - Category 5: Personalization & Themes
                 categoryHeader(title: "Personalization & Appearance", icon: "paintpalette.fill")
                 SystemAppearanceCard(viewModel: viewModel)
+                
+                // MARK: - Category 6: Acknowledgements & Open Source Credits
+                categoryHeader(title: "Acknowledgements & Community Credits", icon: "heart.fill")
+                SystemCreditsCard()
             }
             .padding(20)
         }

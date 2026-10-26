@@ -34,6 +34,11 @@ public struct BuildView: View {
                     }
                 }
                 .animation(.easeInOut(duration: 0.25), value: viewModel.buildWizardStep)
+                
+                // MARK: - Upstream Developer Notice (Placed at the end of Port Game)
+                if !isCreditsDismissed {
+                    creditsNoticeView
+                }
             }
             .padding(20)
         }
@@ -122,5 +127,50 @@ public struct BuildView: View {
         .frame(height: 2)
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 10)
+    }
+    
+    // MARK: - Upstream Developer Notice
+    private var creditsNoticeView: some View {
+        GlassCard(padding: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "heart.circle.fill")
+                    .symbolRenderingMode(.hierarchical)
+                    .font(.system(size: 22))
+                    .foregroundColor(NXTheme.secondary)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text("nxnative by @seedds")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundColor(NXTheme.textPrimary)
+                        
+                        Link("GitHub Repository ↗", destination: URL(string: "https://github.com/seedds/nxnative")!)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(NXTheme.secondary)
+                    }
+                    
+                    Text("This community GUI is a helper tool to make porting Switch games accessible without terminal commands. Notice: As soon as the upstream developer releases an official launcher, this project will be deprecated in favor of the official release.")
+                        .font(.system(size: 11))
+                        .foregroundColor(NXTheme.textSecondary)
+                        .lineSpacing(2)
+                }
+                
+                Spacer()
+                
+                Button(action: {
+                    withAnimation {
+                        isCreditsDismissed = true
+                    }
+                }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(NXTheme.textMuted)
+                        .padding(5)
+                        .background(Color.white.opacity(0.08))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 }

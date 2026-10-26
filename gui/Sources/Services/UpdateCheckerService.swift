@@ -88,6 +88,11 @@ public final class UpdateCheckerService {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
+            self.delegate?.updateCheckerDidProduceLog("==> Recovering any interrupted git operations...")
+            // Abort any previously stalled rebase or merge
+            _ = self.runGitWithStatus(["rebase", "--abort"], in: nxnativePath)
+            _ = self.runGitWithStatus(["merge", "--abort"], in: nxnativePath)
+            
             self.delegate?.updateCheckerDidProduceLog("==> Checking repository status before update...")
             
             // Check for uncommitted changes
@@ -101,9 +106,21 @@ public final class UpdateCheckerService {
                 didStash = (stashRes.exitCode == 0)
             }
             
-            self.delegate?.updateCheckerDidProduceLog("==> Pulling latest updates from GitHub (git pull --rebase origin main)...")
-            let pullResult = self.runGitWithStatus(["pull", "--rebase", "origin", "main"], in: nxnativePath)
-            self.delegate?.updateCheckerDidProduceLog(pullResult.output)
+            self.delegate?.updateCheckerDidProduceLog("==> Fetching latest changes from upstream GitHub...")
+            let fetchRes = self.runGitWithStatus(["fetch", "origin", "main"], in: nxnativePath)
+            self.delegate?.updateCheckerDidProduceLog(fetchRes.output)
+            
+            self.delegate?.updateCheckerDidProduceLog("==> Merging upstream updates into local branch...")
+            let mergeRes = self.runGitWithStatus(["merge", "-X", "ours", "--no-edit", "origin/main"], in: nxnativePath)
+            self.delegate?.updateCheckerDidProduceLog(mergeRes.output)
+            
+            let isSuccess = (mergeRes.exitCode == 0) &&
+                !mergeRes.output.localizedCaseInsensitiveContains("fatal:") &&
+                !mergeRes.output.localizedCaseInsensitiveContains("Automatic merge failed")
+            
+            if !isSuccess {
+                _ = self.runGitWithStatus(["merge", "--abort"], in: nxnativePath)
+            }
             
             if didStash {
                 self.delegate?.updateCheckerDidProduceLog("==> Restoring local modifications...")
@@ -116,16 +133,12 @@ public final class UpdateCheckerService {
             let newHead = self.runGit(["rev-parse", "--short", "HEAD"], in: nxnativePath).trimmingCharacters(in: .whitespacesAndNewlines)
             self.isUpdating = false
             
-            let isSuccess = (pullResult.exitCode == 0) &&
-                !pullResult.output.localizedCaseInsensitiveContains("error:") &&
-                !pullResult.output.localizedCaseInsensitiveContains("fatal:") &&
-                !pullResult.output.localizedCaseInsensitiveContains("Aborting")
-            
             DispatchQueue.main.async {
                 if isSuccess {
-                    completion(true, "Successfully updated to commit [\(newHead)]!")
+                    completion(true, "Successfully updated repository to commit [\(newHead)]!")
                 } else {
-                    completion(false, "Update failed: \(pullResult.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+                    let errOut = mergeRes.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    completion(false, "Update failed: \(errOut.isEmpty ? "Merge conflict or network error" : errOut)")
                 }
             }
         }

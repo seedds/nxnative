@@ -163,6 +163,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var updateInfo: UpdateInfo? = nil
     @Published public var isApplyingUpdate: Bool = false
     @Published public var updateSuccessBanner: String? = nil
+    @Published public var updateErrorBanner: String? = nil
     
     // MARK: - Advanced Options
     @Published public var appName: String = ""
@@ -638,15 +639,19 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     public func applyUpdate() {
         guard isNxnativeValid, !nxnativePath.isEmpty else { return }
         isApplyingUpdate = true
+        updateErrorBanner = nil
+        updateSuccessBanner = nil
         updateChecker.applyUpdate(nxnativePath: nxnativePath) { [weak self] success, message in
             self?.isApplyingUpdate = false
             if success {
                 self?.updateSuccessBanner = message
+                self?.updateErrorBanner = nil
                 self?.updateInfo = nil
                 self?.refreshPrerequisites()
                 self?.logs.append(LogEntry(level: .success, message: message))
             } else {
-                self?.logs.append(LogEntry(level: .error, message: "Update error: \(message)"))
+                self?.updateErrorBanner = message
+                self?.logs.append(LogEntry(level: .error, message: message))
             }
         }
     }

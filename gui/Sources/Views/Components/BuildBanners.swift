@@ -11,11 +11,6 @@ public struct BuildBanners: View {
     
     public var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            // Upstream Developer Credits & Notice
-            if !isCreditsDismissed {
-                creditsBanner
-            }
-            
             // Git Repository Update Available
             if let update = viewModel.updateInfo, update.hasUpdate {
                 updateBanner(update: update)
@@ -23,6 +18,10 @@ public struct BuildBanners: View {
             
             if let updateSuccess = viewModel.updateSuccessBanner {
                 updateSuccessBanner(updateSuccess)
+            }
+            
+            if let updateError = viewModel.updateErrorBanner {
+                updateErrorBanner(updateError)
             }
             
             // Setup Quick-Fix Banners
@@ -161,6 +160,33 @@ public struct BuildBanners: View {
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.35), lineWidth: 1)
+        )
+    }
+    
+    private func updateErrorBanner(_ message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.orange)
+                .font(.system(size: 18))
+            Text(message)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(NXTheme.textPrimary)
+            Spacer()
+            Button("Dismiss") {
+                viewModel.updateErrorBanner = nil
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .bold))
+            .foregroundColor(NXTheme.textSecondary)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.orange.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.35), lineWidth: 1)
         )
     }
     

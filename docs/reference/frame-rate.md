@@ -102,6 +102,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `DM_TEST_PRESENT_LAG=90,30` (sleep 30 ms before every 90th present) makes Mario do this on the Mac; run it with `DM_WINDOW=1` to get the display link. `DM_NVN_TSV` writes each frame's interval as `@itv`.
 - **Note:** the windowless Mac host was never affected by the acquire: there the acquire sleeps until the interval's slot.
 
+### One frame per tick of a 120 Hz display link
+
+- **Symptom:** with `present_interval display`, `DM_PRESENT_HZ=120` and `DM_PRESENT_LINK=2` (a 120 Hz display link) a game stays at 60 fps although its frame takes 8 ms; the display link logs about two ticks per present. With a requested 90 Hz, truncating the tick conversion instead allows 120 fps (reproduced through the real acquire with simulated link ticks).
+- **Cause:** the acquire waits for the present interval's vsyncs on the display link (`mtl_link_wait_tick`), counted in 60 Hz vsyncs, so two ticks of a 120 Hz link per frame; display mode's interval is 1. Dividing the link rate by the requested rate once per acquire loses fractional ticks (120 / 90 becomes 1).
+- **Fix:** in display mode above 60 Hz the acquire waits as many link ticks as one tick of the present rate takes (`link_wait` in `hle_nvn.c`, `mtl_link_wait_ticks`): one at 120 Hz. Fractional ticks carry across acquires: at 90 Hz, three frames wait four link ticks (1, 1, 2); a rate or pacing-mode change starts a new phase. Rates at or above the link's rate wait one tick.
+- **Found on:** Batman: Arkham Knight (`0100ACD0163D0000`; its profile and note are in a PR of their own): 119.8 fps in the opening cutscene on an M2 Max.
+- **Check:** `t_link_ticks` (also run in CPU-only CI): with a controlled clock and one tick delivered per timed wait, a 60 Hz vsync waits two ticks of a 120 Hz link and one tick of a 60 Hz one, and a wait in the link's own ticks takes one tick per frame. The real acquire checks display pacing at 60, 75, 90, 120 and 240 Hz, game intervals and frame-step caps, including the 60 and 30 Hz link modes. Exact tick counts, already elapsed ticks, spurious wakes and silent-link timeouts are checked without depending on OS scheduling: a sleeping ticker could miss the acquire's wall-clock timeout on CI. These checks do not measure a game's frame rate on a screen.
+
 ### Present snapshots: the game's swapchain texture free at once
 
 - **Symptom:** frames miss the screen while the GPU stays at its lowest clock (444 MHz on an M2 Max); more work (a higher render scale) only makes the frames slower.

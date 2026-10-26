@@ -74,6 +74,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Hades II](0100A00019DE0000/README.md) | `0100A00019DE0000` | base game | 19.3.9 | Supergiant Games' engine | NVN |
 | [Hollow Knight: Silksong](010013C00E930000/README.md) | `010013C00E930000` | 1.0.30000 | 20.5.8 | Unity 6000.0.50f1 IL2CPP | NVN |
 | [Hyrule Warriors: Age of Calamity](01002B00111A2000/README.md) | `01002B00111A2000` | 1.3.0 | 9.6.0 | Koei Tecmo's KTGL | NVN |
+| [Kirby and the Forgotten Land](01004D300C5AE000/README.md) | `01004D300C5AE000` | 1.1.0 | 11.4.0 | HAL Laboratory's engine (NintendoWare) | NVN |
 | [Luigi's Mansion 3](0100DCA0064A6000/README.md) | `0100DCA0064A6000` | 1.4.0 | 7.3.2 | Next Level Games' engine | NVN |
 | [Mario Kart 8 Deluxe](0100152000022000/README.md) | `0100152000022000` | 4.0.0 | 4.4.0 | Nintendo (sead / agl / gsys, NintendoWare, Pia) | NVN |
 | [Mario vs. Donkey Kong](0100B99019412000/README.md) | `0100B99019412000` | 1.0.1 (cartridge base) | 15.3.0 | Nintendo (sead / agl / gsys) | NVN |

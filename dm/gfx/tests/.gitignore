@@ -86,6 +86,8 @@ t_view_swizzle
 t_view_swizzle.dSYM/
 t_vk_desc
 t_vk_desc.dSYM/
+t_gl_imports
+t_gl_imports.dSYM/
 t_readback
 t_readback.dSYM/
 t_linear_readback
@@ -104,6 +106,8 @@ t_clear_tex
 t_clear_tex.dSYM/
 t_upgrade_alias
 t_upgrade_alias.dSYM/
+t_image_alias
+t_image_alias.dSYM/
 t_stencil_view
 t_stencil_view.dSYM/
 t_pso_archive
@@ -122,3 +126,5 @@ t_pull_inv
 t_pull_inv.dSYM/
 t_present_snap
 t_present_snap.dSYM/
+t_link_ticks
+t_link_ticks.dSYM/

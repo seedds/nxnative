@@ -1,0 +1,19 @@
+# Configuration of the Python lint and type checks only (.github/workflows/lint-python.yml, dm/tools/lint_python.py); the repository is not a Python package.
+# Scope: scripts/ and the tools under dm/. extraPaths / extra-paths are the folders the tools put on sys.path to import each other.
+
+[tool.pyright]
+include = ["scripts", "dm/tools", "dm/gfx/tools", "dm/games/game.py", "dm/games/profile_guess.py", "dm/games/settings.py", "dm/ios/tools", "dm/mac"]
+extraPaths = ["dm/tools", "dm/gfx/tools", "dm/games", "dm/ios/tools", "dm/mac"]
+typeCheckingMode = "basic"
+pythonVersion = "3.14"
+pythonPlatform = "Darwin"
+
+[tool.ruff]
+target-version = "py310"
+include = ["scripts/**/*.py", "dm/tools/**/*.py", "dm/gfx/tools/**/*.py", "dm/games/*.py", "dm/ios/tools/**/*.py", "dm/mac/**/*.py"]
+
+# Rules that find bugs (pyflakes, syntax, bugbear, pylint's errors and warnings, a few of ruff's own), not style: the code's dense layout (several statements on a
+# line, star imports of the rewriter's tables, short names) is the house style, so those rules are off, and `ruff format` is not used.
+[tool.ruff.lint]
+select = ["F", "E7", "E9", "B", "PLE", "PLW", "PIE", "ISC001", "T10", "RUF006", "RUF008", "RUF009", "RUF013", "RUF016", "RUF017", "RUF018", "RUF024", "RUF026"]
+ignore = ["F403", "F405", "E701", "E702", "E731", "E741", "B007", "B905", "PLW0603", "PLW1510", "PLW2901"]

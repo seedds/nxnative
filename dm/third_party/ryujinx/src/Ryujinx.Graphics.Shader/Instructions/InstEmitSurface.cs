@@ -201,11 +201,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             // Preserve source width before descriptor-sized formats are resolved.
             // Other backends retain their existing surface-instruction handling.
-            bool msl23 = context.TranslatorContext.Options.Flags.HasFlag(TranslationFlags.Msl23ImageAtomics);
-            if (msl23 &&
+            bool metalAtomics = context.TranslatorContext.Options.Flags.HasFlag(TranslationFlags.MetalImageAtomics);
+            if (metalAtomics &&
                 size is not (SuatomSize.U32 or SuatomSize.S32 or SuatomSize.Sd32))
             {
-                throw new NotSupportedException("MSL 2.3 image atomics require a 32-bit integer source size.");
+                throw new NotSupportedException("Metal image atomics require a 32-bit integer source size.");
             }
 
             SamplerType type = ConvertSamplerType(dimensions);
@@ -276,7 +276,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             // TODO: FP and 64-bit formats.
             TextureFormat format = size is SuatomSize.Sd32 or SuatomSize.Sd64
-                ? (isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormatAtomic(context.TranslatorContext.GpuAccessor, imm, strict: msl23))
+                ? (isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormatAtomic(context.TranslatorContext.GpuAccessor, imm, strict: metalAtomics))
                 : GetTextureFormat(size);
 
             if (compareAndSwap)
@@ -289,9 +289,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand[] sources = sourcesList.ToArray();
 
             TextureFlags flags = (compareAndSwap ? TextureFlags.CAS : GetAtomicOpFlags(atomicOp)) | (TextureFlags)((int)clamp << 20);
-            if (msl23)
+            if (metalAtomics)
             {
-                flags |= TextureFlags.AtomicMsl23;
+                flags |= TextureFlags.AtomicMetal;
             }
             if (dest == RegisterConsts.RegisterZeroIndex && !compareAndSwap && !hasPredicateResult)
             {
@@ -504,11 +504,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             // Preserve source width before descriptor-sized formats are resolved.
             // Other backends retain their existing surface-instruction handling.
-            bool msl23 = context.TranslatorContext.Options.Flags.HasFlag(TranslationFlags.Msl23ImageAtomics);
-            if (msl23 &&
+            bool metalAtomics = context.TranslatorContext.Options.Flags.HasFlag(TranslationFlags.MetalImageAtomics);
+            if (metalAtomics &&
                 size is not (SuatomSize.U32 or SuatomSize.S32 or SuatomSize.Sd32))
             {
-                throw new NotSupportedException("MSL 2.3 image atomics require a 32-bit integer source size.");
+                throw new NotSupportedException("Metal image atomics require a 32-bit integer source size.");
             }
 
             SamplerType type = ConvertSamplerType(dimensions);
@@ -577,7 +577,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             // TODO: FP and 64-bit formats.
             TextureFormat format = size is SuatomSize.Sd32 or SuatomSize.Sd64
-                ? (isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormatAtomic(context.TranslatorContext.GpuAccessor, imm, strict: msl23))
+                ? (isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormatAtomic(context.TranslatorContext.GpuAccessor, imm, strict: metalAtomics))
                 : GetTextureFormat(size);
 
             sourcesList.Add(Rb());
@@ -586,9 +586,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             TextureFlags flags = GetAtomicOpFlags((SuatomOp)atomicOp) |
                 (TextureFlags)((int)clamp << 20) | TextureFlags.AtomicDiscardResult;
-            if (msl23)
+            if (metalAtomics)
             {
-                flags |= TextureFlags.AtomicMsl23;
+                flags |= TextureFlags.AtomicMetal;
             }
 
             if (isBindless)

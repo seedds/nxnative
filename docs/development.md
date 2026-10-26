@@ -71,6 +71,26 @@ Generated projects and Xcode build products stay in that folder; the host profil
 header is generated under `dm/host/gen/` as usual. CI uploads failure logs.
 GPU regression tests still run locally with `make -C dm/gfx/tests GAME=<id> run`.
 
+`.github/workflows/lint-python.yml` lints `scripts/` and the Python tools under
+`dm/` with ruff (rules for bugs, never reformatting) and type-checks them with
+pyright in basic mode (`pyproject.toml`). It is a ratchet: today's findings are
+in `dm/tools/lint_python_baseline.tsv`, so it fails only on a new finding, or on
+a fixed one still listed there. Astral's ty, a faster type checker, can replace
+pyright once it is stable. With the pinned tools in a new venv:
+
+```sh
+python3 -m venv /path/to/lint-venv && /path/to/lint-venv/bin/pip install -r .github/requirements/lint.txt
+/path/to/lint-venv/bin/python3 dm/tools/lint_python.py            # the check CI runs
+/path/to/lint-venv/bin/python3 dm/tools/lint_python.py --update   # after fixing findings: shrink the baseline
+```
+
+The baseline never gains entries: fix a new finding, or silence it on its line
+(`# noqa: <rule>`, `# pyright: ignore[<rule>]`) with a reason. Only a raised tool
+version in `.github/requirements/lint.txt` rewrites it (`--rebaseline`). On pull
+requests, only the checker whose pinned release version increased may gain
+baseline entries or counts. Comments, dependency updates and checker downgrades
+do not allow growth.
+
 ## The packing script in detail
 
 `scripts/build_ipa_from_nsp.py` (`-h` lists every option):

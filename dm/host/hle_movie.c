@@ -137,12 +137,15 @@ static void md_event(mdec_t *d, int i) {   // 0 input 1 output 2 format 3 error
 // and only later links the holders into its MultiWait. Signalled synchronously inside Start, the holders were not linked yet and SignalEvent crashed in MultiWaitImpl::NotifyAndWakeupThread on a null MultiWait (0x20)
 // (it showed only when a decoder was built a second time in the same memory). A guest thread now signals it about 2 ms later (SignalEvent is guest code and must be called on a guest thread); the destructor drops that decoder's pending signals under the same lock.
 // The movie player's dispatcher and worker must also finish their requests before the posting thread continues; the shared SVC wake handoff supplies that ordering (hle_thread.c).
+// g_dfmu and each decoder's dmu are held while guest code signals events, so guest threads take them with dm_host_lock: a thread waiting for one counts as blocked, and the
+// signaller's handoff does not wait for it (Kirby and the Forgotten Land froze at its first guide movie: the handoff waited for the input thread, which waited for dmu)
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size);
+void dm_host_lock(pthread_mutex_t *m);   // hle_thread.c
 static pthread_mutex_t g_dfmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_dfcv = PTHREAD_COND_INITIALIZER;
 static struct { void *d; int ev; uint64_t due; } g_dfq[64]; static int g_ndfq, g_dfthr;
 static void md_defer_body(void *arg);
 static void md_defer_at(void *d, int ev, uint64_t due) {
-    pthread_mutex_lock(&g_dfmu);
+    dm_host_lock(&g_dfmu);
     if (!g_dfthr) { g_dfthr = 1; dm_guest_thread_spawn(md_defer_body, NULL, 16, 64 << 10); }
     for (int i = 0; i < g_ndfq; i++) if (g_dfq[i].d == d && g_dfq[i].ev == ev && g_dfq[i].due <= due) { pthread_mutex_unlock(&g_dfmu); return; }   // already due by then
     if (g_ndfq < 64) g_dfq[g_ndfq++] = (__typeof__(g_dfq[0])){d, ev, due};
@@ -151,14 +154,14 @@ static void md_defer_at(void *d, int ev, uint64_t due) {
 }
 static void md_defer(void *d, int ev) { md_defer_at(d, ev, now_ns() + 2000000); }
 static void md_defer_drop(void *d) {
-    pthread_mutex_lock(&g_dfmu);
+    dm_host_lock(&g_dfmu);
     int n = 0; for (int i = 0; i < g_ndfq; i++) if (g_dfq[i].d != d) g_dfq[n++] = g_dfq[i];
     g_ndfq = n; pthread_mutex_unlock(&g_dfmu);
 }
 // signal under the lock: the destructor first drops pending entries under it, so a signal never interleaves with destruction
 static void md_defer_body(void *arg) {
     (void)arg;
-    pthread_mutex_lock(&g_dfmu);
+    dm_host_lock(&g_dfmu);
     for (;;) {
         uint64_t now = now_ns(), next = 0; int k = -1;
         for (int i = 0; i < g_ndfq && k < 0; i++) { if (g_dfq[i].due <= now) k = i; else if (!next || g_dfq[i].due < next) next = g_dfq[i].due; }
@@ -414,7 +417,7 @@ static void md_job(mdec_t *d, int job) {
 }
 // while packets are queued and an output slot is free, decode the head packet, until the queue is empty or every slot is taken; signal the input / output events by the result
 static void md_pump(mdec_t *d) {
-    pthread_mutex_lock(&d->dmu);
+    dm_host_lock(&d->dmu);
     for (;;) {
         pthread_mutex_lock(&d->mu);
         if (d->avc_drain) {   // H.264 end of stream: the pictures still queued leave one per free slot; the last carries the end-of-stream flag
@@ -503,7 +506,7 @@ static void md_free(void **self) {
     self[1] = NULL;
     LOG("[movie] decoder %p destroyed: %lu packets in, %lu frames out; decoded %llu packets, average %.2f ms per packet, longest %.2f ms", (void *)self, d->ncall[7], d->ncall[8],
         (unsigned long long)d->dec_n, d->dec_n ? d->dec_ns / 1e6 / d->dec_n : 0.0, d->dec_max / 1e6);
-    pthread_mutex_lock(&d->dmu); md_job(d, MDJ_QUIT); pthread_mutex_unlock(&d->dmu);
+    dm_host_lock(&d->dmu); md_job(d, MDJ_QUIT); pthread_mutex_unlock(&d->dmu);
     pthread_join(d->wk, NULL);
     for (int i = 0; i < MD_NIN; i++) free(d->in[i]);
     for (int k = 0; k < MD_NOUT; k++) free(d->out[k].frm);
@@ -559,7 +562,7 @@ HLE_FORCE("_ZN5movie7Decoder5StartEv", "movie decoder start: all inputs empty, n
 }
 // clear the queues and slots; with close, the libvpx decoder is closed too (rebuilt at the next packet)
 static void md_reset(mdec_t *d, int close) {
-    pthread_mutex_lock(&d->dmu);   // wait for the packet being decoded
+    dm_host_lock(&d->dmu);   // wait for the packet being decoded
     if (close) md_job(d, MDJ_CLOSE);
     if (d->avc) mavc_drop(d->avc);   // H.264 pictures waiting for their turn belong to the old position
     pthread_mutex_lock(&d->mu);
@@ -576,7 +579,7 @@ static void md_reset(mdec_t *d, int close) {
 HLE_FORCE("_ZN5movie7Decoder4StopEv", "movie decoder stop", int, h_movie_Stop, void **self) {
     mdec_t *d = md_of(self); if (!d) return 0x2003;
     MD_TRACE(d, 3, "Stop");
-    pthread_mutex_lock(&g_dfmu); pthread_mutex_lock(&d->mu); d->started = 0; pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_dfmu);   // the deferred thread signals holding g_dfmu: taking it guarantees no signal afterwards
+    dm_host_lock(&g_dfmu); pthread_mutex_lock(&d->mu); d->started = 0; pthread_mutex_unlock(&d->mu); pthread_mutex_unlock(&g_dfmu);   // the deferred thread signals holding g_dfmu: taking it guarantees no signal afterwards
     md_defer_drop(d);
     md_reset(d, 1); return 0;
 }
@@ -589,7 +592,7 @@ HLE_FORCE("_ZN5movie7Decoder5ResetEv", "movie decoder reset", int, h_movie_Reset
 HLE_FORCE("_ZN5movie7Decoder5FlushEv", "movie decoder flush: all inputs and outputs returned", int, h_movie_Flush, void **self) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     MD_TRACE(d, 5, "Flush"); md_defer_drop(d); md_reset(d, 0);
-    if (d->vb) { pthread_mutex_lock(&d->dmu); stb_vorbis_flush_pushdata(d->vb); pthread_mutex_unlock(&d->dmu); }   // a seek: start the overlap afresh
+    if (d->vb) { dm_host_lock(&d->dmu); stb_vorbis_flush_pushdata(d->vb); pthread_mutex_unlock(&d->dmu); }   // a seek: start the overlap afresh
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder23AcquireInputBufferIndexEPiS1_", "movie decoder: acquire a free input index", int, h_movie_AcqIn, void **self, int *idx, int *left) {

@@ -54,7 +54,7 @@ jobs:
           make GAME="$GAME" -j3 t_perf_order
           ./t_perf_order --cpu 2>&1 | tee ../../../logs/t_perf_order.log
           make GAME="$GAME" -j3 perf-order-tsan 2>&1 | tee ../../../logs/t_perf_order-tsan.log
-          tests="t_dirty_slots t_dirty_race t_tex_layout t_pace t_fstep t_hmap t_cover t_pso_skey t_refl t_rt_range_ro t_present_rescue t_gpuprof"
+          tests="t_dirty_slots t_dirty_race t_tex_layout t_pace t_fstep t_link_ticks t_hmap t_cover t_pso_skey t_refl t_rt_range_ro t_present_rescue t_gpuprof"
           make GAME="$GAME" -j3 $tests 2>&1 | tee ../../../logs/gfx-build.log
           failed=0
           for t in $tests; do
@@ -64,6 +64,8 @@ jobs:
             if [ "$rc" != 0 ]; then echo "::error::$t failed"; failed=1; fi
           done
           exit $failed
+      - name: Direct OpenGL imports and EGL lookup (no GPU)
+        run: make -C dm/gfx/tests GAME="$GAME" gl-imports 2>&1 | tee logs/gl-imports.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:

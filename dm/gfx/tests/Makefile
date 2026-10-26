@@ -9,17 +9,6 @@ endif
 GAME_DIR = ../../games/$(GAME)
 GAME_H = ../../host/gen/$(GAME)/game_profile.h
 
-# Portable admission contract only; native Metal binding remains an Apple test.
-.PHONY: imga-layout imga-layout-sanitize
-imga-layout: t_imga_layout
-	./t_imga_layout
-t_imga_layout: t_imga_layout.c ../nvn/nvn_imga_layout.h
-	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
-imga-layout-sanitize: t_imga_layout_sanitize
-	./t_imga_layout_sanitize
-t_imga_layout_sanitize: t_imga_layout.c ../nvn/nvn_imga_layout.h
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $<
-
 CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H))
 GFX=$(filter-out ../nvn/hle_nvn.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m)))
 GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H)
@@ -93,6 +82,12 @@ check_t_perf_order: t_perf_order
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FAST_WAKE=0 DM_NVN_SLICE_MERGE=0 DM_NVN_CS_HOIST=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 run: check_t_perf_order
+t_link_ticks: t_link_ticks.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_link_ticks.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_link_ticks
+check_t_link_ticks: t_link_ticks
+	./t_link_ticks
+run: check_t_link_ticks
 t_cube_placeholder: t_cube_placeholder.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cube_placeholder.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_cube_placeholder
@@ -221,11 +216,25 @@ check_t_clear_tex: t_clear_tex
 run: check_t_clear_tex
 t_upgrade_alias: t_upgrade_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upgrade_alias.m $(MTL_T_SRC) $(FW)
+t_image_alias: t_image_alias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_image_alias.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_image_alias
+check_t_image_alias: t_image_alias
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_image_alias
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_image_alias
+run: check_t_image_alias
 t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+.PHONY: gl-imports
+gl-imports: t_gl_imports
+	./t_gl_imports
+	./t_gl_imports --stubs
+run: gl-imports
 run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tbuf_align t_deswz_gpu t_pace t_timestamp t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_vbuf t_geometry t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pso_archive t_pso_bundle t_pull t_pull_inv t_pso_pending t_pfv t_view_levels t_view_swizzle t_vk_desc t_integer_blend t_primitive_restart t_clear_ds t_depth16_clear t_upgrade_alias t_stencil_view
 	./t_nvn
 	./t_dirty_slots

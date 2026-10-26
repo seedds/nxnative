@@ -48,9 +48,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 }
 
                 bool converted = table == TableHandle.Set && TryConvertBindless(block, resourceManager, gpuAccessor, texOp);
-                if (!converted && texOp.Inst == Instruction.ImageAtomic && texOp.Flags.HasFlag(TextureFlags.AtomicMsl23))
+                if (!converted && texOp.Inst == Instruction.ImageAtomic && texOp.Flags.HasFlag(TextureFlags.AtomicMetal))
                 {
-                    throw new NotSupportedException("MSL 2.3 image atomics require a statically resolved image handle.");
+                    throw new NotSupportedException("Metal image atomics require a statically resolved image handle.");
                 }
 
                 if (!converted &&
@@ -573,7 +573,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         if (texOp.Inst == Instruction.ImageAtomic)
                         {
                             texOp.Format = ShaderProperties.GetTextureFormatAtomic(gpuAccessor, cbufOffset, cbufSlot,
-                                strict: texOp.Flags.HasFlag(TextureFlags.AtomicMsl23));
+                                strict: texOp.Flags.HasFlag(TextureFlags.AtomicMetal));
                         }
                         else
                         {

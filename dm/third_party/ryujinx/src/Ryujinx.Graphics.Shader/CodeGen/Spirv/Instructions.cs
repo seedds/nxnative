@@ -622,19 +622,22 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             ImageDeclaration declaration = context.Images[texOp.GetTextureSetAndBinding()];
             SpvInstruction image = declaration.Image;
 
-            bool bounded = context.HostCapabilities.Msl23ImageAtomics;
+            bool bounded = context.HostCapabilities.MetalImageAtomics;
+            // CAS is a native texture compare-exchange on Metal (SPIRV-Cross loops
+            // atomic_compare_exchange_weak into a strong one), so it takes the same guard.
             if (bounded && ((texOp.Flags & TextureFlags.AtomicBoundsMask) != 0 ||
-                texOp.Flags.HasFlag(TextureFlags.AtomicPredicateResult) ||
-                (texOp.Flags & TextureFlags.AtomicMask) == TextureFlags.CAS))
+                texOp.Flags.HasFlag(TextureFlags.AtomicPredicateResult)))
             {
-                throw new NotSupportedException("MSL 2.3 image atomics require IGN without CAS or a predicate result; TRAP semantics are not implemented.");
+                throw new NotSupportedException("Metal image atomics require IGN without a predicate result; TRAP semantics are not implemented.");
             }
+            // Metal's texture atomics (MSL 3.1) cover buffer, 2D, 2D-array and 3D textures of
+            // R32Uint / R32Sint; source 1D surfaces arrive here already normalized to 2D.
             if (bounded && (declaration.IsIndexed ||
                 (texOp.Type != SamplerType.TextureBuffer && texOp.Type != SamplerType.Texture2D &&
-                 texOp.Type != (SamplerType.Texture2D | SamplerType.Array)) ||
+                 texOp.Type != (SamplerType.Texture2D | SamplerType.Array) && texOp.Type != SamplerType.Texture3D) ||
                 (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint)))
             {
-                throw new NotSupportedException("MSL 2.3 bounded image atomics support non-indexed 32-bit buffer/2D/2D-array images only.");
+                throw new NotSupportedException("Metal image atomics support non-indexed 32-bit buffer/2D/2D-array/3D images only.");
             }
 
             SpvInstruction resultType = context.GetType(componentType);

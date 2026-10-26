@@ -38,7 +38,7 @@ Status (2026-10-26): opening gameplay tested on the Mac with the capped memory l
 
 ## Rendering
 
-- **Resolved:** two global compute shaders (`2d2093c1f1d3a7e0`, `4fe56176fa5a5dc6`) dispatched at boot failed translation. They use `IGN` buffer-image atomics and consume the returned old value, which the Metal path previously rejected. The general translator now preserves that value, with a zero result and no memory access outside the image: [Bounded MSL 2.3 atomic emulation](../../../docs/reference/shaders.md#bounded-msl-23-atomic-emulation). Synthetic SPIR-V, Mac/iOS Metal and Mac GPU result/sentinel checks pass. All 19,746 shaders build for both Mac and iOS with chain `86c8282f6fb4`; one folded geometry stage needs no separate Metal library.
+- **Resolved:** two global compute shaders (`2d2093c1f1d3a7e0`, `4fe56176fa5a5dc6`) dispatched at boot failed translation. They use `IGN` buffer-image atomics and consume the returned old value, which the Metal path previously rejected. The general translator now preserves that value, with a zero result and no memory access outside the image: [Bounds of image atomics](../../../docs/reference/shaders.md#bounds-of-image-atomics). Synthetic SPIR-V, Mac/iOS Metal and Mac GPU result/sentinel checks pass. All 19,746 shaders build for both Mac and iOS with chain `86c8282f6fb4`; one folded geometry stage needs no separate Metal library.
 - **Resolved:** the first dispatch then failed image admission because reflection classified `texture_buffer` as 2D. Preserving its actual Metal type binds the real four-byte counter storage: [Buffer image reflection keeps its texture type](../../../docs/reference/shaders.md#buffer-image-reflection-keeps-its-texture-type). The corrected Mac runs have no `[RED]` diagnostics through the tested opening.
 
 ## Mac runs
@@ -53,7 +53,7 @@ The NSP script's build directory is `<NSP folder>/010069C01AB82000_build`; analy
 ## Found on this game
 
 - **Provisional Unreal profiles leave room for the initial heap** (`profile_guess.py`): [Provisional Unreal layout leaves no heap](../../../docs/reference/memory.md#provisional-unreal-layout-leaves-no-heap).
-- **Returning `IGN` image atomics** (the offline translator, `t_atomic_return.m`): [Bounded MSL 2.3 atomic emulation](../../../docs/reference/shaders.md#bounded-msl-23-atomic-emulation).
+- **Returning `IGN` image atomics** (the offline translator, `t_atomic_return.m`): [Bounds of image atomics](../../../docs/reference/shaders.md#bounds-of-image-atomics).
 - **Buffer-image reflection preserves its Metal texture type** (`nvn_refl.m`, `t_refl.m`): [Buffer image reflection keeps its texture type](../../../docs/reference/shaders.md#buffer-image-reflection-keeps-its-texture-type).
 
 ## Open

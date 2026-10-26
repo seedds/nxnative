@@ -102,7 +102,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             {
                 if (strict)
                 {
-                    throw new NotSupportedException($"MSL 2.3 image atomics require an R32 integer descriptor format, got {format}.");
+                    throw new NotSupportedException($"Metal image atomics require an R32 integer descriptor format, got {format}.");
                 }
 
                 gpuAccessor.Log($"Unsupported format for texture {handle}: {format}.");

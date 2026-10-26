@@ -367,7 +367,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 GpuAccessor.QueryHostSupportsShaderNonUniformIndexing(),
                 GpuAccessor.QueryHostSupportsTextureShadowLod(),
                 GpuAccessor.QueryHostSupportsViewportMask(),
-                Options.Flags.HasFlag(TranslationFlags.Msl23ImageAtomics));
+                Options.Flags.HasFlag(TranslationFlags.MetalImageAtomics));
 
             CodeGenParameters parameters = new CodeGenParameters(attributeUsage, definitions, resourceManager.Properties, hostCapabilities, GpuAccessor, Options.TargetApi);
 

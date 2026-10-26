@@ -167,6 +167,16 @@ int dm_yield_to_core_peers(int all) {
         { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); } waited = 1;
     }
 }
+// Take a host lock that an HLE call holds while it runs guest code. A guest thread waiting for it is in a native HLE wait (dm_thread_native_wait), blocked as it would be
+// on the guest-visible lock the SDK's own code uses there, so it does not hold a same-core handoff: Kirby and the Forgotten Land's guide movies froze the game when the movie decoder's decode lock was held across the
+// "input available" SignalEvent, the signal woke the priority-44 movie threads of core 0, and the signaller (a priority-46 job worker) waited for its woken input thread,
+// which was itself waiting for that lock (hle_movie.c md_pump)
+void dm_host_lock(pthread_mutex_t *m) {
+    if (!pthread_mutex_trylock(m)) return;
+    dm_thread_native_wait(1);
+    pthread_mutex_lock(m);
+    dm_thread_native_wait(0);
+}
 
 // ---------- Wait primitives (called holding G) ----------
 static void wait_unlink(thr_t *t) {

@@ -1,4 +1,5 @@
-"""MSL-2.3 image atomic contract, using synthetic shaders only.
+"""Native Metal image atomic contract (MSL 3.1 texture atomics behind the IGN bounds guard),
+using synthetic shaders only.
 
 Portable tests require Python. To exercise the actual rebuilt offline compiler:
   DMSH_TEST_XLATE=/absolute/path/to/dmsh_xlate python3 -m unittest discover \
@@ -7,7 +8,8 @@ Requires spirv-cross and spirv-val on PATH; optionally DMSH_TEST_METAL=1 on Mac
 also compiles and links each generated MSL file. DMSH_TEST_METAL_SDKS defaults
 to macosx; set macosx,iphoneos to check both SDKs with the production flags.
 Set DMSH_TEST_GPU=1 with DMSH_TEST_METAL=1 to execute the returning buffer
-fixtures on a Mac GPU and check returned values and surrounding sentinels.
+fixtures (buffer, 2D, 2D-array and 3D textures) on a Mac GPU and check returned
+values and surrounding sentinels.
 No game inputs are used.
 """
 import ast
@@ -26,6 +28,15 @@ ROOT = Path(__file__).resolve().parents[3]
 RYU = ROOT / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader'
 spec = importlib.util.spec_from_file_location('dmsh_atomic', ROOT / 'dm/gfx/tools/dmsh_atomic.py')
 atomic = importlib.util.module_from_spec(spec); spec.loader.exec_module(atomic)
+XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']  # dmsh_build.XC without fragment padding
+
+
+def cross(spv, msl):
+    """spirv-cross as dmsh_build runs it: MSL 3.1 for a module with image atomics, which must come out as native texture atomics"""
+    subprocess.run(['spirv-cross', *atomic.cross_args(XC, str(spv)), str(spv), '--output', str(msl)], check=True)
+    source = atomic.check_msl(msl.read_text())
+    assert '.atomic_fetch_' in source and 'access::read_write' in source, msl
+    return source
 
 
 def offset(coord, extent):
@@ -35,16 +46,22 @@ def offset(coord, extent):
     return coord[0] + extent[0] * (coord[1] + extent[1] * coord[2])
 
 
-def synthetic_shader(x, y, layer=0, *, array=True, mode=0, discard=True, reduction=False, size=0, dim=None, bindless=None, consume_result=False):
+def synthetic_shader(x, y, layer=0, *, array=True, mode=0, discard=True, reduction=False, size=0, dim=None, bindless=None, consume_result=False, cas=None):
     table = (RYU / 'Decoders/InstTable.cs').read_text()
     def base(name):
         pattern = re.search(r'Add\("([01x]{64})", InstName\.' + name + r'\s*,', table)[1]
         return int(pattern.replace('x', '0'), 2)
     def mov(reg, value):
         return base('Mov32i') | ((value & 0xffffffff) << 20) | (7 << 16) | (15 << 12) | reg
-    instructions = [mov(0, x), mov(1, y), mov(2, layer), mov(3, 1)]
+    instructions = [mov(0, x), mov(1, y), mov(2, layer), mov(3, cas[0] if cas else 1)]
     dim = (4 if array else 3) if dim is None else dim
-    if reduction:
+    if cas:
+        # SUATOM.CAS R4, [R0..R2], R3, R4: compare with R3, swap in R4, the old texel into R4.
+        assert not reduction and not discard and bindless is None
+        instructions.append(mov(4, cas[1]))
+        # Bit 54 set, as in the real encoding (0xEAC...): clear, the word also matches SUATOM's pattern.
+        op = base('SuatomCas') | (1 << 54) | (mode << 49) | (0x48 << 36) | (dim << 33) | (3 << 20) | (7 << 16) | 4
+    elif reduction:
         op = base('Sured') | (mode << 49) | (0x48 << 36) | (dim << 33) | (2 << 24) | (7 << 16) | 3
     else:
         op = base('Suatom') | (mode << 49) | (0x48 << 36) | (dim << 33) | (2 << 29) | (3 << 20) | (7 << 16) | (255 if discard else 4)
@@ -137,44 +154,30 @@ class Portable(unittest.TestCase):
         self.assertEqual(offset((7, 3, 2), (8, 4, 3)), 95)
         self.assertEqual([offset((0, 0, z), (8, 4, 3)) for z in range(3)], [0, 32, 64])
 
-    def test_compiler_helper_contract(self):
-        source = atomic._XY_HELPER + '\n' + atomic._DEFAULT_ALIGNMENT
-        self.assertEqual(atomic.validate_msl(source), source)
-        self.assertIn(atomic.HELPERS, atomic.lower_msl(source))
-        self.assertNotIn('#define spvImage2DAtomicCoord', atomic.lower_msl(source))
-        self.assertIn(atomic.HELPERS, atomic.lower_msl(source.replace(' ', '  ')))
-        self.assertEqual(atomic.validate_msl('fragment void main0() {}'), 'fragment void main0() {}')
-        for changed in [source.replace('(tc).x)', '(tc).z)'), source.replace(': 4;', ': 256;'), source.replace('#define', 'inline'), source + '\n' + atomic._XY_HELPER]:
-            with self.assertRaises(ValueError): atomic.validate_msl(changed)
+    def test_msl_version_follows_image_atomics(self):
+        with tempfile.TemporaryDirectory(prefix='dm-atomic-spv-') as temp:
+            def module(name, ops):
+                path = Path(temp) / name
+                path.write_bytes(struct.pack('<5I', 0x07230203, 0x10000, 0, 100, 0) + b''.join(struct.pack('<%dI' % len(o), *o) for o in ops))
+                return str(path)
+            capability = [(2 << 16) | 17, 1]  # OpCapability Shader
+            plain = module('plain.spv', [capability])
+            texel = module('texel.spv', [capability, [(6 << 16) | 60, 1, 2, 3, 4, 5]])  # OpImageTexelPointer
+            self.assertFalse(atomic.uses_image_atomics(plain))
+            self.assertTrue(atomic.uses_image_atomics(texel))
+            self.assertEqual(atomic.cross_args(XC, plain), XC)
+            self.assertEqual(atomic.cross_args(XC, texel), XC[:2] + ['30100'] + XC[3:])
+            self.assertEqual(XC[2], '20300')  # not changed in place
+            with self.assertRaises(ValueError): atomic.uses_image_atomics(module('zero.spv', [[0, 0]]))
+            not_spirv = Path(temp) / 'not.spv'; not_spirv.write_bytes(b'\0' * 20)
+            with self.assertRaises(ValueError): atomic.uses_image_atomics(str(not_spirv))
 
-    @unittest.skipUnless(shutil.which('c++'), 'portable C++ compiler unavailable')
-    def test_exact_helper_body(self):
-        # Compile and execute the exact source-owned helper, with only the
-        # texture/type API mocked. This is not a Metal compiler/GPU test.
-        source = '''#include <cassert>
-#include <cstdint>
-using uint = uint32_t; using ulong = uint64_t;
-enum access { sample }; struct int2 { int x,y; }; struct int3 { int x,y,z; };
-uint spvLinearTextureAlignment = 4;
-template<typename T, access A> struct texture2d { uint w,h; uint get_width() const {return w;} uint get_height() const {return h;} };
-template<typename T, access A> struct texture2d_array { uint w,h; uint get_width() const {return w;} uint get_height() const {return h;} };
-''' + atomic.HELPERS + '''
-int main() {
-    texture2d<uint, sample> two{8,4}; texture2d_array<uint,sample> array{8,4};
-    assert(spvImage2DAtomicCoord(int2{7,3},two)==31);
-    assert(spvImage2DAtomicCoord(int3{7,3,0},array)==31);
-    assert(spvImage2DAtomicCoord(int3{0,0,1},array)==32);
-    assert(spvImage2DAtomicCoord(int3{7,3,2},array)==95);
-    texture2d_array<uint,sample> large{16384,16384};
-    assert(spvImage2DAtomicCoord(int3{7,3,65},large)==ulong(65)*16384*16384+3*16384+7);
-    spvLinearTextureAlignment=256;
-    texture2d_array<uint,sample> padded{17,3};
-    assert(spvImage2DAtomicCoord(int3{16,2,1},padded)==64*(3+2)+16);
-}'''
-        with tempfile.TemporaryDirectory(prefix='dm-atomic-helper-') as temp:
-            path=Path(temp); (path/'test.cpp').write_text(source)
-            subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror',str(path/'test.cpp'),'-o',str(path/'test')],check=True)
-            subprocess.run([str(path/'test')],check=True)
+    def test_pointer_emulation_rejected(self):
+        native = 'uint _1 = spvDescriptorSet0.img.atomic_fetch_add(uint3(c), 1u).x;'
+        self.assertEqual(atomic.check_msl(native), native)
+        for emulated in ('    device atomic_uint* img_atomic [[id(2)]];', 'device atomic_int* cp_i_cb2_4C_r32i_atomic [[id(1)]];',
+                         '#define spvImage2DAtomicCoord(tc, tex) ((tc).x)'):
+            with self.assertRaises(ValueError): atomic.check_msl(emulated)
 
     def test_mode_and_result_are_retained(self):
         src = (RYU / 'Instructions/InstEmitSurface.cs').read_text()
@@ -188,7 +191,8 @@ int main() {
         self.assertIn('context.ULessThan(compareType, coords, extent)', part)
         self.assertNotIn('context.IMul(uintType, height, layer)', part)
         self.assertEqual(part.count('pCoords ='), 2)  # scalar/vector construction only; never folded
-        self.assertIn('context.HostCapabilities.Msl23ImageAtomics', part)
+        self.assertIn('context.HostCapabilities.MetalImageAtomics', part)
+        self.assertIn('texOp.Type != SamplerType.Texture3D', part)
         self.assertIn('texOp.Format != TextureFormat.R32Uint', part)
         self.assertIn('texOp.Format != TextureFormat.R32Sint', part)
         self.assertEqual(src.count('size is not (SuatomSize.U32 or SuatomSize.S32 or SuatomSize.Sd32)'), 2)
@@ -213,7 +217,7 @@ class Compiler(unittest.TestCase):
     def test_returning_ign_atomic(self):
         with tempfile.TemporaryDirectory(prefix='dm-image-atomic-return-') as temp:
             work = Path(temp)
-            for dim, image in ((1, 'buf'), (3, '2d'), (4, '2darray')):
+            for dim, image in ((1, 'buf'), (3, '2d'), (4, '2darray'), (5, '3d')):
                 for x in (-1, 0, 8):
                     key = 'return_%d_%d' % (dim, x)
                     code = work / (key + '.bin')
@@ -249,10 +253,32 @@ class Compiler(unittest.TestCase):
                         return any(reaches(source, target, seen) for source in dependencies.get(value, ()))
                     self.assertTrue(any(op == 234 and reaches(args[-1], phi[1]) for op, args in ops))
                     msl = work / (key + '.metal')
-                    subprocess.run(['spirv-cross', '--msl', '--msl-version', '20300', '--msl-argument-buffers',
-                        '--msl-texture-buffer-native', str(spv), '--output', str(msl)], check=True)
-                    msl.write_text(atomic.lower_msl(msl.read_text()))
-                    self.compile_metal(msl, work, key)
+                    cross(spv, msl)
+                    self.compile_metal(msl, work, key, gpu=('buffer' if image == 'buf' else image, 6 if x == 0 else 3))
+
+    def test_compare_and_swap(self):
+        # Texel 0 holds 3. A CAS at x swaps in 7 when it compares equal and returns the old texel,
+        # which a second atomic adds to texel 0: 7 + 3 = 10 (swapped), 3 + 3 = 6 (compared unequal), 3 (outside).
+        with tempfile.TemporaryDirectory(prefix='dm-image-atomic-cas-') as temp:
+            work = Path(temp)
+            for dim, image in ((1, 'buf'), (3, '2d'), (4, '2darray'), (5, '3d')):
+                for x in (-1, 0, 8):
+                    for compare in (3, 2):
+                        key = 'cas_%d_%d_%d' % (dim, x, compare)
+                        code = work / (key + '.bin')
+                        code.write_bytes(synthetic_shader(x, 0, dim=dim, discard=False, consume_result=True, cas=(compare, 7)))
+                        jobs = work / 'jobs.json'
+                        jobs.write_text(json.dumps([dict(key=key, stage='cs', code=str(code),
+                            img={'0': dict(type=image, fmt='R32Uint')}, local=[1, 1, 1], debug=True)]))
+                        result = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(jobs), str(work)], capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        spv = work / (key + '.spv')
+                        subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(spv)], check=True)
+                        self.assertTrue(any(op == 230 for op, _ in instructions(spv)))  # OpAtomicCompareExchange
+                        msl = work / (key + '.metal')
+                        self.assertIn('atomic_compare_exchange_weak', cross(spv, msl))
+                        expected = (10 if compare == 3 else 6) if x == 0 else 3
+                        self.compile_metal(msl, work, key, gpu=('buffer' if image == 'buf' else image, expected))
 
     def test_descriptor_sized_formats(self):
         # Sd32 takes its format from the descriptor. Validate that original
@@ -290,7 +316,7 @@ class Compiler(unittest.TestCase):
             self.assertIn('require a statically resolved image handle', result.stderr)
             self.assertFalse((work / 'unresolved.spv').exists())
 
-    def compile_metal(self, msl, work, key):
+    def compile_metal(self, msl, work, key, gpu=None):
         if os.environ.get('DMSH_TEST_METAL') != '1':
             return
         metal_sdks = os.environ.get('DMSH_TEST_METAL_SDKS', 'macosx').split(',')
@@ -308,20 +334,21 @@ class Compiler(unittest.TestCase):
             self.assertGreater(air.stat().st_size, 0)
             self.assertGreater(library.stat().st_size, 0)
             print('synthetic Metal compile/link passed:', key, sdk, library.stat().st_size, 'bytes')
-            if sdk == 'macosx' and key.startswith('return_1_') and os.environ.get('DMSH_TEST_GPU') == '1':
+            if sdk == 'macosx' and gpu and os.environ.get('DMSH_TEST_GPU') == '1':
                 executable = work / 'atomic-return'
                 if not executable.exists():
                     subprocess.run(['clang', '-fobjc-arc', '-O1', '-Wall', '-Werror',
                         str(ROOT / 'dm/gfx/tests/t_atomic_return.m'), '-framework', 'Foundation',
                         '-framework', 'Metal', '-o', str(executable)], check=True)
-                expected = 6 if int(key.removeprefix('return_1_')) == 0 else 3
-                subprocess.run([str(executable), str(library), str(expected)], check=True)
+                shape, expected = gpu
+                subprocess.run([str(executable), str(library), str(expected), shape], check=True,
+                               env=dict(os.environ, MTL_DEBUG_LAYER='1'))
 
     def test_dimension_routes(self):
         # 1D routes retain the existing y=0 normalization; buffer images stay
-        # scalar and must not acquire the source-owned 2D helper.
+        # scalar; 3D images keep all three coordinates.
         shapes = [('1d', (1, 0)), ('buffer', (1,)), ('1darray', (1, 0, 2)),
-                  ('2d', (1, 2)), ('2darray', (1, 2, 3)), ('3d', None)]
+                  ('2d', (1, 2)), ('2darray', (1, 2, 3)), ('3d', (1, 2, 3))]
         with tempfile.TemporaryDirectory(prefix='dm-image-atomic-dim-') as temp:
             work = Path(temp)
             for reduction in (False, True):
@@ -334,24 +361,13 @@ class Compiler(unittest.TestCase):
                         img={'0': dict(type=shape, fmt='R32Uint')}, local=[1, 1, 1], debug=True)]))
                     result = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(jp), str(work)], capture_output=True, text=True)
                     spv = work / (key + '.spv')
-                    if expected is None:
-                        self.assertNotEqual(result.returncode, 0)
-                        self.assertIn('support non-indexed 32-bit buffer/2D/2D-array images only', result.stderr)
-                        self.assertFalse(spv.exists())
-                        continue
                     self.assertEqual(result.returncode, 0, result.stderr)
                     subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(spv)], check=True)
                     check_coordinate_guard(instructions(spv), expected)
                     msl = work / (key + '.metal')
-                    subprocess.run(['spirv-cross', '--msl', '--msl-version', '20300', '--msl-argument-buffers',
-                        '--msl-texture-buffer-native', str(spv), '--output', str(msl)], check=True)
-                    original = msl.read_text(); source = atomic.lower_msl(original)
-                    if shape == 'buffer':
-                        self.assertEqual(source, original)
-                        self.assertNotIn('spvImage2DAtomicCoord', source)
-                    else:
-                        self.assertIn(atomic.HELPERS, source)
-                    msl.write_text(source)
+                    source = cross(spv, msl)
+                    self.assertIn({'buffer': 'texture_buffer<', '3d': 'texture3d<'}.get(shape, 'texture2d_array<' if 'array' in shape else 'texture2d<'), source)
+                    if shape == '3d': self.assertIn('.get_depth()', source)
                     self.compile_metal(msl, work, key)
 
     def test_source_size_gate(self):
@@ -371,9 +387,7 @@ class Compiler(unittest.TestCase):
                         self.assertEqual(result.returncode, 0, result.stderr)
                         subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(spv)], check=True)
                         msl = work / (key + '.metal')
-                        subprocess.run(['spirv-cross', '--msl', '--msl-version', '20300', '--msl-argument-buffers',
-                            '--msl-texture-buffer-native', str(spv), '--output', str(msl)], check=True)
-                        msl.write_text(atomic.lower_msl(msl.read_text()))
+                        cross(spv, msl)
                         self.compile_metal(msl, work, key)
                     else:  # U64, S64, descriptor-sized64, float and half2.
                         self.assertNotEqual(result.returncode, 0, key)
@@ -414,11 +428,7 @@ class Compiler(unittest.TestCase):
                         self.assertTrue(any(op == 176 for op, _ in ops))  # OpULessThan
                         self.assertTrue(any(op == 239 for op, _ in ops))  # OpAtomicUMax
                         msl = work / (job['key'] + '.metal')
-                        subprocess.run(['spirv-cross','--msl','--msl-version','20300','--msl-argument-buffers','--msl-texture-buffer-native',str(spv),'--output',str(msl)], check=True)
-                        original = msl.read_text(); source = atomic.lower_msl(original)
-                        helper_line = next(line for line in original.splitlines() if atomic._helper_line(line))
-                        self.assertEqual(source, original.replace(helper_line, atomic.HELPERS, 1))
-                        msl.write_text(source)
+                        source = cross(spv, msl)
                         self.assertIn('.get_height()', source)
                         if array: self.assertIn('.get_array_size()', source)
                         self.compile_metal(msl, work, job['key'])
@@ -428,7 +438,7 @@ class Compiler(unittest.TestCase):
                 jp.write_text(json.dumps([dict(key=key,stage='cs',code=str(code),img={'0':dict(type='2darray',fmt='R32Uint')},local=[1,1,1],debug=True)]))
                 result=subprocess.run([os.environ['DMSH_TEST_XLATE'],str(jp),str(work)],capture_output=True,text=True)
                 self.assertNotEqual(result.returncode,0)
-                self.assertIn('require IGN without CAS or a predicate result',result.stderr)
+                self.assertIn('require IGN without a predicate result',result.stderr)
                 self.assertFalse((work/(key+'.spv')).exists())
 
 

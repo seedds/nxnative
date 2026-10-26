@@ -20,7 +20,7 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         // the operation; TRAP/unknown must not silently become IGN on Metal.
         AtomicBoundsMask = 3 << 20,
         AtomicDiscardResult = 1 << 22,
-        AtomicMsl23 = 1 << 23,
+        AtomicMetal = 1 << 23,
         AtomicPredicateResult = 1 << 24,
 
         AtomicMask = 15 << 16,

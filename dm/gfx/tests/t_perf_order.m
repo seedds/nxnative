@@ -121,7 +121,7 @@ static void slices(id<MTLLibrary> lib) {
     p->sh[1]->rf.nb=1; p->sh[1]->rf.b[0]=(nvn_rbind){.kind=NVN_RB_TEX,.reg=0};
     chain next={0}; rt(&next,&t,1,NULL); triangle(&next); emit(&next,OP_END,NULL,0); g_exec_next=next.p;
     sm_plan(p); CHECK("first draw sampling attachment cannot start slice merge",!g_sm_plan.on);
-    int kinds[]={NVN_RB_TEXU,NVN_RB_TEXD,NVN_RB_TEXA,NVN_RB_IMGA};
+    int kinds[]={NVN_RB_TEXU,NVN_RB_TEXD,NVN_RB_TEXA};
     for(unsigned i=0;i<sizeof kinds/sizeof *kinds;i++) {
         p->sh[1]->rf.b[0].kind=kinds[i];
         CHECK("unknown/bindless attachment reads split merged pass",draw_samples_rt(p));

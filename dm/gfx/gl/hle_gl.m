@@ -1,7 +1,7 @@
 // OpenGL → Metal layer for games that render with OpenGL through EGL (Digimon Story Cyber Sleuth: Complete Edition: Media.Vision's MVGL engine on NVIDIA's desktop GL 4.5 core
 // driver, subsdk0, which the host does not load; Balatro: LÖVE 11.4 on SDL, the same driver). main imports the EGL functions, which bind to the ones here through the host's import
-// table (hle.h swhle); it gets every GL function through eglGetProcAddress (a glad loader asks for 2,956 names; Digimon's code calls 79 of them, LÖVE's about 150, counted with
-// dm/tools/loader_census.py). Only those are implemented; every other name gets a null pointer (DM_GL_STUBS=1: a stub that reports its first call).
+// table (hle.h swhle). GL functions use that same table for direct imports and eglGetProcAddress (a glad loader asks for 2,956 names; Digimon's code calls 79 of them,
+// LÖVE's about 150, counted with dm/tools/loader_census.py). Only those are implemented; every other loader name gets a null pointer (DM_GL_STUBS=1: a stub that reports its first call).
 // LÖVE takes the core profile's paths (GL_CONTEXT_PROFILE_MASK): its vertex streams are persistently mapped buffers (glBufferStorage, glMapBufferRange) that fences
 // (glFenceSync / glClientWaitSync) keep the CPU from rewriting while a frame reads them; with a compatibility profile it would draw from client memory, which Metal cannot.
 // Model:
@@ -40,13 +40,12 @@ static int g_log;
 typedef uint32_t GLenum, GLuint, GLbitfield; typedef int32_t GLint, GLsizei; typedef float GLfloat; typedef double GLdouble; typedef char GLchar; typedef intptr_t GLsizeiptr, GLintptr;
 typedef void *EGLDisplay, *EGLConfig, *EGLContext, *EGLSurface; typedef int32_t EGLint; typedef uint32_t EGLBoolean, EGLenum;
 
-// GL: one GL function, registered in this layer's table (eglGetProcAddress looks names up there); GLB: the same, run on the thread's big host stack (hle_bigstack.c, register
-// arguments only) for the functions that call into Metal: a game thread's stack can be small. EGL: an EGL function, registered in the host's import table under its own name.
+// GL: one GL function, registered in the host's import table for both direct imports and eglGetProcAddress. GLB: the same, run on the thread's big host stack
+// (hle_bigstack.c, register arguments only) for the functions that call into Metal: a game thread's stack can be small. EGL uses the same import table and big-stack entry.
 // GLboolean and other arguments narrower than 32 bits are taken as uint32_t and truncated here (hle.h: Switch callers do not extend them)
-typedef struct { const char *name; void *fn; } gl_ent;
 #define GL(name, ret, ...)                                                                       \
     static ret h_##name(__VA_ARGS__);                                                            \
-    __attribute__((used, section("__DATA,swgl"))) static const gl_ent e_##name = {#name, (void *)h_##name}; \
+    __attribute__((used, section("__DATA,swhle"))) static const hle_ent e_##name = {#name, (void *)h_##name}; \
     static ret h_##name(__VA_ARGS__)
 #define BIGSTUB(fn)                                                                              \
     extern const char fn##_bs[];                                                                 \
@@ -55,7 +54,7 @@ typedef struct { const char *name; void *fn; } gl_ent;
 #define GLB(name, ret, ...)                                                                      \
     static ret h_##name(__VA_ARGS__) __attribute__((used));                                      \
     BIGSTUB(h_##name);                                                                           \
-    __attribute__((used, section("__DATA,swgl"))) static const gl_ent e_##name = {#name, (void *)h_##name##_bs}; \
+    __attribute__((used, section("__DATA,swhle"))) static const hle_ent e_##name = {#name, (void *)h_##name##_bs}; \
     static ret h_##name(__VA_ARGS__)
 #define EGL(name, ret, ...)                                                                      \
     static ret h_##name(__VA_ARGS__) __attribute__((used));                                      \
@@ -1941,10 +1940,10 @@ EGL(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface s) {
     frame_end();
     return EGL_TRUE;
 }
-// eglGetProcAddress: GL names from this layer's table, EGL names from the host's import table; anything else is null (the game's loader asks for every GL name it knows)
+// eglGetProcAddress: GL names from the same table as direct imports; anything else is null (the game's loader asks for every GL name it knows)
 static void *gl_lookup(const char *name) {
-    static const gl_ent *sec; static unsigned long sz;
-    if (!sec) sec = (const gl_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swgl", &sz);
+    static const hle_ent *sec; static unsigned long sz;
+    if (!sec) sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &sz);
     for (unsigned long i = 0; i < sz / sizeof *sec; i++) if (!strcmp(sec[i].name, name)) return sec[i].fn;
     return NULL;
 }

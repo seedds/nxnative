@@ -1997,7 +1997,7 @@ def main(args=None):
             if not saved_signing and legacy_config.exists() and f'/gen/{g.id}/' in legacy_config.read_text():
                 saved_signing = xcode_projects.signing_settings(repo / 'dm/ios/DmIOS.xcodeproj')
         except ValueError as e: raise BuildError(str(e)) from e
-    say('Mac app: the Mac shaders and the Mac host, packed into a Mac app; no iOS shaders, Xcode project or IPA' if mac_pack and not want_ios else 'Mac-only build for development: the Mac shaders and the Mac host, no iOS shaders, Xcode project or IPA' if mac and not want_ios else 'Mac app and IPA: the Mac shaders and host into an app, then the iOS shaders and the IPA' if both else f'Xcode project: {project}' if prepare_xcode else f'output IPA: {out_ipa}')
+    say('Mac app: the Mac shaders and the Mac host, packed into a Mac app; no iOS shaders, Xcode project or IPA' if mac_pack and not want_ios else 'Mac-only build for development: the Mac shaders and the Mac host, no iOS shaders, Xcode project or IPA' if mac and not want_ios else f'Xcode project: {project}' if prepare_xcode else f'output IPA: {out_ipa}')
     say(f'work folder (extracted game files in extract/, {"kept for the next build" if keep else "deleted after the IPA is built"}): {work}')
     xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it

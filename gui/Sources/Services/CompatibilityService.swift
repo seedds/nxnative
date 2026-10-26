@@ -4,6 +4,7 @@ public final class CompatibilityService {
     public static let shared = CompatibilityService()
     
     private let githubRawURL = URL(string: "https://raw.githubusercontent.com/seedds/nxnative/main/dm/games/README.md")!
+    public private(set) var cachedGames: [CompatibleGameItem] = []
     
     private init() {}
     
@@ -99,6 +100,28 @@ public final class CompatibilityService {
             )
         }
         
+        self.cachedGames = items
         return items
+    }
+    
+    public func findTitleId(forGameTitle cleanTitle: String) -> String? {
+        let normalized = cleanTitle.lowercased().filter { $0.isLetter || $0.isNumber }
+        guard !normalized.isEmpty else { return nil }
+        
+        var list = cachedGames
+        if list.isEmpty {
+            let localPath = "/Volumes/SSD FN501 PRO/Emulations/NativePort/nxnative/dm/games/README.md"
+            if let text = try? String(contentsOfFile: localPath, encoding: .utf8) {
+                list = parseMarkdownTable(text)
+            }
+        }
+        
+        for game in list {
+            let normGame = game.title.lowercased().filter { $0.isLetter || $0.isNumber }
+            if normGame == normalized || (normGame.contains(normalized) && normalized.count >= 6) || (normalized.contains(normGame) && normGame.count >= 6) {
+                return game.titleId
+            }
+        }
+        return nil
     }
 }

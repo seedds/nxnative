@@ -36,6 +36,11 @@ public final class GameScanner {
                let match = regex.firstMatch(in: filename, range: NSRange(filename.startIndex..., in: filename)),
                let range = Range(match.range(at: 1), in: filename) {
                 titleId = String(filename[range]).uppercased()
+            } else {
+                let clean = cleanGameTitle(filename)
+                if let matchedTid = CompatibilityService.shared.findTitleId(forGameTitle: clean) {
+                    titleId = matchedTid.uppercased()
+                }
             }
             
             // Extract Version

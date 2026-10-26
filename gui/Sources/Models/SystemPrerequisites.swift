@@ -50,6 +50,18 @@ public struct SystemPrerequisites {
         isProtected: true
     )
     
+    public var git: DependencyStatus = DependencyStatus(
+        id: "git",
+        name: "Git Version Control",
+        isAvailable: false,
+        details: "Checking...",
+        recommendation: nil,
+        installCommand: "/opt/homebrew/bin/brew install git",
+        repairCommand: "/opt/homebrew/bin/brew reinstall git",
+        uninstallCommand: nil,
+        isProtected: true
+    )
+    
     public var python: DependencyStatus = DependencyStatus(
         id: "python",
         name: "Python 3",
@@ -136,6 +148,7 @@ public struct SystemPrerequisites {
     
     public var allSatisfied: Bool {
         xcode.isAvailable &&
+        git.isAvailable &&
         python.isAvailable &&
         dotnet.isAvailable &&
         xcodegen.isAvailable &&
@@ -150,6 +163,6 @@ public struct SystemPrerequisites {
     }
     
     public var list: [DependencyStatus] {
-        [xcode, python, pythonPackages, dotnet, xcodegen, zstd, spirvCross, glslang]
+        [xcode, git, python, pythonPackages, dotnet, xcodegen, zstd, spirvCross, glslang]
     }
 }

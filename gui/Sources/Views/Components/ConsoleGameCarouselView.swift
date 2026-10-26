@@ -13,7 +13,7 @@ public struct ConsoleGameCarouselView: View {
     public var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 22) {
+                HStack(spacing: 28) {
                     ForEach(Array(games.enumerated()), id: \.element.id) { index, game in
                         let isFocused = viewModel.focusedGameIndex == index
                         let isLaunching = viewModel.launchingGameId == game.id
@@ -29,7 +29,7 @@ public struct ConsoleGameCarouselView: View {
                             }
                     }
                 }
-                .padding(.horizontal, 28)
+                .padding(.horizontal, 36)
                 .padding(.vertical, 24)
             }
             .onChange(of: viewModel.focusedGameIndex) { newIndex in
@@ -38,64 +38,100 @@ public struct ConsoleGameCarouselView: View {
                 }
             }
         }
-        .frame(height: 220)
+        .frame(height: 310)
     }
     
     private func gameCoverCard(game: PortedGame, index: Int, isFocused: Bool, isLaunching: Bool) -> some View {
         let icon = NSWorkspace.shared.icon(forFile: game.url.path)
+        let cardSize: CGFloat = isFocused ? 224 : 168
+        let cornerRad: CGFloat = isFocused ? 24 : 18
         
-        return VStack(spacing: 8) {
+        return VStack(spacing: 12) {
             ZStack(alignment: .top) {
+                // Background Ambient Glow for Focused Card
+                if isFocused {
+                    RoundedRectangle(cornerRadius: cornerRad + 4, style: .continuous)
+                        .fill(NXTheme.primaryGradient.opacity(0.4))
+                        .frame(width: cardSize + 16, height: cardSize + 16)
+                        .blur(radius: 14)
+                }
+                
                 // Game Cover Artwork
                 Image(nsImage: icon)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-                    .frame(width: isFocused ? 144 : 118, height: isFocused ? 144 : 118)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .frame(width: cardSize, height: cardSize)
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRad, style: .continuous))
                     .shadow(
-                        color: isFocused ? NXTheme.primary.opacity(0.65) : Color.black.opacity(0.35),
-                        radius: isFocused ? 16 : 6,
+                        color: isFocused ? NXTheme.primary.opacity(0.75) : Color.black.opacity(0.4),
+                        radius: isFocused ? 22 : 8,
                         x: 0,
-                        y: isFocused ? 8 : 3
+                        y: isFocused ? 10 : 4
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        RoundedRectangle(cornerRadius: cornerRad, style: .continuous)
                             .strokeBorder(
-                                isFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(Color.white.opacity(0.12)),
-                                lineWidth: isFocused ? 2.5 : 1
+                                isFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(Color.white.opacity(0.14)),
+                                lineWidth: isFocused ? 3.5 : 1
                             )
                     )
                 
-                // Active Launching / Playing Pill (as in reference image)
+                // Active Launching / Playing Pill
                 if isLaunching {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 5) {
                         ProgressView()
                             .controlSize(.mini)
                         Text("Launching")
-                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.black.opacity(0.75))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.85))
                     .clipShape(Capsule())
                     .overlay(
                         Capsule()
-                            .strokeBorder(NXTheme.secondary.opacity(0.8), lineWidth: 0.8)
+                            .strokeBorder(NXTheme.secondary, lineWidth: 1)
                     )
-                    .padding(.top, 6)
+                    .padding(.top, 8)
                 }
+                
+                // Platform Badge at Bottom of Cover
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Text(game.platform == .macApp ? "Mac App" : "iOS IPA")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Color.black.opacity(0.72))
+                            .foregroundColor(.white)
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+                            )
+                    }
+                    .padding(8)
+                }
+                .frame(width: cardSize, height: cardSize)
             }
             .scaleEffect(isFocused ? 1.05 : 1.0)
-            .animation(.spring(response: 0.25, dampingFraction: 0.75), value: isFocused)
+            .animation(.spring(response: 0.28, dampingFraction: 0.72), value: isFocused)
             
-            // Game Name (Centered, high contrast)
-            Text(game.name)
-                .font(.system(size: isFocused ? 13 : 11, weight: isFocused ? .bold : .medium, design: .rounded))
-                .foregroundColor(isFocused ? NXTheme.textPrimary : NXTheme.textSecondary)
-                .lineLimit(1)
-                .frame(width: isFocused ? 148 : 118)
-                .multilineTextAlignment(.center)
+            // Game Name (Centered, high contrast, prominent)
+            VStack(spacing: 2) {
+                Text(game.name)
+                    .font(.system(size: isFocused ? 15 : 12, weight: isFocused ? .bold : .medium, design: .rounded))
+                    .foregroundColor(isFocused ? NXTheme.textPrimary : NXTheme.textSecondary)
+                    .lineLimit(1)
+                    .multilineTextAlignment(.center)
+                
+                Text(game.formattedSize)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(NXTheme.textMuted)
+            }
+            .frame(width: isFocused ? 230 : 170)
         }
         .contentShape(Rectangle())
     }

@@ -417,10 +417,31 @@ def version_of(path):
     return int(m.group(1)) if m else None
 
 
+def probe_title(path, keys, repo, env=None):
+    """Probe an NSP / XCI with nx_extract --info to get its title ID when not in the filename or ticket."""
+    if not keys or not Path(keys).is_file() or not repo: return None
+    nx_bin = repo / 'dm/tools/nx_extract/bin/Release/net10.0/nx_extract'
+    if not nx_bin.is_file():
+        nx_bin = repo / 'dm/tools/nx_extract/bin/Debug/net10.0/nx_extract'
+    if nx_bin.is_file():
+        cmd = [str(nx_bin), str(keys), '--info', str(path)]
+    else:
+        cmd = ['dotnet', 'run', '--project', str(repo / 'dm/tools/nx_extract'), '--nologo', '-v', 'quiet', '--', str(keys), '--info', str(path)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
+        for line in proc.stdout.splitlines():
+            m = re.match(r'title\s+([0-9A-Fa-f]{16})', line.strip())
+            if m:
+                return int(m.group(1), 16)
+    except Exception:
+        pass
+    return None
+
+
 COMPRESSED = {'.nsz': '.nsp', '.xcz': '.xci'}   # nsz's compressed NSP / XCI and what nsz -D makes of them
 
 
-def scan_nsps(nsp_dir):
+def scan_nsps(nsp_dir, keys=None, repo=None, env=None):
     """Group by game: {application title ID: {'base': path, 'updates': [(version, path)], 'dlc': [(title ID, version, path)]}}. An NSZ / XCZ is listed as it is (its ticket names
     the title as an NSP's does) and converted afterwards (decompress_nsz)"""
     fams, unknown = {}, []
@@ -430,6 +451,11 @@ def scan_nsps(nsp_dir):
         if p.suffix in COMPRESSED and p.with_suffix(COMPRESSED[p.suffix]).exists():
             say(f'skipping {p.name}: {p.with_suffix(COMPRESSED[p.suffix]).name} is beside it'); continue
         tid = title_of(p)
+        if tid is None and keys and repo:
+            say(f'inspecting {p.name} with nx_extract to determine Title ID...')
+            tid = probe_title(p, keys, repo, env)
+            if tid:
+                say(f'identified {p.name} as title ID {tid:016X}')
         if tid is None: unknown.append(p); continue
         low = tid & 0xFFF   # base …000, update …800, DLC = base + 0x1000 + index
         app = tid if low == 0 else tid & ~0xFFF if low == 0x800 else (tid & ~0xFFF) - 0x1000
@@ -1820,7 +1846,7 @@ def main(args=None):
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable
-    app, fam = scan_nsps(nsp_dir)
+    app, fam = scan_nsps(nsp_dir, keys=keys, repo=repo, env=env)
     fam = decompress_nsz(nsp_dir, app, fam, keys, env)
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
     g, provisional, shadowed = None if force else gamemod.by_title(app), False, False

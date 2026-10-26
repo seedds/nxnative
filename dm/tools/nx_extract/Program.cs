@@ -26,6 +26,20 @@ static class P {
     [DllImport("libc", SetLastError = true)] static extern int clonefile(string src, string dst, uint flags);
 
     static int Main(string[] a) {
+        if (a.Length >= 3 && a[1] == "--info") {
+            KeySet ksInfo = ExternalKeyReader.ReadKeyFile(a[0]);
+            var pkg = OpenNsp(ksInfo, a[2]);
+            Nca prog = Pick(pkg, NcaContentType.Program) ?? Pick(pkg, NcaContentType.PublicData) ?? Pick(pkg, NcaContentType.Data);
+            if (prog == null) { Console.Error.WriteLine("no program or data NCA found"); return 1; }
+            Console.WriteLine($"title {prog.Header.TitleId:x16}");
+            Nca ctrlInfo = Pick(pkg, NcaContentType.Control, prog.Header.TitleId) ?? Pick(pkg, NcaContentType.Control);
+            if (ctrlInfo != null) {
+                byte[] nacp = Nacp(ctrlInfo);
+                Console.WriteLine($"version {System.Text.Encoding.ASCII.GetString(nacp, 0x3060, 0x10).TrimEnd('\0')}");
+                Console.WriteLine($"name {TitleName(nacp)}");
+            }
+            return 0;
+        }
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
         g_allow = Array.IndexOf(a, "--allow-damaged") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged");
         if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir>"); return 2; }

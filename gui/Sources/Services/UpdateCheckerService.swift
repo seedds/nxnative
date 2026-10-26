@@ -133,8 +133,12 @@ public final class UpdateCheckerService {
     
     @discardableResult
     private func runGitWithStatus(_ args: [String], in dir: String) -> (exitCode: Int32, output: String) {
+        let fm = FileManager.default
+        let candidates = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"]
+        let gitPath = candidates.first(where: { fm.fileExists(atPath: $0) }) ?? "/usr/bin/git"
+        
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.executableURL = URL(fileURLWithPath: gitPath)
         process.arguments = args
         process.currentDirectoryURL = URL(fileURLWithPath: dir)
         

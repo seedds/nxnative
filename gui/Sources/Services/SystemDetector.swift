@@ -200,7 +200,15 @@ public final class SystemDetector {
             return nil
         }
         
-        // 2. Python 3
+        // 2. Git Version Control
+        if let gitPath = findBinary("git") {
+            let gitVer = runQuickCommand(gitPath, args: ["--version"])
+            prereqs.git = DependencyStatus(id: "git", name: "Git Version Control", isAvailable: true, details: "\(gitVer.output) (\(gitPath))", recommendation: nil, installCommand: "brew install git", repairCommand: "brew reinstall git", uninstallCommand: nil, isProtected: true)
+        } else {
+            prereqs.git = DependencyStatus(id: "git", name: "Git Version Control", isAvailable: false, details: "Not Found", recommendation: "Install Git via Homebrew or Xcode CLT", installCommand: "brew install git", repairCommand: "brew reinstall git", uninstallCommand: nil, isProtected: true)
+        }
+        
+        // 3. Python 3
         if let pyPath = findBinary("python3") {
             let pyVer = runQuickCommand(pyPath, args: ["--version"])
             prereqs.python = DependencyStatus(id: "python", name: "Python 3", isAvailable: true, details: "\(pyVer.output) (\(pyPath))", recommendation: nil, installCommand: "brew install python", repairCommand: "brew reinstall python", uninstallCommand: nil, isProtected: true)

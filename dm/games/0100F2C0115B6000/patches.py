@@ -1,7 +1,7 @@
 # The Legend of Zelda: Tears of the Kingdom (0100F2C0115B6000): the rewriter's patches of this game's own builds. dm/tools/patch_nso.py loads every profile's patches.py and applies those of a module's NSO build ID;
 # CUTS, OBS and FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
 import struct
-from nso_asm import ADRP, B, NOP, STP_PRE
+from nso_asm import ADDI, ADRP, B, NOP, STP_PRE
 
 # Tears of the Kingdom picks a present interval each frame (main+0x2db174: 2 = 30 fps, 3 under load) and steps its game time by 60 / fps (int fps at timing +0x50, read at main+0x2daa54
 # and main+0x3e562c). The stub replaces that logic: int fps = 60 / step, and the float fps (timing +0x24, unused, per masagrator's FPSLocker config for this build, which found the
@@ -138,5 +138,91 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), 0xd5d84))
     fs_put(0xd5d80, [B(0xd5d80, start)], 'dynamic resolution only at render scale 1.0')
+    mouse_camera(ctx)
+
+# Mouse camera: the mouse turns the player camera by angle, not through the stick. The right stick reaches the camera through QueryPlayerCameraControllerInput (main+0x100d030)
+# and ExecutePlayerCameraPreUpdate (main+0x8749b0), which writes the processed stick (dead zone, curve, invert options) to the camera state at +0x8b0. The camera nodes
+# (ExecutePlayerCamera*; the calc is slot 19 of each node's vtable) read it through their camera state + 0x490 (stick at +0x420 / +0x424) and keep the yaw in degrees at +0x414.
+# Chase (main+0x18e414, x20 = node, x26 = camera state + 0x490): the pitch at +0x410 is rebuilt every frame as node +0x108 + (1 - node +0x88) * node +0x10c within +-89.9,
+# and in the player-controlled state (4) only the stick moves node +0x108, the player's pitch in degrees, between node +0xf8 and +0xfc (the bounds main+0x191d78 clamps the
+# follow pitch to); writing +0x410 did nothing (tested in game). Aiming (bow, throw; main+0x23be978, x19 = node, x22 = camera state + 0x490): the stick moves the target pitch
+# node +0x154 from the pitch node +0x15c, clamped to node +0x1d4 / +0x1d8, and +0x15c follows it (at once with the stick, halfway each frame with gyro aiming).
+# The stub at each calc's load of the angles adds the mouse counts the host summed since they were last taken (state +0x40 / +0x44, taken totals at +0x48 / +0x4c):
+# yaw -= dx * (state +0x50), wrapped to [-180, 180); pitch += dy * (state +0x54), within the node's bounds. Counts that no camera took for 1/8 s (another camera, a menu;
+# the time of the last take at state +0x60, in system counter ticks) are dropped instead of turning the camera all at once afterwards. With the stick at rest it holds a 0.001
+# stick (both axes: with y at 0 Chase eases the pitch back into its comfort band, and Aiming takes gyro input instead) for 10 frames after the mouse moved (counter at state
+# +0x58), so the camera stays player-controlled instead of following Link. State +0x50 = 0 (the host's default without a mouse camera) runs the original instruction only
+def LDRS(t, n, off): return 0xbd400000 | (off // 4) << 10 | n << 5 | t   # ldr st,[xn,#off]
+def STRS(t, n, off): return 0xbd000000 | (off // 4) << 10 | n << 5 | t   # str st,[xn,#off]
+def STRW(t, n, off): return 0xb9000000 | (off // 4) << 10 | n << 5 | t   # str wt,[xn,#off]
+def mouse_stub(ctx, site, cam, node, pitch, pitch2, lo, hi):
+    here, emit = ctx.here, ctx.emit
+    ctx.site(site, struct.pack('<I', ADDI(8, cam, 0x40c)).hex())
+    start = here(); emit(ADRP(9, here(), ctx.state))
+    for w in (0xbd405130,   # ldr s16,[x9,#0x50]       yaw degrees per count
+              0x1e202208,   # fcmp s16,#0.0
+              0x540006e0,   # b.eq orig (+55)           mouse camera off
+              0x29482d2a,   # ldp w10,w11,[x9,#0x40]   host totals
+              0x2949352c,   # ldp w12,w13,[x9,#0x48]   taken totals
+              0x29092d2a,   # stp w10,w11,[x9,#0x48]
+              0x4b0c014c,   # sub w12,w10,w12          dx
+              0x4b0d016d,   # sub w13,w11,w13          dy (up)
+              0xd53be04f,   # mrs x15,cntvct_el0
+              0xf940312e,   # ldr x14,[x9,#0x60]       last take
+              0xf900312f,   # str x15,[x9,#0x60]
+              0xcb0e01ee,   # sub x14,x15,x14
+              0xd53be00a,   # mrs x10,cntfrq_el0
+              0xeb4a0ddf,   # cmp x14,x10,lsr #3
+              0x540003a8,   # b.hi hold (+29)          not taken for 1/8 s: dropped
+              0x2a0d018e,   # orr w14,w12,w13
+              0x3400036e,   # cbz w14,hold (+27)
+              0x1e220191,   # scvtf s17,w12
+              0x1e2201b2,   # scvtf s18,w13
+              0xbd405533,   # ldr s19,[x9,#0x54]       pitch degrees per count
+              LDRS(20, cam, 0x414),   # yaw
+              0x1f10d234,   # fmsub s20,s17,s16,s20    yaw -= dx * sens
+              0x52a8668f,   # mov w15,#0x43340000      180.0
+              0x1e2701f5,   # fmov s21,w15
+              0x1e352ab6,   # fadd s22,s21,s21         360.0
+              0x1e352280,   # fcmp s20,s21
+              0x5400004b,   # b.lt (+2)
+              0x1e363a94,   # fsub s20,s20,s22
+              0x1e2142b7,   # fneg s23,s21
+              0x1e372280,   # fcmp s20,s23
+              0x5400004a,   # b.ge (+2)
+              0x1e362a94,   # fadd s20,s20,s22
+              STRS(20, cam, 0x414),
+              LDRS(20, node, pitch),  # player pitch
+              0x1f135254,   # fmadd s20,s18,s19,s20    pitch += dy * sens
+              LDRS(21, node, lo),
+              LDRS(23, node, hi),
+              0x1e375a94,   # fmin s20,s20,s23
+              0x1e354a94,   # fmax s20,s20,s21
+              STRS(20, node, pitch),
+              STRS(20, node, pitch2),
+              0x5280014e,   # mov w14,#10
+              0xb900592e,   # str w14,[x9,#0x58]       frames in the player-controlled state
+              0xb940592e,   # hold: ldr w14,[x9,#0x58]
+              0x340001ae,   # cbz w14,orig (+13)
+              0x510005ce,   # sub w14,w14,#1
+              0xb900592e,   # str w14,[x9,#0x58]
+              LDRS(17, cam, 0x420),   # processed stick x
+              LDRS(18, cam, 0x424),   # processed stick y
+              0x1e20c231,   # fabs s17,s17
+              0x1e20c252,   # fabs s18,s18
+              0x1e322a31,   # fadd s17,s17,s18
+              0x1e202228,   # fcmp s17,#0.0
+              0x54000081,   # b.ne orig (+4)           the stick is in use
+              0x52a7506f,   # mov w15,#0x3a830000      0.001
+              STRW(15, cam, 0x420),
+              STRW(15, cam, 0x424),
+              ADDI(8, cam, 0x40c)):   # orig (original)
+        emit(w)
+    emit(B(here(), site + 4))
+    ctx.put(site, [B(site, start)], 'mouse camera: host mouse counts added to the camera yaw / pitch')
+def mouse_camera(ctx):
+    mouse_stub(ctx, 0x18e468, cam=26, node=20, pitch=0x108, pitch2=0x108, lo=0xf8, hi=0xfc)     # Chase
+    mouse_stub(ctx, 0x23be9b4, cam=22, node=19, pitch=0x15c, pitch2=0x154, lo=0x1d4, hi=0x1d8)  # Aiming
+    ctx.mouse_camera = 1
 
 FRAME_STEP = {'277178b7dba1b6d4949a84778d4abc58': frame_step}

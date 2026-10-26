@@ -67,6 +67,12 @@ Game-specific findings. The general host changes they led to are listed under [F
 - Shaders: `Shader/*.bfsha.zs` (BNSH; `material.bfsha` holds most) and the layout shaders in `Shader/ApplicationPackage.Nin_NX_NVN.release.sarc.zs`.
 - **Resolved in the host: duplicate pipeline keys from unused colour state.** MacNativeGames commit `f3e2f66`, reported in [PR #196](https://github.com/seedds/nxnative/pull/196), found 8,479 of 24,146 recorded render pipelines (35%) differed only in unused state. The general normalization and prewarm deduplication are ported; this is the source project's measurement, with no new gameplay or prewarm-count measurement on this game here.
 
+## Keyboard and mouse
+
+- **Current (Mac, tested in game):** the mouse turns the camera by angle, not by emulating the stick: stubs in `patches.py` (`mouse_stub`) at the Chase camera's calc (`main+0x18e468`) and the Aiming camera's (bow and throw, `main+0x23be9b4`) add the host's mouse counts to the yaw (camera state + 0x490 + 0x414) and to the player pitch of each node (Chase +0x108, Aiming +0x15c / +0x154). The camera state's pitch at +0x410 is rebuilt every frame, so writing it does nothing. The `patches.py` comment has the camera input path and the fields. Mouse up looks up.
+- The front end's layout is on from the start (a click captures the mouse, `` ` `` switches to the classic keys): WASD move, mouse look, left click Y, right click ZL, middle click R3, F ZR, Space X, Shift B, E or Return A, Q L, G R, Ctrl or C L3, 1–4 D-pad, Tab or M −, Esc +. `DM_MOUSE_SENS` (degrees per count, 0.1), `DM_MOUSE_INVERT_Y=1`, `DM_KBM=0` turns it off.
+- **Open:** the scope, lock-on aiming, Ultrahand and the other ability cameras, horse riding and climbing have camera nodes of their own (`ExecutePlayerCamera*`, calc in slot 19 of each node's vtable) without a stub: the mouse does not turn them, and its counts are dropped after 1/8 s. The iPhone front end has no mouse path.
+
 ## Mac routes
 
 - The issue #70 save: `DM_KEYS="20:A*6/4,f2480:LUp~5"` (title, load, jump, steer into the pond).

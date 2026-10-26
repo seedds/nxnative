@@ -1158,9 +1158,10 @@ obs += region_obs
 # +0x20 u32 step in vsyncs (host; 0 = not decided yet), +0x24 u32 a step the game fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update, marked by
 # its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed). Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
-# no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, and ctx.render_scale = 1 marks a render-scale stub
+# no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = 1 marks a render-scale stub and ctx.mouse_camera = 1 a mouse-camera stub
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
+MOUSE_CAMERA = 0   # 1 = the build has a mouse-camera stub (state +0x40..+0x58): the fixups table says so (MOUSE_CAMERA), and the front end captures the mouse only then
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
 if BUILD_ID in FRAME_STEP and NAME == 'main':
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
@@ -1179,8 +1180,8 @@ if BUILD_ID in FRAME_STEP and NAME == 'main':
         for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
         cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why)); stat('frame_step')
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py)
-    fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0)
-    FRAME_STEP[BUILD_ID](fs); RENDER_SCALE = fs.render_scale
+    fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0, mouse_camera=0)
+    FRAME_STEP[BUILD_ID](fs); RENDER_SCALE = fs.render_scale; MOUSE_CAMERA = fs.mouse_camera
 
 # ---- Spin waits (every module) ----
 # A guest loop that polls memory until another thread changes it fills only its own core on the Switch, where any higher-priority thread pinned there preempts it, so the
@@ -1488,6 +1489,7 @@ with open(P('fixups.tsv'), 'w') as f:
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
+    if MOUSE_CAMERA: f.write('# MOUSE_CAMERA\t1\n')   # a mouse-camera stub reads state +0x40..+0x58 (loader.c dm_mouse_move)
     if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
 with open(P('gates.tsv'), 'w') as f:

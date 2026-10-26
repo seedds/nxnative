@@ -88,11 +88,18 @@ static uint64_t g_mbtn;   // buttons held on the captured mouse
 static int g_kbm;   // keyboard and mouse controls (below)
 static double g_shake_t0, g_shake_until;   // a right stick shake played into the game (shake_start)
 static int32_t g_flick_rx;                  // a right stick flick in a quick menu (flick_add)
+static float g_wx, g_wy;                    // the mouse's sum while the ability wheel is open (wheel_open)
+static int g_mouse_cap;                     // the mouse captured (mouse_capture)
+static int menu_open(void);
 #define DPAD (DM_BTN_UP | DM_BTN_RIGHT | DM_BTN_DOWN | DM_BTN_LEFT)
+// The ability wheel (L held by the keyboard and mouse layout, outside the menus): the mouse points the right stick, which picks in it, instead of turning the camera
+static int wheel_open(void) { return g_kbm && g_mouse_cap && (g_btn & DM_BTN_L) && !menu_open(); }
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     double now = CACurrentMediaTime();
+    float wl = sqrtf(g_wx * g_wx + g_wy * g_wy);
     if (now < g_shake_until) dm_input_set(g_btn | g_mbtn, lx, ly, ((int)((now - g_shake_t0) / 0.05) & 1) ? -32767 : 32767, 0);   // full swings, 0.05 s each
+    else if (wheel_open() && wl >= 60) dm_input_set(g_btn | g_mbtn, lx, ly, (int32_t)(g_wx / wl * 32767), (int32_t)(g_wy / wl * 32767));   // full tilt toward the mouse's direction
     else if (g_kbm && (g_btn & DPAD)) dm_input_set(g_btn | g_mbtn, 0, 0, g_flick_rx ? g_flick_rx : lx, ly);   // a held D-pad opens a quick menu, picked with the right stick
     else dm_input_set(g_btn | g_mbtn, lx, ly, 0, 0);
 }
@@ -110,7 +117,6 @@ static void shake_start(void) {
 // Keyboard and mouse controls (main thread), on from the start when the game's patch reads mouse counts (dm_mouse_camera); ` switches between them and the classic keys.
 // A click in the window captures the mouse: the cursor is hidden and detached from it, and it reaches the game only as camera movement and its buttons; leaving the window
 // (input_release) or ` gives the cursor back
-static int g_mouse_cap;
 static float g_mrx, g_mry;   // fractions of a count carried to the next movement
 static void mouse_capture(int on) {
     if (on == g_mouse_cap || (on && !dm_mouse_camera())) return;
@@ -139,13 +145,17 @@ static void shake_detect(float dx) {
 }
 static void mouse_moved(float dx, float dy) {
     if (!g_mouse_cap || !g_input_on) return;
+    if (wheel_open()) {   // the mouse points the right stick (dy up); the sum is kept within 400 counts, so turning toward another ability takes a short move
+        g_wx += dx; g_wy += dy; float l = sqrtf(g_wx * g_wx + g_wy * g_wy);
+        if (l > 400) { g_wx *= 400 / l; g_wy *= 400 / l; }
+        push(); return;
+    }
     g_mrx += dx; g_mry += dy;
     int32_t ix = (int32_t)g_mrx, iy = (int32_t)g_mry;
     g_mrx -= ix; g_mry -= iy;
     if (ix || iy) dm_mouse_move(ix, iy);
     if (dm_mouse_camera_kind() == 5) shake_detect(dx);
 }
-static int menu_open(void);
 // Mouse button n (0 left, 1 right, 2 middle): Y, ZL, R3; in the menus left is A and right B. While aiming (the game's cameras 2 to 4: Tears of the Kingdom's bow and
 // throw, Ultrahand, the other abilities, 5 an object held) right is B, which puts the weapon away or cancels the ability, and with an ability (3 to 5) left is A, which
 // picks or confirms. Its release lets go of what its press pressed
@@ -154,7 +164,7 @@ static void mouse_button(int n, int down) {
     if (!g_mouse_cap || !g_input_on) return;
     if (down) {
         int m = menu_open(), k = dm_mouse_camera_kind();
-        held[n] = n == 0 ? (m || k >= 3 ? DM_BTN_A : DM_BTN_Y) : n == 1 ? (m || k >= 2 ? DM_BTN_B : DM_BTN_ZL) : DM_BTN_RS;
+        held[n] = n == 0 ? (m || k >= 3 ? DM_BTN_A : DM_BTN_Y) : n == 1 ? (m || k >= 2 || wheel_open() ? DM_BTN_B : DM_BTN_ZL) : DM_BTN_RS;   // right: B also in the ability wheel (dismisses it)
     }
     g_mbtn = down ? (g_mbtn | held[n]) : (g_mbtn & ~held[n]); push();
 }
@@ -240,7 +250,9 @@ static void on_key(NSEvent *e, int down) {
         int kb = c == 14 && down && (menu_open() || held) ? 7 : c == 12 && held ? 8 : kbm_bit(c);   // E: R in the menus and with an object held (Ultrahand: rotate); Q: ZL with an object held
         if (c >= 128) return;
         if (down) g_kmask[c] = kb >= 0 ? 1ull << kb : 0;
-        g_btn = down ? (g_btn | g_kmask[c]) : (g_btn & ~g_kmask[c]); push(); return;
+        g_btn = down ? (g_btn | g_kmask[c]) : (g_btn & ~g_kmask[c]);
+        if (g_kmask[c] & DM_BTN_L) g_wx = g_wy = 0;   // the ability wheel opens or closes: the mouse's aim starts again from the centre
+        push(); return;
     }
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held

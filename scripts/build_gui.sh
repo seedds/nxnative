@@ -29,15 +29,16 @@ build_app_bundle() {
     cp "$RELEASE_BIN" "$APP_BUNDLE/Contents/MacOS/NXNativeGUI"
     chmod +x "$APP_BUNDLE/Contents/MacOS/NXNativeGUI"
     
-    if [ -f "$ICON_ICNS" ]; then
-        cp "$ICON_ICNS" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-    fi
-    if [ -f "$ICON_PNG" ]; then
-        cp "$ICON_PNG" "$APP_BUNDLE/Contents/Resources/AppIcon.png"
-    fi
-    if [ -d "$GUI_DIR/Resources/patches" ]; then
-        mkdir -p "$APP_BUNDLE/Contents/Resources/patches"
-        cp -R "$GUI_DIR/Resources/patches/" "$APP_BUNDLE/Contents/Resources/patches/"
+    if [ -d "$GUI_DIR/Resources" ]; then
+        cp "$GUI_DIR/Resources/"*.icns "$APP_BUNDLE/Contents/Resources/" 2>/dev/null || true
+        cp "$GUI_DIR/Resources/"*.png "$APP_BUNDLE/Contents/Resources/" 2>/dev/null || true
+        if [ -d "$GUI_DIR/Resources/NxNative_Launcher.icon" ]; then
+            cp -R "$GUI_DIR/Resources/NxNative_Launcher.icon" "$APP_BUNDLE/Contents/Resources/"
+        fi
+        if [ -d "$GUI_DIR/Resources/patches" ]; then
+            mkdir -p "$APP_BUNDLE/Contents/Resources/patches"
+            cp -R "$GUI_DIR/Resources/patches/" "$APP_BUNDLE/Contents/Resources/patches/"
+        fi
     fi
     
     cat <<EOF > "$APP_BUNDLE/Contents/Info.plist"
@@ -84,7 +85,7 @@ build_app_bundle "$WORKSPACE_DIR"
 build_app_bundle "$REPO_ROOT"
 
 # Limpa artefatos intermediários pesados do build para economizar espaço
-rm -rf "$GUI_DIR/.build"
+rm -rf "$GUI_DIR/.build" 2>/dev/null || true
 
 echo "==> Sucesso! Aplicativo criado com ícone em:"
 echo "    $WORKSPACE_DIR/NxNative_Launcher.app"

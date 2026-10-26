@@ -16,7 +16,10 @@ public struct SystemView: View {
                 // 1. Decryption Keys (prod.keys)
                 SystemKeysCard(viewModel: viewModel)
                 
-                // 2. nxnative Core Repository & Upstream Updates
+                // 2. App Icon & Theme Appearance
+                SystemAppearanceCard(viewModel: viewModel)
+                
+                // 3. nxnative Core Repository & Upstream Updates
                 SystemRepoCard(viewModel: viewModel)
                 
                 // 3. Engine Compatibility Patches

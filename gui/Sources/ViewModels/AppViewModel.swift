@@ -13,6 +13,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         static let savedShowFps = "NXNative_SavedShowFps"
         static let savedKeepExtracted = "NXNative_SavedKeepExtracted"
         static let savedPlatform = "NXNative_SavedPlatform"
+        static let savedIconAppearanceMode = "NXNative_SavedIconAppearanceMode"
     }
     
     // MARK: - Workspace & Paths
@@ -192,6 +193,12 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var buildError: String? = nil
     @Published public var buildSuccessPath: String? = nil
     @Published public var buildWizardStep: Int = 1 // 1: Select Game, 2: Configure & Output, 3: Porting
+    @Published public var iconAppearanceMode: AppIconAppearanceMode = .auto {
+        didSet {
+            UserDefaults.standard.set(iconAppearanceMode.rawValue, forKey: StorageKeys.savedIconAppearanceMode)
+            updateDockIcon()
+        }
+    }
     
     // MARK: - Navigation
     @Published public var selectedTab: Int = 0 // 0: Convert, 1: Library, 2: Settings, 3: Console
@@ -251,6 +258,10 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
            let p = TargetPlatform(rawValue: savedPlat) {
             self.platform = p
         }
+        if let savedMode = UserDefaults.standard.string(forKey: StorageKeys.savedIconAppearanceMode),
+           let mode = AppIconAppearanceMode(rawValue: savedMode) {
+            self.iconAppearanceMode = mode
+        }
         
         detectEnvironment()
         
@@ -265,6 +276,24 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         refreshLibrary()
         checkForUpdates()
         loadCompatibleGames()
+        updateDockIcon()
+    }
+    
+    // MARK: - Dynamic Dock Icon
+    public func updateDockIcon() {
+        let isDark = NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let resName: String
+        switch iconAppearanceMode {
+        case .light: resName = "AppIcon-Light"
+        case .dark: resName = "AppIcon-Dark"
+        case .mono: resName = "AppIcon-Mono"
+        case .auto: resName = isDark ? "AppIcon-Dark" : "AppIcon-Light"
+        }
+        
+        if let url = Bundle.main.url(forResource: resName, withExtension: "png"),
+           let img = NSImage(contentsOf: url) {
+            NSApplication.shared.applicationIconImage = img
+        }
     }
     
     // MARK: - Compatibility

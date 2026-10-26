@@ -70,19 +70,7 @@ public struct MainView: View {
         HStack(spacing: 16) {
             // Brand Logo & Subtitle
             HStack(spacing: 10) {
-                if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
-                   let nsImg = NSImage(contentsOf: iconURL) {
-                    Image(nsImage: nsImg)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 28, height: 28)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .shadow(color: NXTheme.primary.opacity(0.4), radius: 6, x: 0, y: 2)
-                } else {
-                    Image(systemName: "gamecontroller.fill")
-                        .font(.system(size: 22))
-                        .foregroundColor(NXTheme.primary)
-                }
+                AppLogoView(viewModel: viewModel)
                 
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 6) {
@@ -201,6 +189,7 @@ public struct MainView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
+        .frame(height: 54)
         .background(
             ZStack {
                 NXTheme.canvasObsidian.opacity(0.85)

@@ -92,6 +92,15 @@ HLE_FORCE("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_", "sna
     h_time_ToCalendarTime((CalendarTime *)(s + 0x50), (CalendarAdditionalInfo *)(s + 0x60), &now);
     memcpy(s + 0x90, tp, 0x18);
     tzset(); strlcpy((char *)s + 0xa8, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);
+    s[0xcd] = 1;   // Standard clock snapshot type: CalculateSpanBetween and the user-difference check read it
+    return RES_OK;
+}
+// Both user clocks come from host time; only the type byte distinguishes them (0xcd = 2 for the
+// adjustable one). Missing entirely before this: a game that snapshots the adjustable clock read a
+// null. From LNPANDY/NX2Apple#26 (m1guelpf), with its guarded-buffer test.
+HLE_FORCE("_ZN2nn4time13ClockSnapshot31CreateWithAdjustableSystemClockEPS1_", "adjustable clock snapshot from host time; the host has no time service session", Result, h_time_AdjSnapshot, uint8_t *s) {
+    h_time_Snapshot(s);
+    s[0xcd] = 2;
     return RES_OK;
 }
 // Arithmetic on two snapshots: the SDK hands both to the time service (a call through its session, AbortImpl when there is none: STEINS;GATE RE:BOOT's and Tears of the Kingdom's SDK;

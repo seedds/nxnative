@@ -16,20 +16,30 @@
 // 23 DumpAllocatorStats, 24 IsInternallyThreadSafe, 25 ValidateHeap, 26 GetDescriptiveName, 27-29 OnMallocInitialized / OnPreFork / OnPostFork, 30-31 the free cached memory sizes (main+0x67df800;
 // the base FMalloc vtable main+0x67dff48 has 0 for the three pure slots 6 / 8 / 10, its 7 / 9 call +0x30 / +0x40, and its 11 and 12 are one function: +0x30, then memset). The zeroed slots
 // keep the guest's function, which calls Malloc through the vtable
+// Rocksteady's Unreal Engine 3 (Batman: Arkham Knight) carries an FMallocBinned3 too (74 pools of 512 MB, 37 GB, plus a 1 GB region for its small-block metadata) behind Unreal Engine 3's
+// FMalloc interface, whose sizes and alignments are 32-bit (DWORD): 0-1 destructors, 2 Exec (returns 0), 3 QuantizeSize(DWORD, DWORD) → DWORD, 4 Malloc(DWORD, DWORD), 5 Realloc(void *, DWORD, DWORD),
+// 6 Free, 7 returns 0, 8 does nothing, 9 a second Malloc entry that calls slot 4, 10-11 return 0, 12 does nothing, 13 Tick (flushes the thread caches when slot 19 set the flag at +8),
+// 14 IsInternallyThreadSafe (1), 15 does nothing, 16 an Exec, 17 ValidateHeap (1), 18 DumpAllocatorStats, 19 sets the flag at +8, 20 GetAllocationSize(void *, DWORD &),
+// 21 SetupTLSCachesOnCurrentThread (every new thread calls it before anything else), 22 ClearAndDisableTLSCachesOnCurrentThread, 23 does nothing (main+0x329a408; the thread-safe proxy main+0x3450158
+// forwards slots 2 and 4-8 under its lock, so it names them). There is no TryMalloc / TryRealloc. The object is static (main+0x51818c0) and constructed in the guarded getter main+0x192eb30,
+// inline: the cut jumps from the guard over the construction to the guard's release, so the object keeps the host's vtable
 // Fixed addresses: each row runs only on the main build it was found in (AGENTS.md)
 #include "hle.h"
 #include <malloc/malloc.h>
 #include <mach/mach.h>
 #include <stdatomic.h>
+#include <os/lock.h>
+#include <unistd.h>
 
 // Slot layouts: which slots the host fills and which do nothing (up to 6; 0 ends the list); the others keep the guest's own functions
-enum { UE5, UE4_27, UE5_6 };
-static const struct { int nslot, malloc_, try_malloc, realloc_, try_realloc, free_, quantize, get_size, nothing[6]; } k_lay[] = {
+enum { UE5, UE4_27, UE5_6, UE3 };
+static const struct { int nslot, malloc_, try_malloc, realloc_, try_realloc, free_, quantize, get_size, nothing[6]; bool dword; } k_lay[] = {   // try slots -1: none; dword: 32-bit sizes
     [UE5] = { 26, 6, 7, 8, 9, 10, 11, 12, { 13, 14, 15, 19 } },      // Trim, the TLS cache setup and teardown, DumpAllocatorStats
     [UE4_27] = { 21, 3, 4, 5, 6, 7, 8, 9, { 10, 11, 12, 16 } },
     [UE5_6] = { 32, 6, 7, 8, 9, 10, 13, 14, { 15, 16, 17, 18, 19, 23 } },   // Trim, the four TLS cache calls, DumpAllocatorStats
+    [UE3] = { 24, 4, -1, 5, -1, 6, 3, 20, { 13, 21, 22 } , true },          // Tick, the TLS cache setup and teardown
 };
-static const struct { const char *build, *what; int layout; uint64_t obj, vtable, cut; } k_ue[] = {
+static const struct { const char *build, *what; int layout; uint64_t obj, vtable, cut; uint32_t cut_word; uint64_t late_vt; } k_ue[] = {   // cut_word: what the rewriter put at cut (0: a nop); late_vt: see release()
     // Octopath Traveler 0 1.0.5: the FMallocBinned3 object (main+0x68022c8, bss), its vtable (main+0x5b06f38, 26 slots), the cut constructor call (main+0x12e40, a nop after the rewrite)
     { "9fe60a212cff9b9a3656ab63d4f882e5", "Octopath Traveler 0 1.0.5", UE5, 0x68022c8, 0x5b06f38, 0x12e40 },
     // DRAGON QUEST VII Reimagined 1.2.0: no fixed object (0: made by GCreateMalloc, given at the gate), its vtable (main+0x5e4c0e8, 21 slots), the cut constructor call (main+0x32758dc)
@@ -47,6 +57,9 @@ static const struct { const char *build, *what; int layout; uint64_t obj, vtable
     { "84e182f72ee1da4f477804bd05b54c15", "FINAL FANTASY RESONANCE 1.0.1", UE5_6, 0x77c6210, 0x67df800, 0x137f0 },
     // Asian release: object, 32-slot vtable and constructor cut verified on this main build (PRs #126 and #304).
     { "b7f965b9d7227db8e29f04e84ea7331b", "FINAL FANTASY RESONANCE 1.0.1 (Asian release)", UE5_6, 0x77c6210, 0x67df800, 0x137f0 },
+    // Batman: Arkham Knight 1.0.5 (Rocksteady's Unreal Engine 3): the static FMallocBinned3 object (main+0x51818c0, bss), its vtable (main+0x329a408, 24 slots), the cut in its guarded getter
+    // (main+0x192ec14: b main+0x192fea4, past the inline construction to the guard's release); blocks of Scaleform Video's player (vtable main+0x35f0448) wait before the zone gets them
+    { "feae83dc9e9fb34c77d0a62f1fa9ae9f", "Batman: Arkham Knight 1.0.5", UE3, 0x51818c0, 0x329a408, 0x192ec14, 0x140004a4, 0x35f0448 },
 };
 enum { NSLOT = 32 };
 
@@ -58,12 +71,55 @@ static void used(int64_t d) {
     if (after > peak && after >> 28 != peak >> 28) LOG("[mem] Unreal heap (host malloc zone) up to %.2f GB in use", after / 1073741824.0);
 }
 static size_t align_of(uint32_t a) { return a > 16 ? a : 16; }   // 0 = DEFAULT_ALIGNMENT, 16 bytes as Binned3 gives
+// DM_UE_HEAPLOG=<bytes>: one line for each allocation and free of at least that many bytes, with the block, its size and the guest frames that called (the frame-pointer chain
+// from the host function the guest called; the engine's thread-safe proxy is the first frame). To match a stale object a crash reads with the block it lies in, and who freed it
+static size_t g_heaplog;
+static void heaplog(const char *what, void *p, size_t n, size_t a) {
+    char b[512]; int k = snprintf(b, sizeof b, "[dm] [ueheap] %s %p %#zx align %zu t=%.3f by", what, p, n, a, now_ns() / 1e9);
+    uint64_t fp = (uint64_t)__builtin_frame_address(0);
+    for (int i = 0; i < 8 && fp && !(fp & 7) && k < (int)sizeof b - 40; i++) {
+        uint64_t w[2]; vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) break;
+        module_t *m = module_of((void *)w[1]);
+        if (m) k += snprintf(b + k, sizeof b - k, " %s+%#llx", m->name, (unsigned long long)(w[1] - (uint64_t)m->base));
+        if (w[0] <= fp) break;
+        fp = w[0];
+    }
+    b[k++] = '\n'; write(2, b, k);
+}
 static void *alloc(size_t n, uint32_t a) {
     void *p = align_of(a) == 16 ? malloc_zone_malloc(g_zone, n ? n : 1) : malloc_zone_memalign(g_zone, align_of(a), n ? n : 1);
     if (p) used((int64_t)malloc_size(p));
+    if (g_heaplog && n >= g_heaplog) heaplog("alloc", p, n, align_of(a));
     return p;
 }
-static void release(void *p) { if (p) { used(-(int64_t)malloc_size(p)); malloc_zone_free(g_zone, p); } }
+// Some freed blocks wait in a short FIFO before they go back to the zone. A macOS zone writes its free-list pointer into a block's first word at once, where an object keeps its
+// vtable. Batman: Arkham Knight's Scaleform Video frees its player (0x550 bytes, vtable main+0x35f0448) on the main thread in the video provider's destructor (main+0x202a700: it
+// clears the video image's player pointer, image +0x38, then destroys the player) without the lock under which the rendering thread updates the image (main+0xeaaa8 → main+0x203171c:
+// load image +0x38, then call the player's slot 0x100); a rendering thread that loaded the pointer just before it was cleared called through the zone's pointer (main+0x2031740,
+// about once in 30 boots, always at the end of the logo movie). A guest race: only blocks whose first word is the row's late_vt (the player's vtable, which its destructor has
+// just put back) wait 250 ms (DM_UE_QUARANTINE=<ms> makes every freed block wait that long, up to 64 MB; 0 = none). The memory accounting counts them as freed
+#define QUAR_N 8192
+#define QUAR_BYTES (64ull << 20)
+static struct { void *p; uint64_t t; size_t n; } g_q[QUAR_N];
+static unsigned g_qh, g_qt; static size_t g_qbytes; static uint64_t g_quar_ns, g_late_vt; static bool g_quar_all; static os_unfair_lock g_ql = OS_UNFAIR_LOCK_INIT;
+static void release(void *p) {
+    if (!p) return;
+    size_t n = malloc_size(p); used(-(int64_t)n);
+    if (g_heaplog && n >= g_heaplog) heaplog("free", p, n, 0);
+    bool hold = g_quar_ns && (g_quar_all || (n >= 8 && *(uint64_t *)p == g_late_vt));
+    if (!hold && __atomic_load_n(&g_qt, __ATOMIC_RELAXED) == __atomic_load_n(&g_qh, __ATOMIC_RELAXED)) { malloc_zone_free(g_zone, p); return; }   // nothing waiting: no lock
+    if (hold && !g_quar_all) { static _Atomic int seen; if (!atomic_fetch_add(&seen, 1)) LOG("Unreal heap: a freed block %p (%#zx bytes) of the object with the listed vtable waits before it goes back to the zone", p, n); }
+    void *out[32]; int k = 0; uint64_t now = now_ns();
+    os_unfair_lock_lock(&g_ql);
+    while (g_qt != g_qh && k < 32 && (g_qt - g_qh >= QUAR_N || g_qbytes + n > QUAR_BYTES || now - g_q[g_qh % QUAR_N].t > g_quar_ns)) {
+        g_qbytes -= g_q[g_qh % QUAR_N].n; out[k++] = g_q[g_qh % QUAR_N].p; g_qh++;
+    }
+    if (hold && g_qt - g_qh < QUAR_N) { g_q[g_qt % QUAR_N].p = p; g_q[g_qt % QUAR_N].t = now; g_q[g_qt % QUAR_N].n = n; g_qt++; g_qbytes += n; p = NULL; }
+    os_unfair_lock_unlock(&g_ql);
+    for (int i = 0; i < k; i++) malloc_zone_free(g_zone, out[i]);
+    if (p) malloc_zone_free(g_zone, p);
+}
 static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     if (!p) return alloc(n, a);
     if (!n) { release(p); return NULL; }
@@ -90,6 +146,11 @@ static void m_Free(void *self, void *p) { (void)self; release(p); }
 static size_t m_QuantizeSize(void *self, size_t n, uint32_t a) { (void)self; (void)a; return malloc_good_size(n); }
 static bool m_GetAllocationSize(void *self, void *p, size_t *out) { (void)self; if (!p) return false; *out = malloc_size(p); return true; }
 static void m_Nothing(void *self) { (void)self; }   // Trim (its bool argument is ignored), the thread-local cache setup and teardown, DumpAllocatorStats
+// Unreal Engine 3's slots: sizes and alignments are DWORDs, so only the low 32 bits of their registers are the argument
+static void *m3_Malloc(void *self, uint32_t n, uint32_t a) { return m_Malloc(self, n, a); }
+static void *m3_Realloc(void *self, void *p, uint32_t n, uint32_t a) { return m_Realloc(self, p, n, a); }
+static uint32_t m3_QuantizeSize(void *self, uint32_t n, uint32_t a) { (void)self; (void)a; return (uint32_t)malloc_good_size(n); }
+static bool m3_GetAllocationSize(void *self, void *p, uint32_t *out) { (void)self; if (!p) return false; *out = (uint32_t)malloc_size(p); return true; }
 static void *g_vt[NSLOT];
 static const char *g_what;
 
@@ -119,14 +180,21 @@ void dm_ue_malloc_install(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))
         for (int k = 0; k < (int)(sizeof k_ue / sizeof k_ue[0]); k++) if (!strcmp(g_mod[i].build_id, k_ue[k].build)) {
             uint8_t *b = g_mod[i].base; int L = k_ue[k].layout;
-            if (*(uint32_t *)(b + k_ue[k].cut) != 0xd503201f) { LOG("[RED] %s: main is rewritten without the allocator cut (its patches.py): Unreal's own FMallocBinned3 runs", k_ue[k].what); return; }
+            if (*(uint32_t *)(b + k_ue[k].cut) != (k_ue[k].cut_word ? k_ue[k].cut_word : 0xd503201f)) { LOG("[RED] %s: main is rewritten without the allocator cut (its patches.py): Unreal's own FMallocBinned3 runs", k_ue[k].what); return; }
             if (!k_ue[k].obj && !gate_obs_present(OBS_UE_MALLOC)) { LOG("[RED] %s: main is rewritten without the allocator gate (OBS of its patches.py): the allocator would have no vtable", k_ue[k].what); return; }
             memcpy(g_vt, b + k_ue[k].vtable, sizeof g_vt[0] * k_lay[L].nslot);   // the relocated vtable: the trivial slots stay the guest's
-            g_vt[k_lay[L].malloc_] = (void *)m_Malloc; g_vt[k_lay[L].try_malloc] = (void *)m_TryMalloc; g_vt[k_lay[L].realloc_] = (void *)m_Realloc;
-            g_vt[k_lay[L].try_realloc] = (void *)m_TryRealloc; g_vt[k_lay[L].free_] = (void *)m_Free;
-            g_vt[k_lay[L].quantize] = (void *)m_QuantizeSize; g_vt[k_lay[L].get_size] = (void *)m_GetAllocationSize;
+            int dw = k_lay[L].dword;
+            g_vt[k_lay[L].malloc_] = dw ? (void *)m3_Malloc : (void *)m_Malloc; g_vt[k_lay[L].realloc_] = dw ? (void *)m3_Realloc : (void *)m_Realloc; g_vt[k_lay[L].free_] = (void *)m_Free;
+            if (k_lay[L].try_malloc >= 0) g_vt[k_lay[L].try_malloc] = (void *)m_TryMalloc;
+            if (k_lay[L].try_realloc >= 0) g_vt[k_lay[L].try_realloc] = (void *)m_TryRealloc;
+            g_vt[k_lay[L].quantize] = dw ? (void *)m3_QuantizeSize : (void *)m_QuantizeSize; g_vt[k_lay[L].get_size] = dw ? (void *)m3_GetAllocationSize : (void *)m_GetAllocationSize;
             for (int s = 0; s < 6 && k_lay[L].nothing[s]; s++) g_vt[k_lay[L].nothing[s]] = (void *)m_Nothing;
+            { const char *e = getenv("DM_UE_HEAPLOG"); g_heaplog = e ? strtoull(e, NULL, 0) : 0; }
             g_zone = malloc_create_zone(0, 0); malloc_set_zone_name(g_zone, "guest Unreal heap"); g_what = k_ue[k].what;
+            { const char *e = getenv("DM_UE_QUARANTINE"); int ms = e ? atoi(e) : k_ue[k].late_vt ? 250 : 0; g_quar_ns = ms > 0 ? (uint64_t)ms * 1000000 : 0;
+              g_quar_all = e && ms > 0; g_late_vt = k_ue[k].late_vt ? (uint64_t)(b + k_ue[k].late_vt) : 0;
+              if (ms > 0 && g_quar_all) LOG("%s: freed Unreal heap blocks wait %d ms (up to 64 MB) before they go back to the zone (DM_UE_QUARANTINE)", k_ue[k].what, ms);
+              else if (ms > 0) LOG("%s: freed blocks of the object with vtable main+%#llx wait %d ms before they go back to the zone", k_ue[k].what, (unsigned long long)k_ue[k].late_vt, ms); }
             if (!k_ue[k].obj) { gate_obs_set(OBS_UE_MALLOC, obj_made); continue; }
             *(void **)(b + k_ue[k].obj) = g_vt;
             LOG("%s: Unreal's allocator (FMallocBinned3 at main+%#llx) runs on a host malloc zone", k_ue[k].what, (unsigned long long)k_ue[k].obj);

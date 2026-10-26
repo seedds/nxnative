@@ -94,6 +94,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** before cutting a game's frame limiter, find what sets its target and whether anything else holds those frames. A limiter that also enforces a slower mode (here N = 2) has to keep it.
 - **Found on:** [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md), in its menus and town; its movies, paced by their own player, ran at 60.
 
+### Unreal Engine 3's smoothed frame rate cap
+
+- **Symptom:** with the present interval ignored (`present_interval display`) the game runs at 60 fps but never above, the main thread asleep between frames.
+- **Cause:** Unreal Engine 3 caps its frame rate itself: `UEngine::GetMaxTickRate` returns `MaxSmoothedFrameRate` while frame smoothing is on, and `appUpdateTimeAndHandleMaxTickRate` sleeps until 1 / that has passed since the last frame. The game steps by the time that really passed (the real-clock `GDeltaTime`; its fixed-step and "massaged" time-step switches are console commands, off by default).
+- **Fix:** `fps_target` (`DM_FPS_TARGET`) writes the field 2 above the target, as the engine's own 62 for 60 (`hle_fpslock.c`, kind `CAP_F32`; 120 is allowed for such rows only). Game speed was checked by the cutscene: at the same time after the same press the 60 and 120 fps runs show the same moment.
+- **Found on:** Batman: Arkham Knight (`0100ACD0163D0000`; its profile and note are in a PR of their own): `MaxSmoothedFrameRate` at GEngine (`main+0x511a150`) + 0x884, 62 from Coalesced_INT.bin.
+
 ## Present interval and display rate
 
 ### Present thread rescues a silent display link

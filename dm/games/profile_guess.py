@@ -18,7 +18,8 @@ from romfs import Path, os, open, is_image, source
 MAGICS = [(b'UnityFS\0', 'UnityFS'), (b'UnityWeb', 'UnityWeb'), (b'UnityRaw', 'UnityRaw'), (b'BNSH', 'BNSH'), (b'BAHS', 'BAHS'), (b'SARC', 'SARC'), (b'Yaz0', 'Yaz0'),
           (bytes.fromhex('28b52ffd'), 'zstd'), (b'FRES', 'bfres'), (b'BNTX', 'BNTX'), (b'BWAV', 'BWAV'), (b'FSAR', 'BFSAR'), (b'CPK ', 'CRI CPK'), (b'CRID', 'CRI USM'),
           (b'@UTF', 'CRI UTF'), (b'AKPK', 'Wwise pck'), (b'BKHD', 'Wwise bnk'), (b'FSB5', 'FMOD'), (b'\x89PNG', 'PNG'), (b'RIFF', 'RIFF'), (b'OggS', 'Ogg'), (b'PK\x03\x04', 'zip'), (b'NSO0', 'NSO'),
-          (bytes.fromhex('03022307'), 'SPIR-V'), (b'ONEPACK\0', 'Trinity pack'), (b'ARC\0', 'MT Framework ARC'), (b'SCNE', 'Bezel Engine archive'), (b'XNB', 'XNB'), (b'pkzl', 'PlatinumGames PKZ')]
+          (bytes.fromhex('03022307'), 'SPIR-V'), (b'ONEPACK\0', 'Trinity pack'), (b'ARC\0', 'MT Framework ARC'), (b'SCNE', 'Bezel Engine archive'), (b'XNB', 'XNB'), (b'pkzl', 'PlatinumGames PKZ'),
+          (bytes.fromhex('c1832a9e'), 'Unreal package'), (b'BMSG', 'Unreal 3 global shader cache')]
 PACKED = {'UnityFS', 'UnityWeb', 'Yaz0', 'zstd', 'BWAV', 'CRI CPK', 'CRI USM', 'Wwise pck', 'FMOD', 'PNG', 'Ogg', 'zip', 'Trinity pack', 'MT Framework ARC', 'Bezel Engine archive', 'PlatinumGames PKZ'}   # file headers of compressed / media formats (zip_store)
 # IL2CPP by the metadata file every IL2CPP player opens: Unity 2022's main (Ace Attorney Investigations Collection) has no il2cpp_ API names, Engage's 2020.3 has both
 MARKERS = [(b'nvnBootstrapLoader', 'NVN'), (b'vkCreateInstance', 'Vulkan'), (b'eglGetProcAddress', 'EGL / OpenGL'), (b'global-metadata.dat', 'Unity IL2CPP'), (b'UnityEngine', 'Unity'),
@@ -210,7 +211,7 @@ def nro_modules(exefs, nros, modules, hooks=None):
 
 
 # ---- Shader sources: decided from the game files at every build, not kept in the profile (scripts/build_ipa_from_nsp.py; shader_split.py reads what those steps write) ----
-def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0):
+def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_packs=0, legacy_paks=0, gl_names=0, gl_src=0, gl_files=0, oodle_pkz=0, nro_imports=frozenset(), oodle_gfpak=0, ue3_caches=0):
     """{name: (value, reason)}: graphics (vulkan when main imports Vulkan functions and not nvnBootstrapLoader; gl when it imports eglCreateWindowSurface and names glShaderSource, so it compiles
     GLSL through OpenGL (gl_names: how often main has that name; Absolum imports the same EGL functions for SDL3 but renders with NVN and names no GL function); else nvn; vkGetInstanceProcAddr
     alone is SDL's Vulkan loader, which Balatro's LÖVE links and never uses), vk_capture (a Vulkan game without SPIR-V files generates its shaders at run time), gl_capture (an OpenGL game with no
@@ -218,7 +219,8 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
     in their shader code archives, which only the game's own Oodle decodes), oodle_packs (Trinity packs, oodle_pkz PlatinumGames PKZ archives or oodle_gfpak Game Freak GFPAK archives with Oodle Kraken entries:
     Oodle-compressed file by file, which the shader split decodes with the game's own decoder in the Mac host's tool mode), ue_legacy (Unreal paks whose shaders are inline in the cooked packages:
     legacy paks, version 4, which the shader split reads through the game's own decoder the same way, and version 11 paks without shader code archives, Zlib, read by uepak.py itself).
-    unreal_paks counts the paks with shader code archives, legacy_paks those with inline shaders (uepak.inline_shaders). Checked against every profile: Hades and Super Mario Galaxy Vulkan, Galaxy alone with no SPIR-V file, Three Houses alone compiling
+    ue3: Unreal Engine 3's shader caches, the global one and the shader cache packages among the loose cooked packages, whose chunks may be Oodle-compressed.
+    unreal_paks counts the paks with shader code archives, legacy_paks those with inline shaders (uepak.inline_shaders), ue3_caches the Unreal Engine 3 shader cache files (ue3_shader_caches). Checked against every profile: Hades and Super Mario Galaxy Vulkan, Galaxy alone with no SPIR-V file, Three Houses alone compiling
     shaders (13 Sentinels holds 106 GLSL sources but does not import glslcCompile; Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it), Octopath Traveler 0
     alone with version 11 Unreal paks, DRAGON QUEST XI S alone with legacy ones (OCTOPATH TRAVELER II's version 11 pak has inline shaders too), Pokémon Legends: Z-A alone with Trinity packs, Digimon Story Cyber Sleuth and Balatro alone with OpenGL (of the 23 games
     extracted; Hades and both Galaxies import 99 or 100 Vulkan functions, Balatro only vkGetInstanceProcAddr), Balatro alone composing its GLSL.
@@ -241,7 +243,13 @@ def shader_sources(imports, glsl_src, glslc_mods, spirv, unreal_paks, trinity_pa
                             f'{oodle_pkz} PlatinumGames PKZ archive(s) with Oodle Kraken entries (Bayonetta 3)' if oodle_pkz else
                             f'{oodle_gfpak} Game Freak GFPAK archive(s) with Oodle Kraken entries (Pokémon Legends: Arceus)') + ', Oodle-compressed: the shader split decodes them with the game\'s own decoder in the Mac host (dm/host/hle_oodle.c DM_OODLE_SERVE)'),
             'ue_legacy': (not vulkan and not gl and bool(legacy_paks), f'{legacy_paks} Unreal pak(s) with the shaders inline in the cooked packages (legacy, version 4, UE 4.18: DRAGON QUEST XI S, LZ5, decoded by the game\'s own decoder in the Mac host, dm/host/hle_oodle.c DM_OODLE_SERVE; '
-                          'version 11 without shader code archives, UE 4.27: OCTOPATH TRAVELER II, Zlib): the shader split reads them file by file')}
+                          'version 11 without shader code archives, UE 4.27: OCTOPATH TRAVELER II, Zlib): the shader split reads them file by file'),
+            'ue3': (not vulkan and not gl and bool(ue3_caches), f'{ue3_caches} Unreal Engine 3 shader cache(s) (GlobalShaderCache-*.bin, *ShaderCache* packages: Batman: Arkham Knight): the shader split reads '
+                    'the packages chunk by chunk, Oodle chunks with the game\'s own decoder in the Mac host (dm/host/hle_oodle.c DM_OODLE_SERVE)')}
+
+
+def ue3_shader_caches(names):   # the Unreal Engine 3 shader caches among (file name, first bytes) pairs: the global shader cache (magic BMSG) and the packages named *ShaderCache* (Batman: Arkham Knight)
+    return sum(1 for n, h in names if h[:4] == b'BMSG' or h[:4] == bytes.fromhex('c1832a9e') and 'ShaderCache' in n)
 
 
 def romfs_nro_imports(romfs):   # the names the loose NROs in a RomFS import (the modules a game loads at run time with nn::ro: Portal's 28 Source engine modules in nro/)
@@ -290,8 +298,9 @@ def build_sources(exefs, romfs, modules):
                     if h[:8] == b'GFLXPACK':
                         cnt, _, tab = struct.unpack_from('<IIQ', h, 0x10); f.seek(tab); t = f.read(0x18 * cnt)   # the file table: 0x18 bytes per file, u16 compression at +2 (shader_split.py gfpak_members)
                         oodle_gfpak += any(struct.unpack_from('<H', t, 0x18 * i + 2)[0] == 3 for i in range(len(t) // 0x18))
+    ue3 = ue3_shader_caches((os.path.basename(p), h) for p, _, h in romfs_files(romfs))
     return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False)), trinity, len(uepak.unreal_paks(str(romfs), inline=True)), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
-                          oodle_gfpak=oodle_gfpak)
+                          oodle_gfpak=oodle_gfpak, ue3_caches=ue3)
 
 
 def va_heap(sysres, imports):   # virtual address memory (an NPDM system resource) and a heap: the alias / heap split is a starting point the heap check corrects (Wonder, Tears of the Kingdom; Engage's pool is its own measurement)

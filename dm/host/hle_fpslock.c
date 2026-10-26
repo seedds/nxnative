@@ -11,7 +11,7 @@
 // period, so frames at exactly 16.667 ms came 0.11 ms late each on the Mac (59.6 fps, every 150th frame shown two vsyncs). Slightly shorter, the host's present pacing sets the pace
 // (the acquire waits): Luigi's Mansion 3's display interval p99 18.69 → 16.67 ms, 60.0 fps. Not at 30: with present_interval display the presents follow every vsync and hold no
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32 };
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, CAP_F32 };   // CAP_F32: a frame rate cap the engine sleeps down to, written 2 above the target as the engine's own 62 for 60 (frames at exactly the target would come a little late)
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
 static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; } k_locks[] = {
@@ -60,6 +60,10 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
     // started; the limiter (main+0x7a3e70) runs jobs or sleeps until 33.333 ms have passed, the float at main+0x13c94dc (read only there, at main+0x7a3ea8 and main+0x7a3f18), and the game
     // steps by the time that really passed. The game asks for present interval 2 too, which the profile's present_interval display ignores; both are needed
     { "79e5950ffa85acf63e28c9aec051eac2", "NLG frame limiter target", 0, 0x13c94dc, MS_F32, 1 },
+    // Batman: Arkham Knight 1.0.5 (Rocksteady's Unreal Engine 3): MaxSmoothedFrameRate, a float at GEngine+0x884 (GEngine: main+0x511a150). UEngine::GetMaxTickRate (main+0x1283dd4, vtable
+    // slot 0x158) returns it while frame smoothing is on (main+0x5117244), and appUpdateTimeAndHandleMaxTickRate (main+0x1932960) sleeps until 1 / it has passed since the last frame; the game
+    // steps by the time that really passed. Coalesced_INT.bin sets 62 (MinSmoothedFrameRate 22); the game asks for present interval 2 (30 fps), which present_interval display ignores
+    { "feae83dc9e9fb34c77d0a62f1fa9ae9f", "Unreal Engine 3 MaxSmoothedFrameRate", 0x511a150, 0x884, CAP_F32, 1 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
@@ -133,7 +137,9 @@ void dm_fps_lock_tick(void) {
         }
         if (!nrow && !nier) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
-        if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; leaving the game's frame limit", e); t = 0; }
+        if (t != 0 && t != 30 && t != 60 && t != 120) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 60 or 120; leaving the game's frame limit", e); t = 0; }
+        if (t == 120 && nier) { LOG("[RED] DM_FPS_TARGET=120: the NieR frame interval takes 30 or 60 only; leaving the game's frame limit"); t = 0; }
+        if (t == 120) for (int r = 0; r < nrow; r++) if (k_locks[rows[r]].kind != CAP_F32) { LOG("[RED] DM_FPS_TARGET=120: %s takes 30 or 60 only; leaving the game's frame limit", k_locks[rows[r]].what); t = 0; break; }
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", k_locks[rows[r]].what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src); return; }
         target = t; state = 0;
     }
@@ -186,9 +192,9 @@ void dm_fps_lock_tick(void) {
         for (int c = 0; c < k_locks[k].copies; c++) {
             uint64_t a = obj + k_locks[k].field + 4 * (uint64_t)c; uint32_t cur, want; char was[16];
             if (!rd(a, &cur, sizeof cur)) break;
-            if (k_locks[k].kind == FPS_F32 || k_locks[k].kind == MS_F32) {
-                int ms = k_locks[k].kind == MS_F32; float f, w = ms ? ms_want(target) : (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
-                if (cur == want || !(ms ? f >= 8 && f <= 100 : f >= 10 && f <= 120)) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
+            if (k_locks[k].kind == FPS_F32 || k_locks[k].kind == MS_F32 || k_locks[k].kind == CAP_F32) {
+                int ms = k_locks[k].kind == MS_F32, cap = k_locks[k].kind == CAP_F32; float f, w = ms ? ms_want(target) : (float)target + (cap ? 2 : 0); memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
+                if (cur == want || !(ms ? f >= 8 && f <= 100 : f >= 10 && f <= (cap ? 200 : 120))) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
                 snprintf(was, sizeof was, ms ? "%.3f ms" : "%g", f);
             } else {
                 int fps = k_locks[k].kind == FPS_I32;
@@ -200,6 +206,7 @@ void dm_fps_lock_tick(void) {
             dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want, __ATOMIC_RELAXED);
             if (nlog[k] < 8) { nlog[k]++; char now[24];
                 if (k_locks[k].kind == MS_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(target), target);
+                else if (k_locks[k].kind == CAP_F32) snprintf(now, sizeof now, "%d fps (target %d)", target + 2, target);
                 else snprintf(now, sizeof now, "%u%s", k_locks[k].kind == FPS_F32 ? (unsigned)target : want, k_locks[k].kind == FPS_F32 || k_locks[k].kind == FPS_I32 ? " fps" : " vsyncs");
                 LOG("main: %s%s %s → %s (%s)", k_locks[k].what, k_locks[k].copies > 1 ? (c ? " (render thread)" : " (game thread)") : "", was, now, src); }
         }

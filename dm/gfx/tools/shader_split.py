@@ -38,6 +38,9 @@
 #   · SNVN (Retro Studios, Donkey Kong Country: Tropical Freeze): zlib program records in the SNVN chunks of MaterialArchive.arc, of the MTRL resources in its .pak archives
 #       and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
+#   · Unreal Engine 3 shader caches (Rocksteady's, Batman: Arkham Knight): the global shader cache (GlobalShaderCache-Switch.bin, magic BMSG) and the material shader caches in the cooked packages
+#       (CombinedShaderCache-Switch.xxx; packages whose chunks are Oodle-compressed, decoded by the game's own decoder in the Mac host), each shader a record {u32, u32 code length, u32 control
+#       length, u32} + code area + control section, see ue3_package and ue3_records
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -98,8 +101,14 @@ def ctl_len(ctl):
     n = struct.unpack_from('<I', ctl, 0x20)[0]
     return n if 0x760 <= n < 0x880 else 0x880
 
+KEY_SKIP = _game.shader_key_skip(GAME)   # control-section bytes the keys leave out (the profile's shader_key_skip; the host's keys_hash does the same)
+def key_ctl(ctl):   # the control bytes a key hashes
+    c = ctl[:ctl_len(ctl)]
+    if KEY_SKIP[1] and len(c) >= sum(KEY_SKIP): c = c[:KEY_SKIP[0]] + bytes(KEY_SKIP[1]) + c[sum(KEY_SKIP):]
+    return c
+
 def skey(ctl, code):
-    return hashlib.sha256(ctl[:ctl_len(ctl)] + code).hexdigest()[:16]
+    return hashlib.sha256(key_ctl(ctl) + code).hexdigest()[:16]
 
 def same_shader(a, b):
     """Two copies of one key hold the same shader: the code areas are equal, and so are the control sections up to their own length (control +0x20). Pokémon Legends: Z-A's UI layout archives
@@ -107,6 +116,7 @@ def same_shader(a, b):
     (ca, ka), (cb, kb) = a, b
     n = struct.unpack_from('<I', ca, 0x20)[0] if len(ca) >= 0x24 else len(ca)
     n = n if 0x760 <= n <= min(len(ca), len(cb)) else max(len(ca), len(cb))
+    if KEY_SKIP[1]: ca, cb = key_ctl(ca) + ca[ctl_len(ca):], key_ctl(cb) + cb[ctl_len(cb):]   # bytes the key leaves out may differ (shader_key_skip)
     return ka == kb and ca[:n] == cb[:n]
 
 def check(where, st, ctl, code):
@@ -1610,6 +1620,62 @@ def ue_legacy_shaders(path, rel, names, out):
         label = re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))
         ue_inline_shaders(d, f'/{rel}#{label}', out)
 
+UE3_TAG, UE3_GSC = bytes.fromhex('c1832a9e'), b'BMSG'   # Unreal Engine 3: the package tag 0x9E2A83C1 (also each compressed chunk's), the global shader cache's magic
+def ue3_chunks(d):
+    """An Unreal Engine 3 package's compressed chunks: [(file offset of the block's data, compressed size, raw size), …] per chunk, [] for a package stored whole. The package summary is stored
+    as it is; each chunk after it is a header {tag 0x9E2A83C1, u32 block size, u32 compressed size, u32 raw size} with one {u32 compressed, u32 raw} pair per block of up to the block size,
+    then the blocks' data, and the next chunk follows (Batman: Arkham Knight, block size 128 KB, Oodle). The summary of Rocksteady's packages is serialized differently from Epic's, so the first
+    chunk is found by its header, the first consistent one in the first 64 KB"""
+    def chunk(i):
+        if d[i:i + 4] != UE3_TAG or i + 16 > len(d): return None
+        bs, ct, ut = struct.unpack_from('<III', d, i + 4)
+        if not bs or bs & (bs - 1) or not ut or bs > 1 << 24: return None
+        n = (ut + bs - 1) // bs; p = i + 16 + 8 * n
+        if p > len(d): return None
+        blocks = [struct.unpack_from('<II', d, i + 16 + 8 * k) for k in range(n)]
+        if sum(c for c, _ in blocks) != ct or sum(u for _, u in blocks) != ut or p + ct > len(d) or any(u > bs for _, u in blocks): return None
+        out = []
+        for c, u in blocks: out.append((p, c, u)); p += c
+        return out, p
+    i = d.find(UE3_TAG, 4)
+    while 0 <= i < 0x10000 and not chunk(i): i = d.find(UE3_TAG, i + 1)
+    out = []
+    while 0 <= i and (ch := chunk(i)): out.append(ch[0]); i = ch[1]
+    return out
+
+def ue3_package(d, label):
+    """An Unreal Engine 3 package's bytes with its compressed chunks decoded (the summary in front as it is): Zlib blocks here, Oodle ones with the game's own decoder (oodle), stored blocks as they are"""
+    import zlib
+    chunks = ue3_chunks(d)
+    if not chunks: return d
+    out = [d[:chunks[0][0][0]]]
+    for blocks in chunks:
+        for p, c, u in blocks:
+            b = d[p:p + c]
+            if c == u: out.append(b)
+            elif ZLIB_HEAD.match(b): out.append(zlib.decompress(b))
+            elif len(b) >= 2 and b[0] & 0x0F == 0x0C: out.append(oodle(b, u))   # an Oodle block header (0x8C / 0xCC, then the decoder)
+            else: print(f'[RED] {label}: a compressed block of a format the split does not decode ({b[:4].hex()}); the package is left out', flush=True); return b''
+    return b''.join(out)
+
+def ue3_records(d, label):
+    """Shaders of an Unreal Engine 3 shader cache (Rocksteady's: the global shader cache GlobalShaderCache-Switch.bin, 1,847 shaders, and the material shaders of CombinedShaderCache-Switch.xxx,
+    22,874): each a record {u32, u32 code length, u32 control length, u32} followed by the code area and its control section. A control section counts when the code area of the length its +0x704
+    gives lies right before it and the record's lengths say so"""
+    out = []
+    for m in re.finditer(re.escape(CTL_MAGIC), d):
+        c = m.start()
+        if c + 0x880 > len(d): continue
+        n, own = struct.unpack_from('<I', d, c + 0x704)[0], struct.unpack_from('<I', d, c + 0x20)[0]
+        h = c - n - 16
+        if h < 0 or not 0x760 <= own <= 0x880 or struct.unpack_from('<II', d, h + 4) != (n, own): continue
+        ctl, code = d[c:c + own], d[c - n:c]; st = glslc_stage(ctl, code)
+        if not st: continue
+        why = check(label, st, ctl, code)
+        if why: print(f'[RED] {label} shader record @{h:#x}: {why}; left out', flush=True); continue
+        out.append((f'{label}#UE3@{h:#x}', st, ctl, code))
+    return out
+
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 def ue_inline_shaders(d, label, out):
     """Shaders kept inline in cooked Unreal packages (UE 4.18, DRAGON QUEST XI S: each material's shader map in its .uexp, 38 to 87 shaders in the ones looked at, and the engine's global shaders in
@@ -2181,6 +2247,10 @@ def scan_file_in(args):
     if len(args) > 2 and args[2][0] == UE_LEGACY:   # files of a legacy Unreal pak (ue_legacy_jobs)
         ue_legacy_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] in (UE3_TAG, UE3_GSC):   # an Unreal Engine 3 package (its chunks decoded) or global shader cache (Batman: Arkham Knight)
+        d = open(path, 'rb').read()
+        found += ue3_records(ue3_package(d, '/' + rel) if head[:4] == UE3_TAG else d, '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == PKZL:   # entries of a PlatinumGames PKZ (pkz_jobs)
         pkz_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2397,7 +2467,8 @@ def main():
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
-                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
+                                            ('Unreal Engine shader code archives', any('#UE' in r[4] and '#UE3@' not in r[4] for r in rows)),
+                                            ('Unreal Engine 3 shader caches', any('#UE3@' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')

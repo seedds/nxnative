@@ -611,7 +611,13 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t nctl = 0x880, own; memcpy(&own, (const uint8_t *)sd->control + 0x20, 4);
     if (own >= 0x760 && own < 0x880) nctl = own;
     uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
-    CC_SHA256_Update(&hc, sd->control, nctl);
+    if (DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= nctl) {
+        // the profile's shader_key_skip: control bytes the key leaves out, hashed as zeros (Batman: Arkham Knight keeps one control section for shaders whose control sections differ only in GLSLC's compile information from +0x770 on,
+        // so a program's control section is often another shader's; shader_split.py key_ctl)
+        static const uint8_t zero[0x880];
+        CC_SHA256_Update(&hc, sd->control, DM_GAME_SHADER_KEY_SKIP_OFF); CC_SHA256_Update(&hc, zero, DM_GAME_SHADER_KEY_SKIP_LEN);
+        CC_SHA256_Update(&hc, (const uint8_t *)sd->control + DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN, nctl - DM_GAME_SHADER_KEY_SKIP_OFF - DM_GAME_SHADER_KEY_SKIP_LEN);
+    } else CC_SHA256_Update(&hc, sd->control, nctl);
     if (code) CC_SHA256_Update(&hc, (const void *)(uintptr_t)sd->data, ncode);
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;

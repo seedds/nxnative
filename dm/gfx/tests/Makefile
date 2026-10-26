@@ -71,6 +71,8 @@ t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
+t_poolpeak: t_poolpeak.c ../nvn/nvn_poolpeak.h
+	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
 t_fstep: t_fstep.c ../nvn/nvn_fstep.h
 	clang -O1 -Wall -o $@ t_fstep.c
 t_thermal: t_thermal.c $(MTL_T_DEP)

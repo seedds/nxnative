@@ -3,9 +3,11 @@
 # Usage: uv run --with cryptography scripts/xci_split.py <game.xci> <prod.keys> [<out dir>]   (without <out dir>: only list the NCAs)
 # Name the outputs as the NSP script expects: <name> [<title ID>][v0].nsp and <name> [<update title ID>][v<version>].nsp
 import struct, os, sys, re
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # pyright: ignore[reportMissingImports]   # run with `uv run --with cryptography`
 xci, keys = sys.argv[1], sys.argv[2]; out = sys.argv[3] if len(sys.argv) > 3 else None
-hk = bytes.fromhex(re.search(r'^header_key\s*=\s*([0-9a-fA-F]{64})', open(keys).read(), re.M)[1])
+hk_m = re.search(r'^header_key\s*=\s*([0-9a-fA-F]{64})', open(keys).read(), re.M)
+if not hk_m: sys.exit('no header_key in ' + keys)
+hk = bytes.fromhex(hk_m[1])
 f = open(xci, 'rb')
 def hfs(off):
     f.seek(off); h = f.read(16); assert h[:4] == b'HFS0'

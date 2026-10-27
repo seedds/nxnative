@@ -4,7 +4,8 @@
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
-// Key map (Nintendo layout): WASD left stick, arrow keys D-pad (with Shift held: the right stick, for the camera), J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
+// Key map (Nintendo layout): WASD left stick, arrow keys D-pad (with Shift held: the right stick, for the camera), J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller;
+// DM_KEYMAP moves a function to another key (the right stick too), DM_PAD_MAP changes what a controller's buttons send (input_map.h).
 // Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
@@ -17,6 +18,7 @@
 #include "front.h"
 #include "hle.h"
 #include "pad_slots.h"
+#include "input_map.h"
 #include "haptics_apple.h"
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
@@ -28,8 +30,7 @@
 
 static CAMetalLayer *g_layer;
 static uint64_t g_btn;
-static int g_w, g_a, g_s, g_d;
-static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
+
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
@@ -107,33 +108,31 @@ static void cursor_hide_for_input(void) {
     NSView *v = g_win.contentView;
     if (NSPointInRect([v convertPoint:g_win.mouseLocationOutsideOfEventStream fromView:nil], v.bounds)) [NSCursor setHiddenUntilMouseMoves:YES];
 }
+// Keyboard: each key holds one function of the key map (input_map.h; DM_KEYMAP changes it), the held functions make the buttons and both sticks
+static key_map g_keys;
+static uint32_t g_held_fn;   // bit f: a key holding function f is down
+static int8_t g_key_down_fn[IM_KEYS];   // the function each key pressed when it went down, +1 (0: up): it goes back up as it went down, whatever Shift does meanwhile
 static void push(void) {
-    int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    int32_t rx = (g_rr - g_rl) * 32767, ry = (g_ru - g_rd) * 32767;
-    dm_input_set(g_btn, lx, ly, rx, ry);
+    uint32_t h = g_held_fn;
+    #define D(f) ((int32_t)(h >> (f) & 1))
+    dm_input_set(g_btn, (D(IM_LRIGHT) - D(IM_LLEFT)) * 32767, (D(IM_LUP) - D(IM_LDOWN)) * 32767, (D(IM_RRIGHT) - D(IM_RLEFT)) * 32767, (D(IM_RUP) - D(IM_RDOWN)) * 32767);
+    #undef D
 }
-static int key_bit(unsigned short code) {
-    switch (code) {
-        case 38: return 0;  case 40: return 1;  case 32: return 2;  case 34: return 3;    // J K U I → A B X Y
-        case 3: return 4;   case 5: return 5;                                            // F G → press stick
-        case 12: return 6;  case 14: return 7;  case 6: return 8;   case 8: return 9;    // Q E Z C → L R ZL ZR
-        case 36: return 10; case 48: return 11;                                          // Return Tab → + −
-        case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15; // ← ↑ → ↓
-    }
-    return -1;
-}
+static void keys_release(void) { g_btn = 0; g_held_fn = 0; memset(g_key_down_fn, 0, sizeof g_key_down_fn); push(); }
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
-    unsigned short c = e.keyCode;
-    switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
-    // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
-    // could be turned only with a controller (Donkey Kong Bananza)
-    int *rs = c == 123 ? &g_rl : c == 126 ? &g_ru : c == 124 ? &g_rr : c == 125 ? &g_rd : NULL;
-    if (rs && (down ? (e.modifierFlags & NSEventModifierFlagShift) != 0 : *rs)) { *rs = down; push(); return; }
-    int b = key_bit(c);
-    uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
-    g_btn = down ? (g_btn | m) : (g_btn & ~m);
-    if (down && (m || c == 13 || c == 0 || c == 1 || c == 2)) cursor_hide_for_input();   // a key the game takes (WASD: the left stick)
+    unsigned c = e.keyCode; if (c >= IM_KEYS) return;
+    int f;
+    if (down) {
+        f = key_map_fn(&g_keys, c); if (f < 0) return;
+        // A key holding a D-pad direction, pressed with Shift held, is that direction of the right stick until it is released. By default these are the arrow keys:
+        // the keyboard had no right stick, and a 3D game's camera could be turned only with a controller (Donkey Kong Bananza)
+        if ((e.modifierFlags & NSEventModifierFlagShift) && f >= 12 && f <= 15) f = (int[]){IM_RLEFT, IM_RUP, IM_RRIGHT, IM_RDOWN}[f - 12];
+        g_key_down_fn[c] = (int8_t)(f + 1);
+    } else { f = g_key_down_fn[c] - 1; g_key_down_fn[c] = 0; if (f < 0) return; }
+    g_held_fn = down ? (g_held_fn | 1u << f) : (g_held_fn & ~(1u << f));
+    g_btn = (g_held_fn & 0xffff) | (g_held_fn >> IM_SHAKE & 1 ? DM_BTN_SHAKE : 0);
+    if (down) cursor_hide_for_input();   // a key the game takes
     push();
 }
 
@@ -145,9 +144,11 @@ static void on_key(NSEvent *e, int down) {
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_kbd_own;
+static pad_map g_padmap;   // DM_PAD_MAP (input_map.h): what each button sends, applied to every controller
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
 // A controller's state for player p, GameController or raw HID: a pressed button or a stick past 15% hides the pointer (cursor_hide_for_input), a resting stick's drift does not
 static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    m = pad_map_apply(&g_padmap, m);
     const int32_t dead = DM_STICK_MAX * 15 / 100;
     if (m || abs(lx) > dead || abs(ly) > dead || abs(rx) > dead || abs(ry) > dead) cursor_hide_for_input();
     dm_pad_set_player(p, m, lx, ly, rx, ry);
@@ -235,7 +236,7 @@ static void input_release(void) {
     display_awake(0);
     g_input_on = 0;
     dm_motion_pro_active(0);
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+    keys_release();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
@@ -275,6 +276,10 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     dm_pad_players(pad_slot_mask(&g_slots));
 }
 static void pads_start(void) {
+    key_map_default(&g_keys); pad_map_default(&g_padmap);
+    const char *km = getenv("DM_KEYMAP"), *pm = getenv("DM_PAD_MAP");
+    if (km && *km) { int bad = key_map_parse(&g_keys, km); LOG("front end: keyboard map from DM_KEYMAP (%s)%s", km, bad ? ", malformed entries left out" : ""); }
+    if (pm && *pm) { int bad = pad_map_parse(&g_padmap, pm); LOG("front end: controller buttons from DM_PAD_MAP (%s)%s", pm, bad ? ", malformed entries left out" : ""); }
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
     static const char kbd = 0;
@@ -1333,7 +1338,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     dispatch_sync(dispatch_get_main_queue(), ^{
         // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
         // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+        keys_release();
         dm_touch_set(NULL, 0);
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];

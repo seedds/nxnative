@@ -79,10 +79,18 @@ def build(gid, patched, control):
             return {'YES': '1', 'NO': '0', '': '0'}.get(v, v)   # build_ipa.sh's yes / no switches
         return d
 
-    out, table = [], {r[1][0] for r in rows()}
+    def takes(kind, values):   # the values a row's variable can take, for needs; None when any (a range, the game's languages)
+        if kind == 'toggle': return {'1', '0'} if values == '-' else set(values.split('/'))
+        if kind == 'choice' and values != 'languages': return {v.split('=', 1)[0] for v in values.split(',')}
+        return None
+
+    out, table = [], {r[1][0]: takes(r[1][1], r[1][2]) for r in rows()}
     for n, (var, kind, values, default, cond, section, label, note, extra) in rows():
         m = meta(extra, n)
-        if 'needs' in m and m['needs'].split('=', 1)[0] not in table: sys.exit(f'settings.tsv:{n}: needs names a variable no row sets: {m["needs"]}')
+        if 'needs' in m:
+            need, want = m['needs'].split('=', 1)
+            if need not in table: sys.exit(f'settings.tsv:{n}: needs names a variable no row sets: {m["needs"]}')
+            if table[need] is not None and want not in table[need]: sys.exit(f'settings.tsv:{n}: needs a value {need} never takes: {want} (it takes {", ".join(sorted(table[need]))})')
         if not shown(cond, n): continue
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
         if kind == 'choice':

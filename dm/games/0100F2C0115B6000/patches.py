@@ -312,6 +312,21 @@ def mouse_camera(ctx):
         ctx.emit(w)
     ctx.emit(B(ctx.here(), 0x1d59674))
     ctx.put(0x1d59670, [B(0x1d59670, start)], 'mouse camera: Ultrahand raises the held object by the mouse')
+    # Ascend's aiming keeps the Chase camera, so no camera stub tells it apart. Its player node, ExecutePlayerCeilingClipper (calc in slot 9 of its vtable,
+    # main+0x23de46c; enter main+0x23de36c refuses unless the special power manager's current power, +0x6c, is 3), is the aiming phase: node +0x20 = 0 looks for a
+    # ceiling (main+0x23de638, Link's ready pose) and starts the PlayerCeilingClipper event (the rise, another node) on A; 1 plays WarpHeightNG and returns to 0. The
+    # calc stamps state +0x80 each frame, and the host counts it as an ability for 1/8 s after, so the mouse buttons are A (rise) and B (cancel)
+    ctx.site(0x23de46c, 'fd7bbda9')   # stp x29,x30,[sp,#-0x30]!
+    start = ctx.here(); ctx.emit(ADRP(9, ctx.here(), ctx.state))
+    for w in (0xbd405130,   # ldr s16,[x9,#0x50]       degrees per count
+              0x1e202208,   # fcmp s16,#0.0
+              0x54000060,   # b.eq orig (+3)           mouse camera off
+              0xd53be04f,   # mrs x15,cntvct_el0
+              0xf900412f,   # str x15,[x9,#0x80]       Ascend aiming
+              0xa9bd7bfd):  # orig: stp x29,x30,[sp,#-0x30]! (original)
+        ctx.emit(w)
+    ctx.emit(B(ctx.here(), 0x23de470))
+    ctx.put(0x23de46c, [B(0x23de46c, start)], 'mouse camera: Ascend aiming marks itself as an ability')
     ctx.mouse_camera = 1
 
 FRAME_STEP = {'277178b7dba1b6d4949a84778d4abc58': frame_step}

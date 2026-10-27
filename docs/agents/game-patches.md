@@ -649,7 +649,10 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
 - **sdk** `9c73fb73…` ([sdk_patches.py:50](../../dm/tools/sdk_patches.py#L50)): Patrick's Parabox 1.0.1
   - cut `+0x37c3b0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x37c44c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `e01950c5…` ([sdk_patches.py:58](../../dm/tools/sdk_patches.py#L58)): Hollow Knight: Silksong 1.0.30000
+- **sdk** `2587a39a…` ([sdk_patches.py:56](../../dm/tools/sdk_patches.py#L56)): Super Mario RPG 1.0.1, We Love Katamari REROLL+ Royal Reverie 1.0.3
+  - cut `+0x12d8b0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
+  - cut `+0x12d94c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
+- **sdk** `e01950c5…` ([sdk_patches.py:64](../../dm/tools/sdk_patches.py#L64)): Hollow Knight: Silksong 1.0.30000
   - cut `+0x145bfc`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x145c68`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
 

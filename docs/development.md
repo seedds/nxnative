@@ -91,6 +91,8 @@ requests, only the checker whose pinned release version increased may gain
 baseline entries or counts. Comments, dependency updates and checker downgrades
 do not allow growth.
 
+`scripts/bug_report.py` (`-h`) collects the logs, versions and settings a bug report needs into one zip ([CONTRIBUTING.md](../CONTRIBUTING.md#reporting-a-problem)); it reads an allow-list of text files only.
+
 ## The packing script in detail
 
 `scripts/build_ipa_from_nsp.py` (`-h` lists every option):

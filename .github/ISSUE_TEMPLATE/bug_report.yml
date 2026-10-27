@@ -77,6 +77,7 @@ body:
     attributes:
       label: Logs
       description: |
+        Run `python3 scripts/bug_report.py <title ID>` to collect the logs, versions and settings into one file to attach (it contains no game files). Or attach the logs yourself:
         Attach the whole log from the start of the run (drag the file here), not excerpts:
         - Mac app: `~/Library/Logs/nxnative/<title ID>.log` (the run before is `<title ID>.prev.log`)
         - Terminal (`--platform mac`): the host's output, e.g. the command followed by `2>&1 | tee run.log`

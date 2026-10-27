@@ -4,7 +4,7 @@ using synthetic shaders only.
 Portable tests require Python. To exercise the actual rebuilt offline compiler:
   DMSH_TEST_XLATE=/absolute/path/to/dmsh_xlate python3 -m unittest discover \
     -s dm/tools/tests -p test_image_atomic_bounds.py -v
-Requires spirv-cross and spirv-val on PATH; optionally DMSH_TEST_METAL=1 on Mac
+Requires spirv-val on PATH (spirv-cross is the in-repo build, dm/gfx/tools/spirv_cross_bin); optionally DMSH_TEST_METAL=1 on Mac
 also compiles and links each generated MSL file. DMSH_TEST_METAL_SDKS defaults
 to macosx; set macosx,iphoneos to check both SDKs with the production flags.
 Set DMSH_TEST_GPU=1 with DMSH_TEST_METAL=1 to execute the returning buffer
@@ -28,12 +28,13 @@ ROOT = Path(__file__).resolve().parents[3]
 RYU = ROOT / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader'
 spec = importlib.util.spec_from_file_location('dmsh_atomic', ROOT / 'dm/gfx/tools/dmsh_atomic.py')
 atomic = importlib.util.module_from_spec(spec); spec.loader.exec_module(atomic)
+SPIRV_CROSS = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'   # the build dmsh_build.py runs (dmsh_chain.SPIRV_CROSS)
 XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']  # dmsh_build.XC without fragment padding
 
 
 def cross(spv, msl):
     """spirv-cross as dmsh_build runs it: MSL 3.1 for a module with image atomics, which must come out as native texture atomics"""
-    subprocess.run(['spirv-cross', *atomic.cross_args(XC, str(spv)), str(spv), '--output', str(msl)], check=True)
+    subprocess.run([str(SPIRV_CROSS), *atomic.cross_args(XC, str(spv)), str(spv), '--output', str(msl)], check=True)
     source = atomic.check_msl(msl.read_text())
     assert '.atomic_fetch_' in source and 'access::read_write' in source, msl
     return source
@@ -395,8 +396,8 @@ class Compiler(unittest.TestCase):
                         self.assertFalse(spv.exists())
 
     def test_real_translation_and_cross(self):
-        for tool in ('spirv-cross', 'spirv-val'):
-            self.assertIsNotNone(shutil.which(tool), tool + ' required for compiler acceptance')
+        self.assertTrue(os.access(SPIRV_CROSS, os.X_OK), f'{SPIRV_CROSS} required for compiler acceptance')
+        self.assertIsNotNone(shutil.which('spirv-val'), 'spirv-val required for compiler acceptance')
         with tempfile.TemporaryDirectory(prefix='dm-image-atomic-') as temp:
             work = Path(temp)
             cases = [('negative_x', -1, 1, 0), ('negative_y', 0, -1, 0), ('int_min', -2**31, 0, 0),

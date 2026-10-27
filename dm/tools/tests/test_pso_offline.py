@@ -208,6 +208,20 @@ class Build(unittest.TestCase):
         self.assertEqual((self.out / 'prebuilt.tsv').read_text(), po.stamp(CHAIN, True, b'v\tc\n'))
         self.assertIn('bases\t0\n', (self.out / 'archive.tsv').read_text())
 
+    def test_no_pairs_builds_nothing(self):   # GitHub issue #338: a header-only shader_pairs.tsv is nothing to build, not an error
+        self.main()
+        (self.prof / 'shader_pairs.tsv').write_text('# pairs\n')
+        before = len(self.calls)
+        self.assertEqual(self.main(), 0)
+        self.assertEqual(len(self.calls), before)
+        self.assertEqual(list(self.out.glob('*.mtl4a')), [])   # the old archive goes: mac_pso() then packs the app without one
+        self.assertFalse((self.out / 'rest_pairs.tsv').exists())
+        self.assertIn('bases\t0\n', (self.out / 'archive.tsv').read_text())
+
+    def test_pairs_all_left_out_is_an_error(self):   # pairs whose libraries the host would not take: still a failure
+        (self.prof / 'shader_pairs.tsv').write_text('x\ty\n')
+        with self.assertRaises(SystemExit): self.main()
+
     def test_metal_tt_failure_leaves_no_archive(self):
         def fail(cmd, **kw):
             cmd = [str(c) for c in cmd]

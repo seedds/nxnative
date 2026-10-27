@@ -42,7 +42,7 @@ class ProfilePackTests(unittest.TestCase):
                     env['PSO'] = str(pso)
                 # Exercise the actual archive step; only the preceding Xcode build is bypassed.
                 script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
-                packing = script[script.index('\nP=Payload/DmIOS.app;'):]
+                packing = script[script.index('\nP=Payload/DmIOS.app\n'):]
                 result = subprocess.run(['/bin/bash', '-c', 'set -u\nt() { :; }; die() { echo "$*" >&2; exit 1; }\n'
                                          'gp() { python3 "$PROFILE_TOOL" "$GAME" "$1"; }\n' + packing],
                                         cwd=root, env=env, capture_output=True, text=True)

@@ -72,7 +72,7 @@ typedef struct thr {
     uint64_t nspin, nspin_seen, spin_site; const char *spin_mod;   // Spin wait passes (dm_spin_wait; those that yield count in nyield too) and where the last one was
     uint64_t srun_svc, srun_t0, spin_ret;     // Current spin wait: nsvc at its passes, when it began, when the last pass returned
     uint64_t cpu_seen_us;                     // CPU time (µs) at the last power report (dm_thread_cpu)
-    uint64_t yrun_svc, yrun_t0, yrun_sig;     // Current run of yields: nsvc of the last yield, when the run began, and the caller's x19–x28 at the last yield (a run lasts while no other SVC comes between two yields and those registers stay the same, thr_yield)
+    uint64_t yrun_svc, yrun_t0, yrun_sig, yrun_sig2;   // Current run of yields: nsvc of the last yield, when the run began, and the caller's x19–x28 at the last two yields (a run lasts while no other SVC comes between two yields and those registers match one of the last two, thr_yield)
     mach_port_t mport;         // Host thread port (to get CPU time)
     _Atomic int qos_pending;   // SetThreadPriority from another thread changed prio: the thread applies the new class at its next SVC (only a thread can set its own QoS)
     uint32_t qos;
@@ -637,6 +637,21 @@ void svc_thread_dump(void) {
                 m ? m->name : "?", m ? t->last_lr - (uint64_t)m->base : t->last_lr);
         if (have_raw) { char hx[200]; int q = 0; for (int i = 0; i < 64; i += 4) q += snprintf(hx + q, sizeof hx - q, "%08x ", *(uint32_t *)(raw + i));
                         fprintf(stderr, "[dm]   %#x waited-for object, 64 bytes from %#llx: %s\n", t->handle, t->waddr & ~0xfull, hx); }
+        // A thread in an SVC: the guest code that called it, from its stack. Engines built without frame pointers (Batman: Arkham Knight's Unreal Engine 3) leave the frame-pointer backtrace
+        // at the SVC wrapper, so the words above the gate's register frame that point into a module are listed, nearest first, with x19-x28. regs + 800 holds the x29 / x30 the gate block
+        // pushed (x30 = the return address into the wrapper's caller, which the backtrace skips: the wrappers are leaf functions), the guest stack at the SVC follows at regs + 816.
+        // Read page by page up to the first unreadable one: a thread waiting near its stack top (a shallow worker) has PROT_NONE stack region above it, and one read would fail whole
+        uint64_t *sr = atomic_load(&t->svc_regs);
+        if (sr && t->wkind) { uint64_t stk[160]; size_t got = 0; vm_address_t sa = (vm_address_t)((uint8_t *)sr + 800);
+            while (got < sizeof stk) { vm_size_t n = sizeof stk - got, g4 = 0, room = vm_page_size - ((sa + got) & (vm_page_size - 1)); if (n > room) n = room;
+                if (vm_read_overwrite(mach_task_self(), sa + got, n, (vm_address_t)((uint8_t *)stk + got), &g4) || g4 != n) break;
+                got += n; }
+            if (got >= 16 && atomic_load(&t->svc_regs) == sr) {   // still in that SVC: the words are its stack, not a later frame's
+                char sl[1100]; int q = snprintf(sl, sizeof sl, "[dm]   %#x guest stack:", t->handle), nfr = 0;
+                for (int i = 0; i < (int)(got / 8) && nfr < 16 && q < (int)sizeof sl - 40; i++) { module_t *m2 = module_of((void *)stk[i]);
+                    if (m2 && stk[i] - (uint64_t)m2->base < m2->text_end) { q += snprintf(sl + q, sizeof sl - q, " [%d]%s+%#llx", i * 8, m2->name, stk[i] - (uint64_t)m2->base); nfr++; } }
+                q += snprintf(sl + q, sizeof sl - q, " | x19=%#llx x20=%#llx x21=%#llx x22=%#llx x23=%#llx x24=%#llx x25=%#llx x26=%#llx x27=%#llx x28=%#llx", sr[19], sr[20], sr[21], sr[22], sr[23], sr[24], sr[25], sr[26], sr[27], sr[28]);
+                fprintf(stderr, "%s\n", sl); } }
         thr_bt(t);
     }
     // Threads created by the host itself (graphics present, audio, movie decoding, etc.): not in the guest thread table, enumerated as mach threads, the first 12 frames symbolized with dladdr
@@ -704,13 +719,15 @@ static void yield_for(thr_t *me, uint64_t run_ns) {
 // with the back-off each yield slept 250 µs, about 2,600 cells a second, and the screen stayed black with the loading icon for 77 s after the opening movie (now about 10 s).
 // Breath of the Wild's PlacementMgr and RadarMgr yield once per item of their batches too (a list pointer and a count move; RadarMgr's batch is 94,263 items, which the back-off
 // stretched to about 30 s): standing outdoors on the Mac, CPU energy 0.35–0.74 → 0.21–0.34 W at 60 fps, CPU 76–83% → 96–106% of a core, frame interval p99 19 → 20–21 ms.
-// With sched_yield on each such yield (about 200,000 a second) it was 108–121% of a core and 0.38–0.70 W
+// With sched_yield on each such yield (about 200,000 a second) it was 108–121% of a core and 0.38–0.70 W.
+// A loop that waits at two yields comes back to the registers of the yield before last: Hades' NetworkPollThread (main+0x27aaa0) yields between its passes (w23 = 0) and once
+// in each pass's wait for the nifm request (w23 = 2,000, its retry count), and spun a host core as one that moved on at every yield
 static void thr_yield(thr_t *me, const uint64_t *regs) {
     if (!me) { sched_yield(); return; }
     uint64_t y0 = now_ns(), sig = 0xcbf29ce484222325ull;
     for (int i = 19; i <= 28; i++) sig = (sig ^ regs[i]) * 0x100000001b3ull;
-    int moved = me->yrun_svc + 1 == me->nsvc && me->yrun_sig != sig;   // the loop moved on since its last yield
-    me->nyield++; if (me->yrun_svc + 1 != me->nsvc || moved) me->yrun_t0 = y0; me->yrun_svc = me->nsvc; me->yrun_sig = sig;
+    int moved = me->yrun_svc + 1 == me->nsvc && me->yrun_sig != sig && me->yrun_sig2 != sig;   // the loop moved on since its last two yields
+    me->nyield++; if (me->yrun_svc + 1 != me->nsvc || moved) me->yrun_t0 = y0; me->yrun_svc = me->nsvc; me->yrun_sig2 = me->yrun_sig; me->yrun_sig = sig;
     if (!moved) yield_for(me, y0 - me->yrun_t0);
     if (me->handle == 0x1001) { g_main_yield_ns += now_ns() - y0; g_main_yield_n++; }
 }

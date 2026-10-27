@@ -15,7 +15,7 @@ typedef struct { uint32_t magic, flags, origin, depth_mode; void *dbg_cb, *dbg_d
 
 typedef struct { NVNdevice *dev; uint32_t flags; uint64_t cmd_sz, comp_sz, ctl_sz, flush; void *mem; uint64_t mem_sz; } queue_builder_t;
 FITS(queue_builder_t, NVNqueueBuilder);
-typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; } queue_t;                 FITS(queue_t, NVNqueue);
+typedef struct { uint32_t magic; NVNdevice *dev; uint64_t submits; int origin_ll; } queue_t;  FITS(queue_t, NVNqueue);
 
 typedef struct { NVNdevice *dev; void *mem; uint64_t size; uint32_t flags; } pool_builder_t;  FITS(pool_builder_t, NVNmemoryPoolBuilder);
 // A virtual pool (flags 0x200) keeps its sparse state in vp (hle_nvn.c struct vpool, NULL for an aliased one); vmode: 0 not mapped yet, 1 aliased onto one physical pool, 2 sparse
@@ -213,6 +213,7 @@ int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns);   // vsyncs = the game'
 int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns);   // the same in the display link's own ticks
 int mtl_link_rate(void);   // the display link's rate: 120, 60 or 30 Hz
 double mtl_presented_time(uint64_t n);
+int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms);   // the display-link tick that took the n-th present (0 = none: no display link, or not taken yet)
 int mtl_link_stalled(void);   // the display link is silent (background, occluded window, a stall) and queued frames are dropped instead of shown
 int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void);   // present snapshots (DM_PRESENT_SNAP): on, and acquire's wait for ring capacity (returns ns spent pacing)
    // Actual presentation time (seconds) of the n-th present (counted from 1); 0 = not ready, −1 = dropped

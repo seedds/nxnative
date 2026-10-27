@@ -4,7 +4,9 @@
 # DirName, FileName, FileSize (stored), ExtractSize, FileOffset (relative to the smaller of TocOffset and ContentOffset). A file whose stored size is smaller than its size is
 # CRILAYLA-compressed (crilayla). The @UTF tables may be stored masked (Unicorn Overlord; unmask). shader_split.py reads every CPK through it (cpk_jobs).
 # Usage: cpk.py <file.cpk> [--extract <dir> [<name regex>]] lists (or extracts) the files.
-import re, struct, sys
+import re, struct, sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
+from romfs import open
 from pathlib import Path
 
 def unmask(b):

@@ -175,8 +175,8 @@ class Game:
         self.derived = (build / 'profile' / self.id / 'game.tsv').is_file()
 
     def romfs(self):
-        r = self.build / 'extract' / self.ver / 'RomFS'
-        return r if r.is_dir() else bench.newest(self.build.glob('extract/v*')) / 'RomFS'
+        r = bench.rfs.source(self.build / 'extract' / self.ver)
+        return r if r.is_dir() else bench.rfs.source(bench.newest(self.build.glob('extract/v*')))
 
     def route(self):
         f = REPO / 'dm/games' / self.id / 'smoke.tsv'
@@ -249,7 +249,8 @@ def dotnet_env(env):
 def toolchain_fp():
     out = []
     for cmd in (['spirv-cross', '--version'], ['xcrun', '-sdk', 'macosx', 'metal', '--version'], ['xcrun', '-sdk', 'macosx', '--show-sdk-build-version']):
-        r = sh(cmd); out.append(r.stdout + r.stderr)
+        try: r = sh(cmd); out.append(r.stdout + r.stderr)
+        except FileNotFoundError: out.append('missing')   # spirv-cross on PATH: only revisions before the in-repo build (dm/gfx/tools/spirv_cross_bin) run it; a tree's own is in its chain key
     return hashlib.sha256('\0'.join(out).encode()).hexdigest()
 
 
@@ -268,6 +269,11 @@ def chain_key(tree, g, tools):
         vk = load_module('regress_vk_sources', REPO / 'dm/gfx/tools/vk_shaders.py')
         sources = digest(sorted(Path(p) for root in g.shader_roots() for p in vk.spirv_files(root)), root=g.build)
     else: raise HarnessError(f'{g.id}: the chain check does not cover {g.kind} games yet')
+    sc = tree.path / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'
+    if sc.is_file():   # earlier revisions use PATH, already covered by tools; pinned revisions also honor SPIRV_CROSS
+        env = dotnet_env(g.env(tree))
+        selected = env.get('SPIRV_CROSS', str(sc))
+        side += digest([Path(shutil.which(selected, path=env.get('PATH')) or selected)])
     return v, inp, f'{g.kind}-{v}-{inp}-{hashlib.sha256((tools + side + sources).encode()).hexdigest()[:16]}'
 
 
@@ -326,7 +332,7 @@ def chain_build(tree, g, a):
 def refl_hash(p):
     try: j = json.loads(Path(p).read_bytes())
     except (OSError, ValueError): return None
-    for k in ('chain', 'chain_metal'): j.pop(k, None)
+    for k in ('chain', 'chain_metal', 'chain_compiler'): j.pop(k, None)
     return hashlib.sha256(json.dumps(j, sort_keys=True).encode()).hexdigest()[:16]
 
 

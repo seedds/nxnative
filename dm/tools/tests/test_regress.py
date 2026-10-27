@@ -183,6 +183,19 @@ class Regress(unittest.TestCase):
             self.assertNotEqual(original, changed)
             self.assertNotEqual(changed, paired)
 
+    def test_vk_chain_key_tracks_selected_converter_content(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); tools = root / 'dm/gfx/tools'; tools.mkdir(parents=True)
+            bundled = tools / 'spirv_cross_bin/spirv-cross'; bundled.parent.mkdir()
+            bundled.write_bytes(b'bundled converter')
+            selected = root / 'override'; selected.write_bytes(b'converter A'); selected.chmod(0o755)
+            env = dict(regress.os.environ, SPIRV_CROSS=str(selected))
+            g = NS(kind='vk', ver='v0', env=lambda tree: env, shader_roots=list, build=root)
+            tree = NS(path=root)
+            before = regress.chain_key(tree, g, 'tools')[2]
+            selected.write_bytes(b'converter B')
+            self.assertNotEqual(before, regress.chain_key(tree, g, 'tools')[2])
+
     def test_baseline_context_tracks_route_save_artifacts_and_settings(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); save = root / 'save'; save.mkdir()

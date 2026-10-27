@@ -22,6 +22,10 @@
 #   p push constants)
 # Usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]   (SPIR-V dirs: the RomFS, capture folders)
 import concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, tempfile
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
+from romfs import os, open
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dmsh_chain import SPIRV_CROSS   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
 
 MAGIC = 0x07230203
 OP_DECORATE, OP_MEMBER_DECORATE, OP_TYPE_ARRAY, OP_TYPE_RTARRAY, OP_TYPE_STRUCT = 71, 72, 28, 29, 30
@@ -81,7 +85,7 @@ def one(path, tmp, root):
     key = hashlib.sha256(data).hexdigest()[:16]   # of the game's words, which the host hashes
     words = fix_strides(list(struct.unpack(f'<{len(data) // 4}I', data)))
     src_spv = os.path.join(tmp, key + '.in.spv'); open(src_spv, 'wb').write(struct.pack(f'<{len(words)}I', *words))
-    refl = json.loads(subprocess.run(['spirv-cross', src_spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
+    refl = json.loads(subprocess.run([SPIRV_CROSS, src_spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
     eps = refl.get('entryPoints', [])
     if len(eps) != 1: red(f'{path}: entry points {eps} are not exactly one')
     stage = eps[0]['mode']
@@ -113,7 +117,7 @@ def one(path, tmp, root):
     if nxt['buffer'] > 16 or nxt['texture'] > 31 or nxt['sampler'] > 16: red(f'{path}: resource slots exceeded {nxt}')
     spv = os.path.join(tmp, key + '.spv'); msl = os.path.join(tmp, key + '.metal')
     open(spv, 'wb').write(struct.pack(f'<{len(words)}I', *words))
-    cmd = ['spirv-cross', spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--rename-entry-point', 'main', f'vk_{key}', stage, '--output', msl]
+    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--rename-entry-point', 'main', f'vk_{key}', stage, '--output', msl]
     if stage == 'vert': cmd.append('--flip-vert-y')
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: red(f'{path}: spirv-cross failed: {r.stderr.strip()[:300]}')
@@ -170,7 +174,7 @@ def main():
         if skipped: print('[RED] skipped shader stages Metal does not have: ' + ', '.join(f'{k} {v}' for k, v in sorted(skipped.items())))
         msls = [m for v in seen.values() for m in v[2]]
         tsv = ['# Vulkan shaders (dm/gfx/tools/vk_shaders.py): key = sha256(SPIR-V)[:16], Metal function vk_<key>; resources kind:set.binding=slot (u uniform buffer, b storage buffer, t image, s sampler, c combined, p push constants)',
-               '# spirv-cross ' + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run(['spirv-cross', '--revision'], capture_output=True, text=True)).split())]
+               '# spirv-cross ' + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
         tsv += [f'{k}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
         dirs = [(os.path.join(out, 'vk'), 'macosx', [])]
         # The iPhone library is compiled with -fmetal-math-mode=relaxed, as the NVN chain's (dm/ios/tools/ios_metal.py): the default fast mode lets the GPU compiler assume there is

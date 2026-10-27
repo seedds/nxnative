@@ -3,6 +3,7 @@
 # Records pass/fail and the first error line at each stage, and summarizes the success rate and the distribution of failure reasons. The dry run uses ShaderTools' default queries (texture types etc. are not answered truthfully) and only measures "can it be converted".
 # Usage: dmsh_dryrun.py <Switch package dir> <ShaderTools executable> <output dir>   Environment J=concurrency
 import os, re, sys, json, hashlib, subprocess, struct, tempfile, collections, concurrent.futures as cf
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); from dmsh_chain import SPIRV_CROSS   # the in-repo spirv-cross build
 dm_dir, shtools, out = sys.argv[1:4]
 os.makedirs(out, exist_ok=True)
 XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native']
@@ -23,7 +24,7 @@ def one(job):
         open(bi, 'wb').write(code)
         r = subprocess.run([shtools, '--target-language', 'Spirv', '--target-api', 'Vulkan'] + (['--compute'] if comp else []) + [bi, spv], capture_output=True, text=True)
         if r.returncode or not os.path.exists(spv) or os.path.getsize(spv) == 0: return key, name, 'spirv', first_err(r.stdout + r.stderr)
-        r = subprocess.run(['spirv-cross', *XC, spv, '--output', msl], capture_output=True, text=True)
+        r = subprocess.run([SPIRV_CROSS, *XC, spv, '--output', msl], capture_output=True, text=True)
         if r.returncode: return key, name, 'msl', first_err(r.stdout + r.stderr)
         r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', msl, '-o', air], capture_output=True, text=True)
         if r.returncode: return key, name, 'metal', first_err(r.stdout + r.stderr)

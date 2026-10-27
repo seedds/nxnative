@@ -29,6 +29,7 @@ The layer was written for this game (Super Mario Galaxy extended it later: [0100
 ## Services
 
 - **Resolved: the notification event.** The game polls `oe::GetNotificationMessageEvent` every frame. The SDK's own event was never created (the host's `oe::Initialize` is a no-op), so the host now hands out an event of its own, signalled while a notification is queued.
+- **Resolved: `NetworkPollThread` kept a host core busy (issue #334).** The thread (`main+0x27aaa0`, priority 31, started at `main+0x273b68`) runs for good: yield, `nifm::SubmitNetworkRequest`, then while `IsNetworkRequestOnHold` up to 2,000 rounds of `SleepThread(0)` and a query, `CancelNetworkRequest` when they run out, `IsNetworkAvailable` into a flag under a mutex, and round again. The other caller (`main+0x421e10`) is the online account path (`SubmitNetworkRequestAndWait`). With the host's 50 ms hold the 2,000 queries (0.1 ms here) always ran out first: in 60 s of the smoke route, 1.17 billion queries, 833,250 submits, 582,637 cancels and 117 s of process CPU. The request is now on hold for the first query only, and the back-off now catches a wait at two yields (w23 is 0 at the one between rounds and 2,000 at the one in the wait): 101,564 submits, two queries each, no cancel, 216,000 yields and 62 s of CPU, the frames and the picture as before. Both changes are general: [Network requests stay on hold before they settle](../../../docs/reference/services.md#network-requests-stay-on-hold-before-they-settle), [A wait at two yields is not progress](../../../docs/reference/threads.md#a-wait-at-two-yields-is-not-progress).
 - **Current: offline.** `main` imports `EOS_*` functions (Epic Online Services, from `/nro/EOSSDK-Switch-Shipping.nro`, loaded through `nn::ro`); they stay offline. `main` imports only EOS Auth, Connect and PlayerDataStorage (Epic-account cross-save, which the host cannot serve). Since the host loads NROs, it refuses online SDKs: an NRR that registers only such modules fails `RegisterModuleInfo`, and Hades never asks for the module (checked on 1.0.38233: `refused an NRR that registers only online SDKs (1 hashes)`, no `LoadModule`, its frames as before).
 
 ## Rewriter
@@ -45,6 +46,8 @@ General host changes first needed here; each applies to every game:
 
 - **The Vulkan layer on Metal** (`dm/gfx/vk/hle_vk.m`) and the SPIR-V translation (`vk_shaders.py`), described above; [dm/games/README.md, What the game files decide at every build](../README.md#what-the-game-files-decide-at-every-build).
 - **A host notification event** for `oe::GetNotificationMessageEvent` (`hle_oe.c`), described above.
+- **A network request on hold for its first query only** (`hle_net.c`, `nn::nifm`): [Network requests stay on hold before they settle](../../../docs/reference/services.md#network-requests-stay-on-hold-before-they-settle).
+- **A wait at two yields gets the back-off** (`thr_yield`, `hle_thread.c`): [A wait at two yields is not progress](../../../docs/reference/threads.md#a-wait-at-two-yields-is-not-progress).
 
 ## Open
 

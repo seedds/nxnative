@@ -19,16 +19,13 @@ pyright	dm/gfx/tools/dmsh_build.py	reportOptionalMemberAccess	4	"group" is not a
 pyright	dm/gfx/tools/dmsh_build.py	reportOptionalSubscript	13	Object of type "None" is not subscriptable
 pyright	dm/gfx/tools/gl_shaders.py	reportArgumentType	1	Argument of type "list[str]" cannot be assigned to parameter "iterable" of type "Iterable[LiteralString]" in function "join" "list[str]" is not assignable to "Iterable[LiteralString]" Type parameter "_T_co@Iterable" is covariant, but "str" is not a subtype of "LiteralString" "str" is not assignable to "LiteralString"
 pyright	dm/gfx/tools/gl_shaders.py	reportCallIssue	1	No overloads for "join" match the provided arguments
-pyright	dm/gfx/tools/own_compilers.py	reportOptionalSubscript	3	Object of type "None" is not subscriptable
 pyright	dm/gfx/tools/shader_split.py	reportArgumentType	1	Argument of type "Literal['m_Name']" cannot be assigned to parameter "s" of type "slice[SupportsIndex | None, SupportsIndex | None, SupportsIndex | None]" in function "__getitem__" "Literal['m_Name']" is not assignable to "slice[SupportsIndex | None, SupportsIndex | None, SupportsIndex | None]"
 pyright	dm/gfx/tools/shader_split.py	reportArgumentType	1	Argument of type "Literal['m_ParsedForm']" cannot be assigned to parameter "s" of type "slice[SupportsIndex | None, SupportsIndex | None, SupportsIndex | None]" in function "__getitem__" "Literal['m_ParsedForm']" is not assignable to "slice[SupportsIndex | None, SupportsIndex | None, SupportsIndex | None]"
 pyright	dm/gfx/tools/shader_split.py	reportArgumentType	1	Argument of type "Literal['variants']" cannot be assigned to parameter "s" of type "slice[SupportsIndex | None, SupportsIndex | None, SupportsIndex | None]" in function "__getitem__" "Literal['variants']" is not assignable to "slice[SupportsIndex | None, SupportsIndex | None, SupportsIndex | None]"
 pyright	dm/gfx/tools/shader_split.py	reportArgumentType	1	Argument of type "bytes | None" cannot be assigned to parameter "buffer" of type "ReadableBuffer" in function "unpack_from" Type "bytes | None" is not assignable to type "ReadableBuffer" "None" is incompatible with protocol "Buffer" "__buffer__" is not present
-pyright	dm/gfx/tools/shader_split.py	reportArgumentType	1	Argument of type "list[str | None]" cannot be assigned to parameter "args" of type "_CMD" in function "__init__" Type "str | None" is not assignable to type "StrOrBytesPath" Type "None" is not assignable to type "StrOrBytesPath" "None" is not assignable to "str" "None" is not assignable to "bytes" "None" is incompatible with protocol "PathLike[str]" "__fspath__" is not present "None" is incompatible with protocol "PathLike[bytes]" "__fspath__" is not present
 pyright	dm/gfx/tools/shader_split.py	reportArgumentType	2	Argument of type "Unknown | int | None" cannot be assigned to parameter "offset" of type "int" in function "unpack_from" Type "Unknown | int | None" is not assignable to type "int" "None" is not assignable to "int"
 pyright	dm/gfx/tools/shader_split.py	reportAssignmentType	1	Expression with type "tuple[Any, Any] | Any" cannot be assigned to target tuple Type "tuple[Any, Any]" is incompatible with target tuple Tuple size mismatch; expected 4 but received 2
 pyright	dm/gfx/tools/shader_split.py	reportAttributeAccessIssue	1	Cannot access attribute "get" for class "list[Any]" Attribute "get" is unknown
-pyright	dm/gfx/tools/shader_split.py	reportCallIssue	1	No overloads for "__init__" match the provided arguments
 pyright	dm/gfx/tools/shader_split.py	reportCallIssue	3	No overloads for "__getitem__" match the provided arguments
 pyright	dm/gfx/tools/shader_split.py	reportGeneralTypeIssues	2	"None" is not iterable "__iter__" method not defined
 pyright	dm/gfx/tools/shader_split.py	reportMissingImports	1	Import "backports" could not be resolved
@@ -174,7 +171,6 @@ pyright	dm/tools/tests/test_nsp_incremental.py	reportArgumentType	1	Argument of 
 pyright	dm/tools/tests/test_nsp_incremental.py	reportArgumentType	1	Argument of type "int | str | tuple[str, str]" cannot be assigned to parameter "ver" of type "str" in function "derive" Type "int | str | tuple[str, str]" is not assignable to type "str" "int" is not assignable to "str"
 pyright	dm/tools/tests/test_nsp_incremental.py	reportAttributeAccessIssue	1	Cannot assign to attribute "nacp" for class "ModuleType" Attribute "nacp" is unknown
 pyright	dm/tools/tests/test_nsp_incremental.py	reportAttributeAccessIssue	1	Cannot assign to attribute "pg" for class "ModuleType" Attribute "pg" is unknown
-pyright	dm/tools/tests/test_nsp_incremental.py	reportOptionalCall	2	Object of type "None" cannot be called
 pyright	dm/tools/tests/test_nsp_incremental.py	reportOptionalMemberAccess	1	"exec_module" is not a known attribute of "None"
 pyright	dm/tools/tests/test_nsp_incremental.py	reportOptionalMemberAccess	1	"loader" is not a known attribute of "None"
 pyright	dm/tools/tests/test_nsp_mac.py	reportArgumentType	1	Argument of type "ModuleSpec | None" cannot be assigned to parameter "spec" of type "ModuleSpec" in function "module_from_spec" Type "ModuleSpec | None" is not assignable to type "ModuleSpec" "None" is not assignable to "ModuleSpec"
@@ -220,7 +216,6 @@ pyright	scripts/bench.py	reportArgumentType	1	Argument of type "Unknown | None" 
 pyright	scripts/bench.py	reportArgumentType	1	Argument of type "float" cannot be assigned to parameter "value" of type "int" in function "__setitem__" "float" is not assignable to "int"
 pyright	scripts/bench.py	reportCallIssue	1	No overloads for "round" match the provided arguments
 pyright	scripts/bench.py	reportOptionalMemberAccess	1	"group" is not a known attribute of "None"
-pyright	scripts/bench.py	reportOptionalOperand	1	Operator "/" not supported for "None"
 pyright	scripts/build_ipa_from_nsp.py	reportArgumentType	1	Argument of type "str | ((n: Unknown) -> (Unknown | None))" cannot be assigned to parameter "func" of type "(_T1@__new__) -> _S@map" in function "__new__" Type "str | ((n: Unknown) -> (Unknown | None))" is not assignable to type "(Unknown) -> _S@map" Type "str" is not assignable to type "(Unknown) -> _S@map"
 pyright	scripts/build_ipa_from_nsp.py	reportArgumentType	1	Argument of type "str | ((n: Unknown) -> (Unknown | None))" cannot be assigned to parameter "func" of type "(_T1@__new__) -> _S@map" in function "__new__" Type "str | ((n: Unknown) -> (Unknown | None))" is not assignable to type "(_T1@__new__) -> _S@map" Type "str" is not assignable to type "(_T1@__new__) -> _S@map"
 pyright	scripts/build_ipa_from_nsp.py	reportCallIssue	1	Argument expression after ** must be a mapping with a "str" key type
@@ -254,4 +249,3 @@ ruff	dm/tools/tests/test_nsp_nsz.py	F401	1	`sys` imported but unused
 ruff	dm/tools/tests/test_spin_waits.py	F401	1	`sys` imported but unused
 ruff	scripts/bench.py	B023	1	Function definition does not bind loop variable `ok`
 ruff	scripts/build_ipa_from_nsp.py	B020	1	Loop control variable `note` overrides iterable it iterates
-ruff	scripts/build_ipa_from_nsp.py	F401	1	`zlib` imported but unused

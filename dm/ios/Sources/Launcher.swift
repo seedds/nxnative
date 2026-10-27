@@ -88,8 +88,11 @@ private struct LauncherView: View {
                 .frame(width: geometry.size.width / 3, height: geometry.size.height)
                 List {
                     ForEach(m.sections, id: \.self) { section in
-                        Section(section) {
-                            ForEach(m.settings.filter { $0.sectionTitle == section }) { SettingRow(s: $0, m: m) }
+                        let rows = m.rows(in: section)
+                        if !rows.isEmpty {
+                            Section(section) {
+                                ForEach(rows) { SettingRow(s: $0, m: m) }
+                            }
                         }
                     }
                     Section {

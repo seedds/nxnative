@@ -8,11 +8,12 @@
 # cannot tell the games that need them (Tears of the Kingdom) from those that only use what they answer (Wonder's conditional clears, Breath of the Wild's flushed textures).
 # Usage: profile_guess.py <ExeFS dir> <romfs_manifest.tsv | RomFS dir>   the facts and the guessed keys
 #        profile_guess.py --check [<NSP root>]                        every profile in dm/games against its extraction under <NSP root> (default /Volumes/T7/nsp): where the guess differs
-import collections, os, re, struct, sys
+import collections, re, struct, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools')); import nso_syms   # dynamic symbols, the host's hooks
+from romfs import Path, os, open, is_image, source
 
 MAGICS = [(b'UnityFS\0', 'UnityFS'), (b'UnityWeb', 'UnityWeb'), (b'UnityRaw', 'UnityRaw'), (b'BNSH', 'BNSH'), (b'BAHS', 'BAHS'), (b'SARC', 'SARC'), (b'Yaz0', 'Yaz0'),
           (bytes.fromhex('28b52ffd'), 'zstd'), (b'FRES', 'bfres'), (b'BNTX', 'BNTX'), (b'BWAV', 'BWAV'), (b'FSAR', 'BFSAR'), (b'CPK ', 'CRI CPK'), (b'CRID', 'CRI USM'),
@@ -51,7 +52,7 @@ def kind(m):   # a short name for what a module is: its NintendoSDK component, G
 
 def romfs_files(romfs):   # (path, size, first 32 bytes) of every RomFS file: from nx_extract's manifest, or read from a RomFS folder
     romfs = Path(romfs)
-    if romfs.is_file():
+    if romfs.is_file() and not is_image(romfs):
         for line in romfs.read_text(errors='replace').splitlines():
             if line.startswith('#'): continue
             path, size, head = line.split('\t'); yield path, int(size), bytes.fromhex(head)
@@ -343,12 +344,12 @@ def find_extraction(root, g):   # (ExeFS, RomFS manifest or folder) for a profil
             base = d / data
             for v in [g.get('package', '')] + sorted(x.name for x in base.glob('v*')):
                 w = base / v
-                if (w / 'ExeFS').is_dir() and (w / 'RomFS').is_dir(): return w / 'ExeFS', w / 'RomFS'
+                if (w / 'ExeFS').is_dir() and source(w).is_dir(): return w / 'ExeFS', source(w)
     return None
 
 
 def loose_nros(root, g, ex):   # {name: path} of the loose NROs in a profile's RomFS: the extraction's own folder, else an NSP script extraction of the packed version beside its survey
-    roms = [Path(ex[1])] if Path(ex[1]).is_dir() else [d / f'{g.id}_build/extract' / g.get('package', '') / 'RomFS' for d in sorted(Path(root).iterdir())]
+    roms = [Path(ex[1])] if Path(ex[1]).is_dir() else [source(d / f'{g.id}_build/extract' / g.get('package', '')) for d in sorted(Path(root).iterdir())]
     rom = next((r for r in roms if r.is_dir()), None)
     return {p.name: p for p in sorted(rom.rglob('*.nro')) if p.is_file()} if rom else {}
 

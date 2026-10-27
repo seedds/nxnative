@@ -3,8 +3,25 @@
 // file serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up; a function with no
 // Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one despite a
 // mid-prewarm flush, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
-// one base; a flush removes the build folder Metal made for its captures
+// one base; archive flushes preserve unrelated compiler state
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+// Keep the host's cache observations/deletions in a directory owned by this test.
+// Metal itself still uses its real compiler cache; only this translation unit's
+// confstr calls see the fixture parent, including when testing the former cleanup.
+static char archive_cache_root[] = "/tmp/t_pso_archive_cache.XXXXXX";
+static size_t archive_confstr(int name, char *buffer, size_t length) {
+    if (name != _CS_DARWIN_USER_CACHE_DIR) return confstr(name, buffer, length);
+    size_t size = strlen(archive_cache_root) + 1;
+    if (length && buffer) { size_t n = size < length ? size : length; memcpy(buffer, archive_cache_root, n); buffer[n - 1] = 0; }
+    return size;
+}
+#define confstr archive_confstr
 #include "../nvn/nvn_mtl.m"
+static void archive_cache_cleanup(void) {
+    [NSFileManager.defaultManager removeItemAtPath:@(archive_cache_root) error:nil];
+}
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 void *front_metal_layer(void) { return NULL; }
@@ -45,6 +62,31 @@ static id<MTLFunction> test_fn(id<MTLLibrary> lib, NSString *name, int registere
 - (BOOL)serializeAsArchiveAndFlushToURL:(NSURL *)url error:(NSError **)error {
     calls++; marked += [[NSString stringWithContentsOfFile:arch_compact_marker() encoding:NSUTF8StringEncoding error:nil] isEqualToString:arch_compact_stamp()];
     return [ser serializeAsArchiveAndFlushToURL:url error:error];
+}
+@end
+// Model another compiler creating state before the real compiler call returns.
+// The UUID fixture belongs exclusively to this test; no discovered folder is removed.
+@interface ArchiveForeignCompiler : NSObject {
+@public id<MTL4Compiler> compiler; NSString *fixture; NSError *fixture_error;
+    unsigned calls; BOOL created, marker_created;
+}
+@end
+@implementation ArchiveForeignCompiler
+- (id)forwardingTargetForSelector:(SEL)selector { return compiler; }
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4RenderPipelineDescriptor *)d compilerTaskOptions:(MTL4CompilerTaskOptions *)opts error:(NSError **)error {
+    calls++;
+    id<MTLRenderPipelineState> ps = [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opts error:error];
+    if (ps && !created) {
+        if (mkdir(fixture.fileSystemRepresentation, 0700)) fixture_error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+        else {
+            created = YES;
+            NSString *marker = [fixture stringByAppendingPathComponent:@"PersistentState"];
+            int fd = open(marker.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL, 0600);
+            if (fd < 0) fixture_error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+            else { close(fd); marker_created = YES; }
+        }
+    }
+    return ps;
 }
 @end
 // a full-screen triangle; colour 0 = (0.5, 0.25, 1, 0.5), colour 1 = (0.2, 0.4, 0.6, 0.8); attribute 0 (a float4) scales nothing, so a vertex descriptor is part of the pipeline
@@ -146,7 +188,38 @@ static void concurrent_bases(int fail) {
     g_comp4 = gate->compiler;
     if (fail) { NSError *err = nil; EXPECT("concurrent: failed base can retry", 1, pso_build(ds[0], &err) != nil); }
 }
+static void capture_preserves_foreign_folder(void) {
+    arch_flush();   // Finish earlier captures; the old ownership detector starts a new snapshot window.
+    NSError *error = nil;
+    MTLRenderPipelineDescriptor *prime = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+    prime.vertexDescriptor.layouts[16].stride = 1536;
+    // Establish the real compiler's working folder outside the host's ownership detector.
+    EXPECT("foreign capture: prime real compiler", 1,
+           [g_comp4 newRenderPipelineStateWithDescriptor:pso_desc4(prime, 1) compilerTaskOptions:nil error:&error] != nil);
+    char root[PATH_MAX];
+    if (!confstr(_CS_DARWIN_USER_CACHE_DIR, root, sizeof root)) { EXPECT("foreign capture: cache path available", 1, 0); return; }
+    ArchiveForeignCompiler *proxy = [ArchiveForeignCompiler new]; proxy->compiler = g_comp4;
+    NSString *cache = [@(root) stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    proxy->fixture = [cache stringByAppendingPathComponent:[@"gpuarchiver-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    MTLRenderPipelineDescriptor *fresh = [prime copy]; fresh.vertexDescriptor = [prime.vertexDescriptor copy];
+    fresh.vertexDescriptor.layouts[16].stride = 2048;
+    g_comp4 = (id<MTL4Compiler>)proxy;
+    EXPECT("foreign capture: real pipeline", 1, pso_build(fresh, &error) != nil);
+    g_comp4 = proxy->compiler;
+    EXPECT("foreign capture: one real compiler call", 1, proxy->calls);
+    EXPECT("foreign capture: fixture created", 1, proxy->marker_created);
+    if (proxy->fixture_error) fprintf(stderr, "foreign capture: fixture creation failed: %s\n", proxy->fixture_error.localizedDescription.UTF8String);
+    arch_flush();
+    EXPECT("foreign capture: PersistentState survives flush", 1,
+           [NSFileManager.defaultManager fileExistsAtPath:[proxy->fixture stringByAppendingPathComponent:@"PersistentState"]]);
+    if (proxy->created && [NSFileManager.defaultManager fileExistsAtPath:proxy->fixture])
+        EXPECT("foreign capture: test-owned fixture removed", 1, [NSFileManager.defaultManager removeItemAtPath:proxy->fixture error:nil]);
+}
 int main(int argc, char **argv) { @autoreleasepool {
+    if (!mkdtemp(archive_cache_root)) abort();
+    atexit(archive_cache_cleanup);
+    if (![NSFileManager.defaultManager createDirectoryAtPath:[@(archive_cache_root) stringByAppendingPathComponent:@"com.apple.gpuarchiver"]
+                               withIntermediateDirectories:NO attributes:nil error:nil]) abort();
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
     setenv("DM_PSO_ARCHIVE", argc == 3 ? argv[2] : dir, 1);
     mtl_init(); g_q = [g_dev newCommandQueue]; NSError *err = nil;
@@ -217,13 +290,9 @@ int main(int argc, char **argv) { @autoreleasepool {
     EXPECT("one specialization per pipeline", 3, g_pb_spec);
     // the archive: flushed to a file, a later start takes the base from it without compiling
     EXPECT("one base waits for the archive", 1, g_arch_new);
-    NSString *ga = g_ga_mine ? [ga_dir() stringByAppendingPathComponent:g_ga_mine] : nil;   // fails only if another program captured in the same few ms
-    EXPECT("the first capture found Metal's build folder", 1, ga && [NSFileManager.defaultManager fileExistsAtPath:ga]);
     arch_flush();
     NSString *file = [@(dir) stringByAppendingPathComponent:@"00000.mtl4a"];
     EXPECT("archive file written", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);
-    EXPECT("the flush removed Metal's build folder", 0, ga && [NSFileManager.defaultManager fileExistsAtPath:ga]);
-    EXPECT("the next capture looks again", 0, g_ga_seen);
     EXPECT("nothing left to write", 0, g_arch_new);
     nvn_hm_clear(&g_pbase, hm_rel);   // as a new start: no base in memory, the archive opened
     g_arch4 = @[[g_dev newArchiveWithURL:[NSURL fileURLWithPath:file] error:&err]];
@@ -322,6 +391,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     EXPECT("blend of a disabled target dropped (7)", 0, k.blend[7].dst_rgb);
     EXPECT("depth format kept (an MTLDevice pipeline names it)", MTLPixelFormatDepth32Float, k.dfmt);
     EXPECT("stencil format kept", MTLPixelFormatStencil8, k.sfmt);
+    capture_preserves_foreign_folder();
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     printf("t_pso_archive: %d checks, %d failed\n", checks, failed);
     return failed != 0;

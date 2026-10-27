@@ -49,7 +49,9 @@
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
-import collections, concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, zlib
+import collections, concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, time, zlib
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
+from romfs import os, open, is_image
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../games')); import game as _game
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import uepak
 GAME = _game.load()   # the current game profile (DM_GAME, required): source group rules and the table header note
@@ -350,7 +352,7 @@ def idrk_shaders(path, label, out):
     as GLSLC compiler outputs (glslc_shaders). One '_DOK0000' container (type KTID 0x20a6a0bb, the engine's system resources; once in system.rdb.bin and once in the update's .bin1) holds 151 bare
     GLSLC outputs without a G2S wrapper, among them 21 shaders the first battle draws. No other entry type holds any. The RDB files are up to 3.8 GB, so they are mapped rather than read,
     and only entries whose data starts with one of those two magics are inflated"""
-    import mmap
+    from romfs import mmap
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for a, b, flags in idrk_entries(d):
             if idrk_data(d, a, b, flags, 4) in (b'_S2G', b'_DOK'): out.extend(glslc_shaders(idrk_data(d, a, b, flags), f'{label}#IDRK@{a:#x}', need=False))
@@ -396,7 +398,7 @@ def linkdata_jobs(path, rel, parts=64):
     return jobs
 
 def linkdata_shaders(path, rel, rng, out):
-    import mmap
+    from romfs import mmap
     with open(os.path.join(os.path.dirname(path), 'DATA0.bin'), 'rb') as f: idx = f.read()
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for i in range(*rng):
@@ -463,7 +465,7 @@ def sdf_shaders(d, label):
     return out
 
 def kpka_shaders(path, rel, ents, out):
-    import mmap
+    from romfs import mmap
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for e in ents:
             if e[3] >= 0x10 and kpka_data(d, e, 4) == b'SDF\0': out.extend(sdf_shaders(kpka_data(d, e), f'/{rel}#{e[0]:016x}'))
@@ -551,7 +553,7 @@ def zip_jobs(files, parts=64):
         with open(p, 'rb') as f: h = f.read(4)
         if h != ZIP: continue
         try:
-            with zipfile.ZipFile(p) as z: zs.append((p, r, [(i.filename, i.file_size) for i in z.infolist() if not i.is_dir()]))
+            with open(p, 'rb') as source, zipfile.ZipFile(source) as z: zs.append((p, r, [(i.filename, i.file_size) for i in z.infolist() if not i.is_dir()]))
         except (zipfile.BadZipFile, OSError, ValueError) as e: print(f'[RED] /{r}: the zip cannot be read ({e}); scanned as one file', flush=True)
     jobs, step = [], sum(n for _, _, es in zs for _, n in es) / parts
     for p, r, es in zs:
@@ -566,7 +568,7 @@ def zip_shaders(path, rel, names, out):
     """A range of zip members (zip_jobs), each inflated and scanned like a loose file: scan_blob, then whole GLSLC outputs (Portal's .nvsb files: a 0x60-byte 'NVSB' header, then one
     GLSLC output of a vertex and a pixel shader)"""
     import zipfile
-    with zipfile.ZipFile(path) as z:
+    with open(path, 'rb') as source, zipfile.ZipFile(source) as z:
         for nm in names:
             d = z.read(nm); n = len(out)
             scan_blob(d, f'/{rel}/{nm}', out)
@@ -819,16 +821,20 @@ def gfpak_members(d, label):
         yield f'#{i}', data
 
 NLG_DICT = bytes.fromhex('5824f3a9')
-def nlg_dict(d):
+def nlg_dict(d, label):
     """Next Level Games' archive index (Luigi's Mansion 3: '<name>.dict' beside '<name>.data', every RomFS file but the Wwise banks): u32 magic 0xa9f32458, u8 4, u8 1, u8 compressed,
     u8 0, u32 the largest stored chunk, u8 chunk count, u8 record count, u8 name count, u8 0; then one 0x18-byte record per variant {u32 hash, u16 top-level entry count of its
     table, u16, u8 chunk of each of its 16 sections (0 = none)}, one 0x10-byte chunk per piece of data {u32 offset, u32 length, u32 stored length (one zlib stream), u16 alignment
     (log2 in the low 5 bits), u8 file, u8 GPU memory}, and the file names ('.data', '.debug', '.nxpc'). Record v's own entry table is chunk v: 12 bytes per entry {u32 kind (bit 31: a
     list of w1 entries from entry w2; bits 27..30 section; bits 22..26 log2 alignment), u32 length, u32 offset in the section}. The game reads the archive in main+0x1ba00 (Luigi's
     Mansion 3 1.4.0). → (compressed, records [(top, chunks)], chunks [(offset, length, stored, file)], file names)"""
-    comp, nchunk, nrec, nname = d[6], d[0xc], d[0xd], d[0xe]
-    recs = [(struct.unpack_from('<H', d, 0x14 + 0x18 * i)[0], list(d[0x18 + 0x18 * i:0x28 + 0x18 * i])) for i in range(nrec)]
+    nchunk, nrec = (d[0xc], d[0xd]) if len(d) >= 0x10 else (0, 0)
     co = 0x10 + 0x18 * nrec
+    # The layout above, checked before it is read: Mario Strikers: Battle League's (another revision, PR #282) stopped the split with an IndexError that named no file
+    if len(d) < co + 0x10 * nchunk or nrec > nchunk or any(c >= nchunk for i in range(nrec) for c in d[0x18 + 0x18 * i:0x28 + 0x18 * i]):
+        red(f'{label}: the index ({len(d):#x} bytes, header {d[4:0x10].hex(" ")}) is not in the layout of Luigi\'s Mansion 3\'s archives, the only one nlg_dict reads')
+    comp, nname = d[6], d[0xe]
+    recs = [(struct.unpack_from('<H', d, 0x14 + 0x18 * i)[0], list(d[0x18 + 0x18 * i:0x28 + 0x18 * i])) for i in range(nrec)]
     chunks = [struct.unpack_from('<3I2xB', d, co + 0x10 * i) for i in range(nchunk)]
     names = d[co + 0x10 * nchunk:].split(b'\0')[:nname]
     return comp, recs, chunks, [n.decode('latin-1') for n in names]
@@ -866,7 +872,7 @@ def nlg_shaders(path, label, out):
     Every variant whose files are in RomFS is read (the 13 even records; the odd ones point into '.nxpc', which is not shipped), and the shaders found pair by order (checked one by one)"""
     import zlib
     d = open(path, 'rb').read(); stem = path[:-len('.dict')]
-    comp, recs, chunks, names = nlg_dict(d)
+    comp, recs, chunks, names = nlg_dict(d, label)
     files = {i: open(stem + nm, 'rb').read() for i, nm in enumerate(names) if os.path.exists(stem + nm)}
     patch = open(stem + '.patch', 'rb').read() if os.path.exists(stem + '.patch') else None
     cache = {}
@@ -965,7 +971,7 @@ def bnd3_members(d, label):
 def bdt_shaders(path, rel, ents, out):
     """Dark Souls Remastered's shaders: GLSLC outputs, one per BND3 entry ('.vpo' vertex, '.fpo' pixel; 3,225 in six DCX-compressed BND3 archives in dvdbnd0.bdt, 3,088 of them the
     FLVER material shaders). The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs)"""
-    import mmap
+    from romfs import mmap
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
         for h, off, n in ents:
             label = f'/{rel}#{h:08x}'; d = m[off:off + n]
@@ -1403,7 +1409,7 @@ def trpfs_jobs(files, parts=64):
     0 file hashes [u64], 1 pack names [string], 2 file infos [{0 pack index u64}] (in file hash order), 3 pack infos [{0 pack size u64, 1 file count u64}]. The file system: 'ONEPACK\\0', u64 offset of its
     root table {0 pack name hashes [u64], 1 pack offsets [u64]}, each pack a table of its own at its offset. A pack is named through its first file's hash (its own name hash is not a plain FNV-1a of the
     descriptor's name). → ([(path, rel, ((pack offset, pack name), …)), …] in about equal sizes, the paths taken)"""
-    import mmap
+    from romfs import mmap
     jobs, taken = [], set()
     for p, r in files:
         if not p.endswith('.trpfs') or not os.path.exists(p[:-1] + 'd'): continue
@@ -1448,7 +1454,8 @@ def smash_arc_jobs(files, parts=128):
 def smash_arc_shaders(path, rel, ents, out):
     """Each file of a range scanned as a file of its own: GLSLC outputs in the SSBH shader databases ('HBSS' … 'RDHS', the .nushdb files: 41 in 13.0.5), BNSH in the effects ('EFFN') and the UI
     layout archives (SARC). Labels name the file by its format (an SSBH resource by its type, 'SHDR') and its path's hash40: /data.arc/SHDR#<hash40>"""
-    import mmap, smash_arc
+    from romfs import mmap
+    import smash_arc
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for e in ents:
             if not e[3]: continue
@@ -1481,7 +1488,7 @@ def oodle(comp, n):
 
 def trinity_shaders(path, rel, packs, out):
     """A range of Trinity packs (trpfs_jobs). Pack table: 0 file hashes [u64], 1 files [{1 compression i8 (3 = Oodle; stored otherwise), 2 level u8, 3 length u64, 4 data [u8]}]; each file is scanned like a loose one"""
-    import mmap
+    from romfs import mmap
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for off, name in packs:
             pr = fb_root(d, off); hs = fb_vec(d, pr, 0)
@@ -2008,7 +2015,17 @@ def var_pairs(found):
     return {(v['vs'], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() if 'vs' in v and 'ps' in v}
 
 def scan_file(args):
-    """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, or 'defer' (no type tree, scanned again in the second pass)"""
+    """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, 'defer' (no type tree, scanned again in the second pass), or ('unreadable', why).
+    A file no reader can read (a format revision the reader does not know: its red line, or the exception it raised) is left out, and the split goes on: one such
+    archive used to end the whole split with nothing written (PR #282: one of Mario Strikers: Battle League's 879 Next Level Games archives). main reports them"""
+    try: return scan_file_in(args)
+    except (Exception, SystemExit) as e:   # red() is a SystemExit
+        why = str(e).removeprefix('[RED] ') if isinstance(e, SystemExit) else f'{type(e).__name__}: {e}'
+        if not why.lstrip('/').startswith(args[1]): why = f'{args[1]}: {why}'   # most red lines name the file already
+        print(f'[RED] {why} (its shaders are left out)', flush=True)
+        return args[1], {}, set(), ('unreadable', why)
+
+def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
@@ -2108,6 +2125,23 @@ def nso_image(path):
         img[mo:mo + sz] = lz4.block.decompress(raw, uncompressed_size=sz) if flags >> i & 1 else raw
     return bytes(img)
 
+def scan_batch(jobs):   # scan_file over a batch of jobs, in a pool worker
+    return [scan_file(j) for j in jobs]
+
+
+def pooled(ex, jobs, total, start=0, chunk=1):
+    """scan_file over jobs in the pool, the results in job order, with a 'progress: <done>/<total>' line at most twice a second (the NSP script shows it as
+    the stage's count). The count is of the jobs finished in any order: counted in order it would stall behind one slow archive range while the others finish"""
+    batches = [jobs[i:i + chunk] for i in range(0, len(jobs), chunk)]
+    futures = {ex.submit(scan_batch, b): len(b) for b in batches}
+    done, pending, shown = start, set(futures), 0.0
+    while pending:
+        finished, pending = cf.wait(pending, timeout=0.5)
+        done += sum(futures[f] for f in finished)
+        if not pending or time.monotonic() - shown >= 0.5: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
+    return [r for f in futures for r in f.result()]
+
+
 def main():
     romfs_l, main_l, pkg, mapout, factsout = sys.argv[1:6]
     pairsout = sys.argv[6] if len(sys.argv) > 6 else None
@@ -2145,7 +2179,8 @@ def main():
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
         results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
     for romfs in dlc_v:
-        tag = 'aoc/' + os.path.basename(os.path.normpath(romfs))
+        name = os.path.basename(os.path.normpath(romfs))
+        tag = 'aoc/' + (name.removesuffix('.img') if is_image(romfs) else name)
         files += sorted((os.path.join(dp, f), tag + '/' + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
     zdicts = {k: v for r in romfs_v + dlc_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     keys = {}
@@ -2164,11 +2199,12 @@ def main():
     big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs
     files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
-        results += list(ex.map(scan_file, big)) + list(ex.map(scan_file, files, chunksize=16))
+        n = len(big) + len(files)
+        results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
         if extra == 'defer': defer.append(rel)
-        elif extra: trees.update(extra)
+        elif isinstance(extra, dict): trees.update(extra)
     if defer:
         # a hash no bundle supplied takes the layout unityfs.py has for it (KNOWN_TREES); only here, so files a bundle lends a tree to keep their place in the tables (Ace Attorney's built-ins)
         import unityfs
@@ -2178,6 +2214,8 @@ def main():
         for rel, uniq, pr, extra in again:
             if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
         results = [r for r in results if r[3] != 'defer'] + again
+    bad = [extra[1] for *_, extra in results if isinstance(extra, tuple)]
+    if bad: print(f'[RED] {len(bad)} file(s) could not be read, their shaders are left out (first: {bad[0]})', flush=True)   # build_ipa_from_nsp.py reads this line
     per_src = collections.Counter(); pairs = set()
     for rel, uniq, pr, _ in results:
         pairs |= pr

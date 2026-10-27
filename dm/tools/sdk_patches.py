@@ -64,9 +64,15 @@ CUTS = {
   # AI: THE SOMNIUM FILES - nirvanA Initiative 1.0.2 (v131072) sdk (SDK 13.3.5, Unity 2020.3.30f1): the same node area cut. nninitStartup (main+0x493300) calls
   # StandardAllocator::Initialize(nullptr, pool − used) with virtual address memory, as Patrick's Parabox. The constructor is at sdk+0x37c130 (limit = alias start + 0x3fe00000 at +0x28,
   # a unit heap of 0x30-byte nodes, the area then registered as occupied at +0x37c1dc)
+  # Pokémon Scarlet 1.0.0 shares this SDK. Its 12 GB allocator reservation is
+  # reduced to 4 GB in its profile's patches.py. Even with the node-area cut,
+  # 1 GB placement alignment makes that region fail with 0x1803 in the compact
+  # guest block. Platform workaround: use 32 MB alignment for large regions,
+  # as for the equivalent SDK build below; allocation sizes and guards stay intact.
   '3644a6760469451cabc99f00c540acc2': [
     (0x37c140, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x37c1dc, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+    (0x37c33c, '0a00a852', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more mov w10,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
   ],
   # Mario + Rabbids Sparks of Hope 1.6.2225577 (SDK 13.3.5): the same constructor
   # and placement code as nirvanA Initiative above. Snowdrop reserves a small

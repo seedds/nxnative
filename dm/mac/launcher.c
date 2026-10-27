@@ -1,7 +1,7 @@
 // Mac app launcher (CFBundleExecutable of the .app that dm/mac/pack_app.py packs): sets the host's environment from the bundle, then runs the Mac host (Contents/MacOS/dmhost) as a child.
 // The host is not exec'ed: macOS privacy checks (TCC) attribute a child's file access to the app that launched it, while a launcher that hands its process over (a shell script exec'ing
 // dmhost) gets EPERM on every open on a removable volume, with no prompt, signed or not. The launcher forwards SIGTERM / SIGINT / SIGHUP to the host and returns its exit code.
-// Bundle layout: Resources/romfs (the game's RomFS), Resources/msl/<b-chain | vk | gl> (the Mac shader libraries), Resources/aoc/<index> (DLC), Resources/pso (the pipeline archive made
+// Bundle layout: Resources/romfs.img (the game's RomFS image; legacy romfs/ also supported), Resources/msl/<b-chain | vk | gl> (the Mac shader libraries), Resources/aoc/<index> (DLC), Resources/pso (the pipeline archive made
 // offline, handed to the host as DM_PSO_BUNDLE as the iOS app's main.m does), Resources/dm (the rewritten modules, the shader tables and pairs, font/, env.txt). Saves, the pipeline list and temporary files go to ~/Library/Application Support/nxnative/<title ID>/, the host's output to ~/Library/Logs/nxnative/<title ID>.log
 // (the previous run's kept as <title ID>.prev.log). Environment switches: one KEY=VALUE per line in <Application Support folder>/env.txt, then Resources/dm/env.txt (the first one wins; neither
 // replaces a variable already set), as the iOS app reads Documents/env.txt and dm/env.txt.
@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "romfs_image.h"
 
 extern char **environ;
 static pid_t g_child;
@@ -82,9 +83,14 @@ int main(void) {
     if (!info_string("CFBundleName", name, sizeof name)) snprintf(name, sizeof name, "nxnative");
     info_string("DMRomfsMarker", marker, sizeof marker); info_string("DMLanguage", lang, sizeof lang);
     if (!info_string("DMTitleID", id, sizeof id) || strchr(id, '/')) { alert(name, "This app has no title ID in its Info.plist (DMTitleID): pack it again with build_ipa_from_nsp.py --platform mac-app."); return 1; }
-    struct stat st; snprintf(p, sizeof p, "%s/%s", romfs, marker);
-    if (access(host, X_OK) || stat(p, &st) || !modules_present(dm)) {
-        alert(name, "The game data inside this app is missing or incomplete (Contents/Resources/romfs, Contents/Resources/dm or Contents/MacOS/dmhost): pack it again with build_ipa_from_nsp.py --platform mac-app.");
+    struct stat st; snprintf(p, sizeof p, "%s/romfs.img", res);
+    int valid_romfs;
+    if (!stat(p, &st)) {
+        romfs_img *image = romfs_image_open(p); valid_romfs = image != NULL;
+        romfs_image_close(image); snprintf(romfs, sizeof romfs, "%s", p);
+    } else { snprintf(p, sizeof p, "%s/%s", romfs, marker); valid_romfs = !stat(p, &st); }
+    if (access(host, X_OK) || !valid_romfs || !modules_present(dm)) {
+        alert(name, "The game data inside this app is missing or incomplete (Contents/Resources/romfs.img, Contents/Resources/dm or Contents/MacOS/dmhost): pack it again with build_ipa_from_nsp.py --platform mac-app.");
         return 1;
     }
     const char *home = getenv("HOME"); if (!home || !*home) return 1;

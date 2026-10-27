@@ -184,12 +184,15 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 ## Found on this game
 
+- **Resolved build guard and cache isolation; rendering cause open:** [Tested tools and compiler-specific shader caches](../../../docs/reference/shaders.md#tested-tools-and-compiler-specific-shader-caches).
+
 General host changes first needed here; each applies to every game:
 
 - **Shared performance work, checked independently of prewarm data:** [CPU deswizzle copies use slice and row offsets](../../../docs/reference/nvn-objects.md#cpu-deswizzle-copies-use-slice-and-row-offsets) and [Host symbol indexes avoid repeated name scans](../../../docs/reference/services.md#host-symbol-indexes-avoid-repeated-name-scans). [PR #261](https://github.com/seedds/nxnative/pull/261) reports M2 iPad Pro gameplay on update 1.9.0; local verification covers synthetic correctness and CPU microbenchmarks, without a new game/device run.
 - **Final #158/#213 gameplay validation:** [Current results](#final-synchronization-and-pass-validation-2026-10-26-current) distinguish the retained pass savings from the timing gains not demonstrated on this Mac.
 
 - **Resolved: the IPA omitted pulling libraries with `pso_mtl4 on`, and explicitly including them failed under macOS Bash 3.2.** See [Pulling vertex inputs](../../../docs/reference/rendering.md#pulling-vertex-inputs).
+- **Resolved: no rumble on Xbox and DualShock 4-style controllers (Mac)** (`haptics_apple.m`): [Controller haptic engines without advanced players](../../../docs/reference/services.md#controller-haptic-engines-without-advanced-players), [DualShock 4 rumble through its effects report](../../../docs/reference/services.md#dualshock-4-rumble-through-its-effects-report). The charged attack's 0.07 is still not felt on an Xbox controller's motors (open there).
 - **Upscaling in the present** (`fx_encode`, `DM_PRESENT_UPSCALE`): [The present upscales through MetalFX](../../../docs/reference/rendering.md#the-present-upscales-through-metalfx).
 - **Thermal cap; resolved movie recovery and acquire/present races** (`thermal_capped`, `DM_THERMAL_CAP`): [A thermally serious iPhone holds 30 fps](../../../docs/reference/frame-rate.md#a-thermally-serious-iphone-holds-30-fps).
 - **Resolved in the host: frame-step recovery after a 30 fps cap**: [The frame step after a 30 fps cap ends](../../../docs/reference/frame-rate.md#the-frame-step-after-a-30-fps-cap-ends). Modelled with the measured iPhone GPU times; recovery on the device has not been observed here.

@@ -5,6 +5,7 @@ import Combine
 struct Setting: Decodable, Identifiable {
     let env, kind, label, note, def: String
     let section: String?   // heading on the settings screen; absent in older bundles
+    let needs: String?     // "<VAR>=<value>": a sub-setting, drawn only while that setting has that value
     let options: [[String]]?   // choice: [value, label]
     let min, max, step: Double?   // range
     let on, off: String?   // toggle: the values the variable takes (1 / 0 when not given)
@@ -25,7 +26,7 @@ struct Setting: Decodable, Identifiable {
         default: return true
         }
     }
-    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, options, min, max, step, on, off }
+    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, options, min, max, step, on, off }
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
 
@@ -50,6 +51,16 @@ final class LauncherModel: ObservableObject {
     var sections: [String] {
         settings.reduce(into: []) { if !$0.contains($1.sectionTitle) { $0.append($1.sectionTitle) } }
     }
+    // A row with "needs" is a sub-setting of the row it names: drawn only while that setting has that value, so a
+    // setting that cannot do anything is not offered (an upscaler's detail with the upscaler off, rumble strength
+    // with rumble off). A row naming a setting this game does not have stays drawn, as it has nothing to hide behind
+    func visible(_ s: Setting) -> Bool {
+        guard let n = s.needs, let eq = n.firstIndex(of: "=") else { return true }
+        let key = String(n[n.startIndex..<eq]), want = String(n[n.index(after: eq)...])
+        guard let v = values[key] else { return true }
+        return v == want
+    }
+    func rows(in section: String) -> [Setting] { settings.filter { $0.sectionTitle == section && visible($0) } }
     var changed: Bool { settings.contains { !fromFile.contains($0.env) && !$0.isDefault(values[$0.env] ?? $0.def) } }
 
     // Reset every launcher choice to the game's defaults; an env file's values stay.

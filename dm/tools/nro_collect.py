@@ -8,8 +8,9 @@ The game passes nn::ro::LoadModule the NRO's bytes; the host finds the rewritten
 Where: a loose file whose bytes at +0x10 are NRO0 (Hades and Hades II ship their EOS SDK so); the .nro files among the current files of an archive with an index (Super Smash Bros. Ultimate's data.arc,
 read by dm/gfx/tools/smash_arc.py: 98 NROs, while the NRRs of every older release also register 666 superseded copies the archive still holds, which are left out); else a scan of the
 other RomFS files for stored NROs and zstd frames that inflate to one (on data.arc: all 764 registered hashes in 7 minutes)."""
-import hashlib, mmap, os, struct, sys
+import hashlib, struct, sys
 from multiprocessing import Pool
+from romfs import os, open, mmap
 
 ZMAGIC = b'\x28\xb5\x2f\xfd'
 

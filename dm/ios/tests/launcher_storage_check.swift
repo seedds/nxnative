@@ -32,6 +32,13 @@ import Foundation
         expect(d.string(forKey: "launcher.DM_PSO_MTL4") == nil && m.values["DM_PSO_MTL4"] == "1", "Reset clears performance choices and shows the defaults")
         expect(d.string(forKey: "launcher.DM_FPS_TARGET") == nil && m.values["DM_FPS_TARGET"] == file.settings.first { $0.env == "DM_FPS_TARGET" }!.def, "Reset also clears game choices")
         expect(m.values["DM_METAL_HUD"] == "1" && !m.changed, "Reset leaves the env file's value; nothing left to reset")
+        // Sub-settings: a row with "needs" is drawn only while the setting it names has that value
+        m.values["DM_RUMBLE"] = "1"
+        expect(m.rows(in: "Controls").contains { $0.env == "DM_RUMBLE_GAIN" }, "a sub-setting is drawn while its setting is on")
+        m.values["DM_RUMBLE"] = "0"
+        expect(!m.rows(in: "Controls").contains { $0.env == "DM_RUMBLE_GAIN" }, "a sub-setting is hidden while its setting is off")
+        expect(m.rows(in: "Controls").contains { $0.env == "DM_RUMBLE" }, "the setting it depends on stays drawn")
+        m.values["DM_RUMBLE"] = "1"
         print("launcher storage: \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }

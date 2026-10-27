@@ -126,25 +126,35 @@ int main(void) {
     // Scenario 3: the device stops calling back while the output plays (iOS does this when another audio session takes over, without telling the AudioUnit). 20 blocks of 100 ms; at 150 ms the AudioUnit is stopped behind the host's back.
     // Expected: the watchdog sees no callback for 200 ms, the silent sink takes over (all 20 blocks still released in order, about 2 s plus the 200-250 ms gap), and the AudioUnit is restarted 1 s later and calls back again
     // Allow 5 s for scheduling and AudioUnit stop/start delays on virtual CI Macs; buffer order, the playback lower bound and resumed callbacks still have to hold.
+    // The virtual output of a CI Mac can also pause by itself for more than 200 ms after the restart: the watchdog then rightly stands the silent sink in again and retries 1 s later, which can fall after the
+    // last release (CI: "AudioUnit restarted", a second "has not called back for 204 ms", then Close 1 s later, "calling back again=0"). So the backend is followed on every poll until a restarted AudioUnit
+    // has called back, up to 20 s (the watchdog's back-off of 1, 2, 4 s fits), instead of being read once 100 ms after the last release; it still fails when no restarted AudioUnit ever calls back
     char out3[64]; gbuf b3[20]; static int16_t pcm3[20][4800 * 2]; g_sig = 0;
     if (h_au_Open(out3, ev, NULL, prm)) return 1;
     for (int i = 0; i < 20; i++) h_au_SetBuf(&b3[i], pcm3[i], sizeof pcm3[i], sizeof pcm3[i]);
     int app3 = 0; for (; app3 < 20 && h_au_Append(out3, &b3[app3]); app3++) ;
     aout *a3 = ao(out3); t0 = now_ns(); h_au_Start(out3);
-    int got3 = 0, order3 = 1, cut = 0; uint64_t cb_restart = 0;
-    while (got3 < 20 && now_ns() - t0 < 10000000000ull) {
+    int got3 = 0, order3 = 1, cut = 0, standins = 0, sink = 0, restarted = 0, back = 0; uint64_t cb_restart = 0; double total3 = 0;
+    while (!(got3 == 20 && back) && now_ns() - t0 < 20000000000ull) {
         uint64_t ms = (now_ns() - t0) / 1000000;
         if (!cut && ms >= 150) { AudioOutputUnitStop(a3->au); cut = 1; }
-        pthread_mutex_lock(&g_aos_lock); if (cut && !cb_restart && a3->backend == BK_AU && ms > 400) cb_restart = atomic_load(&a3->cb_n); pthread_mutex_unlock(&g_aos_lock);
-        gbuf *r = h_au_Released(out3);
+        // The watchdog changes the backend under g_aos_lock, and a restart comes at least 1 s after the silent sink stood in, so a 1 ms poll sees every stand-in and every restart
+        pthread_mutex_lock(&g_aos_lock);
+        if (cut && a3->backend == BK_NULL && a3->stalled) { standins += !sink; sink = 1; restarted = 0; }
+        else if (standins && a3->backend == BK_AU && !a3->stalled) {
+            uint64_t n = atomic_load(&a3->cb_n); sink = 0;
+            if (!restarted) { restarted = 1; cb_restart = n; } else if (n > cb_restart) back = 1;   // callbacks counted after the restart was seen
+        }
+        pthread_mutex_unlock(&g_aos_lock);
+        gbuf *r = got3 < 20 ? h_au_Released(out3) : NULL;
         if (!r) { usleep(1000); continue; }
-        order3 &= r == &b3[got3]; got3++;
+        order3 &= r == &b3[got3];
+        if (++got3 == 20) total3 = (now_ns() - t0) / 1e6;
         if (app3 < 20) h_au_Append(out3, &b3[app3++]);
     }
-    double total3 = (now_ns() - t0) / 1e6; usleep(100000);
-    pthread_mutex_lock(&g_aos_lock); int back = a3->backend == BK_AU && !a3->stalled; uint64_t cb_end = atomic_load(&a3->cb_n); pthread_mutex_unlock(&g_aos_lock);
+    double waited3 = (now_ns() - t0) / 1e6;
     h_au_Close(out3);
-    int ok3 = got3 == 20 && order3 && total3 > 1900 && total3 < 5000 && back && cb_restart && cb_end > cb_restart;
-    printf("device stall: released %d/20 in order=%d in %.0f ms (expected 1900-5000), AudioUnit restarted and calling back again=%d %s\n", got3, order3, total3, back && cb_restart && cb_end > cb_restart, ok3 ? "✓" : "✗");
+    int ok3 = got3 == 20 && order3 && total3 > 1900 && total3 < 5000 && back;
+    printf("device stall: released %d/20 in order=%d in %.0f ms (expected 1900-5000), AudioUnit restarted and calling back again=%d (silent sink stood in %d times, %.0f ms) %s\n", got3, order3, total3, back, standins, waited3, ok3 ? "✓" : "✗");
     return !ok3;
 }

@@ -210,7 +210,7 @@ class PassthroughCompiler(unittest.TestCase):
             for t, job in enumerate(jobs):
                 with self.subTest(topology=t):
                     spv = work / f'pass{t}.spv'; dmsh_geometry.flatten_sets(spv)
-                    r = subprocess.run(['spirv-cross', '--msl', '--msl-version', '20300', '--msl-argument-buffers',
+                    r = subprocess.run([str(Path(__file__).resolve().parents[1] / 'tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers',
                                         '--msl-texture-buffer-native', str(spv)], capture_output=True, text=True)
                     self.assertEqual(r.returncode, 0, r.stderr)
                     src = dmsh_geometry.capture_input(dmsh_geometry.topology_pointer(r.stdout))

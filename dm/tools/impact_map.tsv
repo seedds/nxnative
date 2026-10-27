@@ -21,9 +21,11 @@ dm/games/*/usage.tsv	-	a usage manifest
 dm/games/*	profile	one game's profile
 scripts/build_ipa_from_nsp.py	*:*	packing: every game's build
 scripts/bench.py	-	the benchmark
+scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
 dm/tools/usage.py	-	the usage manifests
 dm/tools/impact_map.tsv	-	this map
+dm/tools/lint_python_baseline.tsv	-	the lint baseline
 dm/gfx/nvn/*	api:nvn	NVN on Metal: every NVN game
 dm/gfx/nvn/dmsh_chain.h	shader:stage:*	the chain version: every game's NVN shader libraries
 dm/gfx/nvn/nvn_mtl.m:atomic|imga	shader:image_atomic*	image atomics on Metal
@@ -60,6 +62,9 @@ dm/gfx/tools/dmsh_geometry.py	shader:stage:gs	geometry shaders
 dm/gfx/tools/dmsh_facts.py	shader:stage:*	the translator's answer table
 dm/gfx/tools/dmsh_chain.*	shader:stage:*	the chain version: every NVN game's libraries are rebuilt
 dm/gfx/tools/dmsh_mtlcache.py	shader:stage:*	the Metal compile cache
+dm/gfx/tools/own_compilers.py	shader:stage:*	the tested-compiler build guard
+dm/gfx/tools/dmsh_dryrun.py	shader:stage:*	the standalone shader conversion check
+dm/gfx/tools/spirv_cross_bin/*	api:*	the pinned SPIRV-Cross used by every graphics API
 dm/gfx/tools/dmsh_xlate/*	shader:stage:*	the translator's driver
 dm/gfx/tools/dmsh_xlate_bin/*	shader:stage:*	fallback: the translator binary, when its sources are not in the range
 dm/third_party/ryujinx/*/InstEmitSurface.cs	shader:image_atomic*	surface instructions: image loads, stores and atomics
@@ -78,6 +83,19 @@ dm/gfx/tools/shader_split.py	shader:stage:*	the shader tables (after a split)
 dm/tools/patch_nso.py	*:*	the rewriter: every game's code
 dm/tools/nso_*.py	*:*	the rewriter: every game's code
 dm/tools/sdk_patches.py	*:*	the SDK modules' patches (by build ID)
+dm/tools/romfs_image.py	*:*	RomFS image packing: every game's files
+dm/tools/romfs.py	*:*	RomFS image input: every game's build tools
+dm/tools/nro_collect.py	*:*	NRO discovery from game resources during packing
+dm/tools/nx_extract/*	*:*	NSP extraction: every game's resource inputs
+dm/mac/launcher.c	*:*	Mac app resource discovery and host launch
+dm/mac/pack_app.py	*:*	Mac app packaging: every game's bundled resources
+dm/gfx/tools/cpk.py	shader:stage:*	CRI archive input to shader scanning
+dm/gfx/tools/mvgl.py	api:gl	MVGL archive input to OpenGL shader scanning
+dm/gfx/tools/smash_arc.py	*:*	Smash archive input to shader and NRO scanning
+dm/gfx/tools/uepak.py	shader:stage:*	Unreal archive input to shader scanning
+dm/host/romfs_image.h	hle:*fs*	RomFS image index validation shared by mounts and iOS startup
+dm/host/hle_fs.c	hle:*fs*	filesystem mounts, paths and file operations
+dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization
 dm/host/hle_svc.c	svc:*	SVCs
 dm/host/thread.c	svc:*	threads

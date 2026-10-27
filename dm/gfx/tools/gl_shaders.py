@@ -23,8 +23,11 @@
 # <TAB> where it came from
 # Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
 import concurrent.futures as cf, hashlib, json, os, re, subprocess, sys, tempfile
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
+from romfs import os, open
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mvgl
+from dmsh_chain import SPIRV_CROSS   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
 
 VEC_TYPES = {'float', 'vec2', 'vec3', 'vec4', 'int', 'ivec2', 'ivec3', 'ivec4', 'uint', 'uvec2', 'uvec3', 'uvec4', 'bool', 'mat2', 'mat3', 'mat4'}
 
@@ -63,7 +66,8 @@ def sources(roots):
                         st = 'vert' if nm.endswith('_vp.shad') else 'frag' if nm.endswith('_fp.shad') else None
                         yield text_of(a.read(nm)), st, f'/{os.path.relpath(p, r)}:{nm}'
                 elif fn.endswith(('.vert', '.frag')):
-                    yield text_of(open(p, 'rb').read()), fn.rsplit('.', 1)[1], '/' + os.path.relpath(p, r)
+                    with open(p, 'rb') as f: source = text_of(f.read())
+                    yield source, fn.rsplit('.', 1)[1], '/' + os.path.relpath(p, r)
 
 # NVIDIA's GLSL compiler accepts more than the GLSL ES 3.20 specification, and glslang does not; these fix-ups run on the preprocessed text (glslang -E, so macros are expanded):
 #   · the GLSL ES 1.0 texture functions (89 of Digimon's fragment shaders call textureCube; with -V glslang reads textureCube as Vulkan's texture type, so a macro cannot rename it);
@@ -109,8 +113,8 @@ def translate(src, stage, key, tmp):
     open(g, 'w').write(fixups(pre))
     r = subprocess.run(['glslangValidator', '-V', '-R', '--aml', '--amb', '-S', stage, g, '-o', spv], capture_output=True, text=True)
     if r.returncode: return 'glslang: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
-    refl = json.loads(subprocess.run(['spirv-cross', spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
-    cmd = ['spirv-cross', spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
+    refl = json.loads(subprocess.run([SPIRV_CROSS, spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
+    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
     if stage == 'vert': cmd.append('--fixup-clipspace')
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: return 'spirv-cross: ' + r.stderr.strip()[:300]
@@ -190,7 +194,7 @@ def main():
         tsv = ['# GL shaders (dm/gfx/tools/gl_shaders.py): key = sha256(GLSL source)[:16], Metal function gl_<key>_v / gl_<key>_f; a: vertex inputs, u: default uniform block members '
                '(offset:type:count:stride), b: the block (slot:size), t: combined samplers (slot:type), o: fragment outputs',
                '# ' + ' '.join(subprocess.run(['glslangValidator', '--version'], capture_output=True, text=True).stdout.split()[:3]) + '; spirv-cross '
-               + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run(['spirv-cross', '--revision'], capture_output=True, text=True)).split())]
+               + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
         tsv += [f'{k[0]}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
         dirs = [(os.path.join(out, 'gl'), 'macosx', [])]
         if ios: dirs.append((os.path.join(ios, 'gl'), 'iphoneos', ['-mios-version-min=18.0', '-fmetal-math-mode=relaxed']))   # relaxed as in vk_shaders.py and ios_metal.py: no NaN / Inf assumption on the iPhone's GPU compiler

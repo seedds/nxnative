@@ -274,13 +274,13 @@ class SplitShaders(Base):
         for f in ('dm/gfx/tools/shader_split.py', 'dm/gfx/tools/dmsh_chain.lock', 'dm/games/game.py', 'dm/ios/tools/ios_metal.py'):
             p = self.repo / f; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('v1')
         self.pkg = self.tmp / 'work/shader/pkg'; self.logs = self.tmp / 'logs'; self.logs.mkdir()
-        self.splits, self.rows = 0, 'derived'
+        self.splits, self.rows, self.log = 0, 'derived', 'shaders: 3 (3 vertex)\n'
         cm = mock.patch.object(nsp, 'run', self.split); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
     def split(self, cmd, log, env=None, cwd=None, on_line=None):   # shader_split.py: the package and the four tables, deterministic for the same rows
         self.splits += 1; self.last_cmd = cmd; out = Path(cmd[4]); out.mkdir(parents=True); (out / 'main.bin').write_bytes(self.rows.encode())
         for n, t in zip(self.NAMES, cmd[5:]): Path(t).write_text(self.table(n))
-        Path(log).write_text('shaders: 3 (3 vertex)\n')
+        Path(log).write_text(self.log)
 
     def table(self, n): return self.tables[n] if hasattr(self, 'tables') else f'# split header\n{n}\t{self.rows}\n'
 
@@ -409,6 +409,16 @@ class SplitShaders(Base):
         self.assertEqual(g.table('shader_map.tsv').read_text(), self.table('shader_map.tsv'))
         self.go(g); self.assertEqual(self.splits, 2)
 
+    def test_unreadable_files_are_reported(self):   # the split leaves out a file no reader reads and goes on: a provisional build says so and packs, a registered profile stops
+        self.log = '[RED] 2 file(s) could not be read, their shaders are left out (first: /a.dict: not in the layout)\nshaders: 3 (3 vertex)\n'
+        g, said = self.own(), []
+        with mock.patch.object(nsp, 'say', said.append): self.go(g)
+        self.assertEqual(len([m for m in said if m.startswith('[RED] 2 file(s) could not be read')]), 1)
+        self.go(g); self.assertEqual(self.splits, 1)
+        self.assertIn('2 file(s) unreadable', nsp.PROG.end.call_args[0][0])   # the reused split still names them
+        for n in self.NAMES[:3]: (self.src / n).write_text(self.table(n))
+        with self.assertRaisesRegex(nsp.BuildError, r'^2 file\(s\) could not be read'): self.go(game.Game(self.src), own=False)
+
     def test_mode_is_in_the_key(self):   # the same files split as an own profile, then checked against them as a registered one
         g = self.own(); self.go(g)
         self.assertEqual(self.go(g, own=False), nsp.package_key(self.pkg)); self.assertEqual(self.splits, 2)
@@ -480,6 +490,7 @@ class MacApp(Base):
     def test_packer_reports_reuse_and_first_pack_steps(self):
         t = self.tmp; out = t / 'Game.app'; packs = []
         def pack(cmd, log, env=None, on_line=None):
+            if not on_line: return   # the launcher settings (dm/games/settings.py)
             packs.append(cmd)
             (out / 'Contents/MacOS').mkdir(parents=True, exist_ok=True)
             (out / 'Contents/MacOS/dmhost').write_bytes(b'host')

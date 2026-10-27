@@ -4,11 +4,14 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 source = Path(__file__).resolve().parents[1] / 'tools/dmsh_build.py'
+sys.path.insert(0, str(source.parent))
+from dmsh_chain import SPIRV_CROSS  # noqa: E402
 tree = ast.parse(source.read_text())
 nodes = [n for n in tree.body if
          isinstance(n, ast.FunctionDef) and n.name in ('spv_single_lane', '_ep_drop') or
@@ -54,7 +57,7 @@ OpFunctionEnd
 '''
 
 
-@unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val') and shutil.which('spirv-cross'), 'requires SPIR-V tools')
+@unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val') and shutil.which(SPIRV_CROSS), 'requires SPIR-V tools')
 class SubgroupTests(unittest.TestCase):
     def test_mask_component_pointer_becomes_valid_constant_extraction(self):
         for access in ('OpAccessChain', 'OpInBoundsAccessChain'):
@@ -66,7 +69,7 @@ class SubgroupTests(unittest.TestCase):
                 self.assertTrue(scope['spv_single_lane'](spv))
                 result = subprocess.run(['spirv-val', '--target-env', 'spv1.3', str(spv)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                result = subprocess.run(['spirv-cross', '--msl', str(spv)], capture_output=True, text=True)
+                result = subprocess.run([SPIRV_CROSS, '--msl', str(spv)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn('simd_', result.stdout)
                 self.assertFalse(scope['spv_single_lane'](spv))

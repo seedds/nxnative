@@ -92,7 +92,7 @@ class PackReuse(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix='pack-reuse-', dir=TEST_ROOT)).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         t = self.tmp
-        for d in ('patched', 'romfs/empty', 'msl', 'profile', 'font', 'aoc/1', 'pso', 'bin', 'sdk', 'source'):
+        for d in ('patched', 'romfs/empty', 'msl', 'profile', 'font', 'aoc/1', 'pso', 'bin', 'sdk', 'source', 'host', 'tools'):
             (t / d).mkdir(parents=True)
         files = {
             'dmhost': b'host', 'patched/main.patched.bin': b'code', 'patched/main.fixups.tsv': b'fixups',
@@ -101,6 +101,7 @@ class PackReuse(unittest.TestCase):
             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
+            'host/romfs_image.h': b'validator', 'tools/romfs.py': b'reader',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
         for n, content in files.items(): (t / n).write_bytes(content)
@@ -194,6 +195,17 @@ class PackReuse(unittest.TestCase):
                 p.with_name('added').write_bytes(b'new'); self.assert_repacked()
                 p.with_name('added').rename(p.with_name('renamed')); self.assert_repacked()
         (self.tmp / 'romfs/new-empty').mkdir(); self.assert_repacked()
+
+    def test_image_is_copied_once_and_its_changes_invalidate_reuse(self):
+        import romfs_image
+        source = self.tmp / 'romfs'; image = self.tmp / 'RomFS.img'
+        romfs_image.pack(source, image); self.args.romfs = str(image)
+        self.pack(); self.assert_reused()
+        resources = Path(self.args.out) / 'Contents/Resources'
+        self.assertEqual((resources / 'romfs.img').read_bytes(), image.read_bytes())
+        self.assertFalse((resources / 'romfs').exists())
+        (source / 'marker').write_text('new bytes'); romfs_image.pack(source, image)
+        self.assert_repacked()
 
     def test_all_metadata_sign_identity_and_selected_paths_invalidate(self):
         self.pack()
@@ -339,6 +351,7 @@ class App(unittest.TestCase):
         (t / 'aoc/1/x').write_bytes(b'dlc')
         (t / 'pso').mkdir(); (t / 'pso/applegpu_g14s.mtl4a').write_bytes(b'arch'); (t / 'pso/prebuilt.tsv').write_text('chain\t0123456789ab\n'); (t / 'pso/key.x').write_text('not for the app')
         (t / 'env.txt').write_text('# baked in\nDM_BAKED=1\nDM_BOTH=bundle\n')
+        (t / 'launcher.json').write_text('{"game": "x", "settings": []}\n')
         subprocess.run(['sips', '-s', 'format', 'jpeg', '-z', '256', '256', '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericApplicationIcon.icns',
                         '--out', t / 'icon.jpg'], check=True, capture_output=True)
         (t / 'bin/osascript').write_text('#!/bin/sh\necho "$@" > "$HOME/alert.txt"\nprintf "%s\\0" "$@" > "$HOME/alert.args"\n'
@@ -346,7 +359,7 @@ class App(unittest.TestCase):
         (t / 'bin/osascript').chmod(0o755)
         cls.app = t / 'Game - Test.app'
         cls.args = pack_app.parse([str(cls.app), '--host', str(t / 'dmhost'), '--patched', str(t / 'patched'), '--romfs', str(t / 'romfs'), '--msl', str(t / 'cache/b-0123456789ab'),
-                                   '--tables', str(t / 'profile'), '--font', str(t / 'font'), '--aoc', str(t / 'aoc'), '--pso', str(t / 'pso'), '--env-file', str(t / 'env.txt'), '--title-id', TID.lower(),
+                                   '--tables', str(t / 'profile'), '--font', str(t / 'font'), '--aoc', str(t / 'aoc'), '--pso', str(t / 'pso'), '--env-file', str(t / 'env.txt'), '--settings', str(t / 'launcher.json'), '--title-id', TID.lower(),
                                    '--name', 'Game: Test', '--version', '1.0.1', '--lang', 'fr', '--marker', 'region_common/audio/edward.bfsar', '--icon', str(t / 'icon.jpg'),
                                    '--category', 'public.app-category.games'])
         with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(cls.args)
@@ -371,7 +384,7 @@ class App(unittest.TestCase):
         self.assertFalse(self.app.with_name(self.app.name + '.partial').exists())
         self.assertEqual(sorted(p.name for p in (c / 'MacOS').iterdir()), ['dmhost', 'nxnative'])
         self.assertEqual(sorted(p.name for p in (c / 'Resources/dm').iterdir()),
-                         ['c1_full.tsv', 'env.txt', 'font', 'main.cuts.tsv', 'main.fixups.tsv', 'main.gates.tsv', 'main.obs.tsv', 'main.patched.bin', 'pso_manifest.tsv', 'pso_pairs.tsv',
+                         ['c1_full.tsv', 'env.txt', 'font', 'launcher.json', 'main.cuts.tsv', 'main.fixups.tsv', 'main.gates.tsv', 'main.obs.tsv', 'main.patched.bin', 'pso_manifest.tsv', 'pso_pairs.tsv',
                           'shader_map.tsv', 'shader_pairs.tsv'])   # the shader pairs: the pipeline prebuild's, without which hybrid draws have no stand-in
         self.assertEqual([p.name for p in (c / 'Resources/msl').iterdir()], ['b-0123456789ab'])   # the libraries only, not the compile cache
         self.assertEqual(sorted(p.name for p in (c / 'Resources/msl/b-0123456789ab').iterdir()), ['inputs.tsv', 'k_b.json', 'k_b.metallib'])
@@ -534,11 +547,13 @@ class Script(unittest.TestCase):
         self.assertEqual(nsp.mac_app_name('AC/DC'), 'AC - DC'); self.assertEqual(nsp.mac_app_name(':'), 'nxnative')
 
     def pack_cmd(self, gfx, **kw):
-        ran, tmp = [], Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.said = []
+        ran, tmp = [], Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.said = []; self.settings_env = {}
         if kw.get('work'): tmp = kw['work']
         out = tmp / 'G.app'; shutil.rmtree(out, ignore_errors=True)
         def fake_run(cmd, log, env=None, cwd=None, on_line=None):
             ran.append([str(c) for c in cmd])
+            if str(cmd[1]).endswith('dm/games/settings.py'):   # the launcher settings, before the packer
+                self.settings_env = env; Path(cmd[-1]).write_text('{}'); return
             if not on_line:   # pso_offline.py: its archive, or none when every eligible pair has function constants
                 o = Path(cmd[cmd.index('--out') + 1]); o.mkdir(parents=True, exist_ok=True)
                 if not kw.get('no_bases'): (o / f'{cmd[cmd.index("--gpu") + 1]}.mtl4a').write_bytes(b'arch')
@@ -552,7 +567,8 @@ class Script(unittest.TestCase):
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
                         kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''))
-        self.pso_cmd = ran[0] if len(ran) > 1 else None   # pso_offline.py, before the packer
+        self.pso_cmd = next((c for c in ran if c[1].endswith('pso_offline.py')), None)   # before the packer
+        self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
 
     def test_pack_command(self):
@@ -566,6 +582,9 @@ class Script(unittest.TestCase):
                          (str(tmp / 'shader/cache/b-0123456789ab'), str(tmp / 'ex/RomFS'), str(tmp / 'profile'), TID, '-', 'a/b'))
         self.assertNotIn('--aoc', o); self.assertNotIn('--icon', o)
         self.assertNotIn('--pso', o)   # no shader pairs: no pipeline archive
+        self.assertEqual(o['--settings'], str(tmp / 'app/launcher.json'))   # the launcher settings the Mac front end reads, without the iPhone's own switches
+        self.assertEqual(self.settings_cmd[2:], ['01008CF01BAAC000', str(tmp / 'patched'), str(tmp / 'ex/control.nacp'), str(tmp / 'app/launcher.json')])
+        self.assertEqual((self.settings_env['SETTINGS_PLATFORM'], self.settings_env['GFXAPI'], self.settings_env['DM_LANG']), ('mac', 'nvn', 'en-US'))
         o, tmp = self.pack_cmd('vulkan', aoc=Path('/x/aoc'), sign='Developer ID Application: X (T)')
         self.assertEqual((o['--msl'], o['--aoc'], o['--sign']), (str(tmp / 'shader/vk'), '/x/aoc', 'Developer ID Application: X (T)'))
 

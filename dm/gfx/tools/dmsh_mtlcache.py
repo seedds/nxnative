@@ -4,13 +4,12 @@
 # the same MSL with the same flags gives a byte-identical metallib (checked for macOS and iOS), which is what makes reuse safe.
 # Layout: <cache>/<target>/<2 hex>/<digest>.metallib, digest = sha256 over FORMAT, the target's compile convention (the record written into json chain_metal),
 # the compiler's identity (metal / metallib --version without the install path, the SDK version and build) and the MSL bytes.
-# Filling from earlier builds: a Mac b-<chain>/ folder holds <key>_b.metal (the exact source that was compiled) beside <key>_b.metallib, and the iOS b-<chain>/ folder
-# of the same chain holds the iOS libraries of the same sources. A folder is taken only when its json chain_metal is the current convention and a fresh compile of
-# a few of its shaders (two per stage) reproduces their libraries byte for byte; each folder is read once (filled.json remembers it by its number of libraries).
+# Filling from earlier builds: every imported library must record the current compiler identity and flags in its reflection. Legacy libraries without that identity are not imported.
+# A fresh compile of two shaders per stage also checks their bytes. Each folder is read once per compiler identity (filled.json remembers its number of libraries).
 # Not part of the chain version (dmsh_chain.py): the cache never changes an output, it only skips recompiling one. Change FORMAT when what it stores changes.
 import os, re, json, shutil, ctypes, hashlib, threading, subprocess, collections
 
-FORMAT = b'dmsh_mtlcache 1'
+FORMAT = b'dmsh_mtlcache 2'   # earlier prefill could misclassify an unsampled library from another compiler
 _clonefile = getattr(ctypes.CDLL(None, use_errno=True), 'clonefile', None)   # APFS copy-on-write copy (no data written); elsewhere a plain copy
 
 
@@ -37,6 +36,9 @@ class Cache:
         d = hashlib.sha256(self.ident[target] + b'\0' + src).hexdigest()
         return os.path.join(self.root, target, d[:2], d + '.metallib')
 
+    def with_compiler(self, target, refl):
+        return dict(refl, chain_metal=self.targets[target][1], chain_compiler=self.ident[target].hex())
+
     def count(self, what, n=1):
         with self.lock: self.stats[what] += n
 
@@ -59,10 +61,11 @@ class Cache:
     def _check(self, target, d, stems, mac_dir):
         """None if folder d was built with the current convention and compiler, else why not"""
         rec, picks = self.targets[target][1], collections.defaultdict(list)
-        for stem in stems[::max(1, len(stems) // 24)]:
+        for stem in stems:
             try: j = json.load(open(os.path.join(d, stem + '.json')))
             except (OSError, ValueError): return f'no readable {stem}.json'
             if j.get('chain_metal') != rec: return f'built with "{j.get("chain_metal")}"'
+            if j.get('chain_compiler') != self.ident[target].hex(): return f'{stem} has a different or unrecorded Metal compiler'
             if len(picks[j.get('stage')]) < 2: picks[j.get('stage')].append(stem)
         for stem in (s for v in picks.values() for s in v):
             tmp = os.path.join(self.work, f'mtlcache-check-{target}.metallib')
@@ -82,7 +85,7 @@ class Cache:
         for target, d in (('mac', mac_dir), ('ios', ios_dir)):
             if target not in self.targets or not d or not os.path.isdir(d): continue
             libs = names if d == mac_dir else set(os.listdir(d))
-            have = [s for s in stems if s + '.metallib' in libs]; key = os.path.realpath(d)
+            have = [s for s in stems if s + '.metallib' in libs]; key = self.ident[target].hex() + ':' + os.path.realpath(d)
             if not have or stamps.get(key) == len(have): continue
             why = self._check(target, d, have, mac_dir)
             if why: notes.append(f'Metal cache: not filled from {d}: {why}')

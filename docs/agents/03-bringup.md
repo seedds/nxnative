@@ -21,7 +21,7 @@ $W/run/boot.sh <log name> [seconds] [VAR=value ...]
 | `[longframe]` | A long frame, with submit / GPU / pipeline / upload breakdown |
 | `memory up to frame N: resident … GPU allocated …` | Memory report (RSS, Metal allocated size). Printed when memory moves; steady growth here is a leak. A watchdog exits at 24 GB. Also: memory pools and how many are resident (pools join the residency set on first GPU use), finalized pool buffers still alive, the storage-sharing texture table, and on iOS `headroom to the system memory limit` (`os_proc_available_memory`, how far the app is from being killed for memory) |
 | `CRASH sig=… pc=… lr=…` + registers + `bt:` + `stack scan` + thread dump | Crash report: see [05](05-debugging.md) |
-| `thread 0x10xx 'name' … waits:<state> addr=…` | Thread dump: what each guest thread waits on (`address` = address arbiter, `mutex` = mutex with holder, `condvar`, `sync object`, `running/not waiting` = running) |
+| `thread 0x10xx 'name' … waits:<state> addr=…` | Thread dump: what each guest thread waits on (`address` = address arbiter, `mutex` = mutex with holder, `condvar`, `sync object`, `running/not waiting` = running); a thread waiting in an SVC also gets a `guest stack:` line, the words on its guest stack that point into a module (its callers when the code keeps no frame pointers) and x19–x28 |
 
 Useful switches: `DM_FS=1` (file opens, and not-found probes), `DM_SVC=1` (memory SVCs and other syscalls), `DM_THR=1` (thread SVCs), `DM_WATCH=<s>` (dump all threads after s seconds), `DM_WATCH_STALL=<s>` (dump when the frame loop stops progressing).
 

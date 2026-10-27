@@ -186,17 +186,19 @@ def main(argv=None):
     if not text: sys.exit(f'[RED] pso_offline: no pair list ({", ".join(a.pairs)})')
     zero = a.depth == 'zero'
     t0 = time.time()
-    bases, rest, left = plan(lib_dir, chain, read_pairs(text), zero)
+    pairs = read_pairs(text)
+    bases, rest, left = plan(lib_dir, chain, pairs, zero)
     work.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
     js = work / 'bases.mtl4-json'   # metal-tt takes the format from the extension: .mtl4-json is Metal 4's (.mtlp-json is the Metal 3 format)
     body = json.dumps(script(lib_dir, bases), indent=1).encode()
     if not js.is_file() or js.read_bytes() != body: js.write_bytes(body)
     st = stamp(chain, zero, text)
-    print(f'pso_offline: {len(read_pairs(text))} pairs: {len(bases)} bases, {len(rest)} left to the device (function constants), left out as the host leaves them: '
+    print(f'pso_offline: {len(pairs)} pairs: {len(bases)} bases, {len(rest)} left to the device (function constants), left out as the host leaves them: '
           + ', '.join(f'{k} {v}' for k, v in left.items()) + f' ({time.time() - t0:.1f} s)')
     if a.script_only: (out / 'prebuilt.tsv').write_text(st); return 0
-    if not bases and not rest: sys.exit('[RED] pso_offline: no base to build')
-    if not bases: archs = []   # every eligible pair needs device specialization; clear old archives and still write the remainder list
+    if pairs and not bases and not rest: sys.exit('[RED] pso_offline: no base to build')   # pairs, but the host would leave out every one: wrong or missing libraries
+    if not pairs: print('pso_offline: no pairs (only a header): nothing to build, no archive')   # a profile whose split found no pair (GitHub issue #338)
+    if not bases: archs = []   # no pair, or every eligible pair needs device specialization; clear old archives and still write the stamp and the remainder list
     osmin = a.os_min or os_min_default(a.platform); tv = tool_version(a.platform) if bases else 'not used (function constants only)'
     inputs = (lib_dir / 'inputs.tsv').read_text() if (lib_dir / 'inputs.tsv').is_file() else ''
     libraries = library_digest(lib_dir, bases)

@@ -10,7 +10,8 @@ source "$SRCROOT/Gen/resources.env"
 APP="${TARGET_BUILD_DIR:?}/${UNLOCALIZED_RESOURCES_FOLDER_PATH:?}"
 case "$APP" in /*.app) ;; *) die "Unexpected app resource destination: $APP";; esac
 # Validate every source before copying or removing anything (the external drive may be disconnected).
-[ -e "$DM_RESOURCE_ROMFS/$DM_RESOURCE_MARKER" ] || die "Game files unavailable: $DM_RESOURCE_ROMFS/$DM_RESOURCE_MARKER"
+resource_dm=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().parents[2])' "$0")
+python3 "$resource_dm/tools/romfs.py" "$DM_RESOURCE_ROMFS" "$DM_RESOURCE_MARKER" || die "Game files unavailable: $DM_RESOURCE_ROMFS/$DM_RESOURCE_MARKER"
 [ -d "$DM_RESOURCE_SHADERS" ] || die "Shader libraries unavailable: $DM_RESOURCE_SHADERS"
 [ -z "$DM_RESOURCE_AOC" ] || [ -d "$DM_RESOURCE_AOC" ] || die "Add-on content unavailable: $DM_RESOURCE_AOC"
 DM_RESOURCE_PSO=${DM_RESOURCE_PSO:-}   # (a project prepared before the pipeline archive has none)
@@ -22,8 +23,16 @@ case "$DM_RESOURCE_MSLDIR" in b-*)
     [ "$DM_RESOURCE_MSLDIR" = "b-$V" ] || die "The prepared shaders are chain $DM_RESOURCE_MSLDIR, the sources are now at b-$V: prepare the game again (build_ipa_from_nsp.py --prepare-xcode)";;
 esac
 echo 'Copy game resources (the first build copies the complete game; later builds sync changes)'
-mkdir -p "$APP/romfs" "$APP/msl/$DM_RESOURCE_MSLDIR"
-/usr/bin/rsync -a --delete -- "$DM_RESOURCE_ROMFS/" "$APP/romfs/"
+mkdir -p "$APP/msl/$DM_RESOURCE_MSLDIR"
+# DM_COPY_ROMFS=NO: the game files stay out of the app (main.m takes Documents/romfs first, copied there once): a reinstall then sends the code and shaders, not the whole game
+if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then rm -rf "$APP/romfs" "$APP/romfs.img"
+elif [ -f "$DM_RESOURCE_ROMFS" ]; then
+    /usr/bin/rsync -a -- "$DM_RESOURCE_ROMFS" "$APP/romfs.img"
+    rm -rf "$APP/romfs"
+else
+    mkdir -p "$APP/romfs"; /usr/bin/rsync -a --delete -- "$DM_RESOURCE_ROMFS/" "$APP/romfs/"
+    rm -f "$APP/romfs.img"
+fi
 /usr/bin/rsync -a --delete -- "$DM_RESOURCE_SHADERS/" "$APP/msl/$DM_RESOURCE_MSLDIR/"
 for old in "$APP/msl/"*; do
     [ "$old" = "$APP/msl/$DM_RESOURCE_MSLDIR" ] || rm -rf "$old"

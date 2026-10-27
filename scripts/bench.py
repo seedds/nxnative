@@ -17,6 +17,8 @@ import argparse, datetime, json, math, os, re, shutil, signal, statistics, subpr
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / 'dm/tools'))
+import romfs as rfs
 
 
 def fail(msg):
@@ -78,8 +80,8 @@ def run_one(a, gid, build, var, route, out, lock):
     host = Path(var.get('host') or build / 'tools/dmhost')
     patched = Path(var.get('patched') or newest(build.glob('patched_v*')) or fail(f'no rewritten modules (patched_v*) in {build}'))
     ver = patched.name.removeprefix('patched_')
-    romfs = build / 'extract' / ver / 'RomFS'
-    if not romfs.is_dir(): romfs = newest(build.glob('extract/v*')) / 'RomFS'
+    romfs = rfs.source(build / 'extract' / ver)
+    if not romfs.is_dir(): romfs = rfs.source(newest(build.glob('extract/v*')))
     prof = build / 'profile' / gid if (build / 'profile' / gid / 'game.tsv').is_file() else REPO / 'dm/games' / gid
     out.mkdir(parents=True, exist_ok=True); save, temp = out / 'save', out / 'temp'
     shutil.rmtree(save, ignore_errors=True); shutil.copytree(a.save, save); temp.mkdir(exist_ok=True)

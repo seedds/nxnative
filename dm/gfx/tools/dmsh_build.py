@@ -21,6 +21,7 @@ GAME = dmsh_chain.load_game()   # the current game profile (DM_GAME): the tables
 if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'[RED] {dmsh_chain.HEADER} does not hold the current translation chain version {CHAIN}: run dmsh_chain.py --header first and commit it (otherwise the host cannot find these libraries)')
 INPUTS = dmsh_chain.inputs(GAME)   # the digest of the profile's inputs, which a full build stamps on its libraries (b-<V>/inputs.tsv)
 XLATE = os.environ.get('XLATE', os.path.join(dmsh_chain.XLATE_DIR, 'dmsh_xlate'))
+SPIRV_CROSS = dmsh_chain.SPIRV_CROSS   # the in-repo build the lock records
 FACTS = dmsh_facts.load()
 if not os.path.exists(dmsh_facts.TABLE): sys.exit(f'[RED] no answer table {dmsh_facts.TABLE} (it comes with the game profile; an empty table = every query answered with defaults)')
 IOSOUT = os.environ.get('IOSOUT')   # if set, also build the iOS version (iphoneos metallib + reflection) into that directory
@@ -48,6 +49,9 @@ PRE_STATS = collections.Counter()
 # Odyssey's alRenderMaterialUber took 25 minutes and 17.3 MB of GPU code, 31 s and 1.3 MB at -O1. Ordinary shaders come out within a few percent either way (the backend optimizes again)
 MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invariance']
 MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
+# The outer shader and fetch-variant caches restore compiled libraries directly,
+# before the MSL compile cache can check their compiler. Keep override builds separate there too.
+METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
 def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
     subprocess.run([*MAC_METAL, msl, '-o', air], check=True)
     subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib], check=True)
@@ -91,10 +95,10 @@ def shader_rule_source(name):
     return b''.join(inspect.getsource(f).encode() for f, applies in RULES if applies(name))
 
 def tool_fingerprint():
-    sc = subprocess.run(['spirv-cross', '--version'], capture_output=True, text=True, timeout=30)
+    sc = subprocess.run([SPIRV_CROSS, '--version'], capture_output=True, text=True, timeout=30)
     return ('lock\0' + open(dmsh_chain.LOCK).read() + '\0options\0' + dmsh_chain.options() +
             '\0xlate\0' + dmsh_chain.xlate_source_sha() + '\0spirv-cross\0' + sc.stdout + sc.stderr +
-            '\0xc\0' + repr(XC) + '\0mac\0' + MAC_RECORD + '\0ios\0' + (ios_metal.RECORD if IOSOUT else ''))
+            '\0xc\0' + repr(XC) + '\0mac\0' + MAC_RECORD + '\0ios\0' + (ios_metal.RECORD if IOSOUT else '') + '\0metal\0' + METAL_FP)
 
 # The profile keys that change how a shader is built (nvn_*, shader_*), as dmsh_chain.inputs takes them: part of every shader's cache key
 PROFILE_ROWS = dmsh_chain.profile_rows(GAME)
@@ -172,6 +176,7 @@ def bf_digest(msl, key):
     h.update(msl.encode())
     h.update(b'\0mac\0' + MAC_RECORD.encode())
     h.update(b'\0ios\0' + (ios_metal.RECORD if IOSOUT else '').encode())
+    h.update(b'\0metal\0' + METAL_FP.encode())
     h.update(b'\0bf-want\0' + (b'1' if key in BF_WANT else b'0'))
     return h.hexdigest()
 
@@ -195,9 +200,8 @@ def bf_cache_publish(digest, fmsl, maclib, ioslib, fmeta):
     atomic_json(os.path.join(root, 'fetch.json'), fmeta)
 
 def write_refl(key, refl):
-    for d, rec in ((out, MAC_RECORD),) + (((IOSOUT, ios_metal.RECORD),) if IOSOUT else ()):
-        value = dict(refl, chain_metal=rec)
-        atomic_json(os.path.join(d, key + '_b.json'), value)
+    for target, d in (('mac', out),) + ((('ios', IOSOUT),) if IOSOUT else ()):
+        atomic_json(os.path.join(d, key + '_b.json'), MTL.with_compiler(target, refl))
 
 def fetch_finish(key, src, refl):
     if refl['stage'] != 'ps': return refl
@@ -676,7 +680,7 @@ def gs_slice(spv):
     grading LUT the tone mapper reads, and without it the screen came out a flat blue). Metal has no geometry stage, so the host drops such a shader and draws with the vertex shader's
     layer entry points instead (vs_layer_entry), which write that component as the layer. Read from the SPIR-V as GLSL (SPIRV-Cross writes no MSL for a geometry stage).
     → {'loc': input location, 'comp': component} or None (any other geometry shader: one-pass cube shadows emit six transformed triangles)"""
-    r = subprocess.run(['spirv-cross', spv, '--version', '450'], capture_output=True, text=True)
+    r = subprocess.run([SPIRV_CROSS, spv, '--version', '450'], capture_output=True, text=True)
     g = r.stdout
     if r.returncode or 'layout(triangles) in;' not in g or 'layout(max_vertices = 3, triangle_strip) out;' not in g or g.count('EmitVertex();') != 3 or 'EndPrimitive' in g: return None
     ins = {m.group(2): int(m.group(1)) for m in re.finditer(r'layout\(location = (\d+)\) in vec4 (\w+)\[3\];', g)}
@@ -844,7 +848,7 @@ def geometry_finish(key, w, j, c1):
         layout = dmsh_geometry.output_layout(code, t)
         k = job['key']; spv = os.path.join(w, k + '.spv')
         dmsh_geometry.flatten_sets(spv)
-        r = subprocess.run(['spirv-cross', *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
+        r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
         src = dmsh_geometry.capture_input(dmsh_geometry.topology_pointer(precise(dmsh_atomic.check_msl(r.stdout))))
         res = json.load(open(os.path.join(w, k + '.res.json')))
@@ -857,16 +861,16 @@ def geometry_finish(key, w, j, c1):
         def save(suffix, text, meta):
             path = os.path.join(out, key + suffix + '.metal'); open(path, 'w').write(text)
             MTL.compile('mac', path, os.path.join(out, key + suffix + '.metallib'))
-            atomic_json(os.path.join(out, key + suffix + '.json'), dict(meta, chain_metal=MAC_RECORD))
+            atomic_json(os.path.join(out, key + suffix + '.json'), MTL.with_compiler('mac', meta))
             if IOSOUT:
                 MTL.compile('ios', path, os.path.join(IOSOUT, key + suffix + '.metallib'))
-                atomic_json(os.path.join(IOSOUT, key + suffix + '.json'), dict(meta, chain_metal=ios_metal.RECORD))
+                atomic_json(os.path.join(IOSOUT, key + suffix + '.json'), MTL.with_compiler('ios', meta))
         save('_bg' + str(t), src, refl)
         if t == 0:
             base = {**refl, 'key': key + '_b'}
             save('_b', src, base)
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
-            r = subprocess.run(['spirv-cross', *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
+            r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
             reader = vs_layer(vs_init(dmsh_geometry.reader(precise(dmsh_atomic.check_msl(r.stdout)))))
             analysis, full = vs_depth(reader)
@@ -894,7 +898,7 @@ def finish(key, w, j, c1):
         try: return geometry_finish(key, w, j, c1)
         except (ValueError, subprocess.CalledProcessError) as e: return 'geometry failed', str(e)[:160], None
     if j['stage'] == 'vs': spv_single_lane(os.path.join(w, key + '.spv'))   # one-lane subgroups (see spv_single_lane)
-    r = subprocess.run(['spirv-cross', *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
+    r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
     if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
     src = open(msl).read()
     if j['stage'] == 'vs':   # second pass: re-translate with inputs that are only used as integers reported as uint (see int_inputs)
@@ -904,7 +908,7 @@ def finish(key, w, j, c1):
             rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
             if rx.returncode or not os.path.exists(os.path.join(w, key + '.spv')): return 'translation failed', ('integer-input retranslation: ' + rx.stderr.strip())[:160], None
             spv_single_lane(os.path.join(w, key + '.spv'))
-            r = subprocess.run(['spirv-cross', *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
+            r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
             if r.returncode: return 'MSL failed', r.stderr.strip()[:160], None
             src = open(msl).read()
     try: src = dmsh_atomic.check_msl(src)

@@ -113,6 +113,7 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Cause:** `AllocateAddressRegion` aligns a region of 1 GB or more to 1 GB in absolute address (SDK 18: `sdk+0x13c03c`; 32 MB from 32 MB up).
 - **Fix:** a cut on that `sdk` build aligns them to 32 MB as well, beside the node-area cut (`sdk_patches.py`).
 - **Found on:**
+  - [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#memory) (1.0.0, SDK 13.3.5).
   - [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2: `sdk+0x13c03c`): the two large regions, with a 4 KB one between them, lost up to 1 GB each.
   - [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (SDK 7.3.2): 32 MB alignment for large regions on that SDK build.
   - [Advance Wars 1+2: Re-Boot Camp](../../dm/games/0100300012F2A000/README.md) (SDK 10.4.1): `AllocateAddressRegion` (`sdk+0x341030`) aligns a region of 1 GB or more to 1 GB (`+0x34109c`), as DRAGON QUEST XI S's SDK 7.3.2 build, and takes the same 32 MB cut.
@@ -163,6 +164,7 @@ The guest address space, heaps, pools, virtual address memory and the allocators
   - Pokémon Legends: Z-A: two cuts for 2.0.2 (its `patches.py` and `sdk_patches.py`) make it fit the 5 GB block Tears of the Kingdom runs in: the allocator's address space 12 GB → 4 GB (`main+0x1b3e3e4`) and the node area 1 GB → 62 MB (the AddressRegionManager constructor, `sdk+0x1423fc` and `+0x142468`, Engage's cut). SDK 19's AddressRegionManager puts the region right after the node area (+0x3fe2c000 before the cut), not 1 GB aligned as Engage's SDK did, so a 4.25 GB alias region holds both (`mem_alias 0x110000000`).
   - Paper Mario: The Thousand-Year Door: Absolum's three cuts on the `sdk` build (the AddressRegionManager constructor `sdk+0x12e0e0`: `+0x12e0f0` / `+0x12e184`; `AllocateAddressRegion`'s alignment at `+0x12e2e0`) and a cut on `main` to 4 GB of address space, as Pokémon Legends: Z-A's, put the region at alias +62 MB to +4.06 GB in Engage's 5 GB block.
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (2.0.2, SDK 19.3.11; one boot); [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md): the allocator maps 1.5 GB at boot and 2.0 GB by the arrival in Rogueport. The `sdk` build is [Celeste](../../dm/games/01002B30028F6000/README.md)'s. Absolum's malloc StandardAllocator (40 GB, cut to 2.5 GB) is in [.NET NativeAOT malloc and the GC region range](#net-nativeaot-malloc-and-the-gc-region-range).
+- **Also found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#memory) (1.0.0, SDK 13.3.5).
 - **Note:** on Pokémon Legends: Z-A, `QueryMemoryInfo` reporting more than 4 GB would take the game's big-memory path (heaps of allocatable − 4.27 GB instead of − 2.76 GB).
 
 ### Separate virtual ranges in Snowdrop's page allocator

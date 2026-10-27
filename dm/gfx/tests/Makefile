@@ -157,6 +157,13 @@ t_feedback: t_feedback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_feedback.m $(MTL_T_SRC) $(FW)
 t_rast_discard: t_rast_discard.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rast_discard.m $(MTL_T_SRC) $(FW)
+t_queue_origin: t_queue_origin.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_origin.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_queue_origin
+check_t_queue_origin: t_queue_origin
+	MTL_DEBUG_LAYER=1 ./t_queue_origin
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_queue_origin
+run: check_t_queue_origin
 run: t_rast_discard
 .PHONY: check_t_feedback
 check_t_feedback: t_feedback
@@ -266,6 +273,7 @@ run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tb
 	./t_tex_layout
 	./t_builtin
 	./t_vin
+	MTL_DEBUG_LAYER=1 ./t_float_pad
 	./t_tbuf2d
 	./t_tbuf_align
 	./t_sparse_layout
@@ -316,3 +324,8 @@ run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tb
 	MTL_DEBUG_LAYER=1 ./t_rast_discard
 	DM_GAME=$(GAME) python3 test_tbdr_budget.py
 .PHONY: run
+
+# Float32 missing components retain float padding through integer shader inputs.
+t_float_pad: t_float_pad.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)
+run: t_float_pad

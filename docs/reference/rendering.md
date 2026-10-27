@@ -342,9 +342,17 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Symptom:** text a game renders into textures for the title and the menus comes out upside down, while the scene looks right.
 - **Cause:** a game that never calls `nvnDeviceSetWindowOriginMode` keeps NVN's default, lower-left (OpenGL), where NDC y = -1 lands on a render target's first memory row. Read as upper-left, every texture the game renders and samples came out flipped and cancelled out, but not the text, and the game copies the frame with `MIRROR_Y`.
-- **Fix:** viewport and scissor rectangles, fragment coordinates, copies and texture coordinates address the same memory rows in both conventions, so the host only flips the direction inside the viewport (negative viewport height), reverses the front-face winding, and flips the window image at present and in raw screenshots (`g_origin_ll` in `nvn_mtl.m`).
+- **Fix:** viewport and scissor rectangles, fragment coordinates, copies and texture coordinates address the same memory rows in both conventions, so the host flips the direction inside the viewport (negative viewport height) and flips the window image at present and in raw screenshots (`g_origin_ll` in `nvn_mtl.m`). Facing also follows the [raster flip captured at queue initialization](#queue-initialization-captures-the-raster-origin).
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md); the six games before it all switch to upper-left.
 - **Note:** the window's Y-direction system register under this origin is open ([Open: the window Y-direction register `SR_Y_DIRECTION`](shaders.md#open-the-window-y-direction-register-sr_y_direction)); the OpenGL layer renders through this origin ([GL orientation through the lower-left origin](#gl-orientation-through-the-lower-left-origin)), and Absolum combines it with a viewport swizzle ([Viewport swizzles applied as a flipped viewport](#viewport-swizzles-applied-as-a-flipped-viewport)).
+
+### Queue initialization captures the raster origin
+
+- **Symptom:** geometry appears inside out and almost black; a fullscreen indirect-lighting triangle is entirely culled even though its vertex data and polygon state match the game.
+- **Cause:** NVN emits `SET_WINDOW_ORIGIN.FLIP_Y` into a queue's initial GPU state. `DeviceSetWindowOriginMode` only changes the device field that later viewport construction reads; it does not rewrite an existing queue's raster flip. Deriving Metal winding from the current device origin loses this distinction when the game creates a queue before changing the origin. Reversing winding globally fixes that sequence but breaks games that set their origin first.
+- **Fix:** `queue_t.origin_ll` captures the device origin in `nvnQueueInitialize`. Each submission selects that queue's raster origin under the submission lock. Metal winding uses this captured origin; viewport direction and presentation keep using the device origin. The full-coverage proof also accounts for the difference between these origins, and for a negative-Y viewport swizzle.
+- **Check:** `t_queue_origin` alternates two queues created with different origins on one device. GPU readback checks CW/CCW triangles, both current device origins, every cull mode, `front_facing`, negative-Y swizzles and the full-coverage proof: 389 checks pass with direct and deferred Metal encoding; restoring the previous winding expression fails 48. The complete Metal suite passes. Mario Wonder's full smoke route passes with the fix.
+- **Found on:** [Xenoblade Chronicles 2](../../dm/games/0100E95004038000/README.md#rendering), with native SDK initialization evidence and the comparison with Mario Wonder recorded there.
 
 ### The residency set committed before a present
 
@@ -404,6 +412,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the builder's mode now goes to the texture (`tex_t.stencil`), whose sampling view is the `X32_Stencil8` one a stencil-mode texture view already got.
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the character occlusion mask, `edbfc7a088be545e`).
 
+### Conservative rasterization remains unimplemented
+
+- **Symptom:** `[nvn] SetConservativeRasterEnable on: ignored by host for now`, followed by `[RED] NVN unimplemented function called: nvnCommandBufferSetConservativeRasterDilate`.
+- **Cause:** `hle_nvn.c` ignores the enable setter and has no implementation for the dilation setter. The requested raster coverage state never reaches Metal.
+- **Fix:** **Open.** Neither setter has been implemented. The opening indoor scene renders and accepts input, but the visual contribution of the missing coverage state has not been isolated. The diagnostic remains visible.
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#open) (1.0.0, the first playable bedroom).
+
 ## Vertex input and draws
 
 ### Integer vertex inputs
@@ -435,6 +450,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `build_ipa.sh` takes the default library inclusion from the generated `DM_GAME_PSO_MTL4` compiled into the host; `IOS_PULL=0` / `1` still overrides it. Packing options always contain `--store`, so both inclusion and exclusion work under Bash 3.2. A runtime `DM_PSO_MTL4=1` override for a profile with the path off needs an IPA built with `IOS_PULL=1` too. An IPA that packs a [pipeline archive made offline](../development.md#the-pipeline-archive-made-offline) (`pso/`) always carries the `_bp` libraries, whatever `IOS_PULL` says, since the archive's bases are made of them.
 - **Check:** `dm/gfx/tests/t_pull.m` (the words against Metal's fetch and the CPU conversion), `t_pull_inv.m` (a depth prepass with one pipeline and depth-equal with the other), `test_dmsh_pull.py`; `dm/ios/tests/test_profile_pack.py` packs tiny fixtures through the actual archive step and checks profile defaults, explicit overrides and an IPA with a pipeline archive in the ZIP.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): draws that waited for their pipeline on a cold start.
+
+### Float32 vertex padding through integer inputs
+
+- **Symptom:** a fullscreen post-process draw writes no color, then a later blur composite darkens scenery while the character remains visible.
+- **Cause:** reinterpreting Float1/2/3 as UInt1/2/3 preserves supplied bits but pads missing `w` with integer `1`. A shader that bitcasts the input back to float receives `w=1.4e-45`, rather than `1.0`, and can clip the whole draw. Float4 has no missing components.
+- **Fix:** short float32 vectors use the existing float shadow input, or CPU expansion with float `(0,0,0,1)` defaults when shadows are unavailable or disabled. Float4 keeps direct reinterpretation. `t_float_pad` checks signed/unsigned GPU fetch, CPU fallback and Float4 controls.
+- **Found on:** [Xenoblade Chronicles: Definitive Edition](../../dm/games/0100FF500E34A000/README.md) (the game profile is a separate, pending contribution).
 
 ### CPU conversion of vertex attributes the input type cannot take
 

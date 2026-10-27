@@ -4,7 +4,7 @@
 # deflate level 6, a file whose deflate is not smaller is stored (zip's rule), and names ending in a --store suffix are always stored (the profile's zip_store, compared without regard to case).
 # Speed (Info-ZIP managed about 100 MB/s on the T7): files up to BIG are read, and deflated, by a thread pool (zlib releases the GIL) while this thread writes them in order;
 # bigger files are streamed here, their CRC patched into the local header afterwards (no data descriptors). Zip64 fields wherever a size, an offset or the entry count passes its 32 / 16-bit field.
-# Usage: pack_ipa.py <out.ipa> [--store .a:.b] [--skip <archive path>]... <archive path>=<source folder>...
+# Usage: pack_ipa.py <out.ipa> [--store .a:.b] [--skip <archive path>]... <archive path>=<source file or folder>...
 #   Mappings are packed in command-line order; put the files that change least first, and the app last
 #   --skip: an archive path left out of the walk of the folder that holds it (folders a stale app build still has, the signature); a mapping of its own still adds it
 #   --skip-suffix: files whose names end so are left out of every walk (build_ipa.sh: the pulling vertex libraries _bp.metallib when the profile's pso_mtl4 is off, unless IOS_PULL overrides it)
@@ -49,7 +49,9 @@ def entries(maps, skip, skip_suffix=()):
             p = '/'.join(parts[:i])
             if p + '/' not in seen:
                 add(p + '/', None, None); parents.add(p + '/')
-        add(arc + '/', src, os.stat(src)); walk(src, arc)
+        source_stat = os.stat(src)
+        if stat.S_ISREG(source_stat.st_mode): add(arc, src, source_stat)
+        else: add(arc + '/', src, source_stat); walk(src, arc)
     return out
 
 
@@ -224,8 +226,8 @@ def prefix(es, files, infos, old, idx, apfs):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Pack an IPA (zip) from source folders mapped to archive paths, in parallel')
-    ap.add_argument('out'); ap.add_argument('maps', nargs='+', metavar='archive_path=folder')
+    ap = argparse.ArgumentParser(description='Pack an IPA (zip) from files and folders mapped to archive paths, in parallel')
+    ap.add_argument('out'); ap.add_argument('maps', nargs='+', metavar='archive_path=source')
     ap.add_argument('--store', default='', help='suffixes stored without compressing, separated by ":"')
     ap.add_argument('--skip', action='append', default=[], help='an archive path left out of the folder walk that would add it')
     ap.add_argument('--skip-suffix', action='append', default=[], help='files whose names end so are left out of every folder walk')
@@ -234,7 +236,7 @@ def main():
     maps = []
     for m in a.maps:
         arc, sep, src = m.partition('=')
-        if not sep or not arc.strip('/') or not os.path.isdir(src): sys.exit(f'[RED] pack_ipa: not <archive path>=<folder>: {m}')
+        if not sep or not arc.strip('/') or not (os.path.isdir(src) or os.path.isfile(src)): sys.exit(f'[RED] pack_ipa: not <archive path>=<file or folder>: {m}')
         maps.append((arc.strip('/'), src))
     store = tuple(s.lower() for s in a.store.split(':') if s)
     t0 = time.time()

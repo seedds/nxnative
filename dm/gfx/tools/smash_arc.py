@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Super Smash Bros. Ultimate's data.arc: the file-system table and the current file of each path (files), and a file's bytes (read). Used by shader_split.py (its shaders) and
 dm/tools/nro_collect.py (its NROs). The paths are only Hash40 values (CRC-32 of the path and its length); the extension Hash40 (crc32(b'nro') | 3 << 32) tells a file's kind."""
-import struct, sys
+import os, struct, sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
+from romfs import os, open
 
 MAGIC = struct.pack('<Q', 0xABCDEF9876543210)
 ZSTD_MAGIC = bytes.fromhex('28b52ffd')

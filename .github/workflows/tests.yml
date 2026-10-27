@@ -47,10 +47,11 @@ jobs:
       - name: Thermal cap and ThreadSanitizer (concurrent frame-cap readers)
         run: |
           make -C dm/gfx/tests GAME="$GAME" -j3 check_t_thermal thermal-tsan 2>&1 | tee logs/thermal.log
-      - name: CPU texture layout and deswizzle tests
+      - name: CPU texture layout, deswizzle and BC decode tests
         run: |
-          make -C dm/gfx/tex/tests t_tex 2>&1 | tee logs/texture-build.log
+          make -C dm/gfx/tex/tests t_tex t_bcdec 2>&1 | tee logs/texture-build.log
           dm/gfx/tex/tests/t_tex 2>&1 | tee logs/texture-tests.log
+          dm/gfx/tex/tests/t_bcdec 2>&1 | tee logs/bcdec-tests.log
       - name: CPU-only gfx tests (dm/gfx/tests)
         run: |
           mkdir -p logs

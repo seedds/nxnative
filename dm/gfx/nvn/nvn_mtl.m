@@ -20,6 +20,7 @@
 #include "nvn_mtl.h"
 #include "nvn_obj.h"
 #include "../tex/nvn_fmt_mtl.h"
+#include "../tex/nvn_bcdec.h"
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/nvn_deswizzle_gpu.h"
 #include "nvn_builtin.h"
@@ -79,6 +80,10 @@ static int g_warm_started;
 static void warm_claim(void);
 
 static id<MTLDevice> g_dev;
+// BC textures decoded on the CPU: the device cannot sample BC (supportsBCTextureCompression is NO before the A19) or DM_TEST_NO_BC=1 asks for it. Set once in mtl_init; a BC texture is then made in
+// the uncompressed format nvn_bc_unpacked names (tex_desc) and filled with decoded texels (pkg_upload_, copy_b2t)
+static int g_bc_cpu;
+static inline int bc_decoded(uint32_t nvn_format) { uint32_t pf; int bpp; return g_bc_cpu && nvn_bc_unpacked(nvn_format, &pf, &bpp); }   // a texture of this NVN format is made uncompressed and filled with decoded texels
 static NSMutableArray *g_l3_gpu_leaks;
 static int g_nvn_deswz_gpu;
 static id<MTLCommandQueue> g_q;
@@ -358,6 +363,10 @@ void mtl_init(void) {
     g_dev = MTLCreateSystemDefaultDevice();
     if (!g_dev) MDIE("no Metal device");
     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
+    // A texture made in a BC pixel format on a device without BC support comes back nil, so every BC texture of the game would be missing (black or absent surfaces on an A15 / A16). Such a device
+    // decodes them on the CPU (nvn_bcdec.c) instead; one that can sample BC keeps the compressed textures and their GPU path. DM_TEST_NO_BC=1 forces the CPU path, to try it on a Mac
+    g_bc_cpu = nvn_bc_cpu_wanted([g_dev supportsBCTextureCompression], getenv("DM_TEST_NO_BC"));
+    if (g_bc_cpu) MLOG("BC textures: %s, decoding them on the CPU (RGBA8 / RGBA16F textures, 4 to 8 times the memory of the blocks)", [g_dev supportsBCTextureCompression] ? "DM_TEST_NO_BC" : "this GPU cannot sample BC");
     g_q = [g_dev newCommandQueue];
     // A device without Metal 4 (the paravirtualized GPU of a virtual Mac, such as GitHub's macos-26 runner: no residency set, no MTL4CommandQueue) cannot run the NVN layer. The GL and
     // Vulkan layers draw on classic queues of their own and need only the device (mtl_device_classic): there the classic part starts and presents are dropped, which is all a
@@ -1527,7 +1536,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[121];
+static int g_red_once[125];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -1738,9 +1747,15 @@ static MTLTextureUsage img_usage(const tex_t *t, MTLPixelFormat pf) {
 // Metal leaves MTLTextureUsageShaderAtomic out of a texture's usage property (0x3 for a texture made with 0x23), so it cannot be read back: every shader-writable R32Uint / R32Sint
 // texture the host makes has it (img_usage, tex_upgrade, dummy_img_atomic), and that is what this tests
 static int tex_atomic_capable(id<MTLTexture> base) { return pf_r32i(base.pixelFormat) && (base.usage & MTLTextureUsageShaderWrite); }
+// nvn_fmt_to_mtl, except that a BC format is the uncompressed one its texture is made in when BC is decoded on the CPU (a view of such a texture, an sRGB reinterpretation, is of that format too)
+static int nvn_fmt_to_mtl_dec(uint32_t nvn_format, uint32_t *pf, uint8_t swz[4]) {
+    int r = nvn_fmt_to_mtl((int)nvn_format, pf, swz), bpp; uint32_t up;
+    if (g_bc_cpu && nvn_bc_unpacked(nvn_format, &up, &bpp)) { if (pf) *pf = up; return 2; }
+    return r;
+}
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
-    if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
+    if (!nvn_fmt_to_mtl_dec(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
     // Metal's limits: 16384 in 2D, 2048 in 3D, 2048 array layers; beyond them Metal aborts the process on an assertion, so they are caught here with a red line
     if (t->d.width > 16384 || t->d.height > 16384 || t->d.depth > 2048) { RED_ONCE(71, "texture size exceeds Metal limits: %u×%u×%u levels %u format %#x target %d (first case ser=%llu)", t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.format, t->d.target, (unsigned long long)t->serial); return nil; }
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
@@ -2108,14 +2123,19 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, t->L.size); }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
-    size_t total = 0;
+    // A BC texture on the CPU decode path (g_bc_cpu): tex_desc made the Metal texture RGBA8 (R8 / RG8 for BC4 / BC5, RGBA16F for BC6H), so the staging area is per texel, not per block, and the
+    // deswizzled blocks are expanded through nvn_bc_decode before the blit. The GPU deswizzle writes blocks and is not used for it. Off on a device that samples BC: those textures go up as blocks
+    uint32_t bc_pf = 0; int bc_bpp = 0;
+    int bc_cpu = g_bc_cpu && nvn_bc_unpacked(t->d.format, &bc_pf, &bc_bpp);
+    size_t total = 0, total_bc = 0;
     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
         uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         total += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * layers;
+        total_bc += (size_t)w * h * z * layers * (size_t)bc_bpp;
     }
-    g_bp_up_bytes += total;
+    g_bp_up_bytes += bc_cpu ? total_bc : total;
     void *mb; uint64_t mo;
-    int use_gpu = !sparse && g_nvn_deswz_gpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);   // a sparse pool's texture is gathered through its page table on the CPU
+    int use_gpu = !bc_cpu && !sparse && g_nvn_deswz_gpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);   // a sparse pool's texture is gathered through its page table on the CPU
     if (g_nvn_deswz_gpu && !use_gpu && !sparse) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
@@ -2150,14 +2170,27 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         nvn_sparse_copy(t->pool, part, (uint64_t)(uintptr_t)t->mem, t->L.size); src = part;
     }
     up_begin();
-    id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
+    size_t stg_size = bc_cpu ? total_bc : total;
+    id<MTLBuffer> stg = [g_dev newBufferWithLength:stg_size ? stg_size : 16 options:MTLResourceStorageModeShared];
     res_add(stg); [g_up_keep addObject:stg];
     size_t off = 0;
+    uint8_t *bc_tmp = NULL; size_t bc_tmp_sz = 0;   // the deswizzled blocks of one level and layer, before decoding (bc_cpu)
     int zb = zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94; if (zb) { g_zb_ser = t->serial; g_zb_n = (int)MIN(d.mipmapLevelCount, 16u); memset(g_zb, 0, sizeof g_zb); memset(g_zb_tot, 0, sizeof g_zb_tot); }
     for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
         uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u), z = t->d.target == 2 ? MAX(t->d.depth >> l, 1u) : 1;
         size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
         for (unsigned y = 0; y < layers; y++) {
+            if (bc_cpu) {
+                size_t need = pitch * rows * z;
+                if (need > bc_tmp_sz) { free(bc_tmp); bc_tmp = malloc(need); bc_tmp_sz = need; if (!bc_tmp) MDIE("BC decode scratch of %zu bytes failed", need); }
+                if (nvn_deswizzle(&t->d, l, y, src, bc_tmp, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
+                size_t dpitch = (size_t)w * bc_bpp;
+                for (uint32_t zz = 0; zz < z; zz++)
+                    nvn_bc_decode(t->d.format, bc_tmp + (size_t)zz * pitch * rows, pitch, w, h, (uint8_t *)stg.contents + off + (size_t)zz * dpitch * h, dpitch);
+                up_blit_add(stg, off, dpitch, dpitch * h, MTLSizeMake(w, h, z), mt, y, l);
+                off += dpitch * h * z;
+                continue;
+            }
             if (nvn_deswizzle(&t->d, l, y, src, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
             if (zb && l < 16) { const uint64_t *q = (const uint64_t *)((const uint8_t *)stg.contents + off); size_t nb = pitch * rows * z / 16;
                 for (size_t i = 0; i < nb; i++) g_zb[l] += !(q[2 * i] | q[2 * i + 1]);
@@ -2166,6 +2199,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
             off += pitch * rows * z;
         }
     }
+    free(bc_tmp);
     free(part);
     up_flush();
     return mt;
@@ -3095,6 +3129,7 @@ static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const v
     if (has_v && v->set_levels) a.level = v->base_level;
     if (has_v && v->set_layers) { if (t->d.target == 2) a.depthPlane = v->min_layer; else a.slice = v->min_layer; }
     if (base && mtl_fmt_block(base.pixelFormat)) { if (!bcrt_attach(a, base, v, has_v)) { rt_view_fmt(base, v, has_v); a.texture = nil; } return; }   // compressed formats: a shadow or nothing (see rt_view_fmt)
+    if (base && bc_decoded(t->d.format)) { RED_ONCE(121, "render target is a BC texture decoded on the CPU (NVN format %#x %ux%u): not attached; draws to this attachment are lost", t->d.format, t->d.width, t->d.height); a.texture = nil; return; }   // uncompressed and made without render-target use: no blocks to draw into
     if (base && mtl_fmt_depth(base.pixelFormat) && bcrt_attach(a, base, v, has_v)) return;   // a depth texture through a colour view: a shadow (see shrt_block)
     // A view that changes the format is attached as a Metal view of that format (pipeline formats follow the attachment). SMBW's last pass writes the RGBA8 swapchain texture through an RGBA8_SRGB view, so the hardware encodes sRGB on write;
     // attaching the base texture instead stored the linear values as they were and the whole picture came out dark (every value decoded from sRGB once more, on the Mac and the iPhone). The view lives until this submission completes
@@ -4009,7 +4044,7 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     if ((r.has_v && (r.v.set_format || r.v.set_levels || r.v.set_layers || r.v.set_target)) || need_sw || stv) {
         if (!r.has_v) memset(&r.v, 0, sizeof r.v);
         uint32_t pf = (uint32_t)base.pixelFormat; uint8_t swz[4];
-        if (r.v.set_format && !(nvn_fmt_to_mtl(r.v.format, &pf, swz) && pf)) pf = (uint32_t)base.pixelFormat;
+        if (r.v.set_format && !(nvn_fmt_to_mtl_dec(r.v.format, &pf, swz) && pf)) pf = (uint32_t)base.pixelFormat;
         if (stv) pf = MTLPixelFormatX32_Stencil8;
         if (r.v.set_format && nvn_fmt_bc(rp->t.d.format) && !nvn_fmt_bc(r.v.format)) {   // the raw blocks of a BC texture through an uncompressed view (see rt_view_fmt): Metal has no such view
             RED_ONCE(86, "Metal cannot create the raw-block view of a compressed texture (NVN format %#x → view %#x): treated as an empty slot", rp->t.d.format, r.v.format);
@@ -9110,6 +9145,7 @@ static void copy_t2b(const p_copy_b2t *c) {
     int is3d = c->tex->d.target == 2, nz = c->r.depth ? c->r.depth : 1;
     void *mb; uint64_t mo;
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(31, "texture→buffer copy destination is in no memory pool"); return; }
+    if (bc_decoded(c->tex->d.format)) { RED_ONCE(123, "texture→buffer copy out of a BC texture decoded on the CPU (ser=%llu format %#x): the blocks are not kept, not copied", (unsigned long long)c->tex->serial, c->tex->d.format); return; }
     sbw_note(c->src, img * nz, SBW_GPU);
     id<MTL4ComputeCommandEncoder> b = blit();
     if (is3d)
@@ -9148,6 +9184,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     @autoreleasepool {
     id<MTLTexture> mt = tex_mtl(t);
     if (!mt || !tex_level_ok(mt, level, "CPU readback")) { memset(dst, 0, img * nz); return; }
+    if (bc_decoded(t->d.format)) { RED_ONCE(124, "CPU readback of a BC texture decoded on the CPU (ser=%llu format %#x) that the CPU did not fill: the blocks are not kept, read as zeros", (unsigned long long)t->serial, t->d.format); memset(dst, 0, img * nz); return; }
     mtl_finish_gpu_at(WS_READTEX);
     id<MTLBuffer> buf = [g_dev newBufferWithLength:wb * hb * nz options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = enc_b_begin(cb);
@@ -9229,6 +9266,24 @@ static void mirror_rb_land(void *p) {   // the submission's completion handler
     mrb_note(m->t.serial, -1);
     free(m);
 }
+// A buffer→texture copy into a BC texture that is decoded on the CPU (g_bc_cpu): the blocks are read from the buffer's memory now and decoded into a staging buffer, which is blitted in. Only
+// possible when the CPU holds the buffer's content: not when a GPU copy, fill or shader of this submission or one still running writes it (the checks of the storage mirror in copy_b2t).
+// Returns 0 when it cannot, and the copy is dropped with a red line. Unlike the blit, a region that is not block-aligned at its origin is refused (Metal copies texels, a block starts every 4)
+static int copy_b2t_bc(const p_copy_b2t *c, id<MTLTexture> t, unsigned level, unsigned layer0, size_t row, size_t img, int nz) {
+    uint32_t pf; int bpp; if (!nvn_bc_unpacked(c->tex->d.format, &pf, &bpp)) return 0;
+    int is3d = c->tex->d.target == 2, w = c->r.width, h = c->r.height;
+    if (w <= 0 || h <= 0 || (c->r.xoffset & 3) || (c->r.yoffset & 3)) return 0;
+    if (!(img * nz) || pend_hits(c->src, img * nz) || g_sbw_over || sbw_hits(c->src, c->src + img * nz) || gw_live(c->src, c->src + img * nz) || !nvn_host_readable(c->src, img * nz)) return 0;
+    size_t dpitch = (size_t)w * bpp, dimg = dpitch * h;
+    id<MTLBuffer> stg = [g_dev newBufferWithLength:dimg * nz options:MTLResourceStorageModeShared]; if (!stg) return 0;
+    res_add(stg); defer_obj_release(stg);
+    for (int z = 0; z < nz; z++) nvn_bc_decode(c->tex->d.format, (const uint8_t *)(uintptr_t)c->src + z * img, row, (uint32_t)w, (uint32_t)h, (uint8_t *)stg.contents + z * dimg, dpitch);
+    id<MTL4ComputeCommandEncoder> b = blit();
+    if (is3d) enc_b_copy_buffer_texture(b, stg, 0, dpitch, dimg, MTLSizeMake(w, h, nz), t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset));
+    else for (int z = 0; z < nz; z++)
+        enc_b_copy_buffer_texture(b, stg, z * dimg, dpitch, dimg, MTLSizeMake(w, h, 1), t, layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0));
+    return 1;
+}
 static void copy_b2t(const p_copy_b2t *c) {
     if (c->tex) zskip_del(c->tex->serial);
     id<MTLTexture> t = tex_mtl(c->tex);
@@ -9245,9 +9300,15 @@ static void copy_b2t(const p_copy_b2t *c) {
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(23, "buffer→texture copy source is in no memory pool"); return; }
     // The copy's bytes belong in the texture's storage: written there now from the buffer's, unless the GPU writes the buffer (a copy, fill or update queued in this submission: pend_hits; a shader
     // or a texture→buffer copy of it: sbw_hits; one of a submission still running: gw_live) or a readback into the texture is pending (read back after the copy then)
-    int rb = !is3d && tex_storage_dst(c->tex);
+    int rb = !is3d && tex_storage_dst(c->tex), mirrored = 0;
     if (rb && img * nz && !mrb_pending(c->tex->serial) && !pend_hits(c->src, img * nz) && !g_sbw_over && !sbw_hits(c->src, c->src + img * nz) && !gw_live(c->src, c->src + img * nz)
-        && nvn_host_readable(c->src, img * nz) && !nvn_tex_mirror_b2t(c->tex, level, layer0, &c->r, (const uint8_t *)(uintptr_t)c->src, row, img)) { mirror_note(0, c->tex, level, "buffer", 0); rb = 0; }
+        && nvn_host_readable(c->src, img * nz) && !nvn_tex_mirror_b2t(c->tex, level, layer0, &c->r, (const uint8_t *)(uintptr_t)c->src, row, img)) { mirror_note(0, c->tex, level, "buffer", 0); rb = 0; mirrored = 1; }
+    if (bc_decoded(c->tex->d.format)) {   // the texture holds decoded texels, not blocks: a GPU blit of the blocks cannot fill it
+        if (mirrored) return;   // written into its storage above: the next upload decodes it from there
+        if (copy_b2t_bc(c, t, level, layer0, row, img, nz)) return;
+        RED_ONCE(122, "buffer→texture copy into a BC texture decoded on the CPU, from a buffer the GPU writes or that the CPU cannot read (ser=%llu format %#x): not copied", (unsigned long long)c->tex->serial, c->tex->d.format);
+        return;
+    }
     g_cut_copy = 1;
     if (is3d && passdump()) { const char *dd = getenv("DM_NVN_CBDUMP"); if (dd) {   // the source bytes of a 3D upload, beside the uniform dumps (F<frame>_c3d_<serial>.bin)
         char p[1024]; snprintf(p, sizeof p, "%s/F%llu_c3d_%llu.bin", dd, (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)c->tex->serial);

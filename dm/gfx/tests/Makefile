@@ -338,3 +338,10 @@ run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tb
 t_float_pad: t_float_pad.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_float_pad.m $(MTL_T_SRC) $(FW)
 run: t_float_pad
+# BC textures decoded on the CPU, on the Metal device (DM_TEST_NO_BC=1 forces the path on a Mac); local only, like t_cpu_tex --metal
+t_bc_cpu: t_bc_cpu.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_bc_cpu.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_bc_cpu
+check_t_bc_cpu: t_bc_cpu
+	MTL_DEBUG_LAYER=1 ./t_bc_cpu
+run: check_t_bc_cpu

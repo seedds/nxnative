@@ -6,15 +6,18 @@ O ?=
 CLANG = clang $(SAN)
 $(O)t_tex: t_tex.c ../nvn_deswizzle.c ../nvn_deswizzle.h ../../nvn/nvn_tex.c ../../nvn/nvn_tex.h
 	$(CLANG) $(CFLAGS) -o $@ t_tex.c ../nvn_deswizzle.c ../../nvn/nvn_tex.c -lm
+$(O)t_bcdec: t_bcdec.c ../nvn_bcdec.c ../nvn_bcdec.h ../../../third_party/bcdec/bcdec.h
+	$(CLANG) $(CFLAGS) -o $@ t_bcdec.c ../nvn_bcdec.c
 $(O)t_fmt_mtl: t_fmt_mtl.m ../nvn_fmt_mtl.c ../nvn_fmt_mtl.h
 	$(CLANG) $(CFLAGS) -fobjc-arc -o $@ t_fmt_mtl.m ../nvn_fmt_mtl.c -framework Metal -framework Foundation
-run: t_tex t_fmt_mtl
-	./t_fmt_mtl && ./t_tex
+run: t_tex t_fmt_mtl t_bcdec
+	./t_fmt_mtl && ./t_tex && ./t_bcdec
 .PHONY: run
-# ASan and UBSan (../../../sanitizers/sanitizers.mk): the CPU test t_tex, built into asan/ (t_fmt_mtl creates Metal textures and stays local)
+# ASan and UBSan (../../../sanitizers/sanitizers.mk): the CPU tests t_tex and t_bcdec, built into asan/ (t_fmt_mtl creates Metal textures and stays local)
 include ../../../sanitizers/sanitizers.mk
 .PHONY: asan
 asan:
 	@$(call san_fresh,asan,$(ASAN_FLAGS))
-	$(MAKE) O=asan/ SAN="$(ASAN_FLAGS)" asan/t_tex
+	$(MAKE) O=asan/ SAN="$(ASAN_FLAGS)" asan/t_tex asan/t_bcdec
 	$(ASAN_ENV) ./asan/t_tex
+	$(ASAN_ENV) ./asan/t_bcdec

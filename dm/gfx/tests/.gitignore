@@ -169,3 +169,5 @@ t_bc2astc_gpu
 t_bc2astc_gpu.dSYM/
 t_astc_hw
 t_astc_hw.dSYM/
+t_dirty_retire_race
+t_dirty_retire_race.dSYM/

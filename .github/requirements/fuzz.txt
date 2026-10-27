@@ -1,0 +1,4 @@
+# The fuzz job's packages (.github/workflows/fuzz.yml, dm/tools/fuzz): atheris drives the harnesses with libFuzzer, lz4 is what the parsers decode with (as in tests.yml).
+# atheris 3.1.0 has Linux wheels for Python 3.14 and none for macOS: on a Mac it builds from source with a Clang that ships libFuzzer (docs/development.md, "Continuous integration").
+atheris==3.1.0
+lz4==4.4.5

@@ -66,7 +66,7 @@ public struct ControllerMappingCalloutOverlay: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .background(NXTheme.glassSurfaceElevated)
-                        .foregroundColor(NXTheme.secondary)
+                        .foregroundColor(.white)
                         .clipShape(Capsule())
                         .overlay(Capsule().stroke(NXTheme.specularRim, lineWidth: 0.8))
                     }

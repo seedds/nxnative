@@ -23,8 +23,8 @@ public struct SystemAudioGamepadCard: View {
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
-                        .background(controllerService.isGamepadConnected ? Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.2) : NXTheme.glassSurfaceElevated)
-                        .foregroundColor(controllerService.isGamepadConnected ? Color(red: 0.13, green: 0.77, blue: 0.37) : NXTheme.textMuted)
+                        .background(controllerService.isGamepadConnected ? Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.35) : NXTheme.glassSurfaceElevated)
+                        .foregroundColor(.white)
                         .clipShape(Capsule())
                 }
                 

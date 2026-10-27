@@ -223,6 +223,12 @@ extension AppViewModel {
         }
         self.buildSuccessPath = outputPath
         self.logs.append(LogEntry(level: .success, message: "Build succeeded! Output: \(outputPath ?? "Unknown")"))
+        
+        if let out = outputPath {
+            let targetURL = URL(fileURLWithPath: out)
+            GameCoverService.shared.injectCoverIntoBundle(at: targetURL, gameName: appName.isEmpty ? (selectedGame?.name ?? "Game") : appName, titleId: selectedGame?.titleId)
+        }
+        
         refreshLibrary()
         
         SoundEffectService.shared.play(.launch)

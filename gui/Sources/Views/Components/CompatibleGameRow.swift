@@ -3,10 +3,22 @@ import AppKit
 
 public struct CompatibleGameRow: View {
     public let game: CompatibleGameItem
+    public let isRowFocused: Bool
+    public let focusedButton: CompatibilityButtonFocus?
+    public let onNotes: () -> Void
     public let onPort: () -> Void
     
-    public init(game: CompatibleGameItem, onPort: @escaping () -> Void) {
+    public init(
+        game: CompatibleGameItem,
+        isRowFocused: Bool = false,
+        focusedButton: CompatibilityButtonFocus? = nil,
+        onNotes: @escaping () -> Void = {},
+        onPort: @escaping () -> Void
+    ) {
         self.game = game
+        self.isRowFocused = isRowFocused
+        self.focusedButton = focusedButton
+        self.onNotes = onNotes
         self.onPort = onPort
     }
     
@@ -21,7 +33,7 @@ public struct CompatibleGameRow: View {
                     HStack(spacing: 8) {
                         Text(game.title)
                             .font(.system(size: 13, weight: .bold, design: .rounded))
-                            .foregroundColor(NXTheme.textPrimary)
+                            .foregroundColor(isRowFocused ? .white : NXTheme.textPrimary)
                             .lineLimit(1)
                         
                         Text(game.graphicsApi)
@@ -70,9 +82,10 @@ public struct CompatibleGameRow: View {
                 
                 // Action Buttons
                 HStack(spacing: 8) {
-                    if let url = game.githubUrl {
+                    if game.githubUrl != nil {
                         Button(action: {
-                            NSWorkspace.shared.open(url)
+                            SoundEffectService.shared.play(.click)
+                            onNotes()
                         }) {
                             HStack(spacing: 4) {
                                 Image(systemName: "doc.text.fill")
@@ -82,25 +95,49 @@ public struct CompatibleGameRow: View {
                         }
                         .buttonStyle(NXSecondaryButtonStyle())
                         .controlSize(.small)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(isRowFocused && focusedButton == .notes ? Color.white : Color.clear, lineWidth: 1.5)
+                        )
                         .help("View upstream compatibility notes on GitHub")
                     }
                     
                     Button("Port Game") {
+                        SoundEffectService.shared.play(.click)
                         onPort()
                     }
                     .buttonStyle(NXPrimaryButtonStyle())
                     .controlSize(.small)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(isRowFocused && focusedButton == .portGame ? Color.white : Color.clear, lineWidth: 2)
+                    )
                 }
                 .fixedSize(horizontal: true, vertical: false)
             }
             .frame(height: 46)
         }
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(isRowFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(Color.clear), lineWidth: 2)
+        )
+        .shadow(color: isRowFocused ? NXTheme.primary.opacity(0.4) : Color.clear, radius: 8, x: 0, y: 2)
     }
     
     // MARK: - Cover Art Loader
     @ViewBuilder
     private var coverArtView: some View {
-        if let url = game.coverArtUrl {
+        if let localImg = GameCoverService.shared.coverImage(titleId: game.titleId, gameName: game.title) {
+            Image(nsImage: localImg)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 44, height: 44)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(NXTheme.specularRim, lineWidth: 0.8)
+                )
+        } else if let url = game.coverArtUrl {
             AsyncImage(url: url) { phase in
                 switch phase {
                 case .success(let image):

@@ -25,7 +25,6 @@ public struct ConsoleGameCarouselView: View {
                                 SoundEffectService.shared.play(.focus)
                                 withAnimation(.spring(response: 0.28, dampingFraction: 0.75)) {
                                     if viewModel.focusedGameIndex == index {
-                                        // Tap on focused card launches or opens actions
                                         viewModel.launchGame(game)
                                     } else {
                                         viewModel.focusedGameIndex = index
@@ -36,7 +35,8 @@ public struct ConsoleGameCarouselView: View {
                     }
                 }
                 .padding(.horizontal, 40)
-                .padding(.vertical, 24)
+                .padding(.top, 28)
+                .padding(.bottom, 20)
             }
             .onChange(of: viewModel.focusedGameIndex) { newIndex in
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
@@ -56,6 +56,7 @@ public struct ConsoleGameCarouselView: View {
             ? LibraryCardSize.focusedHeight(scale: viewModel.libraryCardScale)
             : LibraryCardSize.unfocusedHeight(scale: viewModel.libraryCardScale)
         let cornerRad: CGFloat = isFocused ? 20 : 16
+        let isSquareIcon = abs(cardImage.size.width - cardImage.size.height) < 10
         
         return VStack(spacing: 12) {
             ZStack(alignment: .top) {
@@ -68,25 +69,48 @@ public struct ConsoleGameCarouselView: View {
                 }
                 
                 // Game Cover Portrait Artwork (Official Switch Box Art - 1 : 1.60 ratio)
-                Image(nsImage: cardImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: cardWidth, height: cardHeight)
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: cornerRad, style: .continuous))
-                    .shadow(
-                        color: isFocused ? NXTheme.primary.opacity(0.8) : Color.black.opacity(0.45),
-                        radius: isFocused ? 24 : 8,
-                        x: 0,
-                        y: isFocused ? 12 : 4
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cornerRad, style: .continuous)
-                            .strokeBorder(
-                                isFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(Color.white.opacity(0.15)),
-                                lineWidth: isFocused ? 3.5 : 1
-                            )
-                    )
+                Group {
+                    if isSquareIcon {
+                        // Styled portrait box container for fallback icons so they never appear cropped
+                        ZStack {
+                            RoundedRectangle(cornerRadius: cornerRad, style: .continuous)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [Color(white: 0.18), Color(white: 0.08)],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                )
+                            
+                            Image(nsImage: cardImage)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: cardWidth * 0.72, height: cardWidth * 0.72)
+                                .shadow(color: Color.black.opacity(0.55), radius: 10, x: 0, y: 5)
+                        }
+                    } else {
+                        // Full-bleed official portrait cover art
+                        Image(nsImage: cardImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    }
+                }
+                .frame(width: cardWidth, height: cardHeight)
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: cornerRad, style: .continuous))
+                .shadow(
+                    color: isFocused ? NXTheme.primary.opacity(0.8) : Color.black.opacity(0.45),
+                    radius: isFocused ? 24 : 8,
+                    x: 0,
+                    y: isFocused ? 12 : 4
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRad, style: .continuous)
+                        .strokeBorder(
+                            isFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(Color.white.opacity(0.15)),
+                            lineWidth: isFocused ? 3.5 : 1
+                        )
+                )
                 
                 // Active Launching / Playing Pill
                 if isLaunching {

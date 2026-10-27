@@ -9,7 +9,7 @@ extension CompactConsoleActionSheetView {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(NXTheme.glassSurfaceElevated.opacity(0.8))
-            .foregroundColor(NXTheme.textSecondary)
+            .foregroundColor(.white)
             .clipShape(Capsule())
     }
     

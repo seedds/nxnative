@@ -74,7 +74,7 @@ extension AppViewModel {
             focusedGameIndex -= 1
             SoundEffectService.shared.play(.focus)
         case 2:
-            cycleCompatibilityFilter(forward: false)
+            handleCompatibilityNavigateLeft()
         case 3:
             let profiles = InputProfileManager.shared.profiles
             if let idx = profiles.firstIndex(where: { $0.id == InputProfileManager.shared.activeProfileId }), idx > 0 {
@@ -94,7 +94,7 @@ extension AppViewModel {
             focusedGameIndex += 1
             SoundEffectService.shared.play(.focus)
         case 2:
-            cycleCompatibilityFilter(forward: true)
+            handleCompatibilityNavigateRight()
         case 3:
             let profiles = InputProfileManager.shared.profiles
             if let idx = profiles.firstIndex(where: { $0.id == InputProfileManager.shared.activeProfileId }), idx < profiles.count - 1 {
@@ -120,6 +120,8 @@ extension AppViewModel {
                 isFocusOnDeck = false
                 SoundEffectService.shared.play(.focus)
             }
+        case 2:
+            handleCompatibilityNavigateUp()
         case 4:
             refreshPrerequisites()
         default: break
@@ -144,6 +146,8 @@ extension AppViewModel {
                 isFocusOnDeck = true
                 SoundEffectService.shared.play(.focus)
             }
+        case 2:
+            handleCompatibilityNavigateDown()
         default: break
         }
     }
@@ -167,6 +171,8 @@ extension AppViewModel {
             } else if let game = currentFocusedGame {
                 launchGame(game)
             }
+        case 2:
+            handleCompatibilityConfirm()
         case 3:
             var prof = InputProfileManager.shared.activeProfile
             prof.swapFaceButtons()
@@ -198,6 +204,8 @@ extension AppViewModel {
                 isFocusOnDeck = false
                 SoundEffectService.shared.play(.click)
             }
+        case 2:
+            handleCompatibilityCancel()
         default:
             break
         }
@@ -207,6 +215,8 @@ extension AppViewModel {
         switch selectedTab {
         case 1:
             if let game = currentFocusedGame { launchGame(game) }
+        case 2:
+            handleCompatibilitySecondaryAction()
         case 5:
             let allText = logs.map { "\($0.timestamp) [\($0.level.rawValue.uppercased())] \($0.message)" }.joined(separator: "\n")
             NSPasteboard.general.clearContents()

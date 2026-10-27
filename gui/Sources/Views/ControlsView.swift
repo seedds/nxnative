@@ -189,9 +189,6 @@ public struct ControlsView: View {
             .frame(maxWidth: 420)
 
             Spacer()
-
-            ControllerLiveStatusCard()
-                .frame(maxWidth: 320)
         }
     }
 

@@ -3,13 +3,11 @@ import SwiftUI
 // MARK: - Subcomponents & Controls for SwitchProControllerVectorView
 extension SwitchProControllerVectorView {
 
-    // MARK: - Top Shoulder Bumpers (L, ZL, R, ZR)
+    // MARK: - Top Shoulder Bumpers (L, R)
     func topShouldersView(width w: CGFloat, height h: CGFloat) -> some View {
         ZStack {
             bumperButton(title: "L", btn: .l, x: w * 0.243, y: h * 0.164, w: w * 0.13, h: h * 0.065)
-            bumperButton(title: "ZL", btn: .zl, x: w * 0.189, y: h * 0.098, w: w * 0.11, h: h * 0.055)
             bumperButton(title: "R", btn: .r, x: w * 0.757, y: h * 0.164, w: w * 0.13, h: h * 0.065)
-            bumperButton(title: "ZR", btn: .zr, x: w * 0.811, y: h * 0.098, w: w * 0.11, h: h * 0.055)
         }
     }
 

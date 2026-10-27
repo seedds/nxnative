@@ -28,7 +28,7 @@ public struct DependencyRow: View {
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
                             .background(NXTheme.primary.opacity(0.2))
-                            .foregroundColor(NXTheme.secondary)
+                            .foregroundColor(.white)
                             .clipShape(Capsule())
                     }
                 }

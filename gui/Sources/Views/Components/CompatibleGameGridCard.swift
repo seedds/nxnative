@@ -3,19 +3,33 @@ import AppKit
 
 public struct CompatibleGameGridCard: View {
     public let item: CompatibleGameItem
+    public let isCardFocused: Bool
+    public let focusedButton: CompatibilityButtonFocus?
+    public let onNotes: () -> Void
+    public let onPort: () -> Void
     
-    public init(item: CompatibleGameItem) {
+    public init(
+        item: CompatibleGameItem,
+        isCardFocused: Bool = false,
+        focusedButton: CompatibilityButtonFocus? = nil,
+        onNotes: @escaping () -> Void = {},
+        onPort: @escaping () -> Void = {}
+    ) {
         self.item = item
+        self.isCardFocused = isCardFocused
+        self.focusedButton = focusedButton
+        self.onNotes = onNotes
+        self.onPort = onPort
     }
     
     public var body: some View {
         GlassCard(padding: 12) {
             VStack(alignment: .leading, spacing: 10) {
-                // MARK: - Game Cover Art with Floating Pills
+                // MARK: - Game Cover Art in Portrait (~1 : 1.35 ratio)
                 ZStack(alignment: .topTrailing) {
                     coverArtView
                         .frame(maxWidth: .infinity)
-                        .frame(height: 130)
+                        .frame(height: 250)
                         .clipped()
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     
@@ -54,7 +68,7 @@ public struct CompatibleGameGridCard: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.title)
                         .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundColor(NXTheme.textPrimary)
+                        .foregroundColor(isCardFocused ? .white : NXTheme.textPrimary)
                         .lineLimit(2)
                         .frame(minHeight: 34, alignment: .topLeading)
                     
@@ -65,25 +79,14 @@ public struct CompatibleGameGridCard: View {
                 
                 Divider().opacity(0.2)
                 
-                // MARK: - Footer: Tested Version & Notes Link
-                HStack {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Tested Build")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundColor(NXTheme.textMuted)
-                        Text(item.versionTested.isEmpty ? "Base" : item.versionTested)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundColor(NXTheme.textSecondary)
-                    }
-                    
-                    Spacer()
-                    
-                    if let url = item.githubUrl {
+                // MARK: - Footer: Action Buttons (Notes & Port Game)
+                HStack(spacing: 8) {
+                    if item.githubUrl != nil {
                         Button(action: {
                             SoundEffectService.shared.play(.click)
-                            NSWorkspace.shared.open(url)
+                            onNotes()
                         }) {
-                            HStack(spacing: 4) {
+                            HStack(spacing: 3) {
                                 Text("Notes")
                                 Image(systemName: "arrow.up.right")
                             }
@@ -91,16 +94,42 @@ public struct CompatibleGameGridCard: View {
                         }
                         .buttonStyle(NXSecondaryButtonStyle())
                         .controlSize(.small)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(isCardFocused && focusedButton == .notes ? Color.white : Color.clear, lineWidth: 1.5)
+                        )
                     }
+                    
+                    Spacer()
+                    
+                    Button("Port Game") {
+                        SoundEffectService.shared.play(.click)
+                        onPort()
+                    }
+                    .buttonStyle(NXPrimaryButtonStyle())
+                    .controlSize(.small)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(isCardFocused && focusedButton == .portGame ? Color.white : Color.clear, lineWidth: 2)
+                    )
                 }
             }
         }
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(isCardFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(Color.clear), lineWidth: 2)
+        )
+        .shadow(color: isCardFocused ? NXTheme.primary.opacity(0.4) : Color.clear, radius: 8, x: 0, y: 3)
     }
     
     // MARK: - Cover Art Loader
     @ViewBuilder
     private var coverArtView: some View {
-        if let url = item.coverArtUrl {
+        if let localImg = GameCoverService.shared.coverImage(titleId: item.titleId, gameName: item.title) {
+            Image(nsImage: localImg)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+        } else if let url = item.coverArtUrl {
             AsyncImage(url: url) { phase in
                 switch phase {
                 case .success(let image):
@@ -131,7 +160,7 @@ public struct CompatibleGameGridCard: View {
                     .foregroundColor(NXTheme.secondary)
                 Text(item.title)
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(NXTheme.textSecondary)
+                    .foregroundColor(.white)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 8)
                     .lineLimit(1)

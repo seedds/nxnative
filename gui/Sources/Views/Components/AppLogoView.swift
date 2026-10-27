@@ -58,11 +58,7 @@ public struct AppLogoView: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 30, height: 30)
                         .clipShape(RoundedRectangle(cornerRadius: 7.5, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 7.5, style: .continuous)
-                                .strokeBorder(isHovered ? Color.cyan.opacity(0.6) : Color.white.opacity(0.15), lineWidth: 1)
-                        )
-                        .shadow(color: NXTheme.primary.opacity(isHovered ? 0.5 : 0.25), radius: isHovered ? 8 : 4, x: 0, y: 2)
+                        .shadow(color: NXTheme.primary.opacity(isHovered ? 0.4 : 0.2), radius: isHovered ? 6 : 3, x: 0, y: 1)
                 } else {
                     Image(systemName: "gamecontroller.fill")
                         .font(.system(size: 20))
@@ -77,6 +73,8 @@ public struct AppLogoView: View {
         .menuIndicator(.hidden)
         .frame(width: 30, height: 30)
         .clipped()
+        .nxNoFocusRing()
+        .focusable(false)
         .onHover { isHovered = $0 }
         .help("NxNative Logo: Adapts to Light, Dark & Mono modes. Click to choose appearance.")
         .onChange(of: colorScheme) { _ in

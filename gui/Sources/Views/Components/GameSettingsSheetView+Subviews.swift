@@ -129,7 +129,7 @@ extension GameSettingsSheetView {
                 if isFocused {
                     Text("Focused")
                         .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundColor(NXTheme.secondary)
+                        .foregroundColor(.white)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(NXTheme.primary.opacity(0.3))

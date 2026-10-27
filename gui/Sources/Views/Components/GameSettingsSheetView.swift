@@ -44,7 +44,7 @@ public struct GameSettingsSheetView: View {
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(NXTheme.primary.opacity(0.2))
-                                .foregroundColor(NXTheme.secondary)
+                                .foregroundColor(.white)
                                 .clipShape(Capsule())
                             
                             if let ver = game.versionString {
@@ -72,6 +72,8 @@ public struct GameSettingsSheetView: View {
                             .foregroundColor(NXTheme.textSecondary)
                     }
                     .buttonStyle(.plain)
+                    .nxNoFocusRing()
+                    .focusable(false)
                 }
                 .padding(18)
                 .background(

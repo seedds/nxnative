@@ -25,7 +25,7 @@ public struct StatusBadge: View {
                 
                 Text(text)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundColor(isPositive ? NXTheme.textPrimary : Color(red: 1.0, green: 0.65, blue: 0.35))
+                    .foregroundColor(.white)
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 4)

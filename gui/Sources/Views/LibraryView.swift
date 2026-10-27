@@ -29,6 +29,7 @@ public struct LibraryView: View {
             VStack(spacing: 0) {
                 // MARK: - Library Toolbar (Liquid Glass, Search & Card Scale Slider)
                 LibraryToolbarView(viewModel: viewModel)
+                    .zIndex(10)
                 
                 // MARK: - Console Game Showcase & Detail Deck
                 if filteredGames.isEmpty {
@@ -37,22 +38,24 @@ public struct LibraryView: View {
                     if controllerService.isGamepadConnected {
                         // Gamepad Mode: Clean Console View with Official Portrait Covers
                         VStack(spacing: 16) {
-                            Spacer()
+                            Spacer(minLength: 12)
                             
                             // Carousel with Portrait Console Box Art
                             ConsoleGameCarouselView(viewModel: viewModel, games: filteredGames)
+                                .padding(.top, 8)
                             
                             // Clean Console Footer Action Hint (A / X to Play, Options for Menu)
                             gamepadFooterBar
                             
-                            Spacer()
+                            Spacer(minLength: 12)
                         }
                     } else {
                         // Mouse/Keyboard Mode: Scrollable with Detail Deck
                         ScrollView {
-                            VStack(spacing: 20) {
+                            VStack(spacing: 24) {
                                 // 1. Console Carousel (Portrait Official Cover Art on Focus)
                                 ConsoleGameCarouselView(viewModel: viewModel, games: filteredGames)
+                                    .padding(.top, 16)
                                 
                                 // 2. Focused Game Detail Deck (Play, DLC, Sizes, Saves, Settings)
                                 if let selected = currentSelectedGame {
@@ -63,7 +66,7 @@ public struct LibraryView: View {
                                     .padding(.horizontal, 24)
                                 }
                             }
-                            .padding(.bottom, 20)
+                            .padding(.bottom, 24)
                         }
                     }
                 }
@@ -152,7 +155,7 @@ public struct LibraryView: View {
                 
                 Text("Game Options")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundColor(NXTheme.textSecondary)
+                    .foregroundColor(.white)
             }
         }
         .padding(.horizontal, 16)

@@ -43,7 +43,7 @@ public struct SystemAppearanceCard: View {
                     
                     Text("Apple Icon Composer Spec")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(NXTheme.secondary)
+                        .foregroundColor(.white)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(NXTheme.secondary.opacity(0.15))

@@ -135,6 +135,9 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
             UserDefaults.standard.set(compatibilityDisplayMode.rawValue, forKey: StorageKeys.savedCompatibilityDisplayMode)
         }
     }
+    @Published public var compatibilityFocusArea: CompatibilityFocusArea = .filters
+    @Published public var focusedCompatibilityIndex: Int = 0
+    @Published public var focusedCompatibilityButtonIndex: CompatibilityButtonFocus = .portGame
     
     // MARK: - System Prerequisites & Installer
     @Published public var prerequisites: SystemPrerequisites = SystemPrerequisites()

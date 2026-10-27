@@ -193,7 +193,8 @@ public final class BuildRunner {
         process?.terminate()
     }
     
-    private var lineBuffer = ""
+    private var stdoutBuffer = ""
+    private var stderrBuffer = ""
     private let decoder = JSONDecoder()
     
     private func processOutputData(_ data: Data, isError: Bool) {
@@ -201,14 +202,23 @@ public final class BuildRunner {
         
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.lineBuffer += text
-            
-            while let newlineRange = self.lineBuffer.range(of: "\n") {
-                let line = String(self.lineBuffer[..<newlineRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-                self.lineBuffer.removeSubrange(..<newlineRange.upperBound)
-                
-                if !line.isEmpty {
-                    self.handleOutputLine(line, isError: isError)
+            if isError {
+                self.stderrBuffer += text
+                while let newlineRange = self.stderrBuffer.range(of: "\n") {
+                    let line = String(self.stderrBuffer[..<newlineRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.stderrBuffer.removeSubrange(..<newlineRange.upperBound)
+                    if !line.isEmpty {
+                        self.handleOutputLine(line, isError: true)
+                    }
+                }
+            } else {
+                self.stdoutBuffer += text
+                while let newlineRange = self.stdoutBuffer.range(of: "\n") {
+                    let line = String(self.stdoutBuffer[..<newlineRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.stdoutBuffer.removeSubrange(..<newlineRange.upperBound)
+                    if !line.isEmpty {
+                        self.handleOutputLine(line, isError: false)
+                    }
                 }
             }
         }
@@ -243,7 +253,7 @@ public final class BuildRunner {
                 let summary = event.summary ?? ""
                 let k = event.k ?? 1
                 delegate?.buildRunner(self, didEndStage: name, index: k, ok: ok, elapsed: event.elapsed, summary: summary)
-                let msg = ok ? "✓ \(name) completed \(summary)" : "✗ \(name) failed \(summary)"
+                let msg = ok ? "[OK] \(name) completed \(summary)" : "[FAIL] \(name) failed \(summary)"
                 delegate?.buildRunner(self, didProduceLog: LogEntry(level: ok ? .success : .error, message: msg))
                 
             case "say":

@@ -32,6 +32,7 @@ build_app_bundle() {
     if [ -d "$GUI_DIR/Resources" ]; then
         cp "$GUI_DIR/Resources/"*.icns "$APP_BUNDLE/Contents/Resources/" 2>/dev/null || true
         cp "$GUI_DIR/Resources/"*.png "$APP_BUNDLE/Contents/Resources/" 2>/dev/null || true
+        cp "$GUI_DIR/Resources/"*.svg "$APP_BUNDLE/Contents/Resources/" 2>/dev/null || true
         if [ -d "$GUI_DIR/Resources/NxNative_Launcher.icon" ]; then
             cp -R "$GUI_DIR/Resources/NxNative_Launcher.icon" "$APP_BUNDLE/Contents/Resources/"
         fi
@@ -63,9 +64,9 @@ build_app_bundle() {
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.2.0</string>
+    <string>1.3.0</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

@@ -1,178 +1,268 @@
 import SwiftUI
+import GameController
 
 public struct ControlsView: View {
+    @ObservedObject private var profileManager = InputProfileManager.shared
+    @ObservedObject private var controllerService = GameControllerService.shared
+    @State private var selectedDeviceIndex: Int = 0 // 0: Controller, 1: Keyboard
+    @State private var showNewProfileAlert: Bool = false
+    @State private var newProfileName: String = ""
+    @State private var activeProfile: ControllerProfile = ControllerProfile.nintendoDefault
+    @State private var pressedButtons: Set<SwitchButton> = []
+    @State private var monitorTimer: Timer? = nil
+
     public init() {}
-    
+
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                // MARK: - Header
-                HStack(alignment: .top, spacing: 14) {
-                    Image(systemName: "gamecontroller.fill")
-                        .symbolRenderingMode(.hierarchical)
-                        .font(.system(size: 36))
-                        .foregroundColor(NXTheme.secondary)
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Controls & Keyboard Mapping")
-                            .font(.system(size: 18, weight: .bold, design: .rounded))
-                            .foregroundColor(NXTheme.textPrimary)
-                        Text("Games ported by NxNative Launcher simultaneously support your Mac keyboard and any USB or Bluetooth gamepad with instant plug-and-play recognition.")
-                            .font(.system(size: 12))
-                            .foregroundColor(NXTheme.textSecondary)
-                    }
-                }
-                .padding(.bottom, 4)
-                
-                // MARK: - Live Gamepad Recognition Status
-                ControllerLiveStatusCard()
-                
-                // MARK: - Section 1: Visual Quick Reference Table
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack {
-                            Label("Default Keyboard Mapping (Player 1)", systemImage: "keyboard.fill")
-                                .symbolRenderingMode(.hierarchical)
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                                .foregroundColor(NXTheme.textPrimary)
-                            Spacer()
-                            Text("Nintendo Switch Layout")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(NXTheme.secondary)
-                        }
-                        
-                        Divider().opacity(0.2)
-                        
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 340, maximum: .infinity), spacing: 12)], spacing: 12) {
-                            // Left Column: Movement & Actions
-                            VStack(spacing: 10) {
-                                controlRow(switchButton: "Left Stick (Move)", keyDesc: "W  A  S  D", detail: "360° Omnidirectional Movement")
-                                controlRow(switchButton: "Left Stick Click (L3)", keyDesc: "F", detail: "Press Left Analog Stick")
-                                controlRow(switchButton: "Right Stick Click (R3)", keyDesc: "G", detail: "Press Right Analog Stick")
-                                controlRow(switchButton: "A Button (Confirm)", keyDesc: "J", detail: "Right face button (Nintendo layout)")
-                                controlRow(switchButton: "B Button (Cancel / Jump)", keyDesc: "K", detail: "Bottom face button (Nintendo layout)")
-                                controlRow(switchButton: "X Button (Menu / Special)", keyDesc: "U", detail: "Top face button (Nintendo layout)")
-                                controlRow(switchButton: "Y Button (Secondary Action)", keyDesc: "I", detail: "Left face button (Nintendo layout)")
+            VStack(alignment: .leading, spacing: 18) {
+                // MARK: - Header & Profile Management
+                profileManagementHeader
+
+                // MARK: - Device Mode Selector (Gamepad vs Keyboard)
+                deviceSelectorBar
+
+                // MARK: - Main Interactive Mapping Surface
+                if selectedDeviceIndex == 0 {
+                    // Controller Mapping with Switch Pro Controller in the Center
+                    GlassCard {
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack {
+                                Label("Controller Button Mapping", systemImage: "gamecontroller.fill")
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    .foregroundColor(NXTheme.textPrimary)
+
+                                Spacer()
+
+                                Text(controllerService.isGamepadConnected ? controllerService.activeControllerName : "No Gamepad Connected (Using Virtual Pro Controller)")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(controllerService.isGamepadConnected ? Color(red: 0.13, green: 0.77, blue: 0.37) : NXTheme.textMuted)
                             }
-                            
-                            // Right Column: Triggers, D-Pad & System
-                            VStack(spacing: 10) {
-                                controlRow(switchButton: "Left Bumper (L)", keyDesc: "Q", detail: "Top Left Shoulder")
-                                controlRow(switchButton: "Right Bumper (R)", keyDesc: "E", detail: "Top Right Shoulder")
-                                controlRow(switchButton: "Left Trigger (ZL)", keyDesc: "Z", detail: "Analog ZL Trigger")
-                                controlRow(switchButton: "Right Trigger (ZR)", keyDesc: "C", detail: "Analog ZR Trigger")
-                                controlRow(switchButton: "Directional Pad (D-Pad)", keyDesc: "↑  ↓  ←  →", detail: "Keyboard Arrow Keys")
-                                controlRow(switchButton: "+ Button (Plus / Start)", keyDesc: "Return (Enter)", detail: "Pause / Main Menu")
-                                controlRow(switchButton: "− Button (Minus / Select)", keyDesc: "Tab", detail: "Map / Inventory")
-                                controlRow(switchButton: "Shake Controller", keyDesc: "Spacebar", detail: "Motion Shake (Mario Galaxy / Odyssey)")
-                            }
+
+                            Divider().opacity(0.2)
+
+                            ControllerMappingCalloutOverlay(
+                                profile: $activeProfile,
+                                pressedButtons: pressedButtons
+                            )
                         }
                     }
-                }
-                
-                // MARK: - Section 2: Mouse Touchscreen & Gestures
-                GlassCard {
-                    HStack(alignment: .top, spacing: 14) {
-                        Image(systemName: "cursorarrow.rays")
-                            .font(.system(size: 28))
-                            .foregroundColor(NXTheme.primary)
-                            .frame(width: 36)
-                        
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("Touchscreen Emulation (Mouse)")
-                                .font(.system(size: 13, weight: .bold, design: .rounded))
-                                .foregroundColor(NXTheme.textPrimary)
-                            Text("In games featuring touch controls or pointer navigation (e.g., Captain Toad, Super Mario Galaxy, and interactive menus):")
-                                .font(.system(size: 12))
-                                .foregroundColor(NXTheme.textSecondary)
-                            
-                            HStack(spacing: 8) {
-                                Text("Left-Click and Drag")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(NXTheme.primary.opacity(0.18))
-                                    .foregroundColor(NXTheme.secondary)
-                                    .cornerRadius(6)
-                                Text("→ Simulates capacitive touch gestures on the Switch screen")
+                } else {
+                    // Simple Keyboard Mapping View
+                    GlassCard {
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack {
+                                Label("Simple Keyboard Mapping", systemImage: "keyboard.fill")
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    .foregroundColor(NXTheme.textPrimary)
+
+                                Spacer()
+
+                                Text("Click any key button to rebind")
                                     .font(.system(size: 11))
-                                    .foregroundColor(NXTheme.textMuted)
+                                    .foregroundColor(NXTheme.secondary)
                             }
-                            .padding(.top, 2)
+
+                            Divider().opacity(0.2)
+
+                            SimpleKeyboardMappingView(profile: $activeProfile)
                         }
                     }
                 }
-                
-                // MARK: - Section 3: Physical Gamepads & Multiplayer Co-op
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Label("Physical Gamepads & Bluetooth Controllers", systemImage: "cable.connector")
-                                .symbolRenderingMode(.hierarchical)
-                                .font(.system(size: 13, weight: .bold, design: .rounded))
-                                .foregroundColor(NXTheme.textPrimary)
-                            Spacer()
-                            Text("Plug & Play")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
-                        }
-                        
-                        Text("Connect via Bluetooth or USB-C before or during gameplay. NxNative Launcher automatically maps standard inputs:")
-                            .font(.system(size: 12))
-                            .foregroundColor(NXTheme.textSecondary)
-                        
-                        VStack(alignment: .leading, spacing: 8) {
-                            bulletPoint("PlayStation DualSense / DualShock 4: Full native haptics and analog triggers.")
-                            bulletPoint("Xbox Wireless Controller: Immediate ABXY and trigger rumble support.")
-                            bulletPoint("Nintendo Switch Pro Controller: Exact 1:1 button layout matching original hardware.")
-                            bulletPoint("Nintendo Switch Joy-Cons: Supported as single horizontal pads or paired Joy-Con pair.")
-                        }
-                    }
-                }
+
+                // MARK: - Analog Stick Deadzone & Calibration (Enhancement 1)
+                AnalogDeadzoneTestView(deadzone: $activeProfile.analogDeadzone)
             }
             .padding(20)
         }
+        .onAppear {
+            activeProfile = profileManager.activeProfile
+            setupControllerPressMonitoring()
+        }
+        .onDisappear {
+            monitorTimer?.invalidate()
+            monitorTimer = nil
+        }
+        .onChange(of: profileManager.activeProfileId) { _ in
+            activeProfile = profileManager.activeProfile
+        }
+        .onChange(of: activeProfile) { updated in
+            profileManager.updateProfile(updated)
+        }
+        .sheet(isPresented: $showNewProfileAlert) {
+            newProfileSheet
+        }
     }
-    
-    private func controlRow(switchButton: String, keyDesc: String, detail: String) -> some View {
-        HStack(spacing: 10) {
-            Text(keyDesc)
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundColor(NXTheme.textPrimary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(NXTheme.glassSurfaceElevated)
-                .cornerRadius(6)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(NXTheme.specularRim, lineWidth: 0.8)
-                )
-                .shadow(color: Color.black.opacity(0.3), radius: 3, x: 0, y: 1)
-                .frame(minWidth: 100, alignment: .center)
-            
-            VStack(alignment: .leading, spacing: 1) {
-                Text(switchButton)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+
+    // MARK: - Profile Management Toolbar
+    private var profileManagementHeader: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "gamecontroller.fill")
+                .symbolRenderingMode(.hierarchical)
+                .font(.system(size: 28))
+                .foregroundColor(NXTheme.secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Controls & Gamepad Mapping")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
-                Text(detail)
-                    .font(.system(size: 10))
+                Text("Configure custom button bindings and profiles for every controller and keyboard.")
+                    .font(.system(size: 11))
                     .foregroundColor(NXTheme.textSecondary)
             }
+
             Spacer()
+
+            // Profile Picker
+            Menu {
+                ForEach(profileManager.profiles) { prof in
+                    Button(action: {
+                        SoundEffectService.shared.play(.click)
+                        profileManager.activeProfileId = prof.id
+                    }) {
+                        if prof.id == profileManager.activeProfileId {
+                            Label(prof.name, systemImage: "checkmark")
+                        } else {
+                            Text(prof.name)
+                        }
+                    }
+                }
+                Divider()
+                Button("New Profile...") {
+                    newProfileName = ""
+                    showNewProfileAlert = true
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text("Profile:")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(NXTheme.textSecondary)
+                    Text(activeProfile.name)
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundColor(NXTheme.textPrimary)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(NXTheme.glassSurfaceElevated)
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(NXTheme.specularRim, lineWidth: 0.8))
+            }
+            .menuStyle(.borderlessButton)
+
+            Button("Duplicate") {
+                SoundEffectService.shared.play(.click)
+                let copy = profileManager.duplicateProfile(activeProfile)
+                activeProfile = copy
+            }
+            .buttonStyle(NXSecondaryButtonStyle())
+            .controlSize(.small)
+
+            if !activeProfile.isDefault {
+                Button("Delete") {
+                    SoundEffectService.shared.play(.click)
+                    profileManager.deleteProfile(activeProfile)
+                }
+                .buttonStyle(NXSecondaryButtonStyle())
+                .controlSize(.small)
+            }
+
+            Button("Reset") {
+                SoundEffectService.shared.play(.click)
+                profileManager.resetActiveProfileToDefault()
+                activeProfile = profileManager.activeProfile
+            }
+            .buttonStyle(NXSecondaryButtonStyle())
+            .controlSize(.small)
         }
-        .padding(6)
-        .background(NXTheme.canvasObsidian.opacity(0.4))
-        .cornerRadius(8)
     }
-    
-    private func bulletPoint(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text("•")
-                .foregroundColor(NXTheme.secondary)
-                .font(.system(size: 12, weight: .bold))
-            Text(text)
-                .font(.system(size: 11))
-                .foregroundColor(NXTheme.textSecondary)
+
+    // MARK: - Device Mode Selector
+    private var deviceSelectorBar: some View {
+        HStack(spacing: 12) {
+            Picker("", selection: $selectedDeviceIndex) {
+                Text("Gamepad Controller (Switch Pro / Xbox / PS)").tag(0)
+                Text("Mac Keyboard & Mouse").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 420)
+
+            Spacer()
+
+            ControllerLiveStatusCard()
+                .frame(maxWidth: 320)
+        }
+    }
+
+    // MARK: - New Profile Sheet
+    private var newProfileSheet: some View {
+        VStack(spacing: 16) {
+            Text("Create New Controller Profile")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundColor(NXTheme.textPrimary)
+
+            TextField("Profile Name (e.g. Zelda Pro Controls)", text: $newProfileName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    showNewProfileAlert = false
+                }
+                .buttonStyle(NXSecondaryButtonStyle())
+
+                Button("Create") {
+                    guard !newProfileName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+                    let created = profileManager.createProfile(name: newProfileName, basedOn: activeProfile)
+                    activeProfile = created
+                    showNewProfileAlert = false
+                }
+                .buttonStyle(NXPrimaryButtonStyle())
+                .disabled(newProfileName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 340, height: 160)
+        .background(NXTheme.canvasObsidian)
+    }
+
+    private func setupControllerPressMonitoring() {
+        monitorTimer?.invalidate()
+        monitorTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [self] _ in
+            if let pad = GCController.controllers().first?.extendedGamepad {
+                var pressed = Set<SwitchButton>()
+                for (elemName, switchBtn) in activeProfile.gamepadBindings {
+                    if isGamepadElementPressed(pad: pad, element: elemName) {
+                        pressed.insert(switchBtn)
+                    }
+                }
+                self.pressedButtons = pressed
+            } else {
+                self.pressedButtons = []
+            }
+        }
+    }
+
+    private func isGamepadElementPressed(pad: GCExtendedGamepad, element: String) -> Bool {
+        switch element {
+        case "buttonA": return pad.buttonA.isPressed
+        case "buttonB": return pad.buttonB.isPressed
+        case "buttonX": return pad.buttonX.isPressed
+        case "buttonY": return pad.buttonY.isPressed
+        case "leftShoulder": return pad.leftShoulder.isPressed
+        case "rightShoulder": return pad.rightShoulder.isPressed
+        case "leftTrigger": return pad.leftTrigger.isPressed
+        case "rightTrigger": return pad.rightTrigger.isPressed
+        case "buttonMenu": return pad.buttonMenu.isPressed
+        case "buttonOptions": return pad.buttonOptions?.isPressed ?? false
+        case "leftThumbstickButton": return pad.leftThumbstickButton?.isPressed ?? false
+        case "rightThumbstickButton": return pad.rightThumbstickButton?.isPressed ?? false
+        case "dpad.up": return pad.dpad.up.isPressed
+        case "dpad.down": return pad.dpad.down.isPressed
+        case "dpad.left": return pad.dpad.left.isPressed
+        case "dpad.right": return pad.dpad.right.isPressed
+        default: return false
         }
     }
 }

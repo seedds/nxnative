@@ -13,8 +13,10 @@ public final class GameControllerService: ObservableObject {
     private var lastNavTime: TimeInterval = 0
     private let navCooldown: TimeInterval = 0.20
     private let stickDeadzone: Float = 0.35
+    private var homeButtonHoldTimer: Timer?
     
     private init() {
+        GCController.shouldMonitorBackgroundEvents = true
         setupObservers()
         refreshControllers()
     }
@@ -125,9 +127,53 @@ public final class GameControllerService: ObservableObject {
             if pressed { self?.triggerAction(.tabNext) }
         }
         
-        // Menu / Options
+        // Menu / Plus
         gamepad.buttonMenu.pressedChangedHandler = { [weak self] _, _, pressed in
             if pressed { self?.triggerAction(.menu) }
+        }
+        
+        // Options / Minus / Share / View
+        gamepad.buttonOptions?.pressedChangedHandler = { [weak self] _, _, pressed in
+            if pressed { self?.triggerAction(.options) }
+        }
+        
+        // Home Button (Xbox Logo / Guide): Pressed & held for 3 seconds quits game & brings NxNative to front
+        gamepad.buttonHome?.pressedChangedHandler = { [weak self] _, _, pressed in
+            if pressed {
+                self?.startHomeHoldTimer()
+            } else {
+                self?.cancelHomeHoldTimer()
+            }
+        }
+    }
+    
+    private func startHomeHoldTimer() {
+        homeButtonHoldTimer?.invalidate()
+        homeButtonHoldTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
+            self?.handleHomeHold3Seconds()
+        }
+    }
+    
+    private func cancelHomeHoldTimer() {
+        homeButtonHoldTimer?.invalidate()
+        homeButtonHoldTimer = nil
+    }
+    
+    private func handleHomeHold3Seconds() {
+        DispatchQueue.main.async {
+            // 1. Terminate running game instances (dmhost)
+            let killProc = Process()
+            killProc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            killProc.arguments = ["-TERM", "dmhost"]
+            try? killProc.run()
+            
+            // 2. Bring NxNative to front of other screens
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            if let window = NSApplication.shared.windows.first {
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
+            }
+            SoundEffectService.shared.play(.error)
         }
     }
     

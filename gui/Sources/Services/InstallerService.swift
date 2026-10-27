@@ -34,7 +34,7 @@ public final class InstallerService {
     
     public func uninstall(dependency: DependencyStatus, completion: @escaping (Bool) -> Void) {
         guard !dependency.isProtected else {
-            delegate?.installerDidProduceOutput("⚠️ \(dependency.name) is an essential system tool and cannot be uninstalled.")
+            delegate?.installerDidProduceOutput("[WARN] \(dependency.name) is an essential system tool and cannot be uninstalled.")
             completion(false)
             return
         }
@@ -86,9 +86,9 @@ public final class InstallerService {
                 guard let self = self else { return }
                 if !success {
                     overallSuccess = false
-                    self.delegate?.installerDidProduceOutput("⚠️ Failed to install \(item.name).")
+                    self.delegate?.installerDidProduceOutput("[FAIL] Failed to install \(item.name).")
                 } else {
-                    self.delegate?.installerDidProduceOutput("✓ \(item.name) installed successfully.")
+                    self.delegate?.installerDidProduceOutput("[OK] \(item.name) installed successfully.")
                 }
                 self.delegate?.installerDidFinishItem(item.name, success: success)
                 processNext()
@@ -126,9 +126,9 @@ public final class InstallerService {
                 guard let self = self else { return }
                 if !success {
                     overallSuccess = false
-                    self.delegate?.installerDidProduceOutput("⚠️ Failed to repair \(item.name).")
+                    self.delegate?.installerDidProduceOutput("[FAIL] Failed to repair \(item.name).")
                 } else {
-                    self.delegate?.installerDidProduceOutput("✓ \(item.name) repaired successfully.")
+                    self.delegate?.installerDidProduceOutput("[OK] \(item.name) repaired successfully.")
                 }
                 self.delegate?.installerDidFinishItem(item.name, success: success)
                 processNext()

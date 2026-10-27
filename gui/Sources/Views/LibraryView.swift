@@ -3,8 +3,7 @@ import AppKit
 
 public struct LibraryView: View {
     @ObservedObject public var viewModel: AppViewModel
-    @State private var gameToDelete: PortedGame? = nil
-    @State private var showDeleteConfirm: Bool = false
+    @ObservedObject private var controllerService = GameControllerService.shared
     
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -26,47 +25,85 @@ public struct LibraryView: View {
     }
     
     public var body: some View {
-        VStack(spacing: 0) {
-            // MARK: - Library Toolbar (Liquid Glass & Search)
-            toolbarView
-            
-            // MARK: - Console Game Showcase & Detail Deck
-            if filteredGames.isEmpty {
-                emptyLibraryView
-            } else {
-                ScrollView {
-                    VStack(spacing: 20) {
-                        // 1. Console Carousel (Elevated Cover on Focus)
-                        ConsoleGameCarouselView(viewModel: viewModel, games: filteredGames)
-                        
-                        // 2. Focused Game Detail Deck (Play, DLC, Sizes, Saves, Settings)
-                        if let selected = currentSelectedGame {
-                            GameDetailDeckView(game: selected, viewModel: viewModel) { target in
-                                self.gameToDelete = target
-                                self.showDeleteConfirm = true
+        ZStack {
+            VStack(spacing: 0) {
+                // MARK: - Library Toolbar (Liquid Glass, Search & Card Scale Slider)
+                LibraryToolbarView(viewModel: viewModel)
+                
+                // MARK: - Console Game Showcase & Detail Deck
+                if filteredGames.isEmpty {
+                    emptyLibraryView
+                } else {
+                    if controllerService.isGamepadConnected {
+                        // Gamepad Mode: Clean Console View with Official Portrait Covers
+                        VStack(spacing: 16) {
+                            Spacer()
+                            
+                            // Carousel with Portrait Console Box Art
+                            ConsoleGameCarouselView(viewModel: viewModel, games: filteredGames)
+                            
+                            // Clean Console Footer Action Hint (A / X to Play, Options for Menu)
+                            gamepadFooterBar
+                            
+                            Spacer()
+                        }
+                    } else {
+                        // Mouse/Keyboard Mode: Scrollable with Detail Deck
+                        ScrollView {
+                            VStack(spacing: 20) {
+                                // 1. Console Carousel (Portrait Official Cover Art on Focus)
+                                ConsoleGameCarouselView(viewModel: viewModel, games: filteredGames)
+                                
+                                // 2. Focused Game Detail Deck (Play, DLC, Sizes, Saves, Settings)
+                                if let selected = currentSelectedGame {
+                                    GameDetailDeckView(game: selected, viewModel: viewModel) { target in
+                                        viewModel.gameToDelete = target
+                                        viewModel.showDeleteConfirm = true
+                                    }
+                                    .padding(.horizontal, 24)
+                                }
                             }
-                            .padding(.horizontal, 24)
+                            .padding(.bottom, 20)
                         }
                     }
-                    .padding(.bottom, 20)
                 }
+                
+                Spacer(minLength: 0)
+                
+                // MARK: - Game Controller / Keyboard Prompt Bar
+                ControllerPromptBar(viewModel: viewModel)
             }
             
-            Spacer(minLength: 0)
-            
-            // MARK: - Game Controller Prompt Bar
-            ControllerPromptBar()
+            // Compact Console Action Sheet (Overlay when Game Selected)
+            if viewModel.isGameActionMenuPresented, let selected = currentSelectedGame {
+                CompactConsoleActionSheetView(
+                    game: selected,
+                    viewModel: viewModel,
+                    onDelete: { target in
+                        viewModel.gameToDelete = target
+                        viewModel.showDeleteConfirm = true
+                    },
+                    onDismiss: {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            viewModel.isGameActionMenuPresented = false
+                        }
+                    }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                .zIndex(100)
+            }
         }
+        .animation(.easeInOut(duration: 0.2), value: viewModel.isGameActionMenuPresented)
         .sheet(item: $viewModel.gameForSettingsSheet) { game in
             GameSettingsSheetView(viewModel: viewModel, game: game)
         }
         .confirmationDialog(
-            "Delete \(gameToDelete?.name ?? "this game")?",
-            isPresented: $showDeleteConfirm,
+            "Delete \(viewModel.gameToDelete?.name ?? "this game")?",
+            isPresented: $viewModel.showDeleteConfirm,
             titleVisibility: .visible
         ) {
             Button("Delete File", role: .destructive) {
-                if let g = gameToDelete {
+                if let g = viewModel.gameToDelete {
                     viewModel.deletePortedGame(g)
                 }
             }
@@ -76,87 +113,54 @@ public struct LibraryView: View {
         }
     }
     
-    private var toolbarView: some View {
-        HStack(spacing: 12) {
-            // Search Field
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(NXTheme.textSecondary)
-                TextField("Search ported games...", text: $viewModel.librarySearchText)
-                    .textFieldStyle(.plain)
-                    .foregroundColor(NXTheme.textPrimary)
-                if !viewModel.librarySearchText.isEmpty {
-                    Button(action: { viewModel.librarySearchText = "" }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(NXTheme.textMuted)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(NXTheme.glassSurfaceElevated.opacity(0.8))
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                }
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
-            )
-            .frame(maxWidth: 280)
-            
-            Spacer()
-            
-            // Library Folder Indicator
+    private var gamepadFooterBar: some View {
+        HStack(spacing: 14) {
             HStack(spacing: 6) {
-                Image(systemName: "folder")
-                    .foregroundColor(NXTheme.secondary)
-                Text(viewModel.libraryFolder?.lastPathComponent ?? "Default Games")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(NXTheme.textSecondary)
-                
-                Button("Change...") {
-                    SoundEffectService.shared.play(.click)
-                    viewModel.selectLibraryFolder()
+                HStack(spacing: 2) {
+                    Text(controllerService.activeBrand == .playstation ? "✕" : "A")
+                        .font(.system(size: 10, weight: .black, design: .rounded))
+                        .foregroundColor(.white)
+                        .frame(width: 18, height: 18)
+                        .background(Circle().fill(Color(red: 0.06, green: 0.49, blue: 0.06)))
+                    
+                    Text("/")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(NXTheme.textMuted)
+                    
+                    Text(controllerService.activeBrand == .playstation ? "□" : "X")
+                        .font(.system(size: 10, weight: .black, design: .rounded))
+                        .foregroundColor(.white)
+                        .frame(width: 18, height: 18)
+                        .background(Circle().fill(Color(red: 0.0, green: 0.47, blue: 0.84)))
                 }
-                .buttonStyle(NXSecondaryButtonStyle())
-                .controlSize(.small)
+                
+                Text("Play Game")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundColor(NXTheme.textPrimary)
             }
             
-            Button(action: {
-                SoundEffectService.shared.play(.click)
-                viewModel.refreshLibrary()
-            }) {
-                HStack(spacing: 4) {
-                    if viewModel.isScanningLibrary {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    Text("Refresh")
-                }
+            Text("·")
+                .foregroundColor(NXTheme.textMuted)
+            
+            HStack(spacing: 6) {
+                Text(controllerService.activeBrand == .xbox ? "⧉" : (controllerService.activeBrand == .playstation ? "OPT" : "−"))
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2.5)
+                    .background(Capsule().fill(Color(white: 0.22)))
+                
+                Text("Game Options")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundColor(NXTheme.textSecondary)
             }
-            .buttonStyle(NXSecondaryButtonStyle())
-            .controlSize(.small)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 10)
-        .background(
-            ZStack {
-                NXTheme.canvasObsidian.opacity(0.6)
-                Rectangle().fill(.ultraThinMaterial)
-            }
-        )
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(NXTheme.glassSurfaceElevated.opacity(0.75))
+        .clipShape(Capsule())
         .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundColor(NXTheme.borderSubtle),
-            alignment: .bottom
+            Capsule().strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
         )
     }
     
@@ -186,3 +190,4 @@ public struct LibraryView: View {
         .padding(40)
     }
 }
+

@@ -86,20 +86,135 @@ static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     dm_input_set(g_btn, lx, ly, 0, 0);
 }
-static int key_bit(unsigned short code) {
-    switch (code) {
-        case 38: return 0;  case 40: return 1;  case 32: return 2;  case 34: return 3;    // J K U I → A B X Y
-        case 3: return 4;   case 5: return 5;                                            // F G → press stick
-        case 12: return 6;  case 14: return 7;  case 6: return 8;   case 8: return 9;    // Q E Z C → L R ZL ZR
-        case 36: return 10; case 48: return 11;                                          // Return Tab → + −
-        case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15; // ← ↑ → ↓
+
+// Dynamic Input Mapping System (Ryujinx-style profile support)
+static int g_custom_map_loaded = 0;
+static int g_key_map[256];
+static unsigned short g_mov_up = 13, g_mov_left = 0, g_mov_down = 1, g_mov_right = 2;
+static float g_deadzone = 0.10f;
+static uint64_t g_elem_a = DM_BTN_B;
+static uint64_t g_elem_b = DM_BTN_A;
+static uint64_t g_elem_x = DM_BTN_Y;
+static uint64_t g_elem_y = DM_BTN_X;
+static uint64_t g_elem_l = DM_BTN_L;
+static uint64_t g_elem_r = DM_BTN_R;
+static uint64_t g_elem_zl = DM_BTN_ZL;
+static uint64_t g_elem_zr = DM_BTN_ZR;
+static uint64_t g_elem_plus = DM_BTN_PLUS;
+static uint64_t g_elem_minus = DM_BTN_MINUS;
+static uint64_t g_elem_ls = DM_BTN_LS;
+static uint64_t g_elem_rs = DM_BTN_RS;
+static uint64_t g_elem_dup = DM_BTN_UP;
+static uint64_t g_elem_ddown = DM_BTN_DOWN;
+static uint64_t g_elem_dleft = DM_BTN_LEFT;
+static uint64_t g_elem_dright = DM_BTN_RIGHT;
+
+static uint64_t parse_switch_btn(NSString *s) {
+    if (!s) return 0;
+    if ([s isEqualToString:@"A"]) return DM_BTN_A;
+    if ([s isEqualToString:@"B"]) return DM_BTN_B;
+    if ([s isEqualToString:@"X"]) return DM_BTN_X;
+    if ([s isEqualToString:@"Y"]) return DM_BTN_Y;
+    if ([s isEqualToString:@"L"]) return DM_BTN_L;
+    if ([s isEqualToString:@"R"]) return DM_BTN_R;
+    if ([s isEqualToString:@"ZL"]) return DM_BTN_ZL;
+    if ([s isEqualToString:@"ZR"]) return DM_BTN_ZR;
+    if ([s isEqualToString:@"+"]) return DM_BTN_PLUS;
+    if ([s isEqualToString:@"−"] || [s isEqualToString:@"-"]) return DM_BTN_MINUS;
+    if ([s isEqualToString:@"L3"]) return DM_BTN_LS;
+    if ([s isEqualToString:@"R3"]) return DM_BTN_RS;
+    if ([s isEqualToString:@"D-Pad Left"]) return DM_BTN_LEFT;
+    if ([s isEqualToString:@"D-Pad Up"]) return DM_BTN_UP;
+    if ([s isEqualToString:@"D-Pad Right"]) return DM_BTN_RIGHT;
+    if ([s isEqualToString:@"D-Pad Down"]) return DM_BTN_DOWN;
+    return 0;
+}
+
+static void load_custom_input_mapping(void) {
+    if (g_custom_map_loaded) return;
+    g_custom_map_loaded = 1;
+    for (int i = 0; i < 256; i++) g_key_map[i] = -1;
+    // Default key map
+    g_key_map[38] = 0;  g_key_map[40] = 1;  g_key_map[32] = 2;  g_key_map[34] = 3;   // J K U I -> A B X Y
+    g_key_map[3] = 4;   g_key_map[5] = 5;                                            // F G -> L3 R3
+    g_key_map[12] = 6;  g_key_map[14] = 7;  g_key_map[6] = 8;   g_key_map[8] = 9;    // Q E Z C -> L R ZL ZR
+    g_key_map[36] = 10; g_key_map[48] = 11;                                         // Return Tab -> + -
+    g_key_map[123] = 12; g_key_map[126] = 13; g_key_map[124] = 14; g_key_map[125] = 15; // Left Up Right Down
+
+    NSString *bundlePath = [[NSBundle mainBundle] pathForResource:@"input_mapping" ofType:@"json" inDirectory:@"dm"];
+    NSString *appSupPath = [@"~/Library/Application Support/nxnative/input_mapping.json" stringByExpandingTildeInPath];
+    // User preferences in Application Support take precedence over bundled default
+    NSString *targetPath = appSupPath;
+    if (!targetPath || ![[NSFileManager defaultManager] fileExistsAtPath:targetPath]) {
+        targetPath = bundlePath;
     }
+    if (!targetPath || ![[NSFileManager defaultManager] fileExistsAtPath:targetPath]) return;
+
+    NSData *data = [NSData dataWithContentsOfFile:targetPath];
+    if (!data) return;
+    NSDictionary *dict = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![dict isKindOfClass:[NSDictionary class]]) return;
+
+    if (dict[@"analogDeadzone"]) {
+        g_deadzone = [dict[@"analogDeadzone"] floatValue];
+    }
+    NSDictionary *mov = dict[@"keyboardMovement"];
+    if ([mov isKindOfClass:[NSDictionary class]]) {
+        if (mov[@"up"]) g_mov_up = [mov[@"up"] unsignedShortValue];
+        if (mov[@"left"]) g_mov_left = [mov[@"left"] unsignedShortValue];
+        if (mov[@"down"]) g_mov_down = [mov[@"down"] unsignedShortValue];
+        if (mov[@"right"]) g_mov_right = [mov[@"right"] unsignedShortValue];
+    }
+    NSDictionary *kb = dict[@"keyboard"];
+    if ([kb isKindOfClass:[NSDictionary class]]) {
+        for (int i = 0; i < 256; i++) g_key_map[i] = -1;
+        for (NSString *keyStr in kb) {
+            int code = [keyStr intValue];
+            if (code >= 0 && code < 256) {
+                uint64_t btn = parse_switch_btn(kb[keyStr]);
+                if (btn) {
+                    for (int b = 0; b < 16; b++) {
+                        if (btn == (1ull << b)) { g_key_map[code] = b; break; }
+                    }
+                }
+            }
+        }
+    }
+    NSDictionary *gp = dict[@"gamepad"];
+    if ([gp isKindOfClass:[NSDictionary class]]) {
+        if (gp[@"buttonA"]) g_elem_a = parse_switch_btn(gp[@"buttonA"]);
+        if (gp[@"buttonB"]) g_elem_b = parse_switch_btn(gp[@"buttonB"]);
+        if (gp[@"buttonX"]) g_elem_x = parse_switch_btn(gp[@"buttonX"]);
+        if (gp[@"buttonY"]) g_elem_y = parse_switch_btn(gp[@"buttonY"]);
+        if (gp[@"leftShoulder"]) g_elem_l = parse_switch_btn(gp[@"leftShoulder"]);
+        if (gp[@"rightShoulder"]) g_elem_r = parse_switch_btn(gp[@"rightShoulder"]);
+        if (gp[@"leftTrigger"]) g_elem_zl = parse_switch_btn(gp[@"leftTrigger"]);
+        if (gp[@"rightTrigger"]) g_elem_zr = parse_switch_btn(gp[@"rightTrigger"]);
+        if (gp[@"leftThumbstickButton"]) g_elem_ls = parse_switch_btn(gp[@"leftThumbstickButton"]);
+        if (gp[@"rightThumbstickButton"]) g_elem_rs = parse_switch_btn(gp[@"rightThumbstickButton"]);
+        if (gp[@"buttonMenu"]) g_elem_plus = parse_switch_btn(gp[@"buttonMenu"]);
+        if (gp[@"buttonOptions"]) g_elem_minus = parse_switch_btn(gp[@"buttonOptions"]);
+        if (gp[@"dpad.up"]) g_elem_dup = parse_switch_btn(gp[@"dpad.up"]);
+        if (gp[@"dpad.down"]) g_elem_ddown = parse_switch_btn(gp[@"dpad.down"]);
+        if (gp[@"dpad.left"]) g_elem_dleft = parse_switch_btn(gp[@"dpad.left"]);
+        if (gp[@"dpad.right"]) g_elem_dright = parse_switch_btn(gp[@"dpad.right"]);
+    }
+    LOG("custom input mapping loaded from %s (profile: %s, deadzone: %.2f)", [targetPath UTF8String], [dict[@"name"] UTF8String] ?: "default", g_deadzone);
+}
+
+static int key_bit(unsigned short code) {
+    if (code < 256) return g_key_map[code];
     return -1;
 }
+
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
+    load_custom_input_mapping();
     unsigned short c = e.keyCode;
-    switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
+    if (c == g_mov_up) g_w = down;
+    else if (c == g_mov_left) g_a = down;
+    else if (c == g_mov_down) g_s = down;
+    else if (c == g_mov_right) g_d = down;
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
     g_btn = down ? (g_btn | m) : (g_btn & ~m);
@@ -114,17 +229,40 @@ static void on_key(NSEvent *e, int down) {
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_kbd_own;
-static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
+static int32_t pad_axis(float v) {
+    if (fabsf(v) < g_deadzone) return 0;
+    return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX);
+}
+
+static uint64_t g_home_held_t0 = 0;
+static void check_xbox_home_button(GCExtendedGamepad *g) {
+    if (g.buttonHome && g.buttonHome.isPressed) {
+        if (!g_home_held_t0) {
+            g_home_held_t0 = now_ns();
+        } else if (now_ns() - g_home_held_t0 >= 3000000000ull) { // 3 seconds held!
+            LOG("Xbox Logo / Home button held for 3 seconds: bringing NxNative to front and quitting game");
+            g_home_held_t0 = 0;
+            // Activate NxNative in front of other screens and quit
+            system("open -a NxNative_Launcher 2>/dev/null || osascript -e 'tell application \"NxNative_Launcher\" to activate' 2>/dev/null &");
+            exit(0);
+        }
+    } else {
+        g_home_held_t0 = 0;
+    }
+}
+
 static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
+    load_custom_input_mapping();
+    check_xbox_home_button(g);
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
     uint64_t m = 0;
     #define K(btn, bit) if (btn.isPressed) m |= bit
-    K(g.buttonB, DM_BTN_A); K(g.buttonA, DM_BTN_B); K(g.buttonY, DM_BTN_X); K(g.buttonX, DM_BTN_Y);   // by position: right A, bottom B, top X, left Y
-    K(g.leftShoulder, DM_BTN_L); K(g.rightShoulder, DM_BTN_R); K(g.leftTrigger, DM_BTN_ZL); K(g.rightTrigger, DM_BTN_ZR);
-    K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
-    K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
+    K(g.buttonA, g_elem_a); K(g.buttonB, g_elem_b); K(g.buttonX, g_elem_x); K(g.buttonY, g_elem_y);
+    K(g.leftShoulder, g_elem_l); K(g.rightShoulder, g_elem_r); K(g.leftTrigger, g_elem_zl); K(g.rightTrigger, g_elem_zr);
+    K(g.buttonMenu, g_elem_plus); K(g.buttonOptions, g_elem_minus); K(g.leftThumbstickButton, g_elem_ls); K(g.rightThumbstickButton, g_elem_rs);
+    K(g.dpad.left, g_elem_dleft); K(g.dpad.up, g_elem_dup); K(g.dpad.right, g_elem_dright); K(g.dpad.down, g_elem_ddown);
     #undef K
     dm_pad_set_player(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
 }

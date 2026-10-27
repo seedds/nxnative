@@ -17,6 +17,7 @@ pad_layout	full
 
 # ---- Versions ----
 build	v720896	1.4.3	main=277178b7dba1b6d4949a84778d4abc58	subsdk0=f39f4c431234c72eb520cfdd1001bbcf	sdk=574284b40c06cf1821a44857939083be
+build	v720896	1.4.2	main=5cb42b1cf25469fb0635fd046453d843	subsdk0=f39f4c431234c72eb520cfdd1001bbcf	sdk=574284b40c06cf1821a44857939083be
 package	v720896
 shader_versions	v720896
 

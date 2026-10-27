@@ -52,6 +52,33 @@ public enum GamepadBrand: String, CaseIterable, Identifiable {
         case .generic: return "L / R"
         }
     }
+    
+    public var leftShoulderName: String {
+        switch self {
+        case .nintendoSwitch: return "L"
+        case .xbox: return "LB"
+        case .playstation: return "L1"
+        case .generic: return "L"
+        }
+    }
+    
+    public var rightShoulderName: String {
+        switch self {
+        case .nintendoSwitch: return "R"
+        case .xbox: return "RB"
+        case .playstation: return "R1"
+        case .generic: return "R"
+        }
+    }
+    
+    public var optionsButtonName: String {
+        switch self {
+        case .nintendoSwitch: return "− (Options)"
+        case .xbox: return "⧉ (Options)"
+        case .playstation: return "Options"
+        case .generic: return "Select"
+        }
+    }
 }
 
 public enum GamepadAction: Hashable {
@@ -61,9 +88,10 @@ public enum GamepadAction: Hashable {
     case navigateRight
     case confirm           // A or Cross
     case cancel            // B or Circle
-    case secondaryAction   // X or Square (Settings)
-    case contextAction     // Y or Triangle (Save files)
+    case secondaryAction   // X or Square
+    case contextAction     // Y or Triangle
     case tabPrevious       // Left Shoulder (L / LB)
     case tabNext           // Right Shoulder (R / RB)
-    case menu              // Plus / Start
+    case menu              // Plus / Start / Menu
+    case options           // Minus / View / Options
 }

@@ -22,22 +22,24 @@ public struct GameRuntimeConfig: Codable, Equatable {
     }
     
     public func toEnvironmentDict() -> [String: String] {
+        let posixLocale = Locale(identifier: "en_US_POSIX")
         return [
             "DM_FPS_TARGET": enable60FPS ? "60" : "30",
             "DM_METAL_HUD": enableMetalHUD ? "1" : "0",
             "DM_OPMODE": isDockedMode ? "1" : "0",
-            "DM_RENDER_SCALE": String(format: "%.2f", renderScale),
+            "DM_RENDER_SCALE": String(format: "%.2f", locale: posixLocale, renderScale),
             "DM_PRESENT_UPSCALE": enableMetalFXUpscale ? "metalfx" : "off"
         ]
     }
     
     public func envFileContent() -> String {
+        let posixLocale = Locale(identifier: "en_US_POSIX")
         return """
         # nxnative runtime configuration
         DM_FPS_TARGET=\(enable60FPS ? "60" : "30")
         DM_METAL_HUD=\(enableMetalHUD ? "1" : "0")
         DM_OPMODE=\(isDockedMode ? "1" : "0")
-        DM_RENDER_SCALE=\(String(format: "%.2f", renderScale))
+        DM_RENDER_SCALE=\(String(format: "%.2f", locale: posixLocale, renderScale))
         DM_PRESENT_UPSCALE=\(enableMetalFXUpscale ? "metalfx" : "off")
         """
     }
@@ -85,14 +87,17 @@ public struct GameRuntimeConfig: Codable, Equatable {
         let content = envFileContent()
         let fm = FileManager.default
         
-        // 1. Write to ~/Library/Application Support/nxnative/<titleId>/env.txt
+        // 1. Write to ~/Library/Application Support/nxnative/<titleId>/env.txt (both cases to avoid mismatch)
         if let titleId = game.titleId, !titleId.isEmpty {
-            let appSupDir = fm.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/nxnative")
-                .appendingPathComponent(titleId)
-            try? fm.createDirectory(at: appSupDir, withIntermediateDirectories: true)
-            let envFile = appSupDir.appendingPathComponent("env.txt")
-            try? content.write(to: envFile, atomically: true, encoding: .utf8)
+            let ids = Set([titleId, titleId.uppercased(), titleId.lowercased()])
+            for tid in ids {
+                let appSupDir = fm.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Library/Application Support/nxnative")
+                    .appendingPathComponent(tid)
+                try? fm.createDirectory(at: appSupDir, withIntermediateDirectories: true)
+                let envFile = appSupDir.appendingPathComponent("env.txt")
+                try? content.write(to: envFile, atomically: true, encoding: .utf8)
+            }
         }
         
         // 2. Also write to <Game.app>/Contents/Resources/dm/env.txt

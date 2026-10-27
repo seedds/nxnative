@@ -1,6 +1,6 @@
 import Foundation
 
-public enum LogLevel {
+public enum LogLevel: String {
     case info
     case step
     case success

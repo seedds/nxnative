@@ -65,6 +65,11 @@ public struct MainView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    
+                    // Persistent Controller Prompt Bar across tabs (when not handled inside tab 1)
+                    if viewModel.selectedTab != 1 {
+                        ControllerPromptBar(viewModel: viewModel)
+                    }
                 }
             }
             .onAppear {
@@ -75,6 +80,11 @@ public struct MainView: View {
             }
         }
         .frame(minWidth: 880, minHeight: 620)
+        .background(
+            KeyboardNavBridge { key in
+                viewModel.handleKeyboardKey(key)
+            }
+        )
     }
     
     private var navigationHeader: some View {

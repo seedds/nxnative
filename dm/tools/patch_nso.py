@@ -20,8 +20,21 @@ from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
 import nso_asm
 from nso_asm import *   # the instruction encoders (B, ADRP, LDRX, ...), shared with the per-build patch files
 
+def code_start(d):
+    """Where the code in the text segment starts: 0x80 in an NRO, 0 in an NSO. An NRO's text segment begins at file and memory
+    offset 0 with the file's own header in it (the start word, the MOD0 offset, NRO0 at +0x10, the segment table at +0x20, the
+    build ID at +0x40), so scanning it from 0 read the header as instructions: the build ID decoded as "ldr x18, #…" and stopped
+    Final Fantasy X/X-2 HD Remaster's rewrite (GitHub issue LNPANDY/NX2Apple#14). An NSO's text holds code from 0."""
+    return 0x80 if d[0x10:0x14] == b'NRO0' else 0
+
+def code_ranges(data_blocks, text_end, start=0):
+    """The text's code ranges: the gaps between its data blocks (nso_code.data_blocks), none of them before `start` (code_start)"""
+    gaps = zip([0] + [e for _, e in data_blocks], [s for s, _ in data_blocks] + [text_end])
+    return [(max(s, start), e) for s, e in gaps if e > max(s, start)]
+
 src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 d = open(src, 'rb').read()
+CODE_START = code_start(d)
 if d[0x10:0x14] == b'NRO0':
     # An NRO (a module the game loads at run time with nn::ro, Super Smash Bros. Ultimate's fighter code): the file is the image itself, each segment stored at its memory offset
     # and uncompressed; +0x20 text, +0x28 ro, +0x30 data as {offset, size}, +0x38 bss size, +0x40 the build ID. Rewritten as an NSO of the same layout would be
@@ -463,14 +476,14 @@ for _ in range(nfde):
     a, s = rd(o, tenc); o += s
     _, s = rd(o, tenc); o += s
     starts.add(a)
-starts = sorted(x for x in starts if x < TEXT_END)
+starts = sorted(x for x in starts if CODE_START <= x < TEXT_END)
 
 # ---- Linear scan to find all rewrite points (not relying on register read/write reports) ----
 # Data blocks in the text (nso_code.py: Absolum's main starts with 1.7 MB of them) are not code: words there that read as rewrite sites are left alone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nso_code
 DATA_BLOCKS = nso_code.data_blocks(IMG, TEXT_END, md)
-CODE_RANGES = list(zip([0] + [e for _, e in DATA_BLOCKS], [s for s, _ in DATA_BLOCKS] + [TEXT_END]))
+CODE_RANGES = code_ranges(DATA_BLOCKS, TEXT_END, CODE_START)
 md_lite = Cs(CS_ARCH_ARM64, CS_MODE_ARM)   # no details: the x18 scan reads only the operand text
 R18 = re.compile(r'\b[xw]18\b')
 def x18_words(lo, hi):

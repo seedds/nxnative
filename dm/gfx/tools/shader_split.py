@@ -863,6 +863,80 @@ def nlg_patch_section(tab, order, s, old, body, cut, end, size):
         struct.pack_into('<I', tab, 12 * i + 8, cur); cur += n
     return bytes(buf[:size])
 
+def nlg4_index(d, label):
+    """Next Level Games' archive index, version 4 (Mario Strikers: Battle League: every '.dict' in RomFS): u32 magic 0xa9f32458, u8 4, u8 4, u8 3 (zstd), u8 0, two 16-byte hashes,
+    u32 stored length of the index (one zstd frame from +0x40), u32 hash pair count, u32 entry count, u32 frame count, u32 0, u8 chunk count, u8 4, u8 16, u8 0. The index: one 0x1c-byte
+    chunk per section {u32 offset, stored length, length, first frame, frame count, mask, u8 log2 alignment, u8 file (1-based in the names), u8 flags, u8 0} (chunk i holds section i),
+    the entries (12 bytes {u32 kind: type in bits 0..7, bit 23 a list of w1 entries from w2, section in bits 24..31; u32 length, u32 offset in the section}), the hash pairs, one
+    {u32 stored, u32 inflated} per zstd frame (a chunk is its frames back to back), then the file names ('data', 'nxpc', 'debug'). → (chunks, entries, frames, names)"""
+    zstd = zstd_mod()
+    isz, nlist, nent, nframe = struct.unpack_from('<4I', d, 0x28)
+    ix = zstd.decompress(d[0x40:0x40 + isz]); nchunk = d[0x3c]
+    need = 0x1c * nchunk + 12 * nent + 8 * nlist + 8 * nframe
+    if len(ix) < need: red(f'{label}: the version 4 index inflates to {len(ix):#x} bytes; {nchunk} chunks, {nent} entries, {nlist} hash pairs and {nframe} frames need {need:#x}')
+    chunks = [struct.unpack_from('<6I4B', ix, 0x1c * i) for i in range(nchunk)]
+    p = 0x1c * nchunk; ents = list(struct.iter_unpack('<3I', ix[p:p + 12 * nent])); p += 12 * nent + 8 * nlist
+    frames = list(struct.iter_unpack('<2I', ix[p:p + 8 * nframe])); p += 8 * nframe
+    return chunks, ents, frames, [n.decode('latin-1') for n in ix[p:].split(b'\0')]
+
+def nlg4_shaders(path, d, label, out):
+    """Shaders of a version 4 Next Level Games archive (nlg4_index; Mario Strikers: Battle League, init.dict: 2,648 in the base game, 3,149 with update 1.3.2). A shader is an entry of
+    type 1 (its code area, in section 1) followed by an entry of type 2 (its control section, 0x880 bytes, in section 2); the next two entries are the same in sections 3 and 4, which point
+    into '.nxpc', which is not shipped. An update ships '<name>.patch' (version 5): u32 magic, u8 4, u8 5, u8 3, u8 0, u32 inflated length, u32 hash pair count, u32 entry count, u32
+    section count, then one zstd frame: the new entry table, the hash pairs, 20 bytes per section {u32 new length, u32 0, u32 start and u32 end of the old data the game's in-place
+    packing overwrites, u32 log2 alignment}, then the new data. An entry offset below the old section's length reads the old section, the rest the new data at offset − old length.
+    The UI layouts' shaders are BNSH files, entries of type 65 (the other entries of that type are small records): 6 in global, 18 in FrontEnd/Persistent and 2 in
+    ClubStadium/Tutorial_TutorialCommon, 41 shaders, the same in each. The menus draw with them: without them 8 keys were missing from the map on the way into the menus"""
+    zstd = zstd_mod(); stem = path[:-len('.dict')]
+    chunks, ents, frames, names = nlg4_index(d, label)
+    cache, files = {}, {}
+    def chunk(ci):
+        if ci not in cache:
+            off, stored, n, f0, nf, _, _, fi, _, _ = chunks[ci]
+            fp = stem + '.' + names[fi - 1] if 0 < fi <= len(names) else None
+            if not fp or not os.path.exists(fp): cache[ci] = None; return None
+            if fp not in files: files[fp] = open(fp, 'rb').read()
+            raw = files[fp][off:off + stored]
+            if stored == n: cache[ci] = raw
+            else:
+                parts, q = [], 0
+                for cs, us in frames[f0:f0 + nf]: parts.append(zstd.decompress(raw[q:q + cs])); q += cs
+                cache[ci] = b''.join(parts)
+            if len(cache[ci]) != n: red(f'{label}: chunk {ci} holds {len(cache[ci]):#x} bytes, the index says {n:#x}')
+        return cache[ci]
+    old, body = [c[2] for c in chunks], None
+    if os.path.exists(stem + '.patch'):
+        pd = open(stem + '.patch', 'rb').read()
+        if pd[:4] != NLG_DICT or pd[4:6] != b'\x04\x05': red(f'{label}: patch {pd[:8].hex()} is not version 5')
+        bn, ntop, nent, nsec = struct.unpack_from('<4I', pd, 8)
+        pz = zstd.decompress(pd[0x18:])
+        if len(pz) != bn: red(f'{label}: the patch inflates to {len(pz):#x} bytes, its header says {bn:#x}')
+        if len(pz) < 12 * nent + 8 * ntop + 20 * nsec: red(f'{label}: the patch inflates to {len(pz):#x} bytes, too few for {nent} entries, {ntop} hash pairs and {nsec} sections')
+        ents = list(struct.iter_unpack('<3I', pz[:12 * nent])); body = pz[12 * nent + 8 * ntop + 20 * nsec:]
+    def get(sec, off, n):
+        if off == 0xffffffff or sec >= len(chunks): return None
+        if off < old[sec]:
+            c = chunk(sec); return None if c is None else c[off:off + n]
+        if body is None: red(f'{label}: section {sec} offset {off:#x} is past its {old[sec]:#x} bytes and there is no patch'); return None
+        return body[off - old[sec]:off - old[sec] + n]
+    bad = []
+    for k in range(len(ents) - 1):
+        (w0, n0, o0), (w1, n1, o1) = ents[k], ents[k + 1]
+        if (w0 | w1) & 0x800000 or (w0 & 0xff, w1 & 0xff) != (1, 2): continue
+        ctl = get(w1 >> 24, o1, n1)
+        if not ctl or ctl[:4] != CTL_MAGIC: continue
+        cd = get(w0 >> 24, o0, n0)
+        if cd is None: continue
+        cd = cd[:struct.unpack_from('<I', ctl, 0x704)[0]]
+        st = glslc_stage(ctl, cd); why = check(label, st, ctl, cd) if st else 'no stage'
+        if why: bad.append(f'entry {k}: {why}'); continue
+        out.append((f'{label}#NLG4:{w1 >> 24}@{o1:#x}', st, ctl, cd))
+    if bad: red(f'{label}: {len(bad)} version 4 shaders do not check, the first: {bad[0]}')
+    for w, n, o in ents:   # BNSH files: entries of type 65
+        if w & 0x800000 or w & 0xff != 65: continue
+        bd = get(w >> 24, o, n)
+        if bd and bd[:8] == b'BNSH\0\0\0\0' and bd[0x60:0x64] == b'grsc': out.extend(bnsh_shaders(bd, 0, f'{label}#NLG4:{w >> 24}@{o:#x}'))
+
 def nlg_shaders(path, label, out):
     """Shaders of a Next Level Games archive (nlg_dict). Luigi's Mansion 3 keeps all 5,149 of the base game (5,317 in update 1.4.0) in init: section 8 of each variant starts with the control
     sections back to back (0x850 bytes each), section 7 with their code areas in the same order (a compute code area without a header), and the engine makes one program per stage. An update
@@ -872,6 +946,7 @@ def nlg_shaders(path, label, out):
     Every variant whose files are in RomFS is read (the 13 even records; the odd ones point into '.nxpc', which is not shipped), and the shaders found pair by order (checked one by one)"""
     import zlib
     d = open(path, 'rb').read(); stem = path[:-len('.dict')]
+    if d[5] == 4: return nlg4_shaders(path, d, label, out)   # index revision 4 (Mario Strikers: Battle League); Luigi's Mansion 3's is 1
     comp, recs, chunks, names = nlg_dict(d, label)
     files = {i: open(stem + nm, 'rb').read() for i, nm in enumerate(names) if os.path.exists(stem + nm)}
     patch = open(stem + '.patch', 'rb').read() if os.path.exists(stem + '.patch') else None

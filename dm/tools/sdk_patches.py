@@ -61,6 +61,16 @@ CUTS = {
     (0x37c3b0, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x37c44c, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
   ],
+  # Mario Strikers: Battle League 1.3.2 (v393216) sdk (SDK 13.3.0): the same node area cut. nninitStartup (main+0x620420) calls StandardAllocator::Initialize(nullptr, size) with virtual
+  # address memory, which aborted at its CentralHeap::Init (sdk+0x32472c). The constructor is at sdk+0x37bce0 (limit = alias start + 0x3fe00000 at +0x10, the area then registered as
+  # occupied at +0x37bd8c). VammManager::AllocateAddressRegion's placement (sdk+0x37be80) aligns a region of 1 GB or more to 1 GB, as Sea of Stars's SDK 16.2.0 build; 32 MB instead,
+  # so the game's 3 GB allocator (cut in its patches.py) starts right after the node area. The SDK-wide MATCH_CUTS below give this build the same three cuts (node area
+  # implementation 3 of 5, alignment 2 of 3); they are registered because the game's profile names the build
+  '7f7710633c020a32018c8715523ebee7': [
+    (0x37bcf0, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x37bd8c, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+    (0x37beec, '0a00a852', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more mov w10,#0x40000000 → mov w10,#0x2000000 (32 MB)'),
+  ],
   # AI: THE SOMNIUM FILES - nirvanA Initiative 1.0.2 (v131072) sdk (SDK 13.3.5, Unity 2020.3.30f1): the same node area cut. nninitStartup (main+0x493300) calls
   # StandardAllocator::Initialize(nullptr, pool − used) with virtual address memory, as Patrick's Parabox. The constructor is at sdk+0x37c130 (limit = alias start + 0x3fe00000 at +0x28,
   # a unit heap of 0x30-byte nodes, the area then registered as occupied at +0x37c1dc)

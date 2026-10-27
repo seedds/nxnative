@@ -173,7 +173,7 @@ Under each game: the IPA's size, and "60 fps with 1.2.0" where the game runs at 
 </tr>
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/blasphemous.jpg" width="256" alt="Blasphemous"><br><a href="dm/games/0100698009C6E000/README.md">Blasphemous</a><br><sub>~0.9 GB</sub></td>
-<td></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/mario-strikers-battle-league.jpg" width="256" alt="Mario Strikers: Battle League"><br><a href="dm/games/010019401051C000/README.md">Mario Strikers: Battle League</a></td>
 <td></td>
 </tr>
 </table>

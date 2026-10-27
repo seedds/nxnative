@@ -1,0 +1,45 @@
+# Game profile of Mario Strikers: Battle League (Switch, update 1.3.2 = v393216). Plays on the Mac: its menus and exhibition matches
+# Format: see dm/games/README.md
+# Next Level Games' engine, SDK 13.3.0, with Havok, Wwise and NEX / Pia. Everything but the Wwise banks is in the engine's own archives, version 4 of the format Luigi's Mansion 3 uses
+# (<name>.dict indexes zstd chunks in <name>.data; update 1.3.2 adds <name>.patch, version 5): shader_split.py nlg4_shaders reads 3,149 shaders from init and the 41 of the UI layouts'
+# BNSH files (global, FrontEnd/Persistent, ClubStadium/Tutorial_TutorialCommon); main holds 40 more (3,230 in all)
+
+# ---- Identity ----
+title_id	010019401051C000
+program_id	010019401051C000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Mario Strikers: Battle League
+ipa	MarioStrikersBattleLeague.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v393216	1.3.2	main=2e90f0815b1f92a1cbf013b3f4d358f4	subsdk0=7e9f31f59e001cf5d9b546ffb233f480	sdk=7f7710633c020a32018c8715523ebee7
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie, the intro's VP9 movies)
+modules	main subsdk0 sdk
+romfs_marker	wwiseaudio/streamedfiles.pck
+zip_store	.data:.patch:.pck:.webm:.metallib
+
+# ---- Memory ----
+# The NPDM declares 32 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup (main+0x620420) gives StandardAllocator 10 GB of address space, cut to 3 GB in patches.py,
+# beside the node area and 1 GB alignment cuts of this sdk build (dm/tools/sdk_patches.py). The 5 GB block of Engage: 256 MB in front + 4.375 GB alias region + 256 MB stack region + the heap region.
+# About 2.0 GB resident in the menus, 2.5 to 2.8 GB in a match
+sys_resource	0x2000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- Graphics ----
+# the game sets the near = 0 depth mode (log: depth mode: near=0, vertex shaders use the main0_z entry), for the pipeline bases made before it runs
+depth_mode	zero
+
+# ---- Shader split ----
+# the survey's groups by RomFS folder; the shaders come from init.dict and global.dict (the root, so "other") and main
+shader_groups	/ClubStadium/=clubstadium /ClubCustomization/=clubcustomizatio /Characters/=characters /GearSets/=gearsets /FrontEnd/=frontend /StadiumGlobal/=stadiumglobal /Movies/=movies /wwiseaudio/=wwiseaudio
+shader_note	Mario Strikers: Battle League shaders

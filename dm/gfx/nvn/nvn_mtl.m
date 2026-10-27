@@ -1963,7 +1963,7 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
    resolution scaling does. The translated shaders already divide gl_FragCoord by the support buffer's render_scale[0] (the Ryujinx
    shader translator's fragment scale), so screen-space maths in them still lands on the game's own pixels: the host only puts k there
    for a pass whose targets are scaled. Sampling uses normalized coordinates and needs nothing. Scaled: single-sample, single-level 2D
-   render targets in the window's aspect (16:9 within 2 %) of at least 256 pixels wide, which leaves shadow maps, cube maps, lookup
+   render targets in the window's aspect (16:9 within 2 %) of at least 128 pixels wide, which leaves shadow maps, cube maps, lookup
    tables and mip chains as the game made them. Copies between textures take each side's own scale (copy_t2t), and the present takes
    the crop in the window texture's scale. CPU reads of a scaled texture and compute shaders that address a scaled image in pixels are
    not covered (Ryujinx scales those through render_scale[1..]; measured at 0 % of Sword's and Breath of the Wild's shaders) */
@@ -1975,7 +1975,7 @@ static float rs_k(void) {
 }
 static CFMutableSetRef g_rs_set;   // the MTLTextures made at rs_k
 static int rs_rule(const tex_t *t) {
-    if (rs_k() == 1.0f || !t || (t->d.target != NVN_TEXTURE_TARGET_2D && t->d.target != NVN_TEXTURE_TARGET_2D_ARRAY) || t->d.samples > 1 || t->d.width < 256) return 0;
+    if (rs_k() == 1.0f || !t || (t->d.target != NVN_TEXTURE_TARGET_2D && t->d.target != NVN_TEXTURE_TARGET_2D_ARRAY && t->d.target != NVN_TEXTURE_TARGET_2D_MULTISAMPLE && t->d.target != NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY && t->d.target != NVN_TEXTURE_TARGET_RECTANGLE) || t->d.width < 128) return 0;
     // a texture made for image access is written by compute shaders addressed in the game's pixels: scaled, only its top-left part was
     // written (Breath of the Wild's post-processing). Ryujinx leaves such textures unscaled too
     if (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) return 0;
@@ -7241,12 +7241,6 @@ static uint64_t gml_take(void) {
     [g_commit_blocks addObject:^{ gml_read(b, predict, fence); }];
     return b.gpuAddress;
 }
-static id<MTLBuffer> support_buf_rs(void) {   // the support buffer of a scaled pass: render_scale[0] = DM_RESCALE (192 = its offset, as support_buf)
-    static __strong id<MTLBuffer> b; if (b) return b;
-    b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; memcpy(b.contents, support_buf().contents, 65536); res_add(b);
-    *(float *)((uint8_t *)b.contents + 192) = rs_k(); return b;
-}
-static uint64_t support_gpu_rs(void) { static uint64_t gpu; if (!gpu) gpu = support_buf_rs().gpuAddress; return gpu; }
 static id<MTLBuffer> zero_bank(void) { static __strong id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b); } return b; }
 static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_bank().gpuAddress; return gpu; }
 // Bindless handle (TEXU / SAMPU): the 32-bit word at byte offset off of uniform slot reg = the low 32 bits of the NVN handle the game wrote there (low 20 bits texture ID, high 12 bits sampler ID).
@@ -7313,6 +7307,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     int bl = passdump() && (bl_all || g_kd_force || bl_pass[nvn_stage] != g_stat_pass);
     if (bl) { bl_pass[nvn_stage] = g_stat_pass; PD("K %llu st%d key=%s nb=%d", g_stat_pass, nvn_stage, sh->key[0] ? sh->key : sh->builtin ? sh->builtin : "?", sh->rf.nb); }
     uint32_t bmask = 0; float bk[DMSH_BORDER_SAMPLERS][4];   // the border colour block (see nvn_border.h): the twins that correct, their factors
+    int rs_sup = -1, rs_nt = 0, rs_ni = 0, rs_any = 0; struct { uint16_t aid; float k; } rs_t[64], rs_i[8];   // resolution scaling: each texture's and image's scale, for the shader's texel fetches
     os_unfair_lock_lock(&g_rmu);   // The texture / sampler registration tables may be being grown or rewritten by the game thread
     for (int i = 0; i < sh->rf.nb; i++) {
         const nvn_rbind *b = &sh->rf.b[i];
@@ -7390,6 +7385,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3]; }
             else if (b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) t = tbuf_shadow(t, &trid);   // see tbuf_shadow
             slots[aid] = trid;
+            if (rs_nt < 64) { float k = rs_of(t); rs_t[rs_nt++] = (typeof(rs_t[0])){(uint16_t)aid, k}; rs_any |= k != 1.0f; }
             USE(t, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_IMG) {   // Writable texture: NVN image slot r (BindImages) ↔ D3D u_r
             int tid = reg < 32 ? (int)(S.img[nvn_stage][reg] & 0xfffff) : 0;
@@ -7405,6 +7401,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                                            tt->d.target == NVN_TEXTURE_TARGET_BUFFER || (tt->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) ? "linear" : "block-linear", (unsigned long long)tt->L.size); }
             if (passdump()) PD("W %llu st%d reg%d tid=%d %s ser=%llu", g_stat_pass, nvn_stage, reg, tid, real ? "real" : "dummy", real && tid < g_ntreg ? g_treg[tid].t.serial : 0ull);
             slots[aid] = trid;
+            if (rs_ni < 8) { float k = rs_of(t); rs_i[rs_ni++] = (typeof(rs_i[0])){(uint16_t)aid, k}; rs_any |= k != 1.0f; }
             USE(t, MTLResourceUsageRead | MTLResourceUsageWrite);
         } else if (b->kind == NVN_RB_TBUF) {   // Typed buffer: the buffer texture (target BUFFER) in texture slot r
             int tid = (int)(tex_slot_h(S.tex[nvn_stage], S.img[nvn_stage], reg) & 0xfffff);
@@ -7415,6 +7412,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             if (!t) { t = dummy_tbuf(b->dpf); trid = g_dummy_tbuf_rid[b->dpf & 3]; }
             else t = tbuf_shadow(t, &trid);   // see tbuf_shadow
             slots[aid] = trid;
+            if (rs_nt < 64) rs_t[rs_nt++] = (typeof(rs_t[0])){(uint16_t)aid, 1.0f};
             USE(t, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_TEXD) {   // dynamic handle array (profile key tex_dyn_slots): element k = the texture in slot k (combined, else separate), since c2 holds slot indices for this shader (see DRV2 below)
             uint64_t real = 0;   // the elements that got a texture of the declared kind (logged on the shader's first encode: logged bit 0)
@@ -7492,14 +7490,11 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_GMEML) {   // B: the write log of those stores; their writes are noted as gml_take learned them
             slots[aid] = gml_take();
         } else if (b->kind == NVN_RB_SUPPORT) {   // support_buffer: scale 1.0, BGRA swap 0, viewport transform not disabled (viewport fields are not read)
-            slots[aid] = support_gpu();
-            USE(support_buf(), MTLResourceUsageRead);
+            slots[aid] = support_gpu(); USE(support_buf(), MTLResourceUsageRead); rs_sup = aid;
         } else if (b->kind == NVN_RB_PUSH) {   // NVN2 push constants (c[24]): the stage group's current block
             id<MTLBuffer> db; size_t doff = arena_alloc(DMSH_PUSH_SIZE, &db);
             memcpy((uint8_t *)db.contents + doff, S.push[nvn_stage == 5 ? 1 : 0], DMSH_PUSH_SIZE);
             slots[aid] = g_cur_arena->gpu + doff; USE(db, MTLResourceUsageRead);
-            if (g_pass_rs != 1.0f && nvn_stage == 1) { slots[aid] = support_gpu_rs(); USE(support_buf_rs(), MTLResourceUsageRead); }   // resolution scaling: render_scale[0] = k
-            else { slots[aid] = support_gpu(); USE(support_buf(), MTLResourceUsageRead); }
         } else if (b->kind == NVN_RB_DRV0 || b->kind == NVN_RB_DRV2) {
             // NVN driver constant segments: those proven unread by static analysis at packaging time are supplied as 0; those read are filled on the spot from the current bindings - c0 = storage buffer table (base + 0x10 r: address 64 bits, size 32 bits),
             // c2 = the handle tables (DMSH_C2_*), the values being the NVN handles the game gave at bind time; positions read outside the tables are registered at packaging time and reported a failure at load time
@@ -7560,6 +7555,21 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             slots[aid] = g_cur_arena->gpu + doff; USE(db, MTLResourceUsageRead);
             if (bl) PD("B %llu st%d border mask=%#x", g_stat_pass, nvn_stage, bmask);
         }
+    }
+    // Resolution scaling: Ryujinx's shader translator scales the integer coordinates of texel fetches and image accesses by render_scale[1 + n] (n = the texture's
+    // place among the shader's textures, then its images; the vertex stage adds frag_scale_count) and divides size queries by it; render_scale[0] divides gl_FragCoord.
+    // In a fragment shader a negative scale also adds gl_FragCoord's position within the scaled texel, as Ryujinx does for a texture the size of the target
+    if (rs_sup >= 0 && (rs_any || (nvn_stage == 1 && g_pass_rs != 1.0f))) {
+        id<MTLBuffer> sb; size_t so = arena_alloc(1536, &sb); uint8_t *sp = (uint8_t *)sb.contents + so;
+        memcpy(sp, support_buf().contents, 1536);
+        *(int32_t *)(sp + 176) = 0;
+        if (nvn_stage == 1) *(float *)(sp + 192) = g_pass_rs;
+        for (int a = 1; a < rs_nt; a++) for (int c = a; c > 0 && rs_t[c].aid < rs_t[c - 1].aid; c--) { typeof(rs_t[0]) x = rs_t[c]; rs_t[c] = rs_t[c - 1]; rs_t[c - 1] = x; }
+        for (int a = 1; a < rs_ni; a++) for (int c = a; c > 0 && rs_i[c].aid < rs_i[c - 1].aid; c--) { typeof(rs_i[0]) x = rs_i[c]; rs_i[c] = rs_i[c - 1]; rs_i[c - 1] = x; }
+        for (int n = 0; n < rs_nt + rs_ni && n < 72; n++) { float k = n < rs_nt ? rs_t[n].k : rs_i[n - rs_nt].k;
+            if (nvn_stage == 1 && n < rs_nt && k != 1.0f && k == g_pass_rs) k = -k;
+            *(float *)(sp + 192 + 16 * (1 + n)) = k; }
+        slots[rs_sup] = sb.gpuAddress + so;
     }
     #undef USE
     os_unfair_lock_unlock(&g_rmu);

@@ -50,7 +50,7 @@ class XcodePipelineTests(unittest.TestCase):
             (extraction / 'ExeFS').mkdir()
             mocks = {}
             for name, value in {
-                'scan_nsps': (int(registered.id, 16), fam), 'check_prereqs': None, 'check_metal': None,
+                'scan_nsps': (int(registered.id, 16), fam), 'check_prereqs': None, 'check_metal': None, 'check_translator': None, 'check_glslang': None,
                 'free_gb': 10000, 'build_nx_extract': root / 'nx_extract',
                 'extract': extraction, 'can_clone': False, 'build_mismatch': [],
                 'extract_aoc': None, 'rewrite': profile, 'split_shaders': 'fixture-key',

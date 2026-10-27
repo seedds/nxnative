@@ -8,6 +8,7 @@ import unittest
 
 TOOL = Path(__file__).resolve().parents[2] / "ios/tools/export_nonpoint_sources.py"
 SPEC = importlib.util.spec_from_file_location("nonpoint_export", TOOL)
+assert SPEC is not None and SPEC.loader is not None
 EXPORT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(EXPORT)
 

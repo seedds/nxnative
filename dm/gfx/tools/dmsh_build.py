@@ -145,6 +145,7 @@ def restore_cache(key, digest):
     root, files = found
     for label, names in files.items():
         directory = out if label == 'mac' else IOSOUT
+        if directory is None: raise RuntimeError(f'no output directory for {label}')
         for name in names:
             src = os.path.join(root, label, name); dst = os.path.join(directory, name)
             if name.endswith('.json'):
@@ -170,10 +171,12 @@ def publish_cache(key, digest, rule_fp, code_fp):
     root, files = found
     for label, names in files.items():
         d = os.path.join(root, label); os.makedirs(d, exist_ok=True)
-        for name in names: clone(os.path.join(out if label == 'mac' else IOSOUT, name), os.path.join(d, name))
+        directory = out if label == 'mac' else IOSOUT
+        if directory is None: raise RuntimeError(f'no output directory for {label}')
+        for name in names: clone(os.path.join(directory, name), os.path.join(d, name))
         for name in names:
             if name.endswith('.json'):
-                src = os.path.join(out if label == 'mac' else IOSOUT, name)
+                src = os.path.join(directory, name)
                 value = json.load(open(src)); value.pop('fetch', None); value.pop('vin', None); value.pop('pull', None)   # the side libraries are made again from the restored MSL (fetch_finish, vin_finish, pull_finish)
                 atomic_json(os.path.join(d, name), value)
     atomic_json(cache_meta_path(key), {'digest': digest, 'rule_fp': rule_fp, 'code_fp': code_fp})

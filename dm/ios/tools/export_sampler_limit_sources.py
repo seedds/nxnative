@@ -250,7 +250,10 @@ if __name__ == "__main__":
         parser.add_argument(name, type=Path)
     args = parser.parse_args()
     header = Path(__file__).resolve().parents[2] / "gfx/nvn/dmsh_chain.h"
-    active_chain = re.search(r'#define\s+DMSH_CHAIN\s+"([a-f0-9]+)"', header.read_text()).group(1)
+    match = re.search(r'#define\s+DMSH_CHAIN\s+"([a-f0-9]+)"', header.read_text())
+    if match is None:
+        raise ValueError(f"No DMSH_CHAIN in {header}")
+    active_chain = match.group(1)
     exported = export(args.cache, args.libraries, args.output, active_chain)
     supported = sum(record.get("supported") is True for record in exported.values())
     print(f"Sampler-limit sources: {supported} proven / {len(exported)} over limit (chain {active_chain})")

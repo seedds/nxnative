@@ -152,6 +152,9 @@ if __name__ == "__main__":
         parser.add_argument(name, type=Path)
     args = parser.parse_args()
     header = Path(__file__).resolve().parents[2] / "gfx/nvn/dmsh_chain.h"
-    chain = re.search(r'#define\s+DMSH_CHAIN\s+"([a-f0-9]+)"', header.read_text()).group(1)
+    match = re.search(r'#define\s+DMSH_CHAIN\s+"([a-f0-9]+)"', header.read_text())
+    if match is None:
+        raise ValueError(f"No DMSH_CHAIN in {header}")
+    chain = match.group(1)
     records = export(args.cache, args.libraries, args.output, chain)
     print(f"Layered sources: {sum(r['supported'] for r in records.values())} proven / {len(records)} total (chain {chain})")

@@ -157,7 +157,13 @@ def lower(source, meta):
     source = source[:position] + f", constant uint* dm_zero_layout [[buffer({SLOT})]]" + source[position:]
     begin, end = match.span("image_declaration")
     source = source[:begin] + "device atomic_uint* " + image["msl_name"] + source[end:]
-    position = source.index("fragment void") if "fragment void" in source else re.search(r"fragment\s+void", source).start()
+    if "fragment void" in source:
+        position = source.index("fragment void")
+    else:
+        fragment = re.search(r"fragment\s+void", source)
+        if fragment is None:
+            raise ValueError("No fragment entry point")
+        position = fragment.start()
     source = source[:position] + HELPER + source[position:]
     return source, {"proof": PROOF, "parameter_slot": SLOT, "image_aid": image["arg_id"], "image_reg": image["reg"], "layers": layers,
                     "coordinate_proof": "trunc-fragcoord-over-support-scale-x-v1", "support_scale_byte_offset": 192,
@@ -197,6 +203,9 @@ if __name__ == "__main__":
         parser.add_argument(name, type=Path)
     args = parser.parse_args()
     header = Path(__file__).resolve().parents[2] / "gfx/nvn/dmsh_chain.h"
-    chain = re.search(r'#define\s+DMSH_CHAIN\s+"([a-f0-9]+)"', header.read_text()).group(1)
+    match = re.search(r'#define\s+DMSH_CHAIN\s+"([a-f0-9]+)"', header.read_text())
+    if match is None:
+        raise ValueError(f"No DMSH_CHAIN in {header}")
+    chain = match.group(1)
     records = export(args.cache, args.libraries, args.output, chain)
     print(f"Exported {len(records)} proven zero-image companions (chain {chain})")

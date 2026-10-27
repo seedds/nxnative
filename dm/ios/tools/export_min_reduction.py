@@ -167,5 +167,8 @@ if __name__ == "__main__":
         parser.add_argument(name, type=Path)
     args = parser.parse_args()
     header = ROOT / "dm/gfx/nvn/dmsh_chain.h"
-    chain = re.search(r'#define\s+DMSH_CHAIN\s+"([a-f0-9]+)"', header.read_text()).group(1)
+    match = re.search(r'#define\s+DMSH_CHAIN\s+"([a-f0-9]+)"', header.read_text())
+    if match is None:
+        raise ValueError(f"No DMSH_CHAIN in {header}")
+    chain = match.group(1)
     print(f"Exported {export(args.cache, args.libraries, args.output, chain)} audited MIN companions (chain {chain})")

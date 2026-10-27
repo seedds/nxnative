@@ -46,6 +46,9 @@ if __name__ == "__main__":
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     header = Path(__file__).resolve().parents[2] / "gfx/nvn/dmsh_chain.h"
-    chain = re.search(r'#define\s+DMSH_CHAIN\s+"([a-f0-9]+)"', header.read_text()).group(1)
+    match = re.search(r'#define\s+DMSH_CHAIN\s+"([a-f0-9]+)"', header.read_text())
+    if match is None:
+        raise ValueError(f"No DMSH_CHAIN in {header}")
+    chain = match.group(1)
     count = export(args.cache, args.libraries, args.output, chain)
     print(f"Exported {count} chain-matched non-point sources (chain {chain})")

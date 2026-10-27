@@ -9,10 +9,11 @@ output and its path is printed; no selection prints an empty line.
 import os
 import shutil
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 
-def select(profile: Path, environ: dict[str, str]) -> Path | None:
+def select(profile: Path, environ: Mapping[str, str]) -> Path | None:
     if "DM_ENV_FILE" in environ:
         value = environ["DM_ENV_FILE"]
         return Path(value) if value else None
@@ -20,7 +21,7 @@ def select(profile: Path, environ: dict[str, str]) -> Path | None:
     return default if default.is_file() else None
 
 
-def stage(profile: Path, output: Path, environ: dict[str, str]) -> Path | None:
+def stage(profile: Path, output: Path, environ: Mapping[str, str]) -> Path | None:
     source = select(profile, environ)
     if source is None:
         output.unlink(missing_ok=True)

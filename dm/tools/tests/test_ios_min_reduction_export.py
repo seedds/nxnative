@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 TOOL = Path(__file__).resolve().parents[2] / "ios/tools/export_min_reduction.py"
 SPEC = importlib.util.spec_from_file_location("min_reduction_export", TOOL)
+assert SPEC is not None and SPEC.loader is not None
 EXPORT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(EXPORT)
 

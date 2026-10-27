@@ -1,3 +1,74 @@
+// Keep the current upstream Metal 4 renderer intact on macOS while older
+// iOS/tvOS devices use the compatibility renderer maintained by this fork.
+// The split prevents an upstream renderer rebase from silently deleting either
+// path and makes the extra maintenance surface explicit.
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include "nvn_mtl_legacy.inc"
+
+// The host-facing NVN layer follows current upstream and therefore expects a
+// few entry points added with the Metal 4 renderer. Keep the legacy renderer
+// honest at that boundary: adapt operations it already supports, and report
+// zero only for Metal-4-only diagnostics/optimisations which are not present
+// on this path.
+void *mtl_device_classic(void) { return mtl_device(); }
+int mtl_pso_prebuild_tool(void) { return 0; }
+int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) { return mtl_wait(fence, timeout_ns); }
+
+unsigned mtl_cpu_tex_count(void) {
+    pthread_mutex_lock(&g_cpu_tex_mu);
+    unsigned count = g_cpu_tex ? (unsigned)CFSetGetCount(g_cpu_tex) : 0;
+    pthread_mutex_unlock(&g_cpu_tex_mu);
+    return count;
+}
+
+uint64_t mtl_pkg_edge_skips(void) { return 0; }
+
+void mtl_reg_image(int tid, const tex_t *t, const view_t *v) {
+    if (!t) { mtl_reg_tex(tid, NULL, v); return; }
+    tex_t image = *t;
+    image.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+    mtl_reg_tex(tid, &image, v);
+}
+
+int mtl_link_rate(void) { return g_link_mode == 3 ? 30 : g_link_mode == 2 ? 120 : 60; }
+int mtl_link_stalled(void) { return __atomic_load_n(&g_stall_t0, __ATOMIC_RELAXED) != 0; }
+
+int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
+    if (!mtl_link_active()) return 0;
+    if (ticks < 1) ticks = 1;
+    static uint64_t started_tick;
+    pthread_mutex_lock(&g_link_mu);
+    if (g_link_tick_n >= started_tick + (uint64_t)ticks) {
+        started_tick = g_link_tick_n;
+        pthread_mutex_unlock(&g_link_mu);
+        return 1;
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeout_ns / 1000000000ull;
+    ts.tv_nsec += timeout_ns % 1000000000ull;
+    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    while (g_link_tick_n < started_tick + (uint64_t)ticks) {
+        if (pthread_cond_timedwait(&g_link_cv, &g_link_mu, &ts) == ETIMEDOUT) {
+            pthread_mutex_unlock(&g_link_mu);
+            return 0;
+        }
+    }
+    started_tick = g_link_tick_n;
+    pthread_mutex_unlock(&g_link_mu);
+    return 1;
+}
+
+int mtl_snap_on(void) { return 0; }
+uint64_t mtl_snap_acquire_wait(void) { return 0; }
+void mtl_sm_stats(uint64_t *passes, uint64_t *continued, uint64_t *waited) { *passes = *continued = *waited = 0; }
+void mtl_cshoist_stats(uint64_t *moved, uint64_t *depth, uint64_t *stops) { *moved = *depth = 0; memset(stops, 0, 8 * sizeof *stops); }
+void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none) { *draws = *made = *none = 0; }
+void mtl_pso_line(char *out, size_t size) { if (size) snprintf(out, size, "legacy renderer (Metal 4 pipeline archive unavailable)"); }
+void mtl_ab_gpu(uint64_t frame, double gpu_ms, double frame_ms) { (void)frame; (void)gpu_ms; (void)frame_ms; }
+#else
+
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -11000,3 +11071,8 @@ void mtl_wait_state_dump(void) {
 }
 void mtl_alloc_stats(uint64_t *waits, uint64_t *grown, int *n) { *waits = g_alloc_waits; *grown = g_alloc_grown; *n = g_alloc_n; }   // Main submit allocator pool: how many times it waited, how many times it grew, how many exist now
 #pragma clang attribute pop
+
+// The compatibility renderer understands these live diagnostics; the current
+// Metal 4 path has no corresponding mutable state.
+void dm_gfx_env_changed(const char *key, const char *value) { (void)key; (void)value; }
+#endif

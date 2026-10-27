@@ -14,6 +14,7 @@ import unittest
 
 TOOL = Path(__file__).resolve().parents[2] / "ios/tools/export_guarded_index_sources.py"
 SPEC = importlib.util.spec_from_file_location("guarded_export", TOOL)
+assert SPEC is not None and SPEC.loader is not None
 EXPORT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(EXPORT)
 META = {"stage": "vs", "entry": "toy", "entry_z": "toy_z"}

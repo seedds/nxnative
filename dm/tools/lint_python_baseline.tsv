@@ -8,11 +8,9 @@ pyright	dm/gfx/tools/cb_extent.py	reportArgumentType	1	Argument of type "Unknown
 pyright	dm/gfx/tools/cb_extent.py	reportArgumentType	1	Argument of type "Unknown | None" cannot be assigned to parameter "arg2" of type "SupportsRichComparisonT@max" in function "max" Type "Unknown | None" is not assignable to type "int" "None" is not assignable to "int"
 pyright	dm/gfx/tools/cb_extent.py	reportOptionalOperand	1	Operator "<" not supported for "None"
 pyright	dm/gfx/tools/dmsh_build.py	reportArgumentType	1	Argument of type "str | None" cannot be assigned to parameter "file" of type "FileDescriptorOrPath" in function "open" Type "str | None" is not assignable to type "FileDescriptorOrPath" Type "None" is not assignable to type "FileDescriptorOrPath" "None" is not assignable to "int" "None" is not assignable to "str" "None" is not assignable to "bytes" "None" is incompatible with protocol "PathLike[str]" "__fspath__" is not present "None" is incompatible with protocol "PathLike[bytes]" ...
-pyright	dm/gfx/tools/dmsh_build.py	reportArgumentType	3	Argument of type "str | None" cannot be assigned to parameter "a" of type "BytesPath" in function "join" Type "str | None" is not assignable to type "BytesPath" Type "str" is not assignable to type "BytesPath" "str" is not assignable to "bytes" "str" is incompatible with protocol "PathLike[bytes]" "__fspath__" is not present
 pyright	dm/gfx/tools/dmsh_build.py	reportAttributeAccessIssue	1	Cannot access attribute "items" for class "str" Attribute "items" is unknown
 pyright	dm/gfx/tools/dmsh_build.py	reportAttributeAccessIssue	1	Cannot access attribute "lineno" for class "AST" Attribute "lineno" is unknown
 pyright	dm/gfx/tools/dmsh_build.py	reportCallIssue	1	No overloads for "open" match the provided arguments
-pyright	dm/gfx/tools/dmsh_build.py	reportCallIssue	3	No overloads for "join" match the provided arguments
 pyright	dm/gfx/tools/dmsh_build.py	reportGeneralTypeIssues	2	"None" is not iterable "__iter__" method not defined
 pyright	dm/gfx/tools/dmsh_build.py	reportOperatorIssue	1	Operator "+" not supported for types "Literal[128]" and "int | None" Operator "+" not supported for types "Literal[128]" and "None" when expected type is "int | Unknown"
 pyright	dm/gfx/tools/dmsh_build.py	reportOptionalMemberAccess	4	"group" is not a known attribute of "None"

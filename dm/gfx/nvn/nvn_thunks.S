@@ -4849,8 +4849,7 @@ _nvnth_536:
     add x16, x16, _nvn_slot@PAGEOFF
     mov x17, #8576
     add x16, x16, x17
-    mov x17, #1
-    stadd x17, [x16]
+    NVN_COUNT_ONE
     ldr x17, [x16, #8]
     br x17
     .data

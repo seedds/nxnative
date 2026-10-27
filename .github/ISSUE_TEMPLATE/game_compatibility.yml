@@ -1,0 +1,95 @@
+name: "🎮 Relato de Compatibilidade de Jogo (Compatibility Report)"
+description: "Envie um relatório de teste de um jogo executado pelo NxNative Launcher no Apple Silicon."
+title: "[Compatibilidade]: "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ajude a mapear a compatibilidade de jogos Nintendo Switch rodando nativamente no Mac / Apple Silicon!
+        Preencha os campos abaixo com os resultados do seu teste.
+
+  - type: input
+    id: game_name
+    attributes:
+      label: "Nome do Jogo"
+      placeholder: "Ex: Super Mario Odyssey"
+    validations:
+      required: true
+
+  - type: input
+    id: title_id
+    attributes:
+      label: "Title ID (16 dígitos hexadecimais)"
+      placeholder: "Ex: 0100000000010000"
+    validations:
+      required: true
+
+  - type: input
+    id: game_version
+    attributes:
+      label: "Versão do Jogo e DLCs instaladas"
+      placeholder: "Ex: v1.3.0 (v196608) / Sem DLC"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: "Status Geral de Execução"
+      description: "Classifique a jogabilidade atual deste título."
+      options:
+        - "🟢 Perfeito (60 FPS estável, sem glitches de áudio ou vídeo)"
+        - "🟡 Jogável (Totalmente jogável do início ao fim com pequenas quedas ou falhas menores)"
+        - "🟠 Entra no Jogo (Carrega o menu e gameplay inicial, mas trava em partes avançadas)"
+        - "🔴 Incompatível / Crash (Trava na inicialização, tela preta constante ou falha no shader)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chip
+    attributes:
+      label: "Processador do Mac"
+      options:
+        - "Apple M1 / M1 Pro / M1 Max / M1 Ultra"
+        - "Apple M2 / M2 Pro / M2 Max / M2 Ultra"
+        - "Apple M3 / M3 Pro / M3 Max"
+        - "Apple M4 / M4 Pro / M4 Max"
+        - "iOS / iPadOS (A17 Pro / M2 iPad)"
+    validations:
+      required: true
+
+  - type: input
+    id: ram_and_os
+    attributes:
+      label: "Memória RAM e Versão do macOS"
+      placeholder: "Ex: 16 GB RAM - macOS 15.1 Sequoia"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: settings_used
+    attributes:
+      label: "Configurações Ativadas no NxNative Launcher"
+      options:
+        - label: "Desbloqueio de 60 FPS (Unlock 60 FPS)"
+        - label: "Modo Docked (1080p)"
+        - label: "MetalFX Spatial Upscaling"
+        - label: "Metal Performance HUD ativado"
+
+  - type: input
+    id: controller
+    attributes:
+      label: "Controle Utilizado"
+      placeholder: "Ex: Nintendo Switch Pro Controller (Bluetooth) / Xbox Series / PS5 DualSense"
+    validations:
+      required: false
+
+  - type: textarea
+    id: observations
+    attributes:
+      label: "Observações Adicionais e Dicas"
+      description: "Mencione taxas de quadros observadas, aquecimento, se precisou de flags especiais no env.txt ou alguma dica para outros jogadores."
+      placeholder: "O jogo roda a 60 FPS cravados em 1080p, com consumo médio de 4GB de VRAM..."
+    validations:
+      required: false

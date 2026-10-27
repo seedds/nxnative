@@ -1,94 +1,131 @@
-name: Bug report
-description: A game that crashes, hangs, draws wrong or runs slowly, or a script or build step that fails
+name: "🐛 Reportar Erro ou Bug (Bug Report)"
+description: "Relate falhas no NxNative Launcher, problemas com controles, erros no assistente de portabilidade ou travamentos ao iniciar jogos."
+title: "[Bug]: "
+labels: ["launcher-bug", "bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the report. The fields below are what a problem is usually traced with; without them the first reply is a request for them.
-        Never attach game files, keys, title keys or anything extracted from a game (RomFS, NSOs, shaders). Logs and screenshots are fine.
-  - type: textarea
-    id: what
+        Obrigado por ajudar a melhorar o **NxNative Launcher**! 
+        Por favor, preencha o formulário abaixo com o máximo de detalhes possível para que possamos reproduzir e corrigir o problema.
+
+        > [!CAUTION]
+        > **POLÍTICA DE CLEAN-ROOM & DIREITOS AUTORAIS:**
+        > **NUNCA** anexe chaves criptográficas (`prod.keys`, `title.keys`), ROMs, NSPs, XCIs, DLCs ou dados proprietários extraídos de jogos. Anexe apenas logs textuais e capturas de tela.
+
+  - type: dropdown
+    id: category
     attributes:
-      label: What happened
-      description: What you did and what you saw. The last log lines, a `[RED]` line or a screenshot help. Say whether it happens every time.
+      label: "Categoria do Problema"
+      description: "Selecione a área do NxNative Launcher onde o erro ocorre."
+      options:
+        - "Interface Gráfica do Launcher (UI / Janelas / Carrossel)"
+        - "Navegação por Controle / Gamepad (Switch Pro, Xbox, PS4/PS5, Joy-Cons)"
+        - "Assistente de Portabilidade (Importação de NSP/XCI / Compilação)"
+        - "Detecção de DLCs, Atualizações e Saves"
+        - "Falha ao Iniciar Jogo (Crash imediato / Tela preta)"
+        - "Problemas Visuais / MetalFX / Shaders"
+        - "Problemas de Áudio / Efeitos Sonoros"
+        - "Outro Problema"
     validations:
       required: true
+
+  - type: dropdown
+    id: chip
+    attributes:
+      label: "Processador Apple Silicon"
+      description: "Qual o chip do seu Mac ou dispositivo Apple?"
+      options:
+        - "Apple M1 / M1 Pro / M1 Max / M1 Ultra"
+        - "Apple M2 / M2 Pro / M2 Max / M2 Ultra"
+        - "Apple M3 / M3 Pro / M3 Max"
+        - "Apple M4 / M4 Pro / M4 Max"
+        - "Apple A17 Pro / A18 / A18 Pro (iPhone / iPad)"
+        - "Outro"
+    validations:
+      required: true
+
+  - type: input
+    id: mac_model
+    attributes:
+      label: "Modelo do Mac & Memória RAM"
+      placeholder: "Ex: MacBook Pro 16\" M2 Max, 32GB RAM"
+    validations:
+      required: true
+
+  - type: input
+    id: os_version
+    attributes:
+      label: "Versão do macOS / iOS"
+      placeholder: "Ex: macOS 15.1 Sequoia (ou macOS 14.5 Sonoma)"
+    validations:
+      required: true
+
+  - type: input
+    id: launcher_version
+    attributes:
+      label: "Versão do NxNative Launcher"
+      placeholder: "Ex: v1.0.0 ou commit git (ex: 51d6e8a)"
+    validations:
+      required: false
+
+  - type: input
+    id: game_info
+    attributes:
+      label: "Jogo e Title ID (se aplicável)"
+      description: "Nome do jogo, Title ID (16 dígitos hexadecimais), versão do update e se há DLC instalada."
+      placeholder: "Ex: The Legend of Zelda: Breath of the Wild (01007EF00011E000) v1.6.0 + DLC"
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "O que aconteceu? (Descrição do Erro)"
+      description: "Descreva com clareza o comportamento inesperado que você presenciou."
+      placeholder: "Ao clicar em 'Play' ou ao tentar portar o arquivo NSP, a tela congela em..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Passos para Reproduzir o Erro"
+      description: "Como podemos reproduzir esse comportamento?"
+      placeholder: |
+        1. Abra o NxNative Launcher
+        2. Conecte o controle Xbox via Bluetooth
+        3. Navegue até a aba Jogos Compatíveis
+        4. Clique em...
+    validations:
+      required: true
+
   - type: textarea
     id: expected
     attributes:
-      label: What you expected
+      label: "Comportamento Esperado"
+      description: "O que você esperava que acontecesse?"
+      placeholder: "O jogo deveria iniciar em tela cheia com os controles mapeados..."
     validations:
       required: false
-  - type: input
-    id: game
-    attributes:
-      label: Game, title ID and version
-      description: The base game's title ID and the update you packed (display version or v-number), and DLC if any.
-      placeholder: "The Legend of Zelda: Breath of the Wild, 01007EF00011E000, 1.9.0 (v1114112)"
-    validations:
-      required: true
-  - type: input
-    id: commit
-    attributes:
-      label: nxnative commit
-      description: "`git rev-parse --short HEAD` in the checkout you built from (or the date you downloaded it)."
-      placeholder: 4639c511
-    validations:
-      required: true
-  - type: input
-    id: chain
-    attributes:
-      label: Shader chain version
-      description: "`grep DMSH_CHAIN dm/gfx/nvn/dmsh_chain.h`, or the `b-<version>` folder name under `<title ID>_build/shader/`."
-      placeholder: 5cddc47253ab
-    validations:
-      required: true
-  - type: dropdown
-    id: build
-    attributes:
-      label: How it was built and run
-      options:
-        - Mac, the host from a terminal (--platform mac)
-        - Mac app (--platform mac-app)
-        - iPhone or iPad, unsigned IPA from build_ipa_from_nsp.py
-        - iPhone or iPad, built and run with Xcode
-        - Built by hand (make, dmsh_build.py, build_ipa.sh)
-        - The NSP script failed before anything ran
-    validations:
-      required: true
-  - type: input
-    id: device
-    attributes:
-      label: Device and OS
-      description: The Mac or iPhone model with its chip, and the macOS or iOS version (Apple menu > About This Mac, or Settings > General > About).
-      placeholder: MacBook Pro M2 Max, macOS 26.1
-    validations:
-      required: true
-  - type: textarea
-    id: env
-    attributes:
-      label: Settings and environment overrides
-      description: "Settings you changed on the settings screen or in the Mac settings window, the contents of `env.txt` (`Documents/env.txt` on iOS; `~/Library/Application Support/nxnative/<title ID>/env.txt` or `--env-file` for a Mac app), and any `DM_*` variables set in the terminal or by a front end. Write \"none\" if there are none."
-      placeholder: "DM_FPS_TARGET=60\nDM_PRESENT_UPSCALE=metalfx"
-    validations:
-      required: true
+
   - type: textarea
     id: logs
     attributes:
-      label: Logs
+      label: "Logs de Execução (Console / Crash Log)"
       description: |
-        Attach the whole log from the start of the run (drag the file here), not excerpts:
-        - Mac app: `~/Library/Logs/nxnative/<title ID>.log` (the run before is `<title ID>.prev.log`)
-        - Terminal (`--platform mac`): the host's output, e.g. the command followed by `2>&1 | tee run.log`
-        - iPhone or iPad: `log.txt` in the Files app under the app's name (the run before is `log.prev.txt`)
-        - Graphics problems: also `<title ID>_build/logs/dmsh_build.log` from the build you ran
-        - Script or build failures: the script's full console output
+        Anexe ou cole os logs de erro relevantes:
+        - **Logs do jogo portado no Mac:** `~/Library/Logs/nxnative/<TitleID>.log`
+        - **Log da sessão anterior:** `~/Library/Logs/nxnative/<TitleID>.prev.log`
+        - **Logs do Launcher:** Saída do console do terminal se executado via `.command`.
+      placeholder: "Cole as linhas de log com [RED], panic, fatal error ou stack trace..."
     validations:
-      required: true
+      required: false
+
   - type: checkboxes
-    id: no-game-files
+    id: clean_room_confirmation
     attributes:
-      label: No game files
+      label: "Confirmação de Conformidade Legal"
       options:
-        - label: Nothing attached here contains game files, keys or data extracted from a game.
+        - label: "Confirmo que NENHUM arquivo proprietário (chaves prod.keys, ROMs, NSPs ou código protegido por direitos autorais) foi anexado neste ticket."
           required: true

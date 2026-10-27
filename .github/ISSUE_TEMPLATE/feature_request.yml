@@ -1,30 +1,50 @@
-name: Feature request
-description: Ask for something nxnative does not do yet
+name: "💡 Sugestão de Melhoria (Feature Request)"
+description: "Sugira novas funcionalidades, melhorias na interface ou recursos para o NxNative Launcher."
+title: "[Sugestão]: "
+labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Looking for a graphical app to pack, list and start games? That is a separate project: [NX2Apple](https://github.com/LNPANDY/NX2Apple) is one.
-        A new front end belongs in a project of its own; what it needs from nxnative (an event, a field in the settings list) is welcome here.
-        A new platform or device class, a second implementation of an existing path, or a change of more than about 1,000 lines: agree on the scope here first ([CONTRIBUTING.md](https://github.com/seedds/nxnative/blob/main/CONTRIBUTING.md#large-changes-and-other-platforms)).
+        Obrigado por ajudar a evoluir o **NxNative Launcher**!
+        Descreva sua ideia ou melhoria abaixo.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Área de Interesse"
+      options:
+        - "Interface do Launcher (UI / UX / Estilização)"
+        - "Suporte a Controles & Mapeamento de Botões"
+        - "Assistente de Portabilidade (Porting Wizard)"
+        - "Gerenciador de Saves e Configurações"
+        - "Integração com macOS (Atalhos, Spotlight, Notificações)"
+        - "Outro"
+    validations:
+      required: true
+
   - type: textarea
     id: problem
     attributes:
-      label: What is missing
-      description: What you want to do and what stops you today. A game, a device or a log line helps.
+      label: "Qual necessidade ou problema você quer resolver?"
+      description: "Uma explicação clara do que está faltando ou como o fluxo de uso atual pode ser melhorado."
+      placeholder: "Atualmente, ao fazer..."
     validations:
       required: true
+
   - type: textarea
-    id: proposal
+    id: solution
     attributes:
-      label: What you propose
-      description: How it could work, and the parts of nxnative it touches, if you know them.
+      label: "Solução Proposta"
+      description: "Como você imagina que essa funcionalidade deveria funcionar na prática?"
+      placeholder: "Seria excelente se houvesse um botão na barra de ferramentas para..."
     validations:
-      required: false
-  - type: input
-    id: platforms
+      required: true
+
+  - type: textarea
+    id: alternatives
     attributes:
-      label: Platforms
-      placeholder: "Mac, iPhone, iPad"
+      label: "Alternativas Consideradas"
+      description: "Você considerou alguma alternativa ou solução de contorno?"
     validations:
       required: false

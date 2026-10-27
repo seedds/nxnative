@@ -17,7 +17,7 @@
       "properties": {
         "env": {"description": "The environment switch the setting sets.", "type": "string", "pattern": "^DM_[A-Z0-9_]+$"},
         "kind": {"enum": ["choice", "range", "toggle"]},
-        "section": {"description": "The heading it goes under; the rows come in the order to show them.", "enum": ["Game", "Controls", "Performance"]},
+        "section": {"description": "The heading it goes under (Game, Controls and Performance today); sections and rows come in the order to show them. A reader draws a section it does not know like the others, under its name.", "type": "string"},
         "label": {"type": "string"},
         "note": {"description": "The line under the label; empty for most settings.", "type": "string"},
         "default": {"description": "The tested default for this app's platform, with profile defaults resolved.", "type": "string"},

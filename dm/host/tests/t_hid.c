@@ -484,10 +484,50 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+// The controller applet: the decision (controller_applet.h) and hid_controller_support with a fake front end that waits like the real one (the game thread is the caller)
+static int g_ask_calls, g_ask_min, g_ask_max, g_ask_answer = FRONT_CA_OK, g_ask_players;
+static int fake_front(int min, int max, const char *explain, int *count, uint32_t *selected) {
+    (void)explain; (void)selected;
+    g_ask_calls++; g_ask_min = min; g_ask_max = max;
+    if (g_ask_players) dm_pad_players(g_ask_players);   // a controller connects while the sheet is up
+    *count = dm_controller_applet_players(max);
+    return g_ask_answer;
+}
+static void t_applet(void) {
+    // The pure decision: ask only below the minimum; min 0 never asks; single mode is one player; a maximum below the minimum is the minimum
+    CHECK(!ca_ask(0, 4, 0, 1) && !ca_ask(1, 4, 0, 1) && ca_ask(2, 4, 0, 1) && !ca_ask(2, 4, 0, 2), "ask only when fewer players than the minimum are connected");
+    CHECK(!ca_ask(0, 0, 0, 0) && !ca_ask(0, 4, 0, 0), "a minimum of 0 is answered at once, even with nobody connected");
+    CHECK(!ca_ask(2, 4, 1, 1) && ca_ask(1, 1, 1, 0), "single mode needs one player whatever the counts say");
+    CHECK(ca_count(5, 4) == 4 && ca_count(2, 4) == 2 && ca_count(5, 0) == 5, "the count is capped at the maximum (0 = no cap)");
+    int mn = 3, mx = 2; ca_normalize(&mn, &mx, 0);
+    CHECK(mx == 3, "a maximum below the minimum becomes the minimum");
+
+    // Host state: players 1 and 2 connected, a game for four
+    g_mode = 1; ids((const uint32_t[]){0, 1, 2, 3, NPAD_HANDHELD}, 5); dm_pad_players(0x3);
+    int32_t info[2] = {-1, -1}; int8_t arg[8] = {2, 4, 0, 0, 0, 0};
+    CHECK(hid_controller_support(info, arg, fake_front) == RES_OK && g_ask_calls == 0 && info[0] == 2 && info[1] == 0, "enough players: answered at once, the front end not asked");
+    arg[0] = 3; g_ask_players = 0x7;
+    CHECK(hid_controller_support(info, arg, fake_front) == RES_OK && g_ask_calls == 1 && g_ask_min == 3 && g_ask_max == 4 && info[0] == 3, "too few players: the front end is asked, the game gets the count when it continues");
+    dm_pad_players(0x3); g_ask_players = 0; g_ask_answer = FRONT_CA_CANCELLED; info[0] = info[1] = -1;
+    CHECK(hid_controller_support(info, arg, fake_front) == RES_CTRL_CANCELED && g_ask_calls == 2 && info[0] == 2, "cancelled: the game gets ResultControllerSupportCanceled (2202-3101) and the players there are");
+    CHECK(hid_controller_support(NULL, arg, fake_front) == RES_CTRL_CANCELED, "no result wanted: the same answer");
+    arg[0] = 0; arg[1] = 4; g_ask_calls = 0;
+    CHECK(hid_controller_support(info, arg, fake_front) == RES_OK && g_ask_calls == 0, "a game that needs no controller is not asked");
+    arg[0] = 2; arg[5] = 1; g_ask_answer = FRONT_CA_OK;
+    CHECK(hid_controller_support(info, arg, fake_front) == RES_OK && g_ask_calls == 0 && info[0] == 1, "single mode: one player is enough and the count is capped at one");
+    // With no front end the weak default has nothing to wait for: fewer players than the minimum are closed as the player would (3101), as main's headless answer
+    arg[0] = 3; arg[1] = 4; arg[5] = 0; info[0] = -1;
+    CHECK(h_hid_ShowCtrl(info, arg) == RES_CTRL_CANCELED && info[0] == 2 && info[1] == 0, "weak default: too few players, canceled, with the connected count");
+    CHECK(h_hid_ShowCtrl0(arg) == RES_CTRL_CANCELED, "weak default, no result wanted: canceled too");
+    arg[0] = 2; CHECK(h_hid_ShowCtrl(info, arg) == RES_OK && info[0] == 2, "weak default: OK when the minimum is met");
+    dm_pad_players(0x1);
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
     t_npads();
+    t_applet();
     t_script();
     t_vibration();
     t_rumble_log();

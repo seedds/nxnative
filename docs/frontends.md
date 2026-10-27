@@ -5,6 +5,7 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 - [Building: the NSP script](#building-the-nsp-script)
 - [The settings list](#the-settings-list)
 - [Starting a game](#starting-a-game)
+- [Sheets the game waits for](#sheets-the-game-waits-for)
 - [What a front end cannot see yet](#what-a-front-end-cannot-see-yet)
 
 ## Building: the NSP script
@@ -94,6 +95,10 @@ Cheats are files, not settings: the host (`dm/host/hle_cheats.c`) reads Atmosph�
 - **What a front end may write while the game runs.** Nothing the host reads back on its own: the host reads `<build ID>.enabled` and the cheat file when it loads them, at the start and on the player's "Reload cheats" (⌘R in the Mac window, which re-reads the same file and the toggles with it), and never watches the folder. So a front end writes before the start, or tells the player to reload. The panel's refresh while it is open reads the engine's state, not the files. For one start, `DM_CHEATS_ON=<name>,<name>,…` in the launch environment turns the named cheats on without touching `.enabled` (case-insensitive, by name); `DM_CHEATS_ANY_BUILD=1` loads the folder's single file of another build when the running build has none (its addresses may not fit: for checking a carried file), and `DM_CHEATS_DEBUG=1` logs every write. The three are diagnostics, not settings: they are not in `launcher.json`.
 - **The iPhone.** The engine is compiled into the iOS host too (without safe mode), with the same folder rule, but the iOS app sets neither `DM_CHEATS` nor `DM_ROOT`, so cheats are off there unless `Documents/env.txt` names a folder with `DM_CHEATS`; even then they write data only, never code (the app's code pages are signed). Giving the iOS app a default, `Documents/cheats`, is the natural next step once a front end wants to manage cheats on a device; it is not in this change.
 - **Carrying a file to another build.** `scripts/cheat_anchor.py` imports a cheat file into a version-independent source and compiles it for any build of the game ([the rewriter reference](reference/rewriter.md#cheats-carried-across-game-updates)). A front end need not know about it: the compiled `<build ID>.txt` is an ordinary cheat file, and its `.meta.tsv` makes the panel richer.
+
+## Sheets the game waits for
+
+A game that calls the controller applet (`nn::hid::ShowControllerSupport`) with more players than are connected is held in that call, as on a Switch, until the player connects them or cancels. The app's own front end shows the sheet: `front_controller_applet` in `dm/host/front.h` (`front_mac.m`, `front_ios.m`), called on the game thread, which blocks while the sheet is up. A front end that wraps the host as a child process sees nothing of it; the host logs `controller applet: ...` lines when it asks and how it ended ([Library applets take the application's focus](reference/services.md#library-applets-take-the-applications-focus)).
 
 ## What a front end cannot see yet
 

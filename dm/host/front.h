@@ -44,3 +44,15 @@ void dm_touch_script(const dm_touch *t, int n);   // scripted touches (DM_KEYS, 
 // Timing: when a save write fails (disk full etc.) within one of the game's save transactions (between two Commits), so that this Commit is refused and the previously committed save is unchanged, it is called once per refused transaction;
 // the next transaction that succeeds commits as usual, and the front end need not do any recovery. err = the first failing errno (ENOSPC = 28 means out of space). Called on the game thread; the front end switches to the main thread itself and must not block
 void front_save_failed(int err);
+
+// Controller applet (hle_hid.c, nn::hid::ShowControllerSupport; controller_applet.h): called on the game thread when the game needs `min` players (at most `max`; the game's single mode makes
+// both 1) and fewer are connected. The front end shows a native sheet (the Mac: an NSAlert sheet on the game window; the iPhone: a UIAlertController) that lists the connected controllers,
+// enables Continue while dm_controller_applet_players(max) >= min, and returns FRONT_CA_CANCELLED on Cancel. The calling thread blocks until then, as the Switch's applet blocks its caller
+// (the guest clock keeps running, as with the keyboard: hle_swkbd.c); the front end switches to its main thread itself and never blocks it on the game thread. *count and *selected come in
+// filled for the players connected now and player 1's npad; on FRONT_CA_OK they are what the game gets (normally the front end sets *count again). explain is the game's explanation text,
+// NULL when none is passed (not decoded yet). The weak default in hle_hid.c, used when a front end does not implement the hook, returns FRONT_CA_CANCELLED at once: with nothing to wait
+// in, the game gets what the player closing the applet gives (ResultControllerSupportCanceled). With no window a front end returns FRONT_CA_CANCELLED too
+enum { FRONT_CA_OK = 0, FRONT_CA_CANCELLED = 1 };
+typedef int (*front_controller_applet_fn)(int min, int max, const char *explain, int *count, uint32_t *selected);
+int front_controller_applet(int min, int max, const char *explain, int *count, uint32_t *selected);
+int dm_controller_applet_players(int max);   // hle_hid.c: the players the applet reports now (connected, on supported npads), capped at max (0 = no cap); any thread

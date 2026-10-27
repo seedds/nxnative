@@ -70,6 +70,7 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** shrink the node area with a rewriter cut for that SDK build (`dm/tools/sdk_patches.py`): the two `mov w8/w9, #0x3fe00000` in the AddressRegionManager constructor → 62 MB.
 - **Finding the constructor on a new `sdk` build:** search its text for the two `mov w8 / w9, #0x3fe00000` words (`08fca752`, `09fca752`); `sdis.py --fn` names the function `AddressRegionManagerC2Emm` from its dynamic symbols. SDK 7 / 8 builds load the node area with `orr w8 / w9, wzr, #0x3fe00000` (`e8230b32`, `e9230b32`), so the `mov` search finds nothing there.
 - **Found on** (the builds that take the cut):
+  - [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) (SDK 12.3.9): constructor `sdk+0x346420`, cuts `+0x346430` / `+0x3464cc`, the same offsets as Engage's SDK 12.3.7, beside the large-region alignment cut. The game's own allocator needs a separate compact layout.
   - [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) (Unity 2019.4.27f1, SDK 11.4.3): constructor `sdk+0x34e0b8`, node-area limit `+0x34e0c8` and occupied length `+0x34e164`. The original node area prevents StandardAllocator's pool-minus-used reservation from fitting at startup.
   - [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md): the two `mov w8/w9, #0x3fe00000` in the constructor → 62 MB; without it the alias region ran out of address space minutes into play ([Size-aligned regions exhaust the alias address space](#size-aligned-regions-exhaust-the-alias-address-space)).
   - [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (Unity 2022.3, SDK 17.5.3): `StandardAllocator::Initialize` aborts in `nninitStartup` on SDK 17, then the alias region fills in minutes; the same node area as Engage's SDK; the constructor is at `sdk+0x139458` on that build and takes the same cut.
@@ -111,6 +112,7 @@ The guest address space, heaps, pools, virtual address memory and the allocators
   - [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (SDK 8.2.1): alignment at `sdk+0x336d5c`, cut as DRAGON QUEST XI S's SDK 7.3.2 build.
   - [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (SDK 15.3.2, Celeste's `sdk` build): `AllocateAddressRegion`'s alignment at `sdk+0x12e2e0`, as Absolum's did.
   - [Pikmin 4](../../dm/games/0100B7C00933A000/README.md) (SDK 10.4.8): the 10.4.1 build's offsets.
+  - [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) (SDK 12.3.9): large-region alignment at `sdk+0x34662c`, 1 GB to 32 MB; its compact 4 GB allocator reservation then fits after the 62 MB node area.
 - **Note:** FINAL FANTASY RESONANCE's SDK 20.5.17 build aligns regions of 2 MB and more to 2 MB only (`VammManager::AllocateAddressRegion`, `sdk+0x145e00`), so it needs no alignment cut.
 
 ### Size-class alignment doubles Unity's regions
@@ -155,6 +157,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
   - Paper Mario: The Thousand-Year Door: Absolum's three cuts on the `sdk` build (the AddressRegionManager constructor `sdk+0x12e0e0`: `+0x12e0f0` / `+0x12e184`; `AllocateAddressRegion`'s alignment at `+0x12e2e0`) and a cut on `main` to 4 GB of address space, as Pokémon Legends: Z-A's, put the region at alias +62 MB to +4.06 GB in Engage's 5 GB block.
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (2.0.2, SDK 19.3.11; one boot); [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md): the allocator maps 1.5 GB at boot and 2.0 GB by the arrival in Rogueport. The `sdk` build is [Celeste](../../dm/games/01002B30028F6000/README.md)'s. Absolum's malloc StandardAllocator (40 GB, cut to 2.5 GB) is in [.NET NativeAOT malloc and the GC region range](#net-nativeaot-malloc-and-the-gc-region-range).
 - **Note:** on Pokémon Legends: Z-A, `QueryMemoryInfo` reporting more than 4 GB would take the game's big-memory path (heaps of allocatable − 4.27 GB instead of − 2.76 GB).
+
+### Separate virtual ranges in Snowdrop's page allocator
+
+- **Symptom:** a write to `0x20000ffff` in static initialization (`main+0x164990`), after `AllocateAddressRegion` returns `0x1803`; reducing the request to 3 GB still returns `0x1803` with the SDK's original large-region alignment. With only the outer ranges reduced, a later free crashes at `main+0x1668dc` after reading compressed file data as a slab-owner pointer.
+- **Cause:** the engine reserves three adjacent virtual ranges before committing pages in them. Its enclosing reservation exceeds the iPhone's available guest address space, and the engine does not check the failed reserve before deriving the page addresses. A smaller reservation also needs the SDK's node area and large-region alignment adapted: a separate metadata reservation comes first, and the 1 GB alignment wastes the remaining contiguous space. The large-allocation child has an independent maximum page count; reducing only the outer range lets it allocate across the boundary used by `free` to distinguish allocation classes.
+- **Fix:** the build-gated game cuts reduce the range sizes, their combined reservation and the large allocator's maximum page count together. The fixed metadata reserve remains large enough, and page allocation, commits and frees retain their behavior. The SDK build gets the existing [node-area cut](#the-sdks-address-region-node-area) and [32 MB alignment](#1-gb-alignment-of-regions-of-1-gb-and-more). Per-range occupancy and the original growth fallbacks remain **open** until sustained gameplay validates the smaller ranges; see the game note for the layout, cut sites and current validation.
+- **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) (1.6.2225577, SDK 13.3.5).
 
 ### .NET NativeAOT malloc and the GC region range
 

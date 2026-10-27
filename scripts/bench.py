@@ -124,11 +124,29 @@ def run_one(a, gid, build, var, route, out, lock):
     return s
 
 
-def wait_lock(lock):   # the measuring lock other runs on this Mac hold while a game runs (an empty file name turns it off); taken atomically
+def lock_holder(lock):
+    """The process ID a measuring lock names (its text: the ID alone, or '… pid <ID>'), when that process still runs; None for a free lock, one naming no ID (taken as held: 0),
+    and a stale one: its process gone and no game running on this Mac"""
+    try: text = Path(lock).read_text()
+    except OSError: return None
+    m = re.search(r'(?:^|pid )(\d+)\s*$', text.strip())
+    if not m: return 0
+    pid = int(m.group(1))
+    try: os.kill(pid, 0); return pid
+    except PermissionError: return pid
+    except ProcessLookupError: pass
+    return 0 if subprocess.run(['pgrep', '-x', 'dmhost'], capture_output=True).returncode == 0 else None
+
+
+def wait_lock(lock, owner=''):   # the measuring lock other runs on this Mac hold while a game runs (an empty file name turns it off); taken atomically; a stale one is removed
     while True:
         try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY); os.write(fd, str(os.getpid()).encode()); os.close(fd); return
-        except FileExistsError: time.sleep(2)
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY); os.write(fd, (f'{owner} pid {os.getpid()}' if owner else str(os.getpid())).encode()); os.close(fd); return
+        except FileExistsError:
+            if lock_holder(lock) is None:
+                print(f'removing the stale measuring lock {lock} ({Path(lock).read_text(errors="replace").strip()[:80]}: its process is gone, no game runs)', flush=True)
+                Path(lock).unlink(missing_ok=True); continue
+            time.sleep(2)
 
 
 def table(results, keys):

@@ -116,6 +116,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `kpka_jobs` maps the PAKs, takes the newest copy of each path, peeks at 4 decompressed bytes and inflates only SDF entries (`sdf_shaders`).
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md): 63,111 shaders (30,233 vertex, 21,475 pixel, 11,271 compute, 53 geometry, 33 hull, 46 domain) and 102,345 pairs, in 5 s with 12 jobs.
 
+### Shader records in Snowdrop SDF data slices
+
+- **Symptom:** the split finds no shaders in a RomFS made of `.sdfdata`, `.sdftoc` and `.sdfver` files.
+- **Cause:** Snowdrop stores the shaders in individually compressed records inside its `BERG` data slices. These SDF archives are a different format from RE Engine's shader definitions above. A shader record has a 20-byte header `{u32 0xabcd00c6, flags, 0, raw length, stored length}`, then one zstd frame; reflection data precedes the NVN sections inside it.
+- **Fix:** `shader_split.py` recognizes `BERG` by magic and reads the length-delimited compressed records (`snowdrop_shaders`). Every control section is followed immediately by its code, with lengths from control +0x20 and +0x704; they are byte-packed, so a control need not be aligned. A single record can hold more than one shader. Each section must pass the control / code / stage checks. Programs hold one stage, and the vertex shaders take the [single-stage cover](#single-stage-programs-paired-with-a-cover). Scanning for the record header avoids mistaking a coincidental zstd magic inside compressed data for another asset.
+- **DLC:** additional shader records ship in the DLC's data slices. The NSP script includes each extracted DLC RomFS as an extra shader root, without an ExeFS module, and fingerprints its index and extraction timestamps for split reuse. Vulkan and OpenGL builds include the DLC roots too. When installing or removing optional DLC changes an NVN shader union, the script uses an external profile with new shader tables only after every non-DLC shader row and fact matches the registered tables; package indices may change. The registered module builds, settings and build-gated cuts are preserved. A cached proof of this comparison permits repeat builds to reuse the split.
+- **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) (Snowdrop, SDF version 22).
+
 ### SPK shader package in an MT Framework ARC
 
 - **How it is stored:** the engine's one shader package, `sc\NX_64\root` (`SPK\0`, type hash `0x02358e1a`) in `nativeNXx64/sa/NX_64/root.arc` ([01](../agents/01-extract.md)). After the package's tables every shader is a code area followed directly by its control section, back to back to the end of the file: 230 vertex shaders, then 230 pixel shaders.
@@ -148,6 +156,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - Each file is one variation with one stage, so the split pairs nothing; as in Hades II, the vertex shaders write every output their pixel shaders read and no pipeline failed to link.
 - **Found on:** [Bayonetta 2](../../dm/games/01007960049A0000/README.md): 1,856 distinct keys (1,547 pixel, 309 vertex) in `shader.dat`, `shader2.dat` and `shadereff.dat` of `data000.cpk` (the split about 2.5 minutes); [Bayonetta](../../dm/games/010076F0049A2000/README.md): 458 distinct keys (236 pixel, 222 vertex), the members of `shader.dat` in `data00.cpk` (about 1.7 minutes). All build for both.
 - **Not checked:** 13 Sentinels and Catherine: Full Body's CPKs (no files on the drives).
+
+### Monolith ARH1, XBC1 and HCPS/SLCT shader containers
+
+- **Symptom:** archive shaders are absent from the map; the two boot shaders in `main` are reported as raw controls with no identified code area.
+- **Cause:** Monolith uses ARH1/ARD archives and XBC1 streams. HCPS shader containers live inside models, map streams and standalone shader files; a standalone SLCT in `main` omits the HCPS header.
+- **Fix:** `shader_split.py` reconstructs paths from the ARH1 XOR trie, reads bounded archive entries in parallel, and decodes stored/zlib/zstd XBC1 streams recursively. The ARH stored size excludes an XBC1 wrapper's 48 bytes. Decoded members are searched for both HCPS and complete GLSLC outputs (effect asset packs); compressed literals are visited only after decoding. HCPS's SLCT/NVSD descriptors locate each variant's control and code ranges; a vertex bundle can include geometry, so stages are split by each control's own lengths. Text-bearing controls advance at eight-byte alignment. Standalone SLCT sections use offsets relative to their own start. Source-only HCPS containers with empty code/control ranges hold no NVN binaries. Pairs stay within their program variant. Synthetic fixtures cover wrapper bounds, embedded geometry, variants, standalone offsets and compressed streams containing literal container magics.
+- **Nested effect compression:** Firehawk WIPAC resources can wrap their `BlShaderArchive` GLSLC programs in `cmp\0zlib`: an eight-byte signature, little-endian stored/raw u32 lengths, then zlib. This layer lives inside the decoded XBC1 entry. The recursive reader checks both lengths and the end of the stream; it excludes these compressed ranges from raw container scans too. The four initially missing geometry/pixel keys and two additional vertex/pixel keys from Xenoblade Chronicles 3's opening match `/effect/fld/ma01a.wipac` after this decoding. Synthetic tests cover nested literal streams and incorrect sizes.
+- **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md#files-and-shaders), whose note records the census and runtime key checks.
+- **Format references:** [ARH1 layout](https://github.com/roccodev/ard-tools/blob/master/docs/arh1.md), [xc3_lib shader structures](https://github.com/ScanMountGoat/xc3_lib/blob/main/xc3_lib/src/spch.rs). The reader's lengths and keys were checked against the supplied game files.
 
 ### Needle shader containers in main and GFD archives
 
@@ -415,8 +432,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** `SPIRV-Cross threw an exception: Subgroup builtins are not available in this type of function`.
 - **Cause:** Metal has no SIMD-group functions in vertex functions, and SPIRV-Cross's own subgroup emulation covers only `Elect`. RE Engine scalarizes uniform loads: ballot the active lanes, shuffle the first lane's value to all and take a fast path when all agree.
-- **Fix:** with a one-lane subgroup that is exact, so `dmsh_build.py` rewrites the vertex shaders' SPIR-V that way before SPIRV-Cross (`spv_single_lane`: the ballot is the lane's own bit, shuffles and broadcasts return its own value, all / any are the predicate, all-equal and elect are true, lane ID 0, size 1).
-- **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (about 4 % of its vertex shaders).
+- **Fix:** with a one-lane subgroup that is exact, so `dmsh_build.py` rewrites the vertex shaders' SPIR-V that way before SPIRV-Cross (`spv_single_lane`: the ballot is the lane's own bit, shuffles and broadcasts return its own value, all / any are the predicate, all-equal and elect are true, lane ID 0, size 1). A mask component read through `OpAccessChain` / `OpInBoundsAccessChain` becomes an extraction from the constant mask, preserving the index.
+- **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (about 4 % of its vertex shaders); [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) (vertex `4b98320a0f512efe`, a prefix ballot that reads `SubgroupLtMask` through a component pointer).
 - **Note:** the rewrite covers vertex shaders only: two of Bayonetta 3's domain shaders still fail this way ([Tessellation stages are not drawn](#tessellation-stages-are-not-drawn)).
 
 ### Geometry shaders that only pick the layer

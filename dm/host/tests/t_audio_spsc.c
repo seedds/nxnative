@@ -1,5 +1,6 @@
 // hle_audio.c lock-free queue stress test: three threads producing / playing / reclaiming 100 thousand blocks concurrently, the byte stream and reclaim order checked one by one by sequence number, no event lost.
 #include "../hle_audio.c"
+__thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
 #include <sched.h>
 #include <time.h>
 

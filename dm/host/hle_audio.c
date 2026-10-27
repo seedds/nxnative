@@ -235,7 +235,7 @@ static OSStatus au_create(aout *a) {
 static void *au_create_th(void *a) { return (void *)(intptr_t)au_create(a); }
 static void au_open(aout *a) {
     pthread_t t; void *r = NULL;
-    if (pthread_create(&t, NULL, au_create_th, a) || pthread_join(t, &r)) die("AudioUnit setup: cannot start its thread");
+    if (pthread_create(&t, NULL, au_create_th, a) || dm_host_thread_join(t, &r)) die("AudioUnit setup: cannot start its thread");
     OSStatus st = (OSStatus)(intptr_t)r; if (st) die("AudioUnit setup failed (status %d)", (int)st);
 }
 // Silent sink: consumes in real time at 48 kHz every 5 ms. When more than 100 ms behind (iOS suspended the whole process in the background, SIGSTOP on the Mac), restart the count from now and do not make up the missed time --

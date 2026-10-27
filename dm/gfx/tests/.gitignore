@@ -68,8 +68,8 @@ t_vbuf
 t_vbuf.dSYM/
 t_geometry
 t_geometry.dSYM/
-t_feedback
-t_feedback.dSYM/
+t_transform_feedback
+t_transform_feedback.dSYM/
 t_dirty_race
 t_dirty_race.dSYM/
 t_vin
@@ -84,6 +84,8 @@ t_upload_budget
 t_upload_budget.dSYM/
 t_view_swizzle
 t_view_swizzle.dSYM/
+t_image_usage
+t_image_usage.dSYM/
 t_vk_desc
 t_vk_desc.dSYM/
 t_gl_imports
@@ -128,3 +130,7 @@ t_present_snap
 t_present_snap.dSYM/
 t_link_ticks
 t_link_ticks.dSYM/
+t_rast_discard
+t_rast_discard.dSYM/
+t_feedback
+t_feedback.dSYM/

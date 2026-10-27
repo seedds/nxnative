@@ -32,6 +32,7 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 
 ## Audio
 
+- **Resolved: an incomplete first command list permanently selected the wrong header layout.** The reproducing test from [PR #331](https://github.com/seedds/nxnative/pull/331) fails on the old host and produces stereo PCM with the fix; the PR author reports sound on the Mac with 4.0.1. Local validation uses synthetic command lists because this machine has no Mario Kart Mac build. See [Incomplete startup lists must not select the command layout](../../../docs/reference/audio.md#incomplete-startup-lists-must-not-select-the-command-layout).
 - **Resolved: no sound; `[RED] audren: no DeviceSink (ID 0x10) in the command list, 0 commands of 0x148 bytes`.** SDK 4's command list has SDK 6's header, but its DeviceSink (`CommandBuffer::GenerateDeviceSinkCommand`, `sdk+0x19e690`) is ID 0xf and 0x130 bytes: device name +0x14, upsample buffer +0x118, input count +0x120, input indices as bytes from +0x124. `capture` takes the one 0x130-byte command with 1 to 6 inputs when there is no 0x148-byte one (`g_sink4` in `hle_audren.c`).
 - **Resolved: the update lock.** Its `AudioRenderSystem::Update` (`sdk+0x19b77c`) locks an `nn::os::MutexType` at +0x1d0, not SDK 16's `SdkMutexType` at +0x1f0. The host took SDK 16's for every SDK before 20, which wrote a lock word into another field and excluded nothing; this was the first game it was plainly wrong for. `update_lock` in `hle_audren.c` now reads it off each SDK's own `Update`.
 
@@ -57,6 +58,7 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 
 ## Found on this game
 
+- **Audio layout detection after incomplete startup lists (resolved):** [Incomplete startup lists must not select the command layout](../../../docs/reference/audio.md#incomplete-startup-lists-must-not-select-the-command-layout).
 - **Save-write failure isolation (resolved; host regression):** the separate device and account saves make this game a relevant two-save case. Failure state, recovery and commit synchronization now belong to each backing transaction: [Save-write failures stay with their backing transaction](../../../docs/reference/services.md#save-write-failures-stay-with-their-backing-transaction).
 
 General host changes first needed here; each applies to every game:

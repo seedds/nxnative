@@ -59,6 +59,13 @@ static int child_burst(int kind) {
 }
 int main(void) {
     unsetenv("DM_OE_SCRIPT"); reset();
+    CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "inactivity extension starts disabled");
+    h_oe_InactivityExtSafe(1);
+    CHECK(h_oe_InactivityMode() == 1 && h_oe_InactivityExtQ(), "normal inactivity extension is mode 1");
+    h_oe_InactivityExt(1);
+    CHECK(h_oe_InactivityMode() == 2 && h_oe_InactivityExtQ(), "unsafe inactivity extension is mode 2");
+    h_oe_InactivityExtSafe(0x100);
+    CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "clearing the extension restores mode 0");
     CHECK(empty(), "empty queue at start: returns false and leaves the output alone");
     dm_focus_set(1); dm_set_opmode(1); CHECK(empty(), "same state sends no notification");
     dm_focus_set(3); CHECK(h_oe_GetFocus() == 3, "background state 3 can be queried before popping");

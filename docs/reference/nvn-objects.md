@@ -424,6 +424,13 @@ Games read this count as a position in their own command memory and size their h
 - `nvnTexturePoolRegisterImage` writes the same table as `RegisterTexture` (image handles are pool indices).
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md).
 
+### Image bindings supply shader-write intent
+
+- **Symptom:** `[RED] texture bound to an image slot lacks the shader-write usage`, and compute image writes go to a dummy texture.
+- **Cause:** Metal usage came only from the texture builder's `IMAGE` flag. A render texture may instead have only `COMPRESSIBLE`, then its descriptor be used in a shader image slot. Snowdrop writes these descriptors with `RegisterTexture`, not `RegisterImage`. Its depth-conversion compute shader `cf5ba107e29b51f4` gathers from a depth texture and unconditionally writes four pixels per invocation to a 256×256 R16F texture whose flags are `0x8`. Its Metal texture had read / render-target usage (`0x5`), so the image binding was rejected.
+- **Fix:** before a draw or dispatch uses a writable image, `image_prepare` resolves it with image intent and ensures its backing allows shader writes. `RegisterImage` also keeps this intent in its host snapshot; neither path changes the guest texture. A texture already rendered into is upgraded through `tex_upgrade`: end its render pass first, copy every mip / slice, replace all shared serials and invalidate cached sampled views. Load-only image slots accept read-only storage without upgrading, and ordinary render targets retain their original usage. `t_image_usage.m` exercises both registration entry points, a late registration while a render pass is open, the clear and other mip surviving the upgrade, and a GPU image write read through a sampled alias.
+- **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) (SDK 13.3.5, Snowdrop).
+
 ### Plural texture binds, builder-registered samplers, strided texel writes, device item 0x67
 
 - `nvnCommandBufferBindTextures` (the plural of `BindTexture`), `nvnSamplerPoolRegisterSamplerBuilder` (a sampler registered from its builder), `nvnTextureWriteTexelsStrided` (`WriteTexels` with row and image strides) and device item 0x67, which the game reads before every program it loads and uses as the alignment of its copies of the shader (answered 256, not measured).

@@ -77,6 +77,9 @@ static void probe_heapwalk(uint64_t h) {
     }
 }   // dump: on hit print 16 bytes at [x0+dump] (-1 = do not print); fn: dedicated handler (replaces the default print)
 static int g_nprobe;
+static uint64_t g_probe_frame_first, g_probe_frame_last = UINT64_MAX;
+static unsigned g_probe_limit;
+uint64_t dm_guest_frame(void);
 static void probe_str(uint64_t p) {
     char buf[80]; vm_size_t got = 0;
     if (p < 0x1000 || vm_read_overwrite(mach_task_self(), p, sizeof buf - 1, (vm_address_t)buf, &got) || !got) return;
@@ -107,8 +110,11 @@ static void probe_dump_once(void) {
 static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the SIGTRAP branch of crash.c
     uint64_t pc = uc->uc_mcontext->__ss.__pc;
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
-        probe_dump_once();
         if (g_probe[i].fn) { g_probe[i].hits++; g_probe[i].fn(uc); uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
+        uint64_t frame = dm_guest_frame();
+        if (frame < g_probe_frame_first || frame > g_probe_frame_last || (g_probe_limit && g_probe[i].hits >= g_probe_limit)) {
+            uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1;
+        }
         if (g_probe[i].freg >= 0) {   // ?xN=value / ?[xN+offset]=value: pass through silently when it does not match
             uint64_t v = uc->uc_mcontext->__ss.__x[g_probe[i].freg]; vm_size_t g = 0;
             if (g_probe[i].foff >= 0 && vm_read_overwrite(mach_task_self(), v + g_probe[i].foff, 8, (vm_address_t)&v, &g)) v = ~g_probe[i].fval;
@@ -118,8 +124,9 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
             char nm[128]; probe_heapname(uc->uc_mcontext->__ss.__x[g_probe[i].hreg], nm, sizeof nm);
             if (!strstr(nm, g_hw.want)) { uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
         }
+        probe_dump_once();
         flockfile(stderr);   // One block per hit when threads hit at once
-        { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] T=%x", g_probe[i].name, ++g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, thr_cur_handle()); }
+        { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] F=%llu T=%x", g_probe[i].name, ++g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, (unsigned long long)frame, thr_cur_handle()); }
         for (int r = 0; r < 8; r++) { uint64_t v = uc->uc_mcontext->__ss.__x[r]; fprintf(stderr, " x%d=%#llx", r, v); probe_str(v); }
         for (int r = 19; r < 24; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);
         if (getenv("DM_PROBE_ALL")) for (int r = 9; r < 19; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);   // also print x9–x18
@@ -357,6 +364,13 @@ static void watch_install(void) {
 void probe_install(void) {
 #if !TARGET_OS_IPHONE
     crash_set_trap_hook(probe_hit);
+    const char *frames = getenv("DM_PROBE_FRAMES");
+    if (frames) {
+        char *end; g_probe_frame_first = strtoull(frames, &end, 10);
+        g_probe_frame_last = *end == '-' ? strtoull(end + 1, NULL, 10) : g_probe_frame_first;
+    }
+    const char *limit = getenv("DM_PROBE_LIMIT");
+    if (limit) g_probe_limit = (unsigned)strtoul(limit, NULL, 10);
     const char *e = getenv("DM_PROBE");
     if (e) {
         char spec[512]; strlcpy(spec, e, sizeof spec);

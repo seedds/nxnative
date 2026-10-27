@@ -41,6 +41,8 @@ HLE_FORCE("_ZN5movie9Extractor13SetDataSourceEPKc", "movie demuxer: the host doe
 // The size comes from Configure's MediaData, or else from the VP9 header of the first key frame. Unity allocates its output buffers itself as width × height × 1.5 (it does not call GetOutputBufferSize), so the stride is the width and the plane height the height, unaligned.
 // Decoding runs on each decoder's own host thread, and the guest thread that sends a packet or returns an output index waits for it: guest threads run on guest stacks given by the SDK, and libvpx's stack frames are large. Events are still signalled by guest threads (SignalEvent is guest code).
 // Buffer / MediaData / event operations call the SDK's own functions (guest_sym), so the host needs no knowledge of their layouts.
+// Native mutex waits use dm_host_mutex_lock: a callback can wake a higher-priority guest thread that then waits for the decoder lock held by its signaller. That thread is blocked,
+// not runnable guest work; counting it as runnable deadlocked Xenoblade Chronicles 3 at the first released output. Keep the locks across signalling for decoder/event lifetime safety.
 
 #define MD_NIN 4                 // input buffers
 #define MD_INCAP (4u << 20)      // 4 MB per input buffer (a 1080p VP9 packet is far smaller)
@@ -389,7 +391,7 @@ static void *md_worker(void *arg) {
     mdec_t *d = arg;
     pthread_setname_np("dm movie decoder");
     dm_host_helper_qos(QOS_CLASS_USER_INITIATED);   // under DM_QOS_MAP: decodes ahead of playback, not on the frame's critical path
-    pthread_mutex_lock(&d->wmu);
+    dm_host_mutex_lock(&d->wmu);
     for (;;) {
         while (d->job == MDJ_NONE) pthread_cond_wait(&d->wcv, &d->wmu);
         int job = d->job;
@@ -401,7 +403,7 @@ static void *md_worker(void *arg) {
             uint64_t dt = now_ns() - t0; d->dec_n++; d->dec_ns += dt; if (dt > d->dec_max) d->dec_max = dt;
         }
         else md_close(d);
-        pthread_mutex_lock(&d->wmu);
+        dm_host_mutex_lock(&d->wmu);
         d->job = MDJ_NONE; pthread_cond_broadcast(&d->wcv);
         if (job == MDJ_QUIT) break;
     }
@@ -410,7 +412,7 @@ static void *md_worker(void *arg) {
 }
 // hand one job to the host thread and wait for it (the caller holds dmu)
 static void md_job(mdec_t *d, int job) {
-    pthread_mutex_lock(&d->wmu);
+    dm_host_mutex_lock(&d->wmu);
     d->job = job; pthread_cond_broadcast(&d->wcv);
     while (d->job != MDJ_NONE) pthread_cond_wait(&d->wcv, &d->wmu);
     pthread_mutex_unlock(&d->wmu);
@@ -419,13 +421,13 @@ static void md_job(mdec_t *d, int job) {
 static void md_pump(mdec_t *d) {
     dm_host_lock(&d->dmu);
     for (;;) {
-        pthread_mutex_lock(&d->mu);
+        dm_host_mutex_lock(&d->mu);
         if (d->avc_drain) {   // H.264 end of stream: the pictures still queued leave one per free slot; the last carries the end-of-stream flag
             int s = -1; for (int k = 0; k < d->nout; k++) if (!d->out[k].used) { s = k; break; }
             if (s < 0) { pthread_mutex_unlock(&d->mu); break; }
             d->out[s].used = 1; pthread_mutex_unlock(&d->mu);
             d->jslot = s; d->jflush = 1; md_job(d, MDJ_TAKE); int got = d->jgot, left = d->avc ? mavc_queued(d->avc) : 0;
-            pthread_mutex_lock(&d->mu);
+            dm_host_mutex_lock(&d->mu);
             d->out[s].pic = got; d->out[s].pts = got ? d->jpts_out : 0; d->out[s].flags = left ? 0 : 4; d->outq[d->noutq++] = s;
             if (!left) d->avc_drain = 0;
             pthread_mutex_unlock(&d->mu);
@@ -447,7 +449,7 @@ static void md_pump(mdec_t *d) {
         if ((pk.size > 0 && (MD_VPX(d) || MD_AUDIO(d) || avc)) || (avc && eos)) {
             d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; d->jpts = pk.pts; d->jflush = avc && eos; md_job(d, MDJ_DECODE); got = d->jgot; }
         int more = avc && eos && d->avc && mavc_queued(d->avc) > 0;   // H.264 pictures still queued: they follow this output, the last of them carries the end-of-stream flag
-        pthread_mutex_lock(&d->mu);
+        dm_host_mutex_lock(&d->mu);
         d->infree[d->ninfree++] = pk.in;
         int ready = got || eos;   // an end-of-stream packet without a picture still yields an output to carry the flag back
         if (ready) { d->out[slot].pic = got; d->out[slot].pts = got && avc ? d->jpts_out : pk.pts; d->out[slot].flags = more ? pk.flags & ~4u : pk.flags; d->outq[d->noutq++] = slot; }
@@ -541,7 +543,7 @@ HLE_FORCE("_ZN5movie7Decoder9ConfigureEPNS_9MediaDataE", "movie decoder configur
         if (G.find_buf(md, "avcc", &b) && b && G.data(b) && G.size(b)) mavc_avcc(d->avc, G.data(b), G.size(b));
     }
     int w = 0, h = 0; if (md) { G.find_i32(md, "width", &w); G.find_i32(md, "height", &h); }
-    pthread_mutex_lock(&d->mu); if (w > 0 && h > 0 && !d->fmt_sent) { d->w = w; d->h = h; } pthread_mutex_unlock(&d->mu);
+    dm_host_mutex_lock(&d->mu); if (w > 0 && h > 0 && !d->fmt_sent) { d->w = w; d->h = h; } pthread_mutex_unlock(&d->mu);
     MD_TRACE(d, 0, "Configure: MediaData width %d height %d", w, h);
     return 0;
 }
@@ -555,7 +557,7 @@ HLE_FORCE("_ZN5movie7Decoder20RegisterClientEventsEPNS_13DecoderEventsE", "movie
 }
 HLE_FORCE("_ZN5movie7Decoder5StartEv", "movie decoder start: all inputs empty, notify the client", int, h_movie_Start, void **self) {
     mdec_t *d = md_of(self); if (!d) return 0x2002;
-    pthread_mutex_lock(&d->mu); d->started = 1; pthread_mutex_unlock(&d->mu);
+    dm_host_mutex_lock(&d->mu); d->started = 1; pthread_mutex_unlock(&d->mu);
     MD_TRACE(d, 2, "Start");
     md_defer(d, 0);
     return 0;
@@ -565,7 +567,7 @@ static void md_reset(mdec_t *d, int close) {
     dm_host_lock(&d->dmu);   // wait for the packet being decoded
     if (close) md_job(d, MDJ_CLOSE);
     if (d->avc) mavc_drop(d->avc);   // H.264 pictures waiting for their turn belong to the old position
-    pthread_mutex_lock(&d->mu);
+    dm_host_mutex_lock(&d->mu);
     // Every input goes back to the free list, as with MediaCodec, but one the client holds may still be sent: Big Brain Academy: Brain vs. Brain's event thread acquires inputs while its
     // control thread flushes to loop an activity preview, and sends them after the flush (SendInputBufferForDecode claims them back). Those are withheld for a while (h_movie_AcqIn)
     uint64_t now = now_ns();
@@ -600,7 +602,7 @@ HLE_FORCE("_ZN5movie7Decoder23AcquireInputBufferIndexEPiS1_", "movie decoder: ac
     if (!idx || !left) return 0x100b;
     // No input indices after Stop (as with MediaCodec): Metroid Dread's "input available" handler (main+0x222f14) posts the decoder wrapper object to the player manager's message queue once it gets an index;
     // after Stop returned every input index, a late input event could still get one, the wrapper was destroyed afterwards, and the worker thread (main+0x223bd4) read the freed object and crashed
-    pthread_mutex_lock(&d->mu);
+    dm_host_mutex_lock(&d->mu);
     int r = MD_NO_INPUT; *idx = -1; *left = 0;
     // An input the client held across a flush (md_reset) is not handed out again for MD_STALE_NS unless the client sends it first: handing it out while the client still meant to send
     // it gave the client one buffer twice (a packet dropped as sent twice, VideoToolbox -12909). A client that abandons it gets it back after that time instead of losing a buffer
@@ -631,7 +633,7 @@ HLE_FORCE("_ZN5movie7Decoder24SendInputBufferForDecodeEiiilj", "movie decoder: s
           void **self, int i, int off, int size, int64_t pts, uint32_t flags) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (i < 0 || i >= MD_NIN || off < 0 || size < 0 || (uint32_t)off + (uint32_t)size > MD_INCAP) return 0x100b;
-    pthread_mutex_lock(&d->mu);
+    dm_host_mutex_lock(&d->mu);
     // An index the client acquired before a Flush and sends after it (Big Brain Academy: Brain vs. Brain loops its activity previews this way): the flush put it back in the free list,
     // so it is claimed from there now. Before, it could be handed out a second time, two packets shared one buffer (VideoToolbox -12909 on the overwritten one) and the fifth pending
     // packet wrote past pend[] into npend and dmu (the process died destroying dmu, 2 runs in 5)
@@ -661,7 +663,7 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
           void **self, int *idx, int64_t *pts, uint32_t *flags, int *left) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (!idx || !pts || !flags || !left) return 0x100b;
-    pthread_mutex_lock(&d->mu);
+    dm_host_mutex_lock(&d->mu);
     int r = MD_NO_OUTPUT; *idx = -1; *left = 0;
     if (d->noutq && d->started) {
         int s = d->outq[0]; memmove(d->outq, d->outq + 1, --d->noutq * sizeof *d->outq);
@@ -768,7 +770,7 @@ HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferEPNS_9MediaDataE", "mo
 HLE_FORCE("_ZN5movie7Decoder24ReleaseOutputBufferIndexEi", "movie decoder: release an output index (decodes queued packets again)", int, h_movie_RelOut, void **self, int i) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (i < 0 || i >= d->nout) return 0x100b;
-    pthread_mutex_lock(&d->mu);
+    dm_host_mutex_lock(&d->mu);
     d->out[i].used = 0; d->out[i].pic = 0;
     int queued = d->npend, drain = d->avc_drain;
     pthread_mutex_unlock(&d->mu);

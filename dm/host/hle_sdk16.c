@@ -26,7 +26,6 @@ HLE_FORCE("_ZN2nn2oe24SetExpectedVolumeBalanceEff", "volume balance; the host ig
 HLE_FORCE("_ZN2nn2oe25GetProgramTotalActiveTimeEv", "total active time → time since the host started", int64_t, h_oe_ActiveTime, void) { return (int64_t)(now_ns() - g_t0_ns); }
 HLE_FORCE("_ZN2nn2oe31EnterExitRequestHandlingSectionEv", "exit request critical section; the host exits through SIGTERM / the lifecycle", void, h_oe_EnterExit, void) {}
 HLE_FORCE("_ZN2nn2oe31LeaveExitRequestHandlingSectionEv", "exit request critical section; the host ignores it", void, h_oe_LeaveExit, void) {}
-HLE_FORCE("_ZN2nn2oe38SetUserInactivityDetectionTimeExtendedEb", "extended auto-sleep delay; the host ignores it", void, h_oe_Inactivity, unsigned on) { (void)on; }
 
 // ---------- time ----------
 // CalendarTime = { int16 year; int8 month, day, hour, minute, second }, returned by value (within 8 bytes, in x0)

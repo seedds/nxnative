@@ -37,8 +37,13 @@ def compare(lib_dir, chain):
     now = load(os.path.join(lib_dir, 'b-' + chain, REPORT))
     prev = previous(lib_dir, chain)
     if prev is None: return None, []
-    was_ok = {r['key'] for r in load(os.path.join(lib_dir, prev, REPORT)) if r['st'] == 'ok'}
-    return prev, [(r['key'], r['st'], r['err']) for r in now if r['st'] != 'ok' and r['key'] in was_ok]
+    return prev, lost(load(os.path.join(lib_dir, prev, REPORT)), now)
+
+
+def lost(prev_rows, now_rows):
+    """[(key, status, reason)] for the shaders ok in prev_rows and not in now_rows (two build reports' rows); scripts/regress.py compares two revisions' builds with this too"""
+    was_ok = {r['key'] for r in prev_rows if r['st'] == 'ok'}
+    return [(r['key'], r['st'], r['err']) for r in now_rows if r['st'] != 'ok' and r['key'] in was_ok]
 
 
 def main(argv):

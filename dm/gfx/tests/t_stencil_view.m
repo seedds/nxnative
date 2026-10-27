@@ -32,6 +32,8 @@ int main(void) { @autoreleasepool {
         s.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=formats[i], .width=W, .height=H, .depth=1, .levels=1, .samples=1};
         nvn_tex_layout(&s.d, &s.L);
         tex_t sb = s, d = s; sb.serial++; sb.stencil = 1; d.serial += 2;   // sb: the same storage built in stencil mode; d: the copy's destination
+        sb.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;   // usage-only difference, as in Xenoblade Chronicles 3
+        d.off = 0x100000;   // a separate destination, not another descriptor of the source storage
         mtl_tex_init(&s); mtl_tex_init(&sb); mtl_tex_init(&d);
         id<MTLTexture> base = tex_mtl(&s), dst = tex_mtl(&d);
         mtl_drain();   // finish production initialization before the fixture writes on its independent classic queue
@@ -41,6 +43,12 @@ int main(void) { @autoreleasepool {
         float dz[W * H]; uint8_t st[W * H];
         for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { dz[x + y * W] = depth_at(x, y); st[x + y * W] = stencil_at(x, y); }
         plane_io(base, 0, 1, dz); plane_io(base, 1, 1, st);
+
+        mtl_sub_begin();
+        id<MTLTexture> image = tex_mtl(&sb);
+        mtl_sub_commit(); mtl_drain();   // adding IMAGE to a sampling descriptor retains both populated planes
+        base = tex_get(s.serial);
+        CHECK(image == base, "IMAGE usage and render descriptors share their populated storage");
 
         // A stencil-mode view, and the texture built in stencil mode, are X32_Stencil8 views of the depth-stencil storage itself (no upgraded copy)
         view_t v = {.set_dsmode=1, .dsmode=NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL};

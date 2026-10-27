@@ -23,6 +23,7 @@ static OSStatus mock_dispose(AudioComponentInstance);
 #define AudioUnitUninitialize mock_uninit
 #define AudioComponentInstanceDispose mock_dispose
 #include "../hle_audio.c"
+__thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
 
 static struct {
     AudioDeviceID device;

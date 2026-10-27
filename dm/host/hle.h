@@ -18,8 +18,6 @@ void *objmap_get(const void *guest);
 void objmap_put(const void *guest, void *host);
 void *objmap_del(const void *guest);
 uint64_t now_ns(void);
-// This thread is doing the host's own heavy work (NVN submit / present: encoding Metal commands; on hardware that is the GPU's business and does not occupy a guest core). The same-core preemption approximation (hle_thread.c) does not count it as "running"
-extern __thread _Atomic int dm_host_work;
 // A blocking native HLE wait releases the guest core. With the condition mutex
 // held, enter with 1 before waiting and balance with 0 after reacquiring it.
 void dm_thread_native_wait(int entering);

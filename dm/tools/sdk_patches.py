@@ -1,6 +1,14 @@
 # The rewriter's patches of Nintendo SDK module builds (sdk), which several games can ship: dm/tools/patch_nso.py applies those of a module's NSO build ID, whatever the game.
 # A patch of a game's own module (main) goes in its profile's patches.py (dm/games/<id>/patches.py). CUTS as described in patch_nso.py ("Registered patches")
 CUTS = {
+  # Xenoblade Chronicles 3 2.2.1, SDK 12.3.9: the same AddressRegionManager
+  # constructor and size-class alignment as Engage's SDK 12.3.7. Its cut 4 GB
+  # malloc reservation must fit the 4.375 GB alias region on iOS.
+  'e8cdceb1e77a8465fe20f21928e8d296': [
+    (0x346430, '08fca752', '087ca052', 'AddressRegionManager node area limit: 1 GB to 62 MB'),
+    (0x3464cc, '09fca752', '097ca052', 'AddressRegionManager occupied node area: 1 GB to 62 MB'),
+    (0x34662c, '0a00a852', '0a40a052', 'AllocateAddressRegion: align regions of 1 GB and more to 32 MB'),
+  ],
   # Pokemon Brilliant Diamond 1.3.0 (SDK 11.4.3): nninitStartup (main+0x2c1d5c) gives pool - used to StandardAllocator with virtual address memory.
   # Its first CentralHeap::Init aborts at sdk+0x2f98e4: the 1 GB node area leaves no room for the 1 GB-aligned 3.14 GB reservation in a 4.375 GB alias region.
   # The constructor (sdk+0x34e0b8) is the same mechanism as Engage's below: the limit and the occupied length must both shrink to 62 MB.
@@ -59,6 +67,18 @@ CUTS = {
   '3644a6760469451cabc99f00c540acc2': [
     (0x37c140, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x37c1dc, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+  ],
+  # Mario + Rabbids Sparks of Hope 1.6.2225577 (SDK 13.3.5): the same constructor
+  # and placement code as nirvanA Initiative above. Snowdrop reserves a small
+  # metadata region before its three-pool range (reduced from 12 GB to 3 GB in
+  # the game's patches.py). Both the 62 MB node area and 32 MB alignment are
+  # needed: with the original 1 GB alignment the 3 GB request returns 0x1803,
+  # even after the node-area cut. Its own pools align to 64 KB / 512 KB and do
+  # not require 1 GB alignment of the enclosing address region.
+  '43211771ed39e7fcef03d88e27091831': [
+    (0x37c140, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x37c1dc, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+    (0x37c33c, '0a00a852', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more mov w10,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
   ],
   # Pokémon Legends: Z-A 2.0.2 (v393216) sdk (SDK 19.3.11): the same node area cut. The constructor is at sdk+0x1423ec (limit = alias start + 0x3fe00000 at +0x28, a unit heap of 0x30-byte
   # nodes, the area then registered as occupied at +0x142468). With main's allocator region below, the guest block fits the 5 GB proven on a phone

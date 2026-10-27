@@ -16,6 +16,14 @@ int main(void) { @autoreleasepool {
     mtl_tex_init(&a); mtl_tex_init(&b);
     id<MTLTexture> old = tex_mtl(&a);
     CHECK(tex_mtl(&b) == old && tex_mtl(&ghost) == old, "live and finalized serials initially share storage");
+    tex_t image = a; image.serial += 3; image.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; mtl_tex_init(&image);
+    CHECK(tex_mtl(&image) == old, "an IMAGE sampling descriptor shares storage without a usage change");
+    mtl_reg_tex(950, &image, NULL); S.img[5][0] = 950;
+    NvShader *writer = [NvShader new]; writer->rf.nb = 1; writer->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .rw=1};
+    NvProg *program = [NvProg new]; program->sh[5] = writer; image_prepare(program, 1u << 5);
+    old = tex_mtl(&image);
+    CHECK(old.usage & MTLTextureUsageShaderWrite, "IMAGE descriptor adds shader-write usage");
+    CHECK(tex_mtl(&a) == old && tex_mtl(&b) == old && tex_mtl(&ghost) == old, "IMAGE usage does not split storage across existing descriptors");
     // Exercise replacement at the hash table's growth threshold: reinserting while iterating would resize and reshuffle it.
     uint64_t extra = 99400;
     while ((g_by_serial.n + 1) * 4 <= g_by_serial.cap * 3) { hm_put_id(&g_by_serial, &extra, old); extra++; }

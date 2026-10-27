@@ -84,6 +84,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 ## Command lists by SDK
 
+### Incomplete startup lists must not select the command layout
+
+- **Symptom:** no sound after boot; `audren: no DeviceSink (ID 0x13) in the command list` and a malformed-command error persist even when later command lists are valid.
+- **Cause:** the host's render thread can generate commands before the game's first `RequestUpdate`. Mario Kart 8 Deluxe's first list ended in a zeroed third command, so none of the supported header layouts could walk it. `capture` nevertheless latched the default layout and consumed the one-time sink scan. Later SDK 6 headers were read as SDK 8–20 headers, and SDK 4's DeviceSink was never found. Retrying only header detection still leaves the sink scan consumed.
+- **Fix:** select the header only when the whole list walks in a supported layout. Until then, return a silent frame before the sink scan; the first valid list can select both the header and its sink. `t_audren_layout` reproduces the failure and checks stereo PCM for SDK 4, 6, 16 and 21, with valid-first, empty and incomplete startup lists and SDK 21's short first list.
+- **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (SDK 4.4.0; [PR #331](https://github.com/seedds/nxnative/pull/331)).
+
 ### The final mix is taken from the DeviceSink's mix buffers
 
 - **Symptom:** the CPU processor drops the final mix.
@@ -102,7 +109,7 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 - **Symptom:** no sound; red `audren: command 1 in the command list is malformed (magic 0 size 0)`.
 - **Cause:** SDK 6's DSP command header is +0x04 size (s16), +0x06 command ID (s16), +0x10 enabled, where SDK 8–20 have +0x04 enabled, +0x05 ID, +0x06 size (`CommandListProcessor::Process`, `sdk+0xaaa00`); its DeviceSink is ID 0x10.
-- **Fix:** `capture` in `hle_audren.c` takes the layout whose walk finds the 0xcafebabe magic on every command of the first full list.
+- **Fix:** `capture` in `hle_audren.c` takes the layout whose walk finds the 0xcafebabe magic on every command of the first valid list; [incomplete startup lists](#incomplete-startup-lists-must-not-select-the-command-layout) leave detection open.
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (SDK 6.5.0).
 
 ### SDK 8: command IDs numbered differently

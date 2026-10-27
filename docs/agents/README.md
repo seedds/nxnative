@@ -11,6 +11,7 @@ Everything here was learned on Diablo II: Resurrected (SDK ~12, NVN 53, the orig
 | [03-bringup.md](03-bringup.md) | Getting the host to boot the game: the run loop and how to read the log; the failures met so far are in the [subsystem references](../reference/README.md), found through the [symptom index](symptoms.md) |
 | [04-graphics.md](04-graphics.md) | NVN on Metal for a new title: finding every shader container, shader keys, binding layouts, bindless textures, depth mode, the diagnostic switches; what other titles needed is in the [rendering](../reference/rendering.md), [shaders](../reference/shaders.md) and [NVN objects](../reference/nvn-objects.md) references |
 | [05-debugging.md](05-debugging.md) | Recipes: crash reports, lldb scripts, Ghidra headless decompilation, objdump, memory growth, render-pass and texture dumps, on-device diagnostics, offline pipeline link checks |
+| [06-dev-loop.md](06-dev-loop.md) | The developer loop: which tool to build, run, debug, measure and check with, CI, and what a pull request needs by what it changes |
 | [symptoms.md](symptoms.md) | One line per symptom met so far (an assertion, a `[RED]` line, an abort or crash site, a visible result) → the reference entry that explains it |
 
 ## Ground rules

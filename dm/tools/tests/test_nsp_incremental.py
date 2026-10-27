@@ -106,6 +106,21 @@ class DeriveProfile(Base):
         self.derive(); (self.pdir / 'pso_manifest.tsv').write_text('S\tk2\tpixel\n'); self.derive()
         self.assertEqual((self.pdir / 'pso_manifest.tsv').read_text(), 'S\tk2\tpixel\n')
 
+    def test_shader_only_derivation_preserves_builds_and_registered_patch_file(self):
+        source = self.src / 'game.tsv'
+        source.write_text(source.read_text() + f'build\tv65536\t1.1.0\tmain={BID2}\nshader_versions\tv0 v65536\n')
+        patch = self.src / 'patches.py'; patch.write_text(f'CUTS = {{"{BID}": []}}\n')
+        g = game.Game(self.src)
+        nsp.derive_profile(g, self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
+        derived = game.Game(self.pdir)
+        self.assertEqual(derived.rows, g.rows)
+        self.assertEqual(derived.builds(), g.builds())
+        self.assertTrue((self.pdir / 'patches.py').is_symlink())
+        self.assertEqual((self.pdir / 'patches.py').resolve(), patch.resolve())
+        derived.table('shader_map.tsv').write_text('generated DLC shader rows\n')
+        nsp.derive_profile(g, self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
+        self.assertEqual(derived.table('shader_map.tsv').read_text(), 'generated DLC shader rows\n')
+
     def test_missing_corrupt_and_duplicate_override_rows_derive_again(self):
         for change in ('missing', 'corrupt', 'override', 'indented override', 'truncated'):
             with self.subTest(change):
@@ -224,6 +239,32 @@ class DeriveProfile(Base):
         self.assertFalse(game.Game(self.pdir).values('mem_alias'))
 
 
+class DlcOnlyShaders(Base):
+    def test_only_dlc_rows_and_facts_can_change(self):
+        tables = self.tmp / 'new-tables'; tables.mkdir()
+        base = 'pkg.bin\t8\tcompute\tbase\t/base.shader\n'
+        dlc = 'pkg.bin\t0\tvertex\tdlc\t/aoc/5/new.shader\n'
+        old_facts = 'base\t{"local":[8,1,1]}\ndlc\t{"other":1}\n'
+        self.src.joinpath('shader_map.tsv').write_text(base + dlc)
+        self.src.joinpath('shader_facts.tsv').write_text(old_facts)
+        g = game.Game(self.src)
+        cases = [
+            ('removed DLC and reindexed base', base.replace('\t8\t', '\t0\t'), 'base\t{"local":[8,1,1]}\n', True),
+            ('added DLC', base + dlc + 'pkg.bin\t9\tpixel\tnew-dlc\t/aoc/7/new.shader\n', old_facts, True),
+            ('shaderless DLC', base + dlc, old_facts, False),
+            ('changed base key', base.replace('\tbase\t', '\tother\t'), old_facts, False),
+            ('changed base source', base.replace('/base.shader', '/different.shader'), old_facts, False),
+            ('changed base facts', base, old_facts.replace('[8,1,1]', '[4,1,1]'), False),
+            ('no DLC difference', base + dlc, old_facts.replace('[8,1,1]', '[4,1,1]'), False),
+            ('invalid map', 'not a shader map\n', old_facts, False),
+        ]
+        for name, shader_map, facts, want in cases:
+            with self.subTest(name=name):
+                tables.joinpath('shader_map.tsv').write_text(shader_map)
+                tables.joinpath('shader_facts.tsv').write_text(facts)
+                self.assertEqual(nsp.dlc_only_shader_change(g, tables), want)
+
+
 class SplitShaders(Base):
     NAMES = ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')
 
@@ -237,14 +278,70 @@ class SplitShaders(Base):
         cm = mock.patch.object(nsp, 'run', self.split); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
     def split(self, cmd, log, env=None, cwd=None, on_line=None):   # shader_split.py: the package and the four tables, deterministic for the same rows
-        self.splits += 1; out = Path(cmd[4]); out.mkdir(parents=True); (out / 'main.bin').write_bytes(self.rows.encode())
+        self.splits += 1; self.last_cmd = cmd; out = Path(cmd[4]); out.mkdir(parents=True); (out / 'main.bin').write_bytes(self.rows.encode())
         for n, t in zip(self.NAMES, cmd[5:]): Path(t).write_text(self.table(n))
         Path(log).write_text('shaders: 3 (3 vertex)\n')
 
-    def table(self, n): return f'# split header\n{n}\t{self.rows}\n'
+    def table(self, n): return self.tables[n] if hasattr(self, 'tables') else f'# split header\n{n}\t{self.rows}\n'
 
-    def go(self, g, own=True, oodle=None):
-        return nsp.split_shaders(sys.executable, self.repo, [self.ex / 'RomFS'], [self.ex / 'ExeFS/main'], self.pkg, {}, self.logs, g, own, oodle)
+    def go(self, g, own=True, oodle=None, dlc_roms=(), derive_dlc=None):
+        return nsp.split_shaders(sys.executable, self.repo, [self.ex / 'RomFS'], [self.ex / 'ExeFS/main'], self.pkg, {}, self.logs, g, own, oodle, dlc_roms, derive_dlc)
+
+    def test_dlc_only_derivation_is_incremental_and_keeps_registered_tables(self):
+        base = 'other.bin\t1\tvertex\tbase\t/base.shader\n'
+        old = {'shader_map.tsv': 'other.bin\t0\tvertex\tdlc\t/aoc/7/new.shader\n' + base,
+               'shader_facts.tsv': 'base\t{"fact":1}\ndlc\t{"fact":2}\n',
+               'shader_pairs.tsv': 'base\tdlc\n', 'pso_pairs.tsv': '# none\n'}
+        for n in self.NAMES: (self.src / n).write_text(old[n])
+        g = game.Game(self.src)
+        self.tables = {'shader_map.tsv': base.replace('\t1\t', '\t0\t'), 'shader_facts.tsv': 'base\t{"fact":1}\n',
+                       'shader_pairs.tsv': '# none\n', 'pso_pairs.tsv': '# none\n'}
+        def derive():
+            nsp.derive_profile(g, self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
+            return game.Game(self.pdir)
+        promote = mock.Mock(side_effect=derive)
+        first = self.go(g, own=False, derive_dlc=promote)
+        self.assertEqual((self.splits, promote.call_count), (1, 1))
+        self.assertEqual(self.go(g, own=False, derive_dlc=promote), first)
+        self.assertEqual((self.splits, promote.call_count), (1, 2))   # proof of the strict non-DLC comparison is reused
+        self.assertEqual(game.Game(self.pdir).rows, g.rows)
+        for n in self.NAMES:
+            self.assertEqual(g.table(n).read_text(), old[n])
+            self.assertEqual(game.Game(self.pdir).table(n).read_text(), self.tables[n])
+        # A new DLC extraction, even of the same file sizes, must perform the strict comparison again.
+        dlc = self.tmp / 'aoc/7'; dlc.mkdir(parents=True); asset = dlc / 'shader'; asset.write_bytes(b'bytes')
+        self.go(g, own=False, dlc_roms=[dlc], derive_dlc=promote); self.assertEqual(self.splits, 2)
+        self.redump(asset)
+        self.go(g, own=False, dlc_roms=[dlc], derive_dlc=promote); self.assertEqual(self.splits, 3)
+        moved = dlc.with_name('8'); dlc.rename(moved)
+        self.go(g, own=False, dlc_roms=[moved], derive_dlc=promote); self.assertEqual(self.splits, 4)   # index changes count even if every file statistic is identical
+        verifier = self.tmp / 'comparison-v2.py'; verifier.write_text('changed comparison code')
+        with mock.patch.object(nsp, '__file__', str(verifier)):
+            self.go(g, own=False, dlc_roms=[moved], derive_dlc=promote); self.assertEqual(self.splits, 5)
+
+    def test_base_shader_mismatch_never_derives_for_dlc(self):
+        (self.src / 'shader_map.tsv').write_text('p.bin\t0\tvertex\tbase\t/base\np.bin\t1\tvertex\tdlc\t/aoc/7/shader\n')
+        (self.src / 'shader_facts.tsv').write_text('# none\n')
+        (self.src / 'shader_pairs.tsv').write_text('# none\n')
+        self.tables = {'shader_map.tsv': 'p.bin\t0\tvertex\twrong-base\t/base\n', 'shader_facts.tsv': '# none\n',
+                       'shader_pairs.tsv': '# none\n', 'pso_pairs.tsv': '# none\n'}
+        promote = mock.Mock()
+        with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'):
+            self.go(game.Game(self.src), own=False, derive_dlc=promote)
+        promote.assert_not_called()
+
+    def test_dlc_shaders_are_passed_and_invalidate_the_split(self):
+        g = self.own(); self.go(g); self.assertEqual(self.splits, 1)
+        dlc = self.tmp / 'work/aoc/7'; dlc.mkdir(parents=True)
+        asset = dlc / 'shader.archive'; asset.write_bytes(b'new shader')
+        self.go(g, dlc_roms=[dlc]); self.assertEqual(self.splits, 2)
+        self.assertEqual(self.last_cmd[-1], str(dlc))
+        # Extra content has no main: the base RomFS/main pairing remains unchanged.
+        self.assertEqual(self.last_cmd[2:4], [str(self.ex / 'RomFS'), str(self.ex / 'ExeFS/main')])
+        self.go(g, dlc_roms=[dlc]); self.assertEqual(self.splits, 2)
+        asset.write_bytes(b'updated DLC shader')
+        self.go(g, dlc_roms=[dlc]); self.assertEqual(self.splits, 3)
+        self.go(g); self.assertEqual(self.splits, 4)   # removing the DLC removes its shaders from the union
 
     def own(self):   # a derived profile with the empty tables, as main makes it
         self.derive(); g = game.Game(self.pdir); nsp.provisional_prep(sys.executable, self.repo, {}, self.logs, g); return g

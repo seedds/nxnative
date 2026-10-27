@@ -17,6 +17,7 @@ PER_ROW = 3
 
 def rows():
     out = []
+    seen = {'image': {}, 'name': {}, 'title ID': {}}
     for n, line in enumerate(TABLE.read_text(encoding='utf-8').splitlines(), 1):
         if not line.strip() or line.startswith('#'): continue
         c = line.split('\t')
@@ -25,6 +26,12 @@ def rows():
         if not (REPO / 'docs' / 'images' / image).is_file(): sys.exit(f'{TABLE.name}:{n}: no image docs/images/{image}')
         if any(ch in name + note for ch in '"<>&'): sys.exit(f'{TABLE.name}:{n}: no " < > & in a name or note (they go into HTML as they are)')
         if tid and not re.fullmatch(r'[0-9A-F]{16}', tid): sys.exit(f'{TABLE.name}:{n}: a title ID is 16 hex digits: {tid}')
+        # A union merge can retain two different captions for the same game, so check its image and title ID too.
+        for field, value in (('image', image), ('name', name), ('title ID', tid)):
+            if not value: continue
+            if value in seen[field]:
+                sys.exit(f'{TABLE.name}:{n}: duplicate {field} {value!r} (first at line {seen[field][value]}): merge the rows by hand')
+            seen[field][value] = n
         out.append((image, name, note, tid))
     return out
 

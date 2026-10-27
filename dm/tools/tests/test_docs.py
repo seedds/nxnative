@@ -6,7 +6,9 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 from urllib.parse import unquote
 
 REPO = Path(__file__).resolve().parents[3]
@@ -89,9 +91,23 @@ class Gallery(unittest.TestCase):
     def test_gallery_is_current(self):
         self.assertEqual(docs_gallery.OUT.read_text(encoding='utf-8'), docs_gallery.readme(), 'README.md: the gallery is out of date: run dm/tools/docs_gallery.py')
 
-    def test_each_game_once(self):   # a union merge of two rows for the same game keeps both
-        names = [r[1] for r in docs_gallery.rows()]
-        self.assertEqual(sorted({n for n in names if names.count(n) > 1}), [], 'docs/images/gallery.tsv: a game is in the table twice')
+    def test_union_merge_rejects_conflicting_game_rows(self):
+        first, second = docs_gallery.rows()[:2]
+        # Concurrent caption/screenshot and size edits must require a manual resolution even when the names differ.
+        for field, changes in (('image', {1: 'Corrected caption'}), ('name', {0: second[0]}),
+                               ('title ID', {0: second[0], 1: 'Corrected caption'})):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as folder:
+                base = [first[0], first[1], first[2], '0100000000000000' if field == 'title ID' else '']
+                ours, theirs = base.copy(), base.copy()
+                for i, value in changes.items(): ours[i] = value
+                theirs[2] = '~2 GB'
+                paths = [Path(folder) / f'{side}.tsv' for side in ('ours', 'base', 'theirs')]
+                for path, row in zip(paths, (ours, base, theirs)): path.write_text('\t'.join(row) + '\n', encoding='utf-8')
+                result = subprocess.run(['git', 'merge-file', '--union', '-p', *map(str, paths)], check=True, capture_output=True, text=True)
+                merged = Path(folder) / 'merged.tsv'
+                merged.write_text(result.stdout, encoding='utf-8')
+                with patch.object(docs_gallery, 'TABLE', merged), self.assertRaisesRegex(SystemExit, f'duplicate {field}'):
+                    docs_gallery.readme()
 
 
 class Length(unittest.TestCase):

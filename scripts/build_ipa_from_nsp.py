@@ -1518,7 +1518,7 @@ def toolchain(repo, env=None):   # Metal is a separate Xcode download: its versi
 
 
 def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
-    """The iOS shader libraries (dmsh_build.py, which builds the Mac's into sh/cache in the same run), or with mac only the Mac's (a Mac-only build: no IOSOUT). Returns the folder the host takes
+    """The iOS shader libraries (dmsh_build.py, which also builds the Mac's into sh/cache when the build wants them), or with mac only the Mac's (a Mac-only build: no IOSOUT). Returns the folder the host takes
     them from. Reused when the shader package (pkg_key, its content; None never reuses) and the chain's tools, translator binaries, profile and compilers are as at the last successful build:
     dmsh_build.py would only restore every shader from its cache (63,000 for Breath of the Wild: about 100 s). The key of the iOS libraries is sh/ios/b-<chain>.key, that of the Mac's
     sh/mac-b-<chain>.key (not in sh/cache, whose b-* entries dmsh_build.py reads as library folders), which an iOS build writes too, so a Mac-only build after it is reused; either is taken only
@@ -1545,7 +1545,10 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     if not mac: rmtree(kf)
     try: PROG.watch(ShaderWatch(g, libs, Path(env['WORK']), pso_pairs))
     except Exception: pass   # progress never stops the build (a missing table is dmsh_build.py's to report)
-    benv = dict(env, XLATE=str(xlate), IOSOUT=str(ios))
+    # The Metal work follows from what the build produces: an iPhone build needs only the iOS libraries (the macOS
+    # metallibs are about half of the compile and never enter the IPA), a Mac build only the Mac's, and a build that
+    # wants both compiles both. The Mac sources and reflection are written either way (c1_full / cb_extent come from them).
+    benv = dict(env, XLATE=str(xlate), IOSOUT=str(ios), DMSH_TARGETS='mac' if mac else 'ios')
     if ALLOW_OTHER_METAL: benv['DM_ALLOW_OTHER_METAL'] = '1'
     if mac: del benv['IOSOUT']   # dmsh_build.py builds the iOS libraries only with IOSOUT
     run([py, repo / 'dm/gfx/tools/own_compilers.py', sh / 'pkg', sh / 'cache'], log, env=benv)

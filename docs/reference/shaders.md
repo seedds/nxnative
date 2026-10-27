@@ -658,6 +658,8 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Bindings and handles
 
+- **Note:** the layout of NVN's driver segments `c0` and `c2` (the handle tables, the storage and uniform buffer tables, the words the host fills) and the binding kinds of the reflection JSON have one definition, `dm/gfx/nvn/dmsh_abi.h`. The host includes it (`nvn_mtl.m`, `nvn_refl.m`, `nvn_obj.h`); `dmsh_build.py` reads it through `dm/gfx/tools/dmsh_abi.py`, which stops on any line it cannot read. Both files are part of the chain version. `dm/tools/tests/test_dmsh_abi.py` checks that the tables fit together, that the host converts every kind the build may write, that the translator's own copy of the `c2` layout (`Program.cs`) agrees, and that the values do not come back as literals in the host or the build. The entries below cite the offsets.
+
 ### Driver-segment reads outside fragment shaders
 
 - **Symptom:** a vertex or compute shader reads zeros from NVN's driver segment `c0`.

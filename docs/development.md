@@ -357,7 +357,7 @@ Each game has a profile in `dm/games/<id>/`:
 - the shader tables: `shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `pso_pairs.tsv` (pairs used by vertex output padding and the pipeline prebuild), `pso_manifest.tsv`, and `c1_full.tsv` / `cb_extent.tsv`, which each checkout's full shader build makes (not committed);
 - `patches.py` (when there are any): the rewriter's patches of the game's own builds.
 
-The shader translation chain has one version for every game, in `dm/gfx/nvn/dmsh_chain.h`.
+The shader translation chain has one version for every game, in `dm/gfx/nvn/dmsh_chain.h`. What the shader libraries and the host must agree on, the NVN driver segment layout and the binding kinds of the reflection, is written once in `dm/gfx/nvn/dmsh_abi.h`: the host includes it, the build reads it through `dm/gfx/tools/dmsh_abi.py`, and `dm/tools/tests/test_dmsh_abi.py` guards it ([Shaders, Bindings and handles](reference/shaders.md#bindings-and-handles)).
 
 The shader tools pick a profile with `DM_GAME=<id>`; `make -C dm/host` and `build_ipa.sh` pick it with `GAME=<id>`. Profiles are named after the base game's title ID. There is no default game: without `GAME` / `DM_GAME` the tools stop and list the profiles. `python3 dm/games/game.py list` lists the profiles. Host code that relies on one build's fixed addresses checks that build's ID.
 

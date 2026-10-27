@@ -305,8 +305,9 @@ int main(int argc, char **argv) {
         if (stat(save, &st)) migrate(lib, sup);
         snprintf(p, sizeof p, "%s/pso_user.tsv", sup); setenv("DM_PSO_USER", p, 0);
     }
-    if (!getenv("DM_SAVE")) mkdirs(save);
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
+    // The save folder, whatever set it: the host makes only its last level before it clones the save, and mounts the save read-only when that fails. A DM_SAVE the player chose stays theirs: no fallback here.
+    if (mkdirs(getenv("DM_SAVE"))) fprintf(stderr, "[RED] launcher: cannot make the save folder %s (%s): the host mounts the save read-only, nothing is saved\n", getenv("DM_SAVE"), strerror(errno));
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);

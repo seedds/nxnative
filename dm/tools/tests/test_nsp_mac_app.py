@@ -640,6 +640,17 @@ class App(unittest.TestCase):
             r = run(DM_SAVE='saves/current')   # relative DM_SAVE
             self.assertEqual((r['DM_SAVE'], r['DM_ROOT']), (str(library / 'saves/current'), str(lib)))
 
+            deep = library / 'fresh library/Saves/current'   # two levels in a folder that is not there yet: made by the launcher, before the host runs
+            r = run(DM_SAVE='fresh library/Saves/current'); self.assertEqual(r['DM_SAVE'], str(deep)); self.assertTrue(deep.is_dir())
+            shutil.rmtree(library / 'fresh library')
+            (lib / 'env.txt').write_text('DM_SAVE=fresh library/Saves/player\n')   # from the player's env.txt as well
+            run(); self.assertTrue((library / 'fresh library/Saves/player').is_dir()); (lib / 'env.txt').unlink()
+            ro_save = self.tmp / 'ro save'; ro_save.mkdir(); ro_save.chmod(0o555); self.addCleanup(ro_save.chmod, 0o755)
+            r = run(DM_SAVE=str(ro_save / 'a/b'))   # cannot be made: a [RED] line, the player's choice stays (no fallback to ~/Library)
+            self.assertEqual(r['DM_SAVE'], str(ro_save / 'a/b'))
+            self.assertIn(f'[RED] launcher: cannot make the save folder {ro_save}/a/b', logged(lib_logs))
+            self.assertEqual(list(ro_save.iterdir()), [])
+
             ro = self.tmp / 'ro logs'; ro.mkdir(); ro.chmod(0o555); self.addCleanup(ro.chmod, 0o755)
             for target in (ro, ro / 'run'):   # cannot be written; cannot be made
                 with self.subTest(target=target):

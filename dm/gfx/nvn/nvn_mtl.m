@@ -67,6 +67,10 @@ void mtl_cshoist_stats(uint64_t *moved, uint64_t *depth, uint64_t *stops) { *mov
 void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none) { *draws = *made = *none = 0; }
 void mtl_pso_line(char *out, size_t size) { if (size) snprintf(out, size, "legacy renderer (Metal 4 pipeline archive unavailable)"); }
 void mtl_ab_gpu(uint64_t frame, double gpu_ms, double frame_ms) { (void)frame; (void)gpu_ms; (void)frame_ms; }
+int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms) {
+    (void)n; (void)target; (void)lead_ms; (void)ticks; (void)gap_ms;
+    return 0;   // The legacy display-link path does not retain per-present tick diagnostics.
+}
 #else
 
 // Metal execution layer of the NVN null device, see nvn_mtl.h.

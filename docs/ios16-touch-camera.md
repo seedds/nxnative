@@ -119,13 +119,13 @@ remain in the existing app bundle.
 
 ## Retired skill-input conversion (v69 validation build)
 
-The input source now observes the actual Waza move layout's visibility, using
-read-only OBS gates for main build `b1f12fd919eae86ab8a978317677e64b` only.
-`DM_ZA_SKILL_DIRECTIONS=1` enables positional selection for new touch and keyboard
-face presses while that layout is visible. A bottom selects the original native
-B move slot, B right selects A, X left selects Y, and Y top selects X. The game
-HUD and move assignments stay in their original positions. ZL alone is not the
-condition. Unsupported builds and runs without the option retain native input.
+The v69 validation build observed the actual Waza move layout's visibility, using
+read-only OBS gates for main build `b1f12fd919eae86ab8a978317677e64b` only. Its
+now-removed skill-direction switch enabled positional selection for new touch and
+keyboard face presses while that layout was visible. A bottom selected the
+original native B move slot, B right selected A, X left selected Y, and Y top
+selected X. The game HUD and move assignments stayed in their original positions.
+ZL alone was not the condition. This experiment was retired in v70.
 
 Each source binds a press at touch/key down until release, so a visibility or Aim
 transition cannot change a held skill into a new confirm/cancel action. Focus
@@ -164,8 +164,8 @@ touch buttons; no selector state is consulted when publishing native input bits.
 only our virtual diamond's visible and hit-test geometry. Ordinary play keeps
 A bottom, B right, X left and Y top. The visible skill selector uses A right,
 B bottom, X top and Y left, matching the original game's move HUD. ZL alone
-does not select this geometry. The old `DM_ZA_SKILL_DIRECTIONS` input conversion
-option is ignored by the current host.
+does not select this geometry. The old positional input-conversion option has
+been removed from the current host.
 
 The existing main-run-loop timer observes geometry at 60 Hz. Drawing and hit
 testing share `facePos:` and one production geometry helper. Every face-owned

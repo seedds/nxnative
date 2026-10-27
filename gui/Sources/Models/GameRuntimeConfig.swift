@@ -88,7 +88,8 @@ public struct GameRuntimeConfig: Codable, Equatable {
         let fm = FileManager.default
         
         // 1. Write to ~/Library/Application Support/nxnative/<titleId>/env.txt (both cases to avoid mismatch)
-        if let titleId = game.titleId, !titleId.isEmpty {
+        let resolvedTitleId = (game.titleId?.isEmpty == false) ? game.titleId : CompatibilityService.shared.findTitleId(forGameTitle: game.name)
+        if let titleId = resolvedTitleId, !titleId.isEmpty {
             let ids = Set([titleId, titleId.uppercased(), titleId.lowercased()])
             for tid in ids {
                 let appSupDir = fm.homeDirectoryForCurrentUser

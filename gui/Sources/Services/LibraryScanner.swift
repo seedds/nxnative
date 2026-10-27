@@ -154,6 +154,7 @@ public final class LibraryScanner {
                     if let err = error {
                         completion(false, err.localizedDescription)
                     } else {
+                        GameControllerService.shared.activeRunningGameApp = app
                         completion(true, nil)
                     }
                 }

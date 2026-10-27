@@ -6,6 +6,22 @@ extension AppViewModel {
     
     // MARK: - Global Keyboard Navigation Handler
     public func handleKeyboardKey(_ key: String) {
+        // Modal Navigation for Game Settings
+        if gameForSettingsSheet != nil {
+            switch key {
+            case "up": handleSettingsModalGamepadAction(.navigateUp)
+            case "down": handleSettingsModalGamepadAction(.navigateDown)
+            case "left": handleSettingsModalGamepadAction(.navigateLeft)
+            case "right": handleSettingsModalGamepadAction(.navigateRight)
+            case "return", "space": handleSettingsModalGamepadAction(.confirm)
+            case "escape": handleSettingsModalGamepadAction(.cancel)
+            case "o": handleSettingsModalGamepadAction(.options)
+            case "y": handleSettingsModalGamepadAction(.contextAction)
+            default: break
+            }
+            return
+        }
+        
         // Tab switching: 1-6
         if let num = Int(key), (1...6).contains(num) {
             SoundEffectService.shared.play(.tabSwitch)

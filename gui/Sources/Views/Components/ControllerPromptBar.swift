@@ -106,8 +106,17 @@ public struct ControllerPromptBar: View {
             }
             
         case 2: // Compatibility
-            dpadPill(glyph: "←/→", action: "Cycle Engine")
-            controllerPill(glyph: xBtn, action: "Refresh", color: brandXColor)
+            if viewModel.compatibilityFocusArea == .filters {
+                dpadPill(glyph: "←/→", action: "Filter")
+                dpadPill(glyph: "↓", action: "Games")
+                controllerPill(glyph: confirmBtn, action: "Select", color: brandAColor)
+            } else {
+                dpadPill(glyph: "↑/↓", action: "Browse")
+                dpadPill(glyph: "←/→", action: "Action")
+                controllerPill(glyph: confirmBtn, action: "Port Game", color: brandAColor)
+                controllerPill(glyph: xBtn, action: "Notes", color: brandXColor)
+                controllerPill(glyph: cancelBtn, action: "Filters", color: brandBColor)
+            }
             
         case 3: // Controls
             controllerPill(glyph: confirmBtn, action: "Calibrate", color: brandAColor)
@@ -147,7 +156,16 @@ public struct ControllerPromptBar: View {
             }
             
         case 2: // Compatibility
-            keyboardKeyBadge(glyph: "← / →", action: "Cycle Engine")
+            if viewModel.compatibilityFocusArea == .filters {
+                keyboardKeyBadge(glyph: "← / →", action: "Filter")
+                keyboardKeyBadge(glyph: "↓", action: "Browse Games")
+            } else {
+                keyboardKeyBadge(glyph: "↑/↓", action: "Browse")
+                keyboardKeyBadge(glyph: "← / →", action: "Action")
+                keyboardKeyBadge(glyph: "↵ Enter", action: "Port")
+                keyboardKeyBadge(glyph: "C", action: "Notes")
+                keyboardKeyBadge(glyph: "⎋ Esc", action: "Filters")
+            }
             keyboardKeyBadge(glyph: "R", action: "Refresh")
             
         case 3: // Controls

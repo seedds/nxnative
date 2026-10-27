@@ -7,6 +7,7 @@ public final class GameControllerService: ObservableObject {
     @Published public var isGamepadConnected: Bool = false
     @Published public var activeControllerName: String = "No Gamepad Connected"
     @Published public var activeBrand: GamepadBrand = .generic
+    @Published public var activeRunningGameApp: NSRunningApplication? = nil
     
     public var onAction: ((GamepadAction) -> Void)?
     
@@ -161,13 +162,21 @@ public final class GameControllerService: ObservableObject {
     
     private func handleHomeHold3Seconds() {
         DispatchQueue.main.async {
-            // 1. Terminate running game instances (dmhost)
-            let killProc = Process()
-            killProc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            killProc.arguments = ["-TERM", "dmhost"]
-            try? killProc.run()
+            // 1. Terminate tracked running game app
+            if let app = self.activeRunningGameApp, !app.isTerminated {
+                app.terminate()
+            }
+            self.activeRunningGameApp = nil
             
-            // 2. Bring NxNative to front of other screens
+            // 2. Terminate running game instances (nxnative / dmhost)
+            for proc in ["nxnative", "dmhost"] {
+                let killProc = Process()
+                killProc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+                killProc.arguments = ["-TERM", proc]
+                try? killProc.run()
+            }
+            
+            // 3. Bring NxNative Launcher to front of other screens
             NSApplication.shared.activate(ignoringOtherApps: true)
             if let window = NSApplication.shared.windows.first {
                 window.makeKeyAndOrderFront(nil)

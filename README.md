@@ -4,6 +4,16 @@ Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
+## Requirements
+
+| To | You need |
+|---|---|
+| **Play on an iPhone or iPad** | iOS / iPadOS 26 or later on an iPhone with an A17 Pro chip or later (iPhone 15 Pro and newer) or an iPad with an M1 chip or later. The games' textures are BC-compressed, and older iPhones can't read that format. |
+| **Play on a Mac** | A Mac with Apple silicon on macOS 26 or later. |
+| **Build a game** (the NSP script) | A Mac with Apple silicon on macOS 26.6 or later, with Xcode 27.1, the toolchain the shaders are tested with ([Build from the command line](#build-from-the-command-line)). |
+
+Other devices aren't supported here: Intel Macs, iOS below 26, iPhones before the A17 Pro and iPads before the M1. Supporting more would mean a second rendering path that every change has to keep working and few contributors can test. Forks are welcome to carry it; a change to this list starts as an issue ([CONTRIBUTING.md](CONTRIBUTING.md#large-changes-and-other-platforms)).
+
 ## How to play
 
 ### With a Mac app
@@ -58,7 +68,7 @@ Controls, saves and settings: [Playing](docs/playing.md).
 
 Games tested on Mac or iPhone. See the [per-game notes](dm/games/README.md#games) for tested platforms, progress and known issues:
 
-Needs iOS / iPadOS 26 or later on an iPhone 15 Pro or newer (A17 Pro chip or later) or an iPad with an M1 chip or later: the games' textures are BC-compressed, and older iPhones can't read that format. Other games aren't supported yet. For them the script writes a survey and still tries its best to pack an IPA, guessing the game's settings; such an IPA may not start.
+For the devices these run on, see [Requirements](#requirements). Other games aren't supported yet. For them the script writes a survey and still tries its best to pack an IPA, guessing the game's settings; such an IPA may not start.
 
 Under each game: the IPA's size, and "60 fps with 1.2.0" where the game runs at 60 fps (30 on the Switch) with that update.
 

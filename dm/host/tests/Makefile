@@ -45,7 +45,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_motion_apple
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
-	$(B)/t_hid
+	TMPDIR="$(abspath $(B))" $(B)/t_hid
 	$(B)/t_haptics
 	$(B)/t_haptics_apple
 	$(B)/t_nro
@@ -192,7 +192,7 @@ resolution: $(B)/t_resolution
 	@for fps in 0 30 60; do for mode in 0 1 unset invalid; do $(B)/t_resolution $$mode $$fps asia || exit 1; done; done
 tsan: $(B)/t_audio_spsc_tsan $(B)/t_hid_tsan
 	$(B)/t_audio_spsc_tsan
-	$(B)/t_hid_tsan
+	TMPDIR="$(abspath $(B))" $(B)/t_hid_tsan
 
 MEM_FLAGS = -O1 -Wall -Werror -Wno-unused-function -Imemory_profile -I..
 MEM_DEPS = t_svc_memory.c memory_profile/game_profile.h ../hle_svc.c ../hle_guestthread.c ../hle.h ../dm.h

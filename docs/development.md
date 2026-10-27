@@ -306,6 +306,8 @@ Signing: `pack_app.py` signs the inner host first, then the bundle (`codesign --
 
 ## Build and run on a device with Xcode
 
+The command-line equivalent of this section, with the prerequisites to check first and every failure message explained, is [Deploying to your own device](deploying.md).
+
 With an Apple developer account, Xcode can sign and install the app itself:
 
 ```

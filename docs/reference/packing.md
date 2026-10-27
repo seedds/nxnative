@@ -9,6 +9,20 @@
 - **Fix:** `scripts/build_ipa_from_nsp.py` `configure_dotnet` derives the root from the `Microsoft.NETCore.App` entry in `dotnet --list-runtimes`, using the build's environment, before any extraction or survey. It exports `DOTNET_ROOT` both to that environment and to `os.environ`, for tools launched with an explicit environment and those that inherit it. Caller-supplied roots, including architecture-specific overrides, retain precedence. A failed or malformed probe leaves the environment unchanged rather than guessing the wrapper's directory.
 - **Found on:** [Balatro](../../dm/games/0100CD801CE5E000/README.md), first extraction with Homebrew .NET ([PR #284](https://github.com/seedds/nxnative/pull/284)). Applies to every game's build on that installation setup.
 
+### A colon in the game folder's path stops every .NET tool
+
+- **Symptom:** the first extraction dies before doing anything, with `Failed to create CoreCLR, HRESULT: 0x80070057` and `nx_extract exit code 137`, moments after `dotnet build` of that same tool succeeded. `dotnet --info` is healthy and the runtime is installed.
+- **Cause:** CoreCLR is handed its assembly list as `TRUSTED_PLATFORM_ASSEMBLIES`, one colon-separated string on Unix. A tool built into a directory whose path contains a colon contributes an entry that splits in two, so the runtime receives paths that do not exist and refuses to start with `E_INVALIDARG`. `COREHOST_TRACE=1` is misleading here: every probe resolves, the trace reaches `CoreCLR path = …`, and only then does the runtime fail, which reads like a broken .NET installation rather than a path problem. macOS allows the character: the Finder stores a colon for a slash typed into a folder name, so such a folder reads as `NPS / Key` in the Finder and `NPS : Key` in the shell, and nothing warns about it.
+- **Fix:** keep the game folder's path free of colons. Proven by copying one built `nx_extract` into two directories: under a colon-free path it prints its usage, and the identical copy under a path with a colon fails with `0x80070057`.
+- **Found on:** Tears of the Kingdom, packed from a folder named `NPS : Key`, .NET 10.0.403 on macOS 27.2. Applies to every game and to every .NET step of the build, `nx_extract` and the shader translator alike.
+
+### A folder synced by iCloud Drive cannot be code signed
+
+- **Symptom:** the Xcode build compiles everything, stages the game resources, and stops at the last step with `DmIOS.app: resource fork, Finder information, or similar detritus not allowed` and `Command CodeSign failed with a nonzero exit code`. Signing identity and provisioning profile are both reported as found on the line above.
+- **Cause:** the build is inside a folder that iCloud Drive's file provider manages, which is what the Desktop and Documents option turns on. The provider puts `com.apple.FinderInfo` on the app bundle and `com.apple.provenance` on every file it tracks, and `codesign` refuses a bundle carrying Finder information. Clearing the attributes alone does not hold: the resource copy phase runs on every build and the provider marks the new bundle again. The same sync also uploads the game dumps and `prod.keys`, and can evict files that the build then has to fetch back.
+- **Fix:** keep the game folder, its `<title ID>_build` and the Xcode derived data outside the synced folders — any directory that is not Desktop or Documents, or another volume. `xattr -cr <folder>` clears what a move carried with it; `xattr -l <folder>` naming `com.apple.file-provider-domain-id` is how to recognise a synced one.
+- **Found on:** Tears of the Kingdom built from `~/Desktop` with Desktop and Documents syncing: the bundle carried `com.apple.FinderInfo` and `com.apple.fileprovider.fpfs#P`, and 82,250 of its files `com.apple.provenance`. Moving the 63 GB folder out of the synced area and clearing the attributes signed on the next build, with every earlier step reused.
+
 ## IPA archives
 
 ### A streamed file changes size and the IPA fails its CRC check

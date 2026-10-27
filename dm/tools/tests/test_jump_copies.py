@@ -18,7 +18,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'jump_masked_pred')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'jump_masked_pred', 'check_before_copy')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -169,6 +169,47 @@ class MaskedPredecessor(unittest.TestCase):
 
     def test_no_base_no_site(self):
         self.assertIsNone(self.run_site(self.words(w0=NOP, w1=NOP)))
+
+
+class CheckBeforeCopy(unittest.TestCase):
+    """#396: the bounds check may be separated from the load by the table base being built between
+    them, and the index may be the checked register zero-extended after the check (Crash Bandicoot
+    N. Sane Trilogy main+0x997b5c and main+0xefcc18). Each instruction word below was assembled
+    with binutils and read back before being written here."""
+
+    def bounds(self, words, idx):
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(len(ins), len(words))
+        ld = next(p for p in ins if p.mnemonic == 'ldrsw')
+        cmp = scope['check_before_copy'](ins, ins[:-1], ld, idx)
+        m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', cmp.op_str) if cmp is not None else None
+        return None if cmp is None or not m else (m.group(1), int(m.group(2), 0) + 1)
+
+    def test_base_setup_between_check_and_load(self):
+        # mov w18,w14; cmp w14,#3; b.hi; adrp x2; add x2,x2,#0x3a0; ldrsw x18,[x2,x18,lsl #2]; add x18,x18,x2; br x18
+        ins = (0x2a0e03f2, 0x71000ddf, 0x540000c8, 0x90000002, 0x910e8042, 0xb8b27852, 0x8b020252, 0xd61f0240)
+        self.assertEqual(self.bounds(ins, {'w18'}), ('w14', 4))
+
+    def test_masked_index_after_the_check(self):
+        # cmp w8,#3; b.hi; and x18,x8,#0xffffffff; ldrsw x18,[x17,x18,lsl #2]; add x18,x18,x17; br x18
+        ins = (0x71000d1f, 0x540000a8, 0x92407d12, 0xb8b27a32, 0x8b110252, 0xd61f0240)
+        self.assertEqual(self.bounds(ins, {'w18'}), ('w8', 4))
+
+    def test_copy_far_before_the_check(self):
+        # mov w0,w18; nop; nop; cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18 (DRAGON QUEST XI S main+0x2dd8cd0)
+        ins = (0x2a1203e0, NOP, NOP, 0x7100125f, 0x54000088, 0xb8a07972, 0x8b0b0252, 0xd61f0240)
+        self.assertEqual(self.bounds(ins, {'w0'}), ('w18', 5))
+
+    def test_wrong_mask_rejects_the_site(self):
+        # cmp w8,#3 (four entries needs every value 0..3 kept); and x18,x8,#2 keeps only 2 of them
+        ins = (0x71000d1f, 0x540000a8, 0x927f0112, 0xb8b27a32, 0x8b110252, 0xd61f0240)
+        self.assertIsNone(self.bounds(ins, {'w18'}))
+
+    def test_index_written_between_copy_and_load(self):
+        # mov w18,w5; cmp w5,#3; b.hi; add w18,w5,#1; ldrsw x18,[x2,x18,lsl #2]; add x18,x18,x2; br x18
+        ins = (0x2a0503f2, 0x71000cbf, 0x540000a8, 0x110004b2, 0xb8b27852, 0x8b020252, 0xd61f0240)
+        self.assertIsNone(self.bounds(ins, {'w18'}))
 
 
 if __name__ == '__main__': unittest.main()

@@ -523,24 +523,32 @@ def func_of(a):
 done = set(); windows = []; jumps = {}; tabjumps = {}; tailcalls = set(); retries = []
 def check_before_copy(insl, ctx, ld, idx):
     """The index copied from the checked register before the check, far back (DRAGON QUEST XI S main+0x2dd8cd0: mov w0,w18, then 41 instructions with two other jump tables on x0, then
-    cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18). Accepted when the cmp and its b.hi come right before the load and the mov is the last writer of the index and of the
-    checked register before them (64 instructions back at most). The compiler checks one register and indexes with the other only when it knows they are equal; blocks in between that branch out
-    and back (main+0x2dd8ce0 → main+0x2dd8cb8) write neither. Tried only when every other form has failed (jump_offsets copy_first), so sites that rewrote before come out the same:
-    the one br x18 of its kind among the 25,508 x18 sites of that main. → the cmp, or None"""
-    k = ctx.index(ld)
-    if k < 2 or ctx[k - 1].mnemonic != 'b.hi' or ctx[k - 2].mnemonic != 'cmp': return None
-    m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', ctx[k - 2].op_str)
-    if not m: return None
-    src, kl = m.group(1), insl.index(ld)
+    cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18). Also the table base being built between the check and the load, and the index zero-extended after it
+    (Crash Bandicoot N. Sane Trilogy main+0x997b5c: mov w18,w14; cmp w14,#3; b.hi; adrp x2; add x2,x2,#0x3a0; ldrsw x18,[x2,x18,lsl #2]; add x18,x18,x2; br x18, and the same main
+    +0xefcc18: cmp w8,#3; b.hi; and x18,x8,#0xffffffff; ldrsw x18,[x17,x18,lsl #2]; add x18,x18,x17; br x18). The b.hi with its cmp is looked for within the 8 instructions before
+    the load, so base setup between the check and the load does not break it; the mov into the index, or an and that masks the checked source (the mask must keep every valid index:
+    mask & (n-1) == n-1), is accepted anywhere within 64 instructions back, when it is the last writer of the index and of the checked register. The compiler checks one register and
+    indexes with the other only when it knows they are equal; blocks in between that branch out and back (main+0x2dd8ce0 → main+0x2dd8cb8) write neither. Tried only when every other
+    form has failed (jump_offsets copy_first), so sites that rewrote before come out the same: the one br x18 of its kind among the 25,508 x18 sites of that main. → the cmp, or None"""
+    k = ctx.index(ld); kl = insl.index(ld)
+    cmp_i = None; m = None
+    for bi in range(k - 1, max(0, k - 8) - 1, -1):   # the bounds check: b.hi right after its cmp; base setup may sit between it and the load
+        if ctx[bi].mnemonic == 'b.hi' and bi >= 1 and ctx[bi - 1].mnemonic == 'cmp':
+            m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', ctx[bi - 1].op_str)
+            if m: cmp_i = bi - 1; break
+    if cmp_i is None: return None
+    src, n = m.group(1), int(m.group(2), 0) + 1
     def writes(p):   # capstone lists a compare's first operand as written (cmp w18,#4 at main+0x2dd8c30); it only sets the flags
         return set() if p.mnemonic in ('cmp', 'cmn', 'tst') else {'w' + p.reg_name(r)[1:] for r in p.regs_access()[1]}
-    for q in range(kl - 3, max(0, kl - 64) - 1, -1):
-        p = insl[q]
+    for z in range(kl - 1, max(0, kl - 64) - 1, -1):   # the copy into the index: mov, or a masking and, must be the last writer before the load
+        p = insl[z]
         mm = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
         if mm and mm.group(1) in idx and mm.group(2) == src: break
+        ma = re.fullmatch(r'([wx]\d+), ([wx]\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'and' else None
+        if ma and ('w' + ma.group(1)[1:]) in idx and ('w' + ma.group(2)[1:]) == src and (int(ma.group(3), 0) & (n - 1)) == (n - 1): break   # x8 and w8 name one register here
         if writes(p) & (idx | {src}): return None
     else: return None
-    return ctx[k - 2]
+    return ctx[cmp_i]
 def jump_offsets(insl, j, copy_first=False, far_base=False):
     """The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
     The index may be another register, and the bounds check may be on a register copied into it: Link's Awakening's GLSLC (subsdk0+0x1be6e8) has

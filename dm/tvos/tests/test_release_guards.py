@@ -29,6 +29,7 @@ def main():
     assert "p.add_argument('--shader-archive-sha256', required=True)" in prepare_source
 
     spec = spec_from_file_location('prepare_project', prepare_path)
+    assert spec is not None and spec.loader is not None
     module = module_from_spec(spec); spec.loader.exec_module(module)
     with tempfile.TemporaryDirectory(prefix='tv-prepare-links-') as temporary:
         root = Path(temporary)

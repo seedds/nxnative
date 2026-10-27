@@ -106,32 +106,34 @@ class PackReuse(unittest.TestCase):
             'host/romfs_image.h': b'validator', 'tools/romfs.py': b'reader',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
+        for n in ('source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift'):
+            files[n] = n.encode(); (t / n).parent.mkdir(parents=True, exist_ok=True)
         for n, content in files.items(): (t / n).write_bytes(content)
-        for tool in ('clang', 'codesign', 'other-codesign'):
+        for tool in ('clang', 'swiftc', 'codesign', 'other-codesign'):
             (t / 'bin' / tool).write_text('fake ' + tool); (t / 'bin' / tool).chmod(0o755)
         self.args = pack_app.parse([str(t / 'Game.app'), '--host', str(t / 'dmhost'), '--patched', str(t / 'patched'),
                                    '--romfs', str(t / 'romfs'), '--msl', str(t / 'msl'), '--tables', str(t / 'profile'), '--font', str(t / 'font'),
                                    '--aoc', str(t / 'aoc'), '--pso', str(t / 'pso'), '--pso-pairs', str(t / 'split.tsv'), '--env-file', str(t / 'env.txt'),
                                    '--title-id', TID, '--name', 'Test Game', '--marker', 'marker', '--icon', str(t / 'icon.jpg')])
         self.commands = []
-        self.clang_version, self.sdk_version = 'clang fixture 1', '27.0'
-        self.clang, self.sdk = t / 'bin/clang', t / 'sdk'
+        self.clang_version, self.swiftc_version, self.sdk_version = 'clang fixture 1', 'swiftc fixture 1', '27.0'
+        self.clang, self.swiftc, self.sdk = t / 'bin/clang', t / 'bin/swiftc', t / 'sdk'
         self.codesign = t / 'bin/codesign'
         self.failed_tool = None
         real_run, real_which = pack_app.run, shutil.which
         def fake_run(cmd):
             cmd = [str(c) for c in cmd]; self.commands.append(cmd)
             name = Path(cmd[0]).name
-            if self.failed_tool == name and (name != 'clang' or '-o' in cmd): raise SystemExit('fixture ' + name + ' failed')
+            if self.failed_tool == name and (name not in ('clang', 'swiftc') or '-o' in cmd): raise SystemExit('fixture ' + name + ' failed')
             if name == 'otool': return 'cmd LC_BUILD_VERSION\n minos 14.0\n'
             if name == 'xcrun':
-                if '--find' in cmd: return str(self.clang) + '\n'
+                if '--find' in cmd: return str(self.swiftc if 'swiftc' in cmd else self.clang) + '\n'
                 if '--show-sdk-path' in cmd: return str(self.sdk) + '\n'
                 if '--show-sdk-version' in cmd: return self.sdk_version + '\n'
                 if 'clang' in cmd: name = 'clang'
-            if name == 'clang':
-                if '--version' in cmd: return self.clang_version + '\n'
-                out = Path(cmd[cmd.index('-o') + 1]); out.write_bytes(b'fake launcher'); out.chmod(0o755); return ''
+            if name in ('clang', 'swiftc'):
+                if '--version' in cmd: return (self.clang_version if name == 'clang' else self.swiftc_version) + '\n'
+                out = Path(cmd[cmd.index('-o') + 1]); out.write_bytes(b'fake ' + name.encode()); out.chmod(0o755); return ''
             if name in ('codesign', 'other-codesign'): return ''
             if name == 'sips': Path(cmd[cmd.index('--out') + 1]).write_bytes(b'png'); return ''
             if name == 'iconutil': Path(cmd[cmd.index('-o') + 1]).write_bytes(b'icns'); return ''
@@ -181,7 +183,8 @@ class PackReuse(unittest.TestCase):
         self.pack()
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
-                 'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c']
+                 'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
+                 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift']
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
             with self.subTest(name=name):
@@ -225,6 +228,8 @@ class PackReuse(unittest.TestCase):
         self.pack()
         self.clang_version = 'clang fixture 2'; self.assert_repacked()
         self.clang.write_text('changed compiler'); self.assert_repacked()
+        self.swiftc_version = 'swiftc fixture 2'; self.assert_repacked()
+        self.swiftc.write_text('changed Swift compiler'); self.assert_repacked()
         self.sdk_version = '28.0'; self.assert_repacked()
         self.sdk = self.tmp / 'other-sdk'; self.sdk.mkdir(); self.assert_repacked()
         self.codesign = self.tmp / 'bin/other-codesign'; self.assert_repacked()
@@ -249,6 +254,16 @@ class PackReuse(unittest.TestCase):
         self.args.out = str(new); self.assert_repacked()
         for name in ('icon', 'env_file', 'aoc', 'pso', 'pso_pairs'):
             with self.subTest(option=name): setattr(self.args, name, None); self.assert_repacked()
+
+    def test_launcher_is_linked_from_its_c_and_swift_sources(self):
+        self.pack()
+        c = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c)
+        s = next(c for c in self.commands if Path(c[0]).name == 'swiftc' and '-o' in c)
+        self.assertIn('-c', c); self.assertIn('-parse-as-library', s)
+        self.assertIn(str(self.tmp / 'host'), c)   # the RomFS image validator's header
+        self.assertEqual(s[s.index('-o') + 1], str(Path(self.args.out).resolve().with_name('Game.app.partial') / 'Contents/MacOS/nxnative'))
+        self.assertIn(c[c.index('-o') + 1], s)
+        self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift'])
 
     def test_packer_source_content_invalidates(self):
         source = self.tmp / 'source/pack_app.py'; shutil.copy2(pack_app.__file__, source)
@@ -285,7 +300,8 @@ class PackReuse(unittest.TestCase):
     def test_missing_selected_inputs_fail_before_reuse_or_partial_creation(self):
         self.pack()
         for name in ('dmhost', 'patched/main.fixups.tsv', 'msl/k.metallib', 'romfs/marker', 'pso/prebuilt.tsv', 'env.txt', 'icon.jpg',
-                     'font', 'aoc', 'profile', 'bin/clang', 'sdk', 'bin/codesign', 'source/launcher.c'):
+                     'font', 'aoc', 'profile', 'bin/clang', 'bin/swiftc', 'sdk', 'bin/codesign', 'source/launcher.c',
+                     'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift'):
             with self.subTest(name=name):
                 p = self.tmp / name; hidden = p.with_name(p.name + '.hidden'); p.rename(hidden)
                 try:
@@ -298,7 +314,7 @@ class PackReuse(unittest.TestCase):
     def test_failed_repack_drops_key_and_keeps_old_app(self):
         self.pack()
         before = (Path(self.args.out) / 'Contents/Info.plist').read_bytes()
-        for tool in ('clang', 'codesign'):
+        for tool in ('clang', 'swiftc', 'codesign'):
             with self.subTest(tool=tool):
                 self.args.name += ' changed'; self.failed_tool = tool
                 with self.assertRaisesRegex(SystemExit, 'fixture'): self.pack()
@@ -369,11 +385,11 @@ class App(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): shutil.rmtree(cls.tmp)
 
-    def launch(self, wait=False, app=None, **env):
+    def launch(self, wait=False, app=None, args=(), **env):   # every valid app launch skips the settings window
         home = self.tmp / 'home'
-        e = dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin', **env)
+        e = {'HOME': str(home), 'PATH': f'{self.tmp / "bin"}:/usr/bin:/bin', 'DM_LAUNCHER': '0', **env}
         if wait: e['STANDIN_WAIT'] = '1'
-        return subprocess.Popen([(app or self.app) / 'Contents/MacOS/nxnative'], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return subprocess.Popen([(app or self.app) / 'Contents/MacOS/nxnative', *args], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     def host_run(self):
         out = {}
@@ -426,7 +442,8 @@ class App(unittest.TestCase):
             {'env': 'DM_FPS_HOLD', 'kind': 'toggle', 'section': 'Performance', 'label': 'Hold', 'note': '', 'default': 'on', 'on': 'on', 'off': 'off'},
             {'env': 'DM_LANG', 'kind': 'choice', 'section': 'Game', 'label': 'Language', 'note': '', 'default': 'fr', 'options': [['fr', 'French'], ['ja', 'Japanese']]},
             {'env': 'DM_BOTH', 'kind': 'choice', 'section': 'Game', 'label': 'Both', 'note': '', 'default': 'bundle', 'options': [['bundle', 'b'], ['player', 'p'], ['saved', 's']]},
-            {'env': 'DM_BAKED', 'kind': 'toggle', 'section': 'Game', 'label': 'Baked', 'note': '', 'default': '1', 'on': '1', 'off': '0'}]}
+            {'env': 'DM_BAKED', 'kind': 'toggle', 'section': 'Game', 'label': 'Baked', 'note': '', 'default': '1', 'on': '1', 'off': '0'},
+            {'env': 'DM_FULLSCREEN', 'kind': 'choice', 'section': 'Game', 'label': 'Display mode', 'note': '', 'default': '', 'options': [['', 'Window'], ['1', 'Fullscreen']]}]}
         sup = self.tmp / f'home/Library/Application Support/nxnative/{TID}'; sup.mkdir(parents=True, exist_ok=True); (sup / 'env.txt').write_text('DM_BOTH=player\n')
 
         def pack(name, settings):
@@ -435,8 +452,8 @@ class App(unittest.TestCase):
             with mock.patch.object(pack_app, 'sign', lambda *x: None), mock.patch('sys.stdout'): pack_app.pack(a)
             return self.tmp / f'{name}.app'
 
-        def run(app, **env):
-            p = self.launch(app=app, **env); out = p.communicate(timeout=30)[0].decode()
+        def run(app, args=(), **env):
+            p = self.launch(app=app, args=args, **env); out = p.communicate(timeout=30)[0].decode()
             self.assertEqual(p.returncode, 7, out)
             return self.host_run()
 
@@ -452,11 +469,28 @@ class App(unittest.TestCase):
             self.assertEqual(r['DM_LANG'], 'ja')   # a saved choice before the packed language
             self.assertEqual((r['DM_BOTH'], r['DM_BAKED']), ('player', '1'))   # the player's env.txt and the bundle's win over a saved choice
             self.assertNotIn('DM_OPMODE', r)
+            save('DM_FULLSCREEN', '-string', '1')
+            self.assertEqual(run(app)['DM_FULLSCREEN'], '1')
+            save('DM_FULLSCREEN', '-string', '')
+            self.assertNotIn('DM_FULLSCREEN', run(app))   # Window leaves it unset: the host checks its presence
             r = run(app, DM_FPS_TARGET='60', DM_RENDER_SCALE='0.5')   # a front end's launch overrides: they win, and are not saved
             self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE']), ('60', '0.5'))
             self.assertEqual(subprocess.run(['defaults', 'read', domain, 'launcher.DM_FPS_TARGET'], capture_output=True, text=True).stdout.strip(), '30')
             r = run(app, DM_SAVED_CHOICES='0')
             self.assertEqual((r.get('DM_FPS_TARGET'), r.get('DM_RENDER_SCALE'), r['DM_LANG']), (None, None, 'fr'))
+            bare = self.tmp / 'No list.app'; shutil.copytree(app, bare)
+            (bare / 'Contents/Resources/dm/launcher.json').unlink()   # even a missed skip cannot show a window
+            r = run(bare, DM_LAUNCHER='1')
+            self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE'], r['DM_LANG']), ('30', '0.75', 'ja'))
+            (bare / 'Contents/Resources/dm/launcher.json').write_text('{invalid')
+            self.assertEqual(run(bare, DM_LAUNCHER='1')['DM_FPS_TARGET'], '30')   # invalid JSON also keeps the Info.plist-backed saved choices
+            (bare / 'Contents/Resources/dm/launcher.json').unlink()
+            r = run(bare, args=('--no-launcher',), DM_LAUNCHER='1')
+            self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE'], r['DM_LANG']), ('30', '0.75', 'ja'))
+            self.assertIn('launcher: no settings window', (self.tmp / f'home/Library/Logs/nxnative/{TID}.log').read_text())
+            r = run(bare, args=('--no-launcher',), DM_LAUNCHER='1', DM_SAVED_CHOICES='0')
+            self.assertEqual((r.get('DM_FPS_TARGET'), r.get('DM_RENDER_SCALE'), r['DM_LANG']), (None, None, 'fr'))
+            self.assertEqual(subprocess.run(['defaults', 'read', domain, 'launcher.DM_FPS_TARGET'], capture_output=True, text=True).stdout.strip(), '30')
             save('DM_RENDER_SCALE', '-float', '0.75')   # not a string
             self.assertNotIn('DM_RENDER_SCALE', run(app))
             save('DM_RENDER_SCALE', '-string', ' 0.75')   # a number the iPhone's settings screen would not take either
@@ -549,7 +583,7 @@ class App(unittest.TestCase):
             hidden = self.tmp.with_name(self.tmp.name + '.unavailable')
             try:
                 self.tmp.rename(hidden)
-                p = subprocess.run([moved / 'Contents/MacOS/nxnative'], env=dict(HOME=str(home), PATH='/usr/bin:/bin'), capture_output=True, timeout=30)
+                p = subprocess.run([moved / 'Contents/MacOS/nxnative'], env=dict(HOME=str(home), PATH='/usr/bin:/bin', DM_LAUNCHER='0'), capture_output=True, timeout=30)
                 self.assertEqual(p.returncode, 7)
                 ran = (home / 'host_run.txt').read_text()
                 self.assertIn(f'argv1={moved}/Contents/Resources/dm\n', ran)

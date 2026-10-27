@@ -1,5 +1,5 @@
 // The launcher's storage (LauncherSettings.swift LauncherModel), run by test_launcher_storage.py on macOS: only choices that differ from the game's default are
-// stored, Reset to tested defaults clears all choices, an env file's values are kept. Argument: a launcher.json of Breath of the Wild (settings.py, GFXAPI=nvn)
+// stored, Reset to tested defaults clears all choices, an env file's values are kept. Arguments: iOS and Mac launcher.json for Breath of the Wild (settings.py, GFXAPI=nvn)
 import Foundation
 @main struct Check {
     static func main() {
@@ -54,6 +54,41 @@ import Foundation
         plain.reset()
         expect(d.string(forKey: "launcher.DM_FPS_TARGET") == "30", "DM_SAVED_CHOICES=0: Reset leaves the saved choices too")
         unsetenv("DM_SAVED_CHOICES")
+        let mac = try! JSONDecoder().decode(SettingsFile.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2])))
+        d.removePersistentDomain(forName: suite)
+        for s in mac.settings { unsetenv(s.env) }
+        setenv("DM_ENV_FILE_KEYS", "", 1)
+        let mm = LauncherModel(mac.settings, defaults: d, fromEnvironment: true)
+        expect(mm.sections(for: .basic) == ["Game", "Controls"] && mm.sections(for: .advanced) == ["Display", "Controller", "Overlay", "Performance"], "Mac sections use schema 1 row levels")
+        let old = try! JSONDecoder().decode(Setting.self, from: Data(#"{"env":"DM_OLD","kind":"toggle","label":"Old","note":"","default":"0"}"#.utf8))
+        expect(old.rowLevel == .basic && old.sectionTitle == "Game", "older settings without a level still decode")
+        let invalid = Data(#"{"env":"DM_BAD","kind":"toggle","label":"Bad","note":"","default":"0","level":"expert"}"#.utf8)
+        expect((try? JSONDecoder().decode(Setting.self, from: invalid)) == nil, "unknown row levels are rejected")
+        expect(mm.values["DM_FULLSCREEN"] == "" && mac.api == "NVN", "Display mode defaults to Window")
+        mm.apply()
+        expect(getenv("DM_FULLSCREEN") == nil, "Window unsets DM_FULLSCREEN")
+        mm.values["DM_FULLSCREEN"] = "1"; mm.apply()
+        expect(String(cString: getenv("DM_FULLSCREEN")) == "1" && d.string(forKey: "launcher.DM_FULLSCREEN") == "1", "Fullscreen sets it and is stored")
+        expect(LauncherModel(mac.settings, defaults: d).values["DM_FULLSCREEN"] == "1", "stored Fullscreen is read back")
+        let macScale = mac.settings.first { $0.env == "DM_RENDER_SCALE" }!
+        expect(macScale.base?["docked"] == [1600, 900] && macScale.base?["handheld"] == [1280, 720], "render pixels decode from schema 1 base")
+        mm.values["DM_OPMODE"] = "1"
+        expect(mm.rangeLabel(macScale, 1) == "1600 × 900 (100 %)" && mm.rangeLabel(macScale, 0.5) == "800 × 450 (50 %)", "docked pixels scale with the slider")
+        mm.values["DM_OPMODE"] = "0"
+        expect(mm.rangeLabel(macScale, 1) == "1280 × 720 (100 %)" && mm.rangeLabel(macScale, 0.5) == "640 × 360 (50 %)", "handheld pixels scale with the slider")
+        mm.values["DM_OPMODE"] = "2"
+        expect(mm.rangeLabel(macScale, 0.5) == "50 %", "an unknown console mode shows the percentage")
+        mm.values["DM_RUMBLE"] = "0"
+        expect(!mm.sections(for: .advanced).contains("Controller") && mm.rows(in: "Controller").isEmpty, "rumble off hides its sub-settings and the empty Mac section")
+        mm.values["DM_RUMBLE"] = "1"
+        expect(mm.rows(in: "Controller").map(\.env) == ["DM_RUMBLE_GAIN", "DM_RUMBLE_MIN"], "rumble on restores both sub-settings")
+        for s in mac.settings { unsetenv(s.env) }
+        d.set("1", forKey: "launcher.DM_OPMODE"); setenv("DM_OPMODE", "0", 1)
+        let locked = LauncherModel(mac.settings, defaults: d, fromEnvironment: true)
+        expect(locked.fromFile.contains("DM_OPMODE") && locked.values["DM_OPMODE"] == "0", "the Mac launch environment wins over stored choices")
+        locked.applySaved(); locked.apply(); locked.reset()
+        expect(String(cString: getenv("DM_OPMODE")) == "0" && locked.values["DM_OPMODE"] == "0", "Mac launch overrides survive skipped UI, Play and Reset")
+        failed += checkLauncherLayout(mm, defaults: d)
         print("launcher storage: \(failed) failed")
         exit(failed == 0 ? 0 : 1)
     }

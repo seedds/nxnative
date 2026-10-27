@@ -10,12 +10,15 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / 'tools'))
 import game, nacp
 
-SECTIONS = ('Game', 'Controls', 'Performance')   # headings on the single settings screen
+PLATFORMS = ('ios', 'mac')
+SECTIONS = {'ios': ('Game', 'Controls', 'Performance'), 'mac': ('Game', 'Controls', 'Display', 'Controller', 'Overlay', 'Performance')}
+LEVELS = ('basic', 'advanced')
+API_NAMES = {'nvn': 'NVN', 'vulkan': 'Vulkan', 'gl': 'OpenGL'}
 SCHEMA = 1   # launcher.json's version (docs/launcher.schema.json); it grows only by optional fields, so a reader of 1 reads every 1
 # The meta column's keys, each with the pattern its value must match. A key is added here, in docs/frontends.md and in
 # docs/launcher.schema.json together (test_launcher_settings.py checks that the three agree); a reader ignores keys it does not know
 META = {
-    'level': r'basic',                       # a setting a front end shows first; without it, the front end decides
+    'level': r'basic|advanced',              # basic settings first, advanced behind a disclosure; without it, the front end decides
     'needs': r'DM_[A-Z0-9_]+=[^;=]+',        # <VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value
 }
 
@@ -42,12 +45,20 @@ def render_base(g):
     return {'docked': list(sizes[0]), 'handheld': list(sizes[1])}
 
 
+def platform_value(v, platform, n):   # section and label may differ between front ends
+    if '|' not in v: return v
+    choices = v.split('|')
+    if len(choices) != 2 or not all(choices): sys.exit(f'settings.tsv:{n}: platform values are <ios>|<mac>: {v}')
+    return choices[PLATFORMS.index(platform)]
+
+
 def rows():
     for n, line in enumerate((HERE / 'settings.tsv').read_text(encoding='utf-8').splitlines(), 1):
         if not line.strip() or line.startswith('#'): continue
         c = line.split('\t')
         if len(c) not in (7, 8, 9): sys.exit(f'settings.tsv:{n}: 7 to 9 columns expected, {len(c)} found')
-        if c[5] not in SECTIONS: sys.exit(f'settings.tsv:{n}: unknown section: {c[5]}')
+        for platform in PLATFORMS:
+            if platform_value(c[5], platform, n) not in SECTIONS[platform]: sys.exit(f'settings.tsv:{n}: unknown section: {c[5]}')
         yield n, c + [''] * (9 - len(c))
 
 
@@ -103,7 +114,7 @@ def build(gid, patched, control):
             can = table[need]
             if can is not None and want not in can: sys.exit(f'settings.tsv:{n}: needs a value {need} never takes: {want} (it takes {", ".join(sorted(can))})')
         if not shown(cond, n): continue
-        s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
+        s = {'env': var, 'kind': kind, 'section': platform_value(section, platform, n), 'label': platform_value(label, platform, n), 'note': note, 'default': value(default, n), **m}
         if var == 'DM_RENDER_SCALE' and base: s['base'] = base   # the render scale in pixels, for the console mode chosen
         if kind == 'choice':
             opts = [list(l) for l in langs] if values == 'languages' else [v.split('=', 1) for v in values.split(',')]
@@ -120,7 +131,11 @@ def build(gid, patched, control):
             s.update(on=on_off[0], off=on_off[1], default=on_off[0] if s['default'] == '1' else on_off[1])   # the default as the value the variable takes
         else: sys.exit(f'settings.tsv:{n}: unknown kind {kind}')
         out.append(s)
-    return {'schema': SCHEMA, 'game': g.id, 'settings': out}
+    result = {'schema': SCHEMA, 'game': g.id, 'settings': out}
+    if platform == 'mac':
+        out.sort(key=lambda s: (LEVELS.index(s.get('level', 'basic')), SECTIONS[platform].index(s['section'])))
+        result['api'] = API_NAMES.get(os.environ.get('GFXAPI', ''), '')
+    return result
 
 
 if __name__ == '__main__':

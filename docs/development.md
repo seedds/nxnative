@@ -243,15 +243,17 @@ The bundle holds what the IPA holds, with the Mac's shader libraries:
 ```
 <game name>.app/Contents/
   Info.plist                 name, version, bundle ID, the profile's app_category; DMTitleID, DMRomfsMarker, DMLanguage, DMModuleFiles and DMSettings for the launcher
-  MacOS/nxnative             the launcher (dm/mac/launcher.c, compiled by pack_app.py)
+  MacOS/nxnative             the launcher (dm/mac/launcher.c, linked by pack_app.py with swiftc and its settings window, dm/mac/Launcher.swift, LauncherSettings.swift and LauncherRow.swift)
   MacOS/dmhost               the Mac host built for the profile
   Resources/romfs.img        the packed version's RomFS image
   Resources/msl/b-<chain>/   the Mac shader libraries, reflection JSON and runtime TSV tables (vk/ or gl/ for a Vulkan or GL game)
   Resources/aoc/<index>/     the DLC, when the folder has some
   Resources/pso/             an NVN game's pipeline archive made offline for this Mac's GPU (<arch>.mtl4a, prebuilt.tsv; --gpu none leaves it out)
-  Resources/dm/              the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv, pso_manifest.tsv, c1_full.tsv, cb_extent.tsv, shader_pairs.tsv and pso_pairs.tsv, font/, env.txt (--env-file)
+  Resources/dm/              the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv, pso_manifest.tsv, c1_full.tsv, cb_extent.tsv, shader_pairs.tsv and pso_pairs.tsv, font/, env.txt (--env-file), launcher.json
   Resources/AppIcon.icns
 ```
+
+`launcher.json` is the settings window's list, which the script writes with `SETTINGS_PLATFORM=mac dm/games/settings.py <id> <rewritten modules> <control.nacp> <id>_build/app/launcher.json` and hands to the packer as `--settings` ([Settings](settings.md#the-mac-settings-window)). Its content, the launcher's C and Swift sources and the Swift compiler are in the app's reuse key, so a change to them packs the app again without building the host or the shaders. The [Mac launcher layout](../specs/mac-launcher.md) defines the Basic and Advanced levels and window sizing.
 
 The shader pairs are what the pipeline prebuild and the hybrid pipelines read ([Hybrid pipelines](#hybrid-pipelines)), as in the IPA; a profile without `pso_pairs.tsv` gets the shader split's copy (`--pso-pairs`). An app without them builds no base: [Shader-pair tables in a Mac app](reference/shaders.md#shader-pair-tables-in-a-mac-app).
 

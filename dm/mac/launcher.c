@@ -24,6 +24,7 @@
 #include "romfs_image.h"
 
 extern char **environ;
+int dm_mac_launcher(void);   // Launcher.swift: 1 = start the game, 0 = the player quit
 static pid_t g_child;
 
 static void forward(int sig) { if (g_child > 0) kill(g_child, sig); }
@@ -108,12 +109,12 @@ static void saved_choices(void) {   // after the env files, before the bundle's 
         if (CFGetTypeID(v) != CFStringGetTypeID() || !CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8)) fprintf(stderr, "launcher: saved choice for %s ignored: not a string of at most %zu bytes\n", env, sizeof s - 1);
         else if (!saved_accepted(rule, v, s)) fprintf(stderr, "launcher: saved choice %s=%s ignored: this build does not offer it\n", env, s);
         else if (getenv(env)) fprintf(stderr, "launcher: saved choice %s=%s not used: %s=%s is set (environment or env.txt)\n", env, s, env, getenv(env));
-        else { setenv(env, s, 0); fprintf(stderr, "launcher: env %s=%s (saved choice)\n", env, s); }
+        else { if (*s) setenv(env, s, 0); fprintf(stderr, "launcher: env %s=%s (saved choice)\n", env, s); }   // an empty choice leaves the variable unset (Window)
         CFRelease(v);
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     char self[PATH_MAX], exe[PATH_MAX]; uint32_t n = sizeof self;
     if (_NSGetExecutablePath(self, &n) || !realpath(self, exe)) return 1;
     char contents[PATH_MAX], res[PATH_MAX], host[PATH_MAX], dm[PATH_MAX], romfs[PATH_MAX], p[PATH_MAX];
@@ -147,7 +148,12 @@ int main(void) {
     fprintf(stderr, "launcher: %s (%s), host %s\n", name, id, host);
     snprintf(p, sizeof p, "%s/env.txt", sup); env_file(p);
     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
-    saved_choices();
+    int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
+    if (!window) {
+        fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
+    } else if (!dm_mac_launcher()) return 0;
+    saved_choices();   // also covers a missing or unreadable launcher.json; values chosen in the window are already set
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
@@ -160,8 +166,8 @@ int main(void) {
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
-    char *argv[] = {host, dm, NULL};
-    int err = posix_spawn(&g_child, host, NULL, NULL, argv, environ);
+    char *host_argv[] = {host, dm, NULL};
+    int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
     if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
     int status;
     while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;

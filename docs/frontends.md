@@ -31,16 +31,17 @@ A built app carries the settings its game supports, as the iPhone app's settings
 {"schema": 1, "game": "01007EF00011E000", "settings": [
  {"env": "DM_FPS_TARGET", "kind": "choice", "section": "Game", "label": "Frame rate", "note": "…", "default": "60",
   "options": [["30", "30 fps"], ["60", "60 fps"]], "level": "basic"},
- {"env": "DM_RENDER_SCALE", "kind": "range", "section": "Game", "label": "Render scale", "note": "…", "default": "1.0", "min": 0.5, "max": 1.0, "step": 0.05},
+ {"env": "DM_RENDER_SCALE", "kind": "range", "section": "Game", "label": "Resolution", "note": "…", "default": "1.0", "min": 0.5, "max": 1.0, "step": 0.05},
  {"env": "DM_FPS_HOLD", "kind": "toggle", "section": "Performance", "label": "Hold frames when late", "note": "…", "default": "on", "on": "on", "off": "off"}
 ]}
 ```
 
 - `env`: the environment switch the setting sets. `kind`: `choice` (one of `options`, each `[value, label]`), `range` (a number from `min` to `max` in `step`s) or `toggle` (`on` or `off`, the values the switch takes).
-- `section`: the heading the row goes under, today `Game`, `Controls` or `Performance`. Sections come in the order of their first rows, and rows in the order to show them. A new section may appear in schema 1: a reader draws a section it does not know like the others, under its name, as the iPhone app does.
+- `api` (optional, at the file's top level): the graphics API name for the Mac window, such as `NVN`, `Vulkan` or `OpenGL`; empty when unknown.
+- `section`: the heading the row goes under: `Game`, `Controls` and `Performance` on iOS; the Mac also uses `Display`, `Controller` and `Overlay`. Sections come in the order of their first rows, and rows in the order to show them. A new section may appear in schema 1: a reader draws a section it does not know like the others, under its name, as the iPhone app does.
 - `default`: the value for this app's platform ([Tested defaults](settings.md#tested-defaults)), with profile defaults resolved for its game. A front end that keeps only the choices that differ from it lets a newer build's tested defaults reach the player, as the iPhone app does.
 - `base` (optional, render scale only): `{"docked": [w, h], "handheld": [w, h]}`, the 3D views' size that the scale multiplies, so a front end can show 0.75 as 1200×675 docked. It comes from the game's profile (`render_base`), and only some games have it.
-- `level` (optional): `basic` marks a setting to show first, for a front end that shows a short list and puts the rest behind a second step. Without it, the front end decides.
+- `level` (optional): `basic` marks a setting to show first; `advanced` marks a setting behind the Mac window's **Advanced settings** disclosure. iOS ignores levels. Without it, the front end decides.
 - `needs` (optional): `<VAR>=<value>` makes the row a sub-setting of the row that sets `<VAR>`, drawn only while that row has that value (Rumble strength only while rumble is on). A row naming a variable the list does not have stays drawn.
 - An app without the file has no settings to offer: start it as it is.
 
@@ -56,7 +57,7 @@ Settings a player chose in a front end and wants kept, also for a start from Fin
 
 ## Saved choices
 
-Each app keeps the player's choices in its own preferences domain, its bundle ID (`CFBundleIdentifier` in `Info.plist`, `org.nxnative.<title ID>` unless the app was packed with another): one string per setting, under the key `launcher.<env>` (`launcher.DM_FPS_TARGET` = `"30"`). The iPhone app's settings screen keeps them there, and a Mac app's launcher (`dm/mac/launcher.c`) reads them at every start, so a start from Finder or the Dock has them too. A front end writes the same keys (`CFPreferencesSetAppValue` with the app's bundle ID, or `defaults write org.nxnative.<title ID> launcher.DM_FPS_TARGET -string 30`), and a settings window inside the app would too: there is one set of choices, and every view of it agrees.
+Each app keeps the player's choices in its own preferences domain, its bundle ID (`CFBundleIdentifier` in `Info.plist`, `org.nxnative.<title ID>` unless the app was packed with another): one string per setting, under the key `launcher.<env>` (`launcher.DM_FPS_TARGET` = `"30"`). The iPhone screen and Mac window keep choices there. The Mac launcher (`dm/mac/launcher.c`) also reads them when the window is skipped. A front end writes the same keys (`CFPreferencesSetAppValue` with the app's bundle ID, or `defaults write org.nxnative.<title ID> launcher.DM_FPS_TARGET -string 30`): there is one set of choices, and every view of it agrees.
 
 - **Only choices that differ from the tested default are kept.** A setting the player left at its default follows the defaults of a later build. Remove a key when the player picks the default again, and remove every `launcher.` key for "Reset to tested defaults".
 - **Checked when read.** The launcher uses a saved value only when this build still offers it: one of a `choice`'s options, a `toggle`'s `on` or `off`, or a number from a `range`'s `min` to `max`. It checks against the app's own list, which the packer copies into `Info.plist` as `DMSettings`. Any other value, a value that is not a string, or a key no setting has is ignored and stays saved. So a rebuild that stops offering a value falls back to its tested default.
@@ -67,7 +68,8 @@ Each app keeps the player's choices in its own preferences domain, its bundle ID
   4. saved choices;
   5. the tested defaults (the host's own, from the game's profile).
 - **Launch overrides are temporary.** A front end that starts the game with a variable in its environment overrides the saved choice for that start only. It writes the store only when the player means to keep the choice.
-- **`DM_SAVED_CHOICES=0`** (in the environment or an `env.txt`) starts with the tested defaults and leaves the saved choices as they are. **`DM_LAUNCHER=0`** only skips the iPhone app's settings screen: the saved choices still apply.
+- **`DM_SAVED_CHOICES=0`** (in the environment or an `env.txt`) starts with the tested defaults and leaves the saved choices as they are. **`DM_LAUNCHER=0`** skips the settings screen or Mac window; the saved choices still apply. The Mac app also accepts `--no-launcher` for that start.
+- **`launcher.show`** (a boolean, Mac only): `false` when the player turned off "Show this window at launch"; the window is then skipped and the saved choices apply. Holding Option at launch shows it again. It is not a setting, so `launcher.json` does not list it.
 - **A sandboxed front end** cannot write another app's preferences domain; this store is for front ends outside the App Sandbox, as NX2Apple is.
 
 ## What a front end cannot see yet

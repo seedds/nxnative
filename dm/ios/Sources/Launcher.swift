@@ -1,68 +1,12 @@
 // Launcher: the settings screen shown before the game starts (front_ios.m dm_show_launcher). Its settings come from the app's dm/launcher.json, which build_ipa.sh writes for this game
 // from dm/games/settings.tsv (dm/games/settings.py): each sets an environment variable the host reads when the game starts. A variable an env file set (Documents/env.txt, the bundle's
-// dm/env.txt; main.m lists them in DM_ENV_FILE_KEYS) is shown but kept. All settings share one screen, grouped by section. Choices that differ from the game's default are kept
-// in UserDefaults; Reset to tested defaults forgets them. DM_LAUNCHER=0 in Documents/env.txt starts the game at once with the saved choices; DM_SAVED_CHOICES=0 ignores them (and keeps them)
+// dm/env.txt; main.m lists them in DM_ENV_FILE_KEYS) is shown but kept. All settings share one screen, grouped by section (rows: LauncherRow.swift). Choices that differ from the game's default are kept
+// in UserDefaults; Reset to tested defaults forgets them. DM_LAUNCHER=0 skips the screen with saved choices; DM_SAVED_CHOICES=0 ignores and keeps them
 import SwiftUI
 import UIKit
 import os
 
 private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryKey: key) }
-
-private extension LauncherModel {
-    func binding(_ s: Setting) -> Binding<String> { Binding(get: { self.values[s.env] ?? s.def }, set: { self.values[s.env] = $0 }) }
-}
-
-private struct SettingRow: View {
-    let s: Setting
-    @ObservedObject var m: LauncherModel
-
-    private var locked: Bool { m.fromFile.contains(s.env) }
-    private var note: String {
-        locked ? (s.note.isEmpty ? "" : s.note + " · ") + "Set by an env file" : s.note
-    }
-    private var rangeValue: Binding<Double> {
-        Binding(get: { Double(m.values[s.env] ?? s.def) ?? s.max ?? 1 },
-                set: { m.values[s.env] = String(format: "%.2f", $0) })
-    }
-    private var percentage: String { "\(Int((rangeValue.wrappedValue * 100).rounded())) %" }
-
-    private var settingLabel: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(s.label)
-            if !note.isEmpty { Text(note).font(.footnote).foregroundStyle(.secondary) }
-        }
-    }
-
-    var body: some View {
-        Group {
-            switch s.kind {
-            case "choice":
-                Picker(selection: m.binding(s)) {
-                    ForEach(s.options ?? [], id: \.[0]) { Text($0[1]).tag($0[0]) }
-                } label: {
-                    settingLabel
-                }
-                .pickerStyle(.menu)
-            case "range":
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        settingLabel
-                        Spacer()
-                        Text(percentage).monospacedDigit().foregroundStyle(.secondary)
-                    }
-                    Slider(value: rangeValue, in: (s.min ?? 0)...(s.max ?? 1), step: s.step ?? 0.05)
-                        .accessibilityLabel(s.label)
-                        .accessibilityValue(percentage)
-                }
-            default:
-                Toggle(isOn: Binding(get: { (m.values[s.env] ?? s.def) == s.onValue }, set: { m.values[s.env] = $0 ? s.onValue : s.offValue })) {
-                    settingLabel
-                }
-            }
-        }
-        .disabled(locked)
-    }
-}
 
 private struct LauncherView: View {
     @ObservedObject var m: LauncherModel

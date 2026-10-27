@@ -63,6 +63,7 @@ class LauncherSettingsTests(unittest.TestCase):
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS'})
+        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
 
     def test_defaults_follow_each_platform_host(self):
@@ -94,13 +95,15 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(listed['schema'], 1)
         self.assertEqual([e for e, s in rows.items() if s.get('level') == 'basic'], ['DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_OPMODE', 'DM_LANG', 'DM_RUMBLE'])
         self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')
-        self.assertFalse({'level', 'needs'} & set(rows['DM_METAL_HUD']), 'a row without meta has no optional fields')
+        self.assertEqual(rows['DM_METAL_HUD']['level'], 'advanced')
+        self.assertNotIn('needs', rows['DM_METAL_HUD'])
 
     def test_meta_is_strict(self):
         self.assertEqual(settings.meta('level=basic; needs=DM_RUMBLE=1', 1), {'level': 'basic', 'needs': 'DM_RUMBLE=1'})
         self.assertEqual(settings.meta('', 1), {})
+        self.assertEqual(settings.meta('level=advanced', 1), {'level': 'advanced'})
         for bad, why in [('colour=red', 'unknown meta key'), ('level', 'unknown meta key'), ('level=basic;level=basic', 'twice'),
-                         ('level=advanced', 'does not match'), ('needs=DM_RUMBLE', 'does not match'), ('needs=rumble=1', 'does not match')]:
+                         ('level=expert', 'does not match'), ('needs=DM_RUMBLE', 'does not match'), ('needs=rumble=1', 'does not match')]:
             with self.subTest(bad=bad), self.assertRaises(SystemExit) as e:
                 settings.meta(bad, 1)
             self.assertIn(why, str(e.exception))
@@ -158,6 +161,31 @@ class LauncherSettingsTests(unittest.TestCase):
                         patch.object(settings.nacp, 'languages', return_value=['en-US']), self.assertRaises(SystemExit) as e:
                     settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
                 self.assertIn(why, str(e.exception))
+
+    def test_mac_window_levels_and_fullscreen(self):
+        rows = build(BOTW, 'nvn', 'mac')
+        fullscreen = rows['DM_FULLSCREEN']
+        self.assertEqual((fullscreen['level'], fullscreen['default'], fullscreen['options']), ('basic', '', [['', 'Window'], ['1', 'Fullscreen']]))
+        self.assertNotIn('DM_FULLSCREEN', build(BOTW, 'nvn'))
+        advanced = [s for s in rows.values() if s.get('level') == 'advanced']
+        self.assertEqual(list(dict.fromkeys(s['section'] for s in advanced)), ['Display', 'Controller', 'Overlay', 'Performance'])
+        self.assertEqual([s['env'] for s in advanced[:4]], ['DM_PRESENT_UPSCALE', 'DM_RUMBLE_GAIN', 'DM_RUMBLE_MIN', 'DM_METAL_HUD'])
+        self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')
+        levels = [s['level'] for s in rows.values()]
+        self.assertEqual(levels, ['basic'] * levels.count('basic') + ['advanced'] * levels.count('advanced'))
+
+    def test_mac_resolution_uses_schema_base(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), \
+                patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': 'mac'}):
+            (Path(tmp) / 'main.fixups.tsv').write_text('# RENDER_SCALE\t1\n')
+            listed = settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
+        scale = next(s for s in listed['settings'] if s['env'] == 'DM_RENDER_SCALE')
+        self.assertEqual((listed['schema'], listed['api'], scale['label']), (1, 'NVN', 'Resolution'))
+        self.assertEqual(scale['base'], {'docked': [1600, 900], 'handheld': [1280, 720]})
+        self.assertNotIn('sizes', scale)
+        schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
+        self.assertIn('api', schema['properties'])
+        self.assertEqual(conforms(listed, schema, schema), [])
 
 
 def conforms(value, node, root, at='$'):

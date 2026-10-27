@@ -1,11 +1,12 @@
 # Settings
 
-The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**.
+The screen before the game starts shows the settings the game supports. A setting that only matters while another is on disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. On iOS, all settings stay on one scrollable screen, under **Game**, **Controls** and **Performance**. **Upscaling** is in **Game**, beside **Console mode**. The [Mac window](#the-mac-settings-window) groups less-used settings under **Advanced settings**.
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
+- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [Settings in a file](#settings-in-a-file)
 
 ## Tested defaults
@@ -14,7 +15,7 @@ Each game comes with the settings it was tested with: its profile in this reposi
 
 When you change a setting and tap **Play**, the app keeps your choice, also when a later build of the app ships other defaults. A setting you leave at its default is not stored: it follows the defaults of the build you have, so a newer build's tested settings reach you without doing anything. **Reset to tested defaults** at the bottom forgets all launcher choices, so the game's defaults apply again. For testing, a line in `Documents/env.txt` overrides any setting ([Settings in a file](#settings-in-a-file)).
 
-A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter and Touch feedback, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
+A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter and Touch feedback. Its settings window and a [Mac front end](frontends.md) use that list.
 
 ## Game
 
@@ -47,7 +48,7 @@ Breath of the Wild renders 1280x720 in handheld mode. Docked it renders its worl
 
 - **When to change it:** turn it on if the picture looks soft and the device has GPU time to spare: on a Mac, or on an iPhone in handheld mode at 30 fps. For long sessions at 60 fps on an iPhone leave it at Standard.
 - **Cost:** more GPU time each frame, which can increase heat on an iPhone. [Breath of the Wild's measurements](../dm/games/01007EF00011E000/README.md#upscaling-current) cover Mac and iPhone; the matching iPhone Standard run and MetalFX's share of the thermal cost remain unmeasured. Nothing changes while the game's picture is as large as the screen. Unsupported devices and sizes use Standard scaling.
-- **On the Mac:** the Mac app has no settings screen; the line `DM_PRESENT_UPSCALE=metalfx` in its `env.txt` turns it on (off by default). It helps in a large window or on a 4K screen.
+- **On the Mac:** choose **MetalFX** under **Upscaling** in the settings window, or set `DM_PRESENT_UPSCALE=metalfx` in `env.txt`. It helps in a large window or on a 4K screen.
 
 ### Game language
 
@@ -179,6 +180,22 @@ Apple's performance overlay over the game: frame rate, frame and GPU times, memo
 
 Forgets all launcher choices, so the game's tested defaults apply again, and those of later builds too ([Tested defaults](#tested-defaults)). Settings fixed by `Documents/env.txt` stay as the file says.
 
+## The Mac settings window
+
+A Mac app ([A Mac app](development.md#a-mac-app)) opens a native grouped settings form before the game starts. Basic settings are **Resolution**, **Display mode**, **Frame rate**, **Console mode**, **Game language** and **Game rumble**, when supported. **Resolution** shows the picture's size in pixels beside the percentage when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %); it changes with **Console mode**. **Frame-rate counter** and **Touch feedback** are iOS-only.
+
+Open **Advanced settings** below Basic for **Display** (Upscaling), **Controller** (Rumble strength and Rumble cutoff), **Overlay** (Performance HUD), and **Performance**. **Reset to tested defaults** is also inside Advanced. The app remembers the disclosure state per game (`launcher.advanced`, closed by default). Advanced sections appear below the disclosure. The window fits its measured content and grows down from its top edge, then scrolls when it reaches the screen's visible area.
+
+The footer has **Show this window at launch**, **Quit**, and **Play** on one line. Click **Play** (or press Return) to start the game; **Quit**, ⌘Q or closing the window ends the app without the game.
+
+Turn off **Show this window at launch** and the app starts the game at once with your saved settings. Hold Option while the app opens to see the window again, and turn the checkbox back on there. The app remembers the checkbox and your settings for each game.
+
+To start without the window, add `DM_LAUNCHER=0` to an env file of the app (`~/Library/Application Support/nxnative/<title ID>/env.txt`) or to the environment. You can also use `--no-launcher` (`open <app> --args --no-launcher`). Saved choices still apply, as on the iPhone. Add `DM_SAVED_CHOICES=0` to use the game's defaults instead; the saved choices stay for later. Launch environment and env files keep precedence.
+
+### Display mode
+
+**Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play.
+
 ## Settings in a file
 
 A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under the app's name) sets a setting from the file: the settings screen shows it greyed out, and the file wins over your choice and the game's default. Fully close and reopen the app after editing the file. The variables:
@@ -189,6 +206,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
+| Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen; not set: a window |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |

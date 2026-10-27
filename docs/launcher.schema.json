@@ -8,6 +8,7 @@
   "properties": {
     "schema": {"description": "The list's version; a list without it is schema 1 written before the field existed.", "type": "integer", "const": 1},
     "game": {"description": "The base game's title ID.", "type": "string", "pattern": "^[0-9A-F]{16}$"},
+    "api": {"description": "The graphics API name for a Mac settings window, when known.", "type": "string"},
     "settings": {"type": "array", "items": {"$ref": "#/$defs/setting"}}
   },
   "$defs": {
@@ -30,7 +31,7 @@
         "off": {"description": "toggle: the value the switch takes when off.", "type": "string"},
         "base": {"description": "Render scale only: the 3D views' size the scale multiplies, docked and handheld, from the game's profile; absent for most games.", "type": "object", "required": ["docked", "handheld"],
                  "properties": {"docked": {"$ref": "#/$defs/size"}, "handheld": {"$ref": "#/$defs/size"}}},
-        "level": {"description": "basic: a setting a front end shows first. Without it, the front end decides.", "const": "basic"},
+        "level": {"description": "basic: shown first; advanced: behind the Mac window's Advanced settings disclosure. Without it, the front end decides.", "enum": ["basic", "advanced"]},
         "needs": {"description": "<VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value. A row naming a variable this list does not have stays drawn.", "type": "string", "pattern": "^DM_[A-Z0-9_]+=[^;=]+$"}
       },
       "allOf": [

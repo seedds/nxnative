@@ -11,9 +11,16 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/games'))
 import game
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
+if spec is None or spec.loader is None: raise ImportError('scripts/build_ipa_from_nsp.py')
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 
 TID = 0x010015100B514000   # a game with a profile in dm/games
+
+
+def profile_ipa():
+    profile = game.by_title(TID)
+    assert profile, 'no profile for the test game'
+    return profile.get('ipa')
 
 
 class Stop(Exception): pass
@@ -41,16 +48,16 @@ class WorkDir(unittest.TestCase):
         return Path(seen['DM_ROOT']), Path(ipa)
 
     def test_default(self):
-        ipa = game.by_title(TID).get('ipa')
+        ipa = profile_ipa()
         self.assertEqual(self.plan(), (self.nsps / f'{TID:016X}_build', self.nsps / ipa))
 
     def test_option_moves_the_build_folder_and_the_default_ipa(self):
-        ipa = game.by_title(TID).get('ipa')
+        ipa = profile_ipa()
         out = self.tmp / 'builds' / 'mine'
         self.assertEqual(self.plan('--work-dir', str(out)), (out, out.parent / ipa))
 
     def test_setting_does_the_same(self):
-        ipa = game.by_title(TID).get('ipa')
+        ipa = profile_ipa()
         out = self.tmp / 'elsewhere'
         self.assertEqual(self.plan(setting=str(out)), (out, out.parent / ipa))
 

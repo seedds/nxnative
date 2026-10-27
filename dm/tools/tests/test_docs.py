@@ -1,7 +1,7 @@
 """The repository's own Markdown stays navigable: every relative link and #anchor resolves (GitHub's heading anchors), every game profile has its note
 (dm/games/<id>/README.md) and a row in the games table of dm/games/README.md, the symptom index (docs/agents/symptoms.md) is the one dm/tools/docs_symptoms.py writes from
 docs/reference, and the entry points stay short: AGENTS.md at most 1,500 words, each numbered guide in docs/agents at most 6,000 (a new finding goes into a game note or a
-reference, not into these). Third-party trees are left out. No game files needed."""
+reference, not into these), and README's games gallery is the one dm/tools/docs_gallery.py writes from docs/images/gallery.tsv. Third-party trees are left out. No game files needed."""
 from pathlib import Path
 import re
 import subprocess
@@ -12,6 +12,7 @@ from urllib.parse import unquote
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import docs_symptoms   # noqa: E402
+import docs_gallery   # noqa: E402
 
 SKIP = ('third_party', 'node_modules')
 AGENTS_WORDS, GUIDE_WORDS = 1500, 6000
@@ -82,6 +83,15 @@ class GameNotes(unittest.TestCase):
 class SymptomIndex(unittest.TestCase):
     def test_index_is_current(self):
         self.assertEqual(docs_symptoms.OUT.read_text(), docs_symptoms.index(), 'docs/agents/symptoms.md is out of date: run dm/tools/docs_symptoms.py')
+
+
+class Gallery(unittest.TestCase):
+    def test_gallery_is_current(self):
+        self.assertEqual(docs_gallery.OUT.read_text(encoding='utf-8'), docs_gallery.readme(), 'README.md: the gallery is out of date: run dm/tools/docs_gallery.py')
+
+    def test_each_game_once(self):   # a union merge of two rows for the same game keeps both
+        names = [r[1] for r in docs_gallery.rows()]
+        self.assertEqual(sorted({n for n in names if names.count(n) > 1}), [], 'docs/images/gallery.tsv: a game is in the table twice')
 
 
 class Length(unittest.TestCase):

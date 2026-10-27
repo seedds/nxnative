@@ -32,6 +32,12 @@ Never commit or attach game files, keys, title keys or anything extracted from a
 - **One concern per PR.** A new front end, a platform baseline and one game's fixes are separate PRs, each on current `main`.
 - **Supported devices** are the ones [README.md](README.md) names: iOS / iPadOS 26 or later on an iPhone with an A17 Pro chip or later or an iPad with an M1 chip or later, and Macs with Apple silicon. Supporting older devices or Intel Macs is the maintainer's decision, so ask in an issue first: it would add code paths that every later change has to keep working and that few contributors can test.
 
+## Graphical front ends
+
+An app that packs games, lists them or starts them (a build window, a game library) is a separate project that builds on nxnative, not a part of this repository. [NX2Apple](https://github.com/LNPANDY/NX2Apple) is one, and [README.md](README.md) points players to it. Such an app needs no changes here to work: the NSP script reports its stages as JSON lines (`--progress json`), a built Mac app or IPA carries the list of its game's settings (`dm/launcher.json`, from `dm/games/settings.tsv`), and the app takes those settings as environment switches ([Front ends](docs/frontends.md)). When a front end needs more from nxnative (a new event, a field in the settings list), open an issue or a small PR for that piece.
+
+The settings screen inside the iPhone and iPad app is part of nxnative ([Settings](docs/settings.md)).
+
 ## How changes get in
 
 The maintainer reviews every PR. A PR is often taken in as a squashed or reworked commit on `main` that credits its author (`Co-authored-by`), and the PR is then closed rather than merged; that is expected. A PR that conflicts with `main` is rebased by its author.

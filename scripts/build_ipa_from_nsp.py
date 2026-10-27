@@ -868,11 +868,28 @@ def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'm
     if mac: del tools['xcodegen']
     gone = [f'{t} ({how})' for t, how in tools.items() if not shutil.which(t, path=env['PATH'])]
     if gone: raise BuildError('tools not found: ' + ', '.join(gone))
+    if not mac: check_ios_sdk(env)
     mtl = subprocess.run(['xcrun', '-sdk', 'macosx' if mac else 'iphoneos', 'metal', '--version'], capture_output=True, text=True, env=env)   # Xcode 26 and later install the Metal toolchain separately
     if mtl.returncode: raise BuildError(f'the Metal compiler does not run ({(mtl.stderr.strip().splitlines() or ["no output"])[-1]}): install it with xcodebuild -downloadComponent MetalToolchain')
     if not xlate.exists(): raise BuildError(f'the shader translator is missing from the repository: {xlate}')
     sc = env.get('SPIRV_CROSS', str(xlate.parent.parent / 'spirv_cross_bin/spirv-cross'))
     if not shutil.which(sc, path=env.get('PATH')): raise BuildError(f'spirv-cross is missing or not executable: {sc}')
+
+
+def check_ios_sdk(env):   # Xcode 15 and later install the iOS platform separately: xcodebuild and the Metal compiler can be there without it
+    sdk = subprocess.run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-version'], capture_output=True, text=True, env=env)
+    if sdk.returncode: raise BuildError('the iOS SDK is not installed (Xcode downloads the iOS platform separately): install it in Xcode → Settings → Components, or with xcodebuild -downloadPlatform iOS')
+
+
+def python_translated():   # sysctl.proc_translated is 1 for a process running under Rosetta and 0 (or missing, on an Intel Mac) otherwise
+    return sys.platform == 'darwin' and subprocess.run(['sysctl', '-n', 'sysctl.proc_translated'], capture_output=True, text=True).stdout.strip() == '1'
+
+
+def check_native_python():
+    # An x86_64 Python (an Intel Homebrew in /usr/local) runs under Rosetta on Apple silicon, and its child processes prefer the x86_64 slice:
+    # the shader translator's universal apphost then looks for an x86_64 .NET, finds only the arm64 one, prints nothing, and the build stops
+    # at the shader step with an empty "xlate_source: lock ... / actual", which reads like a stale translator.
+    if python_translated(): raise BuildError(f'{sys.executable} is an Intel Python running under Rosetta: its child processes (the shader translator among them) look for an x86_64 .NET and the build fails at the shader step with an empty translator fingerprint. Run the script with an arm64 Python (/usr/bin/python3, or Homebrew in /opt/homebrew)')
 
 
 def _importable(m):
@@ -2080,6 +2097,7 @@ def main(args=None):
     if args.mac_sign and not mac_pack: raise BuildError('--mac-sign signs the Mac app: it needs --platform mac-app')
     if mac and prepare_xcode: raise BuildError(f'--prepare-xcode makes an iPhone project: it cannot be combined with --platform {platform}')
     if mac and not apple_silicon(): raise BuildError(f'--platform {platform} runs the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
+    check_native_python()
     keep = KEEP_EXTRACTED if args.keep_extracted is None else args.keep_extracted
     if mac and not keep: say('keeping the extracted game files all the same: the game runs from them on the Mac' + (' and the app is made of clones of them' if mac_pack else '')); keep = True
     if prepare_xcode and not keep: raise BuildError('--prepare-xcode requires --keep-extracted: Xcode builds from the extracted files')

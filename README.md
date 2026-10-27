@@ -16,7 +16,7 @@ Community projects build on nxnative with Mac apps that turn your games into app
 
 ### Build from the command line
 
-You need a Mac with macOS 26.6 or later, [Xcode](https://apps.apple.com/app/xcode/id497799835) 27.1, [Homebrew](https://brew.sh) and Python 3.12 or newer.
+You need a Mac with macOS 26.6 or later, [Xcode](https://apps.apple.com/app/xcode/id497799835) 27.1, [Homebrew](https://brew.sh) and Python 3.12 or newer (on Apple silicon an arm64 Python: the script stops at once under Rosetta, for example with an Intel Homebrew's `python3`). A build for the iPhone also needs Xcode's iOS platform (Xcode → Settings → Components, or `xcodebuild -downloadPlatform iOS`); the script checks both before it extracts anything.
 
 **1. Install the tools** (only once), in Terminal:
 

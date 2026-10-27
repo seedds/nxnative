@@ -233,19 +233,20 @@ static void cap_tex_read(const tex_t *t, int rec) {   // rec: named by a record 
     uintptr_t seen = (uintptr_t)nvn_hm_get(&g_cap_read, &t->serial);   // 1: done; 2: registered without a host texture (a record naming it later still looks for shared storage)
     if (seen == 1 || (seen == 2 && !rec)) return;
     id o = tex_get(t->serial);
+    if (!o) {   // no host texture for this serial yet: its first use takes the host texture of an earlier one with the same storage and shape, content included (tex_mtl,
+                // the storage-sharing table). Breath of the Wild records its transient render targets under new serials every frame and registers them to sample them;
+                // their content from the frame before was not captured, the replay made them empty, and the G-buffer differed from the live run in about 50 pixels (and
+                // a second replay from the first). Only for textures a record names: through the registry (even only those the GPU writes, or
+                // only those shared within the last 16 submissions) it reached about 19,500 textures (18.5 GB) in Breath of the Wild
+        alias_key ak; memset(&ak, 0, sizeof ak); ak.pool = (uint64_t)(uintptr_t)t->pool; ak.off = t->off; ak.d = t->d; ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
+        if (rec) { pthread_mutex_lock(&g_smu); o = hm_get_id(&g_alias, &ak); pthread_mutex_unlock(&g_smu); }
+    }
     nvn_hm_put(&g_cap_read, &t->serial, (void *)(uintptr_t)(!o && !rec ? 2 : 1));
     if (!seen) {   // how the replay layer holds it
         pthread_mutex_lock(&g_smu); int live = nvn_hm_get(&g_tex_live, &t->serial) != NULL; pthread_mutex_unlock(&g_smu);
         int cpu = tex_cpu_written(t->serial) || ([o isKindOfClass:[NvPkg class]] && !t->has_layout);
         cap_tknd k = {*t, (live ? CAP_TK_LIVE : 0) | (cpu ? CAP_TK_CPU : 0), 0};
         if (k.kind) { cap_tex_fields(&k.t, &g_cap_enc, NULL); cap_buf_put(&g_cap_kind, &k, sizeof k); }
-    }
-    if (!o && rec) {   // no host texture for this serial yet: its first use takes the host texture of an earlier one with the same storage and shape, content included (tex_mtl,
-                // the storage-sharing table). Breath of the Wild records its transient render targets under new serials every frame; their content from the frame before was not
-                // captured, the replay made them empty, and about 30 pixels of the G-buffer and the frame differed from the live run (and the second replay from the first).
-                // Only for textures a record names: through the registry it reached 19,513 textures (18.5 GB), registered snapshots of textures long finalized
-        alias_key ak; memset(&ak, 0, sizeof ak); ak.pool = (uint64_t)(uintptr_t)t->pool; ak.off = t->off; ak.d = t->d; ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
-        pthread_mutex_lock(&g_smu); o = hm_get_id(&g_alias, &ak); pthread_mutex_unlock(&g_smu);
     }
     if (!o || [o isKindOfClass:[NvPkg class]] || ![o conformsToProtocol:@protocol(MTLTexture)]) return;   // made at first use (as live, from the pools), or uploaded from the pools
     id<MTLTexture> mt = o; if (mt.parentTexture) mt = mt.parentTexture;

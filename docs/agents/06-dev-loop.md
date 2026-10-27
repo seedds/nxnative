@@ -68,3 +68,24 @@ By what the change touches (the largest that applies):
 - **A Python tool or script** (`scripts/`, the tools under `dm/`): the ratchet `lint-python.yml` runs, ruff and pyright with no new finding: `<venv>/bin/python3 dm/tools/lint_python.py`, from a venv with `.github/requirements/lint.txt` installed, kept on the drive of the NSP folders, not in the home folder ([Continuous integration](../development.md#continuous-integration)). The system Python has neither tool, and the check stops at a `[RED]` line there: that is not a pass. A generated page (`docs_*.py`) is compared in CI on a clean checkout, so it must not read untracked or git-ignored files such as `dm/host/gen`.
 - **One game's profile or note** (`dm/games/<id>/`): the Python tool tests; a full shader build of that game after a change to its shader inputs; the game on the Mac (or the iPhone) along its route, with `scripts/bench.py` numbers when the change is about speed; the finding in the game's note ([AGENTS.md](../../AGENTS.md)).
 - **The host, the chain or the tools** (`dm/host`, `dm/gfx`, `dm/tools`, `dm/gfx/tools`, `dm/ios`, `scripts`): everything above, `make -C dm/gfx/tests GAME=<id> run`, `dmsh_chain.py --header` after a chain change, `python3 scripts/regress.py impact main..HEAD` to see which games it reaches, then `python3 scripts/regress.py check --games <ids>` (`--quick` while iterating, the full run before the pull request), and its `report.md` pasted into the pull request with a word on every `CHANGED`, `NEW-FAIL` or `REGRESSION`. Choose the games, not every local one: the five the change is most likely to reach or break (those `impact` names, then games that cover the APIs, engines and paths it touches). Take more than five only when the change truly needs them (a broad chain or host change no five games cover), and fewer when its reach is narrow and clear (a fix on one game's path, a tool only some games use). Name the games the report covers and why you chose them: the others are unchecked. After a change to C or Objective-C in `dm/host` or `dm/gfx`, `dm/tools/lint_c.py compdb` and `tidy` with LLVM's release run what the `lint-c` workflow runs: no new finding (fix it, or `// NOLINT(<check>)` with a reason on a false positive), and `tidy --update` after fixing one ([Continuous integration](../development.md#continuous-integration)).
+
+## 8. Opening an issue or a pull request
+
+`gh pr create`, `gh issue create` and the API don't apply the repository's pull request template or issue forms; only the web pages do. So an agent writes the body in their structure itself:
+
+- **A pull request:** the three sections of `.github/pull_request_template.md`:
+  - *What and why*: the symptom or need, the cause and the change, with `Fixes #…`;
+  - *Checked*: tests, games with title ID and version, devices and OS, the `regress.py` report for a change every game can reach ([section 7](#7-before-you-open-a-pull-request)), measurements, and what was not checked;
+  - *Docs*: its three checkboxes, ticked or left open as they are.
+
+  `gh pr create --template .github/pull_request_template.md` starts from it in an editor; with `--body-file`, keep its headings.
+- **An issue:** the fields of the matching form in `.github/ISSUE_TEMPLATE/` (`bug_report.yml`, `game_request.yml`, `feature_request.yml`), as headings in their order. For a bug:
+  - the nxnative commit and the shader chain version;
+  - the game with its title ID and version;
+  - how it was built and run, and the device and OS;
+  - settings and environment overrides;
+  - the whole log;
+  - the form's confirmations (the device meets the requirements, nothing from a game is attached) as plain statements.
+
+  An idea or question that fits no form goes in as a feature request.
+- **Never** game files, keys or anything extracted from a game, in the text or in an attachment.

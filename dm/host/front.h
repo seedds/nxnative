@@ -55,4 +55,7 @@ void front_save_failed(int err);
 enum { FRONT_CA_OK = 0, FRONT_CA_CANCELLED = 1 };
 typedef int (*front_controller_applet_fn)(int min, int max, const char *explain, int *count, uint32_t *selected);
 int front_controller_applet(int min, int max, const char *explain, int *count, uint32_t *selected);
+// The most players the front end can ever report: the host asks the applet's sheet only for a minimum within it (the Mac: DM_PLAYERS, 1 with DM_PAD_MERGE; the iPhone: 1, every controller and the
+// touch controls are player 1). The weak default in hle_hid.c is 1
+int front_player_capacity(void);
 int dm_controller_applet_players(int max);   // hle_hid.c: the players the applet reports now (connected, on supported npads), capped at max (0 = no cap); any thread

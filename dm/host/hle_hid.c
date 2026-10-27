@@ -521,17 +521,24 @@ int dm_controller_applet_players(int max) {   // the connected players as the ap
     int count = 0; for (int p = 0; p < DM_PLAYERS; p++) count += reported(p);
     return ca_count(count, max);
 }
+// The most players the front end can report (front.h), cut by the npads the game supports: only a minimum within it is worth a sheet
+static int applet_capacity(void) {
+    int n = front_player_capacity(), sup = 0;
+    for (int p = 0; p < DM_PLAYERS; p++) sup += (p == 0 || (atomic_load(&g_ids_supported) & id_bit((uint32_t)p)) != 0);
+    return n < sup ? n : sup;
+}
+__attribute__((weak)) int front_player_capacity(void) { return 1; }   // no front end: the keyboard / touch player only
 __attribute__((weak)) int front_controller_applet(int min, int max, const char *explain, int *count, uint32_t *selected) {   // no front end: nothing to wait for, closed as the player would
     (void)min; (void)max; (void)explain; (void)count; (void)selected; return FRONT_CA_CANCELLED;
 }
-static Result hid_controller_support(int32_t *info, const int8_t *arg, front_controller_applet_fn ask) {
+static Result hid_controller_support(int32_t *info, const int8_t *arg, front_controller_applet_fn ask, int capacity) {
     int min = arg ? arg[0] : 0, max = arg ? arg[1] : 4, single = arg ? arg[5] != 0 : 0;
     ca_normalize(&min, &max, single);
     int count = dm_controller_applet_players(max); uint32_t selected = connected_id();
     int canceled = 0;
-    if (ca_ask(min, max, 0, count)) {
+    if (ca_ask(min, max, 0, count, capacity)) {
         if (ask(min, max, NULL, &count, &selected) != FRONT_CA_OK) { canceled = 1; count = dm_controller_applet_players(max); }
-    }
+    } else if (min > count) canceled = 1;   // a minimum the front end cannot reach: its sheet could only be cancelled, so it is answered as that, without showing one
     if (arg) LOG("hid controller applet: %d to %d players wanted, %d connected%s", arg[0], arg[1], count, canceled ? ": too few, closed as the player would (canceled)" : "");
     if (info) { info[0] = count; info[1] = (int32_t)selected; }
     return canceled ? RES_CTRL_CANCELED : RES_OK;
@@ -539,7 +546,7 @@ static Result hid_controller_support(int32_t *info, const int8_t *arg, front_con
 HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; answers at once, or waits for the players the game needs (canceled with fewer than the minimum when no front end can ask)",
           Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
     DM_APPLET("controller support");
-    return hid_controller_support(info, arg, front_controller_applet);
+    return hid_controller_support(info, arg, front_controller_applet, applet_capacity());
 }
 // Six-axis sensor (accelerometer + gyroscope) of the connected controller. SixAxisSensorState (0x60): acceleration in G, angular velocity in revolutions / s, angle in revolutions,
 // direction = the controller's three axes. At rest it lies flat: gravity (0, 0, -1), no rotation, the identity direction. While shaking (DM_BTN_SHAKE: the iPhone shaken, DmGamepad.m;
@@ -785,7 +792,7 @@ HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "player LED: the Switch's patte
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "controller color", Result, h_hid_Color, uint32_t *c, const uint32_t *id) { (void)id; ctrl_color(c); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", "left and right Joy-Con colors", Result, h_hid_Color2, uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; ctrl_color(l); ctrl_color(r); return RES_OK; }
-HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return hid_controller_support(NULL, arg, front_controller_applet); }
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return hid_controller_support(NULL, arg, front_controller_applet, applet_capacity()); }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "strap guide applet; not shown by the host", Result, h_hid_Strap, void) { DM_APPLET("controller strap guide"); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "controller firmware update applet; not shown by the host", Result, h_hid_FwUpd, const void *arg) { DM_APPLET("controller firmware update"); (void)arg; return RES_OK; }
 

@@ -270,8 +270,9 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
 
 // Controller applet (front.h front_controller_applet, hle_hid.c): a UIAlertController on the main thread that lists the connected controllers and keeps Continue disabled until the game's minimum
 // is connected; the game thread waits on a semaphore. Compile-checked only (dm/ios/tools/compile_check.py), not run on a device. The iPhone has one player (the touch controls and every
-// controller are player 1: DmGamepad.m), so a game that needs two or more players can only be cancelled here. A timer in the common run-loop modes refreshes the list and reads the pads: the Switch's
+// controller are player 1: DmGamepad.m), so a game that needs two or more players is answered at once (hle_hid.c, front_player_capacity). A timer in the common run-loop modes refreshes the list and reads the pads: the Switch's
 // A (the right face button) continues, B (the bottom one) cancels, on an edge only
+int front_player_capacity(void) { return 1; }   // the touch controls and every controller are player 1 (DmGamepad.m)
 int front_controller_applet(int min, int max, const char *explain, int *count, uint32_t *selected) {
     (void)selected;
     if (!g_layer) return FRONT_CA_CANCELLED;

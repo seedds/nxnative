@@ -495,9 +495,9 @@ static int fake_front(int min, int max, const char *explain, int *count, uint32_
 }
 static void t_applet(void) {
     // The pure decision: ask only below the minimum; min 0 never asks; single mode is one player; a maximum below the minimum is the minimum
-    CHECK(!ca_ask(0, 4, 0, 1) && !ca_ask(1, 4, 0, 1) && ca_ask(2, 4, 0, 1) && !ca_ask(2, 4, 0, 2), "ask only when fewer players than the minimum are connected");
-    CHECK(!ca_ask(0, 0, 0, 0) && !ca_ask(0, 4, 0, 0), "a minimum of 0 is answered at once, even with nobody connected");
-    CHECK(!ca_ask(2, 4, 1, 1) && ca_ask(1, 1, 1, 0), "single mode needs one player whatever the counts say");
+    CHECK(!ca_ask(0, 4, 0, 1, 4) && !ca_ask(1, 4, 0, 1, 4) && ca_ask(2, 4, 0, 1, 4) && !ca_ask(2, 4, 0, 2, 4), "ask only when fewer players than the minimum are connected");
+    CHECK(!ca_ask(0, 0, 0, 0, 4) && !ca_ask(0, 4, 0, 0, 4), "a minimum of 0 is answered at once, even with nobody connected");
+    CHECK(!ca_ask(2, 4, 1, 1, 4) && ca_ask(1, 1, 1, 0, 4), "single mode needs one player whatever the counts say");
     CHECK(ca_count(5, 4) == 4 && ca_count(2, 4) == 2 && ca_count(5, 0) == 5, "the count is capped at the maximum (0 = no cap)");
     int mn = 3, mx = 2; ca_normalize(&mn, &mx, 0);
     CHECK(mx == 3, "a maximum below the minimum becomes the minimum");
@@ -505,16 +505,22 @@ static void t_applet(void) {
     // Host state: players 1 and 2 connected, a game for four
     g_mode = 1; ids((const uint32_t[]){0, 1, 2, 3, NPAD_HANDHELD}, 5); dm_pad_players(0x3);
     int32_t info[2] = {-1, -1}; int8_t arg[8] = {2, 4, 0, 0, 0, 0};
-    CHECK(hid_controller_support(info, arg, fake_front) == RES_OK && g_ask_calls == 0 && info[0] == 2 && info[1] == 0, "enough players: answered at once, the front end not asked");
+    CHECK(hid_controller_support(info, arg, fake_front, 4) == RES_OK && g_ask_calls == 0 && info[0] == 2 && info[1] == 0, "enough players: answered at once, the front end not asked");
     arg[0] = 3; g_ask_players = 0x7;
-    CHECK(hid_controller_support(info, arg, fake_front) == RES_OK && g_ask_calls == 1 && g_ask_min == 3 && g_ask_max == 4 && info[0] == 3, "too few players: the front end is asked, the game gets the count when it continues");
+    CHECK(hid_controller_support(info, arg, fake_front, 4) == RES_OK && g_ask_calls == 1 && g_ask_min == 3 && g_ask_max == 4 && info[0] == 3, "too few players: the front end is asked, the game gets the count when it continues");
     dm_pad_players(0x3); g_ask_players = 0; g_ask_answer = FRONT_CA_CANCELLED; info[0] = info[1] = -1;
-    CHECK(hid_controller_support(info, arg, fake_front) == RES_CTRL_CANCELED && g_ask_calls == 2 && info[0] == 2, "cancelled: the game gets ResultControllerSupportCanceled (2202-3101) and the players there are");
-    CHECK(hid_controller_support(NULL, arg, fake_front) == RES_CTRL_CANCELED, "no result wanted: the same answer");
+    CHECK(hid_controller_support(info, arg, fake_front, 4) == RES_CTRL_CANCELED && g_ask_calls == 2 && info[0] == 2, "cancelled: the game gets ResultControllerSupportCanceled (2202-3101) and the players there are");
+    CHECK(hid_controller_support(NULL, arg, fake_front, 4) == RES_CTRL_CANCELED, "no result wanted: the same answer");
     arg[0] = 0; arg[1] = 4; g_ask_calls = 0;
-    CHECK(hid_controller_support(info, arg, fake_front) == RES_OK && g_ask_calls == 0, "a game that needs no controller is not asked");
+    CHECK(hid_controller_support(info, arg, fake_front, 4) == RES_OK && g_ask_calls == 0, "a game that needs no controller is not asked");
     arg[0] = 2; arg[5] = 1; g_ask_answer = FRONT_CA_OK;
-    CHECK(hid_controller_support(info, arg, fake_front) == RES_OK && g_ask_calls == 0 && info[0] == 1, "single mode: one player is enough and the count is capped at one");
+    CHECK(hid_controller_support(info, arg, fake_front, 4) == RES_OK && g_ask_calls == 0 && info[0] == 1, "single mode: one player is enough and the count is capped at one");
+    // A front end that can report one player only (the iPhone) is not asked for two: its sheet could only be cancelled, so the game gets the cancel at once, as from a headless host
+    arg[0] = 2; arg[5] = 0; g_ask_calls = 0; dm_pad_players(0x1); info[0] = -1;
+    CHECK(hid_controller_support(info, arg, fake_front, 1) == RES_CTRL_CANCELED && g_ask_calls == 0 && info[0] == 1, "capacity 1, minimum 2: canceled at once, no sheet, with the players there are");
+    CHECK(!ca_ask(2, 4, 0, 1, 1) && ca_ask(2, 4, 0, 1, 4) && ca_ask(2, 4, 0, 1, 2), "ask only when the front end could reach the minimum");
+    CHECK(applet_capacity() == 1, "the weak front end capacity is one player");
+    dm_pad_players(0x3);
     // With no front end the weak default has nothing to wait for: fewer players than the minimum are closed as the player would (3101), as main's headless answer
     arg[0] = 3; arg[1] = 4; arg[5] = 0; info[0] = -1;
     CHECK(h_hid_ShowCtrl(info, arg) == RES_CTRL_CANCELED && info[0] == 2 && info[1] == 0, "weak default: too few players, canceled, with the connected count");

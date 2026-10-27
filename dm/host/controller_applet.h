@@ -17,8 +17,10 @@ static inline void ca_normalize(int *min, int *max, int single) {
 }
 // The player count the game gets: the connected players, capped at the game's maximum
 static inline int ca_count(int connected, int max) { return max > 0 && connected > max ? max : connected; }
-// 1 = show the screen and wait until `connected` reaches `min` (or the player cancels); 0 = answer now with ca_count
-static inline int ca_ask(int min, int max, int single, int connected) {
+// 1 = show the screen and wait until `connected` reaches `min` (or the player cancels); 0 = answer now with ca_count. `capacity` is the most players this front end can ever report (the
+// Mac: its slots; the iPhone: 1; also bounded by the npads the game supports): a minimum above it could only be cancelled, so hle_hid.c answers it as that
+// (ResultControllerSupportCanceled) without showing a sheet
+static inline int ca_ask(int min, int max, int single, int connected, int capacity) {
     ca_normalize(&min, &max, single);
-    return min > 0 && connected < min;
+    return min > 0 && connected < min && min <= capacity;
 }

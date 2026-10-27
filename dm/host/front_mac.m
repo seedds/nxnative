@@ -1234,6 +1234,7 @@ static NSString *applet_players(void) {
     }
     return [t stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
 }
+int front_player_capacity(void) { return g_merge ? 1 : DM_PLAYERS; }   // a controller per slot (pad_slots.h); DM_PAD_MERGE makes them all player 1
 int front_controller_applet(int min, int max, const char *explain, int *count, uint32_t *selected) {
     (void)selected;
     if (!g_layer || !g_win) return FRONT_CA_CANCELLED;

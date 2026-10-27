@@ -161,3 +161,9 @@ t_geometry_primitive_id.dSYM/
 t_geometry_hazards.dSYM/
 t_unwritten_store
 t_unwritten_store.dSYM/
+t_capture
+t_capture.dSYM/
+nvn_replay
+nvn_replay.dSYM/
+t_capture_live
+t_capture_live.dSYM/

@@ -9,6 +9,7 @@
 #include "hle.h"
 #include "dm.h"
 #include "haptics_apple.h"
+#include "hle_cheat.h"
 
 UIView *dm_gamepad_view(CGRect frame);
 void dm_gamepad_reset(void);
@@ -264,4 +265,75 @@ void front_ios_focus_event(int ev) {
             if (g_session_off) front_ios_audio_session();
             front_ios_audio_apply(); dm_focus_set(1); break;
     }
+}
+
+// Cheat menu: summoned and dismissed by the hidden combo (hold L+R+ZL+ZR, hle_cheat.c menu_hotkey_tick), a panel over
+// the game listing the baked patches and file cheats with a switch each. Toggling acts at once (the engine tick applies
+// it within one tick); the rows' effective state refreshes after every switch (a keypress-gated patch reads off until
+// its buttons are held). The panel covers the middle of the screen; touches outside it keep going to the game.
+static UIScrollView *g_cheat_scroll;
+static NSMutableArray<UISwitch *> *g_cheat_switches;
+
+static void cheat_menu_refresh(void) {
+    int n = cheat_menu_count();
+    for (int i = 0; i < (int)g_cheat_switches.count; i++) {
+        char name[0x40]; int on = 0;
+        cheat_menu_get(i, name, sizeof name, &on);
+        if (i < n) g_cheat_switches[i].on = on;
+    }
+}
+
+void front_cheat_menu(int open) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *vc = nil;
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) if ([s isKindOfClass:UIWindowScene.class]) for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow) vc = w.rootViewController;
+        if (!vc) return;
+        if (open && !g_cheat_scroll) {
+            UIView *back = [[UIView alloc] initWithFrame:CGRectZero];
+            back.backgroundColor = [UIColor colorWithWhite:0 alpha:0.75];
+            back.layer.cornerRadius = 16; back.clipsToBounds = YES;
+            UILabel *title = [[UILabel alloc] initWithFrame:CGRectZero];
+            title.text = @"Cheats"; title.textColor = UIColor.whiteColor; title.font = [UIFont systemFontOfSize:18 weight:UIFontWeightSemibold];
+            [back addSubview:title];
+            UIScrollView *sc = [[UIScrollView alloc] initWithFrame:CGRectZero];
+            sc.showsVerticalScrollIndicator = YES;
+            [back addSubview:sc];
+            g_cheat_scroll = sc;
+            g_cheat_switches = [NSMutableArray array];
+            int n = cheat_menu_count();
+            for (int i = 0; i < n; i++) {
+                char name[0x40]; int on = 0;
+                cheat_menu_get(i, name, sizeof name, &on);
+                UILabel *lb = [[UILabel alloc] initWithFrame:CGRectZero];
+                lb.text = [NSString stringWithUTF8String:name]; lb.textColor = UIColor.whiteColor; lb.font = [UIFont systemFontOfSize:15]; lb.adjustsFontSizeToFitWidth = YES; lb.minimumScaleFactor = 0.6;
+                UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+                sw.on = on;
+                __block int row = i;
+                [sw addAction:[UIAction actionWithHandler:^(__unused UIAction *a) {
+                    cheat_menu_toggle(row);
+                    cheat_menu_refresh();
+                }] forControlEvents:UIControlEventValueChanged];
+                [sc addSubview:lb]; [sc addSubview:sw];
+                [g_cheat_switches addObject:sw];
+            }
+            [vc.view addSubview:back];
+            CGRect b = vc.view.bounds;
+            CGFloat w = MIN(b.size.width * 0.7, 420), h = MIN(b.size.height * 0.72, 520);
+            back.frame = CGRectMake((b.size.width - w) / 2, (b.size.height - h) / 2, w, h);
+            title.frame = CGRectMake(16, 10, w - 32, 24);
+            sc.frame = CGRectMake(8, 40, w - 16, h - 48);
+            CGFloat rowh = 44;
+            sc.contentSize = CGSizeMake(w - 16, MAX(h - 48, 44.0 * n + 8));
+            for (int i = 0; i < n; i++) {
+                UIView *lb = sc.subviews[i * 2], *sw = sc.subviews[i * 2 + 1];
+                lb.frame = CGRectMake(8, 4 + i * rowh, w - 16 - 64, 32);
+                sw.frame = CGRectMake(w - 16 - 56, 4 + i * rowh, 52, 32);
+            }
+            back.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+        } else if (!open && g_cheat_scroll) {
+            [g_cheat_scroll.superview removeFromSuperview];   // the blurred back view
+            g_cheat_scroll = nil;
+            g_cheat_switches = nil;
+        }
+    });
 }

@@ -97,6 +97,22 @@ static void map_add(uint64_t b, uint64_t n, uint64_t src, uint32_t st) {   // ca
 }
 static void map_del(int i) { g_map[i] = g_map[--g_nmap]; }   // caller holds g_map_lock
 
+// For the cheat engine (hle_cheat.c): the heap as currently opened by SetHeapSize (size 0 before the game opens it),
+// the alias region, and whether an address lies inside one registered mapping (MapMemory stacks, MapPhysicalMemory
+// alias pages) -- everything outside the modules, the opened heap and these mappings is unmapped, and a cheat access
+// there is refused
+void svc_heap_range(uint8_t **base, size_t *size) { mem_init(); *base = g_heap; *size = g_heap_cur; }
+void svc_alias_range(uint8_t **base, size_t *size) { mem_init(); *base = g_alias; *size = g_alias_cap; }
+int svc_guest_mapped(uint64_t a, size_t n) {
+    if (n > 8) return 0;                       // the cheat VM only ever moves 1/2/4/8 bytes
+    pthread_mutex_lock(&g_map_lock);
+    int ok = 0;
+    for (int i = 0; i < g_nmap; i++)
+        if (a >= g_map[i].base && n <= g_map[i].size && a - g_map[i].base <= g_map[i].size - n) { ok = 1; break; }
+    pthread_mutex_unlock(&g_map_lock);
+    return ok;
+}
+
 // One bit per 4 KB page of the alias region (mapped = 1): Map sets bits, Unmap clears them; returns the number of pages whose state really changed (signed: positive for Map, negative for Unmap)
 static int64_t alias_pages(uint64_t off, uint64_t n, int map) {
     int64_t ch = 0;

@@ -58,6 +58,75 @@ if FAR:
 else:
     KEY_PAGE_OFF = (len(IMG) + 0x3FFF) & ~0x3FFF
     IMG.extend(bytes(0x4000))
+
+# ---- Cheat patches (DM_CHEAT_FILE, module main only): Atmosphère-format code-write cheats baked in as toggleable patches ----
+# On iOS the sealed code pages cannot be written at run time, so a code-patch cheat cannot run from the cheat file. Instead the
+# build turns each enabled "store u32 at main+off" cheat into: the site instruction becomes a branch to a patch-area stub that
+# tests a flag byte and then executes either the original instruction (flag 0) or the cheat's instruction (flag 1). The flags
+# live in a writable page appended after the key page; hle_cheat.c finds it through the fixups header and maintains the bytes
+# from toggles.txt and (for keypress-gated cheats) the held buttons, so a baked patch is switched at run time exactly like a
+# file cheat. Cheat-site bytes are asserted like any cut, so a table for the wrong build aborts the rewrite, not the game.
+CHEAT_SRC = os.environ.get('DM_CHEAT_FILE') if NAME == 'main' else None
+CHEAT_BAKE, FLAGS_PAGE_OFF = [], 0
+if CHEAT_SRC:
+    assert not FAR, 'cheat patches are not supported for images with the patch area before the base'
+    bake_txt = open(CHEAT_SRC, 'r', encoding='utf-8', errors='replace').read()
+    site_owner, bake_off = {}, {}
+    tog_path = os.path.join(os.path.dirname(CHEAT_SRC), 'toggles.txt')
+    if os.path.exists(tog_path):
+        for ln in open(tog_path, 'r', encoding='utf-8', errors='replace'):
+            m = re.match(r'\s*\[(.*?)\]\s+(\S+)', ln)
+            if m and m.group(2).strip().lower() in ('0', 'false', 'off'): bake_off[m.group(1)] = True
+    parsed, cur = [], None
+    i, n = 0, len(bake_txt)
+    while i < n:
+        c = bake_txt[i]
+        if c.isspace(): i += 1
+        elif c in '[{':
+            j = bake_txt.index(']' if c == '[' else '}', i)
+            cur = {'master': c == '{', 'name': bake_txt[i + 1:j], 'words': []}
+            parsed.append(cur); i = j + 1
+        elif c in '0123456789abcdefABCDEF':
+            w = bake_txt[i:i + 8]
+            assert len(w) == 8 and all(ch in '0123456789abcdefABCDEF' for ch in w), f'cheat file: bad word at {bake_txt[i:i+16]!r}'
+            assert cur is not None, 'cheat file: code word before any [name]'
+            cur['words'].append(int(w, 16)); i += 8
+        else:
+            # a junk line (a tool's header/footer; dmnt would reject the file): skip it whole -- but garbage inside
+            # a line that carries syntax (code word, name bracket) still aborts, as in dmnt
+            ls = bake_txt.rfind('\n', 0, i) + 1
+            if any(ch in '0123456789abcdefABCDEF[{' for ch in bake_txt[ls:i]): raise AssertionError(f'cheat file: unexpected character {c!r} at {i}')
+            j = bake_txt.find('\n', i)
+            i = len(bake_txt) if j < 0 else j
+    for ch in parsed:
+        if ch['master'] or bake_off.get(ch['name']): continue   # the master block only restores baselines; the stub's off path is the original
+        mask, sites, cave, k, ok = 0, {}, {}, 0, True
+        ws = ch['words']
+        while k < len(ws):
+            w = ws[k]
+            if w >> 28 == 0x8:                                   # keypress conditional wrapping the whole body
+                mask = w & 0x0FFFFFFF; k += 1; continue
+            if w >> 28 == 0x2: k += 1; continue                  # end of block: the baked flag makes the branch itself unnecessary
+            if w >> 28 != 0x0: ok = False; break                 # anything but a plain store: leave it to the run-time engine
+            width, mem, ofs = (w >> 24) & 0xF, (w >> 20) & 0xF, (w >> 16) & 0xF
+            rel = ((w & 0xFF) << 32) | ws[k + 1]; k += 2
+            if width == 8: val = (ws[k] << 32) | ws[k + 1]; k += 2
+            else: val = ws[k]; k += 1
+            if width != 4 or mem != 0 or ofs != 0: ok = False; break
+            (sites if rel < len(IMG) else cave)[rel] = val
+        if not ok or not sites:
+            print(f'    cheat "{ch["name"]}": not bakeable (only plain u32 stores at main+off), left to the run-time engine')
+            continue
+        for off in list(sites):                                  # a later cheat writing the same site wins, as at run time
+            if off in site_owner: site_owner[off]['sites'].pop(off, None)
+        for off in sites: site_owner[off] = ch
+        ch.update(mask=mask, sites=sites, cave=cave)
+        CHEAT_BAKE.append(ch)
+    CHEAT_BAKE[:] = [c for c in CHEAT_BAKE if c['sites']]
+    if CHEAT_BAKE:
+        FLAGS_PAGE_OFF = KEY_PAGE_OFF + 0x4000                   # content written after the stubs (a site may yet drop out)
+        IMG.extend(bytes(0x4000))
+if not FAR:
     PATCH_OFF = (len(IMG) + 0xFFFF) & ~0xFFFF
 
 # ---- Registered patches of particular builds, keyed by NSO build ID: dm/tools/sdk_patches.py (Nintendo SDK module builds, which several games can ship) and dm/games/<id>/patches.py
@@ -1312,6 +1381,74 @@ if os.environ.get('DM_SPIN_LIST'):
     for T, bes, n in spin_sites: print(f'{NAME} spin wait {T:#x} ({n} instructions), back-edges ' + ' '.join(f'{b:#x}' for b in bes))
 
 os.makedirs(outdir, exist_ok=True)
+
+# ---- Cheat patch stubs: the site word becomes B → stub; the stub tests the cheat's flag byte, then runs the original
+# instruction (flag 0) or the cheat's instruction sequence (flag 1). x9 is the only clobber and is saved; NZCV is untouched
+# (STUR/ADRP/LDRB/CBZ do not write flags). A site whose cheat word is itself a B into the cheat's code cave (writers of
+# trampoline-style cheats park their code past the image, where it lands inside the next module at run time) gets the cave
+# body inlined: position-independent words only, and the cave's final branch back is checked and replaced by the stub's own.
+if CHEAT_BAKE:
+    LDRB = lambda t, nn, imm12: 0x39400000 | (imm12 << 10) | (nn << 5) | t
+    def LDR_FLAG(idx):                      # ldr w9, [x9, #0x1400+idx*4]: flag bytes sit past the records (LDRB reaches only 4095)
+        return 0xB9400000 | (((0x1400 + idx * 4) >> 2 & 0xFFF) << 10) | (9 << 5) | 9
+    def CBNZ(frm, to, r):
+        off = to - frm; assert off % 4 == 0 and -(1 << 20) <= off < (1 << 20)
+        return 0x35000000 | (((off >> 2) & 0x7FFFF) << 5) | r
+    def b_target(at, w):                    # target of B at address at (None if not a B)
+        if w & 0xFC000000 != 0x14000000: return None
+        imm = w & 0x3FFFFFF
+        if imm & (1 << 25): imm -= 1 << 26   # signed 26-bit displacement
+        return at + imm * 4
+    cut_at = {c[0] for c in cuts}
+    for idx, ch in enumerate(CHEAT_BAKE):
+        ch['baked'] = 0
+        for off in sorted(ch['sites']):
+            repl = ch['sites'][off]
+            body = [repl]
+            tgt = b_target(off, repl)
+            if tgt is not None:             # a branch into the cheat's cave: inline the body, drop its return branch
+                body = []
+                off2 = tgt
+                while off2 in ch['cave']: body.append(ch['cave'][off2]); off2 += 4
+                if not body or b_target(off2 - 4, body[-1]) != off + 4: body = None
+                else:
+                    body = body[:-1]
+                    for w2 in body:
+                        if w2 & 0xBF000000 == 0x18000000: body = None; break   # ldr literal
+                        if w2 & 0x9F000000 == 0x10000000 or w2 & 0x9F000000 == 0x90000000: body = None; break   # adr / adrp
+                        ins2 = dis(w2, 0)
+                        if CS_GRP_JUMP in ins2.groups: body = None; break
+            if body is None:
+                print(f'    cheat "{ch["name"]}": site {off:#x} is not position-independent, skipped')
+                continue
+            assert off not in cut_at, f'cheat site {off:#x} collides with a registered cut'
+            orig = struct.unpack_from('<I', IMG, off)[0]
+            start = here()
+            emit(STUR(9, 31, -16))
+            emit(ADRP(9, here(), FLAGS_PAGE_OFF))
+            emit(LDR_FLAG(idx))
+            emit(CBNZ(here(), start + 7 * 4, 9))          # flag set → on path (word 7)
+            emit(LDUR(9, 31, -16)); emit(orig); emit(B(here(), off + 4))
+            emit(LDUR(9, 31, -16))
+            for w2 in body: emit(w2)
+            emit(B(here(), off + 4))
+            struct.pack_into('<I', IMG, off, B(off, start))
+            cuts.append((off, struct.pack('<I', orig).hex(), struct.pack('<I', B(off, start)).hex(),
+                         f'cheat patch "{ch["name"]}" (baked toggle flag {idx}, key mask {ch["mask"]:#x})', 'all'))
+            stat('cheat')
+            ch['baked'] += 1
+    dropped = [c['name'] for c in CHEAT_BAKE if not c.get('baked')]
+    CHEAT_BAKE[:] = [c for c in CHEAT_BAKE if c.get('baked')]
+    hdr = bytearray(0x4000)
+    struct.pack_into('<II', hdr, 0, 0x46434D44, len(CHEAT_BAKE))   # 'DMCF', count
+    for idx, c in enumerate(CHEAT_BAKE):
+        r = 0x20 + idx * 0x48
+        struct.pack_into('<II', hdr, r, c['mask'], 0)
+        nb = c['name'].encode('utf-8')[:0x3F]
+        hdr[r + 8:r + 8 + len(nb)] = nb
+    IMG[FLAGS_PAGE_OFF:FLAGS_PAGE_OFF + 0x4000] = hdr
+    if dropped: print(f'    cheat patches not baked: {", ".join(dropped)}')
+    print(f'    cheat patches: {len(CHEAT_BAKE)} baked (flags page at +{FLAGS_PAGE_OFF:#x}, toggled by the run-time cheat engine)')
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
 if FAR:   # patch area before the base: file = text + ro + data (padded to 16K) + patch area
     if BIG_TEXT and len(patch) > FRONT - 0x4000 and 'DM_PATCH_FRONT' not in os.environ:
@@ -1326,7 +1463,7 @@ import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
     for src_ in (os.path.abspath(__file__), nso_code.__file__, nso_asm.__file__, *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
-    f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
+    f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# FLAGS_PAGE_OFF\t{FLAGS_PAGE_OFF:#x}\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
@@ -1343,7 +1480,9 @@ with open(P('sites.tsv'), 'w') as f:
     for t, bes, n in spin_sites: f.write(f'{t:#x}\tS\t' + ' '.join(f'{b:#x}' for b in bes) + '\n')   # spin wait: its head and the back-edges that enter its copy
 with open(P('cuts.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
-    for off, ob, nb, why in cuts: f.write(f'{off:#x}\t{ob}\t{nb}\t{why}\n')   # Columns: offset, original bytes, new bytes, reason
+    for c in cuts:   # Columns: offset, original bytes, new bytes, [scope,] reason (cheat patches append a scope)
+        off, ob, nb, why, scope = c if len(c) == 5 else (*c, 'all')
+        f.write(f'{off:#x}\t{ob}\t{nb}\t{why}\n' if len(c) == 4 else f'{off:#x}\t{ob}\t{nb}\t{scope}\t{why}\n')
 with open(P('obs.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')

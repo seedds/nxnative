@@ -43,3 +43,8 @@ void dm_touch_set(const dm_touch *t, int n);
 // Timing: when a save write fails (disk full etc.) within one of the game's save transactions (between two Commits), so that this Commit is refused and the previously committed save is unchanged, it is called once per refused transaction;
 // the next transaction that succeeds commits as usual, and the front end need not do any recovery. err = the first failing errno (ENOSPC = 28 means out of space). Called on the game thread; the front end switches to the main thread itself and must not block
 void front_save_failed(int err);
+
+// Cheat menu opened / closed (called by hle_cheat.c's hidden hotkey: hold L+R+ZL+ZR for 0.8 s, DM_CHEAT_MENU_KEYS overrides).
+// The iOS front end shows a panel over the game (rows from cheat_menu_count/get, switching through cheat_menu_toggle, hle_cheat.h);
+// fronts without a menu UI use the weak no-op in hle_cheat.c. Called from the engine thread; switch to the main thread and do not block.
+void front_cheat_menu(int open);

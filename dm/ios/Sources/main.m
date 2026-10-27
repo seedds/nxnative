@@ -61,6 +61,7 @@ static int boot_env(void) {
     setenv("DM_ROMFS", romfs.fileSystemRepresentation, 0);
     setenv("DM_SAVE", [doc stringByAppendingPathComponent:@"save"].fileSystemRepresentation, 0);
     setenv("DM_TEMP", [doc stringByAppendingPathComponent:@"temp"].fileSystemRepresentation, 0);
+    setenv("DM_CHEATS_DIR", [doc stringByAppendingPathComponent:@"cheats"].fileSystemRepresentation, 0);   // Atmosphère-format cheat files (hle_cheat.c): <main build ID>.txt + toggles.txt, reloadable at run time
     NSString *dm = [res stringByAppendingPathComponent:@"dm"];
     setenv("DM_NVN_SHMAP", [dm stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
     setenv("DM_MSL_DIR", [res stringByAppendingPathComponent:@"msl"].fileSystemRepresentation, 0);

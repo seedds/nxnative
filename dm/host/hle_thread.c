@@ -15,6 +15,7 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 #include <mach/mach.h>
 #include <pthread/qos.h>
 #include <dlfcn.h>
@@ -666,6 +667,48 @@ void svc_thread_dump(void) {
         }
         vm_deallocate(mach_task_self(), (vm_address_t)ths, nth * sizeof *ths);
     }
+}
+
+// Stop-the-world over every guest thread, for the cheat engine's PauseProcess / ResumeProcess opcodes (hle_cheat.c):
+// the same machinery as SetThreadActivity (svc 0x32, the IL2CPP GC's pause), applied to all started, unexited threads.
+// The caller (the engine thread) is not a guest thread and never appears in g_all, so it cannot pause itself. Repeating
+// the call in the state it is already in is a cheap no-op, which is what the engine's 12 Hz passes do with FF0 held.
+void svc_thread_pause_all(int on) {
+    pthread_mutex_lock(&G);
+    if (!on) {
+        for (thr_t *t = g_all; t; t = t->all) {
+            atomic_store(&t->pause_req, 0);
+            atomic_fetch_and(&t->svc_state, ~2);
+            pthread_cond_broadcast(&t->pcv);
+        }
+        pthread_mutex_unlock(&G);
+        return;
+    }
+    uint64_t t0 = now_ns();
+    int warned = 0;
+    for (;;) {
+        int busy = 0;
+        for (thr_t *t = g_all; t; t = t->all) {
+            if (t->exited || !t->started) continue;
+            if (t->paused) continue;
+            busy++;
+            atomic_store(&t->pause_req, 1);
+            int st = atomic_fetch_or(&t->svc_state, 2);
+            if (st & 1) t->paused = 1;   // stopped inside an SVC: the gate frame holds its context
+        }
+        if (!busy) break;
+        // N threads each broadcast their own pcv, so instead of waiting on one of them, poll: signal, sleep briefly,
+        // re-check (each stop lands in tens of microseconds; the pause as a whole settles in well under a frame)
+        pthread_mutex_unlock(&G);
+        for (thr_t *t = g_all; t; t = t->all) if (t->started && !t->exited && !t->paused) pthread_kill(t->pt, SIGUSR2);
+        usleep(200);
+        pthread_mutex_lock(&G);
+        if (!warned && now_ns() - t0 > 1000000000ull) {
+            warned = 1;
+            LOG("[RED] cheat pause: some guest threads still not suspended after more than 1 second (stuck in host code?)");
+        }
+    }
+    pthread_mutex_unlock(&G);
 }
 
 // Same-core wake handoffs apply to every game. core_preempt additionally checks

@@ -255,6 +255,30 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     s->buttons = b;
     s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
 }
+
+// Buttons held right now, without consuming the press latches (the cheat engine's keypress conditions, hle_cheat.c).
+// Same mask fill() reports: buttons 0-15, stick directions 16-23 (NpadButton numbering -- the same bit layout dmnt's
+// cheat key masks use, so an Atmosphere key mask checks this value directly)
+uint64_t dm_input_held(void) {
+    uint64_t b = atomic_load(&g_btn);
+    int32_t a[4]; uint64_t k = atomic_load(&g_axes);
+    for (int i = 0; i < 4; i++) a[i] = ax(k, i);
+    for (int p = 0; p < DM_PLAYERS; p++) {   // every player's controller, as fill() merges them
+        b |= atomic_load(&g_pad_btn[p]);
+        uint64_t v = atomic_load(&g_pad_axes[p]); for (int i = 0; i < 4; i++) a[i] = pick(a[i], ax(v, i));
+    }
+    b &= 0xffffull;
+    int32_t lx = a[0], ly = a[1], rx = a[2], ry = a[3];
+    if (lx < -STICK_THRESH) b |= 1u << 16;
+    if (ly > STICK_THRESH) b |= 1u << 17;
+    if (lx > STICK_THRESH) b |= 1u << 18;
+    if (ly < -STICK_THRESH) b |= 1u << 19;
+    if (rx < -STICK_THRESH) b |= 1u << 20;
+    if (ry > STICK_THRESH) b |= 1u << 21;
+    if (rx > STICK_THRESH) b |= 1u << 22;
+    if (ry < -STICK_THRESH) b |= 1u << 23;
+    return b;
+}
 // GetNpadStates(out, n, id): newest first, n entries: the current state repeated with consecutive sampling numbers. The host keeps no history, but on hardware the
 // 16-entry history is always full, and games read all of it whatever count comes back: Super Mario Odyssey (main+0x93fc20) polls every controller slot each frame, which advances
 // the shared sampling number by about 16 per frame, and with only entry 0 written neither stick did anything in play (the camera did not turn at its first hint) while buttons

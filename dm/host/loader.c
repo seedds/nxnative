@@ -195,6 +195,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "FILE_IMAGE_LEN")) m->file_image_len = v;
         else if (!strcmp(key, "KEY_PAGE_OFF")) m->key_page_off = v;
         else if (!strcmp(key, "KEY_PAGE_SIZE")) m->key_page_size = v;
+        else if (!strcmp(key, "FLAGS_PAGE_OFF")) m->flags_page_off = v;   // cheat flags page (0 = this build has no baked cheat patches)
         else if (!strcmp(key, "TEXT_END")) m->text_end = v;
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;

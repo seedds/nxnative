@@ -37,6 +37,7 @@ void guest_clock_read_wait(void) {}
 uint64_t guest_ns(void) { return 0; }
 uint64_t dm_entropy64(void) { return 0; }
 int thr_limit_used(void) { return 0; }
+void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param)) { (void)id; (void)fn; } // No observation gates run in this fixture.
 int dm_ue_heap_owns(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; } // No Unreal allocator is installed in this fixture.
 module_t *module_of(const void *p) {
     uintptr_t a = (uintptr_t)p;

@@ -7,6 +7,7 @@
 #define DM_GAME_MEM_USED UINT64_C(0x00200000)
 #define DM_GAME_SYS_RESOURCE UINT64_C(0x02000000)
 #define DM_GAME_PROGRAM_ID UINT64_C(0)
+#define DM_GAME_STDALLOC_CAP 0ull   // what the alias region has room for, as without the profile key (game.py)
 #ifndef DM_GAME_MEM_MAP_LIMIT
 #define DM_GAME_MEM_MAP_LIMIT 1
 #endif

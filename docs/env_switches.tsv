@@ -13,7 +13,7 @@ DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update wi
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
 DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
 DM_COPY_GAME_RESOURCES	switch	`NO` skips the Xcode build phase that copies the game's resources into the app (`stage_resources.sh`, on by default); `build_ipa.sh` sets it for its unsigned build, which packs them itself
-DM_COPY_ROMFS	switch	`NO` keeps the game files out of the app, in the Xcode build phase (`stage_resources.sh`) and in the unsigned IPA of `build_ipa.sh` (on by default): `main.m` takes the validated `Documents/romfs.img` copied by `scripts/push_romfs.sh`, then a `Documents/romfs` folder
+DM_COPY_ROMFS	switch	`NO` keeps the game files out of the app, in the Xcode build phase (`stage_resources.sh`) and in the unsigned IPA of `build_ipa.sh` (on by default): `main.m` takes the validated `Documents/romfs.img` copied by `scripts/push_romfs.sh`, then a `Documents/romfs` folder; the build writes the image's identity as `romfs.id` into the app, and `main.m` uses only a matching image (`--romfs separate` of the NSP script sets this)
 DM_CTL	diagnostic	`=<file>` (Mac): the host polls the file every 100 ms and runs each appended line: button presses, `shot`, `passdump`, `texdump`, `env KEY=VALUE`, `peek`, `memdump`, `drag` and more
 DM_DBG	diagnostic	When set, prints the guest's `svcOutputDebugString` text to stderr as `[guest]` lines
 DM_DBG_AU_FRAMES	diagnostic	`=<frames>` asks the Mac's Core Audio output for that many frames per callback instead of about 5 ms (1024 reproduces the iOS default that caused crackling)
@@ -214,12 +214,15 @@ DM_QOS_MAP	switch	`=1` maps guest thread priority to QoS class: ≤ 44 user-inte
 DM_REGIONS	diagnostic	`=<file>` writes the table of the SDK's address regions every 2 s (alias offset, size, where the request returns to in the game, bytes mapped, the part opened, the SDK offset the request came through; `hle_svc.c` "Address regions"); the NSP script's address region check sets it
 DM_RENDER_SCALE	player	`0.5` to `1.0`: fixes the game's 3D views at that fraction of their size and turns its dynamic resolution off, for builds with a render scale stub; `1.0` (the default) keeps it
 DM_RESOURCE_AOC	path	The add-on content folder the iOS build copies into the app's `aoc/` (empty for none); written by `gen_resources.py`, read by `stage_resources.sh`
+DM_RESOURCE_BUILD	switch	Package version (for example `v327680`), written to `Gen/resources.env` by `gen_resources.py`; with `DM_COPY_ROMFS=NO` the copy phase puts it in the `build=` field of the app's `romfs.id`
 DM_RESOURCE_CHAIN_H	path	Path of `dm/gfx/nvn/dmsh_chain.h`, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) stops when the prepared shaders are not of its chain version
 DM_RESOURCE_MARKER	path	A file under the RomFS, written to `Gen/resources.env` by `build_ipa.sh`, that the Xcode copy phase (`stage_resources.sh`) checks for before copying the game files
 DM_RESOURCE_MSLDIR	path	Name of the shader library folder (`b-<chain>`), written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase copies the shaders to `msl/<name>` in the app
 DM_RESOURCE_PSO	path	Folder of the offline Metal pipeline archive (empty for none), written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase copies it to `<App>/pso`
 DM_RESOURCE_ROMFS	path	RomFS folder, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) copies it into the app's `romfs`
 DM_RESOURCE_SHADERS	path	iOS shader library folder, written to `Gen/resources.env` by `build_ipa.sh`; the Xcode copy phase (`stage_resources.sh`) copies it into the app's `msl/b-<chain>`
+DM_RESOURCE_TITLE	switch	Game profile title ID, written to `Gen/resources.env` by `gen_resources.py`; with `DM_COPY_ROMFS=NO` the copy phase puts it in the `title=` field of the app's `romfs.id`
+DM_RESOURCE_VERSION	switch	Display version, written to `Gen/resources.env` by `gen_resources.py`; with `DM_COPY_ROMFS=NO` the copy phase puts it in the `version=` field of the app's `romfs.id`
 DM_RES_CHECK	diagnostic	`=1` prints the first 40 textures or buffers a shader reaches through its argument block that are not in the residency set (textures attributed to their parent allocation)
 DM_ROMFS	path	The game's RomFS folder, mounted read-only as `rom` (default `$DM_ROOT/romfs`); the Mac launcher, the iOS app and the NSP script set it
 DM_ROMFS_OVERLAY	path	`=<dir>[:<dir>…]`: RomFS reads look in these folders first, in order, and fall back to `DM_ROMFS` (for a modified copy of some files)

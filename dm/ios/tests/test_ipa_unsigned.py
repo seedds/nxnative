@@ -12,6 +12,8 @@ import zipfile
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/games'))
 import game
+sys.path.insert(0, str(REPO / 'dm/tools'))
+import romfs_image
 
 GAME = '010015100B514000'
 SCRIPT = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
@@ -37,16 +39,20 @@ class UnsignedIpaTests(unittest.TestCase):
         (root / 'romfs/marker').write_text('romfs')
         (root / 'aoc/0/file').write_text('aoc')
         (root / 'tools').symlink_to(REPO / 'dm/ios/tools', target_is_directory=True)
+        (root / 'dm/tools').symlink_to(REPO / 'dm/tools', target_is_directory=True)
 
-    def pack(self, **extra):
+    def pack(self, image=False, identity=None, **extra):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.stand_in(root)
             (root / 'DmIOS.app/executable').write_text('app')
-            result = run_step(PACKING, root, APP=str(root / 'DmIOS.app'), MSL_IOS=str(root / 'shaders'), MSLDIR='b-fixture', ROMFS=str(root / 'romfs'),
-                              AOC=str(root / 'aoc'), OUT_IPA=str(root / 'out.ipa'), **extra)
+            if image: romfs_image.pack(root / 'romfs', root / 'RomFS.img')
+            result = run_step(PACKING, root, APP=str(root / 'DmIOS.app'), MSL_IOS=str(root / 'shaders'), MSLDIR='b-fixture', ROMFS=str(root / ('RomFS.img' if image else 'romfs')),
+                              AOC=str(root / 'aoc'), OUT_IPA=str(root / 'out.ipa'), O=str(root / 'pkg'), DM_APP_VERSION='1.2.1', PKG='v327680', **extra)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            with zipfile.ZipFile(root / 'out.ipa') as archive: return set(archive.namelist())
+            with zipfile.ZipFile(root / 'out.ipa') as archive:
+                if identity is not None: identity.append((archive.read('Payload/DmIOS.app/romfs.id').decode() if 'Payload/DmIOS.app/romfs.id' in archive.namelist() else None, (root / 'RomFS.img').read_bytes() if image else None))
+                return set(archive.namelist())
 
     def test_game_files_are_packed_by_default(self):
         names = self.pack()
@@ -59,6 +65,22 @@ class UnsignedIpaTests(unittest.TestCase):
         self.assertIn('Payload/DmIOS.app/executable', names)
         self.assertIn('Payload/DmIOS.app/msl/b-fixture/fixture_b.metallib', names)
         self.assertIn('Payload/DmIOS.app/aoc/0/file', names)   # add-on content has no place outside the app yet
+
+    def test_slim_ipa_of_an_image_carries_its_identity_and_the_default_does_not(self):
+        got = []
+        names = self.pack(image=True, identity=got, DM_COPY_ROMFS='NO')
+        self.assertFalse([n for n in names if n.endswith(('/romfs', '/romfs.img')) or '/romfs/' in n])
+        self.assertIn('Payload/DmIOS.app/romfs.id', names)
+        line, data = got[0]
+        self.assertTrue(line.startswith(f'DMROMFSID1 title={GAME} version=1.2.1 build=v327680 size={len(data)} index='), line)   # read back
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(data); f.flush(); self.assertTrue(romfs_image.same_identity(line, romfs_image.identity(f.name)))
+        got = []
+        names = self.pack(image=True, identity=got)   # bundle: exactly as before
+        self.assertIn('Payload/DmIOS.app/romfs.img', names); self.assertNotIn('Payload/DmIOS.app/romfs.id', names); self.assertIsNone(got[0][0])
+
+    def test_slim_ipa_of_a_folder_has_no_identity(self):
+        self.assertNotIn('Payload/DmIOS.app/romfs.id', self.pack(DM_COPY_ROMFS='NO'))
 
     @unittest.skipUnless(CAN_SIGN, 'needs macOS codesign and a C compiler')
     def test_executable_carries_the_entitlements(self):

@@ -1,7 +1,7 @@
 # The Legend of Zelda: Tears of the Kingdom (0100F2C0115B6000): the rewriter's patches of this game's own builds. dm/tools/patch_nso.py loads every profile's patches.py and applies those of a module's NSO build ID;
 # CUTS, OBS and FRAME_STEP as described there ("Registered patches"). Patches of Nintendo SDK module builds are in dm/tools/sdk_patches.py
 import struct
-from nso_asm import ADDI, ADRP, B, BC, CBZW, EQ, GE, HI, LDRS, LO, LT, NE, NOP, STP_PRE, STRS, STRW
+from nso_asm import ADDI, ADRP, B, BC, CBZW, EQ, GE, HI, LDRS, LO, LT, NE, NOP, STP_PRE, STRS, STRW, SUBI
 
 # Tears of the Kingdom picks a present interval each frame (main+0x2db174: 2 = 30 fps, 3 under load) and steps its game time by 60 / fps (int fps at timing +0x50, read at main+0x2daa54
 # and main+0x3e562c). The stub replaces that logic: int fps = 60 / step, and the float fps (timing +0x24, unused, per masagrator's FPSLocker config for this build, which found the
@@ -153,7 +153,9 @@ def frame_step(ctx):
 #   calc may have rebuilt +0xbc from the last yaw.
 # - SpecialPower (Fuse, Ascend, Recall, Autobuild aiming; main+0x23d2d40, x19 = node, x23 = camera): the yaw is the camera's current direction (main+0x2e2468 into
 #   [x29-0x4c], yaw at [x29-0x44]) plus the stick, so the stub adds the mouse to that slot at its copy (main+0x23d2dd0); the pitch node +0x50 follows the target node
-#   +0x160, which the stick moves between node +0x1ac and +0x1b0 and which the calc first sets from +0x50.
+#   +0x160, which the stick moves between node +0x1ac and +0x1b0 and which the calc first sets from +0x50. With bit 8 of camera +0x15c set (Recall) the calc ignores
+#   that direction: the yaw is the base yaw node +0x54, which the node's enter (slot 18, main+0x23d25fc, through main+0x23d2bc8) sets once, minus a look offset node
+#   +0x1d8 that the stick moves within a small bound. There the stub turns node +0x54 instead.
 # The stub adds the mouse counts the host summed since they were last taken (state +0x40 / +0x44, taken totals at +0x48 / +0x4c): yaw -= dx * (state +0x50), wrapped to
 # [-180, 180); pitch += dy * (state +0x54), within the node's bounds. Counts that no camera took for 1/8 s (another camera, a menu; the time of the last take at state
 # +0x60, in system counter ticks) are dropped instead of turning the camera all at once afterwards. With the stick at rest it holds a 0.001 stick (both axes: with y at 0
@@ -167,12 +169,15 @@ def frame_step(ctx):
 # (the parameters: the getters main+0x1d3a9a0 to +0x1d3ab98, registered at main+0xbb5898). The turn stub takes the mouse counts there: half angle -= dx * (state +0x50)
 # * pi / 360, and a height change of the same angle at the object's horizontal distance, -dy * (state +0x54) * pi / 180 * distance, which the height stub adds before
 # the clamp (state +0x78). It stamps state +0x70 (8 bytes), and the LockOn stub leaves the mouse alone for 1/8 s after it, so the object moves and the camera follows
-def mouse_stub(ctx, site, orig, kind, cam, yaw, pitch, bounds=None, yield_held=False):
+def mouse_stub(ctx, site, orig, kind, cam, yaw, pitch, bounds=None, yield_held=False, fixed=None):
     """At site (holding the instruction orig, run last): yaw = (register, offset), pitch = (register, [offsets]), bounds = (low, high) offsets in the pitch's register;
-    yield_held: nothing while Ultrahand moves an object (state +0x70 stamped within 1/8 s)."""
+    yield_held: nothing while Ultrahand moves an object (state +0x70 stamped within 1/8 s); fixed = (bit, yaw): while that bit of camera +0x15c is set, the yaw turned is
+    that (register, offset) instead."""
     here, emit = ctx.here, ctx.emit
     ctx.site(site, struct.pack('<I', orig).hex())
     start = here(); emit(ADRP(9, here(), ctx.state))
+    flag = [0xb9400000 | 0x15c >> 2 << 10 | cam << 5 | 15,   # ldr w15,[cam,#0x15c]
+            0x36000040 | fixed[0] << 19 | 15] if fixed else []   # tbz w15,#bit,+8: the next instruction only with the bit set
     code = []   # words, or (kind, label) for branches resolved below
     if kind: code += [0x5280000e | kind << 5, STRW(14, 9, 0x68)]   # mov w14,#kind; str w14,[x9,#0x68]  the camera in play
     code += [0xbd405130,   # ldr s16,[x9,#0x50]       yaw degrees per count
@@ -200,8 +205,9 @@ def mouse_stub(ctx, site, orig, kind, cam, yaw, pitch, bounds=None, yield_held=F
              ('cbz', 'hold'),
              0x1e220191,   # scvtf s17,w12
              0x1e2201b2,   # scvtf s18,w13
-             0xbd405533,   # ldr s19,[x9,#0x54]       pitch degrees per count
-             LDRS(20, *yaw),
+             0xbd405533]   # ldr s19,[x9,#0x54]       pitch degrees per count
+    if fixed: yaw_at, yaw = yaw, (11, 0); code += [(SUBI if yaw_at[1] < 0 else ADDI)(11, yaw_at[0], abs(yaw_at[1])), *flag, ADDI(11, *fixed[1])]   # x11: the yaw's address
+    code += [LDRS(20, *yaw),
              0x1f10d234,   # fmsub s20,s17,s16,s20    yaw -= dx * sens
              0x52a8668f,   # mov w15,#0x43340000      180.0
              0x1e2701f5,   # fmov s21,w15
@@ -253,7 +259,8 @@ def mouse_camera(ctx):
     mouse_stub(ctx, 0x18e468, ADDI(8, 26, 0x40c), 1, cam=26, yaw=(26, 0x414), pitch=(20, [0x108]), bounds=(0xf8, 0xfc))             # Chase
     mouse_stub(ctx, 0x23be9b4, ADDI(8, 22, 0x40c), 2, cam=22, yaw=(22, 0x414), pitch=(19, [0x15c, 0x154]), bounds=(0x1d4, 0x1d8))   # Aiming
     mouse_stub(ctx, 0x23d756c, LDRS(0, 24, 0x420), 0, cam=24, yaw=(19, 0xbc), pitch=(19, [0xa4]), yield_held=True)                 # LockOn, Target, UltraHand
-    mouse_stub(ctx, 0x23d2dd0, 0xb85bc3a9, 4, cam=23, yaw=(29, -0x44), pitch=(19, [0x50, 0x160]), bounds=(0x1ac, 0x1b0))            # SpecialPower (ldur w9,[x29,#-0x44])
+    mouse_stub(ctx, 0x23d2dd0, 0xb85bc3a9, 4, cam=23, yaw=(29, -0x44), pitch=(19, [0x50, 0x160]), bounds=(0x1ac, 0x1b0),           # SpecialPower (ldur w9,[x29,#-0x44])
+               fixed=(8, (19, 0x54)))                                                                                       # Recall: base yaw node +0x54
     ctx.site(0x23d8e74, struct.pack('<I', B(0x23d8e74, 0x23d7140)).hex())   # UltraHand's calc: b to LockOn's
     start = ctx.here(); ctx.emit(ADRP(9, ctx.here(), ctx.state))
     for w in (0x5280006e,   # mov w14,#3

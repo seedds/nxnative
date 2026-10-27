@@ -91,6 +91,10 @@ class Length(unittest.TestCase):
         for p in sorted((REPO / 'docs/agents').glob('0*.md')):
             self.assertLessEqual(words(p), GUIDE_WORDS, f'{p.relative_to(REPO)}: put findings in docs/reference or the game notes')
 
+    def test_agents_states_no_game_count(self):   # a count there was edited by most commits that touched the file, and conflicted between pull requests; the games table is the count
+        count = re.search(r'\b(\d+|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|one hundred)(?:-\w+)?)\s+(?:\w+\s+)?games\b', (REPO / 'AGENTS.md').read_text(), re.I)
+        self.assertIsNone(count, f'AGENTS.md: {count and count.group(0)!r}: say "the games in the games table" instead of a number')
+
 
 if __name__ == '__main__':
     unittest.main()

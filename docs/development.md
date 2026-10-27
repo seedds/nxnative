@@ -89,6 +89,28 @@ test (an uninstrumented system framework, a test fixture); then it gets an entry
 with its reason. A fix removes any existing entry in the same change: the job
 then checks the repaired code. A change to `ignorelist.txt` rebuilds the ASan tests.
 
+A `coverage` job measures which lines the tests run, and reports only: no
+threshold fails it. It builds the host unit tests and the CPU texture test again
+with clang's source-based coverage (`make coverage`, into `build/cov` and `cov/`;
+`dm/sanitizers/coverage.mk`), and runs the tool tests (`dm/tools/tests`) under
+coverage.py over `dm/tools`, `dm/gfx/tools`, `dm/games` and `scripts`
+(configured in `pyproject.toml`, pinned in `.github/requirements/coverage.txt`).
+`dm/tools/coverage_report.py` turns the reports into the job summary: line
+coverage per area, the 15 largest files and, on a pull request, the changed lines
+the tests run and those they do not. The C areas list only the files a test
+compiles. The raw reports are the job's `coverage` artifact. Locally (about two
+minutes on an Apple-silicon Mac, most of it the tool tests):
+
+```sh
+make -C dm/host/tests GAME=010015100B514000 -j8 coverage
+make -C dm/gfx/tex/tests coverage
+python3 -m pip install -r .github/requirements/coverage.txt   # in a venv
+DM_GAME=010015100B514000 python3 -m coverage run -m unittest discover -s dm/tools/tests
+python3 -m coverage combine && python3 -m coverage json   # writes coverage.json
+python3 dm/tools/coverage_report.py --host dm/host/tests/build/cov/coverage.json \
+    --textures dm/gfx/tex/tests/cov/coverage.json --python coverage.json --base main
+```
+
 A separate iOS job uses XcodeGen and the production project template to compile
 `Launcher.swift`, link the complete app and stage synthetic resources. It uses
 tiny zero-filled embedded modules, needs no game files or keys, and neither

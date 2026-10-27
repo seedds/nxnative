@@ -102,6 +102,65 @@ jobs:
           path: logs
           retention-days: 7
 
+  # Line coverage of the host and CPU texture tests (llvm-cov) and of the tool tests (coverage.py), as a job summary: totals per area, the largest files and, on a pull
+  # request, which of its changed lines the tests run. Report only: no coverage threshold fails it, and a failing test is the other jobs' to report (the runs here keep going,
+  # so the other tests' coverage is kept). The raw reports are uploaded on every run.
+  coverage:
+    name: Coverage (host, CPU texture and tool tests; report only)
+    runs-on: xcode-27
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2   # a pull request checks out its merge commit: HEAD^1 is the base branch it merges onto, the diff coverage's base
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: .github/requirements/coverage.txt
+      - name: Install coverage.py and the packages the tools import
+        run: python -m pip install -r .github/requirements/coverage.txt
+      - name: Host unit tests (dm/host/tests), llvm-cov
+        continue-on-error: true
+        run: |
+          mkdir -p coverage
+          make -C dm/host/tests GAME="$GAME" -j3 coverage 2>&1 | tee coverage/host.log
+          cp dm/host/tests/build/cov/coverage.json coverage/host.json
+      - name: CPU texture layout and deswizzle test (dm/gfx/tex/tests), llvm-cov
+        continue-on-error: true
+        run: |
+          mkdir -p coverage
+          make -C dm/gfx/tex/tests coverage 2>&1 | tee coverage/textures.log
+          cp dm/gfx/tex/tests/cov/coverage.json coverage/textures.json
+      - name: Tool tests (dm/tools/tests), coverage.py
+        continue-on-error: true
+        env:
+          DM_GAME: ${{ env.GAME }}
+        run: |
+          mkdir -p coverage
+          for f in dm/tools/tests/test_*.py; do
+            echo "::group::$f"
+            python -m coverage run -m unittest "$f" 2>&1 | tee -a coverage/python.log || echo "::warning::$f failed (the tool-test job reports it)"
+            echo "::endgroup::"
+          done
+          python -m coverage combine -q
+          python -m coverage json -q -o coverage/python.json
+      - name: Summary (diff coverage against the pull request's base)
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          args=()
+          for a in host textures python; do [ -f "coverage/$a.json" ] && args+=("--$a" "coverage/$a.json"); done
+          if [ "$EVENT" = pull_request ]; then args+=(--base HEAD^1); fi
+          python dm/tools/coverage_report.py "${args[@]}" | tee coverage/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage
+          path: coverage
+          retention-days: 7
+
   tool-tests:
     name: Tool tests
     runs-on: xcode-27

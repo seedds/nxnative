@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copy a game's files to its iPhone app's Documents/romfs.img once, so later installs built with DM_COPY_ROMFS=NO skip them (see docs/development.md, Quick reinstalls).
+# Copy a game's files to its iPhone app's Documents/romfs.img (and its DLC to Documents/aoc, when it has any) once, so later installs built with DM_COPY_ROMFS=NO skip them (see docs/development.md, Quick reinstalls).
 # The files go as one RomFS image (dm/tools/romfs_image.py), packed next to the RomFS folder on first use: one file copies at full speed, where a folder of a few hundred
 # thousand files ran the phone's file service out of open files (Tears of the Kingdom: 304,000). main.m only takes a complete image, so a copy cut off halfway is never used.
 # Usage: push_romfs.sh <device UDID> <bundle ID> <game>_build/xcode/Gen/resources.env [--repack]
@@ -20,4 +20,9 @@ fi
 python3 -I "$(dirname "$0")/../dm/tools/romfs.py" "$img" "${DM_RESOURCE_MARKER:-}"
 echo "identity: $(python3 -I "$(dirname "$0")/../dm/tools/romfs_image.py" --identity "$img")"
 xcrun devicectl device copy to --device "$dev" --domain-type appDataContainer --domain-identifier "$id" --source "$img" --destination Documents/romfs.img -q
+# Add-on content (DLC): the folder of <index>/ RomFS trees, small beside the game; main.m prefers Documents/aoc to <App>/aoc
+if [ -n "${DM_RESOURCE_AOC:-}" ] && [ -d "$DM_RESOURCE_AOC" ]; then
+    xcrun devicectl device copy to --device "$dev" --domain-type appDataContainer --domain-identifier "$id" --source "$DM_RESOURCE_AOC" --destination Documents/aoc -q
+    echo "DLC on the phone: $id"
+fi
 echo "game files on the phone: $id"

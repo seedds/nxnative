@@ -32,7 +32,7 @@ public enum LibraryCardSize: String, CaseIterable, Identifiable {
     }
     
     public static func carouselHeight(scale: Double) -> CGFloat {
-        focusedHeight(scale: scale) * 1.08 + 92
+        focusedHeight(scale: scale) + 120
     }
     
     // Backwards-compatible properties
@@ -54,5 +54,5 @@ public enum LibraryCardSize: String, CaseIterable, Identifiable {
     
     public var unfocusedHeight: CGFloat { unfocusedWidth * Self.portraitRatio }
     public var focusedHeight: CGFloat { focusedWidth * Self.portraitRatio }
-    public var carouselHeight: CGFloat { focusedHeight + 70 }
+    public var carouselHeight: CGFloat { focusedHeight + 120 }
 }

@@ -115,8 +115,10 @@ public struct CompatibleGameRow: View {
                 }
                 .fixedSize(horizontal: true, vertical: false)
             }
-            .frame(height: 46)
+            .frame(minHeight: 48)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity)
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(isRowFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(Color.clear), lineWidth: 2)

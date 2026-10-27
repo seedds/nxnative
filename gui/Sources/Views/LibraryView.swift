@@ -42,7 +42,7 @@ public struct LibraryView: View {
                             
                             // Carousel with Portrait Console Box Art
                             ConsoleGameCarouselView(viewModel: viewModel, games: filteredGames)
-                                .padding(.top, 8)
+                                .padding(.top, 24)
                             
                             // Clean Console Footer Action Hint (A / X to Play, Options for Menu)
                             gamepadFooterBar
@@ -55,7 +55,7 @@ public struct LibraryView: View {
                             VStack(spacing: 24) {
                                 // 1. Console Carousel (Portrait Official Cover Art on Focus)
                                 ConsoleGameCarouselView(viewModel: viewModel, games: filteredGames)
-                                    .padding(.top, 16)
+                                    .padding(.top, 28)
                                 
                                 // 2. Focused Game Detail Deck (Play, DLC, Sizes, Saves, Settings)
                                 if let selected = currentSelectedGame {

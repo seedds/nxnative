@@ -29,7 +29,7 @@ public struct CompatibleGameGridCard: View {
                 ZStack(alignment: .topTrailing) {
                     coverArtView
                         .frame(maxWidth: .infinity)
-                        .frame(height: 250)
+                        .frame(height: 240)
                         .clipped()
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     
@@ -115,6 +115,7 @@ public struct CompatibleGameGridCard: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .top)
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(isCardFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(Color.clear), lineWidth: 2)
@@ -126,9 +127,28 @@ public struct CompatibleGameGridCard: View {
     @ViewBuilder
     private var coverArtView: some View {
         if let localImg = GameCoverService.shared.coverImage(titleId: item.titleId, gameName: item.title) {
-            Image(nsImage: localImg)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
+            let isPortrait = localImg.size.height >= localImg.size.width * 1.2
+            if isPortrait {
+                Image(nsImage: localImg)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
+                    .clipped()
+            } else {
+                ZStack {
+                    Image(nsImage: localImg)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .blur(radius: 20)
+                        .opacity(0.35)
+                    Image(nsImage: localImg)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .padding(8)
+                }
+                .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
+                .clipped()
+            }
         } else if let url = item.coverArtUrl {
             AsyncImage(url: url) { phase in
                 switch phase {
@@ -136,18 +156,22 @@ public struct CompatibleGameGridCard: View {
                     image
                         .resizable()
                         .aspectRatio(contentMode: .fill)
+                        .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
+                        .clipped()
                 case .empty:
                     ZStack {
                         NXTheme.glassSurfaceElevated
-                        ProgressView()
-                            .controlSize(.small)
+                        ProgressView().controlSize(.small)
                     }
+                    .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
                 default:
                     fallbackIcon
+                        .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
                 }
             }
         } else {
             fallbackIcon
+                .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
         }
     }
     

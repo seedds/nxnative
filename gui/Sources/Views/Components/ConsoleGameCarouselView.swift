@@ -35,7 +35,7 @@ public struct ConsoleGameCarouselView: View {
                     }
                 }
                 .padding(.horizontal, 40)
-                .padding(.top, 28)
+                .padding(.top, 36)
                 .padding(.bottom, 20)
             }
             .onChange(of: viewModel.focusedGameIndex) { newIndex in
@@ -56,7 +56,7 @@ public struct ConsoleGameCarouselView: View {
             ? LibraryCardSize.focusedHeight(scale: viewModel.libraryCardScale)
             : LibraryCardSize.unfocusedHeight(scale: viewModel.libraryCardScale)
         let cornerRad: CGFloat = isFocused ? 20 : 16
-        let isSquareIcon = abs(cardImage.size.width - cardImage.size.height) < 10
+        let isPortrait = cardImage.size.height >= cardImage.size.width * 1.2
         
         return VStack(spacing: 12) {
             ZStack(alignment: .top) {
@@ -70,8 +70,13 @@ public struct ConsoleGameCarouselView: View {
                 
                 // Game Cover Portrait Artwork (Official Switch Box Art - 1 : 1.60 ratio)
                 Group {
-                    if isSquareIcon {
-                        // Styled portrait box container for fallback icons so they never appear cropped
+                    if isPortrait {
+                        // Full-bleed official portrait retail cover art
+                        Image(nsImage: cardImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } else {
+                        // Styled container for landscape/square art so no art is ever cropped
                         ZStack {
                             RoundedRectangle(cornerRadius: cornerRad, style: .continuous)
                                 .fill(
@@ -84,15 +89,16 @@ public struct ConsoleGameCarouselView: View {
                             
                             Image(nsImage: cardImage)
                                 .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .blur(radius: 20)
+                                .opacity(0.35)
+                            
+                            Image(nsImage: cardImage)
+                                .resizable()
                                 .aspectRatio(contentMode: .fit)
-                                .frame(width: cardWidth * 0.72, height: cardWidth * 0.72)
-                                .shadow(color: Color.black.opacity(0.55), radius: 10, x: 0, y: 5)
+                                .padding(10)
+                                .shadow(color: Color.black.opacity(0.6), radius: 10, x: 0, y: 5)
                         }
-                    } else {
-                        // Full-bleed official portrait cover art
-                        Image(nsImage: cardImage)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
                     }
                 }
                 .frame(width: cardWidth, height: cardHeight)
@@ -152,8 +158,6 @@ public struct ConsoleGameCarouselView: View {
                 }
                 .frame(width: cardWidth, height: cardHeight)
             }
-            .scaleEffect(isFocused ? 1.04 : 1.0)
-            .animation(.spring(response: 0.28, dampingFraction: 0.72), value: isFocused)
             
             // Game Name (Centered, high contrast, prominent)
             VStack(spacing: 3) {

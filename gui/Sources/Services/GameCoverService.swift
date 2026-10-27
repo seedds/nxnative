@@ -119,9 +119,10 @@ public final class GameCoverService: ObservableObject {
     }
 
     private func findLocalRepoCover(forGameName name: String, titleId: String?) -> URL? {
-        let slugs = generateSlugs(from: name)
         let searchDirectories = [
+            "/Volumes/SSD FN501 PRO/Emulations/NativePort/nxnative/docs/images/covers",
             "/Volumes/SSD FN501 PRO/Emulations/NativePort/nxnative/docs/images",
+            Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/images/covers").path,
             Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/images").path,
             Bundle.main.resourcePath ?? ""
         ]
@@ -130,6 +131,14 @@ public final class GameCoverService: ObservableObject {
             let dirURL = URL(fileURLWithPath: dirPath)
             guard fileManager.fileExists(atPath: dirURL.path) else { continue }
 
+            if let tid = titleId, !tid.isEmpty {
+                for ext in ["jpg", "png", "jpeg"] {
+                    let byId = dirURL.appendingPathComponent("\(tid.uppercased()).\(ext)")
+                    if fileManager.fileExists(atPath: byId.path) { return byId }
+                }
+            }
+
+            let slugs = generateSlugs(from: name)
             for slug in slugs {
                 for ext in ["jpg", "png", "jpeg"] {
                     let candidate = dirURL.appendingPathComponent("\(slug).\(ext)")
@@ -144,7 +153,6 @@ public final class GameCoverService: ObservableObject {
 
     private func generateSlugs(from name: String) -> [String] {
         var results = [String]()
-        
         var base = name.lowercased()
         base = base.replacingOccurrences(of: "the legend of zelda", with: "zelda")
         base = base.replacingOccurrences(of: "legend of zelda", with: "zelda")
@@ -160,7 +168,6 @@ public final class GameCoverService: ObservableObject {
             .joined(separator: "-")
         results.append(slug1)
         
-        // Literal original slug without zelda transformation
         let slug2 = name.lowercased()
             .replacingOccurrences(of: "’", with: "")
             .replacingOccurrences(of: "'", with: "")
@@ -168,10 +175,7 @@ public final class GameCoverService: ObservableObject {
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
             .joined(separator: "-")
-        if slug2 != slug1 {
-            results.append(slug2)
-        }
-        
+        if slug2 != slug1 { results.append(slug2) }
         return results
     }
 
@@ -183,44 +187,50 @@ public final class GameCoverService: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
             defer {
-                DispatchQueue.main.async {
-                    self.inFlightDownloads.remove(searchKey)
-                }
+                DispatchQueue.main.async { self.inFlightDownloads.remove(searchKey) }
             }
 
             var candidates: [URL] = []
-            let slugs = self.generateSlugs(from: gameName)
             
-            // 1. Raw GitHub repository images
+            // 1. Known GameTDB IDs
+            let gameIdMap: [String: String] = [
+                "0100F2C0115B6000": "AXN7A", "01007EF00011E000": "AAAAA",
+                "01006BB00C6F0000": "AR3NA", "01002B00111A2000": "AXEAA",
+                "0100A9D01C446000": "BD9VA", "01006C300E9F0000": "ALC7A",
+                "010028600EBDA000": "AUZPA", "0100000000010000": "AAACA",
+                "010015100B514000": "AQMXA", "0100152000022000": "AABPA",
+                "01006F8002326000": "ACBAA", "010093801237C000": "AYL8A",
+                "0100CD801CE5E000": "BEYKA", "01004D300C5AE000": "ARZGA",
+                "0100ECD018EBE000": "A9QWA", "01005CA01580E000": "AXU7A",
+                "010055D009F78000": "ANVYA", "010069401ADB8000": "AQ36A",
+                "01003FC01670C000": "AU9HA", "01004A4010FEA000": "AWGKA",
+                "0100535012974000": "AUY4A", "0100B04011742000": "AXSEA",
+                "010056B015FE8000": "A49WA", "0100C1F0051B6000": "AFWTA",
+                "0100DCA0064A6000": "AG3JA", "0100000011D90000": "AX7QA",
+                "0100A3D008C5C000": "ALZPA", "010014E00DB56000": "AY6HA"
+            ]
+
+            if let tid = titleId, let gid = gameIdMap[tid] {
+                for sub in ["coverHQ", "coverfullHQ", "coverM", "cover"] {
+                    for reg in ["US", "EN", "JA", "CA"] {
+                        if let u = URL(string: "https://art.gametdb.com/switch/\(sub)/\(reg)/\(gid).jpg") {
+                            candidates.append(u)
+                        }
+                    }
+                }
+            }
+            
+            // 2. Raw GitHub repository images
+            let slugs = self.generateSlugs(from: gameName)
             for slug in slugs {
                 if let u = URL(string: "https://raw.githubusercontent.com/seedds/nxnative/main/docs/images/\(slug).jpg") {
                     candidates.append(u)
                 }
-                if let u = URL(string: "https://raw.githubusercontent.com/seedds/nxnative/main/docs/images/\(slug).png") {
-                    candidates.append(u)
-                }
-            }
-
-            // 2. Known GameTDB IDs
-            let gameIdMap: [String: String] = [
-                "0100F2C0115B6000": "AXN7A", // Zelda: Tears of the Kingdom
-                "01007EF00011E000": "AAAAA", // Zelda: Breath of the Wild
-                "0100DCA0064A6000": "ALWHA", // Super Mario 3D World + Bowser's Fury
-                "0100000000010000": "AAACA", // Super Mario Odyssey
-                "01002B00111A2000": "A3N9A", // Zelda: Link's Awakening
-                "01006BB00C6F0000": "A3N9A", // Zelda: Link's Awakening (Revision)
-                "01006F8002326000": "ANPHA", // Animal Crossing: New Horizons
-                "0100152000022000": "AABPA"  // Mario Kart 8 Deluxe
-            ]
-
-            if let tid = titleId, let gid = gameIdMap[tid] {
-                if let u1 = URL(string: "https://art.gametdb.com/switch/coverHQ/US/\(gid).jpg") { candidates.append(u1) }
-                if let u2 = URL(string: "https://art.gametdb.com/switch/coverM/US/\(gid).jpg") { candidates.append(u2) }
             }
 
             // 3. Tinfoil CDN
             if let tid = titleId, tid.count >= 16 {
-                if let u = URL(string: "https://tinfoil.media/ti/\(tid)/256/256/") {
+                if let u = URL(string: "https://tinfoil.media/ti/\(tid)/512/512/") {
                     candidates.append(u)
                 }
             }

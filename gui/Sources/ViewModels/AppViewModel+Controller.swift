@@ -44,21 +44,20 @@ extension AppViewModel {
             
         case .confirm:
             handleConfirm()
-            
         case .cancel:
             handleCancel()
-            
         case .secondaryAction:
             handleSecondaryAction()
-            
         case .contextAction:
             handleContextAction()
-            
         case .menu:
             SoundEffectService.shared.play(.click)
             if isGameActionMenuPresented { isGameActionMenuPresented = false }
-            selectedTab = 4 // Settings
-            
+            if selectedTab == 1, let game = currentFocusedGame {
+                gameForSettingsSheet = game
+            } else {
+                selectedTab = 4 // Settings
+            }
         case .options:
             handleOptionsAction()
         }

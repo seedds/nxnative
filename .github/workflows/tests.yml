@@ -73,6 +73,31 @@ jobs:
           path: logs
           retention-days: 7
 
+  # A ratchet: today's findings are listed in dm/sanitizers (ignorelist.txt for ASan and UBSan, tsan.supp for TSan), each with its reason, so the job fails only on a new one.
+  # A job of its own, so its time shows beside the plain tests'.
+  sanitizers:
+    name: Sanitizers (ASan, UBSan and TSan over the host and CPU texture tests)
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: ASan and UBSan, every host unit test (dm/host/tests)
+        run: |
+          mkdir -p logs
+          make -C dm/host/tests GAME="$GAME" -j3 asan 2>&1 | tee logs/host-asan.log
+      - name: ASan and UBSan, CPU texture layout and deswizzle test (dm/gfx/tex/tests)
+        run: make -C dm/gfx/tex/tests asan 2>&1 | tee logs/texture-asan.log
+      - name: ThreadSanitizer, the host tests that start threads (dm/host/tests)
+        run: make -C dm/host/tests GAME="$GAME" -j3 tsan-threads 2>&1 | tee logs/host-tsan-threads.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: logs-sanitizers
+          path: logs
+          retention-days: 7
+
   tool-tests:
     name: Tool tests
     runs-on: macos-26

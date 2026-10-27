@@ -57,6 +57,26 @@ It also runs the CPU texture layout/deswizzle test (`dm/gfx/tex/tests/t_tex`)
 and the host's `tsan` and `memory-tsan` targets for audio and memory races.
 The texture format test (`t_fmt_mtl`) creates Metal textures and stays local.
 
+A separate `sanitizers` job builds the same tests again with sanitizers, each
+build in a folder of its own (`build/asan`, `build/tsan`, `asan/`): every host
+unit test and the CPU texture test under AddressSanitizer and
+UndefinedBehaviorSanitizer (`asan`), and the host tests that start threads under
+ThreadSanitizer (`tsan-threads`). It is a ratchet too: today's findings are
+listed in `dm/sanitizers/`, ASan and UBSan in `ignorelist.txt` (compile time),
+TSan in `tsan.supp` (run time), each with where it is, what overflows or races
+and why it is not fixed yet, so the job fails only on a new finding. To run it
+locally (about a minute on an Apple-silicon Mac):
+
+```sh
+make -C dm/host/tests GAME=010015100B514000 -j8 asan tsan-threads
+make -C dm/gfx/tex/tests asan
+```
+
+A new finding is fixed, not listed, unless its cause lies outside the code under
+test (an uninstrumented system framework, a test fixture); then it gets an entry
+with its reason. A fix removes its entry in the same change: the job then shows
+that the finding is gone. A change to `ignorelist.txt` rebuilds the ASan tests.
+
 A separate iOS job uses XcodeGen and the production project template to compile
 `Launcher.swift`, link the complete app and stage synthetic resources. It uses
 tiny zero-filled embedded modules, needs no game files or keys, and neither

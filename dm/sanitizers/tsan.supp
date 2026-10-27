@@ -1,0 +1,14 @@
+# ThreadSanitizer suppressions (TSAN_OPTIONS=suppressions=...), used by the tsan-threads target of dm/host/tests.
+# Each entry is a race in the code that is not fixed yet, with its reason; remove the entry with the fix.
+# Not a finding: aout.pos (hle_audio.c:95, :97, :106 in pull) passes from the AudioUnit's render thread to the silent sink (null_sink, started by dm_audio_suspend) or to the closing
+#   thread (au_release_pending, hle_audio.c:375) across AudioOutputUnitStop, which returns after the render callback; TSan cannot see that wait (CoreAudio is not instrumented). t_audio
+race:^null_sink$
+race:^au_release_pending$
+# Issue #410. hle_audio.c:210 (au_create) writes a->au on its own thread (au_open) after au_open_at has published the output in g_aos (:334); the AudioUnit watchdog reads a->au under g_aos_lock
+#   (au_watchdog, :284) meanwhile. A second output opened while the watchdog runs (t_audio, about one run in two). Fix: create the AudioUnit before the output is published, or set a->au under the lock
+race:^au_create$
+# Not a finding: t_condvar ends with _exit and does not join its waiter and reader (in the old-order variant the waiter is never woken)
+thread:t_condvar.c
+# Issue #411. hle_thread.c:293: thread_main sets t->host_work (and mport, qos) without G after CreateThread has linked the thread into g_all (:842), while thr_runnable (:130) reads it under G from
+#   dm_yield_to_core_peers (:164) once the thread is started. t_notify_sched. Fix: set them under G before the thread waits for its start (:295), or make host_work atomic
+race:^thr_runnable$

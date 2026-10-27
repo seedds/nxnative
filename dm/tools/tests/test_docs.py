@@ -1,8 +1,9 @@
 """The repository's own Markdown stays navigable: every relative link and #anchor resolves (GitHub's heading anchors), every game profile has its note
 (dm/games/<id>/README.md) and a row in the games table of dm/games/README.md, the symptom index (docs/agents/symptoms.md) is the one dm/tools/docs_symptoms.py writes from
-docs/reference, the patch index (docs/agents/game-patches.md) is the one dm/tools/docs_patches.py writes from the patch files, host tables and profiles, and the entry points stay short: AGENTS.md at most 1,500 words, each numbered guide in docs/agents at most 6,000 (a new finding goes into a game note or a
+docs/reference (checked only with DM_DOCS_INDEX_STRICT=1; CI regenerates it on main), the patch index (docs/agents/game-patches.md) is the one dm/tools/docs_patches.py writes from the patch files, host tables and profiles, and the entry points stay short: AGENTS.md at most 1,500 words, each numbered guide in docs/agents at most 6,000 (a new finding goes into a game note or a
 reference, not into these), README's games gallery is the one dm/tools/docs_gallery.py writes from docs/images/gallery.tsv, and no reference entry has a bullet twice (the guard of .gitattributes' union merge). Third-party trees are left out. No game files needed."""
 from pathlib import Path
+import os
 import re
 import subprocess
 import sys
@@ -84,6 +85,15 @@ class GameNotes(unittest.TestCase):
 
 
 class SymptomIndex(unittest.TestCase):
+    # CI regenerates the index on main (.github/workflows/docs-index.yml), so a pull request may leave it stale, which also keeps two pull requests from conflicting in it.
+    # That workflow sets DM_DOCS_INDEX_STRICT=1 to check the index it has just written; run with it locally to see whether yours is current. Every other check of the index
+    # (its links reach real entries with a Symptom bullet) is the test above and always runs
+    def test_index_lines_point_to_entries_with_a_symptom(self):
+        known = {(p.name, a) for p in docs_symptoms.ref_files() for _, a, _ in docs_symptoms.entries(p)}
+        bad = [m.group(0) for m in re.finditer(r'\.\./reference/([a-z-]+\.md)#(\S+?)\)', docs_symptoms.OUT.read_text()) if (m.group(1), m.group(2)) not in known]
+        self.assertEqual(bad, [], 'docs/agents/symptoms.md links to an entry that is gone or has no Symptom bullet (CI regenerates the index on main; DM_DOCS_INDEX_STRICT=1 checks all of it)')
+
+    @unittest.skipUnless(os.environ.get('DM_DOCS_INDEX_STRICT') == '1', 'a stale index is regenerated on main; DM_DOCS_INDEX_STRICT=1 checks it')
     def test_index_is_current(self):
         self.assertEqual(docs_symptoms.OUT.read_text(), docs_symptoms.index(), 'docs/agents/symptoms.md is out of date: run dm/tools/docs_symptoms.py')
 

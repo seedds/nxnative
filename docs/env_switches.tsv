@@ -20,6 +20,7 @@ DM_DBG_AU_FRAMES	diagnostic	`=<frames>` asks the Mac's Core Audio output for tha
 DM_DETCLOCK	switch	`=<step ns>`: from the first present on, the guest clock advances a fixed step per present instead of following the wall clock, and the random source becomes a fixed-seed stream (replay and test runs)
 DM_DETCLOCK_PACE	switch	`=1` with `DM_DETCLOCK`: each frame takes at least one clock step of wall time, so background loading keeps up with the fixed clock (used by the screenshot gate)
 DM_DISPLAY_NAME	switch	Overrides the iOS app's name in `build_ipa.sh` (default the game name in the base NSP's control data)
+DM_DOCS_INDEX_STRICT	test	`=1`: test_docs also requires docs/agents/symptoms.md to equal a freshly generated index (set by .github/workflows/docs-index.yml on main)
 DM_DYNAMIC_RESOLUTION	player	`1` lets NieR:Automata 1.0.3's own dynamic resolution scale between 70 and 100 %, `0` (default) keeps full resolution; only on the builds whose patches.py names the DYNAMIC_RESOLUTION capability (`hle_fpslock.c` `k_nier_dr`). The launcher's Dynamic resolution
 DM_ENTITLEMENTS	path	`=<plist>` gives a prepared Xcode project another entitlements file instead of the Increased Memory Limit one, and the ad-hoc signature of the unsigned IPA's executable carries them; empty means no entitlements
 DM_ENV_FILE	path	`=<file>` makes `build_ipa.sh` bake its `KEY=VALUE` lines into the app as `dm/env.txt`, applied at boot; `Documents/env.txt` overrides them

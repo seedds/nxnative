@@ -91,6 +91,65 @@ class Gallery(unittest.TestCase):
     def test_gallery_is_current(self):
         self.assertEqual(docs_gallery.OUT.read_text(encoding='utf-8'), docs_gallery.readme(), 'README.md: the gallery is out of date: run dm/tools/docs_gallery.py')
 
+    def test_plain_text_captions_and_unknown_size(self):
+        image = docs_gallery.rows()[0][0]
+        with tempfile.TemporaryDirectory() as folder:
+            table = Path(folder) / 'gallery.tsv'
+            table.write_text(f'{image}\tA & B: "Adventure" <2>\n', encoding='utf-8')
+            with patch.object(docs_gallery, 'TABLE', table):
+                text = docs_gallery.gallery()
+                self.assertIn('alt="A &amp; B: &quot;Adventure&quot; &lt;2&gt;"', text)
+                self.assertIn('<br>A &amp; B: &quot;Adventure&quot; &lt;2&gt;</td>', text)
+                self.assertNotIn('<sub>', text)
+            self.assertIn('<sub>~2 GB &amp; more</sub>', docs_gallery.cell(image, 'Game', '~2 GB & more', ''))
+
+    def test_reversed_markers_fail_before_writing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder) / 'README.md'
+            text = f'{docs_gallery.END}\nKeep this text\n{docs_gallery.BEGIN}\n'
+            out.write_text(text, encoding='utf-8')
+            with patch.object(docs_gallery, 'OUT', out), self.assertRaisesRegex(SystemExit, 'end marker must follow'):
+                docs_gallery.readme()
+            self.assertEqual(out.read_text(encoding='utf-8'), text)
+
+    def test_concurrent_additions_merge_and_regenerate(self):
+        games = docs_gallery.rows()[:5]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            table, out = root / 'docs/images/gallery.tsv', root / 'README.md'
+            table.parent.mkdir(parents=True)
+            (root / '.gitattributes').write_bytes((REPO / '.gitattributes').read_bytes())
+
+            def git(*args, check=True):
+                return subprocess.run(['git', '-c', 'user.name=seedds', '-c', 'user.email=seedds@gmail.com',
+                                       '-c', 'commit.gpgSign=false', '-c', 'core.hooksPath=/dev/null', *args],
+                                      cwd=root, check=check, capture_output=True, text=True)
+
+            def write(rows):
+                table.write_text(''.join('\t'.join(row).rstrip('\t') + '\n' for row in rows), encoding='utf-8')
+                out.write_text(f'Before\n{docs_gallery.BEGIN}\n{docs_gallery.END}\nAfter\n', encoding='utf-8')
+                with patch.object(docs_gallery, 'TABLE', table), patch.object(docs_gallery, 'OUT', out):
+                    out.write_text(docs_gallery.readme(), encoding='utf-8')
+                git('add', '.')
+                git('commit', '-m', 'Gallery fixture')
+
+            git('init', '-b', 'base')
+            write(games[:3])
+            git('switch', '-c', 'ours')
+            write(games[:4])
+            git('switch', '-c', 'theirs', 'base')
+            write(games[:3] + games[4:])
+            self.assertEqual(git('merge', '--no-commit', '--no-ff', 'ours', check=False).returncode, 1)
+            self.assertIn('<<<<<<<', out.read_text(encoding='utf-8'))
+            self.assertEqual(git('diff', '--name-only', '--diff-filter=U').stdout.strip(), 'README.md')
+            with patch.object(docs_gallery, 'TABLE', table), patch.object(docs_gallery, 'OUT', out):
+                self.assertCountEqual(docs_gallery.rows(), games)
+                text = docs_gallery.readme()
+            self.assertNotIn('<<<<<<<', text)
+            self.assertTrue(text.startswith(f'Before\n{docs_gallery.BEGIN}\n'))
+            self.assertTrue(text.endswith(f'\n{docs_gallery.END}\nAfter\n'))
+            self.assertEqual(text.count('<img '), len(games))
+
     def test_union_merge_rejects_conflicting_game_rows(self):
         first, second = docs_gallery.rows()[:2]
         # Concurrent caption/screenshot and size edits must require a manual resolution even when the names differ.

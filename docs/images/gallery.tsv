@@ -1,5 +1,5 @@
 # The games gallery in README.md, in the order it shows them (dm/tools/docs_gallery.py writes it from this table). A new game: its screenshot in docs/images and a row here,
-# usually at the end. Columns: image, name (caption and alt text), note (the IPA size, then " · " and a remark if any), and optionally the title ID that links the name to its note.
+# usually at the end. Columns: image, name (caption and alt text), optional note (IPA size, then " · " and a remark), and optionally the title ID that links the name to its note.
 mario-kart-8-deluxe.jpg	Mario Kart 8 Deluxe	~11.9 GB · no Mii heads
 mario-vs-donkey-kong.jpg	Mario vs. Donkey Kong	~1.6 GB
 paper-mario-the-thousand-year-door.jpg	Paper Mario: The Thousand-Year Door	~5 GB · 60 fps with 1.0.1
@@ -80,3 +80,4 @@ donkey-kong-country-returns-hd.png	Donkey Kong Country Returns HD	~11.6 GB
 mario-rabbids-sparks-of-hope.jpg	Mario + Rabbids Sparks of Hope	~9.8 GB
 xenoblade-chronicles-2.jpg	Xenoblade Chronicles 2	~17.1 GB
 xenoblade-chronicles-3.jpg	Xenoblade Chronicles 3	~19.2 GB
+final-fantasy-crystal-chronicles.jpg	FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition

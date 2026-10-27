@@ -81,6 +81,8 @@ dm/gfx/tools/c1_guard.py	shader:stage:*	the c1 guard table
 dm/gfx/tools/cb_extent.py	shader:stage:*	the uniform read extents
 dm/gfx/tools/shader_split.py	shader:stage:*	the shader tables (after a split)
 dm/gfx/tools/unityfs.py	shader:stage:*	the Unity serialized shader reader (after a split)
+dm/gfx/tools/bsa.py	shader:stage:*	BSA shader member extraction (used by shader_split.py)
+dm/tools/check_skyrim_unlocks.py	-	offline verification of Skyrim's build-gated unlock cuts
 dm/tools/patch_nso.py	*:*	the rewriter: every game's code
 dm/tools/nso_*.py	*:*	the rewriter: every game's code
 dm/tools/sdk_patches.py	*:*	the SDK modules' patches (by build ID)

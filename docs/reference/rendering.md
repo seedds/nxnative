@@ -427,6 +427,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** **Open.** Neither setter has been implemented. The opening indoor scene renders and accepts input, but the visual contribution of the missing coverage state has not been isolated. The diagnostic remains visible.
 - **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#open) (1.0.0, the first playable bedroom).
 
+### Raw depth/stencil storage written as a buffer
+
+- **Symptom:** indoor lighting switches sharply between bright and dark, including while the camera stands still.
+- **Cause:** a compute shader writes stencil initialization through a storage buffer alias of a Tegra D24S8 texture. The host executes those writes into the NVN memory-pool buffer, while rendering and stencil sampling use a separate private Metal depth/stencil texture. The sampled stencil therefore retains UI values from the previous frame. This is distinct from selecting the wrong stencil-mode view: the `X32_Stencil8` view itself is correct.
+- **Fix / limitation:** generic raw depth/stencil alias coherence remains open; Metal does not expose the Tegra allocation's native layout. Skyrim's build-gated mode-7 scene-initializer cut also clears stencil through the existing NVN clear, restoring the upper bits its shadow classifiers require. Ordinary depth-only clears, the raw dispatch, UI and shadows remain enabled. The lower-bit patterned initialization is not reproduced in the Metal plane; see the game note for evidence and coverage.
+- **Found on:** [The Elder Scrolls V: Skyrim](../../dm/games/01000A10041EA000/README.md#indoor-stencil-initialization), compute key `a76fe13a8630d619`, shadow-mask key `f83614ab6954bec4`.
+
 ## Vertex input and draws
 
 ### Integer vertex inputs
@@ -701,6 +708,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** review of the measurement tools for [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md); reproduced with synthetic counters and completion events, without game execution. `t_gpuprof` checks consecutive and sparse frame selection, completion ordering and heap ownership; it runs in CPU CI.
 
 ## Conditional rendering and queries
+
+### Timestamp report completion counter
+
+- **Symptom:** the first frame presents, then the render thread keeps polling a timestamp report while the other game threads wait.
+- **Cause:** the host wrote the timestamp into both fields of `NVNcounterData` unless `render_cond` was enabled. A timestamp report has a zero counter field and a separate timestamp field. Creation Engine polls the first field for zero to observe completion, so the duplicated time never satisfies its wait.
+- **Fix:** completed reports write zero to the counter field and the time to the timestamp field, independently of conditional rendering. Samples-passed reports keep their accumulated count. Regression checks cover both TIMESTAMP and TIMESTAMP_TOP with `render_cond` disabled.
+- **Found on:** [Skyrim](../../dm/games/01000A10041EA000/README.md#graphics-completion), render-thread wait at `main+0xb5e808`.
 
 ### Conditional rendering evaluated at replay
 

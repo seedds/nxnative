@@ -57,11 +57,43 @@ static void sdk_close(void *obj, void *state) {
     assert(((uint8_t *)obj)[SDK_WORK - 1] == 0x5a);   // storage is alive through SDK teardown
     closes++;
 }
+// A pre-SdkMutex SDK: Update adds its OS-mutex offset to this before calling
+// LockMutex. The bytecode is inspected, never executed.
+static uint32_t old_update[24];
+static uint32_t old_impl[24];
+static void *expected_sys;
+static uint8_t empty_commands[8];
+static void *expected_mutex;
+static int held, old_locks, old_unlocks, old_processes, sdk_mutex_queries;
+static void old_lock(void *mutex) { assert(mutex == expected_mutex && !held); held = 1; old_locks++; }
+static void old_unlock(void *mutex) { assert(mutex == expected_mutex && held); held = 0; old_unlocks++; }
+static int old_manual_cpu(void *sys) { assert(sys == expected_sys); return 1; }
+static uint8_t *old_command_buffer(void *sys) { (void)sys; return empty_commands; }
+static size_t old_command_size(void *sys) { (void)sys; return sizeof empty_commands; }
+static size_t old_generate(void *sys, void *commands, size_t size) {
+    (void)sys; assert(held && commands == empty_commands && size == sizeof empty_commands); return 0;
+}
+static void old_time_max(void *proc, uint32_t value) { (void)proc; assert(value == UINT32_MAX); }
+static void old_setup(void *proc, const void *commands, size_t size) { (void)proc; assert(!held && commands == empty_commands && size == 0); }
+static void old_process(void *proc) { (void)proc; assert(!held); old_processes++; }
 void *guest_sym(const char *name) {
     if (!strcmp(name, hle_force_h_ar_WorkSize.name)) return sdk_size;
     if (!strcmp(name, hle_force_h_ar_Open.name)) return sdk_open_ev;
     if (!strcmp(name, hle_force_h_ar_Open0.name)) return sdk_open;
     if (!strcmp(name, hle_force_h_ar_Close.name)) return sdk_close;
+    if (!strcmp(name, hle_force_h_ar_ImplExec.name)) return old_impl;
+    if (!strcmp(name, "_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm")) return old_update;
+    if (!strcmp(name, "_ZN2nn2os9LockMutexEPNS0_9MutexTypeE")) return old_lock;
+    if (!strcmp(name, "_ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE")) return old_unlock;
+    if (!strcmp(name, "_ZN2nn2os12SdkMutexType4LockEv")) { sdk_mutex_queries++; return NULL; }
+    if (!strcmp(name, "_ZNK2nn5audio6server17AudioRenderSystem16GetExecutionModeEv")) return old_manual_cpu;
+    if (!strcmp(name, "_ZNK2nn5audio6server17AudioRenderSystem18GetRenderingDeviceEv")) return old_manual_cpu;
+    if (!strcmp(name, "_ZNK2nn5audio6server17AudioRenderSystem26GetCommandBufferWorkBufferEv")) return old_command_buffer;
+    if (!strcmp(name, "_ZNK2nn5audio6server17AudioRenderSystem30GetCommandBufferWorkBufferSizeEv")) return old_command_size;
+    if (!strcmp(name, "_ZN2nn5audio6server17AudioRenderSystem15GenerateCommandEPvm")) return old_generate;
+    if (!strcmp(name, "_ZN2nn5audio3dsp20CommandListProcessor17SetProcessTimeMaxEj")) return old_time_max;
+    if (!strcmp(name, "_ZN2nn5audio3dsp20CommandListProcessor5SetupEPKvm")) return old_setup;
+    if (!strcmp(name, "_ZN2nn5audio3dsp20CommandListProcessor7ProcessEv")) return old_process;
     if (!strcmp(name, "_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE")) return sdk_destroy_event;
     return NULL;
 }
@@ -165,6 +197,77 @@ int main(void) {
         h_ar_Close(handle[0], handle[1]);
     }
     free(work);
+    uint8_t old_sys[0x300] = {0};
+    expected_sys = old_sys;
+    expected_mutex = old_sys + 0x1f8;
+    old_update[0] = 0x9107e000;   // add x0, x0, #0x1f8
+    intptr_t branch = (intptr_t)(void *)old_lock - (intptr_t)&old_update[1];
+    assert(!(branch & 3) && branch >= -(1 << 27) && branch < (1 << 27));
+    old_update[1] = 0x94000000u | ((uint32_t)(branch / 4) & 0x3ffffffu);
+    assert(render_once(old_sys, NULL, NULL) == RES_OK);
+    assert(old_locks == 1 && old_unlocks == 1 && old_processes == 1 && !held);
+    assert(sdk_mutex_queries == 1);   // optional detection only; never required
+    old_impl[0] = 0x91014013;   // add x19, x0, #0x50
+    old_impl[1] = 0xaa1303e0;   // mov x0, x19
+    branch = (intptr_t)(void *)old_manual_cpu - (intptr_t)&old_impl[2];
+    assert(!(branch & 3) && branch >= -(1 << 27) && branch < (1 << 27));
+    old_impl[2] = 0x94000000u | ((uint32_t)(branch / 4) & 0x3ffffffu);
+    assert(impl_system_offset() == 0x50);
+    old_impl[0] = 0x91018013;   // same call with the later +0x60 member
+    assert(impl_system_offset() == 0x60);
+    old_impl[0] = 0x91014013;
+    uint32_t mode_call = old_impl[2];
+    branch = (intptr_t)(void *)old_process - (intptr_t)&old_impl[2];
+    assert(!(branch & 3) && branch >= -(1 << 27) && branch < (1 << 27));
+    old_impl[2] = 0x94000000u | ((uint32_t)(branch / 4) & 0x3ffffffu);
+    assert(impl_system_offset() == 0x60);   // an unrelated call proves no offset
+    old_impl[2] = mode_call;
+    uint32_t saved_impl[24]; memcpy(saved_impl, old_impl, sizeof old_impl);
+    old_impl[0] = 0x91400413;   // add x19, x0, #1, lsl #12
+    assert(impl_system_offset() == 0x1000);
+    old_impl[0] = saved_impl[0]; old_impl[1] = 0xd2800013;   // mov x19, #0: invalidates the derived pointer
+    old_impl[2] = saved_impl[1];
+    branch = (intptr_t)(void *)old_manual_cpu - (intptr_t)&old_impl[3];
+    old_impl[3] = 0x94000000u | ((uint32_t)(branch / 4) & 0x3ffffffu);
+    assert(impl_system_offset() == 0x60);
+    old_impl[1] = 0xb4000040;   // cbz x0, +8: do not infer across control flow
+    assert(impl_system_offset() == 0x60);
+    old_impl[1] = 0x2a1303f3;   // mov w19, w19: truncates the pointer before it reaches x0
+    assert(impl_system_offset() == 0x60);
+    // Skyrim's complete straight-line prologue, including stack saves and
+    // unrelated MOVZ/MOVK instructions, still recovers the member.
+    uint32_t prologue[] = {0xf81d0ff5, 0xa9014ff4, 0xa9027bfd, 0x910083fd,
+                          0x91014013, 0x52a00094, 0xaa1303e0, 0x72805334};
+    memcpy(old_impl, prologue, sizeof prologue);
+    branch = (intptr_t)(void *)old_manual_cpu - (intptr_t)&old_impl[8];
+    old_impl[8] = 0x94000000u | ((uint32_t)(branch / 4) & 0x3ffffffu);
+    assert(impl_system_offset() == 0x50);
+    memcpy(old_impl, saved_impl, sizeof old_impl);
+    uint8_t impl[0x400] = {0}; expected_sys = impl + 0x50; expected_mutex = (uint8_t *)expected_sys + 0x1f8;
+    assert(h_ar_ImplExec(impl) == RES_OK);
+    assert(old_locks == 2 && old_unlocks == 2 && old_processes == 2 && !held);
+    // SDK 3.4 begins with a single command whose size and ID are both20.
+    // The modern walk used to accept it and permanently select the wrong layout.
+    uint8_t cl[0x20 + 0x14 + 0x130] = {0}; int16_t pcm[FRAME_MAX * 2];
+    int32_t mix[480]; for (int i = 0; i < 240; i++) { mix[i] = i; mix[240 + i] = -i; }
+    *(uint32_t *)(cl + 4) = 1; *(int32_t **)(cl + 8) = mix;
+    *(uint32_t *)(cl + 0x14) = 240; *(uint32_t *)(cl + 0x18) = 48000;
+    uint8_t *cmd = cl + 0x20;
+    *(uint32_t *)cmd = 0xcafebabe; *(uint16_t *)(cmd + 4) = 0x14; *(uint16_t *)(cmd + 6) = 0x14; cmd[0x10] = 1;
+    assert(capture(cl, 0x34, pcm) == 0 && g_hdr6 && !g_hdr21);
+    cmd += 0x14; *(uint32_t *)cmd = 0xcafebabe; *(uint16_t *)(cmd + 4) = 0x130;
+    *(uint16_t *)(cmd + 6) = 0x0f; cmd[0x10] = 1;
+    *(uint32_t *)(cmd + 0x120) = 2; cmd[0x124] = 0; cmd[0x125] = 1;
+    *(uint32_t *)(cl + 4) = 2;
+    // Candidate detection inspects a full list; the first command may repeat.
+    *(uint32_t *)(cl + 4) = 5;
+    uint8_t full[0x20 + 4 * 0x14 + 0x130] = {0}; memcpy(full, cl, 0x20);
+    for (int i = 0; i < 4; i++) memcpy(full + 0x20 + i * 0x14, cl + 0x20, 0x14);
+    memcpy(full + 0x20 + 4 * 0x14, cmd, 0x130);
+    assert(capture(full, sizeof full, pcm) == 240 && g_sink4 && g_sink_id == 0x0f);
+    for (int i = 0; i < 240; i++) assert(pcm[2 * i] == i && pcm[2 * i + 1] == -i);
+    assert(!cmd_ok(full + sizeof full - 2, full + sizeof full));
     puts("audren work buffer: Horizon sizing fixtures, both opens, nested open, failures and close lifetime passed");
+    puts("audren old SDK: OS mutex selected and rendering works with SdkMutex symbols absent");
     return 0;
 }

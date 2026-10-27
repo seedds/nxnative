@@ -15,6 +15,7 @@ void nvn_present_config(int hz, int display_mode);
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/mman.h>
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
 
 static int g_fail, g_n;
@@ -57,6 +58,28 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
 
 int main(void) {
     crash_install();   // the same SIGSEGV / SIGBUS handling as production (the page-fault hook is dispatched from within it)
+    // Debug shader retention must not read a modern-sized section past an old
+    // compiler's shorter allocation. Put the following page out of bounds.
+    setenv("DM_NVN_SHDUMP", "1", 1);
+    for (unsigned ci = 0; ci < 4; ci++) {
+        const uint32_t lengths[] = {0x848, 0x850, 0x880, 0x88c};
+        uint32_t length = lengths[ci], kept = length < 0x880 ? length : 0x880;
+        size_t page = (size_t)getpagesize();
+        uint8_t *region = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (region == MAP_FAILED || mprotect(region + page, page, PROT_NONE)) abort();
+        uint8_t *control = region + page - length;
+        memset(control, 0, length); memcpy(control + 0x20, &length, sizeof length);
+        control[kept - 1] = 0xa7;
+        NVNprogram program; h_nvnProgramInitialize(&program, NULL);
+        NVNshaderData shader = {.control = control};
+        EXPECT("SetShaders retains a page-ended control section", 1, h_nvnProgramSetShaders(&program, 1, &shader));
+        const void *copy = ((prog_t *)&program)->sd[0].control;
+        EXPECT("retained shader controls have their own lifetime", 1, copy != control);
+        EXPECT("retained shader control bytes match", 0, memcmp(copy, control, kept));
+        munmap(region, page * 2);
+        EXPECT("retained controls survive caller unmapping", 0xa7, ((const uint8_t *)copy)[kept - 1]);
+        free((void *)copy); h_nvnProgramFinalize(&program);
+    }
     // 1. Bootstrap address lookup: bootstrap gets GetProcAddress, then uses it to get all the names
     PFNNVNBOOTSTRAPLOADERPROC boot = (PFNNVNBOOTSTRAPLOADERPROC)h_nvnBootstrapLoader;
     gpa = (PFNNVNDEVICEGETPROCADDRESSPROC)boot("nvnDeviceGetProcAddress");
@@ -185,6 +208,7 @@ int main(void) {
     P(nvnCommandBufferSignalEvent)(&cb, &ev, NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 7);
     P(nvnCommandBufferSignalEvent)(&cb, &ev, NVN_EVENT_SIGNAL_MODE_ADD, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 5);
     P(nvnCommandBufferReportCounter)(&cb, NVN_COUNTER_TYPE_TIMESTAMP, (NVNbufferAddress)cnt);
+    P(nvnCommandBufferReportCounter)(&cb, NVN_COUNTER_TYPE_TIMESTAMP_TOP, (NVNbufferAddress)(cnt + 16));
     NVNcommandHandle h1 = P(nvnCommandBufferEndRecording)(&cb);
     EXPECT("not recording after EndRecording", 0, P(nvnCommandBufferIsRecording)(&cb));
     P(nvnCommandBufferBeginRecording)(&cb);
@@ -214,7 +238,21 @@ int main(void) {
     EXPECT("event value: h1(7,+5), then h2 copies and runs h1(7,+5) again = 12", 12, P(nvnEventGetValue)(&ev));
     EXPECT("buffer copy 64 B identical", 0, memcmp(src, dst, 64));
     uint64_t ts[2]; memcpy(ts, cnt, 16);
-    EXPECT("counter timestamp written (non-zero)", 1, ts[0] != 0 && ts[0] == ts[1]);
+    EXPECT("timestamp completion counter is zero", 0, ts[0]);
+    EXPECT("counter timestamp written (non-zero)", 1, ts[1] != 0);
+    memcpy(ts, cnt + 16, sizeof ts);
+    EXPECT("timestamp-top completion counter is zero", 0, ts[0]);
+    EXPECT("counter timestamp-top written (non-zero)", 1, ts[1] != 0);
+    NVNcommandBuffer control_cb;
+    P(nvnCommandBufferInitialize)(&control_cb, &dev);
+    EXPECT("control memory initially empty", 0, P(nvnCommandBufferGetControlMemoryFree)(&control_cb));
+    P(nvnCommandBufferAddControlMemory)(&control_cb, poolmem + 0x6000, 4096);
+    EXPECT("control grant is free", 4096, P(nvnCommandBufferGetControlMemoryFree)(&control_cb));
+    EXPECT("control grant size", 4096, P(nvnCommandBufferGetControlMemorySize)(&control_cb));
+    EXPECT("host handles consume no control memory", 0, P(nvnCommandBufferGetControlMemoryUsed)(&control_cb));
+    P(nvnCommandBufferAddControlMemory)(&control_cb, poolmem + 0x6000, 2048);
+    EXPECT("new control grant replaces old", 2048, P(nvnCommandBufferGetControlMemoryFree)(&control_cb));
+    P(nvnCommandBufferFinalize)(&control_cb);
     NVNcounterData fixed_counter = {0, 614400};
     EXPECT("614400 raw counter ticks = 1 ms", 1000000, P(nvnDeviceGetTimestampInNanoseconds)(&dev, &fixed_counter));
     NVNcounterData reported_counter; memcpy(&reported_counter, cnt, sizeof reported_counter);

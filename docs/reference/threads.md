@@ -142,6 +142,14 @@ The yield back-off (`DM_YIELD_BACKOFF`) and the rewriter's spin waits (`patch_ns
 
 ## Events and notifications
 
+### Plain mutex unlock before an auto-clear event fast path
+
+- **Symptom:** every job worker sleeps, a shared game mutex reads zero (free), and its adjacent LightEvent is unsignalled; all submitted GPU work is complete. Logging or extra preemption can delay or hide the stall.
+- **Cause:** the game unlocks with a plain STR, calls `SignalLightEvent`, then issues DMB. The event's LDARB fast path does no write when it sees an already-signalled event. The unlock can remain buffered while a waiter consumes the previous signal and still sees the old locked word; it sleeps again, leaving no future notification. The barrier after the event call is too late for that decision.
+- **Fix:** a build-gated table corrects all 517 matching inlined unlocks with STLR or the unscaled release form STLUR. Register liveness and address equivalence are checked by `dm/tools/check_skyrim_unlocks.py`; three x0 writeback cases use a small tail-call wrapper in verified executable text padding. Arm's [RCsc ordering rule](https://developer.arm.com/community/arm-community-blogs/b/tools-software-ides-blog/posts/armv8-sequential-consistency) orders a store-release before a later load-acquire, including this event-state read. The original trailing barrier remains.
+- **Check:** `make -C dm/host/tests GAME=01000A10041EA000 light-event-order` runs a native synthetic replay of the unlock and event fast paths, with no host event or mutex implementation involved. On this Mac the original produced32 lost-wake outcomes in20 million iterations, versus zero with STLR; a separate 20-million-iteration STLUR check also observed zero. The original measurement is probabilistic; any lost wake in the release-store variant fails the test.
+- **Found on:** [Skyrim](../../dm/games/01000A10041EA000/README.md#graphics-completion), shared scene mutex at `main+0x2aea1c0`, unlock at `main+0x3dc2d0`. An unprobed eight-minute Mac run reaches character creation without the previous stalls. Longer gameplay remains to be tested. This corrects guest store ordering; host condition-variable wake selection is unchanged.
+
 ### Service-event producers follow the binding lifetime
 
 - **Symptom:** a host helper thread aborts when signalling a destroyed `SystemEvent`; repeated `vi::GetDisplayVsyncEvent` calls double the event's tick rate. Rapid replacement can abort with `too many vsync events`, or a retired vsync worker can signal another service's event at reused storage.

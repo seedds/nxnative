@@ -1,0 +1,11 @@
+# Copy the local Mac checkpoint into <id>_build/run/save before recording a
+# baseline. The Skyrim port was checked with the Helgen dragon-attack quicksave.
+save	run
+keys	f300:A~0.5,f600:A~0.5,f900:A~0.5
+secs	180
+quick	60
+reach	3000@160
+window	100	60
+shots	150
+hang	30
+prebuild	off

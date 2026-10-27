@@ -447,3 +447,10 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### Control-memory grant queries
+
+- **Symptom:** repeated unimplemented `nvnCommandBufferGetControlMemoryFree` calls during scene loading.
+- **Cause:** `AddControlMemory` discarded the grant, and the missing query returned zero. The engine requests more memory even though the host uses none of that storage: host command handles point into command memory.
+- **Fix:** retain the last control-memory grant's size and return it from the size/free queries, with zero used bytes. Replacing a grant replaces its capacity, matching command-memory accounting. Regression checks cover an empty buffer, adding and replacing a grant, and size = used + free.
+- **Found on:** [Skyrim](../../dm/games/01000A10041EA000/README.md#graphics-completion). This resolves the repeated query failures; the later new-game loading stall is still open.

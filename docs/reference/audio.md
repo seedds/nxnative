@@ -36,6 +36,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** a thread-local flag (`t_in_open`) hands the inner call straight to the SDK with the host's CPU / manual copy of the parameter, and only the outer call starts the thread (`hle_audren.c`).
 - **Found on:** [ROMANCE OF THE THREE KINGDOMS 8 REMAKE](../../dm/games/0100C2A01A730000/README.md) (SDK 17.5.3).
 
+### Audio renderer system offset inside its implementation
+
+- **Symptom:** command capture reads malformed commands or never finds a DeviceSink on an older SDK.
+- **Cause:** the host passed `AudioRendererImpl +0x60` to `render_once`, but SDK 3.4 embeds `AudioRenderSystem` at +0x50. Its own Execute method adds +0x50 before calling `GetExecutionMode`.
+- **Fix:** inspect that method's first mode call to recover the member offset, preserving the existing +0x60 layout when no matching call is available. Synthetic bytecode and a full hook invocation verify that the renderer and its lock receive the member address.
+- **Found on:** [Skyrim](../../dm/games/01000A10041EA000/README.md#audio-and-remaining-validation), SDK 3.4.
+
 ### The renderer event as the service gives it: a kernel event
 
 - **Symptom:** the frame loop stops for good as a level loads while audio keeps rendering. The main thread waits in `os::WaitSystemEvent` under `CAudioMemoryPool::Shutdown`, and a sound thread of higher priority waits on the same condition variable.
@@ -46,8 +53,8 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 ### The renderer's update lock (`update_lock`)
 
 - **Symptom:** none of its own; command generation races the game's `Update` on SDKs whose lock is not at SDK 16's offset.
-- **Cause:** `AudioRenderSystem::Update` holds a mutex in `AudioRenderSystem`; `GenerateCommand` does not take it, so the host does (the auto-mode system thread does the same in `SendCommandToDsp`). Which mutex depends on the SDK: `nn::os::LockMutex(MutexType *)` at +0x1d0 in SDK 4.4 and at +0x1d8 in 6.4–8.2, `SdkMutexType::Lock` at +0x1d8 in 10.4–11.4, +0x1f0 in 13.3–16.2 and +0x1f8 in 17.5 (the `sdk` builds of 24 games on hand), inlined in 19 and 20 (+0x2d0, the Span layout: [SDK 20's `AudioRenderSystem` layout](#sdk-20s-audiorendersystem-layout)). The host took SDK 16's for every SDK before 20, which wrote a lock word into another field and excluded nothing.
-- **Fix:** `update_lock` in `hle_audren.c` reads it off the SDK's own `Update`: the register the prologue adds the offset to and moves into x0 before its first `bl`, whose PLT slot must hold `LockMutex` or `SdkMutexType::Lock`; anything else keeps SDK 16's.
+- **Cause:** `AudioRenderSystem::Update` holds a mutex in `AudioRenderSystem`; `GenerateCommand` does not take it, so the host does (the auto-mode system thread does the same in `SendCommandToDsp`). Which mutex depends on the SDK: SDK 3.4 uses `nn::os::LockMutex(MutexType *)` at +0x1f8; `nn::os::LockMutex(MutexType *)` at +0x1d0 in SDK 4.4 and at +0x1d8 in 6.4–8.2, `SdkMutexType::Lock` at +0x1d8 in 10.4–11.4, +0x1f0 in 13.3–16.2 and +0x1f8 in 17.5 (the `sdk` builds of 24 games on hand), inlined in 19 and 20 (+0x2d0, the Span layout: [SDK 20's `AudioRenderSystem` layout](#sdk-20s-audiorendersystem-layout)). The host took SDK 16's for every SDK before 20, which wrote a lock word into another field and excluded nothing.
+- **Fix:** `update_lock` in `hle_audren.c` reads it off the SDK's own `Update`: the register the prologue adds the offset to and moves into x0 before its first `bl`, whose PLT slot must hold `LockMutex` or `SdkMutexType::Lock`; anything else keeps SDK 16's. Required lock/unlock symbols are resolved only after this selection: SDK 3.4 exports no `SdkMutexType::Lock`, so requiring it before detecting `MutexType` aborted startup. [Skyrim](../../dm/games/01000A10041EA000/README.md#audio-and-remaining-validation) uses this path.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (4.4), the first game it was plainly wrong for.
 - **Check:** checked with sound on [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (11.4, +0x1d8), [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (7.3, `MutexType` +0x1d8) and [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (7.3, which is silent for its first minute with either lock).
 
@@ -109,8 +116,8 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 - **Symptom:** no sound; red `audren: command 1 in the command list is malformed (magic 0 size 0)`.
 - **Cause:** SDK 6's DSP command header is +0x04 size (s16), +0x06 command ID (s16), +0x10 enabled, where SDK 8–20 have +0x04 enabled, +0x05 ID, +0x06 size (`CommandListProcessor::Process`, `sdk+0xaaa00`); its DeviceSink is ID 0x10.
-- **Fix:** `capture` in `hle_audren.c` takes the layout whose walk finds the 0xcafebabe magic on every command of the first valid list; [incomplete startup lists](#incomplete-startup-lists-must-not-select-the-command-layout) leave detection open.
-- **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (SDK 6.5.0).
+- **Fix:** `capture` in `hle_audren.c` takes the layout whose bounded walk finds the 0xcafebabe magic and a valid enabled boolean on every command. A single legacy command with size = ID =20 otherwise passes both layouts and selects the modern layout too early; its modern enabled byte would be20, which rejects that interpretation. An [incomplete startup list](#incomplete-startup-lists-must-not-select-the-command-layout) leaves detection open for the next list. Synthetic tests cover that ambiguous first command and actual stereo PCM capture through the old DeviceSink.
+- **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (SDK 6.5.0), [Skyrim](../../dm/games/01000A10041EA000/README.md#audio-and-remaining-validation) (SDK 3.4, ambiguous initial command).
 
 ### SDK 8: command IDs numbered differently
 

@@ -200,7 +200,16 @@ static int g_sink_id = 0x13, g_hdr6, g_hdr21, g_sink4;
 static int cmd_size(const uint8_t *q) { return g_hdr21 ? *(const int16_t *)(q + 2) : g_hdr6 ? *(const int16_t *)(q + 4) : *(const int16_t *)(q + 6); }
 static int cmd_id(const uint8_t *q) { return g_hdr21 ? q[1] : g_hdr6 ? *(const int16_t *)(q + 6) : q[5]; }
 static int cmd_on(const uint8_t *q) { return g_hdr21 ? q[0] & 1 : g_hdr6 ? q[0x10] : q[4]; }
-static int cmd_ok(const uint8_t *q, const uint8_t *end) { int n = cmd_size(q); return g_hdr21 ? n >= 0x10 && q + n <= end : *(const uint32_t *)q == 0xcafebabeu && n > 0; }
+static int cmd_ok(const uint8_t *q, const uint8_t *end) {
+    size_t header = g_hdr21 ? 0x10 : g_hdr6 ? 0x14 : 8;
+    if (q > end || (size_t)(end - q) < header) return 0;
+    int n = cmd_size(q);
+    if (n < (int)header || (size_t)n > (size_t)(end - q)) return 0;
+    if (g_hdr21) return 1;
+    // A legacy command with size == ID == 0x14 otherwise looks valid in
+    // both layouts. Its size byte is not a valid modern enabled boolean.
+    return *(const uint32_t *)q == 0xcafebabeu && q[g_hdr6 ? 0x10 : 4] <= 1;
+}
 static int sink_body(void) { return g_hdr21 ? -8 : 0; }   // where DeviceSink's fields sit relative to SDK 8–20
 static int cmd_walks(const uint8_t *cl, uint32_t ncmd, const uint8_t *end) {
     const uint8_t *q = cl + 0x20;
@@ -243,6 +252,7 @@ static uint32_t up_3_2(const int32_t *in, uint32_t n, int32_t *out) {
     return m;
 }
 static int capture(const uint8_t *cl, size_t len, int16_t *dst) {
+    if (len < 0x20) return 0;
     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
     const int32_t *mix = *(const int32_t *const *)(cl + 8); const uint8_t *cend = cl + len;
     static int logged, hist_logged, layout_done;
@@ -272,8 +282,8 @@ static int capture(const uint8_t *cl, size_t len, int16_t *dst) {
     }
     const uint8_t *c = cl + 0x20;
     for (uint32_t i = 0; i < ncmd; i++) {
+        if (!cmd_ok(c, cend)) { if (!logged++) LOG("[RED] audren: command %u in the command list is malformed", i); return 0; }
         int size = cmd_size(c);
-        if (!cmd_ok(c, cend)) { if (!logged++) LOG("[RED] audren: command %u in the command list is malformed (first word %#x size %d)", i, *(const uint32_t *)c, size); return 0; }
         if (cmd_id(c) == g_sink_id && cmd_on(c)) {
             const uint8_t *b = c + sink_body();
             uint32_t nin = *(const uint32_t *)(b + (g_sink4 ? 0x120 : 0x130)); int16_t in[6];
@@ -390,8 +400,40 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
     pthread_mutex_unlock(&g_render_mu);
     return RES_OK;
 }
+static size_t impl_system_offset(void) {
+    const uint32_t *f = guest_sym("_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv");
+    void *mode = guest_sym("_ZNK2nn5audio6server17AudioRenderSystem16GetExecutionModeEv");
+    int64_t member[32]; for (int r = 0; r < 32; r++) member[r] = -1;
+    member[0] = 0;
+    if (f && mode) for (int i = 0; i < 24; i++) {
+        member[31] = -1;   // XZR/SP is not a tracked general-purpose pointer
+        uint32_t w = f[i]; unsigned rd = w & 31, rn = (w >> 5) & 31, rm = (w >> 16) & 31;
+        if ((w & 0xffe0ffe0u) == 0xaa0003e0u) member[rd] = member[rm];
+        else if ((w & 0xff800000u) == 0x91000000u)
+            member[rd] = rn == 31 || member[rn] < 0 ? -1 : member[rn] + ((int64_t)((w >> 10) & 0xfff) << ((w & (1u << 22)) ? 12 : 0));
+        else if ((w & 0x1f800000u) == 0x12800000u || (w & 0xffe0ffe0u) == 0x2a0003e0u)
+            member[rd] = -1;   // MOVN/Z/K or a 32-bit MOV cannot retain a this-derived pointer
+        else if ((w & 0xfc000000u) == 0x94000000u) {
+            if (member[0] > 0 && plt_target(f + i + (int32_t)(w << 6) / 64) == mode) return (size_t)member[0];
+            break;
+        }
+        // Only step over proven prologue operations. Unknown instructions or
+        // branches may overwrite a tracked pointer or bypass its definition.
+        else if (w == 0xd503201fu || (w & 0xffffff3fu) == 0xd503241fu) continue;   // NOP / BTI; other hints can change registers
+        else if (rn == 31 && (((w & 0x3b400000u) == 0x29000000u) ||
+                 ((w & 0x3b400000u) == 0x39000000u) || ((w & 0x3b400000u) == 0x38000000u))) continue;   // stack stores
+        else if (rd == 31 && rn == 31 && (w & 0xff800000u) == 0xd1000000u) continue;   // sub sp, sp, #imm
+        else break;
+    }
+    return 0x60;   // existing layout when this SDK has no inspectable mode call
+}
 HLE_FORCE("_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv", "render one frame manually: SDK generates commands + CPU processing, the host takes the DeviceSink output",
-          Result, h_ar_ImplExec, uint8_t *impl) { return render_once(impl + 0x60, g_frame, &g_frame_n); }   // the AudioRenderSystem sits at +0x60 inside AudioRendererImpl
+          Result, h_ar_ImplExec, uint8_t *impl) {
+    static _Atomic size_t cached;
+    size_t off = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (!off) { off = impl_system_offset(); atomic_store_explicit(&cached, off, memory_order_relaxed); LOG("audren: AudioRendererImpl system at +%#zx", off); }
+    return render_once(impl + off, g_frame, &g_frame_n);
+}   // SDK 3.4 places the system at +0x50; later layouts use +0x60
 // SDK 20 (The Legend of Zelda: Breath of the Wild 1.9.0): the public ExecuteAudioRendererRendering (sdk+0x221e90) calls the AudioRendererImpl version through the vtable (sdk+0x22ca88, just x0 += 0x60 and a jump through the PLT to here),
 // so the takeover above is never reached. The original generates commands here without the update lock; with the render thread on the original and the game thread's RequestUpdate rendering catch-up frames ("nothing rendered since the last update"),
 // both sides wrote the same command buffer at once and CommandListProcessor::Process sometimes read a half-written command list and crashed (once at 60 s and once at 134 s in the shrine). Taken over here, so rendering goes through the host's locked render as well

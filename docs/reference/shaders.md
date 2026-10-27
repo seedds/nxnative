@@ -829,3 +829,18 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** that run compiled its Metal libraries and pipelines on first use (cold cache). With a warm cache the title is up after about 15 s; what looked like a 40-second wait in the read log (`DM_FSLOG`) was the title screen itself, which reads nothing.
 - **Check:** screenshots every few seconds (`ctl.sh snap` from a script) told the two apart.
 - **Found on:** [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2).
+
+
+### BSA archives and FXP shader records
+
+- **Symptom:** the game has no recognized shader container and the split finds no shaders.
+- **Cause:** the shaders are an FXP member of a Bethesda BSA archive; FXP records carry independent control/code offsets and lengths. Old NVN controls may be 0x848 bytes and compute code may lack SPH.
+- **Fix:** `bsa.py` streams versions 103/104/105, reading only FXP members, with stored/zlib/LZ4-frame payloads, per-file compression toggles and embedded names. `shader_split.py` validates FXP boundaries, magic and independent lengths, identifies graphics stages by SPH and headerless compute by its control dimensions, then supplies covering program pairs. The same validated records are scanned in main, where the engine embeds shaders outside its BSA archive; older embedded controls can be 0x7d1 bytes with unaligned code immediately following. Synthetic fixtures exercise these formats and malformed boundaries.
+- **Found on:** [Skyrim](../../dm/games/01000A10041EA000/README.md#shaders).
+
+### Diagnostic snapshots of short shader controls
+
+- **Symptom:** `DM_NVN_SHDUMP` causes a bus error inside `nvnProgramSetShaders` while normal key hashing accepts the same shader.
+- **Cause:** the diagnostic copy and dump used a fixed 0x880 bytes, even when control +0x20 declares a shorter allocation. A 0x848-byte control ending at a protected page was overread.
+- **Fix:** one shared control-length helper bounds hashing, the retained diagnostic copy and the written .ctl file. Guard-page tests cover 0x848/0x850/0x880/0x88c controls and verify retained bytes after the caller unmaps its original allocation.
+- **Found on:** [Skyrim](../../dm/games/01000A10041EA000/README.md#validation).

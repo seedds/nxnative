@@ -1,0 +1,37 @@
+# Mac opening gameplay and iPhone gameplay checked; later regions remain open.
+# The Elder Scrolls V: Skyrim, base 1.0.12.517175, SDK 3.4.0.
+
+# ---- Identity ----
+title_id	01000A10041EA000
+program_id	01000A10041EA000
+
+# ---- App ----
+name	The Elder Scrolls V: Skyrim
+ipa	TheElderScrollsVSkyrim.ipa
+app_category	public.app-category.games
+pad_layout	full
+
+# ---- Versions ----
+build	v0	1.0.12.517175	main=b3f6e5da5c501857d754e3e186e04dc2	sdk=d6afd2cb180ca36e58ec21a12cf27eec
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	Data/Skyrim - Voices_en0.bsa
+zip_store	.bik:.bsa:.esm:.metallib
+
+# ---- Memory ----
+# Original virtual reservations exceed the alias range. Build-gated cuts reduce
+# Default/GPU growth ceilings and the common pool, retaining per-thread limits.
+mem_reserve	0x180000000
+mem_alias	0x158000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 8 MB of system resource
+sys_resource	0x800000
+
+# ---- Shader split ----
+shader_groups	/Data/=data /BatchFiles/=batchfiles
+shader_note	The Elder Scrolls V: Skyrim shaders (BSA and main FXP records)

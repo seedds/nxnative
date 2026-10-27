@@ -196,6 +196,17 @@ memory-profile: $(B)/t_svc_memory
 	$(PYTHON) test_memory_profile.py
 run: memory memory-dirty memory-profile
 
+# Native ARM memory-order replay; the plain STR case is a measurement, while
+# any lost wake with the release store is a failure.
+.PHONY: light-event-order
+run: light-event-order
+light-event-order: $(B)/t_light_event_order
+	$(B)/t_light_event_order original 20000000
+	$(B)/t_light_event_order release 20000000
+	$(B)/t_light_event_order unscaled 20000000
+$(B)/t_light_event_order: t_light_event_order.c | $(B)
+	clang -O2 -march=armv8.4-a -Wall -Wextra -Werror -o $@ $<
+
 # A native blocking notification wait must release the thread's guest core.
 $(B)/t_notify_sched: t_notify_sched.c t_condvar_stub.c ../hle_thread.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	clang -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_THREAD_ENTER -I.. $(GINC) -o $@ t_notify_sched.c t_condvar_stub.c

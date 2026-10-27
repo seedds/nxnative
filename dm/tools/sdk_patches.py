@@ -1,6 +1,23 @@
 # The rewriter's patches of Nintendo SDK module builds (sdk), which several games can ship: dm/tools/patch_nso.py applies those of a module's NSO build ID, whatever the game.
 # A patch of a game's own module (main) goes in its profile's patches.py (dm/games/<id>/patches.py). CUTS as described in patch_nso.py ("Registered patches")
 CUTS = {
+  # Skyrim base 1.0.12, SDK 3.4.0: main's Default Heap and GPU Heap each reserve
+  # 2 GiB, but the second returns ResultOutOfAddressSpace (0x1803) after the
+  # first is placed at alias+0x70000000. The platform's bounded alias region
+  # cannot hold both with the SDK's 1 GiB node area and large-region alignment.
+  # Use a 64 MiB node area and 2 MiB alignment alongside the main heap cuts.
+  # At 32 MiB alignment, after the file/UI/audio heaps the fifth 64 MiB worker
+  # scrap region still failed (0x1803) despite enough aggregate free space.
+  # ReserveAddressRegion promises page alignment; 2 MiB also meets the game's
+  # 64 KiB requirements. Both the large and medium region alignment cases need
+  # the bounded-address adaptation. Both node constants
+  # must change together (limit and occupied region). Build-gated platform cut.
+  'd6afd2cb180ca36e58ec21a12cf27eec': [
+    (0x8cc60, 'e9030232', '0980a052', 'AddressRegionManager node area limit: 1 GiB to 64 MiB'),
+    (0x8ccf4, 'ea030232', '0a80a052', 'AddressRegionManager occupied node area: 1 GiB to 64 MiB'),
+    (0x8ce48, 'ea030232', '0a04a052', 'AddressRegionManager large-region alignment: 1 GiB to 2 MiB'),
+    (0x8ce4c, 'eb030732', '0b04a052', 'AddressRegionManager medium-region alignment: 32 MiB to 2 MiB'),
+  ],
   # Xenoblade Chronicles 3 2.2.1, SDK 12.3.9: the same AddressRegionManager
   # constructor and size-class alignment as Engage's SDK 12.3.7. Its cut 4 GB
   # malloc reservation must fit the 4.375 GB alias region on iOS.

@@ -1,0 +1,539 @@
+# Skyrim main b3f6e5da5c501857d754e3e186e04dc2; check_skyrim_unlocks.py
+# offset	original bytes	replacement bytes	reason
+0xc9bc	bf0200b9	bffe9f88	release
+0x793b0	bf0200b9	bffe9f88	release
+0x7fd38	ff0200b9	fffe9f88	release
+0x80750	df0200b9	dffe9f88	release
+0x81600	bf0200b9	bffe9f88	release
+0x846e0	ff0200b9	fffe9f88	release
+0x84794	ff0200b9	fffe9f88	release
+0x84970	bf0200b9	bffe9f88	release
+0x9d06c	9f4a00b9	9f820499	unscaled release
+0xa9508	df4a00b9	df820499	unscaled release
+0xa9a70	9f4a00b9	9f820499	unscaled release
+0xaa430	df4a00b9	df820499	unscaled release
+0xdb258	bf2a00b9	bf820299	unscaled release
+0xdb734	3f2b00b9	3f830299	unscaled release
+0xdc9b8	9f2a00b9	9f820299	unscaled release
+0xdd540	df2a00b9	df820299	unscaled release
+0xe3078	bf0200b9	bffe9f88	release
+0xe5adc	ff0200b9	fffe9f88	release
+0xe5f08	7f0300b9	7fff9f88	release
+0xe60fc	9f5200b9	9f020599	unscaled release
+0xe6374	7f0300b9	7fff9f88	release
+0xe67d8	9f5200b9	9f020599	unscaled release
+0xe69f4	3f0300b9	3fff9f88	release
+0xe6ca4	7f5200b9	7f020599	unscaled release
+0xe7748	9f0200b9	9ffe9f88	release
+0xe85f4	7f0300b9	7fff9f88	release
+0xe874c	df0200b9	dffe9f88	release
+0xe8f98	df0200b9	dffe9f88	release
+0xe9048	df0200b9	dffe9f88	release
+0xe94c8	bf0200b9	bffe9f88	release
+0xe9764	bf0200b9	bffe9f88	release
+0xf50d0	9f0200b9	9ffe9f88	release
+0xf5170	bf0200b9	bffe9f88	release
+0xf52e0	7f0300b9	7fff9f88	release
+0xf56cc	df0200b9	dffe9f88	release
+0xf6264	df0200b9	dffe9f88	release
+0xf7e1c	7f0200b9	7ffe9f88	release
+0xfa4ac	df0200b9	dffe9f88	release
+0xfb590	bf0200b9	bffe9f88	release
+0xfbae4	bf0200b9	bffe9f88	release
+0xfc210	bf0200b9	bffe9f88	release
+0xff2dc	5f0300b9	5fff9f88	release
+0x10187c	7f1200b9	7f020199	unscaled release
+0x101a58	7f1200b9	7f020199	unscaled release
+0x101f0c	7f1200b9	7f020199	unscaled release
+0x102078	7f1200b9	7f020199	unscaled release
+0x11b468	bf0200b9	bffe9f88	release
+0x11ba88	9f0300b9	9fff9f88	release
+0x11bc6c	9f0300b9	9fff9f88	release
+0x11c0d0	ff0200b9	fffe9f88	release
+0x11c3e0	ff0200b9	fffe9f88	release
+0x11c494	ff0200b9	fffe9f88	release
+0x11c668	bf0200b9	bffe9f88	release
+0x11c860	df0200b9	dffe9f88	release
+0x11c910	df0200b9	dffe9f88	release
+0x11cda0	bf0200b9	bffe9f88	release
+0x11d030	bf0200b9	bffe9f88	release
+0x11d94c	7f0300b9	7fff9f88	release
+0x11d9d0	ff0200b9	fffe9f88	release
+0x11da84	7f0300b9	7fff9f88	release
+0x11dd78	5f0300b9	5fff9f88	release
+0x11de9c	df0200b9	dffe9f88	release
+0x11f18c	df0200b9	dffe9f88	release
+0x11f23c	df0200b9	dffe9f88	release
+0x11f944	9f0200b9	9ffe9f88	release
+0x125cd4	7f0300b9	7fff9f88	release
+0x133cec	df0200b9	dffe9f88	release
+0x133cfc	7f6e00b9	7fc20699	unscaled release
+0x135c04	bf0200b9	bffe9f88	release
+0x13643c	bf0200b9	bffe9f88	release
+0x14f914	ff0200b9	fffe9f88	release
+0x14ff64	ff0200b9	fffe9f88	release
+0x150478	ff0200b9	fffe9f88	release
+0x15053c	1f0300b9	1fff9f88	release
+0x1511cc	df0200b9	dffe9f88	release
+0x1719c8	7f2200b9	7f020299	unscaled release
+0x171b44	7f2200b9	7f020299	unscaled release
+0x195d90	df0200b9	dffe9f88	release
+0x1ab760	1f4400b8	1f2003d5	unlock moved to release wrapper
+0x1ab764	a5083e94	17103e94	call release wrapper
+0x1b1f0c	9f4600b8	9ffe9f88	post-index release
+0x1b1f10	e00314aa	80120091	event address after release
+0x1eeeb8	ff0200b9	fffe9f88	release
+0x1ef210	bf0200b9	bffe9f88	release
+0x2429b0	9fa602b9	1fc01f99	release through event-4
+0x243308	7fa602b9	1fc01f99	release through event-4
+0x243318	9fa602b9	1fc01f99	release through event-4
+0x243564	bf4600b8	bffe9f88	post-index release
+0x243568	e00315aa	a0120091	event address after release
+0x258258	df0200b9	dffe9f88	release
+0x2584c0	df0200b9	dffe9f88	release
+0x2586c4	df0200b9	dffe9f88	release
+0x25a0a4	ff0200b9	fffe9f88	release
+0x25a884	bf0200b9	bffe9f88	release
+0x2788d4	7f0200b9	7ffe9f88	release
+0x27d3e4	5f0300b9	5fff9f88	release
+0x29c828	bf0200b9	bffe9f88	release
+0x29cca4	ff0200b9	fffe9f88	release
+0x29cf6c	9f0300b9	9fff9f88	release
+0x29d2e4	bf0200b9	bffe9f88	release
+0x29dd00	9f0300b9	9fff9f88	release
+0x2a30d4	df0200b9	dffe9f88	release
+0x2a7b14	bf0200b9	bffe9f88	release
+0x2a7bb4	df0200b9	dffe9f88	release
+0x2aee18	df0200b9	dffe9f88	release
+0x2af090	1f0300b9	1fff9f88	release
+0x2af340	1f0300b9	1fff9f88	release
+0x3c3898	df0200b9	dffe9f88	release
+0x3c3e64	ff0200b9	fffe9f88	release
+0x3c4b04	bf0200b9	bffe9f88	release
+0x3c6008	9f0200b9	9ffe9f88	release
+0x3c60a8	bf0200b9	bffe9f88	release
+0x3c621c	df0200b9	dffe9f88	release
+0x3ca3fc	df0200b9	dffe9f88	release
+0x3ca560	1f0300b9	1fff9f88	release
+0x3caa34	df0200b9	dffe9f88	release
+0x3cb0e0	bf0200b9	bffe9f88	release
+0x3cbff8	bf0200b9	bffe9f88	release
+0x3cc198	7f0300b9	7fff9f88	release
+0x3cc2d8	df0200b9	dffe9f88	release
+0x3cd3bc	df0200b9	dffe9f88	release
+0x3cd46c	df0200b9	dffe9f88	release
+0x3cd8ec	bf0200b9	bffe9f88	release
+0x3cdb88	bf0200b9	bffe9f88	release
+0x3cec2c	9f0200b9	9ffe9f88	release
+0x3cefcc	bf0200b9	bffe9f88	release
+0x3cf268	bf0200b9	bffe9f88	release
+0x3d0098	ff0200b9	fffe9f88	release
+0x3d0284	ff0200b9	fffe9f88	release
+0x3d06f0	1f0300b9	1fff9f88	release
+0x3d0b04	ff0200b9	fffe9f88	release
+0x3d0bb8	ff0200b9	fffe9f88	release
+0x3d0da4	bf0200b9	bffe9f88	release
+0x3d0fc4	df0200b9	dffe9f88	release
+0x3d1074	df0200b9	dffe9f88	release
+0x3d12e0	7f0300b9	7fff9f88	release
+0x3d1364	ff0200b9	fffe9f88	release
+0x3d1418	7f0300b9	7fff9f88	release
+0x3d1ab8	ff0200b9	fffe9f88	release
+0x3d1ca4	ff0200b9	fffe9f88	release
+0x3d2110	1f0300b9	1fff9f88	release
+0x3d252c	ff0200b9	fffe9f88	release
+0x3d25e0	ff0200b9	fffe9f88	release
+0x3d2790	bf0200b9	bffe9f88	release
+0x3d29c0	df0200b9	dffe9f88	release
+0x3d2a70	df0200b9	dffe9f88	release
+0x3d2cdc	7f0300b9	7fff9f88	release
+0x3d2d60	ff0200b9	fffe9f88	release
+0x3d2e14	7f0300b9	7fff9f88	release
+0x3d7488	df0200b9	dffe9f88	release
+0x3d7878	7f1a00b9	7f820199	unscaled release
+0x3d7d3c	9f0200b9	9ffe9f88	release
+0x3d7e6c	bf0200b9	bffe9f88	release
+0x3dc2d0	bf4600b8	bffe9f88	post-index release
+0x3dc2d4	e00315aa	a0120091	event address after release
+0x44f850	df0200b9	dffe9f88	release
+0x456e64	1f0300b9	1fff9f88	release
+0x4953ec	5f0300b9	5fff9f88	release
+0x4956f4	3f0300b9	3fff9f88	release
+0x4966d0	df0200b9	dffe9f88	release
+0x496848	ff0200b9	fffe9f88	release
+0x496978	bf0200b9	bffe9f88	release
+0x496cb0	df0200b9	dffe9f88	release
+0x497a8c	ff0200b9	fffe9f88	release
+0x497b40	ff0200b9	fffe9f88	release
+0x497cf0	bf0200b9	bffe9f88	release
+0x498678	bf0200b9	bffe9f88	release
+0x4987f8	bf0200b9	bffe9f88	release
+0x498c28	df0200b9	dffe9f88	release
+0x498cd8	df0200b9	dffe9f88	release
+0x49906c	bf0200b9	bffe9f88	release
+0x499208	bf0200b9	bffe9f88	release
+0x499b2c	7f0300b9	7fff9f88	release
+0x499bb0	ff0200b9	fffe9f88	release
+0x499c64	7f0300b9	7fff9f88	release
+0x499f60	7f0300b9	7fff9f88	release
+0x49a0b4	df0200b9	dffe9f88	release
+0x49b39c	df0200b9	dffe9f88	release
+0x49b44c	df0200b9	dffe9f88	release
+0x49bc1c	9f0200b9	9ffe9f88	release
+0x49e3c8	df0200b9	dffe9f88	release
+0x49f24c	ff0200b9	fffe9f88	release
+0x49f438	ff0200b9	fffe9f88	release
+0x49f8a4	1f0300b9	1fff9f88	release
+0x49fbb4	ff0200b9	fffe9f88	release
+0x49fc68	ff0200b9	fffe9f88	release
+0x49fe18	bf0200b9	bffe9f88	release
+0x49ffe0	df0200b9	dffe9f88	release
+0x4a0090	df0200b9	dffe9f88	release
+0x4a052c	bf0200b9	bffe9f88	release
+0x4a07c8	bf0200b9	bffe9f88	release
+0x4a10dc	7f0300b9	7fff9f88	release
+0x4a1160	ff0200b9	fffe9f88	release
+0x4a1214	7f0300b9	7fff9f88	release
+0x4a1510	7f0300b9	7fff9f88	release
+0x4a1648	df0200b9	dffe9f88	release
+0x4a2930	df0200b9	dffe9f88	release
+0x4a29e0	df0200b9	dffe9f88	release
+0x4a2e80	bf0200b9	bffe9f88	release
+0x4a34b8	df0200b9	dffe9f88	release
+0x4a3720	bf0200b9	bffe9f88	release
+0x4a39fc	df0200b9	dffe9f88	release
+0x4a3d54	7f0200b9	7ffe9f88	release
+0x4a4858	df0200b9	dffe9f88	release
+0x4a4e54	df0200b9	dffe9f88	release
+0x4a4fcc	ff0200b9	fffe9f88	release
+0x4a50fc	bf0200b9	bffe9f88	release
+0x4a5444	df0200b9	dffe9f88	release
+0x4a5964	ff0200b9	fffe9f88	release
+0x4a5a18	ff0200b9	fffe9f88	release
+0x4a5bc8	bf0200b9	bffe9f88	release
+0x4a64e4	bf0200b9	bffe9f88	release
+0x4a6664	bf0200b9	bffe9f88	release
+0x4a6a94	df0200b9	dffe9f88	release
+0x4a6b44	df0200b9	dffe9f88	release
+0x4a6ed8	bf0200b9	bffe9f88	release
+0x4a7074	bf0200b9	bffe9f88	release
+0x4a7998	7f0300b9	7fff9f88	release
+0x4a7a1c	ff0200b9	fffe9f88	release
+0x4a7ad0	7f0300b9	7fff9f88	release
+0x4a7dcc	7f0300b9	7fff9f88	release
+0x4a7f20	df0200b9	dffe9f88	release
+0x4a9208	df0200b9	dffe9f88	release
+0x4a92b8	df0200b9	dffe9f88	release
+0x4a9a88	9f0200b9	9ffe9f88	release
+0x4acadc	ff0200b9	fffe9f88	release
+0x4acc0c	ff0200b9	fffe9f88	release
+0x4acd3c	ff0200b9	fffe9f88	release
+0x4ace6c	ff0200b9	fffe9f88	release
+0x4acf9c	bf0200b9	bffe9f88	release
+0x4ad1c4	7f0300b9	7fff9f88	release
+0x4ad34c	7f0300b9	7fff9f88	release
+0x4ad4e4	5f0300b9	5fff9f88	release
+0x4ad64c	5f0300b9	5fff9f88	release
+0x4ad7ec	bf0200b9	bffe9f88	release
+0x4ae884	bf0200b9	bffe9f88	release
+0x4aed3c	9f0200b9	9ffe9f88	release
+0x4aeddc	bf0200b9	bffe9f88	release
+0x4af48c	9f0200b9	9ffe9f88	release
+0x4af52c	bf0200b9	bffe9f88	release
+0x4b10a8	1f0300b9	1fff9f88	release
+0x4b1544	1f0300b9	1fff9f88	release
+0x4b1750	bf0200b9	bffe9f88	release
+0x4b18bc	bf0200b9	bffe9f88	release
+0x4b1cbc	bf0200b9	bffe9f88	release
+0x4b1ef8	df0200b9	dffe9f88	release
+0x4b2270	7f0300b9	7fff9f88	release
+0x4b2500	bf0200b9	bffe9f88	release
+0x4b273c	df0200b9	dffe9f88	release
+0x4b2d08	7f0300b9	7fff9f88	release
+0x4b2e8c	bf0200b9	bffe9f88	release
+0x4b2ff8	df0200b9	dffe9f88	release
+0x4b31bc	bf0200b9	bffe9f88	release
+0x4b332c	bf0200b9	bffe9f88	release
+0x4b3498	df0200b9	dffe9f88	release
+0x4b3674	bf0200b9	bffe9f88	release
+0x4b37e4	bf0200b9	bffe9f88	release
+0x4b3950	df0200b9	dffe9f88	release
+0x4b3af4	7f0300b9	7fff9f88	release
+0x4b3c80	9f0300b9	9fff9f88	release
+0x4b3e88	bf0200b9	bffe9f88	release
+0x4b3ff4	df0200b9	dffe9f88	release
+0x4b4198	7f0300b9	7fff9f88	release
+0x4b4324	9f0300b9	9fff9f88	release
+0x4b5460	9f0300b9	9fff9f88	release
+0x4b5644	9f0300b9	9fff9f88	release
+0x4b5aa0	ff0200b9	fffe9f88	release
+0x4b5e48	ff0200b9	fffe9f88	release
+0x4b5efc	ff0200b9	fffe9f88	release
+0x4b60ac	bf0200b9	bffe9f88	release
+0x4b6274	df0200b9	dffe9f88	release
+0x4b6324	df0200b9	dffe9f88	release
+0x4b67b4	bf0200b9	bffe9f88	release
+0x4b6a44	bf0200b9	bffe9f88	release
+0x4b734c	7f0300b9	7fff9f88	release
+0x4b73d0	ff0200b9	fffe9f88	release
+0x4b7484	7f0300b9	7fff9f88	release
+0x4b7aac	7f0300b9	7fff9f88	release
+0x4b8128	5f0300b9	5fff9f88	release
+0x4b83e4	bf0200b9	bffe9f88	release
+0x4c2a58	ff0200b9	fffe9f88	release
+0x4c2b8c	ff0200b9	fffe9f88	release
+0x4c2cc0	ff0200b9	fffe9f88	release
+0x4c2df0	ff0200b9	fffe9f88	release
+0x4c2f20	ff0200b9	fffe9f88	release
+0x4c3050	ff0200b9	fffe9f88	release
+0x4c3180	bf0200b9	bffe9f88	release
+0x4e422c	bf0200b9	bffe9f88	release
+0x4f4638	1f0300b9	1fff9f88	release
+0x4f47a0	bf0200b9	bffe9f88	release
+0x5375f8	ff0200b9	fffe9f88	release
+0x53d700	1f0300b9	1fff9f88	release
+0x53db74	7f0200b9	7ffe9f88	release
+0x53dd74	7f0200b9	7ffe9f88	release
+0x53e770	7f0200b9	7ffe9f88	release
+0x53e8e0	7f0200b9	7ffe9f88	release
+0x53ed94	bf0200b9	bffe9f88	release
+0x53ee48	9f0200b9	9ffe9f88	release
+0x53fdc8	1f0300b9	1fff9f88	release
+0x53ffd0	1f0300b9	1fff9f88	release
+0x540108	9f0200b9	9ffe9f88	release
+0x540280	5f0300b9	5fff9f88	release
+0x5406d4	1f0300b9	1fff9f88	release
+0x5435a0	bf0200b9	bffe9f88	release
+0x5522d0	ff0200b9	fffe9f88	release
+0x552384	ff0200b9	fffe9f88	release
+0x552560	bf0200b9	bffe9f88	release
+0x55f060	9f2b00b9	9f830299	unscaled release
+0x59c8c0	df5202b9	1fc01f99	release through event-4
+0x5de318	9f0300b9	9fff9f88	release
+0x5de984	bf0200b9	bffe9f88	release
+0x606d94	9f0200b9	9ffe9f88	release
+0x606f30	3f0300b9	3fff9f88	release
+0x61aa9c	ff3a00b9	ff820399	unscaled release
+0x63df60	bf0200b9	bffe9f88	release
+0x63e524	1f0300b9	1fff9f88	release
+0x63e728	1f0300b9	1fff9f88	release
+0x63e890	df0200b9	dffe9f88	release
+0x6405c4	7f0200b9	7ffe9f88	release
+0x6487e4	5f0300b9	5fff9f88	release
+0x64ccc4	df0200b9	dffe9f88	release
+0x64cec0	bf0200b9	bffe9f88	release
+0x651ce4	bf0200b9	bffe9f88	release
+0x66b898	7f0300b9	7fff9f88	release
+0x72c338	7f1200b9	7f020199	unscaled release
+0x72c4a0	7f1200b9	7f020199	unscaled release
+0x72c754	7f1200b9	7f020199	unscaled release
+0x72c770	7f1200b9	7f020199	unscaled release
+0x72c974	7f1200b9	7f020199	unscaled release
+0x72ce38	7f1200b9	7f020199	unscaled release
+0x72d47c	7f1200b9	7f020199	unscaled release
+0x738914	df0200b9	dffe9f88	release
+0x742290	df0200b9	dffe9f88	release
+0x74dbb8	ff0200b9	fffe9f88	release
+0x87fe7c	bf0200b9	bffe9f88	release
+0x8814c8	bf0200b9	bffe9f88	release
+0x88f8f4	df0200b9	dffe9f88	release
+0x88fa30	df0200b9	dffe9f88	release
+0x88fb6c	9f0200b9	9ffe9f88	release
+0x890140	ff0200b9	fffe9f88	release
+0x890270	bf0200b9	bffe9f88	release
+0x8904c4	ff0200b9	fffe9f88	release
+0x8905f8	bf0200b9	bffe9f88	release
+0x8a971c	3f0300b9	3fff9f88	release
+0x8a98a0	5f0300b9	5fff9f88	release
+0x8a9b3c	1f0300b9	1fff9f88	release
+0x8a9c6c	ff0200b9	fffe9f88	release
+0x8ab13c	5f0300b9	5fff9f88	release
+0x8af7f4	5f0300b9	5fff9f88	release
+0x8af980	5f0300b9	5fff9f88	release
+0x8afb04	3f0300b9	3fff9f88	release
+0x8b1e74	3f0300b9	3fff9f88	release
+0x8b1fe0	3f0300b9	3fff9f88	release
+0x8b214c	3f0300b9	3fff9f88	release
+0x8bacd4	df0200b9	dffe9f88	release
+0x8bae04	9f0200b9	9ffe9f88	release
+0x8bb054	7f0300b9	7fff9f88	release
+0x8bb438	3f0300b9	3fff9f88	release
+0x8c0f7c	9f0300b9	9fff9f88	release
+0x8d38fc	3f0300b9	3fff9f88	release
+0x8f46b8	ff0200b9	fffe9f88	release
+0x8f4a64	9f0300b9	9fff9f88	release
+0x99ee04	bf0200b9	bffe9f88	release
+0x9e6018	7f0200b9	7ffe9f88	release
+0x9e61b0	df0200b9	dffe9f88	release
+0x9e6950	bf0200b9	bffe9f88	release
+0x9e719c	df0200b9	dffe9f88	release
+0x9e732c	3f0300b9	3fff9f88	release
+0x9e9d48	df0200b9	dffe9f88	release
+0x9ea6f0	df0200b9	dffe9f88	release
+0x9eaa10	9f0200b9	9ffe9f88	release
+0x9eac38	ff0200b9	fffe9f88	release
+0x9eae80	9f0200b9	9ffe9f88	release
+0x9eaf20	bf0200b9	bffe9f88	release
+0x9eb0c8	9f0200b9	9ffe9f88	release
+0x9eb3b0	1f0300b9	1fff9f88	release
+0x9ebbf8	df0200b9	dffe9f88	release
+0x9f349c	ff0200b9	fffe9f88	release
+0x9f45cc	9f0200b9	9ffe9f88	release
+0x9f47ac	bf0200b9	bffe9f88	release
+0x9f8024	7f0200b9	7ffe9f88	release
+0x9f828c	9f0200b9	9ffe9f88	release
+0xa052cc	7f0200b9	7ffe9f88	release
+0xa05458	7f0200b9	7ffe9f88	release
+0xa05c5c	df0200b9	dffe9f88	release
+0xa05e3c	df0200b9	dffe9f88	release
+0xa060f0	df0200b9	dffe9f88	release
+0xa06328	df0200b9	dffe9f88	release
+0xa06988	bf0200b9	bffe9f88	release
+0xa06cf8	bf0200b9	bffe9f88	release
+0xa0778c	ff0200b9	fffe9f88	release
+0xa07978	ff0200b9	fffe9f88	release
+0xa07de4	1f0300b9	1fff9f88	release
+0xa080f4	ff0200b9	fffe9f88	release
+0xa081a8	ff0200b9	fffe9f88	release
+0xa08358	bf0200b9	bffe9f88	release
+0xa08514	df0200b9	dffe9f88	release
+0xa085c4	df0200b9	dffe9f88	release
+0xa08a60	bf0200b9	bffe9f88	release
+0xa08cfc	bf0200b9	bffe9f88	release
+0xa08df8	7f0300b9	7fff9f88	release
+0xa08e7c	ff0200b9	fffe9f88	release
+0xa08f30	7f0300b9	7fff9f88	release
+0xa0922c	7f0300b9	7fff9f88	release
+0xa09364	df0200b9	dffe9f88	release
+0xa0a64c	df0200b9	dffe9f88	release
+0xa0a6fc	df0200b9	dffe9f88	release
+0xa0ae04	9f0200b9	9ffe9f88	release
+0xa0e224	7f0300b9	7fff9f88	release
+0xa0eae0	3f0300b9	3fff9f88	release
+0xa0ec3c	3f0300b9	3fff9f88	release
+0xa0f694	df0200b9	dffe9f88	release
+0xa12390	df0200b9	dffe9f88	release
+0xa1265c	df0200b9	dffe9f88	release
+0xa31f80	7f0a00b9	7f820099	unscaled release
+0xa32040	7f0a00b9	7f820099	unscaled release
+0xa322d4	7f0a00b9	7f820099	unscaled release
+0xa326d0	7f0a00b9	7f820099	unscaled release
+0xa32784	7f0a00b9	7f820099	unscaled release
+0xa53510	9f4600b8	9ffe9f88	post-index release
+0xa53514	e00314aa	80120091	event address after release
+0xa536b0	9f4600b8	9ffe9f88	post-index release
+0xa536b4	e00314aa	80120091	event address after release
+0xa56868	7f1a00b9	7f820199	unscaled release
+0xa56938	7f1a00b9	7f820199	unscaled release
+0xa56e3c	1f4400b8	1f2003d5	unlock moved to release wrapper
+0xa56e40	ee5a1b94	60621b94	call release wrapper
+0xa57080	df1a00b9	df820199	unscaled release
+0xa681d0	bf0200b9	bffe9f88	release
+0xa68310	ff0200b9	fffe9f88	release
+0xa6863c	7f0300b9	7fff9f88	release
+0xa686c0	ff0200b9	fffe9f88	release
+0xa68774	7f0300b9	7fff9f88	release
+0xa688cc	bf0200b9	bffe9f88	release
+0xb05c78	9f0a00b9	9f820099	unscaled release
+0xb05d88	9f0a00b9	9f820099	unscaled release
+0xb0dd58	df0200b9	dffe9f88	release
+0xb0e038	df0200b9	dffe9f88	release
+0xb0e25c	1f0300b9	1fff9f88	release
+0xb0e764	7f0200b9	7ffe9f88	release
+0xb0ebe4	bf0200b9	bffe9f88	release
+0xb0f20c	ff0200b9	fffe9f88	release
+0xb0f3f8	ff0200b9	fffe9f88	release
+0xb0f864	1f0300b9	1fff9f88	release
+0xb0fba8	df0200b9	dffe9f88	release
+0xb0fc58	df0200b9	dffe9f88	release
+0xb0fec4	7f0300b9	7fff9f88	release
+0xb0ff48	ff0200b9	fffe9f88	release
+0xb0fffc	7f0300b9	7fff9f88	release
+0xb101f8	df0200b9	dffe9f88	release
+0xb1057c	bf0200b9	bffe9f88	release
+0xb1539c	1f4400b8	1f2003d5	unlock moved to release wrapper
+0xb153a0	96611894	08691894	call release wrapper
+0xb157e8	7f4600b8	7ffe9f88	post-index release
+0xb157ec	e00313aa	60120091	event address after release
+0xb15980	7f4600b8	7ffe9f88	post-index release
+0xb15984	e00313aa	60120091	event address after release
+0xb15b14	7f4600b8	7ffe9f88	post-index release
+0xb15b18	e00313aa	60120091	event address after release
+0xb15cb0	9f4600b8	9ffe9f88	post-index release
+0xb15cb4	e00314aa	80120091	event address after release
+0xb161a0	9f4600b8	9ffe9f88	post-index release
+0xb161a4	e00314aa	80120091	event address after release
+0xb163bc	bf4600b8	bffe9f88	post-index release
+0xb163c0	e00315aa	a0120091	event address after release
+0xb16524	df4600b8	dffe9f88	post-index release
+0xb16528	e00316aa	c0120091	event address after release
+0xb166d8	df4600b8	dffe9f88	post-index release
+0xb166dc	e00316aa	c0120091	event address after release
+0xb16810	7f4600b8	7ffe9f88	post-index release
+0xb16814	e00313aa	60120091	event address after release
+0xb1a780	ff0a00b9	ff820099	unscaled release
+0xb1aaa0	bf0a00b9	bf820099	unscaled release
+0xb1acc4	1f0b00b9	1f830099	unscaled release
+0xb1ae60	df0200b9	dffe9f88	release
+0xb2b664	bf0200b9	bffe9f88	release
+0xb2b7ec	1f0300b9	1fff9f88	release
+0xb2bcb4	df0200b9	dffe9f88	release
+0xb2c314	bf0200b9	bffe9f88	release
+0xb2c5e0	bf0200b9	bffe9f88	release
+0xb2c984	bf0200b9	bffe9f88	release
+0xb2d144	bf0200b9	bffe9f88	release
+0xb2d788	ff0200b9	fffe9f88	release
+0xb2d974	ff0200b9	fffe9f88	release
+0xb2ddd8	1f0300b9	1fff9f88	release
+0xb2e234	df0200b9	dffe9f88	release
+0xb2e2e4	df0200b9	dffe9f88	release
+0xb2e780	bf0200b9	bffe9f88	release
+0xb2ea1c	bf0200b9	bffe9f88	release
+0xb2eb18	7f0300b9	7fff9f88	release
+0xb2eb9c	ff0200b9	fffe9f88	release
+0xb2ec50	7f0300b9	7fff9f88	release
+0xb2f428	bf0200b9	bffe9f88	release
+0xb2ffe0	df0200b9	dffe9f88	release
+0xb30090	df0200b9	dffe9f88	release
+0xb30374	7f0300b9	7fff9f88	release
+0xb304bc	df0200b9	dffe9f88	release
+0xb34fe0	df0200b9	dffe9f88	release
+0xb35318	df0200b9	dffe9f88	release
+0xb35c70	9f0200b9	9ffe9f88	release
+0xb35f70	df0200b9	dffe9f88	release
+0xb620b8	7f3a00b9	7f820399	unscaled release
+0xb63f4c	7f3a00b9	7f820399	unscaled release
+0xb65bac	bf1a00b9	bf820199	unscaled release
+0xb66628	1f1b00b9	1f830199	unscaled release
+0xb66720	1f1b00b9	1f830199	unscaled release
+0xbcd404	ff0200b9	fffe9f88	release
+0xbcd7ec	df0200b9	dffe9f88	release
+0xbcdf9c	9f0200b9	9ffe9f88	release
+0xbcfa10	bf0200b9	bffe9f88	release
+0xbcfb90	bf0200b9	bffe9f88	release
+0xbcfe9c	ff0200b9	fffe9f88	release
+0xbcff50	ff0200b9	fffe9f88	release
+0xbd0100	bf0200b9	bffe9f88	release
+0xbd02d4	df0200b9	dffe9f88	release
+0xbd0384	df0200b9	dffe9f88	release
+0xbd0718	bf0200b9	bffe9f88	release
+0xbd08b4	bf0200b9	bffe9f88	release
+0xbd0c58	7f0300b9	7fff9f88	release
+0xbd0cdc	ff0200b9	fffe9f88	release
+0xbd0d90	7f0300b9	7fff9f88	release
+0xce7ccc	df1200b9	df020199	unscaled release
+0xce7e08	bf1200b9	bf020199	unscaled release
+0xcef398	7f9200b9	7f020999	unscaled release
+0xceffb0	7f9200b9	7f020999	unscaled release
+0xcf08d8	7f9200b9	7f020999	unscaled release
+0xcf1094	7f9200b9	7f020999	unscaled release
+0xcf16d8	7f9200b9	7f020999	unscaled release
+0xcf1d90	7f9200b9	7f020999	unscaled release
+0xcf26b8	7f9200b9	7f020999	unscaled release
+0xcf45a4	7f9200b9	7f020999	unscaled release
+0xd1c290	7f4600b8	7ffe9f88	post-index release
+0xd1c294	e00313aa	60120091	event address after release
+0xd1c68c	7f4600b8	7ffe9f88	post-index release
+0xd1c690	e00313aa	60120091	event address after release
+0xd1ca48	7f0200b9	7ffe9f88	release
+0x112f7c0	000000000000000000000000	1ffc9f88001000918cf8ff17	release wrapper in verified executable text padding

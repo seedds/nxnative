@@ -199,6 +199,32 @@ def glslc_stage(ctl, code):
     headerless_cs = code[:4] not in (CS_MAGIC, GFX_MAGIC) and len(ctl) >= 0x754 and all(struct.unpack_from('<3I', ctl, 0x748))
     return 'cs' if code[:4] == CS_MAGIC or headerless_cs else sph_stage(code) if code[:4] == GFX_MAGIC and len(code) >= 0x34 else None
 
+def fxp_shaders(d, label):
+    """Skyrim's FXP cache: NVN records {control offset, length, code offset,
+    length}, followed by the control and code. Its SDK 3.4 controls are 0x848
+    bytes; some compute code areas have no graphics header. Locate records by
+    their control magic and validate both independent lengths and offsets,
+    rather than interpreting the engine's variable-length permutation metadata.
+    Programs combine at draw time, so separable_pairs supplies their cover.
+    """
+    out = []
+    for match in re.finditer(re.escape(CTL_MAGIC), d):
+        c = match.start()
+        if c < 16 or c + 0x754 > len(d): continue
+        off, nc, ko, nk = struct.unpack_from('<4I', d, c - 16)
+        if off != 16 or nc < 0x760 or ko != off + nc: continue
+        if nc != struct.unpack_from('<I', d, c + 0x20)[0]: continue
+        k = c - off + ko
+        if nk == 0 or nc > len(d) - c or nk > len(d) - k:
+            red(f'{label} FXP @{c:#x}: truncated NVN shader record')
+        ctl, code = d[c:c + nc], d[k:k + nk]
+        st = glslc_stage(ctl, code)
+        if not st: red(f'{label} FXP @{c:#x}: unknown shader stage')
+        why = check(label, st, ctl, code)
+        if why: red(f'{label} FXP @{c:#x}: {why}')
+        out.append((f'{label}#FXP@{c:#x}', st, ctl, code))
+    return out
+
 def glslc_section(d, h, size):
     """The GPU code sections of the GLSLC output at h, from its section headers: output +0x4c = section count, section i's header at +0x90 + 0x90 i = {u32 size, u32 data offset (from the
     output), u32 type (0 = GPU code)}; a GPU code header adds +0x30 control offset, +0x34 code offset (both from the section's data), +0x38 code length, +0x3c control length.
@@ -2003,6 +2029,7 @@ SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@',
 # MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; and YEBIS's effect file (tfxo_shaders)
+SINGLE_STAGE += ('#FXP@',)   # Skyrim's separately bound NVN programs
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
     from the pipeline state) have their real pairs only at draw time. vs_pad uses only the union of the locations the paired pixel shaders read, so every single-stage vertex shader is paired with
@@ -2068,7 +2095,12 @@ def scan_file_in(args):
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
-    if len(args) > 2 and args[2][0] == b'ARH1':
+    if head[:4] == b'BSA\0':
+        import bsa
+        for name, data in bsa.shader_files(path, opener=open):
+            found.extend(fxp_shaders(data, '/' + rel + '/' + name))
+        return rel, uniq_keys(found), var_pairs(found), trees
+    elif len(args) > 2 and args[2][0] == b'ARH1':
         arh_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == NLG_DICT:
@@ -2199,6 +2231,9 @@ def main():
             try: common = unityfs.common_strings(img)
             except ValueError: common = None   # not a Unity game
         found = []; scan_blob(img, 'main' + ('@' + tag if tag else ''), found)
+        # Creation Engine embeds the same offset/length records as its FXP
+        # archive in main (including older, unaligned 0x7d1-byte controls).
+        found += fxp_shaders(img, 'main' + ('@' + tag if tag else ''))
         found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)

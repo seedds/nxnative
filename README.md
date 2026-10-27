@@ -171,6 +171,11 @@ Under each game: the IPA's size, and "60 fps with 1.2.0" where the game runs at 
 <td align="center" valign="top" width="33%"><img src="docs/images/blasphemous-2.png" width="256" alt="Blasphemous 2"><br><a href="dm/games/010040801A4C8000/README.md">Blasphemous 2</a><br><sub>~1.5 GB</sub></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/blasphemous.jpg" width="256" alt="Blasphemous"><br><a href="dm/games/0100698009C6E000/README.md">Blasphemous</a><br><sub>~0.9 GB</sub></td>
 </tr>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/images/skyrim.png" width="256" alt="The Elder Scrolls V: Skyrim"><br><a href="dm/games/01000A10041EA000/README.md">The Elder Scrolls V: Skyrim</a><br><sub>~16.1 GB</sub></td>
+<td></td>
+<td></td>
+</tr>
 </table>
 <!-- end of gallery -->
 

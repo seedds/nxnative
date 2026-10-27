@@ -10,7 +10,7 @@
 - Tests: <!-- e.g. make -C dm/host/tests GAME=<id> run; make -C dm/gfx/tests GAME=<id> run (Apple silicon, Metal); the dm/tools/tests that apply -->
 - Games run, with title ID and version: <!-- what was played, for how long, and what was compared (log lines, frame times, screenshots) -->
 - Devices and OS: <!-- e.g. M2 Max, macOS 26.1; iPhone 17 Pro Max, iOS 26.1 -->
-- For a change to the shader chain, the host or a tool that every game uses: the games it was run on beyond the one it was made for, or why none
+- For a change to the shader chain, the host or a tool that every game uses: the `scripts/regress.py check --games` report on the games it most likely reaches (`regress.py impact` helps), or why none ([06-dev-loop.md](https://github.com/seedds/nxnative/blob/main/docs/agents/06-dev-loop.md))
 - Measurements before and after, where the change is about speed, memory or power
 
 ## Docs

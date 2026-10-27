@@ -1,6 +1,5 @@
 name: Bug report
 description: A game that crashes, hangs, draws wrong or runs slowly, or a script or build step that fails
-labels: []
 body:
   - type: markdown
     attributes:
@@ -69,7 +68,7 @@ body:
     id: env
     attributes:
       label: Settings and environment overrides
-      description: "Launcher settings you changed, the contents of `env.txt` (`Documents/env.txt` on iOS, `--env-file` for an app), and any `DM_*` variables set in the terminal. Write \"none\" if there are none."
+      description: "Settings you changed on the settings screen or in the Mac settings window, the contents of `env.txt` (`Documents/env.txt` on iOS; `~/Library/Application Support/nxnative/<title ID>/env.txt` or `--env-file` for a Mac app), and any `DM_*` variables set in the terminal or by a front end. Write \"none\" if there are none."
       placeholder: "DM_FPS_TARGET=60\nDM_PRESENT_UPSCALE=metalfx"
     validations:
       required: true

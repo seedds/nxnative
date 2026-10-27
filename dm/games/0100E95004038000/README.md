@@ -135,6 +135,30 @@ to a visible defect is not established.
   `issue424-controls/` and `issue424-idle-benchmark/results-valid/`; the earlier
   idle benchmark with an incorrect shader-cache path is marked invalid.
 
+### Controller motion review
+
+**Current (PR #351, 2026-10-27):** the full regression comparison of `6d1e07b`
+with `f978e28` reaches the tutorial on both hosts, with unchanged shaders and
+no new red lines, but flags windowed frame timing. The candidate repeatedly
+logs one-second display-link stalls; the baseline also stalls and misses both
+requested screenshots. Its windowed visual comparison is unavailable.
+
+Two cached-archive A/B repeats in reverse order reproduce the large spikes on
+both hosts, with nearly identical median frame rates. A second two-run pair
+using direct presentation (`DM_PRESENT_LINK=0`) has matching 33.24 ms median
+frame times and overlapping p99 ranges. These controls do not reproduce a
+consistent slowdown from the gyro change. Windowed performance remains open
+for a controlled foreground run; see [silent display links](../../../docs/reference/frame-rate.md#present-thread-rescues-a-silent-display-link).
+`DM_WINDOW=0` still creates a window: the Mac front end checks whether the
+variable exists.
+
+The original flagged report is `nx-harness/reports/pr351-review/` on the game
+drive. The cached-archive controls are in this game's
+`0100E95004038000-work/regress/pr351-windowed-ab/` and
+`0100E95004038000-work/regress/pr351-direct-ab/`; their public tables are in
+[PR #351](https://github.com/seedds/nxnative/pull/351).
+
+
 ## Integration with main
 
 Rebased onto `75065df` (2026-10-27), whose shader chain is `157e1b96c8da`.
@@ -171,3 +195,4 @@ that diagnostic launch did not yet have a shader map configured.
 
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers).
 - [Queue initialization captures the raster origin](../../../docs/reference/rendering.md#queue-initialization-captures-the-raster-origin).
+- [Present thread rescues a silent display link](../../../docs/reference/frame-rate.md#present-thread-rescues-a-silent-display-link): the motion review's windowed timing comparison is confounded by repeated stalls; see [Controller motion review](#controller-motion-review).

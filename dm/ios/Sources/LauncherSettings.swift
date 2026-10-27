@@ -24,7 +24,7 @@ struct Setting: Decodable, Identifiable {
         switch kind {
         case "choice": return options?.contains { $0[0] == v } ?? false
         case "range":
-            guard let n = Double(v), n.isFinite, let lo = min, let hi = max else { return false }
+            guard !v.contains(where: { $0 == "x" || $0 == "X" }), let n = Double(v), n.isFinite, let lo = min, let hi = max else { return false }   // no hex: launcher.c's check agrees
             return n >= lo && n <= hi
         case "toggle": return v == onValue || v == offValue
         default: return true
@@ -36,8 +36,8 @@ struct SettingsFile: Decodable { let settings: [Setting] }
 
 final class LauncherModel: ObservableObject {
     let settings: [Setting]
-    let fixed: Set<String>      // set by an env file or, on the Mac, by the launch environment: shown, not changed
-    let fromLaunch: Set<String>   // of those, the ones the launch environment set (a front end's launch overrides; the Mac launcher's DM_ENV_LAUNCH_KEYS)
+    let fixed: Set<String>      // set by an env file or by the launch environment: shown, not changed
+    let fromLaunch: Set<String>   // of those, the ones the launch environment set (a front end's launch overrides, Xcode; DM_ENV_LAUNCH_KEYS from launcher.c or main.m)
     let ignoreSaved: Bool   // DM_SAVED_CHOICES=0: start from the defaults, and leave the saved choices as they are
     @Published var values: [String: String] = [:]
 
@@ -53,7 +53,7 @@ final class LauncherModel: ObservableObject {
         if ignoreSaved { fputs("launcher: saved choices ignored (DM_SAVED_CHOICES=0)\n", stderr) }
         for s in settings {
             if fixed.contains(s.env), let v = env[s.env] { values[s.env] = v; continue }
-            let saved = ignoreSaved ? nil : defaults.string(forKey: "launcher." + s.env)
+            let saved = ignoreSaved ? nil : defaults.object(forKey: "launcher." + s.env) as? String   // a string, as launcher.c reads it: not string(forKey:), which turns a number into one
             values[s.env] = saved.flatMap { s.accepts($0) ? $0 : nil } ?? s.def   // a saved choice the game no longer offers: its default
         }
     }
@@ -86,12 +86,10 @@ final class LauncherModel: ObservableObject {
     }
     var changed: Bool { settings.contains { !fixed.contains($0.env) && !$0.isDefault(values[$0.env] ?? $0.def) } }
 
-    // Reset every launcher choice to the game's defaults; values fixed by an env file or at launch stay, and with DM_SAVED_CHOICES=0 so does the store.
+    // Reset every launcher choice to the game's defaults on the screen; values fixed by an env file or at launch stay. The saved choices are forgotten when Play applies
+    // the defaults (apply() keeps no default), so Quit after Reset keeps them, and a choice a launch override hides is kept
     func reset() {
-        for s in settings {
-            if !ignoreSaved { defaults.removeObject(forKey: "launcher." + s.env) }
-            if !fixed.contains(s.env) { values[s.env] = s.def }
-        }
+        for s in settings where !fixed.contains(s.env) { values[s.env] = s.def }
         fputs("launcher: settings reset to the game's defaults\n", stderr)
     }
 

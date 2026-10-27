@@ -75,7 +75,7 @@ class XcodePipelineTests(unittest.TestCase):
             try:
                 with redirect_stdout(output):
                     code = build.cli([str(root), '-k', str(root / 'prod.keys'), '--prepare-xcode',
-                                      '--language', 'ja', '--no-show-fps', '--progress', 'json'])
+                                      '--language', 'ja', '--no-show-fps', '--no-motion', '--progress', 'json'])
             finally:
                 progress.close()
             self.assertEqual(code, 0)
@@ -87,6 +87,8 @@ class XcodePipelineTests(unittest.TestCase):
             environment = mocks['run'].call_args.kwargs['env']
             self.assertEqual(environment['DM_LANG'], 'ja')
             self.assertEqual(environment['DM_SHOW_FPS'], '0')
+            self.assertIn('DM_ENV_FILE', environment)   # --no-motion bakes DM_MOTION=0 into the app's dm/env.txt
+            self.assertEqual(Path(environment['DM_ENV_FILE']).read_text(), 'DM_MOTION=0\n')
             self.assertEqual(environment['GFXAPI'], graphics)
             self.assertEqual(environment['DM_BUNDLE_ID'], 'com.example.saved')
             self.assertEqual(environment['DM_TEAM_ID'], 'ABCDEFGHIJ')
@@ -110,6 +112,16 @@ class XcodePipelineTests(unittest.TestCase):
             build.report_profile_status(profile, profile, 'v0', False, True, 'Xcode project')
         events = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertIn('Xcode project was built from a provisional', events[0]['msg'])
+
+
+class BuildEnvFileTests(unittest.TestCase):
+    def test_no_motion_keeps_the_env_files_switches(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            mine = work / 'mine.txt'
+            mine.write_text('# diagnostics\nDM_MOTION_LOG=1\nDM_MOTION=1\n')
+            self.assertEqual(build.build_env_file(work, str(mine), True), str(mine))
+            self.assertEqual(Path(build.build_env_file(work, str(mine), False)).read_text(), 'DM_MOTION_LOG=1\nDM_MOTION=0\n')
 
 
 class ResourceStagingTests(unittest.TestCase):

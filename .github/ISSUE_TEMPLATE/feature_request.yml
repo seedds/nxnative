@@ -1,6 +1,5 @@
 name: Feature request
 description: Ask for something nxnative does not do yet
-labels: []
 body:
   - type: markdown
     attributes:

@@ -1,6 +1,5 @@
 name: Game request or bring-up report
 description: Ask for a game, or report how far a game without a profile gets
-labels: []
 body:
   - type: markdown
     attributes:

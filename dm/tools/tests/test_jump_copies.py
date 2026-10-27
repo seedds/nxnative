@@ -11,14 +11,14 @@ from capstone.arm64 import ARM64_OP_IMM
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
-from nso_asm import ADRP, ADDI, ADDR, B, BLR, BR, NOP
+from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 
 # patch_nso.py is a command-line program whose top level loads and rewrites an image.
 # Compile its actual recognition functions without executing that driver.
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'jump_masked_pred')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -169,6 +169,69 @@ class MaskedPredecessor(unittest.TestCase):
 
     def test_no_base_no_site(self):
         self.assertIsNone(self.run_site(self.words(w0=NOP, w1=NOP)))
+
+
+class MaskedComplement(unittest.TestCase):
+    TABLE = 0x4040
+    TARGETS = [0x30 + i * 4 for i in range(7)]
+
+    def setUp(self):
+        tabjumps.clear(); jumps.clear()
+        for i, t in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, t - self.TABLE)
+        # The next table's first word is deliberately not a target of this function.
+        struct.pack_into('<i', IMG, self.TABLE + 28, 0x1000)
+
+    def words(self, **over):
+        w = [ADRP(11, 0, self.TABLE), ADDI(11, 11, self.TABLE & 0xfff),
+             0x720009ff, BEQ(12, 44), 0x2a2f03ef, 0x924009ef, NOP,
+             0xb8af796f, ADDR(18, 15, 11), mov(15, 16, False), BR(18), RET] + [NOP] * 7
+        for k, v in over.items(): w[int(k[1:])] = v
+        return w
+
+    def run_site(self, words):
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = [p for i, word in enumerate(words) for p in md.disasm(struct.pack('<I', word), 4 * i)]
+        return scope['jump_masked_not'](ins, next(i for i, p in enumerate(ins) if p.mnemonic == 'br' and p.op_str == 'x18'))
+
+    def test_reads_exactly_seven_entries(self):
+        self.assertEqual(self.run_site(self.words()), self.TARGETS)
+
+    def test_guard_source_mask_and_complement_must_agree(self):
+        for slot, word in ((2, 0x720009df), (2, 0x72000dff), (3, BEQ(12, 44) | 1), (3, BEQ(12, 20)),
+                           (4, NOP), (4, 0x2a2e03ef), (5, 0x92400def)):
+            with self.subTest(slot=slot, word=hex(word)):
+                self.assertIsNone(self.run_site(self.words(**{f'w{slot}': word})))
+
+    def test_intervening_writes_control_flow_and_undecodable_words(self):
+        for slot, word in ((6, mov(15, 0)), (6, mov(11, 0, False)), (6, BLR(0)), (6, B(24, 28)), (6, 0xe7ffdefe), (9, mov(18, 0))):
+            with self.subTest(slot=slot, word=hex(word)):
+                self.assertIsNone(self.run_site(self.words(**{f'w{slot}': word})))
+
+    def test_incoming_edges_cannot_bypass_the_guard(self):
+        for target in (12, 16, 20, 24, 28, 32, 36, 40):
+            with self.subTest(target=target):
+                self.assertIsNone(self.run_site(self.words(w11=B(44, target))))
+        tabjumps[0x1000] = [20]
+        self.assertIsNone(self.run_site(self.words()))
+        tabjumps.clear(); jumps[0x1004] = (0, 8)
+        self.assertIsNone(self.run_site(self.words()))
+        jumps.clear()
+        self.assertEqual(self.run_site(self.words(w11=B(44, 8))), self.TARGETS)
+
+    def test_base_and_targets_must_be_valid(self):
+        self.assertIsNone(self.run_site(self.words(w0=NOP)))
+        self.assertIsNone(self.run_site(self.words(w1=mov(11, 0, False))))
+        self.assertIsNone(self.run_site(self.words(w12=0xe7ffdefe)))
+        struct.pack_into('<i', IMG, self.TABLE + 24, 0x1000)
+        self.assertIsNone(self.run_site(self.words()))
+
+    def test_this_tables_targets_cannot_bypass_the_guard(self):
+        for target in (12, 16, 20, 28, 40):
+            with self.subTest(target=target):
+                struct.pack_into('<i', IMG, self.TABLE, target - self.TABLE)
+                self.assertIsNone(self.run_site(self.words()))
+        struct.pack_into('<i', IMG, self.TABLE, 8 - self.TABLE)
+        self.assertEqual(self.run_site(self.words()), [8] + self.TARGETS[1:])
 
 
 if __name__ == '__main__': unittest.main()

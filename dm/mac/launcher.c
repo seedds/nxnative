@@ -99,7 +99,7 @@ static int saved_accepted(CFDictionaryRef rule, CFStringRef v, const char *s) { 
     if (!lo || !hi || CFGetTypeID(lo) != CFNumberGetTypeID() || CFGetTypeID(hi) != CFNumberGetTypeID()) return 0;
     CFNumberGetValue(lo, kCFNumberDoubleType, &l); CFNumberGetValue(hi, kCFNumberDoubleType, &h);
     char *end; double x = strtod(s, &end);
-    return *s && !isspace((unsigned char)*s) && !*end && x == x && x >= l && x <= h;   // as the iPhone's Double(): no leading space, no NaN
+    return *s && !isspace((unsigned char)*s) && !strpbrk(s, "xX") && !*end && x == x && x >= l && x <= h;   // as Setting.accepts (LauncherSettings.swift): no leading space, no hex, no NaN
 }
 
 static CFArrayRef setting_rules(void) {   // Info.plist DMSettings (pack_app.py, from launcher.json): each setting's variable and the values it takes

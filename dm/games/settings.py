@@ -37,9 +37,9 @@ def render_base(g):
     {"docked": [w, h], "handheld": [w, h]}, for a front end to show the render scale in pixels; None when the profile has none"""
     v = g.get('render_base', '')
     if not v: return None
-    sizes = [tuple(int(x) for x in m) for m in re.findall(r'(\d+)x(\d+)', v)]
-    if len(sizes) != 2 or len(v.split()) != 2: sys.exit(f'{g.id}: render_base is "<w>x<h> <w>x<h>" (docked, then handheld): {v}')
-    return {'docked': list(sizes[0]), 'handheld': list(sizes[1])}
+    m = re.fullmatch(r'\s*(\d+)x(\d+)\s+(\d+)x(\d+)\s*', v)
+    if not m: sys.exit(f'{g.id}: render_base is "<w>x<h> <w>x<h>" (docked, then handheld): {v}')
+    return {'docked': [int(m[1]), int(m[2])], 'handheld': [int(m[3]), int(m[4])]}
 
 
 def rows():

@@ -1,5 +1,5 @@
 // Clock snapshot arithmetic (hle_time.c, from PR #36): CalculateSpanBetween and CalculateStandardUserSystemClockDifferenceByUser looked up by their mangled names in the real swforce
-// registrations, run on snapshots made by the host's own CreateWithStandardSystemClock and on edited copies
+// registrations, run on both host snapshot entries and on edited copies
 #include "../hle_time.c"
 #include <mach-o/getsect.h>
 
@@ -19,11 +19,42 @@ static void put64(uint8_t *s, int off, int64_t v) { memcpy(s + off, &v, 8); }
 static int64_t get64(const uint8_t *s, int off) { int64_t v; memcpy(&v, s + off, 8); return v; }
 int main(void) {
     Result (*snap)(uint8_t *) = hook("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_");
+    Result (*adj_snap)(uint8_t *) = hook("_ZN2nn4time13ClockSnapshot31CreateWithAdjustableSystemClockEPS1_");
     Result (*span)(int64_t *, const uint8_t *, const uint8_t *) = hook("_ZN2nn4time20CalculateSpanBetweenEPNS_8TimeSpanERKNS0_13ClockSnapshotES5_");
     int64_t (*udiff)(const uint8_t *, const uint8_t *) = hook("_ZN2nn4time48CalculateStandardUserSystemClockDifferenceByUserERKNS0_13ClockSnapshotES3_");
-    if (!snap || !span || !udiff) { printf("time: %d checks, %d failed\n", checks, fails); return 1; }
+    if (!snap || !adj_snap || !span || !udiff) { printf("time: %d checks, %d failed\n", checks, fails); return 1; }
     uint8_t a[0xd0], b[0xd0], c[0xd0]; int64_t ts = -1;
+    // Before the first snapshot: h_time_GetCurrentTime reads DM_FIXED_TIME once and caches it
+    setenv("DM_FIXED_TIME", "1700000000", 1);
+    setenv("TZ", "UTC", 1); tzset();
     CHECK(snap(a) == RES_OK, "snapshot a");
+    CHECK(a[0xcd] == 1, "standard snapshot type is 1");
+    // Both entries must stay inside the SDK's 0xd0-byte buffer, including the type near its end.
+    uint8_t guarded[0xf0]; memset(guarded, 0xa5, sizeof guarded);
+    uint8_t *adjustable = guarded + 0x10;
+    CHECK(snap(adjustable) == RES_OK, "standard snapshot in guarded buffer");
+    int standard_guards_ok = 1;
+    for (int i = 0; i < 0x10; i++) standard_guards_ok &= guarded[i] == 0xa5 && guarded[0xe0 + i] == 0xa5;
+    CHECK(standard_guards_ok, "standard snapshot writes only its 0xd0 bytes");
+    memset(guarded, 0xa5, sizeof guarded);
+    CHECK(adj_snap(adjustable) == RES_OK, "adjustable snapshot");
+    int guards_ok = 1;
+    for (int i = 0; i < 0x10; i++) guards_ok &= guarded[i] == 0xa5 && guarded[0xe0 + i] == 0xa5;
+    CHECK(guards_ok, "adjustable snapshot writes only its 0xd0 bytes");
+    CHECK(adjustable[0xcd] == 2, "adjustable snapshot type is 2");
+    CHECK(get64(adjustable, 0x40) == 1700000000, "adjustable user time follows the host clock");
+    const CalendarTime *cal = (const CalendarTime *)(adjustable + 0x50);
+    CHECK(cal->year == 2023 && cal->month == 11 && cal->day == 14 && cal->hour == 22 && cal->minute == 13 && cal->second == 20,
+          "adjustable snapshot has the UTC calendar for the fixed time");
+    uint8_t zero[0x20] = {0};
+    CHECK(!memcmp(adjustable + 0x20, zero, sizeof zero) && get64(adjustable, 0x48) == 0,
+          "offline snapshot has no network clock context or time");
+    CHECK(!memcmp(a + 0x98, adjustable + 0x98, 16), "both snapshots use the same steady clock source");
+    CHECK(udiff(a, adjustable) == 0, "changing snapshot type does not report a user clock change");
+    CHECK(!strcmp((const char *)adjustable + 0xa8, "UTC"), "adjustable snapshot carries the host time zone");
+    memcpy(b, a, sizeof b); b[0xcd] = 2;
+    CHECK(span(&ts, a, b) == RES_OK && ts == 0, "changing only the type leaves the elapsed span at zero");
+    unsetenv("DM_FIXED_TIME");
     CHECK(span(&ts, a, a) == RES_OK && ts == 0, "span of a snapshot with itself is 0");
     memcpy(b, a, sizeof b); put64(b, 0x90, get64(a, 0x90) + 90);   // b: 90 s of steady clock later
     CHECK(span(&ts, a, b) == RES_OK && ts == 90 * 1000000000LL, "span from the steady time points, in nanoseconds");

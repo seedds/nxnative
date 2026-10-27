@@ -429,6 +429,16 @@ class App(unittest.TestCase):
         self.assertEqual((p['DMTitleID'], p['DMLanguage'], p['DMRomfsMarker'], p['CFBundleIconFile']), (TID, 'fr', 'region_common/audio/edward.bfsar', 'AppIcon'))
         self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
 
+    def test_packed_language_is_the_lists(self):   # --lang a game lacks: the Game language row's default (settings.py: the game's first), with or without the window
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d:
+            listed = Path(d) / 'launcher.json'
+            listed.write_text(json.dumps({'game': TID, 'settings': [{'env': 'DM_LANG', 'kind': 'choice', 'section': 'Game', 'label': 'Game language', 'note': '', 'default': 'ja',
+                                                                      'options': [['ja', 'Japanese'], ['ko', 'Korean']]}]}))
+            a = types.SimpleNamespace(**vars(self.args)); a.settings = str(listed)
+            self.assertEqual(pack_app.info_plist(a, '14.0', None)['DMLanguage'], 'ja')   # --lang fr
+            a.settings = None
+            self.assertEqual(pack_app.info_plist(a, '14.0', None)['DMLanguage'], 'fr')   # no list: --lang as given
+
     def test_saved_choices(self):
         """launcher.<VAR> in the app's preferences domain, as a front end or a settings window saves it: used from Finder or the Dock, checked against this build's settings,
         after the launch environment, the player's env.txt and the bundle's, and ignored with DM_SAVED_CHOICES=0"""
@@ -477,6 +487,8 @@ class App(unittest.TestCase):
             save('DM_RENDER_SCALE', '-float', '0.75')   # not a string
             self.assertNotIn('DM_RENDER_SCALE', run(app))
             save('DM_RENDER_SCALE', '-string', ' 0.75')   # a number the iPhone's settings screen would not take either
+            self.assertNotIn('DM_RENDER_SCALE', run(app))
+            save('DM_RENDER_SCALE', '-string', '0x1p-1')   # hex, which neither side takes (Setting.accepts)
             self.assertNotIn('DM_RENDER_SCALE', run(app))
             listed['settings'][0]['options'] = [['60', '60 fps']]; listed['settings'][0]['default'] = '60'   # a rebuild that no longer offers 30 fps
             r = run(pack('Rebuilt', listed))

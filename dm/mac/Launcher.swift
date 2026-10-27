@@ -99,7 +99,10 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         if NSApp.isActive { w.makeKeyAndOrderFront(nil) } else { w.orderBack(nil) }
     }
     func applicationDidBecomeActive(_ n: Notification) { window?.makeKeyAndOrderFront(nil) }
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { finish(false); return .terminateCancel }   // ⌘Q is Quit: launcher.c returns 0
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {   // ⌘Q, or a logout or restart: the app ends without the game (exit 0, as Quit)
+        fputs("launcher: quit without starting the game\n", stderr)
+        return .terminateNow   // not terminateCancel, which a logout or restart takes as a refusal and stops
+    }
     func windowWillClose(_ n: Notification) { finish(false) }
 
     func fit(_ extraHeight: CGFloat) {

@@ -101,9 +101,9 @@ def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .ic
         run(['iconutil', '-c', 'icns', s, '-o', out])
 
 
-def settings_rules(path):   # DMSettings: what the launcher accepts as each setting's saved choice (docs/frontends.md, Saved choices)
+def settings_rules(listed):   # DMSettings: what the launcher accepts as each setting's saved choice (docs/frontends.md, Saved choices)
     rules = []
-    for s in json.loads(Path(path).read_text(encoding='utf-8'))['settings']:
+    for s in listed:
         if s['kind'] == 'range': rules.append({'env': s['env'], 'min': float(s['min']), 'max': float(s['max'])})
         elif s['kind'] == 'choice': rules.append({'env': s['env'], 'values': [o[0] for o in s['options']]})
         elif s['kind'] == 'toggle': rules.append({'env': s['env'], 'values': [s.get('on', '1'), s.get('off', '0')]})
@@ -116,7 +116,11 @@ def info_plist(a, minos, icon):
          'CFBundleInfoDictionaryVersion': '6.0', 'LSMinimumSystemVersion': minos, 'LSArchitecturePriority': ['arm64'], 'NSHighResolutionCapable': True,
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US'}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
-    if a.settings: p['DMSettings'] = settings_rules(a.settings)
+    if a.settings:
+        listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']
+        p['DMSettings'] = settings_rules(listed)
+        lang = next((s['default'] for s in listed if s['env'] == 'DM_LANG'), None)
+        if lang: p['DMLanguage'] = lang   # the Game language row's default: --lang, or the game's first language when it lacks that one (settings.py), with or without the window
     return p
 
 

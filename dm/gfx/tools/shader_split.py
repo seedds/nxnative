@@ -12,7 +12,7 @@
 #       block = control section + code area. A program's vertex / pixel stages form a pair. The game's own serialized files (data.unity3d, unity default resources) carry no type trees and borrow the bundles' Shader type tree of the same hash (second pass),
 #       or take the layout unityfs.py has for that hash (KNOWN_TREES) when no bundle has one (Brain Memory Training Academy, Unity 2022.3: no bundles at all)
 #       Before 2019.3 (Cuphead, Unity 2017.4; found by armyja, GitHub pull request #2) a subprogram holds one stage: program code = a 0x10 header {?, ?, control length, code length} + control section
-#       + code area, and the stage is not in the code but in the Shader's m_ParsedForm (unity_stages)
+#       + code area, and the stage is not in the code but in the Shader's m_ParsedForm (unity_stages). Its pass's pixel-input cover supplies the vertex padding pairs (unity_pass_pairs)
 #       Unity 2022 (Ace Attorney Investigations Collection, 2022.3) keeps the 0x60 header in the program code, but the blob also holds parameter entries, which unity_code_blobs leaves out
 #       A game's own GLSLC outputs in a TextAsset are read too (FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition, Unity 2018.4: shader.switch.vfxsb, unity_text_glslc)
 #   · MSHD (MercurySteam, Metroid Dread system/shd/*.bshdat): each stage = a control section (+0x20 = control length; sometimes a small compiler option table follows) + the code area starting at the next code header;
@@ -1897,24 +1897,55 @@ def unity_compute(x, base, trees):
         if not TREES: raise
         print(f'[RED] {base}: ComputeShader objects that no bundle lends a type tree to and unityfs.py has no layout for, their kernels are left out ({e})', flush=True)
         return []
+    # The NSP script may derive shader-only tables when a new reader adds compute kernels to a registered build.
+    # Emit the actual reader's key/source evidence; guessing from asset names could admit unrelated table changes.
+    for where, _, ctl, code in out:
+        print('unity compute source: ' + json.dumps([skey(ctl, code), where]), flush=True)
     return out
 
+def unity_pass_pairs(o, programs):
+    """Legacy one-stage programs → vertex / pixel-input-cover pairs within each parsed pass and platform.
+    Unity selects the stages separately; their blob indices differ even with the same keywords (Obra Dinn's OneBit/Rope: vertex 0, pixel 8).
+    Cover every pixel input of the pass, including variants with stage-specific keywords and stripped-variant fallbacks, without assuming equal keyword lists
+    or forming the full Cartesian product. These supplemental pairs feed output padding through pso_pairs.tsv, leaving existing evidence-pair tables unchanged."""
+    pairs = set()
+    for sub in (o.get('m_ParsedForm') or {}).get('m_SubShaders', []):
+        for p in sub.get('m_Passes', []):
+            for plat in {plat for plat, _ in programs}:
+                stages = {}
+                for field, stage in (('progVertex', 'vs'), ('progFragment', 'ps')):
+                    stages[stage] = {}
+                    for sp in (p.get(field) or {}).get('m_SubPrograms', []):
+                        program = programs.get((plat, sp.get('m_BlobIndex')))
+                        if program and program[0] == stage:
+                            _, ctl, code = program
+                            stages[stage][skey(ctl, code)] = code
+                cover = pixel_input_cover(stages['ps'])
+                pairs.update((v, f) for v in stages['vs'] for f in cover)
+    return pairs
+
 def unity_shaders(d, label, out, trees):
-    """Shaders and compute shaders in a UnityFS bundle or serialized file → out; raises NoTree when no type tree is available"""
+    """Shaders and compute shaders in a UnityFS bundle or serialized file → out and legacy pass pairs; raises NoTree when no type tree is available"""
     import unityfs
     if COMMON is None: red(f'{label}: a Unity asset, but main has no Unity common string table')
+    pairs = set()
     sers = unityfs.bundle_files(d) if d[:8] == b'UnityFS\0' else [('', d)]
     for node, x in sers:
         if not unityfs.is_serialized(x): continue
         for cid, pid, o in unityfs.serialized_objects(x, COMMON, {unityfs.CLASS_SHADER}, trees):
             name = o['m_ParsedForm']['m_Name'] if 'm_ParsedForm' in o else o.get('m_Name', '?')
             stages = unity_stages(o)
+            legacy = {}
             for plat, k, sp in unityfs.shader_programs(o, unity_code_blobs(o)):
                 where = f'{label}{":" + node if node else ""}#{name}#var{plat}.{k}'
                 code = unityfs.subprogram(sp)[4]
-                out.extend((where, st, ctl, cd) for st, ctl, cd in unity_program(code, where, stages.get(k)))
+                programs = unity_program(code, where, stages.get(k))
+                out.extend((where, st, ctl, cd) for st, ctl, cd in programs)
+                if len(code) >= 0x14 and code[0x10:0x14] == CTL_MAGIC: legacy[plat, k] = programs[0]
+            pairs |= unity_pass_pairs(o, legacy)
         out.extend(unity_compute(x, f'{label}{":" + node if node else ""}', trees))
         out.extend(unity_text_glslc(x, f'{label}{":" + node if node else ""}'))
+    return pairs
 
 def unity_text_glslc(x, base):
     """Whole GLSLC outputs that a game keeps in a TextAsset of a serialized file → [(where, stage, control, code)]. FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition (Unity 2018.4.2f1)
@@ -1960,6 +1991,14 @@ def ps_inputs(code):
     """Generic attributes a pixel shader reads: SPH words 6–13 are the input map, 8 bits for each of the 32 attributes (Ryujinx ShaderHeader.ImapTypes), non-zero = read; the translated MSL inputs are exactly user(locn<attribute>)"""
     return {i for i in range(32) if struct.unpack_from('<I', code, 0x30 + 4 * (6 + (i >> 2)))[0] >> ((i & 3) * 8) & 0xff}
 
+def pixel_input_cover(shaders):
+    """{pixel key: code} → a deterministic greedy cover of their generic inputs; ties take the smaller key."""
+    ins = {k: ps_inputs(code) for k, code in shaders.items()}
+    left, cover = set().union(*ins.values()) if ins else set(), []
+    while left:
+        k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
+    return cover
+
 SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
@@ -1971,10 +2010,7 @@ def separable_pairs(keys):
     All pairs would be 376 × 375 rows; the cover needs a few rows × 376. No single-stage vertex shader, no cover"""
     single = [v for v in keys if keys[v][1] == 'vs' and any(s in keys[v][0] for s in SINGLE_STAGE) and '#var' not in keys[v][0]]   # '#var': a GLSLC output of several stages (glslc_program)
     if not single: return set(), []
-    ins = {k: ps_inputs(v[3]) for k, v in keys.items() if v[1] == 'ps'}
-    left, cover = set().union(*ins.values()) if ins else set(), []
-    while left:
-        k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
+    cover = pixel_input_cover({k: v[3] for k, v in keys.items() if v[1] == 'ps'})
     return {(v, p) for v in single for p in cover}, cover
 
 SMASH_ARC = struct.pack('<Q', 0xABCDEF9876543210)   # smash_arc.MAGIC (scan_file reads only the first bytes, without importing the reader)
@@ -2098,8 +2134,9 @@ def scan_file_in(args):
             d = xnb_decompress(d)
     if d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and __import__('unityfs').is_serialized(d)):
         import unityfs
-        try: unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
+        try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
+        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
     elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members
     else:
         scan_blob(d, '/' + rel, found)
@@ -2146,7 +2183,7 @@ def pooled(ex, jobs, total, start=0, chunk=1):
 def main():
     romfs_l, main_l, pkg, mapout, factsout = sys.argv[1:6]
     pairsout = sys.argv[6] if len(sys.argv) > 6 else None
-    psopairsout = sys.argv[7] if len(sys.argv) > 7 else None   # pso_pairs.tsv: the pairs the pipeline prebuild takes besides shader_pairs.tsv (the BAHS program variations)
+    psopairsout = sys.argv[7] if len(sys.argv) > 7 else None   # pso_pairs.tsv: supplemental BAHS program variations and legacy Unity pass-input covers
     dlc_v = sys.argv[8].split(',') if len(sys.argv) > 8 and sys.argv[8] else []   # extra content has no ExeFS; each root is the extracted DLC index
     # Several versions (base game + update): the RomFS and main arguments are comma-separated and paired one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
@@ -2254,7 +2291,7 @@ def main():
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
-        f.write('# column 5 records where each key first appears; this game has no PC version to pair with\n')
+        f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
         for r in rows: f.write('\t'.join(map(str, r)) + '\n')
     # Hand-written facts the machine code cannot give (the profile's shader_facts_manual.tsv, same row format) are merged over the generated ones, so the table stays reproducible
@@ -2263,7 +2300,7 @@ def main():
         for ln in open(manual):
             if ln.strip() and not ln.startswith('#'): k, v = ln.rstrip('\n').split('\t', 1); facts[k] = {**facts.get(k, {}), **json.loads(v)}
     with open(factsout, 'w') as f:
-        f.write('# Answer table for translation queries (generated by dm/gfx/tools/shader_split.py, do not edit): key <TAB> fact JSON. This game has no PC version to pair with: only the thread group / shared memory of compute shaders (taken from the control section); other queries get the translator defaults\n')
+        f.write('# Answer table for translation queries (generated by dm/gfx/tools/shader_split.py, do not edit): key <TAB> fact JSON. No PC shader pairing supplied: only the thread group / shared memory of compute shaders (taken from the control section); other queries get the translator defaults\n')
         for k in sorted(facts): f.write(k + '\t' + json.dumps(facts[k], sort_keys=True, separators=(',', ':')) + '\n')
     if pairsout:
         with open(pairsout, 'w') as f:
@@ -2271,7 +2308,7 @@ def main():
             for a, b in sorted(pairs): f.write(f'{a}\t{b}\n')
     if psopairsout:
         with open(psopairsout, 'w') as f:
-            f.write('# kind: evidence  vertex / pixel shader pairs of agl program variations (BAHS) that shader_pairs.tsv does not hold, for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
+            f.write('# kind: evidence  supplemental vertex / pixel shader pairs (BAHS program variations and legacy Unity pass-input covers) for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
             for a, b in sorted(prog - pairs): f.write(f'{a}\t{b}\n')
     print(f'shaders: {len(rows)} (' + ', '.join(f'{STAGE_NAME[s]} {n}' for s, n in sorted(stat.items())) + '); sources ' + ', '.join(f'{g} {n}' for g, n in per_src.most_common()) + f'; compute shader answers {len(facts)} rows' + (f'; variation pairs {len(pairs)}' if pairsout else ''))
 

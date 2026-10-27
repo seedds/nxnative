@@ -80,6 +80,7 @@ dm/gfx/tools/pso_offline.py	present:pipeline_prebuild	the offline pipeline archi
 dm/gfx/tools/c1_guard.py	shader:stage:*	the c1 guard table
 dm/gfx/tools/cb_extent.py	shader:stage:*	the uniform read extents
 dm/gfx/tools/shader_split.py	shader:stage:*	the shader tables (after a split)
+dm/gfx/tools/unityfs.py	shader:stage:*	the Unity serialized shader reader (after a split)
 dm/tools/patch_nso.py	*:*	the rewriter: every game's code
 dm/tools/nso_*.py	*:*	the rewriter: every game's code
 dm/tools/sdk_patches.py	*:*	the SDK modules' patches (by build ID)
@@ -103,5 +104,10 @@ dm/host/main.c	*:*	the host's start
 dm/host/loader.c	*:*	module loading
 dm/host/hle.c	hle:*	the HLE tables
 dm/host/front_mac.m	present:*	the Mac front end
+dm/host/dm_input.h	hle:*hid*	the shared input interface
+dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
+dm/host/motion_fusion.h	hle:*SixAxisSensor*	six-axis motion mapping and orientation
+dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro Controller IMU decoder
+dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller raw motion transport and routing
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app

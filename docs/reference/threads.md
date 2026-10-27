@@ -88,6 +88,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** type 3 compares the 64-bit value (`hle_thread.c`).
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (SDK 19.3.11): Z-A does not call it, but the SDK has it.
 
+### Unity's stream buffer handshake loses a wake-up on Apple cores
+
+- **Symptom:** boot stops before or soon after the first frame with the CPU at 0% and every guest thread waiting on a condition variable: the main thread in `nn::os::AcquireSemaphore` after posting a command to `UnityGfxDeviceWorker`, the worker in `AcquireSemaphore` too, one condition wait after it (`wait #` one higher); 3 of 5 Mac runs, at random points.
+- **Cause:** a memory-order race in the game's code, not a host bug. Unity 2018.4's `ThreadedStreamBuffer` (the ring buffer every Unity worker thread is fed through) wakes a sleeping side with a Dekker handshake: the reader that finds nothing sets "reader sleeping" with a store-release and loads the write position again before sleeping on its semaphore; a writer stores the write position with a store-release and then checks that flag (and the mirror pair for a writer short of space). The second access of each side is a plain `ldr`, and AArch64 lets a plain load complete before an earlier store-release is visible, so both sides can read the old value and neither signals. The Switch's Cortex-A57 allows it too, but Apple cores hit it within seconds.
+- **Fix:** a per-build cut turns each of those loads into a load-acquire (`ldar`), which a store-release before it orders after the store (eight sites in that build's `patches.py`); 14 of 14 runs boot and keep presenting.
+- **Found on:** [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](../../dm/games/0100CE4010AAC000/README.md) 1.0.0 and 1.0.3 (Unity 2018.4.2f1, SDK 8.2.1; its `patches.py`: 1.0.0 `main+0x1e425b0` and the stream functions after it, the same sites +0x25380 in 1.0.3).
+- **Check:** another Unity title that stops this way: look for `stlr` followed by a plain `ldr` of the other word in its `ThreadedStreamBuffer` (the functions around the `AcquireSemaphore` the worker waits in).
+
 ### Late PhysX task destructor after the unlock
 
 - **Symptom:** a PhysX worker crashes in a task's `removeReference` with a null task manager, right as the game switches to 30 fps (`pc=main+0x10ccf28`, `lr=main+0x13c236c`); on the iPhone and in 2 of 5 Mac runs, in every Mac run with 12 busy loops loading the CPU.

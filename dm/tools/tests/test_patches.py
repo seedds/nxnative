@@ -65,11 +65,22 @@ class Registry(unittest.TestCase):
         from nso_match import validate
         for p, m in MODS.items():
             for module, rules in getattr(m, 'MATCH_CUTS', {}).items():
-                self.assertEqual(p.name, 'patches.py')
-                self.assertIn(module, game.load(p.parent.name).words('modules'))
-                self.assertNotEqual(module, 'sdk', 'SDK fixes belong in sdk_patches.py, keyed by build ID')
+                if p.name == 'sdk_patches.py':   # SDK-wide: Nintendo's sdk module of any game
+                    self.assertEqual(module, 'sdk')
+                else:
+                    self.assertEqual(p.name, 'patches.py')
+                    self.assertIn(module, game.load(p.parent.name).words('modules'))
+                    self.assertNotEqual(module, 'sdk', 'SDK fixes belong in sdk_patches.py, for every game')
                 self.assertTrue(rules)
                 for rule in rules: validate(rule)
+
+    def test_sdk_wide_rules_restate_registered_cuts(self):
+        # every SDK-wide cut is one of the registered SDK cuts, the same bytes, at some build's function-relative offset (the rules were taken from them)
+        m = MODS[REPO / 'dm/tools/sdk_patches.py']
+        registered = {(old, new) for cuts in m.CUTS.values() for _, old, new, _ in cuts}
+        for rule in m.MATCH_CUTS['sdk']:
+            for delta, old, new, why in rule['cuts']:
+                self.assertIn((old, new), registered, why)
 
     def test_game_files_name_their_own_builds(self):
         for p, m in MODS.items():

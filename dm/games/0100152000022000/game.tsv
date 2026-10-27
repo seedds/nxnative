@@ -16,6 +16,7 @@ program_id	0100152000022000
 name	Mario Kart 8 Deluxe
 ipa	MarioKart8Deluxe.ipa
 app_category	public.app-category.racing-games
+pad_layout	full
 # the race records SetRenderEnableConditional as a course loads: evaluated at replay, as on the GPU (drawn anyway, the same race route at the same frames looked the same; evaluated is NVN's behaviour)
 render_cond	on
 

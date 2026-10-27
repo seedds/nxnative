@@ -11,7 +11,7 @@ program_id	0100F43008C44000
 name	Pokémon Legends: Z-A
 ipa	PokMonLegendsZA.ipa
 app_category	public.app-category.games
-pad_layout	simple
+pad_layout	full
 render_cond	on
 
 # ---- Versions ----

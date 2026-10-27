@@ -76,6 +76,8 @@ class ProfileEnvironmentTests(unittest.TestCase):
                 "DM_DISPLAY_HZ=120",
                 "DM_PRESENT_HZ=120",
                 "DM_ZA_FPS_MODE=dynamic60",
+                "DM_PAD_FORCE_FULL=1",
+                "DM_PAD_KEEP_TOUCH=1",
             ],
         )
 

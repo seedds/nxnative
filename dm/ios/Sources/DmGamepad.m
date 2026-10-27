@@ -12,7 +12,7 @@
 //     then the camera for an unclaimed touch in the right half. Ownership stays with its original control until release/cancellation; sliding a camera finger over ABXY never presses a skill.
 //   Everything hugs the edges and corners to leave the picture room; controls sit over the picture, one CAShapeLayer each: a press only swaps the fill, a stick only moves its knob, nothing redraws the whole screen.
 //   Touches no control takes go to the game's touch screen (pushGame; Super Mario Galaxy's pointer in handheld mode). Tap layout keeps direct game touches everywhere except its layout selector.
-//   Controllers and keyboards hide the pad. Mouse input also hides it, but a direct finger can reclaim touch controls when no controller/keyboard is present; virtual mice may remain connected after a keyboard cover is removed. Physical controllers map by position: bottom = B, right = A, left = Y, top = X.
+//   Controllers and keyboards hide the pad by default. DM_PAD_KEEP_TOUCH=1 keeps the complete touch layer visible and usable beside them. Mouse input follows the same policy; without the switch a direct finger can reclaim touch controls when no controller/keyboard is present. Physical controllers map by position: bottom = B, right = A, left = Y, top = X.
 //   Shaking the phone shakes the controller (DM_BTN_SHAKE: its six-axis sensor, hle_hid.c), whichever controls are in use; see "Shaking the phone" below.
 #import <UIKit/UIKit.h>
 #import <GameController/GameController.h>
@@ -160,6 +160,13 @@ static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 
+static BOOL pad_env_on(const char *name) {
+    const char *value = getenv(name);
+    return value && atoi(value) != 0;
+}
+static BOOL pad_force_full(void) { return pad_env_on("DM_PAD_FORCE_FULL"); }
+static BOOL pad_keep_touch(void) { return pad_env_on("DM_PAD_KEEP_TOUCH"); }
+
 @interface DmGamepad : UIView
 - (void)mouseMotionX:(float)dx y:(float)dy raw:(BOOL)raw;
 - (void)updateSkillFaceLayout;
@@ -180,8 +187,8 @@ static __weak DmGamepad *g_view;
     CAShapeLayer *_aim; CATextLayer *_aimLabel; BOOL _aimHeld, _aimLatched;
     BOOL _stickShown;                              // the left stick was held at the last refresh
     BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
-    CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
-    BOOL _padOff;                                  // physical controls hide the pad: every touch goes to the game
+    CALayer *_controls;                            // holds every control layer; the default external-input policy may hide it while the view stays active for game touches
+    BOOL _padOff;                                  // when the policy hides the pad, every touch goes to the game
     BOOL _controllerOrKeyboard, _touchPreferred;    // direct fingers can take over from an idle persistent mouse
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
     CGPoint _hoverLast;
@@ -241,6 +248,10 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS; }   // stick clicks
         LOG("front end: native A/B/X/Y unchanged; virtual face geometry alone can follow the original battle skill HUD");
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
+        // A profile may require the complete controller surface. This also
+        // upgrades an existing install whose saved preference predates newly
+        // exposed controls, while leaving every native button bit unchanged.
+        if (pad_force_full()) l = 1;
         if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
         _full = l == 1; _tap = l == 2;
         [self applyLayout];
@@ -311,7 +322,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS; }   // stick clicks
     [CATransaction commit];
 }
 - (void)nextLayout {   // 2D → 3D (→ Tap in handheld mode) → 2D: release every touch first (no key stays held), save, lay out again
-    int l = _tap ? 0 : _full ? (dm_opmode() == 0 ? 2 : 0) : 1;
+    int l = pad_force_full() ? 1 : _tap ? 0 : _full ? (dm_opmode() == 0 ? 2 : 0) : 1;
     [self reset];
     _full = l == 1; _tap = l == 2;
     [NSUserDefaults.standardUserDefaults setObject:@(l) forKey:k_layout_key];
@@ -729,7 +740,7 @@ static void clear_mouse(void) {
     }
     pthread_mutex_lock(&g_mu); BOOL active = g_input_active; pthread_mutex_unlock(&g_mu);
     if (!active || _owner.count) return;   // never steal a held movement/camera/skill finger
-    if (_touchPreferred || !_padOff) {
+    if (!pad_keep_touch() && (_touchPreferred || !_padOff)) {
         _touchPreferred = NO; _padOff = YES; _controls.hidden = YES;
         [self reset];
         LOG("front end: mouse motion selected pointer input; touch controls hidden");
@@ -785,7 +796,8 @@ static void clear_mouse(void) {
         };
     }
     if (!mouse) clear_mouse();
-    BOOL any = _controllerOrKeyboard || (mouse && !_touchPreferred);
+    BOOL keepTouch = pad_keep_touch();
+    BOOL any = !keepTouch && (_controllerOrKeyboard || (mouse && !_touchPreferred));
     LOG("front end: input devices controller=%d keyboard=%d mouse=%d; touch controls %s; blank right-half camera %s", controller, hasKeyboard, mouse, any ? "hidden" : "visible", !any && !_tap ? "enabled" : "disabled");
     BOOL changed = _padOff != any;
     _padOff = any; _controls.hidden = any;

@@ -61,5 +61,27 @@ int main(void) {
         self.assertIn("kind = C_DPAD", began)
         self.assertNotIn("if (_full) { CGFloat d = dist(p, self.dpadCenter)", began)
 
+    def test_game_profiles_force_complete_touch_surface_beside_external_input(self):
+        source = (ROOT / "dm/ios/Sources/DmGamepad.m").read_text()
+        for title_id in ("0100F43008C44000", "0100152000022000"):
+            with self.subTest(title_id=title_id):
+                profile = (ROOT / f"dm/games/{title_id}/game.tsv").read_text()
+                environment = (ROOT / f"dm/games/{title_id}/ios.env").read_text()
+                self.assertIn("pad_layout\tfull", profile)
+                self.assertIn("DM_PAD_FORCE_FULL=1", environment)
+                self.assertIn("DM_PAD_KEEP_TOUCH=1", environment)
+
+        self.assertIn('static BOOL pad_force_full(void)', source)
+        self.assertIn('if (pad_force_full()) l = 1;', source)
+        self.assertIn('int l = pad_force_full() ? 1', source)
+        self.assertIn('BOOL any = !keepTouch &&', source)
+        mouse = source[source.index("- (void)mouseMotionX:"):source.index("- (void)inputDevicesChanged")]
+        self.assertIn('if (!pad_keep_touch() &&', mouse)
+
+        # The complete visible surface still publishes the original native
+        # Switch bits; no battle-specific face remapping is introduced.
+        self.assertIn("g_touch_native = g_touch_face | g_touch_btn;", source)
+        self.assertIn("{B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS}", source)
+
 if __name__ == "__main__":
     unittest.main()

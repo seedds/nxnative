@@ -76,11 +76,13 @@ static void launcher_done(void) { [g_root startGame]; }
         [self.view addSubview:lb]; return;
     }
     front_ios_audio_watch();
+#if defined(__IPHONE_27_0)   // compiled only with an SDK that has the scene accessory API
     if (@available(iOS 27.0, *)) {   // iOS 27 offers a TV scene only to a registered scene accessory, no longer from the Info.plist entry alone (that path stays for iOS 26)
         UISceneConfiguration *c = [[UISceneConfiguration alloc] initWithName:@"TV" sessionRole:UIWindowSceneSessionRoleExternalDisplayNonInteractive];
         c.delegateClass = NSClassFromString(@"DmTVSceneDelegate");
         self.tv = [self registerSceneAccessory:[UISceneAccessory externalNonInteractiveSceneAccessoryWithConfiguration:c]];
     }
+#endif
 }
 // The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
 - (void)startGame {

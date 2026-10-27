@@ -12,6 +12,8 @@
 // front end or a settings window writes, each checked against the bundle's settings (Info.plist DMSettings, from launcher.json) and used only for a variable still unset; DM_SAVED_CHOICES=0 ignores them.
 // So the order is: the launch environment, the player's env.txt, the bundle's, saved choices, the host's tested defaults (docs/frontends.md, Saved choices). The data folder is a default too:
 // DM_SAVE, DM_TEMP, DM_ROOT or DM_PSO_USER set in one of those places wins over it, each for its own path (DM_SAVE moves only the save).
+// DM_LOG_DIR names the log's folder (same places, over the data folder's log/); a relative DM_SAVE or DM_LOG_DIR is in the folder the .app is in. The log is opened after the env files are read;
+// what is printed before goes to a temporary file that is copied into it. An unusable DM_LOG_DIR is a [RED] line and ~/Library/Logs/nxnative.
 // Before the host starts, the settings window (dm/mac/Launcher.swift dm_mac_launcher, linked in by pack_app.py) runs in this process and puts the player's settings into the environment; it keeps
 // what the launch environment and the env files set (DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS). DM_LAUNCHER=0 or --no-launcher (open <app> --args --no-launcher) starts the game without the window,
 // with the saved choices; so does "Show this window at launch" turned off.
@@ -212,6 +214,32 @@ static void cloud_saves_folder(void) {
     if (v) CFRelease(v);
 }
 
+// What the launcher prints before its log is open (the log's folder can come from an env.txt it has not read yet) goes to an unnamed temporary file, and is copied into the log first.
+static FILE *g_pre; static int g_err = -1;
+static void pre_begin(void) {
+    fflush(stderr); g_pre = tmpfile();   // none: those lines stay on the original stderr
+    if (g_pre && (g_err = dup(2)) >= 0) dup2(fileno(g_pre), 2);
+}
+static void pre_end(int fd) {   // fd: the open log (it becomes stdout and stderr), or -1: the lines go back to the original stderr
+    if (!g_pre) { if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); } return; }
+    fflush(stderr);
+    int to = fd >= 0 ? fd : g_err; char buf[4096]; ssize_t r; off_t at = 0;
+    while ((r = pread(fileno(g_pre), buf, sizeof buf, at)) > 0) { at += r; for (ssize_t w = 0, k; w < r; w += k) if ((k = write(to, buf + w, (size_t)(r - w))) <= 0) break; }
+    if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); } else dup2(g_err, 2);
+    close(g_err); fclose(g_pre); g_pre = NULL;
+}
+
+// A relative DM_SAVE or DM_LOG_DIR is in the folder the .app is in, as a relative dataFolder is: a library that moves keeps working. The host and the rest of the launcher only see the absolute path.
+static void resolve_relative(const char *name, const char *app) {
+    const char *v = getenv(name); char path[PATH_MAX];
+    if (!v || !*v || *v == '/') return;
+    if (snprintf(path, sizeof path, "%s/%s", app, v) >= (int)sizeof path) {
+        fprintf(stderr, "[RED] launcher: %s=%s is too long a path from %s: ignored\n", name, v, app); unsetenv(name); return;
+    }
+    fprintf(stderr, "launcher: %s=%s is relative: %s in the folder the app is in\n", name, v, path);
+    setenv(name, path, 1);
+}
+
 int main(int argc, char **argv) {
     char self[PATH_MAX], exe[PATH_MAX]; uint32_t n = sizeof self;
     if (_NSGetExecutablePath(self, &n) || !realpath(self, exe)) return 1;
@@ -234,17 +262,14 @@ int main(int argc, char **argv) {
         return 1;
     }
     const char *home = getenv("HOME"); if (!home || !*home) return 1;
-    char lib[PATH_MAX], sup[PATH_MAX], save[PATH_MAX], temp[PATH_MAX], logs[PATH_MAX], log[PATH_MAX], prev[PATH_MAX], note[3 * PATH_MAX];
+    char lib[PATH_MAX], sup[PATH_MAX], save[PATH_MAX], temp[PATH_MAX], logs[PATH_MAX], log[PATH_MAX], prev[PATH_MAX], note[3 * PATH_MAX], app[PATH_MAX];
+    snprintf(app, sizeof app, "%s", contents); *strrchr(app, '/') = 0; *strrchr(app, '/') = 0;   // .../<folder>/<game>.app/Contents → .../<folder>
     snprintf(lib, sizeof lib, "%s/Library/Application Support/nxnative/%s", home, id);
     int moved = data_folder(contents, sup, sizeof sup, note, sizeof note);   // the key first: the player's env.txt is in the folder it names
-    if (moved == 1) snprintf(logs, sizeof logs, "%s/log", sup);
-    else { snprintf(sup, sizeof sup, "%s", lib); snprintf(logs, sizeof logs, "%s/Library/Logs/nxnative", home); }
+    if (moved != 1) snprintf(sup, sizeof sup, "%s", lib);
     snprintf(save, sizeof save, "%s/save", sup); snprintf(temp, sizeof temp, "%s/temp", sup);
-    snprintf(log, sizeof log, "%s/%s.log", logs, id); snprintf(prev, sizeof prev, "%s/%s.prev.log", logs, id);
-    mkdirs(temp); mkdirs(logs);   // save/ once the copy of an old one is decided
-    rename(log, prev);
-    int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); setvbuf(stdout, NULL, _IOLBF, 0); }
+    mkdirs(temp);   // save/ once the copy of an old one is decided
+    pre_begin();   // the log is opened once the env files are read: DM_LOG_DIR may be in one
     fprintf(stderr, "launcher: %s (%s), host %s\n", name, id, host);
     if (moved) fprintf(stderr, "%s\n", note);
     CFArrayRef rules = setting_rules();   // the settings the launch environment already set: the window shows them, fixed
@@ -253,6 +278,21 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
     free(g_file_keys); free(g_launch_keys);
+    resolve_relative("DM_SAVE", app); resolve_relative("DM_LOG_DIR", app);
+    // The log's folder: DM_LOG_DIR, else the data folder's log/, else ~/Library/Logs/nxnative. A DM_LOG_DIR that cannot be made or written is a [RED] line and ~/Library/Logs/nxnative.
+    snprintf(logs, sizeof logs, "%s/Library/Logs/nxnative", home);
+    const char *want = getenv("DM_LOG_DIR");
+    if (want && *want) {
+        if (!mkdirs(want) && writable_dir(want)) snprintf(logs, sizeof logs, "%s", want);
+        else fprintf(stderr, "[RED] launcher: DM_LOG_DIR %s cannot be made or written (%s): the log is in %s\n", want, strerror(errno), logs);
+    } else if (moved == 1) snprintf(logs, sizeof logs, "%s/log", sup);
+    mkdirs(logs);
+    snprintf(log, sizeof log, "%s/%s.log", logs, id); snprintf(prev, sizeof prev, "%s/%s.prev.log", logs, id);
+    rename(log, prev);
+    int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    pre_end(fd);
+    if (fd >= 0) setvbuf(stdout, NULL, _IOLBF, 0);
+    else fprintf(stderr, "[RED] launcher: cannot open the log %s (%s)\n", log, strerror(errno));
     int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
@@ -260,6 +300,7 @@ int main(int argc, char **argv) {
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
     cloud_saves_folder();
+    resolve_relative("DM_SAVE", app);   // a saved choice or the window may have set it
     if (moved == 1) {   // the data folder holds the pipeline list (and pso_archive/ beside it) also when DM_SAVE puts the save elsewhere; without one, the host's default: beside save/
         if (stat(save, &st)) migrate(lib, sup);
         snprintf(p, sizeof p, "%s/pso_user.tsv", sup); setenv("DM_PSO_USER", p, 0);

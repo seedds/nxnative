@@ -596,6 +596,80 @@ class App(unittest.TestCase):
             for name in ('save/game.sav', 'save_device/device.sav', 'pso_user.tsv', 'env.txt'): (lib / name).unlink(missing_ok=True)
             shutil.rmtree(lib / 'save_device', ignore_errors=True)
 
+    def test_log_dir_and_relative_paths(self):
+        """DM_LOG_DIR (environment, the player's env.txt, the bundle's order) names the log's folder, over a data folder's log/; DM_SAVE and DM_LOG_DIR may be relative to the .app's folder, and the
+        host sees the absolute path; an unwritable DM_LOG_DIR falls back to ~/Library/Logs with a [RED] line; save and log alone (no dataFolder) leave everything else in ~/Library"""
+        domain = f'org.nxnative.test.{uuid.uuid4().hex}'   # never a real game's domain
+        home = self.tmp / 'home'; lib = home / f'Library/Application Support/nxnative/{TID}'; lib_logs = home / 'Library/Logs/nxnative'
+        library = self.tmp / 'Log library'
+        a = types.SimpleNamespace(**vars(self.args)); a.out = str(library / 'Logs.app'); a.icon = None; a.bundle_id = domain
+        with mock.patch.object(pack_app, 'sign', lambda *x: None), mock.patch('sys.stdout'): pack_app.pack(a)
+        app = Path(a.out)
+
+        def run(**env):
+            p = self.launch(app=app, **env); out = p.communicate(timeout=30)[0].decode()
+            self.assertEqual(p.returncode, 7, out)
+            return self.host_run()
+
+        def logged(folder, name=f'{TID}.log'): return (folder / name).read_text()
+        try:
+            lib.mkdir(parents=True, exist_ok=True)
+            absolute = self.tmp / 'absolute logs'
+            run(DM_LOG_DIR=str(absolute))   # from the environment, absolute
+            log = logged(absolute)
+            self.assertIn('standin host output', log)
+            self.assertIn(f'launcher: Game: Test ({TID})', log)   # what the launcher printed before the log was open is in it, first
+            self.assertLess(log.index('launcher: Game: Test'), log.index('standin host output'))
+            self.assertFalse((lib_logs / f'{TID}.log').exists() and 'DM_LOG_DIR' in logged(lib_logs))
+            run(DM_LOG_DIR=str(absolute)); self.assertIn('standin host output', logged(absolute, f'{TID}.prev.log'))   # rotated there
+
+            r = run(DM_LOG_DIR='Logs here/run')   # relative: in the folder the app is in, and the host is not given a relative one
+            self.assertEqual(r['DM_LOG_DIR'], str(library / 'Logs here/run'))
+            log = logged(library / 'Logs here/run')
+            self.assertIn('launcher: DM_LOG_DIR=Logs here/run is relative', log)
+
+            (lib / 'env.txt').write_text('DM_LOG_DIR=player logs\nDM_SAVE=player save\n')   # the player's env.txt, relative
+            r = run()
+            self.assertEqual((r['DM_LOG_DIR'], r['DM_SAVE']), (str(library / 'player logs'), str(library / 'player save')))
+            log = logged(library / 'player logs')
+            self.assertIn(f'launcher: env DM_LOG_DIR=player logs ({lib}/env.txt)', log)   # read before the log was open, and still in it
+            r = run(DM_LOG_DIR=str(absolute), DM_SAVE=str(self.tmp / 'abs save'))   # the environment first; absolute values unchanged
+            self.assertEqual((r['DM_LOG_DIR'], r['DM_SAVE']), (str(absolute), str(self.tmp / 'abs save')))
+            (lib / 'env.txt').unlink()
+
+            r = run(DM_SAVE='saves/current')   # relative DM_SAVE
+            self.assertEqual((r['DM_SAVE'], r['DM_ROOT']), (str(library / 'saves/current'), str(lib)))
+
+            ro = self.tmp / 'ro logs'; ro.mkdir(); ro.chmod(0o555); self.addCleanup(ro.chmod, 0o755)
+            for target in (ro, ro / 'run'):   # cannot be written; cannot be made
+                with self.subTest(target=target):
+                    run(DM_LOG_DIR=str(target))
+                    log = logged(lib_logs)
+                    self.assertIn(f'[RED] launcher: DM_LOG_DIR {target} cannot be made or written', log)
+                    self.assertIn('standin host output', log); self.assertIn(f'launcher: Game: Test ({TID})', log)
+            self.assertEqual(list(ro.iterdir()), [])
+
+            # save and log beside the app, no dataFolder: nothing else moves
+            r = run(DM_SAVE='Game data/save', DM_LOG_DIR='Game data/log')
+            data = library / 'Game data'
+            self.assertEqual((r['DM_SAVE'], r['DM_LOG_DIR']), (str(data / 'save'), str(data / 'log')))
+            self.assertEqual((r['DM_ROOT'], r['cwd'], r['DM_TEMP'], r.get('DM_PSO_USER')), (str(lib), str(lib), str(lib / 'temp'), None))
+            self.assertIn('standin host output', logged(data / 'log'))
+            self.assertEqual(sorted(p.name for p in data.iterdir()), ['log', 'save'] if (data / 'save').exists() else ['log'])
+
+            # over a data folder's log/
+            subprocess.run(['defaults', 'write', domain, 'dataFolder', '-string', 'Game data/folder'], check=True)
+            r = run(DM_LOG_DIR='Game data/own log')
+            folder = data / 'folder'
+            self.assertEqual((r['DM_ROOT'], r['DM_SAVE']), (str(folder), str(folder / 'save')))   # the rest in the data folder
+            self.assertIn('standin host output', logged(data / 'own log'))
+            self.assertFalse((folder / 'log').exists() and any((folder / 'log').iterdir()))
+            run(); self.assertIn('standin host output', logged(folder / 'log'))   # without it, the data folder's log/
+        finally:
+            subprocess.run(['defaults', 'delete', domain], capture_output=True)
+            Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)
+            (lib / 'env.txt').unlink(missing_ok=True)
+
     def test_signed(self):   # ad-hoc, both the host and the bundle, never the hardened runtime (it refuses the executable memory the host makes for the game's code)
         for target in (self.app, self.app / 'Contents/MacOS/dmhost'):
             subprocess.run(['codesign', '--verify', '--strict', target], check=True, capture_output=True)

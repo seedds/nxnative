@@ -5,7 +5,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "gfx/nvn/nvn_mtl.m"
+SOURCE = ROOT / "gfx/nvn/nvn_mtl_legacy.inc"
+DISPATCH = ROOT / "gfx/nvn/nvn_mtl.m"
 
 
 def body(source, signature):
@@ -53,7 +54,13 @@ class ZAReadbackDiagnosticTests(unittest.TestCase):
 
     def test_host_tracks_inline_texture_implementation_dependencies(self):
         makefile = (ROOT / "host/Makefile").read_text()
+        self.assertIn("../gfx/nvn/*.inc", makefile)
         self.assertIn("../gfx/tex/*.inc", makefile)
+
+    def test_ios_dispatches_to_the_legacy_renderer(self):
+        dispatch = DISPATCH.read_text()
+        self.assertIn("#if TARGET_OS_IPHONE", dispatch)
+        self.assertIn('#include "nvn_mtl_legacy.inc"', dispatch)
 
 
 if __name__ == "__main__":

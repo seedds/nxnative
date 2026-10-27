@@ -32,6 +32,7 @@ static int test_surround_output(void) {
         gbuf b[2] = {{in, SPLIT * 12, SPLIT * 12}, {in + SPLIT * 6, (FRAMES - SPLIT) * 12, (FRAMES - SPLIT) * 12}};
         aout a = {.ch = 6};
         atomic_init(&a.state, STATE_STARTED); atomic_init(&a.vol, 0x3f800000u);
+        atomic_init(&a.consumer, BK_AU);
         a.q[0] = b; a.q[1] = b + 1; atomic_init(&a.q_tail, 2);
         AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof out, out}}};
         au_render(&a, NULL, NULL, 0, FRAMES, &bl);

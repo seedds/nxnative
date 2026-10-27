@@ -9,6 +9,7 @@
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
+#include "haptics_apple.h"
 #include "DmAudioRetry.h"
 #include "DmDisplayRefresh.h"
 

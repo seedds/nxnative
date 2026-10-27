@@ -59,6 +59,7 @@ static void path_unlock(pthread_mutex_t **m) { pthread_mutex_unlock(*m); }
 #define PATH_LOCK() pthread_mutex_t *path_guard __attribute__((cleanup(path_unlock))) = &g_path_lock; pthread_mutex_lock(path_guard)
 static uint8_t g_fmode[65536];              // fd → open mode
 static uint8_t g_fsave[65536];              // fd → whether it is on a transactional save mount (the save write injection point only counts these)
+static _Atomic uint16_t g_ftxn[65536];       // fd → 1-based canonical transaction index, or 0
 // DM_ROMFS_REDIRECTS=<TSV>: virtual sequential archives backed by disjoint
 // ranges of one materialized RomFS file.  Some archive formats require their
 // index offsets to stay both sorted and separated by each record's aligned

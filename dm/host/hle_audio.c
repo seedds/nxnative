@@ -166,7 +166,13 @@ static void backend_pull(aout *a, int backend, uint8_t *dst, uint64_t bytes) {
         !atomic_compare_exchange_strong_explicit(&a->pulling, &free, 1, memory_order_acquire, memory_order_relaxed)) {
         memset(dst, 0, bytes); return;
     }
-    if (atomic_load_explicit(&a->consumer, memory_order_acquire) == backend) pull(a, dst, bytes);
+    if (atomic_load_explicit(&a->consumer, memory_order_acquire) == backend) {
+        // The device callback requests device-channel bytes. Six-channel guest
+        // output therefore needs the existing 6 -> 2 downmix, while the null
+        // sink consumes the original guest-channel stream directly.
+        if (backend == BK_AU) pull_device(a, dst, bytes);
+        else pull(a, dst, bytes);
+    }
     else memset(dst, 0, bytes);
     atomic_store_explicit(&a->pulling, 0, memory_order_release);
 }
@@ -251,6 +257,7 @@ static OSStatus au_create(aout *a) {
     a->au = NULL; if (!c) return kAudio_ParamError;
     OSStatus created = AudioComponentInstanceNew(c, &a->au);
     if (created) { a->au = NULL; return created; }
+    unsigned ch = (unsigned)device_channels(a);
     AudioStreamBasicDescription f = {.mSampleRate = RATE, .mFormatID = kAudioFormatLinearPCM,
                                      .mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
                                      .mBytesPerPacket = 2u * ch, .mFramesPerPacket = 1, .mBytesPerFrame = 2u * ch,

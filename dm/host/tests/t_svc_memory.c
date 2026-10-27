@@ -57,6 +57,7 @@ static void (*write_prepare)(void *, size_t);
 static int (*fault_hook)(void *, int, void *);
 void dm_fault_hook_register(int (*fn)(void *, int, void *)) { fault_hook = fn; }
 void dm_guest_write_prep_register(void (*fn)(void *, size_t)) { write_prepare = fn; }
+void dm_fault_diagnostic_register(void (*fn)(const void *)) { (void)fn; }
 static void memory_fault(int sig, siginfo_t *info, void *ctx) {
     if (fault_hook && fault_hook(info->si_addr, 1, ctx)) return;
     _exit(128 + sig);

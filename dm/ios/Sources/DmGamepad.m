@@ -183,6 +183,8 @@ static __weak DmGamepad *g_view;
     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
     CAShapeLayer *_ring, *_knob;                   // the left stick (the right one is not drawn)
     CAShapeLayer *_swap; CATextLayer *_swapLabel; BOOL _swapHeld;
+    UIImpactFeedbackGenerator *_touchFeedback;
+    unsigned _hapticSticks;
     CAShapeLayer *_run; CATextLayer *_runLabel; BOOL _runHeld;
     CAShapeLayer *_aim; CATextLayer *_aimLabel; BOOL _aimHeld, _aimLatched;
     BOOL _stickShown;                              // the left stick was held at the last refresh
@@ -425,6 +427,12 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         ax[i * 2] = (int32_t)lrint(o.x * m * 32767); ax[i * 2 + 1] = (int32_t)lrint(-o.y * m * 32767);   // host: up is positive; rounded so full tilt is exactly 32767
     }
     BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits || swap != _swapHeld || run != _runHeld || aim != _aimHeld;
+    uint64_t pressed = (face | dpad | btn) & ~(_faceBits | _dpadBits | _btnBits);
+    unsigned gripping = (_stick[0] ? 1u : 0) | (_stick[1] ? 2u : 0);
+    if (pressed || (swap && !_swapHeld) || (gripping & ~_hapticSticks)) {
+        [_touchFeedback impactOccurredWithIntensity:0.6]; [_touchFeedback prepare];
+    }
+    _hapticSticks = gripping;
     _faceBits = face; _dpadBits = dpad; _btnBits = btn; _swapHeld = swap;
     _runHeld = run;
     _aimHeld = aim;

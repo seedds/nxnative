@@ -103,6 +103,8 @@ Generated projects and Xcode build products stay in that folder; the host profil
 header is generated under `dm/host/gen/` as usual. CI uploads failure logs.
 GPU regression tests still run locally with `make -C dm/gfx/tests GAME=<id> run`.
 
+`.github/workflows/issue-device-check.yml` runs when a bug report is opened: `dm/tools/issue_device_check.py` reads its Device and OS field and, only for a clearly unsupported device (README's Requirements), adds the `unsupported device` label and one comment. Anything ambiguous does nothing. It reads the issue from `$GITHUB_EVENT_PATH`; its tests are `dm/tools/tests/test_issue_device_check.py`.
+
 `.github/workflows/lint-python.yml` lints `scripts/` and the Python tools under
 `dm/` with ruff (rules for bugs, never reformatting) and type-checks them with
 pyright in basic mode (`pyproject.toml`). It is a ratchet: today's findings are

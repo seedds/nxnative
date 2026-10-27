@@ -216,6 +216,9 @@ public struct GameSettingsSheetView: View {
                             }
                             .toggleStyle(.switch)
                         }
+                        
+                        // Section 5: Cover Artwork Customization
+                        coverArtworkSection()
                     }
                     .padding(20)
                 }

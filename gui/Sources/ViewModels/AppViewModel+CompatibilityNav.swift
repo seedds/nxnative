@@ -53,15 +53,10 @@ extension AppViewModel {
             cycleCompatibilityFilter(forward: true)
             SoundEffectService.shared.play(.focus)
         } else {
-            if compatibilityDisplayMode == .list {
-                focusedCompatibilityButtonIndex = .portGame
+            let games = currentFilteredCompatibleGames()
+            if focusedCompatibilityIndex < games.count - 1 {
+                focusedCompatibilityIndex += 1
                 SoundEffectService.shared.play(.focus)
-            } else {
-                let games = currentFilteredCompatibleGames()
-                if focusedCompatibilityIndex < games.count - 1 {
-                    focusedCompatibilityIndex += 1
-                    SoundEffectService.shared.play(.focus)
-                }
             }
         }
     }
@@ -129,16 +124,8 @@ extension AppViewModel {
             let targetGame = games[focusedCompatibilityIndex]
             
             SoundEffectService.shared.play(.click)
-            if focusedCompatibilityButtonIndex == .notes {
-                if let url = targetGame.githubUrl {
-                    NSWorkspace.shared.open(url)
-                }
-            } else {
-                // Port game action
-                self.appName = targetGame.title
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    self.selectedTab = 0
-                }
+            if let url = targetGame.githubUrl {
+                NSWorkspace.shared.open(url)
             }
         }
     }

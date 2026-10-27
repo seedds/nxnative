@@ -1,7 +1,7 @@
 import Foundation
 import AppKit
 
-public enum SoundEffectType {
+public enum SoundEffectType: CaseIterable {
     case click
     case tabSwitch
     case focus
@@ -13,6 +13,7 @@ public final class SoundEffectService: ObservableObject {
     public static let shared = SoundEffectService()
     
     private let soundKey = "NXNative_SoundEnabled"
+    private var cachedSounds: [SoundEffectType: NSSound] = [:]
     
     @Published public var isSoundEnabled: Bool {
         didSet {
@@ -26,24 +27,29 @@ public final class SoundEffectService: ObservableObject {
         } else {
             self.isSoundEnabled = UserDefaults.standard.bool(forKey: soundKey)
         }
+        
+        let mapping: [(SoundEffectType, String)] = [
+            (.click, "Tink"),
+            (.tabSwitch, "Pop"),
+            (.focus, "Purr"),
+            (.launch, "Hero"),
+            (.error, "Basso")
+        ]
+        for (effect, name) in mapping {
+            if let sound = NSSound(named: name) {
+                cachedSounds[effect] = sound
+            }
+        }
     }
     
     public func play(_ effect: SoundEffectType) {
         guard isSoundEnabled else { return }
         
-        DispatchQueue.main.async {
-            switch effect {
-            case .click:
-                NSSound(named: "Tink")?.play()
-            case .tabSwitch:
-                NSSound(named: "Pop")?.play()
-            case .focus:
-                NSSound(named: "Purr")?.play()
-            case .launch:
-                NSSound(named: "Hero")?.play()
-            case .error:
-                NSSound(named: "Basso")?.play()
+        if let sound = cachedSounds[effect] {
+            if sound.isPlaying {
+                sound.stop()
             }
+            sound.play()
         }
     }
 }

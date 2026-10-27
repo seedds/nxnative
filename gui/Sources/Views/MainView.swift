@@ -131,9 +131,7 @@ public struct MainView: View {
                     let isSelected = viewModel.selectedTab == item.tag
                     Button(action: {
                         SoundEffectService.shared.play(.tabSwitch)
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            viewModel.selectedTab = item.tag
-                        }
+                        viewModel.selectedTab = item.tag
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: item.icon)
@@ -162,6 +160,7 @@ public struct MainView: View {
                                 }
                             }
                         )
+                        .animation(.spring(response: 0.22, dampingFraction: 0.78), value: isSelected)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)

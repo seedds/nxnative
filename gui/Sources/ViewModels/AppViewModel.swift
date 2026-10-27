@@ -137,7 +137,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     }
     @Published public var compatibilityFocusArea: CompatibilityFocusArea = .filters
     @Published public var focusedCompatibilityIndex: Int = 0
-    @Published public var focusedCompatibilityButtonIndex: CompatibilityButtonFocus = .portGame
+    @Published public var focusedCompatibilityButtonIndex: CompatibilityButtonFocus = .notes
     
     // MARK: - System Prerequisites & Installer
     @Published public var prerequisites: SystemPrerequisites = SystemPrerequisites()

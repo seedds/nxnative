@@ -6,32 +6,25 @@ public struct CompatibleGameGridCard: View {
     public let isCardFocused: Bool
     public let focusedButton: CompatibilityButtonFocus?
     public let onNotes: () -> Void
-    public let onPort: () -> Void
     
     public init(
         item: CompatibleGameItem,
         isCardFocused: Bool = false,
         focusedButton: CompatibilityButtonFocus? = nil,
-        onNotes: @escaping () -> Void = {},
-        onPort: @escaping () -> Void = {}
+        onNotes: @escaping () -> Void = {}
     ) {
         self.item = item
         self.isCardFocused = isCardFocused
         self.focusedButton = focusedButton
         self.onNotes = onNotes
-        self.onPort = onPort
     }
     
     public var body: some View {
-        GlassCard(padding: 12) {
-            VStack(alignment: .leading, spacing: 10) {
-                // MARK: - Game Cover Art in Portrait (~1 : 1.35 ratio)
+        GlassCard(padding: 10) {
+            VStack(alignment: .leading, spacing: 8) {
+                // MARK: - Game Cover Art in Portrait (1:1.35 ratio)
                 ZStack(alignment: .topTrailing) {
                     coverArtView
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 240)
-                        .clipped()
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     
                     // Floating Engine & Graphics API Pills
                     HStack {
@@ -39,7 +32,7 @@ public struct CompatibleGameGridCard: View {
                             .font(.system(size: 8, weight: .bold, design: .rounded))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
-                            .background(Color.black.opacity(0.68))
+                            .background(Color.black.opacity(0.72))
                             .foregroundColor(.white)
                             .clipShape(Capsule())
                             .overlay(
@@ -56,31 +49,60 @@ public struct CompatibleGameGridCard: View {
                             .foregroundColor(.white)
                             .clipShape(Capsule())
                     }
-                    .padding(8)
+                    .padding(6)
                 }
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .stroke(NXTheme.specularRim, lineWidth: 0.8)
                 )
-                .shadow(color: Color.black.opacity(0.3), radius: 6, x: 0, y: 3)
                 
-                // MARK: - Title & TitleID
-                VStack(alignment: .leading, spacing: 3) {
+                // MARK: - Title & TitleID (Fixed height for uniform grid)
+                VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundColor(isCardFocused ? .white : NXTheme.textPrimary)
                         .lineLimit(2)
-                        .frame(minHeight: 34, alignment: .topLeading)
+                        .frame(height: 32, alignment: .topLeading)
                     
                     Text(item.titleId)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundColor(NXTheme.textSecondary)
                 }
                 
+                // MARK: - Hardware Requirements (Mac & iOS Specs)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 4) {
+                        Text(item.macReq)
+                            .font(.system(size: 8, weight: .semibold, design: .rounded))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.2))
+                            .foregroundColor(Color(red: 0.55, green: 0.80, blue: 1.0))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        
+                        Text(item.storageReq)
+                            .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.purple.opacity(0.2))
+                            .foregroundColor(Color(red: 0.85, green: 0.70, blue: 1.0))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    
+                    Text(item.iosReq)
+                        .font(.system(size: 8, weight: .medium, design: .rounded))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Color.orange.opacity(0.18))
+                        .foregroundColor(Color(red: 1.0, green: 0.75, blue: 0.45))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                .frame(height: 34, alignment: .leading)
+                
                 Divider().opacity(0.2)
                 
-                // MARK: - Footer: Action Buttons (Notes & Port Game)
-                HStack(spacing: 8) {
+                // MARK: - Footer: Action Button (Notes only, Port Game removed)
+                HStack {
                     if item.githubUrl != nil {
                         Button(action: {
                             SoundEffectService.shared.play(.click)
@@ -93,29 +115,24 @@ public struct CompatibleGameGridCard: View {
                             .font(.system(size: 10, weight: .semibold))
                         }
                         .buttonStyle(NXSecondaryButtonStyle())
-                        .controlSize(.small)
+                        .controlSize(.mini)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: 6)
                                 .stroke(isCardFocused && focusedButton == .notes ? Color.white : Color.clear, lineWidth: 1.5)
                         )
                     }
                     
                     Spacer()
                     
-                    Button("Port Game") {
-                        SoundEffectService.shared.play(.click)
-                        onPort()
-                    }
-                    .buttonStyle(NXPrimaryButtonStyle())
-                    .controlSize(.small)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(isCardFocused && focusedButton == .portGame ? Color.white : Color.clear, lineWidth: 2)
-                    )
+                    Text("v\(item.versionTested)")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(NXTheme.textMuted)
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity)
+        .frame(height: 335)
+        .clipped()
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(isCardFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(Color.clear), lineWidth: 2)
@@ -123,56 +140,23 @@ public struct CompatibleGameGridCard: View {
         .shadow(color: isCardFocused ? NXTheme.primary.opacity(0.4) : Color.clear, radius: 8, x: 0, y: 3)
     }
     
-    // MARK: - Cover Art Loader
+    // MARK: - Cover Art Loader (Strictly authentic portrait cover)
     @ViewBuilder
     private var coverArtView: some View {
-        if let localImg = GameCoverService.shared.coverImage(titleId: item.titleId, gameName: item.title) {
-            let isPortrait = localImg.size.height >= localImg.size.width * 1.2
-            if isPortrait {
+        GeometryReader { geo in
+            if let localImg = GameCoverService.shared.coverImage(titleId: item.titleId, gameName: item.title) {
                 Image(nsImage: localImg)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-                    .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
+                    .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
             } else {
-                ZStack {
-                    Image(nsImage: localImg)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .blur(radius: 20)
-                        .opacity(0.35)
-                    Image(nsImage: localImg)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .padding(8)
-                }
-                .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
-                .clipped()
+                fallbackIcon
+                    .frame(width: geo.size.width, height: geo.size.height)
             }
-        } else if let url = item.coverArtUrl {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
-                        .clipped()
-                case .empty:
-                    ZStack {
-                        NXTheme.glassSurfaceElevated
-                        ProgressView().controlSize(.small)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
-                default:
-                    fallbackIcon
-                        .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
-                }
-            }
-        } else {
-            fallbackIcon
-                .frame(maxWidth: .infinity, minHeight: 240, maxHeight: 240)
         }
+        .frame(height: 185)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
     
     private var fallbackIcon: some View {
@@ -180,14 +164,14 @@ public struct CompatibleGameGridCard: View {
             NXTheme.primary.opacity(0.2)
             VStack(spacing: 6) {
                 Image(systemName: "gamecontroller.fill")
-                    .font(.system(size: 28))
+                    .font(.system(size: 26))
                     .foregroundColor(NXTheme.secondary)
                 Text(item.title)
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.white)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 8)
-                    .lineLimit(1)
+                    .lineLimit(2)
             }
         }
     }

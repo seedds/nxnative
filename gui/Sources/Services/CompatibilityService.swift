@@ -87,6 +87,8 @@ public final class CompatibilityService {
             let engine = nsString.substring(with: m.range(at: 6)).trimmingCharacters(in: .whitespaces)
             let api = nsString.substring(with: m.range(at: 7)).trimmingCharacters(in: .whitespaces)
             
+            let specs = self.resolveSpecs(titleId: tid, readmeRelPath: path)
+            
             items.append(
                 CompatibleGameItem(
                     title: title,
@@ -95,7 +97,10 @@ public final class CompatibilityService {
                     sdk: sdk,
                     engine: engine,
                     graphicsApi: api,
-                    readmeRelPath: path
+                    readmeRelPath: path,
+                    macReq: specs.mac,
+                    iosReq: specs.ios,
+                    storageReq: specs.storage
                 )
             )
         }
@@ -123,5 +128,56 @@ public final class CompatibilityService {
             }
         }
         return nil
+    }
+
+    /// Resolves minimum Mac and iOS hardware specs (RAM, Storage) from nxnative game profiles and README notes.
+    private func resolveSpecs(titleId: String, readmeRelPath: String) -> (mac: String, ios: String, storage: String) {
+        let baseDir = "/Volumes/SSD FN501 PRO/Emulations/NativePort/nxnative/dm/games/\(titleId)"
+        let tsvPath = "\(baseDir)/game.tsv"
+        let readmePath = "\(baseDir)/README.md"
+        
+        var memReserve = ""
+        if let tsvContent = try? String(contentsOfFile: tsvPath, encoding: .utf8) {
+            for line in tsvContent.components(separatedBy: .newlines) {
+                let parts = line.components(separatedBy: "\t")
+                if parts.count >= 2 && parts[0].trimmingCharacters(in: .whitespaces) == "mem_reserve" {
+                    memReserve = parts[1].trimmingCharacters(in: .whitespaces)
+                    break
+                }
+            }
+        }
+        
+        var storage = "HD: ~6 GB"
+        if let rmContent = try? String(contentsOfFile: readmePath, encoding: .utf8) {
+            let pattern = #"(?:IPA|RomFS|app|game)[^\n\r]{0,35}?(?:at about|is about|about|is)?\s*([0-9]+(?:\.[0-9]+)?)\s*GB"#
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                let ns = rmContent as NSString
+                if let match = regex.firstMatch(in: rmContent, options: [], range: NSRange(location: 0, length: ns.length)), match.numberOfRanges >= 2 {
+                    let gbVal = ns.substring(with: match.range(at: 1))
+                    storage = "HD: ~\(gbVal) GB"
+                }
+            }
+        }
+        
+        let mac: String
+        let ios: String
+        if memReserve.contains("0x180000000") || memReserve.contains("0x140000000") {
+            mac = "Mac: 16GB+ RAM"
+            ios = "iOS: 8GB RAM (A17+)"
+            if storage == "HD: ~6 GB" { storage = "HD: ~12-16 GB" }
+        } else if memReserve.contains("0x100000000") {
+            mac = "Mac: 8-16GB RAM"
+            ios = "iOS: 6-8GB RAM (A15+)"
+            if storage == "HD: ~6 GB" { storage = "HD: ~8-16 GB" }
+        } else if memReserve.contains("0x80000000") || memReserve.contains("0xC0000000") {
+            mac = "Mac: 8GB RAM"
+            ios = "iOS: 4-6GB RAM (A14+)"
+            if storage == "HD: ~6 GB" { storage = "HD: ~2-4 GB" }
+        } else {
+            mac = "Mac: 8GB+ RAM"
+            ios = "iOS: 6GB+ RAM"
+        }
+        
+        return (mac: mac, ios: ios, storage: storage)
     }
 }

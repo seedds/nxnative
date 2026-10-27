@@ -50,12 +50,6 @@ public struct CompatibilityView: View {
                                         focusedButton: isFocused ? viewModel.focusedCompatibilityButtonIndex : nil,
                                         onNotes: {
                                             if let url = game.githubUrl { NSWorkspace.shared.open(url) }
-                                        },
-                                        onPort: {
-                                            viewModel.appName = game.title
-                                            withAnimation(.easeInOut(duration: 0.18)) {
-                                                viewModel.selectedTab = 0
-                                            }
                                         }
                                     )
                                     .id(game.id)
@@ -68,7 +62,7 @@ public struct CompatibilityView: View {
                             }
                             .padding(18)
                         } else {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 185, maximum: 240), spacing: 16, alignment: .top)], spacing: 16) {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 180, maximum: 220), spacing: 18, alignment: .top)], spacing: 18) {
                                 ForEach(Array(filteredGames.enumerated()), id: \.element.id) { index, game in
                                     let isFocused = viewModel.compatibilityFocusArea == .games && viewModel.focusedCompatibilityIndex == index
                                     CompatibleGameGridCard(
@@ -77,12 +71,6 @@ public struct CompatibilityView: View {
                                         focusedButton: isFocused ? viewModel.focusedCompatibilityButtonIndex : nil,
                                         onNotes: {
                                             if let url = game.githubUrl { NSWorkspace.shared.open(url) }
-                                        },
-                                        onPort: {
-                                            viewModel.appName = game.title
-                                            withAnimation(.easeInOut(duration: 0.18)) {
-                                                viewModel.selectedTab = 0
-                                            }
                                         }
                                     )
                                     .id(game.id)

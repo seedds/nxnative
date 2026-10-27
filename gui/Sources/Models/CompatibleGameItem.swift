@@ -1,7 +1,7 @@
 import Foundation
 
 public struct CompatibleGameItem: Identifiable, Hashable {
-    public let id = UUID()
+    public var id: String { titleId }
     public let title: String
     public let titleId: String
     public let versionTested: String
@@ -9,6 +9,9 @@ public struct CompatibleGameItem: Identifiable, Hashable {
     public let engine: String
     public let graphicsApi: String
     public let readmeRelPath: String
+    public let macReq: String
+    public let iosReq: String
+    public let storageReq: String
     
     public init(
         title: String,
@@ -17,7 +20,10 @@ public struct CompatibleGameItem: Identifiable, Hashable {
         sdk: String,
         engine: String,
         graphicsApi: String,
-        readmeRelPath: String
+        readmeRelPath: String,
+        macReq: String = "Mac: 8GB RAM",
+        iosReq: String = "iOS: 6GB RAM",
+        storageReq: String = "HD: ~6 GB"
     ) {
         self.title = title
         self.titleId = titleId
@@ -26,6 +32,9 @@ public struct CompatibleGameItem: Identifiable, Hashable {
         self.engine = engine
         self.graphicsApi = graphicsApi
         self.readmeRelPath = readmeRelPath
+        self.macReq = macReq
+        self.iosReq = iosReq
+        self.storageReq = storageReq
     }
     
     public var githubUrl: URL? {
@@ -33,10 +42,8 @@ public struct CompatibleGameItem: Identifiable, Hashable {
         return URL(string: base + readmeRelPath)
     }
     
-    /// Official Nintendo Switch Box Art / Icon URL
+    /// Official Nintendo Switch Box Art URL (GameTDB cover art)
     public var coverArtUrl: URL? {
-        let clean = titleId.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard clean.count >= 16 else { return nil }
-        return URL(string: "https://tinfoil.media/ti/\(clean)/256/256/")
+        nil
     }
 }

@@ -15,6 +15,86 @@ public final class GameCoverService: ObservableObject {
             .appendingPathComponent("Library/Application Support/nxnative/covers")
         try? fileManager.createDirectory(at: appSup, withIntermediateDirectories: true)
         self.cacheDirectory = appSup
+        preloadLocalCovers()
+    }
+
+    private func preloadLocalCovers() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let coversDir = URL(fileURLWithPath: "/Volumes/SSD FN501 PRO/Emulations/NativePort/nxnative/docs/images/covers")
+            guard let files = try? self.fileManager.contentsOfDirectory(at: coversDir, includingPropertiesForKeys: nil) else { return }
+            
+            var preloaded: [String: NSImage] = [:]
+            for file in files where file.pathExtension.lowercased() == "jpg" || file.pathExtension.lowercased() == "png" {
+                let tid = file.deletingPathExtension().lastPathComponent.uppercased()
+                if let img = NSImage(contentsOf: file), img.size.height >= img.size.width * 1.15 {
+                    preloaded[tid] = img
+                }
+            }
+            DispatchQueue.main.async {
+                self.loadedCovers.merge(preloaded) { current, _ in current }
+            }
+        }
+    }
+
+    public func customCoverURL(for game: PortedGame) -> URL {
+        let titleId = game.titleId ?? CompatibilityService.shared.findTitleId(forGameTitle: game.name)
+        let key = (titleId ?? game.uniqueKey).uppercased()
+        return cacheDirectory.appendingPathComponent("\(key).custom.jpg")
+    }
+
+    public func hasCustomCover(for game: PortedGame) -> Bool {
+        fileManager.fileExists(atPath: customCoverURL(for: game).path)
+    }
+
+    public func setCustomCover(imageURL: URL, for game: PortedGame) -> Bool {
+        guard let image = NSImage(contentsOf: imageURL) else { return false }
+        let titleId = game.titleId ?? CompatibilityService.shared.findTitleId(forGameTitle: game.name)
+        let key = titleId ?? game.uniqueKey
+        let dest = customCoverURL(for: game)
+
+        try? fileManager.removeItem(at: dest)
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let jpgData = rep.representation(using: .jpeg, properties: [:]) else { return false }
+        
+        do {
+            try jpgData.write(to: dest)
+            if game.url.pathExtension.lowercased() == "app" {
+                let res = game.url.appendingPathComponent("Contents/Resources")
+                let bundleCover = res.appendingPathComponent("cover.jpg")
+                if fileManager.fileExists(atPath: res.path) {
+                    try? jpgData.write(to: bundleCover)
+                }
+            }
+            DispatchQueue.main.async {
+                self.loadedCovers[key] = image
+                if let tid = titleId { self.loadedCovers[tid.uppercased()] = image }
+                self.objectWillChange.send()
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    public func resetCustomCover(for game: PortedGame) {
+        let titleId = game.titleId ?? CompatibilityService.shared.findTitleId(forGameTitle: game.name)
+        let key = titleId ?? game.uniqueKey
+        let dest = customCoverURL(for: game)
+        try? fileManager.removeItem(at: dest)
+
+        if game.url.pathExtension.lowercased() == "app" {
+            let bundleCover = game.url.appendingPathComponent("Contents/Resources/cover.jpg")
+            try? fileManager.removeItem(at: bundleCover)
+        }
+
+        loadedCovers.removeValue(forKey: key)
+        if let tid = titleId { loadedCovers.removeValue(forKey: tid.uppercased()) }
+        _ = coverImage(for: game)
+        DispatchQueue.main.async {
+            self.objectWillChange.send()
+        }
     }
 
     public func coverImage(for game: PortedGame) -> NSImage? {
@@ -25,29 +105,38 @@ public final class GameCoverService: ObservableObject {
             return memoryImage
         }
 
-        // 1. Check game bundle's Contents/Resources for cover art
+        // 1. User custom cover
+        let customFile = customCoverURL(for: game)
+        if fileManager.fileExists(atPath: customFile.path), let img = NSImage(contentsOf: customFile) {
+            loadedCovers[key] = img
+            return img
+        }
+
+        // 2. Check game bundle's Contents/Resources for cover art (only if portrait)
         let bundleResources = game.url.appendingPathComponent("Contents/Resources")
-        for filename in ["cover.jpg", "cover.png", "coverHQ.jpg", "boxart.jpg", "boxart.png"] {
+        for filename in ["cover.jpg", "cover.png", "coverHQ.jpg", "boxart.jpg"] {
             let bundleCover = bundleResources.appendingPathComponent(filename)
             if fileManager.fileExists(atPath: bundleCover.path),
-               let img = NSImage(contentsOf: bundleCover) {
+               let img = NSImage(contentsOf: bundleCover),
+               img.size.height >= img.size.width * 1.05 {
                 loadedCovers[key] = img
                 return img
             }
         }
 
-        // 2. Check disk cache in ~/Library/Application Support/nxnative/covers/<TitleID>.jpg
+        // 3. Check disk cache in ~/Library/Application Support/nxnative/covers/<TitleID>.jpg
         if let tid = titleId, !tid.isEmpty {
             let cached = cacheDirectory.appendingPathComponent("\(tid.uppercased()).jpg")
             if fileManager.fileExists(atPath: cached.path),
-               let img = NSImage(contentsOf: cached) {
+               let img = NSImage(contentsOf: cached),
+               img.size.height >= img.size.width * 1.05 {
                 loadedCovers[key] = img
                 injectCoverIfPossible(sourceImageURL: cached, targetAppURL: game.url)
                 return img
             }
         }
 
-        // 3. Check local docs/images repository for matching slug art
+        // 4. Check local docs/images/covers/ repository for matching portrait box art
         if let localCover = findLocalRepoCover(forGameName: game.name, titleId: titleId) {
             if let img = NSImage(contentsOf: localCover) {
                 loadedCovers[key] = img
@@ -60,17 +149,13 @@ public final class GameCoverService: ObservableObject {
             }
         }
 
-        // 4. Initiate async background download if not yet cached
         fetchOfficialCoverAsync(titleId: titleId?.uppercased(), gameName: game.name, targetAppURL: game.url)
-
-        // 5. Default to app icon while waiting or fallback
         return NSWorkspace.shared.icon(forFile: game.url.path)
     }
 
-    /// Lookup cover art for Compatibility View grid cards
     public func coverImage(titleId: String?, gameName: String) -> NSImage? {
         let resolvedId = titleId ?? CompatibilityService.shared.findTitleId(forGameTitle: gameName)
-        let key = resolvedId ?? gameName
+        let key = (resolvedId ?? gameName).uppercased()
         
         if let memoryImage = loadedCovers[key] {
             return memoryImage
@@ -79,14 +164,15 @@ public final class GameCoverService: ObservableObject {
         if let tid = resolvedId, !tid.isEmpty {
             let cached = cacheDirectory.appendingPathComponent("\(tid.uppercased()).jpg")
             if fileManager.fileExists(atPath: cached.path),
-               let img = NSImage(contentsOf: cached) {
+               let img = NSImage(contentsOf: cached),
+               img.size.height >= img.size.width * 1.05 {
                 loadedCovers[key] = img
                 return img
             }
         }
         
         if let localCover = findLocalRepoCover(forGameName: gameName, titleId: resolvedId) {
-            if let img = NSImage(contentsOf: localCover) {
+            if let img = NSImage(contentsOf: localCover), img.size.height >= img.size.width * 1.15 {
                 loadedCovers[key] = img
                 return img
             }
@@ -119,68 +205,18 @@ public final class GameCoverService: ObservableObject {
     }
 
     private func findLocalRepoCover(forGameName name: String, titleId: String?) -> URL? {
-        let searchDirectories = [
-            "/Volumes/SSD FN501 PRO/Emulations/NativePort/nxnative/docs/images/covers",
-            "/Volumes/SSD FN501 PRO/Emulations/NativePort/nxnative/docs/images",
-            Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/images/covers").path,
-            Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/images").path,
-            Bundle.main.resourcePath ?? ""
-        ]
-
-        for dirPath in searchDirectories where !dirPath.isEmpty {
-            let dirURL = URL(fileURLWithPath: dirPath)
-            guard fileManager.fileExists(atPath: dirURL.path) else { continue }
-
-            if let tid = titleId, !tid.isEmpty {
-                for ext in ["jpg", "png", "jpeg"] {
-                    let byId = dirURL.appendingPathComponent("\(tid.uppercased()).\(ext)")
-                    if fileManager.fileExists(atPath: byId.path) { return byId }
-                }
-            }
-
-            let slugs = generateSlugs(from: name)
-            for slug in slugs {
-                for ext in ["jpg", "png", "jpeg"] {
-                    let candidate = dirURL.appendingPathComponent("\(slug).\(ext)")
-                    if fileManager.fileExists(atPath: candidate.path) {
-                        return candidate
-                    }
-                }
+        let coversDir = URL(fileURLWithPath: "/Volumes/SSD FN501 PRO/Emulations/NativePort/nxnative/docs/images/covers")
+        if let tid = titleId, !tid.isEmpty {
+            for ext in ["jpg", "png", "jpeg"] {
+                let byId = coversDir.appendingPathComponent("\(tid.uppercased()).\(ext)")
+                if fileManager.fileExists(atPath: byId.path) { return byId }
             }
         }
         return nil
     }
 
-    private func generateSlugs(from name: String) -> [String] {
-        var results = [String]()
-        var base = name.lowercased()
-        base = base.replacingOccurrences(of: "the legend of zelda", with: "zelda")
-        base = base.replacingOccurrences(of: "legend of zelda", with: "zelda")
-        base = base.replacingOccurrences(of: "’", with: "")
-        base = base.replacingOccurrences(of: "'", with: "")
-        base = base.replacingOccurrences(of: ":", with: "")
-        base = base.replacingOccurrences(of: "+", with: "-")
-        base = base.replacingOccurrences(of: "&", with: "and")
-        
-        let slug1 = base
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .joined(separator: "-")
-        results.append(slug1)
-        
-        let slug2 = name.lowercased()
-            .replacingOccurrences(of: "’", with: "")
-            .replacingOccurrences(of: "'", with: "")
-            .replacingOccurrences(of: ":", with: "")
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-            .joined(separator: "-")
-        if slug2 != slug1 { results.append(slug2) }
-        return results
-    }
-
     private func fetchOfficialCoverAsync(titleId: String?, gameName: String, targetAppURL: URL?) {
-        let searchKey = titleId ?? gameName
+        let searchKey = (titleId ?? gameName).uppercased()
         guard !inFlightDownloads.contains(searchKey) else { return }
         inFlightDownloads.insert(searchKey)
 
@@ -191,8 +227,6 @@ public final class GameCoverService: ObservableObject {
             }
 
             var candidates: [URL] = []
-            
-            // 1. Known GameTDB IDs
             let gameIdMap: [String: String] = [
                 "0100F2C0115B6000": "AXN7A", "01007EF00011E000": "AAAAA",
                 "01006BB00C6F0000": "AR3NA", "01002B00111A2000": "AXEAA",
@@ -207,11 +241,12 @@ public final class GameCoverService: ObservableObject {
                 "0100535012974000": "AUY4A", "0100B04011742000": "AXSEA",
                 "010056B015FE8000": "A49WA", "0100C1F0051B6000": "AFWTA",
                 "0100DCA0064A6000": "AG3JA", "0100000011D90000": "AX7QA",
-                "0100A3D008C5C000": "ALZPA", "010014E00DB56000": "AY6HA"
+                "0100A3D008C5C000": "ALZXA", "01004AB00A260000": "AK63B",
+                "01009D901BC56000": "BDLWA", "010020D01AD24000": "BCCHA"
             ]
 
             if let tid = titleId, let gid = gameIdMap[tid] {
-                for sub in ["coverHQ", "coverfullHQ", "coverM", "cover"] {
+                for sub in ["coverHQ", "coverfullHQ", "coverM"] {
                     for reg in ["US", "EN", "JA", "CA"] {
                         if let u = URL(string: "https://art.gametdb.com/switch/\(sub)/\(reg)/\(gid).jpg") {
                             candidates.append(u)
@@ -219,32 +254,19 @@ public final class GameCoverService: ObservableObject {
                     }
                 }
             }
-            
-            // 2. Raw GitHub repository images
-            let slugs = self.generateSlugs(from: gameName)
-            for slug in slugs {
-                if let u = URL(string: "https://raw.githubusercontent.com/seedds/nxnative/main/docs/images/\(slug).jpg") {
-                    candidates.append(u)
-                }
-            }
-
-            // 3. Tinfoil CDN
-            if let tid = titleId, tid.count >= 16 {
-                if let u = URL(string: "https://tinfoil.media/ti/\(tid)/512/512/") {
-                    candidates.append(u)
-                }
-            }
 
             for url in candidates {
-                if let data = try? Data(contentsOf: url), let img = NSImage(data: data) {
+                if let data = try? Data(contentsOf: url),
+                   let img = NSImage(data: data),
+                   img.size.height >= img.size.width * 1.1 {
                     if let tid = titleId {
                         let target = self.cacheDirectory.appendingPathComponent("\(tid).jpg")
                         try? data.write(to: target)
                     }
                     if let appURL = targetAppURL {
-                        let resources = appURL.appendingPathComponent("Contents/Resources")
-                        let coverFile = resources.appendingPathComponent("cover.jpg")
-                        if self.fileManager.fileExists(atPath: resources.path) && !self.fileManager.fileExists(atPath: coverFile.path) {
+                        let res = appURL.appendingPathComponent("Contents/Resources")
+                        let coverFile = res.appendingPathComponent("cover.jpg")
+                        if self.fileManager.fileExists(atPath: res.path) && !self.fileManager.fileExists(atPath: coverFile.path) {
                             try? data.write(to: coverFile)
                         }
                     }

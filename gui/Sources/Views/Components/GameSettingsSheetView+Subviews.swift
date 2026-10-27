@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 // MARK: - Subviews and Card Helpers for GameSettingsSheetView
 extension GameSettingsSheetView {
@@ -159,6 +161,84 @@ extension GameSettingsSheetView {
         .animation(.easeInOut(duration: 0.15), value: isFocused)
         .onTapGesture {
             viewModel.settingsModalFocusIndex = rowIndex
+        }
+    }
+    
+    func coverArtworkSection() -> some View {
+        let isCustom = GameCoverService.shared.hasCustomCover(for: game)
+        let currentCover = GameCoverService.shared.coverImage(for: game) ?? NSWorkspace.shared.icon(forFile: game.url.path)
+        
+        return settingCard(
+            rowIndex: 5,
+            title: "Game Cover Artwork",
+            icon: "photo.on.rectangle.angled",
+            iconColor: Color(red: 0.95, green: 0.45, blue: 0.75)
+        ) {
+            HStack(spacing: 16) {
+                Image(nsImage: currentCover)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 55, height: 78)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(NXTheme.specularRim, lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.4), radius: 6, x: 0, y: 2)
+                
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(isCustom ? "Custom Artwork Active" : "Automatic Artwork Active")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundColor(isCustom ? NXTheme.secondary : NXTheme.textPrimary)
+                        
+                        if isCustom {
+                            Text("CUSTOM")
+                                .font(.system(size: 8, weight: .heavy, design: .monospaced))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(NXTheme.secondary.opacity(0.25))
+                                .foregroundColor(NXTheme.secondary)
+                                .clipShape(Capsule())
+                        }
+                    }
+                    
+                    Text(isCustom
+                         ? "Personalized cover active in your library."
+                         : "Automatically fetched from authentic Switch box art repository.")
+                        .font(.system(size: 11))
+                        .foregroundColor(NXTheme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    
+                    HStack(spacing: 8) {
+                        Button("Choose Custom Cover...") {
+                            let panel = NSOpenPanel()
+                            panel.title = "Select Game Cover Image"
+                            panel.allowedContentTypes = [.jpeg, .png, .webP, .image]
+                            panel.allowsMultipleSelection = false
+                            panel.canChooseDirectories = false
+                            if panel.runModal() == .OK, let url = panel.url {
+                                SoundEffectService.shared.play(.click)
+                                _ = GameCoverService.shared.setCustomCover(imageURL: url, for: game)
+                            }
+                        }
+                        .buttonStyle(NXSecondaryButtonStyle())
+                        .controlSize(.small)
+                        
+                        if isCustom {
+                            Button("Reset to Automatic") {
+                                SoundEffectService.shared.play(.click)
+                                GameCoverService.shared.resetCustomCover(for: game)
+                            }
+                            .buttonStyle(NXSecondaryButtonStyle())
+                            .controlSize(.small)
+                            .foregroundColor(Color(red: 1.0, green: 0.4, blue: 0.4))
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+                Spacer()
+            }
         }
     }
 }

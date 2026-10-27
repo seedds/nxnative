@@ -6,20 +6,17 @@ public struct CompatibleGameRow: View {
     public let isRowFocused: Bool
     public let focusedButton: CompatibilityButtonFocus?
     public let onNotes: () -> Void
-    public let onPort: () -> Void
     
     public init(
         game: CompatibleGameItem,
         isRowFocused: Bool = false,
         focusedButton: CompatibilityButtonFocus? = nil,
-        onNotes: @escaping () -> Void = {},
-        onPort: @escaping () -> Void
+        onNotes: @escaping () -> Void = {}
     ) {
         self.game = game
         self.isRowFocused = isRowFocused
         self.focusedButton = focusedButton
         self.onNotes = onNotes
-        self.onPort = onPort
     }
     
     public var body: some View {
@@ -29,7 +26,7 @@ public struct CompatibleGameRow: View {
                 coverArtView
                 
                 // Game Details
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(game.title)
                             .font(.system(size: 13, weight: .bold, design: .rounded))
@@ -57,14 +54,6 @@ public struct CompatibleGameRow: View {
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundColor(NXTheme.textSecondary)
                         
-                        if !game.sdk.isEmpty && game.sdk != "-" {
-                            Text("•")
-                                .foregroundColor(NXTheme.textMuted)
-                            Text("SDK: \(game.sdk)")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(NXTheme.textSecondary)
-                        }
-                        
                         Text("•")
                             .foregroundColor(NXTheme.textMuted)
                         
@@ -80,40 +69,53 @@ public struct CompatibleGameRow: View {
                 
                 Spacer(minLength: 12)
                 
-                // Action Buttons
-                HStack(spacing: 8) {
-                    if game.githubUrl != nil {
-                        Button(action: {
-                            SoundEffectService.shared.play(.click)
-                            onNotes()
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "doc.text.fill")
-                                Text("Notes")
-                            }
-                            .font(.system(size: 11, weight: .semibold))
-                        }
-                        .buttonStyle(NXSecondaryButtonStyle())
-                        .controlSize(.small)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(isRowFocused && focusedButton == .notes ? Color.white : Color.clear, lineWidth: 1.5)
-                        )
-                        .help("View upstream compatibility notes on GitHub")
-                    }
+                // Hardware Specs Badges (Mac, iOS, Storage)
+                HStack(spacing: 6) {
+                    Text(game.macReq)
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.blue.opacity(0.2))
+                        .foregroundColor(Color(red: 0.55, green: 0.80, blue: 1.0))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
                     
-                    Button("Port Game") {
+                    Text(game.iosReq)
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.orange.opacity(0.18))
+                        .foregroundColor(Color(red: 1.0, green: 0.75, blue: 0.45))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                    
+                    Text(game.storageReq)
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.purple.opacity(0.2))
+                        .foregroundColor(Color(red: 0.85, green: 0.70, blue: 1.0))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                }
+                
+                // Action Buttons (Notes only)
+                if game.githubUrl != nil {
+                    Button(action: {
                         SoundEffectService.shared.play(.click)
-                        onPort()
+                        onNotes()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "doc.text.fill")
+                            Text("Notes")
+                        }
+                        .font(.system(size: 11, weight: .semibold))
                     }
-                    .buttonStyle(NXPrimaryButtonStyle())
+                    .buttonStyle(NXSecondaryButtonStyle())
                     .controlSize(.small)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(isRowFocused && focusedButton == .portGame ? Color.white : Color.clear, lineWidth: 2)
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(isRowFocused && focusedButton == .notes ? Color.white : Color.clear, lineWidth: 1.5)
                     )
+                    .help("View upstream compatibility notes on GitHub")
                 }
-                .fixedSize(horizontal: true, vertical: false)
             }
             .frame(minHeight: 48)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -139,55 +141,20 @@ public struct CompatibleGameRow: View {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .stroke(NXTheme.specularRim, lineWidth: 0.8)
                 )
-        } else if let url = game.coverArtUrl {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 44, height: 44)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                case .empty:
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(NXTheme.glassSurfaceElevated)
-                        ProgressView()
-                            .controlSize(.mini)
-                    }
-                    .frame(width: 44, height: 44)
-                default:
-                    fallbackIcon
-                }
-            }
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(NXTheme.specularRim, lineWidth: 0.8)
-            )
-            .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
         } else {
             fallbackIcon
+                .frame(width: 44, height: 44)
         }
     }
     
     private var fallbackIcon: some View {
-        Image(systemName: "gamecontroller.fill")
-            .font(.system(size: 18))
-            .foregroundColor(NXTheme.secondary)
-            .frame(width: 44, height: 44)
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(NXTheme.primary.opacity(0.18))
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                }
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(NXTheme.specularRim, lineWidth: 0.8)
-            )
+        ZStack {
+            NXTheme.glassSurfaceElevated
+            Image(systemName: "gamecontroller.fill")
+                .font(.system(size: 18))
+                .foregroundColor(NXTheme.secondary)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
     
     private func apiColor(_ api: String) -> Color {

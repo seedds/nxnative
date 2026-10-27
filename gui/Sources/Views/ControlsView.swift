@@ -113,12 +113,13 @@ public struct ControlsView: View {
 
             Spacer()
 
-            // Profile Picker
+            // Profile Picker Dropdown Input
             Menu {
                 ForEach(profileManager.profiles) { prof in
                     Button(action: {
                         SoundEffectService.shared.play(.click)
                         profileManager.activeProfileId = prof.id
+                        activeProfile = prof
                     }) {
                         if prof.id == profileManager.activeProfileId {
                             Label(prof.name, systemImage: "checkmark")
@@ -133,23 +134,30 @@ public struct ControlsView: View {
                     showNewProfileAlert = true
                 }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Text("Profile:")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(NXTheme.textSecondary)
-                    Text(activeProfile.name)
+                    
+                    Text(profileManager.activeProfile.name)
                         .font(.system(size: 11, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
+                    
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(NXTheme.textSecondary)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
                 .background(NXTheme.glassSurfaceElevated)
-                .cornerRadius(8)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(NXTheme.specularRim, lineWidth: 0.8))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NXTheme.specularRim, lineWidth: 1.2)
+                )
             }
             .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
 
             Button("Duplicate") {
                 SoundEffectService.shared.play(.click)

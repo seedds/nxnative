@@ -510,6 +510,8 @@ The game's own work and its frame rate stay as they are; the host avoids work of
 
 ## Game notes
 
+A proposal to read the game profile at run time instead of compiling it into each host is in [runtime-profile.md](runtime-profile.md).
+
 Each game's notes are in its profile folder, `dm/games/<id>/README.md`: what the profile needs and why, what was found on the game, Mac routes and open items. The [games table](../dm/games/README.md#games) lists them.
 
 ## Tools (`dm/tools`)

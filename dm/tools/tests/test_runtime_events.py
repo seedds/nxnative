@@ -59,6 +59,16 @@ class RuntimeEvents(unittest.TestCase):
     def test_switch_is_listed(self):
         self.assertRegex((REPO / 'docs/env_switches.tsv').read_text(), r'(?m)^DM_EVENTS\t\w+\t\S')
 
+    def test_notices_are_wired_and_documented(self):   # the app's own notices (dm_notices.c): both front ends install them, and the docs list the rule for every event
+        for fe in ('dm/host/front_mac.m', 'dm/ios/Sources/front_ios.m'):
+            self.assertIn('dm_notices_install(', (REPO / fe).read_text(), fe)
+        self.assertIn('dm_notices.c', (REPO / 'dm/host/Makefile').read_text())
+        notes = SECTION[SECTION.index('**The app\'s own notices.**'):]
+        for ev in names():
+            self.assertRegex(notes, rf'(?m)^\| [^|]*`{ev}`', f'the notices table says nothing about {ev}')
+        self.assertRegex((REPO / 'docs/env_switches.tsv').read_text(), r'(?m)^DM_NOTICES\t\w+\t\S')
+        self.assertRegex((REPO / 'dm/games/settings.tsv').read_text(), r'(?m)^DM_NOTICES\ttoggle\t')
+
 
 if __name__ == '__main__':
     unittest.main()

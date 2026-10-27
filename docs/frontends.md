@@ -119,4 +119,18 @@ Any event can carry `dropped`, the number of events lost since the last line tha
 
 **Not yet** (separate changes): progress of the background prebuild of the shader pairs (`pso_prebuild_bg`), and the launcher's own events before the host starts. The app's own front ends receive the same events as typed callbacks (`dm_events_set_hook` in `dm/host/dm_events.h`), not as JSON.
 
+**The app's own notices.** The game's own app turns the events into small notices through that hook (`dm/host/dm_notices.c`; `front_mac.m` and `front_ios.m` draw them as one pill at the top of the game's view, on the main thread, and never touch the render path). Which event shows what:
+
+| Event | Notice | Why |
+|---|---|---|
+| `shaders`, phase `background` | "Preparing shaders... 45%" while it runs (one update per percent), gone at `done` | the prewarm that runs while the game is already on screen; nothing else tells the player why it is slow |
+| `shaders`, phases `prewarm`, `prebuild` | none | the prepare step before the first frame has its own progress screen (`front_progress`), which these notices do not repeat |
+| `controller` | "Controller connected: <name> (player N)" or "Controller disconnected", 3 s | |
+| `thermal` | "The device is hot; the game may hold 30 fps", 6 s, once per change to `serious` or `critical` | only where the thermal cap holds the frame step at 30 fps (the iPhone, unless `DM_THERMAL_CAP=0`); `nominal` and `fair` show nothing, and the Mac has no cap |
+| `red` | none | `[RED]` lines are diagnostics for the log and for a front end that wants them; a player cannot act on one |
+| `save` | none | games draw their own save icon, and a second one would only get in its way |
+| `frame_loop`, `end`, `exit` | none | a program's own bookkeeping; the player sees the game start or end |
+
+`DM_NOTICES=0` turns all of them off (the settings screens' "Status notices", [Settings](settings.md#status-notices)); the typed hook is then not installed.
+
 A test (`dm/tools/tests/test_runtime_events.py`) fails on an event or field the code emits that this section does not list.

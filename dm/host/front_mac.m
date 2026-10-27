@@ -13,6 +13,7 @@
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
 #include "dm.h"
+#include "dm_notices.h"
 #include "dm_input.h"
 #include "front.h"
 #include "hle.h"
@@ -40,6 +41,7 @@ int front_fullscreen(void) { return g_fullscreen; }   // nvn_mtl.m link_latency:
 // the frame interval jumping between them. In fullscreen, a screen whose rate is not a multiple of the game's switches to the mode of the same size with the highest rate that is (144 → 120 Hz
 // for 60 and 30 fps), for this app only: macOS switches it back when the host quits, crashes included, and leaving fullscreen or that screen switches it back at once. A window keeps the
 // screen's rate, because the switch changes the whole screen for every app and most external screens go black for a second or more. A screen with no such mode keeps the virtual ticks
+static void note_show(const dm_notice_t *n);   // status notices, below
 static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
 static CGDirectDisplayID g_match_id; static CGDisplayModeRef g_match_orig;   // main thread: the screen this host switched and its own mode (NULL = none switched)
 static double mode_hz(CGDisplayModeRef m) { double hz = CGDisplayModeGetRefreshRate(m); return hz > 0 ? hz : 0; }   // 0 = not known (older built-in screens report none)
@@ -1194,6 +1196,7 @@ void front_run(void (*guest)(void)) {
                 GCController *c = n.object; int conn = n.name == GCControllerDidConnectNotification;
                 if (!c.extendedGamepad || g_merge) LOG("controller %s: %s%s", conn ? "connected" : "disconnected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
                 pads_changed(conn ? nil : c); }];
+        dm_notices_install(0, 0, note_show);   // status notices from the events (the Mac has no thermal cap, so no heat notice); before the first event below
         // Runtime events: the thermal state at start and on every change (dm_event_thermal reports only a change)
         dm_event_thermal((int)NSProcessInfo.processInfo.thermalState);
         [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_event_thermal((int)NSProcessInfo.processInfo.thermalState); }];
@@ -1225,6 +1228,34 @@ void front_run(void (*guest)(void)) {
         pthread_t th; if (pthread_create(&th, &a, guest_tramp, &ga)) die("pthread_create guest");
         [NSApp run];
     }
+}
+
+// Status notices (dm_notices.h): one pill at the top of the game's view, drawn from the runtime events; the hook runs on the events' writer thread, so the view is changed on the main thread.
+// A prepare step's own progress screen (front_progress) is not repeated here: only the background prewarm and the controller notices come through.
+static NSView *g_note; static NSTextField *g_note_label; static dm_notice_view_t g_note_view;
+static void note_refresh(void) {   // main thread
+    const char *t = dm_notice_view_text(&g_note_view, CACurrentMediaTime());
+    NSView *cv = g_win.contentView;
+    if (!t || !cv) { g_note.hidden = YES; return; }
+    if (!g_note) {
+        g_note_label = [NSTextField labelWithString:@""]; g_note_label.textColor = NSColor.whiteColor; g_note_label.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+        g_note = [NSView new]; g_note.wantsLayer = YES; g_note.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.6].CGColor; g_note.layer.cornerRadius = 12;
+        g_note.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin;
+        [g_note addSubview:g_note_label];
+    }
+    g_note_label.stringValue = @(t); [g_note_label sizeToFit];
+    NSSize ls = g_note_label.frame.size, bs = NSMakeSize(ls.width + 28, ls.height + 12);
+    g_note_label.frame = NSMakeRect(14, 6, ls.width, ls.height);
+    g_note.frame = NSMakeRect(floor((cv.bounds.size.width - bs.width) / 2), cv.bounds.size.height - bs.height - 14, bs.width, bs.height);
+    if (g_note.superview != cv) [cv addSubview:g_note positioned:NSWindowAbove relativeTo:nil];
+    g_note.hidden = NO;
+}
+static void note_show(const dm_notice_t *n) {
+    dm_notice_t c = *n;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        dm_notice_view_apply(&g_note_view, &c, CACurrentMediaTime()); note_refresh();
+        if (c.act == DM_NOTICE_SHOW) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((c.seconds + 0.05) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ note_refresh(); });
+    });
 }
 
 // Progress screen of the prepare step (front.h front_progress): a dark view over the game's, the title, a bar and a count, centered; AppKit views, so it draws while the game's thread waits

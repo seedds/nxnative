@@ -207,6 +207,13 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ## Input
 
+### Controller disconnect between style and player lookup
+
+- **Symptom:** clang reports a negative shift in `fill` or `vib_targets` (`hle_hid.c`).
+- **Cause:** a style check looked up the connected player, then input or vibration routing looked it up again. A disconnect between the reads made the second result -1, used in `1u << player`.
+- **Fix:** look up the player once and derive the style from that same result before constructing the player mask.
+- **Found on:** clang static analysis ([issue #424](https://github.com/seedds/nxnative/issues/424)); no gameplay failure reported.
+
 ### History reads fill every requested entry
 
 - **Symptom:** buttons and menus work, the sticks do nothing in play (Super Mario Odyssey: its first hint, "Look Around", waited forever); an `nn::diag` abort with Result 0x2aca in the first frames of `nnMain` (Hollow Knight: Silksong, Unity 6000.0.50f1: `bt: sdk+0x514580 main+0x1296c64 …`).

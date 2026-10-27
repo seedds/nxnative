@@ -4,6 +4,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 ## Frame step
 
+### Frame cap checked and used from the same sample
+
+- **Symptom:** clang reports division by zero in `fstep_tick` (`hle_nvn.c`).
+- **Cause:** the present path checked `fps_step_cap()` through `fstep_on`, then `fstep_tick` sampled it again for `60 / cap`. The second sample could be zero even though the first enabled stepping.
+- **Fix:** sample the cap once in `nvnQueuePresentTexture`, check it and pass the nonzero value into `fstep_tick`.
+- **Found on:** clang static analysis ([issue #424](https://github.com/seedds/nxnative/issues/424)); no gameplay failure reported.
+
 ### sead's dynamic present interval, `ksys::VFR` and the host's frame step
 
 - **Symptom:** a 30 fps game to run at 60; after the floor was lowered, slow motion on a GPU-bound device (GitHub issue #9).

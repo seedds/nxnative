@@ -1,4 +1,4 @@
-// Launcher settings, validation and persistence. Shared by the iOS UI and the native storage regression test.
+// Launcher settings, validation and persistence. Shared by the iOS UI, the Mac app's settings window (dm/mac/Launcher.swift) and the native storage regression test.
 import Foundation
 import Combine
 
@@ -6,11 +6,15 @@ struct Setting: Decodable, Identifiable {
     let env, kind, label, note, def: String
     let section: String?   // heading on the settings screen; absent in older bundles
     let needs: String?     // "<VAR>=<value>": a sub-setting, drawn only while that setting has that value
+    let level: String?     // "basic": shown first (the Mac window's Basic settings); any other or none: Advanced settings. The iPhone keeps one list
+    let base: Base?        // render scale: the 3D views' size at 1.0, docked and handheld, for the size in pixels (the Mac window)
+    struct Base: Decodable { let docked, handheld: [Int] }
     let options: [[String]]?   // choice: [value, label]
     let min, max, step: Double?   // range
     let on, off: String?   // toggle: the values the variable takes (1 / 0 when not given)
     var id: String { env }
     var sectionTitle: String { section ?? "Game" }
+    var basic: Bool { level == "basic" }
     var onValue: String { on ?? "1" }
     var offValue: String { off ?? "0" }
     func isDefault(_ v: String) -> Bool {   // a range compares as numbers (a slider writes 1.00 for 1.0)
@@ -26,13 +30,15 @@ struct Setting: Decodable, Identifiable {
         default: return true
         }
     }
-    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, options, min, max, step, on, off }
+    enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off }
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
 
 final class LauncherModel: ObservableObject {
     let settings: [Setting]
-    let fromFile: Set<String>   // set by an env file: shown, not changed
+    let fixed: Set<String>      // set by an env file or, on the Mac, by the launch environment: shown, not changed
+    let fromLaunch: Set<String>   // of those, the ones the launch environment set (a front end's launch overrides; the Mac launcher's DM_ENV_LAUNCH_KEYS)
+    let ignoreSaved: Bool   // DM_SAVED_CHOICES=0: start from the defaults, and leave the saved choices as they are
     @Published var values: [String: String] = [:]
 
     private let defaults: UserDefaults
@@ -40,10 +46,14 @@ final class LauncherModel: ObservableObject {
     init(_ settings: [Setting], defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.settings = settings
-        fromFile = Set((ProcessInfo.processInfo.environment["DM_ENV_FILE_KEYS"] ?? "").split(separator: " ").map(String.init))
+        let env = ProcessInfo.processInfo.environment
+        fromLaunch = Set((env["DM_ENV_LAUNCH_KEYS"] ?? "").split(separator: " ").map(String.init))
+        fixed = fromLaunch.union((env["DM_ENV_FILE_KEYS"] ?? "").split(separator: " ").map(String.init))
+        ignoreSaved = env["DM_SAVED_CHOICES"] == "0"
+        if ignoreSaved { fputs("launcher: saved choices ignored (DM_SAVED_CHOICES=0)\n", stderr) }
         for s in settings {
-            if fromFile.contains(s.env), let v = ProcessInfo.processInfo.environment[s.env] { values[s.env] = v; continue }
-            let saved = defaults.string(forKey: "launcher." + s.env)
+            if fixed.contains(s.env), let v = env[s.env] { values[s.env] = v; continue }
+            let saved = ignoreSaved ? nil : defaults.string(forKey: "launcher." + s.env)
             values[s.env] = saved.flatMap { s.accepts($0) ? $0 : nil } ?? s.def   // a saved choice the game no longer offers: its default
         }
     }
@@ -61,13 +71,26 @@ final class LauncherModel: ObservableObject {
         return v == want
     }
     func rows(in section: String) -> [Setting] { settings.filter { $0.sectionTitle == section && visible($0) } }
-    var changed: Bool { settings.contains { !fromFile.contains($0.env) && !$0.isDefault(values[$0.env] ?? $0.def) } }
+    // The Mac window: Basic settings first, then Advanced settings, each in the list's sections and order
+    func sections(basic: Bool) -> [String] {
+        settings.filter { $0.basic == basic }.reduce(into: []) { if !$0.contains($1.sectionTitle) { $0.append($1.sectionTitle) } }
+    }
+    func rows(in section: String, basic: Bool) -> [Setting] { rows(in: section).filter { $0.basic == basic } }
+    // A range's label: its percentage, with the size in pixels for the chosen console mode when the list has the base size (the render scale)
+    func rangeLabel(_ s: Setting, _ v: Double) -> String {
+        let p = "\(Int((v * 100).rounded())) %"
+        guard let b = s.base else { return p }
+        let size = (values["DM_OPMODE"] ?? "1") == "0" ? b.handheld : b.docked
+        guard size.count == 2 else { return p }
+        return "\(Int((Double(size[0]) * v).rounded())) × \(Int((Double(size[1]) * v).rounded())) (\(p))"
+    }
+    var changed: Bool { settings.contains { !fixed.contains($0.env) && !$0.isDefault(values[$0.env] ?? $0.def) } }
 
-    // Reset every launcher choice to the game's defaults; an env file's values stay.
+    // Reset every launcher choice to the game's defaults; values fixed by an env file or at launch stay, and with DM_SAVED_CHOICES=0 so does the store.
     func reset() {
         for s in settings {
-            defaults.removeObject(forKey: "launcher." + s.env)
-            if !fromFile.contains(s.env) { values[s.env] = s.def }
+            if !ignoreSaved { defaults.removeObject(forKey: "launcher." + s.env) }
+            if !fixed.contains(s.env) { values[s.env] = s.def }
         }
         fputs("launcher: settings reset to the game's defaults\n", stderr)
     }
@@ -77,9 +100,17 @@ final class LauncherModel: ObservableObject {
     func apply() {
         for s in settings {
             let v = values[s.env] ?? s.def
-            if fromFile.contains(s.env) { fputs("launcher: \(s.env) kept at \(v) (env file)\n", stderr); continue }
-            if s.isDefault(v) { defaults.removeObject(forKey: "launcher." + s.env) } else { defaults.set(v, forKey: "launcher." + s.env) }
+            if fixed.contains(s.env) { fputs("launcher: \(s.env) kept at \(v) (\(fromLaunch.contains(s.env) ? "launch environment" : "env file"))\n", stderr); continue }
+            if !ignoreSaved { if s.isDefault(v) { defaults.removeObject(forKey: "launcher." + s.env) } else { defaults.set(v, forKey: "launcher." + s.env) } }
             setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v)\(s.isDefault(v) ? "" : " (changed)")\n", stderr)
+        }
+    }
+
+    // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written
+    func applySaved() {
+        for s in settings where !fixed.contains(s.env) {
+            let v = values[s.env] ?? s.def
+            if !s.isDefault(v) { setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v) (saved choice)\n", stderr) }
         }
     }
 }

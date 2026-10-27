@@ -121,6 +121,20 @@ to a visible defect is not established.
   lack package files required by the baseline shader build; Yoshi's Crafted
   World has no profile in the baseline revision. These are unchecked.
 
+- **Current, [#424](https://github.com/seedds/nxnative/issues/424) controls
+  (2026-10-27):** the unchanged `1963fab7` host reproduces the startup texture
+  warning described above and peak footprints of 1,522 and 2,070 MB, versus
+  the first baseline's 564 MB and the patched run's 1,274 MB. A byte-identical
+  HEAD copy also misses both scheduled captures. These flags are not specific
+  to the analyzer fixes. The 65-second startup route reaches different
+  workloads between runs, so its timing difference is inconclusive. An
+  alternating fresh-save idle-title benchmark, two runs per host with the same
+  shaders, also has unstable timing: p99 134.51/712.67 ms on HEAD and
+  117.44/180.31 ms patched. This does not establish a patch-induced slowdown
+  or a stable performance baseline. Reports are in the NSP work folder's
+  `issue424-controls/` and `issue424-idle-benchmark/results-valid/`; the earlier
+  idle benchmark with an incorrect shader-cache path is marked invalid.
+
 ## Integration with main
 
 Rebased onto `75065df` (2026-10-27), whose shader chain is `157e1b96c8da`.

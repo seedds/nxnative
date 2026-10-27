@@ -1,0 +1,31 @@
+name: Feature request
+description: Ask for something nxnative does not do yet
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Looking for a graphical app to pack, list and start games? That is a separate project: [NX2Apple](https://github.com/LNPANDY/NX2Apple) is one.
+        A new front end belongs in a project of its own; what it needs from nxnative (an event, a field in the settings list) is welcome here.
+        A new platform or device class, a second implementation of an existing path, or a change of more than about 1,000 lines: agree on the scope here first ([CONTRIBUTING.md](https://github.com/seedds/nxnative/blob/main/CONTRIBUTING.md#large-changes-and-other-platforms)).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is missing
+      description: What you want to do and what stops you today. A game, a device or a log line helps.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: How it could work, and the parts of nxnative it touches, if you know them.
+    validations:
+      required: false
+  - type: input
+    id: platforms
+    attributes:
+      label: Platforms
+      placeholder: "Mac, iPhone, iPad"
+    validations:
+      required: false

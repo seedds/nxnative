@@ -1,0 +1,45 @@
+name: Game request or bring-up report
+description: Ask for a game, or report how far a game without a profile gets
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A game without a profile can be tried as it is: run `scripts/build_ipa_from_nsp.py` on its NSP folder. It writes a survey of the game
+        (`<title ID>_survey/survey.md`), a provisional profile and a best-effort build ([Port another game](https://github.com/seedds/nxnative/blob/main/docs/development.md#port-another-game)).
+        The survey tells whoever picks the game up most of what they need. Never attach game files, keys or anything extracted from a game.
+  - type: input
+    id: game
+    attributes:
+      label: Game, title ID and version
+      placeholder: "<game name>, <base game title ID>, <version>"
+    validations:
+      required: true
+  - type: input
+    id: engine
+    attributes:
+      label: Engine and graphics API, if known
+      description: The survey names both (for example Unreal Engine 4, Unity, NVN, Vulkan, OpenGL).
+    validations:
+      required: false
+  - type: textarea
+    id: survey
+    attributes:
+      label: Survey and what happened
+      description: Attach `survey.md` if you ran the NSP script, and say how far the game got (it boots, shows a title, crashes at ..., draws wrong). Attach the log of a run if there was one.
+    validations:
+      required: false
+  - type: input
+    id: device
+    attributes:
+      label: Device and OS you would play on
+      placeholder: iPhone 17 Pro Max, iOS 26.1
+    validations:
+      required: false
+  - type: checkboxes
+    id: no-game-files
+    attributes:
+      label: No game files
+      options:
+        - label: Nothing attached here contains game files, keys or data extracted from a game.
+          required: true

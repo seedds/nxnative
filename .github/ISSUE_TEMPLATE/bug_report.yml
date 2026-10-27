@@ -1,0 +1,95 @@
+name: Bug report
+description: A game that crashes, hangs, draws wrong or runs slowly, or a script or build step that fails
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The fields below are what a problem is usually traced with; without them the first reply is a request for them.
+        Never attach game files, keys, title keys or anything extracted from a game (RomFS, NSOs, shaders). Logs and screenshots are fine.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did and what you saw. The last log lines, a `[RED]` line or a screenshot help. Say whether it happens every time.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: false
+  - type: input
+    id: game
+    attributes:
+      label: Game, title ID and version
+      description: The base game's title ID and the update you packed (display version or v-number), and DLC if any.
+      placeholder: "The Legend of Zelda: Breath of the Wild, 01007EF00011E000, 1.9.0 (v1114112)"
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: nxnative commit
+      description: "`git rev-parse --short HEAD` in the checkout you built from (or the date you downloaded it)."
+      placeholder: 4639c511
+    validations:
+      required: true
+  - type: input
+    id: chain
+    attributes:
+      label: Shader chain version
+      description: "`grep DMSH_CHAIN dm/gfx/nvn/dmsh_chain.h`, or the `b-<version>` folder name under `<title ID>_build/shader/`."
+      placeholder: 5cddc47253ab
+    validations:
+      required: true
+  - type: dropdown
+    id: build
+    attributes:
+      label: How it was built and run
+      options:
+        - Mac, the host from a terminal (--platform mac)
+        - Mac app (--platform mac-app)
+        - iPhone or iPad, unsigned IPA from build_ipa_from_nsp.py
+        - iPhone or iPad, built and run with Xcode
+        - Built by hand (make, dmsh_build.py, build_ipa.sh)
+        - The NSP script failed before anything ran
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device and OS
+      description: The Mac or iPhone model with its chip, and the macOS or iOS version (Apple menu > About This Mac, or Settings > General > About).
+      placeholder: MacBook Pro M2 Max, macOS 26.1
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Settings and environment overrides
+      description: "Launcher settings you changed, the contents of `env.txt` (`Documents/env.txt` on iOS, `--env-file` for an app), and any `DM_*` variables set in the terminal. Write \"none\" if there are none."
+      placeholder: "DM_FPS_TARGET=60\nDM_PRESENT_UPSCALE=metalfx"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Attach the whole log from the start of the run (drag the file here), not excerpts:
+        - Mac app: `~/Library/Logs/nxnative/<title ID>.log` (the run before is `<title ID>.prev.log`)
+        - Terminal (`--platform mac`): the host's output, e.g. the command followed by `2>&1 | tee run.log`
+        - iPhone or iPad: `log.txt` in the Files app under the app's name (the run before is `log.prev.txt`)
+        - Graphics problems: also `<title ID>_build/logs/dmsh_build.log` from the build you ran
+        - Script or build failures: the script's full console output
+    validations:
+      required: true
+  - type: checkboxes
+    id: no-game-files
+    attributes:
+      label: No game files
+      options:
+        - label: Nothing attached here contains game files, keys or data extracted from a game.
+          required: true

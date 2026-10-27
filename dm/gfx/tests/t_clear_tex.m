@@ -9,7 +9,10 @@ static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr,"FAIL: %s\n",label); } } while (0)
 
 int main(void) { @autoreleasepool {
+    CHECK(setenv("DM_NVN_PASSDUMP", "0", 1) == 0, "enable pass dump for frame zero");
     mtl_init(); id<MTLCommandQueue> queue=[g_dev newCommandQueue];
+    CHECK(passdump(), "null clear runs with pass-dump diagnostics enabled");
+    clear_tex(&(p_clear_tex){0});   // A missing texture must also be safe in pass-dump diagnostics.
     struct { int mask, x, y, w, h, layer, level, ui; const char *label; } cases[]={
         {8,0,0,8,8,0,0,0,"alpha-only clear preserves RGB"},
         {5,2,1,3,2,0,0,0,"masked rectangle preserves other pixels and channels"},

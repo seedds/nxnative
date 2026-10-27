@@ -470,6 +470,9 @@ int main(void) {
     EXPECT("texture width", 1280, P(nvnTextureGetWidth)(&sc[0]));
     NVNtexture *scp[2] = {&sc[0], &sc[1]};
     NVNwindowBuilder wb; NVNwindow win; P(nvnWindowBuilderSetDevice)(&wb, &dev); P(nvnWindowBuilderSetDefaults)(&wb);
+    NVNtexture *missing_first[2] = {NULL, &sc[1]};
+    P(nvnWindowBuilderSetTextures)(&wb, 2, missing_first);
+    EXPECT("WindowInitialize with null first texture", 1, P(nvnWindowInitialize)(&win, &wb));
     P(nvnWindowBuilderSetTextures)(&wb, 2, scp); EXPECT("WindowInitialize succeeds", 1, P(nvnWindowInitialize)(&win, &wb));
     int idx[4];
     for (int f = 0; f < 4; f++) {

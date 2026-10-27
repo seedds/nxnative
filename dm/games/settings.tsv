@@ -1,4 +1,4 @@
-# Player-facing settings: the iOS launcher (dm/ios/Sources/Launcher.swift) shows them before the game starts; Mac front ends read the same metadata before starting a Mac app.
+# Player-facing settings: the iOS launcher (dm/ios/Sources/Launcher.swift) and the Mac app's settings window (dm/mac/Launcher.swift) show them before the game starts; Mac front ends read the same list.
 # dm/games/settings.py writes one game's list into its app (dm/launcher.json; build_ipa.sh, and dm/mac/pack_app.py through the NSP script): the rows whose condition holds for that game, with its defaults. Each sets an environment variable the host reads when the game starts; one an env file sets
 # (Documents/env.txt, the bundle's dm/env.txt) is shown but kept. Diagnostic switches stay environment-only, so they are not listed here. The player's page is docs/settings.md.
 # Columns, separated by tabs:
@@ -19,6 +19,7 @@ DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		le
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic
+DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic

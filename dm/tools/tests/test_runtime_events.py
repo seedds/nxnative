@@ -12,7 +12,9 @@ ROWS = {m.group(1): m.group(2) for m in re.finditer(r'^\| `(\w+)` \| (.*?) \| .*
 
 
 def names():   # the NAMES table of dm_events.c
-    return re.findall(r'"(\w+)"', re.search(r'NAMES\[\] = \{(.*?)\};', SRC, re.S).group(1))
+    table = re.search(r'NAMES\[\] = \{(.*?)\};', SRC, re.S)
+    assert table, 'no NAMES table in dm_events.c'
+    return re.findall(r'"(\w+)"', table.group(1))
 
 
 def sources():
@@ -26,7 +28,6 @@ class RuntimeEvents(unittest.TestCase):
     def test_every_event_is_documented_and_emitted(self):
         emitted = names()
         self.assertEqual(sorted(emitted), sorted(ROWS), 'dm_events.c NAMES and the docs table list different events')
-        text = '\n'.join(p.read_text() for p in sources()) + '\n' + SRC
         calls = {'frame_loop': 'dm_event_frame_loop(', 'shaders': 'dm_event_shaders(', 'red': 'dm_log_red(', 'end': 'dm_event_end(', 'exit': 'dm_event_exit('}
         self.assertEqual(sorted(calls), sorted(emitted), 'a new event needs its emitting call named here')
         for ev, call in calls.items():

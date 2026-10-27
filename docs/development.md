@@ -337,6 +337,8 @@ A full install sends the whole app, about 11 GB for Animal Crossing: New Horizon
 
 PR #368 reports Animal Crossing's app shrinking from 11 GB to 1.2 GB, with reinstalls in 30 to 60 seconds. Deleting the app deletes its `Documents`, so push the game files again after a delete. The copy needs one `devicectl` transfer at a time.
 
+`build_ipa.sh` takes the same switch for the unsigned IPA: `DM_COPY_ROMFS=NO` leaves the RomFS out of the package (add-on content stays in), which keeps a large game under the size iOS extracts; the IPA is then only useful with `Documents/romfs.img` already on the phone. The IPA's executable also gets an ad-hoc signature carrying the Increased Memory Limit entitlement (the default `DM_ENTITLEMENTS`, an empty value for none): an unsigned binary has no signature for a sideloader to read entitlements from, and the packed bundle drops `_CodeSignature`, so only the executable's own signature survives.
+
 The unsigned IPA build still uses the repository's `dm/ios/DmIOS.xcodeproj`, skips the resource phase (`DM_COPY_GAME_RESOURCES=NO`) and packs the resources straight from the drive as before.
 
 ## Port another game

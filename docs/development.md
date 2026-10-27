@@ -288,7 +288,9 @@ The replayer is built like the gfx tests: it includes `nvn_mtl.m` and `hle_nvn.c
 
 Tests without game files: `t_capture` (CPU only, in CI) runs synthetic records through the format and the relocation; `make -C dm/gfx/tests GAME=<id> check_t_capture_live` (GPU) captures the second of two synthetic frames and replays it with `nvn_replay`.
 
-What step 1 does not cover yet (GitHub issue #402): more than one frame (pool deltas between frames); multisampled textures and formats that are not plain texels are not captured (a `[RED]` line at capture); sparse virtual pools; addresses stored inside pool contents (the game's own pointers to GPU memory) are not relocated; textures the CPU uploads through `DM_GAME_TEX_DIRTY_UPLOAD`'s flush tracking are uploaded again from the pools in the replay; timing and synchronization (waits, the encode thread, present pacing) are not reproduced.
+Diagnostics: each replay writes the presented image beside the capture (`.replay<n>.png`, the live one is `.live.png`); the first replay takes the live frame's number, so `DM_NVN_TEXDUMP=<that frame>:<path>` given to both the live run and the replayer dumps the same render targets; and after the first replay the replayer compares every pool block with the live run's state after the frame and names the ops of the records that touch blocks that differ (only counter reports: timestamps; blocks no record touches: the CPU wrote them while the frame ran).
+
+What step 1 does not cover yet (GitHub issue #402): bit-for-bit equality on a game frame (Breath of the Wild: about 50 pixels differ, its note, Open); more than one frame (pool deltas between frames); multisampled textures and formats that are not plain texels are not captured (a `[RED]` line at capture); sparse virtual pools; addresses stored inside pool contents (the game's own pointers to GPU memory) are not relocated; textures the CPU uploads through `DM_GAME_TEX_DIRTY_UPLOAD`'s flush tracking are uploaded again from the pools in the replay; timing and synchronization (waits, the encode thread, present pacing) are not reproduced.
 
 ### A Mac app
 

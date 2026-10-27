@@ -98,7 +98,7 @@ static void cap_iface(NvProg *o, uint64_t out[6]) {
 // ---------- Objects ----------
 static int cap_enc_obj(void *ctx, int kind, uint64_t *field, uint8_t *payload, uint32_t size);
 static const cap_ops g_cap_enc = {cap_enc_addr, cap_enc_obj};
-static void cap_tex_read(const tex_t *t);
+static void cap_tex_read(const tex_t *t, int rec);
 static uint64_t cap_pool_obj(const pool_t *p) {
     if (!p) return 0;
     uint8_t k[8 + sizeof(pool_t)]; memcpy(k, &p, 8); memcpy(k + 8, p, sizeof *p);
@@ -113,7 +113,7 @@ static uint64_t cap_tex_obj(const tex_t *src) {   // a texture snapshot (by cont
     tex_t t = *src;
     void *have = nvn_hm_get(&g_cap_tex, &t); if (have) return cap_obj(CAP_K_TEX, (uint64_t)(uintptr_t)have - 1);
     uint32_t idx = g_cap_ntex++; nvn_hm_put(&g_cap_tex, &t, (void *)(uintptr_t)(idx + 1));
-    cap_tex_read(&t);
+    cap_tex_read(&t, 1);
     cap_tex_fields(&t, &g_cap_enc, NULL);
     uint32_t hd[2] = {idx, 0}; cap_buf_put(&g_cap_tobj, hd, 8); cap_buf_put(&g_cap_tobj, &t, sizeof t);
     return cap_obj(CAP_K_TEX, idx);
@@ -128,7 +128,7 @@ static int cap_enc_obj(void *ctx, int kind, uint64_t *field, uint8_t *payload, u
         case CAP_K_TEX:
             if (g_cap_orig && v >= (uint64_t)(uintptr_t)g_cap_orig && v + sizeof(tex_t) <= (uint64_t)(uintptr_t)g_cap_orig + size) {   // the snapshot inside the record
                 uint64_t off = v - (uint64_t)(uintptr_t)g_cap_orig; tex_t *in = (tex_t *)(payload + off);
-                cap_tex_read(in); cap_tex_fields(in, &g_cap_enc, NULL); *field = cap_obj(CAP_K_TEXIN, off); return 1;
+                cap_tex_read(in, 1); cap_tex_fields(in, &g_cap_enc, NULL); *field = cap_obj(CAP_K_TEXIN, off); return 1;
             }
             *field = cap_tex_obj((const tex_t *)(uintptr_t)v); return 1;
         case CAP_K_PROG: {
@@ -196,6 +196,16 @@ static int cap_pf_bpp(MTLPixelFormat f, int plane) {   // bytes per pixel of a p
     if (f >= MTLPixelFormatRGBA32Uint && f <= MTLPixelFormatRGBA32Float) return 16;
     return 0;
 }
+// bytes per block of a plane and the block's size in texels (1x1 for plain texels; BC formats 4x4); 0 = a format the capture cannot read back
+static int cap_pf_block(MTLPixelFormat f, int plane, uint32_t *bw, uint32_t *bh) {
+    *bw = *bh = 1;
+    int b = cap_pf_bpp(f, plane); if (b || plane) return b;
+    *bw = *bh = 4;
+    if (f == MTLPixelFormatBC1_RGBA || f == MTLPixelFormatBC1_RGBA_sRGB || f == MTLPixelFormatBC4_RUnorm || f == MTLPixelFormatBC4_RSnorm) return 8;
+    if ((f >= MTLPixelFormatBC2_RGBA && f <= MTLPixelFormatBC3_RGBA_sRGB) || f == MTLPixelFormatBC5_RGUnorm || f == MTLPixelFormatBC5_RGSnorm
+        || (f >= MTLPixelFormatBC6H_RGBFloat && f <= MTLPixelFormatBC7_RGBAUnorm_sRGB)) return 16;
+    *bw = *bh = 1; return 0;
+}
 static int cap_tex_planes(MTLPixelFormat f) { return f == MTLPixelFormatDepth32Float_Stencil8 ? 2 : 1; }
 static MTLBlitOption cap_plane_opt(MTLPixelFormat f, int plane) { return f != MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionNone : plane ? MTLBlitOptionStencilFromDepthStencil : MTLBlitOptionDepthFromDepthStencil; }
 // Read every level and slice of a texture into one shared buffer (the replayer fills its texture from the same layout); returns the subresource table
@@ -204,7 +214,7 @@ static id<MTLBuffer> cap_tex_readback(id<MTLTexture> t, cap_tsub **subs, uint32_
     *nsub = 0; *subs = calloc((size_t)t.mipmapLevelCount * slices * np, sizeof **subs); uint64_t total = 0;
     for (uint32_t pl = 0; pl < np; pl++) for (uint32_t lv = 0; lv < t.mipmapLevelCount; lv++) for (uint32_t sl = 0; sl < slices; sl++) {
         uint32_t w = (uint32_t)MAX(t.width >> lv, 1u), h = (uint32_t)MAX(t.height >> lv, 1u), d = t.textureType == MTLTextureType3D ? (uint32_t)MAX(t.depth >> lv, 1u) : 1;
-        uint64_t row = (uint64_t)w * cap_pf_bpp(t.pixelFormat, (int)pl), img = row * h;
+        uint32_t bw, bh; uint64_t bpb = (uint64_t)cap_pf_block(t.pixelFormat, (int)pl, &bw, &bh), row = (uint64_t)((w + bw - 1) / bw) * bpb, img = row * ((h + bh - 1) / bh);
         (*subs)[(*nsub)++] = (cap_tsub){lv, sl, w, h, d, pl, row, img, img * d}; total += img * d;
     }
     id<MTLBuffer> b = [g_dev newBufferWithLength:MAX(total, 16u) options:MTLResourceStorageModeShared];
@@ -218,23 +228,33 @@ static id<MTLBuffer> cap_tex_readback(id<MTLTexture> t, cap_tsub **subs, uint32_
     return b;
 }
 static nvn_hmap g_cap_mtex = {.klen = 8};   // MTLTextures already read (several serials can share one)
-static void cap_tex_read(const tex_t *t) {   // the content of a texture the frame can reach, if it lives only in Metal (a render target, a copy destination): read it now, before this submit runs
-    if (g_cap_no_read || !t || !t->serial || t->magic != MAGIC('T', 'E', 'X', 0) || nvn_hm_get(&g_cap_read, &t->serial)) return;
-    nvn_hm_put(&g_cap_read, &t->serial, (void *)1);
+static void cap_tex_read(const tex_t *t, int rec) {   // rec: named by a record (a target, a copy or clear end), not only registered   // the content of a texture the frame can reach, if it lives only in Metal (a render target, a copy destination): read it now, before this submit runs
+    if (g_cap_no_read || !t || !t->serial || t->magic != MAGIC('T', 'E', 'X', 0)) return;
+    uintptr_t seen = (uintptr_t)nvn_hm_get(&g_cap_read, &t->serial);   // 1: done; 2: registered without a host texture (a record naming it later still looks for shared storage)
+    if (seen == 1 || (seen == 2 && !rec)) return;
     id o = tex_get(t->serial);
-    {   // how the replay layer holds it
+    nvn_hm_put(&g_cap_read, &t->serial, (void *)(uintptr_t)(!o && !rec ? 2 : 1));
+    if (!seen) {   // how the replay layer holds it
         pthread_mutex_lock(&g_smu); int live = nvn_hm_get(&g_tex_live, &t->serial) != NULL; pthread_mutex_unlock(&g_smu);
         int cpu = tex_cpu_written(t->serial) || ([o isKindOfClass:[NvPkg class]] && !t->has_layout);
         cap_tknd k = {*t, (live ? CAP_TK_LIVE : 0) | (cpu ? CAP_TK_CPU : 0), 0};
         if (k.kind) { cap_tex_fields(&k.t, &g_cap_enc, NULL); cap_buf_put(&g_cap_kind, &k, sizeof k); }
     }
-    if (!o || [o isKindOfClass:[NvPkg class]] || ![o conformsToProtocol:@protocol(MTLTexture)]) return;   // not made yet (made at first use, as live), or uploaded from the pools
+    if (!o && rec) {   // no host texture for this serial yet: its first use takes the host texture of an earlier one with the same storage and shape, content included (tex_mtl,
+                // the storage-sharing table). Breath of the Wild records its transient render targets under new serials every frame; their content from the frame before was not
+                // captured, the replay made them empty, and about 30 pixels of the G-buffer and the frame differed from the live run (and the second replay from the first).
+                // Only for textures a record names: through the registry it reached 19,513 textures (18.5 GB), registered snapshots of textures long finalized
+        alias_key ak; memset(&ak, 0, sizeof ak); ak.pool = (uint64_t)(uintptr_t)t->pool; ak.off = t->off; ak.d = t->d; ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
+        pthread_mutex_lock(&g_smu); o = hm_get_id(&g_alias, &ak); pthread_mutex_unlock(&g_smu);
+    }
+    if (!o || [o isKindOfClass:[NvPkg class]] || ![o conformsToProtocol:@protocol(MTLTexture)]) return;   // made at first use (as live, from the pools), or uploaded from the pools
     id<MTLTexture> mt = o; if (mt.parentTexture) mt = mt.parentTexture;
     if (mt.buffer || mt.storageMode == MTLStorageModeMemoryless) return;   // reads pool memory in place, or has no content
     uint64_t key = (uint64_t)(uintptr_t)(__bridge void *)mt; int again = nvn_hm_get(&g_cap_mtex, &key) != NULL;
-    if (mt.sampleCount > 1 || !cap_pf_bpp(mt.pixelFormat, 0)) {
+    uint32_t bw_, bh_;
+    if (mt.sampleCount > 1 || !cap_pf_block(mt.pixelFormat, 0, &bw_, &bh_)) {
         if (!again) { g_cap_tex_skip++; if (g_cap_tex_skip <= 8) MLOG("[RED] DM_NVN_CAPTURE: texture ser=%llu %lux%lu format %lu samples %lu: content not captured (%s)", (unsigned long long)t->serial,
-            (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long)mt.pixelFormat, (unsigned long)mt.sampleCount, mt.sampleCount > 1 ? "multisampled" : "format not read as plain texels"); nvn_hm_put(&g_cap_mtex, &key, (void *)1); }
+            (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long)mt.pixelFormat, (unsigned long)mt.sampleCount, mt.sampleCount > 1 ? "multisampled" : "format the capture cannot read back"); nvn_hm_put(&g_cap_mtex, &key, (void *)1); }
         return;
     }
     nvn_hm_put(&g_cap_mtex, &key, (void *)1);
@@ -271,7 +291,7 @@ static void cap_registries(uint32_t submit) {   // the entries that differ from 
     }
     os_unfair_lock_unlock(&g_rmu);
     for (size_t o = 0; o < tb.n; o += sizeof(cap_treg)) { cap_treg *e = (cap_treg *)(tb.p + o); if (e->ok) cap_tex_fields(&e->t, &g_cap_enc, NULL); }
-    for (int i = 0; i < nreads; i++) cap_tex_read(&reads[i]);   // outside the registry lock: q_cb and the readback take other locks
+    for (int i = 0; i < nreads; i++) cap_tex_read(&reads[i], 0);   // outside the registry lock: q_cb and the readback take other locks
     free(reads);
     if (tb.n) cap_put(&g_cap_w, CAP_TREG, submit, tb.p, tb.n, 1);
     if (sb.n) cap_put(&g_cap_w, CAP_SREG, submit, sb.p, sb.n, 1);
@@ -286,7 +306,7 @@ static void cap_head(void) {
     if (!_NSGetExecutablePath(exe, &en)) { char cmd[1400], *d = dirname(exe); snprintf(cmd, sizeof cmd, "git -C '%s' describe --always --dirty --abbrev=12 2>/dev/null", d);
         FILE *p = popen(cmd, "r"); if (p) { if (fgets(commit, sizeof commit, p)) commit[strcspn(commit, "\n")] = 0; else strlcpy(commit, "unknown", sizeof commit); pclose(p); } }
     KV("format\t%u\n", CAP_VERSION); KV("chain\t%s\n", DMSH_CHAIN); KV("commit\t%s\n", commit); KV("title\t%s\n", DM_GAME_ID); KV("build\t%s\n", dm_main_build());
-    KV("frame\t%d\n", g_cap_frame); KV("frames\t1\n");
+    KV("frame\t%d\n", g_cap_frame); KV("frames\t1\n"); KV("mtl_frame\t%llu\n", (unsigned long long)atomic_load(&g_cur_frame));   // the replay layer's frame number: the replayer takes it, so frame-keyed diagnostics (DM_NVN_TEXDUMP, DM_NVN_PASSDUMP) select the same frame
     for (char **e = *_NSGetEnviron(); *e; e++) if (!strncmp(*e, "DM_", 3) && strncmp(*e, "DM_NVN_CAPTURE=", 15)) KV("env\t%s\n", *e);
 #undef KV
     cap_put(&g_cap_w, CAP_HEAD, 0, h.p, h.n, 0); cap_buf_free(&h);
@@ -399,6 +419,14 @@ void nvn_cap_present(const tex_t *t, const int crop[4]) {
     if (!t || !cap_digest(t, p.sha256, &p.bytes, &p.width, &p.height, &p.pixfmt, png)) cap_fail("the presented texture could not be read back");
     g_cap_ns += now_ns() - t0; p.capture_ms = g_cap_ns / 1e6;
     cap_put(&g_cap_w, CAP_PRES, g_cap_cur_submit, &p, sizeof p, 0);
+    {   // the pools as the frame left them (after the GPU finished): the replayer compares its own, which tells pool writes it did not make (the CPU writing during the frame) from ones it made differently
+        cap_buf hb = {0};
+        for (uint32_t i = 0; i < g_cap_nreg; i++) {
+            cap_region *r = &g_cap_reg[i]; uint32_t nb = (uint32_t)((r->size + 4095) / 4096), hd[2] = {g_cap_rid[i], nb}; cap_buf_put(&hb, hd, 8);
+            for (uint32_t k = 0; k < nb; k++) { uint64_t o = (uint64_t)k * 4096, h = cap_hash_block((const uint8_t *)(uintptr_t)r->lo + o, (size_t)MIN(4096, r->size - o)); cap_buf_put(&hb, &h, 8); }
+        }
+        cap_put(&g_cap_w, CAP_PHSH, g_cap_cur_submit, hb.p, hb.n, 1); cap_buf_free(&hb);
+    }
     uint64_t raw = g_cap_w.raw, stored = g_cap_w.stored;
     int ok = cap_close(&g_cap_w); char hex[65]; cap_hex(p.sha256, hex);
     MLOG("%sDM_NVN_CAPTURE: frame %d: %u submits, %llu segments, %u regions, %u textures (%llu read back, %.1f MB; %llu not captured), %llu addresses outside the pools; "

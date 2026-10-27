@@ -16,6 +16,7 @@ module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t g_mod[MAX_MOD]; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
+void crash_install(void);   // host crash.c: the fault handler that also takes the dirty tracker's write faults on pool pages (nvn_dirty.c)
 
 typedef struct { uint8_t p[4096]; size_t n; } chain;
 static void *emit(chain *c, unsigned op, size_t n) {
@@ -32,6 +33,7 @@ static void copy_block(chain *c, const tex_t *t, uint64_t src, int x, int y) {
 }
 
 int main(int argc, char **argv) { @autoreleasepool {
+    crash_install();   // the CPU writes pool pages the dirty tracker protects, as in the host
     if (argc != 2) { fprintf(stderr, "usage: %s <capture path>\n", argv[0]); return 2; }
     char env[1200]; snprintf(env, sizeof env, "2:1:%s", argv[1]); setenv("DM_NVN_CAPTURE", env, 1);
     mtl_init();

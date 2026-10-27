@@ -36,6 +36,7 @@ enum {
     CAP_SEGM = CAP_TAG('S', 'E', 'G', 'M'),   // one command segment of submit k: {u32 index, u32 length, bytes}
     CAP_SUBM = CAP_TAG('S', 'U', 'B', 'M'),   // submit k: {u32 n, u32 segment[n]}
     CAP_PRES = CAP_TAG('P', 'R', 'E', 'S'),   // the present: cap_pres
+    CAP_PHSH = CAP_TAG('P', 'H', 'S', 'H'),   // after the frame: every region's 4 KiB block hashes as the live run left them ({u32 region, u32 blocks, u64 hash[blocks]}...), for the replayer to compare
     CAP_END_ = CAP_TAG('E', 'N', 'D', ' '),
 };
 enum { CAP_RAW = 0, CAP_LZFSE = 1 };

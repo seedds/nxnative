@@ -1,0 +1,25 @@
+# The house style of dm/ as clang-format can state it: 4-space indents, attached braces, no column limit (lines run as long as their thought), short blocks, ifs, loops
+# and functions kept on one line, case labels at the switch's own indent, comments, includes and preprocessor indents left as written. CI (.github/workflows/lint-c.yml,
+# dm/tools/lint_c.py format) applies it to the lines a pull request changes only, and reports only spacing inside a line: clang-format puts every statement on a line of its
+# own, which the dense style here does not, so its line breaks are not reported. Existing code is not reformatted.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ObjCBlockIndentWidth: 4
+ColumnLimit: 0
+AllowShortFunctionsOnASingleLine: All
+AllowShortBlocksOnASingleLine: Always
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: true
+IndentCaseLabels: false
+IndentPPDirectives: Leave
+SortIncludes: Never
+ReflowComments: false
+AlignTrailingComments:
+  Kind: Leave
+SpacesBeforeTrailingComments: 1
+AlignEscapedNewlines: DontAlign
+BreakStringLiterals: false
+MaxEmptyLinesToKeep: 2
+SpacesInContainerLiterals: false

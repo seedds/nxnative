@@ -151,6 +151,33 @@ SDKROOT=$(xcrun --show-sdk-path) CLANG_BIN=/path/to/llvm/bin/clang CC=/path/to/l
 /path/to/fuzz-venv/bin/python dm/tools/fuzz/fuzz_shader_split.py --time 300 --findings /path/to/scratch/findings
 ```
 
+`.github/workflows/lint-c.yml` checks the C and Objective-C of `dm/host` and
+`dm/gfx` on a Mac (the sources need the macOS SDK), in about five minutes. It
+builds a compile database from dry runs of the Makefiles, then runs clang-tidy
+with the bug-finding checks of `.clang-tidy` and clang's static analyzer. That
+is a ratchet too: `dm/tools/lint_c_baseline.tsv` counts today's findings per
+file and check (no line numbers, so moving code changes nothing), and the job
+fails when a file has more findings of a check than listed. Fewer only print a
+notice to refresh it. Last, clang-format (`.clang-format`) looks at the lines
+the change touches and lists those whose spacing it would change in the job
+summary; that report never fails the job, and existing code is not reformatted.
+Apple's toolchain has no clang-tidy: use the LLVM release CI downloads
+(`LLVM_VERSION` in the workflow, from github.com/llvm/llvm-project/releases),
+since another version finds other things:
+
+```sh
+export LLVM=/path/to/LLVM-23.1.4-macOS-ARM64             # the unpacked release (bin/clang-tidy, bin/clang-format)
+python3 dm/tools/lint_c.py compdb                        # dm/host/gen/compile_commands.json (GAME= picks the profile header)
+python3 dm/tools/lint_c.py tidy -j 8                     # the check CI runs; FILE... checks only those sources
+python3 dm/tools/lint_c.py tidy --update                 # after fixing findings, or when a change is meant to add one
+python3 dm/tools/lint_c.py format [--base REF] [--diff FILE]   # the clang-format report on your changes since main
+```
+
+A new finding is fixed in the code rather than baselined, unless it is a false
+positive: then say why in the pull request with the refreshed baseline.
+Raising `LLVM_VERSION` takes a new baseline in the same change
+(`dm/tools/tests/test_lint_c.py` checks that the two name the same release).
+
 ## The packing script in detail
 
 `scripts/build_ipa_from_nsp.py` (`-h` lists every option):

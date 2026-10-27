@@ -1,0 +1,37 @@
+# Checks CI runs on dm/host and dm/gfx (.github/workflows/lint-c.yml, dm/tools/lint_c.py tidy): ones that find bugs, not style, and clang's static analyzer. The findings
+# the code had when this came in are a baseline (dm/tools/lint_c_baseline.tsv) that a pull request may not grow. A check left out says why on its line: it mostly flags
+# a deliberate idiom of this code base, so its findings would be thousands of baseline entries and no bugs.
+Checks:
+  - -*
+  - bugprone-*                                    # CERT C rules that find bugs are aliases of these (cert-flp30-c, cert-str34-c), so not listed again
+  - -bugprone-signed-bitwise                      # three quarters of all findings: guest registers, bitfields and masks are int arithmetic on purpose (`x >> 16 & 0xff`)
+  - -bugprone-unchecked-string-to-number-conversion  # atoi / sscanf on DM_* switches and profile tables, where a bad value reading as 0 (off) is intended
+  - -bugprone-easily-swappable-parameters         # style: adjacent parameters of one type
+  - -bugprone-narrowing-conversions               # guest values narrowed and widened between widths on purpose
+  - -bugprone-implicit-widening-of-multiplication-result
+  - -bugprone-reserved-identifier                 # __-prefixed names of the guest ABI and the SDK
+  - -bugprone-assignment-in-if-condition          # `if ((p = find(...)))` is house style
+  - -bugprone-assignment-in-selection-statement   # the same check's LLVM 23 name, also for `&&` and `?:`
+  - -bugprone-switch-missing-default-case         # switches over decoder fields handle the cases that exist
+  - -bugprone-unhandled-code-paths                # the same check's LLVM 23 name
+  - -bugprone-branch-clone                        # identical branches in decoders and format tables
+  - -bugprone-multi-level-implicit-pointer-conversion
+  - -bugprone-casting-through-void                # guest memory is reached through void *
+  - -bugprone-macro-parentheses                   # style
+  - -bugprone-integer-division                    # integer division into a float is deliberate in layout math
+  - -bugprone-suspicious-include                  # tests include the .c file they test, to reach its static functions
+  - -bugprone-inc-dec-in-conditions               # `i++ < n && p[i]`: && and || sequence their operands in C; unsequenced uses are -Wunsequenced's
+  - clang-analyzer-core.*
+  - clang-analyzer-unix.*
+  - clang-analyzer-security.FloatLoopCounter
+  - clang-analyzer-security.ArrayBound
+  - clang-analyzer-nullability.*
+  - clang-analyzer-osx.*
+  - misc-redundant-expression
+  - misc-misplaced-const
+CheckOptions:
+  # `if (!strcmp(a, b))` is house style; comparing with a wrong constant (`strcmp(a, b) == 1`) is still reported
+  bugprone-suspicious-string-compare.WarnOnImplicitComparison: false
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*/dm/(host|gfx)/.*'
+ExcludeHeaderFilterRegex: '.*/dm/(third_party|host/gen|gfx/nvn/include)/.*'

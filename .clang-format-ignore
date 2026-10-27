@@ -1,0 +1,4 @@
+# Code clang-format leaves alone (.clang-format): third-party sources, the NVN API header and generated prototypes
+dm/third_party/**
+dm/gfx/nvn/include/**
+dm/gfx/nvn/nvn_protos.h

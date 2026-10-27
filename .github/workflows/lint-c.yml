@@ -1,0 +1,81 @@
+# C and Objective-C lint of dm/host and dm/gfx (dm/tools/lint_c.py; docs/development.md has the commands):
+#   clang-tidy with the bug-finding checks of .clang-tidy and clang's static analyzer, as a ratchet: the findings the code had when this came in are in
+#   dm/tools/lint_c_baseline.tsv (counts per file and check), so the job fails only when a file has more findings of a check than listed there;
+#   clang-format (.clang-format) on the lines a change touches, as a report in the job summary that never fails the job: existing code is not reformatted.
+# It runs on a Mac because the compile database comes from the Makefiles' dry runs, whose sources need the macOS SDK's headers and frameworks.
+name: lint-c
+
+on:
+  pull_request:
+    paths: ['dm/host/**', 'dm/gfx/**.[chm]', 'dm/gfx/**.mm', 'dm/gfx/**.cpp', 'dm/gfx/**/Makefile', .clang-tidy, .clang-format, .clang-format-ignore, dm/tools/lint_c.py,
+            dm/tools/lint_c_baseline.tsv, .github/workflows/lint-c.yml]
+  push:
+    branches: [main]
+    paths: ['dm/host/**', 'dm/gfx/**.[chm]', 'dm/gfx/**.mm', 'dm/gfx/**.cpp', 'dm/gfx/**/Makefile', .clang-tidy, .clang-format, .clang-format-ignore, dm/tools/lint_c.py,
+            dm/tools/lint_c_baseline.tsv, .github/workflows/lint-c.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-c-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The LLVM release whose clang-tidy and clang-format run here, and the sha256 of its macOS arm64 archive (github.com/llvm/llvm-project/releases). The baseline names
+  # the version it was made with; dm/tools/tests/test_lint_c.py keeps the two in step: raising LLVM means a new baseline (lint_c.py tidy --update) in the same change.
+  LLVM_VERSION: 23.1.4
+  LLVM_SHA256: 0f8b0db925ab54a63028d788e85b14abaa25492e9608819728c17f6786948da4
+  # The toolchain the project supports (README: Xcode 27.1) on GitHub's xcode-27 image, named by path: the SDK's headers are part of what clang-tidy reads
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  GAME: 010015100B514000   # Super Mario Bros. Wonder: the profile header the sources are parsed with (any profile does)
+
+defaults:
+  run:
+    shell: bash
+
+# Actions are pinned to commit SHAs (the tag in the comment), as in tests.yml.
+# Time: about 5 minutes: 30 s for LLVM (an 870 MB download, of which clang-tidy, clang-format and clang's headers are unpacked), 2-3 minutes of clang-tidy over the 166
+# sources on the runner's 3 cores (65 s on 8 cores of an M2 Max), seconds for the compile database and clang-format.
+jobs:
+  lint:
+    name: clang-tidy (ratchet) and clang-format (changed lines)
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2   # HEAD^: a pull request's base (the first parent of its merge commit), or main before a push
+      - name: LLVM ${{ env.LLVM_VERSION }} (clang-tidy, clang-format)
+        run: |
+          name="LLVM-$LLVM_VERSION-macOS-ARM64"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/llvm.tar.zst" "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/$name.tar.zst"
+          echo "$LLVM_SHA256  $RUNNER_TEMP/llvm.tar.zst" | shasum -a 256 -c -
+          command -v zstd || brew install zstd
+          mkdir -p "$RUNNER_TEMP/llvm"
+          # the archive is compressed with a 1 GB window (--long=30)
+          zstd -dc --long=30 "$RUNNER_TEMP/llvm.tar.zst" | tar -x -C "$RUNNER_TEMP/llvm" --strip-components 1 \
+            "$name/bin/clang-tidy" "$name/bin/clang-format" "$name/lib/clang/${LLVM_VERSION%%.*}/include"
+          rm "$RUNNER_TEMP/llvm.tar.zst"
+          echo "LLVM=$RUNNER_TEMP/llvm" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/llvm/bin/clang-tidy" --version
+          xcodebuild -version
+      - name: Compile database (dry runs of the Makefiles)
+        run: python3 dm/tools/lint_c.py compdb
+      - name: clang-tidy against the baseline
+        run: |
+          mkdir -p logs
+          python3 dm/tools/lint_c.py tidy -j "$(sysctl -n hw.ncpu)" --report logs/clang-tidy.txt
+      - name: clang-format on the changed lines (a report)
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p logs
+          python3 dm/tools/lint_c.py format --base HEAD^ --diff logs/clang-format.diff
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: lint-c
+          path: logs
+          retention-days: 7

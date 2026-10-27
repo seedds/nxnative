@@ -1,6 +1,9 @@
-"""The launcher's settings (dm/games/settings.tsv through dm/games/settings.py): rows by graphics API and profile, single-screen sections, toggle values and the strict format."""
+"""The launcher's settings (dm/games/settings.tsv through dm/games/settings.py): rows by graphics API and profile, single-screen sections, toggle values and the strict format;
+the meta column's optional fields, and the written list against docs/launcher.schema.json, the contract front ends read."""
 import importlib.util
+import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -83,9 +86,49 @@ class LauncherSettingsTests(unittest.TestCase):
                         self.assertRaisesRegex(SystemExit, 'platform default'):
                     settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
 
+    def test_meta_fields_and_the_schema_version(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US', 'ja']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):
+            (Path(tmp) / 'main.fixups.tsv').write_text('# RENDER_SCALE\t1\n')   # the render scale row's condition
+            listed = settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
+        rows = {s['env']: s for s in listed['settings']}
+        self.assertEqual(listed['schema'], 1)
+        self.assertEqual([e for e, s in rows.items() if s.get('level') == 'basic'], ['DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_OPMODE', 'DM_LANG', 'DM_RUMBLE'])
+        self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')
+        self.assertFalse({'level', 'needs'} & set(rows['DM_METAL_HUD']), 'a row without meta has no optional fields')
+
+    def test_meta_is_strict(self):
+        self.assertEqual(settings.meta('level=basic; needs=DM_RUMBLE=1', 1), {'level': 'basic', 'needs': 'DM_RUMBLE=1'})
+        self.assertEqual(settings.meta('', 1), {})
+        for bad, why in [('colour=red', 'unknown meta key'), ('level', 'unknown meta key'), ('level=basic;level=basic', 'twice'),
+                         ('level=advanced', 'does not match'), ('needs=DM_RUMBLE', 'does not match'), ('needs=rumble=1', 'does not match')]:
+            with self.subTest(bad=bad), self.assertRaises(SystemExit) as e:
+                settings.meta(bad, 1)
+            self.assertIn(why, str(e.exception))
+
+    def test_meta_keys_agree_with_the_docs_and_the_schema(self):
+        """A key is added in settings.py's META, docs/frontends.md and docs/launcher.schema.json together"""
+        schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
+        fields = schema['$defs']['setting']['properties']
+        docs = (ROOT / 'docs/frontends.md').read_text(encoding='utf-8')
+        for key in settings.META:
+            with self.subTest(key=key):
+                self.assertIn(key, fields)
+                self.assertNotIn(key, schema['$defs']['setting']['required'], 'a meta field is optional')
+                self.assertRegex(docs, rf'- `{key}` \(optional\)')
+        self.assertEqual(schema['properties']['schema']['const'], settings.SCHEMA)
+
+    def test_written_lists_follow_the_schema(self):
+        schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
+        for gid, api, platform in [(BOTW, 'nvn', None), (BOTW, 'nvn', 'mac'), (WONDER, 'nvn', None), ('0100535012974000', 'vulkan', 'mac')]:
+            with self.subTest(gid=gid, platform=platform), tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': api, **({'SETTINGS_PLATFORM': platform} if platform else {})}):
+                self.assertEqual(conforms(settings.build(gid, tmp, Path(tmp) / 'control.nacp'), schema, schema), [])
+
     def test_table_format_is_strict(self):
         good = 'DM_X\ttoggle\t-\t0\talways\tGame\tX\n'
-        for bad, why in [('DM_X\ttoggle\t-\t0\talways\tX\n', 'columns'), ('DM_X\ttoggle\t-\t0\talways\tsecret\tX\n', 'section'),
+        for bad, why in [('DM_X\ttoggle\t-\t0\talways\tGame\tX\t\tlevel=basic\textra\n', 'columns'),
+                         ('DM_X\ttoggle\t-\t0\talways\tGame\tX\t\tneeds=DM_NOPE=1\n', 'no row sets'),
+                         ('DM_X\ttoggle\t-\t0\talways\tX\n', 'columns'), ('DM_X\ttoggle\t-\t0\talways\tsecret\tX\n', 'section'),
                          ('DM_X\ttoggle\ton\t0\talways\tGame\tX\n', 'toggle values'), ('DM_X\ttoggle\t-\t2\talways\tGame\tX\n', 'defaults to 0 or 1')]:
             with self.subTest(why=why), tempfile.TemporaryDirectory() as tmp:
                 (Path(tmp) / 'settings.tsv').write_text('# header\n' + good + bad, encoding='utf-8')
@@ -93,6 +136,27 @@ class LauncherSettingsTests(unittest.TestCase):
                         patch.object(settings.nacp, 'languages', return_value=['en-US']), self.assertRaises(SystemExit) as e:
                     settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
                 self.assertIn(why, str(e.exception))
+
+
+def conforms(value, node, root, at='$'):
+    """The JSON Schema keywords launcher.schema.json uses (type, required, properties, items, enum, const, pattern, $ref, allOf with
+    if / then), as a list of problems: enough to hold the written lists to the contract without a jsonschema package"""
+    if '$ref' in node: return conforms(value, root['$defs'][node['$ref'].rsplit('/', 1)[1]], root, at)
+    problems = []
+    kinds = {'object': dict, 'array': list, 'string': str, 'integer': int, 'number': (int, float)}
+    if 'type' in node and not isinstance(value, kinds[node['type']]): return [f'{at}: not a {node["type"]}']
+    if 'const' in node and value != node['const']: problems.append(f'{at}: not {node["const"]!r}')
+    if 'enum' in node and value not in node['enum']: problems.append(f'{at}: not one of {node["enum"]}')
+    if 'pattern' in node and not re.search(node['pattern'], value): problems.append(f'{at}: does not match {node["pattern"]}')
+    if isinstance(value, dict):
+        problems += [f'{at}: no {k}' for k in node.get('required', []) if k not in value]
+        for k, v in value.items():
+            if k in node.get('properties', {}): problems += conforms(v, node['properties'][k], root, f'{at}.{k}')
+        for rule in node.get('allOf', []):
+            if not conforms(value, rule['if'], root, at): problems += conforms(value, rule['then'], root, at)
+    if isinstance(value, list) and 'items' in node:
+        for i, v in enumerate(value): problems += conforms(v, node['items'], root, f'{at}[{i}]')
+    return problems
 
 
 if __name__ == '__main__':

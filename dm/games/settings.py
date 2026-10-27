@@ -11,15 +11,34 @@ sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / 'tools'))
 import game, nacp
 
 SECTIONS = ('Game', 'Controls', 'Performance')   # headings on the single settings screen
+SCHEMA = 1   # launcher.json's version (docs/launcher.schema.json); it grows only by optional fields, so a reader of 1 reads every 1
+# The meta column's keys, each with the pattern its value must match. A key is added here, in docs/frontends.md and in
+# docs/launcher.schema.json together (test_launcher_settings.py checks that the three agree); a reader ignores keys it does not know
+META = {
+    'level': r'basic',                       # a setting a front end shows first; without it, the front end decides
+    'needs': r'DM_[A-Z0-9_]+=[^;=]+',        # <VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value
+}
+
+
+def meta(text, n):
+    """The meta column as {key: value}: key=value pairs separated by ;, each key from META once, its value matching its pattern"""
+    out = {}
+    for pair in filter(None, (p.strip() for p in text.split(';'))):
+        key, eq, value = pair.partition('=')
+        if not eq or key not in META: sys.exit(f'settings.tsv:{n}: unknown meta key {pair!r} (keys: {", ".join(META)})')
+        if key in out: sys.exit(f'settings.tsv:{n}: meta key {key} given twice')
+        if not re.fullmatch(META[key], value): sys.exit(f'settings.tsv:{n}: meta {key}={value!r} does not match {META[key]}')
+        out[key] = value
+    return out
 
 
 def rows():
     for n, line in enumerate((HERE / 'settings.tsv').read_text(encoding='utf-8').splitlines(), 1):
         if not line.strip() or line.startswith('#'): continue
         c = line.split('\t')
-        if len(c) not in (7, 8): sys.exit(f'settings.tsv:{n}: 7 or 8 columns expected, {len(c)} found')
+        if len(c) not in (7, 8, 9): sys.exit(f'settings.tsv:{n}: 7 to 9 columns expected, {len(c)} found')
         if c[5] not in SECTIONS: sys.exit(f'settings.tsv:{n}: unknown section: {c[5]}')
-        yield n, c + [''] * (8 - len(c))
+        yield n, c + [''] * (9 - len(c))
 
 
 def fixups_keys(path):   # '# KEY<TAB>value' header rows of a rewriter table
@@ -60,10 +79,12 @@ def build(gid, patched, control):
             return {'YES': '1', 'NO': '0', '': '0'}.get(v, v)   # build_ipa.sh's yes / no switches
         return d
 
-    out = []
-    for n, (var, kind, values, default, cond, section, label, note) in rows():
+    out, table = [], {r[1][0] for r in rows()}
+    for n, (var, kind, values, default, cond, section, label, note, extra) in rows():
+        m = meta(extra, n)
+        if 'needs' in m and m['needs'].split('=', 1)[0] not in table: sys.exit(f'settings.tsv:{n}: needs names a variable no row sets: {m["needs"]}')
         if not shown(cond, n): continue
-        s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n)}
+        s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
         if kind == 'choice':
             opts = [list(l) for l in langs] if values == 'languages' else [v.split('=', 1) for v in values.split(',')]
             if any(len(o) != 2 for o in opts): sys.exit(f'settings.tsv:{n}: choice values are value=label,...')
@@ -79,7 +100,7 @@ def build(gid, patched, control):
             s.update(on=on_off[0], off=on_off[1], default=on_off[0] if s['default'] == '1' else on_off[1])   # the default as the value the variable takes
         else: sys.exit(f'settings.tsv:{n}: unknown kind {kind}')
         out.append(s)
-    return {'game': g.id, 'settings': out}
+    return {'schema': SCHEMA, 'game': g.id, 'settings': out}
 
 
 if __name__ == '__main__':

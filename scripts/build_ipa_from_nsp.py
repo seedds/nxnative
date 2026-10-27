@@ -361,8 +361,8 @@ def build_id(nso):
         f.seek(0x40); return f.read(16).hex()
 
 
-def _gone(*args):   # shutil.rmtree's error hook: onerror gets (func, path, exc_info), onexc (func, path, exception)
-    exc = args[2][1] if isinstance(args[2], tuple) else args[2]
+def _gone(func, path, err):   # shutil.rmtree's error hook: onerror gets (func, path, exc_info), onexc (func, path, exception)
+    exc = err[1] if isinstance(err, tuple) else err
     if not (isinstance(exc, OSError) and exc.errno == errno.ENOENT): raise exc   # anything but "already gone" is a real failure
 
 
@@ -370,7 +370,9 @@ def rmtree(p):
     """Make p gone. An entry that vanishes between the listing and its unlink is the goal reached, not an error: on an exFAT / FAT drive macOS keeps each AppleDouble `._x` beside `x`
     and drops it when `x` is deleted, so the walk's later unlink of `._x` raised FileNotFoundError and left the folder half deleted"""
     if p.is_symlink() or p.is_file(): p.unlink()
-    elif p.exists(): shutil.rmtree(p, **{('onexc' if sys.version_info >= (3, 12) else 'onerror'): _gone})
+    elif p.exists():
+        if sys.version_info >= (3, 12): shutil.rmtree(p, onexc=_gone)
+        else: shutil.rmtree(p, onerror=_gone)
 
 
 def build_nx_extract(repo, work, logs, env):

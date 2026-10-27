@@ -350,5 +350,76 @@ class Regress(unittest.TestCase):
             self.assertEqual(finish.call_args.args[0]['games']['game']['status'], 'NEW-FAIL')
 
 
+class Validated(unittest.TestCase):
+    """--record: dm/games/<id>/validated.tsv, the chain a game was last green on"""
+    def run_record(self, td, status, record=True, dirty=False, mode='quick', smoke=True, chain='aaaa11112222'):
+        games = Path(td) / 'dm/games'; (games / 'g1').mkdir(parents=True, exist_ok=True)
+        head = Path(td) / 'dm/gfx/nvn'; head.mkdir(parents=True, exist_ok=True)
+        (head / 'dmsh_chain.h').write_text(f'#define DMSH_CHAIN "{chain}"\n')
+        gr = {'status': status, **({'smoke': {}} if smoke else {})}
+        rep = {'mode': mode, 'machine': {'model': 'Mac14,6', 'macos': '26.1'}, 'games': {'g1': gr}}
+        tree = NS(commit='0123456789abcdef', dirty=dirty, path=Path(td))
+        with patch.object(regress, 'REPO', Path(td)), patch.object(regress, 'say'):
+            regress.record_validated(NS(record=record), rep, tree)
+        return games / 'g1/validated.tsv'
+
+    def test_green_writes_the_file(self):
+        for status in ('PASS', 'CHANGED'):
+            with self.subTest(status), tempfile.TemporaryDirectory() as td:
+                f = self.run_record(td, status)
+                self.assertTrue(f.read_text().startswith('# '))
+                row = regress.read_validated(f)['quick']
+                self.assertEqual((row['chain'], row['commit'], row['machine'], row['macos']), ('aaaa11112222', '0123456789', 'Mac14,6', '26.1'))
+                self.assertRegex(row['date'], r'^\d{4}-\d\d-\d\d$')
+
+    def test_modes_keep_one_row_each(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.run_record(td, 'PASS', mode='quick', chain='aaaa11112222')
+            f = self.run_record(td, 'PASS', mode='full', chain='bbbb33334444')
+            self.run_record(td, 'PASS', mode='quick', chain='cccc55556666')
+            rows = regress.read_validated(f)
+            self.assertEqual((rows['quick']['chain'], rows['full']['chain']), ('cccc55556666', 'bbbb33334444'))
+            self.assertEqual(sum(1 for x in f.read_text().splitlines() if not x.startswith('#')), 2)
+
+    def test_red_leaves_the_record(self):
+        for status in ('NEW-FAIL', 'REGRESSION', 'ERROR'):
+            with self.subTest(status), tempfile.TemporaryDirectory() as td:
+                f = self.run_record(td, 'PASS'); before = f.read_text()
+                self.run_record(td, status, chain='bbbb33334444')
+                self.assertEqual(f.read_text(), before)
+
+    def test_without_record_no_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertFalse(self.run_record(td, 'PASS', record=False).exists())
+
+    def test_no_boot_run_no_file(self):   # a chain-only result says nothing about the game's boot
+        with tempfile.TemporaryDirectory() as td:
+            self.assertFalse(self.run_record(td, 'PASS', smoke=False).exists())
+            self.assertFalse(self.run_record(td, 'PASS', mode='static').exists())
+
+    def test_dirty_tree(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(regress.read_validated(self.run_record(td, 'PASS', dirty=True))['quick']['commit'], '0123456789+dirty')
+
+    def test_list_shows_current_and_old(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.run_record(td, 'PASS', chain='aaaa11112222')
+            with patch.object(regress, 'REPO', Path(td)):
+                self.assertIn('quick chain aaaa11112222 (current)', regress.validated_text('g1'))
+                self.assertEqual(regress.validated_text('nobody'), 'never recorded')
+                (Path(td) / 'dm/gfx/nvn/dmsh_chain.h').write_text('#define DMSH_CHAIN "dddd77778888"\n')
+                self.assertIn('(old, now dddd77778888)', regress.validated_text('g1'))
+                g = NS(id='g1', name='n', kind='nvn', ver='1', folder=Path(td), route=lambda: None)
+                with patch.object(regress, 'find_games', return_value=[g]), patch.object(regress, 'say') as say:
+                    regress.cmd_list(NS())
+                self.assertIn('green: quick chain aaaa11112222 (old', say.call_args.args[0])
+
+    def test_profiles_validated_files_read(self):
+        for f in (REPO / 'dm/games').glob('*/validated.tsv'):
+            for mode, row in regress.read_validated(f).items():
+                self.assertIn(mode, ('quick', 'full'), f)
+                self.assertTrue(row.get('chain') and row.get('commit') and row.get('date'), f)
+
+
 if __name__ == '__main__':
     unittest.main()

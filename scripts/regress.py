@@ -8,7 +8,13 @@
 #        python3 scripts/regress.py chain    [--baseline REV] [--candidate REV|worktree] [--games ID,...]          (the static checks only, no game runs)
 #        python3 scripts/regress.py usage    [--rev REV] [--games ID,...] [--write]                            (a game's usage manifest, dm/games/<id>/usage.tsv: dm/tools/usage.py)
 #        python3 scripts/regress.py impact   <base>..<head> | <commit>                                         (the games whose manifests hold what the change touches)
-#        python3 scripts/regress.py list                                                                       (the games found, their routes and stored baselines)
+#        python3 scripts/regress.py list                                                                       (the games found, their routes, stored baselines and last green chain)
+#   check / baseline --record: for each game that is green after a boot run (status PASS or CHANGED, not ERROR, NEW-FAIL or REGRESSION; decided in record_validated) write dm/games/<id>/validated.tsv of
+#   this checkout: the chain it was last green on, one row per mode (quick, full), the latest of each. `key <TAB> value` rows under a comment header; the value is `field=value` words:
+#     quick <TAB> chain=157e1b96c8da commit=4f2a9c01d3+dirty date=2026-10-27 machine=Mac14,6 macos=26.1
+#   chain = DMSH_CHAIN of the candidate (dm/gfx/nvn/dmsh_chain.h; for `baseline`, of the revision recorded), commit = its short SHA (+dirty: uncommitted changes in the worktree), date = UTC day,
+#   machine / macos = report.json's machine. No game data, paths, keys or hashes of game content. A red game keeps its row (it shows the last green chain), a game without a route or a run with
+#   --no-smoke writes nothing, and without --record nothing in dm/games changes. `list` prints the rows and whether the chain is the current one. Commit the file with the pull request.
 #   REV: any git revision of this repository; worktree = this checkout as it is, uncommitted and untracked files included. check: baseline = the merge base of HEAD and main,
 #   candidate = worktree; baseline: --rev main. Each revision is checked out once into <root>/trees/<id> (git worktree), and the chain, host and rewriter come from there.
 #   --root (REGRESS_ROOT; no default, required except for impact): source trees and public reports; game-derived files stay in <NSP folder>/<id>-work/regress/.
@@ -83,6 +89,45 @@ TOL = {'fps_pct': 10.0, 'p99_pct': 30.0, 'p99_ms': 4.0, 'footprint_pct': 15.0, '
 
 class HarnessError(Exception):
     pass
+
+
+VALIDATED = 'validated.tsv'
+VALIDATED_HEAD = ('# The chain this game was last green on in scripts/regress.py check / baseline --record (one row per mode, the latest of each). Written by the harness, committed with the pull request.\n'
+                  '# mode <TAB> chain=<DMSH_CHAIN> commit=<short SHA>[+dirty] date=<UTC day> machine=<model> macos=<version>. No game data.\n')
+GREEN = ('PASS', 'CHANGED')   # the statuses of a game that did not get worse (finish: no regression exit for them)
+
+
+def chain_version(root=None):   # DMSH_CHAIN of a checkout (dm/gfx/nvn/dmsh_chain.h)
+    m = re.search(r'#define\s+DMSH_CHAIN\s+"([^"]+)"', (Path(root or REPO) / 'dm/gfx/nvn/dmsh_chain.h').read_text())
+    return m.group(1) if m else None
+
+
+def read_validated(f):   # {mode: {field: value}}
+    out = {}
+    if Path(f).is_file():
+        for line in Path(f).read_text().splitlines():
+            if not line.strip() or line.startswith('#') or '\t' not in line: continue
+            mode, val = line.split('\t', 1)
+            out[mode] = dict(w.split('=', 1) for w in val.split() if '=' in w)
+    return out
+
+
+def record_validated(a, rep, tree):
+    """--record: a game that is green after a boot run gets its row for the report's mode in dm/games/<id>/validated.tsv of this checkout; every other game keeps what it had"""
+    mode = rep.get('mode')
+    if not getattr(a, 'record', False) or mode not in ('quick', 'full'): return []
+    path = getattr(tree, 'path', None)
+    v, hw = chain_version(path if path and (Path(path) / 'dm/gfx/nvn/dmsh_chain.h').is_file() else None), rep.get('machine') or {}
+    row = {'chain': v, 'commit': tree.commit[:10] + ('+dirty' if tree.dirty else ''), 'date': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d'),
+           'machine': (hw.get('model') or 'unknown').replace(' ', '_'), 'macos': (hw.get('macos') or 'unknown').replace(' ', '_')}
+    written = []
+    for gid, gr in rep['games'].items():
+        d = REPO / 'dm/games' / gid
+        if gr['status'] not in GREEN or 'smoke' not in gr or not d.is_dir(): continue
+        rows = read_validated(d / VALIDATED); rows[mode] = row
+        (d / VALIDATED).write_text(VALIDATED_HEAD + ''.join(f'{m}\t' + ' '.join(f'{k}={x}' for k, x in rows[m].items()) + '\n' for m in ('quick', 'full') if m in rows))
+        written.append(gid); say(f'  {gid}: recorded green on chain {v} ({mode}) in dm/games/{gid}/{VALIDATED}')
+    return written
 
 
 def say(msg):
@@ -194,9 +239,9 @@ class Game:
 
     def profile_dir(self, tree):
         src = (self.build / 'profile' if self.derived else tree.path / 'dm/games') / self.id
-        key = digest(sorted(p for p in src.glob('*') if p.is_file()))[:16]
+        key = digest(sorted(p for p in src.glob('*') if p.is_file() and p.name != VALIDATED))[:16]   # validated.tsv records a result about the profile, it is not an input of it
         dst = game_root(self) / 'profiles' / key / self.id
-        if not (dst / 'game.tsv').is_file(): shutil.copytree(src, dst)
+        if not (dst / 'game.tsv').is_file(): shutil.copytree(src, dst, ignore=shutil.ignore_patterns(VALIDATED))
         return dst
 
     def shader_roots(self):
@@ -969,6 +1014,7 @@ def cmd_baseline(a):
         except HarnessError as e:
             gr['status'] = 'ERROR'; gr['reasons'].append(str(e)); say(f'  {g.id}: [RED] {e}')
         say(f'  {g.id}: {gr["status"]} ' + '; '.join(gr['reasons']))
+    record_validated(a, rep, tree)
     return finish(rep, a)
 
 
@@ -1027,6 +1073,7 @@ def cmd_check(a, smoke=True):
         gr['status'] = worst(*[k for k, v in levels.items() if v]) if any(levels.values()) else 'PASS'
         gr['reasons'] = [f'{k}: {x}' for k in LEVELS for x in levels.get(k, [])]
         say(f'  {g.id}: {gr["status"]}' + (' — ' + '; '.join(gr['reasons']) if gr['reasons'] else ''))
+    record_validated(a, rep, cand)
     return finish(rep, a)
 
 
@@ -1176,11 +1223,16 @@ def report_md(rep):
     return '\n'.join(L) + '\n'
 
 
+def validated_text(gid):   # the last green chain per mode, and whether it is the current one
+    rows, cur = read_validated(REPO / 'dm/games' / gid / VALIDATED), chain_version()
+    return '; '.join(f"{m} chain {r.get('chain', '?')} ({'current' if r.get('chain') == cur else 'old, now ' + str(cur)}) {r.get('date', '?')} {r.get('commit', '?')}" for m, r in rows.items()) or 'never recorded'
+
+
 def cmd_list(a):
     for g in find_games():
         r = g.route()
         bl = sorted(p.parent.name + '/' + p.stem for p in (game_root(g) / 'baselines').glob('*/smoke-*.json'))
-        say(f'{g.id}  {g.name}  {g.kind}  build {g.ver}  route: {"yes" if r else "no (dm/games/" + g.id + "/smoke.tsv)"}  baselines: {", ".join(bl) or "none"}')
+        say(f'{g.id}  {g.name}  {g.kind}  build {g.ver}  route: {"yes" if r else "no (dm/games/" + g.id + "/smoke.tsv)"}  baselines: {", ".join(bl) or "none"}  green: {validated_text(g.id)}')
     return 0
 
 
@@ -1199,6 +1251,7 @@ def main():
         if smoke:
             p.add_argument('--quick', action='store_true', help='the chain checks and a short boot (the route\'s quick seconds, no prebuild)')
             p.add_argument('--no-smoke', action='store_true', help='no game runs')
+            p.add_argument('--record', action='store_true', help='write dm/games/<id>/validated.tsv for each game that is green after a boot run (chain, commit, mode, date, machine)')
             p.add_argument('--runs', type=int, default=1, help='runs per revision (default 1)')
             p.add_argument('--wait-idle', type=float, default=900, help='seconds to wait for other builds to end before a run (default 900)')
             p.add_argument('--rewrite', action='store_true', help='rewrite the modules with each revision\'s rewriter (default only when the rewriters differ)')

@@ -45,6 +45,8 @@ One chain and one host serve every profile, and each contributor owns only some 
 
 The routes are `dm/games/<id>/smoke.tsv`; a game without one takes part in the chain checks only. Add one when you own a game: a fixed save, the presses that load it, screenshots only while the player stands (where a walk ends moves from run to run), and the frame it must reach.
 
+After a green check on your games, run it with `--record` (`check --record`, or `baseline --record`) and commit the `dm/games/<id>/validated.tsv` it writes with the pull request: it shows which chain each game was last green on (`regress.py list` prints it). Without `--record` the harness changes nothing in `dm/games`.
+
 Reading the report (`report.md` beside `report.json` in `<root>/reports/`): one row per game, then the details. `PASS` and `CHANGED` (MSL or numbers moved, nothing worse) exit 0; `NEW-FAIL` (a shader, the interface check, a crash, a hang or the frame that worked in the baseline fails) and `REGRESSION` (new `[RED]` lines, a screenshot, frame time, memory or prepare time beyond the tolerances) exit 1; `ERROR` (the harness could not check a game) exits 2. Failures the baseline has too are listed as known and do not fail the check. Changed MSL is expected after a chain change: say in the pull request why it changed. A screenshot difference may be a fix: look at the run's screenshots in `<NSP folder>/<id>-work/regress/runs/` before calling it either. The report holds only numbers, hashes, shader keys and normalized `[RED]` texts, so it can be pasted as it is.
 
 ## 5. Which games a change can reach: usage manifests and `regress.py impact`

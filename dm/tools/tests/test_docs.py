@@ -1,7 +1,7 @@
 """The repository's own Markdown stays navigable: every relative link and #anchor resolves (GitHub's heading anchors), every game profile has its note
 (dm/games/<id>/README.md) and a row in the games table of dm/games/README.md, the symptom index (docs/agents/symptoms.md) is the one dm/tools/docs_symptoms.py writes from
 docs/reference, the patch index (docs/agents/game-patches.md) is the one dm/tools/docs_patches.py writes from the patch files, host tables and profiles, and the entry points stay short: AGENTS.md at most 1,500 words, each numbered guide in docs/agents at most 6,000 (a new finding goes into a game note or a
-reference, not into these), and README's games gallery is the one dm/tools/docs_gallery.py writes from docs/images/gallery.tsv. Third-party trees are left out. No game files needed."""
+reference, not into these), README's games gallery is the one dm/tools/docs_gallery.py writes from docs/images/gallery.tsv, and no reference entry has a bullet twice (the guard of .gitattributes' union merge). Third-party trees are left out. No game files needed."""
 from pathlib import Path
 import re
 import subprocess
@@ -172,6 +172,42 @@ class Gallery(unittest.TestCase):
                 merged.write_text(result.stdout, encoding='utf-8')
                 with patch.object(docs_gallery, 'TABLE', merged), self.assertRaisesRegex(SystemExit, f'duplicate {field}'):
                     docs_gallery.readme()
+
+
+# Entries that already have a bullet more than once (count of the bullet in that entry); .gitattributes merges docs/reference with the union driver, which keeps both versions
+# of a line two branches changed, so an entry gaining a second bullet is what a bad union merge looks like. A count here may only go down
+BULLETS_TWICE = {
+    ('frame-rate.md', "Present snapshots: the game's swapchain texture free at once", 'Fix'): 3,
+    ('rendering.md', 'Pulling vertex inputs', 'Cause'): 2,
+    ('rendering.md', 'Pulling vertex inputs', 'Fix'): 2,
+    ('rendering.md', 'Transform feedback captured by a vertex entry point', 'Found on'): 2,
+    ('services.md', 'oe calls answered without an applet proxy', 'Symptom'): 2,
+    ('services.md', 'oe calls answered without an applet proxy', 'Fix'): 2,
+    ('shaders.md', 'Passthrough geometry shaders drawn by the vertex shader', 'Fix'): 3,
+    ('shaders.md', 'Passthrough geometry shaders drawn by the vertex shader', 'Found on'): 3,
+    ('threads.md', 'A host lock held across a same-core handoff', 'Found on'): 2,
+}
+
+
+class UnionMerge(unittest.TestCase):
+    def test_reference_entries_have_each_bullet_once(self):
+        bad = []
+        for path in sorted((REPO / 'docs/reference').glob('*.md')):
+            head, fence, heads, count = None, False, {}, {}
+            for line in path.read_text().split('\n'):
+                if line.startswith('```'): fence = not fence
+                if fence: continue
+                m = re.match(r'### (.*?)\s*$', line)
+                if m:
+                    head = m.group(1); heads[head] = heads.get(head, 0) + 1
+                    if heads[head] > 1: bad.append(f'{path.name}: heading "{head}" twice')
+                    continue
+                if re.match(r'#{1,2} ', line): head = None
+                m = re.match(r'- \*\*(Symptom|Cause|Fix|Found on):\*\*', line)
+                if m and head:
+                    k = (path.name, head, m.group(1)); count[k] = count.get(k, 0) + 1
+            bad += [f'{f}: "{h}": {b} {n} times' for (f, h, b), n in count.items() if n > BULLETS_TWICE.get((f, h, b), 1)]
+        self.assertEqual(bad, [], 'a reference entry has a bullet or heading more than once (a union merge kept both versions of a line? merge them by hand):\n' + '\n'.join(bad))
 
 
 class Length(unittest.TestCase):

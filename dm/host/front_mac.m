@@ -140,6 +140,13 @@ static void pad_read(GCExtendedGamepad *g) {
 static void pad_keep_system_buttons(GCController *c) { for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled; }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
+// The runtime event `controller` (dm_pad_event, hle_hid.c): every controller that holds a player says so here, once when it takes it and once when it goes. With DM_PAD_MERGE=1 all are player 1
+static void pad_event(int conn, int player, GCController *c) { dm_pad_event(conn, player, c.vendorName.UTF8String, c.productCategory.UTF8String); }
+static void merged_pad_events(GCController *gone) {
+    static NSMutableSet<GCController *> *known; if (!known) known = [NSMutableSet set];
+    for (GCController *c in [known copy]) if (c == gone || ![GCController.controllers containsObject:c]) { pad_event(0, 0, c); [known removeObject:c]; }
+    for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone && ![known containsObject:c]) { [known addObject:c]; pad_event(1, 0, c); }
+}
 static void pro_players_changed(GCController *gone) {
     int count = 0, player = -1;
     for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && [c.productCategory isEqualToString:@"Switch Pro Controller"]) {
@@ -151,7 +158,7 @@ static void pro_devices_changed(void) { pro_players_changed(nil); }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
     if (g_merge) {
-        int any = 0;
+        int any = 0; merged_pad_events(gone);
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
             any = 1; pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
             dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
@@ -165,6 +172,7 @@ static void pads_changed(GCController *gone) {
     NSArray<GCController *> *now = GCController.controllers; char nb[16];
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
+        pad_event(0, p, g_held[p]);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
         dm_motion_detach(g_held[p], p);
         dm_haptics_apple_controller(p, nil);
@@ -174,7 +182,7 @@ static void pads_changed(GCController *gone) {
     for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
-        g_held[p] = c; pad_keep_system_buttons(c);
+        g_held[p] = c; pad_keep_system_buttons(c); pad_event(1, p, c);
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
         dm_motion_attach(c, p);
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
@@ -1186,6 +1194,9 @@ void front_run(void (*guest)(void)) {
                 GCController *c = n.object; int conn = n.name == GCControllerDidConnectNotification;
                 if (!c.extendedGamepad || g_merge) LOG("controller %s: %s%s", conn ? "connected" : "disconnected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
                 pads_changed(conn ? nil : c); }];
+        // Runtime events: the thermal state at start and on every change (dm_event_thermal reports only a change)
+        dm_event_thermal((int)NSProcessInfo.processInfo.thermalState);
+        [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_event_thermal((int)NSProcessInfo.processInfo.thermalState); }];
         dm_haptics_apple_init();
         pads_start();
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {

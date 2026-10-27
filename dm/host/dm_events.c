@@ -11,7 +11,7 @@
 
 #define QN 256            // queued events; more are dropped
 #define RED_PER_SEC 20    // [RED] lines become events at most this often; the rest count as dropped
-typedef struct { dm_ev_kind kind; double t, elapsed; long done, total; int code, sig; unsigned dropped; char phase[16], state[16], reason[32], text[400]; } slot_t;
+typedef struct { dm_ev_kind kind; double t, elapsed; long done, total; int code, sig; unsigned dropped; int player, level; long commit; char phase[16], state[16], reason[32], text[400], pad_name[64], pad_kind[64], type[16], save[16], mount[48]; } slot_t;
 static slot_t g_q[QN];
 static unsigned g_head, g_tail, g_lost;   // under g_mu: pop at g_head, push at g_tail (QN slots), events lost since the last pop
 static int g_busy, g_thread;
@@ -23,6 +23,7 @@ static void (*g_hook)(const dm_event_t *, void *); static void *g_hook_user;
 static double g_t0;                 // process start, CLOCK_MONOTONIC seconds
 static double g_red_sec; static int g_red_n;
 static _Atomic int g_frame_loop;
+static _Atomic int g_thermal = -1;   // the last thermal level reported
 
 static double mono(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (double)ts.tv_sec + ts.tv_nsec / 1e9; }
 static double wall(void) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); return (double)ts.tv_sec + ts.tv_nsec / 1e9; }
@@ -59,7 +60,7 @@ void dm_events_set_hook(void (*fn)(const dm_event_t *, void *), void *user) {
 
 // JSON string body (without quotes) of s into out: escapes quotes, backslashes and controls; a byte that is not valid UTF-8 becomes U+FFFD. Returns the length written (always terminated).
 static size_t json_str(char *out, size_t n, const char *s) {
-    size_t o = 0;
+    size_t o = 0; out[0] = 0;   // an empty string leaves an empty body
 #define PUT(...) do { int w_ = snprintf(out + o, n - o, __VA_ARGS__); if (w_ < 0 || (size_t)w_ >= n - o) { out[o] = 0; return o; } o += (size_t)w_; } while (0)
     for (const unsigned char *p = (const unsigned char *)s; *p;) {
         unsigned c = *p;
@@ -82,10 +83,10 @@ static size_t json_str(char *out, size_t n, const char *s) {
     return o;
 }
 
-static const char *const NAMES[] = {NULL, "frame_loop", "shaders", "red", "end", "exit"};   // the `ev` of each dm_ev_kind (docs/frontends.md lists them; test_runtime_events.py checks)
+static const char *const NAMES[] = {NULL, "frame_loop", "shaders", "red", "end", "exit", "controller", "thermal", "save"};   // the `ev` of each dm_ev_kind (docs/frontends.md lists them; test_runtime_events.py checks)
 
 static size_t format_line(const slot_t *s, char *b, size_t n) {   // one JSON object and a newline
-    char a[1024], r[128];
+    char a[1024], r[128], k[128], ty[32];
     int o = snprintf(b, n, "{\"ev\":\"%s\",\"t\":%.3f", NAMES[s->kind], s->t);
     switch (s->kind) {
     case DM_EV_FRAME_LOOP: o += snprintf(b + o, n - o, ",\"elapsed\":%.3f", s->elapsed); break;
@@ -97,6 +98,11 @@ static size_t format_line(const slot_t *s, char *b, size_t n) {   // one JSON ob
         o += snprintf(b + o, n - o, ",\"code\":"); o += s->code >= 0 ? snprintf(b + o, n - o, "%d", s->code) : snprintf(b + o, n - o, "null");
         o += s->sig ? snprintf(b + o, n - o, ",\"signal\":%d", s->sig) : snprintf(b + o, n - o, ",\"signal\":null");
         o += snprintf(b + o, n - o, ",\"reason\":\"%s\"", r); break;
+    case DM_EV_CONTROLLER: json_str(a, sizeof a, s->pad_name); json_str(k, sizeof k, s->pad_kind); json_str(ty, sizeof ty, s->type);
+        o += snprintf(b + o, n - o, ",\"state\":\"%s\",\"player\":%d,\"name\":\"%s\",\"kind\":\"%s\",\"type\":\"%s\"", s->state, s->player, a, k, ty); break;
+    case DM_EV_THERMAL: o += snprintf(b + o, n - o, ",\"state\":\"%s\",\"level\":%d", s->state, s->level); break;
+    case DM_EV_SAVE: json_str(a, sizeof a, s->mount);
+        o += snprintf(b + o, n - o, ",\"save\":\"%s\",\"mount\":\"%s\",\"commit\":%ld", s->save, a, s->commit); break;
     }
     if (s->dropped) o += snprintf(b + o, n - o, ",\"dropped\":%u", s->dropped);
     o += snprintf(b + o, n - o, "}\n");
@@ -113,7 +119,8 @@ static void *writer(void *arg) {
         pthread_mutex_unlock(&g_mu);
         if (hook) {
             dm_event_t e = {.kind = s.kind, .name = NAMES[s.kind], .t = s.t, .elapsed = s.elapsed, .phase = s.phase, .state = s.state, .done = s.done, .total = s.total,
-                            .text = s.text, .reason = s.reason, .code = s.code, .sig = s.sig, .dropped = s.dropped};
+                            .text = s.text, .reason = s.reason, .code = s.code, .sig = s.sig, .player = s.player, .level = s.level, .pad_name = s.pad_name, .pad_kind = s.pad_kind, .type = s.type,
+                            .save = s.save, .mount = s.mount, .commit = s.commit, .dropped = s.dropped};
             hook(&e, user);
         }
         if (fd >= 0) {
@@ -175,6 +182,20 @@ void dm_event_end(const char *reason, const char *text) {
 void dm_event_exit(int code, int sig, const char *reason) {
     if (!atomic_load_explicit(&g_on, memory_order_relaxed)) return;
     slot_t s = {.kind = DM_EV_EXIT, .code = code, .sig = sig}; copy(s.reason, sizeof s.reason, reason); emit(&s, 0);
+}
+void dm_event_controller(int connected, int player, const char *name, const char *kind, const char *type) {
+    if (!atomic_load_explicit(&g_on, memory_order_relaxed)) return;
+    slot_t s = {.kind = DM_EV_CONTROLLER, .player = player}; copy(s.state, sizeof s.state, connected ? "connected" : "disconnected");
+    copy(s.pad_name, sizeof s.pad_name, name); copy(s.pad_kind, sizeof s.pad_kind, kind); copy(s.type, sizeof s.type, type); emit(&s, 0);
+}
+void dm_event_thermal(int level) {
+    if (!atomic_load_explicit(&g_on, memory_order_relaxed) || level < 0 || level > 3 || atomic_exchange(&g_thermal, level) == level) return;
+    static const char *const N[] = {"nominal", "fair", "serious", "critical"};
+    slot_t s = {.kind = DM_EV_THERMAL, .level = level}; copy(s.state, sizeof s.state, N[level]); emit(&s, 0);
+}
+void dm_event_save(const char *save, const char *mount, long commit) {
+    if (!atomic_load_explicit(&g_on, memory_order_relaxed)) return;
+    slot_t s = {.kind = DM_EV_SAVE, .commit = commit}; copy(s.save, sizeof s.save, save); copy(s.mount, sizeof s.mount, mount); emit(&s, 0);
 }
 void dm_log_red(const char *tag, const char *fmt, ...) {
     va_list ap, ap2; va_start(ap, fmt); va_copy(ap2, ap);

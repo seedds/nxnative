@@ -6743,7 +6743,17 @@ static void warm_start(void) {
     }
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);   // Not optional background work: it decides whether the pipelines are ready before the player enters a run
     dispatch_queue_t q = dispatch_queue_create("dm.nvn.pso-warm", attr);
-    dispatch_async(q, ^{ @autoreleasepool { long lines = 0; for (WarmTask *t in warm_parse(paths, &lines)) warm_task(t); warm_finish(); } });
+    dispatch_async(q, ^{ @autoreleasepool {
+        long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(paths, &lines);
+        uint64_t t0 = bp_now(), ev_last = t0;   // runtime events: the same start / progress / done as the prepare step's, phase "background"
+        dm_event_shaders("background", "start", 0, lines, 0);
+        for (WarmTask *t in tasks) {
+            warm_task(t);
+            if (bp_now() - ev_last >= 500000000ull) { ev_last = bp_now(); dm_event_shaders("background", "progress", g_warm_done, lines, (ev_last - t0) / 1e9); }   // at most every 0.5 s
+        }
+        dm_event_shaders("background", "done", lines, lines, (bp_now() - t0) / 1e9);
+        warm_finish();
+    } });
 }
 static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
     struct { ds_st ds; uint32_t vm[2], wm[2]; int hd, hs; } k;

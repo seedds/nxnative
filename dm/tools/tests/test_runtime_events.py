@@ -28,17 +28,24 @@ class RuntimeEvents(unittest.TestCase):
     def test_every_event_is_documented_and_emitted(self):
         emitted = names()
         self.assertEqual(sorted(emitted), sorted(ROWS), 'dm_events.c NAMES and the docs table list different events')
-        calls = {'frame_loop': 'dm_event_frame_loop(', 'shaders': 'dm_event_shaders(', 'red': 'dm_log_red(', 'end': 'dm_event_end(', 'exit': 'dm_event_exit('}
+        calls = {'frame_loop': 'dm_event_frame_loop(', 'shaders': 'dm_event_shaders(', 'red': 'dm_log_red(', 'end': 'dm_event_end(', 'exit': 'dm_event_exit(',
+                 'controller': 'dm_pad_event(', 'thermal': 'dm_event_thermal(', 'save': 'dm_event_save('}
         self.assertEqual(sorted(calls), sorted(emitted), 'a new event needs its emitting call named here')
         for ev, call in calls.items():
             used = [p for p in sources() if call in p.read_text()]
             self.assertTrue(used, f'{ev}: nothing calls {call}')
+        # `controller` has one emitting function every front end calls (hle_hid.c), and both front ends call it
+        self.assertIn('dm_event_controller(', (REPO / 'dm/host/hle_hid.c').read_text())
+        for fe in ('dm/host/front_mac.m', 'dm/ios/Sources/DmGamepad.m'):
+            self.assertIn('dm_pad_event(', (REPO / fe).read_text(), fe)
+        for fe in ('dm/host/front_mac.m', 'dm/ios/Sources/front_ios.m'):
+            self.assertIn('dm_event_thermal(', (REPO / fe).read_text(), fe)
         # `red` is emitted by the LOG macros: dm.h and nvn_mtl.m must route through them
         self.assertIn('DM_LOG_TAGGED', (REPO / 'dm/host/dm.h').read_text())
 
     def test_every_field_is_documented(self):
         fields = set(re.findall(r'\\"(\w+)\\":', SRC))
-        self.assertTrue({'ev', 't', 'elapsed', 'phase', 'state', 'done', 'total', 'text', 'reason', 'code', 'signal', 'dropped'} <= fields, fields)
+        self.assertTrue({'ev', 't', 'elapsed', 'phase', 'state', 'done', 'total', 'text', 'reason', 'code', 'signal', 'dropped', 'player', 'name', 'kind', 'type', 'level', 'save', 'mount', 'commit'} <= fields, fields)
         for f in fields:
             self.assertIn(f'`{f}`', SECTION, f'the field {f} that dm_events.c writes is not in the docs')
 

@@ -33,6 +33,22 @@ static void s_path(void) {   // every event kind, one line each, in order; the p
     CHECK(strstr(s, ",\"code\":7,\"signal\":null,\"reason\":\"exited\"}\n"));
     CHECK(strstr(s, "\"ev\":\"frame_loop\"") < strstr(s, "\"ev\":\"shaders\"") && strstr(s, "\"ev\":\"shaders\"") < strstr(s, "\"ev\":\"end\""));   // in the order emitted
 }
+static void s_controller_thermal_save(void) {   // the three events of the front ends and the save commit: fields, escaping, and thermal reports only a change
+    char *p = tmp("new.jsonl"); unlink(p); CHECK(dm_events_configure(p));
+    dm_event_controller(1, 1, "Pro \"X\"", "Switch Pro Controller", "pro");
+    dm_event_controller(0, 2, NULL, NULL, "handheld");
+    dm_event_thermal(0); dm_event_thermal(0); dm_event_thermal(2); dm_event_thermal(2); dm_event_thermal(0); dm_event_thermal(7); dm_event_thermal(-1);
+    dm_event_save("save_device", "Common\"Save", 3);
+    dm_event_shaders("background", "progress", 4, 9, 0.5);
+    dm_events_flush(2000);
+    char *s = slurp(p);
+    CHECK(count(s, "\n") == 7);   // 2 controller, 3 thermal (0, 2, 0), 1 save, 1 shaders
+    CHECK(strstr(s, ",\"state\":\"connected\",\"player\":1,\"name\":\"Pro \\\"X\\\"\",\"kind\":\"Switch Pro Controller\",\"type\":\"pro\"}\n"));
+    CHECK(strstr(s, ",\"state\":\"disconnected\",\"player\":2,\"name\":\"\",\"kind\":\"\",\"type\":\"handheld\"}\n"));
+    CHECK(count(s, "\"ev\":\"thermal\"") == 3 && strstr(s, ",\"state\":\"nominal\",\"level\":0}\n") && strstr(s, ",\"state\":\"serious\",\"level\":2}\n"));
+    CHECK(strstr(s, "\"ev\":\"save\",\"t\":") && strstr(s, ",\"save\":\"save_device\",\"mount\":\"Common\\\"Save\",\"commit\":3}\n"));
+    CHECK(strstr(s, ",\"phase\":\"background\",\"state\":\"progress\",\"done\":4,\"total\":9"));
+}
 static void s_append(void) {   // a second process appends to the file the first one made
     char *p = tmp("path.jsonl"); CHECK(dm_events_configure(p)); dm_event_end("x", NULL); dm_events_flush(2000);
     CHECK(count(slurp(p), "\n") == 6);
@@ -91,12 +107,16 @@ static void s_full_pipe(void) {   // a reader that does not read and a pipe that
     CHECK(count(log, "[RED] DM_EVENTS: write failed") == 1);
 }
 static int g_hits; static pthread_t g_hook_thread; static dm_ev_kind g_kinds[8];
-static void hook(const dm_event_t *e, void *u) { CHECK(u == &g_hits); g_kinds[g_hits++ & 7] = e->kind; g_hook_thread = pthread_self(); if (e->kind == DM_EV_RED) CHECK(!strcmp(e->text, "[RED] typed") && !strcmp(e->name, "red")); }
+static void hook(const dm_event_t *e, void *u) { CHECK(u == &g_hits);
+    if (e->kind == DM_EV_CONTROLLER) CHECK(e->player == 2 && !strcmp(e->state, "connected") && !strcmp(e->pad_name, "Pad") && !strcmp(e->pad_kind, "DualSense") && !strcmp(e->type, "pro"));
+    if (e->kind == DM_EV_THERMAL) CHECK(e->level == 3 && !strcmp(e->state, "critical"));
+    if (e->kind == DM_EV_SAVE) CHECK(!strcmp(e->save, "save") && !strcmp(e->mount, "save") && e->commit == 1); g_kinds[g_hits++ & 7] = e->kind; g_hook_thread = pthread_self(); if (e->kind == DM_EV_RED) CHECK(!strcmp(e->text, "[RED] typed") && !strcmp(e->name, "red")); }
 static void s_hook(void) {   // the typed hook runs without a stream, in order, off the caller's thread
     to_log("hook.log"); CHECK(!dm_events_configure(NULL));
     dm_events_set_hook(hook, &g_hits);
-    dm_event_frame_loop(); dm_log_red("", "[RED] typed"); dm_event_end("terminated", "x"); dm_events_flush(2000);
-    CHECK(g_hits == 3 && g_kinds[0] == DM_EV_FRAME_LOOP && g_kinds[1] == DM_EV_RED && g_kinds[2] == DM_EV_END);
+    dm_event_frame_loop(); dm_log_red("", "[RED] typed"); dm_event_end("terminated", "x");
+    dm_event_controller(1, 2, "Pad", "DualSense", "pro"); dm_event_thermal(3); dm_event_save("save", "save", 1); dm_events_flush(2000);
+    CHECK(g_hits == 6 && g_kinds[0] == DM_EV_FRAME_LOOP && g_kinds[1] == DM_EV_RED && g_kinds[2] == DM_EV_END && g_kinds[3] == DM_EV_CONTROLLER && g_kinds[4] == DM_EV_THERMAL && g_kinds[5] == DM_EV_SAVE);
     CHECK(!pthread_equal(g_hook_thread, pthread_self()));
 }
 static void s_rate_limit(void) {   // a flood of [RED] lines: at most RED_PER_SEC a second become events (two seconds at most here), the rest are counted into the next line
@@ -126,7 +146,7 @@ static void run(const char *name, void (*fn)(void)) {
 int main(void) {
     const char *base = getenv("TMPDIR"); char t[512]; snprintf(t, sizeof t, "%s/t_events.XXXXXX", base && *base ? base : "/tmp");
     dir = mkdtemp(t); if (!dir) { perror("mkdtemp"); return 1; }
-    run("path", s_path); run("append", s_append); run("red_escaping", s_red_escaping); run("long_text", s_long_text); run("fd", s_fd); run("bad_specs", s_bad_specs);
+    run("path", s_path); run("new_events", s_controller_thermal_save); run("append", s_append); run("red_escaping", s_red_escaping); run("long_text", s_long_text); run("fd", s_fd); run("bad_specs", s_bad_specs);
     run("closed_reader", s_closed_reader); run("full_pipe", s_full_pipe); run("hook", s_hook); run("rate_limit", s_rate_limit); run("overflow", s_overflow_does_not_block);
     char cmd[600]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir); if (system(cmd)) {}   // NOLINT(bugprone-command-processor): a fixed rm of the folder mkdtemp made above, no outside input
     puts(g_fail ? "t_events: FAILED" : "t_events: all passed");

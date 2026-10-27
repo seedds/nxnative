@@ -8,18 +8,22 @@
 #include <stdio.h>
 #include <string.h>
 
-typedef enum { DM_EV_FRAME_LOOP = 1, DM_EV_SHADERS, DM_EV_RED, DM_EV_END, DM_EV_EXIT } dm_ev_kind;
+typedef enum { DM_EV_FRAME_LOOP = 1, DM_EV_SHADERS, DM_EV_RED, DM_EV_END, DM_EV_EXIT, DM_EV_CONTROLLER, DM_EV_THERMAL, DM_EV_SAVE } dm_ev_kind;
 typedef struct {
     dm_ev_kind kind;
     const char *name;     // the `ev` of the line
     double t;             // Unix time, seconds
     double elapsed;       // seconds: since the process started (frame_loop), since the phase started (shaders)
-    const char *phase;    // shaders: "prewarm" or "prebuild"
-    const char *state;    // shaders: "start", "progress" or "done"
+    const char *phase;    // shaders: "prewarm", "prebuild" or "background"
+    const char *state;    // shaders: "start", "progress" or "done"; controller: "connected" or "disconnected"; thermal: "nominal", "fair", "serious" or "critical"
     long done, total;     // shaders
     const char *text;     // red: the log line without its "[dm] " prefix; end: a detail ("" when none)
     const char *reason;   // end, exit
     int code, sig;        // exit: the exit code (-1 when the host died on a signal) and the signal (0 when it did not)
+    int player, level;    // controller: the player number (1-based); thermal: NSProcessInfo.thermalState (0 nominal .. 3 critical)
+    const char *pad_name, *pad_kind, *type;   // controller: the vendor name, GameController's productCategory, the host's controller type ("pro" or "handheld")
+    const char *save, *mount;             // save: "save" or "save_device"; the guest's mount name
+    long commit;                          // save: the number of commits published so far
     unsigned dropped;     // events lost before this one (queue full, or [RED] lines over the rate limit)
 } dm_event_t;
 
@@ -35,6 +39,9 @@ void dm_events_flush(int ms);
 void dm_event_frame_loop(void);   // the first present; later calls do nothing
 void dm_event_shaders(const char *phase, const char *state, long done, long total, double elapsed);
 void dm_event_end(const char *reason, const char *text);   // the host knows why it is ending
+void dm_event_controller(int connected, int player, const char *name, const char *kind, const char *type);   // a controller took or left a player (called by dm_pad_event, hle_hid.c)
+void dm_event_thermal(int level);   // the thermal state, as NSProcessInfo.thermalState numbers it; only a change is an event (the first call reports the state the run starts in)
+void dm_event_save(const char *save, const char *mount, long commit);   // a save commit was published (hle_fs.c, after the locks are released)
 void dm_event_exit(int code, int sig, const char *reason);   // the supervising launcher: how the host ended
 void dm_log_red(const char *tag, const char *fmt, ...) __attribute__((format(printf, 2, 3)));   // a [RED] log line: "[dm] <tag><text>\n" on stderr, and the event
 #ifdef __cplusplus
@@ -45,6 +52,9 @@ void dm_log_red(const char *tag, const char *fmt, ...) __attribute__((format(pri
 #ifndef DM_EVENTS_IMPL
 __attribute__((weak)) void dm_event_frame_loop(void) {}
 __attribute__((weak)) void dm_event_shaders(const char *phase, const char *state, long done, long total, double elapsed) { (void)phase; (void)state; (void)done; (void)total; (void)elapsed; }
+__attribute__((weak)) void dm_event_controller(int connected, int player, const char *name, const char *kind, const char *type) { (void)connected; (void)player; (void)name; (void)kind; (void)type; }
+__attribute__((weak)) void dm_event_thermal(int level) { (void)level; }
+__attribute__((weak)) void dm_event_save(const char *save, const char *mount, long commit) { (void)save; (void)mount; (void)commit; }
 __attribute__((weak)) void dm_event_end(const char *reason, const char *text) { (void)reason; (void)text; }
 __attribute__((weak)) void dm_events_flush(int ms) { (void)ms; }
 __attribute__((weak)) void dm_log_red(const char *tag, const char *fmt, ...) {

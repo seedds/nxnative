@@ -633,7 +633,13 @@ int dm_fs_clone_committed(const char *dir, const char *to) {
 }
 // Both Commit overloads share this transaction engine. Caller holds the path
 // and mount locks; front-end failure notification is delivered after unlocking.
-static Result commit_mount_locked(int i, int *notify_error) {
+typedef struct { long n; const char *save; char mount[32]; } published_t;   // a commit that was published (n > 0): for the runtime event, emitted once the locks are released
+static void published_note(published_t *pub, int i, long n) {
+    size_t l = strlen(g_mnt[i].commit), sl = sizeof "_device" - 1;
+    pub->n = n; pub->save = l >= sl && !strcmp(g_mnt[i].commit + l - sl, "_device") ? "save_device" : "save";   // the device save is <DM_SAVE>_device (below)
+    strlcpy(pub->mount, g_mnt[i].name, sizeof pub->mount);
+}
+static Result commit_mount_locked(int i, int *notify_error, published_t *pub) {
     int txn = g_mnt[i].txn_root;
     if (txn < 0 || txn >= g_nmnt) return RES_FAIL;
     pthread_once(&g_txn_lock_once, txn_locks_init);
@@ -675,7 +681,7 @@ static Result commit_mount_locked(int i, int *notify_error) {
     // Timing readouts (integer microseconds, no floating point): how long the clone + atomic swap took; how long in total from this transaction's first save write to the end of the commit (the game writing files + the commit; 0 = no save write in this transaction)
     static int n; if (r == RES_OK) { uint64_t tc2 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
         LOG("save commit #%d: %s swapped atomically into %s (%d save writes so far) (clone + swap %llu us, since this transaction's first write %llu us)", ++n, g_mnt[i].dir, g_mnt[i].commit, atomic_load(&g_save_writes),
-            (unsigned long long)((tc2 - tc1) / 1000), (unsigned long long)(tw0 ? (tc2 - tw0) / 1000 : 0)); atomic_fetch_add(&g_save_commits, 1);
+            (unsigned long long)((tc2 - tc1) / 1000), (unsigned long long)(tw0 ? (tc2 - tw0) / 1000 : 0)); published_note(pub, i, (long)atomic_fetch_add(&g_save_commits, 1) + 1);
         save_sync_committed();   // wakes the cloud sender, which clones the committed save through dm_fs_clone_committed above (save_sync.h)
     }
     return r;
@@ -684,9 +690,10 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv; transactional save: the whole work d
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
     int i = 0; while (i < g_nmnt && strcmp(g_mnt[i].name, name)) i++;
     if (i == g_nmnt || !g_mnt[i].commit[0]) { pthread_mutex_unlock(&g_lock); return RES_OK; }   // non-transactional mount: nothing to commit
-    int notify_error = 0; Result r = commit_mount_locked(i, &notify_error);
+    int notify_error = 0; published_t pub = {0}; Result r = commit_mount_locked(i, &notify_error, &pub);
     pthread_mutex_unlock(&g_lock);
     if (notify_error) front_save_failed(notify_error);
+    if (pub.n) dm_event_save(pub.save, pub.mount, pub.n);   // runtime events: queues only, after the locks
     return r;
 }
 // A mount list is atomic only when every name addresses the same host backing
@@ -698,7 +705,7 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKPKci", "fsp-srv; commit a validated mount list sha
     if (count < 0 || count > MAX_MOUNT || (count && !names)) return RES_FAIL;
     if (!count) return RES_OK;
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
-    int target = -1, notify_error = 0; Result r = RES_FAIL;
+    int target = -1, notify_error = 0; published_t pub = {0}; Result r = RES_FAIL;
     for (int k = 0; k < count; k++) {
         if (!names[k] || strnlen(names[k], sizeof g_mnt[0].name) == sizeof g_mnt[0].name) goto out;
         int i = 0; while (i < g_nmnt && strcmp(g_mnt[i].name, names[k])) i++;
@@ -710,10 +717,11 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKPKci", "fsp-srv; commit a validated mount list sha
         }
         if (target < 0) target = i;
     }
-    r = target < 0 ? RES_OK : commit_mount_locked(target, &notify_error);
+    r = target < 0 ? RES_OK : commit_mount_locked(target, &notify_error, &pub);
 out:
     pthread_mutex_unlock(&g_lock);
     if (notify_error) front_save_failed(notify_error);
+    if (pub.n) dm_event_save(pub.save, pub.mount, pub.n);   // runtime events: queues only, after the locks
     return r;
 }
 // The overload with a CommitOption (Animal Crossing: New Horizons 3.0.3): its only flag clears the restore flag, which the host never sets

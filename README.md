@@ -18,6 +18,8 @@ Community projects build on nxnative with Mac apps that turn your games into app
 
 You need a Mac with macOS 26.6 or later, [Xcode](https://apps.apple.com/app/xcode/id497799835) 27.1, [Homebrew](https://brew.sh) and Python 3.12 or newer.
 
+Before the long shader steps the script starts the shader translator once (an NVN game) or looks for `glslangValidator` (an OpenGL game), and stops with a message when the .NET runtime or glslang is missing.
+
 **1. Install the tools** (only once), in Terminal:
 
 ```

@@ -1699,6 +1699,24 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     return out
 
 
+def check_translator(xlate, env):
+    """The shader translator is a framework-dependent apphost: it needs a .NET runtime of its own architecture, which `dotnet` on PATH does not prove (a stale DOTNET_ROOT, a Homebrew wrapper,
+    an x86_64 Python whose children prefer the x86_64 slice). Without one it prints nothing on stdout, and dmsh_build.py then stops at the shader step with an empty `xlate_source: lock ... / actual`.
+    `--source-sha` prints the embedded source's hash without translating, so one short run proves the runtime before the captures and the shader split"""
+    try:
+        r = subprocess.run([str(xlate), '--source-sha'], capture_output=True, text=True, env=env, timeout=120, errors='replace')
+    except (OSError, subprocess.SubprocessError) as e:
+        raise BuildError(f'the shader translator does not start ({e}): {xlate}') from e
+    if r.returncode == 0 and r.stdout.strip(): return
+    why = (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or [f'exit code {r.returncode}'])[0]
+    raise BuildError(f'the shader translator does not run with the .NET it was given ({why}): install the .NET SDK for this Mac\'s architecture (brew install --cask dotnet-sdk) and unset a stale DOTNET_ROOT')
+
+
+def check_glslang(env):
+    """An OpenGL game's GLSL goes through glslangValidator. build_gl_shaders checks for it too, but only when the GL shader step starts, after a run-time capture has run for minutes"""
+    if not shutil.which('glslangValidator', path=env['PATH']): raise BuildError('glslangValidator not found (brew install glslang): it compiles an OpenGL game\'s GLSL shaders')
+
+
 def check_metal(py, repo, env):
     """An NVN game's shaders are built only with the Metal compiler they were tested with (dmsh_chain.lock), unless ALLOW_OTHER_METAL: checked before the shader steps, so a Mac with
     another Xcode stops in seconds instead of after the shader split. Issue #242 reported corruption with an untested compiler; its role remains unconfirmed"""
@@ -1762,7 +1780,7 @@ def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, p
     """An OpenGL game's GLSL sources (roots: the RomFS, main, a run-time capture folder) → one Metal library each for the Mac (sh/gl/) and the iPhone (sh/ios/gl/, what build_ipa.sh takes from MSL_IOS;
     not with mac), replacing the NVN split and chain build, as build_vk_shaders does for a Vulkan game; glslang (glslangValidator) compiles the GLSL to SPIR-V for spirv-cross"""
     PROG.stage('GL shaders', step='checking the inputs')
-    if not shutil.which('glslangValidator', path=env['PATH']): raise BuildError('glslangValidator not found (brew install glslang): it compiles an OpenGL game\'s GLSL shaders')
+    check_glslang(env)
     key = fingerprint(*[('stat' if provisional else 'tree', r) if Path(r).is_dir() else ('files', [r]) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env),
                       ('cmd', ['glslangValidator', '--version']), env=env) if reuse else None
     return layer_shaders(py, repo, 'gl', 'GL', roots, sh, key, logs, env, mac)
@@ -2209,7 +2227,8 @@ def main(args=None):
     uedec = gfx == 'nvn' and src['ue_decode'][0]   # Unreal Engine shaders, Oodle-compressed in the paks' shader code archives, decoded in the Mac host (decode_ue_shaders)
     if gfx == 'vulkan': say(f'Vulkan game ({src["graphics"][1]}): vk_shaders.py translates the shaders instead of the NVN shader chain')
     if gfx == 'gl': say(f'OpenGL game ({src["graphics"][1]}): gl_shaders.py translates the shaders instead of the NVN shader chain')
-    if gfx == 'nvn': check_metal(py, repo, env)   # before the captures and the shader split, which take minutes
+    if gfx == 'nvn': check_metal(py, repo, env); check_translator(xlate, env)   # before the captures and the shader split, which take minutes
+    if gfx == 'gl': check_glslang(env)   # likewise: the API is known only here, from the extracted main's imports
     for on, k in ((glslc, 'glslc_capture'), (vkcap, 'vk_capture'), (glcap, 'gl_capture'), (uedec, 'ue_decode'), (gfx == 'nvn' and src['oodle_packs'][0], 'oodle_packs'), (gfx == 'nvn' and src['ue_legacy'][0], 'ue_legacy')):
         if on: say(src[k][1])
     PROG.add(glslc + vkcap + glcap + uedec + (gfx == 'nvn'))

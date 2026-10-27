@@ -3,7 +3,7 @@
 // The split prevents an upstream renderer rebase from silently deleting either
 // path and makes the extra maintenance surface explicit.
 #include <TargetConditionals.h>
-#if TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE || defined(DM_NVN_LEGACY_RENDERER_TEST)
 #include "nvn_mtl_legacy.inc"
 
 // The host-facing NVN layer follows current upstream and therefore expects a

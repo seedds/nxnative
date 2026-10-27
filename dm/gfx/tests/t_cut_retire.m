@@ -1,6 +1,7 @@
 // Queue-level regression for split retirement. The production completion
 // handler is compiled with this translation unit; this test needs no Metal
 // device and checks which records that handler is allowed to receive.
+#define DM_NVN_LEGACY_RENDERER_TEST 1
 #include "../nvn/nvn_mtl.m"
 
 uint64_t g_t0_ns;

@@ -8,7 +8,7 @@ reduction. A device readback demonstrated a mip-7 parent greater than a child in
 mip 6, including a zero child: this violates the minimum reduction needed here.
 
 `export_min_reduction.py` exports two companions from exact audited originals in
-chain `f80f842de321`. It changes only each source's unique ordinary slot-17
+chain `43806fc88b5e`. It changes only each source's unique ordinary slot-17
 explicit-LOD sample expression and inserts a self-contained helper after the
 Metal namespace declaration. Entry `main0`, resource bindings and all other
 source bytes are preserved. The original sources, reflection and compiled
@@ -62,9 +62,9 @@ Export to a new directory, then package its four files in
 
 ```sh
 python3 dm/ios/tools/export_min_reduction.py \
-  '<shader root>/cache/b-f80f842de321' \
-  '<shader root>/ios/b-f80f842de321' \
-  '<shader root>/min-reduction-v1/b-f80f842de321'
+  '<shader root>/cache/b-43806fc88b5e' \
+  '<shader root>/ios/b-43806fc88b5e' \
+  '<shader root>/min-reduction-v1/b-43806fc88b5e'
 ```
 
 The exporter validates both originals before writing; it rejects changed source,

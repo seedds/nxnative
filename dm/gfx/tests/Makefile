@@ -20,6 +20,12 @@ FW=-framework Metal -framework MetalFX -framework Foundation -framework QuartzCo
 # Tests that #include nvn_mtl.m link the rest of the NVN layer beside it (hle_nvn.c: memory pools, sparse pools, serials) and the host's large stack, with weak stubs of what they need of the host (t_host_stubs.c)
 MTL_T_DEP=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX))
+t_transform_feedback: t_transform_feedback.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_transform_feedback.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_transform_feedback
+check_t_transform_feedback: t_transform_feedback
+	DM_TEST_TRANSFORM_FEEDBACK=$(CURDIR)/t_transform_feedback MTL_DEBUG_LAYER=1 python3 -m unittest test_transform_feedback.py
+run: check_t_transform_feedback
 t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h
@@ -60,6 +66,8 @@ t_sparse_layout: t_sparse_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang $(CFLAGS) -o $@ t_sparse_layout.c ../nvn/nvn_tex.c
 t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
+t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
+	clang -O1 -Wall -o $@ t_tex_layout.c ../nvn/nvn_tex.c
 t_bc2astc_gpu: t_bc2astc_gpu.m ../tex/nvn_bc2astc.c ../tex/nvn_bc2astc.h ../tex/bc2astc_core.h ../tex/bc2astc_body.inc ../tex/bc2astc_msl.h
 	clang $(CFLAGS) -fobjc-arc -o $@ t_bc2astc_gpu.m ../tex/nvn_bc2astc.c -framework Metal -framework Foundation
 t_astc_hw: t_astc_hw.m ../tex/nvn_bc2astc.c ../tex/nvn_bc2astc.h ../tex/bc2astc_core.h ../tex/bc2astc_body.inc
@@ -234,7 +242,21 @@ t_cut_retire: t_cut_retire.m $(MTL_T_DEP)
 check_t_upload_budget: t_upload_budget
 	MTL_DEBUG_LAYER=1 ./t_upload_budget
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_upload_budget
+run: check_t_upload_budget
 .PHONY: check_t_upload_budget
+t_linear_readback: t_linear_readback.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_linear_readback.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+t_copy_alias: t_copy_alias.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_copy_alias.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_copy_alias
+check_t_copy_alias: t_copy_alias
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_copy_alias
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_copy_alias
+run: check_t_copy_alias
+.PHONY: check_t_linear_readback
+check_t_linear_readback: t_linear_readback
+	MTL_DEBUG_LAYER=1 ./t_linear_readback
+run: check_t_linear_readback
 t_pfv: t_pfv.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pfv.m $(MTL_T_SRC) $(FW)
 t_integer_blend: t_integer_blend.m $(MTL_T_DEP)
@@ -280,8 +302,7 @@ gl-imports: t_gl_imports
 	./t_gl_imports
 	./t_gl_imports --stubs
 run: gl-imports
-run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tbuf_align t_sparse_layout t_deswz_gpu t_pace t_timestamp t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_vbuf t_geometry t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pso_archive t_pso_bundle t_pso_stall t_pull t_pull_inv t_pso_pending t_pfv t_view_levels t_view_swizzle t_vk_desc t_integer_blend t_primitive_restart t_clear_ds t_depth16_clear t_upgrade_alias t_image_usage t_stencil_view
-run: t_nvn t_dirty_slots t_dirty_race t_dirty_retire_race t_upload_diag t_cpu_decode_cache t_reduction_footprint t_builtin t_vin t_tbuf2d t_deswz_gpu t_bc2astc_gpu t_astc_hw t_pace t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_vbuf t_geometry t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pfv t_view_levels t_view_swizzle t_upload_budget t_cut_retire t_vk_desc
+run: t_nvn t_dirty_slots t_dirty_race t_dirty_retire_race t_upload_diag t_cpu_decode_cache t_reduction_footprint t_tex_layout t_builtin t_vin t_tbuf2d t_tbuf_align t_sparse_layout t_deswz_gpu t_bc2astc_gpu t_astc_hw t_pace t_timestamp t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_vbuf t_geometry t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pso_archive t_pso_bundle t_pso_stall t_pull t_pull_inv t_pso_pending t_pfv t_view_levels t_view_swizzle t_upload_budget t_cut_retire t_vk_desc t_integer_blend t_primitive_restart t_clear_ds t_depth16_clear t_upgrade_alias t_image_usage t_stencil_view
 run: storage-access
 	./t_nvn
 	./t_dirty_slots
@@ -290,6 +311,7 @@ run: storage-access
 	./t_upload_diag
 	./t_cpu_decode_cache
 	./t_reduction_footprint
+	./t_tex_layout
 	./t_builtin
 	./t_vin
 	MTL_DEBUG_LAYER=1 ./t_float_pad

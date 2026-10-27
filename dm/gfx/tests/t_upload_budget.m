@@ -1,6 +1,7 @@
 // A streaming burst inside one still-open rendering submission must not retain
 // all staging until its rendering fence. Exercise the real Metal upload and
 // completion-retirement path.
+#define DM_NVN_LEGACY_RENDERER_TEST 1
 #include "../nvn/nvn_mtl.m"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }

@@ -5,7 +5,7 @@
 #pragma once
 
 static const char *min_reduction_original(NvShader *sh) {
-    if (!sh || strcmp(DMSH_CHAIN, "f80f842de321")) return NULL;
+    if (!sh || strcmp(DMSH_CHAIN, "43806fc88b5e")) return NULL;
     if (sh->stage == 1 && !strcmp(sh->key, "151607c7a92386cc_b"))
         return "7c6e776f1cccd8ecf7310e5083664697e35de1ab85a9f21466cd307426de297f";
     if (sh->stage == 5 && !strcmp(sh->key, "ec5ebd6d9902a9a1_b"))

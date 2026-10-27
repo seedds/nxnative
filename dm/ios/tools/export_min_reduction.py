@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[3]
-CHAIN = "f80f842de321"
+CHAIN = "43806fc88b5e"
 KIND = "linear-min-reduction-v1"
 AUDITED = {
     "151607c7a92386cc_b": {

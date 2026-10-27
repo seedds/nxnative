@@ -243,8 +243,30 @@ static void t_script(void) {
     g_nsteps = 0;
 }
 
+// The stick dead zone (DM_PAD_STICK_DZ) and a Nintendo controller's face buttons by name (front_mac.m through pad_slots.h)
+static void t_stick_face(void) {
+    int32_t x = 2000, y = -1500; pad_stick_shape(&x, &y, 0.10, 0.9);   // 0.076 of full tilt
+    CHECK(x == 0 && y == 0, "a stick resting inside the dead zone is centred");
+    x = DM_STICK_MAX; y = DM_STICK_MAX; pad_stick_shape(&x, &y, 0.10, 0.9);
+    CHECK(fabs(hypot(x, y) - DM_STICK_MAX) < 2 && labs((long)x - y) <= 1, "a full diagonal (both axes at ±1) is clamped to the unit circle, its direction kept");
+    x = (int32_t)(0.9 * DM_STICK_MAX); y = 0; pad_stick_shape(&x, &y, 0.10, 0.9);
+    CHECK(x == DM_STICK_MAX && y == 0, "a tilt of <full> counts as full");
+    x = (int32_t)(0.45 * DM_STICK_MAX); y = 0; pad_stick_shape(&x, &y, 0.10, 0.9);
+    CHECK(abs(x - (int32_t)(0.5 * DM_STICK_MAX)) <= 1, "a partial tilt is scaled by 1 / <full>, not re-zeroed at the dead zone");
+    x = -12000; y = 9000; pad_stick_shape(&x, &y, 0, 1);
+    CHECK(x == -12000 && y == 9000, "no dead zone and full = 1 leave a stick inside the circle as it is");
+    CHECK(pad_face_bit(NULL, 0) == DM_BTN_B && pad_face_bit(NULL, 1) == DM_BTN_A && pad_face_bit(NULL, 2) == DM_BTN_Y && pad_face_bit(NULL, 3) == DM_BTN_X,
+          "by position: buttonA (bottom) is B, buttonB (right) A, buttonX (left) Y, buttonY (top) X");
+    static const char pro[4] = {'A', 'B', 'X', 'Y'};   // a Pro Controller as GameController reported it: buttonA named A (on the right)
+    CHECK(pad_face_bit(pro, 0) == DM_BTN_A && pad_face_bit(pro, 1) == DM_BTN_B && pad_face_bit(pro, 2) == DM_BTN_X && pad_face_bit(pro, 3) == DM_BTN_Y,
+          "a Nintendo controller's face buttons go by their names");
+    static const char none[4] = {0};
+    CHECK(pad_face_bit(none, 0) == DM_BTN_B, "no names: by position");
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
+    t_stick_face();
     t_slots();
     t_npads();
     t_script();

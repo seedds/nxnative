@@ -8,9 +8,31 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "dm_input.h"
 
 typedef struct { const void *owner[DM_PLAYERS]; char last[DM_PLAYERS][64]; } pad_slots;
+
+// The stick dead zone (DM_PAD_STICK_DZ=<inner>[,<full>], front_mac.m): a stick within <inner> of the centre (a fraction of full tilt) is 0; past it, its length is clamped to the
+// unit circle (GameController gives each axis up to ±1 on its own, so a diagonal came out longer than full tilt) and scaled so a tilt of <full> already counts as full. A worn stick
+// that rests a little off centre stops drifting, and one whose full tilt falls short of 1.0 (GameController's full tilt is not always 1.0) still reaches the game's full speed
+static void pad_stick_shape(int32_t *x, int32_t *y, double inner, double full) {
+    double m = sqrt((double)*x * *x + (double)*y * *y) / DM_STICK_MAX;
+    if (m <= inner) { *x = *y = 0; return; }
+    double k = 1 / full < 1 / m ? 1 / full : 1 / m;
+    double fx = *x * k, fy = *y * k;
+    *x = (int32_t)lround(fx > DM_STICK_MAX ? DM_STICK_MAX : fx < -DM_STICK_MAX ? -DM_STICK_MAX : fx);
+    *y = (int32_t)lround(fy > DM_STICK_MAX ? DM_STICK_MAX : fy < -DM_STICK_MAX ? -DM_STICK_MAX : fy);
+}
+// A Nintendo controller's face buttons by their printed letters: GameController names its buttonA / B / X / Y by position (buttonA bottom, buttonB right), but a real Pro Controller
+// came through with its own letters in those places (buttonA = its A, on the right), so mapped by position its A was the game's B. letters[i] is the letter GameController gives
+// buttonA / B / X / Y (from the element's localized name); with all four distinct the buttons go by letter, otherwise (0) by position. → the NpadButton bit for button i
+static uint64_t pad_face_bit(const char letters[4], int i) {
+    static const uint64_t by_pos[4] = {DM_BTN_B, DM_BTN_A, DM_BTN_Y, DM_BTN_X};   // buttonA bottom = B, buttonB right = A, buttonX left = Y, buttonY top = X
+    if (!letters || !letters[0]) return by_pos[i];
+    switch (letters[i]) { case 'A': return DM_BTN_A; case 'B': return DM_BTN_B; case 'X': return DM_BTN_X; case 'Y': return DM_BTN_Y; }
+    return by_pos[i];
+}
 
 static int pad_slot_of(const pad_slots *s, const void *owner) {
     for (int i = 0; owner && i < DM_PLAYERS; i++) if (s->owner[i] == owner) return i;

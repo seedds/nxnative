@@ -158,6 +158,8 @@ DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads
 DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_PAD_MERGE	switch	`=1` on the Mac merges every controller into player 1, as before, instead of giving each controller a player of its own
+DM_PAD_QUEUE	switch	`=1` on the Mac runs the controllers' value handlers on a serial queue of their own instead of the main queue, so a busy AppKit main thread (window and layer work, menus) does not hold controller input back
+DM_PAD_STICK_DZ	player	`<inner>[,<full>]` on the Mac: each stick goes to the game past a radial dead zone `<inner>` (0 to 0.5), its length clamped to the unit circle and scaled so a tilt of `<full>` (default 1) counts as full; a worn stick stops drifting and one whose full tilt falls short of 1.0 still reaches full speed (e.g. `0.10,0.9`)
 DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
 DM_PREEMPT	switch	`0` / `1` overrides the profile's `core_preempt`: also check already-runnable higher-priority peers on the caller's core after every thread SVC
 DM_PRELOAD	diagnostic	Set: on the Mac, runs the host's early background loading (`dm_host_preload_start`) as the iOS app does, to exercise that path

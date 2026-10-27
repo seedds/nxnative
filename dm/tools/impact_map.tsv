@@ -89,5 +89,6 @@ dm/host/main.c	*:*	the host's start
 dm/host/loader.c	*:*	module loading
 dm/host/hle.c	hle:*	the HLE tables
 dm/host/front_mac.m	present:*	the Mac front end
+dm/host/pad_slots.h	present:*	the Mac front end's controller slots, stick dead zone and face-button mapping
 dm/host/front.h	present:*	the front end
 dm/ios/*	*:*	the iOS app

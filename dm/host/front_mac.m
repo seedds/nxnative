@@ -3,6 +3,10 @@
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN starts it that way. ⌘Q quits; the left mouse button is the touchscreen.
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad, J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
 // Controllers: buttons by position as on the iPhone (right A, bottom B, top X, left Y), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
+// A Nintendo controller whose face buttons the system names A / B / X / Y is mapped by those names instead: a real Pro Controller came through with the names, not the positions, of a Switch.
+// DM_PAD_STICK_DZ=<inner>[,<full>]: each stick goes to the game past a radial dead zone <inner> (0 to 0.5), its length clamped to the unit circle and scaled so a tilt of <full> already
+// counts as full (pad_stick_shape); unset, the axes go as GameController gives them. DM_PAD_QUEUE=1: the controllers' value handlers run on a serial queue of their own instead of the
+// main queue, so a busy AppKit main thread (window and layer work, menus) does not hold controller input back.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
 #import <Cocoa/Cocoa.h>
@@ -17,6 +21,7 @@
 #include "haptics_apple.h"
 #include <signal.h>
 #include <math.h>
+#include <pthread.h>
 
 static CAMetalLayer *g_layer;
 static uint64_t g_btn;
@@ -110,35 +115,74 @@ static void on_key(NSEvent *e, int down) {
 // whichever is deflected more (hle_hid.c). DM_KEYS uses player 1's path, so player 1's controller touched during a script takes it over.
 // Players: every controller with an extended gamepad profile holds a slot (pad_slots.h: player 1 first, a reconnected controller gets its player back), and hle_hid.c reports
 // player n on its own npad while the slot is held (dm_pad_players). A one-player game that supports only No1 / Handheld still sees every controller as player 1 (hle_hid.c).
-// With DM_PAD_MERGE=1 every controller is player 1, as before (the last one moved wins; when the last one goes away its buttons and sticks are released)
+// With DM_PAD_MERGE=1 every controller is player 1, as before (the last one moved wins; when the last one goes away its buttons and sticks are released).
+// g_pad_mu guards the slots and what goes with them: with DM_PAD_QUEUE the value handlers run off the main queue, where connects, disconnects and focus changes are handled
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
+static char g_face[DM_PLAYERS][4];         // a slot's face buttons by name: the letter of buttonA / B / X / Y (face_names), [0] = 0 = by position
+static double g_tilt[DM_PLAYERS];          // DM_PAD_STICK_DZ: the farthest a slot's left stick has gone, logged in 0.05 steps from 0.5
 static int g_merge, g_kbd_own;
+static double g_dz_in = -1, g_dz_full = 1;  // DM_PAD_STICK_DZ (pads_start); g_dz_in < 0 = off
+static dispatch_queue_t g_pad_q;           // DM_PAD_QUEUE: the value handlers' queue (nil = the main queue)
+static pthread_mutex_t g_pad_mu = PTHREAD_MUTEX_INITIALIZER;
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
-static void pad_read(GCExtendedGamepad *g) {
+static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
+static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
+static void pad_put(int p, const char *name, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {   // under g_pad_mu
+    if (g_dz_in >= 0) {
+        double t = hypot(lx, ly) / DM_STICK_MAX;   // how far this controller's left stick really goes
+        if (t >= 0.5 && t >= g_tilt[p] + 0.05) { g_tilt[p] = t; LOG("controller '%s': left stick reaches %.2f (DM_PAD_STICK_DZ)", name, t); }
+        pad_stick_shape(&lx, &ly, g_dz_in, g_dz_full); pad_stick_shape(&rx, &ry, g_dz_in, g_dz_full);
+    }
+    dm_pad_set_player(p, m, lx, ly, rx, ry);
+}
+// A Nintendo controller (by its product category or vendor name) whose four face buttons the system names with the letters A, B, X and Y: out[i] = the letter of buttonA / B / X / Y
+// (pad_face_bit). Others, and a Nintendo controller without four distinct letters, go by position
+static int face_names(GCController *c, GCExtendedGamepad *g, char out[4]) {
+    int nin = 0;
+    for (NSString *s in @[c.productCategory ?: @"", c.vendorName ?: @""]) for (NSString *w in @[@"switch", @"nintendo", @"joy-con"]) if ([s rangeOfString:w options:NSCaseInsensitiveSearch].location != NSNotFound) nin = 1;
+    if (!nin) return 0;
+    GCControllerButtonInput *e[4] = {g.buttonA, g.buttonB, g.buttonX, g.buttonY}; int seen = 0;
+    for (int i = 0; i < 4; i++) {
+        out[i] = 0;
+        for (NSString *t in [e[i].localizedName componentsSeparatedByString:@" "]) if (t.length == 1 && strchr("ABXY", [t characterAtIndex:0])) out[i] = (char)[t characterAtIndex:0];
+        if (!out[i]) return 0;
+        seen |= 1 << (strchr("ABXY", out[i]) - "ABXY");
+    }
+    return seen == 15;
+}
+static void pad_read_locked(GCExtendedGamepad *g) {
     if (!g_input_on) return;
-    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
-    dm_haptics_apple_controller(p, g.controller);
+    GCController *c = g.controller;
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); if (p < 0) return;
+    dm_haptics_apple_controller(p, c);
+    char mf[4]; const char *f = g_merge ? (face_names(c, g, mf) ? mf : NULL) : g_face[p][0] ? g_face[p] : NULL;
     uint64_t m = 0;
+    GCControllerButtonInput *face[4] = {g.buttonA, g.buttonB, g.buttonX, g.buttonY};
+    for (int i = 0; i < 4; i++) if (face[i].isPressed) m |= pad_face_bit(f, i);   // by name for a Nintendo controller, else by position: right A, bottom B, top X, left Y
     #define K(btn, bit) if (btn.isPressed) m |= bit
-    K(g.buttonB, DM_BTN_A); K(g.buttonA, DM_BTN_B); K(g.buttonY, DM_BTN_X); K(g.buttonX, DM_BTN_Y);   // by position: right A, bottom B, top X, left Y
     K(g.leftShoulder, DM_BTN_L); K(g.rightShoulder, DM_BTN_R); K(g.leftTrigger, DM_BTN_ZL); K(g.rightTrigger, DM_BTN_ZR);
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
     K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
     #undef K
-    dm_pad_set_player(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
+    pad_put(p, pad_name(c), m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
 }
-static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
-static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
+static void pad_read(GCExtendedGamepad *g) { pthread_mutex_lock(&g_pad_mu); pad_read_locked(g); pthread_mutex_unlock(&g_pad_mu); }
+static void pad_handle(GCController *c) {   // the value handler, on g_pad_q when DM_PAD_QUEUE set it (before the handler, as GameController asks)
+    if (g_pad_q) c.handlerQueue = g_pad_q;
+    c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
+}
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
+    pthread_mutex_lock(&g_pad_mu);
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
-            any = 1; c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
-            pad_read(c.extendedGamepad);
+            any = 1; pad_handle(c);
+            pad_read_locked(c.extendedGamepad);
         }
         if (!any) { dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }
+        pthread_mutex_unlock(&g_pad_mu);
         return;
     }
     NSArray<GCController *> *now = GCController.controllers; char nb[16];
@@ -152,12 +196,14 @@ static void pads_changed(GCController *gone) {
     for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
-        g_held[p] = c;
-        c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
-        npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)", pad_name(c), p + 1, nb);
-        pad_read(c.extendedGamepad);
+        g_held[p] = c; g_tilt[p] = 0;
+        if (!face_names(c, c.extendedGamepad, g_face[p])) g_face[p][0] = 0;
+        pad_handle(c);
+        npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s), face buttons by %s", pad_name(c), p + 1, nb, g_face[p][0] ? "their names" : "position");
+        pad_read_locked(c.extendedGamepad);
     }
     dm_pad_players(pad_slot_mask(&g_slots));
+    pthread_mutex_unlock(&g_pad_mu);
 }
 // Focus: a window that is no longer key sees no key-up, mouse-up or controller release, so whatever is held when it loses focus (another app, the text box, minimized) would
 // stay pressed in the game. The front end releases only what it pressed itself: scripted buttons and sticks have their own path, and the touch is also DM_KEYS / DM_CTL's (hle_hid.c).
@@ -167,13 +213,17 @@ static void input_release(void) {
     g_input_on = 0;
     g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+    pthread_mutex_lock(&g_pad_mu);
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    pthread_mutex_unlock(&g_pad_mu);
 }
 static void input_resume(void) {
     g_input_on = 1;
-    if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
-    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
+    pthread_mutex_lock(&g_pad_mu);
+    if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read_locked(c.extendedGamepad); }
+    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read_locked(g_held[p].extendedGamepad);
+    pthread_mutex_unlock(&g_pad_mu);
 }
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
@@ -182,6 +232,15 @@ static void pads_start(void) {
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
+    double a = -1, b = 1;
+    if ((e = getenv("DM_PAD_STICK_DZ")) && sscanf(e, "%lf,%lf", &a, &b) >= 1 && a >= 0 && a < 0.5) {
+        g_dz_in = a; g_dz_full = b > a && b <= 1 ? b : 1;
+        LOG("front end: sticks past a radial dead zone of %.2f, %.2f counts as full tilt (DM_PAD_STICK_DZ)", g_dz_in, g_dz_full);
+    } else if (e) LOG("[RED] DM_PAD_STICK_DZ=%s: want <inner>[,<full>] with 0 <= inner < 0.5; sticks as GameController gives them", e);
+    if ((e = getenv("DM_PAD_QUEUE")) && atoi(e)) {
+        g_pad_q = dispatch_queue_create("dm.gamepad", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
+        LOG("front end: controller handlers on a queue of their own (DM_PAD_QUEUE)");
+    }
     pads_changed(nil);
 }
 

@@ -17,6 +17,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # The toolchain the project supports (README: Xcode 27.1; dm/gfx/tools/dmsh_chain.lock: its Metal compiler), on GitHub's xcode-27 image (macOS 27, a preview image),
+  # named by path so the image's default moving to another Xcode does not move CI. The build check checks the Metal compiler against the lock first.
+  # dm/tools/tests/test_ci_toolchain.py keeps this version, the image and README's in step
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
   GAME: 010015100B514000   # Super Mario Bros. Wonder: the profile the host and gfx tests are built for (any profile does; the tests are about code, not the game)
 
 defaults:
@@ -27,7 +31,7 @@ defaults:
 jobs:
   host-tests:
     name: Host unit tests and CPU-only gfx tests
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,7 +79,7 @@ jobs:
 
   tool-tests:
     name: Tool tests
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -120,12 +124,17 @@ jobs:
 
   build:
     name: Build check (Mac host, gfx tests, iOS sources)
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Toolchain (Xcode and the Metal compiler of dmsh_chain.lock)
+        run: |
+          xcodebuild -version
+          xcrun metal --version
+          python3 dm/gfx/tools/own_compilers.py --check-metal
       - name: Mac host for three profiles (Vulkan, NVN, OpenGL)
         run: |
           mkdir -p logs
@@ -154,7 +163,7 @@ jobs:
 
   ios-build:
     name: Unsigned iOS app (synthetic modules, Swift and link)
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

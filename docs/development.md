@@ -56,6 +56,13 @@ tests, Mac builds for NVN/Vulkan/OpenGL profiles, and iOS source compilation.
 It also runs the CPU texture layout/deswizzle test (`dm/gfx/tex/tests/t_tex`)
 and the host's `tsan` and `memory-tsan` targets for audio and memory races.
 The texture format test (`t_fmt_mtl`) creates Metal textures and stays local.
+The macOS jobs run with the toolchain the project supports: Xcode 27.1 on
+GitHub's `xcode-27` image, named by path in `DEVELOPER_DIR` so a new default
+Xcode on the image does not change CI. The build check first compares the
+image's Metal compiler with `dmsh_chain.lock` (`own_compilers.py
+--check-metal`), and `dm/tools/tests/test_ci_toolchain.py` keeps the workflow,
+the image, README and the NSP script naming the same Xcode: raising the
+toolchain changes them together.
 
 A separate iOS job uses XcodeGen and the production project template to compile
 `Launcher.swift`, link the complete app and stage synthetic resources. It uses

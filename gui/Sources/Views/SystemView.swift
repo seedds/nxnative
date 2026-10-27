@@ -34,14 +34,6 @@ public struct SystemView: View {
                 // MARK: - Category 4: Gamepad & Audio Experience
                 categoryHeader(title: "Gamepad & Audio Feedback", icon: "gamecontroller.fill")
                 SystemAudioGamepadCard(viewModel: viewModel)
-                
-                // MARK: - Category 5: Personalization & Themes
-                categoryHeader(title: "Personalization & Appearance", icon: "paintpalette.fill")
-                SystemAppearanceCard(viewModel: viewModel)
-                
-                // MARK: - Category 6: Acknowledgements & Open Source Credits
-                categoryHeader(title: "Acknowledgements & Community Credits", icon: "heart.fill")
-                SystemCreditsCard()
             }
             .padding(20)
         }

@@ -20,6 +20,20 @@ public struct SelectableGameCard: View {
                     .foregroundColor(isSelected ? NXTheme.secondary : NXTheme.textMuted)
                     .frame(width: 24)
                 
+                // Official Portrait Cover Thumbnail
+                if let cover = GameCoverService.shared.coverImage(titleId: game.titleId, gameName: game.name) {
+                    Image(nsImage: cover)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 30, height: 46)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(NXTheme.specularRim, lineWidth: 0.7)
+                        )
+                }
+                
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(game.name)

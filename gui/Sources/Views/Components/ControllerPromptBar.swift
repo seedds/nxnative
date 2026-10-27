@@ -28,7 +28,7 @@ public struct ControllerPromptBar: View {
                 HStack(spacing: 12) {
                     keyboardPromptsForCurrentContext
                     
-                    keyboardKeyBadge(glyph: "1-6", action: "Tabs")
+                    keyboardKeyBadge(glyph: "1-7", action: "Tabs")
                 }
             }
         }
@@ -121,11 +121,14 @@ public struct ControllerPromptBar: View {
         case 3: // Controls
             controllerPill(glyph: confirmBtn, action: "Calibrate", color: brandAColor)
             
-        case 4: // Settings
+        case 4: // Personalize
+            dpadPill(glyph: "←/→", action: "Highlight Color")
+            
+        case 5: // Settings
             controllerPill(glyph: confirmBtn, action: "Install Tools", color: brandAColor)
             controllerPill(glyph: xBtn, action: "Check Updates", color: brandXColor)
             
-        case 5: // Console / Logs
+        case 6: // Console / Logs
             controllerPill(glyph: xBtn, action: "Copy", color: brandXColor)
             controllerPill(glyph: yBtn, action: "Clear", color: brandBColor)
             
@@ -171,11 +174,14 @@ public struct ControllerPromptBar: View {
         case 3: // Controls
             keyboardKeyBadge(glyph: "Space", action: "Calibrate")
             
-        case 4: // Settings
+        case 4: // Personalize
+            keyboardKeyBadge(glyph: "← / →", action: "Highlight Color")
+            
+        case 5: // Settings
             keyboardKeyBadge(glyph: "I", action: "Install Tools")
             keyboardKeyBadge(glyph: "U", action: "Check Updates")
             
-        case 5: // Console
+        case 6: // Console
             keyboardKeyBadge(glyph: "C", action: "Copy Logs")
             keyboardKeyBadge(glyph: "K", action: "Clear")
             

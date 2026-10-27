@@ -97,18 +97,96 @@ public struct CompatibilityView: View {
     }
     
     private var filterBar: some View {
-        HStack(spacing: 8) {
-            filterPill("All", count: viewModel.compatibleGames.count)
-            filterPill("Nintendo", count: viewModel.compatibleGames.filter { $0.engine.localizedCaseInsensitiveContains("nintendo") || $0.engine.localizedCaseInsensitiveContains("sead") }.count)
-            filterPill("Unreal", count: viewModel.compatibleGames.filter { $0.engine.localizedCaseInsensitiveContains("unreal") }.count)
-            filterPill("Unity", count: viewModel.compatibleGames.filter { $0.engine.localizedCaseInsensitiveContains("unity") }.count)
-            filterPill("RE Engine", count: viewModel.compatibleGames.filter { $0.engine.localizedCaseInsensitiveContains("re engine") || $0.engine.localizedCaseInsensitiveContains("capcom") }.count)
-            
-            Spacer()
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                // Engine Filters
+                HStack(spacing: 6) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white)
+                    filterPill("All", count: viewModel.compatibleGames.count)
+                    filterPill("Nintendo", count: viewModel.compatibleGames.filter { $0.engine.localizedCaseInsensitiveContains("nintendo") || $0.engine.localizedCaseInsensitiveContains("sead") }.count)
+                    filterPill("Unreal", count: viewModel.compatibleGames.filter { $0.engine.localizedCaseInsensitiveContains("unreal") }.count)
+                    filterPill("Unity", count: viewModel.compatibleGames.filter { $0.engine.localizedCaseInsensitiveContains("unity") }.count)
+                    filterPill("RE Engine", count: viewModel.compatibleGames.filter { $0.engine.localizedCaseInsensitiveContains("re engine") || $0.engine.localizedCaseInsensitiveContains("capcom") }.count)
+                }
+                
+                Divider()
+                    .frame(height: 16)
+                    .padding(.horizontal, 4)
+                    .opacity(0.35)
+                
+                // Cumulative RAM Filters ("Runs on my device": <= selected GB)
+                HStack(spacing: 6) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "memorychip")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("RAM:")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                    }
+                    .foregroundColor(.white)
+                    
+                    ramFilterPill(label: "All", ramGB: nil, count: viewModel.compatibleGames.count)
+                    ramFilterPill(label: "4GB", ramGB: 4, count: viewModel.compatibleGames.filter { $0.minRamGB <= 4 }.count)
+                    ramFilterPill(label: "6GB", ramGB: 6, count: viewModel.compatibleGames.filter { $0.minRamGB <= 6 }.count)
+                    ramFilterPill(label: "8GB", ramGB: 8, count: viewModel.compatibleGames.filter { $0.minRamGB <= 8 }.count)
+                    ramFilterPill(label: "16GB", ramGB: 16, count: viewModel.compatibleGames.filter { $0.minRamGB <= 16 }.count)
+                }
+                
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 8)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 8)
         .background(NXTheme.glassSurface.opacity(0.35))
+    }
+    
+    private func ramFilterPill(label: String, ramGB: Int?, count: Int) -> some View {
+        let isSelected = viewModel.compatibilityRamFilter == ramGB
+        return Button(action: {
+            SoundEffectService.shared.play(.click)
+            viewModel.compatibilityFocusArea = .filters
+            if viewModel.compatibilityRamFilter == ramGB && ramGB != nil {
+                viewModel.compatibilityRamFilter = nil
+            } else {
+                viewModel.compatibilityRamFilter = ramGB
+            }
+        }) {
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(.system(size: 11, weight: isSelected ? .bold : .semibold, design: .rounded))
+                    .foregroundColor(.white)
+                Text("(\(count))")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.white)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(
+                ZStack {
+                    if isSelected {
+                        Capsule().fill(
+                            LinearGradient(
+                                colors: [NXTheme.secondary, NXTheme.primary],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                    } else {
+                        Capsule().fill(NXTheme.glassSurfaceElevated.opacity(0.6))
+                    }
+                }
+            )
+            .foregroundColor(.white)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(isSelected ? Color.white.opacity(0.45) : NXTheme.borderSubtle, lineWidth: 0.8)
+            )
+        }
+        .buttonStyle(.plain)
+        .nxNoFocusRing()
+        .help(ramGB == nil ? "Show games for all RAM capacities" : "Show games that run on devices with up to \(ramGB!)GB RAM (\(count) games)")
     }
     
     private func filterPill(_ name: String, count: Int) -> some View {
@@ -121,10 +199,11 @@ public struct CompatibilityView: View {
         }) {
             HStack(spacing: 5) {
                 Text(name)
-                    .font(.system(size: 11, weight: isSelected ? .bold : .medium, design: .rounded))
+                    .font(.system(size: 11, weight: isSelected ? .bold : .semibold, design: .rounded))
+                    .foregroundColor(.white)
                 Text("(\(count))")
-                    .font(.system(size: 10, design: .monospaced))
-                    .opacity(0.8)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.white)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 4)

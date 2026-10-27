@@ -61,15 +61,17 @@ public struct PortedGameCard: View {
                 
                 // Centered Large Artwork / Icon
                 VStack(spacing: 8) {
-                    let icon = NSWorkspace.shared.icon(forFile: game.url.path)
+                    let icon = GameCoverService.shared.coverImage(for: game) ?? NSWorkspace.shared.icon(forFile: game.url.path)
+                    let isPortrait = icon.size.height >= icon.size.width * 1.15
                     Image(nsImage: icon)
                         .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 96, height: 96)
-                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .aspectRatio(contentMode: isPortrait ? .fill : .fit)
+                        .frame(width: isPortrait ? 84 : 96, height: isPortrait ? 132 : 96)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: isPortrait ? 12 : 20, style: .continuous))
                         .shadow(color: NXTheme.primary.opacity(0.3), radius: 10, x: 0, y: 4)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            RoundedRectangle(cornerRadius: isPortrait ? 12 : 20, style: .continuous)
                                 .stroke(NXTheme.specularRim, lineWidth: 1.2)
                         )
                     

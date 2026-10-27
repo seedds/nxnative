@@ -76,7 +76,7 @@ public struct SystemRepoCard: View {
                 // GitHub Upstream Information & Live Update Check
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("GitHub Upstream: github.com/seedds/nxnative")
+                        Text("GitHub Repository: github.com/rennan101/nxnative_Launcher")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(NXTheme.textSecondary)
                         if let update = viewModel.updateInfo {
@@ -98,13 +98,13 @@ public struct SystemRepoCard: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                     } else if let update = viewModel.updateInfo, update.hasUpdate {
-                        Button("Update Now") {
-                            viewModel.applyUpdate()
+                        Button("Update & Install Now") {
+                            viewModel.openUpdateCheckerAndAutoInstall()
                         }
                         .buttonStyle(NXPrimaryButtonStyle())
                     } else {
                         Button("Check for Updates") {
-                            viewModel.checkForUpdates()
+                            viewModel.openUpdateCheckerAndAutoInstall()
                         }
                         .buttonStyle(NXSecondaryButtonStyle())
                     }

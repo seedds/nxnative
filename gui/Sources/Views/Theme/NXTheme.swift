@@ -1,9 +1,18 @@
 import SwiftUI
 
 public enum NXTheme {
-    // MARK: - Core Palette (#6F31FF, #8B5CF6, #AA4500, #141418)
-    public static let primary = Color(red: 0x6F / 255.0, green: 0x31 / 255.0, blue: 0xFF / 255.0)
-    public static let secondary = Color(red: 0x8B / 255.0, green: 0x5C / 255.0, blue: 0xF6 / 255.0)
+    // MARK: - Dynamic Highlight Theme
+    public static var activeHighlightTheme: LauncherHighlightTheme = {
+        if let saved = UserDefaults.standard.string(forKey: "NXNative_SavedHighlightTheme"),
+           let theme = LauncherHighlightTheme(rawValue: saved) {
+            return theme
+        }
+        return .electricPurple
+    }()
+    
+    // MARK: - Core Palette
+    public static var primary: Color { activeHighlightTheme.primaryColor }
+    public static var secondary: Color { activeHighlightTheme.secondaryColor }
     public static let tertiary = Color(red: 0xAA / 255.0, green: 0x45 / 255.0, blue: 0x00 / 255.0)
     public static let canvasObsidian = Color(red: 0x14 / 255.0, green: 0x14 / 255.0, blue: 0x18 / 255.0)
     
@@ -19,17 +28,21 @@ public enum NXTheme {
     public static let textMuted = Color(red: 0x65 / 255.0, green: 0x65 / 255.0, blue: 0x7A / 255.0)
     
     // MARK: - Gradients
-    public static let primaryGradient = LinearGradient(
-        colors: [primary, Color(red: 0x7C / 255.0, green: 0x3A / 255.0, blue: 0xED / 255.0)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    public static var primaryGradient: LinearGradient {
+        LinearGradient(
+            colors: [primary, secondary],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
     
-    public static let logoGradient = LinearGradient(
-        colors: [primary, Color(red: 0xF0 / 255.0, green: 0x3B / 255.0, blue: 0x3B / 255.0)],
-        startPoint: .leading,
-        endPoint: .trailing
-    )
+    public static var logoGradient: LinearGradient {
+        LinearGradient(
+            colors: [primary, Color(red: 0xF0 / 255.0, green: 0x3B / 255.0, blue: 0x3B / 255.0)],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
     
     public static let specularRim = LinearGradient(
         colors: [
@@ -41,29 +54,33 @@ public enum NXTheme {
         endPoint: .bottomTrailing
     )
     
-    public static let selectedBorder = LinearGradient(
-        colors: [
-            secondary,
-            primary
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    public static var selectedBorder: LinearGradient {
+        LinearGradient(
+            colors: [
+                secondary,
+                primary
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
     
-    public static let specularRimHover = LinearGradient(
-        colors: [
-            secondary.opacity(0.6),
-            primary.opacity(0.3),
-            Color.white.opacity(0.05)
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    public static var specularRimHover: LinearGradient {
+        LinearGradient(
+            colors: [
+                secondary.opacity(0.6),
+                primary.opacity(0.3),
+                Color.white.opacity(0.05)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
 }
 
 public extension Color {
-    static let nxPrimary = NXTheme.primary
-    static let nxSecondary = NXTheme.secondary
+    static var nxPrimary: Color { NXTheme.primary }
+    static var nxSecondary: Color { NXTheme.secondary }
     static let nxTertiary = NXTheme.tertiary
     static let nxCanvas = NXTheme.canvasObsidian
     static let nxSurface = NXTheme.glassSurface

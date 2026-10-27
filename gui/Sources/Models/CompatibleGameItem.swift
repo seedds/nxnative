@@ -12,6 +12,7 @@ public struct CompatibleGameItem: Identifiable, Hashable {
     public let macReq: String
     public let iosReq: String
     public let storageReq: String
+    public let minRamGB: Int
     
     public init(
         title: String,
@@ -23,7 +24,8 @@ public struct CompatibleGameItem: Identifiable, Hashable {
         readmeRelPath: String,
         macReq: String = "Mac: 8GB RAM",
         iosReq: String = "iOS: 6GB RAM",
-        storageReq: String = "HD: ~6 GB"
+        storageReq: String = "HD: ~6 GB",
+        minRamGB: Int = 8
     ) {
         self.title = title
         self.titleId = titleId
@@ -35,6 +37,7 @@ public struct CompatibleGameItem: Identifiable, Hashable {
         self.macReq = macReq
         self.iosReq = iosReq
         self.storageReq = storageReq
+        self.minRamGB = minRamGB
     }
     
     public var githubUrl: URL? {

@@ -139,11 +139,11 @@ public struct LibraryView: View {
                 
                 Text("Play Game")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundColor(NXTheme.textPrimary)
+                    .foregroundColor(.white)
             }
             
             Text("·")
-                .foregroundColor(NXTheme.textMuted)
+                .foregroundColor(.white.opacity(0.6))
             
             HStack(spacing: 6) {
                 Text(controllerService.activeBrand == .xbox ? "⧉" : (controllerService.activeBrand == .playstation ? "OPT" : "−"))

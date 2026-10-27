@@ -61,11 +61,11 @@ public struct MappingPillView: View {
                             .controlSize(.mini)
                         Text("Press a button...")
                             .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundColor(NXTheme.secondary)
+                            .foregroundColor(.white)
                     } else {
                         Text(mappedLabel)
                             .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundColor(NXTheme.textPrimary)
+                            .foregroundColor(.white)
                             .lineLimit(1)
                     }
 
@@ -80,7 +80,7 @@ public struct MappingPillView: View {
                     } label: {
                         Image(systemName: "chevron.down")
                             .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(NXTheme.textMuted)
+                            .foregroundColor(.white)
                     }
                     .menuStyle(.borderlessButton)
                     .frame(width: 14)
@@ -115,7 +115,7 @@ public struct MappingPillView: View {
     private var switchButtonBadge: some View {
         Text(button.displayName)
             .font(.system(size: 11, weight: .bold, design: .rounded))
-            .foregroundColor(NXTheme.textSecondary)
+            .foregroundColor(.white)
             .lineLimit(1)
             .frame(minWidth: 70, alignment: isLeftSide ? .leading : .trailing)
     }

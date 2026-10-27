@@ -13,7 +13,8 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         public static let savedShowFps = "NXNative_SavedShowFps"
         public static let savedKeepExtracted = "NXNative_SavedKeepExtracted"
         public static let savedPlatform = "NXNative_SavedPlatform"
-        public static let savedIconAppearanceMode = "NXNative_SavedIconAppearanceMode"
+        public static let savedIconAppearanceMode = "NXNative_SavedIconAppearanceMode_v2"
+        public static let savedHighlightTheme = "NXNative_SavedHighlightTheme"
         public static let savedCompatibilityDisplayMode = "NXNative_SavedCompatibilityDisplayMode"
         public static let savedLibraryCardSize = "NXNative_SavedLibraryCardSize"
         public static let savedLibraryCardScale = "NXNative_SavedLibraryCardScale"
@@ -127,6 +128,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var compatibleGames: [CompatibleGameItem] = []
     @Published public var isLoadingCompatibility: Bool = false
     @Published public var compatibilityFilter: String = "All"
+    @Published public var compatibilityRamFilter: Int? = nil
     @Published public var compatibilitySearchText: String = ""
     @Published public var compatibilityLastUpdated: Date? = nil
     @Published public var isCompatibilityFromOnline: Bool = false
@@ -149,10 +151,14 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var dependencyToUninstall: DependencyStatus? = nil
     @Published public var showUninstallConfirm: Bool = false
     
-    // MARK: - Update Checker
+    // MARK: - Update Checker & About Sheet
+    @Published public var showAboutSheet: Bool = false
+    @Published public var showUpdateSheet: Bool = false
     @Published public var isCheckingUpdate: Bool = false
     @Published public var updateInfo: UpdateInfo? = nil
     @Published public var isApplyingUpdate: Bool = false
+    @Published public var updateInstallLogs: [String] = []
+    @Published public var updateCompletedReadyToRelaunch: Bool = false
     @Published public var updateSuccessBanner: String? = nil
     @Published public var updateErrorBanner: String? = nil
     
@@ -186,10 +192,16 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var buildError: String? = nil
     @Published public var buildSuccessPath: String? = nil
     @Published public var buildWizardStep: Int = 1
-    @Published public var iconAppearanceMode: AppIconAppearanceMode = .auto {
+    @Published public var iconAppearanceMode: AppIconAppearanceMode = .light {
         didSet {
             UserDefaults.standard.set(iconAppearanceMode.rawValue, forKey: StorageKeys.savedIconAppearanceMode)
             updateDockIcon()
+        }
+    }
+    @Published public var highlightTheme: LauncherHighlightTheme = NXTheme.activeHighlightTheme {
+        didSet {
+            NXTheme.activeHighlightTheme = highlightTheme
+            UserDefaults.standard.set(highlightTheme.rawValue, forKey: StorageKeys.savedHighlightTheme)
         }
     }
     
@@ -246,6 +258,11 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
            let mode = AppIconAppearanceMode(rawValue: savedMode) {
             self.iconAppearanceMode = mode
         }
+        if let savedTheme = UserDefaults.standard.string(forKey: StorageKeys.savedHighlightTheme),
+           let theme = LauncherHighlightTheme(rawValue: savedTheme) {
+            NXTheme.activeHighlightTheme = theme
+            self.highlightTheme = theme
+        }
         if let savedDisplay = UserDefaults.standard.string(forKey: StorageKeys.savedCompatibilityDisplayMode),
            let dispMode = CompatibilityDisplayMode(rawValue: savedDisplay) {
             self.compatibilityDisplayMode = dispMode
@@ -271,6 +288,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         checkForUpdates()
         loadCompatibleGames()
         updateDockIcon()
+        setupWindowMinimizeIconObserver()
         
         NotificationService.shared.requestAuthorization()
         setupControllerNavigation()

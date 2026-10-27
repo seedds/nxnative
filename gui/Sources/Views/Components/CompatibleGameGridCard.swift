@@ -23,51 +23,18 @@ public struct CompatibleGameGridCard: View {
         GlassCard(padding: 10) {
             VStack(alignment: .leading, spacing: 8) {
                 // MARK: - Game Cover Art in Portrait (1:1.35 ratio)
-                ZStack(alignment: .topTrailing) {
-                    coverArtView
-                    
-                    // Floating Engine & Graphics API Pills
-                    HStack {
-                        Text(item.engine)
-                            .font(.system(size: 8, weight: .bold, design: .rounded))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(Color.black.opacity(0.72))
-                            .foregroundColor(.white)
-                            .clipShape(Capsule())
-                            .overlay(
-                                Capsule().stroke(Color.white.opacity(0.15), lineWidth: 0.5)
-                            )
-                        
-                        Spacer()
-                        
-                        Text(item.graphicsApi)
-                            .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(apiColor(item.graphicsApi).opacity(0.85))
-                            .foregroundColor(.white)
-                            .clipShape(Capsule())
-                    }
-                    .padding(6)
-                }
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(NXTheme.specularRim, lineWidth: 0.8)
-                )
+                coverArtView
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(NXTheme.specularRim, lineWidth: 0.8)
+                    )
                 
-                // MARK: - Title & TitleID (Fixed height for uniform grid)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.title)
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundColor(isCardFocused ? .white : NXTheme.textPrimary)
-                        .lineLimit(2)
-                        .frame(height: 32, alignment: .topLeading)
-                    
-                    Text(item.titleId)
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundColor(NXTheme.textSecondary)
-                }
+                // MARK: - Title (Fixed height for uniform grid)
+                Text(item.title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundColor(isCardFocused ? .white : NXTheme.textPrimary)
+                    .lineLimit(2)
+                    .frame(height: 32, alignment: .topLeading)
                 
                 // MARK: - Hardware Requirements (Mac & iOS Specs)
                 VStack(alignment: .leading, spacing: 3) {
@@ -76,16 +43,16 @@ public struct CompatibleGameGridCard: View {
                             .font(.system(size: 8, weight: .semibold, design: .rounded))
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
-                            .background(Color.blue.opacity(0.2))
-                            .foregroundColor(Color(red: 0.55, green: 0.80, blue: 1.0))
+                            .background(Color.blue.opacity(0.35))
+                            .foregroundColor(.white)
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                         
                         Text(item.storageReq)
                             .font(.system(size: 8, weight: .semibold, design: .monospaced))
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
-                            .background(Color.purple.opacity(0.2))
-                            .foregroundColor(Color(red: 0.85, green: 0.70, blue: 1.0))
+                            .background(Color.purple.opacity(0.35))
+                            .foregroundColor(.white)
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
                     
@@ -93,8 +60,8 @@ public struct CompatibleGameGridCard: View {
                         .font(.system(size: 8, weight: .medium, design: .rounded))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1.5)
-                        .background(Color.orange.opacity(0.18))
-                        .foregroundColor(Color(red: 1.0, green: 0.75, blue: 0.45))
+                        .background(Color.orange.opacity(0.35))
+                        .foregroundColor(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
                 .frame(height: 34, alignment: .leading)
@@ -131,7 +98,7 @@ public struct CompatibleGameGridCard: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 335)
+        .frame(height: 318)
         .clipped()
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)

@@ -469,8 +469,19 @@ def scan_nsps(nsp_dir, keys=None, repo=None, env=None):
         if low == 0: f['base'] = p
         elif low == 0x800: f['updates'].append((version_of(p), p))
         else: f['dlc'].append((tid, version_of(p), p))
-    if len(fams) == 1 and len(unknown) == 1 and next(iter(fams.values()))['base'] is None:   # a base game converted from a cartridge may have neither tags nor a ticket; build IDs are checked afterwards
-        next(iter(fams.values()))['base'] = unknown[0]
+    if len(fams) == 1 and unknown:
+        only_app, only_fam = next(iter(fams.items()))
+        for u in list(unknown):
+            low_name = u.name.lower()
+            if 'dlc' in low_name:
+                dlc_idx = len(only_fam['dlc']) + 1
+                only_fam['dlc'].append((only_app + 0x1000 + dlc_idx, version_of(u), u))
+                unknown.remove(u)
+            elif 'update' in low_name or 'patch' in low_name:
+                only_fam['updates'].append((version_of(u), u))
+                unknown.remove(u)
+        if len(unknown) == 1 and only_fam['base'] is None:   # a base game converted from a cartridge may have neither tags nor a ticket; build IDs are checked afterwards
+            only_fam['base'] = unknown[0]
     if not fams: raise BuildError(f'no NSP with a readable title ID in {nsp_dir}')
     if len(fams) > 1: raise BuildError('more than one game in the folder, keep one game per folder: ' + ', '.join(f'{t:016X}' for t in fams))
     app, fam = next(iter(fams.items()))
@@ -550,6 +561,7 @@ def nsp_versions(fam, builds):
     loose = [p for v, p in fam['updates'] if v is None]
     reg = sorted((b for b in builds if b != 'v0'), key=vnum)
     if loose and len(fam['updates']) == 1 and reg: out[reg[-1]] = loose[0]
+    elif loose and not reg: out['v65536'] = loose[-1]
     elif loose: say(f'[RED] leaving out update NSPs without a version tag ([v<N>]) in their name: {", ".join(p.name for p in loose)}')
     return out
 

@@ -28,6 +28,11 @@ extension AppViewModel {
         default:
             break
         }
+        
+        if let maxRam = compatibilityRamFilter {
+            list = list.filter { $0.minRamGB <= maxRam }
+        }
+        
         return list
     }
     

@@ -2,20 +2,58 @@ import Foundation
 import AppKit
 
 extension AppViewModel {
-    // MARK: - Dynamic Dock Icon
+    // MARK: - Dynamic Dock & Minimized Taskbar Icon
     public func updateDockIcon() {
-        let isDark = NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let resName: String
-        switch iconAppearanceMode {
-        case .light: resName = "AppIcon-Light"
-        case .dark: resName = "AppIcon-Dark"
-        case .mono: resName = "AppIcon-Mono"
-        case .auto: resName = isDark ? "AppIcon-Dark" : "AppIcon-Light"
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            NSApplication.shared.setActivationPolicy(.regular)
+            
+            let isDark = NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let resName: String
+            switch self.iconAppearanceMode {
+            case .light: resName = "AppIcon-Light"
+            case .dark: resName = "AppIcon-Dark"
+            case .mono: resName = "AppIcon-Mono"
+            case .auto: resName = isDark ? "AppIcon-Dark" : "AppIcon-Light"
+            }
+            
+            let url = Bundle.main.url(forResource: resName, withExtension: "png")
+                ?? Bundle.main.url(forResource: resName, withExtension: "icns")
+                ?? Bundle.main.url(forResource: "AppIcon-Light", withExtension: "png")
+                ?? Bundle.main.url(forResource: "AppIcon", withExtension: "icns")
+            
+            if let iconURL = url, let img = NSImage(contentsOf: iconURL) {
+                NSApplication.shared.applicationIconImage = img
+                NSApplication.shared.dockTile.display()
+                
+                for window in NSApplication.shared.windows {
+                    window.miniwindowImage = img
+                    window.miniwindowTitle = "NxNative Launcher"
+                }
+            }
+        }
+    }
+    
+    public func setupWindowMinimizeIconObserver() {
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willMiniaturizeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.updateDockIcon()
+            if let window = notification.object as? NSWindow,
+               let icon = NSApplication.shared.applicationIconImage {
+                window.miniwindowImage = icon
+                window.miniwindowTitle = "NxNative Launcher"
+            }
         }
         
-        if let url = Bundle.main.url(forResource: resName, withExtension: "png"),
-           let img = NSImage(contentsOf: url) {
-            NSApplication.shared.applicationIconImage = img
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateDockIcon()
         }
     }
     
@@ -32,16 +70,37 @@ extension AppViewModel {
     }
     
     public func cycleCompatibilityFilter(forward: Bool) {
-        let filters = ["All", "Unreal", "Unity", "Nintendo", "RE Engine"]
-        guard let currentIndex = filters.firstIndex(of: compatibilityFilter) else {
-            compatibilityFilter = "All"
-            return
-        }
+        let engineFilters = ["All", "Nintendo", "Unreal", "Unity", "RE Engine"]
+        let ramFilters: [Int?] = [nil, 4, 6, 8, 16]
+        
         SoundEffectService.shared.play(.focus)
-        if forward {
-            compatibilityFilter = filters[(currentIndex + 1) % filters.count]
+        // Cycle engine filters first; when wrapping around, cycle RAM filter
+        if let currentIndex = engineFilters.firstIndex(of: compatibilityFilter) {
+            if forward {
+                if currentIndex < engineFilters.count - 1 {
+                    compatibilityFilter = engineFilters[currentIndex + 1]
+                } else {
+                    compatibilityFilter = "All"
+                    if let rIdx = ramFilters.firstIndex(where: { $0 == compatibilityRamFilter }) {
+                        compatibilityRamFilter = ramFilters[(rIdx + 1) % ramFilters.count]
+                    } else {
+                        compatibilityRamFilter = nil
+                    }
+                }
+            } else {
+                if currentIndex > 0 {
+                    compatibilityFilter = engineFilters[currentIndex - 1]
+                } else {
+                    compatibilityFilter = engineFilters.last ?? "All"
+                    if let rIdx = ramFilters.firstIndex(where: { $0 == compatibilityRamFilter }) {
+                        compatibilityRamFilter = ramFilters[(rIdx - 1 + ramFilters.count) % ramFilters.count]
+                    } else {
+                        compatibilityRamFilter = nil
+                    }
+                }
+            }
         } else {
-            compatibilityFilter = filters[(currentIndex - 1 + filters.count) % filters.count]
+            compatibilityFilter = "All"
         }
     }
     
@@ -218,7 +277,7 @@ extension AppViewModel {
         }
     }
     
-    // MARK: - GitHub Updates
+    // MARK: - GitHub Updates & Auto-Installer
     public func checkForUpdates() {
         guard isNxnativeValid, !nxnativePath.isEmpty else { return }
         isCheckingUpdate = true
@@ -228,24 +287,74 @@ extension AppViewModel {
         }
     }
     
-    public func applyUpdate() {
+    /// Triggered from the macOS Menu Bar ("Check for Updates...") or Settings tab:
+    /// Opens the Update modal, checks GitHub (rennan101/nxnative_Launcher), and if a new version is found, downloads & installs it automatically.
+    public func openUpdateCheckerAndAutoInstall() {
+        showUpdateSheet = true
+        updateErrorBanner = nil
+        updateSuccessBanner = nil
+        updateCompletedReadyToRelaunch = false
+        
+        guard isNxnativeValid, !nxnativePath.isEmpty else {
+            updateErrorBanner = "Local repository path not configured."
+            return
+        }
+        
+        isCheckingUpdate = true
+        updateChecker.checkForUpdates(nxnativePath: nxnativePath) { [weak self] info in
+            guard let self = self else { return }
+            self.isCheckingUpdate = false
+            self.updateInfo = info
+            
+            // If an update is available on GitHub, automatically start downloading, building, and installing!
+            if let info = info, info.hasUpdate {
+                self.applyUpdate(autoRelaunch: true)
+            }
+        }
+    }
+    
+    public func applyUpdate(autoRelaunch: Bool = false) {
         guard isNxnativeValid, !nxnativePath.isEmpty else { return }
         isApplyingUpdate = true
         updateErrorBanner = nil
         updateSuccessBanner = nil
-        updateChecker.applyUpdate(nxnativePath: nxnativePath) { [weak self] success, message in
-            self?.isApplyingUpdate = false
-            if success {
-                self?.updateSuccessBanner = message
-                self?.updateErrorBanner = nil
-                self?.updateInfo = nil
-                self?.refreshPrerequisites()
-                self?.logs.append(LogEntry(level: .success, message: message))
-            } else {
-                self?.updateErrorBanner = message
-                self?.logs.append(LogEntry(level: .error, message: message))
+        updateCompletedReadyToRelaunch = false
+        updateInstallLogs.removeAll()
+        
+        updateChecker.applyUpdate(
+            nxnativePath: nxnativePath,
+            rebuildLauncher: true,
+            progressHandler: { [weak self] line in
+                self?.updateInstallLogs.append(line)
+            },
+            completion: { [weak self] success, message in
+                guard let self = self else { return }
+                self.isApplyingUpdate = false
+                if success {
+                    self.updateSuccessBanner = message
+                    self.updateErrorBanner = nil
+                    self.updateCompletedReadyToRelaunch = true
+                    self.checkForUpdates()
+                    self.refreshEnginePatches()
+                    self.refreshPrerequisites()
+                    self.logs.append(LogEntry(level: .success, message: message))
+                    
+                    if autoRelaunch {
+                        self.updateInstallLogs.append("==> Automatic update finished! Relaunching NxNative Launcher in 2 seconds...")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                            self?.relaunchUpdatedLauncher()
+                        }
+                    }
+                } else {
+                    self.updateErrorBanner = message
+                    self.logs.append(LogEntry(level: .error, message: message))
+                }
             }
-        }
+        )
+    }
+    
+    public func relaunchUpdatedLauncher() {
+        updateChecker.relaunchLauncher(nxnativePath: nxnativePath)
     }
     
     // MARK: - Delegate Implementations

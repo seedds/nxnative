@@ -41,7 +41,18 @@ extension AppViewModel {
         logs.removeAll()
         
         var targetGameDirectory = gameDir
-        if detectedGames.count > 1 || sel.files.count < detectedFiles.count {
+        let hasSubfolderFiles = sel.files.contains {
+            $0.url.deletingLastPathComponent().standardizedFileURL != gameDir.standardizedFileURL
+        }
+        
+        if sel.updateCount > 0 || sel.dlcCount > 0 {
+            logs.append(LogEntry(
+                level: .info,
+                message: "Auto-Bundling: Base Game + \(sel.updateCount) Update(s) + \(sel.dlcCount) DLC(s) detected in folder and queued for automatic installation."
+            ))
+        }
+        
+        if detectedGames.count > 1 || sel.files.count < detectedFiles.count || hasSubfolderFiles {
             let safeName = sel.name.replacingOccurrences(of: "[^a-zA-Z0-9._-]", with: "_", options: .regularExpression)
             let stagingDir = URL(fileURLWithPath: defaultInstallPath)
                 .appendingPathComponent("Staging")
@@ -55,10 +66,13 @@ extension AppViewModel {
                 try fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
                 for item in sel.files {
                     let linkURL = stagingDir.appendingPathComponent(item.url.lastPathComponent)
+                    if fm.fileExists(atPath: linkURL.path) {
+                        try? fm.removeItem(at: linkURL)
+                    }
                     try fm.createSymbolicLink(at: linkURL, withDestinationURL: item.url)
                 }
                 targetGameDirectory = stagingDir
-                logs.append(LogEntry(level: .info, message: "Isolated '\(sel.name)' (\(sel.files.count) files) in staging environment."))
+                logs.append(LogEntry(level: .info, message: "Prepared unified build workspace for '\(sel.name)' (\(sel.files.count) files: Base + Updates + DLCs)."))
             } catch {
                 logs.append(LogEntry(level: .warning, message: "Could not create staging symlinks (\(error.localizedDescription)). Using original directory."))
             }

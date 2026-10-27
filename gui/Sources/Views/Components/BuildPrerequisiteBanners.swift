@@ -88,7 +88,7 @@ public struct BuildPrerequisiteBanners: View {
             Spacer()
             
             Button("Configure in Settings") {
-                viewModel.selectedTab = 4
+                viewModel.selectedTab = 5
             }
             .buttonStyle(NXAccentButtonStyle())
             .controlSize(.regular)

@@ -27,44 +27,14 @@ public struct CompatibleGameRow: View {
                 
                 // Game Details
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text(game.title)
-                            .font(.system(size: 13, weight: .bold, design: .rounded))
-                            .foregroundColor(isRowFocused ? .white : NXTheme.textPrimary)
-                            .lineLimit(1)
-                        
-                        Text(game.graphicsApi)
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(apiColor(game.graphicsApi).opacity(0.35))
-                            .foregroundColor(.white)
-                            .clipShape(Capsule())
-                    }
+                    Text(game.title)
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundColor(isRowFocused ? .white : NXTheme.textPrimary)
+                        .lineLimit(1)
                     
-                    HStack(spacing: 6) {
-                        Text(game.titleId)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundColor(NXTheme.textSecondary)
-                        
-                        Text("•")
-                            .foregroundColor(NXTheme.textMuted)
-                        
-                        Text("Ver: \(game.versionTested)")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(NXTheme.textSecondary)
-                        
-                        Text("•")
-                            .foregroundColor(NXTheme.textMuted)
-                        
-                        HStack(spacing: 3) {
-                            Image(systemName: "cpu")
-                                .font(.system(size: 9))
-                            Text(game.engine)
-                                .font(.system(size: 10))
-                        }
-                        .foregroundColor(NXTheme.textMuted)
-                    }
+                    Text("Ver: \(game.versionTested)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(NXTheme.textSecondary)
                 }
                 
                 Spacer(minLength: 12)
@@ -75,24 +45,24 @@ public struct CompatibleGameRow: View {
                         .font(.system(size: 9, weight: .semibold, design: .rounded))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(Color.blue.opacity(0.2))
-                        .foregroundColor(Color(red: 0.55, green: 0.80, blue: 1.0))
+                        .background(Color.blue.opacity(0.35))
+                        .foregroundColor(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 5))
                     
                     Text(game.iosReq)
                         .font(.system(size: 9, weight: .semibold, design: .rounded))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(Color.orange.opacity(0.18))
-                        .foregroundColor(Color(red: 1.0, green: 0.75, blue: 0.45))
+                        .background(Color.orange.opacity(0.35))
+                        .foregroundColor(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 5))
                     
                     Text(game.storageReq)
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(Color.purple.opacity(0.2))
-                        .foregroundColor(Color(red: 0.85, green: 0.70, blue: 1.0))
+                        .background(Color.purple.opacity(0.35))
+                        .foregroundColor(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 5))
                 }
                 

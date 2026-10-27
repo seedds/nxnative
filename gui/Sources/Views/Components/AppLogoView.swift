@@ -29,54 +29,65 @@ public struct AppLogoView: View {
               let img = NSImage(contentsOf: url) else {
             return nil
         }
-        let copy = img.copy() as! NSImage
-        copy.size = NSSize(width: 30, height: 30)
-        return copy
+        return img
     }
     
     public var body: some View {
-        Menu {
-            Section("Icon Appearance") {
-                ForEach(AppIconAppearanceMode.allCases, id: \.self) { mode in
-                    Button(action: {
-                        viewModel.iconAppearanceMode = mode
-                    }) {
-                        HStack {
-                            Text(mode.rawValue)
-                            if viewModel.iconAppearanceMode == mode {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-            }
-        } label: {
-            ZStack {
+        Button(action: {
+            SoundEffectService.shared.play(.click)
+            viewModel.selectedTab = 4 // Abre a aba Personalize
+        }) {
+            Group {
                 if let img = currentNSImage {
                     Image(nsImage: img)
                         .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 30, height: 30)
-                        .clipShape(RoundedRectangle(cornerRadius: 7.5, style: .continuous))
-                        .shadow(color: NXTheme.primary.opacity(isHovered ? 0.4 : 0.2), radius: isHovered ? 6 : 3, x: 0, y: 1)
+                        .interpolation(.high)
+                        .antialiased(true)
+                        .aspectRatio(1.0, contentMode: .fit)
+                        .frame(width: 36, height: 36)
+                        .shadow(color: NXTheme.primary.opacity(isHovered ? 0.45 : 0.2), radius: isHovered ? 6 : 3, x: 0, y: 1)
                 } else {
                     Image(systemName: "gamecontroller.fill")
                         .font(.system(size: 20))
                         .foregroundColor(NXTheme.primary)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 36, height: 36)
                 }
             }
-            .frame(width: 30, height: 30)
+            .frame(width: 36, height: 36)
+            .fixedSize()
+            .scaleEffect(isHovered ? 1.04 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isHovered)
             .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .frame(width: 30, height: 30)
-        .clipped()
+        .buttonStyle(.plain)
+        .fixedSize()
         .nxNoFocusRing()
-        .focusable(false)
         .onHover { isHovered = $0 }
-        .help("NxNative Logo: Adapts to Light, Dark & Mono modes. Click to choose appearance.")
+        .contextMenu {
+            Button(action: {
+                SoundEffectService.shared.play(.click)
+                viewModel.showAboutSheet = true
+            }) {
+                Label("About NxNative Launcher", systemImage: "info.circle")
+            }
+            
+            Button(action: {
+                SoundEffectService.shared.play(.click)
+                viewModel.openUpdateCheckerAndAutoInstall()
+            }) {
+                Label("Check for Updates...", systemImage: "arrow.triangle.2.circlepath")
+            }
+            
+            Divider()
+            
+            Button(action: {
+                SoundEffectService.shared.play(.tabSwitch)
+                viewModel.selectedTab = 4
+            }) {
+                Label("Personalize Launcher...", systemImage: "paintpalette.fill")
+            }
+        }
+        .help("Click to personalize launcher appearance & highlight color")
         .onChange(of: colorScheme) { _ in
             if viewModel.iconAppearanceMode == .auto {
                 viewModel.updateDockIcon()

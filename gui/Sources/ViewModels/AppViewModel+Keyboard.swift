@@ -22,8 +22,8 @@ extension AppViewModel {
             return
         }
         
-        // Tab switching: 1-6
-        if let num = Int(key), (1...6).contains(num) {
+        // Tab switching: 1-7
+        if let num = Int(key), (1...7).contains(num) {
             SoundEffectService.shared.play(.tabSwitch)
             withAnimation(.easeInOut(duration: 0.18)) {
                 if isGameActionMenuPresented { isGameActionMenuPresented = false }
@@ -57,19 +57,19 @@ extension AppViewModel {
                 loadCompatibleGames(forceRefresh: true)
             }
         case "c":
-            if selectedTab == 5 {
+            if selectedTab == 6 {
                 handleSecondaryAction()
             }
         case "k":
-            if selectedTab == 5 {
+            if selectedTab == 6 {
                 handleContextAction()
             }
         case "i":
-            if selectedTab == 4 {
+            if selectedTab == 5 {
                 showInstallerSheet = true
             }
         case "u":
-            if selectedTab == 4 {
+            if selectedTab == 5 {
                 checkForUpdates()
             }
         case "space":

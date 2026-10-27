@@ -104,8 +104,8 @@ public struct CompatibilityToolbarView: View {
                 viewModel.compatibilityDisplayMode = .list
             }) {
                 Image(systemName: "list.bullet")
-                    .font(.system(size: 11, weight: viewModel.compatibilityDisplayMode == .list ? .bold : .regular))
-                    .foregroundColor(viewModel.compatibilityDisplayMode == .list ? .white : NXTheme.textSecondary)
+                    .font(.system(size: 11, weight: viewModel.compatibilityDisplayMode == .list ? .bold : .semibold))
+                    .foregroundColor(.white)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 5)
                     .background(viewModel.compatibilityDisplayMode == .list ? NXTheme.primary.opacity(0.5) : Color.clear)
@@ -119,8 +119,8 @@ public struct CompatibilityToolbarView: View {
                 viewModel.compatibilityDisplayMode = .grid
             }) {
                 Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 11, weight: viewModel.compatibilityDisplayMode == .grid ? .bold : .regular))
-                    .foregroundColor(viewModel.compatibilityDisplayMode == .grid ? .white : NXTheme.textSecondary)
+                    .font(.system(size: 11, weight: viewModel.compatibilityDisplayMode == .grid ? .bold : .semibold))
+                    .foregroundColor(.white)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 5)
                     .background(viewModel.compatibilityDisplayMode == .grid ? NXTheme.primary.opacity(0.5) : Color.clear)

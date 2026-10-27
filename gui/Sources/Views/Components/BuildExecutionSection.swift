@@ -84,7 +84,7 @@ public struct BuildExecutionSection: View {
                 Spacer()
                 
                 Button("Open Full Console") {
-                    viewModel.selectedTab = 5
+                    viewModel.selectedTab = 6
                 }
                 .buttonStyle(.link)
                 .font(.system(size: 12))
@@ -203,7 +203,7 @@ public struct BuildExecutionSection: View {
                 Spacer()
                 
                 Button("Open Full Console") {
-                    viewModel.selectedTab = 5
+                    viewModel.selectedTab = 6
                 }
                 .buttonStyle(.link)
                 .font(.system(size: 12))

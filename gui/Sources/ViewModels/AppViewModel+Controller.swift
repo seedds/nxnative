@@ -20,14 +20,14 @@ extension AppViewModel {
             SoundEffectService.shared.play(.tabSwitch)
             withAnimation(.easeInOut(duration: 0.18)) {
                 if isGameActionMenuPresented { isGameActionMenuPresented = false }
-                selectedTab = (selectedTab - 1 + 6) % 6
+                selectedTab = (selectedTab - 1 + 7) % 7
             }
             
         case .tabNext:
             SoundEffectService.shared.play(.tabSwitch)
             withAnimation(.easeInOut(duration: 0.18)) {
                 if isGameActionMenuPresented { isGameActionMenuPresented = false }
-                selectedTab = (selectedTab + 1) % 6
+                selectedTab = (selectedTab + 1) % 7
             }
             
         case .navigateLeft:
@@ -56,7 +56,7 @@ extension AppViewModel {
             if selectedTab == 1, let game = currentFocusedGame {
                 gameForSettingsSheet = game
             } else {
-                selectedTab = 4 // Settings
+                selectedTab = 5 // Settings
             }
         case .options:
             handleOptionsAction()
@@ -80,6 +80,12 @@ extension AppViewModel {
                 InputProfileManager.shared.activeProfileId = profiles[idx - 1].id
                 SoundEffectService.shared.play(.focus)
             }
+        case 4:
+            let themes = LauncherHighlightTheme.allCases
+            if let idx = themes.firstIndex(of: highlightTheme), idx > 0 {
+                highlightTheme = themes[idx - 1]
+                SoundEffectService.shared.play(.focus)
+            }
         default: break
         }
     }
@@ -98,6 +104,12 @@ extension AppViewModel {
             let profiles = InputProfileManager.shared.profiles
             if let idx = profiles.firstIndex(where: { $0.id == InputProfileManager.shared.activeProfileId }), idx < profiles.count - 1 {
                 InputProfileManager.shared.activeProfileId = profiles[idx + 1].id
+                SoundEffectService.shared.play(.focus)
+            }
+        case 4:
+            let themes = LauncherHighlightTheme.allCases
+            if let idx = themes.firstIndex(of: highlightTheme), idx < themes.count - 1 {
+                highlightTheme = themes[idx + 1]
                 SoundEffectService.shared.play(.focus)
             }
         default: break
@@ -121,7 +133,7 @@ extension AppViewModel {
             }
         case 2:
             handleCompatibilityNavigateUp()
-        case 4:
+        case 5:
             refreshPrerequisites()
         default: break
         }
@@ -176,7 +188,7 @@ extension AppViewModel {
             var prof = InputProfileManager.shared.activeProfile
             prof.swapFaceButtons()
             InputProfileManager.shared.updateProfile(prof)
-        case 4:
+        case 5:
             if !prerequisites.allSatisfied { showInstallerSheet = true }
         default:
             break
@@ -216,7 +228,7 @@ extension AppViewModel {
             if let game = currentFocusedGame { launchGame(game) }
         case 2:
             handleCompatibilitySecondaryAction()
-        case 5:
+        case 6:
             let allText = logs.map { "\($0.timestamp) [\($0.level.rawValue.uppercased())] \($0.message)" }.joined(separator: "\n")
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(allText, forType: .string)
@@ -233,7 +245,7 @@ extension AppViewModel {
                 let profile = GameDetailsProfile.inspect(for: game)
                 revealSaveFolder(profile.saveDirectory)
             }
-        case 5:
+        case 6:
             SoundEffectService.shared.play(.click)
             logs.removeAll()
         default:

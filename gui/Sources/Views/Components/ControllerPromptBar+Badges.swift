@@ -61,7 +61,7 @@ extension ControllerPromptBar {
             }
             Text("Tabs")
                 .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundColor(NXTheme.textSecondary)
+                .foregroundColor(.white)
         }
     }
     
@@ -93,7 +93,7 @@ extension ControllerPromptBar {
             
             Text(action)
                 .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundColor(NXTheme.textSecondary)
+                .foregroundColor(.white)
         }
     }
     
@@ -108,7 +108,7 @@ extension ControllerPromptBar {
                 
                 Text("/")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(NXTheme.textMuted)
+                    .foregroundColor(.white)
                 
                 Text(xGlyph)
                     .font(.system(size: 10, weight: .black, design: .rounded))
@@ -119,7 +119,7 @@ extension ControllerPromptBar {
             
             Text("Play")
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .foregroundColor(NXTheme.textPrimary)
+                .foregroundColor(.white)
         }
     }
     
@@ -137,7 +137,7 @@ extension ControllerPromptBar {
             
             Text(action)
                 .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundColor(NXTheme.textSecondary)
+                .foregroundColor(.white)
         }
     }
     
@@ -155,7 +155,7 @@ extension ControllerPromptBar {
             
             Text(action)
                 .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundColor(NXTheme.textSecondary)
+                .foregroundColor(.white)
         }
     }
     
@@ -163,7 +163,7 @@ extension ControllerPromptBar {
         HStack(spacing: 5) {
             Text(glyph)
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundColor(NXTheme.textPrimary)
+                .foregroundColor(.white)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2.5)
                 .background(
@@ -178,7 +178,7 @@ extension ControllerPromptBar {
             
             Text(action)
                 .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundColor(NXTheme.textSecondary)
+                .foregroundColor(.white)
         }
     }
 }

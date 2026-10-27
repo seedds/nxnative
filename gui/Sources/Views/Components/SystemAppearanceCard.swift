@@ -31,28 +31,15 @@ public struct SystemAppearanceCard: View {
     
     public var body: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Label("App Icon & Color Appearance", systemImage: "paintpalette.fill")
                         .symbolRenderingMode(.hierarchical)
                         .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundColor(NXTheme.textPrimary)
-                        .help("Change how the Launcher icon and in-app brand logo appear across macOS.")
+                        .foregroundColor(.white)
                     
                     Spacer()
-                    
-                    Text("Apple Icon Composer Spec")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(NXTheme.secondary.opacity(0.15))
-                        .clipShape(Capsule())
                 }
-                
-                Text("Select an appearance style for NxNative Launcher. The chosen icon dynamically updates the title bar logo, in-app branding, and the macOS Dock icon in real time.")
-                    .font(.system(size: 12))
-                    .foregroundColor(NXTheme.textSecondary)
                 
                 HStack(spacing: 12) {
                     ForEach(AppIconAppearanceMode.allCases, id: \.self) { mode in
@@ -92,19 +79,19 @@ public struct SystemAppearanceCard: View {
                                 }
                                 
                                 Text(mode.rawValue)
-                                    .font(.system(size: 11, weight: isSelected ? .bold : .medium, design: .rounded))
-                                    .foregroundColor(isSelected ? .white : NXTheme.textSecondary)
+                                    .font(.system(size: 11, weight: isSelected ? .bold : .semibold, design: .rounded))
+                                    .foregroundColor(.white)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
                             .padding(.horizontal, 8)
                             .background(
                                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(isSelected ? NXTheme.primary.opacity(0.18) : NXTheme.glassSurfaceElevated.opacity(0.5))
+                                    .fill(isSelected ? NXTheme.primary.opacity(0.25) : NXTheme.glassSurfaceElevated.opacity(0.6))
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(isSelected ? Color.cyan.opacity(0.5) : Color.white.opacity(0.15), lineWidth: 0.8)
+                                    .strokeBorder(isSelected ? Color.cyan.opacity(0.6) : Color.white.opacity(0.18), lineWidth: 0.8)
                             )
                         }
                         .buttonStyle(.plain)

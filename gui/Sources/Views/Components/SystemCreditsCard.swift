@@ -14,17 +14,82 @@ public struct SystemCreditsCard: View {
                     
                     Spacer()
                     
-                    Link(destination: URL(string: "https://github.com/seedds/nxnative")!) {
-                        HStack(spacing: 4) {
-                            Text("seedds/nxnative")
-                            Image(systemName: "arrow.up.right")
+                    HStack(spacing: 12) {
+                        Link(destination: URL(string: "https://github.com/rennan101/nxnative_Launcher")!) {
+                            HStack(spacing: 4) {
+                                Text("rennan101/nxnative_Launcher")
+                                Image(systemName: "arrow.up.right")
+                            }
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(NXTheme.primary)
                         }
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(NXTheme.secondary)
+                        
+                        Link(destination: URL(string: "https://github.com/seedds/nxnative")!) {
+                            HStack(spacing: 4) {
+                                Text("seedds/nxnative")
+                                Image(systemName: "arrow.up.right")
+                            }
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(NXTheme.secondary)
+                        }
                     }
                 }
                 
-                Text("NxNative Launcher is a native macOS graphical interface and game library built on top of the breakthrough translation engine created by seedds and foundational open-source engineering.")
+                // Highlight Card for Launcher Developer (Rennan)
+                Button(action: {
+                    if let url = URL(string: "https://github.com/rennan101/nxnative_Launcher") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }) {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(NXTheme.primaryGradient)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundColor(.white)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text("Rennan (@rennan101)")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundColor(.white)
+                                Text("LAUNCHER DEVELOPER")
+                                    .font(.system(size: 8.5, weight: .heavy, design: .rounded))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(NXTheme.primary.opacity(0.6))
+                                    .clipShape(Capsule())
+                            }
+                            Text("Creator & Lead Developer of NxNative Launcher (macOS SwiftUI GUI, Game Library, Auto-Updater & Gamepad UX)")
+                                .font(.system(size: 10))
+                                .foregroundColor(NXTheme.textSecondary)
+                                .lineLimit(1)
+                        }
+                        
+                        Spacer()
+                        
+                        Image(systemName: "arrow.up.right.circle.fill")
+                            .font(.system(size: 15))
+                            .foregroundColor(NXTheme.secondary)
+                    }
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(NXTheme.primary.opacity(0.14))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(NXTheme.primary.opacity(0.4), lineWidth: 1)
+                            )
+                    )
+                }
+                .buttonStyle(.plain)
+                .nxNoFocusRing()
+                
+                Text("NxNative Launcher is a native macOS graphical interface and game library created by Rennan, built on top of the breakthrough translation engine created by seedds and foundational open-source engineering.")
                     .font(.system(size: 11))
                     .foregroundColor(NXTheme.textSecondary)
                 

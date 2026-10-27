@@ -87,7 +87,7 @@ public final class CompatibilityService {
             let engine = nsString.substring(with: m.range(at: 6)).trimmingCharacters(in: .whitespaces)
             let api = nsString.substring(with: m.range(at: 7)).trimmingCharacters(in: .whitespaces)
             
-            let specs = self.resolveSpecs(titleId: tid, readmeRelPath: path)
+            let specs = self.resolveSpecs(titleId: tid, readmeRelPath: path, engine: engine)
             
             items.append(
                 CompatibleGameItem(
@@ -100,7 +100,8 @@ public final class CompatibilityService {
                     readmeRelPath: path,
                     macReq: specs.mac,
                     iosReq: specs.ios,
-                    storageReq: specs.storage
+                    storageReq: specs.storage,
+                    minRamGB: specs.minRamGB
                 )
             )
         }
@@ -109,9 +110,23 @@ public final class CompatibilityService {
         return items
     }
     
+    private func normalizeTitle(_ raw: String) -> String {
+        let folded = raw.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let stopWords = Set(["the", "of", "and", "edition", "collection", "remastered", "definitive", "complete", "reimagined", "asian", "release"])
+        let words = folded
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+        let filtered = words.filter { !stopWords.contains($0) }
+        let chosen = filtered.isEmpty ? words : filtered
+        return chosen.joined()
+    }
+    
     public func findTitleId(forGameTitle cleanTitle: String) -> String? {
-        let normalized = cleanTitle.lowercased().filter { $0.isLetter || $0.isNumber }
-        guard !normalized.isEmpty else { return nil }
+        let rawNorm = cleanTitle
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .filter { $0.isLetter || $0.isNumber }
+        let semanticNorm = normalizeTitle(cleanTitle)
+        guard !rawNorm.isEmpty else { return nil }
         
         var list = cachedGames
         if list.isEmpty {
@@ -121,63 +136,145 @@ public final class CompatibilityService {
             }
         }
         
+        // 1. Exact folded match
         for game in list {
-            let normGame = game.title.lowercased().filter { $0.isLetter || $0.isNumber }
-            if normGame == normalized || (normGame.contains(normalized) && normalized.count >= 6) || (normalized.contains(normGame) && normGame.count >= 6) {
+            let normGame = game.title
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .filter { $0.isLetter || $0.isNumber }
+            if normGame == rawNorm {
+                return game.titleId
+            }
+        }
+        
+        // 2. Semantic word match (ignores "The", "of", word order variations like "Legend of Zelda The...")
+        for game in list {
+            let semGame = normalizeTitle(game.title)
+            if !semGame.isEmpty && (semGame == semanticNorm || (semGame.contains(semanticNorm) && semanticNorm.count >= 5) || (semanticNorm.contains(semGame) && semGame.count >= 5)) {
+                return game.titleId
+            }
+        }
+        
+        // 3. Substring match on folded characters
+        for game in list {
+            let normGame = game.title
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .filter { $0.isLetter || $0.isNumber }
+            if (normGame.contains(rawNorm) && rawNorm.count >= 5) || (rawNorm.contains(normGame) && normGame.count >= 5) {
                 return game.titleId
             }
         }
         return nil
     }
 
-    /// Resolves minimum Mac and iOS hardware specs (RAM, Storage) from nxnative game profiles and README notes.
-    private func resolveSpecs(titleId: String, readmeRelPath: String) -> (mac: String, ios: String, storage: String) {
+    /// Resolves minimum Mac and iOS hardware specs (RAM, Storage, minRamGB tier: 4, 6, 8, or 16) from nxnative game profiles and README notes.
+    private func resolveSpecs(titleId: String, readmeRelPath: String, engine: String = "") -> (mac: String, ios: String, storage: String, minRamGB: Int) {
         let baseDir = "/Volumes/SSD FN501 PRO/Emulations/NativePort/nxnative/dm/games/\(titleId)"
         let tsvPath = "\(baseDir)/game.tsv"
         let readmePath = "\(baseDir)/README.md"
         
-        var memReserve = ""
+        var memReserve: UInt64 = 0x100000000
+        var appPool: UInt64 = 0xCD500000
+        var sysResource: UInt64 = 0
+        
         if let tsvContent = try? String(contentsOfFile: tsvPath, encoding: .utf8) {
             for line in tsvContent.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
                 let parts = line.components(separatedBy: "\t")
-                if parts.count >= 2 && parts[0].trimmingCharacters(in: .whitespaces) == "mem_reserve" {
-                    memReserve = parts[1].trimmingCharacters(in: .whitespaces)
-                    break
+                guard parts.count >= 2 else { continue }
+                let key = parts[0].trimmingCharacters(in: .whitespaces)
+                let valStr = parts[1].components(separatedBy: "#")[0].trimmingCharacters(in: .whitespaces)
+                let cleanHex = valStr.lowercased().replacingOccurrences(of: "0x", with: "")
+                if key == "mem_reserve", let v = UInt64(cleanHex, radix: 16) {
+                    memReserve = v
+                } else if key == "app_pool", let v = UInt64(cleanHex, radix: 16) {
+                    appPool = v
+                } else if key == "sys_resource" {
+                    if let v = UInt64(cleanHex, radix: 16) {
+                        sysResource = v
+                    } else if let v = UInt64(valStr) {
+                        sysResource = v
+                    }
                 }
             }
         }
         
         var storage = "HD: ~6 GB"
+        var maxResidentGB: Double? = nil
         if let rmContent = try? String(contentsOfFile: readmePath, encoding: .utf8) {
-            let pattern = #"(?:IPA|RomFS|app|game)[^\n\r]{0,35}?(?:at about|is about|about|is)?\s*([0-9]+(?:\.[0-9]+)?)\s*GB"#
-            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+            let storagePattern = #"(?:IPA|RomFS|app|game)[^\n\r]{0,35}?(?:at about|is about|about|is)?\s*([0-9]+(?:\.[0-9]+)?)\s*GB"#
+            if let regex = try? NSRegularExpression(pattern: storagePattern, options: [.caseInsensitive]) {
                 let ns = rmContent as NSString
                 if let match = regex.firstMatch(in: rmContent, options: [], range: NSRange(location: 0, length: ns.length)), match.numberOfRanges >= 2 {
                     let gbVal = ns.substring(with: match.range(at: 1))
                     storage = "HD: ~\(gbVal) GB"
                 }
             }
+            
+            let resPattern = #"([0-9]+(?:\.[0-9]+)?)\s*GB\s*(?:resident|of GPU)"#
+            if let resRegex = try? NSRegularExpression(pattern: resPattern, options: [.caseInsensitive]) {
+                let ns = rmContent as NSString
+                let matches = resRegex.matches(in: rmContent, options: [], range: NSRange(location: 0, length: ns.length))
+                for m in matches where m.numberOfRanges >= 2 {
+                    if let val = Double(ns.substring(with: m.range(at: 1))) {
+                        maxResidentGB = max(maxResidentGB ?? 0, val)
+                    }
+                }
+            }
+        }
+        
+        // Determine RAM tier: 4, 6, 8, or 16 GB
+        let minRamGB: Int
+        let isUnreal = engine.localizedCaseInsensitiveContains("unreal")
+        
+        if let res = maxResidentGB, res <= 1.35 {
+            minRamGB = 4
+        } else if appPool <= 0x40000000 || (memReserve < 0x100000000 && sysResource == 0) {
+            minRamGB = 4
+        } else if memReserve == 0x100000000 && sysResource == 0 {
+            if let res = maxResidentGB, res >= 2.6 {
+                minRamGB = 8
+            } else if titleId == "01007EF00011E000" || titleId == "0100E95004038000" || titleId == "0100FF500E34A000" {
+                // Breath of the Wild, Xenoblade 1 & 2
+                minRamGB = 8
+            } else {
+                minRamGB = 6
+            }
+        } else if memReserve >= 0x140000000 || sysResource >= 0x2000000 || (isUnreal && sysResource > 0) {
+            if appPool <= 0x80000000 {
+                minRamGB = 8
+            } else if let res = maxResidentGB, res <= 2.55 && !isUnreal {
+                minRamGB = 8
+            } else if titleId == "010015100B514000" || titleId == "0100ECD018EBE000" || titleId == "01009D901BC56000" || titleId == "010086A022444000" {
+                // Super Mario Wonder, Paper Mario TTYD, DKC Returns HD, BALL x PIT
+                minRamGB = 8
+            } else {
+                minRamGB = 16
+            }
+        } else {
+            minRamGB = 8
         }
         
         let mac: String
         let ios: String
-        if memReserve.contains("0x180000000") || memReserve.contains("0x140000000") {
-            mac = "Mac: 16GB+ RAM"
+        switch minRamGB {
+        case 4:
+            mac = "Mac: 4GB+ RAM"
+            ios = "iOS: 4GB RAM"
+            if storage == "HD: ~6 GB" { storage = "HD: ~2-4 GB" }
+        case 6:
+            mac = "Mac: 8GB RAM"
+            ios = "iOS: 6GB RAM"
+        case 8:
+            mac = "Mac: 8GB+ RAM"
+            ios = "iOS: 6-8GB RAM"
+            if storage == "HD: ~6 GB" { storage = "HD: ~8-12 GB" }
+        default: // 16
+            mac = "Mac: 16GB RAM"
             ios = "iOS: 8GB RAM (A17+)"
             if storage == "HD: ~6 GB" { storage = "HD: ~12-16 GB" }
-        } else if memReserve.contains("0x100000000") {
-            mac = "Mac: 8-16GB RAM"
-            ios = "iOS: 6-8GB RAM (A15+)"
-            if storage == "HD: ~6 GB" { storage = "HD: ~8-16 GB" }
-        } else if memReserve.contains("0x80000000") || memReserve.contains("0xC0000000") {
-            mac = "Mac: 8GB RAM"
-            ios = "iOS: 4-6GB RAM (A14+)"
-            if storage == "HD: ~6 GB" { storage = "HD: ~2-4 GB" }
-        } else {
-            mac = "Mac: 8GB+ RAM"
-            ios = "iOS: 6GB+ RAM"
         }
         
-        return (mac: mac, ios: ios, storage: storage)
+        return (mac: mac, ios: ios, storage: storage, minRamGB: minRamGB)
     }
 }

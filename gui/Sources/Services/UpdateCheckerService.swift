@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 public struct UpdateInfo {
     public let hasUpdate: Bool
@@ -6,6 +7,7 @@ public struct UpdateInfo {
     public let remoteCommit: String
     public let commitMessages: [String]
     public let checkDate: Date
+    public let repoURL: String
 }
 
 public protocol UpdateCheckerDelegate: AnyObject {
@@ -15,12 +17,19 @@ public protocol UpdateCheckerDelegate: AnyObject {
 
 public final class UpdateCheckerService {
     public static let shared = UpdateCheckerService()
+    public static let launcherRepoURL = "https://github.com/rennan101/nxnative_Launcher.git"
     
     public weak var delegate: UpdateCheckerDelegate?
     private var isChecking = false
     private var isUpdating = false
     
     private init() {}
+    
+    public func getLocalCommit(nxnativePath: String) -> String {
+        guard !nxnativePath.isEmpty else { return "HEAD" }
+        let localHead = runGit(["rev-parse", "--short", "HEAD"], in: nxnativePath).trimmingCharacters(in: .whitespacesAndNewlines)
+        return localHead.isEmpty ? "HEAD" : localHead
+    }
     
     public func checkForUpdates(nxnativePath: String, completion: @escaping (UpdateInfo?) -> Void) {
         guard !isChecking else { return }
@@ -36,6 +45,9 @@ public final class UpdateCheckerService {
                 DispatchQueue.main.async { completion(nil) }
                 return
             }
+            
+            // Determine remote to check (prefer origin pointing to rennan101/nxnative_Launcher)
+            let remoteURL = self.runGit(["remote", "get-url", "origin"], in: nxnativePath).trimmingCharacters(in: .whitespacesAndNewlines)
             
             // 1. git fetch origin main
             let fetchRes = self.runGitWithStatus(["fetch", "origin", "main", "--quiet"], in: nxnativePath)
@@ -65,7 +77,8 @@ public final class UpdateCheckerService {
                 localCommit: localHead,
                 remoteCommit: remoteHead,
                 commitMessages: commits,
-                checkDate: Date()
+                checkDate: Date(),
+                repoURL: remoteURL.isEmpty ? Self.launcherRepoURL : remoteURL
             )
             
             self.isChecking = false
@@ -78,22 +91,33 @@ public final class UpdateCheckerService {
         }
     }
     
-    public func applyUpdate(nxnativePath: String, completion: @escaping (Bool, String) -> Void) {
+    /// Pulls latest changes from GitHub, applies engine patches, and rebuilds + installs NxNative_Launcher.app automatically
+    public func applyUpdate(
+        nxnativePath: String,
+        rebuildLauncher: Bool = true,
+        progressHandler: ((String) -> Void)? = nil,
+        completion: @escaping (Bool, String) -> Void
+    ) {
         guard !isUpdating else {
             completion(false, "Update already in progress")
             return
         }
         isUpdating = true
         
+        let reportProgress: (String) -> Void = { [weak self] msg in
+            DispatchQueue.main.async {
+                self?.delegate?.updateCheckerDidProduceLog(msg)
+                progressHandler?(msg)
+            }
+        }
+        
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
-            self.delegate?.updateCheckerDidProduceLog("==> Recovering any interrupted git operations...")
+            reportProgress("==> Preparing repository for update...")
             // Abort any previously stalled rebase or merge
             _ = self.runGitWithStatus(["rebase", "--abort"], in: nxnativePath)
             _ = self.runGitWithStatus(["merge", "--abort"], in: nxnativePath)
-            
-            self.delegate?.updateCheckerDidProduceLog("==> Checking repository status before update...")
             
             // Check for uncommitted changes
             let statusRes = self.runGitWithStatus(["status", "--porcelain"], in: nxnativePath)
@@ -101,46 +125,168 @@ public final class UpdateCheckerService {
             
             var didStash = false
             if hasUncommitted {
-                self.delegate?.updateCheckerDidProduceLog("==> Stashing local modifications temporarily...")
+                reportProgress("==> Stashing local modifications temporarily...")
                 let stashRes = self.runGitWithStatus(["stash", "push", "-u", "-m", "nxnative_update_auto_stash"], in: nxnativePath)
                 didStash = (stashRes.exitCode == 0)
             }
             
-            self.delegate?.updateCheckerDidProduceLog("==> Fetching latest changes from upstream GitHub...")
+            reportProgress("==> Downloading latest version from GitHub (rennan101/nxnative_Launcher)...")
             let fetchRes = self.runGitWithStatus(["fetch", "origin", "main"], in: nxnativePath)
-            self.delegate?.updateCheckerDidProduceLog(fetchRes.output)
+            if !fetchRes.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                reportProgress(fetchRes.output.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
             
-            self.delegate?.updateCheckerDidProduceLog("==> Merging upstream updates into local branch...")
-            let mergeRes = self.runGitWithStatus(["merge", "-X", "ours", "--no-edit", "origin/main"], in: nxnativePath)
-            self.delegate?.updateCheckerDidProduceLog(mergeRes.output)
+            reportProgress("==> Merging GitHub updates into local branch...")
+            let mergeRes = self.runGitWithStatus(["merge", "-X", "theirs", "--no-edit", "origin/main"], in: nxnativePath)
+            if !mergeRes.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                reportProgress(mergeRes.output.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
             
-            let isSuccess = (mergeRes.exitCode == 0) &&
+            let isMergeSuccess = (mergeRes.exitCode == 0) &&
                 !mergeRes.output.localizedCaseInsensitiveContains("fatal:") &&
                 !mergeRes.output.localizedCaseInsensitiveContains("Automatic merge failed")
             
-            if !isSuccess {
+            if !isMergeSuccess {
                 _ = self.runGitWithStatus(["merge", "--abort"], in: nxnativePath)
             }
             
             if didStash {
-                self.delegate?.updateCheckerDidProduceLog("==> Restoring local modifications...")
+                reportProgress("==> Restoring local workspace modifications...")
                 _ = self.runGitWithStatus(["stash", "pop"], in: nxnativePath)
             }
             
             // Update submodules if any
             _ = self.runGitWithStatus(["submodule", "update", "--init", "--recursive"], in: nxnativePath)
             
+            guard isMergeSuccess else {
+                self.isUpdating = false
+                let errOut = mergeRes.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                DispatchQueue.main.async {
+                    completion(false, "Git update failed: \(errOut.isEmpty ? "Merge conflict or network error" : errOut)")
+                }
+                return
+            }
+            
+            // Re-apply compatibility patches
+            reportProgress("==> Verifying & applying engine compatibility patches...")
+            _ = PatchService.shared.applyPatchesIfNeeded(nxnativePath: nxnativePath)
+            
+            // Rebuild & install NxNative_Launcher.app if requested
+            if rebuildLauncher {
+                let buildScript = URL(fileURLWithPath: nxnativePath).appendingPathComponent("scripts/build_gui.sh").path
+                if FileManager.default.fileExists(atPath: buildScript) {
+                    reportProgress("==> Compiling & installing new NxNative Launcher (.app)...")
+                    let buildRes = self.runShellScript(buildScript, workingDir: nxnativePath) { line in
+                        reportProgress(line)
+                    }
+                    if buildRes != 0 {
+                        self.isUpdating = false
+                        DispatchQueue.main.async {
+                            completion(false, "Git updated, but compiling NxNative Launcher failed (exit code \(buildRes)).")
+                        }
+                        return
+                    }
+                    
+                    // If running from a custom location (e.g. /Applications/NxNative_Launcher.app), sync binary there too
+                    self.syncUpdatedBundleToRunningAppIfNeeded(nxnativePath: nxnativePath, reportProgress: reportProgress)
+                }
+            }
+            
             let newHead = self.runGit(["rev-parse", "--short", "HEAD"], in: nxnativePath).trimmingCharacters(in: .whitespacesAndNewlines)
             self.isUpdating = false
             
             DispatchQueue.main.async {
-                if isSuccess {
-                    completion(true, "Successfully updated repository to commit [\(newHead)]!")
-                } else {
-                    let errOut = mergeRes.output.trimmingCharacters(in: .whitespacesAndNewlines)
-                    completion(false, "Update failed: \(errOut.isEmpty ? "Merge conflict or network error" : errOut)")
-                }
+                completion(true, "NxNative Launcher updated & installed successfully (commit [\(newHead)])!")
             }
+        }
+    }
+    
+    /// Relaunches the updated NxNative_Launcher.app bundle and terminates the current process
+    public func relaunchLauncher(nxnativePath: String) {
+        let fm = FileManager.default
+        let workspaceRoot = URL(fileURLWithPath: nxnativePath).deletingLastPathComponent()
+        let workspaceBundle = workspaceRoot.appendingPathComponent("NxNative_Launcher.app").path
+        let repoBundle = URL(fileURLWithPath: nxnativePath).appendingPathComponent("NxNative_Launcher.app").path
+        let currentBundle = Bundle.main.bundleURL.path
+        
+        let targetBundle: String
+        if currentBundle.hasSuffix(".app") && fm.fileExists(atPath: currentBundle) {
+            targetBundle = currentBundle
+        } else if fm.fileExists(atPath: workspaceBundle) {
+            targetBundle = workspaceBundle
+        } else {
+            targetBundle = repoBundle
+        }
+        
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let script = "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; sleep 0.3; open \"\(targetBundle)\""
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", script]
+        try? process.run()
+        
+        DispatchQueue.main.async {
+            NSApplication.shared.terminate(nil)
+        }
+    }
+    
+    private func syncUpdatedBundleToRunningAppIfNeeded(nxnativePath: String, reportProgress: (String) -> Void) {
+        let fm = FileManager.default
+        let currentBundleURL = Bundle.main.bundleURL.standardizedFileURL
+        guard currentBundleURL.pathExtension == "app" else { return }
+        
+        let workspaceRoot = URL(fileURLWithPath: nxnativePath).deletingLastPathComponent().standardizedFileURL
+        let workspaceApp = workspaceRoot.appendingPathComponent("NxNative_Launcher.app").standardizedFileURL
+        let repoApp = URL(fileURLWithPath: nxnativePath).appendingPathComponent("NxNative_Launcher.app").standardizedFileURL
+        
+        // If current running app is neither workspaceApp nor repoApp (e.g. /Applications/NxNative_Launcher.app), copy over
+        if currentBundleURL.path != workspaceApp.path && currentBundleURL.path != repoApp.path {
+            let sourceApp = fm.fileExists(atPath: workspaceApp.path) ? workspaceApp : repoApp
+            guard fm.fileExists(atPath: sourceApp.path) else { return }
+            reportProgress("==> Updating running bundle at \(currentBundleURL.path)...")
+            _ = runGitWithStatus(["-c", "core.fsmonitor=false"], in: nxnativePath) // no-op warm
+            let cpProc = Process()
+            cpProc.executableURL = URL(fileURLWithPath: "/bin/cp")
+            cpProc.arguments = ["-Rf", "\(sourceApp.path)/Contents", "\(currentBundleURL.path)/"]
+            try? cpProc.run()
+            cpProc.waitUntilExit()
+        }
+    }
+    
+    private func runShellScript(_ scriptPath: String, workingDir: String, onLine: @escaping (String) -> Void) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [scriptPath]
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDir)
+        
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        process.environment = env
+        
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        
+        let handle = pipe.fileHandleForReading
+        handle.readabilityHandler = { fileHandle in
+            let data = fileHandle.availableData
+            guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
+            let lines = chunk.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            for line in lines {
+                onLine(line)
+            }
+        }
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            handle.readabilityHandler = nil
+            return process.terminationStatus
+        } catch {
+            handle.readabilityHandler = nil
+            onLine("Error running build script: \(error.localizedDescription)")
+            return -1
         }
     }
     

@@ -1,22 +1,25 @@
 import SwiftUI
 
 public struct MainView: View {
-    @StateObject private var viewModel = AppViewModel()
+    @ObservedObject public var viewModel: AppViewModel
     @State private var windowWidth: CGFloat = 1100
     
-    public init() {}
+    public init(viewModel: AppViewModel) {
+        self.viewModel = viewModel
+    }
     
     private let tabs: [(tag: Int, title: String, icon: String)] = [
         (0, "Port Game", "play.circle.fill"),
         (1, "Library", "books.vertical.fill"),
         (2, "Compatibility", "checklist.checked"),
         (3, "Controls", "gamecontroller.fill"),
-        (4, "Settings", "gearshape.fill"),
-        (5, "Console", "terminal.fill")
+        (4, "Personalize", "paintpalette.fill"),
+        (5, "Settings", "gearshape.fill"),
+        (6, "Console", "terminal.fill")
     ]
     
     private var isCompactNav: Bool {
-        windowWidth < 1000
+        windowWidth < 1080
     }
     
     public var body: some View {
@@ -57,8 +60,10 @@ public struct MainView: View {
                         case 3:
                             ControlsView()
                         case 4:
-                            SystemView(viewModel: viewModel)
+                            PersonalizationView(viewModel: viewModel)
                         case 5:
+                            SystemView(viewModel: viewModel)
+                        case 6:
                             LogsView(viewModel: viewModel)
                         default:
                             BuildView(viewModel: viewModel)
@@ -85,6 +90,12 @@ public struct MainView: View {
                 viewModel.handleKeyboardKey(key)
             }
         )
+        .sheet(isPresented: $viewModel.showAboutSheet) {
+            AboutLauncherView(viewModel: viewModel)
+        }
+        .sheet(isPresented: $viewModel.showUpdateSheet) {
+            LauncherUpdateSheet(viewModel: viewModel)
+        }
     }
     
     private var navigationHeader: some View {
@@ -100,18 +111,25 @@ public struct MainView: View {
                             .foregroundColor(NXTheme.textPrimary)
                         
                         if let update = viewModel.updateInfo, update.hasUpdate {
-                            HStack(spacing: 4) {
-                                Circle()
-                                    .fill(NXTheme.secondary)
-                                    .frame(width: 5, height: 5)
-                                Text("Update")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(.white)
+                            Button(action: {
+                                SoundEffectService.shared.play(.click)
+                                viewModel.openUpdateCheckerAndAutoInstall()
+                            }) {
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(NXTheme.secondary)
+                                        .frame(width: 5, height: 5)
+                                    Text("Update")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .foregroundColor(.white)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(NXTheme.secondary.opacity(0.35))
+                                .clipShape(Capsule())
                             }
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(NXTheme.secondary.opacity(0.35))
-                            .clipShape(Capsule())
+                            .buttonStyle(.plain)
+                            .help("Click to install the latest NxNative Launcher update from GitHub")
                         }
                     }
                     
@@ -135,14 +153,14 @@ public struct MainView: View {
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: item.icon)
-                                .font(.system(size: isCompactNav ? 13 : 12, weight: isSelected ? .bold : .medium))
+                                .font(.system(size: isCompactNav ? 13 : 12, weight: isSelected ? .bold : .semibold))
                             
                             if !isCompactNav {
                                 Text(item.title)
-                                    .font(.system(size: 12, weight: isSelected ? .bold : .medium, design: .rounded))
+                                    .font(.system(size: 12, weight: isSelected ? .bold : .semibold, design: .rounded))
                             }
                         }
-                        .foregroundColor(isSelected ? .white : NXTheme.textSecondary)
+                        .foregroundColor(.white)
                         .padding(.horizontal, isCompactNav ? 9 : 11)
                         .padding(.vertical, 6)
                         .background(

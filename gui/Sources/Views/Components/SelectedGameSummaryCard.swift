@@ -10,13 +10,27 @@ public struct SelectedGameSummaryCard: View {
     public var body: some View {
         GlassCard {
             HStack(spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(NXTheme.primary.opacity(0.18))
-                        .frame(width: 40, height: 40)
-                    Image(systemName: "gamecontroller.fill")
-                        .font(.system(size: 20))
-                        .foregroundColor(NXTheme.secondary)
+                if let sel = viewModel.selectedGame,
+                   let cover = GameCoverService.shared.coverImage(titleId: sel.titleId, gameName: sel.name) {
+                    Image(nsImage: cover)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 34, height: 52)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(NXTheme.specularRim, lineWidth: 0.8)
+                        )
+                } else {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(NXTheme.primary.opacity(0.18))
+                            .frame(width: 40, height: 40)
+                        Image(systemName: "gamecontroller.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(NXTheme.secondary)
+                    }
                 }
                 
                 VStack(alignment: .leading, spacing: 3) {

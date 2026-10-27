@@ -90,17 +90,17 @@ public struct BuildView: View {
                     if isCompleted {
                         Image(systemName: "checkmark")
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
+                            .foregroundColor(.white)
                     } else {
                         Image(systemName: icon)
-                            .font(.system(size: 11, weight: isCurrent ? .bold : .medium))
-                            .foregroundColor(isCurrent ? NXTheme.secondary : NXTheme.textSecondary)
+                            .font(.system(size: 11, weight: isCurrent ? .bold : .semibold))
+                            .foregroundColor(.white)
                     }
                 }
                 
                 Text(title)
-                    .font(.system(size: 12, weight: isCurrent ? .bold : .medium, design: .rounded))
-                    .foregroundColor(isCurrent ? NXTheme.textPrimary : (isCompleted ? NXTheme.textSecondary : NXTheme.textMuted))
+                    .font(.system(size: 12, weight: isCurrent ? .bold : .semibold, design: .rounded))
+                    .foregroundColor(.white)
             }
             .padding(.vertical, 4)
             .padding(.horizontal, 8)

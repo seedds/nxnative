@@ -2,7 +2,8 @@
 // Checks: pipelines that differ only in colour state share one base; a specialized pipeline draws the same pixels as one built through the MTLDevice; a flushed archive
 // file serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up; a function with no
 // Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one despite a
-// mid-prewarm flush; depth-only draws write depth; concurrent colour variants compile one base; a flush removes the build folder Metal made for its captures
+// mid-prewarm flush, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
+// one base; a flush removes the build folder Metal made for its captures
 #include "../nvn/nvn_mtl.m"
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
@@ -16,26 +17,42 @@ static int checks, failed;
 
 static id<MTLLibrary> g_lib, g_lib2;   // g_lib2: the same source again, for functions with no Metal 4 descriptor (a library hands out one function object per name)
 static id<MTLCommandQueue> g_q;
+static id<MTLFunction> test_fn(id<MTLLibrary> lib, NSString *name, int registered) {
+    id<MTLFunction> f = [lib newFunctionWithName:name];
+    MTLFunctionConstantValues *cv = f.functionConstantsDictionary.count ? [MTLFunctionConstantValues new] : nil;
+    if (cv) f = [lib newFunctionWithName:name constantValues:cv error:nil];
+    return registered ? fn4_note(f, lib, name, cv) : f;
+}
 // Hold the first base build while other callers request colour variants and an unrelated base.
 @interface ArchiveGateCompiler : NSObject {
-@public id<MTL4Compiler> compiler; dispatch_semaphore_t entered, release; _Atomic int calls; int fail;
+@public id<MTL4Compiler> compiler; dispatch_semaphore_t entered, release; _Atomic int calls, lookup_calls; int fail;
 }
 @end
 @implementation ArchiveGateCompiler
 - (id)forwardingTargetForSelector:(SEL)selector { return compiler; }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4RenderPipelineDescriptor *)d compilerTaskOptions:(MTL4CompilerTaskOptions *)opts error:(NSError **)error {
+    if (opts.lookupArchives.count) atomic_fetch_add(&lookup_calls, 1);
     int call = atomic_fetch_add(&calls, 1);
     if (!call) { dispatch_semaphore_signal(entered); dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER); }
     if (fail) { if (error) *error = [NSError errorWithDomain:@"test" code:1 userInfo:nil]; return nil; }
     return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opts error:error];
 }
 @end
+// Notes whether the compaction marker exists while the serializer writes (issue #342: a flush that does not return leaves it)
+@interface MarkerSerializer : NSObject { @public id<MTL4PipelineDataSetSerializer> ser; int calls, marked; } @end
+@implementation MarkerSerializer
+- (id)forwardingTargetForSelector:(SEL)selector { return ser; }
+- (BOOL)serializeAsArchiveAndFlushToURL:(NSURL *)url error:(NSError **)error {
+    calls++; marked += [[NSString stringWithContentsOfFile:arch_compact_marker() encoding:NSUTF8StringEncoding error:nil] isEqualToString:arch_compact_stamp()];
+    return [ser serializeAsArchiveAndFlushToURL:url error:error];
+}
+@end
 // a full-screen triangle; colour 0 = (0.5, 0.25, 1, 0.5), colour 1 = (0.2, 0.4, 0.6, 0.8); attribute 0 (a float4) scales nothing, so a vertex descriptor is part of the pipeline
 static MTLRenderPipelineDescriptor *desc(MTLPixelFormat f0, int blend, MTLPixelFormat f1, MTLColorWriteMask m1, int registered) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    id<MTLFunction> v = [g_lib2 newFunctionWithName:@"vs"], f = [g_lib2 newFunctionWithName:@"fs"];
+    id<MTLFunction> v = test_fn(g_lib2, @"vs", 0), f = test_fn(g_lib2, @"fs", 0);
     static id<MTLFunction> rv, rf;   // the registered ones are made once, as shader_load makes a shader's functions once
-    if (registered) { if (!rv) { rv = fn4_note([g_lib newFunctionWithName:@"vs"], g_lib, @"vs", nil); rf = fn4_note([g_lib newFunctionWithName:@"fs"], g_lib, @"fs", nil); } v = rv; f = rf; }
+    if (registered) { if (!rv) { rv = test_fn(g_lib, @"vs", 1); rf = test_fn(g_lib, @"fs", 1); } v = rv; f = rf; }
     d.vertexFunction = v; d.fragmentFunction = f;
     MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
     vd.attributes[0].format = MTLVertexFormatFloat4; vd.attributes[0].bufferIndex = 16; vd.layouts[16].stride = 16; vd.layouts[16].stepFunction = MTLVertexStepFunctionConstant; vd.layouts[16].stepRate = 0;
@@ -129,17 +146,67 @@ static void concurrent_bases(int fail) {
     g_comp4 = gate->compiler;
     if (fail) { NSError *err = nil; EXPECT("concurrent: failed base can retry", 1, pso_build(ds[0], &err) != nil); }
 }
-int main(void) { @autoreleasepool {
+int main(int argc, char **argv) { @autoreleasepool {
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
-    setenv("DM_PSO_ARCHIVE", dir, 1);
+    setenv("DM_PSO_ARCHIVE", argc == 3 ? argv[2] : dir, 1);
     mtl_init(); g_q = [g_dev newCommandQueue]; NSError *err = nil;
     NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\nstruct I { float4 a [[attribute(0)]]; };\n"
         "vertex V vs(I in [[stage_in]], uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0, in.a.w); return o; }\n"
         "struct O { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; };\nfragment O fs() { return { float4(0.5, 0.25, 1.0, 0.5), float4(0.2, 0.4, 0.6, 0.8) }; }\n"
+        "fragment O fs2() { return { float4(1), float4(0) }; }\n"
         "vertex V vs0(uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0, 1); return o; }\n";
-    g_lib = [g_dev newLibraryWithSource:src options:nil error:&err];
+    if (getenv("DM_TEST_ARCHIVE_CONSTANTS")) src = [src stringByReplacingOccurrencesOfString:@"fragment O fs() { return" withString:@"constant bool enabled [[function_constant(0)]]; fragment O fs() { if (is_function_constant_defined(enabled) && enabled) discard_fragment(); return"];
+    if (argc == 3) {
+        NSString *metal = [@(argv[2]) stringByAppendingPathComponent:@"fixture.metal"], *library = [metal stringByAppendingString:@"lib"];
+        if (!strcmp(argv[1], "--compact-seed")) {
+            [src writeToFile:metal atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            NSTask *task = [NSTask new]; task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/xcrun"];
+            task.arguments = @[@"-sdk", @"macosx", @"metal", metal, @"-o", library];
+            if (![task launchAndReturnError:&err]) return 1;
+            [task waitUntilExit]; if (task.terminationStatus) return 1;
+        }
+        g_lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:library] error:&err];
+    } else g_lib = [g_dev newLibraryWithSource:src options:nil error:&err];
     if (!g_lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     g_lib2 = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// another library: the same source would come back as the same library\n"] options:nil error:&err];
+    // A fresh process is essential: a compiler that built the source archives still has their online binaries.
+    if (argc == 3) {
+        int seed = !strcmp(argv[1], "--compact-seed");
+        pso4_init();
+        EXPECT("restart: opened run archives", seed ? 0 : !strcmp(argv[1], "--compact-replay") ? PSO_ARCH_COMPACT + 1 : 1, g_arch4.count);
+        atomic_store(&g_warm_running, !seed);
+        NSMutableArray<MTLRenderPipelineDescriptor *> *descs = [NSMutableArray array];
+        for (int i = 0; i <= PSO_ARCH_COMPACT; i++) {
+            MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+            cd.vertexDescriptor.layouts[16].stride = 16 * (i + 2);
+            [descs addObject:cd];
+            if (seed) { EXPECT("restart: pipeline", 1, pso_build(cd, &err) != nil); arch_flush(); }
+        }
+        if (!seed) {
+            int fresh = getenv("DM_TEST_ARCHIVE_MIXED") != NULL, compacting = g_compact_files != nil;
+            int outcomes[PSO_ARCH_COMPACT + 1] = {0}; int *results = outcomes;
+            dispatch_apply(descs.count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
+                @autoreleasepool { results[i] = pso_build(descs[i], NULL) != nil; }
+            });
+            for (int i = 0; i <= PSO_ARCH_COMPACT; i++) EXPECT("restart: pipeline", 1, outcomes[i]);
+            if (fresh) {
+                MTLRenderPipelineDescriptor *extra = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+                extra.fragmentFunction = test_fn(g_lib, @"fs2", 1);
+                extra.vertexDescriptor.layouts[16].stride = 4096;
+                EXPECT("restart: fresh pipeline mixed with recaptures", 1, pso_build(extra, &err) != nil);
+            }
+            EXPECT("restart: every base from disk", PSO_ARCH_COMPACT + 1 + (fresh && !compacting), g_pb_archived);
+            EXPECT("restart: compiled bases", fresh && compacting, g_pb_built);
+            dispatch_sync(g_arch_q, ^{ arch_flush(); });
+            if (g_compact_files) EXPECT("restart: timed flush keeps recaptures pending", PSO_ARCH_COMPACT + 1 + fresh, g_arch_new);
+            atomic_store(&g_warm_running, 0);
+            arch_flush_now(); dispatch_sync(g_arch_q, ^{});
+        }
+        if (seed && getenv("DM_TEST_ARCHIVE_MIXED")) [arch_os_build() writeToFile:arch_compact_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
+        return failed != 0;
+    }
     // pipelines differing only in colour state share one base
     same_pixels("RGBA8 blended, RGBA16F all channels", MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll);
     EXPECT("first pipeline: its base compiled", 1, g_pb_built);
@@ -197,10 +264,13 @@ int main(void) { @autoreleasepool {
         NSMutableArray<id<MTL4Archive>> *open = [NSMutableArray array]; NSMutableArray<NSString *> *paths = [NSMutableArray array];
         for (NSString *n in names.reverseObjectEnumerator) { NSString *f = [@(cdir) stringByAppendingPathComponent:n]; [paths addObject:f]; [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:f] error:&err]]; }
         nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = open;   // as a new start with that many files
-        g_compact_opts = [MTL4CompilerTaskOptions new]; g_compact_opts.lookupArchives = open; g_compact_files = paths; g_compacted = 0;
+        g_compact_enabled = 1; g_compact_files = paths; g_compacted = 0;
         uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
+        ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = g_comp4; gate->calls = 1; g_comp4 = (id<MTL4Compiler>)gate;
         atomic_store(&g_warm_running, 1);
         for (MTLRenderPipelineDescriptor *cd in descs) pso_build(cd, &err);
+        EXPECT("compaction: captures original shader functions, not archive imports", 0, gate->lookup_calls);
+        g_comp4 = gate->compiler;
         dispatch_sync(g_arch_q, ^{ arch_flush(); });   // the timer fires while prewarm still has other work
         EXPECT("compaction: timed flush keeps recaptured bases pending", descs.count, g_arch_new);
         EXPECT("compaction: timed flush adds no partial file", PSO_ARCH_COMPACT + 1, [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil].count);
@@ -208,10 +278,25 @@ int main(void) { @autoreleasepool {
         EXPECT("compaction: every base from the archive", arch0 + descs.count, g_pb_archived);
         EXPECT("compaction: none compiled", built0, g_pb_built);
         EXPECT("compaction: every base captured again", descs.count, g_compacted);
+        MarkerSerializer *ms = [MarkerSerializer new]; ms->ser = g_ser4; g_ser4 = (id<MTL4PipelineDataSetSerializer>)ms;
         arch_flush_now(); dispatch_sync(g_arch_q, ^{});
+        g_ser4 = ms->ser;
+        EXPECT("compaction: the marker exists while the flush writes", 1, ms->calls == 1 && ms->marked == 1);
+        EXPECT("compaction: the flush that returned removed the marker", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
         names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil];
         EXPECT("compaction: one file left", 1, names.count);
-        nvn_hm_clear(&g_pbase, hm_rel); g_compact_opts = nil; g_compacted = 0;
+        // a marker left by a compaction that did not finish: the next start on this system build does not compact, one from another build is removed and compaction tried
+        EXPECT("compaction: allowed without a marker", 1, arch_compact_allowed());
+        [arch_compact_stamp() writeToFile:arch_compact_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        EXPECT("compaction: not after one that did not finish on this system build", 0, arch_compact_allowed());
+        EXPECT("compaction: that marker stays", 1, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
+        [[@"os\t1A1\n" stringByAppendingString:@"capture\toriginal-functions-v1\n"] writeToFile:arch_compact_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        EXPECT("compaction: tried again on another system build", 1, arch_compact_allowed());
+        EXPECT("compaction: the other build's marker removed", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
+        [arch_os_build() writeToFile:arch_compact_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        EXPECT("compaction: old archive-import marker permits the new capture method", 1, arch_compact_allowed());
+        EXPECT("compaction: old capture marker removed", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
+        nvn_hm_clear(&g_pbase, hm_rel); g_compact_enabled = 0; g_compacted = 0;
         g_arch4 = @[[g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(cdir) stringByAppendingPathComponent:names.firstObject]] error:&err]];
         arch0 = g_pb_archived; built0 = g_pb_built;
         for (MTLRenderPipelineDescriptor *cd in descs) pso_build(cd, &err);

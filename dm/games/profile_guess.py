@@ -157,7 +157,7 @@ def guess(F, hooks=None):
 
     if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp:
         G['shader_groups'] = ('ShaderArchive-Global-=global ShaderArchive-=game', 'the decoded shader code archives: the engine\'s global shaders and the game\'s material shaders')
-    # The engine region needs virtual address memory; without it (OCTOPATH TRAVELER 1.0.5, Unreal Engine 4 on SDK 3.5.1, no system resource) nninitStartup sets a heap of pool − used instead,
+    # The engine region needs virtual address memory; without it (OCTOPATH TRAVELER 1.0.5, Unreal Engine 4 on SDK 3.5.1, no system resource; Yoshi's Crafted World, SDK 4: 0xc5200000) nninitStartup sets a heap of pool − used instead,
     # which the heap-region layout above holds
     if F.get('main_markers', set()) & {'Unreal', 'Unreal 4'} and R['exts'].get('.pak') and 'nvnBootstrapLoader' in imp and F['sysres']:
         G['mem_reserve'] =('0x1028000000', 'Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. '

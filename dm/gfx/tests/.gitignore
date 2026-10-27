@@ -78,6 +78,8 @@ t_tbuf2d
 t_tbuf2d.dSYM/
 t_tbuf_align
 t_tbuf_align.dSYM/
+t_sparse_layout
+t_sparse_layout.dSYM/
 t_view_levels
 t_view_levels.dSYM/
 t_upload_budget
@@ -134,3 +136,5 @@ t_rast_discard
 t_rast_discard.dSYM/
 t_feedback
 t_feedback.dSYM/
+t_cpu_tex
+t_cpu_tex.dSYM/

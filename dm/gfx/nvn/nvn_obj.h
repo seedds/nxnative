@@ -220,6 +220,7 @@ int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void);   // present snapsh
 void mtl_tex_init(const tex_t *t);      // TextureInitialize: the serial belongs to a live texture object until mtl_tex_release
 void mtl_tex_release(tex_t *t);
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
+unsigned mtl_cpu_tex_count(void);   // live textures the CPU writes (retired snapshots are excluded)
 uint64_t mtl_pkg_edge_skips(void);   // packaged texture checks that found only writes beside the texture (pkg_edges_clean)
 uint64_t mtl_pkg_miss(void);
 uint64_t mtl_upload_ns_take(void);   // Take and zero: time spent uploading packaged textures on the submit thread since last time   // DM_NVN_DIRTYCHECK diagnostic: number of missed detections   // Packaged textures: number of first uploads, number of re-uploads due to pool content changes
@@ -233,6 +234,10 @@ void mtl_reg_image(int id, const tex_t *t, const view_t *v);   // RegisterImage 
 // textures written by WriteTexels (recorded by serial): the replay layer treats them like packaged textures, uploaded from guest memory and re-uploaded on dirty pages
 void mtl_tex_cpu_written(const tex_t *t);
 int mtl_tex_gpu_owned(uint64_t serial);                                  // its host texture is a render target or shader-writable: GPU content, never re-uploaded from guest memory
+// hle_nvn.c: a texture tex_flush_upload / tex_dirty_upload registered and has not resolved yet; GPU copies written into the destination texture's storage as well (see there)
+int nvn_ft_tracked(uint64_t serial);
+int nvn_tex_mirror_b2t(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img);
+int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRegion *sr, const tex_t *d, unsigned dl, unsigned ds, const NVNcopyRegion *dr);
 // A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section (its own length when shorter) + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
 // a stage whose code area was not yet in any memory pool then is computed the first time it is asked for. Returns 0 = no such stage
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);

@@ -635,6 +635,48 @@ int main(void) {
         P(nvnMemoryPoolFinalize)(&wtp);
     }
 
+    // 6c3. GPU copies mirrored into the destination's storage (nvn_tex_mirror_t2t / nvn_tex_mirror_b2t, the streamer's level copies): a region of a level copied from a texture of other
+    //      dimensions (another block height) and a whole level, byte-identical to "decode the source level → patch the destination level → re-encode", with the rest of the pool untouched;
+    //      RGBA8 and BC1; the same regions from a linear buffer with a padded row stride
+    {
+        static uint8_t mmem[1 << 18] __attribute__((aligned(16384)));
+        NVNmemoryPoolBuilder mb; NVNmemoryPool mp; P(nvnMemoryPoolBuilderSetDevice)(&mb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&mb);
+        P(nvnMemoryPoolBuilderSetStorage)(&mb, mmem, sizeof mmem); P(nvnMemoryPoolBuilderSetFlags)(&mb, 0x24); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        struct { int fmt, sw, dw; int rg[2][6]; } cs[] = {   // source sw×sw with 3 levels, destination dw×dw with 4 levels at pool offset 0x20000; regions (sx, sy, dx, dy, w, h): level 0 → 1, then level 1 → 2
+            {NVN_FORMAT_RGBA8, 32, 64, {{8, 4, 4, 8, 16, 12}, {0, 0, 0, 0, 16, 16}}},
+            {NVN_FORMAT_RGBA_DXT1, 64, 128, {{8, 4, 4, 8, 16, 12}, {0, 0, 0, 0, 32, 32}}},
+        };
+        int bad = 0, n = 0; uint32_t seed = 777;
+        for (unsigned c = 0; c < sizeof cs / sizeof cs[0]; c++) {
+            NVNtextureBuilder b; NVNtexture s, d; P(nvnTextureBuilderSetDevice)(&b, &dev); P(nvnTextureBuilderSetDefaults)(&b); P(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_2D); P(nvnTextureBuilderSetFormat)(&b, cs[c].fmt);
+            P(nvnTextureBuilderSetSize3D)(&b, cs[c].sw, cs[c].sw, 1); P(nvnTextureBuilderSetLevels)(&b, 3); P(nvnTextureBuilderSetStorage)(&b, &mp, 0); P(nvnTextureInitialize)(&s, &b);
+            P(nvnTextureBuilderSetSize3D)(&b, cs[c].dw, cs[c].dw, 1); P(nvnTextureBuilderSetLevels)(&b, 4); P(nvnTextureBuilderSetStorage)(&b, &mp, 0x20000); P(nvnTextureInitialize)(&d, &b);
+            const tex_t *ts = (const tex_t *)&s, *td = (const tex_t *)&d; int bw, bh, bpb = nvn_fmt_bpb(cs[c].fmt, &bw, &bh);
+            for (int k = 0; k < 2; k++) {
+                static uint8_t want[1 << 18], slin[1 << 16], dlin[1 << 16], src[1 << 16];
+                unsigned sl = (unsigned)k, dl = (unsigned)k + 1; int sx = cs[c].rg[k][0], sy = cs[c].rg[k][1], dx = cs[c].rg[k][2], dy = cs[c].rg[k][3], w = cs[c].rg[k][4], h = cs[c].rg[k][5];
+                size_t slp = (size_t)(((cs[c].sw >> sl) + bw - 1) / bw) * bpb, dlp = (size_t)(((cs[c].dw >> dl) + bw - 1) / bw) * bpb, wbb = (size_t)((w + bw - 1) / bw) * bpb, hbb = (size_t)(h + bh - 1) / bh;
+                NVNcopyRegion sr = {sx, sy, 0, w, h, 1}, dr = {dx, dy, 0, w, h, 1};
+                for (size_t i = 0; i < sizeof mmem; i++) mmem[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 3;
+                memcpy(want, mmem, sizeof mmem);
+                nvn_deswizzle(&ts->d, sl, 0, ts->mem, slin, slp); nvn_deswizzle(&td->d, dl, 0, td->mem, dlin, dlp);
+                for (size_t r = 0; r < hbb; r++) memcpy(dlin + ((size_t)dy / bh + r) * dlp + (size_t)(dx / bw) * bpb, slin + ((size_t)sy / bh + r) * slp + (size_t)(sx / bw) * bpb, wbb);
+                nvn_swizzle(&td->d, dl, 0, dlin, dlp, want + 0x20000);
+                n++; if (nvn_tex_mirror_t2t(ts, sl, 0, &sr, td, dl, 0, &dr) || memcmp(want, mmem, sizeof mmem)) bad++;
+                for (size_t i = 0; i < sizeof mmem; i++) mmem[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 3;
+                memcpy(want, mmem, sizeof mmem);
+                size_t row = wbb + 16; for (size_t i = 0; i < row * hbb; i++) src[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 5;
+                nvn_deswizzle(&td->d, dl, 0, td->mem, dlin, dlp);
+                for (size_t r = 0; r < hbb; r++) memcpy(dlin + ((size_t)dy / bh + r) * dlp + (size_t)(dx / bw) * bpb, src + r * row, wbb);
+                nvn_swizzle(&td->d, dl, 0, dlin, dlp, want + 0x20000);
+                n++; if (nvn_tex_mirror_b2t(td, dl, 0, &dr, src, row, row * hbb) || memcmp(want, mmem, sizeof mmem)) bad++;
+            }
+            P(nvnTextureFinalize)(&s); P(nvnTextureFinalize)(&d);
+        }
+        EXPECT("copies mirrored into the destination's storage, byte-identical to a level round trip (8 cases)", 0, bad); EXPECT("copy mirror case count", 8, n);
+        P(nvnMemoryPoolFinalize)(&mp);
+    }
+
     // 6d. Lifecycle: in-flight GPU work is 0 when suspend returns; submits are blocked during suspend and let through after resume
     {
         size_t big = 64u << 20; uint8_t *heap; posix_memalign((void **)&heap, 16384, 2 * big); memset(heap, 0, 2 * big);

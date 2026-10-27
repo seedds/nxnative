@@ -133,6 +133,20 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (Unreal Engine 4.18 flags its streamed and CPU-loaded textures sparse).
 - **Check:** the map's guest bytes deswizzled in Python at 1 to 32 GOBs read right only at 8; a 512×512 RGBA8 sprite sheet only at 16; [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md)'s packaged ASTC 6×6 textures (16 bytes per block) carry 8 in their layout. The 1- and 2-byte heights follow the same tile shapes and were not seen.
 
+### Sparse textures of 8- and 16-byte blocks: blocks at most 8 GOBs high
+
+- **Symptom:** crashes that move between runs (30–70% of boots, in the first minute): in the allocator, on bogus pointers, in unrelated threads. Unreal's purgatory proxy ([05-debugging](../agents/05-debugging.md)) finds freed 64 KB-aligned blocks modified; with the parked blocks read-only, the faulting store is a `memcpy` of texture mip data from the texture streamer into the buffer `RHILockTexture2D` returned.
+- **Cause:** with the automatic block height the host gave sparse textures the same block height as plain ones (16 GOBs for 96 or more block rows), so a 64 KB tile was 8 GOBs wide. For 8- and 16-byte blocks (DXT1, DXT5 and the like) the real layout uses blocks of at most 8 GOBs and so tiles 16 GOBs (1,024 bytes) wide: the game's pre-swizzled data for a 384×384 DXT5 level is 32 GOBs × two 8-GOB block rows, 0x40000 bytes, where the host's layout said 0x30000 (the padding sits at the end of each 8-GOB block in the dump). 4-byte texels keep 16-GOB blocks (a 1350×270 BGRA8 level is 88 GOBs × three 16-GOB block rows, 0x210000 bytes). Unreal's NVN RHI sizes its lock buffer from the host's level layout and copies the cooked level in at its own size, past the end of the buffer.
+- **Fix:** `nvn_tex.c` `sparse_tile_h` (see [Sparse textures take the block height of their 64 KB tile](#sparse-textures-take-the-block-height-of-their-64-kb-tile)): a sparse texture without a packaged layout and with 8 or 16 bytes per block takes 8-GOB blocks. `dm/gfx/tests/t_sparse_layout.c` checks 15 measured textures and Monster Hunter Rise's level offsets.
+- **Found on:** [Yoshi's Crafted World](../../dm/games/01006000040C2000/README.md): 9 streamed DXT5 textures (384×384 to 1920×912) overran their buffers by 0x8000–0x20000 bytes; after the fix none of 10,578 level copies did, and 10 of 10 boots ran clean.
+
+### Sparse textures smaller than a tile keep the automatic block height
+
+- **Symptom:** a small CPU-filled sparse texture shows part of its image beside fragments, cut off at the bottom (Yoshi's Crafted World's loading icon: the left half of a chalk drawing and two stray strokes).
+- **Cause:** a sparse texture smaller than one 64 KB tile in width or height is all mip tail, laid out as a plain texture with the [automatic block height](#automatic-block-height-truncates), but the host gave every sparse texture its tile's block height. The 192×160 DXT5 icon (12 × 5 GOBs, under the 16 × 8 GOBs of a 16-byte tile) is laid out in 4 GOBs and was read with 8; a 384×384 DXT1 (12 GOBs wide, under the 16-GOB tile width, 96 block rows) in 16, also read with 8. The storage sizes stay the same, so only the picture shows it.
+- **Fix:** `nvn_tex.c` `nvn_tex_layout` gives a sparse texture its tile's block height only when level 0 is at least one tile wide and high, the test `level_walk` uses for padding; the tile's shape for that test and for `nvn_tex_sparse_tiles` comes from the block size (`tile_shape_h`), not from the block height the texture got. `t_tex_layout.c` checks both block heights and the icon's tile shape.
+- **Found on:** [Yoshi's Crafted World](../../dm/games/01006000040C2000/README.md): the guest bytes of the icon and of the DXT1 deswizzled in Python read right only at 4 and 16 GOBs; its 384×384 DXT5 (24 GOBs wide, at least one tile) still reads right only padded to 32 GOBs at 8.
+
 ### Sparse textures bound from their first mapped level
 
 - **Symptom:** streamed textures read 0 (magenta on Monster Hunter Rise's title screen's clothes).

@@ -41,6 +41,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 
 - Not needed in the end for [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (1.0.0.2, SDK 17.5.3): the process heap of pull request #16. `nninitStartup` calls `SetMemoryHeapSize` / `AllocateMemoryBlock` only without virtual address memory, and nothing else in `main` calls them ([Virtual address memory follows the NPDM's system resource](#virtual-address-memory-follows-the-npdms-system-resource)).
 
+### Unreal games without virtual address memory take a heap
+
+- **Symptom:** the app quits at launch; the host log shows `SetHeapSize OOM: req 0xc5200000 > cap 0`.
+- **Cause:** `profile_guess.py` gave every Unreal game the 64 GB alias region and no heap, after the Unreal 4.26+ games ([Unreal's engine address region and its options](#unreals-engine-address-region-and-its-options)). An older Unreal game whose NPDM declares no system resource has no virtual address memory, and its `nninitStartup` sets a heap of the application pool less used memory instead ([Heap sized from the application pool less used memory](#heap-sized-from-the-application-pool-less-used-memory)).
+- **Fix:** the guesser's Unreal memory rule applies only with an NPDM system resource; other Unreal games get the usual heap region (3.25 GB here).
+- **Found on:** [Yoshi's Crafted World](../../dm/games/01006000040C2000/README.md) (Unreal Engine 4.18, SDK 4.4.1): a 3.15 GB heap; GMalloc is a FMallocBinned on it.
+
 ### Sizing the pool and alias region for virtual address memory
 
 - A title that uses virtual address memory may never call `SetHeapSize`: everything comes from `MapPhysicalMemory` in the alias region. The `[mem]` log lines show what it maps ([Measuring address regions and commits](#measuring-address-regions-and-commits)).

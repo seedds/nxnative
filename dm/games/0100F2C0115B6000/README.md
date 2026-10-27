@@ -75,6 +75,8 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 General host changes first needed here; each applies to every game:
 
+- **Resolved in the host (#342): recurring startup crash during archive compaction**, with a workaround for Metal's serializer defect: [Pipeline archive compaction crashes in Metal's serializer](../../../docs/reference/shaders.md#a-compaction-flush-that-crashes-then-crashes-every-start). Confirmed with local manifest replays; no new gameplay or iOS validation.
+
 - **BAHS pairs omitted from vertex padding:** [Pixel shader inputs the vertex shader does not write](../../../docs/reference/shaders.md#pixel-shader-inputs-the-vertex-shader-does-not-write).
 
 - **Resolved in the host: frame-step recovery after a 30 fps movie cap**: [The frame step after a 30 fps cap ends](../../../docs/reference/frame-rate.md#the-frame-step-after-a-30-fps-cap-ends). Modelled with the movie flag; no new gameplay recovery observation is claimed.

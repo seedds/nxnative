@@ -16,6 +16,7 @@ void dm_host_preload_start(int argc, char **argv) { (void)argc; (void)argv; }
 void dm_haptics_apple_init(void) {}
 UIView *dm_gamepad_view(CGRect frame) { return [[UIView alloc] initWithFrame:frame]; }
 void dm_gamepad_reset(void) {}
+void dm_gamepad_active(void) {}
 bool dm_show_launcher(void *view, void (*done)(void)) { (void)view; (void)done; return false; }
 uint64_t mtl_present_count(void) { return 0; }
 void dm_audio_suspend(int on) { (void)on; }
@@ -41,7 +42,10 @@ static void checkSize(DmRootVC *root, CGSize size) {
     check([prefix stringByAppendingString:@" retains the complete picture"], CGRectContainsRect(root.view.bounds, frame));
     check([prefix stringByAppendingString:@" uses the rendering scene scale"], value.scale == root.game.window.windowScene.screen.nativeScale);
     check([prefix stringByAppendingString:@" publishes the actual drawable size"], value.width == layer.drawableSize.width && value.height == layer.drawableSize.height);
-    check([prefix stringByAppendingString:@" converts points to physical pixels"], fabs(value.width - frame.size.width * value.scale) < 0.001 && fabs(value.height - frame.size.height * value.scale) < 0.001);
+    check([prefix stringByAppendingString:@" rounds physical pixels to the nearest whole pixel"],
+        fabs(value.width - frame.size.width * value.scale) <= 0.500001 &&
+        fabs(value.height - frame.size.height * value.scale) <= 0.500001 &&
+        value.width == round(value.width) && value.height == round(value.height));
 }
 
 @interface MetricsScene : SceneDelegate
@@ -52,6 +56,16 @@ static void checkSize(DmRootVC *root, CGSize size) {
     [super scene:scene willConnectToSession:session options:options];
     DmRootVC *root = (DmRootVC *)self.window.rootViewController;
     root.launched = YES;
+    // This standalone test uses no game files. Replace the inherited placeholder
+    // immediately; the production missing-files message remains unchanged.
+    for (UIView *view in root.view.subviews.copy) [view removeFromSuperview];
+    UILabel *status = [[UILabel alloc] initWithFrame:root.view.bounds];
+    status.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    status.numberOfLines = 0; status.textAlignment = NSTextAlignmentCenter;
+    status.font = [UIFont systemFontOfSize:20 weight:UIFontWeightMedium];
+    status.textColor = UIColor.whiteColor; status.backgroundColor = UIColor.blackColor;
+    status.text = @"Scene metrics test\nRunning programmatic checks.\nThis verification app does not use game files.";
+    [root.view addSubview:status];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         checks = [NSMutableArray array];
         root.game = [[DmGameView alloc] initWithFrame:root.view.bounds];
@@ -74,13 +88,19 @@ static void checkSize(DmRootVC *root, CGSize size) {
         check(@"the default dynamic range stays standard", [layer.preferredDynamicRange isEqual:CADynamicRangeStandard]);
         id<CAMetalDrawable> drawable = [layer nextDrawable];
         check(@"the real scene produces a drawable", drawable != nil);
-        check(@"drawable pixels match the snapshot", drawable && fabs((double)drawable.texture.width - metrics.width) < 1 && fabs((double)drawable.texture.height - metrics.height) < 1);
+        check(@"drawable pixels exactly match the snapshot", drawable && drawable.texture.width == metrics.width && drawable.texture.height == metrics.height);
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             int fps = front_screen_max_fps();
             dispatch_async(dispatch_get_main_queue(), ^{
                 check(@"a worker reads the published refresh without UIKit", fps == metrics.max_fps);
                 NSInteger failed = 0; for (NSDictionary *item in checks) if (![item[@"passed"] boolValue]) failed++;
-                NSDictionary *report = @{@"checks":checks, @"failed":@(failed), @"externalDisplayTested":@NO,
+                status.text = [NSString stringWithFormat:@"Scene metrics test\n%@: %lu checks, %ld failed.\nThis verification app does not use game files.\nPhysical external-display testing is still pending.",
+                    failed ? @"FAILED" : @"PASS", (unsigned long)checks.count, (long)failed];
+                [root.view bringSubviewToFront:status];
+                NSURL *provenanceURL = [NSBundle.mainBundle URLForResource:@"SourceProvenance" withExtension:@"json"];
+                NSDictionary *provenance = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfURL:provenanceURL] options:0 error:NULL];
+                NSDictionary *report = @{@"displayMessage":status.text, @"sourceProvenance":provenance,
+                    @"checks":checks, @"failed":@(failed), @"externalDisplayTested":@NO,
                     @"EDROutputEnabled":@NO, @"scale":@(metrics.scale), @"width":@(metrics.width), @"height":@(metrics.height),
                     @"maximumFPS":@(metrics.max_fps), @"currentEDRHeadroom":@(metrics.headroom), @"potentialEDRHeadroom":@(metrics.potential_headroom),
                     @"systemVersion":UIDevice.currentDevice.systemVersion};

@@ -85,8 +85,12 @@ int front_screen_max_fps(void) { return display_snapshot().max_fps; }
     double scale = screen.nativeScale;
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;
-    CGSize pixels = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    // A fitted view can have fractional points. CAMetalLayer normalizes its
+    // drawable to whole pixels, so choose that size once and publish the actual
+    // post-set value rather than repeatedly requesting a fractional size.
+    CGSize pixels = CGSizeMake(round(self.bounds.size.width * l.contentsScale), round(self.bounds.size.height * l.contentsScale));
     if (!CGSizeEqualToSize(l.drawableSize, pixels)) l.drawableSize = pixels;
+    pixels = l.drawableSize;
     DmDisplayMetrics value = {l.contentsScale, pixels.width, pixels.height, screen.currentEDRHeadroom,
         screen.potentialEDRHeadroom, (int)screen.maximumFramesPerSecond,
         self.traitCollection.hdrHeadroomUsageLimit == UIHDRHeadroomUsageLimitActive};

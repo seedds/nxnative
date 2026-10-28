@@ -5,6 +5,7 @@ GAME selects only source profile constants. No game files, keys or signing are
 used. Install/run the resulting app separately on an authorized test device.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -26,7 +27,7 @@ def main():
     output.mkdir(parents=True)
     include = output / 'Include'
     include.mkdir()
-    subprocess.run([sys.executable, str(REPO / 'dm/games/game.py'), 'header', game,
+    subprocess.run([sys.executable, '-B', str(REPO / 'dm/games/game.py'), 'header', game,
                     str(include / 'game_profile.h')], check=True)
     project = {
         'name': 'DisplayVerification',
@@ -43,7 +44,7 @@ def main():
                 'HEADER_SEARCH_PATHS': [str(REPO / 'dm/host'), str(include)],
             }},
             'info': {'path': 'Info.plist', 'properties': {
-                'CFBundleDisplayName': 'Display Verification', 'UILaunchScreen': {},
+                'CFBundleDisplayName': 'Scene Metrics Test', 'UILaunchScreen': {},
                 'UIFileSharingEnabled': True,
                 'UISupportedInterfaceOrientations': ['UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'],
                 'UIApplicationSceneManifest': {'UIApplicationSupportsMultipleScenes': False,
@@ -52,6 +53,15 @@ def main():
             }},
         }},
     }
+    paths = ['dm/ios/tests/scene_metrics_check.m', 'dm/ios/Sources/front_ios.m', 'dm/ios/Sources/main.m']
+    provenance = {
+        'commit': subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip(),
+        'sourceSHA256': {path: hashlib.sha256((REPO / path).read_bytes()).hexdigest() for path in paths},
+        'gameProfile': game,
+    }
+    provenance_file = output / 'SourceProvenance.json'
+    provenance_file.write_text(json.dumps(provenance, indent=2) + '\n')
+    project['targets']['DisplayVerification']['sources'].append({'path': str(provenance_file), 'buildPhase': 'resources'})
     spec = output / 'project.yml'
     spec.write_text(json.dumps(project, indent=2) + '\n')
     subprocess.run(['xcodegen', 'generate', '--spec', str(spec)], check=True)

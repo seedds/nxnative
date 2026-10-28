@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Uploads an age-encrypted game bundle to private S3 storage, triggers a Bitrise
-# build by pushing a one-use tag, then downloads the IPA back to the NSP folder.
+# build by pushing a one-use tag, then downloads the IPA beside the game input.
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/build_ipa_linux.sh <NSP folder> --keys <prod.keys>
+Usage: scripts/build_ipa_linux.sh <NSP/XCI/NSZ/XCZ file or game folder> --keys <prod.keys>
 
 Required environment:
   NX_S3_BUCKET       private S3 bucket configured in Bitrise
@@ -17,7 +17,7 @@ EOF
 }
 
 if [ "$#" -lt 3 ]; then usage >&2; exit 2; fi
-NSP_DIR=$1; shift
+GAME_INPUT=$1; shift
 KEYS=
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -33,11 +33,19 @@ done
 : "${NX_AGE_RECIPIENT:?Set NX_AGE_RECIPIENT to the public recipient for the age identity stored in Bitrise}"
 [ -n "$KEYS" ] || { echo "--keys is required" >&2; exit 2; }
 for tool in aws age python3 git; do command -v "$tool" >/dev/null || { echo "Missing required tool: $tool" >&2; exit 1; }; done
-[ -d "$NSP_DIR" ] || { echo "NSP folder does not exist" >&2; exit 1; }
 [ -f "$KEYS" ] || { echo "prod.keys file does not exist" >&2; exit 1; }
+if [ -d "$GAME_INPUT" ]; then
+  NSP_DIR=$(cd "$GAME_INPUT" && pwd)
+  GAME_INPUT=$NSP_DIR
+elif [ -f "$GAME_INPUT" ]; then
+  GAME_INPUT=$(cd "$(dirname "$GAME_INPUT")" && pwd)/$(basename "$GAME_INPUT")
+  NSP_DIR=$(dirname "$GAME_INPUT")
+else
+  echo "Game input does not exist: $GAME_INPUT" >&2
+  exit 1
+fi
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-NSP_DIR=$(cd "$NSP_DIR" && pwd)
 KEYS=$(cd "$(dirname "$KEYS")" && pwd)/$(basename "$KEYS")
 git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "Run this from a checked-out NxNative repository" >&2; exit 1; }
 git -C "$ROOT" cat-file -e HEAD:bitrise.yml 2>/dev/null || { echo "Commit and push the Bitrise workflow before building" >&2; exit 1; }
@@ -65,7 +73,7 @@ STATUS_FILE=$(mktemp)
 cleanup() { rm -rf "$ARCHIVE_DIR"; rm -f "$STATUS_FILE"; }
 trap cleanup EXIT HUP INT TERM
 
-python3 "$ROOT/scripts/cloud_bundle.py" "$NSP_DIR" "$KEYS" "$NX_AGE_RECIPIENT" "$ARCHIVE"
+python3 "$ROOT/scripts/cloud_bundle.py" "$GAME_INPUT" "$KEYS" "$NX_AGE_RECIPIENT" "$ARCHIVE"
 aws s3 cp "$ARCHIVE" "$INPUT_URI" --only-show-errors --sse AES256
 git -C "$ROOT" tag "$TAG"
 git -C "$ROOT" push origin "refs/tags/$TAG"

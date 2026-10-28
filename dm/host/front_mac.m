@@ -115,6 +115,7 @@ static void on_key(NSEvent *e, int down) {
 // Players: every controller with an extended gamepad profile holds a slot (pad_slots.h: player 1 first, a reconnected controller gets its player back), and hle_hid.c reports
 // player n on its own npad while the slot is held (dm_pad_players). A one-player game that supports only No1 / Handheld still sees every controller as player 1 (hle_hid.c).
 // With DM_PAD_MERGE=1 every controller is player 1, as before (the last one moved wins; when the last one goes away its buttons and sticks are released)
+static int pad_nintendo(GCController *c);
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_kbd_own;
@@ -125,12 +126,33 @@ static void pad_read(GCExtendedGamepad *g) {
     dm_haptics_apple_controller(p, g.controller);
     uint64_t m = 0;
     #define K(btn, bit) if (btn.isPressed) m |= bit
-    K(g.buttonB, DM_BTN_A); K(g.buttonA, DM_BTN_B); K(g.buttonY, DM_BTN_X); K(g.buttonX, DM_BTN_Y);   // by position: right A, bottom B, top X, left Y
+    // Apple reports a Nintendo pad's buttons by Nintendo's names (the right-hand button is A, the bottom one B), while an Xbox-style pad's
+    // buttonA is the bottom one. Mapping by position would swap A/B and X/Y on a Switch controller, so a Nintendo pad passes through.
+    int nin = pad_nintendo(g.controller);
+    if (nin) { K(g.buttonA, DM_BTN_A); K(g.buttonB, DM_BTN_B); K(g.buttonX, DM_BTN_X); K(g.buttonY, DM_BTN_Y); }
+    else { K(g.buttonB, DM_BTN_A); K(g.buttonA, DM_BTN_B); K(g.buttonY, DM_BTN_X); K(g.buttonX, DM_BTN_Y); }   // by position: right A, bottom B, top X, left Y
     K(g.leftShoulder, DM_BTN_L); K(g.rightShoulder, DM_BTN_R); K(g.leftTrigger, DM_BTN_ZL); K(g.rightTrigger, DM_BTN_ZR);
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
     K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
     #undef K
-    dm_pad_set_player(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
+    float st[4] = { g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, g.rightThumbstick.xAxis.value, g.rightThumbstick.yAxis.value };
+    if (p == g_pro_player && g_pro_bound) {   // raw Pro sticks when GameController's stay at 0 (motion_pro_mac.h)
+        int gc_zero = !st[0] && !st[1] && !st[2] && !st[3], raw_far = 0; for (int i = 0; i < 4; i++) if (fabsf(g_pro_raw_stick[i]) > 0.5f) raw_far = 1;
+        if (!g_pro_raw_sticks && gc_zero && raw_far) { g_pro_raw_sticks = 1; LOG("[hid] Pro Controller sticks: GameController reports none while the raw reports move; player %d's sticks come from the raw HID reports", p + 1); }
+        if (g_pro_raw_sticks) memcpy(st, g_pro_raw_stick, sizeof st);
+    }
+    dm_pad_set_player(p, m, pad_axis(st[0]), pad_axis(st[1]), pad_axis(st[2]), pad_axis(st[3]));
+}
+static void pro_sticks_changed(int p) { if (p >= 0 && p < DM_PLAYERS && g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad); }
+// A Nintendo controller (Switch Pro, Joy-Con, a controller in Switch mode): Apple names its buttons A/B/X/Y at Nintendo's positions.
+// DM_PAD_NINTENDO=1 / 0 forces the choice for a pad macOS names differently.
+static int pad_nintendo(GCController *c) {
+    const char *e = getenv("DM_PAD_NINTENDO");
+    if (e && *e) return atoi(e) != 0;
+    NSString *v = c.vendorName ?: @"", *pc = c.productCategory ?: @"";
+    return [v localizedCaseInsensitiveContainsString:@"nintendo"] || [v localizedCaseInsensitiveContainsString:@"switch"] ||
+           [v localizedCaseInsensitiveContainsString:@"joy-con"] || [v localizedCaseInsensitiveContainsString:@"joycon"] ||
+           [pc localizedCaseInsensitiveContainsString:@"nintendo"] || [pc localizedCaseInsensitiveContainsString:@"switch"];
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
@@ -203,6 +225,7 @@ static void pads_start(void) {
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     pads_changed(nil);
+    g_pro_sticks_changed = pro_sticks_changed;
     dm_motion_pro_start(pro_devices_changed);
 }
 

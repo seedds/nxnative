@@ -14,6 +14,12 @@ static pro_device *g_pro_devices, *g_pro_bound;
 static int g_pro_player = -1, g_pro_active = 1, g_pro_controllers, g_pro_slot = -1;
 static int g_pro_seen_devices = -1, g_pro_seen_controllers = -1;
 static void (*g_pro_changed)(void);
+// Sticks from the same 0x30 reports, for a pad whose GameController sticks stay at 0 (a Pro-compatible pad whose calibration macOS rejects: its
+// 12-bit sticks read 0..4095 around 2048 in the raw reports while GCExtendedGamepad's thumbsticks never move). Used only after that is seen.
+static float g_pro_raw_stick[4];
+static int g_pro_raw_sticks;          // 1 once the raw sticks moved while GameController's stayed at 0
+static void (*g_pro_sticks_changed)(int player);
+static float pro_stick_axis(unsigned v) { float f = ((float)v - 2048.f) / 2047.f; if (f > 1.f) f = 1.f; if (f < -1.f) f = -1.f; return fabsf(f) < 0.08f ? 0.f : f; }
 
 static void pro_route(void) {
     int n = 0; for (pro_device *d = g_pro_devices; d; d = d->next) n++;
@@ -37,6 +43,12 @@ static void pro_report(void *ctx, IOReturn result, void *sender, IOHIDReportType
     (void)sender;
     pro_device *d = ctx;
     if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput || report_id != 0x30 || len < 0 || !g_pro_active || d != g_pro_bound) return;
+    if (len >= 12) {
+        float v[4] = { pro_stick_axis(r[6] | (r[7] & 0xf) << 8), pro_stick_axis(r[7] >> 4 | r[8] << 4), pro_stick_axis(r[9] | (r[10] & 0xf) << 8), pro_stick_axis(r[10] >> 4 | r[11] << 4) };
+        int moved = 0; for (int i = 0; i < 4; i++) if (fabsf(v[i] - g_pro_raw_stick[i]) > 0.01f) moved = 1;
+        memcpy(g_pro_raw_stick, v, sizeof v);
+        if (moved && g_pro_sticks_changed) g_pro_sticks_changed(g_pro_player);
+    }
     pro_motion_sample samples[3];
     int n = pro_motion_decode(&d->motion, r, (size_t)len, now_ns(), samples);
     for (int i = 0; i < n; i++) dm_motion_set_hid(g_pro_player, samples[i].acc, samples[i].rot, samples[i].ns);

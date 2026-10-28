@@ -1,16 +1,15 @@
 # Pokémon Scarlet (`0100A3D008C5C000`)
 
-Base game 1.0.0 (v0), SDK 13.3.5, Game Freak's Trinity engine on NVN.
+Base game 1.0.0 (v0, SDK 13.3.5) and update 4.0.0 (v786432, SDK 13.3.13),
+Game Freak's Trinity engine on NVN.
 Playable on the Mac: language and character selection, the academy opening,
 the native Bink movie, getting up in the bedroom, walking downstairs and
 through the living room and kitchen, camera control, dialogue and save/reload.
 The unsigned 1.0.0 IPA is built (~7.0 GB); iPhone testing is pending.
-Only 1.0.0 is registered, and the profile's shader tables come from v0.
-When the NSP folder also contains updates, build the supported version with
-`scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> -p v0` (add
-`--platform mac` for a Mac build). The builder otherwise selects the newest
-supplied version. The supplied 4.0.0 update is damaged and remains unsupported
-(see [Files and builds](#files-and-builds)).
+4.0.0 is the packed version when its update is in the NSP folder; it runs on
+the Mac through the same new-game route to the bedroom
+([4.0.0 route](#400-route)). Build 1.0.0 from such a folder with
+`scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> -p v0`.
 
 ## Memory
 
@@ -32,6 +31,14 @@ supplied version. The supplied 4.0.0 update is damaged and remains unsupported
   32 MB alignment, as for the equivalent SDK build in Sparks of Hope.
   Decompilation confirms region size and page guards are unchanged. The same
   startup check fails with only the main cut and reaches `nnMain` with both.
+- **Resolved: 4.0.0 needs the same three cuts at its own addresses.**
+  `main` `421c5411…` makes the same 12 GB request from `main+0x167d554`
+  (the abort's backtrace passes `main+0x167d558`); its cut is at
+  `main+0x167d54c`. SDK 13.3.13 (`bb560bdf…`) has the same
+  AddressRegionManager code 0x620 bytes later: node area at `sdk+0x37c760` /
+  `+0x37c7fc`, 1 GB alignment at `sdk+0x37c95c`. With only the `main` cut,
+  startup still aborts in CentralHeap's setup with no SVC logged; with all
+  three it reaches `nnMain`.
 - **Resolved: freed startup pages stayed mapped past the application pool.**
   Startup probes all allocatable memory, frees it, and leaves those pages in
   the SDK's cache. Without `mem_map_limit`, a physical-map census reaches
@@ -51,10 +58,10 @@ game's own Oodle decoder extract them. Chain `157e1b96c8da`, profile inputs
 bindings. The complete build supplies the stamped `c1_full.tsv` and
 `cb_extent.tsv`; no shader override is needed.
 
-The 4.0.0 split aborts on 195 malformed active Trinity packs in the damaged
-input described [below](#files-and-builds). Full 4.0.0 shader coverage and an
-update IPA have not been produced. Its partial startup used the base shader
-libraries and reported missing update shader keys.
+With 4.0.0, the tables are the union of v0 and v786432 (`shader_versions`):
+39,216 unique shaders, the 30,142 above unchanged plus 9,074 the update adds,
+with 35,610 variation pairs and 95 compute facts. Chain `157e1b96c8da`: all
+39,216 compile for the Mac.
 
 ### Pipeline preparation depth
 
@@ -129,6 +136,21 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   unchanged; 86 affected tests and pinned lint pass, and the generated iOS
   launcher settings exactly match the verified IPA.
 
+### 4.0.0 route
+
+- **2026-10-27, chain `157e1b96c8da`, Apple M4, macOS 27.0.1:** a fresh
+  save, with the DLC's licence-only NSP in the folder, and the route above
+  (`DM_KEYS="f300:A,f600:LUp+LLeft~0.3,f660:A,f1000:A,f1300:A*90/90,f11000:LDown~2"`)
+  under `MTL_DEBUG_LAYER=1` reaches the academy cutscene, the Bink movie,
+  the desk's get-up prompt and the standing player in the bedroom. The
+  600-second run ends at frame 15,800 with conservative raster dilation as
+  the sole red diagnostic and no GPU fault. Bedroom frame times: p50
+  33.4 ms, p95 36.6 ms; resident memory about 5.0 GB, GPU allocations
+  1,366 MB.
+- Startup reaches `nnMain` only with [Bluetooth LE accessories reported absent](../../../docs/reference/services.md#bluetooth-le-accessories-reported-absent):
+  4.0.0 sets up the Pokémon GO Plus + link at boot (`main+0xa0b02c`); 1.0.0
+  reaches `nnMain` without it.
+
 ## Pipeline cache ownership
 
 - **Current:** a longer indoor run reported 20 pipeline/transform-feedback
@@ -157,7 +179,9 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   The host supplies the imports from Nintendo's movie module `subsdk0`.
 - The complete, CRC-checked 1.0.0 IPA remains preserved at
   `<NSP folder>/PokemonScarlet-1.0.0.ipa`.
-- **Blocked: supplied update 4.0.0 (v786432) has erased payload bytes.**
+- **Resolved: an earlier 4.0.0 (v786432) copy had erased payload bytes.**
+  An intact copy now builds and runs (next item); this one's
+  evidence stays for reference.
   Independent checks trace 2,633 invalid 16 KB data blocks to three all-zero
   ciphertext ranges in the original NSP: 2,629 blocks in `arc/data.trpfs`
   and four in `audio/wwise/bin/Switch/DEMO.bnk`. The ranges below use absolute
@@ -196,8 +220,11 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   through frame 3,475 using base shaders; it was not gameplay validation.
   The investigation is preserved under the work folder's `update4/` and
   `release-1.0.0/before-scope-trim/`. No 4.0.0 build or cuts are registered in
-  this profile. An intact update source is required for its full shader build
-  and gameplay validation.
+  the profile from this copy.
+- **Current: an intact 4.0.0 update.** Another dump
+  of v786432 extracts without `--allow-damaged`: 35 files, 9.3 GB, with
+  `main` `421c5411…` and `sdk` `bb560bdf…`. Its full shader split,
+  the union tables and the [route](#400-route) come from it.
 - The supplied DLC is a licence-only NSP, with no data to extract.
 
 ## Open
@@ -217,4 +244,7 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
 - [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 - [Maps past the application pool fail as on Horizon](../../../docs/reference/memory.md#maps-past-the-application-pool-fail-as-on-horizon).
 - [Conservative rasterization remains unimplemented](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented).
+- [Bluetooth LE accessories reported absent](../../../docs/reference/services.md#bluetooth-le-accessories-reported-absent) (4.0.0).
+- [Nintendo controllers' face buttons on the Mac](../../../docs/reference/services.md#nintendo-controllers-face-buttons-on-the-mac).
+- [Pro Controller sticks missing from GameController](../../../docs/reference/services.md#pro-controller-sticks-missing-from-gamecontroller).
 - [Metal's build folders left by pipeline archive flushes](../../../docs/reference/shaders.md#metals-build-folders-left-by-pipeline-archive-flushes).

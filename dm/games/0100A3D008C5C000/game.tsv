@@ -1,5 +1,4 @@
-# Pokémon Scarlet 1.0.0, Game Freak's Trinity engine, SDK 13.3.5.
-# Only 1.0.0 is registered; use -p v0 when the NSP folder also has updates.
+# Pokémon Scarlet 1.0.0 (SDK 13.3.5) and 4.0.0 (SDK 13.3.13), Game Freak's Trinity engine.
 
 # ---- Identity ----
 title_id	0100A3D008C5C000
@@ -14,8 +13,9 @@ pad_layout	full
 
 # ---- Versions ----
 build	v0	1.0.0	main=ca44e7dd62e61a2a4e8889b3319ae173	sdk=3644a6760469451cabc99f00c540acc2
-package	v0
-shader_versions	v0
+build	v786432	4.0.0	main=421c5411b487eb4d049dd065fec95477	sdk=bb560bdfa85b4a97786ae2c3b7995df6
+package	v786432
+shader_versions	v0 v786432
 
 # The game calls nvnDeviceSetDepthMode(near=0); prepare the same main0_z bases
 # offline so the first run can use them instead of repeating the full prebuild.

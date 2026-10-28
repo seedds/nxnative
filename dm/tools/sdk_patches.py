@@ -84,6 +84,16 @@ CUTS = {
     (0x37c1dc, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
     (0x37c33c, '0a00a852', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more mov w10,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
   ],
+  # Pokémon Scarlet 4.0.0 (v786432) sdk (SDK 13.3.13): the same constructor and
+  # placement code as 1.0.0's SDK above, 0x620 bytes later (constructor at
+  # sdk+0x37c750, AllocateAddressRegion's alignment choice at sdk+0x37c95c).
+  # With only the profile's 4 GB allocator cut, startup still aborts with no
+  # SVC logged in CentralHeap's setup; with these three it reaches nnMain.
+  'bb560bdfa85b4a97786ae2c3b7995df6': [
+    (0x37c760, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x37c7fc, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+    (0x37c95c, '0a00a852', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more mov w10,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
+  ],
   # Mario + Rabbids Sparks of Hope 1.6.2225577 (SDK 13.3.5): the same constructor
   # and placement code as nirvanA Initiative above. Snowdrop reserves a small
   # metadata region before its three-pool range (reduced from 12 GB to 3 GB in

@@ -323,11 +323,32 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked: `hid::GetMouseState`, `hid::GetKeyboardStates`, and `kpr::GetKeyCodeMap`, which asks the settings service (`settings::detail::GetKeyCodeMap`) for the keyboard layout's map; the host leaves the map zero.
 - **Found on:** [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11, `GetMouseState`); [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11, `GetKeyboardStates`); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (`kpr::GetKeyCodeMap`: the game zeroes a 0x1000-byte map and fetches it only once a keyboard reports keys, `main+0x1f0eb4`).
 
+### Nintendo controllers' face buttons on the Mac
+
+- **Symptom:** on a Switch Pro Controller (or a pad macOS reports as one), A and B are swapped, and so are X and Y.
+- **Cause:** GameController names a Nintendo pad's face buttons by Nintendo's letters: the right-hand A arrives as `buttonA`, which on an Xbox-style pad is the bottom button. The Mac front end mapped every pad by position. A GameController probe confirms the printed A, B, X and Y arrive as `buttonA`, `buttonB`, `buttonX` and `buttonY` (`localizedName` "A Button" and so on).
+- **Fix:** a pad whose vendor name or product category names Nintendo, Switch or Joy-Con passes its face buttons through by name; other pads keep the position mapping (`front_mac.m`, from #415). `DM_PAD_NINTENDO=1` / `0` forces the choice.
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md) 4.0.0, with a Pro-compatible pad over Bluetooth.
+
+### Pro Controller sticks missing from GameController
+
+- **Symptom:** a Pro-compatible pad's buttons, D-pad and motion work on the Mac, but both sticks stay at 0, so a screen that needs the left stick cannot be passed. A standalone GameController probe also logs no thumbstick events.
+- **Cause:** the pad's raw `0x30` reports carry the sticks: 12-bit, exactly 2048 at rest, 0 / 4095 at full tilt. The idealized values suggest calibration data macOS rejects, and GameController then drops the sticks.
+- **Fix:** `motion_pro_mac.h`, which already reads those reports for motion, also decodes the sticks (centred on 2048, 0.08 dead zone). Once the raw sticks pass half tilt while all four GameController axes are 0, `front_mac.m` takes that player's sticks from the raw reports and logs it once. A pad whose GameController sticks work never switches.
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md) 4.0.0, with the same pad.
+
 ### Poké Ball Plus (Palma)
 
 - **Symptom:** the first boot crashed in `hid::detail::SetPalmaBoostMode`, a null read at `sdk+0x238eb0` (the hid service never opened).
 - **Fix:** the Poké Ball Plus calls (`hid::*Palma*`, 26 functions) answer that none is connected: no npad has the Palma style, so the game never gets a connection handle, and every call on a handle fails (`hle_hid.c`).
 - **Found on:** [Pokémon Sword](../../dm/games/0100ABF008968000/README.md) (SDK 7).
+
+### Bluetooth LE accessories reported absent
+
+- **Symptom:** `[RED] sf: the game connects to service bt itself` early in `nnMain`, then an abort in `nn::bluetooth::hal::user::InitializeBluetoothUserInterface`; with `InitializeBle` answered, the next abort is in `btm::user::AcquireBleScanEvent`.
+- **Cause:** the game sets up Bluetooth LE for an accessory (Scarlet 4.0.0: the Pokémon GO Plus +, `InitializeBle` at `main+0xa0b02c`, then the five `AcquireBle…Event` calls), and the SDK's client opens the `bt` and `btm` services, which the host does not have.
+- **Fix:** the `nn::bluetooth` entry points that reach `bt` / `btm` answer that no accessory is present (`hle_bluetooth.c`): `InitializeBle` does nothing, the events are bound and never fire, a scan starts and finds nothing, connecting and GATT operations fail. The `GattService` / `GattCharacteristic` / `GattDescriptor` getters only touch the game's memory and stay in the SDK.
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md) 4.0.0 (SDK 13.3.13).
 
 ### IR camera reported unconnected
 

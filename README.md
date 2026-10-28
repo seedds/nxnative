@@ -37,7 +37,7 @@
 
 NxNative Launcher transforms the technical command-line porting pipeline into a fluid, responsive, console-quality desktop application for Apple Silicon Macs (macOS 13+ Ventura, Sonoma, Sequoia, and later).
 
-### 🕹️ 1. Console-Style Game Library (Switch Dark Mode & CrossOver Experience)
+### 🕹️ 1. Console-Style Game Library
 - **16:9 Hero Section & Cover Art Carousel**: Panoramic header displaying full widescreen game artwork with ambient neon specular rims (`NXTheme.specularRim`) and authentic box art in portrait proportion (1 : 1.60).
 - **Two-Tier Library Categories**:
   - **Mac (macOS Native)**: Standalone compiled `.app` bundles executable on Apple Silicon Macs.

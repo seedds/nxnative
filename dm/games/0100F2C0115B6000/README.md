@@ -77,7 +77,11 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 General host changes first needed here; each applies to every game:
 
+- **Display link at frame latency 2 in fullscreen (#347, a workaround; why the system misses at 16 ms is open):** [Frame latency 2 for the display link in fullscreen](../../../docs/reference/frame-rate.md#frame-latency-2-for-the-display-link-in-fullscreen). Measured from the issue #70 save on an M4 Pro's built-in ProMotion screen: a window held 60; fullscreen at latency 1 stepped to 20 fps on cheap frames in one run of three.
+
 - **RomFS folder transfer and startup deletion failures:** [RomFS images](../../../docs/reference/packing.md#romfs-folder-transfers-fail-or-leave-stale-game-files).
+
+- **Resolved in the host (#531): `DM_NVN_GPUPROF` abort when an upload flush lands in a profiled draw pass:** [GPU profiles stamp only the encoder they began](../../../docs/reference/rendering.md#gpu-profiles-stamp-only-the-encoder-they-began). Covered by `t_gpuprof`; not rerun in the game.
 
 - **Resolved in the host (#342): recurring startup crash during archive compaction**, with a workaround for Metal's serializer defect: [Pipeline archive compaction crashes in Metal's serializer](../../../docs/reference/shaders.md#a-compaction-flush-that-crashes-then-crashes-every-start). Confirmed with local manifest replays; no new gameplay or iOS validation.
 
@@ -92,6 +96,7 @@ General host changes first needed here; each applies to every game:
 - **Bounded upload staging and retirement on upload completion:** [Upload staging grows within one rendering submission](../../../docs/reference/memory.md#upload-staging-grows-within-one-rendering-submission).
 - **Resolved: registry lock priority inversion** (`g_rmu`): [Registry lock priority inheritance](../../../docs/reference/frame-rate.md#registry-lock-priority-inheritance). Ported from MacNativeGames; checked here through the Metal registry view tests, without a new gameplay contention measurement.
 - **Conditional rendering** evaluated at replay (`OP_RENDER_COND`, profile key `render_cond`) and **CPU-written textures with no flush** (`tex_dirty_upload`, `ft_add`): [Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay), [CPU writes with no flush, caught by page protection](../../../docs/reference/nvn-objects.md#cpu-writes-with-no-flush-caught-by-page-protection-tex_dirty_upload).
+- **Resolved in the host (#471): abort in `up_begin` from `ReadTexels` after the app comes back from the background (iPad Pro M5)**, on a texture of a sparse pool: [`ReadTexels` on a texture of a sparse pool](../../../docs/reference/nvn-objects.md#readtexels-on-a-texture-of-a-sparse-pool). Covered by `t_readback`; not rerun on an iPad.
 - **Mid-pass, partial-mask and partial-scissor clears** drawn as a triangle (`clear_color_tri` / `clear_ds_tri`), **8-bit indices widened on the GPU** when written in the same submission (`wide_run`), **`ReadTexels` from guest memory on any thread** with `nvn_ft_poll` marking textures written after first use, **attachment-less passes** (`bare_dims`): same section.
 - **Rewriter:** out-of-line atomic retry blocks (`retry_block` / `site_retry_window`, 8 sites) and jump tables relative to an `adr` (`jump_adr_offsets`, `main+0x393bb0`): [Out-of-line retry blocks of atomic updates](../../../docs/reference/rewriter.md#out-of-line-retry-blocks-of-atomic-updates), [Offset tables relative to an adr](../../../docs/reference/rewriter.md#offset-tables-relative-to-an-adr).
 - **Resolved: black screen at boot since `9a56ecf` (issue #247), handoffs that waited for the whole core:** [Same-core wake handoffs](../../../docs/reference/threads.md#same-core-wake-handoffs). Each wake's handoff waited for every runnable higher-priority thread pinned to the caller's core. `BootupBackgroundWorkThread` (priority 58) then waited 200–290 ms at a time for `ARes Loading 1`, `Presentation Thread` and `BaseProcExecutor`, threads its wake had not made runnable. Checked on the Mac with update 1.4.3 and no shader libraries for chain `8393d85a4eae` (draws skipped), the issue #70 route for 180 s. On `82ab25b` the scene stayed empty (`84 functions 771 calls` a frame, no texture uploaded), and handoffs waited 250,008 ms in total. With handoffs limited to the threads the wake made runnable, they waited 1,221 ms, and the run matched `9feac2f` (before the change) frame by frame: 11 first uploads in both, 14,500–20,500 calls a frame. Gameplay with shaders has not been rechecked.
@@ -100,5 +105,6 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- Ground textures drawn as a checkerboard of blocks at different levels of detail that fill in over a few seconds (iPad Pro M5, GitHub issue #471, second part); the only red line is `texture type mismatch: shader 9808aabbd3219e97_b (stage 1) declares slot 1 as Metal type 2, texture ID … is type 7`. Not investigated.
 - Texture layout: NVN's automatic block height now truncates for every game (`pick_tile(ah * 3 / 16)`). That changes layouts at 6–10, 17–21, 38–42 and 81–85 block rows, which matters for this game's flushed textures. Not re-checked here.
 - `game.tsv` still describes the game as "In bring-up", and some memory values as "Breath of the Wild's", not measured for this game.

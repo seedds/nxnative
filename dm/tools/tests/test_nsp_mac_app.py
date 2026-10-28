@@ -87,6 +87,20 @@ class Copy(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == 'darwin', 'uses macOS atomic bundle replacement')
+class CloneProbe(unittest.TestCase):
+    """can_clone with the real clonefile: a RomFS image is one file (os.walk of a file yields nothing), a folder is probed by its first file."""
+    def test_image_and_folder(self):
+        TEST_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as t:
+            t = Path(t)
+            for d in ('romfs/sub', 'empty', 'app'): (t / d).mkdir(parents=True)
+            (t / 'romfs.img').write_bytes(b'DMROMFS1'); (t / 'romfs/sub/file').write_bytes(b'file')
+            if not pack_app.can_clone(t / 'romfs', t / 'app'): self.skipTest(f'no APFS clones in {TEST_ROOT}')
+            self.assertTrue(pack_app.can_clone(t / 'romfs.img', t / 'app'))
+            self.assertFalse(pack_app.can_clone(t / 'empty', t / 'app'))
+            self.assertEqual(sorted(p.name for p in (t / 'app').iterdir()), [])   # no probe left behind
+
+
 class PackReuse(unittest.TestCase):
     """Call the real pack entry point; only external compiler, icon and signing tools are faked. No host is run."""
     def setUp(self):
@@ -612,6 +626,18 @@ class App(unittest.TestCase):
              mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + msls + pso - 1)), contextlib.redirect_stdout(io.StringIO()) as o:
             with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
         self.assertEqual(o.getvalue(), ''); self.assertFalse(Path(a.out).exists())
+
+    def test_each_source_probed(self):   # the RomFS on the app's volume, the rest on another: only the rest counts in the free-space check
+        a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / 'Split.app')
+        romfs, probed, counted = (self.tmp / 'romfs').resolve(), [], []
+        def can_clone(src, dst): probed.append(src); return src == romfs
+        def tree_bytes(d): counted.append(d); return 0
+        lists = sum(p.stat().st_size for d, pats in (('patched', pack_app.MODULE_FILES), ('msl', pack_app.MSL_FILES), ('pso', pack_app.PSO_FILES))
+                    for pat in pats for p in (self.tmp / d).glob(pat) if p.is_file() and p.name != '_b_build.json')
+        with mock.patch.object(pack_app, 'can_clone', can_clone), mock.patch.object(pack_app, 'tree_bytes', tree_bytes), \
+             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + lists - 1)), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
+        self.assertEqual(len(probed), 5); self.assertEqual(counted, [(self.tmp / 'aoc').resolve()])
 
     def test_copies(self):   # another volume (no APFS clone): plain copies, the same layout; a new app replaces the old one whole
         with mock.patch.object(pack_app, 'can_clone', lambda *a: False), mock.patch.object(pack_app, 'sign', lambda *a: None), mock.patch('sys.stdout'):

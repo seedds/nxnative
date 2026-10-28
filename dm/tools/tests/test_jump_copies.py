@@ -18,7 +18,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -67,6 +67,92 @@ LDRSW_X18 = 0xb8a07800 | 6 << 16 | 27 << 5 | 18           # ldrsw x18, [x27, x6,
 
 def cbz_w18(frm, to): return 0x34000000 | (((to - frm) >> 2) & 0x7ffff) << 5 | 18
 def bhi(frm, to): return 0x54000008 | (((to - frm) >> 2) & 0x7ffff) << 5
+
+
+class ForwardBase(unittest.TestCase):
+    """Entry jumps over the dispatch to its sole base initialization, then branches backward."""
+    TABLE = 0x4040
+    TARGETS = [24, 28, 44]
+
+    def setUp(self):
+        for i, target in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - self.TABLE)
+        struct.pack_into('<i', IMG, self.TABLE + 12, 0x1000)   # not a fourth entry
+        tabjumps.clear(); jumps.clear()
+
+    def words(self, **over):
+        # cmp w18,#2; b.hi; ldrsw x18,[x17,x18,lsl #2]; add x18,x18,x17; br x18.
+        words = [B(0, 32), 0x71000a5f, bhi(8, 28), 0xb8b27a32, ADDR(18, 18, 17), BR(18), NOP, RET,
+                 ADRP(17, 32, self.TABLE), ADDI(17, 17, self.TABLE & 0xfff), B(40, 4), NOP, RET]
+        for k, v in over.items(): words[int(k[1:])] = v
+        return words
+
+    def run_site(self, words, forward=True):
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = [p for i, word in enumerate(words) for p in md.disasm(struct.pack('<I', word), 4 * i)]
+        j = next(i for i, p in enumerate(ins) if p.address == 20)
+        return scope['jump_offsets'](ins, j, copy_first=True, far_base=True, forward_base=forward)
+
+    def test_later_initialization_and_exact_extent(self):
+        self.assertIsNone(self.run_site(self.words(), forward=False))
+        self.assertEqual(self.run_site(self.words()), self.TARGETS)
+
+    def test_base_writers_must_be_unique_full_width_and_adjacent(self):
+        for slot, word in ((8, NOP), (9, mov(17, 0, False)), (9, ADDI(17, 17, 0x40) & 0x7fffffff),
+                           (11, mov(17, 0)), (11, 0x94000000), (11, BLR(0))):
+            with self.subTest(slot=slot, word=hex(word)):
+                self.assertIsNone(self.run_site(self.words(**{f'w{slot}': word})))
+        words = self.words(); words.insert(9, NOP)
+        self.assertIsNone(self.run_site(words))
+
+    def test_no_entry_may_bypass_the_page_initialization(self):
+        for target in (8, 12, 16, 20, 36):
+            self.assertIsNone(self.run_site(self.words(w11=B(44, target))))
+        tabjumps[0x1000] = [36]
+        self.assertIsNone(self.run_site(self.words()))
+        tabjumps.clear(); jumps[0x1000] = (32, 2)
+        self.assertIsNone(self.run_site(self.words()))
+        jumps.clear()
+        struct.pack_into('<i', IMG, self.TABLE, 36 - self.TABLE)
+        self.assertIsNone(self.run_site(self.words()))
+
+    def test_guard_must_bound_the_loaded_index(self):
+        for word in (BEQ(8, 28), bhi(8, 12), NOP):
+            self.assertIsNone(self.run_site(self.words(w2=word)))
+
+    def test_targets_must_be_decoded_instructions_and_table_in_bounds(self):
+        self.assertIsNone(self.run_site(self.words(w11=0xe7ffdefe)))
+        for target in (25, 0x1000):
+            struct.pack_into('<i', IMG, self.TABLE, target - self.TABLE)
+            self.assertIsNone(self.run_site(self.words()))
+        struct.pack_into('<i', IMG, self.TABLE, self.TARGETS[0] - self.TABLE)
+        self.assertIsNone(self.run_site(self.words(w8=ADRP(17, 32, 0x5000))))
+
+
+class IndexCopiedBeforeCheck(unittest.TestCase):
+    def run_site(self, middle):
+        table = 0x4040
+        words = [ADRP(9, 0, table), ADDI(9, 9, table & 0xfff), mov(18, 17, False)] + middle
+        at = len(words) * 4
+        words += [0x7100123f, bhi(at + 4, at + 20), 0xb8b27932, ADDR(18, 18, 9), BR(18), RET]
+        for i in range(5): struct.pack_into('<i', IMG, table + 4 * i, at + 20 - table)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = [p for i, w in enumerate(words) for p in md.disasm(struct.pack('<I', w), 4 * i)]
+        j = next(i for i, p in enumerate(ins) if p.mnemonic == 'br')
+        return scope['jump_offsets'](ins, j, copy_first=True, far_base=True), [at + 20] * 5
+
+    def test_copy_beyond_old_search_limit(self):
+        actual, expected = self.run_site([NOP] * 75)
+        self.assertEqual(actual, expected)
+
+    def test_source_and_index_must_remain_unchanged(self):
+        for reg in (17, 18):
+            with self.subTest(reg=reg):
+                self.assertIsNone(self.run_site([NOP] * 65 + [mov(reg, 0, False)])[0])
+
+    def test_calls_and_undecodable_gaps_break_the_chain(self):
+        for word in (0x94000000, BLR(0), 0xe7ffdefe):
+            with self.subTest(word=hex(word)):
+                self.assertIsNone(self.run_site([NOP] * 65 + [word])[0])
 
 
 class MaskedPredecessor(unittest.TestCase):

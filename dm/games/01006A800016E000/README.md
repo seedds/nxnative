@@ -62,7 +62,9 @@ General host changes first needed here; each applies to every game:
 - **The residency set committed at present** (`present_now` → `res_commit`): [The residency set committed before a present](../../../docs/reference/rendering.md#the-residency-set-committed-before-a-present).
 - **The indexed archive reader** (`smash_arc.py`, `smash_arc_jobs`): [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).
 - **Function-matched patches of several functions, and the pack-time report of what an unregistered build kept** (`nso_match.py` `match_patch`, `<module>.match.tsv`, `report_fix_coverage`): [Function-matched cuts for unregistered builds](../../../docs/reference/rewriter.md#function-matched-cuts-for-unregistered-builds).
+- **The address region table and the NSP script's region check** (`patch_nso.py` "Address regions", `hle_svc.c`, `DM_REGIONS`): its engine region, 4 GB through `nn::os::AllocateAddressRegion`, returning to `main+0x37c9a64` (its constructor's call), opened up to 14 MB below its end: [Measuring address regions and commits](../../../docs/reference/memory.md#measuring-address-regions-and-commits).
 
 ## Open
 
 - The one geometry shader among the 35,012: whether it builds is not recorded.
+- The base game 1.0.0 (v0) packed alone (a derived profile) stops before the address region check: the NRO collection's `data.arc` reader (`dm/gfx/tools/smash_arc.py`) knows only 13.x's file system table, and 1.0.0's is not one zstd frame (`ZstdError: Unknown frame descriptor`); with the NROs skipped, the rewrite of its `main` (`fd471eb4…`) stops at a jump table it cannot resolve (`patch_nso.py`, `jump table f5c9cc`). Its engine region is not measured.

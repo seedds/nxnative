@@ -198,6 +198,45 @@ class DeriveProfile(Base):
                 nsp.heap_check(REPO, self.ex, self.tmp / 'patched', self.tmp / 'work', {}, logs, g)
         self.assertEqual(g.table('game.tsv').read_bytes(), before)
 
+    def test_region_stamp_follows_the_rewrite(self):   # a derived build is checked once per rewrite: a new cut checks again, a reused derivation keeps the stamp
+        with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x80000000\n')   # every profile has one (the host is built with it)
+        self.derive(); patched = self.tmp / 'work/patched_v65536'
+        logs = self.tmp / 'logs'; logs.mkdir()
+        def boot(*args): (logs / 'region_check.log').write_text('>>> nnMain\n'); (logs / 'regions.tsv').write_text('# table\n'); return 0
+        def check(key):
+            patched.with_name(patched.name + '.key').parent.mkdir(parents=True, exist_ok=True); patched.with_name(patched.name + '.key').write_text(key + '\n')
+            with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot):
+                return nsp.region_check(REPO, self.ex, patched, self.tmp / 'work', {}, logs, game.Game(self.pdir))
+        g = check('a' * 64)
+        self.assertTrue(nsp.region_checked(g, patched))
+        self.derive(); self.assertTrue(nsp.region_checked(game.Game(self.pdir), patched))   # the derivation's inputs are unchanged: its stamp stays
+        patched.with_name(patched.name + '.key').write_text('b' * 64 + '\n')
+        self.assertFalse(nsp.region_checked(game.Game(self.pdir), patched))
+        g = check('b' * 64)
+        stamps = [l for l in g.table('game.tsv').read_text().splitlines() if l.startswith('# address regions: ')]
+        self.assertEqual(len(stamps), 1); self.assertTrue(stamps[0].endswith(f'(rewrite {"b" * 12})'))
+        self.assertNotIn('\n\n\n', g.table('game.tsv').read_text())
+
+    def test_region_check_sets_stdalloc_cap(self):   # set when the regions need it, worked out again by a later check, never over a value set by hand
+        with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x118000000\n')
+        self.derive(); patched = self.tmp / 'work/patched_v65536'; key = patched.with_name(patched.name + '.key')
+        key.parent.mkdir(parents=True); key.write_text('a' * 64 + '\n')
+        logs = self.tmp / 'logs'; logs.mkdir()
+        def boot(*args): (logs / 'region_check.log').write_text('>>> nnMain\n'); (logs / 'regions.tsv').write_text('0x4000000\t0xa00000000\tmain+0x10\t0\t-\t-\t0\n'); return 0
+        def check(need):
+            with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot), \
+                 mock.patch.object(nsp.pg, 'stdalloc_cap_needed', return_value=need) if not isinstance(need, Exception) else mock.patch.object(nsp.pg, 'stdalloc_cap_needed', side_effect=need):
+                return nsp.region_check(REPO, self.ex, patched, self.tmp / 'work', {}, logs, game.Game(self.pdir))
+        g = check(0xa4000000)
+        self.assertEqual(g.get('stdalloc_cap'), '0xa4000000'); self.assertTrue(nsp.checked_cap(g))
+        self.derive(); self.assertEqual(game.Game(self.pdir).get('stdalloc_cap'), '0xa4000000')   # a reused derivation keeps it
+        g = check(0xa2000000); self.assertEqual(g.get('stdalloc_cap'), '0xa2000000')
+        self.assertEqual(sum(l.startswith('stdalloc_cap\t') for l in g.table('game.tsv').read_text().splitlines()), 1)
+        g = check(None); self.assertFalse(g.values('stdalloc_cap'))   # no longer needed: the value it set goes
+        g = nsp.set_keys(g, {'stdalloc_cap': ('0xa0000000', 'by hand')}, 'Memory')
+        g = check(AssertionError('a value set by hand is checked, not worked out again'))
+        self.assertEqual(g.get('stdalloc_cap'), '0xa0000000')
+
     def test_rewrite_changes_update_auto_mem_used(self):
         self.derive(); g = game.Game(self.pdir); reg = game.Game(self.src)
         with mock.patch.object(nsp.pg, 'mem_used') as used:

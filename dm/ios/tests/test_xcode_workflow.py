@@ -229,8 +229,10 @@ class ImageStaging(unittest.TestCase):
                 result = subprocess.run(['bash', str(ios / 'tools/stage_resources.sh')], env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
             stage(); self.assertEqual((app / 'romfs.img').read_bytes(), image.read_bytes()); self.assertFalse((app / 'romfs').exists())
+            self.assertFalse((app / 'romfs.id').exists())   # the default build has no identity
             environment['DM_COPY_ROMFS'] = 'NO'; stage(); self.assertFalse((app / 'romfs.img').exists())
-            environment.pop('DM_COPY_ROMFS'); stage(); self.assertTrue((app / 'romfs.img').is_file())
+            self.assertTrue(romfs_image.same_identity((app / 'romfs.id').read_text(), romfs_image.identity(image)))   # the slim build names the image it needs
+            environment.pop('DM_COPY_ROMFS'); stage(); self.assertTrue((app / 'romfs.img').is_file()); self.assertFalse((app / 'romfs.id').exists())
 
 
 if __name__ == '__main__':

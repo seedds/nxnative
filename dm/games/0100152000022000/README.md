@@ -60,8 +60,11 @@ The game builds Mii heads from the console's MiiModel system data, starting at b
 
 ## Found on this game
 
+- **Resolved in the sanitizer audit:** [Unaligned command headers during layout probing](../../../docs/reference/audio.md#unaligned-command-headers-during-layout-probing), reproduced with the SDK 4 command-list fixture.
+
 - **Audio layout detection after incomplete startup lists (resolved):** [Incomplete startup lists must not select the command layout](../../../docs/reference/audio.md#incomplete-startup-lists-must-not-select-the-command-layout).
 - **Rumble on a DualShock 4-style controller (resolved, Mac):** a GameSir Cyclone takes the [DualShock 4 effects report](../../../docs/reference/services.md#dualshock-4-rumble-through-its-effects-report). The game holds its low band at 0.1–0.4 all race long, which rotating motors play as constant rumble; `DM_RUMBLE_MIN=0.45` leaves crashes and drifts ([low levels on rotating motors](../../../docs/reference/services.md#controller-haptic-engines-without-advanced-players), open).
+- **Fullscreen slowdown to 15 frames a second on an M4's ProMotion screen (#348, closed into #347):** the display link skipped refreshes at frame latency 1; latency 2 in fullscreen is the workaround: [Frame latency 2 for the display link in fullscreen](../../../docs/reference/frame-rate.md#frame-latency-2-for-the-display-link-in-fullscreen). Measured on TotK; not yet checked on this game.
 - **Save-write failure isolation (resolved; host regression):** the separate device and account saves make this game a relevant two-save case. Failure state, recovery and commit synchronization now belong to each backing transaction: [Save-write failures stay with their backing transaction](../../../docs/reference/services.md#save-write-failures-stay-with-their-backing-transaction).
 
 General host changes first needed here; each applies to every game:

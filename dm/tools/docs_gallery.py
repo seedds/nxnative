@@ -2,7 +2,7 @@
 # Writes the games gallery in README.md (between its gallery markers) from docs/images/gallery.tsv: one cell per row of the table, three to a row, in the table's order.
 # The table is the source: a new game is a row in it (usually at the end), so two pull requests that each add a game change one line each instead of moving every cell after
 # the first one; .gitattributes merges the table with the union driver. Columns: image (a file in docs/images), name (the caption and the image's alt text), note (the small
-# line under it: the IPA's size, then " · " and a remark if any; omit when the size is unknown) and, optionally, the base game's title ID, which links to its game note.
+# line under it, in small print like the caption: the IPA's size, then " · " and a remark if any; omit when the size is unknown) and, optionally, the base game's title ID, which links to its game note.
 # Run it after changing the table; --check only reports whether README.md is current (dm/tools/tests/test_docs.py runs it).
 # Usage: docs_gallery.py [--check]
 import html, pathlib, re, sys
@@ -39,8 +39,9 @@ def cell(image, name, note, tid):
     # Attributes use double quotes; apostrophes in existing captions need no escaping.
     image, name, note = (html.escape(s, quote=False).replace('"', '&quot;') for s in (image, name, note))
     caption = f'<a href="dm/games/{tid}/README.md">{name}</a>' if tid else name
-    detail = f'<br><sub>{note}</sub>' if note else ''   # a game whose IPA size is still open has only its caption
-    return f'<td align="center" valign="top" width="33%"><img src="docs/images/{image}" width="256" alt="{name}"><br>{caption}{detail}</td>'
+    detail = f'<br>{note}' if note else ''   # a game whose IPA size is still open has only its caption
+    # All in small print: GitHub keeps its own line height in a README, so smaller text is what makes the captions compact.
+    return f'<td align="center" valign="top" width="33%"><img src="docs/images/{image}" width="256" alt="{name}"><br><sub><b>{caption}</b>{detail}</sub></td>'
 
 
 def gallery():

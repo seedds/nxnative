@@ -36,3 +36,6 @@ MATCH_CUTS = {'main': [{'name': region, 'functions': [
     _function(0x37ca180, 1328, '6248aa2f59006b37f9af1690691000914210a3482e3a0defef56460c042cc43f'),
     _function(0x37caf10, 788, '846ba936f6b9870853808ed82d482ce0e104aa7ef300c692d79ca7d4837dd07b'),
 ]}]}
+
+# Whether a general rule could replace these patches (dm/tools/docs_patches.py lists it in docs/agents/game-patches.md)
+GENERALIZE = "Already function-matched for builds of the same code (MATCH_CUTS); the 62 GB region is the engine's own, so no general rule"

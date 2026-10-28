@@ -1,87 +1,87 @@
+---
 format_version: '26'
 default_step_lib_source: https://github.com/bitrise-io/bitrise-steplib.git
 project_type: other
-
 workflows:
   nxnative-cloud-build:
     triggers:
       tag:
-        - name:
-            regex: '^nxnative-build-[a-f0-9]+$'
+      - name:
+          regex: "^nxnative-build-[a-f0-9]+$"
     meta:
       bitrise.io:
         stack: osx-xcode-27.1.x-edge
-        machine_type_id: g2.mac.x-large
+        machine_type_id: g2.mac.large
     steps:
-      - git-clone@8: {}
-      - script@1:
-          title: Build NxNative IPA from encrypted game files
-          inputs:
-            - content: |-
-                #!/usr/bin/env bash
-                set -euo pipefail
+    - git-clone@8: {}
+    - script@1:
+        title: Build NxNative IPA from encrypted game files
+        inputs:
+        - content: |-
+            #!/usr/bin/env bash
+            set -euo pipefail
 
-                : "${NX_S3_BUCKET:?Set NX_S3_BUCKET in the Bitrise secret environment group}"
-                : "${AWS_DEFAULT_REGION:?Set AWS_DEFAULT_REGION in the Bitrise secret environment group}"
-                : "${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID in the Bitrise secret environment group}"
-                : "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY in the Bitrise secret environment group}"
-                : "${NX_AGE_IDENTITY:?Set NX_AGE_IDENTITY in the Bitrise secret environment group}"
-                : "${BITRISE_GIT_TAG:?This workflow must be started by an nxnative-build-* tag}"
+            : "${NX_S3_BUCKET:?Set NX_S3_BUCKET in the Bitrise secret environment group}"
+            : "${AWS_DEFAULT_REGION:?Set AWS_DEFAULT_REGION in the Bitrise secret environment group}"
+            : "${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID in the Bitrise secret environment group}"
+            : "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY in the Bitrise secret environment group}"
+            : "${NX_AGE_IDENTITY:?Set NX_AGE_IDENTITY in the Bitrise secret environment group}"
+            : "${BITRISE_GIT_TAG:?This workflow must be started by an nxnative-build-* tag}"
 
-                case "$BITRISE_GIT_TAG" in
-                  nxnative-build-*) BUILD_ID=${BITRISE_GIT_TAG#nxnative-build-} ;;
-                  *) echo "Unexpected build tag" >&2; exit 2 ;;
-                esac
-                case "$BUILD_ID" in
-                  *[!a-f0-9-]*|'') echo "Invalid build tag suffix" >&2; exit 2 ;;
-                esac
+            case "$BITRISE_GIT_TAG" in
+              nxnative-build-*) BUILD_ID=${BITRISE_GIT_TAG#nxnative-build-} ;;
+              *) echo "Unexpected build tag" >&2; exit 2 ;;
+            esac
+            case "$BUILD_ID" in
+              *[!a-f0-9-]*|'') echo "Invalid build tag suffix" >&2; exit 2 ;;
+            esac
 
-                INPUT_KEY="nxnative/incoming/${BUILD_ID}.tar.age"
-                OUTPUT_KEY="nxnative/outgoing/${BUILD_ID}.ipa"
-                STATUS_KEY="nxnative/status/${BUILD_ID}.txt"
-                INPUT_URI="s3://${NX_S3_BUCKET}/${INPUT_KEY}"
-                OUTPUT_URI="s3://${NX_S3_BUCKET}/${OUTPUT_KEY}"
-                STATUS_URI="s3://${NX_S3_BUCKET}/${STATUS_KEY}"
-                WORK_DIR=$(mktemp -d "${BITRISE_TMP_DIR:-/tmp}/nxnative.XXXXXX")
-                STATUS=failed
+            INPUT_KEY="nxnative/incoming/${BUILD_ID}.tar.age"
+            OUTPUT_KEY="nxnative/outgoing/${BUILD_ID}.ipa"
+            STATUS_KEY="nxnative/status/${BUILD_ID}.txt"
+            INPUT_URI="s3://${NX_S3_BUCKET}/${INPUT_KEY}"
+            OUTPUT_URI="s3://${NX_S3_BUCKET}/${OUTPUT_KEY}"
+            STATUS_URI="s3://${NX_S3_BUCKET}/${STATUS_KEY}"
+            WORK_DIR=$(mktemp -d "${BITRISE_TMP_DIR:-/tmp}/nxnative.XXXXXX")
+            STATUS=failed
 
-                finish() {
-                  RESULT=$?
-                  if [ "$RESULT" -eq 0 ]; then STATUS=done; fi
-                  printf '%s\n' "$STATUS" | aws s3 cp - "$STATUS_URI" --only-show-errors --sse AES256 >/dev/null 2>&1 || true
-                  rm -rf "$WORK_DIR"
-                  exit "$RESULT"
-                }
-                trap finish EXIT
+            finish() {
+              RESULT=$?
+              if [ "$RESULT" -eq 0 ]; then STATUS=done; fi
+              printf '%s\n' "$STATUS" | aws s3 cp - "$STATUS_URI" --only-show-errors --sse AES256 >/dev/null 2>&1 || true
+              rm -rf "$WORK_DIR"
+              exit "$RESULT"
+            }
+            trap finish EXIT
 
-                printf '%s\n' running | aws s3 cp - "$STATUS_URI" --only-show-errors --sse AES256
+            printf '%s\n' running | aws s3 cp - "$STATUS_URI" --only-show-errors --sse AES256
 
-                export DEVELOPER_DIR=/Applications/Xcode-27.1.0.app/Contents/Developer
-                xcodebuild -version | grep -q '^Xcode 27\.1$' || { echo "Xcode 27.1 is required" >&2; exit 1; }
-                xcodebuild -showComponent MetalToolchain | grep -q 'Status: installed' || { echo "Metal Toolchain is not installed" >&2; exit 1; }
-                xcodebuild -showsdks | grep -q 'iOS' || { echo "The iOS SDK is not installed" >&2; exit 1; }
+            export DEVELOPER_DIR=/Applications/Xcode-27.1.0.app/Contents/Developer
+            xcodebuild -version | grep -q '^Xcode 27\.1$' || { echo "Xcode 27.1 is required" >&2; exit 1; }
+            xcodebuild -showComponent MetalToolchain | grep -q 'Status: installed' || { echo "Metal Toolchain is not installed" >&2; exit 1; }
+            xcodebuild -showsdks | grep -q 'iOS' || { echo "The iOS SDK is not installed" >&2; exit 1; }
 
-                export HOMEBREW_NO_AUTO_UPDATE=1
-                brew install age awscli glslang xcodegen zstd
-                brew install --cask dotnet-sdk
+            export HOMEBREW_NO_AUTO_UPDATE=1
+            brew install age awscli glslang xcodegen zstd
+            brew install --cask dotnet-sdk
 
-                python3 -m venv "$WORK_DIR/venv"
-                PY="$WORK_DIR/venv/bin/python"
-                "$PY" -m pip install --disable-pip-version-check lz4 capstone fonttools nsz 'backports.zstd; python_version < "3.14"'
+            python3 -m venv "$WORK_DIR/venv"
+            PY="$WORK_DIR/venv/bin/python"
+            "$PY" -m pip install --disable-pip-version-check lz4 capstone fonttools nsz 'backports.zstd; python_version < "3.14"'
 
-                printf '%s\n' "$NX_AGE_IDENTITY" > "$WORK_DIR/age-identity.txt"
-                chmod 600 "$WORK_DIR/age-identity.txt"
-                mkdir "$WORK_DIR/input"
-                aws s3 cp "$INPUT_URI" - --only-show-errors \
-                  | age --decrypt --identity "$WORK_DIR/age-identity.txt" \
-                  | tar -xf - -C "$WORK_DIR/input"
-                rm -f "$WORK_DIR/age-identity.txt"
-                test -d "$WORK_DIR/input/game" || { echo "Input archive has no game folder" >&2; exit 1; }
-                test -s "$WORK_DIR/input/prod.keys" || { echo "Input archive has no prod.keys" >&2; exit 1; }
+            printf '%s\n' "$NX_AGE_IDENTITY" > "$WORK_DIR/age-identity.txt"
+            chmod 600 "$WORK_DIR/age-identity.txt"
+            mkdir "$WORK_DIR/input"
+            aws s3 cp "$INPUT_URI" - --only-show-errors \
+              | age --decrypt --identity "$WORK_DIR/age-identity.txt" \
+              | tar -xf - -C "$WORK_DIR/input"
+            rm -f "$WORK_DIR/age-identity.txt"
+            test -d "$WORK_DIR/input/game" || { echo "Input archive has no game folder" >&2; exit 1; }
+            test -s "$WORK_DIR/input/prod.keys" || { echo "Input archive has no prod.keys" >&2; exit 1; }
 
-                "$PY" scripts/build_ipa_from_nsp.py "$WORK_DIR/input/game" \
-                  -k "$WORK_DIR/input/prod.keys" \
-                  -o "$WORK_DIR/nxnative.ipa"
-                test -s "$WORK_DIR/nxnative.ipa" || { echo "NxNative did not produce an IPA" >&2; exit 1; }
-                aws s3 cp "$WORK_DIR/nxnative.ipa" "$OUTPUT_URI" --only-show-errors --sse AES256
-                STATUS=done
+            "$PY" scripts/build_ipa_from_nsp.py "$WORK_DIR/input/game" \
+              -k "$WORK_DIR/input/prod.keys" \
+              -o "$WORK_DIR/nxnative.ipa"
+            test -s "$WORK_DIR/nxnative.ipa" || { echo "NxNative did not produce an IPA" >&2; exit 1; }
+            aws s3 cp "$WORK_DIR/nxnative.ipa" "$OUTPUT_URI" --only-show-errors --sse AES256
+            STATUS=done

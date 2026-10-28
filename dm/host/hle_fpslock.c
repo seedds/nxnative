@@ -2,7 +2,6 @@
 // fps_target (DM_FPS_TARGET overrides; 0 = leave the game's own limit), the same key that drives Tears of the Kingdom's frame step (loader.c install_fps_state). Called on every present
 // (hle_nvn.c); the game sets the values after boot and may set them again, so each is written whenever it differs. Fixed addresses: each row runs only on the main build it was found in (AGENTS.md)
 #include "hle.h"
-#include <mach/mach.h>
 
 // What a field holds: the frame rate as a float or int32, vsyncs per frame (60 / frame rate) as an int32, or the frame time in milliseconds as a float. Copies: consecutive copies of the value
 // (Unreal keeps one for the game thread, one for the render thread). A row with no pointer (ptr_off 0) has its field at main + field: a constant in main's read-only data, which the loader
@@ -61,7 +60,7 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
-static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 0x1000 && vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n; }
+static int rd(uint64_t a, void *out, size_t n) { size_t got = 0; return a >= 0x1000 && !plat_mem_read(a, out, n, &got) && got == n; }
 
 void dm_fps_lock_tick(void) {
     static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target; static uint8_t *base; static const char *src;

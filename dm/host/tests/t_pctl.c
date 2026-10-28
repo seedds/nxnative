@@ -1,19 +1,20 @@
 // pctl free communication offline policy (hle_misc.c, from PR #38): the hooks are looked up by their mangled names in the real swforce registrations, so a missing or misspelled
 // takeover fails; no guest module, IPC session or system applet exists in this test
 #include "../hle_misc.c"
-#include <mach-o/getsect.h>
 
 static int unexpected, checks, fails;
 void *guest_sym(const char *name) { (void)name; unexpected++; return NULL; }
 module_t *module_of(const void *p) { (void)p; unexpected++; return NULL; }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; unexpected++; }
+#if DM_NATIVE_EXEC
 // The big-stack take-overs' stubs (HLE_FORCE_BIG) jump here with the implementation in x16; off a guest stack the real entry calls it straight
 __asm__(".text\n.p2align 2\n.globl _dm_bigstack_enter\n_dm_bigstack_enter:\n    br x16\n");
-extern const struct mach_header_64 _mh_execute_header;
+#endif   // otherwise HLE_FORCE_BIG registers the implementation itself (hle.h)
+PLAT_TABLE_DEFINE(swforce)   // the real forced registrations (on Apple: getsectiondata of __DATA,swforce)
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 static void *hook(const char *name) {
-    unsigned long bytes = 0;
-    const hle_force_ent *e = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &bytes);
+    size_t bytes = 0;
+    const hle_force_ent *e = (const hle_force_ent *)plat_table_swforce(&bytes);
     void *fn = NULL; unsigned count = 0;
     for (size_t i = 0; e && i < bytes / sizeof *e; i++) {
         if (strcmp(e[i].name, name)) continue;

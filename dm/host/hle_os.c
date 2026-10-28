@@ -2,7 +2,6 @@
 // (The former 136 HLE entries for nn::os/mem/lmem/C++ ABI have been deleted: the SDK brings its own nn::os, and at load time not one of these entries was resolved and used.)
 #include <pthread.h>
 #include "hle.h"
-#include <mach/mach_time.h>
 #include <stdatomic.h>
 
 // ---------- Side table ----------
@@ -36,11 +35,7 @@ void *objmap_del(const void *k) {
     pthread_mutex_unlock(&g_om_lock);
     return r;
 }
-uint64_t now_ns(void) {
-    static mach_timebase_info_data_t tb;
-    if (!tb.denom) mach_timebase_info(&tb);
-    return mach_absolute_time() * tb.numer / tb.denom;
-}
+uint64_t now_ns(void) { return plat_now_ns(); }
 // Guest clock: the system counters the guest can read (mrs cntpct gate, svc GetSystemTick) all go through here. Default = now_ns().
 // Freeze (only for the test driver DM_TICK_HOLD): while frozen the guest clock does not advance ⇒ the game's next tick never comes due; after unfreezing the frozen duration is subtracted, the guest clock is continuous with no jump
 // DM_DETCLOCK=<step ns> (for replay / test runs; product runs do not set it = wall clock): from the first present on the guest clock becomes "advance a fixed step per present", not following the wall clock --
@@ -96,14 +91,14 @@ void guest_clock_freeze(int on) { guest_clock_freeze_for(0, on); }
 // The two outlets (libc getentropy, svc GetInfo RandomEntropy) share one stream; the call count is reported in the log (first call and every 1000 calls)
 static _Atomic uint64_t g_detrng = 0x5357444554524e47ull; static _Atomic uint64_t g_detrng_n;
 uint64_t dm_entropy64(void) {
-    if (!detclock_cfg()) return ((uint64_t)arc4random() << 32) | arc4random();
+    if (!detclock_cfg()) return ((uint64_t)plat_random32() << 32) | plat_random32();
     uint64_t z = atomic_fetch_add(&g_detrng, 0x9E3779B97F4A7C15ull) + 0x9E3779B97F4A7C15ull;
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull; z ^= z >> 31;
     uint64_t n = atomic_fetch_add(&g_detrng_n, 1) + 1; if (n == 1 || n % 1000 == 0) LOG("DM_DETCLOCK: deterministic entropy call %llu", (unsigned long long)n);
     return z;
 }
 HLE("getentropy", int, g_getentropy, void *p, size_t n) {
-    if (!detclock_cfg()) { arc4random_buf(p, n); return 0; }
+    if (!detclock_cfg()) { plat_random_buf(p, n); return 0; }
     for (size_t i = 0; i < n; i += 8) { uint64_t v = dm_entropy64(); memcpy((uint8_t *)p + i, &v, n - i < 8 ? n - i : 8); }
     return 0;
 }

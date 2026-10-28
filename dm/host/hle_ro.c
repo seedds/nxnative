@@ -7,7 +7,6 @@
 // (on Horizon they become the module's memory; the game keeps them until UnloadModule).
 // Only success matters for the failures: the game checks IsSuccess only, so a failure code is a non-zero value under the ro module number 22.
 #include "hle.h"
-#include <CommonCrypto/CommonDigest.h>
 
 #define RO_FAIL ((Result)(22 | (1 << 9)))   // a failure under ro module 22
 #define RO_NOT_NRO ((Result)0x816)           // the SDK's result for an image without NRO0 (sdk+0x3471e8)
@@ -54,7 +53,7 @@ HLE_FORCE("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "load an NRO rewritten o
     const uint8_t *h = image;
     if (!h || memcmp(h + 0x10, "NRO0", 4)) return RO_NOT_NRO;
     uint32_t n = *(const uint32_t *)(h + 0x18);
-    uint8_t sha[32]; CC_SHA256(h, n, sha);
+    uint8_t sha[32]; plat_sha256(h, n, sha);
     char hx[17]; for (int k = 0; k < 8; k++) snprintf(hx + 2 * k, 3, "%02x", sha[k]);
     // Online SDKs are never loaded, whatever the game (dm/tools/nro_collect.py ONLINE_SDKS: Epic Online Services, known by its export EOS_Platform_Create). Hades and Hades II load
     // rom:/nro/EOSSDK-Switch-Shipping.nro for Epic-account cross-save (Auth, Connect, PlayerDataStorage), which the host cannot serve; the real SDK would at best fail its login and at

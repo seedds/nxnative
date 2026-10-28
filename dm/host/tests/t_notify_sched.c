@@ -29,7 +29,7 @@ static void notify(uint64_t unused) {
     // Exercise the real gate's deferred QoS update after a priority change before StartThread.
     uint64_t regs[32] = {0}; thr_svc_enter(regs, 0); thr_svc_leave();
     pthread_mutex_lock(&G);
-    assert(cur()->host_work == &dm_host_work && cur()->mport == pthread_mach_thread_np(pthread_self()));
+    assert(cur()->host_work == &dm_host_work && cur()->mport == plat_thread_self());   // Apple: pthread_mach_thread_np
     assert(!atomic_load(&cur()->qos_pending));
     pthread_mutex_unlock(&G);
     message=h_oe_PopMsg();
@@ -56,7 +56,11 @@ static void until_waiting(int count) {
 }
 int main(int argc, char **argv) {
     (void)argv;
+#if !defined(_WIN32)
     signal(SIGALRM,timeout);alarm(10);
+#else
+    (void)timeout;   // no alarm on Windows: CTest's timeout bounds the run there
+#endif
     unsetenv("DM_OE_SCRIPT");
     setenv("DM_PREEMPT", argc > 1 ? "1" : "0", 1);
     svc_thread_main_init();

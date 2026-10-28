@@ -9,15 +9,15 @@
 
 static int heap_mprotect(void *addr, size_t size, int prot);
 static _Noreturn void heap_abort(void);
-// Substitution is confined to this translation unit; production needs no test API.
-#define mprotect heap_mprotect
+// Substitution is confined to this translation unit; production needs no test API. hle_svc.c changes protections through plat_vm_protect (mprotect on POSIX)
+#define plat_vm_protect heap_mprotect
 #define abort heap_abort
 #ifndef HLE_SVC_SOURCE
 #define HLE_SVC_SOURCE "../hle_svc.c"
 #endif
 #include HLE_SVC_SOURCE
 #undef abort
-#undef mprotect
+#undef plat_vm_protect
 
 module_t *g_mod;
 int g_nmod;
@@ -48,7 +48,7 @@ static int heap_mprotect(void *addr, size_t size, int prot) {
     // The production state must not be published before the host operation.
     assert(g_heap_cur == old_size && regs[0] == sentinel && regs[1] == requested);
     if (injected_error) { errno = injected_error; return -1; }
-    return mprotect(addr, size, prot);
+    return plat_vm_protect(addr, size, prot);
 }
 static int correct_call(void) {
     int grow = requested > old_size;

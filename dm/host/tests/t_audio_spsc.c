@@ -21,7 +21,7 @@ void hle_signal_system_event(void *g) {
 }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 module_t *module_of(const void *p) { (void)p; return NULL; }   // call sites in the log: no guest modules in the unit test
-void dm_host_helper_qos(qos_class_t q) { (void)q; }   // hle_thread.c: the helper threads keep the default class in the unit test
+void dm_host_helper_qos(plat_qos_t q) { (void)q; }   // hle_thread.c: the helper threads keep the default class in the unit test
 
 typedef struct {
     void *out;
@@ -104,9 +104,9 @@ static int stop_pending(void) {
     atomic_store(&a->rel_head, UINT32_MAX-1); atomic_store(&a->rel_tail, UINT32_MAX-1);
     for (int i=0; i<5; i++) { buffers[i].ptr=bytes[i]; buffers[i].size=buffers[i].cap=8; if (!h_au_Append(out,&buffers[i])) return 1; }
     pull(a,played,sizeof played);   // one released buffer followed by a partly played one
-    a->rel_sem=dispatch_semaphore_create(0);
+    a->rel_sem=plat_sema_create(0);
     h_au_Stop(out);
-    int failed = h_au_BufCount(out)!=0 || a->pos!=0 || dispatch_semaphore_wait(a->rel_sem,dispatch_time(DISPATCH_TIME_NOW,100000000))!=0;
+    int failed = h_au_BufCount(out)!=0 || a->pos!=0 || plat_sema_wait(a->rel_sem,100000000)!=0;
     for (int i=0; i<5; i++) failed |= h_au_Released(out)!=&buffers[i];
     h_au_Stop(out); failed |= h_au_Released(out)!=NULL;
     // Buffers queued while stopped belong to the next Start; a repeated Stop keeps them.

@@ -8,6 +8,9 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifndef MINCORE_INCORE
+#define MINCORE_INCORE 1   // Linux: bit 0 of each mincore byte is "resident", Apple's MINCORE_INCORE
+#endif
 
 static int memory_mprotect(void *addr, size_t size, int prot);
 static _Noreturn void memory_abort(void);
@@ -19,13 +22,22 @@ static int memory_getpagesize(void) {
     return getpagesize();
 #endif
 }
-#define getpagesize memory_getpagesize
-#define mprotect memory_mprotect
+// The guest block reserved on a boundary of the emulated page, as a host with that page size reserves it (on 4 KiB hosts TEST_PAGE_16K needs 16 KiB alignment; with real 16 KiB pages it is the reservation itself)
+static void *memory_reserve(size_t n) {
+    size_t pg = (size_t)memory_getpagesize();
+    uint8_t *p = plat_vm_reserve(n + pg);
+    return p ? (void *)(((uintptr_t)p + pg - 1) & ~(uintptr_t)(pg - 1)) : NULL;
+}
+// hle_svc.c reaches the host through plat_page_size / plat_vm_protect / plat_vm_reserve (getpagesize / mprotect / mmap on POSIX)
+#define plat_page_size memory_getpagesize
+#define plat_vm_protect memory_mprotect
+#define plat_vm_reserve memory_reserve
 #define abort memory_abort
 #include "../hle_svc.c"
 #undef abort
-#undef mprotect
-#undef getpagesize
+#undef plat_vm_reserve
+#undef plat_vm_protect
+#undef plat_page_size
 
 static module_t test_modules[2];
 module_t *g_mod = test_modules;
@@ -200,7 +212,7 @@ static void ownership(void) {
     assert(!pages(0, alias, P) && !pages(1, alias, P));
     assert(*(uint8_t *)(alias + P) == 0x34);
     memset((void *)(stack + P), 0x76, 2 * P);
-    readonly_base = alias; readonly_size = memory_getpagesize();
+    readonly_base = (alias + P) & ~(uintptr_t)(memory_getpagesize() - 1); readonly_size = memory_getpagesize();   // the host page the copy back writes first (alias itself with 16 KiB pages)
     assert(!mprotect((void *)readonly_base, readonly_size, PROT_READ));
     assert(!unmap(stack + P, alias + P, 2 * P) && !readonly_size);
     for (size_t i = P; i < 3 * P; ++i) assert(((uint8_t *)alias)[i] == 0x76);
@@ -330,12 +342,12 @@ static void fragmented_queries(void) {
     assert(!pages(0, alias, N * P));
 }
 static void lazy_commit(void) {
-    size_t n = DM_GAME_APP_POOL - DM_GAME_MEM_USED, pg = memory_getpagesize();
-    char *resident = malloc(n / pg); assert(resident);
+    size_t n = DM_GAME_APP_POOL - DM_GAME_MEM_USED, pg = memory_getpagesize(), hp = (size_t)getpagesize();   // mincore reports real host pages (TEST_PAGE_16K on a 4 KiB host)
+    char *resident = malloc(n / hp); assert(resident);
     assert(!pages(1, alias, n));
-    assert(!mincore((void *)alias, n, resident));
+    assert(!mincore((void *)alias, n, (void *)resident));
     size_t count = 0;
-    for (size_t i = 0; i < n / pg; ++i) count += !!(resident[i] & MINCORE_INCORE);
+    for (size_t i = 0; i < n / hp; ++i) count += !!(resident[i] & MINCORE_INCORE);
     assert(count < 32); // metadata scans must not fault the anonymous backing in
     ((uint8_t *)alias)[0] = 0x98;
     assert(!pages(0, alias, pg) && !pages(1, alias, pg));

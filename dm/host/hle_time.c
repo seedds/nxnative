@@ -19,7 +19,7 @@ HLE_FORCE("_ZN2nn4time10InitializeEv", "connect to the time service; clocks come
 HLE_FORCE("_ZN2nn4time13IsInitializedEv", "the time service is taken over, always initialized", int, h_time_IsInitialized, void) { return 1; }
 // Steady clock (seconds since boot + a clock source ID, a 16-byte UUID): the host's monotonic seconds with a fixed source ID. GetSpanBetween runs as is in sdk: it subtracts only when the source IDs match
 HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock → host monotonic clock (seconds), fixed source ID", Result, h_time_SteadyNow, uint8_t *out) {
-    int64_t s = (int64_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1000000000ull);
+    int64_t s = (int64_t)(plat_boot_ns() / 1000000000ull);
     memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock (the free function form, SDK 20) → host monotonic clock", Result, h_time_SteadyNowFn, uint8_t *out) { return h_time_SteadyNow(out); }
@@ -63,13 +63,29 @@ HLE_FORCE("_ZN2nn4time23StandardUserSystemClock3nowEv", "user clock → host tim
     int64_t ft = fixed_time(); return ft >= 0 ? ft : time(NULL); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock9to_time_tERKNSt3__16chrono10time_pointINS0_17SystemClockTraitsENS3_8durationIlNS2_5ratioILl1ELl1EEEEEEE",
           "the SDK implementation pairs with now(), taken over with it", int64_t, h_time_to_time_t, const int64_t *tp) { return *tp; }
+// The zone name and UTC offset of a local time: struct tm's tm_zone / tm_gmtoff (Apple, glibc); Windows' C runtime has neither, so the offset is the local fields read as UTC less t
+static const char *tm_zone_of(const struct tm *tm) {
+#if defined(_WIN32)
+    (void)tm; return NULL;
+#else
+    return tm->tm_zone;
+#endif
+}
+static long tm_offset_of(const struct tm *tm, time_t t) {
+#if defined(_WIN32)
+    struct tm c = *tm; return (long)(timegm(&c) - t);
+#else
+    (void)t; return tm->tm_gmtoff;
+#endif
+}
 HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeE",
           "time zone rules of the time service; uses the host localtime_r instead", Result, h_time_ToCalendarTime, CalendarTime *ct, CalendarAdditionalInfo *ai, const int64_t *pt) {
     time_t t = *pt; struct tm tm; localtime_r(&t, &tm);
-    static int once; if (!once++) LOG("ToCalendarTime: first conversion %lld → %04d-%02d-%02d %02d:%02d (time zone %s, offset %ld s)", (long long)t, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_zone ? tm.tm_zone : "?", (long)tm.tm_gmtoff);
+    const char *zone = tm_zone_of(&tm); long off = tm_offset_of(&tm, t);
+    static int once; if (!once++) LOG("ToCalendarTime: first conversion %lld → %04d-%02d-%02d %02d:%02d (time zone %s, offset %ld s)", (long long)t, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, zone ? zone : "?", off);
     if (ct) *ct = (CalendarTime){(int16_t)(tm.tm_year + 1900), (int8_t)(tm.tm_mon + 1), (int8_t)tm.tm_mday, (int8_t)tm.tm_hour, (int8_t)tm.tm_min, (int8_t)tm.tm_sec, 0};
-    if (ai) { memset(ai, 0, sizeof *ai); ai->wday = tm.tm_wday; ai->yday = tm.tm_yday; strlcpy(ai->tzname, tm.tm_zone ? tm.tm_zone : "UTC", sizeof ai->tzname);
-              ai->dst = tm.tm_isdst > 0; ai->offset = (int32_t)tm.tm_gmtoff; }
+    if (ai) { memset(ai, 0, sizeof *ai); ai->wday = tm.tm_wday; ai->yday = tm.tm_yday; strlcpy(ai->tzname, zone ? zone : "UTC", sizeof ai->tzname);
+              ai->dst = tm.tm_isdst > 0; ai->offset = (int32_t)off; }
     return RES_OK;
 }
 // Explicit time zone rules (Monster Hunter Rise, SDK 11): LoadTimeZoneRule reads the rule from the time service; the host keeps the game's rule buffer untouched and converts with localtime_r as above

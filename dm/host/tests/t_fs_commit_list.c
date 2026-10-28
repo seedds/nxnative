@@ -7,12 +7,11 @@ static int fake_ftruncate(int fd, off_t size);
 #include "../hle_fs.c"
 #undef pwrite
 #undef ftruncate
-#include <mach-o/getsect.h>
 ssize_t pwrite(int, const void *, size_t, off_t);
 int ftruncate(int, off_t);
 
 struct dm_flags g_flag; uint64_t g_t0_ns;
-uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+uint64_t now_ns(void) { return plat_boot_ns(); }
 void dm_prof_add(int id, uint64_t ns, uint64_t b) { (void)id; (void)ns; (void)b; }
 void dm_guest_write_prepare(void *a, size_t n) { (void)a; (void)n; }
 extern int g_nfail;
@@ -98,10 +97,10 @@ static void *commit_during_io(void *arg) {
     pthread_mutex_unlock(&io_lock);
     return NULL;
 }
-extern const struct mach_header_64 _mh_execute_header;
+PLAT_TABLE_DEFINE(swforce)   // the real forced registrations (on Apple: getsectiondata of __DATA,swforce)
 static Result (*list_hook(void))(const char *const *, int) {
-    unsigned long bytes = 0;
-    const hle_force_ent *e = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &bytes);
+    size_t bytes = 0;
+    const hle_force_ent *e = (const hle_force_ent *)plat_table_swforce(&bytes);
     for (size_t i = 0; e && i < bytes / sizeof *e; i++)
         if (!strcmp(e[i].name, "_ZN2nn2fs6CommitEPKPKci")) return e[i].fn;
     return NULL;
@@ -168,7 +167,11 @@ int main(void) {
     CHECK(mount("rom", root, 1) == RES_OK, "mount non-save input"); const char *non_save[] = {"save", "rom"};
     CHECK(commit(non_save, 2) != RES_OK && same(path, "post-alias"), "read-only mount cannot produce partial success");
     CHECK(dm_fs_commit_count() == n, "rejected/empty lists do not publish");
+#if defined(_WIN32)
+    if (0) {   // a POSIX mode on the folder cannot refuse the snapshot on Windows: the branch below is skipped
+#else
     if (geteuid() != 0) {
+#endif
         CHECK(chmod(root, 0500) == 0, "refuse creation of commit snapshot");
         Result denied = commit(one, 1); chmod(root, 0700);
         CHECK(denied != RES_OK && same(path, "post-alias") && dm_fs_commit_count() == n, "clone failure propagates; committed data unchanged");

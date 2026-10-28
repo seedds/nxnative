@@ -1,14 +1,12 @@
 // Horizon kernel system calls (triggered by the SDK runtime once the SDK is loaded). Only what the P1 boot chain needs is implemented: memory layout + heap + query + debug output + timing.
 // Register convention: inputs w1.. / outputs w0=Result, x1=value (GetInfo / SetHeapSize), consistent with the public Horizon ABI.
 #include "dm.h"
-#include <sys/mman.h>
 #include <errno.h>
 #include <unistd.h>
 #include <unistd.h>
 #include <sched.h>
 #include <time.h>
 #include <stdatomic.h>
-#include <mach/mach.h>
 
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
 // It only takes address space, not memory.
@@ -32,7 +30,7 @@ int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_
 static void *alias_windows_thread(void *arg);
 static void *regions_thread(void *arg);
 static void mem_init_once(void) {
-    size_t pg = (size_t)getpagesize();
+    size_t pg = (size_t)plat_page_size();
     if (RESERVE < 0x10000000 || DM_GAME_MEM_ALIAS > RESERVE - 0x10000000 ||
         DM_GAME_MEM_STACK > RESERVE - 0x10000000 - DM_GAME_MEM_ALIAS ||
         ((RESERVE | DM_GAME_MEM_ALIAS | DM_GAME_MEM_STACK) & (pg - 1)))
@@ -42,8 +40,8 @@ static void mem_init_once(void) {
     size_t alias = DM_GAME_MEM_ALIAS; const char *as = getenv("DM_ALIAS_SIZE");
     if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
     g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
-    g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (g_as == MAP_FAILED) die("reserve guest AS");
+    g_as = plat_vm_reserve(g_reserve);
+    if (!g_as) die("reserve guest AS");
     // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 1.625 GB.
     // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
     // SMBW also defines a 1792000 KB (1.75 GB) VirtualAddressMemory in HeapDef (System/HeapSize): it is subtracted from the memory pool before the heap is opened (SetHeapSize asks for only 0x5be00000),
@@ -159,7 +157,7 @@ static void alias_query(uint64_t addr, uint64_t *base, uint64_t *size, int *mapp
 // Initialize holes using the OLD commit bitmap. Fresh anonymous host pages stay
 // lazy; after any exposure, even an untouched 4 KiB sibling may hold stale bytes.
 static void alias_initialize(uint64_t off, size_t size) {
-    size_t pg = (size_t)getpagesize(), ratio = pg >> 12;
+    size_t pg = (size_t)plat_page_size(), ratio = pg >> 12;
     uint64_t end = (off + size) >> 12;
     for (uint64_t p = off >> 12; p < end;) {
         int mapped = (atomic_load(&g_alias_bits[p >> 6]) >> (p & 63)) & 1;
@@ -286,8 +284,8 @@ static void guest_caller(const uint64_t *r, char *buf, size_t n, uint64_t *via) 
     *via = 0;
     for (int i = 0; i < 32 && m && !strcmp(m->name, "sdk"); i++) {
         *via = lr - (uint64_t)(uintptr_t)m->base;   // AArch64 frame records: [fp] = the caller's fp, [fp + 8] = its return address
-        uint64_t rec[2]; vm_size_t got = 0;   // read safely: static constructors run on the host's main thread, whose stack is outside the guest block
-        if (!fp || (fp & 15) || vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof rec, (vm_address_t)rec, &got) || got != sizeof rec) break;
+        uint64_t rec[2]; size_t got = 0;   // read safely: static constructors run on the host's main thread, whose stack is outside the guest block
+        if (!fp || (fp & 15) || plat_mem_read(fp, rec, sizeof rec, &got) || got != sizeof rec) break;
         lr = rec[1]; fp = rec[0]; m = module_of((void *)(uintptr_t)lr);
     }
     if (m) snprintf(buf, n, "%s+%#llx", m->name, (unsigned long long)(lr - (uint64_t)(uintptr_t)m->base));
@@ -370,7 +368,7 @@ static void bits_span(const uint64_t *b, uint64_t lo, uint64_t hi, int64_t *firs
 // the sdk offset it came through
 static void *regions_thread(void *arg) {
     const char *path = arg; char tmp[1024]; snprintf(tmp, sizeof tmp, "%s.partial", path);
-    uint64_t hpg = (uint64_t)getpagesize();
+    uint64_t hpg = (uint64_t)plat_page_size();
     for (;;) {
         FILE *f = fopen(tmp, "w");
         if (f) {
@@ -423,8 +421,8 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             pthread_mutex_unlock(&g_map_lock); regs[0] = 0x10801; return 0;
         }
         int rc = 0;
-        if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
-        else if (size < g_heap_cur) rc = mprotect(g_heap + size, g_heap_cur - size, PROT_NONE);
+        if (size > g_heap_cur) rc = plat_vm_protect(g_heap + g_heap_cur, size - g_heap_cur, PLAT_PROT_READ | PLAT_PROT_WRITE);
+        else if (size < g_heap_cur) rc = plat_vm_protect(g_heap + size, g_heap_cur - size, PLAT_PROT_NONE);
         if (rc) die("SetHeapSize mprotect failed: req=%#zx errno=%d", size, errno);
         if (g_flag.svc) LOG("SetHeapSize %#zx -> base %p mprotect=%d errno=%d", size, g_heap, rc, errno);
         else if (size > g_heap_cur) LOG("[mem] heap %.2f GB (heap region %.2f GB)", size / 1073741824.0, g_heap_cap / 1073741824.0);
@@ -448,9 +446,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         else if (g_nmap == MAX_MAP) result = 0xCE01;
         if (result) { pthread_mutex_unlock(&g_map_lock); regs[0] = result; LOG("[RED] MapMemory refused (%#x): %#llx <- %#llx +%#llx", result, (unsigned long long)dst, (unsigned long long)src, (unsigned long long)size); return 0; }
         // Apple pages are 16K, Horizon pages 4K: the accessible region is extended to a 16K boundary (the extra pages opened are unused pages of the same region, semantics unaffected)
-        uint64_t mask = (size_t)getpagesize() - 1;
+        uint64_t mask = (size_t)plat_page_size() - 1;
         uint64_t lo = dst & ~mask, hi = (dst + size + mask) & ~mask;
-        if (mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE)) die("MapMemory mprotect errno=%d", errno);
+        if (plat_vm_protect((void *)lo, hi - lo, PLAT_PROT_READ | PLAT_PROT_WRITE)) die("MapMemory mprotect errno=%d", errno);
         dm_guest_write_prepare((void *)lo, hi - lo);
         memcpy((void *)dst, (void *)src, size);   // move semantics: the source region is not accessed while mapped (Horizon makes it inaccessible)
         map_add(dst, size, src, 0x0B /*MappedMemory*/);
@@ -531,7 +529,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             // The address lies in "the current host thread's stack": report the whole stack (state 0xB = stack). When the SDK initializes the main thread record it queries here with the sp at that moment and takes the reported range as the main thread stack;
             // later nn::os::GetCurrentStackInfo asserts that sp is still inside that range and aborts if not. Previously every address outside the guest address space was reported as "the 4 KiB page containing it",
             // so the main thread stack was recorded as one page. Whether the sp at init and a later sp share a page depends on the absolute position of the host stack top, which moves with the total length of environment variables / launch arguments (a different environment occasionally aborts at startup).
-            uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self()), ssz = pthread_get_stacksize_np(pthread_self());
+            uint64_t top = 0, ssz = 0; plat_thread_stack(&top, &ssz);
             if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
             // Other host memory: report "free, no permissions" (the 4 KiB page around it) as Horizon does for unmapped addresses. It used to report Code+RX, and GetExceptionInfo walking back from main merged on through host memory down to 0
             else { base=addr & ~0xFFFull; size=0x1000; state=0/*Free*/; perm=0; } }
@@ -573,7 +571,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         }
         // Host pages are 16 KB, Horizon pages 4 KB: a map is rounded out to host pages (the extra neighboring 4K pages are inside the alias region and merely become writable early, harmless);
         // An edge host page is reclaimed only when no live logical neighbor remains.
-        uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)a, hi = (uintptr_t)a + size;
+        uintptr_t pg = (uintptr_t)plat_page_size(), lo = (uintptr_t)a, hi = (uintptr_t)a + size;
         uintptr_t mlo = lo & ~(pg - 1), mhi = (hi + pg - 1) & ~(pg - 1);
         int commit = num == 0x2C;
         int64_t changed = commit ? need : (int64_t)size - need;
@@ -582,10 +580,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             if ((mhi - hi) / 4096 != (uint64_t)alias_unmapped(hi - (uintptr_t)g_alias, mhi - hi)) mhi -= pg;
         }
         if (changed && mhi > mlo) {
-            if (mprotect((void *)mlo, mhi - mlo, commit ? PROT_READ | PROT_WRITE : PROT_NONE))
+            if (plat_vm_protect((void *)mlo, mhi - mlo, commit ? PLAT_PROT_READ | PLAT_PROT_WRITE : PLAT_PROT_NONE))
                 die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, errno);
             if (commit) dm_guest_write_prepare((void *)mlo, mhi - mlo);
-            else (void)madvise((void *)mlo, mhi - mlo, MADV_FREE);
+            else (void)plat_vm_discard((void *)mlo, mhi - mlo);
         }
         if (commit && changed) alias_initialize(off, size);
         if (g_flag.svc) LOG("%sPhysicalMemory %p+%#zx", commit ? "Map" : "Unmap", (void *)a, size);

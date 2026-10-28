@@ -1,0 +1,14 @@
+# Linux build and test environment for the portable host (dm/host/CMakeLists.txt): docker/README.md has the commands.
+# Ubuntu 24.04, pinned by digest; LLVM 18 (the distribution's clang / lld), CMake 3.28, Ninja, Python 3.12
+FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18 cmake ninja-build python3 git ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100 \
+ && update-alternatives --install /usr/bin/cc cc /usr/bin/clang-18 100 \
+ && update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-18 100
+ENV CC=clang
+# The worktree is mounted at /src; git refuses repositories owned by another user without this
+RUN git config --global --add safe.directory '*'
+WORKDIR /src

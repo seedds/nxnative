@@ -9,6 +9,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
+if spec is None or spec.loader is None: raise ImportError('scripts/build_ipa_from_nsp.py')
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 
 

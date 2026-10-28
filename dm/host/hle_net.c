@@ -3,6 +3,14 @@
 #include "hle_net.h"
 #include <pthread.h>
 #include <stdatomic.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_socket_Initialize, const void *cfg) { (void)cfg; return RES_OK; }
 // SDK 21 (Star Fox) inlines nn::socket::Initialize(const Config &) into the game, and the service connection is this call
@@ -25,10 +33,14 @@ HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "offline: on hold for the fir
     while (h > 0 && !atomic_compare_exchange_weak(&g_nifm_hold, &h, h - 1)) {}
     return h > 0;
 }
-HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "offline: the network is always unavailable", int, h_nifm_Available, void) { return 0; }
-// Returns bool (`and w0, w0, #1`, Metroid Dread's sdk+0x336210): whether the system's network screen resolved the error
-HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "offline: not resolved, shows no system network screen", unsigned, h_nifm_HandleErr, void) { return 0; }
-HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "offline: no IP", Result, h_nifm_GetIp, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
+HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "offline: always unavailable / DM_NET=1: the host's own connectivity", int, h_nifm_Available, void) { return dm_net_online() && dm_net_own_ip() ? 1 : 0; }
+// Returns bool (`and w0, w0, #1`, Metroid Dread's sdk+0x336210): whether the system's network screen resolved the error.
+// Neither socket mode presents that system screen, so neither can report it resolved.
+HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "not resolved, shows no system network screen (offline or DM_NET=1)", unsigned, h_nifm_HandleErr, void) { return 0; }
+HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "offline: no IP / DM_NET=1: the probed interface", Result, h_nifm_GetIp, uint32_t *a) {
+    if (!dm_net_online() || !dm_net_own_ip()) { if (a) *a = 0; return RES_FAIL; }
+    *a = dm_net_own_ip(); return RES_OK;
+}
 HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "offline: no proxy setting", Result, h_nifm_GetProxy, void *p) { (void)p; return RES_FAIL; }
 HLE_FORCE("nnsslInitialize", "connects to the ssl service; the network library's global init needs it to succeed, offline creates no session (cut)", Result, h_ssl_Initialize, void) { return RES_OK; }
 HLE_FORCE("nnsslFinalize", "pairs with nnsslInitialize (cut)", Result, h_ssl_Finalize, void) { return RES_OK; }
@@ -42,7 +54,11 @@ static __thread int t_skerr = SK_ENETDOWN;
 static int sk_error(int error) { t_skerr = error; return -1; }
 static int sk_fail(void) { return sk_error(SK_ENETDOWN); }
 int dm_sk_errno(void) { return t_skerr; }
-#define SKF(m, cname, ...) HLE_FORCE(m, "local BSD descriptor service; remote networking unavailable", int, cname, __VA_ARGS__)
+static int net_listen(int s, int n);
+static int net_accept(int s, void *a, unsigned *n);
+int dm_sk_listen(int s, int n) { return dm_net_online() ? net_listen(s, n) : sk_fail(); }
+int dm_sk_accept(int s, void *a, unsigned *n) { return dm_net_online() ? net_accept(s, a, n) : sk_fail(); }
+#define SKF(m, cname, ...) HLE_FORCE(m, "local BSD descriptor service; remote networking unavailable / DM_NET=1: the host's own sockets", int, cname, __VA_ARGS__)
 void dm_guest_sleep_ns(int64_t ns);
 void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns);
 static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000); return 0; }
@@ -77,11 +93,222 @@ static int efd_create(uint64_t v, int flags) {
     if (fd >= 0) { g_efd[fd].count = v; g_efd[fd].flags = flags; }
     pthread_mutex_unlock(&g_efd_m); return fd;
 }
+// ---------- DM_NET=1: real sockets (the default stays offline: without the flag every game keeps the behaviour above) ----------
+// The guest descriptor is a host descriptor. Horizon's SockAddr has no sin_len — family u16 at 0 (AF_INET = 2, the host's
+// own number), the port big-endian at 2, the address at 4 — where the host's has sin_len first, so addresses cross through
+// an explicit conversion. PollFd and the fd_set bits match the host's layouts, and the host is BSD, so the errno numbering
+// is the guest's. DM_NET_PEERS=ip,ip,… replicates a send to a broadcast-style address (255.255.255.255, the interface's own
+// IP, or its /24's .255) as unicast to each peer: a Tailscale tailnet carries no L2 broadcast, so a game's LAN discovery
+// rides on this. nifm (below) reports the probed interface with a /24 subnet, which puts a game's directed-broadcast
+// address inside the same patterns.
+int dm_net_online(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NET"); v = e && atoi(e); } return v; }
+enum { SK_MAX_PEERS = 16 };
+static in_addr_t sk_peers[SK_MAX_PEERS];
+static int sk_npeers = -1;
+static in_addr_t sk_own_ip;          // the interface unicast leaves through (dm_net_own_ip); 0 = unknown
+static uint8_t sk_own_logged;
+
+static int sk_peer_count(void) {
+    if (sk_npeers < 0) {
+        sk_npeers = 0;
+        const char *p = getenv("DM_NET_PEERS");
+        while (p && *p && sk_npeers < SK_MAX_PEERS) {
+            char buf[40]; const char *q = strchr(p, ',');
+            size_t n = q ? (size_t)(q - p) : strlen(p);
+            if (n < sizeof buf) {
+                memcpy(buf, p, n); buf[n] = 0;
+                struct in_addr a;
+                if (inet_pton(AF_INET, buf, &a) == 1) sk_peers[sk_npeers++] = a.s_addr;
+                else LOG("[RED] DM_NET_PEERS: %s is not an IPv4 address", buf);
+            }
+            p = q ? q + 1 : p + strlen(p);
+        }
+    }
+    return sk_npeers;
+}
+
+uint32_t dm_net_own_ip(void) {   // a connected UDP socket's local address: the route unicast would take, no packets sent
+    if (!sk_own_ip && dm_net_online()) {
+        int s = (int)socket(AF_INET, SOCK_DGRAM, 0);
+        if (s >= 0) {
+            struct sockaddr_in a = {0}; a.sin_len = sizeof a; a.sin_family = AF_INET; a.sin_port = htons(53);   // connect needs a port; UDP connect sends nothing, it only picks the route
+            const char *e = getenv("DM_NET_PROBE");   // what to route to: the first peer by default, else the system's own route (8.8.8.8)
+            a.sin_addr.s_addr = e ? inet_addr(e) : (sk_peer_count() ? sk_peers[0] : inet_addr("8.8.8.8"));
+            if (!connect(s, (struct sockaddr *)&a, sizeof a)) {
+                socklen_t l = sizeof a; struct sockaddr_in l4 = {0};
+                if (!getsockname(s, (struct sockaddr *)&l4, &l)) sk_own_ip = l4.sin_addr.s_addr;
+            }
+            close(s);
+        }
+        if (sk_own_ip && !sk_own_logged) {
+            sk_own_logged = 1;
+            struct in_addr i = {sk_own_ip}; char ip[INET_ADDRSTRLEN] = "";
+            inet_ntop(AF_INET, &i, ip, sizeof ip);
+            LOG("DM_NET: the game's sockets are the host's own (interface %s, %d peer(s))", ip, sk_peer_count());
+        }
+    }
+    return sk_own_ip;
+}
+
+void dm_net_ipconfig(uint32_t *ip, uint32_t *mask, uint32_t *gw, uint32_t *d0, uint32_t *d1) {   // nifm's IpConfigInfo; the /24 mask lands a game's directed broadcast inside the replication patterns
+    uint32_t own = dm_net_own_ip();
+    if (ip) *ip = own;
+    if (mask) *mask = own ? htonl(0xffffff00u) : 0;
+    if (gw) *gw = 0;
+    if (d0) *d0 = 0;
+    if (d1) *d1 = 0;
+}
+
+static void sk_host_addr(struct sockaddr_in *h, const void *g) {   // Horizon SockAddr → the host's (which has sin_len first)
+    memset(h, 0, sizeof *h);
+    h->sin_len = sizeof *h; h->sin_family = AF_INET;
+    memcpy(&h->sin_port, (const char *)g + 2, 2);
+    memcpy(&h->sin_addr, (const char *)g + 4, 4);
+}
+static void sk_guest_addr(void *g, unsigned *gl, const struct sockaddr_in *h) {   // and back (family 2, no sin_len)
+    uint8_t o[16] = {0};
+    o[0] = 2;   // AF_INET as the guest's u16 family
+    memcpy(o + 2, &h->sin_port, 2);
+    memcpy(o + 4, &h->sin_addr, 4);
+    memcpy(g, o, 16);
+    if (gl) *gl = 16;
+}
+static int sk_is_broadcast(const struct sockaddr_in *d) {   // 255.255.255.255 / the interface's own IP / its /24's .255
+    if (d->sin_addr.s_addr == INADDR_BROADCAST || !d->sin_addr.s_addr) return 1;
+    uint32_t own = sk_own_ip, ip = d->sin_addr.s_addr;
+    return own && (ip == own || ((ip & htonl(0xffffff00u)) == (own & htonl(0xffffff00u)) && (ip & htonl(0x000000ffu)) == htonl(0x000000ffu)));
+}
+
+static int net_socket(int fam, int type, int proto) {
+    if (fam != 2) { t_skerr = 47; return -1; }   // EAFNOSUPPORT: AF_INET for now (a game's Inet6 is not wired)
+    int s = (int)socket(AF_INET, type, proto ? proto : 0);
+    if (s < 0) { t_skerr = errno; return -1; }
+    if (type == 2) { int one = 1; setsockopt(s, SOL_SOCKET, SO_BROADCAST, &one, sizeof one); }   // a game sending to 255.255.255.255 expects that to work as on hardware
+    t_skerr = 0; return s;
+}
+static int sk_addr_ok(const void *a, unsigned n, struct sockaddr_in *h) {
+    if (n < 8 || ((const uint16_t *)a)[0] != 2) { t_skerr = 47; return 0; }
+    sk_host_addr(h, a); return 1;
+}
+static int net_bind(int s, const void *a, unsigned n) {
+    struct sockaddr_in h; if (!sk_addr_ok(a, n, &h)) return -1;
+    int rc = bind(s, (struct sockaddr *)&h, sizeof h);
+    t_skerr = rc < 0 ? errno : 0; return rc;
+}
+static int net_connect(int s, const void *a, unsigned n) {
+    struct sockaddr_in h; if (!sk_addr_ok(a, n, &h)) return -1;
+    int rc = connect(s, (struct sockaddr *)&h, sizeof h);
+    t_skerr = rc < 0 ? errno : 0; return rc;
+}
+static int net_listen(int s, int n) {
+    int rc = listen(s, n); t_skerr = rc < 0 ? errno : 0; return rc;
+}
+static int net_accept(int s, void *a, unsigned *n) {
+    struct sockaddr_in h = {0}; socklen_t l = sizeof h;
+    int r = (int)accept(s, (struct sockaddr *)&h, &l);
+    if (r >= 0) { t_skerr = 0; if (a && n && *n >= 16) sk_guest_addr(a, NULL, &h); }
+    else t_skerr = errno;
+    return r;
+}
+static int net_close(int s) {
+    int rc = close(s); t_skerr = rc < 0 ? errno : 0; return rc;
+}
+static int net_shutdown(int s, int how) {
+    int rc = shutdown(s, how); t_skerr = rc < 0 ? errno : 0; return rc;
+}
+static int net_name(int s, void *a, unsigned *n, int peer) {   // GetPeerName (1) / GetSockName (0)
+    struct sockaddr_in h = {0}; socklen_t l = sizeof h;
+    int rc = peer ? getpeername(s, (struct sockaddr *)&h, &l) : getsockname(s, (struct sockaddr *)&h, &l);
+    if (rc >= 0) { t_skerr = 0; if (a && n && *n >= 16) sk_guest_addr(a, n, &h); }
+    else t_skerr = errno;
+    return rc;
+}
+static int net_sockopt(int s, int l, int o, const void *v, unsigned *n, int set) {
+    if (l != 0xffff) { t_skerr = 42; return -1; }   // ENOPROTOOPT: nn::socket::Level Socket = 0xffff = the host's SOL_SOCKET; the other levels (IP options) are not wired
+    socklen_t hl = n ? *n : 0;
+    int rc = set ? setsockopt(s, SOL_SOCKET, o, v, n ? *n : 0) : getsockopt(s, SOL_SOCKET, o, (void *)v, &hl);
+    if (!set && n) *n = hl;
+    t_skerr = rc < 0 ? errno : 0; return rc;
+}
+static int net_fcntl(int s, int c, long a) {
+    if (c == 3) {   // F_GETFL: O_NONBLOCK is 0x800 on Horizon, 4 here
+        int rc = fcntl(s, F_GETFL);
+        if (rc < 0) { t_skerr = errno; return -1; }
+        t_skerr = 0; return (rc & O_NONBLOCK) ? (rc & ~O_NONBLOCK) | 0x800 : rc;
+    }
+    if (c == 4) {   // F_SETFL
+        int rc = fcntl(s, F_SETFL, (a & 0x800) ? O_NONBLOCK : 0);
+        t_skerr = rc < 0 ? errno : 0; return rc;
+    }
+    t_skerr = 22; return -1;   // EINVAL: the other commands are not wired
+}
+static long net_send(int s, const void *b, unsigned long n, int f) {
+    long r = send(s, b, n, f); t_skerr = r < 0 ? errno : 0; return r;
+}
+static long net_recv(int s, void *b, unsigned long n, int f) {
+    long r = recv(s, b, n, f); t_skerr = r < 0 ? errno : 0; return r;
+}
+static long net_sendto(int s, const void *b, unsigned long n, int f, const void *a, unsigned al) {
+    struct sockaddr_in d; if (!sk_addr_ok(a, al, &d)) return -1;
+    long r = sendto(s, b, n, f, (struct sockaddr *)&d, sizeof d);
+    int peers = sk_peer_count();
+    if (peers && sk_is_broadcast(&d)) {
+        for (int i = 0; i < peers; i++) {
+            if (sk_peers[i] == d.sin_addr.s_addr) continue;
+            struct sockaddr_in p = {0}; p.sin_len = sizeof p; p.sin_family = AF_INET;
+            p.sin_port = d.sin_port; p.sin_addr.s_addr = sk_peers[i];
+            sendto(s, b, n, f, (struct sockaddr *)&p, sizeof p);
+        }
+        if (r < 0) r = (long)n;   // the broadcast itself may have no route on a tailnet; the unicast copies are what arrive
+    }
+    t_skerr = r < 0 ? errno : 0;
+    return r;
+}
+static long net_recvfrom(int s, void *b, unsigned long n, int f, void *a, unsigned *al) {
+    struct sockaddr_in d = {0}; socklen_t l = sizeof d;
+    long r = recvfrom(s, b, n, f, a ? (struct sockaddr *)&d : NULL, a ? &l : NULL);
+    if (r >= 0) { t_skerr = 0; if (a) sk_guest_addr(a, al, &d); }
+    else t_skerr = errno;
+    return r;
+}
+// Poll and Select under DM_NET=1: the host's own. The guest's PollFd and fd_set bits match the host's layouts. A set with no descriptor in it falls back to the offline service's wait (main's dm_sk_select), so the timeout still passes
+static int net_poll(void *fds, uint64_t n, int ms) {
+    sk_pollfd *p = fds;
+        int rc = poll((struct pollfd *)p, (nfds_t)n, ms);
+        t_skerr = rc < 0 ? errno : 0;
+        return rc;
+}
+static int net_select_live(int nfds, uint64_t *r, uint64_t *w, uint64_t *e) {
+    const uint64_t *sets[3] = {r, w, e};
+    int live = 0;
+    for (int k = 0; k < 3 && !live; k++)
+        for (int fd = 0; sets[k] && fd < nfds && fd < 1024; fd++) if ((sets[k][fd >> 6] >> (fd & 63)) & 1) { live = 1; break; }
+    return live;
+}
+static int net_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv) {   // fd_set: 1024 bits; timeval: {i64 seconds, i64 microseconds}
+    const uint64_t *sets[3] = {r, w, e};
+    fd_set R, W, E; fd_set *h[3] = {r ? &R : NULL, w ? &W : NULL, e ? &E : NULL};
+    FD_ZERO(&R); FD_ZERO(&W); FD_ZERO(&E);
+    for (int k = 0; k < 3; k++) for (int fd = 0; sets[k] && fd < nfds && fd < 1024; fd++) if ((sets[k][fd >> 6] >> (fd & 63)) & 1) FD_SET(fd, h[k]);
+    struct timeval t = {0, 0};
+    if (tv) { t.tv_sec = (time_t)tv[0]; t.tv_usec = (suseconds_t)tv[1]; }
+    int rc = select(nfds > 0 ? nfds : 1, h[0], h[1], h[2], tv ? &t : NULL);
+    t_skerr = rc < 0 ? errno : 0;
+    if (rc >= 0) for (int k = 0; k < 3; k++) if (sets[k]) {   // the results go back into the guest's bit sets (Horizon's fd_set is 1024 bits)
+        uint64_t *g = (uint64_t *)sets[k];
+        memset(g, 0, 128);
+        for (int fd = 0; fd < nfds && fd < 1024; fd++) if (FD_ISSET(fd, h[k])) g[fd >> 6] |= (uint64_t)1 << (fd & 63);
+    }
+    return rc;
+}
+
 int dm_sk_socket(int family, int type, int protocol) {
+    if (dm_net_online()) return net_socket(family, type, protocol);
     if (family != 2 || type != 2 || (protocol && protocol != 17)) return sk_fail();
     dm_host_mutex_lock(&g_efd_m); int fd = sk_new_locked(SK_UDP); pthread_mutex_unlock(&g_efd_m); return fd;
 }
 int dm_sk_close(int fd) {
+    if (dm_net_online()) return net_close(fd);
     dm_host_mutex_lock(&g_efd_m);
     if (!sk_used(fd)) { pthread_mutex_unlock(&g_efd_m); return sk_fail(); }
     sk_packet *p = g_efd[fd].head;
@@ -141,10 +368,12 @@ static int sk_bind_locked(int fd, uint32_t addr, uint16_t port) {
     g_efd[fd].addr = addr; g_efd[fd].port = port; return 0;
 }
 int dm_sk_bind(int fd, const void *a, unsigned n) {
+    if (dm_net_online()) return net_bind(fd, a, n);
     uint32_t addr; uint16_t port; if (sk_addr_read(a, n, &addr, &port)) return -1;
     dm_host_mutex_lock(&g_efd_m); int r = sk_udp_locked(fd) ? sk_bind_locked(fd, addr, port) : sk_error(SK_EBADF); pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_connect(int fd, const void *a, unsigned n) {
+    if (dm_net_online()) return net_connect(fd, a, n);
     uint32_t addr = 0; uint16_t port = 0; int disconnect = a && n >= 2 && ((const uint8_t *)a)[1] == 0;
     if (!disconnect && sk_addr_read(a, n, &addr, &port)) return -1;
     if (!disconnect && !port) return sk_error(SK_EINVAL);
@@ -155,6 +384,7 @@ int dm_sk_connect(int fd, const void *a, unsigned n) {
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_name(int fd, void *a, unsigned *n, int peer) {
+    if (dm_net_online()) return net_name(fd, a, n, peer);
     if (!a || !n) return sk_error(SK_EINVAL);
     dm_host_mutex_lock(&g_efd_m); int r;
     if (!sk_udp_locked(fd)) r = sk_error(SK_EBADF);
@@ -163,6 +393,7 @@ int dm_sk_name(int fd, void *a, unsigned *n, int peer) {
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_shutdown(int fd, int how) {
+    if (dm_net_online()) return net_shutdown(fd, how);
     dm_host_mutex_lock(&g_efd_m); int r = 0;
     if (!sk_udp_locked(fd)) r = sk_error(SK_EBADF);
     else if (how < 0 || how > 2) r = sk_error(SK_EINVAL);
@@ -171,6 +402,7 @@ int dm_sk_shutdown(int fd, int how) {
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_fcntl(int fd, int cmd, int value) {
+    if (dm_net_online()) return net_fcntl(fd, cmd, value);
     dm_host_mutex_lock(&g_efd_m); int r = 0;
     if (!sk_used(fd)) r = sk_error(SK_EBADF);
     else if (cmd == 1) r = g_efd[fd].fdflags;
@@ -181,6 +413,7 @@ int dm_sk_fcntl(int fd, int cmd, int value) {
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_setopt(int fd, int level, int option, const void *value, unsigned size) {
+    if (dm_net_online()) return net_sockopt(fd, level, option, value, &size, 1);
     if (!value) return sk_error(SK_EINVAL);
     dm_host_mutex_lock(&g_efd_m); int r = 0;
     if (!sk_udp_locked(fd)) r = sk_error(SK_EBADF);
@@ -201,6 +434,7 @@ int dm_sk_setopt(int fd, int level, int option, const void *value, unsigned size
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_getopt(int fd, int level, int option, void *value, unsigned *size) {
+    if (dm_net_online()) return net_sockopt(fd, level, option, value, size, 0);
     if (!value || !size) return sk_error(SK_EINVAL);
     dm_host_mutex_lock(&g_efd_m); int r = 0, v = 0;
     if (!sk_udp_locked(fd)) r = sk_error(SK_EBADF);
@@ -220,6 +454,7 @@ int dm_sk_getopt(int fd, int level, int option, void *value, unsigned *size) {
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 long dm_sk_sendto(int fd, const void *data, unsigned long n, int flags, const void *a, unsigned al) {
+    if (dm_net_online()) return a ? net_sendto(fd, data, n, flags, a, al) : net_send(fd, data, n, flags);
     if ((!data && n) || n > SK_UDP_MAX) return sk_error(n > SK_UDP_MAX ? SK_EMSGSIZE : SK_EINVAL);
     if (flags & ~(SK_MSG_DONTWAIT | 4 | 0x20000)) return sk_error(SK_EOPNOTSUPP);
     uint32_t addr = 0; uint16_t port = 0; if (a && sk_addr_read(a, al, &addr, &port)) return -1;
@@ -252,18 +487,21 @@ done:
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 long dm_sk_read(int fd, void *data, unsigned long size) {
+    if (dm_net_online()) return sk_fail();   // DM_NET=1: Read stays cut, as before
     dm_host_mutex_lock(&g_efd_m); int event = efd_used(fd); pthread_mutex_unlock(&g_efd_m);
     if (!event) return dm_sk_recvfrom(fd, data, size, 0, NULL, NULL);
     if (!data || size < sizeof(uint64_t)) return sk_error(SK_EINVAL);
     uint64_t v; if (efd_read(fd, &v)) return -1; memcpy(data, &v, sizeof v); return sizeof v;
 }
 long dm_sk_write(int fd, const void *data, unsigned long size) {
+    if (dm_net_online()) return sk_fail();   // DM_NET=1: Write stays cut, as before
     dm_host_mutex_lock(&g_efd_m); int event = efd_used(fd); pthread_mutex_unlock(&g_efd_m);
     if (!event) return dm_sk_sendto(fd, data, size, 0, NULL, 0);
     if (!data || size < sizeof(uint64_t)) return sk_error(SK_EINVAL);
     uint64_t v; memcpy(&v, data, sizeof v); return efd_write(fd, v) ? -1 : (long)sizeof v;
 }
 long dm_sk_recvfrom(int fd, void *data, unsigned long n, int flags, void *a, unsigned *al) {
+    if (dm_net_online()) return net_recvfrom(fd, data, n, flags, a, al);
     if ((!data && n) || (a && !al)) return sk_error(SK_EINVAL);
     if (flags & ~(SK_MSG_DONTWAIT | SK_MSG_PEEK)) return sk_error(SK_EOPNOTSUPP);
     dm_host_mutex_lock(&g_efd_m); long r = -1;
@@ -301,6 +539,7 @@ static int efd_ready(sk_pollfd *p, uint64_t n, uint64_t open, const uint64_t gen
     return ready;
 }
 int dm_sk_poll(void *fds, uint64_t n, int ms) {
+    if (dm_net_online()) return net_poll(fds, n, ms);
     sk_pollfd *p = fds; uint64_t open = 0, generation[EFD_MAX] = {0};
     if (!p && n) return sk_error(SK_EINVAL);
     dm_host_mutex_lock(&g_efd_m);
@@ -317,6 +556,7 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {
 }
 // fd_set is1024 bits; timeval is {i64 seconds, i64 microseconds}. Only this service's small descriptors can become ready.
 int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv) {
+    if (dm_net_online() && net_select_live(nfds, r, w, e)) return net_select(nfds, r, w, e, tv);
     uint64_t *sets[3] = {r, w, e}; static const int16_t ask[3] = {SK_POLLIN, SK_POLLOUT, 0}; sk_pollfd p[EFD_MAX]; int np = 0;
     if (nfds < 0 || (tv && (tv[0] < 0 || tv[1] < 0 || tv[1] >= 1000000))) return sk_error(SK_EINVAL);
     if (nfds > 1024) nfds = 1024;
@@ -339,8 +579,8 @@ int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t 
 SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { return dm_sk_socket(a, b, c); }
 SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { return dm_sk_bind(s, a, n); }
 SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
-SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
+SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { return dm_sk_listen(s, n); }
+SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { return dm_sk_accept(s, a, n); }
 SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { return dm_sk_close(s); }
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 1); }
 SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 0); }

@@ -116,28 +116,76 @@ extension DeviceDeploymentService {
     }
 
     internal func fetchSigningIdentities() -> [DeveloperSigningTeam] {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-identity", "-p", "codesigning", "-v"]
-        process.standardOutput = pipe
-
-        guard (try? process.run()) != nil else { return [] }
-        process.waitUntilExit()
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let out = String(decoding: data, as: UTF8.self)
+        var keychainOutput = ""
+        let secProc = Process()
+        let secPipe = Pipe()
+        secProc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        secProc.arguments = ["find-identity", "-p", "codesigning", "-v"]
+        secProc.standardOutput = secPipe
+        if (try? secProc.run()) != nil {
+            secProc.waitUntilExit()
+            let data = secPipe.fileHandleForReading.readDataToEndOfFile()
+            keychainOutput = String(decoding: data, as: UTF8.self)
+        }
 
         var teams: [DeveloperSigningTeam] = []
-        for line in out.components(separatedBy: .newlines) {
-            if line.contains("Apple Development:") || line.contains("iPhone Developer:") {
-                let parts = line.components(separatedBy: "\"")
-                if parts.count >= 2 {
-                    let teamName = parts[1]
-                    teams.append(DeveloperSigningTeam(id: teamName, name: teamName))
+        var seenTeamIDs = Set<String>()
+
+        // 1. Read teams configured in Xcode accounts (~/Library/Preferences/com.apple.dt.Xcode.plist)
+        let defProc = Process()
+        let defPipe = Pipe()
+        defProc.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        defProc.arguments = ["export", "com.apple.dt.Xcode", "-"]
+        defProc.standardOutput = defPipe
+        if (try? defProc.run()) != nil {
+            defProc.waitUntilExit()
+            let data = defPipe.fileHandleForReading.readDataToEndOfFile()
+            if let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+               let teamsDict = plist["IDEProvisioningTeamByIdentifier"] as? [String: Any] {
+                for (_, list) in teamsDict {
+                    guard let arr = list as? [[String: Any]] else { continue }
+                    for item in arr {
+                        guard let tid = item["teamID"] as? String, !tid.isEmpty else { continue }
+                        if seenTeamIDs.contains(tid) { continue }
+                        seenTeamIDs.insert(tid)
+                        let tname = (item["teamName"] as? String) ?? tid
+                        let ttype = item["teamType"] as? String
+                        let isFree = (item["isFreeProvisioningTeam"] as? Bool) ?? (item["isFreeProvisioningTeam"] as? Int == 1)
+                        let hasCert = keychainOutput.contains(tid) || keychainOutput.contains(tname)
+                        teams.append(DeveloperSigningTeam(
+                            id: tid,
+                            name: tname,
+                            teamType: ttype,
+                            isFreeProvisioningTeam: isFree,
+                            hasCertificateInKeychain: hasCert
+                        ))
+                    }
                 }
             }
         }
+
+        // 2. Also incorporate any Keychain signing identities that weren't captured by Xcode team IDs
+        for line in keychainOutput.components(separatedBy: .newlines) {
+            if line.contains("Apple Development:") || line.contains("iPhone Developer:") {
+                let parts = line.components(separatedBy: "\"")
+                if parts.count >= 2 {
+                    let certName = parts[1]
+                    let isAlreadyIncluded = teams.contains { t in
+                        certName.contains(t.id) || certName.contains(t.name)
+                    }
+                    if !isAlreadyIncluded {
+                        teams.append(DeveloperSigningTeam(
+                            id: certName,
+                            name: certName,
+                            teamType: "Keychain",
+                            isFreeProvisioningTeam: false,
+                            hasCertificateInKeychain: true
+                        ))
+                    }
+                }
+            }
+        }
+
         return teams
     }
 }

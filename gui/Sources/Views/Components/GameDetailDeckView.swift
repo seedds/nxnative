@@ -119,16 +119,35 @@ public struct GameDetailDeckView: View {
                             .buttonStyle(NXSecondaryButtonStyle())
                             .controlSize(.regular)
                             
-                            Button(action: {
-                                SoundEffectService.shared.play(.click)
-                                onDelete(game)
-                            }) {
+                            Menu {
+                                Button {
+                                    viewModel.gameToRemove = game
+                                    viewModel.showRemoveConfirm = true
+                                } label: {
+                                    Label(viewModel.tr("actions.remove_from_library"), systemImage: "eye.slash")
+                                }
+                                Divider()
+                                Button(role: .destructive) {
+                                    onDelete(game)
+                                } label: {
+                                    Label(viewModel.tr("actions.move_to_trash"), systemImage: "trash")
+                                }
+                            } label: {
                                 Image(systemName: "trash")
                                     .font(.system(size: 11))
                                     .foregroundColor(Color(red: 0.9, green: 0.3, blue: 0.3))
+                                    .padding(6)
+                                    .background(NXTheme.glassSurfaceElevated)
+                                    .cornerRadius(6)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(NXTheme.specularRim, lineWidth: 0.8)
+                                    )
                             }
-                            .buttonStyle(NXSecondaryButtonStyle())
-                            .controlSize(.regular)
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
+                            .fixedSize()
+                            .help(viewModel.tr("actions.move_to_trash"))
                         }
                         
                         // Storage Size Info Card

@@ -3,6 +3,7 @@ import AppKit
 
 public struct SquareGameCardView: View {
     public let game: PortedGame
+    @ObservedObject public var viewModel: AppViewModel
     public let isFocused: Bool
     public let baseSize: CGFloat
     public let onSelect: () -> Void
@@ -10,11 +11,13 @@ public struct SquareGameCardView: View {
 
     public init(
         game: PortedGame,
+        viewModel: AppViewModel,
         isFocused: Bool,
         baseSize: CGFloat = 170,
         onSelect: @escaping () -> Void
     ) {
         self.game = game
+        self.viewModel = viewModel
         self.isFocused = isFocused
         self.baseSize = baseSize
         self.onSelect = onSelect
@@ -108,5 +111,55 @@ public struct SquareGameCardView: View {
         }
         .buttonStyle(.plain)
         .nxNoFocusRing()
+        .contextMenu {
+            if game.platform == .macApp {
+                Button {
+                    viewModel.launchGame(game)
+                } label: {
+                    Label(viewModel.tr("actions.play_game"), systemImage: "play.fill")
+                }
+            } else {
+                Button {
+                    viewModel.gameForSettingsSheet = game
+                } label: {
+                    Label(viewModel.tr("actions.send_ios"), systemImage: "arrow.up.forward.app")
+                }
+            }
+            
+            Button {
+                viewModel.gameForSettingsSheet = game
+            } label: {
+                Label(viewModel.tr("actions.game_settings"), systemImage: "slider.horizontal.3")
+            }
+            
+            Button {
+                viewModel.revealInFinder(url: game.url)
+            } label: {
+                Label(viewModel.tr("actions.app_files"), systemImage: "folder")
+            }
+            
+            Button {
+                let profile = GameDetailsProfile.inspect(for: game)
+                viewModel.revealSaveFolder(profile.saveDirectory)
+            } label: {
+                Label(viewModel.tr("actions.save_location"), systemImage: "internaldrive")
+            }
+            
+            Divider()
+            
+            Button {
+                viewModel.gameToRemove = game
+                viewModel.showRemoveConfirm = true
+            } label: {
+                Label(viewModel.tr("actions.remove_from_library"), systemImage: "eye.slash")
+            }
+            
+            Button(role: .destructive) {
+                viewModel.gameToTrash = game
+                viewModel.showTrashConfirm = true
+            } label: {
+                Label(viewModel.tr("actions.move_to_trash"), systemImage: "trash")
+            }
+        }
     }
 }

@@ -241,4 +241,42 @@ extension GameSettingsSheetView {
             }
         }
     }
+    
+    func gameManagementSection() -> some View {
+        GlassCard(padding: 14) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(viewModel.tr("settings_modal.management_title"), systemImage: "gearshape.2.fill")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundColor(NXTheme.textPrimary)
+                
+                Text(viewModel.tr("settings_modal.management_desc"))
+                    .font(.system(size: 11))
+                    .foregroundColor(NXTheme.textSecondary)
+                
+                HStack(spacing: 12) {
+                    Button(action: {
+                        dismissSettingsAndShowRemove()
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "eye.slash")
+                            Text(viewModel.tr("actions.remove_from_library"))
+                        }
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    
+                    Button(action: {
+                        dismissSettingsAndShowTrash()
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "trash.fill")
+                            Text(viewModel.tr("actions.move_to_trash"))
+                        }
+                        .foregroundColor(Color(red: 0.95, green: 0.35, blue: 0.35))
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                }
+                .padding(.top, 2)
+            }
+        }
+    }
 }

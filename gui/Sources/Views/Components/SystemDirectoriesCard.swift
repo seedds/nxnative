@@ -113,6 +113,60 @@ public struct SystemDirectoriesCard: View {
                         .buttonStyle(NXSecondaryButtonStyle())
                     }
                 }
+                
+                Divider().opacity(0.2)
+                
+                // Hidden Games from Library
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(viewModel.tr("system.hidden_games_title"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(NXTheme.textPrimary)
+                        
+                        Spacer()
+                        
+                        if viewModel.hasHiddenGames {
+                            Text("\(viewModel.hiddenGamesCount)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(NXTheme.secondary.opacity(0.25))
+                                .foregroundColor(.white)
+                                .clipShape(Capsule())
+                        }
+                    }
+                    
+                    HStack(spacing: 8) {
+                        HStack {
+                            Image(systemName: viewModel.hasHiddenGames ? "eye.slash.fill" : "eye.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(viewModel.hasHiddenGames ? NXTheme.secondary : NXTheme.textMuted)
+                            
+                            Text(viewModel.hasHiddenGames 
+                                 ? "\(viewModel.hiddenGamesCount) " + viewModel.tr("system.hidden_games_count_suffix")
+                                 : viewModel.tr("system.hidden_games_none"))
+                                .font(.system(size: 12))
+                                .foregroundColor(viewModel.hasHiddenGames ? NXTheme.textPrimary : NXTheme.textSecondary)
+                            
+                            Spacer()
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(NXTheme.glassSurfaceElevated)
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(NXTheme.specularRim, lineWidth: 0.8)
+                        )
+                        
+                        if viewModel.hasHiddenGames {
+                            Button(viewModel.tr("system.restore_all_hidden")) {
+                                viewModel.restoreAllHiddenGames()
+                            }
+                            .buttonStyle(NXSecondaryButtonStyle())
+                        }
+                    }
+                }
             }
         }
     }

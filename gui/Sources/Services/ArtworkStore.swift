@@ -229,6 +229,15 @@ public final class ArtworkStore: ObservableObject {
         }
     }
 
+    public func clearCache(for game: PortedGame) {
+        let tid = (game.titleId ?? CompatibilityService.shared.findTitleId(forGameTitle: game.name))?.uppercased()
+        let iconKey = "icon_\(tid ?? game.uniqueKey)" as NSString
+        let heroKey = "hero_\(tid ?? game.uniqueKey)" as NSString
+        memoryCache.removeObject(forKey: iconKey)
+        memoryCache.removeObject(forKey: heroKey)
+        refreshTrigger += 1
+    }
+
     private func normalizeString(_ str: String) -> String {
         str.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
             .components(separatedBy: CharacterSet.alphanumerics.inverted)

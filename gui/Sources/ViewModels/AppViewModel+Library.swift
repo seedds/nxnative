@@ -23,8 +23,13 @@ extension AppViewModel {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let games = LibraryScanner.shared.scan(directories: searchDirs)
             DispatchQueue.main.async {
-                self?.libraryGames = games
-                self?.isScanningLibrary = false
+                guard let self = self else { return }
+                let visible = games.filter { !self.hiddenGamePaths.contains($0.url.standardized.path) }
+                self.libraryGames = visible
+                if self.focusedGameIndex >= visible.count {
+                    self.focusedGameIndex = max(0, visible.count - 1)
+                }
+                self.isScanningLibrary = false
             }
         }
     }
@@ -61,16 +66,22 @@ extension AppViewModel {
             }
         }
         
-        LibraryScanner.shared.launchGame(at: game.url, env: config.toEnvironmentDict(savePath: savePath)) { [weak self] success, error in
-            DispatchQueue.main.async {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                    self?.launchingGameId = nil
-                }
-                if success {
-                    self?.logs.append(LogEntry(level: .success, message: "Launched game: \(game.name)"))
-                } else if let err = error {
-                    SoundEffectService.shared.play(.error)
-                    self?.logs.append(LogEntry(level: .error, message: "Failed to launch game: \(err)"))
+        // Auto-sync saves with connected device before launch if available
+        SaveSyncService.shared.autoSyncOnLaunch(for: game) { [weak self] status, msg in
+            if let status = status, status != .noSaves && status != .alreadyInSync {
+                self?.logs.append(LogEntry(level: .info, message: "Auto-sync on launch: \(msg)"))
+            }
+            LibraryScanner.shared.launchGame(at: game.url, env: config.toEnvironmentDict(savePath: savePath)) { [weak self] success, error in
+                DispatchQueue.main.async {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                        self?.launchingGameId = nil
+                    }
+                    if success {
+                        self?.logs.append(LogEntry(level: .success, message: "Launched game: \(game.name)"))
+                    } else if let err = error {
+                        SoundEffectService.shared.play(.error)
+                        self?.logs.append(LogEntry(level: .error, message: "Failed to launch game: \(err)"))
+                    }
                 }
             }
         }
@@ -97,14 +108,45 @@ extension AppViewModel {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
     
-    public func deletePortedGame(_ game: PortedGame) {
+    public func removeGameFromLibrary(_ game: PortedGame) {
+        hiddenGamePaths.insert(game.url.standardized.path)
+        SoundEffectService.shared.play(.click)
+        logs.append(LogEntry(level: .warning, message: "Removed from library: \(game.name) (files preserved on disk)"))
+        refreshLibrary()
+    }
+
+    public func restoreHiddenGame(path: String) {
+        hiddenGamePaths.remove(path)
+        SoundEffectService.shared.play(.click)
+        logs.append(LogEntry(level: .success, message: "Restored game to library"))
+        refreshLibrary()
+    }
+
+    public func restoreAllHiddenGames() {
+        let count = hiddenGamePaths.count
+        hiddenGamePaths.removeAll()
+        SoundEffectService.shared.play(.click)
+        logs.append(LogEntry(level: .success, message: "Restored \(count) hidden games to library"))
+        refreshLibrary()
+    }
+
+    public func deleteGameToTrash(_ game: PortedGame) {
         do {
-            try FileManager.default.removeItem(at: game.url)
-            logs.append(LogEntry(level: .warning, message: "Game removed: \(game.name)"))
+            var resultingURL: NSURL?
+            try FileManager.default.trashItem(at: game.url, resultingItemURL: &resultingURL)
+            hiddenGamePaths.remove(game.url.standardized.path)
+            ArtworkStore.shared.clearCache(for: game)
+            SoundEffectService.shared.play(.click)
+            logs.append(LogEntry(level: .warning, message: "Moved game to Trash: \(game.name)"))
             refreshLibrary()
         } catch {
-            logs.append(LogEntry(level: .error, message: "Failed to delete game: \(error.localizedDescription)"))
+            SoundEffectService.shared.play(.error)
+            logs.append(LogEntry(level: .error, message: "Failed to move game to Trash: \(error.localizedDescription)"))
         }
+    }
+
+    public func deletePortedGame(_ game: PortedGame) {
+        deleteGameToTrash(game)
     }
     
     public func scanGameFolder(_ folder: URL) {
@@ -202,7 +244,7 @@ extension AppViewModel {
 
     public func handleLibraryNavigateDown() {
         if isGameActionMenuPresented {
-            if gameActionFocusedIndex < 5 {
+            if gameActionFocusedIndex < 6 {
                 gameActionFocusedIndex += 1
                 SoundEffectService.shared.play(.focus)
             }

@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue.svg)](https://apple.com/macos)
 [![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%2B%20%26%20A17%2B)-orange.svg)](https://apple.com)
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-FA7343.svg)](https://swift.org)
-[![Version](https://img.shields.io/badge/version-v1.6.3-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
+[![Version](https://img.shields.io/badge/version-v1.7.0-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Core Engine](https://img.shields.io/badge/core%20engine-seedds%2Fnxnative-informational.svg)](https://github.com/seedds/nxnative)
 [![Report Issues](https://img.shields.io/badge/Issues-Support%20%26%20Bugs-red.svg)](https://github.com/rennan101/nxnative_Launcher/issues)
@@ -88,7 +88,7 @@
 
 Running Nintendo Switch games on Apple Silicon with upstream tools historically required manual terminal scripting, manual LibHac extractions, custom SPIRV-Cross flags, and hand-edited environment variables. **NxNative Launcher** brings the entire ecosystem into a seamless, console-like desktop interface.
 
-| Feature | Raw Command-Line Porting | 🎮 NxNative Launcher (v1.6.3) |
+| Feature | Raw Command-Line Porting | 🎮 NxNative Launcher (v1.7.0) |
 | :--- | :---: | :---: |
 | **User Interface** | Terminal Commands only | **Switch Dark Mode Console Library** |
 | **Controller Remapping**| Fixed hardcoded layouts | **Custom Profiles (Switch Pro, Xbox, PS5, Keyboard)** |
@@ -323,19 +323,23 @@ Track our shipped milestones and upcoming features! Star the repository to follo
   - **Custom Cover Art**: User-customizable box art picker (`.jpg`, `.png`, `.webp`) with instant persistence and fallback reset.
   - **Automated Environment Diagnostics & Python 3.12+ / Pip Fix**: One-click sequential Homebrew and build dependency installer in Settings tab, with dynamic Python 3.12+ resolution and safe pip package installation.
   - **3-Second Couch Exit**: Global 3-second hold shortcut on Xbox Guide / PS / Home buttons to close running games and refocus the Launcher.
-- [x] **v1.6.3 (Current Version) — In-App Multi-Language Localization (13 Languages)**:
+- [x] **v1.6.3 — In-App Multi-Language Localization (13 Languages)**:
   - **In-App Dynamic Language Switcher**: Switch the launcher UI language on the fly under the *Personalization* tab without restarting or altering macOS system preferences.
   - **13 Languages Supported**: English, Portuguese (Brazil), Spanish, French, German, Italian, Polish, Russian, Japanese, Korean, Simplified Chinese, Traditional Chinese, and Swedish (contributed by @yeager).
   - **Full UI Coverage**: Localized navigation, library cards, porting progress banners, action sheets, settings dialogs, controller remapping, and system tools.
+- [x] **v1.7.0 (Current Version) — Smart iCloud Cross-Save & Single-Button Device Sync**:
+  - **Automated Smart Cross-Save**: Timestamp-based bidirectional save synchronization between Mac, iCloud Drive (`com~apple~CloudDocs/nxnative_launcher`), and connected iOS devices.
+  - **Single "Sync Save" Button**: Replaced manual "Push" and "Pull" buttons with a single 1-click automatic synchronization action localized in all 13 languages.
+  - **Auto-Sync on Game Launch**: Automatically checks and synchronizes saves with connected iPhone/iPad devices before starting a game on Mac.
+  - **Safety Backups & iCloud Cover Badging**: Generates instant safety backups before any file replacement, and renders custom high-res box art onto iCloud game folders in Finder.
 
 ---
 
 ### ⏳ In Active Development & Future Milestones
 
-- [ ] **v1.7.0 — Cross Save iCloud Sync**: Automated cloud save synchronization across macOS and iOS devices via iCloud Drive / CloudKit.
-- [ ] **v1.7.0 — MetalFX Temporal Upscaler**: Temporal anti-aliasing and dynamic temporal scaling for demanding 3D games.
+- [ ] **v1.8.0 — MetalFX Temporal Upscaler**: Temporal anti-aliasing and dynamic temporal scaling for demanding 3D games.
 - [ ] **v1.8.0 — Haptic Feedback & Gamepad Vibration**: DualSense adaptive triggers & Switch Pro linear resonant actuator rumble.
-- [ ] **v1.8.0 — Discord Rich Presence**: Real-time rich presence showing active title, in-game playtime, and FPS counters.
+- [ ] **v1.9.0 — Discord Rich Presence**: Real-time rich presence showing active title, in-game playtime, and FPS counters.
 
 ---
 
@@ -358,7 +362,7 @@ Yes! Saves are stored in plain unencrypted Horizon save formats at <code>~/Libra
 
 <details>
 <summary><b>4. How does Save Sync work between Mac and iOS devices?</b></summary>
-NxNative Launcher uses <code>SaveSyncService</code> to detect paired iOS devices via <code>xcrun devicectl</code>. You can back up and sync save games between your Mac and iPhone 15 Pro / iPad with one click in the game options deck. Full automatic <b>Cross Save iCloud Sync</b> is currently on the roadmap for v1.7.0!
+NxNative Launcher uses <code>SaveSyncService</code> to detect paired iOS devices via <code>xcrun devicectl</code>. With v1.7.0, a single click on <b>Sync Save</b> automatically compares timestamps and synchronizes the newest save between your Mac, iCloud Drive, and iPhone 15 Pro / iPad. Saves are also verified and synchronized automatically whenever you launch a game with a connected device!
 </details>
 
 <details>
@@ -387,7 +391,7 @@ This launcher stands on the shoulders of brilliant software engineering across t
 
 # 🇧🇷 Guia em Português (PT-BR)
 
-Bem-vindo ao guia oficial em português do **NxNative Launcher (v1.6.3)**! Esta seção contém tudo o que você precisa para configurar o ambiente, portar seus jogos, personalizar sua biblioteca, sincronizar saves e jogar com controles no Apple Silicon.
+Bem-vindo ao guia oficial em português do **NxNative Launcher (v1.7.0)**! Esta seção contém tudo o que você precisa para configurar o ambiente, portar seus jogos, personalizar sua biblioteca, sincronizar saves e jogar com controles no Apple Silicon.
 
 ### 📑 Índice do Guia em Português
 - [1. Configuração do Ambiente e Dependências](#1-configuração-do-ambiente-e-dependências)
@@ -452,7 +456,7 @@ pip3 install pycryptodome libhac
 3. **Sincronização de Saves (Cross Save)**:
    - Os arquivos de progresso ficam gravados em:
      `~/Library/Application Support/nxnative/<TitleID>/save/`
-   - Clique no botão **Saves** no launcher para abrir a pasta diretamente no Finder ou sincronizar com aparelhos iOS emparelhados via `SaveSyncService`. O **Cross Save iCloud Sync** automático está em desenvolvimento para a v1.7.0!
+   - Clique no botão **Saves** no launcher para abrir a pasta diretamente no Finder ou sincronizar com aparelhos iOS emparelhados via `SaveSyncService`. Com a versão v1.7.0, um clique no botão **Sincronizar Save** compara datas e sincroniza automaticamente a versão mais recente entre seu Mac, iCloud Drive e dispositivos iPhone/iPad! Além disso, a sincronização ocorre automaticamente ao iniciar o jogo no Mac.
 4. **Mods de Jogo (LayeredFS / Atmosphere)**:
    - No painel de opções, acesse a pasta de mods: `<Game.app>/Contents/Resources/atmosphere/contents/<TitleID>/`.
    - Cole suas texturas HD, mods de física ou traduções em PT-BR.

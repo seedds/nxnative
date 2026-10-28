@@ -152,8 +152,16 @@ public struct PortedGameCard: View {
                             pb.setString(game.url.path, forType: .string)
                         }
                         Divider()
-                        Button(viewModel.tr("deck.delete_port"), role: .destructive) {
+                        Button {
+                            viewModel.gameToRemove = game
+                            viewModel.showRemoveConfirm = true
+                        } label: {
+                            Label(viewModel.tr("actions.remove_from_library"), systemImage: "eye.slash")
+                        }
+                        Button(role: .destructive) {
                             onDelete(game)
+                        } label: {
+                            Label(viewModel.tr("actions.move_to_trash"), systemImage: "trash")
                         }
                     } label: {
                         Image(systemName: "ellipsis")

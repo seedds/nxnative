@@ -267,8 +267,11 @@ extension AppViewModel {
                 SaveSyncService.shared.revealCloudGameFolder(for: game, cover: cover)
             }
         case 5:
-            gameToDelete = game
-            showDeleteConfirm = true
+            gameToRemove = game
+            showRemoveConfirm = true
+        case 6:
+            gameToTrash = game
+            showTrashConfirm = true
         default:
             break
         }

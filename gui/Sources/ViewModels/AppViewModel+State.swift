@@ -62,7 +62,17 @@ extension AppViewModel {
         showAboutSheet ||
         showUpdateSheet ||
         showInstallerSheet ||
-        showDeleteConfirm
+        showDeleteConfirm ||
+        showRemoveConfirm ||
+        showTrashConfirm
+    }
+
+    public var hasHiddenGames: Bool {
+        !hiddenGamePaths.isEmpty
+    }
+
+    public var hiddenGamesCount: Int {
+        hiddenGamePaths.count
     }
 
     public var macLibraryGames: [PortedGame] {

@@ -25,12 +25,17 @@ public struct GameSettingsIosDeploymentView: View {
             }
 
             if !deployment.isRunning {
-                devicesListSection
+                installSetupCard
             }
         }
         .padding(14)
         .background(NXTheme.glassSurface.opacity(0.6))
         .cornerRadius(12)
+        .onAppear {
+            if deviceService.connectedDevices.isEmpty || deviceService.signingTeams.isEmpty {
+                deviceService.refreshDevicesAndTeams()
+            }
+        }
     }
 
     private var headerBar: some View {
@@ -69,74 +74,199 @@ public struct GameSettingsIosDeploymentView: View {
         }
     }
 
-    private var devicesListSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if deviceService.connectedDevices.isEmpty {
-                HStack(spacing: 8) {
-                    if deviceService.isDetecting {
-                        ProgressView().controlSize(.small)
+    private var installSetupCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Row 1: Install on (Device Selection)
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "iphone.gen3")
+                        .foregroundColor(NXTheme.primary)
+                        .font(.system(size: 13))
+                    Text(L10n.t("settings_modal.install_on_label"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(NXTheme.textPrimary)
+                }
+
+                Spacer()
+
+                Button(action: {
+                    SoundEffectService.shared.play(.click)
+                    deviceService.refreshDevicesAndTeams()
+                }) {
+                    HStack(spacing: 3) {
+                        if deviceService.isDetecting {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        Text(L10n.t("settings_modal.refresh_label"))
                     }
+                }
+                .buttonStyle(NXSecondaryButtonStyle())
+                .controlSize(.mini)
+                .disabled(deviceService.isDetecting)
+
+                if deviceService.connectedDevices.isEmpty {
                     Text(L10n.t("settings_modal.no_devices"))
                         .font(.system(size: 11))
                         .foregroundColor(NXTheme.textSecondary)
-
-                    Spacer()
-
-                    Button(L10n.t("settings_modal.search_devices")) {
-                        SoundEffectService.shared.play(.click)
-                        deviceService.refreshDevicesAndTeams()
+                } else {
+                    Picker("", selection: $deviceService.selectedDevice) {
+                        ForEach(deviceService.connectedDevices) { dev in
+                            Text("\(dev.name) (\(dev.model) • iOS \(dev.osVersion))")
+                                .tag(Optional(dev))
+                        }
                     }
-                    .buttonStyle(NXSecondaryButtonStyle())
-                    .controlSize(.mini)
-                }
-                .padding(.vertical, 4)
-            } else {
-                ForEach(deviceService.connectedDevices) { dev in
-                    HStack {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(Color(red: 0.13, green: 0.77, blue: 0.37))
-                                .frame(width: 6, height: 6)
+                    .pickerStyle(MenuPickerStyle())
+                    .frame(maxWidth: 240)
 
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(dev.name)
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(NXTheme.textPrimary)
-                                Text("\(dev.model) • iOS \(dev.osVersion)")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(NXTheme.textSecondary)
+                    Circle()
+                        .fill(Color(red: 0.13, green: 0.77, blue: 0.37))
+                        .frame(width: 7, height: 7)
+                }
+            }
+
+            Divider()
+                .background(NXTheme.borderSubtle)
+
+            // Row 2: Signing team Selection
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.badge.shield.checkmark")
+                        .foregroundColor(NXTheme.primary)
+                        .font(.system(size: 13))
+                    Text(L10n.t("settings_modal.signing_team_label"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(NXTheme.textPrimary)
+                }
+
+                Spacer()
+
+                if deviceService.signingTeams.isEmpty {
+                    Text(L10n.t("settings_modal.no_teams_found"))
+                        .font(.system(size: 11))
+                        .foregroundColor(NXTheme.textSecondary)
+                } else {
+                    Picker("", selection: $deviceService.selectedSigningTeam) {
+                        ForEach(deviceService.signingTeams) { team in
+                            Text(team.displayName)
+                                .tag(Optional(team))
+                        }
+                    }
+                    .pickerStyle(MenuPickerStyle())
+                    .frame(maxWidth: 280)
+                }
+            }
+
+            Divider()
+                .background(NXTheme.borderSubtle)
+
+            // Row 3: Contextual Notice (Certificate / Developer Mode advice)
+            if let team = deviceService.selectedSigningTeam {
+                if !team.hasCertificateInKeychain {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 14))
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(L10n.t("settings_modal.team_no_cert_notice"))
+                                .font(.system(size: 10.5))
+                                .foregroundColor(NXTheme.textSecondary)
+                                .lineSpacing(2)
+
+                            HStack {
+                                Text(L10n.t("settings_modal.developer_mode_tip"))
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(.orange.opacity(0.95))
+
+                                Spacer()
+
+                                Button(action: {
+                                    SoundEffectService.shared.play(.click)
+                                    deviceService.openXcodeAccounts()
+                                }) {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "hammer.fill")
+                                        Text(L10n.t("settings_modal.open_xcode_btn"))
+                                    }
+                                }
+                                .buttonStyle(NXSecondaryButtonStyle())
+                                .controlSize(.mini)
                             }
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.orange.opacity(0.1))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(Color.orange.opacity(0.25), lineWidth: 1)
+                    )
+                    .cornerRadius(8)
+                } else {
+                    HStack(alignment: .center, spacing: 8) {
+                        Image(systemName: "checkmark.shield.fill")
+                            .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
+                            .font(.system(size: 14))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(L10n.t("settings_modal.team_has_cert_notice"))
+                                .font(.system(size: 11))
+                                .foregroundColor(NXTheme.textSecondary)
+
+                            Text(L10n.t("settings_modal.developer_mode_tip"))
+                                .font(.system(size: 10))
+                                .foregroundColor(NXTheme.textSecondary.opacity(0.8))
                         }
 
                         Spacer()
-
-                        Button(action: {
-                            SoundEffectService.shared.play(.click)
-                            deviceService.shareViaAirDrop(fileURL: game.url)
-                        }) {
-                            HStack(spacing: 3) {
-                                Image(systemName: "airdrop")
-                                Text(L10n.t("common.airdrop"))
-                            }
-                        }
-                        .buttonStyle(NXSecondaryButtonStyle())
-                        .controlSize(.small)
-
-                        Button(L10n.t("settings_modal.install_on_device", dev.name)) {
-                            deviceService.installApp(appBundleURL: game.url, on: dev) { success, _ in
-                                if success {
-                                    SoundEffectService.shared.play(.click)
-                                } else {
-                                    SoundEffectService.shared.play(.error)
-                                }
-                            }
-                        }
-                        .buttonStyle(NXPrimaryButtonStyle())
-                        .controlSize(.small)
                     }
-                    .padding(.vertical, 4)
+                    .padding(9)
+                    .background(Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.25), lineWidth: 1)
+                    )
+                    .cornerRadius(8)
                 }
             }
+
+            // Row 4: Action Button
+            HStack {
+                Spacer()
+
+                Button(action: {
+                    guard let dev = deviceService.selectedDevice else { return }
+                    SoundEffectService.shared.play(.click)
+                    deviceService.installApp(appBundleURL: game.url, on: dev, team: deviceService.selectedSigningTeam) { success, _ in
+                        if success {
+                            SoundEffectService.shared.play(.click)
+                        } else {
+                            SoundEffectService.shared.play(.error)
+                        }
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.down.to.line.circle.fill")
+                        Text(L10n.t("settings_modal.install_button", deviceService.selectedDevice?.name ?? "iOS"))
+                            .fontWeight(.bold)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 5)
+                }
+                .buttonStyle(NXPrimaryButtonStyle())
+                .disabled(deviceService.selectedDevice == nil || deviceService.isDetecting)
+
+                Spacer()
+            }
+            .padding(.top, 4)
         }
+        .padding(12)
+        .background(NXTheme.glassSurfaceElevated.opacity(0.75))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(NXTheme.borderSubtle, lineWidth: 1)
+        )
+        .cornerRadius(10)
     }
 }

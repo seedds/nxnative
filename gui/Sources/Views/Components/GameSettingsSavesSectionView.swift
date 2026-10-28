@@ -8,6 +8,7 @@ public struct GameSettingsSavesSectionView: View {
 
     @State private var backupStatusText: String? = nil
     @State private var syncStatusText: String? = nil
+    @State private var isSyncing: Bool = false
 
     public init(game: PortedGame) {
         self.game = game
@@ -109,6 +110,10 @@ public struct GameSettingsSavesSectionView: View {
                 .font(.system(size: 12, weight: .bold, design: .rounded))
                 .foregroundColor(NXTheme.textPrimary)
 
+            Text(L10n.t("settings_modal.auto_sync_desc"))
+                .font(.system(size: 10))
+                .foregroundColor(NXTheme.textSecondary)
+
             ForEach(deviceService.connectedDevices) { dev in
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -124,33 +129,33 @@ public struct GameSettingsSavesSectionView: View {
 
                     Spacer()
 
-                    Button(L10n.t("settings_modal.push_device")) {
+                    Button(action: {
                         SoundEffectService.shared.play(.click)
-                        _ = saveService.createSafetySnapshot(for: game, label: "pre_push")
-                        saveService.pushSaveToDevice(
+                        isSyncing = true
+                        syncStatusText = L10n.t("settings_modal.syncing_save")
+                        saveService.autoSyncSave(
                             titleId: titleId,
                             bundleId: game.bundleId ?? "com.nxnative.\(titleId)",
-                            device: dev
-                        ) { success, _ in
-                            syncStatusText = success ? "Save sent to \(dev.name)!" : "Failed to send save"
+                            device: dev,
+                            game: game
+                        ) { _, msg in
+                            isSyncing = false
+                            syncStatusText = msg
+                        }
+                    }) {
+                        HStack(spacing: 5) {
+                            if isSyncing {
+                                ProgressView()
+                                    .controlSize(.mini)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                            }
+                            Text(isSyncing ? L10n.t("settings_modal.syncing_save") : L10n.t("settings_modal.sync_save"))
                         }
                     }
                     .buttonStyle(NXSecondaryButtonStyle())
                     .controlSize(.mini)
-
-                    Button(L10n.t("settings_modal.pull_device")) {
-                        SoundEffectService.shared.play(.click)
-                        _ = saveService.createSafetySnapshot(for: game, label: "pre_pull")
-                        saveService.pullSaveFromDevice(
-                            titleId: titleId,
-                            bundleId: game.bundleId ?? "com.nxnative.\(titleId)",
-                            device: dev
-                        ) { success, _ in
-                            syncStatusText = success ? "Save imported from \(dev.name)!" : "Failed to import save"
-                        }
-                    }
-                    .buttonStyle(NXSecondaryButtonStyle())
-                    .controlSize(.mini)
+                    .disabled(isSyncing)
                 }
                 .padding(.vertical, 2)
             }

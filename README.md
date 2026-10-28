@@ -88,7 +88,7 @@
 
 Running Nintendo Switch games on Apple Silicon with upstream tools historically required manual terminal scripting, manual LibHac extractions, custom SPIRV-Cross flags, and hand-edited environment variables. **NxNative Launcher** brings the entire ecosystem into a seamless, console-like desktop interface.
 
-| Feature | Raw Command-Line Porting | 🎮 NxNative Launcher (v1.6.1) |
+| Feature | Raw Command-Line Porting | 🎮 NxNative Launcher (v1.6.2) |
 | :--- | :---: | :---: |
 | **User Interface** | Terminal Commands only | **Switch Dark Mode Console Library** |
 | **Controller Remapping**| Fixed hardcoded layouts | **Custom Profiles (Switch Pro, Xbox, PS5, Keyboard)** |
@@ -317,11 +317,11 @@ Track our shipped milestones and upcoming features! Star the repository to follo
   - Real-time streaming progress feedback for iOS deployments via `xcrun devicectl`.
   - Native AirDrop sharing support for exported `.ipa` packages.
   - Deadlock prevention and background task safety.
-- [x] **v1.6.0 & v1.6.1 (Current Version) — Controller Remapping, Save Sync & Automated Setup**:
+- [x] **v1.6.0, v1.6.1 & v1.6.2 (Current Version) — Controller Remapping, Save Sync & Robust Environment Setup**:
   - **Full Controller Remapping**: Custom button mapping for Switch Pro, Joy-Cons, Xbox Series/One, and PS5 DualSense controllers with profile duplication and reset.
   - **Save Synchronization Service (`SaveSyncService`)**: Bidirectional save state synchronization and backup between Mac and paired iOS devices.
   - **Custom Cover Art**: User-customizable box art picker (`.jpg`, `.png`, `.webp`) with instant persistence and fallback reset.
-  - **Automated Environment Diagnostics**: One-click sequential Homebrew, Clang, and Xcode Command Line Tools installer in Settings tab.
+  - **Automated Environment Diagnostics & Python 3.12+ / Pip Fix**: One-click sequential Homebrew and build dependency installer in Settings tab, with dynamic Python 3.12+ resolution and safe pip package installation.
   - **3-Second Couch Exit**: Global 3-second hold shortcut on Xbox Guide / PS / Home buttons to close running games and refocus the Launcher.
 
 ---

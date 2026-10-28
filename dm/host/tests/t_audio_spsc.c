@@ -117,6 +117,7 @@ static int stop_pending(void) {
     atomic_store(&g_sig,0); return failed;
 }
 int main(void) {
+    setenv("DM_AUDIO", "0", 1);   // the queue alone: no device (Linux and Windows default to real output, t_audio_sdl checks it)
     if (stop_pending()) return 1;
     char out[64], ev[64]; uint8_t prm[16];
     test_ctx t = {0};

@@ -73,7 +73,7 @@ jobs:
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src "$MINGW_IMAGE" sh -c \
             "cmake -S dm/host -B build/win64 -G Ninja -DGAME=$GAME -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake && cmake --build build/win64"
-      # The .exe files are linked statically: they import only KERNEL32, bcrypt and the UCRT (docker/README.md), so no DLL goes with them
+      # The .exe files are linked statically: they import only Windows' own DLLs (KERNEL32, bcrypt and the UCRT; with SDL3 also USER32, GDI32 and other system DLLs: docker/README.md), so no DLL goes with them
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: win64-tests

@@ -1,19 +1,23 @@
 // nn::audio AudioOut: the game (FMOD nx output layer) appends PCM buffers block by block; once played the system puts them back on the "released" queue and signals the event.
-// Host: real audio output = CoreAudio AudioUnit (Mac DefaultOutput / iOS RemoteIO); silent sink = consumes buffers in real time (no sound, pacing matches the real device).
-//       iOS defaults to real audio output (the product must have sound), tests that want silence set DM_AUDIO=0 explicitly; Mac defaults to the silent sink (replay / gate checks are silent), DM_AUDIO=1 for real audio output.
+// Host: real audio output = CoreAudio AudioUnit (Mac DefaultOutput / iOS RemoteIO), an SDL3 audio stream on Linux and Windows; silent sink = consumes buffers in real time (no sound, pacing matches the real device).
+//       iOS, Linux and Windows default to real audio output (the product must have sound), tests that want silence set DM_AUDIO=0 explicitly; Mac defaults to the silent sink (replay / gate checks are silent), DM_AUDIO=1 for real audio output.
 // The contents of AudioOut / AudioOutBuffer / AudioOutParameter are read and written only through the interfaces below; the host defines its own internal layout and only writes the front part of the structs (AudioOut: the SDK's own fields, au_info).
 #include "hle.h"
 #if defined(__APPLE__)
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
 #else
-// No audio device backend on this platform yet: a declared stopgap until Phase 1 brings SDL3's audio output. Every output plays through the silent sink (the game's audio keeps
-// its real-time pace, without sound; real_audio() says so once with a red line). No output gets a unit, so these stand-ins for the AudioUnit calls are never reached with one
-typedef void *AudioUnit; typedef int32_t OSStatus;
-static OSStatus AudioOutputUnitStart(AudioUnit au) { (void)au; return -1; }
-static OSStatus AudioOutputUnitStop(AudioUnit au) { (void)au; return 0; }
-static OSStatus AudioUnitUninitialize(AudioUnit au) { (void)au; return 0; }
-static OSStatus AudioComponentInstanceDispose(AudioUnit au) { (void)au; return 0; }
+// Linux and Windows: real audio output = an SDL3 audio stream on the default playback device (SDL_OpenAudioDeviceStream), which SDL's device thread pulls through sdl_render below,
+// the counterpart of au_render. The AudioUnit calls the shared code makes map onto it: start = resume the device, stop = pause it, dispose = destroy the stream (which closes the
+// device). Pausing takes the lock SDL's device thread holds while it calls the stream back, so once it returns no pull() is running and none starts: the same single-consumer
+// guarantee AudioOutputUnitStop gives backend_stop, au_release_pending and the silent sink taking over. SDL_OpenAudioDeviceStream follows the system's default device when it changes
+#include <SDL3/SDL.h>
+typedef SDL_AudioStream *AudioUnit; typedef int32_t OSStatus;
+static OSStatus AudioOutputUnitStart(AudioUnit au) { return SDL_ResumeAudioStreamDevice(au) ? 0 : -1; }
+// What SDL converted but the device has not played yet is dropped, as a stopped AudioUnit drops its buffer: a later Start must not replay buffers the game already took back
+static OSStatus AudioOutputUnitStop(AudioUnit au) { if (!SDL_PauseAudioStreamDevice(au)) return -1; SDL_ClearAudioStream(au); return 0; }
+static OSStatus AudioUnitUninitialize(AudioUnit au) { (void)au; return 0; }   // an SDL stream has no initialized state apart from being open
+static OSStatus AudioComponentInstanceDispose(AudioUnit au) { SDL_DestroyAudioStream(au); return 0; }
 #endif
 #include <stdatomic.h>
 #include <unistd.h>
@@ -240,8 +244,60 @@ static OSStatus au_create(aout *a) {
     return st;
 }
 #else
-static void au_dispose(AudioUnit au) { (void)au; }
-static OSStatus au_create(aout *a) { a->au = NULL; return -1; }   // no device backend yet (see the top of the file)
+// SDL's device thread asks for additional bytes in the stream's own format (S16 at 48 kHz in the output's device channels); exactly that much is pulled, as au_render pulls what the
+// AudioUnit asks, with the same per-output statistics, callback counts (the watchdog's evidence) and DM_AUDIO_MUTE diagnostic. Through a stack buffer: no allocation here
+static void SDLCALL sdl_render(void *ctx, SDL_AudioStream *s, int additional, int total) {
+    (void)total;
+    aout *a = ctx;
+    atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed); atomic_fetch_add_explicit(&a->cb_n, 1, memory_order_relaxed);
+    int frame = 2 * device_channels(a); uint32_t frames = additional > 0 ? (uint32_t)(additional / frame) : 0;
+    if (frames) {   // SDL also calls back when the stream still holds what the device asks (a resampler's leftover): nothing to pull, no statistics
+        // Every 2000 callbacks of each output, log one line: frames requested per call, pending blocks at callback start, underruns (as au_render; docs/reference/audio.md "RemoteIO's default I/O buffer duration")
+        uint32_t qd = atomic_load(&a->q_tail) - atomic_load(&a->q_head);
+        if (!a->st_calls || frames < a->st_fmin) a->st_fmin = frames; if (frames > a->st_fmax) a->st_fmax = frames; a->st_qsum += qd;
+        if (++a->st_calls % 2000 == 0) { uint64_t un = atomic_load(&a->under_n), ubb = atomic_load(&a->under_b);
+            LOG("audio #%d device callbacks %llu: %u–%u frames each, %.1f blocks queued on average at callback; in these 2000, %llu underruns, %.1f ms zero-padded", a->id, (unsigned long long)a->st_calls, a->st_fmin, a->st_fmax, a->st_qsum / 2000.0,
+                (unsigned long long)(un - a->st_u0), (ubb - a->st_ub0) / (2.0 * a->ch) / (RATE / 1000.0)); a->st_fmin = ~0u; a->st_fmax = 0; a->st_qsum = 0; a->st_u0 = un; a->st_ub0 = ubb; } }
+    static int mute = -1; if (mute < 0) { const char *e = getenv("DM_AUDIO_MUTE"); mute = e && atoi(e); }   // diagnostic: the whole real-output path, silenced (as au_render)
+    uint8_t buf[4096];
+    while (additional >= frame) {
+        int n = additional < (int)sizeof buf ? additional : (int)sizeof buf; n -= n % frame;
+        pull_device(a, buf, (uint64_t)n);
+        if (mute) memset(buf, 0, (size_t)n);
+        SDL_PutAudioStreamData(s, buf, n);
+        additional -= n;
+    }
+}
+static void au_dispose(AudioUnit au) { SDL_DestroyAudioStream(au); }
+// The device buffer: about 5 ms of frames, as the Mac's au_buffer and iOS's audio session ask. SDL's own default at 48 kHz is 1024 frames (21 ms), more than games keep queued (4 blocks
+// of 5 ms): every callback would come up short and be zero-padded, the crackling of docs/reference/audio.md "RemoteIO's default I/O buffer duration". SDL_AUDIO_DEVICE_SAMPLE_FRAMES in the
+// environment still wins (SDL's hint priority); DM_DBG_AU_FRAMES=N asks N frames, as on the Mac. The backend rounds the request to what it supports (WASAPI to its engine period, PipeWire
+// to its quantum), and the open logs the frames it got. Set before SDL's audio starts, so the first device opened takes it
+static char g_sdl_frames[16];
+static int g_sdl_audio;   // SDL's audio subsystem started (sdl_audio_start)
+static void sdl_audio_start(void) {
+    const char *e = getenv("DM_DBG_AU_FRAMES");
+    snprintf(g_sdl_frames, sizeof g_sdl_frames, "%d", e ? atoi(e) : RATE / 200);
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, g_sdl_frames, e ? SDL_HINT_OVERRIDE : SDL_HINT_NORMAL);
+    SDL_SetAppMetadata(DM_GAME_NAME, NULL, NULL);   // the name the system's mixer shows for the game's sound (front_sdl.c sets the same)
+    g_sdl_audio = SDL_InitSubSystem(SDL_INIT_AUDIO);   // reference counted beside the front end's SDL_Init, never quit: outputs open and close all through a game
+    if (g_sdl_audio) LOG("audio: SDL %d.%d.%d, audio driver %s", SDL_VERSIONNUM_MAJOR(SDL_GetVersion()), SDL_VERSIONNUM_MINOR(SDL_GetVersion()), SDL_VERSIONNUM_MICRO(SDL_GetVersion()), SDL_GetCurrentAudioDriver());
+    else LOG("[RED] audio: SDL has no audio driver (%s): every output plays through the silent sink", SDL_GetError());
+}
+// No device (no audio driver, or the default device would not open: a PC without sound hardware, a container) is not fatal, unlike a failed AudioUnit: the output keeps a->au NULL and
+// plays through the silent sink, which keeps the game's audio at its real-time pace, and the line says so. So this returns 0 either way (au_open stops the host on any other status)
+static OSStatus au_create(aout *a) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, sdl_audio_start);
+    a->au = NULL;
+    if (!g_sdl_audio) return 0;
+    SDL_AudioSpec spec = {SDL_AUDIO_S16, device_channels(a), RATE};
+    SDL_AudioStream *s = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, sdl_render, a);   // opens paused: nothing is pulled before Start
+    if (!s) { LOG("[RED] audio #%d: the default output device did not open (%s): this output plays through the silent sink", a->id, SDL_GetError()); return 0; }
+    SDL_AudioSpec dev; int fr = 0; SDL_AudioDeviceID id = SDL_GetAudioStreamDevice(s);
+    if (SDL_GetAudioDeviceFormat(id, &dev, &fr)) LOG("audio device buffer: %d frames at %d Hz (requested %s; %s, %d channels)", fr, dev.freq, g_sdl_frames, SDL_GetAudioDeviceName(id) ?: "default device", dev.channels);
+    a->au = s;
+    return 0;
+}
 #endif
 // OpenAudioOut runs on the game's thread, and creating the AudioUnit takes about 24 KB of stack (measured on the Mac: component lookup, instance, Initialize), more than some game threads have
 // left (Super Mario 3D World's save thread has 8 KB in all; Pokémon: Let's Go overflowed here at startup, PR #36). So it runs on a host thread, once per AudioOut. Not HLE_FORCE_BIG:
@@ -274,10 +330,8 @@ static void backend_stop(aout *a) {
 #if defined(__APPLE__)
 static int real_audio(void) { const char *e = getenv("DM_AUDIO"); return e ? atoi(e) != 0 : TARGET_OS_IPHONE; }
 #else
-static int real_audio(void) {
-    static _Atomic int once; if (!atomic_exchange(&once, 1)) LOG("[RED] audio output: no backend on this platform yet (Phase 1: SDL3); every output plays through the silent sink");
-    return 0;
-}
+// Linux and Windows: a player's PC must have sound, as an iPhone; DM_AUDIO=0 chooses the silent sink (the Mac's default, which exists for the replay checks only Macs run)
+static int real_audio(void) { const char *e = getenv("DM_AUDIO"); return e ? atoi(e) != 0 : 1; }
 #endif
 // Start the AudioUnit of an output whose backend is BK_NONE (callers hold g_aos_lock). When the device refuses (the session is held by a call, or is being reset), the silent sink stands in and the watchdog retries
 static void au_go(aout *a, uint64_t now) {

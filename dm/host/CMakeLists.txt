@@ -76,20 +76,56 @@ if(NOT WIN32)
     target_link_libraries(vpx PUBLIC pthread m)
 endif()
 
+# ---- SDL3: the Linux and Windows front end (front_sdl.c: window, keyboard, mouse, controllers, motion, rumble) and audio output (hle_audio.c) ----
+# Pinned by release tag and the commit it names (docker/README.md has the version, its date and why). A shallow clone of the tag; the commit is checked after it, so a moved tag
+# stops the configure step. Offline: -DFETCHCONTENT_SOURCE_DIR_SDL3=<a copy of that release> builds from the copy instead (not downloaded; its commit is checked when it is a git checkout).
+# A static library with only what the host uses: video (with the dummy driver the tests run on, X11 and Wayland, Windows), the software renderer for the progress screen, Vulkan
+# surfaces, events, joystick and gamepad (HIDAPI for the PlayStation, Switch and Xbox controllers' gyro and rumble), haptic, sensor (the gyro of PC handhelds whose controller has
+# none of its own) and audio (PipeWire, PulseAudio, ALSA, WASAPI, the dummy driver). The Linux libraries are loaded at run time with dlopen (SDL_DEPS_SHARED), so a PC without
+# one of them still starts: that driver is skipped
+set(SDL3_TAG release-3.4.14)
+set(SDL3_COMMIT 147a8ee32dbf9ac02f3794964490687b6bbda1bc)
+if(WIN32)
+    enable_language(CXX)   # SDL's Windows core has C++ sources (GameInput), so the programs that link it link as C++; the language is enabled here, above every target that links SDL
+endif()
+include(FetchContent)
+FetchContent_Declare(SDL3 GIT_REPOSITORY https://github.com/libsdl-org/SDL.git GIT_TAG ${SDL3_TAG} GIT_SHALLOW TRUE)
+foreach(opt SDL_SHARED SDL_TEST_LIBRARY SDL_TESTS SDL_EXAMPLES SDL_INSTALL SDL_UNINSTALL SDL_GPU SDL_CAMERA SDL_POWER SDL_DIALOG SDL_TRAY
+            SDL_OPENGL SDL_OPENGLES SDL_RENDER_VULKAN SDL_RENDER_D3D SDL_RENDER_D3D11 SDL_RENDER_D3D12 SDL_KMSDRM SDL_OFFSCREEN SDL_DISKAUDIO
+            SDL_JACK SDL_SNDIO SDL_OSS SDL_FRIBIDI SDL_LIBTHAI SDL_LIBURING SDL_HIDAPI_LIBUSB)
+    set(${opt} OFF)
+endforeach()
+foreach(opt SDL_STATIC SDL_VIDEO SDL_RENDER SDL_VULKAN SDL_AUDIO SDL_JOYSTICK SDL_HAPTIC SDL_HIDAPI SDL_SENSOR SDL_DUMMYVIDEO SDL_DUMMYAUDIO SDL_VIRTUAL_JOYSTICK)
+    set(${opt} ON)
+endforeach()
+FetchContent_MakeAvailable(SDL3)
+if(NOT FETCHCONTENT_SOURCE_DIR_SDL3 OR EXISTS ${sdl3_SOURCE_DIR}/.git)
+    find_package(Git REQUIRED)
+    execute_process(COMMAND ${GIT_EXECUTABLE} -C ${sdl3_SOURCE_DIR} rev-parse HEAD OUTPUT_VARIABLE sdl3_head OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(NOT sdl3_head STREQUAL SDL3_COMMIT)
+        message(FATAL_ERROR "SDL3 at ${sdl3_SOURCE_DIR} is commit '${sdl3_head}', not ${SDL3_COMMIT} (${SDL3_TAG}): the tag moved or the copy is another version")
+    endif()
+else()
+    message(STATUS "SDL3 from ${FETCHCONTENT_SOURCE_DIR_SDL3}, not a git checkout: its version is not checked (it must be ${SDL3_TAG})")
+endif()
+if(NOT CMAKE_BUILD_TYPE)
+    target_compile_options(SDL3-static PRIVATE -O2)   # SDL as a subproject gets no optimization of its own: its audio conversion and mixing run on every device callback
+endif()
+
 # ---- The portable host sources ----
 # Not here: the parts tied to native ARM64 execution (entry.S, hle_bigstack.c, crash.c, probe.c; the x86-64 execution engine, Phase 2, replaces them), the program entry
-# main.c (it runs a frontend), and the Apple frontend files (*.m). hle_fdstat.c compiles to nothing on Windows
+# main.c (it runs a frontend), and the Apple frontend files (*.m). front_sdl.c is the front end here. hle_fdstat.c compiles to nothing on Windows
 file(GLOB HLE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hle_*.c)
 list(FILTER HLE_SRC EXCLUDE REGEX "/hle_bigstack\\.c$")
-add_library(nxhost STATIC hle.c loader.c thread.c ${HLE_SRC})
+add_library(nxhost STATIC hle.c loader.c thread.c front_sdl.c ${HLE_SRC})
 add_dependencies(nxhost game_profile)
 target_compile_options(nxhost PRIVATE ${HOST_FLAGS})
 target_include_directories(nxhost PUBLIC ${GEN} ${PROFILE_DIR} ${REPO}/dm/third_party/stb_vorbis)
-target_link_libraries(nxhost PUBLIC nxplat vpx)
+target_link_libraries(nxhost PUBLIC nxplat vpx SDL3::SDL3-static)
 
 # ---- Unit tests (dm/host/tests: each includes the host sources it exercises, so a test links the platform layer, not nxhost) ----
-# host_test(<name> SOURCES <files> [PROFILE] [VPX] [POSIX] [DEFS <macros>] [RUNS <arguments; one run each, "-" = none>] [TMPDIR])
-#   PROFILE: needs the game profile header; POSIX: needs fork() (death tests in a child), so Linux only for now
+# host_test(<name> SOURCES <files> [PROFILE] [VPX] [SDL] [POSIX] [DEFS <macros>] [RUNS <arguments; one run each, "-" = none>] [TMPDIR])
+#   PROFILE: needs the game profile header; SDL: links SDL3 (front_sdl.c, hle_audio.c); POSIX: needs fork() (death tests in a child), so Linux only for now
 include(CTest)
 set(TESTS ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 # The test list for the runners (dm/host/tests/run_host_tests.sh, run_win64_tests.ps1), which run where CTest cannot: CTest's files name this machine's paths, and a Windows tree
@@ -105,7 +141,7 @@ set(MANIFEST "# nxnative host unit tests, written by dm/host/CMakeLists.txt: nam
 string(APPEND MANIFEST "# platform: ${LOG_PLATFORM}\n# system: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}\n# compiler: ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} (${CMAKE_C_COMPILER})\n")
 string(APPEND MANIFEST "# game: ${GAME}\n# configured: ${configured}\n")
 function(host_test name)
-    cmake_parse_arguments(T "PROFILE;VPX;POSIX;TMPDIR" "" "SOURCES;DEFS;RUNS;INCLUDES" ${ARGN})
+    cmake_parse_arguments(T "PROFILE;VPX;SDL;POSIX;TMPDIR" "" "SOURCES;DEFS;RUNS;INCLUDES" ${ARGN})
     if(T_POSIX AND WIN32)
         string(APPEND MANIFEST "# not built for this platform: ${name} (POSIX: fork() death tests)\n")
         set(MANIFEST "${MANIFEST}" PARENT_SCOPE)
@@ -124,6 +160,9 @@ function(host_test name)
     if(T_VPX)
         target_link_libraries(${name} PRIVATE vpx)
         target_include_directories(${name} PRIVATE ${REPO}/dm/third_party/stb_vorbis)
+    endif()
+    if(T_SDL)
+        target_link_libraries(${name} PRIVATE SDL3::SDL3-static)
     endif()
     if(NOT T_RUNS)
         set(T_RUNS -)
@@ -165,7 +204,9 @@ host_test(t_swkbd SOURCES t_swkbd.c ../hle_swkbd.c PROFILE)
 host_test(t_pctl SOURCES t_pctl.c PROFILE)
 host_test(t_time SOURCES t_time.c PROFILE)
 host_test(t_hid SOURCES t_hid.c ../hle_haptics.c PROFILE)
-host_test(t_audio_spsc SOURCES t_audio_spsc.c PROFILE)
+host_test(t_audio_spsc SOURCES t_audio_spsc.c PROFILE SDL)
+host_test(t_audio_sdl SOURCES t_audio_sdl.c PROFILE SDL)
+host_test(t_front_sdl SOURCES t_front_sdl.c ../hle_haptics.c PROFILE SDL)
 host_test(t_audren_work SOURCES t_audren_work.c PROFILE)
 host_test(t_nro SOURCES t_nro.c PROFILE)
 host_test(t_fs SOURCES t_fs.c t_fs_stub.c PROFILE TMPDIR)
@@ -188,7 +229,7 @@ host_test(t_svc_memory SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_pro
 host_test(t_svc_memory_unlimited SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile DEFS DM_GAME_MEM_MAP_LIMIT=0)
 host_test(t_svc_memory_16k SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile DEFS TEST_PAGE_16K)
 # Not portable yet (Apple only, dm/host/tests/Makefile): t_altstack (crash.c's signal stack: native execution), t_audio and t_audio_device (the Core Audio render callback,
-# device and AudioUnit watchdog), t_motion_apple, t_motion_pro_mac and t_haptics_apple (Apple frontends: GameController, IOKit, Core Haptics), t_svc_memory_dirty (the
-# Metal backend's write-protect page tracking, dm/gfx/nvn)
+# device and AudioUnit watchdog; t_audio_sdl checks the SDL3 output here), t_motion_apple, t_motion_pro_mac and t_haptics_apple (Apple frontends: GameController, IOKit,
+# Core Haptics; t_front_sdl checks the SDL3 front end here), t_svc_memory_dirty (the Metal backend's write-protect page tracking, dm/gfx/nvn)
 
 file(WRITE ${CMAKE_BINARY_DIR}/host_tests.tsv "${MANIFEST}")

@@ -1,5 +1,5 @@
 # Linux build and test environment for the portable host (dm/host/CMakeLists.txt): docker/README.md has the commands.
-# Ubuntu 24.04, pinned by digest; LLVM 18 (the distribution's clang / lld), CMake 3.28, Ninja, Python 3.12
+# Ubuntu 24.04, pinned by digest; LLVM 18 (the distribution's clang / lld), CMake 3.28, Ninja, Python 3.12, and the development headers SDL3 compiles its Linux drivers against
 FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
@@ -9,6 +9,13 @@ RUN apt-get update \
  && update-alternatives --install /usr/bin/cc cc /usr/bin/clang-18 100 \
  && update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-18 100
 ENV CC=clang
+# SDL3's drivers (dm/host/CMakeLists.txt builds SDL from source): the headers of the libraries SDL loads at run time with dlopen, X11 and its extensions, Wayland with libdecor
+# and xkbcommon, EGL, ALSA, PulseAudio, PipeWire, D-Bus, udev and IBus, and pkg-config to find them. A static SDL built against them still starts on a PC without one of them
+# (that driver is skipped). A layer of its own, so the toolchain layer above stays as it was
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends pkg-config libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+    libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libasound2-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev libibus-1.0-dev \
+ && rm -rf /var/lib/apt/lists/*
 # The worktree is mounted at /src; git refuses repositories owned by another user without this (system-wide: the container also runs as the caller's user, HOME=/tmp,
 # and the test runner reads the commit with git)
 RUN git config --system --add safe.directory '*'

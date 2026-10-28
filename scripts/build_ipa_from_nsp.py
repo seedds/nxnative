@@ -29,7 +29,7 @@
 # unless ALLOW_OTHER_METAL / --allow-other-metal. Issue #242 reported corruption with another compiler; the cause is still unconfirmed.
 # Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x and fonttools (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, .NET SDK 10, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress). --progress json writes newline-delimited JSON events to stdout.
-import ast, collections, contextlib, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
+import ast, collections, contextlib, ctypes, errno, getpass, pwd, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
@@ -2312,6 +2312,24 @@ def main(args=None):
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
+    # HOME and DOTNET_CLI_HOME for every child: a GUI launch (LaunchServices) can hand the app a
+    # process environment with HOME missing or empty, and .NET's first-run configure then builds a
+    # mutex path from "" and dies with 'NuGet-Migrations' + lstat("") == ENOENT — before any project
+    # is read (issue #10, where the app's own DOTNET_ROOT workaround did not help because the empty
+    # HOME came from the launch, not from the app). Derive it from the password database when the
+    # environment has nothing usable, so the pipeline is correct however it was started.
+    if not env.get('HOME') or not os.path.isdir(env['HOME']):
+        try: home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except Exception: home = Path.home()
+        if home.is_dir():
+            env['HOME'] = os.environ['HOME'] = str(home)
+            say(f'HOME: {home} (taken from the password database; the environment had none)')
+    env.setdefault('DOTNET_CLI_HOME', env['HOME'])   # .NET writes its first-run state here
+    # No first-run banner, no telemetry: a build neither wants nor reads either, and the telemetry
+    # call can hang the first run on a network that cannot reach Microsoft. setdefault, so a user
+    # who wants telemetry on keeps it.
+    env.setdefault('DOTNET_CLI_TELEMETRY_OPTOUT', '1')
+    env.setdefault('DOTNET_NOLOGO', '1')
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable

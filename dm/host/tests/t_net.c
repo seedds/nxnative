@@ -6,11 +6,19 @@
 #include <mach-o/getsect.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
 
 void dm_guest_sleep_ns(int64_t ns) { struct timespec t = {0, ns > 0 && ns < 1000000000 ? (long)ns : 100000000}; nanosleep(&t, NULL); }   // hle_thread.c is not linked
 void hle_bind_system_event(void *ev, int on) { (void)ev; (void)on; }
 
 static int checks, fails;
+static void poll_interrupted(int sig) { (void)sig; }
+struct poll_waker { pthread_t target; _Atomic int done; };
+static void *interrupt_poll(void *arg) {
+    struct poll_waker *w = arg;
+    while (!atomic_load(&w->done)) { usleep(10000); if (!atomic_load(&w->done)) pthread_kill(w->target, SIGALRM); }
+    return NULL;
+}
 extern const struct mach_header_64 _mh_execute_header;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 
@@ -73,6 +81,26 @@ int main(void) {
     CHECK(poll_(&pf, 1, 500) == 1, "Poll readable (broadcast)");
     r = recvfrom_(a, buf, sizeof buf, 0, from, &fl);
     CHECK(r == 2 && !memcmp(buf, "bc", 2), "RecvFrom broadcast");
+
+    static char too_large[65536];   // beyond IPv4 UDP's maximum payload: neither the broadcast nor any peer copy can succeed
+    CHECK(sendto_(a, too_large, sizeof too_large, 0, bc, 16) == -1, "SendTo broadcast preserves total failure");
+    CHECK(lasterr() == EMSGSIZE, "GetLastError after failed broadcast");
+
+    struct sigaction action = {0}, old_action;
+    action.sa_handler = poll_interrupted; sigemptyset(&action.sa_mask);
+    sigaction(SIGALRM, &action, &old_action);
+    sigset_t signal_set, old_mask; sigemptyset(&signal_set); sigaddset(&signal_set, SIGALRM);
+    pthread_sigmask(SIG_UNBLOCK, &signal_set, &old_mask);
+    struct poll_waker waker = {.target = pthread_self()}; pthread_t waking;
+    int thread_ok = pthread_create(&waking, NULL, interrupt_poll, &waker) == 0;
+    CHECK(thread_ok, "create the polling thread's signal sender");
+    int interrupted = poll_(NULL, 0, 1000);
+    int poll_error = lasterr();
+    atomic_store(&waker.done, 1); if (thread_ok) pthread_join(waking, NULL);
+    CHECK(interrupted == -1, "Poll interrupted by a signal on its own thread");
+    CHECK(poll_error == EINTR, "GetLastError after interrupted Poll");
+    pthread_sigmask(SIG_SETMASK, &old_mask, NULL); sigaction(SIGALRM, &old_action, NULL);
+    CHECK(poll_(NULL, 0, 0) == 0 && lasterr() == 0, "successful Poll clears the previous error");
 
     int b = sock(2, 2, 0);
     CHECK(b >= 0, "Socket 2");

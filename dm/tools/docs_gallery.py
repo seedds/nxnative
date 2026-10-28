@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-# Writes the games gallery in README.md (between its gallery markers) from docs/images/gallery.tsv: one cell per row of the table, three to a row, in the table's order.
+# Writes the games gallery in GAMES.md (between its gallery markers) from docs/images/gallery.tsv: one cell per row of the table, three to a row, in the table's order.
 # The table is the source: a new game is a row in it (usually at the end), so two pull requests that each add a game change one line each instead of moving every cell after
 # the first one; .gitattributes merges the table with the union driver. Columns: image (a file in docs/images), name (the caption and the image's alt text), note (the small
 # line under it: a remark, such as "60 fps with 1.0.1"; empty for most games) and the base game's title ID, which links the name to its game note.
-# Run it after changing the table; --check only reports whether README.md is current (dm/tools/tests/test_docs.py runs it).
+# Run it after changing the table; --check only reports whether GAMES.md is current (dm/tools/tests/test_docs.py runs it).
 # Usage: docs_gallery.py [--check]
 import html, pathlib, re, sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 TABLE = REPO / 'docs' / 'images' / 'gallery.tsv'
-OUT = REPO / 'README.md'
+OUT = REPO / 'GAMES.md'
+BLOB = RAW = ''   # the links are relative to GAMES.md's folder, which holds the engine
+if not OUT.exists() and (REPO.parent / '.upstream-ref').is_file():
+    # In engine/ (NX2Apple's tools/engine.py sync) GAMES.md is the checkout's, one folder up, and the checkout holds no engine files: the
+    # game notes and images are seedds/nxnative's, at the commit the checkout is pinned to (.upstream-ref).
+    OUT = REPO.parent / 'GAMES.md'
+    pin = (REPO.parent / '.upstream-ref').read_text(encoding='utf-8').strip()
+    BLOB = f'https://github.com/seedds/nxnative/blob/{pin}/'
+    RAW = f'https://raw.githubusercontent.com/seedds/nxnative/{pin}/'
 BEGIN = '<!-- gallery: written by dm/tools/docs_gallery.py from docs/images/gallery.tsv; change the table, then run it -->'
 END = '<!-- end of gallery -->'
 PER_ROW = 3
@@ -38,10 +46,10 @@ def rows():
 def cell(image, name, note, tid):
     # Attributes use double quotes; apostrophes in existing captions need no escaping.
     image, name, note = (html.escape(s, quote=False).replace('"', '&quot;') for s in (image, name, note))
-    caption = f'<a href="dm/games/{tid}/README.md">{name}</a>'
+    caption = f'<a href="{BLOB}dm/games/{tid}/README.md">{name}</a>'
     detail = f'<br>{note}' if note else ''   # a game with no remark has only its caption
     # <small> is one step below the body text; <sub> would be smaller still and lower the baseline.
-    return f'<td align="center" valign="top" width="33%"><img src="docs/images/{image}" width="256" alt="{name}"><br><small><b>{caption}</b>{detail}</small></td>'
+    return f'<td align="center" valign="top" width="33%"><img src="{RAW}docs/images/{image}" width="256" alt="{name}"><br><small><b>{caption}</b>{detail}</small></td>'
 
 
 def gallery():
@@ -49,21 +57,21 @@ def gallery():
     lines = ['<table>']
     for i in range(0, len(r), PER_ROW):
         row = [cell(*x) for x in r[i:i + PER_ROW]]
-        lines += ['<tr>'] + row + ['<td></td>'] * (PER_ROW - len(row)) + ['</tr>']   # a short last row is filled with empty cells, as README had it
+        lines += ['<tr>'] + row + ['<td></td>'] * (PER_ROW - len(row)) + ['</tr>']   # a short last row is filled with empty cells, as the page had it
     return '\n'.join(lines + ['</table>'])
 
 
 def readme():
     text = OUT.read_text(encoding='utf-8')
-    if text.count(BEGIN) != 1 or text.count(END) != 1: sys.exit(f'README.md: the gallery markers ({BEGIN} … {END}) must appear once each')
+    if text.count(BEGIN) != 1 or text.count(END) != 1: sys.exit(f'GAMES.md: the gallery markers ({BEGIN} … {END}) must appear once each')
     head, rest = text.split(BEGIN)
-    if END not in rest: sys.exit('README.md: the gallery end marker must follow the begin marker')
+    if END not in rest: sys.exit('GAMES.md: the gallery end marker must follow the begin marker')
     return head + BEGIN + '\n' + gallery() + '\n' + END + rest.split(END, 1)[1]
 
 
 if __name__ == '__main__':
     text = readme()
     if '--check' in sys.argv[1:]:
-        if OUT.read_text(encoding='utf-8') != text: sys.exit('README.md: the gallery is out of date: run dm/tools/docs_gallery.py')
+        if OUT.read_text(encoding='utf-8') != text: sys.exit('GAMES.md: the gallery is out of date: run dm/tools/docs_gallery.py')
     else:
         OUT.write_text(text, encoding='utf-8')

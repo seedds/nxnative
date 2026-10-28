@@ -230,6 +230,9 @@ public struct GameSettingsSheetView: View {
                             // Cover Artwork Customization
                             coverArtworkSection()
                         }
+                        
+                        // Section: Game Management (Remove / Trash)
+                        gameManagementSection()
                     }
                     .padding(20)
                 }
@@ -239,6 +242,26 @@ public struct GameSettingsSheetView: View {
             }
         }
         .frame(minWidth: 500, idealWidth: 560, maxWidth: 640, minHeight: 560, idealHeight: 640, maxHeight: 740)
+    }
+    
+    func dismissSettingsAndShowRemove() {
+        let target = game
+        viewModel.gameForSettingsSheet = nil
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            viewModel.gameToRemove = target
+            viewModel.showRemoveConfirm = true
+        }
+    }
+    
+    func dismissSettingsAndShowTrash() {
+        let target = game
+        viewModel.gameForSettingsSheet = nil
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            viewModel.gameToTrash = target
+            viewModel.showTrashConfirm = true
+        }
     }
 }
 

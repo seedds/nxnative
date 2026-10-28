@@ -44,9 +44,17 @@ public struct LibraryView: View {
                 CompactConsoleActionSheetView(
                     game: selected,
                     viewModel: viewModel,
+                    onRemoveFromLibrary: { target in
+                        viewModel.gameToRemove = target
+                        viewModel.showRemoveConfirm = true
+                    },
+                    onDeleteToTrash: { target in
+                        viewModel.gameToTrash = target
+                        viewModel.showTrashConfirm = true
+                    },
                     onDelete: { target in
-                        viewModel.gameToDelete = target
-                        viewModel.showDeleteConfirm = true
+                        viewModel.gameToTrash = target
+                        viewModel.showTrashConfirm = true
                     },
                     onDismiss: {
                         withAnimation(.easeInOut(duration: 0.18)) {
@@ -63,18 +71,46 @@ public struct LibraryView: View {
             GameSettingsSheetView(viewModel: viewModel, game: game)
         }
         .confirmationDialog(
-            viewModel.tr("library.delete_title", viewModel.gameToDelete?.name ?? "Game"),
-            isPresented: $viewModel.showDeleteConfirm,
+            viewModel.tr("library.remove_title", viewModel.gameToRemove?.name ?? "Game"),
+            isPresented: $viewModel.showRemoveConfirm,
             titleVisibility: .visible
         ) {
-            Button(viewModel.tr("library.delete_button"), role: .destructive) {
-                if let g = viewModel.gameToDelete {
-                    viewModel.deletePortedGame(g)
+            Button(viewModel.tr("library.remove_button")) {
+                if let g = viewModel.gameToRemove {
+                    viewModel.removeGameFromLibrary(g)
                 }
             }
             Button(viewModel.tr("library.cancel"), role: .cancel) {}
         } message: {
-            Text(viewModel.tr("library.delete_message"))
+            Text(viewModel.tr("library.remove_message"))
+        }
+        .confirmationDialog(
+            viewModel.tr("library.trash_title", viewModel.gameToTrash?.name ?? "Game"),
+            isPresented: $viewModel.showTrashConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(viewModel.tr("library.trash_button"), role: .destructive) {
+                if let g = viewModel.gameToTrash {
+                    viewModel.deleteGameToTrash(g)
+                }
+            }
+            Button(viewModel.tr("library.cancel"), role: .cancel) {}
+        } message: {
+            Text(viewModel.tr("library.trash_message"))
+        }
+        .confirmationDialog(
+            viewModel.tr("library.delete_title", viewModel.gameToDelete?.name ?? "Game"),
+            isPresented: $viewModel.showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(viewModel.tr("library.trash_button"), role: .destructive) {
+                if let g = viewModel.gameToDelete {
+                    viewModel.deleteGameToTrash(g)
+                }
+            }
+            Button(viewModel.tr("library.cancel"), role: .cancel) {}
+        } message: {
+            Text(viewModel.tr("library.trash_message"))
         }
     }
     

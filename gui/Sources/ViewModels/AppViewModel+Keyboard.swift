@@ -28,8 +28,12 @@ extension AppViewModel {
                 case "escape": handleCancel()
                 default: break
                 }
-            } else if showDeleteConfirm {
-                if key == "escape" { showDeleteConfirm = false }
+            } else if showDeleteConfirm || showRemoveConfirm || showTrashConfirm {
+                if key == "escape" {
+                    showDeleteConfirm = false
+                    showRemoveConfirm = false
+                    showTrashConfirm = false
+                }
             }
             return
         }

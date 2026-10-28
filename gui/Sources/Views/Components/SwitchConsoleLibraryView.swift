@@ -147,6 +147,7 @@ public struct SwitchConsoleLibraryView: View {
 
                             SquareGameCardView(
                                 game: game,
+                                viewModel: viewModel,
                                 isFocused: isFocused,
                                 baseSize: baseCardSize,
                                 onSelect: {

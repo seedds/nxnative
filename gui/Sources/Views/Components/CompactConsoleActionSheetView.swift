@@ -4,17 +4,23 @@ import AppKit
 public struct CompactConsoleActionSheetView: View {
     public let game: PortedGame
     @ObservedObject public var viewModel: AppViewModel
+    public let onRemoveFromLibrary: ((PortedGame) -> Void)?
+    public let onDeleteToTrash: ((PortedGame) -> Void)?
     public let onDelete: (PortedGame) -> Void
     public let onDismiss: () -> Void
     
     public init(
         game: PortedGame,
         viewModel: AppViewModel,
-        onDelete: @escaping (PortedGame) -> Void,
+        onRemoveFromLibrary: ((PortedGame) -> Void)? = nil,
+        onDeleteToTrash: ((PortedGame) -> Void)? = nil,
+        onDelete: @escaping (PortedGame) -> Void = { _ in },
         onDismiss: @escaping () -> Void
     ) {
         self.game = game
         self.viewModel = viewModel
+        self.onRemoveFromLibrary = onRemoveFromLibrary
+        self.onDeleteToTrash = onDeleteToTrash
         self.onDelete = onDelete
         self.onDismiss = onDismiss
     }
@@ -223,17 +229,38 @@ public struct CompactConsoleActionSheetView: View {
                         }
                     }
                     
-                    // Option 5: Remove Game
+                    // Option 5: Remove from Library (Keep files on disk)
                     menuActionRow(
                         index: 5,
-                        title: viewModel.tr("actions.delete_game"),
-                        subtitle: viewModel.tr("actions.delete_game_subtitle"),
+                        title: viewModel.tr("actions.remove_from_library"),
+                        subtitle: viewModel.tr("actions.remove_from_library_subtitle"),
+                        icon: "eye.slash",
+                        isPrimary: false
+                    ) {
+                        onDismiss()
+                        if let onRemove = onRemoveFromLibrary {
+                            onRemove(game)
+                        } else {
+                            viewModel.gameToRemove = game
+                            viewModel.showRemoveConfirm = true
+                        }
+                    }
+                    
+                    // Option 6: Move to macOS Trash
+                    menuActionRow(
+                        index: 6,
+                        title: viewModel.tr("actions.move_to_trash"),
+                        subtitle: viewModel.tr("actions.move_to_trash_subtitle"),
                         icon: "trash.fill",
                         isPrimary: false,
                         isDestructive: true
                     ) {
                         onDismiss()
-                        onDelete(game)
+                        if let onTrash = onDeleteToTrash {
+                            onTrash(game)
+                        } else {
+                            onDelete(game)
+                        }
                     }
                 }
                 .padding(16)

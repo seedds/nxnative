@@ -19,6 +19,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         public static let savedLibraryCardSize = "NXNative_SavedLibraryCardSize"
         public static let savedLibraryCardScale = "NXNative_SavedLibraryCardScale"
         public static let savedLauncherLanguage = "NXNative_SavedLauncherLanguage"
+        public static let savedHiddenGamePaths = "NXNative_SavedHiddenGamePaths"
     }
     
     // MARK: - Workspace & Paths
@@ -124,6 +125,15 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var settingsModalFocusIndex: Int = 0
     @Published public var gameToDelete: PortedGame? = nil
     @Published public var showDeleteConfirm: Bool = false
+    @Published public var hiddenGamePaths: Set<String> = [] {
+        didSet {
+            UserDefaults.standard.set(Array(hiddenGamePaths), forKey: StorageKeys.savedHiddenGamePaths)
+        }
+    }
+    @Published public var gameToRemove: PortedGame? = nil
+    @Published public var showRemoveConfirm: Bool = false
+    @Published public var gameToTrash: PortedGame? = nil
+    @Published public var showTrashConfirm: Bool = false
     
     // MARK: - Compatibility Database
     @Published public var compatibleGames: [CompatibleGameItem] = []
@@ -302,6 +312,10 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
             if FileManager.default.fileExists(atPath: savedGamePath, isDirectory: &isDir), isDir.boolValue {
                 self.selectedGameFolder = URL(fileURLWithPath: savedGamePath)
             }
+        }
+        
+        if let savedHidden = UserDefaults.standard.stringArray(forKey: StorageKeys.savedHiddenGamePaths) {
+            self.hiddenGamePaths = Set(savedHidden)
         }
         
         refreshLibrary()

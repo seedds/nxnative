@@ -1,17 +1,49 @@
 import Foundation
 import AppKit
 
-public struct ConnectedAppleDevice: Identifiable, Equatable {
+public struct ConnectedAppleDevice: Identifiable, Equatable, Hashable {
     public let id: String
     public let name: String
     public let model: String
     public let osVersion: String
     public let isPaired: Bool
+
+    public init(id: String, name: String, model: String, osVersion: String, isPaired: Bool) {
+        self.id = id
+        self.name = name
+        self.model = model
+        self.osVersion = osVersion
+        self.isPaired = isPaired
+    }
 }
 
-public struct DeveloperSigningTeam: Identifiable, Equatable {
+public struct DeveloperSigningTeam: Identifiable, Equatable, Hashable {
     public let id: String
     public let name: String
+    public let teamType: String?
+    public let isFreeProvisioningTeam: Bool
+    public let hasCertificateInKeychain: Bool
+
+    public init(
+        id: String,
+        name: String,
+        teamType: String? = nil,
+        isFreeProvisioningTeam: Bool = false,
+        hasCertificateInKeychain: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.teamType = teamType
+        self.isFreeProvisioningTeam = isFreeProvisioningTeam
+        self.hasCertificateInKeychain = hasCertificateInKeychain
+    }
+
+    public var displayName: String {
+        if let type = teamType, !type.isEmpty {
+            return "\(name) (\(type)) · \(id)"
+        }
+        return "\(name) · \(id)"
+    }
 }
 
 public enum DeploymentErrorCategory: Equatable {
@@ -32,6 +64,7 @@ public struct DeploymentProgressInfo: Equatable {
         case connecting = "Connecting to Device"
         case transferring = "Transferring to Device"
         case installing = "Installing on iOS"
+        case copyingRomFS = "Transferring Game Data (romfs.img)"
         case completed = "Installation Completed"
         case failed = "Installation Failed"
         case cancelled = "Deployment Cancelled"
@@ -54,6 +87,8 @@ public final class DeviceDeploymentService: ObservableObject {
 
     @Published public var connectedDevices: [ConnectedAppleDevice] = []
     @Published public var signingTeams: [DeveloperSigningTeam] = []
+    @Published public var selectedDevice: ConnectedAppleDevice? = nil
+    @Published public var selectedSigningTeam: DeveloperSigningTeam? = nil
     @Published public var isDetecting: Bool = false
     @Published public var deploymentStatus: String? = nil
     @Published public var activeDeployment: DeploymentProgressInfo = DeploymentProgressInfo()
@@ -78,9 +113,25 @@ public final class DeviceDeploymentService: ObservableObject {
             DispatchQueue.main.async {
                 self.connectedDevices = devices
                 self.signingTeams = teams
+
+                if self.selectedDevice == nil || !devices.contains(where: { $0.id == self.selectedDevice?.id }) {
+                    self.selectedDevice = devices.first
+                }
+                if self.selectedSigningTeam == nil || !teams.contains(where: { $0.id == self.selectedSigningTeam?.id }) {
+                    self.selectedSigningTeam = teams.first
+                }
+
                 self.isDetecting = false
             }
         }
+    }
+
+    public func openXcodeAccounts() {
+        let script = "tell application \"Xcode\" to activate"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", script]
+        try? p.run()
     }
 
     public func dismissDeploymentStatus() {
@@ -120,6 +171,7 @@ public final class DeviceDeploymentService: ObservableObject {
     public func installApp(
         appBundleURL: URL,
         on device: ConnectedAppleDevice,
+        team: DeveloperSigningTeam? = nil,
         completion: @escaping (Bool, String) -> Void
     ) {
         // Prevent concurrent deployments
@@ -149,10 +201,11 @@ public final class DeviceDeploymentService: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             var targetAppURL = appBundleURL
+            var stagedRomfsURL: URL? = nil
 
             // 1. If given an .ipa archive, extract Payload/*.app with cache support
             if appBundleURL.pathExtension.lowercased() == "ipa" {
-                let (appURL, extractError) = self.prepareExtractedApp(from: appBundleURL)
+                let (appURL, romfsURL, extractError) = self.prepareExtractedApp(from: appBundleURL)
                 guard let extractedURL = appURL else {
                     DispatchQueue.main.async {
                         self.failDeployment(
@@ -164,6 +217,7 @@ public final class DeviceDeploymentService: ObservableObject {
                     return
                 }
                 targetAppURL = extractedURL
+                stagedRomfsURL = romfsURL
             }
 
             guard self.activeDeployment.isRunning else { return }
@@ -176,7 +230,7 @@ public final class DeviceDeploymentService: ObservableObject {
                 self.activeDeployment.detailMessage = "Ensuring bundle integrity before transfer..."
             }
 
-            self.applyCodeSignatureIfNeeded(targetAppURL: targetAppURL)
+            self.applyCodeSignatureIfNeeded(targetAppURL: targetAppURL, team: team)
 
             guard self.activeDeployment.isRunning else { return }
 
@@ -188,12 +242,12 @@ public final class DeviceDeploymentService: ObservableObject {
                 self.activeDeployment.detailMessage = "Connecting to device and transferring game files..."
             }
 
-            self.executeDeviceCtlInstall(targetAppURL: targetAppURL, device: device)
+            self.executeDeviceCtlInstall(targetAppURL: targetAppURL, device: device, stagedRomfsURL: stagedRomfsURL)
         }
     }
 
     // MARK: - App Extraction with Fast Cache
-    private func prepareExtractedApp(from ipaURL: URL) -> (URL?, String?) {
+    private func prepareExtractedApp(from ipaURL: URL) -> (URL?, URL?, String?) {
         let fm = FileManager.default
         let values = try? ipaURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         let size = values?.fileSize ?? 0
@@ -204,6 +258,26 @@ public final class DeviceDeploymentService: ObservableObject {
             .appendingPathComponent("nxnative/deploy_cache/\(safeName)_\(size)_\(mtime)")
 
         let payloadDir = cacheDir.appendingPathComponent("Payload")
+        let stagedRomfs = cacheDir.appendingPathComponent("romfs.img")
+
+        let stageEmbeddedRomfs: (URL) -> URL? = { appURL in
+            let embedded = appURL.appendingPathComponent("romfs.img")
+            if fm.fileExists(atPath: embedded.path) {
+                if !fm.fileExists(atPath: stagedRomfs.path) {
+                    try? fm.moveItem(at: embedded, to: stagedRomfs)
+                } else {
+                    try? fm.removeItem(at: embedded)
+                }
+            }
+            if fm.fileExists(atPath: stagedRomfs.path) {
+                return stagedRomfs
+            }
+            let nextDoorRomfs = ipaURL.deletingLastPathComponent().appendingPathComponent("RomFS.img")
+            if fm.fileExists(atPath: nextDoorRomfs.path) {
+                return nextDoorRomfs
+            }
+            return nil
+        }
 
         // Check if cache already contains a valid extracted .app
         if fm.fileExists(atPath: payloadDir.path),
@@ -212,11 +286,12 @@ public final class DeviceDeploymentService: ObservableObject {
             let appURL = payloadDir.appendingPathComponent(existingApp)
             let plistURL = appURL.appendingPathComponent("Info.plist")
             if fm.fileExists(atPath: plistURL.path) {
+                let romfsURL = stageEmbeddedRomfs(appURL)
                 DispatchQueue.main.async {
                     self.activeDeployment.logLines.append("[OK] Extracted app bundle found in local cache.")
                     self.activeDeployment.progressFraction = 0.30
                 }
-                return (appURL, nil)
+                return (appURL, romfsURL, nil)
             }
         }
 
@@ -248,27 +323,37 @@ public final class DeviceDeploymentService: ObservableObject {
 
         guard let items = try? fm.contentsOfDirectory(atPath: payloadDir.path),
               let appFolder = items.first(where: { $0.hasSuffix(".app") }) else {
-            return (nil, "The .ipa archive does not contain a valid Payload/*.app directory.")
+            return (nil, nil, "The .ipa archive does not contain a valid Payload/*.app directory.")
         }
 
         let appURL = payloadDir.appendingPathComponent(appFolder)
+        let romfsURL = stageEmbeddedRomfs(appURL)
+
         DispatchQueue.main.async {
             self.activeDeployment.logLines.append("[OK] Package extracted successfully: \(appFolder)")
+            if romfsURL != nil {
+                self.activeDeployment.logLines.append("[OK] Game data (romfs.img) staged for direct Documents transfer.")
+            }
             self.activeDeployment.progressFraction = 0.30
         }
-        return (appURL, nil)
+        return (appURL, romfsURL, nil)
     }
 
     // MARK: - Code Signing
-    private func applyCodeSignatureIfNeeded(targetAppURL: URL) {
-        let teams = fetchSigningIdentities()
+    private func applyCodeSignatureIfNeeded(targetAppURL: URL, team: DeveloperSigningTeam?) {
+        let chosenTeam = team ?? selectedSigningTeam
         let sign = Process()
         sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
 
-        if let team = teams.first {
-            sign.arguments = ["--force", "--deep", "--sign", team.id, targetAppURL.path]
+        if let team = chosenTeam, team.hasCertificateInKeychain {
+            sign.arguments = ["--force", "--deep", "--sign", team.name, targetAppURL.path]
             DispatchQueue.main.async {
                 self.activeDeployment.logLines.append("==> Signing with development identity: \(team.name)")
+            }
+        } else if let team = chosenTeam {
+            sign.arguments = ["--force", "--deep", "--sign", "-", targetAppURL.path]
+            DispatchQueue.main.async {
+                self.activeDeployment.logLines.append("==> Signing for team \(team.displayName) (ad-hoc / Xcode development)...")
             }
         } else {
             // Apply ad-hoc signature

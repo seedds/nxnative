@@ -134,6 +134,8 @@ def header(g):
     if pm not in ('follow', 'boost'): sys.exit(f'{g.id}: perf_mode must be follow or boost: {pm}')
     dmo = g.get('depth_mode', 'gl')   # the NVN depth mode the game sets, for the pipeline archive made offline (dm/gfx/tools/pso_offline.py; the host follows the game at run time): gl / zero
     if dmo not in ('gl', 'zero'): sys.exit(f'{g.id}: depth_mode must be gl or zero: {dmo}')
+    usp = g.get('ue_screen_percent', '0')   # Unreal's render resolution as a percentage of the back buffer, the dynamic resolution off (hle_fpslock.c; DM_UE_SCREEN_PERCENT overrides): 0 = the game's own, 25-400
+    if not re.fullmatch(r'\d+', usp) or not (usp == '0' or 25 <= int(usp) <= 400): sys.exit(f'{g.id}: ue_screen_percent must be 0 or 25 to 400: {usp}')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -160,6 +162,7 @@ def header(g):
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',
          f'#define DM_GAME_ALLOC_BIG_ALIGN {int(aba == "on")}',
          f'#define DM_GAME_FPS_TARGET {int(ft)}',
+         f'#define DM_GAME_UE_SCREEN_PERCENT {int(usp)}',
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
          f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',

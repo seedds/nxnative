@@ -16,6 +16,7 @@
 #             level=basic  a setting a front end shows first;  needs=<VAR>=<value>  a sub-setting, drawn only while the row that sets <VAR> has that value
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
 DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
+DM_UE_SCREEN_PERCENT	choice	0=Game's own,100=100%,150=150%,200=200%	0|DM_GAME_UE_SCREEN_PERCENT	DM_GAME_UE_SCREEN_PERCENT!=0	Game	Render resolution	Above 100% renders larger and scales down: sharper, more GPU time.	level=basic
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic

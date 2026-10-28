@@ -98,9 +98,59 @@ static int key_bit(unsigned short code) {
     }
     return -1;
 }
+// In-game box and number keys (the way MacNativeGames' Tears of the Kingdom shows its shortcuts), top right of the game picture, refreshed twice a second:
+// 1 the box (shortcuts and frame rate → frame rate only → hidden), 2 an Unreal game's render resolution 100 → 150 → 200 % (hle_fpslock.c, only where its build has the addresses),
+// 3 MetalFX upscaling in the present on / off (nvn_mtl.m), 4 Apple's Metal performance HUD on / off. DM_HUD_KEYS=0 turns the keys and the box off
+int dm_ue_sp(void), dm_ue_sp_cycle(void), dm_gfx_mfx(void), dm_gfx_mfx_toggle(void); uint64_t mtl_present_count(void);
+static NSTextField *g_hud; static int g_hud_mode, g_keys = -1, g_mhud;
+static int keys_on(void) { if (g_keys < 0) { const char *e = getenv("DM_HUD_KEYS"); g_keys = !(e && !strcmp(e, "0")); } return g_keys; }
+static NSString *hud_text(void) {
+    static uint64_t last_n; static double last_t, fps; double t = CACurrentMediaTime(); uint64_t n = mtl_present_count();
+    if (last_t > 0 && t - last_t >= 0.4) { fps = (n - last_n) / (t - last_t); last_n = n; last_t = t; } else if (last_t == 0) { last_n = n; last_t = t; }
+    NSString *f = [NSString stringWithFormat:@"FPS %.0f", fps];
+    if (g_hud_mode == 1) return f;
+    int sp = dm_ue_sp(); static int zh = -1; if (zh < 0) { const char *l = getenv("DM_LANG"); zh = l && !strncmp(l, "zh", 2); }   // Chinese when the game runs in Chinese
+    NSString *yes = zh ? @"\u5F00" : @"on", *no = zh ? @"\u5173" : @"off";
+    NSMutableString *m = [NSMutableString stringWithFormat:zh ? @"%@\n1  \u63D0\u793A\uFF1A\u5168\u90E8 \u2192 \u53EA\u663E\u793A FPS \u2192 \u9690\u85CF" : @"%@\n1  Box: all \u2192 frame rate only \u2192 hidden", f];
+    if (sp > 0) [m appendFormat:zh ? @"\n2  \u6E32\u67D3\u5206\u8FA8\u7387\uFF1A%d%%\uFF08100 \u2192 150 \u2192 200\uFF09" : @"\n2  Render resolution: %d%% (100 \u2192 150 \u2192 200)", sp];
+    else if (sp == 0) [m appendString:zh ? @"\n2  \u6E32\u67D3\u5206\u8FA8\u7387\uFF1A\u6E38\u620F\u539F\u751F\uFF08100 \u2192 150 \u2192 200\uFF09" : @"\n2  Render resolution: the game's own (100 \u2192 150 \u2192 200)"];
+    [m appendFormat:zh ? @"\n3  MetalFX \u653E\u5927\uFF1A%@\n4  \u6027\u80FD\u76D1\u89C6\uFF08Metal HUD\uFF09\uFF1A%@\n\u2303\u2318F  \u5168\u5C4F" : @"\n3  MetalFX upscaling: %@\n4  Performance HUD: %@\n\u2303\u2318F  Fullscreen", dm_gfx_mfx() ? yes : no, g_mhud ? yes : no];
+    return m;
+}
+static void hud_refresh(void) {
+    if (!g_hud) return;
+    g_hud.hidden = g_hud_mode == 2;
+    if (g_hud_mode == 2) return;
+    g_hud.stringValue = hud_text(); [g_hud sizeToFit];
+    // the widest width so far: a box that shrank left the old, longer line's glyphs on the layer at its right edge
+    NSRect b = g_hud.superview.bounds, f = g_hud.frame; static CGFloat wmax[2]; int wi = g_hud_mode == 1; if (f.size.width + 16 > wmax[wi]) wmax[wi] = f.size.width + 16; f.size.width = wmax[wi]; f.size.height += 10;
+    f.origin = NSMakePoint(NSMaxX(b) - f.size.width - 12, NSMaxY(b) - f.size.height - 12); g_hud.frame = f; g_hud.needsDisplay = YES;
+}
+static void hud_setup(NSView *v) {
+    if (!keys_on()) return;
+    g_hud = [NSTextField labelWithString:@""];
+    g_hud.font = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightMedium]; g_hud.textColor = NSColor.whiteColor;
+    g_hud.wantsLayer = YES; g_hud.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.04 alpha:0.72].CGColor; g_hud.layer.cornerRadius = 7;
+    g_hud.drawsBackground = NO; g_hud.alignment = NSTextAlignmentLeft; g_hud.maximumNumberOfLines = 0; g_hud.lineBreakMode = NSLineBreakByClipping;
+    g_hud.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+    [v addSubview:g_hud]; hud_refresh();
+    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *tm) { hud_refresh(); }];
+}
+static int hud_key(unsigned short c) {   // keys 1-4 (key codes 18-21); 1 when taken
+    if (!g_hud) return 0;
+    switch (c) {
+        case 18: g_hud_mode = (g_hud_mode + 1) % 3; break;
+        case 19: if (!dm_ue_sp_cycle()) return 0; break;
+        case 20: dm_gfx_mfx_toggle(); break;
+        case 21: g_mhud = !g_mhud; g_layer.developerHUDProperties = g_mhud ? @{@"mode": @"default"} : nil; break;
+        default: return 0;
+    }
+    hud_refresh(); return 1;
+}
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
+    if (down && !e.isARepeat && hud_key(c)) return;
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
@@ -262,8 +312,9 @@ void front_run(void (*guest)(void)) {
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;
-        if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
+        if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_mhud = 1; g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
+        hud_setup(v);   // the in-game box and keys 1-4
         [win center];
         [win makeKeyAndOrderFront:nil];
         g_screen_fps = (int)(win.screen ?: NSScreen.mainScreen).maximumFramesPerSecond;

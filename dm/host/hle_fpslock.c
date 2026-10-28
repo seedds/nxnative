@@ -3,6 +3,7 @@
 // (hle_nvn.c); the game sets the values after boot and may set them again, so each is written whenever it differs. Fixed addresses: each row runs only on the main build it was found in (AGENTS.md)
 #include "hle.h"
 #include <mach/mach.h>
+#include <TargetConditionals.h>
 
 // What a field holds: the frame rate as a float or int32, vsyncs per frame (60 / frame rate) as an int32, or the frame time in milliseconds as a float. Copies: consecutive copies of the value
 // (Unreal keeps one for the game thread, one for the render thread). A row with no pointer (ptr_off 0) has its field at main + field: a constant in main's read-only data, which the loader
@@ -63,7 +64,54 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
 
 static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 0x1000 && vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n; }
 
+// Unreal's render resolution held in game memory: DM_UE_SCREEN_PERCENT=<25..400> turns the game's dynamic resolution off (r.DynamicRes.OperationMode 0) and sets r.ScreenPercentage, the 3D
+// views' size as a percentage of the back buffer; above 100 the engine renders larger and scales down (supersampling). Unset or 0 leaves the game's own. Written whenever they differ, as the frame
+// limits above (the device profile sets them again on a mode change). Same TAutoConsoleVariable layout: the value pointer at +0x10, the game thread's copy then the render thread's
+static const struct { const char *build; uint32_t opmode, sp; } k_uesp[] = {
+    // Pikmin 4 1.1.1: docked the device profile (SwitchConsole) keeps the dynamic resolution between 66.666 and 83.333 % of 1920x1080. r.DynamicRes.OperationMode registered at
+    // main+0x5b27e1c (TAutoConsoleVariable main+0x9fbfa60), r.ScreenPercentage at main+0x359fd38 (main+0x97f3ab0). On an M4 Pro, 200 % (3840x2160 scaled to 1080p) took the GPU from about 8 to 12 ms a frame
+    { "060f827bd2b38703e9ea11e3210d89bc", 0x9fbfa60, 0x97f3ab0 },
+};
+static int g_uesp_row = -2; static uint8_t *g_uesp_base; static _Atomic float g_uesp_want;   // the build's row (-1 none), main's base, the percentage held (0 = the game's own)
+static int uesp_row(void) {
+    if (g_uesp_row != -2) return g_uesp_row;
+    g_uesp_row = -1;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))
+        for (int k = 0; k < (int)(sizeof k_uesp / sizeof k_uesp[0]); k++) if (!strcmp(g_mod[i].build_id, k_uesp[k].build)) { g_uesp_base = g_mod[i].base; g_uesp_row = k; }
+    // the profile's ue_screen_percent (the Mac's default; an iPhone keeps the game's own unless chosen) unless the environment says
+#if TARGET_OS_IPHONE
+    const float def = 0;
+#else
+    const float def = DM_GAME_UE_SCREEN_PERCENT;
+#endif
+    const char *e = getenv("DM_UE_SCREEN_PERCENT"); float v = e ? strtof(e, NULL) : def;
+    if (v != 0 && (v < 25 || v > 400)) { LOG("[RED] DM_UE_SCREEN_PERCENT=%g: must be 25 to 400; leaving the game's resolution", v); v = 0; }
+    if (v != 0 && g_uesp_row < 0) LOG("DM_UE_SCREEN_PERCENT=%g: no address for this main build; ignored", v);
+    g_uesp_want = g_uesp_row < 0 ? 0 : v;
+    return g_uesp_row;
+}
+// The Mac window's key 2 (front_mac.m): the percentage held now (0 = the game's own, -1 = no address for this build), and the next of 100 → 150 → 200 (returns it; 0 when this build has no address)
+int dm_ue_sp(void) { return g_uesp_row < 0 ? -1 : (int)g_uesp_want; }   // -1: no address (or not looked up yet)
+int dm_ue_sp_cycle(void) {
+    if (uesp_row() < 0) return 0;
+    int w = (int)g_uesp_want, n = w < 100 ? 100 : w < 150 ? 150 : w < 200 ? 200 : 100;
+    g_uesp_want = n; LOG("Unreal r.ScreenPercentage → %d (key 2)", n); return n;
+}
+static void ue_screen_percent_tick(void) {
+    static int nlog; int state = uesp_row(); float want = g_uesp_want; uint8_t *base = g_uesp_base;
+    if (state < 0 || want == 0) return;
+    uint64_t om, sp;
+    if (!rd((uint64_t)(uintptr_t)(base + k_uesp[state].opmode + 0x10), &om, sizeof om) || !om || !rd((uint64_t)(uintptr_t)(base + k_uesp[state].sp + 0x10), &sp, sizeof sp) || !sp) return;
+    for (int c = 0; c < 2; c++) {
+        int32_t *o = (int32_t *)(uintptr_t)(om + 4 * (uint64_t)c); float *s = (float *)(uintptr_t)(sp + 4 * (uint64_t)c); int32_t ov; float sv;
+        if (!rd((uint64_t)(uintptr_t)o, &ov, sizeof ov) || !rd((uint64_t)(uintptr_t)s, &sv, sizeof sv)) return;
+        if (ov != 0) { dm_guest_write_prepare(o, sizeof *o); __atomic_store_n(o, 0, __ATOMIC_RELAXED); }
+        if (sv != want) { dm_guest_write_prepare(s, sizeof *s); *s = want; if (nlog < 6) { nlog++; LOG("main: Unreal r.ScreenPercentage%s %g → %g, dynamic resolution off (DM_UE_SCREEN_PERCENT)", c ? " (render thread)" : "", sv, want); } }
+    }
+}
+
 void dm_fps_lock_tick(void) {
+    ue_screen_percent_tick();
     static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target; static uint8_t *base; static const char *src;
     if (state == -1) return;
     if (state == -2) {

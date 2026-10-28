@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Render resolution](#render-resolution), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -26,6 +26,10 @@ Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and
 ### Render scale
 
 The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
+
+### Render resolution
+
+Unreal games whose resolution the app can hold (Pikmin 4): the 3D picture as a percentage of the game's output, with the game's own dynamic resolution off. Above 100 % the game renders a larger picture and scales it down, which is sharper and costs GPU time; **Game's own** keeps the game's dynamic resolution. The Mac starts at the game's tested value (Pikmin 4: 200 %, its 3D at 3840x2160 for a 1920x1080 output); the iPhone at the game's own. On the Mac, key 2 changes it while the game runs.
 
 ### Console mode
 
@@ -187,6 +191,10 @@ A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window
 Click **Play** (or press Return) to start the game. **Quit**, ⌘Q or closing the window ends the app without the game. The app remembers your choices for that game, and a game started without the window, from a front end or with the window turned off, uses them too ([Saved choices](frontends.md#saved-choices)). A setting fixed by an `env.txt` or by the program that started the app is shown greyed out.
 
 Turn off **Show this window at launch** to start the game at once with your choices. Hold Option while the app opens to see the window again. `DM_LAUNCHER=0` in the app's `env.txt` (`~/Library/Application Support/nxnative/<title ID>/env.txt`) or in its environment, or opening it with `open <app> --args --no-launcher`, also skips the window; your choices still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults instead.
+
+### In-game keys
+
+In a Mac game's window, a box at the top right shows the frame rate and the number keys: **1** cycles the box (everything, the frame rate only, hidden), **2** changes the render resolution of a game that has the setting (100, 150, 200 %), **3** turns MetalFX upscaling on or off, **4** turns the Metal performance HUD on or off. `DM_HUD_KEYS=0` turns the box and the keys off.
 
 ### Display mode
 

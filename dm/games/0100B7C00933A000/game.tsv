@@ -28,6 +28,10 @@ zip_store	.pak:.ucas:.utoc:.metallib
 # 30 fps, as on the Switch: the game steps a fixed frame time (bUseFixedFrameRate=True in DefaultEngine.ini, Unreal's default FixedFrameRate of 30) and asks for present interval 2
 # (rhi.SyncInterval=2 in SwitchDeviceProfiles.ini, r.VSync=1), so a higher present rate would run the game faster, not smoother
 
+# Render resolution (the Mac's default; an iPhone keeps the game's own unless the player chooses): docked the device profile keeps Unreal's dynamic resolution between 66.666 and 83.333 % of 1920x1080. On the Mac the host turns it off and sets r.ScreenPercentage 200
+# (hle_fpslock.c): 3840x2160 scaled down to the back buffer. On an M4 Pro the opening's indoor scenes took about 12 ms of GPU a frame (8 at the game's own), well inside the 33 ms of 30 fps
+ue_screen_percent	200
+
 # ---- Memory ----
 # Unreal Engine 4.26.2: nninitStartup needs virtual address memory, sets a 6 MB heap for the C library's malloc and reserves one address region for the engine, 62 GB. This build reserves
 # it only when -SwitchVirtualAddressSpaceSize= is absent (with the argument the region's base stayed 0 and the first commit failed into Unreal's fatal error), so no game_args: a rewriter cut

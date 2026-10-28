@@ -20,6 +20,13 @@ Status: on the Mac, the boot, the title (a VP9 movie behind the logo), the main 
 
 - **Current:** 30 fps, as on the Switch. The game steps a fixed frame time (`bUseFixedFrameRate=True` in `DefaultEngine.ini`, Unreal's default `FixedFrameRate` of 30) and asks for present interval 2 (`rhi.SyncInterval=2` in `SwitchDeviceProfiles.ini`, `r.VSync=1`), so a faster present rate would speed the game up, not smooth it. No `fps_target`.
 
+## Render resolution
+
+- **Current (Mac):** 200 % (`ue_screen_percent`): the 3D views at 3840x2160 scaled down to the 1920x1080 back buffer. Docked, the device profile (`SwitchDeviceProfiles.ini`, `[SwitchConsole]`) keeps Unreal's dynamic resolution between 66.666 and 83.333 % of 1920x1080 and upsamples with TAAU. The host writes `r.DynamicRes.OperationMode` 0 and `r.ScreenPercentage` (`hle_fpslock.c` `k_uesp`): TAutoConsoleVariables at `main+0x9fbfa60` (registered at `main+0x5b27e1c`) and `main+0x97f3ab0` (`main+0x359fd38`), the value pointer at +0x10, game thread's copy then render thread's.
+- On an M4 Pro, in the opening's indoor scenes, the GPU took about 8 ms a frame at the game's own resolution and about 12 ms at 200 %; the frame time stayed at 33.4 ms. 16x anisotropic filtering on top added about 2 ms with no visible difference, so it is not set.
+- The game does not size its back buffer from `nn::oe::GetDefaultDisplayResolution`: a larger default display resolution left the output at 1920x1080.
+- The shadow, view-distance and cascade console variables (`r.Shadow.MaxCSMResolution`, `r.Shadow.MaxResolution`, `r.ViewDistanceScale`, `r.Shadow.DistanceScale`, `r.Shadow.CSM.MaxCascades`) changed neither the picture nor the GPU time in the indoor opening; untested outdoors.
+
 ## Memory
 
 - `nninitStartup` needs virtual address memory, sets a 6 MB heap for the C library's malloc and reserves one address region for the engine, 62 GB.

@@ -1,4 +1,4 @@
-// Virtual gamepad (Nintendo button positions) + physical controllers (GameController). Both are merged and handed to the host through dm_input_set (hle_hid.c, bit layout in dm_input.h).
+// Virtual gamepad (Nintendo button positions), physical controllers and keyboards (GameController), merged through dm_input_set (hle_hid.c, bit layout in dm_input.h).
 //   Two layouts, three in handheld mode; one tap on the layout button at the top centre (labelled with the current layout, "2D" / "3D" / "Tap") goes to the next, and the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
 //   Tap (touch): no control but the layout button, every other touch goes to the game's touch screen; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
@@ -10,7 +10,7 @@
 //     then in 3D the right stick for a touch in the right third.
 //   Everything hugs the edges and corners to leave the picture room; controls sit over the picture, one CAShapeLayer each: a press only swaps the fill, a stick only moves its knob, nothing redraws the whole screen.
 //   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen (pushGame; Super Mario Galaxy's pointer in handheld mode).
-//   The virtual gamepad (layout button included) hides while a physical controller is connected and comes back when it is removed; meanwhile every touch goes to the game. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller).
+//   The virtual gamepad (layout button included) hides while a physical controller or keyboard is connected and comes back when both are removed; meanwhile every touch goes to the game. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller).
 //   Shaking the phone shakes the controller (DM_BTN_SHAKE: its six-axis sensor, hle_hid.c), whichever controls are in use; see "Shaking the phone" below.
 #import <UIKit/UIKit.h>
 #import <GameController/GameController.h>
@@ -31,15 +31,63 @@ enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which 
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn, g_pad_btn, g_shake_btn;
+static uint64_t g_keyboard_btn;
+static int g_keyboard_w, g_keyboard_a, g_keyboard_s, g_keyboard_d;
 static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry, g_pad_lx, g_pad_ly, g_pad_rx, g_pad_ry;
 static int tilted(int32_t x, int32_t y) { return (int64_t)x * x + (int64_t)y * y > (int64_t)4000 * 4000; }
 static void publish(void) {
     pthread_mutex_lock(&g_mu);
     int32_t lx = g_touch_lx, ly = g_touch_ly, rx = g_touch_rx, ry = g_touch_ry;
+    int32_t keyboardLeft = (g_keyboard_d - g_keyboard_a) * 32767, keyboardUp = (g_keyboard_w - g_keyboard_s) * 32767;
+    if (keyboardLeft || keyboardUp) { lx = keyboardLeft; ly = keyboardUp; }
     if (tilted(g_pad_lx, g_pad_ly)) { lx = g_pad_lx; ly = g_pad_ly; }   // a tilted physical stick wins
     if (tilted(g_pad_rx, g_pad_ry)) { rx = g_pad_rx; ry = g_pad_ry; }
-    dm_input_set(g_touch_btn | g_pad_btn | g_shake_btn, lx, ly, rx, ry);
+    dm_input_set(g_touch_btn | g_pad_btn | g_shake_btn | g_keyboard_btn, lx, ly, rx, ry);
     pthread_mutex_unlock(&g_mu);
+}
+
+// Map physical key positions to the Mac front end's Nintendo button layout.
+static uint64_t KeyboardButton(GCKeyCode keyCode) {
+    if (keyCode == GCKeyCodeKeyJ) return DM_BTN_A;
+    if (keyCode == GCKeyCodeKeyK) return DM_BTN_B;
+    if (keyCode == GCKeyCodeKeyU) return DM_BTN_X;
+    if (keyCode == GCKeyCodeKeyI) return DM_BTN_Y;
+    if (keyCode == GCKeyCodeKeyF) return DM_BTN_LS;
+    if (keyCode == GCKeyCodeKeyG) return DM_BTN_RS;
+    if (keyCode == GCKeyCodeKeyQ) return DM_BTN_L;
+    if (keyCode == GCKeyCodeKeyE) return DM_BTN_R;
+    if (keyCode == GCKeyCodeKeyZ) return DM_BTN_ZL;
+    if (keyCode == GCKeyCodeKeyC) return DM_BTN_ZR;
+    if (keyCode == GCKeyCodeReturnOrEnter) return DM_BTN_PLUS;
+    if (keyCode == GCKeyCodeTab) return DM_BTN_MINUS;
+    if (keyCode == GCKeyCodeLeftArrow) return DM_BTN_LEFT;
+    if (keyCode == GCKeyCodeUpArrow) return DM_BTN_UP;
+    if (keyCode == GCKeyCodeRightArrow) return DM_BTN_RIGHT;
+    if (keyCode == GCKeyCodeDownArrow) return DM_BTN_DOWN;
+    if (keyCode == GCKeyCodeSpacebar) return DM_BTN_SHAKE;
+    return 0;
+}
+
+// Update only the keyboard's contribution, retaining simultaneous touch and controller input.
+static void KeyboardKey(GCKeyCode keyCode, BOOL pressed) {
+    uint64_t button = KeyboardButton(keyCode);
+    pthread_mutex_lock(&g_mu);
+    if (keyCode == GCKeyCodeKeyW) g_keyboard_w = pressed;
+    else if (keyCode == GCKeyCodeKeyA) g_keyboard_a = pressed;
+    else if (keyCode == GCKeyCodeKeyS) g_keyboard_s = pressed;
+    else if (keyCode == GCKeyCodeKeyD) g_keyboard_d = pressed;
+    else if (!button) { pthread_mutex_unlock(&g_mu); return; }
+    g_keyboard_btn = pressed ? g_keyboard_btn | button : g_keyboard_btn & ~button;
+    pthread_mutex_unlock(&g_mu);
+    publish();
+}
+
+// Release the keyboard without disturbing input owned by another source.
+static void KeyboardReset(void) {
+    pthread_mutex_lock(&g_mu);
+    g_keyboard_btn = 0; g_keyboard_w = g_keyboard_a = g_keyboard_s = g_keyboard_d = 0;
+    pthread_mutex_unlock(&g_mu);
+    publish();
 }
 
 // ---- Shaking the phone ----
@@ -140,9 +188,12 @@ static __weak DmGamepad *g_view;
     unsigned _hapticSticks;
     BOOL _stickShown;                              // the left stick was held at the last refresh
     BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
-    CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
-    BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
+    CALayer *_controls;                            // holds every control layer: hidden while a physical controller or keyboard is connected (the view itself stays, for game touches)
+    BOOL _padOff;                                  // a physical controller or keyboard is connected: every touch goes to the game
+    BOOL _physicalControllerConnected;
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
+    GCKeyboard *_keyboard;
+    BOOL _keyboardEditing;
 }
 
 static UIColor *k_idle, *k_on, *k_line, *k_ringFill, *k_text, *k_textOn;
@@ -194,6 +245,12 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidConnectNotification object:nil];
         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidDisconnectNotification object:nil];
         [self padsChanged:nil];
+        [nc addObserver:self selector:@selector(KeyboardChanged:) name:GCKeyboardDidConnectNotification object:nil];
+        [nc addObserver:self selector:@selector(KeyboardChanged:) name:GCKeyboardDidDisconnectNotification object:nil];
+        for (NSNotificationName name in @[UITextFieldTextDidBeginEditingNotification, UITextFieldTextDidEndEditingNotification,
+                                           UITextViewTextDidBeginEditingNotification, UITextViewTextDidEndEditingNotification])
+            [nc addObserver:self selector:@selector(KeyboardTextChanged:) name:name object:nil];
+        [self KeyboardChanged:nil];
         motion_start();
         phone_motion_start();
     }
@@ -446,6 +503,48 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     [CATransaction commit];
 }
 
+// Hide virtual controls while either physical input device is connected, retaining game touches.
+- (void)UpdateControlsVisibility {
+    BOOL hidden = _keyboard != nil || _physicalControllerConnected;
+    if (_padOff == hidden) return;
+    _padOff = hidden; _controls.hidden = hidden;
+    [self reset];
+}
+
+// Rebind on connection changes and discard callbacks queued by a disconnected keyboard.
+- (void)KeyboardChanged:(NSNotification *)notification {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self KeyboardChanged:notification]; });
+        return;
+    }
+    _keyboard.keyboardInput.keyChangedHandler = nil;
+    _keyboard = [notification.name isEqualToString:GCKeyboardDidDisconnectNotification] ? nil : GCKeyboard.coalescedKeyboard;
+    KeyboardReset();
+    _keyboard.handlerQueue = dispatch_get_main_queue();
+    __weak DmGamepad *weakSelf = self;
+    _keyboard.keyboardInput.keyChangedHandler = ^(GCKeyboardInput *keyboard, GCDeviceButtonInput *key, GCKeyCode keyCode, BOOL pressed) {
+        (void)key;
+        DmGamepad *view = weakSelf;
+        if (!view || keyboard != view->_keyboard.keyboardInput) return;
+        if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive || view.window.windowScene.activationState != UISceneActivationStateForegroundActive ||
+            !view.window.isKeyWindow || view->_keyboardEditing || view.window.rootViewController.presentedViewController) {
+            KeyboardReset(); return;
+        }
+        if (pressed && ([keyboard buttonForKeyCode:GCKeyCodeLeftGUI].isPressed || [keyboard buttonForKeyCode:GCKeyCodeRightGUI].isPressed)) {
+            KeyboardReset(); return;
+        }
+        KeyboardKey(keyCode, pressed);
+    };
+    [self UpdateControlsVisibility];
+}
+
+// Keep physical typing in text fields out of the game's controller state.
+- (void)KeyboardTextChanged:(NSNotification *)notification {
+    _keyboardEditing = [notification.name isEqualToString:UITextFieldTextDidBeginEditingNotification] ||
+                       [notification.name isEqualToString:UITextViewTextDidBeginEditingNotification];
+    KeyboardReset();
+}
+
 // ---- Physical controllers ----
 static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 32767); }
 static void read_pad(GCExtendedGamepad *g) {
@@ -476,12 +575,13 @@ static void read_pad(GCExtendedGamepad *g) {
     }
     if (!any || !motion) dm_motion_clear(0);   // the phone's gyro (if on) takes over from its next sample
     if (!any) { dm_haptics_apple_controller(0, nil); pthread_mutex_lock(&g_mu); g_pad_btn = 0; g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = 0; pthread_mutex_unlock(&g_mu); publish(); }
-    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ self->_physicalControllerConnected = any; [self UpdateControlsVisibility]; });
 }
 @end
 
 UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v; return v; }
 void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")
+    KeyboardReset();
     dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; });
     pthread_mutex_lock(&g_mu); g_pad_btn = 0; g_shake_btn = 0; g_pad_lx = g_pad_ly = g_pad_rx = g_pad_ry = 0; pthread_mutex_unlock(&g_mu); publish();
 }

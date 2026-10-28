@@ -144,6 +144,13 @@ def one(path, tmp, root):
 
 def metallib(msls, out, sdk, extra):
     os.makedirs(out, exist_ok=True)
+    if os.environ.get('DM_RUNTIME_MSL') == '1':
+        sources = os.path.join(out, 'src'); os.makedirs(sources, exist_ok=True)
+        for source in msls:
+            with open(source, 'rb') as src, open(os.path.join(sources, os.path.basename(source)), 'wb') as dst: dst.write(src.read())
+        lib = os.path.join(out, 'vk_shaders.metallib')
+        open(lib, 'wb').write(b'NXNATIVE_RUNTIME_MSL_V1\n')
+        return lib
     airs = []
     def comp(m):
         a = m[:-6] + f'.{sdk}.air'

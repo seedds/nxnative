@@ -20,6 +20,8 @@ def clone(src, dst):
 
 
 def compiler_id(sdk):
+    if sdk == 'iphoneos' and os.environ.get('DM_RUNTIME_MSL') == '1':
+        return 'runtime MSL source; compiled by MTLDevice.newLibraryWithSource on iOS'
     def run(*a): return subprocess.run(['xcrun', '-sdk', sdk, *a], capture_output=True, text=True).stdout
     tools = ''.join(run(t, '--version') for t in ('metal', 'metallib'))
     return re.sub(r'(?m)^InstalledDir:.*\n?', '', tools) + run('--show-sdk-version') + run('--show-sdk-build-version')   # the install path changes with each toolchain mount

@@ -16,6 +16,7 @@
 #define VK_NO_PROTOTYPES
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/mtl_runtime_shader.h"
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
 #import <Metal/Metal.h>
@@ -24,6 +25,7 @@
 #include <mach-o/ldsyms.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <sys/stat.h>
 #include <time.h>
 
 int mtl_fps_target(void);   // nvn_mtl.m: 60, or 30 when the frame rate is halved
@@ -129,6 +131,7 @@ typedef struct { char kind; uint8_t set, slot, count; uint16_t binding; } shres;
 typedef struct { char key[17]; int frag, nres; shres res[24]; } shinfo;
 static shinfo *g_sh; static int g_nsh;
 static id<MTLLibrary> g_lib;
+static char g_msl_src_dir[1024];
 static int sh_cmp(const void *a, const void *b) { return memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); }
 static void sh_load(void) {
     const char *d = getenv("DM_MSL_DIR"); char p[1024];
@@ -152,10 +155,15 @@ static void sh_load(void) {
     }
     fclose(f);
     qsort(g_sh, g_nsh, sizeof *g_sh, sh_cmp);   // looked up by key (Super Mario Galaxy creates over 3,000 modules at boot)
-    snprintf(p, sizeof p, "%s/vk/vk_shaders.metallib", d);
-    NSError *err = nil;
-    g_lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(p)] error:&err];
-    if (!g_lib) LOG("[vk] [RED] shader library failed to load %s: %s", p, err.localizedDescription.UTF8String);
+    snprintf(p, sizeof p, "%s/vk/src", d);
+    struct stat src_st;
+    if (!stat(p, &src_st) && S_ISDIR(src_st.st_mode)) strlcpy(g_msl_src_dir, p, sizeof g_msl_src_dir);
+    if (!g_msl_src_dir[0]) {
+        snprintf(p, sizeof p, "%s/vk/vk_shaders.metallib", d);
+        NSError *err = nil;
+        g_lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(p)] error:&err];
+        if (!g_lib) LOG("[vk] [RED] shader library failed to load %s: %s", p, err.localizedDescription.UTF8String);
+    }
 }
 static const shinfo *sh_find(const char *key) { shinfo k; memcpy(k.key, key, 16); return g_nsh ? bsearch(&k, g_sh, g_nsh, sizeof *g_sh, sh_cmp) : NULL; }
 
@@ -187,7 +195,7 @@ struct VkImage_T { __strong id<MTLTexture> tex; const fmt_t *f; VkFormat fmt; Vk
                   VkImageUsageFlags usage; uint32_t pitch; };   // pitch: row pitch of a linear image (its texture is made over the bound memory), 0 otherwise
 struct VkImageView_T { __strong id<MTLTexture> tex; VkImage img; };
 struct VkSampler_T { __strong id<MTLSamplerState> s; };
-struct VkShaderModule_T { const shinfo *si; __strong id<MTLFunction> fn, fn_d; char key[17]; int tried_d; };   // fn_d: the dual-source variant vk_<key>_d, looked up on first use
+struct VkShaderModule_T { const shinfo *si; __strong id<MTLLibrary> lib, lib_d; __strong id<MTLFunction> fn, fn_d; char key[17]; int tried_d; };   // fn_d: the dual-source variant vk_<key>_d, looked up on first use
 struct VkPipelineCache_T { int unused; };
 // Query pool: a result is valid once the submit that wrote it has completed (g_done >= ticket). Timestamps are the completion time of their submit (in ns,
 // timestampPeriod 1), the same for every timestamp of one submit; occlusion results are copied from the submit's visibility buffer when it completes
@@ -801,12 +809,19 @@ VKB(vkCreateShaderModule, VkResult, VkDevice d, const VkShaderModuleCreateInfo *
     for (int i = 0; i < 8; i++) snprintf(m->key + 2 * i, 3, "%02x", h[i]);
     sh_capture(m->key, ci->pCode, ci->codeSize);
     m->si = sh_find(m->key);
-    @autoreleasepool { if (m->si && g_lib) m->fn = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s", m->key]]; }
+    @autoreleasepool {
+        if (m->si && g_msl_src_dir[0]) {
+            NSString *path = [NSString stringWithFormat:@"%s/%s.metal", g_msl_src_dir, m->key]; NSError *err = nil;
+            m->lib = mtl_runtime_shader_library(path, &err);
+            if (m->lib) m->fn = [m->lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s", m->key]];
+            else VLOG("[RED] source shader %s failed to compile: %s", m->key, err.localizedDescription.UTF8String ?: "unknown error");
+        } else if (m->si && g_lib) { m->lib = g_lib; m->fn = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s", m->key]]; }
+    }
     if (!m->fn) LOG("[vk] [RED] shader %s (%zu bytes of SPIR-V) is not in the library", m->key, ci->codeSize);
     else OLOG("CreateShaderModule %s", m->key);
     *out = m; return VK_SUCCESS;
 }
-VKB(vkDestroyShaderModule, void, VkDevice d, VkShaderModule m, const VkAllocationCallbacks *a) { (void)d; (void)a; if (m) { m->fn = m->fn_d = nil; free(m); } }
+VKB(vkDestroyShaderModule, void, VkDevice d, VkShaderModule m, const VkAllocationCallbacks *a) { (void)d; (void)a; if (m) { m->fn = m->fn_d = nil; m->lib = m->lib_d = nil; free(m); } }
 // Pipeline caches hold nothing: the game's initial data is NVIDIA's binary cache (Super Mario Galaxy's data/database/vulkan/*.cache), and Metal keeps its own
 VK(vkCreatePipelineCache, VkResult, VkDevice d, const VkPipelineCacheCreateInfo *ci, const VkAllocationCallbacks *a, VkPipelineCache *out) {
     (void)d; (void)ci; (void)a; *out = zalloc(sizeof **out); return VK_SUCCESS;
@@ -854,7 +869,15 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             else if (st->stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
                 if (dual && m->fn) {   // pipelines may be built on several threads
                     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&mu);
-                    if (!m->tried_d) { m->tried_d = 1; m->fn_d = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s_d", m->key]]; }
+                    if (!m->tried_d) {
+                        m->tried_d = 1;
+                        if (g_msl_src_dir[0]) {
+                            NSString *path = [NSString stringWithFormat:@"%s/%s_d.metal", g_msl_src_dir, m->key]; NSError *err = nil;
+                            m->lib_d = mtl_runtime_shader_library(path, &err);
+                            if (m->lib_d) m->fn_d = [m->lib_d newFunctionWithName:[NSString stringWithFormat:@"vk_%s_d", m->key]];
+                            else VLOG("[RED] dual-source shader %s failed to compile: %s", m->key, err.localizedDescription.UTF8String ?: "unknown error");
+                        } else if (g_lib) { m->lib_d = g_lib; m->fn_d = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s_d", m->key]]; }
+                    }
                     pthread_mutex_unlock(&mu);
                 }
                 pd.fragmentFunction = dual && m->fn_d ? m->fn_d : m->fn; p->fs = m->si;

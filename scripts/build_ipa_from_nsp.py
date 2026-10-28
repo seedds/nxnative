@@ -882,13 +882,32 @@ def profile_files(g):   # every file of the game profile (game.tsv and its table
 def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'mac'), which needs no xcodegen and compiles shaders only for macOS
     missing = [m for m in ('lz4.block', 'capstone', 'fontTools') if not _importable(m)] + ([] if _importable('compression.zstd') or _importable('backports.zstd') else ['backports.zstd'])   # zstd: built in from Python 3.14
     if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 capstone fonttools backports.zstd; backports.zstd only before Python 3.14)')
-    tools = {'xcodebuild': 'Xcode', 'xcodegen': 'brew install xcodegen', 'dotnet': '.NET SDK 10', 'zstd': 'brew install zstd', 'make': 'Xcode', 'glslangValidator': 'brew install glslang'}   # glslang: an OpenGL game's shaders, checked before its capture
-    if mac: del tools['xcodegen']
+    linux = sys.platform == 'linux'
+    if linux:
+        tools = {'swift': 'Swift 6.4', 'dotnet': '.NET SDK 10', 'zstd': 'zstd', 'make': 'make', 'glslangValidator': 'glslang-tools', 'cmake': 'CMake', 'ninja': 'Ninja', 'clang': 'Clang', 'git': 'git', 'ldid': 'ldid'}
+        xtool = env.get('XTOOL') or shutil.which('xtool', path=env['PATH'])
+        xtool = shutil.which(xtool, path=env['PATH']) if xtool else None
+        if not xtool or not Path(xtool).is_file() or not os.access(xtool, os.X_OK): raise BuildError('xtool not found: install the Linux AppImage or set XTOOL=/path/to/xtool')
+        env['XTOOL'] = str(Path(xtool).resolve())
+        swift = subprocess.run(['swift', '--version'], capture_output=True, text=True, env=env)
+        swift_version = re.search(r'Swift version (\d+)\.(\d+)', swift.stdout + swift.stderr)
+        if swift.returncode or not swift_version or tuple(map(int, swift_version.groups())) < (6, 4):
+            raise BuildError('xtool requires the Swift 6.4 Linux toolchain; install it from swift.org and confirm `swift --version` reports 6.4 or newer')
+        dotnet = subprocess.run(['dotnet', '--list-sdks'], capture_output=True, text=True, env=env)
+        if dotnet.returncode or not re.search(r'(?m)^10\.', dotnet.stdout):
+            raise BuildError('.NET SDK 10 is required to build the Linux Switch shader translator')
+        sdk = subprocess.run([env['XTOOL'], 'sdk', 'status'], capture_output=True, text=True, env=env)
+        if sdk.returncode or 'Not installed' in (sdk.stdout + sdk.stderr):
+            raise BuildError('xtool has no Darwin SDK installed; provide an Xcode.xip and run `xtool sdk install /path/to/Xcode.xip` on this Linux machine')
+    else:
+        tools = {'xcodebuild': 'Xcode', 'xcodegen': 'brew install xcodegen', 'dotnet': '.NET SDK 10', 'zstd': 'brew install zstd', 'make': 'Xcode', 'glslangValidator': 'brew install glslang'}   # glslang: an OpenGL game's shaders, checked before its capture
+        if mac: del tools['xcodegen']
     gone = [f'{t} ({how})' for t, how in tools.items() if not shutil.which(t, path=env['PATH'])]
     if gone: raise BuildError('tools not found: ' + ', '.join(gone))
-    if not mac: check_ios_sdk(env)   # before the Metal check, whose message would blame the Metal toolchain
-    mtl = subprocess.run(['xcrun', '-sdk', 'macosx' if mac else 'iphoneos', 'metal', '--version'], capture_output=True, text=True, env=env)   # Xcode 26 and later install the Metal toolchain separately
-    if mtl.returncode: raise BuildError(f'the Metal compiler does not run ({(mtl.stderr.strip().splitlines() or ["no output"])[-1]}): install it with xcodebuild -downloadComponent MetalToolchain')
+    if not mac and not linux: check_ios_sdk(env)   # before the Metal check, whose message would blame the Metal toolchain
+    if not linux:
+        mtl = subprocess.run(['xcrun', '-sdk', 'macosx' if mac else 'iphoneos', 'metal', '--version'], capture_output=True, text=True, env=env)   # Xcode 26 and later install the Metal toolchain separately
+        if mtl.returncode: raise BuildError(f'the Metal compiler does not run ({(mtl.stderr.strip().splitlines() or ["no output"])[-1]}): install it with xcodebuild -downloadComponent MetalToolchain')
     if not xlate.exists(): raise BuildError(f'the shader translator is missing from the repository: {xlate}')
     check_translator(xlate, env)
     sc = env.get('SPIRV_CROSS', str(xlate.parent.parent / 'spirv_cross_bin/spirv-cross'))
@@ -902,6 +921,57 @@ def check_ios_sdk(env):   # the iOS platform is a separate download in Xcode's C
     raise BuildError('the iOS SDK is not installed: install the iOS platform in Xcode → Settings → Components, or with xcodebuild -downloadPlatform iOS')
 
 
+def setup_linux_shader_tools(repo, work, logs, env):
+    """Build the shader translator and pinned SPIRV-Cross for Linux in the NSP work folder, without touching the Mac-only binaries in the repository."""
+    xtool = env.get('XTOOL') or shutil.which('xtool', path=env['PATH'])
+    xtool = shutil.which(xtool, path=env['PATH']) if xtool else None
+    if not xtool: raise BuildError('xtool not found: install the Linux AppImage or set XTOOL=/path/to/xtool')
+    sdk = subprocess.run([xtool, 'sdk', 'status'], capture_output=True, text=True, env=env)
+    if sdk.returncode or 'Not installed' in (sdk.stdout + sdk.stderr):
+        raise BuildError('xtool has no Darwin SDK installed; provide an Xcode.xip and run `xtool sdk install /path/to/Xcode.xip` on this Linux machine')
+    missing = [name for name in ('dotnet', 'cmake', 'ninja', 'clang', 'git') if not shutil.which(name, path=env['PATH'])]
+    if missing: raise BuildError('Linux shader toolchain is missing: ' + ', '.join(missing))
+    dotnet = subprocess.run(['dotnet', '--list-sdks'], capture_output=True, text=True, env=env)
+    if dotnet.returncode or not re.search(r'(?m)^10\.', dotnet.stdout): raise BuildError('.NET SDK 10 is required to build the Linux Switch shader translator')
+    machine = os.uname().machine
+    rid = {'x86_64': 'linux-x64', 'aarch64': 'linux-arm64'}.get(machine)
+    if not rid: raise BuildError(f'Linux shader tools do not have a runtime target for this CPU: {machine}')
+    tool_root = work / 'tools/linux'
+    translator = tool_root / 'dmsh_xlate'
+    source_dir = repo / 'dm/gfx/tools/dmsh_xlate'
+    ryujinx = repo / 'dm/third_party/ryujinx'
+    source_files = [source_dir / 'Program.cs', source_dir / 'dmsh_xlate.csproj'] + sorted(ryujinx.rglob('*.cs'))
+    source_hash = hashlib.sha256()
+    for path in source_files:
+        if any(part in ('bin', 'obj') for part in path.parts): continue
+        source_hash.update(path.relative_to(repo).as_posix().encode() + b'\0' + path.read_bytes() + b'\0')
+    translator_stamp = tool_root / 'dmsh_xlate.source.sha256'
+    if not translator.is_file() or not translator_stamp.is_file() or translator_stamp.read_text().strip() != source_hash.hexdigest():
+        if not shutil.which('dotnet', path=env['PATH']): raise BuildError('dotnet not found (.NET SDK 10), required to build the Linux shader translator')
+        tool_root.mkdir(parents=True, exist_ok=True)
+        say('building the Linux shader translator')
+        run(['dotnet', 'publish', source_dir / 'dmsh_xlate.csproj', '-c', 'Release', '-r', rid, '--self-contained', 'false', '-p:UseAppHost=true', '-o', tool_root], logs / 'dmsh_xlate_publish.log', env=env)
+        if not translator.is_file(): raise BuildError(f'the .NET publish did not produce the Linux apphost {translator}')
+        translator_stamp.write_text(source_hash.hexdigest() + '\n')
+
+    cross_dir = tool_root / 'spirv-cross'
+    cross = cross_dir / 'spirv-cross'
+    build_script = repo / 'dm/gfx/tools/spirv_cross_bin/build.sh'
+    cross_stamp = cross_dir / 'source.sha256'
+    script_hash = hashlib.sha256(build_script.read_bytes()).hexdigest()
+    needs_cross = not cross.is_file() or not os.access(cross, os.X_OK) or not cross_stamp.is_file() or cross_stamp.read_text().strip() != script_hash
+    if not needs_cross:
+        revision = subprocess.run([str(cross), '--revision'], capture_output=True, text=True, env=env).stdout
+        pin = re.search(r'^COMMIT=([0-9a-f]+)', build_script.read_text(), re.M)
+        needs_cross = not pin or pin.group(1) not in revision
+    if needs_cross:
+        say('building pinned Linux SPIRV-Cross')
+        run(['sh', build_script, tool_root / 'spirv-cross-work', cross_dir], logs / 'spirv_cross_build.log', env=env)
+        cross_stamp.write_text(script_hash + '\n')
+    env.update(XLATE=str(translator), SPIRV_CROSS=str(cross), DM_RUNTIME_MSL='1')
+    return translator
+
+
 def check_translator(xlate, env):
     """The shader translator is a framework-dependent apphost (universal since issue #54): it needs a .NET runtime of the slice it starts as, which `dotnet` on PATH and nx_extract (built
     for the SDK's own architecture) do not prove. Without one it prints nothing on stdout, and dmsh_build.py stops at the shader step with an empty `xlate_source: lock ... / actual`.
@@ -910,7 +980,9 @@ def check_translator(xlate, env):
     except (OSError, subprocess.SubprocessError) as e: raise BuildError(f'the shader translator does not start ({e}): {xlate}') from e
     if r.returncode == 0 and r.stdout.strip(): return
     why = (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or [f'exit code {r.returncode}'])[0]
-    raise BuildError(f'the shader translator does not run ({why}): it needs the .NET 10 runtime for this Mac\'s architecture (brew install --cask dotnet-sdk); unset DOTNET_ROOT if it names another one')
+    system = 'Linux' if sys.platform == 'linux' else 'this Mac'
+    install = 'install the .NET 10 SDK from Microsoft' if sys.platform == 'linux' else 'brew install --cask dotnet-sdk'
+    raise BuildError(f'the shader translator does not run ({why}): it needs the .NET 10 runtime for {system} ({install}); unset DOTNET_ROOT if it names another one')
 
 
 def check_native_python():
@@ -1709,8 +1781,15 @@ def spirv_cross(repo, env=None):   # resolve the same selection the shader tools
     return Path(shutil.which(selected, path=env.get('PATH')) or selected)
 
 
-def toolchain(repo, env=None):   # Metal is a separate Xcode download: its version and SDK must invalidate reuse too
-    return (('cmd', ['xcodebuild', '-version']), ('files', [spirv_cross(repo, env)]),
+def toolchain(repo, env=None):   # the active compiler and SDK invalidate shader reuse
+    env = os.environ if env is None else env
+    cross = spirv_cross(repo, env)
+    if sys.platform == 'linux':
+        translator = Path(env.get('XLATE', ''))
+        files = [cross, translator] + sorted(translator.parent.glob('*.dll'))
+        return (('files', files), ('cmd', ['dotnet', '--version']), ('cmd', [env['XTOOL'], '--version']),
+                ('cmd', [env['XTOOL'], 'sdk', 'status']))
+    return (('cmd', ['xcodebuild', '-version']), ('files', [cross]),
             *(('cmd', ['xcrun', '-sdk', sdk, *args]) for sdk in ('macosx', 'iphoneos')
               for args in (['metal', '--version'], ['metallib', '--version'], ['--show-sdk-version'], ['--show-sdk-build-version'])))
 
@@ -2243,6 +2322,9 @@ def main(args=None):
     # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
     logs = work / 'logs'
+    if sys.platform == 'linux':
+        env['DM_RUNTIME_MSL'] = '1'
+        xlate = setup_linux_shader_tools(repo, work, logs, env)
     check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)
 
@@ -2281,6 +2363,12 @@ def main(args=None):
     vkcap = gfx == 'vulkan' and src['vk_capture'][0]   # SPIR-V shaders the game generates at run time, captured in the Mac host (capture_shaders)
     glcap = gfx == 'gl' and src['gl_capture'][0]   # GLSL the game puts together at run time (LÖVE), captured in the Mac host (capture_shaders)
     uedec = gfx == 'nvn' and src['ue_decode'][0]   # Unreal Engine shaders, Oodle-compressed in the paks' shader code archives, decoded in the Mac host (decode_ue_shaders)
+    if sys.platform == 'linux':
+        blockers = [(gfx == 'nvn' and glslc, 'run-time GLSL shader capture'), (gfx == 'vulkan' and vkcap, 'run-time Vulkan shader capture'),
+                    (gfx == 'gl' and glcap, 'run-time OpenGL shader capture'), (uedec, 'Unreal Oodle shader decoding'),
+                    (gfx == 'nvn' and src['oodle_packs'][0], 'Oodle shader archive decoding'), (gfx == 'nvn' and src['ue_legacy'][0], 'legacy Unreal shader decoding')]
+        required = [label for needed, label in blockers if needed]
+        if required: raise BuildError('this game needs Mac-host analysis before Linux can build it: ' + ', '.join(required))
     if gfx == 'vulkan': say(f'Vulkan game ({src["graphics"][1]}): vk_shaders.py translates the shaders instead of the NVN shader chain')
     if gfx == 'gl': say(f'OpenGL game ({src["graphics"][1]}): gl_shaders.py translates the shaders instead of the NVN shader chain')
     if gfx == 'nvn': check_metal(py, repo, env)   # before the captures and the shader split, which take minutes
@@ -2385,6 +2473,7 @@ def main(args=None):
     gpus = (args.gpu or PSO_GPUS).strip()
     if gpus and not re.fullmatch(r'none|(applegpu_)?g\w+(,(applegpu_)?g\w+)*', gpus): raise BuildError(f'--gpu / PSO_GPUS takes GPU architectures such as g18p,g17p, or none: {gpus}')
     if not gpus: gpus = 'g18p' if g.get('pso_mtl4', 'off') == 'on' else 'none'   # by the profile, as build_ipa.sh decides without DM_PSO_GPUS: only the Metal 4 path reads the archive on iOS
+    if sys.platform == 'linux' and gpus != 'none': say(f'pipeline archive {gpus} skipped: Apple metal-tt is unavailable on Linux'); gpus = 'none'
     ipa_env['DM_PSO_GPUS'] = gpus
     if gfx == 'nvn': say(f'pipeline archive: {"none, the device builds the bases on its first start if it takes the Metal 4 path (--gpu g18p builds one)" if gpus == "none" else gpus + " (made on this Mac with metal-tt; --gpu none leaves it out)"}')
     if show_fps: say('frame-rate counter: on (DM_SHOW_FPS=0 in the app\'s Documents/env.txt turns it off)')

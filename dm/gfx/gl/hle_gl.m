@@ -19,6 +19,7 @@
 // Environment: DM_GL_LOG=1 logs object creation; DM_GL_CAPTURE=<dir> writes every shader source the game compiles (<key>.vert / <key>.frag, read by gl_shaders.py).
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/mtl_runtime_shader.h"
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <mach/mach.h>
@@ -26,6 +27,7 @@
 #include <mach-o/ldsyms.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <sys/stat.h>
 #include <time.h>
 
 int mtl_fps_target(void);
@@ -132,6 +134,7 @@ static id<MTLSharedEvent> g_ev;                  // signalled with a command buf
 static id<MTLTexture> g_tex0, g_cube0, g_tex3d0, g_arr0;   // bound where a sampler's unit has no texture (or an unusable one): opaque black, as GL samples an incomplete texture
 static id<MTLSamplerState> g_samp0;
 static id<MTLLibrary> g_lib, g_util;             // the game's shaders; the layer's own (clears)
+static char g_msl_src_dir[1024];
 static uint64_t g_serial = 1;                    // serial of the command buffer being recorded (g_cb); committed ones have lower serials
 static _Atomic uint64_t g_done;                  // highest serial whose command buffer has completed
 static id<MTLCommandBuffer> g_cb;
@@ -185,10 +188,15 @@ static void sh_load(void) {
     }
     fclose(f);
     qsort(g_sh, g_nsh, sizeof *g_sh, sh_cmp);
-    snprintf(p, sizeof p, "%s/gl/gl_shaders.metallib", d);
-    NSError *err = nil;
-    g_lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(p)] error:&err];
-    if (!g_lib) GLOG("[RED] shader library failed to load %s: %s", p, err.localizedDescription.UTF8String);
+    snprintf(p, sizeof p, "%s/gl/src", d);
+    struct stat src_st;
+    if (!stat(p, &src_st) && S_ISDIR(src_st.st_mode)) strlcpy(g_msl_src_dir, p, sizeof g_msl_src_dir);
+    if (!g_msl_src_dir[0]) {
+        snprintf(p, sizeof p, "%s/gl/gl_shaders.metallib", d);
+        NSError *err = nil;
+        g_lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(p)] error:&err];
+        if (!g_lib) GLOG("[RED] shader library failed to load %s: %s", p, err.localizedDescription.UTF8String);
+    }
 }
 static const shinfo *sh_find(const char *key, int frag) { shinfo k; memcpy(k.key, key, 16); k.frag = frag; return g_nsh ? bsearch(&k, g_sh, g_nsh, sizeof *g_sh, sh_cmp) : NULL; }
 
@@ -323,7 +331,7 @@ typedef struct { vattr_t a[16]; GLuint ebo; } vao_t;
 NAMES(vao_t, g_vaos, g_nvaos, g_capvaos)
 static vao_t g_vao0;   // the default vertex array (GL core has none, the compatibility profile does)
 
-typedef struct { GLenum type; char *src; size_t len; char key[17]; const shinfo *si; __strong id<MTLFunction> fn; int compiled; } shader_t;
+typedef struct { GLenum type; char *src; size_t len; char key[17]; const shinfo *si; __strong id<MTLLibrary> lib; __strong id<MTLFunction> fn; int compiled; } shader_t;
 typedef struct { char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2]; int slot[2]; int unit; } puni_t;   // [0] vertex, [1] fragment
 typedef struct { uint32_t vf[16]; uint16_t stride[16]; uint8_t div[16]; uint32_t cpf, dpf, spf; uint8_t blend, mask, bsrc, bdst, bsa, bda, eqc, eqa; } pkey_t;
 typedef struct { pkey_t k; void *pso; } pent_t;   // pso: a retained id<MTLRenderPipelineState>, NULL = failed
@@ -1628,7 +1636,15 @@ GLB(glCompileShader, void, GLuint sh) {
     sh_capture(s);
     int frag = s->type == GL_FRAGMENT_SHADER;
     s->si = sh_find(s->key, frag); s->compiled = 1;
-    @autoreleasepool { s->fn = s->si && g_lib ? [g_lib newFunctionWithName:[NSString stringWithFormat:@"gl_%s_%c", s->key, frag ? 'f' : 'v']] : nil; }
+    @autoreleasepool {
+        NSString *name = [NSString stringWithFormat:@"gl_%s_%c", s->key, frag ? 'f' : 'v'];
+        if (s->si && g_msl_src_dir[0]) {
+            NSString *path = [NSString stringWithFormat:@"%s/%s_%c.metal", g_msl_src_dir, s->key, frag ? 'f' : 'v']; NSError *err = nil;
+            s->lib = mtl_runtime_shader_library(path, &err);
+            if (s->lib) s->fn = [s->lib newFunctionWithName:name];
+            else GLOG("[RED] source shader %s failed to compile: %s", s->key, err.localizedDescription.UTF8String ?: "unknown error");
+        } else { s->lib = g_lib; s->fn = s->si && g_lib ? [g_lib newFunctionWithName:name] : nil; }
+    }
     if (!s->fn) { static int n; if (n++ < 50) GLOG("[RED] %s shader %s (%zu bytes of GLSL) is not in the library (DM_GL_CAPTURE collects it)", s->type == GL_VERTEX_SHADER ? "vertex" : "fragment", s->key, s->len); }
     else OLOG("CompileShader %s", s->key);
 }
@@ -1644,7 +1660,7 @@ GL(glGetShaderiv, void, GLuint sh, GLenum p, GLint *v) {
     RED1("glGetShaderiv(%#x) not implemented", p); *v = 0;
 }
 GL(glGetShaderInfoLog, void, GLuint sh, GLsizei size, GLsizei *len, GLchar *log) { (void)sh; if (len) *len = 0; if (log && size > 0) log[0] = 0; }
-GL(glDeleteShader, void, GLuint sh) { shader_t *s = shader_of(sh); if (!s) return; free(s->src); s->fn = nil; free(g_sps[sh]); g_sps[sh] = NULL; }
+GL(glDeleteShader, void, GLuint sh) { shader_t *s = shader_of(sh); if (!s) return; free(s->src); s->fn = nil; s->lib = nil; free(g_sps[sh]); g_sps[sh] = NULL; }
 GL(glAttachShader, void, GLuint pr, GLuint sh) {
     prog_t *p = prog_of(pr); shader_t *s = shader_of(sh); if (!p || !s) return;
     if (s->type == GL_VERTEX_SHADER) p->vs = sh; else p->fs = sh;

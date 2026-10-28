@@ -48,7 +48,9 @@ To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the g
 
 ### Build from Linux
 
-Linux cannot compile the iOS app or Metal shaders. The [Linux cloud build](docs/linux-cloud-build.md) sends an encrypted copy of your game files and `prod.keys` through your private S3 bucket to a remote Apple Silicon Mac, then downloads the IPA back to your game folder. It needs Bitrise and AWS accounts.
+An experimental, unofficial local route is available for Linux. It uses `xtool` with a Darwin SDK extracted locally from an Xcode archive, then puts Metal shader source in the IPA for iOS to compile on first use. It does not send game files or keys to a cloud service. The [local Linux build guide](docs/linux-local-build.md) lists the setup, Apple SDK terms and current limits.
+
+This route has not been validated with a built IPA yet. Games that need Mac-host shader captures or Oodle-based shader decoding are not supported by the Linux pipeline; a guessed profile can also produce an IPA that does not boot. The existing [Linux cloud build](docs/linux-cloud-build.md) remains available when Bitrise and AWS are configured.
 
 ### Install
 

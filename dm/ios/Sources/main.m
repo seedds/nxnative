@@ -1,6 +1,7 @@
 // iOS App entry: set the environment (game files, saves, shader libraries), write the host log to Documents/log.txt, create the window (front_ios.m), then run the host's dm_main on a big-stack thread.
 // The game files (RomFS) ship inside the App at <App>/romfs; Documents/romfs.img (one image, scripts/push_romfs.sh) or a Documents/romfs folder is also accepted (lets you swap them without reinstalling).
 #import <UIKit/UIKit.h>
+#import "DmIOSApp.h"
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -147,6 +148,10 @@ static int boot_env(void) {
     return 1;
 }
 static int g_boot_ok;
+int dm_ios_boot_env(void) {
+    @autoreleasepool { g_boot_ok = boot_env(); }
+    return g_boot_ok;
+}
 
 static void *boot_thread(void *p) {
     (void)p;
@@ -163,9 +168,7 @@ void front_ios_boot(void) {   // Called by front_ios.m once the window and Metal
 }
 int front_ios_boot_ok(void) { return g_boot_ok; }
 
-@interface App : UIResponder <UIApplicationDelegate>
-@end
-@implementation App
+@implementation DmIOSAppDelegate
 - (UISceneConfiguration *)application:(UIApplication *)a configurationForConnectingSceneSession:(UISceneSession *)s options:(UISceneConnectionOptions *)o {
     return [[UISceneConfiguration alloc] initWithName:@"Default" sessionRole:s.role];
 }
@@ -187,7 +190,9 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
 - (void)sceneDidBecomeActive:(UIScene *)s { front_ios_focus_event(3); }
 @end
 
+#ifndef DM_XTOOL
 int main(int argc, char **argv) {
     @autoreleasepool { g_boot_ok = boot_env(); }
-    @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(App.class)); }
+    @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(DmIOSAppDelegate.class)); }
 }
+#endif

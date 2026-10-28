@@ -60,7 +60,8 @@ MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', '-fpreserve-invari
 MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
 # The outer shader and fetch-variant caches restore compiled libraries directly,
 # before the MSL compile cache can check their compiler. Keep override builds separate there too.
-METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
+METAL_FP = ('runtime MSL source' if os.environ.get('DM_RUNTIME_MSL') == '1' else dmsh_mtlcache.compiler_id('macosx'))
+if IOSOUT and os.environ.get('DM_RUNTIME_MSL') != '1': METAL_FP += '\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos')
 def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
     subprocess.run([*MAC_METAL, msl, '-o', air], check=True)
     subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib], check=True)
@@ -98,9 +99,15 @@ def shader_rule_source(name):
 
 def tool_fingerprint():
     sc = subprocess.run([SPIRV_CROSS, '--version'], capture_output=True, text=True, timeout=30)
+    local_linux_tools = ''
+    if os.environ.get('DM_RUNTIME_MSL') == '1' and sys.platform == 'linux':
+        local_linux_tools = '\0linux-tools\0' + '\0'.join(
+            f'{name}:{dmsh_chain.sha16(os.path.join(dmsh_chain.XLATE_DIR, name))}'
+            for name in ('dmsh_xlate.dll', 'Ryujinx.Graphics.Shader.dll', 'Ryujinx.Common.dll')
+        ) + '\0spirv-cross-bin\0' + dmsh_chain.sha16(SPIRV_CROSS)
     return ('lock\0' + open(dmsh_chain.LOCK).read() + '\0options\0' + dmsh_chain.options() +
             '\0xlate\0' + dmsh_chain.xlate_source_sha() + '\0spirv-cross\0' + sc.stdout + sc.stderr +
-            '\0xc\0' + repr(XC) + '\0mac\0' + MAC_RECORD + '\0ios\0' + (ios_metal.RECORD if IOSOUT else '') + '\0metal\0' + METAL_FP)
+            '\0xc\0' + repr(XC) + '\0mac\0' + MAC_RECORD + '\0ios\0' + (ios_metal.RECORD if IOSOUT else '') + '\0metal\0' + METAL_FP + local_linux_tools)
 
 # The profile keys that change how a shader is built (nvn_*, shader_*), as dmsh_chain.inputs takes them: part of every shader's cache key
 PROFILE_ROWS = dmsh_chain.profile_rows(GAME)
@@ -1020,7 +1027,9 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):
         if _m and (not want or _m.group(1) in want): os.unlink(os.path.join(_d, _n))
     if (not want or STAMP_BEFORE != INPUTS) and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
 w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
-MTL = dmsh_mtlcache.Cache(os.path.join(CAS, 'metallib'), {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
+MTL_TARGETS = ({'mac': ('macosx', MAC_RECORD, mac_compile)} if 'mac' in TARGETS else {})
+if IOSOUT: MTL_TARGETS['ios'] = ('iphoneos', ios_metal.RECORD, ios_metal.compile)
+MTL = dmsh_mtlcache.Cache(os.path.join(CAS, 'metallib'), MTL_TARGETS, w)
 # first take the libraries earlier chain versions left on disk: the b-*/ beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
 for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')

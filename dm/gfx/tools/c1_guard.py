@@ -220,7 +220,7 @@ def main():
     if len(sys.argv) != 3:
         raise SystemExit(f"usage: {sys.argv[0]} <dmsh_b version dir> <output tsv>")
     version_dir, output = map(os.path.abspath, sys.argv[1:])
-    jobs = [(version_dir, name) for name in sorted(os.listdir(version_dir)) if name.endswith(".metal")]
+    jobs = [(version_dir, name) for name in sorted(os.listdir(version_dir)) if name.endswith(".metal") and not name.startswith("._")]
     with multiprocessing.Pool() as pool:   # map keeps the sorted order, so the list is the same as one core's
         keys = [key for key in pool.map(unproven, jobs, chunksize=64) if key]
     os.makedirs(os.path.dirname(output), exist_ok=True)

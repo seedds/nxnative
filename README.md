@@ -9,7 +9,7 @@
 ### nxnative Graphical user interface Tool for Apple Silicon
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue.svg)](https://apple.com/macos)
-[![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%2FM2%2FM3%2FM4)-orange.svg)](https://apple.com)
+[![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%2B%20%26%20A17%2B)-orange.svg)](https://apple.com)
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-FA7343.svg)](https://swift.org)
 [![Version](https://img.shields.io/badge/version-v1.6.2-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -210,7 +210,7 @@ bash scripts/create_dmg.sh
 ## 🛠️ Environment Setup & Prerequisites
 
 ### System Requirements
-* **Hardware**: Apple Silicon Mac (M1, M2, M3, M4 or later).
+* **Hardware**: Apple Silicon (M1+ & A17+).
 * **OS**: macOS 13.0 (Ventura), macOS 14.0 (Sonoma), macOS 15.0 (Sequoia) or newer.
 * **Unified Memory**: 8 GB minimum (16 GB recommended for open-world titles like Zelda TotK).
 * **Disk Space**: 20–50 GB free SSD space for RomFS extraction and shader caches.
@@ -359,7 +359,7 @@ NxNative Launcher uses <code>SaveSyncService</code> to detect paired iOS devices
 
 <details>
 <summary><b>5. Does this run via Rosetta 2 or an emulator?</b></summary>
-No! Nintendo Switch games use ARM64 binaries (AArch64). Apple Silicon processors (M1-M4) run ARM64 instructions natively. NxNative recompiles and translates Horizon OS syscalls and Maxwell graphics into native macOS Mach-O binaries and Apple Metal Shading Language (`.metal`), resulting in near-native performance.
+No! Nintendo Switch games use ARM64 binaries (AArch64). Apple Silicon processors (M1+ & A17+) run ARM64 instructions natively. NxNative recompiles and translates Horizon OS syscalls and Maxwell graphics into native macOS Mach-O binaries and Apple Metal Shading Language (`.metal`), resulting in near-native performance.
 </details>
 
 ---
@@ -397,7 +397,7 @@ Bem-vindo ao guia oficial em português do **NxNative Launcher (v1.6.2)**! Esta 
 ### 1. Configuração do Ambiente e Dependências
 
 #### A. Requisitos de Sistema
-- Mac com processador **Apple Silicon** (M1, M2, M3, M4 ou superior).
+- Dispositivo com processador **Apple Silicon** (M1+ ou A17+).
 - macOS 13.0 (Ventura), 14.0 (Sonoma) ou 15.0 (Sequoia).
 - Chaves de descriptografia **`prod.keys`** extraídas do seu próprio Nintendo Switch via Lockpick_RCM (salve em `~/.switch/prod.keys`).
 

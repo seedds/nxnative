@@ -67,7 +67,7 @@
 
 ## 🎬 Live Demo
 
-> **Show, don't tell!** Experience a console-grade desktop application with fluid cover carousels, responsive neon accents, and instantaneous 60 FPS performance toggles in full Retina clarity:
+> Experience a console-grade desktop application with fluid cover carousels, responsive neon accents, and instantaneous 60 FPS performance toggles in full Retina clarity:
 
 <p align="center">
   <img src="docs/images/gifs/demo_library_carousel.gif" width="100%" alt="NxNative Launcher Console Library Demo">
@@ -103,7 +103,7 @@ Running Nintendo Switch games on Apple Silicon with upstream tools historically 
 
 ## ✨ Key Features
 
-### 1. Console-Style Game Library (Switch Dark Mode)
+### 1. Console-Style Game Library
 - **16:9 Hero Section & Box Art Shelf**: High-resolution panoramic art paired with authentic vertical box art (1 : 1.60 ratio).
 - **Two-Tier Category Shelves**:
   - **Mac (macOS Native)**: Standalone compiled `.app` bundles running directly on Apple Silicon Metal.

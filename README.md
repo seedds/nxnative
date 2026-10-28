@@ -6,7 +6,7 @@
 
 # NxNative Launcher
 
-### nxnative Graphical user interface Tool for Apple Silicon
+### nxnative Graphical User Interface Tool for Apple Silicon
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue.svg)](https://apple.com/macos)
 [![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%2B%20%26%20A17%2B)-orange.svg)](https://apple.com)

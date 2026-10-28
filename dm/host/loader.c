@@ -562,6 +562,33 @@ static uint8_t *slurp(const char *path, size_t *n) {
     close(fd); *n = st.st_size; return p;
 }
 
+// Run-time patches chosen by the environment (<module>.runtime.tsv beside the patched image): one line per write, "<VAR>=<value>\t<offset hex>\t<bytes hex>[\t<why>]", applied when
+// the variable has that value ("*" in the first column: always), after the image is copied in and before the code is sealed. A game's settings that are code (Metroid Prime 4's render
+// size: immediates in several functions; its 120 fps frame pacing cave) pick their variant at launch this way, from the launcher's choices, without a rewrite per combination.
+// A row whose offset column is "env" sets a host switch instead ("<NAME>=<VALUE>" in the third column; 120 fps also needs a 120 Hz present)
+static void runtime_patches(module_t *m, const char *dir, uint8_t *base, uint64_t limit) {
+    char path[1024]; snprintf(path, sizeof path, "%s/%s.runtime.tsv", dir, m->name);
+    FILE *f = fopen(path, "r"); if (!f) return;
+    char ln[4096], last[256] = ""; int n = 0, sets = 0;
+    while (fgets(ln, sizeof ln, f)) {
+        if (ln[0] == '#' || ln[0] == '\n') continue;
+        char *cond = strtok(ln, "\t\n"), *off = strtok(NULL, "\t\n"), *hex = strtok(NULL, "\t\n");
+        if (!cond || !off || !hex) continue;
+        if (strcmp(cond, "*")) { char *eq = strchr(cond, '='); if (!eq) continue; *eq = 0; const char *v = getenv(cond); if (!v || strcmp(v, eq + 1)) continue; *eq = '='; }
+        if (!strcmp(off, "env")) {   // "<VAR>=<value>\tenv\t<NAME>=<VALUE>": the choice also sets a host switch, unless the environment already sets it
+            char *e = strchr(hex, '='); if (e) { *e = 0; if (!getenv(hex)) { setenv(hex, e + 1, 0); LOG("%s: %s sets %s=%s", m->name, cond, hex, e + 1); } }
+            continue;
+        }
+        uint64_t o = strtoull(off, NULL, 16); size_t len = strlen(hex) / 2;
+        if (o + len > limit) { LOG("[RED] %s run-time patch at %#llx (%zu bytes) is past the image", m->name, (unsigned long long)o, len); continue; }
+        for (size_t i = 0; i < len; i++) { unsigned b; sscanf(hex + 2 * i, "%2x", &b); base[o + i] = (uint8_t)b; }
+        if (strcmp(last, cond)) { strlcpy(last, cond, sizeof last); sets++; LOG("%s: run-time patches for %s", m->name, cond); }
+        n++;
+    }
+    fclose(f);
+    if (n) LOG("%s: %d run-time patch writes applied (%d choices)", m->name, n, sets);
+}
+
 // Seal the code area immediately after copying into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
 // what lies between (ro and data on the same page can only go together) is writable
 static void map_image(module_t *m, const char *dir) {
@@ -577,6 +604,7 @@ static void map_image(module_t *m, const char *dir) {
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - fl); free(raw); install_key_page(m);
+        runtime_patches(m, dir, m->base, m->size);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
         if (mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
@@ -587,6 +615,7 @@ static void map_image(module_t *m, const char *dir) {
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
+    runtime_patches(m, dir, m->base, m->size);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;

@@ -36,10 +36,10 @@ From the NxNative checkout on Linux:
 ```sh
 export NX_S3_BUCKET='your-private-bucket'
 export NX_AGE_RECIPIENT='age1…'
-scripts/build_ipa_linux.sh '/path/to/game NSP folder' --keys '/path/to/prod.keys'
+scripts/build_ipa_linux.sh '/path/to/game.nsp' --keys '/path/to/prod.keys'
 ```
 
-The command creates an encrypted temporary archive beside the game's NSPs, uploads it to S3, pushes a one-use tag to `origin`, waits for Bitrise, and saves the IPA next to the NSPs. The temporary local archive is removed when the command exits. Input and output objects remain in S3 until the lifecycle rule expires them. Build errors appear in the Bitrise log for the tag printed by the command.
+Pass one `.nsp`, `.xci`, `.nsz`, or `.xcz` file, or a folder containing the game's package files when it has updates or DLC. The command creates an encrypted temporary archive beside the input, uploads it to S3, pushes a one-use tag to `origin`, waits for Bitrise, and saves the IPA beside the input. The temporary local archive is removed when the command exits. Input and output objects remain in S3 until the lifecycle rule expires them. Build errors appear in the Bitrise log for the tag printed by the command.
 
 The result is an unsigned IPA, as produced by NxNative on a Mac. Install it on your iPhone using AltStore, Sideloadly, or another sideloading tool. Your iPhone must meet NxNative's supported OS and hardware requirements. Bitrise and AWS accounts, build minutes, storage, bandwidth, and possible charges are user-provided.
 

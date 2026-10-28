@@ -241,24 +241,144 @@ public final class SystemDetector {
             prereqs.git = DependencyStatus(id: "git", name: "Git Version Control", isAvailable: false, details: "Not Found", recommendation: rec, installCommand: "brew install git", repairCommand: "brew reinstall git", uninstallCommand: nil, isProtected: true)
         }
         
-        // 4. Python 3
-        if let pyPath = findBinary("python3") {
-            let pyVer = runQuickCommand(pyPath, args: ["--version"])
-            prereqs.python = DependencyStatus(id: "python", name: "Python 3", isAvailable: true, details: "\(pyVer.output) (\(pyPath))", recommendation: nil, installCommand: "brew install python", repairCommand: "brew reinstall python", uninstallCommand: nil, isProtected: true)
+        // 4. Python 3 (Python 3.12+ required by NxNative for direct RomFS image builds)
+        func checkPythonVersion(_ path: String) -> (isSufficient: Bool, version: String) {
+            let verOutput = runQuickCommand(path, args: ["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"])
+            guard verOutput.success else {
+                return (false, "Unknown")
+            }
+            let verStr = verOutput.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let parts = verStr.split(separator: ".").compactMap { Int($0) }
+            if parts.count >= 2 {
+                let major = parts[0]
+                let minor = parts[1]
+                let isOk = (major > 3) || (major == 3 && minor >= 12)
+                return (isOk, "Python \(verStr)")
+            }
+            return (false, "Python \(verStr)")
+        }
+        
+        let pyCandidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
+        var chosenPyPath: String? = nil
+        var chosenPyVersion = ""
+        var isPySufficient = false
+        
+        // 1. Prefer a Python that satisfies >= 3.12 (e.g. Homebrew python)
+        for candidate in pyCandidates where fm.fileExists(atPath: candidate) {
+            let check = checkPythonVersion(candidate)
+            if check.isSufficient {
+                chosenPyPath = candidate
+                chosenPyVersion = check.version
+                isPySufficient = true
+                break
+            }
+        }
+        
+        // 2. If no candidate is >= 3.12, pick the first existing python for diagnostic reporting
+        if chosenPyPath == nil {
+            for candidate in pyCandidates where fm.fileExists(atPath: candidate) {
+                let check = checkPythonVersion(candidate)
+                chosenPyPath = candidate
+                chosenPyVersion = check.version
+                isPySufficient = false
+                break
+            }
+        }
+        
+        let pipInstallCmd = "PY_BIN=$(which python3); if [ -f /opt/homebrew/bin/python3 ]; then PY_BIN=\"/opt/homebrew/bin/python3\"; elif [ -f /usr/local/bin/python3 ]; then PY_BIN=\"/usr/local/bin/python3\"; fi; if \"$PY_BIN\" -m pip install --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip install --break-system-packages lz4 capstone fonttools nsz; else \"$PY_BIN\" -m pip install lz4 capstone fonttools nsz; fi"
+        let pipRepairCmd = "PY_BIN=$(which python3); if [ -f /opt/homebrew/bin/python3 ]; then PY_BIN=\"/opt/homebrew/bin/python3\"; elif [ -f /usr/local/bin/python3 ]; then PY_BIN=\"/usr/local/bin/python3\"; fi; if \"$PY_BIN\" -m pip install --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools nsz; else \"$PY_BIN\" -m pip install --force-reinstall lz4 capstone fonttools nsz; fi"
+        let pipUninstallCmd = "PY_BIN=$(which python3); if [ -f /opt/homebrew/bin/python3 ]; then PY_BIN=\"/opt/homebrew/bin/python3\"; elif [ -f /usr/local/bin/python3 ]; then PY_BIN=\"/usr/local/bin/python3\"; fi; if \"$PY_BIN\" -m pip uninstall --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip uninstall -y --break-system-packages lz4 capstone fonttools nsz; else \"$PY_BIN\" -m pip uninstall -y lz4 capstone fonttools nsz; fi"
+
+        if let pyPath = chosenPyPath, isPySufficient {
+            prereqs.python = DependencyStatus(
+                id: "python",
+                name: "Python 3",
+                isAvailable: true,
+                details: "\(chosenPyVersion) (\(pyPath))",
+                recommendation: nil,
+                installCommand: "brew install python",
+                repairCommand: "brew reinstall python",
+                uninstallCommand: nil,
+                isProtected: false
+            )
             
             // Python modules
             let pyCheck = runQuickCommand(pyPath, args: ["-c", "import lz4, capstone, fontTools; print('OK')"])
             if pyCheck.success && pyCheck.output.contains("OK") {
                 let nszCheck = runQuickCommand(pyPath, args: ["-c", "import nsz; print('OK')"])
                 let nszNote = nszCheck.success ? " + nsz" : ""
-                prereqs.pythonPackages = DependencyStatus(id: "python_packages", name: "Python Modules", isAvailable: true, details: "lz4, capstone, fonttools\(nszNote) installed", recommendation: nil, installCommand: "\(pyPath) -m pip install --break-system-packages lz4 capstone fonttools nsz", repairCommand: "\(pyPath) -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools nsz", uninstallCommand: "\(pyPath) -m pip uninstall -y --break-system-packages lz4 capstone fonttools nsz", isProtected: false)
+                prereqs.pythonPackages = DependencyStatus(
+                    id: "python_packages",
+                    name: "Python Modules",
+                    isAvailable: true,
+                    details: "lz4, capstone, fonttools\(nszNote) installed",
+                    recommendation: nil,
+                    installCommand: pipInstallCmd,
+                    repairCommand: pipRepairCmd,
+                    uninstallCommand: pipUninstallCmd,
+                    isProtected: false
+                )
             } else {
-                prereqs.pythonPackages = DependencyStatus(id: "python_packages", name: "Python Modules", isAvailable: false, details: "Missing required packages", recommendation: "Install packages via pip", installCommand: "\(pyPath) -m pip install --break-system-packages lz4 capstone fonttools nsz", repairCommand: "\(pyPath) -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools nsz", uninstallCommand: "\(pyPath) -m pip uninstall -y --break-system-packages lz4 capstone fonttools nsz", isProtected: false)
+                prereqs.pythonPackages = DependencyStatus(
+                    id: "python_packages",
+                    name: "Python Modules",
+                    isAvailable: false,
+                    details: "Missing required packages for \(chosenPyVersion)",
+                    recommendation: "Install packages via pip",
+                    installCommand: pipInstallCmd,
+                    repairCommand: pipRepairCmd,
+                    uninstallCommand: pipUninstallCmd,
+                    isProtected: false
+                )
             }
+        } else if let pyPath = chosenPyPath {
+            let rec = isHomebrewInstalled ? "Python 3.12+ is required. Click Install to install modern Python via Homebrew." : "Install Homebrew first, then install Python 3.12+."
+            prereqs.python = DependencyStatus(
+                id: "python",
+                name: "Python 3",
+                isAvailable: false,
+                details: "\(chosenPyVersion) (\(pyPath)) - Python 3.12+ required",
+                recommendation: rec,
+                installCommand: "brew install python",
+                repairCommand: "brew reinstall python",
+                uninstallCommand: nil,
+                isProtected: false
+            )
+            prereqs.pythonPackages = DependencyStatus(
+                id: "python_packages",
+                name: "Python Modules",
+                isAvailable: false,
+                details: "Requires Python 3.12+",
+                recommendation: isHomebrewInstalled ? "Install Python 3 first via Homebrew" : "Install Homebrew first",
+                installCommand: pipInstallCmd,
+                repairCommand: pipRepairCmd,
+                uninstallCommand: pipUninstallCmd,
+                isProtected: false
+            )
         } else {
             let rec = isHomebrewInstalled ? "Install Python 3 via Homebrew" : "Install Homebrew first to install Python 3"
-            prereqs.python = DependencyStatus(id: "python", name: "Python 3", isAvailable: false, details: "Not Found", recommendation: rec, installCommand: "brew install python", repairCommand: "brew reinstall python", uninstallCommand: nil, isProtected: true)
-            prereqs.pythonPackages = DependencyStatus(id: "python_packages", name: "Python Modules", isAvailable: false, details: "Python Not Found", recommendation: isHomebrewInstalled ? "Install Python 3 first" : "Install Homebrew first", installCommand: "python3 -m pip install --break-system-packages lz4 capstone fonttools nsz", repairCommand: "python3 -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools nsz", uninstallCommand: nil, isProtected: false)
+            prereqs.python = DependencyStatus(
+                id: "python",
+                name: "Python 3",
+                isAvailable: false,
+                details: "Not Found",
+                recommendation: rec,
+                installCommand: "brew install python",
+                repairCommand: "brew reinstall python",
+                uninstallCommand: nil,
+                isProtected: false
+            )
+            prereqs.pythonPackages = DependencyStatus(
+                id: "python_packages",
+                name: "Python Modules",
+                isAvailable: false,
+                details: "Python 3 Not Found",
+                recommendation: isHomebrewInstalled ? "Install Python 3 first via Homebrew" : "Install Homebrew first",
+                installCommand: pipInstallCmd,
+                repairCommand: pipRepairCmd,
+                uninstallCommand: pipUninstallCmd,
+                isProtected: false
+            )
         }
         
         // 5. .NET SDK

@@ -83,7 +83,7 @@ public struct SystemPrerequisites {
         installCommand: "brew install python",
         repairCommand: "brew reinstall python",
         uninstallCommand: nil,
-        isProtected: true
+        isProtected: false
     )
     
     public var dotnet: DependencyStatus = DependencyStatus(
@@ -148,13 +148,13 @@ public struct SystemPrerequisites {
     
     public var pythonPackages: DependencyStatus = DependencyStatus(
         id: "python_packages",
-        name: "Python Modules (lz4, capstone, fonttools, nsz)",
+        name: "Python Modules",
         isAvailable: false,
         details: "Checking...",
         recommendation: nil,
-        installCommand: "python3 -m pip install --break-system-packages lz4 capstone fonttools nsz",
-        repairCommand: "python3 -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools nsz",
-        uninstallCommand: "python3 -m pip uninstall -y --break-system-packages lz4 capstone fonttools nsz",
+        installCommand: "PY_BIN=$(which python3); if [ -f /opt/homebrew/bin/python3 ]; then PY_BIN=\"/opt/homebrew/bin/python3\"; elif [ -f /usr/local/bin/python3 ]; then PY_BIN=\"/usr/local/bin/python3\"; fi; if \"$PY_BIN\" -m pip install --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip install --break-system-packages lz4 capstone fonttools nsz; else \"$PY_BIN\" -m pip install lz4 capstone fonttools nsz; fi",
+        repairCommand: "PY_BIN=$(which python3); if [ -f /opt/homebrew/bin/python3 ]; then PY_BIN=\"/opt/homebrew/bin/python3\"; elif [ -f /usr/local/bin/python3 ]; then PY_BIN=\"/usr/local/bin/python3\"; fi; if \"$PY_BIN\" -m pip install --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools nsz; else \"$PY_BIN\" -m pip install --force-reinstall lz4 capstone fonttools nsz; fi",
+        uninstallCommand: "PY_BIN=$(which python3); if [ -f /opt/homebrew/bin/python3 ]; then PY_BIN=\"/opt/homebrew/bin/python3\"; elif [ -f /usr/local/bin/python3 ]; then PY_BIN=\"/usr/local/bin/python3\"; fi; if \"$PY_BIN\" -m pip uninstall --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip uninstall -y --break-system-packages lz4 capstone fonttools nsz; else \"$PY_BIN\" -m pip uninstall -y lz4 capstone fonttools nsz; fi",
         isProtected: false
     )
     

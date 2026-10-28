@@ -18,7 +18,10 @@
 [![Sync Upstream](https://github.com/rennan101/nxnative_Launcher/actions/workflows/sync-upstream.yml/badge.svg)](https://github.com/rennan101/nxnative_Launcher/actions/workflows/sync-upstream.yml)
 
 <p align="center">
-  <b>Port, configure, and play your Nintendo Switch games natively on Apple Silicon Macs and iOS devices with 60 FPS, Apple MetalFX, Controller Remapping, Cross Save Sync, and zero command-line friction.</b>
+  <b>Port, configure, and play your owned Switch games natively on Apple Silicon Macs and iOS devices with 60 FPS, Apple MetalFX, Controller Remapping, Cross Save Sync, and zero command-line friction.</b>
+</p>
+<p align="center">
+<b>It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.<b>
 </p>
 
 <p align="center">

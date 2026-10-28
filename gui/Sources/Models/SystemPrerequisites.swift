@@ -50,14 +50,26 @@ public struct SystemPrerequisites {
         isProtected: true
     )
     
+    public var homebrew: DependencyStatus = DependencyStatus(
+        id: "homebrew",
+        name: "Homebrew Package Manager",
+        isAvailable: false,
+        details: "Checking...",
+        recommendation: "Required to install and manage compilers, SDKs, and build tools",
+        installCommand: "NONINTERACTIVE=1 /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\" && (if [ -x /opt/homebrew/bin/brew ]; then eval \"$(/opt/homebrew/bin/brew shellenv)\"; grep -q 'brew shellenv' ~/.zprofile 2>/dev/null || echo 'eval \"$(/opt/homebrew/bin/brew shellenv)\"' >> ~/.zprofile; elif [ -x /usr/local/bin/brew ]; then eval \"$(/usr/local/bin/brew shellenv)\"; grep -q 'brew shellenv' ~/.zprofile 2>/dev/null || echo 'eval \"$(/usr/local/bin/brew shellenv)\"' >> ~/.zprofile; fi)",
+        repairCommand: "brew update",
+        uninstallCommand: nil,
+        isProtected: true
+    )
+    
     public var git: DependencyStatus = DependencyStatus(
         id: "git",
         name: "Git Version Control",
         isAvailable: false,
         details: "Checking...",
         recommendation: nil,
-        installCommand: "/opt/homebrew/bin/brew install git",
-        repairCommand: "/opt/homebrew/bin/brew reinstall git",
+        installCommand: "brew install git",
+        repairCommand: "brew reinstall git",
         uninstallCommand: nil,
         isProtected: true
     )
@@ -68,8 +80,8 @@ public struct SystemPrerequisites {
         isAvailable: false,
         details: "Checking...",
         recommendation: nil,
-        installCommand: "/opt/homebrew/bin/brew install python",
-        repairCommand: "/opt/homebrew/bin/brew reinstall python",
+        installCommand: "brew install python",
+        repairCommand: "brew reinstall python",
         uninstallCommand: nil,
         isProtected: true
     )
@@ -80,9 +92,9 @@ public struct SystemPrerequisites {
         isAvailable: false,
         details: "Checking...",
         recommendation: nil,
-        installCommand: "/opt/homebrew/bin/brew install --cask dotnet-sdk",
-        repairCommand: "/opt/homebrew/bin/brew reinstall --cask dotnet-sdk",
-        uninstallCommand: "/opt/homebrew/bin/brew uninstall --cask dotnet-sdk",
+        installCommand: "brew install --cask dotnet-sdk",
+        repairCommand: "brew reinstall --cask dotnet-sdk",
+        uninstallCommand: "brew uninstall --cask dotnet-sdk",
         isProtected: false
     )
     
@@ -92,9 +104,9 @@ public struct SystemPrerequisites {
         isAvailable: false,
         details: "Checking...",
         recommendation: nil,
-        installCommand: "/opt/homebrew/bin/brew install xcodegen",
-        repairCommand: "/opt/homebrew/bin/brew reinstall xcodegen",
-        uninstallCommand: "/opt/homebrew/bin/brew uninstall xcodegen",
+        installCommand: "brew install xcodegen",
+        repairCommand: "brew reinstall xcodegen",
+        uninstallCommand: "brew uninstall xcodegen",
         isProtected: false
     )
     
@@ -104,9 +116,9 @@ public struct SystemPrerequisites {
         isAvailable: false,
         details: "Checking...",
         recommendation: nil,
-        installCommand: "/opt/homebrew/bin/brew install zstd",
-        repairCommand: "/opt/homebrew/bin/brew reinstall zstd",
-        uninstallCommand: "/opt/homebrew/bin/brew uninstall zstd",
+        installCommand: "brew install zstd",
+        repairCommand: "brew reinstall zstd",
+        uninstallCommand: "brew uninstall zstd",
         isProtected: false
     )
     
@@ -116,9 +128,9 @@ public struct SystemPrerequisites {
         isAvailable: false,
         details: "Checking...",
         recommendation: nil,
-        installCommand: "/opt/homebrew/bin/brew install spirv-cross",
-        repairCommand: "/opt/homebrew/bin/brew reinstall spirv-cross",
-        uninstallCommand: "/opt/homebrew/bin/brew uninstall spirv-cross",
+        installCommand: "brew install spirv-cross",
+        repairCommand: "brew reinstall spirv-cross",
+        uninstallCommand: "brew uninstall spirv-cross",
         isProtected: false
     )
     
@@ -128,9 +140,9 @@ public struct SystemPrerequisites {
         isAvailable: false,
         details: "Checking...",
         recommendation: nil,
-        installCommand: "/opt/homebrew/bin/brew install glslang",
-        repairCommand: "/opt/homebrew/bin/brew reinstall glslang",
-        uninstallCommand: "/opt/homebrew/bin/brew uninstall glslang",
+        installCommand: "brew install glslang",
+        repairCommand: "brew reinstall glslang",
+        uninstallCommand: "brew uninstall glslang",
         isProtected: false
     )
     
@@ -148,6 +160,7 @@ public struct SystemPrerequisites {
     
     public var allSatisfied: Bool {
         xcode.isAvailable &&
+        homebrew.isAvailable &&
         git.isAvailable &&
         python.isAvailable &&
         dotnet.isAvailable &&
@@ -163,6 +176,6 @@ public struct SystemPrerequisites {
     }
     
     public var list: [DependencyStatus] {
-        [xcode, git, python, pythonPackages, dotnet, xcodegen, zstd, spirvCross, glslang]
+        [xcode, homebrew, git, python, pythonPackages, dotnet, xcodegen, zstd, spirvCross, glslang]
     }
 }

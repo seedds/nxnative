@@ -65,10 +65,11 @@ public struct SystemView: View {
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.down.circle.fill")
-                        Text("Install Missing (\(viewModel.prerequisites.missingList.count))")
+                        Text("Install All Missing (\(viewModel.prerequisites.missingList.count))")
                     }
                 }
                 .buttonStyle(NXAccentButtonStyle())
+                .help("Install all missing dependencies sequentially one by one until completed.")
             } else {
                 Button(action: {
                     SoundEffectService.shared.play(.click)

@@ -77,9 +77,11 @@ public final class InstallerService {
             }
             
             let item = queue.removeFirst()
-            self.delegate?.installerDidStartItem(item.name)
+            let currentStep = dependencies.count - queue.count
+            let totalSteps = dependencies.count
+            self.delegate?.installerDidStartItem("\(item.name) (\(currentStep)/\(totalSteps))")
             self.delegate?.installerDidProduceOutput("\n----------------------------------------")
-            self.delegate?.installerDidProduceOutput("==> Installing (\(dependencies.count - queue.count)/\(dependencies.count)): \(item.name)")
+            self.delegate?.installerDidProduceOutput("==> Installing (\(currentStep)/\(totalSteps)): \(item.name)")
             self.delegate?.installerDidProduceOutput("Command: \(item.installCommand!)")
             
             self.runShell(command: item.installCommand!) { [weak self] success, output in
@@ -151,6 +153,18 @@ public final class InstallerService {
             } else {
                 env["PATH"] = extraPaths
             }
+            
+            // Configure SUDO_ASKPASS for unattended / GUI password prompts if required
+            let askPassURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nxnative_askpass.sh")
+            let askPassScript = """
+            #!/bin/bash
+            exec osascript -e 'display dialog "NxNative Launcher requires administrator privileges to install dependencies:" default answer "" with hidden answer' -e 'text returned of result'
+            """
+            if !FileManager.default.fileExists(atPath: askPassURL.path) {
+                try? askPassScript.write(to: askPassURL, atomically: true, encoding: .utf8)
+                chmod(askPassURL.path, 0o755)
+            }
+            env["SUDO_ASKPASS"] = askPassURL.path
             process.environment = env
             
             let pipe = Pipe()

@@ -19,6 +19,10 @@ public struct BuildPrerequisiteBanners: View {
             
             if !viewModel.prerequisites.xcode.isAvailable {
                 cltMissingBanner
+            } else if !viewModel.prerequisites.homebrew.isAvailable {
+                homebrewMissingBanner
+            } else if !viewModel.prerequisites.allSatisfied {
+                dependenciesMissingBanner
             }
         }
     }
@@ -127,6 +131,82 @@ public struct BuildPrerequisiteBanners: View {
             
             Button("Install Apple Developer Tools") {
                 viewModel.installAppleCommandLineTools()
+            }
+            .buttonStyle(NXAccentButtonStyle())
+            .controlSize(.regular)
+        }
+        .padding(12)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(NXTheme.tertiary.opacity(0.12))
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.ultraThinMaterial)
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(NXTheme.tertiary.opacity(0.4), lineWidth: 1)
+        )
+    }
+    
+    private var homebrewMissingBanner: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "mug.fill")
+                .font(.system(size: 24))
+                .foregroundColor(NXTheme.tertiary)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Homebrew Package Manager Not Installed")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundColor(NXTheme.textPrimary)
+                Text("Homebrew is required to install Python modules, .NET, and build compilers. Install with 1 click.")
+                    .font(.system(size: 11))
+                    .foregroundColor(NXTheme.textSecondary)
+            }
+            
+            Spacer()
+            
+            Button("Install Homebrew & Tools") {
+                viewModel.installAllMissingDependencies()
+            }
+            .buttonStyle(NXAccentButtonStyle())
+            .controlSize(.regular)
+        }
+        .padding(12)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(NXTheme.tertiary.opacity(0.12))
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.ultraThinMaterial)
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(NXTheme.tertiary.opacity(0.4), lineWidth: 1)
+        )
+    }
+    
+    private var dependenciesMissingBanner: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "wrench.and.screwdriver.fill")
+                .font(.system(size: 24))
+                .foregroundColor(NXTheme.tertiary)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Missing Build Dependencies (\(viewModel.prerequisites.missingList.count) Left)")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundColor(NXTheme.textPrimary)
+                Text("Install all missing dependencies sequentially one by one until completed.")
+                    .font(.system(size: 11))
+                    .foregroundColor(NXTheme.textSecondary)
+            }
+            
+            Spacer()
+            
+            Button("Install All One by One") {
+                viewModel.installAllMissingDependencies()
             }
             .buttonStyle(NXAccentButtonStyle())
             .controlSize(.regular)

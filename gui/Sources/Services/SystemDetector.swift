@@ -200,15 +200,48 @@ public final class SystemDetector {
             return nil
         }
         
-        // 2. Git Version Control
+        // 2. Homebrew Package Manager
+        let isHomebrewInstalled: Bool
+        if let brewPath = findBinary("brew") {
+            isHomebrewInstalled = true
+            let brewVer = runQuickCommand(brewPath, args: ["--version"])
+            let firstLine = brewVer.output.components(separatedBy: .newlines).first ?? brewVer.output
+            prereqs.homebrew = DependencyStatus(
+                id: "homebrew",
+                name: "Homebrew Package Manager",
+                isAvailable: true,
+                details: "\(firstLine) (\(brewPath))",
+                recommendation: nil,
+                installCommand: prereqs.homebrew.installCommand,
+                repairCommand: "brew update",
+                uninstallCommand: nil,
+                isProtected: true
+            )
+        } else {
+            isHomebrewInstalled = false
+            prereqs.homebrew = DependencyStatus(
+                id: "homebrew",
+                name: "Homebrew Package Manager",
+                isAvailable: false,
+                details: "Not Installed",
+                recommendation: "Required to install and manage compilers and tools. Click Install to set up automatically.",
+                installCommand: prereqs.homebrew.installCommand,
+                repairCommand: "brew update",
+                uninstallCommand: nil,
+                isProtected: true
+            )
+        }
+        
+        // 3. Git Version Control
         if let gitPath = findBinary("git") {
             let gitVer = runQuickCommand(gitPath, args: ["--version"])
             prereqs.git = DependencyStatus(id: "git", name: "Git Version Control", isAvailable: true, details: "\(gitVer.output) (\(gitPath))", recommendation: nil, installCommand: "brew install git", repairCommand: "brew reinstall git", uninstallCommand: nil, isProtected: true)
         } else {
-            prereqs.git = DependencyStatus(id: "git", name: "Git Version Control", isAvailable: false, details: "Not Found", recommendation: "Install Git via Homebrew or Xcode CLT", installCommand: "brew install git", repairCommand: "brew reinstall git", uninstallCommand: nil, isProtected: true)
+            let rec = isHomebrewInstalled ? "Install Git via Homebrew or Xcode CLT" : "Install Homebrew first to install Git"
+            prereqs.git = DependencyStatus(id: "git", name: "Git Version Control", isAvailable: false, details: "Not Found", recommendation: rec, installCommand: "brew install git", repairCommand: "brew reinstall git", uninstallCommand: nil, isProtected: true)
         }
         
-        // 3. Python 3
+        // 4. Python 3
         if let pyPath = findBinary("python3") {
             let pyVer = runQuickCommand(pyPath, args: ["--version"])
             prereqs.python = DependencyStatus(id: "python", name: "Python 3", isAvailable: true, details: "\(pyVer.output) (\(pyPath))", recommendation: nil, installCommand: "brew install python", repairCommand: "brew reinstall python", uninstallCommand: nil, isProtected: true)
@@ -223,45 +256,51 @@ public final class SystemDetector {
                 prereqs.pythonPackages = DependencyStatus(id: "python_packages", name: "Python Modules", isAvailable: false, details: "Missing required packages", recommendation: "Install packages via pip", installCommand: "\(pyPath) -m pip install --break-system-packages lz4 capstone fonttools nsz", repairCommand: "\(pyPath) -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools nsz", uninstallCommand: "\(pyPath) -m pip uninstall -y --break-system-packages lz4 capstone fonttools nsz", isProtected: false)
             }
         } else {
-            prereqs.python = DependencyStatus(id: "python", name: "Python 3", isAvailable: false, details: "Not Found", recommendation: "Install Python 3 via Homebrew", installCommand: "brew install python", repairCommand: "brew reinstall python", uninstallCommand: nil, isProtected: true)
-            prereqs.pythonPackages = DependencyStatus(id: "python_packages", name: "Python Modules", isAvailable: false, details: "Python Not Found", recommendation: nil, installCommand: "python3 -m pip install --break-system-packages lz4 capstone fonttools nsz", repairCommand: "python3 -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools nsz", uninstallCommand: nil, isProtected: false)
+            let rec = isHomebrewInstalled ? "Install Python 3 via Homebrew" : "Install Homebrew first to install Python 3"
+            prereqs.python = DependencyStatus(id: "python", name: "Python 3", isAvailable: false, details: "Not Found", recommendation: rec, installCommand: "brew install python", repairCommand: "brew reinstall python", uninstallCommand: nil, isProtected: true)
+            prereqs.pythonPackages = DependencyStatus(id: "python_packages", name: "Python Modules", isAvailable: false, details: "Python Not Found", recommendation: isHomebrewInstalled ? "Install Python 3 first" : "Install Homebrew first", installCommand: "python3 -m pip install --break-system-packages lz4 capstone fonttools nsz", repairCommand: "python3 -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools nsz", uninstallCommand: nil, isProtected: false)
         }
         
-        // 3. .NET SDK
+        // 5. .NET SDK
         if let dotnetPath = findBinary("dotnet") {
             let dotnetVer = runQuickCommand(dotnetPath, args: ["--version"])
             prereqs.dotnet = DependencyStatus(id: "dotnet", name: ".NET SDK", isAvailable: true, details: "v\(dotnetVer.output)", recommendation: nil, installCommand: "brew install --cask dotnet-sdk", repairCommand: "brew reinstall --cask dotnet-sdk", uninstallCommand: "brew uninstall --cask dotnet-sdk", isProtected: false)
         } else {
-            prereqs.dotnet = DependencyStatus(id: "dotnet", name: ".NET SDK", isAvailable: false, details: "Not Found", recommendation: "Install .NET SDK via Homebrew", installCommand: "brew install --cask dotnet-sdk", repairCommand: "brew reinstall --cask dotnet-sdk", uninstallCommand: "brew uninstall --cask dotnet-sdk", isProtected: false)
+            let rec = isHomebrewInstalled ? "Install .NET SDK via Homebrew" : "Install Homebrew first to install .NET SDK"
+            prereqs.dotnet = DependencyStatus(id: "dotnet", name: ".NET SDK", isAvailable: false, details: "Not Found", recommendation: rec, installCommand: "brew install --cask dotnet-sdk", repairCommand: "brew reinstall --cask dotnet-sdk", uninstallCommand: "brew uninstall --cask dotnet-sdk", isProtected: false)
         }
         
-        // 4. XcodeGen
+        // 6. XcodeGen
         if let xcodegenPath = findBinary("xcodegen") {
             let xcodegenVer = runQuickCommand(xcodegenPath, args: ["--version"])
             prereqs.xcodegen = DependencyStatus(id: "xcodegen", name: "XcodeGen", isAvailable: true, details: xcodegenVer.output, recommendation: nil, installCommand: "brew install xcodegen", repairCommand: "brew reinstall xcodegen", uninstallCommand: "brew uninstall xcodegen", isProtected: false)
         } else {
-            prereqs.xcodegen = DependencyStatus(id: "xcodegen", name: "XcodeGen", isAvailable: false, details: "Not Found", recommendation: "Install XcodeGen via Homebrew", installCommand: "brew install xcodegen", repairCommand: "brew reinstall xcodegen", uninstallCommand: "brew uninstall xcodegen", isProtected: false)
+            let rec = isHomebrewInstalled ? "Install XcodeGen via Homebrew" : "Install Homebrew first to install XcodeGen"
+            prereqs.xcodegen = DependencyStatus(id: "xcodegen", name: "XcodeGen", isAvailable: false, details: "Not Found", recommendation: rec, installCommand: "brew install xcodegen", repairCommand: "brew reinstall xcodegen", uninstallCommand: "brew uninstall xcodegen", isProtected: false)
         }
         
-        // 5. zstd
+        // 7. zstd
         if let zstdPath = findBinary("zstd") {
             prereqs.zstd = DependencyStatus(id: "zstd", name: "zstd", isAvailable: true, details: "Installed (\(zstdPath))", recommendation: nil, installCommand: "brew install zstd", repairCommand: "brew reinstall zstd", uninstallCommand: "brew uninstall zstd", isProtected: false)
         } else {
-            prereqs.zstd = DependencyStatus(id: "zstd", name: "zstd", isAvailable: false, details: "Not Found", recommendation: "Install zstd via Homebrew", installCommand: "brew install zstd", repairCommand: "brew reinstall zstd", uninstallCommand: "brew uninstall zstd", isProtected: false)
+            let rec = isHomebrewInstalled ? "Install zstd via Homebrew" : "Install Homebrew first to install zstd"
+            prereqs.zstd = DependencyStatus(id: "zstd", name: "zstd", isAvailable: false, details: "Not Found", recommendation: rec, installCommand: "brew install zstd", repairCommand: "brew reinstall zstd", uninstallCommand: "brew uninstall zstd", isProtected: false)
         }
         
-        // 6. spirv-cross
+        // 8. spirv-cross
         if let spirvPath = findBinary("spirv-cross") {
             prereqs.spirvCross = DependencyStatus(id: "spirv_cross", name: "spirv-cross", isAvailable: true, details: "Installed (\(spirvPath))", recommendation: nil, installCommand: "brew install spirv-cross", repairCommand: "brew reinstall spirv-cross", uninstallCommand: "brew uninstall spirv-cross", isProtected: false)
         } else {
-            prereqs.spirvCross = DependencyStatus(id: "spirv_cross", name: "spirv-cross", isAvailable: false, details: "Not Found", recommendation: "Install spirv-cross via Homebrew", installCommand: "brew install spirv-cross", repairCommand: "brew reinstall spirv-cross", uninstallCommand: "brew uninstall spirv-cross", isProtected: false)
+            let rec = isHomebrewInstalled ? "Install spirv-cross via Homebrew" : "Install Homebrew first to install spirv-cross"
+            prereqs.spirvCross = DependencyStatus(id: "spirv_cross", name: "spirv-cross", isAvailable: false, details: "Not Found", recommendation: rec, installCommand: "brew install spirv-cross", repairCommand: "brew reinstall spirv-cross", uninstallCommand: "brew uninstall spirv-cross", isProtected: false)
         }
         
-        // 7. glslangValidator
+        // 9. glslangValidator
         if let glslangPath = findBinary("glslangValidator") {
             prereqs.glslang = DependencyStatus(id: "glslang", name: "glslang", isAvailable: true, details: "Installed (\(glslangPath))", recommendation: nil, installCommand: "brew install glslang", repairCommand: "brew reinstall glslang", uninstallCommand: "brew uninstall glslang", isProtected: false)
         } else {
-            prereqs.glslang = DependencyStatus(id: "glslang", name: "glslang", isAvailable: false, details: "Not Found", recommendation: "Install glslang via Homebrew", installCommand: "brew install glslang", repairCommand: "brew reinstall glslang", uninstallCommand: "brew uninstall glslang", isProtected: false)
+            let rec = isHomebrewInstalled ? "Install glslang via Homebrew" : "Install Homebrew first to install glslang"
+            prereqs.glslang = DependencyStatus(id: "glslang", name: "glslang", isAvailable: false, details: "Not Found", recommendation: rec, installCommand: "brew install glslang", repairCommand: "brew reinstall glslang", uninstallCommand: "brew uninstall glslang", isProtected: false)
         }
         
         return prereqs

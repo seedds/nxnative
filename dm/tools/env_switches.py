@@ -72,7 +72,37 @@ def rows():
     return HEAD + ''.join(out), bad, unread
 
 
+def verify_texts(paths):
+    """Every DM_* name these files mention must be one the sources read (docs/env_switches.tsv), or a
+    family a row documents: DM_PROF_<key> builds its name at run time, so no row can exist per member
+    and the table names the family instead. A name ending in _ is a family prefix itself.
+
+    Written after two replies in one day recommended DM_LOG_UEMALLOC and DM_NVN_ALIAS_TRACE, neither
+    of which exists: a name recalled from memory rather than read out of the table. Run this over a
+    draft before posting it.
+    """
+    known, family = set(), set()
+    if TABLE.exists():
+        for l in TABLE.read_text().split('\n'):
+            f = l.split('\t')
+            if not f or not f[0].startswith('DM_'): continue
+            known.add(f[0])
+            for m in re.finditer(r'(' + NAME + r')_[<*]', '\t'.join(f[1:])):
+                family.add(m.group(1))
+    bad = []
+    for p in paths:
+        for n in sorted(set(re.findall(NAME, Path(p).read_text(encoding='utf-8', errors='replace')))):
+            if n.endswith('_'): continue                    # a family prefix itself ("DM_NVN_*")
+            if n not in known and not any(k.startswith(n + '_') for k in known) and n not in family:
+                bad.append((p, n))                          # unknown, and no row starts with it
+    return bad, len(known)
+
 if __name__ == '__main__':
+    if sys.argv[1:2] == ['--verify']:
+        problems, known = verify_texts(sys.argv[2:])
+        for p, n in problems: print(f'{p}: {n} is not a switch the sources read')
+        print(f'{len(problems)} unknown name(s) against {known} known switches')
+        raise SystemExit(1 if problems else 0)
     text, bad, unread = rows()
     if unread: print('quoted in the docs but read nowhere (check that each mention says it was removed): ' + ' '.join(unread))
     if sys.argv[1:] == ['--check']:

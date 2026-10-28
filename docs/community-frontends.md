@@ -20,6 +20,7 @@ Sorted by name. A row is the author's statement; the checkmarks are theirs, and 
 
 | Front end | Platform | Licence | Reads `launcher.json` | Writes saved choices | `DM_LAUNCHER=0` | Game files out | Support |
 |---|---|---|---|---|---|---|---|
+| [NX Play](https://github.com/varyform/nx-native-wrapper) | macOS | MIT | no | no | n/a | yes | [its issues](https://github.com/varyform/nx-native-wrapper/issues) |
 | [NX2Apple](https://github.com/LNPANDY/NX2Apple) | macOS | MIT | yes | yes, from [v0.5.0](https://github.com/LNPANDY/NX2Apple/releases/tag/v0.5.0) ([LNPANDY/NX2Apple#88](https://github.com/LNPANDY/NX2Apple/pull/88)) | yes | yes | [its issues](https://github.com/LNPANDY/NX2Apple/issues) |
 
 Windows work is discussed in [#244](https://github.com/seedds/nxnative/issues/244): portability is a separate question from this page.

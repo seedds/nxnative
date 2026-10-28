@@ -2,13 +2,13 @@ name: Sync Upstream (seedds/nxnative)
 
 on:
   schedule:
-    # Sincroniza automaticamente a cada 12 horas (00:00 e 12:00 UTC)
+    # Automatically sync every 12 hours (00:00 and 12:00 UTC)
     - cron: '0 0,12 * * *'
-  # Permite disparar manualmente pela aba Actions do GitHub
+  # Allow manual trigger via GitHub Actions tab
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Simular merge sem enviar (Dry Run)'
+        description: 'Simulate merge without pushing (Dry Run)'
         required: false
         type: boolean
         default: false
@@ -24,92 +24,92 @@ concurrency:
 
 jobs:
   sync-upstream:
-    name: Sincronizar com seedds/nxnative
+    name: Sync with seedds/nxnative
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout do Repositório Fork
+      - name: Checkout Fork Repository
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configurar Git Bot
+      - name: Configure Git Bot
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Adicionar Remoto Upstream
+      - name: Add Upstream Remote
         run: |
           git remote add upstream https://github.com/seedds/nxnative.git || git remote set-url upstream https://github.com/seedds/nxnative.git
           git fetch upstream main
 
-      - name: Verificar Novos Commits do Upstream
+      - name: Check for New Upstream Commits
         id: check_diff
         run: |
           BEHIND=$(git rev-list --count HEAD..upstream/main)
           echo "behind=$BEHIND" >> $GITHUB_OUTPUT
-          echo "Commits novos no upstream: $BEHIND"
+          echo "New upstream commits: $BEHIND"
           if [ "$BEHIND" -gt 0 ]; then
-            echo "Últimos commits do upstream a serem incorporados:"
+            echo "Latest upstream commits to incorporate:"
             git log HEAD..upstream/main --oneline -n 10
           else
-            echo "O fork já está completamente atualizado com upstream/main."
+            echo "Fork is already fully up to date with upstream/main."
           fi
 
-      - name: Executar Mesclagem Segura (Preservando Customizações)
+      - name: Execute Safe Merge (Preserving Customizations)
         id: do_merge
         if: steps.check_diff.outputs.behind > 0
         run: |
-          echo "Tentando mesclar upstream/main na branch main..."
-          # Tenta o merge padrão preservando os commits locais do launcher
+          echo "Attempting to merge upstream/main into main branch..."
+          # Standard merge preserving local launcher commits
           if git merge upstream/main --no-edit -m "chore(sync): merge upstream updates from seedds/nxnative"; then
             echo "has_conflicts=false" >> $GITHUB_OUTPUT
-            echo "✅ Mesclagem concluída com sucesso sem conflitos!"
+            echo "✅ Merge completed successfully without conflicts!"
           else
             echo "has_conflicts=true" >> $GITHUB_OUTPUT
-            echo "⚠️ Conflito de mesclagem detectado!"
-            # Aborta imediatamente para NÃO corromper nem quebrar a branch main
+            echo "⚠️ Merge conflict detected!"
+            # Abort immediately to NOT corrupt or break main branch
             git merge --abort
           fi
 
-      - name: Enviar Atualizações para a Main
+      - name: Push Updates to Main
         if: steps.check_diff.outputs.behind > 0 && steps.do_merge.outputs.has_conflicts == 'false' && (!inputs.dry_run)
         run: |
-          echo "Enviando novos commits mesclados para a branch main do fork..."
+          echo "Pushing newly merged commits to fork main branch..."
           git push origin main
-          echo "🎉 Fork atualizado com sucesso!"
+          echo "🎉 Fork successfully updated!"
 
-      - name: Alertar Conflito com Segurança (Sem Quebrar a Main)
+      - name: Safely Alert Conflicts (Without Breaking Main)
         if: steps.check_diff.outputs.behind > 0 && steps.do_merge.outputs.has_conflicts == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BRANCH_NAME="upstream-sync-review-${{ github.run_id }}"
-          echo "Criando branch de resolução isolada: $BRANCH_NAME..."
+          echo "Creating isolated review branch: $BRANCH_NAME..."
           git checkout -b "$BRANCH_NAME"
-          # Faz a tentativa na branch isolada para registrar onde estão os conflitos
+          # Run attempt on isolated branch to record where conflicts lie
           git merge upstream/main --no-edit || true
           git push origin "$BRANCH_NAME" || true
 
           ALERT_BODY=$(cat <<'EOF'
-          ## ⚠️ Conflito Detectado na Sincronização Automática com o Upstream
+          ## ⚠️ Conflict Detected during Automated Upstream Synchronization
 
-          A ação automatizada tentou sincronizar os novos commits de `seedds/nxnative:main`, mas detectou **conflitos de mesclagem** com arquivos modificados no **NxNative Launcher**.
+          The automated sync workflow attempted to merge new commits from `seedds/nxnative:main`, but encountered **merge conflicts** with custom files in **NxNative Launcher**.
 
           > [!IMPORTANT]
-          > **A sua branch `main` foi protegida e NÃO foi alterada nem corrompida.** Suas funcionalidades continuam intactas.
+          > **Your `main` branch is protected and was NOT modified or corrupted.** All existing functionality remains safe and operational.
 
-          Uma branch de trabalho temporária foi criada: `${{ env.BRANCH_NAME }}`.
+          A temporary review branch has been created: `${{ env.BRANCH_NAME }}`.
 
-          ### Como resolver manualmente no seu terminal local:
+          ### How to resolve manually in your local terminal:
           ```bash
           cd nxnative
           git checkout main
           git fetch upstream
           git merge upstream/main
-          # Resolva os conflitos nos arquivos indicados
+          # Resolve conflicts in the highlighted files
           git commit -m "chore(sync): resolve upstream merge conflicts"
           git push origin main
           ```
@@ -117,6 +117,6 @@ jobs:
           )
 
           gh issue create \
-            --title "⚠️ [Sincronização Upstream] Conflito detectado em $(date +'%d/%m/%Y %H:%M UTC')" \
+            --title "⚠️ [Upstream Sync] Conflict detected on $(date +'%Y-%m-%d %H:%M UTC')" \
             --body "$ALERT_BODY" \
             --label "upstream-sync" || true

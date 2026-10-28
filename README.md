@@ -9,7 +9,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue.svg)](https://apple.com/macos)
 [![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%2FM2%2FM3%2FM4)-orange.svg)](https://apple.com)
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-FA7343.svg)](https://swift.org)
-[![Version](https://img.shields.io/badge/version-v1.5.1-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
+[![Version](https://img.shields.io/badge/version-v1.6.0-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Upstream](https://img.shields.io/badge/core%20engine-seedds%2Fnxnative-informational.svg)](https://github.com/seedds/nxnative)
 [![Report Errors](https://img.shields.io/badge/Issues-Support%20%26%20Bugs-red.svg)](https://github.com/rennan101/nxnative_Launcher/issues)
@@ -42,7 +42,8 @@ NxNative Launcher transforms the technical command-line porting pipeline into a 
 - **Two-Tier Library Categories**:
   - **Mac (macOS Native)**: Standalone compiled `.app` bundles executable on Apple Silicon Macs.
   - **iPhone / iPad (iOS Port)**: Sideloadable `.ipa` packages ready for direct deployment via `xcrun devicectl` or AirDrop.
-- **Real-Time Save Location**: Instant discovery of save game folders (`~/Library/Application Support/nxnative/<TID>/save`) with a single-click **"Saves"** button to reveal in Finder.
+- **iCloud Cross-Save Synchronization**: Seamless bidirectional save sync between macOS and iOS/iPadOS (`iCloud Drive/NxNative/Saves/<Game>`) with automated folder cover badges for instant visual identification in Finder and the Files app.
+- **Real-Time Save Location**: Instant discovery of local save game folders (`~/Library/Application Support/nxnative/<TID>/save`) with single-click shortcuts to push to or pull from iCloud or connected devices.
 - **Installed DLC & Update Detection**: Scans `<Game.app>/Contents/Resources/aoc` and lists installed expansions, version tags, and disk space usage.
 - **Per-Game Settings Deck**: Quick toggles for 60 FPS Unlocked, Docked/Handheld mode, Apple MetalFX Spatial Upscaling, and Metal Performance HUD overlay.
 
@@ -99,7 +100,7 @@ NxNative Launcher transforms the technical command-line porting pipeline into a 
 ### 🌈 6. Personalization & Neon Highlight Themes
 - **8 Dynamic Accent Themes**: Switch Neon Red, Switch Neon Blue, Electric Purple, Sunset Orange, Emerald Green, Cyber Rose, Hyrule Gold, and Deep Cobalt.
 - **Appearance Modes**: Light, Dark, Monochrome, and Auto (System).
-- **Tactile UI Sound Effects**: Mechanical sound effects for button clicks, carousel navigation, and game launching (toggleable in Settings).
+- **Tactile UI Sound Effects**: Mechanical sound effects for button clicks, carousel navigation, and game launching (toggleable in Settings with built-in audio debouncing).
 
 <p align="center">
   <img src="docs/images/screenshots/personalization_themes.png" width="90%" alt="Personalization & Neon Themes">
@@ -124,246 +125,251 @@ NxNative Launcher transforms the technical command-line porting pipeline into a 
 
 ---
 
-## 🛠️ Tutorial: Configuração do Ambiente e Dependências (Setup Guide)
+## 🛠️ Environment Setup & Dependencies Guide
 
-Antes de iniciar a compilação ou execução dos jogos portados, seu sistema precisa estar configurado com as ferramentas e bibliotecas essenciais do macOS.
+Before compiling or executing ported games, ensure your macOS system is configured with the required command-line tools and runtime libraries.
 
-### 📋 1. Requisitos de Sistema
-- **Hardware**: Qualquer computador Mac com **Apple Silicon** (M1, M1 Pro/Max/Ultra, M2, M3, M4 ou posterior).
-- **Sistema Operacional**: **macOS 13.0 (Ventura)**, **macOS 14.0 (Sonoma)**, **macOS 15.0 (Sequoia)** ou mais recente.
-- **Memória Unificada**: 8 GB recomendados (mínimo de 4 GB para jogos 2D/leves; 16 GB recomendados para títulos complexos como Zelda TotK).
-- **Armazenamento**: SSD com pelo menos 20 a 50 GB livres para extração de RomFS e compilação de shaders.
+### 📋 1. System Requirements
+- **Hardware**: Any Mac computer powered by **Apple Silicon** (M1, M1 Pro/Max/Ultra, M2, M3, M4 or later).
+- **Operating System**: **macOS 13.0 (Ventura)**, **macOS 14.0 (Sonoma)**, **macOS 15.0 (Sequoia)** or newer.
+- **Unified Memory**: 8 GB recommended (minimum 4 GB for lightweight 2D games; 16 GB recommended for demanding open-world titles like Zelda TotK).
+- **Storage Space**: High-speed SSD with at least 20 to 50 GB free for RomFS extraction, shader compilation, and intermediate builds.
 
 ---
 
-### 🔑 2. Chaves de Descriptografia (`prod.keys`)
+### 🔑 2. Decryption Keys (`prod.keys`)
 > [!IMPORTANT]
-> O NxNative requer o arquivo **`prod.keys`** para descriptografar os contêineres NCA e arquivos de código dos jogos. Por motivos de conformidade legal, **nenhuma chave é distribuída com este projeto**.
+> NxNative requires **`prod.keys`** to decrypt Nintendo Switch NCA archives and executable binaries. In compliance with intellectual property laws, **no keys are provided or distributed with this project**.
 >
-> 1. Obtenha suas chaves a partir do seu próprio console Nintendo Switch desbloqueado utilizando o homebrew **[Lockpick_RCM](https://github.com/shchmue/Lockpick_RCM)**.
-> 2. Salve o arquivo gerado `prod.keys` em:
+> 1. Dump your personal keys from your own modded Nintendo Switch hardware using the homebrew tool **[Lockpick_RCM](https://github.com/shchmue/Lockpick_RCM)**.
+> 2. Place your dumped `prod.keys` into:
 >    ```bash
 >    mkdir -p ~/.switch
->    cp /caminho/do/seu/prod.keys ~/.switch/prod.keys
+>    cp /path/to/your/prod.keys ~/.switch/prod.keys
 >    ```
-> 3. Você também pode apontar o caminho do arquivo diretamente na aba **Settings** do NxNative Launcher.
+> 3. Alternatively, you can browse and set your custom keys file directly in the **Settings** tab within NxNative Launcher.
 
 ---
 
-### ⚙️ 3. Instalação Automática (Pelo Próprio Launcher)
-1. Baixe e abra o **`NxNative_Launcher.app`**.
-2. Vá até a aba **Settings** (pressione `6` no teclado ou use `R` no controle).
-3. Na seção de diagnóstico do ambiente:
-   - Se o compilador Clang, ferramentas de linha de comando ou dependências estiverem marcadas em amarelo, clique em **"Install Missing"** ou **"Repair All"**.
-   - O launcher configurará as dependências necessárias automaticamente em segundo plano.
+### ⚙️ 3. Automatic Setup (Via Launcher Interface)
+1. Download and open **`NxNative_Launcher.app`**.
+2. Navigate to the **Settings** tab (press `6` on your keyboard or `R` on a connected controller).
+3. Under the **System Prerequisites & Diagnostics** section:
+   - If Clang, Command Line Tools, Homebrew, or any required packages show warnings, click **"Install Missing"** or **"Repair All"**.
+   - The launcher installs and validates all dependencies automatically in the background.
 
 ---
 
-### 💻 4. Instalação Manual das Dependências (Linha de Comando)
-Caso prefira preparar seu ambiente manualmente via terminal:
+### 💻 4. Manual Setup (Terminal / Command Line)
+If you prefer configuring your development environment manually via the terminal:
 
-#### Passo A: Instalar o Xcode Command Line Tools
+#### Step A: Install Xcode Command Line Tools
 ```bash
 xcode-select --install
 ```
 
-#### Passo B: Instalar o Gerenciador Homebrew
-Caso ainda não possua o [Homebrew](https://brew.sh) instalado:
+#### Step B: Install Homebrew Package Manager
+If [Homebrew](https://brew.sh) is not yet installed:
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-#### Passo C: Instalar Compiladores e Bibliotecas
-Instale as bibliotecas necessárias para extração de pacotes, manipulação de compressão e compilação de shaders SPIR-V:
+#### Step C: Install Compilers and Support Libraries
+Install required libraries for package extraction, compression codecs, and SPIR-V shader compilation:
 ```bash
 brew install python@3.11 cmake ninja molten-vk libzip lz4 zstd spirv-cross
 ```
 
-#### Passo D: Instalar Pacotes Python Necessários
+#### Step D: Install Python Runtime Dependencies
 ```bash
 pip3 install pycryptodome libhac
 ```
 
 ---
 
-## 🚀 Passo a Passo: Como Portar Jogos para o Mac e iOS
+## 🚀 Step-by-Step: Porting Games to Mac and iOS
 
-Com o ambiente configurado e suas chaves em mãos, o processo de portabilidade é simples e guiado em 3 passos:
+With your environment configured and `prod.keys` in place, porting your games is streamlined into three guided steps:
 
 ```mermaid
 flowchart LR
-    A["📁 Arquivos do Jogo<br/>(NSP / NSZ / XCI)"] --> B["⚡ Passo 1: Seleção<br/>(Agrupamento Base + DLC)"]
-    B --> C["⚙️ Passo 2: Configuração<br/>(Mac .app ou iOS .ipa)"]
-    C --> D["🔨 Passo 3: Compilação<br/>(LibHac, Metal Shaders, dmhost)"]
-    D --> E["🎮 Jogo Portado<br/>(Pronto na Biblioteca)"]
+    A["📁 Dumped Game Files<br/>(NSP / NSZ / XCI)"] --> B["⚡ Step 1: File Selection<br/>(Base + Update + DLC)"]
+    B --> C["⚙️ Step 2: Configuration<br/>(Mac .app or iOS .ipa)"]
+    C --> D["🔨 Step 3: Compilation<br/>(LibHac, Metal Shaders, dmhost)"]
+    D --> E["🎮 Ported Game Ready<br/>(Instant Library Access)"]
 ```
 
-### Passo 1: Preparar e Selecionar os Arquivos
-1. Crie uma pasta com os arquivos do seu jogo (por exemplo, na pasta `Jogos` ou em um SSD externo).
-2. Coloque os arquivos correspondentes na pasta:
-   - Jogo Base (`.nsp`, `.nsz`, ou `.xci`)
-   - Atualização mais recente (`[v...] .nsp`)
-   - Pacotes de DLC (`.nsp`, se houver)
-3. Abra o **NxNative Launcher** e clique na aba **Port Game** (ou pressione `1`).
-4. Arraste e solte a pasta na área indicada (ou clique em **"Choose Folder..."**).
-5. O Launcher identificará automaticamente o Title ID, calculará o tamanho total e agrupará o jogo base com suas atualizações e DLCs:
-   - Clique no card do jogo detectado para selecioná-lo.
+### Step 1: Select Game Files
+1. Create a folder containing your dumped game files (e.g., inside your `Games` directory or on an external SSD).
+2. Ensure the matching files are present:
+   - Base Game (`.nsp`, `.nsz`, or `.xci`)
+   - Latest Game Update (`[v...] .nsp`)
+   - Optional DLC Packages (`.nsp`, if available)
+3. Open **NxNative Launcher** and click the **Port Game** tab (or press `1`).
+4. Drag and drop the folder into the designated drop zone (or click **"Choose Folder..."**).
+5. The Launcher automatically parses Title IDs, calculates required storage, and groups updates and DLCs with the base game:
+   - Click on the detected game card to select it.
 
 <p align="center">
-  <img src="docs/images/screenshots/port_step1_select_game.png" width="90%" alt="Passo 1: Seleção de Arquivos do Jogo">
+  <img src="docs/images/screenshots/port_step1_select_game.png" width="90%" alt="Step 1: Game File Selection">
 </p>
 
 ---
 
-### Passo 2: Configurar Plataforma de Destino e Opções
-1. Após selecionar o jogo, você avançará para a tela de **Target Platform & Output**:
+### Step 2: Configure Target Platform and Options
+1. Once selected, proceed to **Target Platform & Output**:
    - **Target Platform**:
-     - Selecione **Mac App (.app)** para jogar diretamente no macOS com aceleração nativa Metal.
-     - Selecione **iOS / iPadOS (.ipa)** caso queira gerar o pacote IPA para iPhone 15 Pro ou iPad.
+     - Select **Mac App (.app)** for direct macOS native execution with full Metal hardware acceleration.
+     - Select **iOS / iPadOS (.ipa)** to export a sideloadable IPA bundle for iPhone 15 Pro / iPad.
    - **Destination Directory**:
-     - O diretório padrão de saída é `Nx Ports/` (ou clique em **"Choose..."** para selecionar outra pasta).
-   - **Opções de Desempenho**:
-     - Ative **60 FPS Unlock** para desbloquear o framerate do jogo.
-     - Ative **MetalFX Spatial Upscaling** para melhor nitidez em resoluções mais altas.
-2. Clique no botão **"Port Game"**.
+     - Default output directory is `Nx Ports/` (or click **"Choose..."** to specify a custom folder).
+   - **Performance Enhancements**:
+     - Enable **60 FPS Unlock** to release frame caps.
+     - Enable **MetalFX Spatial Upscaling** for crisp neural super-resolution on high-DPI displays.
+2. Click **"Port Game"**.
 
 <p align="center">
-  <img src="docs/images/screenshots/port_step2_configure.png" width="90%" alt="Passo 2: Configuração de Destino e Opções">
+  <img src="docs/images/screenshots/port_step2_configure.png" width="90%" alt="Step 2: Configuration and Target Platform">
 </p>
 
 ---
 
-### Passo 3: Compilação Automática e Acompanhamento
-1. O pipeline executará automaticamente as etapas em tempo real:
-   - **Stage 1 (Survey)**: Análise do cabeçalho NCA e manifestos do jogo.
-   - **Stage 2 (Extraction)**: Extração do ExeFS e RomFS com `LibHac`.
-   - **Stage 3 (Shaders)**: Descompilação dos microcódigos Maxwell em SPIR-V.
-   - **Stage 4 (Metal MSL)**: Tradução de SPIR-V para Metal Shading Language (`.metal`) via SPIRV-Cross.
-   - **Stage 5 (Host Linking)**: Compilação e ligação do binário Mach-O (`dmhost`) com o bundle final `.app`.
-2. Você pode acompanhar todas as mensagens de compilação diretamente na aba **Console**:
+### Step 3: Automated Compilation & Progress
+1. The automated pipeline executes in real time:
+   - **Stage 1 (Survey)**: NCA header inspection and game manifests validation.
+   - **Stage 2 (Extraction)**: ExeFS and RomFS extraction via `LibHac`.
+   - **Stage 3 (Shaders)**: Maxwell microcode decompilation into SPIR-V intermediates.
+   - **Stage 4 (Metal MSL)**: SPIR-V translation to Metal Shading Language (`.metal`) via SPIRV-Cross.
+   - **Stage 5 (Host Linking)**: Mach-O host binary linking (`dmhost`) and `.app` bundle assembly.
+2. Monitor real-time compiler output directly in the **Console** tab:
 
 <p align="center">
-  <img src="docs/images/screenshots/console_logs.png" width="90%" alt="Passo 3: Acompanhamento de Logs e Compilação">
+  <img src="docs/images/screenshots/console_logs.png" width="90%" alt="Step 3: Compilation Logs in Console">
 </p>
 
-3. Ao concluir a compilação, o macOS emitirá uma **notificação visual com banner e som**, avisando que o jogo está pronto para jogar!
+3. Once compilation finishes, macOS displays a **native notification banner with audio chime**, confirming that your game is ready to play!
 
 ---
 
-## 🕹️ Como Configurar o Jogo na Biblioteca (Library)
+## 🕹️ Configuring Games in Your Library
 
-Após a compilação, seu jogo estará imediatamente disponível na aba **Library**. Você pode customizar sua aparência, mods e preferências individuais:
+Ported games appear immediately in the **Library** tab. Customize appearance, mods, save sync, and runtime performance individually:
 
-### 🖼️ 1. Alterar a Imagem de Capa (Custom Cover Art)
-1. Na aba **Library**, selecione o jogo desejado no carrossel.
-2. Clique no botão **Options** (ou pressione `X` / `□` no controle).
-3. Na seção de capa, clique em **"Choose Custom Cover..."**.
-4. Selecione qualquer imagem do seu computador (`.jpg`, `.png`, `.webp`).
-5. A capa será salva em cache e automaticamente embutida no aplicativo. Para voltar à capa oficial, basta clicar em *Reset to Official*.
+### 🖼️ 1. Custom Cover Art
+1. In the **Library** tab, navigate to the desired game card in the carousel.
+2. Click **Options** (or press `X` / `□` on a controller).
+3. In the cover art section, click **"Choose Custom Cover..."**.
+4. Select any local image (`.jpg`, `.png`, or `.webp`).
+5. The cover is cached and embedded directly into the application bundle. Click *Reset to Official* to restore defaults at any time.
 
-### ⚡ 2. Ajustar Taxa de Quadros (60 FPS) e Opções Gráficas
-Cada jogo possui seu próprio perfil de execução salvo em `~/Library/Application Support/nxnative/<TitleID>/env.txt`:
-- **Framerate Target**: Alterne entre 30 FPS e **60 FPS (Unlocked)** com VSync suave.
-- **Docked Mode**: Ative o modo TV/Docked (1080p nativo) ou Handheld (720p para menor consumo de bateria em MacBooks).
-- **MetalFX Spatial Scaler**: Super-resolução neural da Apple que aumenta a nitidez mantendo alto desempenho.
-- **Metal Performance HUD**: Ative o painel de telemetria oficial da Apple para monitorar FPS, latência e uso de GPU em tempo real.
+### ☁️ 2. iCloud Cross-Save Synchronization
+- **One-Click Cloud Sync**: Sync game progress seamlessly between Mac and iPhone/iPad via `iCloud Drive/NxNative/Saves/<Game>`.
+- **Folder Badges**: Cover art is automatically embedded as a custom folder badge in iCloud Drive for intuitive Finder and iOS Files navigation.
+- **Push & Pull Controls**: Easily upload your local Mac save to iCloud or download cloud saves with timestamps and collision protection.
+
+### ⚡ 3. Frame Rate (60 FPS) and Graphics Options
+Each game maintains its personal execution environment file at `~/Library/Application Support/nxnative/<TitleID>/env.txt`:
+- **Framerate Target**: Toggle between default 30 FPS and **60 FPS (Unlocked)** with smooth VSync.
+- **Docked Mode**: Toggle between TV/Docked mode (native 1080p) and Handheld mode (720p for optimized MacBook battery life).
+- **MetalFX Spatial Scaler**: Apple's hardware-accelerated spatial upscaler enhancing clarity while maintaining high frame rates.
+- **Metal Performance HUD**: Toggle Apple's official telemetry overlay to inspect real-time FPS, GPU frame times, and memory usage.
 
 <p align="center">
-  <img src="docs/images/screenshots/library_game_details.png" width="90%" alt="Configuração de 60 FPS na Biblioteca">
+  <img src="docs/images/screenshots/library_game_details.png" width="90%" alt="60 FPS and Graphics Settings in Library">
 </p>
 
-### 🧩 3. Instalar Mods de Jogo (LayeredFS / Atmosphere)
-O NxNative suporta carregamento em tempo real de mods através do sistema LayeredFS do Atmosphere:
-1. No menu **Options** do jogo, localize a seção **Game Mods (LayeredFS)**.
-2. Clique para abrir a pasta correspondente:
+### 🧩 4. Atmosphere Mods & LayeredFS
+NxNative natively supports Atmosphere-compatible LayeredFS mod structures:
+1. In the game's **Options** sheet, scroll to **Game Mods (LayeredFS)**.
+2. Click **Reveal Mods Folder** to open:
    `<Game.app>/Contents/Resources/atmosphere/contents/<TitleID>/`
-3. Cole seus mods compatíveis (texturas em alta resolução, traduções em PT-BR, ajustes de física ou cheats).
-4. O jogo carregará os arquivos modificados automaticamente ao abrir.
+3. Paste compatible mod files (high-resolution textures, custom audio, community translations, or physics patches).
+4. The game automatically mounts and loads modified assets upon startup.
 
-### 💾 4. Localização e Backup dos Saves
-- Os saves de cada jogo são gravados no caminho padrão do macOS:
+### 💾 5. Save Game Locations & Backups
+- Local saves are stored in standard macOS application support directories:
   `~/Library/Application Support/nxnative/<TitleID>/save/`
-- No Launcher, clique no botão **Saves** para abrir a pasta diretamente no Finder e realizar backups rápidos.
+- Click **"Saves"** on any game card to open the directory directly in Finder for manual backups.
 
 <p align="center">
-  <img src="docs/images/screenshots/game_options_mods.png" width="90%" alt="Painel de Opções, Mods e Saves">
+  <img src="docs/images/screenshots/game_options_mods.png" width="90%" alt="Options, Mods, and Saves Overview">
 </p>
 
 ---
 
-## 🎮 Como Abrir e Jogar o Jogo
+## 🎮 Launching and Playing Games
 
-Existem duas formas fáceis de iniciar seu jogo:
+Launch games using either of two methods:
 
-### Método 1: Direto pelo NxNative Launcher
-1. Conecte seu controle preferido (Switch Pro, Joy-Cons, Xbox, PS5 DualSense) ou use o teclado.
-2. Na aba **Library**, navegue com o **D-Pad / Analógico** ou com as **Setas do Teclado** até o jogo desejado.
-3. Pressione **`A`** (Nintendo / Xbox), **`✕`** (PlayStation) ou a tecla **Enter** (ou clique em **"Play Game"** com o mouse).
-4. O Launcher abrirá o jogo com feedback de áudio e proteção contra abertura duplicada.
+### Method 1: Directly from NxNative Launcher
+1. Connect your preferred controller (Nintendo Switch Pro, Joy-Cons, Xbox Wireless, PS5 DualSense) or use the keyboard.
+2. In the **Library** tab, navigate to your desired game using the **D-Pad / Analog Sticks** or **Arrow Keys**.
+3. Press **`A`** (Nintendo / Xbox), **`✕`** (PlayStation), or **Return (Enter)** (or click **"Play Game"** with the mouse).
+4. The launcher provides tactile audio confirmation and guards against duplicate background instances.
 
 <p align="center">
-  <img src="docs/images/screenshots/library_hero.png" width="90%" alt="Execução Direta pela Biblioteca">
+  <img src="docs/images/screenshots/library_hero.png" width="90%" alt="Direct Execution from Library">
 </p>
 
-### Método 2: Pelo Finder do macOS
-- O jogo gerado é um aplicativo `.app` autônomo nativo do macOS.
-- Abra o Finder, vá até a pasta de saída (por exemplo, `Nx Ports/`) e clique duas vezes sobre o ícone do jogo (`<NomeDoJogo>.app`).
-- O jogo abrirá imediatamente, lendo todas as opções configuradas no `env.txt`.
+### Method 2: Via macOS Finder
+- Every ported game is a standalone, native macOS `.app` bundle.
+- In Finder, navigate to your output folder (e.g., `Nx Ports/`) and double-click `<GameName>.app`.
+- The game launches immediately, reading all preferences configured in `env.txt`.
 
 > [!TIP]
-> **Atalho para Sair do Jogo**:
-> Quando estiver jogando com um controle, segure o botão **Xbox Guide / PS / Home** por **3 segundos** para encerrar o jogo e reativar a janela do NxNative Launcher instantaneamente!
+> **Controller Quick-Exit Shortcut**:
+> While playing a game with a gamepad, hold the **Xbox Guide / PS / Home** button for **3 seconds** to exit the game cleanly and return immediate focus to NxNative Launcher!
 
 ---
 
 ## 🎮 Gamepad Navigation & Controller Mapping Reference
 
-| Ação no Launcher | Nintendo Switch | Xbox | PlayStation | Atalho de Teclado |
+| Action in Launcher | Nintendo Switch | Xbox | PlayStation | Keyboard Shortcut |
 | :--- | :---: | :---: | :---: | :---: |
-| **Navegar Carrossel / Itens** | D-Pad / Analógico | D-Pad / Analógico | D-Pad / Analógico | Setas direcionais |
-| **Jogar / Confirmar Seleção** | **`A`** | **`A`** | **`✕`** | Return (Enter) |
-| **Cancelar / Retornar** | **`B`** | **`B`** | **`○`** | Escape |
-| **Abrir Opções & Mods** | **`X`** | **`X`** | **`□`** | `O` |
-| **Abrir Pasta de Saves** | **`Y`** | **`Y`** | **`△`** | `S` |
-| **Aba Anterior** | **`L`** | **`LB`** | **`L1`** | `[` |
-| **Próxima Aba** | **`R`** | **`RB`** | **`R1`** | `]` |
-| **Abrir Configurações** | **`+` (Plus)** | **Menu** | **Options** | `,` (Vírgula) |
-| **Sair do Jogo (Em Execução)** | Segurar **Home** (3s) | Segurar **Guide** (3s) | Segurar **PS** (3s) | `Cmd + Q` |
+| **Navigate Carousel / Shelves** | D-Pad / Analog Stick | D-Pad / Analog Stick | D-Pad / Analog Stick | Arrow Keys |
+| **Play / Confirm Selection** | **`A`** | **`A`** | **`✕`** | Return (Enter) |
+| **Cancel / Back** | **`B`** | **`B`** | **`○`** | Escape |
+| **Open Options & Mods** | **`X`** | **`X`** | **`□`** | `O` |
+| **Open Saves Folder** | **`Y`** | **`Y`** | **`△`** | `S` |
+| **Previous Tab** | **`L`** | **`LB`** | **`L1`** | `[` or `Q` |
+| **Next Tab** | **`R`** | **`RB`** | **`R1`** | `]` or `E` |
+| **Open Settings** | **`+` (Plus)** | **Menu** | **Options** | `,` (Comma) |
+| **Quick Exit Game** | Hold **Home** (3s) | Hold **Guide** (3s) | Hold **PS** (3s) | `Cmd + Q` |
 
 ---
 
-## 🛠️ Compilando o NxNative Launcher a Partir do Código-Fonte
+## 🛠️ Building NxNative Launcher from Source
 
-Caso queira construir o próprio executável do launcher a partir do repositório:
+To compile the latest launcher binary from source code:
 
 ```bash
-# 1. Clone o repositório
+# 1. Clone repository
 git clone https://github.com/rennan101/nxnative_Launcher.git
 cd nxnative_Launcher
 
-# 2. Compile o aplicativo Swift GUI
+# 2. Build Swift GUI application in release mode
 cd gui
 swift build -c release
 
-# 3. Crie o pacote .app assinado
+# 3. Assemble and code-sign .app bundle
 cd ..
 bash scripts/build_gui.sh
 
-# 4. (Opcional) Gere o instalador .dmg para distribuição
+# 4. (Optional) Generate distributable .dmg installer
 bash scripts/create_dmg.sh
 ```
 
-Os arquivos compilados `NxNative_Launcher.app` e `NxNative_Launcher.dmg` serão gerados na raiz do projeto.
+Compiled deliverables `NxNative_Launcher.app` and `NxNative_Launcher.dmg` will be generated in the project root directory.
 
 ---
 
-## 💬 Suporte, Tickets e Relato de Erros
+## 💬 Community Support, Bug Reports & Feature Requests
 
-Encontrou algum erro, problema com controle ou quer relatar a compatibilidade de um jogo no Mac?
-- 🚨 **Relatar Bug / Problema:** [Abrir Bug Report](https://github.com/rennan101/nxnative_Launcher/issues/new?template=bug_report.yml) ou comente no [Support Hub (Ticket #1)](https://github.com/rennan101/nxnative_Launcher/issues/1).
-- 🎮 **Relatar Compatibilidade de Jogo:** [Enviar Relatório de Jogo](https://github.com/rennan101/nxnative_Launcher/issues/new?template=game_compatibility.yml) ou participe no [Compatibility Hub (Ticket #2)](https://github.com/rennan101/nxnative_Launcher/issues/2).
-- 💡 **Sugerir Novas Funcionalidades:** [Sugerir Feature](https://github.com/rennan101/nxnative_Launcher/issues/new?template=feature_request.yml).
-- 🔄 **Sincronização Upstream:** O repositório possui uma GitHub Action configurada para sincronizar automaticamente com as novidades de `seedds/nxnative` sem afetar as customizações do Launcher. Também é possível sincronizar localmente via `./scripts/sync_upstream.sh`.
+Encountered an issue, controller quirk, or want to submit game compatibility findings?
+- 🚨 **Bug Reports:** [Submit a Bug Report](https://github.com/rennan101/nxnative_Launcher/issues/new?template=bug_report.yml) or join the conversation on the [Support Hub (Issue #1)](https://github.com/rennan101/nxnative_Launcher/issues/1).
+- 🎮 **Game Compatibility:** [Submit a Compatibility Report](https://github.com/rennan101/nxnative_Launcher/issues/new?template=game_compatibility.yml) or share notes on the [Compatibility Hub (Issue #2)](https://github.com/rennan101/nxnative_Launcher/issues/2).
+- 💡 **Feature Requests:** [Propose a Feature](https://github.com/rennan101/nxnative_Launcher/issues/new?template=feature_request.yml).
+- 🔄 **Upstream Sync:** Automated GitHub Actions run daily to incorporate updates from `seedds/nxnative` safely. You can also trigger a local sync anytime with `./scripts/sync_upstream.sh`.
 
 ---
 

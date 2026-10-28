@@ -383,7 +383,7 @@ This launcher stands on the shoulders of brilliant software engineering across t
 
 # 🇧🇷 Guia em Português (PT-BR)
 
-Bem-vindo ao guia oficial em português do **NxNative Launcher (v1.6.1)**! Esta seção contém tudo o que você precisa para configurar o ambiente, portar seus jogos, personalizar sua biblioteca, sincronizar saves e jogar com controles no Apple Silicon.
+Bem-vindo ao guia oficial em português do **NxNative Launcher (v1.6.2)**! Esta seção contém tudo o que você precisa para configurar o ambiente, portar seus jogos, personalizar sua biblioteca, sincronizar saves e jogar com controles no Apple Silicon.
 
 ### 📑 Índice do Guia em Português
 - [1. Configuração do Ambiente e Dependências](#1-configuração-do-ambiente-e-dependências)

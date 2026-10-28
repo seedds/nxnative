@@ -50,7 +50,7 @@ Two conventions that run through the whole table:
 
 The following are empty implementations (`g_nops` in `hle_nvn.c`); calling them neither reports red nor has any effect:
 
-`SetPatchSize`, `MultiDrawArraysIndirectCount`, `MultiDrawElementsIndirectCount`, `SetDepthBounds`, `DownsampleTextureView`, `WaitSync`, `SetShaderScratchMemory`, `PushDebugGroupDynamic`, `PopDebugGroup`, `InsertDebugMarkerDynamic`, `WaitEvent`, and `nvnWindowFinalize`.
+`SetPatchSize`, `SetDepthBounds`, `WaitSync`, `SetShaderScratchMemory`, the debug groups and markers (`PushDebugGroup*`, `PopDebugGroup*`, `InsertDebugMarker*`), `WaitEvent`, and `nvnWindowFinalize`.
 
 ## 3. Shader bindings
 

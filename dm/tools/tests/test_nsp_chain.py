@@ -1,7 +1,7 @@
 """NSP script chain files (scripts/build_ipa_from_nsp.py chain_header, chain_tables): the one chain version header (dm/gfx/nvn/dmsh_chain.h) is written again when stale and left
 alone when current, and the committed one is current; only the c1 / uniform extent tables that are missing (they are not committed) or do not name the library's stamp (its chain version
-and profile inputs) are made (GitHub issue #78), none without a stamped library, and no step's reuse key counts them; no game files, keys or Xcode needed (temporary files only in a
-temporary folder)."""
+and profile inputs) are made (GitHub issue #78), none without a stamped library, and no step's reuse key counts them; off a Mac, the chain's hashed files are checked out with LF
+line endings (.gitattributes) and dm/gfx/tools/chain_tools.py reads a tool that cannot start as missing; no game files, keys or Xcode needed (temporary files only in a temporary folder)."""
 import importlib.util
 import os
 from pathlib import Path
@@ -17,6 +17,9 @@ REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / 'scripts/build_ipa_from_nsp.py'
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', SCRIPT)
 nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
+sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
+import chain_tools  # noqa: E402
+import dmsh_chain  # noqa: E402
 
 
 class Base(unittest.TestCase):
@@ -116,6 +119,38 @@ class Tables(Base):
     def test_not_profile_inputs(self):   # the steps' reuse keys leave out what the iOS shader step makes, and the rewriter's patches (the rewrite step's own key)
         for n in ('game.tsv', 'shader_map.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'patches.py'): (self.tmp / n).write_text('')
         self.assertEqual([p.name for p in nsp.profile_files(types.SimpleNamespace(dir=self.tmp))], ['game.tsv', 'shader_map.tsv'])
+
+
+class Portable(unittest.TestCase):   # the chain off a Mac (docs/design/vulkan-backend.md, step M0)
+    def setUp(self):
+        self.empty = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, self.empty)   # a PATH with no xcrun
+
+    def test_chain_files_lf(self):   # core.autocrlf=true on Windows checked them out with CRLF, and the chain version changed
+        git = shutil.which('git')
+        if not git or subprocess.run([git, '-C', str(REPO), 'rev-parse', '--is-inside-work-tree'], capture_output=True).returncode: self.skipTest('needs a git checkout')
+        paths = [Path(os.path.normpath(os.path.join(dmsh_chain.GFX, f))).resolve().relative_to(REPO).as_posix() for f in dmsh_chain.FILES]
+        out = subprocess.run([git, '-C', str(REPO), 'check-attr', 'eol', '--', *paths], capture_output=True, text=True, check=True).stdout
+        self.assertEqual([l.rsplit(': ', 1)[1] for l in out.splitlines()], ['lf'] * len(paths), out)
+
+    def test_tools_without_xcrun(self):
+        with mock.patch.dict(os.environ, {'PATH': self.empty}): t = chain_tools.tools_now()
+        with open(dmsh_chain.LOCK) as f: lock = dict(l.rstrip('\n').split('\t', 1) for l in f if '\t' in l and not l.startswith('#'))
+        self.assertEqual(sorted(t), sorted(lock))
+        self.assertEqual((t['metal_macosx'], t['metal_iphoneos']), ('missing', 'missing'))
+        self.assertIs(dmsh_chain.subprocess, subprocess)
+
+    def test_same_as_dmsh_chain(self):   # where every tool starts (a Mac), the values are dmsh_chain.py's own
+        def run(cmd, **kw): return subprocess.CompletedProcess(cmd, 0, 'Apple metal version 1\nmore\n' if cmd[0] == 'xcrun' else ' 0123456789abcdef\n', '')
+        with mock.patch('subprocess.run', run): t, want = chain_tools.tools_now(), dmsh_chain.tools_now()
+        self.assertEqual(t, want)
+        self.assertEqual((t['xlate_source'], t['metal_macosx']), ('0123456789abcdef', 'Apple metal version 1'))
+
+    def test_check_tools_command(self):   # [RED] lines and exit 1, not a traceback
+        r = subprocess.run([sys.executable, str(REPO / 'dm/gfx/tools/chain_tools.py'), '--check-tools'], capture_output=True, text=True, env=dict(os.environ, PATH=self.empty))
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn('[RED] translation chain tools do not match the lock file: metal_macosx: lock ', r.stdout)
+        self.assertIn(' / actual missing\n', r.stdout)
+        self.assertNotIn('Traceback', r.stderr)
 
 
 if __name__ == '__main__':

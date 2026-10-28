@@ -4,3 +4,13 @@ docs/images/gallery.tsv merge=union
 # Shell scripts keep LF line endings in every checkout, also on Windows with core.autocrlf: Git Bash and the Linux containers run them from a Windows checkout
 # (dm/host/tests/run_host_tests.sh, docker/README.md), and a CR at a line end breaks them
 *.sh text eol=lf
+# The shader chain's version (DMSH_CHAIN) is a sha256 of the bytes of the files in FILES of dm/gfx/tools/dmsh_chain.py, so they keep LF line endings in every checkout, also on
+# Windows with core.autocrlf=true: a checkout with CRLF made dmsh_chain.py print 2aff3aff9a76 instead of the committed 157e1b96c8da, and no shader build there could match a Mac's.
+# Keep these patterns covering FILES (dm/tools/tests/test_nsp_chain.py checks it)
+dm/gfx/tools/dmsh_*.py text eol=lf
+dm/gfx/tools/dmsh_pull.metal text eol=lf
+dm/gfx/tools/dmsh_chain.lock text eol=lf
+dm/gfx/tools/dmsh_xlate/Program.cs text eol=lf
+dm/gfx/tools/dmsh_xlate/dmsh_xlate.csproj text eol=lf
+dm/ios/tools/ios_metal.py text eol=lf
+dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/**/*.cs text eol=lf

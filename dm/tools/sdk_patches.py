@@ -80,6 +80,15 @@ CUTS = {
     (0x37c3b0, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x37c44c, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
   ],
+  # Cult of the Lamb 1.0.0 (v0) sdk (SDK 13.3.2, Unity 2019.4.35f1; the same build as Bayonetta 3 1.2.0's and Persona 5 Royal 1.0.2's, which have no virtual address memory
+  # (sys_resource 0) and never allocate an address region): the node area cut and the 32 MB alignment, the cuts MATCH_CUTS made while its profile was provisional
+  # (implementations 3 of 5 and 2 of 3). Once its build was registered they no longer applied, and nninitStartup's StandardAllocator::Initialize(nullptr, pool − used)
+  # (returning to main+0x3d9310, virtual address memory) aborted at once (Break at sdk+0x3ccf40, from sdk+0x32476c). With them it reserves its 3.14 GB at alias +0.06 GB
+  '357efc198e728cb5d55265aff304f03c': [
+    (0x37bd30, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x37bdcc, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+    (0x37bf2c, '0a00a852', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more mov w10,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
+  ],
   # AI: THE SOMNIUM FILES - nirvanA Initiative 1.0.2 (v131072) sdk (SDK 13.3.5, Unity 2020.3.30f1): the same node area cut. nninitStartup (main+0x493300) calls
   # StandardAllocator::Initialize(nullptr, pool − used) with virtual address memory, as Patrick's Parabox. The constructor is at sdk+0x37c130 (limit = alias start + 0x3fe00000 at +0x28,
   # a unit heap of 0x30-byte nodes, the area then registered as occupied at +0x37c1dc)

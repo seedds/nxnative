@@ -1,0 +1,44 @@
+# Game profile of Cult of the Lamb 1.0.0 (Unity 2019.4.35f1 IL2CPP, FMOD, SDK 13.3.2, NVN).
+# Format: see dm/games/README.md; bring-up and measurements in README.md beside this file.
+
+# ---- Identity ----
+title_id	01002E7016C46000
+program_id	01002E7016C46000
+
+# ---- App ----
+name	Cult of the Lamb
+ipa	CultOfTheLamb.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=a5354e56c47b9547adebd0e936c1d51e	subsdk0=a8cb97803f7f442a3b6cce1c7cd4ee4a	sdk=357efc198e728cb5d55265aff304f03c
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/data.unity3d
+zip_store	.bank:.bundle:.dat:.mp4:.png:.resource:.unity3d:.metallib
+
+# ---- Memory ----
+# Virtual address memory: the NPDM declares 16 MB of system resource and main never sets a heap (the heap check saw none), so a 5 GB block with a 4.375 GB alias
+# region, where the game maps its memory itself. The surveyed values held: its regions reach alias +3.79 GB in the first 15 s, and about 2.8 GB resident in play (README.md)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Graphics ----
+# The game calls nvnDeviceSetDepthMode(near=0), so its vertex shaders use the main0_z entries; the pipeline bases made before it runs (the Mac app's archive,
+# the Mac prebuild) are made for that mode
+depth_mode	zero
+# The game asks for present interval 2 (30 fps) but steps by Unity's frame time, as Monster Train 2 does: one frame per display tick plays at 60 fps at normal speed
+# (README.md)
+present_interval	display
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Cult of the Lamb shaders

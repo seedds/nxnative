@@ -210,13 +210,13 @@ Under each game: the IPA's size, and "60 fps with 1.2.0" where the game runs at 
 <td align="center" valign="top" width="33%"><img src="docs/images/mario-rabbids-kingdom-battle.jpg" width="256" alt="Mario + Rabbids Kingdom Battle"><br><sub><b><a href="dm/games/010067300059A000/README.md">Mario + Rabbids Kingdom Battle</a></b><br>~5 GB</sub></td>
 </tr>
 <tr>
+<td align="center" valign="top" width="33%"><img src="docs/images/cult-of-the-lamb.jpg" width="256" alt="Cult of the Lamb"><br><sub><b><a href="dm/games/01002E7016C46000/README.md">Cult of the Lamb</a></b></sub></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/persona-4-golden.jpg" width="256" alt="Persona 4 Golden"><br><sub><b><a href="dm/games/010062B01525C000/README.md">Persona 4 Golden</a></b></sub></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/xenoblade-chronicles-definitive-edition.jpg" width="256" alt="Xenoblade Chronicles: Definitive Edition"><br><sub><b><a href="dm/games/0100FF500E34A000/README.md">Xenoblade Chronicles: Definitive Edition</a></b><br>~13.2 GB</sub></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/pokemon-legends-arceus.jpg" width="256" alt="Pokémon Legends: Arceus"><br><sub><b><a href="dm/games/01001F5010DFA000/README.md">Pokémon Legends: Arceus</a></b><br>~4.2 GB</sub></td>
 </tr>
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/super-mario-party-jamboree.jpg" width="256" alt="Super Mario Party Jamboree"><br><sub><b><a href="dm/games/0100965017338000/README.md">Super Mario Party Jamboree</a></b></sub></td>
-<td></td>
 <td></td>
 </tr>
 </table>

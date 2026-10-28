@@ -66,6 +66,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Captain Toad: Treasure Tracker](01009BF0072D4000/README.md) | `01009BF0072D4000` | 1.4.2 | 8.2.0 | Nintendo EPD Tokyo (`al` over sead / agl) | NVN |
 | [Catherine: Full Body](0100BF00112C0000/README.md) | `0100BF00112C0000` | 1.0.1a | 8.2.1 | Atlus GFD (CRI middleware) | NVN |
 | [Celeste](01002B30028F6000/README.md) | `01002B30028F6000` | 1.4.1.1 | 15.3.2 | MonoGame (C# → C++ by BRUTE) | NVN |
+| [Cult of the Lamb](01002E7016C46000/README.md) | `01002E7016C46000` | 1.0.0 (base) | 13.3.2 | Unity 2019.4.35f1 IL2CPP | NVN |
 | [Cuphead](0100A5C00D162000/README.md) | `0100A5C00D162000` | 1.3.7 | 5.5.0 | Unity 2017.4.9f1 IL2CPP | NVN |
 | [DARK SOULS: REMASTERED](01004AB00A260000/README.md) | `01004AB00A260000` | 1.0.3 | 4.5.0 | FromSoftware's engine | NVN |
 | [Digimon Story Cyber Sleuth: Complete Edition](010014E00DB56000/README.md) | `010014E00DB56000` | 1.0.3 | 6.4.0 | Media.Vision MVGL | OpenGL |

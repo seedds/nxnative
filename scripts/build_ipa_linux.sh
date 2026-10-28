@@ -30,7 +30,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 : "${NX_S3_BUCKET:?Set NX_S3_BUCKET to the private bucket configured in Bitrise}"
-: "${NX_AGE_RECIPIENT:?Set NX_AGE_RECIPIENT to the Bitrise identity's age public recipient}"
+: "${NX_AGE_RECIPIENT:?Set NX_AGE_RECIPIENT to the public recipient for the age identity stored in Bitrise}"
 [ -n "$KEYS" ] || { echo "--keys is required" >&2; exit 2; }
 for tool in aws age python3 git; do command -v "$tool" >/dev/null || { echo "Missing required tool: $tool" >&2; exit 1; }; done
 [ -d "$NSP_DIR" ] || { echo "NSP folder does not exist" >&2; exit 1; }

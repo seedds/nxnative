@@ -125,6 +125,8 @@ SWITCH_BINDING = [
     ('ue_fps_cvar', '', {'what': "the game's own Unreal frame-limit variable", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's own variable, which its settings apply to t.MaxFPS; the rewriter finds it by name (ue_cvar.py)"}),
     ('perf_mode', '', {'what': 'Boost whatever the operation mode', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'a combination a Switch 1 never reports: a choice per game'}),
     ('op_mode', '', {'what': 'the operation mode at start', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': "the game's controls (handheld: the touch screen instead of a gyro pointer)"}),
+    ('tex_bc_cpu', '', {'what': 'BC1-7 textures decoded on the CPU where the Metal device has no BC support', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
+     'why': 'a device capability, not a game choice: the host could decode wherever supportsBCTextureCompression is false, for every game'}),
 ]
 
 

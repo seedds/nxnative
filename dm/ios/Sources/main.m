@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "hle_profile.h"   // the runtime game profile (DM_PROFILE): the RomFS marker path comes from it
+#include "game_profile.h"   // DM_GAME_TEX_BC_CPU: a game whose BC textures are decoded on the CPU runs on a GPU without BC
 #include "front.h"
 #include "romfs_image.h"
 #include "DataBookmark.h"
@@ -253,7 +254,7 @@ static int boot_env(void) {
     if (!getenv("DM_LANG") && [lang isKindOfClass:NSString.class] && lang.length) setenv("DM_LANG", lang.UTF8String, 0);
     fprintf(stderr, "boot: game language %s\n", getenv("DM_LANG") ?: "en-US");
     id<MTLDevice> gpu = MTLCreateSystemDefaultDevice();   // the system default device, the one the graphics layers take (mtl_init repeats this check for the other routes)
-    if (!gpu.supportsBCTextureCompression) {
+    if (!gpu.supportsBCTextureCompression && !DM_GAME_TEX_BC_CPU) {   // tex_bc_cpu: nvn_mtl.m decodes BC on the CPU (nvn_bcdec.c)
         snprintf(g_device_message, sizeof g_device_message, "This device's GPU (%s) cannot read BC-compressed textures, which the games use. It needs an iPhone 15 Pro or newer (A17 Pro chip or later) or an iPad with an M1 chip or later.",
                  gpu ? gpu.name.UTF8String : "no Metal device");
         fprintf(stderr, "[RED] boot: %s\n", g_device_message); return 0;

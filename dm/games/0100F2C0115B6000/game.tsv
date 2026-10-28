@@ -39,6 +39,9 @@ app_pool	0xCD500000
 # ---- Graphics ----
 # Streamed textures are written by the CPU straight into pool memory (already in GPU layout) and published with nvnMemoryPoolFlushMappedRange (hle_nvn.c ft_add)
 tex_flush_upload	on
+# BC textures on GPUs without BC support (A15/A16 and older): decode them on the CPU into
+# RGBA8 (nvn_bcdec.c). No effect on Macs and A19+ devices, which keep the GPU path.
+tex_bc_cpu	on
 render_cond	on
 tex_dirty_upload	on
 # 60 fps (30 on the Switch): the host decides each frame's step in whole vsyncs and holds the frame that long (rewriter stubs at FPSLocker's sites, patches.py FRAME_STEP);

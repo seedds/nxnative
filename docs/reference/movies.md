@@ -136,6 +136,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Fix:** the host converts the VP9 picture to RGBA (BT.709 / BT.601 and range from the stream) and writes it into the texture's storage like `WriteTexels`, then marks the sync as signalled (`nvn_host_write_texture` / `nvn_host_signal_sync` in `hle_nvn.c`). The host writes the texture's block-linear storage on the CPU and the replay layer re-uploads the dirtied pages, as for `WriteTexels` ([nvn-objects.md](nvn-objects.md)).
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 
+### Players that never release a native-texture output
+
+- **Symptom:** a native-texture movie stops after its first 16 pictures (the decoder's output slots); the player keeps presenting the last one, and its extractor reads its file once every 5 s.
+- **Cause:** the player takes each output into its texture with `GetOutputBuffer` and never calls `ReleaseOutputBufferIndex`: in native-texture mode the SDK's GPU consumer evidently frees the index itself.
+- **Fix:** profile key `movie_tex_autorelease on` (`DM_MOVIE_TEX_AUTOREL=0/1`): the host releases the index once the picture is in the texture (`hle_movie.c`). Off by default, as Metroid Dread and Monster Hunter Rise release theirs.
+- **Found on:** Metroid Prime 4: Beyond (its RetroFMV player: the logo, title and opening movies, H.264 1080p, type 1, output 3, mode 2).
+
 ### SDK 4's `movie::Buffer` has no sync object
 
 - **Symptom:** `FATAL movie: missing SDK symbol _ZNK5movie6Buffer10GetNvnSyncEv` at the first frame of the native-texture movie (H.264 into the game's RGBA texture, as in Monster Hunter Rise).

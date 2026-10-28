@@ -76,8 +76,14 @@ public final class DiagnosticsService {
     }
 
     private func getPythonEnvironment() -> String {
-        let out = runProcess(executable: "/usr/bin/python3", args: ["--version"]).trimmingCharacters(in: .whitespacesAndNewlines)
-        return out.isEmpty ? "python3 (system)" : out
+        let candidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
+        for p in candidates where FileManager.default.fileExists(atPath: p) {
+            let out = runProcess(executable: p, args: ["--version"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !out.isEmpty {
+                return "\(out) (\(p))"
+            }
+        }
+        return "Not detected"
     }
 
     private func getDotnetSDKs() -> String {

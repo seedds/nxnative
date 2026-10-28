@@ -219,6 +219,11 @@ Under each game: the IPA's size, and "60 fps with 1.2.0" where the game runs at 
 <td align="center" valign="top" width="33%"><img src="docs/images/cult-of-the-lamb.jpg" width="256" alt="Cult of the Lamb"><br><sub><b><a href="dm/games/01002E7016C46000/README.md">Cult of the Lamb</a></b></sub></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/paper-mario-the-origami-king.jpg" width="256" alt="Paper Mario: The Origami King"><br><sub><b><a href="dm/games/0100A3900C3E2000/README.md">Paper Mario: The Origami King</a></b></sub></td>
 </tr>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/images/pokemon-lets-go-pikachu.jpg" width="256" alt="Pokémon: Let's Go, Pikachu!"><br><sub><b><a href="dm/games/010003F003A34000/README.md">Pokémon: Let's Go, Pikachu!</a></b></sub></td>
+<td></td>
+<td></td>
+</tr>
 </table>
 <!-- end of gallery -->
 

@@ -1,0 +1,9 @@
+# Empty save to the first controller-selection screen; no game/save data required.
+# Do not press buttons: screenshots compare the same stationary menu.
+save	new
+secs	90
+quick	60
+reach	900@45
+window	45	40
+shots	50,55,85
+hang	20

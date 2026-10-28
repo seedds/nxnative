@@ -21,7 +21,7 @@ A patch's binding is what its correctness is anchored to, from the loosest. A pa
 
 ## Gaps
 
-Every patch bound tighter than it could be: the open gaps, then the blocked, kept and unreviewed ones; in each, those reaching the most games first (the games whose profiles register the builds it touches), then those farthest from their goal.
+Every patch bound tighter than it could be: the open gaps, then the blocked, kept and unreviewed ones; in each, those reaching the most games first (the games whose profiles register the builds it touches), then those farthest from their goal. 1 patch has no reviewed goal yet.
 
 | Now → goal | Patch | Purpose | Status | Evidence | Games | Where | Why |
 |---|---|---|---|---|---|---|---|
@@ -57,6 +57,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
+| `build` → unreviewed | _ZN5movie destructor: abort call nop | runtime | unreviewed | judgement | 1 | [Pikmin 2](../../dm/games/0100D680194B2000/README.md) | unconditional AbortImpl call during movie player teardown in Hagi video cleanup |
 
 ## Summary
 
@@ -79,6 +80,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
+| [Pikmin 2](#pikmin-2) | 1 | 0 | 0 | 0 | 0 | `build` → unreviewed |
 | [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Subnautica](#subnautica) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -439,6 +441,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x2e77a4`: frame step floor in 60 Hz vsyncs: mov w9,#2 → mov w9,#1 (the game steps by the vsyncs that passed, down to one)
   - frame step `+0x2e77f8`: frame step: the base clock steps by the host's vsyncs (state page target fps; 0 = the game's measured step)
 
+### Pikmin 2
+
+[Pikmin 2](../../dm/games/0100D680194B2000/README.md), `0100D680194B2000`, [patches.py](../../dm/games/0100D680194B2000/patches.py).
+
+- **`build` → unreviewed**, runtime, unreviewed, judgement: _ZN5movie destructor: abort call nop. Unconditional AbortImpl call during movie player teardown in Hagi video cleanup
+
+- **1.0.0 `main`** `b23a4349…` ([patches.py:6](../../dm/games/0100D680194B2000/patches.py#L6))
+  - cut `+0x2ba5b4`: _ZN5movie destructor: abort call → nop
+
 ### Pokémon Brilliant Diamond
 
 [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md), `0100000011D90000`.
@@ -646,10 +657,14 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
 - **sdk** `12f16103…` ([sdk_patches.py:43](../../dm/tools/sdk_patches.py#L43)): Brain Memory Training Academy 1.0.0, Unicorn Overlord (Asia) 1.05, Unicorn Overlord 1.05
   - cut `+0x134778`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x13480c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `9c73fb73…` ([sdk_patches.py:50](../../dm/tools/sdk_patches.py#L50)): Patrick's Parabox 1.0.1
+- **sdk** `2aef2cff…` ([sdk_patches.py:50](../../dm/tools/sdk_patches.py#L50)): Batman: Arkham Knight 1.0.5, Persona 4 Golden 1.0.2, Pikmin 2 1.0.0
+  - cut `+0x12d8b0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
+  - cut `+0x12d94c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
+  - cut `+0x11de60`: CentralHeap::Free: return early if heap_base is null (cbz x8, #0x11df44)
+- **sdk** `9c73fb73…` ([sdk_patches.py:58](../../dm/tools/sdk_patches.py#L58)): Patrick's Parabox 1.0.1
   - cut `+0x37c3b0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x37c44c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `e01950c5…` ([sdk_patches.py:58](../../dm/tools/sdk_patches.py#L58)): Hollow Knight: Silksong 1.0.30000
+- **sdk** `e01950c5…` ([sdk_patches.py:66](../../dm/tools/sdk_patches.py#L66)): Hollow Knight: Silksong 1.0.30000
   - cut `+0x145bfc`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x145c68`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
 

@@ -44,6 +44,14 @@ CUTS = {
     (0x134778, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x13480c, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
   ],
+  # Pikmin 2 1.0.0 (v0) sdk (SDK 14.3.0, NERD Hagi): AddressRegionManager node area compaction (1 GB -> 62 MB)
+  # and null guard on uninitialized heap_base in CentralHeap::Free (cbz x8, #0x11df44).
+  # The constructor is at sdk+0x12d8a0 (+0x12d8b0 sets node area limit, +0x12d94c registers it as occupied).
+  '2aef2cffb104ee7c9e212fd2f4c731e9': [
+    (0x12d8b0, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x12d94c, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+    (0x11de60, 'bf3903d5', '280700b4', 'CentralHeap::Free: return early if heap_base is null (cbz x8, #0x11df44)'),
+  ],
   # Patrick's Parabox 1.0.1 (v65536) sdk (SDK 13.3.7, Unity 2020.3.30f1): the same node area cut. nninitStartup (main+0x1cd010) calls StandardAllocator::Initialize(nullptr, pool − used) with virtual
   # address memory, which aborted at its CentralHeap::Init (sdk+0x324dec). The constructor is at sdk+0x37c3a0 (limit = alias start + 0x3fe00000 at +0x28, a unit heap of 0x30-byte nodes, the area then
   # registered as occupied at +0x37c44c)

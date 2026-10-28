@@ -54,6 +54,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_sf.c` takes over the SDK's HIPC client entry points (`InitializeHipcServiceResolution`, `ConnectToHipcService`, `SendSyncRequest`, `CloseClientSessionHandle` and the control requests `QueryPointerBufferSize`, `ConvertSessionToDomain`, `DuplicateSession(Ex)`): a service it serves (`olsc:u`) gets a host session, and every request on it succeeds with zeroed output, which reads as backup off for every user. Any other name is refused with a red line, as `sm` refuses a service nobody registered (`npns` was never connected). `DM_SF_TRACE=1` dumps each request.
 - **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4).
 
+### Offline BLE initialization and discovery
+
+- **Symptom:** Pokemon: Let's Go, Pikachu! 1.0.2 aborts at startup after `[RED] sf: the game connects to service bt itself, which the host does not serve`; `svcBreak` is at `sdk+0xd989c`, reached from `main+0x1139d4` through `sdk+0x250230`.
+- **Cause:** the game initializes BLE unconditionally for its Pokemon GO / peripheral integration. The SDK implementation connects to Horizon's Bluetooth services, which the host does not implement. This is separate from the Mac front end's physical controller input.
+- **Fix (startup resolved, peripheral support open):** `hle_offline.c` hooks BLE initialization, five idle event acquisitions, start/stop scan and empty scan/connection lists. Events use the host's existing SystemEvent binding. No physical Bluetooth device or IPC session is opened, and zero results leave the caller's array untouched. `t_ble` resolves all ten real SDK registrations, checks unique hooks, event binding and empty discovery. This follows the offline-service approach used for local wireless, adapted from PR #36 rather than broadly returning IPC success.
+- **Open:** the GO settings path still aborts through `sdk+0x25588c`, `sdk+0x252aa0` and `main+0x114124`. Pairing and transfers are unsupported; these hooks are not a complete BLE service. The menu should eventually fail gracefully instead of aborting.
+- **Found on:** [Pokemon: Let's Go, Pikachu!](../../dm/games/010003F003A34000/README.md) 1.0.2, SDK 5.4.151. iOS is untested locally.
+
 ## SDK names that changed between versions
 
 ### Older SDK names for the same calls

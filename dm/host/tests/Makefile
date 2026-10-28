@@ -12,6 +12,9 @@ QUIET = $(if $(strip $(SAN)),,2>/dev/null)
 GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 GAME_H = ../gen/$(GAME)/game_profile.h
+run: $(B)/t_ble
+$(B)/t_ble: t_ble.c ../hle_offline.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_ble.c
 run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pctl $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple
 	$(B)/t_language
 	$(B)/t_heap_size
@@ -35,6 +38,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_preempt --all-peers
 	$(B)/t_pctl
 	$(B)/t_time
+	$(B)/t_ble
 	$(B)/t_shared_font
 	$(B)/t_system_event
 	$(B)/t_vorbis

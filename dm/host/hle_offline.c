@@ -5,6 +5,21 @@
 
 static _Alignas(16) uint8_t g_ev_ldn[0x100];
 
+// BLE is unavailable on the host, as are local wireless and online play. Let's Go 1.0.2
+// initializes it unconditionally (main+0x1139d4 -> sdk+0x250230 -> service bt).
+// Adapted from futurist-raghav's PR #36: idle events and empty discovery, not
+// blanket IPC success (issue #224). No physical Bluetooth devices are accessed.
+HLE_FORCE("_ZN2nn9bluetooth13InitializeBleEv", "BLE init: offline discovery only", Result, h_bt_InitBle, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth19AcquireBleScanEventEPNS_2os15SystemEventTypeE", "BLE scan event: bound, never fires", Result, h_bt_ScanEv, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth37AcquireBleConnectionStateChangedEventEPNS_2os15SystemEventTypeE", "BLE connection event: bound, never fires", Result, h_bt_ConnEv, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth31AcquireBleServiceDiscoveryEventEPNS_2os15SystemEventTypeE", "BLE service event: bound, never fires", Result, h_bt_ServEv, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth24AcquireBleMtuConfigEventEPNS_2os15SystemEventTypeE", "BLE MTU event: bound, never fires", Result, h_bt_MtuEv, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth28AcquireBleGattOperationEventEPNS_2os15SystemEventTypeE", "BLE GATT event: bound, never fires", Result, h_bt_GattEv, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth23StartBleScanSmartDeviceERKNS0_17GattAttributeUuidE", "BLE scan: no devices", Result, h_bt_StartScan, const void *uuid) { (void)uuid; return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth22StopBleScanSmartDeviceEv", "BLE stop scan", Result, h_bt_StopScan, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth16GetBleScanResultEPNS0_13BleScanResultEi", "BLE scan results: empty", int, h_bt_GetScanResult, void *out, int max) { (void)out; (void)max; return 0; }
+HLE_FORCE("_ZN2nn9bluetooth24GetBleConnectionInfoListEPNS0_17BleConnectionInfoEi", "BLE connections: empty", int, h_bt_GetConnList, void *out, int max) { (void)out; (void)max; return 0; }
+
 // ---------- prepo: telemetry reports. Saving / submitting all report success; nothing is sent ----------
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", "telemetry report save (user); nothing is sent, reports success", Result, h_prepo_SaveU, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveEv", "telemetry report save; nothing is sent, reports success", Result, h_prepo_Save, void *self) { (void)self; return RES_OK; }

@@ -1,0 +1,2 @@
+# Routes for scripts/bench.py: name, DM_KEYS, window start/length in seconds, description.
+saved-game-idle	3:A*20/3	65	25	local gameplay save: confirm controller/title/load prompts, then stand still; scene depends on --save

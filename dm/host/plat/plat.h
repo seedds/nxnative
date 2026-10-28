@@ -109,7 +109,9 @@ int plat_xattr_remove(const char *path, const char *name);
 #define PLAT_ENOATTR ENODATA
 #endif
 int plat_fd_path(int fd, char *out, size_t n);           // the path an open descriptor refers to; 0 on success
-const char *plat_data_dir(void);                         // the host's default work folder when DM_ROOT is unset: Apple $HOME/dm-work, Linux $XDG_DATA_HOME/dm-work (~/.local/share), Windows %APPDATA%/dm-work
+// The path rel in the host's default work folder (the one used when DM_ROOT is unset), written into buf as snprintf writes it (and its return value):
+// Apple $HOME/dm-work, Linux $XDG_DATA_HOME/dm-work (else ~/.local/share/dm-work), Windows %APPDATA%/dm-work
+int plat_data_path(char *buf, size_t n, const char *rel);
 
 // ---------- Random bytes and SHA-256 ----------
 uint32_t plat_random32(void);                            // cryptographically random (Apple: arc4random)

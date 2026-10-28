@@ -1,0 +1,112 @@
+# The portable host on Linux and Windows (x86-64), Phase 0 of the port (docs/design/migration-status.md): dm/host/CMakeLists.txt built and its unit tests run with the
+# commands of docker/README.md. No game runs there yet. The macOS jobs are in tests.yml and do not change.
+name: port
+
+on:
+  pull_request:
+  push:
+    branches: [main, multiplataforma]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: port-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GAME: 010015100B514000   # Super Mario Bros. Wonder: the profile the host is built for (any profile does; the tests are about code, not the game)
+  # The Windows cross-build image of docker/README.md, pinned by its digest
+  MINGW_IMAGE: mstorsjo/llvm-mingw:20261020@sha256:dadd757c364edee190c53d8e71a135892a6986182e873205d3611f85e26f290b
+
+defaults:
+  run:
+    shell: bash
+
+# Actions are pinned to commit SHAs (the tag in the comment): a tag can be moved, a SHA cannot. Dependabot (github-actions) can raise them.
+jobs:
+  # Linux: the nxnative-build image (docker/Dockerfile.build), CTest, then the runner that writes logs/linux/
+  linux-host:
+    name: Linux host build and unit tests (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: docker build -t nxnative-build -f docker/Dockerfile.build docker
+      - name: Configure and build (build/linux)
+        id: build
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build sh -c \
+            "cmake -S dm/host -B build/linux -G Ninja -DGAME=$GAME && cmake --build build/linux"
+      - name: CTest
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build \
+            ctest --test-dir build/linux --output-on-failure
+      - name: Test runner (logs/linux)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build \
+            sh dm/host/tests/run_host_tests.sh build/linux
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: logs-linux
+          path: logs/linux
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Windows, step 1: the cross-build with llvm-mingw; the test programs and their list (host_tests.tsv) go to the next job
+  win64-cross:
+    name: Windows cross-build (llvm-mingw, Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Configure and build (build/win64)
+        # The toolchain file by its absolute path in the container: CMake looks for a relative one in the build folder, then in dm/host
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src "$MINGW_IMAGE" sh -c \
+            "cmake -S dm/host -B build/win64 -G Ninja -DGAME=$GAME -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake && cmake --build build/win64"
+      # The .exe files are linked statically: they import only KERNEL32, bcrypt and the UCRT (docker/README.md), so no DLL goes with them
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: win64-tests
+          path: |
+            build/win64/*.exe
+            build/win64/host_tests.tsv
+          if-no-files-found: error
+          retention-days: 7
+
+  # Windows, step 2: the cross-built tests on a Windows runner with run_win64_tests.ps1, which writes logs/win64/ and exits non-zero when a run fails
+  win64-test:
+    name: Windows unit tests (cross-built)
+    needs: win64-cross
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      # The checkout gives the runner script, and git for the commit: line of the logs
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: win64-tests
+          path: build/win64
+      - name: Test runner (logs/win64)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File dm\host\tests\run_win64_tests.ps1 -BuildDir build\win64
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: logs-win64
+          path: logs/win64
+          if-no-files-found: ignore
+          retention-days: 7

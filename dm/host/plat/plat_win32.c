@@ -299,10 +299,9 @@ int plat_fd_path(int fd, char *out, size_t n) {
     if (!k || k >= 4096) return fail();
     return narrow(w, out, (int)n);
 }
-const char *plat_data_dir(void) {   // %APPDATA%\dm-work (the roaming application data folder)
-    static char d[1024];
-    if (!d[0]) { const char *a = getenv("APPDATA"); snprintf(d, sizeof d, "%s/dm-work", a && *a ? a : "."); }
-    return d;
+int plat_data_path(char *buf, size_t n, const char *rel) {   // %APPDATA%\dm-work (the roaming application data folder)
+    const char *a = getenv("APPDATA");
+    return snprintf(buf, n, "%s/dm-work/%s", a && *a ? a : ".", rel);
 }
 
 // ---------- Random bytes ----------

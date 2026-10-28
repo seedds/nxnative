@@ -143,7 +143,7 @@ HLE_FORCE_DEF = re.compile(r'^HLE_FORCE(?:_BIG)?\(\s*"([^"]+)"\s*,\s*"(?:[^"\\]|
 CALL = re.compile(r'\b([A-Za-z_]\w*)\s*\(')
 TABLE = re.compile(r'\{\s*"([^"]+)"\s*,\s*(?:\(void\s*\*\)\s*)?&?([A-Za-z_]\w*)\s*\}')
 KEYWORDS = {'if', 'for', 'while', 'switch', 'return', 'sizeof', 'do', 'else', 'case', 'defined', 'typeof', '__typeof__', 'alignof'}
-HOST_SRC = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/tex', 'dm/gfx/vk', 'dm/gfx/gl')
+HOST_SRC = ('dm/host', 'dm/host/plat', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/tex', 'dm/gfx/vk', 'dm/gfx/gl')
 HOST_EXT = ('.c', '.m', '.inc', '.h')   # headers too: the frame step, the texture layouts and other static inline code live in them
 
 

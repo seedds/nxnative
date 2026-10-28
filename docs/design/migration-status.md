@@ -1,12 +1,12 @@
 # Windows and Linux migration: status and handoff
 
-This page is the handoff for the port of nxnative to Windows 10+ and Linux. It records what was decided, what exists, where it is, and what is left, so that a new session (another account, another agent) can continue without the conversation that produced it. Last updated 2026-10-28.
+This page is the handoff for the port of nxnative to Windows 10+ and Linux. It records what was decided, what exists, where it is, and what is left, so that a new session (another account, another agent) can continue without the conversation that produced it. Last updated 2026-10-28 (evening, on the owner's Linux PC).
 
 Read first: [AGENTS.md](../../AGENTS.md) and `CLAUDE.md` (the project rules; they apply to all of this work), then [aot-recompiler.md](aot-recompiler.md) and [vulkan-backend.md](vulkan-backend.md) (the two designs).
 
 ## Goal
 
-Play the supported Switch games on Windows 10 or later and on Linux (run through Docker), on x86-64 PCs, as well as on the Apple platforms that work today. Targets set by the owner:
+Play the supported Switch games on Windows 10 or later and on Linux (checked through Docker; the games run natively), on x86-64 PCs, as well as on the Apple platforms that work today. Targets set by the owner:
 
 - Maximum performance, **no loss of quality or accuracy**, **no stutter**; modest PCs (an i3 with an ordinary or integrated GPU) must play. An i5 requirement is acceptable.
 - Balanced waits: packing a game and starting it must not take very long. Performance is not bought with long load times.
@@ -15,17 +15,19 @@ Play the supported Switch games on Windows 10 or later and on Linux (run through
 
 ## Environment
 
-- Owner's PC: Intel Core i9-13950HX (x86-64), NVIDIA GeForce RTX 4060 Laptop, Windows 11 Pro, 209 GB free on C:. Docker Desktop on WSL2, server `linux/amd64`. CMake, Python 3.13, .NET and a Chocolatey `gcc` are installed; **clang, ninja and make are not** (Windows builds are cross-compiled from Docker with llvm-mingw so nothing has to be installed).
-- Only Mac available: an **Intel** work Mac. There is no Apple-silicon Mac, so `scripts/regress.py check` cannot run locally and Apple-side regressions can only be checked by macOS CI (unit tests and builds, no games) or by someone with an Apple-silicon Mac. Note that `scripts/build_ipa_from_nsp.py:2068` refuses Intel Macs today.
+- **Current (since 2026-10-28, evening): the owner works on an Ubuntu Linux PC** (x86-64; Docker 29, CMake, Ninja, Make and Python 3 installed; **no clang, no .NET, no Wine**: everything compiles inside Docker). The Windows PC below was the environment of the earlier sessions (another Claude account) and is still where the Windows test executables run.
+- Owner's Windows PC: Intel Core i9-13950HX (x86-64), NVIDIA GeForce RTX 4060 Laptop, Windows 11 Pro, 209 GB free on C:. Docker Desktop on WSL2, server `linux/amd64`. CMake, Python 3.13, .NET and a Chocolatey `gcc` are installed; **clang, ninja and make are not** (Windows builds are cross-compiled from Docker with llvm-mingw so nothing has to be installed).
+- **Test flow when a check needs a machine the session does not have** (Windows for the test `.exe` files, a Mac for anything Apple): the agent puts the runnable thing into the repository together with a runner that writes its logs into the committed folder `logs/<platform>/` (see `logs/README.md`); the owner runs it; when it fails, the owner commits and pushes the logs to GitHub and the next session reads them from the repository and fixes the cause. A check that did not run in the session is reported as not run, never as passed.
+- The only Mac is an **Intel** work Mac, managed by the owner's employer: **nothing can be tested on it**. There is no Apple-silicon Mac, so `scripts/regress.py check` cannot run and Apple-side regressions can only be checked by macOS CI (unit tests and builds, no games) or by a contributor with an Apple-silicon Mac. Note that `scripts/build_ipa_from_nsp.py:2068` refuses Intel Macs today.
 - Docker cannot run macOS (licence, no Metal, and it would be x86 anyway).
 - The owner has six purchased games and will dump them from their own Switch (keys with Lockpick_RCM, games with nxdumptool). Game files go in a work folder outside the repository; the folder is chosen at Phase 3.
-- **Warning:** `Mario-vs-Donkey-Kong.xci` (1.3 GB, a game image) is in the repository root, untracked and not ignored. AGENTS.md forbids game files in the repository. Move it to a work folder outside the repository (for example `C:\nxwork\`) and never `git add -A` while it is there. Nobody has opened or modified it.
+- **Warning:** `Mario-vs-Donkey-Kong.xci` (1.3 GB, a game image) was in the repository root of the Windows checkout, untracked and not ignored. AGENTS.md forbids game files in the repository. Move it to a work folder outside the repository (for example `C:\nxwork\`) and never `git add -A` while it is there. The Linux checkout does not have it.
 
 ## Git state
 
-- Branch `multiplataforma` (created from `main` at `3e77816`, pushed to `origin`). Commit `8ed424a` ("claude") on it was made by the owner.
-- Untracked on `multiplataforma`: `docs/design/` (this file and the two designs), `.claude/` (agent worktrees; do not commit).
-- **Phase 0 work in progress is NOT on `multiplataforma` yet.** It is committed as unverified work in progress on the branch **`multiplataforma-fase0-wip`** (pushed to `origin`; locally also the git worktree `.claude/worktrees/agent-a3008471ce6c9b503`, branch `worktree-agent-a3008471ce6c9b503`), based on `3e77816`. When it passes its acceptance check, review its diff and bring it into `multiplataforma` (commit only when the owner asks, with `git -c user.name=seedds -c user.email=seedds@gmail.com commit`).
+- Branch `multiplataforma` (created from `main` at `3e77816`, pushed to `origin`). Commit `8ed424a` ("claude") on it was made by the owner; `54d9e4a` added the three design pages; `2c76606` the specific CLAUDE.md.
+- **Phase 0 is on `multiplataforma` since merge commit `aa64ca4`** (it brought in `d2d7efb` from `multiplataforma-fase0-wip`; that branch is now history and is not worked on). The fixes made after the merge (below) are in the working tree of the Linux PC until the owner asks for a commit (`git -c user.name=seedds -c user.email=seedds@gmail.com commit`).
+- `.claude/` (agent worktrees) is never committed. `logs/` IS committed on purpose (see Environment).
 
 ## Decisions taken
 
@@ -48,7 +50,7 @@ Play the supported Switch games on Windows 10 or later and on Linux (run through
 
 | Phase | Content | Needs games | Status |
 |---|---|---|---|
-| 0 | Host portability layer in C (`dm/host/plat/`), CMake build, host unit tests on Linux (Docker) and Windows (llvm-mingw cross-build, tests run on the PC), CI jobs | No | **In progress** (see below) |
+| 0 | Host portability layer in C (`dm/host/plat/`), CMake build, host unit tests on Linux (Docker) and Windows (llvm-mingw cross-build, tests run on the PC), CI jobs | No | **Built and tested on Linux (35/35), cross-built for Windows (23 test executables, not run yet), CI added; macOS CI and the Windows run pending** (see below) |
 | 1 | SDL3 front end: window, audio, controllers, gyro, rumble, keyboard/touch, fullscreen and refresh matching; save/log paths | No | Not started |
 | 2 | AOT recompiler, first with open-source homebrew (devkitPro/libnx) as legal input; differential tests against dynarmic | No | **Designed** ([aot-recompiler.md](aot-recompiler.md)); not started |
 | 3 | Recompiler on real games, first on the Intel Mac with the existing Metal backend (isolates recompiler bugs from the Vulkan port) | Yes | Not started |
@@ -60,7 +62,7 @@ Play the supported Switch games on Windows 10 or later and on Linux (run through
 
 Brief given to the agent (keep these requirements if you continue it):
 
-1. `dm/host/plat/plat.h` with `plat_apple.c` (existing Apple code moved verbatim, behaviour unchanged), `plat_linux.c`, `plat_win32.c`, plus a portable `sha256.c` (replaces CommonCrypto). It covers locks (`os_unfair_lock`), monotonic time (`mach_absolute_time`), thread priority/QoS, high-resolution sleep (Windows `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`), virtual memory reserve/commit/protect/release/alias and page size (Windows `VirtualAlloc2`/`MapViewOfFile3`, `_WIN32_WINNT=0x0A00`, Windows 10 1803+), clonefile/xattr helpers, save/log directories (Apple unchanged, Linux XDG, Windows %APPDATA%), address-to-symbol lookup (`plat_addr_symbol`).
+1. `dm/host/plat/plat.h` with `plat_apple.c` (existing Apple code moved verbatim, behaviour unchanged), `plat_linux.c`, `plat_win32.c`, plus a portable `sha256.c` (**only for Linux and Windows**; Apple keeps CommonCrypto so its digests are byte-identical; the review of 2026-10-28 checked `sha256.c` against Python's `hashlib` on 209 lengths × 8 chunkings, 0 mismatches). Note: `os_unfair_lock` is not in `plat.h` (it is only used by the Metal backend) and memory aliasing is not either (it comes with the Vulkan backend's host port, AOT design section 5). It covers locks (`os_unfair_lock`), monotonic time (`mach_absolute_time`), thread priority/QoS, high-resolution sleep (Windows `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`), virtual memory reserve/commit/protect/release/alias and page size (Windows `VirtualAlloc2`/`MapViewOfFile3`, `_WIN32_WINNT=0x0A00`, Windows 10 1803+), clonefile/xattr helpers, save/log directories (Apple unchanged, Linux XDG, Windows %APPDATA%), address-to-symbol lookup (`plat_addr_symbol`).
 2. Portable host `.c` files converted. Core Audio (`hle_audio.c`) and VideoToolbox (`hle_movie_avc.c`) keep their Apple backends; other platforms get a declared null backend logging a `[RED] ` line until Phase 1.
 3. Code tied to executing guest ARM64 natively stays Apple/arm64-only behind a minimal interface for the Phase 2 engine: `dm/host/entry.S`, `dm/gfx/nvn/nvn_entry.S`, `nvn_thunks.S`, `hle_bigstack.c` asm, `hle.h:45` inline stub, `tpidrro_el0` in `loader.c`, Mach thread state and signal-context parsing in `hle_thread.c`, `probe.c`, `crash.c`, Mach-O section lookups for embedded modules.
 4. Apple-only front ends (`front_mac.m`, `haptics_apple.m`, `memstat.m`, `motion_pro_mac.h`, `*_apple.*`) are not ported (Phase 1).
@@ -69,17 +71,27 @@ Brief given to the agent (keep these requirements if you continue it):
 7. CI jobs for Linux and Windows in `.github/workflows/`; macOS jobs untouched.
 8. A section in `docs/development.md` linking `docker/README.md`.
 
-State when the agent was stopped (on the owner's request): plat layer files exist (`plat.h`, `plat_apple.c`, `plat_linux.c`, `plat_win32.c`, `sha256.c`); 41 tracked files changed (+501/−318) across `dm/host/*.c`, `dm.h`, `hle.h`, both host Makefiles, `dm/gfx/tests/Makefile` (for `t_gl_imports`, which compiles `hle.c` and now needs the Apple plat layer) and many host tests; `dm/host/CMakeLists.txt`, `dm/host/cmake/` and `docker/` exist. The agent was adding a Windows shim for `posix_memalign` in `hle_audren.c` (Windows' runtime lacks it; Apple must stay identical). **Not verified yet:** nothing of this has been compiled or run anywhere; the Linux CTest run, the Windows cross-build and test run, CI jobs, docs section and the final report are not done.
+State on 2026-10-28 (evening), after the merge and the fixes made on the Linux PC:
+
+- **Linux: done.** `docker build` of `docker/Dockerfile.build` (Ubuntu 24.04 by digest, clang 18), CMake + Ninja build of `libnxhost.a`, `libnxplat.a`, `libvpx.a` and the tests, CTest **35 of 35 passing** (12.9 s), repeated twice from a clean `build/`. `dm/host/tests/run_host_tests.sh build/linux` writes `logs/linux/`.
+- **Windows: cross-built, not run.** The same tree cross-built in `mstorsjo/llvm-mingw:20261020` (digest in `docker/README.md`; the toolchain file must be given as an absolute path, `/src/dm/host/cmake/x86_64-w64-mingw32.cmake`): 184 build steps, 23 test `.exe` files that import only `KERNEL32`, `bcrypt` and the UCRT. **The owner runs them on the Windows PC with `dm/host/tests/run_win64_tests.ps1`** (PowerShell 5.1 or 7; logs to `logs/win64/`; the script was only exercised under pwsh 7 on Linux, so its Windows-only parts, `cmd /d /s /c` quoting, `SetErrorMode`, `taskkill`, the registry read, are unverified). The CI job `win64-test` also runs them on a `windows-latest` runner.
+- **Review of the diff (independent agent, all 176 hunks):** no change breaks Apple on a normal path. Its findings were fixed: `plat_data_dir` had become a cached static buffer with a first-call race, now `plat_data_path(buf, n, rel)` writes into the caller's buffer and on Apple is the old `snprintf` byte for byte; the directory-type test in `hle_fs.c` is again `d_type == DT_DIR` on Apple (the `lstat` fallback exists only on Linux and Windows); `t_symbols.c` again asserts the `__DATA` segment on Apple; `DM_HLECOUNT` and `DM_FD_LOG` log one `[RED] ` line where they are not supported; `scripts/build_ipa_from_nsp.py` and `dm/tools/usage.py` now include `dm/host/plat` in the host fingerprint (they did not, so a Mac host build would have reused a stale `dmhost` after a plat change). Known, accepted differences on Apple: log text only (`?` for an unknown import symbol, `0+0` in one EFAULT line), float rounding of the thread dump's CPU time, and `DM_LOADHASH` of modules of 4 GiB or more. One iOS item is unverified: `hle_count.c` now sees `TARGET_OS_IPHONE` through `plat.h`; the old file may not have had it defined, so iOS may have compiled the counting code before. Check with `xcrun -sdk iphoneos clang -E -dM` on a Mac.
+- **Other fixes:** `t_fs_case` assumed a case-folding file system (APFS); on ext4 it now detects the file system and skips the five alias-metadata checks with a message (they still run on APFS and NTFS). `t_audren_work` builds on Windows through `sys_memalign` / `work_release` hooks. The `posix_memalign` shim of `hle_audren.c` is finished (Windows: `_aligned_malloc` / `_aligned_free`; Apple and Linux unchanged).
+- **Not compiled on macOS or iOS:** none of the Apple-visible edits. macOS CI (`.github/workflows/tests.yml`) must confirm; `scripts/regress.py check` cannot run anywhere available. Also not built here: the TSan / ASan targets (the Docker image has no sanitizer runtime), the ten `fork()` death tests on Windows (listed as not built in `build/win64/host_tests.tsv`).
+- **CI:** `.github/workflows/port.yml` adds `linux-host` (Docker build + CTest + `logs/linux` artifact), `win64-cross` (llvm-mingw cross-build, `.exe` artifact) and `win64-test` (`windows-latest`, runs `run_win64_tests.ps1`, `logs/win64` artifact). macOS jobs untouched.
+- **Docs:** `docker/README.md` (commands from Linux and from Git Bash, image tags and digests, the log-commit flow, what is not portable), `logs/README.md`, a section in `docs/development.md`.
 
 Acceptance check for Phase 0 (run and paste the output):
 
 ```sh
-# from the worktree root, Git Bash (MSYS_NO_PATHCONV=1, $(pwd -W) for volumes)
+# from the repository root on Linux (docker/README.md has the Git Bash form: MSYS_NO_PATHCONV=1, $(pwd -W) for volumes)
 docker build -t nxnative-build -f docker/Dockerfile.build docker
-docker run --rm -v "$(pwd -W):/src" -w /src nxnative-build sh -c \
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build sh -c \
   'cmake -S dm/host -B build/linux -G Ninja -DGAME=010015100B514000 && cmake --build build/linux && ctest --test-dir build/linux --output-on-failure'
-# Windows: same CMake tree cross-built in mstorsjo/llvm-mingw for x86_64-w64-mingw32, then run the test .exe files on the PC
-PYTHONUTF8=1 python -m unittest dm.tools.tests.test_docs
+# result on 2026-10-28: 100% tests passed, 0 tests failed out of 35
+# Windows: the cross-build command of docker/README.md (mstorsjo/llvm-mingw, absolute toolchain path), then on the PC:
+#   powershell -ExecutionPolicy Bypass -File dm/host/tests/run_win64_tests.ps1 build/win64   -> logs/win64/summary.txt (commit it when it fails)
+python3 -m unittest dm/tools/tests/test_docs.py
 ```
 
 Also required in the report: the list of host tests not portable yet and why, every Apple-side edit with why it preserves behaviour (to be confirmed on macOS CI), and the execution-engine boundary left for Phase 2.
@@ -98,6 +110,17 @@ From [aot-recompiler.md](aot-recompiler.md):
 - The iPhone address-space cuts are keyed by build ID without a platform tag (`dm/tools/sdk_patches.py:208-218`), so x86 needs new metadata to drop them.
 - Possible existing Apple bug, unverified: `patch_nso.py:532-541` rewrites `cntpct`/`cntvct` reads to 19.2 MHz but not `mrs cntfrq_el0`.
 
+### Review of the Vulkan design (2026-10-28)
+
+[vulkan-backend.md](vulkan-backend.md) was reviewed on the Linux PC against the repository (over 60 `[V]` claims checked; three corrected in the text: the counts of the replay interface, and "121 texture reads" instead of "121 shaders" for Monster Hunter Rise's fully dynamic handles; a Review note sits under its Status line). Sections 5 to 13 are complete. What the review found, to resolve before Phase 4:
+
+- **Inconsistencies:** level D of section 3.6 ("none of the extensions") contradicts the Vulkan 1.3 floor of 9.1 (extended dynamic state 1 and 2 are core in 1.3); the checks of 1.7, 10.5 and 11.1 need an Apple-silicon Mac that nobody has (D13); summary item 7 and D1 disagree on whether ASTC is decoded at upload or re-encoded offline; 9.1 accepts losing transform-feedback effects on devices without the extension, against the zero-loss goal.
+- **Mechanisms without a phase:** the vsync fallbacks (DXGI `WaitForVBlank`, Linux presentation feedback), the GPU deswizzle in GLSL, the per-vendor quirk table, `be_guest_map` / `be_guest_unmap` with coalesced imports, `--platform windows/linux` packing, the `regress.py` Vulkan mode, `gfx_compare.py`.
+- **Acceptance checks to tighten:** P3's FLIP threshold is calibrated partly from the thing under test; P4 ("p99 within one vsync") still allows one dropped frame in 100; P5 bounds a draw's wait (2 ms) but not a frame; P6, P8 and P10 have no pass criterion.
+- **Performance (the owner's priority):** the background link-time-optimized compile runs only when the frame step reports slack, which a loaded 4-thread i3 may never report; a shader outside the prewarm lists means a full compile during play (Kirby's map has 27,297 shaders, Monster Hunter Rise's 23,478: compiling "all libraries at load" could take minutes on an i3, so the load-time / stutter balance needs a number before P5); before P6's mirrors every vertex, index and uniform read on a discrete GPU crosses PCIe, yet P4 already demands 60 fps on five games (move the import-versus-device-local microbenchmark into P3/P4; put the per-draw driver ring in device-local host-visible memory from the start); the per-draw CPU cost (about 4,900 draws a frame in Breath of the Wild, descriptor hashing on the submit thread) must be measured on a real i3 in P3/P4, not P10; page faults through a vectored exception handler on Windows are dearer than on macOS, so measure before choosing between faults and write watching; full barriers between passes idle desktop GPUs; ASTC decode during streaming and WDDM paging at 4 to 8 GB of VRAM are stutter sources; pipeline-cache writes can hold driver locks; DWM composition and Optimus routing add a frame unless the present mode is independent flip.
+- **Decision-changing assumptions, cheapest check first:** fast-link time per pipeline (a small Vulkan test on the RTX 4060 and its iGPU); whether `VK_EXT_external_memory_host` can import the AOT arena's memory kinds (`MapViewOfFile3` views and placeholders on Windows, `memfd` shared mappings on Linux), its alignment and overlap rules (`t_vk_import` before P3, agreed between both designs); `maxMemoryAllocationCount` on NVIDIA Windows (if 4,096, coalesced imports are mandatory: Breath of the Wild peaks at 4,006 pools); host coherence of imported memory; whether a discrete GPU needs mirrors at all (microbenchmark before P4); the vertex-input and sampled-image numeric type rules (spec plus validation layers on lavapipe); which GPUs have ASTC; the Intel legacy driver's level; DXGI `WaitForVBlank` as a vsync source; which iGPU the owner's laptop has (Intel ARK says the i9-13950HX has Intel UHD Graphics, Xe-LP, which would make the Intel Windows path testable at home); the target i3 model.
+- **Decisions the text makes silently and section 12 does not list:** a second chain version `DMSH_CHAIN_VK` with a separate translator project (changes AGENTS.md's one-version rule); the .NET 10 runtime on pack machines; the threshold that defines "no loss of quality" (FLIP); whether "Linux through Docker" means games inside a container (needs GPU and display passthrough); the quirk-table policy; C as the backend language (only matters if VMA, C++, is chosen in D2).
+
 ## Decisions waiting for the owner
 
 From the AOT design (section 15 there has the criteria for each):
@@ -114,14 +137,60 @@ From the AOT design (section 15 there has the criteria for each):
 10. Whether patching LLVM is acceptable if no stock calling convention meets the phase 1 targets.
 11. JIT in release builds on Windows/Linux, or misses made fatal with feedback only.
 
-Also open: the launcher technology; ASTC textures on desktop GPUs (lossless decode offline, GPU decode at load, or BC7 recompression which loses a little); the Vulkan design's own section 12 once written; the work folder for game files (Phase 3).
+Also open: the launcher technology; the work folder for game files (Phase 3).
+
+From the Vulkan design (section 12 there has the options and criteria): D1 ASTC on GPUs without it; D2 memory allocator (VMA in C++ or our own in C); D3 first start on devices without pipeline libraries; D4 spatial upscaler; D5 guest OpenGL (2 games); D6 hardware floor (Vulkan 1.3 list; Intel 6th-10th generation; NVIDIA Maxwell-Volta); D7 video memory for mirrors and resizable BAR; D8 pipeline cache size and cleanup; D9 new tools and libraries (glslang, SPIRV-Tools, volk, SDL3, plus VMA, astcenc test-only, validation layers, a lavapipe image); D10 depth 24 + stencil without the format; D11 double precision; D12 latency against smoothness; D13 who runs the Mac regressions. Plus the silent ones listed under the review above: `DMSH_CHAIN_VK`, .NET 10 on pack machines, the quality threshold, Linux through Docker.
+
+### Recommendations prepared for the owner (2026-10-28), against the stated priority: top speed with no stutter, no loss of quality, reasonable load and pack times
+
+| Decision | Recommendation | Why |
+|---|---|---|
+| AOT 1 Boost | vendor a header-only subset (bcp) pinned with the fork | smallest friction for contributors, reproducible; patching it out diverges from the fork |
+| AOT 2 nxaot distribution | prebuilt CI binaries pinned by hash (as `dmsh_xlate_bin`); building from source stays possible | an hour of LLVM build before a first pack is against "balanced waits" |
+| AOT 3 CMake | yes for the new C++ tool and the Linux/Windows host (Phase 0 already uses it); Apple keeps its Makefiles | LLVM's CMake package; no second build system to maintain |
+| AOT 4 iPhone address-space cuts on x86 | keep them for Phases 3 and 4; revisit dropping (platform-tagged cuts) once games run | tested behaviour first; no performance effect |
+| AOT 5 FPSR | model only where the census finds reads | always modelling it costs on every saturating or FP operation |
+| AOT 6 ABA-sensitive windows | compare-and-swap semantics, the census lists the windows, gameplay tests watch them | exact emulation is "much slower" and would create stutter; yuzu ran on the same semantics |
+| AOT 7 pack budget and default mode | balanced by default; targets: at most 3 min for Mario, 10 min for Monster Hunter Rise, 30 min for any max pack, under 1 min repack; max mode opt-in | the owner's "balanced waits"; balanced must reach 90 % of max's frame rate |
+| AOT 8 CPU baseline | x86-64-v3 only (Haswell / Zen 1 and later, every i3 since 2013) | a v2 build with software FMA is slow (stutter) and doubles the builds |
+| AOT 9 PGO profiles | in the repository (offsets and counts per build, no game code) | every player gets the fast pack; nothing copyrighted |
+| AOT 10 patches to LLVM | no, unless phase 1 measurements show no stock convention meets the targets; then decide with the numbers | an LLVM fork is a permanent cost |
+| AOT 11 JIT in release builds | included, with the miss feedback file | a miss becomes a logged slowdown instead of a crash; the antivirus risk is manageable (one executable region) |
+| Launcher | Dear ImGui (C++, already in the project with the recompiler) | one toolkit for Windows and Linux, small |
+| D1 ASTC | GPU decode to RGBA8 (sRGB to sRGB8) at upload by default; cached BC7 as an opt-in low-VRAM mode chosen through `VK_EXT_memory_budget` | lossless for 8-bit LDR content, no load-time cost; BC7 is a second lossy generation |
+| D2 allocator | VMA behind a C wrapper | mature budgets and dedicated allocations; C++ is already accepted for the recompiler |
+| D3 first start without pipeline libraries | prewarm the seed and per-device lists in the prepare step; offer the full prebuild once at first start with a measured time estimate; decide the default after timing it on an i3 in P5 | the stutter / load-time trade-off needs a number |
+| D4 upscaler | none by default; FSR 1 opt-in later if wanted | fidelity to the game's picture |
+| D5 guest OpenGL | re-target the GL layer to Vulkan (option 1); the host's GL driver only as a stopgap | offline, deterministic, no driver GLSL compile stutter |
+| D6 hardware floor | Vulkan 1.3 with the 9.1 list, transform feedback required; NVIDIA Maxwell-Volta supported (580 branch has pipeline libraries); Intel 6th-10th generation best effort until a real one is measured | reach without accepting lost effects |
+| D7 mirrors and resizable BAR | on by default on discrete GPUs, capped at a fraction of the memory budget, only if P6 shows a gain; off on iGPUs | speed where it pays, memory left for textures |
+| D8 pipeline cache | one file per game, driver and chain version; stale files deleted at start; a generous cap, no LRU at first; written at idle priority | simple and fast starts |
+| D9 tools | glslang offline (SPIR-V committed), `spirv-val` only, volk, SDL3; plus VMA (D2), astcenc test-only, the validation layers, a pinned lavapipe image | small, permissive licences; volk saves a call per command |
+| D10 D24S8 | D32F_S8 with `VK_EXT_depth_bias_control`; else D32F with the bias converted and a `[RED] ` line; never refuse the device | AMD lacks D24S8 |
+| D11 FP64 | native where `shaderFloat64`, the lowered variant elsewhere (Intel Xe has no FP64; consumer NVIDIA runs it at 1/64 rate, so measure) | exactness where it is free |
+| D12 latency | FIFO by default; the swapchain image count from the game's own NVN window texture count; MAILBOX opt-in | smooth 30 and 60 fps pacing first |
+| D13 Mac regressions | macOS arm64 CI for builds and unit tests (no games); a contributor or a rented Apple-silicon Mac for the five-game `regress.py` gates and the FLIP reference captures | the owner has no usable Mac; without one, P1 and the image comparison have no acceptance path |
+| `DMSH_CHAIN_VK` | yes, a second chain version with a separate translator project; AGENTS.md's one-version rule becomes one version per target | keeps every Metal library untouched |
+| .NET 10 on pack machines | required (the chain already needs it); no self-contained publish (it would change the lock fingerprints) | reproducible chain |
+| Quality threshold | FLIP calibrated from two Metal runs of the same route (the noise floor); structural differences are bugs, vendor floating-point differences are reported | makes "no loss of quality" measurable |
+| Linux through Docker | answered: only a way to check Linux; games are packaged natively (Phase 6) | the Goal section said "run through Docker" |
+
+### The owner's answers (2026-10-28)
+
+Every recommendation of the table above is adopted, with these changes:
+
+- **Pack modes (AOT 7):** both modes exist and the player chooses: `balanced` (the default) and `max`, selectable in the launcher, so a game can be packed faster or made to run faster at will. The targets of the table stay as the budget of each mode. (What "pack time" is: the one-time conversion of a game for the PC, which recompiles its ARM64 code to x86-64 and translates its shaders; a longer pack buys a faster game. Nothing is compiled while playing in either mode.)
+- **D8 pipeline cache:** both a size limit and an automatic cleanup exist, each one switchable in the launcher's panel (on or off), with the defaults of the table.
+- **D13 Mac regressions:** left for last. The owner has no usable Mac; macOS CI covers builds and unit tests. The five-game `regress.py` gates and the Metal reference captures stay open until a Mac is found; they are not needed for the Windows and Linux work itself, only to prove that the Apple path is unchanged on real games and to compare pictures.
+- **.NET 10:** not accepted as a requirement on players' machines. The shader translator (`dmsh_xlate`, Ryujinx's translator in C#) needs a .NET runtime today; the chosen way is a self-contained (or NativeAOT) build of the translator per OS, produced by CI and pinned by hash in the chain lock beside the macOS launcher it already records, so that packing on a PC needs no .NET install. The framework-dependent assemblies stay for developers. This is a chain change (`dmsh_chain.py`, `dmsh_chain.lock`, `test_nsp_chain.py`) to plan in Phase 1 or P0 of the Vulkan plan.
+- **Linux through Docker:** it only meant checking that the host works on Linux; no game runs inside a container. The goal is native Linux packaging (Phase 6).
 
 ## How to continue in a new session
 
-1. Read AGENTS.md, CLAUDE.md, this page, then the two designs.
-2. Check the Phase 0 worktree: `git -C .claude/worktrees/agent-a3008471ce6c9b503 status` and `diff --stat`. Finish the items listed as not done, run the acceptance check, review the full diff (Apple paths must be verbatim moves), then bring it into `multiplataforma`.
-3. Review [vulkan-backend.md](vulkan-backend.md): its agent wrote every section (through 13 and Sources) but was stopped before reporting, so check sections 5–13 for completeness and for claims marked as assumptions, and collect its section 12 decisions for the owner. `PYTHONUTF8=1 python -m unittest dm.tools.tests.test_docs` passes with all three design pages.
-4. Present the open decisions above to the owner, in Spanish, with criteria; wait for answers before Phase 2 and Phase 4 implementation.
-5. Then Phase 1 (SDL3), Phase 2 (recompiler with homebrew), and so on. Per CLAUDE.md, delegate bounded tasks to Opus subagents with the effort table, full briefs, and verify their diffs and checks before reporting.
+1. Read AGENTS.md, CLAUDE.md, this page, then the two designs (the Vulkan one has a Review note under its Status line).
+2. Phase 0 is on `multiplataforma`. Still open: the Windows test run (the owner runs `run_win64_tests.ps1` on the PC, or CI's `win64-test` job; a failure arrives as `logs/win64/` committed to the repository), macOS CI confirming the Apple-side edits (nothing was compiled on macOS or iOS), the iOS `TARGET_OS_IPHONE` question in `hle_count.c`, the sanitizer targets on Linux (the Docker image has no sanitizer runtime).
+3. The decisions are taken (the owner's answers above). Phase 2 and Phase 4 can be planned; Phase 1 (SDL3) first.
+4. Before Phase 4, resolve the Vulkan review items (the level D definition, the phases without an owner, the acceptance checks, the `VK_EXT_external_memory_host` / AOT arena question) in the design.
+5. Then Phase 1 (SDL3), Phase 2 (recompiler with homebrew), and so on. Per CLAUDE.md, delegate bounded tasks to Opus 5.5 subagents with the effort table, full briefs, at most two at a time, and verify their diffs and checks before reporting.
 
-Working notes: the owner writes in Spanish and gets answers in Spanish; code, comments, docs and commits stay in English. The usage limit of the plan was hit several times when three agents ran in parallel; running fewer at a time is slower overall but is interrupted less.
+Working notes: the owner writes in Spanish and gets answers in Spanish; code, comments, docs and commits stay in English. The usage limit of the plan was hit several times when three agents ran in parallel; two at a time is the rule now (CLAUDE.md). On the Linux PC the Python tool tests that need macOS tools or the `capstone` / `lz4` modules fail before and after any change (344 tests: 3 failures, 38 errors, 54 skipped at `aa64ca4` and after Phase 0 alike); a venv on the data drive with those two modules would make most of them run.

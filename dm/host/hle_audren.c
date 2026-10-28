@@ -16,12 +16,18 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
-#if defined(_WIN32)   // Windows' C runtime has no posix_memalign, and its aligned blocks are freed with _aligned_free
+// The local renderer work buffer (ar_open) is allocated with posix_memalign and released with work_release: free, except on Windows, whose C runtime has no posix_memalign
+// and frees its aligned blocks (_aligned_malloc) only with _aligned_free. A unit test that counts the allocations (t_audren_work.c) defines both names before including this file
+#if defined(_WIN32)
 #include <malloc.h>
+#ifndef posix_memalign
 static int audren_memalign(void **p, size_t align, size_t n) { *p = _aligned_malloc(n, align); return *p ? 0 : ENOMEM; }
 #define posix_memalign audren_memalign
+#endif
+#ifndef work_release
 #define work_release _aligned_free
-#else
+#endif
+#elif !defined(work_release)
 #define work_release free
 #endif
 

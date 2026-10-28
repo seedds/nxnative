@@ -7,21 +7,31 @@
 static void *backing;
 static size_t backing_size;
 static int allocations, frees, fail_alloc;
+// The system's aligned allocation and its release: posix_memalign / free, and on Windows _aligned_malloc / _aligned_free (what hle_audren.c's work_release is there)
+#if defined(_WIN32)
+#include <malloc.h>
+static int sys_memalign(void **p, size_t align, size_t n) { *p = _aligned_malloc(n, align); return *p ? 0 : ENOMEM; }
+#define sys_free _aligned_free
+#else
+#define sys_memalign posix_memalign
+#define sys_free free
+#endif
 static int work_alloc(void **out, size_t align, size_t size) {
     if (fail_alloc) return ENOMEM;
-    int r = posix_memalign(out, align, size);
+    int r = sys_memalign(out, align, size);
     if (!r) { assert(!backing); backing = *out; backing_size = size; allocations++; }
     return r;
 }
 static void work_free(void *p) {
     if (p) { assert(p == backing); backing = NULL; backing_size = 0; frees++; }
-    free(p);
+    sys_free(p);
 }
+// hle_audren.c allocates its local work buffer with posix_memalign and releases it with work_release
 #define posix_memalign work_alloc
-#define free work_free
+#define work_release work_free
 #include "../hle_audren.c"
 #undef posix_memalign
-#undef free
+#undef work_release
 
 enum { SDK_WORK = 0x760000, SERVICE_WORK = 0x61d000 };
 static int opens, starts, joins, closes, fail_open, nested;
@@ -125,7 +135,7 @@ int main(void) {
     assert(h_ar_WorkSize(param) == SDK_WORK);
     memcpy(param, saved, sizeof param);
     assert(h_ar_WorkSize(param) == SERVICE_WORK);
-    void *work; assert(!posix_memalign(&work, WORK_PAGE, SDK_WORK));
+    void *work; assert(!sys_memalign(&work, WORK_PAGE, SDK_WORK));
     memset(work, 0xa5, SDK_WORK);
     void *handle[2], *event[8];
     for (int route = 0; route < 3; route++) {
@@ -164,7 +174,7 @@ int main(void) {
         assert(handle[0] == work && allocations == a && !map_key);
         h_ar_Close(handle[0], handle[1]);
     }
-    free(work);
+    sys_free(work);
     puts("audren work buffer: Horizon sizing fixtures, both opens, nested open, failures and close lifetime passed");
     return 0;
 }

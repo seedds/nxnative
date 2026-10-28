@@ -103,20 +103,31 @@ static void fslog_init(void) { static int done; if (done) return; done = 1; cons
 static const char *envdir(const char *var, const char *rel, char *buf, size_t n) {
     const char *v = getenv(var);
     if (v) return v;
-    snprintf(buf, n, "%s/%s", getenv("DM_ROOT") ?: plat_data_dir(), rel); return buf;   // the work folder: DM_ROOT, else the platform's (Apple: $HOME/dm-work)
+    // The work folder: DM_ROOT, else the platform's default (plat_data_path; Apple $HOME/dm-work). Both are the snprintf this made before the platform layer,
+    // "%s%s/%s" with DM_ROOT, "", rel or with $HOME, "/dm-work", rel
+    const char *root = getenv("DM_ROOT");
+    if (root) snprintf(buf, n, "%s%s/%s", root, "", rel); else plat_data_path(buf, n, rel);
+    return buf;
 }
-// Whether a directory entry is a directory: from d_type where readdir fills it in (Apple, Linux), else from an lstat of its path (Windows' C runtime has no d_type)
+// Whether a directory entry is a directory. Apple: d_type alone (e->d_type == DT_DIR), the test this file always made there. Linux: d_type, except that a file system
+// may leave it DT_UNKNOWN (XFS without ftype, some FUSE and network mounts), and Windows' C runtime has no d_type at all: an lstat of the entry's path decides there
 static int ent_dtype(const struct dirent *e) {   // 1 directory, 0 something else, -1 unknown
-#ifdef DT_DIR
+#if defined(__APPLE__)
+    return e->d_type == DT_DIR;
+#elif defined(DT_DIR)
     return e->d_type == DT_UNKNOWN ? -1 : e->d_type == DT_DIR;
 #else
     (void)e; return -1;
 #endif
 }
 static int ent_isdir(const char *dir, const struct dirent *e) {
+#if defined(__APPLE__)
+    (void)dir; return e->d_type == DT_DIR;
+#else
     int t = ent_dtype(e); if (t >= 0) return t;
     char c[1280]; struct stat st; snprintf(c, sizeof c, "%s/%s", dir, e->d_name);
     return !lstat(c, &st) && S_ISDIR(st.st_mode);
+#endif
 }
 static int ent_stat(DIR *d, const char *dir, const char *name, struct stat *st) {   // following links, as stat does
 #if defined(_WIN32)

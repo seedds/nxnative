@@ -1,6 +1,6 @@
 // Diagnostic DM_FD_LOG=<seconds>: every this many seconds log one line with "the number and breakdown of file descriptors the process has in use" (whether long play sessions will hit the open file limit: the iOS soft limit defaults to 256, raised to 4096 at startup in host_preload, main.c).
 // fstat each descriptor to determine its type; for regular files / directories get the path with fcntl(F_GETPATH) and classify by where it points. Read-only, touches no descriptor; no thread is started when the variable is unset.
-// POSIX descriptor tables only (Apple, Linux: /proc/self/fd): on Windows the C runtime's descriptors are not the process's handles, and the file compiles to nothing
+// POSIX descriptor tables only (Apple, Linux: /proc/self/fd): on Windows the C runtime's descriptors are not the process's handles, and a set DM_FD_LOG gets one red line saying it is ignored
 #include "hle.h"
 #include "dm.h"
 #if !defined(_WIN32)
@@ -37,5 +37,9 @@ static void *fdstat_main(void *arg) {
 __attribute__((constructor)) static void fdstat_init(void) {
     const char *e = getenv("DM_FD_LOG"); int every = e ? atoi(e) : 0; if (every <= 0) return;
     pthread_t t; if (!pthread_create(&t, NULL, fdstat_main, (void *)(intptr_t)every)) pthread_detach(t);
+}
+#else
+__attribute__((constructor)) static void fdstat_init(void) {
+    const char *e = getenv("DM_FD_LOG"); if (e && atoi(e) > 0) LOG("[RED] DM_FD_LOG is not supported on Windows (no POSIX descriptor table to count): no descriptor lines are logged");
 }
 #endif

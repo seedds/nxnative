@@ -4,6 +4,9 @@
 .iosdd_*/
 # CMake build trees of the Linux / Windows host (docker/README.md)
 /build/
+# Host test logs are committed on purpose when a run fails (logs/README.md): never ignored, also not by a global *.log rule (this file takes precedence over it)
+!/logs/
+!/logs/**
 .DS_Store
 __pycache__/
 # Made from each shader build's Mac outputs (c1_guard.py, cb_extent.py; the NSP script makes them), not committed

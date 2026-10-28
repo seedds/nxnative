@@ -49,6 +49,9 @@ int main(void) {
     if (!mkdtemp(root)) { perror("mkdtemp"); return 2; }
     snprintf(save, sizeof save, "%s/save", root); mkdir(save, 0755);
     snprintf(p, sizeof p, "%s/Legacy", save); FILE *f = fopen(p, "w"); fputs("old", f); fclose(f);
+    // Whether the host file system folds case (APFS and NTFS by default): only there do two guest names collide on the host and take an alias with its metadata.
+    // On a case-sensitive one (Linux ext4, a case-sensitive APFS volume) every guest name is its own host name and no metadata is ever written
+    struct stat st; snprintf(p, sizeof p, "%s/legacy", save); int folds_case = !lstat(p, &st);
     setenv("DM_SAVE", save, 1); CHECK(h_fs_MountSave("save", NULL) == RES_OK, "mount the existing save");
     uint64_t h = 0; int32_t type = -1;
     CHECK(content("save:/Legacy", "old"), "the existing name with its case is readable");
@@ -94,13 +97,16 @@ int main(void) {
     CHECK(content("save:/.dm-case-1", "real") && content("save:/LEGACY", "old"), "a physical alias does not pose as a real guest name");
     CHECK(listed("save:/", ".dm-case-1", ENT_FILE), "a real guest name with the alias prefix is listed under its own name");
     CHECK(h_fs_CreateFile("save:/plain", 0) == RES_PATH_EXISTS, "creating an ordinary name twice is still refused");
-    int before = entry_count(); fail_name_write = 1;
-    CHECK(h_fs_CreateFile("save:/PLAIN", 0) == RES_FAIL, "disk full on alias metadata: create file returns failure");
-    CHECK(entry_count() == before && h_fs_GetEntryType(&type, "save:/PLAIN") == RES_PATH_NOT_FOUND, "a failed create leaves no file or guest name behind");
-    CHECK(h_fs_CreateDirectory("save:/trail") == RES_FAIL && entry_count() == before, "alias directory metadata fails: the new directory is removed");
-    CHECK(h_fs_RenameFile("save:/plain", "save:/PLAIN") == RES_FAIL, "rename metadata failure returns failure");
-    CHECK(content("save:/plain", "again") && h_fs_GetEntryType(&type, "save:/PLAIN") == RES_PATH_NOT_FOUND && entry_count() == before, "a failed rename fully restores the original name and content");
-    fail_name_write = 0;
+    int before = entry_count();
+    if (folds_case) {   // a failing alias metadata write: PLAIN, trail and the rename target collide with plain / Trail on the host
+        fail_name_write = 1;
+        CHECK(h_fs_CreateFile("save:/PLAIN", 0) == RES_FAIL, "disk full on alias metadata: create file returns failure");
+        CHECK(entry_count() == before && h_fs_GetEntryType(&type, "save:/PLAIN") == RES_PATH_NOT_FOUND, "a failed create leaves no file or guest name behind");
+        CHECK(h_fs_CreateDirectory("save:/trail") == RES_FAIL && entry_count() == before, "alias directory metadata fails: the new directory is removed");
+        CHECK(h_fs_RenameFile("save:/plain", "save:/PLAIN") == RES_FAIL, "rename metadata failure returns failure");
+        CHECK(content("save:/plain", "again") && h_fs_GetEntryType(&type, "save:/PLAIN") == RES_PATH_NOT_FOUND && entry_count() == before, "a failed rename fully restores the original name and content");
+        fail_name_write = 0;
+    } else printf("- the host file system is case-sensitive: guest names never collide there and no alias metadata is written, so the 5 alias metadata failure checks do not apply\n");
     CHECK(h_fs_CreateFile("save:/PLAIN", -1) == RES_FAIL && entry_count() == before, "a failed size set on an alias file leaves no physical name without metadata");
     CHECK(h_fs_CreateFile("save:/Ä", 0) == RES_OK && h_fs_CreateFile("save:/ä", 0) == RES_OK, "non-ASCII case variants coexist too");
     CHECK(write_text("save:/Ä", "upper") && write_text("save:/ä", "lower") && content("save:/Ä", "upper") && content("save:/ä", "lower"), "non-ASCII names have separate content");

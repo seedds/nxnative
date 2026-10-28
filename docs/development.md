@@ -397,6 +397,10 @@ Notes on these steps:
 - The unsigned build pins its build product and intermediate directories inside `$W/build/ios/pkg/dd`, independently of Xcode's Locations preference.
 - hactool cannot read every update (Mario 1.2.1's patch NCA gives "Invalid BKTR layout!"), which is why `nx_extract` uses LibHac.
 
+## Linux and Windows (in progress)
+
+The port to Windows 10 or later and to Linux on x86-64 is under way ([migration-status.md](design/migration-status.md)). Its first part builds the host's platform layer (`dm/host/plat/`), the host sources that do not depend on running the guest's ARM64 code natively, and their unit tests with CMake ([dm/host/CMakeLists.txt](../dm/host/CMakeLists.txt)) in Docker: for Linux, and cross-built for Windows with llvm-mingw, whose test programs then run on a Windows PC. [docker/README.md](../docker/README.md) has the commands and what is not portable yet. GitHub Actions runs the same builds and tests on every pull request ([.github/workflows/port.yml](../.github/workflows/port.yml)). Each test run writes its logs to `logs/<platform>/`, which are committed when a run fails ([logs/README.md](../logs/README.md)). No game runs on Linux or Windows yet, and the Apple builds above are unchanged: they keep the Makefiles.
+
 ## Prewarm lists
 
 Metal compiles each combination of shaders and pipeline settings for the GPU the first time it is used. Each takes tens of milliseconds, so a burst of them on entering a level is a visible freeze. The host records what it had to compile and rebuilds those pipelines on a background queue at the next launch:

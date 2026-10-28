@@ -9,6 +9,7 @@ RUN apt-get update \
  && update-alternatives --install /usr/bin/cc cc /usr/bin/clang-18 100 \
  && update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-18 100
 ENV CC=clang
-# The worktree is mounted at /src; git refuses repositories owned by another user without this
-RUN git config --global --add safe.directory '*'
+# The worktree is mounted at /src; git refuses repositories owned by another user without this (system-wide: the container also runs as the caller's user, HOME=/tmp,
+# and the test runner reads the commit with git)
+RUN git config --system --add safe.directory '*'
 WORKDIR /src

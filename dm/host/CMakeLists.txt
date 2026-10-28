@@ -1,7 +1,9 @@
 # The portable host for Linux and Windows (x86-64): the host's portable sources as a static library, libvpx, and the host unit tests that run without native ARM64
 # execution or an Apple frontend, registered with CTest. Apple builds keep using the Makefiles (make -C dm/host, make -C dm/host/tests). docker/README.md has the commands.
 #   cmake -S dm/host -B build/linux -G Ninja -DGAME=<base game title ID>
-# Windows: the same with -DCMAKE_TOOLCHAIN_FILE=dm/host/cmake/x86_64-w64-mingw32.cmake (llvm-mingw); the tests then run on Windows (ctest there, or build/<dir>/run_host_tests.sh)
+# Windows: the same with -DCMAKE_TOOLCHAIN_FILE=<absolute path of dm/host/cmake/x86_64-w64-mingw32.cmake> (llvm-mingw; a relative path is taken from the build folder first, then from
+# dm/host). The test .exe files then run on a Windows PC: dm/host/tests/run_win64_tests.ps1 (PowerShell) or dm/host/tests/run_host_tests.sh (Git Bash) read the list this file writes
+# (<build folder>/host_tests.tsv) and record a log per test in logs/<platform>/ (logs/README.md). CTest runs the same tests where the tree was configured (Linux, Docker)
 cmake_minimum_required(VERSION 3.20)
 project(nxnative_host C)
 
@@ -84,10 +86,23 @@ target_link_libraries(nxhost PUBLIC nxplat vpx)
 #   PROFILE: needs the game profile header; POSIX: needs fork() (death tests in a child), so Linux only for now
 include(CTest)
 set(TESTS ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-set(RUN_SCRIPT "#!/bin/sh\n# Runs the host unit tests of this build (written by dm/host/CMakeLists.txt); for a cross-built Windows tree run it there in Git Bash\ncd \"$(dirname \"$0\")\" || exit 2\nfailed=0\n")
+# The test list for the runners (dm/host/tests/run_host_tests.sh, run_win64_tests.ps1), which run where CTest cannot: CTest's files name this machine's paths, and a Windows tree
+# cross-built in Docker runs on the PC. One line per run, tab-separated: name, executable, arguments (separated by spaces), "tmpdir" when it needs TMPDIR=<build folder>/tmp;
+# an empty field is "-" (a POSIX shell's read merges adjacent tabs)
+if(WIN32)
+    set(LOG_PLATFORM win64)
+else()
+    set(LOG_PLATFORM linux)
+endif()
+string(TIMESTAMP configured "%Y-%m-%dT%H:%M:%SZ" UTC)
+set(MANIFEST "# nxnative host unit tests, written by dm/host/CMakeLists.txt: name<TAB>executable<TAB>arguments<TAB>tmpdir\n")
+string(APPEND MANIFEST "# platform: ${LOG_PLATFORM}\n# system: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}\n# compiler: ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} (${CMAKE_C_COMPILER})\n")
+string(APPEND MANIFEST "# game: ${GAME}\n# configured: ${configured}\n")
 function(host_test name)
     cmake_parse_arguments(T "PROFILE;VPX;POSIX;TMPDIR" "" "SOURCES;DEFS;RUNS;INCLUDES" ${ARGN})
     if(T_POSIX AND WIN32)
+        string(APPEND MANIFEST "# not built for this platform: ${name} (POSIX: fork() death tests)\n")
+        set(MANIFEST "${MANIFEST}" PARENT_SCOPE)
         return()
     endif()
     list(TRANSFORM T_SOURCES PREPEND ${TESTS}/)
@@ -116,17 +131,20 @@ function(host_test name)
             set(args ${run})
         endif()
         add_test(NAME ${test_name} COMMAND ${name} ${args} WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-        set(env)
+        set(tmpdir -)
         if(T_TMPDIR)
             file(MAKE_DIRECTORY ${tmp})
             set_tests_properties(${test_name} PROPERTIES ENVIRONMENT "TMPDIR=${tmp}")
-            set(env "TMPDIR=\"$PWD/tmp\" ")
+            set(tmpdir tmpdir)
         endif()
         set_tests_properties(${test_name} PROPERTIES TIMEOUT 120)
         string(JOIN " " argv ${args})
-        set(RUN_SCRIPT "${RUN_SCRIPT}${env}./${name}${CMAKE_EXECUTABLE_SUFFIX} ${argv} > ${test_name}.log 2>&1 && echo \"PASS ${test_name}\" || { echo \"FAIL ${test_name} (see ${test_name}.log)\"; failed=1; }\n")
+        if(argv STREQUAL "")
+            set(argv -)
+        endif()
+        string(APPEND MANIFEST "${test_name}\t${name}${CMAKE_EXECUTABLE_SUFFIX}\t${argv}\t${tmpdir}\n")
     endforeach()
-    set(RUN_SCRIPT "${RUN_SCRIPT}" PARENT_SCOPE)
+    set(MANIFEST "${MANIFEST}" PARENT_SCOPE)
 endfunction()
 
 host_test(t_motion SOURCES t_motion.c)
@@ -167,4 +185,4 @@ host_test(t_svc_memory_16k SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory
 # device and AudioUnit watchdog), t_motion_apple, t_motion_pro_mac and t_haptics_apple (Apple frontends: GameController, IOKit, Core Haptics), t_svc_memory_dirty (the
 # Metal backend's write-protect page tracking, dm/gfx/nvn)
 
-file(WRITE ${CMAKE_BINARY_DIR}/run_host_tests.sh "${RUN_SCRIPT}exit $failed\n")
+file(WRITE ${CMAKE_BINARY_DIR}/host_tests.tsv "${MANIFEST}")

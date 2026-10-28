@@ -256,11 +256,10 @@ int plat_fd_path(int fd, char *out, size_t n) {
     if (k <= 0) return -1;
     out[k] = 0; return 0;
 }
-const char *plat_data_dir(void) {   // XDG base directories: $XDG_DATA_HOME, else ~/.local/share
-    static char d[1024];
-    if (!d[0]) { const char *x = getenv("XDG_DATA_HOME"), *h = getenv("HOME");
-        if (x && *x == '/') snprintf(d, sizeof d, "%s/dm-work", x); else snprintf(d, sizeof d, "%s/.local/share/dm-work", h ? h : "."); }
-    return d;
+int plat_data_path(char *buf, size_t n, const char *rel) {   // XDG base directories: $XDG_DATA_HOME (an absolute path, as the specification requires), else ~/.local/share
+    const char *x = getenv("XDG_DATA_HOME"), *h = getenv("HOME");
+    if (x && *x == '/') return snprintf(buf, n, "%s/dm-work/%s", x, rel);
+    return snprintf(buf, n, "%s/.local/share/dm-work/%s", h ? h : ".", rel);
 }
 
 // ---------- Random bytes ----------

@@ -112,10 +112,8 @@ int plat_fd_path(int fd, char *out, size_t n) {
     if (fcntl(fd, F_GETPATH, p) || !p[0]) return -1;
     snprintf(out, n, "%s", p); return 0;
 }
-const char *plat_data_dir(void) {   // hle_fs.c envdir, probe.c: $HOME/dm-work
-    static char d[1024];
-    if (!d[0]) snprintf(d, sizeof d, "%s/dm-work", getenv("HOME"));
-    return d;
+int plat_data_path(char *buf, size_t n, const char *rel) {   // hle_fs.c envdir without DM_ROOT: the snprintf it made, "%s%s/%s" with $HOME, "/dm-work", rel
+    return snprintf(buf, n, "%s%s/%s", getenv("HOME"), "/dm-work", rel);
 }
 
 // ---------- Random bytes and SHA-256 (hle_os.c; hle_ro.c, loader.c) ----------

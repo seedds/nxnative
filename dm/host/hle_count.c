@@ -3,7 +3,8 @@
 //   ldr x16, =&count; movz x17, #1; stadd x17, [x16]; ldr x16, =implementation; br x16
 // Touches only x16 / x17, which may be clobbered between calls; arguments and return values pass through unchanged. Stubs are written in a writable page and sealed read-only executable when loading ends (hlecount_seal).
 // svc is counted separately by number (the hle_svc.c dispatch entry calls hlecount_svc). Unavailable on iOS (code written at runtime cannot execute).
-// The stubs are ARM64 code the guest calls natively: without native execution (DM_NATIVE_EXEC 0) the counting belongs to the x86-64 execution engine (Phase 2), and these are no-ops
+// The stubs are ARM64 code the guest calls natively: without native execution (DM_NATIVE_EXEC 0) the counting belongs to the x86-64 execution engine (Phase 2), and a set
+// DM_HLECOUNT gets one red line saying it is ignored
 #include "dm.h"
 #if DM_NATIVE_EXEC
 #include <stdatomic.h>
@@ -51,6 +52,16 @@ void hlecount_seal(void) {
 }
 void hlecount_svc(int num) { if (g_hon > 0 && num >= 0 && num < 256) atomic_fetch_add(&g_hsvc[num], 1); }
 void hlecount_flush(void) { if (hc_on() && g_hcode) hc_write(); }   // Also write a copy on the graceful exit path (SIGTERM / scene disconnect)
+#elif !DM_NATIVE_EXEC
+#include <stdatomic.h>
+static void hc_unsupported(void) {
+    static _Atomic int once;
+    if (getenv("DM_HLECOUNT") && !atomic_exchange(&once, 1)) LOG("[RED] DM_HLECOUNT is not supported on this platform yet: its counting stubs are ARM64 code the guest runs natively (the x86-64 execution engine, Phase 2, will count); no counts are written");
+}
+void *hlecount_wrap(const char *kind, const char *name, void *fn) { (void)kind; (void)name; hc_unsupported(); return fn; }
+void hlecount_seal(void) { hc_unsupported(); }
+void hlecount_svc(int num) { (void)num; }
+void hlecount_flush(void) {}
 #else
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { (void)kind; (void)name; return fn; }
 void hlecount_seal(void) {}

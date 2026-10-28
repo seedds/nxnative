@@ -207,7 +207,7 @@ void dm_fps_lock_tick(void) {
             for (int k = 0; k < nue; k++) { rows[nrow++] = &ue[k]; base = g_mod[i].base; }
         }
         fb_find(); if (!nrow && !nier && !fb.n && !ue_missing) return;
-        const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
+        const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : dm_profile()->fps_target; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
         if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; leaving the game's frame limit", e); t = 0; }
         if (t && ue_missing) LOG("[RED] main: Unreal %s not found by the rewriter (ue_cvar.py NAMES; game profile ue_fps_cvar): the game's own frame limit stays", DM_GAME_UE_FPS_CVAR);
         if (!nrow && !nier && !fb.n) return;

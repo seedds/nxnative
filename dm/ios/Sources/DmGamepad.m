@@ -193,7 +193,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         }
         _swap = shape(_controls); _swapLabel = label(_swap, @"");
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
-        int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
+        int l = saved ? (int)saved.integerValue : dm_profile()->pad_layout;
         if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
         _full = l == 1; _tap = l == 2;
         [self applyLayout];

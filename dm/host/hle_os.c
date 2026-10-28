@@ -120,7 +120,7 @@ HLE_FORCE("_ZN2nn6crypto36GenerateCryptographicallyRandomBytesEPvm", "csrng serv
 // The profile's game_env (KEY=VALUE, separated by spaces; DM_GAME_ENV overrides it, also from Documents/env.txt) answers getenv for those names; any other name goes to the SDK's own getenv
 static const char **g_env_kv;   // "KEY=VALUE" strings, NULL-terminated
 static void game_env_init(void) {
-    const char *e = getenv("DM_GAME_ENV"); if (!e) e = DM_GAME_ENV;
+    const char *e = getenv("DM_GAME_ENV"); if (!e) e = dm_profile()->genv;
     int n = 0; for (const char *p = e; *p; p++) n += *p == '=';
     if (!(g_env_kv = calloc((size_t)n + 1, sizeof *g_env_kv))) die("game_env allocation failed");
     char *s = strdup(e); int k = 0;
@@ -152,7 +152,7 @@ static void sa_init(void) {
     g_sa_alloc = ms ? module_sym(ms, "_ZN2nn3mem17StandardAllocator8AllocateEm") : NULL;
     g_sa_alloc_al = ms ? module_sym(ms, "_ZN2nn3mem17StandardAllocator8AllocateEmm") : NULL;
     if (!g_sa_alloc || !g_sa_alloc_al) die("StandardAllocator::Allocate not found in the SDK");
-    g_sa_big_align = DM_GAME_ALLOC_BIG_ALIGN;
+    g_sa_big_align = dm_profile()->alloc_big_align;
     if (g_sa_big_align) LOG("StandardAllocator::Allocate: allocations ≥ 64 KB are 64 KB aligned (game profile alloc_big_align: memory pool storage, see hle_os.c)");
 }
 HLE_FORCE("_ZN2nn3mem17StandardAllocator8AllocateEm", "passed straight to the SDK; with the profile's alloc_big_align (13 Sentinels, Unicorn Overlord) allocations ≥ 64 KB are 64 KB aligned (memory pool start)", void *, h_mem_SAAllocate, void *self, size_t size) {

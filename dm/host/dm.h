@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
+#include "hle_profile.h"   // the runtime profile (DM_PROFILE): every constant above can also come from it; dm_profile() is the accessor
 
 // Explicit host work does not occupy a guest core (Metal submission, or a blocked native codec lock). A contended host mutex must count as blocked: a signal's same-core handoff
 // can otherwise wait forever for a peer that needs the signaller's native lock. Uncontended locks retain guest ordering; the counter nests inside existing host work.

@@ -199,6 +199,40 @@ if __name__ == '__main__':
         out, text = Path(a[2]), header(load(a[1])); out.parent.mkdir(parents=True, exist_ok=True)
         if not (out.exists() and out.read_text() == text):   # written only when it changes: make runs this every time (the profile folder can change under the same GAME), and an unchanged header must not rebuild the host
             tmp = out.with_name(out.name + '.tmp'); tmp.write_text(text); tmp.replace(out)
+    elif len(a) == 3 and a[0] == 'profile':   # the runtime profile the host reads from DM_PROFILE (hle_profile.h): the header's values, as the TSV form
+        g = load(a[1]); out = Path(a[2]); out.parent.mkdir(parents=True, exist_ok=True)
+        M = dict(re.findall(r'^#define (DM_GAME_\w+) (.*)$', header(g), re.M))   # exactly what the compiled profile would hold
+        # macro → the runtime profile's key (hle_profile.c set_kv); the header's spelling of the value is the file's
+        KEYS = [('title_id', 'ID'), ('program_id', 'PROGRAM_ID'), ('name', 'NAME'), ('romfs_marker', 'ROMFS_MARKER'),
+                ('modules', 'MODULES'), ('mem_reserve', 'MEM_RESERVE'), ('mem_alias', 'MEM_ALIAS'), ('mem_stack', 'MEM_STACK'),
+                ('app_pool', 'APP_POOL'), ('mem_used', 'MEM_USED'), ('sys_resource', 'SYS_RESOURCE'), ('mem_map_limit', 'MEM_MAP_LIMIT'),
+                ('present_interval', 'PRESENT_DISPLAY'), ('core_preempt', 'CORE_PREEMPT'), ('alloc_big_align', 'ALLOC_BIG_ALIGN'),
+                ('fps_target', 'FPS_TARGET'), ('fps_hold', 'FPS_HOLD'), ('present_snap', 'PRESENT_SNAP'), ('pso_mtl4', 'PSO_MTL4'),
+                ('shared_font', 'SHARED_FONT_TTF'), ('pad_layout', 'PAD_LAYOUT'), ('op_mode', 'OPMODE'), ('perf_mode', 'PERF_BOOST'),
+                ('feedback_snap', 'FEEDBACK_SNAP'), ('tex_flush_upload', 'TEX_FLUSH_UPLOAD'), ('render_cond', 'RENDER_COND'),
+                ('tex_dirty_upload', 'TEX_DIRTY_UPLOAD'), ('tex_dyn_slots', 'TEX_DYN_SLOTS'), ('gpu_timestamps', 'GPU_TS_SEGMENT'),
+                ('vconv_range', 'VCONV_RANGE'), ('game_args', 'ARGS'), ('game_env', 'ENV')]
+        def val(macro):   # the header's C spelling → the file's plain spelling
+            v = M.get('DM_GAME_' + macro)
+            if v is None: return None
+            v = v.strip()
+            if v.startswith('{') and v.endswith('}'):   # {"main", "sdk"} → main sdk
+                return ' '.join(x.strip().strip('"') for x in v[1:-1].split(',') if x.strip())
+            if v.startswith('"'): return v[1:-1]
+            return v[:-3] if v.endswith('ull') else v
+        L = [f'# Runtime game profile of {g.id} ({g.get("name")}), written by dm/games/game.py profile from {g.dir}/game.tsv',
+             '# Read by the host from DM_PROFILE (hle_profile.c set_kv): KEY<TAB>VALUE, # starts a comment. Every value the compiled',
+             '# profile would hold is written, so the file alone describes the game.']
+        for key, macro in KEYS:
+            v = val(macro)
+            if v is not None: L.append(f'{key}\t{v}')
+        api = [val('NVN_API_MAJOR'), val('NVN_API_MINOR')]
+        if api[0] is not None: L.append(f'device_api\t{api[0]}.{api[1] or 0}')
+        for b, d in re.findall(r'\{"([0-9a-f]+)", "([^"]*)"\}', M.get('DM_GAME_DISPLAY_VERSIONS', '')):
+            L.append(f'display_version\t{b}\t{d}')
+        text = '\n'.join(L) + '\n'
+        if not (out.exists() and out.read_text() == text): out.write_text(text, encoding='utf-8')   # unchanged: keep the mtime
+        print(out)
     elif len(a) == 2 and a[0] == 'dir':
         print(load(a[1]).dir)
     elif len(a) == 3 and a[0] == 'link':   # link → the profile folder (replaced when it points elsewhere)

@@ -50,11 +50,11 @@ Play the supported Switch games on Windows 10 or later and on Linux (checked thr
 
 | Phase | Content | Needs games | Status |
 |---|---|---|---|
-| 0 | Host portability layer in C (`dm/host/plat/`), CMake build, host unit tests on Linux (Docker) and Windows (llvm-mingw cross-build, tests run on the PC), CI jobs | No | **Done on Linux and Windows: tested on Linux (35/35) and on Windows CI (25/25, run 2 on `12aa34a`); macOS CI confirmation pending** (see below) |
-| 1 | SDL3 front end: window, audio, controllers, gyro, rumble, keyboard/touch, fullscreen and refresh matching; save/log paths | No | **Done on Linux** (`ae8e308`: `dm/host/front_sdl.c`, SDL audio in `hle_audio.c`, SDL3 3.4.14 pinned; `t_front_sdl` 82 checks, `t_audio_sdl` 45, CTest 37/37); Windows run and macOS CI pending; real controllers, sound devices and mode switching unverified until a game runs (Phase 5) |
+| 0 | Host portability layer in C (`dm/host/plat/`), CMake build, host unit tests on Linux (Docker) and Windows (llvm-mingw cross-build, tests run on the PC), CI jobs | No | **Done: tested on Linux (35/35), on Windows CI (25/25, run 2 on `12aa34a`) and on macOS CI (`tests.yml` run 2 on `18bf526`: build check, host tests, sanitizers, tool tests and the iOS app all green)** (see below) |
+| 1 | SDL3 front end: window, audio, controllers, gyro, rumble, keyboard/touch, fullscreen and refresh matching; save/log paths | No | **Done on Linux** (`ae8e308`: `dm/host/front_sdl.c`, SDL audio in `hle_audio.c`, SDL3 3.4.14 pinned; `t_front_sdl` 82 checks, `t_audio_sdl` 45, CTest 37/37); Windows CI 27/27 and macOS CI green on `18bf526`; real controllers, sound devices and mode switching unverified until a game runs (Phase 5) |
 | 2 | AOT recompiler, first with open-source homebrew (devkitPro/libnx) as legal input; differential tests against dynarmic | No | **Designed** ([aot-recompiler.md](aot-recompiler.md)); not started |
 | 3 | Recompiler on real games, first on the Intel Mac with the existing Metal backend (isolates recompiler bugs from the Vulkan port) | Yes | Not started |
-| 4 | Vulkan backend: NVN frontend/backend split, Vulkan shader target, pipelines, memory, textures, presentation | Yes (from P3 on) | **Designed and reviewed** ([vulkan-backend.md](vulkan-backend.md)); **M0 and M1 done** (`a041a27`: chain files LF, tool fingerprints off a Mac, `nvn_be.h`; macOS CI confirmation pending); M2 next |
+| 4 | Vulkan backend: NVN frontend/backend split, Vulkan shader target, pipelines, memory, textures, presentation | Yes (from P3 on) | **Designed and reviewed** ([vulkan-backend.md](vulkan-backend.md)); **M0 and M1 done** (`a041a27`: chain files LF, tool fingerprints off a Mac, `nvn_be.h`; macOS CI green on `18bf526`); M2 running |
 | 5 | Full games on Windows and Linux/Docker; performance, frame pacing, P-core pinning, timers | Yes | Not started |
 | 6 | Packaging for Windows (folder/zip) and Linux (AppImage/folder), launcher, CI, docs (README "not an emulator" and "iOS only" wording, AGENTS.md, development.md, games table platform column) | Yes, for the final test | Not started |
 
@@ -193,7 +193,7 @@ The owner delegated every remaining decision to the agent, to be taken as the ow
 
 | Wave | Track A (CPU side) | Track B (graphics side) | State |
 |---|---|---|---|
-| 1 | Phase 1: SDL3 front end (`dm/host/front_sdl.c`, SDL audio in `hle_audio.c`, headless tests with SDL's dummy drivers; `ae8e308`) | Vulkan M0 + M1 (`a041a27`) | done, CI pending |
+| 1 | Phase 1: SDL3 front end (`dm/host/front_sdl.c`, SDL audio in `hle_audio.c`, headless tests with SDL's dummy drivers; `ae8e308`) | Vulkan M0 + M1 (`a041a27`) | done; `port` run 5 and `tests` run 2 green on `18bf526` |
 | 2 | Phase 2 foundation: `dm/tools/aot` (CMake, LLVM 18, vendored `azahar-emu/dynarmic` at `a466015`, Boost subset), the lifter for integer / memory / branch / system / exclusive classes, the differential vector harness against dynarmic, the census subcommand, `docker/Dockerfile.aot`, `aot.yml` | Vulkan M2: NVN state, resolve, GPU-write ledger and pools into pure C files with CPU tests on Linux (after macOS CI has confirmed M1) | A running |
 | 3 | FP and SIMD lowering (phase 2 of the AOT plan), NRO loader + discovery + the homebrew corpus in `devkitpro/devkita64` (phase 1 of the AOT plan completed) | M3 (replay loop to `nvn_replay.c`), M4 (reflection in C), M5 (neutral pipeline rows) | planned |
 | 4 | Control flow, safepoints, JIT fallback (phase 3 of the AOT plan); host x86 integration (thunks, `dm_guest_call`, arena) | M6 (build split), P2 (Vulkan shader chain with .NET in Docker), P3 (Vulkan core on lavapipe, headless) | planned |
@@ -204,7 +204,7 @@ Decisions taken by the lead inside this program (recorded here so they are not r
 ## How to continue in a new session
 
 1. Read AGENTS.md, CLAUDE.md, this page, then the two designs (the Vulkan one has a Review note under its Status line).
-2. Phase 0 is on `multiplataforma` and green on Linux and Windows CI (run 2). Still open: macOS CI confirming the Apple-side edits (nothing was compiled on macOS or iOS), the iOS `TARGET_OS_IPHONE` question in `hle_count.c`, the sanitizer targets on Linux (the Docker image has no sanitizer runtime).
+2. Phases 0 and 1 are on `multiplataforma`, green on the three CI workflows. Still open: the iOS `TARGET_OS_IPHONE` question in `hle_count.c` (compiles; behaviour unverified), the sanitizer targets on Linux (the Docker image has no sanitizer runtime).
 3. The decisions are taken (the owner's answers above). Phase 2 and Phase 4 can be planned; Phase 1 (SDL3) first.
 4. Before Phase 4, resolve the Vulkan review items (the level D definition, the phases without an owner, the acceptance checks, the `VK_EXT_external_memory_host` / AOT arena question) in the design.
 5. Then Phase 1 (SDL3), Phase 2 (recompiler with homebrew), and so on. Per CLAUDE.md, delegate bounded tasks to Opus 5.5 subagents with the effort table, full briefs, at most two at a time, and verify their diffs and checks before reporting.

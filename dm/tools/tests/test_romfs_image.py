@@ -56,6 +56,21 @@ class Images(unittest.TestCase):
         self.assertEqual(self.content('data/z'), b'')
         self.assertTrue(image.read_index(self.dst)['data/empty'][0])
 
+    def test_repack_replaces_files_and_keeps_the_rest(self):
+        (self.src / 'Content/Packages').mkdir(parents=True); (self.src / 'Content/empty').mkdir()
+        (self.src / 'Content/Packages/a.pkg').write_bytes(b'A' * 10)
+        (self.src / 'Content/Packages/b.pkg').write_bytes(b'B' * 3)
+        (self.src / 'Content/z.txt').write_bytes(b'zed')
+        image.pack(self.src, self.root / 'base.img')
+        (self.root / 'new_a').write_bytes(b'a' * 25)
+        image.repack(self.root / 'base.img', self.dst, {'Content/Packages/a.pkg': self.root / 'new_a'})
+        self.assertTrue(self.valid())
+        self.assertEqual(self.content('Content/Packages/a.pkg'), b'a' * 25)
+        self.assertEqual(self.content('Content/Packages/b.pkg'), b'BBB')
+        self.assertEqual(self.content('Content/z.txt'), b'zed')
+        self.assertEqual(set(image.read_index(self.dst)), set(image.read_index(self.root / 'base.img')))
+        with self.assertRaises(ValueError): image.repack(self.root / 'base.img', self.dst, {'Content/missing': self.root / 'new_a'})
+
     def test_reuse_rebuilds_changed_added_removed_and_renamed_files(self):
         (self.src / 'a').write_bytes(b'old')
         image.pack(self.src, self.dst, reuse=True)

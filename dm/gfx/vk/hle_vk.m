@@ -103,8 +103,18 @@ static const fmt_t g_fmts[] = {
     FV(R16G16B16_UINT, UShort3, 6), FV(R16G16B16_SINT, Short3, 6), FV(R16G16B16_SFLOAT, Half3, 6),
     FV(R16G16B16A16_USCALED, UShort4, 8), FV(R16G16B16A16_SSCALED, Short4, 8),
 };
+// DM_VK_BC7_ASTC=1 (baked in by the NSP script's --bc7-astc, whose RomFS has its BC7 textures re-encoded as ASTC 4x4 by dm/tools/pkg_astc.py, for GPUs without BC: the A16 and
+// older iPhones): BC7 images are ASTC 4x4 textures. Both take 16 bytes per 4x4 block, so the sizes, offsets and copies the game works out for BC7 stay right
+static const fmt_t g_bc7_astc[] = {FB(BC7_UNORM_BLOCK, ASTC_4x4_LDR, 16, 4, 4), FB(BC7_SRGB_BLOCK, ASTC_4x4_sRGB, 16, 4, 4)};
 static const fmt_t *g_fmt_by[VK_FORMAT_ASTC_12x12_SRGB_BLOCK + 1];
-static void fmt_init(void) { for (size_t i = 0; i < sizeof g_fmts / sizeof *g_fmts; i++) g_fmt_by[g_fmts[i].vk] = &g_fmts[i]; }
+static void fmt_init(void) {
+    for (size_t i = 0; i < sizeof g_fmts / sizeof *g_fmts; i++) g_fmt_by[g_fmts[i].vk] = &g_fmts[i];
+    const char *e = getenv("DM_VK_BC7_ASTC");
+    if (e && strcmp(e, "0")) {
+        for (size_t i = 0; i < sizeof g_bc7_astc / sizeof *g_bc7_astc; i++) g_fmt_by[g_bc7_astc[i].vk] = &g_bc7_astc[i];
+        LOG("[vk] BC7 images are ASTC 4x4 (DM_VK_BC7_ASTC=1: the RomFS's BC7 textures were re-encoded)");
+    }
+}
 static const fmt_t *fmt_of(VkFormat f) {
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, fmt_init);
     return (unsigned)f < sizeof g_fmt_by / sizeof *g_fmt_by ? g_fmt_by[f] : NULL;

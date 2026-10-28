@@ -120,6 +120,45 @@ def read_index(img):   # for tests and checks: {guest path: (is dir, offset, siz
     return out
 
 
+def repack(src, dst, replace):
+    """A copy of the image src with some files' data replaced (replace: {guest path: host file}), written to dst (via dst.part). The entries, names and directory numbering
+    stay as they are; only the replaced files' data and the offsets of the files after them change. For a transformed RomFS (pkg_astc.py) without unpacking the image."""
+    src, dst = os.fspath(src), os.fspath(dst)
+    with open(src, 'rb') as f:
+        magic, ioff, isz, n = HEAD.unpack(f.read(HEAD.size))
+        if magic != MAGIC: raise ValueError(f'not a RomFS image: {src}')
+        f.seek(ioff); raw = f.read(isz)
+    e = [list(ENT.unpack_from(raw, k * ENT.size)) for k in range(n)]
+    pool = raw[n * ENT.size:]
+    path = [''] * n
+    for k, (a, b, _, _, t, _) in enumerate(e):
+        if t == 0:
+            for c in range(a, a + b): path[c] = (path[k] + '/' if path[k] else '') + pool[e[c][2]:e[c][2] + e[c][3]].decode()
+    missing = set(replace) - {path[k] for k in range(n) if e[k][4] == 1}
+    if missing: raise ValueError(f'not files of {src}: {", ".join(sorted(missing))}')
+    part = dst + '.part'
+    with open(src, 'rb') as f, open(part, 'wb') as out:
+        out.write(b'\0' * HEAD.size)
+        off = HEAD.size
+        for k in range(n):   # the data in entry order, as pack() wrote it
+            if e[k][4] != 1: continue
+            new = replace.get(path[k])
+            g = open(new, 'rb') if new else f
+            left = os.path.getsize(new) if new else e[k][1]
+            if not new: f.seek(e[k][0])
+            e[k][0], e[k][1] = off, left
+            while left:
+                b = g.read(min(left, 8 << 20))
+                if not b: raise ValueError(f'{path[k]}: cut off')
+                out.write(b); left -= len(b); off += len(b)
+            if new: g.close()
+        idx = b''.join(ENT.pack(*x) for x in e)
+        out.write(idx); out.write(pool)
+        out.seek(0); out.write(HEAD.pack(MAGIC, off, len(idx) + len(pool), n))
+    os.replace(part, dst)
+    return n
+
+
 ID_MAGIC = 'DMROMFSID1'
 _FNV_OFFSET, _FNV_PRIME, _MASK = 0xcbf29ce484222325, 0x100000001b3, (1 << 64) - 1
 

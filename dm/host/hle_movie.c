@@ -741,10 +741,18 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     md_rel(d, i);
     return 0;
 }
+static int h_movie_RelOut(void **self, int i);
 HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE", "movie decoder: get a frame", int, h_movie_GetOut, void **self, int i, void *buf) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (!buf || i < 0 || i >= d->nout) return 0x100b;
-    if (d->mode == MD_MODE_TEX) return md_out_tex(d, i, buf);
+    if (d->mode == MD_MODE_TEX) {
+        // The profile's movie_tex_autorelease (DM_MOVIE_TEX_AUTOREL=0/1 overrides it): the index is released once its picture is in the texture. Metroid Prime 4: Beyond's movie
+        // player (RetroFMV) never releases a native-texture output, as the SDK's GPU consumer evidently frees it: with the indices held, its movies stopped after 16 pictures
+        int r = md_out_tex(d, i, buf); static int autorel = -1;
+        if (autorel < 0) { const char *e = getenv("DM_MOVIE_TEX_AUTOREL"); autorel = e ? atoi(e) != 0 : DM_GAME_MOVIE_TEX_AUTOREL; }
+        if (!r && autorel) h_movie_RelOut(self, i);
+        return r;
+    }
     // The decoder writes from the start of the client's buffer. movie::Buffer::Data() is Base() + Offset() and Capacity() the whole buffer (STEINS;GATE RE:BOOT's subsdk0), so a buffer whose
     // read offset the client advanced was written past its end, over the guest heap (from PR #36): the range is reset first. Not in native-texture mode (md_out_tex),
     // where Data() is the texture object the client points it at and nothing is written through it

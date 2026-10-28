@@ -92,7 +92,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** a 10-byte read of the wrong RomFS file, then a null pointer at boot; files named `rom:\StartupUI.pak` are not found.
 - **Cause:** on Horizon a `FileHandle` is a pointer to the SDK's `FileAccessor`, a heap object, so its low bits are clear, and a game's file device may mask them off (`handle & ~7`) before `ReadFile`. The host's RomFS-image handle kept the entry index in its low bits, so entry 7 was read as entry 0. Separately, Horizon's file system accessor turns every backslash in a path into a slash before it normalizes the path (`FileSystemAccessor::SetUpPath`, on every mount except the PC host's); the host treated a backslash as part of a name.
 - **Fix:** the guest gets the host's handle shifted left by 4, 16-byte aligned like an AArch64 heap block (`FH_OUT` / `FH_IN`). Each guest path resolver (`img_path`, `host_path_ex`, `set_guest_name`, `dir_snapshot`) turns backslashes into slashes first, so overlays, `..` and guest names see the same path (`hle_fs.c`; `dm/host/tests/t_fs.c`).
-- **Found on:** Metroid Prime 4: Beyond (SDK 19; bring-up in [issue #229](https://github.com/seedds/nxnative/issues/229), from [PR #513](https://github.com/seedds/nxnative/pull/513)); not in the games table yet.
+- **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md) (SDK 19; bring-up in [issue #229](https://github.com/seedds/nxnative/issues/229), from [PR #513](https://github.com/seedds/nxnative/pull/513)).
 
 ### C library path checks ask the file system's limits
 

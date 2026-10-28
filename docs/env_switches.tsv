@@ -73,6 +73,7 @@ DM_MOTION_AXES	switch	`=<map>` such as `x,-z,y`: maps Apple's controller axes to
 DM_MOTION_GAIN	switch	`=<gain>`: how fast the orientation is pulled toward the measured gravity, in rad/s per unit error (default 0.5; `0` integrates the gyro alone)
 DM_MOTION_HID	switch	On the Mac, `0` disables the passive Switch Pro Controller HID motion fallback (`motion_pro_mac.h`); enabled by default when exactly one physical Pro and one GameController Pro can use the same player slot; usable GameController motion takes priority
 DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second per source (phone / GameController / controller HID; acceleration in G, gyro in revolutions/s), for checking the axes: flat and still reads acc 0 0 -1
+DM_MOVIE_TEX_AUTOREL	switch	`=1` / `=0` overrides the profile's `movie_tex_autorelease`: a native-texture movie output is released once its picture is written into the client's texture (`hle_movie.c`)
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
 DM_NICK	switch	The account nickname the game sees (default `Player`)

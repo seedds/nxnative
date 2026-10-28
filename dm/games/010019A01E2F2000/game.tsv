@@ -1,0 +1,42 @@
+# Metroid Prime 4: Beyond (010019A01E2F2000): from the provisional profile, with the keys its bring-up needed (README.md)
+# Metroid Prime 4: Beyond 1.1.0 (v131072), SDK 19
+
+# ---- Identity ----
+title_id	010019A01E2F2000
+program_id	010019A01E2F2000
+
+# ---- App ----
+name	Metroid Prime 4: Beyond
+ipa	MetroidPrime4Beyond.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1	1.1.0	main=8275fbe1ec5191c279f3a943ad8524f4	subsdk0=9c8b2c03854ffda4e33614d6f42d4a64	sdk=0cc95d4d30133833d7df439a890414de
+package	v1
+shader_versions	v1
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Preload/DuplicateData.pak
+zip_store	.arc:.pak:.patch:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Worlds/=worlds /Preload/=preload /UI/=ui /Patch/=patch
+shader_note	Metroid Prime 4: Beyond shaders
+
+# ---- Textures and movies ----
+# streamed textures: the CPU writes higher mip levels into a texture's storage after it was first used (cave walls and the arm cannon were ASTC error magenta)
+tex_dirty_upload	on
+tex_flush_upload	on
+# RetroFMV never releases a native-texture movie output (hle_movie.c): without this its movies stop after 16 pictures
+movie_tex_autorelease	on

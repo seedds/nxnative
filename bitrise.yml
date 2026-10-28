@@ -21,11 +21,11 @@ workflows:
             #!/usr/bin/env bash
             set -euo pipefail
 
-            : "${NX_S3_BUCKET:?Set NX_S3_BUCKET in the Bitrise secret environment group}"
-            : "${AWS_DEFAULT_REGION:?Set AWS_DEFAULT_REGION in the Bitrise secret environment group}"
-            : "${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID in the Bitrise secret environment group}"
-            : "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY in the Bitrise secret environment group}"
-            : "${NX_AGE_IDENTITY:?Set NX_AGE_IDENTITY in the Bitrise secret environment group}"
+            : "${NX_S3_BUCKET:?Set NX_S3_BUCKET in Bitrise project secrets}"
+            : "${AWS_DEFAULT_REGION:?Set AWS_DEFAULT_REGION in Bitrise project secrets}"
+            : "${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID in Bitrise project secrets}"
+            : "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY in Bitrise project secrets}"
+            : "${NX_AGE_IDENTITY:?Set NX_AGE_IDENTITY in Bitrise project secrets}"
             : "${BITRISE_GIT_TAG:?This workflow must be started by an nxnative-build-* tag}"
 
             case "$BITRISE_GIT_TAG" in

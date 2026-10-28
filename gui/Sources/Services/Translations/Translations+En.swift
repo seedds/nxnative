@@ -417,5 +417,8 @@ extension Translations {
         "settings_modal.mods_title": "Game Mods (LayeredFS)",
         "settings_modal.icloud_folder_help": "Opens game folder inside iCloud Drive > nxnative_launcher with game cover art on the folder",
         "settings_modal.direct_sync_title": "Direct Device Save Sync",
-    ]
+            "build.port_failed": "Porting Failed",
+        "common.repair": "Repair",
+        "deck.settings": "Settings",
+]
 }

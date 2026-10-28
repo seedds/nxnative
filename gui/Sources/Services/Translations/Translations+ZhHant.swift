@@ -417,5 +417,8 @@ extension Translations {
         "settings_modal.mods_title": "遊戲模組 (LayeredFS)",
         "settings_modal.icloud_folder_help": "在 iCloud Drive > nxnative_launcher 中開啟帶有封面圖示的遊戲專屬目錄",
         "settings_modal.direct_sync_title": "裝置存檔直連同步",
-    ]
+            "build.port_failed": "移植失敗",
+        "common.repair": "修復",
+        "deck.settings": "設定",
+]
 }

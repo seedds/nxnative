@@ -65,6 +65,7 @@ Resources:
                 Action:
                   - s3:PutObject
                   - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
                 Resource: !Sub '${NxNativeBuildBucket.Arn}/nxnative/incoming/*'
               - Sid: DownloadBuildStatusAndIPAs
                 Effect: Allow
@@ -90,6 +91,7 @@ Resources:
                 Action:
                   - s3:PutObject
                   - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
                 Resource:
                   - !Sub '${NxNativeBuildBucket.Arn}/nxnative/status/*'
                   - !Sub '${NxNativeBuildBucket.Arn}/nxnative/outgoing/*'

@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private S3 storage and prefix-scoped users for NxNative Linux-to-iOS builds.
+
+Parameters:
+  ObjectExpirationDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 30
+    Description: Days to retain encrypted inputs, build status, and IPA outputs.
+
+Resources:
+  NxNativeBuildBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNxNativeBuildObjects
+            Status: Enabled
+            Prefix: nxnative/
+            ExpirationInDays: !Ref ObjectExpirationDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  NxNativeBuildBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref NxNativeBuildBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt NxNativeBuildBucket.Arn
+              - !Sub '${NxNativeBuildBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  NxNativeLinuxUploader:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: NxNativeLinuxUploadAndDownload
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: UploadEncryptedGameBundles
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                Resource: !Sub '${NxNativeBuildBucket.Arn}/nxnative/incoming/*'
+              - Sid: DownloadBuildStatusAndIPAs
+                Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub '${NxNativeBuildBucket.Arn}/nxnative/status/*'
+                  - !Sub '${NxNativeBuildBucket.Arn}/nxnative/outgoing/*'
+
+  NxNativeBitriseBuilder:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: NxNativeBitriseBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DownloadEncryptedGameBundles
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${NxNativeBuildBucket.Arn}/nxnative/incoming/*'
+              - Sid: WriteBuildStatusAndIPAs
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                Resource:
+                  - !Sub '${NxNativeBuildBucket.Arn}/nxnative/status/*'
+                  - !Sub '${NxNativeBuildBucket.Arn}/nxnative/outgoing/*'
+
+Outputs:
+  BucketName:
+    Description: Set this as NX_S3_BUCKET on Linux and in Bitrise.
+    Value: !Ref NxNativeBuildBucket
+  LinuxIAMUser:
+    Description: Create a dedicated access key for the Linux computer.
+    Value: !Ref NxNativeLinuxUploader
+  BitriseIAMUser:
+    Description: Create a dedicated access key and store it in Bitrise project secrets.
+    Value: !Ref NxNativeBitriseBuilder

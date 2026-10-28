@@ -1212,7 +1212,8 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
                 host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
             dec = uepak.OodleHost(host, patched, env)
         PROG.set(step=f'{v}: shader archives out of the paks' + (' and IoStore containers' if dec else ''))
-        try: listing, n = uepak.job(str(rfs.source(d)), str(d / 'ExeFS/main'), str(jd), decode=dec)
+        pkey = bytes.fromhex(g['ue_pak_key']) if g.get('ue_pak_key') else None   # a game whose index key is derived at run time, not a window of main (Princess Peach: Showtime!): the profile carries it
+        try: listing, n = uepak.job(str(rfs.source(d)), str(d / 'ExeFS/main'), str(jd), decode=dec, key=pkey)
         finally:
             if dec: dec.close()
         if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {rfs.source(d)} holds a shader code archive: where the shaders are has to be found first')

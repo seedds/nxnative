@@ -6,6 +6,7 @@ void front_save_failed(int err) { g_nfail++; g_lasterr = err; }
 #include "../dm.h"
 module_t *g_mod;
 int g_nmod;
+module_t *module_of(const void *p) { (void)p; return NULL; }   // the loader's resolver (loader.c): no modules here, so no call site is ever printed
 // the guest address space (hle_svc.c): the unit test has none, so every stack is a host stack and the big-stack takeovers run on it directly (hle_bigstack.c)
 #include <stdint.h>
 int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }

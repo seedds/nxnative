@@ -1,0 +1,37 @@
+# Game profile of Princess Peach: Showtime! 1.0.0 (Unreal Engine 4.27, SDK 15, NVN).
+# Format: see dm/games/README.md; bring-up and measurements in README.md beside this file.
+
+# ---- Identity ----
+title_id	01007A3009184000
+program_id	01007A3009184000
+
+# ---- App ----
+name	Princess Peach: Showtime!
+ipa	PrincessPeachShowtime.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=928efe2954f680557b8b3839481c97db	subsdk0=368f01d5cb42f06cd125dc739d036719	sdk=8618895246b420329b77746b960a66ab
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	PJ037/Content/Paks/PJ037-Switch.pak
+zip_store	.mp4:.pak:.metallib
+
+# ---- Memory ----
+# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. An iPhone needs the allocator cut for the build and a capped region (game_args), as Octopath Traveler 0's profile (docs/reference/memory.md)
+mem_reserve	0x1028000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 80 MB of system resource
+sys_resource	0x5000000
+# the game asks for a 0.01 GB heap (a 0.125 GB heap region); the first guess of this region did not fit the heap request and the boot stopped there
+mem_alias	0x1000000000
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Princess Peach: Showtime! shaders

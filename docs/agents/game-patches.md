@@ -595,7 +595,7 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
   - cut `+0x13be4c`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x13bee0`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
   - cut `+0x13c03c`: AllocateAddressRegion: alignment of regions of 1 GB and more mov w10,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)
-- **sdk** `86188952…` ([sdk_patches.py:149](../../dm/tools/sdk_patches.py#L149)): Blasphemous 2 1.0.8, Celeste 1.4.1.1, Paper Mario: The Thousand-Year Door 1.0.1, SHIN MEGAMI TENSEI V: Vengeance 1.0.3
+- **sdk** `86188952…` ([sdk_patches.py:149](../../dm/tools/sdk_patches.py#L149)): Blasphemous 2 1.0.8, Celeste 1.4.1.1, Paper Mario: The Thousand-Year Door 1.0.1, Princess Peach: Showtime! 1.0.0, SHIN MEGAMI TENSEI V: Vengeance 1.0.3
   - cut `+0x12e0f0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x12e184`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
   - cut `+0x12e2e0`: AllocateAddressRegion: alignment of regions of 1 GB and more mov w10,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)

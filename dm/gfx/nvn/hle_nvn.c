@@ -643,7 +643,12 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
             }
         }
         // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
-        if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
+        if (dump && sd[i].control) {
+            uint32_t own; memcpy(&own, (const uint8_t *)sd[i].control + 0x20, 4);
+            // sections longer than 0x880 keep their full length: the texture / image descriptors past the keyed 0x880 prefix are needed offline (UE4.27's compute shaders, Peach Showtime)
+            uint32_t nctl = own >= 0x880 && own < (1u << 20) ? own : 0x880;
+            void *c = malloc(nctl); memcpy(c, sd[i].control, nctl); o->sd[i].control = c;
+        }
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;

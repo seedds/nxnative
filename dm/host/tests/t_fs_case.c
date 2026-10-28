@@ -41,6 +41,7 @@ static int entry_count(void) {
 }
 static void *create_race(void *p) { return (void *)(uintptr_t)h_fs_CreateFile(p, 0); }
 module_t *g_mod; int g_nmod;   // Module table (MountSave picks save fixes by main build ID): this unit test loads no modules
+module_t *module_of(const void *p) { (void)p; return NULL; }   // the loader's resolver (loader.c): no modules here, so no call site is ever printed
 int main(void) {
     char root[1024], save[1024], p[1100];
     const char *tmp = getenv("TMPDIR");

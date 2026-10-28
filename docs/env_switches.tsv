@@ -33,7 +33,7 @@ DM_FPS	switch	`30` or `60` pins the frame rate the display link and frame pacing
 DM_FPS_HOLD	player	`on` / `off` overrides the profile's `fps_hold`: whether late frames may raise the hold above the frame cap's vsyncs (on by default)
 DM_FPS_TARGET	player	Frame-rate cap: `30` or `60`, or `0` for the game's own limit; overrides the profile's `fps_target`
 DM_FS	diagnostic	When set, logs file opens, paths not found or not mounted, and a read summary every 64 MiB or 1000 reads
-DM_FSLOG	diagnostic	`=<file>` writes one TSV line per ReadFile: seconds since boot, guest path, offset, length and guest buffer address
+DM_FSLOG	diagnostic	`=<file>` writes one TSV line per ReadFile: seconds since boot, guest path, offset, length, guest buffer address and the guest call site (`main+0x…`; reads over 1 MiB record the caller chain, `|`-joined)
 DM_FSLOG_HASH	diagnostic	With `DM_FSLOG`, adds a column with the FNV-1a 64 hash of the bytes read
 DM_FULLSCREEN	player	`1` (any value but `0`) starts the Mac window in fullscreen; `0` or unset, a window. The Mac settings window's Display mode
 DM_GAME	switch	Selects the game profile (a title ID under `dm/games` or `DM_GAMES_DIR`) for the Python tools and the rewriter; there is no default
@@ -62,6 +62,9 @@ DM_LINK_VTICK	switch	`0` keeps the system's display-link rate on 144 or 165 Hz M
 DM_LOADHASH	diagnostic	`=1` logs an address-independent SHA-256 per module after loading
 DM_LONGFRAME	diagnostic	`0` turns off the long-frame log (on by default), a line for a frame over 20 ms or with GPU time over 16.7 ms that is clearly above recent frames
 DM_MEASURE_LOCK	path	`=<file>`: `scripts/regress.py`'s default `--lock`, the measuring lock `scripts/bench.py --lock` shares: held only while a game runs, and the harness's shader builds pause while another process holds it
+DM_MEMGREP	diagnostic	`=<hex bytes>[,<hex bytes>…]`: `DM_MEMGREP_WAIT` seconds (default 15) after start, scans every readable VM region for each byte signature and dumps up to 4 hits (± `DM_MEMGREP_SPAN`, default 4 MiB, page-wise) to `memgrep_s<sig>_<n>_<addr>.bin`, logging each address — fish a buffer the guest built (a decoded pak index, a table) out of a running game without a debugger
+DM_MEMGREP_SPAN	diagnostic	With `DM_MEMGREP`: bytes dumped around each hit (page-wise; unreadable pages dump as zeros)
+DM_MEMGREP_WAIT	diagnostic	With `DM_MEMGREP`: seconds to wait after start before the scan (default 15)
 DM_MEMSTAT	diagnostic	`=<tsv>` writes one line per second of memory accounting: footprint, Metal allocation and resident and charged memory by region class (guest, code, malloc, gpu, …)
 DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second writes every VM region of 1 MiB or more to `<tsv>.regions`
 DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exceeds that many GB (default 24 on the Mac, none on iOS; `0` turns it off)
@@ -132,7 +135,7 @@ DM_NVN_PROGTRACE	diagnostic	`=<vertex keys,...>` logs matching ProgramSetShaders
 DM_NVN_REGLUM	diagnostic	`=x0,y0,x1,y1:<file>` (normalized coordinates): on every present records the present number, time, mean luminance and a grayscale thumbnail of that region, to check animation speed against frame rate
 DM_NVN_RT_RANGE	switch	`=1` (experimental, off by default; with `DM_NVN_TBDR=1`) keeps the pass open when the game sets the same colour and depth target again with a view that differs only in its level count
 DM_NVN_RT_RANGE_CHECK	diagnostic	With `DM_NVN_RT_RANGE=1` and `DM_NVN_PASSDUMP`, renders a candidate pass both ways in the same frame and logs and writes the comparison (`CHECK_RESULTS.tsv`, `[RED]` on a difference)
-DM_NVN_SHDUMP	diagnostic	`=<dir>` saves programs missing from the shader map as `<key>.ctl` (control section) and `<key>.code`, to find the files that hold them
+DM_NVN_SHDUMP	diagnostic	`=<dir>` saves programs missing from the shader map as `<key>.ctl` (the control section, whole when longer than 0x880) and `<key>.code`, to find the files that hold them
 DM_NVN_SHMAP	path	The shader map (`shader_map.tsv`); `c1_full.tsv` and `pso_manifest.tsv` are taken from the same folder. Default: the game profile's folder on the Mac; the iOS app sets it
 DM_NVN_SHOT	diagnostic	`=<frame>[,<frame>…]:<path>` saves the swapchain texture as an image at those frames (`%d` in the path = frame number)
 DM_NVN_SHOT_OUT	diagnostic	`=<W>x<H>` makes `DM_NVN_SHOT` capture the picture as the present pass upscales it to that size, the crop included, instead of the raw swapchain texture

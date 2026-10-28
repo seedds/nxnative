@@ -765,8 +765,19 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)
         uint64_t fh = 0xcbf29ce484222325ull; if (hash_on) for (size_t i = 0; i < got; i++) fh = (fh ^ ((uint8_t *)buf)[i]) * 0x100000001b3ull;
-        if (hash_on) fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%016llx\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf, (unsigned long long)fh);
-        else fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf);
+        uint64_t fp = (uint64_t)__builtin_frame_address(0); module_t *m = NULL; void *lr = NULL; char site[220], *sp = site;   // the HLE gate's own return address is host code: walk the frame chain to guest frames (the game code that asked for the read); big reads record the chain up, small ones just the first frame
+        int want_chain = 0, depth = 0;
+        for (int i = 0; i++ < 32 && fp && !(fp & 7); ) { uint64_t w[2]; vm_size_t g2 = 0;
+            if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof w, (vm_address_t)w, &g2) != KERN_SUCCESS || g2 != sizeof w) break;
+            module_t *mm = module_of((void *)(uintptr_t)w[1]);
+            if (mm) { lr = (void *)(uintptr_t)w[1]; m = mm; if (!depth && sz > (1 << 20)) want_chain = 1;
+                if (want_chain && sp + 40 < site + sizeof site) sp += snprintf(sp, (size_t)(site + sizeof site - sp), depth ? "|%s+%#llx" : "%s+%#llx", mm->name, (unsigned long long)((uint8_t *)lr - (uint8_t *)mm->base));
+                if (++depth >= 4 && want_chain) break; if (!want_chain) break; }
+            if (w[0] <= fp) break; fp = w[0]; }
+        if (m && sp == site) snprintf(site, sizeof site, "%s+%#llx", m->name, (unsigned long long)((uint8_t *)lr - (uint8_t *)m->base));
+        else if (!m) snprintf(site, sizeof site, "host");
+        if (hash_on) fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%016llx\t%s\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf, (unsigned long long)fh, site);
+        else fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%s\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf, site);
         pthread_mutex_unlock(&g_fslog_lock); }
     if (g_flag.fs) {   // Read metering: print a line every 64 MiB accumulated or every 1000 reads
         static uint64_t n, bytes, next_b = 64 << 20; static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;

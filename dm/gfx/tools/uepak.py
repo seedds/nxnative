@@ -432,12 +432,13 @@ def unreal_paks(romfs, inline=None):
         if inline is None or inl == inline: out.append(p)
     return out
 
-def job(romfs, main_nso, work, decode=None):
+def job(romfs, main_nso, work, decode=None, key=None):
     """The shader code archives of every pak under the RomFS into <work>/archives, and one Oodle job (<work>/oodle.job) of every compressed shader in them; <work>/job.json lists them.
     The shader libraries of IoStore containers (Unreal Engine 5.6, FINAL FANTASY RESONANCE: no archive in the pak) go there already decoded: their container blocks and shader groups are
-    Oodle-compressed, two layers, so they need decode (OodleHost: the game's decoder over a pipe) rather than the job"""
+    Oodle-compressed, two layers, so they need decode (OodleHost: the game's decoder over a pipe) rather than the job. key: the index AES key when it is not a 32-byte window of main (Princess
+    Peach: Showtime! derives it at run time; the NSP script takes it from the profile's ue_pak_key)"""
     os.makedirs(os.path.join(work, 'archives'), exist_ok=True)
-    img, lo, hi = nso_image(main_nso); key = None; listing, recs = [], []
+    img, lo, hi = nso_image(main_nso) if key is None else (None, None, None); listing, recs = [], []
     tocs = io_tocs(romfs)
     libs = [t for t in tocs if t.of_type(IO_SHADER_LIBRARY)]
     if libs and not decode: raise ValueError(f'{libs[0].path}: IoStore shader libraries need the game\'s decoder (decode)')
@@ -521,7 +522,8 @@ if __name__ == '__main__':
             print(f'pak version {p.version}, mount {p.mount}, {len(p.files)} files, compression {used}')
         elif cmd == 'job':
             dec = OodleHost(*sys.argv[5:7]) if len(sys.argv) > 6 else None
-            try: listing, n = job(*sys.argv[2:5], decode=dec)
+            pkey = bytes.fromhex(sys.argv[7]) if len(sys.argv) > 7 else None   # the index key when it is not a window of main (Princess Peach: Showtime!)
+            try: listing, n = job(*sys.argv[2:5], decode=dec, key=pkey)
             finally:
                 if dec: dec.close()
             for x in listing: print(f"{x['name']}: {x['shaders']} shaders, {x['compressed']} compressed")

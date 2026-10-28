@@ -841,6 +841,72 @@ def rfrm_shaders(d, label):
         out += snvn_shaders(zlib.decompress(r[0x20:]) if r[0x20:0x21] == b'\x78' else r, f'{label}/{d[e + 4:e + 20].hex()}')
     return out
 
+def snvn_le_records(d, a, b, label):
+    """The program records of a little-endian SNVN chunk's data d[a:b] (Metroid Prime 4: Beyond, Retro's engine after Metroid Prime Remastered): the same records as snvn_records, but
+    little-endian and zstd: u32 code length, u32 control length, a byte (0), u32 stream length, then zstd frames (a data frame and an empty one) that inflate to the code areas back to
+    back, then the control sections in the same order (0x880 bytes on SDK 19), each followed by bytes of the engine's own (none, or 0xc0 for some stages), then a binding table.
+    A control section is found by its magic after the previous one's end. → [(offset, [(ctl, code), …])]"""
+    zstd = zstd_mod()
+    out, i = [], a + 12
+    while (i := d.find(ZSTD_MAGIC, i + 1, b)) >= 0:
+        ncode, nctl, _, nz = struct.unpack_from('<IIBI', d, i - 13)
+        if not (nctl and not nctl % 4 and nctl < 1 << 20 and ncode < 1 << 24 and 0 < nz <= b - i): continue
+        try: y = zstd.decompress(d[i:i + nz])
+        except zstd.ZstdError: continue
+        if len(y) != ncode + nctl: continue
+        stages, k, c = [], 0, ncode
+        while (c := y.find(CTL_MAGIC, c)) >= 0 and c + 0x708 <= len(y):
+            n, nk = struct.unpack_from('<I', y, c + 0x20)[0], struct.unpack_from('<I', y, c + 0x704)[0]
+            stages.append((y[c:c + n], y[k:k + nk])); k += nk; c += n
+        if k != ncode: red(f'{label} SNVN record @{i:#x}: the code areas end at {k:#x}, the control sections start at {ncode:#x}')
+        out.append((i, stages)); i += nz - 1
+    return out
+
+def rfrm_le(head, size):   # a little-endian RFRM form (Metroid Prime 4): its own u64 length at +4 fits the file; a big-endian one's (Tropical Freeze) read little-endian does not
+    return head[:4] == RFRM and struct.unpack_from('<Q', head, 4)[0] + 0x20 <= size
+
+def rfrm_le_shaders(f, size, label):
+    """A little-endian Retro Studios RFRM file (Metroid Prime 4: Beyond), read by range: MaterialArchive.arc is one 'MTRL' form whose chunks are 'SDX ' (D3D bytecode), 'NVN2' (the
+    Nintendo Switch 2 Edition's programs, not read) and 'SNVN' (1,740 programs, 3,473 stages); a '.pak' is a 'PACK' form whose 'TOCC' form holds the 'ADIR' chunk: u32 count, then
+    60-byte entries {fourcc type, 16-byte GUID, u32, u32, u64 offset, u64 length, u64 stored length, u64}. An 'MTRL' resource (2,110 in 145 packs, stored uncompressed) is an RFRM
+    form whose data after its 0x20-byte header is zstd, holding an 'MTRL' form with an 'SNVN' chunk"""
+    zstd = zstd_mod()
+    def at(o, n): f.seek(o); return f.read(n)
+    def snvn(d, lb):
+        out, p = [], d.find(SNVN)
+        while p >= 0:
+            a, b = p + 0x18, p + 0x18 + struct.unpack_from('<Q', d, p + 4)[0]
+            for i, stages in snvn_le_records(d, a, b, lb):
+                for ctl, code in stages:
+                    st = glslc_stage(ctl, code)
+                    why = check(lb, st, ctl, code) if st else 'no stage in the code area'
+                    if why: red(f'{lb} SNVN record @{i:#x}: {why}')
+                    out.append((f'{lb}#SNVN@{i:#x}#var', st, ctl, code))
+            p = d.find(SNVN, b)
+        return out
+    head = at(0, 0x40)
+    if head[0x14:0x18] != b'PACK':
+        d, o, out = at(0, size), 0x20, []
+        while o + 0x18 <= len(d):   # the form's chunks: only 'SNVN' is read (an 'NVN2' chunk's data could hold the four bytes SNVN)
+            n = struct.unpack_from('<Q', d, o + 4)[0]
+            if d[o:o + 4] == SNVN: out += snvn(d[o:o + 0x18 + n], label)
+            o += 0x18 + n
+        return out
+    if head[0x34:0x38] != b'TOCC': red(f'{label}: RFRM PACK without a TOCC form')
+    toc = at(0x40, struct.unpack_from('<Q', head, 0x24)[0])
+    a = toc.find(b'ADIR')
+    if a < 0: red(f'{label}: RFRM PACK without an ADIR chunk')
+    out = []
+    for i in range(struct.unpack_from('<I', toc, a + 0x18)[0]):
+        e = a + 0x1c + 60 * i
+        if toc[e:e + 4] != b'MTRL': continue
+        off, n, stored = struct.unpack_from('<QQQ', toc, e + 28)
+        if n != stored: red(f'{label}: MTRL resource {toc[e + 4:e + 20].hex()} is stored compressed ({stored} of {n} bytes)')
+        r = at(off, n)
+        if r[:4] != RFRM or r[0x20:0x24] != ZSTD_MAGIC: red(f'{label}: MTRL resource {toc[e + 4:e + 20].hex()} is not a zstd RFRM form')
+        out += snvn(zstd.decompress(r[0x20:]), f'{label}/{toc[e + 4:e + 20].hex()}')
+    return out
+
 GFPAK = b'GFLXPACK'
 
 def gfpak_members(d, label):
@@ -2168,6 +2234,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == SPKG or head[:4] == b'\0\0\1\0' and path.endswith('.gz'):   # Three Houses' loose shader packages and chunked zlib files (kt_shaders)
         kt_shaders(open(path, 'rb').read(), '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if rfrm_le(head, os.path.getsize(path)):   # a little-endian Retro Studios form or pack, read by range (rfrm_le_shaders)
+        with open(path, 'rb') as f: found += rfrm_le_shaders(f, os.path.getsize(path), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == RFRM:   # a Retro Studios form or pack (rfrm_shaders)
         found += rfrm_shaders(open(path, 'rb').read(), '/' + rel)

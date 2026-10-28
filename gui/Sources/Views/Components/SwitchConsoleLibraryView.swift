@@ -4,7 +4,6 @@ import AppKit
 public struct SwitchConsoleLibraryView: View {
     @ObservedObject public var viewModel: AppViewModel
     public let games: [PortedGame]
-    @State private var selectedGameId: UUID? = nil
 
     public init(viewModel: AppViewModel, games: [PortedGame]) {
         self.viewModel = viewModel
@@ -21,9 +20,6 @@ public struct SwitchConsoleLibraryView: View {
 
     private var focusedGame: PortedGame? {
         guard !games.isEmpty else { return nil }
-        if let selId = selectedGameId, let match = games.first(where: { $0.id == selId }) {
-            return match
-        }
         let idx = max(0, min(viewModel.focusedGameIndex, games.count - 1))
         return games[idx]
     }
@@ -40,6 +36,7 @@ public struct SwitchConsoleLibraryView: View {
                     if let selected = focusedGame {
                         ConsoleHeroView(game: selected, viewModel: viewModel, height: heroHeight)
                             .id("hero_\(selected.id.uuidString)")
+                            .frame(height: heroHeight)
                             .transition(.opacity.animation(.easeInOut(duration: 0.22)))
                     } else {
                         Spacer().frame(height: heroHeight)
@@ -152,9 +149,9 @@ public struct SwitchConsoleLibraryView: View {
                             isFocused: isFocused,
                             baseSize: baseCardSize,
                             onSelect: {
+                                guard !viewModel.isAnyModalPresented else { return }
                                 SoundEffectService.shared.play(.focus)
                                 withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
-                                    selectedGameId = game.id
                                     if let idx = games.firstIndex(where: { $0.id == game.id }) {
                                         viewModel.focusedGameIndex = idx
                                     }

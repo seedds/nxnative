@@ -49,6 +49,7 @@ public struct ConsoleHeroView: View {
                     .frame(width: geo.size.width, height: height)
                 }
             }
+            .allowsHitTesting(false)
 
             // MARK: - Dark Mode Linear Blend Overlay (Matches paint0_linear_31_76)
             LinearGradient(
@@ -61,6 +62,7 @@ public struct ConsoleHeroView: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
+            .allowsHitTesting(false)
 
             LinearGradient(
                 stops: [
@@ -70,6 +72,7 @@ public struct ConsoleHeroView: View {
                 startPoint: .leading,
                 endPoint: .trailing
             )
+            .allowsHitTesting(false)
 
             // MARK: - Game Metadata & Console Action Buttons
             VStack(alignment: .leading, spacing: 12) {

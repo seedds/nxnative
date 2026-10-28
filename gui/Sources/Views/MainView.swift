@@ -47,6 +47,7 @@ public struct MainView: View {
                 VStack(spacing: 0) {
                     // MARK: - Liquid Glass Navigation Bar
                     navigationHeader
+                        .zIndex(500)
                     
                     // MARK: - Selected Content Surface
                     Group {
@@ -71,10 +72,9 @@ public struct MainView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     
-                    // Persistent Controller Prompt Bar across tabs (when not handled inside tab 1)
-                    if viewModel.selectedTab != 1 {
-                        ControllerPromptBar(viewModel: viewModel)
-                    }
+                    // Persistent Controller Prompt Bar across all tabs
+                    ControllerPromptBar(viewModel: viewModel)
+                        .zIndex(500)
                 }
             }
             .onAppear {
@@ -142,8 +142,11 @@ public struct MainView: View {
                 ForEach(tabs, id: \.tag) { item in
                     let isSelected = viewModel.selectedTab == item.tag
                     Button(action: {
+                        guard !viewModel.isAnyModalPresented else { return }
                         SoundEffectService.shared.play(.tabSwitch)
-                        viewModel.selectedTab = item.tag
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            viewModel.selectedTab = item.tag
+                        }
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: item.icon)
@@ -168,7 +171,7 @@ public struct MainView: View {
                                         )
                                         .shadow(color: NXTheme.primary.opacity(0.5), radius: 6, x: 0, y: 2)
                                 } else {
-                                    Color.clear
+                                    Color.white.opacity(0.001)
                                 }
                             }
                         )
@@ -176,6 +179,7 @@ public struct MainView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .disabled(viewModel.isAnyModalPresented)
                     .help(item.title)
                     .nxNoFocusRing()
                 }

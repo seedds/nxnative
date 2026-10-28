@@ -10,8 +10,18 @@ extension AppViewModel {
     }
     
     public func handleGamepadAction(_ action: GamepadAction) {
-        if gameForSettingsSheet != nil {
-            handleSettingsModalGamepadAction(action)
+        if isAnyModalPresented {
+            if gameForSettingsSheet != nil {
+                handleSettingsModalGamepadAction(action)
+            } else if isGameActionMenuPresented {
+                switch action {
+                case .navigateUp: handleLibraryNavigateUp()
+                case .navigateDown: handleLibraryNavigateDown()
+                case .confirm: handleConfirm()
+                case .cancel: handleCancel()
+                default: break
+                }
+            }
             return
         }
         
@@ -19,14 +29,12 @@ extension AppViewModel {
         case .tabPrevious:
             SoundEffectService.shared.play(.tabSwitch)
             withAnimation(.easeInOut(duration: 0.18)) {
-                if isGameActionMenuPresented { isGameActionMenuPresented = false }
                 selectedTab = (selectedTab - 1 + 7) % 7
             }
             
         case .tabNext:
             SoundEffectService.shared.play(.tabSwitch)
             withAnimation(.easeInOut(duration: 0.18)) {
-                if isGameActionMenuPresented { isGameActionMenuPresented = false }
                 selectedTab = (selectedTab + 1) % 7
             }
             
@@ -52,7 +60,6 @@ extension AppViewModel {
             handleContextAction()
         case .menu:
             SoundEffectService.shared.play(.click)
-            if isGameActionMenuPresented { isGameActionMenuPresented = false }
             if selectedTab == 1, let game = currentFocusedGame {
                 gameForSettingsSheet = game
             } else {
@@ -69,9 +76,8 @@ extension AppViewModel {
         case 0 where buildWizardStep > 1:
             SoundEffectService.shared.play(.focus)
             withAnimation(.easeInOut(duration: 0.2)) { goToWizardStep(buildWizardStep - 1) }
-        case 1 where !isGameActionMenuPresented && focusedGameIndex > 0:
-            focusedGameIndex -= 1
-            SoundEffectService.shared.play(.focus)
+        case 1:
+            handleLibraryNavigateLeft()
         case 2:
             handleCompatibilityNavigateLeft()
         case 3:
@@ -95,9 +101,8 @@ extension AppViewModel {
         case 0 where buildWizardStep == 1 && selectedGame != nil:
             SoundEffectService.shared.play(.focus)
             withAnimation(.easeInOut(duration: 0.2)) { goToWizardStep(2) }
-        case 1 where !isGameActionMenuPresented && focusedGameIndex < libraryGames.count - 1:
-            focusedGameIndex += 1
-            SoundEffectService.shared.play(.focus)
+        case 1:
+            handleLibraryNavigateRight()
         case 2:
             handleCompatibilityNavigateRight()
         case 3:
@@ -124,13 +129,7 @@ extension AppViewModel {
                 SoundEffectService.shared.play(.focus)
             }
         case 1:
-            if isGameActionMenuPresented && gameActionFocusedIndex > 0 {
-                gameActionFocusedIndex -= 1
-                SoundEffectService.shared.play(.focus)
-            } else if isFocusOnDeck {
-                isFocusOnDeck = false
-                SoundEffectService.shared.play(.focus)
-            }
+            handleLibraryNavigateUp()
         case 2:
             handleCompatibilityNavigateUp()
         case 5:
@@ -150,13 +149,7 @@ extension AppViewModel {
                 SoundEffectService.shared.play(.focus)
             }
         case 1:
-            if isGameActionMenuPresented && gameActionFocusedIndex < 5 {
-                gameActionFocusedIndex += 1
-                SoundEffectService.shared.play(.focus)
-            } else if !GameControllerService.shared.isGamepadConnected {
-                isFocusOnDeck = true
-                SoundEffectService.shared.play(.focus)
-            }
+            handleLibraryNavigateDown()
         case 2:
             handleCompatibilityNavigateDown()
         default: break

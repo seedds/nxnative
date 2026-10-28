@@ -158,4 +158,55 @@ extension AppViewModel {
             }
         )
     }
+
+    // MARK: - Library Directional Navigation (Two-Row Shelves)
+    public func handleLibraryNavigateLeft() {
+        guard !isGameActionMenuPresented && focusedGameIndex > 0 else { return }
+        focusedGameIndex -= 1
+        SoundEffectService.shared.play(.focus)
+    }
+
+    public func handleLibraryNavigateRight() {
+        guard !isGameActionMenuPresented && focusedGameIndex < libraryGames.count - 1 else { return }
+        focusedGameIndex += 1
+        SoundEffectService.shared.play(.focus)
+    }
+
+    public func handleLibraryNavigateUp() {
+        if isGameActionMenuPresented {
+            if gameActionFocusedIndex > 0 {
+                gameActionFocusedIndex -= 1
+                SoundEffectService.shared.play(.focus)
+            }
+            return
+        }
+        let macs = macLibraryGames
+        let ioses = iosLibraryGames
+        if let cur = currentFocusedGame, let iosIdx = ioses.firstIndex(where: { $0.id == cur.id }), !macs.isEmpty {
+            let targetMacIdx = min(iosIdx, macs.count - 1)
+            if let newGameIdx = libraryGames.firstIndex(where: { $0.id == macs[targetMacIdx].id }) {
+                focusedGameIndex = newGameIdx
+                SoundEffectService.shared.play(.focus)
+            }
+        }
+    }
+
+    public func handleLibraryNavigateDown() {
+        if isGameActionMenuPresented {
+            if gameActionFocusedIndex < 5 {
+                gameActionFocusedIndex += 1
+                SoundEffectService.shared.play(.focus)
+            }
+            return
+        }
+        let macs = macLibraryGames
+        let ioses = iosLibraryGames
+        if let cur = currentFocusedGame, let macIdx = macs.firstIndex(where: { $0.id == cur.id }), !ioses.isEmpty {
+            let targetIosIdx = min(macIdx, ioses.count - 1)
+            if let newGameIdx = libraryGames.firstIndex(where: { $0.id == ioses[targetIosIdx].id }) {
+                focusedGameIndex = newGameIdx
+                SoundEffectService.shared.play(.focus)
+            }
+        }
+    }
 }

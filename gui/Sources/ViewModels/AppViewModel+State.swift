@@ -55,6 +55,24 @@ extension AppViewModel {
         return avail < (targetBytes + 300_000_000)
     }
 
+    // MARK: - Modal Presentation & Navigation Guard
+    public var isAnyModalPresented: Bool {
+        gameForSettingsSheet != nil ||
+        isGameActionMenuPresented ||
+        showAboutSheet ||
+        showUpdateSheet ||
+        showInstallerSheet ||
+        showDeleteConfirm
+    }
+
+    public var macLibraryGames: [PortedGame] {
+        libraryGames.filter { $0.platform == .macApp }
+    }
+
+    public var iosLibraryGames: [PortedGame] {
+        libraryGames.filter { $0.platform == .ios }
+    }
+
     public var diskSpaceWarningMessage: String? {
         guard isDiskSpaceLow, let avail = availableDiskBytes else { return nil }
         let targetBytes: Int64 = selectedGame?.totalSizeBytes ?? detectedFiles.reduce(0) { $0 + $1.sizeBytes }

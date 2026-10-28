@@ -37,11 +37,6 @@ public struct LibraryView: View {
                 } else {
                     SwitchConsoleLibraryView(viewModel: viewModel, games: filteredGames)
                 }
-                
-                Spacer(minLength: 0)
-                
-                // MARK: - Game Controller / Keyboard Prompt Bar
-                ControllerPromptBar(viewModel: viewModel)
             }
             
             // Compact Console Action Sheet (Overlay when Game Selected)

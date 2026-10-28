@@ -6,7 +6,7 @@
 
 # NxNative Launcher
 
-### The Native Nintendo Switch Porting Suite & Console Game Library for Apple Silicon
+### nxnative Graphical user interface Tool for Apple Silicon
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue.svg)](https://apple.com/macos)
 [![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%2FM2%2FM3%2FM4)-orange.svg)](https://apple.com)

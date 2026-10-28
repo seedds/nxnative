@@ -74,7 +74,7 @@ public struct CompatibleGameRow: View {
                     }) {
                         HStack(spacing: 4) {
                             Image(systemName: "doc.text.fill")
-                            Text("Notes")
+                            Text(L10n.t("compatibility.notes"))
                         }
                         .font(.system(size: 11, weight: .semibold))
                     }
@@ -84,7 +84,7 @@ public struct CompatibleGameRow: View {
                         RoundedRectangle(cornerRadius: 8)
                             .stroke(isRowFocused && focusedButton == .notes ? Color.white : Color.clear, lineWidth: 1.5)
                     )
-                    .help("View upstream compatibility notes on GitHub")
+                    .help(L10n.t("compatibility.upstream_notes_help"))
                 }
             }
             .frame(minHeight: 48)

@@ -12,6 +12,7 @@ public struct PersonalizationView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 headerView
+                launcherLanguageCard
                 highlightColorCard
                 SystemAppearanceCard(viewModel: viewModel)
                 soundEffectsCard
@@ -22,24 +23,25 @@ public struct PersonalizationView: View {
     
     private var headerView: some View {
         HStack {
-            Text("Personalization & Appearance")
+            Text(viewModel.tr("personalization.title"))
                 .font(.system(size: 18, weight: .bold, design: .rounded))
                 .foregroundColor(NXTheme.textPrimary)
             
             Spacer()
             
-            if viewModel.highlightTheme != .electricPurple || viewModel.iconAppearanceMode != .light || !soundService.isSoundEnabled {
+            if viewModel.highlightTheme != .electricPurple || viewModel.iconAppearanceMode != .light || !soundService.isSoundEnabled || viewModel.launcherLanguage != .system {
                 Button(action: {
                     SoundEffectService.shared.play(.click)
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                         viewModel.highlightTheme = .electricPurple
                         viewModel.iconAppearanceMode = .light
                         soundService.isSoundEnabled = true
+                        viewModel.launcherLanguage = .system
                     }
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.counterclockwise")
-                        Text("Reset Defaults")
+                        Text(viewModel.tr("personalization.reset_defaults"))
                     }
                 }
                 .buttonStyle(NXSecondaryButtonStyle())
@@ -47,10 +49,93 @@ public struct PersonalizationView: View {
         }
     }
     
+    private var launcherLanguageCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "globe")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(viewModel.highlightTheme.primaryColor)
+                
+                Text(viewModel.tr("personalization.launcher_language"))
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundColor(NXTheme.textPrimary)
+                
+                Spacer()
+            }
+            
+            let columns = [
+                GridItem(.flexible(), spacing: 10),
+                GridItem(.flexible(), spacing: 10),
+                GridItem(.flexible(), spacing: 10)
+            ]
+            
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(AppLanguage.allCases) { lang in
+                    let isSelected = viewModel.launcherLanguage == lang
+                    languagePill(lang: lang, isSelected: isSelected)
+                }
+            }
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(NXTheme.glassSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
+        )
+    }
+    
+    private func languagePill(lang: AppLanguage, isSelected: Bool) -> some View {
+        Button(action: {
+            SoundEffectService.shared.play(.click)
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.78)) {
+                viewModel.launcherLanguage = lang
+            }
+        }) {
+            HStack(spacing: 10) {
+                Text(lang.flag)
+                    .font(.system(size: 18))
+                
+                Text(lang == .system ? viewModel.tr("personalization.icon_auto") : lang.nativeName)
+                    .font(.system(size: 12, weight: isSelected ? .bold : .semibold, design: .rounded))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                
+                Spacer(minLength: 0)
+                
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(viewModel.highlightTheme.primaryColor)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected ? viewModel.highlightTheme.primaryColor.opacity(0.24) : NXTheme.glassSurfaceElevated.opacity(0.5))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        isSelected
+                            ? AnyShapeStyle(viewModel.highlightTheme.primaryColor.opacity(0.8))
+                            : AnyShapeStyle(NXTheme.specularRim),
+                        lineWidth: isSelected ? 1.4 : 0.8
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .nxNoFocusRing()
+    }
+    
     private var highlightColorCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Accent & Highlight Theme")
+                Text(viewModel.tr("personalization.accent_theme"))
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
                 
@@ -139,7 +224,7 @@ public struct PersonalizationView: View {
     private var soundEffectsCard: some View {
         GlassCard {
             HStack {
-                Text("Console UI Sound Effects")
+                Text(viewModel.tr("personalization.sound_effects"))
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
                 

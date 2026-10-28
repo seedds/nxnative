@@ -49,6 +49,22 @@ build_app_bundle() {
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>pt-BR</string>
+        <string>es</string>
+        <string>ja</string>
+        <string>fr</string>
+        <string>de</string>
+        <string>it</string>
+        <string>zh-Hans</string>
+        <string>zh-Hant</string>
+        <string>ko</string>
+        <string>pl</string>
+        <string>ru</string>
+        <string>sv</string>
+    </array>
     <key>CFBundleDisplayName</key>
     <string>NxNative Launcher</string>
     <key>CFBundleExecutable</key>
@@ -66,9 +82,9 @@ build_app_bundle() {
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.6.2</string>
+    <string>1.6.3</string>
     <key>CFBundleVersion</key>
-    <string>12</string>
+    <string>13</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

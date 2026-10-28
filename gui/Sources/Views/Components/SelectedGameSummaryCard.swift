@@ -46,7 +46,7 @@ public struct SelectedGameSummaryCard: View {
                                 .foregroundColor(NXTheme.secondary)
                             
                             if sel.updateCount > 0 {
-                                Text("+\(sel.updateCount) Update\(sel.updateCount > 1 ? "s" : "")")
+                                Text(viewModel.tr("build.badge_updates", sel.updateCount))
                                     .font(.system(size: 10, weight: .bold))
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 6)
@@ -55,7 +55,7 @@ public struct SelectedGameSummaryCard: View {
                                     .clipShape(Capsule())
                             }
                             if sel.dlcCount > 0 {
-                                Text("+\(sel.dlcCount) DLC\(sel.dlcCount > 1 ? "s" : "")")
+                                Text(viewModel.tr("build.badge_dlcs", sel.dlcCount))
                                     .font(.system(size: 10, weight: .bold))
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 6)
@@ -69,7 +69,7 @@ public struct SelectedGameSummaryCard: View {
                 
                 Spacer()
                 
-                Button("Change Game") {
+                Button(viewModel.tr("build.change_game")) {
                     withAnimation(.easeInOut(duration: 0.25)) {
                         viewModel.goToWizardStep(1)
                     }

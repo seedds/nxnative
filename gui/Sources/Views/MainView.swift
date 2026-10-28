@@ -8,15 +8,17 @@ public struct MainView: View {
         self.viewModel = viewModel
     }
     
-    private let tabs: [(tag: Int, title: String, icon: String)] = [
-        (0, "Port Game", "play.circle.fill"),
-        (1, "Library", "books.vertical.fill"),
-        (2, "Compatibility", "checklist.checked"),
-        (3, "Controls", "gamecontroller.fill"),
-        (4, "Personalize", "paintpalette.fill"),
-        (5, "Settings", "gearshape.fill"),
-        (6, "Console", "terminal.fill")
-    ]
+    private var tabs: [(tag: Int, title: String, icon: String)] {
+        [
+            (0, viewModel.tr("nav.port_game"), "play.circle.fill"),
+            (1, viewModel.tr("nav.library"), "books.vertical.fill"),
+            (2, viewModel.tr("nav.compatibility"), "checklist.checked"),
+            (3, viewModel.tr("nav.controls"), "gamecontroller.fill"),
+            (4, viewModel.tr("nav.personalize"), "paintpalette.fill"),
+            (5, viewModel.tr("nav.settings"), "gearshape.fill"),
+            (6, viewModel.tr("nav.console"), "terminal.fill")
+        ]
+    }
     
     private var isCompactNav: Bool {
         windowWidth < 1080
@@ -86,6 +88,7 @@ public struct MainView: View {
                     ControllerPromptBar(viewModel: viewModel)
                         .zIndex(500)
                 }
+                .id(viewModel.launcherLanguage)
             }
             .onAppear {
                 self.windowWidth = windowGeo.size.width
@@ -129,7 +132,7 @@ public struct MainView: View {
                                     Circle()
                                         .fill(NXTheme.secondary)
                                         .frame(width: 5, height: 5)
-                                    Text("Update")
+                                    Text(viewModel.tr("nav.update"))
                                         .font(.system(size: 9, weight: .bold))
                                         .foregroundColor(.white)
                                 }
@@ -139,7 +142,7 @@ public struct MainView: View {
                                 .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
-                            .help("Click to install the latest NxNative Launcher update from GitHub")
+                            .help(viewModel.tr("nav.update_tooltip"))
                         }
                     }
                 }
@@ -214,7 +217,7 @@ public struct MainView: View {
                     HStack(spacing: 6) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("Building...")
+                        Text(viewModel.tr("status.building"))
                             .font(.system(size: 11, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
                     }
@@ -231,7 +234,7 @@ public struct MainView: View {
                 } else {
                     StatusBadge(
                         isPositive: viewModel.isProdKeysValid && viewModel.isNxnativeValid,
-                        text: (viewModel.isProdKeysValid && viewModel.isNxnativeValid) ? "Environment Ready" : "Setup Required (Check Settings)",
+                        text: (viewModel.isProdKeysValid && viewModel.isNxnativeValid) ? viewModel.tr("status.env_ready") : viewModel.tr("status.setup_required"),
                         showText: false
                     )
                 }

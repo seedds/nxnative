@@ -11,11 +11,11 @@ public struct SystemPatchesCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Label("Engine Compatibility Patches", systemImage: "checkmark.seal.fill")
+                    Label(viewModel.tr("system.patches_title"), systemImage: "checkmark.seal.fill")
                         .symbolRenderingMode(.hierarchical)
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
-                        .help("Pre-configured patches for 60 FPS unlock, UE memory allocators, dynamic shader fallbacks, and Mac app packaging.")
+                        .help(viewModel.tr("system.patches_help"))
                     
                     Spacer()
                     
@@ -24,7 +24,7 @@ public struct SystemPatchesCard: View {
                     }) {
                         HStack(spacing: 4) {
                             Image(systemName: "arrow.triangle.2.circlepath")
-                            Text("Verify & Apply")
+                            Text(viewModel.tr("system.verify_apply"))
                         }
                     }
                     .buttonStyle(NXSecondaryButtonStyle())

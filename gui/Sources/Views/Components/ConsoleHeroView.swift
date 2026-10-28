@@ -115,12 +115,12 @@ public struct ConsoleHeroView: View {
                                 if isLaunching {
                                     ProgressView()
                                         .controlSize(.small)
-                                    Text("Launching...")
+                                    Text(viewModel.tr("common.launching"))
                                         .font(.system(size: 13, weight: .bold, design: .rounded))
                                 } else {
                                     Image(systemName: "play.fill")
                                         .font(.system(size: 12))
-                                    Text("Play Game")
+                                    Text(viewModel.tr("common.play_game"))
                                         .font(.system(size: 14, weight: .bold, design: .rounded))
                                 }
                             }
@@ -154,7 +154,7 @@ public struct ConsoleHeroView: View {
                                 } else {
                                     Image(systemName: "arrow.up.forward.app")
                                         .font(.system(size: 13))
-                                    Text("Send to iPhone / iPad")
+                                    Text(viewModel.tr("console.send_ios"))
                                         .font(.system(size: 14, weight: .bold, design: .rounded))
                                 }
                             }
@@ -180,7 +180,7 @@ public struct ConsoleHeroView: View {
                         }) {
                             HStack(spacing: 6) {
                                 Image(systemName: "airdrop")
-                                Text("AirDrop")
+                                Text(viewModel.tr("common.airdrop"))
                                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                             }
                             .foregroundColor(NXTheme.textPrimary)
@@ -196,7 +196,7 @@ public struct ConsoleHeroView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .help("Send .ipa directly to iPhone/iPad via AirDrop")
+                        .help(viewModel.tr("settings_modal.airdrop_help"))
 
                         // Reveal in Finder Button for iOS
                         Button(action: {
@@ -205,7 +205,7 @@ public struct ConsoleHeroView: View {
                         }) {
                             HStack(spacing: 6) {
                                 Image(systemName: "folder.fill")
-                                Text("Reveal .ipa")
+                                Text(viewModel.tr("console.reveal_ipa"))
                                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                             }
                             .foregroundColor(NXTheme.textPrimary)
@@ -230,7 +230,7 @@ public struct ConsoleHeroView: View {
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: "slider.horizontal.3")
-                            Text("Options")
+                            Text(viewModel.tr("console.options"))
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                         }
                         .foregroundColor(NXTheme.textPrimary)
@@ -255,7 +255,7 @@ public struct ConsoleHeroView: View {
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: "folder.fill")
-                            Text("Saves")
+                            Text(viewModel.tr("console.saves"))
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                         }
                         .foregroundColor(NXTheme.textSecondary)

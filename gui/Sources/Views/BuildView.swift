@@ -43,9 +43,9 @@ public struct BuildView: View {
             .padding(20)
         }
         .alert("Apple Command Line Tools", isPresented: $viewModel.showCltInstallAlert) {
-            Button("OK", role: .cancel) {}
+            Button(viewModel.tr("common.ok"), role: .cancel) {}
         } message: {
-            Text("Apple's official installer dialog has opened on screen. Follow Apple's prompt to complete the installation. Once finished, click 'Re-check' to verify.")
+            Text(viewModel.tr("build.apple_clt_dialog"))
         }
     }
     
@@ -54,15 +54,15 @@ public struct BuildView: View {
     private var wizardStepperHeader: some View {
         GlassCard {
             HStack(spacing: 0) {
-                stepIndicator(step: 1, title: "1. Select Game", icon: "gamecontroller.fill")
+                stepIndicator(step: 1, title: viewModel.tr("build.step_1"), icon: "gamecontroller.fill")
                 
                 stepDivider(isCompleted: viewModel.buildWizardStep > 1)
                 
-                stepIndicator(step: 2, title: "2. Configure & Output", icon: "slider.horizontal.3")
+                stepIndicator(step: 2, title: viewModel.tr("build.step_2"), icon: "slider.horizontal.3")
                 
                 stepDivider(isCompleted: viewModel.buildWizardStep > 2)
                 
-                stepIndicator(step: 3, title: "3. Porting Execution", icon: "hammer.fill")
+                stepIndicator(step: 3, title: viewModel.tr("build.step_3"), icon: "hammer.fill")
             }
         }
     }
@@ -140,7 +140,7 @@ public struct BuildView: View {
                 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        Text("nxnative by @seedds")
+                        Text(viewModel.tr("build.community_disclaimer_title"))
                             .font(.system(size: 13, weight: .bold, design: .rounded))
                             .foregroundColor(NXTheme.textPrimary)
                         
@@ -149,7 +149,7 @@ public struct BuildView: View {
                             .foregroundColor(NXTheme.secondary)
                     }
                     
-                    Text("This community GUI is a helper tool to make porting Switch games accessible without terminal commands. Notice: As soon as the upstream developer releases an official launcher, this project will be deprecated in favor of the official release.")
+                    Text(viewModel.tr("build.community_disclaimer_desc"))
                         .font(.system(size: 11))
                         .foregroundColor(NXTheme.textSecondary)
                         .lineSpacing(2)

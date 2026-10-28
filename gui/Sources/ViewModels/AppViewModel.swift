@@ -18,6 +18,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         public static let savedCompatibilityDisplayMode = "NXNative_SavedCompatibilityDisplayMode"
         public static let savedLibraryCardSize = "NXNative_SavedLibraryCardSize"
         public static let savedLibraryCardScale = "NXNative_SavedLibraryCardScale"
+        public static let savedLauncherLanguage = "NXNative_SavedLauncherLanguage"
     }
     
     // MARK: - Workspace & Paths
@@ -205,6 +206,12 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
             UserDefaults.standard.set(highlightTheme.rawValue, forKey: StorageKeys.savedHighlightTheme)
         }
     }
+    @Published public var launcherLanguage: AppLanguage = .system {
+        didSet {
+            UserDefaults.standard.set(launcherLanguage.rawValue, forKey: StorageKeys.savedLauncherLanguage)
+            LocalizationService.shared.currentLanguage = launcherLanguage
+        }
+    }
     
     // MARK: - Navigation & Gamepad State
     @Published public var selectedTab: Int = 0
@@ -216,6 +223,10 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     
     public var availableLanguages: [(code: String, label: String)] {
         Self.availableLanguages
+    }
+    
+    public func tr(_ key: String, _ args: CVarArg...) -> String {
+        LocalizationService.shared.format(key: key, arguments: args)
     }
     
     let runner = BuildRunner()
@@ -274,6 +285,14 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         }
         if let savedScale = UserDefaults.standard.object(forKey: StorageKeys.savedLibraryCardScale) as? Double {
             self.libraryCardScale = max(0.70, min(1.35, savedScale))
+        }
+        if let savedLang = UserDefaults.standard.string(forKey: StorageKeys.savedLauncherLanguage),
+           let lang = AppLanguage(rawValue: savedLang) {
+            self.launcherLanguage = lang
+            LocalizationService.shared.currentLanguage = lang
+        } else {
+            self.launcherLanguage = .system
+            LocalizationService.shared.currentLanguage = .system
         }
         
         detectEnvironment()

@@ -16,6 +16,13 @@ public final class SoundEffectService: ObservableObject {
     private var cachedSounds: [SoundEffectType: NSSound] = [:]
     private var lastPlayTimes: [SoundEffectType: Date] = [:]
     private var lastGlobalPlayTime: Date = Date.distantPast
+    private let lock = NSLock()
+    
+    // Minimum interval between identical sound triggers (prevents double-tap / gesture bounce)
+    private let debounceInterval: TimeInterval = 0.22
+    
+    // Minimum interval between distinct UI sounds (prevents click + focus or card + button collision)
+    private let globalThrottleInterval: TimeInterval = 0.18
     
     @Published public var isSoundEnabled: Bool {
         didSet {
@@ -30,44 +37,63 @@ public final class SoundEffectService: ObservableObject {
             self.isSoundEnabled = UserDefaults.standard.bool(forKey: soundKey)
         }
         
-        let mapping: [(SoundEffectType, String)] = [
-            (.click, "Tink"),
-            (.tabSwitch, "Pop"),
-            (.focus, "Purr"),
-            (.launch, "Hero"),
-            (.error, "Basso")
-        ]
-        for (effect, name) in mapping {
-            if let sound = NSSound(named: name) {
-                cachedSounds[effect] = sound
-            }
+        let coreSystemPath = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system"
+        let mediaKeysPath = "\(coreSystemPath)/Media Keys.aif"
+        let tabSoundPath = "\(coreSystemPath)/acknowledgment_sent.caf"
+        
+        // Single-impulse, non-overlapping sounds
+        cachedSounds[.click] = loadSound(fromPath: mediaKeysPath, fallbackNamed: "Tink")
+        cachedSounds[.tabSwitch] = loadSound(fromPath: tabSoundPath, fallbackNamed: "Tink")
+        cachedSounds[.focus] = loadSound(fromPath: mediaKeysPath, fallbackNamed: "Tink")
+        cachedSounds[.launch] = NSSound(named: "Hero")
+        cachedSounds[.error] = NSSound(named: "Basso")
+    }
+    
+    private func loadSound(fromPath path: String, fallbackNamed name: String) -> NSSound? {
+        if FileManager.default.fileExists(atPath: path),
+           let sound = NSSound(contentsOfFile: path, byReference: true) {
+            return sound
         }
+        return NSSound(named: name)
     }
     
     public func play(_ effect: SoundEffectType) {
         guard isSoundEnabled else { return }
         
+        lock.lock()
         let now = Date()
-        // Prevent duplicate trigger bursts of the exact same sound
-        if let last = lastPlayTimes[effect], now.timeIntervalSince(last) < 0.12 {
+        
+        // 1. Prevent duplicate trigger bursts of the exact same sound
+        if let last = lastPlayTimes[effect], now.timeIntervalSince(last) < debounceInterval {
+            lock.unlock()
             return
         }
         
-        // Prevent rapid overlapping distinct sounds on a single mouse click (e.g. click + focus)
-        if effect != .launch && effect != .error {
-            if now.timeIntervalSince(lastGlobalPlayTime) < 0.08 {
+        // 2. Prevent rapid overlapping distinct sounds on a single mouse click (e.g. click + focus or click + launch)
+        if effect != .error {
+            if now.timeIntervalSince(lastGlobalPlayTime) < globalThrottleInterval {
+                lock.unlock()
                 return
             }
         }
         
         lastPlayTimes[effect] = now
         lastGlobalPlayTime = now
+        let sound = cachedSounds[effect]
+        lock.unlock()
         
-        if let sound = cachedSounds[effect] {
-            if sound.isPlaying {
-                sound.stop()
+        guard let sound = sound else { return }
+        
+        DispatchQueue.main.async {
+            // Use independent copy to avoid stopping or clipping audio buffer in AppKit CoreAudio
+            if let player = sound.copy() as? NSSound {
+                player.play()
+            } else {
+                if sound.isPlaying {
+                    sound.stop()
+                }
+                sound.play()
             }
-            sound.play()
         }
     }
 }

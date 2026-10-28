@@ -23,7 +23,7 @@ public struct DependencyRow: View {
                         .foregroundColor(NXTheme.textPrimary)
                     
                     if item.isProtected {
-                        Text("System")
+                        Text(viewModel.tr("system.tag_system"))
                             .font(.system(size: 9, weight: .bold))
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
@@ -53,7 +53,7 @@ public struct DependencyRow: View {
                 }) {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.down.circle")
-                        Text("Install")
+                        Text(viewModel.tr("common.install"))
                     }
                     .font(.system(size: 11, weight: .semibold))
                 }
@@ -61,12 +61,12 @@ public struct DependencyRow: View {
                 .controlSize(.small)
             } else if item.isAvailable {
                 HStack(spacing: 6) {
-                    Button("Repair") {
+                    Button(viewModel.tr("common.repair")) {
                         viewModel.repairDependency(item)
                     }
                     .buttonStyle(NXSecondaryButtonStyle())
                     .controlSize(.small)
-                    .help("Reinstall / repair tool")
+                    .help(viewModel.tr("system.repair_help"))
                     
                     if !item.isProtected && item.uninstallCommand != nil {
                         Button(role: .destructive) {
@@ -78,7 +78,7 @@ public struct DependencyRow: View {
                         }
                         .buttonStyle(NXSecondaryButtonStyle())
                         .controlSize(.small)
-                        .help("Uninstall tool")
+                        .help(viewModel.tr("system.uninstall_help"))
                     }
                 }
             }

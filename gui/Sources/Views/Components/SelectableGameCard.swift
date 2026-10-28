@@ -51,7 +51,7 @@ public struct SelectableGameCard: View {
                     HStack(spacing: 6) {
                         // Badge: Base (White text for high contrast per user request)
                         if game.baseFile != nil {
-                            Text("Base")
+                            Text(L10n.t("build.badge_base"))
                                 .font(.system(size: 10, weight: .bold))
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 2)
@@ -62,7 +62,7 @@ public struct SelectableGameCard: View {
                         
                         // Badge: Updates (White text for high contrast)
                         if game.updateCount > 0 {
-                            Text("+\(game.updateCount) Update\(game.updateCount > 1 ? "s" : "")")
+                            Text(L10n.t("build.badge_updates", game.updateCount))
                                 .font(.system(size: 10, weight: .bold))
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 2)
@@ -73,7 +73,7 @@ public struct SelectableGameCard: View {
                         
                         // Badge: DLCs (White text for high contrast)
                         if game.dlcCount > 0 {
-                            Text("+\(game.dlcCount) DLC\(game.dlcCount > 1 ? "s" : "")")
+                            Text(L10n.t("build.badge_dlcs", game.dlcCount))
                                 .font(.system(size: 10, weight: .bold))
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 2)
@@ -82,7 +82,7 @@ public struct SelectableGameCard: View {
                                 .clipShape(Capsule())
                         }
                         
-                        Text("(\(game.files.count) file\(game.files.count > 1 ? "s" : ""))")
+                        Text(L10n.t("build.files_count", game.files.count))
                             .font(.system(size: 10))
                             .foregroundColor(NXTheme.textMuted)
                     }

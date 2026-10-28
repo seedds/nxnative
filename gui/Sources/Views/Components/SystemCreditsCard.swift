@@ -8,7 +8,7 @@ public struct SystemCreditsCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Label("Acknowledgements & Credits", systemImage: "heart.fill")
+                    Label(L10n.t("system.credits_title"), systemImage: "heart.fill")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(Color(red: 0.95, green: 0.4, blue: 0.6))
                     
@@ -56,7 +56,7 @@ public struct SystemCreditsCard: View {
                                 Text("Rennan (@rennan101)")
                                     .font(.system(size: 12, weight: .bold, design: .rounded))
                                     .foregroundColor(.white)
-                                Text("LAUNCHER DEVELOPER")
+                                Text(L10n.t("about.role_launcher_dev"))
                                     .font(.system(size: 8.5, weight: .heavy, design: .rounded))
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 6)
@@ -64,7 +64,7 @@ public struct SystemCreditsCard: View {
                                     .background(NXTheme.primary.opacity(0.6))
                                     .clipShape(Capsule())
                             }
-                            Text("Creator & Lead Developer of NxNative Launcher (macOS SwiftUI GUI, Game Library, Auto-Updater & Gamepad UX)")
+                            Text(L10n.t("about.desc_launcher"))
                                 .font(.system(size: 10))
                                 .foregroundColor(NXTheme.textSecondary)
                                 .lineLimit(1)
@@ -89,7 +89,7 @@ public struct SystemCreditsCard: View {
                 .buttonStyle(.plain)
                 .nxNoFocusRing()
                 
-                Text("NxNative Launcher is a native macOS graphical interface and game library created by Rennan, built on top of the breakthrough translation engine created by seedds and foundational open-source engineering.")
+                Text(L10n.t("about.description"))
                     .font(.system(size: 11))
                     .foregroundColor(NXTheme.textSecondary)
                 

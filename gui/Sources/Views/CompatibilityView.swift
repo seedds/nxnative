@@ -54,6 +54,7 @@ public struct CompatibilityView: View {
                                     )
                                     .id(game.id)
                                     .onTapGesture {
+                                        guard viewModel.focusedCompatibilityIndex != index || viewModel.compatibilityFocusArea != .games else { return }
                                         SoundEffectService.shared.play(.focus)
                                         viewModel.compatibilityFocusArea = .games
                                         viewModel.focusedCompatibilityIndex = index
@@ -75,6 +76,7 @@ public struct CompatibilityView: View {
                                     )
                                     .id(game.id)
                                     .onTapGesture {
+                                        guard viewModel.focusedCompatibilityIndex != index || viewModel.compatibilityFocusArea != .games else { return }
                                         SoundEffectService.shared.play(.focus)
                                         viewModel.compatibilityFocusArea = .games
                                         viewModel.focusedCompatibilityIndex = index
@@ -101,7 +103,7 @@ public struct CompatibilityView: View {
             Image(systemName: "tray")
                 .font(.system(size: 38))
                 .foregroundColor(NXTheme.secondary.opacity(0.4))
-            Text("No compatible games match your filter.")
+            Text(viewModel.tr("compatibility.no_match"))
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(NXTheme.textSecondary)
         }

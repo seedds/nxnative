@@ -28,7 +28,7 @@ public struct ControllerPromptBar: View {
                 HStack(spacing: 12) {
                     keyboardPromptsForCurrentContext
                     
-                    keyboardKeyBadge(glyph: "1-7", action: "Tabs")
+                    keyboardKeyBadge(glyph: "1-7", action: viewModel.tr("controls.tabs"))
                 }
             }
         }
@@ -55,7 +55,7 @@ public struct ControllerPromptBar: View {
                 .font(.system(size: 11))
                 .foregroundColor(controllerService.isGamepadConnected ? Color(red: 0.13, green: 0.77, blue: 0.37) : NXTheme.secondary)
             
-            Text(controllerService.isGamepadConnected ? controllerService.activeControllerName : "Keyboard Controls")
+            Text(controllerService.isGamepadConnected ? controllerService.activeControllerName : viewModel.tr("controls.keyboard_controls"))
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                 .foregroundColor(controllerService.isGamepadConnected ? NXTheme.textPrimary : NXTheme.textSecondary)
                 .lineLimit(1)

@@ -75,7 +75,7 @@ public struct BuildExecutionSection: View {
                 Button(action: {
                     viewModel.cancelBuild()
                 }) {
-                    Label("Cancel Porting", systemImage: "xmark.circle.fill")
+                    Label(viewModel.tr("build.cancel"), systemImage: "xmark.circle.fill")
                         .font(.system(size: 13, weight: .medium))
                 }
                 .buttonStyle(.bordered)
@@ -83,7 +83,7 @@ public struct BuildExecutionSection: View {
                 
                 Spacer()
                 
-                Button("Open Full Console") {
+                Button(viewModel.tr("build.open_console")) {
                     viewModel.selectedTab = 6
                 }
                 .buttonStyle(.link)
@@ -103,7 +103,7 @@ public struct BuildExecutionSection: View {
                     .font(.system(size: 28))
                 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Porting Completed Successfully!")
+                    Text(viewModel.tr("build.port_completed_title"))
                         .font(.system(size: 16, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
                     Text(outputPath)
@@ -122,7 +122,7 @@ public struct BuildExecutionSection: View {
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: "play.fill")
-                            Text("Launch Game")
+                            Text(viewModel.tr("build.launch_game"))
                         }
                         .font(.system(size: 13, weight: .bold))
                         .padding(.horizontal, 16)
@@ -136,7 +136,7 @@ public struct BuildExecutionSection: View {
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: "airdrop")
-                            Text("AirDrop to iPhone / iPad")
+                            Text(viewModel.tr("build.airdrop_ios"))
                         }
                         .font(.system(size: 13, weight: .bold))
                         .padding(.horizontal, 16)
@@ -150,7 +150,7 @@ public struct BuildExecutionSection: View {
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "folder.fill")
-                        Text("Reveal in Finder")
+                        Text(viewModel.tr("common.reveal_finder"))
                     }
                     .font(.system(size: 13, weight: .semibold))
                     .padding(.horizontal, 14)
@@ -167,7 +167,7 @@ public struct BuildExecutionSection: View {
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.counterclockwise.circle.fill")
-                        Text("Port Another Game")
+                        Text(viewModel.tr("build.port_another"))
                     }
                     .font(.system(size: 13, weight: .semibold))
                     .padding(.horizontal, 14)
@@ -186,7 +186,7 @@ public struct BuildExecutionSection: View {
                     .font(.system(size: 28))
                 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Porting Failed")
+                    Text(viewModel.tr("build.port_failed_title"))
                         .font(.system(size: 16, weight: .bold, design: .rounded))
                         .foregroundColor(.red)
                     Text(errorMessage)
@@ -206,7 +206,7 @@ public struct BuildExecutionSection: View {
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.left.circle.fill")
-                        Text("Back to Options & Try Again")
+                        Text(viewModel.tr("build.back_options"))
                     }
                     .font(.system(size: 13, weight: .semibold))
                     .padding(.horizontal, 14)
@@ -216,7 +216,7 @@ public struct BuildExecutionSection: View {
                 
                 Spacer()
                 
-                Button("Open Full Console") {
+                Button(viewModel.tr("build.open_console")) {
                     viewModel.selectedTab = 6
                 }
                 .buttonStyle(.link)
@@ -229,10 +229,10 @@ public struct BuildExecutionSection: View {
     private var idleExecutionView: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("No Porting Task Active")
+                Text(viewModel.tr("build.no_task_active"))
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
-                Text("Select a game in Step 1 and configure options in Step 2 to start.")
+                Text(viewModel.tr("build.no_task_desc"))
                     .font(.system(size: 12))
                     .foregroundColor(NXTheme.textSecondary)
             }
@@ -246,7 +246,7 @@ public struct BuildExecutionSection: View {
             }) {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.left.circle.fill")
-                    Text("Go to Step 1")
+                    Text(viewModel.tr("build.go_step_1"))
                 }
                 .font(.system(size: 13, weight: .semibold))
                 .padding(.horizontal, 16)

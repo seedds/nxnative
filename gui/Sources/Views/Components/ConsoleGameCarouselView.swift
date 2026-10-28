@@ -22,11 +22,11 @@ public struct ConsoleGameCarouselView: View {
                         gameCoverCard(game: game, index: index, isFocused: isFocused, isLaunching: isLaunching)
                             .id(index)
                             .onTapGesture {
-                                SoundEffectService.shared.play(.focus)
                                 withAnimation(.spring(response: 0.28, dampingFraction: 0.75)) {
                                     if viewModel.focusedGameIndex == index {
                                         viewModel.launchGame(game)
                                     } else {
+                                        SoundEffectService.shared.play(.focus)
                                         viewModel.focusedGameIndex = index
                                         viewModel.isFocusOnDeck = false
                                     }
@@ -123,7 +123,7 @@ public struct ConsoleGameCarouselView: View {
                     HStack(spacing: 5) {
                         ProgressView()
                             .controlSize(.mini)
-                        Text("Launching")
+                        Text(L10n.t("common.launching"))
                             .font(.system(size: 10, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
                     }

@@ -49,7 +49,7 @@ public struct BuildBanners: View {
             
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text("nxnative by @seedds")
+                    Text(viewModel.tr("build.community_disclaimer_title"))
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
                     
@@ -58,7 +58,7 @@ public struct BuildBanners: View {
                         .foregroundColor(NXTheme.secondary)
                 }
                 
-                Text("This community GUI is a helper tool to make porting Switch games accessible without terminal commands. Notice: As soon as the upstream developer releases an official launcher, this project will be deprecated in favor of the official release.")
+                Text(viewModel.tr("build.community_disclaimer_desc"))
                     .font(.system(size: 11))
                     .foregroundColor(NXTheme.textSecondary)
                     .lineSpacing(2)
@@ -101,10 +101,10 @@ public struct BuildBanners: View {
                 .foregroundColor(NXTheme.secondary)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("nxnative Update Available")
+                Text(viewModel.tr("build.update_banner_title"))
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
-                Text("\(update.commitMessages.count) new commits available on GitHub repository.")
+                Text(viewModel.tr("build.update_banner_commits", update.commitMessages.count))
                     .font(.system(size: 11))
                     .foregroundColor(NXTheme.textSecondary)
             }
@@ -114,7 +114,7 @@ public struct BuildBanners: View {
             if viewModel.isApplyingUpdate {
                 ProgressView().controlSize(.small)
             } else {
-                Button("Update Now") {
+                Button(viewModel.tr("build.update_now")) {
                     viewModel.applyUpdate()
                 }
                 .buttonStyle(NXPrimaryButtonStyle())
@@ -145,7 +145,7 @@ public struct BuildBanners: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(NXTheme.textPrimary)
             Spacer()
-            Button("Dismiss") {
+            Button(viewModel.tr("common.dismiss")) {
                 viewModel.updateSuccessBanner = nil
             }
             .buttonStyle(.plain)
@@ -172,7 +172,7 @@ public struct BuildBanners: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(NXTheme.textPrimary)
             Spacer()
-            Button("Dismiss") {
+            Button(viewModel.tr("common.dismiss")) {
                 viewModel.updateErrorBanner = nil
             }
             .buttonStyle(.plain)
@@ -197,7 +197,7 @@ public struct BuildBanners: View {
                 .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
             
             VStack(alignment: .leading, spacing: 3) {
-                Text("Game Port Succeeded!")
+                Text(viewModel.tr("build.port_succeeded"))
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
                 Text(path)
@@ -217,18 +217,18 @@ public struct BuildBanners: View {
                 }) {
                     HStack(spacing: 4) {
                         Image(systemName: "airdrop")
-                        Text("AirDrop")
+                        Text(viewModel.tr("common.airdrop"))
                     }
                 }
                 .buttonStyle(NXSecondaryButtonStyle())
             }
             
-            Button("View in Library") {
+            Button(viewModel.tr("common.view_library")) {
                 viewModel.selectedTab = 1
             }
             .buttonStyle(NXSecondaryButtonStyle())
             
-            Button("Reveal in Finder") {
+            Button(viewModel.tr("common.reveal_finder")) {
                 viewModel.openOutputInFinder()
             }
             .buttonStyle(NXPrimaryButtonStyle())
@@ -251,7 +251,7 @@ public struct BuildBanners: View {
                 .foregroundColor(Color.red)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("Build Failed")
+                Text(viewModel.tr("build.port_failed"))
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
                 Text(message)
@@ -262,7 +262,7 @@ public struct BuildBanners: View {
             
             Spacer()
             
-            Button("View Logs") {
+            Button(viewModel.tr("common.view_logs")) {
                 viewModel.selectedTab = 6
             }
             .buttonStyle(NXSecondaryButtonStyle())

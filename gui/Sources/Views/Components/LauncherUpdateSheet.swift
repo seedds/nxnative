@@ -26,10 +26,10 @@ public struct LauncherUpdateSheet: View {
                     }
                     
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("NxNative Launcher Software Update")
+                        Text(viewModel.tr("update_modal.title"))
                             .font(.system(size: 16, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
-                        Text("GitHub Repository: github.com/rennan101/nxnative_Launcher")
+                        Text(viewModel.tr("update_modal.repo_label"))
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(NXTheme.textSecondary)
                     }
@@ -45,10 +45,10 @@ public struct LauncherUpdateSheet: View {
                         ProgressView()
                             .controlSize(.regular)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("Checking GitHub for new versions...")
+                            Text(viewModel.tr("update_modal.checking"))
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(.white)
-                            Text("Comparing local commit with origin/main on GitHub...")
+                            Text(viewModel.tr("update_modal.comparing"))
                                 .font(.system(size: 11))
                                 .foregroundColor(NXTheme.textSecondary)
                         }
@@ -62,7 +62,7 @@ public struct LauncherUpdateSheet: View {
                         HStack(spacing: 10) {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("Downloading & Installing New Launcher Version Automatically...")
+                            Text(viewModel.tr("update_modal.downloading"))
                                 .font(.system(size: 13, weight: .bold, design: .rounded))
                                 .foregroundColor(NXTheme.secondary)
                             Spacer()
@@ -77,7 +77,7 @@ public struct LauncherUpdateSheet: View {
                                 .font(.system(size: 22))
                                 .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Update Installed Successfully!")
+                                Text(viewModel.tr("update_modal.success"))
                                     .font(.system(size: 14, weight: .bold, design: .rounded))
                                     .foregroundColor(.white)
                                 Text(viewModel.updateSuccessBanner ?? "The new NxNative_Launcher.app bundle has been compiled and installed.")
@@ -101,7 +101,7 @@ public struct LauncherUpdateSheet: View {
                                 .font(.system(size: 20))
                                 .foregroundColor(.orange)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Update Encountered an Issue")
+                                Text(viewModel.tr("update_modal.issue"))
                                     .font(.system(size: 13, weight: .bold))
                                     .foregroundColor(.white)
                                 Text(err)
@@ -122,7 +122,7 @@ public struct LauncherUpdateSheet: View {
                     if info.hasUpdate {
                         VStack(alignment: .leading, spacing: 10) {
                             HStack {
-                                Label("New Version Available on GitHub!", systemImage: "sparkles")
+                                Label(viewModel.tr("updates.new_version_available"), systemImage: "sparkles")
                                     .font(.system(size: 13, weight: .bold, design: .rounded))
                                     .foregroundColor(NXTheme.secondary)
                                 Spacer()
@@ -153,10 +153,10 @@ public struct LauncherUpdateSheet: View {
                                 .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
                             
                             VStack(alignment: .leading, spacing: 3) {
-                                Text("NxNative Launcher is Up to Date!")
+                                Text(viewModel.tr("update_modal.up_to_date"))
                                     .font(.system(size: 14, weight: .bold, design: .rounded))
                                     .foregroundColor(.white)
-                                Text("You are running the latest version from GitHub (Commit [\(info.localCommit)]).")
+                                Text(viewModel.tr("update_modal.up_to_date_desc", info.localCommit))
                                     .font(.system(size: 11.5))
                                     .foregroundColor(NXTheme.textSecondary)
                             }
@@ -171,7 +171,7 @@ public struct LauncherUpdateSheet: View {
                         Image(systemName: "wifi.exclamationmark")
                             .font(.system(size: 20))
                             .foregroundColor(.orange)
-                        Text("Could not reach GitHub or locate local git repository (\(viewModel.nxnativePath)).")
+                        Text(viewModel.tr("update_modal.reach_error", viewModel.nxnativePath))
                             .font(.system(size: 11.5))
                             .foregroundColor(NXTheme.textSecondary)
                         Spacer()
@@ -191,7 +191,7 @@ public struct LauncherUpdateSheet: View {
                         }) {
                             HStack(spacing: 5) {
                                 Image(systemName: "arrow.clockwise")
-                                Text("Re-check GitHub")
+                                Text(viewModel.tr("update_modal.recheck"))
                             }
                         }
                         .buttonStyle(NXSecondaryButtonStyle())
@@ -202,7 +202,7 @@ public struct LauncherUpdateSheet: View {
                             }) {
                                 HStack(spacing: 5) {
                                     Image(systemName: "hammer.fill")
-                                    Text("Force Rebuild & Reinstall Launcher")
+                                    Text(viewModel.tr("update_modal.force_rebuild"))
                                 }
                             }
                             .buttonStyle(NXSecondaryButtonStyle())
@@ -217,7 +217,7 @@ public struct LauncherUpdateSheet: View {
                         }) {
                             HStack(spacing: 6) {
                                 Image(systemName: "bolt.fill")
-                                Text("Relaunch Launcher Now")
+                                Text(viewModel.tr("update_modal.relaunch_now"))
                             }
                         }
                         .buttonStyle(NXPrimaryButtonStyle())
@@ -227,14 +227,14 @@ public struct LauncherUpdateSheet: View {
                         }) {
                             HStack(spacing: 6) {
                                 Image(systemName: "arrow.down.circle.fill")
-                                Text("Install Update & Relaunch")
+                                Text(viewModel.tr("update_modal.install_relaunch"))
                             }
                         }
                         .buttonStyle(NXPrimaryButtonStyle())
                     }
                     
                     if !viewModel.isApplyingUpdate {
-                        Button("Close") {
+                        Button(viewModel.tr("common.close")) {
                             dismiss()
                         }
                         .buttonStyle(NXSecondaryButtonStyle())

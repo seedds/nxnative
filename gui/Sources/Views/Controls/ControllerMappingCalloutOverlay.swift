@@ -60,7 +60,7 @@ public struct ControllerMappingCalloutOverlay: View {
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.left.arrow.right")
                                 .font(.system(size: 11, weight: .bold))
-                            Text("Swap A↔B & X↔Y (Xbox Layout)")
+                            Text(L10n.t("controls.swap_ab_xy"))
                                 .font(.system(size: 11, weight: .bold, design: .rounded))
                         }
                         .padding(.horizontal, 10)
@@ -71,7 +71,7 @@ public struct ControllerMappingCalloutOverlay: View {
                         .overlay(Capsule().stroke(NXTheme.specularRim, lineWidth: 0.8))
                     }
                     .buttonStyle(.plain)
-                    .help("Quickly swap face buttons between Nintendo Switch layout and Xbox/PC layout")
+                    .help(L10n.t("controls.swap_ab_xy_help"))
                 }
 
                 // Vector Controller View

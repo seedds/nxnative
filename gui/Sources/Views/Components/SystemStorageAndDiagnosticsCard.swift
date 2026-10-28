@@ -13,7 +13,7 @@ public struct SystemStorageAndDiagnosticsCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Label("Storage Reclamation & Diagnostics", systemImage: "cylinder.split.1x2.fill")
+                    Label(viewModel.tr("system.storage_diag_title"), systemImage: "cylinder.split.1x2.fill")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
 
@@ -25,10 +25,10 @@ public struct SystemStorageAndDiagnosticsCard: View {
                 // Row 1: Diagnostics Report
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Sanitized GitHub Diagnostics")
+                        Text(viewModel.tr("system.github_diag"))
                             .font(.system(size: 12, weight: .bold, design: .rounded))
                             .foregroundColor(NXTheme.textPrimary)
-                        Text("Copies environment info, macOS chip, and redacted build log to clipboard.")
+                        Text(viewModel.tr("system.github_diag_desc"))
                             .font(.system(size: 11))
                             .foregroundColor(NXTheme.textSecondary)
                     }
@@ -58,7 +58,7 @@ public struct SystemStorageAndDiagnosticsCard: View {
                 // Row 2: Free Space & Intermediate Caches Purge
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Intermediate Build Caches")
+                        Text(viewModel.tr("system.build_caches"))
                             .font(.system(size: 12, weight: .bold, design: .rounded))
                             .foregroundColor(NXTheme.textPrimary)
                         Text(freedSpaceMessage ?? "Purges intermediate extraction, shaders, and temporary caches while preserving saves and finished apps.")
@@ -81,7 +81,7 @@ public struct SystemStorageAndDiagnosticsCard: View {
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: "trash.fill")
-                            Text("Purge Build Caches")
+                            Text(viewModel.tr("system.purge_caches"))
                         }
                     }
                     .buttonStyle(NXSecondaryButtonStyle())

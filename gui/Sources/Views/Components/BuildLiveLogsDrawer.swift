@@ -10,11 +10,11 @@ public struct BuildLiveLogsDrawer: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Label("Live Terminal Output", systemImage: "terminal.fill")
+                Label(viewModel.tr("build.logs"), systemImage: "terminal.fill")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(NXTheme.textSecondary)
                 Spacer()
-                Text("\(viewModel.logs.count) lines")
+                Text(viewModel.tr("build.lines_count", viewModel.logs.count))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(NXTheme.textMuted)
             }

@@ -10,7 +10,7 @@ public struct AboutLauncherView: View {
     }
     
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.6.2"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.6.3"
     }
     
     private var currentCommit: String {
@@ -68,7 +68,7 @@ public struct AboutLauncherView: View {
                             .clipShape(Capsule())
                         }
                         
-                        Text("Switch Native Port Builder & Library for Apple Silicon")
+                        Text(viewModel.tr("about.subtitle"))
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundColor(NXTheme.textSecondary)
                     }
@@ -95,7 +95,7 @@ public struct AboutLauncherView: View {
                                 .font(.system(size: 13.5, weight: .bold, design: .rounded))
                                 .foregroundColor(.white)
                             
-                            Text("Launcher Developer")
+                            Text(viewModel.tr("about.role"))
                                 .font(.system(size: 9, weight: .bold, design: .rounded))
                                 .foregroundColor(.white)
                                 .padding(.horizontal, 7)
@@ -104,7 +104,7 @@ public struct AboutLauncherView: View {
                                 .clipShape(Capsule())
                         }
                         
-                        Text("macOS Native GUI, Game Library, Auto-Updater & Controller UX")
+                        Text(viewModel.tr("about.desc"))
                             .font(.system(size: 10.5))
                             .foregroundColor(NXTheme.textSecondary)
                     }
@@ -139,7 +139,7 @@ public struct AboutLauncherView: View {
                 
                 // MARK: - Open Source Credits
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("CORE ENGINE & ACKNOWLEDGEMENTS")
+                    Text(viewModel.tr("about.core_ack"))
                         .font(.system(size: 9.5, weight: .bold, design: .rounded))
                         .foregroundColor(.white.opacity(0.75))
                         .tracking(0.6)
@@ -166,7 +166,7 @@ public struct AboutLauncherView: View {
                     }) {
                         HStack(spacing: 5) {
                             Image(systemName: "arrow.triangle.2.circlepath")
-                            Text("Check for Updates...")
+                            Text(viewModel.tr("about.check_updates"))
                         }
                         .foregroundColor(.white)
                     }
@@ -174,7 +174,7 @@ public struct AboutLauncherView: View {
                     
                     Spacer()
                     
-                    Button("Close") {
+                    Button(viewModel.tr("common.close")) {
                         dismiss()
                     }
                     .buttonStyle(NXPrimaryButtonStyle())

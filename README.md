@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue.svg)](https://apple.com/macos)
 [![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%2B%20%26%20A17%2B)-orange.svg)](https://apple.com)
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-FA7343.svg)](https://swift.org)
-[![Version](https://img.shields.io/badge/version-v1.6.2-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
+[![Version](https://img.shields.io/badge/version-v1.6.3-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Core Engine](https://img.shields.io/badge/core%20engine-seedds%2Fnxnative-informational.svg)](https://github.com/seedds/nxnative)
 [![Report Issues](https://img.shields.io/badge/Issues-Support%20%26%20Bugs-red.svg)](https://github.com/rennan101/nxnative_Launcher/issues)
@@ -88,7 +88,7 @@
 
 Running Nintendo Switch games on Apple Silicon with upstream tools historically required manual terminal scripting, manual LibHac extractions, custom SPIRV-Cross flags, and hand-edited environment variables. **NxNative Launcher** brings the entire ecosystem into a seamless, console-like desktop interface.
 
-| Feature | Raw Command-Line Porting | 🎮 NxNative Launcher (v1.6.2) |
+| Feature | Raw Command-Line Porting | 🎮 NxNative Launcher (v1.6.3) |
 | :--- | :---: | :---: |
 | **User Interface** | Terminal Commands only | **Switch Dark Mode Console Library** |
 | **Controller Remapping**| Fixed hardcoded layouts | **Custom Profiles (Switch Pro, Xbox, PS5, Keyboard)** |
@@ -317,12 +317,16 @@ Track our shipped milestones and upcoming features! Star the repository to follo
   - Real-time streaming progress feedback for iOS deployments via `xcrun devicectl`.
   - Native AirDrop sharing support for exported `.ipa` packages.
   - Deadlock prevention and background task safety.
-- [x] **v1.6.0, v1.6.1 & v1.6.2 (Current Version) — Controller Remapping, Save Sync & Robust Environment Setup**:
+- [x] **v1.6.0, v1.6.1 & v1.6.2 — Controller Remapping, Save Sync & Robust Environment Setup**:
   - **Full Controller Remapping**: Custom button mapping for Switch Pro, Joy-Cons, Xbox Series/One, and PS5 DualSense controllers with profile duplication and reset.
   - **Save Synchronization Service (`SaveSyncService`)**: Bidirectional save state synchronization and backup between Mac and paired iOS devices.
   - **Custom Cover Art**: User-customizable box art picker (`.jpg`, `.png`, `.webp`) with instant persistence and fallback reset.
   - **Automated Environment Diagnostics & Python 3.12+ / Pip Fix**: One-click sequential Homebrew and build dependency installer in Settings tab, with dynamic Python 3.12+ resolution and safe pip package installation.
   - **3-Second Couch Exit**: Global 3-second hold shortcut on Xbox Guide / PS / Home buttons to close running games and refocus the Launcher.
+- [x] **v1.6.3 (Current Version) — In-App Multi-Language Localization (13 Languages)**:
+  - **In-App Dynamic Language Switcher**: Switch the launcher UI language on the fly under the *Personalization* tab without restarting or altering macOS system preferences.
+  - **13 Languages Supported**: English, Portuguese (Brazil), Spanish, French, German, Italian, Polish, Russian, Japanese, Korean, Simplified Chinese, Traditional Chinese, and Swedish (contributed by @yeager).
+  - **Full UI Coverage**: Localized navigation, library cards, porting progress banners, action sheets, settings dialogs, controller remapping, and system tools.
 
 ---
 
@@ -383,7 +387,7 @@ This launcher stands on the shoulders of brilliant software engineering across t
 
 # 🇧🇷 Guia em Português (PT-BR)
 
-Bem-vindo ao guia oficial em português do **NxNative Launcher (v1.6.2)**! Esta seção contém tudo o que você precisa para configurar o ambiente, portar seus jogos, personalizar sua biblioteca, sincronizar saves e jogar com controles no Apple Silicon.
+Bem-vindo ao guia oficial em português do **NxNative Launcher (v1.6.3)**! Esta seção contém tudo o que você precisa para configurar o ambiente, portar seus jogos, personalizar sua biblioteca, sincronizar saves e jogar com controles no Apple Silicon.
 
 ### 📑 Índice do Guia em Português
 - [1. Configuração do Ambiente e Dependências](#1-configuração-do-ambiente-e-dependências)

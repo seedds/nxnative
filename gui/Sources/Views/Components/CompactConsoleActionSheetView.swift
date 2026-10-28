@@ -121,8 +121,8 @@ public struct CompactConsoleActionSheetView: View {
                         // Option 0: Play Game
                         menuActionRow(
                             index: 0,
-                            title: isLaunching ? "Launching..." : "Play Game",
-                            subtitle: "Start native execution on Apple Silicon",
+                            title: isLaunching ? viewModel.tr("actions.launching") : viewModel.tr("actions.play_game"),
+                            subtitle: viewModel.tr("actions.play_subtitle"),
                             icon: isLaunching ? "hourglass" : "play.fill",
                             isPrimary: true,
                             isLoading: isLaunching
@@ -136,8 +136,8 @@ public struct CompactConsoleActionSheetView: View {
                         // Option 0: Send to iPhone / iPad
                         menuActionRow(
                             index: 0,
-                            title: "Send to iPhone / iPad",
-                            subtitle: "Install on connected device via devicectl",
+                            title: viewModel.tr("actions.send_ios"),
+                            subtitle: viewModel.tr("actions.send_ios_subtitle"),
                             icon: "arrow.up.forward.app",
                             isPrimary: true
                         ) {
@@ -149,8 +149,8 @@ public struct CompactConsoleActionSheetView: View {
                     // Option 1: Game Settings
                     menuActionRow(
                         index: 1,
-                        title: "Game Settings & Options",
-                        subtitle: game.platform == .macApp ? "Resolution, 60 FPS, Docked mode & MetalFX" : "Device deployment, AirDrop, covers & saves",
+                        title: viewModel.tr("actions.game_settings"),
+                        subtitle: game.platform == .macApp ? viewModel.tr("actions.settings_mac_subtitle") : viewModel.tr("actions.settings_ios_subtitle"),
                         icon: "slider.horizontal.3",
                         isPrimary: false
                     ) {
@@ -162,8 +162,8 @@ public struct CompactConsoleActionSheetView: View {
                         // Option 2: AirDrop for iOS
                         menuActionRow(
                             index: 2,
-                            title: "Share via AirDrop",
-                            subtitle: "Send .ipa directly to iPhone/iPad wirelessly",
+                            title: viewModel.tr("actions.share_airdrop"),
+                            subtitle: viewModel.tr("actions.share_airdrop_subtitle"),
                             icon: "airdrop",
                             isPrimary: false
                         ) {
@@ -174,8 +174,8 @@ public struct CompactConsoleActionSheetView: View {
                         // Option 2: Reveal App Files
                         menuActionRow(
                             index: 2,
-                            title: "App Files",
-                            subtitle: "Reveal .app bundle inside Finder",
+                            title: viewModel.tr("actions.app_files"),
+                            subtitle: viewModel.tr("actions.app_files_subtitle"),
                             icon: "folder.fill",
                             isPrimary: false
                         ) {
@@ -187,8 +187,8 @@ public struct CompactConsoleActionSheetView: View {
                     // Option 3: Save Location
                     menuActionRow(
                         index: 3,
-                        title: "Save Location",
-                        subtitle: "Open game save data folder in Finder",
+                        title: viewModel.tr("actions.save_location"),
+                        subtitle: viewModel.tr("actions.save_location_subtitle"),
                         icon: "internaldrive.fill",
                         isPrimary: false
                     ) {
@@ -200,8 +200,8 @@ public struct CompactConsoleActionSheetView: View {
                         // Option 4: Reveal .ipa in Finder
                         menuActionRow(
                             index: 4,
-                            title: "Reveal .ipa in Finder",
-                            subtitle: "Open folder containing compiled .ipa package",
+                            title: viewModel.tr("actions.reveal_ipa"),
+                            subtitle: viewModel.tr("actions.reveal_ipa_subtitle"),
                             icon: "folder.fill",
                             isPrimary: false
                         ) {
@@ -226,8 +226,8 @@ public struct CompactConsoleActionSheetView: View {
                     // Option 5: Remove Game
                     menuActionRow(
                         index: 5,
-                        title: "Remove Game",
-                        subtitle: game.platform == .macApp ? "Delete compiled application from library" : "Delete compiled .ipa package from storage",
+                        title: viewModel.tr("actions.delete_game"),
+                        subtitle: viewModel.tr("actions.delete_game_subtitle"),
                         icon: "trash.fill",
                         isPrimary: false,
                         isDestructive: true
@@ -240,13 +240,13 @@ public struct CompactConsoleActionSheetView: View {
                 
                 // Console Footer Controller Hints
                 HStack(spacing: 16) {
-                    controllerHint(button: isGamepadConnected && GameControllerService.shared.activeBrand == .playstation ? "✕" : "A", action: "Confirm")
-                    controllerHint(button: isGamepadConnected && GameControllerService.shared.activeBrand == .playstation ? "○" : "B", action: "Back")
+                    controllerHint(button: isGamepadConnected && GameControllerService.shared.activeBrand == .playstation ? "✕" : "A", action: viewModel.tr("actions.select"))
+                    controllerHint(button: isGamepadConnected && GameControllerService.shared.activeBrand == .playstation ? "○" : "B", action: viewModel.tr("actions.back"))
                     controllerHint(button: "↑ / ↓", action: "Navigate")
                     
                     Spacer()
                     
-                    Text("NXNATIVE CONSOLE")
+                    Text(viewModel.tr("console.banner_title"))
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .foregroundColor(NXTheme.textMuted)
                 }

@@ -32,27 +32,27 @@ public struct SystemView: View {
             InstallerSheetView(viewModel: viewModel)
         }
         .alert("Apple Command Line Tools", isPresented: $viewModel.showCltInstallAlert) {
-            Button("OK", role: .cancel) {}
+            Button(viewModel.tr("common.ok"), role: .cancel) {}
         } message: {
-            Text("Apple's official installer dialog has opened on screen. Follow Apple's prompt to complete the installation. Once finished, click 'Re-check' to verify.")
+            Text(viewModel.tr("build.apple_clt_dialog"))
         }
         .confirmationDialog(
-            "Uninstall \(viewModel.dependencyToUninstall?.name ?? "this tool")?",
+            viewModel.tr("system.uninstall_title", viewModel.dependencyToUninstall?.name ?? "Tool"),
             isPresented: $viewModel.showUninstallConfirm,
             titleVisibility: .visible
         ) {
-            Button("Uninstall Tool", role: .destructive) {
+            Button(viewModel.tr("system.uninstall_button"), role: .destructive) {
                 viewModel.executeUninstall()
             }
-            Button("Cancel", role: .cancel) {}
+            Button(viewModel.tr("common.cancel"), role: .cancel) {}
         } message: {
-            Text("This will remove the selected package from your system environment. You can reinstall it at any time.")
+            Text(viewModel.tr("system.uninstall_message"))
         }
     }
     
     private var headerView: some View {
         HStack {
-            Text("Settings & System Architecture")
+            Text(viewModel.tr("system.title"))
                 .font(.system(size: 18, weight: .bold, design: .rounded))
                 .foregroundColor(NXTheme.textPrimary)
             
@@ -65,11 +65,11 @@ public struct SystemView: View {
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.down.circle.fill")
-                        Text("Install All Missing (\(viewModel.prerequisites.missingList.count))")
+                        Text(viewModel.tr("system.install_all_missing", viewModel.prerequisites.missingList.count))
                     }
                 }
                 .buttonStyle(NXAccentButtonStyle())
-                .help("Install all missing dependencies sequentially one by one until completed.")
+                .help(viewModel.tr("system.install_all_help"))
             } else {
                 Button(action: {
                     SoundEffectService.shared.play(.click)
@@ -77,7 +77,7 @@ public struct SystemView: View {
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.triangle.2.circlepath")
-                        Text("Repair All")
+                        Text(viewModel.tr("system.repair_all"))
                     }
                 }
                 .buttonStyle(NXSecondaryButtonStyle())
@@ -93,7 +93,7 @@ public struct SystemView: View {
                         ProgressView().controlSize(.small)
                     } else {
                         Image(systemName: "arrow.clockwise")
-                        Text("Re-check")
+                        Text(viewModel.tr("system.recheck"))
                     }
                 }
             }

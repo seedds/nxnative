@@ -2,6 +2,7 @@ import SwiftUI
 import GameController
 
 public struct ControlsView: View {
+    @ObservedObject private var i18n = LocalizationService.shared
     @ObservedObject private var profileManager = InputProfileManager.shared
     @ObservedObject private var controllerService = GameControllerService.shared
     @State private var selectedDeviceIndex: Int = 0 // 0: Controller, 1: Keyboard
@@ -28,13 +29,13 @@ public struct ControlsView: View {
                     GlassCard {
                         VStack(alignment: .leading, spacing: 14) {
                             HStack {
-                                Label("Controller Button Mapping", systemImage: "gamecontroller.fill")
+                                Label(i18n.t("controls.controller_mapping"), systemImage: "gamecontroller.fill")
                                     .font(.system(size: 14, weight: .bold, design: .rounded))
                                     .foregroundColor(NXTheme.textPrimary)
 
                                 Spacer()
 
-                                Text(controllerService.isGamepadConnected ? controllerService.activeControllerName : "No Gamepad Connected (Using Virtual Pro Controller)")
+                                Text(controllerService.isGamepadConnected ? controllerService.activeControllerName : i18n.t("controls.gamepad_none"))
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundColor(controllerService.isGamepadConnected ? Color(red: 0.13, green: 0.77, blue: 0.37) : NXTheme.textMuted)
                             }
@@ -52,13 +53,13 @@ public struct ControlsView: View {
                     GlassCard {
                         VStack(alignment: .leading, spacing: 14) {
                             HStack {
-                                Label("Simple Keyboard Mapping", systemImage: "keyboard.fill")
+                                Label(i18n.t("controls.keyboard_mapping"), systemImage: "keyboard.fill")
                                     .font(.system(size: 14, weight: .bold, design: .rounded))
                                     .foregroundColor(NXTheme.textPrimary)
 
                                 Spacer()
 
-                                Text("Click any key button to rebind")
+                                Text(i18n.t("controls.click_to_rebind"))
                                     .font(.system(size: 11))
                                     .foregroundColor(NXTheme.secondary)
                             }
@@ -97,7 +98,7 @@ public struct ControlsView: View {
     // MARK: - Profile Management Toolbar
     private var profileManagementHeader: some View {
         HStack(spacing: 12) {
-            Text("Controls & Gamepad Mapping")
+            Text(i18n.t("controls.title"))
                 .font(.system(size: 16, weight: .bold, design: .rounded))
                 .foregroundColor(NXTheme.textPrimary)
 
@@ -119,7 +120,7 @@ public struct ControlsView: View {
                     }
                 }
                 Divider()
-                Button("New Profile...") {
+                Button(i18n.t("controls.new_profile")) {
                     newProfileName = ""
                     showNewProfileAlert = true
                 }
@@ -130,7 +131,7 @@ public struct ControlsView: View {
                         .foregroundColor(NXTheme.secondary)
                     
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("Profile")
+                        Text(i18n.t("controls.profile"))
                             .font(.system(size: 9, weight: .medium))
                             .foregroundColor(NXTheme.textSecondary)
                         Text(profileManager.activeProfile.name)
@@ -162,7 +163,7 @@ public struct ControlsView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
 
-            Button("Duplicate") {
+            Button(i18n.t("common.duplicate")) {
                 SoundEffectService.shared.play(.click)
                 let copy = profileManager.duplicateProfile(activeProfile)
                 activeProfile = copy
@@ -171,7 +172,7 @@ public struct ControlsView: View {
             .controlSize(.small)
 
             if !activeProfile.isDefault {
-                Button("Delete") {
+                Button(i18n.t("common.delete")) {
                     SoundEffectService.shared.play(.click)
                     profileManager.deleteProfile(activeProfile)
                 }
@@ -179,7 +180,7 @@ public struct ControlsView: View {
                 .controlSize(.small)
             }
 
-            Button("Reset") {
+            Button(i18n.t("common.reset")) {
                 SoundEffectService.shared.play(.click)
                 profileManager.resetActiveProfileToDefault()
                 activeProfile = profileManager.activeProfile
@@ -193,8 +194,8 @@ public struct ControlsView: View {
     private var deviceSelectorBar: some View {
         HStack(spacing: 12) {
             Picker("", selection: $selectedDeviceIndex) {
-                Text("Gamepad Controller (Switch Pro / Xbox / PS)").tag(0)
-                Text("Mac Keyboard & Mouse").tag(1)
+                Text(i18n.t("controls.gamepad_tab")).tag(0)
+                Text(i18n.t("controls.keyboard_tab")).tag(1)
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 420)
@@ -206,7 +207,7 @@ public struct ControlsView: View {
     // MARK: - New Profile Sheet
     private var newProfileSheet: some View {
         VStack(spacing: 16) {
-            Text("Create New Controller Profile")
+            Text(i18n.t("controls.create_profile_title"))
                 .font(.system(size: 15, weight: .bold, design: .rounded))
                 .foregroundColor(NXTheme.textPrimary)
 
@@ -215,12 +216,12 @@ public struct ControlsView: View {
                 .frame(width: 280)
 
             HStack(spacing: 12) {
-                Button("Cancel") {
+                Button(i18n.t("common.cancel")) {
                     showNewProfileAlert = false
                 }
                 .buttonStyle(NXSecondaryButtonStyle())
 
-                Button("Create") {
+                Button(i18n.t("controls.create")) {
                     guard !newProfileName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                     let created = profileManager.createProfile(name: newProfileName, basedOn: activeProfile)
                     activeProfile = created

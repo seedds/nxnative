@@ -30,16 +30,16 @@ public struct DropZoneView: View {
                         .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isTargeted)
                     
                     VStack(spacing: 4) {
-                        Text(isTargeted ? "Drop files here!" : "Drag & drop game folder or Switch files here")
+                        Text(isTargeted ? viewModel.tr("build.dropzone_title") : viewModel.tr("build.dropzone_subtitle"))
                             .font(.system(size: 13, weight: .bold, design: .rounded))
                             .foregroundColor(NXTheme.textPrimary)
                         
-                        Text("Supports game folders, NSP, XCI, NSZ, and ZIP archives")
+                        Text(viewModel.tr("build.dropzone_formats"))
                             .font(.system(size: 11))
                             .foregroundColor(NXTheme.textSecondary)
                     }
                     
-                    Button("Choose Folder...") {
+                    Button(viewModel.tr("common.choose_folder")) {
                         viewModel.selectGameFolder()
                     }
                     .buttonStyle(NXSecondaryButtonStyle())
@@ -50,14 +50,14 @@ public struct DropZoneView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "folder.fill")
                                 .foregroundColor(NXTheme.secondary)
-                            Text("Active Folder: \(folder.path)")
+                            Text(viewModel.tr("build.active_folder", folder.path))
                                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                                 .foregroundColor(NXTheme.textPrimary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
                             
-                            Button("Clear") {
+                            Button(viewModel.tr("common.clear")) {
                                 viewModel.selectedGameFolder = nil
                             }
                             .buttonStyle(NXSecondaryButtonStyle())

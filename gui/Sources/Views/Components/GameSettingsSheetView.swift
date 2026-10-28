@@ -96,16 +96,16 @@ public struct GameSettingsSheetView: View {
                             // Section 0: Framerate (60 FPS)
                             settingCard(
                                 rowIndex: 0,
-                                title: "Framerate Target",
+                                title: viewModel.tr("settings_modal.framerate_title"),
                                 icon: "speedometer",
                                 iconColor: Color(red: 0.13, green: 0.77, blue: 0.37)
                             ) {
                                 Toggle(isOn: $viewModel.activeSettingsConfig.enable60FPS) {
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(viewModel.activeSettingsConfig.enable60FPS ? "60 FPS (Unlocked)" : "30 FPS (Switch Default)")
+                                        Text(viewModel.activeSettingsConfig.enable60FPS ? viewModel.tr("settings_modal.fps_60") : viewModel.tr("settings_modal.fps_30"))
                                             .font(.system(size: 13, weight: .semibold, design: .rounded))
                                             .foregroundColor(NXTheme.textPrimary)
-                                        Text("Unlocks the game's internal frame limiter to 60 FPS with smooth VSync.")
+                                        Text(viewModel.tr("settings_modal.fps_desc"))
                                             .font(.system(size: 11))
                                             .foregroundColor(NXTheme.textSecondary)
                                     }
@@ -116,16 +116,16 @@ public struct GameSettingsSheetView: View {
                             // Section 1: Metal HUD
                             settingCard(
                                 rowIndex: 1,
-                                title: "Performance Overlay (Metal HUD)",
+                                title: viewModel.tr("settings_modal.metal_hud_title"),
                                 icon: "gauge.with.needle.fill",
                                 iconColor: NXTheme.secondary
                             ) {
                                 Toggle(isOn: $viewModel.activeSettingsConfig.enableMetalHUD) {
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(viewModel.activeSettingsConfig.enableMetalHUD ? "Metal HUD Enabled" : "Metal HUD Disabled")
+                                        Text(viewModel.activeSettingsConfig.enableMetalHUD ? viewModel.tr("settings_modal.metal_hud_enabled") : viewModel.tr("settings_modal.metal_hud_disabled"))
                                             .font(.system(size: 13, weight: .semibold, design: .rounded))
                                             .foregroundColor(NXTheme.textPrimary)
-                                        Text("Displays Apple's official in-game performance overlay with real-time FPS and GPU metrics.")
+                                        Text(viewModel.tr("settings_modal.metal_hud_desc"))
                                             .font(.system(size: 11))
                                             .foregroundColor(NXTheme.textSecondary)
                                     }
@@ -136,20 +136,20 @@ public struct GameSettingsSheetView: View {
                             // Section 2: Console Mode
                             settingCard(
                                 rowIndex: 2,
-                                title: "Console Mode (Operation Profile)",
+                                title: viewModel.tr("settings_modal.console_mode_title"),
                                 icon: "tv.and.mediabox",
                                 iconColor: NXTheme.primary
                             ) {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Picker("", selection: $viewModel.activeSettingsConfig.isDockedMode) {
-                                        Text("Docked (TV Mode · 1080p)").tag(true)
-                                        Text("Handheld (Portable · 720p)").tag(false)
+                                        Text(viewModel.tr("settings_modal.docked_label")).tag(true)
+                                        Text(viewModel.tr("settings_modal.handheld_label")).tag(false)
                                     }
                                     .pickerStyle(.segmented)
                                     
                                     Text(viewModel.activeSettingsConfig.isDockedMode
-                                         ? "Docked Mode: Uses maximum graphics profile and render resolution (1080p/900p)."
-                                         : "Handheld Mode: Renders at native 720p with reduced GPU workload.")
+                                         ? viewModel.tr("settings_modal.docked_desc")
+                                         : viewModel.tr("settings_modal.handheld_desc"))
                                         .font(.system(size: 11))
                                         .foregroundColor(NXTheme.textSecondary)
                                 }
@@ -158,13 +158,13 @@ public struct GameSettingsSheetView: View {
                             // Section 3: 3D Render Scale
                             settingCard(
                                 rowIndex: 3,
-                                title: "3D Render Scale",
+                                title: viewModel.tr("settings_modal.render_scale_title"),
                                 icon: "viewfinder.circle.fill",
                                 iconColor: Color(red: 1.0, green: 0.65, blue: 0.35)
                             ) {
                                 VStack(alignment: .leading, spacing: 10) {
                                     HStack {
-                                        Text("Render Resolution Scale:")
+                                        Text(viewModel.tr("settings_modal.render_scale_label"))
                                             .font(.system(size: 12, weight: .medium))
                                             .foregroundColor(NXTheme.textSecondary)
                                         Spacer()
@@ -177,19 +177,19 @@ public struct GameSettingsSheetView: View {
                                         .tint(NXTheme.primary)
                                     
                                     HStack(spacing: 8) {
-                                        Button("50% (Performance)") {
+                                        Button(viewModel.tr("settings_modal.scale_50")) {
                                             viewModel.activeSettingsConfig.renderScale = 0.50
                                         }
                                         .buttonStyle(NXSecondaryButtonStyle())
                                         .controlSize(.mini)
                                         
-                                        Button("75% (Balanced)") {
+                                        Button(viewModel.tr("settings_modal.scale_75")) {
                                             viewModel.activeSettingsConfig.renderScale = 0.75
                                         }
                                         .buttonStyle(NXSecondaryButtonStyle())
                                         .controlSize(.mini)
                                         
-                                        Button("100% (Native)") {
+                                        Button(viewModel.tr("settings_modal.resolution_native")) {
                                             viewModel.activeSettingsConfig.renderScale = 1.00
                                         }
                                         .buttonStyle(NXSecondaryButtonStyle())
@@ -201,16 +201,16 @@ public struct GameSettingsSheetView: View {
                             // Section 4: MetalFX Upscaling
                             settingCard(
                                 rowIndex: 4,
-                                title: "Intelligent Upscaling (MetalFX)",
+                                title: viewModel.tr("settings_modal.metalfx_title"),
                                 icon: "sparkles.tv.fill",
                                 iconColor: NXTheme.secondary
                             ) {
                                 Toggle(isOn: $viewModel.activeSettingsConfig.enableMetalFXUpscale) {
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(viewModel.activeSettingsConfig.enableMetalFXUpscale ? "MetalFX Spatial Upscaler Enabled" : "Standard Bilinear Upscaling")
+                                        Text(viewModel.activeSettingsConfig.enableMetalFXUpscale ? viewModel.tr("settings_modal.metalfx_enabled") : viewModel.tr("settings_modal.metalfx_disabled"))
                                             .font(.system(size: 13, weight: .semibold, design: .rounded))
                                             .foregroundColor(NXTheme.textPrimary)
-                                        Text("Uses Apple Silicon spatial neural upscaling for crisp high-resolution presentation.")
+                                        Text(viewModel.tr("settings_modal.metalfx_desc"))
                                             .font(.system(size: 11))
                                             .foregroundColor(NXTheme.textSecondary)
                                     }

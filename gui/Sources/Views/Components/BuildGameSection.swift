@@ -11,7 +11,7 @@ public struct BuildGameSection: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Label("1. Game Files (NSP / NSZ / XCI / ZIP)", systemImage: "gamecontroller.fill")
+                    Label(viewModel.tr("build.step_1_title"), systemImage: "gamecontroller.fill")
                         .symbolRenderingMode(.hierarchical)
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
@@ -45,7 +45,7 @@ public struct BuildGameSection: View {
                             }
                         }) {
                             HStack(spacing: 8) {
-                                Text("Continue to Configuration")
+                                Text(viewModel.tr("build.continue_config"))
                                 Image(systemName: "arrow.right.circle.fill")
                             }
                             .font(.system(size: 13, weight: .bold, design: .rounded))
@@ -64,7 +64,7 @@ public struct BuildGameSection: View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundColor(NXTheme.tertiary)
-            Text("No .nsp, .nsz, or .xci files found in this folder.")
+            Text(viewModel.tr("build.no_files_found"))
                 .font(.system(size: 12))
                 .foregroundColor(NXTheme.textSecondary)
         }
@@ -76,7 +76,7 @@ public struct BuildGameSection: View {
     private var detectedGamesList: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Select Game to Port (\(viewModel.detectedGames.count) detected):")
+                Text(viewModel.tr("build.select_game_detected", viewModel.detectedGames.count))
                     .font(.system(size: 12, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
                 Spacer()
@@ -106,7 +106,7 @@ public struct BuildGameSection: View {
                     .foregroundColor(NXTheme.tertiary)
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Low Disk Space Alert")
+                    Text(viewModel.tr("build.low_disk_title"))
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.tertiary)
                     Text(diskWarning)
@@ -129,7 +129,7 @@ public struct BuildGameSection: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
                     .font(.system(size: 14))
-                Text("Storage ready: ~\(availStr) available on output destination for \(sel.name)")
+                Text(viewModel.tr("build.storage_ready", availStr, sel.name))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(NXTheme.textSecondary)
             }
@@ -149,31 +149,31 @@ public struct BuildGameSection: View {
                 case .fits(let fw, _):
                     Image(systemName: "key.fill")
                         .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
-                    Text("Pre-flight Verified: prod.keys opens this game (Target Switch Firmware \(fw)+)")
+                    Text(viewModel.tr("build.prodkeys_verified", fw))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
                 case .outdatedMasterKey(let gen, let missing, let fw):
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(Color(red: 0.98, green: 0.65, blue: 0.12))
-                    Text("Warning: Missing \(missing) (Gen \(gen)). Dump from firmware \(fw)+ recommended.")
+                    Text(viewModel.tr("build.prodkeys_missing_key", missing, String(gen), fw))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(Color(red: 0.98, green: 0.65, blue: 0.12))
                 case .wrongHeaderKey:
                     Image(systemName: "xmark.octagon.fill")
                         .foregroundColor(Color(red: 0.91, green: 0.14, blue: 0.14))
-                    Text("Invalid header_key: Keys could not decrypt NCA headers.")
+                    Text(viewModel.tr("build.prodkeys_invalid_header"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(Color(red: 0.91, green: 0.14, blue: 0.14))
                 case .noHeaderKey:
                     Image(systemName: "xmark.octagon.fill")
                         .foregroundColor(Color(red: 0.91, green: 0.14, blue: 0.14))
-                    Text("Missing header_key in prod.keys file.")
+                    Text(viewModel.tr("build.prodkeys_missing_header"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(Color(red: 0.91, green: 0.14, blue: 0.14))
                 case .unreadableKeys:
                     Image(systemName: "questionmark.circle.fill")
                         .foregroundColor(NXTheme.textMuted)
-                    Text("Unable to parse prod.keys content.")
+                    Text(viewModel.tr("build.prodkeys_unparseable"))
                         .font(.system(size: 11))
                         .foregroundColor(NXTheme.textMuted)
                 case .cannotCheck:

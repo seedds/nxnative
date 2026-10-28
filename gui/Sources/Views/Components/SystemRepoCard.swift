@@ -11,17 +11,17 @@ public struct SystemRepoCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Label("Core Repository (nxnative)", systemImage: "folder.badge.gearshape")
+                    Label(viewModel.tr("system.repo_title"), systemImage: "folder.badge.gearshape")
                         .symbolRenderingMode(.hierarchical)
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
-                        .help("The upstream conversion scripts and headers from seedds/nxnative required to compile native ports.")
+                        .help(viewModel.tr("system.repo_help"))
                     
                     Spacer()
                     
                     StatusBadge(
                         isPositive: viewModel.isNxnativeValid,
-                        text: viewModel.isNxnativeValid ? "Installed and Ready" : "Repository Missing"
+                        text: viewModel.isNxnativeValid ? viewModel.tr("system.repo_ready") : viewModel.tr("system.repo_missing_badge")
                     )
                 }
                 
@@ -34,7 +34,7 @@ public struct SystemRepoCard: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         } else {
-                            Text("Select or download the nxnative repository folder...")
+                            Text(viewModel.tr("system.select_repo_desc"))
                                 .font(.system(size: 12))
                                 .foregroundColor(NXTheme.textSecondary)
                         }
@@ -49,7 +49,7 @@ public struct SystemRepoCard: View {
                             .stroke(NXTheme.specularRim, lineWidth: 0.8)
                     )
                     
-                    Button("Change...") {
+                    Button(viewModel.tr("common.change")) {
                         viewModel.selectNxnativeFolder()
                     }
                     .buttonStyle(NXSecondaryButtonStyle())
@@ -58,12 +58,12 @@ public struct SystemRepoCard: View {
                         if viewModel.isCloningRepository {
                             HStack(spacing: 6) {
                                 ProgressView().controlSize(.small)
-                                Text("Downloading...")
+                                Text(viewModel.tr("common.downloading"))
                                     .font(.system(size: 11))
                                     .foregroundColor(NXTheme.secondary)
                             }
                         } else {
-                            Button("Download (1-Click)") {
+                            Button(viewModel.tr("system.download_1click")) {
                                 viewModel.cloneNxnativeRepository()
                             }
                             .buttonStyle(NXPrimaryButtonStyle())
@@ -76,11 +76,11 @@ public struct SystemRepoCard: View {
                 // GitHub Upstream Information & Live Update Check
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("GitHub Repository: github.com/rennan101/nxnative_Launcher")
+                        Text(viewModel.tr("system.repo_label"))
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(NXTheme.textSecondary)
                         if let update = viewModel.updateInfo {
-                            Text("Local: [\(update.localCommit)] · Remote: [\(update.remoteCommit)]")
+                            Text(viewModel.tr("system.local_remote_commit", update.localCommit, update.remoteCommit))
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(NXTheme.textMuted)
                         }
@@ -91,19 +91,19 @@ public struct SystemRepoCard: View {
                     if viewModel.isApplyingUpdate {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.small)
-                            Text("Updating...")
+                            Text(viewModel.tr("common.updating"))
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundColor(NXTheme.primary)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                     } else if let update = viewModel.updateInfo, update.hasUpdate {
-                        Button("Update & Install Now") {
+                        Button(viewModel.tr("system.update_install_now")) {
                             viewModel.openUpdateCheckerAndAutoInstall()
                         }
                         .buttonStyle(NXPrimaryButtonStyle())
                     } else {
-                        Button("Check for Updates") {
+                        Button(viewModel.tr("system.check_updates")) {
                             viewModel.openUpdateCheckerAndAutoInstall()
                         }
                         .buttonStyle(NXSecondaryButtonStyle())

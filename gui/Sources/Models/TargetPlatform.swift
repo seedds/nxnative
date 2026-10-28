@@ -9,9 +9,9 @@ public enum TargetPlatform: String, CaseIterable, Identifiable {
     public var title: String {
         switch self {
         case .macApp:
-            return "Mac App (.app)"
+            return L10n.t("build.platform_mac")
         case .ios:
-            return "iOS / iPadOS (.ipa)"
+            return L10n.t("build.platform_ios")
         }
     }
     

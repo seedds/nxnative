@@ -17,12 +17,12 @@ public struct CompatibilityFilterBarView: View {
                     Image(systemName: "memorychip")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(NXTheme.secondary)
-                    Text("RAM:")
+                    Text(viewModel.tr("compatibility.ram_filter"))
                         .font(.system(size: 11, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
                 }
                 
-                ramFilterPill(label: "All", ramGB: nil, count: viewModel.compatibleGames.count)
+                ramFilterPill(label: viewModel.tr("compatibility.all"), ramGB: nil, count: viewModel.compatibleGames.count)
                 ramFilterPill(label: "4GB", ramGB: 4, count: viewModel.compatibleGames.filter { $0.minRamGB <= 4 }.count)
                 ramFilterPill(label: "6GB", ramGB: 6, count: viewModel.compatibleGames.filter { $0.minRamGB <= 6 }.count)
                 ramFilterPill(label: "8GB", ramGB: 8, count: viewModel.compatibleGames.filter { $0.minRamGB <= 8 }.count)
@@ -41,7 +41,7 @@ public struct CompatibilityFilterBarView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 10))
-                            Text("Reset")
+                            Text(viewModel.tr("common.reset"))
                                 .font(.system(size: 10, weight: .semibold))
                         }
                         .foregroundColor(NXTheme.textSecondary)
@@ -59,7 +59,7 @@ public struct CompatibilityFilterBarView: View {
             GeometryReader { geo in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 3) {
-                        nameLetterButton("All", isSelected: viewModel.compatibilityNameFilter == "All") {
+                        nameLetterButton(viewModel.tr("compatibility.all"), isSelected: viewModel.compatibilityNameFilter == "All") {
                             viewModel.compatibilityNameFilter = "All"
                         }
                         

@@ -35,7 +35,7 @@ public struct GameSettingsIosDeploymentView: View {
 
     private var headerBar: some View {
         HStack {
-            Label("Install Port on iPhone / iPad", systemImage: "iphone.badge.play")
+            Label(L10n.t("settings_modal.ios_deploy_title"), systemImage: "iphone.badge.play")
                 .font(.system(size: 13, weight: .bold, design: .rounded))
                 .foregroundColor(NXTheme.textPrimary)
 
@@ -47,12 +47,12 @@ public struct GameSettingsIosDeploymentView: View {
             }) {
                 HStack(spacing: 4) {
                     Image(systemName: "airdrop")
-                    Text("AirDrop")
+                    Text(L10n.t("common.airdrop"))
                 }
             }
             .buttonStyle(NXSecondaryButtonStyle())
             .controlSize(.mini)
-            .help("Send .ipa directly to iPhone via AirDrop")
+            .help(L10n.t("settings_modal.airdrop_help"))
 
             Button(action: {
                 SoundEffectService.shared.play(.click)
@@ -60,12 +60,12 @@ public struct GameSettingsIosDeploymentView: View {
             }) {
                 HStack(spacing: 4) {
                     Image(systemName: "folder")
-                    Text("Show .ipa")
+                    Text(L10n.t("settings_modal.show_ipa"))
                 }
             }
             .buttonStyle(NXSecondaryButtonStyle())
             .controlSize(.mini)
-            .help("Show .ipa package in Finder for AltStore, TrollStore or Sideloadly")
+            .help(L10n.t("settings_modal.reveal_ipa_help"))
         }
     }
 
@@ -76,13 +76,13 @@ public struct GameSettingsIosDeploymentView: View {
                     if deviceService.isDetecting {
                         ProgressView().controlSize(.small)
                     }
-                    Text("No devices found on local network or USB.")
+                    Text(L10n.t("settings_modal.no_devices"))
                         .font(.system(size: 11))
                         .foregroundColor(NXTheme.textSecondary)
 
                     Spacer()
 
-                    Button("Search Devices") {
+                    Button(L10n.t("settings_modal.search_devices")) {
                         SoundEffectService.shared.play(.click)
                         deviceService.refreshDevicesAndTeams()
                     }
@@ -116,13 +116,13 @@ public struct GameSettingsIosDeploymentView: View {
                         }) {
                             HStack(spacing: 3) {
                                 Image(systemName: "airdrop")
-                                Text("AirDrop")
+                                Text(L10n.t("common.airdrop"))
                             }
                         }
                         .buttonStyle(NXSecondaryButtonStyle())
                         .controlSize(.small)
 
-                        Button("Install on \(dev.name)") {
+                        Button(L10n.t("settings_modal.install_on_device", dev.name)) {
                             deviceService.installApp(appBundleURL: game.url, on: dev) { success, _ in
                                 if success {
                                     SoundEffectService.shared.play(.click)

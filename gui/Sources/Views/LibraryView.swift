@@ -63,18 +63,18 @@ public struct LibraryView: View {
             GameSettingsSheetView(viewModel: viewModel, game: game)
         }
         .confirmationDialog(
-            "Delete \(viewModel.gameToDelete?.name ?? "this game")?",
+            viewModel.tr("library.delete_title", viewModel.gameToDelete?.name ?? "Game"),
             isPresented: $viewModel.showDeleteConfirm,
             titleVisibility: .visible
         ) {
-            Button("Delete File", role: .destructive) {
+            Button(viewModel.tr("library.delete_button"), role: .destructive) {
                 if let g = viewModel.gameToDelete {
                     viewModel.deletePortedGame(g)
                 }
             }
-            Button("Cancel", role: .cancel) {}
+            Button(viewModel.tr("library.cancel"), role: .cancel) {}
         } message: {
-            Text("This action will permanently delete the compiled game file from your storage.")
+            Text(viewModel.tr("library.delete_message"))
         }
     }
     
@@ -85,15 +85,15 @@ public struct LibraryView: View {
                 .foregroundColor(NXTheme.secondary.opacity(0.4))
             
             VStack(spacing: 4) {
-                Text("No Ported Games Found")
+                Text(viewModel.tr("library.empty_title"))
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
-                Text("Games you convert (.app and .ipa) will automatically appear here.")
+                Text(viewModel.tr("library.empty_subtitle"))
                     .font(.system(size: 12))
                     .foregroundColor(NXTheme.textSecondary)
             }
             
-            Button("Convert a Game Now") {
+            Button(viewModel.tr("library.convert_now")) {
                 SoundEffectService.shared.play(.click)
                 viewModel.selectedTab = 0
             }

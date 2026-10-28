@@ -72,12 +72,12 @@ public struct GameDetailDeckView: View {
                                     if isLaunching {
                                         ProgressView()
                                             .controlSize(.small)
-                                        Text("Launching...")
+                                        Text(viewModel.tr("common.launching"))
                                             .font(.system(size: 13, weight: .bold, design: .rounded))
                                     } else {
                                         Image(systemName: "play.fill")
                                             .font(.system(size: 13))
-                                        Text("Play Game")
+                                        Text(viewModel.tr("common.play_game"))
                                             .font(.system(size: 13, weight: .bold, design: .rounded))
                                     }
                                 }
@@ -97,7 +97,7 @@ public struct GameDetailDeckView: View {
                             }) {
                                 HStack(spacing: 6) {
                                     Image(systemName: "slider.horizontal.3")
-                                    Text("Settings")
+                                    Text(viewModel.tr("deck.settings"))
                                 }
                                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                                 .frame(maxWidth: .infinity)
@@ -111,7 +111,7 @@ public struct GameDetailDeckView: View {
                             }) {
                                 HStack(spacing: 6) {
                                     Image(systemName: "folder")
-                                    Text("App Files")
+                                    Text(viewModel.tr("deck.app_files"))
                                 }
                                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                                 .frame(maxWidth: .infinity)
@@ -133,12 +133,12 @@ public struct GameDetailDeckView: View {
                         
                         // Storage Size Info Card
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Storage Footprint")
+                            Text(viewModel.tr("deck.storage_footprint"))
                                 .font(.system(size: 11, weight: .bold, design: .rounded))
                                 .foregroundColor(NXTheme.textSecondary)
                             
                             HStack {
-                                Text("Total Game Size:")
+                                Text(viewModel.tr("deck.total_size"))
                                     .font(.system(size: 11))
                                     .foregroundColor(NXTheme.textMuted)
                                 Spacer()
@@ -157,11 +157,11 @@ public struct GameDetailDeckView: View {
                         // Save Files Location
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
-                                Label("Save Files Location", systemImage: "internaldrive")
+                                Label(viewModel.tr("actions.save_location"), systemImage: "internaldrive")
                                     .font(.system(size: 11, weight: .bold, design: .rounded))
                                     .foregroundColor(NXTheme.textSecondary)
                                 Spacer()
-                                Button("Open Folder") {
+                                Button(viewModel.tr("common.open_folder")) {
                                     SoundEffectService.shared.play(.click)
                                     viewModel.revealSaveFolder(profile.saveDirectory)
                                 }
@@ -186,17 +186,17 @@ public struct GameDetailDeckView: View {
                         // DLC Installed
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
-                                Label("DLC Installed", systemImage: "shippingbox.fill")
+                                Label(viewModel.tr("deck.dlc_installed"), systemImage: "shippingbox.fill")
                                     .font(.system(size: 11, weight: .bold, design: .rounded))
                                     .foregroundColor(NXTheme.textSecondary)
                                 Spacer()
-                                Text("\(profile.dlcItems.count) found")
+                                Text(viewModel.tr("deck.found_count", profile.dlcItems.count))
                                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                     .foregroundColor(profile.dlcItems.isEmpty ? NXTheme.textMuted : NXTheme.secondary)
                             }
                             
                             if profile.dlcItems.isEmpty {
-                                Text("Base Game Only (No DLC packages detected in bundle)")
+                                Text(viewModel.tr("deck.base_game_only"))
                                     .font(.system(size: 10))
                                     .foregroundColor(NXTheme.textMuted)
                                     .padding(.vertical, 2)

@@ -21,15 +21,15 @@ public struct InstallerSheetView: View {
                         .foregroundColor(NXTheme.secondary)
                     
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Dependency Installer")
+                        Text(viewModel.tr("installer_modal.title"))
                             .font(.system(size: 16, weight: .bold, design: .rounded))
                             .foregroundColor(NXTheme.textPrimary)
                         if let item = viewModel.installerCurrentItem {
-                            Text("Installing: \(item)...")
+                            Text(viewModel.tr("installer_modal.installing_item", item))
                                 .font(.system(size: 12))
                                 .foregroundColor(NXTheme.textSecondary)
                         } else if !viewModel.isInstallingDependency {
-                            Text("Installation finished.")
+                            Text(viewModel.tr("installer_modal.finished"))
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
                         }
@@ -81,7 +81,7 @@ public struct InstallerSheetView: View {
                 // Footer
                 HStack {
                     Spacer()
-                    Button("Close") {
+                    Button(viewModel.tr("common.close")) {
                         dismiss()
                     }
                     .buttonStyle(NXPrimaryButtonStyle())

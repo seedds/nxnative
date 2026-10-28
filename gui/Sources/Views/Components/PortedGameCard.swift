@@ -99,17 +99,16 @@ public struct PortedGameCard: View {
                     if game.isPlayableLocally {
                         let isLaunching = viewModel.launchingGameId == game.id
                         Button(action: {
-                            SoundEffectService.shared.play(.click)
                             viewModel.launchGame(game)
                         }) {
                             HStack(spacing: 5) {
                                 if isLaunching {
                                     ProgressView()
                                         .controlSize(.mini)
-                                    Text("Starting...")
+                                    Text(viewModel.tr("common.starting"))
                                 } else {
                                     Image(systemName: "play.fill")
-                                    Text("Play")
+                                    Text(viewModel.tr("common.play"))
                                 }
                             }
                             .font(.system(size: 11, weight: .bold, design: .rounded))
@@ -128,7 +127,7 @@ public struct PortedGameCard: View {
                     }
                     .buttonStyle(NXSecondaryButtonStyle())
                     .controlSize(.regular)
-                    .help("Game Settings (60 FPS, Metal HUD, Docked, MetalFX)")
+                    .help(viewModel.tr("library.settings_help"))
                     
                     Button(action: {
                         viewModel.revealInFinder(url: game.url)
@@ -138,22 +137,22 @@ public struct PortedGameCard: View {
                     }
                     .buttonStyle(NXSecondaryButtonStyle())
                     .controlSize(.regular)
-                    .help("Reveal in Finder")
+                    .help(viewModel.tr("common.reveal_finder"))
                     
                     // Context Menu with hidden chevron indicator to eliminate overlap
                     Menu {
                         Button(action: {
                             viewModel.gameForSettingsSheet = game
                         }) {
-                            Label("Game Settings...", systemImage: "slider.horizontal.3")
+                            Label(viewModel.tr("deck.settings"), systemImage: "slider.horizontal.3")
                         }
-                        Button("Copy Path") {
+                        Button(viewModel.tr("common.copy_path")) {
                             let pb = NSPasteboard.general
                             pb.clearContents()
                             pb.setString(game.url.path, forType: .string)
                         }
                         Divider()
-                        Button("Delete Port...", role: .destructive) {
+                        Button(viewModel.tr("deck.delete_port"), role: .destructive) {
                             onDelete(game)
                         }
                     } label: {
@@ -171,7 +170,7 @@ public struct PortedGameCard: View {
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
                     .fixedSize()
-                    .help("More Options")
+                    .help(viewModel.tr("common.more_options"))
                     .nxNoFocusRing()
                 }
             }

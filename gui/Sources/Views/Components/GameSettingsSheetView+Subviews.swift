@@ -8,7 +8,7 @@ extension GameSettingsSheetView {
     func footerBar(onDismiss: @escaping () -> Void) -> some View {
         VStack(spacing: 10) {
             HStack(spacing: 12) {
-                Button("Restore Defaults") {
+                Button(viewModel.tr("personalization.reset_defaults")) {
                     viewModel.activeSettingsConfig = GameRuntimeConfig()
                 }
                 .buttonStyle(NXSecondaryButtonStyle())
@@ -20,7 +20,7 @@ extension GameSettingsSheetView {
                 
                 Spacer()
                 
-                Button("Cancel") {
+                Button(viewModel.tr("common.cancel")) {
                     viewModel.gameForSettingsSheet = nil
                     onDismiss()
                 }
@@ -34,7 +34,7 @@ extension GameSettingsSheetView {
                         .stroke(viewModel.settingsModalFocusIndex == 6 ? NXTheme.secondary : Color.clear, lineWidth: 1.5)
                 )
                 
-                Button("Save Settings") {
+                Button(viewModel.tr("common.save")) {
                     viewModel.saveRuntimeConfig(viewModel.activeSettingsConfig, for: game)
                     viewModel.gameForSettingsSheet = nil
                     onDismiss()
@@ -50,21 +50,21 @@ extension GameSettingsSheetView {
             
             // Controller navigation hints strip
             HStack(spacing: 12) {
-                hintBadge(glyph: "↑/↓", text: "Navigate", isPill: true)
-                hintBadge(glyph: "←/→", text: "Adjust", isPill: true)
+                hintBadge(glyph: "↑/↓", text: viewModel.tr("controls.hint_navigate"), isPill: true)
+                hintBadge(glyph: "←/→", text: viewModel.tr("controls.hint_adjust"), isPill: true)
                 hintBadge(
                     glyph: controllerService.activeBrand == .playstation ? "✕" : "A",
-                    text: "Toggle",
+                    text: viewModel.tr("controls.hint_toggle"),
                     bgColor: Color(red: 0.06, green: 0.49, blue: 0.06)
                 )
                 hintBadge(
                     glyph: controllerService.activeBrand == .playstation ? "□" : "X",
-                    text: "Save & Close",
+                    text: viewModel.tr("settings_modal.save_and_close"),
                     bgColor: Color(red: 0.0, green: 0.47, blue: 0.84)
                 )
                 hintBadge(
                     glyph: controllerService.activeBrand == .playstation ? "○" : "B",
-                    text: "Close",
+                    text: viewModel.tr("common.close"),
                     bgColor: Color(red: 0.91, green: 0.07, blue: 0.14)
                 )
             }
@@ -129,7 +129,7 @@ extension GameSettingsSheetView {
                 Spacer()
                 
                 if isFocused {
-                    Text("Focused")
+                    Text(viewModel.tr("settings_modal.focused"))
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
                         .padding(.horizontal, 6)
@@ -170,7 +170,7 @@ extension GameSettingsSheetView {
         
         return settingCard(
             rowIndex: 5,
-            title: "Game Cover Artwork",
+            title: viewModel.tr("settings_modal.cover_title"),
             icon: "photo.on.rectangle.angled",
             iconColor: Color(red: 0.95, green: 0.45, blue: 0.75)
         ) {
@@ -188,12 +188,12 @@ extension GameSettingsSheetView {
                 
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 6) {
-                        Text(isCustom ? "Custom Artwork Active" : "Automatic Artwork Active")
+                        Text(isCustom ? viewModel.tr("settings_modal.cover_custom_active") : viewModel.tr("settings_modal.cover_auto_active"))
                             .font(.system(size: 12, weight: .bold, design: .rounded))
                             .foregroundColor(isCustom ? NXTheme.secondary : NXTheme.textPrimary)
                         
                         if isCustom {
-                            Text("CUSTOM")
+                            Text(viewModel.tr("settings_modal.cover_custom_badge"))
                                 .font(.system(size: 8, weight: .heavy, design: .monospaced))
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 1)
@@ -204,16 +204,16 @@ extension GameSettingsSheetView {
                     }
                     
                     Text(isCustom
-                         ? "Personalized cover active in your library."
-                         : "Automatically fetched from authentic Switch box art repository.")
+                         ? viewModel.tr("settings_modal.cover_custom_desc")
+                         : viewModel.tr("settings_modal.cover_auto_desc"))
                         .font(.system(size: 11))
                         .foregroundColor(NXTheme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                     
                     HStack(spacing: 8) {
-                        Button("Choose Custom Cover...") {
+                        Button(viewModel.tr("settings_modal.cover_choose_btn")) {
                             let panel = NSOpenPanel()
-                            panel.title = "Select Game Cover Image"
+                            panel.title = viewModel.tr("settings_modal.cover_panel_title")
                             panel.allowedContentTypes = [.jpeg, .png, .webP, .image]
                             panel.allowsMultipleSelection = false
                             panel.canChooseDirectories = false
@@ -226,7 +226,7 @@ extension GameSettingsSheetView {
                         .controlSize(.small)
                         
                         if isCustom {
-                            Button("Reset to Automatic") {
+                            Button(viewModel.tr("settings_modal.cover_reset_btn")) {
                                 SoundEffectService.shared.play(.click)
                                 GameCoverService.shared.resetCustomCover(for: game)
                             }

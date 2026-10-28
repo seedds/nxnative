@@ -40,14 +40,14 @@ public struct GameSettingsSavesSectionView: View {
                     Image(systemName: "icloud.fill")
                         .foregroundColor(Color.blue)
                         .font(.system(size: 15))
-                    Text("iCloud Cross-Save (Mac & iPhone/iPad)")
+                    Text(L10n.t("settings_modal.icloud_sync"))
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
                 }
 
                 Spacer()
 
-                Button("Local Backup") {
+                Button(L10n.t("settings_modal.local_backup")) {
                     SoundEffectService.shared.play(.click)
                     if let backup = saveService.backupMacSave(titleId: titleId) {
                         backupStatusText = "Saved to: \(backup.lastPathComponent)"
@@ -70,7 +70,7 @@ public struct GameSettingsSavesSectionView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(NXTheme.textPrimary)
 
-                    Text("Saves are centralized in the nxnative_launcher folder with game cover art.")
+                    Text(L10n.t("settings_modal.saves_centralized"))
                         .font(.system(size: 10))
                         .foregroundColor(NXTheme.textSecondary)
                 }
@@ -84,12 +84,12 @@ public struct GameSettingsSavesSectionView: View {
                 }) {
                     HStack(spacing: 4) {
                         Image(systemName: "folder.fill")
-                        Text("Open Folder in Finder")
+                        Text(L10n.t("common.reveal_finder"))
                     }
                 }
                 .buttonStyle(NXSecondaryButtonStyle())
                 .controlSize(.mini)
-                .help("Opens game folder inside iCloud Drive > nxnative_launcher with game cover art on the folder")
+                .help(L10n.t("settings_modal.icloud_folder_help"))
             }
             .padding(10)
             .background(NXTheme.glassSurfaceElevated.opacity(0.7))
@@ -105,14 +105,14 @@ public struct GameSettingsSavesSectionView: View {
 
     private var deviceSyncSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Direct Device Save Sync", systemImage: "arrow.triangle.2.circlepath")
+            Label(L10n.t("settings_modal.direct_sync_title"), systemImage: "arrow.triangle.2.circlepath")
                 .font(.system(size: 12, weight: .bold, design: .rounded))
                 .foregroundColor(NXTheme.textPrimary)
 
             ForEach(deviceService.connectedDevices) { dev in
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Sync with \(dev.name) (\(dev.model))")
+                        Text(L10n.t("settings_modal.sync_with_device", dev.name, dev.model))
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(NXTheme.textPrimary)
                         if let text = syncStatusText {
@@ -124,7 +124,7 @@ public struct GameSettingsSavesSectionView: View {
 
                     Spacer()
 
-                    Button("Push to Device") {
+                    Button(L10n.t("settings_modal.push_device")) {
                         SoundEffectService.shared.play(.click)
                         _ = saveService.createSafetySnapshot(for: game, label: "pre_push")
                         saveService.pushSaveToDevice(
@@ -138,7 +138,7 @@ public struct GameSettingsSavesSectionView: View {
                     .buttonStyle(NXSecondaryButtonStyle())
                     .controlSize(.mini)
 
-                    Button("Pull from Device") {
+                    Button(L10n.t("settings_modal.pull_device")) {
                         SoundEffectService.shared.play(.click)
                         _ = saveService.createSafetySnapshot(for: game, label: "pre_pull")
                         saveService.pullSaveFromDevice(

@@ -24,7 +24,7 @@ public struct LogsView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(NXTheme.textSecondary)
-                    TextField("Filter logs...", text: $searchText)
+                    TextField(viewModel.tr("logs.filter"), text: $searchText)
                         .textFieldStyle(.plain)
                         .foregroundColor(NXTheme.textPrimary)
                     if !searchText.isEmpty {
@@ -53,12 +53,12 @@ public struct LogsView: View {
                 
                 Spacer()
                 
-                Toggle("Auto-Scroll", isOn: $autoScroll)
+                Toggle(viewModel.tr("logs.auto_scroll"), isOn: $autoScroll)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(NXTheme.textSecondary)
                 
                 Button(action: copyLogsToClipboard) {
-                    Label("Copy", systemImage: "doc.on.doc")
+                    Label(viewModel.tr("logs.copy"), systemImage: "doc.on.doc")
                 }
                 .buttonStyle(NXSecondaryButtonStyle())
                 .controlSize(.small)
@@ -66,7 +66,7 @@ public struct LogsView: View {
                 Button(action: {
                     viewModel.logs.removeAll()
                 }) {
-                    Label("Clear", systemImage: "trash")
+                    Label(viewModel.tr("logs.clear"), systemImage: "trash")
                 }
                 .buttonStyle(NXSecondaryButtonStyle())
                 .controlSize(.small)
@@ -95,7 +95,7 @@ public struct LogsView: View {
                                 Image(systemName: "terminal")
                                     .font(.system(size: 28))
                                     .foregroundColor(NXTheme.secondary.opacity(0.4))
-                                Text("No logs recorded yet.")
+                                Text(viewModel.tr("logs.empty"))
                                     .font(.system(size: 12))
                                     .foregroundColor(NXTheme.textSecondary)
                             }

@@ -17,7 +17,7 @@ public struct BuildOptionsSection: View {
             GlassCard {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
-                        Label("2. Target Platform & Output", systemImage: "macbook.and.iphone")
+                        Label(viewModel.tr("build.step_2"), systemImage: "macbook.and.iphone")
                             .symbolRenderingMode(.hierarchical)
                             .font(.system(size: 14, weight: .bold, design: .rounded))
                             .foregroundColor(NXTheme.textPrimary)
@@ -35,17 +35,17 @@ public struct BuildOptionsSection: View {
                     
                     // Output Folder Option
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Custom output folder (defaults to game directory)", isOn: $viewModel.useCustomOutputFolder)
+                        Toggle(viewModel.tr("build.output_folder"), isOn: $viewModel.useCustomOutputFolder)
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(NXTheme.textPrimary)
                         
                         if viewModel.useCustomOutputFolder {
                             PathPickerRow(
-                                title: "Destination Directory",
+                                title: viewModel.tr("build.output_folder"),
                                 icon: "arrow.down.doc.fill",
                                 path: viewModel.customOutputFolder?.path,
-                                placeholder: "Choose folder where .app or .ipa will be saved...",
-                                actionTitle: "Choose..."
+                                placeholder: viewModel.tr("common.choose_folder"),
+                                actionTitle: viewModel.tr("common.choose")
                             ) {
                                 viewModel.selectOutputFolder()
                             }
@@ -59,10 +59,10 @@ public struct BuildOptionsSection: View {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 20) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Application Name (Optional):")
+                            Text(viewModel.tr("build.app_name_label"))
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(NXTheme.textSecondary)
-                            TextField("Custom name displayed in macOS / iOS", text: $viewModel.appName)
+                            TextField("Custom name", text: $viewModel.appName)
                                 .textFieldStyle(.plain)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
@@ -75,10 +75,10 @@ public struct BuildOptionsSection: View {
                         }
                         
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Bundle Identifier (Optional):")
+                            Text(viewModel.tr("build.bundle_id_label"))
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(NXTheme.textSecondary)
-                            TextField("e.g. org.nxnative.game", text: $viewModel.bundleId)
+                            TextField("org.nxnative.game", text: $viewModel.bundleId)
                                 .textFieldStyle(.plain)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
@@ -93,7 +93,7 @@ public struct BuildOptionsSection: View {
                     
                     HStack(spacing: 20) {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Game Language:")
+                            Text(viewModel.tr("build.game_language_label"))
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(NXTheme.textSecondary)
                             
@@ -152,16 +152,16 @@ public struct BuildOptionsSection: View {
                     Divider().opacity(0.2)
                     
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Display real-time FPS counter and overlay (--show-fps)", isOn: $viewModel.showFps)
-                        Toggle("Keep intermediate extracted files for fast rebuilds (--keep-extracted)", isOn: $viewModel.keepExtracted)
-                        Toggle("Survey inspection only (Survey Only)", isOn: $viewModel.surveyOnly)
+                        Toggle(viewModel.tr("build.opt_fps"), isOn: $viewModel.showFps)
+                        Toggle(viewModel.tr("build.opt_keep_extracted"), isOn: $viewModel.keepExtracted)
+                        Toggle(viewModel.tr("build.opt_survey_only"), isOn: $viewModel.surveyOnly)
                     }
                     .font(.system(size: 12))
                     .foregroundColor(NXTheme.textSecondary)
                 }
                 .padding(.top, 8)
             } label: {
-                Label("Advanced Options & Build Flags", systemImage: "slider.horizontal.3")
+                Label(viewModel.tr("build.opt_advanced_title"), systemImage: "slider.horizontal.3")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundColor(NXTheme.textSecondary)
             }
@@ -194,7 +194,7 @@ public struct BuildOptionsSection: View {
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.left.circle.fill")
-                        Text("Back to Game Selection")
+                        Text(viewModel.tr("build.back_select"))
                     }
                     .font(.system(size: 13, weight: .semibold))
                     .padding(.horizontal, 14)
@@ -218,7 +218,7 @@ public struct BuildOptionsSection: View {
                 }) {
                     HStack(spacing: 8) {
                         Image(systemName: "play.fill")
-                        Text("Port Game")
+                        Text(viewModel.tr("build.port_game"))
                     }
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .padding(.horizontal, 22)
@@ -232,18 +232,18 @@ public struct BuildOptionsSection: View {
     
     private func missingRequirementHint() -> String {
         if viewModel.selectedGame == nil {
-            return "Please select a game first."
+            return viewModel.tr("build.no_task_desc")
         }
         if !viewModel.isProdKeysValid {
-            return "prod.keys missing. Configure in Settings."
+            return viewModel.tr("build.keys_missing_desc")
         }
         if !viewModel.isNxnativeValid {
-            return "nxnative core missing. Configure in Settings."
+            return viewModel.tr("build.core_repo_missing_desc")
         }
         if viewModel.isDiskSpaceLow {
-            return "Insufficient disk space."
+            return viewModel.tr("build.low_disk_title")
         }
-        return "Complete setup requirements to port."
+        return viewModel.tr("status.setup_required")
     }
     
     private func platformCard(_ plat: TargetPlatform) -> some View {

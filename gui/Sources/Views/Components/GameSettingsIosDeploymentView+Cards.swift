@@ -54,7 +54,7 @@ extension GameSettingsIosDeploymentView {
             }
 
             HStack {
-                Button("Cancel Deployment") {
+                Button(L10n.t("settings_modal.cancel_deployment")) {
                     SoundEffectService.shared.play(.click)
                     deviceService.cancelDeployment()
                 }
@@ -115,7 +115,7 @@ extension GameSettingsIosDeploymentView {
 
             Spacer()
 
-            Button("OK") {
+            Button(L10n.t("common.ok")) {
                 SoundEffectService.shared.play(.click)
                 deviceService.dismissDeploymentStatus()
             }
@@ -141,7 +141,7 @@ extension GameSettingsIosDeploymentView {
 
                 Spacer()
 
-                Button("Close") {
+                Button(L10n.t("common.close")) {
                     SoundEffectService.shared.play(.click)
                     deviceService.dismissDeploymentStatus()
                 }
@@ -162,7 +162,7 @@ extension GameSettingsIosDeploymentView {
                     }) {
                         HStack(spacing: 4) {
                             Image(systemName: "airdrop")
-                            Text("Send via AirDrop Now")
+                            Text(L10n.t("settings_modal.airdrop_now"))
                         }
                     }
                     .buttonStyle(NXPrimaryButtonStyle())
@@ -174,7 +174,7 @@ extension GameSettingsIosDeploymentView {
                     }) {
                         HStack(spacing: 4) {
                             Image(systemName: "folder")
-                            Text("Open .ipa Folder")
+                            Text(L10n.t("settings_modal.open_ipa_folder"))
                         }
                     }
                     .buttonStyle(NXSecondaryButtonStyle())

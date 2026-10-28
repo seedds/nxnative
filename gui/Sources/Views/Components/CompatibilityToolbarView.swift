@@ -12,11 +12,11 @@ public struct CompatibilityToolbarView: View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
-                    Text("Compatible Games")
+                    Text(viewModel.tr("nav.compatibility"))
                         .font(.system(size: 16, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
                     
-                    Text("\(viewModel.compatibleGames.count) verified")
+                    Text(viewModel.tr("compatibility.verified_count", viewModel.compatibleGames.count))
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
@@ -34,7 +34,7 @@ public struct CompatibilityToolbarView: View {
                         .foregroundColor(NXTheme.textSecondary)
                     
                     if let date = viewModel.compatibilityLastUpdated {
-                        Text("• Updated \(formattedTime(date))")
+                        Text(viewModel.tr("compatibility.updated_date", formattedTime(date)))
                             .font(.system(size: 10))
                             .foregroundColor(NXTheme.textMuted)
                     }
@@ -47,7 +47,7 @@ public struct CompatibilityToolbarView: View {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(NXTheme.textSecondary)
-                TextField("Search title, ID, engine...", text: $viewModel.compatibilitySearchText)
+                TextField(viewModel.tr("compatibility.search"), text: $viewModel.compatibilitySearchText)
                     .textFieldStyle(.plain)
                     .foregroundColor(NXTheme.textPrimary)
                 if !viewModel.compatibilitySearchText.isEmpty {
@@ -89,7 +89,7 @@ public struct CompatibilityToolbarView: View {
                     } else {
                         Image(systemName: "arrow.clockwise")
                     }
-                    Text("Refresh")
+                    Text(viewModel.tr("common.refresh"))
                 }
             }
             .buttonStyle(NXSecondaryButtonStyle())
@@ -112,7 +112,7 @@ public struct CompatibilityToolbarView: View {
                     .cornerRadius(6)
             }
             .buttonStyle(.plain)
-            .help("List View")
+            .help(L10n.t("compatibility.list_view"))
             
             Button(action: {
                 SoundEffectService.shared.play(.click)
@@ -127,7 +127,7 @@ public struct CompatibilityToolbarView: View {
                     .cornerRadius(6)
             }
             .buttonStyle(.plain)
-            .help("Grid View")
+            .help(L10n.t("compatibility.grid_view"))
         }
         .padding(2)
         .background(NXTheme.glassSurfaceElevated.opacity(0.6))

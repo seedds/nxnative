@@ -139,9 +139,9 @@ extension AppViewModel {
     }
     
     func handleConfirm() {
-        SoundEffectService.shared.play(.click)
         switch selectedTab {
         case 0:
+            SoundEffectService.shared.play(.click)
             if buildWizardStep == 1 {
                 if selectedGame != nil {
                     withAnimation(.easeInOut(duration: 0.2)) { goToWizardStep(2) }
@@ -153,23 +153,28 @@ extension AppViewModel {
             }
         case 1:
             if isGameActionMenuPresented {
+                SoundEffectService.shared.play(.click)
                 executeFocusedGameAction()
             } else if let game = currentFocusedGame {
                 if game.platform == .macApp {
                     launchGame(game)
                 } else {
+                    SoundEffectService.shared.play(.click)
                     gameForSettingsSheet = game
                 }
             }
         case 2:
             handleCompatibilityConfirm()
         case 3:
+            SoundEffectService.shared.play(.click)
             var prof = InputProfileManager.shared.activeProfile
             prof.swapFaceButtons()
             InputProfileManager.shared.updateProfile(prof)
         case 5:
+            SoundEffectService.shared.play(.click)
             if !prerequisites.allSatisfied { showInstallerSheet = true }
         default:
+            SoundEffectService.shared.play(.click)
             break
         }
     }

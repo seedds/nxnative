@@ -11,17 +11,17 @@ public struct SystemKeysCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Label("Decryption Keys (prod.keys)", systemImage: "key.fill")
+                    Label(viewModel.tr("system.keys_title"), systemImage: "key.fill")
                         .symbolRenderingMode(.hierarchical)
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
-                        .help("Keys are auto-detected from Ryujinx or chosen manually and used by nxnative to decrypt Switch game files.")
+                        .help(viewModel.tr("system.keys_help"))
                     
                     Spacer()
                     
                     StatusBadge(
                         isPositive: viewModel.isProdKeysValid,
-                        text: viewModel.isProdKeysValid ? "Detected: \(viewModel.prodKeysSource)" : "Keys Missing"
+                        text: viewModel.isProdKeysValid ? viewModel.tr("system.keys_detected", viewModel.prodKeysSource) : viewModel.tr("system.keys_missing_badge")
                     )
                 }
                 
@@ -34,7 +34,7 @@ public struct SystemKeysCard: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         } else {
-                            Text("No prod.keys located. Auto-detected from Ryujinx or choose manually.")
+                            Text(viewModel.tr("system.keys_missing_desc"))
                                 .font(.system(size: 12))
                                 .foregroundColor(NXTheme.textSecondary)
                         }
@@ -49,12 +49,12 @@ public struct SystemKeysCard: View {
                             .stroke(NXTheme.specularRim, lineWidth: 0.8)
                     )
                     
-                    Button("Choose File...") {
+                    Button(viewModel.tr("common.choose_file")) {
                         viewModel.selectProdKeysFile()
                     }
                     .buttonStyle(NXSecondaryButtonStyle())
                     
-                    Button("Find in Ryujinx...") {
+                    Button(viewModel.tr("system.find_ryujinx")) {
                         viewModel.selectRyujinxFolder()
                     }
                     .buttonStyle(NXSecondaryButtonStyle())

@@ -12,17 +12,17 @@ public struct SystemToolsCard: View {
             VStack(alignment: .leading, spacing: 14) {
                 // Header
                 HStack(spacing: 10) {
-                    Label("System Build Tools & Compilers", systemImage: "wrench.and.screwdriver.fill")
+                    Label(viewModel.tr("system.tools_title"), systemImage: "wrench.and.screwdriver.fill")
                         .symbolRenderingMode(.hierarchical)
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
-                        .help("Toolchains, compilers, and dependencies required to build and bundle native ports.")
+                        .help(viewModel.tr("system.tools_help"))
                     
                     Spacer()
                     
                     StatusBadge(
                         isPositive: viewModel.prerequisites.allSatisfied,
-                        text: viewModel.prerequisites.allSatisfied ? "All Dependencies Ready" : "\(viewModel.prerequisites.missingList.count) Missing"
+                        text: viewModel.prerequisites.allSatisfied ? viewModel.tr("system.deps_ready") : viewModel.tr("system.deps_missing_count", viewModel.prerequisites.missingList.count)
                     )
                     
                     if !viewModel.prerequisites.allSatisfied {
@@ -33,10 +33,10 @@ public struct SystemToolsCard: View {
                             HStack(spacing: 5) {
                                 if viewModel.isInstallingDependency {
                                     ProgressView().controlSize(.small)
-                                    Text("Installing...")
+                                    Text(viewModel.tr("common.installing"))
                                 } else {
                                     Image(systemName: "arrow.down.circle.fill")
-                                    Text("Install All")
+                                    Text(viewModel.tr("system.install_all"))
                                 }
                             }
                             .font(.system(size: 11, weight: .bold, design: .rounded))
@@ -54,10 +54,10 @@ public struct SystemToolsCard: View {
                             .foregroundColor(NXTheme.tertiary)
                         
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Missing Dependencies Detected (\(viewModel.prerequisites.missingList.count) Items)")
+                            Text(viewModel.tr("system.missing_deps_title", viewModel.prerequisites.missingList.count))
                                 .font(.system(size: 13, weight: .bold, design: .rounded))
                                 .foregroundColor(NXTheme.textPrimary)
-                            Text("Homebrew and build dependencies will be installed sequentially one by one until finished.")
+                            Text(viewModel.tr("system.missing_deps_desc"))
                                 .font(.system(size: 11))
                                 .foregroundColor(NXTheme.textSecondary)
                         }
@@ -71,10 +71,10 @@ public struct SystemToolsCard: View {
                             HStack(spacing: 6) {
                                 if viewModel.isInstallingDependency {
                                     ProgressView().controlSize(.small)
-                                    Text("Installing Dependencies...")
+                                    Text(viewModel.tr("common.installing"))
                                 } else {
                                     Image(systemName: "play.fill")
-                                    Text("Install All One by One")
+                                    Text(viewModel.tr("build.install_all_seq"))
                                 }
                             }
                             .font(.system(size: 12, weight: .bold, design: .rounded))
@@ -113,10 +113,10 @@ public struct SystemToolsCard: View {
                         HStack(spacing: 8) {
                             if viewModel.isInstallingDependency {
                                 ProgressView().controlSize(.small)
-                                Text("Installing Dependencies One by One...")
+                                Text(viewModel.tr("common.installing"))
                             } else {
                                 Image(systemName: "arrow.down.circle.fill")
-                                Text("Install All Dependencies One by One Until Finished (\(viewModel.prerequisites.missingList.count) Left)")
+                                Text(viewModel.tr("build.deps_missing_title", viewModel.prerequisites.missingList.count))
                             }
                         }
                         .font(.system(size: 12, weight: .bold, design: .rounded))
@@ -128,13 +128,13 @@ public struct SystemToolsCard: View {
                     HStack {
                         Image(systemName: "checkmark.seal.fill")
                             .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
-                        Text("All compilers and build tools are ready for native compilation.")
+                        Text(viewModel.tr("system.all_tools_ready"))
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
                         
                         Spacer()
                         
-                        Button("Repair / Re-check All") {
+                        Button(viewModel.tr("system.repair_recheck")) {
                             SoundEffectService.shared.play(.click)
                             viewModel.repairAllDependencies()
                         }

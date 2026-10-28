@@ -77,7 +77,7 @@ public struct SwitchConsoleLibraryView: View {
                                     Image(systemName: "gamecontroller")
                                         .font(.system(size: 38))
                                         .foregroundColor(NXTheme.textMuted)
-                                    Text("No games found in library")
+                                    Text(viewModel.tr("console.no_games"))
                                         .font(.system(size: 14, weight: .semibold))
                                         .foregroundColor(NXTheme.textSecondary)
                                 }

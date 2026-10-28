@@ -34,10 +34,10 @@ public struct BuildPrerequisiteBanners: View {
                 .foregroundColor(NXTheme.tertiary)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("nxnative Core Repository Not Installed")
+                Text(viewModel.tr("build.core_repo_missing"))
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
-                Text("The conversion scripts are required to build native ports. Download with 1 click.")
+                Text(viewModel.tr("build.core_repo_missing_desc"))
                     .font(.system(size: 11))
                     .foregroundColor(NXTheme.textSecondary)
             }
@@ -47,12 +47,12 @@ public struct BuildPrerequisiteBanners: View {
             if viewModel.isCloningRepository {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("Downloading...")
+                    Text(viewModel.tr("common.downloading"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(NXTheme.secondary)
                 }
             } else {
-                Button("Download & Setup (1-Click)") {
+                Button(viewModel.tr("build.download_setup_click")) {
                     viewModel.cloneNxnativeRepository()
                 }
                 .buttonStyle(NXPrimaryButtonStyle())
@@ -81,17 +81,17 @@ public struct BuildPrerequisiteBanners: View {
                 .foregroundColor(NXTheme.tertiary)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("Decryption Keys (prod.keys) Missing")
+                Text(viewModel.tr("build.keys_missing_title"))
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
-                Text("Keys are required to decrypt game archives. Configure them once in Settings.")
+                Text(viewModel.tr("build.keys_missing_desc"))
                     .font(.system(size: 11))
                     .foregroundColor(NXTheme.textSecondary)
             }
             
             Spacer()
             
-            Button("Configure in Settings") {
+            Button(viewModel.tr("build.configure_settings")) {
                 viewModel.selectedTab = 5
             }
             .buttonStyle(NXAccentButtonStyle())
@@ -119,17 +119,17 @@ public struct BuildPrerequisiteBanners: View {
                 .foregroundColor(NXTheme.tertiary)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("Apple Command Line Tools Not Installed")
+                Text(viewModel.tr("build.apple_tools_missing"))
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
-                Text("Apple developer compilers are required to build native Mac ports. Install with 1 click.")
+                Text(viewModel.tr("build.apple_tools_missing_desc"))
                     .font(.system(size: 11))
                     .foregroundColor(NXTheme.textSecondary)
             }
             
             Spacer()
             
-            Button("Install Apple Developer Tools") {
+            Button(viewModel.tr("build.install_apple_tools")) {
                 viewModel.installAppleCommandLineTools()
             }
             .buttonStyle(NXAccentButtonStyle())
@@ -157,17 +157,17 @@ public struct BuildPrerequisiteBanners: View {
                 .foregroundColor(NXTheme.tertiary)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("Homebrew Package Manager Not Installed")
+                Text(viewModel.tr("build.homebrew_missing"))
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
-                Text("Homebrew is required to install Python modules, .NET, and build compilers. Install with 1 click.")
+                Text(viewModel.tr("build.homebrew_missing_desc"))
                     .font(.system(size: 11))
                     .foregroundColor(NXTheme.textSecondary)
             }
             
             Spacer()
             
-            Button("Install Homebrew & Tools") {
+            Button(viewModel.tr("build.install_homebrew")) {
                 viewModel.installAllMissingDependencies()
             }
             .buttonStyle(NXAccentButtonStyle())
@@ -195,17 +195,17 @@ public struct BuildPrerequisiteBanners: View {
                 .foregroundColor(NXTheme.tertiary)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("Missing Build Dependencies (\(viewModel.prerequisites.missingList.count) Left)")
+                Text(viewModel.tr("build.deps_missing_title", viewModel.prerequisites.missingList.count))
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
-                Text("Install all missing dependencies sequentially one by one until completed.")
+                Text(viewModel.tr("build.deps_missing_desc"))
                     .font(.system(size: 11))
                     .foregroundColor(NXTheme.textSecondary)
             }
             
             Spacer()
             
-            Button("Install All One by One") {
+            Button(viewModel.tr("build.install_all_seq")) {
                 viewModel.installAllMissingDependencies()
             }
             .buttonStyle(NXAccentButtonStyle())

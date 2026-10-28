@@ -29,11 +29,24 @@ public struct SystemAppearanceCard: View {
         return Image(systemName: "gamecontroller.fill")
     }
     
+    private func modeTitle(for mode: AppIconAppearanceMode) -> String {
+        switch mode {
+        case .light:
+            return viewModel.tr("personalization.icon_light")
+        case .dark:
+            return viewModel.tr("personalization.icon_dark")
+        case .mono:
+            return viewModel.tr("personalization.icon_mono")
+        case .auto:
+            return viewModel.tr("personalization.icon_auto")
+        }
+    }
+    
     public var body: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("App Icon & Color Appearance")
+                    Text(viewModel.tr("personalization.app_icon"))
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
                     
@@ -77,7 +90,7 @@ public struct SystemAppearanceCard: View {
                                     }
                                 }
                                 
-                                Text(mode.rawValue)
+                                Text(modeTitle(for: mode))
                                     .font(.system(size: 11, weight: isSelected ? .bold : .semibold, design: .rounded))
                                     .foregroundColor(.white)
                             }

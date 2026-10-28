@@ -14,3 +14,5 @@ dm/games/*/c1_full.tsv
 dm/games/*/cb_extent.tsv
 
 .vscode/
+# Agent worktrees (CLAUDE.md): never committed
+/.claude/worktrees/

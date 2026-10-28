@@ -7,9 +7,9 @@ import sys
 import tempfile
 import unittest
 
-from test_nso_match import image, RET
-
 TOOLS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TOOLS / 'tests'))   # the CI runs each file by path from the repository root (tests.yml), which does not put this folder on sys.path
+from test_nso_match import image, RET  # noqa: E402
 
 
 class NroHeader(unittest.TestCase):

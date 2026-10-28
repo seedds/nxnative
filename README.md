@@ -9,7 +9,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue.svg)](https://apple.com/macos)
 [![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%2FM2%2FM3%2FM4)-orange.svg)](https://apple.com)
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-FA7343.svg)](https://swift.org)
-[![Version](https://img.shields.io/badge/version-v1.6.0-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
+[![Version](https://img.shields.io/badge/version-v1.6.1-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Upstream](https://img.shields.io/badge/core%20engine-seedds%2Fnxnative-informational.svg)](https://github.com/seedds/nxnative)
 [![Report Errors](https://img.shields.io/badge/Issues-Support%20%26%20Bugs-red.svg)](https://github.com/rennan101/nxnative_Launcher/issues)
@@ -154,9 +154,9 @@ Before compiling or executing ported games, ensure your macOS system is configur
 ### ⚙️ 3. Automatic Setup (Via Launcher Interface)
 1. Download and open **`NxNative_Launcher.app`**.
 2. Navigate to the **Settings** tab (press `6` on your keyboard or `R` on a connected controller).
-3. Under the **System Prerequisites & Diagnostics** section:
-   - If Clang, Command Line Tools, Homebrew, or any required packages show warnings, click **"Install Missing"** or **"Repair All"**.
-   - The launcher installs and validates all dependencies automatically in the background.
+3. Under the **System Build Tools & Compilers** section:
+   - If Homebrew, Command Line Tools, Python modules, .NET, or any required compilers show missing items, click **"Install All One by One"** or **"Install All Dependencies"**.
+   - The launcher installs Homebrew (with automatic macOS sudo authentication) and then installs all missing tools sequentially one by one until completed.
 
 ---
 

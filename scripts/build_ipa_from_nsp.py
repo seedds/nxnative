@@ -1023,6 +1023,9 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
         for p in procs.values():
             if p.poll() is None: p.terminate(); p.wait()
         for f in logf.values(): f.close()
+    rtp = next((d / g.id / 'runtime_patches.py' for d in [Path(env['DM_GAMES_DIR'])] * bool(env.get('DM_GAMES_DIR')) + [repo / 'dm/games'] if (d / g.id / 'runtime_patches.py').is_file()), None)
+    if rtp and 'main' in src:   # the game's run-time patch choices (dm/host/loader.c runtime_patches): main.runtime.tsv beside the patched image
+        run([py, rtp, src['main'], tmp / 'main.patched.bin', tmp / 'main.runtime.tsv'], logs / 'runtime_patches.log', env=env)
     rmtree(kf); swap_in(tmp, out); kf.write_text(f'{key}\n')
     PROG.end(', '.join(mods) + (f' and {len(nros)} NROs' if nros else ''))
     return g

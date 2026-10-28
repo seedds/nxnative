@@ -62,6 +62,8 @@ def build(gid, patched, control):
     g = game.load(gid)
     macros = dict(re.findall(r'^#define (DM_GAME_\w+) (.*)$', game.header(g), re.M))   # the host's own defaults, as it is compiled for this game
     keys = fixups_keys(Path(patched) / 'main.fixups.tsv')
+    rt = Path(patched) / 'main.runtime.tsv'   # run-time patch choices (dm/host/loader.c runtime_patches): the variables its rows test
+    rvars = {l.split('=', 1)[0] for l in rt.read_text(encoding='utf-8').splitlines() if l and not l.startswith('#') and '=' in l.split('\t', 1)[0]} if rt.is_file() else set()
     langs = [(c, n) for c, n in nacp.LANGUAGES if c in nacp.languages(control)]
 
     def macro(name, n):
@@ -72,6 +74,7 @@ def build(gid, patched, control):
         if cond == 'always': return True
         if cond == 'languages>1': return len(langs) > 1
         if cond.startswith('fixups:'): return cond[7:] in keys
+        if cond.startswith('runtime:'): return cond[8:] in rvars
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]
         if cond.startswith('platform:'): return platform == cond[9:]
         m = re.fullmatch(r'(DM_GAME_\w+)(!=|==)(.*)', cond)

@@ -290,6 +290,13 @@ To enroll a cut for any game's own module:
 - **Fix:** `relr_apply` in `loader.c`; `DM_LOADHASH` and `nvn_slots_got.py` read it too. The loader's log line counts them as `relr=`.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0 (SDK 20).
 
+## Run-time patches chosen at launch
+
+- **What:** settings that are code — a render size held as immediates in several functions, a frame-pacing cave — chosen in the launcher instead of a rewrite per combination. `<module>.runtime.tsv` beside the patched image holds one write per line, `<VAR>=<value>\t<offset hex>\t<bytes hex>[\t<why>]`; `loader.c` (`runtime_patches`) writes the rows whose variable has that value (`*` in the first column: always) after the image is copied in and before the code is sealed. A row whose offset column is `env` sets a host switch instead (`<NAME>=<VALUE>` in the third column, unless the environment sets it): a 120 fps choice also asks for a 120 Hz present.
+- **Making the table:** a profile's `runtime_patches.py` is run by `build_ipa_from_nsp.py` after the rewrite as `runtime_patches.py <module as extracted> <patched image> <out tsv>`, for `main`; it should check every site's original bytes and that the rewriter left it alone (the offsets are those of the original image, so a site the rewriter moved would be overwritten wrongly). The Mac app takes the table with the modules (`pack_app.py`).
+- **Settings:** a row of `dm/games/settings.tsv` shown under `runtime:<VAR>` appears only when the table has rows for that variable.
+- **Found on:** Metroid Prime 4: Beyond (render size 1080p / 1440p / 4K with the dynamic resolution off, and 60 / 120 fps, from existing community patches for its 1.1.0 build; the values are not in this repository).
+
 ## Checking a rewriter change
 
 Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.

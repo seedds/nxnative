@@ -1046,7 +1046,10 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), so they are an input too
     try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith('build\t')]
     except OSError: own = []
-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
+    # the profile's run-time patch script (a provisional profile's under DM_GAMES_DIR first), an input of the rewrite as its table is made with it
+    gid = Path(env.get('DM_GAME') or '-').name
+    rtp = next((p for d in ([Path(env['DM_GAMES_DIR'])] if env.get('DM_GAMES_DIR') else []) + [repo / 'dm/games'] if (p := d / gid / 'runtime_patches.py').is_file()), None)
+    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_match.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else []) + ([rtp] if rtp else [])), names, capstone.__version__,
                       {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)'); return g
@@ -1071,7 +1074,6 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
         for p in procs.values():
             if p.poll() is None: p.terminate(); p.wait()
         for f in logf.values(): f.close()
-    rtp = next((d / g.id / 'runtime_patches.py' for d in [Path(env['DM_GAMES_DIR'])] * bool(env.get('DM_GAMES_DIR')) + [repo / 'dm/games'] if (d / g.id / 'runtime_patches.py').is_file()), None)
     if rtp and 'main' in src:   # the game's run-time patch choices (dm/host/loader.c runtime_patches): main.runtime.tsv beside the patched image
         run([py, rtp, src['main'], tmp / 'main.patched.bin', tmp / 'main.runtime.tsv'], logs / 'runtime_patches.log', env=env)
     rmtree(kf); swap_in(tmp, out); kf.write_text(f'{key}\n')

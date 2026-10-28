@@ -11,14 +11,14 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue.svg)](https://apple.com/macos)
 [![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%2FM2%2FM3%2FM4)-orange.svg)](https://apple.com)
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-FA7343.svg)](https://swift.org)
-[![Version](https://img.shields.io/badge/version-v1.5.1-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
+[![Version](https://img.shields.io/badge/version-v1.6.1-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Core Engine](https://img.shields.io/badge/core%20engine-seedds%2Fnxnative-informational.svg)](https://github.com/seedds/nxnative)
 [![Report Issues](https://img.shields.io/badge/Issues-Support%20%26%20Bugs-red.svg)](https://github.com/rennan101/nxnative_Launcher/issues)
 [![Sync Upstream](https://github.com/rennan101/nxnative_Launcher/actions/workflows/sync-upstream.yml/badge.svg)](https://github.com/rennan101/nxnative_Launcher/actions/workflows/sync-upstream.yml)
 
 <p align="center">
-  <b>Port, configure, and play your Nintendo Switch games natively on Apple Silicon Macs and iOS devices with 60 FPS, Apple MetalFX, and zero command-line friction.</b>
+  <b>Port, configure, and play your Nintendo Switch games natively on Apple Silicon Macs and iOS devices with 60 FPS, Apple MetalFX, Controller Remapping, Cross Save Sync, and zero command-line friction.</b>
 </p>
 
 <p align="center">
@@ -39,7 +39,7 @@
   * [1. Console Game Library (Switch Dark Mode)](#1-console-style-game-library-switch-dark-mode)
   * [2. Custom Covers & Atmosphere Mods](#2-custom-covers-atmosphere-mods-layeredfs)
   * [3. 3-Step Guided Porting Wizard](#3-3-step-guided-porting-wizard)
-  * [4. Universal Gamepad Navigation & Mapping](#4-universal-gamepad-navigation-button-remapping)
+  * [4. Controller Remapping & Universal Gamepad](#4-controller-remapping-universal-gamepad-navigation)
   * [5. Compatibility Matrix & RAM Filters](#5-compatibility-matrix-ram-filters-live-github-sync)
   * [6. Personalization & 8 Neon Themes](#6-personalization-8-neon-highlight-themes)
   * [7. Engine Compatibility Patches & Upstream Sync](#7-engine-compatibility-patches-upstream-synchronization)
@@ -56,15 +56,15 @@
 * [🇧🇷 Guia em Português (PT-BR)](#guia-em-português-pt-br)
   * [Instalação de Dependências](#1-configuração-do-ambiente-e-dependências)
   * [Passo a Passo de Portabilidade](#2-passo-a-passo-como-portar-jogos)
-  * [Configuração na Biblioteca e Saves](#3-configuração-na-biblioteca-e-saves)
-  * [Como Abrir e Jogar](#4-como-abrir-e-jogar)
+  * [Configuração na Biblioteca, Saves e Mods](#3-configuração-na-biblioteca-saves-e-mods)
+  * [Remapeamento de Controles e Como Jogar](#4-remapeamento-de-controles-e-como-jogar)
   * [Suporte e Relato de Erros](#5-suporte-e-relato-de-erros)
 
 ---
 
 ## 🎬 Live Demo
 
-> **Show, don't tell!** Experience a console-grade desktop application for your Switch games with fluid cover carousels, responsive neon accents, and instantaneous 60 FPS performance toggles:
+> **Show, don't tell!** Experience a console-grade desktop application with fluid cover carousels, responsive neon accents, and instantaneous 60 FPS performance toggles in full Retina clarity:
 
 <p align="center">
   <img src="docs/images/gifs/demo_library_carousel.gif" width="100%" alt="NxNative Launcher Console Library Demo">
@@ -85,14 +85,14 @@
 
 Running Nintendo Switch games on Apple Silicon with upstream tools historically required manual terminal scripting, manual LibHac extractions, custom SPIRV-Cross flags, and hand-edited environment variables. **NxNative Launcher** brings the entire ecosystem into a seamless, console-like desktop interface.
 
-| Feature | Raw Command-Line Porting | 🎮 NxNative Launcher |
+| Feature | Raw Command-Line Porting | 🎮 NxNative Launcher (v1.6.1) |
 | :--- | :---: | :---: |
 | **User Interface** | Terminal Commands only | **Switch Dark Mode Console Library** |
-| **Controller Support** | Hand-configured mapping | **Plug & Play (Switch Pro, Xbox, PS5, Joy-Cons)** |
+| **Controller Remapping**| Fixed hardcoded layouts | **Custom Profiles (Switch Pro, Xbox, PS5, Keyboard)** |
+| **Save Synchronization**| Hidden Application Support paths | **Cross-Device Save Sync & 1-Click Finder Reveal** |
 | **Game Bundling** | Manual multi-step extraction | **Automatic Base + Update + DLC Grouping** |
 | **Performance Tuning** | Manual `env.txt` edits | **1-Click 60 FPS, MetalFX & Metal HUD** |
 | **Game Mods (LayeredFS)**| Manual directory navigation | **Integrated Atmosphere Mod Manager** |
-| **Save Management** | Hidden Application Support folders | **1-Click Saves Explorer in Finder** |
 | **Target Deployment** | Mac only via terminal | **Dual Target: Mac Native (.app) & iOS (.ipa)** |
 | **Exit Game from Couch**| Force quit or terminal kill | **Hold Guide/Home for 3s to return to Launcher** |
 
@@ -105,7 +105,7 @@ Running Nintendo Switch games on Apple Silicon with upstream tools historically 
 - **Two-Tier Category Shelves**:
   - **Mac (macOS Native)**: Standalone compiled `.app` bundles running directly on Apple Silicon Metal.
   - **iPhone / iPad (iOS Port)**: Sideloadable `.ipa` packages ready for direct deployment via `xcrun devicectl` or AirDrop.
-- **Real-Time Save Location**: Instantly resolves `~/Library/Application Support/nxnative/<TID>/save` with a one-click **"Saves"** button to reveal in Finder.
+- **Cross Save & Backup**: Instantly resolves `~/Library/Application Support/nxnative/<TID>/save` with a one-click **"Saves"** button to reveal in Finder and synchronize with iOS paired devices.
 - **Installed DLC & Update Detection**: Scans `<Game.app>/Contents/Resources/aoc` and displays installed expansions and bundle storage size.
 
 <p align="center">
@@ -136,8 +136,9 @@ Running Nintendo Switch games on Apple Silicon with upstream tools historically 
 
 ---
 
-### 4. Universal Gamepad Navigation & Button Remapping
-- **Plug & Play Controller Support**: Native integration with **Nintendo Switch** (Joy-Cons & Pro Controller), **Xbox** (Series S/X, One, Bluetooth), **PlayStation** (DualShock 4 & DualSense PS5), **8BitDo**, and MFi gamepads via Apple's native `GameController` framework.
+### 4. Controller Remapping & Universal Gamepad Navigation
+- **Custom Button Remapping**: Rebind any controller button, trigger, or stick click with dedicated profile management (Gamepad Controller and Mac Keyboard & Mouse profiles).
+- **Plug & Play Support**: Native compatibility with **Nintendo Switch** (Joy-Cons & Pro Controller), **Xbox** (Series S/X, One, Bluetooth), **PlayStation** (DualShock 4 & DualSense PS5), **8BitDo**, and MFi gamepads via Apple's native `GameController` framework.
 - **Adaptive Glyphs & Haptic Audio**: On-screen prompts automatically match your connected controller (A/B/X/Y or ✕/○/□/△) with tactile mechanical audio feedback (`NSSound`).
 - **3-Second Couch Exit Shortcut**: Hold the **Xbox Guide / PS / Home** button for **3 seconds** during gameplay to close the game and immediately reactivate the Launcher.
 
@@ -156,7 +157,7 @@ Running Nintendo Switch games on Apple Silicon with upstream tools historically 
 - **Sound Effects Toggle**: Low-latency tactile feedback for navigation, tab changes, and game launching.
 
 <p align="center">
-  <img src="docs/images/gifs/demo_features_showcase.gif" width="95%" alt="Features, Controls & Neon Themes Demo">
+  <img src="docs/images/gifs/demo_features_showcase.gif" width="95%" alt="Features, Controller Remapping & Neon Themes Demo">
 </p>
 
 ---
@@ -289,16 +290,45 @@ Watch real-time extraction, shader compilation, and host linking. A native macOS
 
 ## 🗺️ Interactive Roadmap
 
-Help us shape the future of native gaming on Apple Silicon! Star the repo to follow updates:
+Track our shipped milestones and upcoming features! Star the repository to follow development:
 
-- [x] **v1.0.0**: Foundation pipeline, Mach-O rewriting, and Swift GUI.
-- [x] **v1.4.0**: Switch Dark Mode redesign, 1:1.60 box art, and Personalization tab.
-- [x] **v1.5.0**: Two-tier Mac/iOS library categories, instant scanning, and key checks.
-- [x] **v1.5.1**: iOS deployment progress streaming and AirDrop integration.
-- [ ] **v1.6.0**: MetalFX Temporal Upscaling (Temporal Anti-Aliasing & Upscaling).
-- [ ] **v1.6.0**: Haptic feedback & rumble for DualSense and Switch Pro controllers.
-- [ ] **v1.7.0**: Automatic Cloud Save Synchronization via iCloud / WebDAV.
-- [ ] **v1.7.0**: Discord Rich Presence showing current game, playtime, and FPS.
+### ✅ Completed Milestones
+
+- [x] **v1.0.0 — Foundation & Native Metal Execution**:
+  - Direct Mach-O ARM64 rewriting and compilation on Apple Silicon.
+  - Native Metal Shading Language (`.metal`) pipeline translation via SPIRV-Cross.
+  - Horizon OS kernel service simulation & LibHac extraction.
+  - Initial Swift graphical user interface.
+- [x] **v1.4.0 — Switch Dark Mode UI & Authentic Cover Art**:
+  - Full UI redesign inspired by the Nintendo Switch Dark Mode & CrossOver.
+  - Panoramic 16:9 Hero section with dynamic specular neon rim lighting.
+  - Official retail portrait box art (1 : 1.60 ratio) and dynamic game carousel.
+  - Personalization tab with 8 dynamic neon highlight themes.
+  - Compatibility Matrix with RAM requirement filters (4GB, 6GB, 8GB, 16GB).
+- [x] **v1.5.0 — Dual-Tier Library & Pre-Flight Security**:
+  - Two-tier library organization: Mac Native (`.app`) and iPhone / iPad (`.ipa`).
+  - Automatic game bundling (Base + Update + DLCs) with disk space pre-flight calculation.
+  - Cryptographic `KeyCheckService` validating `prod.keys` and NCA headers with AES-128-XTS.
+  - Atmosphere LayeredFS mod integration (`<Game.app>/Contents/Resources/atmosphere/contents/<TID>/`).
+- [x] **v1.5.1 — iOS Device Deployment & AirDrop**:
+  - Real-time streaming progress feedback for iOS deployments via `xcrun devicectl`.
+  - Native AirDrop sharing support for exported `.ipa` packages.
+  - Deadlock prevention and background task safety.
+- [x] **v1.6.0 & v1.6.1 (Current Version) — Controller Remapping, Save Sync & Automated Setup**:
+  - **Full Controller Remapping**: Custom button mapping for Switch Pro, Joy-Cons, Xbox Series/One, and PS5 DualSense controllers with profile duplication and reset.
+  - **Save Synchronization Service (`SaveSyncService`)**: Bidirectional save state synchronization and backup between Mac and paired iOS devices.
+  - **Custom Cover Art**: User-customizable box art picker (`.jpg`, `.png`, `.webp`) with instant persistence and fallback reset.
+  - **Automated Environment Diagnostics**: One-click sequential Homebrew, Clang, and Xcode Command Line Tools installer in Settings tab.
+  - **3-Second Couch Exit**: Global 3-second hold shortcut on Xbox Guide / PS / Home buttons to close running games and refocus the Launcher.
+
+---
+
+### ⏳ In Active Development & Future Milestones
+
+- [ ] **v1.7.0 — Cross Save iCloud Sync**: Automated cloud save synchronization across macOS and iOS devices via iCloud Drive / CloudKit.
+- [ ] **v1.7.0 — MetalFX Temporal Upscaler**: Temporal anti-aliasing and dynamic temporal scaling for demanding 3D games.
+- [ ] **v1.8.0 — Haptic Feedback & Gamepad Vibration**: DualSense adaptive triggers & Switch Pro linear resonant actuator rumble.
+- [ ] **v1.8.0 — Discord Rich Presence**: Real-time rich presence showing active title, in-game playtime, and FPS counters.
 
 ---
 
@@ -320,7 +350,12 @@ Yes! Saves are stored in plain unencrypted Horizon save formats at <code>~/Libra
 </details>
 
 <details>
-<summary><b>4. Does this run via Rosetta 2 or an emulator?</b></summary>
+<summary><b>4. How does Save Sync work between Mac and iOS devices?</b></summary>
+NxNative Launcher uses <code>SaveSyncService</code> to detect paired iOS devices via <code>xcrun devicectl</code>. You can back up and sync save games between your Mac and iPhone 15 Pro / iPad with one click in the game options deck. Full automatic <b>Cross Save iCloud Sync</b> is currently on the roadmap for v1.7.0!
+</details>
+
+<details>
+<summary><b>5. Does this run via Rosetta 2 or an emulator?</b></summary>
 No! Nintendo Switch games use ARM64 binaries (AArch64). Apple Silicon processors (M1-M4) run ARM64 instructions natively. NxNative recompiles and translates Horizon OS syscalls and Maxwell graphics into native macOS Mach-O binaries and Apple Metal Shading Language (`.metal`), resulting in near-native performance.
 </details>
 
@@ -345,13 +380,13 @@ This launcher stands on the shoulders of brilliant software engineering across t
 
 # 🇧🇷 Guia em Português (PT-BR)
 
-Bem-vindo ao guia oficial em português do **NxNative Launcher**! Esta seção contém tudo o que você precisa para configurar o ambiente, portar seus jogos, personalizar sua biblioteca e jogar no Apple Silicon.
+Bem-vindo ao guia oficial em português do **NxNative Launcher (v1.6.1)**! Esta seção contém tudo o que você precisa para configurar o ambiente, portar seus jogos, personalizar sua biblioteca, sincronizar saves e jogar com controles no Apple Silicon.
 
 ### 📑 Índice do Guia em Português
 - [1. Configuração do Ambiente e Dependências](#1-configuração-do-ambiente-e-dependências)
 - [2. Passo a Passo: Como Portar Jogos](#2-passo-a-passo-como-portar-jogos)
-- [3. Configuração na Biblioteca e Saves](#3-configuração-na-biblioteca-e-saves)
-- [4. Como Abrir e Jogar](#4-como-abrir-e-jogar)
+- [3. Configuração na Biblioteca, Saves e Mods](#3-configuração-na-biblioteca-saves-e-mods)
+- [4. Remapeamento de Controles e Como Jogar](#4-remapeamento-de-controles-e-como-jogar)
 - [5. Suporte e Relato de Erros](#5-suporte-e-relato-de-erros)
 
 ---
@@ -366,7 +401,7 @@ Bem-vindo ao guia oficial em português do **NxNative Launcher**! Esta seção c
 #### B. Instalação Automática (Pelo Próprio Launcher)
 1. Abra o **NxNative_Launcher.app**.
 2. Vá até a aba **Settings** (pressione `6` ou use o botão `R` no controle).
-3. Na seção de diagnóstico, clique em **"Install Missing"** ou **"Repair All"** para que o aplicativo instale os compiladores e ferramentas automaticamente.
+3. Na seção de diagnóstico, clique em **"Install Missing"** ou **"Repair All"** para que o aplicativo instale os compiladores e ferramentas sequencialmente em segundo plano.
 
 #### C. Instalação Manual via Terminal
 Se preferir instalar manualmente pelo terminal:
@@ -400,27 +435,30 @@ pip3 install pycryptodome libhac
 
 ---
 
-### 3. Configuração na Biblioteca e Saves
+### 3. Configuração na Biblioteca, Saves e Mods
 
 1. **Capas Customizadas**:
    - Na aba **Library**, selecione o jogo e clique no botão **Options** (ou tecla `O` / botão `X` no controle).
    - Clique em **"Choose Custom Cover..."** e selecione qualquer imagem do seu Mac (`.jpg`, `.png`, `.webp`).
 2. **Desempenho e 60 FPS por Jogo**:
    - Configure individualmente cada jogo via `env.txt`: Framerate Target (30 FPS vs 60 FPS Unlocked), Docked Mode (1080p) vs Handheld (720p), MetalFX Upscaling e painel Metal Performance HUD.
-3. **Mods de Jogo (LayeredFS / Atmosphere)**:
-   - No painel de opções, acesse a pasta de mods: `<Game.app>/Contents/Resources/atmosphere/contents/<TitleID>/`.
-   - Cole suas texturas HD, mods de física ou traduções em PT-BR.
-4. **Localização e Backup de Saves**:
+3. **Sincronização de Saves (Cross Save)**:
    - Os arquivos de progresso ficam gravados em:
      `~/Library/Application Support/nxnative/<TitleID>/save/`
-   - Clique no botão **Saves** no launcher para abrir a pasta diretamente no Finder.
+   - Clique no botão **Saves** no launcher para abrir a pasta diretamente no Finder ou sincronizar com aparelhos iOS emparelhados via `SaveSyncService`. O **Cross Save iCloud Sync** automático está em desenvolvimento para a v1.7.0!
+4. **Mods de Jogo (LayeredFS / Atmosphere)**:
+   - No painel de opções, acesse a pasta de mods: `<Game.app>/Contents/Resources/atmosphere/contents/<TitleID>/`.
+   - Cole suas texturas HD, mods de física ou traduções em PT-BR.
 
 ---
 
-### 4. Como Abrir e Jogar
+### 4. Remapeamento de Controles e Como Jogar
 
-- **Pelo Launcher**: Conecte seu controle (Switch Pro, Xbox, PS5) e aperte **`A` / `✕`** ou a tecla **Enter** sobre o jogo selecionado.
-- **Pelo Finder**: O jogo gerado é um aplicativo `.app` autônomo. Basta dar duplo clique no `<NomeDoJogo>.app` na sua pasta `Nx Ports/`.
+- **Remapeamento Completo de Botões**:
+  - Na aba **Controls**, você pode customizar cada botão do seu Switch Pro Controller, Joy-Cons, Xbox ou PS5 DualSense, além de configurar perfis para Teclado e Mouse.
+- **Como Abrir o Jogo**:
+  - Pelo Launcher: Aperte **`A` / `✕`** ou a tecla **Enter** sobre o jogo selecionado no carrossel.
+  - Pelo Finder: Dê duplo clique no aplicativo autônomo `<NomeDoJogo>.app` na sua pasta `Nx Ports/`.
 - **Atalho do Sofá para Sair**: Segure o botão central do seu controle (**Guide / PS / Home**) por **3 segundos** durante a gameplay para fechar o jogo com segurança e voltar ao Launcher!
 
 ---

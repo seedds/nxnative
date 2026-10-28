@@ -379,6 +379,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, `DM_WINDOW=1`).
 - **Check:** Breath of the Wild windowed with the change: its title, 60 fps, no GPU error.
 
+### Rasterizer-discard draws whose vertex shader stores to images
+
+- **Symptom:** the whole 3D scene black (or tinted) behind a working HUD and particles; the pass dump shows `Z … draw skipped: rasterizer discard with no vertex storage writes vs=<key>` for point draws; snapshots of the scene target (`DM_NVN_TEXSNAP`) show the scene drawn, then a full-screen pass multiplies it by 0.
+- **Cause:** the host runs a rasterizer-discard draw only through the vertex shader's `main0_discard` entry, which `dmsh_build.py` made only for shaders with writable buffers. A vertex shader that writes a 3D image (Metroid Prime 4: Beyond's volumetric fog: 4,488 points injecting into an 88×51×64 froxel volume) had none, so its draws were skipped, the volume stayed 0, and the fog pass's transmittance (read from it) made the scene black.
+- **Fix:** a vertex shader with an image binding gets `main0_discard` too (`dmsh_build.py`, the `discard` flag).
+- **Found on:** Metroid Prime 4: Beyond (`3caf684be210b6d8` and six other vertex shaders with image stores).
+
 ### The present upscales through MetalFX
 
 - **Symptom:** a game that renders below the screen's resolution looks soft on a phone, in a large Mac window or on a 4K screen.

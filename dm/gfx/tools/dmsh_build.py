@@ -971,7 +971,7 @@ def finish(key, w, j, c1):
         capture = dmsh_geometry.capture(src)
         src, full = vs_depth(src)
         full += capture
-        discard = any(b.get('rw') for b in reflect(key, 'vs', src, res))
+        discard = any(b.get('rw') or b.get('kind') == 'img' for b in reflect(key, 'vs', src, res))   # image stores are side effects too (Metroid Prime 4's fog volume)
         if discard: full += vs_discard(src)
         if j.get('tf'): full += vs_tf(src, j['tf'])   # transform feedback capture (see vs_tf)
         plain = full

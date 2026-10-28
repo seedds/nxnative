@@ -46,6 +46,10 @@ The IPA appears in the game's folder. The first build takes 30–60 minutes and 
 
 To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
 
+### Build from Linux
+
+Linux cannot compile the iOS app or Metal shaders. The [Linux cloud build](docs/linux-cloud-build.md) sends an encrypted copy of your game files and `prod.keys` through your private S3 bucket to a remote Apple Silicon Mac, then downloads the IPA back to your game folder. It needs Bitrise and AWS accounts.
+
 ### Install
 
 Install the IPA on your iPhone or iPad with a sideloading tool such as AltStore, Sideloadly or LiveContainer. If your tool offers **Increased Memory Limit**, turn it on: the bigger games need it.

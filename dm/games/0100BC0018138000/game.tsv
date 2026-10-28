@@ -1,0 +1,19 @@
+# Super Mario RPG 1.0.1: title/opening cinematic tested on NX2Apple; upstream runtime validation pending.
+title_id	0100BC0018138000
+program_id	0100BC0018138000
+name	Super Mario RPG
+ipa	SuperMarioRPG.ipa
+app_category	public.app-category.role-playing-games
+build	v65536	1.0.1	main=97f9664cfb2721546954cdeb3b303a4c	subsdk0=75c83c09e25f9a4e60bd960815722e86	sdk=2587a39ac2547a780ec0e4b77e22afab
+package	v65536
+shader_versions	v65536
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/d_assets_/misc-textures.bundle
+# Preserve the provisional NPDM-derived layout; SDK node-area cuts are required.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+# StandardAllocator reserves pool - used; leave address space for Unity pools.
+app_pool	0x80000000
+mem_used	0x4000000
+sys_resource	0x1000000

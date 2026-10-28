@@ -1,6 +1,17 @@
 # The rewriter's patches of Nintendo SDK module builds (sdk), which several games can ship: dm/tools/patch_nso.py applies those of a module's NSO build ID, whatever the game.
 # A patch of a game's own module (main) goes in its profile's patches.py (dm/games/<id>/patches.py). CUTS as described in patch_nso.py ("Registered patches")
 CUTS = {
+  # Super Mario RPG 1.0.1, SDK 14.3.1: StandardAllocator reserves pool - used
+  # (0xc9400000) in nninitStartup. The original 1 GB node area plus the next
+  # 1 GB-aligned region does not fit the 4.375 GB alias region (0x1803).
+  # Shrinking both node-area bounds reaches nnMain. Large-region alignment
+  # at 32 MB also avoids wasting the alias prefix: with 1 GB alignment the
+  # first asset load runs out of regions at +4.26 GB with only 0.75 GB mapped.
+  '2587a39ac2547a780ec0e4b77e22afab': [
+    (0x12d8b0, '08fca752', '087ca052', 'AddressRegionManager node area limit: 1 GB to 62 MB'),
+    (0x12d94c, '09fca752', '097ca052', 'AddressRegionManager occupied node area: 1 GB to 62 MB'),
+    (0x12daac, '0a00a852', '0a40a052', 'AllocateAddressRegion: align regions of 1 GB and more to 32 MB'),
+  ],
   # Kingdom Battle 1.9.589692, SDK 4.4.0: the older VammManager reserves a
   # full 1 GB node area (constructor +0x93dd8, occupied range +0x93e98).
   # Snowdrop's compact 3 GB region follows its small metadata reservation;

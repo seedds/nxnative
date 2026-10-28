@@ -66,6 +66,12 @@ DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second write
 DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exceeds that many GB (default 24 on the Mac, none on iOS; `0` turns it off)
 DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
 DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
+DM_MFX_DUMP	diagnostic	`=<folder>` with frame interpolation: while the camera turns, saves the two scenes, depth, motion and interpolated output of 16 frame pairs as raw files (waits for the GPU; for unpaced runs)
+DM_MFX_FI_CACHE	diagnostic	`=0` makes a new MetalFX frame interpolator at each size change instead of reusing one of up to four cached ones
+DM_MFX_INTERP	switch	`interp30` (Mac) turns on MetalFX frame interpolation for a game whose profile has `scene_upscale` and `camera_block`: with `DM_FPS_TARGET=30` the game renders 30 frames a second and MetalFX makes the frame between each pair; unset or `0` off
+DM_MFX_MSL_DIR	path	With frame interpolation: the folder holding the build's `b-<chain>` MSL folder (`<id>_build/shader/cache`) or that folder itself; the UI draws' attachment-7 copies are compiled from its sources of this host's chain only
+DM_MFX_MVLOG	diagnostic	`=<n>` with frame interpolation: every n interpolated frames, logs the motion vectors' median against the camera step (waits for the GPU)
+DM_MFX_YFLIP	diagnostic	`=-1` with frame interpolation: tries the other clip-space y convention for the motion vectors (default `1`)
 DM_MOTION	switch	`0` ignores live motion: every six-axis sensor lies flat as before (a shake still plays), and neither controllers' motion sensors nor the phone's device motion are switched on (`hle_hid.c`, `motion_apple.h`, `DmGamepad.m`); the NSP script's `--no-motion` (`MOTION = False`) builds it in
 DM_MOTION_ACC_SIGN	switch	`-1` flips only GameController's acceleration, for a source that reports the specific force (+1 G up at rest) instead of the gravity direction (`motion_fusion.h`); phone and raw HID samples are already in the Switch frame
 DM_MOTION_AXES	switch	`=<map>` such as `x,-z,y`: maps Apple's controller axes to the Switch's, a signed permutation applied to acceleration and rotation alike, for a controller whose axes differ (default `x,y,z`; phone and raw HID samples are already in the Switch frame)

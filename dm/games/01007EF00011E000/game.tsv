@@ -29,6 +29,11 @@ fps_target	60
 # pipeline archive, the prepare step and the hybrid pipelines on the iPhone too (5,100 prewarm lines prepared in 0.28 s at start instead of compiling on first use)
 present_snap	on
 pso_mtl4	on
+# Frame interpolation (DM_MFX_INTERP=interp30, nvn_mtl.m): the scene is finished by the agl post-effect draw that scales the 1600x900 scene into the
+# 1920x1080 canvas (every later draw into the canvas is UI), and the G-buffer pass's first draw holds the camera in vertex uniform 0: 2336 bytes, view, view-projection,
+# projection, inverse view, near / far, aspect and field of view at Tears of the Kingdom's offsets (MacNativeGames' BOTW_MFXUP_KEY, MFX_CAM_SLOT / MFX_CAM_SIZE)
+scene_upscale	bd7ffdd435c6c3bc
+camera_block	vertex 0 2336
 
 # ---- Versions ----
 # only the merged 1.9.0 copy is extracted; the base game's own build IDs are added when needed

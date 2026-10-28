@@ -134,6 +134,11 @@ def header(g):
     if pm not in ('follow', 'boost'): sys.exit(f'{g.id}: perf_mode must be follow or boost: {pm}')
     dmo = g.get('depth_mode', 'gl')   # the NVN depth mode the game sets, for the pipeline archive made offline (dm/gfx/tools/pso_offline.py; the host follows the game at run time): gl / zero
     if dmo not in ('gl', 'zero'): sys.exit(f'{g.id}: depth_mode must be gl or zero: {dmo}')
+    su = g.get('scene_upscale', '')   # fragment shader key of the draw that scales the finished 3D scene into the canvas, before the UI (nvn_mtl.m frame interpolation: the scene ends there); none by default
+    if su and not re.fullmatch(r'[0-9a-f]{16}', su): sys.exit(f'{g.id}: scene_upscale takes one fragment shader key (16 lowercase hex digits): {su}')
+    cb = g.words('camera_block', '')   # the uniform block holding the camera at the G-buffer pass's first draw: <vertex | fragment> <slot> <bytes> (nvn_mtl.m frame interpolation); none by default
+    if cb and (len(cb) != 3 or cb[0] not in ('vertex', 'fragment') or not cb[1].isdigit() or int(cb[1]) > 15 or not cb[2].isdigit() or int(cb[2]) < 84 * 4):
+        sys.exit(f'{g.id}: camera_block takes <vertex | fragment> <uniform slot 0-15> <block size in bytes, at least 336>: {cb}')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -174,6 +179,10 @@ def header(g):
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
+         f'#define DM_GAME_SCENE_UPSCALE {q(su)}',
+         f'#define DM_GAME_CAMERA_STAGE {int(cb[0] == "fragment") if cb else 0}',
+         f'#define DM_GAME_CAMERA_SLOT {int(cb[1]) if cb else 0}',
+         f'#define DM_GAME_CAMERA_SIZE {int(cb[2]) if cb else 0}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
     return '\n'.join(L)

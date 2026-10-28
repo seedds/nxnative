@@ -7,9 +7,18 @@ The game and keys are encrypted locally with `age` and again at rest in S3. The 
 ## One-time setup
 
 1. This repository is already a fork of `seedds/nxnative`, with the Linux workflow committed on `main`. GitHub keeps forks of this public upstream public, so the fork's source code and history are visible to everyone. The workflow keeps ROMs, keys, archives, and IPAs out of GitHub. For private source, create a separate private repository instead of a fork. Preserve the repository's `LICENSE` and third-party license files.
-2. Create a Bitrise project connected to `well0l/nxnative`. In Bitrise's Workflow Editor, set the configuration YAML source to the `bitrise.yml` stored on the repository's `main` branch; new Bitrise apps can keep their config on Bitrise by default. The file defines a tag-triggered workflow on the `osx-xcode-27.1.x-edge` Apple Silicon stack. The stack is an edge preview, and its currently published report lists Xcode 27.1, macOS 26.6.1, the iOS SDK, an installed Metal Toolchain, and about 107 GB of free disk. Check the current Bitrise availability and pricing before relying on it.
-3. Create an S3 bucket with Block Public Access enabled. Keep the Linux AWS credentials and Bitrise AWS credentials separate. Give Linux permission to write only `nxnative/incoming/*` and read `nxnative/status/*` plus `nxnative/outgoing/*`. Give Bitrise permission to read only `nxnative/incoming/*` and write `nxnative/status/*` plus `nxnative/outgoing/*`. Set an S3 lifecycle rule to expire all objects under `nxnative/`. Do not put AWS credentials in the repository.
-4. On Linux, install AWS CLI, `age`, Python 3.12+, and Git. Configure the AWS CLI with the Linux credentials. Store the `age` identity outside the repository and create one:
+2. Connect the Bitrise project to `well0l/nxnative` with the GitHub App and grant it access to this repository only. GitHub delivers push and tag events through the app, so no manual webhook is needed. Store the Bitrise configuration in the repository: in Workflow Editor choose **Change storage… → Git repository**, and leave the path empty for the root `bitrise.yml` on `main`. The workflow uses the `osx-xcode-27.1.x-edge` Apple Silicon stack. This is an edge preview; its published report lists Xcode 27.1, macOS 26.6.1, the iOS SDK, an installed Metal Toolchain, and about 107 GB of free disk. Check current Bitrise availability and pricing before relying on it.
+3. Create the private S3 bucket and two narrowly scoped IAM users from [`deploy/bitrise-s3.yaml`](../deploy/bitrise-s3.yaml). For example, with AWS CLI credentials that can create CloudFormation and IAM resources:
+
+   ```sh
+   aws cloudformation deploy \
+     --template-file deploy/bitrise-s3.yaml \
+     --stack-name nxnative-build-storage \
+     --capabilities CAPABILITY_IAM
+   ```
+
+   The stack blocks public access, applies S3-managed encryption, expires objects under `nxnative/` after seven days, and creates separate Linux and Bitrise users. It does not create access keys. Create one key for each user in AWS IAM; use the Linux key only on Linux and put the Bitrise key in Bitrise project secrets. Set the stack's `BucketName` output as `NX_S3_BUCKET` and use the AWS region where you deployed it as `AWS_DEFAULT_REGION`. Do not put AWS credentials in the repository.
+4. On Linux, install AWS CLI, `age`, Python 3.12+, and Git. Configure the AWS CLI with the Linux user's credentials. This Bitrise project already has a matching `age` identity registered as the protected `NX_AGE_IDENTITY` secret. Use its public recipient as `NX_AGE_RECIPIENT`; do not generate a replacement unless you also update the Bitrise secret. For a fresh Bitrise setup, generate an identity outside the repository and add it as the protected `NX_AGE_IDENTITY` secret:
 
    ```sh
    mkdir -p "$HOME/.config/nxnative"
@@ -17,8 +26,8 @@ The game and keys are encrypted locally with `age` and again at rest in S3. The 
    age-keygen -o "$HOME/.config/nxnative/age-identity.txt"
    ```
 
-   Add the complete identity file as the Bitrise secret `NX_AGE_IDENTITY`. Add `NX_S3_BUCKET`, `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY` to the Bitrise project; mark the AWS key values and identity as secret. Read the `# public key:` recipient from the identity file and set it on Linux as `NX_AGE_RECIPIENT`.
-5. Confirm that Bitrise uses the repository-stored `bitrise.yml`, that the `nxnative-cloud-build` tag trigger is enabled, and that `origin` points to `https://github.com/well0l/nxnative.git`. Do not create an AWS access key with broader permissions than these prefixes require.
+   Add `NX_S3_BUCKET` and `AWS_DEFAULT_REGION` as Bitrise environment variables; add `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as project secrets. For a fresh setup, read the `# public key:` recipient from the identity file and set it on Linux as `NX_AGE_RECIPIENT`.
+5. Confirm that Bitrise uses the repository-stored `bitrise.yml`, that the `nxnative-cloud-build` tag trigger is enabled, and that `origin` points to `https://github.com/well0l/nxnative.git`. Do not create an AWS access key with broader permissions than the template grants.
 
 ## Build a game
 

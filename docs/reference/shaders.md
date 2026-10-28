@@ -226,6 +226,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `rfrm_shaders`, `snvn_records`, `retro_main_forms` and `retro_lzss8` in `shader_split.py`; each record is one program, so its stages pair with each other.
 - **Found on:** [Donkey Kong Country: Tropical Freeze](../../dm/games/0100C1F0051B6000/README.md) (SDK 4.4.0): 24,098 shaders (11,644 vertex, 11,734 pixel, 720 geometry, which run as compute kernels): 3,460 first seen in `MaterialArchive.arc` (its 3,468 stages), the rest in the 795 `MTRL` resources of the packs, 8 in the startup archive and 294 GLSLC outputs in `main`; about 8 s.
 
+### Little-endian RFRM forms with zstd (Metroid Prime 4: Beyond)
+
+- **Symptom:** the shader split reads every `.pak` and `MaterialArchive.arc` for an hour and finds no shaders (`[RED] … MTRL resource … is not an RFRM form` for 217 files; GitHub issue #229).
+- **How it is stored:** the same RFRM forms as Tropical Freeze's, little-endian: the form's and chunks' lengths are little-endian u64s, and a chunk header is the fourcc, u64 length and two u32 versions (0x18 bytes). `MaterialArchive.arc` is one `MTRL` form with `SDX ` (D3D bytecode), `NVN2` (the Nintendo Switch 2 Edition's programs, not read) and `SNVN` chunks. A `.pak` is a `PACK` form whose `TOCC` form holds the `ADIR` chunk: u32 count, then 60-byte entries {fourcc, 16-byte GUID, u32, u32, u64 offset, u64 length, u64 stored length, u64}. An `MTRL` resource (stored uncompressed) is an RFRM form whose data after its 0x20-byte header is zstd, holding an `MTRL` form with an `SNVN` chunk. An SNVN record is little-endian {u32 code length, u32 control length, a byte, u32 stream length} and zstd frames (a data frame and an empty one) that inflate to the code areas, then the control sections (0x880 bytes on SDK 19), each followed by bytes of the engine's own, then a binding table: a control section is found by its magic after the previous one.
+- **Reader:** `rfrm_le`, `rfrm_le_shaders` and `snvn_le_records` in `shader_split.py`, read by range (the 3.8 GB `Preload/DuplicateData.pak` is no longer loaded whole): 259,989 shaders, 129,972 pairs, in 11 s.
+- **Found on:** Metroid Prime 4: Beyond 1.1.0 (SDK 19).
+
 ### MGFX effects in MonoGame XNB files
 
 - **How it is stored:** the 13 XNB files in `Content/Effects` (XNB platform `S`, uncompressed, read by `EffectReader`) each hold one MGFX effect, and `main` holds SpriteBatch's built-in one; no other file and no GLSLC output. A compressed XNB (MonoGame's LZX flag 0x80 or LZ4 flag 0x40, as in Stardew Valley) is decompressed first (`xnb_decompress`).

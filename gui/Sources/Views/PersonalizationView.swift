@@ -2,6 +2,7 @@ import SwiftUI
 
 public struct PersonalizationView: View {
     @ObservedObject public var viewModel: AppViewModel
+    @ObservedObject private var soundService = SoundEffectService.shared
     
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -11,14 +12,9 @@ public struct PersonalizationView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 headerView
-                
-                // MARK: - Category 1: Highlight & Accent Color
-                categoryHeader(title: "Launcher Highlight Color", icon: "sparkles")
                 highlightColorCard
-                
-                // MARK: - Category 2: App Icon Appearance
-                categoryHeader(title: "App Icon Appearance", icon: "app.badge.fill")
                 SystemAppearanceCard(viewModel: viewModel)
+                soundEffectsCard
             }
             .padding(20)
         }
@@ -26,23 +22,19 @@ public struct PersonalizationView: View {
     
     private var headerView: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Personalization & Appearance")
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
-                    .foregroundColor(NXTheme.textPrimary)
-                Text("Customize the launcher highlight color and app icon style across the interface and macOS Dock.")
-                    .font(.system(size: 12))
-                    .foregroundColor(NXTheme.textSecondary)
-            }
+            Text("Personalization & Appearance")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundColor(NXTheme.textPrimary)
             
             Spacer()
             
-            if viewModel.highlightTheme != .electricPurple || viewModel.iconAppearanceMode != .light {
+            if viewModel.highlightTheme != .electricPurple || viewModel.iconAppearanceMode != .light || !soundService.isSoundEnabled {
                 Button(action: {
                     SoundEffectService.shared.play(.click)
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                         viewModel.highlightTheme = .electricPurple
                         viewModel.iconAppearanceMode = .light
+                        soundService.isSoundEnabled = true
                     }
                 }) {
                     HStack(spacing: 6) {
@@ -58,50 +50,11 @@ public struct PersonalizationView: View {
     private var highlightColorCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                HStack(spacing: 10) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(NXTheme.primaryGradient)
-                            .frame(width: 32, height: 32)
-                            .shadow(color: NXTheme.primary.opacity(0.45), radius: 6, x: 0, y: 2)
-                        Image(systemName: "paintpalette.fill")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundColor(.white)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Accent & Highlight Theme")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundColor(NXTheme.textPrimary)
-                        Text("Updates active tabs, primary buttons, selection borders, and ambient glow in real time.")
-                            .font(.system(size: 11))
-                            .foregroundColor(NXTheme.textSecondary)
-                    }
-                }
+                Text("Accent & Highlight Theme")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundColor(NXTheme.textPrimary)
                 
                 Spacer()
-                
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(NXTheme.secondary)
-                        .frame(width: 8, height: 8)
-                    Text(viewModel.highlightTheme.rawValue)
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
-                    Text(viewModel.highlightTheme.hexLabel)
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.85))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    Capsule()
-                        .fill(NXTheme.primaryGradient)
-                )
-                .overlay(
-                    Capsule()
-                        .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.8)
-                )
             }
             
             let columns = [
@@ -144,17 +97,10 @@ public struct PersonalizationView: View {
                                 }
                             }
                             
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(theme.rawValue)
-                                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                                    .foregroundColor(.white)
-                                    .lineLimit(1)
-                                
-                                Text(theme.subtitle)
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundColor(isSelected ? .white.opacity(0.9) : NXTheme.textSecondary)
-                                    .lineLimit(1)
-                            }
+                            Text(theme.rawValue)
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
                             
                             Spacer(minLength: 0)
                         }
@@ -190,19 +136,24 @@ public struct PersonalizationView: View {
         )
     }
     
-    private func categoryHeader(title: String, icon: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundColor(NXTheme.secondary)
-            
-            Text(title.uppercased())
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-                .foregroundColor(NXTheme.textSecondary)
-                .tracking(0.5)
-            
-            Spacer()
+    private var soundEffectsCard: some View {
+        GlassCard {
+            HStack {
+                Text("Console UI Sound Effects")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundColor(NXTheme.textPrimary)
+                
+                Spacer()
+                
+                Toggle("", isOn: $soundService.isSoundEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .onChange(of: soundService.isSoundEnabled) { val in
+                        if val {
+                            SoundEffectService.shared.play(.click)
+                        }
+                    }
+            }
         }
-        .padding(.top, 6)
     }
 }

@@ -92,16 +92,59 @@ public struct BuildOptionsSection: View {
                     }
                     
                     HStack(spacing: 20) {
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 6) {
                             Text("Game Language:")
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(NXTheme.textSecondary)
-                            Picker("", selection: $viewModel.selectedLanguage) {
-                                ForEach(viewModel.availableLanguages, id: \.code) { item in
-                                    Text(item.label).tag(item.code)
+                            
+                            Menu {
+                                ForEach(AppViewModel.availableLanguages, id: \.code) { item in
+                                    Button(action: {
+                                        SoundEffectService.shared.play(.click)
+                                        viewModel.selectedLanguage = item.code
+                                    }) {
+                                        if viewModel.selectedLanguage == item.code {
+                                            Label(item.label, systemImage: "checkmark")
+                                        } else {
+                                            Text(item.label)
+                                        }
+                                    }
                                 }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "globe")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundColor(NXTheme.secondary)
+                                    
+                                    let currentLabel = AppViewModel.availableLanguages.first(where: { $0.code == viewModel.selectedLanguage })?.label ?? "Game Default"
+                                    Text(currentLabel)
+                                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                                        .foregroundColor(NXTheme.textPrimary)
+                                    
+                                    Spacer(minLength: 8)
+                                    
+                                    HStack(spacing: 2) {
+                                        Image(systemName: "chevron.up.chevron.down")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundColor(NXTheme.secondary)
+                                    }
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 3)
+                                    .background(Color.white.opacity(0.08))
+                                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .frame(minWidth: 180)
+                                .background(NXTheme.glassSurfaceElevated)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(NXTheme.specularRim, lineWidth: 1)
+                                )
                             }
-                            .pickerStyle(.menu)
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
                         }
                         Spacer()
                     }

@@ -219,6 +219,9 @@ public struct GameSettingsSheetView: View {
                         
                         // Section 5: Cover Artwork Customization
                         coverArtworkSection()
+                        
+                        // Section 6: Mods Management & Save Sync
+                        GameSettingsModsAndSavesView(game: game)
                     }
                     .padding(20)
                 }

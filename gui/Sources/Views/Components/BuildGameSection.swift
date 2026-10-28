@@ -32,6 +32,9 @@ public struct BuildGameSection: View {
                 // Storage Space Status Alert
                 storageStatusView
                 
+                // Pre-flight Cryptographic Keys & File Check
+                keyCheckStatusView
+                
                 // Continue to Step 2 Action
                 if viewModel.selectedGame != nil {
                     HStack {
@@ -77,11 +80,6 @@ public struct BuildGameSection: View {
                     .font(.system(size: 12, weight: .bold, design: .rounded))
                     .foregroundColor(NXTheme.textPrimary)
                 Spacer()
-                if let sel = viewModel.selectedGame {
-                    Text("Selected: \(sel.formattedSize)")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundColor(NXTheme.secondary)
-                }
             }
             
             VStack(spacing: 6) {
@@ -131,11 +129,60 @@ public struct BuildGameSection: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
                     .font(.system(size: 14))
-                Text("Storage ready: ~\(availStr) available on volume for \(sel.name) (\(sel.formattedSize))")
+                Text("Storage ready: ~\(availStr) available on output destination for \(sel.name)")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(NXTheme.textSecondary)
             }
             .padding(.horizontal, 4)
+        }
+    }
+    
+    @ViewBuilder
+    private var keyCheckStatusView: some View {
+        if let sel = viewModel.selectedGame, !viewModel.prodKeysPath.isEmpty {
+            let keysUrl = URL(fileURLWithPath: viewModel.prodKeysPath)
+            let files = sel.files.map(\.url)
+            let result = KeyCheckService.shared.verify(keysURL: keysUrl, gameFiles: files)
+            
+            HStack(spacing: 8) {
+                switch result {
+                case .fits(let fw, _):
+                    Image(systemName: "key.fill")
+                        .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
+                    Text("Pre-flight Verified: prod.keys opens this game (Target Switch Firmware \(fw)+)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Color(red: 0.13, green: 0.77, blue: 0.37))
+                case .outdatedMasterKey(let gen, let missing, let fw):
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(Color(red: 0.98, green: 0.65, blue: 0.12))
+                    Text("Warning: Missing \(missing) (Gen \(gen)). Dump from firmware \(fw)+ recommended.")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Color(red: 0.98, green: 0.65, blue: 0.12))
+                case .wrongHeaderKey:
+                    Image(systemName: "xmark.octagon.fill")
+                        .foregroundColor(Color(red: 0.91, green: 0.14, blue: 0.14))
+                    Text("Invalid header_key: Keys could not decrypt NCA headers.")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Color(red: 0.91, green: 0.14, blue: 0.14))
+                case .noHeaderKey:
+                    Image(systemName: "xmark.octagon.fill")
+                        .foregroundColor(Color(red: 0.91, green: 0.14, blue: 0.14))
+                    Text("Missing header_key in prod.keys file.")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Color(red: 0.91, green: 0.14, blue: 0.14))
+                case .unreadableKeys:
+                    Image(systemName: "questionmark.circle.fill")
+                        .foregroundColor(NXTheme.textMuted)
+                    Text("Unable to parse prod.keys content.")
+                        .font(.system(size: 11))
+                        .foregroundColor(NXTheme.textMuted)
+                case .cannotCheck:
+                    EmptyView()
+                }
+            }
+            .padding(8)
+            .background(NXTheme.glassSurfaceElevated.opacity(0.6))
+            .cornerRadius(8)
         }
     }
 }

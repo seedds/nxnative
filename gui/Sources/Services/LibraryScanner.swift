@@ -67,6 +67,8 @@ public final class LibraryScanner {
         return games.sorted { $0.modificationDate > $1.modificationDate }
     }
     
+    private var sizeCache: [URL: Int64] = [:]
+
     private func parseMacApp(at url: URL) -> PortedGame? {
         let fm = FileManager.default
         let plistURL = url.appendingPathComponent("Contents/Info.plist")
@@ -92,7 +94,17 @@ public final class LibraryScanner {
             version = plist["CFBundleShortVersionString"] as? String
         }
         
-        let size = calculateDirectorySize(url: url)
+        // Fast instant size retrieval without blocking RomFS traversal
+        var size: Int64 = sizeCache[url] ?? 0
+        if size == 0 {
+            let romfsImg = url.appendingPathComponent("Contents/Resources/romfs.img")
+            if let imgSize = (try? romfsImg.resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+                size = Int64(imgSize)
+            } else if let exeSize = (try? url.appendingPathComponent("Contents/MacOS/dmhost").resourceValues(forKeys: [.fileSizeKey]))?.fileSize {
+                size = Int64(exeSize)
+            }
+        }
+        
         let modDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
         
         return PortedGame(
@@ -112,13 +124,17 @@ public final class LibraryScanner {
         let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         let size = Int64(values?.fileSize ?? 0)
         let modDate = values?.contentModificationDate ?? Date()
+        let tid = CompatibilityService.shared.findTitleId(forGameTitle: name)
+        let bundleId = tid != nil ? "org.nxnative.\(tid!.lowercased())" : nil
         
         return PortedGame(
             name: name,
             url: url,
             platform: .ios,
             sizeBytes: size,
-            modificationDate: modDate
+            modificationDate: modDate,
+            bundleId: bundleId,
+            titleId: tid
         )
     }
     

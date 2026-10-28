@@ -15,14 +15,27 @@ extension AppViewModel {
         ("ko", "Korean")
     ]
 
+    public var appOutputDirectory: URL {
+        if useCustomOutputFolder, let custom = customOutputFolder {
+            return custom
+        }
+        if !defaultInstallPath.isEmpty {
+            return URL(fileURLWithPath: defaultInstallPath).appendingPathComponent("Games")
+        }
+        return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Applications")
+    }
+
     public var availableDiskBytes: Int64? {
-        let checkPath = selectedGameFolder?.path ?? (defaultInstallPath.isEmpty ? NSHomeDirectory() : defaultInstallPath)
+        var current = appOutputDirectory
+        while !FileManager.default.fileExists(atPath: current.path) && current.pathComponents.count > 1 {
+            current = current.deletingLastPathComponent()
+        }
+        let checkPath = current.path
         var stat = statvfs()
         if statvfs(checkPath, &stat) == 0 {
             return Int64(stat.f_bavail) * Int64(stat.f_frsize)
         }
-        let url = URL(fileURLWithPath: checkPath)
-        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        let values = try? current.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
         if let cap = values?.volumeAvailableCapacityForImportantUsage {
             return cap
         }
@@ -50,6 +63,6 @@ extension AppViewModel {
         let totalStr = ByteCountFormatter.string(fromByteCount: targetBytes, countStyle: .file)
         let neededStr = ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)
         let gameName = selectedGame?.name ?? "Game"
-        return "Storage warning: \(gameName) extraction requires ~\(totalStr), but only \(availStr) is free on this volume. Please free up at least \(neededStr) to ensure the .app can be extracted and built."
+        return "Storage warning: \(gameName) extraction requires ~\(totalStr), but only \(availStr) is free on output destination. Please free up at least \(neededStr) on that volume to ensure the .app can be built."
     }
 }

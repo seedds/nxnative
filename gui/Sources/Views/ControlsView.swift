@@ -97,19 +97,9 @@ public struct ControlsView: View {
     // MARK: - Profile Management Toolbar
     private var profileManagementHeader: some View {
         HStack(spacing: 12) {
-            Image(systemName: "gamecontroller.fill")
-                .symbolRenderingMode(.hierarchical)
-                .font(.system(size: 28))
-                .foregroundColor(NXTheme.secondary)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Controls & Gamepad Mapping")
-                    .font(.system(size: 16, weight: .bold, design: .rounded))
-                    .foregroundColor(NXTheme.textPrimary)
-                Text("Configure custom button bindings and profiles for every controller and keyboard.")
-                    .font(.system(size: 11))
-                    .foregroundColor(NXTheme.textSecondary)
-            }
+            Text("Controls & Gamepad Mapping")
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundColor(NXTheme.textPrimary)
 
             Spacer()
 
@@ -135,20 +125,33 @@ public struct ControlsView: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Text("Profile:")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(NXTheme.textSecondary)
+                    Image(systemName: "slider.horizontal.2.square")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(NXTheme.secondary)
                     
-                    Text(profileManager.activeProfile.name)
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundColor(NXTheme.textPrimary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Profile")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(NXTheme.textSecondary)
+                        Text(profileManager.activeProfile.name)
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundColor(NXTheme.textPrimary)
+                    }
                     
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundColor(NXTheme.textSecondary)
+                    Spacer(minLength: 8)
+                    
+                    HStack(spacing: 2) {
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(NXTheme.secondary)
+                    }
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 3)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
                 .background(NXTheme.glassSurfaceElevated)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay(

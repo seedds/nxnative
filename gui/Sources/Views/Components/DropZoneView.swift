@@ -39,22 +39,11 @@ public struct DropZoneView: View {
                             .foregroundColor(NXTheme.textSecondary)
                     }
                     
-                    HStack(spacing: 8) {
-                        formatPill("NSP")
-                        formatPill("XCI")
-                        formatPill("NSZ")
-                        formatPill("ZIP")
-                        
-                        Text("or")
-                            .font(.system(size: 11))
-                            .foregroundColor(NXTheme.textMuted)
-                        
-                        Button("Choose Folder...") {
-                            viewModel.selectGameFolder()
-                        }
-                        .buttonStyle(NXSecondaryButtonStyle())
-                        .controlSize(.small)
+                    Button("Choose Folder...") {
+                        viewModel.selectGameFolder()
                     }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .controlSize(.small)
                     .padding(.top, 4)
                     
                     if let folder = viewModel.selectedGameFolder {
@@ -67,11 +56,6 @@ public struct DropZoneView: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
-                            Button("Change...") {
-                                viewModel.selectGameFolder()
-                            }
-                            .buttonStyle(NXSecondaryButtonStyle())
-                            .controlSize(.mini)
                             
                             Button("Clear") {
                                 viewModel.selectedGameFolder = nil
@@ -142,19 +126,5 @@ public struct DropZoneView: View {
             }
             return true
         }
-    }
-    
-    private func formatPill(_ name: String) -> some View {
-        Text(name)
-            .font(.system(size: 9, weight: .bold, design: .monospaced))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(NXTheme.secondary.opacity(0.16))
-            .foregroundColor(NXTheme.secondary)
-            .clipShape(Capsule())
-            .overlay(
-                Capsule()
-                    .strokeBorder(NXTheme.secondary.opacity(0.3), lineWidth: 0.6)
-            )
     }
 }

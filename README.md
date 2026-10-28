@@ -11,7 +11,7 @@
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-FA7343.svg)](https://swift.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Upstream](https://img.shields.io/badge/core%20engine-seedds%2Fnxnative-informational.svg)](https://github.com/seedds/nxnative)
-[![Report Errors](https://img.shields.io/badge/Reportar%20Erros-Tickets%20Abertos-red.svg)](https://github.com/rennan101/nxnative_Launcher/issues)
+[![Report Errors](https://img.shields.io/badge/Issues-Support%20%26%20Bugs-red.svg)](https://github.com/rennan101/nxnative_Launcher/issues)
 [![Sync Upstream](https://github.com/rennan101/nxnative_Launcher/actions/workflows/sync-upstream.yml/badge.svg)](https://github.com/rennan101/nxnative_Launcher/actions/workflows/sync-upstream.yml)
 
 > ### ❤️ Community Acknowledgement & Credits
@@ -198,9 +198,9 @@ The compiled `NxNative_Launcher.app` and `NxNative_Launcher.dmg` will be created
 ## 💬 Suporte, Tickets e Relato de Erros
 
 Encontrou algum erro, problema com controle ou quer relatar a compatibilidade de um jogo no Mac?
-- 🚨 **Reportar Erro / Bug:** [Abrir Novo Ticket de Bug](https://github.com/rennan101/nxnative_Launcher/issues/new?template=bug_report.yml) ou comente na [Central de Suporte (Ticket #1)](https://github.com/rennan101/nxnative_Launcher/issues/1).
-- 🎮 **Relatar Compatibilidade de Jogo:** [Enviar Relatório de Compatibilidade](https://github.com/rennan101/nxnative_Launcher/issues/new?template=game_compatibility.yml) ou participe da [Central de Compatibilidade (Ticket #2)](https://github.com/rennan101/nxnative_Launcher/issues/2).
-- 💡 **Sugerir Funcionalidade:** [Sugerir Nova Feature](https://github.com/rennan101/nxnative_Launcher/issues/new?template=feature_request.yml).
+- 🚨 **Report Bug / Issue:** [Open Bug Report](https://github.com/rennan101/nxnative_Launcher/issues/new?template=bug_report.yml) or comment in the [Support Hub (Ticket #1)](https://github.com/rennan101/nxnative_Launcher/issues/1).
+- 🎮 **Submit Compatibility Report:** [Submit Compatibility Report](https://github.com/rennan101/nxnative_Launcher/issues/new?template=game_compatibility.yml) or participate in the [Compatibility Hub (Ticket #2)](https://github.com/rennan101/nxnative_Launcher/issues/2).
+- 💡 **Feature Request:** [Suggest New Feature](https://github.com/rennan101/nxnative_Launcher/issues/new?template=feature_request.yml).
 - 🔄 **Sincronização Upstream:** O repositório possui uma GitHub Action configurada para sincronizar automaticamente com as novidades de `seedds/nxnative` sem afetar as customizações do Launcher. Também é possível sincronizar localmente via `./scripts/sync_upstream.sh`.
 
 ---

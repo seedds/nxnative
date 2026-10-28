@@ -31,44 +31,11 @@ public struct LibraryView: View {
                 LibraryToolbarView(viewModel: viewModel)
                     .zIndex(10)
                 
-                // MARK: - Console Game Showcase & Detail Deck
+                // MARK: - Switch Dark Mode Console Showcase (Hero 16:9 + Square Tiles 1:1)
                 if filteredGames.isEmpty {
                     emptyLibraryView
                 } else {
-                    if controllerService.isGamepadConnected {
-                        // Gamepad Mode: Clean Console View with Official Portrait Covers
-                        VStack(spacing: 16) {
-                            Spacer(minLength: 12)
-                            
-                            // Carousel with Portrait Console Box Art
-                            ConsoleGameCarouselView(viewModel: viewModel, games: filteredGames)
-                                .padding(.top, 24)
-                            
-                            // Clean Console Footer Action Hint (A / X to Play, Options for Menu)
-                            gamepadFooterBar
-                            
-                            Spacer(minLength: 12)
-                        }
-                    } else {
-                        // Mouse/Keyboard Mode: Scrollable with Detail Deck
-                        ScrollView {
-                            VStack(spacing: 24) {
-                                // 1. Console Carousel (Portrait Official Cover Art on Focus)
-                                ConsoleGameCarouselView(viewModel: viewModel, games: filteredGames)
-                                    .padding(.top, 28)
-                                
-                                // 2. Focused Game Detail Deck (Play, DLC, Sizes, Saves, Settings)
-                                if let selected = currentSelectedGame {
-                                    GameDetailDeckView(game: selected, viewModel: viewModel) { target in
-                                        viewModel.gameToDelete = target
-                                        viewModel.showDeleteConfirm = true
-                                    }
-                                    .padding(.horizontal, 24)
-                                }
-                            }
-                            .padding(.bottom, 24)
-                        }
-                    }
+                    SwitchConsoleLibraryView(viewModel: viewModel, games: filteredGames)
                 }
                 
                 Spacer(minLength: 0)
@@ -116,57 +83,6 @@ public struct LibraryView: View {
         }
     }
     
-    private var gamepadFooterBar: some View {
-        HStack(spacing: 14) {
-            HStack(spacing: 6) {
-                HStack(spacing: 2) {
-                    Text(controllerService.activeBrand == .playstation ? "✕" : "A")
-                        .font(.system(size: 10, weight: .black, design: .rounded))
-                        .foregroundColor(.white)
-                        .frame(width: 18, height: 18)
-                        .background(Circle().fill(Color(red: 0.06, green: 0.49, blue: 0.06)))
-                    
-                    Text("/")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(NXTheme.textMuted)
-                    
-                    Text(controllerService.activeBrand == .playstation ? "□" : "X")
-                        .font(.system(size: 10, weight: .black, design: .rounded))
-                        .foregroundColor(.white)
-                        .frame(width: 18, height: 18)
-                        .background(Circle().fill(Color(red: 0.0, green: 0.47, blue: 0.84)))
-                }
-                
-                Text("Play Game")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
-            }
-            
-            Text("·")
-                .foregroundColor(.white.opacity(0.6))
-            
-            HStack(spacing: 6) {
-                Text(controllerService.activeBrand == .xbox ? "⧉" : (controllerService.activeBrand == .playstation ? "OPT" : "−"))
-                    .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2.5)
-                    .background(Capsule().fill(Color(white: 0.22)))
-                
-                Text("Game Options")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(NXTheme.glassSurfaceElevated.opacity(0.75))
-        .clipShape(Capsule())
-        .overlay(
-            Capsule().strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
-        )
-    }
-    
     private var emptyLibraryView: some View {
         VStack(spacing: 14) {
             Image(systemName: "gamecontroller")
@@ -189,8 +105,7 @@ public struct LibraryView: View {
             .buttonStyle(NXPrimaryButtonStyle())
             .controlSize(.regular)
         }
-        .frame(maxWidth: .infinity, minHeight: 320)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)
     }
 }
-

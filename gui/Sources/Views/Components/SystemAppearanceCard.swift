@@ -33,8 +33,7 @@ public struct SystemAppearanceCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Label("App Icon & Color Appearance", systemImage: "paintpalette.fill")
-                        .symbolRenderingMode(.hierarchical)
+                    Text("App Icon & Color Appearance")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
                     

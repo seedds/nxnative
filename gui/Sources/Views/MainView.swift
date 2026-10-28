@@ -132,12 +132,6 @@ public struct MainView: View {
                             .help("Click to install the latest NxNative Launcher update from GitHub")
                         }
                     }
-                    
-                    if !isCompactNav {
-                        Text("Switch Native Port Builder · Apple Silicon")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(NXTheme.textSecondary)
-                    }
                 }
             }
             

@@ -1,131 +1,131 @@
-name: "🐛 Reportar Erro ou Bug (Bug Report)"
-description: "Relate falhas no NxNative Launcher, problemas com controles, erros no assistente de portabilidade ou travamentos ao iniciar jogos."
+name: "🐛 Bug Report"
+description: "Report NxNative Launcher issues, controller glitches, porting wizard errors, or crashes when launching games."
 title: "[Bug]: "
 labels: ["launcher-bug", "bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Obrigado por ajudar a melhorar o **NxNative Launcher**! 
-        Por favor, preencha o formulário abaixo com o máximo de detalhes possível para que possamos reproduzir e corrigir o problema.
+        Thank you for helping improve **NxNative Launcher**! 
+        Please fill out the form below with as much detail as possible to help us reproduce and fix the issue.
 
         > [!CAUTION]
-        > **POLÍTICA DE CLEAN-ROOM & DIREITOS AUTORAIS:**
-        > **NUNCA** anexe chaves criptográficas (`prod.keys`, `title.keys`), ROMs, NSPs, XCIs, DLCs ou dados proprietários extraídos de jogos. Anexe apenas logs textuais e capturas de tela.
+        > **CLEAN-ROOM & COPYRIGHT POLICY:**
+        > **NEVER** attach cryptographic keys (`prod.keys`, `title.keys`), ROMs, NSPs, XCIs, DLCs, or proprietary data extracted from games. Attach only plain text logs and screenshots.
 
   - type: dropdown
     id: category
     attributes:
-      label: "Categoria do Problema"
-      description: "Selecione a área do NxNative Launcher onde o erro ocorre."
+      label: "Problem Category"
+      description: "Select the area of NxNative Launcher where the error occurs."
       options:
-        - "Interface Gráfica do Launcher (UI / Janelas / Carrossel)"
-        - "Navegação por Controle / Gamepad (Switch Pro, Xbox, PS4/PS5, Joy-Cons)"
-        - "Assistente de Portabilidade (Importação de NSP/XCI / Compilação)"
-        - "Detecção de DLCs, Atualizações e Saves"
-        - "Falha ao Iniciar Jogo (Crash imediato / Tela preta)"
-        - "Problemas Visuais / MetalFX / Shaders"
-        - "Problemas de Áudio / Efeitos Sonoros"
-        - "Outro Problema"
+        - "Launcher Graphical Interface (UI / Windows / Carousel)"
+        - "Controller / Gamepad Navigation (Switch Pro, Xbox, PS4/PS5, Joy-Cons)"
+        - "Porting Wizard (NSP/XCI Import / Compilation)"
+        - "DLC, Update & Save Detection"
+        - "Game Launch Failure (Immediate crash / Black screen)"
+        - "Visual Glitches / MetalFX / Shaders"
+        - "Audio / Sound Effect Issues"
+        - "Other Issue"
     validations:
       required: true
 
   - type: dropdown
     id: chip
     attributes:
-      label: "Processador Apple Silicon"
-      description: "Qual o chip do seu Mac ou dispositivo Apple?"
+      label: "Apple Silicon Processor"
+      description: "Which chip powers your Mac or Apple device?"
       options:
         - "Apple M1 / M1 Pro / M1 Max / M1 Ultra"
         - "Apple M2 / M2 Pro / M2 Max / M2 Ultra"
         - "Apple M3 / M3 Pro / M3 Max"
         - "Apple M4 / M4 Pro / M4 Max"
         - "Apple A17 Pro / A18 / A18 Pro (iPhone / iPad)"
-        - "Outro"
+        - "Other"
     validations:
       required: true
 
   - type: input
     id: mac_model
     attributes:
-      label: "Modelo do Mac & Memória RAM"
-      placeholder: "Ex: MacBook Pro 16\" M2 Max, 32GB RAM"
+      label: "Mac Model & RAM"
+      placeholder: "e.g., MacBook Pro 16\" M2 Max, 32GB RAM"
     validations:
       required: true
 
   - type: input
     id: os_version
     attributes:
-      label: "Versão do macOS / iOS"
-      placeholder: "Ex: macOS 15.1 Sequoia (ou macOS 14.5 Sonoma)"
+      label: "macOS / iOS Version"
+      placeholder: "e.g., macOS 15.1 Sequoia (or macOS 14.5 Sonoma)"
     validations:
       required: true
 
   - type: input
     id: launcher_version
     attributes:
-      label: "Versão do NxNative Launcher"
-      placeholder: "Ex: v1.0.0 ou commit git (ex: 51d6e8a)"
+      label: "NxNative Launcher Version"
+      placeholder: "e.g., v1.0.0 or git commit (e.g., 51d6e8a)"
     validations:
       required: false
 
   - type: input
     id: game_info
     attributes:
-      label: "Jogo e Title ID (se aplicável)"
-      description: "Nome do jogo, Title ID (16 dígitos hexadecimais), versão do update e se há DLC instalada."
-      placeholder: "Ex: The Legend of Zelda: Breath of the Wild (01007EF00011E000) v1.6.0 + DLC"
+      label: "Game & Title ID (if applicable)"
+      description: "Game name, Title ID (16 hex digits), update version, and whether DLC is installed."
+      placeholder: "e.g., The Legend of Zelda: Breath of the Wild (01007EF00011E000) v1.6.0 + DLC"
     validations:
       required: false
 
   - type: textarea
     id: description
     attributes:
-      label: "O que aconteceu? (Descrição do Erro)"
-      description: "Descreva com clareza o comportamento inesperado que você presenciou."
-      placeholder: "Ao clicar em 'Play' ou ao tentar portar o arquivo NSP, a tela congela em..."
+      label: "What happened? (Bug Description)"
+      description: "Clearly describe the unexpected behavior you encountered."
+      placeholder: "When clicking 'Play' or attempting to port the NSP file, the screen freezes at..."
     validations:
       required: true
 
   - type: textarea
     id: steps
     attributes:
-      label: "Passos para Reproduzir o Erro"
-      description: "Como podemos reproduzir esse comportamento?"
+      label: "Steps to Reproduce"
+      description: "How can we reproduce this behavior?"
       placeholder: |
-        1. Abra o NxNative Launcher
-        2. Conecte o controle Xbox via Bluetooth
-        3. Navegue até a aba Jogos Compatíveis
-        4. Clique em...
+        1. Open NxNative Launcher
+        2. Connect Xbox controller via Bluetooth
+        3. Navigate to Compatible Games tab
+        4. Click on...
     validations:
       required: true
 
   - type: textarea
     id: expected
     attributes:
-      label: "Comportamento Esperado"
-      description: "O que você esperava que acontecesse?"
-      placeholder: "O jogo deveria iniciar em tela cheia com os controles mapeados..."
+      label: "Expected Behavior"
+      description: "What did you expect to happen?"
+      placeholder: "The game should launch in full screen with controls mapped..."
     validations:
       required: false
 
   - type: textarea
     id: logs
     attributes:
-      label: "Logs de Execução (Console / Crash Log)"
+      label: "Execution Logs (Console / Crash Log)"
       description: |
-        Anexe ou cole os logs de erro relevantes:
-        - **Logs do jogo portado no Mac:** `~/Library/Logs/nxnative/<TitleID>.log`
-        - **Log da sessão anterior:** `~/Library/Logs/nxnative/<TitleID>.prev.log`
-        - **Logs do Launcher:** Saída do console do terminal se executado via `.command`.
-      placeholder: "Cole as linhas de log com [RED], panic, fatal error ou stack trace..."
+        Attach or paste relevant error logs:
+        - **Ported game logs on Mac:** `~/Library/Logs/nxnative/<TitleID>.log`
+        - **Previous session log:** `~/Library/Logs/nxnative/<TitleID>.prev.log`
+        - **Launcher logs:** Terminal console output if executed via `.command`.
+      placeholder: "Paste log lines with [RED], panic, fatal error, or stack traces..."
     validations:
       required: false
 
   - type: checkboxes
     id: clean_room_confirmation
     attributes:
-      label: "Confirmação de Conformidade Legal"
+      label: "Legal Compliance Confirmation"
       options:
-        - label: "Confirmo que NENHUM arquivo proprietário (chaves prod.keys, ROMs, NSPs ou código protegido por direitos autorais) foi anexado neste ticket."
+        - label: "I confirm that NO proprietary files (prod.keys, ROMs, NSPs, or copyrighted code) are attached to this ticket."
           required: true

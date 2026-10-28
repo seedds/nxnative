@@ -1,50 +1,50 @@
-name: "💡 Sugestão de Melhoria (Feature Request)"
-description: "Sugira novas funcionalidades, melhorias na interface ou recursos para o NxNative Launcher."
-title: "[Sugestão]: "
+name: "💡 Feature Request"
+description: "Suggest new features, UI improvements, or capabilities for NxNative Launcher."
+title: "[Feature]: "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Obrigado por ajudar a evoluir o **NxNative Launcher**!
-        Descreva sua ideia ou melhoria abaixo.
+        Thank you for helping evolve **NxNative Launcher**!
+        Please describe your idea or improvement below.
 
   - type: dropdown
     id: area
     attributes:
-      label: "Área de Interesse"
+      label: "Area of Interest"
       options:
-        - "Interface do Launcher (UI / UX / Estilização)"
-        - "Suporte a Controles & Mapeamento de Botões"
-        - "Assistente de Portabilidade (Porting Wizard)"
-        - "Gerenciador de Saves e Configurações"
-        - "Integração com macOS (Atalhos, Spotlight, Notificações)"
-        - "Outro"
+        - "Launcher Interface (UI / UX / Styling)"
+        - "Controller Support & Button Mapping"
+        - "Porting Wizard"
+        - "Save & Configuration Manager"
+        - "macOS Integration (Shortcuts, Spotlight, Notifications)"
+        - "Other"
     validations:
       required: true
 
   - type: textarea
     id: problem
     attributes:
-      label: "Qual necessidade ou problema você quer resolver?"
-      description: "Uma explicação clara do que está faltando ou como o fluxo de uso atual pode ser melhorado."
-      placeholder: "Atualmente, ao fazer..."
+      label: "What need or problem are you trying to solve?"
+      description: "A clear explanation of what is missing or how the current workflow can be improved."
+      placeholder: "Currently, when doing..."
     validations:
       required: true
 
   - type: textarea
     id: solution
     attributes:
-      label: "Solução Proposta"
-      description: "Como você imagina que essa funcionalidade deveria funcionar na prática?"
-      placeholder: "Seria excelente se houvesse um botão na barra de ferramentas para..."
+      label: "Proposed Solution"
+      description: "How do you envision this feature working in practice?"
+      placeholder: "It would be great if there was a button in the toolbar to..."
     validations:
       required: true
 
   - type: textarea
     id: alternatives
     attributes:
-      label: "Alternativas Consideradas"
-      description: "Você considerou alguma alternativa ou solução de contorno?"
+      label: "Alternatives Considered"
+      description: "Did you consider any alternative solutions or workarounds?"
     validations:
       required: false

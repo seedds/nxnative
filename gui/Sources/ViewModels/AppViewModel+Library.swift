@@ -10,6 +10,11 @@ extension AppViewModel {
         let root = URL(fileURLWithPath: defaultInstallPath)
         let gamesDir = root.appendingPathComponent("Games")
         searchDirs.append(gamesDir)
+
+        let nxPortsDir = URL(fileURLWithPath: "/Volumes/SSD FN501 PRO/Emulations/Nx Ports")
+        if FileManager.default.fileExists(atPath: nxPortsDir.path) {
+            searchDirs.append(nxPortsDir)
+        }
         
         if let custom = libraryFolder, custom.path != "/" && custom.path != gamesDir.path {
             searchDirs.append(custom)

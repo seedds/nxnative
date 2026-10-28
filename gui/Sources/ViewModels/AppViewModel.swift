@@ -129,6 +129,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var isLoadingCompatibility: Bool = false
     @Published public var compatibilityFilter: String = "All"
     @Published public var compatibilityRamFilter: Int? = nil
+    @Published public var compatibilityNameFilter: String = "All"
     @Published public var compatibilitySearchText: String = ""
     @Published public var compatibilityLastUpdated: Date? = nil
     @Published public var isCompatibilityFromOnline: Bool = false

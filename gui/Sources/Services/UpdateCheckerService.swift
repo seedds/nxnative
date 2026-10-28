@@ -1,20 +1,6 @@
 import Foundation
 import AppKit
 
-public struct UpdateInfo {
-    public let hasUpdate: Bool
-    public let localCommit: String
-    public let remoteCommit: String
-    public let commitMessages: [String]
-    public let checkDate: Date
-    public let repoURL: String
-}
-
-public protocol UpdateCheckerDelegate: AnyObject {
-    func updateCheckerDidFindUpdate(_ info: UpdateInfo)
-    func updateCheckerDidProduceLog(_ message: String)
-}
-
 public final class UpdateCheckerService {
     public static let shared = UpdateCheckerService()
     public static let launcherRepoURL = "https://github.com/rennan101/nxnative_Launcher.git"
@@ -240,12 +226,10 @@ public final class UpdateCheckerService {
         let workspaceApp = workspaceRoot.appendingPathComponent("NxNative_Launcher.app").standardizedFileURL
         let repoApp = URL(fileURLWithPath: nxnativePath).appendingPathComponent("NxNative_Launcher.app").standardizedFileURL
         
-        // If current running app is neither workspaceApp nor repoApp (e.g. /Applications/NxNative_Launcher.app), copy over
         if currentBundleURL.path != workspaceApp.path && currentBundleURL.path != repoApp.path {
             let sourceApp = fm.fileExists(atPath: workspaceApp.path) ? workspaceApp : repoApp
             guard fm.fileExists(atPath: sourceApp.path) else { return }
             reportProgress("==> Updating running bundle at \(currentBundleURL.path)...")
-            _ = runGitWithStatus(["-c", "core.fsmonitor=false"], in: nxnativePath) // no-op warm
             let cpProc = Process()
             cpProc.executableURL = URL(fileURLWithPath: "/bin/cp")
             cpProc.arguments = ["-Rf", "\(sourceApp.path)/Contents", "\(currentBundleURL.path)/"]
@@ -259,23 +243,19 @@ public final class UpdateCheckerService {
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [scriptPath]
         process.currentDirectoryURL = URL(fileURLWithPath: workingDir)
-        
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        process.environment = env
+        process.environment = ["PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"]
         
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
-        
         let handle = pipe.fileHandleForReading
         handle.readabilityHandler = { fileHandle in
             let data = fileHandle.availableData
             guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-            let lines = chunk.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-            for line in lines {
-                onLine(line)
-            }
+            chunk.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .forEach { onLine($0) }
         }
         
         do {
@@ -293,18 +273,12 @@ public final class UpdateCheckerService {
     @discardableResult
     private func runGitWithStatus(_ args: [String], in dir: String) -> (exitCode: Int32, output: String) {
         let fm = FileManager.default
-        let candidates = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"]
-        let gitPath = candidates.first(where: { fm.fileExists(atPath: $0) }) ?? "/usr/bin/git"
-        
+        let gitPath = ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"].first(where: { fm.fileExists(atPath: $0) }) ?? "/usr/bin/git"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: gitPath)
         process.arguments = args
         process.currentDirectoryURL = URL(fileURLWithPath: dir)
-        
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        process.environment = env
-        
+        process.environment = ["PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -313,14 +287,13 @@ public final class UpdateCheckerService {
             try process.run()
             process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let out = String(data: data, encoding: .utf8) ?? ""
-            return (process.terminationStatus, out)
+            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
         } catch {
             return (-1, error.localizedDescription)
         }
     }
     
     private func runGit(_ args: [String], in dir: String) -> String {
-        return runGitWithStatus(args, in: dir).output
+        runGitWithStatus(args, in: dir).output
     }
 }

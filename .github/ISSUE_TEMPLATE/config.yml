@@ -1,14 +1,14 @@
 blank_issues_enabled: true
 contact_links:
-  - name: "🚨 Central de Suporte & Reportes Rápidos"
+  - name: "🚨 Support Hub & Quick Reports"
     url: https://github.com/rennan101/nxnative_Launcher/issues/1
-    about: "Ticket central para dúvidas, suporte rápido e reporte aberto de bugs."
-  - name: "🎮 Central de Testes e Compatibilidade de Jogos"
+    about: "Central issue for questions, quick support, and open bug reporting."
+  - name: "🎮 Game Testing & Compatibility Hub"
     url: https://github.com/rennan101/nxnative_Launcher/issues/2
-    about: "Comente testes de execução de jogos no Apple Silicon (M1/M2/M3/M4)."
-  - name: "📖 Documentação do NxNative Launcher"
+    about: "Discuss and share game execution tests on Apple Silicon (M1/M2/M3/M4)."
+  - name: "📖 NxNative Launcher Documentation"
     url: https://github.com/rennan101/nxnative_Launcher#readme
-    about: "Guia completo de uso do launcher, controles, requisitos e atalhos."
-  - name: "⚙️ Motor de Tradução Central (Upstream seedds/nxnative)"
+    about: "Comprehensive guide for launcher usage, controls, requirements, and shortcuts."
+  - name: "⚙️ Core Translation Engine (Upstream seedds/nxnative)"
     url: https://github.com/seedds/nxnative
-    about: "Repositório do motor de emulação nativa e HLE de Horizon/Metal."
+    about: "Upstream repository for the native translation engine and Horizon/Metal HLE."

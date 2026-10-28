@@ -1,5 +1,7 @@
-name: Game request or bring-up report
-description: Ask for a game, or report how far a game without a profile gets
+name: "🎮 Game Request or Bring-up Report"
+description: "Request a game profile, or report how far a game without a profile gets."
+title: "[Game Request]: "
+labels: ["game-request"]
 body:
   - type: markdown
     attributes:
@@ -10,35 +12,35 @@ body:
   - type: input
     id: game
     attributes:
-      label: Game, title ID and version
+      label: "Game, title ID and version"
       placeholder: "<game name>, <base game title ID>, <version>"
     validations:
       required: true
   - type: input
     id: engine
     attributes:
-      label: Engine and graphics API, if known
-      description: The survey names both (for example Unreal Engine 4, Unity, NVN, Vulkan, OpenGL).
+      label: "Engine and graphics API (if known)"
+      description: "The survey names both (for example Unreal Engine 4, Unity, NVN, Vulkan, OpenGL)."
     validations:
       required: false
   - type: textarea
     id: survey
     attributes:
-      label: Survey and what happened
-      description: Attach `survey.md` if you ran the NSP script, and say how far the game got (it boots, shows a title, crashes at ..., draws wrong). Attach the log of a run if there was one.
+      label: "Survey and run behavior"
+      description: "Attach `survey.md` if you ran the NSP script, and state how far the game got (boots, shows a title, crashes at ..., graphical glitches). Attach run logs if available."
     validations:
       required: false
   - type: input
     id: device
     attributes:
-      label: Device and OS you would play on
-      placeholder: iPhone 17 Pro Max, iOS 26.1
+      label: "Device and OS"
+      placeholder: "e.g., MacBook Pro M2 Max (macOS 15.1) or iPhone 17 Pro Max (iOS 26.1)"
     validations:
       required: false
   - type: checkboxes
     id: no-game-files
     attributes:
-      label: No game files
+      label: "Clean-Room Policy"
       options:
-        - label: Nothing attached here contains game files, keys or data extracted from a game.
+        - label: "Nothing attached here contains game files, keys or data extracted from a game."
           required: true

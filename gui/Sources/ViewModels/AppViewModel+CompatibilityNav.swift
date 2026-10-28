@@ -16,21 +16,22 @@ extension AppViewModel {
             }
         }
         
-        switch compatibilityFilter {
-        case "Unreal":
-            list = list.filter { $0.engine.localizedCaseInsensitiveContains("unreal") }
-        case "Unity":
-            list = list.filter { $0.engine.localizedCaseInsensitiveContains("unity") }
-        case "Nintendo":
-            list = list.filter { $0.engine.localizedCaseInsensitiveContains("nintendo") || $0.engine.localizedCaseInsensitiveContains("sead") }
-        case "RE Engine":
-            list = list.filter { $0.engine.localizedCaseInsensitiveContains("re engine") || $0.engine.localizedCaseInsensitiveContains("capcom") }
-        default:
-            break
-        }
-        
         if let maxRam = compatibilityRamFilter {
             list = list.filter { $0.minRamGB <= maxRam }
+        }
+        
+        if compatibilityNameFilter != "All" && !compatibilityNameFilter.isEmpty {
+            if compatibilityNameFilter == "#" {
+                list = list.filter { game in
+                    guard let first = game.title.trimmingCharacters(in: .whitespaces).first else { return false }
+                    return !first.isLetter
+                }
+            } else {
+                list = list.filter { game in
+                    let title = game.title.trimmingCharacters(in: .whitespaces)
+                    return title.prefix(1).localizedCaseInsensitiveCompare(compatibilityNameFilter) == .orderedSame
+                }
+            }
         }
         
         return list

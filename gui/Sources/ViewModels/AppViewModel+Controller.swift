@@ -256,30 +256,22 @@ extension AppViewModel {
     // MARK: - Game Action Menu Execution
     public func executeFocusedGameAction() {
         guard let game = currentFocusedGame else { return }
+        isGameActionMenuPresented = false
         switch gameActionFocusedIndex {
         case 0:
-            isGameActionMenuPresented = false
             launchGame(game)
         case 1:
-            isGameActionMenuPresented = false
             gameForSettingsSheet = game
-        case 2:
-            isGameActionMenuPresented = false
+        case 2, 4:
             revealInFinder(url: game.url)
         case 3:
-            isGameActionMenuPresented = false
             let profile = GameDetailsProfile.inspect(for: game)
             revealSaveFolder(profile.saveDirectory)
-        case 4:
-            isGameActionMenuPresented = false
-            revealInFinder(url: game.url)
         case 5:
-            // SAFE DELETION: trigger safety confirmation modal, never delete directly!
-            isGameActionMenuPresented = false
             gameToDelete = game
             showDeleteConfirm = true
         default:
-            isGameActionMenuPresented = false
+            break
         }
     }
     
@@ -288,7 +280,6 @@ extension AppViewModel {
         let clamped = max(0, min(focusedGameIndex, libraryGames.count - 1))
         return libraryGames[clamped]
     }
-    
     func handleOptionsAction() {
         if gameForSettingsSheet != nil {
             if let g = gameForSettingsSheet { saveRuntimeConfig(activeSettingsConfig, for: g) }

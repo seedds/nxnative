@@ -156,6 +156,31 @@ public struct ConsoleHeroView: View {
                         }
                         .buttonStyle(.plain)
 
+                        // AirDrop Button for iOS
+                        Button(action: {
+                            SoundEffectService.shared.play(.click)
+                            DeviceDeploymentService.shared.shareViaAirDrop(fileURL: game.url)
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "airdrop")
+                                Text("AirDrop")
+                                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            }
+                            .foregroundColor(NXTheme.textPrimary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(
+                                Capsule()
+                                    .fill(NXTheme.glassSurfaceElevated.opacity(0.85))
+                            )
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .help("Enviar .ipa diretamente para iPhone/iPad via AirDrop")
+
                         // Reveal in Finder Button for iOS
                         Button(action: {
                             SoundEffectService.shared.play(.click)

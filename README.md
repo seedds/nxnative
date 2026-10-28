@@ -22,7 +22,7 @@ You need a Mac with macOS 26.6 or later, [Xcode](https://apps.apple.com/app/xcod
 
 ```
 xcodebuild -downloadComponent MetalToolchain
-git clone https://github.com/seedds/nxnative.git && cd nxnative
+git clone https://github.com/well0l/nxnative.git && cd nxnative
 brew install xcodegen zstd glslang
 brew install --cask dotnet-sdk
 python3 -m pip install lz4 capstone fonttools nsz "backports.zstd; python_version < '3.14'"

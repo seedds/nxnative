@@ -66,15 +66,27 @@ public struct SquareGameCardView: View {
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-                // Platform pill badge (Mac Native vs iOS)
-                Text(game.platform == .macApp ? "MAC" : "IOS")
-                    .font(.system(size: 8, weight: .black, design: .rounded))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(game.platform == .macApp ? NXTheme.primary.opacity(0.85) : NXTheme.secondary.opacity(0.85))
-                    .clipShape(Capsule())
-                    .padding(8)
+                // Platform pill badge (Mac Native vs iOS) & Cloud Save Status
+                HStack(spacing: 4) {
+                    Text(game.platform == .macApp ? "MAC" : "IOS")
+                        .font(.system(size: 8, weight: .black, design: .rounded))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(game.platform == .macApp ? NXTheme.primary.opacity(0.85) : NXTheme.secondary.opacity(0.85))
+                        .clipShape(Capsule())
+
+                    if SaveSyncService.shared.isCloudSyncActive(for: game) {
+                        Image(systemName: "icloud.fill")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.85))
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(8)
             }
             .frame(width: baseSize, height: baseSize)
             // MARK: - Switch Dark Mode Glowing Focus Frame
@@ -91,9 +103,10 @@ public struct SquareGameCardView: View {
                 x: 0,
                 y: isFocused ? 4 : 2
             )
-            .scaleEffect(isFocused ? 1.12 : 1.0)
+            .scaleEffect(isFocused ? 1.10 : 1.0)
             .animation(.spring(response: 0.28, dampingFraction: 0.76), value: isFocused)
         }
         .buttonStyle(.plain)
+        .nxNoFocusRing()
     }
 }

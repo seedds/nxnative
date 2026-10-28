@@ -28,36 +28,18 @@ extension AppViewModel {
         switch action {
         case .tabPrevious:
             SoundEffectService.shared.play(.tabSwitch)
-            withAnimation(.easeInOut(duration: 0.18)) {
-                selectedTab = (selectedTab - 1 + 7) % 7
-            }
-            
+            selectedTab = (selectedTab - 1 + 7) % 7
         case .tabNext:
             SoundEffectService.shared.play(.tabSwitch)
-            withAnimation(.easeInOut(duration: 0.18)) {
-                selectedTab = (selectedTab + 1) % 7
-            }
-            
-        case .navigateLeft:
-            handleNavigateLeft()
-            
-        case .navigateRight:
-            handleNavigateRight()
-            
-        case .navigateDown:
-            handleNavigateDown()
-            
-        case .navigateUp:
-            handleNavigateUp()
-            
-        case .confirm:
-            handleConfirm()
-        case .cancel:
-            handleCancel()
-        case .secondaryAction:
-            handleSecondaryAction()
-        case .contextAction:
-            handleContextAction()
+            selectedTab = (selectedTab + 1) % 7
+        case .navigateLeft: handleNavigateLeft()
+        case .navigateRight: handleNavigateRight()
+        case .navigateDown: handleNavigateDown()
+        case .navigateUp: handleNavigateUp()
+        case .confirm: handleConfirm()
+        case .cancel: handleCancel()
+        case .secondaryAction: handleSecondaryAction()
+        case .contextAction: handleContextAction()
         case .menu:
             SoundEffectService.shared.play(.click)
             if selectedTab == 1, let game = currentFocusedGame {
@@ -173,7 +155,11 @@ extension AppViewModel {
             if isGameActionMenuPresented {
                 executeFocusedGameAction()
             } else if let game = currentFocusedGame {
-                launchGame(game)
+                if game.platform == .macApp {
+                    launchGame(game)
+                } else {
+                    gameForSettingsSheet = game
+                }
             }
         case 2:
             handleCompatibilityConfirm()
@@ -252,14 +238,29 @@ extension AppViewModel {
         isGameActionMenuPresented = false
         switch gameActionFocusedIndex {
         case 0:
-            launchGame(game)
+            if game.platform == .macApp {
+                launchGame(game)
+            } else {
+                gameForSettingsSheet = game
+            }
         case 1:
             gameForSettingsSheet = game
-        case 2, 4:
-            revealInFinder(url: game.url)
+        case 2:
+            if game.platform == .ios {
+                DeviceDeploymentService.shared.shareViaAirDrop(fileURL: game.url)
+            } else {
+                revealInFinder(url: game.url)
+            }
         case 3:
             let profile = GameDetailsProfile.inspect(for: game)
             revealSaveFolder(profile.saveDirectory)
+        case 4:
+            if game.platform == .ios {
+                revealInFinder(url: game.url)
+            } else {
+                let cover = GameCoverService.shared.coverImage(for: game)
+                SaveSyncService.shared.revealCloudGameFolder(for: game, cover: cover)
+            }
         case 5:
             gameToDelete = game
             showDeleteConfirm = true

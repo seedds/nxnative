@@ -117,26 +117,40 @@ public struct CompactConsoleActionSheetView: View {
                 
                 // Action Menu Items (Compact Console List)
                 VStack(spacing: 8) {
-                    // Option 0: Play
-                    menuActionRow(
-                        index: 0,
-                        title: isLaunching ? "Launching..." : "Play Game",
-                        subtitle: "Start native execution on Apple Silicon",
-                        icon: isLaunching ? "hourglass" : "play.fill",
-                        isPrimary: true,
-                        isLoading: isLaunching
-                    ) {
-                        if !isLaunching {
-                            viewModel.launchGame(game)
+                    if game.platform == .macApp {
+                        // Option 0: Play Game
+                        menuActionRow(
+                            index: 0,
+                            title: isLaunching ? "Launching..." : "Play Game",
+                            subtitle: "Start native execution on Apple Silicon",
+                            icon: isLaunching ? "hourglass" : "play.fill",
+                            isPrimary: true,
+                            isLoading: isLaunching
+                        ) {
+                            if !isLaunching {
+                                viewModel.launchGame(game)
+                                onDismiss()
+                            }
+                        }
+                    } else {
+                        // Option 0: Send to iPhone / iPad
+                        menuActionRow(
+                            index: 0,
+                            title: "Send to iPhone / iPad",
+                            subtitle: "Install on connected device via devicectl",
+                            icon: "arrow.up.forward.app",
+                            isPrimary: true
+                        ) {
                             onDismiss()
+                            viewModel.gameForSettingsSheet = game
                         }
                     }
                     
                     // Option 1: Game Settings
                     menuActionRow(
                         index: 1,
-                        title: "Game Settings",
-                        subtitle: "Resolution, 60 FPS, Docked mode & MetalFX",
+                        title: "Game Settings & Options",
+                        subtitle: game.platform == .macApp ? "Resolution, 60 FPS, Docked mode & MetalFX" : "Device deployment, AirDrop, covers & saves",
                         icon: "slider.horizontal.3",
                         isPrimary: false
                     ) {
@@ -144,16 +158,30 @@ public struct CompactConsoleActionSheetView: View {
                         viewModel.gameForSettingsSheet = game
                     }
                     
-                    // Option 2: Reveal App Files
-                    menuActionRow(
-                        index: 2,
-                        title: "App Files",
-                        subtitle: "Reveal .app bundle inside Finder",
-                        icon: "folder.fill",
-                        isPrimary: false
-                    ) {
-                        onDismiss()
-                        viewModel.revealInFinder(url: game.url)
+                    if game.platform == .ios {
+                        // Option 2: AirDrop for iOS
+                        menuActionRow(
+                            index: 2,
+                            title: "Share via AirDrop",
+                            subtitle: "Send .ipa directly to iPhone/iPad wirelessly",
+                            icon: "airdrop",
+                            isPrimary: false
+                        ) {
+                            onDismiss()
+                            DeviceDeploymentService.shared.shareViaAirDrop(fileURL: game.url)
+                        }
+                    } else {
+                        // Option 2: Reveal App Files
+                        menuActionRow(
+                            index: 2,
+                            title: "App Files",
+                            subtitle: "Reveal .app bundle inside Finder",
+                            icon: "folder.fill",
+                            isPrimary: false
+                        ) {
+                            onDismiss()
+                            viewModel.revealInFinder(url: game.url)
+                        }
                     }
                     
                     // Option 3: Save Location
@@ -168,24 +196,38 @@ public struct CompactConsoleActionSheetView: View {
                         viewModel.revealSaveFolder(profile.saveDirectory)
                     }
                     
-                    // Option 4: DLC Packages
-                    menuActionRow(
-                        index: 4,
-                        title: "DLC Packages (\(profile.dlcItems.count))",
-                        subtitle: profile.dlcItems.isEmpty ? "No DLC packages detected in bundle" : "\(profile.dlcItems.count) content package(s) detected",
-                        icon: "shippingbox.fill",
-                        isPrimary: false
-                    ) {
-                        // Open game folder or inspect
-                        onDismiss()
-                        viewModel.revealInFinder(url: game.url)
+                    if game.platform == .ios {
+                        // Option 4: Reveal .ipa in Finder
+                        menuActionRow(
+                            index: 4,
+                            title: "Reveal .ipa in Finder",
+                            subtitle: "Open folder containing compiled .ipa package",
+                            icon: "folder.fill",
+                            isPrimary: false
+                        ) {
+                            onDismiss()
+                            viewModel.revealInFinder(url: game.url)
+                        }
+                    } else {
+                        // Option 4: iCloud Cross-Save Folder in Finder
+                        menuActionRow(
+                            index: 4,
+                            title: "iCloud Cross-Save Folder",
+                            subtitle: "Open unified Mac & iOS cloud saves in Finder",
+                            icon: "icloud.fill",
+                            isPrimary: false
+                        ) {
+                            onDismiss()
+                            let cover = GameCoverService.shared.coverImage(for: game)
+                            SaveSyncService.shared.revealCloudGameFolder(for: game, cover: cover)
+                        }
                     }
                     
                     // Option 5: Remove Game
                     menuActionRow(
                         index: 5,
                         title: "Remove Game",
-                        subtitle: "Delete compiled application from library",
+                        subtitle: game.platform == .macApp ? "Delete compiled application from library" : "Delete compiled .ipa package from storage",
                         icon: "trash.fill",
                         isPrimary: false,
                         isDestructive: true

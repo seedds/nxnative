@@ -27,9 +27,14 @@ public final class KeyCheckService {
         }
 
         let keys = parseKeys(keysText)
-        guard let headerKey = keys["header_key"], headerKey.count == 32 else {
+        guard let headerKey = keys["header_key"] ?? keys["header_key_00"] ?? keys["nca_header_key"], headerKey.count == 32 else {
             return .noHeaderKey
         }
+
+        var openedAnyAcrossAllFiles = false
+        var totalNcasChecked = 0
+        var highestRevisionOverall = 0
+        var missingKeyName: String?
 
         for file in gameFiles {
             let ext = file.pathExtension.lowercased()
@@ -38,43 +43,54 @@ public final class KeyCheckService {
             }
 
             let container = readContainer(file.path)
-            switch container {
-            case .unsupported:
-                return .cannotCheck(fileName: file.lastPathComponent)
-            case .pfs0(let ncas):
-                var openedAtLeastOne = false
-                var highestRevision = 0
-                var missingKeyName: String?
-
-                for nca in ncas {
-                    guard let decrypted = xts(nca.header, key: headerKey, encrypt: false),
-                          let req = needs(header: decrypted) else {
-                        continue
-                    }
-
-                    openedAtLeastOne = true
-                    if req.revision > highestRevision {
-                        highestRevision = req.revision
-                    }
-
-                    if !hasKey(req.key, in: keys) {
-                        missingKeyName = req.key
-                    }
-                }
-
-                if !openedAtLeastOne && !ncas.isEmpty {
-                    return .wrongHeaderKey(fileName: file.lastPathComponent)
-                }
-
-                if let missing = missingKeyName {
-                    let gen = highestRevision + 1
-                    let fw = gen <= Self.firmwareRevisions.count ? Self.firmwareRevisions[gen - 1] : "Unknown"
-                    return .outdatedMasterKey(generation: gen, neededKey: missing, suggestedFirmware: fw)
-                }
-
-                let fw = (highestRevision < Self.firmwareRevisions.count) ? Self.firmwareRevisions[highestRevision] : "Current"
-                return .fits(firmware: fw, revision: highestRevision)
+            guard case .pfs0(let ncas) = container else {
+                continue
             }
+
+            for nca in ncas {
+                totalNcasChecked += 1
+                var decryptedHeader: [UInt8]? = nil
+
+                // Support plaintext / already-decrypted NCA headers
+                if nca.header.count >= 0x400 {
+                    let rawMagic = String(bytes: nca.header[0x200..<0x204], encoding: .ascii) ?? ""
+                    if rawMagic == "NCA3" || rawMagic == "NCA2" {
+                        decryptedHeader = nca.header
+                    }
+                }
+
+                if decryptedHeader == nil {
+                    decryptedHeader = xts(nca.header, key: headerKey, encrypt: false)
+                }
+
+                guard let hdr = decryptedHeader, let req = needs(header: hdr) else {
+                    continue
+                }
+
+                openedAnyAcrossAllFiles = true
+                if req.revision > highestRevisionOverall {
+                    highestRevisionOverall = req.revision
+                }
+
+                if !hasKey(req.key, in: keys) && missingKeyName == nil {
+                    missingKeyName = req.key
+                }
+            }
+        }
+
+        if openedAnyAcrossAllFiles {
+            if let missing = missingKeyName {
+                let gen = highestRevisionOverall + 1
+                let fw = gen <= Self.firmwareRevisions.count ? Self.firmwareRevisions[gen - 1] : "Unknown"
+                return .outdatedMasterKey(generation: gen, neededKey: missing, suggestedFirmware: fw)
+            }
+
+            let fw = (highestRevisionOverall < Self.firmwareRevisions.count) ? Self.firmwareRevisions[highestRevisionOverall] : "Current"
+            return .fits(firmware: fw, revision: highestRevisionOverall)
+        }
+
+        if totalNcasChecked > 0 {
+            return .wrongHeaderKey(fileName: gameFiles.first?.lastPathComponent ?? "Game")
         }
 
         return .cannotCheck(fileName: gameFiles.first?.lastPathComponent ?? "None")
@@ -86,7 +102,11 @@ public final class KeyCheckService {
             let parts = line.split(separator: "=", maxSplits: 1)
             guard parts.count == 2 else { continue }
             let name = parts[0].trimmingCharacters(in: .whitespaces).lowercased()
-            if let value = hexToBytes(parts[1].trimmingCharacters(in: .whitespaces)), !name.isEmpty {
+            var valStr = parts[1].trimmingCharacters(in: .whitespaces)
+            if let commentIdx = valStr.firstIndex(where: { $0 == "#" || $0 == ";" }) {
+                valStr = String(valStr[..<commentIdx]).trimmingCharacters(in: .whitespaces)
+            }
+            if let value = hexToBytes(valStr), !name.isEmpty {
                 keys[name] = value
             }
         }
@@ -186,21 +206,45 @@ public final class KeyCheckService {
         }
 
         guard let magic = read(0, 4), String(bytes: magic, encoding: .ascii) == "PFS0",
-              let countBytes = read(4, 4) else { return .unsupported }
+              let countBytes = read(4, 4),
+              let stringTableSizeBytes = read(8, 4) else { return .unsupported }
 
         let count = Int(countBytes[0]) | Int(countBytes[1]) << 8 | Int(countBytes[2]) << 16 | Int(countBytes[3]) << 24
-        guard count > 0, count < 256 else { return .unsupported }
+        let stringTableSize = Int(stringTableSizeBytes[0]) | Int(stringTableSizeBytes[1]) << 8 | Int(stringTableSizeBytes[2]) << 16 | Int(stringTableSizeBytes[3]) << 24
+        guard count > 0, count < 512, stringTableSize > 0, stringTableSize < 65536 else { return .unsupported }
 
-        var headers: [(header: [UInt8], ncz: Bool)] = []
         let entrySize = 24
         guard let table = read(16, count * entrySize) else { return .unsupported }
+        let stringTableOffset = UInt64(16 + count * entrySize)
+        guard let stringTable = read(stringTableOffset, stringTableSize) else { return .unsupported }
+        let dataSectionOffset = stringTableOffset + UInt64(stringTableSize)
 
-        for i in 0..<min(count, 8) {
+        var headers: [(header: [UInt8], ncz: Bool)] = []
+
+        for i in 0..<count {
             let off = i * entrySize
-            let ncaOffset = UInt64(table[off]) | UInt64(table[off+1]) << 8 | UInt64(table[off+2]) << 16 | UInt64(table[off+3]) << 24 |
-                            UInt64(table[off+4]) << 32 | UInt64(table[off+5]) << 40 | UInt64(table[off+6]) << 48 | UInt64(table[off+7]) << 56
-            if let ncaHeader = read(ncaOffset, 0x400) {
-                headers.append((header: ncaHeader, ncz: false))
+            let fileOffset = UInt64(table[off]) | UInt64(table[off+1]) << 8 | UInt64(table[off+2]) << 16 | UInt64(table[off+3]) << 24 |
+                             UInt64(table[off+4]) << 32 | UInt64(table[off+5]) << 40 | UInt64(table[off+6]) << 48 | UInt64(table[off+7]) << 56
+            let fileSize = UInt64(table[off+8]) | UInt64(table[off+9]) << 8 | UInt64(table[off+10]) << 16 | UInt64(table[off+11]) << 24 |
+                           UInt64(table[off+12]) << 32 | UInt64(table[off+13]) << 40 | UInt64(table[off+14]) << 48 | UInt64(table[off+15]) << 56
+            let nameOff = Int(table[off+16]) | Int(table[off+17]) << 8 | Int(table[off+18]) << 16 | Int(table[off+19]) << 24
+
+            guard nameOff >= 0 && nameOff < stringTable.count else { continue }
+            var nameEnd = nameOff
+            while nameEnd < stringTable.count && stringTable[nameEnd] != 0 {
+                nameEnd += 1
+            }
+            let fileName = String(bytes: stringTable[nameOff..<nameEnd], encoding: .utf8) ?? ""
+            
+            // Focus on NCA packages that contain executable and metadata headers
+            guard (fileName.hasSuffix(".nca") || fileName.hasSuffix(".ncz")), fileSize >= 0x400 else {
+                continue
+            }
+
+            let absoluteOffset = dataSectionOffset + fileOffset
+            if let ncaHeader = read(absoluteOffset, 0x400) {
+                headers.append((header: ncaHeader, ncz: fileName.hasSuffix(".ncz")))
+                if headers.count >= 8 { break }
             }
         }
         return headers.isEmpty ? .unsupported : .pfs0(headers)

@@ -27,81 +27,79 @@ public struct SwitchConsoleLibraryView: View {
     public var body: some View {
         GeometryReader { geo in
             let totalHeight = geo.size.height
-            let heroHeight = max(240, totalHeight * 0.48)
-            let shelfHeight = totalHeight - heroHeight + 40
+            // Hero Section: proportional height giving ample breathing room for 16:9 art + action buttons
+            let heroHeight = min(420, max(280, totalHeight * 0.48))
 
-            ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
                 // MARK: - 1. Hero Section (Widescreen 16:9 Promo Art + Game Controls)
-                VStack(spacing: 0) {
-                    if let selected = focusedGame {
-                        ConsoleHeroView(game: selected, viewModel: viewModel, height: heroHeight)
-                            .id("hero_\(selected.id.uuidString)")
-                            .frame(height: heroHeight)
-                            .transition(.opacity.animation(.easeInOut(duration: 0.22)))
-                    } else {
-                        Spacer().frame(height: heroHeight)
-                    }
-                    Spacer()
+                if let selected = focusedGame {
+                    ConsoleHeroView(game: selected, viewModel: viewModel, height: heroHeight)
+                        .id("hero_\(selected.id.uuidString)")
+                        .frame(height: heroHeight)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.22)))
+                } else {
+                    Spacer().frame(height: heroHeight)
                 }
-                .frame(width: geo.size.width, height: totalHeight)
 
-                // MARK: - 2. Smooth Blend Gradient Between Hero & Shelves
-                LinearGradient(
-                    stops: [
-                        .init(color: Color.clear, location: 0.0),
-                        .init(color: Color.nxCanvas.opacity(0.65), location: 0.35),
-                        .init(color: Color.nxCanvas, location: 1.0)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: shelfHeight + 50)
-                .allowsHitTesting(false)
-
-                // MARK: - 3. Two Categories Shelves (Row 1: Mac, Row 2: iPhone / iPad)
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 22) {
-                        // Category 1: Mac (macOS Native)
-                        if !macGames.isEmpty {
-                            categoryShelf(
-                                title: "Mac (macOS Native)",
-                                icon: "laptopcomputer",
-                                count: macGames.count,
-                                countSuffix: macGames.count == 1 ? "game" : "games",
-                                categoryColor: NXTheme.primary,
-                                items: macGames
-                            )
-                        }
-
-                        // Category 2: iPhone / iPad (iOS Port)
-                        if !iosGames.isEmpty {
-                            categoryShelf(
-                                title: "iPhone / iPad (iOS Port)",
-                                icon: "iphone.gen3",
-                                count: iosGames.count,
-                                countSuffix: iosGames.count == 1 ? "port" : "ports",
-                                categoryColor: NXTheme.secondary,
-                                items: iosGames
-                            )
-                        }
-
-                        // Fallback if both empty
-                        if macGames.isEmpty && iosGames.isEmpty {
-                            VStack(spacing: 12) {
-                                Image(systemName: "gamecontroller")
-                                    .font(.system(size: 38))
-                                    .foregroundColor(NXTheme.textMuted)
-                                Text("Nenhum jogo encontrado na biblioteca")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(NXTheme.textSecondary)
+                // MARK: - 2. Two Categories Shelves (Row 1: Mac, Row 2: iPhone / iPad)
+                ScrollViewReader { verticalProxy in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 18) {
+                            // Category 1: Mac (macOS Native)
+                            if !macGames.isEmpty {
+                                categoryShelf(
+                                    title: "Mac (macOS Native)",
+                                    icon: "laptopcomputer",
+                                    count: macGames.count,
+                                    countSuffix: macGames.count == 1 ? "game" : "games",
+                                    categoryColor: NXTheme.primary,
+                                    items: macGames
+                                )
+                                .id("shelf_mac")
                             }
-                            .frame(maxWidth: .infinity, minHeight: 140)
+
+                            // Category 2: iPhone / iPad (iOS Port)
+                            if !iosGames.isEmpty {
+                                categoryShelf(
+                                    title: "iPhone / iPad (iOS Port)",
+                                    icon: "iphone.gen3",
+                                    count: iosGames.count,
+                                    countSuffix: iosGames.count == 1 ? "port" : "ports",
+                                    categoryColor: NXTheme.secondary,
+                                    items: iosGames
+                                )
+                                .id("shelf_ios")
+                            }
+
+                            // Fallback if both empty
+                            if macGames.isEmpty && iosGames.isEmpty {
+                                VStack(spacing: 12) {
+                                    Image(systemName: "gamecontroller")
+                                        .font(.system(size: 38))
+                                        .foregroundColor(NXTheme.textMuted)
+                                    Text("No games found in library")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(NXTheme.textSecondary)
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 140)
+                            }
+                        }
+                        .padding(.top, 14)
+                        .padding(.bottom, 28)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .onChange(of: viewModel.focusedGameIndex) { _ in
+                        if let focused = focusedGame {
+                            withAnimation(.easeInOut(duration: 0.22)) {
+                                if focused.platform == .macApp {
+                                    verticalProxy.scrollTo("shelf_mac", anchor: .top)
+                                } else {
+                                    verticalProxy.scrollTo("shelf_ios", anchor: .bottom)
+                                }
+                            }
                         }
                     }
-                    .padding(.top, 24)
-                    .padding(.bottom, 28)
                 }
-                .frame(height: shelfHeight)
             }
             .frame(width: geo.size.width, height: totalHeight)
             .background(Color.nxCanvas)
@@ -118,6 +116,8 @@ public struct SwitchConsoleLibraryView: View {
         items: [PortedGame]
     ) -> some View {
         let baseCardSize: CGFloat = 138 * CGFloat(viewModel.libraryCardScale)
+        let verticalPadding: CGFloat = max(28, baseCardSize * 0.12 + 18)
+        let cardSpacing: CGFloat = max(22, baseCardSize * 0.14)
 
         VStack(alignment: .leading, spacing: 8) {
             // Category Header
@@ -138,31 +138,50 @@ public struct SwitchConsoleLibraryView: View {
             }
             .padding(.horizontal, 34)
 
-            // Horizontal Scroll Carousel of Square 1:1 Cards
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .center, spacing: 18) {
-                    ForEach(items) { game in
-                        let isFocused = focusedGame?.id == game.id
+            // Horizontal Scroll Carousel of Square 1:1 Cards (With Auto-Scroll & Non-Clipping Padding)
+            ScrollViewReader { horizontalProxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .center, spacing: cardSpacing) {
+                        ForEach(items) { game in
+                            let isFocused = focusedGame?.id == game.id
 
-                        SquareGameCardView(
-                            game: game,
-                            isFocused: isFocused,
-                            baseSize: baseCardSize,
-                            onSelect: {
-                                guard !viewModel.isAnyModalPresented else { return }
-                                SoundEffectService.shared.play(.focus)
-                                withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
-                                    if let idx = games.firstIndex(where: { $0.id == game.id }) {
-                                        viewModel.focusedGameIndex = idx
+                            SquareGameCardView(
+                                game: game,
+                                isFocused: isFocused,
+                                baseSize: baseCardSize,
+                                onSelect: {
+                                    guard !viewModel.isAnyModalPresented else { return }
+                                    if isFocused {
+                                        if game.platform == .macApp {
+                                            viewModel.launchGame(game)
+                                        } else {
+                                            SoundEffectService.shared.play(.click)
+                                            viewModel.gameForSettingsSheet = game
+                                        }
+                                    } else {
+                                        SoundEffectService.shared.play(.focus)
+                                        withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                                            if let idx = games.firstIndex(where: { $0.id == game.id }) {
+                                                viewModel.focusedGameIndex = idx
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        )
-                        .id("card_\(game.id.uuidString)")
+                            )
+                            .zIndex(isFocused ? 10 : 1)
+                            .id("card_\(game.id.uuidString)")
+                        }
+                    }
+                    .padding(.horizontal, 34)
+                    .padding(.vertical, verticalPadding)
+                }
+                .onChange(of: viewModel.focusedGameIndex) { _ in
+                    if let focused = focusedGame, items.contains(where: { $0.id == focused.id }) {
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            horizontalProxy.scrollTo("card_\(focused.id.uuidString)", anchor: .center)
+                        }
                     }
                 }
-                .padding(.horizontal, 34)
-                .padding(.vertical, 8)
             }
         }
     }

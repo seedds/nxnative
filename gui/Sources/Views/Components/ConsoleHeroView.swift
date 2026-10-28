@@ -5,6 +5,7 @@ public struct ConsoleHeroView: View {
     public let game: PortedGame
     @ObservedObject public var viewModel: AppViewModel
     @ObservedObject private var artworkStore = ArtworkStore.shared
+    @ObservedObject private var deviceService = DeviceDeploymentService.shared
     public let height: CGFloat
 
     public init(game: PortedGame, viewModel: AppViewModel, height: CGFloat) {
@@ -55,8 +56,8 @@ public struct ConsoleHeroView: View {
             LinearGradient(
                 stops: [
                     .init(color: Color.clear, location: 0.0),
-                    .init(color: Color.black.opacity(0.30), location: 0.40),
-                    .init(color: Color.nxCanvas.opacity(0.75), location: 0.78),
+                    .init(color: Color.black.opacity(0.18), location: 0.52),
+                    .init(color: Color.nxCanvas.opacity(0.70), location: 0.82),
                     .init(color: Color.nxCanvas, location: 1.0)
                 ],
                 startPoint: .top,
@@ -78,12 +79,22 @@ public struct ConsoleHeroView: View {
             VStack(alignment: .leading, spacing: 12) {
                 // Console Runtime Status Indicators
                 HStack(spacing: 8) {
-                    statusPill(title: config.enable60FPS ? "60 FPS" : "30 FPS", active: config.enable60FPS)
-                    statusPill(title: config.isDockedMode ? "Docked" : "Handheld", active: true)
-                    if config.enableMetalFXUpscale {
-                        statusPill(title: "MetalFX", active: true)
+                    if game.platform == .macApp {
+                        statusPill(title: config.enable60FPS ? "60 FPS" : "30 FPS", active: config.enable60FPS)
+                        statusPill(title: config.isDockedMode ? "Docked" : "Handheld", active: true)
+                        if config.enableMetalFXUpscale {
+                            statusPill(title: "MetalFX", active: true)
+                        }
+                        statusPill(title: "macOS Native", active: false)
+                    } else {
+                        statusPill(title: "iOS IPA Port", active: true)
+                        statusPill(title: "Handheld", active: false)
+                        if deviceService.activeDeployment.isRunning {
+                            statusPill(title: "Deploying (\(Int(deviceService.activeDeployment.progressFraction * 100))%)", active: true)
+                        } else {
+                            statusPill(title: "iPhone & iPad", active: false)
+                        }
                     }
-                    statusPill(title: game.platform == .macApp ? "macOS Native" : "iOS Port", active: false)
                 }
 
                 // Clean Game Title
@@ -98,7 +109,6 @@ public struct ConsoleHeroView: View {
                     if game.platform == .macApp {
                         // Play Button Pill for Mac Apps
                         Button(action: {
-                            SoundEffectService.shared.play(.click)
                             viewModel.launchGame(game)
                         }) {
                             HStack(spacing: 8) {
@@ -130,16 +140,23 @@ public struct ConsoleHeroView: View {
                         .buttonStyle(.plain)
                         .disabled(isLaunching)
                     } else {
-                        // Send to Device Button for iOS IPAs
+                        // Send to Device Button for iOS IPAs (With live progress if deployment running)
                         Button(action: {
                             SoundEffectService.shared.play(.click)
                             viewModel.gameForSettingsSheet = game
                         }) {
                             HStack(spacing: 8) {
-                                Image(systemName: "arrow.up.forward.app")
-                                    .font(.system(size: 13))
-                                Text("Send to iPhone / iPad")
-                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                if deviceService.activeDeployment.isRunning {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("\(deviceService.activeDeployment.phase.rawValue) (\(Int(deviceService.activeDeployment.progressFraction * 100))%)")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                } else {
+                                    Image(systemName: "arrow.up.forward.app")
+                                        .font(.system(size: 13))
+                                    Text("Send to iPhone / iPad")
+                                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                                }
                             }
                             .foregroundColor(.white)
                             .padding(.horizontal, 20)
@@ -179,7 +196,7 @@ public struct ConsoleHeroView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .help("Enviar .ipa diretamente para iPhone/iPad via AirDrop")
+                        .help("Send .ipa directly to iPhone/iPad via AirDrop")
 
                         // Reveal in Finder Button for iOS
                         Button(action: {

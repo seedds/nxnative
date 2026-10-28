@@ -129,6 +129,20 @@ public struct BuildExecutionSection: View {
                         .padding(.vertical, 8)
                     }
                     .buttonStyle(NXPrimaryButtonStyle())
+                } else if outputPath.hasSuffix(".ipa") {
+                    Button(action: {
+                        let ipaURL = URL(fileURLWithPath: outputPath)
+                        DeviceDeploymentService.shared.shareViaAirDrop(fileURL: ipaURL)
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "airdrop")
+                            Text("AirDrop to iPhone / iPad")
+                        }
+                        .font(.system(size: 13, weight: .bold))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(NXPrimaryButtonStyle())
                 }
                 
                 Button(action: {

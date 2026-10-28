@@ -49,27 +49,37 @@ public struct MainView: View {
                     navigationHeader
                         .zIndex(500)
                     
-                    // MARK: - Selected Content Surface
-                    Group {
-                        switch viewModel.selectedTab {
-                        case 0:
-                            BuildView(viewModel: viewModel)
-                        case 1:
-                            LibraryView(viewModel: viewModel)
-                        case 2:
-                            CompatibilityView(viewModel: viewModel)
-                        case 3:
-                            ControlsView()
-                        case 4:
-                            PersonalizationView(viewModel: viewModel)
-                        case 5:
-                            SystemView(viewModel: viewModel)
-                        case 6:
-                            LogsView(viewModel: viewModel)
-                        default:
-                            BuildView(viewModel: viewModel)
-                        }
+                    // MARK: - Selected Content Surface (Instant Tab Switching via Preserved ZStack)
+                    ZStack {
+                        BuildView(viewModel: viewModel)
+                            .opacity(viewModel.selectedTab == 0 ? 1 : 0)
+                            .allowsHitTesting(viewModel.selectedTab == 0)
+                        
+                        LibraryView(viewModel: viewModel)
+                            .opacity(viewModel.selectedTab == 1 ? 1 : 0)
+                            .allowsHitTesting(viewModel.selectedTab == 1)
+                        
+                        CompatibilityView(viewModel: viewModel)
+                            .opacity(viewModel.selectedTab == 2 ? 1 : 0)
+                            .allowsHitTesting(viewModel.selectedTab == 2)
+                        
+                        ControlsView()
+                            .opacity(viewModel.selectedTab == 3 ? 1 : 0)
+                            .allowsHitTesting(viewModel.selectedTab == 3)
+                        
+                        PersonalizationView(viewModel: viewModel)
+                            .opacity(viewModel.selectedTab == 4 ? 1 : 0)
+                            .allowsHitTesting(viewModel.selectedTab == 4)
+                        
+                        SystemView(viewModel: viewModel)
+                            .opacity(viewModel.selectedTab == 5 ? 1 : 0)
+                            .allowsHitTesting(viewModel.selectedTab == 5)
+                        
+                        LogsView(viewModel: viewModel)
+                            .opacity(viewModel.selectedTab == 6 ? 1 : 0)
+                            .allowsHitTesting(viewModel.selectedTab == 6)
                     }
+                    .animation(.easeInOut(duration: 0.12), value: viewModel.selectedTab)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     
                     // Persistent Controller Prompt Bar across all tabs
@@ -144,9 +154,7 @@ public struct MainView: View {
                     Button(action: {
                         guard !viewModel.isAnyModalPresented else { return }
                         SoundEffectService.shared.play(.tabSwitch)
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            viewModel.selectedTab = item.tag
-                        }
+                        viewModel.selectedTab = item.tag
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: item.icon)
@@ -175,7 +183,7 @@ public struct MainView: View {
                                 }
                             }
                         )
-                        .animation(.spring(response: 0.22, dampingFraction: 0.78), value: isSelected)
+                        .animation(.interactiveSpring(response: 0.24, dampingFraction: 0.8), value: isSelected)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)

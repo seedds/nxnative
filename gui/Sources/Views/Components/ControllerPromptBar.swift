@@ -98,8 +98,12 @@ public struct ControllerPromptBar: View {
                 controllerPill(glyph: cancelBtn, action: "Close", color: brandBColor)
                 dpadPill(glyph: "↑/↓", action: "Navigate")
             } else {
-                // A or X to Play, Options button for Game Options, as requested
-                playPromptPill(aGlyph: confirmBtn, xGlyph: xBtn)
+                let isIOS = viewModel.currentFocusedGame?.platform == .ios
+                if isIOS {
+                    controllerPill(glyph: confirmBtn, action: "Install / Options", color: brandAColor)
+                } else {
+                    playPromptPill(aGlyph: confirmBtn, xGlyph: xBtn)
+                }
                 optionsPill(glyph: optionsBtn, action: "Game Options")
                 dpadPill(glyph: "←/→", action: "Browse")
                 controllerPill(glyph: yBtn, action: "Saves", color: brandYColor)
@@ -112,9 +116,7 @@ public struct ControllerPromptBar: View {
                 controllerPill(glyph: confirmBtn, action: "Select", color: brandAColor)
             } else {
                 dpadPill(glyph: "↑/↓", action: "Browse")
-                dpadPill(glyph: "←/→", action: "Action")
-                controllerPill(glyph: confirmBtn, action: "Port Game", color: brandAColor)
-                controllerPill(glyph: xBtn, action: "Notes", color: brandXColor)
+                controllerPill(glyph: confirmBtn, action: "View Notes", color: brandAColor)
                 controllerPill(glyph: cancelBtn, action: "Filters", color: brandBColor)
             }
             
@@ -152,8 +154,9 @@ public struct ControllerPromptBar: View {
                 keyboardKeyBadge(glyph: "↵ Enter", action: "Execute")
                 keyboardKeyBadge(glyph: "⎋ Esc", action: "Close")
             } else {
+                let isIOS = viewModel.currentFocusedGame?.platform == .ios
                 keyboardKeyBadge(glyph: "← / →", action: "Browse")
-                keyboardKeyBadge(glyph: "↵ Enter", action: "Play")
+                keyboardKeyBadge(glyph: "↵ Enter", action: isIOS ? "Install / Options" : "Play")
                 keyboardKeyBadge(glyph: "O", action: "Options")
                 keyboardKeyBadge(glyph: ",", action: "Settings")
             }
@@ -164,9 +167,7 @@ public struct ControllerPromptBar: View {
                 keyboardKeyBadge(glyph: "↓", action: "Browse Games")
             } else {
                 keyboardKeyBadge(glyph: "↑/↓", action: "Browse")
-                keyboardKeyBadge(glyph: "← / →", action: "Action")
-                keyboardKeyBadge(glyph: "↵ Enter", action: "Port")
-                keyboardKeyBadge(glyph: "C", action: "Notes")
+                keyboardKeyBadge(glyph: "↵ Enter", action: "View Notes")
                 keyboardKeyBadge(glyph: "⎋ Esc", action: "Filters")
             }
             keyboardKeyBadge(glyph: "R", action: "Refresh")

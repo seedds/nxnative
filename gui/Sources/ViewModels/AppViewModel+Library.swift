@@ -52,7 +52,16 @@ extension AppViewModel {
         config.applyToDisk(for: game)
         InputProfileManager.shared.exportActiveMappingToDisk(libraryFolder: libraryFolder)
         
-        LibraryScanner.shared.launchGame(at: game.url, env: config.toEnvironmentDict()) { [weak self] success, error in
+        // Ensure iCloud Cross-Save is configured with cover art if iCloud Drive is available
+        var savePath: String? = nil
+        if SaveSyncService.shared.isICloudDriveAvailable {
+            let cover = GameCoverService.shared.coverImage(for: game)
+            if case .success(let cloudSaveDir) = SaveSyncService.shared.ensureCloudSaveConfigured(for: game, cover: cover) {
+                savePath = cloudSaveDir.path
+            }
+        }
+        
+        LibraryScanner.shared.launchGame(at: game.url, env: config.toEnvironmentDict(savePath: savePath)) { [weak self] success, error in
             DispatchQueue.main.async {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
                     self?.launchingGameId = nil

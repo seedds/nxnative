@@ -209,6 +209,20 @@ public struct BuildBanners: View {
             
             Spacer()
             
+            if path.hasSuffix(".ipa") {
+                Button(action: {
+                    SoundEffectService.shared.play(.click)
+                    let url = URL(fileURLWithPath: path)
+                    DeviceDeploymentService.shared.shareViaAirDrop(fileURL: url)
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "airdrop")
+                        Text("AirDrop")
+                    }
+                }
+                .buttonStyle(NXSecondaryButtonStyle())
+            }
+            
             Button("View in Library") {
                 viewModel.selectedTab = 1
             }
@@ -249,7 +263,7 @@ public struct BuildBanners: View {
             Spacer()
             
             Button("View Logs") {
-                viewModel.selectedTab = 3
+                viewModel.selectedTab = 6
             }
             .buttonStyle(NXSecondaryButtonStyle())
         }

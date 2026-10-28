@@ -21,15 +21,19 @@ public struct GameRuntimeConfig: Codable, Equatable {
         self.enableMetalFXUpscale = enableMetalFXUpscale
     }
     
-    public func toEnvironmentDict() -> [String: String] {
+    public func toEnvironmentDict(savePath: String? = nil) -> [String: String] {
         let posixLocale = Locale(identifier: "en_US_POSIX")
-        return [
+        var dict: [String: String] = [
             "DM_FPS_TARGET": enable60FPS ? "60" : "30",
             "DM_METAL_HUD": enableMetalHUD ? "1" : "0",
             "DM_OPMODE": isDockedMode ? "1" : "0",
             "DM_RENDER_SCALE": String(format: "%.2f", locale: posixLocale, renderScale),
             "DM_PRESENT_UPSCALE": enableMetalFXUpscale ? "metalfx" : "off"
         ]
+        if let sp = savePath, !sp.isEmpty {
+            dict["DM_SAVE"] = sp
+        }
+        return dict
     }
     
     public func envFileContent() -> String {

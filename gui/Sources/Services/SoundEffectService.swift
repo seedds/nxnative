@@ -14,6 +14,8 @@ public final class SoundEffectService: ObservableObject {
     
     private let soundKey = "NXNative_SoundEnabled"
     private var cachedSounds: [SoundEffectType: NSSound] = [:]
+    private var lastPlayTimes: [SoundEffectType: Date] = [:]
+    private var lastGlobalPlayTime: Date = Date.distantPast
     
     @Published public var isSoundEnabled: Bool {
         didSet {
@@ -44,6 +46,22 @@ public final class SoundEffectService: ObservableObject {
     
     public func play(_ effect: SoundEffectType) {
         guard isSoundEnabled else { return }
+        
+        let now = Date()
+        // Prevent duplicate trigger bursts of the exact same sound
+        if let last = lastPlayTimes[effect], now.timeIntervalSince(last) < 0.12 {
+            return
+        }
+        
+        // Prevent rapid overlapping distinct sounds on a single mouse click (e.g. click + focus)
+        if effect != .launch && effect != .error {
+            if now.timeIntervalSince(lastGlobalPlayTime) < 0.08 {
+                return
+            }
+        }
+        
+        lastPlayTimes[effect] = now
+        lastGlobalPlayTime = now
         
         if let sound = cachedSounds[effect] {
             if sound.isPlaying {

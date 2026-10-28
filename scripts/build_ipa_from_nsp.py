@@ -1595,8 +1595,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
 class ShaderWatch:
     """Progress of dmsh_build.py, read from the files it writes (it prints nothing until it ends). It works in three phases:
     the cache check (a hit restores <key>_b.json into the library directory b-<chain>/: the iOS one, or the Mac's for a Mac-only build; a miss writes <key>.bin into its temporary folder dmsh_* under WORK),
-    the translation of the misses (<key>.spv in the temporary folder), and the compile, which takes the keys in a fixed order (sorted, the vertex shaders with pixel pairs last)
-    and writes <key>_b.json again for every miss and every pixel shader: the furthest key written so far tells how far it got"""
+    the translation of the misses (<key>.spv in the temporary folder), and the compile, which takes each translated chunk as it comes (in key order, the vertex shaders with pixel pairs
+    last), so it runs beside the translation, and writes <key>_b.json again for every miss and every pixel shader: the furthest key written so far tells how far it got"""
     def __init__(self, g, out, tmp, pso_pairs=None):   # out: the library directory b-<chain>/ (the iOS one, or the Mac's for a Mac-only build)
         keys = set()
         for ln in g.table('shader_map.tsv').read_text(errors='replace').splitlines():   # the keys dmsh_build.py builds: column 4 of the rows from a shader package
@@ -1630,10 +1630,10 @@ class ShaderWatch:
             if len(self.hits) + ext['.bin'] < self.n and not ext['.spv'] and not ext['.metal']:
                 return {'step': 'cache check', 'done': len(self.hits) + ext['.bin'], 'total': self.n, 'unit': 'shaders', 'note': f'{len(self.hits):,} cached'}
             self.t1 = time.time()   # the cache check is over: from now on a <key>_b.json is written by the compile
-        if ext['.bin'] and not ext['.metal'] and ext['.spv'] < ext['.bin']:
-            return {'step': 'translating', 'done': ext['.spv'], 'total': ext['.bin'], 'unit': 'shaders'}
         new = self.written(self.pos.keys() - self.fin, self.t1)
         self.fin |= new; self.top = max([self.top] + [self.pos[k] for k in new])
+        if ext['.bin'] and ext['.spv'] < ext['.bin']:
+            return {'step': 'translating', 'done': ext['.spv'], 'total': ext['.bin'], 'unit': 'shaders', 'note': f'{len(self.fin):,} compiled' if self.fin else ''}
         return {'step': 'compiling' if ext['.bin'] else 'finishing', 'done': max(len(self.fin), self.top + 1), 'total': self.n, 'unit': 'shaders',
                 'note': f'{ext[".bin"]:,} not cached' if ext['.bin'] else ''}
 

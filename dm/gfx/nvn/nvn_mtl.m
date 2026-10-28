@@ -6109,6 +6109,15 @@ static void prepare_prebuild(void) {
     if (left > 0) MLOG("pipeline prepare: every shader pair handed out after %.1f s; %d compiles still under way finish in the background", (bp_now() - t0) / 1e9, left);
     if (shown) front_progress(NULL, n, n);
 }
+// How many tasks the background prewarm (no prepare step: no window, or DM_PSO_PREPARE=0) builds at once (DM_PSO_WARM_JOBS=n overrides, 1 = one at a time). Metal compiles in its
+// compiler service, which takes several requests at once, so a serial prewarm left it mostly idle; half the cores, at least 2 and at most 4, leaves the game's own threads and the
+// pipelines it demands while playing room (a phone has 6 cores). The prepare step uses every core instead (prepare_workers): the game draws nothing meanwhile
+static long warm_jobs(void) {
+    const char *e = getenv("DM_PSO_WARM_JOBS");
+    if (e && atoi(e) > 0) return atoi(e);
+    long n = (long)NSProcessInfo.processInfo.activeProcessorCount / 2;
+    return n < 2 ? 2 : n > 4 ? 4 : n;
+}
 static void warm_start(void) {
     if (g_warm_started++) return;
     const char *e = getenv("DM_PSO_MANIFEST");
@@ -6140,7 +6149,17 @@ static void warm_start(void) {
     }
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);   // Not optional background work: it decides whether the pipelines are ready before the player enters a run
     dispatch_queue_t q = dispatch_queue_create("dm.nvn.pso-warm", attr);
-    dispatch_async(q, ^{ @autoreleasepool { long lines = 0; for (WarmTask *t in warm_parse(paths, &lines)) warm_task(t); warm_finish(); } });
+    dispatch_async(q, ^{ @autoreleasepool {
+        long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(paths, &lines); long n = (long)tasks.count, jobs = warm_jobs();
+        __block _Atomic long next = 0;
+        dispatch_group_t g = dispatch_group_create();
+        for (long w = 0; w < jobs; w++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            for (;;) { long i = atomic_fetch_add(&next, 1); if (i >= n) break; warm_task(tasks[(NSUInteger)i]); }
+        });
+        dispatch_group_wait(g, DISPATCH_TIME_FOREVER);
+        MLOG("pipeline prewarm in the background: %ld lines on %ld workers", lines, jobs);
+        warm_finish();
+    } });
 }
 static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
     struct { ds_st ds; uint32_t vm[2], wm[2]; int hd, hs; } k;

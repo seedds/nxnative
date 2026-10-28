@@ -1,0 +1,6 @@
+// The application manifest of every Windows executable (dm/host/CMakeLists.txt adds this file to each one), as resource 1 of type RT_MANIFEST (24), the one the loader reads for
+// an executable. win32_utf8.manifest makes the process ANSI code page UTF-8 (activeCodePage, Windows 10 1903 and later), so the C runtime's narrow file calls (open, fopen, stat,
+// opendir / readdir, unlink, rmdir, rename, access) and getenv name the same file as the platform layer's own UTF-8 to UTF-16 conversion (plat_win32.c wide). Windows 10 1803 and
+// 1809 ignore the element; plat_win32.c's plat_win32_init then switches the C runtime to UTF-8 instead. The manifest carries no comments: the loader rejects a malformed one and
+// the program does not start, so it stays the minimal documented form
+1 24 "win32_utf8.manifest"

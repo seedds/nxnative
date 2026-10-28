@@ -44,6 +44,12 @@ if(WIN32)
     set(PLAT_SRC plat/plat_win32.c plat/sha256.c)
     set(PLAT_LIBS pthread bcrypt)   # pthread: mingw-w64's winpthreads
     add_link_options(-static)   # winpthreads and the C++-free runtime linked in: the test .exe files run on a stock Windows
+    # The application manifest, in every executable (host_test below; a host executable target takes it the same way): the process ANSI code page is UTF-8, so the C runtime's narrow
+    # file calls and getenv agree with the platform layer's UTF-8 paths and a non-ASCII guest name (a Japanese save file) is one name on disk (plat/win32_utf8.manifest, plat_win32.c).
+    # A resource in a static library is never linked in (nothing references it), so it is a source of each executable
+    enable_language(RC)
+    set(WIN32_MANIFEST_RC ${CMAKE_CURRENT_SOURCE_DIR}/plat/win32_utf8.rc)
+    set_source_files_properties(${WIN32_MANIFEST_RC} PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/plat/win32_utf8.manifest)
 else()
     set(PLAT_DEFS _GNU_SOURCE)
     set(PLAT_SRC plat/plat_linux.c plat/sha256.c)
@@ -106,7 +112,7 @@ function(host_test name)
         return()
     endif()
     list(TRANSFORM T_SOURCES PREPEND ${TESTS}/)
-    add_executable(${name} ${T_SOURCES})
+    add_executable(${name} ${T_SOURCES} ${WIN32_MANIFEST_RC})   # WIN32_MANIFEST_RC: the UTF-8 code page manifest, Windows only (empty elsewhere)
     target_compile_options(${name} PRIVATE ${HOST_FLAGS})
     target_compile_definitions(${name} PRIVATE ${T_DEFS})
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${T_INCLUDES})

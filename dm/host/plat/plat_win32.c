@@ -1,11 +1,13 @@
 // Host platform layer, Windows 10 1803+ (x86-64), built with mingw-w64 (llvm-mingw). Nothing here needs Windows 11.
-// Paths are UTF-8 in the host and UTF-16 for the system calls made here; the C runtime's own file calls (open, fopen, opendir) take the process code page
+// Paths are UTF-8 in the host and UTF-16 for the system calls made here. The C runtime's own file calls (open, fopen, stat, opendir, unlink, rename, ...) take the process ANSI code page,
+// which every executable's manifest makes UTF-8 (win32_utf8.manifest; plat_win32_init below on systems before 1903), so both name the same file
 #include "plat.h"
 #include <windows.h>
 #include <bcrypt.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <io.h>
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,8 +16,15 @@
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002   // Windows 10 1803
 #endif
 
-// Files opened by the C runtime are binary, as on POSIX: the host reads and writes game data, save files and tables through open / fopen
-__attribute__((constructor)) static void plat_win32_init(void) { _set_fmode(_O_BINARY); }
+// Files opened by the C runtime are binary, as on POSIX: the host reads and writes game data, save files and tables through open / fopen.
+// Narrow paths are UTF-8 in the C runtime as in wide() below: the manifest's UTF-8 code page does that from Windows 10 1903. Windows 10 1803 and 1809 ignore it (the ANSI code page stays, e.g. 1252,
+// where the guest name U+00C4 is stored through open as the two characters U+00C3 U+201E, and through mkdir / plat_xattr_* as U+00C4), so there the C runtime's own code page is switched to UTF-8
+// (the UCRT's UTF-8 locale, 1803 and later; LC_CTYPE only: number formatting stays "C"). Open there: the narrow environment block is converted from the ANSI code page before this runs, so getenv
+// still returns a non-ASCII value (a user folder in APPDATA, TMPDIR) in that code page on those two versions
+__attribute__((constructor)) static void plat_win32_init(void) {
+    _set_fmode(_O_BINARY);
+    if (GetACP() != CP_UTF8) setlocale(LC_CTYPE, ".UTF8");
+}
 
 static int win_errno(DWORD e) {
     switch (e) {

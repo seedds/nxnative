@@ -108,13 +108,12 @@ body:
       placeholder: "The game should launch in full screen with controls mapped..."
     validations:
       required: false
-
   - type: textarea
     id: logs
     attributes:
       label: "Execution Logs (Console / Crash Log)"
       description: |
-        Attach or paste relevant error logs:
+        Run `python3 scripts/bug_report.py <title ID>` to collect logs, versions and settings into one file to attach, or attach logs manually:
         - **Ported game logs on Mac:** `~/Library/Logs/nxnative/<TitleID>.log`
         - **Previous session log:** `~/Library/Logs/nxnative/<TitleID>.prev.log`
         - **Launcher logs:** Terminal console output if executed via `.command`.

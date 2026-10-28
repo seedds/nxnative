@@ -10,7 +10,7 @@
 #define P(name) ((NVNT_##name)nvn_lookup(#name))
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
-module_t g_mod[MAX_MOD]; int g_nmod;
+module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, fails;
@@ -46,6 +46,22 @@ int main(void) { @autoreleasepool {
         NVNqueueBuilder qb = {0}; P(nvnQueueBuilderSetDefaults)(&qb); P(nvnQueueBuilderSetDevice)(&qb,&device);
         CHECK(P(nvnQueueInitialize)(&queues[origin],&qb),"queue initialized");
     }
+    uint64_t first_serial = ((queue_t *)&queues[0])->serial;
+    mtl_queue_activate(first_serial); S.tex_base = 123; R.has_sc = 1; R.sc.x = 77;
+    mtl_queue_activate(((queue_t *)&queues[1])->serial);
+    CHECK(S.tex_base == 0 && !R.has_sc && !S.bst[0],"a new queue starts with independent default state");
+    S.tex_base = 456;
+    mtl_queue_activate(first_serial);
+    CHECK(S.tex_base == 123 && R.has_sc && R.sc.x == 77,"switching back restores the first queue state");
+    mtl_queue_activate(((queue_t *)&queues[1])->serial);
+    CHECK(S.tex_base == 456 && !R.has_sc,"the second queue keeps its own bindings");
+    mtl_queue_activate(first_serial); S.bst[0] = S.prog = (const prog_t *)(uintptr_t)0xdead0000;
+    P(nvnQueueFinalize)(&queues[0]);
+    P(nvnDeviceSetWindowOriginMode)(&device,(NVNwindowOriginMode)0);
+    NVNqueueBuilder fresh = {0}; P(nvnQueueBuilderSetDefaults)(&fresh); P(nvnQueueBuilderSetDevice)(&fresh,&device);
+    CHECK(P(nvnQueueInitialize)(&queues[0],&fresh),"queue storage can be initialized again");
+    mtl_queue_activate(((queue_t *)&queues[0])->serial);
+    CHECK(((queue_t *)&queues[0])->serial != first_serial && !S.bst[0] && !S.prog && !R.has_sc,"reinitializing a queue never inherits finalized program pointers");
     // Native GPU state: matching queue/device origins keep NVN's NDC facing;
     // differing origins reverse it. CW and CCW expectations are explicit here.
     const int front_in_clip[2][2][2] = {{{0,1},{1,0}},{{1,0},{0,1}}};

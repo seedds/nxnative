@@ -1,0 +1,66 @@
+# Fuzzing of the Python file parsers (dm/tools/fuzz): each harness mutates synthetic seeds it builds in code, never game files, for a fixed time with atheris (libFuzzer).
+# A finding is an exception other than the parser's declared rejection, a hang or an oversized allocation (dm/tools/fuzz/fuzzlib.py); the findings already recorded in
+# dm/tools/fuzz/known.tsv are skipped, so the job fails only on a new one, and uploads its input. Nightly and by hand only: it never slows a pull request down. The inputs
+# found are replayed on every pull request by dm/tools/tests/test_fuzz_corpus.py (tests.yml) once they are in dm/tools/fuzz/corpus.
+name: fuzz
+
+on:
+  schedule:
+    - cron: '17 3 * * *'   # nightly, 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per harness
+        default: '60'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+# Actions are pinned to commit SHAs (the tag in the comment), as in tests.yml.
+jobs:
+  fuzz:
+    name: Fuzz the file parsers
+    runs-on: ubuntu-24.04   # atheris ships Linux wheels; the parsers are pure Python
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: .github/requirements/fuzz.txt
+      - name: Install the pinned packages
+        run: python -m pip install -r .github/requirements/fuzz.txt
+      - name: Run each harness
+        env:
+          SECONDS_EACH: ${{ github.event.inputs.seconds || '60' }}
+        run: |
+          mkdir -p findings logs
+          failed=0
+          for f in dm/tools/fuzz/fuzz_*.py; do
+            h=$(basename "$f" .py); h=${h#fuzz_}
+            echo "::group::$h"
+            python "$f" --time "$SECONDS_EACH" --engine atheris --findings "findings/$h" 2>&1 | tee "logs/$h.log" && rc=0 || rc=1   # pipefail: the harness's status
+            echo "::endgroup::"
+            grep -E '^Done [0-9]+ runs' "logs/$h.log" | sed "s/^/$h: /" >> "$GITHUB_STEP_SUMMARY" || true
+            if [ "$rc" != 0 ]; then echo "::error::$h: $(grep -m1 '==finding==' "logs/$h.log" || echo 'the harness failed')"; failed=1; fi
+          done
+          exit $failed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: fuzz-findings
+          path: |
+            findings
+            logs
+          retention-days: 30

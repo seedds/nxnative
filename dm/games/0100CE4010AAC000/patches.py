@@ -22,3 +22,6 @@ CUTS = {
     (0x1e681d8, '080140b9', '08fddf88', 'stream reader: ldr w8,[x8] → ldar ("writer sleeping" after the store-release of the read position)'),
   ],
 }
+
+# Whether a general rule could replace these patches (dm/tools/docs_patches.py lists it in docs/agents/game-patches.md)
+GENERALIZE = "Likely: the race is in Unity 2018.4's ThreadedStreamBuffer, engine code other Unity games of that era ship (Cuphead, AI: THE SOMNIUM FILES, Raging Loop). A function-matched rule per Unity version could give every game with the same code the load-acquires; other builds are not checked yet"

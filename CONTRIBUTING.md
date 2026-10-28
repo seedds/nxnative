@@ -4,7 +4,9 @@ Issues and pull requests are welcome. This page says how a change gets in; what 
 
 ## Reporting a problem
 
-Open an issue with the bug report form. It asks for what a problem is traced with: the nxnative commit, the shader chain version, the game's title ID and version, the device and OS, how the game was built and run, environment overrides, and the whole log of the run. [README.md](README.md#play) says where the iPhone app's log is; a Mac app writes `~/Library/Logs/nxnative/<title ID>.log`.
+Open an issue with the bug report form. It asks for what a problem is traced with: the nxnative commit, the shader chain version, the game's title ID and version, the device and OS, how the game was built and run, environment overrides, and the whole log of the run. [Playing](docs/playing.md) says where the iPhone app's log is; a Mac app writes `~/Library/Logs/nxnative/<title ID>.log`.
+
+`python3 scripts/bug_report.py <title ID | path to the .app | NSP folder>` collects most of this into one zip to attach: `report.md` with the game, commit, chain version, device, settings and the list of files, plus the Mac app's logs, the NSP script's logs under `<title ID>_build/logs` and recent crash reports. Add `--ios-log log.txt` for an iPhone log. It reads only text logs and settings, never game files or keys; it writes your home folder as `~` and drops lines that look like key material. Look at the zip before you attach it.
 
 ## Never game files or keys
 

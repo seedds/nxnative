@@ -4,6 +4,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 
 ## Thread creation and cores
 
+### Publishing a new thread's scheduler fields
+
+- **Symptom:** TSan reports `thread_main` writing `host_work` while `thr_runnable` reads it during a same-core yield (`t_notify_sched`, issue #411).
+- **Cause:** `CreateThread` had already linked the object into `g_all`, but its pthread initialized `host_work`, the Mach port and QoS without the scheduler lock `G`. `StartThread` could make the object runnable before those writes completed.
+- **Fix:** initialize those shared fields and read the starting priority under `G`. `CreateThread` publishes the pthread handle and registry link together after `pthread_create` returns, rather than letting that call write a published field. The initial main thread obtains its QoS before publication; the priority getter/setter and deferred QoS updates also hold `G`. Readers keep the same lock, with no added startup wait, timeout or game rule.
+- **Check:** the real start/exit and native-wait paths in `t_notify_sched`, both preemption modes, run under TSan with the `thr_runnable` suppression removed. The unsuppressed original reported the startup race. Changing priority before start and consuming the deferred update at a real gate also exposed the unlocked priority setter; the extended test covers that path with `DM_QOS_MAP=1`.
+- **Found on:** host unit tests; no particular game's hang was attributed to this race.
+
 ### Starting a higher-priority thread on the caller's core
 
 - **Symptom:** a parent returns from `StartThread` before a newly runnable higher-priority child pinned to its core finishes its work (deterministic regression, not attributed to a game failure).

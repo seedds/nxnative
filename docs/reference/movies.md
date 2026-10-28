@@ -157,6 +157,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Fix** (`hle_movie.c`): a flush now keeps each slot's last picture, and in native-texture mode an output with no picture leaves the texture as it was, as the SDK's GPU consumer has nothing to draw.
 - **Found on:** [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (the same looped activity previews, Flush and Start).
 
+### `GetOutputBuffer` returns the output index in native-texture mode
+
+- **Symptom:** a native-texture movie freezes on its 16th picture while the game keeps running; `DM_MOVIE_TRACE=1` shows 16 `AcquireOutputBufferIndex` / `GetOutputBuffer` pairs and no `ReleaseOutputBufferIndex`.
+- **Cause:** in native-texture mode (output 3, mode 2) the SDK's `DecoderImpl::GetOutputBuffer` calls `CopyOutputBufferToClientTextureAndRelease`, which renders the picture into the client's texture with MediaCodec's `renderOutputBufferAndRelease`: the index goes back to the decoder there, and a client need not release it. The host kept the slot until a release, so a client that never releases held all 16 video slots and the decoder stopped. A client that releases anyway gets success from the SDK, whose texture-mode `ReleaseOutputBufferIndex` turns MediaCodec's "not owned" (-13) into 0 (SDK 17.5.9 `subsdk0+0x123a0c`).
+- **Fix** (`hle_movie.c`): the host tracks which output slots the client holds (taken by `AcquireOutputBufferIndex`, returned by a release or a flush). A texture-mode `GetOutputBuffer` returns its slot after writing the texture, and a release of a slot the client does not hold changes nothing and returns 0. Before, such a second release freed a slot the decoder might have filled again.
+- **Found on:** [Super Mario Party Jamboree](../../dm/games/0100965017338000/README.md) (SDK 17.5.9: the opening movie and the mode previews). Metroid Dread (SDK 11.4.3) has the same copy-and-release and still releases each index itself, the case the second rule covers.
+
 ## Demuxers and codecs
 
 ### `movie::Extractor` runs natively
@@ -176,7 +183,7 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Symptom:** VP8 WebM movies play black; `movie::Decoder` is created with decoder type 2.
 - **Cause:** the host offered output slots for VP8 without decoding the packets, and its vendored libvpx included only the VP9 decoder.
 - **Fix:** the same libvpx revision now includes its VP8 decoder. Type 2 selects `vpx_codec_vp8_dx`, type 3 selects VP9; both use the existing worker, NV12 conversion and native RGBA output. VP8 keyframe dimensions come from its ten-byte uncompressed header. Only decoded pictures and end-of-stream packets make an output ready.
-- **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md): logos and opening WebM movies. Decoding 3,182 packets over 106 seconds averaged about 1 ms per packet; making the picture visible also needed [zero initialization of depth textures](rendering.md#new-textures-start-as-zero).
+- **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md): logos and opening WebM movies. Decoding 3,182 packets over 106 seconds averaged about 1 ms per packet; making the picture visible also needed [zero initialization of depth textures](rendering.md#new-textures-start-as-zero). [Silver Pines](../../dm/games/0100D5B026844000/README.md): the Team17 logo and the title screen's animated background, 1920x1080.
 - **Check:** `t_movie_vpx` decodes synthetic VP8 and VP9 keyframes through the real decoder, checking NV12 and RGBA pixels and a truncated VP8 header.
 
 ### H.264 into an RGBA texture and AAC through AudioToolbox

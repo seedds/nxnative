@@ -349,7 +349,7 @@ static void t_motion_hid(void) {
     CHECK(st.acc[0] == .5f, "HID: stale raw stream yields to live GC motion");
     dm_motion_set_hid(1, flat, turn, motion_now); h_hid_SixStates(&st, 1, &h);
     CHECK(st.acc[0] == .5f, "HID: another player's raw data stays on its own sensor");
-    dm_motion_set_hid(0, flat, turn, motion_now); dm_motion_set_switch(0, (float[]){0, -1, 0}, (float[]){0}); g_phone_mode = 1;
+    dm_motion_set_hid(0, flat, turn, motion_now); dm_motion_set_switch(0, (float[]){0, -1, 0}, (float[]){0, 0, 0}); g_phone_mode = 1;
     h_hid_SixStates(&st, 1, &h); CHECK(st.acc[1] == -1, "HID: forced phone selection still wins");
     dm_motion_clear_hid(0); dm_motion_clear_hid(1); dm_motion_clear(0); g_phone_motion.last_ns = 0;
     dm_pad_players(1); g_phone_mode = -1;

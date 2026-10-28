@@ -45,8 +45,8 @@ To enroll a cut for any game's own module:
 
 - **Symptom:** `jump table <addr>` assertion where the index is a copy made before the check (`mov w0,w18`, then 41 instructions holding two other jump tables on `x0`, then `cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18`).
 - **Cause:** every other form follows copies made after the bounds check.
-- **Fix:** `check_before_copy` accepts the `cmp` and `b.hi` right before the load when a `mov wI, wS` up to 64 instructions back is the last writer of both registers; capstone lists a `cmp`'s first operand as written, which the search skips. It runs only when every other form has failed, so modules that rewrote before come out the same.
-- **Found on:** [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md) `main+0x2dd8cd0`.
+- **Fix:** `check_before_copy` accepts the `cmp` and `b.hi` right before the load when a `mov wI, wS` is the last writer of both registers; capstone lists a `cmp`'s first operand as written, which the search skips. The search follows the function boundary rather than an arbitrary instruction count, stopping at undecodable gaps and calls that can clobber either register. It runs only when every other form has failed.
+- **Found on:** [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md) `main+0x2dd8cd0`; [Mario + Rabbids Kingdom Battle](../../dm/games/010067300059A000/README.md) `subsdk0+0x7340b8`, whose copy is 71 instructions before the load, across two switches preserving both registers (beyond the former 64-instruction limit).
 - **Note:** before fixing one site, a census of all of them saves a run per site: a copy of `patch_nso.py` whose assert prints and continues found this one alone among the 25,508 `x18` sites. That `main` has no unwind entries for its first 70 MB, so the rewriter disassembles them as one function and takes 6 minutes (see [Long functions analysed in pieces](#long-functions-analysed-in-pieces)).
 
 ### 64-bit bounds check of the index
@@ -88,6 +88,14 @@ To enroll a cut for any game's own module:
 - **Fix:** the last attempt now follows register copies back to the `adrp` + `add` (`copied_base`, through no call while the register followed is caller-saved; the same target check). It runs only where the rewriter asserted before.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) 13.0.5 (SDK 8.2.1) `main+0x2b74458`: that `main`'s only unhandled site.
 - **Check:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md)'s three modules and Smash's `sdk` and movie module come out byte-identical.
+
+### Offset table base initialized after the dispatch
+
+- **Symptom:** `jump table ae95f8` assertion in `patch_nso.py` while rewriting Blasphemous 1.0.8.
+- **Cause:** the function enters an initialization block later in address order, then branches backward to `cmp w18,#9; b.hi; ldrsw x18,[x17,x18,lsl #2]; add x18,x18,x17; br x18`. The `adrp x17` / `add x17,x17,#lo` pair is after the dispatch, so the backward writer searches find no base.
+- **Fix:** a final `jump_offsets` fallback uses `forward_table_base` only when that adjacent full-width pair is the base register's sole initialization in the function. It rejects other writes, calls that can clobber the base, known branches or table targets entering the add without its adrp, out-of-image tables and targets that are not decoded instructions of the function. Earlier recognizers are unchanged.
+- **Found on:** [Blasphemous](../../dm/games/0100698009C6E000/README.md), `main+0xae95f8`, ten table-relative targets.
+- **Check:** `dm/tools/tests/test_jump_copies.py` covers the exact table extent, base clobbers, incoming edges, undecodable targets and out-of-image tables. The extracted function resolves to the ten targets read directly from its table.
 
 ### Offset tables relative to an adr
 
@@ -241,6 +249,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) `main` (.NET NativeAOT).
 - **Check:** no module of the 19 other games on hand has a data block, and their rewrites are byte-identical.
 
+### NRO metadata inside the text segment
+
+- **Symptom:** `RuntimeError: 44 ldr x18, #0xfffffffffff40370` while rewriting an NRO.
+- **Cause:** an NRO's text segment includes its metadata header. The arbitrary build ID at `+0x40` can decode as instructions; `magic_0898_2015.nro` contains a literal load into `x18` at `+0x44`. The ordinary 4 KB data-gap heuristic cannot exclude this 120-byte header.
+- **Fix:** `nso_code.data_blocks` explicitly excludes `+8..+0x80` when the image has the `NRO0` header. The initial entry branch and MOD0 pointer remain intact, and scanning resumes at the first possible function. NSO scanning is unchanged.
+- **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md), 1,432 registered NROs.
+- **Check:** `test_nro_header.py` runs the real rewriter on synthetic NROs whose build IDs decode as an `x18` load or `br x18`, checks the header byte-for-byte, and checks that an actual `x18` instruction immediately after it is rewritten. Code before the first unwind entry is covered too: per-function analysis must not reenter the header even when the linear scans exclude it.
+
 ## Stack and system registers
 
 ### Stack pointer writes through x18
@@ -273,6 +289,13 @@ To enroll a cut for any game's own module:
 - **Cause:** SDK 20 modules pack their relative relocations as `DT_RELR` (tag 36, size tag 35): `main` has 223,994 of them and its `DT_RELA` only symbol relocations. Each 8-byte entry is either an even offset (relocate it, move to the next slot) or an odd bitmap whose bits 1–63 stand for the following 63 slots; the addend is the slot's own value.
 - **Fix:** `relr_apply` in `loader.c`; `DM_LOADHASH` and `nvn_slots_got.py` read it too. The loader's log line counts them as `relr=`.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0 (SDK 20).
+
+### Regression rewrites register copied profiles twice
+
+- **Symptom:** `regress.py check` stops before gameplay with `CUTS of build ... in both ...`, naming a revision profile and its copied harness profile.
+- **Cause:** shader builds use a writable profile copy for generated tables. Passing that copy to the rewriter exposes its `patches.py` alongside the revision's original, registering every cut twice.
+- **Fix:** registered games rewrite with the revision's original profile; provisional games retain their external profile path. Shader builds continue using their writable copies. The harness regression covers both selections.
+- **Found on:** [NieR:Automata geometry review](../../dm/games/010056B015FE8000/README.md#geometry-optimization-review), when comparing rewrites after reconciling PRs #336 and #416.
 
 ## Checking a rewriter change
 

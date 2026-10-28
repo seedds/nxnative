@@ -128,6 +128,7 @@ static const CGFloat
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
+CGRect front_ios_picture(CGRect b, UIEdgeInsets s, CGRect *pad);   // front_ios.m: the picture, and the controls' area in the portrait layout (CGRectNull: over the picture)
 
 @interface DmGamepad : UIView
 @end
@@ -150,9 +151,16 @@ static void pads_start(void);   // Physical controllers, below
     CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
     BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
+    CGRect _pic, _area;                            // the picture; the controls' area (the whole view, or the bottom half in the portrait layout)
+    BOOL _split, _colored, _coloredSplit;          // the portrait layout is current; the colours were set, and for which layout
 }
 
 static UIColor *k_idle, *k_on, *k_line, *k_ringFill, *k_text, *k_textOn;
+static void palette(BOOL split) {   // each colour carries its own low opacity instead of lowering the whole view's alpha (that would add an off-screen pass for the full-screen layer);
+    // below the picture (the portrait layout) the controls are on black, not over the game, so they are drawn a little stronger
+    k_idle = [UIColor colorWithWhite:1 alpha:split ? 0.22 : 0.14]; k_on = [UIColor colorWithWhite:1 alpha:split ? 0.55 : 0.45]; k_line = [UIColor colorWithWhite:1 alpha:split ? 0.6 : 0.38];
+    k_ringFill = [UIColor colorWithWhite:1 alpha:split ? 0.1 : 0.06]; k_text = [UIColor colorWithWhite:1 alpha:split ? 0.85 : 0.6]; k_textOn = [UIColor colorWithWhite:0 alpha:0.7];
+}
 static CAShapeLayer *shape(CALayer *parent) {
     CAShapeLayer *l = [CAShapeLayer layer];
     l.fillColor = k_idle.CGColor; l.strokeColor = k_line.CGColor; l.lineWidth = 1.5;
@@ -175,12 +183,8 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             [_touchFeedback prepare];
         }
         _owner = [NSMapTable strongToStrongObjectsMapTable]; _faceOf = [NSMapTable strongToStrongObjectsMapTable];
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{
-            // each colour carries its own low opacity instead of lowering the whole view's alpha (that would add an off-screen pass for the full-screen layer)
-            k_idle = [UIColor colorWithWhite:1 alpha:0.14]; k_on = [UIColor colorWithWhite:1 alpha:0.45]; k_line = [UIColor colorWithWhite:1 alpha:0.38];
-            k_ringFill = [UIColor colorWithWhite:1 alpha:0.06]; k_text = [UIColor colorWithWhite:1 alpha:0.6]; k_textOn = [UIColor colorWithWhite:0 alpha:0.7];
-        });
+        palette(NO);
+        [self place];
         _controls = [CALayer layer]; [self.layer addSublayer:_controls];
         _ring = shape(_controls); _ring.fillColor = k_ringFill.CGColor;
         _knob = shape(_controls);
@@ -222,10 +226,24 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
     [self applyLayout]; [self setNeedsLayout];
 }
 
-// ---- Layout (points; computed inside the safe area) ----
-- (CGRect)safe { return UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets); }
-- (CGRect)corner { UIEdgeInsets i = self.safeAreaInsets; i.left *= K_CORNER_IN; i.right *= K_CORNER_IN; return UIEdgeInsetsInsetRect(self.bounds, i); }   // the rectangle the bottom-corner controls use
-- (CGFloat)u { return MIN(self.bounds.size.height / 430.0, 1.3); }   // 1 = 430 points tall (iPhone Pro Max landscape)
+// ---- Layout (points; computed inside the safe area of the controls' area) ----
+- (void)place {   // the picture and the controls' area: the whole view, or in the portrait layout the bottom half (front_ios.m front_ios_picture), with the controls laid out in it as on a landscape screen
+    CGRect pad; _pic = front_ios_picture(self.bounds, self.safeAreaInsets, &pad);
+    _split = !CGRectIsNull(pad); _area = _split ? pad : self.bounds;
+    if (_split) {   // the controls come in from the sides and the bottom by DM_PORTRAIT_INSET percent of the area (6 by default), to sit under the thumbs of a phone held upright
+        static CGFloat k = -1;
+        if (k < 0) { const char *e = getenv("DM_PORTRAIT_INSET"); k = e ? fmax(0, fmin(atof(e), 25)) / 100 : 0.06; }
+        CGFloat mx = floor(pad.size.width * k), my = floor(pad.size.height * k);
+        _area = CGRectMake(CGRectGetMinX(pad) + mx, CGRectGetMinY(pad), pad.size.width - 2 * mx, pad.size.height - my);
+    }
+}
+- (UIEdgeInsets)areaInsets { UIEdgeInsets i = self.safeAreaInsets; if (_split) i.top = 0; return i; }   // the controls' area starts below the picture: the top inset is not in it
+- (CGRect)safe { return UIEdgeInsetsInsetRect(_area, self.areaInsets); }
+- (CGRect)corner { UIEdgeInsets i = self.areaInsets; i.left *= K_CORNER_IN; i.right *= K_CORNER_IN; return UIEdgeInsetsInsetRect(_area, i); }   // the rectangle the bottom-corner controls use
+- (CGFloat)u {   // 1 = 430 points tall (iPhone Pro Max landscape); the portrait layout's area is narrower for its height, so its width (470 u is what the 3D layout needs across) limits it too
+    if (_split) { CGRect s = self.safe; return MIN(MIN(s.size.height / 430.0, s.size.width / 470.0), 1.3); }
+    return MIN(self.bounds.size.height / 430.0, 1.3);
+}
 static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPointMake(right ? CGRectGetMaxX(s) - dx : CGRectGetMinX(s) + dx, y); }
 - (CGPoint)faceCenter { CGRect s = self.corner; CGFloat u = self.u; return side(s, 1, K_FACE_X * u, CGRectGetMaxY(s) - K_PAD_Y * u); }
 - (CGFloat)faceGap { return K_FACE_GAP * self.u; }
@@ -235,7 +253,7 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGPoint)stickHome { CGRect s = self.corner; return side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u); }   // the left stick's ring centre
 - (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
 - (CGFloat)stickR:(int)i { return (i ? K_RSTICK_R : K_STICK_R) * self.u; }
-- (BOOL)inRightArea:(CGPoint)p { CGRect b = self.bounds; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE; }
+- (BOOL)inRightArea:(CGPoint)p { CGRect b = _area; return CGRectContainsPoint(b, p) && p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE; }
 - (CGPoint)dpadCenter { CGRect s = self.corner; CGFloat u = self.u; return side(s, 0, K_LOW_X * u, CGRectGetMaxY(s) - K_LOW_Y * u); }
 - (CGFloat)dpadR { return K_DPAD_R * self.u; }
 static BOOL isDrop(int b) { return b == B_ZL || b == B_L || b == B_ZR || b == B_R; }
@@ -317,10 +335,9 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 // Touches no control takes (all of them while a physical controller is connected) go to the game's touch screen, normalized on the 16:9 picture that front_ios.m
 // centres in the screen: Super Mario Galaxy's pointer in handheld mode (profile op_mode). The host reports them only in handheld mode, as on the Switch (hle_hid.c touch_read)
 - (void)pushGame {
-    CGRect b = self.bounds; CGFloat w = b.size.width, h = b.size.height;
+    CGFloat w = _pic.size.width, h = _pic.size.height;
     if (w <= 0 || h <= 0) return;
-    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
-    CGFloat x0 = (b.size.width - w) / 2, y0 = (b.size.height - h) / 2;
+    CGFloat x0 = CGRectGetMinX(_pic), y0 = CGRectGetMinY(_pic);
     dm_touch t[16]; int n = 0;
     for (int i = 0; i < 16; i++) if (_game[i]) {
         CGPoint p = [_game[i] locationInView:self];
@@ -332,14 +349,16 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     for (int i = 0; i < 16; i++) if (!_game[i]) { _game[i] = t; [_owner setObject:@(C_GAME | (uint64_t)i << 8) forKey:t]; return YES; }
     return NO;
 }
+- (BOOL)gameTouch:(UITouch *)t at:(CGPoint)p { return (!_split || CGRectContainsPoint(_pic, p)) && [self gameBegin:t]; }   // in the portrait layout only a touch on the picture reaches the game's touch screen
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
     BOOL game = NO;
     for (UITouch *t in ts) {
-        if (_padOff) { game |= [self gameBegin:t]; continue; }
-        CGPoint p = [t locationInView:self]; int hit = _tap ? -1 : [self btnAt:p];
+        CGPoint p = [t locationInView:self];
+        if (_padOff) { game |= [self gameTouch:t at:p]; continue; }
+        int hit = _tap ? -1 : [self btnAt:p];
         if (hit >= 0) { [_owner setObject:@(C_BTN | (uint64_t)hit << 8) forKey:t]; continue; }
         if ([self inSwap:p]) { [_owner setObject:@(C_SWAP) forKey:t]; continue; }
-        if (_tap) { game |= [self gameBegin:t]; continue; }
+        if (_tap) { game |= [self gameTouch:t at:p]; continue; }
         // diamond, D-pad, left stick: take the one with the smallest distance / grab radius, if it is <= 1
         CGFloat best = 1; int kind = C_NONE, idx = 0;
         CGFloat f = dist(p, self.faceCenter) / (self.faceGap + self.faceR * 1.6); if (f <= best) { best = f; kind = C_FACE; }
@@ -349,7 +368,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
         else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; }
-        else game |= [self gameBegin:t];
+        else game |= [self gameTouch:t at:p];
     }
     if (game) [self pushGame];
     [self recompute];
@@ -416,8 +435,15 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     UIWindowScene *ws = self.window.windowScene; if (ws) atomic_store(&g_iface_orient, (int)ws.effectiveGeometry.interfaceOrientation);
+    [self place];
     CGFloat u = self.u;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
+    if (!_colored || _coloredSplit != _split) {   // the colours for the layout (palette): outlines and the ring here, fills in refresh
+        palette(_split); _colored = YES; _coloredSplit = _split;
+        for (int b = 0; b < B_N; b++) _key[b].strokeColor = k_line.CGColor;
+        _ring.strokeColor = _knob.strokeColor = _swap.strokeColor = ((CAShapeLayer *)_knob.sublayers.firstObject).strokeColor = k_line.CGColor;
+        _ring.fillColor = k_ringFill.CGColor;
+    }
     _controls.frame = self.layer.bounds;
     for (int b = B_A; b <= B_Y; b++) { CGPoint c = [self facePos:b]; setPath(_key[b], circlePath(c, self.faceR)); placeLabel(_label[b], c, 20 * u); }
     for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];

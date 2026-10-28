@@ -203,9 +203,12 @@ void front_ios_boot(void) {   // Called by front_ios.m once the window and Metal
 }
 int front_ios_boot_ok(void) { return g_boot_ok; }
 
+UIInterfaceOrientationMask front_ios_orientations(void);   // front_ios.m: landscape, and portrait too once a game in the portrait layout has started
+
 @interface App : UIResponder <UIApplicationDelegate>
 @end
 @implementation App
+- (UIInterfaceOrientationMask)application:(UIApplication *)a supportedInterfaceOrientationsForWindow:(UIWindow *)w { return front_ios_orientations(); }   // instead of Info.plist's landscape-only list
 - (UISceneConfiguration *)application:(UIApplication *)a configurationForConnectingSceneSession:(UISceneSession *)s options:(UISceneConnectionOptions *)o {
     return [[UISceneConfiguration alloc] initWithName:[s.role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive] ? @"TV" : @"Default" sessionRole:s.role];   // a TV (front_ios.m DmTVSceneDelegate)
 }

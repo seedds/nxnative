@@ -27,6 +27,13 @@ static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
 
+// Portrait layout (DM_PORTRAIT=1, the launcher's Portrait layout): with the phone upright, the picture fills the width of the screen's top half and the controls take the bottom half,
+// as on a Nintendo 3DS (an iPhone Duo half folded has its fold across the middle). Off, or held in landscape, the picture is centred and the controls lie over it as before.
+// The app turns to portrait only once the game starts (main.m asks front_ios_orientations), so the settings screen stays in landscape
+static BOOL g_portrait;
+static BOOL g_on_tv;   // a TV shows the picture (tv_attach): no portrait split on the phone
+UIInterfaceOrientationMask front_ios_orientations(void) { return g_portrait ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskLandscape; }
+
 @interface DmGameView : UIView
 @end
 @implementation DmGameView
@@ -55,6 +62,22 @@ static CGRect fit_16_9(CGRect b) {   // the largest centered 16:9 rectangle in b
     CGFloat w = b.size.width, h = b.size.height;
     if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
     return CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
+}
+// The picture's frame in a view of bounds b with safe-area insets s (DmGamepad.m maps game touches on it too); *pad, when not NULL, gets the controls' area in the portrait layout,
+// CGRectNull when the controls lie over the picture
+CGRect front_ios_picture(CGRect b, UIEdgeInsets s, CGRect *pad) {
+    if (pad) *pad = CGRectNull;
+    CGFloat W = b.size.width, H = b.size.height;
+    if (g_portrait && !g_on_tv && H > W) {   // not while a TV shows the picture: then the phone holds the pad alone, over the whole screen
+        CGFloat w = W - s.left - s.right, h = floor(w * 9.0 / 16.0), top = CGRectGetMinY(b) + s.top, mid = CGRectGetMinY(b) + floor(H / 2);
+        CGFloat y = top + h <= mid ? fmax(top, CGRectGetMinY(b) + floor((H / 2 - h) / 2)) : top;   // centred in the top half when it fits there (clear of a fold across the middle), else under the top inset
+        CGFloat padTop = fmax(mid, y + h);
+        if (CGRectGetMaxY(b) - s.bottom - padTop >= 0.4 * W) {   // room for the controls below it; otherwise the usual layout
+            if (pad) *pad = CGRectMake(CGRectGetMinX(b), padTop, W, CGRectGetMaxY(b) - padTop);
+            return CGRectMake(CGRectGetMinX(b) + s.left, y, w, h);
+        }
+    }
+    return fit_16_9(b);
 }
 static void tv_attach(void);
 
@@ -96,6 +119,11 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)startGame {
     if (self.game) return;
     dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (CloudSaves.m, save_sync.h)
+    const char *pe = getenv("DM_PORTRAIT"); g_portrait = pe && atoi(pe) != 0;
+    if (g_portrait) {
+        LOG("front end: portrait layout on (DM_PORTRAIT=1): held upright, the picture takes the top half and the controls the bottom half");
+        if (@available(iOS 16.0, *)) [self setNeedsUpdateOfSupportedInterfaceOrientations];
+    }
     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
@@ -117,8 +145,10 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    if (self.game.superview == self.view) self.game.frame = fit_16_9(b);   // on a TV the TV's view lays it out
-    if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
+    CGRect pad, pic = front_ios_picture(b, self.view.safeAreaInsets, &pad);
+    if (self.game.superview == self.view) self.game.frame = pic;   // on a TV the TV's view lays it out
+    if (self.fps && !CGRectIsNull(pad)) self.fps.frame = CGRectMake(CGRectGetMinX(pic) + 8, CGRectGetMinY(pic) + 8, 64, 22);   // portrait layout: the picture's top left corner
+    else if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
     }
@@ -137,7 +167,7 @@ static void launcher_done(void) { [g_root startGame]; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
 - (BOOL)prefersStatusBarHidden { return YES; }
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return front_ios_orientations(); }
 @end
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
 
@@ -159,12 +189,14 @@ static void tv_attach(void) {
     v.layer.contentsScale = MIN(v.layer.contentsScale, 1920.0 / MAX(f.size.width, 1)); [v setNeedsLayout];
     if (g_tv_mode_was < 0) g_tv_mode_was = dm_opmode();
     dm_set_opmode(1);
+    g_on_tv = YES; [g_root.view setNeedsLayout]; [g_root.pad setNeedsLayout];   // the phone's pad takes the whole screen, upright too
     LOG("front end: TV connected (%.0fx%.0f points), the picture moves there at %.0fx%.0f, console mode", g_tv.bounds.size.width, g_tv.bounds.size.height, f.size.width * v.layer.contentsScale, f.size.height * v.layer.contentsScale);
 }
 static void tv_detach(void) {
     DmGameView *v = g_root.game; g_tv = nil;
     if (v && v.superview != g_root.view) { [g_root.view insertSubview:v atIndex:0]; [g_root.view setNeedsLayout]; }
     if (g_tv_mode_was >= 0) { dm_set_opmode(g_tv_mode_was); g_tv_mode_was = -1; }
+    g_on_tv = NO; [g_root.view setNeedsLayout]; [g_root.pad setNeedsLayout];
     LOG("front end: TV disconnected, the picture is back on the phone");
 }
 @interface DmTVSceneDelegate : UIResponder <UIWindowSceneDelegate>

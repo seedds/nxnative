@@ -3,9 +3,7 @@
 #include "hle.h"
 #include <fcntl.h>
 #include <pthread.h>
-#include <pthread/qos.h>
 #include <stdatomic.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -63,11 +61,11 @@ static font_t font_map(const char *p) {
     font_t f = {0}; int fd = open(p, O_RDONLY); struct stat st;
     if (fd < 0 || fstat(fd, &st)) { if (fd >= 0) close(fd); return f; }
     size_t n = (size_t)st.st_size;
-    uint8_t *m = mmap(NULL, n + 8, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (m == MAP_FAILED) { LOG("[RED] shared font memory allocation failed (%zu bytes)", n + 8); close(fd); return f; }
+    uint8_t *m = plat_vm_alloc(n + 8);
+    if (!m) { LOG("[RED] shared font memory allocation failed (%zu bytes)", n + 8); close(fd); return f; }
     size_t got = 0; while (got < n) { ssize_t r = pread(fd, m + 8 + got, n - got, (off_t)got); if (r <= 0) break; got += (size_t)r; }
     close(fd);
-    if (got != n) { LOG("[RED] shared font read short: %s (%zu / %zu bytes)", p, got, n); munmap(m, n + 8); return f; }
+    if (got != n) { LOG("[RED] shared font read short: %s (%zu / %zu bytes)", p, got, n); plat_vm_release(m, n + 8); return f; }
     uint32_t done = 0x18029a7fu, len = __builtin_bswap32((uint32_t)n ^ 0x49621806u);
     memcpy(m, &done, 4); memcpy(m + 4, &len, 4);
     f.p = m; f.n = n + 8; return f;
@@ -218,7 +216,7 @@ HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_
 // One thread per binding lifetime: repeated requests must not double its rate.
 // A destroyed binding retires its worker even if another service reuses the same
 // guest storage and handle number before the next tick (MacNativeGames dab728a).
-void dm_host_helper_qos(qos_class_t q);   // hle_thread.c
+void dm_host_helper_qos(plat_qos_t q);   // hle_thread.c
 typedef struct vsync_event { void *ev; uint64_t binding; struct vsync_event *next; } vsync_event_t;
 static pthread_mutex_t g_vs_mu = PTHREAD_MUTEX_INITIALIZER;
 static vsync_event_t *g_vs_events;
@@ -234,12 +232,12 @@ static int vsync_tick(vsync_event_t *v) {   // 0: the event is gone and this thr
 __attribute__((weak)) int mtl_link_wait_vsync(uint64_t *seen, uint64_t timeout_ns) { (void)seen; (void)timeout_ns; return 0; }   // nvn_mtl.m
 static void *vsync_thread(void *arg) {
     vsync_event_t *v = arg;
-    dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // the game paces frames on this event
+    dm_host_helper_qos(PLAT_QOS_USER_INTERACTIVE);   // the game paces frames on this event
     const char *e = getenv("DM_VSYNC_HZ"); double hz = e ? atof(e) : 60.0; if (hz <= 0) hz = 60.0;
     uint64_t period = (uint64_t)(1e9 / hz), next = now_ns() + period, seen = 0;
     for (;;) {
         if (!e && mtl_link_wait_vsync(&seen, 2 * period)) { if (!vsync_tick(v)) break; next = now_ns() + period; continue; }
-        uint64_t t = now_ns(); if (next > t) { struct timespec ts = {(time_t)((next - t) / 1000000000ull), (long)((next - t) % 1000000000ull)}; nanosleep(&ts, NULL); }
+        uint64_t t = now_ns(); if (next > t) plat_sleep_ns(next - t);
         if (!vsync_tick(v)) break;
         next += period; if (now_ns() > next + 4 * period) next = now_ns() + period;   // do not try to catch up when far behind
     }

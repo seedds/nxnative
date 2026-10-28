@@ -19,8 +19,7 @@ static int test_create(pthread_t *th, const pthread_attr_t *attr, void *(*fn)(vo
     jobs[njobs] = fn; args[njobs++] = arg; return 0;
 }
 static int test_detach(pthread_t th) { (void)th; return 0; }
-static int test_sleep(const struct timespec *ts, struct timespec *left) {
-    (void)left;
+static void test_sleep(uint64_t ns) {   // the vsync worker's sleep (plat_sleep_ns)
     // Bound an old worker that incorrectly follows a replacement event: inspect
     // its first tick, then destroy the replacement so even that worker can exit.
     if (sleeps++ && observe && observe->wh) {
@@ -28,16 +27,15 @@ static int test_sleep(const struct timespec *ts, struct timespec *left) {
         destroy_event(observe);
     }
     assert(sleeps < 4);
-    clock_ns += (uint64_t)ts->tv_sec * 1000000000ull + ts->tv_nsec;
-    return 0;
+    clock_ns += ns;
 }
 #define pthread_create test_create
 #define pthread_detach test_detach
-#define nanosleep test_sleep
+#define plat_sleep_ns test_sleep
 #include "../hle_sdk16.c"
 #undef pthread_create
 #undef pthread_detach
-#undef nanosleep
+#undef plat_sleep_ns
 
 struct dm_flags g_flag;
 module_t *g_mod;

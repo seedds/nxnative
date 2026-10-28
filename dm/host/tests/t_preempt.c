@@ -16,6 +16,37 @@ static int wait_kind;
 static _Atomic int worker_host_work;
 static int worker_ready;
 
+// Suspending the worker's host thread wherever it is (the dispatch delay): Mach thread_suspend on Apple, SuspendThread on Windows; on Linux a signal parks it in its handler
+#if defined(__APPLE__)
+#include <mach/mach.h>
+static void worker_register(void) { worker.mport = pthread_mach_thread_np(pthread_self()); }
+static int worker_suspend(void) { return thread_suspend(worker.mport) == KERN_SUCCESS; }
+static int worker_resume(void) { return thread_resume(worker.mport) == KERN_SUCCESS; }
+#elif defined(_WIN32)
+#include <windows.h>
+static HANDLE worker_h;
+static void worker_register(void) {
+    worker.mport = plat_thread_self();
+    if (worker_h) CloseHandle(worker_h);
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &worker_h, 0, FALSE, DUPLICATE_SAME_ACCESS);
+}
+static int worker_suspend(void) { return SuspendThread(worker_h) != (DWORD)-1; }
+static int worker_resume(void) { return ResumeThread(worker_h) != (DWORD)-1; }
+#else
+#include <semaphore.h>
+static pthread_t worker_pt; static sem_t parked, unpark;
+static void park(int sig) { (void)sig; sem_post(&parked); while (sem_wait(&unpark)) {} }   // both async-signal-safe
+static void worker_register(void) { worker.mport = plat_thread_self(); worker_pt = pthread_self(); }
+static int worker_suspend(void) {
+    static int ready;
+    if (!ready++) { sem_init(&parked, 0, 0); sem_init(&unpark, 0, 0); struct sigaction sa = {.sa_handler = park}; sigemptyset(&sa.sa_mask); sigaction(SIGUSR1, &sa, NULL); }
+    if (pthread_kill(worker_pt, SIGUSR1)) return 0;
+    while (sem_wait(&parked)) {}
+    return 1;
+}
+static int worker_resume(void) { return !sem_post(&unpark); }
+#endif
+
 // FFT's SDK auto-clear event wakes one condition waiter. Its private worker
 // queues cannot influence the kernel's priority/FIFO selection.
 static thr_t fifo_workers[3];
@@ -74,7 +105,7 @@ static void condition_order(void) {
 static void *work(void *arg) {
     (void)arg;
     pthread_setspecific(g_keythr, &worker);
-    worker.mport = pthread_mach_thread_np(pthread_self());
+    worker_register();
     if (wait_kind == 0) {
         pthread_mutex_lock(&G);
         worker_ready = 1;
@@ -104,7 +135,7 @@ static void *work(void *arg) {
 static void *dispatch(void *arg) {
     (void)arg;
     usleep(dispatch_us);
-    assert(thread_resume(worker.mport) == KERN_SUCCESS);
+    assert(worker_resume());
     return NULL;
 }
 static int delayed_wake(unsigned delay, int kind, int exclusion) {
@@ -133,7 +164,7 @@ static int delayed_wake(unsigned delay, int kind, int exclusion) {
         if (waiting) break;
         usleep(100);
     }
-    assert(thread_suspend(worker.mport) == KERN_SUCCESS);
+    assert(worker_suspend());
     dispatch_us = delay; assert(!pthread_create(&d, NULL, dispatch, NULL));
     if (kind == 0) { r[0] = worker.handle; svc_thread(0x09, r); }
     else if (kind == 4) { r[0] = event_write; svc_thread(0x11, r); }
@@ -303,7 +334,9 @@ static int native_join_handoff(void) {
 }
 int main(int argc, char **argv) {
     (void)argv;
-    alarm(10);
+#if !defined(_WIN32)
+    alarm(10);   // Windows has no alarm: CTest's timeout bounds the run there
+#endif
     setenv("DM_PREEMPT", argc > 1 ? "1" : "0", 1);
     setenv("DM_YIELD_BACKOFF", "0", 1);   // plain yields only: a back-off sleep would end the yielding thread's handoff on its own
     main_handle = svc_thread_main_init();

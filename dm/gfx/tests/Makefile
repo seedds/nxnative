@@ -261,8 +261,8 @@ t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
-t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h ../../host/plat/plat_apple.c $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c ../../host/plat/plat_apple.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 .PHONY: gl-imports
 gl-imports: t_gl_imports
 	./t_gl_imports

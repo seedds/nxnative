@@ -18,6 +18,17 @@ ssize_t pwrite(int, const void *, size_t, off_t);
 
 struct dm_flags g_flag; uint64_t g_t0_ns; uint64_t now_ns(void) { return 0; }   // stubs for log timestamps and the read path (not used by the write path)
 void dm_guest_write_prepare(void *a, size_t n) { (void)a; (void)n; }
+// A second name for a file: a hard link on POSIX; a copy on Windows, whose C runtime has no link()
+static int stage_file(const char *from, const char *to) {
+#if defined(_WIN32)
+    FILE *a = fopen(from, "rb"), *b = a ? fopen(to, "wb") : NULL; char buf[4096]; size_t k; int ok = a && b;
+    while (ok && (k = fread(buf, 1, sizeof buf, a)) > 0) ok = fwrite(buf, 1, k, b) == k;
+    if (a) fclose(a); if (b && fclose(b)) ok = 0;
+    return ok ? 0 : -1;
+#else
+    return link(from, to);
+#endif
+}
 extern int g_nfail, g_lasterr;                                        // front-end notification count (the strong implementation in t_fs_stub.c replaces the weak one in hle_fs.c)
 static int g_mode, g_calls;                   // 0 write normally; 1 always return 0; 2 write only 3 bytes the first time
 static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off) {
@@ -83,7 +94,7 @@ int main(void) {
         int seen = 0; for (int i = 0; i < cnt; i++) { if (!strcmp(de[i].name, "a")) seen += de[i].size == 3; if (!strcmp(de[i].name, "b")) seen += de[i].type == ENT_DIR; if (!strcmp(de[i].name, "c")) seen += de[i].size == 2; if (!strcmp(de[i].name, "new")) seen += de[i].size == 5; }
         CHECK(seen == 4, "with the right types and sizes"); h_fs_CloseDirectory(h);
         unsetenv("DM_ROMFS_OVERLAY"); g_nmnt = 0;
-        snprintf(fn, sizeof fn, "%s/2.img", root); CHECK(!link(ip, fn), "stage a DLC image"); setenv("DM_AOC_DIR", root, 1);
+        snprintf(fn, sizeof fn, "%s/2.img", root); CHECK(!stage_file(ip, fn), "stage a DLC image"); setenv("DM_AOC_DIR", root, 1);
         size_t cache = 0;
         CHECK(h_fs_QueryAocCache(&cache, 2) == RES_OK && cache == 176, "DLC image reports Horizon table size (176, got %zu)", cache);
         CHECK(h_fs_MountAoc("aoc", 2, NULL, 0) == RES_OK && read_fs("aoc:/data/a", got, sizeof got) && !strcmp(got, "hello"), "DLC mounts and reads directly from its image");

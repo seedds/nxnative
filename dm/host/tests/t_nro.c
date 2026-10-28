@@ -45,7 +45,7 @@ static void fixture(int i) {
     m->nro = 1; m->data_off = offsetof(image, slots); m->pristine_len = offsetof(image, bss) - m->data_off; m->key_page_off = sizeof *im;
     im->value = 123;
     uint8_t *h = raw[i - 1]; memcpy(h + 0x10, "NRO0", 4); *(uint32_t *)(h + 0x18) = sizeof raw[0]; h[0x40] = (uint8_t)i;
-    *(uint32_t *)(h + 0x38) = 32; m->nro_size = sizeof raw[0]; CC_SHA256(h, sizeof raw[0], m->sha256);
+    *(uint32_t *)(h + 0x38) = 32; m->nro_size = sizeof raw[0]; plat_sha256(h, sizeof raw[0], m->sha256);
     m->init = (uintptr_t)init - (uintptr_t)m->base; m->fini = (uintptr_t)fini - (uintptr_t)m->base;
 }
 static void load(int i) { assert(h_ro_LoadModule(&handles[i - 1], raw[i - 1], NULL, 32, 1) == 0); }

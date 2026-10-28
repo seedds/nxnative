@@ -1,14 +1,10 @@
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
 #include "dm.h"
-#include <TargetConditionals.h>
 #include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
-#include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
 #include "hle.h"
 
 module_t *g_mod;
@@ -32,16 +28,18 @@ static pthread_key_t key_value(unsigned i) {
 static void create_keys(void) {
     if (pthread_key_create(&g_key18, NULL) || pthread_key_create(&g_keytls, NULL) ||
         pthread_key_create(&g_keytlr, NULL) || pthread_key_create(&g_keygate, NULL)) die("cannot create the host key");
-    LOG("key numbers K18=%lu KTLS=%lu KTLR=%lu KGATE=%lu", g_key18, g_keytls, g_keytlr, g_keygate);
+    LOG("key numbers K18=%lu KTLS=%lu KTLR=%lu KGATE=%lu", (unsigned long)g_key18, (unsigned long)g_keytls, (unsigned long)g_keytlr, (unsigned long)g_keygate);
 }
 
 // K slot check: the pthread TSD layout is fixed, slot = tpidrro_el0 + 8*key
 static void tsd_check(void) {
+#if DM_NATIVE_EXEC
     pthread_setspecific(g_key18, (void *)0x1234);
     uint64_t base; __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
     uint64_t off = *(uint64_t *)(g_mod[0].base + g_mod[0].key_page_off + g_mod[0].key_idx[KEY_K18] * 8);
     if (((uint64_t *)(base & ~7ull))[off / 8] != 0x1234) die("TSD layout mismatch");
     pthread_setspecific(g_key18, 0);
+#endif   // the rewritten code reads its thread slots through Apple's TSD (tpidrro_el0); the x86-64 execution engine (Phase 2) keeps the guest's thread registers itself
 }
 
 static void build_symhash(module_t *m);
@@ -148,10 +146,11 @@ static uint64_t resolve_sym(module_t *m, const char *name) {
 }
 
 // Forced take-over table (hle.h HLE_FORCE, the __DATA,swforce section): a hit overrides the definition inside the module
+PLAT_TABLE_DEFINE(swforce)   // plat_table_swforce
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
 static unsigned *g_fidx, g_fmask;   // name hash over the table: force_lookup runs for every named relocation, and each lookup used to strcmp its way through all 722 entries (the swhle table's scan is hashed the same way, hle.c)
 static void force_init(void) {
-    unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
+    size_t sz; g_force = (const hle_force_ent *)plat_table_swforce(&sz);
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
     unsigned cap = 16; while (cap < g_nforce * 2) cap <<= 1;
@@ -245,7 +244,7 @@ static void install_key_page(module_t *m) {
     memset(page, 0, m->key_page_size);
     for (unsigned i = 0; i < KEY_N; i++) page[m->key_idx[i]] = (uint64_t)key_value(i) * 8;
     for (int k = 0; k < KEY_N; k++) if (!page[m->key_idx[k]]) die("%s: key page entry %d is 0 (host key not created) -- the game would read TSD slot 0", m->name, k);
-    if (mprotect(m->base + m->key_page_off, m->key_page_size, PROT_READ)) die("%s key page mprotect", m->name);
+    if (plat_vm_protect(m->base + m->key_page_off, m->key_page_size, PLAT_PROT_READ)) die("%s key page mprotect", m->name);
     if (m->fps_state_off) install_fps_state(m);
 }
 
@@ -259,7 +258,7 @@ static void register_gates(module_t *m, const char *dir) {
             if (sscanf(line, "%lx %15s %d %lx", &ret, kind, &arg, &orig) == 4) { gate_register((uint64_t)m->base + ret, kind, arg, orig); ng++; }
         fclose(f);
     }
-    LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate);
+    LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, (long long)m->patch_off, (unsigned long)g_key18, (unsigned long)g_keytls, (unsigned long)g_keytlr, (unsigned long)g_keygate);
 }
 
 // DT_RELR (from SDK 20; all three modules of The Legend of Zelda: Breath of the Wild 1.9.0 have it): a compact table of relative relocations with the addend in the slot (*slot += base).
@@ -455,7 +454,6 @@ void nro_unload(module_t *m) {
 // DM_LOADHASH=1 (diagnostics): after loading, output an address-independent sha256 per module, to prove that the load results of "early start / no early start" are byte-identical.
 // Module base addresses and host ASLR differ every run, and only the values of the relocation slots change with them: copy the image and, using the same relocation table, replace every slot with an address-independent token --
 // RELATIVE → (0, addend); symbol target falls in some module → (1 + module number, offset within the module); otherwise (host forced take-over / host symbol) → (name FNV, addend); all other bytes as is.
-#include <CommonCrypto/CommonDigest.h>
 void loader_hash_log(void) {
     if (!getenv("DM_LOADHASH")) return;
     for (int k = 0; k < g_nmod; k++) {
@@ -483,7 +481,7 @@ void loader_hash_log(void) {
                 memcpy(cp + r->r_offset, &tok[0], 8);                // The 8 slot bytes are replaced by the token head; the token tail is appended below in slot order
                 nslot++;
             }
-        CC_SHA256_CTX c; CC_SHA256_Init(&c); CC_SHA256_Update(&c, cp, (CC_LONG)m->size);
+        plat_sha256_ctx c; plat_sha256_init(&c); plat_sha256_update(&c, cp, m->size);
         for (int t = 0; t < 2; t++)                                // Token tails (addend / offset) are appended in slot order, and together with the slot head uniquely determine the slot value
             for (uint64_t i = 0; i < sizes[t] / sizeof(Elf64_Rela); i++) {
                 const Elf64_Rela *r = &tabs[t][i]; uint64_t tail = (uint64_t)r->r_addend;
@@ -491,9 +489,9 @@ void loader_hash_log(void) {
                     uint64_t v = *(const uint64_t *)(m->base + r->r_offset);
                     for (int j = 0; j < g_nmod; j++) if (v >= (uint64_t)g_mod[j].base && v < (uint64_t)g_mod[j].base + g_mod[j].size) { tail = v - (uint64_t)g_mod[j].base; break; }
                 }
-                CC_SHA256_Update(&c, &tail, 8);
+                plat_sha256_update(&c, &tail, 8);
             }
-        uint8_t d[32]; CC_SHA256_Final(d, &c); free(cp);
+        uint8_t d[32]; plat_sha256_final(&c, d); free(cp);
         char hx[65]; for (int i = 0; i < 32; i++) sprintf(hx + 2 * i, "%02x", d[i]);
         LOG("DM_LOADHASH %s size %#zx relocation slots %u sha256 %s", m->name, m->size, nslot, hx);
     }
@@ -505,6 +503,8 @@ void loader_hash_log(void) {
 // and they are vm_remap'ed back at their original relative positions: code pages with copy=FALSE (sharing the same signed pages with __TEXT, r-x), W with copy=TRUE (copy-on-write, paged only when used).
 // The run-time layout is byte-identical to the original image. Remapping signed pages to a new address and then executing them on iOS is exactly what libffi's trampoline table (FFI_EXEC_TRAMPOLINE_TABLE) does
 #include <mach/mach.h>
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
 static void remap_at(module_t *m, vm_address_t to, const void *from, unsigned long size, boolean_t copy, vm_prot_t need) {
     vm_address_t a = to; vm_prot_t cur = 0, max = 0;
     kern_return_t kr = vm_remap(mach_task_self(), &a, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)from, copy, &cur, &max, VM_INHERIT_NONE);
@@ -573,24 +573,24 @@ static void map_image(module_t *m, const char *dir) {
         if (sz < fl) die("%s is shorter than FILE_IMAGE_LEN %#llx", path, (unsigned long long)fl);
         m->size = m->image_size; m->patch_len = (sz - fl + 0x3FFF) & ~0x3FFFull;
         if (m->patch_len > pre) die("%s patch area of %#llx bytes does not fit in the %#llx before the base", path, (unsigned long long)m->patch_len, (unsigned long long)pre);
-        uint8_t *a = mmap(NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
+        uint8_t *a = plat_vm_alloc(pre + m->size);
+        if (!a) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - fl); free(raw); install_key_page(m);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
-        if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
-        if (mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
-        if (pre > m->patch_len && mprotect(a + m->patch_len, pre - m->patch_len, PROT_NONE)) die("%s mprotect gap", m->name);
+        if (plat_vm_protect(m->base, rx, PLAT_PROT_READ | PLAT_PROT_EXEC)) die("%s mprotect text", m->name);
+        if (plat_vm_protect(a, m->patch_len, PLAT_PROT_READ | PLAT_PROT_EXEC)) die("%s mprotect patch", m->name);
+        if (pre > m->patch_len && plat_vm_protect(a + m->patch_len, pre - m->patch_len, PLAT_PROT_NONE)) die("%s mprotect gap", m->name);
         return;
     }
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
-    m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (m->base == MAP_FAILED) die("%s mmap", m->name);
+    m->base = plat_vm_alloc(m->size);
+    if (!m->base) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
-    if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
+    if (plat_vm_protect(m->base, rx, PLAT_PROT_READ | PLAT_PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;
-    if (mprotect(m->base + po, m->size - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
+    if (plat_vm_protect(m->base + po, m->size - po, PLAT_PROT_READ | PLAT_PROT_EXEC)) die("%s mprotect patch", m->name);
 }
 #endif
 

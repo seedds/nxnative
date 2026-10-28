@@ -3,16 +3,16 @@
 #ifndef HLE_FS_SOURCE
 #define HLE_FS_SOURCE "../hle_fs.c"
 #endif
-#include <sys/xattr.h>
+#include "../dm.h"   // the platform layer's plat_xattr_set (an extended attribute on Apple), before the substitution below
 #include <errno.h>
 static int fail_name_write;
-static int fake_setxattr(const char *p, const char *name, const void *v, size_t n, u_int32_t pos, int opt) {
+static int fake_xattr_set(const char *p, const char *name, const void *v, size_t n) {
     if (fail_name_write) { errno = ENOSPC; return -1; }
-    return setxattr(p, name, v, n, pos, opt);
+    return plat_xattr_set(p, name, v, n);
 }
-#define setxattr fake_setxattr
+#define plat_xattr_set fake_xattr_set
 #include HLE_FS_SOURCE
-#undef setxattr
+#undef plat_xattr_set
 struct dm_flags g_flag; uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 0; }
 void dm_guest_write_prepare(void *a, size_t n) { (void)a; (void)n; }

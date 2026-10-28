@@ -1,6 +1,5 @@
 // Shared-font ownership and LoadFont forwarding through the real forced registration; no game module or font file is needed.
 #include "../hle_sdk16.c"
-#include <mach-o/getsect.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
 
@@ -34,11 +33,11 @@ void hle_signal_system_event(void *ev) { (void)ev; }
 uint64_t hle_system_event_binding(void *ev) { (void)ev; return 1; }
 int hle_signal_system_event_binding(uint64_t binding) { (void)binding; return 1; }
 uint32_t hle_hid_connected_npad(void) { return 0; }
-void dm_host_helper_qos(qos_class_t q) { (void)q; }
-extern const struct mach_header_64 _mh_execute_header;
+void dm_host_helper_qos(plat_qos_t q) { (void)q; }
+PLAT_TABLE_DEFINE(swforce)   // the real forced registrations (on Apple: getsectiondata of __DATA,swforce)
 int main(void) {
-    unsigned long bytes = 0;
-    const hle_force_ent *e = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &bytes);
+    size_t bytes = 0;
+    const hle_force_ent *e = (const hle_force_ent *)plat_table_swforce(&bytes);
     uint32_t (*load)(void *, char *, const void *, unsigned, unsigned) = NULL;
     unsigned count = 0;
     for (size_t i = 0; e && i < bytes / sizeof *e; i++) {

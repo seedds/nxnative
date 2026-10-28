@@ -1,8 +1,5 @@
 // Import resolution (implemented ones go to the host, the rest go to named stubs) and host gate dispatch.
 #include "hle.h"
-#include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
-#include <dlfcn.h>
 #include <time.h>
 
 // ---------- Unimplemented imports: named stubs (the statically assembled stub table in entry.S, the k-th = movz x9,#k; b unimpl_entry) ----------
@@ -28,11 +25,12 @@ uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
 // whose module symbol tables module_sym's hash already fixed (loader.c build_symhash, whose comment measured
 // that phase at 77-86 ms of the ① load before it)
 static uint32_t name_h(const char *s) { uint32_t h = 2166136261u; while (*s) h = (h ^ (uint8_t)*s++) * 16777619u; return h; }
+PLAT_TABLE_DEFINE(swhle)   // plat_table_swhle: the swhle entries of every object file (hle.h HLE, hle_table.c)
 static unsigned *g_hle_idx, g_hle_mask; static const hle_ent *g_hle_sec;
 static const hle_ent *hle_find(const char *name) {
     if (!g_hle_mask) {
-        unsigned long secsz;
-        g_hle_sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &secsz);
+        size_t secsz;
+        g_hle_sec = (const hle_ent *)plat_table_swhle(&secsz);
         unsigned n = g_hle_sec ? (unsigned)(secsz / sizeof *g_hle_sec) : 0;
         unsigned cap = 16; while (cap < n * 2) cap <<= 1;
         g_hle_idx = calloc(cap, sizeof *g_hle_idx); g_hle_mask = cap - 1;
@@ -51,7 +49,7 @@ static const hle_ent *hle_find(const char *name) {
 uint64_t resolve_import(module_t *m, const char *name) {
     const hle_ent *e = hle_find(name);
     if (e) {
-        if (g_flag.imports) { Dl_info di; dladdr(e->fn, &di); LOG("import %s -> %s", name, di.dli_sname); }
+        if (g_flag.imports) { const char *sn = plat_addr_symbol(e->fn, NULL); LOG("import %s -> %s", name, sn ? sn : "?"); }
         void *hlecount_wrap(const char *, const char *, void *); return (uint64_t)hlecount_wrap("HLE", name, e->fn);   // With DM_HLECOUNT it is a counting stub (including the libc passthrough table)
     }
     // Reuse the stub if one was already allocated for the same name (its own hash: the reuse scan over every stub was quadratic in the stub count)

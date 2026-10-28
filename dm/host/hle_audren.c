@@ -16,6 +16,14 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(_WIN32)   // Windows' C runtime has no posix_memalign, and its aligned blocks are freed with _aligned_free
+#include <malloc.h>
+static int audren_memalign(void **p, size_t align, size_t n) { *p = _aligned_malloc(n, align); return *p ? 0 : ENOMEM; }
+#define posix_memalign audren_memalign
+#define work_release _aligned_free
+#else
+#define work_release free
+#endif
 
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size);
 void dm_guest_thread_join(void *tt);
@@ -154,7 +162,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
         }
     }
     t_in_open = 1; Result r = ev ? orig_ev(handle, ev, p, work, sz) : orig(handle, p, work, sz); t_in_open = 0;
-    if (r) { free(owned); LOG("[RED] audren: SDK OpenAudioRenderer failed %#x", r); return r; }
+    if (r) { work_release(owned); LOG("[RED] audren: SDK OpenAudioRenderer failed %#x", r); return r; }
     if (owned) objmap_put(handle[0], owned);   // Close releases it only after the render thread and the SDK have finished with it
     // The renderer event as the service gives it. With the DSP service (device 0, what the game asked for) OpenAudioRenderer attaches the service's kernel event (auto-clear,
     // AttachReadableHandleToSystemEvent); with CPU + manual it creates a local one instead (CreateSystemEvent(ev, AutoClear, false), SDK 4: sdk+0x190b6c). A signal of a local
@@ -181,7 +189,7 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "close 
     if (obj == g_handle[0] && g_render_tt) { atomic_store(&g_open, 0); dm_guest_thread_join(g_render_tt); g_render_tt = NULL; }
     void *owned = objmap_del(obj);
     orig(obj, state);
-    free(owned);
+    work_release(owned);
 }
 
 // DeviceSink input mix buffers → int16 stereo. The command ID is 0x13 in SDK 16; SDK 20 inserted a command before it, making it 0x14 (written at sdk+0x233f44); SDK 8 (Link's Awakening)

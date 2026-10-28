@@ -7,7 +7,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
+#if defined(__APPLE__)
 #include <malloc/malloc.h>
+#endif
 static _Atomic long g_live_blocks, g_live_bytes, g_total_bytes;
 static void *t_calloc(size_t n, size_t sz) { void *p = calloc(n, sz); atomic_fetch_add(&g_live_blocks, 1); atomic_fetch_add(&g_live_bytes, (long)(n * sz)); atomic_fetch_add(&g_total_bytes, (long)(n * sz)); return p; }
 static _Atomic long g_freed_req;   // number of frees

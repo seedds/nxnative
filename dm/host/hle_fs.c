@@ -5,7 +5,6 @@
 // Paths look like "rom:/data/x". FileHandle / DirectoryHandle are 8 bytes passed by value, here they store the host fd / DIR*.
 // Struct layout follows the public Horizon ABI: DirectoryEntry = {char name[0x301], pad[3], s8 type, pad[3], s64 size} (0x310 bytes).
 #include "hle.h"
-#include <mach/mach.h>
 #include "front.h"
 #include <dirent.h>
 #include <errno.h>
@@ -14,8 +13,6 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdatomic.h>
-#include <sys/clonefile.h>
-#include <sys/xattr.h>
 #include "romfs_image.h"
 
 // Every take-over in this file runs on the big host stack (hle_bigstack.c): path buffers are sized by PATH_MAX and one file open takes 6-7 KB of stack, while a game's save thread can have as little as 8 KB (Super Mario 3D World + Bowser's Fury)
@@ -106,7 +103,27 @@ static void fslog_init(void) { static int done; if (done) return; done = 1; cons
 static const char *envdir(const char *var, const char *rel, char *buf, size_t n) {
     const char *v = getenv(var);
     if (v) return v;
-    snprintf(buf, n, "%s%s/%s", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work", rel); return buf;
+    snprintf(buf, n, "%s/%s", getenv("DM_ROOT") ?: plat_data_dir(), rel); return buf;   // the work folder: DM_ROOT, else the platform's (Apple: $HOME/dm-work)
+}
+// Whether a directory entry is a directory: from d_type where readdir fills it in (Apple, Linux), else from an lstat of its path (Windows' C runtime has no d_type)
+static int ent_dtype(const struct dirent *e) {   // 1 directory, 0 something else, -1 unknown
+#ifdef DT_DIR
+    return e->d_type == DT_UNKNOWN ? -1 : e->d_type == DT_DIR;
+#else
+    (void)e; return -1;
+#endif
+}
+static int ent_isdir(const char *dir, const struct dirent *e) {
+    int t = ent_dtype(e); if (t >= 0) return t;
+    char c[1280]; struct stat st; snprintf(c, sizeof c, "%s/%s", dir, e->d_name);
+    return !lstat(c, &st) && S_ISDIR(st.st_mode);
+}
+static int ent_stat(DIR *d, const char *dir, const char *name, struct stat *st) {   // following links, as stat does
+#if defined(_WIN32)
+    (void)d; char c[1280]; snprintf(c, sizeof c, "%s/%s", dir, name); return stat(c, st);   // no dirfd / fstatat in mingw-w64
+#else
+    (void)dir; return fstatat(dirfd(d), name, st, 0);
+#endif
 }
 
 // Steps that end in a failed write: test injection DM_TEST_FS_FAILAT=<point>[:<count>][,...] -- in a save transaction, mountclone (clone the work directory at mount),
@@ -196,7 +213,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
         const char *why = NULL;
         if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear the work directory left over from last time";
         else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear the .new left over from last time";
-        else if (dm_fs_test_fail("mountclone") || clonefile(dir, work, 0)) why = "cloning the work directory failed";
+        else if (dm_fs_test_fail("mountclone") || plat_clone_tree(dir, work)) why = "cloning the work directory failed";
         if (why) { txn_err = errno ? errno : EIO; g_mnt[g_nmnt].ro = 1; strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
             LOG("[RED] save transaction: %s (%s, errno=%d) -- mounting the committed directory %s read-only instead: saves cannot be written this session, the committed version is unchanged", why, work, txn_err, dir); }
         else {
@@ -229,9 +246,9 @@ static int guest_name(const char *parent, const char *physical, char *out, size_
     // so no per-entry getxattr is needed -- that was one system call per entry when listing, seconds for the 216,000 entries Engage walks in RomFS at boot
     if (strncmp(physical, ".dm-case-", 9)) { strlcpy(out, physical, n); return 1; }
     char p[1280]; snprintf(p, sizeof p, "%s/%s", parent, physical);
-    ssize_t k = getxattr(p, FS_GUEST_NAME, out, n - 1, 0, XATTR_NOFOLLOW);
+    ssize_t k = plat_xattr_get(p, FS_GUEST_NAME, out, n - 1);
     if (k >= 0) { out[k] = 0; return 1; }
-    if (errno != ENOATTR) return 0;
+    if (errno != PLAT_ENOATTR) return 0;
     strlcpy(out, physical, n); return 1;
 }
 // Name index of the directories of read-only mounts (RomFS, a save that fell back to read-only): guest name → physical name, sorted by guest name. The mount table is resident and a read-only mount does not change for the whole process,
@@ -394,8 +411,8 @@ static int set_guest_name(const char *hp, const char *path) {
     if (k >= sizeof guest) { errno = ENAMETOOLONG; return -1; }
     memcpy(guest, start, k); guest[k] = 0;
     const char *physical = strrchr(hp, '/') + 1;
-    if (strcmp(physical, guest)) return setxattr(hp, FS_GUEST_NAME, guest, strlen(guest), 0, XATTR_NOFOLLOW);
-    if (!removexattr(hp, FS_GUEST_NAME, XATTR_NOFOLLOW) || errno == ENOATTR) return 0;
+    if (strcmp(physical, guest)) return plat_xattr_set(hp, FS_GUEST_NAME, guest, strlen(guest));
+    if (!plat_xattr_remove(hp, FS_GUEST_NAME) || errno == PLAT_ENOATTR) return 0;
     return -1;
 }
 static Result err_res(const char *op, const char *path) {
@@ -441,7 +458,7 @@ static void romfs_tables(const char *dir, size_t *ndir, size_t *dbytes, size_t *
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !guest_name(dir, e->d_name, g, sizeof g)) continue;
         size_t name = (strlen(g) + 3) & ~(size_t)3;
-        if (e->d_type == DT_DIR) {
+        if (ent_isdir(dir, e)) {
             ++*ndir; *dbytes += 0x18 + name;
             if (depth < 64 && snprintf(hp, sizeof hp, "%s/%s", dir, e->d_name) < (int)sizeof hp) romfs_tables(hp, ndir, dbytes, nfile, fbytes, depth + 1);
         } else { ++*nfile; *fbytes += 0x20 + name; }
@@ -611,7 +628,7 @@ static Result commit_mount_locked(int i, int *notify_error) {
     pthread_once(&g_txn_lock_once, txn_locks_init);
     pthread_rwlock_wrlock(&g_txn_lock[txn]);
     pthread_rwlock_t *txn_guard __attribute__((cleanup(txn_unlock))) = &g_txn_lock[txn];
-    uint64_t tc1 = clock_gettime_nsec_np(CLOCK_MONOTONIC), tw0 = atomic_exchange(&g_mnt[txn].first_write_ns, 0);
+    uint64_t tc1 = plat_boot_ns(), tw0 = atomic_exchange(&g_mnt[txn].first_write_ns, 0);
     int perr = atomic_exchange(&g_mnt[txn].poison, 0);
     if (perr) {                                                         // a write failed in this transaction: refuse the commit, discard the working directory
         char torn[512] = ""; size_t tl = 0; DIR *d0 = opendir(g_mnt[i].dir); struct dirent *e0;   // record files truncated to 0 bytes (the damage that would enter the save if committed as usual)
@@ -630,8 +647,8 @@ static Result commit_mount_locked(int i, int *notify_error) {
         // (the next commit is refused again and recloning is retried); the committed version is unchanged (before, the work directory was deleted first and then recloned, and a failed clone called die, so with a full disk the process exited and the work directory was gone)
         char re[1100]; snprintf(re, sizeof re, "%s.re", g_mnt[i].dir); int rerr = 0;
         if (!access(re, F_OK) && rm_tree(re)) rerr = errno ? errno : EIO;
-        else if (dm_fs_test_fail("reclone") || clonefile(g_mnt[i].commit, re, 0)) { rerr = errno ? errno : EIO; rm_tree(re); }
-        else if (renamex_np(re, g_mnt[i].dir, RENAME_SWAP)) { rerr = errno ? errno : EIO; rm_tree(re); }
+        else if (dm_fs_test_fail("reclone") || plat_clone_tree(g_mnt[i].commit, re)) { rerr = errno ? errno : EIO; rm_tree(re); }
+        else if (plat_rename_swap(re, g_mnt[i].dir)) { rerr = errno ? errno : EIO; rm_tree(re); }
         else rm_tree(re);                                               // the swapped-out tainted work directory
         if (rerr) { save_poison_txn(txn, perr); LOG("[RED] save transaction: recloning the work directory failed errno=%d -- the work directory is left as it is and stays tainted (the next commit is refused again and retries), the committed version is unchanged", rerr); }
         LOG("[RED] save commit refused: a save write failed in this transaction errno=%d (0-byte files in the work directory: %s); the committed version is unchanged, the work directory %s%s", perr, tl ? torn + 1 : "none", rerr ? "could not be recloned (see the previous line)" : "was recloned from the committed version", nopen ? "; [RED] save files are still open" : "");
@@ -641,11 +658,11 @@ static Result commit_mount_locked(int i, int *notify_error) {
     char neu[1100]; snprintf(neu, sizeof neu, "%s.new", g_mnt[i].commit);
     Result r = RES_OK;
     if (!access(neu, F_OK)) rm_tree(neu);
-    if (clonefile(g_mnt[i].dir, neu, 0)) { LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
-    else if (renamex_np(neu, g_mnt[i].commit, RENAME_SWAP)) { LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", errno); rm_tree(neu); r = RES_FAIL; }
+    if (plat_clone_tree(g_mnt[i].dir, neu)) { LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
+    else if (plat_rename_swap(neu, g_mnt[i].commit)) { LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", errno); rm_tree(neu); r = RES_FAIL; }
     else rm_tree(neu);                                                  // the old version that was swapped out
     // Timing readouts (integer microseconds, no floating point): how long the clone + atomic swap took; how long in total from this transaction's first save write to the end of the commit (the game writing files + the commit; 0 = no save write in this transaction)
-    static int n; if (r == RES_OK) { uint64_t tc2 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    static int n; if (r == RES_OK) { uint64_t tc2 = plat_boot_ns();
         LOG("save commit #%d: %s swapped atomically into %s (%d save writes so far) (clone + swap %llu us, since this transaction's first write %llu us)", ++n, g_mnt[i].dir, g_mnt[i].commit, atomic_load(&g_save_writes),
             (unsigned long long)((tc2 - tc1) / 1000), (unsigned long long)(tw0 ? (tc2 - tw0) / 1000 : 0)); atomic_fetch_add(&g_save_commits, 1);
     }
@@ -739,9 +756,9 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
                 static _Atomic int once; if (!once++) LOG("[fs] ReadFile into %p+%#zx: the destination was write-protected again during the read, prepared again at +%#zx (first case)", buf, sz, got);
                 dm_guest_write_prepare((uint8_t *)buf + got, sz - got); continue; }
             if (errno == EFAULT) {   // the destination is not writable host memory: say where, with the protection of its VM region
-                int e = errno; vm_address_t ra = (vm_address_t)((uint8_t *)buf + got); vm_size_t rs = 0; vm_region_basic_info_data_64_t vi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
-                kern_return_t kr = vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vi, &cnt, &obj);
-                LOG("[RED] fs ReadFile into %p+%#zx failed at +%#zx (EFAULT): VM region %#lx+%#lx protection %d%s", buf, sz, got, (unsigned long)ra, (unsigned long)rs, kr == KERN_SUCCESS ? vi.protection : -1, kr == KERN_SUCCESS ? "" : " (none)");
+                int e = errno; uint64_t ra = 0, rs = 0; int prot = 0;
+                int kr = plat_vm_query((uint64_t)(uintptr_t)((uint8_t *)buf + got), &ra, &rs, &prot);
+                LOG("[RED] fs ReadFile into %p+%#zx failed at +%#zx (EFAULT): VM region %#lx+%#lx protection %d%s", buf, sz, got, (unsigned long)ra, (unsigned long)rs, !kr ? prot : -1, !kr ? "" : " (none)");
                 errno = e; }
             return err_res("pread", "fd"); }
         if (r == 0) break;
@@ -771,7 +788,7 @@ HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp
     if (txn >= 0) {                                                     // Save write injection point (for deterministic regression; only writes on the save mount are counted)
         pthread_once(&g_save_test_once, save_test_init);
         int n = atomic_fetch_add(&g_save_writes, 1) + 1;
-        { uint64_t z = 0; atomic_compare_exchange_strong(&g_mnt[txn].first_write_ns, &z, clock_gettime_nsec_np(CLOCK_MONOTONIC)); }
+        { uint64_t z = 0; atomic_compare_exchange_strong(&g_mnt[txn].first_write_ns, &z, plat_boot_ns()); }
         if (g_save_kill_n && n == g_save_kill_n) { LOG("DM_TEST_KILL_AT: save write #%d, calling _exit (simulates being killed mid-write)", n); _exit(9); }
         if (g_save_fail_n && n == g_save_fail_n) { LOG("DM_TEST_FS_FAIL: save write #%d returns failure errno=%d", n, g_save_fail_e); errno = g_save_fail_e; save_poison_txn(txn, g_save_fail_e); return err_res("pwrite (injected)", "fd"); }
     }
@@ -829,7 +846,7 @@ static int rm_tree(const char *p) {
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         snprintf(c, sizeof c, "%s/%s", p, e->d_name);
-        rc |= e->d_type == DT_DIR ? rm_tree(c) : unlink(c);
+        rc |= ent_isdir(p, e) ? rm_tree(c) : unlink(c);
     }
     closedir(d);
     return rc | rmdir(p);
@@ -845,7 +862,7 @@ HLE_FORCE("_ZN2nn2fs25CleanDirectoryRecursivelyEPKc", "fsp-srv → recursively d
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         snprintf(c, sizeof c, "%s/%s", hp, e->d_name);
-        rc |= e->d_type == DT_DIR ? rm_tree(c) : unlink(c);
+        rc |= ent_isdir(hp, e) ? rm_tree(c) : unlink(c);
     }
     closedir(d);
     return rc ? err_res("cleandir", hp) : RES_OK;
@@ -963,13 +980,12 @@ HLE_FORCE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandl
     if (!hh) { *count = 0; return RES_FAIL; }
     PATH_LOCK(); dirh_t *h = (dirh_t *)hh; int64_t n = 0; struct dirent *e;
     if (h->snap) { while (n < max && h->psnap < h->nsnap) { DirectoryEntry *src = &h->snap[h->psnap++]; if (!(h->mode & (src->type == ENT_DIR ? DIRMODE_DIR : DIRMODE_FILE))) continue; ents[n++] = *src; } *count = n; return RES_OK; }
-    int dfd = dirfd(h->d);
     while (n < max && (e = readdir(h->d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         // a directory's type comes from d_type without stat; files need a size, taken with fstatat relative to the directory fd (following links, like the old stat)
         struct stat st; int isdir;
-        if (e->d_type == DT_DIR) isdir = 1;
-        else { if (fstatat(dfd, e->d_name, &st, 0)) continue; isdir = S_ISDIR(st.st_mode); }
+        if (ent_dtype(e) == 1) isdir = 1;
+        else { if (ent_stat(h->d, h->path, e->d_name, &st)) continue; isdir = S_ISDIR(st.st_mode); }
         if (!(h->mode & (isdir ? DIRMODE_DIR : DIRMODE_FILE))) continue;
         DirectoryEntry *o = &ents[n++]; memset(o, 0, sizeof *o);
         if (!guest_name(h->path, e->d_name, o->name, sizeof o->name)) { char c[1280]; snprintf(c, sizeof c, "%s/%s", h->path, e->d_name); *count = n - 1; return err_res("directory name", c); }

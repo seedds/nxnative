@@ -4,9 +4,27 @@
 // VideoToolbox wants a format description built from SPS / PPS and NAL units with 4-byte length prefixes. Decoding is synchronous and yields pictures in decode order; MediaCodec yields them
 // in presentation order, so pictures wait in a queue sorted by presentation time and leave it once more than `depth` are queued (4 when the profile has B-frames, 0 for Baseline), or all at the end of the stream
 #include "hle.h"
+#include "hle_movie_avc.h"
+#if !defined(__APPLE__)
+// No H.264 decoder on this platform yet: a declared stopgap until Phase 1 brings one. The decoder takes every access unit and hands out no picture (the first one is reported
+// with a red line), so an H.264 movie plays without its video: the player runs on, and its end-of-stream flag still comes through hle_movie.c
+struct mavc { int red, nq; };
+mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
+void mavc_free(mavc *a) { free(a); }
+void mavc_param_sets(mavc *a, const uint8_t *p, size_t n) { (void)a; (void)p; (void)n; }
+void mavc_avcc(mavc *a, const uint8_t *p, size_t n) { (void)a; (void)p; (void)n; }
+int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
+    (void)p; (void)n; (void)pts_us;
+    if (!a->red++) LOG("[RED] movie: no H.264 decoder on this platform yet (Phase 1: the video of H.264 movies is not shown)");
+    return 0;
+}
+int mavc_take(mavc *a, int flush, uint8_t *nv12, int w, int h, int64_t *pts_us) { (void)a; (void)flush; (void)nv12; (void)w; (void)h; (void)pts_us; return 0; }
+int mavc_queued(const mavc *a) { return a->nq; }
+void mavc_set_rgba(mavc *a) { (void)a; }
+void mavc_drop(mavc *a) { (void)a; }
+#else
 #include <VideoToolbox/VideoToolbox.h>
 #include <arm_neon.h>
-#include "hle_movie_avc.h"
 
 #define QMAX 16
 struct mavc {
@@ -141,3 +159,4 @@ int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
     CVPixelBufferRelease(pb);
     return 1;
 }
+#endif

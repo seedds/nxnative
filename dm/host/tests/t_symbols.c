@@ -1,6 +1,5 @@
-// Exercise the real HLE, forced-takeover and stub indexes with synthetic Mach-O sections; no game files required.
+// Exercise the real HLE, forced-takeover and stub indexes with synthetic registration tables (the swhle / swforce sections); no game files required.
 #include "../hle.h"
-#include <mach-o/getsect.h>
 #include <assert.h>
 #include <signal.h>
 #include <sys/resource.h>
@@ -10,17 +9,17 @@
 static hle_ent entries[4];
 static hle_force_ent forces[3];
 static int have_sections;
-static uint8_t *test_section(const struct mach_header_64 *mh, const char *seg, const char *sect, unsigned long *size) {
-    (void)mh; assert(!strcmp(seg, "__DATA"));
+static const void *test_section(const char *sect, size_t *size) {
     *size = 0;
     if (!have_sections) return NULL;
-    if (!strcmp(sect, "swhle")) { *size = sizeof entries; return (uint8_t *)entries; }
-    assert(!strcmp(sect, "swforce")); *size = sizeof forces; return (uint8_t *)forces;
+    if (!strcmp(sect, "swhle")) { *size = sizeof entries; return entries; }
+    assert(!strcmp(sect, "swforce")); *size = sizeof forces; return forces;
 }
-#define getsectiondata test_section
+// hle.c and loader.c read their tables through plat_table_swhle / plat_table_swforce (plat.h): here they read the synthetic ones
+#undef PLAT_TABLE_DEFINE
+#define PLAT_TABLE_DEFINE(name) static const void *plat_table_##name(size_t *bytes) { return test_section(#name, bytes); }
 #include "../hle.c"
 #include "../loader.c"
-#undef getsectiondata
 
 struct dm_flags g_flag;
 uint64_t unimpl_stubs[MAX_STUB];

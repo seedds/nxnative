@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "plat/plat.h"      // the host platform layer (macOS / iOS, Linux, Windows)
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
 // Explicit host work does not occupy a guest core (Metal submission, or a blocked native codec lock). A contended host mutex must count as blocked: a signal's same-core handoff

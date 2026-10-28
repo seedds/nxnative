@@ -3,12 +3,15 @@
 //   ldr x16, =&count; movz x17, #1; stadd x17, [x16]; ldr x16, =implementation; br x16
 // Touches only x16 / x17, which may be clobbered between calls; arguments and return values pass through unchanged. Stubs are written in a writable page and sealed read-only executable when loading ends (hlecount_seal).
 // svc is counted separately by number (the hle_svc.c dispatch entry calls hlecount_svc). Unavailable on iOS (code written at runtime cannot execute).
+// The stubs are ARM64 code the guest calls natively: without native execution (DM_NATIVE_EXEC 0) the counting belongs to the x86-64 execution engine (Phase 2), and these are no-ops
 #include "dm.h"
+#if DM_NATIVE_EXEC
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <libkern/OSCacheControl.h>
-#if !TARGET_OS_IPHONE
+#endif
+#if DM_NATIVE_EXEC && !TARGET_OS_IPHONE
 #define HC_MAX 8192
 static struct { const char *kind, *name; void *fn; _Atomic uint64_t n; } g_hc[HC_MAX];
 static unsigned g_nhc; static uint32_t *g_hcode; static int g_hon = -1, g_hsealed; static const char *g_hpath;

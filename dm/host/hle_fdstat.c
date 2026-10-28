@@ -1,7 +1,9 @@
 // Diagnostic DM_FD_LOG=<seconds>: every this many seconds log one line with "the number and breakdown of file descriptors the process has in use" (whether long play sessions will hit the open file limit: the iOS soft limit defaults to 256, raised to 4096 at startup in host_preload, main.c).
 // fstat each descriptor to determine its type; for regular files / directories get the path with fcntl(F_GETPATH) and classify by where it points. Read-only, touches no descriptor; no thread is started when the variable is unset.
+// POSIX descriptor tables only (Apple, Linux: /proc/self/fd): on Windows the C runtime's descriptors are not the process's handles, and the file compiles to nothing
 #include "hle.h"
 #include "dm.h"
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -19,7 +21,7 @@ static void *fdstat_main(void *arg) {
         int total = 0, romfs = 0, save = 0, logf = 0, cache = 0, dev = 0, sock = 0, pipe_ = 0, kq = 0, dir = 0, other = 0, hi = -1; char sample[400] = ""; int sk = 0;
         for (int fd = 0; fd < max; fd++) { struct stat st; if (fstat(fd, &st)) continue; total++; hi = fd;
             if (S_ISSOCK(st.st_mode)) { sock++; continue; } if (S_ISFIFO(st.st_mode)) { pipe_++; continue; } if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) { dev++; continue; }
-            char p[MAXPATHLEN] = ""; if (fcntl(fd, F_GETPATH, p) || !p[0]) { if (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) other++; else kq++; continue; }
+            char p[MAXPATHLEN] = ""; if (plat_fd_path(fd, p, sizeof p) || !p[0]) { if (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) other++; else kq++; continue; }
             if (S_ISDIR(st.st_mode)) dir++;
             if (strstr(p, "romfs") || strstr(p, "RomFS")) romfs++;
             else if (strstr(p, "/save")) save++;
@@ -36,3 +38,4 @@ __attribute__((constructor)) static void fdstat_init(void) {
     const char *e = getenv("DM_FD_LOG"); int every = e ? atoi(e) : 0; if (every <= 0) return;
     pthread_t t; if (!pthread_create(&t, NULL, fdstat_main, (void *)(intptr_t)every)) pthread_detach(t);
 }
+#endif

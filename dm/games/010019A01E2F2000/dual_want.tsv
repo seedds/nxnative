@@ -1,4 +1,4 @@
-# Pixel shaders that may be drawn with dual-source blending (SRC1_* factors): every one that writes exactly colour outputs 0 and 1 (raster colors [0, 1] in its reflection; 455 of 129,972), so none meets the first-source fallback. dmsh_build.py builds <key>_bds.metallib for each (nvn_mtl.m dsb_fn)
+# Pixel shaders a pipeline blends with their output 1 as the second source (dual-source blending): dmsh_build.py gives each a dual-source entry point (fs_dual). Rows: shader key; every pixel shader that writes exactly colour outputs 0 and 1 (455 of 129,972), so none meets the zero second-source fallback
 005b5c6c2fcc77d6
 015715428117e52b
 01dd0b6198ad0c61

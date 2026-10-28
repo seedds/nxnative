@@ -92,6 +92,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Mario + Rabbids Kingdom Battle](010067300059A000/README.md) | `010067300059A000` | 1.9.589692 | 4.4.0 | Ubisoft Snowdrop | NVN |
 | [Mario + Rabbids Sparks of Hope](0100317013770000/README.md) | `0100317013770000` | 1.6.2225577 | 13.3.5 | Ubisoft Snowdrop | NVN |
 | [Mario vs. Donkey Kong](0100B99019412000/README.md) | `0100B99019412000` | 1.0.1 (cartridge base) | 15.3.0 | Nintendo (sead / agl / gsys) | NVN |
+| [Metroid Prime 4: Beyond](010019A01E2F2000/README.md) | `010019A01E2F2000` | 1.1.0 | 19.3 | Retro Studios' engine | NVN |
 | [Metroid Dread](010093801237C000/README.md) | `010093801237C000` | 2.1.0 | 11.4.3 | MercurySteam's engine | NVN |
 | [Monster Hunter Rise](0100B04011742000/README.md) | `0100B04011742000` | 16.0.2 | 11.4.3 | Capcom's RE Engine | NVN |
 | [Monster Train 2](010051701FB46000/README.md) | `010051701FB46000` | 1.1.1 | 18.3.5 | Unity 2022.3.54f1 IL2CPP | NVN |

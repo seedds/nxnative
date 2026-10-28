@@ -293,17 +293,19 @@ long dm_sk_sendto(int s, const void *b, unsigned long n, int f, const void *a, u
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
     struct sockaddr_in d; if (!sk_addr_ok(a, al, &d)) return -1;
     long r = sendto(s, b, n, f, (struct sockaddr *)&d, sizeof d);
+    int err = r < 0 ? errno : 0;
     int peers = sk_peer_count();
     if (peers && sk_is_broadcast(&d)) {
         for (int i = 0; i < peers; i++) {
             if (sk_peers[i] == d.sin_addr.s_addr) continue;
             struct sockaddr_in p = {0}; p.sin_len = sizeof p; p.sin_family = AF_INET;
             p.sin_port = d.sin_port; p.sin_addr.s_addr = sk_peers[i];
-            sendto(s, b, n, f, (struct sockaddr *)&p, sizeof p);
+            long copy = sendto(s, b, n, f, (struct sockaddr *)&p, sizeof p);
+            if (r < 0) { r = copy; err = copy < 0 ? errno : 0; }
         }
-        if (r < 0) r = (long)n;   // the broadcast itself may have no route on a tailnet; the unicast copies are what arrive
+        // A tailnet may have no broadcast route; a successful peer copy still delivers the datagram. Keep failures when none was sent.
     }
-    t_skerr = r < 0 ? errno : 0;
+    t_skerr = err;
     return r;
 }
 long dm_sk_recvfrom(int s, void *b, unsigned long n, int f, void *a, unsigned *al) {

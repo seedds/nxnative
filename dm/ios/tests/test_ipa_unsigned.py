@@ -54,8 +54,13 @@ class UnsignedIpaTests(unittest.TestCase):
                 if identity is not None: identity.append((archive.read('Payload/DmIOS.app/romfs.id').decode() if 'Payload/DmIOS.app/romfs.id' in archive.namelist() else None, (root / 'RomFS.img').read_bytes() if image else None))
                 return set(archive.namelist())
 
-    def test_game_files_are_packed_by_default(self):
+    def test_game_files_are_not_packed_by_default(self):
+        # The fork ships a slim IPA by default: the app reads Documents/games/<id>/ (the fork patch ios-slim-ipa).
         names = self.pack()
+        self.assertFalse([n for n in names if '/romfs' in n or '/aoc' in n])
+
+    def test_full_romfs_packs_the_game_files(self):
+        names = self.pack(DM_FULL_ROMFS='1')
         self.assertIn('Payload/DmIOS.app/romfs/marker', names)
         self.assertIn('Payload/DmIOS.app/aoc/0/file', names)
 
@@ -64,7 +69,7 @@ class UnsignedIpaTests(unittest.TestCase):
         self.assertFalse([n for n in names if '/romfs' in n])
         self.assertIn('Payload/DmIOS.app/executable', names)
         self.assertIn('Payload/DmIOS.app/msl/b-fixture/fixture_b.metallib', names)
-        self.assertIn('Payload/DmIOS.app/aoc/0/file', names)   # add-on content has no place outside the app yet
+        self.assertFalse([n for n in names if '/aoc' in n], 'the fork copies add-on content beside the game data')
 
     def test_slim_ipa_of_an_image_carries_its_identity_and_the_default_does_not(self):
         got = []
@@ -76,8 +81,8 @@ class UnsignedIpaTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile() as f:
             f.write(data); f.flush(); self.assertTrue(romfs_image.same_identity(line, romfs_image.identity(f.name)))
         got = []
-        names = self.pack(image=True, identity=got)   # bundle: exactly as before
-        self.assertIn('Payload/DmIOS.app/romfs.img', names); self.assertNotIn('Payload/DmIOS.app/romfs.id', names); self.assertIsNone(got[0][0])
+        names = self.pack(image=True, identity=got)   # the fork's default: the image stays out, its identity goes in
+        self.assertNotIn('Payload/DmIOS.app/romfs.img', names); self.assertIn('Payload/DmIOS.app/romfs.id', names); self.assertIsNotNone(got[0][0])
 
     def test_slim_ipa_of_a_folder_has_no_identity(self):
         self.assertNotIn('Payload/DmIOS.app/romfs.id', self.pack(DM_COPY_ROMFS='NO'))

@@ -11,6 +11,60 @@
 // honest at that boundary: adapt operations it already supports, and report
 // zero only for Metal-4-only diagnostics/optimisations which are not present
 // on this path.
+// Queue bindings are persistent NVN state. Keep one legacy S/R snapshot per
+// queue just like the current renderer, so destroying a launcher's queue cannot
+// leave its program bindings in the game queue (FFX/X-2), and alternating queues
+// retain their own bindings (Three Houses).
+typedef struct legacy_queue_state {
+    uint64_t serial;
+    typeof(S) s;
+    typeof(R) r;
+    struct legacy_queue_state *next;
+} legacy_queue_state;
+static legacy_queue_state *g_legacy_queue_states, *g_legacy_active_queue;
+
+void mtl_queue_activate(uint64_t serial) {
+    if (g_legacy_active_queue && g_legacy_active_queue->serial == serial) return;
+    if (g_legacy_active_queue) {
+        g_legacy_active_queue->s = S;
+        g_legacy_active_queue->r = R;
+    }
+    legacy_queue_state *q = g_legacy_queue_states;
+    while (q && q->serial != serial) q = q->next;
+    if (q) {
+        S = q->s;
+        R = q->r;
+        const prog_t *program = bind_stages(NULL, 0);
+        if (program != S.prog) S.prog = program;
+    } else {
+        q = calloc(1, sizeof *q);
+        if (!q) MDIE("queue state allocation failed");
+        q->serial = serial;
+        q->next = g_legacy_queue_states;
+        g_legacy_queue_states = q;
+        state_reset();
+        memset(&R, 0, sizeof R);
+    }
+    g_legacy_active_queue = q;
+    g_pso_dirty = g_dss_dirty = 1;
+    args_dirty_all();
+}
+
+void mtl_queue_forget(uint64_t serial) {
+    legacy_queue_state **p = &g_legacy_queue_states;
+    while (*p && (*p)->serial != serial) p = &(*p)->next;
+    if (!*p) return;
+    legacy_queue_state *q = *p;
+    *p = q->next;
+    if (g_legacy_active_queue == q) {
+        g_legacy_active_queue = NULL;
+        state_reset();
+        memset(&R, 0, sizeof R);
+        args_dirty_all();
+    }
+    free(q);
+}
+
 void *mtl_device_classic(void) { return mtl_device(); }
 int mtl_pso_prebuild_tool(void) { return 0; }
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) { return mtl_wait(fence, timeout_ns); }

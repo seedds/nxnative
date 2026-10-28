@@ -5,7 +5,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-module_t g_mod[MAX_MOD]; int g_nmod;
+static module_t test_modules[1];
+module_t *g_mod = test_modules; int g_nmod;
 static uint64_t g_test_guest = 1000000000, g_test_wall = 1000000000;
 static int g_detclock;
 static void (*g_readonly)(uint64_t *, int);

@@ -5,7 +5,8 @@
 #include "../hle_za_timing.c"
 #include <assert.h>
 
-module_t g_mod[MAX_MOD]; int g_nmod;
+static module_t test_modules[1];
+module_t *g_mod = test_modules; int g_nmod;
 static _Atomic uint64_t g_test_ns = 1000000000ull;
 static void (*g_readonly)(uint64_t *, int);
 static void (*g_mutable)(uint64_t *, int);

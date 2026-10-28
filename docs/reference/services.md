@@ -815,7 +815,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** broadcast replication discarded the peer sends' results and replaced any initial failure with the requested byte count. The live `Poll` path returned the host result without saving its error.
 - **Fix:** a successful original send or peer copy establishes success; if every send fails, keep an error. Save `Poll`'s error on failure and clear the previous error on success (`hle_net.c`).
 - **Found on:** the synthetic socket regression test, without game files.
-- **Check:** `t_net` sends a datagram beyond IPv4 UDP's payload limit and interrupts a waiting poll with `SIGALRM`; both return their actual error, and a subsequent successful poll clears it. The ordinary loopback and broadcast-delivery checks still pass.
+- **Check:** `t_net` sends a datagram beyond IPv4 UDP's payload limit and interrupts a socket poll with `SIGUSR1` on the polling thread; both return their actual error, and a subsequent successful poll clears it. The ordinary loopback and broadcast-delivery checks still pass.
 
 ## Settings, languages and fonts
 

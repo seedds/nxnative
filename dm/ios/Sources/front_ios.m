@@ -21,6 +21,7 @@ int front_ios_boot_ok(void);
 const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
 const char *front_ios_device_message(void);   // main.m: why this device cannot run the games (its GPU has no BC textures; NULL = supported)
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
+int dm_locate_game_data(void);   // main.m: (re)decide where the game data is; NO when there still is none
 
 static CAMetalLayer *g_layer;
 static void front_ios_power_watch(void);
@@ -64,6 +65,7 @@ static void tv_attach(void);
 @property (nonatomic, strong) UILabel *fps;
 @property (nonatomic) BOOL launched;
 @property (nonatomic, strong) id tv;   // the TV scene accessory's registration (iOS 27)
+@property (nonatomic) BOOL hasLauncher;   // the app has a settings screen: a failed Play goes back to it (its Game data section is the way out)
 - (void)startGame;
 @end
 static DmRootVC *g_root;
@@ -93,6 +95,14 @@ static void launcher_done(void) { [g_root startGame]; }
 // The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
 - (void)startGame {
     if (self.game) return;
+    if (!dm_locate_game_data()) {   // no game data (nothing picked, nothing in Documents): the game cannot start
+        if (self.hasLauncher) { dm_show_launcher((__bridge void *)self, launcher_done); return; }   // back to the settings screen, whose Game data section picks a location
+        UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
+        lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        lb.numberOfLines = 0; lb.textAlignment = NSTextAlignmentCenter; lb.textColor = UIColor.whiteColor;
+        lb.text = @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart.";
+        [self.view addSubview:lb]; return;
+    }
     dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (CloudSaves.m, save_sync.h)
     front_hud_env();   // before the game view makes its device (an env file's DM_METAL_HUD sets it in main.m already)
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
@@ -128,7 +138,8 @@ static void launcher_done(void) { [g_root startGame]; }
     }
     if (self.launched || !front_ios_boot_ok()) return;
     self.launched = YES; g_root = self;
-    if (!dm_show_launcher((__bridge void *)self, launcher_done)) [self startGame];   // the settings screen first (Launcher.swift), when the app has one
+    self.hasLauncher = dm_show_launcher((__bridge void *)self, launcher_done);
+    if (!self.hasLauncher) [self startGame];   // the settings screen first (Launcher.swift), when the app has one
 }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits

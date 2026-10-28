@@ -238,17 +238,36 @@ int plat_xattr_remove(const char *path, const char *name) {
     if (DeleteFileW(ws)) return 0;
     DWORD e = GetLastError(); errno = e == ERROR_FILE_NOT_FOUND ? ENODATA : win_errno(e); return -1;
 }
-static void copy_streams(const wchar_t *src, const wchar_t *dst) {   // a directory's alternate data streams (CopyFileW copies a file's own); best effort
+// A directory's named streams (a directory alias's guest name, plat_xattr_set), each copied by reading it and writing it through the same "path:name" opens plat_xattr_get / plat_xattr_set
+// make. CopyFileW copies a file's own streams, but given a directory's stream as its source it does not reproduce it on the destination directory (the Windows run of tests/t_fs_case.c:
+// after Commit + remount the alias directory .dm-case-N had no guest name, so "dir" was not found), and the failure was ignored. A failure now fails the clone: the copy would lose a guest name
+static int copy_streams(const wchar_t *src, const wchar_t *dst) {
     WIN32_FIND_STREAM_DATA sd; HANDLE f = FindFirstStreamW(src, FindStreamInfoStandard, &sd, 0);
-    if (f == INVALID_HANDLE_VALUE) return;
+    if (f == INVALID_HANDLE_VALUE) {   // no named streams, or a file system without them (FAT, exFAT: nothing to copy)
+        DWORD e = GetLastError();
+        return e == ERROR_HANDLE_EOF || e == ERROR_INVALID_PARAMETER || e == ERROR_INVALID_FUNCTION || e == ERROR_NOT_SUPPORTED ? 0 : fail();
+    }
+    int r = 0;
     do {
-        if (!wcscmp(sd.cStreamName, L"::$DATA")) continue;   // the unnamed stream
+        if (!wcscmp(sd.cStreamName, L"::$DATA")) continue;   // the unnamed stream (a directory has none)
         wchar_t s[4200], d[4200], nm[300]; wcsncpy(nm, sd.cStreamName, 299); nm[299] = 0;
         wchar_t *c = wcsrchr(nm, L':'); if (c && c != nm) *c = 0;   // ":name:$DATA" → ":name"
         _snwprintf(s, 4200, L"%ls%ls", src, nm); _snwprintf(d, 4200, L"%ls%ls", dst, nm); s[4199] = d[4199] = 0;
-        CopyFileW(s, d, FALSE);
-    } while (FindNextStreamW(f, &sd));
-    FindClose(f);
+        HANDLE in = CreateFileW(s, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (in == INVALID_HANDLE_VALUE) { r = fail(); break; }
+        HANDLE out = CreateFileW(d, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (out == INVALID_HANDLE_VALUE) { r = fail(); CloseHandle(in); break; }
+        char b[4096]; DWORD k = 0, put = 0;
+        for (;;) {
+            if (!ReadFile(in, b, sizeof b, &k, NULL)) { r = fail(); break; }
+            if (!k) break;
+            if (!WriteFile(out, b, k, &put, NULL)) { r = fail(); break; }
+            if (put != k) { errno = ENOSPC; r = -1; break; }
+        }
+        CloseHandle(out); CloseHandle(in);
+    } while (!r && FindNextStreamW(f, &sd));
+    if (!r && GetLastError() != ERROR_HANDLE_EOF) r = fail();   // the enumeration itself stopped early
+    FindClose(f); return r;
 }
 static int rm_tree_w(const wchar_t *p) {
     DWORD a = GetFileAttributesW(p); if (a == INVALID_FILE_ATTRIBUTES) return 0;
@@ -266,7 +285,7 @@ static int clone_w(const wchar_t *src, const wchar_t *dst) {
     DWORD a = GetFileAttributesW(src); if (a == INVALID_FILE_ATTRIBUTES) return fail();
     if (!(a & FILE_ATTRIBUTE_DIRECTORY)) return CopyFileW(src, dst, TRUE) ? 0 : fail();   // with the file's streams and attributes
     if (!CreateDirectoryW(dst, NULL)) return fail();
-    copy_streams(src, dst);
+    if (copy_streams(src, dst)) return -1;
     wchar_t pat[4200]; _snwprintf(pat, 4200, L"%ls\\*", src); pat[4199] = 0;
     WIN32_FIND_DATAW fd; HANDLE f = FindFirstFileW(pat, &fd); int r = 0;
     if (f == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND ? 0 : fail();

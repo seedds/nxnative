@@ -263,6 +263,7 @@ uint32_t dm_player_npad(int p) { return p <= 0 ? connected_id() : (uint32_t)p; }
 static _Atomic uint32_t g_players = 1, g_ids_supported = 0x3ff;
 static uint32_t id_bit(uint32_t id) { return id < DM_PLAYERS ? 1u << id : id == NPAD_HANDHELD ? 1u << 8 : id == 0x10 ? 1u << 9 : 0; }
 static int reported(int p) { return p == 0 || (atomic_load(&g_players) >> p & 1 && atomic_load(&g_ids_supported) & id_bit((uint32_t)p)); }
+uint32_t dm_pad_players_accepted(void) { uint32_t n = 1; for (int p = 1; p < DM_PLAYERS; p++) n += (atomic_load(&g_ids_supported) & id_bit((uint32_t)p)) != 0; return n; }
 // Players with a controller whose npad the game does not support. A one-player game (no npad past No1 supported) gets them as player 1, so any controller plays it; in a game for
 // fewer players than are connected (a fifth controller in a four-player game) they are not used, as on the Switch, where the system does not connect them
 static uint32_t unsupported_players(void) {

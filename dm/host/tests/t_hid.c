@@ -478,6 +478,19 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+// How many players the game takes (dm_pad_players_accepted, shown by the iPhone launcher before the next start): player 1 always, and one
+// more for each other npad the game supports
+static void t_accepted(void) {
+    ids((const uint32_t[]){0, NPAD_HANDHELD}, 2);
+    CHECK(dm_pad_players_accepted() == 1, "a one-player game: 1");
+    ids((const uint32_t[]){0, 1, 2, 3, NPAD_HANDHELD}, 5);
+    CHECK(dm_pad_players_accepted() == 4, "No1..No4: 4");
+    ids((const uint32_t[]){0, 1, 2, 3, 4, 5, 6, 7, NPAD_HANDHELD}, 9);
+    CHECK(dm_pad_players_accepted() == 8, "No1..No8: 8");
+    ids((const uint32_t[]){NPAD_HANDHELD}, 1);
+    CHECK(dm_pad_players_accepted() == 1, "handheld only: player 1 still counts");
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
@@ -489,6 +502,7 @@ int main(void) {
     t_motion_live();
     t_motion_hid();
     t_rec();
+    t_accepted();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

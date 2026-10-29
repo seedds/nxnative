@@ -4,6 +4,8 @@
 // --manifest: the RomFS is not written, only a list <output dir>/romfs_manifest.tsv (path, size, first 32 bytes), for surveying a new game (a large game's RomFS is well over 10 GB).
 // A damaged NSP (a file whose data fails the NCA's hash check, e.g. a copy cut short or a broken download) stops the extraction with exit code 3 after listing every damaged file;
 //   --allow-damaged writes those files as read instead and only lists them (Super Mario Galaxy's base NSP with 147 MB zeroed: its two prologue WebM movies).
+//   However many files are damaged: after each hash failure the remaining files are read through a re-opened section storage, because LibHac's read
+//   cache (CachedStorage) loses one of its four blocks per failed read and would otherwise throw from an empty LinkedList on the fifth (#383).
 // Add-on content: nx_extract <prod.keys> --aoc <DLC NSP> <output dir> writes the RomFS of the DLC's data NCA to <output dir> (the packing script puts it at aoc/<index>/, the host mounts it through DM_AOC_DIR).
 // Title keys come from the common tickets (.tik) inside the NSPs, so only prod.keys is needed; key values are never printed.
 // The base game may also be a cartridge dump (.xci, Monster Hunter Rise): its secure partition holds the NCAs, which carry their keys in the key area (no ticket).
@@ -52,8 +54,9 @@ static class P {
             else Console.WriteLine("no icon in the control data");
         }
         // Code section: the update's ExeFS is complete; opening it layered over the base gives the same result
-        IFileSystem exefs = updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);
-        Copy(exefs, Path.Combine(outDir, "ExeFS"), null);
+        Func<IFileSystem> reopenExefs = () => updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);
+        IFileSystem exefs = reopenExefs();
+        Copy(exefs, Path.Combine(outDir, "ExeFS"), null, reopenExefs);
         string[] mods = Directory.GetFiles(Path.Combine(outDir, "ExeFS")); Array.Sort(mods, StringComparer.Ordinal);
         foreach (string p in mods) {   // build ID of every NSO module (main, sdk, subsdk*, rtld...)
             if (new FileInfo(p).Length < 0x50) continue;
@@ -69,17 +72,29 @@ static class P {
             Console.WriteLine("program has no data section: empty RomFS");
             return Damaged();
         }
-        IStorage romfs = updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        // the strict RomFS section storage, re-openable: LibHac's read cache (CachedStorage) removes
+        // its least-recent block before the read and only puts it back on success, so every failed hash
+        // check permanently loses one of the cache's four blocks; after four damaged files every later
+        // read throws InvalidOperationException (the empty LinkedList of #383) instead of a hash
+        // error, and the damaged-file report never prints. The cause is in LibHac and cannot be fixed
+        // here; re-opening the section after each hash failure is the recovery this tool owns.
+        g_strict = () => updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        IStorage romfs = g_strict();
         // the same RomFS without hash checks, for reading damaged files as they are (--allow-damaged)
         g_lenient = () => new RomFsFileSystem(updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid));
-        if (manifest) Manifest(new RomFsFileSystem(romfs), Path.Combine(outDir, "romfs_manifest.tsv"));
-        else if (image) WriteImage(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS.img"));
-        else Copy(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS"), cmpDir);
+        if (manifest) Manifest(new RomFsFileSystem(romfs), Path.Combine(outDir, "romfs_manifest.tsv"), () => new RomFsFileSystem(g_strict()));
+        else if (image) WriteImage(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS.img"), () => new RomFsFileSystem(g_strict()));
+        else Copy(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS"), cmpDir, () => new RomFsFileSystem(g_strict()));
         return Damaged();
     }
 
     // Files whose data failed the hash check: listed at the end; exit code 3 unless --allow-damaged
     static readonly List<string> g_damaged = new List<string>(); static bool g_allow; static Func<IFileSystem> g_lenient; static IFileSystem g_lenientFs;
+    // The strict RomFS storage a damaged extraction re-opens after each hash failure: each failed
+    // read permanently drops one of CachedStorage's four blocks (#383), so without re-opening the
+    // fifth failed read throws InvalidOperationException from an empty LinkedList instead of a
+    // hash error, and the report this tool ends with never prints.
+    static Func<IStorage> g_strict;
     static bool HashError(HorizonResultException e) => e.ResultValue.Module == 2 && e.ResultValue.Description >= 4600 && e.ResultValue.Description < 4700;   // fs: integrity verification failures (2002-46xx)
     static int Damaged() {
         if (g_damaged.Count == 0) return 0;
@@ -96,9 +111,10 @@ static class P {
         Nca data = Pick(pkg, NcaContentType.PublicData) ?? Pick(pkg, NcaContentType.Data) ?? throw new Exception("no data NCA in the DLC NSP");
         Console.WriteLine($"add-on content {data.Header.TitleId:x16}");
         Directory.CreateDirectory(image ? Path.GetDirectoryName(outDir) : outDir);
-        var fs = new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid));
+        g_strict = () => data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);   // re-opened after hash failures (#383)
+        var fs = new RomFsFileSystem(g_strict());
         g_lenient = () => new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid));
-        if (image) WriteImage(fs, outDir); else Copy(fs, outDir, null);
+        if (image) WriteImage(fs, outDir, () => new RomFsFileSystem(g_strict())); else Copy(fs, outDir, null, () => new RomFsFileSystem(g_strict()));
         return Damaged();
     }
 
@@ -198,7 +214,7 @@ static class P {
         public List<ImageEntry> Children = new List<ImageEntry>();
     }
     // Stream the merged, integrity-checked filesystem directly into DMROMFS1. No RomFS directories or per-resource host files are created.
-    static void WriteImage(IFileSystem fs, string dst) {
+    static void WriteImage(IFileSystem fs, string dst, Func<IFileSystem> reopen = null) {
         var root = new ImageEntry { Path = "/", Name = Array.Empty<byte>(), Directory = true };
         var byPath = new Dictionary<string, ImageEntry>(StringComparer.Ordinal) { ["/"] = root };
         if (fs != null) foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
@@ -230,6 +246,9 @@ static class P {
                     try { WriteStream(f.Get, output, e.Size, buffer); }
                     catch (HorizonResultException x) when (HashError(x)) {
                         g_damaged.Add(e.Path);
+                        // one failed read drops one CachedStorage block permanently (#383): a fresh
+                        // strict storage keeps later files readable and detectable
+                        if (reopen != null) fs = reopen();
                         if (!g_allow) continue;
                         g_lenientFs ??= g_lenient();
                         using var lf = new UniqueRef<IFile>();
@@ -264,7 +283,7 @@ static class P {
     }
 
     // Copy out file by file; files identical to the same path in the compare dir become APFS clones instead
-    static void Copy(IFileSystem fs, string dst, string cmpDir) {
+    static void Copy(IFileSystem fs, string dst, string cmpDir, Func<IFileSystem> reopen = null) {
         long n = 0, cloned = 0, bytes = 0, written = 0; byte[] buf = new byte[4 << 20], cb = new byte[4 << 20];
         foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
             string rel = e.FullPath.TrimStart('/'), op = Path.Combine(dst, rel);
@@ -273,14 +292,19 @@ static class P {
             using var f = new UniqueRef<IFile>();
             fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
             string cp = cmpDir == null ? null : Path.Combine(cmpDir, rel);
-            if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
-                if (File.Exists(op)) File.Delete(op);
-                if (clonefile(cp, op, 0) != 0) throw new IOException($"clonefile {cp} → {op} failed: errno {Marshal.GetLastWin32Error()}");
-                cloned++; continue;
+            try {
+                if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
+                    if (File.Exists(op)) File.Delete(op);
+                    if (clonefile(cp, op, 0) != 0) throw new IOException($"clonefile {cp} → {op} failed: errno {Marshal.GetLastWin32Error()}");
+                    cloned++; continue;
+                }
+                Write(f.Get, op, e.Size, buf);
             }
-            try { Write(f.Get, op, e.Size, buf); }
             catch (HorizonResultException x) when (HashError(x)) {
                 g_damaged.Add(e.FullPath);
+                // one failed read drops one CachedStorage block permanently (#383): continue on a
+                // fresh strict storage so detection and the report survive any number of failures
+                if (reopen != null) fs = reopen();
                 if (!g_allow || g_lenient == null) { File.Delete(op); continue; }
                 g_lenientFs ??= g_lenient();
                 using var lf = new UniqueRef<IFile>();
@@ -300,7 +324,7 @@ static class P {
         }
     }
     // List the RomFS only (path, size, first 32 bytes) without writing game files
-    static void Manifest(IFileSystem fs, string path) {
+    static void Manifest(IFileSystem fs, string path, Func<IFileSystem> reopen = null) {
         long n = 0, bytes = 0; byte[] h = new byte[32];
         Directory.CreateDirectory(Path.GetDirectoryName(path));
         using var o = new StreamWriter(path);
@@ -311,7 +335,7 @@ static class P {
             fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
             long got = 0; int want = (int)Math.Min(h.Length, e.Size);
             try { if (want > 0) f.Get.Read(out got, 0, h.AsSpan(0, want), ReadOption.None).ThrowIfFailure(); }
-            catch (HorizonResultException x) when (HashError(x)) { g_damaged.Add(e.FullPath); got = 0; }   // the survey goes on; the file is listed as damaged
+            catch (HorizonResultException x) when (HashError(x)) { g_damaged.Add(e.FullPath); got = 0; if (reopen != null) fs = reopen(); }   // the survey goes on; the file is listed as damaged, and a fresh strict storage keeps it going past four failures (#383)
             o.WriteLine($"{e.FullPath}\t{e.Size}\t{Convert.ToHexString(h, 0, (int)got).ToLowerInvariant()}");
             n++; bytes += e.Size;
         }

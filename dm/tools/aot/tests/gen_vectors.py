@@ -6,8 +6,10 @@ function per instruction class, each sweeping its fields over their ranges with 
 extremes, single bits, byte patterns) and from a fixed-seed pseudo-random stream, so the files are the same on every run and every Python.
 nxaot_vec runs each vector on dynarmic's JIT and as lifted code and compares the results; the expected values are not in the files.
 
-  gen_vectors.py                 write tests/vectors/*.tsv
+  gen_vectors.py                 write tests/vectors/*.tsv (integer classes) and *.tsv.gz (floating point and SIMD: gen_fp_simd.py)
   gen_vectors.py --check         exit 1 when the committed files differ from what this script writes (a CTest)
+  gen_vectors.py --count N --seed S [--classes a,b]
+                                 N random floating-point and SIMD vectors to standard output, no files (the big sweep: | nxaot_vec -)
   gen_vectors.py --census-blob <file> --census-expect <file>
                                  write the synthetic code blob of the census test and the counts nxaot census must find in it
 
@@ -16,8 +18,11 @@ the registers and the 64 KiB memory image the vector does not set; memory operan
 """
 
 import argparse
+import gzip
 import os
 import sys
+
+import gen_fp_simd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VECTOR_DIR = os.path.join(HERE, 'vectors')
@@ -89,6 +94,24 @@ def sext(v, bits):
 COND_NAMES = ['eq', 'ne', 'cs', 'cc', 'mi', 'pl', 'vs', 'vc', 'hi', 'ls', 'ge', 'lt', 'gt', 'le', 'al', 'nv']
 
 
+def vector_line(vid, cls, text, words, seed, fpcr, regs, mem):
+    """One line of the format of src/vec/vectors.h. regs: name -> value (x0..x30, sp, nzcv, fpsr, tpidr, tpidrro, cnt as 64-bit values; v0..v31
+    as 128-bit values; vk as a lane kind name)."""
+    parts = []
+    for k, v in (regs or {}).items():
+        if k == 'vk':
+            parts.append(f'vk={v}')
+        elif k[0] == 'v':
+            parts.append(f'{k}={v & ((1 << 128) - 1):x}')
+        else:
+            parts.append(f'{k}={v & M64:x}')
+    regs_s = ','.join(parts) if parts else '-'
+    mem_s = ','.join(f'{off:x}:{data.hex()}' for off, data in mem) if mem else '-'
+    code = ','.join(f'{w & M32:08x}' for w in words)
+    assert '\t' not in text
+    return '\t'.join([vid, cls, text, code, f'{seed:016x}', f'{fpcr & M32:x}', regs_s, mem_s])
+
+
 class Out:
     """The vectors of one file."""
 
@@ -98,20 +121,19 @@ class Out:
         self.lines = []
         self.per_class = {}
 
-    def add(self, r, cls, text, words, regs=None, mem=None):
+    def add(self, r, cls, text, words, regs=None, mem=None, fpcr=0, seed=None):
         n = len(self.lines) + 1
-        seed = r.next()
-        regs_s = ','.join(f'{k}={v & M64:x}' for k, v in regs.items()) if regs else '-'
-        mem_s = ','.join(f'{off:x}:{data.hex()}' for off, data in mem) if mem else '-'
-        code = ','.join(f'{w & M32:08x}' for w in words)
-        assert '\t' not in text
-        self.lines.append('\t'.join([f'{self.name}.{n:05d}', cls, text, code, f'{seed:016x}', regs_s, mem_s]))
+        seed = r.next() if seed is None else seed
+        regs = dict(regs or {})
+        if 'fpcr' in regs:
+            fpcr = regs.pop('fpcr')
+        self.lines.append(vector_line(f'{self.name}.{n:05d}', cls, text, words, seed, fpcr, regs, mem))
         self.per_class[cls] = self.per_class.get(cls, 0) + 1
 
     def text(self):
         head = [f'# nxaot vectors: {self.title}',
                 '# Written by dm/tools/aot/tests/gen_vectors.py; do not edit (run it again). Format: src/vec/vectors.h',
-                '# id\tclass\ttext\tcode\tseed\tregs\tmem']
+                '# id\tclass\ttext\tcode\tseed\tfpcr\tregs\tmem']
         return '\n'.join(head + self.lines) + '\n'
 
 
@@ -886,7 +908,7 @@ def gen_system(out, r):
                 [add_imm(rd, rd, 1), word, add_imm(rd, rd, 2)], {f'x{rd}': value(r)})
 
 
-# ---- Words dynarmic does not translate, and FP / SIMD (refused by the lifter today) ----
+# ---- Words dynarmic does not translate ----
 
 def gen_undefined(out, r):
     for i in range(400):
@@ -904,36 +926,6 @@ def gen_undefined(out, r):
         else:
             word, name = 0xD500401F | (r.below(8) << 16) | (r.below(16) << 8) | (r.below(8) << 5), 'MSR (immediate)'
         out.add(r, 'undefined', f'{name} {word:#010x}', [word])
-
-
-def gen_fp_simd(out, r):
-    def reg3(base):
-        return base | (r.below(32) << 16) | (r.below(32) << 5) | r.below(32)
-
-    kinds = [
-        (lambda: reg3(0x1E202800 | (r.below(2) << 22)), 'FADD (scalar)'),
-        (lambda: reg3(0x1E200800 | (r.below(2) << 22)), 'FMUL (scalar)'),
-        (lambda: 0x1E270000 | (r.below(32) << 5) | r.below(32), 'FMOV (general to S)'),
-        (lambda: 0x1E380000 | (r.below(32) << 5) | r.below(32), 'FCVTZS (scalar, integer)'),
-        (lambda: 0x1E220000 | (r.below(32) << 5) | r.below(32), 'SCVTF (scalar, integer)'),
-        (lambda: 0x3DC00000 | (r.below(31) << 5) | r.below(32), 'LDR Q'),
-        (lambda: 0x3D800000 | (r.below(31) << 5) | r.below(32), 'STR Q'),
-        (lambda: reg3(0x4EA08400), 'ADD (vector, 4S)'),
-        (lambda: 0x4E284800 | (r.below(32) << 5) | r.below(32), 'AESE'),
-        (lambda: reg3(0x5E000000), 'SHA1C'),
-        (lambda: reg3(0x0EE0E000), 'PMULL (1Q)'),
-        (lambda: 0x6F00E400 | r.below(32), 'MOVI (2D, #0)'),
-        (lambda: reg3(0x1E202000) & ~31, 'FCMP'),
-    ]
-    for i in range(150):
-        fn, name = kinds[i % len(kinds)]
-        rn = r.below(31)
-        word = fn()
-        regs = {}
-        if name in ('LDR Q', 'STR Q'):
-            rn = (word >> 5) & 31
-            regs[f'x{rn}'] = data_address(r, 16, align=16)
-        out.add(r, 'fp_simd', f'{name} {word:#010x}', [word], regs)
 
 
 # ---- Sequences: flags set by one instruction and read by later ones, and straight-line mixes ----
@@ -1004,17 +996,64 @@ FILES = [
     ('system', 'system registers, hints, barriers, data and instruction cache maintenance, svc and brk', gen_system),
     ('sequence', 'flags set and read across instructions, and straight-line mixes', gen_sequences),
     ('undefined', 'words dynarmic does not translate (udf, unallocated groups, LSE, hvc / smc, msr immediate)', gen_undefined),
-    ('fp_simd', 'floating point and SIMD: refused by the lifter today (counted as unsupported)', gen_fp_simd),
 ]
 
 
 def build():
+    """{file name: Out}: the integer classes as .tsv, the floating-point and SIMD ones (gen_fp_simd.py) as .tsv.gz"""
     files = {}
     for k, (name, title, fn) in enumerate(FILES):
         out = Out(name, title)
         fn(out, Rng(SEED + k))
         files[name + '.tsv'] = out
+    for name, out in gen_fp_simd.build_all(Out, Rng, SEED, value).items():
+        files[name + '.tsv.gz'] = out
     return files
+
+
+def write_file(path, text):
+    data = text.encode()
+    if path.endswith('.gz'):
+        data = gzip.compress(data, compresslevel=9, mtime=0)
+    with open(path, 'wb') as f:
+        f.write(data)
+
+
+def read_file(path):
+    with open(path, 'rb') as f:
+        data = f.read()
+    if path.endswith('.gz'):
+        data = gzip.decompress(data)
+    return data.decode().replace('\r\n', '\n')  # a checkout with CRLF line ends compares equal
+
+
+def sweep(count, seed, classes, seeds_per_word):
+    """count random floating-point and SIMD vectors to standard output (nothing is written): the generators of gen_fp_simd.py, round after
+    round with new seeds, every file (or the files or classes named) in turn, until count lines are out"""
+    printed = 0
+    rnd = 0
+    files_named = [c for c in classes if c in gen_fp_simd.FILE_NAMES]
+    sys.stdout.write('# nxaot vectors: random sweep, gen_vectors.py --count %d --seed %#x\n' % (count, seed))
+    while printed < count:
+        only = files_named if files_named and len(files_named) == len(classes) else None
+        files = gen_fp_simd.build_all(Out, Rng, seed + rnd * 0x10001, value, only=only, seeds=seeds_per_word)
+        rnd += 1
+        lines = []
+        for name, out in files.items():
+            for line in out.lines:
+                cls = line.split('\t', 2)[1]
+                if not classes or name in classes or cls in classes:
+                    lines.append(line)
+        if not lines:
+            sys.stderr.write('gen_vectors.py --count: no vectors of the classes named\n')
+            return 1
+        for line in lines:
+            if printed >= count:
+                break
+            vid, rest = line.split('\t', 1)
+            sys.stdout.write(f'{vid}.r{rnd}\t{rest}\n')
+            printed += 1
+    return 0
 
 
 # ---- The census test's synthetic blob ----
@@ -1174,7 +1213,15 @@ def main():
     ap.add_argument('--out', default=VECTOR_DIR, help='folder for the .tsv files (default: tests/vectors beside this script)')
     ap.add_argument('--census-blob', help='write the census test blob (raw little-endian words) to this file')
     ap.add_argument('--census-expect', help='with --census-blob: write the expected counts (key<TAB>count) to this file')
+    ap.add_argument('--count', type=int, help='write this many random floating-point and SIMD vectors to standard output instead of the files '
+                                              '(the big sweep: gen_vectors.py --count N --seed S | nxaot_vec -)')
+    ap.add_argument('--seed', type=lambda x: int(x, 0), default=1, help='with --count: the seed of the sweep (default 1)')
+    ap.add_argument('--classes', default='', help='with --count: comma-separated file or class names to keep (default: all)')
+    ap.add_argument('--seeds-per-word', type=int, default=10, help='with --count: vectors per encoding (default 10)')
     args = ap.parse_args()
+
+    if args.count is not None:
+        return sweep(args.count, args.seed, [c for c in args.classes.split(',') if c], args.seeds_per_word)
 
     if args.census_blob:
         words, expect = census_blob()
@@ -1194,13 +1241,12 @@ def main():
         for name, o in files.items():
             path = os.path.join(args.out, name)
             try:
-                with open(path) as f:  # universal newlines: a checkout with CRLF line ends compares equal
-                    current = f.read()
+                current = read_file(path)
             except OSError:
                 current = None
             if current != o.text():
                 stale.append(name)
-        on_disk = sorted(n for n in os.listdir(args.out) if n.endswith('.tsv')) if os.path.isdir(args.out) else []
+        on_disk = sorted(n for n in os.listdir(args.out) if n.endswith(('.tsv', '.tsv.gz'))) if os.path.isdir(args.out) else []
         extra = [n for n in on_disk if n not in files]
         if stale or extra:
             print('gen_vectors.py --check: out of date: ' + ', '.join(stale + [f'{n} (not written by this script)' for n in extra]) +
@@ -1210,12 +1256,14 @@ def main():
         return 0
 
     os.makedirs(args.out, exist_ok=True)
+    for name in os.listdir(args.out):
+        if name.endswith(('.tsv', '.tsv.gz')) and name not in files:
+            os.remove(os.path.join(args.out, name))  # a file of a class this script no longer writes
     for name, o in files.items():
-        with open(os.path.join(args.out, name), 'w', newline='\n') as f:
-            f.write(o.text())
+        write_file(os.path.join(args.out, name), o.text())
     print(f'gen_vectors.py: {total} vectors in {len(files)} files under {args.out}')
     for name, o in files.items():
-        print(f'  {name:16s} {len(o.lines):6d}  ' + ', '.join(f'{c} {n}' for c, n in sorted(o.per_class.items())))
+        print(f'  {name:20s} {len(o.lines):7d}  ' + ', '.join(f'{c} {n}' for c, n in sorted(o.per_class.items())))
     return 0
 
 

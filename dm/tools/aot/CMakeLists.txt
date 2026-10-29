@@ -43,7 +43,7 @@ configure_file(src/nxaot_lock.h.in "${CMAKE_CURRENT_BINARY_DIR}/gen/nxaot_lock.h
 # LLVM: the shared libLLVM where the package was built with one (the Ubuntu packages of the image are), else the static component libraries.
 # NXAOT_LLVM_STATIC=ON links the components statically, as the distributed nxaot will be (aot-recompiler.md section 13)
 option(NXAOT_LLVM_STATIC "Link the LLVM component libraries statically instead of libLLVM" OFF)
-set(NXAOT_LLVM_COMPONENTS core support orcjit native nativecodegen asmparser asmprinter passes analysis mc)
+set(NXAOT_LLVM_COMPONENTS core support orcjit native nativecodegen asmparser asmprinter passes analysis mc transformutils)
 
 # dynarmic: the A64 frontend (the lifter's semantics) and the x86-64 backend (the reference executor of nxaot_vec). Its own tests, the A32 frontend and its
 # precompiled headers are off; warnings of vendored code are not ours to fix
@@ -64,12 +64,13 @@ target_link_libraries(nxaot_decode PUBLIC dynarmic merry::mcl fmt::fmt tsl::robi
 target_compile_options(nxaot_decode PRIVATE ${NXAOT_WARNINGS})
 
 # The census (src/analysis): instruction classes and the phase 0 questions over a raw code blob
-add_library(nxaot_analysis STATIC src/analysis/census.cpp)
+add_library(nxaot_analysis STATIC src/analysis/census.cpp src/analysis/reach.cpp)
 target_link_libraries(nxaot_analysis PUBLIC nxaot_decode)
 target_compile_options(nxaot_analysis PRIVATE ${NXAOT_WARNINGS})
 
 # The lifter (src/lift): dynarmic IR -> LLVM IR, and the ORC JIT that runs lifted blocks in nxaot_vec
-add_library(nxaot_lift STATIC src/lift/lifter.cpp src/lift/opcodes.cpp src/lift/jit.cpp)
+add_library(nxaot_lift STATIC src/lift/lifter.cpp src/lift/lower_fp.cpp src/lift/lower_vector.cpp src/lift/lower_crypto.cpp src/lift/runtime.cpp
+            src/lift/opcodes.cpp src/lift/jit.cpp)
 target_include_directories(nxaot_lift PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/gen")
 target_include_directories(nxaot_lift SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
 separate_arguments(_llvm_defs NATIVE_COMMAND "${LLVM_DEFINITIONS}")
@@ -87,14 +88,28 @@ add_executable(nxaot src/main.cpp)
 target_link_libraries(nxaot PRIVATE nxaot_analysis nxaot_lift)
 target_compile_options(nxaot PRIVATE ${NXAOT_WARNINGS})
 
+# zlib reads the compressed vector files (tests/vectors/*.tsv.gz); LLVM itself is built with it (LLVM_ENABLE_ZLIB), so it is no new dependency
+find_package(ZLIB REQUIRED)
 add_executable(nxaot_vec src/vec/main.cpp src/vec/vectors.cpp src/vec/reference.cpp src/vec/lifted.cpp)
-target_link_libraries(nxaot_vec PRIVATE nxaot_lift)
+target_link_libraries(nxaot_vec PRIVATE nxaot_lift ZLIB::ZLIB)
 target_compile_options(nxaot_vec PRIVATE ${NXAOT_WARNINGS})
 
-# Tests: the vectors (lifted against dynarmic), the census over the generator's synthetic blob, and the committed vectors against the generator
+# nxaot_bench: the cost of the NaN-chain checks and the x86 code of lifted floating point (README.md, "Measurements")
+add_executable(nxaot_bench src/bench/main.cpp)
+target_link_libraries(nxaot_bench PRIVATE nxaot_lift)
+target_compile_options(nxaot_bench PRIVATE ${NXAOT_WARNINGS})
+
+# Tests: the vectors (lifted against dynarmic) on this machine's CPU; the cryptographic vectors for x86-64-v3, which has no AES-NI, SHA or
+# PCLMULQDQ (their software forms); the scalar floating point and the sequences with every operation checking its own NaNs (NaNMode::PerOp,
+# the reference of the chains); every opcode the A64 frontend emits lowered; the census over the generator's synthetic blob; and the committed
+# vectors against the generator
 enable_testing()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-add_test(NAME vectors COMMAND nxaot_vec "${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors")
+set(_vectors "${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors")
+add_test(NAME vectors COMMAND nxaot_vec "${_vectors}")
+add_test(NAME vectors_v3 COMMAND nxaot_vec --cpu x86-64-v3 "${_vectors}/crypto.tsv.gz")
+add_test(NAME vectors_perop COMMAND nxaot_vec --nan-mode perop "${_vectors}/fp.tsv.gz" "${_vectors}/fp_seq.tsv.gz")
+add_test(NAME opcodes_reach COMMAND nxaot opcodes --reach --check)
 add_test(NAME census COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_census.py" --nxaot $<TARGET_FILE:nxaot> --work "${CMAKE_CURRENT_BINARY_DIR}/census")
 add_test(NAME vectors_current COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/gen_vectors.py" --check)
-set_tests_properties(vectors census PROPERTIES TIMEOUT 600)
+set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census PROPERTIES TIMEOUT 900)

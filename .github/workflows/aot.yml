@@ -1,5 +1,6 @@
 # The ahead-of-time recompiler nxaot (dm/tools/aot, Phase 2 of the port: docs/design/migration-status.md): its Docker image, its build, CTest and the
-# test runner that writes logs/aot/, with the commands of dm/tools/aot/README.md. Nothing here builds or runs a game.
+# test runner that writes logs/aot/ (the vector harness, the benchmark of the NaN chains), with the commands of dm/tools/aot/README.md. Nothing here
+# builds or runs a game.
 name: aot
 
 on:
@@ -36,10 +37,14 @@ jobs:
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
             "cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot"
-      - name: CTest
+      # Time budget: the committed vectors (179,296, most of them floating point and SIMD) take about 4 minutes on an 8-thread machine, and they run
+      # once, in the runner, which logs them; CTest runs the other tests (the crypto vectors for x86-64-v3, the per-operation NaN mode, the reach
+      # check, the census, the vectors-current check). Should the job outgrow its budget, trim the committed set (words_per_entry and
+      # seeds_per_word in dm/tools/aot/tests/gen_fp_simd.py), not the classes it covers
+      - name: CTest (all but the full vector run)
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot \
-            ctest --test-dir build/aot --output-on-failure
+            ctest --test-dir build/aot --output-on-failure -E '^vectors$'
       - name: Test runner (logs/aot)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |

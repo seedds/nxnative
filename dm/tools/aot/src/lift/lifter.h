@@ -3,8 +3,10 @@
 // Guest registers live in allocas that mem2reg promotes (loaded at entry, the written ones stored at exit); NZCV is four i1 values, compared directly
 // against the operands of the subtraction or logical operation that set them where the block shows it, and stored to st->nzcv only when written;
 // guest memory is one volatile access per IR access, exclusives a compare-and-swap against st->excl_* (section 6.5); svc, brk, udf and anything
-// undefined leave the function with st->pc and st->exit_reason. Scope today: the integer, memory, branch, system-register and exclusive instruction
-// classes. A region that holds a floating-point or SIMD IR opcode is refused whole (Lifted::unsupported), never lowered in part.
+// undefined leave the function with st->pc and st->exit_reason. Floating point and SIMD (section 7) follow the FPCR the region is specialised for
+// (LiftOptions::fpcr, section 7.1): MXCSR holds its rounding mode and flush-to-zero while guest code runs (the host, or nxaot_vec, sets it), the
+// cumulative exception flags accumulate in MXCSR and in st->fpsr (section 7.4), and NaN results follow Arm's rules through the NaN chains of
+// section 7.3. A region that holds an IR opcode the lowering does not cover is refused whole (Lifted::unsupported), never lowered in part.
 #pragma once
 
 #include <cstddef>
@@ -33,10 +35,49 @@ constexpr uint64_t kZvaBytes = 64;
 constexpr uint32_t kFpcrMask = 0x07C89F00;
 constexpr uint32_t kFpsrMask = 0x0800009F;
 
+// What the lowering may use of the x86-64 target (lift/jit.h reads it from the target machine). The baseline is x86-64-v3 (FMA3, AVX2, F16C:
+// migration-status.md, CPU baseline); AES-NI, SHA and PCLMULQDQ are outside the x86-64 levels and have software forms
+struct Target {
+    bool fma = true, f16c = true, avx2 = true;
+    bool aes = false, sha = false, pclmul = false;
+};
+
+// How NaN results are made exact (section 7.3)
+enum class NaNMode {
+    Chains,     // the fast path: a check on each value that leaves a chain of P operations, the chain recomputed with Arm's rules when it is a NaN
+    PerOp,      // every operation checks its own result (dynarmic's way): the reference the chains are measured against
+    Unchecked,  // no NaN fix-up at all: inexact (x86 NaNs), for measuring the cost of the checks only (nxaot_bench); never in a pack
+};
+
+struct LiftOptions {
+    uint32_t fpcr = 0;            // the FPCR the region is specialised for; only its mode bits (AHP, DN, FZ, RMode, FZ16) matter
+    bool fpsr_flags = true;       // model the cumulative exception flags exactly (strict floating point; section 7.4)
+    NaNMode nan_mode = NaNMode::Chains;
+    Target target;
+};
+
+// The FPCR bits a block is specialised on: dynarmic's location descriptor keeps the same (frontend/A64/a64_location_descriptor.h, fpcr_mask)
+constexpr uint32_t kFpcrModeMask = 0x07C80000;
+
 struct Region {
     uint64_t entry = 0;
     uint64_t lo = 0, hi = 0;  // blocks that start in [lo, hi) are lifted into the function; a transfer anywhere else leaves it with st->pc set
     size_t max_blocks = 64;
+};
+
+// Where dynarmic's x86-64 backend, the reference of nxaot_vec, raises other cumulative FPSR bits than the Arm ARM for an operation the lowering
+// follows the Arm ARM in (README.md, "Known issues": the numbers there). The lowering notes the ones a region meets, in the forms dynarmic takes
+// them; nxaot_vec relaxes only those FPSR bits, only in those directions, for such regions (src/vec/main.cpp, KnownIssues)
+enum DynarmicIssue : int {
+    kIssueRoundIntInexact = 8,      // frintn / p / m / z / i: Inexact from roundss (Arm raises none when exact = FALSE)
+    kIssueToFixedNative = 9,        // fcvt[npmz][su] / fcvtzs fixed: the clamps of the native conversions drop or swap Invalid Operation and Inexact
+    kIssueToFixedSoftware = 10,     // fcvta[su], half precision: a negative value rounding to 0 in an unsigned conversion gives IOC, not IXC
+    kIssueMulAddNaNProduct = 11,    // fmadd family, DN = 0: the NaN path's test multiply adds Inexact / Overflow / Underflow
+    kIssueNoInputDenormal = 12,     // FZ: denormal inputs flushed by DAZ raise no Input Denormal in native operations
+    kIssueVectorMinMaxQNaN = 13,    // fmax / fmin / fmaxnm / fminnm (vector): maxps / minps raise Invalid Operation for quiet NaNs
+    kIssueRSqrtEstimateNative = 14, // frsqrte (single, double): the native estimate raises Inexact (sqrtss / divss) or, through rsqrtss, nothing
+    kIssueVectorUpperLanes = 15,    // 64-bit vector forms: dynarmic computes the zero upper lanes too (fdiv 0 / 0: IOC; frecpe, frsqrte of 0: DZC)
+    kIssueMulAddInfZero = 16,       // fmla / fmls, and the fmadd family with DN: a quiet NaN addend with infinity times zero raises no Invalid Operation
 };
 
 struct Lifted {
@@ -44,13 +85,21 @@ struct Lifted {
     std::vector<std::string> unsupported;  // the dynarmic IR opcodes it was refused for: their names, sorted, each once
     std::string error;                     // an internal error of the lowering (the region is refused too)
     std::vector<Dynarmic::IR::Opcode> opcodes;  // every IR opcode of the region's blocks (after dead-code elimination), each once
+    std::vector<int> dynarmic_issues;      // DynarmicIssue values the region's floating point meets, sorted, each once
     size_t blocks = 0;
 };
 
 // Lifts the region into module as a function called name. The module's data layout should be the target's (lift/jit.h sets it)
-Lifted LiftRegion(llvm::Module& module, const std::string& name, const Region& region, const decode::CodeReader& read);
+Lifted LiftRegion(llvm::Module& module, const std::string& name, const Region& region, const decode::CodeReader& read, const LiftOptions& options = {});
 
 // dynarmic's text dump of the region's IR blocks, as the lifter sees them (nxaot_vec --dump)
-std::string DumpRegion(const Region& region, const decode::CodeReader& read);
+std::string DumpRegion(const Region& region, const decode::CodeReader& read, uint32_t fpcr = 0);
+
+// The MXCSR value guest code runs with for an FPCR (dynarmic's A64JitState::SetFpcr): every exception masked, RMode as the rounding control, FZ
+// as flush-to-zero and denormals-are-zero, the flags clear
+uint32_t GuestMxcsr(uint32_t fpcr);
+
+// MXCSR exception flags as FPSR cumulative bits (dynarmic's A64JitState::GetFpsr): IE -> IOC, ZE -> DZC, OE -> OFC, UE -> UFC, PE -> IXC
+uint32_t FpsrFromMxcsr(uint32_t mxcsr);
 
 }  // namespace nxaot::lift

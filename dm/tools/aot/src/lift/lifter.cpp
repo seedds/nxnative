@@ -4,12 +4,14 @@
 #include <cstddef>
 #include <deque>
 #include <map>
+#include <optional>
 #include <set>
 #include <unordered_map>
 
 #include <llvm/ADT/StringExtras.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/FPEnv.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
@@ -26,6 +28,7 @@
 #include "dynarmic/ir/opt/passes.h"
 #include "dynarmic/ir/terminal.h"
 #include "dynarmic/ir/type.h"
+#include "lift/function_lifter.h"
 #include "lift/opcodes.h"
 #include "nxaot/guest_state.h"
 #include "nxaot_lock.h"
@@ -42,116 +45,27 @@ constexpr bool SameString(const char* a, const char* b) {
 }
 static_assert(SameString(LLVM_VERSION_STRING, NXAOT_LOCK_LLVM), "LLVM_VERSION_STRING differs from the llvm row of nxaot.lock");
 
+}  // namespace
+
+uint32_t GuestMxcsr(uint32_t value) {
+    static const uint32_t rc[4] = {0x0000, 0x4000, 0x2000, 0x6000};  // RN, RP, RM, RZ as MXCSR.RC (nearest, down = 1, up = 2, zero = 3)
+    uint32_t m = 0x1F80 | rc[(value >> 22) & 3];
+    if ((value >> 24) & 1) {
+        m |= 0x8040;  // FTZ and DAZ
+    }
+    return m;
+}
+
+uint32_t FpsrFromMxcsr(uint32_t mxcsr) {
+    return (mxcsr & 0x1) | ((mxcsr & 0x3C) >> 1);
+}
+
+namespace detail {
+
 using namespace Dynarmic;
-using llvm::BasicBlock;
-using llvm::ConstantInt;
-using llvm::Value;
 
-// The four flags as i1 values
-struct Flags {
-    Value* n = nullptr;
-    Value* z = nullptr;
-    Value* c = nullptr;
-    Value* v = nullptr;
-};
-
-// What set the flags, when the block shows it: conditions then compare the operands directly (section 9.2) instead of combining flag bits
-enum class OriginKind { None, Sub, Logic };
-struct Origin {
-    OriginKind kind = OriginKind::None;
-    Value* a = nullptr;    // Sub: the operands of a - b (carry in 1)
-    Value* b = nullptr;
-    Value* res = nullptr;  // Sub and Logic: the result
-};
-
-class FunctionLifter {
-public:
-    FunctionLifter(llvm::Module& module, const Region& region, const decode::CodeReader& read)
-            : M(module), C(module.getContext()), B(module.getContext()), region(region), read(read) {}
-
-    Lifted Run(const std::string& name);
-    std::string Dump();
-
-private:
-    // Phase 1: translate the region's blocks and check their opcodes
-    void Discover(Lifted& out);
-    static void Successors(const IR::Terminal& t, const IR::Block& block, std::vector<uint64_t>& out);
-    bool InRegion(uint64_t pc) const { return pc >= region.lo && pc < region.hi; }
-
-    // Phase 2: lowering
-    void Prologue();
-    void Epilogue();
-    void LowerBlock(IR::Block& block);
-    void LowerInst(IR::Inst& inst);
-    void LowerTerminal(const IR::Terminal& t);
-    void Goto(Value* target);
-    void Exit(Value* pc, uint32_t reason, Value* arg);
-    bool LowerContext(IR::Inst& inst);
-    bool LowerFlags(IR::Inst& inst);
-    bool LowerInteger(IR::Inst& inst);
-    bool LowerMemory(IR::Inst& inst);
-
-    // Values
-    Value* Get(const IR::Value& v);
-    Value* Arg(const IR::Inst& inst, size_t i) { return Get(inst.GetArg(i)); }
-    const Flags& FlagsArg(const IR::Inst& inst, size_t i);
-    void Def(const IR::Inst& inst, Value* v) { values[&inst] = v; }
-    llvm::Type* TypeOf(IR::Type t);
-    Value* Field(size_t offset) { return B.CreateConstInBoundsGEP1_64(B.getInt8Ty(), st, offset); }
-    Value* LoadField(llvm::Type* ty, size_t offset) { return B.CreateAlignedLoad(ty, Field(offset), llvm::Align(ty->getPrimitiveSizeInBits() / 8)); }
-    void StoreField(Value* v, size_t offset) { B.CreateAlignedStore(v, Field(offset), llvm::Align(v->getType()->getPrimitiveSizeInBits() / 8)); }
-    Value* I(unsigned bits, uint64_t v) { return ConstantInt::get(B.getIntNTy(bits), v); }
-    Value* SignBit(Value* v) { return B.CreateICmpSLT(v, ConstantInt::get(v->getType(), 0)); }
-    static unsigned Bits(Value* v) { return v->getType()->getIntegerBitWidth(); }
-
-    // Flags and conditions
-    Flags CurrentFlags();
-    void SetFlags(const Flags& f, const Origin& origin);
-    Value* Cond(IR::Cond cond);
-    Flags FlagsFromOp(const IR::Inst& producer, Origin* origin);
-    Value* CarryOf(const IR::Inst& producer);
-    Value* OverflowOf(const IR::Inst& producer);
-    Value* PackNzcv(const Flags& f);
-    Flags UnpackNzcv(Value* packed);
-
-    // Integer helpers
-    Value* Shift(IR::Opcode op, Value* v, Value* amount);
-    Value* Div(bool is_signed, Value* a, Value* b);
-    Value* Crc32Iso(Value* crc, Value* data, unsigned bytes);
-    Value* Crc32c(Value* crc, Value* data, unsigned bits);
-
-    // Memory helpers
-    Value* GuestPtr(Value* vaddr) { return B.CreateIntToPtr(vaddr, B.getPtrTy()); }
-    llvm::Instruction* Mark(llvm::Instruction* i);
-    static bool Ordered(IR::AccType acc) { return acc == IR::AccType::ORDERED || acc == IR::AccType::ORDEREDRW || acc == IR::AccType::LIMITEDORDERED; }
-
-    llvm::Module& M;
-    llvm::LLVMContext& C;
-    llvm::IRBuilder<> B;
-    const Region& region;
-    const decode::CodeReader& read;
-
-    std::map<uint64_t, IR::Block> blocks;
-    std::map<uint64_t, BasicBlock*> bbs;
-    llvm::Function* F = nullptr;
-    Value* st = nullptr;
-    BasicBlock* exit_bb = nullptr;
-    std::array<llvm::AllocaInst*, 31> x{};
-    llvm::AllocaInst* sp = nullptr;
-    std::array<llvm::AllocaInst*, 4> flag{};  // N, Z, C, V
-    llvm::AllocaInst* check_bit = nullptr;
-    std::array<bool, 31> wrote_x{};
-    bool wrote_sp = false, wrote_nzcv = false;
-
-    // Per block
-    std::unordered_map<const IR::Inst*, Value*> values;
-    std::unordered_map<const IR::Inst*, Flags> flag_values;
-    std::unordered_map<const IR::Inst*, Origin> origins;
-    Origin cur_origin;
-    Value* last_pc = nullptr;
-    bool terminated = false;
-    std::string error;
-};
+FunctionLifter::FunctionLifter(llvm::Module& module, const Region& region, const decode::CodeReader& read, const LiftOptions& options)
+        : M(module), C(module.getContext()), B(module.getContext()), region(region), read(read), opts(options), fpcr(options.fpcr & kFpcrModeMask) {}
 
 // ---- Phase 1 ----
 
@@ -182,6 +96,87 @@ void FunctionLifter::Successors(const IR::Terminal& t, const IR::Block& block, s
     }
 }
 
+// Forwards the vector registers within a block, as dynarmic's A64GetSetElimination does for every register (the reference runs without that
+// pass: README.md, "Known issues", 1, which is about NZCV): a GetQ after a SetQ or SetD of the register, or a GetD after a SetD, takes the value
+// written; a SetQ / SetD the block overwrites before reading the register is dead; and the scalar read of what a scalar write zero-extended
+// (VectorGetElement of ZeroExtendLongToQuad, lane 0) is the scalar. A value then flows from one floating-point instruction to the next without
+// the round trip through the register, which is what lets NaN chains (section 7.3) span instructions: only the block's last write of a register
+// is a use outside the chain
+static void ForwardVectorRegisters(IR::Block& block) {
+    struct Last {
+        IR::Inst* set = nullptr;  // the last SetQ / SetD of the register in the block
+        bool read = false;        // the register was read (not forwarded) since
+    };
+    std::array<Last, 32> last{};
+    auto scalar_of = [](IR::Inst& get) -> std::optional<IR::Value> {
+        // VectorGetElementN(ZeroExtendLongToQuad(ZeroExtend*ToLong(x)), 0) -> x
+        const IR::Value q = get.GetArg(0);
+        if (q.IsImmediate() || get.GetArg(1).GetU8() != 0) {
+            return std::nullopt;
+        }
+        IR::Inst* quad = q.GetInstRecursive();
+        if (quad->GetOpcode() != IR::Opcode::ZeroExtendLongToQuad) {
+            return std::nullopt;
+        }
+        const IR::Value l = quad->GetArg(0);
+        if (get.GetOpcode() == IR::Opcode::VectorGetElement64) {
+            return l;
+        }
+        if (l.IsImmediate()) {
+            return std::nullopt;
+        }
+        IR::Inst* widen = l.GetInstRecursive();
+        const IR::Opcode want = get.GetOpcode() == IR::Opcode::VectorGetElement32   ? IR::Opcode::ZeroExtendWordToLong
+                                : get.GetOpcode() == IR::Opcode::VectorGetElement16 ? IR::Opcode::ZeroExtendHalfToLong
+                                                                                    : IR::Opcode::ZeroExtendByteToLong;
+        if (widen->GetOpcode() != want) {
+            return std::nullopt;
+        }
+        return widen->GetArg(0);
+    };
+    for (auto& inst : block) {
+        switch (inst.GetOpcode()) {
+        case IR::Opcode::A64SetQ:
+        case IR::Opcode::A64SetD: {
+            Last& l = last[static_cast<size_t>(inst.GetArg(0).GetA64VecRef())];
+            if (l.set && !l.read) {
+                l.set->Invalidate();
+            }
+            l = {&inst, false};
+            break;
+        }
+        case IR::Opcode::A64SetS:
+            last[static_cast<size_t>(inst.GetArg(0).GetA64VecRef())] = {};
+            break;
+        case IR::Opcode::A64GetQ:
+        case IR::Opcode::A64GetD: {
+            Last& l = last[static_cast<size_t>(inst.GetArg(0).GetA64VecRef())];
+            const bool forward =
+                l.set && (inst.GetOpcode() == IR::Opcode::A64GetQ || l.set->GetOpcode() == IR::Opcode::A64SetD);  // GetD of a SetQ needs a ZeroUpper
+            if (forward) {
+                inst.ReplaceUsesWith(l.set->GetArg(1));
+            } else {
+                l.read = true;
+            }
+            break;
+        }
+        case IR::Opcode::A64GetS:
+            last[static_cast<size_t>(inst.GetArg(0).GetA64VecRef())].read = true;
+            break;
+        case IR::Opcode::VectorGetElement8:
+        case IR::Opcode::VectorGetElement16:
+        case IR::Opcode::VectorGetElement32:
+        case IR::Opcode::VectorGetElement64:
+            if (const auto x = scalar_of(inst)) {
+                inst.ReplaceUsesWith(*x);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 void FunctionLifter::Discover(Lifted& out) {
     std::deque<uint64_t> work{region.entry};
     std::set<std::string> unsupported;
@@ -192,7 +187,12 @@ void FunctionLifter::Discover(Lifted& out) {
         if (blocks.count(pc) || blocks.size() >= region.max_blocks) {
             continue;
         }
-        IR::Block block = decode::TranslateBlock(pc, read);
+        IR::Block block = decode::TranslateBlock(pc, read, fpcr);
+        if (!opts.target.sha) {
+            // SHA-256 without SHA-NI: dynarmic's own polyfill, in IR operations the lowering covers (ir/opt/polyfill_pass.cpp)
+            Optimization::PolyfillPass(block, Optimization::PolyfillOptions{.sha256 = true, .vector_multiply_widen = false});
+        }
+        ForwardVectorRegisters(block);
         Optimization::IdentityRemovalPass(block);
         Optimization::DeadCodeElimination(block);
         for (const auto& inst : block) {
@@ -249,6 +249,19 @@ Lifted FunctionLifter::Run(const std::string& name) {
     st = F->getArg(0);
     st->setName("st");
 
+    // Floating point (section 7.1): the code runs under the MXCSR of the specialised FPCR. LLVM is told the rounding mode (constrained
+    // intrinsics with a static mode, so that nothing is folded in another mode) and, when the cumulative flags are modelled (section 7.4), that
+    // the exceptions are observable (strict: no operation is removed, speculated or folded away). FZ is flush-to-zero and denormals-are-zero
+    const bool constrained = opts.fpsr_flags || RMode() != 0;
+    if (constrained) {
+        F->addFnAttr(llvm::Attribute::StrictFP);
+        B.setIsFPConstrained(true);
+        B.setDefaultConstrainedRounding(RoundingOf(RMode()));
+        B.setDefaultConstrainedExcept(opts.fpsr_flags ? llvm::fp::ebStrict : llvm::fp::ebIgnore);
+    }
+    F->addFnAttr("denormal-fp-math", FZ() ? "preserve-sign,preserve-sign" : "ieee,ieee");
+    F->addFnAttr("denormal-fp-math-f32", FZ() ? "preserve-sign,preserve-sign" : "ieee,ieee");
+
     for (auto& [pc, block] : blocks) {
         bbs[pc] = BasicBlock::Create(C, "pc_" + llvm::utohexstr(pc), F);
     }
@@ -270,6 +283,7 @@ Lifted FunctionLifter::Run(const std::string& name) {
         return out;
     }
     out.function = F;
+    out.dynarmic_issues.assign(issues.begin(), issues.end());
     return out;
 }
 
@@ -279,14 +293,22 @@ void FunctionLifter::Prologue() {
     for (size_t i = 0; i < 31; ++i) {
         x[i] = B.CreateAlloca(B.getInt64Ty(), nullptr, "x" + std::to_string(i));
     }
+    for (size_t i = 0; i < 32; ++i) {
+        vreg[i] = B.CreateAlloca(V128(), nullptr, "v" + std::to_string(i));
+    }
     sp = B.CreateAlloca(B.getInt64Ty(), nullptr, "sp");
     static const char* const flag_names[] = {"n", "z", "c", "v"};
     for (size_t i = 0; i < 4; ++i) {
         flag[i] = B.CreateAlloca(B.getInt1Ty(), nullptr, flag_names[i]);
     }
     check_bit = B.CreateAlloca(B.getInt1Ty(), nullptr, "check_bit");
+    qc = B.CreateAlloca(B.getInt1Ty(), nullptr, "qc");
+    fpsr_bits = B.CreateAlloca(B.getInt32Ty(), nullptr, "fpsr_bits");
     for (size_t i = 0; i < 31; ++i) {
         B.CreateStore(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, x) + 8 * i), x[i]);
+    }
+    for (size_t i = 0; i < 32; ++i) {
+        B.CreateStore(LoadField(V128(), offsetof(dm_guest_state, v) + 16 * i), vreg[i]);
     }
     B.CreateStore(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, sp)), sp);
     const Flags f = UnpackNzcv(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, nzcv)));
@@ -295,6 +317,8 @@ void FunctionLifter::Prologue() {
     B.CreateStore(f.c, flag[2]);
     B.CreateStore(f.v, flag[3]);
     B.CreateStore(B.getFalse(), check_bit);
+    B.CreateStore(B.getFalse(), qc);
+    B.CreateStore(B.getInt32(0), fpsr_bits);
     B.CreateBr(bbs.at(region.entry));
 }
 
@@ -305,11 +329,19 @@ void FunctionLifter::Epilogue() {
             StoreField(B.CreateLoad(B.getInt64Ty(), x[i]), offsetof(dm_guest_state, x) + 8 * i);
         }
     }
+    for (size_t i = 0; i < 32; ++i) {
+        if (wrote_v[i]) {
+            StoreField(B.CreateLoad(V128(), vreg[i]), offsetof(dm_guest_state, v) + 16 * i);
+        }
+    }
     if (wrote_sp) {
         StoreField(B.CreateLoad(B.getInt64Ty(), sp), offsetof(dm_guest_state, sp));
     }
     if (wrote_nzcv) {
         StoreField(PackNzcv(CurrentFlags()), offsetof(dm_guest_state, nzcv));
+    }
+    if (uses_fpsr) {
+        FlushFpsr();
     }
     B.CreateRetVoid();
 }
@@ -318,8 +350,19 @@ void FunctionLifter::LowerBlock(IR::Block& block) {
     values.clear();
     flag_values.clear();
     origins.clear();
+    chain.clear();
+    users.clear();
+    for (auto& inst : block) {
+        for (size_t i = 0; i < inst.NumArgs(); ++i) {
+            const IR::Value a = inst.GetArg(i);
+            if (!a.IsImmediate()) {
+                users[a.GetInst()].push_back(&inst);
+            }
+        }
+    }
     cur_origin = {};
     last_pc = nullptr;
+    new_fpcr = nullptr;
     terminated = false;
     for (auto& inst : block) {
         if (inst.GetOpcode() == IR::Opcode::Void) {
@@ -341,10 +384,11 @@ void FunctionLifter::LowerBlock(IR::Block& block) {
 }
 
 void FunctionLifter::LowerInst(IR::Inst& inst) {
-    if (LowerContext(inst) || LowerFlags(inst) || LowerInteger(inst) || LowerMemory(inst)) {
+    if (LowerContext(inst) || LowerFlags(inst) || LowerInteger(inst) || LowerMemory(inst) || LowerVectorRegisters(inst) || LowerFP(inst) ||
+        LowerFPVector(inst) || LowerVector(inst) || LowerSaturated(inst) || LowerCrypto(inst)) {
         return;
     }
-    // GroupOf said Lowered, but no lowering took it: a bug of this file, not of the guest code
+    // GroupOf said Lowered, but no lowering took it: a bug of the lowering, not of the guest code
     error = std::string("opcode marked lowered in opcodes.cpp has no lowering: ") + OpcodeName(inst.GetOpcode());
 }
 
@@ -359,6 +403,18 @@ void FunctionLifter::LowerTerminal(const IR::Terminal& t) {
         if (!last_pc) {
             error = "a dispatch terminal without an A64SetPC";
             return;
+        }
+        if (new_fpcr) {
+            // msr fpcr ends its block (system.cpp). The code that follows was specialised for this region's FPCR: it runs here only when the
+            // new value keeps the same mode bits; otherwise the function leaves at the next instruction, for the dispatcher to continue in code
+            // specialised for the new value (section 7.1: the JIT, or another specialisation)
+            auto* same_bb = BasicBlock::Create(C, "fpcr_same", F);
+            auto* other_bb = BasicBlock::Create(C, "fpcr_changed", F);
+            Value* same = B.CreateICmpEQ(B.CreateAnd(new_fpcr, kFpcrModeMask), B.getInt32(fpcr));
+            B.CreateCondBr(same, same_bb, other_bb);
+            B.SetInsertPoint(other_bb);
+            Exit(last_pc, DM_EXIT_NONE, I(32, 0));
+            B.SetInsertPoint(same_bb);
         }
         Goto(last_pc);
     } else if (const auto* i = boost::get<IR::Term::If>(&t)) {
@@ -423,10 +479,33 @@ llvm::Type* FunctionLifter::TypeOf(IR::Type t) {
     case IR::Type::U64:
         return B.getInt64Ty();
     case IR::Type::U128:
-        return B.getInt128Ty();
+        return V128();
     default:
         return nullptr;
     }
+}
+
+llvm::Type* FunctionLifter::FloatTy(unsigned bits) {
+    switch (bits) {
+    case 16:
+        return B.getHalfTy();
+    case 32:
+        return B.getFloatTy();
+    default:
+        return B.getDoubleTy();
+    }
+}
+
+Value* FunctionLifter::As(Value* v, llvm::Type* t) {
+    if (!t || v->getType() == t) {
+        return v;
+    }
+    if (v->getType()->getPrimitiveSizeInBits() != t->getPrimitiveSizeInBits()) {
+        error = "a value of " + std::to_string(v->getType()->getPrimitiveSizeInBits()) + " bits used as " +
+                std::to_string(t->getPrimitiveSizeInBits()) + " bits";
+        return llvm::UndefValue::get(t);
+    }
+    return B.CreateBitCast(v, t);
 }
 
 Value* FunctionLifter::Get(const IR::Value& v) {
@@ -447,12 +526,25 @@ Value* FunctionLifter::Get(const IR::Value& v) {
             return llvm::UndefValue::get(B.getInt64Ty());
         }
     }
+    const auto c = chain.find(v.GetInst());
+    if (c != chain.end()) {
+        return Escape(c->second);
+    }
     const auto it = values.find(v.GetInst());
     if (it == values.end()) {
         error = std::string("a value used before its definition: ") + OpcodeName(v.GetInst()->GetOpcode());
         return llvm::UndefValue::get(B.getInt64Ty());
     }
     return it->second;
+}
+
+Value* FunctionLifter::Arg(const IR::Inst& inst, size_t i) {
+    const IR::Value a = inst.GetArg(i);
+    return As(Get(a), TypeOf(a.GetType()));
+}
+
+Value* FunctionLifter::ArgAs(const IR::Inst& inst, size_t i, llvm::Type* t) {
+    return As(Get(inst.GetArg(i)), t);
 }
 
 const Flags& FunctionLifter::FlagsArg(const IR::Inst& inst, size_t i) {
@@ -464,6 +556,82 @@ const Flags& FunctionLifter::FlagsArg(const IR::Inst& inst, size_t i) {
         return none;
     }
     return it->second;
+}
+
+llvm::Function* FunctionLifter::Intrinsic(llvm::Intrinsic::ID id, llvm::ArrayRef<llvm::Type*> types) {
+    return llvm::Intrinsic::getDeclaration(&M, id, types);
+}
+
+Value* FunctionLifter::Call(llvm::Intrinsic::ID id, llvm::ArrayRef<llvm::Type*> types, llvm::ArrayRef<Value*> args) {
+    return B.CreateCall(Intrinsic(id, types), args);
+}
+
+Value* FunctionLifter::SplatOf(Value* lanes_like, uint64_t v) {
+    llvm::Type* t = lanes_like->getType();
+    if (auto* vt = llvm::dyn_cast<llvm::FixedVectorType>(t)) {
+        llvm::Type* et = vt->getElementType()->isIntegerTy() ? vt->getElementType() : B.getIntNTy(vt->getScalarSizeInBits());
+        return llvm::ConstantVector::getSplat(vt->getElementCount(), ConstantInt::get(et, v));
+    }
+    return ConstantInt::get(t->isIntegerTy() ? t : B.getIntNTy(t->getPrimitiveSizeInBits()), v);
+}
+
+Value* FunctionLifter::ZeroUpper(Value* v128) {
+    Value* q = As(v128, V128());
+    return Shuffle(q, llvm::Constant::getNullValue(V128()), {0, 2});
+}
+
+// ---- FPSR ----
+
+void FunctionLifter::OrQC(Value* saturated) {
+    uses_fpsr = true;
+    B.CreateStore(B.CreateOr(B.CreateLoad(B.getInt1Ty(), qc), saturated), qc);
+}
+
+void FunctionLifter::OrFpsrBits(Value* bits) {
+    uses_fpsr = true;
+    B.CreateStore(B.CreateOr(B.CreateLoad(B.getInt32Ty(), fpsr_bits), bits), fpsr_bits);
+}
+
+void FunctionLifter::FlushFpsr() {
+    Value* add = B.CreateOr(B.CreateLoad(B.getInt32Ty(), fpsr_bits), B.CreateShl(B.CreateZExt(B.CreateLoad(B.getInt1Ty(), qc), B.getInt32Ty()), 27));
+    StoreField(B.CreateOr(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpsr)), add), offsetof(dm_guest_state, fpsr));
+    B.CreateStore(B.getFalse(), qc);
+    B.CreateStore(B.getInt32(0), fpsr_bits);
+}
+
+Value* FunctionLifter::MxcsrFlags() {
+    llvm::AllocaInst* slot = nullptr;
+    {
+        llvm::IRBuilderBase::InsertPointGuard guard{B};
+        B.SetInsertPoint(&F->getEntryBlock(), F->getEntryBlock().begin());
+        slot = B.CreateAlloca(B.getInt32Ty(), nullptr, "mxcsr");
+    }
+    B.CreateCall(Intrinsic(llvm::Intrinsic::x86_sse_stmxcsr), {slot});
+    Value* m = B.CreateLoad(B.getInt32Ty(), slot);
+    return B.CreateOr(B.CreateAnd(m, 1), B.CreateLShr(B.CreateAnd(m, 0x3C), 1));
+}
+
+void FunctionLifter::SetMxcsr(Value* new_fpcr_value, bool clear_flags) {
+    llvm::AllocaInst* slot = nullptr;
+    {
+        llvm::IRBuilderBase::InsertPointGuard guard{B};
+        B.SetInsertPoint(&F->getEntryBlock(), F->getEntryBlock().begin());
+        slot = B.CreateAlloca(B.getInt32Ty(), nullptr, "mxcsr_new");
+    }
+    B.CreateCall(Intrinsic(llvm::Intrinsic::x86_sse_stmxcsr), {slot});
+    Value* m = B.CreateLoad(B.getInt32Ty(), slot);
+    Value* keep = clear_flags ? B.CreateAnd(m, 0xFFC0) : m;  // the mode bits, and the flags unless cleared
+    if (new_fpcr_value) {
+        // RC from RMode (RN 0, RP 1 -> up 2, RM 2 -> down 1, RZ 3), FTZ and DAZ from FZ, every exception masked
+        Value* rmode = B.CreateAnd(B.CreateLShr(new_fpcr_value, 22), 3);
+        Value* swapped = B.CreateOr(B.CreateShl(B.CreateAnd(rmode, 1), 1), B.CreateLShr(B.CreateAnd(rmode, 2), 1));
+        Value* fz = B.CreateAnd(B.CreateLShr(new_fpcr_value, 24), 1);
+        Value* mode = B.CreateOr(B.getInt32(0x1F80), B.CreateShl(swapped, 13));
+        mode = B.CreateOr(mode, B.CreateMul(fz, B.getInt32(0x8040)));
+        keep = B.CreateOr(B.CreateAnd(keep, 0x3F), mode);
+    }
+    B.CreateStore(keep, slot);
+    B.CreateCall(Intrinsic(llvm::Intrinsic::x86_sse_ldmxcsr), {slot});
 }
 
 // ---- Flags ----
@@ -752,16 +920,28 @@ bool FunctionLifter::LowerContext(IR::Inst& inst) {
     case Opcode::A64GetFPCR:
         Def(inst, LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpcr)));
         return true;
-    case Opcode::A64SetFPCR:
-        // Integer code does not depend on FPCR. Once floating point is lowered, a change away from the FPCR the block was specialised for
-        // must leave the function here (section 7.1)
-        StoreField(B.CreateAnd(Arg(inst, 0), kFpcrMask), offsetof(dm_guest_state, fpcr));
+    case Opcode::A64SetFPCR: {
+        // The new rounding mode and flush-to-zero go to MXCSR at once (the flags stay); the block ends here, and its terminal leaves the
+        // function when the mode bits differ from the specialisation (LowerTerminal, section 7.1)
+        Value* v = B.CreateAnd(Arg(inst, 0), kFpcrMask);
+        StoreField(v, offsetof(dm_guest_state, fpcr));
+        SetMxcsr(v, false);
+        new_fpcr = v;
         return true;
+    }
     case Opcode::A64GetFPSR:
-        Def(inst, LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpsr)));
+        // What is in st->fpsr, the QC and cumulative bits the lowering raised since the last flush, and the native operations' flags in MXCSR
+        uses_fpsr = true;
+        Def(inst, B.CreateAnd(B.CreateOr(B.CreateOr(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpsr)), B.CreateLoad(B.getInt32Ty(), fpsr_bits)),
+                                         B.CreateOr(B.CreateShl(B.CreateZExt(B.CreateLoad(B.getInt1Ty(), qc), B.getInt32Ty()), 27), MxcsrFlags())),
+                              kFpsrMask));
         return true;
     case Opcode::A64SetFPSR:
+        uses_fpsr = true;
         StoreField(B.CreateAnd(Arg(inst, 0), kFpsrMask), offsetof(dm_guest_state, fpsr));
+        B.CreateStore(B.getFalse(), qc);
+        B.CreateStore(B.getInt32(0), fpsr_bits);
+        SetMxcsr(nullptr, true);
         return true;
     case Opcode::A64GetCNTFRQ:
         Def(inst, B.getInt32(kCntfrq));
@@ -952,9 +1132,11 @@ bool FunctionLifter::LowerInteger(IR::Inst& inst) {
     case Opcode::Pack2x32To1x64:
         Def(inst, B.CreateOr(B.CreateZExt(Arg(inst, 0), B.getInt64Ty()), B.CreateShl(B.CreateZExt(Arg(inst, 1), B.getInt64Ty()), 32)));
         return true;
-    case Opcode::Pack2x64To1x128:
-        Def(inst, B.CreateOr(B.CreateZExt(Arg(inst, 0), B.getInt128Ty()), B.CreateShl(B.CreateZExt(Arg(inst, 1), B.getInt128Ty()), 64)));
+    case Opcode::Pack2x64To1x128: {
+        Value* v = B.CreateInsertElement(llvm::PoisonValue::get(V128()), Arg(inst, 0), uint64_t{0});
+        Def(inst, B.CreateInsertElement(v, Arg(inst, 1), uint64_t{1}));
         return true;
+    }
     case Opcode::LeastSignificantWord:
         Def(inst, B.CreateTrunc(Arg(inst, 0), B.getInt32Ty()));
         return true;
@@ -1141,15 +1323,6 @@ bool FunctionLifter::LowerInteger(IR::Inst& inst) {
     case Opcode::CRC32ISO64:
         Def(inst, Crc32Iso(Arg(inst, 0), Arg(inst, 1), 8));
         return true;
-    case Opcode::VectorGetElement64: {
-        if (!inst.GetArg(1).IsImmediate()) {
-            error = "VectorGetElement64 with a variable index";
-            return true;
-        }
-        const unsigned index = inst.GetArg(1).GetU8() & 1;
-        Def(inst, B.CreateTrunc(B.CreateLShr(Arg(inst, 0), 64 * index), B.getInt64Ty()));
-        return true;
-    }
     default:
         return false;
     }
@@ -1193,6 +1366,22 @@ bool FunctionLifter::LowerMemory(IR::Inst& inst) {
         }
     };
     switch (op) {
+    case Opcode::A64ReadMemory128: {
+        // ldr q, ld1 of a whole register: one unaligned volatile 16-byte access (movdqu; section 6.4)
+        if (Ordered(inst.GetArg(2).GetAccType())) {
+            error = "an ordered 128-bit read";
+            return true;
+        }
+        Def(inst, Mark(B.CreateAlignedLoad(V128(), GuestPtr(Arg(inst, 1)), llvm::Align(1), true)));
+        return true;
+    }
+    case Opcode::A64WriteMemory128:
+        if (Ordered(inst.GetArg(3).GetAccType())) {
+            error = "an ordered 128-bit write";
+            return true;
+        }
+        Mark(B.CreateAlignedStore(Arg(inst, 2), GuestPtr(Arg(inst, 1)), llvm::Align(1), true));
+        return true;
     case Opcode::A64ClearExclusive:
         StoreField(B.getInt32(0), offsetof(dm_guest_state, excl_valid));
         return true;
@@ -1245,12 +1434,13 @@ bool FunctionLifter::LowerMemory(IR::Inst& inst) {
         if (bits == 128) {
             StoreField(B.CreateTrunc(l, B.getInt64Ty()), offsetof(dm_guest_state, excl_val));
             StoreField(B.CreateTrunc(B.CreateLShr(l, 64), B.getInt64Ty()), offsetof(dm_guest_state, excl_val) + 8);
+            Def(inst, B.CreateBitCast(l, V128()));
         } else {
             StoreField(B.CreateZExt(l, B.getInt64Ty()), offsetof(dm_guest_state, excl_val));
+            Def(inst, l);
         }
         StoreField(B.getInt32(bits / 8), offsetof(dm_guest_state, excl_size));
         StoreField(B.getInt32(1), offsetof(dm_guest_state, excl_valid));
-        Def(inst, l);
         return true;
     }
     case Opcode::A64ExclusiveWriteMemory8:
@@ -1264,7 +1454,7 @@ bool FunctionLifter::LowerMemory(IR::Inst& inst) {
         llvm::Type* ty = B.getIntNTy(bits);
         const IR::AccType acc = inst.GetArg(3).GetAccType();
         Value* vaddr = Arg(inst, 1);
-        Value* value = Arg(inst, 2);
+        Value* value = ArgAs(inst, 2, ty);
         Value* valid = B.CreateICmpNE(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, excl_valid)), B.getInt32(0));
         Value* same_addr = B.CreateICmpEQ(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, excl_addr)), vaddr);
         Value* same_size = B.CreateICmpEQ(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, excl_size)), B.getInt32(bits / 8));
@@ -1301,17 +1491,56 @@ bool FunctionLifter::LowerMemory(IR::Inst& inst) {
     }
 }
 
-}  // namespace
+// ---- Vector registers ----
 
-Lifted LiftRegion(llvm::Module& module, const std::string& name, const Region& region, const decode::CodeReader& read) {
-    FunctionLifter lifter{module, region, read};
+bool FunctionLifter::LowerVectorRegisters(IR::Inst& inst) {
+    using IR::Opcode;
+    auto vec = [&]() { return static_cast<size_t>(inst.GetArg(0).GetA64VecRef()); };
+    switch (inst.GetOpcode()) {
+    case Opcode::A64GetQ:
+        Def(inst, B.CreateLoad(V128(), vreg[vec()]));
+        return true;
+    case Opcode::A64GetD:
+        // the low 64 bits, the rest zero (dynarmic: movq)
+        Def(inst, ZeroUpper(B.CreateLoad(V128(), vreg[vec()])));
+        return true;
+    case Opcode::A64GetS: {
+        Value* q = B.CreateBitCast(B.CreateLoad(V128(), vreg[vec()]), VecI(32));
+        Def(inst, Shuffle(q, llvm::Constant::getNullValue(VecI(32)), {0, 4, 4, 4}));
+        return true;
+    }
+    case Opcode::A64SetQ:
+        B.CreateStore(Arg(inst, 1), vreg[vec()]);
+        wrote_v[vec()] = true;
+        return true;
+    case Opcode::A64SetD:
+        B.CreateStore(ZeroUpper(Arg(inst, 1)), vreg[vec()]);
+        wrote_v[vec()] = true;
+        return true;
+    case Opcode::A64SetS: {
+        Value* s32 = ArgAs(inst, 1, VecI(32));
+        B.CreateStore(B.CreateBitCast(Shuffle(s32, llvm::Constant::getNullValue(VecI(32)), {0, 4, 4, 4}), V128()), vreg[vec()]);
+        wrote_v[vec()] = true;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+}  // namespace detail
+
+Lifted LiftRegion(llvm::Module& module, const std::string& name, const Region& region, const decode::CodeReader& read, const LiftOptions& options) {
+    detail::FunctionLifter lifter{module, region, read, options};
     return lifter.Run(name);
 }
 
-std::string DumpRegion(const Region& region, const decode::CodeReader& read) {
+std::string DumpRegion(const Region& region, const decode::CodeReader& read, uint32_t fpcr) {
     llvm::LLVMContext context;
     llvm::Module module{"dump", context};
-    FunctionLifter lifter{module, region, read};
+    LiftOptions options;
+    options.fpcr = fpcr;
+    detail::FunctionLifter lifter{module, region, read, options};
     return lifter.Dump();
 }
 

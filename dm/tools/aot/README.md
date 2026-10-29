@@ -1,9 +1,10 @@
 # nxaot: the ahead-of-time ARM64 to x86-64 recompiler
 
 Phase 2 of the Windows and Linux port ([migration-status.md](../../../docs/design/migration-status.md)); the design is
-[aot-recompiler.md](../../../docs/design/aot-recompiler.md). This folder holds its foundation: the build, the lifter of the integer, memory, branch,
-system-register and exclusive instruction classes, the differential vector harness against dynarmic, and the census of phase 0. No game runs through
-it yet, and nothing here touches the Apple builds.
+[aot-recompiler.md](../../../docs/design/aot-recompiler.md). This folder holds its foundation and its floating point: the build, the lifter of the
+integer, memory, branch, system-register, exclusive, floating-point, Advanced SIMD and cryptographic instruction classes (every IR opcode dynarmic's
+A64 frontend emits), the differential vector harness against dynarmic, a benchmark of the NaN chains, and the census of phase 0. No game runs
+through it yet, and nothing here touches the Apple builds.
 
 ## What exists
 
@@ -11,12 +12,16 @@ it yet, and nothing here touches the Apple builds.
 |---|---|---|
 | State block | [include/nxaot/guest_state.h](include/nxaot/guest_state.h) | `dm_guest_state` of design section 2.1, C, 64-byte aligned, every offset asserted; host-only fields `cnt` (the counter `mrs cntpct_el0` / `cntvct_el0` read) and `exit_reason` / `exit_arg` |
 | Decoder glue | [src/decode/translate.cpp](src/decode/translate.cpp) | dynarmic's A64 translation loop with nxaot's options (hints raise their exceptions, wall-clock counter) and the encodings dynarmic leaves to an interpreter that nxaot translates itself (`mrs xN, cntvct_el0`) |
-| Lifter | [src/lift/lifter.cpp](src/lift/lifter.cpp), [src/lift/opcodes.cpp](src/lift/opcodes.cpp) | dynarmic IR blocks of a region to one LLVM function `void f(dm_guest_state *st)`: registers in allocas that SROA / mem2reg promote, NZCV as four `i1` compared directly against the operands of the `subs` / logical operation that set them, stored only when written; guest memory as `inttoptr` volatile accesses (alignment 1), `ldar` acquire, `stlr` sequentially consistent, exclusives as `cmpxchg` against `st->excl_*`, `dc zva` zeroing the aligned 64 bytes; `svc`, `brk`, `udf` and undefined encodings leave with `st->pc` and `st->exit_reason`. A region holding an IR opcode the lowering does not cover is refused whole |
-| ORC JIT | [src/lift/jit.cpp](src/lift/jit.cpp) | LLVM 18 ORC LLJIT, the default O2 pipeline, the host's CPU (`getHostCPUName` and its features) or a named level (`--cpu x86-64-v3`) |
-| Vector harness | [src/vec/](src/vec/) (`nxaot_vec`) | every vector on dynarmic's own A64 JIT (the reference) and as lifted code, from one initial state; compares x0..x30, SP, NZCV, FPCR, TPIDR_EL0, the exit (pc, reason, svc number) and the 64 KiB memory image byte for byte |
-| Vectors | [tests/vectors/](tests/vectors/), written by [tests/gen_vectors.py](tests/gen_vectors.py) | 24,550 vectors, encodings written by hand from the Arm ARM, fields swept, operands from edge values and a fixed-seed stream |
+| Lifter | [src/lift/lifter.cpp](src/lift/lifter.cpp), [src/lift/opcodes.cpp](src/lift/opcodes.cpp) | dynarmic IR blocks of a region to one LLVM function `void f(dm_guest_state *st)`: registers (x0..x30, SP, v0..v31) in allocas that SROA / mem2reg promote, NZCV as four `i1` compared directly against the operands of the `subs` / logical operation that set them, stored only when written; guest memory as `inttoptr` volatile accesses (alignment 1, 16 bytes for `ldr q`), `ldar` acquire, `stlr` sequentially consistent, exclusives as `cmpxchg` against `st->excl_*`, `dc zva` zeroing the aligned 64 bytes; `svc`, `brk`, `udf` and undefined encodings leave with `st->pc` and `st->exit_reason`. A region holding an IR opcode the lowering does not cover is refused whole |
+| Floating point and SIMD | [src/lift/lower_fp.cpp](src/lift/lower_fp.cpp), [lower_vector.cpp](src/lift/lower_vector.cpp), [lower_crypto.cpp](src/lift/lower_crypto.cpp), [function_lifter.h](src/lift/function_lifter.h) | the lowering of section 7: FPCR as a compile-time specialisation, the NaN chains, Arm's NaN, min / max, rounding and conversion rules, saturation with FPSR.QC, the cumulative exception flags, AES-NI / SHA-NI / PCLMULQDQ with software forms ("Floating point and SIMD" below) |
+| Run-time helpers | [src/lift/runtime.cpp](src/lift/runtime.cpp) | the operations whose exact Arm semantics are no x86 sequence (the estimates, half-precision arithmetic, FZ fused multiply-add fix-ups, some conversions, software AES): wrappers of dynarmic's own `common/fp` and `common/crypto`, which its backend calls for the same cases |
+| ORC JIT | [src/lift/jit.cpp](src/lift/jit.cpp) | LLVM 18 ORC LLJIT, the default O2 pipeline, the host's CPU (`getHostCPUName` and its features) or a named level (`--cpu x86-64-v3`); the helpers as absolute symbols; the x86 assembly of a module (nxaot_bench) |
+| Vector harness | [src/vec/](src/vec/) (`nxaot_vec`) | every vector on dynarmic's own A64 JIT (the reference) and as lifted code, from one initial state; compares x0..x30, SP, NZCV, FPCR, FPSR (QC and the cumulative flags), TPIDR_EL0, v0..v31, the exit (pc, reason, svc number) and the 64 KiB memory image byte for byte. It runs lifted code as a host gate would: MXCSR from FPCR before, its flags into FPSR after, and a continuation lifted for the new pc and FPCR after a normal exit inside the code (`msr fpcr`) |
+| Vectors | [tests/vectors/](tests/vectors/), written by [tests/gen_vectors.py](tests/gen_vectors.py) and [tests/gen_fp_simd.py](tests/gen_fp_simd.py) | 179,296 vectors: 24,400 integer ones as `.tsv` (encodings written by hand from the Arm ARM), 154,896 floating-point and SIMD ones as `.tsv.gz` (every form of dynarmic's decoder table, fields swept, lanes of special values, 13 FPCR values: the variants of design section 12 and mixes) |
+| Benchmark | [src/bench/main.cpp](src/bench/main.cpp) (`nxaot_bench`) | the cost of the NaN-chain checks, the x86 instructions lifted code compiles to, the instructions per guest memory access ("Measurements") |
 | Census | [src/analysis/census.cpp](src/analysis/census.cpp) (`nxaot census`) | phase 0's numbers over a raw code blob as `key<TAB>count` lines |
-| Runner | [tests/run_aot_tests.sh](tests/run_aot_tests.sh) | runs the tests and writes `logs/aot/` ([logs/README.md](../../../logs/README.md)) |
+| Reach | [src/analysis/reach.cpp](src/analysis/reach.cpp) (`nxaot opcodes --reach`) | every entry of dynarmic's A64 decoder table translated with random fields: the opcodes the A64 frontend can emit; `--check` fails when one is not lowered |
+| Runner | [tests/run_aot_tests.sh](tests/run_aot_tests.sh) | runs the tests and the benchmark and writes `logs/aot/` ([logs/README.md](../../../logs/README.md)) |
 | CI | [.github/workflows/aot.yml](../../../.github/workflows/aot.yml) | the image, the build, CTest and the runner on every pull request and push to `main` and `multiplataforma` |
 
 Vendored: [dm/third_party/dynarmic](../../third_party/dynarmic/VENDOR.md), the fork `azahar-emu/dynarmic` at `a46601580d55` (A64 frontend, IR, x86-64
@@ -30,11 +35,11 @@ Ninja, Python 3.12 and the Boost headers:
 ```sh
 docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 
-# configure, build, CTest (the vectors, the census, the vectors-current check)
+# configure, build, CTest (the vectors, the crypto vectors for x86-64-v3, the per-operation NaN mode, the reach check, the census, the vectors-current check)
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
 
-# the same tests through the runner, which writes logs/aot/<test>.log and logs/aot/summary.txt
+# the same tests and the benchmark through the runner, which writes logs/aot/<test>.log and logs/aot/summary.txt
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh dm/tools/aot/tests/run_aot_tests.sh build/aot
 ```
 
@@ -45,30 +50,144 @@ registry first (`docker push`, then the digest it prints), as the llvm-mingw ima
 already, and its packages are the Ubuntu 24.04 versions of the day it is built: `nxaot.lock` and the configure check keep LLVM at 18.1.3.
 
 Linking: `libLLVM-18.so` from the image (the Ubuntu package is built with `LLVM_LINK_LLVM_DYLIB`); `-DNXAOT_LLVM_STATIC=ON` links the component
-libraries statically instead, as the distributed `nxaot` will be (design section 13). The build tree takes about 35 MB.
+libraries statically instead, as the distributed `nxaot` will be (design section 13). zlib (which LLVM itself links) reads the `.tsv.gz` vectors. The
+build tree takes about 46 MB. On this repository's development machine (8 threads) the CTest run takes about 5 minutes, the vectors 4 of them.
 
 ## Running the harness and the census
 
 ```sh
-build/aot/nxaot_vec dm/tools/aot/tests/vectors            # every file of the folder; or name .tsv files
-build/aot/nxaot_vec --cpu x86-64-v3 dm/tools/aot/tests/vectors
+build/aot/nxaot_vec dm/tools/aot/tests/vectors            # every .tsv and .tsv.gz of the folder; or name files; - reads standard input
+build/aot/nxaot_vec --cpu x86-64-v3 dm/tools/aot/tests/vectors/crypto.tsv.gz   # a named target: no AES-NI, SHA or PCLMULQDQ, their software forms
 build/aot/nxaot_vec --filter excl_seq --dump dm/tools/aot/tests/vectors/exclusive.tsv   # dynarmic IR and optimised LLVM IR of the matches
+build/aot/nxaot_vec --state --filter fp.00612 dm/tools/aot/tests/vectors/fp.tsv.gz      # a mismatch with the initial registers
+build/aot/nxaot_vec --nan-mode perop dm/tools/aot/tests/vectors/fp.tsv.gz       # every operation checks its own NaNs (chains: the default)
 build/aot/nxaot census <raw ARM64 code file> --base <hex address of its first byte>
 build/aot/nxaot opcodes                                    # every dynarmic IR opcode and whether the lifter lowers it
-python3 dm/tools/aot/tests/gen_vectors.py                  # write the vectors again after changing the generator
+build/aot/nxaot opcodes --reach --check                    # the opcodes the A64 frontend emits, the decoder entries that emit them; all lowered?
+build/aot/nxaot_bench                                      # the NaN-chain measurements
+python3 dm/tools/aot/tests/gen_vectors.py                  # write the vectors again after changing a generator
 ```
 
-`nxaot_vec` prints each mismatch with the vector's file and line, its words and every field that differs, then per class the vectors, mismatches,
-refusals and normal exits, the IR opcodes each refused class needed, and last
-`== nxaot_vec: N vectors, M mismatches, U unsupported (listed) ==`; it exits with 1 on a mismatch. A refused vector (an FP or SIMD opcode) is not a
-failure today. The vectors' format and the memory layout (the image at `0x10000000`, code at `0x10008000`) are in [src/vec/vectors.h](src/vec/vectors.h);
-the image is mapped at that address in the harness process with guard pages around it, since lifted code uses guest addresses as host addresses.
+`nxaot_vec` prints each mismatch with the vector's file and line, its words, its FPCR and every field that differs, then per class the vectors,
+mismatches, refusals, FPSR differences of known dynarmic issues and normal exits, the IR opcodes each refused class needed, the vectors per known
+issue, which lowered opcodes the passing vectors exercised, and last `== nxaot_vec: N vectors, M mismatches, U unsupported (listed), F FPSR
+differences of known dynarmic issues ==`; it exits with 1 on a mismatch. Options: `--no-fpsr-model` lifts without modelling the cumulative flags
+(and compares QC only), `--ignore-fpsr-flags` compares QC only, `--no-filters` compares the whole FPSR without the known-issue relaxations,
+`--batch`, `--max-report`, `-v`. The vectors' format (8 tab-separated fields: id, class, text, code, seed, FPCR, register overrides, memory
+overrides; `vk=` names the lane kind the seed fills v0..v31 with) and the memory layout (the image at `0x10000000`, code at `0x10008000`) are in
+[src/vec/vectors.h](src/vec/vectors.h); the image is mapped at that address in the harness process with guard pages around it, since lifted code uses
+guest addresses as host addresses.
+
+**The big sweep.** Phase 2's acceptance asks for 10^8 vectors per instruction class; CI runs the committed set. Any number of random vectors streams
+through the harness without files:
+
+```sh
+python3 dm/tools/aot/tests/gen_vectors.py --count 1000000 --seed 5 --classes simd_same --seeds-per-word 20 | build/aot/nxaot_vec --batch 1024 -
+```
+
+`--classes` takes the file names of the floating-point and SIMD generators (`fp`, `simd_same`, `simd_misc`, `simd_shift`, `simd_perm`, `crypto`,
+`simd_ldst`, `fp_seq`) or the class names of their vectors; each round of the generator takes new seeds; `--seeds-per-word` runs each encoding with
+that many value sets (and one FPCR), so that the lifter compiles it once. About 2,900 vectors a second per process on the development machine; the
+numbers of a sweep are in "Measurements".
 
 The census reads dynarmic's decoder (its matcher names), the Arm ARM's top-level encoding table, and Arm ARM masks for what dynarmic does not decode
 (LSE atomics, `ldapr`, `msr` immediate, `hvc` / `smc`, `udf`). Exclusive windows and SP writes are followed on dynarmic's IR of each instruction: a
 window is the straight line from an exclusive load to its store (conditional branches fall through, a second exclusive load or an unconditional
 branch ends it unpaired), ABA-sensitive when a load inside reads through the loaded value (design 6.5); `sp.from_memory` counts SP set, within a basic
 block, from a value a load produced. The `answer.*` keys answer phase 0's questions with 0 or 1.
+
+## Floating point and SIMD
+
+Design sections 7.1 to 7.4, as lowered here.
+
+- **FPCR is a compile-time specialisation (7.1).** `LiftOptions::fpcr` names the FPCR a region is compiled for; only its mode bits count (AHP, DN,
+  FZ, RMode, FZ16: `kFpcrModeMask`, what dynarmic's location descriptor keeps), and the blocks are translated with it. Guest code runs with the
+  MXCSR of that FPCR (`lift::GuestMxcsr`: RMode as the rounding control, FZ as FTZ and DAZ, every exception masked), which the host sets once when a
+  thread enters guest code and nxaot_vec sets around each run; lifted functions never load MXCSR themselves. LLVM is told the rounding mode through
+  constrained intrinsics with that static mode, so that nothing is folded in another mode, and FZ through `denormal-fp-math`. Chosen over a
+  `ldmxcsr` / `stmxcsr` pair at every function entry and exit: the pair costs tens of cycles per call and serialises, and every function of a module
+  shares one FPCR anyway; with round to nearest and the flags unmodelled the operations are plain LLVM ones and optimise freely. `msr fpcr` writes
+  `st->fpcr` and the new mode bits into MXCSR, and its block leaves the function when the mode bits differ from the specialisation, for the
+  dispatcher to continue in code compiled for the new value (the JIT of section 11 later; nxaot_vec lifts a continuation).
+- **FPSR (7.4).** `LiftOptions::fpsr_flags` models the cumulative exception flags exactly: the function is `strictfp` and every floating-point
+  operation is a constrained intrinsic with strict exception behaviour (none removed, speculated or folded). Native operations raise their flags in
+  MXCSR, which `mrs fpsr` and the host's gate read (`lift::FpsrFromMxcsr`); operations lowered in integers raise none of their own and add the Arm
+  bits explicitly (conversions to integers: IOC, IXC; FZ: IDC per flushed operand); the helpers OR theirs into `st->fpsr`. QC is a flag of the
+  function stored at exit, from every saturating operation, scalar or vector, as dynarmic ORs `fpsr_qc`. A pack sets `fpsr_flags` for modules where
+  the census finds an FPSR read (`answer.fpsr_read`), as decision 5 says; nxaot_vec always sets it.
+- **NaN chains (7.3).** The P operations (add, subtract, multiply, divide, square root, fused multiply-add with FMA3 and FZ = 0, negate, absolute
+  value, single / double conversions, pairwise add; scalar and vector) are chain nodes (`ChainNode`): the native result, and how to rebuild the Arm
+  result from the operands' exact values. A use outside the chain (a register write that survives the block, a store, an integer or another
+  floating-point operation that keeps NaN bits) takes the node's escaped value: one NaN check (`ucomiss` / `vcmpunordps` and a branch weighted
+  cold); when it fires, a cold block recomputes the chain from its inputs with Arm's rules (`FPProcessNaNs`, the fused multiply-add's default NaN
+  and IOC for a quiet NaN addend with infinity times zero, FPCR.DN) in integer operations. With FPCR.DN an arithmetic node escapes branch-free (the
+  default NaN where the fast value is a NaN), except a chain that holds a fused multiply-add when the flags are modelled: x86 raises nothing for
+  that invalid case (known issue 16), so it takes the check and the cold block. Compares and conversions to integer read fast values directly. Chains span instructions because the lifter
+  forwards vector registers within a block (`ForwardVectorRegisters`, as dynarmic's get/set elimination does) and drops a write the block
+  overwrites. `NaNMode::PerOp` checks every operation instead (dynarmic's way, the reference of the measurements; CTest `vectors_perop` runs the
+  scalar and sequence vectors with it); `NaNMode::Unchecked` is inexact and exists only for measuring.
+- **The operations of rows 4 to 11 have their own exact lowering**, with quiet compares only so that quiet NaNs raise nothing: FMAX / FMIN
+  (AND / OR of equal operands, NaN rules), FMAXNM / FMINNM (a single quiet NaN loses), FMULX (0 times infinity is 2.0), FRECPS / FRSQRTS (FMA3,
+  and dynarmic's software step when a lane is a NaN or near infinity), rounding to integral (roundss without Inexact, ties away from zero by an exact
+  trunc-and-compare sequence, FRINTX by `rint`), conversions to integer and fixed point (in double precision, saturation and NaN by compares and
+  selects, IOC / IXC computed; ties away included), from integer (one rounding in the current mode, unsigned 64-bit values halved with a sticky bit).
+  The estimates (FRECPE, FRSQRTE, FRECPX), half-precision arithmetic, FZ fused multiply-add results of +-(smallest normal) and conversions in a mode
+  other than FPCR's or with AHP / FZ16 call the run-time helpers. F16C converts halves.
+- **Integer SIMD** is generic LLVM vector IR (shuffles, `smax` / `sadd.sat` and friends, widening and narrowing, `pshufb` per register for TBL /
+  TBX, table lookups for URECPE / URSQRTE); polynomial multiplication is PCLMULQDQ for PMULL 1Q or a shift-and-XOR sequence.
+- **Cryptography:** AESE / AESD as AESENCLAST / AESDECLAST with a zero key, AESMC as AESDECLAST then AESENC, AESIMC; SHA256H / H2 / SU0 / SU1 with
+  SHA-NI in dynarmic's register arrangement; SHA-1 is generic IR (dynarmic's frontend expands it); SM4's S-box is a table. Without AES-NI the
+  helpers, without SHA the lifter runs dynarmic's SHA-256 polyfill on the block first, without PCLMULQDQ the generic sequence. `Target` holds what the
+  target CPU has (`Jit::TargetFeatures`); x86-64-v3 is the baseline (FMA3, F16C, AVX2), and AES-NI, SHA and PCLMULQDQ are outside it.
+- **64-bit vector forms (2S):** when an operation's only uses keep the low 64 bits, a division divides 1.0 by 1.0 in the upper lanes and the
+  estimates skip them, so that the zero upper lanes raise nothing (`LowHalfOnly`; known issue 15).
+
+What is not done: the slow path of design 7.2 row 13 for add / subtract / multiply / divide / square root under FZ (they follow dynarmic, see the
+end of "Known issues"); the half-precision estimates and steps are scalar helper calls per lane; FRECPE / FRSQRTE are helper calls (a table-based
+inline form is an optimisation for later); one combined check for all the escapes of a block (four checks of a 4x4 matrix multiply cost about 1.4
+ns of its 5 per iteration).
+
+## Measurements
+
+`nxaot_bench` on the development machine (Intel Core i9-13950HX, LLVM's `alderlake`, 2,000,000 iterations, best of 5, Docker): ns per iteration of
+each kernel's loop, and the x86 instructions of one iteration lifted alone, all of them and the hot ones (the blocks a run takes when no value is a
+NaN). Timings vary by about 10 % from run to run on this machine.
+
+| Kernel | Mode | ns / iteration | x86 instructions | hot |
+|---|---|---:|---:|---:|
+| 4x4 matrix multiply (`ld1` x 2, 4 x (`fmul` + 3 `fmla` by element), `st1`) | chains | 5.2 | 1,118 | 91 |
+| | per operation | 9.5 | 2,651 | 149 |
+| | unchecked | 3.7 | 63 | 63 |
+| 8 dependent `fmla v0.4s` | chains | 13.8 | 267 | 23 |
+| | per operation | 14.4 | 1,288 | 56 |
+| | unchecked | 14.0 | 16 | 16 |
+| 4 `fmadd s` + `fadd` + `fmul` + `str s` | chains | 7.9 | 581 | 41 |
+| | per operation | 7.6 | 879 | 45 |
+| | unchecked | 6.6 | 22 | 22 |
+
+The chain checks cost 40 % of the matrix multiply (four escaping 4-lane results, one `vcmpunordps` / `vmovmskps` / `test` / `jne` each, and the
+spills the cold recomputation causes), nothing measurable in a long dependent `fmla` chain (one check per eight operations), and 19 % in the scalar
+loop; checking every operation instead costs 2.6 times the unchecked matrix multiply. The cold blocks are most of the code size. With the flags
+modelled (strict floating point) the times are within the noise of these. dynarmic's JIT runs the same loops at 70 to 90 ns per iteration, but its
+memory goes through callbacks here (no fastmem), so that number is no comparison of the backends.
+
+Section 6.4 (each guest memory access one x86 instruction): the kernel `ldr q8, [x0, #16]; str q8, [x1, #32]; ldp q9, q10, [x0, #32]; ld1 {v12.4s,
+v13.4s}, [x1]; st1 {v12.s}[2], [x2]; ldr d14, [x0, #24]; str s14, [x1, #20]` (`3dc00408 3d800828 ad412809 4c40a82c 4d00804c fd400c0e bd00142e`) makes
+nine guest accesses (the pair and the two-register `ld1` two each), and its lifted function nine x86 memory instructions: `vmovups 16(%rax)`,
+`vmovups %xmm0, 32(%rcx)`, `vmovups 32(%rax)`, `vmovups 48(%rax)`, `vmovups (%rcx)`, `vmovups 16(%rcx)`, `vextractps $2, %xmm3, (%rdx)`,
+`movq 24(%rax)`, `movl %eax, 20(%rcx)` (`nxaot_bench --asm`; the other instructions are the state block's loads and stores).
+
+The big sweep (`gen_vectors.py --count 1000000 --seed S --classes C --seeds-per-word 20 | nxaot_vec --batch 1024 -`, once per class, four or
+five processes at a time), vectors, mismatches, FPSR differences of known issues (by issue number), seconds: `fp` 1,000,000, 0, 65,727 (8: 26,903,
+9: 26,338, 10: 1,380, 11: 620, 12: 10,486), 255; `simd_same` 1,000,000, 0, 17,311 (11: 36, 12: 12,990, 13: 2,961, 15: 1,324), 265; `simd_misc`
+1,000,000, 0, 70,847 (8: 21,313, 9: 28,873, 10: 2,172, 12: 8,310, 14: 7,334, 15: 2,845), 250; `simd_shift` 1,000,000, 0, 18,055 (9: 17,133,
+12: 922), 226; `simd_perm` 1,000,000, 0, 7,866 (11: 453, 12: 7,413), 262; `crypto` 1,000,000, 0, 0, 289; `simd_ldst` 1,000,000, 0, 0, 897.
+Between 21 % and 38 % of the vectors of the data-processing classes are undefined encodings (the field sweep includes the reserved values),
+which both executors must agree on. `fp_seq` did not complete: its first run found the FMA bug of known issue 16 (vector 28,302 of seed 1008)
+and was stopped for the fix; the second ended without a result (its container was removed from outside the run). The first run of
+`simd_ldst` found that the generator left `sp`-based addresses at the seed's random `sp`, which can lie within 256 bytes of the image's ends
+(both executors faulted on the same address); the generator now sets `sp` as it sets other base registers. `simd_misc`, `simd_shift` and
+`crypto` ran before the FMA fix, which does not reach them.
 
 ## The lock file
 
@@ -89,14 +208,21 @@ preprocessed headers).
 
 ## Lifter coverage
 
-`nxaot opcodes` lists the 725 opcodes of dynarmic's IR: 131 lowered (`Void`, `Identity`, and every opcode the A64 translator emits for the integer,
-memory, branch, system-register and exclusive classes, with the CRC32 opcodes and `VectorGetElement64`, which `ldxp` of two X registers needs),
-492 floating point / SIMD / crypto (phase 2 of the plan; with them the 128-bit loads and stores and the integer max / min only the SIMD translators
-emit), and 102 that never appear in an A64 block: 99 of the AArch32 frontend (its own, and the packed, `ssat` / `usat`, GE, carry and overflow opcodes
-only it emits) and 3 dynarmic-internal ones (`Breakpoint`, `CallHostFunction`, `GetNZFromOp`). The vectors exercise 129 of the 130 lowered opcodes
-other than `Void` (`nxaot_vec` prints the list after each run); the one left is `Identity`, which the identity-removal pass leaves unused before the
-lifter looks. Apart from those two, an opcode is in the lowered set only when a passing vector reaches it. CRC32C is `crc32` (SSE4.2);
+`nxaot opcodes` lists the 725 opcodes of dynarmic's IR: 589 lowered and 136 that never appear in an A64 block: 133 of the AArch32 frontend (its own;
+the packed, `ssat` / `usat`, GE, carry and overflow opcodes only it emits; and 34 floating-point and SIMD ones: the widening multiply pseudo-operations
+`VectorSignedMultiply` / `VectorUnsignedMultiply` with `GetUpperFromOp` / `GetLowerFromOp`, the 64-bit lane integer max / min / multiply / reduce /
+sign extension, `VectorEqual128`, VTBL's `VectorTableLookup64`, the 16-bit fixed-point and the vector half-precision conversions of VCVT, and
+`SignedSaturatedAddWithFlag32` / `SubWithFlag32`) and 3 dynarmic-internal ones (`Breakpoint`, `CallHostFunction`, `GetNZFromOp`). `nxaot opcodes
+--reach --check` (CTest `opcodes_reach`) proves the split: it translates 655,956 words filled from every entry of dynarmic's A64 decoder table
+under four FPCR values, finds the 576 opcodes the A64 frontend emits, and fails when one is not lowered. The vectors exercise 587 of the 588 lowered
+opcodes other than `Void` (`nxaot_vec` prints the list after each run); the one left is `Identity`, which the identity-removal pass leaves unused before
+the lifter looks. Apart from those two, an opcode is in the lowered set only when a passing vector reaches it. CRC32C is `crc32` (SSE4.2);
 CRC32 (IEEE) is a 256-entry table a byte at a time (a PCLMULQDQ form is an optimisation for later). `dmb` of every kind is `fence seq_cst`.
+
+Vectors per file of the committed set (all pass; `nxaot_vec` prints them per class): `fp.tsv.gz` 14,856 (with `fma_invalid` 456),
+`simd_same.tsv.gz` 42,000, `simd_misc.tsv.gz` 39,000, `simd_shift.tsv.gz` 15,600, `simd_perm.tsv.gz` 13,800, `crypto.tsv.gz` 9,600,
+`simd_ldst.tsv.gz` 14,040, `fp_seq.tsv.gz` 6,000; the integer `.tsv` files 24,400 (`dp_imm` 4,200, `dp_reg` 7,400, `branch` 2,200, `loadstore`
+4,900, `exclusive` 1,800, `system` 2,100, `sequence` 1,400, `undefined` 400).
 
 ## Known issues
 
@@ -107,15 +233,19 @@ vendored copy.
    (`ir/opt/a64_get_set_elimination_pass.cpp:67`), where NZCV bits 27:0 read as 0. Encoding: `d51b4200 d53b4201` (`msr nzcv, x0; mrs x1, nzcv`):
    with the pass, 56 of the 300 `msr_mrs` vectors differed (x1 = 0xfe947a5a from the reference, 0xf0000000 lifted, for x0 = 0xfe947a5a).
    The reference runs without that pass (`src/vec/reference.cpp`); the JIT fallback (design section 11) must too, or the pass be fixed upstream.
+   The lifter forwards vector registers only, in a pass of its own (`ForwardVectorRegisters`).
 2. **`dc zva` at an unaligned address.** With `hook_data_cache_operations` off, dynarmic's `A64CallbackConfigPass` zeroes 64 bytes from the address
    itself (`ir/opt/a64_callback_config_pass.cpp:32`), not from the aligned block that holds it (read in the code, not run). Encoding: `d50b7420`
    with an unaligned `x0`. The reference takes the hook and zeroes the aligned block, as the Arm ARM's `dc zva` does.
 3. **FPSR after a block lookup.** dynarmic's dispatcher compiles a block it misses with the guest's MXCSR loaded (`backend/x64/block_of_code.cpp:370`,
    `:449`), so its own floating point (hash-map load factors) can leave IXC in the guest's cumulative flags: the first vector, `94000001` (`bl +4`),
-   ended with FPSR 0x10. The harness does not compare the final FPSR (an `mrs fpsr` result is compared in its register). The JIT fallback inherits this.
+   ended with FPSR 0x10, and `d65f03c0` (`ret x30`) after another `ret` to a different target did again. The harness now runs every vector twice
+   on the reference and compares the second run, which finds every block of its path compiled (`src/vec/reference.cpp`, `Reference::Run`), and
+   compares the whole final FPSR; `--ignore-fpsr-flags` compares QC alone, should the issue come back. The JIT fallback inherits the issue.
 4. **FPCR bits.** `msr fpcr` keeps the bits dynarmic keeps (`FPCR_MASK = 0x07C89F00`, `backend/x64/a64_jitstate.cpp:51`), which include FZ16 and the
    trap enables a Cortex-A57 does not implement [A: the A57 reads them as 0]. The lifter uses the same mask (`kFpcrMask`), so both differ from the A57
-   alike; FPSR keeps QC and the cumulative flags (0x0800009F) on both.
+   alike; FPSR keeps QC and the cumulative flags (0x0800009F) on both. The trap enables reach neither executor's floating point: code is compiled
+   for the mode bits only, and dynarmic's software operations, which assert on an enabled trap, get the same (the helpers here too).
 5. **Branch targets.** dynarmic's location descriptors keep 56-bit PCs, sign-extended from bit 55 (`frontend/A64/a64_location_descriptor.h:28`), so a
    `br` to a non-canonical address leaves the reference at another pc than the lifted code: `d61f0020` (`br x1`) with x1 = 0x123456789abcdef0 ends at
    0x003456789abcdef0 in the reference and at x1 in the lifted code. That is the Arm ARM's result when top-byte-ignore is on for EL0 (BranchAddr), not
@@ -126,6 +256,68 @@ vendored copy.
 7. **What dynarmic leaves to an interpreter.** `mrs xN, cntvct_el0` (dynarmic translates `cntpct_el0` only): the decoder glue translates it and the
    reference's interpreter callback does the same. LSE atomics, `ldapr`, `hvc` / `smc` and `msr` immediate end a block as untranslated on both sides.
 
+The issues below are FPSR only: dynarmic's x86-64 backend raises other cumulative exception bits than the Arm ARM's pseudocode for some
+operations, and the lowering follows the Arm ARM. The lifter notes the issues a region meets in the forms dynarmic takes them
+(`lift::DynarmicIssue`, `Lifted::dynarmic_issues`), and nxaot_vec relaxes only those FPSR bits, only in the direction listed, for such a vector,
+and only when the FPSR is all that differs (`src/vec/main.cpp`, `KnownIssues`; it prints the vectors per issue; `--no-filters` turns it off).
+Values, QC and the other registers are compared exactly in every case.
+
+8. **FRINTN / FRINTP / FRINTM / FRINTZ / FRINTI raise Inexact.** dynarmic's native path is `roundss` / `roundps` with the rounding immediate but
+   without the precision-suppression bit (`backend/x64/constants.h:162`), so an inexact result raises PE, IXC. The Arm ARM's `FPRoundInt` with
+   `exact` FALSE raises no Inexact; only FRINTX does. Example: `1e644020` (`frintn d0, d1`) with d1 = 1.5: reference FPSR 0x10, Arm and lifted 0.
+   Reference-only IXC.
+9. **Conversions to integer and fixed point, dynarmic's native forms** (FCVTNS / NU / PS / PU / MS / MU / ZS / ZU, scalar and vector, and the
+   fixed-point FCVTZS / FCVTZU; `backend/x64/emit_x64_floating_point.cpp:1623`, `emit_x64_vector_floating_point.cpp:2012`). They
+   clamp with `minsd` / `maxsd` or compare-and-select before `cvttsd2si`, so a saturated result raises no Invalid Operation (positive overflow of
+   the signed forms, negative values to the unsigned ones, a quiet NaN zeroed by a quiet compare); unsigned 64-bit conversions convert the operand
+   with the signed `cvttsd2si` too, which raises Invalid Operation for values in [2^63, 2^64) that convert exactly; negative values to unsigned
+   are clamped to 0 before rounding, so Inexact is lost or IXC appears where Arm raises IOC; and the fixed-point forms scale by 2^fbits in the
+   source precision, which overflows (OFC, IXC) for large operands where Arm scales exactly. Examples: `9e581ccd` (`fcvtzs x13, d6, #57`) with
+   d6 = 0x43efffffffffffff saturates: Arm IOC, reference nothing; `9e390100` (`fcvtzu x0, s8`) with s8 = 0x5f7ffffe (1.8e19, exact):
+   reference IOC, Arm nothing. Reference-only IOC / IXC / OFC, lifted-only IOC / IXC.
+10. **Conversions dynarmic does in software** (FCVTAS / FCVTAU, the half-precision ones): its `FPToFixed` (`common/fp/op/FPToFixed.cpp:41`)
+    raises Invalid Operation for any negative nonzero operand of an unsigned conversion, also one that rounds to 0, where the Arm ARM's
+    `FPToFixed` rounds first (0, no overflow) and raises Inexact. Example: `9e250196` (`fcvtau x22, s12`) with s12 = 0x9be5733f (-3.8e-22):
+    reference IOC, Arm IXC. Reference-only IOC, lifted-only IXC.
+11. **FMADD / FMSUB / FNMADD / FNMSUB with DN = 0.** When the native result is a NaN, dynarmic's NaN path multiplies the two factors
+    (`vmuls`, `emit_x64_floating_point.cpp:745`) to test for infinity times zero; the product's Inexact, Overflow and Underflow reach the flags,
+    which the Arm ARM's `FPMulAdd` (a NaN addend is the result) does not raise. Example: `1f020c20` (`fmadd s0, s1, s2, s3`) with s1 = s2 =
+    1.1 and s3 a quiet NaN: reference IXC. Reference-only IXC / OFC / UFC.
+12. **No Input Denormal under FZ.** dynarmic's native operations flush denormal operands through MXCSR.DAZ, which raises nothing; the Arm ARM's
+    `FPUnpack` raises Input Denormal (IDC) for each operand it flushes. The lowering raises IDC as Arm does (`FunctionLifter::InputDenormal`),
+    as dynarmic's own software paths also do. Example: `1e222820` (`fadd s0, s1, s2`) with s1 = 0x00000001 under FZ: Arm IDC, reference nothing.
+    Lifted-only IDC.
+13. **FMAX / FMIN / FMAXNM / FMINNM of vectors raise Invalid Operation for quiet NaNs.** dynarmic computes `maxps` / `minps` on every lane,
+    which signal for any NaN operand (`emit_x64_vector_floating_point.cpp:950`); the Arm ARM signals for signalling NaNs only (the scalar
+    forms are right: they test with `ucomiss` first). Example: `4e22f420` (`fmax v0.4s, v1.4s, v2.4s`) with a quiet NaN lane in v1: reference IOC.
+    Reference-only IOC.
+14. **FRSQRTE (single, double).** dynarmic's native estimate truncates the operand and computes `1 / sqrt` with `sqrtss` / `divss`
+    (`emit_x64_floating_point.cpp:1182`), which raises Inexact; its truncation turns +infinity into a signalling NaN that its `ucomiss` test then
+    signals (Invalid Operation); and its `rsqrtss` path for zero, negative, denormal (FZ) and NaN operands raises nothing where the Arm ARM raises
+    Divide by Zero, Invalid Operation or Input Denormal. Values agree. Examples: `7ea1d9f6` (`frsqrte s22, s15`) with s15 = +inf: reference IOC,
+    Arm nothing; `7ea1d817` with s0 = 0x0000000b under FZ: Arm IDC and DZC, reference nothing. Reference-only IXC / IOC, lifted-only IOC / DZC /
+    IDC.
+15. **FDIV / FRECPE / FRSQRTE of 64-bit vectors (2S).** dynarmic computes all four lanes, and the zero upper lanes the frontend's `GetD` supplies
+    give 0 / 0 (Invalid Operation) and estimates of 0 (Divide by Zero). The Arm ARM computes two lanes; the lowering computes the upper lanes
+    on 1.0 (division) or not at all (estimates) when the result's only uses keep the low 64 bits (`FunctionLifter::LowHalfOnly`). Example:
+    `2e22fc20` (`fdiv v0.2s, v1.2s, v2.2s`): reference IOC always. Reference-only IOC / DZC.
+16. **A quiet NaN addend with infinity times zero.** The Arm ARM's `FPMulAdd` returns the default NaN and raises Invalid Operation; x86's FMA returns
+    the quiet NaN and raises nothing. dynarmic's vector NaN correction sets the default NaN without the flag
+    (`emit_x64_vector_floating_point.cpp:1299`), and with DN = 1 its scalar and vector forms are `vfmadd` alone (`emit_x64_floating_point.cpp:638`,
+    `emit_x64_vector_floating_point.cpp:1326`); its scalar forms with DN = 0 raise it through the multiply that tests for infinity times zero
+    (`vmuls`, `emit_x64_floating_point.cpp:745`, issue 11). The lowering raises IOC in every form (`FunctionLifter::MulAddInvalid`; with DN a chain
+    that holds an FMA takes the cold block instead of the default-NaN select when the flags are modelled). Examples:
+    `4ea5cc81` (`fmls v1.4s, v4.4s, v5.4s`) with quiet NaN addends, v4 = 0, v5 = +inf: Arm IOC, reference nothing; `1f450881`
+    (`fmadd d1, d4, d5, d2`) with d2 a quiet NaN, d4 = 0, d5 = +inf under DN: the same. Found by the big sweep (`fp_seq`, `fmadd` with DN = 0
+    under FPCR.RZ: the lifted run raised nothing and the reference IOC, a lowering bug, now fixed); the committed class `fma_invalid` (in
+    `fp.tsv.gz`) covers every form. Lifted-only IOC.
+
+Shared with dynarmic, not filtered, and open: x86 detects tininess after rounding and the Arm ARM before, so a result that rounds up to the
+smallest normal raises UFC on Arm and not here (FZ = 0); with FZ = 1, x86 flushes after rounding and Arm before, so add, subtract, multiply,
+divide and square root of such a result give the smallest normal here and zero on Arm (design 7.2, row 13). The brief of phase 2 asks the
+FZ handling to follow dynarmic's: fused multiply-add gets the software slow path dynarmic has (`FPMulAdd` for a result of +-smallest normal), the
+other operations take x86's FTZ as dynarmic does. Random vectors do not hit these boundaries; a slow path for them is a later, measured change.
+
 ## What is not done yet
 
 The phases of design section 14, and where this folder stands:
@@ -133,7 +325,7 @@ The phases of design section 14, and where this folder stands:
 | Phase | Content | Here |
 |---|---|---|
 | 0. Census | the numbers per module | `nxaot census` over raw code; NSO / NRO parsing, FDE coverage, setjmp imports, LSDA counts and the address-taken set are not done |
-| 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | the state block, the lifter of those classes (one region of blocks per function), the harness (0 mismatches over 24,400 vectors). Not done: discovery, function summaries and the calling convention (2.3), calls and returns (3), the dispatcher (4), the host's SVC path (`svc` only leaves the function), safepoints, ThinLTO, the cache, the corpus NROs, the throughput measurements |
-| 2. FP and SIMD | every FP, NEON and crypto lowering, NaN chains | not started: such blocks are refused |
+| 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | the state block, the lifter of those classes (one region of blocks per function), the harness (0 mismatches over 24,400 integer vectors). Not done: discovery, function summaries and the calling convention (2.3), calls and returns (3), the dispatcher (4), the host's SVC path (`svc` only leaves the function), safepoints, ThinLTO, the cache, the corpus NROs, the throughput measurements |
+| 2. FP and SIMD | every FP, NEON and crypto lowering, NaN chains | every opcode the A64 frontend emits lowered; 0 mismatches over the committed vectors and 7,000,000 random floating-point and SIMD ones (10^6 per class for seven of the eight classes, `fp_seq` not completed; not the 10^8 of the acceptance); the chain checks measured. Not done: the row-13 FZ slow path for the basic operations, inline estimates, combined escape checks, the run-time helpers in the host |
 | 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | not started |
 | 4. to 6. | games on the Intel Mac, performance, breadth | not started |

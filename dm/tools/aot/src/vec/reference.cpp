@@ -1,5 +1,6 @@
 #include "vec/reference.h"
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <optional>
@@ -181,12 +182,30 @@ struct Reference::Impl final : A64::UserCallbacks {
     uint32_t reason = 0, arg = 0;
     bool done = false;
     std::string failure;
+    std::vector<uint32_t> last_code;  // the code and FPCR the code cache holds (Run)
+    uint32_t last_fpcr = 0;
+    bool have_last = false;
 };
 
 Reference::Reference() : impl(std::make_unique<Impl>()) {}
 Reference::~Reference() = default;
 
 Outcome Reference::Run(const Vector& v, const State& init, const std::vector<uint8_t>& image) {
+    Impl& r = *impl;
+    // Every vector runs twice and the second run is the outcome: dynarmic's dispatcher compiles a block it misses with the guest's MXCSR loaded,
+    // and its own floating point (its hash maps' load factors) can then leave IXC in the guest's cumulative flags (README.md, "Known issues",
+    // 3). The first run compiles every block of the vector's path (a branch target depends on the registers, so a vector with the same code as
+    // the last one can still miss), the second finds them all, so its final FPSR holds the guest code's flags alone. The cache is cleared when
+    // the code or the FPCR differs from the last vector's (RunOnce clears it after its Reset, which would drop a pending request)
+    const bool same_code = r.have_last && r.last_code == v.code && r.last_fpcr == v.fpcr;
+    r.last_code = v.code;
+    r.last_fpcr = v.fpcr;
+    r.have_last = true;
+    RunOnce(v, init, image, !same_code);
+    return RunOnce(v, init, image, false);
+}
+
+Outcome Reference::RunOnce(const Vector& v, const State& init, const std::vector<uint8_t>& image, bool clear_cache) {
     Impl& r = *impl;
     r.vec = &v;
     r.mem = image;
@@ -199,13 +218,20 @@ Outcome Reference::Run(const Vector& v, const State& init, const std::vector<uin
     r.reason = r.arg = 0;
     r.exit_pc = 0;
 
-    r.jit->Reset();       // registers, exclusive state, return stack buffer, halt requests
-    r.jit->ClearCache();  // the code at kCodeBase is another vector's: compiled again at the next Run
+    r.jit->Reset();  // registers, exclusive state, return stack buffer, halt requests
+    if (clear_cache) {
+        r.jit->ClearCache();  // after Reset, which would drop the request
+    }
     r.monitor.Clear();
     r.jit->SetRegisters(init.x);
     r.jit->SetSP(init.sp);
     r.jit->SetPC(init.pc);
     r.jit->SetPstate(init.nzcv & 0xF0000000u);
+    std::array<A64::Vector, 32> vregs;
+    for (size_t i = 0; i < 32; ++i) {
+        vregs[i] = {init.v[i][0], init.v[i][1]};
+    }
+    r.jit->SetVectors(vregs);
     r.jit->SetFpcr(init.fpcr);
     r.jit->SetFpsr(init.fpsr);
     while (!r.done) {
@@ -224,6 +250,10 @@ Outcome Reference::Run(const Vector& v, const State& init, const std::vector<uin
     o.s.nzcv = r.jit->GetPstate() & 0xF0000000u;
     o.s.fpcr = r.jit->GetFpcr();
     o.s.fpsr = r.jit->GetFpsr();
+    const auto out_v = r.jit->GetVectors();
+    for (size_t i = 0; i < 32; ++i) {
+        o.s.v[i] = {out_v[i][0], out_v[i][1]};
+    }
     o.s.tpidr = r.tpidr;
     o.s.tpidrro = r.tpidrro;
     o.s.cnt = r.cnt;

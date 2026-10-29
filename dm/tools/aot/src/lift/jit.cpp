@@ -1,18 +1,25 @@
 #include "lift/jit.h"
 
+#include <llvm/ExecutionEngine/Orc/Core.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/MC/MCSubtargetInfo.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/CodeGen.h>
 #include <llvm/Target/TargetMachine.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/TargetParser/SubtargetFeature.h>
+
+#include "lift/runtime.h"
 
 namespace nxaot::lift {
 
@@ -66,6 +73,16 @@ std::unique_ptr<Jit> Jit::Create(const std::string& cpu, std::string* error) {
         return nullptr;
     }
     self->impl->jit->getMainJITDylib().addGenerator(std::move(*generator));
+    // The helpers lifted code calls (lift/runtime.h), by name
+    llvm::orc::SymbolMap helpers;
+    for (const auto& [name, address] : RuntimeSymbols()) {
+        helpers[self->impl->jit->mangleAndIntern(name)] = {llvm::orc::ExecutorAddr::fromPtr(address),
+                                                            llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable};
+    }
+    if (auto err = self->impl->jit->getMainJITDylib().define(llvm::orc::absoluteSymbols(std::move(helpers)))) {
+        *error = llvm::toString(std::move(err));
+        return nullptr;
+    }
     return self;
 }
 
@@ -109,6 +126,32 @@ bool Jit::Add(std::unique_ptr<llvm::Module> module, std::unique_ptr<llvm::LLVMCo
     return true;
 }
 
+std::string Jit::Assembly(const llvm::Module& module, std::string* error) {
+    std::unique_ptr<llvm::Module> copy = llvm::CloneModule(module);
+    llvm::LoopAnalysisManager lam;
+    llvm::FunctionAnalysisManager fam;
+    llvm::CGSCCAnalysisManager cgam;
+    llvm::ModuleAnalysisManager mam;
+    llvm::PassBuilder pb{impl->tm.get()};
+    pb.registerModuleAnalyses(mam);
+    pb.registerCGSCCAnalyses(cgam);
+    pb.registerFunctionAnalyses(fam);
+    pb.registerLoopAnalyses(lam);
+    pb.crossRegisterProxies(lam, fam, cgam, mam);
+    llvm::ModulePassManager mpm = pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2);
+    mpm.run(*copy, mam);
+    llvm::SmallString<0> text;
+    llvm::raw_svector_ostream out{text};
+    llvm::legacy::PassManager pm;
+    impl->tm->Options.MCOptions.AsmVerbose = true;  // block comments name the IR blocks (nxaot_bench counts the cold ones apart)
+    if (impl->tm->addPassesToEmitFile(pm, out, nullptr, llvm::CodeGenFileType::AssemblyFile)) {
+        *error = "the target machine cannot emit assembly";
+        return {};
+    }
+    pm.run(*copy);
+    return std::string(text.str());
+}
+
 void* Jit::Lookup(const std::string& name, std::string* error) {
     auto sym = impl->jit->lookup(name);
     if (!sym) {
@@ -124,6 +167,18 @@ std::string Jit::Cpu() const {
 
 std::string Jit::Features() const {
     return impl->features;
+}
+
+lift::Target Jit::TargetFeatures() const {
+    const llvm::MCSubtargetInfo* sti = impl->tm->getMCSubtargetInfo();
+    lift::Target t;
+    t.fma = sti->checkFeatures("+fma");
+    t.f16c = sti->checkFeatures("+f16c");
+    t.avx2 = sti->checkFeatures("+avx2");
+    t.aes = sti->checkFeatures("+aes");
+    t.sha = sti->checkFeatures("+sha");
+    t.pclmul = sti->checkFeatures("+pclmul");
+    return t;
 }
 
 const std::string& Jit::LastIr() const {

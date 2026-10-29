@@ -48,9 +48,13 @@ run() {
 }
 
 run vectors "$build/nxaot_vec" "$aot/tests/vectors"
+run vectors_v3 "$build/nxaot_vec" --cpu x86-64-v3 "$aot/tests/vectors/crypto.tsv.gz"
+run vectors_perop "$build/nxaot_vec" --nan-mode perop "$aot/tests/vectors/fp.tsv.gz" "$aot/tests/vectors/fp_seq.tsv.gz"
+run opcodes_reach "$build/nxaot" opcodes --reach --check
 run census python3 "$aot/tests/test_census.py" --nxaot "$build/nxaot" --work "$build/census"
 run vectors_current python3 "$aot/tests/gen_vectors.py" --check
 run opcodes "$build/nxaot" opcodes
+run bench "$build/nxaot_bench" --iterations 200000
 
 total_line="$total runs: $passed passed, $failed failed"
 {
@@ -58,7 +62,9 @@ total_line="$total runs: $passed passed, $failed failed"
     printf 'directory: %s\nhost: %s\nbuild folder: %s\n' "$started_in" "$(uname -srm 2>/dev/null || echo unknown)" "$build"
     "$build/nxaot" version | sed 's/^/toolchain: /'
     printf 'compiler: %s\n' "$(c++ --version 2>/dev/null | head -n 1)"
-    grep -h '^nxaot_vec: LLVM\|^== nxaot_vec' "$logs/vectors.log" 2>/dev/null
+    for t in vectors vectors_v3 vectors_perop; do grep -h '^== nxaot_vec' "$logs/$t.log" 2>/dev/null | sed "s/^/$t: /"; done
+    grep -h '^nxaot_vec: LLVM\|^nxaot_vec: lowering' "$logs/vectors.log" 2>/dev/null
+    grep -h '^# reach' "$logs/opcodes_reach.log" 2>/dev/null
     grep -h '^census test:' "$logs/census.log" 2>/dev/null
     grep -h '^# ' "$logs/opcodes.log" 2>/dev/null | sed 's/^# /lifter opcodes: /'
     echo

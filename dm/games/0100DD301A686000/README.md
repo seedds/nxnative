@@ -94,8 +94,8 @@ verification; device validation remains open.
 - A fresh process with the existing `lollipop` save reached the prologue again,
   with no error lines. This checks save creation and acceptance on relaunch;
   persistence of a later checkpoint has not been validated.
-- The corrected chain's 95-second Mac smoke route reached 5,364 frames with
-  zero `[RED]` kinds, 59.3 fps and 18.15 ms frame-time p99; its gate screenshots
+- The corrected chain's 95-second Mac smoke route reached 5,388 frames with
+  zero `[RED]` kinds, 59.6 fps and 18.03 ms frame-time p99; its gate screenshots
   match the expected scene. The comparison against the profile's pre-fix
   baseline changed only the three CAS shaders, with no new shader or interface
   failures. See [`validated.tsv`](validated.tsv) for the recorded chain.
@@ -103,12 +103,20 @@ verification; device validation remains open.
   interactions, the grab-escape prompt and combat attacks (score 1,000), with
   no error or crash lines. The earlier test covered the rest of the first wave
   and parking-lot transition.
-- The unsigned 1.21.1 IPA is 6.81 GiB (7,312,918,586 bytes) and contains all
+- After rebasing onto the SDK patch-binding update, all three rewritten module
+  binaries matched the tested images byte for byte. The full smoke comparison
+  above uses the rebased hosts and profile.
+- The unsigned 1.21.1 IPA is 6.81 GiB and contains all
   9,828 base iOS shader libraries and the
   merged RomFS. ZIP CRC verification passed. It has an arm64 executable, no
   provisioning profile or developer identity, and the standard ad-hoc
   entitlement carrier for the increased-memory request. It has not been
   installed or tested on an iOS device.
+- The later Portal 2 integration changed the generated gallery and added an
+  audio-input notification handler upstream. RePOP's profile, rewritten modules
+  and shaders are unchanged; both executables were refreshed and host and
+  documentation/patch tests passed. The gameplay measurements above precede
+  that final integration.
 - **Open:** longer play sessions, later stages, later-checkpoint persistence,
   and iOS device performance/memory. The IPA requires iOS 26 or later.
 

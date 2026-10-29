@@ -35,7 +35,7 @@ static void image_case(int explicit_image) { @autoreleasepool {
     mtl_reg_tex(601, &alias, NULL);
     os_unfair_lock_lock(&g_rmu); CHECK(tex_by_id(601) == old, "sampled descriptor caches the old backing"); os_unfair_lock_unlock(&g_rmu);
     mtl_sub_begin(); memset(&R, 0, sizeof R); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &texture;
-    R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0.5,0,0,1);
+    R.clear_c[0] = 1; R.cc[0] = cc_nvn(MTLClearColorMake(0.5,0,0,1));
     CHECK(rp_begin() != nil && g_enc != nil, "production render pass is open before image registration");
     view_t mip = {.set_levels=1, .base_level=1, .nlevels=1};
     if (explicit_image) mtl_reg_image(602, &texture, &mip); else mtl_reg_tex(602, &texture, &mip);

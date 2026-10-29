@@ -19,6 +19,8 @@
 #endif
 #include "nvn_mtl.h"
 #include "nvn_obj.h"
+#include "nvn_state.h"      // the draw and render-target state S and R, state records, per-queue state (frontend, every host)
+#include "nvn_gpuwrite.h"   // the GPU-write ledger: pend_*, sbw_*, gw_* (frontend, every host)
 #include "../tex/nvn_fmt_mtl.h"
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/nvn_deswizzle_gpu.h"
@@ -31,8 +33,6 @@
 #include "nvn_timestamp.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
-// Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
-#define NTEX 256
 // The NVN driver's constant segments, one layout in every game (dm/gfx/tools/dmsh_build.py), byte offsets: c2 holds the combined handles at 0x20 + 8 r (41 slots up to the separate table:
 // past slot 31 they lie in the image table, 0x120 + 8 r, 8 slots), the separate textures at 0x168 + 8 r and the separate samplers at 0x568 + 8 r (128 each);
 // c0 the storage buffer table at base + 0x10 r (address 64 bits, size 32 bits), base vertex 0x110, compute 0x310, geometry 0x410, pixel 0x510. The replay fills one DRV_SIZE buffer per segment a shader reads
@@ -619,69 +619,16 @@ static vis_list *vis_snapshot(void) {
     for (int i = 0; i < g_nvs; i++) { l->s[i] = g_vs[i]; CFRetain(g_vs[i].buf); }
     return l;
 }
-// Target ranges of buffer writes (copies / inline uniform updates) already encoded in this submission but not yet executed on the GPU: reading these addresses on the CPU side at encode time yields old values (uv_proof avoids them when reading uniforms)
-// Inline updates keep where their data sits in the update ring (g_pend_upd: index + 1 into g_upd), so a bindless handle they wrote can be read as the GPU will see it (pend_read).
-// Monster Hunter Rise queues more than 256 writes in a submission (the old limit, after which every address counted as written). The writes are indexed by 4 KB page (a chain per hash
-// bucket, newest first); a write over more than PEND_SPAN pages goes to a short list that every lookup scans
-enum { PEND_MAX = 8192, PEND_HB = 2048, PEND_NODES = 16384, PEND_SPAN = 8, PEND_WIDE = 256 };
-static uint64_t g_pend_lo[PEND_MAX], g_pend_hi[PEND_MAX]; static int g_npend, g_pend_over; static uint8_t g_pend_kind[PEND_MAX]; static uint16_t g_pend_upd[PEND_MAX];   // kind: 1 inline update, 2 copy, 3 fill
-static int32_t g_pend_head[PEND_HB]; static uint32_t g_pend_hgen[PEND_HB], g_pend_gen = 1;   // a bucket's chain is valid when its generation is this submission's
-static struct { int32_t e, next; } g_pend_node[PEND_NODES]; static int g_npnode;
-static int32_t g_pend_wide[PEND_WIDE]; static int g_nwide;
-typedef struct { uint64_t lo; size_t off; __unsafe_unretained id<MTLBuffer> buf; } upd_ent;   // the ring block lives until this submission completes (mtl_sub_update)
-static upd_ent g_upd[PEND_MAX]; static int g_nupd;
-// Other writes to guest memory in this submission, which the pend list does not hold: writable storage buffers bound to a shader, texture→buffer copies, counter reports (ubp_get).
-// Kept by 4 KB page (Breath of the Wild's particle dispatches bind about ten storage buffers each, hundreds a frame): a set of pages tagged with the submission (g_pend_gen) and with what
-// wrote them. A counter report does not count against this submission's shadows: the host writes reports on the CPU when the whole submission has completed, so no draw of it reads one
-// (Fire Emblem Engage writes its query reports into the page of a uniform block); it counts for later submissions while this one runs (gw_commit)
-enum { SBW_N = 16384, SBW_PAGES = 4096 };
-static struct { uint64_t page; uint32_t gen; uint8_t src; } g_sbwp[SBW_N]; static int g_nsbw, g_sbw_over;   // src: SBW_* bits; pages in the set this submission; over: a write could not be kept (too large, set full, size not known)
-static int sbw_slot(uint64_t pg, int add) {   // open addressing; −1 = not there (or no room to add)
-    unsigned h = (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 50) & (SBW_N - 1);
-    for (int i = 0; i < 64; i++, h = (h + 1) & (SBW_N - 1)) {
-        if (g_sbwp[h].gen != g_pend_gen) { if (!add) return -1; g_sbwp[h].page = pg; g_sbwp[h].gen = g_pend_gen; g_sbwp[h].src = 0; g_nsbw++; return (int)h; }
-        if (g_sbwp[h].page == pg) return (int)h; }
-    return -1;
-}
-enum { SBW_GPU = 1, SBW_REPORT = 2 };
-static uint32_t g_sbw_gen;   // bumped by every write noted that this submission's shadows must respect (a cached shadow made before it is checked again)
-static void sbw_note(uint64_t lo, uint64_t n, int src) {
-    if (src == SBW_GPU) g_sbw_gen++;
-    if (!n || n > (uint64_t)SBW_PAGES << 12) { if (src == SBW_GPU) g_sbw_over = 1; return; }   // a report too large to keep cannot happen (16 bytes)
-    for (uint64_t pg = lo >> 12; pg <= (lo + n - 1) >> 12; pg++) { int k = sbw_slot(pg, 1); if (k < 0) { g_sbw_over = 1; return; } g_sbwp[k].src |= (uint8_t)src; }
-}
-static int sbw_hits(uint64_t lo, uint64_t hi) { if (!g_nsbw) return 0; for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { int k = sbw_slot(pg, 0); if (k >= 0 && (g_sbwp[k].src & SBW_GPU)) return 1; } return 0; }
-static inline unsigned pend_bucket(uint64_t page) { return (unsigned)((page * 0x9E3779B97F4A7C15ull) >> 53) & (PEND_HB - 1); }
-static void pend_reset(void) { g_npend = g_pend_over = g_nupd = g_npnode = g_nwide = g_nsbw = g_sbw_over = 0; if (!++g_pend_gen) { memset(g_pend_hgen, 0, sizeof g_pend_hgen); memset(g_sbwp, 0, sizeof g_sbwp); g_pend_gen = 1; } }
+// The GPU-write ledger (writes queued in this submission: pend; its other GPU writes: sbw; earlier submissions' writes still running: gw) is in nvn_gpuwrite.c (nvn_gpuwrite.h).
+// These keep the names the replay uses
 static void vc_gpu_write(uint64_t dst, uint64_t n);   // kept index ranges under the written range are not trusted again (ix_range)
-static int pend_add(uint64_t dst, uint64_t n, int kind) {
-    vc_gpu_write(dst, n);
-    if (g_pend_over || g_npend == PEND_MAX) { g_pend_over = 1; return -1; }
-    int e = g_npend; uint64_t p0 = dst >> 12, p1 = (dst + (n ? n : 1) - 1) >> 12;
-    if (p1 - p0 < PEND_SPAN && g_npnode + (int)(p1 - p0 + 1) <= PEND_NODES)
-        for (uint64_t pg = p0; pg <= p1; pg++) { unsigned b = pend_bucket(pg); int k = g_npnode++;
-            g_pend_node[k].e = e; g_pend_node[k].next = g_pend_hgen[b] == g_pend_gen ? g_pend_head[b] : -1; g_pend_head[b] = k; g_pend_hgen[b] = g_pend_gen; }
-    else if (g_nwide < PEND_WIDE) g_pend_wide[g_nwide++] = e;
-    else { g_pend_over = 1; return -1; }
-    g_pend_lo[e] = dst; g_pend_hi[e] = dst + n; g_pend_kind[e] = (uint8_t)kind; g_pend_upd[e] = 0; return g_npend++;
-}
-// The newest queued write overlapping [a, a+n): its index, -1 for none, -2 when it cannot be told (overflow)
-static int pend_last(uint64_t a, uint64_t n) {
-    if (g_pend_over) return -2;
-    int best = -1; uint64_t p0 = a >> 12, p1 = (a + (n ? n : 1) - 1) >> 12;
-    for (int i = 0; i < g_nwide; i++) { int e = g_pend_wide[i]; if (e > best && a < g_pend_hi[e] && a + n > g_pend_lo[e]) best = e; }
-    if (p1 - p0 >= PEND_SPAN) { for (int e = g_npend - 1; e > best; e--) if (a < g_pend_hi[e] && a + n > g_pend_lo[e]) return e; return best; }
-    for (uint64_t pg = p0; pg <= p1; pg++) { unsigned b = pend_bucket(pg); if (g_pend_hgen[b] != g_pend_gen) continue;
-        for (int k = g_pend_head[b]; k >= 0 && g_pend_node[k].e > best; k = g_pend_node[k].next) { int e = g_pend_node[k].e; if (a < g_pend_hi[e] && a + n > g_pend_lo[e]) { best = e; break; } } }
-    return best;
-}
-static int pend_hits(uint64_t a, uint64_t n) { return pend_last(a, n) != -1; }
-// The n bytes at a as the last write queued in this submission leaves them, when that write is an inline update covering them all → 1; otherwise → 0 and *kind = what wrote them (0 = too many writes to tell)
-static int pend_read(uint64_t a, uint64_t n, void *out, int *kind) {
-    int e = pend_last(a, n); *kind = e >= 0 ? g_pend_kind[e] : 0;
-    if (e < 0 || !g_pend_upd[e] || a < g_pend_lo[e] || a + n > g_pend_hi[e]) return 0;
-    const upd_ent *u = &g_upd[g_pend_upd[e] - 1]; memcpy(out, (const uint8_t *)u->buf.contents + u->off + (a - u->lo), n); return 1;
-}
+static inline void pend_reset(void) { nvn_gw_reset(); }
+static inline int pend_add(uint64_t dst, uint64_t n, int kind) { vc_gpu_write(dst, n); return nvn_gw_pend_add(dst, n, kind); }
+static inline int pend_last(uint64_t a, uint64_t n) { return nvn_gw_pend_last(a, n); }
+static inline int pend_hits(uint64_t a, uint64_t n) { return nvn_gw_pend_hits(a, n); }
+static inline int pend_read(uint64_t a, uint64_t n, void *out, int *kind) { return nvn_gw_pend_read(a, n, out, kind); }
+static inline void sbw_note(uint64_t lo, uint64_t n, int src) { nvn_gw_sbw_note(lo, n, src); }
+static inline int sbw_hits(uint64_t lo, uint64_t hi) { return nvn_gw_sbw_hits(lo, hi); }
 typedef struct { uint64_t ser; uint16_t level, slice; } zskip_zero;
 static zskip_zero g_zskip_zero[4096]; static int g_zskip_n, g_zskip_count;
 static zskip_zero g_zskip_cand[8]; static uint8_t g_zskip_cand_ok[8];
@@ -1068,47 +1015,12 @@ static void ubd_read(uint64_t lo, size_t n, void *out) {
 // Breath of the Wild updates part of a bound block about 226 times a frame outdoors and ended a pass for nearly every one (about 900 MB of attachment loads and stores a frame on an iPhone).
 // DM_NVN_UB_PARTIAL=0 turns it off
 static int ub_partial_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UB_PARTIAL"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UB_PARTIAL=0: a binding the deferred uniform updates cover only in part ends the pass as before"); } return v; }
-enum { GW_N = 4096, GW_PAGES = 4096 };
-static struct { uint64_t page, fence; } g_gw[GW_N];   // page ~0: two live pages met in the slot, so any page there counts as written until fence completes
-static uint64_t g_gw_all;                            // every page counts as written until this fence completes (a submission whose writes could not all be listed)
 static uint64_t g_ubp_made, g_ubp_reused, g_ubp_refused;   // partial shadows made / taken from the cache / refused (the pass ended), for the residency set line
 static uint64_t g_ubp_why[5];   // why ubp_get refused: 0 too large or off, 1 other GPU writes in this submission (sbw), 2 GPU writes of an earlier submission still running, 3 a copy, fill or feedback write queued, 4 unreadable or too many writes
-static inline unsigned gw_slot(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 52) & (GW_N - 1); }
-static void gw_put(uint64_t lo, uint64_t hi, uint64_t fence, uint64_t done) {
-    if (hi <= lo) return;
-    uint64_t p0 = lo >> 12, p1 = (hi - 1) >> 12;
-    if (p1 - p0 >= GW_PAGES) { if (fence > g_gw_all) g_gw_all = fence; return; }
-    for (uint64_t pg = p0; pg <= p1; pg++) { unsigned s = gw_slot(pg);
-        g_gw[s].page = g_gw[s].page == pg || g_gw[s].fence <= done ? pg : ~0ull;
-        if (fence > g_gw[s].fence) g_gw[s].fence = fence; }
-}
-static int gw_live(uint64_t lo, uint64_t hi) {
-    uint64_t done = g_done;   // read without the lock as elsewhere: a stale value only refuses more
-    if (g_gw_all > done) return 1;
-    for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned s = gw_slot(pg); if ((g_gw[s].page == pg || g_gw[s].page == ~0ull) && g_gw[s].fence > done) return 1; }
-    return 0;
-}
-// The submission's GPU writes go into the page table with its fence (mtl_sub_commit)
-static void gw_commit(uint64_t fence) {
-    uint64_t done = g_done;
-    if ((g_pend_over || g_sbw_over) && fence > g_gw_all) g_gw_all = fence;
-    for (int e = 0; e < g_npend; e++) gw_put(g_pend_lo[e], g_pend_hi[e], fence, done);
-    if (g_nsbw) for (int i = 0; i < SBW_N; i++) if (g_sbwp[i].gen == g_pend_gen) gw_put(g_sbwp[i].page << 12, (g_sbwp[i].page + 1) << 12, fence, done);
-}
-// The writes queued in this submission from index since on that overlap [a, b), newest first, into out (room for every entry a lookup can meet); -1 when they cannot all be told
-static int pend_since(uint64_t a, uint64_t b, int since, int *out) {
-    if (g_pend_over) return -1;
-    int n = 0; uint64_t p0 = a >> 12, p1 = (b - 1) >> 12;
-    if (p1 - p0 >= PEND_SPAN) { for (int e = g_npend - 1; e >= since; e--) if (a < g_pend_hi[e] && g_pend_lo[e] < b) out[n++] = e; return n; }   // every entry, newest first
-    for (int i = 0; i < g_nwide; i++) { int e = g_pend_wide[i]; if (e >= since && a < g_pend_hi[e] && g_pend_lo[e] < b) out[n++] = e; }
-    for (uint64_t pg = p0; pg <= p1; pg++) { unsigned bk = pend_bucket(pg); if (g_pend_hgen[bk] != g_pend_gen) continue;
-        for (int k = g_pend_head[bk]; k >= 0 && g_pend_node[k].e >= since; k = g_pend_node[k].next) { int e = g_pend_node[k].e; if (a < g_pend_hi[e] && g_pend_lo[e] < b) out[n++] = e; } }   // chains run newest first
-    if (n > 1 && (g_nwide || p1 > p0)) {   // several lists: newest first, each once
-        for (int i = 1; i < n; i++) { int v = out[i], j = i; while (j > 0 && out[j - 1] < v) { out[j] = out[j - 1]; j--; } out[j] = v; }
-        int m = 1; for (int i = 1; i < n; i++) if (out[i] != out[m - 1]) out[m++] = out[i];
-        n = m; }
-    return n;
-}
+static inline void gw_put(uint64_t lo, uint64_t hi, uint64_t fence, uint64_t done) { nvn_gw_put(lo, hi, fence, done); }
+static inline int gw_live(uint64_t lo, uint64_t hi) { return nvn_gw_live(lo, hi, g_done); }   // g_done read without the lock as elsewhere: a stale value only refuses more
+static inline void gw_commit(uint64_t fence) { nvn_gw_commit(fence, g_done); }   // the submission's GPU writes go into the page table with its fence (mtl_sub_commit)
+static inline int pend_since(uint64_t a, uint64_t b, int since, int *out) { return nvn_gw_pend_since(a, b, since, out); }
 int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and sparse pools
 // Shadows made from memory, per range. One is kept while no write is queued after it (the draws after an update bind the same block again and again); the next one for the same range starts
 // from it and lays over only the writes queued since (the game rewrites one block hundreds of times a submission). A range read whole from memory once is not read from memory again in the submission
@@ -1149,7 +1061,7 @@ static int ubp_get(uint64_t lo, uint64_t hi, uint64_t *gpu, const uint8_t **cpu)
     else { if (c) ubc_wait(c->ready); memcpy(d, c ? c->cpu : (const uint8_t *)(uintptr_t)lo, (size_t)len); }
     for (int i = nk - 1; i >= 0; i--) { int e = g_ubp_idx[i]; const upd_ent *u = &g_upd[g_pend_upd[e] - 1];   // oldest first: each byte ends with the newest write
         uint64_t x = g_pend_lo[e] > lo ? g_pend_lo[e] : lo, y = g_pend_hi[e] < hi ? g_pend_hi[e] : hi;
-        const uint8_t *src = (const uint8_t *)u->buf.contents + u->off + (x - u->lo);
+        const uint8_t *src = u->data + (x - u->lo);
         if (defer) ready = ubc_push(d + (x - lo), src, (size_t)(y - x)); else memcpy(d + (x - lo), src, (size_t)(y - x)); }
     g_ubp_made++;
     if (!c) c = &g_ubpc[g_ubpc_i++ % UBP_CACHE];
@@ -1173,7 +1085,7 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
         res_add(g_ubs_buf); g_ubs_off = 0;
     }
     memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
-    if (pi >= 0) { g_upd[g_nupd] = (upd_ent){dst, g_ubs_off, g_ubs_buf}; g_pend_upd[pi] = (uint16_t)++g_nupd; }
+    if (pi >= 0) nvn_gw_pend_data(pi, dst, (const uint8_t *)g_ubs_buf.contents + g_ubs_off);
     if (defer) {
         // A deferred update this one covers whole never needs to land: the same landing writes these bytes after it, and the draws that read it hold its ring copy (ubd_shadow).
         // Games rewrite one block before every draw group (Breath of the Wild: the same 64 bytes), so the list stays short: every lookup below scans it, for most bindings of most draws
@@ -2580,12 +2492,12 @@ void mtl_tex_release(tex_t *t) {
 }
 
 // ---------- Render passes: SetRenderTargets opens a new pass; clears before the first command in the pass are folded into the load action ----------
-static struct {
-    p_set_rt rt; int has_rt;
-    uint8_t clear_c[8]; MTLClearColor cc[8];
-    uint8_t clear_d, clear_s; double cd; uint32_t cs;
-    p_scissor sc; int has_sc;
-} R;
+// The render-target state R is in nvn_state.c (nvn_state.h). Its clear colours are nvn_clear_color, laid out as MTLClearColor: the copies of them below (deferred groups,
+// fused passes, lazy clears) are MTLClearColor arrays memcpy'd to and from R.cc, and a single one is converted where it is assigned (cc_nvn) or given to Metal (cc_mtl)
+_Static_assert(sizeof(nvn_clear_color) == sizeof(MTLClearColor) && offsetof(nvn_clear_color, red) == offsetof(MTLClearColor, red) && offsetof(nvn_clear_color, green) == offsetof(MTLClearColor, green)
+               && offsetof(nvn_clear_color, blue) == offsetof(MTLClearColor, blue) && offsetof(nvn_clear_color, alpha) == offsetof(MTLClearColor, alpha), "nvn_clear_color is laid out as MTLClearColor");
+static inline MTLClearColor cc_mtl(nvn_clear_color c) { return MTLClearColorMake(c.red, c.green, c.blue, c.alpha); }
+static inline nvn_clear_color cc_nvn(MTLClearColor c) { return (nvn_clear_color){c.red, c.green, c.blue, c.alpha}; }
 
 // ---------- Zero-source skip ----------
 // Shader fact table (statically proven keys): 'the textures it samples are all 0 and the coefficient is finite ⇒ the output is all 0'. Coefficient = component comp of vector vec of fragment-stage constant buffer register ubo_slot.
@@ -3137,7 +3049,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         if (!pd.colorAttachments[i].texture) continue;
         any = 1;
         pd.colorAttachments[i].loadAction = R.clear_c[i] ? MTLLoadActionClear : MTLLoadActionLoad;
-        pd.colorAttachments[i].clearColor = R.cc[i];
+        pd.colorAttachments[i].clearColor = cc_mtl(R.cc[i]);
         if (R.clear_c[i]) PD("C %llu c%d cleared to %g,%g,%g,%g", g_stat_pass + 1, i, R.cc[i].red, R.cc[i].green, R.cc[i].blue, R.cc[i].alpha);
         if (bcrt_is(pd.colorAttachments[i].texture)) { pd.colorAttachments[i].storeAction = MTLStoreActionStore; continue; }   // a shadow (bcrt_attach): loaded and stored as is, outside the bookkeeping below
         int cov = tbdr_on() && !R.clear_c[i] && (g_fd_dw || g_fd_di) && fz_load_covers(i, pd.colorAttachments[i].texture, pd.colorAttachments[i].level);
@@ -4231,35 +4143,26 @@ static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) {
 }
 
 // ---------- Draw state ----------
-static struct {
-    const prog_t *prog;
-    const prog_t *cprog;       // compute program: NVN binds it apart from the graphics stages (see OP_BIND_PROGRAM in state_op)
-    p_prim_restart restart;
-    const prog_t *bst[5];      // program bound per stage (NVN stage bits 1 vertex 2 fragment 4 geometry 8 / 16 tessellation, indices as in NvProg.sh), see bind_stages
-    blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
-    va_st attr[16]; int nattr; vs_st stream[16]; int nstream;
-    NVNbufferRange vbuf[16];
-    p_bind_buf ubo[6][16], ssbo[6][16];
-    uint64_t tex[6][NTEX], samp[6][128], img[6][32];
-    uint32_t st_vmask[2], st_wmask[2], st_ref[2];
-    p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
-    float blend_color[4]; int64_t copy_stride, copy_img_stride;
-    p_tf_bind tf[4]; int tf_on, rast_discard;   // capture buffers and enables; byte offsets and captured count stay on the GPU (nvn_feedback.inc)
-    int tex_base, samp_base;   // host-table bases of the texture / sampler pool bound (OP_SET_TEX_POOL / OP_SET_SAMP_POOL), for handles read at replay from uniform buffers (encode_args)
-} S;
+// The draw state S, the state records (nvn_state_apply), the per-stage program binds and each queue's own state are in nvn_state.c (nvn_state.h)
 // The handle c2 holds at byte b, as encode_args fills the table (DRV2): a combined slot (past slot 31 the image there, tex_slot_h), a separate texture, else none
 static uint64_t c2_handle(int stage, unsigned b) {
     if (b >= C2_TEX && b < C2_SEPTEX && !((b - C2_TEX) & 7)) return tex_slot_h(S.tex[stage], S.img[stage], (b - C2_TEX) / 8);
     if (b >= C2_SEPTEX && b < C2_SAMP && !((b - C2_SEPTEX) & 7)) return S.tex[stage][NVN_SEPTEX_SLOT0 + (b - C2_SEPTEX) / 8];
     return 0;
 }
-// A deferred inline update changes what the draws after it read through the uniform bindings it overlaps (they get a shadow): the argument blocks of those stages are encoded again.
-// Only those: marking every stage made each later draw encode all of its blocks again, which with the updates kept across passes cost about 1.5 ms a frame in Breath of the Wild
 static uint8_t g_args_dirty[6];
-static void ubd_dirty(uint64_t lo, uint64_t hi) {
-    for (int st = 0; st < 6; st++) { if (g_args_dirty[st]) continue;
-        for (int r = 0; r < 16; r++) { const p_bind_buf *u = &S.ubo[st][r]; if (u->addr && lo < u->addr + u->size && u->addr < hi) { g_args_dirty[st] = 1; break; } } }
+// The dirty mask the state functions return (nvn_state.h) into this backend's flags: each bit sets its flag, as the moved code set it in place
+static inline uint32_t state_dirty(uint32_t d) {
+    if (d & NVN_DIRTY_PIPELINE) g_pso_dirty = 1;
+    if (d & NVN_DIRTY_DEPTH_STENCIL) g_dss_dirty = 1;
+    for (int st = 0; st < 6; st++) if (d & NVN_DIRTY_ARGS(st)) g_args_dirty[st] = 1;
+    return d;
 }
+static inline int state_op(uint32_t op, const void *a) { return state_dirty(nvn_state_apply(op, a)) != 0; }   // 0: not a state record
+static inline void prog_resolve(void) { state_dirty(nvn_state_prog_resolve()); }
+static inline void state_reset(void) { state_dirty(nvn_state_reset()); }
+// A deferred inline update changes what the draws after it read through the uniform bindings it overlaps: the argument blocks of those stages are encoded again (nvn_state_ubo_dirty)
+static void ubd_dirty(uint64_t lo, uint64_t hi) { state_dirty(nvn_state_ubo_dirty(lo, hi)); }
 // NVN permits byte-aligned vertex streams; Metal drops the low two address bits. Keep an aligned copy in the submission arena.
 // A CPU copy is safe only without GPU writers (including earlier submissions and sparse aliases). Otherwise copy on the GPU before
 // opening the draw's encoder. Guest writes and pool remaps invalidate reuse; scratch copies themselves do not change guest memory.
@@ -4401,77 +4304,19 @@ static void udc_note_draw(NvProg *pr) {
                     || S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP)) { t->wrote = 1; t->wwhy = 5; }
     }
 }
-// NVN's BindProgram(program, stage bits) binds per stage: the stages in the bits take that program's shaders (a null program unbinds them), the other stages stay.
-// Metroid Dread's depth prepass calls BindProgram(program, vertex | fragment), then BindProgram(null, fragment): only the vertex shader remains and depth is drawn.
-// Every bind used to replace S.prog as a whole, a null program meant "no program bound", and the prepass's ~140 draws per frame were all dropped: depth stayed empty, the G-buffer's depth EQUAL test passed no pixel, and scenes and characters were black.
-// When every stage comes from the same program, that program is the effective one (all of Mario's and Engage's binds are like this, so nothing changes for them); otherwise a composite is made: a host-made prog_t carrying only a serial, whose NvProg in the serial table takes each stage from its source program (a null fragment = a vertex-only pipeline)
-static const prog_t *bind_stages(const prog_t *p, int stages) {
-    for (int st = 0; st < 5; st++) if (stages >> st & 1) S.bst[st] = p;
-    const prog_t *v = S.bst[0];
-    if (!v) return NULL;
-    int same = 1; for (int st = 1; st < 5; st++) if (S.bst[st] && S.bst[st] != v) same = 0;
-    if (same && S.bst[1] == v) return v;
-    enum { NCMP = 64 };
-    static prog_t cp[NCMP]; static const prog_t *ck[NCMP][5]; static uint64_t cs[NCMP][5]; static int ncp, next;
-    for (int i = 0; i < ncp; i++) {
-        int hit = 1; for (int st = 0; st < 5 && hit; st++) hit = ck[i][st] == S.bst[st] && (!S.bst[st] || cs[i][st] == S.bst[st]->serial);
-        if (hit) return &cp[i];
-    }
-    int i = ncp < NCMP ? ncp++ : next++ % NCMP;
-    if (cp[i].serial) serial_del(cp[i].serial);
+// A combined program of per-stage binds (nvn_state.c nvn_state_bind_stages): its NvProg takes each stage from the program bound there, under a new serial
+uint64_t nvn_state_hook_compose(uint64_t old, const prog_t *const bst[5]) {
+    if (old) serial_del(old);
     NvProg *o = [NvProg new];
-    for (int st = 0; st < 5; st++) { ck[i][st] = S.bst[st]; cs[i][st] = S.bst[st] ? S.bst[st]->serial : 0; if (S.bst[st]) { __unsafe_unretained NvProg *src = prog_get(S.bst[st]); o->sh[st] = src ? src->sh[st] : nil; } }
+    for (int st = 0; st < 5; st++) if (bst[st]) { __unsafe_unretained NvProg *src = prog_get(bst[st]); o->sh[st] = src ? src->sh[st] : nil; }
     prog_fold_gs(o);   // the geometry stage came from another program (see prog_fold_gs)
-    memset(&cp[i], 0, sizeof cp[i]); cp[i].magic = MAGIC('P', 'R', 'O', 'G'); cp[i].serial = nvn_new_serial(); serial_put(cp[i].serial, o);
+    uint64_t serial = nvn_new_serial(); serial_put(serial, o);
     { static int once; if (!once++) MLOG("per-stage program binding: first combined program (vertex %s fragment %s)", o->sh[0] ? o->sh[0]->key : "-", o->sh[1] ? o->sh[1]->key : "-"); }
-    return &cp[i];
+    return serial;
 }
-// S.prog after S was copied back from a saved state (the precompile prediction, the fusion probe and redraw, deferred draws). A combined program is a slot of the ring above, and binds
-// replayed after the save can give the slot the saved pointer names to another combination. AI: THE SOMNIUM FILES (Unity 2017.4) binds its vertex and fragment programs apart; the
-// prediction over a 280-draw submission (pso_predict_rest) made more than NCMP combinations, and the draw after it ran Legacy Shaders/VertexLit's shadow vertex shader with
-// PSYNC/BG_AlphaTest's shadow pixel shader, a pipeline Metal refused (the pixel shader reads two outputs that vertex shader does not write). The combination is taken again from S.bst
-static void prog_resolve(void) {
-    const prog_t *np = bind_stages(NULL, 0); if (np == S.prog) return;
-    S.prog = np; g_pso_dirty = 1;
-    static unsigned n; if (!n++ || !(n & (n - 1))) MLOG("combined program taken again after a state restore: its ring slot had been reused (%u times so far)", n);
-}
-static int g_state_inited;
-static void state_reset(void) {
-    g_state_inited = 1;
-    memset(&S, 0, sizeof S);
-    g_pso_dirty = g_dss_dirty = 1;
-    for (int i = 0; i < 8; i++) S.blend[i] = (blend_st){i, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD};
-    S.color = (color_st){0, NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS}; S.chmask.mask = 0xffffffffu;
-    S.poly = (poly_st){NVN_FACE_NONE, NVN_FRONT_FACE_CCW, NVN_POLYGON_MODE_FILL, 0};
-    S.ds = (ds_st){0, 1, NVN_DEPTH_FUNC_LESS, 0, NVN_STENCIL_FUNC_ALWAYS, NVN_STENCIL_FUNC_ALWAYS, 1, 1, 1, 1, 1, 1};
-    S.st_vmask[0] = S.st_vmask[1] = S.st_wmask[0] = S.st_wmask[1] = 0xff; S.dr[1] = 1;
-}
-
-// GPU bindings belong to a queue, including across submissions. FFX/X-2 destroys its launcher's queue before creating a game's: a global S kept freed launcher programs in S.bst,
-// and X-2's first fragment-only bind dereferenced that stale vertex program in keys_hash. Separate queues also retain their own bindings when submissions alternate (Three Houses).
-typedef struct queue_state { uint64_t serial; typeof(S) s; typeof(R) r; struct queue_state *next; } queue_state;
-static queue_state *g_queue_states, *g_active_queue;
-void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
-    if (g_active_queue && g_active_queue->serial == serial) return;
-    if (g_active_queue) { g_active_queue->s = S; g_active_queue->r = R; }
-    queue_state *q = g_queue_states;
-    while (q && q->serial != serial) q = q->next;
-    if (q) { S = q->s; R = q->r; prog_resolve(); }
-    else {
-        q = calloc(1, sizeof *q); if (!q) MDIE("queue state allocation failed");
-        q->serial = serial; q->next = g_queue_states; g_queue_states = q;
-        state_reset(); memset(&R, 0, sizeof R);
-    }
-    g_active_queue = q; g_pso_dirty = g_dss_dirty = 1; args_dirty_all();
-}
-void mtl_queue_forget(uint64_t serial) {   // caller holds the submission lock
-    queue_state **p = &g_queue_states;
-    while (*p && (*p)->serial != serial) p = &(*p)->next;
-    if (!*p) return;
-    queue_state *q = *p; *p = q->next;
-    if (g_active_queue == q) { g_active_queue = NULL; state_reset(); memset(&R, 0, sizeof R); args_dirty_all(); }
-    free(q);
-}
+// GPU bindings belong to a queue, including across submissions (nvn_state.c nvn_state_queue_activate)
+void mtl_queue_activate(uint64_t serial) { state_dirty(nvn_state_queue_activate(serial)); }   // caller holds the submission lock
+void mtl_queue_forget(uint64_t serial) { state_dirty(nvn_state_queue_forget(serial)); }       // caller holds the submission lock
 
 // Correct the vertex format by the shader input's component type: Metal requires integer inputs to get integer formats of the same signedness, and float inputs float / normalized formats.
 // Integer input (inferred at translation time as "only used as an integer", dmsh_build.py int_inputs) with an integer format: on a signedness mismatch switch to the same width with the other sign (bit pattern unchanged for 32-bit components;
@@ -6730,73 +6575,20 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
                      S.has_vp, vp, R.has_sc, sc, (long)MAX(t.width >> level, 1), (long)MAX(t.height >> level, 1));
 }
 
-int nvn_dpool_base(const void *pool, int tex);   // hle_nvn.c: where a descriptor pool's IDs start in the host table
-static int state_op(uint32_t op, const void *a) {
-    switch (op) {
-        case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1; break;
-        // The pool bound when the draw runs, as on the GPU (a command buffer that binds none keeps the queue's): handles a shader reads from a uniform buffer are resolved only here,
-        // so they take this base. Dark Souls Remastered keeps 12 sampler pools with different samplers under the same IDs and its map materials read their handles from uniform
-        // memory; resolved in the first pool, the walls' tiling textures took a clamp-to-edge sampler and smeared sideways
-        case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: { int tex = op == OP_SET_TEX_POOL, b = nvn_dpool_base(((const p_set_pool *)a)->pool, tex);
-            if (b != (tex ? S.tex_base : S.samp_base)) { if (tex) S.tex_base = b; else S.samp_base = b; args_dirty_all(); }
-            break; }
-        // The compute stage has a binding of its own: a compute bind used to replace the one bound program, so a draw after a dispatch found the compute program (or none) and was
-        // dropped, and a dispatch after a graphics bind found no compute shader. Hyrule Warriors: Age of Calamity interleaves them; its movie's NV12 → RGB draw was dropped and the intro played black
-        case OP_BIND_PROGRAM: { const p_bind_program *bp_ = a;
-            if ((bp_->stages & 0x20) && bp_->prog != S.cprog) { S.cprog = bp_->prog; args_dirty_all(); }
-            if (bp_->stages & 0x1f) { const prog_t *np = bind_stages(bp_->prog, bp_->stages & 0x1f); if (np != S.prog) { S.prog = np; g_pso_dirty = 1; args_dirty_all(); } }
-            break; }
-        case OP_BIND_STATE: {
-            const p_bind_state *b = a; void *dst = NULL; size_t n = 0;
-            blend_st bs;
-            switch (b->kind) {
-                case 0: memcpy(&bs, b->bytes, sizeof bs); dst = &S.blend[bs.target]; n = sizeof bs; break;
-                case 1: dst = &S.color; n = sizeof S.color; break;
-                case 2: dst = &S.chmask; n = sizeof S.chmask; break;
-                case 3: dst = &S.ms; n = sizeof S.ms; break;
-                case 4: dst = &S.poly; n = sizeof S.poly; break;
-                case 5: dst = &S.ds; n = sizeof S.ds; break;
-            }
-            if (dst && memcmp(dst, b->bytes, n)) { memcpy(dst, b->bytes, n); if (b->kind == 5) g_dss_dirty = 1; else g_pso_dirty = 1; }
-            break;
-        }
-        case OP_BIND_VATTR: { const p_bind_vattr *b = a; if (S.nattr != b->n || memcmp(S.attr, b->st, 4 * b->n)) { memcpy(S.attr, b->st, 4 * b->n); S.nattr = b->n; g_pso_dirty = 1; } break; }
-        case OP_BIND_VSTREAM: { const p_bind_vstream *b = a; if (S.nstream != b->n || memcmp(S.stream, b->st, 8 * b->n)) { memcpy(S.stream, b->st, 8 * b->n); S.nstream = b->n; g_pso_dirty = 1; } break; }
-        case OP_BIND_VBUF: case OP_BIND_VBUF1: { p_bind_vbuf tmp; const p_bind_vbuf *b = vbuf_rec(op, a, &tmp); memcpy(&S.vbuf[b->first], b->r, sizeof *b->r * b->n); break; }
-        case OP_BIND_UBO: case OP_BIND_UBO_SMALL: { p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, a, &tmp); if (b->stage < 6 && b->index < 16 && memcmp(&S.ubo[b->stage][b->index], b, sizeof *b)) { S.ubo[b->stage][b->index] = *b; g_args_dirty[b->stage] = 1; } break; }
-        case OP_BIND_SSBO: { const p_bind_buf *b = a; if (b->stage < 6 && b->index < 16 && memcmp(&S.ssbo[b->stage][b->index], b, sizeof *b)) { S.ssbo[b->stage][b->index] = *b; g_args_dirty[b->stage] = 1; } break; }
-        case OP_BIND_TEX: case OP_BIND_TEX1: { p_bind_handles t1; const p_bind_handles *b = bind_rec(op, a, &t1);
-            if (b->n < 0 || b->n > 32) {   // the recorder never writes more than 32 (bind_handles): the record was overwritten after it was recorded
-                static int once; if (!once++) { const uint8_t *q = (const uint8_t *)a; char hx[3 * 96 + 1]; for (int k = 0; k < 96; k++) snprintf(hx + 3 * k, 4, "%02x ", q[k - 32]);
-                    MLOG("[RED] bind record at %p (pass %llu) holds count %d: overwritten after recording; bytes from -0x20: %s", a, g_stat_pass + 1, b->n, hx); }
-                break; }
-            bh_fresh(b);
-            if (passdump()) for (int k = 0; k < b->n; k++) { int tid = (int)(b->h[k] & 0xfffff); if (tid) PD("T %llu bind st%d slot%d tid=%d sid=%d ser=%llu%s", g_stat_pass + 1, b->stage, b->first + k, tid, (int)(b->h[k] >> 20),
-                tid < g_ntreg ? g_treg[tid].t.serial : 0ull, b->defer ? " deferred" : ""); }
-            if (b->stage < 6 && b->first + b->n <= NTEX && memcmp(&S.tex[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.tex[b->stage][b->first], b->h, 8 * b->n); g_args_dirty[b->stage] = 1; } break; }
-        case OP_BIND_SAMP: { const p_bind_handles *b = a; bh_fresh(b); if (b->stage < 6 && b->first + b->n <= 128 && memcmp(&S.samp[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.samp[b->stage][b->first], b->h, 8 * b->n); g_args_dirty[b->stage] = 1; } break; }
-        case OP_BIND_IMG: { const p_bind_handles *b = a; bh_fresh(b); if (b->stage < 6 && b->first >= 0 && b->first + b->n <= 32) { if (memcmp(&S.img[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.img[b->stage][b->first], b->h, 8 * b->n); g_args_dirty[b->stage] = 1; } } else RED_ONCE(31, "image slots out of range stage %d first %d count %d", b->stage, b->first, b->n); break; }
-        case OP_STENCIL: {
-            const p_stencil *b = a;
-            if (b->which != 2) g_dss_dirty = 1;
-            for (int f = 0; f < 2; f++) if (b->face & (1 << f)) { if (b->which == 0) S.st_vmask[f] = b->value_mask; else if (b->which == 1) S.st_wmask[f] = b->mask; else S.st_ref[f] = b->ref; }
-            break;
-        }
-        case OP_POLY_OFFSET: S.po = *(const p_poly_offset *)a; break;
-        case OP_VIEWPORTS: { const p_viewports *b = a; for (int i = 0; i < b->n; i++) memcpy(S.vp[b->first + i], b->v[i], 16); S.has_vp = 1; break; }
-        case OP_DEPTH_RANGE: { const p_depth_range *b = a; S.dr[0] = b->n; S.dr[1] = b->f; break; }
-        case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on; break;
-        case OP_VP_SWIZZLE: { const p_vp_swizzle *b = a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }
-        case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
-        case OP_COPY_STRIDE: { const p_copy_stride *cs = a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
-        case OP_TF_BIND: { const p_tf_bind *b = a; if (b->index >= 0 && b->index < 4) S.tf[b->index] = *b; break; }
-        case OP_TF_STATE: { const p_tf_state *b = a; S.tf_on = b->what == 0 || b->what == 3; break; }
-        case OP_PRIM_RESTART: S.restart = *(const p_prim_restart *)a; break;
-        case OP_RAST_DISCARD: S.rast_discard = ((const p_rast_discard *)a)->on; g_pso_dirty = 1; break;
-        default: return 0;
-    }
-    return 1;
+// What the state records' bind arms (nvn_state.c nvn_state_apply) do with this backend's own state
+// A texture bind record holding a count the recorder never writes (more than 32, bind_handles): overwritten after it was recorded; the bind is skipped
+void nvn_state_hook_bind_bad(const void *a, int n) {
+    static int once; if (!once++) { const uint8_t *q = (const uint8_t *)a; char hx[3 * 96 + 1]; for (int k = 0; k < 96; k++) snprintf(hx + 3 * k, 4, "%02x ", q[k - 32]);
+        MLOG("[RED] bind record at %p (pass %llu) holds count %d: overwritten after recording; bytes from -0x20: %s", a, g_stat_pass + 1, n, hx); }
 }
+// Before a texture, sampler or image bind is applied: deferred handles read again (bh_fresh), and a dumped pass lists its texture binds (DM_NVN_PASSDUMP)
+void nvn_state_hook_bind(uint32_t op, const p_bind_handles *b) {
+    bh_fresh(b);
+    if ((op == OP_BIND_TEX || op == OP_BIND_TEX1) && passdump()) for (int k = 0; k < b->n; k++) { int tid = (int)(b->h[k] & 0xfffff); if (tid) PD("T %llu bind st%d slot%d tid=%d sid=%d ser=%llu%s", g_stat_pass + 1, b->stage, b->first + k, tid, (int)(b->h[k] >> 20),
+        tid < g_ntreg ? g_treg[tid].t.serial : 0ull, b->defer ? " deferred" : ""); }
+}
+// Image slots out of range: the red line shares its once flag (31) with the texture→buffer copy's, as before the move
+void nvn_state_hook_img_range(const p_bind_handles *b) { RED_ONCE(31, "image slots out of range stage %d first %d count %d", b->stage, b->first, b->n); }
 
 static void rt_sub(const p_set_rt *r, int k, uint64_t *ser, int *lv, int *sl);
 
@@ -7458,7 +7250,7 @@ static void defer_env(void);
 static void defer_reset(void) { defer_clear_all(); g_defer_replaying = 0; defer_env(); }
 static void defer_apply_p_clear(void) {
     memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0;
-    for (int j = 0; j < g_defer.q_rt.n; j++) { int i = g_defer.lmap[j]; if (i >= 0 && g_defer.clear_c[i]) { R.clear_c[j] = 1; R.cc[j] = g_defer.cc[i]; } }
+    for (int j = 0; j < g_defer.q_rt.n; j++) { int i = g_defer.lmap[j]; if (i >= 0 && g_defer.clear_c[i]) { R.clear_c[j] = 1; R.cc[j] = cc_nvn(g_defer.cc[i]); } }
     if (g_defer.clear_d) { R.clear_d = 1; R.cd = g_defer.cd; } if (g_defer.clear_s) { R.clear_s = 1; R.cs = g_defer.cs; }
 }
 static int defer_begin_q(const uint8_t *op) {
@@ -7470,7 +7262,7 @@ static int defer_begin_q(const uint8_t *op) {
     for (int i = 0; i < 4 && !R.rt.depth; i++) { const defer_t *d = &g_defer_slots[i]; if (d->active && !d->at_q && d->q_op == op && d->q_rt.depth) { R.rt.depth = d->q_rt.depth; R.rt.dview = d->q_rt.dview; R.rt.has_dview = d->q_rt.has_dview; } }   // Attach the depth-stencil needed by any group (the depths of groups with the same Q have been checked compatible)
     memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0;
     for (int i = 0; i < 4; i++) { defer_t *d = &g_defer_slots[i]; if (!d->active || d->at_q || d->q_op != op) continue;
-        for (int j = 0; j < d->q_rt.n; j++) { int k = d->lmap[j]; if (k >= 0 && d->clear_c[k]) { R.clear_c[j] = 1; R.cc[j] = d->cc[k]; } }
+        for (int j = 0; j < d->q_rt.n; j++) { int k = d->lmap[j]; if (k >= 0 && d->clear_c[k]) { R.clear_c[j] = 1; R.cc[j] = cc_nvn(d->cc[k]); } }
         if (d->clear_d) { R.clear_d = 1; R.cd = d->cd; } if (d->clear_s) { R.clear_s = 1; R.cs = d->cs; }
         d->at_q = 1; g_defer_natq++;
     }
@@ -7760,7 +7552,7 @@ planned:
     for (int i = 0; i < g_fz.nskip; i++) g_hoist_skip[g_hoist_n++] = g_fz.skip[i];
     R.rt = U;
     memcpy(g_fz.clr2, clr, 8); memcpy(g_fz.cc2, cc, sizeof cc); g_fz.cd2f = (uint8_t)cd_f; g_fz.cs2f = (uint8_t)cs_f; g_fz.cd2 = cdv; g_fz.cs2 = csv;
-    for (int k = 0; k < 8; k++) if (clr[k]) { R.clear_c[p2map[k]] = 1; R.cc[p2map[k]] = cc[k]; }
+    for (int k = 0; k < 8; k++) if (clr[k]) { R.clear_c[p2map[k]] = 1; R.cc[p2map[k]] = cc_nvn(cc[k]); }
     if (cd_f) { R.clear_d = 1; R.cd = cdv; } if (cs_f) { R.clear_s = 1; R.cs = csv; }
     if (!g_fz_n++) MLOG("readable-tile pass merge: first case pass %llu (%d physical attachments)", g_stat_pass + 1, n);
     PD("F %llu merge with the next pass (readable tile): physical attachments %d, previous pass %d", g_stat_pass + 1, n, R.rt.n == n ? g_fz.n1 : g_fz.n1);
@@ -8528,7 +8320,7 @@ static void lc_take(NvProg *pr) {
     for (int gi = g_nlc - 1; gi >= 0; gi--) { lc_group *g = &g_lc[gi];
         for (int i = 0; i < 8; i++) if (g->clear_c[i])
             for (int j = 0; j < R.rt.n && j < 8; j++) if (R.rt.color[j] && !rt_dup_slot(&R.rt, j) && !nvn_fmt_bc(R.rt.color[j]->d.format) && lc_same(&g->rt, i, &R.rt, j)) {
-                if (!R.clear_c[j]) { R.clear_c[j] = 1; R.cc[j] = g->cc[i]; }
+                if (!R.clear_c[j]) { R.clear_c[j] = 1; R.cc[j] = cc_nvn(g->cc[i]); }
                 g->clear_c[i] = 0; g_lc_taken++; break; }
         if ((g->clear_d || g->clear_s) && R.rt.depth && lc_same(&g->rt, 8, &R.rt, 8)) {
             if (g->clear_d) { if (!R.clear_d) { R.clear_d = 1; R.cd = g->cd; } g->clear_d = 0; }
@@ -9789,7 +9581,7 @@ void mtl_exec(const uint8_t *p) {
                     static uint64_t n; static int clog = -1; if (clog < 0) clog = getenv("DM_NVN_CLEARLOG") != NULL; if (clog && n++ < 40) MLOG("color clear drawn as a triangle frame %llu pass %llu target %d ser=%llu %ux%u mid=%d mask=%#x scissor=%d,%d,%d,%d color=%g,%g,%g,%g", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, c->index,
                         (unsigned long long)R.rt.color[c->index]->serial, R.rt.color[c->index]->d.width, R.rt.color[c->index]->d.height, g_enc != nil, c->mask, R.sc.x, R.sc.y, R.sc.w, R.sc.h, c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
                     clear_color_tri(c); break; }
-                R.clear_c[c->index] = 1; R.cc[c->index] = MTLClearColorMake(c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
+                R.clear_c[c->index] = 1; R.cc[c->index] = cc_nvn(MTLClearColorMake(c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]));
                 PD("c %llu color clear recorded slot%d ser=%llu mask=%#x scissor=%d:%d,%d,%d,%d", g_stat_pass, c->index, (unsigned long long)R.rt.color[c->index]->serial, c->mask, R.has_sc, R.sc.x, R.sc.y, R.sc.w, R.sc.h);
                 break;
             }

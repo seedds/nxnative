@@ -52,6 +52,11 @@ t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
 t_cover: t_cover.c ../nvn/nvn_cover.h
 	clang -O1 -Wall -o $@ t_cover.c
+# The replay's draw and render-target state and its GPU-write ledger (plain C, every host): dm/host/CMakeLists.txt builds the same two for Linux and Windows
+t_state: t_state.c ../nvn/nvn_state.c ../nvn/nvn_state.h ../nvn/nvn_obj.h
+	clang -std=c11 -O1 -Wall -Wextra -I../nvn/include -o $@ t_state.c ../nvn/nvn_state.c
+t_gpuwrite: t_gpuwrite.c ../nvn/nvn_gpuwrite.c ../nvn/nvn_gpuwrite.h
+	clang -std=c11 -O1 -Wall -Wextra -o $@ t_gpuwrite.c ../nvn/nvn_gpuwrite.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
@@ -268,7 +273,7 @@ gl-imports: t_gl_imports
 	./t_gl_imports
 	./t_gl_imports --stubs
 run: gl-imports
-run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tbuf_align t_sparse_layout t_deswz_gpu t_pace t_timestamp t_fstep t_refl t_hmap t_cover t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_vbuf t_geometry t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pso_archive t_pso_bundle t_pso_stall t_pull t_pull_inv t_pso_pending t_pfv t_view_levels t_view_swizzle t_vk_desc t_integer_blend t_primitive_restart t_clear_ds t_depth16_clear t_upgrade_alias t_image_usage t_stencil_view
+run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tbuf_align t_sparse_layout t_deswz_gpu t_pace t_timestamp t_fstep t_refl t_hmap t_cover t_state t_gpuwrite t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_vbuf t_geometry t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pso_archive t_pso_bundle t_pso_stall t_pull t_pull_inv t_pso_pending t_pfv t_view_levels t_view_swizzle t_vk_desc t_integer_blend t_primitive_restart t_clear_ds t_depth16_clear t_upgrade_alias t_image_usage t_stencil_view
 	./t_nvn
 	./t_dirty_slots
 	./t_dirty_race
@@ -286,6 +291,8 @@ run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tb
 	./t_refl
 	./t_hmap
 	./t_cover
+	./t_state
+	./t_gpuwrite
 	./t_fuse_check
 	./t_present_crop
 	MTL_DEBUG_LAYER=1 ./t_reorder_chain

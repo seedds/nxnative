@@ -26,7 +26,7 @@ int main(void){@autoreleasepool{
         tex_t t={.magic=MAGIC('T','E','X',0),.serial=99600+test++};
         t.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=32,.height=16,.depth=1,.levels=1,.samples=1};
         MTLTextureDescriptor *td=tex_desc(&t,0);td.storageMode=MTLStorageModeShared;id<MTLTexture>out=[g_dev newTextureWithDescriptor:td];res_add(out);mtl_tex_init(&t);serial_put(t.serial,out);
-        state_reset();memset(&R,0,sizeof R);mtl_sub_begin();R.has_rt=1;R.rt.n=1;R.rt.color[0]=&t;R.clear_c[0]=1;R.cc[0]=MTLClearColorMake(0,0,0,0);
+        state_reset();memset(&R,0,sizeof R);mtl_sub_begin();R.has_rt=1;R.rt.n=1;R.rt.color[0]=&t;R.clear_c[0]=1;R.cc[0]=cc_nvn(MTLClearColorMake(0,0,0,0));
         S.prog=&pg;S.ds.dt=S.ds.dw=S.ds.st=0;S.poly.cull=0;S.color.blend_en=0;S.chmask.mask=0xffff;S.restart=(p_prim_restart){1,restart};
         p_draw_idx di={.prim=prim,.count=sizeof indices/sizeof *indices,.itype=isz==1?0:isz==2?1:2,.ibuf=(uint64_t)mem,.instances=1};draw(NULL,&di);
         uint64_t fence=mtl_sub_commit();CHECK(mtl_wait(fence,5000000000ull),"restart draw completes");CHECK(!mtl_last_commit_error(),"restart draw has no GPU error");

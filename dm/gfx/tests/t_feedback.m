@@ -19,7 +19,7 @@ static id<MTLTexture> target(tex_t *t, uint64_t serial) {
     return texture;
 }
 static void clear(MTLClearColor color) {
-    R.clear_c[0] = 1; R.cc[0] = color;
+    R.clear_c[0] = 1; R.cc[0] = cc_nvn(color);
     CHECK(rp_begin() != nil, "production render pass opens");
 }
 static void sample(NvShader *fs, id<MTLRenderPipelineState> pipeline) {

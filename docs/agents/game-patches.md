@@ -614,7 +614,7 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
   - cut `+0xc96f0`: AddressRegionManager constructor: node area limit orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000
   - cut `+0xc9790`: AddressRegionManager constructor: length of the node area registered as an occupied region orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000
   - cut `+0xc98fc`: AllocateAddressRegion: alignment of regions of 1 GB and more orr w10,wzr,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)
-- **sdk** `2aef2cff…` ([sdk_patches.py:95](../../dm/tools/sdk_patches.py#L95)): Batman: Arkham Knight 1.0.5, Persona 4 Golden 1.0.2
+- **sdk** `2aef2cff…` ([sdk_patches.py:95](../../dm/tools/sdk_patches.py#L95)): Batman: Arkham Knight 1.0.5, FINAL FANTASY VI 1.2.1_5, Persona 4 Golden 1.0.2
   - cut `+0x12d8b0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x12d94c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
 - **sdk** `9c73fb73…` ([sdk_patches.py:102](../../dm/tools/sdk_patches.py#L102)): Patrick's Parabox 1.0.1

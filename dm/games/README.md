@@ -81,6 +81,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [FINAL FANTASY RESONANCE](0100606026F12000/README.md) | `0100606026F12000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
 | [FINAL FANTASY RESONANCE, Asian release](0100B8A026F14000/README.md) | `0100B8A026F14000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](010038B015560000/README.md) | `010038B015560000` | 1.4.0 | 19.3.9 | Square Enix's engine | NVN |
+| [FINAL FANTASY VI](0100AA001415E000/README.md) | `0100AA001415E000` | 1.2.1 | 14.3.0 | Unity 2020.3.37f1 IL2CPP | NVN |
 | [FINAL FANTASY X/X-2 HD Remaster](0100BC300CB48000/README.md) | `0100BC300CB48000` | 1.0.0 (base) | 5.4.0 | PhyreEngine (Virtuos) | NVN |
 | [Fire Emblem Engage](0100A6301214E000/README.md) | `0100A6301214E000` | 2.0.0 | 12.3.7 | Unity 2020.3.18f1 IL2CPP, Wwise | NVN |
 | [Fire Emblem: Three Houses](010055D009F78000/README.md) | `010055D009F78000` | 1.2.0 | 6.5.0 | Koei Tecmo's KTGL | NVN |

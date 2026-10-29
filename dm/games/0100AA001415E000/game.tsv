@@ -1,0 +1,39 @@
+# Game profile of FINAL FANTASY VI (Switch, update 1.2.1 = v458752). Plays on the Mac and on the iPhone
+# Format: see dm/games/README.md
+# Unity 2020.3.37f1 (IL2CPP), SDK 14.3.0: the shaders are Unity Shader objects in data.unity3d and the Addressables bundles under StreamingAssets/aa/Switch, read by unityfs.py
+
+# ---- Identity ----
+title_id	0100AA001415E000
+program_id	0100AA001415E000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	FINAL FANTASY VI
+ipa	FinalFantasyVi.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v458752	1.2.1_5	main=e77331aa7883b5886f853491d38d61ef	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v458752
+shader_versions	v458752
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/ff6_bgm_60_assets_all.bundle
+zip_store	.bundle:.dat:.json:.png:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup (main+0x345cd0) hands application pool − used memory to StandardAllocator as virtual address memory
+# and never calls SetMemoryHeapSize. The sdk build is Batman: Arkham Knight's, whose node area cut (dm/tools/sdk_patches.py) shrinks the AddressRegionManager's node area to 62 MB.
+# With the hardware pool (0xCD500000) StandardAllocator reserved 3.2 GB of address space, and on the iPhone Unity's next 16 MB region failed 41 s in (a null write at 0xffffe0, main+0x839d5c).
+# A 1.5 GB pool in the 5 GB block: the game maps up to 1.26 GB through the opening, and the alias region is used up to +3.76 GB of 4.375 GB
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x60000000
+
+# ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
+shader_groups	/Data/=data
+shader_note	FINAL FANTASY VI shaders

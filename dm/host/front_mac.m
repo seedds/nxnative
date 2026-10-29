@@ -12,6 +12,7 @@
 #include "dm.h"
 #include "dm_input.h"
 #include "front.h"
+#include "front_kbm_mac.h"
 #include "hle.h"
 #include "pad_slots.h"
 #include "haptics_apple.h"
@@ -21,9 +22,9 @@
 #include <math.h>
 
 static CAMetalLayer *g_layer;
-static uint64_t g_btn;
+uint64_t front_btn;
 static int g_w, g_a, g_s, g_d;
-static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
+int front_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
@@ -86,9 +87,10 @@ void front_screen_match(int fps) {
     if (!g_layer || g_match_want == fps) return;   // no window (a windowless run's main thread runs the guest), or the rate as before
     g_match_want = fps; dispatch_async(dispatch_get_main_queue(), ^{ screen_match_apply(); });
 }
-static void push(void) {
-    int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    dm_input_set(g_btn, lx, ly, 0, 0);
+void front_push(void) {   // sends the keys held, with the keyboard and mouse controls' own buttons and sticks (kbm_input)
+    uint64_t b = front_btn; int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767, rx = 0, ry = 0;
+    kbm_input(&b, &lx, &ly, &rx, &ry);
+    dm_input_set(b, lx, ly, rx, ry);
 }
 static int key_bit(unsigned short code) {
     switch (code) {
@@ -101,13 +103,14 @@ static int key_bit(unsigned short code) {
     return -1;
 }
 static void on_key(NSEvent *e, int down) {
-    if (!g_input_on) return;
+    if (!front_input_on) return;
     unsigned short c = e.keyCode;
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
+    if (kbm_key(c, down)) return;   // ` and the keyboard and mouse layout (front_kbm_mac.m)
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
-    g_btn = down ? (g_btn | m) : (g_btn & ~m);
-    push();
+    front_btn = down ? (front_btn | m) : (front_btn & ~m);
+    front_push();
 }
 
 // Physical controllers (GameController) go to dm_pad_set_player, mapped as the iPhone's (DmGamepad.m read_pad, same layout); player 1's is ORed with the keyboard, a stick takes
@@ -120,7 +123,7 @@ static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept 
 static int g_merge, g_kbd_own;
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
 static void pad_read(GCExtendedGamepad *g) {
-    if (!g_input_on) return;
+    if (!front_input_on) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
     uint64_t m = 0;
@@ -184,15 +187,16 @@ static void pads_changed(GCController *gone) {
 // Out of focus a controller's changes are ignored, so back in focus each controller is read as it is now (a button still held, a stick still deflected)
 static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 static void input_release(void) {
-    g_input_on = 0;
+    kbm_release();
+    front_input_on = 0;
     dm_motion_pro_active(0);
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+    front_btn = 0; g_w = g_a = g_s = g_d = 0; front_push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
 }
 static void input_resume(void) {
-    g_input_on = 1;
+    front_input_on = 1;
     dm_motion_pro_active(1);
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
@@ -212,9 +216,16 @@ static void pads_start(void) {
 // not a window-wide event monitor, so clicks on the title bar, the window buttons and the resize edges still reach AppKit.
 @interface DmGameView : NSView @end
 @implementation DmGameView
-- (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
+- (void)mouseDown:(NSEvent *)e {
+    if (!kbm_mouse(0, 1)) [self mouseDragged:e];
+}
+- (void)rightMouseDown:(NSEvent *)e { (void)e; kbm_mouse(1, 1); }
+- (void)rightMouseUp:(NSEvent *)e { (void)e; kbm_mouse(1, 0); }
+- (void)otherMouseDown:(NSEvent *)e { if (e.buttonNumber == 2) kbm_mouse(2, 1); }
+- (void)otherMouseUp:(NSEvent *)e { if (e.buttonNumber == 2) kbm_mouse(2, 0); }
+- (void)scrollWheel:(NSEvent *)e { kbm_scroll(e); }
 - (void)mouseDragged:(NSEvent *)e {
-    if (!g_input_on) return;
+    if (!front_input_on || kbm_on()) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
@@ -223,7 +234,7 @@ static void pads_start(void) {
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
-- (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+- (void)mouseUp:(NSEvent *)e { (void)e; kbm_mouse(0, 0); if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -289,8 +300,10 @@ void front_run(void (*guest)(void)) {
                 pads_changed(conn ? nil : c); }];
         dm_haptics_apple_init();
         pads_start();
-        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
+        kbm_start();   // keyboard and mouse controls, when the game's patch turns the camera by the mouse
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
+            if (e.type == NSEventTypeFlagsChanged) { kbm_flags(e); return e; }
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
@@ -356,7 +369,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     dispatch_sync(dispatch_get_main_queue(), ^{
         // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
         // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+        front_btn = 0; g_w = g_a = g_s = g_d = 0; front_push();
         dm_touch_set(NULL, 0);
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];

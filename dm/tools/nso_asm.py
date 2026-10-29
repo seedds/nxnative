@@ -23,6 +23,22 @@ def CMPR(n, m): return 0xEB00001F | (m << 16) | (n << 5)   # cmp xn, xm (subs xz
 def BEQ(frm, to):
     off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
     return 0x54000000 | (((off >> 2) & 0x7FFFF) << 5)
+def BC(cond, frm, to):   # b.cond (EQ, NE, ... below)
+    off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
+    return 0x54000000 | (((off >> 2) & 0x7FFFF) << 5) | cond
+def CBZW(t, frm, to):   # cbz wt
+    off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
+    return 0x34000000 | (((off >> 2) & 0x7FFFF) << 5) | t
+EQ, NE, LO, HI, GE, LT = 0, 1, 3, 8, 10, 11   # condition codes for BC
+def LDRS(t, n, off):   # ldr st,[xn,#off], or ldur for a negative off
+    assert (0 <= off < 0x4000 and off % 4 == 0) or -256 <= off < 0
+    return (0xBD400000 | ((off // 4) << 10) if off >= 0 else 0xBC400000 | ((off & 0x1FF) << 12)) | (n << 5) | t
+def STRS(t, n, off):   # str st,[xn,#off], or stur for a negative off
+    assert (0 <= off < 0x4000 and off % 4 == 0) or -256 <= off < 0
+    return (0xBD000000 | ((off // 4) << 10) if off >= 0 else 0xBC000000 | ((off & 0x1FF) << 12)) | (n << 5) | t
+def STRW(t, n, off):   # str wt,[xn,#off]
+    assert 0 <= off < 0x4000 and off % 4 == 0
+    return 0xB9000000 | ((off // 4) << 10) | (n << 5) | t
 def BRK(imm): return 0xD4200000 | ((imm & 0xFFFF) << 5)
 def BLR(n): return 0xD63F0000 | (n << 5)
 NOP = 0xD503201F

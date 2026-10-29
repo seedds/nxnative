@@ -61,6 +61,10 @@ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_ap
 #define DM_APPLET(name) const char *const dm_applet_ __attribute__((cleanup(dm_applet_leave_))) = (name); dm_applet_enter(dm_applet_)
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
 extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag, +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
+int dm_mouse_camera(void);             // 1 = the game turns its camera by the mouse (loader.c; a build with a mouse-camera stub and DM_KBM=1: keyboard and mouse controls, opt in)
+void dm_mouse_move(int32_t dx, int32_t dy);   // raw mouse counts since the last call, dy up; any thread
+int dm_mouse_camera_kind(void);       // the stubbed camera in play (the game's numbers: Tears of the Kingdom 1 Chase, 2 Aiming, 3 UltraHand, 4 SpecialPower or Ascend's aiming, 5 an object held by Ultrahand), 0 when none ran just now
+double dm_mouse_camera_idle(void);    // seconds since a camera stub last ran (a stubbed camera is in play when small; huge before the first)
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)

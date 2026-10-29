@@ -1,7 +1,8 @@
-"""The unsigned IPA of build_ipa.sh: the game files stay out with DM_COPY_ROMFS=NO, and the executable carries the entitlements in an ad-hoc signature.
-Only the archive step and the signing step run (a stand-in app, no Xcode or game files)."""
+"""The unsigned IPA of build_ipa.sh: the game files stay out with DM_COPY_ROMFS=NO, the executable carries the entitlements in an ad-hoc signature, and the Info.plist names the shared and the game's own URL scheme.
+Only the archive step, the signing step and the Info.plist block run (a stand-in app, no Xcode or game files)."""
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -19,13 +20,18 @@ GAME = '010015100B514000'
 SCRIPT = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
 SIGNING = SCRIPT[SCRIPT.index('# The entitlements of an unsigned IPA'):SCRIPT.index('\nP=Payload/DmIOS.app\n')]
 PACKING = SCRIPT[SCRIPT.index('\nP=Payload/DmIOS.app\n'):]
+SCHEMES = SCRIPT[SCRIPT.index('# Game handoff: register the shared scheme'):SCRIPT.index('# DM_METAL_CAPTURE=1')]
+PLIST = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+         '<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>dev.nxnative.fixture</string></dict></plist>\n')
 PREAMBLE = 'set -u\nt() { :; }; die() { echo "$*" >&2; exit 1; }\ngp() { python3 "$PROFILE_TOOL" "$GAME" "$1"; }\n'
 CAN_SIGN = sys.platform == 'darwin' and shutil.which('codesign') and shutil.which('cc')
 
 
 def run_step(script, root, **extra):
     env = {k: v for k, v in os.environ.items() if not k.startswith('DM_') and k not in ('IOS_PULL', 'AOC', 'PSO')}
-    env.update(GAME=GAME, DM=str(root / 'dm'), PROFILE_TOOL=str(REPO / 'dm/games/game.py'), **extra)
+    env.update({'GAME': GAME, 'DM': str(root / 'dm'), 'PROFILE_TOOL': str(REPO / 'dm/games/game.py')})
+    env.update(extra)
     return subprocess.run(['/bin/bash', '-c', PREAMBLE + script], cwd=root, env=env, capture_output=True, text=True)
 
 
@@ -95,6 +101,38 @@ class UnsignedIpaTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 shown = subprocess.run(['codesign', '-d', '--entitlements', '-', str(root / 'DmIOS.app/DmIOS')], capture_output=True, text=True)
                 self.assertEqual('com.apple.developer.kernel.increased-memory-limit' in shown.stdout + shown.stderr, expected)
+
+
+class UrlSchemeTests(unittest.TestCase):
+    """The Info.plist block build_ipa.sh runs after xcodegen: the shared scheme and this game's own."""
+
+    def plist(self, root, game_id=GAME):
+        (root / 'Gen').mkdir()
+        path = root / 'Gen/Info.plist'
+        path.write_text(PLIST)
+        return path, run_step(SCHEMES, root, GAME=game_id)
+
+    def test_one_entry_names_the_shared_and_the_game_scheme(self):
+        for game_id in (GAME, '0100A6301214E000'):
+            with self.subTest(game=game_id), tempfile.TemporaryDirectory() as temporary:
+                path, result = self.plist(Path(temporary), game_id)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                plist = plistlib.loads(path.read_bytes())
+                self.assertEqual(plist['CFBundleURLTypes'], [{
+                    'CFBundleURLName': 'dev.nxnative',
+                    'CFBundleURLSchemes': ['nxnative', 'nxnative-' + game_id.lower()]}])
+                self.assertEqual(plist['CFBundleIdentifier'], 'dev.nxnative.fixture')   # nothing else is touched
+
+    def test_a_plist_that_already_names_schemes_stops_the_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path, result = self.plist(root)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            before = path.read_bytes()
+            result = run_step(SCHEMES, root)
+            self.assertNotEqual(result.returncode, 0)   # die "URL schemes": no silent second entry for one bundle
+            self.assertIn('URL schemes', result.stderr)
+            self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == '__main__':

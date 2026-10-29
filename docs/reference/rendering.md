@@ -206,6 +206,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** reported by MacNativeGames (`f864eb0`): a mod's 1×1 texture in Tears of the Kingdom declaring 9 levels. No game here is known to reach it; the sample counts (an M4 Pro has 1, 2 and 4, and a multisample texture of one sample aborts) were checked on that Mac while porting the fix.
 - **Check:** `t_view_levels` makes each case with Metal's validation layer on: a 1×1 texture of 9 levels, a 3D texture whose depth holds the levels, an array of no layers, a 1D array of 4,096 layers, an 8-sample and a 1-sample multisample texture, and a copy at a missing level.
 
+### BC7 textures on GPUs without BC (Vulkan)
+
+- **Symptom:** on an iPhone with an A16 or older chip (`supportsBCTextureCompression` NO), a Vulkan game's BC7 images cannot be created; expected in the log as `[vk] [RED] cannot create image ... format 145` (BC7 unorm) or `format 146` (BC7 sRGB). Not yet seen on a device.
+- **Cause:** these GPUs sample no BC format. The NVN layer stores BC textures decompressed on such a device, at 2 to 8 times the memory (issue #4); the Vulkan layer has no such path.
+- **Fix (opt-in):** BC7 and ASTC 4x4 blocks both take 16 bytes for 4x4 texels and each stands alone, so a block can be re-encoded where it lies: the sizes, offsets and copies the game works out for BC7 stay right, and the textures take the memory they take with BC. `dm/tools/pkg_astc.py` re-encodes the BC7 textures of Supergiant packages in a copy of the RomFS image (Xcode's TextureConverter: BC7 decoded, ASTC 4x4 encoded by ARM's astcenc at quality Normal, alpha kept, cached by hash), and `DM_VK_BC7_ASTC=1` makes `hle_vk.m` back BC7 images with ASTC 4x4 LDR / sRGB textures. The NSP script's `--bc7-astc` does both and builds the switch in.
+- **Found on:** [Hades](../../dm/games/0100535012974000/README.md): 610 of its 671 textures are BC7. On the Mac with `DM_VK_BC7_ASTC=1` the game draws right with the re-encoded textures, and built with `--bc7-astc` it plays on an iPhone 14 Pro Max (A16).
+- **Check:** `t_vk_bc7_astc` (the switch off and on), `test_pkg_astc.py`, `test_nsp_bc7_astc.py`.
+
 ## Render targets, passes and clears
 
 ### Transient render targets shared by storage

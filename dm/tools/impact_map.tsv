@@ -90,6 +90,7 @@ dm/tools/patch_nso.py	*:*	the rewriter: every game's code
 dm/tools/nso_*.py	*:*	the rewriter: every game's code
 dm/tools/sdk_patches.py	*:*	the SDK modules' patches (by build ID)
 dm/tools/romfs_image.py	*:*	RomFS image packing: every game's files
+dm/tools/pkg_astc.py	-	Supergiant packages' BC7 textures as ASTC 4x4, only with the NSP script's --bc7-astc (opt-in): no game by default
 dm/tools/romfs.py	*:*	RomFS image input: every game's build tools
 dm/tools/nro_collect.py	*:*	NRO discovery from game resources during packing
 dm/tools/nx_extract/*	*:*	NSP extraction: every game's resource inputs

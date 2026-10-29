@@ -40,6 +40,11 @@ The layer was written for this game (Super Mario Galaxy extended it later: [0100
 
 - `DM_KEYS="f800:A,f1000:A,f1200:A,f1500:A,f1900:A"` goes through the title and the intro into Tartarus.
 
+## iPhone without BC (A16 and older)
+
+- 610 of the game's 671 textures are BC7, in the Supergiant packages of `Content/Win/Packages/720p` (a u32 version with the LZ4 bit, LZ4 chunks of up to 32 MB, XNB texture records; format 28 is BC7). The NSP script's `--bc7-astc` re-encodes them as ASTC 4x4 in a copy of the RomFS image (`dm/tools/pkg_astc.py`) and builds `DM_VK_BC7_ASTC=1` in ([BC7 textures on GPUs without BC](../../../docs/reference/rendering.md#bc7-textures-on-gpus-without-bc-vulkan)). On the Mac the game draws with the re-encoded textures as it does with BC7.
+- On an iPhone 14 Pro Max (A16) the game built with `--bc7-astc` plays.
+
 ## Found on this game
 
 General host changes first needed here; each applies to every game:

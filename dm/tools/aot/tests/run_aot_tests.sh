@@ -1,6 +1,7 @@
 #!/bin/sh
-# Runs the tests of a CMake build folder of dm/tools/aot (the vector harness, the census test, the vectors-current check) and records the run in the
-# repository: one log per test and summary.txt in logs/aot/ (logs/README.md). In the nxnative-aot Docker image (dm/tools/aot/README.md). From anywhere:
+# Runs the tests of a CMake build folder of dm/tools/aot (the vector harness, the census test, the vectors-current check, discovery over the corpus,
+# the manifest test, the corpus reference run) and records the run in the repository: one log per test and summary.txt in logs/aot/ (logs/README.md).
+# In the nxnative-aot Docker image (dm/tools/aot/README.md). From anywhere:
 #   sh dm/tools/aot/tests/run_aot_tests.sh <build folder> [<log folder>]
 # <log folder> defaults to logs/aot at the repository root; its old *.log files and summary.txt are removed first. Each test gets TIMEOUT seconds
 # (default 900). Exit status: 0 when every test passed, 1 when one did not, 2 on a usage error
@@ -13,7 +14,7 @@ here=$(cd "$(dirname "$0")" && pwd) || exit 2
 aot=$(cd "$here/.." && pwd) || exit 2
 repo=$(cd "$aot/../../.." && pwd) || exit 2
 build=$(cd "$1" 2>/dev/null && pwd) || { echo "no build folder: $1" >&2; exit 2; }
-[ -x "$build/nxaot" ] && [ -x "$build/nxaot_vec" ] || { echo "$build has no nxaot / nxaot_vec: configure and build it first (dm/tools/aot/README.md)" >&2; exit 2; }
+[ -x "$build/nxaot" ] && [ -x "$build/nxaot_vec" ] && [ -x "$build/nxaot_run" ] || { echo "$build has no nxaot / nxaot_vec / nxaot_run: configure and build it first (dm/tools/aot/README.md)" >&2; exit 2; }
 logs=${2:-$repo/logs/aot}
 mkdir -p "$logs" && logs=$(cd "$logs" && pwd) || exit 2
 rm -f "$logs"/*.log "$logs/summary.txt"
@@ -53,6 +54,10 @@ run vectors_perop "$build/nxaot_vec" --nan-mode perop "$aot/tests/vectors/fp.tsv
 run opcodes_reach "$build/nxaot" opcodes --reach --check
 run census python3 "$aot/tests/test_census.py" --nxaot "$build/nxaot" --work "$build/census"
 run vectors_current python3 "$aot/tests/gen_vectors.py" --check
+run discover python3 "$aot/tests/test_discover.py" --nxaot "$build/nxaot" --work "$build/discover"
+run manifest python3 "$aot/tests/test_manifest.py" --nxaot "$build/nxaot" --work "$build/manifest"
+run corpus_ref python3 "$aot/tests/test_corpus_run.py" --nxaot-run "$build/nxaot_run"
+run corpus_fp_current python3 "$aot/corpus/gen_fp.py" --check
 run opcodes "$build/nxaot" opcodes
 run bench "$build/nxaot_bench" --iterations 200000
 
@@ -66,6 +71,9 @@ total_line="$total runs: $passed passed, $failed failed"
     grep -h '^nxaot_vec: LLVM\|^nxaot_vec: lowering' "$logs/vectors.log" 2>/dev/null
     grep -h '^# reach' "$logs/opcodes_reach.log" 2>/dev/null
     grep -h '^census test:' "$logs/census.log" 2>/dev/null
+    grep -h '^discover test:' "$logs/discover.log" 2>/dev/null
+    grep -h '^manifest test:\|^manifest rows:\|^behaviour images:' "$logs/manifest.log" 2>/dev/null
+    grep -h '^corpus reference run:' "$logs/corpus_ref.log" 2>/dev/null
     grep -h '^# ' "$logs/opcodes.log" 2>/dev/null | sed 's/^# /lifter opcodes: /'
     echo
     cat "$results"

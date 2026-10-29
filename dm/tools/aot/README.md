@@ -3,8 +3,10 @@
 Phase 2 of the Windows and Linux port ([migration-status.md](../../../docs/design/migration-status.md)); the design is
 [aot-recompiler.md](../../../docs/design/aot-recompiler.md). This folder holds its foundation and its floating point: the build, the lifter of the
 integer, memory, branch, system-register, exclusive, floating-point, Advanced SIMD and cryptographic instruction classes (every IR opcode dynarmic's
-A64 frontend emits), the differential vector harness against dynarmic, a benchmark of the NaN chains, and the census of phase 0. No game runs
-through it yet, and nothing here touches the Apple builds.
+A64 frontend emits), the differential vector harness against dynarmic, a benchmark of the NaN chains, and the census of phase 0; and of phase 1 the
+module loader (NROs and behaviour images with their manifests), function discovery over whole modules with jump tables recovered on the lifted IR,
+exclusive windows and interprocedural summaries, and a corpus of self-checking homebrew NROs with no game files. No game runs through it yet, and
+nothing here touches the Apple builds.
 
 ## What exists
 
@@ -21,6 +23,10 @@ through it yet, and nothing here touches the Apple builds.
 | Benchmark | [src/bench/main.cpp](src/bench/main.cpp) (`nxaot_bench`) | the cost of the NaN-chain checks, the x86 instructions lifted code compiles to, the instructions per guest memory access ("Measurements") |
 | Census | [src/analysis/census.cpp](src/analysis/census.cpp) (`nxaot census`) | phase 0's numbers over a raw code blob as `key<TAB>count` lines |
 | Reach | [src/analysis/reach.cpp](src/analysis/reach.cpp) (`nxaot opcodes --reach`) | every entry of dynarmic's A64 decoder table translated with random fields: the opcodes the A64 frontend can emit; `--check` fails when one is not lowered |
+| Module loader | [src/module/](src/module/) (`nxaot module`, `nxaot image`, `nxaot manifest`) | an NRO, or a behaviour image with its manifest (design 1.1, 1.2), as one image keyed by its SHA-256 (1.4): segments, MOD0, the dynamic section, symbols, init and fini arrays, RELA / JMPREL / RELR relocations, `.eh_frame_hdr`, FDEs, LSDAs, data blocks in text; the manifest parser and writer ("Module loader and discovery") |
+| Discovery | [src/analysis/discover.cpp](src/analysis/discover.cpp), [jumptable.cpp](src/analysis/jumptable.cpp), [summary.cpp](src/analysis/summary.cpp) (`nxaot discover`) | design 1.3 over a whole module: function entries from every source with their provenance, a CFG per function, jump tables on the lifted IR, exclusive windows, the summaries of 2.3, the coverage of the text |
+| Reference runner | [src/run/main.cpp](src/run/main.cpp) (`nxaot_run`) | a corpus NRO under dynarmic's A64 JIT with the corpus's two SVCs: the corpus's reference output on x86 |
+| Corpus | [corpus/](corpus/) | seven self-checking C programs with a crt0 of their own, built with devkitA64 and with clang into fourteen committed NROs ("The corpus") |
 | Runner | [tests/run_aot_tests.sh](tests/run_aot_tests.sh) | runs the tests and the benchmark and writes `logs/aot/` ([logs/README.md](../../../logs/README.md)) |
 | CI | [.github/workflows/aot.yml](../../../.github/workflows/aot.yml) | the image, the build, CTest and the runner on every pull request and push to `main` and `multiplataforma` |
 
@@ -35,7 +41,8 @@ Ninja, Python 3.12 and the Boost headers:
 ```sh
 docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 
-# configure, build, CTest (the vectors, the crypto vectors for x86-64-v3, the per-operation NaN mode, the reach check, the census, the vectors-current check)
+# configure, build, CTest (the vectors, the crypto vectors for x86-64-v3, the per-operation NaN mode, the reach check, the census, the vectors-current
+# check, discovery over the corpus, the manifest test, the corpus reference run, the fp cases current)
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
 
@@ -95,6 +102,123 @@ The census reads dynarmic's decoder (its matcher names), the Arm ARM's top-level
 window is the straight line from an exclusive load to its store (conditional branches fall through, a second exclusive load or an unconditional
 branch ends it unpaired), ABA-sensitive when a load inside reads through the loaded value (design 6.5); `sp.from_memory` counts SP set, within a basic
 block, from a value a load produced. The `answer.*` keys answer phase 0's questions with 0 or 1.
+
+## Module loader and discovery
+
+```sh
+build/aot/nxaot module dm/tools/aot/corpus/nro/switch-gcc.nro          # what the loader read: layout, MOD0, symbols, relocations, FDEs, LSDAs, data blocks
+build/aot/nxaot image dm/tools/aot/corpus/nro/switch-gcc.nro /tmp/x    # the behaviour-image form: /tmp/x/switch-gcc.image.bin and switch-gcc.aot.tsv
+build/aot/nxaot manifest /tmp/x/switch-gcc.aot.tsv                     # parse a manifest, print it back in canonical form
+build/aot/nxaot discover dm/tools/aot/corpus/nro/switch-gcc.nro --tsv /tmp/x/switch.tsv            # discovery: a line per function, the summary
+build/aot/nxaot discover /tmp/x/switch-gcc.aot.tsv --symbols-as-oracle                               # no symbol as a source; compared with them
+```
+
+**The loader** ([src/module/image.h](src/module/image.h)) reads an NRO as the host's loader does (`dm/host/loader.c`: the header's segments, MOD0 at
+the offset in word +4, the dynamic section, `DT_SYMTAB` sized by `DT_HASH`, `DT_GNU_HASH` or the distance to `DT_STRTAB`, `DT_INIT` / `DT_FINI`,
+the init, preinit and fini arrays read through their relocations, RELA, JMPREL and RELR), and `.eh_frame_hdr`'s search table with each FDE's CIE
+augmentation (`zPLR`), LSDA pointer and the LSDA's call-site table and landing pads, as `dm/tools/nso_code.py` `fde_ranges` reads them. Data blocks
+in text: an NRO's header after its entry branch (+4..+0x80: word +4 is MOD0's offset, then the header) and MOD0 with libnx's `LNY` records when it
+lies in the text; for a behaviour image, the manifest's `data` rows. A manifest (`<name>.aot.tsv`, every row kind of design 1.2:
+[src/module/manifest.h](src/module/manifest.h)) names its image `<name>.image.bin` beside it; the image's SHA-256 must be the one in its header.
+`nxaot image` writes that form for an NRO (its bytes unchanged, so the key is the same SHA-256; a manifest with `layout` and `data` rows), so the
+tool reads one input form whatever `patch_nso.py --aot` will add.
+
+**Discovery** ([src/analysis/discover.h](src/analysis/discover.h)) takes the entries of design 1.3 in its order and records each entry's provenance
+(`fn` rows: every source that named it; the first is its primary one): the module's entry, FDEs, `STT_FUNC` symbols (not with `--symbols-as-oracle`),
+`DT_INIT`, `DT_FINI`, the arrays, relocation targets in text; then, from the walks, `bl` targets, `b` / `b.cond` / `cbz` / `tbz` targets outside
+their function (tail calls), landing pads outside their function, jump-table targets that are other functions' entries, `adr` and `adrp` + `add`
+text addresses that no function's code reaches and no function's FDE or symbol range holds (inside one they are a root of it: a table base, a resume
+point), and last the gap sweep (the first word that is not padding of every stretch no function reached; inside a function's own range it is a
+root of that function, not an entry). A walk follows a function's direct branches in `[entry, limit)`, the limit being the next entry or the FDE's
+end, by dynarmic's decoder table and the Arm ARM's fields ([src/analysis/insn.h](src/analysis/insn.h)); `br x30` is a return (design 3.3), a call to
+a function the summaries prove does not return does not fall through, and landing pads are reached from the calls their call-site range covers.
+Coverage: every text word outside data blocks is in a function, padding (`nop` or zero) or reported as uncovered; undefined words inside functions
+are counted.
+
+**Jump tables** ([src/analysis/jumptable.h](src/analysis/jumptable.h)), by data flow on the lifted IR as design 1.3 asks: for each `br`, the blocks
+from one of the br block's dominators (the br block itself, then up the dominator tree) that reach the br are lifted by the lifter into one LLVM
+function (`Region::follow`), SROA and EarlyCSE make it SSA, and the br's target (the operand of an `nxaot.indirect` marker the lifter emits,
+`Region::mark_indirect`) must be a function of one guest load whose address is a function of one index. The index is bounded at the br by
+LLVM's LazyValueInfo and known bits, through casts, constant arithmetic and phis (each lifted instruction reads its registers anew, so `cmp w13`
+and the index `w13` are two `trunc x13`: an equal cast on each predecessor's straight line gives the edge's range); the entries are read from the
+image (through the relocation of a slot, for tables of pointers in data) and every target must be a decoded instruction of the function or another
+function's entry. A region is used only when it is closed: every block of it that reaches the br, but its first, is entered only from inside it.
+Regions continue past a call by the callee's summary (`Region::calls`: what it may change is opaque, the rest keeps its value; GCC keeps a table
+base in `x18` across a call to a function its interprocedural register allocation knows leaves `x18` alone) and through the function's known tables,
+which become LLVM `switch`es (`Region::tables`, the lowering of design section 4). A switch in a loop, whose cases branch back to it, is first
+bounded with the code no known edge reaches left out, then verified: with its cases walked, a closed region that includes them must give the same
+targets, or the table is dropped. InstCombine is not run: it rewrites the index's `zext (trunc x)` as `and x, mask`, a value the compare does not
+name. Shapes covered by the corpus: byte, halfword and word entries, signed (GCC) and unsigned (clang), `adr` bases and table-relative bases (clang's
+uncompressed tables), bounds by `cmp` / `b.hi`, by `sub` then `cmp` (offset cases), bases set before calls, switches in loops. A br left unbounded is
+a `br` row with its reason, for the dispatcher (design section 4): in the corpus only fnptr's `unops[i % 6](x)`, an indirect tail call whose index is
+a remainder computed with a multiply and shifts that no LLVM analysis bounds.
+
+**Exclusive windows** ([src/analysis/summary.cpp](src/analysis/summary.cpp)): from each `ld(a)x(r|p)` the straight line (conditional branches fall
+through) to its `st(l)x(r|p)`, never past a second exclusive load (the rewriter's rules); `cas` when no other load is inside (compare-and-swap
+semantics are equivalent, design 6.5), `aba` when a load reads through the loaded value, `load` for another load; the others are counted unpaired.
+The rewriter's `oracle-W` rows are a subset (its x18 windows) and are not compared yet.
+
+**Summaries** (design 2.3, the facts only): per function the registers it may read before writing them (backward liveness, a call's reads and its
+must-writes), may change (everything written, callees included, minus what it restores), must write on every return path, and whether it is
+**preserving**: x19..x29, SP and the low halves of v8..v15 hold their entry values at every return, which an abstract interpretation of each
+instruction's dynarmic IR checks (registers as entry values plus offsets, SP-relative 8-byte slots, stores through other pointers taken not to reach
+the save slots; a `ret` whose `x30` is not the entry's, as longjmp's `br x30`, is a non-local transfer and makes the function open). A fixed point over
+the call graph: direct calls by their callee, `blr` and unbounded `br` by the union over the address-taken functions that return, `svc` as a call
+that keeps x19 and up. Classes: `preserving`, `open`, `noreturn` (no return path). The address-taken set: entries from relocations, `adr` /
+`adrp` pairs, the init and fini arrays and other functions' tables.
+
+`nxaot discover` prints a line per function (`offset size provenance blocks calls indirect windows has_lsda class name`; `indirect` counts `blr` and
+unbounded `br`) and `summary` lines; `--tsv` writes every row: `fn` (entry, size, limit, provenance, blocks, calls, unbounded brs, blrs, windows,
+has_lsda, reads, writes, must, class, address-taken, exported, name), `jt` (br, function, first entry, width, signed, base, scale, first index,
+count, region start, past calls, targets), `br`, `call`, `win`, `pad`, `gap` (uncovered words), `oracle` (with `--symbols-as-oracle`) and the
+summary. `NXAOT_DUMP_REGION=<br pc>` prints the optimised IR of every region tried for that br; `NXAOT_DEBUG_REGION=1` the outcome of each.
+
+What is not done: the census numbers of phase 0 over whole modules (FDE coverage, LSDA counts, setjmp imports, the address-taken set: all available
+from `nxaot discover` now, not folded into `nxaot census`), `oracle-T` / `oracle-J` / `oracle-W` comparisons (the parser reads them), the
+non-local control flow census beyond landing pads (setjmp by symbol, SP from memory), functions split for size (design 9.3), and the measured
+throughput on game modules: every region is lifted afresh and the dominators and the fixed points are plain, which the corpus does not stress.
+
+## The corpus
+
+Design section 12, item 3: self-checking programs built as NROs with no game files and no keys, the same programs with devkitA64's GCC and with
+upstream clang. [corpus/](corpus/):
+
+| Program | What it checks |
+|---|---|
+| `int_ops` | integer arithmetic and bit manipulation, compiler-torture style: volatile inputs, each operation against a reference written another way, the corners C leaves undefined (division by zero, `INT_MIN / -1`, shifts by the width or more) in inline assembly, CRC32 / CRC32C, a TLS counter; built without unwind tables, so discovery works without FDEs |
+| `switch` | switches lowered to jump tables of every entry size (byte, halfword, word: `switch_word.c`), offset cases, case ranges, fallthrough, a state machine, nested, sparse (a compare tree) and two clusters, checked against tables of function pointers and if chains |
+| `fnptr` | vtables and dispatch tables in relocated data, callbacks built with `adrp` + `add`, direct and indirect tail calls, mutual recursion, constructors and destructors (the init and fini arrays, `DT_INIT`), cleanup landing pads (built with `-fexceptions`) |
+| `fp` | the operations of design 7.2 over special values, single and double: 5,928 cases whose results [corpus/gen_fp.py](corpus/gen_fp.py) computes from the Arm ARM's pseudocode (`FPAdd`, `FPMulAdd`, `FPRecipEstimate`, `FPToFixed`, `FPRoundInt`, ...) with FPCR = 0 |
+| `simd` | NEON intrinsics lane by lane against scalar references, the floating-point vector forms against the scalar instructions |
+| `sjlj` | setjmp / longjmp of [corpus/rt/setjmp.S](corpus/rt/setjmp.S): second returns, deep recursion, a handler stack, callee-saved registers |
+| `excl` | the C11 atomics of every width as `ldaxr` / `stlxr` loops, compare-and-swap, 128-bit pairs, `clrex`, a spin lock, an ABA-sensitive lock-free pop |
+
+The run time ([corpus/rt/](corpus/rt/)): `crt0.S` lays out an NRO's start as libnx's does (a branch over the header, MOD0's offset at +4, MOD0 in the
+text), sets SP to a stack of its own, relocates the module unless a loader did, points `tpidr_el0` at the TLS block, runs `DT_INIT` and the init
+array, calls `main` and leaves through `svcExitProcess`; `rt.c` prints one line per `svcOutputDebugString` (`dm/host/hle_svc.c` answers it) and
+ends with `PASS <checks>` or `FAIL <failed> of <checks>`; `mem.S` has `memcpy` and its kin, `nro.ld` the layout both linkers read.
+
+```sh
+sh dm/tools/aot/corpus/build_corpus.sh            # build both toolchains in Docker, write corpus/nro/ and corpus/corpus.tsv
+sh dm/tools/aot/corpus/build_corpus.sh --check    # build into build/corpus/check, compare byte for byte with the committed files
+python3 dm/tools/aot/corpus/fetch_devkita64.py /tmp/dkp && DKP_ROOT=/tmp/dkp/opt/devkitpro sh dm/tools/aot/corpus/build_corpus.sh --check
+build/aot/nxaot_run dm/tools/aot/corpus/nro/fp-gcc.nro                  # one NRO under dynarmic: its lines
+python3 dm/tools/aot/tests/test_corpus_run.py --nxaot-run build/aot/nxaot_run   # every NRO against corpus/expected/<program>.out
+python3 dm/tools/aot/corpus/gen_fp.py             # after a change to the fp cases (CTest corpus_fp_current checks fp_cases.h is current)
+```
+
+GCC is devkitA64 15.2.0 from `devkitpro/devkita64:20260219` pinned by digest in `build_corpus.sh` (pulled on first use: about 700 MB compressed);
+with `DKP_ROOT` the same binaries run in the `nxnative-aot` image from a devkitPro tree, which `fetch_devkita64.py` extracts from the pinned image's
+layer (every digest checked, 190 MB) for a machine without the disk room for the image. clang is the image's clang-18 (`--target=aarch64-none-elf`).
+Common flags: `-O2 -mcpu=cortex-a57 -mno-outline-atomics -ffreestanding -fPIE -fno-stack-protector -ffp-contract=off -fno-math-errno`, PIE links with
+`--export-dynamic --hash-style=sysv --build-id=sha1` (GNU ld: RELA relocations; ld.lld: `-z pack-relative-relocs`, RELR); `corpus.tsv` lists
+every NRO with its compiler, flags and SHA-256. [tests/elf2nro.py](tests/elf2nro.py) writes the NROs (and the symbol tables `test_discover.py` compares
+with), byte for byte what devkitPro's `elf2nro` writes, which `build_corpus.sh` checks on every build. The builds are reproducible: no timestamps,
+paths relative to the corpus folder, build IDs over the content; `--check` rebuilds byte-identically.
+
+Run so far: under dynarmic only (`nxaot_run`, CTest `corpus_ref`): all fourteen NROs print `PASS`, and the GCC and clang builds of each program the
+same lines, recorded in [corpus/expected/](corpus/expected/). Not run: natively on ARM64 hardware (an Apple-silicon Mac; nothing here can) and
+recompiled on x86 (the dispatcher and the host run time do not exist yet): both must print the expected lines.
 
 ## Floating point and SIMD
 
@@ -324,8 +448,8 @@ The phases of design section 14, and where this folder stands:
 
 | Phase | Content | Here |
 |---|---|---|
-| 0. Census | the numbers per module | `nxaot census` over raw code; NSO / NRO parsing, FDE coverage, setjmp imports, LSDA counts and the address-taken set are not done |
-| 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | the state block, the lifter of those classes (one region of blocks per function), the harness (0 mismatches over 24,400 integer vectors). Not done: discovery, function summaries and the calling convention (2.3), calls and returns (3), the dispatcher (4), the host's SVC path (`svc` only leaves the function), safepoints, ThinLTO, the cache, the corpus NROs, the throughput measurements |
+| 0. Census | the numbers per module | `nxaot census` over raw code; NROs and behaviour images are read (`nxaot module`) and FDE coverage, LSDA counts and the address-taken set come out of `nxaot discover`, not yet as census keys; NSO decompression (LZ4) and setjmp imports are not done |
+| 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | the state block, the lifter of those classes (one region of blocks per function), the harness (0 mismatches over 24,400 integer vectors), the module loader (NROs, behaviour images and their manifests), discovery over whole modules with jump tables on the lifted IR, exclusive windows and the interprocedural summaries (the facts of 2.3), the corpus (fourteen NROs from two toolchains, `PASS` under dynarmic). Not done: the calling convention in code (2.3: the summaries exist, the lowering that uses them does not), calls and returns (3), the dispatcher (4), the host's SVC path (`svc` only leaves the function), safepoints, ThinLTO, the cache, the corpus run natively on Apple silicon and recompiled on x86 (it needs the dispatcher and the host run time), the throughput measurements |
 | 2. FP and SIMD | every FP, NEON and crypto lowering, NaN chains | every opcode the A64 frontend emits lowered; 0 mismatches over the committed vectors and 7,000,000 random floating-point and SIMD ones (10^6 per class for seven of the eight classes, `fp_seq` not completed; not the 10^8 of the acceptance); the chain checks measured. Not done: the row-13 FZ slow path for the basic operations, inline estimates, combined escape checks, the run-time helpers in the host |
 | 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | not started |
 | 4. to 6. | games on the Intel Mac, performance, breadth | not started |

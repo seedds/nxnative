@@ -63,17 +63,33 @@ target_include_directories(nxaot_decode PUBLIC include src)
 target_link_libraries(nxaot_decode PUBLIC dynarmic merry::mcl fmt::fmt tsl::robin_map Boost::boost)
 target_compile_options(nxaot_decode PRIVATE ${NXAOT_WARNINGS})
 
-# The census (src/analysis): instruction classes and the phase 0 questions over a raw code blob
-add_library(nxaot_analysis STATIC src/analysis/census.cpp src/analysis/reach.cpp)
-target_link_libraries(nxaot_analysis PUBLIC nxaot_decode)
+# The analyses (src/analysis): the census of phase 0 over a raw code blob, and over a whole module (aot-recompiler.md section 1.3) function
+# discovery, CFGs, jump tables on the lifted IR (hence the lifter and LLVM's analyses), exclusive windows and the interprocedural summaries
+add_library(nxaot_analysis STATIC src/analysis/census.cpp src/analysis/reach.cpp src/analysis/discover.cpp src/analysis/jumptable.cpp
+            src/analysis/summary.cpp)
+target_link_libraries(nxaot_analysis PUBLIC nxaot_decode nxaot_module nxaot_lift)
 target_compile_options(nxaot_analysis PRIVATE ${NXAOT_WARNINGS})
+
+separate_arguments(_llvm_defs NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+
+# The module loader (src/module): NROs and behaviour images with their manifests (aot-recompiler.md sections 1.1 to 1.4); LLVM's SHA-256
+add_library(nxaot_module STATIC src/module/image.cpp src/module/manifest.cpp)
+target_include_directories(nxaot_module PUBLIC src)
+target_include_directories(nxaot_module SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_compile_definitions(nxaot_module PRIVATE ${_llvm_defs})
+target_compile_options(nxaot_module PRIVATE ${NXAOT_WARNINGS})
+if (NXAOT_LLVM_STATIC OR NOT LLVM_LINK_LLVM_DYLIB)
+    llvm_map_components_to_libnames(_llvm_support_libs support)
+    target_link_libraries(nxaot_module PUBLIC ${_llvm_support_libs})
+else()
+    llvm_config(nxaot_module USE_SHARED support)
+endif()
 
 # The lifter (src/lift): dynarmic IR -> LLVM IR, and the ORC JIT that runs lifted blocks in nxaot_vec
 add_library(nxaot_lift STATIC src/lift/lifter.cpp src/lift/lower_fp.cpp src/lift/lower_vector.cpp src/lift/lower_crypto.cpp src/lift/runtime.cpp
             src/lift/opcodes.cpp src/lift/jit.cpp)
 target_include_directories(nxaot_lift PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/gen")
 target_include_directories(nxaot_lift SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
-separate_arguments(_llvm_defs NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 target_compile_definitions(nxaot_lift PUBLIC ${_llvm_defs})
 target_link_libraries(nxaot_lift PUBLIC nxaot_decode)
 target_compile_options(nxaot_lift PRIVATE ${NXAOT_WARNINGS})
@@ -94,6 +110,11 @@ add_executable(nxaot_vec src/vec/main.cpp src/vec/vectors.cpp src/vec/reference.
 target_link_libraries(nxaot_vec PRIVATE nxaot_lift ZLIB::ZLIB)
 target_compile_options(nxaot_vec PRIVATE ${NXAOT_WARNINGS})
 
+# nxaot_run: a corpus NRO under dynarmic's A64 JIT with the corpus's two SVCs (the reference output of dm/tools/aot/corpus)
+add_executable(nxaot_run src/run/main.cpp)
+target_link_libraries(nxaot_run PRIVATE nxaot_module nxaot_lift)
+target_compile_options(nxaot_run PRIVATE ${NXAOT_WARNINGS})
+
 # nxaot_bench: the cost of the NaN-chain checks and the x86 code of lifted floating point (README.md, "Measurements")
 add_executable(nxaot_bench src/bench/main.cpp)
 target_link_libraries(nxaot_bench PRIVATE nxaot_lift)
@@ -112,4 +133,10 @@ add_test(NAME vectors_perop COMMAND nxaot_vec --nan-mode perop "${_vectors}/fp.t
 add_test(NAME opcodes_reach COMMAND nxaot opcodes --reach --check)
 add_test(NAME census COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_census.py" --nxaot $<TARGET_FILE:nxaot> --work "${CMAKE_CURRENT_BINARY_DIR}/census")
 add_test(NAME vectors_current COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/gen_vectors.py" --check)
-set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census PROPERTIES TIMEOUT 900)
+# The module loader, discovery and the corpus (aot-recompiler.md sections 1.1 to 1.4 and 12, item 3): discovery of every corpus NRO against its
+# ELF's symbol table, the manifest parser and the behaviour-image form, the corpus under dynarmic against its expected output, the fp cases current
+add_test(NAME discover COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_discover.py" --nxaot $<TARGET_FILE:nxaot> --work "${CMAKE_CURRENT_BINARY_DIR}/discover")
+add_test(NAME manifest COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_manifest.py" --nxaot $<TARGET_FILE:nxaot> --work "${CMAKE_CURRENT_BINARY_DIR}/manifest")
+add_test(NAME corpus_ref COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_corpus_run.py" --nxaot-run $<TARGET_FILE:nxaot_run>)
+add_test(NAME corpus_fp_current COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/corpus/gen_fp.py" --check)
+set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census discover manifest corpus_ref PROPERTIES TIMEOUT 900)

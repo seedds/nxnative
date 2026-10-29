@@ -1,0 +1,18 @@
+vtable.total 00000000000000ae ok
+vtable.after_scale 000000000000009b ok
+dispatch.digest 55a5a49833900fd8
+dispatch.sq 0000000000000090 ok
+dispatch.pop 0000000000000008 ok
+callback.sum 0000000000000036 ok
+callback.max 000000000000001e ok
+callback.xor_rot 00000000000004a9 ok
+recursion.even 00000001 ok
+recursion.odd 00000001 ok
+tail.collatz27 000000000000006f ok
+tail.helper 000000000000024f ok
+init.order 000000000000007b ok
+init.dt_init 00000001 ok
+cleanup.value 0000000000003315 ok
+cleanup.released 000000000000000f ok
+pointer.hidden 5a5a5a5a5a5a5aa5 ok
+PASS 16

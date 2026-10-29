@@ -1,0 +1,26 @@
+fetch_add.u8 000000b8 ok
+fetch_sub.u16 0000e4a8 ok
+fetch_add.u32 00079f2c ok
+fetch_xor.u64 71bce4301220b010 ok
+fetch_or_and.u32 f0079f2c ok
+exchange.u16 0000e4a8 ok
+exchange.after 0000beef ok
+cas.fail 00000000 ok
+cas.fail.observed 71bce4301220b010 ok
+cas.success 00000001 ok
+cas.success.stored 0000000000000009 ok
+cas.weak.u8 00000042 ok
+cas.weak.retries 00000000
+cas128.fail 00000000 ok
+cas128.success 00000001 ok
+cas128.value 0000000000000014 000000000000000a ok
+cas128.loop 000001f4 ok
+cas128.loop.value 0000000000000014 000000000001e758 ok
+clrex.store_fails 00000001 ok
+clrex.memory_kept 0000000000000009 ok
+stack.sum 00000000000004d8 ok
+stack.order cc5f55f1c7c16cd8
+stack.empty 0000000000000000 ok
+spinlock.guarded 00000000001e8098 ok
+spinlock.free 00000000 ok
+PASS 23

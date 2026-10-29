@@ -323,7 +323,9 @@ int main(int argc, char** argv) {
         const auto prepared = lifted->Prepare(batch, dump, &ir);
         if (dump) {
             for (const Vector* v : batch) {
-                lift::Region region{kCodeBase, kCodeBase, kCodeBase + 4 * v->code.size()};
+                lift::Region region;
+                region.entry = region.lo = kCodeBase;
+                region.hi = kCodeBase + 4 * v->code.size();
                 const decode::CodeReader read = [v](uint64_t a) -> std::optional<uint32_t> {
                     if (!InCode(*v, a)) {
                         return std::nullopt;

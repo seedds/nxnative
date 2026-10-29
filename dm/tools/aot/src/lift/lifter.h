@@ -11,6 +11,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -59,10 +61,30 @@ struct LiftOptions {
 // The FPCR bits a block is specialised on: dynarmic's location descriptor keeps the same (frontend/A64/a64_location_descriptor.h, fpcr_mask)
 constexpr uint32_t kFpcrModeMask = 0x07C80000;
 
+// What a call may change, for a region that continues past it (Region::calls): the registers that may hold another value when the callee
+// returns (its interprocedural summary, src/analysis/summary.h). Everything else keeps its value across the call
+struct CallEffect {
+    uint32_t x = 0x7FFFFFFFu;  // bit i: x_i
+    uint32_t v = 0xFFFFFFFFu;  // bit i: v_i
+    bool sp = true, nzcv = true;
+};
+
 struct Region {
     uint64_t entry = 0;
     uint64_t lo = 0, hi = 0;  // blocks that start in [lo, hi) are lifted into the function; a transfer anywhere else leaves it with st->pc set
     size_t max_blocks = 64;
+    // For the analyses (src/analysis/jumptable.cpp); the defaults lift a region as the vector harness and the benchmark need it.
+    // follow: the block starts the region may enter besides the entry (empty: every one in [lo, hi))
+    std::function<bool(uint64_t pc)> follow;
+    // calls: for a block that ends in bl or blr at call_pc, what the call may change; the region then goes on at call_pc + 4 with those
+    // registers unknown (opaque values) instead of leaving at the call. nullopt, or no hook: the call leaves the function as before
+    std::function<std::optional<CallEffect>(uint64_t call_pc)> calls;
+    // mark_indirect: before each exit to a computed target, `call void @nxaot.indirect(i64 <pc of the branch>, i64 <target>)`, so that an
+    // analysis finds the target's value in the optimised IR
+    bool mark_indirect = false;
+    // tables: the targets of a br at br_pc that a jump table gives (null: none known); the region follows them, and the br becomes an LLVM
+    // switch over them that leaves the function for any other value (aot-recompiler.md section 4)
+    std::function<const std::vector<uint64_t>*(uint64_t br_pc)> tables;
 };
 
 // Where dynarmic's x86-64 backend, the reference of nxaot_vec, raises other cumulative FPSR bits than the Arm ARM for an operation the lowering

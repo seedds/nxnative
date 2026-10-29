@@ -1,0 +1,13 @@
+switch.dense 00000000 ok
+switch.offset 00000000 ok
+switch.chars 00000000 ok
+switch.fallthrough 00000000 ok
+switch.machine 00000000 ok
+switch.nested 00000000 ok
+switch.sparse 00000000 ok
+switch.clusters 00000000 ok
+switch.long 00000000 ok
+switch.digest 6f9dc3c237d0412b
+switch.word 00000000 ok
+switch.word.digest 4917696b98d03f41
+PASS 10

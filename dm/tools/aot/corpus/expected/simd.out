@@ -1,0 +1,20 @@
+simd.int_arith 00000000 ok
+  digest ec57d4cebb3c1dd7
+simd.saturating 00000000 ok
+  digest 49062b8e4da7ec78
+simd.shift_narrow_widen 00000000 ok
+  digest aff2fd162994919e
+simd.reduce_count_bits 00000000 ok
+  digest b130896ad02529f5
+simd.table_permute 00000000 ok
+  digest 936e611ec26903dc
+simd.load_store 00000000 ok
+  digest 4b063429b53d2a01
+simd.float_vectors 00000000 ok
+  digest e714611e84854da0
+simd.qadd_s16.saturates 0000000000007fff ok
+simd.qdmulh.min 0000000000007fff ok
+simd.addv 0000000000000010 ok
+simd.tbl.out_of_range 0000000000000000 ok
+simd.digest 45aa9ffea949cf07
+PASS 11

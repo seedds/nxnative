@@ -80,6 +80,7 @@ public:
     void LowerTerminal(const IR::Terminal& t);
     void Goto(Value* target);
     void Exit(Value* pc, uint32_t reason, Value* arg);
+    Value* Opaque(llvm::Type* t);  // an unknown value of type t (the registers a call may change, Region::calls)
     bool LowerContext(IR::Inst& inst);
     bool LowerFlags(IR::Inst& inst);
     bool LowerInteger(IR::Inst& inst);
@@ -203,6 +204,8 @@ public:
 
     std::map<uint64_t, IR::Block> blocks;
     std::map<uint64_t, BasicBlock*> bbs;
+    std::map<uint64_t, CallEffect> call_effects;  // blocks ending in a call the region continues past (Region::calls), by block start
+    std::map<uint64_t, std::vector<uint64_t>> table_targets;  // blocks ending in a br with a known jump table (Region::tables), by block start
     llvm::Function* F = nullptr;
     Value* st = nullptr;
     BasicBlock* exit_bb = nullptr;
@@ -224,6 +227,9 @@ public:
     std::unordered_map<const IR::Inst*, ChainNode> chain;
     std::unordered_map<const IR::Inst*, std::vector<const IR::Inst*>> users;
     Origin cur_origin;
+    uint64_t cur_end = 0;                   // the pc after the block's last instruction
+    const CallEffect* cur_call = nullptr;   // the block's call effects, when it ends in a call the region continues past
+    const std::vector<uint64_t>* cur_table = nullptr;  // the block's jump-table targets, when it ends in a br with a known table
     Value* last_pc = nullptr;
     Value* new_fpcr = nullptr;  // the value an msr fpcr of the block wrote (its terminal checks it)
     bool terminated = false;

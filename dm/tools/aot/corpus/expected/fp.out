@@ -1,0 +1,165 @@
+fp.fadd.s.digest a25eddbdb0ce72f6
+fp.fadd.s 00000000 ok
+fp.fadd.d.digest 485c26f2bca64c75
+fp.fadd.d 00000000 ok
+fp.fsub.s.digest bc009b259b631e10
+fp.fsub.s 00000000 ok
+fp.fsub.d.digest 2d4e155b5cd28f2c
+fp.fsub.d 00000000 ok
+fp.fmul.s.digest 4824cc1040b9413a
+fp.fmul.s 00000000 ok
+fp.fmul.d.digest 8112fff9fea0ddc9
+fp.fmul.d 00000000 ok
+fp.fdiv.s.digest f02d326f1658535d
+fp.fdiv.s 00000000 ok
+fp.fdiv.d.digest 36c09251e0deab22
+fp.fdiv.d 00000000 ok
+fp.fmax.s.digest 0dacfb60119057eb
+fp.fmax.s 00000000 ok
+fp.fmax.d.digest 887b5d0f2074d803
+fp.fmax.d 00000000 ok
+fp.fmin.s.digest 91729ea041be8dfc
+fp.fmin.s 00000000 ok
+fp.fmin.d.digest 36fe361730c527b7
+fp.fmin.d 00000000 ok
+fp.fmaxnm.s.digest 4740f3b464958383
+fp.fmaxnm.s 00000000 ok
+fp.fmaxnm.d.digest 1794a0ef70b34da3
+fp.fmaxnm.d 00000000 ok
+fp.fminnm.s.digest 47cb8fa231cb0b98
+fp.fminnm.s 00000000 ok
+fp.fminnm.d.digest 4a42d58ec2404be3
+fp.fminnm.d 00000000 ok
+fp.fmulx.s.digest c2f687f6f362a07a
+fp.fmulx.s 00000000 ok
+fp.fmulx.d.digest 47fa28c5c0045899
+fp.fmulx.d 00000000 ok
+fp.frecps.s.digest 5248a448dd5eeafa
+fp.frecps.s 00000000 ok
+fp.frecps.d.digest 451a86143f421114
+fp.frecps.d 00000000 ok
+fp.frsqrts.s.digest d545062b4412ed5d
+fp.frsqrts.s 00000000 ok
+fp.frsqrts.d.digest 7c3e1086a1a056b2
+fp.frsqrts.d 00000000 ok
+fp.fcmp.s.digest a555c4844f77730f
+fp.fcmp.s 00000000 ok
+fp.fcmp.d.digest a555c4844f77730f
+fp.fcmp.d 00000000 ok
+fp.fmadd.s.digest a8b54d018c08b1f1
+fp.fmadd.s 00000000 ok
+fp.fmadd.d.digest def67a473ddf6abc
+fp.fmadd.d 00000000 ok
+fp.fmsub.s.digest 37d01aaba4948103
+fp.fmsub.s 00000000 ok
+fp.fmsub.d.digest 6c02b94a392eaa1f
+fp.fmsub.d 00000000 ok
+fp.fnmadd.s.digest ca2336303d76e171
+fp.fnmadd.s 00000000 ok
+fp.fnmadd.d.digest 832ae53f0b2ad73c
+fp.fnmadd.d 00000000 ok
+fp.fnmsub.s.digest eefbd87fe0982c03
+fp.fnmsub.s 00000000 ok
+fp.fnmsub.d.digest 540871305ae1191f
+fp.fnmsub.d 00000000 ok
+fp.fsqrt.s.digest 3aaab58de891674c
+fp.fsqrt.s 00000000 ok
+fp.fsqrt.d.digest 7c3b4b9bca391c0b
+fp.fsqrt.d 00000000 ok
+fp.fabs.s.digest 355894de3af24725
+fp.fabs.s 00000000 ok
+fp.fabs.d.digest b89691856c0d57b8
+fp.fabs.d 00000000 ok
+fp.fneg.s.digest 9a293b28d1d9d025
+fp.fneg.s 00000000 ok
+fp.fneg.d.digest 7bdc948022ce35b8
+fp.fneg.d 00000000 ok
+fp.frintn.s.digest 883850c6e146104f
+fp.frintn.s 00000000 ok
+fp.frintn.d.digest 483e02ebc4160246
+fp.frintn.d 00000000 ok
+fp.frinta.s.digest 18e97930de50f9ee
+fp.frinta.s 00000000 ok
+fp.frinta.d.digest 661ab23a71f50bcf
+fp.frinta.d 00000000 ok
+fp.frintm.s.digest c9edaa9030c1cb57
+fp.frintm.s 00000000 ok
+fp.frintm.d.digest 20df779c31a4b956
+fp.frintm.d 00000000 ok
+fp.frintp.s.digest f65e0e8215ba83f6
+fp.frintp.s 00000000 ok
+fp.frintp.d.digest 274fcb6caa86da77
+fp.frintp.d 00000000 ok
+fp.frintz.s.digest c13b76805c6cb72f
+fp.frintz.s 00000000 ok
+fp.frintz.d.digest bca7ba9f64e832b6
+fp.frintz.d 00000000 ok
+fp.frinti.s.digest 883850c6e146104f
+fp.frinti.s 00000000 ok
+fp.frinti.d.digest 483e02ebc4160246
+fp.frinti.d 00000000 ok
+fp.frintx.s.digest 883850c6e146104f
+fp.frintx.s 00000000 ok
+fp.frintx.d.digest 483e02ebc4160246
+fp.frintx.d 00000000 ok
+fp.frecpe.s.digest 5a77d611c56120b4
+fp.frecpe.s 00000000 ok
+fp.frecpe.d.digest 8225ab5e4ab0c827
+fp.frecpe.d 00000000 ok
+fp.frsqrte.s.digest f594f6606923c27e
+fp.frsqrte.s 00000000 ok
+fp.frsqrte.d.digest 6bc48e5ea642beca
+fp.frsqrte.d 00000000 ok
+fp.frecpx.s.digest d5e11f89b1254ae0
+fp.frecpx.s 00000000 ok
+fp.frecpx.d.digest ef7fac3c35b7f833
+fp.frecpx.d 00000000 ok
+fp.fcvt.s.digest 0d5ec8013b23fa12
+fp.fcvt.s 00000000 ok
+fp.fcvt.d.digest 538d2b4275893146
+fp.fcvt.d 00000000 ok
+fp.fcvtzs_w.s.digest d7e61cb5f2c793e2
+fp.fcvtzs_w.s 00000000 ok
+fp.fcvtzs_w.d.digest 66079b59236729db
+fp.fcvtzs_w.d 00000000 ok
+fp.fcvtzs_x.s.digest 7f550da101667803
+fp.fcvtzs_x.s 00000000 ok
+fp.fcvtzs_x.d.digest 3294d9ad916d17b7
+fp.fcvtzs_x.d 00000000 ok
+fp.fcvtzu_w.s.digest 63303161d525a211
+fp.fcvtzu_w.s 00000000 ok
+fp.fcvtzu_w.d.digest 8fcb36b21abc822c
+fp.fcvtzu_w.d 00000000 ok
+fp.fcvtzu_x.s.digest cc90c6bf7650f2cc
+fp.fcvtzu_x.s 00000000 ok
+fp.fcvtzu_x.d.digest 589d8595974e1140
+fp.fcvtzu_x.d 00000000 ok
+fp.fcvtas_x.s.digest f137613d7451f1ee
+fp.fcvtas_x.s 00000000 ok
+fp.fcvtas_x.d.digest 7ce0522da59adaa2
+fp.fcvtas_x.d 00000000 ok
+fp.fcvtau_w.s.digest 6936cb3b23080ff2
+fp.fcvtau_w.s 00000000 ok
+fp.fcvtau_w.d.digest db1a2177495322cf
+fp.fcvtau_w.d 00000000 ok
+fp.fcvtns_x.s.digest 433b2ea1fbb1b789
+fp.fcvtns_x.s 00000000 ok
+fp.fcvtns_x.d.digest 9c3c53c68c72cbfd
+fp.fcvtns_x.d 00000000 ok
+fp.fcvtms_w.s.digest 0a1fbb374b8e74e0
+fp.fcvtms_w.s 00000000 ok
+fp.fcvtms_w.d.digest 5d0f89b9694a3add
+fp.fcvtms_w.d 00000000 ok
+fp.fcvtps_x.s.digest e8e0fe27ceb19769
+fp.fcvtps_x.s 00000000 ok
+fp.fcvtps_x.d.digest 8e599c6f06ac141d
+fp.fcvtps_x.d 00000000 ok
+fp.scvtf.s.digest f5383efbc2e389c3
+fp.scvtf.s 00000000 ok
+fp.scvtf.d.digest af564cdf38d0509c
+fp.scvtf.d 00000000 ok
+fp.ucvtf.s.digest 7b9ab5382c26ea35
+fp.ucvtf.s 00000000 ok
+fp.ucvtf.d.digest d50621ca30d1844b
+fp.ucvtf.d 00000000 ok
+PASS 82

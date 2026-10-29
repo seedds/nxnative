@@ -205,9 +205,29 @@ void FunctionLifter::Discover(Lifted& out) {
         }
         std::vector<uint64_t> next;
         Successors(block.GetTerminal(), block, next);
+        if (region.calls || region.tables) {
+            const uint64_t end = A64::LocationDescriptor{block.EndLocation()}.PC();
+            const auto word = end >= 4 ? read(end - 4) : std::nullopt;
+            const bool is_call = word && ((*word & 0xFC000000u) == 0x94000000u || (*word & 0xFFFFFC1Fu) == 0xD63F0000u);  // bl, blr
+            const bool is_br = word && (*word & 0xFFFFFC1Fu) == 0xD61F0000u && ((*word >> 5) & 31) != 30;                // br, not br x30
+            if (is_call && region.calls) {
+                // A call the analysis knows the effects of: the region goes on after it (LowerTerminal applies the effects)
+                if (const auto effect = region.calls(end - 4)) {
+                    call_effects[pc] = *effect;
+                    next.assign(1, end);
+                }
+            }
+            if (is_br && region.tables) {
+                // A br with a known jump table: its targets are successors (Goto lowers the br as a switch over them)
+                if (const std::vector<uint64_t>* targets = region.tables(end - 4)) {
+                    table_targets[pc] = *targets;
+                    next.insert(next.end(), targets->begin(), targets->end());
+                }
+            }
+        }
         blocks.emplace(pc, std::move(block));
         for (const uint64_t n : next) {
-            if (InRegion(n) && !blocks.count(n)) {
+            if (InRegion(n) && (!region.follow || region.follow(n)) && !blocks.count(n)) {
                 work.push_back(n);
             }
         }
@@ -364,6 +384,11 @@ void FunctionLifter::LowerBlock(IR::Block& block) {
     last_pc = nullptr;
     new_fpcr = nullptr;
     terminated = false;
+    cur_end = A64::LocationDescriptor{block.EndLocation()}.PC();
+    const auto call = call_effects.find(A64::LocationDescriptor{block.Location()}.PC());
+    cur_call = call == call_effects.end() ? nullptr : &call->second;
+    const auto table = table_targets.find(A64::LocationDescriptor{block.Location()}.PC());
+    cur_table = table == table_targets.end() ? nullptr : &table->second;
     for (auto& inst : block) {
         if (inst.GetOpcode() == IR::Opcode::Void) {
             continue;
@@ -393,6 +418,31 @@ void FunctionLifter::LowerInst(IR::Inst& inst) {
 }
 
 void FunctionLifter::LowerTerminal(const IR::Terminal& t) {
+    if (cur_call) {
+        // A call the region continues past (Region::calls): what the callee may change becomes unknown, then the code after the call
+        const CallEffect& e = *cur_call;
+        for (size_t i = 0; i < 31; ++i) {
+            if (e.x >> i & 1) {
+                B.CreateStore(Opaque(B.getInt64Ty()), x[i]);
+                wrote_x[i] = true;
+            }
+        }
+        for (size_t i = 0; i < 32; ++i) {
+            if (e.v >> i & 1) {
+                B.CreateStore(Opaque(V128()), vreg[i]);
+                wrote_v[i] = true;
+            }
+        }
+        if (e.sp) {
+            B.CreateStore(Opaque(B.getInt64Ty()), sp);
+            wrote_sp = true;
+        }
+        if (e.nzcv) {
+            SetFlags(UnpackNzcv(B.CreateTrunc(Opaque(B.getInt64Ty()), B.getInt32Ty())), Origin{});
+        }
+        Goto(I(64, cur_end));
+        return;
+    }
     if (const auto* l = boost::get<IR::Term::LinkBlock>(&t)) {
         Goto(I(64, A64::LocationDescriptor{l->next}.PC()));
     } else if (const auto* lf = boost::get<IR::Term::LinkBlockFast>(&t)) {
@@ -453,8 +503,40 @@ void FunctionLifter::Goto(Value* target) {
             B.CreateBr(it->second);
             return;
         }
+    } else if (region.mark_indirect) {
+        auto fn = M.getOrInsertFunction("nxaot.indirect", llvm::FunctionType::get(B.getVoidTy(), {B.getInt64Ty(), B.getInt64Ty()}, false));
+        if (auto* f = llvm::dyn_cast<llvm::Function>(fn.getCallee())) {
+            f->addFnAttr(llvm::Attribute::NoUnwind);
+            f->setMemoryEffects(llvm::MemoryEffects::inaccessibleMemOnly());
+        }
+        B.CreateCall(fn, {I(64, cur_end - 4), target});
+    }
+    if (cur_table && !llvm::isa<ConstantInt>(target)) {
+        // A known jump table: a switch over its targets; any other value leaves the function, for the dispatcher
+        auto* other = BasicBlock::Create(C, "table_miss", F);
+        auto* sw = B.CreateSwitch(target, other, static_cast<unsigned>(cur_table->size()));
+        std::set<uint64_t> seen;
+        for (const uint64_t t : *cur_table) {
+            const auto it = bbs.find(t);
+            if (it != bbs.end() && seen.insert(t).second) {
+                sw->addCase(llvm::cast<ConstantInt>(I(64, t)), it->second);
+            }
+        }
+        B.SetInsertPoint(other);
     }
     Exit(target, DM_EXIT_NONE, I(32, 0));
+}
+
+Value* FunctionLifter::Opaque(llvm::Type* t) {
+    // An unknown value: a call LLVM cannot see into, which touches only memory nothing else reads, so each call is a value of its own
+    const std::string name = t->isIntegerTy() ? "nxaot.opaque.i" + std::to_string(t->getIntegerBitWidth()) : "nxaot.opaque.v128";
+    auto fn = M.getOrInsertFunction(name, llvm::FunctionType::get(t, {}, false));
+    if (auto* f = llvm::dyn_cast<llvm::Function>(fn.getCallee())) {
+        f->addFnAttr(llvm::Attribute::NoUnwind);
+        f->addFnAttr(llvm::Attribute::WillReturn);
+        f->setMemoryEffects(llvm::MemoryEffects::inaccessibleMemOnly());
+    }
+    return B.CreateCall(fn, {});
 }
 
 void FunctionLifter::Exit(Value* pc, uint32_t reason, Value* arg) {

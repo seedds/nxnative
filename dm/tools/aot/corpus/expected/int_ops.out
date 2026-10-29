@@ -1,0 +1,45 @@
+clz.ref 00000000 ok
+cls.ref 00000000 ok
+rbit.ref 00000000 ok
+rev.ref 00000000 ok
+popcount.ref 00000000 ok
+umulh.ref 00000000 ok
+smulh.ref 00000000 ok
+umull_smull.ref 00000000 ok
+div.ref 00000000 ok
+ror_shiftv.ref 00000000 ok
+crc32.ref 00000000 ok
+csel_ccmp.ref 00000000 ok
+bitfield.ref 00000000 ok
+clz.digest 99a2698b620a32a5
+bits.digest 48b1247a545194d7
+mul.digest 23f26e10a9d22f76
+div.digest b813cafdb78b3e8d
+shift.digest 4bb2d93bbe99da47
+clz.1 000000000000003f ok
+cls.-1 000000000000003f ok
+cls.0x4000 0000000000000010 ok
+rbit.1 8000000000000000 ok
+rev16 23016745ab89efcd ok
+rev32 67452301efcdab89 ok
+udiv.by0 0000000000000000 ok
+sdiv.by0 0000000000000000 ok
+sdiv.min_by_m1 8000000000000000 ok
+sdiv32.min_by_m1 80000000 ok
+lslv.64 0000000000001234 ok
+lslv.65 0000000000002468 ok
+asrv.127 ffffffffffffffff ok
+lsrv32.33 40000000 ok
+umulh.max fffffffffffffffe ok
+smulh.min 4000000000000000 ok
+crc32.check 9ae0daaf ok
+add128.carry 0000000000000000 0000000000000001 ok
+sub128.borrow ffffffffffffffff ffffffffffffffff ok
+sadd.overflow 00000001 ok
+sadd.no_overflow 00000000 ok
+usub.borrow 00000001 ok
+smul.overflow 00000001 ok
+smul.no_overflow 00000000 ok
+loads.unaligned 00887766553f9f3b ok
+tls.counter 000000000000000c ok
+PASS 39

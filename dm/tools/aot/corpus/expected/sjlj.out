@@ -1,0 +1,11 @@
+setjmp.value 00000003 ok
+setjmp.rounds 00000004 ok
+longjmp.zero_is_one 00000001 ok
+longjmp.deep 00000028 ok
+longjmp.depth 00000028 ok
+longjmp.pointer 00001234 ok
+handlers.caught_inner 00000046 ok
+handlers.rethrown 0000006d ok
+handlers.empty 00000000 ok
+callee_saved 8a6f72dddb14845d ok
+PASS 10

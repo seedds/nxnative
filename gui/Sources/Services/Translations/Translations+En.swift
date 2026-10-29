@@ -22,6 +22,15 @@ extension Translations {
         "personalization.title": "Personalization & Appearance",
         "personalization.reset_defaults": "Reset Defaults",
         "personalization.accent_theme": "Accent & Highlight Theme",
+        "personalization.liquid_glass": "Liquid Glass",
+        "personalization.liquid_glass_on": "Liquid Glass: Active",
+        "personalization.liquid_glass_off": "Liquid Glass: Off",
+        "personalization.glass_appearance": "Liquid Glass Appearance",
+        "personalization.glass_liquid": "Liquid",
+        "personalization.glass_frosted": "Frosted",
+        "personalization.glass_liquid_desc": "Clear optical lens with real-time fluid refraction and specular highlights",
+        "personalization.glass_frosted_desc": "Diffused satin glass with deeper backdrop attenuation and higher contrast",
+        "personalization.glass_off_desc": "Disabled — classic Obsidian surfaces without dynamic refraction",
         "personalization.app_icon": "App Icon & Color Appearance",
         "personalization.sound_effects": "Console UI Sound Effects",
         "personalization.launcher_language": "Launcher Language",
@@ -52,7 +61,7 @@ extension Translations {
         "library.cancel": "Cancel",
         
         // Actions
-        "actions.play_game": "Play Game",
+        "actions.play_game": "Play",
         "actions.launching": "Launching...",
         "actions.play_subtitle": "Start native execution on Apple Silicon",
         "actions.send_ios": "Send to iPhone / iPad",
@@ -130,6 +139,9 @@ extension Translations {
         
         // Compatibility
         "compatibility.search": "Search compatible games...",
+        "compatibility.new": "New",
+        "compatibility.new_badge": "NEW",
+        "compatibility.iphone_chip_filter": "iPhone Chip:",
         "compatibility.all": "All",
         "compatibility.playable": "Playable",
         "compatibility.ingame": "In-Game",
@@ -179,7 +191,7 @@ extension Translations {
         "common.starting": "Starting...",
         "common.launching": "Launching...",
         "common.play": "Play",
-        "common.play_game": "Play Game",
+        "common.play_game": "Play",
         "common.reveal_finder": "Reveal in Finder",
         "common.view_library": "View in Library",
         "common.view_logs": "View Logs",
@@ -456,5 +468,19 @@ extension Translations {
             "build.port_failed": "Porting Failed",
         "common.repair": "Repair",
         "deck.settings": "Settings",
+        // System Credits & About Aliases
+        "about.role_launcher_dev": "Launcher Developer",
+        "about.desc_launcher": "macOS Native GUI, Game Library, Auto-Updater & Controller UX",
+        "about.description": "Switch Native Port Builder & Library for Apple Silicon",
+        // Menu Bar Strings
+        "menubar.open": "Open NxNative Launcher",
+        "menubar.minimize": "Minimize to Menu Bar",
+        "menubar.status_idle": "Idle (Low-Memory Mode)",
+        "menubar.status_building": "Porting: %@ (%d%%)",
+        "menubar.status_playing": "Game Running: %@",
+        "menubar.quick_play": "Quick Play",
+        "menubar.no_games": "No Games Installed",
+        "menubar.free_memory": "Free Standby Memory",
+        "menubar.quit": "Quit NxNative Launcher",
 ]
 }

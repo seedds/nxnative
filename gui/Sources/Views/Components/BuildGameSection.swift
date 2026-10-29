@@ -82,15 +82,18 @@ public struct BuildGameSection: View {
                 Spacer()
             }
             
-            VStack(spacing: 6) {
-                ForEach(viewModel.detectedGames) { game in
-                    SelectableGameCard(
-                        game: game,
-                        isSelected: viewModel.selectedGame?.id == game.id,
-                        onSelect: {
-                            viewModel.selectedGame = game
-                        }
-                    )
+            NXGlassContainer(spacing: 8) {
+                VStack(spacing: 6) {
+                    ForEach(viewModel.detectedGames) { game in
+                        SelectableGameCard(
+                            game: game,
+                            isSelected: viewModel.selectedGame?.id == game.id,
+                            onSelect: {
+                                SoundEffectService.shared.play(.click)
+                                viewModel.selectedGame = game
+                            }
+                        )
+                    }
                 }
             }
         }

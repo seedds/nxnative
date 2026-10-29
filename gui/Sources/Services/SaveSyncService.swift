@@ -11,11 +11,16 @@ public struct SaveComparisonInfo: Equatable {
 public final class SaveSyncService: ObservableObject {
     public static let shared = SaveSyncService()
     internal let fileManager = FileManager.default
+    private var cloudSyncActiveCache: [String: Bool] = [:]
 
     @Published public private(set) var isICloudDriveAvailable: Bool = false
 
     private init() {
         checkICloudAvailability()
+    }
+
+    public func invalidateCloudSyncCache() {
+        cloudSyncActiveCache.removeAll()
     }
 
     public func checkICloudAvailability() {
@@ -58,18 +63,30 @@ public final class SaveSyncService: ObservableObject {
     }
 
     public func isCloudSyncActive(for game: PortedGame) -> Bool {
-        guard let titleId = game.titleId, !titleId.isEmpty else { return false }
+        let key = game.uniqueKey
+        if let cached = cloudSyncActiveCache[key] {
+            return cached
+        }
+        guard let titleId = game.titleId, !titleId.isEmpty else {
+            cloudSyncActiveCache[key] = false
+            return false
+        }
         let localDir = macSaveDirectory(for: titleId)
         
         var isDir: ObjCBool = false
         if fileManager.fileExists(atPath: localDir.path, isDirectory: &isDir) {
             if let dest = try? fileManager.destinationOfSymbolicLink(atPath: localDir.path) {
-                return dest.contains("nxnative_launcher") || dest.contains("CloudDocs")
+                if dest.contains("nxnative_launcher") || dest.contains("CloudDocs") {
+                    cloudSyncActiveCache[key] = true
+                    return true
+                }
             }
         }
         
         let cloudDir = iCloudSaveDirectory(for: game)
-        return fileManager.fileExists(atPath: cloudDir.path)
+        let active = fileManager.fileExists(atPath: cloudDir.path)
+        cloudSyncActiveCache[key] = active
+        return active
     }
 
     // MARK: - Safe Setup & Migration
@@ -122,6 +139,7 @@ public final class SaveSyncService: ObservableObject {
             // Write DM_SAVE into env.txt
             updateEnvFileWithCloudSave(titleId: titleId, cloudSavePath: cloudSaveDir.path)
 
+            cloudSyncActiveCache[game.uniqueKey] = true
             DispatchQueue.main.async { self.objectWillChange.send() }
             return .success(cloudSaveDir)
         } catch {

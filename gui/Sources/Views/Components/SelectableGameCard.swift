@@ -44,7 +44,7 @@ public struct SelectableGameCard: View {
                         if let tid = game.titleId {
                             Text("[\(tid)]")
                                 .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(NXTheme.textMuted)
+                                .foregroundColor(isSelected ? .white.opacity(0.92) : NXTheme.textMuted)
                         }
                     }
                     
@@ -83,8 +83,8 @@ public struct SelectableGameCard: View {
                         }
                         
                         Text(L10n.t("build.files_count", game.files.count))
-                            .font(.system(size: 10))
-                            .foregroundColor(NXTheme.textMuted)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(isSelected ? .white.opacity(0.92) : NXTheme.textMuted)
                     }
                 }
                 
@@ -96,24 +96,15 @@ public struct SelectableGameCard: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(isSelected ? NXTheme.primary.opacity(0.18) : NXTheme.glassSurfaceElevated.opacity(0.7))
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                }
+            .contentShape(Rectangle())
+            .nxGlassInteractive(
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous),
+                isSelected: isSelected,
+                fallbackFill: NXTheme.glassSurfaceElevated.opacity(0.7),
+                fallbackSelectedFill: NXTheme.primary.opacity(0.18)
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(
-                        isSelected ? NXTheme.selectedBorder : NXTheme.specularRim,
-                        lineWidth: isSelected ? 1.4 : 0.8
-                    )
-            )
-            .shadow(color: isSelected ? NXTheme.primary.opacity(0.3) : Color.clear, radius: 8, x: 0, y: 2)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .nxNoFocusRing()
     }
 }

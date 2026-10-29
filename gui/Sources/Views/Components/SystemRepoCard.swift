@@ -125,7 +125,7 @@ public struct SystemRepoCard: View {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(NXTheme.textMuted)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(NXPressableButtonStyle())
                     }
                     .padding(8)
                     .background(Color.orange.opacity(0.12))
@@ -145,7 +145,7 @@ public struct SystemRepoCard: View {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(NXTheme.textMuted)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(NXPressableButtonStyle())
                     }
                     .padding(8)
                     .background(Color.green.opacity(0.12))

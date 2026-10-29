@@ -77,7 +77,7 @@ public struct GameDetailDeckView: View {
                                     } else {
                                         Image(systemName: "play.fill")
                                             .font(.system(size: 13))
-                                        Text(viewModel.tr("common.play_game"))
+                                        Text(viewModel.tr("common.play"))
                                             .font(.system(size: 13, weight: .bold, design: .rounded))
                                     }
                                 }

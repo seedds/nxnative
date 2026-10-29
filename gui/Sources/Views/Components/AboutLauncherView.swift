@@ -10,7 +10,7 @@ public struct AboutLauncherView: View {
     }
     
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.7.0"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.8.0"
     }
     
     private var currentCommit: String {
@@ -21,129 +21,115 @@ public struct AboutLauncherView: View {
     }
     
     private var appIconImage: NSImage? {
-        if let url = Bundle.main.url(forResource: "AppIcon-Light", withExtension: "png") ??
-                     Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
-           let img = NSImage(contentsOf: url) {
-            return img
-        }
-        return NSApp?.applicationIconImage
+        AppIconCache.image(named: "AppIcon-Light") ?? NSApp?.applicationIconImage
     }
     
     public var body: some View {
-        ZStack {
-            NXTheme.canvasObsidian.ignoresSafeArea()
-            
-            VStack(spacing: 14) {
-                // MARK: - Clean App Header
-                HStack(spacing: 14) {
-                    if let icon = appIconImage {
-                        Image(nsImage: icon)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 60, height: 60)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
-                            )
-                            .shadow(color: NXTheme.primary.opacity(0.35), radius: 8, x: 0, y: 3)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 8) {
-                            Text("NxNative Launcher")
-                                .font(.system(size: 18, weight: .bold, design: .rounded))
-                                .foregroundColor(.white)
-                            
-                            HStack(spacing: 4) {
-                                Image(systemName: "tag.fill")
-                                    .font(.system(size: 8.5, weight: .bold))
-                                Text("v\(appVersion) · \(currentCommit)")
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(NXTheme.primary.opacity(0.45))
-                            .clipShape(Capsule())
-                        }
-                        
-                        Text(viewModel.tr("about.subtitle"))
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundColor(NXTheme.textSecondary)
-                    }
-                    
-                    Spacer()
+        VStack(spacing: 14) {
+            // MARK: - Clean App Header
+            HStack(spacing: 14) {
+                if let icon = appIconImage {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 60, height: 60)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+                        )
+                        .shadow(color: NXTheme.primary.opacity(0.35), radius: 8, x: 0, y: 3)
                 }
                 
-                Divider().opacity(0.18)
-                
-                // MARK: - Launcher Developer (Rennan)
-                HStack(spacing: 12) {
-                    ZStack {
-                        Circle()
-                            .fill(NXTheme.primaryGradient)
-                            .frame(width: 38, height: 38)
-                        Image(systemName: "person.fill.checkmark")
-                            .font(.system(size: 15, weight: .bold))
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 8) {
+                        Text("NxNative Launcher")
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text("Rennan (@rennan101)")
-                                .font(.system(size: 13.5, weight: .bold, design: .rounded))
-                                .foregroundColor(.white)
-                            
-                            Text(viewModel.tr("about.role"))
-                                .font(.system(size: 9, weight: .bold, design: .rounded))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(NXTheme.primary)
-                                .clipShape(Capsule())
-                        }
                         
-                        Text(viewModel.tr("about.desc"))
-                            .font(.system(size: 10.5))
-                            .foregroundColor(NXTheme.textSecondary)
-                    }
-                    
-                    Spacer()
-                    
-                    Button(action: {
-                        if let url = URL(string: "https://github.com/rennan101/nxnative_Launcher") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }) {
                         HStack(spacing: 4) {
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 10, weight: .bold))
-                            Text("GitHub")
-                                .font(.system(size: 11, weight: .bold))
+                            Image(systemName: "tag.fill")
+                                .font(.system(size: 8.5, weight: .bold))
+                            Text("v\(appVersion) · \(currentCommit)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
                         }
                         .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(NXTheme.primary.opacity(0.45))
+                        .clipShape(Capsule())
                     }
-                    .buttonStyle(NXPrimaryButtonStyle())
-                    .controlSize(.small)
-                }
-                .padding(11)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(NXTheme.primary.opacity(0.15))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .strokeBorder(NXTheme.primary.opacity(0.45), lineWidth: 1)
-                        )
-                )
-                
-                // MARK: - Open Source Credits
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(viewModel.tr("about.core_ack"))
-                        .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                        .foregroundColor(.white.opacity(0.75))
-                        .tracking(0.6)
                     
+                    Text(viewModel.tr("about.subtitle"))
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundColor(NXTheme.textSecondary)
+                }
+                
+                Spacer()
+            }
+            
+            Divider().opacity(0.18)
+            
+            // MARK: - Launcher Developer (Rennan)
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(NXTheme.primaryGradient)
+                        .frame(width: 38, height: 38)
+                    Image(systemName: "person.fill.checkmark")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(.white)
+                }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text("Rennan (@rennan101)")
+                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+                        
+                        Text(viewModel.tr("about.role"))
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(NXTheme.primary)
+                            .clipShape(Capsule())
+                    }
+                    
+                    Text(viewModel.tr("about.desc"))
+                        .font(.system(size: 10.5))
+                        .foregroundColor(NXTheme.textSecondary)
+                }
+                
+                Spacer()
+                
+                Button(action: {
+                    if let url = URL(string: "https://github.com/rennan101/nxnative_Launcher") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("GitHub")
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                }
+                .buttonStyle(NXPrimaryButtonStyle())
+                .controlSize(.small)
+            }
+            .padding(12)
+            .nxGlassCard(cornerRadius: 12, tint: NXTheme.primary.opacity(0.28))
+            
+            // MARK: - Open Source Credits
+            VStack(alignment: .leading, spacing: 6) {
+                Text(viewModel.tr("about.core_ack"))
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                    .foregroundColor(.white.opacity(0.75))
+                    .tracking(0.6)
+                
+                NXGlassContainer(spacing: 8) {
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
                         creditPill(title: "seedds", role: "nxnative Core Engine", url: "https://github.com/seedds/nxnative")
                         creditPill(title: "d2r-mobile", role: "Execution Architecture", url: "https://github.com/jhaizhou-ops/d2r-mobile")
@@ -153,10 +139,12 @@ public struct AboutLauncherView: View {
                         creditPill(title: "Khronos & GameTDB", role: "SPIRV-Cross & Box Art", url: "https://github.com/KhronosGroup/SPIRV-Cross")
                     }
                 }
-                
-                Divider().opacity(0.18)
-                
-                // MARK: - Footer
+            }
+            
+            Divider().opacity(0.18)
+            
+            // MARK: - Footer
+            NXGlassContainer(spacing: 12) {
                 HStack {
                     Button(action: {
                         dismiss()
@@ -181,8 +169,9 @@ public struct AboutLauncherView: View {
                     .keyboardShortcut(.defaultAction)
                 }
             }
-            .padding(20)
         }
+        .padding(20)
+        .nxSheetSurface()
         .frame(width: 470)
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -210,14 +199,12 @@ public struct AboutLauncherView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
-            .background(NXTheme.glassSurfaceElevated.opacity(0.75))
-            .cornerRadius(8)
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.7)
+            .nxGlassInteractive(
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous),
+                fallbackFill: NXTheme.glassSurfaceElevated.opacity(0.75)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .nxNoFocusRing()
     }
 }

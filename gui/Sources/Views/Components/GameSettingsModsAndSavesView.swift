@@ -53,8 +53,7 @@ public struct GameSettingsModsAndSavesView: View {
                     .foregroundColor(NXTheme.textSecondary)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(NXTheme.glassSurfaceElevated.opacity(0.5))
-                    .cornerRadius(8)
+                    .nxGlassCard(cornerRadius: 10, isNested: true)
             } else {
                 VStack(spacing: 6) {
                     ForEach(modsList) { mod in
@@ -81,15 +80,13 @@ public struct GameSettingsModsAndSavesView: View {
                             .labelsHidden()
                         }
                         .padding(8)
-                        .background(NXTheme.glassSurfaceElevated.opacity(0.4))
-                        .cornerRadius(8)
+                        .nxGlassCard(cornerRadius: 10, isNested: true)
                     }
                 }
             }
         }
         .padding(14)
-        .background(NXTheme.glassSurface.opacity(0.6))
-        .cornerRadius(12)
+        .nxGlassCard(cornerRadius: 14)
     }
 
     private func refreshMods() {

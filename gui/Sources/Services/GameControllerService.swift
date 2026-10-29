@@ -176,18 +176,17 @@ public final class GameControllerService: ObservableObject {
                 try? killProc.run()
             }
             
-            // 3. Bring NxNative Launcher to front of other screens
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            if let window = NSApplication.shared.windows.first {
-                window.makeKeyAndOrderFront(nil)
-                window.orderFrontRegardless()
-            }
+            // 3. Bring NxNative Launcher to front of other screens (and restore from Menu Bar if minimized)
+            MenuBarManager.shared.restoreMainWindow()
             SoundEffectService.shared.play(.error)
         }
     }
     
     private func triggerAction(_ action: GamepadAction) {
         DispatchQueue.main.async { [weak self] in
+            // Guard against intercepting gamepad events while user is playing another game in foreground
+            guard NSApplication.shared.isActive else { return }
+            guard !MenuBarManager.isMinimized else { return }
             self?.onAction?(action)
         }
     }

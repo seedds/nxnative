@@ -24,12 +24,7 @@ public struct AppLogoView: View {
     }
     
     private var currentNSImage: NSImage? {
-        guard let url = Bundle.main.url(forResource: currentImageName, withExtension: "png") ??
-                        Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
-              let img = NSImage(contentsOf: url) else {
-            return nil
-        }
-        return img
+        AppIconCache.image(named: currentImageName)
     }
     
     public var body: some View {
@@ -59,7 +54,7 @@ public struct AppLogoView: View {
             .animation(.easeInOut(duration: 0.15), value: isHovered)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .fixedSize()
         .nxNoFocusRing()
         .onHover { isHovered = $0 }

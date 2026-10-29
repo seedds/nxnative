@@ -66,7 +66,7 @@ extension GameSettingsIosDeploymentView {
                 Button(showDeployLogs ? "Hide Logs" : "View Live Logs") {
                     withAnimation(.easeInOut(duration: 0.2)) { showDeployLogs.toggle() }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(NXPressableButtonStyle())
                 .font(.system(size: 10))
                 .foregroundColor(NXTheme.textSecondary)
             }

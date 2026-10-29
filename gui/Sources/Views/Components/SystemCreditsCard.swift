@@ -86,7 +86,7 @@ public struct SystemCreditsCard: View {
                             )
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(NXPressableButtonStyle())
                 .nxNoFocusRing()
                 
                 Text(L10n.t("about.description"))
@@ -133,7 +133,7 @@ public struct SystemCreditsCard: View {
             .background(NXTheme.glassSurfaceElevated.opacity(0.5))
             .cornerRadius(6)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .nxNoFocusRing()
     }
 }

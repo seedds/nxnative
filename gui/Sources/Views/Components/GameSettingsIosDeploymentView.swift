@@ -29,8 +29,7 @@ public struct GameSettingsIosDeploymentView: View {
             }
         }
         .padding(14)
-        .background(NXTheme.glassSurface.opacity(0.6))
-        .cornerRadius(12)
+        .nxGlassCard(cornerRadius: 14)
         .onAppear {
             if deviceService.connectedDevices.isEmpty || deviceService.signingTeams.isEmpty {
                 deviceService.refreshDevicesAndTeams()
@@ -46,31 +45,35 @@ public struct GameSettingsIosDeploymentView: View {
 
             Spacer()
 
-            Button(action: {
-                SoundEffectService.shared.play(.click)
-                deviceService.shareViaAirDrop(fileURL: game.url)
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "airdrop")
-                    Text(L10n.t("common.airdrop"))
-                }
-            }
-            .buttonStyle(NXSecondaryButtonStyle())
-            .controlSize(.mini)
-            .help(L10n.t("settings_modal.airdrop_help"))
+            NXGlassContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    Button(action: {
+                        SoundEffectService.shared.play(.click)
+                        deviceService.shareViaAirDrop(fileURL: game.url)
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "airdrop")
+                            Text(L10n.t("common.airdrop"))
+                        }
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .controlSize(.mini)
+                    .help(L10n.t("settings_modal.airdrop_help"))
 
-            Button(action: {
-                SoundEffectService.shared.play(.click)
-                deviceService.revealInFinder(fileURL: game.url)
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "folder")
-                    Text(L10n.t("settings_modal.show_ipa"))
+                    Button(action: {
+                        SoundEffectService.shared.play(.click)
+                        deviceService.revealInFinder(fileURL: game.url)
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder")
+                            Text(L10n.t("settings_modal.show_ipa"))
+                        }
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .controlSize(.mini)
+                    .help(L10n.t("settings_modal.reveal_ipa_help"))
                 }
             }
-            .buttonStyle(NXSecondaryButtonStyle())
-            .controlSize(.mini)
-            .help(L10n.t("settings_modal.reveal_ipa_help"))
         }
     }
 
@@ -262,11 +265,6 @@ public struct GameSettingsIosDeploymentView: View {
             .padding(.top, 4)
         }
         .padding(12)
-        .background(NXTheme.glassSurfaceElevated.opacity(0.75))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(NXTheme.borderSubtle, lineWidth: 1)
-        )
-        .cornerRadius(10)
+        .nxGlassCard(cornerRadius: 10, isNested: true)
     }
 }

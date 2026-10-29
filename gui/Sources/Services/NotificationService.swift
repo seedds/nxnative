@@ -8,6 +8,7 @@ public final class NotificationService {
     private init() {}
     
     public func requestAuthorization() {
+        guard Bundle.main.bundleIdentifier != nil else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             if let error = error {
                 print("[NotificationService] Authorization error: \(error.localizedDescription)")
@@ -16,6 +17,7 @@ public final class NotificationService {
     }
     
     public func sendPortSuccessNotification(gameName: String, outputPath: String?) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
         content.title = "Game Porting Complete!"
         content.subtitle = gameName
@@ -40,6 +42,7 @@ public final class NotificationService {
     }
     
     public func sendPortErrorNotification(gameName: String, error: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
         content.title = "Game Porting Failed"
         content.subtitle = gameName

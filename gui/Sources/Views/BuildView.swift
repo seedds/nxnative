@@ -3,6 +3,7 @@ import SwiftUI
 public struct BuildView: View {
     @ObservedObject public var viewModel: AppViewModel
     @State private var isCreditsDismissed: Bool = false
+    @Namespace private var wizardStepNamespace
     
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -42,6 +43,7 @@ public struct BuildView: View {
             }
             .padding(20)
         }
+        .nxScrollEdgeEffect(edges: [.top, .bottom])
         .alert("Apple Command Line Tools", isPresented: $viewModel.showCltInstallAlert) {
             Button(viewModel.tr("common.ok"), role: .cancel) {}
         } message: {
@@ -53,16 +55,29 @@ public struct BuildView: View {
     
     private var wizardStepperHeader: some View {
         GlassCard {
-            HStack(spacing: 0) {
-                stepIndicator(step: 1, title: viewModel.tr("build.step_1"), icon: "gamecontroller.fill")
-                
-                stepDivider(isCompleted: viewModel.buildWizardStep > 1)
-                
-                stepIndicator(step: 2, title: viewModel.tr("build.step_2"), icon: "slider.horizontal.3")
-                
-                stepDivider(isCompleted: viewModel.buildWizardStep > 2)
-                
-                stepIndicator(step: 3, title: viewModel.tr("build.step_3"), icon: "hammer.fill")
+            NXGlassContainer(spacing: 12) {
+                HStack(spacing: 0) {
+                    stepIndicator(step: 1, title: viewModel.tr("build.step_1"), icon: "gamecontroller.fill")
+                    
+                    stepDivider(isCompleted: viewModel.buildWizardStep > 1)
+                    
+                    stepIndicator(step: 2, title: viewModel.tr("build.step_2"), icon: "slider.horizontal.3")
+                    
+                    stepDivider(isCompleted: viewModel.buildWizardStep > 2)
+                    
+                    stepIndicator(step: 3, title: viewModel.tr("build.step_3"), icon: "hammer.fill")
+                }
+                .background {
+                    NXLiquidSlidingPill(in: Capsule())
+                        .matchedGeometryEffect(
+                            id: viewModel.buildWizardStep,
+                            in: wizardStepNamespace,
+                            properties: .frame,
+                            anchor: .center,
+                            isSource: false
+                        )
+                        .animation(.spring(response: 0.34, dampingFraction: 0.76), value: viewModel.buildWizardStep)
+                }
             }
         }
     }
@@ -76,7 +91,8 @@ public struct BuildView: View {
         
         return Button(action: {
             if canNavigate {
-                withAnimation(.easeInOut(duration: 0.25)) {
+                SoundEffectService.shared.play(.click)
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.76)) {
                     viewModel.goToWizardStep(step)
                 }
             }
@@ -84,7 +100,11 @@ public struct BuildView: View {
             HStack(spacing: 8) {
                 ZStack {
                     Circle()
-                        .fill(isCurrent ? NXTheme.primary.opacity(0.3) : (isCompleted ? Color.green.opacity(0.2) : NXTheme.glassSurfaceElevated))
+                        .fill(
+                            isCurrent
+                                ? Color.white.opacity(0.24)
+                                : (isCompleted ? Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.32) : Color.white.opacity(0.10))
+                        )
                         .frame(width: 24, height: 24)
                     
                     if isCompleted {
@@ -102,16 +122,18 @@ public struct BuildView: View {
                     .font(.system(size: 12, weight: isCurrent ? .bold : .semibold, design: .rounded))
                     .foregroundColor(.white)
             }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 8)
+            .padding(.vertical, 6.5)
+            .padding(.horizontal, 12)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isCurrent ? NXTheme.primary.opacity(0.12) : Color.clear)
+                Capsule()
+                    .fill(isCompleted ? Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.20) : Color.clear)
             )
+            .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .disabled(!canNavigate)
         .nxNoFocusRing()
+        .matchedGeometryEffect(id: step, in: wizardStepNamespace, isSource: true)
     }
     
     private func stepDivider(isCompleted: Bool) -> some View {
@@ -169,7 +191,7 @@ public struct BuildView: View {
                         .background(Color.white.opacity(0.08))
                         .clipShape(Circle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(NXPressableButtonStyle())
             }
         }
     }

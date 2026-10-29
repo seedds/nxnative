@@ -28,8 +28,10 @@ public struct SystemView: View {
             }
             .padding(20)
         }
+        .nxScrollEdgeEffect(edges: [.top, .bottom])
         .sheet(isPresented: $viewModel.showInstallerSheet) {
             InstallerSheetView(viewModel: viewModel)
+                .environment(\.nxLiquidGlass, viewModel.liquidGlassEnvironment)
         }
         .alert("Apple Command Line Tools", isPresented: $viewModel.showCltInstallAlert) {
             Button(viewModel.tr("common.ok"), role: .cancel) {}
@@ -58,46 +60,50 @@ public struct SystemView: View {
             
             Spacer()
             
-            if !viewModel.prerequisites.missingList.isEmpty {
-                Button(action: {
-                    SoundEffectService.shared.play(.click)
-                    viewModel.installAllMissingDependencies()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.down.circle.fill")
-                        Text(viewModel.tr("system.install_all_missing", viewModel.prerequisites.missingList.count))
-                    }
-                }
-                .buttonStyle(NXAccentButtonStyle())
-                .help(viewModel.tr("system.install_all_help"))
-            } else {
-                Button(action: {
-                    SoundEffectService.shared.play(.click)
-                    viewModel.repairAllDependencies()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                        Text(viewModel.tr("system.repair_all"))
-                    }
-                }
-                .buttonStyle(NXSecondaryButtonStyle())
-            }
-            
-            Button(action: {
-                SoundEffectService.shared.play(.click)
-                viewModel.detectEnvironment()
-                viewModel.checkForUpdates()
-            }) {
-                HStack(spacing: 6) {
-                    if viewModel.isCheckingPrerequisites || viewModel.isCheckingUpdate {
-                        ProgressView().controlSize(.small)
+            NXGlassContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    if !viewModel.prerequisites.missingList.isEmpty {
+                        Button(action: {
+                            SoundEffectService.shared.play(.click)
+                            viewModel.installAllMissingDependencies()
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.down.circle.fill")
+                                Text(viewModel.tr("system.install_all_missing", viewModel.prerequisites.missingList.count))
+                            }
+                        }
+                        .buttonStyle(NXAccentButtonStyle())
+                        .help(viewModel.tr("system.install_all_help"))
                     } else {
-                        Image(systemName: "arrow.clockwise")
-                        Text(viewModel.tr("system.recheck"))
+                        Button(action: {
+                            SoundEffectService.shared.play(.click)
+                            viewModel.repairAllDependencies()
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                Text(viewModel.tr("system.repair_all"))
+                            }
+                        }
+                        .buttonStyle(NXSecondaryButtonStyle())
                     }
+                    
+                    Button(action: {
+                        SoundEffectService.shared.play(.click)
+                        viewModel.detectEnvironment()
+                        viewModel.checkForUpdates()
+                    }) {
+                        HStack(spacing: 6) {
+                            if viewModel.isCheckingPrerequisites || viewModel.isCheckingUpdate {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                                Text(viewModel.tr("system.recheck"))
+                            }
+                        }
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
                 }
             }
-            .buttonStyle(NXSecondaryButtonStyle())
         }
     }
 }

@@ -6,7 +6,9 @@ extension AppViewModel {
     public func updateDockIcon() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            NSApplication.shared.setActivationPolicy(.regular)
+            if !MenuBarManager.shared.isMinimizedToMenuBar {
+                NSApplication.shared.setActivationPolicy(.regular)
+            }
             
             let isDark = NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             let resName: String
@@ -36,24 +38,12 @@ extension AppViewModel {
     
     public func setupWindowMinimizeIconObserver() {
         NotificationCenter.default.addObserver(
-            forName: NSWindow.willMiniaturizeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            self?.updateDockIcon()
-            if let window = notification.object as? NSWindow,
-               let icon = NSApplication.shared.applicationIconImage {
-                window.miniwindowImage = icon
-                window.miniwindowTitle = "NxNative Launcher"
-            }
-        }
-        
-        NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.updateDockIcon()
+            guard let self = self, !MenuBarManager.isMinimized else { return }
+            self.updateDockIcon()
         }
     }
     

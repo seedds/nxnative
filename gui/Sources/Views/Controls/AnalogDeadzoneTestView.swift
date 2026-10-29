@@ -22,14 +22,18 @@ public struct AnalogDeadzoneTestView: View {
 
                 Spacer()
 
-                HStack(spacing: 8) {
-                    Text(L10n.t("controls.deadzone_label", Int(deadzone * 100)))
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundColor(NXTheme.secondary)
+                HStack(spacing: 10) {
+                    Text(L10n.t("controls.deadzone_label", Int(round(deadzone * 100))))
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
 
-                    Slider(value: $deadzone, in: 0.05...0.30, step: 0.01)
-                        .frame(width: 120)
-                        .tint(NXTheme.primary)
+                    NXLiquidGlassSlider(
+                        value: $deadzone,
+                        in: 0.05...0.30,
+                        step: 0.01,
+                        accentColor: NXTheme.primary
+                    )
+                    .frame(width: 140)
                 }
             }
 
@@ -57,14 +61,7 @@ public struct AnalogDeadzoneTestView: View {
             }
         }
         .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(NXTheme.glassSurfaceElevated.opacity(0.65))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
-        )
+        .nxGlassCard(cornerRadius: 14)
         .onAppear {
             startPolling()
         }
@@ -124,6 +121,7 @@ public struct AnalogDeadzoneTestView: View {
     private func startPolling() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+            guard NSApplication.shared.isActive && !MenuBarManager.isMinimized else { return }
             if let pad = GCController.controllers().first?.extendedGamepad {
                 self.leftX = pad.leftThumbstick.xAxis.value
                 self.leftY = pad.leftThumbstick.yAxis.value

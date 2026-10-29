@@ -8,7 +8,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 |---|---|---|---|---|---|---|
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | yes |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | yes |
-| [DRAGON QUEST VII Reimagined](#dragon-quest-vii-reimagined) | 1 | 1 | 0 | 0 | 3 | yes |
+| [DRAGON QUEST VII Reimagined](#dragon-quest-vii-reimagined) | 2 | 2 | 0 | 0 | 6 | yes |
 | [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](#dragon-quest-xi-s-echoes-of-an-elusive-age--definitive-edition) | 0 | 0 | 0 | 0 | 2 |  |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | yes |
 | [FINAL FANTASY RESONANCE](#final-fantasy-resonance) | 1 | 0 | 0 | 0 | 3 | yes |
@@ -34,7 +34,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | yes |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | yes |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | yes |
-| [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 11 | 0 | 0 | yes |
+| [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 20 | 0 | 0 | yes |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | yes |
 
 ## Games
@@ -186,6 +186,12 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - host [hle_fpslock.c:41](../../dm/host/hle_fpslock.c#L41): engine frame limit set to fps_target: Unreal t.MaxFPS
   - host [hle_fpslock.c:42](../../dm/host/hle_fpslock.c#L42): engine frame limit set to fps_target: Unreal rhi.SyncInterval
   - host [hle_uemalloc.c:36](../../dm/host/hle_uemalloc.c#L36): Unreal's allocator on a host malloc zone
+- **1.0.0 `main`** `ab060209…` ([patches.py:13](../../dm/games/0100A9D01C446000/patches.py#L13))
+  - cut `+0x32755bc`: GCreateMalloc: bl 0x291714 (FMallocBinned3 constructor, 37 GB of address space) → nop; the host allocator's vtable is put in at the gate after it (hle_uemalloc.c)
+  - gate 21 at `+0x32755c4`: GCreateMalloc: the allocator object is in x19, before it is used: the host puts its vtable in; orig mov x0, x19
+  - host [hle_fpslock.c:44](../../dm/host/hle_fpslock.c#L44): engine frame limit set to fps_target: Unreal t.MaxFPS
+  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Unreal rhi.SyncInterval
+  - host [hle_uemalloc.c:38](../../dm/host/hle_uemalloc.c#L38): Unreal's allocator on a host malloc zone
 
 ### DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition
 
@@ -219,9 +225,9 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 
 - **1.0.1 `main`** `84e182f7…` ([patches.py:9](../../dm/games/0100606026F12000/patches.py#L9))
   - cut `+0x137f0`: nninitStartup: bl 0xae770 (FMallocBinned3 constructor, 38 GB of address space) → nop; the host allocator is in the object already (hle_uemalloc.c)
-  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Unreal t.MaxFPS
-  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Unreal rhi.SyncInterval
-  - host [hle_uemalloc.c:47](../../dm/host/hle_uemalloc.c#L47): Unreal's allocator on a host malloc zone
+  - host [hle_fpslock.c:48](../../dm/host/hle_fpslock.c#L48): engine frame limit set to fps_target: Unreal t.MaxFPS
+  - host [hle_fpslock.c:49](../../dm/host/hle_fpslock.c#L49): engine frame limit set to fps_target: Unreal rhi.SyncInterval
+  - host [hle_uemalloc.c:49](../../dm/host/hle_uemalloc.c#L49): Unreal's allocator on a host malloc zone
 
 ### FINAL FANTASY RESONANCE (Asian release)
 
@@ -231,8 +237,8 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 
 - **1.0.1 `main`** `b7f965b9…` ([patches.py:7](../../dm/games/0100B8A026F14000/patches.py#L7))
   - cut `+0x137f0`: nninitStartup: bl 0xae770 (FMallocBinned3 constructor, 38 GB of address space) → nop; the host allocator is in the object already (hle_uemalloc.c)
-  - host [hle_fpslock.c:48](../../dm/host/hle_fpslock.c#L48): engine frame limit set to fps_target: Unreal rhi.SyncInterval
-  - host [hle_uemalloc.c:49](../../dm/host/hle_uemalloc.c#L49): Unreal's allocator on a host malloc zone
+  - host [hle_fpslock.c:51](../../dm/host/hle_fpslock.c#L51): engine frame limit set to fps_target: Unreal rhi.SyncInterval
+  - host [hle_uemalloc.c:51](../../dm/host/hle_uemalloc.c#L51): Unreal's allocator on a host malloc zone
 
 ### FINAL FANTASY TACTICS - The Ivalice Chronicles
 
@@ -289,7 +295,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), `0100DCA0064A6000`.
 
 - **1.4.0 `main`** `79e5950f…`
-  - host [hle_fpslock.c:62](../../dm/host/hle_fpslock.c#L62): engine frame limit set to fps_target: NLG frame limiter target
+  - host [hle_fpslock.c:65](../../dm/host/hle_fpslock.c#L65): engine frame limit set to fps_target: NLG frame limiter target
 
 ### Mario + Rabbids Kingdom Battle
 
@@ -343,7 +349,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:78](../../dm/host/hle_fpslock.c#L78): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:81](../../dm/host/hle_fpslock.c#L81): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -361,7 +367,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:79](../../dm/host/hle_fpslock.c#L79): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:82](../../dm/host/hle_fpslock.c#L82): frame interval and dynamic-resolution floor
 
 ### OCTOPATH TRAVELER 0
 
@@ -384,9 +390,9 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 - **1.1.1 `main`** `0d964901…` ([patches.py:9](../../dm/games/0100A3501946E000/patches.py#L9))
   - cut `+0xbecc08`: GCreateMalloc: bl 0xc4d778 (FMallocBinned3 constructor) → nop; the host allocator's vtable is put in at the gate after it (hle_uemalloc.c)
   - gate 21 at `+0xbecc0c`: GCreateMalloc: the allocator object is in x19, before it is used: the host puts its vtable in; orig mov x0, x19
-  - host [hle_fpslock.c:52](../../dm/host/hle_fpslock.c#L52): engine frame limit set to fps_target: Unreal t.MaxFPS
-  - host [hle_fpslock.c:53](../../dm/host/hle_fpslock.c#L53): engine frame limit set to fps_target: Unreal rhi.SyncInterval
-  - host [hle_uemalloc.c:42](../../dm/host/hle_uemalloc.c#L42): Unreal's allocator on a host malloc zone
+  - host [hle_fpslock.c:55](../../dm/host/hle_fpslock.c#L55): engine frame limit set to fps_target: Unreal t.MaxFPS
+  - host [hle_fpslock.c:56](../../dm/host/hle_fpslock.c#L56): engine frame limit set to fps_target: Unreal rhi.SyncInterval
+  - host [hle_uemalloc.c:44](../../dm/host/hle_uemalloc.c#L44): Unreal's allocator on a host malloc zone
 
 ### Paper Mario: The Thousand-Year Door
 
@@ -409,7 +415,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - cut `+0x353f578`: nninitStartup: AllocateAddressRegion size orr x1,xzr,#0xf80000000 (62 GB) → mov x1,#0xfe000000 (4064 MB)
   - cut `+0x353f788`: GCreateMalloc: bl 0x35ba610 (FMallocBinned3 constructor) → nop; the host allocator's vtable is put in at the gate after it (hle_uemalloc.c)
   - gate 21 at `+0x353f78c`: GCreateMalloc: the allocator object is in x19, before it is used: the host puts its vtable in; orig ldp x29, x30, [sp, #0x10]
-  - host [hle_uemalloc.c:39](../../dm/host/hle_uemalloc.c#L39): Unreal's allocator on a host malloc zone
+  - host [hle_uemalloc.c:41](../../dm/host/hle_uemalloc.c#L41): Unreal's allocator on a host malloc zone
 
 ### Pokémon Brilliant Diamond
 
@@ -436,9 +442,9 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 - **1.0.3 `main`** `0a4f14a5…` ([patches.py:9](../../dm/games/010069C01AB82000/patches.py#L9))
   - cut `+0x1f2f63c`: GCreateMalloc: bl FMallocBinned3 constructor -> nop; host malloc zone installed at OBS_UE_MALLOC
   - gate 21 at `+0x1f2f644`: GCreateMalloc: x19 is the allocator object; install the host vtable before use; orig mov x0, x19
-  - host [hle_fpslock.c:57](../../dm/host/hle_fpslock.c#L57): engine frame limit set to fps_target: Unreal Project.FrameRateLimit
-  - host [hle_fpslock.c:58](../../dm/host/hle_fpslock.c#L58): engine frame limit set to fps_target: Unreal rhi.SyncInterval
-  - host [hle_uemalloc.c:45](../../dm/host/hle_uemalloc.c#L45): Unreal's allocator on a host malloc zone
+  - host [hle_fpslock.c:60](../../dm/host/hle_fpslock.c#L60): engine frame limit set to fps_target: Unreal Project.FrameRateLimit
+  - host [hle_fpslock.c:61](../../dm/host/hle_fpslock.c#L61): engine frame limit set to fps_target: Unreal rhi.SyncInterval
+  - host [hle_uemalloc.c:47](../../dm/host/hle_uemalloc.c#L47): Unreal's allocator on a host malloc zone
 
 ### Super Smash Bros. Ultimate
 
@@ -507,7 +513,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 
 **Generalize?** No for the hook sites (the game's own timing object). The translator's rule for one of its vertex shaders (Program.cs VertexCounterLowering) might become a general lowering of subgroup ballots in vertex shaders
 
-- **1.4.3 `main`** `277178b7…` ([patches.py:142](../../dm/games/0100F2C0115B6000/patches.py#L142))
+- **1.4.3 `main`** `277178b7…` ([patches.py:267](../../dm/games/0100F2C0115B6000/patches.py#L267))
   - frame step `+0xd5cc0`: view render size x the host render scale (1.0 = original)
   - frame step `+0xd5d80`: dynamic resolution only at render scale 1.0
   - frame step `+0x1fbc80`: D-pad menu fade starts at full rate under fractional steps (FPSLocker)
@@ -519,6 +525,17 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - frame step `+0xbe14a8`: swapchain argument 1 when on (FPSLocker)
   - frame step `+0x2b33918`: movie ends
   - frame step `+0x2b36100`: movie starts: 30 fps cap
+  - render scale stub (the launcher offers DM_RENDER_SCALE)
+- **1.4.2 `main`** `5cb42b1c…` ([patches.py:268](../../dm/games/0100F2C0115B6000/patches.py#L268))
+  - frame step `+0x10250c`: view render size x the host render scale (1.0 = original)
+  - frame step `+0x1025cc`: dynamic resolution only at render scale 1.0
+  - frame step `+0x2d4730`: game step reads the float fps (original integer fps and scvtf when off)
+  - frame step `+0x2d4748`: scvtf moved into the stub at the load
+  - frame step `+0x2d4e68`: frame step from the host in whole vsyncs, by elapsed time until it has decided one (state page target fps; 0 = original interval logic)
+  - frame step `+0x37ea5c`: game step reads the float fps (original integer fps and scvtf when off)
+  - frame step `+0x37ea68`: scvtf moved into the stub at the load
+  - frame step `+0xbbf258`: swapchain argument 1 when on (FPSLocker)
+  - frame step `+0x1064334`: D-pad menu fade starts at full rate under fractional steps (FPSLocker)
   - render scale stub (the launcher offers DM_RENDER_SCALE)
 
 ### Xenoblade Chronicles 3
@@ -593,7 +610,7 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
 - **sdk** `e01950c5…` ([sdk_patches.py:134](../../dm/tools/sdk_patches.py#L134)): Hollow Knight: Silksong 1.0.30000
   - cut `+0x145bfc`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x145c68`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `574284b4…` ([sdk_patches.py:144](../../dm/tools/sdk_patches.py#L144)): The Legend of Zelda: Breath of the Wild 1.9.0, The Legend of Zelda: Tears of the Kingdom 1.4.3
+- **sdk** `574284b4…` ([sdk_patches.py:144](../../dm/tools/sdk_patches.py#L144)): The Legend of Zelda: Breath of the Wild 1.9.0, The Legend of Zelda: Tears of the Kingdom 1.4.2, The Legend of Zelda: Tears of the Kingdom 1.4.3
   - cut `+0x145d0c`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x145d78`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
 - **sdk** `8bfebccd…` ([sdk_patches.py:150](../../dm/tools/sdk_patches.py#L150)): BALL x PIT 1.293
@@ -613,7 +630,7 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
 - **sdk** `0023a1b0…` ([sdk_patches.py:181](../../dm/tools/sdk_patches.py#L181)): FINAL FANTASY RESONANCE (Asian release) 1.0.1, FINAL FANTASY RESONANCE 1.0.1, STEINS;GATE RE:BOOT 1.0.3
   - cut `+0x145cbc`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x145d28`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `145dde94…` ([sdk_patches.py:186](../../dm/tools/sdk_patches.py#L186)): DRAGON QUEST VII Reimagined 1.2.0
+- **sdk** `145dde94…` ([sdk_patches.py:186](../../dm/tools/sdk_patches.py#L186)): DRAGON QUEST VII Reimagined 1.0.0, DRAGON QUEST VII Reimagined 1.2.0
   - cut `+0x1423fc`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x142468`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
 - **sdk** `fcf93a41…` ([sdk_patches.py:195](../../dm/tools/sdk_patches.py#L195)): DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition 1.0.4, Luigi's Mansion 3 1.4.0, Pokémon Shield 1.3.2, Pokémon Sword 1.3.2, Raging Loop 1.0.0, Super Mario Odyssey 1.4.1
@@ -657,7 +674,7 @@ Applied to the `sdk` of any build without CUTS whose profile was not brought up 
 
 Dead code unless such a build is run; a candidate for removal, or for a build row in its profile.
 
-- `992787e2…`: [hle_fpslock.c:130](../../dm/host/hle_fpslock.c#L130): build check (a build no profile registers)
+- `992787e2…`: [hle_fpslock.c:133](../../dm/host/hle_fpslock.c#L133): build check (a build no profile registers)
 
 ## Translator rules keyed by a shader's code
 

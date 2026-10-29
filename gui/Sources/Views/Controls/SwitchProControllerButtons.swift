@@ -36,7 +36,7 @@ extension SwitchProControllerVectorView {
             )
             .shadow(color: isSel ? NXTheme.primary.opacity(0.8) : Color.clear, radius: 4)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .position(x: x, y: y)
     }
 
@@ -73,7 +73,7 @@ extension SwitchProControllerVectorView {
             )
             .shadow(color: isSel ? NXTheme.primary.opacity(0.8) : Color.clear, radius: 4)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .position(x: x, y: y)
     }
 
@@ -114,7 +114,7 @@ extension SwitchProControllerVectorView {
                     .foregroundColor(Color.white.opacity(0.85))
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .position(x: centerX, y: centerY)
     }
 
@@ -158,7 +158,7 @@ extension SwitchProControllerVectorView {
             )
             .shadow(color: isSel ? NXTheme.primary.opacity(0.7) : Color.clear, radius: 3)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .position(x: x, y: y)
     }
 
@@ -196,7 +196,7 @@ extension SwitchProControllerVectorView {
             )
             .shadow(color: isSel ? color.opacity(0.85) : Color.clear, radius: 4)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .position(x: x, y: y)
     }
 }

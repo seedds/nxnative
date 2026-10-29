@@ -22,94 +22,99 @@ public struct ControllerMappingCalloutOverlay: View {
     ]
 
     public var body: some View {
-        HStack(alignment: .center, spacing: 18) {
-            // MARK: - Left Callout Column
-            VStack(alignment: .trailing, spacing: 10) {
-                ForEach(leftButtons) { btn in
-                    let mapped = profile.gamepadBindings.first(where: { $0.value == btn })?.key ?? "None"
-                    MappingPillView(
-                        button: btn,
-                        mappedLabel: formatElementName(mapped),
-                        isListening: listeningButton == btn,
-                        isLeftSide: true,
-                        onStartListening: {
+        NXGlassContainer(spacing: 8) {
+            HStack(alignment: .center, spacing: 18) {
+                // MARK: - Left Callout Column
+                VStack(alignment: .trailing, spacing: 10) {
+                    ForEach(leftButtons) { btn in
+                        let mapped = profile.gamepadBindings.first(where: { $0.value == btn })?.key ?? "None"
+                        MappingPillView(
+                            button: btn,
+                            mappedLabel: formatElementName(mapped),
+                            isListening: listeningButton == btn,
+                            isLeftSide: true,
+                            onStartListening: {
+                                startListening(for: btn)
+                            },
+                            onSelectMapping: { elem in
+                                assignMapping(element: elem, to: btn)
+                            },
+                            onReset: {
+                                assignMapping(element: btn.defaultGamepadElement, to: btn)
+                            }
+                        )
+                    }
+                }
+                .frame(width: 220)
+
+                // MARK: - Center Controller Vector & Connecting Canvas
+                VStack(spacing: 12) {
+                    // Quick Layout Switcher (Enhancement 2)
+                    HStack(spacing: 8) {
+                        Button(action: {
+                            SoundEffectService.shared.play(.click)
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                profile.swapFaceButtons()
+                                InputProfileManager.shared.updateProfile(profile)
+                            }
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.left.arrow.right")
+                                    .font(.system(size: 11, weight: .bold))
+                                Text(L10n.t("controls.swap_ab_xy"))
+                                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .contentShape(Capsule())
+                            .nxGlassInteractive(
+                                in: Capsule(),
+                                fallbackFill: NXTheme.glassSurfaceElevated
+                            )
+                        }
+                        .buttonStyle(NXPressableButtonStyle())
+                        .nxNoFocusRing()
+                        .help(L10n.t("controls.swap_ab_xy_help"))
+                    }
+
+                    // Vector Controller View
+                    SwitchProControllerVectorView(
+                        pressedButtons: pressedButtons,
+                        selectedButton: listeningButton,
+                        onSelectButton: { btn in
                             startListening(for: btn)
-                        },
-                        onSelectMapping: { elem in
-                            assignMapping(element: elem, to: btn)
-                        },
-                        onReset: {
-                            assignMapping(element: btn.defaultGamepadElement, to: btn)
                         }
                     )
+                    .frame(minWidth: 320, idealWidth: 380, maxWidth: 440, minHeight: 220, idealHeight: 260)
                 }
-            }
-            .frame(width: 220)
+                .frame(maxWidth: .infinity)
 
-            // MARK: - Center Controller Vector & Connecting Canvas
-            VStack(spacing: 12) {
-                // Quick Layout Switcher (Enhancement 2)
-                HStack(spacing: 8) {
-                    Button(action: {
-                        SoundEffectService.shared.play(.click)
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            profile.swapFaceButtons()
-                            InputProfileManager.shared.updateProfile(profile)
-                        }
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.left.arrow.right")
-                                .font(.system(size: 11, weight: .bold))
-                            Text(L10n.t("controls.swap_ab_xy"))
-                                .font(.system(size: 11, weight: .bold, design: .rounded))
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(NXTheme.glassSurfaceElevated)
-                        .foregroundColor(.white)
-                        .clipShape(Capsule())
-                        .overlay(Capsule().stroke(NXTheme.specularRim, lineWidth: 0.8))
+                // MARK: - Right Callout Column
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(rightButtons) { btn in
+                        let mapped = profile.gamepadBindings.first(where: { $0.value == btn })?.key ?? "None"
+                        MappingPillView(
+                            button: btn,
+                            mappedLabel: formatElementName(mapped),
+                            isListening: listeningButton == btn,
+                            isLeftSide: false,
+                            onStartListening: {
+                                startListening(for: btn)
+                            },
+                            onSelectMapping: { elem in
+                                assignMapping(element: elem, to: btn)
+                            },
+                            onReset: {
+                                assignMapping(element: btn.defaultGamepadElement, to: btn)
+                            }
+                        )
                     }
-                    .buttonStyle(.plain)
-                    .help(L10n.t("controls.swap_ab_xy_help"))
                 }
-
-                // Vector Controller View
-                SwitchProControllerVectorView(
-                    pressedButtons: pressedButtons,
-                    selectedButton: listeningButton,
-                    onSelectButton: { btn in
-                        startListening(for: btn)
-                    }
-                )
-                .frame(minWidth: 320, idealWidth: 380, maxWidth: 440, minHeight: 220, idealHeight: 260)
+                .frame(width: 220)
             }
-            .frame(maxWidth: .infinity)
-
-            // MARK: - Right Callout Column
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(rightButtons) { btn in
-                    let mapped = profile.gamepadBindings.first(where: { $0.value == btn })?.key ?? "None"
-                    MappingPillView(
-                        button: btn,
-                        mappedLabel: formatElementName(mapped),
-                        isListening: listeningButton == btn,
-                        isLeftSide: false,
-                        onStartListening: {
-                            startListening(for: btn)
-                        },
-                        onSelectMapping: { elem in
-                            assignMapping(element: elem, to: btn)
-                        },
-                        onReset: {
-                            assignMapping(element: btn.defaultGamepadElement, to: btn)
-                        }
-                    )
-                }
-            }
-            .frame(width: 220)
+            .padding(.vertical, 8)
         }
-        .padding(.vertical, 8)
     }
 
     private func startListening(for btn: SwitchButton) {

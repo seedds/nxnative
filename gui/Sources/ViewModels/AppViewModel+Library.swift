@@ -30,6 +30,13 @@ extension AppViewModel {
                     self.focusedGameIndex = max(0, visible.count - 1)
                 }
                 self.isScanningLibrary = false
+                
+                // Automatically ensure every game in the library has its correct official cover
+                DispatchQueue.global(qos: .utility).async {
+                    for game in visible {
+                        GameCoverService.shared.ensureCover(for: game)
+                    }
+                }
             }
         }
     }
@@ -77,8 +84,25 @@ extension AppViewModel {
                         self?.launchingGameId = nil
                     }
                     if success {
+                        self?.runningGameTitle = game.name
                         self?.logs.append(LogEntry(level: .success, message: "Launched game: \(game.name)"))
+                        MemoryOptimizer.shared.optimizeForBackground(viewModel: self)
+                        
+                        // Observe game termination to clear runningGameTitle
+                        if let runningApp = GameControllerService.shared.activeRunningGameApp {
+                            NotificationCenter.default.addObserver(
+                                forName: NSWorkspace.didTerminateApplicationNotification,
+                                object: nil,
+                                queue: .main
+                            ) { [weak self] notif in
+                                if let termApp = notif.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                                   termApp.processIdentifier == runningApp.processIdentifier {
+                                    self?.runningGameTitle = nil
+                                }
+                            }
+                        }
                     } else if let err = error {
+                        self?.runningGameTitle = nil
                         SoundEffectService.shared.play(.error)
                         self?.logs.append(LogEntry(level: .error, message: "Failed to launch game: \(err)"))
                     }
@@ -88,10 +112,17 @@ extension AppViewModel {
     }
     
     public func loadRuntimeConfig(for game: PortedGame) -> GameRuntimeConfig {
-        GameRuntimeConfig.load(for: game)
+        let key = game.uniqueKey
+        if let cached = runtimeConfigCache[key] {
+            return cached
+        }
+        let loaded = GameRuntimeConfig.load(for: game)
+        runtimeConfigCache[key] = loaded
+        return loaded
     }
     
     public func saveRuntimeConfig(_ config: GameRuntimeConfig, for game: PortedGame) {
+        runtimeConfigCache[game.uniqueKey] = config
         config.save(for: game)
         logs.append(LogEntry(level: .success, message: "Saved settings for \(game.name)"))
     }

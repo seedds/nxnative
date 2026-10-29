@@ -1,16 +1,28 @@
 import SwiftUI
 import AppKit
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag || MenuBarManager.shared.isMinimizedToMenuBar {
+            MenuBarManager.shared.restoreMainWindow()
+            return true
+        }
+        return true
+    }
+}
+
 @main
 struct NXNativeGUIApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var viewModel = AppViewModel()
     
     var body: some Scene {
         WindowGroup {
             MainView(viewModel: viewModel)
+                .preferredColorScheme(.dark)
         }
         .windowStyle(.titleBar)
-        .windowToolbarStyle(.unified)
+        .windowToolbarStyle(.unifiedCompact)
         .defaultSize(width: 820, height: 680)
         .commands {
             SidebarCommands()
@@ -30,6 +42,13 @@ struct NXNativeGUIApp: App {
                 .keyboardShortcut("U", modifiers: [.command])
                 
                 Divider()
+            }
+            
+            CommandGroup(replacing: .windowList) {
+                Button(L10n.t("menubar.minimize")) {
+                    MenuBarManager.shared.minimizeToMenuBar()
+                }
+                .keyboardShortcut("M", modifiers: [.command])
             }
         }
     }

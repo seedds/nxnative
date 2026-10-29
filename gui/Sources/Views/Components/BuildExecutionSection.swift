@@ -115,65 +115,59 @@ public struct BuildExecutionSection: View {
             
             Divider().opacity(0.2)
             
-            HStack(spacing: 12) {
-                if outputPath.hasSuffix(".app") {
+            NXGlassContainer(spacing: 12) {
+                HStack(spacing: 12) {
+                    if outputPath.hasSuffix(".app") {
+                        Button(action: {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: outputPath))
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "play.fill")
+                                Text(viewModel.tr("build.launch_game"))
+                            }
+                            .font(.system(size: 13, weight: .bold))
+                        }
+                        .buttonStyle(NXPrimaryButtonStyle())
+                    } else if outputPath.hasSuffix(".ipa") {
+                        Button(action: {
+                            let ipaURL = URL(fileURLWithPath: outputPath)
+                            DeviceDeploymentService.shared.shareViaAirDrop(fileURL: ipaURL)
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "airdrop")
+                                Text(viewModel.tr("build.airdrop_ios"))
+                            }
+                            .font(.system(size: 13, weight: .bold))
+                        }
+                        .buttonStyle(NXPrimaryButtonStyle())
+                    }
+                    
                     Button(action: {
-                        NSWorkspace.shared.open(URL(fileURLWithPath: outputPath))
+                        NSWorkspace.shared.selectFile(outputPath, inFileViewerRootedAtPath: "")
                     }) {
                         HStack(spacing: 6) {
-                            Image(systemName: "play.fill")
-                            Text(viewModel.tr("build.launch_game"))
+                            Image(systemName: "folder.fill")
+                            Text(viewModel.tr("common.reveal_finder"))
                         }
-                        .font(.system(size: 13, weight: .bold))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
+                        .font(.system(size: 13, weight: .semibold))
                     }
-                    .buttonStyle(NXPrimaryButtonStyle())
-                } else if outputPath.hasSuffix(".ipa") {
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    
+                    Spacer()
+                    
                     Button(action: {
-                        let ipaURL = URL(fileURLWithPath: outputPath)
-                        DeviceDeploymentService.shared.shareViaAirDrop(fileURL: ipaURL)
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            viewModel.resetWizard()
+                        }
                     }) {
                         HStack(spacing: 6) {
-                            Image(systemName: "airdrop")
-                            Text(viewModel.tr("build.airdrop_ios"))
+                            Image(systemName: "arrow.counterclockwise.circle.fill")
+                            Text(viewModel.tr("build.port_another"))
                         }
-                        .font(.system(size: 13, weight: .bold))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
+                        .font(.system(size: 13, weight: .semibold))
                     }
-                    .buttonStyle(NXPrimaryButtonStyle())
+                    .buttonStyle(NXSecondaryButtonStyle())
                 }
-                
-                Button(action: {
-                    NSWorkspace.shared.selectFile(outputPath, inFileViewerRootedAtPath: "")
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "folder.fill")
-                        Text(viewModel.tr("common.reveal_finder"))
-                    }
-                    .font(.system(size: 13, weight: .semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                }
-                .buttonStyle(NXSecondaryButtonStyle())
-                
-                Spacer()
-                
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        viewModel.resetWizard()
-                    }
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.counterclockwise.circle.fill")
-                        Text(viewModel.tr("build.port_another"))
-                    }
-                    .font(.system(size: 13, weight: .semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                }
-                .buttonStyle(NXSecondaryButtonStyle())
             }
         }
     }

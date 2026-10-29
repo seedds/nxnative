@@ -90,21 +90,20 @@ public struct DropZoneView: View {
             }
         }
         .padding(16)
+        .nxGlassCard(cornerRadius: 12, isNested: true)
         .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(isTargeted ? NXTheme.primary.opacity(0.16) : NXTheme.glassSurfaceElevated.opacity(0.7))
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            }
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isTargeted ? NXTheme.primary.opacity(0.20) : Color.clear)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(
-                    isTargeted ? NXTheme.secondary : NXTheme.borderSubtle,
+                    isTargeted ? NXTheme.secondary : Color.clear,
                     style: StrokeStyle(lineWidth: isTargeted ? 1.8 : 1, dash: isTargeted ? [6] : [])
                 )
         )
+        .shadow(color: isTargeted ? NXTheme.primary.opacity(0.35) : .clear, radius: 12, x: 0, y: 4)
+        .animation(.spring(response: 0.28, dampingFraction: 0.75), value: isTargeted)
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
             var urls: [URL] = []
             let group = DispatchGroup()

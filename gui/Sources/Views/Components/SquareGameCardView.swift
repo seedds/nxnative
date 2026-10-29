@@ -8,6 +8,7 @@ public struct SquareGameCardView: View {
     public let baseSize: CGFloat
     public let onSelect: () -> Void
     @ObservedObject private var artworkStore = ArtworkStore.shared
+    @ObservedObject private var coverService = GameCoverService.shared
 
     public init(
         game: PortedGame,
@@ -30,93 +31,89 @@ public struct SquareGameCardView: View {
     public var body: some View {
         Button(action: onSelect) {
             ZStack(alignment: .bottomTrailing) {
-                // MARK: - 1:1 Square Card Canvas
-                if iconImage.size.height > iconImage.size.width * 1.15 {
-                    // Portrait box art inside 1:1 square: unclipped fit with blurred glass ambient backdrop
-                    ZStack {
-                        Color.black.opacity(0.85)
-
-                        Image(nsImage: iconImage)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: baseSize, height: baseSize)
-                            .blur(radius: 14)
-                            .opacity(0.45)
-                            .clipped()
-
-                        Image(nsImage: iconImage)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: baseSize * 0.90, height: baseSize * 0.90)
-                            .shadow(color: Color.black.opacity(0.65), radius: 6, x: 0, y: 3)
-                    }
-                    .frame(width: baseSize, height: baseSize)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                } else {
-                    // True 1:1 Square Game Icon
-                    Image(nsImage: iconImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: baseSize, height: baseSize)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
+                // MARK: - 1:1 Square Nintendo Switch Tile (Edge-to-Edge Full Bleed)
+                Image(nsImage: iconImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: baseSize, height: baseSize, alignment: .top)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                 // Ambient gradient on bottom edge for subtle depth
                 LinearGradient(
-                    colors: [Color.clear, Color.black.opacity(0.4)],
+                    colors: [Color.clear, Color.black.opacity(0.35)],
                     startPoint: .center,
                     endPoint: .bottom
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                // Platform pill badge (Mac Native vs iOS) & Cloud Save Status
-                HStack(spacing: 4) {
-                    Text(game.platform == .macApp ? "MAC" : "IOS")
-                        .font(.system(size: 8, weight: .black, design: .rounded))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(game.platform == .macApp ? NXTheme.primary.opacity(0.85) : NXTheme.secondary.opacity(0.85))
-                        .clipShape(Capsule())
-
-                    if SaveSyncService.shared.isCloudSyncActive(for: game) {
-                        Image(systemName: "icloud.fill")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 2)
-                            .background(Color.blue.opacity(0.85))
-                            .clipShape(Capsule())
-                    }
-                }
-                .padding(8)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .frame(width: baseSize, height: baseSize)
+            // Liquid Glass micro-capsules placed outside so backdrop refraction renders natively
+            .overlay(alignment: .bottomTrailing) {
+                NXGlassContainer(spacing: 4) {
+                    HStack(spacing: 4) {
+                        Text(game.platform == .macApp ? "MAC" : "IOS")
+                            .font(.system(size: 8, weight: .black, design: .rounded))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2.5)
+                            .nxGlassBar(
+                                in: Capsule(),
+                                tint: (game.platform == .macApp ? NXTheme.primary : NXTheme.secondary).opacity(0.68),
+                                fallbackFill: (game.platform == .macApp ? NXTheme.primary : NXTheme.secondary).opacity(0.85),
+                                fallbackStroke: Color.white.opacity(0.22)
+                            )
+
+                        if SaveSyncService.shared.isCloudSyncActive(for: game) {
+                            Image(systemName: "icloud.fill")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2.5)
+                                .nxGlassBar(
+                                    in: Capsule(),
+                                    tint: Color.blue.opacity(0.68),
+                                    fallbackFill: Color.blue.opacity(0.85),
+                                    fallbackStroke: Color.white.opacity(0.22)
+                                )
+                        }
+                    }
+                    .padding(8)
+                }
+            }
             // MARK: - Switch Dark Mode Glowing Focus Frame
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(
-                        isFocused ? NXTheme.primary : Color.white.opacity(0.12),
-                        lineWidth: isFocused ? 4 : 1
+                        isFocused
+                            ? AnyShapeStyle(LinearGradient(colors: [Color.white.opacity(0.95), NXTheme.primary], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            : AnyShapeStyle(Color.white.opacity(0.16)),
+                        lineWidth: isFocused ? 3.5 : 1
                     )
             )
             .shadow(
-                color: isFocused ? NXTheme.primary.opacity(0.9) : Color.black.opacity(0.3),
-                radius: isFocused ? 16 : 4,
+                color: isFocused ? NXTheme.primary.opacity(0.65) : Color.black.opacity(0.35),
+                radius: isFocused ? 8 : 4,
                 x: 0,
-                y: isFocused ? 4 : 2
+                y: isFocused ? 2 : 2
             )
-            .scaleEffect(isFocused ? 1.10 : 1.0)
+            .shadow(
+                color: isFocused ? NXTheme.primary.opacity(0.35) : Color.clear,
+                radius: isFocused ? 18 : 0,
+                x: 0,
+                y: isFocused ? 3 : 0
+            )
+            .scaleEffect(isFocused ? 1.08 : 1.0)
             .animation(.spring(response: 0.28, dampingFraction: 0.76), value: isFocused)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
         .nxNoFocusRing()
         .contextMenu {
             if game.platform == .macApp {
                 Button {
                     viewModel.launchGame(game)
                 } label: {
-                    Label(viewModel.tr("actions.play_game"), systemImage: "play.fill")
+                    Label(viewModel.tr("common.play"), systemImage: "play.fill")
                 }
             } else {
                 Button {

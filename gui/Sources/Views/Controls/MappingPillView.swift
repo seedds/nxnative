@@ -83,28 +83,22 @@ public struct MappingPillView: View {
                             .foregroundColor(.white)
                     }
                     .menuStyle(.borderlessButton)
-                    .frame(width: 14)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
                 }
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(isListening ? NXTheme.primary.opacity(0.35) : NXTheme.glassSurfaceElevated.opacity(0.85))
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .nxGlassInteractive(
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous),
+                    tint: isListening ? NXTheme.primary.opacity(0.68) : nil,
+                    isSelected: isListening,
+                    fallbackFill: NXTheme.glassSurfaceElevated.opacity(0.85),
+                    fallbackSelectedFill: NXTheme.primary.opacity(0.35)
                 )
-                .overlay(
-                    Group {
-                        if isListening {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(NXTheme.secondary, lineWidth: 1.5)
-                        } else {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
-                        }
-                    }
-                )
-                .shadow(color: isListening ? NXTheme.secondary.opacity(0.5) : Color.clear, radius: 6)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(NXPressableButtonStyle())
+            .nxNoFocusRing()
 
             if isLeftSide {
                 switchButtonBadge

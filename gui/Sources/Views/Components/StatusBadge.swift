@@ -29,14 +29,11 @@ public struct StatusBadge: View {
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
-            .background(
-                ZStack {
-                    Capsule().fill(badgeColor.opacity(0.12))
-                    Capsule().fill(.ultraThinMaterial)
-                }
-            )
-            .overlay(
-                Capsule().strokeBorder(badgeColor.opacity(0.35), lineWidth: 0.8)
+            .nxGlassBar(
+                in: Capsule(),
+                tint: badgeColor.opacity(0.35),
+                fallbackFill: badgeColor.opacity(0.16),
+                fallbackStroke: badgeColor.opacity(0.38)
             )
             .help(text)
         } else {

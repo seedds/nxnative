@@ -139,6 +139,130 @@ def frame_step(ctx):
     emit(B(here(), 0xd5d84))
     fs_put(0xd5d80, [B(0xd5d80, start)], 'dynamic resolution only at render scale 1.0')
 
+# Tears of the Kingdom v1.4.2 (build 5cb42b1cf25469fb0635fd046453d843)
+def frame_step_v142(ctx):
+    here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
+    # frame step (replaces ldrb w9,[x0,#0x58], the first instruction after the prologue)
+    fs_site(0x2d4e68, '09604139')
+    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (0xbd400200,   # ldr s0,[x16]           target fps
+              0x1e202008,   # fcmp s0,#0.0
+              0x54000640,   # b.eq off (+50)        target 0: original path
+              0xb9402202,   # ldr w2,[x16,#0x20]     step in vsyncs
+              0x340001a2,   # cbz w2,elapsed (+13)   not decided yet: by the measured frame time
+              0x1e230041,   # ucvtf s1,w2
+              0x1e27d003,   # fmov s3,#30.0
+              0x1e211872,   # fdiv s18,s3,s1
+              0x1e322a52,   # fadd s18,s18,s18       fps = 60 / step
+              0xbd002412,   # str s18,[x0,#0x24]     float fps
+              0x52800785,   # mov w5,#60
+              0x1ac208a5,   # udiv w5,w5,w2
+              0xb9005005,   # str w5,[x0,#0x50]      integer fps
+              0xf9401a04,   # ldr x4,[x16,#0x30]
+              0x8b224084,   # add x4,x4,w2,uxtw
+              0xf9001a04):  # str x4,[x16,#0x30]     vsyncs stepped
+        emit(w)
+    emit(B(here(), 0x2d4f60))                                       # the original epilogue
+    for w in (0xf9406c22,   # elapsed: ldr x2,[x1,#0xd8]  last frame time in 19.2 MHz ticks
+              0x9e630041,   # ucvtf d1,x2
+              0x529f0003,   # mov w3,#0xf800
+              0x72a02483,   # movk w3,#0x124,lsl #16 (19,200,000)
+              0x1e630062,   # ucvtf d2,w3
+              0x1e621821,   # fdiv d1,d1,d2          elapsed seconds
+              0xb9400604,   # ldr w4,[x16,#4]        movie flag
+              0x1e27d003,   # fmov s3,#30.0
+              0x7100009f,   # cmp w4,#0
+              0x1e201c60,   # fcsel s0,s3,s0,ne      cap = movie ? 30 : target
+              0x1e22c000,   # fcvt d0,s0
+              0x1e6e1003,   # fmov d3,#1.0
+              0x1e601864,   # fdiv d4,d3,d0          shortest step 1 / cap
+              0x1e65d005,   # fmov d5,#15.0
+              0x1e651865,   # fdiv d5,d3,d5          longest step 1 / 15
+              0xfd400606,   # ldr d6,[x16,#8]        lead
+              0x1e663827,   # fsub d7,d1,d6
+              0x1e6448e7,   # fmax d7,d7,d4
+              0x1e6558e7,   # fmin d7,d7,d5          step = clamp(elapsed - lead)
+              0x1e6728c6,   # fadd d6,d6,d7
+              0x1e6138c6,   # fsub d6,d6,d1          lead += step - elapsed
+              0x2f00e410,   # movi d16,#0
+              0x1e7048c6,   # fmax d6,d6,d16
+              0x1e6a1011,   # fmov d17,#0.25
+              0x1e7158c6,   # fmin d6,d6,d17         lead in [0, 0.25]
+              0xfd000606,   # str d6,[x16,#8]
+              0x1e671872,   # fdiv d18,d3,d7         fps = 1 / step
+              0x1e624252,   # fcvt s18,d18
+              0xbd002412,   # str s18,[x0,#0x24]     float fps
+              0x1e380245,   # fcvtzs w5,s18
+              0xb9005005,   # str w5,[x0,#0x50]      integer fps
+              0xfd400e13,   # ldr d19,[x16,#0x18]
+              0x1e672a73,   # fadd d19,d19,d7
+              0xfd000e13):  # str d19,[x16,#0x18]    game seconds stepped
+        emit(w)
+    emit(B(here(), 0x2d4f60))                                       # the original epilogue
+    emit(0x39416009); emit(B(here(), 0x2d4e6c))                     # off: ldrb w9,[x0,#0x58]; back
+    fs_put(0x2d4e68, [B(0x2d4e68, start)], 'frame step from the host in whole vsyncs, by elapsed time until it has decided one (state page target fps; 0 = original interval logic)')
+    # the two readers of the integer fps: float fps when on; the scvtf a few instructions later moves into the stub (s0 is not touched in between)
+    for site, cvt, r in ((0x2d4730, 0x2d4748, 19), (0x37ea5c, 0x37ea68, 22)):
+        fs_site(site, struct.pack('<I', 0xbd425000 | r << 5).hex()); fs_site(cvt, '00d8215e')
+        start = here(); emit(STP_PRE(16, 17, 31, -16)); emit(ADRP(16, here(), FS_STATE_OFF))
+        for w in (0xb9400211,                # ldr w17,[x16]
+                  0x34000071,                # cbz w17,off (+12)
+                  0xbd422400 | r << 5,       # ldr s0,[xR,#0x224]  float fps
+                  0x14000003,                # b done (+12)
+                  0xbd425000 | r << 5,       # off: ldr s0,[xR,#0x250]  integer fps
+                  0x5e21d800,                # scvtf s0,s0
+                  0xa8c147f0):               # done: ldp x16,x17,[sp],#16
+            emit(w)
+        emit(B(here(), site + 4))
+        fs_put(site, [B(site, start)], 'game step reads the float fps (original integer fps and scvtf when off)')
+        fs_put(cvt, [NOP], 'scvtf moved into the stub at the load')
+    # D-pad menu fade (w8 is overwritten right after the site)
+    fs_site(0x1064334, '0820201e0a04081f')
+    start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
+    for w in (0xb9400108, 0x340001a8,       # ldr w8,[x8]; cbz w8,off (+52)
+              0x1e202028, 0x54000101,       # fcmp s1,#0.0; b.ne go
+              0x785fa308, 0x7100151f, 0x540000a1,   # ldurh w8,[x24,#-6]; cmp w8,#5; b.ne go
+              0x785f8308, 0x7100151f, 0x54000041,   # ldurh w8,[x24,#-8]; cmp w8,#5; b.ne go
+              0x1e2e1008,                   # fmov s8,#1.0
+              0x1f08040a, 0x1e202008, 0x14000003,   # go: fmadd s10,s0,s8,s1; fcmp s0,#0.0; b end
+              0x1e202008, 0x1f08040a):      # off: the original fcmp s0,#0.0; fmadd s10,s0,s8,s1
+        emit(w)
+    emit(B(here(), 0x106433c))
+    fs_put(0x1064334, [B(0x1064334, start), NOP], 'D-pad menu fade starts at full rate under fractional steps (FPSLocker)')
+    # swapchain argument (x16 is dead before the bl that follows)
+    fs_site(0xbbf258, '61a24039')
+    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in (0xb9400210, 0x34000070, 0x52800021, 0x14000002, 0x3940a261):   # ldr w16,[x16]; cbz w16,off; mov w1,#1; b end; off: ldrb w1,[x19,#0x28]
+        emit(w)
+    emit(B(here(), 0xbbf25c))
+    fs_put(0xbbf258, [B(0xbbf258, start)], 'swapchain argument 1 when on (FPSLocker)')
+    # Render scale
+    fs_site(0x10250c, '08d0a8524008251e6108241e0401271e'); fs_site(0x1025cc, '062940bd')
+    start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
+    for w in (0xbd401106,   # ldr s6,[x8,#0x10]   render scale
+              0x1e250840,   # fmul s0,s2,s5       (original)
+              0x1e240861,   # fmul s1,s3,s4       (original)
+              0x1e2020c8,   # fcmp s6,#0.0
+              0x5400006d,   # b.le skip (+12)     not set
+              0x1e260800,   # fmul s0,s0,s6
+              0x1e260821,   # fmul s1,s1,s6
+              0x52a8d008,   # skip: mov w8,#0x46800000 (original)
+              0x1e270104):  # fmov s4,w8          (original)
+        emit(w)
+    emit(B(here(), 0x10251c))
+    fs_put(0x10250c, [B(0x10250c, start)], 'view render size x the host render scale (1.0 = original)'); ctx.render_scale = 1
+    start = here(); emit(0xbd402906); emit(ADRP(8, here(), FS_STATE_OFF))   # ldr s6,[x8,#0x28] (original: the dynamic multiplier); x8 is dead after it
+    for w in (0xbd401107,   # ldr s7,[x8,#0x10]
+              0x1e2e1010,   # fmov s16,#1.0
+              0x1e3020e0,   # fcmp s7,s16
+              0x54000080,   # b.eq done (+16)     scale 1: the game's dynamic resolution
+              0x1e2020e8,   # fcmp s7,#0.0
+              0x5400004d,   # b.le done (+8)      not set
+              0x1e204206):  # fmov s6,s16         a fixed scale: no dynamic multiplier
+        emit(w)
+    emit(B(here(), 0x1025d0))
+    fs_put(0x1025cc, [B(0x1025cc, start)], 'dynamic resolution only at render scale 1.0')
+
 FRAME_STEP = {
     '277178b7dba1b6d4949a84778d4abc58': frame_step,
     '5cb42b1cf25469fb0635fd046453d843': frame_step_v142

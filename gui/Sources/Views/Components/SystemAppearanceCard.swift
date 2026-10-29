@@ -22,8 +22,7 @@ public struct SystemAppearanceCard: View {
             name = "AppIcon-Mono"
         }
         
-        if let url = Bundle.main.url(forResource: name, withExtension: "png"),
-           let img = NSImage(contentsOf: url) {
+        if let img = AppIconCache.image(named: name) {
             return Image(nsImage: img)
         }
         return Image(systemName: "gamecontroller.fill")
@@ -43,9 +42,13 @@ public struct SystemAppearanceCard: View {
     }
     
     public var body: some View {
-        GlassCard {
+        GlassCard(cornerRadius: 16, padding: 18) {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
+                HStack(spacing: 8) {
+                    Image(systemName: "app.badge.sparkles.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(viewModel.highlightTheme.primaryColor)
+                    
                     Text(viewModel.tr("personalization.app_icon"))
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
@@ -53,61 +56,71 @@ public struct SystemAppearanceCard: View {
                     Spacer()
                 }
                 
-                HStack(spacing: 12) {
-                    ForEach(AppIconAppearanceMode.allCases, id: \.self) { mode in
-                        let isSelected: Bool = (viewModel.iconAppearanceMode == mode)
-                        Button(action: {
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
-                                viewModel.iconAppearanceMode = mode
-                            }
-                        }) {
-                            VStack(spacing: 8) {
-                                ZStack {
-                                    iconPreview(for: mode)
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fit)
-                                        .frame(width: 44, height: 44)
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                                .strokeBorder(isSelected ? Color.cyan : Color.white.opacity(0.15), lineWidth: isSelected ? 2 : 1)
-                                        )
-                                        .shadow(color: isSelected ? Color.cyan.opacity(0.4) : Color.black.opacity(0.2), radius: isSelected ? 8 : 3, x: 0, y: 2)
-                                    
-                                    if isSelected {
-                                        VStack {
-                                            HStack {
-                                                Spacer()
-                                                Image(systemName: "checkmark.circle.fill")
-                                                    .font(.system(size: 14, weight: .bold))
-                                                    .foregroundColor(.white)
-                                                    .background(Circle().fill(Color.cyan))
-                                                    .offset(x: 4, y: -4)
-                                            }
-                                            Spacer()
-                                        }
-                                        .frame(width: 44, height: 44)
-                                    }
+                NXGlassContainer(spacing: 12) {
+                    HStack(spacing: 12) {
+                        ForEach(AppIconAppearanceMode.allCases, id: \.self) { mode in
+                            let isSelected: Bool = (viewModel.iconAppearanceMode == mode)
+                            Button(action: {
+                                SoundEffectService.shared.play(.click)
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                                    viewModel.iconAppearanceMode = mode
                                 }
-                                
-                                Text(modeTitle(for: mode))
-                                    .font(.system(size: 11, weight: isSelected ? .bold : .semibold, design: .rounded))
-                                    .foregroundColor(.white)
+                            }) {
+                                VStack(spacing: 8) {
+                                    ZStack {
+                                        iconPreview(for: mode)
+                                            .resizable()
+                                            .aspectRatio(contentMode: .fit)
+                                            .frame(width: 44, height: 44)
+                                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                    .strokeBorder(
+                                                        isSelected ? viewModel.highlightTheme.secondaryColor : Color.white.opacity(0.15),
+                                                        lineWidth: isSelected ? 2 : 1
+                                                    )
+                                            )
+                                            .shadow(
+                                                color: isSelected ? viewModel.highlightTheme.primaryColor.opacity(0.45) : Color.black.opacity(0.2),
+                                                radius: isSelected ? 8 : 3,
+                                                x: 0,
+                                                y: 2
+                                            )
+                                        
+                                        if isSelected {
+                                            VStack {
+                                                HStack {
+                                                    Spacer()
+                                                    Image(systemName: "checkmark.circle.fill")
+                                                        .font(.system(size: 14, weight: .bold))
+                                                        .foregroundColor(.white)
+                                                        .background(Circle().fill(viewModel.highlightTheme.primaryColor))
+                                                        .offset(x: 4, y: -4)
+                                                }
+                                                Spacer()
+                                            }
+                                            .frame(width: 44, height: 44)
+                                        }
+                                    }
+                                    
+                                    Text(modeTitle(for: mode))
+                                        .font(.system(size: 11, weight: isSelected ? .bold : .semibold, design: .rounded))
+                                        .foregroundColor(.white)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .padding(.horizontal, 8)
+                                .contentShape(Rectangle())
+                                .nxGlassInteractive(
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous),
+                                    isSelected: isSelected,
+                                    fallbackFill: NXTheme.glassSurfaceElevated.opacity(0.6),
+                                    fallbackSelectedFill: NXTheme.primary.opacity(0.25)
+                                )
                             }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .padding(.horizontal, 8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(isSelected ? NXTheme.primary.opacity(0.25) : NXTheme.glassSurfaceElevated.opacity(0.6))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(isSelected ? Color.cyan.opacity(0.6) : Color.white.opacity(0.18), lineWidth: 0.8)
-                            )
+                            .buttonStyle(NXPressableButtonStyle())
+                            .nxNoFocusRing()
                         }
-                        .buttonStyle(.plain)
-                        .nxNoFocusRing()
                     }
                 }
             }

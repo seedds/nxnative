@@ -183,6 +183,9 @@ extension AppViewModel {
     // MARK: - BuildRunner Delegates
     public func buildRunner(_ runner: BuildRunner, didProduceLog entry: LogEntry) {
         logs.append(entry)
+        if logs.count > 1200 {
+            logs.removeFirst(200)
+        }
     }
     
     public func buildRunner(_ runner: BuildRunner, didUpdateStage stage: String, index: Int, total: Int) {

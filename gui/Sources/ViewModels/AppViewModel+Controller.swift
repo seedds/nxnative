@@ -212,6 +212,11 @@ extension AppViewModel {
             if let game = currentFocusedGame { launchGame(game) }
         case 2:
             handleCompatibilitySecondaryAction()
+        case 4:
+            SoundEffectService.shared.play(.click)
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+                isLiquidGlassEnabled.toggle()
+            }
         case 6:
             let allText = logs.map { "\($0.timestamp) [\($0.level.rawValue.uppercased())] \($0.message)" }.joined(separator: "\n")
             NSPasteboard.general.clearContents()
@@ -228,6 +233,14 @@ extension AppViewModel {
                 SoundEffectService.shared.play(.click)
                 let profile = GameDetailsProfile.inspect(for: game)
                 revealSaveFolder(profile.saveDirectory)
+            }
+        case 4:
+            SoundEffectService.shared.play(.click)
+            withAnimation(.spring(response: 0.30, dampingFraction: 0.78)) {
+                liquidGlassIntensity = (liquidGlassIntensity >= 0.5) ? 0.0 : 1.0
+                if !isLiquidGlassEnabled {
+                    isLiquidGlassEnabled = true
+                }
             }
         case 6:
             SoundEffectService.shared.play(.click)

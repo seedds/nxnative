@@ -3,139 +3,134 @@ import AppKit
 
 public struct CompatibilityToolbarView: View {
     @ObservedObject public var viewModel: AppViewModel
+    @Namespace private var displayModeNamespace
     
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
     }
     
     public var body: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 8) {
-                    Text(viewModel.tr("nav.compatibility"))
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
-                        .foregroundColor(NXTheme.textPrimary)
+        NXGlassContainer(spacing: 10) {
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text(viewModel.tr("nav.compatibility"))
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .foregroundColor(NXTheme.textPrimary)
+                        
+                        Text(viewModel.tr("compatibility.verified_count", viewModel.compatibleGames.count))
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2.5)
+                            .background(NXTheme.primary.opacity(0.24))
+                            .foregroundColor(.white)
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .strokeBorder(NXTheme.secondary.opacity(0.35), lineWidth: 0.7)
+                            )
+                    }
                     
-                    Text(viewModel.tr("compatibility.verified_count", viewModel.compatibleGames.count))
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(NXTheme.primary.opacity(0.18))
-                        .foregroundColor(.white)
-                        .clipShape(Capsule())
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(viewModel.isCompatibilityFromOnline ? Color(red: 0.13, green: 0.77, blue: 0.37) : NXTheme.tertiary)
+                            .frame(width: 6, height: 6)
+                        Text(viewModel.isCompatibilityFromOnline ? "Live GitHub Sync" : "Local Repository Cache")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(NXTheme.textSecondary)
+                        
+                        if let date = viewModel.compatibilityLastUpdated {
+                            Text(viewModel.tr("compatibility.updated_date", formattedTime(date)))
+                                .font(.system(size: 10))
+                                .foregroundColor(NXTheme.textMuted)
+                        }
+                    }
                 }
                 
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(viewModel.isCompatibilityFromOnline ? Color(red: 0.13, green: 0.77, blue: 0.37) : NXTheme.tertiary)
-                        .frame(width: 6, height: 6)
-                    Text(viewModel.isCompatibilityFromOnline ? "Live GitHub Sync" : "Local Repository Cache")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(NXTheme.textSecondary)
-                    
-                    if let date = viewModel.compatibilityLastUpdated {
-                        Text(viewModel.tr("compatibility.updated_date", formattedTime(date)))
-                            .font(.system(size: 10))
-                            .foregroundColor(NXTheme.textMuted)
+                Spacer()
+                
+                // Search Field Capsule (Crisp White Placeholder)
+                NXLiquidGlassSearchField(
+                    viewModel.tr("compatibility.search"),
+                    text: $viewModel.compatibilitySearchText,
+                    onClear: { SoundEffectService.shared.play(.click) }
+                )
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .frame(maxWidth: 240)
+                .nxGlassCard(cornerRadius: 16, isNested: true)
+                
+                displayModeToggle
+                
+                Button(action: {
+                    SoundEffectService.shared.play(.click)
+                    viewModel.loadCompatibleGames(forceRefresh: true)
+                }) {
+                    HStack(spacing: 5) {
+                        if viewModel.isLoadingCompatibility {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        Text(viewModel.tr("common.refresh"))
                     }
                 }
+                .buttonStyle(NXSecondaryButtonStyle())
+                .controlSize(.small)
             }
-            
-            Spacer()
-            
-            // Search Field
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(NXTheme.textSecondary)
-                TextField(viewModel.tr("compatibility.search"), text: $viewModel.compatibilitySearchText)
-                    .textFieldStyle(.plain)
-                    .foregroundColor(NXTheme.textPrimary)
-                if !viewModel.compatibilitySearchText.isEmpty {
-                    Button(action: {
-                        SoundEffectService.shared.play(.click)
-                        viewModel.compatibilitySearchText = ""
-                    }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(NXTheme.textMuted)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(NXTheme.glassSurfaceElevated.opacity(0.8))
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                }
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
-            )
-            .frame(maxWidth: 240)
-            
-            displayModeToggle
-            
-            Button(action: {
-                SoundEffectService.shared.play(.click)
-                viewModel.loadCompatibleGames(forceRefresh: true)
-            }) {
-                HStack(spacing: 5) {
-                    if viewModel.isLoadingCompatibility {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    Text(viewModel.tr("common.refresh"))
-                }
-            }
-            .buttonStyle(NXSecondaryButtonStyle())
-            .controlSize(.small)
         }
     }
     
     private var displayModeToggle: some View {
-        HStack(spacing: 2) {
-            Button(action: {
-                SoundEffectService.shared.play(.click)
-                viewModel.compatibilityDisplayMode = .list
-            }) {
-                Image(systemName: "list.bullet")
-                    .font(.system(size: 11, weight: viewModel.compatibilityDisplayMode == .list ? .bold : .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 5)
-                    .background(viewModel.compatibilityDisplayMode == .list ? NXTheme.primary.opacity(0.5) : Color.clear)
-                    .cornerRadius(6)
+        NXGlassContainer(spacing: 4) {
+            HStack(spacing: 3) {
+                modeToggleButton(
+                    mode: .list,
+                    icon: "list.bullet",
+                    helpText: L10n.t("compatibility.list_view")
+                )
+                modeToggleButton(
+                    mode: .grid,
+                    icon: "square.grid.2x2",
+                    helpText: L10n.t("compatibility.grid_view")
+                )
             }
-            .buttonStyle(.plain)
-            .help(L10n.t("compatibility.list_view"))
-            
-            Button(action: {
-                SoundEffectService.shared.play(.click)
-                viewModel.compatibilityDisplayMode = .grid
-            }) {
-                Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 11, weight: viewModel.compatibilityDisplayMode == .grid ? .bold : .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 5)
-                    .background(viewModel.compatibilityDisplayMode == .grid ? NXTheme.primary.opacity(0.5) : Color.clear)
-                    .cornerRadius(6)
+            .background {
+                NXLiquidSlidingPill(in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .matchedGeometryEffect(
+                        id: viewModel.compatibilityDisplayMode,
+                        in: displayModeNamespace,
+                        properties: .frame,
+                        anchor: .center,
+                        isSource: false
+                    )
+                    .animation(.spring(response: 0.32, dampingFraction: 0.76), value: viewModel.compatibilityDisplayMode)
             }
-            .buttonStyle(.plain)
-            .help(L10n.t("compatibility.grid_view"))
+            .padding(3)
+            .nxGlassCard(cornerRadius: 10, isNested: true)
         }
-        .padding(2)
-        .background(NXTheme.glassSurfaceElevated.opacity(0.6))
-        .cornerRadius(8)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
-        )
+    }
+    
+    private func modeToggleButton(mode: CompatibilityDisplayMode, icon: String, helpText: String) -> some View {
+        let isSelected = viewModel.compatibilityDisplayMode == mode
+        return Button(action: {
+            guard viewModel.compatibilityDisplayMode != mode else { return }
+            SoundEffectService.shared.play(.click)
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.76)) {
+                viewModel.compatibilityDisplayMode = mode
+            }
+        }) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: isSelected ? .bold : .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5.5)
+                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(NXPressableButtonStyle())
+        .help(helpText)
+        .nxNoFocusRing()
+        .matchedGeometryEffect(id: mode, in: displayModeNamespace, isSource: true)
     }
     
     private func formattedTime(_ date: Date) -> String {

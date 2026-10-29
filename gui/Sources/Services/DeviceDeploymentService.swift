@@ -98,7 +98,8 @@ public final class DeviceDeploymentService: ObservableObject {
     internal var elapsedTimer: Timer? = nil
 
     private init() {
-        refreshDevicesAndTeams()
+        // Do not eagerly run xcrun/security/defaults subprocesses on launch.
+        // Discovery is triggered when opening the iOS deployment view or explicit refresh.
     }
 
     public func refreshDevicesAndTeams() {

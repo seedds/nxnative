@@ -20,7 +20,18 @@ extension AppViewModel {
             list = list.filter { $0.minRamGB <= maxRam }
         }
         
-        if compatibilityNameFilter != "All" && !compatibilityNameFilter.isEmpty {
+        if let maxChip = compatibilityChipFilter {
+            list = list.filter { $0.minChipTier <= maxChip }
+        }
+        
+        if compatibilityNameFilter == "New" {
+            list = list.sorted { lhs, rhs in
+                if lhs.addedTimestamp != rhs.addedTimestamp {
+                    return lhs.addedTimestamp > rhs.addedTimestamp
+                }
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            }
+        } else if compatibilityNameFilter != "All" && !compatibilityNameFilter.isEmpty {
             if compatibilityNameFilter == "#" {
                 list = list.filter { game in
                     guard let first = game.title.trimmingCharacters(in: .whitespaces).first else { return false }

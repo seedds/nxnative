@@ -20,17 +20,31 @@ public struct CompatibleGameRow: View {
     }
     
     public var body: some View {
-        GlassCard(padding: 10) {
+        GlassCard(padding: 10, tint: isRowFocused ? NXTheme.primary.opacity(0.28) : nil) {
             HStack(spacing: 14) {
                 // Official Cover Art / Box Art
                 coverArtView
                 
                 // Game Details
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(game.title)
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundColor(isRowFocused ? .white : NXTheme.textPrimary)
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(game.title)
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundColor(isRowFocused ? .white : NXTheme.textPrimary)
+                            .lineLimit(1)
+                        
+                        if game.isNew {
+                            Text(L10n.t("compatibility.new_badge"))
+                                .font(.system(size: 8.5, weight: .heavy, design: .rounded))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(
+                                    Capsule()
+                                        .fill(NXTheme.primaryGradient)
+                                )
+                        }
+                    }
                     
                     Text("Ver: \(game.versionTested)")
                         .font(.system(size: 10, design: .monospaced))

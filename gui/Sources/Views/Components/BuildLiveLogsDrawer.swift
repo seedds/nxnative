@@ -23,7 +23,7 @@ public struct BuildLiveLogsDrawer: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 3) {
                         let recentLogs = viewModel.logs.suffix(60)
-                        ForEach(Array(recentLogs.enumerated()), id: \.offset) { idx, log in
+                        ForEach(Array(recentLogs), id: \.id) { log in
                             HStack(alignment: .top, spacing: 6) {
                                 Text(log.message)
                                     .font(.system(size: 10, design: .monospaced))
@@ -32,7 +32,7 @@ public struct BuildLiveLogsDrawer: View {
                                     .textSelection(.enabled)
                                 Spacer()
                             }
-                            .id(idx)
+                            .id(log.id)
                         }
                     }
                     .padding(8)

@@ -88,7 +88,6 @@ public struct GameRuntimeConfig: Codable, Equatable {
     }
     
     public func applyToDisk(for game: PortedGame) {
-        let content = envFileContent()
         let fm = FileManager.default
         
         // 1. Write to ~/Library/Application Support/nxnative/<titleId>/env.txt (both cases to avoid mismatch)
@@ -101,6 +100,8 @@ public struct GameRuntimeConfig: Codable, Equatable {
                     .appendingPathComponent(tid)
                 try? fm.createDirectory(at: appSupDir, withIntermediateDirectories: true)
                 let envFile = appSupDir.appendingPathComponent("env.txt")
+                let existing = try? String(contentsOf: envFile, encoding: .utf8)
+                let content = mergedEnvContent(existing: existing)
                 try? content.write(to: envFile, atomically: true, encoding: .utf8)
             }
         }
@@ -109,8 +110,34 @@ public struct GameRuntimeConfig: Codable, Equatable {
         let dmDir = game.url.appendingPathComponent("Contents/Resources/dm")
         if fm.fileExists(atPath: dmDir.path) {
             let bundleEnv = dmDir.appendingPathComponent("env.txt")
+            let existing = try? String(contentsOf: bundleEnv, encoding: .utf8)
+            let content = mergedEnvContent(existing: existing)
             try? content.write(to: bundleEnv, atomically: true, encoding: .utf8)
         }
+    }
+
+    private func mergedEnvContent(existing: String?) -> String {
+        let managedKeys = ["DM_FPS_TARGET", "DM_METAL_HUD", "DM_OPMODE", "DM_RENDER_SCALE", "DM_PRESENT_UPSCALE"]
+        var preservedLines: [String] = []
+        if let existing = existing {
+            for line in existing.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty || trimmed.hasPrefix("#") {
+                    continue
+                }
+                let isManaged = managedKeys.contains { k in
+                    trimmed.hasPrefix("\(k)=")
+                }
+                if !isManaged {
+                    preservedLines.append(trimmed)
+                }
+            }
+        }
+        var outputLines = envFileContent().components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        for preserved in preservedLines {
+            outputLines.append(preserved)
+        }
+        return outputLines.joined(separator: "\n") + "\n"
     }
     
     private static func parseEnvContent(_ text: String) -> GameRuntimeConfig {

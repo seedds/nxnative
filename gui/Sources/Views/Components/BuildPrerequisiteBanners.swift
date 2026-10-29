@@ -60,18 +60,7 @@ public struct BuildPrerequisiteBanners: View {
             }
         }
         .padding(12)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(NXTheme.tertiary.opacity(0.12))
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            }
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(NXTheme.tertiary.opacity(0.4), lineWidth: 1)
-        )
+        .nxGlassCard(cornerRadius: 12, tint: NXTheme.tertiary.opacity(0.28))
     }
     
     private var prodKeysMissingBanner: some View {
@@ -98,18 +87,7 @@ public struct BuildPrerequisiteBanners: View {
             .controlSize(.regular)
         }
         .padding(12)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(NXTheme.tertiary.opacity(0.12))
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            }
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(NXTheme.tertiary.opacity(0.4), lineWidth: 1)
-        )
+        .nxGlassCard(cornerRadius: 12, tint: NXTheme.tertiary.opacity(0.28))
     }
     
     private var cltMissingBanner: some View {
@@ -136,18 +114,7 @@ public struct BuildPrerequisiteBanners: View {
             .controlSize(.regular)
         }
         .padding(12)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(NXTheme.tertiary.opacity(0.12))
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            }
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(NXTheme.tertiary.opacity(0.4), lineWidth: 1)
-        )
+        .nxGlassCard(cornerRadius: 12, tint: NXTheme.tertiary.opacity(0.28))
     }
     
     private var homebrewMissingBanner: some View {
@@ -174,18 +141,7 @@ public struct BuildPrerequisiteBanners: View {
             .controlSize(.regular)
         }
         .padding(12)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(NXTheme.tertiary.opacity(0.12))
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            }
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(NXTheme.tertiary.opacity(0.4), lineWidth: 1)
-        )
+        .nxGlassCard(cornerRadius: 12, tint: NXTheme.tertiary.opacity(0.28))
     }
     
     private var dependenciesMissingBanner: some View {
@@ -212,17 +168,6 @@ public struct BuildPrerequisiteBanners: View {
             .controlSize(.regular)
         }
         .padding(12)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(NXTheme.tertiary.opacity(0.12))
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            }
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(NXTheme.tertiary.opacity(0.4), lineWidth: 1)
-        )
+        .nxGlassCard(cornerRadius: 12, tint: NXTheme.tertiary.opacity(0.28))
     }
 }

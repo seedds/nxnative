@@ -83,14 +83,7 @@ public struct SystemToolsCard: View {
                         .disabled(viewModel.isInstallingDependency)
                     }
                     .padding(12)
-                    .background(
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(NXTheme.tertiary.opacity(0.12))
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(.ultraThinMaterial)
-                        }
-                    )
+                    .nxGlassCard(cornerRadius: 10, isNested: true)
                     .overlay(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .strokeBorder(NXTheme.tertiary.opacity(0.35), lineWidth: 1)

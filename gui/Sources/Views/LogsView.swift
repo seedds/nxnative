@@ -3,6 +3,8 @@ import AppKit
 
 public struct LogsView: View {
     @ObservedObject public var viewModel: AppViewModel
+    @Environment(\.nxLiquidGlass) private var glassEnv
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var searchText: String = ""
     @State private var autoScroll: Bool = true
     
@@ -17,39 +19,81 @@ public struct LogsView: View {
         return viewModel.logs.filter { $0.message.localizedCaseInsensitiveContains(searchText) }
     }
     
+    private var useFloatingGlass: Bool {
+        glassEnv.isSupportedAndEnabled && !reduceTransparency
+    }
+    
     public var body: some View {
-        VStack(spacing: 0) {
-            // MARK: - Logs Toolbar (Liquid Glass)
-            HStack(spacing: 12) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(NXTheme.textSecondary)
-                    TextField(viewModel.tr("logs.filter"), text: $searchText)
-                        .textFieldStyle(.plain)
-                        .foregroundColor(NXTheme.textPrimary)
-                    if !searchText.isEmpty {
-                        Button(action: { searchText = "" }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(NXTheme.textMuted)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    if filteredLogs.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "terminal")
+                                .font(.system(size: 28))
+                                .foregroundColor(NXTheme.secondary.opacity(0.4))
+                            Text(viewModel.tr("logs.empty"))
+                                .font(.system(size: 12))
+                                .foregroundColor(NXTheme.textSecondary)
                         }
-                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity, minHeight: 260)
+                    } else {
+                        ForEach(filteredLogs) { entry in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(entry.formattedTimestamp)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(NXTheme.textMuted)
+                                
+                                Image(systemName: entry.level.sfSymbol)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(textColorFor(entry.level))
+                                    .padding(.top, 2)
+                                
+                                Text(entry.message)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(textColorFor(entry.level))
+                                    .textSelection(.enabled)
+                                
+                                Spacer()
+                            }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 2)
+                            .id(entry.id)
+                        }
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(NXTheme.glassSurfaceElevated.opacity(0.8))
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(.ultraThinMaterial)
+                .padding(.vertical, 12)
+            }
+            .nxScrollEdgeEffect(edges: [.top, .bottom])
+            .safeAreaInset(edge: .top, spacing: 0) {
+                logsToolbar
+            }
+            .background(
+                Group {
+                    if !useFloatingGlass {
+                        NXTheme.canvasObsidian.opacity(0.5)
                     }
+                }
+            )
+            .onChange(of: viewModel.logs.count) { _ in
+                if autoScroll, let last = filteredLogs.last {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+        }
+    }
+    
+    private var logsToolbar: some View {
+        NXGlassContainer(spacing: 10) {
+            HStack(spacing: 12) {
+                NXLiquidGlassSearchField(
+                    viewModel.tr("logs.filter"),
+                    text: $searchText
                 )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
-                )
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
                 .frame(maxWidth: 260)
+                .nxGlassCard(cornerRadius: 16, isNested: true)
                 
                 Spacer()
                 
@@ -64,6 +108,7 @@ public struct LogsView: View {
                 .controlSize(.small)
                 
                 Button(action: {
+                    SoundEffectService.shared.play(.click)
                     viewModel.logs.removeAll()
                 }) {
                     Label(viewModel.tr("logs.clear"), systemImage: "trash")
@@ -71,70 +116,13 @@ public struct LogsView: View {
                 .buttonStyle(NXSecondaryButtonStyle())
                 .controlSize(.small)
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 10)
-            .background(
-                ZStack {
-                    NXTheme.canvasObsidian.opacity(0.6)
-                    Rectangle().fill(.ultraThinMaterial)
-                }
-            )
-            .overlay(
-                Rectangle()
-                    .frame(height: 1)
-                    .foregroundColor(NXTheme.borderSubtle),
-                alignment: .bottom
-            )
-            
-            // MARK: - Logs Stream
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 4) {
-                        if filteredLogs.isEmpty {
-                            VStack(spacing: 8) {
-                                Image(systemName: "terminal")
-                                    .font(.system(size: 28))
-                                    .foregroundColor(NXTheme.secondary.opacity(0.4))
-                                Text(viewModel.tr("logs.empty"))
-                                    .font(.system(size: 12))
-                                    .foregroundColor(NXTheme.textSecondary)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 260)
-                        } else {
-                            ForEach(filteredLogs) { entry in
-                                HStack(alignment: .top, spacing: 8) {
-                                    Text(entry.formattedTimestamp)
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundColor(NXTheme.textMuted)
-                                    
-                                    Image(systemName: entry.level.sfSymbol)
-                                        .font(.system(size: 10))
-                                        .foregroundColor(textColorFor(entry.level))
-                                        .padding(.top, 2)
-                                    
-                                    Text(entry.message)
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundColor(textColorFor(entry.level))
-                                        .textSelection(.enabled)
-                                    
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 2)
-                                .id(entry.id)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 10)
-                }
-                .background(NXTheme.canvasObsidian.opacity(0.5))
-                .onChange(of: viewModel.logs.count) { _ in
-                    if autoScroll, let last = filteredLogs.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .modifier(LogsToolbarSurfaceModifier(useFloatingGlass: useFloatingGlass))
         }
+        .padding(.horizontal, useFloatingGlass ? 16 : 0)
+        .padding(.top, useFloatingGlass ? 4 : 0)
+        .padding(.bottom, useFloatingGlass ? 6 : 0)
     }
     
     private func textColorFor(_ level: LogLevel) -> Color {
@@ -152,5 +140,29 @@ public struct LogsView: View {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(full, forType: .string)
+    }
+}
+
+private struct LogsToolbarSurfaceModifier: ViewModifier {
+    let useFloatingGlass: Bool
+    
+    func body(content: Content) -> some View {
+        if useFloatingGlass {
+            content.nxGlassBar(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        } else {
+            content
+                .background(
+                    ZStack {
+                        NXTheme.canvasObsidian.opacity(0.6)
+                        Rectangle().fill(.ultraThinMaterial)
+                    }
+                )
+                .overlay(
+                    Rectangle()
+                        .frame(height: 1)
+                        .foregroundColor(NXTheme.borderSubtle),
+                    alignment: .bottom
+                )
+        }
     }
 }

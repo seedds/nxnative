@@ -30,8 +30,7 @@ public struct GameSettingsSavesSectionView: View {
             }
         }
         .padding(14)
-        .background(NXTheme.glassSurface.opacity(0.6))
-        .cornerRadius(12)
+        .nxGlassCard(cornerRadius: 14)
     }
 
     private var iCloudCrossSaveCard: some View {
@@ -93,8 +92,7 @@ public struct GameSettingsSavesSectionView: View {
                 .help(L10n.t("settings_modal.icloud_folder_help"))
             }
             .padding(10)
-            .background(NXTheme.glassSurfaceElevated.opacity(0.7))
-            .cornerRadius(8)
+            .nxGlassCard(cornerRadius: 10, isNested: true)
 
             if let status = backupStatusText {
                 Text(status)

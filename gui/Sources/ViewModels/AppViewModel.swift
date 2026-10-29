@@ -15,6 +15,9 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         public static let savedPlatform = "NXNative_SavedPlatform"
         public static let savedIconAppearanceMode = "NXNative_SavedIconAppearanceMode_v2"
         public static let savedHighlightTheme = "NXNative_SavedHighlightTheme"
+        public static let savedLiquidGlassEnabled = "NXNative_SavedLiquidGlassEnabled"
+        public static let savedLiquidGlassAppearance = "NXNative_SavedLiquidGlassAppearance"
+        public static let savedLiquidGlassIntensity = "NXNative_SavedLiquidGlassIntensity"
         public static let savedCompatibilityDisplayMode = "NXNative_SavedCompatibilityDisplayMode"
         public static let savedLibraryCardSize = "NXNative_SavedLibraryCardSize"
         public static let savedLibraryCardScale = "NXNative_SavedLibraryCardScale"
@@ -122,6 +125,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         }
     }
     @Published public var activeSettingsConfig: GameRuntimeConfig = GameRuntimeConfig()
+    internal var runtimeConfigCache: [String: GameRuntimeConfig] = [:]
     @Published public var settingsModalFocusIndex: Int = 0
     @Published public var gameToDelete: PortedGame? = nil
     @Published public var showDeleteConfirm: Bool = false
@@ -140,6 +144,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var isLoadingCompatibility: Bool = false
     @Published public var compatibilityFilter: String = "All"
     @Published public var compatibilityRamFilter: Int? = nil
+    @Published public var compatibilityChipFilter: IphoneChipTier? = nil
     @Published public var compatibilityNameFilter: String = "All"
     @Published public var compatibilitySearchText: String = ""
     @Published public var compatibilityLastUpdated: Date? = nil
@@ -216,6 +221,37 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
             UserDefaults.standard.set(highlightTheme.rawValue, forKey: StorageKeys.savedHighlightTheme)
         }
     }
+    @Published public var isLiquidGlassEnabled: Bool = NXTheme.isLiquidGlassEnabled {
+        didSet {
+            NXTheme.isLiquidGlassEnabled = isLiquidGlassEnabled
+            UserDefaults.standard.set(isLiquidGlassEnabled, forKey: StorageKeys.savedLiquidGlassEnabled)
+        }
+    }
+    @Published public var liquidGlassAppearance: LiquidGlassAppearance = NXTheme.liquidGlassAppearance {
+        didSet {
+            NXTheme.liquidGlassAppearance = liquidGlassAppearance
+            UserDefaults.standard.set(liquidGlassAppearance.rawValue, forKey: StorageKeys.savedLiquidGlassAppearance)
+        }
+    }
+    @Published public var liquidGlassIntensity: Double = NXTheme.liquidGlassIntensity {
+        didSet {
+            let clamped = min(max(liquidGlassIntensity, 0.0), 1.0)
+            NXTheme.liquidGlassIntensity = clamped
+            UserDefaults.standard.set(clamped, forKey: StorageKeys.savedLiquidGlassIntensity)
+            let derivedMode: LiquidGlassAppearance = clamped >= 0.5 ? .liquid : .frosted
+            if liquidGlassAppearance != derivedMode {
+                liquidGlassAppearance = derivedMode
+            }
+        }
+    }
+    public var liquidGlassEnvironment: NXLiquidGlassEnvironment {
+        NXLiquidGlassEnvironment(
+            isEnabled: isLiquidGlassEnabled,
+            appearance: liquidGlassAppearance,
+            intensity: liquidGlassIntensity,
+            highlightTheme: highlightTheme
+        )
+    }
     @Published public var launcherLanguage: AppLanguage = .system {
         didSet {
             UserDefaults.standard.set(launcherLanguage.rawValue, forKey: StorageKeys.savedLauncherLanguage)
@@ -230,6 +266,19 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var isGameActionMenuPresented: Bool = false
     @Published public var gameActionFocusedIndex: Int = 0
     @Published public var launchingGameId: UUID? = nil
+    @Published public var runningGameTitle: String? = nil
+
+    public func trimHistoricalLogs(keepCount: Int = 200) {
+        if logs.count > keepCount {
+            logs = Array(logs.suffix(keepCount))
+        }
+        if installerLogs.count > keepCount {
+            installerLogs = Array(installerLogs.suffix(keepCount))
+        }
+        if updateInstallLogs.count > keepCount {
+            updateInstallLogs = Array(updateInstallLogs.suffix(keepCount))
+        }
+    }
     
     public var availableLanguages: [(code: String, label: String)] {
         Self.availableLanguages
@@ -285,6 +334,24 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
             NXTheme.activeHighlightTheme = theme
             self.highlightTheme = theme
         }
+        if let savedGlassEnabled = UserDefaults.standard.object(forKey: StorageKeys.savedLiquidGlassEnabled) as? Bool {
+            NXTheme.isLiquidGlassEnabled = savedGlassEnabled
+            self.isLiquidGlassEnabled = savedGlassEnabled
+        }
+        if let savedGlassMode = UserDefaults.standard.string(forKey: StorageKeys.savedLiquidGlassAppearance),
+           let glassMode = LiquidGlassAppearance(rawValue: savedGlassMode) {
+            NXTheme.liquidGlassAppearance = glassMode
+            self.liquidGlassAppearance = glassMode
+        }
+        if let savedIntensity = UserDefaults.standard.object(forKey: StorageKeys.savedLiquidGlassIntensity) as? Double {
+            let clamped = min(max(savedIntensity, 0.0), 1.0)
+            NXTheme.liquidGlassIntensity = clamped
+            self.liquidGlassIntensity = clamped
+        } else {
+            let fallback = self.liquidGlassAppearance == .liquid ? 1.0 : 0.0
+            NXTheme.liquidGlassIntensity = fallback
+            self.liquidGlassIntensity = fallback
+        }
         if let savedDisplay = UserDefaults.standard.string(forKey: StorageKeys.savedCompatibilityDisplayMode),
            let dispMode = CompatibilityDisplayMode(rawValue: savedDisplay) {
             self.compatibilityDisplayMode = dispMode
@@ -326,5 +393,10 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         
         NotificationService.shared.requestAuthorization()
         setupControllerNavigation()
+        
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            MenuBarManager.shared.configure(with: self)
+        }
     }
 }

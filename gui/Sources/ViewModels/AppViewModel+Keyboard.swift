@@ -41,25 +41,19 @@ extension AppViewModel {
         // Tab switching: Direct number keys 1-7
         if let num = Int(key), (1...7).contains(num) {
             SoundEffectService.shared.play(.tabSwitch)
-            withAnimation(.easeInOut(duration: 0.18)) {
-                selectedTab = num - 1
-            }
+            selectedTab = num - 1
             return
         }
         
         // Tab cycling: Tab key, [ and ]
         if key == "tab" || key == "]" {
             SoundEffectService.shared.play(.tabSwitch)
-            withAnimation(.easeInOut(duration: 0.18)) {
-                selectedTab = (selectedTab + 1) % 7
-            }
+            selectedTab = (selectedTab + 1) % 7
             return
         }
         if key == "shifttab" || key == "[" {
             SoundEffectService.shared.play(.tabSwitch)
-            withAnimation(.easeInOut(duration: 0.18)) {
-                selectedTab = (selectedTab - 1 + 7) % 7
-            }
+            selectedTab = (selectedTab - 1 + 7) % 7
             return
         }
         
@@ -108,6 +102,14 @@ extension AppViewModel {
                 var prof = InputProfileManager.shared.activeProfile
                 prof.swapFaceButtons()
                 InputProfileManager.shared.updateProfile(prof)
+            }
+        case "g":
+            if selectedTab == 4 {
+                handleSecondaryAction()
+            }
+        case "m":
+            if selectedTab == 4 {
+                handleContextAction()
             }
         default:
             break

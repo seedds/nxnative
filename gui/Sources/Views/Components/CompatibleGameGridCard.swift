@@ -20,7 +20,7 @@ public struct CompatibleGameGridCard: View {
     }
     
     public var body: some View {
-        GlassCard(padding: 10) {
+        GlassCard(padding: 10, tint: isCardFocused ? NXTheme.primary.opacity(0.28) : nil) {
             VStack(alignment: .leading, spacing: 8) {
                 // MARK: - Game Cover Art in Portrait (1:1.35 ratio)
                 coverArtView
@@ -28,6 +28,21 @@ public struct CompatibleGameGridCard: View {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .stroke(NXTheme.specularRim, lineWidth: 0.8)
                     )
+                    .overlay(alignment: .topTrailing) {
+                        if item.isNew {
+                            Text(L10n.t("compatibility.new_badge"))
+                                .font(.system(size: 8.5, weight: .heavy, design: .rounded))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule()
+                                        .fill(NXTheme.primaryGradient)
+                                )
+                                .shadow(color: Color.black.opacity(0.45), radius: 3, x: 0, y: 1)
+                                .padding(6)
+                        }
+                    }
                 
                 // MARK: - Title (Fixed height for uniform grid)
                 Text(item.title)
@@ -98,8 +113,6 @@ public struct CompatibleGameGridCard: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 318)
-        .clipped()
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(isCardFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(Color.clear), lineWidth: 2)
@@ -107,23 +120,37 @@ public struct CompatibleGameGridCard: View {
         .shadow(color: isCardFocused ? NXTheme.primary.opacity(0.4) : Color.clear, radius: 8, x: 0, y: 3)
     }
     
-    // MARK: - Cover Art Loader (Strictly authentic portrait cover)
+    // MARK: - Game Cover Art (1:1 Square matching Play Screen)
     @ViewBuilder
     private var coverArtView: some View {
-        GeometryReader { geo in
-            if let localImg = GameCoverService.shared.coverImage(titleId: item.titleId, gameName: item.title) {
-                Image(nsImage: localImg)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .clipped()
-            } else {
-                fallbackIcon
-                    .frame(width: geo.size.width, height: geo.size.height)
-            }
-        }
-        .frame(height: 185)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        let coverImg = ArtworkStore.shared.loadSquareIcon(titleId: item.titleId, gameName: item.title)
+            ?? GameCoverService.shared.coverImage(titleId: item.titleId, gameName: item.title)
+        
+        Color.clear
+            .aspectRatio(1.0, contentMode: .fit)
+            .overlay(
+                GeometryReader { geo in
+                    let side = min(geo.size.width, geo.size.height)
+                    Group {
+                        if let img = coverImg {
+                            Image(nsImage: img)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: side, height: side, alignment: .top)
+                                .clipped()
+                        } else {
+                            fallbackIcon
+                                .frame(width: side, height: side)
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(NXTheme.specularRim, lineWidth: 0.8)
+            )
     }
     
     private var fallbackIcon: some View {

@@ -13,29 +13,30 @@ public struct SimpleKeyboardMappingView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             // MARK: - Presets Bar
-            HStack(spacing: 10) {
-                Text(L10n.t("controls.keyboard_presets"))
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundColor(NXTheme.textPrimary)
+            NXGlassContainer(spacing: 8) {
+                HStack(spacing: 10) {
+                    Text(L10n.t("controls.keyboard_presets"))
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundColor(NXTheme.textPrimary)
 
-                Button(L10n.t("controls.preset_wasd")) {
-                    applyDefaultPreset()
+                    Button(L10n.t("controls.preset_wasd")) {
+                        applyDefaultPreset()
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .controlSize(.small)
+
+                    Button(L10n.t("controls.preset_arrows")) {
+                        applyArrowsPreset()
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .controlSize(.small)
+
+                    Spacer()
                 }
-                .buttonStyle(NXSecondaryButtonStyle())
-                .controlSize(.small)
-
-                Button(L10n.t("controls.preset_arrows")) {
-                    applyArrowsPreset()
-                }
-                .buttonStyle(NXSecondaryButtonStyle())
-                .controlSize(.small)
-
-                Spacer()
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .nxGlassCard(cornerRadius: 10, isNested: true)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(NXTheme.glassSurfaceElevated.opacity(0.6))
-            .cornerRadius(10)
 
             // MARK: - Mapping Sections Grid
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 16) {
@@ -102,17 +103,12 @@ public struct SimpleKeyboardMappingView: View {
                     .foregroundColor(NXTheme.textPrimary)
                 Spacer()
             }
-            content()
+            NXGlassContainer(spacing: 6) {
+                content()
+            }
         }
         .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(NXTheme.glassSurfaceElevated.opacity(0.7))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
-        )
+        .nxGlassCard(cornerRadius: 12, isNested: true)
     }
 
     private func buttonRow(btn: SwitchButton, defaultKey: String) -> some View {
@@ -155,19 +151,20 @@ public struct SimpleKeyboardMappingView: View {
         Button(action: action) {
             Text(text)
                 .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundColor(isListening ? NXTheme.secondary : NXTheme.textPrimary)
+                .foregroundColor(isListening ? .white : NXTheme.textPrimary)
                 .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(isListening ? NXTheme.primary.opacity(0.3) : Color(white: 0.16))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .strokeBorder(isListening ? NXTheme.secondary : Color.white.opacity(0.2), lineWidth: isListening ? 1.5 : 0.8)
+                .padding(.vertical, 4.5)
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .nxGlassInteractive(
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous),
+                    tint: isListening ? NXTheme.primary.opacity(0.68) : nil,
+                    isSelected: isListening,
+                    fallbackFill: Color(white: 0.16),
+                    fallbackSelectedFill: NXTheme.primary.opacity(0.32)
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NXPressableButtonStyle())
+        .nxNoFocusRing()
     }
 
     private func handleCapturedKey(keyCode: UInt16, keyName: String) {

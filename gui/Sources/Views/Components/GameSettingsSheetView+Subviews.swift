@@ -6,46 +6,45 @@ import UniformTypeIdentifiers
 extension GameSettingsSheetView {
     
     func footerBar(onDismiss: @escaping () -> Void) -> some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                Button(viewModel.tr("personalization.reset_defaults")) {
-                    viewModel.activeSettingsConfig = GameRuntimeConfig()
+        let footerContent = VStack(spacing: 10) {
+            NXGlassContainer(spacing: 10) {
+                HStack(spacing: 12) {
+                    Button(viewModel.tr("personalization.reset_defaults")) {
+                        viewModel.activeSettingsConfig = GameRuntimeConfig()
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .controlSize(.regular)
+                    .overlay(
+                        Capsule()
+                            .stroke(viewModel.settingsModalFocusIndex == 5 ? NXTheme.secondary : Color.clear, lineWidth: 2)
+                    )
+                    
+                    Spacer()
+                    
+                    Button(viewModel.tr("common.cancel")) {
+                        viewModel.gameForSettingsSheet = nil
+                        onDismiss()
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .controlSize(.regular)
+                    .overlay(
+                        Capsule()
+                            .stroke(viewModel.settingsModalFocusIndex == 6 ? NXTheme.secondary : Color.clear, lineWidth: 2)
+                    )
+                    
+                    Button(viewModel.tr("common.save")) {
+                        viewModel.saveRuntimeConfig(viewModel.activeSettingsConfig, for: game)
+                        viewModel.gameForSettingsSheet = nil
+                        onDismiss()
+                    }
+                    .buttonStyle(NXPrimaryButtonStyle())
+                    .controlSize(.regular)
+                    .overlay(
+                        Capsule()
+                            .stroke(viewModel.settingsModalFocusIndex == 7 ? Color.white : Color.clear, lineWidth: 2)
+                    )
+                    .shadow(color: viewModel.settingsModalFocusIndex == 7 ? NXTheme.primary.opacity(0.8) : Color.clear, radius: 8)
                 }
-                .buttonStyle(NXSecondaryButtonStyle())
-                .controlSize(.regular)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(viewModel.settingsModalFocusIndex == 5 ? NXTheme.secondary : Color.clear, lineWidth: 2)
-                )
-                
-                Spacer()
-                
-                Button(viewModel.tr("common.cancel")) {
-                    viewModel.gameForSettingsSheet = nil
-                    onDismiss()
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(viewModel.settingsModalFocusIndex == 6 ? NXTheme.secondary : NXTheme.textSecondary)
-                .font(.system(size: 12, weight: viewModel.settingsModalFocusIndex == 6 ? .bold : .regular))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(viewModel.settingsModalFocusIndex == 6 ? NXTheme.secondary : Color.clear, lineWidth: 1.5)
-                )
-                
-                Button(viewModel.tr("common.save")) {
-                    viewModel.saveRuntimeConfig(viewModel.activeSettingsConfig, for: game)
-                    viewModel.gameForSettingsSheet = nil
-                    onDismiss()
-                }
-                .buttonStyle(NXPrimaryButtonStyle())
-                .controlSize(.regular)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(viewModel.settingsModalFocusIndex == 7 ? Color.white : Color.clear, lineWidth: 2)
-                )
-                .shadow(color: viewModel.settingsModalFocusIndex == 7 ? NXTheme.primary.opacity(0.8) : Color.clear, radius: 8)
             }
             
             // Controller navigation hints strip
@@ -68,22 +67,36 @@ extension GameSettingsSheetView {
                     bgColor: Color(red: 0.91, green: 0.07, blue: 0.14)
                 )
             }
-            .padding(.top, 4)
+            .padding(.top, 2)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
-        .background(
-            ZStack {
-                NXTheme.glassSurfaceElevated.opacity(0.85)
-                Rectangle().fill(.ultraThinMaterial)
+        
+        return Group {
+            if useLiquidGlass {
+                footerContent
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .nxGlassBar(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+                    .padding(.bottom, 10)
+            } else {
+                footerContent
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                    .background(
+                        ZStack {
+                            NXTheme.glassSurfaceElevated.opacity(0.85)
+                            Rectangle().fill(.ultraThinMaterial)
+                        }
+                    )
+                    .overlay(
+                        Rectangle()
+                            .frame(height: 1)
+                            .foregroundColor(NXTheme.borderSubtle),
+                        alignment: .top
+                    )
             }
-        )
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundColor(NXTheme.borderSubtle),
-            alignment: .top
-        )
+        }
     }
     
     func hintBadge(glyph: String, text: String, isPill: Bool = false, bgColor: Color = Color(white: 0.25)) -> some View {
@@ -142,20 +155,17 @@ extension GameSettingsSheetView {
             content()
         }
         .padding(14)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isFocused ? NXTheme.glassSurfaceElevated.opacity(0.9) : NXTheme.glassSurfaceElevated.opacity(0.65))
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            }
+        .nxGlassCard(
+            cornerRadius: 14,
+            tint: isFocused ? NXTheme.primary.opacity(0.28) : nil
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(
-                    isFocused ? AnyShapeStyle(NXTheme.primaryGradient) : AnyShapeStyle(NXTheme.specularRim),
-                    lineWidth: isFocused ? 2.5 : 0.8
-                )
+            Group {
+                if isFocused {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(NXTheme.primaryGradient, lineWidth: 2.2)
+                }
+            }
         )
         .shadow(color: isFocused ? NXTheme.primary.opacity(0.4) : Color.clear, radius: 8, x: 0, y: 2)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
@@ -206,33 +216,35 @@ extension GameSettingsSheetView {
                     Text(isCustom
                          ? viewModel.tr("settings_modal.cover_custom_desc")
                          : viewModel.tr("settings_modal.cover_auto_desc"))
-                        .font(.system(size: 11))
-                        .foregroundColor(NXTheme.textSecondary)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(viewModel.settingsModalFocusIndex == 5 ? .white : .white.opacity(0.88))
                         .fixedSize(horizontal: false, vertical: true)
                     
-                    HStack(spacing: 8) {
-                        Button(viewModel.tr("settings_modal.cover_choose_btn")) {
-                            let panel = NSOpenPanel()
-                            panel.title = viewModel.tr("settings_modal.cover_panel_title")
-                            panel.allowedContentTypes = [.jpeg, .png, .webP, .image]
-                            panel.allowsMultipleSelection = false
-                            panel.canChooseDirectories = false
-                            if panel.runModal() == .OK, let url = panel.url {
-                                SoundEffectService.shared.play(.click)
-                                _ = GameCoverService.shared.setCustomCover(imageURL: url, for: game)
-                            }
-                        }
-                        .buttonStyle(NXSecondaryButtonStyle())
-                        .controlSize(.small)
-                        
-                        if isCustom {
-                            Button(viewModel.tr("settings_modal.cover_reset_btn")) {
-                                SoundEffectService.shared.play(.click)
-                                GameCoverService.shared.resetCustomCover(for: game)
+                    NXGlassContainer(spacing: 8) {
+                        HStack(spacing: 8) {
+                            Button(viewModel.tr("settings_modal.cover_choose_btn")) {
+                                let panel = NSOpenPanel()
+                                panel.title = viewModel.tr("settings_modal.cover_panel_title")
+                                panel.allowedContentTypes = [.jpeg, .png, .webP, .image]
+                                panel.allowsMultipleSelection = false
+                                panel.canChooseDirectories = false
+                                if panel.runModal() == .OK, let url = panel.url {
+                                    SoundEffectService.shared.play(.click)
+                                    _ = GameCoverService.shared.setCustomCover(imageURL: url, for: game)
+                                }
                             }
                             .buttonStyle(NXSecondaryButtonStyle())
                             .controlSize(.small)
-                            .foregroundColor(Color(red: 1.0, green: 0.4, blue: 0.4))
+                            
+                            if isCustom {
+                                Button(viewModel.tr("settings_modal.cover_reset_btn")) {
+                                    SoundEffectService.shared.play(.click)
+                                    GameCoverService.shared.resetCustomCover(for: game)
+                                }
+                                .buttonStyle(NXSecondaryButtonStyle())
+                                .controlSize(.small)
+                                .foregroundColor(Color(red: 1.0, green: 0.4, blue: 0.4))
+                            }
                         }
                     }
                     .padding(.top, 2)
@@ -245,38 +257,49 @@ extension GameSettingsSheetView {
     func gameManagementSection() -> some View {
         GlassCard(padding: 14) {
             VStack(alignment: .leading, spacing: 10) {
-                Label(viewModel.tr("settings_modal.management_title"), systemImage: "gearshape.2.fill")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundColor(NXTheme.textPrimary)
+                HStack {
+                    Label(viewModel.tr("settings_modal.management_title"), systemImage: "gearshape.2.fill")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundColor(NXTheme.textPrimary)
+                    Spacer()
+                }
                 
                 Text(viewModel.tr("settings_modal.management_desc"))
-                    .font(.system(size: 11))
-                    .foregroundColor(NXTheme.textSecondary)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.88))
                 
                 HStack(spacing: 12) {
-                    Button(action: {
-                        dismissSettingsAndShowRemove()
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "eye.slash")
-                            Text(viewModel.tr("actions.remove_from_library"))
-                        }
-                    }
-                    .buttonStyle(NXSecondaryButtonStyle())
+                    Spacer()
                     
-                    Button(action: {
-                        dismissSettingsAndShowTrash()
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "trash.fill")
-                            Text(viewModel.tr("actions.move_to_trash"))
+                    NXGlassContainer(spacing: 12) {
+                        HStack(spacing: 12) {
+                            Button(action: {
+                                dismissSettingsAndShowRemove()
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "eye.slash")
+                                    Text(viewModel.tr("actions.remove_from_library"))
+                                }
+                            }
+                            .buttonStyle(NXSecondaryButtonStyle())
+                            
+                            Button(action: {
+                                dismissSettingsAndShowTrash()
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "trash.fill")
+                                    Text(viewModel.tr("actions.move_to_trash"))
+                                }
+                                .foregroundColor(Color(red: 0.95, green: 0.35, blue: 0.35))
+                            }
+                            .buttonStyle(NXSecondaryButtonStyle())
                         }
-                        .foregroundColor(Color(red: 0.95, green: 0.35, blue: 0.35))
                     }
-                    .buttonStyle(NXSecondaryButtonStyle())
                 }
                 .padding(.top, 2)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity)
     }
 }

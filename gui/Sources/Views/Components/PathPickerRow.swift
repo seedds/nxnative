@@ -30,34 +30,31 @@ public struct PathPickerRow: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(NXTheme.textSecondary)
             
-            HStack(spacing: 8) {
-                HStack {
-                    if let p = path, !p.isEmpty {
-                        Text(p)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(NXTheme.textPrimary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } else {
-                        Text(placeholder)
-                            .font(.system(size: 12))
-                            .foregroundColor(NXTheme.textMuted)
+            NXGlassContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    HStack {
+                        if let p = path, !p.isEmpty {
+                            Text(p)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(NXTheme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        } else {
+                            Text(placeholder)
+                                .font(.system(size: 12))
+                                .foregroundColor(NXTheme.textMuted)
+                        }
+                        Spacer()
                     }
-                    Spacer()
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .nxGlassCard(cornerRadius: 8, isNested: true)
+                    
+                    Button(action: onSelect) {
+                        Text(actionTitle)
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(NXTheme.glassSurfaceElevated)
-                .cornerRadius(8)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(NXTheme.specularRim, lineWidth: 0.8)
-                )
-                
-                Button(action: onSelect) {
-                    Text(actionTitle)
-                }
-                .buttonStyle(NXSecondaryButtonStyle())
             }
         }
     }

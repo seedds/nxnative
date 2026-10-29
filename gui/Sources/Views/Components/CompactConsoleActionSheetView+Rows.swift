@@ -6,11 +6,17 @@ extension CompactConsoleActionSheetView {
     func badgePill(text: String) -> some View {
         Text(text)
             .font(.system(size: 9, weight: .semibold, design: .rounded))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(NXTheme.glassSurfaceElevated.opacity(0.8))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2.5)
+            .background(
+                Capsule()
+                    .fill(useLiquidGlass ? Color.white.opacity(0.10) : NXTheme.glassSurfaceElevated.opacity(0.8))
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(Color.white.opacity(useLiquidGlass ? 0.16 : 0.08), lineWidth: 0.7)
+            )
             .foregroundColor(.white)
-            .clipShape(Capsule())
     }
     
     func menuActionRow(
@@ -23,21 +29,76 @@ extension CompactConsoleActionSheetView {
         isLoading: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        let isFocused = viewModel.gameActionFocusedIndex == index
+        CompactConsoleActionRowButton(
+            index: index,
+            title: title,
+            subtitle: subtitle,
+            icon: icon,
+            isPrimary: isPrimary,
+            isDestructive: isDestructive,
+            isLoading: isLoading,
+            isFocused: viewModel.gameActionFocusedIndex == index,
+            namespace: actionRowNamespace,
+            onHoverFocus: { hovering in
+                if hovering && viewModel.gameActionFocusedIndex != index {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                        viewModel.gameActionFocusedIndex = index
+                    }
+                }
+            },
+            action: {
+                SoundEffectService.shared.play(.click)
+                viewModel.gameActionFocusedIndex = index
+                action()
+            }
+        )
+    }
+    
+    func controllerHint(button: String, action: String) -> some View {
+        HStack(spacing: 4) {
+            Text(button)
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .foregroundColor(.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.white.opacity(0.18)))
+            
+            Text(action)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundColor(.white.opacity(0.88))
+        }
+    }
+}
+
+private struct CompactConsoleActionRowButton: View {
+    let index: Int
+    let title: String
+    let subtitle: String
+    let icon: String
+    let isPrimary: Bool
+    let isDestructive: Bool
+    let isLoading: Bool
+    let isFocused: Bool
+    let namespace: Namespace.ID
+    let onHoverFocus: (Bool) -> Void
+    let action: () -> Void
+    
+    @State private var isHovered: Bool = false
+    
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let destructiveTint = Color(red: 0.92, green: 0.24, blue: 0.24)
+        let isHighlighted = isFocused || isHovered
         
-        return Button(action: {
-            SoundEffectService.shared.play(.click)
-            viewModel.gameActionFocusedIndex = index
-            action()
-        }) {
+        Button(action: action) {
             HStack(spacing: 14) {
                 // Icon Box
                 ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .fill(
                             isDestructive
-                                ? Color(red: 0.9, green: 0.25, blue: 0.25).opacity(isFocused ? 0.35 : 0.15)
-                                : (isPrimary ? NXTheme.primary.opacity(isFocused ? 0.4 : 0.2) : NXTheme.glassSurfaceElevated)
+                                ? destructiveTint.opacity(isHighlighted ? 0.38 : 0.18)
+                                : (isPrimary ? NXTheme.primary.opacity(isHighlighted ? 0.48 : 0.24) : Color.white.opacity(isHighlighted ? 0.18 : 0.09))
                         )
                         .frame(width: 34, height: 34)
                     
@@ -49,70 +110,45 @@ extension CompactConsoleActionSheetView {
                             .font(.system(size: 14, weight: .bold))
                             .foregroundColor(
                                 isDestructive
-                                    ? Color(red: 0.95, green: 0.35, blue: 0.35)
-                                    : (isPrimary ? NXTheme.secondary : NXTheme.textSecondary)
+                                    ? Color(red: 1.0, green: 0.50, blue: 0.50)
+                                    : .white
                             )
                     }
                 }
                 
-                // Labels
+                // Labels (Crisp White Title & High-Contrast Subtitle)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(
                             isDestructive
-                                ? Color(red: 0.95, green: 0.4, blue: 0.4)
-                                : (isFocused ? NXTheme.textPrimary : NXTheme.textPrimary.opacity(0.9))
+                                ? Color(red: 1.0, green: 0.52, blue: 0.52)
+                                : .white
                         )
                     
                     Text(subtitle)
-                        .font(.system(size: 10, design: .rounded))
-                        .foregroundColor(NXTheme.textMuted)
+                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                        .foregroundColor(isHighlighted ? .white.opacity(0.96) : .white.opacity(0.82))
                 }
                 
                 Spacer()
                 
-                if isFocused {
+                if isHighlighted {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(isDestructive ? Color.red : NXTheme.secondary)
+                        .foregroundColor(isDestructive ? Color(red: 1.0, green: 0.55, blue: 0.55) : .white)
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(
-                        isFocused
-                            ? (isDestructive ? Color.red.opacity(0.18) : NXTheme.glassSurfaceElevated.opacity(0.95))
-                            : Color.clear
-                    )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(
-                        isFocused
-                            ? (isDestructive ? Color.red.opacity(0.5) : NXTheme.secondary.opacity(0.7))
-                            : Color.clear,
-                        lineWidth: 1.2
-                    )
-            )
+            .padding(.vertical, 9)
+            .contentShape(shape)
         }
-        .buttonStyle(.plain)
-    }
-    
-    func controllerHint(button: String, action: String) -> some View {
-        HStack(spacing: 4) {
-            Text(button)
-                .font(.system(size: 9, weight: .bold, design: .rounded))
-                .foregroundColor(.white)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(Circle().fill(Color.white.opacity(0.15)))
-            
-            Text(action)
-                .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundColor(NXTheme.textMuted)
+        .buttonStyle(NXPressableButtonStyle())
+        .nxNoFocusRing()
+        .matchedGeometryEffect(id: index, in: namespace, isSource: true)
+        .onHover { hovering in
+            isHovered = hovering
+            onHoverFocus(hovering)
         }
     }
 }

@@ -5,6 +5,7 @@ public struct ControlsView: View {
     @ObservedObject private var i18n = LocalizationService.shared
     @ObservedObject private var profileManager = InputProfileManager.shared
     @ObservedObject private var controllerService = GameControllerService.shared
+    @Environment(\.nxLiquidGlass) private var glassEnv
     @State private var selectedDeviceIndex: Int = 0 // 0: Controller, 1: Keyboard
     @State private var showNewProfileAlert: Bool = false
     @State private var newProfileName: String = ""
@@ -76,13 +77,22 @@ public struct ControlsView: View {
             }
             .padding(20)
         }
+        .nxScrollEdgeEffect(edges: [.top, .bottom])
         .onAppear {
             activeProfile = profileManager.activeProfile
-            setupControllerPressMonitoring()
+            if selectedDeviceIndex == 0 {
+                setupControllerPressMonitoring()
+            }
         }
         .onDisappear {
-            monitorTimer?.invalidate()
-            monitorTimer = nil
+            stopControllerPressMonitoring()
+        }
+        .onChange(of: selectedDeviceIndex) { newIndex in
+            if newIndex == 0 {
+                setupControllerPressMonitoring()
+            } else {
+                stopControllerPressMonitoring()
+            }
         }
         .onChange(of: profileManager.activeProfileId) { _ in
             activeProfile = profileManager.activeProfile
@@ -92,6 +102,7 @@ public struct ControlsView: View {
         }
         .sheet(isPresented: $showNewProfileAlert) {
             newProfileSheet
+                .environment(\.nxLiquidGlass, glassEnv)
         }
     }
 
@@ -104,100 +115,97 @@ public struct ControlsView: View {
 
             Spacer()
 
-            // Profile Picker Dropdown Input
-            Menu {
-                ForEach(profileManager.profiles) { prof in
-                    Button(action: {
-                        SoundEffectService.shared.play(.click)
-                        profileManager.activeProfileId = prof.id
-                        activeProfile = prof
-                    }) {
-                        if prof.id == profileManager.activeProfileId {
-                            Label(prof.name, systemImage: "checkmark")
-                        } else {
-                            Text(prof.name)
-                        }
-                    }
-                }
-                Divider()
-                Button(i18n.t("controls.new_profile")) {
-                    newProfileName = ""
-                    showNewProfileAlert = true
-                }
-            } label: {
+            NXGlassContainer(spacing: 8) {
                 HStack(spacing: 8) {
-                    Image(systemName: "slider.horizontal.2.square")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(NXTheme.secondary)
-                    
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(i18n.t("controls.profile"))
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundColor(NXTheme.textSecondary)
-                        Text(profileManager.activeProfile.name)
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundColor(NXTheme.textPrimary)
+                    // Profile Selector Pill: displays the selected profile name directly in place of "Profile"
+                    Menu {
+                        ForEach(profileManager.profiles) { prof in
+                            Button(action: {
+                                SoundEffectService.shared.play(.click)
+                                profileManager.activeProfileId = prof.id
+                                activeProfile = prof
+                            }) {
+                                if prof.id == profileManager.activeProfileId {
+                                    Label(prof.name, systemImage: "checkmark")
+                                } else {
+                                    Text(prof.name)
+                                }
+                            }
+                        }
+                        Divider()
+                        Button(i18n.t("controls.new_profile")) {
+                            newProfileName = ""
+                            showNewProfileAlert = true
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "gamecontroller.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.white)
+
+                            Text(activeProfile.name)
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.white.opacity(0.85))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .contentShape(Capsule())
+                        .nxGlassInteractive(
+                            in: Capsule(),
+                            fallbackFill: NXTheme.glassSurfaceElevated
+                        )
                     }
-                    
-                    Spacer(minLength: 8)
-                    
-                    HStack(spacing: 2) {
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(NXTheme.secondary)
+                    .menuStyle(.button)
+                    .buttonStyle(NXPressableButtonStyle())
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .nxNoFocusRing()
+
+                    Button(i18n.t("common.duplicate")) {
+                        SoundEffectService.shared.play(.click)
+                        let copy = profileManager.duplicateProfile(activeProfile)
+                        activeProfile = copy
                     }
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 3)
-                    .background(Color.white.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .controlSize(.small)
+
+                    if !activeProfile.isDefault {
+                        Button(i18n.t("common.delete")) {
+                            SoundEffectService.shared.play(.click)
+                            profileManager.deleteProfile(activeProfile)
+                        }
+                        .buttonStyle(NXSecondaryButtonStyle())
+                        .controlSize(.small)
+                        .nxGlassTransition(.materialize)
+                    }
+
+                    Button(i18n.t("common.reset")) {
+                        SoundEffectService.shared.play(.click)
+                        profileManager.resetActiveProfileToDefault()
+                        activeProfile = profileManager.activeProfile
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .controlSize(.small)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(NXTheme.glassSurfaceElevated)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(NXTheme.specularRim, lineWidth: 1.2)
-                )
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-
-            Button(i18n.t("common.duplicate")) {
-                SoundEffectService.shared.play(.click)
-                let copy = profileManager.duplicateProfile(activeProfile)
-                activeProfile = copy
-            }
-            .buttonStyle(NXSecondaryButtonStyle())
-            .controlSize(.small)
-
-            if !activeProfile.isDefault {
-                Button(i18n.t("common.delete")) {
-                    SoundEffectService.shared.play(.click)
-                    profileManager.deleteProfile(activeProfile)
-                }
-                .buttonStyle(NXSecondaryButtonStyle())
-                .controlSize(.small)
-            }
-
-            Button(i18n.t("common.reset")) {
-                SoundEffectService.shared.play(.click)
-                profileManager.resetActiveProfileToDefault()
-                activeProfile = profileManager.activeProfile
-            }
-            .buttonStyle(NXSecondaryButtonStyle())
-            .controlSize(.small)
         }
     }
 
     // MARK: - Device Mode Selector
     private var deviceSelectorBar: some View {
         HStack(spacing: 12) {
-            Picker("", selection: $selectedDeviceIndex) {
-                Text(i18n.t("controls.gamepad_tab")).tag(0)
-                Text(i18n.t("controls.keyboard_tab")).tag(1)
-            }
-            .pickerStyle(.segmented)
+            NXLiquidSegmentedPicker(
+                selection: $selectedDeviceIndex,
+                options: [
+                    NXSegmentOption(value: 0, title: i18n.t("controls.gamepad_tab"), icon: "gamecontroller.fill"),
+                    NXSegmentOption(value: 1, title: i18n.t("controls.keyboard_tab"), icon: "keyboard.fill")
+                ]
+            )
             .frame(maxWidth: 420)
 
             Spacer()
@@ -211,34 +219,44 @@ public struct ControlsView: View {
                 .font(.system(size: 15, weight: .bold, design: .rounded))
                 .foregroundColor(NXTheme.textPrimary)
 
-            TextField("Profile Name (e.g. Zelda Pro Controls)", text: $newProfileName)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 280)
+            NXLiquidGlassTextField("Profile Name (e.g. Zelda Pro Controls)", text: $newProfileName)
+                .frame(width: 290)
 
-            HStack(spacing: 12) {
-                Button(i18n.t("common.cancel")) {
-                    showNewProfileAlert = false
-                }
-                .buttonStyle(NXSecondaryButtonStyle())
+            NXGlassContainer(spacing: 12) {
+                HStack(spacing: 12) {
+                    Button(i18n.t("common.cancel")) {
+                        showNewProfileAlert = false
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
 
-                Button(i18n.t("controls.create")) {
-                    guard !newProfileName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-                    let created = profileManager.createProfile(name: newProfileName, basedOn: activeProfile)
-                    activeProfile = created
-                    showNewProfileAlert = false
+                    Button(i18n.t("controls.create")) {
+                        guard !newProfileName.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+                        let created = profileManager.createProfile(name: newProfileName, basedOn: activeProfile)
+                        activeProfile = created
+                        showNewProfileAlert = false
+                    }
+                    .buttonStyle(NXPrimaryButtonStyle())
+                    .disabled(newProfileName.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
-                .buttonStyle(NXPrimaryButtonStyle())
-                .disabled(newProfileName.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
         .padding(24)
         .frame(width: 340, height: 160)
-        .background(NXTheme.canvasObsidian)
+        .nxSheetSurface()
     }
 
     private func setupControllerPressMonitoring() {
-        monitorTimer?.invalidate()
-        monitorTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [self] _ in
+        stopControllerPressMonitoring()
+        guard controllerService.isGamepadConnected else {
+            self.pressedButtons = []
+            return
+        }
+        monitorTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [self] _ in
+            guard NSApplication.shared.isActive && !MenuBarManager.isMinimized else { return }
+            guard controllerService.isGamepadConnected else {
+                if !self.pressedButtons.isEmpty { self.pressedButtons = [] }
+                return
+            }
             if let pad = GCController.controllers().first?.extendedGamepad {
                 var pressed = Set<SwitchButton>()
                 for (elemName, switchBtn) in activeProfile.gamepadBindings {
@@ -246,10 +264,20 @@ public struct ControlsView: View {
                         pressed.insert(switchBtn)
                     }
                 }
-                self.pressedButtons = pressed
-            } else {
+                if self.pressedButtons != pressed {
+                    self.pressedButtons = pressed
+                }
+            } else if !self.pressedButtons.isEmpty {
                 self.pressedButtons = []
             }
+        }
+    }
+
+    private func stopControllerPressMonitoring() {
+        monitorTimer?.invalidate()
+        monitorTimer = nil
+        if !pressedButtons.isEmpty {
+            pressedButtons = []
         }
     }
 

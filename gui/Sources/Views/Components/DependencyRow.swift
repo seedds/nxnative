@@ -22,15 +22,6 @@ public struct DependencyRow: View {
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundColor(NXTheme.textPrimary)
                     
-                    if item.isProtected {
-                        Text(viewModel.tr("system.tag_system"))
-                            .font(.system(size: 9, weight: .bold))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(NXTheme.primary.opacity(0.2))
-                            .foregroundColor(.white)
-                            .clipShape(Capsule())
-                    }
                 }
                 
                 Text(item.details)
@@ -47,54 +38,45 @@ public struct DependencyRow: View {
             Spacer()
             
             // Actions: Install / Repair / Uninstall
-            if !item.isAvailable && item.installCommand != nil {
-                Button(action: {
-                    viewModel.installDependency(item)
-                }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.down.circle")
-                        Text(viewModel.tr("common.install"))
+            NXGlassContainer(spacing: 6) {
+                if !item.isAvailable && item.installCommand != nil {
+                    Button(action: {
+                        viewModel.installDependency(item)
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.down.circle")
+                            Text(viewModel.tr("common.install"))
+                        }
+                        .font(.system(size: 11, weight: .semibold))
                     }
-                    .font(.system(size: 11, weight: .semibold))
-                }
-                .buttonStyle(NXPrimaryButtonStyle())
-                .controlSize(.small)
-            } else if item.isAvailable {
-                HStack(spacing: 6) {
-                    Button(viewModel.tr("common.repair")) {
-                        viewModel.repairDependency(item)
-                    }
-                    .buttonStyle(NXSecondaryButtonStyle())
+                    .buttonStyle(NXPrimaryButtonStyle())
                     .controlSize(.small)
-                    .help(viewModel.tr("system.repair_help"))
-                    
-                    if !item.isProtected && item.uninstallCommand != nil {
-                        Button(role: .destructive) {
-                            viewModel.confirmUninstall(item)
-                        } label: {
-                            Image(systemName: "trash")
-                                .font(.system(size: 11))
-                                .foregroundColor(NXTheme.tertiary)
+                } else if item.isAvailable {
+                    HStack(spacing: 6) {
+                        Button(viewModel.tr("common.repair")) {
+                            viewModel.repairDependency(item)
                         }
                         .buttonStyle(NXSecondaryButtonStyle())
                         .controlSize(.small)
-                        .help(viewModel.tr("system.uninstall_help"))
+                        .help(viewModel.tr("system.repair_help"))
+                        
+                        if !item.isProtected && item.uninstallCommand != nil {
+                            Button(role: .destructive) {
+                                viewModel.confirmUninstall(item)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(NXTheme.tertiary)
+                            }
+                            .buttonStyle(NXSecondaryButtonStyle())
+                            .controlSize(.small)
+                            .help(viewModel.tr("system.uninstall_help"))
+                        }
                     }
                 }
             }
         }
         .padding(10)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(NXTheme.glassSurfaceElevated.opacity(0.65))
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            }
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(NXTheme.specularRim, lineWidth: 0.8)
-        )
+        .nxGlassCard(cornerRadius: 10, isNested: true)
     }
 }

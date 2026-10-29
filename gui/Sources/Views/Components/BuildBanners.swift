@@ -75,7 +75,7 @@ public struct BuildBanners: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(NXTheme.textSecondary)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(NXPressableButtonStyle())
             .padding(4)
         }
         .padding(14)
@@ -122,18 +122,7 @@ public struct BuildBanners: View {
             }
         }
         .padding(12)
-        .background(
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(NXTheme.primary.opacity(0.12))
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            }
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(NXTheme.secondary.opacity(0.4), lineWidth: 1)
-        )
+        .nxGlassCard(cornerRadius: 12, tint: NXTheme.primary.opacity(0.26))
     }
     
     private func updateSuccessBanner(_ message: String) -> some View {
@@ -148,19 +137,12 @@ public struct BuildBanners: View {
             Button(viewModel.tr("common.dismiss")) {
                 viewModel.updateSuccessBanner = nil
             }
-            .buttonStyle(.plain)
+            .buttonStyle(NXPressableButtonStyle())
             .font(.system(size: 11, weight: .bold))
             .foregroundColor(NXTheme.textSecondary)
         }
         .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.12))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.35), lineWidth: 1)
-        )
+        .nxGlassCard(cornerRadius: 10, tint: Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.24))
     }
     
     private func updateErrorBanner(_ message: String) -> some View {
@@ -175,19 +157,12 @@ public struct BuildBanners: View {
             Button(viewModel.tr("common.dismiss")) {
                 viewModel.updateErrorBanner = nil
             }
-            .buttonStyle(.plain)
+            .buttonStyle(NXPressableButtonStyle())
             .font(.system(size: 11, weight: .bold))
             .foregroundColor(NXTheme.textSecondary)
         }
         .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.orange.opacity(0.12))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.orange.opacity(0.35), lineWidth: 1)
-        )
+        .nxGlassCard(cornerRadius: 10, tint: Color.orange.opacity(0.24))
     }
     
     private func successBanner(path: String) -> some View {
@@ -209,39 +184,36 @@ public struct BuildBanners: View {
             
             Spacer()
             
-            if path.hasSuffix(".ipa") {
-                Button(action: {
-                    SoundEffectService.shared.play(.click)
-                    let url = URL(fileURLWithPath: path)
-                    DeviceDeploymentService.shared.shareViaAirDrop(fileURL: url)
-                }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "airdrop")
-                        Text(viewModel.tr("common.airdrop"))
+            NXGlassContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    if path.hasSuffix(".ipa") {
+                        Button(action: {
+                            SoundEffectService.shared.play(.click)
+                            let url = URL(fileURLWithPath: path)
+                            DeviceDeploymentService.shared.shareViaAirDrop(fileURL: url)
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "airdrop")
+                                Text(viewModel.tr("common.airdrop"))
+                            }
+                        }
+                        .buttonStyle(NXSecondaryButtonStyle())
                     }
+                    
+                    Button(viewModel.tr("common.view_library")) {
+                        viewModel.selectedTab = 1
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    
+                    Button(viewModel.tr("common.reveal_finder")) {
+                        viewModel.openOutputInFinder()
+                    }
+                    .buttonStyle(NXPrimaryButtonStyle())
                 }
-                .buttonStyle(NXSecondaryButtonStyle())
             }
-            
-            Button(viewModel.tr("common.view_library")) {
-                viewModel.selectedTab = 1
-            }
-            .buttonStyle(NXSecondaryButtonStyle())
-            
-            Button(viewModel.tr("common.reveal_finder")) {
-                viewModel.openOutputInFinder()
-            }
-            .buttonStyle(NXPrimaryButtonStyle())
         }
         .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.14))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.4), lineWidth: 1)
-        )
+        .nxGlassCard(cornerRadius: 12, tint: Color(red: 0.13, green: 0.77, blue: 0.37).opacity(0.24))
     }
     
     private func errorBanner(message: String) -> some View {
@@ -268,13 +240,6 @@ public struct BuildBanners: View {
             .buttonStyle(NXSecondaryButtonStyle())
         }
         .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.red.opacity(0.12))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.red.opacity(0.35), lineWidth: 1)
-        )
+        .nxGlassCard(cornerRadius: 10, tint: Color.red.opacity(0.24))
     }
 }

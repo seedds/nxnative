@@ -26,17 +26,17 @@ public struct LibraryView: View {
     
     public var body: some View {
         ZStack {
-            VStack(spacing: 0) {
-                // MARK: - Library Toolbar (Liquid Glass, Search & Card Scale Slider)
-                LibraryToolbarView(viewModel: viewModel)
-                    .zIndex(10)
-                
+            Group {
                 // MARK: - Switch Dark Mode Console Showcase (Hero 16:9 + Square Tiles 1:1)
                 if filteredGames.isEmpty {
                     emptyLibraryView
                 } else {
                     SwitchConsoleLibraryView(viewModel: viewModel, games: filteredGames)
                 }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                // MARK: - Floating Liquid Glass Library Toolbar (Search & Card Scale Slider)
+                LibraryToolbarView(viewModel: viewModel)
             }
             
             // Compact Console Action Sheet (Overlay when Game Selected)
@@ -69,6 +69,7 @@ public struct LibraryView: View {
         .animation(.easeInOut(duration: 0.2), value: viewModel.isGameActionMenuPresented)
         .sheet(item: $viewModel.gameForSettingsSheet) { game in
             GameSettingsSheetView(viewModel: viewModel, game: game)
+                .environment(\.nxLiquidGlass, viewModel.liquidGlassEnvironment)
         }
         .confirmationDialog(
             viewModel.tr("library.remove_title", viewModel.gameToRemove?.name ?? "Game"),

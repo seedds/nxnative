@@ -3,49 +3,51 @@ import SwiftUI
 public struct ControllerPromptBar: View {
     @ObservedObject var controllerService = GameControllerService.shared
     @ObservedObject public var viewModel: AppViewModel
+    @Environment(\.nxLiquidGlass) private var glassEnv
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     
     public init(viewModel: AppViewModel) {
         self.viewModel = viewModel
     }
     
+    private var useFloatingGlassDock: Bool {
+        glassEnv.isSupportedAndEnabled && !reduceTransparency
+    }
+    
     public var body: some View {
-        HStack(spacing: 16) {
-            // Connected status badge (Gamepad or Keyboard)
-            statusBadge
-            
-            Spacer()
-            
-            // Dynamic context-sensitive Action button prompts
-            if controllerService.isGamepadConnected {
-                HStack(spacing: 14) {
-                    controllerPromptsForCurrentContext
-                    
-                    // Shoulder bumper prompt for Tabs
-                    shoulderTabsPromptView
-                }
-            } else {
-                // Keyboard shortcuts when no gamepad is connected
-                HStack(spacing: 12) {
-                    keyboardPromptsForCurrentContext
-                    
-                    keyboardKeyBadge(glyph: "1-7", action: viewModel.tr("controls.tabs"))
+        NXGlassContainer(spacing: 10) {
+            HStack(spacing: 16) {
+                // Connected status badge (Gamepad or Keyboard)
+                statusBadge
+                
+                Spacer()
+                
+                // Dynamic context-sensitive Action button prompts
+                if controllerService.isGamepadConnected {
+                    HStack(spacing: 14) {
+                        controllerPromptsForCurrentContext
+                        
+                        // Shoulder bumper prompt for Tabs
+                        shoulderTabsPromptView
+                    }
+                    .transaction { $0.animation = nil }
+                } else {
+                    // Keyboard shortcuts when no gamepad is connected
+                    HStack(spacing: 12) {
+                        keyboardPromptsForCurrentContext
+                        
+                        keyboardKeyBadge(glyph: "1-7", action: viewModel.tr("controls.tabs"))
+                    }
+                    .transaction { $0.animation = nil }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .modifier(PromptBarDockModifier(useFloatingGlassDock: useFloatingGlassDock))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(
-            ZStack {
-                NXTheme.canvasObsidian.opacity(0.85)
-                Rectangle().fill(.ultraThinMaterial)
-            }
-        )
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundColor(NXTheme.borderSubtle),
-            alignment: .top
-        )
+        .padding(.horizontal, useFloatingGlassDock ? 14 : 0)
+        .padding(.bottom, useFloatingGlassDock ? 8 : 0)
+        .padding(.top, useFloatingGlassDock ? 2 : 0)
     }
     
     // MARK: - Status Badge
@@ -64,11 +66,20 @@ public struct ControllerPromptBar: View {
         .padding(.vertical, 4)
         .background(
             Capsule()
-                .fill(controllerService.isGamepadConnected ? NXTheme.primary.opacity(0.2) : NXTheme.glassSurfaceElevated.opacity(0.5))
+                .fill(
+                    controllerService.isGamepadConnected
+                        ? NXTheme.primary.opacity(0.24)
+                        : Color.white.opacity(useFloatingGlassDock ? 0.08 : 0.05)
+                )
         )
         .overlay(
             Capsule()
-                .strokeBorder(controllerService.isGamepadConnected ? NXTheme.secondary.opacity(0.4) : Color.white.opacity(0.12), lineWidth: 0.8)
+                .strokeBorder(
+                    controllerService.isGamepadConnected
+                        ? NXTheme.secondary.opacity(0.45)
+                        : Color.white.opacity(0.14),
+                    lineWidth: 0.8
+                )
         )
     }
     
@@ -125,6 +136,16 @@ public struct ControllerPromptBar: View {
             
         case 4: // Personalize
             dpadPill(glyph: "←/→", action: "Highlight Color")
+            controllerPill(
+                glyph: xBtn,
+                action: viewModel.tr(viewModel.isLiquidGlassEnabled ? "personalization.liquid_glass_on" : "personalization.liquid_glass_off"),
+                color: brandXColor
+            )
+            controllerPill(
+                glyph: yBtn,
+                action: viewModel.tr(viewModel.liquidGlassAppearance.titleLocalizationKey),
+                color: brandYColor
+            )
             
         case 5: // Settings
             controllerPill(glyph: confirmBtn, action: "Install Tools", color: brandAColor)
@@ -177,6 +198,14 @@ public struct ControllerPromptBar: View {
             
         case 4: // Personalize
             keyboardKeyBadge(glyph: "← / →", action: "Highlight Color")
+            keyboardKeyBadge(
+                glyph: "G",
+                action: viewModel.tr(viewModel.isLiquidGlassEnabled ? "personalization.liquid_glass_on" : "personalization.liquid_glass_off")
+            )
+            keyboardKeyBadge(
+                glyph: "M",
+                action: viewModel.tr(viewModel.liquidGlassAppearance.titleLocalizationKey)
+            )
             
         case 5: // Settings
             keyboardKeyBadge(glyph: "I", action: "Install Tools")
@@ -188,6 +217,30 @@ public struct ControllerPromptBar: View {
             
         default:
             EmptyView()
+        }
+    }
+}
+
+private struct PromptBarDockModifier: ViewModifier {
+    let useFloatingGlassDock: Bool
+    
+    func body(content: Content) -> some View {
+        if useFloatingGlassDock {
+            content.nxGlassBar(in: Capsule())
+        } else {
+            content
+                .background(
+                    ZStack {
+                        NXTheme.canvasObsidian.opacity(0.85)
+                        Rectangle().fill(.ultraThinMaterial)
+                    }
+                )
+                .overlay(
+                    Rectangle()
+                        .frame(height: 1)
+                        .foregroundColor(NXTheme.borderSubtle),
+                    alignment: .top
+                )
         }
     }
 }

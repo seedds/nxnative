@@ -141,6 +141,20 @@ CUTS = {
     (0x37c1dc, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
     (0x37c33c, '0a00a852', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more mov w10,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
   ],
+  # Atelier Resleriana 1.4b (v524288), SDK 19: verified AddressRegionManager
+  # constructor at +0x1423ec, with the same limit and occupied-length fields
+  # as the SDK 19 build below. The unpatched alias high-water reaches 4.27 GiB
+  # of 4.375 GiB, followed by a null allocator result and main+0x8f13b0.
+  # Node-area reduction reaches sustained gameplay. A live failure tree has
+  # 440 MiB in gaps but no legal 2 MiB placement under the large-region rule.
+  # Use the existing small-region 64 KiB mask AND rounding offset for all
+  # sizes; retain both guard pages. iPhone gameplay passed at least 19m53s.
+  '191086db0c8bb8477a320ccd7942a254': [
+    (0x1423fc, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit 1022 MiB to 62 MiB'),
+    (0x142468, '09fca752', '097ca052', 'AddressRegionManager constructor: occupied node area 1022 MiB to 62 MiB'),
+    (0x14254c, '4931899a', 'e9030aaa', 'AllocateAddressRegion: use existing 64 KiB alignment mask for all region sizes'),
+    (0x142560, '4a318b9a', '1f2003d5', 'AllocateAddressRegion: retain existing small-region rounding offset with guard spacing'),
+  ],
   # Pokémon Legends: Z-A 2.0.2 (v393216) sdk (SDK 19.3.11): the same node area cut. The constructor is at sdk+0x1423ec (limit = alias start + 0x3fe00000 at +0x28, a unit heap of 0x30-byte
   # nodes, the area then registered as occupied at +0x142468). With main's allocator region below, the guest block fits the 5 GB proven on a phone
   'df7a3960c74c3a4803f826c587153252': [

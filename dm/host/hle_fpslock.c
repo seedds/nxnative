@@ -16,7 +16,14 @@
 enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
-static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; } k_locks[] = {
+static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint8_t depth; uint32_t chain[4]; int8_t bias; } k_locks[] = {
+    // Atelier Resleriana 1.4b: verified Unity icall name/function table entries 325/326
+    // give getter +0x16a6e50 and setter +0x16a6e60, both using int32 main+0x7adfa70.
+    { "5e6f9d0c5161586bcd32dd7ddc5e9db0", "Unity targetFrameRate", 0, 0x7adfa70, FPS_I32, 1 },
+    // Cloth frequency follows FPSLocker-Warehouse's exact-build 1.4b config:
+    // [MAIN,0x7791fe8,0xb8,0,0x10,0x20,0x10] = FPS_TARGET + 5.
+    // https://github.com/masagrator/FPSLocker-Warehouse/blob/master/SaltySD/plugins/FPSLocker/patches/01000F9020CD4000/5E6F9D0C5161586B.yaml
+    { "5e6f9d0c5161586bcd32dd7ddc5e9db0", "MagicaCloth simulation frequency", 0x7791fe8, 0x10, FPS_I32, 1, 0, 4, {0xb8, 0, 0x10, 0x20}, 5 },
     // Pokemon Brilliant Diamond 1.3.0: Unity's Application.targetFrameRate. Its icall registration (main+0xe34e60) resolves to main+0xdc8e70 -> +0x5fa640,
     // which stores w0 at main+0x4afc868; the getter at +0x5fa630 reads the same int32. The game sets 30 when entering the field; display pacing alone does not remove that cap.
     { "94ceae325c205c4b9d6f7235552f28fd", "Unity targetFrameRate", 0, 0x4afc868, FPS_I32, 1 },
@@ -273,6 +280,13 @@ void dm_fps_lock_tick(void) {
     for (int r = 0; r < nrow; r++) {
         int k = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
         if (k_locks[k].ptr_off && (!rd((uint64_t)(uintptr_t)(base + k_locks[k].ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
+        int ready = 1;
+        for (int d = 0; d < k_locks[k].depth; d++) {
+            uint64_t next;
+            if (!rd(obj + k_locks[k].chain[d], &next, sizeof next) || !next) { ready = 0; break; }
+            obj = next;
+        }
+        if (!ready) continue;   // managed objects may not exist until a scene loads
         if (k_locks[k].kind == FPS_F64) {
             for (int c = 0; c < k_locks[k].copies; c++) {
                 uint64_t a = obj + k_locks[k].field + 8 * (uint64_t)c; double cur, want = target;
@@ -305,7 +319,7 @@ void dm_fps_lock_tick(void) {
                 snprintf(was, sizeof was, "%u", cur);
             } else {
                 int fps = k_locks[k].kind == FPS_I32;
-                want = fps ? (uint32_t)target : 60 / (uint32_t)target;
+                want = fps ? (uint32_t)(target + k_locks[k].bias) : 60 / (uint32_t)target;
                 if (cur == want || cur < (fps ? 10u : 1u) || cur > (fps ? 120u : 4u)) continue;
                 snprintf(was, sizeof was, "%u", cur);
             }

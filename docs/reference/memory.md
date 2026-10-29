@@ -360,3 +360,10 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** `mtl_read_texels` encloses texture resolution, readback encoding, the GPU wait and the CPU copy in its own `@autoreleasepool`. The guest-memory path needs no Metal objects.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), measured upstream in MacNativeGames commit `635fb31` and ported in [PR #195](https://github.com/seedds/nxnative/pull/195): about 130 readbacks a second retained 3.7 GB of GPU memory after 30 minutes. Those game measurements have not been repeated here.
 - **Check:** `make -C dm/gfx/tests GAME=010015100B514000 check_t_readback` checks literal GPU and CPU readback pixels and observes the real readback buffer through a weak reference while the caller's outer pool remains open. Removing only the local pool leaves that buffer alive and fails the lifetime check.
+
+### Fragmentation with 2 MiB region alignment
+
+- **Symptom:** a 2 MiB Unity pool reservation returns `0x1803`, then a null allocator result is dereferenced at `main+0x8f13b0`, despite hundreds of MiB free across address-region gaps.
+- **Cause:** SDK 19 uses 64 KiB placement below 2 MiB and 2 MiB placement at or above it. A captured 812-record tree held 3.9405 GiB of a 4.375 GiB alias region; about 440.4 MiB remained between records after guards, but no gap fit the 2 MiB request with the large-region alignment and rounding offset.
+- **Fix:** exact SDK-build cuts select both existing small-region parameters for every request: the 64 KiB mask and rounding offset `0x1ffff`, retaining guard spacing. Changing just the mask would keep the large padding and miss usable gaps. The separate node-area reduction and 2 GiB startup StandardAllocator cap remain necessary for this game's tested layout.
+- **Found on:** [Atelier Resleriana](../../dm/games/01000F9020CD4000/README.md), SDK build `191086db0c8bb8477a320ccd7942a254`. Captured-tree replay of the actual SDK loop recovered the failed request and preserved small-request placement and guards; iPhone gameplay reached at least 19m53s without another allocation failure.

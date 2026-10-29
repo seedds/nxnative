@@ -280,3 +280,10 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Cause:** the thread that acquires the window (here the render thread) runs under a time-constraint policy whose computation the host re-declares every 120 frames; it was 1.25 × the 90th percentile of that thread's CPU time per frame. This render thread needs 1.9–2.0 ms a frame with one or two frames in 120 near 4.4 ms, against 2.5 ms declared, and each frame past the declaration stalled the thread. Probes on both threads' waits showed the main thread's waits; adding probes slowed the render thread and the stalls vanished, and `DM_RT=0` or a fixed `DM_RT_COMP=5` / `10` removed them too (99th percentile 18–21 ms) at the same CPU energy.
 - **Fix:** the declaration also covers 1.1 × the window's peak (`rt_comp_tick` in `hle_nvn.c`): 5.6 ms here, 60.0 fps, 99th percentile 21 ms.
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), in the Asylum cell.
+
+### Managed cloth frequency follows the frame target
+
+- **Symptom:** raising the presentation rate can leave cloth simulation using its original low-frequency setting.
+- **Cause:** the game's MagicaCloth frequency lives behind a managed-object pointer chain, separately from Unity's Application.targetFrameRate and the NVN present interval.
+- **Fix:** frame-limit rows can follow up to four additional safe-read pointer hops and apply an integer bias to the requested target. Missing/unreadable scene objects are skipped. The exact-build Atelier rows set Unity's verified int32 frame cap and the FPSLocker-provided cloth field to target plus five, with display present pacing.
+- **Found on:** [Atelier Resleriana](../../dm/games/01000F9020CD4000/README.md#60-fps-adaptation), 1.4b; synthetic-memory tests and original ARM64 getter/setter execution pass; the player confirms the rebuilt 60 fps IPA works on iPhone.

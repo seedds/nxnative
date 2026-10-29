@@ -49,6 +49,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Absolum](0100A83022A22000/README.md) | `0100A83022A22000` | 1.1.2 | 18.3.2 | FNA / .NET NativeAOT (FNA3D's NVN driver) | NVN |
 | [Ace Attorney Investigations Collection](010005501E68C000/README.md) | `010005501E68C000` | 1.0.0.2 | 17.5.3 | Unity 2022.3.17f1 IL2CPP | NVN |
 | [Advance Wars 1+2: Re-Boot Camp](0100300012F2A000/README.md) | `0100300012F2A000` | 1.0.0 (base) | 10.4.1 | Unity 2020.2.1f3 IL2CPP | NVN |
+| [Atelier Resleriana: The Red Alchemist & the White Guardian](01000F9020CD4000/README.md) | `01000F9020CD4000` | 1.4b | 19.3.5 | Unity 2022.3.56f1 IL2CPP | NVN |
 | [AI: THE SOMNIUM FILES](010089B00D09C000/README.md) | `010089B00D09C000` | 1.0.1 | 6.4.2 | Unity 2017.4.17f1 IL2CPP | NVN |
 | [ASTRAL CHAIN](01007300020FA000/README.md) | `01007300020FA000` | 1.0.1 | 6.4.0 | PlatinumGames' engine | NVN |
 | [AI: THE SOMNIUM FILES - nirvanA Initiative](0100713016CCC000/README.md) | `0100713016CCC000` | 1.0.2 | 13.3.5 | Unity 2020.3.30f1 IL2CPP | NVN |

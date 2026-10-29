@@ -242,10 +242,10 @@ public final class SystemDetector {
         }
         
         // 4. Python 3 (Python 3.12+ required by NxNative for direct RomFS image builds)
-        func checkPythonVersion(_ path: String) -> (isSufficient: Bool, version: String) {
+        func checkPythonVersion(_ path: String) -> (isSufficient: Bool, isStable: Bool, version: String) {
             let verOutput = runQuickCommand(path, args: ["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"])
             guard verOutput.success else {
-                return (false, "Unknown")
+                return (false, false, "Unknown")
             }
             let verStr = verOutput.output.trimmingCharacters(in: .whitespacesAndNewlines)
             let parts = verStr.split(separator: ".").compactMap { Int($0) }
@@ -253,20 +253,31 @@ public final class SystemDetector {
                 let major = parts[0]
                 let minor = parts[1]
                 let isOk = (major > 3) || (major == 3 && minor >= 12)
-                return (isOk, "Python \(verStr)")
+                let isStable = (major == 3 && minor >= 12 && minor <= 14)
+                return (isOk, isStable, "Python \(verStr)")
             }
-            return (false, "Python \(verStr)")
+            return (false, false, "Python \(verStr)")
         }
         
-        let pyCandidates = ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
+        let pyCandidates = [
+            "/opt/homebrew/opt/python@3.14/bin/python3",
+            "/opt/homebrew/opt/python@3.13/bin/python3",
+            "/opt/homebrew/opt/python@3.12/bin/python3",
+            "/opt/homebrew/bin/python3",
+            "/usr/local/opt/python@3.14/bin/python3",
+            "/usr/local/opt/python@3.13/bin/python3",
+            "/usr/local/opt/python@3.12/bin/python3",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3"
+        ]
         var chosenPyPath: String? = nil
         var chosenPyVersion = ""
         var isPySufficient = false
         
-        // 1. Prefer a Python that satisfies >= 3.12 (e.g. Homebrew python)
+        // 1. Prefer a Python that is verified stable (>= 3.12 and <= 3.14)
         for candidate in pyCandidates where fm.fileExists(atPath: candidate) {
             let check = checkPythonVersion(candidate)
-            if check.isSufficient {
+            if check.isSufficient && check.isStable {
                 chosenPyPath = candidate
                 chosenPyVersion = check.version
                 isPySufficient = true
@@ -274,7 +285,20 @@ public final class SystemDetector {
             }
         }
         
-        // 2. If no candidate is >= 3.12, pick the first existing python for diagnostic reporting
+        // 2. If no stable 3.12-3.14 is found, accept any >= 3.12 (e.g. 3.15+)
+        if chosenPyPath == nil {
+            for candidate in pyCandidates where fm.fileExists(atPath: candidate) {
+                let check = checkPythonVersion(candidate)
+                if check.isSufficient {
+                    chosenPyPath = candidate
+                    chosenPyVersion = check.version
+                    isPySufficient = true
+                    break
+                }
+            }
+        }
+        
+        // 3. If still none >= 3.12, pick the first existing python for diagnostic reporting
         if chosenPyPath == nil {
             for candidate in pyCandidates where fm.fileExists(atPath: candidate) {
                 let check = checkPythonVersion(candidate)
@@ -285,9 +309,9 @@ public final class SystemDetector {
             }
         }
         
-        let pipInstallCmd = "PY_BIN=$(which python3); if [ -f /opt/homebrew/bin/python3 ]; then PY_BIN=\"/opt/homebrew/bin/python3\"; elif [ -f /usr/local/bin/python3 ]; then PY_BIN=\"/usr/local/bin/python3\"; fi; if \"$PY_BIN\" -m pip install --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip install --break-system-packages lz4 capstone fonttools nsz; else \"$PY_BIN\" -m pip install lz4 capstone fonttools nsz; fi"
-        let pipRepairCmd = "PY_BIN=$(which python3); if [ -f /opt/homebrew/bin/python3 ]; then PY_BIN=\"/opt/homebrew/bin/python3\"; elif [ -f /usr/local/bin/python3 ]; then PY_BIN=\"/usr/local/bin/python3\"; fi; if \"$PY_BIN\" -m pip install --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools nsz; else \"$PY_BIN\" -m pip install --force-reinstall lz4 capstone fonttools nsz; fi"
-        let pipUninstallCmd = "PY_BIN=$(which python3); if [ -f /opt/homebrew/bin/python3 ]; then PY_BIN=\"/opt/homebrew/bin/python3\"; elif [ -f /usr/local/bin/python3 ]; then PY_BIN=\"/usr/local/bin/python3\"; fi; if \"$PY_BIN\" -m pip uninstall --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip uninstall -y --break-system-packages lz4 capstone fonttools nsz; else \"$PY_BIN\" -m pip uninstall -y lz4 capstone fonttools nsz; fi"
+        let pipInstallCmd = "PY_BIN=\"\"; for c in /opt/homebrew/opt/python@3.14/bin/python3 /opt/homebrew/opt/python@3.13/bin/python3 /opt/homebrew/opt/python@3.12/bin/python3 /opt/homebrew/bin/python3 /usr/local/opt/python@3.14/bin/python3 /usr/local/opt/python@3.13/bin/python3 /usr/local/opt/python@3.12/bin/python3 /usr/local/bin/python3 $(which python3); do if [ -x \"$c\" ]; then PY_BIN=\"$c\"; break; fi; done; if [ -n \"$PY_BIN\" ]; then if \"$PY_BIN\" -m pip install --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip install --break-system-packages lz4 capstone fonttools && (\"$PY_BIN\" -m pip install --break-system-packages nsz 2>/dev/null || true); else \"$PY_BIN\" -m pip install lz4 capstone fonttools && (\"$PY_BIN\" -m pip install nsz 2>/dev/null || true); fi; fi"
+        let pipRepairCmd = "PY_BIN=\"\"; for c in /opt/homebrew/opt/python@3.14/bin/python3 /opt/homebrew/opt/python@3.13/bin/python3 /opt/homebrew/opt/python@3.12/bin/python3 /opt/homebrew/bin/python3 /usr/local/opt/python@3.14/bin/python3 /usr/local/opt/python@3.13/bin/python3 /usr/local/opt/python@3.12/bin/python3 /usr/local/bin/python3 $(which python3); do if [ -x \"$c\" ]; then PY_BIN=\"$c\"; break; fi; done; if [ -n \"$PY_BIN\" ]; then if \"$PY_BIN\" -m pip install --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip install --force-reinstall --break-system-packages lz4 capstone fonttools && (\"$PY_BIN\" -m pip install --force-reinstall --break-system-packages nsz 2>/dev/null || true); else \"$PY_BIN\" -m pip install --force-reinstall lz4 capstone fonttools && (\"$PY_BIN\" -m pip install --force-reinstall nsz 2>/dev/null || true); fi; fi"
+        let pipUninstallCmd = "PY_BIN=\"\"; for c in /opt/homebrew/opt/python@3.14/bin/python3 /opt/homebrew/opt/python@3.13/bin/python3 /opt/homebrew/opt/python@3.12/bin/python3 /opt/homebrew/bin/python3 /usr/local/opt/python@3.14/bin/python3 /usr/local/opt/python@3.13/bin/python3 /usr/local/opt/python@3.12/bin/python3 /usr/local/bin/python3 $(which python3); do if [ -x \"$c\" ]; then PY_BIN=\"$c\"; break; fi; done; if [ -n \"$PY_BIN\" ]; then if \"$PY_BIN\" -m pip uninstall --help 2>&1 | grep -q -- '--break-system-packages'; then \"$PY_BIN\" -m pip uninstall -y --break-system-packages lz4 capstone fonttools nsz 2>/dev/null || true; else \"$PY_BIN\" -m pip uninstall -y lz4 capstone fonttools nsz 2>/dev/null || true; fi; fi"
 
         if let pyPath = chosenPyPath, isPySufficient {
             prereqs.python = DependencyStatus(
@@ -296,23 +320,23 @@ public final class SystemDetector {
                 isAvailable: true,
                 details: "\(chosenPyVersion) (\(pyPath))",
                 recommendation: nil,
-                installCommand: "brew install python",
-                repairCommand: "brew reinstall python",
+                installCommand: "brew install python@3.13",
+                repairCommand: "brew reinstall python@3.13",
                 uninstallCommand: nil,
                 isProtected: false
             )
             
-            // Python modules
+            // Python modules: core modules are lz4, capstone, fontTools
             let pyCheck = runQuickCommand(pyPath, args: ["-c", "import lz4, capstone, fontTools; print('OK')"])
             if pyCheck.success && pyCheck.output.contains("OK") {
                 let nszCheck = runQuickCommand(pyPath, args: ["-c", "import nsz; print('OK')"])
-                let nszNote = nszCheck.success ? " + nsz" : ""
+                let nszNote = nszCheck.success ? " + nsz" : " (nsz optional)"
                 prereqs.pythonPackages = DependencyStatus(
                     id: "python_packages",
                     name: "Python Modules",
                     isAvailable: true,
                     details: "lz4, capstone, fonttools\(nszNote) installed",
-                    recommendation: nil,
+                    recommendation: nszCheck.success ? nil : "Note: Compressed .nsz/.xcz files require standalone nsz or Python <= 3.14",
                     installCommand: pipInstallCmd,
                     repairCommand: pipRepairCmd,
                     uninstallCommand: pipUninstallCmd,

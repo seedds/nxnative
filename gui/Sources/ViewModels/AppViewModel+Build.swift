@@ -91,7 +91,8 @@ extension AppViewModel {
             language: selectedLanguage,
             showFps: showFps,
             keepExtracted: keepExtracted,
-            surveyOnly: surveyOnly
+            surveyOnly: surveyOnly,
+            romfsSeparate: romfsSeparate
         )
     }
     

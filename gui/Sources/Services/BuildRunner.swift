@@ -35,7 +35,8 @@ public final class BuildRunner {
         language: String?,
         showFps: Bool,
         keepExtracted: Bool,
-        surveyOnly: Bool
+        surveyOnly: Bool,
+        romfsSeparate: Bool = false
     ) {
         guard !isRunning else { return }
         isCancelled = false
@@ -55,15 +56,23 @@ public final class BuildRunner {
             self.delegate?.buildRunner(self, didProduceLog: LogEntry(level: isSuccess ? .success : .info, message: message))
         }
         
-        // Determina caminho do python
-        let pythonPath: String
+        // Determina caminho do python com seleção resiliente
+        let pyCandidates = [
+            "/opt/homebrew/opt/python@3.14/bin/python3",
+            "/opt/homebrew/opt/python@3.13/bin/python3",
+            "/opt/homebrew/opt/python@3.12/bin/python3",
+            "/opt/homebrew/bin/python3",
+            "/usr/local/opt/python@3.14/bin/python3",
+            "/usr/local/opt/python@3.13/bin/python3",
+            "/usr/local/opt/python@3.12/bin/python3",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3"
+        ]
         let fm = FileManager.default
-        if fm.fileExists(atPath: "/opt/homebrew/bin/python3") {
-            pythonPath = "/opt/homebrew/bin/python3"
-        } else if fm.fileExists(atPath: "/usr/local/bin/python3") {
-            pythonPath = "/usr/local/bin/python3"
-        } else {
-            pythonPath = "/usr/bin/python3"
+        var pythonPath = "/usr/bin/python3"
+        for candidate in pyCandidates where fm.fileExists(atPath: candidate) {
+            pythonPath = candidate
+            break
         }
         
         var arguments: [String] = [
@@ -109,10 +118,17 @@ public final class BuildRunner {
             arguments.append("--no-show-fps")
         }
         
-        if keepExtracted {
+        let shouldSeparateRomfs = (platform == .ios && romfsSeparate)
+        if shouldSeparateRomfs {
+            arguments.append(contentsOf: ["--romfs", "separate"])
+            // --romfs separate requires --keep-extracted
             arguments.append("--keep-extracted")
         } else {
-            arguments.append("--no-keep-extracted")
+            if keepExtracted {
+                arguments.append("--keep-extracted")
+            } else {
+                arguments.append("--no-keep-extracted")
+            }
         }
         
         if surveyOnly {

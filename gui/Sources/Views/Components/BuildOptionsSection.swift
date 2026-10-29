@@ -53,6 +53,52 @@ public struct BuildOptionsSection: View {
                             }
                         }
                     }
+                    
+                    // MARK: - iOS RomFS Splitting Option
+                    if viewModel.platform == .ios {
+                        Divider().opacity(0.2)
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle(viewModel.tr("build.opt_romfs_separate"), isOn: $viewModel.romfsSeparate)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(NXTheme.textPrimary)
+                            
+                            Text(viewModel.tr("build.opt_romfs_separate_help"))
+                                .font(.system(size: 11))
+                                .foregroundColor(NXTheme.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            
+                            if viewModel.shouldSuggestRomfsSplit && !viewModel.romfsSeparate {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "sparkles")
+                                        .foregroundColor(NXTheme.primary)
+                                        .font(.system(size: 12, weight: .bold))
+                                    
+                                    Text(String(format: viewModel.tr("build.romfs_split_recommendation"), viewModel.selectedGameSizeString))
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(NXTheme.textPrimary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    
+                                    Spacer(minLength: 4)
+                                    
+                                    Button("Separate RomFS") {
+                                        SoundEffectService.shared.play(.click)
+                                        viewModel.romfsSeparate = true
+                                        viewModel.keepExtracted = true
+                                    }
+                                    .buttonStyle(NXSecondaryButtonStyle())
+                                    .controlSize(.mini)
+                                }
+                                .padding(9)
+                                .background(NXTheme.primary.opacity(0.12))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .strokeBorder(NXTheme.primary.opacity(0.3), lineWidth: 1)
+                                )
+                                .cornerRadius(8)
+                            }
+                        }
+                    }
                 }
             }
             
@@ -141,6 +187,20 @@ public struct BuildOptionsSection: View {
                         Toggle(viewModel.tr("build.opt_fps"), isOn: $viewModel.showFps)
                         Toggle(viewModel.tr("build.opt_keep_extracted"), isOn: $viewModel.keepExtracted)
                         Toggle(viewModel.tr("build.opt_survey_only"), isOn: $viewModel.surveyOnly)
+                        
+                        if viewModel.platform == .ios {
+                            Divider().opacity(0.2)
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text("Auto-Split RomFS Threshold: \(Int(viewModel.autoRomfsSplitLimitGB)) GB")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(NXTheme.textSecondary)
+                                    Spacer()
+                                }
+                                Slider(value: $viewModel.autoRomfsSplitLimitGB, in: 2.0...16.0, step: 1.0)
+                                    .accentColor(NXTheme.primary)
+                            }
+                        }
                     }
                     .font(.system(size: 12))
                     .foregroundColor(NXTheme.textSecondary)

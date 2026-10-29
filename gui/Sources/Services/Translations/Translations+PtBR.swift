@@ -366,6 +366,10 @@ extension Translations {
         "applogo.help": "Clique para personalizar a aparência e a cor de destaque do launcher",
         "build.step_1_title": "1. Arquivos do Jogo (NSP / NSZ / XCI / ZIP)",
         "build.opt_fps": "Exibir contador de FPS em tempo real e overlay (--show-fps)",
+        "build.opt_romfs_separate": "Separar dados RomFS do IPA (--romfs separate)",
+        "build.opt_romfs_separate_help": "Mantém os arquivos pesados fora do IPA. Gera um IPA leve (<100 MB) ideal para AltStore, Sideloadly ou Kravasign, transferindo o RomFS.img uma única vez.",
+        "build.romfs_split_recommendation": "Jogo Grande Detectado (~%@): Ferramentas de sideloading frequentemente falham em IPAs gigantes. Recomendamos ativar RomFS Separado.",
+        "common.enable": "Ativar",
         "build.opt_keep_extracted": "Manter arquivos intermediários extraídos para recompilações rápidas (--keep-extracted)",
         "build.opt_survey_only": "Apenas inspeção de compatibilidade (Survey Only)",
         "build.opt_advanced_title": "Opções Avançadas e Flags de Compilação",
@@ -482,5 +486,9 @@ extension Translations {
         "menubar.no_games": "Nenhum Jogo Instalado",
         "menubar.free_memory": "Liberar Memória Standby",
         "menubar.quit": "Encerrar NxNative Launcher",
+        "menubar.icon_style": "Estilo do Ícone da Barra",
+        "menubar.icon_style_symbol": "Símbolo Branco (Sem Fundo)",
+        "menubar.icon_style_dark": "Escuro",
+        "menubar.icon_style_light_color": "Claro com Cor",
 ]
 }

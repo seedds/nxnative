@@ -221,6 +221,22 @@ public final class DeviceDeploymentService: ObservableObject {
                 stagedRomfsURL = romfsURL
             }
 
+            // Also check if RomFS was built separately next to the IPA or game bundle
+            if stagedRomfsURL == nil {
+                let parentDir = appBundleURL.deletingLastPathComponent()
+                let candidates = [
+                    parentDir.appendingPathComponent("RomFS.img"),
+                    parentDir.appendingPathComponent("romfs.img")
+                ]
+                for c in candidates where FileManager.default.fileExists(atPath: c.path) {
+                    stagedRomfsURL = c
+                    DispatchQueue.main.async {
+                        self.activeDeployment.logLines.append("[OK] Detected external RomFS image: \(c.lastPathComponent)")
+                    }
+                    break
+                }
+            }
+
             guard self.activeDeployment.isRunning else { return }
 
             // 2. Prepare code signature
@@ -343,6 +359,19 @@ public final class DeviceDeploymentService: ObservableObject {
     // MARK: - Code Signing
     private func applyCodeSignatureIfNeeded(targetAppURL: URL, team: DeveloperSigningTeam?) {
         let chosenTeam = team ?? selectedSigningTeam
+        let fm = FileManager.default
+        
+        // If a custom provisioning profile was configured or exists, embed it into the app bundle!
+        let customProfilePath = UserDefaults.standard.string(forKey: "NXNative_SavedCustomProvisioningProfilePath")
+        if let provPath = customProfilePath, !provPath.isEmpty, fm.fileExists(atPath: provPath) {
+            let dest = targetAppURL.appendingPathComponent("embedded.mobileprovision")
+            try? fm.removeItem(at: dest)
+            try? fm.copyItem(at: URL(fileURLWithPath: provPath), to: dest)
+            DispatchQueue.main.async {
+                self.activeDeployment.logLines.append("==> Embedded custom provisioning profile: \(URL(fileURLWithPath: provPath).lastPathComponent)")
+            }
+        }
+        
         let sign = Process()
         sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
 
@@ -366,5 +395,71 @@ public final class DeviceDeploymentService: ObservableObject {
 
         try? sign.run()
         sign.waitUntilExit()
+    }
+    
+    // MARK: - Custom Certificate & Profile Import
+    public func importP12Certificate(fileURL: URL, password: String, completion: @escaping (Bool, String) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let proc = Process()
+            let pipe = Pipe()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            let keychainPath = "\(home)/Library/Keychains/login.keychain-db"
+            proc.arguments = ["import", fileURL.path, "-k", keychainPath, "-P", password, "-T", "/usr/bin/codesign"]
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(decoding: data, as: UTF8.self)
+                
+                if proc.terminationStatus == 0 {
+                    DispatchQueue.main.async {
+                        self?.refreshDevicesAndTeams()
+                        completion(true, "Certificate imported successfully into macOS Keychain.")
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        completion(false, output.isEmpty ? "Failed to import .p12 certificate (check password)." : output)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(false, error.localizedDescription)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Direct RomFS Push (without full app reinstall)
+    public func pushRomfsDirectly(
+        gameURL: URL,
+        device: ConnectedAppleDevice,
+        completion: @escaping (Bool, String) -> Void
+    ) {
+        let fm = FileManager.default
+        let parentDir = gameURL.deletingLastPathComponent()
+        var romfsURL: URL? = nil
+        let candidates = [
+            parentDir.appendingPathComponent("RomFS.img"),
+            parentDir.appendingPathComponent("romfs.img"),
+            gameURL.appendingPathComponent("romfs.img"),
+            gameURL.appendingPathComponent("RomFS.img")
+        ]
+        for c in candidates where fm.fileExists(atPath: c.path) {
+            romfsURL = c
+            break
+        }
+        
+        guard let targetRomfs = romfsURL else {
+            completion(false, "RomFS.img not found next to the game files.")
+            return
+        }
+        
+        let bundleId = extractBundleIdentifier(from: gameURL) ?? "org.nxnative"
+        executeRomfsCopy(romfsURL: targetRomfs, bundleId: bundleId, device: device)
+        completion(true, "RomFS transfer initiated.")
     }
 }

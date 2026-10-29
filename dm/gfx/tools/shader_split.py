@@ -2291,19 +2291,29 @@ def bnd2_resources(d, label):
     An entry is 0x50 bytes: +0x00 resource ID u64, +0x08 import hash u64, +0x10 four uncompressed sizes, +0x20 four sizes on disk (each with the alignment in the top
     nibble), +0x30 four offsets (from that block's data offset), +0x40 import offset, +0x44 type ID, +0x48 import count u16, flags u8, stream index u8.
     A resource has up to four blocks (0: main memory, 1: graphics memory). Hot Pursuit Remastered's SHADERS.BNDL keeps one whole GLSLC output in block 1 of each type 0x8 resource (2,112)"""
+    if len(d) < 0x30: red(f'{label}: truncated bnd2 header')
     ver, plat, dbg, cnt, eoff = struct.unpack_from('<5I', d, 4)
-    if ver not in (2, 3) or eoff + cnt * 0x50 > len(d): red(f'{label}: bnd2 version {ver} with {cnt} entries at {eoff:#x} is not a layout this reader knows')
+    if ver not in (2, 3) or plat != 1 or eoff < 0x30 or eoff + cnt * 0x50 > len(d): red(f'{label}: bnd2 version {ver} with platform {plat} and {cnt} entries at {eoff:#x} is not a layout this reader knows')
     datoff = struct.unpack_from('<4I', d, 0x18); flags, = struct.unpack_from('<I', d, 0x28)
     out = []
     for i in range(cnt):
         e = eoff + i * 0x50
         rid, = struct.unpack_from('<Q', d, e); typ, = struct.unpack_from('<I', d, e + 0x44)
+        unpacked = struct.unpack_from('<4I', d, e + 0x10)
         sizes = struct.unpack_from('<4I', d, e + 0x20); offs = struct.unpack_from('<4I', d, e + 0x30)
         for k in range(4):
             n = sizes[k] & 0x0FFFFFFF
             if not n: continue
-            raw = d[datoff[k] + offs[k]:datoff[k] + offs[k] + n]
-            out.append((rid, typ, k, zlib.decompress(raw) if flags & 1 else raw))
+            start = datoff[k] + offs[k]; expected = unpacked[k] & 0x0FFFFFFF
+            where = f'{label}: bnd2 resource {rid:016x} block {k}'
+            if start < eoff + cnt * 0x50 or start > len(d) or n > len(d) - start: red(f'{where}: stored range is outside the resource data')
+            raw = d[start:start + n]
+            if flags & 1:
+                dec = zlib.decompressobj()
+                raw = dec.decompress(raw, expected + 1)
+                if not dec.eof or len(raw) != expected: red(f'{where}: incomplete zlib stream or decompressed size differs from declared size {expected}')
+            elif len(raw) != expected: red(f'{where}: stored size differs from declared size {expected}')
+            out.append((rid, typ, k, raw))
     return out
 
 def bnd2_shaders(d, label):

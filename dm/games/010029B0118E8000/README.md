@@ -30,6 +30,8 @@ The rest of the profile is what `profile_guess.py` made of the survey: the 3.25 
 
 ## Rendering
 
+- **Bundle-reader validation (2026-10-29):** header/range checks and bounded inflation produced exactly the same resource bytes as the previous reader across all 3,370 bundles and 518,261 blocks of update 1.0.3. All 2,065 unique shaders from `SHADERS.BNDL` also matched. See [Criterion Bundle 2 resources](../../../docs/reference/shaders.md#glslc-outputs-in-criterions-bundle-2-resources) for the general validation mechanism. This is parser equivalence testing, not an additional gameplay session.
+
 - **Resolved: a crash at the first loading screen** after `texture upgraded to allow format views` (a 4096x1024 texture, base format 73, sampled as format 70): the upgrade's copy ended the render pass while the draw bound its arguments ([A texture upgrade while a draw binds its arguments ends the pass](../../../docs/reference/rendering.md#a-texture-upgrade-while-a-draw-binds-its-arguments-ends-the-pass)).
 - **Current:** `vertex attribute format 0x27 (8 / 16-bit integer) feeds a float input`, converted on the CPU at replay; no visible effect.
 - `nvnDeviceGetInteger` items 0x60 and 0x61 are answered 0, as before; no visible effect.

@@ -50,6 +50,45 @@ class Bnd2(unittest.TestCase):
     def test_no_glslc_output_finds_nothing(self):
         self.assertEqual(ss.bnd2_shaders(bundle([(1, 8, [b'', b'no shader here'])]), '/C.BNDL'), [])
 
+    def test_truncated_header_is_named(self):
+        with self.assertRaisesRegex(SystemExit, 'truncated bnd2 header'):
+            ss.bnd2_resources(b'bnd2', '/bad')
+
+    def test_stored_range_cannot_be_silently_truncated(self):
+        d = bundle([(1, 8, [b'raw block'])], compressed=False)
+        with self.assertRaisesRegex(SystemExit, 'stored range is outside'):
+            ss.bnd2_resources(d[:-1], '/bad')
+
+    def test_offsets_cannot_point_into_the_table(self):
+        d = bytearray(bundle([(1, 8, [b'x'])], compressed=False))
+        struct.pack_into('<I', d, 0x18, 0x30)
+        with self.assertRaisesRegex(SystemExit, 'stored range is outside'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_inflation_stops_at_declared_size(self):
+        d = bytearray(bundle([(1, 8, [b'x' * 10000])]))
+        struct.pack_into('<I', d, 0x30 + 0x10, 1)
+        with self.assertRaisesRegex(SystemExit, 'decompressed size differs'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_incomplete_zlib_stream_is_rejected(self):
+        d = bytearray(bundle([(1, 8, [b'x' * 100])]))
+        n = struct.unpack_from('<I', d, 0x30 + 0x20)[0]
+        struct.pack_into('<I', d, 0x30 + 0x20, n - 1)
+        with self.assertRaisesRegex(SystemExit, 'incomplete zlib stream'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_unpacked_size_alignment_nibble_is_not_length(self):
+        d = bytearray(bundle([(1, 8, [b'content'])]))
+        struct.pack_into('<I', d, 0x30 + 0x10, 0x40000007)
+        self.assertEqual(ss.bnd2_resources(d, '/ok'), [(1, 8, 0, b'content')])
+
+    def test_uncompressed_size_must_match(self):
+        d = bytearray(bundle([(1, 8, [b'x'])], compressed=False))
+        struct.pack_into('<I', d, 0x30 + 0x10, 2)
+        with self.assertRaisesRegex(SystemExit, 'stored size differs'):
+            ss.bnd2_resources(d, '/bad')
+
 
 if __name__ == '__main__':
     unittest.main()

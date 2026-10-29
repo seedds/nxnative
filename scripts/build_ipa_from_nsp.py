@@ -581,6 +581,9 @@ def same_build(nsp_dir, app, fam, keys, repo, env):
     Only the code modules are extracted (a RomFS manifest, no game files written). Returns (profile, version, main build ID) or None"""
     import game as gamemod   # dm/games (main put it on the path)
     work = nsp_dir / f'{app:016X}_survey'; logs = work / 'logs'
+    if (nsp_dir / f'{app:016X}_build' / 'profile' / f'{app:016X}' / 'game.tsv').exists():
+        say('a provisional profile exists for this build: skipping the build ID lookup (avoids re-extracting a repacked NSP)')
+        return None
     PROG.plan(1); PROG.stage('build ID lookup', step='build nx_extract')
     nx = build_nx_extract(repo, work, logs, env)
     ups = sorted(fam['updates'], key=lambda u: u[0] or 0)
@@ -2247,7 +2250,7 @@ def main(args=None):
     picks = pick_nsps(fam, have, versions)
 
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
-    gb = extract_bytes(picks, False) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
+    gb = 2.0 if args.romfs == 'separate' else extract_bytes(picks, False) / 2**30 + 6   # every merged image is complete, including on APFS; shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
     PROG.plan(1 + len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
@@ -2370,7 +2373,7 @@ def main(args=None):
         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Mac build', patched)
         return
 
-    if not prepare_xcode and free_gb(out_ipa.parent) < 5: raise BuildError(f'less than 5 GB free on the volume of {out_ipa.parent}')
+    if not prepare_xcode and free_gb(out_ipa.parent) < (2 if args.romfs == 'separate' else 5): raise BuildError(f'less than {2 if args.romfs == 'separate' else 5} GB free on the volume of {out_ipa.parent}')
     say('preparing the Xcode project' if prepare_xcode else f'building the IPA → {out_ipa}')
     ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(rfs.source(game)), MSL_IOS=str(ios), GFXAPI=gfx, FONT_PY=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''), DM_XCODE_DERIVED_DATA=str(work / 'xcode-derived-data'), DM_TEAM_ID=team_id, DM_LANG=lang)
     if prepare_xcode: ipa_env['DM_XCODE_PROJECT_DIR'] = str(project.parent)

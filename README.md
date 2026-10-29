@@ -25,7 +25,7 @@ xcodebuild -downloadComponent MetalToolchain
 git clone https://github.com/seedds/nxnative.git && cd nxnative
 brew install xcodegen zstd glslang
 brew install --cask dotnet-sdk
-python3 -m pip install lz4 capstone fonttools nsz zbic "backports.zstd; python_version < '3.14'"
+python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```
 
 **2. Put your game in a folder**: the game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):

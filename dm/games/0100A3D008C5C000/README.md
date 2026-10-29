@@ -85,6 +85,20 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
 - [`smoke.tsv`](smoke.tsv) uses an isolated, fixed copy of the save just after
   getting up at `<NSP folder>/0100A3D008C5C000-work/smoke-save`. Make that
   copy before running the regression harness; the save stays outside the repo.
+  `regress.py capture` records its frame 3000 for `regress.py replay`: 4 of 8
+  replays equal the live frame, noise 20 pixels (2026-10-29, chain
+  `6ad4d951e3c8`; 7 of 8 and 18 pixels in an earlier capture). The capture
+  takes 53 s ([a frame capture runs under the standard thread
+  policy](../../../docs/reference/nvn-objects.md#a-frame-capture-runs-under-the-standard-thread-policy),
+  resolved; 1,178 s before). The first
+  captures aborted the replay ([a replay's own objects take serials above a
+  capture's](../../../docs/reference/nvn-objects.md#a-replays-own-objects-take-serials-above-a-captures), resolved).
+  Texture IDs 1726 to 1786 in the bedroom stay registered after the game
+  finalizes their textures' memory pools (each texture has a pool of its own)
+  and reuses the pool objects' memory. The capture read texture data there as
+  pool addresses and once stopped incomplete ([a captured texture ID whose memory
+  pool was finalized](../../../docs/reference/nvn-objects.md#a-captured-texture-id-whose-memory-pool-was-finalized),
+  resolved).
 - **Initial gameplay validation, 2026-10-27, chain `7fbca6dd477d`:**
   the complete Mac shaders render the character,
   academy, movie and bedroom. A fresh 10-minute run and a 20-minute reload
@@ -209,12 +223,6 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   reports `[RED] NVN unimplemented function called`. Its visual contribution
   has not been isolated; the diagnostic has not been suppressed.
 - Outdoor exploration and battles have not been validated yet.
-- No `regress.py replay` capture yet (2026-10-29): `DM_NVN_CAPTURE` of the bedroom
-  (frame 3000 of [`smoke.tsv`](smoke.tsv)) reports `a record's memory straddles a
-  region: the capture is incomplete` and nine record values outside every pool
-  that look like data, not addresses; `nvn_replay` then finds a program where a
-  render target's texture should be (`-[NvProg width]` in `rt_dims`) and aborts.
-  The capture's record field walk misreads one of this game's records: cause open.
 - iPhone gameplay, device memory and touch controls are untested. Audio runs
   through both Wwise output queues on the Mac without sustained underruns;
   listening on the iPhone is pending.
@@ -224,5 +232,8 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
 - [StandardAllocators over 12 to 62 GB of address space](../../../docs/reference/memory.md#standardallocators-over-12-to-62-gb-of-address-space).
 - [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 - [Maps past the application pool fail as on Horizon](../../../docs/reference/memory.md#maps-past-the-application-pool-fail-as-on-horizon).
+- [A replay's own objects take serials above a capture's](../../../docs/reference/nvn-objects.md#a-replays-own-objects-take-serials-above-a-captures).
+- [A captured texture ID whose memory pool was finalized](../../../docs/reference/nvn-objects.md#a-captured-texture-id-whose-memory-pool-was-finalized).
+- [A frame capture runs under the standard thread policy](../../../docs/reference/nvn-objects.md#a-frame-capture-runs-under-the-standard-thread-policy).
 - [Conservative rasterization remains unimplemented](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented).
 - [Metal's build folders left by pipeline archive flushes](../../../docs/reference/shaders.md#metals-build-folders-left-by-pipeline-archive-flushes).

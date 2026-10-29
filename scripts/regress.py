@@ -1315,7 +1315,9 @@ def cmd_capture(a):
             # the wall clock (DM_DETCLOCK stops some games, waiting for guest time); no pipeline prebuild, and no stand-in pipelines, whose draws would differ from the replay's
             env.update(DM_KEYS=route['keys'], DM_PSO_PREBUILD='0', DM_PSO_HYBRID='0', DM_NVN_CAPTURE=f'{frame}:1:{cap}')
             say(f'  {g.id}: capturing frame {frame} with {tree.id} → {cap}')
-            r = run_watched([art['host'], art['modules']], env, outdir, outdir / 'log.txt', a, limit=a.capture_limit, hang=max(route['hang'], 300), kind='nvn',
+            # the capture step itself shows no frame until it ends (reading back the textures and compressing the pools: about 2 minutes for Breath of the Wild), so only the
+            # capture limit bounds it
+            r = run_watched([art['host'], art['modules']], env, outdir, outdir / 'log.txt', a, limit=a.capture_limit, hang=max(route['hang'], a.capture_limit), kind='nvn',
                             what=f'{g.id} capture', frames=outdir / 'frames.tsv', until=r'DM_NVN_CAPTURE: frame \d+: [^\n]*')
             if not r['until'] or not cap.is_file():
                 raise HarnessError(f'frame {frame} was not captured within {a.capture_limit:g} s (the game reached frame {r["max_frame"]}; see {outdir / "log.txt"})')

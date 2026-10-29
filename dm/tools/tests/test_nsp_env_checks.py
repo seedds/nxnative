@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -32,11 +33,15 @@ def fake_run(sdk_rc=0, devdir='/Applications/Xcode.app/Contents/Developer', xlat
     return run
 
 
+def fake_capstone(major):   # the installed capstone's version does not matter to these tests
+    return types.SimpleNamespace(__version__=f'{major}.0.0', cs_version=lambda: (major, 0, major << 8))
+
+
 class Prereqs(unittest.TestCase):
-    def check(self, mac=False, which=lambda *a, **k: '/x', **kw):
+    def check(self, mac=False, which=lambda *a, **k: '/x', capstone=5, **kw):
         calls = []
         with tempfile.TemporaryDirectory() as d, mock.patch.object(nsp, '_importable', lambda m: True), mock.patch.object(nsp.shutil, 'which', which), \
-                mock.patch.object(nsp.subprocess, 'run', fake_run(calls=calls, **kw)):
+                mock.patch.object(nsp.subprocess, 'run', fake_run(calls=calls, **kw)), mock.patch.dict(sys.modules, capstone=fake_capstone(capstone)):
             xlate = Path(d) / 'dmsh_xlate'; xlate.write_text('')
             try: nsp.check_prereqs({'PATH': '/usr/bin', 'DOTNET_ROOT': '/stale'}, xlate, mac)
             finally: self.calls = calls
@@ -70,6 +75,15 @@ class Prereqs(unittest.TestCase):
 
     def test_glslang_is_a_prerequisite(self):   # README installs it; an OpenGL game would otherwise stop only after its run-time capture
         with self.assertRaisesRegex(nsp.BuildError, r'glslangValidator \(brew install glslang\)'): self.check(which=lambda t, **k: None if t == 'glslangValidator' else '/x')
+
+    def test_capstone_5_passes(self):
+        with mock.patch.dict(sys.modules, capstone=fake_capstone(5)): nsp.check_capstone()
+
+    def test_other_capstone_stops_with_the_install_command(self):   # Capstone 6 renamed CS_ARCH_ARM64 and the operand constants patch_nso.py uses
+        for major in (4, 6):
+            with self.subTest(major=major), mock.patch.dict(sys.modules, capstone=fake_capstone(major)):
+                with self.assertRaisesRegex(nsp.BuildError, rf'Capstone {major}\.0\.0 is unsupported.*-m pip install .capstone>=5,<6'): nsp.check_capstone()
+        with self.assertRaisesRegex(nsp.BuildError, 'Capstone 6'): self.check(capstone=6, which=lambda *a, **k: None)   # before the tools and the Metal check
 
 
 class Rosetta(unittest.TestCase):

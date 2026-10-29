@@ -96,6 +96,7 @@ dm/tools/romfs.py	*:*	RomFS image input: every game's build tools
 dm/tools/nro_collect.py	*:*	NRO discovery from game resources during packing
 dm/tools/nx_extract/*	*:*	NSP extraction: every game's resource inputs
 dm/mac/launcher.c	*:*	Mac app resource discovery and host launch
+dm/mac/Launcher.swift	*:*	the Mac settings window, linked into every Mac app
 dm/mac/pack_app.py	*:*	Mac app packaging: every game's bundled resources
 dm/gfx/tools/cpk.py	shader:stage:*	CRI archive input to shader scanning
 dm/gfx/tools/vbf.py	shader:stage:*	Virtuos archive input to shader scanning
@@ -108,6 +109,7 @@ dm/gfx/tools/uepak.py	shader:stage:*	Unreal archive input to shader scanning
 dm/host/romfs_image.h	hle:*fs*	RomFS image index validation shared by mounts and iOS startup
 dm/host/romfs_identity.h	*:*	RomFS identity checks at iOS startup for every game's separate deployment
 dm/host/hle_fs.c	hle:*fs*	filesystem mounts, paths and file operations
+dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit (hle_fs.c)
 dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization
 dm/host/hle_svc.c	svc:*	SVCs

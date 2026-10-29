@@ -23,7 +23,8 @@ static void adrp_add(uint32_t *t, uint32_t i, int r, uint64_t target) {
 static uint8_t *frostbite(uint8_t *base, uint8_t *inst) {
     g_mod[0].text_end = 0x1000; g_mod[0].ro_off = 0x2000; g_mod[0].size = 0x13000000;
     uint64_t b = (uint64_t)(uintptr_t)base, rec = 0x3008, fields = 0x3100, ti = 0x40000, cache = 0x41000;
-    memcpy(base + 0x2000, "\0SimulationTimeSettingsX\0SimulationTimeSettings\0ForceSimRate\0MaxSimFps", 72);
+    static const char names[] = "\0SimulationTimeSettingsX\0SimulationTimeSettings\0ForceSimRate\0MaxSimFps";
+    memcpy(base + 0x2000, names, sizeof names);
     *(uint64_t *)(base + 0x3000) = b + 0x2001;   // a record of another class whose name starts the same
     *(uint64_t *)(base + rec) = b + 0x2019; *(uint64_t *)(base + rec + 0x40) = b + fields;
     *(uint64_t *)(base + fields) = b + 0x203d; *(uint32_t *)(base + fields + 0x10) = 0x34;

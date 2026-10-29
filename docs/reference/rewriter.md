@@ -2,6 +2,15 @@
 
 The NSO rewriter (`dm/tools/patch_nso.py`) and its per-build tables (`dm/tools/sdk_patches.py`, a profile's `patches.py`). Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Disassembler dependencies
+
+### Capstone API version
+
+- **Symptom:** `NameError: name 'CS_ARCH_ARM64' is not defined` at the start of `patch_nso.py`; now `[RED] Capstone 6.… is unsupported` from the NSP script or `patch_nso.py`.
+- **Cause:** Capstone 6 renames the architecture to `CS_ARCH_AARCH64` and the operand constants (`ARM64_OP_*`); the rewriter uses the Capstone 5 API. PyPI's Capstone 6 releases are pre-releases (6.0.0a…), so a plain `pip install capstone` gets 5.x; a `--pre` install or another package's requirement brings in 6.
+- **Fix:** install `capstone>=5,<6` (README and CI). `patch_nso.py` checks the major version (`cs_version()`) before it disassembles anything, and the NSP script checks it before building or surveying, so the extraction is not wasted; both print the install command for the Python that runs them. Capstone 6 is not supported.
+- **Found on:** [Celeste](../../dm/games/01002B30028F6000/README.md#found-on-this-game).
+
 ## Patches across updates
 
 ### Function-matched cuts for unregistered builds

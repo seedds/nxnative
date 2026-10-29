@@ -234,6 +234,7 @@ void mtl_create_stats(uint64_t *lib, uint64_t *pso);   // Cumulative: number of 
 void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img);
 // Descriptor pool registration (texture ID / sampler ID → object snapshot), program release
 void mtl_reg_tex(int id, const tex_t *t, const view_t *v);
+void mtl_reg_tex_gone(int id);   // the ID stays registered, its memory pool finalized (dm/gfx/tests/nvn_replay.m: a captured registry entry, as the live run left it)
 void mtl_reg_image(int id, const tex_t *t, const view_t *v);   // RegisterImage declares image use even when the builder omitted IMAGE
 // textures written by WriteTexels (recorded by serial): the replay layer treats them like packaged textures, uploaded from guest memory and re-uploaded on dirty pages
 void mtl_tex_cpu_written(const tex_t *t);
@@ -249,3 +250,5 @@ void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
 // New serial (> 0, globally increasing)
 uint64_t nvn_new_serial(void);
+// Serials handed out from now on are above s (dm/gfx/tests/nvn_replay.m: the objects of a capture keep the live run's serials)
+void nvn_serial_floor(uint64_t s);

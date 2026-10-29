@@ -4,9 +4,92 @@
 // in UserDefaults; Reset to tested defaults shows the defaults, and Play then forgets them. DM_LAUNCHER=0 in Documents/env.txt starts the game at once with the saved choices; DM_SAVED_CHOICES=0 ignores them (and keeps them)
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 import os
 
 private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryKey: key) }
+
+
+/// Cloud saves: an iCloud Drive folder shared with the Mac app (chosen in its settings window's
+/// Cloud saves too). The host brings the save in from there when the game starts and
+/// sends it there after each save (dm/host/save_sync.h); the folder is a bookmark (CloudSaves.m).
+private struct CloudSavesSection: View {
+    @State private var folder: String = ""
+    @State private var note: String = ""
+    @State private var picking = false
+
+    var body: some View {
+        Section {
+            HStack {
+                Text("Cloud saves")
+                Spacer()
+                Text(folder.isEmpty ? "Off" : (folder as NSString).lastPathComponent)
+                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            Button(folder.isEmpty ? "Choose a folder in iCloud Drive…" : "Choose a different folder…") { picking = true }
+            if !folder.isEmpty {
+                Button("Turn off cloud saves", role: .destructive) {
+                    dm_clear_cloud_saves(); refresh(); note = ""
+                }
+            }
+        } footer: {
+            Text(note.isEmpty
+                 ? "Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
+                 : note)
+        }
+        .sheet(isPresented: $picking) {
+            DocumentPicker(types: [.folder]) { url in
+                picking = false
+                if dm_store_cloud_saves(url) {
+                    note = "Saved. The game uses this folder when you press Play."
+                    refresh()
+                } else {
+                    note = "That folder could not be remembered — try a different one."
+                }
+            } onCancel: { picking = false }
+        }
+        .onAppear(perform: refresh)
+    }
+
+    private func refresh() {
+        var stale: ObjCBool = false
+        folder = dm_cloud_saves_path(&stale) ?? ""
+        if stale.boolValue && folder.isEmpty {
+            note = "The folder you chose before is no longer readable (the app was signed differently). Please choose it again."
+        }
+    }
+}
+
+/// UIDocumentPickerViewController for a folder, in the two callbacks a SwiftUI sheet wants.
+private struct DocumentPicker: UIViewControllerRepresentable {
+    var types: [UTType] = [.folder]
+    let onPick: (URL) -> Void
+    let onCancel: () -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        // .open (not .import): the folder stays where it is and the bookmark keeps pointing at it.
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
+        picker.allowsMultipleSelection = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick, onCancel: onCancel) }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        let onCancel: () -> Void
+        init(onPick: @escaping (URL) -> Void, onCancel: @escaping () -> Void) {
+            self.onPick = onPick; self.onCancel = onCancel
+        }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            if let url = urls.first { onPick(url) } else { onCancel() }
+        }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { onCancel() }
+    }
+}
 
 private struct LauncherView: View {
     @ObservedObject var m: LauncherModel
@@ -45,6 +128,7 @@ private struct LauncherView: View {
                     } footer: {
                         Text("Brings back all settings this game was tested with.")
                     }
+                    CloudSavesSection()
                     Section {
                         HStack {
                             Text("Memory available")

@@ -1,0 +1,102 @@
+# The shader chain for the Vulkan target (dm/gfx/tools/dmsh_build_vk.py, milestone P2 of docs/design/vulkan-backend.md): its Docker image, the Vulkan translator's build
+# (dm/gfx/tools/dmsh_xlate_vk, whose assemblies are not committed), the check of its fingerprints against dm/gfx/tools/dmsh_chain_vk.lock, and the tests on synthetic Maxwell
+# shaders, with the commands of docker/README.md. Nothing here builds a game's shaders or a Metal library.
+name: chain
+
+on:
+  pull_request:
+    paths:   # the chain's files, its tests and what they import (the same list under push)
+      - 'dm/gfx/tools/dmsh_*'
+      - 'dm/gfx/tools/dmsh_xlate_vk/**'
+      - 'dm/gfx/tools/c1_guard.py'
+      - 'dm/gfx/tools/cb_extent.py'
+      - 'dm/gfx/tools/chain_tools.py'
+      - 'dm/gfx/tools/spirv_cross_bin/build.sh'
+      - 'dm/gfx/nvn/dmsh_chain*.h'
+      - 'dm/gfx/nvn/nvn_refl.h'
+      - 'dm/gfx/tests/test_dmsh_vk.py'
+      - 'dm/gfx/tests/test_subgroup.py'
+      - 'dm/tools/tests/test_nsp_chain.py'
+      - 'dm/tools/tests/test_image_atomic_bounds.py'
+      - 'dm/third_party/ryujinx/**'
+      - 'dm/games/game.py'
+      - 'scripts/build_ipa_from_nsp.py'
+      - 'docker/Dockerfile.chain'
+      - '.github/workflows/chain.yml'
+      - '.gitattributes'
+  push:
+    branches: [main, multiplataforma]
+    paths:
+      - 'dm/gfx/tools/dmsh_*'
+      - 'dm/gfx/tools/dmsh_xlate_vk/**'
+      - 'dm/gfx/tools/c1_guard.py'
+      - 'dm/gfx/tools/cb_extent.py'
+      - 'dm/gfx/tools/chain_tools.py'
+      - 'dm/gfx/tools/spirv_cross_bin/build.sh'
+      - 'dm/gfx/nvn/dmsh_chain*.h'
+      - 'dm/gfx/nvn/nvn_refl.h'
+      - 'dm/gfx/tests/test_dmsh_vk.py'
+      - 'dm/gfx/tests/test_subgroup.py'
+      - 'dm/tools/tests/test_nsp_chain.py'
+      - 'dm/tools/tests/test_image_atomic_bounds.py'
+      - 'dm/third_party/ryujinx/**'
+      - 'dm/games/game.py'
+      - 'scripts/build_ipa_from_nsp.py'
+      - 'docker/Dockerfile.chain'
+      - '.github/workflows/chain.yml'
+      - '.gitattributes'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chain-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+# Actions are pinned to commit SHAs (the tag in the comment), as in port.yml and aot.yml: a tag can be moved, a SHA cannot
+jobs:
+  vulkan-chain:
+    name: Vulkan shader chain (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: docker build -t nxnative-chain -f docker/Dockerfile.chain docker
+      # The assemblies' fingerprints in the lock hold for this path (build/xlate_vk) in any checkout: dmsh_xlate_vk.csproj maps the repository root out of the compilers' paths
+      - name: Build the Vulkan translator (build/xlate_vk)
+        id: build
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain \
+            dotnet build -c Release dm/gfx/tools/dmsh_xlate_vk --artifacts-path build/xlate_vk
+      - name: Check the tools against dmsh_chain_vk.lock
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain \
+            python3 dm/gfx/tools/dmsh_chain_vk.py --check-tools
+      - name: Tests (logs/chain)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          mkdir -p logs/chain
+          failed=0
+          for f in dm/gfx/tests/test_dmsh_vk.py dm/tools/tests/test_nsp_chain.py; do
+            echo "::group::$f"
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain \
+              python3 -m unittest -v "$f" 2>&1 | tee "logs/chain/$(basename "$f").log" || { echo "::error::$f failed"; failed=1; }   # pipefail: the test's status
+            echo "::endgroup::"
+          done
+          exit $failed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: logs-chain
+          path: logs/chain
+          if-no-files-found: ignore
+          retention-days: 7

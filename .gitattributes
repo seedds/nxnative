@@ -14,3 +14,10 @@ dm/gfx/tools/dmsh_xlate/Program.cs text eol=lf
 dm/gfx/tools/dmsh_xlate/dmsh_xlate.csproj text eol=lf
 dm/ios/tools/ios_metal.py text eol=lf
 dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/**/*.cs text eol=lf
+# The same for the Vulkan chain's version (DMSH_CHAIN_VK, FILES of dm/gfx/tools/dmsh_chain_vk.py; dmsh_*.py above covers its Python files): the Vulkan translator's sources,
+# its lock, and the two analyses the Vulkan build runs (test_nsp_chain.py checks these too)
+dm/gfx/tools/dmsh_xlate_vk/Program.cs text eol=lf
+dm/gfx/tools/dmsh_xlate_vk/dmsh_xlate_vk.csproj text eol=lf
+dm/gfx/tools/dmsh_chain_vk.lock text eol=lf
+dm/gfx/tools/c1_guard.py text eol=lf
+dm/gfx/tools/cb_extent.py text eol=lf

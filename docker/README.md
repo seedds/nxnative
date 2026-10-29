@@ -10,6 +10,7 @@ The build is [dm/host/CMakeLists.txt](../dm/host/CMakeLists.txt). It needs a gam
 |---|---|---|
 | Linux build and tests | `nxnative-build`, built from [Dockerfile.build](Dockerfile.build) | Ubuntu 24.04 pinned by digest; clang and lld 18.1.3, CMake 3.28, Ninja, Python 3.12, git, and the development headers SDL3's Linux drivers compile against (X11, Wayland, libdecor, xkbcommon, EGL, ALSA, PulseAudio, PipeWire, D-Bus, udev, IBus), and Vulkan without a GPU ([below](#vulkan)): Mesa's lavapipe, the Vulkan loader, the validation layer, glslang and SPIRV-Tools |
 | Windows cross-build | `mstorsjo/llvm-mingw:20261020` (digest `sha256:dadd757c364edee190c53d8e71a135892a6986182e873205d3611f85e26f290b`) | llvm-mingw: clang 23.1.4 for `x86_64-w64-mingw32` with the UCRT and winpthreads, CMake 3.28.3, Ninja 1.11.1, Python 3.12.3, git |
+| Shader chain for Vulkan ([below](#the-shader-chain-for-vulkan)) | `nxnative-chain`, built from [Dockerfile.chain](Dockerfile.chain) | the .NET SDK 10.0.402 image (`mcr.microsoft.com/dotnet/sdk:10.0.402-noble`, Ubuntu 24.04) pinned by digest; Python 3.12 with PyYAML, SPIRV-Tools and glslang from Ubuntu 24.04, and SPIRV-Cross built for linux-x64 from the tag `dm/gfx/tools/spirv_cross_bin/build.sh` pins |
 
 The Linux image takes about 1.6 GB on disk (the SDL3 headers are a layer of their own, about 340 MB, and the Vulkan packages another, about 190 MB); the llvm-mingw image about 1.6 GB (350 MB to download: it carries toolchains for four architectures). The Windows programs it makes are linked statically (`-static`, SDL3 and libc++ included): they need only the system's own DLLs (`KERNEL32.dll`, `bcrypt.dll` and the UCRT, which every Windows 10 has; the programs with SDL3 also `USER32`, `GDI32`, `IMM32`, `ole32`, `OLEAUT32`, `SETUPAPI`, `SHELL32`, `VERSION`, `WINMM` and `ADVAPI32`), so the test `.exe` files run on a stock Windows 10 or 11. To check a program: `llvm-readobj --coff-imports build/win64/t_front_sdl.exe | grep -i '\.dll'` in the llvm-mingw image.
 
@@ -111,7 +112,41 @@ git push
 
 Each log starts with the date, the commit the run was built from (`git rev-parse HEAD`, marked when the working tree had uncommitted changes) and the exact command; `summary.txt` adds the Windows version, the runner and the toolchain that built the tree. [logs/README.md](../logs/README.md) has the convention. The Linux runs in Docker write `logs/linux/` the same way.
 
+## The shader chain for Vulkan
+
+The Vulkan target of the shader chain (milestone P2 of [vulkan-backend.md](../docs/design/vulkan-backend.md)): the Vulkan translator `dm/gfx/tools/dmsh_xlate_vk` (C#, .NET 10), the SPIR-V passes `dmsh_spv.py`, the build `dmsh_build_vk.py` and its version `dmsh_chain_vk.py` ([dm/gfx/README.md](../dm/gfx/README.md)). The Metal chain does not use this image and nothing here changes it. [Dockerfile.chain](Dockerfile.chain) starts from the .NET SDK 10.0.402 image (released on 2026-10-13; digest of its rebuild of 2026-10-21) and builds SPIRV-Cross in a stage of its own (about 30 s: its first three instructions are Dockerfile.build's, so a machine that has the build image takes the toolchain from the build cache); the image takes about 1.3 GB on disk, nearly all of it the SDK. apt resolves the Ubuntu packages when the image is built and the build prints them; on 2026-10-29 they were:
+
+| Tool | Version | Where `dmsh_chain_vk.lock` records it |
+|---|---|---|
+| .NET SDK | 10.0.402 (runtime 10.0.13) | the translator's assemblies (`dmsh_xlate_vk.dll`, `Ryujinx.Graphics.Shader.dll`, `Ryujinx.Common.dll`) and its embedded source hash |
+| `spirv-tools` | 2025.1~rc1-1~ubuntu0.24.04.2 (`SPIRV-Tools v2025.1 unknown hash, 2026-05-13T06:03:38+00:00`) | `spirv-tools_linux-x64` |
+| `glslang-tools` | 15.1.0-2~ubuntu0.24.04.2 (`Glslang Version: 11:15.1.0`) | `glslang_linux-x64` |
+| SPIRV-Cross | tag `vulkan-sdk-1.4.363.0`, commit `f11ba9f0b21ba8fc15153d50a2a1ae31ab1cf8f7` (`Git commit: vulkan-sdk-1.4.363.0 Timestamp: 2026-09-16T11:27:19`) | `spirv-cross_linux-x64` |
+| `python3`, `python3-yaml` | 3.12.3-0ubuntu2.1, 6.0.1-2build2 | not recorded |
+
+The translator is built with `dotnet build` and run with `dotnet dmsh_xlate_vk.dll` (framework-dependent, as `dmsh_xlate_bin` is); its assemblies are not committed. They are byte for byte the same in any checkout as long as they are built into `build/xlate_vk` (the project maps the repository root out of the compilers' paths), so the lock's fingerprints hold on every machine; a self-contained or NativeAOT publish for players is a later step. From the repository root:
+
+```sh
+docker build -t nxnative-chain -f docker/Dockerfile.chain docker
+
+# the Vulkan translator, into build/xlate_vk (dmsh_chain_vk.py looks for it there; XLATE_VK names another dll)
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain \
+  dotnet build -c Release dm/gfx/tools/dmsh_xlate_vk --artifacts-path build/xlate_vk
+
+# the tools against the lock, then the tests on synthetic Maxwell shaders (no game files)
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain sh -c \
+  'python3 dm/gfx/tools/dmsh_chain_vk.py --check-tools && python3 -m unittest dm/gfx/tests/test_dmsh_vk.py dm/tools/tests/test_nsp_chain.py'
+
+# a game's shaders: its shader package folder and an output folder outside the repository, both on the drive of its NSP folder (AGENTS.md)
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e DM_GAME=<base game title ID> -v "$(pwd):/src" -v "<NSP folder>:/nsp" -w /src nxnative-chain \
+  python3 dm/gfx/tools/dmsh_build_vk.py /nsp/<shader package folder> /nsp/<id>-work/vk
+```
+
+After a tool change (the SDK, a package, the SPIRV-Cross tag, a Ryujinx source), rebuild the translator, run `python3 dm/gfx/tools/dmsh_chain_vk.py --update-lock` and `--header` in the image, and commit `dm/gfx/tools/dmsh_chain_vk.lock` and `dm/gfx/nvn/dmsh_chain_vk.h` with the change. From Git Bash on Windows the commands take the changes of the section above (`MSYS_NO_PATHCONV=1`, `$(pwd -W)`, no `--user`).
+
 ## Continuous integration
+
+[.github/workflows/chain.yml](../.github/workflows/chain.yml) builds the chain image, the Vulkan translator, checks the lock and runs `test_dmsh_vk.py` and `test_nsp_chain.py` in it, for pull requests and pushes to `main` and `multiplataforma` that change the chain's files; each run's `logs/chain/` is kept as the artifact `logs-chain`.
 
 [.github/workflows/port.yml](../.github/workflows/port.yml) runs the commands above on GitHub for every pull request and every push to `main` and `multiplataforma`, beside the macOS jobs of `tests.yml`. `linux-host` builds the `nxnative-build` image, configures and builds `build/linux`, runs CTest and then `run_host_tests.sh`; `win64-cross` cross-builds `build/win64` in the pinned llvm-mingw image and hands the test `.exe` files and `host_tests.tsv` to `win64-test`, which runs `run_win64_tests.ps1` on a Windows runner. Each run's `logs/linux/` and `logs/win64/` are kept as the artifacts `logs-linux` and `logs-win64` for seven days: a failure on CI is read there.
 

@@ -12,6 +12,9 @@ __pycache__/
 # Made from each shader build's Mac outputs (c1_guard.py, cb_extent.py; the NSP script makes them), not committed
 dm/games/*/c1_full.tsv
 dm/games/*/cb_extent.tsv
+# The same tables of the Vulkan chain (dmsh_build_vk.py)
+dm/games/*/c1_full_vk.tsv
+dm/games/*/cb_extent_vk.tsv
 
 .vscode/
 # Agent worktrees (CLAUDE.md): never committed

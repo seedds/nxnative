@@ -20,6 +20,7 @@ nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
 import chain_tools  # noqa: E402
 import dmsh_chain  # noqa: E402
+import dmsh_chain_vk  # noqa: E402
 
 
 class Base(unittest.TestCase):
@@ -66,6 +67,26 @@ class Header(Base):
         os.utime(self.h, (1, 1))
         self.header()
         self.assertEqual(self.h.stat().st_mtime, 1); self.assertEqual(self.said, [])
+
+
+class VulkanHeader(unittest.TestCase):   # the Vulkan chain's version (dm/gfx/tools/dmsh_chain_vk.py), beside the Metal one, which it must never move
+    def test_committed_current(self):   # a Vulkan chain change committed without dmsh_chain_vk.py --header
+        r = subprocess.run([sys.executable, str(REPO / 'dm/gfx/tools/dmsh_chain_vk.py')], capture_output=True, text=True, check=True)
+        self.assertIn(f'#define DMSH_CHAIN_VK "{r.stdout.strip()}"', Path(dmsh_chain_vk.HEADER).read_text(), 'dm/gfx/nvn/dmsh_chain_vk.h is stale: run dm/gfx/tools/dmsh_chain_vk.py --header and commit it')
+
+    def test_not_in_the_metal_version(self):   # no file of the Vulkan chain alone is hashed into DMSH_CHAIN (docs/design/vulkan-backend.md, step P2)
+        metal = set(dmsh_chain.FILES)
+        own = [f for f in dmsh_chain_vk.FILES if f not in metal]
+        self.assertEqual(sorted(own), sorted(['tools/dmsh_chain_vk.py', 'tools/dmsh_build_vk.py', 'tools/dmsh_spv.py', 'tools/dmsh_xlate_vk/Program.cs',
+                                              'tools/dmsh_xlate_vk/dmsh_xlate_vk.csproj', 'tools/dmsh_chain_vk.lock', 'tools/c1_guard.py', 'tools/cb_extent.py']))
+        self.assertTrue({f for f in metal if 'third_party' in f} <= set(dmsh_chain_vk.FILES))
+
+    def test_chain_files_lf(self):   # as Portable.test_chain_files_lf, for the Vulkan list
+        git = shutil.which('git')
+        if not git or subprocess.run([git, '-C', str(REPO), 'rev-parse', '--is-inside-work-tree'], capture_output=True).returncode: self.skipTest('needs a git checkout')
+        paths = [Path(os.path.normpath(os.path.join(dmsh_chain.GFX, f))).resolve().relative_to(REPO).as_posix() for f in dmsh_chain_vk.FILES]
+        out = subprocess.run([git, '-C', str(REPO), 'check-attr', 'eol', '--', *paths], capture_output=True, text=True, check=True).stdout
+        self.assertEqual([l.rsplit(': ', 1)[1] for l in out.splitlines()], ['lf'] * len(paths), out)
 
 
 class Tables(Base):

@@ -1,0 +1,29 @@
+<!-- Switch shader → SPIR-V translation tool for the Vulkan target (Program.cs says how it differs from dmsh_xlate). It references the same Ryujinx shader translator source as
+     dmsh_xlate (dm/third_party/ryujinx); -p:RyuSrc=<dir> points it at another copy. Built with dotnet build -c Release, framework-dependent and run with dotnet dmsh_xlate_vk.dll.
+     The built assemblies are not committed: dm/gfx/tools/dmsh_chain_vk.lock records their fingerprints, and the chain workflow builds them and checks the lock -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- No PDB, so the assembly holds no build path: the same source and SDK give the same bytes in any folder, as dmsh_chain_vk.lock records them (the Ryujinx projects build
+         their Release assemblies without one too, dm/third_party/ryujinx/Directory.Build.props) -->
+    <DebugType>none</DebugType>
+    <Deterministic>true</Deterministic>
+    <!-- The repository root is mapped to /_/ in every path the compilers see, in this project and (as a global property) in the Ryujinx projects it builds: Ryujinx.Common's
+         generated regular expressions are file-local types, whose names hash the generated file's path under the artifacts folder, so without the map the assembly's bytes
+         depended on the checkout's location. Build into build/xlate_vk (docker/README.md), the path dmsh_chain_vk.lock's fingerprints were made with -->
+    <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../'))=/_/</PathMap>
+    <RyuSrc Condition="'$(RyuSrc)' == ''">$(MSBuildThisFileDirectory)../../../third_party/ryujinx</RyuSrc>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" AdditionalProperties="PathMap=$(PathMap)" />
+    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Common/Ryujinx.Common.csproj" AdditionalProperties="PathMap=$(PathMap)" />
+  </ItemGroup>
+  <!-- Embeds its own source: the source-sha argument prints its hash, by which dmsh_chain_vk.py checks that the translator was built from the in-repo source -->
+  <ItemGroup>
+    <EmbeddedResource Include="Program.cs" LogicalName="src0" />
+    <EmbeddedResource Include="dmsh_xlate_vk.csproj" LogicalName="src1" />
+  </ItemGroup>
+</Project>

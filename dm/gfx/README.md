@@ -95,6 +95,10 @@ The scripts in `tools/`; usage is written in each file's header:
 | `dmsh_xlate/` | The shader translation tool (C#), which references the translation library in `dm/third_party/ryujinx` |
 | `dmsh_build.py` | Drives the whole translation chain to produce the shader libraries; when the environment variable `IOSOUT=directory` is set, it also produces the iOS version |
 | `dmsh_chain.py`, `dmsh_chain.lock` | Translation chain version and tool fingerprints |
+| `dmsh_xlate_vk/` | The shader translation tool for the Vulkan target (C#, the same translation library; the accessor answers for Vulkan: four descriptor sets by resource class and NVN slot, native transform feedback and FP64, depth clip control); built in the chain image, not committed ([docker/README.md](../../docker/README.md#the-shader-chain-for-vulkan)) |
+| `dmsh_build_vk.py` | Drives the Vulkan target of the chain: SPIR-V libraries and reflection in `vk-<V>/`, the integer-input, integer-output and padding decisions taken by `dmsh_build.py`'s own code on an MSL rendering made for analysis, `c1_full_vk.tsv` and `cb_extent_vk.tsv`; `--census` lists integer or stencil reads through float declarations |
+| `dmsh_spv.py` | The SPIR-V passes of the Vulkan target (NaN-exact min / max / clamp, invariant position, output defaults and padding, shadow inputs, the integer-output entry points) and the reads of a module its reflection is made from |
+| `dmsh_chain_vk.py`, `dmsh_chain_vk.lock` | The Vulkan chain's version `DMSH_CHAIN_VK` (`nvn/dmsh_chain_vk.h`) and tool fingerprints, apart from the Metal ones |
 | `dmsh_facts.py` | Reads the answer table `shader_facts.tsv` (which `shader_split.py` writes) |
 | `dmsh_fetch.py` | Generates the "readable tile" versions of fragment shaders |
 | `c1_guard.py` | Generates `c1_full.tsv` |

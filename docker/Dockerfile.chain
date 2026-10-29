@@ -1,0 +1,46 @@
+# The shader chain for the Vulkan target (dm/gfx/tools/dmsh_build_vk.py, docs/design/vulkan-backend.md section 2): docker/README.md has the commands.
+# The .NET 10 SDK for the Vulkan translator (dm/gfx/tools/dmsh_xlate_vk, built with dotnet build), Python 3.12 for the build script and its tests, SPIRV-Tools (spirv-val, spirv-opt,
+# spirv-link, spirv-dis, spirv-as) and glslang, and SPIRV-Cross built for linux-x64 from the tag dm/gfx/tools/spirv_cross_bin/build.sh pins, for the analyses that read an MSL
+# rendering of the Vulkan SPIR-V (integer inputs and outputs, c1 bounds, uniform read extents). No Metal tools: nothing here builds a Metal library.
+
+# SPIRV-Cross, in a stage of its own: only the binary and its licences reach the image. The first three instructions are Dockerfile.build's, so a machine that has built that
+# image takes its toolchain layer from the build cache instead of a second download
+FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c AS spirv-cross
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18 cmake ninja-build python3 git ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100 \
+ && update-alternatives --install /usr/bin/cc cc /usr/bin/clang-18 100 \
+ && update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-18 100
+# The tag and commit of dm/gfx/tools/spirv_cross_bin/build.sh (the Mac's build): the clone stops when the tag names another commit. SOURCE_DATE_EPOCH (the commit's time) makes
+# --revision print the same timestamp in every build, which dmsh_chain_vk.lock records
+ARG SPIRV_CROSS_TAG=vulkan-sdk-1.4.363.0
+ARG SPIRV_CROSS_COMMIT=f11ba9f0b21ba8fc15153d50a2a1ae31ab1cf8f7
+RUN git clone --quiet --depth 1 --branch "$SPIRV_CROSS_TAG" https://github.com/KhronosGroup/SPIRV-Cross.git /tmp/src \
+ && got="$(git -C /tmp/src rev-parse HEAD)" \
+ && { [ "$got" = "$SPIRV_CROSS_COMMIT" ] || { echo "[RED] $SPIRV_CROSS_TAG is commit $got, not the pinned $SPIRV_CROSS_COMMIT" >&2; exit 1; }; } \
+ && export SOURCE_DATE_EPOCH="$(git -C /tmp/src log -1 --format=%ct)" TZ=UTC \
+ && cmake -S /tmp/src -B /tmp/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+      -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_SKIP_INSTALL=ON -DCMAKE_EXE_LINKER_FLAGS=-s > /tmp/configure.log \
+ && cmake --build /tmp/build --target spirv-cross > /tmp/build.log \
+ && mkdir -p /out && cp /tmp/build/spirv-cross /tmp/src/LICENSE /out/ && cp -R /tmp/src/LICENSES /out/LICENSES \
+ && rm -rf /tmp/src /tmp/build /tmp/*.log \
+ && /out/spirv-cross --revision
+
+# The .NET SDK 10.0.402 (runtime 10.0.13, released on 2026-10-13) on Ubuntu 24.04, pinned by the digest of its multi-architecture index (the image's rebuild of 2026-10-21).
+# The translator targets net10.0 and is framework-dependent, as dmsh_xlate_bin is
+FROM mcr.microsoft.com/dotnet/sdk:10.0.402-noble@sha256:747cbade5bfd918a175ac32f8f1d931edec2c7d0d5397a3de72eaef1ac1f66d2
+ENV DEBIAN_FRONTEND=noninteractive DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+# Python 3.12 (and PyYAML, which reads the workflow files), SPIRV-Tools and glslang from Ubuntu 24.04's archive, the same packages as Dockerfile.build's Vulkan layer; apt
+# resolves them when the image is built, so the versions are printed (dmsh_chain_vk.lock records spirv-val's and glslang's)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-yaml spirv-tools glslang-tools \
+ && rm -rf /var/lib/apt/lists/* \
+ && dpkg-query -W -f '${Package} ${Version}\n' python3 python3-yaml spirv-tools glslang-tools \
+ && dotnet --version
+COPY --from=spirv-cross /out/ /opt/spirv-cross/
+ENV PATH=/opt/spirv-cross:$PATH
+# The worktree is mounted at /src and the container runs as the caller's user (HOME=/tmp): git refuses a repository owned by another user without this
+RUN git config --system --add safe.directory '*' && spirv-cross --revision && spirv-val --version && glslangValidator --version | head -1
+WORKDIR /src

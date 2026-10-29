@@ -339,6 +339,11 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the console) wi
 <td align="center" valign="top" width="33%"><img src="docs/images/dave-the-diver.jpg" width="256" alt="DAVE THE DIVER"><br><small><b><a href="dm/games/010097F018538000/README.md">DAVE THE DIVER</a></b></small></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/mario-luigi-brothership.jpg" width="256" alt="Mario &amp; Luigi: Brothership"><br><small><b><a href="dm/games/01006D0017F7A000/README.md">Mario &amp; Luigi: Brothership</a></b><br>60 fps with 1.0.0</small></td>
 </tr>
+<tr>
+<td align="center" valign="top" width="33%"><img src="docs/images/south-park-fractured-but-whole.jpg" width="256" alt="South Park: The Fractured But Whole"><br><small><b><a href="dm/games/01008F2005154000/README.md">South Park: The Fractured But Whole</a></b><br>30/60 fps with 1.05</small></td>
+<td></td>
+<td></td>
+</tr>
 </table>
 <!-- end of gallery -->
 

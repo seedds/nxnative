@@ -1,0 +1,47 @@
+# South Park: The Fractured But Whole, update 1.05 (v327680), Ubisoft Snowdrop on NVN, SDK 3.5.1.
+# iPhone-sized virtual address layout. The ten exact build-gated cuts were
+# tested on the Mac through character customization; see README.md for limits.
+
+# ---- Identity ----
+title_id	01008F2005154000
+program_id	01008F2005154000
+
+# ---- App ----
+name	South Park™: The Fractured But Whole™
+ipa	SouthParkTheFracturedButWhole.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	1.05	main=df15edaaf603e00cd7d8a01bd05a15c2	subsdk0=6c8a6b30bd5e6ca1206e8b1cdcc93bf7	sdk=8bb65519bc6399ab432e0ba7cdb16e2b
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	camel/sdf/nx/data/sdf-A-0130.sdfdata
+zip_store	.dds:.sdfdata:.sdftoc:.txt:.metallib
+
+# ---- Memory ----
+# 5 GiB guest reservation, of which 4.375 GiB is the virtual-address alias region.
+# Snowdrop experimentally reserves 4 GiB of virtual addresses after main's
+# build-gated cuts (1.5 GiB large + 512 MiB 512 KiB slabs + 2 GiB 64 KiB slabs).
+# This leaves about 320 MiB of alias address space past the engine reservation
+# and the SDK's 62 MiB node area, subject to earlier small reservations.
+# Virtual reservation is not physical commitment; memory usage needs gameplay checks.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Frame rate ----
+# Snowdrop asks for interval 2 (30 fps). The host's presentation cap keeps that
+# as the default and lets the launcher offer 60 fps; the game's elapsed-time
+# step was checked during iPhone gameplay with one present per 60 Hz tick.
+fps_target	30
+
+# ---- Shader split ----
+# Repository shader tables are placeholders; the privately extracted 4615-key
+# version-complete v1.05 shaders live in the game work folder, not in Git.
+shader_groups	/camel/=camel
+shader_note	South Park™: The Fractured But Whole™ shaders (experimental, incomplete)

@@ -348,7 +348,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** a tile grid in Ultrahand and Recall highlights; an `EQUAL` depth test rejects fragments writing the same depth as a cleared Depth16 target.
 - **Cause:** Apple GPUs truncate a `Depth16Unorm` load-clear but round fragment depth. A clear of 0.5 stores 32767 while a fragment writing 0.5 stores 32768.
 - **Fix:** `nvn_depth16_clear_value` selects the nearest D16 value in double precision and adds a quarter-unit margin inside both its truncation and rounding bins, surviving Metal's conversion of the descriptor to float. Both attachment load-clears (`rp_begin_ex_`) and whole-texture clears (`clear_tex`) use it only for `Depth16Unorm`. Other formats and clears drawn as fragments retain their existing conversion. `t_depth16_clear` compares both production command paths with fragment-written reference depths, including half-bin boundaries and adjacent floats.
-- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), reported in MacNativeGames commit `3d90e41` and ported in PR #199. The conversion difference is reproduced here with a synthetic Mac GPU test; the game's highlight effect and the iPhone have not been rechecked.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), reported in MacNativeGames commit `3d90e41` and ported in PR #199. The conversion difference is reproduced here with a synthetic Mac GPU test. The game's highlight effect is rechecked on an iPhone 16 Pro (iPhone17,1) on iOS 27.0 with update 1.4.3: no tile grid over Ultrahand or Recall, where a build made before the correction had one.
 
 ### Integer colour clears
 

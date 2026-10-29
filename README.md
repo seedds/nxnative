@@ -1,7 +1,7 @@
 <div align="center">
 
 <a href="https://github.com/rennan101/nxnative_Launcher">
-  <img src="docs/images/banner_monochrome.png" width="100%" alt="NxNative Launcher Banner">
+  <img src="docs/images/banner.png" width="100%" alt="NxNative Launcher Banner">
 </a>
 
 # NxNative Launcher

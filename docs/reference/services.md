@@ -150,13 +150,10 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### Folder reads entering the RomFS prefetch list
 
-**Symptom.** With image recording enabled, reading a folder-backed file can append its range to `fs_user.tsv` and suppress a later image range as already covered.
-
-**Cause.** An ordinary file descriptor has zero high bits, so decoding it as an image handle selects mount zero. When the tracked RomFS image occupies that slot, the mount comparison alone accepts folder reads.
-
-**Fix.** `hle_fs.c` checks the image-handle tag before decoding its mount index. The existing prefetch fixture mounts a folder beside image slot zero and verifies that a folder read leaves the image list unchanged before recording the image's own reads.
-
-**Found on.** The synthetic `t_fs_prefetch` fixture during review of the [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) prefetch work; the added case fails before the handle-tag check and passes with it.
+- **Symptom:** With image recording enabled, reading a folder-backed file can append its range to `fs_user.tsv` and suppress a later image range as already covered.
+- **Cause:** An ordinary file descriptor has zero high bits, so decoding it as an image handle selects mount zero. When the tracked RomFS image occupies that slot, the mount comparison alone accepts folder reads.
+- **Fix:** `hle_fs.c` checks the image-handle tag before decoding its mount index. The existing prefetch fixture mounts a folder beside image slot zero and verifies that a folder read leaves the image list unchanged before recording the image's own reads.
+- **Found on:** The synthetic `t_fs_prefetch` fixture during review of the [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) prefetch work; the added case fails before the handle-tag check and passes with it.
 
 ### ReadFile into write-protected texture pool pages
 

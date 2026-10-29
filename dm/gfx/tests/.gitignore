@@ -7,3 +7,8 @@ t_*
 nvn_replay
 .precommit.err
 .precommit_snap/
+
+t_logic_or
+t_logic_or.dSYM/
+t_early_fragment
+t_early_fragment.dSYM/

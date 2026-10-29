@@ -39,6 +39,8 @@ static NSString *row(const pso_key *key, int merged) {
     strcpy(vs->key, "warm-vs"); strcpy(fs->key, "warm-fs"); fs->stage = 1;
     pso_skey sk; char hex[sizeof sk * 2 + 1];
     pso_skey_from(key, vs, fs, merged, NULL, &sk); pso_skey_hex(&sk, hex);
+    // Exercise the historical manifest format through the real warm loader.
+    if (key->logic_op == NVN_LOGIC_OP_COPY) hex[(offsetof(pso_skey, k) + offsetof(pso_key, logic_op)) * 2] = 0;
     return [NSString stringWithFormat:@"R\t%s\n", hex];
 }
 
@@ -89,7 +91,7 @@ static void check_draw(const pso_key *raw, int merged, const uint8_t expected[4]
 static void scenario(NSString *dir, int merged) {
     nvn_hm_clear(&g_pso, hm_rel); g_shcache = nil; g_warm_items = [NSMutableArray array];
     g_warm_rps = g_warm_claim_rps = 0; atomic_store(&g_warm_ready, 0);
-    pso_key keys[4] = {0}; keys[0].cfmt[0] = MTLPixelFormatRGBA8Unorm; keys[0].samples = 1;
+    pso_key keys[4] = {0}; keys[0].cfmt[0] = MTLPixelFormatRGBA8Unorm; keys[0].samples = 1; keys[0].logic_op = NVN_LOGIC_OP_COPY;
     int logical = merged ? 7 : 0;
     keys[0].chmask = 0xfu << (4 * logical);
     blend_st enabled = {.src_rgb = NVN_BLEND_FUNC_SRC_ALPHA, .dst_rgb = NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA,

@@ -49,7 +49,7 @@ class MonolithTests(unittest.TestCase):
         cmp = struct.pack('<8s2I', b'cmp\0zlib', len(packed), len(data)) + packed
         expected = {split.skey(c, k) for c, k in zip(controls, codes)}
         with tempfile.TemporaryDirectory() as tmp:
-            for body in (data, xbc, b'DRSM' + bytes(60) + xbc + xbc, cmp):
+            for body in (data, xbc, b'DRSM' + bytes(60) + xbc + xbc, cmp, *(magic + bytes(60) + data for magic in (b'DMXM', b'DMSM', b'1RAS'))):
                 with self.subTest(magic=body[:4]):
                     path = Path(tmp) / 'resource.bin'   # detection uses the header, not the suffix
                     path.write_bytes(body)

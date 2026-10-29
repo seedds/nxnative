@@ -522,12 +522,26 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `dm/gfx/tests/t_pull.m` (the words against Metal's fetch and the CPU conversion), `t_pull_inv.m` (a depth prepass with one pipeline and depth-equal with the other), `test_dmsh_pull.py`; `dm/ios/tests/test_profile_pack.py` packs tiny fixtures through the actual archive step and checks profile defaults, explicit overrides and an IPA with a pipeline archive in the ZIP.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): draws that waited for their pipeline on a cold start.
 
+### Primitive barriers before a later shader writer
+
+- **Symptom:** models intermittently stretch or flicker as another model's skinning preparation updates a shared palette; still captures can look correct.
+- **Cause:** Metal storage accesses from different draws in one render encoder are unordered. Ending a pass only when an earlier draw wrote storage protects write-to-read dependencies, but misses read-to-write dependencies: an NVN primitive barrier can precede the pass's first writer. The later writer may overwrite data an earlier model still reads.
+- **Fix:** remember an ordering barrier inside the open pass and end that pass before a later draw with reflected storage/image writes. Keep read-only draws in the same encoder. The synthetic rasterizer-discard regression checks both orders, retained read-only passes and rendered pixels.
+- **Found on:** [Xenoblade Chronicles: Definitive Edition](../../dm/games/0100FF500E34A000/README.md), Colony 9 models and Reyn's weapon. The captured command stream alternates read-only skinned-model draws, `ORDER_PRIMITIVES`, and vertex-only palette writers in the same pass.
+
+### Integer OR lighting lists and early occupancy rejection
+
+- **Symptom:** textured terrain or close-up scenery becomes dark in rectangular regions.
+- **Cause:** NVN OR state was recorded but ignored on unsigned integer targets. Probe-list draws must accumulate bits, not replace the previous list. Occupancy image writes from depth/stencil-rejected fragments also corrupt these lists when the game requires early rejection.
+- **Fix:** a separate unsigned framebuffer-fetch OR entry for sole color(0) writers admitted through `fs_uint`, selected by NVN state and distinguished in pipeline keys. COPY is unchanged; remapping through float readable-tile variants falls back to a normal pass. Early tests are opt-in shader facts, retained in cloned entries. Signed/native integer and multiple-output logic operations are outside this implementation.
+- **Found on:** [Xenoblade Chronicles: Definitive Edition](../../dm/games/0100FF500E34A000/README.md), five measured occupancy-list shaders at the Colony 9 approach.
+
 ### Float32 vertex padding through integer inputs
 
 - **Symptom:** a fullscreen post-process draw writes no color, then a later blur composite darkens scenery while the character remains visible.
 - **Cause:** reinterpreting Float1/2/3 as UInt1/2/3 preserves supplied bits but pads missing `w` with integer `1`. A shader that bitcasts the input back to float receives `w=1.4e-45`, rather than `1.0`, and can clip the whole draw. Float4 has no missing components.
 - **Fix:** short float32 vectors use the existing float shadow input, or CPU expansion with float `(0,0,0,1)` defaults when shadows are unavailable or disabled. Float4 keeps direct reinterpretation. `t_float_pad` checks signed/unsigned GPU fetch, CPU fallback and Float4 controls.
-- **Found on:** [Xenoblade Chronicles: Definitive Edition](../../dm/games/0100FF500E34A000/README.md) (the game profile is a separate, pending contribution).
+- **Found on:** [Xenoblade Chronicles: Definitive Edition](../../dm/games/0100FF500E34A000/README.md).
 
 ### CPU conversion of vertex attributes the input type cannot take
 

@@ -29,13 +29,23 @@ int main(void) {
     }
     // A prewarm row written before pso_key.atest: the key without its last field parses with the alpha test off
     {
-        pso_key k; fill(&k, 9); k.atest = 1; k.pad = 0; pso_key_norm(&k, 0);
+        pso_key k; fill(&k, 9); k.atest = 1; k.pad = 0; k.logic_op = NVN_LOGIC_OP_COPY; k.logic_pad = 0; pso_key_norm(&k, 0);
         NvShader *vs = [NvShader new]; snprintf(vs->key, sizeof vs->key, "vs-a");
         pso_skey a, b; char hex[sizeof a * 2 + 1];
         pso_skey_from(&k, vs, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
-        size_t old = strlen(hex) - 2 * (sizeof k.atest + sizeof k.pad); hex[old] = 0;
+        size_t old = (offsetof(pso_skey, k) + offsetof(pso_key, atest)) * 2; hex[old] = 0;
         assert(pso_skey_parse(hex, &b) == 0); assert(b.k.atest == 0 && b.k.pad == 0);
         a.k.atest = 0; assert(memcmp(&a, &b, sizeof a) == 0);
+    }
+    // Current-upstream alpha-test rows precede logic state; preserve alpha and default COPY.
+    for (uint32_t alpha = 0; alpha <= 1; alpha++) {
+        pso_key k = {0}; k.atest = alpha; k.logic_op = NVN_LOGIC_OP_OR;
+        pso_skey a, b; char hex[sizeof a * 2 + 1];
+        pso_skey_from(&k, nil, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
+        assert(pso_skey_parse(hex, &b) == 0 && b.k.atest == alpha && b.k.logic_op == NVN_LOGIC_OP_OR);
+        hex[(offsetof(pso_skey, k) + offsetof(pso_key, logic_op)) * 2] = 0;
+        assert(pso_skey_parse(hex, &b) == 0 && b.k.atest == alpha && b.k.logic_op == NVN_LOGIC_OP_COPY);
+        a.k.logic_op = NVN_LOGIC_OP_COPY; assert(memcmp(&a, &b, sizeof a) == 0);
     }
     // pso_key_norm: blend factors of a target that does not blend, and the mask / blend bit of a target a normal pass lacks, are not part of the key; a merged pass keeps
     // the mask and blend bits (they index logical targets through lmap)

@@ -828,7 +828,7 @@ static void ser_gate(void) {
 }
 // Metal 4 conservative barriers (first version): a consumer barrier at the start of an encoder (all prior work → this encoder) and a producer barrier at the end (this encoder and earlier → later encoders).
 // Only the one at the start is not enough: t_rt_range 'pass 1 → pass 2 → copy' read back black, and after adding the end barrier it is 19/19. Old-queue encoders (upload / diagnostics / present) do not go through these barriers.
-static int g_pass_swrite;   // the open draw pass has shader writes (swrite_note)
+static int g_pass_swrite, g_pass_ordered;   // prior shader writes / an ordering barrier inside this open pass
 static void img_fit_upgrade(void); static int g_imfit_npend;   // textures an image slot needs a format view of (img_fit), upgraded before the next draw pass opens
 static int g_last_end_relaxed, g_game_barrier;   // the last encoder ended was a draw pass with the relaxed end barrier (nothing else since); the game issued nvnCommandBufferBarrier since the last draw pass began
 static uint64_t g_bar_skip, g_bar_full;            // draw passes begun without / with the consumer barrier (DM_NVN_BARRIER=game)
@@ -3261,7 +3261,7 @@ static void bare_dims(NSUInteger *w, NSUInteger *h);
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (g_enc) return g_enc;
     memset(g_zskip_cand_ok, 0, sizeof g_zskip_cand_ok);
-    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = 0; g_sm_pass = 0;
+    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_ordered = 0; g_sm_pass = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return nil; }
     if (g_imfit_npend) img_fit_upgrade();   // no pass is open here: the upgrade's copy may run (img_fit)
     // The version of the attachment-range candidate is taken before capturing any attachment; if it changes during setup, there is no continuation.
@@ -3564,7 +3564,7 @@ static void shmap_load(void) {
     warm_start();
 }
 
-@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
+@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_u_or, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed;
@@ -3791,6 +3791,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         for (NSUInteger b = 0; b < 4 && b < ts.count; b++) o->tf_stride[b] = (uint16_t)[ts[b] unsignedIntValue];
         if (!o->tf_fn) MLOG("[RED] shader %s: no transform feedback entry point %s in its library", pc.UTF8String, [j[@"entry_tf"] UTF8String]);
     }
+    if (stage == 1 && j[@"entry_u_or"]) o->fn_u_or = fn4_note([lib newFunctionWithName:j[@"entry_u_or"]], lib, j[@"entry_u_or"], nil);
     if (stage == 1 && j[@"entry_u"]) { o->fn_u = fn4_note([lib newFunctionWithName:j[@"entry_u"]], lib, j[@"entry_u"], nil); if (!o->fn_u) MLOG("[RED] shader %s: no integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_u"] UTF8String]); }
     if (stage == 1 && j[@"entry_m"]) { o->fn_m = fn4_note([lib newFunctionWithName:j[@"entry_m"]], lib, j[@"entry_m"], nil); o->mask_m = (uint8_t)[j[@"uint_mask_m"] unsignedIntValue];
         if (!o->fn_m) MLOG("[RED] shader %s: no mixed integer-output entry point %s in its library", pc.UTF8String, [j[@"entry_m"] UTF8String]); }
@@ -3798,6 +3799,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (o->fn.functionConstantsDictionary.count) {
         NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; id<MTLFunction> f = fn4_note([lib newFunctionWithName:entry constantValues:cv error:&fe], lib, entry, cv);
         if (f) o->fn = f; else MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String);
+        if (o->fn_u_or) { f = fn4_note([lib newFunctionWithName:j[@"entry_u_or"] constantValues:cv error:&fe], lib, j[@"entry_u_or"], cv); o->fn_u_or = f; }
         if (o->fn_u) { f = fn4_note([lib newFunctionWithName:j[@"entry_u"] constantValues:cv error:&fe], lib, j[@"entry_u"], cv); o->fn_u = f; }
         if (o->fn_m) { f = fn4_note([lib newFunctionWithName:j[@"entry_m"] constantValues:cv error:&fe], lib, j[@"entry_m"], cv); o->fn_m = f; }
         if (o->fn_d) { f = fn4_note([lib newFunctionWithName:j[@"entry_d"] constantValues:cv error:&fe], lib, j[@"entry_d"], cv); o->fn_d = f; }
@@ -4628,11 +4630,15 @@ static void bare_dims(NSUInteger *w, NSUInteger *h) {
 // behind the full consumer barrier. FINAL FANTASY TACTICS - The Ivalice Chronicles composites its UI into the window texture in software, a read-modify-write of the image by draw after
 // draw in one attachment-less pass with barrier bits 0x12 between them: without the split a later element read the window before the earlier one had landed and wrote the old pixels
 // back (the dialog boxes had holes the size of their text)
-static void swrite_note(NvProg *pr) {
-    if (!pr) return;
-    if (g_pass_swrite) { g_vbuf_write_epoch++; return; }   // further shader writes also invalidate aligned vertex snapshots
+// A barrier before the first writer also orders the pass's earlier readers.
+static int shader_writes(NvProg *pr) {
+    if (!pr) return 0;
     for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
-        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP)) { g_pass_swrite = 1; g_vbuf_write_epoch++; return; } }
+        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP)) return 1; }
+    return 0;
+}
+static void swrite_note(NvProg *pr) {
+    if (g_pass_swrite || shader_writes(pr)) { g_pass_swrite = 1; g_vbuf_write_epoch++; }
 }
 static void udc_note_draw(NvProg *pr) {
     int td = tbdr_on();
@@ -5241,6 +5247,9 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
             break; } }
     if (fs && fs->fn_u && !fsfn && d.fragmentFunction == fs->fn && pso_all_uint(k, fs, merged)) d.fragmentFunction = fs->fn_u;   // integer colour targets (dmsh_build.py fs_uint)
     else if (fs && fs->fn_m && !fsfn && d.fragmentFunction == fs->fn && pso_mixed_uint(k, fs, merged)) d.fragmentFunction = fs->fn_m;   // integer and float colour targets
+    // Integer OR list accumulation uses a separate entry; COPY stays unchanged.
+    if (fs && fs->fn_u_or && d.fragmentFunction == fs->fn_u && k->logic_op == NVN_LOGIC_OP_OR &&
+        mtl_fmt_uint((MTLPixelFormat)k->cfmt[0]) && (!merged || k->lmap[0] == 0)) d.fragmentFunction = fs->fn_u_or;
     // Dual-source blending: target 0 reads the shader's output 1 as its second source. The dual-source entry point returns that output as [[color(0), index(1)]] (dmsh_build.py fs_dual),
     // and output 1 is then no colour output: Maxwell leaves the attachment of output 1 as it was. A shader without that entry point blends with zero for the second source, as an
     // unwritten one (blend_zero_src1): passing the state to Metal as it is makes Metal 4's blend compiler crash (MTLCompilerService in buildBlendFactor, Pokémon Legends: Arceus)
@@ -5733,7 +5742,7 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
     memset(k, 0, sizeof *k);
     k->vs = (__bridge void *)vs; k->fs = (__bridge void *)fs;
     memcpy(k->cfmt, cfmt, sizeof k->cfmt); k->dfmt = dfmt; k->sfmt = sfmt; k->samples = samples;
-    k->blend_en = S.color.blend_en; k->chmask = S.chmask.mask; k->a2c = S.ms.a2c; k->atest = atest_key(fs, cfmt, lmap ? g_pso_lmap : NULL);
+    k->blend_en = S.color.blend_en; k->chmask = S.chmask.mask; k->a2c = S.ms.a2c; k->atest = atest_key(fs, cfmt, lmap ? g_pso_lmap : NULL); k->logic_op = S.color.logic_op;
     for (int i = 0; i < 8; i++) if (k->cfmt[i] || lmap) k->blend[i] = S.blend[i];
     const nvn_refl *rf = &vs->rf;
     for (int v = 0; v < rf->nv; v++) { int a = rf->v[v].nvn; if (a < 16 && a < S.nattr) { k->attr[a] = S.attr[a]; int st = S.attr[a].stream; if (st < 16) k->stream[st] = S.stream[st]; } }
@@ -7139,7 +7148,7 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
     NvShader *vs = pr->sh[0], *fs = pr->sh[1];
     if (!vs || !fs || vs->rf.pos_attr < 0 || fs->rf.may_discard || atest_on() || fs->rf.writes_smask || !(fs->rf.color_mask >> i & 1)) return g_fd_why = 2, 0;   // atest_on: the alpha test may drop fragments
     if (!t || t.sampleCount != 1 || t.textureType == MTLTextureType3D) return g_fd_why = 3, 0;
-    if ((S.color.blend_en >> i & 1) || ((S.chmask.mask >> (4 * i)) & 0xf) != 0xf || S.ms.a2c || S.poly.mode != NVN_POLYGON_MODE_FILL) return g_fd_why = 4, 0;
+    if (S.color.logic_op != NVN_LOGIC_OP_COPY || (S.color.blend_en >> i & 1) || ((S.chmask.mask >> (4 * i)) & 0xf) != 0xf || S.ms.a2c || S.poly.mode != NVN_POLYGON_MODE_FILL) return g_fd_why = 4, 0;
     if (R.rt.depth && ((S.ds.dt && S.ds.df != NVN_DEPTH_FUNC_ALWAYS) || S.ds.st)) return g_fd_why = 5, 0;
     if (n < 3 || n > 64) return g_fd_why = 6, 0;
     float P[64][4]; int why = attr_read(vs->rf.pos_attr, dw, di, P);
@@ -8332,6 +8341,8 @@ static int fz_p2_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di, uint8_
     for (int c = 0; c < 8; c++) if (fs->rf.color_mask >> c & 1) { if (g_fz.p2map[c] < 0) { PD("F %llu not provable: output color %d has no matching attachment", g_stat_pass, c); return 0; } lmap[g_fz.p2map[c]] = (uint8_t)c; }
     int ident = !fbmask; for (int c = 0; c < 8; c++) if ((fs->rf.color_mask >> c & 1) && g_fz.p2map[c] != c) ident = 0;
     if (ident) { for (int q = 0; q < 8; q++) if (lmap[q] != 0xff) g_fz.wrote[q] = 1; if (fz_check_on()) fz_snap_take(dw, di); return 1; }   // Does not read the tile and the output is not shifted: use the original version (the write mask still follows the mapping)
+    // Float readable-tile variants cannot preserve integer OR accumulation.
+    if (S.color.logic_op == NVN_LOGIC_OP_OR) return 0;
     if (!fs->rf.nfo) { bf_want_note(fs->key); PD("F %llu not provable: no readable-tile version (outputs would need moving)", g_stat_pass); return 0; }
     *fn = bf_fn(fs, fx, fbmask, lmap);
     if (!*fn) return 0;
@@ -9117,6 +9128,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     __unsafe_unretained NvProg *pr = g_geo_program ? g_geo_program : prog_get(S.prog);
     image_prepare(pr, 0x1f);
     draw_gs_check(pr);   // a geometry stage left with no function (see prog_fold_gs)
+    // ORDER_PRIMITIVES also orders earlier model reads before a later palette writer.
+    if (g_enc && g_pass_ordered && shader_writes(pr)) rp_end();
     if (!g_geo_program && S.rast_discard && S.tf_on) { tf_draw(pr, dw, di); return; }
     // Feedback captures rasterized draws too (Donkey Kong Country: Tropical Freeze's fur).
     if (!g_geo_program && S.tf_on && pr && pr->sh[0] && pr->sh[0]->tf_fn) tf_draw(pr, dw, di);
@@ -10401,6 +10414,7 @@ void mtl_exec(const uint8_t *p) {
                 int split = g_enc && g_pass_swrite && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT));
                 PD("I %llu barrier bits %#x%s", g_stat_pass, bits, split ? ": ends the pass (shader writes)" : g_enc ? " (render pass open)" : "");
                 if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
+                if (g_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT))) g_pass_ordered = 1;
                 if (bits) g_game_barrier = 1; break; }
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a); break;
             default: break;

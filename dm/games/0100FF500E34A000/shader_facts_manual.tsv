@@ -1,0 +1,7 @@
+# Measured Colony 9 probe-list writers: stencil/depth rejection must precede occupancy image writes.
+# OR-only leaves residual dark regions; OR+early tests clears terrain and bridge close-ups (see game README).
+16f9d05b534eb551	{"early_fragment_tests":true}
+3175e73c7e8c52f2	{"early_fragment_tests":true}
+7f531c84c910ae0a	{"early_fragment_tests":true}
+d5effe527d3e3924	{"early_fragment_tests":true}
+f52ce42a4b3f5756	{"early_fragment_tests":true}

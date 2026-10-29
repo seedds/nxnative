@@ -40,6 +40,9 @@ int main(void) { @autoreleasepool {
         "vertex float4 c(uint n[[vertex_id]]){return float4(0,0,0,1);}\n"
         "vertex void pd(uint n[[vertex_id]],constant A&a[[buffer(0)]]){a.p[n]=n+0x1200;}\n"
         "vertex void cd(uint n[[vertex_id]],constant A&a[[buffer(0)]]){a.p[n+4096]=a.p[n];}\n"
+        "struct O{float4 p[[position]];float value[[user(locn0)]];};\n"
+        "vertex O vr(uint n[[vertex_id]],constant A&a[[buffer(0)]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return O{float4(p[n%3],0,1),a.p[0]==1?1.0:0.0};}\n"
+        "fragment float4 fr(O in[[stage_in]]){return float4(in.value,0,0,1);}\n"
         "fragment float4 f(){return float4(1,0,0,1);}\n" options:nil error:&error];
     if(!lib){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return 1;}
     static prog_t pg={.serial=910501}; NvProg *program=[NvProg new];
@@ -76,5 +79,28 @@ int main(void) { @autoreleasepool {
     bp.prog=&cp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&arrays,sizeof arrays);execute();
     int ordered=1;for(int i=0;i<4096;i++)ordered&=output[i+4096]==(uint32_t)(i+0x1200);
     CHECK(ordered,"primitive barrier orders vertex storage writes before the consuming draw");
+    // A barrier also orders READ -> WRITE. The old past-writer-only rule
+    // left these draws in one Metal encoder, so a bone-palette update could
+    // race a model still reading that palette (NVN ORDER_PRIMITIVES).
+    static prog_t rp={.serial=910505}; NvProg *reader=[NvProg new];
+    NvShader *rvs=[NvShader new]; rvs->fn=[lib newFunctionWithName:@"vr"];
+    rvs->ae=[rvs->fn newArgumentEncoderWithBufferIndex:0]; rvs->rf.nb=1;
+    rvs->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=0,.reg=0,.aid=0}; reader->sh[0]=rvs;
+    reader->sh[1]=[NvShader new]; reader->sh[1]->fn=[lib newFunctionWithName:@"fr"]; reader->sh[1]->stage=1;
+    serial_put(rp.serial,reader); output[0]=1;
+    discard(0); clear_blue(); bp.prog=&rp; emit(OP_BIND_PROGRAM,&bp,sizeof bp);
+    arrays=(p_draw){.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=3,.instances=1}; emit(OP_DRAW,&arrays,sizeof arrays);
+    emit(OP_BARRIER,&barrier,sizeof barrier);
+    emit(OP_DRAW,&arrays,sizeof arrays); uint64_t before=g_stat_pass; execute();
+    CHECK(g_stat_pass==before+1,"read-only draws across a primitive barrier may retain their encoder"); pixels(&t,1);
+    output[0]=1; clear_blue(); emit(OP_DRAW,&arrays,sizeof arrays);
+    emit(OP_BARRIER,&barrier,sizeof barrier); emit(OP_DRAW,&arrays,sizeof arrays); // a later reader must not consume the pending order
+    discard(1); bp.prog=&pp; emit(OP_BIND_PROGRAM,&bp,sizeof bp);
+    arrays.prim=NVN_DRAW_PRIMITIVE_POINTS; emit(OP_DRAW,&arrays,sizeof arrays); before=g_stat_pass; execute();
+    // Metal draw memory accesses are unordered inside one render encoder:
+    // splitting before the writer is necessary even if this GPU happened to
+    // finish the three earlier vertices before scheduling the writer.
+    CHECK(g_stat_pass==before+2,"primitive barrier orders earlier read-only draws before a later storage writer");
+    CHECK(output[0]==0x1200,"later discarded writer executes after the read"); pixels(&t,1);
     printf("rasterizer discard: %d checks, %d failed\n",checks,fails);return fails!=0;
 } }

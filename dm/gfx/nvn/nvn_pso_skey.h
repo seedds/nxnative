@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 #include "nvn_obj.h"
 
@@ -8,6 +9,7 @@ typedef struct {
     va_st attr[16]; vs_st stream[16];
     uint8_t lmap[8]; const void *fsfn;
     uint32_t atest, pad;   // atest: 1 = drawn with the alpha test, the fragment from the shader's alpha test library <key>_ba (nvn_mtl.m atest_key); last, so a prewarm row written before it reads as 0
+    uint32_t logic_op, logic_pad;   // append after upstream alpha-test fields; old keys decode as COPY
 } pso_key;
 
 typedef struct {
@@ -46,9 +48,12 @@ static inline void pso_skey_hex(const pso_skey *key, char *out) {
 }
 
 static inline int pso_skey_parse(const char *hex, pso_skey *out) {
-    size_t n = sizeof *out * 2, old = n - 2 * (sizeof out->k.atest + sizeof out->k.pad);   // a row from before the alpha test field: the key without it, alpha test off
-    if (!hex || (strlen(hex) != n && strlen(hex) != old)) return -1;
-    if (strlen(hex) == old) { memset(out, 0, sizeof *out); n = old; }
+    if (!hex) return -1;
+    size_t n = strlen(hex), alpha = (offsetof(pso_skey, k) + offsetof(pso_key, logic_op)) * 2;
+    size_t original = (offsetof(pso_skey, k) + offsetof(pso_key, atest)) * 2;
+    if (n != sizeof *out * 2 && n != alpha && n != original) return -1;
+    memset(out, 0, sizeof *out);
+    if (n != sizeof *out * 2) out->k.logic_op = NVN_LOGIC_OP_COPY;
     uint8_t *p = (uint8_t *)out;
     for (size_t i = 0; i < n; i += 2) {
         int a = hex[i] >= '0' && hex[i] <= '9' ? hex[i] - '0' : hex[i] >= 'a' && hex[i] <= 'f' ? hex[i] - 'a' + 10 : hex[i] >= 'A' && hex[i] <= 'F' ? hex[i] - 'A' + 10 : -1;

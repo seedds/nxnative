@@ -48,6 +48,33 @@ All 199 shader keys absent during the first title run match this inventory.
 
 - **Resolved: scenery darkened during the first Colony 9 bridge reply by Shulk** ([PR #365](https://github.com/seedds/nxnative/pull/365)). In version 1.1.2 on the Mac, the depth-of-field initialization draw takes a Float3 position through a uint4 shader declaration. Its missing `w` caused the draw to be clipped, leaving a black depth-of-field buffer that a later composite blended over textured scenery. The general fix and synthetic regression are linked below.
 
+### Lighting lists and palette ordering (PR #371)
+
+The packed RG32Uint lighting lists accumulate integer OR values; COPY remains a
+separate pipeline entry. Five measured occupancy writers require early depth /
+stencil rejection before image writes; `shader_facts_manual.tsv` records those
+opt-in facts. The general mechanism is documented under
+[integer OR lighting lists and early occupancy rejection](../../../docs/reference/rendering.md#integer-or-lighting-lists-and-early-occupancy-rejection).
+
+A read-only model draw followed by ORDER_PRIMITIVES and the first vertex-only
+palette writer could remain in one Metal encoder. The writer raced the earlier
+reader, intermittently stretching models. Remember the barrier until a writer
+arrives and split before it; intervening readers may keep the encoder. See
+[primitive barriers before a later shader writer](../../../docs/reference/rendering.md#primitive-barriers-before-a-later-shader-writer).
+
+Before this rebase, the PR's clean renderer was tested on a copied first manual
+save in Colony 9: movement, terrain and bridge dialogue including Shulk's reply.
+The player confirmed stable models with the ordering fix. Those observations
+predate the current upstream changes and do not extend the upstream game's
+validation claims. Reproduce via the second displayed save (the first manual
+slot after autosave), then approach the bridge. No saves are distributed.
+
+The DMXM model container `monolib/shader/mirror_ball.wimdo` holds six additional
+shader keys (three vertex / pixel pairs) beyond the upstream 15,129-key inventory.
+The decoder admits DMXM, DMSM and 1RAS model containers through the existing
+recursive Monolith reader; generated package indices must be regenerated along
+with the inventory when those additional programs are discovered.
+
 ## Running on the Mac
 
 Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac`;
@@ -82,6 +109,9 @@ stages. This result is inconclusive; further gameplay testing was stopped at
 the user's request.
 
 ## Found on this game
+
+- [Integer OR lighting lists and early occupancy rejection](../../../docs/reference/rendering.md#integer-or-lighting-lists-and-early-occupancy-rejection).
+- [Primitive barriers before a later shader writer](../../../docs/reference/rendering.md#primitive-barriers-before-a-later-shader-writer).
 
 - [Float32 vertex padding through integer inputs](../../../docs/reference/rendering.md#float32-vertex-padding-through-integer-inputs).
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers): loose programs, effects and model/map streams.

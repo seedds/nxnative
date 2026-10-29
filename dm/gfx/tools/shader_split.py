@@ -2172,7 +2172,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         if left is None: left = [NEST * sum(len(member) for _, member in members)]   # as with Yaz0, count decoded bytes, not compressed bytes
         for nm, member in members: scan_blob(member, label + nm, out, depth + 1, left)
         return
-    if d[:4] in (b'HCPS', b'xbc1', b'DRSM') or d[:8] == b'cmp\0zlib':
+    if d[:4] in (b'HCPS', b'xbc1', b'DRSM', b'DMXM', b'DMSM', b'1RAS') or d[:8] == b'cmp\0zlib':
         monolith_shaders(d, label, out)
         return
     for m in re.finditer(b'SLCT\x03\x10\0\0', d): out.extend(slct_shaders(d, m.start(), label))
@@ -2361,7 +2361,7 @@ def scan_file_in(args):
     # Monolith also ships these containers loose, without an ARH/ARD archive
     # (Xenoblade DE). The generic prefilter below otherwise drops even HCPS.
     # DRSM model streams contain several embedded XBC1 resources.
-    if d[:4] in (b'HCPS', b'xbc1', b'DRSM') or d[:8] == b'cmp\0zlib':
+    if d[:4] in (b'HCPS', b'xbc1', b'DRSM', b'DMXM', b'DMSM', b'1RAS') or d[:8] == b'cmp\0zlib':
         scan_blob(d, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if d[:4] == b'RYHP' or d[8:12] == GFX_MAGIC:

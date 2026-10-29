@@ -30,7 +30,7 @@ public struct MouseLookSettingsView: View {
                     Divider().opacity(0.2)
                     
                     VStack(alignment: .leading, spacing: 12) {
-                        // Sensitivity Slider
+                        // Sensitivity Slider (Liquid Glass pattern, range up to 100x, default 5x)
                         HStack {
                             Text(L10n.t("controls.mouse_sensitivity"))
                                 .font(.system(size: 11, weight: .medium))
@@ -43,12 +43,27 @@ public struct MouseLookSettingsView: View {
                                 .foregroundColor(NXTheme.secondary)
                         }
                         
-                        Slider(value: $profile.mouseSensitivity, in: 0.2...3.0, step: 0.1)
-                            .tint(NXTheme.primary)
+                        NXLiquidGlassSlider(
+                            value: $profile.mouseSensitivity,
+                            in: 0.5...100.0,
+                            step: 0.5,
+                            accentColor: NXTheme.primary
+                        )
+                        .frame(height: 24)
                         
                         Divider().opacity(0.15)
                         
-                        // Invert Y Axis
+                        // Invert X Axis (Horizontal)
+                        Toggle(isOn: $profile.mouseInvertX) {
+                            Text(L10n.t("controls.mouse_invert_x"))
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(NXTheme.textPrimary)
+                        }
+                        .toggleStyle(SwitchToggleStyle(tint: NXTheme.primary))
+                        
+                        Divider().opacity(0.15)
+                        
+                        // Invert Y Axis (Vertical)
                         Toggle(isOn: $profile.mouseInvertY) {
                             Text(L10n.t("controls.mouse_invert_y"))
                                 .font(.system(size: 11, weight: .medium))

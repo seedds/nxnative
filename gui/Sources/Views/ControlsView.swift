@@ -13,7 +13,12 @@ public struct ControlsView: View {
     @State private var pressedButtons: Set<SwitchButton> = []
     @State private var monitorTimer: Timer? = nil
 
-    public init() {}
+    public init() {
+        let hasGamepad = GameControllerService.shared.isGamepadConnected
+        _selectedDeviceIndex = State(initialValue: hasGamepad ? 0 : 1)
+        let current = InputProfileManager.shared.activeProfile
+        _activeProfile = State(initialValue: current)
+    }
 
     public var body: some View {
         ScrollView {
@@ -79,6 +84,9 @@ public struct ControlsView: View {
         }
         .nxScrollEdgeEffect(edges: [.top, .bottom])
         .onAppear {
+            if !controllerService.isGamepadConnected {
+                selectedDeviceIndex = 1
+            }
             activeProfile = profileManager.activeProfile
             if selectedDeviceIndex == 0 {
                 setupControllerPressMonitoring()
@@ -86,6 +94,15 @@ public struct ControlsView: View {
         }
         .onDisappear {
             stopControllerPressMonitoring()
+            profileManager.updateProfile(activeProfile)
+            profileManager.flushAllSettings()
+        }
+        .onChange(of: controllerService.isGamepadConnected) { isConnected in
+            if !isConnected && selectedDeviceIndex == 0 {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.76)) {
+                    selectedDeviceIndex = 1
+                }
+            }
         }
         .onChange(of: selectedDeviceIndex) { newIndex in
             if newIndex == 0 {

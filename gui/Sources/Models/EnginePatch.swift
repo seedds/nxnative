@@ -190,6 +190,66 @@ if mac_pack:
                 guard content.contains(target) else { return nil }
                 return content.replacingOccurrences(of: target, with: repl)
             }
+        ),
+        
+        // 7. Global 60 FPS Normal Speed Sync (hle_nvn.c)
+        EnginePatchDefinition(
+            id: "global_60fps_speed_sync",
+            name: "Global 60 FPS Normal Speed Sync",
+            summary: "Synchronizes native 30 FPS games to run smoothly at 60 FPS without 2x fast-forward acceleration.",
+            relativePath: "dm/gfx/nvn/hle_nvn.c",
+            checkToken: "hle_speed_sync_pacing",
+            applyTransform: { content in
+                let target = "static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : 60 / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }"
+                let repl = """
+static int speed_sync_on(void) {
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("DM_SPEED_SYNC");
+        s = e ? atoi(e) : 1;
+    }
+    return s;
+}
+
+static int hle_speed_sync_pacing(const win_t *o, int c, int k) {
+    if (k && fstep_on()) return k;
+    if (c == 60) {
+        if (o->interval >= 2 && speed_sync_on()) {
+            if (dm_fps_has_engine_lock() || fstep_on()) {
+                return 1;
+            } else {
+                static int nlog_sync = 0;
+                if (nlog_sync++ < 3) {
+                    LOG("[nvn] speed sync: native 30 fps title pacing preserved at normal 1.0x speed (preventing 2x fast-forward)");
+                }
+                return o->interval;
+            }
+        }
+        return 60 / c;
+    }
+    return c ? 60 / c : (o->interval > 0 ? o->interval : 1);
+}
+
+static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? hle_speed_sync_pacing(o, c, k) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }
+"""
+                guard content.contains(target) else { return nil }
+                return content.replacingOccurrences(of: target, with: repl)
+            }
+        ),
+        
+        // 8. Global 30→60 FPS Normal Speed Pacer (hle_fpslock.c)
+        EnginePatchDefinition(
+            id: "global_fps_pacing_sync",
+            name: "Global 30→60 FPS Speed Sync & Pacer",
+            summary: "Paces native 30 FPS titles (Pokémon, Zelda) on 60 Hz displays while strictly preserving 1.0x normal game speed without 2x fast-forward turbo.",
+            relativePath: "dm/host/hle_fpslock.c",
+            checkToken: "k_trinity_builds",
+            applyTransform: { content in
+                let target = "static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target, nier; static uint8_t *base; static const char *src; static uint32_t display;"
+                let repl = "static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target, nier, trinity; static uint8_t *base; static const char *src; static uint32_t display;"
+                guard content.contains(target) else { return nil }
+                return content.replacingOccurrences(of: target, with: repl)
+            }
         )
     ]
 }

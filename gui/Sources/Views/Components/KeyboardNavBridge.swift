@@ -28,6 +28,10 @@ public struct KeyboardNavBridge: NSViewRepresentable {
             if window != nil && monitor == nil {
                 monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                     guard let self = self else { return event }
+                    // Yield all keyboard events when user is rebinding controls
+                    if InputProfileManager.shared.listeningTarget != nil {
+                        return event
+                    }
                     // Prevent search field or text editor hijacking
                     if let fr = self.window?.firstResponder, fr is NSTextView || fr is NSTextField {
                         // Allow Escape to dismiss focus and return control to the library

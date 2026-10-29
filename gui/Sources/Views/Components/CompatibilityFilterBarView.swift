@@ -2,8 +2,6 @@ import SwiftUI
 
 public struct CompatibilityFilterBarView: View {
     @ObservedObject public var viewModel: AppViewModel
-    @Namespace private var ramFilterNamespace
-    @Namespace private var chipFilterNamespace
     @Namespace private var alphaFilterNamespace
     
     private let alphabet = (65...90).map { String(UnicodeScalar($0)) }
@@ -20,109 +18,30 @@ public struct CompatibilityFilterBarView: View {
     
     public var body: some View {
         VStack(spacing: 8) {
-            // Row 1: Sliding Liquid Glass Hardware Filters (Mac RAM + iPhone Chip Tier)
-            ScrollView(.horizontal, showsIndicators: false) {
-                NXGlassContainer(spacing: 8) {
-                    HStack(spacing: 12) {
-                        // Mac RAM Filter Group
-                        HStack(spacing: 6) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "memorychip")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(NXTheme.secondary)
-                                Text(viewModel.tr("compatibility.ram_filter"))
-                                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                                    .foregroundColor(.white)
-                            }
+            // Row 1: Dropdown Hardware Filters (Mac RAM + iPhone Chip Tier)
+            GeometryReader { geo in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    NXGlassContainer(spacing: 8) {
+                        HStack(spacing: 12) {
+                            ramDropdownMenu
                             
-                            HStack(spacing: 5) {
-                                ramFilterPill(label: viewModel.tr("compatibility.all"), ramGB: nil, count: viewModel.compatibleGames.count)
-                                ramFilterPill(label: "4GB", ramGB: 4, count: viewModel.compatibleGames.filter { $0.minRamGB <= 4 }.count)
-                                ramFilterPill(label: "6GB", ramGB: 6, count: viewModel.compatibleGames.filter { $0.minRamGB <= 6 }.count)
-                                ramFilterPill(label: "8GB", ramGB: 8, count: viewModel.compatibleGames.filter { $0.minRamGB <= 8 }.count)
-                                ramFilterPill(label: "16GB", ramGB: 16, count: viewModel.compatibleGames.filter { $0.minRamGB <= 16 }.count)
-                            }
-                            .background {
-                                NXLiquidSlidingPill(in: Capsule())
-                                    .matchedGeometryEffect(
-                                        id: viewModel.compatibilityRamFilter ?? -1,
-                                        in: ramFilterNamespace,
-                                        properties: .frame,
-                                        anchor: .center,
-                                        isSource: false
-                                    )
-                                    .animation(.spring(response: 0.34, dampingFraction: 0.76), value: viewModel.compatibilityRamFilter)
-                            }
-                        }
-                        
-                        Rectangle()
-                            .fill(Color.white.opacity(0.14))
-                            .frame(width: 1, height: 18)
-                        
-                        // iPhone Hardware Chip Filter Group
-                        HStack(spacing: 6) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "iphone")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(NXTheme.secondary)
-                                Text(viewModel.tr("compatibility.iphone_chip_filter"))
-                                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                                    .foregroundColor(.white)
-                            }
+                            Rectangle()
+                                .fill(Color.white.opacity(0.14))
+                                .frame(width: 1, height: 18)
                             
-                            HStack(spacing: 5) {
-                                chipFilterPill(label: viewModel.tr("compatibility.all"), chip: nil, count: viewModel.compatibleGames.count)
-                                ForEach(IphoneChipTier.allCases) { tier in
-                                    let count = viewModel.compatibleGames.filter { $0.minChipTier <= tier }.count
-                                    chipFilterPill(label: tier.rawValue, chip: tier, count: count)
-                                }
-                            }
-                            .background {
-                                NXLiquidSlidingPill(in: Capsule())
-                                    .matchedGeometryEffect(
-                                        id: viewModel.compatibilityChipFilter?.rawValue ?? "AllChips",
-                                        in: chipFilterNamespace,
-                                        properties: .frame,
-                                        anchor: .center,
-                                        isSource: false
-                                    )
-                                    .animation(.spring(response: 0.34, dampingFraction: 0.76), value: viewModel.compatibilityChipFilter)
+                            chipDropdownMenu
+                            
+                            if hasActiveFilter {
+                                resetButton
                             }
                         }
-                        
-                        if hasActiveFilter {
-                            Button(action: {
-                                SoundEffectService.shared.play(.click)
-                                withAnimation(.spring(response: 0.34, dampingFraction: 0.76)) {
-                                    viewModel.compatibilityRamFilter = nil
-                                    viewModel.compatibilityChipFilter = nil
-                                    viewModel.compatibilityNameFilter = "All"
-                                }
-                            }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 10))
-                                    Text(viewModel.tr("common.reset"))
-                                        .font(.system(size: 10, weight: .semibold))
-                                }
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 4.5)
-                                .contentShape(Capsule())
-                                .nxGlassInteractive(
-                                    in: Capsule(),
-                                    tint: NXTheme.tertiary.opacity(0.50),
-                                    fallbackFill: NXTheme.glassSurfaceElevated.opacity(0.6)
-                                )
-                                .nxGlassTransition(.materialize)
-                            }
-                            .buttonStyle(NXPressableButtonStyle())
-                            .nxNoFocusRing()
-                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 3)
+                        .frame(minWidth: geo.size.width, alignment: .center)
                     }
-                    .padding(.horizontal, 16)
                 }
             }
+            .frame(height: 30)
             
             // Row 2: Centered [New | All | A-Z] Filter Buttons (Single persistent sliding Liquid Glass droplet)
             GeometryReader { geo in
@@ -173,86 +92,231 @@ public struct CompatibilityFilterBarView: View {
         .padding(.vertical, 8)
     }
     
-    private func ramFilterPill(label: String, ramGB: Int?, count: Int) -> some View {
-        let isSelected = viewModel.compatibilityRamFilter == ramGB
-        let pillID: Int = ramGB ?? -1
+    // MARK: - RAM Dropdown
+    private var ramDropdownMenu: some View {
+        let isFiltered = viewModel.compatibilityRamFilter != nil
+        // When filtered, substitutes "RAM" with the selected option (e.g. "8GB").
+        // When not filtered, displays default "RAM".
+        let displayText: String = {
+            if let ram = viewModel.compatibilityRamFilter {
+                return "\(ram)GB"
+            } else {
+                return viewModel.tr("compatibility.ram_filter").replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces)
+            }
+        }()
+        
+        return Menu {
+            Picker("RAM", selection: Binding(
+                get: { viewModel.compatibilityRamFilter ?? -1 },
+                set: { newRam in
+                    SoundEffectService.shared.play(.click)
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.76)) {
+                        viewModel.compatibilityFocusArea = .filters
+                        viewModel.compatibilityRamFilter = (newRam == -1) ? nil : newRam
+                    }
+                }
+            )) {
+                Text("\(viewModel.tr("compatibility.all")) (\(viewModel.compatibleGames.count))")
+                    .tag(-1)
+                
+                ForEach([4, 6, 8, 16], id: \.self) { ram in
+                    let count = viewModel.compatibleGames.filter { $0.minRamGB <= ram }.count
+                    Text("\(ram)GB (\(count))")
+                        .tag(ram)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            ramMenuLabel(isFiltered: isFiltered, displayText: displayText)
+        }
+        .menuStyle(.button)
+        .buttonStyle(NXPressableButtonStyle())
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .nxNoFocusRing()
+        .help(viewModel.compatibilityRamFilter == nil ? "Filter games by minimum RAM" : "Filtered: up to \(viewModel.compatibilityRamFilter!)GB RAM")
+    }
+    
+    private func ramMenuLabel(isFiltered: Bool, displayText: String) -> some View {
+        let intensity = viewModel.liquidGlassIntensity
+        let buttonBgOpacity = isFiltered
+            ? (0.18 + 0.12 * intensity)
+            : (0.04 + 0.05 * (1.0 - intensity))
+        let borderOpacity = isFiltered
+            ? (0.35 + 0.15 * intensity)
+            : (0.08 + 0.10 * intensity)
+        
+        return HStack(spacing: 6) {
+            Image(systemName: "memorychip")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(isFiltered ? NXTheme.primary : NXTheme.secondary)
+            
+            Text(displayText)
+                .font(.system(size: 11, weight: isFiltered ? .bold : .semibold, design: .rounded))
+                .foregroundColor(isFiltered ? NXTheme.primary : .white)
+            
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundColor(isFiltered ? NXTheme.primary.opacity(0.85) : .white.opacity(0.65))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(isFiltered ? NXTheme.primary.opacity(buttonBgOpacity) : Color.white.opacity(buttonBgOpacity))
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(
+                    isFiltered
+                        ? NXTheme.primary.opacity(borderOpacity)
+                        : Color.white.opacity(borderOpacity),
+                    lineWidth: 0.75
+                )
+        )
+        .contentShape(Capsule())
+        .nxGlassInteractive(
+            in: Capsule(),
+            tint: isFiltered ? NXTheme.primary.opacity(0.35) : nil,
+            fallbackFill: Color.clear
+        )
+    }
+    
+    // MARK: - iPhone Chip Dropdown
+    private var chipDropdownMenu: some View {
+        let isFiltered = viewModel.compatibilityChipFilter != nil
+        // When filtered, substitutes "Chip iPhone" with the selected chip tier (e.g. "A17 Pro").
+        // When not filtered, displays default "Chip iPhone".
+        let displayText: String = {
+            if let chip = viewModel.compatibilityChipFilter {
+                return chip.rawValue
+            } else {
+                return viewModel.tr("compatibility.iphone_chip_filter").replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces)
+            }
+        }()
+        
+        return Menu {
+            Picker("Chip", selection: Binding(
+                get: { viewModel.compatibilityChipFilter?.rawValue ?? "All" },
+                set: { val in
+                    SoundEffectService.shared.play(.click)
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.76)) {
+                        viewModel.compatibilityFocusArea = .filters
+                        if val == "All" {
+                            viewModel.compatibilityChipFilter = nil
+                        } else {
+                            viewModel.compatibilityChipFilter = IphoneChipTier(rawValue: val)
+                        }
+                    }
+                }
+            )) {
+                Text("\(viewModel.tr("compatibility.all")) (\(viewModel.compatibleGames.count))")
+                    .tag("All")
+                
+                ForEach(IphoneChipTier.allCases) { tier in
+                    let count = viewModel.compatibleGames.filter { $0.minChipTier <= tier }.count
+                    Text("\(tier.rawValue) — \(tier.deviceSummary) (\(count))")
+                        .tag(tier.rawValue)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            chipMenuLabel(isFiltered: isFiltered, displayText: displayText)
+        }
+        .menuStyle(.button)
+        .buttonStyle(NXPressableButtonStyle())
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .nxNoFocusRing()
+        .help(viewModel.compatibilityChipFilter?.deviceSummary ?? "Filter games by minimum iPhone chip tier")
+    }
+    
+    private func chipMenuLabel(isFiltered: Bool, displayText: String) -> some View {
+        let intensity = viewModel.liquidGlassIntensity
+        let buttonBgOpacity = isFiltered
+            ? (0.18 + 0.12 * intensity)
+            : (0.04 + 0.05 * (1.0 - intensity))
+        let borderOpacity = isFiltered
+            ? (0.35 + 0.15 * intensity)
+            : (0.08 + 0.10 * intensity)
+        
+        return HStack(spacing: 6) {
+            Image(systemName: "iphone")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(isFiltered ? NXTheme.primary : NXTheme.secondary)
+            
+            Text(displayText)
+                .font(.system(size: 11, weight: isFiltered ? .bold : .semibold, design: .rounded))
+                .foregroundColor(isFiltered ? NXTheme.primary : .white)
+            
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundColor(isFiltered ? NXTheme.primary.opacity(0.85) : .white.opacity(0.65))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(isFiltered ? NXTheme.primary.opacity(buttonBgOpacity) : Color.white.opacity(buttonBgOpacity))
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(
+                    isFiltered
+                        ? NXTheme.primary.opacity(borderOpacity)
+                        : Color.white.opacity(borderOpacity),
+                    lineWidth: 0.75
+                )
+        )
+        .contentShape(Capsule())
+        .nxGlassInteractive(
+            in: Capsule(),
+            tint: isFiltered ? NXTheme.primary.opacity(0.35) : nil,
+            fallbackFill: Color.clear
+        )
+    }
+    
+    // MARK: - Reset Button
+    private var resetButton: some View {
+        let intensity = viewModel.liquidGlassIntensity
         return Button(action: {
             SoundEffectService.shared.play(.click)
             withAnimation(.spring(response: 0.34, dampingFraction: 0.76)) {
-                viewModel.compatibilityFocusArea = .filters
-                if viewModel.compatibilityRamFilter == ramGB && ramGB != nil {
-                    viewModel.compatibilityRamFilter = nil
-                } else {
-                    viewModel.compatibilityRamFilter = ramGB
-                }
+                viewModel.compatibilityRamFilter = nil
+                viewModel.compatibilityChipFilter = nil
+                viewModel.compatibilityNameFilter = "All"
             }
         }) {
-            HStack(spacing: 3) {
-                Text(label)
-                    .font(.system(size: 10.5, weight: isSelected ? .bold : .semibold, design: .rounded))
-                    .foregroundColor(.white)
-                Text("(\(count))")
-                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.white)
+            HStack(spacing: 4) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 10))
+                Text(viewModel.tr("common.reset"))
+                    .font(.system(size: 10, weight: .semibold))
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .foregroundColor(.white)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4.5)
             .background(
                 Capsule()
-                    .fill(isSelected ? Color.clear : Color.white.opacity(0.06))
+                    .fill(NXTheme.tertiary.opacity(0.25 + 0.15 * intensity))
             )
             .overlay(
                 Capsule()
-                    .strokeBorder(isSelected ? Color.clear : Color.white.opacity(0.10), lineWidth: 0.6)
+                    .strokeBorder(NXTheme.tertiary.opacity(0.40 + 0.20 * intensity), lineWidth: 0.75)
             )
             .contentShape(Capsule())
+            .nxGlassInteractive(
+                in: Capsule(),
+                tint: NXTheme.tertiary.opacity(0.40),
+                fallbackFill: Color.clear
+            )
+            .nxGlassTransition(.materialize)
         }
         .buttonStyle(NXPressableButtonStyle())
         .nxNoFocusRing()
-        .matchedGeometryEffect(id: pillID, in: ramFilterNamespace, isSource: true)
-        .help(ramGB == nil ? "Show games for all RAM capacities" : "Show games that run on devices with up to \(ramGB!)GB RAM (\(count) games)")
     }
     
-    private func chipFilterPill(label: String, chip: IphoneChipTier?, count: Int) -> some View {
-        let isSelected = viewModel.compatibilityChipFilter == chip
-        let pillID: String = chip?.rawValue ?? "AllChips"
-        return Button(action: {
-            SoundEffectService.shared.play(.click)
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.76)) {
-                viewModel.compatibilityFocusArea = .filters
-                if viewModel.compatibilityChipFilter == chip && chip != nil {
-                    viewModel.compatibilityChipFilter = nil
-                } else {
-                    viewModel.compatibilityChipFilter = chip
-                }
-            }
-        }) {
-            HStack(spacing: 3) {
-                Text(label)
-                    .font(.system(size: 10.5, weight: isSelected ? .bold : .semibold, design: .rounded))
-                    .foregroundColor(.white)
-                Text("(\(count))")
-                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.white)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                Capsule()
-                    .fill(isSelected ? Color.clear : Color.white.opacity(0.06))
-            )
-            .overlay(
-                Capsule()
-                    .strokeBorder(isSelected ? Color.clear : Color.white.opacity(0.10), lineWidth: 0.6)
-            )
-            .contentShape(Capsule())
-        }
-        .buttonStyle(NXPressableButtonStyle())
-        .nxNoFocusRing()
-        .matchedGeometryEffect(id: pillID, in: chipFilterNamespace, isSource: true)
-        .help(chip?.deviceSummary ?? "Show games for all iPhone / iOS chips")
-    }
-    
+    // MARK: - Alphabet Buttons
     private func nameLetterButton(
         _ label: String,
         icon: String? = nil,
@@ -260,7 +324,8 @@ public struct CompatibilityFilterBarView: View {
         isSelected: Bool,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: {
+        let intensity = viewModel.liquidGlassIntensity
+        return Button(action: {
             SoundEffectService.shared.play(.click)
             withAnimation(.spring(response: 0.32, dampingFraction: 0.76)) {
                 viewModel.compatibilityFocusArea = .filters
@@ -286,11 +351,11 @@ public struct CompatibilityFilterBarView: View {
             .frame(height: 22)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isSelected ? Color.clear : Color.white.opacity(0.05))
+                    .fill(isSelected ? Color.clear : Color.white.opacity(0.04 + 0.04 * (1.0 - intensity)))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(isSelected ? Color.clear : Color.white.opacity(0.08), lineWidth: 0.5)
+                    .strokeBorder(isSelected ? Color.clear : Color.white.opacity(0.06 + 0.06 * intensity), lineWidth: 0.5)
             )
             .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }

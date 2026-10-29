@@ -121,13 +121,28 @@ public struct ControllerMappingCalloutOverlay: View {
         SoundEffectService.shared.play(.focus)
         listeningButton = btn
 
-        // Temporary listener on GameController
+        // Raw element listener (covers all buttons, triggers, stick clicks, D-Pad, menu)
+        GameControllerService.shared.onRawElementPressed = { [self] elem in
+            if let targetBtn = self.listeningButton {
+                DispatchQueue.main.async {
+                    self.assignMapping(element: elem, to: targetBtn)
+                    self.listeningButton = nil
+                    GameControllerService.shared.onRawElementPressed = nil
+                    GameControllerService.shared.onAction = nil
+                    SoundEffectService.shared.play(.click)
+                }
+            }
+        }
+
+        // Action fallback listener on GameController
         GameControllerService.shared.onAction = { [self] action in
             if let targetBtn = self.listeningButton {
                 let mappedElem = self.elementName(for: action)
                 DispatchQueue.main.async {
                     self.assignMapping(element: mappedElem, to: targetBtn)
                     self.listeningButton = nil
+                    GameControllerService.shared.onRawElementPressed = nil
+                    GameControllerService.shared.onAction = nil
                     SoundEffectService.shared.play(.click)
                 }
             }

@@ -10,6 +10,7 @@ public final class GameControllerService: ObservableObject {
     @Published public var activeRunningGameApp: NSRunningApplication? = nil
     
     public var onAction: ((GamepadAction) -> Void)?
+    public var onRawElementPressed: ((String) -> Void)?
     
     private var lastNavTime: TimeInterval = 0
     private let navCooldown: TimeInterval = 0.20
@@ -73,16 +74,28 @@ public final class GameControllerService: ObservableObject {
         
         // D-Pad
         gamepad.dpad.up.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.navigateUp) }
+            if pressed {
+                self?.triggerRawElement("dpad.up")
+                self?.triggerAction(.navigateUp)
+            }
         }
         gamepad.dpad.down.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.navigateDown) }
+            if pressed {
+                self?.triggerRawElement("dpad.down")
+                self?.triggerAction(.navigateDown)
+            }
         }
         gamepad.dpad.left.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.navigateLeft) }
+            if pressed {
+                self?.triggerRawElement("dpad.left")
+                self?.triggerAction(.navigateLeft)
+            }
         }
         gamepad.dpad.right.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.navigateRight) }
+            if pressed {
+                self?.triggerRawElement("dpad.right")
+                self?.triggerAction(.navigateRight)
+            }
         }
         
         // Left Thumbstick Analog Navigation with Deadzone and Cooldown
@@ -108,43 +121,99 @@ public final class GameControllerService: ObservableObject {
         
         // Face Buttons
         gamepad.buttonA.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.confirm) }
+            if pressed {
+                self?.triggerRawElement("buttonA")
+                self?.triggerAction(.confirm)
+            }
         }
         gamepad.buttonB.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.cancel) }
+            if pressed {
+                self?.triggerRawElement("buttonB")
+                self?.triggerAction(.cancel)
+            }
         }
         gamepad.buttonX.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.secondaryAction) }
+            if pressed {
+                self?.triggerRawElement("buttonX")
+                self?.triggerAction(.secondaryAction)
+            }
         }
         gamepad.buttonY.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.contextAction) }
+            if pressed {
+                self?.triggerRawElement("buttonY")
+                self?.triggerAction(.contextAction)
+            }
         }
         
-        // Shoulders: Tab Switching
+        // Shoulders: Tab Switching / Bumpers
         gamepad.leftShoulder.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.tabPrevious) }
+            if pressed {
+                self?.triggerRawElement("leftShoulder")
+                self?.triggerAction(.tabPrevious)
+            }
         }
         gamepad.rightShoulder.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.tabNext) }
+            if pressed {
+                self?.triggerRawElement("rightShoulder")
+                self?.triggerAction(.tabNext)
+            }
+        }
+        
+        // Triggers (ZL / ZR)
+        gamepad.leftTrigger.valueChangedHandler = { [weak self] _, val, pressed in
+            if pressed || val > 0.35 {
+                self?.triggerRawElement("leftTrigger")
+            }
+        }
+        gamepad.rightTrigger.valueChangedHandler = { [weak self] _, val, pressed in
+            if pressed || val > 0.35 {
+                self?.triggerRawElement("rightTrigger")
+            }
+        }
+        
+        // Thumbstick Buttons (L3 / R3)
+        gamepad.leftThumbstickButton?.pressedChangedHandler = { [weak self] _, _, pressed in
+            if pressed {
+                self?.triggerRawElement("leftThumbstickButton")
+            }
+        }
+        gamepad.rightThumbstickButton?.pressedChangedHandler = { [weak self] _, _, pressed in
+            if pressed {
+                self?.triggerRawElement("rightThumbstickButton")
+            }
         }
         
         // Menu / Plus
         gamepad.buttonMenu.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.menu) }
+            if pressed {
+                self?.triggerRawElement("buttonMenu")
+                self?.triggerAction(.menu)
+            }
         }
         
         // Options / Minus / Share / View
         gamepad.buttonOptions?.pressedChangedHandler = { [weak self] _, _, pressed in
-            if pressed { self?.triggerAction(.options) }
+            if pressed {
+                self?.triggerRawElement("buttonOptions")
+                self?.triggerAction(.options)
+            }
         }
         
         // Home Button (Xbox Logo / Guide): Pressed & held for 3 seconds quits game & brings NxNative to front
         gamepad.buttonHome?.pressedChangedHandler = { [weak self] _, _, pressed in
             if pressed {
+                self?.triggerRawElement("buttonHome")
                 self?.startHomeHoldTimer()
             } else {
                 self?.cancelHomeHoldTimer()
             }
+        }
+    }
+    
+    private func triggerRawElement(_ element: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard NSApplication.shared.isActive else { return }
+            self?.onRawElementPressed?(element)
         }
     }
     

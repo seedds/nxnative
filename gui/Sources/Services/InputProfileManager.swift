@@ -1,5 +1,39 @@
 import Foundation
 import Combine
+import AppKit
+
+public enum MouseKeyCode {
+    public static let left: UInt16 = 1001
+    public static let right: UInt16 = 1002
+    public static let middle: UInt16 = 1003
+    public static let button4: UInt16 = 1004
+    public static let button5: UInt16 = 1005
+
+    public static func fromButtonNumber(_ num: Int) -> UInt16 {
+        let code = 1001 + num
+        return (code >= 1001 && code <= 1099) ? UInt16(code) : 0
+    }
+
+    public static func isMouse(_ code: UInt16) -> Bool {
+        return code >= 1001 && code <= 1099
+    }
+
+    public static func name(for code: UInt16) -> String? {
+        switch code {
+        case left: return L10n.t("controls.mouse_button_left")
+        case right: return L10n.t("controls.mouse_button_right")
+        case middle: return L10n.t("controls.mouse_button_middle")
+        case button4: return L10n.t("controls.mouse_button_4")
+        case button5: return L10n.t("controls.mouse_button_5")
+        default: return (code >= 1001 && code <= 1099) ? "Mouse \(code - 1000)" : nil
+        }
+    }
+}
+
+public enum KeyBindingTarget: Equatable {
+    case switchButton(SwitchButton)
+    case movement(String) // "up", "left", "down", "right"
+}
 
 public final class InputProfileManager: ObservableObject {
     public static let shared = InputProfileManager()
@@ -14,6 +48,13 @@ public final class InputProfileManager: ObservableObject {
             UserDefaults.standard.set(activeProfileId.uuidString, forKey: StorageKeys.activeProfileId)
             exportActiveMappingToDisk()
         }
+    }
+    @Published public var listeningTarget: KeyBindingTarget? = nil
+    public var listeningStartTime: TimeInterval = 0
+
+    public func startListening(for target: KeyBindingTarget) {
+        listeningStartTime = ProcessInfo.processInfo.systemUptime
+        listeningTarget = target
     }
 
     private let fileManager = FileManager.default
@@ -38,6 +79,31 @@ public final class InputProfileManager: ObservableObject {
 
     private init() {
         loadProfiles()
+        setupLifecyclePersistence()
+    }
+
+    private func setupLifecyclePersistence() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.flushAllSettings()
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.flushAllSettings()
+        }
+    }
+
+    public func flushAllSettings() {
+        saveProfileToDisk(activeProfile)
+        UserDefaults.standard.set(activeProfileId.uuidString, forKey: StorageKeys.activeProfileId)
+        UserDefaults.standard.synchronize()
+        exportActiveMappingToDisk()
     }
 
     public var activeProfile: ControllerProfile {
@@ -70,6 +136,14 @@ public final class InputProfileManager: ObservableObject {
             }
         }
 
+        // If a profile was decoded with the legacy default 1.0, update to 5.0
+        for i in 0..<loaded.count {
+            if loaded[i].mouseSensitivity == 1.0 {
+                loaded[i].mouseSensitivity = 5.0
+                saveProfileToDisk(loaded[i])
+            }
+        }
+
         self.profiles = loaded
 
         if let savedIdStr = UserDefaults.standard.string(forKey: StorageKeys.activeProfileId),
@@ -93,6 +167,31 @@ public final class InputProfileManager: ObservableObject {
         }
     }
 
+    public func bindCapturedInput(keyCode: UInt16) {
+        guard let target = listeningTarget else { return }
+        var current = activeProfile
+        // A key has one job: free it from any button or movement direction before reassigning.
+        current.keyboardBindings = current.keyboardBindings.filter { $0.key != keyCode }
+        current.keyboardMovement = current.keyboardMovement.filter { $0.value != keyCode }
+        switch target {
+        case .switchButton(let btn):
+            current.keyboardBindings = current.keyboardBindings.filter { $0.value != btn }
+            current.keyboardBindings[keyCode] = btn
+        case .movement(let dir):
+            current.keyboardMovement[dir] = keyCode
+        }
+        listeningTarget = nil
+        updateProfile(current)
+        SoundEffectService.shared.play(.click)
+    }
+
+    public func cancelListening() {
+        if listeningTarget != nil {
+            listeningTarget = nil
+            SoundEffectService.shared.play(.click)
+        }
+    }
+
     public func createProfile(name: String, basedOn source: ControllerProfile? = nil) -> ControllerProfile {
         let base = source ?? activeProfile
         let newProfile = ControllerProfile(
@@ -102,7 +201,12 @@ public final class InputProfileManager: ObservableObject {
             gamepadBindings: base.gamepadBindings,
             keyboardBindings: base.keyboardBindings,
             keyboardMovement: base.keyboardMovement,
-            analogDeadzone: base.analogDeadzone
+            analogDeadzone: base.analogDeadzone,
+            mouseAsRightStick: base.mouseAsRightStick,
+            mouseSensitivity: base.mouseSensitivity,
+            mouseInvertX: base.mouseInvertX,
+            mouseInvertY: base.mouseInvertY,
+            mouseRightStickMode: base.mouseRightStickMode
         )
         profiles.append(newProfile)
         saveProfileToDisk(newProfile)
@@ -132,14 +236,20 @@ public final class InputProfileManager: ObservableObject {
         current.keyboardBindings = def.keyboardBindings
         current.keyboardMovement = def.keyboardMovement
         current.analogDeadzone = def.analogDeadzone
+        current.mouseAsRightStick = def.mouseAsRightStick
+        current.mouseSensitivity = def.mouseSensitivity
+        current.mouseInvertX = def.mouseInvertX
+        current.mouseInvertY = def.mouseInvertY
+        current.mouseRightStickMode = def.mouseRightStickMode
         updateProfile(current)
     }
 
-    private func saveProfileToDisk(_ profile: ControllerProfile) {
+    public func saveProfileToDisk(_ profile: ControllerProfile) {
         let file = profilesDirectory.appendingPathComponent("\(profile.id.uuidString).json")
         if let data = try? JSONEncoder().encode(profile) {
-            try? data.write(to: file)
+            try? data.write(to: file, options: [.atomic])
         }
+        UserDefaults.standard.synchronize()
     }
 
     public func exportActiveMappingToDisk(libraryFolder: URL? = nil) {
@@ -147,15 +257,41 @@ public final class InputProfileManager: ObservableObject {
         guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]) else { return }
 
         // 1. Global mapping in Application Support
-        try? data.write(to: globalMappingFile)
+        try? data.write(to: globalMappingFile, options: [.atomic])
 
-        // 2. Also write to active game bundles if provided or from saved library folder
-        let targetLib = libraryFolder ?? UserDefaults.standard.string(forKey: "NXNative_SavedLibraryFolder").flatMap { URL(fileURLWithPath: $0) }
-        if let lib = targetLib, let items = try? fileManager.contentsOfDirectory(at: lib, includingPropertiesForKeys: nil) {
+        // 2. Also write to active game bundles in all potential library paths
+        var candidateDirs: [URL] = []
+        if let lib = libraryFolder {
+            candidateDirs.append(lib)
+        }
+        if let savedLib = UserDefaults.standard.string(forKey: "NXNative_SavedLibraryFolder"),
+           let savedURL = URL(string: savedLib) ?? URL(fileURLWithPath: savedLib) as URL? {
+            candidateDirs.append(savedURL)
+        }
+        let nxPortsDir = fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Applications/NxPorts")
+        candidateDirs.append(nxPortsDir)
+        let rootGames = SystemDetector.shared.resolveRootDirectory().appendingPathComponent("Games")
+        candidateDirs.append(rootGames)
+        let defaultExternal = URL(fileURLWithPath: "/Volumes/SSD FN501 PRO/Emulations/Nx Ports")
+        if fileManager.fileExists(atPath: defaultExternal.path) {
+            candidateDirs.append(defaultExternal)
+        }
+
+        var visitedGames = Set<String>()
+        for dir in candidateDirs {
+            guard fileManager.fileExists(atPath: dir.path),
+                  let items = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+                continue
+            }
             for item in items where item.pathExtension == "app" {
-                let target = item.appendingPathComponent("Contents/Resources/dm/input_mapping.json")
-                if fileManager.fileExists(atPath: item.appendingPathComponent("Contents/Resources/dm").path) {
-                    try? data.write(to: target)
+                let canonicalPath = item.standardized.path
+                guard !visitedGames.contains(canonicalPath) else { continue }
+                visitedGames.insert(canonicalPath)
+
+                let dmDir = item.appendingPathComponent("Contents/Resources/dm")
+                if fileManager.fileExists(atPath: dmDir.path) {
+                    let target = dmDir.appendingPathComponent("input_mapping.json")
+                    try? data.write(to: target, options: [.atomic])
                 }
             }
         }

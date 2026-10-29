@@ -68,6 +68,15 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
 
 static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 0x1000 && vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n; }
 
+static int g_engine_fps_locked = 0;
+int dm_fps_has_engine_lock(void) { return g_engine_fps_locked; }
+
+static const char *k_trinity_builds[] = {
+    "b1f12fd919eae86ab8a978317677e64b", // Pokémon Legends: Z-A 2.0.2 (v393216)
+    "7222e13e000000000000000000000000", // Pokémon Legends: Z-A 1.0.0 (v0)
+    "ca44e7dd62e61a2a4e8889b3319ae173", // Pokémon Scarlet 1.0.0
+};
+
 // NieR 1.0.3 exposes its preset minimum but ships fixed mode-specific fallbacks.
 // Keep the native current-scale and UV controller intact; only select its
 // verified lower bound. This is independent of the FPS choice.
@@ -125,20 +134,32 @@ static void dynamic_resolution_tick(void) {
 
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
-    static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target, nier; static uint8_t *base; static const char *src; static uint32_t display;
+    static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target, nier, trinity; static uint8_t *base; static const char *src; static uint32_t display;
     if (state == -1) return;
     if (state == -2) {
         state = -1;
         for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
+            for (size_t b = 0; b < sizeof k_trinity_builds / sizeof k_trinity_builds[0]; b++) {
+                if (!strncmp(g_mod[i].build_id, k_trinity_builds[b], 16)) {
+                    trinity = (int)(b + 1); base = g_mod[i].base;
+                }
+            }
             if (!strcmp(g_mod[i].build_id, "992787e2b54259948b844059a8ab21ad")) { base = g_mod[i].base; nier = 1; }
             for (int k = 0; k < (int)(sizeof k_nier_dr / sizeof *k_nier_dr); k++) if (!strcmp(g_mod[i].build_id, k_nier_dr[k].build)) { base = g_mod[i].base; nier = 2; display = k_nier_dr[k].display; }
             for (int k = 0; k < NLOCKS; k++) if (!strcmp(g_mod[i].build_id, k_locks[k].build)) { rows[nrow++] = k; base = g_mod[i].base; }
         }
-        if (!nrow && !nier) return;
+        if (!nrow && !nier && !trinity) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
         if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; leaving the game's frame limit", e); t = 0; }
         if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", k_locks[rows[r]].what, src); if (nier) LOG("main: NieR frame interval left as the game sets it (%s)", src); return; }
         target = t; state = 0;
+        if (target == 60 && (nrow > 0 || nier > 0)) g_engine_fps_locked = 1;
+    }
+    if (trinity) {
+        static int nlog_trinity;
+        if (nlog_trinity++ < 5) {
+            LOG("main: Trinity Engine (Pokémon Legends: Z-A) speed sync active (preserving 1.0x normal speed pacing without 2x turbo)");
+        }
     }
     if (nier == 1) {
         // NieR:Automata (Switch) 1.0.2, matching the 60 FPS Atmosphere cheat

@@ -90,7 +90,7 @@ public struct PersonalizationView: View {
                 
                 NXGlassContainer(spacing: 10) {
                     LazyVGrid(columns: columns, spacing: 10) {
-                        ForEach(AppLanguage.allCases) { lang in
+                        ForEach(AppLanguage.sortedForDisplay) { lang in
                             let isSelected = viewModel.launcherLanguage == lang
                             languagePill(lang: lang, isSelected: isSelected)
                         }

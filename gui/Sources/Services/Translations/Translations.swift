@@ -10,6 +10,8 @@ public enum Translations {
             return english
         case .ptBR:
             return portuguese
+        case .ptPT:
+            return portuguesePortugal
         case .es:
             return spanish
         case .ja:

@@ -53,6 +53,7 @@ build_app_bundle() {
     <array>
         <string>en</string>
         <string>pt-BR</string>
+        <string>pt-PT</string>
         <string>es</string>
         <string>ja</string>
         <string>fr</string>

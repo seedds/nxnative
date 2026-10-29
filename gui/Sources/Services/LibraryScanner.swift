@@ -240,16 +240,14 @@ public final class LibraryScanner {
         guard let files = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
         var total: Int64 = 0
         for case let file as URL in files {
-            if let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-                total += Int64(size)
-            }
+            if let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize { total += Int64(size) }
         }
         return total
     }
     
     public func launchGame(at url: URL, env: [String: String]? = nil, completion: @escaping (Bool, String?) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Strip macOS quarantine attribute to bypass Gatekeeper unidentified developer blocks
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.syncDmhostBinary(to: url)
             let cleanProc = Process()
             cleanProc.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
             cleanProc.arguments = ["-cr", url.path]
@@ -259,19 +257,43 @@ public final class LibraryScanner {
             DispatchQueue.main.async {
                 let config = NSWorkspace.OpenConfiguration()
                 config.activates = true
-                if let envDict = env {
-                    config.environment = envDict
-                }
-                
+                if let envDict = env { config.environment = envDict }
                 NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
-                    if let err = error {
-                        completion(false, err.localizedDescription)
-                    } else {
+                    if let err = error { completion(false, err.localizedDescription) }
+                    else {
                         GameControllerService.shared.activeRunningGameApp = app
                         completion(true, nil)
                     }
                 }
             }
+        }
+    }
+
+    private func syncDmhostBinary(to appURL: URL) {
+        let fm = FileManager.default
+        let targetHost = appURL.appendingPathComponent("Contents/MacOS/dmhost")
+        guard fm.fileExists(atPath: targetHost.path) else { return }
+
+        let candidates = [
+            SystemDetector.shared.resolveRootDirectory().appendingPathComponent("nxnative/dm/host/dmhost"),
+            Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("dmhost")
+        ]
+
+        for src in candidates {
+            guard fm.fileExists(atPath: src.path),
+                  let srcAttrs = try? fm.attributesOfItem(atPath: src.path),
+                  let srcDate = srcAttrs[.modificationDate] as? Date,
+                  let tgtAttrs = try? fm.attributesOfItem(atPath: targetHost.path),
+                  let tgtDate = tgtAttrs[.modificationDate] as? Date,
+                  srcDate > tgtDate else { continue }
+
+            let tempTarget = targetHost.deletingLastPathComponent().appendingPathComponent("dmhost.tmp")
+            try? fm.removeItem(at: tempTarget)
+            if (try? fm.copyItem(at: src, to: tempTarget)) != nil {
+                _ = try? fm.replaceItemAt(targetHost, withItemAt: tempTarget)
+                try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: targetHost.path)
+            }
+            break
         }
     }
 }

@@ -4,6 +4,7 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Codable {
     case system = "system"
     case en = "en"
     case ptBR = "pt-BR"
+    case ptPT = "pt-PT"
     case es = "es"
     case ja = "ja"
     case fr = "fr"
@@ -17,12 +18,20 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Codable {
     case sv = "sv"
     
     public var id: String { rawValue }
+
+    /// "System Default" first, then the remaining languages by native name (locale-aware).
+    public static var sortedForDisplay: [AppLanguage] {
+        let rest = allCases.filter { $0 != .system }
+            .sorted { $0.nativeName.localizedStandardCompare($1.nativeName) == .orderedAscending }
+        return [.system] + rest
+    }
     
     public var displayName: String {
         switch self {
         case .system: return "System Default"
         case .en: return "English"
         case .ptBR: return "Portuguese (Brazil)"
+        case .ptPT: return "Portuguese (Portugal)"
         case .es: return "Spanish"
         case .ja: return "Japanese"
         case .fr: return "French"
@@ -42,6 +51,7 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Codable {
         case .system: return "System Default"
         case .en: return "English (US)"
         case .ptBR: return "Português (Brasil)"
+        case .ptPT: return "Português (Portugal)"
         case .es: return "Español"
         case .ja: return "日本語"
         case .fr: return "Français"
@@ -61,6 +71,7 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Codable {
         case .system: return "🌐"
         case .en: return "🇺🇸"
         case .ptBR: return "🇧🇷"
+        case .ptPT: return "🇵🇹"
         case .es: return "🇪🇸"
         case .ja: return "🇯🇵"
         case .fr: return "🇫🇷"
@@ -77,6 +88,7 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Codable {
     
     public static func resolve(locale: Locale = Locale.current) -> AppLanguage {
         let id = locale.identifier.lowercased().replacingOccurrences(of: "_", with: "-")
+        if id.starts(with: "pt-pt") { return .ptPT }
         if id.starts(with: "pt") { return .ptBR }
         if id.starts(with: "es") { return .es }
         if id.starts(with: "ja") { return .ja }
@@ -94,6 +106,7 @@ public enum AppLanguage: String, CaseIterable, Identifiable, Codable {
         let preferred = Locale.preferredLanguages
         for pref in preferred {
             let lower = pref.lowercased().replacingOccurrences(of: "_", with: "-")
+            if lower.starts(with: "pt-pt") { return .ptPT }
             if lower.starts(with: "pt") { return .ptBR }
             if lower.starts(with: "es") { return .es }
             if lower.starts(with: "ja") { return .ja }

@@ -11,6 +11,7 @@ public struct ControllerProfile: Codable, Identifiable, Equatable {
     public var analogDeadzone: Double
     public var mouseAsRightStick: Bool
     public var mouseSensitivity: Double
+    public var mouseInvertX: Bool
     public var mouseInvertY: Bool
     public var mouseRightStickMode: String
 
@@ -24,7 +25,8 @@ public struct ControllerProfile: Codable, Identifiable, Equatable {
         keyboardMovement: [String: UInt16] = ["up": 13, "left": 0, "down": 1, "right": 2],
         analogDeadzone: Double = 0.10,
         mouseAsRightStick: Bool = true,
-        mouseSensitivity: Double = 1.0,
+        mouseSensitivity: Double = 5.0,
+        mouseInvertX: Bool = false,
         mouseInvertY: Bool = false,
         mouseRightStickMode: String = "cursorLock"
     ) {
@@ -38,13 +40,14 @@ public struct ControllerProfile: Codable, Identifiable, Equatable {
         self.analogDeadzone = analogDeadzone
         self.mouseAsRightStick = mouseAsRightStick
         self.mouseSensitivity = mouseSensitivity
+        self.mouseInvertX = mouseInvertX
         self.mouseInvertY = mouseInvertY
         self.mouseRightStickMode = mouseRightStickMode
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, isDefault, targetDeviceName, gamepadBindings, keyboardBindings, keyboardMovement, analogDeadzone
-        case mouseAsRightStick, mouseSensitivity, mouseInvertY, mouseRightStickMode
+        case mouseAsRightStick, mouseSensitivity, mouseInvertX, mouseInvertY, mouseRightStickMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -58,7 +61,8 @@ public struct ControllerProfile: Codable, Identifiable, Equatable {
         self.keyboardMovement = try container.decodeIfPresent([String: UInt16].self, forKey: .keyboardMovement) ?? ["up": 13, "left": 0, "down": 1, "right": 2]
         self.analogDeadzone = try container.decodeIfPresent(Double.self, forKey: .analogDeadzone) ?? 0.10
         self.mouseAsRightStick = try container.decodeIfPresent(Bool.self, forKey: .mouseAsRightStick) ?? true
-        self.mouseSensitivity = try container.decodeIfPresent(Double.self, forKey: .mouseSensitivity) ?? 1.0
+        self.mouseSensitivity = try container.decodeIfPresent(Double.self, forKey: .mouseSensitivity) ?? 5.0
+        self.mouseInvertX = try container.decodeIfPresent(Bool.self, forKey: .mouseInvertX) ?? false
         self.mouseInvertY = try container.decodeIfPresent(Bool.self, forKey: .mouseInvertY) ?? false
         self.mouseRightStickMode = try container.decodeIfPresent(String.self, forKey: .mouseRightStickMode) ?? "cursorLock"
     }
@@ -150,6 +154,7 @@ public struct ControllerProfile: Codable, Identifiable, Equatable {
             "analogDeadzone": analogDeadzone,
             "mouseAsRightStick": mouseAsRightStick,
             "mouseSensitivity": mouseSensitivity,
+            "mouseInvertX": mouseInvertX,
             "mouseInvertY": mouseInvertY,
             "mouseRightStickMode": mouseRightStickMode,
             "gamepad": gpExport,

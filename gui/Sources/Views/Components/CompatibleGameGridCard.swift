@@ -20,8 +20,8 @@ public struct CompatibleGameGridCard: View {
     }
     
     public var body: some View {
-        GlassCard(padding: 10, tint: isCardFocused ? NXTheme.primary.opacity(0.28) : nil) {
-            VStack(alignment: .leading, spacing: 8) {
+        GlassCard(padding: 8, tint: isCardFocused ? NXTheme.primary.opacity(0.28) : nil) {
+            VStack(alignment: .leading, spacing: 6) {
                 // MARK: - Game Cover Art in Portrait (1:1.35 ratio)
                 coverArtView
                     .overlay(
@@ -31,55 +31,55 @@ public struct CompatibleGameGridCard: View {
                     .overlay(alignment: .topTrailing) {
                         if item.isNew {
                             Text(L10n.t("compatibility.new_badge"))
-                                .font(.system(size: 8.5, weight: .heavy, design: .rounded))
+                                .font(.system(size: 8, weight: .heavy, design: .rounded))
                                 .foregroundColor(.white)
-                                .padding(.horizontal, 6)
+                                .padding(.horizontal, 5)
                                 .padding(.vertical, 2)
                                 .background(
                                     Capsule()
                                         .fill(NXTheme.primaryGradient)
                                 )
                                 .shadow(color: Color.black.opacity(0.45), radius: 3, x: 0, y: 1)
-                                .padding(6)
+                                .padding(5)
                         }
                     }
                 
                 // MARK: - Title (Fixed height for uniform grid)
                 Text(item.title)
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundColor(isCardFocused ? .white : NXTheme.textPrimary)
                     .lineLimit(2)
-                    .frame(height: 32, alignment: .topLeading)
+                    .frame(height: 28, alignment: .topLeading)
                 
                 // MARK: - Hardware Requirements (Mac & iOS Specs)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 4) {
+                VStack(alignment: .leading, spacing: 2.5) {
+                    HStack(spacing: 3) {
                         Text(item.macReq)
-                            .font(.system(size: 8, weight: .semibold, design: .rounded))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
+                            .font(.system(size: 7.5, weight: .semibold, design: .rounded))
+                            .padding(.horizontal, 4.5)
+                            .padding(.vertical, 1.5)
                             .background(Color.blue.opacity(0.35))
                             .foregroundColor(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .clipShape(RoundedRectangle(cornerRadius: 3.5))
                         
                         Text(item.storageReq)
-                            .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
+                            .font(.system(size: 7.5, weight: .semibold, design: .monospaced))
+                            .padding(.horizontal, 4.5)
+                            .padding(.vertical, 1.5)
                             .background(Color.purple.opacity(0.35))
                             .foregroundColor(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .clipShape(RoundedRectangle(cornerRadius: 3.5))
                     }
                     
                     Text(item.iosReq)
-                        .font(.system(size: 8, weight: .medium, design: .rounded))
-                        .padding(.horizontal, 5)
+                        .font(.system(size: 7.5, weight: .medium, design: .rounded))
+                        .padding(.horizontal, 4.5)
                         .padding(.vertical, 1.5)
                         .background(Color.orange.opacity(0.35))
                         .foregroundColor(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .clipShape(RoundedRectangle(cornerRadius: 3.5))
                 }
-                .frame(height: 34, alignment: .leading)
+                .frame(height: 32, alignment: .leading)
                 
                 Divider().opacity(0.2)
                 
@@ -94,7 +94,7 @@ public struct CompatibleGameGridCard: View {
                                 Text(L10n.t("compatibility.notes"))
                                 Image(systemName: "arrow.up.right")
                             }
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 9.5, weight: .semibold))
                         }
                         .buttonStyle(NXSecondaryButtonStyle())
                         .controlSize(.mini)
@@ -107,7 +107,7 @@ public struct CompatibleGameGridCard: View {
                     Spacer()
                     
                     Text("v\(item.versionTested)")
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(.system(size: 8.5, design: .monospaced))
                         .foregroundColor(NXTheme.textMuted)
                 }
             }

@@ -1597,6 +1597,7 @@ static _Atomic uint64_t g_itv2_since;   // start of the game's current run of in
 // (fstep_tick, nvn_fstep.h) and presents follow the hold k it decides with it
 __attribute__((weak)) uint8_t *dm_fps_state;   // loader.c; graphics unit tests have no loader
 __attribute__((weak)) void dm_fps_lock_tick(void) {}   // hle_fpslock.c: engine frame limits in game memory (Monster Hunter Rise); graphics unit tests have no host
+__attribute__((weak)) int dm_fps_has_engine_lock(void) { return 0; }
 __attribute__((weak)) void dm_ue_cvar_tick(void) {}   // hle_uecvar.c: Unreal's texture streaming pool (profile ue_texture_pool)
 // Thermal cap (iOS): while the device is thermally serious or worse (NSProcessInfo thermalState >= 2) the frame step holds 30 fps, and it goes back to the cap after the device
 // has been fair or better for THERMAL_CALM_NS, so it does not flap. At "serious" iOS caps the GPU clock to about a third: Breath of the Wild's vistas (about 3,000 G-buffer draws)
@@ -1663,7 +1664,35 @@ static void present_cfg(const win_t *o) {
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
         m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window, fixed 60 Hz" : "no window, fixed 60 Hz");
 }
-static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : 60 / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+static int speed_sync_on(void) {
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("DM_SPEED_SYNC");
+        s = e ? atoi(e) : 1;
+    }
+    return s;
+}
+
+static int hle_speed_sync_pacing(const win_t *o, int c, int k) {
+    if (k && fstep_on()) return k;
+    if (c == 60) {
+        if (o->interval >= 2 && speed_sync_on()) {
+            if (dm_fps_has_engine_lock() || fstep_on()) {
+                return 1;
+            } else {
+                static int nlog_sync = 0;
+                if (nlog_sync++ < 3) {
+                    LOG("[nvn] speed sync: native 30 fps title pacing preserved at normal 1.0x speed (preventing 2x fast-forward)");
+                }
+                return o->interval;
+            }
+        }
+        return 60 / c;
+    }
+    return c ? 60 / c : (o->interval > 0 ? o->interval : 1);
+}
+
+static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? hle_speed_sync_pacing(o, c, k) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
 // The acquire's wait for the display link: the present interval's vsyncs (60 Hz units), or with present_interval display above 60 Hz (DM_PRESENT_HZ=120 on a 120 Hz link,
 // DM_PRESENT_LINK=2) one tick of the present rate, as many link ticks as that takes. Before, a 120 Hz link waited two ticks per frame there, and display mode never went past 60 fps
 static int link_wait(const win_t *o, uint64_t timeout_ns) {

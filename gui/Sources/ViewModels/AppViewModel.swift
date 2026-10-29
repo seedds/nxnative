@@ -163,7 +163,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var compatibilityFocusArea: CompatibilityFocusArea = .filters
     @Published public var focusedCompatibilityIndex: Int = 0
     @Published public var focusedCompatibilityButtonIndex: CompatibilityButtonFocus = .notes
-    @Published public var compatibilityGridColumnCount: Int = 4
+    @Published public var compatibilityGridColumnCount: Int = 6
     
     // MARK: - System Prerequisites & Installer
     @Published public var prerequisites: SystemPrerequisites = SystemPrerequisites()
@@ -460,6 +460,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
             self.hiddenGamePaths = Set(savedHidden)
         }
         
+        InputProfileManager.shared.exportActiveMappingToDisk(libraryFolder: self.libraryFolder)
         refreshLibrary()
         checkForUpdates()
         loadCompatibleGames()

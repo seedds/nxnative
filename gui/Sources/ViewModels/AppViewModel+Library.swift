@@ -24,15 +24,16 @@ extension AppViewModel {
             let games = LibraryScanner.shared.scan(directories: searchDirs)
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                let visible = games.filter { !self.hiddenGamePaths.contains($0.url.standardized.path) }
+                let visible = LibraryOrder.apply(to: games.filter { !self.hiddenGamePaths.contains($0.url.standardized.path) })
                 self.libraryGames = visible
                 if self.focusedGameIndex >= visible.count {
                     self.focusedGameIndex = max(0, visible.count - 1)
                 }
                 self.isScanningLibrary = false
                 
-                // Automatically ensure every game in the library has its correct official cover
+                // Automatically ensure every game in the library has its correct official cover and input mapping
                 DispatchQueue.global(qos: .utility).async {
+                    InputProfileManager.shared.exportActiveMappingToDisk(libraryFolder: self.libraryFolder)
                     for game in visible {
                         GameCoverService.shared.ensureCover(for: game)
                     }
@@ -41,6 +42,21 @@ extension AppViewModel {
         }
     }
     
+    /// Moves `dragged` to the position of `target` inside the same shelf and persists the new order.
+    public func moveLibraryGame(_ dragged: PortedGame, onto target: PortedGame) {
+        guard dragged.id != target.id, dragged.platform == target.platform,
+              let from = libraryGames.firstIndex(where: { $0.id == dragged.id }),
+              let to = libraryGames.firstIndex(where: { $0.id == target.id }) else { return }
+        let focusedId = libraryGames.indices.contains(focusedGameIndex) ? libraryGames[focusedGameIndex].id : nil
+        var games = libraryGames
+        games.insert(games.remove(at: from), at: to)
+        libraryGames = games
+        if let focusedId, let idx = games.firstIndex(where: { $0.id == focusedId }) {
+            focusedGameIndex = idx
+        }
+        LibraryOrder.save(games)
+    }
+
     public func selectLibraryFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -82,6 +98,7 @@ extension AppViewModel {
             let prof = InputProfileManager.shared.activeProfile
             env["DM_MOUSE_RIGHT_STICK"] = prof.mouseAsRightStick ? "1" : "0"
             env["DM_MOUSE_SENSITIVITY"] = String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), prof.mouseSensitivity)
+            env["DM_MOUSE_INVERT_X"] = prof.mouseInvertX ? "1" : "0"
             env["DM_MOUSE_INVERT_Y"] = prof.mouseInvertY ? "1" : "0"
             LibraryScanner.shared.launchGame(at: game.url, env: env) { [weak self] success, error in
                 DispatchQueue.main.async {

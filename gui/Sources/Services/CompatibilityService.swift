@@ -535,13 +535,13 @@ public final class CompatibilityService {
         switch minRamGB {
         case 4:
             mac = "Mac: 4GB+ RAM"
-            ios = "iPhone: A15+ (4GB)"
-            minChipTier = .a15
+            ios = "iPhone: A17 Pro+ (8GB)"
+            minChipTier = .a17Pro
             if storage == "HD: ~6 GB" { storage = "HD: ~2-4 GB" }
         case 6:
             mac = "Mac: 8GB RAM"
-            ios = "iPhone: A16+ (6GB)"
-            minChipTier = .a16
+            ios = "iPhone: A17 Pro+ (8GB)"
+            minChipTier = .a17Pro
         case 8:
             mac = "Mac: 8GB+ RAM"
             if isUnreal || a18OptimizedTitles.contains(upperTid) || (maxResidentGB ?? 0) >= 2.75 {

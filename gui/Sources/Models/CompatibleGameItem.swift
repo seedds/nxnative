@@ -2,8 +2,6 @@ import Foundation
 
 /// Minimum Apple iPhone / iOS A-Series silicon tier required to run a ported game smoothly.
 public enum IphoneChipTier: String, CaseIterable, Identifiable, Comparable, Hashable, Sendable {
-    case a15 = "A15"
-    case a16 = "A16"
     case a17Pro = "A17 Pro"
     case a18 = "A18"
     case a18Pro = "A18 Pro"
@@ -12,20 +10,14 @@ public enum IphoneChipTier: String, CaseIterable, Identifiable, Comparable, Hash
 
     public var rank: Int {
         switch self {
-        case .a15: return 1
-        case .a16: return 2
-        case .a17Pro: return 3
-        case .a18: return 4
-        case .a18Pro: return 5
+        case .a17Pro: return 1
+        case .a18: return 2
+        case .a18Pro: return 3
         }
     }
 
     public var deviceSummary: String {
         switch self {
-        case .a15:
-            return "iPhone 13 / 14 (A15 Bionic)"
-        case .a16:
-            return "iPhone 14 Pro / 15 (A16 Bionic, 6GB)"
         case .a17Pro:
             return "iPhone 15 Pro / Pro Max (A17 Pro, 8GB)"
         case .a18:

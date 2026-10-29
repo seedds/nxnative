@@ -3,8 +3,7 @@ import AppKit
 
 public struct SimpleKeyboardMappingView: View {
     @Binding public var profile: ControllerProfile
-    @State private var listeningButton: SwitchButton? = nil
-    @State private var listeningDirection: String? = nil
+    @ObservedObject private var profileManager = InputProfileManager.shared
 
     public init(profile: Binding<ControllerProfile>) {
         self._profile = profile
@@ -12,6 +11,44 @@ public struct SimpleKeyboardMappingView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+            // MARK: - Listening Banner
+            if profileManager.listeningTarget != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "cursorarrow.and.square.on.square.dashed")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.white)
+                    Text(L10n.t("controls.press_key_or_mouse_banner"))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundColor(.white)
+                    Spacer()
+                    Button(action: {
+                        profileManager.cancelListening()
+                    }) {
+                        Text(L10n.t("controls.press_esc_cancel"))
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(Capsule().fill(Color.white.opacity(0.20)))
+                            .foregroundColor(.white)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [NXTheme.primary, NXTheme.secondary],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .shadow(color: NXTheme.primary.opacity(0.50), radius: 8, x: 0, y: 2)
+                )
+                .transition(.scale.combined(with: .opacity))
+            }
+
             // MARK: - Presets Bar
             NXGlassContainer(spacing: 8) {
                 HStack(spacing: 10) {
@@ -84,11 +121,10 @@ public struct SimpleKeyboardMappingView: View {
             // MARK: - Section 5: Mouse as Right Stick
             MouseLookSettingsView(profile: $profile)
         }
-        .background(
-            KeyboardEventBridge { keyCode, keyName in
-                handleCapturedKey(keyCode: keyCode, keyName: keyName)
-            }
-        )
+        .background(InputCaptureBridge())
+        .onReceive(profileManager.$profiles) { _ in
+            profile = profileManager.activeProfile
+        }
     }
 
     private func mappingGroupCard<Content: View>(
@@ -115,37 +151,43 @@ public struct SimpleKeyboardMappingView: View {
     }
 
     private func buttonRow(btn: SwitchButton, defaultKey: String) -> some View {
-        let isListening = listeningButton == btn
+        let isListening = profileManager.listeningTarget == .switchButton(btn)
         let boundCode = profile.keyboardBindings.first(where: { $0.value == btn })?.key
-        let keyText = boundCode.map { keyName(for: $0) } ?? defaultKey
+        let keyText = boundCode.map { KeyNames.name(for: $0) } ?? defaultKey
 
         return HStack {
             Text(btn.displayName)
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundColor(NXTheme.textPrimary)
             Spacer()
-            keyButton(text: isListening ? "Press Key..." : keyText, isListening: isListening) {
-                listeningDirection = nil
-                listeningButton = btn
-                SoundEffectService.shared.play(.focus)
+            keyButton(text: isListening ? L10n.t("controls.press_key_or_mouse") : keyText, isListening: isListening) {
+                if isListening {
+                    profileManager.cancelListening()
+                } else {
+                    profileManager.startListening(for: .switchButton(btn))
+                    SoundEffectService.shared.play(.focus)
+                }
             }
         }
     }
 
     private func movementRow(direction: String, label: String, defaultKey: String) -> some View {
-        let isListening = listeningDirection == direction
+        let isListening = profileManager.listeningTarget == .movement(direction)
         let boundCode = profile.keyboardMovement[direction]
-        let keyText = boundCode.map { keyName(for: $0) } ?? defaultKey
+        let keyText = boundCode.map { KeyNames.name(for: $0) } ?? defaultKey
 
         return HStack {
             Text(label)
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundColor(NXTheme.textPrimary)
             Spacer()
-            keyButton(text: isListening ? "Press Key..." : keyText, isListening: isListening) {
-                listeningButton = nil
-                listeningDirection = direction
-                SoundEffectService.shared.play(.focus)
+            keyButton(text: isListening ? L10n.t("controls.press_key_or_mouse") : keyText, isListening: isListening) {
+                if isListening {
+                    profileManager.cancelListening()
+                } else {
+                    profileManager.startListening(for: .movement(direction))
+                    SoundEffectService.shared.play(.focus)
+                }
             }
         }
     }
@@ -170,22 +212,6 @@ public struct SimpleKeyboardMappingView: View {
         .nxNoFocusRing()
     }
 
-    private func handleCapturedKey(keyCode: UInt16, keyName: String) {
-        if let btn = listeningButton {
-            // Remove previous binding
-            profile.keyboardBindings = profile.keyboardBindings.filter { $0.value != btn && $0.key != keyCode }
-            profile.keyboardBindings[keyCode] = btn
-            listeningButton = nil
-            SoundEffectService.shared.play(.click)
-            InputProfileManager.shared.updateProfile(profile)
-        } else if let dir = listeningDirection {
-            profile.keyboardMovement[dir] = keyCode
-            listeningDirection = nil
-            SoundEffectService.shared.play(.click)
-            InputProfileManager.shared.updateProfile(profile)
-        }
-    }
-
     private func applyDefaultPreset() {
         SoundEffectService.shared.play(.click)
         profile.keyboardMovement = ["up": 13, "left": 0, "down": 1, "right": 2] // WASD
@@ -205,72 +231,4 @@ public struct SimpleKeyboardMappingView: View {
         InputProfileManager.shared.updateProfile(profile)
     }
 
-    private func keyName(for keyCode: UInt16) -> String {
-        switch keyCode {
-        case 0: return "A"
-        case 1: return "S"
-        case 2: return "D"
-        case 3: return "F"
-        case 5: return "G"
-        case 6: return "Z"
-        case 7: return "X"
-        case 8: return "C"
-        case 9: return "V"
-        case 12: return "Q"
-        case 13: return "W"
-        case 14: return "E"
-        case 32: return "U"
-        case 34: return "I"
-        case 36: return "Return"
-        case 38: return "J"
-        case 40: return "K"
-        case 48: return "Tab"
-        case 49: return "Space"
-        case 53: return "Esc"
-        case 123: return "←"
-        case 124: return "→"
-        case 125: return "↓"
-        case 126: return "↑"
-        default: return "Key #\(keyCode)"
-        }
-    }
-}
-
-// Helper to capture physical key presses
-private struct KeyboardEventBridge: NSViewRepresentable {
-    let onKeyDown: (UInt16, String) -> Void
-
-    func makeNSView(context: Context) -> BridgeNSView {
-        let view = BridgeNSView()
-        view.onKeyDown = onKeyDown
-        return view
-    }
-
-    func updateNSView(_ nsView: BridgeNSView, context: Context) {
-        nsView.onKeyDown = onKeyDown
-    }
-
-    class BridgeNSView: NSView {
-        var onKeyDown: ((UInt16, String) -> Void)?
-        private var monitor: Any?
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if window != nil && monitor == nil {
-                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                    self?.onKeyDown?(event.keyCode, event.charactersIgnoringModifiers ?? "")
-                    return event
-                }
-            } else if window == nil, let m = monitor {
-                NSEvent.removeMonitor(m)
-                monitor = nil
-            }
-        }
-
-        deinit {
-            if let m = monitor {
-                NSEvent.removeMonitor(m)
-            }
-        }
-    }
 }

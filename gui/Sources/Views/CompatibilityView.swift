@@ -49,7 +49,7 @@ public struct CompatibilityView: View {
                         .padding(.top, 14)
                         .padding(.bottom, 32)
                     } else {
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 18, alignment: .top), count: 4), spacing: 18) {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 6), spacing: 14) {
                             ForEach(Array(filteredGames.enumerated()), id: \.element.id) { index, game in
                                 let isFocused = viewModel.compatibilityFocusArea == .games && viewModel.focusedCompatibilityIndex == index
                                 CompatibleGameGridCard(
@@ -69,7 +69,7 @@ public struct CompatibilityView: View {
                                 }
                             }
                         }
-                        .padding(.horizontal, 18)
+                        .padding(.horizontal, 16)
                         .padding(.top, 14)
                         .padding(.bottom, 32)
                     }
@@ -94,10 +94,10 @@ public struct CompatibilityView: View {
             CompatibilityToolbarView(viewModel: viewModel)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .modifier(CompatibilityFloatingPanelModifier(useFloatingGlass: useFloatingGlass))
+                .modifier(CompatibilityFloatingPanelModifier(viewModel: viewModel, useFloatingGlass: useFloatingGlass))
             
             CompatibilityFilterBarView(viewModel: viewModel)
-                .modifier(CompatibilityFloatingFilterModifier(useFloatingGlass: useFloatingGlass))
+                .modifier(CompatibilityFloatingFilterModifier(viewModel: viewModel, useFloatingGlass: useFloatingGlass))
         }
         .padding(.horizontal, useFloatingGlass ? 16 : 0)
         .padding(.top, useFloatingGlass ? 4 : 0)
@@ -119,45 +119,90 @@ public struct CompatibilityView: View {
 }
 
 private struct CompatibilityFloatingPanelModifier: ViewModifier {
+    @ObservedObject var viewModel: AppViewModel
     let useFloatingGlass: Bool
     
     func body(content: Content) -> some View {
-        if useFloatingGlass {
-            content.nxGlassBar(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        } else {
-            content
-                .background(
-                    ZStack {
-                        NXTheme.canvasObsidian.opacity(0.8)
-                        Rectangle().fill(.ultraThinMaterial)
-                    }
-                )
-                .overlay(
-                    Rectangle()
-                        .frame(height: 1)
-                        .foregroundColor(NXTheme.borderSubtle),
-                    alignment: .bottom
-                )
-        }
+        let intensity = viewModel.liquidGlassIntensity
+        let bgOpacity = 0.40 * (1.0 - intensity * 0.70)
+        let matOpacity = 0.85 * (1.0 - intensity * 0.60)
+        let strokeOpacity = 0.09 + 0.12 * intensity
+        
+        content
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(NXTheme.canvasObsidian.opacity(bgOpacity))
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .opacity(matOpacity)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(strokeOpacity),
+                                Color.white.opacity(strokeOpacity * 0.3),
+                                Color.white.opacity(strokeOpacity * 0.7)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.75
+                    )
+            )
+            .shadow(
+                color: Color.black.opacity(0.15 + 0.15 * (1.0 - intensity)),
+                radius: 12,
+                x: 0,
+                y: 5
+            )
     }
 }
 
 private struct CompatibilityFloatingFilterModifier: ViewModifier {
+    @ObservedObject var viewModel: AppViewModel
     let useFloatingGlass: Bool
     
     func body(content: Content) -> some View {
-        if useFloatingGlass {
-            content.nxGlassBar(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        } else {
-            content
-                .background(NXTheme.glassSurface.opacity(0.35))
-                .overlay(
-                    Rectangle()
-                        .frame(height: 1)
-                        .foregroundColor(NXTheme.borderSubtle.opacity(0.6)),
-                    alignment: .bottom
-                )
-        }
+        let intensity = viewModel.liquidGlassIntensity
+        let bgOpacity = 0.32 * (1.0 - intensity * 0.80)
+        let matOpacity = 0.80 * (1.0 - intensity * 0.65)
+        let strokeOpacity = 0.08 + 0.12 * intensity
+        
+        content
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(NXTheme.glassSurface.opacity(bgOpacity))
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .opacity(matOpacity)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(strokeOpacity),
+                                Color.white.opacity(strokeOpacity * 0.3),
+                                Color.white.opacity(strokeOpacity * 0.7)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.75
+                    )
+            )
+            .shadow(
+                color: Color.black.opacity(0.12 + 0.12 * (1.0 - intensity)),
+                radius: 10,
+                x: 0,
+                y: 4
+            )
     }
 }
 

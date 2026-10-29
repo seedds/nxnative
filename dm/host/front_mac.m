@@ -87,12 +87,43 @@ void front_screen_match(int fps) {
     g_match_want = fps; dispatch_async(dispatch_get_main_queue(), ^{ screen_match_apply(); });
 }
 static int g_mouse_as_right_stick = 1;
-static float g_mouse_sensitivity = 1.0f;
+static float g_mouse_sensitivity = 5.0f;
+static float g_mouse_deadzone_offset = 3600.0f;
+static int g_mouse_invert_x = 0;
 static int g_mouse_invert_y = 0;
 static int g_mouse_mode_drag = 0;
 static int g_cursor_locked = 0;
 static int32_t g_mouse_rx = 0, g_mouse_ry = 0;
-static uint64_t g_mouse_decay_t0 = 0;
+static uint64_t g_mouse_last_move_ns = 0;
+static dispatch_source_t g_mouse_ticker = NULL;
+static pthread_mutex_t g_mouse_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void push(void);
+
+static void mouse_ticker_tick(void) {
+    pthread_mutex_lock(&g_mouse_mu);
+    uint64_t now = now_ns();
+    // Instant stop: if no mouse delta arrived in the last 18ms (~1 frame), zero the stick immediately.
+    // This gives the crisp, immediate 1:1 camera stop expected of native PC games with zero residual drift.
+    if (now - g_mouse_last_move_ns > 18000000ull) {
+        if (g_mouse_rx != 0 || g_mouse_ry != 0) {
+            g_mouse_rx = 0;
+            g_mouse_ry = 0;
+            push();
+        }
+    }
+    pthread_mutex_unlock(&g_mouse_mu);
+}
+
+static void mouse_start_ticker(void) {
+    if (g_mouse_ticker) return;
+    g_mouse_ticker = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(g_mouse_ticker, DISPATCH_TIME_NOW, 8333333ull /* 120Hz */, 1000000ull);
+    dispatch_source_set_event_handler(g_mouse_ticker, ^{
+        mouse_ticker_tick();
+    });
+    dispatch_resume(g_mouse_ticker);
+}
 
 static void set_cursor_locked(int locked) {
     if (g_cursor_locked == locked) return;
@@ -108,50 +139,44 @@ static void set_cursor_locked(int locked) {
     } else {
         CGAssociateMouseAndMouseCursorPosition(true);
         [NSCursor unhide];
+        pthread_mutex_lock(&g_mouse_mu);
+        g_mouse_rx = 0;
+        g_mouse_ry = 0;
+        push();
+        pthread_mutex_unlock(&g_mouse_mu);
     }
 }
 
-static void push(void);
-
 static void front_handle_mouse_delta(float dx, float dy) {
     if (!g_input_on || !g_mouse_as_right_stick) return;
-    float len = sqrtf(dx * dx + dy * dy);
-    if (len < 0.10f) return;
-
-    float sens = (g_mouse_sensitivity > 0.05f ? g_mouse_sensitivity : 1.0f);
-    // Switch analog deadzone in Zelda and other 3D games is ~3000 to 5000.
-    // Base deflection ensures immediate camera reaction on first movement:
-    float base_deadzone = 7200.0f;
-    float speed_boost = powf(len * sens * 1400.0f, 0.88f);
-    float total_mag = fminf(32767.0f, base_deadzone + speed_boost);
-
-    float dir_x = dx / len;
-    float dir_y = (g_mouse_invert_y ? dy : -dy) / len;
-
-    g_mouse_rx = (int32_t)fmaxf(-32767.f, fminf(32767.f, dir_x * total_mag));
-    g_mouse_ry = (int32_t)fmaxf(-32767.f, fminf(32767.f, dir_y * total_mag));
+    if (fabsf(dx) < 0.01f && fabsf(dy) < 0.01f) return;
+    
+    mouse_start_ticker();
+    
+    float eff_dx = g_mouse_invert_x ? -dx : dx;
+    float eff_dy = g_mouse_invert_y ? dy : -dy;
+    
+    float speed = sqrtf(eff_dx * eff_dx + eff_dy * eff_dy);
+    if (speed < 0.01f) return;
+    
+    float dir_x = eff_dx / speed;
+    float dir_y = eff_dy / speed;
+    
+    float sens = (g_mouse_sensitivity > 0.05f ? g_mouse_sensitivity : 10.0f);
+    // 1:1 Direct PC velocity scaling:
+    // Any physical movement immediately lifts right stick above the Switch game's internal deadzone (3600),
+    // and scales proportionally to full deflection (32767).
+    float base_deadzone = (g_mouse_deadzone_offset > 500.0f ? g_mouse_deadzone_offset : 3600.0f);
+    float gain = sens * 140.0f;
+    float deflection = base_deadzone + speed * gain;
+    if (deflection > 32767.0f) deflection = 32767.0f;
+    
+    pthread_mutex_lock(&g_mouse_mu);
+    g_mouse_rx = (int32_t)(dir_x * deflection);
+    g_mouse_ry = (int32_t)(dir_y * deflection);
+    g_mouse_last_move_ns = now_ns();
     push();
-
-    // Smooth multi-stage decay (simulates analog stick returning to center)
-    uint64_t seq = ++g_mouse_decay_t0;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-        if (g_mouse_decay_t0 == seq) {
-            g_mouse_rx = (int32_t)(g_mouse_rx * 0.40f);
-            g_mouse_ry = (int32_t)(g_mouse_ry * 0.40f);
-            if (abs(g_mouse_rx) < 800) g_mouse_rx = 0;
-            if (abs(g_mouse_ry) < 800) g_mouse_ry = 0;
-            push();
-            if (g_mouse_rx != 0 || g_mouse_ry != 0) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-                    if (g_mouse_decay_t0 == seq) {
-                        g_mouse_rx = 0;
-                        g_mouse_ry = 0;
-                        push();
-                    }
-                });
-            }
-        }
-    });
+    pthread_mutex_unlock(&g_mouse_mu);
 }
 
 static void push(void) {
@@ -163,7 +188,8 @@ static void push(void) {
 
 // Dynamic Input Mapping System (Ryujinx-style profile support)
 static int g_custom_map_loaded = 0;
-static int g_key_map[256];
+#define KEY_MAP_MAX 2048
+static int g_key_map[KEY_MAP_MAX];
 static unsigned short g_mov_up = 13, g_mov_left = 0, g_mov_down = 1, g_mov_right = 2;
 static float g_deadzone = 0.10f;
 static uint64_t g_elem_a = DM_BTN_B;
@@ -207,7 +233,7 @@ static uint64_t parse_switch_btn(NSString *s) {
 static void load_custom_input_mapping(void) {
     if (g_custom_map_loaded) return;
     g_custom_map_loaded = 1;
-    for (int i = 0; i < 256; i++) g_key_map[i] = -1;
+    for (int i = 0; i < KEY_MAP_MAX; i++) g_key_map[i] = -1;
     // Default key map
     g_key_map[38] = 0;  g_key_map[40] = 1;  g_key_map[32] = 2;  g_key_map[34] = 3;   // J K U I -> A B X Y
     g_key_map[3] = 4;   g_key_map[5] = 5;                                            // F G -> L3 R3
@@ -246,6 +272,18 @@ static void load_custom_input_mapping(void) {
     const char *env_ms = getenv("DM_MOUSE_SENSITIVITY");
     if (env_ms) g_mouse_sensitivity = (float)atof(env_ms);
 
+    if (dict[@"mouseDeadzoneOffset"]) {
+        g_mouse_deadzone_offset = [dict[@"mouseDeadzoneOffset"] floatValue];
+    }
+    const char *env_mdo = getenv("DM_MOUSE_DEADZONE_OFFSET");
+    if (env_mdo) g_mouse_deadzone_offset = (float)atof(env_mdo);
+
+    if (dict[@"mouseInvertX"]) {
+        g_mouse_invert_x = [dict[@"mouseInvertX"] boolValue];
+    }
+    const char *env_mix = getenv("DM_MOUSE_INVERT_X");
+    if (env_mix) g_mouse_invert_x = atoi(env_mix);
+
     if (dict[@"mouseInvertY"]) {
         g_mouse_invert_y = [dict[@"mouseInvertY"] boolValue];
     }
@@ -264,10 +302,10 @@ static void load_custom_input_mapping(void) {
     }
     NSDictionary *kb = dict[@"keyboard"];
     if ([kb isKindOfClass:[NSDictionary class]]) {
-        for (int i = 0; i < 256; i++) g_key_map[i] = -1;
+        for (int i = 0; i < KEY_MAP_MAX; i++) g_key_map[i] = -1;
         for (NSString *keyStr in kb) {
             int code = [keyStr intValue];
-            if (code >= 0 && code < 256) {
+            if (code >= 0 && code < KEY_MAP_MAX) {
                 uint64_t btn = parse_switch_btn(kb[keyStr]);
                 if (btn) {
                     for (int b = 0; b < 16; b++) {
@@ -300,8 +338,19 @@ static void load_custom_input_mapping(void) {
 }
 
 static int key_bit(unsigned short code) {
-    if (code < 256) return g_key_map[code];
+    if (code < KEY_MAP_MAX) return g_key_map[code];
     return -1;
+}
+
+static void on_mouse_button(int buttonCode, int down) {
+    if (!g_input_on) return;
+    load_custom_input_mapping();
+    int b = key_bit((unsigned short)buttonCode);
+    if (b >= 0) {
+        uint64_t m = 1ull << b;
+        g_btn = down ? (g_btn | m) : (g_btn & ~m);
+        push();
+    }
 }
 
 static void on_key(NSEvent *e, int down) {
@@ -453,6 +502,15 @@ static void pads_start(void) {
 @interface DmGameView : NSView @end
 @implementation DmGameView
 - (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+
+- (BOOL)performKeyEquivalent:(NSEvent *)event {
+    if (event.keyCode == 48) { // Tab key: route to game input and prevent AppKit focus navigation
+        on_key(event, event.type == NSEventTypeKeyDown);
+        return YES;
+    }
+    return [super performKeyEquivalent:event];
+}
 
 - (void)handleMouseMotion:(NSEvent *)e {
     front_handle_mouse_delta((float)e.deltaX, (float)e.deltaY);
@@ -469,6 +527,7 @@ static void pads_start(void) {
     if (g_mouse_as_right_stick && g_mouse_mode_drag) {
         set_cursor_locked(1);
     }
+    on_mouse_button(1002, 1);
 }
 
 - (void)rightMouseDragged:(NSEvent *)e {
@@ -479,6 +538,7 @@ static void pads_start(void) {
 
 - (void)rightMouseUp:(NSEvent *)e {
     (void)e;
+    on_mouse_button(1002, 0);
     if (g_mouse_as_right_stick && g_mouse_mode_drag) {
         set_cursor_locked(0);
         g_mouse_rx = 0;
@@ -492,6 +552,7 @@ static void pads_start(void) {
     if (g_mouse_as_right_stick && !g_mouse_mode_drag && !g_cursor_locked) {
         set_cursor_locked(1);
     }
+    on_mouse_button(1001, 1);
     if (!g_cursor_locked) {
         [self mouseDragged:e];
     }
@@ -512,7 +573,26 @@ static void pads_start(void) {
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
 
-- (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+- (void)mouseUp:(NSEvent *)e {
+    (void)e;
+    on_mouse_button(1001, 0);
+    if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+}
+
+- (void)otherMouseDown:(NSEvent *)e {
+    load_custom_input_mapping();
+    if (g_mouse_as_right_stick && !g_mouse_mode_drag && !g_cursor_locked) {
+        set_cursor_locked(1);
+    }
+    int code = 1001 + (int)e.buttonNumber;
+    on_mouse_button(code, 1);
+}
+
+- (void)otherMouseUp:(NSEvent *)e {
+    (void)e;
+    int code = 1001 + (int)e.buttonNumber;
+    on_mouse_button(code, 0);
+}
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -560,6 +640,7 @@ void front_run(void (*guest)(void)) {
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
         [win center];
         [win makeKeyAndOrderFront:nil];
+        [win makeFirstResponder:v];
         g_screen_fps = (int)(win.screen ?: NSScreen.mainScreen).maximumFramesPerSecond;
         g_win = win;
         [NSApp activateIgnoringOtherApps:YES];
@@ -579,14 +660,52 @@ void front_run(void (*guest)(void)) {
                 pads_changed(conn ? nil : c); }];
         dm_haptics_apple_init();
         pads_start();
-        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
-            if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged handler:^NSEvent *(NSEvent *e) {
+            if (e.window != nil && e.window != win && !win.isKeyWindow) return e;   // Only swallow keys for the game window; other windows receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
+            if (e.type == NSEventTypeFlagsChanged) {
+                int down = 0;
+                switch (e.keyCode) {
+                    case 56: case 60: down = (e.modifierFlags & NSEventModifierFlagShift) != 0; break;
+                    case 59: case 62: down = (e.modifierFlags & NSEventModifierFlagControl) != 0; break;
+                    case 58: case 61: down = (e.modifierFlags & NSEventModifierFlagOption) != 0; break;
+                    case 55: case 54: down = (e.modifierFlags & NSEventModifierFlagCommand) != 0; break;
+                    case 57: down = (e.modifierFlags & NSEventModifierFlagCapsLock) != 0; break;
+                    case 63: down = (e.modifierFlags & NSEventModifierFlagFunction) != 0; break;
+                    default: down = (e.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask) != 0; break;
+                }
+                on_key(e, down);
+                return nil;
+            }
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
         }];
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp | NSEventMaskRightMouseDown | NSEventMaskRightMouseUp | NSEventMaskOtherMouseDown | NSEventMaskOtherMouseUp handler:^NSEvent *(NSEvent *e) {
+            if (e.window != nil && e.window != win && !win.isKeyWindow && !g_cursor_locked) return e;
+            if (g_cursor_locked) {
+                int code = 1001;
+                int down = (e.type == NSEventTypeLeftMouseDown || e.type == NSEventTypeRightMouseDown || e.type == NSEventTypeOtherMouseDown);
+                if (e.type == NSEventTypeLeftMouseDown || e.type == NSEventTypeLeftMouseUp) code = 1001;
+                else if (e.type == NSEventTypeRightMouseDown || e.type == NSEventTypeRightMouseUp) code = 1002;
+                else code = 1001 + (int)e.buttonNumber;
+                on_mouse_button(code, down);
+                return nil;
+            }
+            // Extra buttons (middle, 4, 5...) can be bound to Switch buttons without the locked cursor: the view only sees them
+            // when it is first responder and under the pointer, so take them here for any event in the game window.
+            if ((e.type == NSEventTypeOtherMouseDown || e.type == NSEventTypeOtherMouseUp) && e.window == win && g_input_on) {
+                int down = (e.type == NSEventTypeOtherMouseDown);
+                if (down) {
+                    load_custom_input_mapping();
+                    if (g_mouse_as_right_stick && !g_mouse_mode_drag) set_cursor_locked(1);
+                }
+                on_mouse_button(1001 + (int)e.buttonNumber, down);
+                return nil;
+            }
+            return e;
+        }];
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged | NSEventMaskRightMouseDragged | NSEventMaskOtherMouseDragged handler:^NSEvent *(NSEvent *e) {
-            if (e.window != win && !g_cursor_locked) return e;
+            if (e.window != nil && e.window != win && !win.isKeyWindow && !g_cursor_locked) return e;
             if (g_mouse_as_right_stick && (g_cursor_locked || (g_mouse_mode_drag && (e.type == NSEventTypeRightMouseDragged || e.type == NSEventTypeLeftMouseDragged)))) {
                 front_handle_mouse_delta((float)e.deltaX, (float)e.deltaY);
                 return nil;

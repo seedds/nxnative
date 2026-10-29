@@ -6,6 +6,7 @@ public struct SwitchConsoleLibraryView: View {
     public let games: [PortedGame]
     @State private var scrollWheelMonitor: Any? = nil
     @State private var suppressVerticalAutoScroll: Bool = false
+    @State private var draggedGame: PortedGame? = nil
 
     public init(viewModel: AppViewModel, games: [PortedGame]) {
         self.viewModel = viewModel
@@ -217,6 +218,15 @@ public struct SwitchConsoleLibraryView: View {
                             )
                             .zIndex(isFocused ? 10 : 1)
                             .id("card_\(game.id.uuidString)")
+                            .onDrag {
+                                draggedGame = game
+                                return NSItemProvider(object: game.id.uuidString as NSString)
+                            }
+                            .onDrop(of: [.text], delegate: GameReorderDropDelegate(
+                                target: game,
+                                draggedGame: $draggedGame,
+                                move: { viewModel.moveLibraryGame($0, onto: $1) }
+                            ))
                         }
                     }
                     .padding(.horizontal, 36)
@@ -231,5 +241,26 @@ public struct SwitchConsoleLibraryView: View {
                 }
             }
         }
+    }
+}
+
+/// Live reordering: the dragged card swaps into the hovered card's slot.
+struct GameReorderDropDelegate: DropDelegate {
+    let target: PortedGame
+    @Binding var draggedGame: PortedGame?
+    let move: (PortedGame, PortedGame) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let dragged = draggedGame else { return }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+            move(dragged, target)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedGame = nil
+        return true
     }
 }

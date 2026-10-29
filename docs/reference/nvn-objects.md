@@ -161,6 +161,13 @@ The game may also write into an NVN object directly, without an NVN call, throug
 
 ## Command memory
 
+### Control memory capacity queries
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferGetControlMemoryFree`, repeatedly after a command buffer is given control memory.
+- **Cause:** `AddControlMemory` was a no-op, and the size and free getters reached the red-reporting stub, which returned zero. The Metal host writes records only to command memory; it uses no bytes of the game's control-memory block.
+- **Fix:** `cmd_t` records the size of the last `AddControlMemory` block and returns that size as both `GetControlMemoryFree` and `GetControlMemorySize`. `GetControlMemoryUsed` remains zero, since none is consumed by the host. `t_nvn` verifies initial, re-granted and post-recording values.
+- **Found on:** [South Park: The Fractured But Whole port PR #435](https://github.com/seedds/nxnative/pull/435) (1.05; the normal capacity-return getter was exercised through compact Mac title, menu, save and character customization. A zero-return A/B variant altered command submission counts but was not required for progression).
+
 ### Host-lent command memory segments
 
 - **Symptom:** `FATAL NVN command memory: the game's pool is empty…`.

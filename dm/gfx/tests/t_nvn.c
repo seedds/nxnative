@@ -312,10 +312,21 @@ int main(void) {
         static uint8_t m[4096] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer c2;
         P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
         P(nvnCommandBufferInitialize)(&c2, &dev);
+        // Control memory is unused by the host's command stream: a supplied
+        // block has its full size available, even after recording commands.
+        static uint8_t ctl[512];
+        EXPECT("control free before AddControlMemory", 0, P(nvnCommandBufferGetControlMemoryFree)(&c2));
+        P(nvnCommandBufferAddControlMemory)(&c2, ctl, sizeof ctl);
+        EXPECT("control block size after grant", sizeof ctl, P(nvnCommandBufferGetControlMemorySize)(&c2));
+        EXPECT("control block free after grant", sizeof ctl, P(nvnCommandBufferGetControlMemoryFree)(&c2));
         P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
         P(nvnCommandBufferDrawElementsBaseVertex)(&c2, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x10000, 5);
         NVNcommandHandle hd = P(nvnCommandBufferEndRecording)(&c2);
         EXPECT("plain indexed draw recording: 0x28 + END", 0x30, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        EXPECT("recording uses no control memory", 0, P(nvnCommandBufferGetControlMemoryUsed)(&c2));
+        EXPECT("control capacity remains available", sizeof ctl, P(nvnCommandBufferGetControlMemoryFree)(&c2));
+        P(nvnCommandBufferAddControlMemory)(&c2, ctl, 128);
+        EXPECT("new control block replaces capacity", 128, P(nvnCommandBufferGetControlMemoryFree)(&c2));
         op_hdr rh; memcpy(&rh, m, sizeof rh); p_draw_idx dt; const p_draw_idx *d = draw_idx_rec(m + 8, rh.size, &dt);
         EXPECT("its handle is the draw record", 1, (const uint8_t *)hd == m && rh.op == OP_DRAW_IDX);
         EXPECT("draw read back: count, base vertex, no indirect address", 1, d->count == 36 && d->base_vertex == 5 && d->ibuf == 0x10000 && !d->ind && !d->mdi_cnt);

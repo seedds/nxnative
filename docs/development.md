@@ -627,13 +627,13 @@ Each prepared game is a scheme in the shared workspace (by default `NxNative.xcw
 
 ### Install a signed build from the command line
 
-`scripts/install_ios_app.py` installs an already-signed development `.app` on a connected iPhone and launches it, for a prepared project's build or a bundle handed to you. It checks the bundle's `Info.plist`, code signature, embedded provisioning profile, profile expiry and the selected device's UDID before any device write:
+`scripts/install_ios_app.py` installs an already-signed development `.app` on a connected iPhone or iPad and launches it, for a prepared project's build or a bundle handed to you. It checks the bundle's `Info.plist`, code signature, embedded provisioning profile, profile expiry and the selected device's UDID before any device write:
 
 ```sh
 python3 scripts/install_ios_app.py "<NSP folder>/<title ID>_build/xcode-derived-data/Build/Products/Release-iphoneos/DmIOS.app" --device "<name or UDID>"
 ```
 
-The app must already be signed with a profile that includes the device; the tool does not sign or provision. `--list` shows the bundle and the connected iPhones without installing. Without `--device`, one connected iPhone is used; with several, pass one by name or UDID. `--no-launch` installs only, and `--yes` skips the confirmation. A profile that names no devices, an expired profile, a mismatched bundle identity or a device missing from the profile stops before the install.
+The app must already be signed with a profile that includes the device; the tool does not sign or provision. `--list` shows the bundle and the connected iPhones and iPads without installing. Without `--device`, one connected device is used; with several, pass one by name or UDID. `--no-launch` installs only, and `--yes` skips the confirmation. A profile that names no devices, an expired profile, a mismatched bundle identity or a device missing from the profile stops before the install.
 
 ### Quick reinstalls
 

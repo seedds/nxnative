@@ -12,7 +12,7 @@ Usage:
   python3 scripts/install_ios_app.py <path/to/App.app> --list
 
 `--list` only reads the app and the connected devices. Without --device, a
-single connected iPhone is used; with several, pass one by name or UDID.
+single connected iPhone or iPad is used; with several, pass one by name or UDID.
 """
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ def inspect_app(path: Path, now: datetime | None = None) -> App:
 
 
 def discover_devices(timeout: int = 12) -> list[Device]:
-    """Every physical iPhone paired to this Mac, connected ones first."""
+    """Every physical iPhone or iPad paired to this Mac, connected ones first."""
     try:
         result = subprocess.run(
             ["xcrun", "devicectl", "list", "devices", "--json-output", "-", "--timeout", str(timeout)],
@@ -193,12 +193,12 @@ def discover_devices(timeout: int = 12) -> list[Device]:
         hardware = entry.get("hardwareProperties") or {}
         props = entry.get("deviceProperties") or {}
         connection = entry.get("connectionProperties") or {}
-        if hardware.get("deviceType") != "iPhone" or hardware.get("reality") == "simulated":
+        if hardware.get("deviceType") not in {"iPhone", "iPad"} or hardware.get("reality") == "simulated":
             continue
         udid = hardware.get("udid")
         if not isinstance(udid, str) or not udid:
             continue
-        name = props.get("name") or hardware.get("marketingName") or "iPhone"
+        name = props.get("name") or hardware.get("marketingName") or "device"
         model = hardware.get("marketingName", "")
         found[udid] = Device(name, udid, model, connection.get("tunnelState") == "connected")
     return sorted(found.values(), key=lambda device: (not device.connected, device.name.casefold()))
@@ -209,16 +209,16 @@ def choose_device(devices: list[Device], selection: str | None) -> Device:
         wanted = selection.casefold()
         matches = [device for device in devices if wanted in {device.name.casefold(), device.udid.casefold()}]
         if len(matches) != 1:
-            raise ValueError(f"no single iPhone matches {selection!r}; use its name or UDID")
+            raise ValueError(f"no single device matches {selection!r}; use its name or UDID")
         if not matches[0].connected:
             raise ValueError(f"{matches[0].name} is not connected; no installation was attempted")
         return matches[0]
     connected = [device for device in devices if device.connected]
     if not connected:
-        raise ValueError("no iPhone is connected; unlock it, trust the Mac and try again")
+        raise ValueError("no iPhone or iPad is connected; unlock it, trust the Mac and try again")
     if len(connected) > 1:
         names = ", ".join(device.name for device in connected)
-        raise ValueError(f"more than one iPhone is connected ({names}); choose one with --device")
+        raise ValueError(f"more than one device is connected ({names}); choose one with --device")
     return connected[0]
 
 
@@ -269,9 +269,9 @@ def _print_app(app: App) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Install a signed iOS app bundle on a connected iPhone and launch it")
+    parser = argparse.ArgumentParser(description="Install a signed iOS app bundle on a connected iPhone or iPad and launch it")
     parser.add_argument("app", type=Path, help="path to the signed .app bundle")
-    parser.add_argument("--device", help="connected iPhone name or UDID (required when several are connected)")
+    parser.add_argument("--device", help="connected iPhone or iPad name or UDID (required when several are connected)")
     parser.add_argument("--list", action="store_true", help="show the app and connected devices without installing")
     parser.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     parser.add_argument("--no-launch", action="store_true", help="install without launching the app")
@@ -284,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     except DeviceListError as error:
         print(f"Device status unavailable: {error}", file=sys.stderr)
         return 2
-    print("\nConnected iPhones:")
+    print("\nConnected devices:")
     if not devices:
         print("  none")
     for index, device in enumerate(devices, start=1):
@@ -301,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         print(error, file=sys.stderr)
         return 2
 
-    print(f"\nSelected: {app.name} on {device.name} ({device.model or 'iPhone'})")
+    print(f"\nSelected: {app.name} on {device.name} ({device.model or 'device'})")
     if not args.yes:
         try:
             answer = input("Install" + (" and open" if not args.no_launch else "") + "? [y/N] ").strip().casefold()

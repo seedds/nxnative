@@ -166,6 +166,8 @@ private struct LauncherView: View {
             case .success(let urls):
                 guard let url = urls.first else { return }
                 Task { @MainActor in   // a save can be hundreds of megabytes: pack it off the main thread
+                    let scoped = url.startAccessingSecurityScopedResource()   // held until the import is done: the picker's file may be temporary
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                     do {
                         try await Task.detached { try SaveData.importArchive(from: url) }.value
                         saveMessage = "Save data imported. The game starts with it."

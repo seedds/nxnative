@@ -85,6 +85,40 @@ public final class BuildCleanupService {
         return freed
     }
 
+    // MARK: - Image and Artwork Cache Audit
+    public var imageCacheDirectories: [URL] {
+        let appSup = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let base = appSup.appendingPathComponent("nxnative")
+        return [
+            base.appendingPathComponent("covers"),
+            base.appendingPathComponent("artwork")
+        ]
+    }
+
+    public func calculateImageCacheBytes() -> Int64 {
+        var total: Int64 = 0
+        for dir in imageCacheDirectories {
+            total += folderSize(dir)
+        }
+        return total
+    }
+
+    public func cleanImageCache() -> Int64 {
+        let before = calculateImageCacheBytes()
+        for dir in imageCacheDirectories {
+            if fileManager.fileExists(atPath: dir.path),
+               let items = try? fileManager.contentsOfDirectory(atPath: dir.path) {
+                for item in items {
+                    let target = dir.appendingPathComponent(item)
+                    try? fileManager.removeItem(at: target)
+                }
+            }
+        }
+        ArtworkStore.shared.purgeMemoryCaches()
+        GameCoverService.shared.purgeMemoryCaches()
+        return max(0, before - calculateImageCacheBytes())
+    }
+
     private func folderSize(_ url: URL) -> Int64 {
         var isDir: ObjCBool = false
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }

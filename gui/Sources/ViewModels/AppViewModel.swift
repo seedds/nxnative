@@ -163,6 +163,7 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
     @Published public var compatibilityFocusArea: CompatibilityFocusArea = .filters
     @Published public var focusedCompatibilityIndex: Int = 0
     @Published public var focusedCompatibilityButtonIndex: CompatibilityButtonFocus = .notes
+    @Published public var compatibilityGridColumnCount: Int = 4
     
     // MARK: - System Prerequisites & Installer
     @Published public var prerequisites: SystemPrerequisites = SystemPrerequisites()

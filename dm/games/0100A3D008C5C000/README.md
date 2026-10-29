@@ -32,6 +32,8 @@ supplied version. The supplied 4.0.0 update is damaged and remains unsupported
   32 MB alignment, as for the equivalent SDK build in Sparks of Hope.
   Decompilation confirms region size and page guards are unchanged. The same
   startup check fails with only the main cut and reaches `nnMain` with both.
+  Since Subnautica: Below Zero ([010014C011146000](../010014C011146000/README.md))
+  the build aligns its 4 MB, 32 MB and 1 GB classes to 2 MB, as SDK 20 does.
 - **Resolved: freed startup pages stayed mapped past the application pool.**
   Startup probes all allocatable memory, frees it, and leaves those pages in
   the SDK's cache. Without `mem_map_limit`, a physical-map census reaches
@@ -207,6 +209,12 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   reports `[RED] NVN unimplemented function called`. Its visual contribution
   has not been isolated; the diagnostic has not been suppressed.
 - Outdoor exploration and battles have not been validated yet.
+- No `regress.py replay` capture yet (2026-10-29): `DM_NVN_CAPTURE` of the bedroom
+  (frame 3000 of [`smoke.tsv`](smoke.tsv)) reports `a record's memory straddles a
+  region: the capture is incomplete` and nine record values outside every pool
+  that look like data, not addresses; `nvn_replay` then finds a program where a
+  render target's texture should be (`-[NvProg width]` in `rt_dims`) and aborts.
+  The capture's record field walk misreads one of this game's records: cause open.
 - iPhone gameplay, device memory and touch controls are untested. Audio runs
   through both Wwise output queues on the Mac without sustained underruns;
   listening on the iPhone is pending.

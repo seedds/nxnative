@@ -78,7 +78,12 @@ extension AppViewModel {
             if let status = status, status != .noSaves && status != .alreadyInSync {
                 self?.logs.append(LogEntry(level: .info, message: "Auto-sync on launch: \(msg)"))
             }
-            LibraryScanner.shared.launchGame(at: game.url, env: config.toEnvironmentDict(savePath: savePath)) { [weak self] success, error in
+            var env = config.toEnvironmentDict(savePath: savePath)
+            let prof = InputProfileManager.shared.activeProfile
+            env["DM_MOUSE_RIGHT_STICK"] = prof.mouseAsRightStick ? "1" : "0"
+            env["DM_MOUSE_SENSITIVITY"] = String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), prof.mouseSensitivity)
+            env["DM_MOUSE_INVERT_Y"] = prof.mouseInvertY ? "1" : "0"
+            LibraryScanner.shared.launchGame(at: game.url, env: env) { [weak self] success, error in
                 DispatchQueue.main.async {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
                         self?.launchingGameId = nil
@@ -176,9 +181,7 @@ extension AppViewModel {
         }
     }
 
-    public func deletePortedGame(_ game: PortedGame) {
-        deleteGameToTrash(game)
-    }
+    public func deletePortedGame(_ game: PortedGame) { deleteGameToTrash(game) }
     
     public func scanGameFolder(_ folder: URL) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in

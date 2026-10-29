@@ -86,9 +86,79 @@ void front_screen_match(int fps) {
     if (!g_layer || g_match_want == fps) return;   // no window (a windowless run's main thread runs the guest), or the rate as before
     g_match_want = fps; dispatch_async(dispatch_get_main_queue(), ^{ screen_match_apply(); });
 }
+static int g_mouse_as_right_stick = 1;
+static float g_mouse_sensitivity = 1.0f;
+static int g_mouse_invert_y = 0;
+static int g_mouse_mode_drag = 0;
+static int g_cursor_locked = 0;
+static int32_t g_mouse_rx = 0, g_mouse_ry = 0;
+static uint64_t g_mouse_decay_t0 = 0;
+
+static void set_cursor_locked(int locked) {
+    if (g_cursor_locked == locked) return;
+    g_cursor_locked = locked;
+    if (locked) {
+        if (g_win) {
+            NSRect frame = g_win.frame;
+            CGPoint center = CGPointMake(NSMidX(frame), CGDisplayPixelsHigh(CGMainDisplayID()) - NSMidY(frame));
+            CGWarpMouseCursorPosition(center);
+        }
+        CGAssociateMouseAndMouseCursorPosition(false);
+        [NSCursor hide];
+    } else {
+        CGAssociateMouseAndMouseCursorPosition(true);
+        [NSCursor unhide];
+    }
+}
+
+static void push(void);
+
+static void front_handle_mouse_delta(float dx, float dy) {
+    if (!g_input_on || !g_mouse_as_right_stick) return;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.10f) return;
+
+    float sens = (g_mouse_sensitivity > 0.05f ? g_mouse_sensitivity : 1.0f);
+    // Switch analog deadzone in Zelda and other 3D games is ~3000 to 5000.
+    // Base deflection ensures immediate camera reaction on first movement:
+    float base_deadzone = 7200.0f;
+    float speed_boost = powf(len * sens * 1400.0f, 0.88f);
+    float total_mag = fminf(32767.0f, base_deadzone + speed_boost);
+
+    float dir_x = dx / len;
+    float dir_y = (g_mouse_invert_y ? dy : -dy) / len;
+
+    g_mouse_rx = (int32_t)fmaxf(-32767.f, fminf(32767.f, dir_x * total_mag));
+    g_mouse_ry = (int32_t)fmaxf(-32767.f, fminf(32767.f, dir_y * total_mag));
+    push();
+
+    // Smooth multi-stage decay (simulates analog stick returning to center)
+    uint64_t seq = ++g_mouse_decay_t0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+        if (g_mouse_decay_t0 == seq) {
+            g_mouse_rx = (int32_t)(g_mouse_rx * 0.40f);
+            g_mouse_ry = (int32_t)(g_mouse_ry * 0.40f);
+            if (abs(g_mouse_rx) < 800) g_mouse_rx = 0;
+            if (abs(g_mouse_ry) < 800) g_mouse_ry = 0;
+            push();
+            if (g_mouse_rx != 0 || g_mouse_ry != 0) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+                    if (g_mouse_decay_t0 == seq) {
+                        g_mouse_rx = 0;
+                        g_mouse_ry = 0;
+                        push();
+                    }
+                });
+            }
+        }
+    });
+}
+
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    dm_input_set(g_btn, lx, ly, 0, 0);
+    int32_t rx = g_mouse_as_right_stick ? g_mouse_rx : 0;
+    int32_t ry = g_mouse_as_right_stick ? g_mouse_ry : 0;
+    dm_input_set(g_btn, lx, ly, rx, ry);
 }
 
 // Dynamic Input Mapping System (Ryujinx-style profile support)
@@ -162,6 +232,29 @@ static void load_custom_input_mapping(void) {
     if (dict[@"analogDeadzone"]) {
         g_deadzone = [dict[@"analogDeadzone"] floatValue];
     }
+    if (dict[@"mouseAsRightStick"]) {
+        g_mouse_as_right_stick = [dict[@"mouseAsRightStick"] boolValue];
+    } else {
+        g_mouse_as_right_stick = 1;
+    }
+    const char *env_mrs = getenv("DM_MOUSE_RIGHT_STICK");
+    if (env_mrs) g_mouse_as_right_stick = atoi(env_mrs);
+
+    if (dict[@"mouseSensitivity"]) {
+        g_mouse_sensitivity = [dict[@"mouseSensitivity"] floatValue];
+    }
+    const char *env_ms = getenv("DM_MOUSE_SENSITIVITY");
+    if (env_ms) g_mouse_sensitivity = (float)atof(env_ms);
+
+    if (dict[@"mouseInvertY"]) {
+        g_mouse_invert_y = [dict[@"mouseInvertY"] boolValue];
+    }
+    const char *env_miy = getenv("DM_MOUSE_INVERT_Y");
+    if (env_miy) g_mouse_invert_y = atoi(env_miy);
+
+    if (dict[@"mouseRightStickMode"]) {
+        g_mouse_mode_drag = [dict[@"mouseRightStickMode"] isEqualToString:@"rightDrag"] ? 1 : 0;
+    }
     NSDictionary *mov = dict[@"keyboardMovement"];
     if ([mov isKindOfClass:[NSDictionary class]]) {
         if (mov[@"up"]) g_mov_up = [mov[@"up"] unsignedShortValue];
@@ -214,6 +307,12 @@ static int key_bit(unsigned short code) {
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     load_custom_input_mapping();
+    if (e.keyCode == 53 && down && g_cursor_locked) {
+        set_cursor_locked(0);
+        g_mouse_rx = 0; g_mouse_ry = 0;
+        push();
+        return;
+    }
     unsigned short c = e.keyCode;
     if (c == g_mov_up) g_w = down;
     else if (c == g_mov_left) g_a = down;
@@ -324,7 +423,10 @@ static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 static void input_release(void) {
     g_input_on = 0;
     dm_motion_pro_active(0);
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+    g_btn = 0; g_w = g_a = g_s = g_d = 0;
+    if (g_cursor_locked) set_cursor_locked(0);
+    g_mouse_rx = 0; g_mouse_ry = 0;
+    push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
@@ -350,9 +452,57 @@ static void pads_start(void) {
 // not a window-wide event monitor, so clicks on the title bar, the window buttons and the resize edges still reach AppKit.
 @interface DmGameView : NSView @end
 @implementation DmGameView
-- (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
+- (BOOL)acceptsFirstResponder { return YES; }
+
+- (void)handleMouseMotion:(NSEvent *)e {
+    front_handle_mouse_delta((float)e.deltaX, (float)e.deltaY);
+}
+
+- (void)mouseMoved:(NSEvent *)e {
+    if (g_mouse_as_right_stick && g_cursor_locked) {
+        [self handleMouseMotion:e];
+    }
+}
+
+- (void)rightMouseDown:(NSEvent *)e {
+    load_custom_input_mapping();
+    if (g_mouse_as_right_stick && g_mouse_mode_drag) {
+        set_cursor_locked(1);
+    }
+}
+
+- (void)rightMouseDragged:(NSEvent *)e {
+    if (g_mouse_as_right_stick && g_mouse_mode_drag) {
+        [self handleMouseMotion:e];
+    }
+}
+
+- (void)rightMouseUp:(NSEvent *)e {
+    (void)e;
+    if (g_mouse_as_right_stick && g_mouse_mode_drag) {
+        set_cursor_locked(0);
+        g_mouse_rx = 0;
+        g_mouse_ry = 0;
+        push();
+    }
+}
+
+- (void)mouseDown:(NSEvent *)e {
+    load_custom_input_mapping();
+    if (g_mouse_as_right_stick && !g_mouse_mode_drag && !g_cursor_locked) {
+        set_cursor_locked(1);
+    }
+    if (!g_cursor_locked) {
+        [self mouseDragged:e];
+    }
+}
+
 - (void)mouseDragged:(NSEvent *)e {
     if (!g_input_on) return;
+    if (g_mouse_as_right_stick && (g_cursor_locked || g_mouse_mode_drag)) {
+        [self handleMouseMotion:e];
+        return;
+    }
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
@@ -361,6 +511,7 @@ static void pads_start(void) {
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
+
 - (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
@@ -398,6 +549,7 @@ void front_run(void (*guest)(void)) {
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+        win.acceptsMouseMovedEvents = YES;
         NSView *v = win.contentView = [[DmGameView alloc] initWithFrame:r];
         v.wantsLayer = YES;
         g_layer = [CAMetalLayer layer];
@@ -432,6 +584,14 @@ void front_run(void (*guest)(void)) {
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
+        }];
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged | NSEventMaskRightMouseDragged | NSEventMaskOtherMouseDragged handler:^NSEvent *(NSEvent *e) {
+            if (e.window != win && !g_cursor_locked) return e;
+            if (g_mouse_as_right_stick && (g_cursor_locked || (g_mouse_mode_drag && (e.type == NSEventTypeRightMouseDragged || e.type == NSEventTypeLeftMouseDragged)))) {
+                front_handle_mouse_delta((float)e.deltaX, (float)e.deltaY);
+                return nil;
+            }
+            return e;
         }];
         [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:win queue:nil
                                                       usingBlock:^(NSNotification *n) { (void)n; exit(0); }];

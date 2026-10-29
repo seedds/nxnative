@@ -9,6 +9,10 @@ public struct ControllerProfile: Codable, Identifiable, Equatable {
     public var keyboardBindings: [UInt16: SwitchButton]
     public var keyboardMovement: [String: UInt16]
     public var analogDeadzone: Double
+    public var mouseAsRightStick: Bool
+    public var mouseSensitivity: Double
+    public var mouseInvertY: Bool
+    public var mouseRightStickMode: String
 
     public init(
         id: UUID = UUID(),
@@ -18,7 +22,11 @@ public struct ControllerProfile: Codable, Identifiable, Equatable {
         gamepadBindings: [String: SwitchButton],
         keyboardBindings: [UInt16: SwitchButton],
         keyboardMovement: [String: UInt16] = ["up": 13, "left": 0, "down": 1, "right": 2],
-        analogDeadzone: Double = 0.10
+        analogDeadzone: Double = 0.10,
+        mouseAsRightStick: Bool = true,
+        mouseSensitivity: Double = 1.0,
+        mouseInvertY: Bool = false,
+        mouseRightStickMode: String = "cursorLock"
     ) {
         self.id = id
         self.name = name
@@ -28,6 +36,31 @@ public struct ControllerProfile: Codable, Identifiable, Equatable {
         self.keyboardBindings = keyboardBindings
         self.keyboardMovement = keyboardMovement
         self.analogDeadzone = analogDeadzone
+        self.mouseAsRightStick = mouseAsRightStick
+        self.mouseSensitivity = mouseSensitivity
+        self.mouseInvertY = mouseInvertY
+        self.mouseRightStickMode = mouseRightStickMode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, isDefault, targetDeviceName, gamepadBindings, keyboardBindings, keyboardMovement, analogDeadzone
+        case mouseAsRightStick, mouseSensitivity, mouseInvertY, mouseRightStickMode
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.isDefault = try container.decode(Bool.self, forKey: .isDefault)
+        self.targetDeviceName = try container.decode(String.self, forKey: .targetDeviceName)
+        self.gamepadBindings = try container.decode([String: SwitchButton].self, forKey: .gamepadBindings)
+        self.keyboardBindings = try container.decode([UInt16: SwitchButton].self, forKey: .keyboardBindings)
+        self.keyboardMovement = try container.decodeIfPresent([String: UInt16].self, forKey: .keyboardMovement) ?? ["up": 13, "left": 0, "down": 1, "right": 2]
+        self.analogDeadzone = try container.decodeIfPresent(Double.self, forKey: .analogDeadzone) ?? 0.10
+        self.mouseAsRightStick = try container.decodeIfPresent(Bool.self, forKey: .mouseAsRightStick) ?? true
+        self.mouseSensitivity = try container.decodeIfPresent(Double.self, forKey: .mouseSensitivity) ?? 1.0
+        self.mouseInvertY = try container.decodeIfPresent(Bool.self, forKey: .mouseInvertY) ?? false
+        self.mouseRightStickMode = try container.decodeIfPresent(String.self, forKey: .mouseRightStickMode) ?? "cursorLock"
     }
 
     // MARK: - Factory Presets
@@ -115,6 +148,10 @@ public struct ControllerProfile: Codable, Identifiable, Equatable {
         return [
             "name": name,
             "analogDeadzone": analogDeadzone,
+            "mouseAsRightStick": mouseAsRightStick,
+            "mouseSensitivity": mouseSensitivity,
+            "mouseInvertY": mouseInvertY,
+            "mouseRightStickMode": mouseRightStickMode,
             "gamepad": gpExport,
             "keyboard": kbExport,
             "keyboardMovement": movExport

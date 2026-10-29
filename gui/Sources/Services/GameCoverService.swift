@@ -35,8 +35,9 @@ public final class GameCoverService: ObservableObject {
             self.coversRepoDirectory = URL(fileURLWithPath: "/Volumes/SSD FN501 PRO/Emulations/NativePort/nxnative/docs/images/covers")
         }
 
-        memoryCache.countLimit = 36
-        memoryCache.totalCostLimit = 18 * 1024 * 1024
+        // Expanded memory bounds for whole library/compatibility list: 512 images or 128 MB max
+        memoryCache.countLimit = 512
+        memoryCache.totalCostLimit = 128 * 1024 * 1024
     }
 
     public func purgeMemoryCaches() {

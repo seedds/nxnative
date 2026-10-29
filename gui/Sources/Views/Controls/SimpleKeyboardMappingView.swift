@@ -80,6 +80,9 @@ public struct SimpleKeyboardMappingView: View {
                     }
                 }
             }
+
+            // MARK: - Section 5: Mouse as Right Stick
+            MouseLookSettingsView(profile: $profile)
         }
         .background(
             KeyboardEventBridge { keyCode, keyName in

@@ -80,6 +80,18 @@ public struct KeyboardNavBridge: NSViewRepresentable {
                     case 49: // Spacebar
                         self.onKey?("space")
                         return nil
+                    case 116: // Page Up
+                        self.onKey?("pageup")
+                        return nil
+                    case 121: // Page Down
+                        self.onKey?("pagedown")
+                        return nil
+                    case 115: // Home
+                        self.onKey?("home")
+                        return nil
+                    case 119: // End
+                        self.onKey?("end")
+                        return nil
                     default:
                         break
                     }

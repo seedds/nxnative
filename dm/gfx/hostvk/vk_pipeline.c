@@ -1,4 +1,4 @@
-// The Vulkan backend's pipelines and descriptors (docs/design/vulkan-backend.md 2.3 and 3.1; phase P3: monolithic pipelines, no libraries, no disk cache, which are phase P5).
+// The Vulkan backend's pipeline layouts, descriptors and compute pipelines (docs/design/vulkan-backend.md 2.3; phase P3). Graphics pipelines are vk_gpl.c's (phase P5).
 // Pipeline layouts: one universal layout per stage combination (vertex and fragment; with geometry; with tessellation, which includes geometry; compute), over the binding numbers the
 // Vulkan translator gives each resource class (dm/gfx/tools/dmsh_xlate_vk/Program.cs): set 0 the uniform buffers (binding 0 the support buffer, then 1 + 18 s + c for constant
 // buffer c of translator stage s, c0 and c2 dynamic: the driver banks of each draw are written into the ring and a draw changes offsets, not descriptors), set 1 the storage buffers
@@ -7,12 +7,12 @@
 // what the translator renumbers past the slots) gets a layout made from its shaders' own bindings, logged once; both are cached by content.
 // Descriptor sets: per set, the resolved content of the bindings the pipeline's shaders use is hashed and looked up in the submission slot's cache; a miss allocates from the slot's
 // pools and writes the set. Dynamic offsets select each stage's c0 / c2 bank.
-// Graphics pipelines are keyed by the shaders, the entry point, the attachment formats, the topology class and whatever state the device cannot set dynamically (hvk_gfx_key;
-// lavapipe and level-A devices set nearly all of it dynamically, design 3.6), in a hash table. Compute pipelines by their shader.
+// Compute pipelines by their shader and layout, through the disk cache (vk_cache.c).
 // The backend's own pipelines: the clear triangle of design 2.7 (partial channel and stencil masks) and the compute kernels that write counter reports and conditional-render
 // predicates on the GPU, in order (design 4.6, 4.7), through buffer device addresses (core in Vulkan 1.3) and push constants.
 #include "plat/plat.h"
 #include "vk_backend.h"
+#include "vk_pso.h"
 #include "../nvn/nvn_state.h"
 #include "../nvn/nvn_resolve.h"
 #include "../nvn/nvn_gpuwrite.h"
@@ -150,7 +150,15 @@ static int fits(const hvk_layout *u, hvk_shader *const sh[6], char *why, size_t 
     }
     return 1;
 }
+static hvk_layout *layout_for(hvk_shader *const sh[6]);
+static pthread_mutex_t g_layout_mu = PTHREAD_MUTEX_INITIALIZER;   // the layout and set-layout tables: the draws and the prewarm's workers (vk_prewarm.c) both make layouts
 hvk_layout *hvk_layout_for(hvk_shader *const sh[6]) {
+    pthread_mutex_lock(&g_layout_mu);
+    hvk_layout *l = layout_for(sh);
+    pthread_mutex_unlock(&g_layout_mu);
+    return l;
+}
+static hvk_layout *layout_for(hvk_shader *const sh[6]) {
     int combo = combo_of(sh);
     hvk_layout *u = univ_get(combo);
     char why[160] = "";
@@ -429,85 +437,27 @@ int hvk_bind_resources(VkCommandBuffer cb, hvk_layout *l, hvk_shader *const sh[6
     return 1;
 }
 
-// ---------- Graphics pipelines ----------
-typedef struct { const void *sh[5]; const void *layout; hvk_gfx_key k; } pso_key;
-static nvn_hmap g_pso;    // pso_key → VkPipeline (boxed)
-static nvn_hmap g_cso;    // compute shader → VkPipeline (boxed)
-// The dynamic states of a graphics pipeline: the colour blend states only with colour attachments (with none, vkCmdSetColorBlend*EXT cannot be called for any, and a pipeline that
-// declares them dynamic fails every draw's validation)
-static uint32_t dyn_states(VkDynamicState *d, int vertex_dynamic, int colors) {
-    uint32_t n = 0;
-    const VkDynamicState core[] = {VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT, VK_DYNAMIC_STATE_LINE_WIDTH, VK_DYNAMIC_STATE_DEPTH_BIAS,
-        VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE,
-        VK_DYNAMIC_STATE_CULL_MODE, VK_DYNAMIC_STATE_FRONT_FACE, VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
-        VK_DYNAMIC_STATE_DEPTH_COMPARE_OP, VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP,
-        VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE, VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE, VK_DYNAMIC_STATE_DEPTH_BOUNDS};
-    for (size_t i = 0; i < sizeof core / sizeof *core; i++) d[n++] = core[i];
-    uint32_t e = hvk.dev.eds_present;
-    if (vertex_dynamic) d[n++] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT; else d[n++] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;
-    if (e >> HOSTVK_EDS_LOGIC_OP & 1) d[n++] = VK_DYNAMIC_STATE_LOGIC_OP_EXT;
-    if (e >> HOSTVK_EDS_PATCH_POINTS & 1) d[n++] = VK_DYNAMIC_STATE_PATCH_CONTROL_POINTS_EXT;
-    if (e >> HOSTVK_EDS_LOGIC_OP_ENABLE & 1) d[n++] = VK_DYNAMIC_STATE_LOGIC_OP_ENABLE_EXT;
-    if (colors && (e >> HOSTVK_EDS_BLEND_ENABLE & 1)) d[n++] = VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT;
-    if (colors && (e >> HOSTVK_EDS_BLEND_EQUATION & 1)) d[n++] = VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT;
-    if (colors && (e >> HOSTVK_EDS_WRITE_MASK & 1)) d[n++] = VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT;
-    if (e >> HOSTVK_EDS_DEPTH_CLAMP & 1) d[n++] = VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT;
-    if (e >> HOSTVK_EDS_POLYGON_MODE & 1) d[n++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
-    if (e >> HOSTVK_EDS_SAMPLES & 1) d[n++] = VK_DYNAMIC_STATE_RASTERIZATION_SAMPLES_EXT;
-    if (e >> HOSTVK_EDS_SAMPLE_MASK & 1) d[n++] = VK_DYNAMIC_STATE_SAMPLE_MASK_EXT;
-    if (e >> HOSTVK_EDS_ALPHA_TO_COVERAGE & 1) d[n++] = VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT;
-    return n;
-}
-static const char *entry_of(const hvk_shader *s, int which) { return which == 1 && s->entry_u[0] ? s->entry_u : which == 2 && s->entry_m[0] ? s->entry_m : s->entry; }
-VkPipeline hvk_gfx_pipeline(hvk_shader *const sh[6], hvk_layout *l, const hvk_gfx_key *k) {
-    pso_key key; memset(&key, 0, sizeof key);
-    static const int order[5] = {0, 3, 4, 2, 1};   // vertex, tess control, tess evaluation, geometry, fragment
-    for (int i = 0; i < 5; i++) key.sh[i] = sh[order[i]];
-    key.layout = l; key.k = *k;
-    if (!g_pso.klen) nvn_hm_init(&g_pso, sizeof key);
-    VkPipeline *have = nvn_hm_get(&g_pso, &key);
-    if (have) return *have;
-    uint64_t t0 = plat_now_ns();
-    VkPipelineShaderStageCreateInfo stg[5]; uint32_t ns = 0;
-    for (int i = 0; i < 5; i++) { const hvk_shader *s = sh[order[i]]; if (!s) continue;
-        stg[ns++] = (VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, k_vkstage[order[i]], s->module, entry_of(s, order[i] == 1 ? k->entry[0] : 0), NULL}; }
-    int vdyn = hvk.dev.caps.vertex_input_dynamic;
-    VkPipelineVertexInputDivisorStateCreateInfoKHR vds = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_KHR, NULL, k->nvd, k->vd};
-    VkPipelineVertexInputStateCreateInfo vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, k->nvd ? &vds : NULL, 0, vdyn ? 0 : k->nvb, k->vb, vdyn ? 0 : k->nva, k->va};
-    if (vdyn) vi.pNext = NULL;
-    VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, NULL, 0, (VkPrimitiveTopology)k->topology_class, VK_FALSE};
-    VkPipelineTessellationStateCreateInfo ts = {VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, NULL, 0, k->patch_points ? k->patch_points : 1};
-    VkPipelineViewportDepthClipControlCreateInfoEXT dcc = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT, NULL, k->depth_clip_ndc};
-    VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, hvk.dev.x.depth_clip_control ? &dcc : NULL, 0, 0, NULL, 0, NULL};
-    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, NULL, 0, k->depth_clamp, VK_FALSE, (VkPolygonMode)k->poly_mode, VK_CULL_MODE_NONE,
-                                                 VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1};
-    VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, k->samples ? k->samples : VK_SAMPLE_COUNT_1_BIT, VK_FALSE, 0, NULL, k->a2c, VK_FALSE};
-    VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    VkPipelineColorBlendAttachmentState ba[8];
-    for (int i = 0; i < 8; i++) ba[i] = k->blend[i];
-    VkPipelineColorBlendStateCreateInfo cbs = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, NULL, 0, k->logic_en, (VkLogicOp)k->logic_op, k->ccount, ba, {0, 0, 0, 0}};
-    VkDynamicState dsv[48]; uint32_t nd = dyn_states(dsv, vdyn, k->ccount > 0);
-    VkPipelineDynamicStateCreateInfo dy = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, NULL, 0, nd, dsv};
-    VkPipelineRenderingCreateInfo ri = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, NULL, 0, k->ccount, k->color, k->depth, k->stencil};
-    VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri, 0, ns, stg, &vi, &ia, (sh[3] || sh[4]) ? &ts : NULL, &vp, &rs, &ms, &ds, &cbs, &dy, l->pl, VK_NULL_HANDLE, 0, VK_NULL_HANDLE, -1};
-    VkPipeline p = VK_NULL_HANDLE;
-    VkResult r = vkCreateGraphicsPipelines(hvk.d, VK_NULL_HANDLE, 1, &ci, NULL, &p);
-    atomic_fetch_add(&hvk.st_pipelines, 1); atomic_fetch_add(&hvk.st_pipeline_ns, plat_now_ns() - t0);
-    if (r) { hostvk_log("[RED] [hostvk] graphics pipeline (vertex %s fragment %s) failed: VkResult %d", sh[0] ? sh[0]->key : "-", sh[1] ? sh[1]->key : "-", r); p = VK_NULL_HANDLE; }
-    VkPipeline *box = malloc(sizeof *box); if (box) { *box = p; nvn_hm_put(&g_pso, &key, box); }
-    return p;
-}
+// ---------- Compute pipelines (graphics pipelines are vk_gpl.c's, phase P5) ----------
+static nvn_hmap g_cso;    // compute shader and layout → VkPipeline (boxed), under g_cso_mu: the draws' dispatches and the prewarm's C rows (vk_prewarm.c)
+static pthread_mutex_t g_cso_mu = PTHREAD_MUTEX_INITIALIZER;
 VkPipeline hvk_cs_pipeline(hvk_shader *cs, hvk_layout *l) {
     struct { const void *cs, *l; } key = {cs, l};
+    pthread_mutex_lock(&g_cso_mu);
     if (!g_cso.klen) nvn_hm_init(&g_cso, sizeof key);
     VkPipeline *have = nvn_hm_get(&g_cso, &key);
-    if (have) return *have;
-    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
+    if (have) { VkPipeline p = *have; pthread_mutex_unlock(&g_cso_mu); return p; }
+    VkPipelineCreationFeedback fb = {0};
+    VkPipelineCreationFeedbackCreateInfo fci = {VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO, NULL, &fb, 0, NULL};
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, &fci, 0,
         {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, cs->module, cs->entry, NULL}, l->pl, VK_NULL_HANDLE, -1};
     VkPipeline p = VK_NULL_HANDLE;
-    if (vkCreateComputePipelines(hvk.d, VK_NULL_HANDLE, 1, &ci, NULL, &p)) { hostvk_log("[RED] [hostvk] compute pipeline %s failed", cs->key); p = VK_NULL_HANDLE; }
+    VkPipelineCache pc = hvk_cache_begin();   // compute pipelines go into the disk cache too (vk_cache.c, design 3.4)
+    VkResult r = vkCreateComputePipelines(hvk.d, pc, 1, &ci, NULL, &p);
+    hvk_cache_end(&fb, r == VK_SUCCESS);
+    if (r) { hostvk_log("[RED] [hostvk] compute pipeline %s failed", cs->key); p = VK_NULL_HANDLE; }
     atomic_fetch_add(&hvk.st_pipelines, 1);
     VkPipeline *box = malloc(sizeof *box); if (box) { *box = p; nvn_hm_put(&g_cso, &key, box); }
+    pthread_mutex_unlock(&g_cso_mu);
     return p;
 }
 
@@ -593,8 +543,6 @@ int hvk_clear_tri(VkCommandBuffer cb, const VkFormat color[8], int ncolor, VkFor
 }
 
 void hvk_pipeline_shutdown(void) {
-    for (uint32_t i = 0; i < g_pso.cap; i++) if (g_pso.vals && g_pso.vals[i]) { if (*(VkPipeline *)g_pso.vals[i]) vkDestroyPipeline(hvk.d, *(VkPipeline *)g_pso.vals[i], NULL); free(g_pso.vals[i]); }
-    nvn_hm_clear(&g_pso, NULL);
     for (uint32_t i = 0; i < g_cso.cap; i++) if (g_cso.vals && g_cso.vals[i]) { if (*(VkPipeline *)g_cso.vals[i]) vkDestroyPipeline(hvk.d, *(VkPipeline *)g_cso.vals[i], NULL); free(g_cso.vals[i]); }
     nvn_hm_clear(&g_cso, NULL);
     for (uint32_t i = 0; i < g_clr.cap; i++) if (g_clr.vals && g_clr.vals[i]) { if (*(VkPipeline *)g_clr.vals[i]) vkDestroyPipeline(hvk.d, *(VkPipeline *)g_clr.vals[i], NULL); free(g_clr.vals[i]); }

@@ -197,7 +197,7 @@ DM_PSO_BUNDLE	path	The pipeline archive made offline (`<GPU architecture>.mtl4a`
 DM_PSO_GPUS	switch	`build_ipa.sh`: the GPU architectures, comma-separated, to build the offline pipeline archive for (`none` builds none); unset, `g18p` for a profile with `pso_mtl4 on`, else none
 DM_PSO_HYBRID	switch	`0`: a draw whose pipeline is not built yet waits for it instead of drawing with its shader pair's pulling pipeline meanwhile (on by default with the Metal 4 path)
 DM_PSO_IOS_MIN	switch	`build_ipa.sh`: the minimum iOS version of the offline pipeline archives (default the SDK's major version); an older system cannot open them and builds the bases itself
-DM_PSO_MANIFEST	path	The prewarm manifest to use instead of the profile's `pso_manifest.tsv`; `off` turns the prewarm off
+DM_PSO_MANIFEST	path	The prewarm manifest to use instead of the profile's `pso_manifest.tsv` (the Vulkan backend: instead of it and `pso_user_vk.tsv`; empty: both, as unset); `off` turns the prewarm off
 DM_PSO_MTL4	player	`0` builds render pipelines through the `MTLDevice` with no bases and no archive; `1` uses MTL4Compiler with the archive, hybrid pipelines and prebuild (default on on the Mac, the profile's `pso_mtl4` on iOS)
 DM_PSO_PAIRS	path	The prebuild's second shader pair table (default: `pso_pairs.tsv` beside the shader map)
 DM_PSO_PREBUILD	player	`0` turns off the prebuild of every known shader pair's pulling base into the pipeline archive (on by default); `tool` runs the prebuild alone on the Mac and exits
@@ -274,7 +274,12 @@ DM_UDC_SELFTEST	diagnostic	`=1` runs a start-up check of DontCare load and store
 DM_UE_SHADERS	path	Folder of the Unreal shader code archives decoded by `uepak.py`, for `shader_split.py` (default `ue_shaders` beside the RomFS); needed when the RomFS has Unreal paks
 DM_VK_CAPTURE	path	`=<dir>` (Mac) writes every SPIR-V module the game creates to `<dir>/<key>.spv`; the NSP script's Vulkan shader capture stage sets it
 DM_VK_DEVICE	switch	`=<index>` picks the Vulkan backend's physical device (`dm/gfx/hostvk`) by its index in `vkEnumeratePhysicalDevices`; otherwise the first that meets the baseline
+DM_VK_LEVEL	switch	`=A`, `B`, `C` or `D`: the Vulkan backend makes the device as one of that level of design 3.6 would be (`dm/gfx/hostvk`): `B` without the dynamic blend and raster states, `C` without pipeline libraries, `D` without either or dynamic vertex input, so levels C and D can be measured and compared on one machine; a level above the device's is refused with a red line
 DM_VK_LOG	diagnostic	`=1` logs Vulkan object creation in the Vulkan-on-Metal layer
+DM_VK_PREBUILD	switch	`1`: the Vulkan backend's prebuild (decision D3): the first submission waits until every row of the prewarm lists is built, and on levels A and B the libraries of every shader in the shader map, with the progress on `front_progress`; default: the prewarm runs in the background
+DM_VK_PSO_CACHE	path	The Vulkan backend's pipeline cache folder (default: `vk_pipeline_cache` beside the save, the parent of `DM_SAVE`, else in the platform's data folder); `off` turns the cache on disk off
+DM_VK_PSO_TRACE	diagnostic	`=1` logs every draw that waits for its pipeline in the Vulkan backend, with the time, the reason and the key (shaders, formats, samples, topology class, level)
+DM_VK_PSO_USER	path	The Vulkan backend's per-device list of render pipelines built on the spot, as P rows (default: `pso_user_vk.tsv` in the parent of `DM_SAVE`); prewarmed after the seed list at the next start
 DM_VK_VALIDATION	diagnostic	`=1` turns the Khronos validation layer on in the Vulkan backend, with synchronization validation; every message is logged as a `[RED]` line and counted (the GPU tests in `dm/gfx/tests/vk` set it)
 DM_VSYNC_HZ	switch	`=<Hz>`: rate at which a host thread fires the vi vsync event when the display link does not drive it (default 60)
 DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) and turns on the stall watchdog; off unless set

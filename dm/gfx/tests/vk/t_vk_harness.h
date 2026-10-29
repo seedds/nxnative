@@ -9,7 +9,10 @@
 // - a shader library in a temporary folder as the backend reads one (DM_MSL_DIR/vk-<DMSH_CHAIN_VK>/<key>.spv and .json, the shader map DM_NVN_SHMAP): a test's GLSL, compiled by
 //   dm/gfx/hostvk/shaders/gen_spirv.sh into committed arrays, with a hand-written reflection in the Vulkan form dmsh_build_vk.py writes, under the key the frontend computes for a
 //   program's shader data (prog_key), so a draw loads its shaders the way a game's do;
-// - records (emit), submissions through nvnQueueSubmitCommands, and readbacks of a texture's subresource through the backend's own image (vk_texture.c hvk_test_image).
+// - records (emit), submissions through nvnQueueSubmitCommands, and readbacks of a texture's subresource through the backend's own image (vk_texture.c hvk_test_image);
+// - the pipeline switches of phase P5 kept inside the test: the disk cache in the test's temporary folder (DM_VK_PSO_CACHE) and no prewarm list (DM_PSO_MANIFEST=off), unless the
+//   test sets them first; and a second start of the backend, for the tests of the disk cache and the prewarm: the test runs itself again as a child process with a phase argument
+//   (hv_spawn), which reports its numbers through a results file (hv_res_put / hv_res_get).
 #pragma once
 #include "../../nvn/nvn_obj.h"
 #include "../../nvn/nvn_protos.h"
@@ -27,6 +30,9 @@
 #include <sys/stat.h>
 #if !defined(_WIN32)
 #include <unistd.h>
+#include <sys/wait.h>
+#else
+#include <process.h>
 #endif
 
 // ---------- The entry points the tests call (each NVNT_<name> of nvn_protos.h is the type hle_nvn.c checks its h_<name> against) ----------
@@ -151,7 +157,7 @@ static int hv_pool_make(hv_pool *p, size_t size) {
 static void hv_pool_free(hv_pool *p) { h_nvnMemoryPoolFinalize(&p->pool); plat_vm_release(p->mem, p->size); memset(p, 0, sizeof *p); }
 
 // ---------- The shader library ----------
-static char g_lib[512], g_libv[600], g_map[600];
+static char g_lib[512], g_libv[600], g_map[600], g_pcache[600]; static int g_own_pcache;
 static void hv_library(void) {
     const char *tmp = getenv("TMPDIR");
     snprintf(g_lib, sizeof g_lib, "%s/t_vk_lib_XXXXXX", tmp && *tmp ? tmp : "/tmp");
@@ -162,6 +168,9 @@ static void hv_library(void) {
     fprintf(f, "package\tindex\tstage\tdm_ctl_sha16\tsource\n"); fclose(f);
     char p[700]; snprintf(p, sizeof p, "%s/inputs.tsv", g_libv); f = fopen(p, "w"); if (f) { fprintf(f, "game\ttest\ninputs\ttest\n"); fclose(f); }
     setenv("DM_MSL_DIR", g_lib, 1); setenv("DM_NVN_SHMAP", g_map, 1);
+    snprintf(g_pcache, sizeof g_pcache, "%s/vk_pipeline_cache", g_lib);
+    if (!getenv("DM_VK_PSO_CACHE")) { setenv("DM_VK_PSO_CACHE", g_pcache, 1); g_own_pcache = 1; }   // not the user's data folder
+    if (!getenv("DM_PSO_MANIFEST")) setenv("DM_PSO_MANIFEST", "off", 1);
 }
 static void rm_dir(const char *dir) {   // a folder of files
     DIR *d = opendir(dir); if (!d) return;
@@ -169,7 +178,31 @@ static void rm_dir(const char *dir) {   // a folder of files
     while ((e = readdir(d))) { if (e->d_name[0] == '.') continue; snprintf(p, sizeof p, "%s/%s", dir, e->d_name); remove(p); }
     closedir(d); rmdir(dir);
 }
-static void hv_library_remove(void) { if (g_lib[0]) { rm_dir(g_libv); rm_dir(g_lib); g_lib[0] = 0; } }
+static void hv_library_remove(void) { if (g_lib[0]) { rm_dir(g_libv); if (g_own_pcache) rm_dir(g_pcache); rm_dir(g_lib); g_lib[0] = 0; } }
+// ---------- A second start: the test run again as a child process (a new process: a new device, the backend's state and the disk cache read anew) ----------
+// self: argv[0]; phase: the child's argument. The child inherits the environment as it is when called. Returns its exit status (-1: it could not be started)
+static int hv_spawn(const char *self, const char *phase) {
+    fflush(stdout); fflush(stderr);
+#if defined(_WIN32)
+    const char *argv[] = {self, phase, NULL};
+    return (int)_spawnv(_P_WAIT, self, argv);
+#else
+    pid_t pid = fork();
+    if (pid == 0) { execl(self, self, phase, (char *)NULL); _exit(127); }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) < 0) return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+#endif
+}
+// A child's numbers: "name value" lines appended to a file, read back by name (the last line of that name; def when none)
+static void hv_res_put(const char *path, const char *name, double v) { FILE *f = fopen(path, "a"); if (f) { fprintf(f, "%s %.9g\n", name, v); fclose(f); } }
+static double hv_res_get(const char *path, const char *name, double def) {
+    FILE *f = fopen(path, "r"); if (!f) return def;
+    char line[256], n[128]; double v, out = def;
+    while (fgets(line, sizeof line, f)) if (sscanf(line, "%127s %lf", n, &v) == 2 && !strcmp(n, name)) out = v;
+    fclose(f);
+    return out;
+}
 // A shader of a program: control section and code made unique by name, the program's data in pool cp at offset off; its module (code, bytes) and its Vulkan reflection
 // (bindings_json: the "bindings" array's text, vin_json: the "vertex_inputs" array's, both may be NULL) are written under the key the frontend gives it
 typedef struct { const char *name; int stage; const uint32_t *code; size_t bytes; const char *bindings; const char *vin; } hv_shader;

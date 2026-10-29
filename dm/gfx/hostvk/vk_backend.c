@@ -1,7 +1,8 @@
 // The Vulkan backend's entry points (docs/design/vulkan-backend.md 1.5, phase P3): every function of dm/gfx/nvn/nvn_be.h and nvn_be_ext.h for the hosts without Metal, the hooks
 // the frontend's state, handle and pool code calls in its backend (nvn_state.h, nvn_resolve.h, nvn_pools.h), and be_get_caps / be_guest_map / be_guest_unmap of design 1.5.
 // The device comes up on the first call that needs it (as the Metal backend's mtl_init), through hostvk_init: DM_VK_DEVICE=<index> picks the physical device (design 10 item 4),
-// DM_VK_VALIDATION=1 turns the Khronos validation layer on with synchronization validation (design 10 item 7). No window yet (the presenter is phase P4).
+// DM_VK_VALIDATION=1 turns the Khronos validation layer on with synchronization validation (design 10 item 7), DM_VK_LEVEL=A|B|C|D makes the device as one of that level of design
+// 3.6 would be (for tests and measurements of levels C and D on one machine; phase P5). No window yet (the presenter is phase P4).
 // Fallback: when no Vulkan device meets the baseline (no loader, no driver, a device below design 9.1), every function takes the null backend's form instead (dm/gfx/nvn/nvn_null.c:
 // one [RED] line per function on its first call, a GPU that has finished everything, events and syncs written at once, the pool table kept), so a host without Vulkan still runs
 // its CPU side. The two forms live in this one library: a host binary links exactly one backend (dm/host/CMakeLists.txt: nxhost links hostvk; nvn_null.c stays the backend of the
@@ -10,6 +11,7 @@
 // be_report's statistics lines (the per-frame statistics answer zero or what the backend counts).
 #include "plat/plat.h"
 #include "vk_backend.h"
+#include "vk_pso.h"
 #include "../nvn/nvn_be.h"
 #include "../nvn/nvn_pools.h"
 #include "../nvn/nvn_replay.h"
@@ -68,12 +70,15 @@ static void up_once(void) {
     if (e && *e) { char *end; long v = strtol(e, &end, 10); if (*end || v < 0) hostvk_log("[RED] [hostvk] DM_VK_DEVICE=%s is not a device index: the first device that meets the baseline is used", e); else o.device_index = (int)v; }
     e = getenv("DM_VK_VALIDATION");
     o.validation = e && *e && strcmp(e, "0") != 0;
+    e = getenv("DM_VK_LEVEL");
+    if (e && *e) { if ((e[0] >= 'A' && e[0] <= 'D') && !e[1]) o.force_level = e[0]; else hostvk_log("[RED] [hostvk] DM_VK_LEVEL=%s is not A, B, C or D: the device's level is used", e); }
     int rc = hostvk_init(&o, &hvk.dev, g_why, sizeof g_why);
     if (rc) { hostvk_log("[RED] [hostvk] no Vulkan device for the NVN backend (%s): the null backend's forms answer, nothing is drawn", g_why); return; }
     hvk.d = hvk.dev.device; hvk.lim = hvk.dev.props.limits;
     if (!hvk.dev.caps.buffer_device_address) hostvk_log("[RED] [hostvk] the device has no buffer device address: counter reports and conditional rendering are not written by the GPU");
     if (!hvk_commands_init()) { hostvk_log("[RED] [hostvk] the command layer could not be made: the null backend's forms answer"); hostvk_destroy(&hvk.dev); hvk.d = VK_NULL_HANDLE; return; }
     hvk.on = 1;
+    hvk_cache_init(); hvk_pso_init();   // the pipeline cache on disk is read now; the prewarm starts at the first submission (vk_prewarm.c)
     hostvk_log("[hostvk] NVN backend on Vulkan: library %s%s", hvk_shader_dir(), o.validation ? ", validation on (DM_VK_VALIDATION)" : "");
 }
 int hvk_up(void) { pthread_once(&g_once, up_once); return hvk.on; }
@@ -84,6 +89,7 @@ void hvk_shutdown(void);
 void hvk_shutdown(void) {
     if (!hvk.on) return;
     hvk_commands_shutdown();
+    hvk_pso_shutdown(); hvk_prewarm_shutdown(); hvk_cache_shutdown();   // the workers stopped, every pipeline released, the cache written a last time
     hvk_pipeline_shutdown(); hvk_shader_shutdown(); hvk_tex_shutdown(); hvk_mem_shutdown();
     hostvk_destroy(&hvk.dev); hvk.d = VK_NULL_HANDLE; hvk.on = 0;
 }
@@ -241,7 +247,7 @@ uint64_t be_upload_ns_take(void) { return atomic_exchange(&hvk.st_upload_ns, 0);
 uint64_t be_upload_gpu_ns_take(void) { return 0; }
 uint64_t be_upload_bytes(void) { return atomic_load(&hvk.st_upload_bytes); }
 void be_create_stats(uint64_t *lib, uint64_t *pso) { *lib = atomic_load(&hvk.st_shaders); *pso = atomic_load(&hvk.st_pipelines); }
-void be_create_ns(uint64_t *lib_ns, uint64_t *pso_ns) { *lib_ns = 0; *pso_ns = atomic_load(&hvk.st_pipeline_ns); }
+void be_create_ns(uint64_t *lib_ns, uint64_t *pso_ns) { *lib_ns = 0; *pso_ns = atomic_load(&hvk.st_pipeline_ns); }   // pso_ns: the time draws waited for their pipelines
 void be_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none) { *draws = *made = *none = 0; }
 void be_res_stats(char *out, size_t n) {
     if (n) snprintf(out, n, "vulkan: passes %llu draws %llu dispatches %llu pipelines %llu shaders %llu barriers %llu pass splits %llu GPU vertex copies %llu GPU quad indices %llu",
@@ -260,7 +266,27 @@ void be_ubp_why(uint64_t w[5]) { memset(w, 0, 5 * sizeof *w); }
 void be_lc_stats(uint64_t *taken, uint64_t *landed) { *taken = *landed = 0; }
 void be_sm_stats(uint64_t *np, uint64_t *nc, uint64_t *nw) { *np = *nc = *nw = 0; }
 void be_cshoist_stats(uint64_t *moved, uint64_t *depth, uint64_t *stops) { *moved = *depth = 0; memset(stops, 0, 8 * sizeof *stops); }   // stops: 8 counters, as hle_nvn.c reads them
-void be_pso_line(char *o, size_t n) { if (n) snprintf(o, n, "vulkan: %llu pipelines made in %.1f ms (monolithic, phase P3)", (unsigned long long)hvk.st_pipelines, hvk.st_pipeline_ns / 1e6); }
+// The pipeline line of hle_nvn.c's timing summary, the differences since the last call, in the shape of the Metal backend's (mtl_pso_line): what the submit thread spent, what
+// every thread made, the background builds, and the draws that waited, per reason, with the longest wait of the window and the waits over the 2 ms budget (phase P5)
+void be_pso_line(char *o, size_t n) {
+    if (!n) return;
+    if (!hvk.on) { snprintf(o, n, "vulkan: no device"); return; }
+    hvk_pso_stats a; hvk_pso_stats_get(&a); hvk_prewarm_stats pw; hvk_prewarm_stats_get(&pw); hvk_cache_stats cs; hvk_cache_stats_get(&cs);
+    enum { V = 20 + 2 * HVK_W_N };
+    uint64_t v[V] = {a.draw_ns, a.wait_ns[HVK_W_LIB], pw.speculative, a.lib[0] + a.lib[1] + a.lib[2] + a.lib[3], a.lib_ns[0] + a.lib_ns[1] + a.lib_ns[2] + a.lib_ns[3],
+                     a.fast, a.fast_ns, a.opt, a.opt_ns, a.swapped, a.mono, a.mono_ns, pw.built, pw.failed, a.draw_made, a.over_budget, cs.created, cs.hits, a.opt_dropped, pw.stale};
+    for (int i = 0; i < HVK_W_N; i++) { v[20 + i] = a.wait_n[i]; v[20 + HVK_W_N + i] = a.wait_ns[i]; }
+    static uint64_t p[V]; uint64_t d[V]; for (int i = 0; i < V; i++) d[i] = v[i] - p[i];
+    size_t k = (size_t)snprintf(o, n, "on the submit thread pipelines %.1f ms, shader libraries %.1f ms, predictions %llu / 0.0 ms; all threads (level %c): pipeline libraries %llu / %.1f ms, "
+        "fast links %llu / %.1f ms, optimized links %llu / %.1f ms (swapped in %llu, dropped %llu), monolithic %llu / %.1f ms, driver cache hits %llu of %llu creations; "
+        "background builds done %llu, failed %llu, made by the draw %llu, in flight %llu; draws that waited:",
+        d[0] / 1e6, d[1] / 1e6, (unsigned long long)d[2], hvk_pso_level(), (unsigned long long)d[3], d[4] / 1e6, (unsigned long long)d[5], d[6] / 1e6, (unsigned long long)d[7], d[8] / 1e6,
+        (unsigned long long)d[9], (unsigned long long)d[18], (unsigned long long)d[10], d[11] / 1e6, (unsigned long long)d[17], (unsigned long long)d[16], (unsigned long long)d[12],
+        (unsigned long long)d[13], (unsigned long long)d[14], (unsigned long long)a.pending);
+    for (int i = 0; i < HVK_W_N; i++) if (d[20 + i] && k < n) k += (size_t)snprintf(o + k, n - k, " %s %llu / %.1f ms,", hvk_wait_why[i], (unsigned long long)d[20 + i], d[20 + HVK_W_N + i] / 1e6);
+    if (k < n) snprintf(o + k, n - k, " longest %.2f ms, over 2 ms %llu", hvk_pso_take_window_max() / 1e6, (unsigned long long)d[15]);
+    memcpy(p, v, sizeof p);
+}
 void be_alloc_stats(uint64_t *waits, uint64_t *grown, int *n) { *waits = *grown = 0; *n = 0; }
 
 // ---------- Per operation (nvn_replay_exec, in record order) ----------

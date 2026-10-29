@@ -103,6 +103,15 @@ static uint8_t fmt_cls(VkFormat f) {
         default: return is_depth_fmt(f) || is_stencil_fmt(f) ? NVN_VK_DS : NVN_VK_FLOAT;
     }
 }
+// The format an attachment of NVN format nf gets, as an image of it is made (pick_format, the texture's own format), and the view's numeric class: what a prewarm row's
+// attachments are keyed by (vk_pso.h). VK_FORMAT_UNDEFINED for 0 or a format the device cannot attach
+VkFormat hvk_attach_format(int nf, uint8_t *cls);
+VkFormat hvk_attach_format(int nf, uint8_t *cls) {
+    nvn_vk_fmt row; int alt = 0;
+    VkFormat f = nf ? pick_format(nf, &row, &alt) : VK_FORMAT_UNDEFINED;
+    if (cls) *cls = fmt_cls(f);
+    return f;
+}
 
 // ---------- The texture table ----------
 static hvk_tex *tex_find(uint64_t serial) { return serial ? nvn_hm_get(&g_tex, &serial) : NULL; }

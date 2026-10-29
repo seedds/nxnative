@@ -22,9 +22,11 @@
 #include <string.h>
 
 // ---------- The shader map and the library directory ----------
+// Loads are serialized by g_sh_mu: the submit thread's draws and the prewarm's workers (vk_prewarm.c, phase P5) both load shaders by key; a loaded shader is immutable
 typedef struct { char key[17]; int stage; } map_ent;
-static nvn_hmap g_map;            // 16-hex-digit key → map_ent
-static int g_map_loaded;
+static nvn_hmap g_map;            // 16-hex-digit key → map_ent, read without the lock once loaded
+static _Atomic int g_map_loaded;
+static pthread_mutex_t g_sh_mu = PTHREAD_MUTEX_INITIALIZER;
 static char g_dir[1024];
 static int name_index(const char *s, const char *const names[6]) {   // the NVN stage a name of the table gives (0 vertex, 1 fragment, 2 geometry, 3 hull, 4 domain, 5 compute)
     for (int i = 0; s && i < 6; i++) if (!strcmp(s, names[i])) return i;
@@ -51,12 +53,19 @@ const char *hvk_shader_dir(void) {
     }
     return g_dir;
 }
+const char *hvk_shader_map_path(void) { const char *p = getenv("DM_NVN_SHMAP"); return p && *p ? p : NULL; }
+static void map_load_(void);
 static void map_load(void) {
-    if (g_map_loaded) return;
-    g_map_loaded = 1; nvn_hm_init(&g_map, 16);
+    if (atomic_load(&g_map_loaded)) return;
+    pthread_mutex_lock(&g_sh_mu);
+    if (!atomic_load(&g_map_loaded)) map_load_();
+    pthread_mutex_unlock(&g_sh_mu);
+}
+static void map_load_(void) {   // under g_sh_mu
+    nvn_hm_init(&g_map, 16);
     const char *path = getenv("DM_NVN_SHMAP");
     size_t n = 0; char *txt = path && *path ? read_file(path, &n) : NULL;
-    if (!txt) { hostvk_log("[RED] [hostvk] no shader map (DM_NVN_SHMAP=%s): every game shader is missing", path ? path : "unset"); return; }
+    if (!txt) { hostvk_log("[RED] [hostvk] no shader map (DM_NVN_SHMAP=%s): every game shader is missing", path ? path : "unset"); atomic_store(&g_map_loaded, 1); return; }
     int count = 0;
     for (char *ln = txt, *next; ln && *ln; ln = next) {
         next = strchr(ln, '\n'); if (next) *next++ = 0;
@@ -71,6 +80,7 @@ static void map_load(void) {
         free(nvn_hm_put(&g_map, e->key, e)); count++;
     }
     free(txt);
+    atomic_store(&g_map_loaded, 1);
     hostvk_log("[hostvk] shader map %s: %d shaders; library %s", path, count, hvk_shader_dir());
     char stamp[1100]; snprintf(stamp, sizeof stamp, "%s/inputs.tsv", hvk_shader_dir());
     size_t sn; char *st = read_file(stamp, &sn);
@@ -271,7 +281,31 @@ static hvk_shader *builtin_get(const char *ctl) {
     }
     return NULL;
 }
+static hvk_shader *shader_get_(const char *key, int stage);
 static hvk_shader *shader_get(const char *key, int stage) {
+    pthread_mutex_lock(&g_sh_mu);
+    hvk_shader *sh = shader_get_(key, stage);
+    pthread_mutex_unlock(&g_sh_mu);
+    return sh;
+}
+// A prewarm row's shader (vk_backend.h)
+hvk_shader *hvk_shader_by_key(const char *key, int *stale) {
+    if (stale) *stale = 0;
+    map_load();
+    // the lists name a shader by its map key, or the Metal library's name for it, <map key>_b (R and S rows recorded by the Metal backend)
+    size_t n = strlen(key);
+    char k[17] = {0}; snprintf(k, sizeof k, "%s", key);
+    map_ent *e = n == 16 || (n == 18 && !strcmp(key + 16, "_b")) ? nvn_hm_get(&g_map, k) : NULL;
+    if (!e) { if (stale) *stale = 1; return NULL; }
+    return shader_get(k, e->stage);
+}
+int hvk_shader_map_each(void (*fn)(const char *key, int stage, void *u), void *u) {
+    map_load();
+    int n = 0;
+    for (uint32_t i = 0; i < g_map.cap; i++) if (g_map.vals && g_map.vals[i]) { const map_ent *e = g_map.vals[i]; fn(e->key, e->stage, u); n++; }
+    return n;
+}
+static hvk_shader *shader_get_(const char *key, int stage) {   // under g_sh_mu
     char k24[24] = {0}; snprintf(k24, sizeof k24, "%s", key);
     if (!g_sh.klen) { nvn_hm_init(&g_sh, 24); nvn_hm_init(&g_fail, 24); }
     hvk_shader *sh = nvn_hm_get(&g_sh, k24);
@@ -352,5 +386,5 @@ void hvk_shader_shutdown(void) {
     for (uint32_t i = 0; i < g_comp.cap; i++) if (g_comp.vals && g_comp.vals[i]) free(g_comp.vals[i]);
     nvn_hm_clear(&g_comp, NULL);
     for (uint32_t i = 0; i < g_map.cap; i++) if (g_map.vals && g_map.vals[i]) free(g_map.vals[i]);
-    nvn_hm_clear(&g_map, NULL); g_map_loaded = 0; g_dir[0] = 0;
+    nvn_hm_clear(&g_map, NULL); atomic_store(&g_map_loaded, 0); g_dir[0] = 0;
 }

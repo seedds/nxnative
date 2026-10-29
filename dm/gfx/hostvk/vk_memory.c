@@ -182,6 +182,7 @@ static void del_now(const del_ent *e) {
         case HVK_DEL_VIEW: vkDestroyImageView(hvk.d, (VkImageView)e->obj, NULL); break;
         case HVK_DEL_BUFVIEW: vkDestroyBufferView(hvk.d, (VkBufferView)e->obj, NULL); break;
         case HVK_DEL_FREE: free(e->obj); break;
+        case HVK_DEL_PIPELINE: vkDestroyPipeline(hvk.d, (VkPipeline)e->obj, NULL); break;   // a fast-linked pipeline its optimized one replaced (vk_gpl.c)
     }
 }
 void hvk_defer(hvk_del_kind kind, void *obj, uint64_t a, uint64_t b) {

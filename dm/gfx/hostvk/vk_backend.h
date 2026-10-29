@@ -41,7 +41,7 @@ void hvk_buffer_free(VkBuffer buf, VkDeviceMemory mem);
 uint32_t hvk_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags fallback);   // UINT32_MAX for none
 VkBufferUsageFlags hvk_ring_usage(void);
 // The objects the GPU may still use: released when every submission up to the fence that may use them has completed (hvk_deferred_run)
-typedef enum { HVK_DEL_IMPORT, HVK_DEL_BUFFER, HVK_DEL_IMAGE, HVK_DEL_VIEW, HVK_DEL_BUFVIEW, HVK_DEL_FREE } hvk_del_kind;
+typedef enum { HVK_DEL_IMPORT, HVK_DEL_BUFFER, HVK_DEL_IMAGE, HVK_DEL_VIEW, HVK_DEL_BUFVIEW, HVK_DEL_FREE, HVK_DEL_PIPELINE } hvk_del_kind;
 void hvk_defer(hvk_del_kind kind, void *obj, uint64_t a, uint64_t b);   // a, b: the second and third handles (an image's memory) or a pointer to free
 void hvk_deferred_run(uint64_t done);   // release what the fences up to done let go
 void hvk_mem_shutdown(void);
@@ -119,6 +119,11 @@ void hvk_prog_drop(uint64_t serial);               // be_prog_release
 uint64_t hvk_prog_compose(uint64_t old_serial, const prog_t *const bst[5]);   // nvn_state_hook_compose
 void hvk_shader_shutdown(void);
 const char *hvk_shader_dir(void);                  // the library directory: <DM_MSL_DIR or the default cache>/vk-<DMSH_CHAIN_VK>
+// A shader by its content key (16 hex digits), its stage from the shader map: what a prewarm row names (any thread; the loads are serialized). NULL when the map does not have
+// it (*stale set: a row of another game version, dropped quietly) or it fails to load (a red line, as for a draw)
+hvk_shader *hvk_shader_by_key(const char *key, int *stale);
+const char *hvk_shader_map_path(void);             // DM_NVN_SHMAP: the prewarm lists are found beside it
+int hvk_shader_map_each(void (*fn)(const char *key, int stage, void *u), void *u);   // every shader of the map (the prebuild): how many
 // The backend's own SPIR-V (dm/gfx/hostvk/shaders/gen): a module made from a committed array
 VkShaderModule hvk_module(const uint32_t *code, size_t bytes);
 
@@ -132,7 +137,7 @@ VkPipelineLayout hvk_layout_vk(const hvk_layout *l);
 typedef struct {
     VkFormat color[8]; VkFormat depth, stencil;
     VkSampleCountFlagBits samples;
-    uint8_t topology_class;    // VkPrimitiveTopology of the class (points, lines, triangles, patches), dynamic within it
+    uint8_t topology_class;    // VkPrimitiveTopology of the class (points, lines, triangles, patches), dynamic within it; HVK_TOPOLOGY_ANY (vk_pso.h) where one pipeline draws any class
     uint8_t ccount;            // colour attachments
     uint8_t entry[1];          // the fragment entry chosen (0 main, 1 main_u, 2 main_m)
     uint8_t depth_clip_ndc;    // depth clip control negativeOneToOne (the GL depth mode)
@@ -149,8 +154,10 @@ typedef struct {
     VkVertexInputBindingDivisorDescriptionKHR vd[16]; uint8_t nvd;
 } hvk_gfx_key;
 enum { HVK_BAKE_BLEND = 1, HVK_BAKE_RASTER = 2, HVK_BAKE_VERTEX = 4, HVK_BAKE_LOGIC_OP = 8, HVK_BAKE_PATCH = 16 };
-VkPipeline hvk_gfx_pipeline(hvk_shader *const sh[6], hvk_layout *l, const hvk_gfx_key *k);   // cached by content (design 3.1); VK_NULL_HANDLE with a red line on failure
+// Graphics pipelines: vk_pso.h (vk_gpl.c, phase P5). Compute pipelines by their shader and layout (any thread)
 VkPipeline hvk_cs_pipeline(hvk_shader *cs, hvk_layout *l);
+// The dynamic states of a graphics pipeline made whole (a monolithic one: every state the device sets dynamically at the pipeline level, vk_gpl.c)
+uint32_t hvk_dyn_states(VkDynamicState *d, int vertex_dynamic, int colors, int bindings);
 // The descriptor sets of a draw or dispatch from the resolved state (S, the resolver), cached by content per submission slot, and bound with the driver banks' dynamic offsets.
 // base_instance: c0 + 0x644; dispatch: the workgroup counts (c0 + 0x200 of compute). 0 when a set could not be made (logged): the caller skips the draw
 int hvk_bind_resources(VkCommandBuffer cb, hvk_layout *l, hvk_shader *const sh[6], VkPipelineBindPoint bp, uint32_t base_instance, const uint32_t dispatch[3]);
@@ -193,7 +200,7 @@ typedef struct {
     _Atomic int tex_pool_n;    // texture IDs past this are empty slots (be_set_tex_pool_n)
     uint64_t frame;            // be_set_frame
     // statistics (be_stats and the like)
-    _Atomic uint64_t st_passes, st_draws, st_dispatches, st_pipelines, st_pipeline_ns, st_uploads, st_reuploads, st_upload_bytes, st_upload_ns;
+    _Atomic uint64_t st_passes, st_draws, st_dispatches, st_pipelines, st_pipeline_ns, st_uploads, st_reuploads, st_upload_bytes, st_upload_ns;   // st_pipelines: made on the submit thread
     _Atomic uint64_t st_shaders, st_barriers, st_pass_splits;
     _Atomic uint64_t st_vcopies_gpu, st_index_gpu;   // unaligned vertex streams copied and quad indices expanded on the GPU (their source not readable on the CPU at encode time)
 } hvk_t;

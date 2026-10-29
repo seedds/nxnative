@@ -33,7 +33,10 @@ typedef struct {
     uint32_t max_allocations;           // maxMemoryAllocationCount: imports count against it with every other allocation (design 4.2)
     uint32_t import_type_bits;          // the memory types a page of host memory can be imported as (vkGetMemoryHostPointerPropertiesEXT of a probe page at hostvk_init)
     uint32_t import_type;               // the one hostvk_import prefers among them (HOST_VISIBLE and HOST_COHERENT first)
-    char level;                         // 'A' to 'D', design 3.6 (rules in hostvk_init below)
+    char level;                         // 'A' to 'D', design 3.6 (rules in hostvk_init below); a level forced lower by hostvk_opts.force_level is this one
+    char device_level;                  // the level the device itself offers (the same unless a lower one was forced)
+    uint32_t gpl_fast_link : 1;         // graphicsPipelineLibraryFastLinking: linking libraries without link-time optimization is fast (design 3.2)
+    uint32_t gpl_indep_interp : 1;      // graphicsPipelineLibraryIndependentInterpolationDecoration: a vertex library need not match its fragment partner's Flat / NoPerspective
 } hostvk_caps;
 
 // The optional extensions of design 9.1's second list (Vulkan 1.4 and ASTC are reported beside them). A bit of hostvk_dev.opt_present per entry
@@ -72,6 +75,9 @@ typedef struct {
     int device_index;   // the physical device at this index of vkEnumeratePhysicalDevices; -1: the first one that meets the baseline
     int validation;     // 1: VK_LAYER_KHRONOS_validation with synchronization validation, and VK_EXT_debug_utils with a messenger that counts and logs what it reports
     int want_surface;   // 1: the instance extensions front_vk_instance_extensions asks for, and VK_KHR_swapchain in the baseline
+    char force_level;   // 'B', 'C' or 'D': the device is made as one of that level would be (design 3.6; DM_VK_LEVEL, for tests and measurements on one machine): the pipeline
+                        // libraries (C, D), the dynamic states of HOSTVK_EDS_* (B, D) and dynamic vertex input (D) are not enabled; 0 or 'A': what the device offers. A level above
+                        // the device's is refused with a red line (nothing can be added)
 } hostvk_opts;
 
 // hostvk_init's results: 0, or one of these (err says what in words)
@@ -102,7 +108,8 @@ typedef struct hostvk_dev {
     char driver_name[VK_MAX_DRIVER_NAME_SIZE], driver_info[VK_MAX_DRIVER_INFO_SIZE];   // VkPhysicalDeviceDriverProperties
     hostvk_caps caps;
     uint32_t opt_present;                 // bit HOSTVK_OPT_*: the device has that optional extension (enabled only where caps says so)
-    uint32_t eds_present;                 // bit HOSTVK_EDS_*: that state can be dynamic on this device
+    uint32_t eds_present;                 // bit HOSTVK_EDS_*: that state can be dynamic on this device (as enabled: a forced level clears what it does not enable)
+    uint32_t driver_id;                   // VkDriverId (VkPhysicalDeviceDriverProperties): the backend's per-vendor quirk table matches it (vk_gpl.c)
     int vk14, astc_ldr;                   // Vulkan 1.4 (device and loader), textureCompressionASTC_LDR
     // Optional features and extensions beyond the baseline and be_caps that the backend (vk_backend.h) uses where the device has them: hostvk_init enables each one present
     struct {
@@ -121,6 +128,8 @@ typedef struct hostvk_dev {
         uint32_t push_descriptor : 1;         // VK_KHR_push_descriptor (core in 1.4): the descriptor benchmark's alternative (design 2.3)
         uint32_t vertex_divisor : 1;          // VK_KHR / VK_EXT_vertex_attribute_divisor with vertexAttributeInstanceRateDivisor: NVN stream divisors above 1
         uint32_t divisor_khr : 1;
+        uint32_t topology_unrestricted : 1;   // dynamicPrimitiveTopologyUnrestricted (VK_EXT_extended_dynamic_state3, enabled): a pipeline draws any topology class (design 3.1)
+        uint32_t maintenance5 : 1;            // VK_KHR_maintenance5 with maintenance5: a point whose vertex stage writes no PointSize is 1.0 in size (else undefined)
     } x;
     char missing[1024];                   // what of design 9.1's optional list the device lacks, comma-separated, as the level line prints it ("" when nothing)
     char eds_missing[512];                // the dynamic states of level A it lacks, comma-separated
@@ -138,7 +147,7 @@ typedef struct hostvk_dev {
 // occlusionQueryPrecise, pipelineStatisticsQuery, vertexPipelineStoresAndAtomics, fragmentStoresAndAtomics, shaderStorageImageExtendedFormats, drawIndirectCount,
 // timelineSemaphore, dynamicRendering, synchronization2, subgroupSizeControl, transformFeedback.
 // Level (design 3.6): A = pipeline libraries, dynamic vertex input and every dynamic state of HOSTVK_EDS_*; B = pipeline libraries without all of those; C = no pipeline
-// libraries, but dynamic vertex input or some of HOSTVK_EDS_*; D = none of them.
+// libraries, but dynamic vertex input or some of HOSTVK_EDS_*; D = none of them. o->force_level makes it lower (the line then says "forced by DM_VK_LEVEL").
 // Not thread-safe; once per device (volk's function pointers are global)
 int hostvk_init(const hostvk_opts *o, hostvk_dev *d, char *err, size_t n);
 // Wait for the device to be idle and destroy what hostvk_init made (the caller has released its own objects and imports). d's validation counters stay

@@ -89,7 +89,7 @@ static const struct { const char *name; size_t off; } core_req[] = {
 typedef struct {
     VkExtensionProperties *ext; uint32_t n_ext;
     int host_mem, xfb, swapchain, gpl, eds2, eds3, vid, cr, calibrated_ext;   // the extension is listed (gpl: with VK_KHR_pipeline_library)
-    int calibrated_khr, custom_border, uint8_khr, uint8_ext, depth_clip, push, divisor_khr, divisor_ext;   // the backend's optional extensions (hostvk_dev.x)
+    int calibrated_khr, custom_border, uint8_khr, uint8_ext, depth_clip, push, divisor_khr, divisor_ext, m5;   // the backend's optional extensions (hostvk_dev.x)
     VkPhysicalDeviceFeatures2 f;
     VkPhysicalDeviceVulkan12Features f12;
     VkPhysicalDeviceVulkan13Features f13;
@@ -103,10 +103,13 @@ typedef struct {
     VkPhysicalDeviceIndexTypeUint8FeaturesKHR fu8;
     VkPhysicalDeviceDepthClipControlFeaturesEXT fdcc;
     VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR fdiv;
+    VkPhysicalDeviceMaintenance5FeaturesKHR fm5;
     VkPhysicalDeviceProperties2 p;
     VkPhysicalDeviceVulkan12Properties p12;
     VkPhysicalDeviceVulkan13Properties p13;
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT phost;
+    VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT pgpl;
+    VkPhysicalDeviceExtendedDynamicState3PropertiesEXT peds3;
 } devq;
 
 static int has_ext(const devq *q, const char *name) {
@@ -138,6 +141,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     q->push = has_ext(q, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     q->divisor_khr = has_ext(q, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     q->divisor_ext = has_ext(q, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+    q->m5 = has_ext(q, VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     vkGetPhysicalDeviceProperties(p, &q->p.properties);
     if (q->p.properties.apiVersion < VK_API_VERSION_1_3) return;   // below the baseline: the 1.2 / 1.3 structures may not be chained
     void **next = &q->f.pNext;
@@ -154,12 +158,15 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->uint8_khr || q->uint8_ext) { q->fu8.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_KHR; *next = &q->fu8; next = &q->fu8.pNext; }   // the EXT's structure type is the same value
     if (q->depth_clip) { q->fdcc.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT; *next = &q->fdcc; next = &q->fdcc.pNext; }
     if (q->divisor_khr || q->divisor_ext) { q->fdiv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR; *next = &q->fdiv; next = &q->fdiv.pNext; }
+    if (q->m5) { q->fm5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR; *next = &q->fm5; next = &q->fm5.pNext; }
     vkGetPhysicalDeviceFeatures2(p, &q->f);
     next = &q->p.pNext;
     q->p.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     q->p12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES; *next = &q->p12; next = &q->p12.pNext;
     q->p13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES; *next = &q->p13; next = &q->p13.pNext;
     if (q->host_mem) { q->phost.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT; *next = &q->phost; next = &q->phost.pNext; }
+    if (q->gpl) { q->pgpl.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT; *next = &q->pgpl; next = &q->pgpl.pNext; }
+    if (q->eds3) { q->peds3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT; *next = &q->peds3; next = &q->peds3.pNext; }
     vkGetPhysicalDeviceProperties2(p, &q->p);
 }
 
@@ -194,6 +201,7 @@ static int assess(VkPhysicalDevice p, const devq *q, const hostvk_opts *o, uint3
     vkGetPhysicalDeviceMemoryProperties(p, &d->mem);
     snprintf(d->driver_name, sizeof d->driver_name, "%s", q->p12.driverName);
     snprintf(d->driver_info, sizeof d->driver_info, "%s", q->p12.driverInfo);
+    d->driver_id = (uint32_t)q->p12.driverID;
     if (d->props.apiVersion < VK_API_VERSION_1_3) {
         char v[48]; snprintf(v, sizeof v, "Vulkan 1.3 (the device has %u.%u.%u)", VK_API_VERSION_MAJOR(d->props.apiVersion), VK_API_VERSION_MINOR(d->props.apiVersion),
                              VK_API_VERSION_PATCH(d->props.apiVersion));
@@ -269,8 +277,20 @@ static int assess(VkPhysicalDevice p, const devq *q, const hostvk_opts *o, uint3
     c->min_import_alignment = q->host_mem ? q->phost.minImportedHostPointerAlignment : 0;
     c->max_buffer_size = q->p13.maxBufferSize;
     c->max_allocations = l->maxMemoryAllocationCount;
+    c->gpl_fast_link = c->gpl && q->pgpl.graphicsPipelineLibraryFastLinking;
+    c->gpl_indep_interp = c->gpl && q->pgpl.graphicsPipelineLibraryIndependentInterpolationDecoration;
     int some_dynamic = c->vertex_input_dynamic || d->eds_present != 0;
-    c->level = c->gpl ? (c->vertex_input_dynamic && c->eds3_blend && c->eds3_raster ? 'A' : 'B') : some_dynamic ? 'C' : 'D';
+    c->level = c->device_level = c->gpl ? (c->vertex_input_dynamic && c->eds3_blend && c->eds3_raster ? 'A' : 'B') : some_dynamic ? 'C' : 'D';
+    // A lower level forced (design 3.6, DM_VK_LEVEL): what that level's device would lack is left out here, so make_device does not enable it
+    char fl = o->force_level;
+    if (fl && fl != 'A' && fl > c->level) {
+        if (fl == 'B' || fl == 'D') { d->eds_present = 0; c->eds3_blend = c->eds3_raster = 0; }
+        if (fl == 'C' || fl == 'D') { c->gpl = c->gpl_fast_link = c->gpl_indep_interp = 0; }
+        if (fl == 'D') c->vertex_input_dynamic = 0;
+        c->level = fl;
+        d->eds_missing[0] = 0;
+        for (int i = 0; i < HOSTVK_EDS_N; i++) if (!(d->eds_present & (1u << i))) append(d->eds_missing, sizeof d->eds_missing, hostvk_eds_names[i]);
+    }
     // host allocations importable as pool buffers (design 4.2): the buffer usage the pools need, with the handle type host pointers are imported with
     if (q->host_mem) {
         VkPhysicalDeviceExternalBufferInfo bi = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO, NULL, 0, hostvk_pool_usage(d), VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
@@ -418,6 +438,11 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     d->x.push_descriptor = q->push;
     if (d->x.push_descriptor) ext[ne++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
     d->x.vertex_divisor = (q->divisor_khr || q->divisor_ext) && q->fdiv.vertexAttributeInstanceRateDivisor; d->x.divisor_khr = q->divisor_khr && (khr280 || !q->divisor_ext);
+    d->x.topology_unrestricted = eds3 && q->peds3.dynamicPrimitiveTopologyUnrestricted;   // a property of the extension: it holds only with the extension enabled
+    // VK_KHR_maintenance5: points whose vertex stage does not write PointSize are 1.0 in size, NVN's default (the Vulkan chain writes no PointSize and nvnCommandBufferSetPointSize
+    // is not recorded); without it their size is undefined, and on a device whose pipelines are made per topology class (levels C and D) such a pipeline is invalid (phase P5)
+    d->x.maintenance5 = q->m5 && q->fm5.maintenance5;
+    if (d->x.maintenance5) ext[ne++] = VK_KHR_MAINTENANCE_5_EXTENSION_NAME;
     if (d->x.vertex_divisor) ext[ne++] = d->x.divisor_khr ? VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME : VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
     const VkPhysicalDeviceFeatures *cf = &q->f.features;
     d->x.float64 = cf->shaderFloat64 != 0; d->x.int64 = cf->shaderInt64 != 0; d->x.int16 = cf->shaderInt16 != 0;
@@ -458,6 +483,7 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     VkPhysicalDeviceIndexTypeUint8FeaturesKHR fu8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_KHR, NULL, VK_TRUE};
     VkPhysicalDeviceDepthClipControlFeaturesEXT fdcc = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT, NULL, VK_TRUE};
     VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR fdiv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR, NULL, VK_TRUE, q->fdiv.vertexAttributeInstanceRateZeroDivisor};
+    VkPhysicalDeviceMaintenance5FeaturesKHR fm5 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR, NULL, VK_TRUE};
     void **next = &f.pNext;
     *next = &f12; next = &f12.pNext;
     *next = &f13; next = &f13.pNext;
@@ -471,6 +497,7 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (d->x.index_uint8) { *next = &fu8; next = &fu8.pNext; }
     if (d->x.depth_clip_control) { *next = &fdcc; next = &fdcc.pNext; }
     if (d->x.vertex_divisor) { *next = &fdiv; next = &fdiv.pNext; }
+    if (d->x.maintenance5) { *next = &fm5; next = &fm5.pNext; }
     // One queue for graphics, compute and copies; the transfer-only family (transfer_family) gets a queue when uploads move to it
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, d->queue_family, 1, &prio};
@@ -543,8 +570,11 @@ int hostvk_init(const hostvk_opts *o, hostvk_dev *d, char *err, size_t n) {
     char ver[48];
     driver_version(d, ver, sizeof ver);
     uint32_t v = d->props.apiVersion;
-    hostvk_log("[hostvk] device '%s' driver %s (%s: %s) Vulkan %u.%u.%u level %c: %s", d->props.deviceName, ver, d->driver_name, d->driver_info,
-               VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v), VK_API_VERSION_PATCH(v), d->caps.level, d->missing[0] ? d->missing : "no optional extension missing");
+    hostvk_log("[hostvk] device '%s' driver %s (%s: %s) Vulkan %u.%u.%u level %c%s: %s", d->props.deviceName, ver, d->driver_name, d->driver_info,
+               VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v), VK_API_VERSION_PATCH(v), d->caps.level, d->caps.level != d->caps.device_level ? " (forced by DM_VK_LEVEL)" : "",
+               d->missing[0] ? d->missing : "no optional extension missing");
+    if (o->force_level && o->force_level != 'A' && o->force_level < d->caps.device_level)
+        hostvk_log("[RED] [hostvk] DM_VK_LEVEL=%c is above the device's level %c: the device's level is used (nothing can be added)", o->force_level, d->caps.device_level);
     if (d->caps.level != 'A')
         hostvk_log("[hostvk] level %c: %s; not dynamic: %s", d->caps.level,
                    d->caps.gpl ? "pipeline libraries" : "no pipeline libraries", d->eds_missing[0] ? d->eds_missing : "-");

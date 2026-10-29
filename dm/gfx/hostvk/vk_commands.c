@@ -14,8 +14,11 @@
 // predicate word that the following passes test (VK_EXT_conditional_rendering).
 // Declared with a red line: indirect quads and fans, and indices or vertices the GPU writes earlier in the same submission that need a CPU conversion; other counter types
 // (pipeline statistics, primitives generated: phase P8); the alpha test; advanced blend modes; viewport swizzles other than a negated y; presentation (phase P4).
+// Pipelines (phase P5): the draw fills its key through vk_gpl.c's hvk_key_fill and takes its pipeline from hvk_gfx_pipeline, which counts the time a draw waits for it; the first
+// submission starts the prewarm (vk_prewarm.c), as the Metal backend's does, since the vertex stage's depth mode is the game's by then.
 #include "plat/plat.h"
 #include "vk_backend.h"
+#include "vk_pso.h"
 #include "../nvn/nvn_state.h"
 #include "../nvn/nvn_resolve.h"
 #include "../nvn/nvn_gpuwrite.h"
@@ -247,6 +250,7 @@ static int pass_begin(VkCommandBuffer cb) {
         if (P.cv[i].layers < layers) layers = P.cv[i].layers;
         samples = P.cv[i].samples; hvk_tex_gpu_written(x);
     }
+    while (nc > 0 && !P.ca[nc - 1].imageView) nc--;   // trailing slots with nothing attached are not the pass's: its pipelines are keyed by the attachments it has (a prewarm row names those)
     P.nc = nc;
     if (R.has_rt && R.rt.depth) {
         hvk_tex *x = hvk_tex_get(R.rt.depth);
@@ -328,6 +332,8 @@ static void slot_reset(int i) {
 void hvk_sub_begin(void);
 void hvk_sub_begin(void) {
     if (g_cur >= 0) return;
+    static int prewarmed;
+    if (!prewarmed) { prewarmed = 1; hvk_prewarm_start(); }   // with the prebuild (DM_VK_PREBUILD=1) this returns once every row is built
     int i = g_next; slot_t *s = &g_slot[i];
     if (s->fence) hvk_wait(s->fence, UINT64_MAX);   // the slot's submission has completed and its CPU work has run
     slot_reset(i);
@@ -604,72 +610,8 @@ static int is_strip(VkPrimitiveTopology t) {
     return t == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP || t == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || t == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN ||
            t == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY || t == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY;
 }
-static VkBlendFactor bf(uint32_t f) {
-    switch (f) {
-        case NVN_BLEND_FUNC_ZERO: return VK_BLEND_FACTOR_ZERO; case NVN_BLEND_FUNC_ONE: return VK_BLEND_FACTOR_ONE;
-        case NVN_BLEND_FUNC_SRC_COLOR: return VK_BLEND_FACTOR_SRC_COLOR; case NVN_BLEND_FUNC_ONE_MINUS_SRC_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
-        case NVN_BLEND_FUNC_SRC_ALPHA: return VK_BLEND_FACTOR_SRC_ALPHA; case NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        case NVN_BLEND_FUNC_DST_ALPHA: return VK_BLEND_FACTOR_DST_ALPHA; case NVN_BLEND_FUNC_ONE_MINUS_DST_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
-        case NVN_BLEND_FUNC_DST_COLOR: return VK_BLEND_FACTOR_DST_COLOR; case NVN_BLEND_FUNC_ONE_MINUS_DST_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
-        case NVN_BLEND_FUNC_SRC_ALPHA_SATURATE: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
-        case NVN_BLEND_FUNC_SRC1_COLOR: return VK_BLEND_FACTOR_SRC1_COLOR; case NVN_BLEND_FUNC_ONE_MINUS_SRC1_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
-        case NVN_BLEND_FUNC_SRC1_ALPHA: return VK_BLEND_FACTOR_SRC1_ALPHA; case NVN_BLEND_FUNC_ONE_MINUS_SRC1_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
-        case NVN_BLEND_FUNC_CONSTANT_COLOR: return VK_BLEND_FACTOR_CONSTANT_COLOR; case NVN_BLEND_FUNC_ONE_MINUS_CONSTANT_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
-        case NVN_BLEND_FUNC_CONSTANT_ALPHA: return VK_BLEND_FACTOR_CONSTANT_ALPHA; case NVN_BLEND_FUNC_ONE_MINUS_CONSTANT_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
-        default: return VK_BLEND_FACTOR_ONE;
-    }
-}
-static VkBlendOp bo(uint32_t e) {
-    switch (e) { case NVN_BLEND_EQUATION_SUB: return VK_BLEND_OP_SUBTRACT; case NVN_BLEND_EQUATION_REVERSE_SUB: return VK_BLEND_OP_REVERSE_SUBTRACT;
-                 case NVN_BLEND_EQUATION_MIN: return VK_BLEND_OP_MIN; case NVN_BLEND_EQUATION_MAX: return VK_BLEND_OP_MAX; default: return VK_BLEND_OP_ADD; }
-}
-static int fmt_blendable(VkFormat f) {
-    VkFormatProperties p; vkGetPhysicalDeviceFormatProperties(hvk.dev.phys, f, &p);
-    return (p.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0;
-}
-// The colour state of attachment i as Vulkan wants it: blending off on integer attachments, which ignore it (the Metal backend's t_integer_blend)
-static void blend_of(int i, VkFormat f, uint32_t *en, VkColorBlendEquationEXT *eq, VkColorComponentFlags *wm) {
-    const blend_st *b = &S.blend[i];
-    *en = (S.color.blend_en >> i & 1) && f && fmt_blendable(f);
-    if (b->adv && *en) HVK_RED_ONCE("advanced blend mode %u: not implemented (blended with the blend functions)", (unsigned)b->adv);
-    *eq = (VkColorBlendEquationEXT){bf(b->src_rgb), bf(b->dst_rgb), bo(b->eq_rgb), bf(b->src_a), bf(b->dst_a), bo(b->eq_a)};
-    if (bo(b->eq_rgb) == VK_BLEND_OP_MIN || bo(b->eq_rgb) == VK_BLEND_OP_MAX) { eq->srcColorBlendFactor = eq->dstColorBlendFactor = VK_BLEND_FACTOR_ONE; }
-    if (bo(b->eq_a) == VK_BLEND_OP_MIN || bo(b->eq_a) == VK_BLEND_OP_MAX) { eq->srcAlphaBlendFactor = eq->dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE; }
-    *wm = (VkColorComponentFlags)(S.chmask.mask >> (4 * i) & 0xf);
-}
 static VkStencilOp sop(uint32_t o) { return o >= 1 && o <= 8 ? (VkStencilOp)(o - 1) : VK_STENCIL_OP_KEEP; }
 static VkCompareOp cop(uint32_t f) { return f >= 1 && f <= 8 ? (VkCompareOp)(f - 1) : VK_COMPARE_OP_ALWAYS; }
-// Vertex input: the attributes the vertex shader reads, from S.attr / S.stream; *zero_binding is set when one reads the zero buffer (an attribute with no format or no buffer)
-typedef struct { VkVertexInputBindingDescription2EXT b[17]; VkVertexInputAttributeDescription2EXT a[32]; uint32_t nb, na; uint32_t used_streams; int zero; } vin_t;
-static void vertex_input(const hvk_shader *vs, vin_t *v) {
-    memset(v, 0, sizeof *v);
-    if (!vs) return;
-    uint32_t zero_binding = 16;
-    for (uint32_t loc = 0; loc < 32; loc++) {
-        if (!vs->vin_types[loc]) continue;
-        uint32_t ct = vs->vin_types[loc] - 1;
-        const va_st *at = loc < 16 ? &S.attr[loc] : NULL;
-        nvn_vk_fmt row; VkFormat f = 0;
-        if (at && at->fmt) { nvn_fmt_to_vk((int)at->fmt, &row); f = row.vk ? row.vk : row.alt; }
-        if (!f || !S.vbuf[at->stream].address) {   // no format or no buffer: the attribute reads zero, as on an unbound Maxwell attribute
-            f = ct == NVN_CT_UINT ? VK_FORMAT_R32G32B32A32_UINT : ct == NVN_CT_INT ? VK_FORMAT_R32G32B32A32_SINT : VK_FORMAT_R32G32B32A32_SFLOAT;
-            v->a[v->na++] = (VkVertexInputAttributeDescription2EXT){VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT, NULL, loc, zero_binding, f, 0};
-            v->zero = 1; continue;
-        }
-        uint8_t fc = row.cls; int fint = fc == NVN_VK_UINT ? NVN_CT_UINT : fc == NVN_VK_SINT ? NVN_CT_INT : NVN_CT_FLOAT;
-        if (fint != (int)ct) HVK_RED_ONCE("vertex input %u read as %s from a %s format (NVN %s): the class mismatch needs the shader's shadow inputs (<key>_bv, phase P4); bound as it is",
-                                          loc, ct == NVN_CT_FLOAT ? "float" : ct == NVN_CT_UINT ? "uint" : "int", fint == NVN_CT_FLOAT ? "float" : "integer", nvn_fmt_name((int)at->fmt));
-        v->a[v->na++] = (VkVertexInputAttributeDescription2EXT){VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT, NULL, loc, at->stream, f, at->offset};
-        v->used_streams |= 1u << at->stream;
-    }
-    for (uint32_t s = 0; s < 16; s++) if (v->used_streams >> s & 1) {
-        const vs_st *st = &S.stream[s];
-        VkVertexInputBindingDescription2EXT b = {VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT, NULL, s, st->stride, st->divisor ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX, 1};
-        if (st->divisor > 1) { if (hvk.dev.x.vertex_divisor) b.divisor = st->divisor; else HVK_RED_ONCE("vertex stream divisor %u without VK_EXT_vertex_attribute_divisor: read per instance", st->divisor); }
-        v->b[v->nb++] = b;
-    }
-    if (v->zero) v->b[v->nb++] = (VkVertexInputBindingDescription2EXT){VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT, NULL, zero_binding, 0, VK_VERTEX_INPUT_RATE_VERTEX, 1};
-}
 static VkBuffer g_zero_vb; static VkDeviceMemory g_zero_vb_mem;
 static VkBuffer g_quad_ib; static VkDeviceMemory g_quad_ib_mem; enum { QUAD_N = 65536 };
 static int static_draw_buffers(void) {
@@ -749,7 +691,7 @@ static int cpu_readable(uint64_t a, uint64_t n) {
 }
 // Unaligned streams the CPU cannot read now (cpu_readable): copied into the ring on the GPU, outside the pass, before the draw's pass begins; bind_vertex_buffers binds the copies
 static struct { VkBuffer buf; VkDeviceSize off; } g_vcopy[16]; static uint32_t g_vcopy_mask;
-static int vertex_copies_gpu(const vin_t *v) {
+static int vertex_copies_gpu(const hvk_vin *v) {
     g_vcopy_mask = 0;
     for (uint32_t i = 0; i < v->nb; i++) {
         uint32_t s = v->b[i].binding;
@@ -771,7 +713,7 @@ static int vertex_copies_gpu(const vin_t *v) {
     return 1;
 }
 // Vertex buffer bindings: a stream whose address the format cannot fetch aligned is copied into the ring (on the CPU, or on the GPU when vertex_copies_gpu did)
-static int bind_vertex_buffers(VkCommandBuffer cb, const vin_t *v) {
+static int bind_vertex_buffers(VkCommandBuffer cb, const hvk_vin *v) {
     VkBuffer bufs[17]; VkDeviceSize offs[17], sizes[17], strides[17]; uint32_t first = 0, n = 0;
     for (uint32_t i = 0; i < v->nb; i++) {
         uint32_t s = v->b[i].binding;
@@ -839,7 +781,7 @@ static void dyn_apply(VkCommandBuffer cb, VkPrimitiveTopology topo, int strip, i
     n.pr = strip && restart_native && S.restart.on;
     memcpy(n.bc, S.blend_color, 16); n.lw = 1;
     n.dclamp = S.depth_clamp != 0; n.a2c = S.ms.a2c != 0; n.samples = P.samples; n.logic_en = S.color.logic_op != NVN_LOGIC_OP_COPY; n.logic = S.color.logic_op;
-    for (int i = 0; i < P.nc; i++) blend_of(i, P.cfmt[i], &n.ben[i], &n.beq[i], &n.wm[i]);
+    for (int i = 0; i < P.nc; i++) hvk_blend_of(&S.blend[i], (int)(S.color.blend_en >> i & 1), P.cfmt[i], S.chmask.mask >> (4 * i), &n.ben[i], &n.beq[i], &n.wm[i]);
     int all = !g_dyn.valid;
     #define CH(field) (all || memcmp(&n.field, &g_dyn.field, sizeof n.field))
     if (CH(vp)) vkCmdSetViewportWithCount(cb, 1, &n.vp);
@@ -881,36 +823,26 @@ static void dyn_apply(VkCommandBuffer cb, VkPrimitiveTopology topo, int strip, i
     #undef CH
     n.valid = 1; g_dyn = n;
 }
-// The parts of the pipeline key the device cannot set dynamically (design 3.1), and the attachment formats
-static void key_fill(hvk_gfx_key *k, hvk_shader *const sh[6], int klass, const vin_t *v) {
-    memset(k, 0, sizeof *k);
-    k->ccount = (uint8_t)P.nc; memcpy(k->color, P.cfmt, sizeof k->color); k->depth = P.dfmt; k->stencil = P.sfmt; k->samples = P.samples;
-    k->topology_class = (uint8_t)klass;
-    k->depth_clip_ndc = !atomic_load(&hvk.depth_zero) && hvk.dev.x.depth_clip_control;   // NVN's default depth mode: near = -w (GL), in fixed function (design 2.2)
-    int all_uint = P.nc > 0, any_uint = 0;
-    for (int i = 0; i < P.nc; i++) { if (!P.cfmt[i]) continue; int u = P.ccls[i] == NVN_VK_UINT || P.ccls[i] == NVN_VK_SINT; all_uint &= u; any_uint |= u; }
-    if (sh[1] && any_uint) k->entry[0] = all_uint && sh[1]->entry_u[0] ? 1 : sh[1]->entry_m[0] ? 2 : sh[1]->entry_u[0] ? 1 : 0;
-    uint32_t e = hvk.dev.eds_present;
-    if ((e & HOSTVK_EDS_BLEND) != HOSTVK_EDS_BLEND) {
-        k->baked |= HVK_BAKE_BLEND;
-        for (int i = 0; i < P.nc; i++) { uint32_t en; VkColorBlendEquationEXT q; VkColorComponentFlags wm; blend_of(i, P.cfmt[i], &en, &q, &wm);
-            k->blend[i] = (VkPipelineColorBlendAttachmentState){en, q.srcColorBlendFactor, q.dstColorBlendFactor, q.colorBlendOp, q.srcAlphaBlendFactor, q.dstAlphaBlendFactor, q.alphaBlendOp, wm}; }
-        k->logic_en = S.color.logic_op != NVN_LOGIC_OP_COPY;
-    } else for (int i = 0; i < P.nc; i++) k->blend[i].colorWriteMask = 0xf;
-    if (!(e >> HOSTVK_EDS_LOGIC_OP & 1)) { k->baked |= HVK_BAKE_LOGIC_OP; k->logic_op = S.color.logic_op; }
-    if ((e & HOSTVK_EDS_RASTER) != HOSTVK_EDS_RASTER) {
-        k->baked |= HVK_BAKE_RASTER;
-        k->poly_mode = S.poly.mode == NVN_POLYGON_MODE_POINT ? VK_POLYGON_MODE_POINT : S.poly.mode == NVN_POLYGON_MODE_LINE ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-        k->depth_clamp = S.depth_clamp != 0; k->a2c = S.ms.a2c != 0;
-    }
-    if (klass == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) { k->patch_points = 3; HVK_RED_ONCE("patches drawn with 3 control points: nvnCommandBufferSetPatchSize is not recorded (nvn_pipe.h's TODO list)"); }
-    if (!hvk.dev.caps.vertex_input_dynamic) {
-        k->baked |= HVK_BAKE_VERTEX;
-        for (uint32_t i = 0; i < v->nb; i++) { k->vb[i] = (VkVertexInputBindingDescription){v->b[i].binding, v->b[i].stride, v->b[i].inputRate};
-            if (v->b[i].divisor > 1) k->vd[k->nvd++] = (VkVertexInputBindingDivisorDescriptionKHR){v->b[i].binding, v->b[i].divisor}; }
-        for (uint32_t i = 0; i < v->na; i++) k->va[i] = (VkVertexInputAttributeDescription){v->a[i].location, v->a[i].binding, v->a[i].format, v->a[i].offset};
-        k->nvb = (uint8_t)v->nb; k->nva = (uint8_t)v->na;
-    }
+// The draw's key source (vk_pso.h): the pass's attachments and S's state, which hvk_key_fill reduces to what the device cannot set dynamically (design 3.1)
+static void key_src(hvk_key_src *src, const hvk_vin *v) {
+    memset(src, 0, sizeof *src);
+    src->nc = P.nc; memcpy(src->cfmt, P.cfmt, sizeof src->cfmt); memcpy(src->ccls, P.ccls, sizeof src->ccls); src->dfmt = P.dfmt; src->sfmt = P.sfmt; src->samples = P.samples;
+    src->blend = S.blend; src->blend_en = S.color.blend_en; src->chmask = S.chmask.mask; src->logic_op = S.color.logic_op; src->poly_mode = S.poly.mode;
+    src->depth_clamp = S.depth_clamp; src->a2c = S.ms.a2c; src->vin = v;
+}
+static uint32_t bound_streams(void) { uint32_t b = 0; for (int s = 0; s < 16; s++) if (S.vbuf[s].address) b |= 1u << s; return b; }
+// A pipeline no list named was built for this draw: its P row for the device's user list (design 3.3), in NVN terms (the formats the pass attaches, a view's where it sets one)
+static hvk_shader *g_miss_sh[6];
+static void user_row(void) {
+    uint16_t cf[8] = {0}, df = 0, sf = 0;
+    for (int i = 0; i < P.nc && i < 8; i++) if (P.ca[i].imageView && R.rt.color[i]) cf[i] = (uint16_t)(R.rt.has_cview[i] && R.rt.cview[i].set_format ? R.rt.cview[i].format : R.rt.color[i]->d.format);
+    if (R.rt.depth) { uint16_t f = (uint16_t)(R.rt.has_dview && R.rt.dview.set_format ? R.rt.dview.format : R.rt.depth->d.format); if (P.has_d) df = f; if (P.has_s) sf = f; }
+    const hvk_shader *vs = g_miss_sh[0], *fs = g_miss_sh[1];
+    if (!vs || g_miss_sh[2] || g_miss_sh[3] || g_miss_sh[4]) return;   // a row names a vertex and a fragment shader only (nvn_pipe.h's TODO list: geometry and tessellation)
+    uint32_t inputs = 0; for (int a = 0; a < 16; a++) if (vs->vin_types[a]) inputs |= 1u << a;
+    char vk[24] = {0}, fk[24] = {0}; memcpy(vk, vs->key, 16); if (fs) memcpy(fk, fs->key, 16);
+    nvn_pipe_desc d;
+    if (nvn_pipe_from_state(&d, &S, vk, 0, inputs, fs ? fk : NULL, 1, cf, df, sf, (uint32_t)P.samples) == 0) hvk_prewarm_user_row(&d);
 }
 static int sh_xfb(const hvk_shader *s) { return s && s->xfb; }   // the module declares the Xfb execution mode: it captures
 void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32_t size);
@@ -950,14 +882,16 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
         if (dw->count / 4 > QUAD_N) HVK_RED_ONCE("a quad draw of %d vertices: only the first %d quads are drawn", dw->count, QUAD_N);
         topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     } else if (conv == 1 && !ind) HVK_RED_ONCE("line loops: drawn as line strips (the closing line missing)");
-    vin_t v; vertex_input(sh[0], &v);
+    hvk_vin v; hvk_vertex_input(sh[0], S.attr, S.stream, bound_streams(), &v);
     if (!vertex_copies_gpu(&v)) return;   // before the pass: they end the one open
     VkCommandBuffer cb = hvk_main();
     if (!pass_begin(cb)) return;
-    hvk_gfx_key k; key_fill(&k, sh, klass, &v);
+    hvk_key_src src; key_src(&src, &v);
+    hvk_gfx_key k; hvk_key_fill(&k, sh, klass, &src);
     hvk_layout *l = hvk_layout_for(sh);
     if (!l) return;
-    VkPipeline pipe = hvk_gfx_pipeline(sh, l, &k);
+    memcpy(g_miss_sh, sh, sizeof g_miss_sh);
+    VkPipeline pipe = hvk_gfx_pipeline(sh, l, &k, user_row);   // a pipeline not ready yet is made or waited for here: the wait is counted (vk_gpl.c)
     if (!pipe) return;
     if (!g_bound.valid || g_bound.pipe != pipe) {
         if (P.xfb_open && !sh_xfb(sh[2] ? sh[2] : sh[4] ? sh[4] : sh[0])) xfb_end(cb);   // the last stage before rasterization must capture while the capture is begun

@@ -12,10 +12,18 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <sys/clonefile.h>
+#include <copyfile.h>
 static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off);
+static int fake_clonefile(const char *src, const char *dst, uint32_t flags);
+static int fake_copyfile(const char *src, const char *dst, copyfile_state_t state, copyfile_flags_t flags);
 #define pwrite fake_pwrite
+#define clonefile fake_clonefile
+#define copyfile fake_copyfile
 #include "../hle_fs.c"
 #undef pwrite
+#undef clonefile
+#undef copyfile
 ssize_t pwrite(int, const void *, size_t, off_t);
 
 struct dm_flags g_flag; uint64_t g_t0_ns; uint64_t now_ns(void) { return 0; }   // stubs for log timestamps and the read path (not used by the write path)
@@ -27,6 +35,21 @@ static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off) {
     if (g_mode == 1) { if (g_calls > 1000) { printf("  ✗ pwrite retried over 1000 times after returning 0 (endless loop)\n"); exit(1); } return 0; }
     if (g_mode == 2 && g_calls == 1 && n > 3) n = 3;
     return pwrite(fd, buf, n, off);
+}
+static int clone_mode, copy_mode, copy_calls;
+static int fake_clonefile(const char *src, const char *dst, uint32_t flags) {
+    if (clone_mode) { errno = clone_mode == 1 ? ENOTSUP : ENOSPC; return -1; }
+    return clonefile(src, dst, flags);
+}
+static int fake_copyfile(const char *src, const char *dst, copyfile_state_t state, copyfile_flags_t flags) {
+    copy_calls++;
+    if (copy_mode) {   // Simulate failure halfway through a directory copy: it must not publish or leave a staged tree.
+        mkdir(dst, 0755);
+        char part[1300]; snprintf(part, sizeof part, "%s/partial", dst);
+        FILE *f = fopen(part, "w"); if (f) { fputs("partial", f); fclose(f); }
+        errno = EIO; return -1;
+    }
+    return copyfile(src, dst, state, flags);
 }
 static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("  ✗ "); } else printf("  ✓ "); printf(__VA_ARGS__); printf("\n"); } while (0)
@@ -206,6 +229,64 @@ int main(void) {
         h = 0; CHECK(h_fs_OpenDirectory(&h, "save:\\dir", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 1 && !strcmp(de[0].name, "g"), "the directory lists g, not a name with backslashes (%s)", cnt ? de[0].name : "-"); h_fs_CloseDirectory(h);
     }
 
+    printf("⑧ filesystem without clonefile but with atomic directory exchange\n");
+    // Force the real copyfile fallback for mount, commit and failed-write recovery on APFS.
+    // The host's +WD HFS+ volume cannot be used for this test: it lacks atomic directory exchange too.
+    char deep[1300], leaf[1400], linkpath[1300];
+    snprintf(deep, sizeof deep, "%s/nested", save); mkdir(deep, 0755);
+    snprintf(leaf, sizeof leaf, "%s/leaf", deep); put(leaf, "preserved");
+    CHECK(chmod(leaf, 0640) == 0, "set a non-default mode on the committed nested file");
+    snprintf(linkpath, sizeof linkpath, "%s/link", save); symlink("nested/leaf", linkpath);
+    const char attr[] = "guest-metadata";
+    CHECK(setxattr(leaf, "org.dm.test-save", attr, sizeof attr, 0, 0) == 0, "set custom metadata on the committed nested file");
+    clone_mode = 1; g_nmnt = 0; int old_copies = copy_calls;
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK && !g_mnt[0].ro && copy_calls > old_copies, "ENOTSUP at mount uses the recursive copy fallback and remains writable");
+    snprintf(p, sizeof p, "%s/nested/leaf", work);
+    char meta[64] = {0}; struct stat st;
+    CHECK(same(p, "preserved") && getxattr(p, "org.dm.test-save", meta, sizeof meta, 0, 0) == sizeof attr && !memcmp(meta, attr, sizeof attr) && !stat(p, &st) && (st.st_mode & 0777) == 0640, "copy preserves nested contents, POSIX mode and extended attributes");
+    snprintf(p, sizeof p, "%s/link", work);
+    CHECK(lstat(p, &st) == 0 && S_ISLNK(st.st_mode), "the recursive copy keeps symlinks, without following them");
+    CHECK(write_save("save:/a", "via-copy") == RES_OK && h_fs_Commit("save") == RES_OK, "fallback commit publishes the complete staged directory");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "via-copy"), "after fallback commit, the committed version is updated");
+    snprintf(p, sizeof p, "%s/nested/leaf", save);
+    CHECK(same(p, "preserved") && getxattr(p, "org.dm.test-save", meta, sizeof meta, 0, 0) == sizeof attr, "commit also preserves nested files and metadata");
+    CHECK(write_save("save:/a", "uncommitted") == RES_OK, "stage an uncommitted write before fallback remount");
+    g_nmnt = 0;
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK && !g_mnt[0].ro, "fallback remount discards the old working directory");
+    snprintf(p, sizeof p, "%s/a", work);
+    CHECK(same(p, "via-copy"), "fallback remount restored the last complete committed save, not the staged write");
+    copy_mode = 1;
+    CHECK(write_save("save:/a", "copy-failed") == RES_OK && h_fs_Commit("save") == RES_FAIL, "incomplete copy during commit is refused");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "via-copy"), "failed copy leaves committed bytes unchanged");
+    snprintf(p, sizeof p, "%s.new", save); CHECK(access(p, F_OK) != 0, "partial staged .new directory is deleted");
+    copy_mode = 0;
+    CHECK(h_fs_Commit("save") == RES_OK, "the next complete snapshot commits staged bytes");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "copy-failed"), "the retried complete snapshot publishes the staged bytes");
+    CHECK(write_save("save:/a", "poisoned") == RES_OK, "stage a failed-write transaction");
+    save_poison(ENOSPC); copy_mode = 1; nf0 = g_nfail;
+    CHECK(h_fs_Commit("save") == RES_FAIL && g_nfail == nf0 + 1, "copy failure during rollback refuses transaction and notifies frontend");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "copy-failed"), "rollback failure cannot corrupt committed save");
+    snprintf(p, sizeof p, "%s.re", work); CHECK(access(p, F_OK) != 0, "failed rollback removes its partially copied .re directory");
+    copy_mode = 0;
+    CHECK(h_fs_Commit("save") == RES_FAIL, "still-poisoned transaction is refused until rollback succeeds");
+    snprintf(p, sizeof p, "%s/a", work); CHECK(same(p, "copy-failed"), "successful fallback rollback restores committed bytes to work");
+    CHECK(write_save("save:/a", "recovered") == RES_OK && h_fs_Commit("save") == RES_OK, "clean transaction after recovery commits normally");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "recovered"), "committed save remains writable after fallback recovery");
+
+    printf("⑨ unsupported swap and incomplete copies fail closed\n");
+    g_nmnt = 0; copy_mode = 1; nf0 = g_nfail;
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK && g_mnt[0].ro && g_nfail == nf0 + 1, "failed fallback copy mounts existing save read-only");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "recovered"), "failed mount copy does not change committed files");
+    CHECK(access(work, F_OK) != 0, "failed mount copy cleans up partial .work directory");
+    copy_mode = 0; clone_mode = 2; g_nmnt = 0; old_copies = copy_calls;
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK && g_mnt[0].ro && copy_calls == old_copies, "ENOSPC from clonefile never falls back to copying");
+    clone_mode = 1; g_nmnt = 0; old_copies = copy_calls;
+    setenv("DM_TEST_FS_FAILAT", "noswap:1", 1);
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK && g_mnt[0].ro && copy_calls == old_copies, "filesystem without RENAME_SWAP is read-only before copying");
+    CHECK(read_fs("save:/a", got, sizeof got) && !strcmp(got, "recovered") && write_save("save:/a", "unsafe") != RES_OK, "the unsupported filesystem still permits reads, never partial writes");
+    unsetenv("DM_TEST_FS_FAILAT"); clone_mode = 0; g_nmnt = 0;
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK && write_save("save:/a", "final") == RES_OK && h_fs_Commit("save") == RES_OK, "after simulated failures the normal APFS transaction still works");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "final"), "normal transaction publishes the expected final file");
 
     char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
     printf("== %d checks, %d failed ==\n", checks, fails);

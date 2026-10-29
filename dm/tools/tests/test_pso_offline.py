@@ -241,6 +241,99 @@ class Build(unittest.TestCase):
         self.assertEqual(list(self.out.glob('*.mtl4a')), [])
 
 
+class Rejected(unittest.TestCase):
+    """metal-tt exits 1 with `Max Unstruct ID N in function agc.main in shader M exceeds supported limit` for bases of the script (GitHub LNPANDY/NX2Apple#98, applegpu_g13g): they are found
+    by halving (M is the backend's job counter, not an index: the stand-in prints numbers that point at no base), dropped and left to the device; the archive is made of the rest"""
+    main = Build.main   # the same profile and libraries, with more fragment shaders
+    t: Path; lib: Path; prof: Path; out: Path; work: Path; calls: list
+
+    def setUp(self):
+        Build.setUp(self)  # pyright: ignore[reportArgumentType]
+        for k in ('g1', 'g2', 'g3', 'g4'):
+            (self.lib / f'{k}_b.json').write_text(json.dumps({'chain': CHAIN, 'entry': 'main0'}))
+            (self.lib / f'{k}_b.metallib').write_bytes(metallib([('main0', False)]))
+        (self.prof / 'shader_pairs.tsv').write_text('v\tf\nv\tc\n' + ''.join(f'v\t{k}\n' for k in ('g1', 'g2', 'g3', 'g4')))
+        self.bad, self.first_only, self.version, self.failing, self.runs = set(), False, 'AIR-TT 1.0', None, []
+
+    def fake_run(self, cmd, **kw):
+        cmd = [str(c) for c in cmd]
+        if '-version' in cmd: return subprocess.CompletedProcess(cmd, 0, f'{self.version}\n', '')
+        if '--show-sdk-version' in cmd: return subprocess.CompletedProcess(cmd, 0, '27.1\n', '')
+        pipes = json.loads(Path(cmd[8]).read_text())['pipeline_descriptors']['render_pipeline_descriptors']
+        hit = [p for p in pipes if p['fragment_function_descriptor'].split('.')[0][4:] in self.bad]
+        self.runs.append((Path(cmd[8]).name, len(pipes), len(hit)))
+        if self.failing is not None and (len(pipes) == 5 or 'Unstruct' not in self.failing):   # a message, but only the whole script fails
+            kw['stdout'].write(self.failing); return subprocess.CompletedProcess(cmd, 1)
+        if self.first_only: hit = hit[:1]   # a compiler run that reports one base only
+        for i, _ in enumerate(hit): kw['stdout'].write(f'Max Unstruct ID 642 in function agc.main in shader {13566 + 7 * i} exceeds supported limit\n')
+        if self.bad & {p['fragment_function_descriptor'].split('.')[0][4:] for p in pipes}:
+            kw['stdout'].write('air-tt: applegpu-nt command failed\n'); return subprocess.CompletedProcess(cmd, 1)
+        self.calls.append(cmd); Path(cmd[cmd.index('-o') + 1]).write_bytes(b'archive ' + str(len(pipes)).encode())
+        return subprocess.CompletedProcess(cmd, 0)
+
+    def run_main(self, *extra):
+        out = io.StringIO()
+        args = ['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--gpu', 'g13g', *extra]
+        try:
+            with mock.patch.object(po.subprocess, 'run', self.fake_run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(out):
+                po.main(args)
+        finally: self.text = out.getvalue()
+
+    def script_names(self, cmd):
+        return [p['fragment_function_descriptor'] for p in json.loads(Path(cmd[8]).read_text())['pipeline_descriptors']['render_pipeline_descriptors']]
+
+    def test_rejected_bases_are_dropped_and_left_to_the_device(self):
+        self.bad = {'g2_b', 'g4_b'}
+        self.run_main()
+        self.assertEqual(self.script_names(self.calls[-1]), ['fnd:f_b.main0', 'fnd:g1_b.main0', 'fnd:g3_b.main0'])   # exactly those two are gone
+        self.assertEqual((self.out / 'applegpu_g13g.mtl4a').read_bytes(), b'archive 3')
+        self.assertEqual((self.out / 'rest_pairs.tsv').read_text(), 'v\tc\nv\tg2\nv\tg4\n')   # the function constants' pair, then the rejected ones
+        t = (self.out / 'archive.tsv').read_text()
+        self.assertIn('bases\t5\n', t); self.assertIn('rest\t3\n', t); self.assertIn('rejected\t2\n', t)
+        self.assertIn('rejected_base\tapplegpu_g13g\tv_bp\tmain0_z\tg2_b\tmain0\tMax Unstruct ID 642', t); self.assertIn('\tg4_b\tmain0\t', t)
+        self.assertIn('[RED] pso_offline: applegpu_g13g: 2 bases the compiler rejects (Max Unstruct ID 642', self.text); self.assertIn('left to the device', self.text)
+        self.assertLess(len(self.runs), 12)   # halving, not one run per base
+        self.assertEqual((self.out / 'prebuilt.tsv').read_text(), po.stamp(CHAIN, True, (self.prof / 'shader_pairs.tsv').read_bytes()))
+
+    def test_one_base_per_message_run_takes_rounds(self):
+        self.bad, self.first_only = {'g1_b', 'g3_b'}, True   # the second one shows only when the first is gone
+        self.run_main()
+        self.assertEqual(self.script_names(self.calls[-1]), ['fnd:f_b.main0', 'fnd:g2_b.main0', 'fnd:g4_b.main0'])
+        self.assertIn('rejected\t2\n', (self.out / 'archive.tsv').read_text())
+        self.bad, self.first_only = {'g1_b', 'g2_b', 'g3_b', 'g4_b'}, True
+        shutil.rmtree(self.work); shutil.rmtree(self.out)
+        with mock.patch.object(po, 'ROUNDS', 2), self.assertRaises(SystemExit) as e: self.run_main()   # more than the rounds allow: as before
+        self.assertIn('after 2 rounds', str(e.exception))
+
+    def test_other_failures_stay_fatal(self):
+        self.failing = 'applegpu-nt: error: something else\nair-tt: applegpu-nt command failed\n'
+        with self.assertRaises(SystemExit) as e: self.run_main()
+        self.assertIn('metal-tt failed for applegpu_g13g (exit 1)', str(e.exception)); self.assertEqual(len(self.runs), 1)   # nothing to search for
+        self.failing = 'Max Unstruct ID 642 in function agc.main in shader 3 exceeds supported limit\n'   # the message, but no base fails alone
+        with self.assertRaises(SystemExit) as e: self.run_main()
+        self.assertIn('no base of the script fails alone', str(e.exception))
+        self.assertEqual(list(self.out.glob('*.mtl4a')), [])
+
+    def test_search_budget(self):
+        self.bad = {'g2_b'}
+        with mock.patch.object(po, 'PROBES', 1), self.assertRaises(SystemExit) as e: self.run_main()
+        self.assertIn('more than 1 metal-tt runs', str(e.exception))
+
+    def test_rejected_set_is_part_of_the_key(self):
+        self.bad = {'g2_b'}
+        self.run_main(); n = len(self.calls)
+        self.run_main(); self.assertEqual(len(self.calls), n); self.assertIn('reused', self.text)   # same inputs and the same rejected set
+        self.assertEqual(len(po.rejected_load(self.work / 'rejected.applegpu_g13g.tsv')), 1)
+        rf = self.work / 'rejected.applegpu_g13g.tsv'
+        rf.write_text(rf.read_text() + 'v_bp\tmain0_z\tg3_b\tmain0\tedited\n')   # another set: not the archive made for it
+        self.bad = set(); self.run_main(); self.assertEqual(len(self.calls), n + 1)
+        self.assertEqual(self.script_names(self.calls[-1]).count('fnd:g2_b.main0'), 1)   # the rejection is tried again, not trusted: a compiler that accepts it keeps the base
+        self.assertFalse(rf.exists()); self.assertFalse((self.out / 'rest_pairs.tsv').read_text().count('g2'))
+        self.assertNotIn('rejected', (self.out / 'archive.tsv').read_text())
+        self.bad = {'g2_b'}; self.version = 'AIR-TT 2.0'   # another toolchain: every base again, and its own result
+        self.run_main(); self.assertEqual(self.runs[-1][1], 4); self.assertIn('rejected\t1\n', (self.out / 'archive.tsv').read_text())
+
+
 class Default(unittest.TestCase):
     """Which games get an archive without DM_PSO_GPUS: build_ipa.sh's own lines, run with game.py's default form, so only a profile with pso_mtl4 on (the Metal 4 path, which alone
     reads the archive on iOS) gets g18p; an explicit DM_PSO_GPUS wins, also when empty"""

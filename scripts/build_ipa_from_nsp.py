@@ -182,17 +182,17 @@ class Progress:
         obj.setdefault('t', round(time.time(), 3))
         print(json.dumps(obj, ensure_ascii=False, allow_nan=False), flush=True)
 
-    def end(self, summary='', ok=True):
-        """End the current stage with a ✓ (or ✗) line: its elapsed time and a summary"""
+    def end(self, summary='', ok=True, warn=False):
+        """End the current stage with a ✓ (or ✗) line: its elapsed time and a summary. warn: it finished without what it makes (a ⚠ line; the JSON event has ok true and warn true)"""
         with self.lock:
             st, self.cur = self.cur, None
             if not st: return
             if st.pstop: st.pstop.set()
             if self.mode == 'json':
                 self._json_progress(st, force=True)   # the last count, if it was held back
-                self._json({'ev': 'stage_end', 'k': self.k, 'name': st.name, 'ok': ok, 'summary': summary, 'elapsed': round(time.time() - st.t0, 3)})
+                self._json(dict({'ev': 'stage_end', 'k': self.k, 'name': st.name, 'ok': ok, 'summary': summary, 'elapsed': round(time.time() - st.t0, 3)}, **({'warn': True} if warn else {})))
                 return
-            self._out(f'[{clock()}] {"✓" if ok else "✗"} [{self.k}/{self.n}] {st.name} ({hms(time.time() - st.t0)})' + (f': {summary}' if summary else ''))
+            self._out(f'[{clock()}] {"⚠" if warn else "✓" if ok else "✗"} [{self.k}/{self.n}] {st.name} ({hms(time.time() - st.t0)})' + (f': {summary}' if summary else ''))
 
     def say(self, msg):
         with self.lock:
@@ -333,9 +333,10 @@ def ask(prompt, what):   # what: what is missing, for the error message
     return os.path.expanduser(s)
 
 
-def run(cmd, log, env=None, cwd=None, on_line=None, ok=()):
+def run(cmd, log, env=None, cwd=None, on_line=None, ok=(), fatal=True):
     """Run a subprocess with all its output written to log (the console shows the stage line instead: the shader build alone emits tens of thousands of compiler warnings);
-    stop on a non-zero exit not in ok, printing the log's last lines. on_line: called with every output line (build_ipa.sh's own step lines move its stages on)"""
+    stop on a non-zero exit not in ok, printing the log's last lines. on_line: called with every output line (build_ipa.sh's own step lines move its stages on).
+    fatal False: a non-zero exit only prints the log's last lines and returns the exit code (the caller ends the stage and goes on without what the command makes)"""
     cmd = [str(c) for c in cmd]
     log.parent.mkdir(parents=True, exist_ok=True)
     tail = collections.deque(maxlen=40)
@@ -353,10 +354,12 @@ def run(cmd, log, env=None, cwd=None, on_line=None, ok=()):
     finally:
         p.stdout.close()
     if p.returncode and p.returncode not in ok:
-        PROG.end(ok=False)
+        if fatal: PROG.end(ok=False)
         PROG.say(f'---- last lines of {log} ----\n' + ''.join(tail).rstrip('\n'))
+        if not fatal: return p.returncode
         tool = Path(cmd[1] if cmd[0] in (sys.executable, 'bash') else cmd[0]).name
         raise BuildError(f'{tool} exit code {p.returncode} (full output: {log})')
+    return 0
 
 
 def build_id(nso):
@@ -2068,7 +2071,12 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     cmd = [py, repo / 'dm/gfx/tools/pso_offline.py', '--game', g.id, '--msl', lib, '--out', out, '--work', work / 'pso/mac-work', '--gpu', arch, '--platform', 'macos']
     if not g.table('pso_pairs.tsv').is_file() and (work / 'shader/pso_pairs.tsv').is_file():   # the split's copy, as the app gets it (--pso-pairs)
         cmd += ['--pairs', g.table('shader_pairs.tsv'), '--pairs', work / 'shader/pso_pairs.tsv']
-    run(cmd, logs / 'pso_offline_mac.log', env=env)
+    strict = env.get('DM_PSO_STRICT') == '1'
+    if run(cmd, logs / 'pso_offline_mac.log', env=env, fatal=strict):   # an optimization: the app builds its pipelines on its first start without it (--pso-strict / DM_PSO_STRICT=1: fail instead, for CI)
+        shutil.rmtree(out, ignore_errors=True)
+        PROG.end('failed, the app is packed without one', warn=True)
+        say(f'[RED] pipeline archive: pso_offline.py failed (see {logs / "pso_offline_mac.log"}); the app is packed without one and builds its pipeline bases on its first start (--pso-strict makes this stop the build; --gpu none skips the step)')
+        return None
     if not any(out.glob('*.mtl4a')):   # no pair (a header-only table, #338), or every eligible pair declares function constants (the host specializes them on the device, rest_pairs.tsv)
         PROG.end('no base to bundle'); say('pipeline archive: none (no shader pair, or every eligible one has function constants): the app builds what it needs on its first start'); return None
     PROG.end(f'{arch}, {amount(tree_size(out)[1], "B")}')
@@ -2141,6 +2149,7 @@ def parse_args(argv):
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, g18p for a game whose profile sets pso_mtl4 on, else none). '
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
+    ap.add_argument('--pso-strict', action='store_true', help='fail the build when the pipeline archive cannot be made (default: warn, and pack the app without it: the device builds its pipelines on its first start); DM_PSO_STRICT=1 does the same')
     ap.add_argument('--show-fps', action=argparse.BooleanOptionalAction, help='show the game\'s frame rate on the iPhone, frames on screen per second at the top left (default: the SHOW_FPS setting, on)')
     ap.add_argument('--motion', action=argparse.BooleanOptionalAction, help='pass a gyro controller\'s motion (on iOS also the phone\'s own) to games that read it; --no-motion builds with DM_MOTION=0, for when motion misbehaves (default: the MOTION setting, on)')
     ap.add_argument('--survey-only', action='store_true', help='a game with no profile: only the survey, no provisional profile and no IPA')
@@ -2248,6 +2257,7 @@ def main(args=None):
     want_lang = language_code(lang_in) if lang_in else 'en-US'
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
+    if args.pso_strict: env['DM_PSO_STRICT'] = '1'
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)

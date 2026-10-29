@@ -1,0 +1,5 @@
+lz4==4.4.5
+capstone==5.0.9
+fonttools==4.67.0
+backports.zstd; python_version < "3.14"
+# nsz   # only for .nsz / .xcz inputs

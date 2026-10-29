@@ -114,10 +114,10 @@ jobs:
         with:
           python-version: '3.14'
           cache: pip
-          cache-dependency-path: .github/workflows/tests.yml   # no requirements file: the packages are listed in the step below
+          cache-dependency-path: requirements.txt
       - name: Install the Python packages the tools import
-        run: python -m pip install lz4 capstone fonttools   # backports.zstd is for Python before 3.14 only
-      # The shader translator's tests (test_image_atomic_bounds, test_dmsh_geometry) run the committed translator on synthetic Maxwell shaders, then spirv-val and the committed spirv-cross:
+        run: python -m pip install -r requirements.txt   # backports.zstd is for Python before 3.14 only
+      # The shader translator's tests (test_image_atomic_bounds, test_dmsh_geometry) run the committed translator on synthetic Maxwell shaders, then spirv-val and spirv-cross:
       # one translation chain serves every game, so these are what checks a translator change on games its author does not own (GitHub issue #272). Compiling their MSL with
       # Metal (DMSH_TEST_METAL=1) and running it on the GPU (DMSH_TEST_GPU=1) stay local.
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0

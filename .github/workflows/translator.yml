@@ -1,0 +1,55 @@
+name: translator
+
+# dmsh_xlate_bin is a committed build, and dmsh_build refuses any other one (dmsh_chain.lock).
+# This checks the lock against the committed dlls, and whether the source still rebuilds to them.
+on:
+  pull_request:
+    paths:
+      - dm/gfx/tools/dmsh_xlate/**
+      - dm/gfx/tools/dmsh_xlate_bin/**
+      - dm/gfx/tools/dmsh_chain.lock
+      - dm/third_party/ryujinx/**
+      - global.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    name: Committed translator matches the lock
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: Committed dlls against the lock
+        run: |
+          fp() { shasum -a 256 "$1" | cut -c1-16; }
+          bad=0
+          for dll in dmsh_xlate.dll Ryujinx.Graphics.Shader.dll Ryujinx.Common.dll; do
+            want=$(awk -F'\t' -v k="$dll" '$1 == k { print $2 }' dm/gfx/tools/dmsh_chain.lock)
+            have=$(fp "dm/gfx/tools/dmsh_xlate_bin/$dll")
+            echo "$dll lock=$want committed=$have"
+            [ "$have" = "$want" ] || { echo "::error::$dll does not match dmsh_chain.lock"; bad=1; }
+          done
+          exit $bad
+      # Not required yet: nobody has shown that this source rebuilds byte for byte. If it does on a few runs, drop continue-on-error.
+      - name: Rebuild from source
+        continue-on-error: true
+        run: |
+          dotnet --version
+          dotnet publish dm/gfx/tools/dmsh_xlate -c Release -o "$RUNNER_TEMP/xlate" -p:ContinuousIntegrationBuild=true
+          fp() { shasum -a 256 "$1" | cut -c1-16; }
+          bad=0
+          for dll in dmsh_xlate.dll Ryujinx.Graphics.Shader.dll Ryujinx.Common.dll; do
+            want=$(awk -F'\t' -v k="$dll" '$1 == k { print $2 }' dm/gfx/tools/dmsh_chain.lock)
+            built=$(fp "$RUNNER_TEMP/xlate/$dll")
+            echo "$dll lock=$want rebuilt=$built"
+            [ "$built" = "$want" ] || { echo "::warning::$dll rebuilt from source differs from the lock"; bad=1; }
+          done
+          exit $bad

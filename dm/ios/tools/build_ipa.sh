@@ -191,6 +191,14 @@ xcodegen generate -q > /dev/null || die "xcodegen"
 COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null)" ] || COMMIT=$COMMIT+dirty
   /usr/libexec/PlistBuddy -c "Add :DMCommit string $COMMIT" Gen/Info.plist > /dev/null || die "DMCommit"; t "source: $COMMIT"; }
 case "$MSLDIR" in b-*) /usr/libexec/PlistBuddy -c "Add :DMChain string ${MSLDIR#b-}" Gen/Info.plist > /dev/null || die "DMChain";; esac
+# Game handoff: register the shared scheme and this game's own scheme
+# (nxnative-<title id>) so a launcher can detect and open exactly this game.
+/usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes array" Gen/Info.plist > /dev/null || die "URL schemes"
+/usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0 dict" Gen/Info.plist > /dev/null || die "URL schemes"
+/usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLName string dev.nxnative" Gen/Info.plist > /dev/null || die "URL schemes"
+/usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" Gen/Info.plist > /dev/null || die "URL schemes"
+/usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string nxnative" Gen/Info.plist > /dev/null || die "URL schemes"
+/usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:1 string nxnative-$(echo "$GAME" | tr 'A-Z' 'a-z')" Gen/Info.plist > /dev/null || die "URL schemes"
 # DM_METAL_CAPTURE=1: a development build that may write GPU frame captures (MetalCaptureEnabled; the host's DM_GPU_CAPTURE switch writes them to Documents/gpu_captures)
 if [ "${DM_METAL_CAPTURE:-0}" = 1 ]; then /usr/libexec/PlistBuddy -c "Add :MetalCaptureEnabled bool true" Gen/Info.plist > /dev/null || die "MetalCaptureEnabled"; t "Metal frame capture: enabled (DM_METAL_CAPTURE=1)"; fi
 RP=; if [ -n "${PROGRAMS_TSV:-}" ]; then   # a game of several programs: each program's files, which the Xcode build phase copies under p<index> as the IPA has them (stage_resources.sh)

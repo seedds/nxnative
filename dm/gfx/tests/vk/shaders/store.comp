@@ -1,0 +1,5 @@
+// t_vk_view_swizzle: a constant stored into image slot 0 of the compute stage (translator binding: set 3, 512 x stage index 0 + slot), one texel per invocation
+#version 450
+layout(local_size_x = 2) in;
+layout(set = 3, binding = 0, rgba8) uniform writeonly image2D img;
+void main() { imageStore(img, ivec2(int(gl_GlobalInvocationID.x), 0), vec4(0.25, 0.5, 0.75, 0.125)); }

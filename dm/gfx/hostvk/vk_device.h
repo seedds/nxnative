@@ -95,6 +95,7 @@ typedef struct hostvk_dev {
     uint32_t api_version;                 // the version the device is used at: the lower of the device's and the instance's
     uint32_t instance_version;            // the loader's (volkGetInstanceVersion)
     int validation;                       // the validation layer is on (asked for and installed)
+    uint32_t validation_version;          // its specVersion (the Vulkan header it was built from)
     int swapchain;                        // VK_KHR_swapchain is enabled (want_surface)
     VkPhysicalDeviceProperties props;
     VkPhysicalDeviceMemoryProperties mem;
@@ -103,6 +104,24 @@ typedef struct hostvk_dev {
     uint32_t opt_present;                 // bit HOSTVK_OPT_*: the device has that optional extension (enabled only where caps says so)
     uint32_t eds_present;                 // bit HOSTVK_EDS_*: that state can be dynamic on this device
     int vk14, astc_ldr;                   // Vulkan 1.4 (device and loader), textureCompressionASTC_LDR
+    // Optional features and extensions beyond the baseline and be_caps that the backend (vk_backend.h) uses where the device has them: hostvk_init enables each one present
+    struct {
+        uint32_t host_query_reset : 1;        // hostQueryReset (1.2): query pools reset on the CPU when a submission slot is reused
+        uint32_t sampler_minmax : 1;          // samplerFilterMinmax (1.2): NVN's min / max sampler reduction
+        uint32_t mirror_clamp_to_edge : 1;    // samplerMirrorClampToEdge (1.2): NVN's MIRROR_CLAMP and MIRROR_CLAMP_TO_EDGE wrap modes
+        uint32_t float64 : 1, int64 : 1, int16 : 1;   // shaderFloat64, shaderInt64, shaderInt16: capabilities the translator's modules may declare
+        uint32_t storage_without_format : 1;  // shaderStorageImageReadWithoutFormat and WriteWithoutFormat
+        uint32_t multi_viewport : 1, depth_bounds : 1;
+        uint32_t custom_border : 1;           // VK_EXT_custom_border_color with customBorderColors: exact border colours (design 5.4)
+        uint32_t border_without_format : 1;   // customBorderColorWithoutFormat
+        uint32_t index_uint8 : 1;             // VK_KHR_index_type_uint8 / VK_EXT_index_type_uint8 with indexTypeUint8: 8-bit indices (design 4.8)
+        uint32_t calibrated : 1;              // VK_KHR_calibrated_timestamps / VK_EXT_calibrated_timestamps: GPU timestamps tied to the host clock (design 4.6)
+        uint32_t calibrated_khr : 1;          // the KHR name of it is the one enabled
+        uint32_t depth_clip_control : 1;      // VK_EXT_depth_clip_control with depthClipControl: NVN's GL depth mode (near = -w) in fixed function (design 2.2)
+        uint32_t push_descriptor : 1;         // VK_KHR_push_descriptor (core in 1.4): the descriptor benchmark's alternative (design 2.3)
+        uint32_t vertex_divisor : 1;          // VK_KHR / VK_EXT_vertex_attribute_divisor with vertexAttributeInstanceRateDivisor: NVN stream divisors above 1
+        uint32_t divisor_khr : 1;
+    } x;
     char missing[1024];                   // what of design 9.1's optional list the device lacks, comma-separated, as the level line prints it ("" when nothing)
     char eds_missing[512];                // the dynamic states of level A it lacks, comma-separated
     _Atomic uint32_t allocations;         // device memory allocations made through hostvk and live (imports included), against caps.max_allocations

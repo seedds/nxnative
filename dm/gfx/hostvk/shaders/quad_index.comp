@@ -1,0 +1,20 @@
+// The index helper for quads (docs/design/vulkan-backend.md 2.7, 4.8): Vulkan has no quads, so the indices of an indexed quad draw become a triangle list, (0 1 2) (0 2 3) per quad,
+// 32-bit, one thread per quad. vk_commands.c runs it for indices the GPU wrote earlier in the submission (others are expanded on the CPU, nvn_primitive.h, as the Metal backend does).
+// Push constants: the source's device address (aligned down to 4 bytes) and its byte offset there, the destination, the quad count and the index size (1, 2 or 4 bytes)
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 64) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer W { uint v[]; };
+layout(push_constant) uniform P { uvec2 src, dst; uint quads, isz, shift, pad; } p;
+uint fetch(uint i) {
+    uint byte = p.shift + i * p.isz, w = W(p.src).v[byte >> 2], s = (byte & 3u) * 8u;
+    return p.isz == 4u ? w : p.isz == 2u ? (w >> s) & 0xffffu : (w >> s) & 0xffu;
+}
+void main() {
+    uint q = gl_GlobalInvocationID.x;
+    if (q >= p.quads) return;
+    uint a = fetch(4u * q), b = fetch(4u * q + 1u), c = fetch(4u * q + 2u), d = fetch(4u * q + 3u);
+    W(p.dst).v[6u * q] = a; W(p.dst).v[6u * q + 1u] = b; W(p.dst).v[6u * q + 2u] = c;
+    W(p.dst).v[6u * q + 3u] = a; W(p.dst).v[6u * q + 4u] = c; W(p.dst).v[6u * q + 5u] = d;
+}

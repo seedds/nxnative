@@ -1,0 +1,31 @@
+// A counter report written by the GPU, in order (docs/design/vulkan-backend.md 4.6; vk_commands.c report_run): the samples passed since the counter's reset (the accumulator of
+// earlier segments plus this segment's occlusion query results) and the timestamp converted to NVN's 614.4 MHz ticks on the guest clock, as the 16 bytes {count, timestamp} at the
+// report's guest address. All addresses are buffer device addresses; 64-bit arithmetic in pairs of 32-bit words (no shaderInt64 needed).
+// flags: 1 sum the queries, 2 start from the accumulator (else 0), 4 store the sum into the accumulator, 8 the count field is the timestamp (a timestamp report), 16 a timestamp is given
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 1) in;
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer Q { uvec2 v[]; };
+layout(push_constant) uniform P { uvec2 src, acc, ts, dst; uint nq, flags; uvec2 mul, g0, n0; } p;
+uvec2 add64(uvec2 a, uvec2 b) { uint c; uint lo = uaddCarry(a.x, b.x, c); return uvec2(lo, a.y + b.y + c); }
+uvec2 sub64(uvec2 a, uvec2 b) { uint br; uint lo = usubBorrow(a.x, b.x, br); return uvec2(lo, a.y - b.y - br); }
+// (d * m) >> 32, modulo 2^64: m is a 32.32 fixed-point factor
+uvec2 mulshr32(uvec2 d, uvec2 m) {
+    uint h0, l0, h1, l1, h2, l2, h3, l3;
+    umulExtended(d.x, m.x, h0, l0); umulExtended(d.x, m.y, h1, l1); umulExtended(d.y, m.x, h2, l2); umulExtended(d.y, m.y, h3, l3);
+    uint c1, c2; uint s = uaddCarry(h0, l1, c1); s = uaddCarry(s, l2, c2);
+    return uvec2(s, h1 + h2 + l3 + c1 + c2);
+}
+void main() {
+    uvec2 sum = uvec2(0u);
+    if ((p.flags & 1u) != 0u) {
+        if ((p.flags & 2u) != 0u) sum = Q(p.acc).v[0];
+        for (uint i = 0u; i < p.nq; i++) sum = add64(sum, Q(p.src).v[i]);
+        if ((p.flags & 4u) != 0u) Q(p.acc).v[0] = sum;
+    }
+    uvec2 t = uvec2(0u);
+    if ((p.flags & 16u) != 0u) t = add64(p.n0, mulshr32(sub64(Q(p.ts).v[0], p.g0), p.mul));
+    if ((p.flags & 8u) != 0u) sum = t;
+    if (p.dst != uvec2(0u)) { Q(p.dst).v[0] = sum; Q(p.dst).v[1] = t; }
+}

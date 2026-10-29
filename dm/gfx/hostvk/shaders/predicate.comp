@@ -1,0 +1,14 @@
+// The predicate of a conditional render (docs/design/vulkan-backend.md 4.7; vk_commands.c hvk_render_cond): 1 when NVN draws, 0 when it does not, from the two 64-bit counters at
+// a and a + 16 in guest memory, which the GPU wrote in order before it (mode 0 draws if they are equal, 1 if not). The passes after it test the word (VK_EXT_conditional_rendering)
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 1) in;
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer Q { uvec2 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer W { uint v[]; };
+layout(push_constant) uniform P { uvec2 a, dst; uint mode, pad; } p;
+void main() {
+    uvec2 x = Q(p.a).v[0], y = Q(p.a).v[2];
+    bool eq = all(equal(x, y));
+    W(p.dst).v[0] = (p.mode == 0u ? eq : !eq) ? 1u : 0u;
+}

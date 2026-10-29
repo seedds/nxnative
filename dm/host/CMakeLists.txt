@@ -296,6 +296,44 @@ if(NOT WIN32)
 endif()
 host_test(t_vk_device SOURCES ../../gfx/hostvk/tests/t_vk_device.c ${HOSTVK_SRC} PROFILE DEFS VK_NO_PROTOTYPES INCLUDES ${HOSTVK_INC} ENV ${HOSTVK_ENV})
 host_test(t_vk_import SOURCES ../../gfx/hostvk/tests/t_vk_import.c ${HOSTVK_SRC} PROFILE DEFS VK_NO_PROTOTYPES INCLUDES ${HOSTVK_INC} ENV ${HOSTVK_ENV})
+# The Vulkan backend behind dm/gfx/nvn/nvn_be.h (dm/gfx/hostvk; docs/design/vulkan-backend.md, step P3): a library of its own beside nvn_null, so that a binary links exactly one
+# backend (nxhost takes one at step M7). Its own shaders are SPIR-V arrays in committed headers (dm/gfx/hostvk/shaders/gen/, written by shaders/gen_spirv.sh), so building needs no glslang
+set(HOSTVK_BACKEND_SRC vk_backend.c vk_memory.c vk_texture.c vk_shader.c vk_pipeline.c vk_commands.c vk_device.c vk_import.c)
+list(TRANSFORM HOSTVK_BACKEND_SRC PREPEND ${REPO}/dm/gfx/hostvk/)
+list(APPEND HOSTVK_BACKEND_SRC ${REPO}/dm/gfx/tex/nvn_fmt_vk.c ${REPO}/dm/third_party/volk/volk.c)
+add_library(nvn_vk STATIC ${HOSTVK_BACKEND_SRC})
+add_dependencies(nvn_vk game_profile)
+target_compile_options(nvn_vk PRIVATE ${HOST_FLAGS})
+target_compile_definitions(nvn_vk PUBLIC VK_NO_PROTOTYPES)
+target_include_directories(nvn_vk PUBLIC ${HOSTVK_INC} PRIVATE ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn/include)
+target_link_libraries(nvn_vk PUBLIC nxplat)
+# Its GPU tests (dm/gfx/tests/vk; t_vk_harness.h says what they share): the NVN frontend, as objects so that the backend's references to it resolve whatever the link order,
+# over nvn_vk, each drawing headless and reading pixels back. Without a Vulkan device they skip as t_vk_device does; CTest on Linux runs them on lavapipe under the validation layer
+add_library(nvn_front_obj OBJECT ${NVN_FRONTEND_SRC} ${NVN_NAMES_C})
+add_dependencies(nvn_front_obj game_profile)
+target_compile_options(nvn_front_obj PRIVATE ${HOST_FLAGS})
+target_include_directories(nvn_front_obj PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
+target_link_libraries(nvn_front_obj PUBLIC nxplat)
+foreach(t IN ITEMS queue_origin clear_ds clear_tex depth16_clear integer_blend primitive_restart rast_discard vbuf readback view_swizzle queries cond_render copy_alias)
+    host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
+    target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
+endforeach()
+# The descriptor microbenchmark (design 2.3): cached sets with dynamic offsets against push descriptors over 4,900 draws a frame, a table of CPU times. Without the validation
+# layer (its cost would be what is measured), so its CTest environment names the driver only
+set(HOSTVK_ENV_BENCH)
+if(NOT WIN32)
+    set(HOSTVK_ENV_BENCH VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json VK_LOADER_DRIVERS_SELECT=lvp*)
+endif()
+# The NVN → Vulkan format table against NVN's block sizes and the formats' names (plain C, no Vulkan)
+host_test(t_fmt_vk SOURCES ../../gfx/tex/tests/t_fmt_vk.c ../../gfx/tex/nvn_fmt_vk.c ../../gfx/nvn/nvn_tex.c INCLUDES ${REPO}/dm/gfx/tex ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/third_party/vulkan-headers/include)
+host_test(t_vk_descbench SOURCES ../../gfx/hostvk/tests/t_vk_descbench.c ${HOSTVK_SRC} PROFILE DEFS VK_NO_PROTOTYPES INCLUDES ${HOSTVK_INC} ENV ${HOSTVK_ENV_BENCH})
+# The committed SPIR-V headers rebuild byte for byte (gen_spirv.sh --check): where glslang and spirv-val are installed, in the version the headers name (the nxnative-build
+# image); skipped elsewhere (exit 77). CTest only: the runners' list has no shell scripts
+if(NOT WIN32)
+    add_test(NAME t_vk_spirv COMMAND sh ${REPO}/dm/gfx/hostvk/shaders/gen_spirv.sh --check)
+    set_tests_properties(t_vk_spirv PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    string(APPEND MANIFEST "# CTest only: t_vk_spirv (dm/gfx/hostvk/shaders/gen_spirv.sh --check)\n")
+endif()
 # The NVN frontend linked over the null backend (step M6): its entry points called as C functions, a device, a queue and a memory pool made, a command list recorded, submitted and
 # handed by the decoder to the null backend (dm/gfx/tests/t_frontend.c). Here only: on Apple nvn_be.h's functions are the Metal backend's
 host_test(t_frontend SOURCES ../../gfx/tests/t_frontend.c ../../gfx/nvn/hle_nvn.c ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_tex.c ../../gfx/nvn/nvn_state.c ../../gfx/nvn/nvn_pools.c

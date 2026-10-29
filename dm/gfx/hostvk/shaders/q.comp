@@ -1,0 +1,25 @@
+// The four Maxwell counter kernels that games embed in their main (dm/gfx/nvn/nvn_builtin.h: matched by control-section key, hand-written MSL on Metal), in GLSL for the Vulkan backend:
+// id = workgroup x * 32 + thread x; nothing past the element count (word 0 of uniform slot 0, c3); src and dst are storage slots 0 and 1 (the c0 table at 0x310 and 0x320). An NVN counter
+// report is 16 bytes {count u64, timestamp u64}. KERNEL 0 q_val0: dst[id] = the count of report id; 1 q_val8: its timestamp; 2 q_dlt0: count of report 2id+1 minus that of 2id;
+// 3 q_dlt8: the same for the timestamps. 64-bit values as pairs of words. The bindings are the Vulkan translator's (set 0 binding 1 + 3 for c3; set 1 bindings 0 and 1)
+#version 450
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 4, std140) uniform C3 { uvec4 n; } c3;
+layout(set = 1, binding = 0, std430) readonly buffer S0 { uint s[]; } src;
+layout(set = 1, binding = 1, std430) writeonly buffer S1 { uint d[]; } dst;
+uvec2 ld(uint word) { return uvec2(src.s[word], src.s[word + 1u]); }
+uvec2 sub64(uvec2 a, uvec2 b) { uint br; uint lo = usubBorrow(a.x, b.x, br); return uvec2(lo, a.y - b.y - br); }
+void main() {
+    uint id = gl_WorkGroupID.x * 32u + gl_LocalInvocationID.x;
+    if (id >= c3.n.x) return;
+#if KERNEL == 0
+    uvec2 v = ld(4u * id);
+#elif KERNEL == 1
+    uvec2 v = ld(4u * id + 2u);
+#elif KERNEL == 2
+    uvec2 v = sub64(ld(8u * id + 4u), ld(8u * id));
+#else
+    uvec2 v = sub64(ld(8u * id + 6u), ld(8u * id + 2u));
+#endif
+    dst.d[2u * id] = v.x; dst.d[2u * id + 1u] = v.y;
+}

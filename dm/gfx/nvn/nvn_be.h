@@ -13,6 +13,12 @@
 #include "nvn_obj.h"
 #include "nvn_be_ext.h"   // be_set_origin_lower_left, be_present_wait, be_fps_target, be_vsync_active, be_vsync_wait, be_native_device, be_ext_tex, be_present_ext
 
+// Device capabilities (design 1.5): what the backend's device can do, for the frontend's later choices. The Vulkan backend fills it from its device layer (dm/gfx/hostvk, hostvk_caps)
+typedef struct {
+    uint32_t unified_memory : 1, gpl : 1, eds3_blend : 1, eds3_raster : 1, vertex_input_dynamic : 1, cond_render : 1, xfb : 1, geometry : 1, tessellation : 1, astc_ldr : 1, logic_op : 1;
+    uint32_t max_samples, max_point_size, max_vertex_attribs;
+} be_caps;
+
 #if defined(__APPLE__)
 #include "nvn_mtl.h"
 // Metal backend functions that no header declares (hle_nvn.c declared them where it called them); their definitions in nvn_mtl.m have exactly these types
@@ -37,12 +43,17 @@ void mtl_alloc_stats(uint64_t *waits, uint64_t *grown, int *n);
 
 // device
 static inline void be_init(void) { mtl_init(); }
+// The Metal backend reads no capabilities through this interface: Apple GPUs have unified memory, which is all the frontend asks about (trivial bodies, design 1.5)
+static inline const be_caps *be_get_caps(void) { static const be_caps c = {.unified_memory = 1}; return &c; }
 
 // memory pools
 static inline void be_pool_add(const void *mem, uint64_t size, uint32_t nvn_flags) { mtl_pool_add_flags(mem, size, nvn_flags); }
 static inline void be_pool_del(const void *mem) { mtl_pool_del(mem); }
 static inline void be_alias_drop_pool(const void *pool) { mtl_alias_drop_pool(pool); }
 static inline int be_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) { return mtl_addr(addr, len, buf, off); }
+// Guest memory committed / about to be decommitted (design 1.5): the Metal backend's pools are zero-copy buffers made per pool, with nothing per guest region
+static inline void be_guest_map(void *mem, uint64_t size) { (void)mem; (void)size; }
+static inline void be_guest_unmap(void *mem, uint64_t size) { (void)mem; (void)size; }
 
 // object hooks
 static inline void be_tex_init(const tex_t *t) { mtl_tex_init(t); }
@@ -134,12 +145,15 @@ static inline void be_alloc_stats(uint64_t *waits, uint64_t *grown, int *n) { mt
 
 // device
 void be_init(void);
+const be_caps *be_get_caps(void);
 
 // memory pools
 void be_pool_add(const void *mem, uint64_t size, uint32_t nvn_flags);
 void be_pool_del(const void *mem);
 void be_alias_drop_pool(const void *pool);
 int be_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off);
+void be_guest_map(void *mem, uint64_t size);     // guest memory committed (hle_svc.c, with the CPU port)
+void be_guest_unmap(void *mem, uint64_t size);   // guest memory about to be decommitted: an import under it must go first (design 4.2)
 
 // object hooks
 void be_tex_init(const tex_t *t);
@@ -265,10 +279,10 @@ void be_dispatch(const uint8_t *rec, const op_hdr *h, const void *a);        // 
 void be_barrier(const uint8_t *rec, const op_hdr *h, const void *a);         // OP_BARRIER
 
 // Not part of step M1 (docs/design/vulkan-backend.md, section 1.5); none of these is declared yet, except where said:
-// - With the Vulkan backend: const be_caps *be_get_caps(void) (device capabilities); void be_guest_map(void *mem, uint64_t size) and void be_guest_unmap(void *mem, uint64_t size)
-//   (guest memory committed / about to be decommitted, called from hle_svc.c, so the backend can release an import first).
-// - be_addr stays after step M6, for the Vulkan backend's step: the frontend's pool table (nvn_pool_lookup, nvn_pools.c) is read under the backend's lock (g_mu on Metal), and on Metal
-//   mtl_addr also makes the pool it finds resident; hle_nvn.c answering it alone needs that lock decided (docs/design/vulkan-backend.md, step M7).
+// - Declared with the Vulkan backend's core (phase P3): be_get_caps (device capabilities) and be_guest_map / be_guest_unmap (guest memory committed / about to be decommitted, so the
+//   backend can release an import first), above; on Apple trivial bodies. hle_svc.c is to call the last two with the CPU port; nothing calls them yet.
+// - be_addr stays after step M6: the frontend's pool table (nvn_pool_lookup, nvn_pools.c) is read under the backend's lock (g_mu on Metal, hvk.mu in dm/gfx/hostvk), and on Metal
+//   mtl_addr also makes the pool it finds resident, which the Vulkan backend's imports need not.
 // - Step M3 added the per-operation group above, in the raw form (rec, h, a): the typed arguments of the design's sketch (section 1.5) come when the Vulkan backend needs them.
 //   be_exec stays (on Apple mtl_exec, which is now nvn_replay_exec; the null backend's is nvn_replay_exec too) and be_exec_rest too (the Metal look-ahead's handles still to come in
 //   the submission) until hle_nvn.c calls nvn_replay_exec itself, with the look-ahead cursor (step M7).

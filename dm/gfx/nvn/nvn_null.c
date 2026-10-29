@@ -48,6 +48,7 @@ static _Atomic uint64_t g_fence;                           // the last submissio
 
 // ---------- Device ----------
 void be_init(void) { RED(); }
+const be_caps *be_get_caps(void) { RED(); static const be_caps none; return &none; }   // no GPU: every capability 0
 
 // ---------- Memory pools: the shared table, with the pool's own address as its GPU address and no backend object ----------
 void be_pool_add(const void *mem, uint64_t size, uint32_t nvn_flags) {
@@ -56,6 +57,8 @@ void be_pool_add(const void *mem, uint64_t size, uint32_t nvn_flags) {
 }
 void be_pool_del(const void *mem) { RED(); pthread_mutex_lock(&g_mu); nvn_pool_del(mem); pthread_mutex_unlock(&g_mu); }
 void be_alias_drop_pool(const void *pool) { RED(); (void)pool; }
+void be_guest_map(void *mem, uint64_t size) { RED(); (void)mem; (void)size; }     // no import to make or release
+void be_guest_unmap(void *mem, uint64_t size) { RED(); (void)mem; (void)size; }
 int be_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     RED();
     const nvn_pool_ref *c = nvn_pool_cached(addr, len);

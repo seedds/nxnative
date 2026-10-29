@@ -89,6 +89,7 @@ static const struct { const char *name; size_t off; } core_req[] = {
 typedef struct {
     VkExtensionProperties *ext; uint32_t n_ext;
     int host_mem, xfb, swapchain, gpl, eds2, eds3, vid, cr, calibrated_ext;   // the extension is listed (gpl: with VK_KHR_pipeline_library)
+    int calibrated_khr, custom_border, uint8_khr, uint8_ext, depth_clip, push, divisor_khr, divisor_ext;   // the backend's optional extensions (hostvk_dev.x)
     VkPhysicalDeviceFeatures2 f;
     VkPhysicalDeviceVulkan12Features f12;
     VkPhysicalDeviceVulkan13Features f13;
@@ -98,6 +99,10 @@ typedef struct {
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT feds3;
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT fvid;
     VkPhysicalDeviceConditionalRenderingFeaturesEXT fcr;
+    VkPhysicalDeviceCustomBorderColorFeaturesEXT fcb;
+    VkPhysicalDeviceIndexTypeUint8FeaturesKHR fu8;
+    VkPhysicalDeviceDepthClipControlFeaturesEXT fdcc;
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR fdiv;
     VkPhysicalDeviceProperties2 p;
     VkPhysicalDeviceVulkan12Properties p12;
     VkPhysicalDeviceVulkan13Properties p13;
@@ -125,6 +130,14 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     q->vid = has_ext(q, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
     q->cr = has_ext(q, VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);
     q->calibrated_ext = has_ext(q, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    q->calibrated_khr = has_ext(q, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+    q->custom_border = has_ext(q, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
+    q->uint8_khr = has_ext(q, VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME);
+    q->uint8_ext = has_ext(q, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
+    q->depth_clip = has_ext(q, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
+    q->push = has_ext(q, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    q->divisor_khr = has_ext(q, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
+    q->divisor_ext = has_ext(q, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     vkGetPhysicalDeviceProperties(p, &q->p.properties);
     if (q->p.properties.apiVersion < VK_API_VERSION_1_3) return;   // below the baseline: the 1.2 / 1.3 structures may not be chained
     void **next = &q->f.pNext;
@@ -137,6 +150,10 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->eds3) { q->feds3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT; *next = &q->feds3; next = &q->feds3.pNext; }
     if (q->vid) { q->fvid.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT; *next = &q->fvid; next = &q->fvid.pNext; }
     if (q->cr) { q->fcr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT; *next = &q->fcr; next = &q->fcr.pNext; }
+    if (q->custom_border) { q->fcb.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT; *next = &q->fcb; next = &q->fcb.pNext; }
+    if (q->uint8_khr || q->uint8_ext) { q->fu8.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_KHR; *next = &q->fu8; next = &q->fu8.pNext; }   // the EXT's structure type is the same value
+    if (q->depth_clip) { q->fdcc.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT; *next = &q->fdcc; next = &q->fdcc.pNext; }
+    if (q->divisor_khr || q->divisor_ext) { q->fdiv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR; *next = &q->fdiv; next = &q->fdiv.pNext; }
     vkGetPhysicalDeviceFeatures2(p, &q->f);
     next = &q->p.pNext;
     q->p.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -315,7 +332,7 @@ static int make_instance(const hostvk_opts *o, hostvk_dev *d, char *err, size_t 
         vkEnumerateInstanceLayerProperties(&nl, NULL);
         VkLayerProperties *lp = calloc(nl ? nl : 1, sizeof *lp);
         if (lp && vkEnumerateInstanceLayerProperties(&nl, lp) >= 0)
-            for (uint32_t i = 0; i < nl; i++) if (!strcmp(lp[i].layerName, layer)) d->validation = 1;
+            for (uint32_t i = 0; i < nl; i++) if (!strcmp(lp[i].layerName, layer)) { d->validation = 1; d->validation_version = lp[i].specVersion; }
         free(lp);
         if (!d->validation) hostvk_log("[RED] [hostvk] validation was asked for, but %s is not installed: running without it", layer);
     }
@@ -372,7 +389,7 @@ static int make_instance(const hostvk_opts *o, hostvk_dev *d, char *err, size_t 
 
 // ---------- Logical device ----------
 static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char *err, size_t n) {
-    const char *ext[16]; uint32_t ne = 0;
+    const char *ext[24]; uint32_t ne = 0;
     ext[ne++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
     ext[ne++] = VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME;
     d->swapchain = o->want_surface != 0;
@@ -385,12 +402,38 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (eds3) ext[ne++] = VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME;
     if (d->caps.vertex_input_dynamic) ext[ne++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
     if (d->caps.cond_render) ext[ne++] = VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME;
+    // The backend's optional extensions (hostvk_dev.x): each one the device has, with its feature. Three were promoted from EXT to KHR in header 1.3.280 with the same structures
+    // and values; a validation layer older than that rejects the KHR names ("not supported by this layer"), so under one the EXT name is enabled where the device has it
+    memset(&d->x, 0, sizeof d->x);
+    int khr280 = !d->validation || d->validation_version >= VK_MAKE_API_VERSION(0, 1, 3, 280);
+    d->x.custom_border = q->custom_border && q->fcb.customBorderColors;
+    d->x.border_without_format = d->x.custom_border && q->fcb.customBorderColorWithoutFormat;
+    if (d->x.custom_border) ext[ne++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
+    d->x.index_uint8 = (q->uint8_khr || q->uint8_ext) && q->fu8.indexTypeUint8;
+    if (d->x.index_uint8) ext[ne++] = q->uint8_khr && (khr280 || !q->uint8_ext) ? VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME : VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME;
+    d->x.calibrated = q->calibrated_khr || q->calibrated_ext; d->x.calibrated_khr = q->calibrated_khr && (khr280 || !q->calibrated_ext);
+    if (d->x.calibrated) ext[ne++] = d->x.calibrated_khr ? VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME : VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+    d->x.depth_clip_control = q->depth_clip && q->fdcc.depthClipControl;
+    if (d->x.depth_clip_control) ext[ne++] = VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME;
+    d->x.push_descriptor = q->push;
+    if (d->x.push_descriptor) ext[ne++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+    d->x.vertex_divisor = (q->divisor_khr || q->divisor_ext) && q->fdiv.vertexAttributeInstanceRateDivisor; d->x.divisor_khr = q->divisor_khr && (khr280 || !q->divisor_ext);
+    if (d->x.vertex_divisor) ext[ne++] = d->x.divisor_khr ? VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME : VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
+    const VkPhysicalDeviceFeatures *cf = &q->f.features;
+    d->x.float64 = cf->shaderFloat64 != 0; d->x.int64 = cf->shaderInt64 != 0; d->x.int16 = cf->shaderInt16 != 0;
+    d->x.storage_without_format = cf->shaderStorageImageReadWithoutFormat && cf->shaderStorageImageWriteWithoutFormat;
+    d->x.multi_viewport = cf->multiViewport != 0; d->x.depth_bounds = cf->depthBounds != 0;
+    d->x.host_query_reset = q->f12.hostQueryReset != 0; d->x.sampler_minmax = q->f12.samplerFilterMinmax != 0; d->x.mirror_clamp_to_edge = q->f12.samplerMirrorClampToEdge != 0;
     // Features: the baseline's and the enabled extensions' (not every supported core feature: robustBufferAccess and the like cost performance)
     VkPhysicalDeviceFeatures2 f = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     for (size_t i = 0; i < sizeof core_req / sizeof core_req[0]; i++) *(VkBool32 *)((char *)&f.features + core_req[i].off) = VK_TRUE;
     f.features.textureCompressionASTC_LDR = d->astc_ldr ? VK_TRUE : VK_FALSE;
+    f.features.shaderFloat64 = d->x.float64; f.features.shaderInt64 = d->x.int64; f.features.shaderInt16 = d->x.int16;
+    f.features.shaderStorageImageReadWithoutFormat = f.features.shaderStorageImageWriteWithoutFormat = d->x.storage_without_format;
+    f.features.multiViewport = d->x.multi_viewport; f.features.depthBounds = d->x.depth_bounds;
     VkPhysicalDeviceVulkan12Features f12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     f12.drawIndirectCount = VK_TRUE; f12.timelineSemaphore = VK_TRUE; f12.bufferDeviceAddress = d->caps.buffer_device_address ? VK_TRUE : VK_FALSE;
+    f12.hostQueryReset = d->x.host_query_reset; f12.samplerFilterMinmax = d->x.sampler_minmax; f12.samplerMirrorClampToEdge = d->x.mirror_clamp_to_edge;
     VkPhysicalDeviceVulkan13Features f13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     f13.dynamicRendering = VK_TRUE; f13.synchronization2 = VK_TRUE; f13.subgroupSizeControl = VK_TRUE; f13.maintenance4 = q->f13.maintenance4;
     VkPhysicalDeviceTransformFeedbackFeaturesEXT fxfb = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT, NULL, VK_TRUE, q->fxfb.geometryStreams};
@@ -411,6 +454,10 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     feds3.extendedDynamicState3AlphaToCoverageEnable = (eds >> HOSTVK_EDS_ALPHA_TO_COVERAGE) & 1;
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT fvid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT, NULL, VK_TRUE};
     VkPhysicalDeviceConditionalRenderingFeaturesEXT fcr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT, NULL, VK_TRUE, VK_FALSE};
+    VkPhysicalDeviceCustomBorderColorFeaturesEXT fcb = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, NULL, VK_TRUE, d->x.border_without_format};
+    VkPhysicalDeviceIndexTypeUint8FeaturesKHR fu8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_KHR, NULL, VK_TRUE};
+    VkPhysicalDeviceDepthClipControlFeaturesEXT fdcc = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT, NULL, VK_TRUE};
+    VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR fdiv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR, NULL, VK_TRUE, q->fdiv.vertexAttributeInstanceRateZeroDivisor};
     void **next = &f.pNext;
     *next = &f12; next = &f12.pNext;
     *next = &f13; next = &f13.pNext;
@@ -420,6 +467,10 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (eds3) { *next = &feds3; next = &feds3.pNext; }
     if (d->caps.vertex_input_dynamic) { *next = &fvid; next = &fvid.pNext; }
     if (d->caps.cond_render) { *next = &fcr; next = &fcr.pNext; }
+    if (d->x.custom_border) { *next = &fcb; next = &fcb.pNext; }
+    if (d->x.index_uint8) { *next = &fu8; next = &fu8.pNext; }
+    if (d->x.depth_clip_control) { *next = &fdcc; next = &fdcc.pNext; }
+    if (d->x.vertex_divisor) { *next = &fdiv; next = &fdiv.pNext; }
     // One queue for graphics, compute and copies; the transfer-only family (transfer_family) gets a queue when uploads move to it
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, d->queue_family, 1, &prio};

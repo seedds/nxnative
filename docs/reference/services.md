@@ -229,6 +229,27 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** look up the player once and derive the style from that same result before constructing the player mask.
 - **Found on:** clang static analysis ([issue #424](https://github.com/seedds/nxnative/issues/424)); no gameplay failure reported.
 
+### Steam Controller hotplug interrupts other players
+
+- **Symptom:** connecting a Steam Controller clears another controller's held input or rumble and makes it press a button to rejoin; a composite controller can appear as two players or lose native fallback after a partial exclusive open.
+- **Cause:** resetting every native profile covered the native/HID notification race, but discarded unrelated players. Independent opens of native and vendor siblings could leave half of one controller seized.
+- **Fix:** `controllers_mac.m` completes synchronous HID discovery before admitting a fresh, non-neutral native event. It gates only unadmitted snapshots and preserves established slots and the merged rumble owner. USB device ancestry, per-port Puck interface ancestry, or the OS physical-device ID groups sibling claims; report metadata selects the Triton endpoint. Opens commit together, suppression handles have no decoder, and failure releases only that group. Unknown physical identity constrains new claims instead of guessing a native instance. See [Mac controller behavior and fallback](../mac-controllers.md#steam-controller-2026).
+- **Found on:** synthetic native/HID race, ownership-failure and mixed-controller regressions in `dm/host/tests/t_controllers_mac.m`; physical controller/game validation remains pending.
+
+### Steam Controller bypasses the rumble cutoff
+
+- **Symptom:** `DM_RUMBLE_MIN` silences quiet effects on native controllers but has no effect on the Steam Controller's direct HID output.
+- **Cause:** the direct adapter converted the game's vibration bands and gain into motor reports without applying the cutoff used by the Core Haptics and DualShock 4 routes.
+- **Fix:** all three routes share `dm_haptics_apple_controller_intensity`. The Steam adapter applies it independently to each motor after band conversion and gain, before encoding the output report. Guest vibration values are unchanged. Replacing a DualShock route with a direct output also releases that player's old HID claim, preserving other players' claims.
+- **Found on:** synthetic regressions in `dm/host/tests/t_controllers_mac.m` and `t_haptics_apple.m`, covering packet mapping, gain before cutoff, threshold/rescaling and route replacement. No new hardware or game validation.
+
+### Steam Controller stick drift suppresses gyro aiming
+
+- **Symptom:** six-axis values reach the game but gyro aiming does nothing, or stops after using a stick.
+- **Cause:** the raw Triton reports contain small nonzero stick values at rest. Passing them through as intentional input prevents a game that prioritizes stick input from using motion aiming.
+- **Fix (resolved in the decoder):** apply a radial deadzone to both sticks in `steam_input.h`, default 10%, rescaling the remaining travel to full range. `DM_STEAM_DEADZONE` accepts 0 to below 0.9; invalid values retain the default. Trackpads and motion remain unchanged. Decoder regressions cover all three report formats, centre drift, radial boundaries, travel, diagonals and settings.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#services); the contributor's USB-C test confirmed gyro aiming with the proposed deadzone. No new local gameplay validation.
+
 ### History reads fill every requested entry
 
 - **Symptom:** buttons and menus work, the sticks do nothing in play (Super Mario Odyssey: its first hint, "Look Around", waited forever); an `nn::diag` abort with Result 0x2aca in the first frames of `nnMain` (Hollow Knight: Silksong, Unity 6000.0.50f1: `bt: sdk+0x514580 main+0x1296c64 …`).
@@ -248,7 +269,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** motion moves never happen; shaking does nothing (Super Mario Odyssey: cap throws by shaking).
 - **Cause:** the host handed out six-axis handles but reported no sensor.
-- **Fix:** it now reports one per connected controller: two for handheld or dual Joy-Cons, one otherwise, with the style, npad id and device in the handle. At rest the sensor lies flat: acceleration (0, 0, −1) G, no rotation, identity direction. Samples are 5 ms apart on the guest clock and numbered by time, so a history read returns the samples at those times. `DM_BTN_SHAKE` (`dm_input.h`: the iPhone shaken, Space on the Mac, `DM_KEYS` `Shake`) plays a side-to-side shake in whole cycles.
+- **Fix:** it reports one combined sensor per FullKey or Handheld controller, two for dual Joy-Cons and one for a single Joy-Con, with the SDK style index, npad id and device in the handle ([handle encoding](#six-axis-handle-encoding)). At rest the sensor lies flat: acceleration (0, 0, −1) G, no rotation, identity direction. Samples are 5 ms apart on the guest clock and numbered by time, so a history read returns the samples at those times. `DM_BTN_SHAKE` (`dm_input.h`: the iPhone shaken, Space on the Mac, `DM_KEYS` `Shake`) plays a side-to-side shake in whole cycles.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md): it reads all 16 history entries per sensor and ignores the count, like its npad history ([History reads fill every requested entry](#history-reads-fill-every-requested-entry)).
 - **Note:** find a game's swing detector by probing the accelerometer value it reads (`DM_PROBE=main:626248@x8+10` in Odyssey 1.4.1).
 
@@ -280,6 +301,20 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Routing limit:** GameController exposes no public per-controller HID identity. Raw motion is enabled only with one physical Pro and one GameController Pro, using that controller's existing player slot (including `DM_KBD_PLAYER=own` / `DM_PAD_MERGE`). Multiple Pros keep their GameController paths; raw data is never assigned to the first controller by guesswork. Synthetic GameController HID devices are excluded with Apple's `GCSyntheticDevice` property.
 - **Open:** passive reading cannot obtain factory calibration without issuing SPI commands alongside the OS driver. Nominal scales are 4096 counts/G and 70 mdps/count ([protocol research](https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering/blob/master/imu_sensor_notes.md)); no automatic bias learning removes slow intentional turns. Sample order follows that research and [Linux hid-nintendo](https://github.com/torvalds/linux/blob/master/drivers/hid/hid-nintendo.c); SDL reverses it. Confirm order, sensitivity, drift and reconnects on hardware before calling the reworked reader device-tested. `t_motion_pro`, `t_motion_pro_mac` and `t_hid` cover decoding, timestamps, ownership, removal, ambiguity and source fallback with synthetic inputs.
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), docked pointer on a Pro Controller.
+
+### Six-axis handle encoding
+
+- **Symptom:** six-axis handles use byte 0 = 0 for a FullKey controller, which the SDK reserves for no style; Handheld exposes two sensors instead of its combined sensor.
+- **Cause:** `GetSixAxisSensorHandles` encoded the style bit number rather than the SDK style index, and treated Handheld like a Joy-Con pair. The reader accepted the same private format, hiding the mismatch.
+- **Fix (resolved):** use SDK style indices 3 through 7, with device 2 for FullKey / Handheld, 0 and 1 for JoyDual, and the corresponding side for single Joy-Cons, following [libnx's handle construction](https://github.com/switchbrew/libnx/blob/master/nx/source/services/hid.c). Readers validate the style, device, player and reserved byte consistently; invalid handles return no connected samples and report at rest. Tests use independent wire-format fixtures and cover docked / handheld histories, bounds and invalid handles.
+- **Found on:** the [Tears of the Kingdom PR #221 hardware investigation](../../dm/games/0100F2C0115B6000/README.md#services). This mismatch predates the Steam Controller adapter; correcting the style alone did not fix that game's aiming, which required the [stick deadzone](#steam-controller-stick-drift-suppresses-gyro-aiming). No new local gameplay validation.
+
+### Mapped Shake on secondary controllers
+
+- **Symptom:** a button mapped to Shake does nothing on a secondary controller, including the first physical controller with `DM_KBD_PLAYER=own`, even though its normal buttons work in a one-player game.
+- **Cause:** the synthetic shake tracked only the keyboard and controller slot 0, and six-axis reads enabled it only for player 1.
+- **Fix:** track whole shake cycles per controller slot and select a source using the same player assignments as buttons and physical motion. One-player games merge secondary sources into player 1; multiplayer keeps each player's shake separate. Short taps, release completion, physical-motion fallback and the at-rest query follow that source. Removing a slot discards its pending shake so reconnecting cannot inherit it.
+- **Found on:** controller-mapping review and synthetic regressions in `dm/host/tests/t_hid.c`, covering all secondary slots, keyboard reservation, docked/handheld merging, disconnect and physical-motion coexistence.
 
 ### SDK 20 six-axis sensor and amiibo (`nfp`) calls
 

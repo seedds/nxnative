@@ -110,11 +110,51 @@ static void check(int which) {
     munmap(base, len);
 }
 
+static void check_atelier(int which) {
+    size_t len = 0x8000000;
+    uint8_t *base = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(base != MAP_FAILED);
+    g_nmod = 1; strcpy(g_mod[0].name, "main"); g_mod[0].base = base;
+    strcpy(g_mod[0].build_id, "5e6f9d0c5161586bcd32dd7ddc5e9db0");
+    setenv("DM_FPS_TARGET", which == 1 ? "30" : which == 2 ? "0" : "60", 1);
+    uint8_t obj[5][0x200] = {{0}};
+    uint32_t offsets[] = {0xb8, 0, 0x10, 0x20};
+    *(uintptr_t *)(base + 0x7791fe8) = (uintptr_t)obj[0];
+    for (int i = 0; i < 4; i++) *(uintptr_t *)(obj[i] + offsets[i]) = (uintptr_t)obj[i+1];
+    int32_t *fps = (int32_t *)(base + 0x7adfa70), *cloth = (int32_t *)(obj[4]+0x10);
+    *fps = which == 1 ? 60 : which == 10 ? -1 : 30;
+    *cloth = which == 1 ? 65 : 30;
+    if (which == 3) g_mod[0].build_id[0] = '0';
+    if (which == 4) *(uintptr_t *)(base + 0x7791fe8) = 0;
+    if (which >= 5 && which <= 8) *(uintptr_t *)(obj[which-5]+offsets[which-5]) = 0;
+    if (which == 9) *(uintptr_t *)(obj[3]+offsets[3]) = 0x1000;
+    dm_fps_lock_tick();
+    if (which == 2 || which == 3) assert(*fps == 30 && *cloth == 30 && writes == 0);
+    else if (which >= 4 && which <= 9) assert(*fps == 60 && *cloth == 30 && writes == 1);
+    else if (which == 10) assert(*fps == -1 && *cloth == 65 && writes == 1);
+    else {
+        assert(*fps == (which == 1 ? 30 : 60));
+        assert(*cloth == (which == 1 ? 35 : 65));
+        assert(writes == 2);
+        dm_fps_lock_tick(); assert(writes == 2);
+        *fps = 30; *cloth = 30;
+        dm_fps_lock_tick();
+        assert(*fps == (which == 1 ? 30 : 60) && *cloth == (which == 1 ? 35 : 65));
+        assert(writes == (which == 1 ? 3 : 4));
+    }
+    munmap(base,len);
+}
+
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
     for (int i = 0; i < 17; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
+        int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    for (int i = 0; i < 11; i++) {
+        pid_t p = fork(); assert(p >= 0);
+        if (!p) { check_atelier(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
     puts("Frame limits: integer/float FPS, milliseconds, vsync copies, build gates and overrides passed");

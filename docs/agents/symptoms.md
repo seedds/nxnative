@@ -98,6 +98,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the iPhone app is killed for memory; resident memory grows steadily (about 0.2 MB a frame) while the residency set and the texture counts stay flat. → [Deferred-release drain without an autorelease pool](../reference/memory.md#deferred-release-drain-without-an-autorelease-pool)
 - travelling produces a brief multi-GB footprint spike, then memory returns to its earlier level; periodic memory lines can miss the peak. Upload diagnostics show many swapped-out blocks still alive in one batch. → [Upload staging grows within one rendering submission](../reference/memory.md#upload-staging-grows-within-one-rendering-submission)
 - GPU memory grows with repeated `nvnTextureReadTexels` calls on a long-lived game thread, even after each readback completes. → [GPU readback without an autorelease pool](../reference/memory.md#gpu-readback-without-an-autorelease-pool)
+- a 2 MiB Unity pool reservation returns `0x1803`, then a null allocator result is dereferenced at `main+0x8f13b0`, despite hundreds of MiB free across address-region gaps. → [Fragmentation with 2 MiB region alignment](../reference/memory.md#fragmentation-with-2-mib-region-alignment)
 
 ## Threads
 
@@ -317,6 +318,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the submit thread's CPU samples dominated by `mtl_addr` / `mtl_gpu_addr` (vertex buffers in `draw`, uniform buffers in `encode_args`). → [Address to memory pool lookups by binary search](../reference/frame-rate.md#address-to-memory-pool-lookups-by-binary-search)
 - gameplay has low CPU clocks, large render submission wall time compared with thread CPU time, and default QoS (`0x15`) on the main guest thread while workers report user-interactive (`0x21`). → [Main guest thread keeps inherited default QoS](../reference/frame-rate.md#main-guest-thread-keeps-inherited-default-qos)
 - stalls of 30–60 ms about once a second, at 30 fps and at 60 (99th percentile 63–127 ms); the main thread waits 20–34 ms for the render thread once a second. → [Time-constraint computation declared below the thread's peaks](../reference/frame-rate.md#time-constraint-computation-declared-below-the-threads-peaks)
+- raising the presentation rate can leave cloth simulation using its original low-frequency setting. → [Managed cloth frequency follows the frame target](../reference/frame-rate.md#managed-cloth-frequency-follows-the-frame-target)
 
 ## NVN objects
 

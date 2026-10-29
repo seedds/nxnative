@@ -5,6 +5,18 @@ public struct GameSettingsIosDeploymentView: View {
     public let game: PortedGame
     @ObservedObject internal var deviceService = DeviceDeploymentService.shared
     @State internal var showDeployLogs: Bool = false
+    @State private var showCustomSigning: Bool = false
+    @State private var p12Path: String = ""
+    @State private var p12Password: String = ""
+    @State private var mobileprovisionPath: String = ""
+    @State private var importMessage: String? = nil
+    @State private var isImportingCert: Bool = false
+    
+    private var hasExternalRomfs: Bool {
+        let parent = game.url.deletingLastPathComponent()
+        return FileManager.default.fileExists(atPath: parent.appendingPathComponent("RomFS.img").path) ||
+               FileManager.default.fileExists(atPath: parent.appendingPathComponent("romfs.img").path)
+    }
 
     public init(game: PortedGame) {
         self.game = game
@@ -161,6 +173,96 @@ public struct GameSettingsIosDeploymentView: View {
                 }
             }
 
+            // Custom Signing Identity Disclosure
+            DisclosureGroup(isExpanded: $showCustomSigning) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Import external Developer Certificate (.p12) and Provisioning Profile (.mobileprovision) for sideloading or third-party signing accounts.")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(NXTheme.textSecondary)
+                    
+                    HStack(spacing: 8) {
+                        Button("Select .p12 Certificate") {
+                            let panel = NSOpenPanel()
+                            panel.canChooseFiles = true
+                            panel.canChooseDirectories = false
+                            panel.allowedContentTypes = []
+                            panel.prompt = "Choose .p12"
+                            if panel.runModal() == .OK, let url = panel.url {
+                                p12Path = url.path
+                            }
+                        }
+                        .buttonStyle(NXSecondaryButtonStyle())
+                        .controlSize(.mini)
+                        
+                        if !p12Path.isEmpty {
+                            Text(URL(fileURLWithPath: p12Path).lastPathComponent)
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundColor(NXTheme.textPrimary)
+                                .lineLimit(1)
+                        }
+                    }
+                    
+                    if !p12Path.isEmpty {
+                        HStack(spacing: 8) {
+                            SecureField("P12 Password (if any)", text: $p12Password)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                                .font(.system(size: 11))
+                                .frame(maxWidth: 180)
+                            
+                            Button(isImportingCert ? "Importing..." : "Import to Keychain") {
+                                isImportingCert = true
+                                deviceService.importP12Certificate(fileURL: URL(fileURLWithPath: p12Path), password: p12Password) { success, msg in
+                                    isImportingCert = false
+                                    importMessage = msg
+                                }
+                            }
+                            .buttonStyle(NXSecondaryButtonStyle())
+                            .controlSize(.mini)
+                            .disabled(isImportingCert)
+                        }
+                    }
+                    
+                    HStack(spacing: 8) {
+                        Button("Select .mobileprovision") {
+                            let panel = NSOpenPanel()
+                            panel.canChooseFiles = true
+                            panel.canChooseDirectories = false
+                            panel.allowedContentTypes = []
+                            panel.prompt = "Choose Profile"
+                            if panel.runModal() == .OK, let url = panel.url {
+                                mobileprovisionPath = url.path
+                                UserDefaults.standard.set(url.path, forKey: "NXNative_SavedCustomProvisioningProfilePath")
+                            }
+                        }
+                        .buttonStyle(NXSecondaryButtonStyle())
+                        .controlSize(.mini)
+                        
+                        if !mobileprovisionPath.isEmpty {
+                            Text(URL(fileURLWithPath: mobileprovisionPath).lastPathComponent)
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundColor(NXTheme.textPrimary)
+                                .lineLimit(1)
+                        }
+                    }
+                    
+                    if let msg = importMessage {
+                        Text(msg)
+                            .font(.system(size: 10))
+                            .foregroundColor(msg.contains("successfully") ? Color.green : Color.orange)
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                Label("Custom Signing Certificate & Profile (.p12 / .mobileprovision)", systemImage: "signature")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(NXTheme.textSecondary)
+            }
+            .onAppear {
+                if let savedProf = UserDefaults.standard.string(forKey: "NXNative_SavedCustomProvisioningProfilePath") {
+                    mobileprovisionPath = savedProf
+                }
+            }
+
             Divider()
                 .background(NXTheme.borderSubtle)
 
@@ -235,8 +337,26 @@ public struct GameSettingsIosDeploymentView: View {
             }
 
             // Row 4: Action Button
-            HStack {
+            HStack(spacing: 10) {
                 Spacer()
+
+                if hasExternalRomfs {
+                    Button(action: {
+                        guard let dev = deviceService.selectedDevice else { return }
+                        SoundEffectService.shared.play(.click)
+                        deviceService.pushRomfsDirectly(gameURL: game.url, device: dev) { _, _ in }
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.up.doc.fill")
+                            Text("Push RomFS Only")
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                    }
+                    .buttonStyle(NXSecondaryButtonStyle())
+                    .disabled(deviceService.selectedDevice == nil || deviceService.isDetecting)
+                    .help("Transfers RomFS.img directly to the app's Documents folder on the connected device.")
+                }
 
                 Button(action: {
                     guard let dev = deviceService.selectedDevice else { return }

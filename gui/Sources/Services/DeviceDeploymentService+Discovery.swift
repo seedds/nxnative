@@ -166,7 +166,7 @@ extension DeviceDeploymentService {
 
         // 2. Also incorporate any Keychain signing identities that weren't captured by Xcode team IDs
         for line in keychainOutput.components(separatedBy: .newlines) {
-            if line.contains("Apple Development:") || line.contains("iPhone Developer:") {
+            if line.contains("Apple Development:") || line.contains("iPhone Developer:") || line.contains("Apple Distribution:") || line.contains("iPhone Distribution:") || line.contains("iOS Development:") {
                 let parts = line.components(separatedBy: "\"")
                 if parts.count >= 2 {
                     let certName = parts[1]

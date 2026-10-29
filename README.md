@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue.svg)](https://apple.com/macos)
 [![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%2B%20%26%20A17%2B)-orange.svg)](https://apple.com)
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-FA7343.svg)](https://swift.org)
-[![Version](https://img.shields.io/badge/version-v1.8.0-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
+[![Version](https://img.shields.io/badge/version-v1.8.1-purple.svg)](https://github.com/rennan101/nxnative_Launcher/releases)
 [![Appearance](https://img.shields.io/badge/UI-Liquid%20Glass-00E5FF.svg)](#)
 [![Multi-Language](https://img.shields.io/badge/Languages-13%20Locales-34D399.svg)](#)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)

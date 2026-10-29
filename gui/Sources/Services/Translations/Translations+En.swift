@@ -366,6 +366,10 @@ extension Translations {
         "applogo.help": "Click to personalize launcher appearance & highlight color",
         "build.step_1_title": "1. Game Files (NSP / NSZ / XCI / ZIP)",
         "build.opt_fps": "Display real-time FPS counter and overlay (--show-fps)",
+        "build.opt_romfs_separate": "Separate RomFS data from IPA (--romfs separate)",
+        "build.opt_romfs_separate_help": "Leaves large game files out of the IPA. Generates a lightweight (<100 MB) IPA for AltStore, Sideloadly, or Kravasign, keeping RomFS.img for one-time direct transfer.",
+        "build.romfs_split_recommendation": "Large Game Detected (~%@): Sideloading tools often fail on huge IPAs. Enabling Separate RomFS is strongly recommended.",
+        "common.enable": "Enable",
         "build.opt_keep_extracted": "Keep intermediate extracted files for fast rebuilds (--keep-extracted)",
         "build.opt_survey_only": "Survey inspection only (Survey Only)",
         "build.opt_advanced_title": "Advanced Options & Build Flags",
@@ -482,5 +486,9 @@ extension Translations {
         "menubar.no_games": "No Games Installed",
         "menubar.free_memory": "Free Standby Memory",
         "menubar.quit": "Quit NxNative Launcher",
+        "menubar.icon_style": "Taskbar Icon Style",
+        "menubar.icon_style_symbol": "White Symbol (No Background)",
+        "menubar.icon_style_dark": "Dark",
+        "menubar.icon_style_light_color": "Light with Color",
 ]
 }

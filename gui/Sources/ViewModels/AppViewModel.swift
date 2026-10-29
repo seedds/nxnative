@@ -23,6 +23,12 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         public static let savedLibraryCardScale = "NXNative_SavedLibraryCardScale"
         public static let savedLauncherLanguage = "NXNative_SavedLauncherLanguage"
         public static let savedHiddenGamePaths = "NXNative_SavedHiddenGamePaths"
+        public static let savedRomfsSeparate = "NXNative_SavedRomfsSeparate"
+        public static let savedAutoRomfsSplitLimitGB = "NXNative_SavedAutoRomfsSplitLimitGB"
+        public static let savedCustomCertP12Path = "NXNative_SavedCustomCertP12Path"
+        public static let savedCustomCertPassword = "NXNative_SavedCustomCertPassword"
+        public static let savedCustomProvisioningProfilePath = "NXNative_SavedCustomProvisioningProfilePath"
+        public static let savedMenuBarIconStyle = "NXNative_SavedMenuBarIconStyle"
     }
     
     // MARK: - Workspace & Paths
@@ -194,6 +200,46 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         }
     }
     @Published public var surveyOnly: Bool = false
+    @Published public var romfsSeparate: Bool = false {
+        didSet {
+            UserDefaults.standard.set(romfsSeparate, forKey: StorageKeys.savedRomfsSeparate)
+            if romfsSeparate {
+                keepExtracted = true
+            }
+        }
+    }
+    @Published public var autoRomfsSplitLimitGB: Double = 8.0 {
+        didSet {
+            UserDefaults.standard.set(autoRomfsSplitLimitGB, forKey: StorageKeys.savedAutoRomfsSplitLimitGB)
+        }
+    }
+    @Published public var customCertP12Path: String = "" {
+        didSet {
+            UserDefaults.standard.set(customCertP12Path, forKey: StorageKeys.savedCustomCertP12Path)
+        }
+    }
+    @Published public var customCertPassword: String = "" {
+        didSet {
+            UserDefaults.standard.set(customCertPassword, forKey: StorageKeys.savedCustomCertPassword)
+        }
+    }
+    @Published public var customProvisioningProfilePath: String = "" {
+        didSet {
+            UserDefaults.standard.set(customProvisioningProfilePath, forKey: StorageKeys.savedCustomProvisioningProfilePath)
+        }
+    }
+    
+    public var shouldSuggestRomfsSplit: Bool {
+        guard platform == .ios else { return false }
+        let totalBytes = selectedGame?.totalSizeBytes ?? detectedFiles.reduce(0) { $0 + $1.sizeBytes }
+        let limitBytes = Int64(autoRomfsSplitLimitGB * 1_073_741_824)
+        return totalBytes >= limitBytes
+    }
+    
+    public var selectedGameSizeString: String {
+        let totalBytes = selectedGame?.totalSizeBytes ?? detectedFiles.reduce(0) { $0 + $1.sizeBytes }
+        return ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
+    }
     
     // MARK: - Build State
     @Published public var isBuilding: Bool = false
@@ -213,6 +259,15 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         didSet {
             UserDefaults.standard.set(iconAppearanceMode.rawValue, forKey: StorageKeys.savedIconAppearanceMode)
             updateDockIcon()
+        }
+    }
+    @Published public var menuBarIconStyle: MenuBarIconStyle = .symbol {
+        didSet {
+            UserDefaults.standard.set(menuBarIconStyle.rawValue, forKey: StorageKeys.savedMenuBarIconStyle)
+            let style = menuBarIconStyle
+            DispatchQueue.main.async {
+                MenuBarManager.shared.updateMenuBarIcon(style: style)
+            }
         }
     }
     @Published public var highlightTheme: LauncherHighlightTheme = NXTheme.activeHighlightTheme {
@@ -325,9 +380,28 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
            let p = TargetPlatform(rawValue: savedPlat) {
             self.platform = p
         }
+        if let savedRomfs = UserDefaults.standard.object(forKey: StorageKeys.savedRomfsSeparate) as? Bool {
+            self.romfsSeparate = savedRomfs
+        }
+        if let savedSplitLimit = UserDefaults.standard.object(forKey: StorageKeys.savedAutoRomfsSplitLimitGB) as? Double {
+            self.autoRomfsSplitLimitGB = savedSplitLimit
+        }
+        if let savedP12 = UserDefaults.standard.string(forKey: StorageKeys.savedCustomCertP12Path) {
+            self.customCertP12Path = savedP12
+        }
+        if let savedPass = UserDefaults.standard.string(forKey: StorageKeys.savedCustomCertPassword) {
+            self.customCertPassword = savedPass
+        }
+        if let savedProfile = UserDefaults.standard.string(forKey: StorageKeys.savedCustomProvisioningProfilePath) {
+            self.customProvisioningProfilePath = savedProfile
+        }
         if let savedMode = UserDefaults.standard.string(forKey: StorageKeys.savedIconAppearanceMode),
            let mode = AppIconAppearanceMode(rawValue: savedMode) {
             self.iconAppearanceMode = mode
+        }
+        if let savedMenuStyle = UserDefaults.standard.string(forKey: StorageKeys.savedMenuBarIconStyle),
+           let menuStyle = MenuBarIconStyle(rawValue: savedMenuStyle) {
+            self.menuBarIconStyle = menuStyle
         }
         if let savedTheme = UserDefaults.standard.string(forKey: StorageKeys.savedHighlightTheme),
            let theme = LauncherHighlightTheme(rawValue: savedTheme) {
@@ -397,6 +471,33 @@ public final class AppViewModel: ObservableObject, BuildRunnerDelegate, Installe
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             MenuBarManager.shared.configure(with: self)
+        }
+    }
+    
+    // MARK: - Custom Signing Pickers
+    public func selectCustomCertP12() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = []
+        panel.prompt = "Select .p12 Certificate"
+        panel.message = "Choose your custom Apple Developer Certificate (.p12)."
+        if panel.runModal() == .OK, let url = panel.url {
+            self.customCertP12Path = url.path
+        }
+    }
+
+    public func selectCustomProvisioningProfile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = []
+        panel.prompt = "Select .mobileprovision"
+        panel.message = "Choose your custom Provisioning Profile (.mobileprovision)."
+        if panel.runModal() == .OK, let url = panel.url {
+            self.customProvisioningProfilePath = url.path
         }
     }
 }

@@ -51,9 +51,11 @@ static class SwshXlate
         public SetBindingPair CreateStorageBufferBinding(int index) => new(0, _binding++);
         public SetBindingPair CreateTextureBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(0, b); }
         public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize) => MemoryMarshal.Cast<byte, ulong>(new ReadOnlySpan<byte>(_code)[(int)address..]);
-        public int QuerySamplerArrayLengthFromPool() => 32;
+        // A texture read whose handle the translator cannot trace to one slot indexes the texture and sampler pools by the handle's IDs (20 and 12 bits); dmsh_build.py turns these
+        // arrays into pointers to the pools the replay keeps (pool_arrays), with a run-time bound, so the lengths are the whole ID ranges
+        public int QuerySamplerArrayLengthFromPool() => 1 << 12;
         public int QueryTextureArrayLengthFromBuffer(int slot) => 32;
-        public int QueryTextureArrayLengthFromPool() => 32;
+        public int QueryTextureArrayLengthFromPool() => 1 << 20;
 
         string Get(string table, int slot) => _job[table] is JsonObject t && t[slot.ToString()] is JsonNode n ? (n is JsonObject o ? (string)o["type"] : (string)n) : null;
         // A handle's texture or image slot, numbered as dmsh_build.py decode_tex numbers the reflection's (so an answer table row names the slot the reflection shows): the handle ORs two

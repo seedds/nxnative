@@ -281,8 +281,8 @@ static region_t *g_rgn; static int g_nrgn, g_rgn_cap; static pthread_mutex_t g_r
 static _Thread_local uint64_t t_rgn_size, t_rgn_via; static _Thread_local char t_rgn_who[40];
 // Where a request at an sdk function's entry gate returns to in the game: buf gets "main+0x…", *via the outermost sdk return address on the way (0 = none)
 static void guest_caller(const uint64_t *r, char *buf, size_t n, uint64_t *via) {
-    // at the function's entry the return address is the x30 the gate block pushed above the gate's register frame (regs + 800: x29, x30; entry.S), x30 itself holds the gate's own
-    uint64_t lr = r[101], fp = r[29]; module_t *m = module_of((void *)(uintptr_t)lr);
+    // at the function's entry the return address is the x30 the gate block pushed (at the block's sp, regs[99]: x29, x30; entry.S), x30 itself holds the gate's own
+    uint64_t lr = ((const uint64_t *)(uintptr_t)r[99])[1], fp = r[29]; module_t *m = module_of((void *)(uintptr_t)lr);
     *via = 0;
     for (int i = 0; i < 32 && m && !strcmp(m->name, "sdk"); i++) {
         *via = lr - (uint64_t)(uintptr_t)m->base;   // AArch64 frame records: [fp] = the caller's fp, [fp + 8] = its return address

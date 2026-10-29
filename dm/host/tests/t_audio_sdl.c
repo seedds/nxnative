@@ -92,7 +92,10 @@ int main(void) {
     int t1 = threads();
     cycle(6, 1, "a six-channel output opens");
     cycle(2, 1, "and a stereo one again");
+    // A thread that is exiting still has its /proc/self/task entry for a moment after the join (or after SDL's device thread was told to stop): the count is read until it settles,
+    // up to a second. A thread that is still there after that is a leak (CI run 8 on f8ac96d read 3 right after Close and failed on one exiting thread)
     int t2 = threads();
+    for (int ms = 0; t2 != t1 && ms < 1000; ms += 10) { sleep_ms(10); t2 = threads(); }
     if (t0 >= 0) CHECK(t2 == t1, "a second and third open / play / close cycle leave no thread behind");
     else printf("note: thread counting is Linux-only; the leak check did not run here\n");
     printf("threads: %d at start, %d after the first output (its watchdog and SDL's own), %d after two more\n", t0, t1, t2);

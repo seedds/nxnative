@@ -228,6 +228,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 - abort in NVIDIA's video path (`NvRmChannelOpen` → `NvOsDrvOpen`). → [The SDK's hardware decoder opens nvdrv](../reference/movies.md#the-sdks-hardware-decoder-opens-nvdrv)
 - the game waits forever at a movie (Engage's 94 s opening `S01F.webm`; frames keep presenting, nothing happens). → [`movie::Decoder` taken over as a MediaCodec-style protocol](../reference/movies.md#moviedecoder-taken-over-as-a-mediacodec-style-protocol)
+- an anime or story movie ends on a black screen; the pause menu still works and skipping lets the game continue. → [H.264 POC type 2 needs no presentation reorder queue](../reference/movies.md#h264-poc-type-2-needs-no-presentation-reorder-queue)
 - a movie in grey with vertical bands of colour, its luma sharp; or a read far outside guest memory at `main+0x344f74` on the first movie picture (CRI Sofdec2's NV12 → RGB conversion). → [Output format keys (`md_format`)](../reference/movies.md#output-format-keys-md_format)
 - a call through a null pointer in the host's `movie::Decoder::Configure` right after `nnMain` starts the logos. → [SDK 4's `movie::Decoder` constructor without a priority](../reference/movies.md#sdk-4s-moviedecoder-constructor-without-a-priority)
 - the first deferred signal crashed in `InternalCriticalSectionImplByHorizon::Enter` (DRAGON QUEST XI S). → [Client events read through the registered pointer](../reference/movies.md#client-events-read-through-the-registered-pointer)

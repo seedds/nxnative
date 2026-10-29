@@ -18,6 +18,14 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md): when the movie ends the game continues to its title screen.
 - **Note:** output slots, VP9 decoding and the output format keys are in their own entries ([Packets wait while every output slot is taken](#packets-wait-while-every-output-slot-is-taken), [VP9 on host threads with libvpx](#vp9-on-host-threads-with-libvpx), [Output format keys (`md_format`)](#output-format-keys-md_format)).
 
+### H.264 POC type 2 needs no presentation reorder queue
+
+- **Symptom:** an anime or story movie ends on a black screen; the pause menu still works and skipping lets the game continue.
+- **Cause:** `hle_movie_avc.c` held four pictures for every non-Baseline H.264 stream, assuming High profile meant B-frames. Catherine's High-profile streams use SPS `pic_order_cnt_type = 2`, whose picture order follows decode order (H.264 8.2.1.3), and CRI Sofdec2 supplies zero timestamps. The unnecessary hold moved the last picture onto the end-of-stream output. CRI discards an output flagged EOS and waits for that missing picture before completing playback. On the original host the anime intro stays black after its EOS buffers; the last picture is returned only with flag 4.
+- **Fix:** `avc_reorder_depth` reads the SPS prefix, removing emulation-prevention bytes and accounting for extended-profile fields and scaling lists. POC type 2 uses depth zero in every profile; other POC modes retain the previous depth and EOS drain. No timeout or movie skip is used. The same intro now delivers all 1,141 pictures and transitions into Golden Playhouse automatically.
+- **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (1.0.1a, CRI Sofdec2, H.264 High, NV12).
+- **Check:** `t_movie_avc` uses synthetic SPS prefixes and pixel buffers to check immediate final-picture delivery, other POC modes' hold/drain, scaling-list syntax, chroma formats and truncated input. The game's `smoke.tsv` lets its intro finish without pressing skip; the original and corrected hosts were compared from fresh saves on the Mac. Later story movies and iPhone completion still need validation.
+
 ### Output format keys (`md_format`)
 
 - **Symptom:** a movie in grey with vertical bands of colour, its luma sharp; or a read far outside guest memory at `main+0x344f74` on the first movie picture (CRI Sofdec2's NV12 → RGB conversion).

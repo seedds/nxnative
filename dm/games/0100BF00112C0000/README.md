@@ -39,6 +39,7 @@ Brought up on the Mac: the ATLUS logo, the title, the puzzle type choice, the Go
 - CRI ADX2 sound (`data/sound*/*.acb` / `.awb`) through one 6-channel AudioOut.
 - CRI Sofdec2 movies (`data/movie*/*.usm`) whose H.264 goes through the SDK's `movie::Decoder` (the host's VideoToolbox decoder; mode 1, output format 4).
 - **Resolved: a read far outside guest memory at `main+0x344f74` on the first movie picture** (Sofdec2's NV12 → RGB conversion). The player reads `nv12-y-stride`, `nv12-y-offset`, `nv12-uv-stride` and `nv12-uv-offset` from the output format and checks none of the results (`main+0x34e694`); the host set no `nv12-uv-stride`, so the chroma stride was stack garbage. It is the luma stride now, as for any NV12 picture (`hle_movie.c` `md_format`).
+- **Resolved on the Mac: the anime intro ends on a black screen until manually skipped.** Its H.264 High stream uses POC type 2, which needs no reorder queue. Holding four pictures caused the player to discard the last picture as EOS and wait forever. The corrected host delivers all 1,141 pictures and enters Golden Playhouse automatically, from a fresh save with no skip input; see [H.264 POC type 2 needs no presentation reorder queue](../../../docs/reference/movies.md#h264-poc-type-2-needs-no-presentation-reorder-queue). The same symptom was reported on iPhone for later story videos; those scenes remain unverified.
 
 ## Services
 
@@ -56,6 +57,7 @@ Brought up on the Mac: the ATLUS logo, the title, the puzzle type choice, the Go
 ## Mac routes
 
 - From a fresh save, `DM_KEYS="5:A*25/2,60:Plus*14/4,61:Y*14/4,62:A*14/4"` skips the intro scenes into the first Nightmare stage (about frame 3,300); `120:LUp~0.4*40/1.5` then climbs.
+- `smoke.tsv` uses only `DM_KEYS="5:A*25/2"`, then waits through the entire anime intro. Golden Playhouse is visible at frame 3,600 with the POC type 2 fix; the original host remains black.
 
 ## Found on this game
 
@@ -65,6 +67,7 @@ General host changes first needed here; each applies to every game:
 - **VertexA / VertexB merge** (`shader_split.py` `sph_stage`, `dmsh_build.py` `vertex_ab`), explained in full under [Shaders](#shaders): [VertexA and VertexB parts merged into one vertex shader](../../../docs/reference/shaders.md#vertexa-and-vertexb-parts-merged-into-one-vertex-shader).
 - **Commit at the first pass boundary after a buffer → texture copy** (`g_cut_copy`, `sub_cut`; always on, even with `DM_NVN_CUT=0`): same section.
 - **`nv12-uv-stride` in the movie decoder's output format** (`md_format` in `hle_movie.c`): [Output format keys (`md_format`)](../../../docs/reference/movies.md#output-format-keys-md_format).
+- **No reorder delay for H.264 POC type 2** (`hle_movie_avc.c`): [H.264 POC type 2 needs no presentation reorder queue](../../../docs/reference/movies.md#h264-poc-type-2-needs-no-presentation-reorder-queue).
 - **`nn::settings::GetAvailableLanguageCodeCount`** (`hle_sdk16.c`): same section.
 
 ## Open

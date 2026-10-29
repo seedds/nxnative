@@ -190,6 +190,8 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 ## Found on this game
 
+- **Optional touch-camera preferences (tested on iPhone Duo, iOS 27.2, in LiveContainer):** [Relative swipe camera input on iOS](../../../docs/reference/services.md#relative-swipe-camera-input-on-ios). User feedback on the 1.9.0 prototypes motivated a game-independent swipe option and configurable touch sensitivity/dead zone; this is separate from physical-controller input.
+
 - **Resolved build guard and cache isolation; rendering cause open:** [Tested tools and compiler-specific shader caches](../../../docs/reference/shaders.md#tested-tools-and-compiler-specific-shader-caches).
 
 General host changes first needed here; each applies to every game:

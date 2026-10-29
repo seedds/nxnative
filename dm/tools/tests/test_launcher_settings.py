@@ -26,6 +26,20 @@ def build(gid, api, platform=None):
 
 
 class LauncherSettingsTests(unittest.TestCase):
+    def test_touch_settings_are_opt_in_and_game_independent(self):
+        for gid, api in [(BOTW, 'nvn'), (WONDER, 'nvn'), ('0100535012974000', 'vulkan'), ('010014E00DB56000', 'gl')]:
+            with self.subTest(game=gid):
+                rows = build(gid, api)
+                mode, gain, dead, area = [rows[k] for k in ('DM_TOUCH_SWIPE', 'DM_TOUCH_SWIPE_GAIN', 'DM_TOUCH_LEFT_DEADZONE', 'DM_TOUCH_RIGHT_AREA')]
+                self.assertEqual((mode['kind'], mode['default']), ('toggle', '0'))
+                self.assertEqual((gain['kind'], float(gain['default']), gain['min'], gain['max'], gain['step']),
+                                 ('range', 1, 0.25, 4, 0.05))
+                self.assertEqual((dead['kind'], float(dead['default']), dead['min'], dead['max'], dead['step']),
+                                 ('range', 0.1, 0, 0.4, 0.01))
+                self.assertEqual((area['kind'], area['default']), ('choice', 'third'))
+                self.assertEqual(area['options'], [['third', 'Right third'], ['half', 'Right half']])
+                self.assertTrue(all(r['section'] == 'Controls' for r in (mode, gain, dead, area)))
+
     def test_upscaling_is_opt_in_for_every_graphics_api(self):
         for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
             with self.subTest(api=api):
@@ -62,7 +76,7 @@ class LauncherSettingsTests(unittest.TestCase):
     def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS'})
+        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_TOUCH_SWIPE', 'DM_TOUCH_SWIPE_GAIN', 'DM_TOUCH_RIGHT_AREA', 'DM_TOUCH_LEFT_DEADZONE'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN'})   # the Mac window's Display mode (front_mac.m reads 1 or 0)
         s = mac['DM_FULLSCREEN']

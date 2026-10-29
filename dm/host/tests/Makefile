@@ -19,6 +19,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	$(B)/t_gesture
 	$(B)/t_oe $(QUIET)
 	$(B)/t_fs $(QUIET)
+	$(B)/t_save_archive
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_commit_list
 	$(B)/t_thread_leak
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_case $(QUIET)
@@ -159,6 +160,12 @@ $(B)/t_save_sync_metadata: t_save_sync_metadata.c ../save_sync.c ../save_sync.h 
 save-sync: $(B)/t_save_sync $(B)/t_save_sync_metadata
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_metadata $(QUIET)
+run: $(B)/t_save_archive
+$(B)/t_save_archive: t_save_archive.c ../save_archive.c ../save_archive.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. -o $@ t_save_archive.c ../save_archive.c
+.PHONY: save-archive
+save-archive: $(B)/t_save_archive
+	$(B)/t_save_archive
 $(B)/t_audio: t_audio.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c ../hle_bigstack.c -framework AudioToolbox
 $(B)/t_output_stream: t_output_stream.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)

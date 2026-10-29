@@ -109,16 +109,18 @@ class InstallIOSAppTests(unittest.TestCase):
              "deviceProperties": {"name": "First"}, "connectionProperties": {"tunnelState": "connected"}},
             {"hardwareProperties": {"udid": "sim", "deviceType": "iPhone", "reality": "simulated", "marketingName": "iPhone Simulator"},
              "deviceProperties": {"name": "Simulator"}, "connectionProperties": {"tunnelState": "connected"}},
+            {"hardwareProperties": {"udid": "tablet", "deviceType": "iPad", "reality": "physical", "marketingName": "iPad Pro"},
+             "deviceProperties": {"name": "Tablet"}, "connectionProperties": {"tunnelState": "disconnected"}},
             {"hardwareProperties": {"udid": "tv", "deviceType": "AppleTV", "reality": "physical", "marketingName": "Apple TV"},
              "deviceProperties": {"name": "Living Room"}, "connectionProperties": {"tunnelState": "connected"}},
         ]}}
 
-    def test_device_discovery_lists_only_physical_iphones_connected_first(self):
+    def test_device_discovery_lists_only_physical_devices_connected_first(self):
         response = subprocess.CompletedProcess([], 0, json.dumps(self.device_payload()), "")
         with patch.object(installer.subprocess, "run", return_value=response):
             devices = installer.discover_devices()
-        self.assertEqual([device.name for device in devices], ["First", "Second"])
-        self.assertEqual([device.connected for device in devices], [True, False])
+        self.assertEqual([device.name for device in devices], ["First", "Second", "Tablet"])
+        self.assertEqual([device.connected for device in devices], [True, False, False])
 
     def test_choose_device_requires_one_connected_match(self):
         devices = [installer.Device("First", "a", "iPhone", True), installer.Device("Second", "b", "iPhone", True)]

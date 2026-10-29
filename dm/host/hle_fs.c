@@ -1068,7 +1068,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         got += r;
     }
     *out = got;
-    if (atomic_load(&g_fsrng_on) && (int)IMG_M(h) == atomic_load(&g_fsimgrack))   // only image reads: the list's coordinates are image offsets, so a folder mount's reads stay out
+    if (atomic_load(&g_fsrng_on) && IMG_H(h) && (int)IMG_M(h) == atomic_load(&g_fsimgrack))   // only image reads: the list's coordinates are image offsets, so a folder mount's reads stay out
         fs_rng_tracked((uint64_t)base + (uint64_t)off, (uint64_t)base + (uint64_t)off + got);
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)

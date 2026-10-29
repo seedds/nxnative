@@ -252,7 +252,15 @@ void front_run(void (*guest)(void)) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-        NSRect r = NSMakeRect(0, 0, 1280, 720);
+        // Window size: the largest 16:9 that fits the visible frame, capped at 1920x1080 points
+        // (Retina backing 3840x2160 keeps the game's dynamic resolution untouched); DM_WINDOW_SIZE=WxH overrides.
+        NSScreen *scr = NSScreen.mainScreen; NSRect vis = scr ? scr.visibleFrame : NSMakeRect(0, 0, 1280, 720);
+        double w = 1920, h = 1080, sc = 2.0;
+        if (vis.size.width < w || vis.size.height < h) { sc = MIN(vis.size.width / 16.0, vis.size.height / 9.0); w = floor(sc * 16); h = floor(sc * 9); }
+        const char *ws = getenv("DM_WINDOW_SIZE");   // "WxH" in points
+        if (ws && sscanf(ws, "%lfx%lf", &w, &h) == 2 && w > 0 && h > 0) { }
+        NSRect r = NSMakeRect(0, 0, w, h);
+        LOG("window %.0fx%.0f points at scale %.1f (DM_WINDOW_SIZE=WxH overrides)", w, h, scr ? scr.backingScaleFactor : 1.0);
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];

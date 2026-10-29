@@ -99,6 +99,12 @@ int main(void) {
         setenv("DM_FS_RECORD", "1", 1);
         CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the image with the recorder on");
         char *buf = malloc(BIG);
+        // A folder-backed read has an ordinary fd, whose high bits also decode to mount zero.
+        CHECK(mount("folder", save, 0) == RES_OK, "mount a folder beside the tracked image");
+        char folder_file[1200]; snprintf(folder_file, sizeof folder_file, "%s/plain", save);
+        FILE *plain = fopen(folder_file, "wb"); memset(buf, 'F', BIG); fwrite(buf, 1, BIG, plain); fclose(plain);
+        CHECK(read_file("folder:/plain", 0, buf, BIG), "read a folder-backed file while image recording is on");
+        CHECK(list_eq(list, "image\t123066\n"), "folder reads never enter the image's range list");
         CHECK(read_file("rom:/data/a", 0, buf, BIG) && buf[0] == 'A' && buf[BIG / 2] == 'A' && buf[BIG - 1] == 'A', "the layout: a reads 100 KiB of 'A' in full");
         CHECK(list_eq(list, LIST_1), "the list: the identity row with the image's size and a's row only");
         CHECK(read_file("rom:/data/a", 0, buf, BIG), "a re-read of a in full");

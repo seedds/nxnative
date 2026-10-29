@@ -83,6 +83,17 @@ int main(void) {
     CHECK(r == 5 && !memcmp(buf, "hello", 5) && from[0] == 2, "RecvFrom");
     CHECK(lasterr() == 0, "GetLastError");
 
+    uint8_t short_from[16]; memset(short_from, 0xa5, sizeof short_from);
+    unsigned short_len = 4;
+    CHECK(sendto_(a, "short", 5, 0, dst, 16) == 5, "SendTo for truncated address");
+    CHECK(recvfrom_(a, buf, sizeof buf, 0, short_from, &short_len) == 5 && short_len == 16,
+          "RecvFrom reports the full source address length");
+    CHECK(short_from[0] == 2 && short_from[4] == 0xa5 && short_from[15] == 0xa5,
+          "RecvFrom respects the source address capacity");
+    memset(short_from, 0xa5, sizeof short_from); short_len = 4;
+    CHECK(gname(a, short_from, &short_len) == 0 && short_len == 16 && short_from[0] == 2 && short_from[4] == 0xa5,
+          "GetSockName truncates to the capacity and reports the full length");
+
     int fl0 = fcntl_(a, 3, 0);   // F_GETFL
     CHECK(fl0 >= 0, "Fcntl GETFL");
     CHECK(fcntl_(a, 4, (long)(fl0 | 0x800)) == 0, "Fcntl SETFL non-blocking");   // Horizon's O_NONBLOCK = 0x800
@@ -136,6 +147,20 @@ int main(void) {
     int64_t tv[2] = {0, 500000};   // 0.5 s
     CHECK(select_(b + 1, rset, NULL, NULL, tv) == 1, "Select readable");
     CHECK(close_(a) == 0 && close_(b) == 0, "Close");
+
+    int listener = dm_sk_socket(2, 1, 0), client = dm_sk_socket(2, 1, 0);
+    CHECK(listener >= 0 && client >= 0, "TCP sockets");
+    CHECK(dm_sk_bind(listener, any, 16) == 0 && dm_sk_listen(listener, 1) == 0, "TCP listener");
+    nl = sizeof name;
+    CHECK(dm_sk_name(listener, name, &nl, 0) == 0, "TCP listener address");
+    guest_addr(dst, 0x7f000001, (uint16_t)((name[2] << 8) | name[3]));
+    CHECK(dm_sk_connect(client, dst, sizeof dst) == 0, "TCP connect");
+    memset(short_from, 0xa5, sizeof short_from); short_len = 4;
+    int accepted = dm_sk_accept(listener, short_from, &short_len);
+    CHECK(accepted >= 0 && short_len == 16 && short_from[0] == 2 && short_from[4] == 0xa5,
+          "Accept truncates to the capacity and reports the full length");
+    CHECK(dm_sk_close(accepted) == 0 && dm_sk_close(client) == 0 && dm_sk_close(listener) == 0, "TCP close");
+
 
     CHECK(handle_error() == 0, "online nifm network screen did not resolve the error");
     CHECK(netavail() == 1, "nifm IsNetworkAvailable");

@@ -817,6 +817,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** the synthetic socket regression test, without game files.
 - **Check:** `t_net` sends a datagram beyond IPv4 UDP's payload limit and interrupts a socket poll with `SIGUSR1` on the polling thread; both return their actual error, and a subsequent successful poll clears it. The ordinary loopback and broadcast-delivery checks still pass.
 
+### Socket address outputs respect the caller's capacity
+
+- **Symptom:** with `DM_NET=1`, `RecvFrom` overwrites bytes beyond a short source-address buffer; `Accept` and `GetSockName` leave short buffers and their lengths unchanged.
+- **Cause:** the host-to-guest conversion always copied 16 bytes, while the other callers skipped conversion unless the entire address fit. `Accept` also discarded the output length.
+- **Fix:** copy only the supplied capacity and report the full 16-byte address length, including when the buffer is truncated (`hle_net.c`).
+- **Found on:** the synthetic socket regression test, without game files.
+- **Check:** `t_net` supplies four-byte address capacities to UDP receive, socket-name lookup and TCP accept, checking the returned length and the untouched bytes beyond each capacity.
+
 ## Settings, languages and fonts
 
 ### Language codes

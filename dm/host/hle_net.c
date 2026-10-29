@@ -198,8 +198,9 @@ static void sk_guest_addr(void *g, unsigned *gl, const struct sockaddr_in *h) { 
     o[0] = 2;   // AF_INET as the guest's u16 family
     memcpy(o + 2, &h->sin_port, 2);
     memcpy(o + 4, &h->sin_addr, 4);
-    memcpy(g, o, 16);
-    if (gl) *gl = 16;
+    unsigned capacity = gl ? *gl : 0;
+    if (capacity) memcpy(g, o, capacity < sizeof o ? capacity : sizeof o);
+    if (gl) *gl = sizeof o;
 }
 static int sk_is_broadcast(const struct sockaddr_in *d) {   // 255.255.255.255 / the interface's own IP / its /24's .255
     if (d->sin_addr.s_addr == INADDR_BROADCAST || !d->sin_addr.s_addr) return 1;
@@ -239,7 +240,7 @@ int dm_sk_accept(int s, void *a, unsigned *n) {
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
     struct sockaddr_in h = {0}; socklen_t l = sizeof h;
     int r = (int)accept(s, (struct sockaddr *)&h, &l);
-    if (r >= 0) { t_skerr = 0; if (a && n && *n >= 16) sk_guest_addr(a, NULL, &h); }
+    if (r >= 0) { t_skerr = 0; if (a && n) sk_guest_addr(a, n, &h); }
     else t_skerr = errno;
     return r;
 }
@@ -256,7 +257,7 @@ int dm_sk_name(int s, void *a, unsigned *n, int peer) {   // GetPeerName (1) / G
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
     struct sockaddr_in h = {0}; socklen_t l = sizeof h;
     int rc = peer ? getpeername(s, (struct sockaddr *)&h, &l) : getsockname(s, (struct sockaddr *)&h, &l);
-    if (rc >= 0) { t_skerr = 0; if (a && n && *n >= 16) sk_guest_addr(a, n, &h); }
+    if (rc >= 0) { t_skerr = 0; if (a && n) sk_guest_addr(a, n, &h); }
     else t_skerr = errno;
     return rc;
 }
@@ -312,7 +313,7 @@ long dm_sk_recvfrom(int s, void *b, unsigned long n, int f, void *a, unsigned *a
     if (!dm_net_online()) { t_skerr = SK_ENETDOWN; return -1; }
     struct sockaddr_in d = {0}; socklen_t l = sizeof d;
     long r = recvfrom(s, b, n, f, a ? (struct sockaddr *)&d : NULL, a ? &l : NULL);
-    if (r >= 0) { t_skerr = 0; if (a) sk_guest_addr(a, al, &d); }
+    if (r >= 0) { t_skerr = 0; if (a && al) sk_guest_addr(a, al, &d); }
     else t_skerr = errno;
     return r;
 }

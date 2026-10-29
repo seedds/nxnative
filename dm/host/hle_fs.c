@@ -428,7 +428,10 @@ static Result err_res(const char *op, const char *path) {
 HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host directory directly, the cache gets only the minimum size", Result, h_fs_QueryRomCache, size_t *out) { *out = 0x1000; return RES_OK; }
 HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) {
     (void)cache; (void)sz; char b[1024];
-    Result r = mount(name, envdir("DM_ROMFS", "romfs", b, sizeof b), 1);
+    const char *dir = envdir("DM_ROMFS", "romfs", b, sizeof b);
+    // A missing path is a stale DM_ROMFS (a folder replaced by RomFS.img): stop here, not at the game's first failed read
+    struct stat st; if (stat(dir, &st) || !(S_ISDIR(st.st_mode) || S_ISREG(st.st_mode))) die("the game files %s are missing (DM_ROMFS names neither a RomFS folder nor an image)", dir);
+    Result r = mount(name, dir, 1);
     if (r == RES_OK && getenv("DM_ROMFS_OVERLAY")) {
         PATH_LOCK();
         for (int i = 0; i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) {

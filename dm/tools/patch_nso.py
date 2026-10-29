@@ -1201,7 +1201,7 @@ obs += region_obs
 # its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed). Fields a build's stubs read only when its fixups table names them
 # (the loader writes them for that build alone): +0x40 u64 output width | height << 32 and +0x48 float output width (OUTPUT_W / OUTPUT_H; 0 = the game's), +0x4c u32 render buffer pool
 # factor and +0x58 u64 bytes added to the game's heaps around it (RENDER_POOL; 0 = as the game sets them), +0x50 float variable frame step in 1/30 s units (VAR_STEP, written by the
-# host each frame; 0 = off). Stub bodies assembled with clang
+# host each frame; 0 = off) and +0x54 the same latched by the build's stubs once a game frame. Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
 # no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = 1 marks a render-scale stub, and
 # ctx.keys[KEY] = value adds a row to the fixups table for stubs the loader writes further state page fields for (VAR_STEP, RENDER_POOL, VIEW_W / VIEW_H, OUTPUT_W / OUTPUT_H)

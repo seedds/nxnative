@@ -1655,8 +1655,8 @@ static int fps_present_cap(void) {
     return g_present_cap;
 }
 // Variable frame step (a build whose rewriter table names VAR_STEP, DM_FPS_TARGET 61 to 240; loader.c dm_fps_var_cap): each frame steps the game by the real time the previous one
-// took, in 1/30 s units at state +0x50 (at least 1/240 s, at most the game's own longest step, 1.5), and the frame is shown on the next display-link tick. While the game fixes its own
-// step (BotW's VFR override in cutscenes) or a prerendered movie halves the cap, the whole-vsync step holds as below
+// took, in 1/30 s units at state +0x50 (at least 1/240 s, at most the game's own longest step, 1.5; the build's stubs latch it once a game frame), and the frame is shown on the next
+// display-link tick. While the game fixes its own step (BotW's VFR override in cutscenes) or a prerendered movie halves the cap, the whole-vsync step holds as below
 __attribute__((weak)) int dm_fps_var_cap;   // loader.c; graphics unit tests have no loader
 static int vstep_on(void) { return dm_fps_var_cap && fps_step_cap() == 60 && !__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED); }
 int nvn_var_fps(void) { return dm_fps_state && vstep_on() ? dm_fps_var_cap : 0; }   // nvn_mtl.m: the display link runs at the cap while the variable step holds
@@ -1815,15 +1815,14 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
     }
     return lc;
 }
-// Once per present while the variable step holds: the time since the previous frame's start is the next frame's step
+// Once per present while the variable step holds: the time since the previous frame's start is the next frame's step (nvn_fstep.h nvn_vstep_next)
+static nvn_vstep g_vs;   // present thread only
 static void vstep_tick(const win_t *o) {
-    static uint64_t prev, t0, frames; static double game;
+    static uint64_t t0, frames; static double game;
     uint64_t st = g_fs_start ? g_fs_start : now_ns(); g_fs_start = g_fs_wait = 0;
-    double shown = prev ? (st - prev) / 1e9 : 0; prev = st;
     // No floor at the cap: on a screen whose rate is not a multiple of it the link's ticks lie on the nearest refreshes (nvn_mtl.m link_range), so at 120 on a 144 Hz screen
     // frames start 6.9 and 13.9 ms apart in turn; raising the short ones to 1/120 s ran the game at 1.12 of real time
-    float step = shown > 0 ? (float)(shown * 30) : 30.0f / dm_fps_var_cap;
-    if (step < 0.125f) step = 0.125f; if (step > 1.5f) step = 1.5f;
+    float step = nvn_vstep_next(&g_vs, st, dm_fps_var_cap);
     memcpy(dm_fps_state + 0x50, &step, sizeof step);
     __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), 1u, __ATOMIC_RELAXED); atomic_store(&g_fs_k, 1);
     game += step / 30.0; frames++;
@@ -1833,7 +1832,8 @@ static void vstep_tick(const win_t *o) {
         t0 = t; game = 0; frames = 0;
     }
 }
-static void vstep_off(void) { if (dm_fps_var_cap) memset(dm_fps_state + 0x50, 0, 4); }   // the whole-vsync step holds (the game's own step, a prerendered movie)
+// The whole-vsync step holds (the game's own step, a prerendered movie): its frames are stepped by it, so the variable step starts again from the next frame's start
+static void vstep_off(void) { if (dm_fps_var_cap) { memset(dm_fps_state + 0x50, 0, 4); nvn_vstep_reset(&g_vs); } }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
     dm_fps_lock_tick(); dm_ue_cvar_tick();

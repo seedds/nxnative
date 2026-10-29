@@ -522,7 +522,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0xc61f28`: output size global = the host's (state page +0x40; 0 = 1920x1080)
   - frame step `+0xeb0f88`: held-button counts step by the VFR ratio (menu repeat in game time at any frame step)
   - frame step `+0x106d328`: render buffer pool size × the host factor (state page +0x4c; 0 = the game's 115 MB)
-  - frame step `+0x11269b8`: setWaitVsyncInterval: the host's step unless the VFR override is set (state page target fps; 0 = the game's interval)
+  - frame step `+0x11269b8`: setWaitVsyncInterval: the host's step unless the VFR override is set (state page target fps; 0 = the game's interval); latches the variable step
   - frame step `+0x125f118`: interval step: the VFR's frame ratio × 2 in place of max(interval, 1) (UI animation / fade)
   - frame step `+0x12618c4`: output size global = the host's (state page +0x40; 0 = 1920x1080)
   - frame step `+0x12660cc`: docked output width = the host's (state page +0x48; 0 = 1920.0)
@@ -533,7 +533,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x1280ecc`: interval step: the VFR's frame ratio × 2 in place of max(interval, 1) (UI animation / fade)
   - frame step `+0x128106c`: physics step ratio at least 0.5 (three substeps)
   - frame step `+0x151d3d0`: VFR::updateInterval: its own override published for the host (state page target fps; 0 = original)
-  - frame step `+0x151d484`: VFR::updateInterval: the published frame ratio is the host's variable step (state page +0x50) when set, unless the game overrides its interval
+  - frame step `+0x151d484`: VFR::updateInterval: the published frame ratio is the host's variable step (state page +0x54, latched) when set, unless the game overrides its interval
 
   </details>
 

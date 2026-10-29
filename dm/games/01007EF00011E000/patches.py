@@ -39,7 +39,9 @@ def frame_step(ctx):
     fs_site(0x11269b8, 'fd7bbea9'); fs_site(0x151d3d0, 'fd7bbea9')
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
     for w in (0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
-              0x34000191):  # cbz w17,orig (+12)
+              0x340001d1,   # cbz w17,orig (+14)
+              0xb9405211,   # ldr w17,[x16,#0x50]    the variable step (VAR_STEP below), latched once a frame at +0x54
+              0xb9005611):  # str w17,[x16,#0x54]
         emit(w)
     emit(ADRP(17, here(), 0x1e93890)); emit(LDRX(17, 17, 0x890 // 8))   # the VFR
     for w in (0xb4000131,   # cbz x17,orig (+9)
@@ -54,7 +56,7 @@ def frame_step(ctx):
               0xa9be7bfd):  # orig: stp x29,x30,[sp,#-0x20]!
         emit(w)
     emit(B(here(), 0x11269bc))
-    fs_put(0x11269b8, [B(0x11269b8, start)], 'setWaitVsyncInterval: the host\'s step unless the VFR override is set (state page target fps; 0 = the game\'s interval)')
+    fs_put(0x11269b8, [B(0x11269b8, start)], 'setWaitVsyncInterval: the host\'s step unless the VFR override is set (state page target fps; 0 = the game\'s interval); latches the variable step')
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
     for w in (0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
               0x340000b1,   # cbz w17,orig (+5)
@@ -84,19 +86,20 @@ def frame_step(ctx):
     # Variable frame step (VAR_STEP: a cap above 60, hle_nvn.c vstep_tick). VFR::updateInterval turns the interval into the frame ratio, the frame's length in 30 fps frames
     # (interval / [+0x150], 2: 0.5 at 60 fps), keeps it at +0x30 and publishes it at +0x3c, from which every per-core step is taken (main+0x151d7e8: delta frames at +0x108,
     # delta time at +0x138). The host's step (state +0x50: the time the last frame took, clamped) is published instead, except while the game's own override is set (cutscenes keep
-    # their steps); +0x30 keeps the interval's ratio for them. x9, x10 and s2 are dead at main+0x151d484 (w8 holds the changed flag stored next)
+    # their steps); +0x30 keeps the interval's ratio for them. It is read from +0x54, where the setter stub above latches it once a frame like the whole-vsync step: the host writes
+    # +0x50 on the presenting thread, which may come between the two VFR calls of a frame. x9, x10 and s2 are dead at main+0x151d484 (w8 holds the changed flag stored next)
     fs_site(0x151d484, '2020201e')
     start = here(); emit(ADRP(9, here(), FS_STATE_OFF))
     for w in (0x3940a66a,   # ldrb w10,[x19,#0x29]   the VFR's override
               0x350000aa,   # cbnz w10,orig (+5)
-              0xbd405122,   # ldr s2,[x9,#0x50]      the host's step (1/30 s units)
+              0xbd405522,   # ldr s2,[x9,#0x54]      the host's step (1/30 s units), as latched this frame
               0x1e202048,   # fcmp s2,#0.0
               0x5400004d,   # b.le orig (+2)         not set
               0x1e204041,   # fmov s1,s2             published at +0x3c
               0x1e202020):  # orig: fcmp s1,s0
         emit(w)
     emit(B(here(), 0x151d488))
-    fs_put(0x151d484, [B(0x151d484, start)], 'VFR::updateInterval: the published frame ratio is the host\'s variable step (state page +0x50) when set, unless the game overrides its interval')
+    fs_put(0x151d484, [B(0x151d484, start)], 'VFR::updateInterval: the published frame ratio is the host\'s variable step (state page +0x54, latched) when set, unless the game overrides its interval')
     # Logic that steps by the interval rather than the frame ratio. The menus (title screen, inventory) and the HUD animated at twice the speed at 120 fps: the layout system's
     # animation step is max(interval, 1) × 0.5 (main+0x1280ec8, the getter main+0x583118 reads the VFR's interval through its per-core pointers at +0x48) into +0xb20 of the
     # layout system [main+0x1e374b8], and a fade adds max(interval, 1) × 0.5 × 0.2 a frame (main+0x125f114). Both take the VFR's frame ratio (+0x3c) × 2 in place of the interval,

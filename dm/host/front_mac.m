@@ -2,6 +2,7 @@
 // Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits; the left mouse button is the touchscreen.
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad, J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
+// DM_ARROWS=camera: the arrow keys are the right stick (the camera in most 3D games), the D-pad moves to F T H G (left up right down) and the stick presses to V and B.
 // Controllers: buttons by position as on the iPhone (right A, bottom B, top X, left Y), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
@@ -23,6 +24,7 @@
 static CAMetalLayer *g_layer;
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
+static int g_arrow_cam, g_al, g_ar, g_au, g_ad;   // DM_ARROWS=camera (pads_start), and the arrow keys held as the right stick
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
@@ -87,10 +89,15 @@ void front_screen_match(int fps) {
     g_match_want = fps; dispatch_async(dispatch_get_main_queue(), ^{ screen_match_apply(); });
 }
 static void push(void) {
-    int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    dm_input_set(g_btn, lx, ly, 0, 0);
+    int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767, rx = (g_ar - g_al) * 32767, ry = (g_au - g_ad) * 32767;
+    dm_input_set(g_btn, lx, ly, rx, ry);
 }
 static int key_bit(unsigned short code) {
+    if (g_arrow_cam) switch (code) {
+        case 3: return 12;  case 17: return 13; case 4: return 14;  case 5: return 15;   // F T H G → D-pad ← ↑ → ↓
+        case 9: return 4;   case 11: return 5;                                           // V B → press stick
+        case 123: case 124: case 125: case 126: return -1;                               // the arrows are the right stick (on_key)
+    }
     switch (code) {
         case 38: return 0;  case 40: return 1;  case 32: return 2;  case 34: return 3;    // J K U I → A B X Y
         case 3: return 4;   case 5: return 5;                                            // F G → press stick
@@ -104,6 +111,7 @@ static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
+    if (g_arrow_cam) switch (c) { case 123: g_al = down; break; case 124: g_ar = down; break; case 126: g_au = down; break; case 125: g_ad = down; break; }
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
     g_btn = down ? (g_btn | m) : (g_btn & ~m);
@@ -186,7 +194,7 @@ static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 static void input_release(void) {
     g_input_on = 0;
     dm_motion_pro_active(0);
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_al = g_ar = g_au = g_ad = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
@@ -200,6 +208,8 @@ static void input_resume(void) {
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
+    e = getenv("DM_ARROWS"); g_arrow_cam = e && !strcmp(e, "camera");
+    if (g_arrow_cam) LOG("front end: the arrow keys are the right stick, F T H G the D-pad, V B the stick presses (DM_ARROWS=camera)");
     static const char kbd = 0;
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"
@@ -356,7 +366,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     dispatch_sync(dispatch_get_main_queue(), ^{
         // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
         // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_al = g_ar = g_au = g_ad = 0; push();
         dm_touch_set(NULL, 0);
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];

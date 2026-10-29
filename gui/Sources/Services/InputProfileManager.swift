@@ -149,8 +149,9 @@ public final class InputProfileManager: ObservableObject {
         // 1. Global mapping in Application Support
         try? data.write(to: globalMappingFile)
 
-        // 2. Also write to active game bundles if provided
-        if let lib = libraryFolder, let items = try? fileManager.contentsOfDirectory(at: lib, includingPropertiesForKeys: nil) {
+        // 2. Also write to active game bundles if provided or from saved library folder
+        let targetLib = libraryFolder ?? UserDefaults.standard.string(forKey: "NXNative_SavedLibraryFolder").flatMap { URL(fileURLWithPath: $0) }
+        if let lib = targetLib, let items = try? fileManager.contentsOfDirectory(at: lib, includingPropertiesForKeys: nil) {
             for item in items where item.pathExtension == "app" {
                 let target = item.appendingPathComponent("Contents/Resources/dm/input_mapping.json")
                 if fileManager.fileExists(atPath: item.appendingPathComponent("Contents/Resources/dm").path) {

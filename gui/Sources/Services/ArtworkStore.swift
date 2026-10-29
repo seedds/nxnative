@@ -12,6 +12,7 @@ public final class ArtworkStore: ObservableObject {
     private let lock = NSLock()
 
     private var inFlightDownloads = Set<String>()
+    private var failedLookups = Set<String>()
     private var galleryMapByTitle: [String: String] = [:]
     private var galleryMapByTid: [String: String] = [:]
     private var resolvedTitleEntries: [String: [String: String]] = [:]
@@ -42,9 +43,9 @@ public final class ArtworkStore: ObservableObject {
         
         try? fileManager.createDirectory(at: artworkDir, withIntermediateDirectories: true)
         
-        // Strict memory bounds: 36 images or 24 MB max
-        memoryCache.countLimit = 36
-        memoryCache.totalCostLimit = 24 * 1024 * 1024
+        // Expanded memory bounds for whole library/compatibility list: 512 images or 128 MB max
+        memoryCache.countLimit = 512
+        memoryCache.totalCostLimit = 128 * 1024 * 1024
 
         loadLocalGalleryIndex()
     }
@@ -308,7 +309,7 @@ public final class ArtworkStore: ObservableObject {
     private func fetchSquareIconAsync(titleId: String) {
         let iconFlightKey = "icon_\(titleId)"
         lock.lock()
-        if inFlightDownloads.contains(iconFlightKey) {
+        if inFlightDownloads.contains(iconFlightKey) || failedLookups.contains(iconFlightKey) {
             lock.unlock()
             return
         }
@@ -322,6 +323,7 @@ public final class ArtworkStore: ObservableObject {
                   let url = URL(string: iconUrlStr) else {
                 self.lock.lock()
                 self.inFlightDownloads.remove(iconFlightKey)
+                self.failedLookups.insert(iconFlightKey)
                 self.lock.unlock()
                 return
             }
@@ -336,6 +338,9 @@ public final class ArtworkStore: ObservableObject {
                 guard let http = response as? HTTPURLResponse, http.statusCode == 200,
                       let data = data,
                       let img = ImageDownsampler.downsample(data: data, maxPixelSize: 320) ?? NSImage(data: data) else {
+                    self.lock.lock()
+                    self.failedLookups.insert(iconFlightKey)
+                    self.lock.unlock()
                     return
                 }
                 let iconDest = self.artworkDir.appendingPathComponent("\(titleId).icon.jpg")

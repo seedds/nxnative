@@ -49,7 +49,7 @@ public struct CompatibilityView: View {
                         .padding(.top, 14)
                         .padding(.bottom, 32)
                     } else {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180, maximum: 220), spacing: 18, alignment: .top)], spacing: 18) {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 18, alignment: .top), count: 4), spacing: 18) {
                             ForEach(Array(filteredGames.enumerated()), id: \.element.id) { index, game in
                                 let isFocused = viewModel.compatibilityFocusArea == .games && viewModel.focusedCompatibilityIndex == index
                                 CompatibleGameGridCard(
@@ -160,3 +160,4 @@ private struct CompatibilityFloatingFilterModifier: ViewModifier {
         }
     }
 }
+

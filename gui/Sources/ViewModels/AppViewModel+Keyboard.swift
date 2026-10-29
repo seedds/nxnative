@@ -66,6 +66,22 @@ extension AppViewModel {
             handleNavigateUp()
         case "down":
             handleNavigateDown()
+        case "pageup":
+            if selectedTab == 2 {
+                handleCompatibilityPageUp()
+            }
+        case "pagedown":
+            if selectedTab == 2 {
+                handleCompatibilityPageDown()
+            }
+        case "home":
+            if selectedTab == 2 {
+                handleCompatibilityHome()
+            }
+        case "end":
+            if selectedTab == 2 {
+                handleCompatibilityEnd()
+            }
         case "return":
             handleConfirm()
         case "escape":

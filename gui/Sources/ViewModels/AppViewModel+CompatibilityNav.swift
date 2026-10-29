@@ -89,9 +89,13 @@ extension AppViewModel {
                     SoundEffectService.shared.play(.focus)
                 }
             } else {
-                let columns = 4
-                if focusedCompatibilityIndex >= columns {
-                    focusedCompatibilityIndex -= columns
+                let columns = max(1, compatibilityGridColumnCount)
+                let currentRow = focusedCompatibilityIndex / columns
+                let currentCol = focusedCompatibilityIndex % columns
+                if currentRow > 0 {
+                    let targetIndex = (currentRow - 1) * columns + currentCol
+                    let games = currentFilteredCompatibleGames()
+                    focusedCompatibilityIndex = min(targetIndex, games.count - 1)
                     SoundEffectService.shared.play(.focus)
                 } else {
                     compatibilityFocusArea = .filters
@@ -116,15 +120,68 @@ extension AppViewModel {
                     SoundEffectService.shared.play(.focus)
                 }
             } else {
-                let columns = 4
-                if focusedCompatibilityIndex + columns < games.count {
-                    focusedCompatibilityIndex += columns
+                let columns = max(1, compatibilityGridColumnCount)
+                let currentRow = focusedCompatibilityIndex / columns
+                let currentCol = focusedCompatibilityIndex % columns
+                let targetSameCol = (currentRow + 1) * columns + currentCol
+                
+                if targetSameCol < games.count {
+                    focusedCompatibilityIndex = targetSameCol
                     SoundEffectService.shared.play(.focus)
-                } else if focusedCompatibilityIndex < games.count - 1 {
-                    focusedCompatibilityIndex = games.count - 1
-                    SoundEffectService.shared.play(.focus)
+                } else {
+                    // Check if the next row exists (even if partially filled)
+                    let nextRowStart = (currentRow + 1) * columns
+                    if nextRowStart < games.count {
+                        focusedCompatibilityIndex = games.count - 1
+                        SoundEffectService.shared.play(.focus)
+                    }
+                    // Already at the bottom row: do nothing, do not jump or wrap
                 }
             }
+        }
+    }
+    
+    public func handleCompatibilityPageUp() {
+        let games = currentFilteredCompatibleGames()
+        guard !games.isEmpty else { return }
+        let columns = max(1, compatibilityGridColumnCount)
+        let stride = compatibilityDisplayMode == .list ? 6 : (columns * 4)
+        if focusedCompatibilityIndex >= stride {
+            focusedCompatibilityIndex -= stride
+            SoundEffectService.shared.play(.focus)
+        } else {
+            focusedCompatibilityIndex = 0
+            SoundEffectService.shared.play(.focus)
+        }
+    }
+    
+    public func handleCompatibilityPageDown() {
+        let games = currentFilteredCompatibleGames()
+        guard !games.isEmpty else { return }
+        let columns = max(1, compatibilityGridColumnCount)
+        let stride = compatibilityDisplayMode == .list ? 6 : (columns * 4)
+        if focusedCompatibilityIndex + stride < games.count {
+            focusedCompatibilityIndex += stride
+            SoundEffectService.shared.play(.focus)
+        } else {
+            focusedCompatibilityIndex = games.count - 1
+            SoundEffectService.shared.play(.focus)
+        }
+    }
+    
+    public func handleCompatibilityHome() {
+        if compatibilityFocusArea == .games {
+            focusedCompatibilityIndex = 0
+            SoundEffectService.shared.play(.focus)
+        }
+    }
+    
+    public func handleCompatibilityEnd() {
+        let games = currentFilteredCompatibleGames()
+        guard !games.isEmpty else { return }
+        if compatibilityFocusArea == .games {
+            focusedCompatibilityIndex = games.count - 1
+            SoundEffectService.shared.play(.focus)
         }
     }
     

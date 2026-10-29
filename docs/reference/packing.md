@@ -111,6 +111,15 @@
 - **Check:** Well Dweller's `main` decodes to 85,370,056 bytes with segments `0x39680d0 / 0x9f7e74 / 0x9b1930`, every SHA-256 matching; `dm/tools/tests/test_nso.py` checks that a flag-bit-7 module whose segments are not ZBIC is an Error naming ZBIC.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0).
 
+## Package identification
+
+### An NSP without a ticket or a title ID in its name stops with "no NSP with a readable title ID"
+
+- **Symptom:** `[RED] no NSP with a readable title ID in <folder>`, although the keys open the package (the launcher's key check passes). Renaming the file to `Game [0100XXXXXXXXXXXX].nsp` makes the build go on.
+- **Cause:** `title_of` took the title ID only from the ticket's file name (`<rights ID>.tik`) or from a `[title ID]` tag in the package's file name. Many NSPs carry no ticket (standard-crypto dumps, repacks), and a download's file name often has no tag.
+- **Fix:** with neither, `title_of` asks the package: `nx_extract <prod.keys> --title <package>` opens it, decrypts the header of each meta NCA with the keys' `header_key` and prints the lowest title ID (the base game's before its update's or a DLC's). It works for NSP, NSZ (the meta NCA is not compressed), XCI and XCZ, and runs only when the ticket and the tag are both missing, so the common cases stay a read of the file name table. `nx_extract` is built into a temporary folder for it, since the build folder is named after the title ID. Key values are never printed.
+- **Found on:** NX2Apple, [LNPANDY/NX2Apple#177](https://github.com/LNPANDY/NX2Apple/issues/177) (Tears of the Kingdom, whose base NSP has no ticket). Applies to every game.
+
 ## Cartridge dumps
 
 ### A cartridge dump with its update on it extracts the update as the base game

@@ -109,6 +109,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Patrick's Parabox](0100E44016C22000/README.md) | `0100E44016C22000` | 1.0.1 | 13.3.7 | Unity 2020.3.30f1 IL2CPP | NVN |
 | [Persona 4 Golden](010062B01525C000/README.md) | `010062B01525C000` | 1.0.2 | 14.3.0 | Atlus in-house (CRI middleware) | NVN |
 | [Persona 5 Royal](01005CA01580E000/README.md) | `01005CA01580E000` | 1.0.2 | 13.3.2 | Atlus GFD / Needle (CRI middleware) | NVN |
+| [Pikmin 2](0100D680194B2000/README.md) | `0100D680194B2000` | 1.0.0 (base) | 14.3.0 | NERD Hagi (GameCube) | Vulkan |
 | [Pikmin 4](0100B7C00933A000/README.md) | `0100B7C00933A000` | 1.1.1 | 10.4.8 | Unreal Engine 4.26.2 | NVN |
 | [Pokémon Brilliant Diamond](0100000011D90000/README.md) | `0100000011D90000` | 1.3.0 | 11.4.3 | Unity 2019.4.27f1 IL2CPP | NVN |
 | [Pokémon Legends: Arceus](01001F5010DFA000/README.md) | `01001F5010DFA000` | 1.1.1 | 11.4.0 | Game Freak's engine (between Sword's and Trinity) | NVN |

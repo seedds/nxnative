@@ -27,6 +27,7 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
 | [OCTOPATH TRAVELER 0](#octopath-traveler-0) | 1 | 0 | 0 | 0 | 3 | yes |
 | [OCTOPATH TRAVELER II](#octopath-traveler-ii) | 1 | 1 | 0 | 0 | 3 | yes |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | yes |
+| [Pikmin 2](#pikmin-2) | 1 | 0 | 0 | 0 | 0 | yes |
 | [Pikmin 4](#pikmin-4) | 3 | 1 | 0 | 0 | 1 | yes |
 | [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 1 |  |
 | [Pokémon Scarlet](#pokémon-scarlet) | 1 | 0 | 0 | 0 | 0 | yes |
@@ -418,6 +419,15 @@ Every piece of code that runs for one game and not the others: the rewriter's pa
   - cut `+0x2e77a4`: frame step floor in 60 Hz vsyncs: mov w9,#2 → mov w9,#1 (the game steps by the vsyncs that passed, down to one)
   - frame step `+0x2e77f8`: frame step: the base clock steps by the host's vsyncs (state page target fps; 0 = the game's measured step)
 
+### Pikmin 2
+
+[Pikmin 2](../../dm/games/0100D680194B2000/README.md), `0100D680194B2000`, [patches.py](../../dm/games/0100D680194B2000/patches.py).
+
+**Generalize?** No: game-specific video cleanup abort call
+
+- **1.0.0 `main`** `b23a4349…` ([patches.py:6](../../dm/games/0100D680194B2000/patches.py#L6))
+  - cut `+0x2ba5b4`: _ZN5movie destructor: abort call → nop
+
 ### Pikmin 4
 
 [Pikmin 4](../../dm/games/0100B7C00933A000/README.md), `0100B7C00933A000`, [patches.py](../../dm/games/0100B7C00933A000/patches.py).
@@ -614,9 +624,10 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
   - cut `+0xc96f0`: AddressRegionManager constructor: node area limit orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000
   - cut `+0xc9790`: AddressRegionManager constructor: length of the node area registered as an occupied region orr w9,wzr,#0x3fe00000 → mov w9,#0x3e00000
   - cut `+0xc98fc`: AllocateAddressRegion: alignment of regions of 1 GB and more orr w10,wzr,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)
-- **sdk** `2aef2cff…` ([sdk_patches.py:95](../../dm/tools/sdk_patches.py#L95)): Batman: Arkham Knight 1.0.5, Persona 4 Golden 1.0.2
+- **sdk** `2aef2cff…` ([sdk_patches.py:94](../../dm/tools/sdk_patches.py#L94)): Batman: Arkham Knight 1.0.5, Persona 4 Golden 1.0.2, Pikmin 2 1.0.0
   - cut `+0x12d8b0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x12d94c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
+  - cut `+0x11de60`: CentralHeap::Free: return early if heap_base is null (cbz x8, #0x11df44)
 - **sdk** `9c73fb73…` ([sdk_patches.py:102](../../dm/tools/sdk_patches.py#L102)): Patrick's Parabox 1.0.1
   - cut `+0x37c3b0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x37c44c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
@@ -730,7 +741,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `alloc_big_align on` | [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md), [13 Sentinels: Aegis Rim (Asia)](../../dm/games/01008D7016438000/README.md), [13 Sentinels: Aegis Rim (Japan)](../../dm/games/010045C014650000/README.md), [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md), [Unicorn Overlord (Asia)](../../dm/games/010054B01AD92000/README.md) |
 | `feedback_snap (shader keys)` | [Captain Toad: Treasure Tracker](../../dm/games/01009BF0072D4000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [Paper Mario: The Origami King](../../dm/games/0100A3900C3E2000/README.md), [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md), [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) |
 | `present_interval display` | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [Monster Train 2](../../dm/games/010051701FB46000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) |
-| `op_mode handheld` | [Balatro](../../dm/games/0100CD801CE5E000/README.md), [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md), [Captain Toad: Treasure Tracker](../../dm/games/01009BF0072D4000/README.md), [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md), [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md), [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md) |
+| `op_mode handheld` | [Balatro](../../dm/games/0100CD801CE5E000/README.md), [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md), [Captain Toad: Treasure Tracker](../../dm/games/01009BF0072D4000/README.md), [Pikmin 2](../../dm/games/0100D680194B2000/README.md), [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md), [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md), [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md) |
 | `tex_dirty_upload on` | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md), [Ghost Trick: Phantom Detective](../../dm/games/010029B018432000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md), [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Yoshi's Crafted World](../../dm/games/01006000040C2000/README.md) |
 | `tex_flush_upload on` | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md), [Ghost Trick: Phantom Detective](../../dm/games/010029B018432000/README.md), [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md), [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Yoshi's Crafted World](../../dm/games/01006000040C2000/README.md) |
 | `fps_target 60` | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md), [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md), [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](../../dm/games/01006C300E9F0000/README.md), [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md), [FINAL FANTASY RESONANCE (Asian release)](../../dm/games/0100B8A026F14000/README.md), [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md), [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md), [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md), [OCTOPATH TRAVELER 0](../../dm/games/01005270232F2000/README.md), [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md), [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md), [SHIN MEGAMI TENSEI V: Vengeance](../../dm/games/010069C01AB82000/README.md), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) |

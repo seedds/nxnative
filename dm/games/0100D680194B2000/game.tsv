@@ -1,0 +1,44 @@
+# Pikmin 2 (0100D680194B2000, 1.0.0), SDK 14.3.0.
+# NERD's Hagi Wii/GameCube layer: statically recompiled into main, Hagi stands in for
+# the GameCube hardware (GX -> Vulkan with SPIR-V generated at run time).
+# Renders with Vulkan: main imports 98 vk* functions; the host implements them on Metal (dm/gfx/vk/hle_vk.m).
+# Only main, subsdk0 (NintendoSDK_movie) and sdk are loaded.
+
+# ---- Identity ----
+title_id	0100D680194B2000
+program_id	0100D680194B2000
+
+# ---- App ----
+name	Pikmin 2
+ipa	Pikmin2.ipa
+app_category	public.app-category.games
+pad_layout	full
+op_mode	handheld
+
+# ---- Versions ----
+build	v0	1.0.0	main=b23a43495191e7ad33d1d0effcbb1d84	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v0
+shader_versions	v0
+
+# ---- Graphics ----
+# main imports Vulkan, not NVN: the host's Vulkan layer (dm/gfx/vk/hle_vk.m). Hagi generates its GX shaders as SPIR-V at run time.
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	data/video_replace/Application/thp/opening1.webm
+zip_store	.cache:.har:.szs:.thp:.webm:.metallib
+
+# ---- Memory ----
+# NPDM system resource 8 MB. The game calls SetHeapSize for a 2.64 GB heap (0xa8e00000), so the heap region is 2.75 GB.
+# The movie player's StandardAllocator initializes with virtual address memory in the 1.75 GB alias region
+# after the SDK's node area (cut from 1 GB to 62 MB in dm/tools/sdk_patches.py for this SDK 14.3.0 build).
+# NERD's Hagi maps the 32-bit GameCube address space (0x100200000 bytes = 4.002 GB) via AllocateAddressRegion,
+# requiring a 5.25 GB alias region and 9 GB guest reservation.
+mem_reserve	0x240000000
+mem_alias	0x150000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x800000
+
+# ---- Shader split ----
+shader_note	Pikmin 2 has no NVN shaders (its SPIR-V shaders go through the Vulkan layer)

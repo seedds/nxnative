@@ -2747,11 +2747,11 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     snprintf(avail, sizeof avail, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
 #endif
     MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, avail);
-    { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf;
-      mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf);
-      MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed "
+    { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf, tc, tcb;
+      mtl_vc_stats(&vn, &vh, &vm); mtl_tb2_stats(&tb, &tm, &tf, &tc, &tcb);
+      MLOG("texture views by texture (vc_get): %u textures hold cached views; %llu views reused, %llu made in total; texture buffers bound as 2D rows for wrapped 1D fetches %llu times, %llu made, %llu failed, %llu copied into aligned rows (%llu MB) "
            "(tbuf_as_2d); texture type mismatches no view bridges %llu in total (tex_mis_note)",
-           vn, (unsigned long long)vh, (unsigned long long)vm, (unsigned long long)tb, (unsigned long long)tm, (unsigned long long)tf, (unsigned long long)mtl_tex_mis_count()); }
+           vn, (unsigned long long)vh, (unsigned long long)vm, (unsigned long long)tb, (unsigned long long)tm, (unsigned long long)tf, (unsigned long long)tc, (unsigned long long)(tcb >> 20), (unsigned long long)mtl_tex_mis_count()); }
     if (g_allocprof > 0) { char ab[256]; int o = 0; for (int i = 0; i < g_alloc_n && o < 200; i++) o += snprintf(ab + o, sizeof ab - o, " #%d %llu MB", i, (unsigned long long)(g_alloc4[i].allocatedSize >> 20));
         for (int i = 0; i < 3 && o < 240; i++) o += snprintf(ab + o, sizeof ab - o, " up%d %llu pres%d %llu", i, (unsigned long long)(g_up_alloc4[i].allocatedSize >> 20), i, (unsigned long long)(g_present_alloc4[i].allocatedSize >> 20));
         MLOG("command allocator usage:%s", ab);
@@ -4148,7 +4148,36 @@ static void vc_drop_pool(const void *pool) {   // caller holds g_rmu
 // such rows over the same pool memory, so the shader reads the buffer. Maxwell reads 1D textures and texture buffers with the same instruction and the descriptor decides; without a type
 // answer the translator read them as 2D, and Age of Calamity's light and decal lists (and Three Houses' lighting) read the dummy texture, zeros. Kept with the texture's views (vc_set),
 // checked against the buffer texture it was made from. Caller holds g_rmu
-static uint64_t g_tb2_binds, g_tb2_made, g_tb2_fail;
+static uint64_t g_tb2_binds, g_tb2_made, g_tb2_fail, g_tb2_copy, g_tb2_copy_bytes;
+// Metal views a buffer texture only at a multiple of the device's linear-texture alignment for its format, and that alignment is
+// larger on an iPhone than on a Mac. A game that keeps its light list at an offset a Mac accepts therefore read zeros on the phone:
+// Three Houses' lighting alternated between lit and unlit frames, its two copies of that list 32 bytes apart. When the rows are fine
+// and only the offset is not, they are copied into an aligned staging buffer and read there, one copy per texture per frame,
+// released once the submission that read it is done. Caller holds g_rmu.
+#define TB2_STAGE_MAX 16
+static struct { id<MTLTexture> src; id<MTLBuffer> buf; id<MTLTexture> view; uint64_t epoch, rid; } g_tb2_stage[TB2_STAGE_MAX];
+static id<MTLTexture> tbuf_rows_copy(id<MTLTexture> t, uint32_t w, uint32_t h, uint32_t row, size_t off, uint64_t *rid) {
+    id<MTLBuffer> src = t.buffer;
+    if (!src || !src.contents || off >= src.length) return nil;
+    unsigned k = (unsigned)(((uintptr_t)(__bridge void *)t >> 4) % TB2_STAGE_MAX);
+    typeof(g_tb2_stage[0]) *e = &g_tb2_stage[k];
+    if (e->view && e->src == t && e->epoch == g_fence + 1) { *rid = e->rid; return e->view; }   // copied for this frame already
+    size_t need = (size_t)row * h, n = src.length - off; if (n > need) n = need;
+    id<MTLBuffer> nb = [g_dev newBufferWithLength:need options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
+    if (!nb) { RED_ONCE(119, "no staging buffer for a texture buffer at pool offset %#zx whose rows need aligned storage", off); return nil; }
+    memcpy(nb.contents, (const uint8_t *)src.contents + off, n);
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:w height:h mipmapped:NO];
+    d.resourceOptions = nb.resourceOptions; d.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> v = [nb newTextureWithDescriptor:d offset:0 bytesPerRow:row];
+    if (!v) { defer_obj_release(nb); RED_ONCE(120, "cannot make the aligned 2D rows of a texture buffer (%ux%u, row %u, %#zx)", w, h, row, off); return nil; }
+    res_add(nb); res_add(v);
+    if (e->buf) defer_obj_release(e->buf);
+    if (e->view) defer_obj_release(e->view);
+    e->src = t; e->buf = nb; e->view = v; e->rid = *rid = v.gpuResourceID._impl; e->epoch = g_fence + 1;
+    g_tb2_copy++; g_tb2_copy_bytes += n;
+    if (!(g_tb2_copy - 1)) MLOG("texture buffer at pool offset %#zx (not a multiple of the %lu-byte linear-texture alignment) read through aligned rows %ux%u of %u bytes (first case)", off, (unsigned long)[g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat], w, h, row);
+    return v;
+}
 static id<MTLTexture> tbuf_as_2d(int tid, id<MTLTexture> t, uint64_t *rid) {
     if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) return nil;
     const tex_t *tt = &g_treg[tid].t; uint64_t ser = tt->serial;
@@ -4159,7 +4188,13 @@ static id<MTLTexture> tbuf_as_2d(int tid, id<MTLTexture> t, uint64_t *rid) {
     }
     id<MTLBuffer> buf = t.buffer; int bw, bh; uint32_t bpb = (uint32_t)nvn_fmt_bpb(tt->d.format, &bw, &bh), w, h, row;
     NSUInteger al = [g_dev minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat];
-    if (!buf || bw != 1 || bh != 1 || t.bufferOffset % al || !nvn_tbuf_rows(t.width, bpb, (uint32_t)al, &w, &h, &row)) {
+    { const char *e = getenv("DM_TBUF_ALIGN"); if (e && *e) al = (NSUInteger)strtoul(e, NULL, 0); }   // a device's alignment, to reproduce an iPhone's on a Mac
+    int rows = buf && bw == 1 && bh == 1 && nvn_tbuf_rows(t.width, bpb, (uint32_t)al, &w, &h, &row);
+    if (rows && t.bufferOffset % al) {   // the rows are fine, the pool offset is not: read them from an aligned copy
+        id<MTLTexture> sv = tbuf_rows_copy(t, w, h, row, t.bufferOffset, rid);
+        if (sv) { g_tb2_binds++; return sv; }
+    }
+    if (!rows || t.bufferOffset % al) {
         if (!g_tb2_fail++) MLOG("[RED] texture buffer (texture ID %d, %lu elements of format %#x at pool offset %lu) has no 2D-row form for a wrapped 1D fetch: the slot reads 0", tid, (unsigned long)t.width, tt->d.format, (unsigned long)t.bufferOffset);
         return nil;
     }
@@ -4175,7 +4210,7 @@ static id<MTLTexture> tbuf_as_2d(int tid, id<MTLTexture> t, uint64_t *rid) {
     else defer_obj_release(v);   // a finalized texture's last reads: released once this submission is done
     return v;
 }
-void mtl_tb2_stats(uint64_t *binds, uint64_t *made, uint64_t *fail) { *binds = g_tb2_binds; *made = g_tb2_made; *fail = g_tb2_fail; }
+void mtl_tb2_stats(uint64_t *binds, uint64_t *made, uint64_t *fail, uint64_t *copy, uint64_t *copy_bytes) { *binds = g_tb2_binds; *made = g_tb2_made; *fail = g_tb2_fail; *copy = g_tb2_copy; *copy_bytes = g_tb2_copy_bytes; }
 // The ID stays registered, as in the game's texture pool, but its storage is gone: nothing may make its texture until the game registers the ID again. A draw never binds
 // such an ID; a walk over every ID does (pool_gpu, which also checks tex_storage_live). Under g_rmu
 static void treg_gone(treg_t *r) {

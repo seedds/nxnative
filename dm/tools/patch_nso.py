@@ -27,26 +27,6 @@ bss = MOD.bss
 # Every jump between the patch area and the code is a B (±128 MB). A patch area appended after the image (with bss) cannot reach the code when it would start beyond 112 MB (leaving 16 MB for the patch area): Metroid Dread's main has about 1.8 GB of bss (the engine's static heap); Engage's main starts its patch area at about 103 MB and keeps it after the image.
 # The patch area then sits FRONT bytes before the module base (PATCH_OFF is negative), and the output file holds only text + ro + data (FILE_IMAGE_LEN) followed by the patch area; the loader supplies zero pages for bss and the key page (IMAGE_SIZE is the whole image).
 # The key page stays after bss (the patch area reaches it through ADRP, ±4 GB). Modules below the limit produce output byte-identical to before
-NEAR_PATCH_OFF = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x4000 + 0xFFFF) & ~0xFFFF)   # where an appended patch area would start (as in the else branch below)
-FAR, FRONT = NEAR_PATCH_OFF > 0x7000000, 0x2000000
-# A text segment that ends within 32 MB of the ±128 MB reach (Monster Hunter Rise: 125.3 MB of text) puts the patch area right before the base instead. Its stubs follow the sites in address
-# order, so the last site's stub ends up about as far from it as the text is long. The first pass tries the gap that keeps every site in reach; when the patch area does not fit there
-# (Monster Hunter Rise: 3.6 MB), the rewriter runs again with exactly the size it needs (DM_PATCH_FRONT, set only by that rerun) and B() checks every branch
-BIG_TEXT = FAR and MOD.text_end + FRONT > 0x8000000 - 0x10000
-if BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
-IMG = MOD.image
-if not FAR: IMG.extend(bytes(bss))
-TEXT_END = MOD.text_end
-RO_OFF, DATA_OFF = MOD.segments[1][0], MOD.segments[2][0]
-if FAR:
-    FILE_IMAGE_LEN = (len(IMG) + 0x3FFF) & ~0x3FFF
-    KEY_PAGE_OFF = (len(IMG) + bss + 0x3FFF) & ~0x3FFF
-    IMAGE_SIZE, PATCH_OFF = KEY_PAGE_OFF + 0x4000, -FRONT
-else:
-    KEY_PAGE_OFF = (len(IMG) + 0x3FFF) & ~0x3FFF
-    IMG.extend(bytes(0x4000))
-    PATCH_OFF = (len(IMG) + 0xFFFF) & ~0xFFFF
-
 # ---- Registered patches of particular builds, keyed by NSO build ID: dm/tools/sdk_patches.py (Nintendo SDK module builds, which several games can ship) and dm/games/<id>/patches.py
 # (a game's own modules: its profile's builds). Every file is loaded, whatever the game, so a module gets the patches of its build wherever it comes from; a build ID claimed twice stops the rewrite.
 # A file may define:
@@ -92,6 +72,28 @@ def load_patches():
     return tables, where
 PATCHES, PATCH_WHERE = load_patches()
 BUILD_ID = MOD.build_id[:0x10].hex()
+# Reserve the frame-state page before placing code; alignment padding alone can be empty (Z-A 2.0.2).
+FS_RESERVE = 0x4000 if NAME == 'main' and BUILD_ID in PATCHES['FRAME_STEP'] else 0
+NEAR_PATCH_OFF = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x4000 + FS_RESERVE + 0xFFFF) & ~0xFFFF)   # where an appended patch area would start (as in the else branch below)
+FAR, FRONT = NEAR_PATCH_OFF > 0x7000000, 0x2000000
+# A text segment that ends within 32 MB of the ±128 MB reach (Monster Hunter Rise: 125.3 MB of text) puts the patch area right before the base instead. Its stubs follow the sites in address
+# order, so the last site's stub ends up about as far from it as the text is long. The first pass tries the gap that keeps every site in reach; when the patch area does not fit there
+# (Monster Hunter Rise: 3.6 MB), the rewriter runs again with exactly the size it needs (DM_PATCH_FRONT, set only by that rerun) and B() checks every branch
+BIG_TEXT = FAR and MOD.text_end + FRONT > 0x8000000 - 0x10000
+if BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
+IMG = MOD.image
+if not FAR: IMG.extend(bytes(bss))
+TEXT_END = MOD.text_end
+RO_OFF, DATA_OFF = MOD.segments[1][0], MOD.segments[2][0]
+if FAR:
+    FILE_IMAGE_LEN = (len(IMG) + 0x3FFF) & ~0x3FFF
+    KEY_PAGE_OFF = (len(IMG) + bss + 0x3FFF) & ~0x3FFF
+    IMAGE_SIZE, PATCH_OFF = KEY_PAGE_OFF + 0x4000, -FRONT
+else:
+    KEY_PAGE_OFF = (len(IMG) + 0x3FFF) & ~0x3FFF
+    IMG.extend(bytes(0x4000 + FS_RESERVE))
+    PATCH_OFF = (len(IMG) + 0xFFFF) & ~0xFFFF
+
 cuts = list(PATCHES['CUTS'].get(BUILD_ID, []))
 if BUILD_ID not in PATCHES['CUTS']:
     from nso_match import resolve

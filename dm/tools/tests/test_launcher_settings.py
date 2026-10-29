@@ -59,10 +59,12 @@ class LauncherSettingsTests(unittest.TestCase):
         s = build(BOTW, 'nvn')['DM_SHOW_FPS']
         self.assertEqual((s['on'], s['off']), ('1', '0'))
 
-    def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
+    def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter, touch feedback and the left stick are the iOS front end's (front_ios.m, DmGamepad.m)
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS'})
+        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_TOUCH_STICK'})
+        s = ios['DM_TOUCH_STICK']   # DmGamepad.m reads float or fixed; fixed by default keeps every game's left-half touches as they were
+        self.assertEqual((s['kind'], s['default'], s['options']), ('choice', 'fixed', [['fixed', 'Fixed'], ['float', 'Anywhere on the left']]))
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN'})   # the Mac window's Display mode (front_mac.m reads 1 or 0)
         s = mac['DM_FULLSCREEN']

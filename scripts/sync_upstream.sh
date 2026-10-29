@@ -66,6 +66,14 @@ if git merge upstream/main --no-edit -m "chore(sync): merge upstream updates fro
     echo "🎉 Merge completed successfully with zero conflicts!"
     echo "All NxNative Launcher customizations have been preserved."
     echo ""
+    echo "🎮 Regenerating SUPPORTED_GAMES.md from upstream game definitions..."
+    python3 "$REPO_ROOT/scripts/generate_supported_games.py" 2>/dev/null || python3 "$REPO_ROOT/nxnative/scripts/generate_supported_games.py" 2>/dev/null || true
+    if git status --porcelain | grep -q "SUPPORTED_GAMES.md"; then
+        echo "📝 Committing updated SUPPORTED_GAMES.md..."
+        git add SUPPORTED_GAMES.md nxnative/SUPPORTED_GAMES.md 2>/dev/null || true
+        git commit -m "docs: auto-update SUPPORTED_GAMES.md from upstream game list" || true
+    fi
+    echo ""
     echo "👉 To publish the updates to your GitHub fork, run:"
     echo "   git push origin main"
 else

@@ -2,13 +2,13 @@ name: Sync Upstream (seedds/nxnative)
 
 on:
   schedule:
-    # Automatically sync every 12 hours (00:00 and 12:00 UTC)
+    # Sincroniza automaticamente a cada 12 horas (00:00 e 12:00 UTC)
     - cron: '0 0,12 * * *'
-  # Allow manual trigger via GitHub Actions tab
+  # Permite disparar manualmente pela aba Actions do GitHub
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Simulate merge without pushing (Dry Run)'
+        description: 'Simular merge sem enviar (Dry Run)'
         required: false
         type: boolean
         default: false
@@ -24,92 +24,103 @@ concurrency:
 
 jobs:
   sync-upstream:
-    name: Sync with seedds/nxnative
+    name: Sincronizar com seedds/nxnative
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Fork Repository
+      - name: Checkout do Repositório Fork
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure Git Bot
+      - name: Configurar Git Bot
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Add Upstream Remote
+      - name: Adicionar Remoto Upstream
         run: |
           git remote add upstream https://github.com/seedds/nxnative.git || git remote set-url upstream https://github.com/seedds/nxnative.git
           git fetch upstream main
 
-      - name: Check for New Upstream Commits
+      - name: Verificar Novos Commits do Upstream
         id: check_diff
         run: |
           BEHIND=$(git rev-list --count HEAD..upstream/main)
           echo "behind=$BEHIND" >> $GITHUB_OUTPUT
-          echo "New upstream commits: $BEHIND"
+          echo "Commits novos no upstream: $BEHIND"
           if [ "$BEHIND" -gt 0 ]; then
-            echo "Latest upstream commits to incorporate:"
+            echo "Últimos commits do upstream a serem incorporados:"
             git log HEAD..upstream/main --oneline -n 10
           else
-            echo "Fork is already fully up to date with upstream/main."
+            echo "O fork já está completamente atualizado com upstream/main."
           fi
 
-      - name: Execute Safe Merge (Preserving Customizations)
+      - name: Executar Mesclagem Segura (Preservando Customizações)
         id: do_merge
         if: steps.check_diff.outputs.behind > 0
         run: |
-          echo "Attempting to merge upstream/main into main branch..."
-          # Standard merge preserving local launcher commits
+          echo "Tentando mesclar upstream/main na branch main..."
+          # Tenta o merge padrão preservando os commits locais do launcher
           if git merge upstream/main --no-edit -m "chore(sync): merge upstream updates from seedds/nxnative"; then
             echo "has_conflicts=false" >> $GITHUB_OUTPUT
-            echo "✅ Merge completed successfully without conflicts!"
+            echo "✅ Mesclagem concluída com sucesso sem conflitos!"
           else
             echo "has_conflicts=true" >> $GITHUB_OUTPUT
-            echo "⚠️ Merge conflict detected!"
-            # Abort immediately to NOT corrupt or break main branch
+            echo "⚠️ Conflito de mesclagem detectado!"
+            # Aborta imediatamente para NÃO corromper nem quebrar a branch main
             git merge --abort
           fi
 
-      - name: Push Updates to Main
+      - name: Regenerar Lista de Jogos Suportados (SUPPORTED_GAMES.md)
+        if: steps.check_diff.outputs.behind > 0 && steps.do_merge.outputs.has_conflicts == 'false'
+        run: |
+          echo "Regenerando SUPPORTED_GAMES.md a partir dos novos perfis do upstream..."
+          python3 scripts/generate_supported_games.py || python3 nxnative/scripts/generate_supported_games.py || true
+          if git status --porcelain | grep -q "SUPPORTED_GAMES.md"; then
+            echo "Committing updated SUPPORTED_GAMES.md..."
+            git add SUPPORTED_GAMES.md nxnative/SUPPORTED_GAMES.md 2>/dev/null || true
+            git commit -m "docs: auto-update SUPPORTED_GAMES.md from upstream game list" || true
+          fi
+
+      - name: Enviar Atualizações para a Main
         if: steps.check_diff.outputs.behind > 0 && steps.do_merge.outputs.has_conflicts == 'false' && (!inputs.dry_run)
         run: |
-          echo "Pushing newly merged commits to fork main branch..."
+          echo "Enviando novos commits mesclados para a branch main do fork..."
           git push origin main
-          echo "🎉 Fork successfully updated!"
+          echo "🎉 Fork atualizado com sucesso!"
 
-      - name: Safely Alert Conflicts (Without Breaking Main)
+      - name: Alertar Conflito com Segurança (Sem Quebrar a Main)
         if: steps.check_diff.outputs.behind > 0 && steps.do_merge.outputs.has_conflicts == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           BRANCH_NAME="upstream-sync-review-${{ github.run_id }}"
-          echo "Creating isolated review branch: $BRANCH_NAME..."
+          echo "Criando branch de resolução isolada: $BRANCH_NAME..."
           git checkout -b "$BRANCH_NAME"
-          # Run attempt on isolated branch to record where conflicts lie
+          # Faz a tentativa na branch isolada para registrar onde estão os conflitos
           git merge upstream/main --no-edit || true
           git push origin "$BRANCH_NAME" || true
 
           ALERT_BODY=$(cat <<'EOF'
-          ## ⚠️ Conflict Detected during Automated Upstream Synchronization
+          ## ⚠️ Conflito Detectado na Sincronização Automática com o Upstream
 
-          The automated sync workflow attempted to merge new commits from `seedds/nxnative:main`, but encountered **merge conflicts** with custom files in **NxNative Launcher**.
+          A ação automatizada tentou sincronizar os novos commits de `seedds/nxnative:main`, mas detectou **conflitos de mesclagem** com arquivos modificados no **NxNative Launcher**.
 
           > [!IMPORTANT]
-          > **Your `main` branch is protected and was NOT modified or corrupted.** All existing functionality remains safe and operational.
+          > **A sua branch `main` foi protegida e NÃO foi alterada nem corrompida.** Suas funcionalidades continuam intactas.
 
-          A temporary review branch has been created: `${{ env.BRANCH_NAME }}`.
+          Uma branch de trabalho temporária foi criada: `${{ env.BRANCH_NAME }}`.
 
-          ### How to resolve manually in your local terminal:
+          ### Como resolver manualmente no seu terminal local:
           ```bash
           cd nxnative
           git checkout main
           git fetch upstream
           git merge upstream/main
-          # Resolve conflicts in the highlighted files
+          # Resolva os conflitos nos arquivos indicados
           git commit -m "chore(sync): resolve upstream merge conflicts"
           git push origin main
           ```
@@ -117,6 +128,6 @@ jobs:
           )
 
           gh issue create \
-            --title "⚠️ [Upstream Sync] Conflict detected on $(date +'%Y-%m-%d %H:%M UTC')" \
+            --title "⚠️ [Sincronização Upstream] Conflito detectado em $(date +'%d/%m/%Y %H:%M UTC')" \
             --body "$ALERT_BODY" \
             --label "upstream-sync" || true

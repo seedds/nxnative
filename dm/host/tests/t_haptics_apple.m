@@ -69,7 +69,7 @@ static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, d
 @property(copy) void (^startingReset)(void);
 @end
 @implementation TestEngine
-- (NSTimeInterval)currentTime { return now(); }   // an engine's clock runs like the host's
+- (NSTimeInterval)currentTime { return (double)testTime / NSEC_PER_SEC; }   // the same clock as the driven dispatch deadlines
 - (BOOL)startAndReturnError:(NSError **)e {
     self.starts++; self.handlersAtStart = self.resetHandler && self.stoppedHandler;
     self.startingReset = self.resetHandler;
@@ -163,6 +163,34 @@ int main(void) { @autoreleasepool {
     dispatch_queue_set_specific(queue, &queue, &queue, NULL);
     timers = [NSMutableArray new];
     dm_haptics_init(apply, 1); drain();
+    __block int rawCalls=0; __block float rawLeft=0;
+    NSObject *owner=[NSObject new];
+    // Reusing a DualShock player's slot for a raw output must release its HID claim.
+    // Silent routes only retain/release these CF tokens; no HID calls or hardware.
+    dispatch_sync(queue, ^{
+        ds4[2].dev = (IOHIDDeviceRef)CFRetain(CFSTR("old route"));
+        ds4[3].dev = (IOHIDDeviceRef)CFRetain(CFSTR("other player"));
+    });
+    dm_haptics_apple_output(2, owner, ^(dm_haptic_state s, float gain) { rawCalls++; rawLeft=s.motor[0].amplitude_low*gain; });
+    dispatch_sync(queue, ^{
+        assert(!ds4[2].dev && ds4[3].dev);
+        ds4_release(3);
+    });
+    dm_vibration_update raw={2,0,{0.5f,160,0,320}};
+    dm_haptics_send(&raw,1); drain(); assert(rawLeft==0.5f && (dm_haptics_available() & 4));
+    int before=rawCalls;
+    advance(0.039); assert(rawCalls==before);
+    advance(0.001); assert(rawCalls==before+1 && rawLeft==0.5f); // firmware watchdog refreshed at 40 ms
+    advance(0.08); assert(rawCalls==before+3 && rawLeft==0.5f); // refresh continues without a new game send
+    suspend(DM_HAPTICS_INACTIVE,YES); drain(); assert(rawLeft==0);
+    before=rawCalls; advance(0.12); assert(rawCalls==before); // stale timers cannot revive rumble
+    suspend(DM_HAPTICS_INACTIVE,NO); dm_haptics_send(&raw,1); drain(); assert(rawLeft==0.5f);
+    dm_haptics_apple_focus(0); drain(); assert(rawLeft==0);
+    suspend(DM_HAPTICS_INACTIVE,YES); suspend(DM_HAPTICS_INACTIVE,NO);
+    dm_haptics_send(&raw,1); drain(); assert(rawLeft==0); // app activation cannot bypass window suspension
+    dm_haptics_apple_focus(1); dm_haptics_send(&raw,1); drain(); assert(rawLeft==0.5f);
+    dm_haptics_apple_controller(2,nil); drain(); assert(rawLeft==0 && !(dm_haptics_available() & 4));
+    before=rawCalls; advance(0.04); assert(rawCalls==before); // stale route cannot refresh after disconnect
     TestEngine *left = [TestEngine new], *right = [TestEngine new];
     dispatch_sync(queue, ^{
         channels[0] = [NSMutableArray new];
@@ -280,9 +308,12 @@ int main(void) { @autoreleasepool {
     dm_haptics_apple_controller(0, (id)unsupported); drain();
     assert(!(dm_haptics_available() & 1) && unsupported.haptics.attempts == 0);
     // DM_RUMBLE_MIN: controller levels below it are silent, the rest stretched over the full range; the phone keeps its levels
-    assert(controller_level(0) == 0 && controller_level(0.3f) == 0.3f && controller_level(1) == 1 && controller_level(NAN) == 0);
+    assert(dm_haptics_apple_controller_intensity(0) == 0 && dm_haptics_apple_controller_intensity(0.3f) == 0.3f && dm_haptics_apple_controller_intensity(1) == 1 && dm_haptics_apple_controller_intensity(NAN) == 0);
     rumble_min = 0.45f;
-    assert(controller_level(0.4f) == 0 && controller_level(0.45f) == 0 && fabsf(controller_level(0.725f) - 0.5f) < 1e-6f && controller_level(1) == 1);
+    dm_vibration rawLevel = {.amplitude_low=0.3f, .frequency_low=160, .frequency_high=320};
+    assert(dm_haptics_apple_controller_intensity(dm_haptics_level(&rawLevel, 1, 1).intensity) == 0);
+    assert(fabsf(dm_haptics_apple_controller_intensity(dm_haptics_level(&rawLevel, 1, 2).intensity) - 3.0f/11.0f) < 1e-6f); // gain before cutoff
+    assert(dm_haptics_apple_controller_intensity(0.4f) == 0 && dm_haptics_apple_controller_intensity(0.45f) == 0 && fabsf(dm_haptics_apple_controller_intensity(0.725f) - 0.5f) < 1e-6f && dm_haptics_apple_controller_intensity(1) == 1);
     TestController *cut = [TestController new]; cut.haptics = [TestHaptics new];
     dm_haptics_apple_controller(0, (id)cut); drain();
     send_pair(0.3, 0); drain();

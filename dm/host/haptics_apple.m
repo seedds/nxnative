@@ -38,6 +38,9 @@
 static dispatch_queue_t queue;
 static NSMutableArray<DmRumbleChannel *> *channels[DM_PLAYERS];
 static GCController *controllers[DM_PLAYERS];
+static id outputOwners[DM_PLAYERS]; // protected by routeLock
+static dm_haptics_output nativeOutputs[DM_PLAYERS]; // serial queue only
+static uint64_t outputGeneration[DM_PLAYERS];
 #if TARGET_OS_IPHONE
 static BOOL phoneSupported;
 #endif
@@ -69,7 +72,7 @@ static CHHapticPattern *simple_pattern(dm_haptic_level level, NSError **error) {
 // low band at 0.1-0.4 all race long: 0.45 leaves crashes and drifts). The mapping stays linear by default: the opposite need, low levels that
 // rotating motors do not render at all (Breath of the Wild's charged attack on an Xbox controller), is open (docs/reference/services.md)
 static float rumble_min;
-static float controller_level(float x) {
+float dm_haptics_apple_controller_intensity(float x) {
     x = isfinite(x) ? fmaxf(0, fminf(1, x)) : 0;
     return x <= rumble_min ? 0 : (x - rumble_min) / (1 - rumble_min);
 }
@@ -159,7 +162,7 @@ static void report(NSError *e, NSString *target, const char *stage) {
     return YES;
 }
 - (void)apply:(dm_haptic_level)level {
-    if ([self.target hasPrefix:@"controller"]) level.intensity = controller_level(level.intensity);
+    if ([self.target hasPrefix:@"controller"]) level.intensity = dm_haptics_apple_controller_intensity(level.intensity);
     uint64_t silence = ++self.silenceGeneration;
     NSError *error = nil;
     self.level = level;
@@ -253,8 +256,8 @@ static void ds4_apply(dm_haptic_state s) {
     ds4_out *o = &ds4[s.player];
     if (!o->dev) return;
     const dm_vibration *l = &s.motor[0], *r = &s.motor[1];
-    o->motor[0] = (uint8_t)lrintf(controller_level((0.85f * l->amplitude_low + 0.15f * r->amplitude_low) * gain) * 255);
-    o->motor[1] = (uint8_t)lrintf(controller_level((0.15f * l->amplitude_high + 0.85f * r->amplitude_high) * gain) * 255);
+    o->motor[0] = (uint8_t)lrintf(dm_haptics_apple_controller_intensity((0.85f * l->amplitude_low + 0.15f * r->amplitude_low) * gain) * 255);
+    o->motor[1] = (uint8_t)lrintf(dm_haptics_apple_controller_intensity((0.15f * l->amplitude_high + 0.85f * r->amplitude_high) * gain) * 255);
     if (o->motor[0] == o->sent[0] && o->motor[1] == o->sent[1]) return;
     ds4_send(s.player);
 }
@@ -300,9 +303,21 @@ static BOOL ds4_route(int p, GCController *controller) {
 }
 #endif
 
+static void native_stop(int p) {
+    outputGeneration[p]++;
+    if (nativeOutputs[p]) nativeOutputs[p]((dm_haptic_state){.player=p}, gain);
+}
+static void native_apply(dm_haptic_state s, uint64_t generation) {
+    int p=s.player;
+    if (!nativeOutputs[p] || generation != outputGeneration[p] || s.epoch != dm_haptics_epoch(p)) return;
+    nativeOutputs[p](s,gain);
+    if (s.motor[0].amplitude_low || s.motor[0].amplitude_high || s.motor[1].amplitude_low || s.motor[1].amplitude_high)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 40*NSEC_PER_MSEC),queue,^{ native_apply(s,generation); });
+}
 static void apply(dm_haptic_state s) {
     dispatch_async(queue, ^{ @autoreleasepool {
         if (s.epoch != dm_haptics_epoch(s.player)) return;
+        if (nativeOutputs[s.player]) { native_apply(s,++outputGeneration[s.player]); return; }
         NSArray<DmRumbleChannel *> *out = channels[s.player];
 #if !TARGET_OS_IPHONE
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
@@ -374,20 +389,39 @@ static void configure(int p, GCController *controller) {
 void dm_haptics_apple_controller(int p, GCController *controller) {
     if (!queue || p < 0 || p >= DM_PLAYERS) return;
     pthread_mutex_lock(&routeLock);
-    if (controllers[p] != controller) {
+    if (controllers[p] != controller || outputOwners[p]) {
         controllers[p] = controller;
+        outputOwners[p] = nil;
         dm_haptics_route(p, 0);   // invalidate queued work before changing hardware
-        dispatch_sync(queue, ^{ configure(p, controller); });
+        dispatch_sync(queue, ^{ native_stop(p); nativeOutputs[p]=nil; configure(p, controller); });
+    }
+    pthread_mutex_unlock(&routeLock);
+}
+void dm_haptics_apple_output(int p, id owner, dm_haptics_output output) {
+    if (!queue || p < 0 || p >= DM_PLAYERS) return;
+    if (!owner || !output) { dm_haptics_apple_controller(p,nil); return; }
+    pthread_mutex_lock(&routeLock);
+    if (outputOwners[p] != owner) {
+        outputOwners[p]=owner; controllers[p]=nil; dm_haptics_route(p,0);
+        dispatch_sync(queue, ^{
+            native_stop(p);
+            for (DmRumbleChannel *c in channels[p]) [c stop];
+#if !TARGET_OS_IPHONE
+            ds4_release(p);
+#endif
+            channels[p]=[NSMutableArray new]; nativeOutputs[p]=[output copy]; dm_haptics_route(p,1);
+        });
     }
     pthread_mutex_unlock(&routeLock);
 }
 static void suspend(unsigned reason, BOOL on) {
     dm_haptics_suspend(reason, on);
     void (^stop)(void) = ^{
-        for (int p = 0; p < DM_PLAYERS; p++) for (DmRumbleChannel *c in channels[p]) [c stop];
+        for (int p = 0; p < DM_PLAYERS; p++) { native_stop(p); for (DmRumbleChannel *c in channels[p]) [c stop]; }
     };
     if (on) { if (dispatch_get_specific(&queue)) stop(); else dispatch_sync(queue, stop); }
 }
+void dm_haptics_apple_focus(int active) { if(queue) suspend(DM_HAPTICS_UNFOCUSED,!active); }
 void dm_haptics_apple_shutdown(void) {
     if (queue) suspend(DM_HAPTICS_INACTIVE, YES);
 }

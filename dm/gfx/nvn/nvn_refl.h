@@ -4,6 +4,7 @@
 // PC shader reflection json → fixed-length C arrays (converted once when the shader is fetched; each draw only walks the arrays and does not touch NSDictionary / NSString).
 // Unit test tests/t_refl.m computes the expectations by hand from real reflection.
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 enum { NVN_RB_CBUF = 1, NVN_RB_SAMP, NVN_RB_TEX, NVN_RB_IMG, NVN_RB_TBUF,
@@ -54,6 +55,11 @@ typedef struct {
     int8_t uv_aff_attr[32]; uint16_t uv_aff[32][4];   // [sx, ox, sy, oy]
     uint8_t *c1;             // c1 constant segment as-is (B): c1_len bytes, malloc'd by nvn_refl_from_json (NULL without one). It was a 4 KB array; Hyrule Warriors: Age of Calamity has 6 KB segments (its soldiers' vertex shaders)
 } nvn_refl;
+
+// Plain C, every host (nvn_refl.c, cJSON): the same conversion from the json's text (len bytes of UTF-8, no NUL needed), byte for byte the nvn_refl that nvn_refl_from_json makes of the
+// same document, with the same failure texts (tests/t_refl_cmp.m checks both on the Mac); text that is not one json value fails ("reflection json does not parse"). dtt holds the
+// MTLTextureType values (nvn_refl_textype.h). 0 on success, as below
+int nvn_refl_from_json_text(const char *json, size_t len, nvn_refl *out, char *err, int errlen);
 
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>

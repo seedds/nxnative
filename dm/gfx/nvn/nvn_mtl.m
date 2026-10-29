@@ -3508,7 +3508,7 @@ static void shmap_load(void) {
     warm_start();
 }
 
-@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
+@interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m, writes_depth;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual); writes_depth: writes gl_FragDepth
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed;
@@ -5065,6 +5065,58 @@ static int pso_mixed_uint(const pso_key *k, NvShader *fs, int merged) {
     }
     return ints && floats;
 }
+// Dynamic depth-stripped fragment function variant: for fragment shaders that statically write gl_FragDepth
+// when drawn in colour-only render passes (dfmt == 0). Metal rejects pipeline descriptors where fragment shader writes
+// depth without a depth attachment; this strips [[depth(...)]] outputs and FragDepth writes from MSL source on demand.
+static id<MTLFunction> fs_nodepth(NvShader *fs, NSString *name) {
+    if (!fs || fs->stage != 1) return nil;
+    static NSMutableDictionary<NSString *, id<MTLFunction>> *g_fs_nd;
+    static os_unfair_lock g_fs_nd_lock = OS_UNFAIR_LOCK_INIT;
+    NSString *entry = name ?: (fs->ventry ?: @"main0");
+    NSString *ck = [NSString stringWithFormat:@"%s:%@", fs->key, entry];
+    os_unfair_lock_lock(&g_fs_nd_lock);
+    if (!g_fs_nd) g_fs_nd = [NSMutableDictionary new];
+    id<MTLFunction> cached = g_fs_nd[ck];
+    os_unfair_lock_unlock(&g_fs_nd_lock);
+    if (cached) return cached;
+
+    NSString *path = [NSString stringWithFormat:@"%@/%s.metal", g_msl_dir, fs->key];
+    if (![NSFileManager.defaultManager fileExistsAtPath:path]) {
+        NSString *kstr = [NSString stringWithUTF8String:fs->key];
+        if (![kstr hasSuffix:@"_b"]) kstr = [kstr stringByAppendingString:@"_b"];
+        path = [NSString stringWithFormat:@"%@/%@.metal", g_msl_dir, kstr];
+    }
+    NSError *err = nil;
+    NSString *src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
+    if (!src) {
+        MLOG("[RED] fs_nodepth: cannot read MSL source %s: %s", path.UTF8String, err.localizedDescription.UTF8String);
+        return nil;
+    }
+
+    NSMutableString *s = [src mutableCopy];
+    NSRegularExpression *re_depth_mem = [NSRegularExpression regularExpressionWithPattern:@"^\\s*float\\s+\\w+\\s+\\[\\[depth\\([^]]*\\)\\]\\];\\s*$" options:NSRegularExpressionAnchorsMatchLines error:nil];
+    [re_depth_mem replaceMatchesInString:s options:0 range:NSMakeRange(0, s.length) withTemplate:@""];
+    NSRegularExpression *re_depth_asgn = [NSRegularExpression regularExpressionWithPattern:@"^\\s*out\\.gl_FragDepth\\s*=\\s*[^;]+;\\s*$" options:NSRegularExpressionAnchorsMatchLines error:nil];
+    [re_depth_asgn replaceMatchesInString:s options:0 range:NSMakeRange(0, s.length) withTemplate:@""];
+    NSRegularExpression *re_ret_depth = [NSRegularExpression regularExpressionWithPattern:@",\\s*out\\.gl_FragDepth" options:0 error:nil];
+    [re_ret_depth replaceMatchesInString:s options:0 range:NSMakeRange(0, s.length) withTemplate:@""];
+
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:s options:nil error:&err];
+    if (!lib) {
+        MLOG("[RED] fs_nodepth: compiling depth-stripped MSL failed for %s: %s", fs->key, err.localizedDescription.UTF8String);
+        return nil;
+    }
+    id<MTLFunction> fn = [lib newFunctionWithName:entry];
+    if (!fn) {
+        MLOG("[RED] fs_nodepth: entry %s not found in depth-stripped library for %s", entry.UTF8String, fs->key);
+        return nil;
+    }
+    os_unfair_lock_lock(&g_fs_nd_lock);
+    g_fs_nd[ck] = fn;
+    os_unfair_lock_unlock(&g_fs_nd_lock);
+    return fn;
+}
+
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = vs->fn; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;
@@ -5084,6 +5136,10 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
             break; } }
     if (fs && fs->fn_u && !fsfn && d.fragmentFunction == fs->fn && pso_all_uint(k, fs, merged)) d.fragmentFunction = fs->fn_u;   // integer colour targets (dmsh_build.py fs_uint)
     else if (fs && fs->fn_m && !fsfn && d.fragmentFunction == fs->fn && pso_mixed_uint(k, fs, merged)) d.fragmentFunction = fs->fn_m;   // integer and float colour targets
+    if (fs && !k->dfmt && fs->writes_depth && !fsfn) {
+        id<MTLFunction> fn_nd = fs_nodepth(fs, d.fragmentFunction.name);
+        if (fn_nd) d.fragmentFunction = fn_nd;
+    }
     // Dual-source blending: target 0 reads the shader's output 1 as its second source. The dual-source entry point returns that output as [[color(0), index(1)]] (dmsh_build.py fs_dual),
     // and output 1 is then no colour output: Maxwell leaves the attachment of output 1 as it was. A shader without that entry point blends with zero for the second source, as an
     // unwritten one (blend_zero_src1): passing the state to Metal as it is makes Metal 4's blend compiler crash (MTLCompilerService in buildBlendFactor, Pokémon Legends: Arceus)
@@ -6008,6 +6064,16 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
             vs->layer_out = 1; MLOG("vertex shader %s writes the layer: its pipelines get the triangle input primitive class", vs->key);
             e = nil; d = pso_desc(&k, vs, fs, ms_fn ? ms_fn : g_pso_fsfn, g_pso_lmap != NULL); ps = pso_build(d, &e);
         }
+        if (!ps && fs && !k.dfmt && [e.localizedDescription containsString:@"depthAttachmentPixelFormat is not valid and shader writes to depth"]) {
+            fs->writes_depth = 1;
+            id<MTLFunction> fn_nd = fs_nodepth(fs, d.fragmentFunction.name);
+            if (fn_nd) {
+                MLOG("fragment shader %s writes depth but pass has no depth attachment: using depth-stripped variant", fs->key);
+                d.fragmentFunction = fn_nd;
+                e = nil;
+                ps = pso_build(d, &e);
+            }
+        }
     }
     if (!took) {   // the draw waited (built here, made from its queued build, or waited for its running build)
         uint64_t w = bp_now() - bt - (g_pt_pred_ns - pred0); g_pw_n[why]++; g_pw_ns[why] += w;
@@ -6125,6 +6191,11 @@ static void warm_task(WarmTask *t) {
             NSError *e = nil; id ps = pso_build(pso_desc(&k, vs, fs, fsfn, sk.merged), &e);
             if (!ps && !vs->layer_out && [e.localizedDescription containsString:@"render_target_array_index"]) {   // a vertex shader that writes the layer (see pso_get_)
                 vs->layer_out = 1; e = nil; ps = pso_build(pso_desc(&k, vs, fs, fsfn, sk.merged), &e); }
+            if (!ps && fs && !k.dfmt && [e.localizedDescription containsString:@"depthAttachmentPixelFormat is not valid and shader writes to depth"]) {
+                fs->writes_depth = 1;
+                id<MTLFunction> fn_nd = fs_nodepth(fs, fsfn ? fsfn.name : fs->fn.name);
+                if (fn_nd) { e = nil; ps = pso_build(pso_desc(&k, vs, fs, fn_nd, sk.merged), &e); }
+            }
             g_warm_done++;
             if (!ps) { MLOG("[RED] background render pipeline creation failed: %s", e.localizedDescription.UTF8String); continue; }
             WarmItem *item = [WarmItem new]; item->kind = 1; item->vs_key = t->vkey; item->fs_key = t->fkey; item->vs = vs; item->fs = fs; item->fsfn = fsfn; item->pso = k; item->object = ps;

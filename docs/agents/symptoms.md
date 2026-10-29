@@ -578,6 +578,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - hundreds of geometry raster passes in combat, despite support for batching consecutive geometry draws. → [Geometry runs across occlusion query boundaries](../reference/shaders.md#geometry-runs-across-occlusion-query-boundaries)
 - geometry preparation dominates rendering CPU even after geometry passes have been batched; primitive assembly and capture-index deduplication repeat for unchanged meshes. → [Prepared geometry indices reused after byte comparison](../reference/shaders.md#prepared-geometry-indices-reused-after-byte-comparison)
 - geometry vertex-capture passes consume substantial GPU time before geometry compute or depth rasterization. → [Geometry capture initializes only missing words](../reference/shaders.md#geometry-capture-initializes-only-missing-words)
+- `[RED] failed to create render pipeline (vertex <vs> fragment <fs>): pipeline descriptor is invalid: depthAttachmentPixelFormat is not valid and shader writes to depth`. Render pass aborts or crashes when drawing colour-only passes with a fragment shader that writes `gl_FragDepth`. → [Depth-writing fragment shaders in colour-only passes](../reference/shaders.md#depth-writing-fragment-shaders-in-colour-only-passes)
 
 ## Game state
 

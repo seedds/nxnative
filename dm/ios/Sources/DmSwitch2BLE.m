@@ -370,7 +370,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
             [self.peripheral writeValue:[NSData dataWithBytes:packet length:n] forCharacteristic:m type:CBCharacteristicWriteWithoutResponse];
             _lastWrite = t;
         }
-        _rumbleHoldUntil = t + 120ull * NSEC_PER_MSEC;   // keep sending zeros briefly so the actuator stops instead of holding
+        if (lfA > 0 || hfA > 0) _rumbleHoldUntil = t + 120ull * NSEC_PER_MSEC;   // zero packets must not extend their own stop deadline
     }
     // 1 Hz keep-alive: the last host write is what keeps the link alive on Apple hosts.
     if (t - _lastWrite >= 1000000000ull && !_pending) [self setPlayerLEDs:nil];

@@ -3,6 +3,7 @@
 // result (nvn_mtl.m; nvn_obj.h and nvn_mtl.h declare them), so the Metal backend's behaviour is unchanged. Other hosts get the same functions as prototypes, which the Vulkan backend
 // (dm/gfx/hostvk, step M7) is to define. Names are the mtl_* ones with be_ in front, except: mtl_link_* (the display link) are be_vsync_*, mtl_device is be_native_device, and
 // be_pool_add also takes the pool's NVN flags (memory placement for a Vulkan backend; the Metal backend ignores them). Outside the Apple block this header is plain C11.
+// The per-operation group at the end (step M3) is declared once for every host: the frontend's decoder (nvn_replay.c) calls it and each backend defines it.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -240,13 +241,48 @@ void be_alloc_stats(uint64_t *waits, uint64_t *grown, int *n);
 
 #endif
 
-// Not part of step M1 (docs/design/vulkan-backend.md, section 1.5); none of these is declared yet:
+// ---------- Per operation (step M3): the frontend's decoder, nvn_replay_exec (nvn_replay.c), calls these in record order, on every host ----------
+// New functions, not renames: the Metal backend defines them in nvn_mtl.m (each is the body of one case arm of the old mtl_exec, verbatim), the Vulkan backend (step M7) in
+// dm/gfx/hostvk. Each per-record function takes exactly what that arm had: rec, the record (rec + h->size is the next one), h, its header as the decoder read it, and a, its payload
+// (rec + 8), which the backend reads through the payload types of nvn_obj.h as the arm did. The decoder applies the state records itself (nvn_state_apply) and hands the mask to
+// be_state_dirty; the operations that are also state records call the backend before the apply (be_tf_bind, be_tf_state_note, be_rast_discard) or after it (be_bind_program,
+// be_tf_state), as the Metal arm ordered its own work around state_op
+int be_list_begin(void);                                             // a command list or a called sub-list starts: a value the decoder gives back to be_rec_pre for each of its records (Metal: whether DM_NVN_PASSDUMP_ALL traces them)
+int be_rec_pre(const uint8_t *rec, const op_hdr *h, int list);       // before every record (Metal: the look-ahead hooks); nonzero: consumed, the decoder goes on with the next record
+void be_state_dirty(uint32_t mask);                                  // what nvn_state_apply / nvn_state_reset returned (NVN_DIRTY_*, NVN_STATE_APPLIED; nvn_state.h)
+void be_end(const uint8_t *rec, const op_hdr *h, const void *a);             // OP_END: the list ends (a called sub-list while nvn_replay_ret_n > 0, nvn_replay.h)
+void be_signal_event(const uint8_t *rec, const op_hdr *h, const void *a);    // OP_SIGNAL_EVENT
+void be_report_counter(const uint8_t *rec, const op_hdr *h, const void *a);  // OP_REPORT_COUNTER
+void be_render_cond(const uint8_t *rec, const op_hdr *h, const void *a);     // OP_RENDER_COND (p_render_cond)
+void be_fence_sync(const uint8_t *rec, const op_hdr *h, const void *a);      // OP_FENCE_SYNC
+void be_reset_counter(const uint8_t *rec, const op_hdr *h, const void *a);   // OP_RESET_COUNTER
+void be_fill(const uint8_t *rec, const op_hdr *h, const void *a);            // OP_CLEAR_BUF (p_clear_buf)
+void be_copy_b2b(const uint8_t *rec, const op_hdr *h, const void *a);        // OP_COPY_B2B
+void be_update_ub(const uint8_t *rec, const op_hdr *h, const void *a);       // OP_UPDATE_UB
+void be_set_rt(const uint8_t *rec, const op_hdr *h, const void *a);          // OP_SET_RT (p_set_rt)
+void be_clear_color(const uint8_t *rec, const op_hdr *h, const void *a);     // OP_CLEAR_COLOR (p_clear_color)
+void be_clear_ds(const uint8_t *rec, const op_hdr *h, const void *a);        // OP_CLEAR_DS (p_clear_ds)
+void be_draw(const uint8_t *rec, const op_hdr *h, const void *a);            // OP_DRAW (p_draw through draw_rec)
+void be_draw_idx(const uint8_t *rec, const op_hdr *h, const void *a);        // OP_DRAW_IDX (p_draw_idx through draw_idx_rec)
+void be_bind_program(const uint8_t *rec, const op_hdr *h, const void *a);    // OP_BIND_PROGRAM, after the apply
+void be_tf_bind(const uint8_t *rec, const op_hdr *h, const void *a);         // OP_TF_BIND, before the apply
+void be_tf_state_note(const uint8_t *rec, const op_hdr *h, const void *a);   // OP_TF_STATE, before the apply
+void be_tf_state(const uint8_t *rec, const op_hdr *h, const void *a);        // OP_TF_STATE, after the apply
+void be_rast_discard(const uint8_t *rec, const op_hdr *h, const void *a);    // OP_RAST_DISCARD, before the apply
+void be_copy_b2t(const uint8_t *rec, const op_hdr *h, const void *a);        // OP_COPY_B2T (p_copy_b2t)
+void be_copy_t2b(const uint8_t *rec, const op_hdr *h, const void *a);        // OP_COPY_T2B (p_copy_t2t)
+void be_copy_t2t(const uint8_t *rec, const op_hdr *h, const void *a);        // OP_COPY_T2T (p_copy_t2t)
+void be_clear_tex(const uint8_t *rec, const op_hdr *h, const void *a);       // OP_CLEAR_TEX (p_clear_tex)
+void be_dispatch(const uint8_t *rec, const op_hdr *h, const void *a);        // OP_DISPATCH (p_dispatch)
+void be_barrier(const uint8_t *rec, const op_hdr *h, const void *a);         // OP_BARRIER
+
+// Not part of step M1 (docs/design/vulkan-backend.md, section 1.5); none of these is declared yet, except where said:
 // - With the Vulkan backend: const be_caps *be_get_caps(void) (device capabilities); void be_guest_map(void *mem, uint64_t size) and void be_guest_unmap(void *mem, uint64_t size)
 //   (guest memory committed / about to be decommitted, called from hle_svc.c, so the backend can release an import first).
 // - With step M2: be_addr goes; the frontend's pool table answers it (nvn_pool_lookup, nvn_pools.c).
-// - With step M3: the per-operation group, called by the frontend's decoder (nvn_replay.c) in record order with what today's case arms of mtl_exec receive: be_rec_pre, be_state_dirty,
-//   be_set_rt, be_clear_color, be_clear_ds, be_draw, be_dispatch, be_copy_b2b, be_update_ub, be_fill, be_copy_b2t, be_copy_t2b, be_copy_t2t, be_clear_tex, be_barrier,
-//   be_report_counter, be_reset_counter, be_signal_event, be_fence_sync, be_render_cond, be_tf_state; be_exec and be_exec_rest then go.
+// - Step M3 added the per-operation group above, in the raw form (rec, h, a): the typed arguments of the design's sketch (section 1.5) come when the Vulkan backend needs them.
+//   be_exec stays (on Apple mtl_exec, which is now nvn_replay_exec) and be_exec_rest too (the Metal look-ahead's handles still to come in the submission) until step M6, when
+//   hle_nvn.c calls nvn_replay_exec itself.
 // - void be_report(uint32_t tick, char *out, size_t n): designed, not yet used. The backend is to format its own statistics lines, replacing the 41 calls in hle_nvn.c's log lines and
 //   per-frame rows of these 33 functions: be_mem_stat, be_stats, be_args_stats, be_use_stats, be_vbuf_stats, be_ds_omit, be_drawable_ns_take, be_bw, be_udc_saved_bytes, be_pkg_stats,
 //   be_cpu_tex_count, be_pkg_edge_skips, be_pkg_miss, be_upload_ns_take, be_upload_gpu_ns_take, be_upload_bytes, be_create_stats, be_create_ns, be_hybrid_stats, be_res_stats,

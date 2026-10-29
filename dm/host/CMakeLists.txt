@@ -236,6 +236,8 @@ host_test(t_gpuwrite SOURCES ../../gfx/tests/t_gpuwrite.c ../../gfx/nvn/nvn_gpuw
 # Its handle resolution and memory pool table (the same, step M2b)
 host_test(t_resolve SOURCES ../../gfx/tests/t_resolve.c ../../gfx/nvn/nvn_resolve.c ../../gfx/nvn/nvn_state.c ../../gfx/nvn/nvn_gpuwrite.c INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
 host_test(t_pools SOURCES ../../gfx/tests/t_pools.c ../../gfx/nvn/nvn_pools.c INCLUDES ${REPO}/dm/gfx/nvn)
+# Its decoder of command lists over a stub backend (step M3)
+host_test(t_replay SOURCES ../../gfx/tests/t_replay.c ../../gfx/nvn/nvn_replay.c ../../gfx/nvn/nvn_state.c INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
 # The shader reflection parser in plain C, with its JSON reader (dm/gfx/nvn/nvn_refl.c, dm/third_party/cjson; dm/gfx/tests/t_refl_cmp.m checks it against the Objective-C one on the Mac)
 host_test(t_refl_c SOURCES ../../gfx/tests/t_refl_c.c ../../gfx/nvn/nvn_refl.c ../../third_party/cjson/cJSON.c INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/third_party/cjson)
 # The host-call thunks and the host-function page: the generator's output for the synthetic entries of t_hle_thunks_entries.c, which t_hle_thunks.c includes

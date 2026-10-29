@@ -515,6 +515,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** general: `RemoveNode` follows only into producers without side effects (`HasSideEffects`). This follows MacNativeGames' translator patch 0002.
 - **Found on:** no game on hand so far. Rebuilding the chain changed no shader for this reason in Tears of the Kingdom, Breath of the Wild, Wonder, Scarlet or ANIMAL WELL (94,717 shaders); every MSL change was the early fragment tests attribute.
 
+### Global compare-and-swap omitted from translated shaders
+
+- **Symptom:** translation logs `AtomCas` as unimplemented but still produces a shader; a global hash-table insertion neither writes the bucket nor updates its returned old value.
+- **Cause:** the Maxwell `ATOM.CAS` emitter only logged a warning. Its address also needs a signed 20-bit byte displacement; the shared extended-address helper previously added the low-word carry without sign-extending a negative displacement into the high word.
+- **Fix:** decode the displacement and width, emit a global atomic compare-and-swap using the source register as the comparison and its next register as the replacement, and copy the old word to the destination. Normal instruction predication guards both effects. Sign-extend negative displacements before adding the unsigned low-word carry. The verified 32-bit form accepts an even source-register pair; 64-bit, odd-pair and unverified modifier forms fail translation explicitly. Encoding reference: [envytools' Maxwell decoder](https://github.com/envytools/envytools/blob/master/envydis/gm107.c), `atommem0_imm` and `tabeef0sz`.
+- **Found on:** [LOLLIPOP CHAINSAW RePOP](../../dm/games/0100DD301A686000/README.md#files-and-shaders), in a feedback-compaction shader dispatched during the tested prologue route. The route was already visually playable; this fixes a verified missing operation, without claiming a measured visual or performance improvement.
+- **Check:** `dm/tools/tests/test_global_atomic_cas.py` translates synthetic Maxwell code, validates SPIR-V, compiles for Mac and iOS, and runs 11 Mac GPU cases covering success/mismatch, displacement, predication, source/destination aliasing and an unused result. Six unsupported forms must fail. A separate fixture evaluates the production address-emitter IR before storage-buffer lowering, covering signed carry/borrow and non-extended wraparound.
+
 ### Position invariance across shaders
 
 - **Symptom:** the ground kept stale 32×32 blocks where the G-buffer draw failed the depth test: blocks of a stale image where a depth pre-pass and a later pass with other vertex shaders meet (Odyssey: 32×32 blocks on every fourth frame).

@@ -5,8 +5,8 @@ Update 1.21.1 (`v1245184`) over the base game. Unreal Engine 5.6.0
 NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`.
 
 **Current:** playable on the Mac through the prologue's first combat wave and
-the parking-lot transition. The unsigned iOS package is being built; device
-validation remains open.
+the parking-lot transition. The unsigned iOS package builds and passes archive
+verification; device validation remains open.
 
 ## Memory
 
@@ -43,7 +43,7 @@ validation remains open.
   global). The split deduplicates them into 9,828 shaders: 908 vertex,
   7,712 pixel and 1,208 compute shaders. The 1,816 vertex/pixel pairs cover
   the separable programs' pixel inputs.
-- All 9,828 Mac shaders compiled on chain `f3ceca86cac5`, including 166
+- All 9,828 shaders compiled for Mac and iOS on chain `d54f11c2255c`, including 166
   shadow-input, 7,064 alpha-test and 868 pulling variants; no driver-constant
   read was classified as impossible to fill.
 - `tex_dyn_slots on` uses the existing [dynamic texture slot binding](../../../docs/reference/shaders.md#texture-slots-picked-at-run-time)
@@ -60,6 +60,17 @@ validation remains open.
   pipelines from startup through the first combat wave and parking lot. A fresh
   launch loaded all 1,066 entries with no stale shader keys in about 1.2 seconds.
 - `pad_layout full` exposes both sticks for movement and camera control.
+- **Resolved:** global `ATOM.CAS` was silently omitted in three compute
+  shaders (`56e279e8fac3fa1c`, `b63078f53df8db95`, `e918336692525691`). The
+  last is `/Engine/Private/GPUFeedbackCompaction.usf:BuildFeedbackHashTableCS`
+  (global archive entry 324), recorded in an actual compute dispatch during
+  prologue gameplay. Its instruction at code offset `0x208`
+  (`0xeef1000000c70201`) compares the bucket with R12, replaces it with R13
+  on a match, and returns the old value in R1. See the general
+  [global compare-and-swap fix](../../../docs/reference/shaders.md#global-compare-and-swap-omitted-from-translated-shaders).
+- **Open:** translation still reports `Sam`, `Ram` and `PrmtI` in shaders
+  not recorded in the tested route. Compiling the complete library does not
+  establish that those unvisited paths behave correctly.
 
 ## Testing
 
@@ -83,6 +94,21 @@ validation remains open.
 - A fresh process with the existing `lollipop` save reached the prologue again,
   with no error lines. This checks save creation and acceptance on relaunch;
   persistence of a later checkpoint has not been validated.
+- The corrected chain's 95-second Mac smoke route reached 5,364 frames with
+  zero `[RED]` kinds, 59.3 fps and 18.15 ms frame-time p99; its gate screenshots
+  match the expected scene. The comparison against the profile's pre-fix
+  baseline changed only the three CAS shaders, with no new shader or interface
+  failures. See [`validated.tsv`](validated.tsv) for the recorded chain.
+- A further four-minute functional check on that chain repeated the gate
+  interactions, the grab-escape prompt and combat attacks (score 1,000), with
+  no error or crash lines. The earlier test covered the rest of the first wave
+  and parking-lot transition.
+- The unsigned 1.21.1 IPA is 6.81 GiB (7,312,918,586 bytes) and contains all
+  9,828 base iOS shader libraries and the
+  merged RomFS. ZIP CRC verification passed. It has an arm64 executable, no
+  provisioning profile or developer identity, and the standard ad-hoc
+  entitlement carrier for the increased-memory request. It has not been
+  installed or tested on an iOS device.
 - **Open:** longer play sessions, later stages, later-checkpoint persistence,
   and iOS device performance/memory. The IPA requires iOS 26 or later.
 
@@ -109,3 +135,4 @@ captures in `<NSP folder>/0100DD301A686000-work/`.
 - [Unreal's FMallocBinned3 replaced by the host allocator](../../../docs/reference/memory.md#unreals-fmallocbinned3-replaced-by-the-host-allocator).
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area).
 - [Texture slots picked at run time](../../../docs/reference/shaders.md#texture-slots-picked-at-run-time).
+- [Global compare-and-swap omitted from translated shaders](../../../docs/reference/shaders.md#global-compare-and-swap-omitted-from-translated-shaders).

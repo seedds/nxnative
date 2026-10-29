@@ -1,0 +1,5 @@
+# The toolchain nxaot is built and tested with (README.md, "The lock file"). CMakeLists.txt stops the configure step when the LLVM package
+# or the vendored dynarmic (dm/third_party/dynarmic/VENDOR.md) differs, and the lifter checks LLVM_VERSION_STRING at compile time.
+# Later rows: the hashes of the prebuilt nxaot binaries (docs/design/aot-recompiler.md section 13).
+llvm	18.1.3
+dynarmic	a46601580d5512d324104f985b5f0209dc980ddc

@@ -1,0 +1,22 @@
+# Build and test environment of the ahead-of-time recompiler nxaot (dm/tools/aot): dm/tools/aot/README.md has the commands.
+# Ubuntu 24.04, pinned by digest (the same base as Dockerfile.build); LLVM 18 with its development packages (the version dm/tools/aot/nxaot.lock pins), lld 18,
+# CMake 3.28, Ninja, Python 3.12.
+FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18-dev liblld-18-dev libclang-rt-18-dev cmake ninja-build python3 git ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100 \
+ && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100 \
+ && update-alternatives --install /usr/bin/cc cc /usr/bin/clang-18 100 \
+ && update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++-18 100 \
+ && update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-18 100
+# Boost headers for dynarmic (it includes boost/icl and boost/variant). A temporary deviation from the vendored subset (dm/tools/aot/README.md, "Boost"): the
+# subset bcp makes of those headers is 21 MB, over the size the subset was allowed. In a layer of its own, so that dropping it later leaves the LLVM layer cached
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libboost-dev \
+ && rm -rf /var/lib/apt/lists/*
+ENV CC=clang CXX=clang++
+# The worktree is mounted at /src; git refuses repositories owned by another user without this (the container runs as the caller's user, HOME=/tmp)
+RUN git config --system --add safe.directory '*'
+WORKDIR /src

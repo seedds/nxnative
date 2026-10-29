@@ -1,0 +1,403 @@
+# nxaot vectors: words dynarmic does not translate (udf, unallocated groups, LSE, hvc / smc, msr immediate)
+# Written by dm/tools/aot/tests/gen_vectors.py; do not edit (run it again). Format: src/vec/vectors.h
+# id	class	text	code	seed	regs	mem
+undefined.00001	undefined	unallocated op0 0x8347a1d2	8347a1d2	d89d78dc159795ae	-	-
+undefined.00002	undefined	unallocated op0 0xc2263cf7	c2263cf7	8a17a3d6aeadde16	-	-
+undefined.00003	undefined	LSE atomic 0xf87a02b4	f87a02b4	aba12a00d8536aec	-	-
+undefined.00004	undefined	MSR (immediate) 0xd500467f	d500467f	d7ae45510712a23e	-	-
+undefined.00005	undefined	MSR (immediate) 0xd50441bf	d50441bf	09b7cf88b0022fb7	-	-
+undefined.00006	undefined	MSR (immediate) 0xd50344df	d50344df	cbd6d3857cb0b659	-	-
+undefined.00007	undefined	unallocated op0 0xc2353cae	c2353cae	cedcbe923ad81e19	-	-
+undefined.00008	undefined	LSE atomic 0x78366341	78366341	12fac7532f1a56d1	-	-
+undefined.00009	undefined	UDF 0x00001056	00001056	67e7c3f612c24395	-	-
+undefined.00010	undefined	CAS 0x08a1fdc8	08a1fdc8	6a335d686b5474fe	-	-
+undefined.00011	undefined	HVC / SMC 0xd4077c42	d4077c42	df337455fee43d6a	-	-
+undefined.00012	undefined	MSR (immediate) 0xd50344ff	d50344ff	7c01c30030cd430e	-	-
+undefined.00013	undefined	MSR (immediate) 0xd5074d5f	d5074d5f	f800f5638c86500f	-	-
+undefined.00014	undefined	MSR (immediate) 0xd5034fdf	d5034fdf	5c7f7b77fae5734d	-	-
+undefined.00015	undefined	UDF 0x0000f319	0000f319	31c5951295444162	-	-
+undefined.00016	undefined	CAS 0x48f5feb1	48f5feb1	2ec76dfac309e793	-	-
+undefined.00017	undefined	UDF 0x000065d9	000065d9	a75c32029e7e690a	-	-
+undefined.00018	undefined	UDF 0x0000fc0d	0000fc0d	e6690fcc504ee096	-	-
+undefined.00019	undefined	HVC / SMC 0xd4137fa2	d4137fa2	8e8f40fd47a4e55e	-	-
+undefined.00020	undefined	CAS 0x88b6fdd7	88b6fdd7	8b605cb2f5da797d	-	-
+undefined.00021	undefined	CAS 0x08a1febc	08a1febc	f1ac42607c9038cb	-	-
+undefined.00022	undefined	HVC / SMC 0xd413f863	d413f863	ad0cd51c95f525e7	-	-
+undefined.00023	undefined	UDF 0x00008f9c	00008f9c	44e0592fd2d87e98	-	-
+undefined.00024	undefined	MSR (immediate) 0xd5024fff	d5024fff	6cb948ff2c1caa0b	-	-
+undefined.00025	undefined	LSE atomic 0xb8e570b0	b8e570b0	c2dd7e701fff34de	-	-
+undefined.00026	undefined	UDF 0x0000ba1c	0000ba1c	23446cb8624c0d93	-	-
+undefined.00027	undefined	LSE atomic 0x38672267	38672267	ad4bbfbb882b5642	-	-
+undefined.00028	undefined	CAS 0x88a07e2e	88a07e2e	b03db1fdce0573f1	-	-
+undefined.00029	undefined	LSE atomic 0x386211d9	386211d9	bed69548692e86fa	-	-
+undefined.00030	undefined	HVC / SMC 0xd40c66e3	d40c66e3	a25f9a7b18c17628	-	-
+undefined.00031	undefined	HVC / SMC 0xd41ddbc2	d41ddbc2	cca555cdcdf707ed	-	-
+undefined.00032	undefined	CAS 0x88a3fea6	88a3fea6	8992b8fc66756097	-	-
+undefined.00033	undefined	UDF 0x000030b7	000030b7	efff265c7ba1daee	-	-
+undefined.00034	undefined	LSE atomic 0x386ee3c2	386ee3c2	98f82e5ef62ba60b	-	-
+undefined.00035	undefined	unallocated op0 0xe704246f	e704246f	763be450434c7bf9	-	-
+undefined.00036	undefined	MSR (immediate) 0xd50547ff	d50547ff	201ac951d2e5321c	-	-
+undefined.00037	undefined	UDF 0x0000b639	0000b639	a8f317f521efd35f	-	-
+undefined.00038	undefined	CAS 0x48e07ef7	48e07ef7	25ce5b35469284ff	-	-
+undefined.00039	undefined	HVC / SMC 0xd40296e3	d40296e3	e0ff370a7353f26d	-	-
+undefined.00040	undefined	MSR (immediate) 0xd500461f	d500461f	7a6827b3ac407c50	-	-
+undefined.00041	undefined	unallocated op0 0xc373ec8b	c373ec8b	47e811bb1772930a	-	-
+undefined.00042	undefined	CAS 0xc8b37fc3	c8b37fc3	5451f65dd8fae858	-	-
+undefined.00043	undefined	unallocated op0 0xc390917d	c390917d	4f98a4977d3da765	-	-
+undefined.00044	undefined	HVC / SMC 0xd4008ac3	d4008ac3	18e255eebd8923c9	-	-
+undefined.00045	undefined	UDF 0x00004537	00004537	806e5610ed73ef10	-	-
+undefined.00046	undefined	UDF 0x000008fc	000008fc	1f3e053f159d9c6d	-	-
+undefined.00047	undefined	MSR (immediate) 0xd50746df	d50746df	8e928101c186bf8d	-	-
+undefined.00048	undefined	unallocated op0 0x435d5f04	435d5f04	33d2c579fbcf192a	-	-
+undefined.00049	undefined	LSE atomic 0xf8e46057	f8e46057	18d92177bac8c4bd	-	-
+undefined.00050	undefined	CAS 0x48a07ea2	48a07ea2	9729e8ca112a7a16	-	-
+undefined.00051	undefined	LSE atomic 0x78665166	78665166	2293cf71339f6467	-	-
+undefined.00052	undefined	HVC / SMC 0xd40f1643	d40f1643	337885801b217d58	-	-
+undefined.00053	undefined	CAS 0xc8b67f60	c8b67f60	897ac48b6523e371	-	-
+undefined.00054	undefined	UDF 0x00000aad	00000aad	ddcd71939f4bb79f	-	-
+undefined.00055	undefined	unallocated op0 0x475fcde8	475fcde8	0c9ac7f7461c42d3	-	-
+undefined.00056	undefined	UDF 0x0000eb9e	0000eb9e	1413257e336351d3	-	-
+undefined.00057	undefined	CAS 0x88be7d30	88be7d30	0e5a5f464b43fad5	-	-
+undefined.00058	undefined	CAS 0x48b37ea6	48b37ea6	2618a22faad4d2ce	-	-
+undefined.00059	undefined	LSE atomic 0x38bc7143	38bc7143	cac21bb65fe1beed	-	-
+undefined.00060	undefined	unallocated op0 0xc3369d44	c3369d44	8be66fd06d9d4975	-	-
+undefined.00061	undefined	LSE atomic 0x78a570ae	78a570ae	1d1a3f5797e93006	-	-
+undefined.00062	undefined	UDF 0x0000c04d	0000c04d	2fee2e7fc2cbd181	-	-
+undefined.00063	undefined	unallocated op0 0x06abc94e	06abc94e	fe854bfc883b481a	-	-
+undefined.00064	undefined	MSR (immediate) 0xd5024f1f	d5024f1f	237bbe68a9656df1	-	-
+undefined.00065	undefined	CAS 0x08a97cc1	08a97cc1	04c7b0995c5f694c	-	-
+undefined.00066	undefined	unallocated op0 0x625acd50	625acd50	758086f49908f685	-	-
+undefined.00067	undefined	CAS 0x48f17ee5	48f17ee5	2642a8101e3e134e	-	-
+undefined.00068	undefined	CAS 0x88be7dce	88be7dce	d7f684f0bd8f50ea	-	-
+undefined.00069	undefined	HVC / SMC 0xd40ecba2	d40ecba2	c6e41c223b053917	-	-
+undefined.00070	undefined	unallocated op0 0x0661b106	0661b106	cd0ea5e4769045c3	-	-
+undefined.00071	undefined	unallocated op0 0xa2181d12	a2181d12	450d05ed2c437728	-	-
+undefined.00072	undefined	LSE atomic 0xb8edb006	b8edb006	7e2309a2ce60298b	-	-
+undefined.00073	undefined	HVC / SMC 0xd407da02	d407da02	4890a2b5acf45be4	-	-
+undefined.00074	undefined	LSE atomic 0x78e5a058	78e5a058	b4201e5b27dbac8b	-	-
+undefined.00075	undefined	CAS 0xc8fa7c8b	c8fa7c8b	7fdcc9b25bd722f9	-	-
+undefined.00076	undefined	HVC / SMC 0xd4181ec2	d4181ec2	3a02f5ff5024dc5b	-	-
+undefined.00077	undefined	unallocated op0 0xe63d317e	e63d317e	d7cf1541f73b4afd	-	-
+undefined.00078	undefined	HVC / SMC 0xd411eea3	d411eea3	5de3b5cf73ca5ddf	-	-
+undefined.00079	undefined	MSR (immediate) 0xd50747ff	d50747ff	59275c7228f6ae8d	-	-
+undefined.00080	undefined	CAS 0xc8aefd47	c8aefd47	72b52766184f5608	-	-
+undefined.00081	undefined	MSR (immediate) 0xd502473f	d502473f	53251e357b774511	-	-
+undefined.00082	undefined	MSR (immediate) 0xd50141bf	d50141bf	66945f4d15c6801d	-	-
+undefined.00083	undefined	LSE atomic 0x7828e225	7828e225	64996ed39a436eb3	-	-
+undefined.00084	undefined	HVC / SMC 0xd41db362	d41db362	ad0707e282e798c5	-	-
+undefined.00085	undefined	CAS 0x08b87fd8	08b87fd8	c1a9685dce5fc63e	-	-
+undefined.00086	undefined	CAS 0x08b4ff69	08b4ff69	2dd520cbcc67c43e	-	-
+undefined.00087	undefined	LSE atomic 0xf8f7c220	f8f7c220	0d40505921f2a305	-	-
+undefined.00088	undefined	UDF 0x0000f4b3	0000f4b3	c6879bb5bddaf3c4	-	-
+undefined.00089	undefined	MSR (immediate) 0xd500481f	d500481f	0180f342aa1819e1	-	-
+undefined.00090	undefined	CAS 0x08e67e43	08e67e43	30103bf84820e59a	-	-
+undefined.00091	undefined	CAS 0x08fc7d0c	08fc7d0c	d8a12d1c0d4c9b8b	-	-
+undefined.00092	undefined	LSE atomic 0xb83d0069	b83d0069	edfe3545bed224e0	-	-
+undefined.00093	undefined	HVC / SMC 0xd40f29c2	d40f29c2	f7a8ea54f427dfde	-	-
+undefined.00094	undefined	HVC / SMC 0xd4061aa3	d4061aa3	f68ad7529ff61b4a	-	-
+undefined.00095	undefined	MSR (immediate) 0xd5014cff	d5014cff	3b104845b698e90c	-	-
+undefined.00096	undefined	LSE atomic 0xb8eac368	b8eac368	2b3e833878570576	-	-
+undefined.00097	undefined	UDF 0x0000c50d	0000c50d	003ff9225f4c0aae	-	-
+undefined.00098	undefined	LSE atomic 0x78bb42c2	78bb42c2	b504988ac9457170	-	-
+undefined.00099	undefined	MSR (immediate) 0xd50649ff	d50649ff	6018004872588952	-	-
+undefined.00100	undefined	HVC / SMC 0xd40f61c3	d40f61c3	d2ac2c20ccc3821f	-	-
+undefined.00101	undefined	LSE atomic 0x7862b1de	7862b1de	a74ccfabeabe090f	-	-
+undefined.00102	undefined	MSR (immediate) 0xd5074fff	d5074fff	9fded6dde7e475b5	-	-
+undefined.00103	undefined	CAS 0x08e27e4f	08e27e4f	7a6aecb2fdbf9276	-	-
+undefined.00104	undefined	MSR (immediate) 0xd50148ff	d50148ff	4fd33e42a44b49be	-	-
+undefined.00105	undefined	LSE atomic 0xb8feb3a9	b8feb3a9	01e08d1fdf94574e	-	-
+undefined.00106	undefined	UDF 0x0000e677	0000e677	8c7367bf20896c13	-	-
+undefined.00107	undefined	unallocated op0 0xa365bc9d	a365bc9d	ef674235c1335ea9	-	-
+undefined.00108	undefined	LSE atomic 0x38f523ae	38f523ae	776a20f789ed264b	-	-
+undefined.00109	undefined	CAS 0x88ebfc7b	88ebfc7b	af59ac7b6c129c97	-	-
+undefined.00110	undefined	MSR (immediate) 0xd502481f	d502481f	40e9a3ff7c4f75eb	-	-
+undefined.00111	undefined	UDF 0x00001385	00001385	05ef03f10e63b542	-	-
+undefined.00112	undefined	MSR (immediate) 0xd507403f	d507403f	12787d48d232698c	-	-
+undefined.00113	undefined	CAS 0x88e6fd12	88e6fd12	331b3b65f78e6340	-	-
+undefined.00114	undefined	HVC / SMC 0xd4165b22	d4165b22	24526872c032cb71	-	-
+undefined.00115	undefined	HVC / SMC 0xd41d1863	d41d1863	1b30f0bddd03e15e	-	-
+undefined.00116	undefined	CAS 0x48fefccd	48fefccd	8693248f7db54406	-	-
+undefined.00117	undefined	MSR (immediate) 0xd50449bf	d50449bf	477b146b764d7762	-	-
+undefined.00118	undefined	HVC / SMC 0xd403b243	d403b243	51616f90b4e169c2	-	-
+undefined.00119	undefined	unallocated op0 0x638ceafa	638ceafa	4848a84d28a4603b	-	-
+undefined.00120	undefined	UDF 0x00005d07	00005d07	085d6fbb0e3c2dcb	-	-
+undefined.00121	undefined	CAS 0xc8abff06	c8abff06	0ae8aa113b6e5014	-	-
+undefined.00122	undefined	unallocated op0 0x63cd3339	63cd3339	d55ce51346e84f80	-	-
+undefined.00123	undefined	CAS 0xc8b5fc37	c8b5fc37	150040ffbaa63214	-	-
+undefined.00124	undefined	UDF 0x000089bc	000089bc	17ebe78826f831bd	-	-
+undefined.00125	undefined	MSR (immediate) 0xd50744ff	d50744ff	5834d1a6ce828bef	-	-
+undefined.00126	undefined	LSE atomic 0xb830b36c	b830b36c	c443b77d429e2542	-	-
+undefined.00127	undefined	UDF 0x0000360a	0000360a	81934a237654c1ff	-	-
+undefined.00128	undefined	UDF 0x0000c581	0000c581	3a76b5443f61efd2	-	-
+undefined.00129	undefined	HVC / SMC 0xd41650a2	d41650a2	6be62c57388dfd40	-	-
+undefined.00130	undefined	MSR (immediate) 0xd5064ebf	d5064ebf	74a9bcf6cc2c7bc4	-	-
+undefined.00131	undefined	CAS 0x48fefc77	48fefc77	2bae3e43db475066	-	-
+undefined.00132	undefined	CAS 0xc8e9fe1b	c8e9fe1b	47892ee16db7e13f	-	-
+undefined.00133	undefined	unallocated op0 0xa2525473	a2525473	063108273a847f5b	-	-
+undefined.00134	undefined	LSE atomic 0x3865e171	3865e171	90636821c9339fef	-	-
+undefined.00135	undefined	unallocated op0 0x0357a701	0357a701	fdae68ac44502ecd	-	-
+undefined.00136	undefined	unallocated op0 0xe7fbc715	e7fbc715	8420e22b9007788b	-	-
+undefined.00137	undefined	CAS 0x08abfed7	08abfed7	7716537383cc82e2	-	-
+undefined.00138	undefined	unallocated op0 0x2250e353	2250e353	0d8485491d93eef3	-	-
+undefined.00139	undefined	CAS 0x08b27c5c	08b27c5c	1376eb8a12f8da9f	-	-
+undefined.00140	undefined	CAS 0x08e6fc01	08e6fc01	d0a8ff9271c8b5aa	-	-
+undefined.00141	undefined	MSR (immediate) 0xd5054ddf	d5054ddf	9abae62425b416aa	-	-
+undefined.00142	undefined	UDF 0x00007d61	00007d61	b9c6837915c1bb9b	-	-
+undefined.00143	undefined	UDF 0x0000bc1a	0000bc1a	0f0ebce4b922230e	-	-
+undefined.00144	undefined	CAS 0xc8f87efd	c8f87efd	249326c1f4032be5	-	-
+undefined.00145	undefined	MSR (immediate) 0xd5064e1f	d5064e1f	dd860859c882df22	-	-
+undefined.00146	undefined	MSR (immediate) 0xd507477f	d507477f	ac74c6f230f01c06	-	-
+undefined.00147	undefined	LSE atomic 0xb83133d8	b83133d8	8db38947507f6770	-	-
+undefined.00148	undefined	UDF 0x0000fc70	0000fc70	c5a79c858441f17f	-	-
+undefined.00149	undefined	HVC / SMC 0xd402fd62	d402fd62	a59349d7c0583934	-	-
+undefined.00150	undefined	CAS 0x08ef7c9e	08ef7c9e	8bc3098501b6419e	-	-
+undefined.00151	undefined	UDF 0x000048a3	000048a3	34567a5857fdffe2	-	-
+undefined.00152	undefined	unallocated op0 0xe2aad2ad	e2aad2ad	9390e9dd8c14fe5a	-	-
+undefined.00153	undefined	MSR (immediate) 0xd5014e5f	d5014e5f	73b170293d5332a7	-	-
+undefined.00154	undefined	UDF 0x00008e9e	00008e9e	31abe78bb1200c62	-	-
+undefined.00155	undefined	unallocated op0 0xa36cb0d8	a36cb0d8	9bef808cf512dba7	-	-
+undefined.00156	undefined	MSR (immediate) 0xd5054b7f	d5054b7f	b7e59b8a3e3969ab	-	-
+undefined.00157	undefined	unallocated op0 0xe7f9c5a1	e7f9c5a1	3522d533576d1dd0	-	-
+undefined.00158	undefined	CAS 0xc8a37d25	c8a37d25	4bb4dc96233c2fcc	-	-
+undefined.00159	undefined	CAS 0x08f47db3	08f47db3	bc3f97aee15941e5	-	-
+undefined.00160	undefined	LSE atomic 0xb8a37293	b8a37293	b4b671a4a9598187	-	-
+undefined.00161	undefined	unallocated op0 0x22753380	22753380	2eab6205e4308c86	-	-
+undefined.00162	undefined	HVC / SMC 0xd4177ca3	d4177ca3	eead20443b835d9c	-	-
+undefined.00163	undefined	LSE atomic 0x7878636a	7878636a	e9102f733e6d0a92	-	-
+undefined.00164	undefined	CAS 0xc8f87de8	c8f87de8	baf2bd1498ee10f8	-	-
+undefined.00165	undefined	UDF 0x0000396c	0000396c	873b165032c6618b	-	-
+undefined.00166	undefined	unallocated op0 0xe3a468f4	e3a468f4	f50ff23c565b522a	-	-
+undefined.00167	undefined	CAS 0x08e2fe2f	08e2fe2f	8db1e844571e18e8	-	-
+undefined.00168	undefined	CAS 0xc8bc7d4b	c8bc7d4b	1f6c21e479076532	-	-
+undefined.00169	undefined	UDF 0x00006792	00006792	0e68e512ed5c8a20	-	-
+undefined.00170	undefined	LSE atomic 0x78ec3280	78ec3280	30cf988c367127e1	-	-
+undefined.00171	undefined	LSE atomic 0xb8ad5022	b8ad5022	9e0c364f2e9c49ff	-	-
+undefined.00172	undefined	CAS 0x48bcffa5	48bcffa5	66f3045061a1b019	-	-
+undefined.00173	undefined	CAS 0x48a37ec0	48a37ec0	17e8ac0d2a5d507b	-	-
+undefined.00174	undefined	CAS 0x48b0fc3d	48b0fc3d	5b379ed935e32aac	-	-
+undefined.00175	undefined	UDF 0x0000b6a5	0000b6a5	8db8a6ae677d019b	-	-
+undefined.00176	undefined	MSR (immediate) 0xd5044abf	d5044abf	5ecebe2ebb2d9bc5	-	-
+undefined.00177	undefined	unallocated op0 0xe2904f01	e2904f01	aae9b7a72fd710d0	-	-
+undefined.00178	undefined	LSE atomic 0x78e03064	78e03064	f3e293aceb5d4cd6	-	-
+undefined.00179	undefined	MSR (immediate) 0xd507433f	d507433f	6f5c579bb1dbe6b2	-	-
+undefined.00180	undefined	MSR (immediate) 0xd504419f	d504419f	a59c80fa639c1872	-	-
+undefined.00181	undefined	CAS 0xc8e17de0	c8e17de0	2976b41dfe1ca389	-	-
+undefined.00182	undefined	unallocated op0 0x26682751	26682751	3ef99b11d0f61852	-	-
+undefined.00183	undefined	HVC / SMC 0xd41acfa2	d41acfa2	aa3a30c0184b68ed	-	-
+undefined.00184	undefined	MSR (immediate) 0xd504445f	d504445f	73ed84a688f593c8	-	-
+undefined.00185	undefined	UDF 0x0000030e	0000030e	b0abd80eb49d8627	-	-
+undefined.00186	undefined	MSR (immediate) 0xd50448bf	d50448bf	a2820dd216491b11	-	-
+undefined.00187	undefined	CAS 0x48a1fd14	48a1fd14	079d9b1cbbc5766d	-	-
+undefined.00188	undefined	HVC / SMC 0xd406ef62	d406ef62	79ab845dfab80cdb	-	-
+undefined.00189	undefined	UDF 0x0000729f	0000729f	2a70dbb4c465a352	-	-
+undefined.00190	undefined	unallocated op0 0xc76fe272	c76fe272	127a014630c5d505	-	-
+undefined.00191	undefined	MSR (immediate) 0xd5024bdf	d5024bdf	2fe5e389e19ceaef	-	-
+undefined.00192	undefined	MSR (immediate) 0xd50540ff	d50540ff	9c89b545f305987d	-	-
+undefined.00193	undefined	LSE atomic 0x38391360	38391360	11601ee09aae858f	-	-
+undefined.00194	undefined	CAS 0x88e87ea2	88e87ea2	cf414b29090165e8	-	-
+undefined.00195	undefined	unallocated op0 0x476d6524	476d6524	125cabb703780703	-	-
+undefined.00196	undefined	unallocated op0 0x06a5a1de	06a5a1de	7d5e79c4e5057111	-	-
+undefined.00197	undefined	UDF 0x0000fc65	0000fc65	48df870be2d7d3e2	-	-
+undefined.00198	undefined	unallocated op0 0x0297c1ee	0297c1ee	98cca7f97dc6842e	-	-
+undefined.00199	undefined	CAS 0xc8be7f85	c8be7f85	9236c12b44a987c6	-	-
+undefined.00200	undefined	CAS 0x08e5fd96	08e5fd96	502e56944584f72c	-	-
+undefined.00201	undefined	unallocated op0 0x028b04f0	028b04f0	8f83797059c4a551	-	-
+undefined.00202	undefined	UDF 0x0000304d	0000304d	0f3031dd9727bdc5	-	-
+undefined.00203	undefined	CAS 0x48effde1	48effde1	8122fe07a68ebb51	-	-
+undefined.00204	undefined	unallocated op0 0x63edc370	63edc370	e60a958e814302ab	-	-
+undefined.00205	undefined	LSE atomic 0x78ad11bd	78ad11bd	0d3df5becc6cf9bb	-	-
+undefined.00206	undefined	LSE atomic 0x78300045	78300045	f627cd4b3d219625	-	-
+undefined.00207	undefined	LSE atomic 0xf822b349	f822b349	dd164cf100bdafd5	-	-
+undefined.00208	undefined	MSR (immediate) 0xd5004f5f	d5004f5f	8209583ef2eaca3b	-	-
+undefined.00209	undefined	CAS 0xc8b27fbb	c8b27fbb	9b7168625531e83d	-	-
+undefined.00210	undefined	CAS 0x08fafc37	08fafc37	64ca3a7f949ebffb	-	-
+undefined.00211	undefined	UDF 0x0000a7a1	0000a7a1	785e89694f3fb2ee	-	-
+undefined.00212	undefined	unallocated op0 0xc6a1fa81	c6a1fa81	27c69c86b8fbde44	-	-
+undefined.00213	undefined	LSE atomic 0x38bef1c7	38bef1c7	55b6f6439a5fb3f6	-	-
+undefined.00214	undefined	HVC / SMC 0xd40601e3	d40601e3	d2ab40d22c47cdb5	-	-
+undefined.00215	undefined	HVC / SMC 0xd4058203	d4058203	645964f1bde6c54b	-	-
+undefined.00216	undefined	CAS 0xc8fe7c65	c8fe7c65	610449319f15b5e7	-	-
+undefined.00217	undefined	CAS 0x08e5ff0b	08e5ff0b	ecd44f842fcac748	-	-
+undefined.00218	undefined	CAS 0x48b5fdd9	48b5fdd9	6198d4336b0965dc	-	-
+undefined.00219	undefined	CAS 0x48ecfecc	48ecfecc	6bb273b79927fdbc	-	-
+undefined.00220	undefined	MSR (immediate) 0xd5044c9f	d5044c9f	71b29b320484654c	-	-
+undefined.00221	undefined	LSE atomic 0xb8f852cf	b8f852cf	e6722d1f82179beb	-	-
+undefined.00222	undefined	CAS 0xc8ac7ecc	c8ac7ecc	02c18e4abe33c736	-	-
+undefined.00223	undefined	MSR (immediate) 0xd5024d1f	d5024d1f	68befefbc4718172	-	-
+undefined.00224	undefined	LSE atomic 0xb8f9839c	b8f9839c	4be80541eaadf660	-	-
+undefined.00225	undefined	LSE atomic 0xf87103b1	f87103b1	ef83e51c89bd0c90	-	-
+undefined.00226	undefined	unallocated op0 0x02613cfe	02613cfe	56d45e0eeb51ac06	-	-
+undefined.00227	undefined	LSE atomic 0xf8e7d1a2	f8e7d1a2	53014c14918275e6	-	-
+undefined.00228	undefined	LSE atomic 0xf82dd367	f82dd367	b07bb66d4ea2f9f2	-	-
+undefined.00229	undefined	LSE atomic 0xf82e00d2	f82e00d2	9ca7700c0731de91	-	-
+undefined.00230	undefined	MSR (immediate) 0xd50346df	d50346df	ae1f85f21a2584e7	-	-
+undefined.00231	undefined	MSR (immediate) 0xd506413f	d506413f	3e5f1c50d316ad59	-	-
+undefined.00232	undefined	LSE atomic 0xb8b2c110	b8b2c110	67deb8edb4c9546c	-	-
+undefined.00233	undefined	unallocated op0 0xc6d3456d	c6d3456d	5f9ffdf9617beaf1	-	-
+undefined.00234	undefined	UDF 0x0000b416	0000b416	94aefb500edb0e42	-	-
+undefined.00235	undefined	UDF 0x00001fa7	00001fa7	27e85612aed7bcc5	-	-
+undefined.00236	undefined	HVC / SMC 0xd41f2c22	d41f2c22	2ca4e3243d323512	-	-
+undefined.00237	undefined	UDF 0x0000f17f	0000f17f	7bd1bfeacc789d90	-	-
+undefined.00238	undefined	LSE atomic 0x387c802e	387c802e	50a35ad42b5ae9f9	-	-
+undefined.00239	undefined	unallocated op0 0x636a5ab1	636a5ab1	b5ee2ac8246434d0	-	-
+undefined.00240	undefined	LSE atomic 0xb8a83086	b8a83086	374e4e22dc54ea43	-	-
+undefined.00241	undefined	CAS 0x88b57d04	88b57d04	f13ec88733c8c086	-	-
+undefined.00242	undefined	MSR (immediate) 0xd5074d1f	d5074d1f	58780c39ca64a500	-	-
+undefined.00243	undefined	MSR (immediate) 0xd507407f	d507407f	974bed17539cf2d5	-	-
+undefined.00244	undefined	HVC / SMC 0xd40e9403	d40e9403	b21f95295edfa51b	-	-
+undefined.00245	undefined	UDF 0x000023d5	000023d5	ea81d0f116728cfe	-	-
+undefined.00246	undefined	CAS 0x88ea7d1e	88ea7d1e	25fd2fcf41d3744c	-	-
+undefined.00247	undefined	UDF 0x00003e32	00003e32	d60e68578e3973b6	-	-
+undefined.00248	undefined	MSR (immediate) 0xd507467f	d507467f	d0d67ab1a6914005	-	-
+undefined.00249	undefined	unallocated op0 0x229b30f1	229b30f1	f39aded820293af3	-	-
+undefined.00250	undefined	UDF 0x0000ad77	0000ad77	4f4843d54a030edc	-	-
+undefined.00251	undefined	UDF 0x0000b0a5	0000b0a5	d741de6e5c5bfbea	-	-
+undefined.00252	undefined	unallocated op0 0x6396cf14	6396cf14	9e337a5b3ffb03bd	-	-
+undefined.00253	undefined	MSR (immediate) 0xd500495f	d500495f	37ef5081c76cc2dc	-	-
+undefined.00254	undefined	HVC / SMC 0xd407f8e3	d407f8e3	4d538e29b19644a3	-	-
+undefined.00255	undefined	HVC / SMC 0xd410efe3	d410efe3	150d14d207f3b4b3	-	-
+undefined.00256	undefined	LSE atomic 0x783a718d	783a718d	eb845fa888474326	-	-
+undefined.00257	undefined	CAS 0xc8fafcf8	c8fafcf8	2f3b409eef66edfa	-	-
+undefined.00258	undefined	unallocated op0 0xa2cb3b3d	a2cb3b3d	215997c5ccad9172	-	-
+undefined.00259	undefined	CAS 0x08ec7f4b	08ec7f4b	87c55df38d5fdf35	-	-
+undefined.00260	undefined	unallocated op0 0xa6e3e9af	a6e3e9af	8b67efca86d3627d	-	-
+undefined.00261	undefined	CAS 0x08f37e16	08f37e16	a0bf2e7c0ae3d772	-	-
+undefined.00262	undefined	CAS 0x08e0fc81	08e0fc81	54af7c6b8e9a8b01	-	-
+undefined.00263	undefined	LSE atomic 0xb82a0315	b82a0315	ca5a02182e9bed13	-	-
+undefined.00264	undefined	MSR (immediate) 0xd5014a5f	d5014a5f	e4adfa20537579be	-	-
+undefined.00265	undefined	HVC / SMC 0xd41e0ca2	d41e0ca2	fd75325b5f833873	-	-
+undefined.00266	undefined	LSE atomic 0xf82fa139	f82fa139	dc12fce115b6bc15	-	-
+undefined.00267	undefined	CAS 0x08f67c20	08f67c20	c7554ce970ba354d	-	-
+undefined.00268	undefined	LSE atomic 0xb865935b	b865935b	60a5377a38b6c865	-	-
+undefined.00269	undefined	MSR (immediate) 0xd50347bf	d50347bf	bcb7da6121d92807	-	-
+undefined.00270	undefined	MSR (immediate) 0xd5004b3f	d5004b3f	2a488500ee4e2a47	-	-
+undefined.00271	undefined	LSE atomic 0x38fdd2cb	38fdd2cb	931f99b94cdae65b	-	-
+undefined.00272	undefined	CAS 0x88b67f54	88b67f54	bef8999c92d4375e	-	-
+undefined.00273	undefined	CAS 0x48eafd64	48eafd64	64f086e5a6048d18	-	-
+undefined.00274	undefined	UDF 0x00005e4c	00005e4c	844d2804abbde5c0	-	-
+undefined.00275	undefined	unallocated op0 0xc761dcd2	c761dcd2	dfbe0f04cbaef473	-	-
+undefined.00276	undefined	unallocated op0 0x666a91d3	666a91d3	1997eaca8d3d71a3	-	-
+undefined.00277	undefined	MSR (immediate) 0xd50040ff	d50040ff	5ee406086426726c	-	-
+undefined.00278	undefined	HVC / SMC 0xd411e382	d411e382	f26cb17ed67a61cb	-	-
+undefined.00279	undefined	MSR (immediate) 0xd501485f	d501485f	5da246b7d567553e	-	-
+undefined.00280	undefined	unallocated op0 0x46947d06	46947d06	e90f1ce94c27b2da	-	-
+undefined.00281	undefined	MSR (immediate) 0xd50448df	d50448df	6fd139d444b380a5	-	-
+undefined.00282	undefined	CAS 0x48effc31	48effc31	d8b5db522ddec8a6	-	-
+undefined.00283	undefined	unallocated op0 0xc65284b0	c65284b0	6d29d9ec959313e2	-	-
+undefined.00284	undefined	MSR (immediate) 0xd5024f5f	d5024f5f	bf3e260a7dc54bda	-	-
+undefined.00285	undefined	LSE atomic 0xb8a82050	b8a82050	bd0381e9e20ac7df	-	-
+undefined.00286	undefined	MSR (immediate) 0xd501455f	d501455f	89d8d037be893993	-	-
+undefined.00287	undefined	UDF 0x0000da2e	0000da2e	8b1dfa112a6311d8	-	-
+undefined.00288	undefined	unallocated op0 0x27e5bf69	27e5bf69	4929a7f4054263d7	-	-
+undefined.00289	undefined	UDF 0x00005743	00005743	2642637a7a895952	-	-
+undefined.00290	undefined	LSE atomic 0xf83972b1	f83972b1	afb1708691beb2d1	-	-
+undefined.00291	undefined	HVC / SMC 0xd4065023	d4065023	5277749e0be2d6c2	-	-
+undefined.00292	undefined	CAS 0xc8e67c8a	c8e67c8a	11c6f08915c73570	-	-
+undefined.00293	undefined	CAS 0x48e57cbd	48e57cbd	b7df6184ba952eab	-	-
+undefined.00294	undefined	MSR (immediate) 0xd501435f	d501435f	f9bb785698dadb44	-	-
+undefined.00295	undefined	CAS 0x88f07f6c	88f07f6c	0c4e36490583a878	-	-
+undefined.00296	undefined	unallocated op0 0xa79dff2f	a79dff2f	ec1af851f8ff26f9	-	-
+undefined.00297	undefined	CAS 0x08e17e2c	08e17e2c	c8881af9961b68be	-	-
+undefined.00298	undefined	MSR (immediate) 0xd504477f	d504477f	f3cc4f6e8bbc333f	-	-
+undefined.00299	undefined	unallocated op0 0x222a6b0c	222a6b0c	416e697e352bca15	-	-
+undefined.00300	undefined	HVC / SMC 0xd407af03	d407af03	7957a273e6b251d3	-	-
+undefined.00301	undefined	CAS 0xc8effcb5	c8effcb5	70976459c9d42697	-	-
+undefined.00302	undefined	HVC / SMC 0xd41dc183	d41dc183	05bbadcfde8ad1ac	-	-
+undefined.00303	undefined	CAS 0x48b47ec4	48b47ec4	c274aaddb4396ea4	-	-
+undefined.00304	undefined	MSR (immediate) 0xd503405f	d503405f	4581235b4e2b77f4	-	-
+undefined.00305	undefined	CAS 0x48b27f9a	48b27f9a	e8c5b24fcccb36e4	-	-
+undefined.00306	undefined	LSE atomic 0xf8e341ef	f8e341ef	87d384c76acd5673	-	-
+undefined.00307	undefined	CAS 0x88a57e45	88a57e45	6adb8554b5856a8d	-	-
+undefined.00308	undefined	CAS 0x88a1fef6	88a1fef6	8882752893bc23fe	-	-
+undefined.00309	undefined	MSR (immediate) 0xd506455f	d506455f	c11a67d77ba7a3b6	-	-
+undefined.00310	undefined	MSR (immediate) 0xd50246ff	d50246ff	0406fb7252016304	-	-
+undefined.00311	undefined	CAS 0x48f4fdc0	48f4fdc0	6fc6cb9182077715	-	-
+undefined.00312	undefined	MSR (immediate) 0xd506441f	d506441f	7fd37f9119865bb2	-	-
+undefined.00313	undefined	LSE atomic 0x38abd221	38abd221	860b4f038e9c5955	-	-
+undefined.00314	undefined	MSR (immediate) 0xd50446ff	d50446ff	8fce5bc4ad5b4956	-	-
+undefined.00315	undefined	UDF 0x00004ad3	00004ad3	1182d93feb75988e	-	-
+undefined.00316	undefined	CAS 0x48fd7d2a	48fd7d2a	93197e11da125b87	-	-
+undefined.00317	undefined	unallocated op0 0xe63228fe	e63228fe	20255731e78136ed	-	-
+undefined.00318	undefined	HVC / SMC 0xd4048322	d4048322	aff9d6eed97fe6e3	-	-
+undefined.00319	undefined	HVC / SMC 0xd41b4342	d41b4342	800251567e951027	-	-
+undefined.00320	undefined	HVC / SMC 0xd416aee2	d416aee2	1c2ad3709f030565	-	-
+undefined.00321	undefined	HVC / SMC 0xd40987c3	d40987c3	0fbc9aa74f16c5e8	-	-
+undefined.00322	undefined	CAS 0x48effea6	48effea6	785ac58367845449	-	-
+undefined.00323	undefined	UDF 0x0000b3f5	0000b3f5	6cf7166ac6ea5f6d	-	-
+undefined.00324	undefined	CAS 0xc8f27c53	c8f27c53	f7e60150d340024e	-	-
+undefined.00325	undefined	UDF 0x00009f8f	00009f8f	4640170befbe1c08	-	-
+undefined.00326	undefined	LSE atomic 0xf835138e	f835138e	40cc404aa89b032f	-	-
+undefined.00327	undefined	UDF 0x0000ca82	0000ca82	b5b5a5a6c135008e	-	-
+undefined.00328	undefined	unallocated op0 0x63a9394b	63a9394b	76d61b3da5d86875	-	-
+undefined.00329	undefined	LSE atomic 0x786ab0ef	786ab0ef	423b97c12a7f6bdc	-	-
+undefined.00330	undefined	MSR (immediate) 0xd503419f	d503419f	ebad7f31a7ce5847	-	-
+undefined.00331	undefined	unallocated op0 0x623f98ee	623f98ee	a3c2739b934d368b	-	-
+undefined.00332	undefined	HVC / SMC 0xd40ca2e3	d40ca2e3	daf5f1f35dd91df2	-	-
+undefined.00333	undefined	LSE atomic 0xb8787016	b8787016	34016a2983f4dfd1	-	-
+undefined.00334	undefined	UDF 0x0000ad0b	0000ad0b	6a03bd9af9d0d6d8	-	-
+undefined.00335	undefined	unallocated op0 0x6678a83f	6678a83f	a49cd2dae27b71f8	-	-
+undefined.00336	undefined	UDF 0x000066fa	000066fa	5f590283e30ef1bc	-	-
+undefined.00337	undefined	unallocated op0 0xe2381471	e2381471	6bd0a4006e23f320	-	-
+undefined.00338	undefined	MSR (immediate) 0xd5064a9f	d5064a9f	2376c33f9aac45f5	-	-
+undefined.00339	undefined	MSR (immediate) 0xd50745df	d50745df	c4d60baa1d1de840	-	-
+undefined.00340	undefined	MSR (immediate) 0xd5004d5f	d5004d5f	280b10827b75bd2b	-	-
+undefined.00341	undefined	CAS 0xc8ef7e49	c8ef7e49	be985e5d2cda03db	-	-
+undefined.00342	undefined	UDF 0x0000352b	0000352b	99d4f2b5bcc3461b	-	-
+undefined.00343	undefined	unallocated op0 0x42624ddf	42624ddf	f450bd83e9a3d20d	-	-
+undefined.00344	undefined	HVC / SMC 0xd40fe042	d40fe042	2aaae6b52bd44cf8	-	-
+undefined.00345	undefined	MSR (immediate) 0xd50743df	d50743df	112a9c757c024e94	-	-
+undefined.00346	undefined	LSE atomic 0x38221229	38221229	743a09e165b5a9dd	-	-
+undefined.00347	undefined	HVC / SMC 0xd4153ea3	d4153ea3	97dba09b5f6a1aab	-	-
+undefined.00348	undefined	HVC / SMC 0xd41da7c3	d41da7c3	fcdf2d885c0028bb	-	-
+undefined.00349	undefined	MSR (immediate) 0xd5074eff	d5074eff	ea8e54beaf9d6344	-	-
+undefined.00350	undefined	MSR (immediate) 0xd5054b3f	d5054b3f	8df627ee0fc95d63	-	-
+undefined.00351	undefined	LSE atomic 0xb8f061d2	b8f061d2	864498c296ca6677	-	-
+undefined.00352	undefined	HVC / SMC 0xd4010e43	d4010e43	f55ff59084a68041	-	-
+undefined.00353	undefined	HVC / SMC 0xd40bbe23	d40bbe23	e68cf21afbfc9263	-	-
+undefined.00354	undefined	UDF 0x0000ebcf	0000ebcf	95ac4eba82263aa2	-	-
+undefined.00355	undefined	HVC / SMC 0xd400daa3	d400daa3	364ac4fcd74d6582	-	-
+undefined.00356	undefined	UDF 0x00002421	00002421	ec976598e1e1d891	-	-
+undefined.00357	undefined	CAS 0x48b0fca1	48b0fca1	d5b9cfdc3a01874e	-	-
+undefined.00358	undefined	LSE atomic 0xf8684011	f8684011	6657e2d866927602	-	-
+undefined.00359	undefined	MSR (immediate) 0xd500403f	d500403f	c1b300622d1154a2	-	-
+undefined.00360	undefined	UDF 0x000078a8	000078a8	3dfbdccb10ba9637	-	-
+undefined.00361	undefined	unallocated op0 0x669a0e03	669a0e03	83aaca4eb9d4375c	-	-
+undefined.00362	undefined	MSR (immediate) 0xd5004ddf	d5004ddf	a9fc8a3e38da18d6	-	-
+undefined.00363	undefined	unallocated op0 0x0369bec0	0369bec0	05f47200ac3a6b21	-	-
+undefined.00364	undefined	UDF 0x00003fd6	00003fd6	f51401f503d5f2d2	-	-
+undefined.00365	undefined	CAS 0xc8a87cfe	c8a87cfe	43f69b39dba4291d	-	-
+undefined.00366	undefined	unallocated op0 0x6383e905	6383e905	1af0d93154957763	-	-
+undefined.00367	undefined	HVC / SMC 0xd41667a2	d41667a2	10368339f4390cd9	-	-
+undefined.00368	undefined	LSE atomic 0xf860d320	f860d320	14212ca97048df0b	-	-
+undefined.00369	undefined	UDF 0x00003b61	00003b61	651f5c0f42c6d874	-	-
+undefined.00370	undefined	UDF 0x00004a4f	00004a4f	765645454a236cc2	-	-
+undefined.00371	undefined	CAS 0x88bd7e48	88bd7e48	62d190d678f4dbc0	-	-
+undefined.00372	undefined	UDF 0x0000c8fc	0000c8fc	726722afd1a86756	-	-
+undefined.00373	undefined	unallocated op0 0xa3c35489	a3c35489	82fff954b1136dc3	-	-
+undefined.00374	undefined	unallocated op0 0x232b5d3f	232b5d3f	d3ea916ebca631ce	-	-
+undefined.00375	undefined	MSR (immediate) 0xd50745df	d50745df	fdcd54415a80f565	-	-
+undefined.00376	undefined	UDF 0x0000f0a7	0000f0a7	dacbf249a45a56fe	-	-
+undefined.00377	undefined	unallocated op0 0x032633f4	032633f4	25fbb2c7cd3652f6	-	-
+undefined.00378	undefined	HVC / SMC 0xd40a2542	d40a2542	9decdae5f0696cdc	-	-
+undefined.00379	undefined	LSE atomic 0x3839f16e	3839f16e	1af64b162cbb47a7	-	-
+undefined.00380	undefined	UDF 0x00009155	00009155	0830f75c02bd374b	-	-
+undefined.00381	undefined	CAS 0xc8b07e52	c8b07e52	dabe38723a4b5f59	-	-
+undefined.00382	undefined	UDF 0x0000a2d4	0000a2d4	514520d2a8fa231c	-	-
+undefined.00383	undefined	CAS 0xc8a27d4e	c8a27d4e	27b7439f392ec72e	-	-
+undefined.00384	undefined	unallocated op0 0x42f45111	42f45111	d8d70aa8df20f716	-	-
+undefined.00385	undefined	CAS 0x88f27fa0	88f27fa0	ffd74c2ee8d64314	-	-
+undefined.00386	undefined	UDF 0x0000bc41	0000bc41	595582669f29c311	-	-
+undefined.00387	undefined	HVC / SMC 0xd4163a42	d4163a42	b6e805dd53e18ccc	-	-
+undefined.00388	undefined	UDF 0x0000c9a6	0000c9a6	cf7cbf89c00e8b71	-	-
+undefined.00389	undefined	CAS 0xc8a2fe14	c8a2fe14	79e80ccf5ce69f7a	-	-
+undefined.00390	undefined	CAS 0x48f9fd1d	48f9fd1d	84658e381d62687a	-	-
+undefined.00391	undefined	CAS 0x48e0fc08	48e0fc08	43e8b585d6554b71	-	-
+undefined.00392	undefined	LSE atomic 0x78f27180	78f27180	66e123e8e513cb95	-	-
+undefined.00393	undefined	HVC / SMC 0xd4054242	d4054242	4d0dceedc49b63c3	-	-
+undefined.00394	undefined	unallocated op0 0x02900ea0	02900ea0	8012abe208176bf8	-	-
+undefined.00395	undefined	UDF 0x0000ba35	0000ba35	84b5c03a87411d03	-	-
+undefined.00396	undefined	unallocated op0 0xe3fe2952	e3fe2952	a487d40f654a6b0b	-	-
+undefined.00397	undefined	UDF 0x0000ccd7	0000ccd7	6cb4bcf705c270b7	-	-
+undefined.00398	undefined	UDF 0x00005ebe	00005ebe	01eb241afadcaf8d	-	-
+undefined.00399	undefined	unallocated op0 0x67727236	67727236	883de3dd71878b2a	-	-
+undefined.00400	undefined	CAS 0x08e37e8c	08e37e8c	d44e9a83c38ae224	-	-

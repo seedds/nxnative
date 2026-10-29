@@ -1,0 +1,153 @@
+# nxaot vectors: floating point and SIMD: refused by the lifter today (counted as unsupported)
+# Written by dm/tools/aot/tests/gen_vectors.py; do not edit (run it again). Format: src/vec/vectors.h
+# id	class	text	code	seed	regs	mem
+fp_simd.00001	fp_simd	FADD (scalar) 0x1e292895	1e292895	2cd29c6aa24afd03	-	-
+fp_simd.00002	fp_simd	FMUL (scalar) 0x1e280aea	1e280aea	edb6ac61477de7cb	-	-
+fp_simd.00003	fp_simd	FMOV (general to S) 0x1e270159	1e270159	6f9ed013c607eadd	-	-
+fp_simd.00004	fp_simd	FCVTZS (scalar, integer) 0x1e3800ef	1e3800ef	3f385184566184d6	-	-
+fp_simd.00005	fp_simd	SCVTF (scalar, integer) 0x1e220075	1e220075	aef226430303ee0b	-	-
+fp_simd.00006	fp_simd	LDR Q 0x3dc00201	3dc00201	9eecfa7b4542ba9a	x16=10009560	-
+fp_simd.00007	fp_simd	STR Q 0x3d800000	3d800000	f06ac001f2dd0e21	x0=10008d60	-
+fp_simd.00008	fp_simd	ADD (vector, 4S) 0x4ebe8648	4ebe8648	0785fbb94ceee4fe	-	-
+fp_simd.00009	fp_simd	AESE 0x4e284a6a	4e284a6a	8d99c42ffd1d5945	-	-
+fp_simd.00010	fp_simd	SHA1C 0x5e090312	5e090312	f8ea5c7088c6c441	-	-
+fp_simd.00011	fp_simd	PMULL (1Q) 0x0ee9e232	0ee9e232	29fbeb217640a907	-	-
+fp_simd.00012	fp_simd	MOVI (2D, #0) 0x6f00e41c	6f00e41c	32e0bc5544ad4cc8	-	-
+fp_simd.00013	fp_simd	FCMP 0x1e2e2220	1e2e2220	2ffda5b2cfdf38b5	-	-
+fp_simd.00014	fp_simd	FADD (scalar) 0x1e38295c	1e38295c	01892d664eee7275	-	-
+fp_simd.00015	fp_simd	FMUL (scalar) 0x1e260974	1e260974	ccf385fae123f986	-	-
+fp_simd.00016	fp_simd	FMOV (general to S) 0x1e2700a2	1e2700a2	f7a3d264ed613d9a	-	-
+fp_simd.00017	fp_simd	FCVTZS (scalar, integer) 0x1e38037a	1e38037a	4726024e196295d7	-	-
+fp_simd.00018	fp_simd	SCVTF (scalar, integer) 0x1e22034e	1e22034e	2f11f74161118a69	-	-
+fp_simd.00019	fp_simd	LDR Q 0x3dc00297	3dc00297	9d5aded809856fec	x20=1000b5a0	-
+fp_simd.00020	fp_simd	STR Q 0x3d80013e	3d80013e	b7f5bb86977c7246	x9=1000b1b0	-
+fp_simd.00021	fp_simd	ADD (vector, 4S) 0x4ea886ee	4ea886ee	f475333410d7272b	-	-
+fp_simd.00022	fp_simd	AESE 0x4e284b66	4e284b66	a816e6afe00be804	-	-
+fp_simd.00023	fp_simd	SHA1C 0x5e0a0068	5e0a0068	5144c7afa0ef9c4d	-	-
+fp_simd.00024	fp_simd	PMULL (1Q) 0x0efee31e	0efee31e	321b01566059c6f6	-	-
+fp_simd.00025	fp_simd	MOVI (2D, #0) 0x6f00e41b	6f00e41b	bf1be2fdb416fb0a	-	-
+fp_simd.00026	fp_simd	FCMP 0x1e382240	1e382240	113be5e165d0e619	-	-
+fp_simd.00027	fp_simd	FADD (scalar) 0x1e742b16	1e742b16	096a8c4beeb049c6	-	-
+fp_simd.00028	fp_simd	FMUL (scalar) 0x1e26087c	1e26087c	af894e1ac301cc2f	-	-
+fp_simd.00029	fp_simd	FMOV (general to S) 0x1e2701dd	1e2701dd	665c96b939a41cdf	-	-
+fp_simd.00030	fp_simd	FCVTZS (scalar, integer) 0x1e3803cf	1e3803cf	3e96e3cc9e19e44d	-	-
+fp_simd.00031	fp_simd	SCVTF (scalar, integer) 0x1e2200a3	1e2200a3	bc998479558f4a1b	-	-
+fp_simd.00032	fp_simd	LDR Q 0x3dc0020d	3dc0020d	f72930a1e35edc15	x16=1000d6f0	-
+fp_simd.00033	fp_simd	STR Q 0x3d800159	3d800159	7134a5bd9d8cf6af	x10=10006930	-
+fp_simd.00034	fp_simd	ADD (vector, 4S) 0x4eab85ac	4eab85ac	d244ab54a3da72d3	-	-
+fp_simd.00035	fp_simd	AESE 0x4e28490d	4e28490d	9f4621657550c2b2	-	-
+fp_simd.00036	fp_simd	SHA1C 0x5e0b02a7	5e0b02a7	d7414d15c9ba5345	-	-
+fp_simd.00037	fp_simd	PMULL (1Q) 0x0ee4e0ab	0ee4e0ab	9f624e661409ddd5	-	-
+fp_simd.00038	fp_simd	MOVI (2D, #0) 0x6f00e40b	6f00e40b	e515fa27473b7345	-	-
+fp_simd.00039	fp_simd	FCMP 0x1e2321c0	1e2321c0	92a76b94eafdfb80	-	-
+fp_simd.00040	fp_simd	FADD (scalar) 0x1e7f2887	1e7f2887	e591c5662bd1dbcf	-	-
+fp_simd.00041	fp_simd	FMUL (scalar) 0x1e3a0b0e	1e3a0b0e	7571d18b59ba791b	-	-
+fp_simd.00042	fp_simd	FMOV (general to S) 0x1e270120	1e270120	de5f64f9df68dbeb	-	-
+fp_simd.00043	fp_simd	FCVTZS (scalar, integer) 0x1e38037c	1e38037c	14f7b7c379ac4684	-	-
+fp_simd.00044	fp_simd	SCVTF (scalar, integer) 0x1e220372	1e220372	adbe761b79c76b00	-	-
+fp_simd.00045	fp_simd	LDR Q 0x3dc0024f	3dc0024f	0020de98243476a9	x18=100007b0	-
+fp_simd.00046	fp_simd	STR Q 0x3d80018c	3d80018c	6db06d8cf215f9d2	x12=1000cc20	-
+fp_simd.00047	fp_simd	ADD (vector, 4S) 0x4eb184a1	4eb184a1	87c735e8dfe9fbe5	-	-
+fp_simd.00048	fp_simd	AESE 0x4e284be6	4e284be6	8cb78356fdfd0e48	-	-
+fp_simd.00049	fp_simd	SHA1C 0x5e0603a4	5e0603a4	cab4b13886562f17	-	-
+fp_simd.00050	fp_simd	PMULL (1Q) 0x0ef3e0b4	0ef3e0b4	046357fb8aa08a49	-	-
+fp_simd.00051	fp_simd	MOVI (2D, #0) 0x6f00e412	6f00e412	405d28926243c8c1	-	-
+fp_simd.00052	fp_simd	FCMP 0x1e3120a0	1e3120a0	e3650e6bae4b3571	-	-
+fp_simd.00053	fp_simd	FADD (scalar) 0x1e2c29ab	1e2c29ab	67b0c9909dd402e3	-	-
+fp_simd.00054	fp_simd	FMUL (scalar) 0x1e7d0ba2	1e7d0ba2	9c496b1aa179ff1a	-	-
+fp_simd.00055	fp_simd	FMOV (general to S) 0x1e270368	1e270368	d92f51996533b92c	-	-
+fp_simd.00056	fp_simd	FCVTZS (scalar, integer) 0x1e38038b	1e38038b	4b06891a898c5531	-	-
+fp_simd.00057	fp_simd	SCVTF (scalar, integer) 0x1e22009e	1e22009e	c864d2dfb3671548	-	-
+fp_simd.00058	fp_simd	LDR Q 0x3dc001fa	3dc001fa	fed956008ff0b67d	x15=10005ea0	-
+fp_simd.00059	fp_simd	STR Q 0x3d800370	3d800370	c2e017b903e8ee9e	x27=1000dfc0	-
+fp_simd.00060	fp_simd	ADD (vector, 4S) 0x4eac8675	4eac8675	6048bd247acfdd93	-	-
+fp_simd.00061	fp_simd	AESE 0x4e284866	4e284866	f8f13004d08b99db	-	-
+fp_simd.00062	fp_simd	SHA1C 0x5e14016c	5e14016c	c3d646d52395414b	-	-
+fp_simd.00063	fp_simd	PMULL (1Q) 0x0ee4e0e3	0ee4e0e3	0342b8f45b24ac6d	-	-
+fp_simd.00064	fp_simd	MOVI (2D, #0) 0x6f00e40a	6f00e40a	994d4641601e0900	-	-
+fp_simd.00065	fp_simd	FCMP 0x1e262260	1e262260	588248144fb5d635	-	-
+fp_simd.00066	fp_simd	FADD (scalar) 0x1e2e2b2b	1e2e2b2b	c87ece31ca7d3197	-	-
+fp_simd.00067	fp_simd	FMUL (scalar) 0x1e7a0b53	1e7a0b53	5104815fae254bc9	-	-
+fp_simd.00068	fp_simd	FMOV (general to S) 0x1e2700c4	1e2700c4	3625ba28aab52f9b	-	-
+fp_simd.00069	fp_simd	FCVTZS (scalar, integer) 0x1e38006b	1e38006b	21b8d47beb1231ae	-	-
+fp_simd.00070	fp_simd	SCVTF (scalar, integer) 0x1e2202a0	1e2202a0	44feda7e45a41e23	-	-
+fp_simd.00071	fp_simd	LDR Q 0x3dc002c0	3dc002c0	93f065f5f9d0dec7	x22=10002c10	-
+fp_simd.00072	fp_simd	STR Q 0x3d8002d6	3d8002d6	406cafcf616affab	x22=1000cb60	-
+fp_simd.00073	fp_simd	ADD (vector, 4S) 0x4eb387b8	4eb387b8	c481d0b06024f354	-	-
+fp_simd.00074	fp_simd	AESE 0x4e284bc2	4e284bc2	dd5842eba2e7fe28	-	-
+fp_simd.00075	fp_simd	SHA1C 0x5e05026d	5e05026d	e89d4293d4192ced	-	-
+fp_simd.00076	fp_simd	PMULL (1Q) 0x0ef8e0e5	0ef8e0e5	9f6798cb66f2a38e	-	-
+fp_simd.00077	fp_simd	MOVI (2D, #0) 0x6f00e407	6f00e407	c17001043b9828aa	-	-
+fp_simd.00078	fp_simd	FCMP 0x1e2e2380	1e2e2380	90fb31e4bd2799f7	-	-
+fp_simd.00079	fp_simd	FADD (scalar) 0x1e60294c	1e60294c	b230ce67b1822aab	-	-
+fp_simd.00080	fp_simd	FMUL (scalar) 0x1e7f0ac4	1e7f0ac4	bef6ac8eea6adf78	-	-
+fp_simd.00081	fp_simd	FMOV (general to S) 0x1e270154	1e270154	3d4835b03a52c581	-	-
+fp_simd.00082	fp_simd	FCVTZS (scalar, integer) 0x1e380055	1e380055	e33406d09d154dbe	-	-
+fp_simd.00083	fp_simd	SCVTF (scalar, integer) 0x1e2200c4	1e2200c4	5883bc994303a9d1	-	-
+fp_simd.00084	fp_simd	LDR Q 0x3dc00107	3dc00107	14b9f3adb9f63df1	x8=10005870	-
+fp_simd.00085	fp_simd	STR Q 0x3d800250	3d800250	c88813b0d8c4302a	x18=10000790	-
+fp_simd.00086	fp_simd	ADD (vector, 4S) 0x4ea38417	4ea38417	5d8f10d57527b612	-	-
+fp_simd.00087	fp_simd	AESE 0x4e284b62	4e284b62	1b89ffeb6d6b4599	-	-
+fp_simd.00088	fp_simd	SHA1C 0x5e1c005d	5e1c005d	d26821206f75543a	-	-
+fp_simd.00089	fp_simd	PMULL (1Q) 0x0ef5e3ba	0ef5e3ba	186c6c98f4646a1d	-	-
+fp_simd.00090	fp_simd	MOVI (2D, #0) 0x6f00e40b	6f00e40b	833fbd3aaf486878	-	-
+fp_simd.00091	fp_simd	FCMP 0x1e2321c0	1e2321c0	0a3742243d61a759	-	-
+fp_simd.00092	fp_simd	FADD (scalar) 0x1e732a7e	1e732a7e	2d97082c4f221c71	-	-
+fp_simd.00093	fp_simd	FMUL (scalar) 0x1e6f09d7	1e6f09d7	65caa7e12b34754b	-	-
+fp_simd.00094	fp_simd	FMOV (general to S) 0x1e270115	1e270115	aeab1efa72e9ca86	-	-
+fp_simd.00095	fp_simd	FCVTZS (scalar, integer) 0x1e3802fd	1e3802fd	cd89f4c706ffba89	-	-
+fp_simd.00096	fp_simd	SCVTF (scalar, integer) 0x1e220356	1e220356	d805fb81decaa1f4	-	-
+fp_simd.00097	fp_simd	LDR Q 0x3dc0022a	3dc0022a	9e52e7c01e0377a6	x17=1000b8d0	-
+fp_simd.00098	fp_simd	STR Q 0x3d800092	3d800092	f75278ee486b29c1	x4=10004290	-
+fp_simd.00099	fp_simd	ADD (vector, 4S) 0x4ebb8405	4ebb8405	bf41ee597e827a07	-	-
+fp_simd.00100	fp_simd	AESE 0x4e284983	4e284983	c9575cd51cc17b9d	-	-
+fp_simd.00101	fp_simd	SHA1C 0x5e080272	5e080272	42ffa6b8596ca5d6	-	-
+fp_simd.00102	fp_simd	PMULL (1Q) 0x0ee1e0ce	0ee1e0ce	f330d4adc7050632	-	-
+fp_simd.00103	fp_simd	MOVI (2D, #0) 0x6f00e412	6f00e412	cc94a4b03510d777	-	-
+fp_simd.00104	fp_simd	FCMP 0x1e312100	1e312100	f9494a47de9e0e3b	-	-
+fp_simd.00105	fp_simd	FADD (scalar) 0x1e742b86	1e742b86	e38bc3fccb91f143	-	-
+fp_simd.00106	fp_simd	FMUL (scalar) 0x1e2e09fe	1e2e09fe	caa3b454fdd2ff0f	-	-
+fp_simd.00107	fp_simd	FMOV (general to S) 0x1e27024b	1e27024b	dcf529fda6df37ed	-	-
+fp_simd.00108	fp_simd	FCVTZS (scalar, integer) 0x1e3801f8	1e3801f8	e8c58cef88b259f4	-	-
+fp_simd.00109	fp_simd	SCVTF (scalar, integer) 0x1e220323	1e220323	70cbd136078358a5	-	-
+fp_simd.00110	fp_simd	LDR Q 0x3dc002d2	3dc002d2	4ca82ed6909e5855	x22=100070b0	-
+fp_simd.00111	fp_simd	STR Q 0x3d80029b	3d80029b	1221ea21c6ccb6ed	x20=1000adc0	-
+fp_simd.00112	fp_simd	ADD (vector, 4S) 0x4ebe8726	4ebe8726	ebb3229a7973c10f	-	-
+fp_simd.00113	fp_simd	AESE 0x4e2849f3	4e2849f3	82bff3028f1ada03	-	-
+fp_simd.00114	fp_simd	SHA1C 0x5e1a0024	5e1a0024	0ec370531df8dc0f	-	-
+fp_simd.00115	fp_simd	PMULL (1Q) 0x0ee1e29d	0ee1e29d	361598b6cdfebb52	-	-
+fp_simd.00116	fp_simd	MOVI (2D, #0) 0x6f00e418	6f00e418	42318f0d41f64723	-	-
+fp_simd.00117	fp_simd	FCMP 0x1e2221a0	1e2221a0	a3b07e0260d7fd4d	-	-
+fp_simd.00118	fp_simd	FADD (scalar) 0x1e662ba0	1e662ba0	3ffc21a34b4030d4	-	-
+fp_simd.00119	fp_simd	FMUL (scalar) 0x1e64082d	1e64082d	aa89a3e19670852f	-	-
+fp_simd.00120	fp_simd	FMOV (general to S) 0x1e2700a0	1e2700a0	ae6994acd2c37e4b	-	-
+fp_simd.00121	fp_simd	FCVTZS (scalar, integer) 0x1e380045	1e380045	922c7a149f4efb70	-	-
+fp_simd.00122	fp_simd	SCVTF (scalar, integer) 0x1e22007c	1e22007c	dfdcee5c51929d00	-	-
+fp_simd.00123	fp_simd	LDR Q 0x3dc00065	3dc00065	728ba6bb488e8580	x3=1000b2a0	-
+fp_simd.00124	fp_simd	STR Q 0x3d800261	3d800261	193b79f03a753516	x19=10009da0	-
+fp_simd.00125	fp_simd	ADD (vector, 4S) 0x4eb986e8	4eb986e8	137c2ee906818cf5	-	-
+fp_simd.00126	fp_simd	AESE 0x4e2849c6	4e2849c6	16e316a4ee338813	-	-
+fp_simd.00127	fp_simd	SHA1C 0x5e130383	5e130383	f4cc87aea244c154	-	-
+fp_simd.00128	fp_simd	PMULL (1Q) 0x0ef4e136	0ef4e136	4bdcf0350ea3037e	-	-
+fp_simd.00129	fp_simd	MOVI (2D, #0) 0x6f00e40a	6f00e40a	2956acb3cf2a576c	-	-
+fp_simd.00130	fp_simd	FCMP 0x1e262240	1e262240	6c7b90ee56114357	-	-
+fp_simd.00131	fp_simd	FADD (scalar) 0x1e212b3e	1e212b3e	bf45f47c80d964c7	-	-
+fp_simd.00132	fp_simd	FMUL (scalar) 0x1e390bfb	1e390bfb	b8b7eedec87c361d	-	-
+fp_simd.00133	fp_simd	FMOV (general to S) 0x1e270061	1e270061	3c65c55dc3c0c81f	-	-
+fp_simd.00134	fp_simd	FCVTZS (scalar, integer) 0x1e380012	1e380012	2399db356d77ad57	-	-
+fp_simd.00135	fp_simd	SCVTF (scalar, integer) 0x1e2203aa	1e2203aa	8886a556e4bf43a8	-	-
+fp_simd.00136	fp_simd	LDR Q 0x3dc00335	3dc00335	7bb59ec6ba8f60a4	x25=100045a0	-
+fp_simd.00137	fp_simd	STR Q 0x3d800379	3d800379	e2fcfc254af73720	x27=1000d750	-
+fp_simd.00138	fp_simd	ADD (vector, 4S) 0x4eaf86f9	4eaf86f9	1a0666c633bdb85b	-	-
+fp_simd.00139	fp_simd	AESE 0x4e28493d	4e28493d	e8653fb26383d264	-	-
+fp_simd.00140	fp_simd	SHA1C 0x5e160282	5e160282	0ca3fef164636578	-	-
+fp_simd.00141	fp_simd	PMULL (1Q) 0x0ee1e292	0ee1e292	71fc84cc64bb6e42	-	-
+fp_simd.00142	fp_simd	MOVI (2D, #0) 0x6f00e40c	6f00e40c	583622e28e90d3f4	-	-
+fp_simd.00143	fp_simd	FCMP 0x1e3c2180	1e3c2180	ced1e1b3a7610835	-	-
+fp_simd.00144	fp_simd	FADD (scalar) 0x1e2b2a62	1e2b2a62	cd4b778efd9fad4c	-	-
+fp_simd.00145	fp_simd	FMUL (scalar) 0x1e750b1f	1e750b1f	381454ca61a8bcb3	-	-
+fp_simd.00146	fp_simd	FMOV (general to S) 0x1e2702f8	1e2702f8	573fa3ad8c652625	-	-
+fp_simd.00147	fp_simd	FCVTZS (scalar, integer) 0x1e3802e2	1e3802e2	952e54af2aefa44f	-	-
+fp_simd.00148	fp_simd	SCVTF (scalar, integer) 0x1e22031e	1e22031e	3a2e9d456069ca78	-	-
+fp_simd.00149	fp_simd	LDR Q 0x3dc00264	3dc00264	87efb5b681110720	x19=1000ecc0	-
+fp_simd.00150	fp_simd	STR Q 0x3d80033f	3d80033f	8e71f79f81841816	x25=1000f9c0	-

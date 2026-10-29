@@ -6,6 +6,7 @@ The logs of host unit test runs, kept in the repository on purpose: when a run f
 |---|---|
 | `logs/linux/` | `sh dm/host/tests/run_host_tests.sh build/linux`, in the `nxnative-build` Docker image |
 | `logs/win64/` | `dm\host\tests\run_win64_tests.ps1` (PowerShell) or `sh dm/host/tests/run_host_tests.sh build/win64` (Git Bash), on a Windows PC, for the tree cross-built in Docker |
+| `logs/aot/` | `sh dm/tools/aot/tests/run_aot_tests.sh build/aot`, in the `nxnative-aot` Docker image: the recompiler's vector harness, census test and vectors-current check ([dm/tools/aot/README.md](../dm/tools/aot/README.md)) |
 
 ## Files
 

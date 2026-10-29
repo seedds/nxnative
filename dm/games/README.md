@@ -147,6 +147,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [The Legend of Zelda: Echoes of Wisdom](01008CF01BAAC000/README.md) | `01008CF01BAAC000` | 1.1.0 | 20.5.1 | NintendoWare (G3d / Ui2d / Vfx) | NVN |
 | [The Legend of Zelda: Link's Awakening](01006BB00C6F0000/README.md) | `01006BB00C6F0000` | 1.1.0 | 8.2.0 | Grezzo's engine on NintendoWare | NVN |
 | [The Legend of Zelda: Tears of the Kingdom](0100F2C0115B6000/README.md) | `0100F2C0115B6000` | 1.4.3 | 20.5.22 | Nintendo EPD (sead / agl / gsys) | NVN |
+| [Tomodachi Life: Living the Dream](010051F0207B2000/README.md) | `010051F0207B2000` | 1.0.4 | 20.5.3 | Nintendo EPD (sead / agl / gsys) | NVN |
 | [Unicorn Overlord](010069401ADB8000/README.md) | `010069401ADB8000` | 1.05 | 16.2.4 | Vanillaware's engine | NVN |
 | [Unicorn Overlord, Asian release](010054B01AD92000/README.md) | `010054B01AD92000` | 1.05 | 16.2.4 | Vanillaware's engine | NVN |
 | [Well Dweller](0100217023F6C000/README.md) | `0100217023F6C000` | 1.0.0 | 22.2.0 | GameMaker Studio 2 (its runner) | OpenGL |

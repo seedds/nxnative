@@ -1,0 +1,33 @@
+# Game profile of Tomodachi Life: Living the Dream (Switch, update 1.0.4 v262144).
+# Format: key <TAB> value; several values of one key are separated by spaces; one build row per version; comments must be on their own line.
+
+# ---- Identity ----
+title_id	010051F0207B2000
+program_id	010051F0207B2000
+
+# ---- App ----
+name	Tomodachi Life: Living the Dream
+ipa	TomodachiLifeMobile.ipa
+app_category	public.app-category.simulation-games
+
+# ---- Versions ----
+build	v262144	1.0.4	main=b39fef373fb12154385d012aab3bc99e	sdk=651781821e2c2e0b2bdfe905e8676f56
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+modules	main sdk
+romfs_marker	RSDB
+zip_store	.zs:.bwav:.metallib
+
+# ---- Memory ----
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+mem_used	0x6200000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/=romfs
+shader_note	Tomodachi Life: Living the Dream shaders (provisional profile)

@@ -148,6 +148,12 @@ CUTS = {
     (0x145bfc, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x145c68, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
   ],
+  # Tomodachi Life: Living the Dream 1.0.4 (v262144) sdk (SDK 20.5.3): the AddressRegionManager node area cut, at the same offsets as Silksong (SDK 20.5.8).
+  # The constructor is at sdk+0x145bec (limit = alias start + 0x3fe00000 at +0x28, a unit heap of 0x30-byte nodes, the area then registered as occupied at +0x145c68)
+  '651781821e2c2e0b2bdfe905e8676f56': [
+    (0x145bfc, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x145c68, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+  ],
   # SDK 20.5.22 sdk (The Legend of Zelda: Tears of the Kingdom 1.4.3 and Breath of the Wild 1.9.0, the same build): the same node area cut. Tears of the Kingdom's resource heaps live in
   # address regions after the node area. At the first descent from the Great Sky Island the alias region's high-water mark was +2.25 GB of its 2.375 GB with 1.00 GB mapped, and the game then
   # took a memory shortage: its frame check (main+0x1fd32ec) logs MSF / R / Rf and plays the memory-shortage Blood Moon, which puts Link back at the start (GitHub issue #70; 7 of 8 Mac runs from

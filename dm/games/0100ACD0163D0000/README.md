@@ -1,6 +1,6 @@
 # Batman: Arkham Knight (`0100ACD0163D0000`)
 
-Update 1.0.5 (v327680) over the base game; the base NSP is a 7 MB stub and the update holds the game (26.9 GB). SDK 14.3.0. Rocksteady's Unreal Engine 3 (package version 864, licensee 0x80e3) on NVN, with Wwise for the sound, CRI Sofdec for the movies (`.usm`) and Scaleform for the menus. Modules `main` and `sdk`. Plays on the Mac at 30 fps, as on the Switch: the language screen, the health warning, the title, the save select, New Story, the opening cutscene and the cremation, then Pauli's Diner as Officer Owens. An unsigned IPA has not been built; iOS is untested.
+Update 1.0.5 (v327680) over the base game; the base NSP is a 7 MB stub and the update holds the game (26.9 GB). SDK 14.3.0. Rocksteady's Unreal Engine 3 (package version 864, licensee 0x80e3) on NVN, with Wwise for the sound, CRI Sofdec for the movies (`.usm`) and Scaleform for the menus. Modules `main` and `sdk`. Plays on the Mac at 30 fps, as on the Switch: the language screen, the health warning, the title, the save select, New Story, the opening cutscene and the cremation, then Pauli's Diner as Officer Owens. An unsigned IPA runs on an iPhone (A17 Pro); the iPad is untested.
 
 Two pull requests brought this game up before this profile, separately: [#339](https://github.com/seedds/nxnative/pull/339) / [#340](https://github.com/seedds/nxnative/pull/340) and [#384](https://github.com/seedds/nxnative/pull/384). This port was done on its own and then checked against them; what it takes from them is named below.
 
@@ -14,6 +14,7 @@ Two pull requests brought this game up before this profile, separately: [#339](h
 | `shader_key_skip 0x770+0x78` | [`game.tsv`](game.tsv) | the engine shares one control section among shaders that differ only in GLSLC's compile information; see [Files and shaders](#files-and-shaders) |
 | A 2 GB block: `mem_reserve 0x80000000`, `mem_alias 0x58000000` | `game.tsv` | the host heap lies outside the block; see [Memory](#memory) |
 | `sys_resource 0x2000000` | `game.tsv` | the NPDM's 32 MB of system resource: virtual address memory |
+| `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | the engine fills its textures from the CPU in the pool and flushes most of them never; see [Textures](#textures) |
 
 No frame-rate key: the game asks for present interval 2 and runs at 30 fps, as on the Switch.
 
@@ -24,6 +25,11 @@ No frame-rate key: the game asks for present interval 2 and runs at 30 fps, as o
 - **Resolved: 40 of the first shaders the game used were not in the shader map.** Each was one record's control section with another record's code area: the shader loader (`main+0xb7948c`) shares control sections that differ only in GLSLC's compile information, and the host's key hashed those bytes: [Control sections shared among shaders that differ only in their compile information](../../../docs/reference/shaders.md#control-sections-shared-among-shaders-that-differ-only-in-their-compile-information). In the files only +0x7d0..+0x7e7 seemed to matter, but the opening cutscene met a pair that differed at +0x778, as #340 had found; with `0x770+0x78` no shader was missing through the diner.
 - **Resolved: four shaders sampled 2D render targets as 3D textures** (`[RED] texture type mismatch … declares slot 129–132 as Metal type 7, texture … is type 2`, `553c51835a24a36a`, `fad24ea404d1bbac`, `26ccc3148f457613` and the compute shader `e4bd7b26b4a2dc5b`; #340 read them as 2D arrays). They sample a volume at world coordinates (`fad24ea404d1bbac`: position × 1/20480 + 0.5) through separate texture slots 1–4, and from the first frames of New Story on the game leaves 2D textures bound there, mostly its half-resolution targets (a BC1 texture for `26ccc3148f457613`): the pass dump of `553c51835a24a36a` (frame 5121 from `save_diner`) shows separate slot 2 holding texture ID 283, a 720x406 RGBA16F target, beside the R32F, RG11B10F and depth targets and two 64x64 textures; the game does create 3D textures (2x2x2 at boot, 32x32x32, 71x40x64), but binds none there. Metal has no 3D view of a 2D texture, so they were bound as is with undefined reads; the host now binds the zero 3D texture: [A 2D texture in a 3D slot binds the zero 3D texture](../../../docs/reference/rendering.md#a-2d-texture-in-a-3d-slot-binds-the-zero-3d-texture). What the Switch reads there is not known.
 - **Explained: `[RED] stage 0 cb0 has no uniform buffer bound`, once per run, at boot.** The game's first command buffer (before the first present) updates its two uniform buffers (vertex 128 bytes at pool +0x3400, fragment 116 bytes at +0x300) and draws a quad to the window (vertex shader `86ade63f9df2cdb0`, fragment `4904d66df28dbfbc`, 6 vertices) and then a second draw, with no `CommandBufferBindUniformBuffer` in it at all (the `[nvn] init 0` call counts); from frame 1 on it binds the same two addresses before the same draws (`DM_NVN_PASSDUMP=0-2`). The host reads the zero bank there: [An unbound uniform slot reads the zero bank](../../../docs/reference/rendering.md#an-unbound-uniform-slot-reads-the-zero-bank). The vertex shader makes x and y from rows 6 and 7 of cb0, so with zeros every vertex lands on (0, 0) and the quad draws nothing on a window that is still zero. Nothing to fix in the host; what the Switch reads from the unbound slot is not known.
+
+## Textures
+
+- **Current:** `tex_flush_upload` and `tex_dirty_upload` are both on. The engine creates its textures and fills them from the CPU in the pool, and flushes most of them never, which is the case both keys exist for: [mapped-range flushes taken as uploads](../../../docs/reference/nvn-objects.md#mapped-range-flushes-taken-as-uploads-tex_flush_upload) and [CPU writes with no flush, caught by page protection](../../../docs/reference/nvn-objects.md#cpu-writes-with-no-flush-caught-by-page-protection-tex_dirty_upload). #384 carries both for this game as well. Without them the host samples a texture's pool content from before the fill, which is another texture's bytes: outdoors beyond the diner the tree trunks drew green with orange patches (an iPhone build of this profile).
+- **Resolved:** in Gotham the tree trunks draw with their bark texture with both keys on. Without them the trunks drew bright green with orange patches; with them, bark brown-grey. Before and after: [#652](https://github.com/seedds/nxnative/pull/652#issuecomment-6505175539), on an iPhone build (A17 Pro).
 
 ## Memory
 
@@ -49,11 +55,12 @@ No frame-rate key: the game asks for present interval 2 and runs at 30 fps, as o
 
 - 2026-10-29, Mac (headless): the route above from an empty save into Pauli's Diner, a few steps and turns there, with no crash and no shader missing from the map (the four texture-type red lines only).
 - 2026-10-29, Mac (headless), with the zero 3D texture: from `save_diner` (it resumes at the cremation) through the cremation into the diner, no texture type mismatch left (`texture type mismatches no view bridges 0`), the cremation and the diner drawn as before; the only red line is `stage 0 cb0 has no uniform buffer bound`, once, at boot ([Files and shaders](#files-and-shaders)).
-- Not checked: Gotham beyond the diner, a save and continue, the iPhone or iPad.
+- 2026-10-29, iPhone (A17 Pro), from the reporter: the game runs, and a save and continue works. In Gotham the trees drew bright green with orange patches before these keys and draw with their bark texture with them; before and after in [#652](https://github.com/seedds/nxnative/pull/652#issuecomment-6505175539) ([Textures](#textures)).
+- Not checked: the iPad.
 
 ## Open
 
-- iOS: no IPA built yet; untested on a device (the 2 GB block comes from #384's iPad run).
+- iOS: runs on an iPhone (A17 Pro); the iPad is untested (the 2 GB block comes from #384's iPad run).
 - 60 fps, picture settings (render scale, the engine's SMAA): #384 has both; not taken here.
 - Only update 1.0.5 is registered.
 

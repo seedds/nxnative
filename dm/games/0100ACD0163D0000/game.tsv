@@ -25,6 +25,13 @@ modules	main sdk
 romfs_marker	BmGame/Movies/Ending.usm
 zip_store	.bin:.tfc:.upk:.usm:.wad:.xxx:.metallib
 
+# ---- Graphics ----
+# Unreal Engine 3 creates its textures and fills them from the CPU in the pool, and flushes most of them never (README.md, Textures; dm/games/README.md).
+# Without both keys the host keeps the pool content from before the fill, so a texture samples another texture's colour; tex_dirty_upload is the one that
+# covers the textures the engine writes after their first use.
+tex_flush_upload	on
+tex_dirty_upload	on
+
 # ---- Memory ----
 # The NPDM declares 32 MB of system resource (virtual address memory) and main never sets a heap. With the engine's allocator on a host malloc zone (outside the guest block)
 # the game maps almost nothing in the alias region, and on iOS the block, that heap and Metal share the app's address space: a 2 GB block with a 1.375 GB alias region,

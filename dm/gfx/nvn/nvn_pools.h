@@ -17,7 +17,7 @@ typedef struct {
     uint64_t gpu;          // the backend's GPU address of base (Metal: the buffer's gpuAddress)
     const void *key;       // mem as nvn_pool_add was given it: what nvn_pool_del finds the pool by
     int res;               // the backend's own mark, 0 when added (Metal: already in the residency set, on demand, see pool_res)
-    uint32_t nvn_flags;    // the pool's NVN flags (be_pool_add); the Metal backend is not given them and passes 0
+    uint32_t nvn_flags;    // the pool's NVN flags as be_pool_add gives them (the Metal backend records them since step M6, mtl_pool_add_flags, and does not read them)
 } nvn_pool;
 // What a lookup gives, and the per-thread cache keeps (an empty entry has hi 0)
 typedef struct { uintptr_t lo, hi, base; void *backend; uint64_t gpu; } nvn_pool_ref;

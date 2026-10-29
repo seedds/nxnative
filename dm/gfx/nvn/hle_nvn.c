@@ -7,6 +7,9 @@
 // Metal command buffer (nvn_mtl.m): buffer copies / uniform updates go through blit (GPU ordering), event value writes / counters are written after the GPU completes;
 // sync object = submit fence value, and waits are released only after the GPU completes.
 // Every implementation gets a compile-time signature check against the prototypes in nvn_protos.h (NVNboolean parameters are received as uint32_t, only the low 8 bits are looked at).
+// The NVN frontend on every host (docs/design/vulkan-backend.md, step M6): it reaches its backend only through nvn_be.h (the Metal one on Apple; Linux and Windows build it into the
+// CMake host with the null backend, nvn_null.c, until the Vulkan one), the operating system through the platform layer (plat.h), and Apple's own interfaces with no counterpart
+// there only under #if defined(__APPLE__), beside a declared null form. What belongs to native execution (the thunks, the big host stack) is under DM_NATIVE_EXEC.
 // Environment switches: DM_NVN_FRAMES=N prints the call table per frame for the first N frames (default 3); DM_NVN_TSV=path writes the per-frame call table and timing to a TSV (DM_NVN_TSV_CALLS=0 writes timing only); DM_SLOWFRAME=1 writes only the per-frame breakdown of dropped frames to the log; DM_NVN_LOG=1 logs object creation.
 #include "../../host/hle.h"
 #include "nvn_protos.h"
@@ -17,37 +20,51 @@
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
+#include <unistd.h>
+#include <errno.h>
+#include <time.h>
+#include <assert.h>
+#include <stdatomic.h>
+// Apple's own interfaces the platform layer (plat.h) has no function for: Mach time units and thread / task statistics, the real-time thread policy, the sysctl of core types, memory
+// aliasing (vm_remap), CoreFoundation's dictionary. Every use is under #if defined(__APPLE__), the Apple code as it was, with a declared null form on the other hosts that says once
+// what it does not do (step M6, docs/design/vulkan-backend.md). The registration table, SHA-256, QoS, page size, address reservation and the safe memory read go through plat.h
+#if defined(__APPLE__)
 #include <mach/mach_time.h>
-#include <CommonCrypto/CommonDigest.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #include <TargetConditionals.h>
-#include <unistd.h>
 #include <sys/mman.h>
-#include <errno.h>
+#include <pthread/qos.h>
+#include <sys/resource.h>
+#include <sys/sysctl.h>
+#include <mach/thread_policy.h>
+#else
+#include "nvn_hmap.h"   // the program key table (pk_get)
+#endif
 #if TARGET_OS_OSX
 #define DM_MEM_CAP_DEFAULT_GB 24
 #else
 #define DM_MEM_CAP_DEFAULT_GB 0
 #endif
-#include <pthread/qos.h>
-#include <sys/resource.h>
-#include <sys/sysctl.h>
-#include <mach/thread_policy.h>
-#include <assert.h>
-#include <stdatomic.h>
-#include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
+// A declared null form's red line, said once per call site: what this platform does not do that Apple does
+#define APPLE_ONLY_RED(...) do { static _Atomic int red_; if (!atomic_exchange(&red_, 1)) LOG("[RED] " __VA_ARGS__); } while (0)
 
 // ---------- Slot table, thunks, unimplemented stubs ----------
 typedef struct { _Atomic uint64_t cnt; void *fn; } nvn_slot_t;
 nvn_slot_t nvn_slot[NVN_NFUNC];                 // The thunk accesses it by i*16; the layout must not change
 _Static_assert(sizeof(nvn_slot_t) == 16, "the trampolines are addressed in 16-byte steps");
+extern const char *nvn_names[NVN_NFUNC];   // the names in load order: nvn_thunks.S on Apple; elsewhere the table dm/host/CMakeLists.txt writes from names.txt (gen/nvn_names.c)
+#if DM_NATIVE_EXEC
 extern void *nvn_thunk[NVN_NFUNC];
-extern const char *nvn_names[NVN_NFUNC];
 extern void nvn_unimpl_entry(void);
 extern void nvn_prof_entry(void);
 extern void nvn_big_entry(void);
+#else
+// Without native execution (DM_NATIVE_EXEC 0, plat.h) the entry points the guest calls (the counting thunks of nvn_thunks.S), the big host stack and DM_NVN_PROF's timing wrapper
+// (nvn_entry.S) are the execution engine's: the x86-64 engine (Phase 2) has none yet. The slots of the functions not implemented hold this stand-in, which no guest code reaches, and a
+// lookup answers NULL (nvn_lookup). The implementations get host-call thunks like the other HLE entries (dm/host/tools/gen_hle_thunks.py)
+static void nvn_unimpl_entry(void) { LOG("[RED] NVN: the slot of an unimplemented function was called without native execution"); }
+#endif
 void *nvn_big_real[NVN_NFUNC];            // the real implementation of functions that run on the big host stack (nvn_entry.S nvn_big_entry)
 void *nvn_real[NVN_NFUNC];               // DM_NVN_PROF: the real implementation called by the timing wrapper
 _Atomic uint64_t nvn_prof_ticks[NVN_NFUNC]; // DM_NVN_PROF: cumulative time of each function (cntvct counts)
@@ -60,16 +77,20 @@ uint64_t nvn_unimpl_c(nvn_slot_t *slot, uint64_t x0, uint64_t x1, uint64_t x2) {
 }
 
 typedef struct { const char *name; void *fn; } nvn_impl;
+// An implementation h_<name> registered in the table swnvn (PLAT_TABLE_ENTRY, plat.h: the Mach-O section __DATA,swnvn on Apple, as before). Its C function has HLE_LINKAGE (hle.h):
+// static on native builds (Apple arm64), as always; elsewhere external, so that the host-call thunks generated from these entries can call it (dm/host/tools/gen_hle_thunks.py reads
+// NVN( and NVN_NOPROTO( as entries named <name>, C function h_<name>)
 #define NVN(name, ret, ...)                                                                       \
-    static ret h_##name(__VA_ARGS__);                                                             \
+    HLE_LINKAGE ret h_##name(__VA_ARGS__);                                                        \
     static const NVNT_##name chk_##name __attribute__((unused)) = h_##name;                       \
-    __attribute__((used, section("__DATA,swnvn"))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
-    static ret h_##name(__VA_ARGS__)
+    PLAT_TABLE_ENTRY(swnvn) static const nvn_impl e_##name = {#name, (void *)h_##name};           \
+    HLE_LINKAGE ret h_##name(__VA_ARGS__)
 // Newer interfaces without prototypes: no signature check
 #define NVN_NOPROTO(name, ret, ...)                                                               \
-    static ret h_##name(__VA_ARGS__);                                                             \
-    __attribute__((used, section("__DATA,swnvn"))) static const nvn_impl e_##name = {#name, (void *)h_##name}; \
-    static ret h_##name(__VA_ARGS__)
+    HLE_LINKAGE ret h_##name(__VA_ARGS__);                                                        \
+    PLAT_TABLE_ENTRY(swnvn) static const nvn_impl e_##name = {#name, (void *)h_##name};           \
+    HLE_LINKAGE ret h_##name(__VA_ARGS__)
+PLAT_TABLE_DEFINE(swnvn)   // plat_table_swnvn: this file's registrations (on Apple getsectiondata of __DATA,swnvn, as nvn_init_slots called it before)
 
 static int g_log;
 static pthread_mutex_t g_sub_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -80,8 +101,8 @@ static unsigned g_nsem;                          // Number of semantic implement
 static void nvn_init_slots(void) {
     static int done; if (done) return; done = 1;
     g_log = getenv("DM_NVN_LOG") != NULL;
-    unsigned long sz;
-    const nvn_impl *im = (const nvn_impl *)getsectiondata(&_mh_execute_header, "__DATA", "swnvn", &sz);
+    size_t sz;
+    const nvn_impl *im = (const nvn_impl *)plat_table_swnvn(&sz);
     unsigned nim = im ? (unsigned)(sz / sizeof *im) : 0, hit = 0;
     for (unsigned i = 0; i < NVN_NFUNC; i++) nvn_slot[i].fn = (void *)nvn_unimpl_entry;
     for (unsigned k = 0; k < nim; k++) {
@@ -96,7 +117,11 @@ static void nvn_init_slots(void) {
 static void *nvn_lookup(const char *name) {
     nvn_init_slots();
     for (unsigned i = 0; i < NVN_NFUNC; i++)
+#if DM_NATIVE_EXEC
         if (!strcmp(nvn_names[i], name)) return nvn_thunk[i];
+#else
+        if (!strcmp(nvn_names[i], name)) { APPLE_ONLY_RED("NVN: no guest entry points without native execution yet (the x86-64 engine's NVN thunks, Phase 2): %s and every later name resolve to NULL", name); return NULL; }
+#endif
     LOG("[RED] NVN address lookup of an unknown name: %s", name ? name : "(null)");
     return NULL;
 }
@@ -584,6 +609,7 @@ static void pk_drop(const void *p);
 NVN(nvnProgramFinalize, void, NVNprogram *p) { be_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p); }
 // a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
 typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
+#if defined(__APPLE__)
 static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // a dedicated table (keys not shared with other side tables)
 static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_lock(&g_pk_mu);
@@ -599,6 +625,22 @@ static void pk_drop(const void *p) {
     if (k) { CFDictionaryRemoveValue(g_pk, p); free(k); }
     pthread_mutex_unlock(&g_pk_mu);
 }
+#else   // the same table in the frontend's own hash map (nvn_hmap.h), keyed by the object's address: CoreFoundation is Apple's
+static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static nvn_hmap g_pk; static int g_pk_init;
+static prog_keys_t *pk_get(const void *p, int make) {
+    pthread_mutex_lock(&g_pk_mu);
+    if (!g_pk_init) { nvn_hm_init(&g_pk, sizeof p); g_pk_init = 1; }
+    prog_keys_t *k = (prog_keys_t *)nvn_hm_get(&g_pk, &p);
+    if (!k && make) { if (!(k = calloc(1, sizeof *k))) die("program key table allocation failed"); nvn_hm_put(&g_pk, &p, k); }
+    pthread_mutex_unlock(&g_pk_mu);
+    return k;
+}
+static void pk_drop(const void *p) {
+    pthread_mutex_lock(&g_pk_mu);
+    free(g_pk_init ? nvn_hm_del(&g_pk, &p) : NULL);
+    pthread_mutex_unlock(&g_pk_mu);
+}
+#endif
 // mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0; void *mb; uint64_t mo;
@@ -609,10 +651,10 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     // Control +0x20 holds the section's own length: sections of at least 0x880 bytes (all of Mario's, Engage's, Dread's and 13 Sentinels') use the first 0x880; SDK 10's 3D World has 0x850-byte ones followed by other data, so only their own length is used (shader_split.py ctl_len)
     uint32_t nctl = 0x880, own; memcpy(&own, (const uint8_t *)sd->control + 0x20, 4);
     if (own >= 0x760 && own < 0x880) nctl = own;
-    uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
-    CC_SHA256_Update(&hc, sd->control, nctl);
-    if (code) CC_SHA256_Update(&hc, (const void *)(uintptr_t)sd->data, ncode);
-    CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
+    uint8_t md[32]; plat_sha256_ctx hc; plat_sha256_init(&hc);   // plat.h: CommonCrypto's SHA-256 on Apple, as before (the same digest), sha256.c elsewhere
+    plat_sha256_update(&hc, sd->control, nctl);
+    if (code) plat_sha256_update(&hc, (const void *)(uintptr_t)sd->data, ncode);
+    plat_sha256_final(&hc, md); memcpy(out, md, 8);
     return 1;
 }
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
@@ -1142,6 +1184,7 @@ NVN(nvnVertexAttribStateGetStreamIndex, int, const NVNvertexAttribState *s) { re
 
 static _Atomic uint64_t g_sub_wall_ns, g_sub_cpu_ns, g_sub_instr;   // Wall clock / this thread's CPU time / this thread's retired instruction count for submit (excluding present) (taken away per frame)
 static _Atomic uint64_t g_cum_sub_instr, g_cum_sub_cpu_ns;   // Cumulative versions of the above (the "translation" summary row every 300 frames takes the difference; on a real device read through the log port: instructions per draw / submit CPU per frame)
+#if defined(__APPLE__)
 extern int thread_selfcounts(int type, void *buf, size_t nbytes);   // This thread's cumulative {instructions, cycles} (libSystem private interface, present on both Mac and iOS)
 static uint64_t thr_instr(void) { uint64_t c[2] = {0, 0}; thread_selfcounts(1, c, sizeof c); return c[0]; }
 // Supplementary readings for the submit path (on a real device Metal 4 instruction count is -18% while submit CPU time is +49%; need to tell apart kernel mode, execution efficiency, or frequency throttling):
@@ -1152,6 +1195,16 @@ static uint64_t thr_sys_ns(void) {
     if (thread_info(me, THREAD_BASIC_INFO, (thread_info_t)&bi, &n) == KERN_SUCCESS) r = (uint64_t)bi.system_time.seconds * 1000000000ull + (uint64_t)bi.system_time.microseconds * 1000ull;
     mach_port_deallocate(mach_task_self(), me); return r;
 }
+static uint64_t thr_cpu_ns(void) { return clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); }   // this thread's CPU time in nanoseconds (Darwin's clock, as the callers read it before)
+#else
+// The thread's instruction and cycle counters (libSystem's thread_selfcounts) and its kernel-mode CPU time (Mach THREAD_BASIC_INFO) are Apple's, and the platform layer has none: they
+// read 0 here, so the submit statistics built on them do too (the translation detail line, which needs the cycle count, is not printed)
+static void thr_red(void) { APPLE_ONLY_RED("NVN submit statistics: this thread's instruction and cycle counters and kernel CPU time are Apple's (thread_selfcounts, THREAD_BASIC_INFO): they read 0 on this platform"); }
+static uint64_t thr_instr(void) { thr_red(); return 0; }
+static void thr_counts(uint64_t *instr, uint64_t *cyc) { thr_red(); *instr = *cyc = 0; }
+static uint64_t thr_sys_ns(void) { thr_red(); return 0; }
+static uint64_t thr_cpu_ns(void) { uint64_t us = 0; plat_thread_cpu_us(plat_thread_self(), &us); return us * 1000u; }   // this thread's CPU time: the platform layer's, in microseconds
+#endif
 static _Atomic uint64_t g_cum_sub_cyc, g_cum_sub_sys_ns, g_cum_sub_wall_ns;
 static int frame_rec(void);
 static _Atomic uint64_t g_nvn_ns;   // Host time spent in submit / present this frame (replay encoding + present), used by the timing instrumentation
@@ -1182,7 +1235,7 @@ void dm_gfx_suspend(int on) {
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     gfx_enter();
     pthread_mutex_lock(&g_sub_mu);
-    uint64_t t0 = now_ns(), c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
+    uint64_t t0 = now_ns(), c0 = thr_cpu_ns(), i0, y0, s0 = thr_sys_ns(); thr_counts(&i0, &y0);
     ((queue_t *)q)->submits++;
     be_queue_activate(((const queue_t *)q)->serial);
     be_set_queue_origin_lower_left(((const queue_t *)q)->origin_ll);
@@ -1195,7 +1248,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     pthread_mutex_unlock(&g_sub_mu);
     uint64_t dw = now_ns() - t0;
     atomic_fetch_add(&g_nvn_ns, dw); atomic_fetch_add(&g_sub_wall_ns, dw);
-    uint64_t i1, y1; thr_counts(&i1, &y1); uint64_t dc = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - c0, di = i1 - i0;
+    uint64_t i1, y1; thr_counts(&i1, &y1); uint64_t dc = thr_cpu_ns() - c0, di = i1 - i0;
     atomic_fetch_add(&g_cum_sub_cyc, y1 - y0); atomic_fetch_add(&g_cum_sub_sys_ns, thr_sys_ns() - s0); atomic_fetch_add(&g_cum_sub_wall_ns, dw);
     atomic_fetch_add(&g_sub_cpu_ns, dc); atomic_fetch_add(&g_cum_sub_cpu_ns, dc);
     atomic_fetch_add(&g_sub_instr, di); atomic_fetch_add(&g_cum_sub_instr, di);
@@ -1233,6 +1286,7 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
     unsigned nnop = sizeof g_nops / sizeof *g_nops;
     // Implemented functions other than command recording (nvnCommandBuffer*, tens of thousands per frame, where the host only appends records) run on the big host stack: submit / present / object creation do Metal work, and a game thread's stack may be too small (see nvn_entry.S nvn_big_entry)
     unsigned nbig = 0;
+#if DM_NATIVE_EXEC
     for (unsigned i = 0; i < NVN_NFUNC; i++)
         if (nvn_slot[i].fn != (void *)nvn_unimpl_entry && nvn_slot[i].fn != (void *)nvn_nop && strncmp(nvn_names[i], "nvnCommandBuffer", 16)) {
             nvn_big_real[i] = nvn_slot[i].fn; nvn_slot[i].fn = (void *)nvn_big_entry; nbig++;
@@ -1241,6 +1295,9 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
     if (getenv("DM_NVN_PROF"))
         for (unsigned i = 0; i < NVN_NFUNC; i++)
             if (nvn_slot[i].fn != (void *)nvn_unimpl_entry && strcmp(nvn_names[i], "nvnQueuePresentTexture")) { nvn_real[i] = nvn_slot[i].fn; nvn_slot[i].fn = (void *)nvn_prof_entry; }
+#else   // the big host stack and the timing wrapper are the native engine's (nvn_entry.S); the x86-64 engine is to run host code on the host thread's own stack (hle.h HLE_FORCE_BIG)
+    if (getenv("DM_NVN_PROF")) LOG("[RED] DM_NVN_PROF: the per-function timing wrapper is native execution's (nvn_entry.S): no NVN function is timed on this build");
+#endif
     LOG("[nvn] null device: %u names, %u implemented (%u semantic + %u empty, %u of them on the large host stack), the other %u go to the red-reporting stub",
         NVN_NFUNC, g_nsem + nnop, g_nsem, nnop, nbig, NVN_NFUNC - g_nsem - nnop);
 }
@@ -1280,14 +1337,16 @@ static void trow(uint64_t f, const char *name, double v);
 static void set_time_constraint(uint64_t period_ns);
 static void rt_comp_tick(uint64_t period_ns);
 static double g_rt_comp_ms;   // Currently declared real-time computation amount (ms; 0 = not declared)
+#if defined(__APPLE__)   // the declared period: read and written by the Mach policy code alone
 static double g_rt_period_ms;
+#endif
 static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
 static int present_itv(const win_t *o);
 static int link_wait(const win_t *o, uint64_t timeout_ns);
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
-__attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
+__attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return PLAT_QOS_UNSPECIFIED; }
 __attribute__((weak)) void dm_yield_top(char *out, size_t n) { if (n) snprintf(out, n, "-"); }   // hle_thread.c: the threads that yielded most since the last call; none in graphics unit tests
 __attribute__((weak)) void dm_thread_cpu(char *out, size_t n, double secs) { (void)secs; if (n) snprintf(out, n, "-"); }   // hle_thread.c: guest-thread CPU by Switch priority band since the last call
 static uint64_t g_frame;
@@ -1359,13 +1418,24 @@ static void dump_frame(void) {
     g_frame++; cs_dump();
     // Every 300 frames read resident memory and hand it to the graphics layer to print the memory readout line (be_mem_stat, low frequency, capped). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
     // drags the whole machine into a kernel panic, which happened twice with other programs on the same machine), or set for tests with DM_MEM_CAP_GB=<integer>; the player's iOS app has no cap (exiting before the system kills it is pointless and only adds another kind of crash)
+#if defined(__APPLE__)
     if (g_frame % 300 == 0) { task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
         if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) { unsigned long long mb = (unsigned long long)(vi.phys_footprint >> 20); be_mem_stat(g_frame, mb);
             static long cap = -1; if (cap < 0) { const char *e = getenv("DM_MEM_CAP_GB"); cap = e ? atol(e) : DM_MEM_CAP_DEFAULT_GB; }
             if (cap > 0 && mb > (unsigned long long)cap * 1024) { LOG("[RED] memory watchdog: resident %llu MB over the limit of %ld GB (frame %llu), exiting", mb, cap, (unsigned long long)g_frame); _exit(86); } } }
+#else   // the footprint is Mach's (TASK_VM_INFO phys_footprint) and the platform layer has none yet
+    if (g_frame % 300 == 0) APPLE_ONLY_RED("NVN: the process's memory footprint is read on Apple only (TASK_VM_INFO): no memory readout line and no memory watchdog (DM_MEM_CAP_GB) on this platform");
+#endif
     dm_guest_frame_tick();   // Deterministic guest clock (DM_DETCLOCK, host hle_os.c): each present advances a fixed step; a no-op when not enabled
 }
 // ---------- Timing instrumentation (per-frame rows written to DM_NVN_TSV: frame / @metric / value; every 300 frames a summary of p50 / p95 / max) ----------
+// DM_NVN_PROF's per-function times (nvn_prof_ticks) in nanoseconds: the native engine's timing wrapper (nvn_entry.S nvn_prof_entry) counts mach_absolute_time units, converted as
+// before; without native execution nothing fills them yet (the x86-64 engine's wrapper is to count nanoseconds)
+#if DM_NATIVE_EXEC
+static uint64_t prof_ns(uint64_t t) { static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb); return t * tb.numer / tb.denom; }
+#else
+static uint64_t prof_ns(uint64_t t) { return t; }
+#endif
 #define TWIN 300
 static double g_tw[6][TWIN]; static unsigned g_tn[6];
 static double g_pres_iv[TWIN]; static unsigned g_presn;   // Present interval (ms; -1 = dropped by the system, 0 = no reading)
@@ -1405,6 +1475,9 @@ static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y
 // wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c);
 // then render-target traffic per frame (attachment load / store bytes, passes that load and store everything, stores saved by DM_NVN_UNWRITTEN_DC) and guest-thread CPU by Switch priority
 static void power_line(uint64_t frame) {
+#if !defined(__APPLE__)   // energy, CPU time, its share on performance cores and wakeups are Mach's (TASK_POWER_INFO_V2): the power, residency and thread lines are Apple only for now
+    (void)frame; APPLE_ONLY_RED("NVN: process energy, CPU time and wakeups are read on Apple only (TASK_POWER_INFO_V2): no power, residency or thread lines on this platform");
+#else
     static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf, pld, pst, pfu, pudc; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     task_power_info_v2_data_t pw; mach_msg_type_number_t n = TASK_POWER_INFO_V2_COUNT;
     if (task_info(mach_task_self(), TASK_POWER_INFO_V2, (task_info_t)&pw, &n) != KERN_SUCCESS) return;
@@ -1436,6 +1509,7 @@ static void power_line(uint64_t frame) {
         LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }
     else { char yt[192], rs[400], tc[400]; dm_yield_top(yt, sizeof yt); be_res_stats(rs, sizeof rs); dm_thread_cpu(tc, sizeof tc, 1); }   // the first call only takes the baselines
     pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame; be_bw(&pld, &pst, &pfu); pudc = be_udc_saved_bytes();
+#endif
 }
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;
@@ -1452,7 +1526,11 @@ static void tsummary(uint64_t frame) {
         LOG("[nvn] frame interval up to frame %llu: >%.1fms %u / %u frames, p99 %.2f ms", frame, tgt, over, n, v[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1]); } }
     { unsigned n = g_presn < TWIN ? g_presn : TWIN, k = 0, drop = 0, discard = 0; double v[TWIN];   // on-screen present: dropped frame = on screen longer than its hold × 1.5 (pres_expect_ms) or discarded
       for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > g_pres_exp[i] * 1.5; } }
+#if defined(__APPLE__)
       task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
+#else
+      double fp = -1;   // the footprint is Mach's (TASK_VM_INFO): unknown here, as when task_info fails
+#endif
       double br = dm_brightness_now();   // footprint / brightness are carried on the on-screen present row: does not depend on the tick-entry observation gate (camp runs have it too)
       if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] on-screen up to frame %llu: %u frames, dropped %u (discarded %u), p99 %.2f ms; footprint %.0f MiB; brightness %.2f; thermal %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
       g_presn = 0; }
@@ -1467,14 +1545,16 @@ static void tsummary(uint64_t frame) {
           (double)(ci - pi) / (double)(dr_ - pd), (ci - pi) / 1e6 / (double)(frame - pf), (cc - pc) / 1e6 / (double)(frame - pf), (double)(dr_ - pd) / (double)(frame - pf));
       { static uint64_t py, pk, pw; uint64_t cy = atomic_load(&g_cum_sub_cyc), ck = atomic_load(&g_cum_sub_sys_ns), cw = atomic_load(&g_cum_sub_wall_ns);
         if (pf && frame > pf && ci > pi && cy > py) { double nf = (double)(frame - pf), cyc = (double)(cy - py), cpu = (double)(cc - pc);
-          qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0; pthread_get_qos_class_np(pthread_self(), &qc, &rp);
+          plat_qos_t qc = plat_qos_self();   // plat.h: pthread_get_qos_class_np on Apple, as before
           uint64_t aw = 0, ag = 0; int an = 0; be_alloc_stats(&aw, &ag, &an);
           static uint64_t pyn, pyns; uint64_t yn = 0, yns = 0; dm_main_yield_stats(&yn, &yns);
           LOG("[nvn] translation detail up to frame %llu: submit per frame %.2f M cycles (%.2f cycles per instruction), CPU %.3f ms of which kernel %.3f ms, wall clock %.3f ms; mean clock %.2f GHz (cycles / CPU time); this thread's QoS %#x; allocator pools %d, GPU waits so far %llu; real-time declared computation %.2f ms; main thread yields per frame %.0f / %.3f ms", frame,
               cyc / 1e6 / nf, cyc / (double)(ci - pi), cpu / 1e6 / nf, (double)(ck - pk) / 1e6 / nf, (double)(cw - pw) / 1e6 / nf, cpu > 0 ? cyc / cpu : 0, (unsigned)qc, an, (unsigned long long)aw, g_rt_comp_ms, (double)(yn - pyn) / nf, (double)(yns - pyns) / 1e6 / nf); pyn = yn; pyns = yns; }
+#if defined(__APPLE__)   // the thread's Mach policy and priorities (THREAD_EXTENDED_INFO, THREAD_TIME_CONSTRAINT_POLICY): Apple only
         if (frame % 300 == 0) { unsigned wn = 0; uint32_t wq = dm_guest_work_qos(&wn); thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT; int okx = thread_info(pthread_mach_thread_np(pthread_self()), THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc) == KERN_SUCCESS;
             thread_time_constraint_policy_data_t tp; mach_msg_type_number_t tc = THREAD_TIME_CONSTRAINT_POLICY_COUNT; boolean_t def = 0; int rt_live = thread_policy_get(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&tp, &tc, &def) == KERN_SUCCESS && !def;   // def = 1: the real-time policy is not in effect (never set / revoked)
             LOG("[nvn] thread policy: main thread real-time computation %.2f ms / period %.2f ms, real-time policy %s, current priority %d (base %d, policy %d); %u worker threads QoS %#x; present QoS %#x", g_rt_comp_ms, g_rt_period_ms, rt_live ? "in effect" : "not in effect", okx ? xi.pth_curpri : -1, okx ? xi.pth_priority : -1, okx ? xi.pth_policy : -1, wn, wq, be_present_qos()); }
+#endif
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
     uint64_t up, re, es = be_pkg_edge_skips(), fa, pr; be_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr);
@@ -1522,6 +1602,10 @@ static void slow_emit(uint64_t f) {
 static int rt_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_RT=0: the present thread gets no time-constraint policy (QoS only)"); } return v; }
 static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
     if (!rt_on()) return;
+#if !defined(__APPLE__)   // the time-constraint policy is Mach's (thread_policy_set): the acquire thread keeps its scheduling class, and no computation is declared (rt_comp_tick stays idle)
+    (void)period_ns; (void)comp_ns;
+    APPLE_ONLY_RED("NVN: the present thread's time-constraint (real-time) policy is Mach's (thread_policy_set): not set on this platform");
+#else
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     if (comp_ns < 1000000ull) comp_ns = 1000000ull; if (comp_ns > period_ns * 9 / 10) comp_ns = period_ns * 9 / 10;
     thread_time_constraint_policy_data_t p = {
@@ -1530,6 +1614,7 @@ static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
     kern_return_t kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&p, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
     if (kr == KERN_SUCCESS) { g_rt_comp_ms = comp_ns / 1e6; g_rt_period_ms = period_ns / 1e6; }
     LOG("[nvn] present thread time-constraint policy (period %.3f ms, computation %.3f ms) %s", period_ns / 1e6, comp_ns / 1e6, kr == KERN_SUCCESS ? "set" : "failed to set");
+#endif
 }
 static int rt_comp_fixed_ms(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_RT_COMP"); v = e && *e && strcmp(e, "auto") ? atoi(e) : -1; } return v; }   // −1 = auto
 // The fixed value, or in auto mode the computation declared so far (auto's starting value of 2 ms only the first time): a reset to 2 ms at each period change under-declared the thread until the next p90
@@ -1538,7 +1623,7 @@ static void set_time_constraint(uint64_t period_ns) { int f = rt_comp_fixed_ms()
 static void rt_comp_tick(uint64_t period_ns) {
     if (rt_comp_fixed_ms() > 0 || !period_ns || !g_rt_comp_ms) return;
     static uint64_t last; static double win[120]; static int n;
-    uint64_t c = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); if (!last) { last = c; return; }
+    uint64_t c = thr_cpu_ns(); if (!last) { last = c; return; }
     win[n++] = (double)(c - last) / 1e6; last = c;
     if (n < 120) return;
     double v[120]; memcpy(v, win, sizeof v); qsort(v, 120, sizeof *v, dcmp); n = 0;
@@ -1548,9 +1633,14 @@ static void rt_comp_tick(uint64_t period_ns) {
     if (comp > g_rt_comp_ms * 1.15 || comp < g_rt_comp_ms * 0.85) set_time_constraint_comp(period_ns, (uint64_t)(comp * 1e6));
 }
 static void sleep_until_ns(uint64_t dl) {   // absolute time on the monotonic clock
+#if defined(__APPLE__)
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     uint64_t now = now_ns(); if (dl <= now) return;
     mach_wait_until(mach_absolute_time() + (dl - now) * tb.denom / tb.numer);
+#else   // a sleep for the time left: the platform layer's finest (a high-resolution waitable timer on Windows)
+    uint64_t now = now_ns(); if (dl <= now) return;
+    plat_sleep_ns(dl - now);
+#endif
 }
 // Present is fixed at 60 Hz: the adaptive mechanism stepped down at frame 60 in 24/24 real-device logs and never came back up, so for this phase 60 fps is the hard floor.
 // DM_PRESENT_HZ=0 (uncapped frame rate) serves only as an explicit performance profiling switch: some of the game's UI logic counts frames (with the same save, uncapped gives
@@ -1662,6 +1752,11 @@ static uint64_t rt_period_ns(const win_t *o, uint64_t period) {
 // dips that low on a Mac at 30 fps now and then (26% once in 70 s, 97% around it)
 static int g_fs_pshare = -1;   // the last window's share in percent (−1 = not measured yet)
 static int fstep_cpu_slowed(uint64_t presents) {
+#if !defined(__APPLE__)   // the core types (sysctl hw.nperflevels) and the time on performance cores (TASK_POWER_INFO_V2) are Apple's: no slowdown is seen, as with one core type
+    (void)presents;
+    APPLE_ONLY_RED("NVN frame step: the CPU's core types and the share of time on performance cores are read on Apple only: no CPU slowdown is seen on this platform");
+    return 0;
+#else
     static int levels = -1, slowed, low_was; static uint64_t pc, pp;
     if (levels < 0) { size_t n = sizeof levels; if (sysctlbyname("hw.nperflevels", &levels, &n, 0, 0)) levels = 1; }
     if (levels < 2 || presents % 30) return levels >= 2 && slowed;
@@ -1673,6 +1768,7 @@ static int fstep_cpu_slowed(uint64_t presents) {
     int low = g_fs_pshare >= 0 && g_fs_pshare < 30;
     slowed = low && low_was && dm_thermal_now() <= 1 && !dm_low_power_now(); low_was = low;
     return slowed;
+#endif
 }
 // Whether late frames may raise the hold above the cap's vsyncs (profile fps_hold, DM_FPS_HOLD=on / off). Off for a game whose updates do not wait for the presents and step
 // by the cap whatever the hold (Age of Calamity): holding frames there only paces the screen, and an iPhone lowers the GPU clock to the longer hold, so frames got slower and
@@ -1773,7 +1869,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; be_stats(&ps, &dr);
     if (nvn_real[0] || nvn_real[1]) {   // DM_NVN_PROF: record phase = time of all implemented functions except submit; submit phase = QueueSubmitCommands
-        static unsigned isub = ~0u; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+        static unsigned isub = ~0u;
         if (isub == ~0u) for (isub = 0; isub < NVN_NFUNC && strcmp(nvn_names[isub], "nvnQueueSubmitCommands"); isub++) {}
         uint64_t rec = 0, sub = 0;
         static uint64_t acc[NVN_NFUNC];
@@ -1781,11 +1877,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         if ((g_frame + 1) % TWIN == 0) {   // every 300 frames list the 5 most time-consuming functions
             char line[1024]; size_t o = 0;
             for (int k = 0; k < 5; k++) { unsigned best = 0; for (unsigned i = 1; i < NVN_NFUNC; i++) if (acc[i] > acc[best]) best = i;
-                if (!acc[best]) break; o += snprintf(line + o, sizeof line - o, " %s %.2f ms;", nvn_names[best] + 3, acc[best] * tb.numer / tb.denom / 1e6); acc[best] = 0; }
+                if (!acc[best]) break; o += snprintf(line + o, sizeof line - o, " %s %.2f ms;", nvn_names[best] + 3, prof_ns(acc[best]) / 1e6); acc[best] = 0; }
             LOG("[nvn] translation layer top 5 by time (sum over the last 300 frames):%s", line); memset(acc, 0, sizeof acc);
         }
-        trow(g_frame, "@rec_ms", rec * tb.numer / tb.denom / 1e6); trow(g_frame, "@submit_ms", sub * tb.numer / tb.denom / 1e6);
-        tpush(4, rec * tb.numer / tb.denom / 1e6); tpush(5, sub * tb.numer / tb.denom / 1e6);
+        trow(g_frame, "@rec_ms", prof_ns(rec) / 1e6); trow(g_frame, "@submit_ms", prof_ns(sub) / 1e6);
+        tpush(4, prof_ns(rec) / 1e6); tpush(5, prof_ns(sub) / 1e6);
     }
     if (prev_in) {
         double fr = (t0 - prev_in) / 1e6, wk = (t0 - prev_out) / 1e6, nv = atomic_exchange(&g_nvn_ns, 0) / 1e6;
@@ -1795,10 +1891,14 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         trow(f, "@wait_ms", g_acq_wait_ns / 1e6); trow(f, "@pq_wait_ms", g_pq_wait_ns / 1e6);
         if (frame_rec()) {
             static pthread_t pth; static uint64_t pcpu, pproc;
-            uint64_t c = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); pthread_t th = pthread_self();
+            uint64_t c = thr_cpu_ns(); pthread_t th = pthread_self();
             trow(f, "@cpu_ms", pcpu && pthread_equal(th, pth) ? (c - pcpu) / 1e6 : -1); pth = th; pcpu = c;
+#if defined(__APPLE__)
             struct rusage ru; getrusage(RUSAGE_SELF, &ru);
             uint64_t pc = (uint64_t)(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000000000ull + (uint64_t)(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) * 1000ull;
+#else       // the process's CPU time from the POSIX clock (glibc; winpthreads on Windows)
+            struct timespec ps; uint64_t pc = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ps) ? 0 : (uint64_t)ps.tv_sec * 1000000000ull + (uint64_t)ps.tv_nsec;
+#endif
             if (pproc) trow(f, "@proc_cpu_ms", (pc - pproc) / 1e6); pproc = pc;
             trow(f, "@call_ms", (t0 - g_t0_ns) / 1e6);
         }
@@ -1955,9 +2055,9 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
 #else
     uint64_t len = o->size < (64ull << 30) ? o->size : 64ull << 30;
 #endif
-    len = (len + (uint64_t)getpagesize() - 1) & ~((uint64_t)getpagesize() - 1);
-    void *a = mmap(NULL, len, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
-    if (a == MAP_FAILED) { LOG("[RED] virtual pool %p: cannot reserve %#llx bytes of address space (errno %d)", (const void *)o, (unsigned long long)len, errno); return NULL; }
+    len = (len + (uint64_t)plat_page_size() - 1) & ~((uint64_t)plat_page_size() - 1);
+    void *a = plat_vm_reserve(len);   // plat.h: inaccessible address space (on Apple the same mmap as before)
+    if (!a) { LOG("[RED] virtual pool %p: cannot reserve %#llx bytes of address space (errno %d)", (const void *)o, (unsigned long long)len, errno); return NULL; }
     struct vpool *v = calloc(1, sizeof *v);
     if (!v || !(v->pt = calloc((o->size + (2u << 20) - 1) >> 21, sizeof *v->pt))) die("sparse pool allocation failed");
     v->pool = o; v->base = a; v->len = len; v->size = o->size;
@@ -1972,7 +2072,7 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
 static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     struct vpool *v = o->vp; if (!v) return;
     for (int k = 0; k < v->nrun; k++) be_pool_del(v->base + v->run[k].lo);
-    munmap(v->base, v->len);
+    plat_vm_release(v->base, v->len);
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
     free(v->pt); free(v); o->vp = NULL;
@@ -2006,12 +2106,19 @@ static void vpt_set(struct vpool *v, uint64_t voff, uint64_t size, const uint8_t
     }
 }
 static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp_mu; → 0 on failure
-    uint64_t pg = (uint64_t)getpagesize();
+    uint64_t pg = (uint64_t)plat_page_size();
     if (r->voff < 0 || (uint64_t)r->voff + r->size > v->size) { LOG("[RED] virtual pool %p: request at %#llx+%#llx is beyond the pool's %#llx", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, (unsigned long long)v->size); return 0; }
     if (((uint64_t)r->voff | r->size | (uint64_t)r->poff) & 0xFFF) { LOG("[RED] virtual pool %p: request %#llx+%#llx (physical offset %#llx) is not 4 KB aligned", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, (unsigned long long)r->poff); return 0; }
     const pool_t *ph = (const pool_t *)r->phys;
     if (ph && (!ph->mem || r->poff < 0 || (uint64_t)r->poff + r->size > ph->size)) { LOG("[RED] virtual pool %p: physical pool %p (%#llx bytes, storage %p) cannot supply %#llx+%#llx", (const void *)v->pool, (const void *)ph, (unsigned long long)ph->size, (void *)ph->mem, (unsigned long long)r->poff, (unsigned long long)r->size); return 0; }
     vpt_set(v, (uint64_t)r->voff, r->size, ph ? ph->mem + r->poff : NULL);
+#if !defined(__APPLE__)
+    // Aliasing the physical pages into the pool's range (Mach vm_remap) has no counterpart in the platform layer yet (it comes with the Vulkan backend's host port, AOT design
+    // section 5): every request is kept in the page table only, as an unaligned one is on Apple; textures read it, the GPU cannot address the pool directly
+    (void)pg;
+    APPLE_ONLY_RED("virtual pool %p: physical pages are not aliased into its range on this platform (no vm_remap): mapping requests are kept in the page table only", (const void *)v->pool);
+    return 1;
+#else
     vm_address_t to = (vm_address_t)(v->base + r->voff);
     // Not aliased (see above): only textures read through the page table see it; the GPU cannot address it directly
     if ((uint64_t)r->voff + r->size > v->len || ((uintptr_t)to | r->size | (uint64_t)r->voff) & (pg - 1) || (ph && (((uintptr_t)ph->mem + (uintptr_t)r->poff) & (pg - 1)))) {
@@ -2033,6 +2140,7 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
     if (end >> 27 > v->top >> 27) LOG("[nvn] virtual pool %p: mapped up to %#llx (%d runs)", (const void *)v->pool, (unsigned long long)end, v->nrun);
     if (end > v->top) v->top = end;
     return 1;
+#endif
 }
 NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappingRequest *rq) {
     pool_t *o = (pool_t *)p; const map_req *r = (const map_req *)rq;
@@ -2183,7 +2291,7 @@ NVN(nvnTextureGetDepthStencilMode, NVNtextureDepthStencilMode, const NVNtexture 
 NVN_NOPROTO(nvnQueueBuilderSetQueuePriority, void, NVNqueueBuilder *b, int prio) { (void)b; (void)prio; }
 // The driver's external graphics debugger switch (Nsight / NVN debugger attach): Super Smash Bros. Ultimate fetches it with nvnDeviceGetProcAddress(NULL, …) before creating its device and calls
 // it without a null check (main+0x37fe92c); the host has no debugger to attach
-NVN_NOPROTO(nvnSetExternalDebuggerEnabledNVX, void, NVNboolean enable) { (void)enable; }
+NVN_NOPROTO(nvnSetExternalDebuggerEnabledNVX, void, uint32_t enable) { (void)enable; }
 // Transform feedback (vertex outputs captured into buffers): Pokémon Legends: Z-A skins its characters this way. A vertex-only program writes skinned positions and packed normals / tangents
 // under rasterizer discard, and the character draws read those buffers as vertex streams. Recorded here and run at replay by the shader's main0_tf entry point, a vertex function that stores the
 // captured outputs into the bound buffers (dmsh_build.py vs_tf, the layout from the program's control section; nvn_mtl.m tf_* for the replay)
@@ -2518,8 +2626,8 @@ int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRe
 // The movie decoder's native-texture output (DecoderMode 2, hle_movie.c): a whole frame into level 0 of the client texture, as WriteTexels does; returns the texture format, or −1 when the object is not a texture
 int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, size_t row, int *tw, int *th) {
     const tex_t *t = nvntex;
-    uint32_t mg = 0; vm_size_t got = 0;   // the value the client gives is not necessarily a pointer: test-read first
-    if (!t || (uintptr_t)t & 7 || vm_read_overwrite(mach_task_self(), (vm_address_t)t, 4, (vm_address_t)&mg, &got) != KERN_SUCCESS || got != 4) return -1;
+    uint32_t mg = 0; size_t got = 0;   // the value the client gives is not necessarily a pointer: test-read first (plat_mem_read: vm_read_overwrite on Apple, as before)
+    if (!t || (uintptr_t)t & 7 || plat_mem_read((uint64_t)(uintptr_t)t, &mg, 4, &got) || got != 4) return -1;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) return -1;
     if (tw) *tw = (int)t->d.width;
     if (th) *th = (int)t->d.height;

@@ -1,13 +1,17 @@
 // NVN graphics backend interface: what the NVN frontend (hle_nvn.c) calls in the backend that replays its command records (docs/design/vulkan-backend.md, sections 1.5 and 1.7, step M1).
 // One backend per host binary, chosen at build time. On Apple every be_* below is a static inline one-line forward to the Metal backend's mtl_* function with the same parameters and
-// result (nvn_mtl.m; nvn_obj.h and nvn_mtl.h declare them), so the Metal backend's behaviour is unchanged. Other hosts get the same functions as prototypes, which the Vulkan backend
-// (dm/gfx/hostvk, step M7) is to define. Names are the mtl_* ones with be_ in front, except: mtl_link_* (the display link) are be_vsync_*, mtl_device is be_native_device, and
-// be_pool_add also takes the pool's NVN flags (memory placement for a Vulkan backend; the Metal backend ignores them). Outside the Apple block this header is plain C11.
+// result (nvn_mtl.m; nvn_obj.h and nvn_mtl.h declare them), so the Metal backend's behaviour is unchanged. Other hosts get the same functions as prototypes: the null backend
+// (nvn_null.c, step M6) defines them where there is no Metal, until the Vulkan backend (dm/gfx/hostvk, step M7) does. Names are the mtl_* ones with be_ in front, except: mtl_link_*
+// (the display link) are be_vsync_*, mtl_device is be_native_device, and be_pool_add also takes the pool's NVN flags (memory placement for a Vulkan backend; the Metal backend keeps
+// them in the shared pool table, mtl_pool_add_flags, and does not read them). Outside the Apple block this header is plain C11.
+// The functions the guest Vulkan and GL layers call as well (presentation of their own textures, pacing, the native device) are in nvn_be_ext.h, included here: those layers include
+// that part alone, since nvn_obj.h's type names clash with theirs.
 // The per-operation group at the end (step M3) is declared once for every host: the frontend's decoder (nvn_replay.c) calls it and each backend defines it.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
 #include "nvn_obj.h"
+#include "nvn_be_ext.h"   // be_set_origin_lower_left, be_present_wait, be_fps_target, be_vsync_active, be_vsync_wait, be_native_device, be_ext_tex, be_present_ext
 
 #if defined(__APPLE__)
 #include "nvn_mtl.h"
@@ -35,7 +39,7 @@ void mtl_alloc_stats(uint64_t *waits, uint64_t *grown, int *n);
 static inline void be_init(void) { mtl_init(); }
 
 // memory pools
-static inline void be_pool_add(const void *mem, uint64_t size, uint32_t nvn_flags) { (void)nvn_flags; mtl_pool_add(mem, size); }
+static inline void be_pool_add(const void *mem, uint64_t size, uint32_t nvn_flags) { mtl_pool_add_flags(mem, size, nvn_flags); }
 static inline void be_pool_del(const void *mem) { mtl_pool_del(mem); }
 static inline void be_alias_drop_pool(const void *pool) { mtl_alias_drop_pool(pool); }
 static inline int be_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) { return mtl_addr(addr, len, buf, off); }
@@ -53,7 +57,6 @@ static inline void be_prog_release(prog_t *p) { mtl_prog_release(p); }
 static inline void be_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) { mtl_read_texels(t, level, layer0, r, dst, row, img); }
 static inline void be_xv_window_tex(uint64_t serial) { mtl_xv_window_tex(serial); }
 static inline void be_set_depth_zero(int on) { mtl_set_depth_zero(on); }
-static inline void be_set_origin_lower_left(int on) { mtl_set_origin_lower_left(on); }
 static inline void be_set_queue_origin_lower_left(int on) { mtl_set_queue_origin_lower_left(on); }
 
 // submission and sync (hle_nvn.c, under its submission lock)
@@ -72,13 +75,9 @@ static inline void be_drain(void) { mtl_drain(); }
 
 // presentation and pacing
 static inline uint64_t be_present(const tex_t *t, double period_s, const int crop[4]) { return mtl_present(t, period_s, crop); }
-static inline void be_present_wait(uint64_t ticket) { mtl_present_wait(ticket); }
 static inline void be_present_flush(void) { mtl_present_flush(); }
 static inline int be_has_window(void) { return mtl_has_window(); }
 static inline int be_display_hz(void) { return mtl_display_hz(); }
-static inline int be_fps_target(void) { return mtl_fps_target(); }
-static inline int be_vsync_active(void) { return mtl_link_active(); }
-static inline int be_vsync_wait(int vsyncs, uint64_t timeout_ns) { return mtl_link_wait_tick(vsyncs, timeout_ns); }
 static inline int be_vsync_wait_ticks(int ticks, uint64_t timeout_ns) { return mtl_link_wait_ticks(ticks, timeout_ns); }
 static inline int be_vsync_rate(void) { return mtl_link_rate(); }
 static inline int be_vsync_stalled(void) { return mtl_link_stalled(); }
@@ -87,10 +86,7 @@ static inline double be_presented_time(uint64_t n) { return mtl_presented_time(n
 static inline int be_snap_on(void) { return mtl_snap_on(); }
 static inline uint64_t be_snap_acquire_wait(void) { return mtl_snap_acquire_wait(); }
 
-// external producers (the guest Vulkan and GL layers on the same host; they still call the mtl_* names, see the end of this file)
-static inline void *be_native_device(void) { return mtl_device(); }
-static inline uint64_t be_ext_tex(void *tex) { return mtl_ext_tex(tex); }
-static inline uint64_t be_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]) { return mtl_present_ext(serial, period, ev, ev_val, crop); }
+// external producers (the guest Vulkan and GL layers on the same host): in nvn_be_ext.h
 
 // frames and measurements
 static inline void be_set_frame(uint64_t f) { mtl_set_frame(f); }
@@ -158,7 +154,6 @@ void be_prog_release(prog_t *p);
 void be_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img);
 void be_xv_window_tex(uint64_t serial);
 void be_set_depth_zero(int on);
-void be_set_origin_lower_left(int on);
 void be_set_queue_origin_lower_left(int on);
 
 // submission and sync (hle_nvn.c, under its submission lock)
@@ -177,13 +172,9 @@ void be_drain(void);
 
 // presentation and pacing
 uint64_t be_present(const tex_t *t, double period_s, const int crop[4]);
-void be_present_wait(uint64_t ticket);
 void be_present_flush(void);
 int be_has_window(void);
 int be_display_hz(void);
-int be_fps_target(void);
-int be_vsync_active(void);
-int be_vsync_wait(int vsyncs, uint64_t timeout_ns);
 int be_vsync_wait_ticks(int ticks, uint64_t timeout_ns);
 int be_vsync_rate(void);
 int be_vsync_stalled(void);
@@ -192,10 +183,7 @@ double be_presented_time(uint64_t n);
 int be_snap_on(void);
 uint64_t be_snap_acquire_wait(void);
 
-// external producers
-void *be_native_device(void);
-uint64_t be_ext_tex(void *tex);
-uint64_t be_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]);
+// external producers: in nvn_be_ext.h
 
 // frames and measurements
 void be_set_frame(uint64_t f);
@@ -279,14 +267,17 @@ void be_barrier(const uint8_t *rec, const op_hdr *h, const void *a);         // 
 // Not part of step M1 (docs/design/vulkan-backend.md, section 1.5); none of these is declared yet, except where said:
 // - With the Vulkan backend: const be_caps *be_get_caps(void) (device capabilities); void be_guest_map(void *mem, uint64_t size) and void be_guest_unmap(void *mem, uint64_t size)
 //   (guest memory committed / about to be decommitted, called from hle_svc.c, so the backend can release an import first).
-// - With step M2: be_addr goes; the frontend's pool table answers it (nvn_pool_lookup, nvn_pools.c).
+// - be_addr stays after step M6, for the Vulkan backend's step: the frontend's pool table (nvn_pool_lookup, nvn_pools.c) is read under the backend's lock (g_mu on Metal), and on Metal
+//   mtl_addr also makes the pool it finds resident; hle_nvn.c answering it alone needs that lock decided (docs/design/vulkan-backend.md, step M7).
 // - Step M3 added the per-operation group above, in the raw form (rec, h, a): the typed arguments of the design's sketch (section 1.5) come when the Vulkan backend needs them.
-//   be_exec stays (on Apple mtl_exec, which is now nvn_replay_exec) and be_exec_rest too (the Metal look-ahead's handles still to come in the submission) until step M6, when
-//   hle_nvn.c calls nvn_replay_exec itself.
+//   be_exec stays (on Apple mtl_exec, which is now nvn_replay_exec; the null backend's is nvn_replay_exec too) and be_exec_rest too (the Metal look-ahead's handles still to come in
+//   the submission) until hle_nvn.c calls nvn_replay_exec itself, with the look-ahead cursor (step M7).
 // - void be_report(uint32_t tick, char *out, size_t n): designed, not yet used. The backend is to format its own statistics lines, replacing the 41 calls in hle_nvn.c's log lines and
 //   per-frame rows of these 33 functions: be_mem_stat, be_stats, be_args_stats, be_use_stats, be_vbuf_stats, be_ds_omit, be_drawable_ns_take, be_bw, be_udc_saved_bytes, be_pkg_stats,
 //   be_cpu_tex_count, be_pkg_edge_skips, be_pkg_miss, be_upload_ns_take, be_upload_gpu_ns_take, be_upload_bytes, be_create_stats, be_create_ns, be_hybrid_stats, be_res_stats,
 //   be_barrier_stats, be_present_qos, be_cut_count, be_copy_cut_count, be_blit_splits, be_ubd_stats, be_ubp_stats, be_ubp_why, be_lc_stats, be_sm_stats, be_cshoist_stats,
 //   be_pso_line, be_alloc_stats. Several of them also feed the per-frame TSV rows (DM_NVN_TSV: @upload_ms, @drawable_ms, @ds_omit, ...), which a tick-based be_report does not cover.
-// - The guest Vulkan and GL layers (dm/gfx/vk/hle_vk.m, dm/gfx/gl/hle_gl.m) and the host (dm/host/main.c, hle_sdk16.c, dm/ios/Sources/front_ios.m) still call mtl_* names, some with no
-//   be_* counterpart yet (mtl_device_classic, mtl_link_wait_vsync, mtl_pso_prebuild_tool, mtl_present_count): step M6 (the build split) moves them.
+// - Since step M6 the guest Vulkan and GL layers (dm/gfx/vk/hle_vk.m, dm/gfx/gl/hle_gl.m) call the be_* names of nvn_be_ext.h. Still mtl_*, with no be_* counterpart, because no file
+//   built without Metal needs them: mtl_device_classic (those two layers, Apple only), mtl_pso_prebuild_tool (dm/host/main.c, not built elsewhere), mtl_present_count
+//   (dm/ios/Sources/front_ios.m) and mtl_link_wait_vsync (dm/host/hle_sdk16.c, whose weak definition answers "no display link" in every build without the Metal backend, the
+//   host tests that include hle_sdk16.c too; the Vulkan presenter's vsync source, design section 7.3, is to give it a be_* name).

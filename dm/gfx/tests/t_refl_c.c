@@ -1,7 +1,7 @@
-// The plain C reflection parser (nvn_refl.c, nvn_refl_from_json_text) on every host: the samples and hand-computed expectations of t_refl.m, every failure path with its text, the
-// array<…> forms, the storage buffer write flag, the c1 segment, the limits, every texture type prefix and pixel class. t_refl_cmp.m (Mac) includes this file for its corpus
-// (T_REFL_CMP: the case table and the generated documents, without main) and checks that the Objective-C parser makes the same structs of every document.
-// The real samples of t_refl.m (Super Mario Bros. Wonder's translated shaders in the NSP script's build cache) are read from DM_ROOT (or ~/dm-work) when present, else skipped.
+// The reflection parser (nvn_refl.c, nvn_refl_from_json_text; every backend's since step M6) on every host: the samples and hand-computed expectations of the Objective-C parser's
+// old test (t_refl.m), every failure path with its text, the array<…> forms, the storage buffer write flag, the c1 segment, the limits, every texture type prefix and pixel class,
+// and the text Foundation's parser refused, which this one refuses too. (The Mac's comparison of the two parsers, t_refl_cmp.m, went with the Objective-C parser in step M6.)
+// The real samples (Super Mario Bros. Wonder's translated shaders in the NSP script's build cache) are read from DM_ROOT (or ~/dm-work) when present, else skipped.
 #include "nvn_refl.h"
 #include "nvn_refl_textype.h"
 #include "dmsh_chain.h"
@@ -35,11 +35,11 @@ static void check_binds(const nvn_refl *r, const want_bind *w, int count) {
 
 // ---- the cases: a document, whether it fails, its error text, the checks of its struct ----
 static void v_atomic(const nvn_refl *r) {   // native image atomics (dmsh_atomic.py): one read_write image, marked atomic by the build; an image the shader only stores to is not
-    CK("IMG kind", NVN_RB_IMG, r->b[0].kind); CK("texture type buffer", NVN_MTL_TEX_BUFFER, r->b[0].dtt); CK("unsigned format", U, r->b[0].dpf);
-    CK("written", 1, r->b[0].rw); CK("atomic flag", 1, r->b[0].atom); CK("stored image: 3D texture type", NVN_MTL_TEX_3D, r->b[1].dtt); CK("stored image: no atomic flag", 0, r->b[1].atom);
+    CK("IMG kind", NVN_RB_IMG, r->b[0].kind); CK("texture type buffer", NVN_DTT_BUFFER, r->b[0].dtt); CK("unsigned format", U, r->b[0].dpf);
+    CK("written", 1, r->b[0].rw); CK("atomic flag", 1, r->b[0].atom); CK("stored image: 3D texture type", NVN_DTT_3D, r->b[1].dtt); CK("stored image: no atomic flag", 0, r->b[1].atom);
     CK("stored image: written (access::write)", 1, r->b[1].rw); CK("binding count", 2, r->nb); CK("B flag", 1, r->route_b);
 }
-static void v_handle_array(const nvn_refl *r) {   // Paper Mario: The Thousand-Year Door b352f7af1c86e9fa_b, its last four bindings (t_refl.m)
+static void v_handle_array(const nvn_refl *r) {   // Paper Mario: The Thousand-Year Door b352f7af1c86e9fa_b, its last four bindings (as t_refl.m had them)
     CK("single texture n", 0, r->b[0].n); CK("single texture offset", 16, r->b[0].off); CK("single sampler n", 0, r->b[1].n);
     CK("texture kind", NVN_RB_TEXU, r->b[2].kind); CK("texture n", 32, r->b[2].n); CK("texture dummy type 2D", 2, r->b[2].dtt); CK("texture slot", 11, r->b[2].reg);
     CK("sampler kind", NVN_RB_SAMPU, r->b[3].kind); CK("sampler n", 32, r->b[3].n); CK("bindless", 1, r->bindless); CK("argument index of the sampler array", 48, r->b[3].aid);
@@ -51,16 +51,16 @@ static void v_every_kind(const nvn_refl *r) {
         {8, NVN_RB_SAMPI, 12, 8, X, X, X, X, X}, {9, NVN_RB_SBUFP, 4, 9, 1, X, X, X, X}, {10, NVN_RB_SBUFP, 5, 10, 0, X, X, X, X}, {11, NVN_RB_SBUFP, 6, 11, 0, X, X, X, X},
         {12, NVN_RB_SBUFP, 7, 12, 1, X, X, X, X}, {13, NVN_RB_UBOP, 2, 13, 0, X, X, X, X}, {14, NVN_RB_SBUFU, 0, 14, 1, X, X, X, 56}, {15, NVN_RB_GEOMETRY, 2, 15, X, X, X, X, X},
         {16, NVN_RB_TBUF, 8, 16, 0, 0, U, X, X}, {17, NVN_RB_IMG, 1, 17, 0, 2, F, X, X}, {18, NVN_RB_TEXA, 0, 18, X, 3, F, 4, 128}, {19, NVN_RB_SAMPA, 0, 22, X, 0, X, 4, 128},
-        {20, NVN_RB_SAMPD, 0, 26, X, 0, X, 11, X}, {21, NVN_RB_TEXD, 0, 37, X, 2, F, 11, X}, {22, NVN_RB_TEXD, 0, 48, X, NVN_MTL_TEX_BUFFER, S, 2, X}, {23, NVN_RB_TEXD, 0, 50, X, 2, D, 3, X}};
+        {20, NVN_RB_SAMPD, 0, 26, X, 0, X, 11, X}, {21, NVN_RB_TEXD, 0, 37, X, 2, F, 11, X}, {22, NVN_RB_TEXD, 0, 48, X, NVN_DTT_BUFFER, S, 2, X}, {23, NVN_RB_TEXD, 0, 50, X, 2, D, 3, X}};
     check_binds(r, w, NW(w));
     CK("binding count", 24, r->nb); CK("fetch1d flag of the texture", 1, r->b[7].f1d); CK("dynamic handle arrays", 1, r->dyn); CK("no uniform-buffer handles", 0, r->bindless);
     CK("reads c0 (declared binding)", 1, r->drv_read[0]); CK("reads c2 (declared binding)", 1, r->drv_read[2]); CK("entry after the last binding zero", 0, r->b[24].kind);
 }
 static void v_tex_types(const nvn_refl *r) {   // every prefix rule of dummy_kind and every pixel class
     static const struct { int dtt, dpf; } w[] = {
-        {NVN_MTL_TEX_1D, F}, {NVN_MTL_TEX_1D_ARRAY, F}, {NVN_MTL_TEX_2D, F}, {NVN_MTL_TEX_2D_ARRAY, F}, {NVN_MTL_TEX_CUBE, F}, {NVN_MTL_TEX_CUBE_ARRAY, F}, {NVN_MTL_TEX_3D, F},
-        {NVN_MTL_TEX_BUFFER, F}, {NVN_MTL_TEX_2D, D}, {NVN_MTL_TEX_2D_ARRAY, D}, {NVN_MTL_TEX_CUBE, D}, {NVN_MTL_TEX_CUBE_ARRAY, D}, {NVN_MTL_TEX_2D, F}, {NVN_MTL_TEX_2D, U},
-        {NVN_MTL_TEX_2D_ARRAY, S}, {NVN_MTL_TEX_3D, F}, {NVN_MTL_TEX_2D, F}, {NVN_MTL_TEX_1D_ARRAY, U}};
+        {NVN_DTT_1D, F}, {NVN_DTT_1D_ARRAY, F}, {NVN_DTT_2D, F}, {NVN_DTT_2D_ARRAY, F}, {NVN_DTT_CUBE, F}, {NVN_DTT_CUBE_ARRAY, F}, {NVN_DTT_3D, F},
+        {NVN_DTT_BUFFER, F}, {NVN_DTT_2D, D}, {NVN_DTT_2D_ARRAY, D}, {NVN_DTT_CUBE, D}, {NVN_DTT_CUBE_ARRAY, D}, {NVN_DTT_2D, F}, {NVN_DTT_2D, U},
+        {NVN_DTT_2D_ARRAY, S}, {NVN_DTT_3D, F}, {NVN_DTT_2D, F}, {NVN_DTT_1D_ARRAY, U}};
     for (int i = 0; i < NW(w); i++) { char m[48]; snprintf(m, sizeof m, "binding[%d] dummy texture type", i); CK(m, w[i].dtt, r->b[i].dtt);
         snprintf(m, sizeof m, "binding[%d] pixel class", i); CK(m, w[i].dpf, r->b[i].dpf); }
     CK("binding count", 18, r->nb); CK("image written (access::write)", 1, r->b[17].rw);
@@ -69,7 +69,7 @@ static void v_arrays(const nvn_refl *r) {
     static const want_bind w[] = {
         {0, NVN_RB_TEXU, 1, 0, X, 2, F, 0, 8}, {1, NVN_RB_TEXU, 1, 1, X, 3, U, 8, 0}, {2, NVN_RB_SAMPU, 1, 9, X, X, X, 32, 4}, {3, NVN_RB_TEXU, 1, 41, X, 2, F, 0, X},
         {4, NVN_RB_TEXU, 2, 42, X, 5, S, 1, X}, {5, NVN_RB_TEXU, 2, 43, X, X, X, 255, X}, {6, NVN_RB_SAMPU, 2, 44, X, X, X, 0, X}, {7, NVN_RB_TEXU, 2, 45, X, 2, F, 0, X}};
-    check_binds(r, w, NW(w));   // [3] "array<…,32>" has no ", ": not an array; [5] a negative count passes the n > 32 test (as nvn_refl.m: n = (uint8_t)-1); [7] no closing ">" last
+    check_binds(r, w, NW(w));   // [3] "array<…,32>" has no ", ": not an array; [5] a negative count passes the n > 32 test (as the Objective-C parser did: n = (uint8_t)-1); [7] no closing ">" last
 }
 static void v_rw(const nvn_refl *r) {
     static const int w[] = {1, 0, 0, 1, 1, 0, 1, 0, 0, 1};
@@ -85,7 +85,7 @@ static void v_c1_odd_digits(const nvn_refl *r) {   // strtoul of each two-charac
     for (int i = 0; r->c1 && i < NW(w); i++) { char m[24]; snprintf(m, sizeof m, "c1[%d]", i); CK(m, w[i], r->c1[i]); }
 }
 static void v_no_c1(const nvn_refl *r) { CK("no c1", 0, r->has_c1); CK("c1 length 0", 0, r->c1_len); CK("c1 NULL", 1, r->c1 == NULL); }
-static void v_defaults(const nvn_refl *r) {   // a document with nothing but its bindings: every default nvn_refl.m sets
+static void v_defaults(const nvn_refl *r) {   // a document with nothing but its bindings: every default the parser sets (the Objective-C parser's)
     CK("B flag", 1, r->route_b); CK("argument buffer slot", 0, r->abi); CK("no bindings", 0, r->nb); CK("no inputs", 0, r->nv); CK("no c1", 1, r->c1 == NULL && !r->has_c1);
     CK("pos_attr unknown", -1, r->pos_attr); CK("may discard", 1, r->may_discard); CK("may write sample_mask", 1, r->writes_smask); CK("colors unknown", 0, r->color_known);
     CK("color mask", 0, r->color_mask); CK("pos_w1", 0, r->pos_w1); CK("uv_attr[0]", -1, r->uv_attr[0]); CK("uv_attr[31]", -1, r->uv_attr[31]); CK("uv_aff_attr[17]", -1, r->uv_aff_attr[17]);
@@ -145,7 +145,7 @@ static void v_aid_limit(const nvn_refl *r) {   // the parser keeps arg_id as is;
 
 typedef struct { const char *name, *json; int fails; const char *err; void (*expect)(const nvn_refl *); } refl_case;
 static const refl_case CASES[] = {
-    // t_refl.m's synthetic samples
+    // the synthetic samples of the Objective-C parser's test (t_refl.m, gone with it in step M6)
     {"atomic image", J({"route": "B", "bindings": [
         {"kind": "img", "reg": 2, "arg_id": 0, "msl_name": "cp_i_cb2_4C_r32ui", "msl_type": "texture_buffer<uint, access::read_write>", "atomic": true},
         {"kind": "img", "reg": 3, "arg_id": 1, "msl_name": "cp_i_cb2_4E_r32ui", "msl_type": "texture3d<uint, access::write>"}]}), 0, NULL, v_atomic},
@@ -305,10 +305,19 @@ static const refl_case CASES[] = {
     {"no unfillable driver locations", J({"route": "B", "bindings": [], "drv_unfillable": []}), 0, NULL, NULL},
     // the text itself
     {"white space around the document", " \n\t{\"route\": \"B\", \"bindings\": []}\r\n ", 0, NULL, v_ws},
+    // what the refusal of leading zeros, control characters and NULs (strict_text) must let through: zeros that are not leading, exponent digits, escapes inside strings
+    {"numbers with zeros that are not leading", J({"route": "B", "bindings": [], "n": [0, -0, 0.5, -0.25, 10, 100, 1e05, 1E+07, 2e-08, -0e0, 0E00]}), 0, NULL, NULL},
+    {"an escaped backslash before u0000 is no NUL", "{\"route\": \"B\", \"bindings\": [], \"x\": \"\\\\u0000\"}", 0, NULL, NULL},
+    {"an escaped quote keeps the string open", "{\"route\": \"B\", \"bindings\": [], \"x\": \"a\\\"012\\\" 012\"}", 0, NULL, NULL},
+    {"a non-NUL escape and DEL inside a string", "{\"route\": \"B\", \"bindings\": [], \"x\": \"\\u0001\\u00e9\x7f\"}", 0, NULL, NULL},
 };
 #define NCASES (int)(sizeof CASES / sizeof *CASES)
-// Text that is not one json value: the C parser's own failure (NSJSONSerialization returns nil for it; t_refl_cmp.m expects both to fail)
-static const char *const BAD_TEXT[] = { "{", "", "{\"route\": \"B\", \"bindings\": []} x", "{\"route\": \"B\", \"bindings\": [}", "nul" };
+// Text that is not one json value, and text NSJSONSerialization refused that cJSON would take (t_refl_cmp's probes on the Mac, macOS CI on 093317b: a leading zero, a control
+// character inside a string; and a NUL inside a string, which Foundation kept and cJSON cuts short): the parser's own failure, "reflection json does not parse"
+static const char *const BAD_TEXT[] = { "{", "", "{\"route\": \"B\", \"bindings\": []} x", "{\"route\": \"B\", \"bindings\": [}", "nul",
+    "{\"route\": \"B\", \"bindings\": [{\"kind\": \"cbuf\", \"reg\": 012, \"arg_id\": 0}]}", "{\"route\": \"B\", \"bindings\": [{\"kind\": \"cbuf\", \"reg\": -01, \"arg_id\": 0}]}",
+    "{\"route\": \"B\", \"bindings\": [{\"kind\": \"cbuf\", \"reg\": 1, \"arg_id\": 0, \"msl_name\": \"a\tb\"}]}", "{\"route\": \"B\", \"bindings\": [], \"x\": \"line\nbreak\"}",
+    "{\"route\": \"B\\u0000\", \"bindings\": []}", "{\"route\": \"B\", \"bindings\": [], \"x\": \"\\u0000\"}" };
 #define NBAD (int)(sizeof BAD_TEXT / sizeof *BAD_TEXT)
 
 // ---- generated documents: the limits ----
@@ -347,7 +356,6 @@ static char *limit_doc(int i) {   // malloc'd
     return b.s;
 }
 
-#ifndef T_REFL_CMP
 static void check_str(const char *what, const char *want, const char *got) {
     n_checks++;
     if (strcmp(want, got)) { n_failed++; printf("  %s: %s\n    expected \"%s\"\n    got      \"%s\" FAILED\n", cur, what, want, got); }
@@ -381,7 +389,7 @@ static void run_limit(int i) {
     printf("%-64s %s\n", LIM_NAME[i], n_failed == f0 ? "ok" : "FAILED");
 }
 
-// t_refl.m's real samples: B reflection ps_models_p#0 / vs_models_v#0 of the current chain version, expectations hand-copied from the json text
+// The real samples of the Objective-C parser's test: B reflection ps_models_p#0 / vs_models_v#0 of the current chain version, expectations hand-copied from the json text
 static int skipped;
 static char *load(const char *key, size_t *len) {
     const char *root = getenv("DM_ROOT"); char p[1024];
@@ -432,4 +440,3 @@ int main(void) {
     printf("== t_refl_c: %d checks, %d failed ==\n", n_checks, n_failed);
     return n_failed != 0;
 }
-#endif

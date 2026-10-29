@@ -5,19 +5,22 @@ Recompiled guest code (docs/design/aot-recompiler.md, section 2.4) calls a host 
 the dispatcher maps the slot to a thunk, which reads the arguments from the guest state block (dm_guest_state, dm/tools/aot/include/nxaot/guest_state.h) as
 AAPCS64 passes them, calls the C function on the host thread's own stack and writes its result back to the block. This script reads the host sources given on
 its command line, finds every HLE(, HLE_FORCE( and HLE_FORCE_BIG( entry (hle.h), also through a file's own wrapper macros (hle_net.c's SKF) and aliases
-(hle_fs.c's #define HLE_FORCE HLE_FORCE_BIG), and writes one thunk per entry, the table hle_thunks[] sorted by mangled name, and an extern declaration of each
-entry's C function (external on non-native builds: HLE_LINKAGE in hle.h).
+(hle_fs.c's #define HLE_FORCE HLE_FORCE_BIG), and the NVN interface layer's NVN( and NVN_NOPROTO( entries (dm/gfx/nvn/hle_nvn.c: NVN(name, ret, params...), the
+entry named by the NVN function's name, its C function h_<name>), and writes one thunk per entry, the table hle_thunks[] sorted by mangled name (an NVN entry's
+name stands for it), and an extern declaration of each entry's C function (external on non-native builds: HLE_LINKAGE in hle.h).
 
 Argument rules (AAPCS64): integer and pointer parameters take the next x register (x0..x7), float and double the next v register (v0..v7, its low 32 or 64
 bits); a 32-bit parameter is the low half of its register, as a w register reads it. A parameter past the eighth of its class is read from the guest stack
 (the 8-byte slot at st->sp + 8 * n, in parameter order): the thunk reads guest memory there, it never runs on the guest stack.
 Returns: integers and pointers in x0, a 32-bit or smaller value zero-extended (AAPCS64 leaves the upper bits unspecified, so guest code cannot depend on them;
 zero is the deterministic choice), long as its value (sign-extended), float and double in v0 with the rest of q0 cleared, void nothing.
-Parameter types come from the C spelling, the pointers, and the typedefs of the source and of the headers it includes with quotes. A type the script does not
-know (a struct or union by value, a sub-32-bit parameter, ..., an unknown typedef), an entry inside a preprocessor conditional other than #if 0 / #if 1, or
-a C name used by two entries stops the run with file:line.
+Parameter types come from the C spelling, the pointers, and the typedefs of the source and of the headers it includes with quotes (found beside the including
+file, then in the -I directories, as the compiler finds them). A struct whose one member is a 64-bit integer (NVN's separate texture and sampler handles) is
+passed as that integer: AAPCS64 gives an 8-byte composite one x register, and the host ABIs (System V, Windows x64) one integer register. A type the script
+does not know (any other struct or union by value, a sub-32-bit parameter, ..., an unknown typedef), an entry inside a preprocessor conditional other than
+#if 0 / #if 1 (and #ifdef / #ifndef __cplusplus, which is never defined in these C sources), or a C name used by two entries stops the run with file:line.
 
-  gen_hle_thunks.py -o <out.c> <source.c>...
+  gen_hle_thunks.py -o <out.c> [-I <dir>]... <source.c>...
 Prints a summary (entries, parameter and return kinds); exit status 1 on any error, and nothing is written then.
 """
 import argparse
@@ -25,7 +28,9 @@ import os
 import re
 import sys
 
-MACROS = {"HLE": 3, "HLE_FORCE": 4, "HLE_FORCE_BIG": 4}   # macro -> index of the first parameter argument (mangled, [why,] ret, cname, params...)
+MACROS = {"HLE": 3, "HLE_FORCE": 4, "HLE_FORCE_BIG": 4, "NVN": 2, "NVN_NOPROTO": 2}   # macro -> index of the first parameter argument (mangled, [why,] ret, cname, params...; name, ret, params...)
+NAMED = {"NVN", "NVN_NOPROTO"}   # entries named by an identifier, the NVN function's name, whose C function is h_<name> (dm/gfx/nvn/hle_nvn.c)
+TABLES = {"HLE": "hle", "HLE_FORCE": "force", "HLE_FORCE_BIG": "force", "NVN": "nvn", "NVN_NOPROTO": "nvn"}   # the host table each entry registers in (a name is unique within one)
 
 # Scalar types by C spelling (qualifiers removed, words joined by one space): (class, canonical C type).
 # Classes: x32 / x64 integer in an x register; f32 / f64 in a v register; small: a sub-32-bit integer (accepted as a return only)
@@ -264,6 +269,7 @@ def learn_typedef(scope, decl):
         base = base[:-1]
     bwords = [v for _, v, _ in base if v not in QUALIFIERS]
     aggregate = bool(bwords) and bwords[0] in ("struct", "union")
+    single = one_member_x64(base, scope.typedefs) if aggregate and bwords[0] == "struct" else None
     for idx, p in enumerate(parts):
         n = name_at(p)
         if n is None:
@@ -272,6 +278,8 @@ def learn_typedef(scope, decl):
         head = p[len(base):n] if idx == 0 else p[:n]
         if any(v == "*" for _, v, _ in head) or any(v == "[" for _, v, _ in p[n + 1:]):
             scope.typedefs[name] = ("ptr", "void *")
+        elif single:
+            scope.typedefs[name] = single
         elif aggregate:
             scope.typedefs[name] = ("struct", " ".join(bwords[:2]))
         elif bwords and bwords[0] == "enum":
@@ -280,7 +288,23 @@ def learn_typedef(scope, decl):
             scope.typedefs[name] = resolve_words(bwords, scope.typedefs) or ("unknown", " ".join(bwords))
 
 
-def parse_file(path, scope=None, entries=None, seen=None):
+def one_member_x64(base, typedefs):
+    """("x64", canonical type) for a struct whose body is one member of a 64-bit integer type (struct { uint64_t value; }), else None"""
+    vals = [v for _, v, _ in base]
+    if "{" not in vals or vals.count("{") != 1 or "}" not in vals:
+        return None
+    body = base[vals.index("{") + 1:vals.index("}")]
+    decls = [d for d in " ".join(v for _, v, _ in body).split(";") if d.strip()]
+    if len(decls) != 1 or any(c in decls[0] for c in "*[],:(") or [v for _, v, _ in body][-1:] != [";"]:
+        return None
+    words = [w for w in decls[0].split() if w not in QUALIFIERS]
+    if len(words) < 2:
+        return None
+    r = resolve_words(words[:-1], typedefs)   # the member's type, without its name
+    return r if r and r[0] == "x64" else None
+
+
+def parse_file(path, scope=None, entries=None, seen=None, incs=()):
     """The entries of a source file. The typedefs and macros of headers it includes with quotes (beside it) are learned; headers hold no entries"""
     scope = scope or Scope()
     entries = [] if entries is None else entries
@@ -296,6 +320,13 @@ def parse_file(path, scope=None, entries=None, seen=None):
     def active():
         return all(c[2] for c in conds)
 
+    def state(dname, arg):   # what the generator knows of a condition: #if 0 / #if 1, and __cplusplus, which a C source never has
+        if dname == "if" and arg in ("0", "1"):
+            return int(arg)
+        if dname in ("ifdef", "ifndef") and arg == "__cplusplus":
+            return 0 if dname == "ifdef" else 1
+        return None
+
     i, brace = 0, 0
     while i < len(toks):
         kind, val, line = toks[i]
@@ -303,7 +334,7 @@ def parse_file(path, scope=None, entries=None, seen=None):
             d = re.match(r"#\s*(\w+)\s*(.*)", val, re.S)
             dname, arg = (d.group(1), d.group(2).strip()) if d else ("", "")
             if dname in ("if", "ifdef", "ifndef"):
-                conds.append([val, line, int(arg) if dname == "if" and arg in ("0", "1") else None])
+                conds.append([val, line, state(dname, arg)])
             elif dname in ("elif", "elifdef", "elifndef", "else"):
                 if not conds:
                     raise GenError(f"{path}:{line}: #{dname} without #if")
@@ -327,9 +358,15 @@ def parse_file(path, scope=None, entries=None, seen=None):
             elif dname == "include" and active():
                 m = re.match(r'"([^"]+)"', arg)
                 if m:
-                    inc = os.path.join(os.path.dirname(path), m.group(1))
-                    if os.path.isfile(inc) and not inc.endswith(".c"):
-                        parse_file(inc, scope, [], seen)
+                    for d in (os.path.dirname(path),) + tuple(incs):   # beside the file, then the -I directories
+                        inc = os.path.join(d, m.group(1))
+                        if os.path.isfile(inc):
+                            if not inc.endswith(".c"):
+                                parse_file(inc, scope, [], seen, incs)
+                            break
+            i += 1
+            continue
+        if any(c[2] == 0 for c in conds):   # not compiled: its braces do not count (an extern "C" { of a __cplusplus block)
             i += 1
             continue
         if kind == "p" and val == "{":
@@ -376,6 +413,15 @@ def take_entry(scope, base, name, args, path, line, entries):
     first = MACROS[base]
     if len(args) < first + 1 or not args[first - 1]:
         raise GenError(f"{path}:{line}: {name}( with {len(args)} arguments")
+    if base in NAMED:   # NVN(name, ret, params...): the entry is the NVN function, its C function h_<name>
+        nm = args[0]
+        if len(nm) != 1 or nm[0][0] != "id":
+            raise GenError(f"{path}:{line}: {name}: the NVN function's name is not one identifier")
+        entries.append({
+            "macro": base, "path": path, "line": line, "mangled_lit": f'"{nm[0][1]}"', "mangled": nm[0][1], "cname": "h_" + nm[0][1],
+            "typedefs": dict(scope.typedefs), "ret": [(k, v) for k, v, _ in args[1]], "params": [[(k, v) for k, v, _ in p] for p in args[first:]],
+        })
+        return
     mangled = args[0]
     if not mangled or any(k != "str" for k, _, _ in mangled):
         raise GenError(f"{path}:{line}: {name}: the mangled name is not a string literal")
@@ -523,12 +569,13 @@ def tally(items):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Generate the AOT host-call thunks from the HLE entries of the host sources")
     ap.add_argument("-o", "--out", required=True, help="the C file to write")
+    ap.add_argument("-I", dest="incs", action="append", default=[], help="a directory to find quoted headers in after the including file's own (as the compiler's -I)")
     ap.add_argument("sources", nargs="+", help="host sources: exactly the ones compiled into the host")
     a = ap.parse_args(argv)
     errors, entries = [], []
     for src in a.sources:
         try:
-            for e in parse_file(src):
+            for e in parse_file(src, incs=tuple(a.incs)):
                 try:
                     analyse(e)
                     entries.append(e)
@@ -543,7 +590,7 @@ def main(argv=None):
         o = by_cname.setdefault(e["cname"], e)
         if o is not e:
             errors.append(f"{e['path']}:{e['line']}: duplicate C name {e['cname']}: also the entry at {o['path']}:{o['line']} (entries are external outside native builds)")
-        o = by_mangled.setdefault((e["macro"] == "HLE", e["mangled"]), e)
+        o = by_mangled.setdefault((TABLES[e["macro"]], e["mangled"]), e)
         if o is not e:
             errors.append(f"{e['path']}:{e['line']}: duplicate entry {e['mangled']}: also at {o['path']}:{o['line']}")
     if errors:

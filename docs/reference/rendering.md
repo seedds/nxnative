@@ -384,7 +384,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Symptom:** undefined values blended into attachments the fragment shader leaves alone.
 - **Cause:** Maxwell leaves targets outside the shader's output map untouched; on Metal such an attachment gets undefined values blended in.
-- **Fix:** pipelines get a zero write mask and no blending for colour outputs the shader does not write (reflection `colors`, `color_known` in `nvn_refl.m`).
+- **Fix:** pipelines get a zero write mask and no blending for colour outputs the shader does not write (reflection `colors`, `color_known` in `nvn_refl.c`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md): volume draws after the G-buffer (`50d813761ca3f1f9` and others) write only outputs 0 and 2, with blending and all channels enabled on targets 1 and 3.
 - **Check:** all five games' regressions were unchanged by it.
 
@@ -662,7 +662,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Symptom:** dialog boxes with holes the size of their text, and white specks where text faded.
 - **Cause:** each UI element is drawn into its own layers and then composited into the window image by one draw per layer, all in one attachment-less pass, each a read-modify-write of the image, with `nvnCommandBufferBarrier(ORDER_FRAGMENTS | INVALIDATE_TEXTURE)` (bits 0x12) between them. The host took a barrier only as an order for the next pass, and Metal orders nothing between draws of one render pass for shader writes: the text element's composite read the window before the parchment had landed and wrote the old pixels back.
-- **Fix:** a barrier with `ORDER_FRAGMENTS` or `ORDER_FRAGMENTS_TILED` now ends the open pass when a draw in it wrote an image or a storage buffer (`swrite_note` in `nvn_mtl.m`), so the next draw opens a pass behind the full consumer barrier; reflection marks an image binding written when its type has write access (`nvn_refl.m`, which left `rw` unset for images).
+- **Fix:** a barrier with `ORDER_FRAGMENTS` or `ORDER_FRAGMENTS_TILED` now ends the open pass when a draw in it wrote an image or a storage buffer (`swrite_note` in `nvn_mtl.m`), so the next draw opens a pass behind the full consumer barrier; reflection marks an image binding written when its type has write access (`nvn_refl.c`, which left `rw` unset for images).
 - **Found on:** [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md).
 
 ### A segment committed after a buffer → texture copy

@@ -1,11 +1,12 @@
 // Shader reflection json → fixed-length C arrays (A: PC chain reflection; B: reflection produced by translating the original Switch shaders, route = "B", output of tools/dmsh_build.py).
 // Kinds added by B: SBUFP = storage buffer device pointer (NVN storage buffer slot); SUPPORT = Ryujinx auxiliary constants; C1 = the shader's own constant segment (c[1]);
 //            DRV0 / DRV2 = NVN driver constant segments c[0] (storage buffer address table) / c[2] (texture and sampler handle table)
-// PC shader reflection json → fixed-length C arrays (converted once when the shader is fetched; each draw only walks the arrays and does not touch NSDictionary / NSString).
-// Unit test tests/t_refl.m computes the expectations by hand from real reflection.
+// Converted once when the shader is fetched; each draw only walks the arrays. The parser is plain C on every host (nvn_refl.c over cJSON; the Metal backend's too since step M6).
+// Unit test tests/t_refl_c.c computes the expectations by hand from real reflection.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include "nvn_refl_textype.h"   // enum nvn_dtt: the dummy texture's type in nvn_rbind.dtt
 
 enum { NVN_RB_CBUF = 1, NVN_RB_SAMP, NVN_RB_TEX, NVN_RB_IMG, NVN_RB_TBUF,
        NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU, NVN_RB_SAMPI, NVN_RB_SBUFU, NVN_RB_TEXD, NVN_RB_SAMPD, NVN_RB_TEXA, NVN_RB_SAMPA, NVN_RB_GEOMETRY };
@@ -26,7 +27,7 @@ enum { NVN_CT_FLOAT = 0, NVN_CT_UINT, NVN_CT_INT };                             
 
 typedef struct {
     uint8_t kind, rw;        // rw: storage buffer access is read_write / write / device
-    uint8_t dtt, dpf;        // Dummy texture when the texture slot is unbound: MTLTextureType value, pixel class
+    uint8_t dtt, dpf;        // Dummy texture when the texture slot is unbound: its type (enum nvn_dtt, nvn_refl_textype.h) and pixel class (NVN_DPF_*)
     uint16_t reg, aid;       // D3D register number, index within the argument buffer
     uint16_t off;            // TEXU / SAMPU: byte offset of the handle within the uniform buffer; SBUFU: of the 64-bit storage buffer address
     uint8_t n;               // TEXD / SAMPD, and TEXU / SAMPU arrays (element k = the handle at byte 8k of the uniform buffer): array length (argument buffer entries aid .. aid + n - 1)
@@ -53,16 +54,11 @@ typedef struct {
     uint8_t nfc, fc_reg[32], fc_locn[32], nfo, fo_color[4]; uint64_t fc_mixed[4]; int8_t uv_attr[32];   // fc_mixed: a bit per texture slot 0-255 (slots 128+ are separate texture binds, NVN_SEPTEX_SLOT0)
     // Vertex - .x / .y of interpolated output locn = fma(.x / .y of attribute uv_aff_attr[locn], scale, offset), where scale / offset reference a uniform: (slot << 8) | (vector << 2) | component
     int8_t uv_aff_attr[32]; uint16_t uv_aff[32][4];   // [sx, ox, sy, oy]
-    uint8_t *c1;             // c1 constant segment as-is (B): c1_len bytes, malloc'd by nvn_refl_from_json (NULL without one). It was a 4 KB array; Hyrule Warriors: Age of Calamity has 6 KB segments (its soldiers' vertex shaders)
+    uint8_t *c1;             // c1 constant segment as-is (B): c1_len bytes, malloc'd by nvn_refl_from_json_text (NULL without one). It was a 4 KB array; Hyrule Warriors: Age of Calamity has 6 KB segments (its soldiers' vertex shaders)
 } nvn_refl;
 
-// Plain C, every host (nvn_refl.c, cJSON): the same conversion from the json's text (len bytes of UTF-8, no NUL needed), byte for byte the nvn_refl that nvn_refl_from_json makes of the
-// same document, with the same failure texts (tests/t_refl_cmp.m checks both on the Mac); text that is not one json value fails ("reflection json does not parse"). dtt holds the
-// MTLTextureType values (nvn_refl_textype.h). 0 on success, as below
+// Plain C, every host (nvn_refl.c, cJSON): the conversion of the json's text (len bytes of UTF-8, no NUL needed). It makes the nvn_refl the Objective-C parser it replaced in step M6
+// made of the same document, with the same failure texts (the Mac compared the two over 37,694 documents before the switch: no difference); text that is not one json value, or
+// that Foundation's parser refused, fails ("reflection json does not parse"). Safe to call from several threads at once. 0 on success; on failure non-0, with the reason in err
+// (unknown binding type, fixed-length limit exceeded, missing field)
 int nvn_refl_from_json_text(const char *json, size_t len, nvn_refl *out, char *err, int errlen);
-
-#ifdef __OBJC__
-#import <Foundation/Foundation.h>
-// 0 on success; on failure returns non-0 and writes the reason into err (unknown binding type, fixed-length limit exceeded, missing field)
-int nvn_refl_from_json(NSDictionary *j, nvn_refl *out, char *err, int errlen);
-#endif

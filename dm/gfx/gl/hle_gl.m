@@ -8,8 +8,8 @@
 //   · one context, used from the thread that made it current; GL calls are encoded into Metal as they come: one MTLCommandBuffer per frame on this layer's own queue,
 //     committed at eglSwapBuffers (signalling g_ev with its serial for the present path), a render encoder per stretch of draws into one framebuffer;
 //   · rendering keeps GL's orientation: images are stored bottom row first, viewports are flipped (negative height), the winding is reversed, and the present flips the
-//     window image (the NVN layer's lower-left origin, mtl_set_origin_lower_left); scissor rectangles and gl_FragCoord then need no change;
-//   · the window surface is three textures registered with the NVN layer's present path (mtl_ext_tex), as the Vulkan layer's swapchain, plus a depth / stencil texture;
+//     window image (the NVN layer's lower-left origin, be_set_origin_lower_left); scissor rectangles and gl_FragCoord then need no change;
+//   · the window surface is three textures registered with the NVN layer's present path (be_ext_tex, nvn_be_ext.h), as the Vulkan layer's swapchain, plus a depth / stencil texture;
 //   · buffers are shared MTLBuffers; glBufferData on a buffer the GPU may still read gets a new one (orphaning, as GL drivers do);
 //   · textures are created on first use from the levels given so far (the game defines a texture level by level, and Metal needs the level count up front); an upload into a
 //     texture the GPU may still read goes through a blit in command order, any other is a CPU write;
@@ -18,7 +18,8 @@
 //     glGetAttribLocation returns the Metal attribute index of the input, so the game's attribute index is the Metal one; vertex buffers are at slot 30 − index.
 // Environment: DM_GL_LOG=1 logs object creation; DM_GL_CAPTURE=<dir> writes every shader source the game compiles (<key>.vert / <key>.frag, read by gl_shaders.py).
 #include "../../host/hle.h"
-#include "../nvn/nvn_mtl.h"
+#include "../nvn/nvn_mtl.h"      // mtl_device_classic
+#include "../nvn/nvn_be_ext.h"   // the backend's present path and its pacing: be_ext_tex, be_present_ext, be_present_wait, be_fps_target, be_vsync_active, be_vsync_wait, be_set_origin_lower_left
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <mach/mach.h>
@@ -28,8 +29,6 @@
 #include <stdatomic.h>
 #include <time.h>
 
-int mtl_fps_target(void);
-int mtl_link_active(void); int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns);   // nvn_mtl.m
 void dm_vi_layer_size(int *w, int *h);   // hle_vi.c: the size of the last sized vi::CreateLayer
 
 #define GLOG(...) LOG("[gl] " __VA_ARGS__)
@@ -223,7 +222,7 @@ static void dev_init_once(void) {
         g_util = [g_dev newLibraryWithSource:@(g_util_src) options:nil error:&err];
         if (!g_util) GLOG("[RED] the layer's own shaders do not compile: %s", err.localizedDescription.UTF8String);
         sh_load();
-        mtl_set_origin_lower_left(1);   // the window image is stored bottom row first; the present flips it
+        be_set_origin_lower_left(1);   // the window image is stored bottom row first; the present flips it
         GLOG("Metal device %s; %d shader table entries", g_dev.name.UTF8String, g_nsh);
     }
 }
@@ -380,10 +379,10 @@ static tex_t *bound_tex(GLenum target) { GLuint *s = unit_slot(S.unit, target); 
 static struct { int made; uint32_t w, h; __strong id<MTLTexture> col[NWIN], ds; uint64_t serial[NWIN], ticket[NWIN]; int cur; } g_win;
 static void win_make(uint32_t w, uint32_t h) {
     @autoreleasepool {
-        for (int i = 0; i < NWIN; i++) if (g_win.ticket[i]) mtl_present_wait(g_win.ticket[i]);
+        for (int i = 0; i < NWIN; i++) if (g_win.ticket[i]) be_present_wait(g_win.ticket[i]);
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
-        for (int i = 0; i < NWIN; i++) { g_win.col[i] = [g_dev newTextureWithDescriptor:td]; g_win.serial[i] = mtl_ext_tex((__bridge void *)g_win.col[i]); g_win.ticket[i] = 0; }
+        for (int i = 0; i < NWIN; i++) { g_win.col[i] = [g_dev newTextureWithDescriptor:td]; g_win.serial[i] = be_ext_tex((__bridge void *)g_win.col[i]); g_win.ticket[i] = 0; }
         td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:w height:h mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
         g_win.ds = [g_dev newTextureWithDescriptor:td];
@@ -1925,12 +1924,12 @@ EGL(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface s) {
         uint64_t v = cb_commit();
         int vs = S.swap_interval < 1 ? 1 : S.swap_interval > 4 ? 4 : S.swap_interval;
         int k = g_win.cur;
-        g_win.ticket[k] = mtl_present_ext(g_win.serial[k], vs / 60.0, (__bridge void *)g_ev, v, NULL);
+        g_win.ticket[k] = be_present_ext(g_win.serial[k], vs / 60.0, (__bridge void *)g_ev, v, NULL);
         g_win.cur = (k + 1) % NWIN;
-        if (g_win.ticket[g_win.cur]) mtl_present_wait(g_win.ticket[g_win.cur]);   // its previous present has been shown, so drawing into it again is safe
+        if (g_win.ticket[g_win.cur]) be_present_wait(g_win.ticket[g_win.cur]);   // its previous present has been shown, so drawing into it again is safe
         // Paced by the display link when it runs, as the Vulkan layer's acquire: the swap interval in vsyncs
         uint64_t period = 1000000000ull * vs / 60, now = now_ns();
-        if (S.swap_interval > 0 && mtl_link_active() && mtl_link_wait_tick(vs, 2 * period)) g_next_swap = now_ns() + period;
+        if (S.swap_interval > 0 && be_vsync_active() && be_vsync_wait(vs, 2 * period)) g_next_swap = now_ns() + period;
         else if (S.swap_interval > 0) {
             if (g_next_swap > now) { uint64_t w = g_next_swap - now; struct timespec ts = {(time_t)(w / 1000000000ull), (long)(w % 1000000000ull)}; nanosleep(&ts, NULL); }
             now = now_ns(); g_next_swap = g_next_swap && now < g_next_swap + period ? g_next_swap + period : now + period;

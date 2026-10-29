@@ -10,7 +10,7 @@ GAME_DIR = ../../games/$(GAME)
 GAME_H = ../../host/gen/$(GAME)/game_profile.h
 
 CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H))
-GFX=$(filter-out ../nvn/hle_nvn.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m))) ../../third_party/cjson/cJSON.c   # cJSON: the JSON reader of nvn_refl.c, as in the host Makefile
+GFX=$(filter-out ../nvn/hle_nvn.c ../nvn/nvn_null.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m))) ../../third_party/cjson/cJSON.c ../../host/plat/plat_apple.c   # cJSON: the JSON reader of nvn_refl.c, as in the host Makefile; plat_apple.c: the platform layer (plat.h) hle_nvn.c and nvn_dirty.c call since step M6; nvn_null.c: the null backend of the hosts without Metal
 GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H)
 .DEFAULT_GOAL := t_nvn   # the profile header rule comes first, so keep the default goal as before
 $(GAME_H):
@@ -28,10 +28,10 @@ check_t_transform_feedback: t_transform_feedback
 run: check_t_transform_feedback
 t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c $(GFX) $(FW)
-t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h
-	clang $(CFLAGS) -o $@ t_dirty_slots.c ../../host/crash.c ../nvn/nvn_dirty.c
-t_dirty_race: t_dirty_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h
-	clang $(CFLAGS) -o $@ t_dirty_race.c ../../host/crash.c
+t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h ../../host/plat/plat_apple.c
+	clang $(CFLAGS) -o $@ t_dirty_slots.c ../../host/crash.c ../nvn/nvn_dirty.c ../../host/plat/plat_apple.c
+t_dirty_race: t_dirty_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h ../../host/plat/plat_apple.c
+	clang $(CFLAGS) -o $@ t_dirty_race.c ../../host/crash.c ../../host/plat/plat_apple.c
 t_builtin: t_builtin.m ../nvn/nvn_builtin.h
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_builtin.m -framework Metal -framework Foundation
 t_vin: t_vin.m
@@ -46,14 +46,10 @@ t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../
 	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
 t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -Wall -o $@ t_tex_layout.c ../nvn/nvn_tex.c
-t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h
-	clang -O1 -g -Wall -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
-# The reflection parser in plain C (every host; dm/host/CMakeLists.txt builds the same test for Linux and Windows), and checked against the Objective-C one (Mac)
+# The reflection parser in plain C, the only one since step M6 (every host; dm/host/CMakeLists.txt builds the same test for Linux and Windows)
 REFL_C_DEP=../nvn/nvn_refl.c ../nvn/nvn_refl.h ../nvn/nvn_refl_textype.h ../nvn/dmsh_chain.h ../../third_party/cjson/cJSON.c ../../third_party/cjson/cJSON.h
 t_refl_c: t_refl_c.c $(REFL_C_DEP)
 	clang -std=c11 -O1 -Wall -Wextra -I../nvn -I../../third_party/cjson -o $@ t_refl_c.c ../nvn/nvn_refl.c ../../third_party/cjson/cJSON.c
-t_refl_cmp: t_refl_cmp.m t_refl_c.c ../nvn/nvn_refl.m $(REFL_C_DEP)
-	clang -O1 -g -Wall -I../nvn -I../../third_party/cjson -fobjc-arc -o $@ t_refl_cmp.m ../nvn/nvn_refl.m ../nvn/nvn_refl.c ../../third_party/cjson/cJSON.c -framework Metal -framework Foundation
 t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
 t_cover: t_cover.c ../nvn/nvn_cover.h
@@ -284,13 +280,13 @@ t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_gl_imports: t_gl_imports.m ../gl/hle_gl.m ../../host/hle.c ../../host/hle.h ../../host/plat/plat_apple.c $(MTL_T_DEP)
-	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c ../../host/plat/plat_apple.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_gl_imports.m ../../host/hle.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)   # plat_apple.c comes with MTL_T_SRC (GFX)
 .PHONY: gl-imports
 gl-imports: t_gl_imports
 	./t_gl_imports
 	./t_gl_imports --stubs
 run: gl-imports
-run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tbuf_align t_sparse_layout t_deswz_gpu t_pace t_timestamp t_fstep t_refl t_refl_c t_refl_cmp t_hmap t_cover t_state t_gpuwrite t_resolve t_pools t_replay t_pipe t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_vbuf t_geometry t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pso_archive t_pso_bundle t_pso_stall t_pull t_pull_inv t_pso_pending t_pfv t_view_levels t_view_swizzle t_vk_desc t_integer_blend t_primitive_restart t_clear_ds t_depth16_clear t_upgrade_alias t_image_usage t_stencil_view
+run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tbuf_align t_sparse_layout t_deswz_gpu t_pace t_timestamp t_fstep t_refl_c t_hmap t_cover t_state t_gpuwrite t_resolve t_pools t_replay t_pipe t_fuse_check t_present_crop t_reorder_chain t_defer_chain t_zskip t_xv t_ub t_vbuf t_geometry t_mip_extent t_rt_range_shape t_rt_range_ro t_rt_range t_rt_depth_ro t_pso_skey t_pso_archive t_pso_bundle t_pso_stall t_pull t_pull_inv t_pso_pending t_pfv t_view_levels t_view_swizzle t_vk_desc t_integer_blend t_primitive_restart t_clear_ds t_depth16_clear t_upgrade_alias t_image_usage t_stencil_view
 	./t_nvn
 	./t_dirty_slots
 	./t_dirty_race
@@ -305,9 +301,7 @@ run: t_nvn t_dirty_slots t_dirty_race t_tex_layout t_builtin t_vin t_tbuf2d t_tb
 	./t_pace
 	./t_timestamp
 	./t_fstep
-	./t_refl
 	./t_refl_c
-	./t_refl_cmp
 	./t_hmap
 	./t_cover
 	./t_state

@@ -18,12 +18,8 @@ t_thermal_tsan
 t_thermal_tsan.dSYM/
 .precommit.err
 .precommit_snap/
-t_refl
-t_refl.dSYM
 t_refl_c
 t_refl_c.dSYM/
-t_refl_cmp
-t_refl_cmp.dSYM/
 t_hmap
 t_cover
 t_state

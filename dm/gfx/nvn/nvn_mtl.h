@@ -14,6 +14,7 @@ void bf_want_note(const char *key);
 
 // Memory pool: [mem, mem+size) is expanded outward to page boundaries to build a zero-copy buffer; look up the buffer and offset by GPU address (= CPU address)
 void mtl_pool_add(const void *mem, uint64_t size);
+void mtl_pool_add_flags(const void *mem, uint64_t size, uint32_t nvn_flags);   // the same with the pool's NVN flags, kept in the shared pool table (be_pool_add; mtl_pool_add passes 0)
 void mtl_pool_del(const void *mem);
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);

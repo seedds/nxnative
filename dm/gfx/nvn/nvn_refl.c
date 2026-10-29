@@ -1,12 +1,15 @@
-// Shader reflection json (B: produced by translating the original Switch shaders, output of tools/dmsh_build.py) → fixed-length C arrays (nvn_refl.h), in plain C for every host.
-// The same conversion as nvn_refl_from_json (nvn_refl.m, Foundation): rule for rule, in the same order, with the same failure texts, so both make the same nvn_refl byte for byte
-// (tests/t_refl_cmp.m compares them on the Mac). cJSON (dm/third_party/cjson) reads the text; a cJSON item stands for the object NSJSONSerialization makes of it, NULL for nil.
-// Where the Objective-C code sends a message, the helpers below answer as Foundation does: intValue / boolValue of a number or a string, isKindOfClass checks, nil for a missing
-// key. A value of a type on which the Objective-C code would raise (intValue of null, an array or a dictionary; a subscript of a string) takes the nil answer here instead
+// Shader reflection json (B: produced by translating the original Switch shaders, output of tools/dmsh_build.py) → fixed-length C arrays (nvn_refl.h), in plain C for every host;
+// the Metal backend's parser too since step M6. It is the conversion of the Objective-C parser it replaced (Foundation's NSJSONSerialization and NSDictionary) rule for rule, in the
+// same order, with the same failure texts, so the structs are byte for byte the ones that parser made: the Mac compared both over a corpus of 37,694 documents (t_refl_cmp, macOS CI
+// on 093317b) and found no difference. cJSON (dm/third_party/cjson) reads the text; a cJSON item stands for the object NSJSONSerialization made of it, NULL for nil. Where the
+// Objective-C code sent a message, the helpers below answer as Foundation does: intValue / boolValue of a number or a string, isKindOfClass checks, nil for a missing key. A value
+// of a type on which the Objective-C code raised (intValue of null, an array or a dictionary; a subscript of a string) takes the nil answer here instead. Text Foundation's parser
+// refused is refused here too (strict_text)
 #include "nvn_refl.h"
 #include "nvn_refl_textype.h"
 #include "../../third_party/cjson/cJSON.h"
 #include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,14 +91,14 @@ static int has(const char *s, const char *p) { return s && strstr(s, p) != NULL;
 
 // Dummy texture type: same prefix rules as the original dummy_tex (an unbound texture slot reads 0 per D3D semantics)
 static void dummy_kind(const char *t, uint8_t *tt, uint8_t *pf) {
-    enum nvn_mtl_texture_type y = NVN_MTL_TEX_2D;
-    if (pre(t, "texture2d_array") || pre(t, "depth2d_array")) y = NVN_MTL_TEX_2D_ARRAY;
-    else if (pre(t, "texturecube_array") || pre(t, "depthcube_array")) y = NVN_MTL_TEX_CUBE_ARRAY;
-    else if (pre(t, "texturecube") || pre(t, "depthcube")) y = NVN_MTL_TEX_CUBE;
-    else if (pre(t, "texture3d")) y = NVN_MTL_TEX_3D;
-    else if (pre(t, "texture1d_array")) y = NVN_MTL_TEX_1D_ARRAY;
-    else if (pre(t, "texture1d")) y = NVN_MTL_TEX_1D;
-    else if (pre(t, "texture_buffer")) y = NVN_MTL_TEX_BUFFER;
+    enum nvn_dtt y = NVN_DTT_2D;
+    if (pre(t, "texture2d_array") || pre(t, "depth2d_array")) y = NVN_DTT_2D_ARRAY;
+    else if (pre(t, "texturecube_array") || pre(t, "depthcube_array")) y = NVN_DTT_CUBE_ARRAY;
+    else if (pre(t, "texturecube") || pre(t, "depthcube")) y = NVN_DTT_CUBE;
+    else if (pre(t, "texture3d")) y = NVN_DTT_3D;
+    else if (pre(t, "texture1d_array")) y = NVN_DTT_1D_ARRAY;
+    else if (pre(t, "texture1d")) y = NVN_DTT_1D;
+    else if (pre(t, "texture_buffer")) y = NVN_DTT_BUFFER;
     *tt = (uint8_t)y;
     *pf = pre(t, "depth") ? NVN_DPF_DEPTH : has(t, "<uint") ? NVN_DPF_UINT : has(t, "<int") ? NVN_DPF_SINT : NVN_DPF_FLOAT;
 }
@@ -145,6 +148,36 @@ static size_t utf16_units(const char *s, unsigned char **u) {
     return n;
 }
 
+// Text the two parsers read differently, found by the Mac's comparison of them (t_refl_cmp's probes, macOS CI on 093317b), refused here since step M6: a control character
+// (U+0000 to U+001F) inside a string and a number with a leading zero (012), both invalid json (RFC 8259), which NSJSONSerialization refused and cJSON takes; and a NUL inside a
+// string (the escape \u0000), which Foundation kept in the string while cJSON's C strings end there (the route "B\u0000" was not B to Foundation, and is B to strcmp). The chain
+// writes none of them. The first two never reach this parser on the Metal backend, which reads the file with Foundation first (shader_load) and gives up when that fails; on every
+// other backend this parser is the only reader, and refuses them as Foundation did. Returns NULL, or what was found and its byte offset in *at
+static int num_char(unsigned char c) { return (c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-'; }
+static const char *strict_text(const char *s, size_t n, size_t *at) {
+    int in_str = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (in_str) {
+            if (c == '"') in_str = 0;
+            else if (c < 0x20) { *at = i; return "a control character inside a string"; }
+            else if (c == '\\' && i + 1 < n) {
+                if (s[i + 1] == 'u' && i + 5 < n && !memcmp(s + i + 2, "0000", 4)) { *at = i; return "a NUL inside a string"; }
+                i++;   // the escaped character: an escaped quote or backslash neither ends the string nor escapes what follows
+            }
+        } else if (c == '"') in_str = 1;
+        else if ((c == '-' || (c >= '0' && c <= '9')) && !(i && num_char((unsigned char)s[i - 1]))) {   // the first character of a number
+            size_t k = i + (c == '-');
+            if (k + 1 < n && s[k] == '0' && s[k + 1] >= '0' && s[k + 1] <= '9') { *at = i; return "a number with a leading zero"; }
+        }
+    }
+    return NULL;
+}
+// cJSON records where a parse failed in one global (global_error, cJSON_GetErrorPtr), which every parse writes. The Metal backend loads shaders on several threads at once (the
+// shader prefetch's dispatch_apply, the prewarm workers) and called the parser it replaced with no lock, which had no shared state: the parse is serialized here, so concurrent
+// calls do not race on that global. Nothing reads it; the conversion after the parse works on the parse's own tree and runs in parallel
+static pthread_mutex_t g_parse_mu = PTHREAD_MUTEX_INITIALIZER;
+
 int nvn_refl_from_json_text(const char *json, size_t len, nvn_refl *o, char *err, int errlen) {
     memset(o, 0, sizeof *o);
     int rc = 0;
@@ -154,8 +187,11 @@ int nvn_refl_from_json_text(const char *json, size_t len, nvn_refl *o, char *err
     jv j = NULL;
     #define FAIL(...) do { free(o->c1); o->c1 = NULL; snprintf(err, errlen, __VA_ARGS__); rc = 1; goto done; } while (0)
     {   // the text: one json value and white space around it (NSJSONSerialization takes no trailing data)
-        const char *end = NULL;
+        const char *end = NULL, *bad; size_t at = 0;
+        if (json && (bad = strict_text(json, len, &at))) FAIL("reflection json does not parse (%s at byte %lu)", bad, (unsigned long)at);
+        pthread_mutex_lock(&g_parse_mu);
         root = json && len ? cJSON_ParseWithLengthOpts(json, len, &end, 0) : NULL;
+        pthread_mutex_unlock(&g_parse_mu);
         if (root) while (end < json + len && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) end++;
         if (!root || end != json + len) FAIL("reflection json does not parse (at byte %ld)", end && json ? (long)(end - json) : 0L);
     }
@@ -173,12 +209,12 @@ int nvn_refl_from_json_text(const char *json, size_t len, nvn_refl *o, char *err
             jv rg = get(b, "reg"); int reg = is_num(rg) ? ival(rg) : -1, aid = ival(get(b, "arg_id"));
             r->aid = (uint16_t)aid; r->reg = reg < 0 ? 0 : (uint16_t)reg;
             jv nmv = get(b, "msl_name"); const char *nm = str(nmv), *ty = str(get(b, "msl_type"));
-            // Ryujinx's fallback for a handle it cannot trace to one slot (handle type 4, nvn_refl.m)
+            // Ryujinx's fallback for a handle it cannot trace to one slot (handle type 4, nvn_refl.h TEXD / SAMPD)
             const char *el; int n = arr_len(ty, &el, &elbuf);
             if (suf(nm, "_cb0_40000000") && pre(ty, "array<") && suf(ty, ">")) {
                 if (n < 1 || n > 32) FAIL("B binding %s: array of %d", nm, n);
                 if (pre(el, "sampler")) r->kind = NVN_RB_SAMPD;
-                else if (pre(el, "texture_buffer")) { r->kind = NVN_RB_TEXD; r->dtt = (uint8_t)NVN_MTL_TEX_BUFFER; uint8_t tt; dummy_kind(el, &tt, &r->dpf); }
+                else if (pre(el, "texture_buffer")) { r->kind = NVN_RB_TEXD; r->dtt = (uint8_t)NVN_DTT_BUFFER; uint8_t tt; dummy_kind(el, &tt, &r->dpf); }
                 else if (pre(el, "texture") || pre(el, "depth")) { r->kind = NVN_RB_TEXD; dummy_kind(el, &r->dtt, &r->dpf); }
                 else FAIL("B binding %s: dynamic handle array of %s", nm, el ? el : "(null)");
                 r->n = (uint8_t)n; o->dyn = 1; o->nb++; continue;
@@ -188,7 +224,7 @@ int nvn_refl_from_json_text(const char *json, size_t len, nvn_refl *o, char *err
             else if (IS("samp")) r->kind = NVN_RB_SAMP;
             else if (IS("samp_tex")) r->kind = NVN_RB_SAMPT;
             else if (IS("tex")) { r->kind = NVN_RB_TEX; dummy_kind(ty, &r->dtt, &r->dpf); r->f1d = (uint8_t)bval(get(b, "fetch1d")); }
-            // An array of them (array<element, n>): the handles of a uniform buffer the shader indexes at run time (nvn_refl.m)
+            // An array of them (array<element, n>): the handles of a uniform buffer the shader indexes at run time (nvn_refl.h TEXU / SAMPU)
             else if (IS("tex_ubo")) { r->kind = NVN_RB_TEXU; dummy_kind(el, &r->dtt, &r->dpf); r->off = (uint16_t)ival(get(b, "off")); o->bindless = 1;
                 if (n) { if (n > 32) FAIL("B binding %s: array of %d", u8(nmv), n); r->n = (uint8_t)n; } }
             else if (IS("samp_ubo")) { r->kind = NVN_RB_SAMPU; r->off = (uint16_t)ival(get(b, "off")); o->bindless = 1;
@@ -217,7 +253,7 @@ int nvn_refl_from_json_text(const char *json, size_t len, nvn_refl *o, char *err
         }
         jv dr = get(j, "drv_reads");
         if (cJSON_IsObject(dr)) { o->drv_read[0] = get(dr, "0") != NULL; o->drv_read[2] = get(dr, "2") != NULL; }
-        // A declared driver-segment binding means the shader reads it (nvn_refl.m)
+        // A declared driver-segment binding means the shader reads it (docs/reference/shaders.md)
         for (int i = 0; i < o->nb; i++) { if (o->b[i].kind == NVN_RB_DRV0) o->drv_read[0] = 1; else if (o->b[i].kind == NVN_RB_DRV2) o->drv_read[2] = 1; }
         jv uf = get(j, "drv_unfillable");
         if (cJSON_IsArray(uf) && cJSON_GetArraySize(uf)) {

@@ -8,10 +8,10 @@ The build is [dm/host/CMakeLists.txt](../dm/host/CMakeLists.txt). It needs a gam
 
 | Use | Image | Contents |
 |---|---|---|
-| Linux build and tests | `nxnative-build`, built from [Dockerfile.build](Dockerfile.build) | Ubuntu 24.04 pinned by digest; clang and lld 18.1.3, CMake 3.28, Ninja, Python 3.12, git, and the development headers SDL3's Linux drivers compile against (X11, Wayland, libdecor, xkbcommon, EGL, ALSA, PulseAudio, PipeWire, D-Bus, udev, IBus) |
+| Linux build and tests | `nxnative-build`, built from [Dockerfile.build](Dockerfile.build) | Ubuntu 24.04 pinned by digest; clang and lld 18.1.3, CMake 3.28, Ninja, Python 3.12, git, and the development headers SDL3's Linux drivers compile against (X11, Wayland, libdecor, xkbcommon, EGL, ALSA, PulseAudio, PipeWire, D-Bus, udev, IBus), and Vulkan without a GPU ([below](#vulkan)): Mesa's lavapipe, the Vulkan loader, the validation layer, glslang and SPIRV-Tools |
 | Windows cross-build | `mstorsjo/llvm-mingw:20261020` (digest `sha256:dadd757c364edee190c53d8e71a135892a6986182e873205d3611f85e26f290b`) | llvm-mingw: clang 23.1.4 for `x86_64-w64-mingw32` with the UCRT and winpthreads, CMake 3.28.3, Ninja 1.11.1, Python 3.12.3, git |
 
-The Linux image takes about 1.4 GB on disk (the SDL3 headers are a layer of their own, about 340 MB); the llvm-mingw image about 1.6 GB (350 MB to download: it carries toolchains for four architectures). The Windows programs it makes are linked statically (`-static`, SDL3 and libc++ included): they need only the system's own DLLs (`KERNEL32.dll`, `bcrypt.dll` and the UCRT, which every Windows 10 has; the programs with SDL3 also `USER32`, `GDI32`, `IMM32`, `ole32`, `OLEAUT32`, `SETUPAPI`, `SHELL32`, `VERSION`, `WINMM` and `ADVAPI32`), so the test `.exe` files run on a stock Windows 10 or 11. To check a program: `llvm-readobj --coff-imports build/win64/t_front_sdl.exe | grep -i '\.dll'` in the llvm-mingw image.
+The Linux image takes about 1.6 GB on disk (the SDL3 headers are a layer of their own, about 340 MB, and the Vulkan packages another, about 190 MB); the llvm-mingw image about 1.6 GB (350 MB to download: it carries toolchains for four architectures). The Windows programs it makes are linked statically (`-static`, SDL3 and libc++ included): they need only the system's own DLLs (`KERNEL32.dll`, `bcrypt.dll` and the UCRT, which every Windows 10 has; the programs with SDL3 also `USER32`, `GDI32`, `IMM32`, `ole32`, `OLEAUT32`, `SETUPAPI`, `SHELL32`, `VERSION`, `WINMM` and `ADVAPI32`), so the test `.exe` files run on a stock Windows 10 or 11. To check a program: `llvm-readobj --coff-imports build/win64/t_front_sdl.exe | grep -i '\.dll'` in the llvm-mingw image.
 
 ## SDL3
 
@@ -26,6 +26,21 @@ It is the newest SDL3 release that was at least two months old when it was chose
 Offline, or to build from a copy you already have, point CMake at an unpacked copy of that release: `-DFETCHCONTENT_SOURCE_DIR_SDL3=/src/<path to the copy>` (a path inside the container). Nothing is downloaded then; the commit is checked when the copy is a clone, and the configure step says so when it is not (it must be 3.4.14).
 
 The SDL tests run on SDL's dummy drivers, which they choose themselves (`SDL_VIDEO_DRIVER` and `SDL_AUDIO_DRIVER` set to `dummy` through SDL's hints before SDL starts), so they need no display, sound card or controller, on Linux in Docker as on a Windows runner: `t_front_sdl` (keys, mouse, focus, virtual gamepads as players with buttons, sticks, triggers, motion and rumble, the progress screen, the save-failure notice, the text box) and `t_audio_sdl` (an output through `OpenAudioOut` on the dummy device: callbacks, released buffers, Stop, suspend, Close, no thread left behind).
+
+## Vulkan
+
+The Vulkan backend's tests (`t_vk_device`, `t_vk_import`: [dm/gfx/hostvk](../dm/gfx/hostvk/README.md)) run headless on Mesa's software Vulkan driver, lavapipe, under the Khronos validation layer, installed by a layer of the Linux image of its own. The image is pinned by the digest of its base, but apt resolves the packages from Ubuntu 24.04's archive when the image is built; the build prints the versions (`dpkg-query` at the end of that layer). On 2026-10-29 they were:
+
+| Package | Version | What |
+|---|---|---|
+| `mesa-vulkan-drivers` | 25.2.8-0ubuntu0.24.04.4 | lavapipe (`libvulkan_lvp.so`, manifest `/usr/share/vulkan/icd.d/lvp_icd.json`, Vulkan 1.4.318), and Mesa's hardware drivers, which find no GPU in the container |
+| `libllvm20` | 1:20.1.2-0ubuntu1~24.04.3 | lavapipe's code generator (already in the image: Mesa's EGL in the SDL3 layer needs it) |
+| `libvulkan1` | 1.3.275.0-1build1 | the Vulkan loader, which volk loads at run time (already in the image; no `libvulkan-dev`: nothing links against it) |
+| `vulkan-validationlayers` | 1.3.275.0-1 | `VK_LAYER_KHRONOS_validation` |
+| `glslang-tools` | 15.1.0-2~ubuntu0.24.04.2 | `glslangValidator`, for `dm/gfx/hostvk/tests/gen_spirv.sh` |
+| `spirv-tools` | 2025.1~rc1-1~ubuntu0.24.04.2 | `spirv-val`, the same script's check |
+
+Two variables choose them: `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json` (with `VK_LOADER_DRIVERS_SELECT=lvp*`, which this loader also reads) makes lavapipe the only driver, and `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` turns the validation layer on. CTest sets them for the two tests ([dm/host/CMakeLists.txt](../dm/host/CMakeLists.txt), the `ENV` option of `host_test`), and then a missing driver or layer fails them. The runners do not set them; the tests still run on lavapipe there (the only driver with a device in the container), with the layer they turn on themselves. Ubuntu 24.04's loader is 1.3.275, so the device, which reports Vulkan 1.4.318, is used at Vulkan 1.3. The manifest is `lvp_icd.json` in this Mesa, not the `lvp_icd.x86_64.json` of older packages. The Windows test programs import no Vulkan DLL (volk loads `vulkan-1.dll` at run time): on a PC or runner without a Vulkan loader or driver they print `note: no Vulkan device: skipped` and pass.
 
 ## From a Linux host
 

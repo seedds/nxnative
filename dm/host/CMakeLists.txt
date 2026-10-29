@@ -137,8 +137,9 @@ target_include_directories(nxhost PUBLIC ${GEN} ${PROFILE_DIR} ${REPO}/dm/third_
 target_link_libraries(nxhost PUBLIC nxplat vpx SDL3::SDL3-static)
 
 # ---- Unit tests (dm/host/tests: each includes the host sources it exercises, so a test links the platform layer, not nxhost) ----
-# host_test(<name> SOURCES <files> [PROFILE] [VPX] [SDL] [POSIX] [DEFS <macros>] [RUNS <arguments; one run each, "-" = none>] [TMPDIR])
-#   PROFILE: needs the game profile header; SDL: links SDL3 (front_sdl.c, hle_audio.c); POSIX: needs fork() (death tests in a child), so Linux only for now
+# host_test(<name> SOURCES <files> [PROFILE] [VPX] [SDL] [POSIX] [DEFS <macros>] [RUNS <arguments; one run each, "-" = none>] [TMPDIR] [ENV <VAR=value ...>])
+#   PROFILE: needs the game profile header; SDL: links SDL3 (front_sdl.c, hle_audio.c); POSIX: needs fork() (death tests in a child), so Linux only for now;
+#   ENV: the environment of the CTest run only (host_tests.tsv does not carry it, so the runners do not set it: the test must also run without it)
 include(CTest)
 set(TESTS ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 # The test list for the runners (dm/host/tests/run_host_tests.sh, run_win64_tests.ps1), which run where CTest cannot: CTest's files name this machine's paths, and a Windows tree
@@ -154,7 +155,7 @@ set(MANIFEST "# nxnative host unit tests, written by dm/host/CMakeLists.txt: nam
 string(APPEND MANIFEST "# platform: ${LOG_PLATFORM}\n# system: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}\n# compiler: ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} (${CMAKE_C_COMPILER})\n")
 string(APPEND MANIFEST "# game: ${GAME}\n# configured: ${configured}\n")
 function(host_test name)
-    cmake_parse_arguments(T "PROFILE;VPX;SDL;POSIX;TMPDIR" "" "SOURCES;DEFS;RUNS;INCLUDES" ${ARGN})
+    cmake_parse_arguments(T "PROFILE;VPX;SDL;POSIX;TMPDIR" "" "SOURCES;DEFS;RUNS;INCLUDES;ENV" ${ARGN})
     if(T_POSIX AND WIN32)
         string(APPEND MANIFEST "# not built for this platform: ${name} (POSIX: fork() death tests)\n")
         set(MANIFEST "${MANIFEST}" PARENT_SCOPE)
@@ -190,10 +191,14 @@ function(host_test name)
         endif()
         add_test(NAME ${test_name} COMMAND ${name} ${args} WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
         set(tmpdir -)
+        set(env ${T_ENV})
         if(T_TMPDIR)
             file(MAKE_DIRECTORY ${tmp})
-            set_tests_properties(${test_name} PROPERTIES ENVIRONMENT "TMPDIR=${tmp}")
+            list(APPEND env "TMPDIR=${tmp}")
             set(tmpdir tmpdir)
+        endif()
+        if(env)
+            set_tests_properties(${test_name} PROPERTIES ENVIRONMENT "${env}")
         endif()
         set_tests_properties(${test_name} PROPERTIES TIMEOUT 120)
         string(JOIN " " argv ${args})
@@ -244,6 +249,18 @@ host_test(t_pipe SOURCES ../../gfx/tests/t_pipe.c ../../gfx/nvn/nvn_pipe.c ../..
 host_test(t_fmt_inv SOURCES ../../gfx/tex/tests/t_fmt_inv.c ../../gfx/tex/nvn_fmt_mtl.c INCLUDES ${REPO}/dm/gfx/tex)
 # The shader reflection parser in plain C, with its JSON reader (dm/gfx/nvn/nvn_refl.c, dm/third_party/cjson; dm/gfx/tests/t_refl_cmp.m checks it against the Objective-C one on the Mac)
 host_test(t_refl_c SOURCES ../../gfx/tests/t_refl_c.c ../../gfx/nvn/nvn_refl.c ../../third_party/cjson/cJSON.c INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/third_party/cjson)
+# The Vulkan backend's device layer and host-memory import (dm/gfx/hostvk; docs/design/vulkan-backend.md 3.6, 4.2, 9.1), over volk: the Vulkan loader is loaded at run time,
+# so nothing links against libvulkan or vulkan-1.dll (dl, which volk needs on Linux, comes with the platform layer). Headless. Without a Vulkan loader or device they print
+# "note: no Vulkan device: skipped" and pass (the Windows CI runner has no Vulkan driver); CTest on Linux runs them on Mesa's lavapipe under the validation layer, both in the
+# nxnative-build image (docker/README.md), and then a missing driver or layer fails them
+set(HOSTVK_SRC ../../gfx/hostvk/vk_device.c ../../gfx/hostvk/vk_import.c ../../third_party/volk/volk.c)
+set(HOSTVK_INC ${REPO}/dm/gfx/hostvk ${REPO}/dm/third_party/volk ${REPO}/dm/third_party/vulkan-headers/include)
+set(HOSTVK_ENV)
+if(NOT WIN32)
+    set(HOSTVK_ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json VK_LOADER_DRIVERS_SELECT=lvp* VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation)
+endif()
+host_test(t_vk_device SOURCES ../../gfx/hostvk/tests/t_vk_device.c ${HOSTVK_SRC} PROFILE DEFS VK_NO_PROTOTYPES INCLUDES ${HOSTVK_INC} ENV ${HOSTVK_ENV})
+host_test(t_vk_import SOURCES ../../gfx/hostvk/tests/t_vk_import.c ${HOSTVK_SRC} PROFILE DEFS VK_NO_PROTOTYPES INCLUDES ${HOSTVK_INC} ENV ${HOSTVK_ENV})
 # The host-call thunks and the host-function page: the generator's output for the synthetic entries of t_hle_thunks_entries.c, which t_hle_thunks.c includes
 # (its death tests are skipped on Windows)
 set(T_HLE_THUNKS_C ${CMAKE_BINARY_DIR}/gen/t_hle_thunks.c)

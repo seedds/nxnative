@@ -1,5 +1,6 @@
 # Linux build and test environment for the portable host (dm/host/CMakeLists.txt): docker/README.md has the commands.
-# Ubuntu 24.04, pinned by digest; LLVM 18 (the distribution's clang / lld), CMake 3.28, Ninja, Python 3.12, and the development headers SDL3 compiles its Linux drivers against
+# Ubuntu 24.04, pinned by digest; LLVM 18 (the distribution's clang / lld), CMake 3.28, Ninja, Python 3.12, the development headers SDL3 compiles its Linux drivers against,
+# and Vulkan on the CPU (lavapipe, the loader, the validation layer, glslang, SPIRV-Tools) for the Vulkan backend's tests
 FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
@@ -16,6 +17,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends pkg-config libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
     libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libasound2-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev libibus-1.0-dev \
  && rm -rf /var/lib/apt/lists/*
+# Vulkan without a GPU, for the Vulkan backend's tests (dm/gfx/hostvk): Mesa's software driver lavapipe (mesa-vulkan-drivers: libvulkan_lvp.so and its manifest
+# /usr/share/vulkan/icd.d/lvp_icd.json), the Vulkan loader (libvulkan1; volk loads it at run time, so no libvulkan-dev), the Khronos validation layer, and glslang and
+# SPIRV-Tools for dm/gfx/hostvk/tests/gen_spirv.sh. A layer of its own; the versions apt resolved are printed at the end (docker/README.md records them)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 vulkan-validationlayers glslang-tools spirv-tools \
+ && rm -rf /var/lib/apt/lists/* \
+ && dpkg-query -W -f '${Package} ${Version}\n' mesa-vulkan-drivers libvulkan1 vulkan-validationlayers glslang-tools spirv-tools 'libllvm*'
 # The worktree is mounted at /src; git refuses repositories owned by another user without this (system-wide: the container also runs as the caller's user, HOME=/tmp,
 # and the test runner reads the commit with git)
 RUN git config --system --add safe.directory '*'

@@ -2,6 +2,7 @@
 // Component remapping: "no alpha" formats such as RGBX / RGB_DXT1 read a as 1; RGB-family 16-bit packed formats swap r/b; all others are identity.
 // BC1–7 on iOS require GPU BC support (MTLDevice.supportsBCTextureCompression, iOS 16.4+; A19 supports it; device capability is not checked in this table).
 #include "nvn_fmt_mtl.h"
+#include <string.h>
 
 enum {   // MTLPixelFormat
     R8Unorm = 10, R8Snorm = 12, R8Uint = 13, R8Sint = 14, R16Unorm = 20, R16Snorm = 22, R16Uint = 23, R16Sint = 24, R16Float = 25,
@@ -80,4 +81,20 @@ int nvn_fmt_to_mtl(int f, uint32_t *mtl, uint8_t swz[4]) {
     if (mtl) *mtl = e.kind ? e.mtl : 0;
     if (swz) { swz[0] = e.rb ? NVN_SWZ_B : NVN_SWZ_R; swz[1] = NVN_SWZ_G; swz[2] = e.rb ? NVN_SWZ_R : NVN_SWZ_B; swz[3] = e.noalpha ? NVN_SWZ_ONE : NVN_SWZ_A; }
     return e.kind;
+}
+
+// The inverse walks the forward map over every NVN format (0x01-0x9C, ASTC included) instead of keeping a second table that could drift from T
+int nvn_fmt_from_mtl(uint32_t mtl, const uint8_t swz[4], uint16_t *out, int max) {
+    if (!mtl) return 0;
+    uint16_t c[0x9D]; int rank[0x9D], n = 0;
+    for (int f = 1; f < (int)(sizeof T / sizeof *T); f++) {
+        uint32_t m = 0; uint8_t s[4]; int kind = nvn_fmt_to_mtl(f, &m, s);
+        if (!kind || m != mtl || (swz && memcmp(s, swz, 4))) continue;
+        int ident = s[0] == NVN_SWZ_R && s[1] == NVN_SWZ_G && s[2] == NVN_SWZ_B && s[3] == NVN_SWZ_A;
+        int r = (kind == 1 ? 0 : 2) + !ident, j = n++;
+        for (; j > 0 && rank[j - 1] > r; j--) { c[j] = c[j - 1]; rank[j] = rank[j - 1]; }   // stable insertion: equal ranks stay in NVN order
+        c[j] = (uint16_t)f; rank[j] = r;
+    }
+    for (int i = 0; i < n && i < max; i++) out[i] = c[i];
+    return n;
 }

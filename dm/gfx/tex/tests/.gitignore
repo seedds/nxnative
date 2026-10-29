@@ -1,4 +1,5 @@
 t_tex
 t_fmt_mtl
+t_fmt_inv
 *.dSYM
 asan/

@@ -31,6 +31,7 @@ t_gpuwrite
 t_resolve
 t_pools
 t_replay
+t_pipe
 t_fuse_check
 t_fuse_check.dSYM/
 t_perf_order

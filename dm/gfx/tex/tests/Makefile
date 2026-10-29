@@ -6,10 +6,13 @@ O ?=
 CLANG = clang $(SAN)
 $(O)t_tex: t_tex.c ../nvn_deswizzle.c ../nvn_deswizzle.h ../../nvn/nvn_tex.c ../../nvn/nvn_tex.h
 	$(CLANG) $(CFLAGS) -o $@ t_tex.c ../nvn_deswizzle.c ../../nvn/nvn_tex.c -lm
+# The inverse of the format table (plain C; dm/host/CMakeLists.txt builds it for Linux and Windows)
+$(O)t_fmt_inv: t_fmt_inv.c ../nvn_fmt_mtl.c ../nvn_fmt_mtl.h
+	$(CLANG) $(CFLAGS) -std=c11 -o $@ t_fmt_inv.c ../nvn_fmt_mtl.c
 $(O)t_fmt_mtl: t_fmt_mtl.m ../nvn_fmt_mtl.c ../nvn_fmt_mtl.h
 	$(CLANG) $(CFLAGS) -fobjc-arc -o $@ t_fmt_mtl.m ../nvn_fmt_mtl.c -framework Metal -framework Foundation
-run: t_tex t_fmt_mtl
-	./t_fmt_mtl && ./t_tex
+run: t_tex t_fmt_mtl t_fmt_inv
+	./t_fmt_mtl && ./t_fmt_inv && ./t_tex
 .PHONY: run
 # ASan and UBSan (../../../sanitizers/sanitizers.mk): the CPU test t_tex, built into asan/ (t_fmt_mtl creates Metal textures and stays local)
 include ../../../sanitizers/sanitizers.mk

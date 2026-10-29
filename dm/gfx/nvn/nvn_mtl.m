@@ -21,6 +21,8 @@
 #include "nvn_obj.h"
 #include "nvn_state.h"      // the draw and render-target state S and R, state records, per-queue state (frontend, every host)
 #include "nvn_gpuwrite.h"   // the GPU-write ledger: pend_*, sbw_*, gw_* (frontend, every host)
+#include "nvn_resolve.h"    // handle resolution: texture slots, the driver segments c0 / c2, handles read from uniform memory, deferred binds (frontend, every host)
+#include "nvn_pools.h"      // the memory pool table, the address lookup and its per-thread cache (frontend, every host)
 #include "../tex/nvn_fmt_mtl.h"
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/nvn_deswizzle_gpu.h"
@@ -33,20 +35,10 @@
 #include "nvn_timestamp.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
-// The NVN driver's constant segments, one layout in every game (dm/gfx/tools/dmsh_build.py), byte offsets: c2 holds the combined handles at 0x20 + 8 r (41 slots up to the separate table:
-// past slot 31 they lie in the image table, 0x120 + 8 r, 8 slots), the separate textures at 0x168 + 8 r and the separate samplers at 0x568 + 8 r (128 each);
-// c0 the storage buffer table at base + 0x10 r (address 64 bits, size 32 bits), base vertex 0x110, compute 0x310, geometry 0x410, pixel 0x510. The replay fills one DRV_SIZE buffer per segment a shader reads
-enum { C2_TEX = 0x20, C2_TEX_SLOTS = 41, C2_IMG = 0x120, C2_IMG_SLOTS = 8, C2_SEPTEX = 0x168, C2_SAMP = 0x568, DRV_SIZE = 0xA00 };
-_Static_assert(C2_TEX + 8 * C2_TEX_SLOTS == C2_SEPTEX && C2_SEPTEX + 8 * 128 == C2_SAMP && C2_SAMP + 8 * 128 <= DRV_SIZE && NVN_SEPTEX_SLOT0 + 128 == NTEX, "NVN driver handle tables");
-// Geometry's counter/output addresses are c0+0x410/0x430 (NieR:Automata's MOVC/IADDC pairs); they use the logical NVN stage even when Metal executes a compute kernel.
-static int c0_ssbo_base(int stage) { return stage == 0 ? 0x110 : stage == 1 ? 0x510 : stage == 2 ? 0x410 : stage == 5 ? 0x310 : -1; }   // NVN stages 0 vertex, 1 pixel, 2 geometry, 5 compute; hull / domain never seen
-// The handle a texture binding of slot reg reads: as c2 holds it (encode_args fills c2 the same way), a combined slot past 31 shares its word with an image slot, and a bound image
-// is what lies there. A texture instruction on an image handle names such a slot: a size query of the image a compute shader writes (Unreal's GetDimensions on a RWTexture3D,
-// dmsh_build.py decode_tex). DRAGON QUEST VII Reimagined's volumetric lightmap indirection patch read the empty texture slot 32 there, got a 1x1 size and wrote only cell (0, 0, 0)
-static inline uint64_t tex_slot_h(const uint64_t *tex, const uint64_t *img, unsigned reg) {
-    return reg >= 32 && reg - 32 < C2_IMG_SLOTS && img[reg - 32] ? img[reg - 32] : reg < NTEX ? tex[reg] : 0;
-}
-static uint64_t c2_handle(int stage, unsigned b);   // the handle c2 holds at byte b (defined with the draw state, TEXA / SAMPA)
+// The NVN driver's constant segments (C2_*, DRV_SIZE), the handle a texture slot reads, the handle c2 holds at a byte and the segments' contents are in nvn_resolve.c (nvn_resolve.h).
+// These keep the names the replay uses
+static inline uint64_t tex_slot_h(const uint64_t *tex, const uint64_t *img, unsigned reg) { return nvn_tex_slot_handle(tex, img, reg); }
+static inline uint64_t c2_handle(int stage, unsigned b) { return nvn_c2_handle(stage, b); }   // TEXA / SAMPA
 #include "nvn_hmap.h"
 #include "../../host/dm.h"
 #import <CommonCrypto/CommonDigest.h>
@@ -302,10 +294,9 @@ void bf_want_note(const char *key) {
 }
 
 // ---------- Memory pools ----------
-typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; } pool_ent;   // res: already in the residency set (on demand, see pool_res)
-static pool_ent *g_pools; static int g_npool, g_cap;
-static int g_pidx_ok, g_plast = -1;   // whether the address→pool index is valid, the last hit (pool_find)
-static NSMutableArray *g_keep;                  // Holds the buffer references (pool_ent has non-owning pointers)
+// The pool table, the address lookup and its per-thread cache are in nvn_pools.c (nvn_pools.h), under g_mu as before: a pool's record holds its zero-copy buffer (backend, unretained),
+// the buffer's gpuAddress (gpu) and whether it is in the residency set (res, on demand, see pool_res)
+static NSMutableArray *g_keep;                  // Holds the buffer references (nvn_pool has non-owning pointers)
 static uint64_t g_pool_adds;
 static int g_pool_res_n;   // registered pools already in the residency set (for the memory readout; under g_mu)
 
@@ -449,37 +440,17 @@ uint64_t dm_mtl_l3_sample(uint32_t tick) {
 
 // No-copy buffers of finalized pools (weak references, under g_mu): the memory report counts how many are still alive and their length -- a buffer that outlives its pool is still strongly referenced by something else (a texture built directly on the pool, etc.)
 static NSHashTable *g_dead_pools;
-// Address → pool cache per thread (mtl_addr / mtl_gpu_addr), valid while g_pool_gen is unchanged (every pool add / removal bumps it under g_mu), holding only pools already in the residency set.
-// Every buffer binding of every draw used to take g_mu, which game threads creating pools and the GPU completion handler also take, and search the pool index. Two levels: a table direct-mapped
-// by 4 KB page, then the last 8 pools found, which also fill the table. Breath of the Wild binds from more pools a frame than 8 entries alone could hold (about 2300 of its 21000 lookups a frame
-// took the lock), and its uniform rings move to a new page every few draws (the table alone missed as often)
-enum { PC_BITS = 10, PC_RECENT = 8 };
-static _Atomic uint64_t g_pool_gen = 1;
-typedef struct { uintptr_t lo, hi, base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; } pc_ent;
-static __thread struct { uint64_t gen; unsigned next; pc_ent r[PC_RECENT], e[1u << PC_BITS]; } t_pc;   // an empty entry has hi 0
-static inline unsigned pc_slot(uint64_t addr) { return (unsigned)(((addr >> 12) * 0x9E3779B97F4A7C15ull) >> (64 - PC_BITS)); }
-static inline const pc_ent *pc_get(uint64_t addr, uint64_t len) {
-    if (t_pc.gen != atomic_load_explicit(&g_pool_gen, memory_order_acquire)) return NULL;
-    pc_ent *c = &t_pc.e[pc_slot(addr)];
-    if (addr >= c->lo && addr + len <= c->hi) return c;
-    for (unsigned k = 0; k < PC_RECENT; k++) { const pc_ent *x = &t_pc.r[k]; if (addr >= x->lo && addr + len <= x->hi) { *c = *x; return c; } }
-    return NULL;
-}
-static void pc_put(int i, uint64_t addr) {   // caller holds g_mu, pool i is resident and holds addr
-    uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
-    if (t_pc.gen != gen) { memset(t_pc.r, 0, sizeof t_pc.r); memset(t_pc.e, 0, sizeof t_pc.e); t_pc.gen = gen; }
-    pc_ent c = {g_pools[i].lo, g_pools[i].hi, g_pools[i].base, g_pools[i].buf, g_pools[i].gpu};
-    t_pc.e[pc_slot(addr)] = c; t_pc.r[t_pc.next++ % PC_RECENT] = c;
-}
+// Address → pool cache per thread (mtl_addr / mtl_gpu_addr): nvn_pools.h nvn_pool_cached, valid while g_pool_gen is unchanged, holding only pools already in the residency set
 static _Atomic uint64_t g_reg_gen = 1;   // Change generation of memory pool / texture / sampler registration: one of the invalidation conditions for argument buffer reuse
 // On-demand residency of memory pools: putting a zero-copy buffer into the residency set makes iOS read the whole pool into memory and pin it as wired, even a pool the game never uses
 // (they measured on a 17 Pro Max a 512 MB render-target pool addressed 0 times in a run, with about 530 MB more device wired memory; a 4 GB A14 was ended by the system within seconds of launch because of it).
 // So a pool is not put into the residency set when created; it is put in, and the residency set committed on the spot, the first time the GPU gets its address through mtl_addr / mtl_gpu_addr -- these are the only two ways the GPU gets pool addresses,
 // and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu
-static void pool_res(int i) {
-    if (g_pools[i].res) return;
-    res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
+static void pool_res(nvn_pool *p) {
+    if (p->res) return;
+    res_add((__bridge id<MTLBuffer>)p->backend); res_commit(); p->res = 1; g_pool_res_n++;
 }
+void nvn_pool_hook_use(nvn_pool *p) { pool_res(p); }   // a lookup under g_mu found p (nvn_pools.c nvn_pool_lookup), before the thread's cache takes it
 void mtl_pool_add(const void *mem, uint64_t size) {
     mtl_init(); g_reg_gen++;
     uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
@@ -502,9 +473,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
         MDIE("memory pool %p+%#llx: failed to create the zero-copy buffer over %#lx..%#lx", mem, (unsigned long long)size, (unsigned long)a, (unsigned long)b);
     }
     pthread_mutex_lock(&g_mu);
-    if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc(g_pools, g_cap * sizeof *g_pools); }
-    g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);   // the address index and the per-thread caches are invalid (pool_find, pc_get)
-    g_pools[g_npool++] = (pool_ent){lo, hi, a, buf, buf.gpuAddress, mem, 0};   // not in the residency set yet: put in the first time it is addressed (pool_res)
+    nvn_pool_add(mem, size, 0, a, (__bridge void *)buf, buf.gpuAddress);   // the table (nvn_pools.c); not in the residency set yet: put in the first time it is addressed (pool_res). NVN flags 0: be_pool_add does not pass them here
     g_pool_adds++;
     [g_keep addObject:buf];
     pthread_mutex_unlock(&g_mu);
@@ -517,49 +486,32 @@ void mtl_pool_del(const void *mem) {
     // and a new pool at the same address wrapped it again. Engage's title demo cycles scenes; GPU allocated grew to 5.4 GB and resident memory to 3.6 GB in 850 s.
     // Its own autorelease pool: this runs on the guest thread that finalizes the pool, whose implicit pool never drains, and adding to the weak table g_dead_pools left the buffer
     // autoreleased there, so every finalized pool buffer stayed alive for good (Ghost Trick: Phantom Detective, 125 buffers and 6.6 GB of GPU allocations 300 frames into the boot, 0 with the pool)
-    @autoreleasepool {
-    for (int i = 0; i < g_npool; i++)
-        if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; defer_obj_release(b); if (g_pools[i].res) g_pool_res_n--;
-            if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
-            [g_dead_pools addObject:b]; g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); break; }
-    }
+    @autoreleasepool { nvn_pool_del(mem); }   // the table (nvn_pools.c), which hands the pool to nvn_pool_hook_del below before it goes
     pthread_mutex_unlock(&g_mu);
 }
-
-// Address → pool: the last hit first, then a binary search over indices sorted by start address, and a full linear scan only when that fails (pools overlapping).
-// The Legend of Zelda: Breath of the Wild keeps about 1760 memory pools alive and every buffer binding of every draw looks one up; the old full scan took about 4% of the submit thread's samples (mtl_gpu_addr 222 / 6 s). Adding / removing pools invalidates the index, which is re-sorted when next used. Caller holds g_mu
-static int *g_pidx; static int g_pidx_cap;
-static int pidx_cmp(const void *a, const void *b) { uintptr_t x = g_pools[*(const int *)a].lo, y = g_pools[*(const int *)b].lo; return x < y ? -1 : x > y; }
-static int pool_find(uint64_t addr, uint64_t len) {
-    if (g_plast >= 0 && g_plast < g_npool && addr >= g_pools[g_plast].lo && addr + len <= g_pools[g_plast].hi) return g_plast;
-    if (!g_pidx_ok) {
-        if (g_pidx_cap < g_npool) { g_pidx_cap = g_npool * 2; g_pidx = realloc(g_pidx, (size_t)g_pidx_cap * sizeof *g_pidx); }
-        for (int i = 0; i < g_npool; i++) g_pidx[i] = i;
-        qsort(g_pidx, (size_t)g_npool, sizeof *g_pidx, pidx_cmp); g_pidx_ok = 1;
-    }
-    int lo = 0, hi = g_npool - 1, hit = -1;   // the last one whose start ≤ addr
-    while (lo <= hi) { int m = (lo + hi) / 2; if (g_pools[g_pidx[m]].lo <= addr) { hit = m; lo = m + 1; } else hi = m - 1; }
-    if (hit >= 0 && addr + len <= g_pools[g_pidx[hit]].hi) return g_plast = g_pidx[hit];
-    for (int i = 0; i < g_npool; i++) if (addr >= g_pools[i].lo && addr + len <= g_pools[i].hi) return g_plast = i;
-    return -1;
+// A pool nvn_pool_del removes, under g_mu and mtl_pool_del's autorelease pool: its buffer goes through deferred release and into the table of dead pools
+void nvn_pool_hook_del(nvn_pool *p) {
+    id<MTLBuffer> b = (__bridge id<MTLBuffer>)p->backend; [g_keep removeObject:b]; defer_obj_release(b); if (p->res) g_pool_res_n--;
+    if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
+    [g_dead_pools addObject:b];
 }
+
+// Address → pool (nvn_pools.c): the thread's cache, then under g_mu the table's lookup, which makes the pool resident (nvn_pool_hook_use) and fills the cache
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
-    const pc_ent *c = pc_get(addr, len);
-    if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; return 1; }
-    int ok = 0;
+    const nvn_pool_ref *c = nvn_pool_cached(addr, len);
+    if (c) { *buf = c->backend; *off = addr - c->base; return 1; }
+    int ok = 0; nvn_pool_ref r;
     pthread_mutex_lock(&g_mu);
-    int i = pool_find(addr, len);
-    if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
+    if (nvn_pool_lookup(addr, len, &r)) { *buf = r.backend; *off = addr - r.base; ok = 1; }
     pthread_mutex_unlock(&g_mu);
     return ok;
 }
 int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_t *gpu) {
-    const pc_ent *c = pc_get(addr, len);
-    if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; *gpu = c->gpu + *off; return 1; }
-    int ok = 0;
+    const nvn_pool_ref *c = nvn_pool_cached(addr, len);
+    if (c) { *buf = c->backend; *off = addr - c->base; *gpu = c->gpu + *off; return 1; }
+    int ok = 0; nvn_pool_ref r;
     pthread_mutex_lock(&g_mu);
-    int i = pool_find(addr, len);
-    if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
+    if (nvn_pool_lookup(addr, len, &r)) { *buf = r.backend; *off = addr - r.base; *gpu = r.gpu + *off; ok = 1; }
     pthread_mutex_unlock(&g_mu);
     return ok;
 }
@@ -3854,10 +3806,8 @@ void mtl_reg_samp(int sid, const samp_par *sp) {
     g_sreg[id_] = *sp; g_sreg_ok[id_] = 1;
     os_unfair_lock_unlock(&g_rmu);
 }
-// Handles of deferred binds (BindTexturesDeferred) are read at execution: the record keeps the address of the handles (see hle_nvn.c); every reader of a bind record refreshes it first. Command memory is writable, so it is updated in place
-static inline void bh_fresh(const p_bind_handles *b) {
-    if (b->defer && b->src && b->n > 0 && b->n <= 32) memcpy((void *)b->h, (const void *)(uintptr_t)b->src, 8 * (size_t)b->n);
-}
+// Handles of deferred binds (BindTexturesDeferred) are read at execution, and every reader of a bind record refreshes it first (nvn_resolve.h nvn_bind_fresh)
+static inline void bh_fresh(const p_bind_handles *b) { nvn_bind_fresh(b); }
 static MTLTextureType ttype(int target, int fallback) {
     switch (target) { case 0: return MTLTextureType2D; case 1: case 7: return MTLTextureType2D; case 2: return MTLTextureType3D;   // 1D as one-row 2D (see where textures are created)
         case 3: return MTLTextureType2DArray; case 4: return MTLTextureType2DArray; case 5: return MTLTextureType2DMultisample;
@@ -4143,13 +4093,7 @@ static size_t arena_alloc(size_t n, __strong id<MTLBuffer> *buf) {
 }
 
 // ---------- Draw state ----------
-// The draw state S, the state records (nvn_state_apply), the per-stage program binds and each queue's own state are in nvn_state.c (nvn_state.h)
-// The handle c2 holds at byte b, as encode_args fills the table (DRV2): a combined slot (past slot 31 the image there, tex_slot_h), a separate texture, else none
-static uint64_t c2_handle(int stage, unsigned b) {
-    if (b >= C2_TEX && b < C2_SEPTEX && !((b - C2_TEX) & 7)) return tex_slot_h(S.tex[stage], S.img[stage], (b - C2_TEX) / 8);
-    if (b >= C2_SEPTEX && b < C2_SAMP && !((b - C2_SEPTEX) & 7)) return S.tex[stage][NVN_SEPTEX_SLOT0 + (b - C2_SEPTEX) / 8];
-    return 0;
-}
+// The draw state S, the state records (nvn_state_apply), the per-stage program binds and each queue's own state are in nvn_state.c (nvn_state.h); the handle c2 holds at a byte is nvn_resolve.c's
 static uint8_t g_args_dirty[6];
 // The dirty mask the state functions return (nvn_state.h) into this backend's flags: each bit sets its flag, as the moved code set it in place
 static inline uint32_t state_dirty(uint32_t d) {
@@ -6097,28 +6041,27 @@ static id<MTLBuffer> support_buf(void) {
 static uint64_t support_gpu(void) { static uint64_t gpu; if (!gpu) gpu = support_buf().gpuAddress; return gpu; }
 static id<MTLBuffer> zero_bank(void) { static __strong id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b); } return b; }
 static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_bank().gpuAddress; return gpu; }
-// Bindless handle (TEXU / SAMPU): the 32-bit word at byte offset off of uniform slot reg = the low 32 bits of the NVN handle the game wrote there (low 20 bits texture ID, high 12 bits sampler ID).
-// Read on the CPU side at replay time (the memory at the same moment a real GPU would read it at execution); slot unbound / out of range / unreadable = 0 (empty slot: dummy texture / dummy sampler).
-// A location with a GPU-side write queued in this submit (pend_hits) is still read at its current value; the first case is reported red.
-// The same read serves storage buffer addresses kept in uniform memory (SBUFU: 8 bytes)
-static void ubo_read(int stage, int reg, int off, size_t n, void *out) {
-    memset(out, 0, n);
-    if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16) return;
-    const p_bind_buf *u = &S.ubo[stage][reg];
-    if (!u->addr || (uint64_t)off + n > u->size) return;
-    if (g_nubd && ubd_hits(u->addr + off, u->addr + off + n) && ubd_covers(u->addr + off, u->addr + off + n)) { ubd_read(u->addr + off, n, out); return; }   // written by an inline update deferred in this pass
-    { uint64_t g; const uint8_t *c; if (pend_hits(u->addr + off, n) && ubp_get(u->addr + off, u->addr + off + n, &g, &c)) { ubc_wait(g_ubp_ready); memcpy(out, c, n); return; } }   // memory and the inline updates queued over it
-    if (pend_hits(u->addr + off, n)) { int kind; if (pend_read(u->addr + off, n, out, &kind)) return;   // written by an inline update queued in this submission: its data
-        RED_ONCE(47, "the uniform buffer holding bindless handles (stage %d slot %d +%#x) has GPU-side writes in this submission (%s): the current value is read", stage, reg, off,
-                 kind == 2 ? "a buffer copy" : kind == 3 ? "a fill" : kind == 1 ? "an inline update covering part of it" : "more writes than the host tracks"); }
+// Bindless handles (TEXU / SAMPU) and storage buffer addresses (SBUFU) read from uniform memory as the GPU will read them, and the IDs a handle read there names: nvn_resolve.c
+// (nvn_ubo_read). What it reads of this backend's own state goes through the three hooks below, which hold the moved lines as they were
+// The bytes [a, a+n) as this backend's copies of the inline updates hold them: an update deferred in this pass (ubd), or memory and the inline updates queued over it (a partial shadow, ubp)
+int nvn_resolve_hook_ubo_copy(uint64_t a, size_t n, void *out) {
+    if (g_nubd && ubd_hits(a, a + n) && ubd_covers(a, a + n)) { ubd_read(a, n, out); return 1; }   // written by an inline update deferred in this pass
+    { uint64_t g; const uint8_t *c; if (pend_hits(a, n) && ubp_get(a, a + n, &g, &c)) { ubc_wait(g_ubp_ready); memcpy(out, c, n); return 1; } }   // memory and the inline updates queued over it
+    return 0;
+}
+void nvn_resolve_hook_ubo_stale(int stage, int reg, int off, int kind) {
+    RED_ONCE(47, "the uniform buffer holding bindless handles (stage %d slot %d +%#x) has GPU-side writes in this submission (%s): the current value is read", stage, reg, off,
+             kind == 2 ? "a buffer copy" : kind == 3 ? "a fill" : kind == 1 ? "an inline update covering part of it" : "more writes than the host tracks");
+}
+void nvn_resolve_hook_mem_read(uint64_t a, size_t n, void *out) {
     void *mb; uint64_t mo; const uint8_t *base;
-    if (!mtl_addr(u->addr + off, n, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return;
+    if (!mtl_addr(a, n, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return;
     memcpy(out, base + mo, n);
 }
-static uint32_t ubo_handle(int stage, int reg, int off) { uint32_t h; ubo_read(stage, reg, off, 4, &h); return h; }
-// A handle read from a uniform buffer names IDs of the pools bound when the draw runs: as bound handles are moved at recording (hle_nvn.c bind_handles), these take the bases here (0 = none)
-static int ubo_tex_id(uint32_t h) { int t = (int)(h & 0xfffff); return t ? t + S.tex_base : 0; }
-static int ubo_samp_id(uint32_t h) { int s = (int)(h >> 20); return s ? s + S.samp_base : 0; }
+static inline void ubo_read(int stage, int reg, int off, size_t n, void *out) { nvn_ubo_read(stage, reg, off, n, out); }
+static inline uint32_t ubo_handle(int stage, int reg, int off) { return nvn_ubo_handle(stage, reg, off); }
+static inline int ubo_tex_id(uint32_t h) { return nvn_tid_from_handle(h); }
+static inline int ubo_samp_id(uint32_t h) { return nvn_sid_from_handle(h); }
 static uint32_t g_dispatch_dim[3];   // the current dispatch's workgroup counts (driver segment c0 + 0x200 for compute)
 static uint32_t g_draw_binst;   // the current draw's base instance (draw), for c0 + 0x644
 static __unsafe_unretained id<MTLBuffer> g_c0_dim_buf; static size_t g_c0_dim_off;   // where encode_args put them for this dispatch (nil: the shader reads no c0); an indirect dispatch copies its GPU-written counts there
@@ -6313,40 +6256,10 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             int bank = b->kind == NVN_RB_DRV2 ? 2 : 0;
             if (!sh->rf.drv_read[bank]) { slots[aid] = zero_bank_gpu(); USE(zero_bank(), MTLResourceUsageRead); }
             else {
-                id<MTLBuffer> db; size_t doff = arena_alloc(DRV_SIZE, &db); uint8_t *d = (uint8_t *)db.contents + doff; memset(d, 0, DRV_SIZE);
-                if (bank == 0) {
-                    int base = c0_ssbo_base(nvn_stage);
-                    if (base < 0) RED_ONCE(45, "stage %d shader reads driver segment c0; the storage buffer table base was never measured", nvn_stage);
-                    else for (int r = 0; r < 16; r++) { uint64_t a = S.ssbo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ssbo[nvn_stage][r].size; memcpy(d + base + 16 * r, &a, 8); memcpy(d + base + 16 * r + 8, &n, 4); }
-                    // Compute also has the dispatch size at 0x200 (x, y, z) and the uniform buffer table at 0x210 + 16 r (address 64 bits, size 32 bits), ending where the storage buffer table
-                    // starts (0x310). Measured on Link's Awakening's light culling (light_culling_compute.bfsha): tile index = workgroup y × c0[0x200] + workgroup x, and c0[0x280] is
-                    // the address of uniform buffer 7 (the light parameters, 144 bytes per light); Breath of the Wild's compute shaders read 0x280 / 0x290 / 0x2d0 of the same table
-                    // Graphics stages: 0x610, right after the pixel stage's storage buffer table, holds the largest point size, to which GLSLC clamps a shader-written
-                    // gl_PointSize (Super Mario Odyssey's agl point sprites, alPointSpriteShader: gl_PointSize = min(size attribute, c0[0x610])). It is not SetPointSize: the game
-                    // sets that to 1 and sizes its sprites itself (the fog splats ask for 3-18 px). Left at 0, every sprite had size 0, so the splats that push the Cap Kingdom
-                    // fog aside never reached its velocity fields and the fog did not part around Mario. 2047 is Maxwell's point size limit (Metal clamps to its own)
-                    if (nvn_stage != 5) { const float max_point = 2047.0f; memcpy(d + 0x610, &max_point, 4); }
-                    // Graphics stages: 0x644 holds the draw's base instance. Maxwell's instance ID leaves it out (GL's gl_InstanceID), and GLSLC adds this word where a shader needs the
-                    // absolute instance (gl_InstanceID + gl_BaseInstance): Pokémon Legends: Z-A's occlusion boxes (a793f436dcabd350, one box per draw at base instance 61, 62, …) pick their
-                    // transform this way, and 1,550 reads in 793 of its vertex shaders. Left at 0, every box was box 0: all six queries came back empty, and the game, taking its characters for
-                    // hidden, posed their legs straight back from the hips. 0x640 (read by 58 shaders, added to the vertex ID) stays 0: what the driver puts there is not established
-                    if (nvn_stage != 5) memcpy(d + 0x644, &g_draw_binst, 4);
-                    if (nvn_stage == 5) {
-                        memcpy(d + 0x200, g_dispatch_dim, 12); g_c0_dim_buf = db; g_c0_dim_off = doff + 0x200;
-                        for (int r = 0; r < 16; r++) { uint64_t a = S.ubo[5][r].addr; uint32_t n = (uint32_t)S.ubo[5][r].size; memcpy(d + 0x210 + 16 * r, &a, 8); memcpy(d + 0x210 + 16 * r + 8, &n, 4); }
-                    }
-                } else {
-                    // A shader with dynamic handle arrays (TEXD / SAMPD, profile key tex_dyn_slots) picks a table slot at run time and ORs a texture word with a sampler word into a handle,
-                    // whose texture / sampler IDs index the arrays. For it the tables hold slot indices instead of handles (texture slot r → r, and r << 20 when a combined handle carries
-                    // a sampler; sampler slot r → r << 20), and the arrays hold the bound slots, so the shader's own arithmetic picks the binding (Octopath Traveler 0: separate texture slots 0-10, samplers 0-4)
-                    const uint64_t *tx = S.tex[nvn_stage], *im = S.img[nvn_stage]; int dyn = sh->rf.dyn;
-                    for (int r = 0; r < C2_IMG_SLOTS; r++) { uint32_t ih = (uint32_t)im[r]; memcpy(d + C2_IMG + 8 * r, &ih, 4); }
-                    for (int r = 0; r < C2_TEX_SLOTS; r++) {   // a combined slot past 31 is written when it is bound and the image slot it shares is not (Hades II binds texture slot 34, no image)
-                        if (r >= 32 && (!tx[r] || (r - 32 < C2_IMG_SLOTS && im[r - 32]))) continue;
-                        uint32_t v = !dyn ? (uint32_t)tx[r] : !tx[r] ? 0 : (uint32_t)r | (tx[r] >> 20 ? (uint32_t)r << 20 : 0); memcpy(d + C2_TEX + 8 * r, &v, 4); }
-                    for (int r = 0; r < 128; r++) { uint64_t h = tx[NVN_SEPTEX_SLOT0 + r]; uint32_t v = !dyn ? (uint32_t)h : h ? (uint32_t)r : 0; memcpy(d + C2_SEPTEX + 8 * r, &v, 4); }
-                    for (int r = 0; r < 128; r++) { uint64_t h = S.samp[nvn_stage][r]; uint32_t v = !dyn ? (uint32_t)h : h ? (uint32_t)r << 20 : 0; memcpy(d + C2_SAMP + 8 * r, &v, 4); }
-                }
+                id<MTLBuffer> db; size_t doff = arena_alloc(DRV_SIZE, &db); uint8_t *d = (uint8_t *)db.contents + doff;
+                if (!nvn_fill_driver_bank(nvn_stage, bank, d, sh->rf.dyn, g_draw_binst, g_dispatch_dim))   // the segment's bytes from the bindings (nvn_resolve.c)
+                    RED_ONCE(45, "stage %d shader reads driver segment c0; the storage buffer table base was never measured", nvn_stage);
+                if (bank == 0 && nvn_stage == 5) { g_c0_dim_buf = db; g_c0_dim_off = doff + 0x200; }   // where an indirect dispatch copies its GPU-written counts over the dispatch size
                 slots[aid] = g_cur_arena->gpu + doff;
                 USE(db, MTLResourceUsageRead);
             }
@@ -9657,7 +9570,7 @@ void mtl_res_snapshot(mtl_res_count *out) {
     out->live_tex = g_by_serial.n;
     pthread_mutex_unlock(&g_smu);
     pthread_mutex_lock(&g_mu);
-    out->pools = (uint32_t)g_npool;
+    out->pools = (uint32_t)nvn_pool_count();
     out->pool_adds = g_pool_adds;
     pthread_mutex_unlock(&g_mu);
     os_unfair_lock_lock(&g_rmu);

@@ -24,6 +24,8 @@ t_hmap
 t_cover
 t_state
 t_gpuwrite
+t_resolve
+t_pools
 t_fuse_check
 t_fuse_check.dSYM/
 t_perf_order

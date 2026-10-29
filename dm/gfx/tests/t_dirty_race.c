@@ -2,7 +2,7 @@
 // Scene: thread A, in nvn_dirty_protect, has already recorded the page state as "protected" while its mprotect has not landed yet; thread B now arrives with prep_write (the unprotect done before the host writes into guest memory,
 // for example the movie decoder thread writing a frame into texture storage, or a disk read into a guest buffer). Old implementation: B sets the state back to "none", then A's mprotect lands => the page is read-only while its state is "none" --
 //   when the host reads a file into it again: prep_write sees state "none" and skips, the system call does not go through the page-fault handler and fails with EFAULT; when a game thread writes directly: the page-fault handler only returns "re-execute" and spins forever.
-// How it is staged: the mprotect in nvn_dirty.c is replaced by t_mprotect here -- before the call with which A sets read-only lands, B is let in and given 100 ms, so the order is deterministic.
+// How it is staged: the plat_vm_protect call of nvn_dirty.c is replaced by t_mprotect here -- before the call with which A sets read-only lands, B is let in and given 100 ms, so the order is deterministic.
 // Expected values do not depend on the implementation under test: after B's prep_write returns, this page must really be writable (reading 16 bytes into it gives 16; writing one byte directly does not hang and reads back as written),
 // and this write must be recorded as dirty (nvn_dirty_since returns 1 for a stamp taken before the page was set read-only).
 #include <stdatomic.h>
@@ -15,9 +15,11 @@ static void t_before_store(const volatile void *object);
     t_before_store(object_); \
     __c11_atomic_store(object_, desired_, __ATOMIC_SEQ_CST); \
 } while (0)
-#define mprotect t_mprotect
+#define plat_vm_protect t_mprotect   // nvn_dirty.c protects through the platform layer (step M6); its PLAT_PROT_* values equal PROT_*
+#include <sys/mman.h>   // mmap, mprotect, PROT_*: nvn_dirty.c itself reaches them through the platform layer since step M6
+#include <unistd.h>      // usleep
 #include "../nvn/nvn_dirty.c"
-#undef mprotect
+#undef plat_vm_protect
 int mprotect(void *, size_t, int);
 #include <fcntl.h>
 #include <errno.h>

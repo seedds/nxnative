@@ -1,8 +1,8 @@
 # Vulkan translation chain tool fingerprints (written by dmsh_chain_vk.py --update-lock in the chain image, docker/Dockerfile.chain; regenerate after changing
 # a tool and commit it). The dlls hold on every OS; a row named <tool>_<platform> only on that platform
-dmsh_xlate_vk.dll	ebbb74322adcee2b
-Ryujinx.Graphics.Shader.dll	98193cdf93713992
-Ryujinx.Common.dll	c8bd313fabf558ae
+dmsh_xlate_vk.dll	dc00acfaed1f770b
+Ryujinx.Graphics.Shader.dll	521cc87831946a31
+Ryujinx.Common.dll	b85c761a1246bb9e
 xlate_source	8dd96129dbf1ea05
 spirv-tools_linux-x64	SPIRV-Tools v2025.1 unknown hash, 2026-05-13T06:03:38+00:00
 glslang_linux-x64	Glslang Version: 11:15.1.0

@@ -11,6 +11,7 @@
 #include <llvm/ADT/StringExtras.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/FPEnv.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
@@ -65,7 +66,8 @@ namespace detail {
 using namespace Dynarmic;
 
 FunctionLifter::FunctionLifter(llvm::Module& module, const Region& region, const decode::CodeReader& read, const LiftOptions& options)
-        : M(module), C(module.getContext()), B(module.getContext()), region(region), read(read), opts(options), fpcr(options.fpcr & kFpcrModeMask) {}
+        : M(module), C(module.getContext()), B(module.getContext()), region(region), read(read), opts(options), fpcr(options.fpcr & kFpcrModeMask),
+          plan(options.plan) {}
 
 // ---- Phase 1 ----
 
@@ -179,15 +181,12 @@ static void ForwardVectorRegisters(IR::Block& block) {
 
 void FunctionLifter::Discover(Lifted& out) {
     std::deque<uint64_t> work{region.entry};
+    if (Fn()) {
+        work.insert(work.end(), plan->roots.begin(), plan->roots.end());
+    }
     std::set<std::string> unsupported;
     std::set<IR::Opcode> seen;
-    while (!work.empty()) {
-        const uint64_t pc = work.front();
-        work.pop_front();
-        if (blocks.count(pc) || blocks.size() >= region.max_blocks) {
-            continue;
-        }
-        IR::Block block = decode::TranslateBlock(pc, read, fpcr);
+    const auto passes = [this](IR::Block& block) {
         if (!opts.target.sha) {
             // SHA-256 without SHA-NI: dynarmic's own polyfill, in IR operations the lowering covers (ir/opt/polyfill_pass.cpp)
             Optimization::PolyfillPass(block, Optimization::PolyfillOptions{.sha256 = true, .vector_multiply_widen = false});
@@ -195,6 +194,18 @@ void FunctionLifter::Discover(Lifted& out) {
         ForwardVectorRegisters(block);
         Optimization::IdentityRemovalPass(block);
         Optimization::DeadCodeElimination(block);
+    };
+    while (!work.empty()) {
+        const uint64_t pc = work.front();
+        work.pop_front();
+        if (blocks.count(pc) || blocks.size() >= region.max_blocks || (Fn() && !InRegion(pc))) {
+            continue;
+        }
+        IR::Block block = decode::TranslateBlock(pc, read, fpcr, Fn() ? &inst_pcs : nullptr);
+        passes(block);
+        if (Fn()) {
+            FnRelative(pc, block, passes);
+        }
         for (const auto& inst : block) {
             if (!IsLowered(inst.GetOpcode())) {
                 unsupported.insert(OpcodeName(inst.GetOpcode()));
@@ -204,8 +215,12 @@ void FunctionLifter::Discover(Lifted& out) {
             }
         }
         std::vector<uint64_t> next;
-        Successors(block.GetTerminal(), block, next);
-        if (region.calls || region.tables) {
+        if (Fn()) {
+            FnClassify(pc, block, next);
+        } else {
+            Successors(block.GetTerminal(), block, next);
+        }
+        if (!Fn() && (region.calls || region.tables)) {
             const uint64_t end = A64::LocationDescriptor{block.EndLocation()}.PC();
             const auto word = end >= 4 ? read(end - 4) : std::nullopt;
             const bool is_call = word && ((*word & 0xFC000000u) == 0x94000000u || (*word & 0xFFFFFC1Fu) == 0xD63F0000u);  // bl, blr
@@ -252,20 +267,37 @@ std::string FunctionLifter::Dump() {
 
 Lifted FunctionLifter::Run(const std::string& name) {
     Lifted out;
+    stats = &out;
     Discover(out);
     if (!out.unsupported.empty()) {
         return out;
     }
 
-    auto* fn_type = llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false);
-    F = llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, name, M);
-    F->addFnAttr(llvm::Attribute::NoUnwind);
-    F->addFnAttr(llvm::Attribute::getWithUWTableKind(C, llvm::UWTableKind::Async));
-    F->addParamAttr(0, llvm::Attribute::NoAlias);
-    F->addParamAttr(0, llvm::Attribute::NoCapture);
-    F->addParamAttr(0, llvm::Attribute::NonNull);
-    F->addParamAttr(0, llvm::Attribute::getWithAlignment(C, llvm::Align(64)));
-    F->addParamAttr(0, llvm::Attribute::getWithDereferenceableBytes(C, sizeof(dm_guest_state)));
+    if (Fn()) {
+        // Function mode: the body was declared with the convention's signature (src/build); st is its first argument
+        F = plan->fn;
+        F->addFnAttr(llvm::Attribute::NoUnwind);
+        F->addFnAttr(llvm::Attribute::getWithUWTableKind(C, llvm::UWTableKind::Async));
+        F->addFnAttr("probe-stack", "inline-asm");
+        F->addFnAttr("frame-pointer", "none");
+        F->addParamAttr(0, llvm::Attribute::NoAlias);
+        F->addParamAttr(0, llvm::Attribute::NonNull);
+        F->addParamAttr(0, llvm::Attribute::getWithAlignment(C, llvm::Align(64)));
+        F->addParamAttr(0, llvm::Attribute::getWithDereferenceableBytes(C, sizeof(dm_guest_state)));
+        if (plan->debug) {
+            F->setSubprogram(plan->debug);
+        }
+    } else {
+        auto* fn_type = llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false);
+        F = llvm::Function::Create(fn_type, llvm::GlobalValue::ExternalLinkage, name, M);
+        F->addFnAttr(llvm::Attribute::NoUnwind);
+        F->addFnAttr(llvm::Attribute::getWithUWTableKind(C, llvm::UWTableKind::Async));
+        F->addParamAttr(0, llvm::Attribute::NoAlias);
+        F->addParamAttr(0, llvm::Attribute::NoCapture);
+        F->addParamAttr(0, llvm::Attribute::NonNull);
+        F->addParamAttr(0, llvm::Attribute::getWithAlignment(C, llvm::Align(64)));
+        F->addParamAttr(0, llvm::Attribute::getWithDereferenceableBytes(C, sizeof(dm_guest_state)));
+    }
     st = F->getArg(0);
     st->setName("st");
 
@@ -285,8 +317,13 @@ Lifted FunctionLifter::Run(const std::string& name) {
     for (auto& [pc, block] : blocks) {
         bbs[pc] = BasicBlock::Create(C, "pc_" + llvm::utohexstr(pc), F);
     }
-    exit_bb = BasicBlock::Create(C, "exit", F);
-    Prologue();
+    if (Fn()) {
+        FnDataflow();
+        FnPrologue();
+    } else {
+        exit_bb = BasicBlock::Create(C, "exit", F);
+        Prologue();
+    }
     for (auto& [pc, block] : blocks) {
         B.SetInsertPoint(bbs[pc]);
         LowerBlock(block);
@@ -294,11 +331,15 @@ Lifted FunctionLifter::Run(const std::string& name) {
             break;
         }
     }
-    if (error.empty()) {
+    if (error.empty() && !Fn()) {
         Epilogue();
     }
     if (!error.empty()) {
-        F->eraseFromParent();
+        if (Fn()) {
+            F->deleteBody();  // declared by the caller, who replaces the body (src/build: a stub for the JIT)
+        } else {
+            F->eraseFromParent();
+        }
         out.error = error;
         return out;
     }
@@ -389,6 +430,10 @@ void FunctionLifter::LowerBlock(IR::Block& block) {
     cur_call = call == call_effects.end() ? nullptr : &call->second;
     const auto table = table_targets.find(A64::LocationDescriptor{block.Location()}.PC());
     cur_table = table == table_targets.end() ? nullptr : &table->second;
+    cur_start = A64::LocationDescriptor{block.Location()}.PC();
+    if (Fn()) {
+        cur_dirty = dirty_in[cur_start] | gen[cur_start];
+    }
     for (auto& inst : block) {
         if (inst.GetOpcode() == IR::Opcode::Void) {
             continue;
@@ -398,13 +443,25 @@ void FunctionLifter::LowerBlock(IR::Block& block) {
                     OpcodeName(inst.GetOpcode());
             return;
         }
+        cur_inst = &inst;
+        if (Fn() && plan->debug) {
+            B.SetCurrentDebugLocation(llvm::DILocation::get(C, static_cast<unsigned>(CurOffset()), 0, plan->debug));
+        }
         LowerInst(inst);
         if (!error.empty()) {
             return;
         }
     }
+    cur_inst = nullptr;
+    if (Fn() && plan->debug) {
+        B.SetCurrentDebugLocation(llvm::DILocation::get(C, static_cast<unsigned>(CurOffset()), 0, plan->debug));
+    }
     if (!terminated) {
-        LowerTerminal(block.GetTerminal());
+        if (Fn()) {
+            FnLowerTerminal(block.GetTerminal());
+        } else {
+            LowerTerminal(block.GetTerminal());
+        }
     }
 }
 
@@ -497,6 +554,10 @@ void FunctionLifter::LowerTerminal(const IR::Terminal& t) {
 }
 
 void FunctionLifter::Goto(Value* target) {
+    if (Fn()) {
+        FnGoto(target);
+        return;
+    }
     if (auto* k = llvm::dyn_cast<ConstantInt>(target)) {
         const auto it = bbs.find(k->getZExtValue());
         if (it != bbs.end()) {
@@ -540,6 +601,10 @@ Value* FunctionLifter::Opaque(llvm::Type* t) {
 }
 
 void FunctionLifter::Exit(Value* pc, uint32_t reason, Value* arg) {
+    if (Fn()) {
+        FnExit(pc, reason);
+        return;
+    }
     StoreField(pc, offsetof(dm_guest_state, pc));
     StoreField(I(32, reason), offsetof(dm_guest_state, exit_reason));
     StoreField(arg, offsetof(dm_guest_state, exit_arg));
@@ -622,11 +687,18 @@ Value* FunctionLifter::Get(const IR::Value& v) {
 
 Value* FunctionLifter::Arg(const IR::Inst& inst, size_t i) {
     const IR::Value a = inst.GetArg(i);
+    if (Fn() && a.IsImmediate() && relative.count({&inst, i})) {
+        return Rel(a.GetU64());  // an address the code built from its pc: base + offset (section 3.3)
+    }
     return As(Get(a), TypeOf(a.GetType()));
 }
 
 Value* FunctionLifter::ArgAs(const IR::Inst& inst, size_t i, llvm::Type* t) {
-    return As(Get(inst.GetArg(i)), t);
+    const IR::Value a = inst.GetArg(i);
+    if (Fn() && a.IsImmediate() && relative.count({&inst, i})) {
+        return As(Rel(a.GetU64()), t);
+    }
+    return As(Get(a), t);
 }
 
 const Flags& FunctionLifter::FlagsArg(const IR::Inst& inst, size_t i) {
@@ -1029,7 +1101,14 @@ bool FunctionLifter::LowerContext(IR::Inst& inst) {
         Def(inst, B.getInt32(kCntfrq));
         return true;
     case Opcode::A64GetCNTPCT:
-        Def(inst, LoadField(B.getInt64Ty(), offsetof(dm_guest_state, cnt)));
+        if (Fn() && plan->rt_counter) {
+            // Section 8: a preserve_most call to the host's clock (19.2 MHz guest ticks), so the call site keeps its registers
+            auto* call = B.CreateCall(plan->rt_counter, {st});
+            call->setCallingConv(plan->rt_counter->getCallingConv());
+            Def(inst, call);
+        } else {
+            Def(inst, LoadField(B.getInt64Ty(), offsetof(dm_guest_state, cnt)));
+        }
         return true;
     case Opcode::A64GetCTR:
         Def(inst, B.getInt32(kCtr));
@@ -1075,6 +1154,10 @@ bool FunctionLifter::LowerContext(IR::Inst& inst) {
             return true;
         }
         StoreField(B.getInt32(0), offsetof(dm_guest_state, excl_valid));
+        if (Fn()) {
+            FnSvc(Arg(inst, 0), last_pc);  // a host call; the block's terminal goes on at the next instruction
+            return true;
+        }
         Exit(last_pc, DM_EXIT_SVC, Arg(inst, 0));
         terminated = true;
         return true;
@@ -1413,8 +1496,12 @@ bool FunctionLifter::LowerInteger(IR::Inst& inst) {
 // ---- Memory ----
 
 llvm::Instruction* FunctionLifter::Mark(llvm::Instruction* i) {
-    // Guest memory accesses carry !nxaot.guest (section 9.2), for the code-generation checks and later passes
+    // Guest memory accesses carry !nxaot.guest (section 9.2), for the code-generation checks and later passes; in a pack, a line-table entry
+    // too (section 3.5: a fault there is reported at its guest instruction, 5.4)
     i->setMetadata("nxaot.guest", llvm::MDNode::get(C, {}));
+    if (Fn()) {
+        LineEntry(i, CurOffset());
+    }
     return i;
 }
 

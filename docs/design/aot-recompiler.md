@@ -132,6 +132,8 @@ The logical convention (decided):
 
 Mapping onto LLVM (fixed by measurement in phase 1, section 14):
 
+Chosen in phase 1: swifttailcc (`st` as swiftself), the default of `nxaot build`; measured against ghccc (LLVM 18.1 has no `preserve_nonecc`, ghccc is its stock predecessor with the same register property): 2.2 ns (5.4 TSC cycles) per call and return in both, ghccc 10 to 30 % more reloads on the corpus and one loop twice as slow [V: dm/tools/aot/README.md, "Phase 1: calls, the dispatcher, a jump table, throughput"].
+
 - Guest tail calls (`b <function>`, `br xN` ending a function) must be real tail calls: guest tail-call chains can be unbounded (state machines). Candidates [V: LangRef]: `swifttailcc` (the callee pops the argument area, "so that mandatory tail calls are possible", with `st` as `swiftself`), and `preserve_none` with one uniform signature and `musttail` (all general registers carry arguments; none is callee-saved). The criterion is cycles per call and return and spills on call-heavy guest code from the corpus (section 12). If neither meets the target, a calling convention of its own is a patch to LLVM, which is the user's decision (section 15).
 - Slow-path helpers (dispatch misses, NaN recomputation, safepoints, observers) use `preserve_most` or `preserve_all`, so their call sites force no spills [V: LangRef: on x86-64 the callee preserves every general register except R11 and the return registers; `preserve_all` also the XMM/YMM registers].
 - Every address-taken function also gets a standard entry with one fixed signature, used by indirect calls and the JIT, which tail-calls its specialised body.
@@ -405,12 +407,14 @@ Model: `T = T_analyse + Σ T_compile(function, tier) / workers + T_link`. The th
 
 | Step | Guest instructions per second per core |
 |---|---|
-| decoding, discovery, summaries | at least 10 million |
-| lifting to IR | 2 to 5 million |
-| tier C | 150,000 to 300,000 |
-| tier W | 50,000 to 100,000 |
-| tier H | 15,000 to 30,000 |
-| linking | 10 to 30 s per pack |
+| decoding, discovery, summaries | 38,000 (estimated at least 10 million) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
+| lifting to IR | 150,000 (estimated 2 to 5 million) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
+| tier C | 23,600 (estimated 150,000 to 300,000) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
+| tier W | 6,700 (estimated 50,000 to 100,000) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
+| tier H | 6,500 at O2 (estimated 15,000 to 30,000; H+ at O3: 6,200) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
+| linking | 0.005 s per module of the corpus with lld as a library (estimated 10 to 30 s per pack) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
+
+Measured in phase 1 over the corpus (14 NROs, 86,141 guest instructions, one thread, one tier per module; dm/tools/aot/README.md, "Measurements").
 
 Estimates on the reference machine: 4 cores and 8 threads (Core i3-10100 class, x86-64-v3), 8 GB of RAM, a SATA SSD, about 4 compile workers of about 1 GB each [A]:
 

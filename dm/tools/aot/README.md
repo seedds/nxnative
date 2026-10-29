@@ -3,16 +3,20 @@
 Phase 2 of the Windows and Linux port ([migration-status.md](../../../docs/design/migration-status.md)); the design is
 [aot-recompiler.md](../../../docs/design/aot-recompiler.md). This folder holds its foundation and its floating point: the build, the lifter of the
 integer, memory, branch, system-register, exclusive, floating-point, Advanced SIMD and cryptographic instruction classes (every IR opcode dynarmic's
-A64 frontend emits), the differential vector harness against dynarmic, a benchmark of the NaN chains, and the census of phase 0; and of phase 1 the
+A64 frontend emits), the differential vector harness against dynarmic, a benchmark of the NaN chains, and the census of phase 0; and phase 1: the
 module loader (NROs and behaviour images with their manifests), function discovery over whole modules with jump tables recovered on the lifted IR,
-exclusive windows and interprocedural summaries, and a corpus of self-checking homebrew NROs with no game files. No game runs through it yet, and
-nothing here touches the Apple builds.
+exclusive windows and interprocedural summaries, a corpus of self-checking homebrew NROs with no game files, whole functions lifted with the calling
+convention of design 2.3 (calls, returns checked against lr, real tail calls, non-local returns), the dispatcher of section 4 (jump tables as
+switches, inline caches, the lookup table), the pack stage (`nxaot build`: one object and one shared object per module, linked by lld as a
+library), and a minimal native run time (`nxaot_host`): the fourteen corpus NROs run natively on x86-64 and print what dynarmic prints. No game runs
+through it yet, and nothing here touches the Apple builds.
 
 ## What exists
 
 | Piece | Where | What it does |
 |---|---|---|
-| State block | [include/nxaot/guest_state.h](include/nxaot/guest_state.h) | `dm_guest_state` of design section 2.1, C, 64-byte aligned, every offset asserted; host-only fields `cnt` (the counter `mrs cntpct_el0` / `cntvct_el0` read) and `exit_reason` / `exit_arg` |
+| State block | [include/nxaot/guest_state.h](include/nxaot/guest_state.h) | `dm_guest_state` of design section 2.1, C, 64-byte aligned, every offset asserted; host-only fields `cnt` (the counter `mrs cntpct_el0` / `cntvct_el0` read in a region; a pack calls the host instead) and `exit_reason` / `exit_arg` |
+| Pack descriptor | [include/nxaot/aot_module.h](include/nxaot/aot_module.h) | what a pack's library holds for a module (the descriptor, the lookup table, function map and line table, the inline-cache descriptors) and what it imports from the host (the SVC path, the miss path, traps, the counter), C |
 | Decoder glue | [src/decode/translate.cpp](src/decode/translate.cpp) | dynarmic's A64 translation loop with nxaot's options (hints raise their exceptions, wall-clock counter) and the encodings dynarmic leaves to an interpreter that nxaot translates itself (`mrs xN, cntvct_el0`) |
 | Lifter | [src/lift/lifter.cpp](src/lift/lifter.cpp), [src/lift/opcodes.cpp](src/lift/opcodes.cpp) | dynarmic IR blocks of a region to one LLVM function `void f(dm_guest_state *st)`: registers (x0..x30, SP, v0..v31) in allocas that SROA / mem2reg promote, NZCV as four `i1` compared directly against the operands of the `subs` / logical operation that set them, stored only when written; guest memory as `inttoptr` volatile accesses (alignment 1, 16 bytes for `ldr q`), `ldar` acquire, `stlr` sequentially consistent, exclusives as `cmpxchg` against `st->excl_*`, `dc zva` zeroing the aligned 64 bytes; `svc`, `brk`, `udf` and undefined encodings leave with `st->pc` and `st->exit_reason`. A region holding an IR opcode the lowering does not cover is refused whole |
 | Floating point and SIMD | [src/lift/lower_fp.cpp](src/lift/lower_fp.cpp), [lower_vector.cpp](src/lift/lower_vector.cpp), [lower_crypto.cpp](src/lift/lower_crypto.cpp), [function_lifter.h](src/lift/function_lifter.h) | the lowering of section 7: FPCR as a compile-time specialisation, the NaN chains, Arm's NaN, min / max, rounding and conversion rules, saturation with FPSR.QC, the cumulative exception flags, AES-NI / SHA-NI / PCLMULQDQ with software forms ("Floating point and SIMD" below) |
@@ -20,13 +24,17 @@ nothing here touches the Apple builds.
 | ORC JIT | [src/lift/jit.cpp](src/lift/jit.cpp) | LLVM 18 ORC LLJIT, the default O2 pipeline, the host's CPU (`getHostCPUName` and its features) or a named level (`--cpu x86-64-v3`); the helpers as absolute symbols; the x86 assembly of a module (nxaot_bench) |
 | Vector harness | [src/vec/](src/vec/) (`nxaot_vec`) | every vector on dynarmic's own A64 JIT (the reference) and as lifted code, from one initial state; compares x0..x30, SP, NZCV, FPCR, FPSR (QC and the cumulative flags), TPIDR_EL0, v0..v31, the exit (pc, reason, svc number) and the 64 KiB memory image byte for byte. It runs lifted code as a host gate would: MXCSR from FPCR before, its flags into FPSR after, and a continuation lifted for the new pc and FPCR after a normal exit inside the code (`msr fpcr`) |
 | Vectors | [tests/vectors/](tests/vectors/), written by [tests/gen_vectors.py](tests/gen_vectors.py) and [tests/gen_fp_simd.py](tests/gen_fp_simd.py) | 179,296 vectors: 24,400 integer ones as `.tsv` (encodings written by hand from the Arm ARM), 154,896 floating-point and SIMD ones as `.tsv.gz` (every form of dynarmic's decoder table, fields swept, lanes of special values, 13 FPCR values: the variants of design section 12 and mixes) |
-| Benchmark | [src/bench/main.cpp](src/bench/main.cpp) (`nxaot_bench`) | the cost of the NaN-chain checks, the x86 instructions lifted code compiles to, the instructions per guest memory access ("Measurements") |
+| Benchmark | [src/bench/main.cpp](src/bench/main.cpp), [calls.cpp](src/bench/calls.cpp) (`nxaot_bench`) | the cost of the NaN-chain checks, the x86 instructions lifted code compiles to, the instructions per guest memory access; the two calling conventions on synthetic call chains and on the corpus (time per call, spills), the dispatcher per `blr` hit and miss, a jump table, int_ops natively against dynarmic, the pack stage's throughput per tier ("Measurements") |
 | Census | [src/analysis/census.cpp](src/analysis/census.cpp) (`nxaot census`) | phase 0's numbers over a raw code blob as `key<TAB>count` lines |
 | Reach | [src/analysis/reach.cpp](src/analysis/reach.cpp) (`nxaot opcodes --reach`) | every entry of dynarmic's A64 decoder table translated with random fields: the opcodes the A64 frontend can emit; `--check` fails when one is not lowered |
 | Module loader | [src/module/](src/module/) (`nxaot module`, `nxaot image`, `nxaot manifest`) | an NRO, or a behaviour image with its manifest (design 1.1, 1.2), as one image keyed by its SHA-256 (1.4): segments, MOD0, the dynamic section, symbols, init and fini arrays, RELA / JMPREL / RELR relocations, `.eh_frame_hdr`, FDEs, LSDAs, data blocks in text; the manifest parser and writer ("Module loader and discovery") |
 | Discovery | [src/analysis/discover.cpp](src/analysis/discover.cpp), [jumptable.cpp](src/analysis/jumptable.cpp), [summary.cpp](src/analysis/summary.cpp) (`nxaot discover`) | design 1.3 over a whole module: function entries from every source with their provenance, a CFG per function, jump tables on the lifted IR, exclusive windows, the summaries of 2.3, the coverage of the text |
-| Reference runner | [src/run/main.cpp](src/run/main.cpp) (`nxaot_run`) | a corpus NRO under dynarmic's A64 JIT with the corpus's two SVCs: the corpus's reference output on x86 |
+| Reference runner | [src/run/main.cpp](src/run/main.cpp) (`nxaot_run`) | a corpus NRO under dynarmic's A64 JIT with the corpus's two SVCs: the corpus's reference output on x86; `--set` writes a symbol before the run, `--fastmem` gives dynarmic direct memory access (the throughput comparison) |
 | Corpus | [corpus/](corpus/) | seven self-checking C programs with a crt0 of their own, built with devkitA64 and with clang into fourteen committed NROs ("The corpus") |
+| Function mode | [src/lift/lower_calls.cpp](src/lift/lower_calls.cpp), [lifter.h](src/lift/lifter.h) (`FunctionPlan`, `Convention`) | one guest function as one LLVM function of the convention of design 2.3, swifttailcc or ghccc: calls, returns checked against lr, tail calls, the inline caches, svc as a host call, the stores and reloads the summaries allow ("Calls and returns") |
+| Pack stage | [src/build/](src/build/) (`nxaot build`) | the convention facts of a module (PASS, WRITES, LIVE_AFTER, RV, resume points: [plan.h](src/build/plan.h)), every function lifted into one module with the standard entries, the lookup table, the function map, the line table and the descriptor of [include/nxaot/aot_module.h](include/nxaot/aot_module.h); the tiers of design 9.3; an object, and a shared object by lld as a library |
+| Native run time | [src/rt/](src/rt/) (`nxaot_host`) | the arena below 2^39, the image at its one-to-one address, the library by `dlopen` with its identity checked, the state block, the SVC path, the dispatcher's miss path, traps and faults through the line table, the counter ("The native run time") |
+| Per-function differential test | [src/rt/funcdiff.cpp](src/rt/funcdiff.cpp) (`nxaot_funcdiff`) | every function of a module from one register and memory snapshot under the recompiled code and under dynarmic, final registers and written memory compared (design 12, item 2) |
 | Runner | [tests/run_aot_tests.sh](tests/run_aot_tests.sh) | runs the tests and the benchmark and writes `logs/aot/` ([logs/README.md](../../../logs/README.md)) |
 | CI | [.github/workflows/aot.yml](../../../.github/workflows/aot.yml) | the image, the build, CTest and the runner on every pull request and push to `main` and `multiplataforma` |
 
@@ -42,7 +50,8 @@ Ninja, Python 3.12 and the Boost headers:
 docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 
 # configure, build, CTest (the vectors, the crypto vectors for x86-64-v3, the per-operation NaN mode, the reach check, the census, the vectors-current
-# check, discovery over the corpus, the manifest test, the corpus reference run, the fp cases current)
+# check, discovery over the corpus, the manifest test, the corpus reference run, the fp cases current, the corpus run natively, the per-function
+# differential test); --tmpfs /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on a machine short of disk
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
 
@@ -57,8 +66,10 @@ registry first (`docker push`, then the digest it prints), as the llvm-mingw ima
 already, and its packages are the Ubuntu 24.04 versions of the day it is built: `nxaot.lock` and the configure check keep LLVM at 18.1.3.
 
 Linking: `libLLVM-18.so` from the image (the Ubuntu package is built with `LLVM_LINK_LLVM_DYLIB`); `-DNXAOT_LLVM_STATIC=ON` links the component
-libraries statically instead, as the distributed `nxaot` will be (design section 13). zlib (which LLVM itself links) reads the `.tsv.gz` vectors. The
-build tree takes about 46 MB. On this repository's development machine (8 threads) the CTest run takes about 5 minutes, the vectors 4 of them.
+libraries statically instead, as the distributed `nxaot` will be (design section 13). zlib (which LLVM itself links) reads the `.tsv.gz` vectors; lld's
+ELF driver (`liblldELF.a`, the image's `liblld-18-dev`) links the packs. The build tree takes about 74 MB, and the tests' objects and shared objects
+(corpus_native, corpus_funcdiff, the benchmark) about 56 MB more. On this repository's development machine (8 threads) the CTest run takes about 9
+minutes: the vectors 4 of them, corpus_native and corpus_funcdiff 1.5 each.
 
 ## Running the harness and the census
 
@@ -71,7 +82,8 @@ build/aot/nxaot_vec --nan-mode perop dm/tools/aot/tests/vectors/fp.tsv.gz       
 build/aot/nxaot census <raw ARM64 code file> --base <hex address of its first byte>
 build/aot/nxaot opcodes                                    # every dynarmic IR opcode and whether the lifter lowers it
 build/aot/nxaot opcodes --reach --check                    # the opcodes the A64 frontend emits, the decoder entries that emit them; all lowered?
-build/aot/nxaot_bench                                      # the NaN-chain measurements
+build/aot/nxaot_bench                                      # the NaN-chain measurements, then phase 1's ("Measurements")
+build/aot/nxaot_bench --sections calls,dispatch,spills,int_ops,pack --work /tmp/x   # phase 1's only
 python3 dm/tools/aot/tests/gen_vectors.py                  # write the vectors again after changing a generator
 ```
 
@@ -216,9 +228,133 @@ every NRO with its compiler, flags and SHA-256. [tests/elf2nro.py](tests/elf2nro
 with), byte for byte what devkitPro's `elf2nro` writes, which `build_corpus.sh` checks on every build. The builds are reproducible: no timestamps,
 paths relative to the corpus folder, build IDs over the content; `--check` rebuilds byte-identically.
 
-Run so far: under dynarmic only (`nxaot_run`, CTest `corpus_ref`): all fourteen NROs print `PASS`, and the GCC and clang builds of each program the
-same lines, recorded in [corpus/expected/](corpus/expected/). Not run: natively on ARM64 hardware (an Apple-silicon Mac; nothing here can) and
-recompiled on x86 (the dispatcher and the host run time do not exist yet): both must print the expected lines.
+Run so far: under dynarmic (`nxaot_run`, CTest `corpus_ref`) and recompiled on x86-64 (`nxaot build` and `nxaot_host`, CTest `corpus_native`: both
+conventions, the correctness mode and the max mode): all fourteen NROs print `PASS`, the GCC and clang builds of each program the same lines, recorded
+in [corpus/expected/](corpus/expected/), and the native runs exactly what dynarmic prints. Not run: natively on ARM64 hardware (an Apple-silicon Mac;
+nothing here can). `int_ops` reads an exported `int_ops_rounds` (1 in the committed output) that a runner may set before the run (`--set
+int_ops_rounds=N`): its operation loop then runs N times, which the throughput measurement uses.
+
+## Calls and returns
+
+```sh
+build/aot/nxaot build dm/tools/aot/corpus/nro/fnptr-gcc.nro -o /tmp/x/fnptr.o --shared /tmp/x/fnptr.so   # balanced (tier W), swifttailcc
+build/aot/nxaot build ... --cc ghc --mode max --correctness --all-entries --cpu x86-64-v3 --spills --asm /tmp/x/fnptr.s
+```
+
+`nxaot build` ([src/build/pack.cpp](src/build/pack.cpp)) runs discovery, plans the convention ([src/build/plan.cpp](src/build/plan.cpp)) and lifts
+every function in **function mode** ([src/lift/lower_calls.cpp](src/lift/lower_calls.cpp)): one LLVM function per guest function, named
+`<module>+0x<offset>`, its blocks those its entry and its landing pads reach inside `[entry, limit)` (a block that runs to the limit continues in the
+next function by a tail call). Design 2.3, 3.3 and 4, as implemented:
+
+- **The convention's facts** (`FnFacts`): PASS = x0..x3 and the passable registers the function may read (its summary's `reads`); WRITES = the
+  summary's `writes`, plus v8..v15 when the function writes them at all (a `ldr d8` restore zeroes the high half, which callers must not keep);
+  LIVE_AFTER, a fixed point over every call site of the module (what is read before being written after the call; a tail call passes on its own
+  function's; an indirect site counts for every standard entry; the host reads x0, x1, v0..v3); RV, the v0..v3 returned in host registers: the
+  same over every chain of tail calls (a component of the tail-call graph; every standard entry is in one), the ones every returning member writes.
+- **Registers** live in allocas as in a region; at entry the passed ones come from the arguments, the rest from the block (unused loads go). A
+  forward data flow over the function's blocks gives the **dirty** registers (newer than their block copy) at every block end. A call stores
+  dirty - PASS(callee) - {sp, lr}, then takes x0, x1 and RV from the return value and reloads WRITES(callee); through the dispatcher it also stores
+  what it passes that the union of the possible callees may change (`CalleeView::exact`: the callee that runs stores only its own writes). A return
+  stores dirty & LIVE_AFTER & WRITES (not the returned registers), and the registers it restores whose block copy it changed before an inner call
+  (design 2.3: "stores the restored value again"); a tail call stores dirty - PASS(callee) and what its callers reload that the callee passes back
+  unchanged; svc, traps and non-local returns store every dirty register, so the block then holds the whole register file. Preserving callees keep
+  x19..x29 and SP in SSA across the call. **The correctness mode** (`--correctness`) stores every register at every call, tail call and return,
+  reloads every register after every call and takes nothing from arguments or return values: the reference the tests compare with.
+- **Two conventions** (`--cc`): **swifttailcc** (the default) with `st` as `swiftself` (R13), sp, lr, x0..x3 in RDI, RSI, RDX, RCX, R8, R9, x4..x7
+  on the stack and v0..v7 in XMM0..7, each function's signature carrying only what it reads (the callee pops its argument area, so `musttail`
+  between different prototypes is allowed); **ghccc**, the stand-in for preserve_none: LLVM 18.1, which `nxaot.lock` pins, has no `preserve_nonecc`
+  (it came with LLVM 19), and ghccc is the convention preserve_none generalises (every general register carries arguments, none is callee-saved): one
+  uniform signature, st, sp, lr, x0..x6 in R13, RBP, R12, RBX, R14, RSI, RDI, R8, R9, R15, v0..v5 in XMM1..6 (x7, v6, v7 through the block), frame
+  pointers off. Both return `{x0, x1, v0..v3}` in RAX, RDX, XMM0..3. swifttailcc is the default from the numbers ("Measurements"): calls and returns
+  cost the same in both (2.2 ns, 5.4 TSC cycles, for a leaf), ghccc reloads 10 to 30 % more on the corpus (no callee-saved host registers across
+  calls), and one loop was twice as slow under it; ghccc is 14 % faster on a chain of frame-building calls and on an inline-cache hit.
+- **Returns** (3.3): `ret` (and `br x30`, `ret xN`) compares its target with the lr the function was entered with; equal, a native `ret` (the
+  compare folds away where x30 is never written); else the whole register file to the block, the target in `st->pending` and a native return.
+  After every call one compare and branch on `st->pending`: a resume point of the call site (the LSDA landing pad covering it; every setjmp
+  continuation of the function, setjmp found by symbol) entered with this frame's SP takes it, reloading every register; otherwise the frame
+  returns at once, and the host dispatches what reaches it as a new call (a target with no compiled entry stops with the JIT-needed status: the
+  resume of a continuation in the middle of a function is the JIT's, phase 3). The sjlj program's longjmps (deep recursion, through a function
+  pointer, nested handlers, callee-saved registers) all resume this way.
+- **Calls and tail calls**: `bl` is a call of the callee's body with `lr = base + pc + 4`; `b`, `b.cond`, `cbz`, `tbz` to another function and a
+  fall into the next one are `musttail` calls; a call the summaries say does not return traps if it returns.
+- **Indirect branches** (4): a recovered jump table is an LLVM `switch` over module offsets (the target minus the base), a native jump table, its
+  other values going to the dispatcher; `blr` and unbounded `br` (fnptr's `unops[i % 6](x)` among them) go through a per-site **inline cache**:
+  the slot points at an immutable `{guest, native}` descriptor; a hit is the slot's load, the guest address's load and a compare (and the native
+  entry's load beside it), a miss calls the host through a `preserve_all` wrapper (`nxaot.dispatch`), which looks the target up in the module's
+  **lookup table** and publishes a descriptor in the slot. Every host-callable function (address-taken, the module's entry, exported; every
+  function with `--all-entries`) has a **standard entry** with the module's one signature (x0..x3 and what some address-taken function reads), which
+  stores what its body does not take and tail-calls the body.
+- **Addresses built from the pc** (adr, adrp, literal loads, return addresses, the pcs of svc and exceptions) are base-relative: the module runs
+  wherever the host maps it (`*desc->base`, one invariant load per function). Each block is translated a second time 2^44 higher, and every 64-bit
+  immediate that moved by exactly that much is such an address, lowered as `base + offset`.
+- **Host calls**: `svc` stores the dirty registers and `st->pc`, calls `dm_aot_svc(st, n)` (the C convention) and reloads x0..x8 (2.4); `mrs
+  cntpct_el0` is a `preserve_most` call of `dm_aot_cntpct` (8); `brk`, `udf`, undefined words, branches into the middle of other functions and `msr
+  fpcr` leaving the specialisation call `nxaot_rt_trap` with a reason (`include/nxaot/aot_module.h`). A function the lifter refuses becomes a body
+  that traps to the JIT (none in the corpus).
+- **Tables in the object** ([include/nxaot/aot_module.h](include/nxaot/aot_module.h)): `.nxaot.lookup` (open addressing, module offset ->
+  standard entry, self-relative), `.nxaot.fnmap` (every function's body and size), `nxaot_lines` (the line table, 3.5: every guest memory access's
+  native address and guest offset, written by LLVM's `!pcsections`; LLVM 18 keeps those on memory instructions only, so call sites map through the
+  DWARF line table, line = guest offset in a synthetic `<module>.s`, `--no-debug-info` drops it) and the exported descriptor `nxaot_module`.
+- **Tiers** (9.3, `--tier`): C (SROA, instcombine, simplifycfg, DCE; FastISel), W (LLVM's O1 pipeline, codegen Less), H (O2), H+ (O3, codegen
+  Aggressive). Without a profile the pack modes are one tier for every function: `balanced` W, `max` H+. One tier per module for now.
+
+Found by the tests and fixed in the lowering: a preserving callee that stored its own x29 before an inner call left that copy in the block, which a
+later callee saved in its frame record (nxaot_funcdiff, summary mode: the missing "store the restored value again" rule); an indirect call reloaded
+x3 from the block after the call because some address-taken function writes x3, while the leaf that ran stored nothing (nxaot_bench's blr loop never
+ended: the `exact` rule above).
+
+## The native run time
+
+```sh
+build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro       # the lines, as nxaot_run prints them; exit status of the run
+build/aot/nxaot_host /tmp/x/int_ops.so dm/tools/aot/corpus/nro/int_ops-gcc.nro --set int_ops_rounds=200 --quiet --repeat 5
+build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --relocate --set hidden_ptr=@0x1844   # a target with no entry: exit 3
+build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --lookup     # the module offsets the lookup table holds
+build/aot/nxaot build dm/tools/aot/corpus/nro/fnptr-gcc.nro -o /tmp/x/all.o --shared /tmp/x/all.so --all-entries --correctness
+build/aot/nxaot_funcdiff /tmp/x/all.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --seeds 3   # every function against dynarmic
+python3 dm/tools/aot/tests/test_corpus_native.py --nxaot build/aot/nxaot --nxaot-host build/aot/nxaot_host --nxaot-run build/aot/nxaot_run --work /tmp/x
+python3 dm/tools/aot/tests/test_funcdiff.py --nxaot build/aot/nxaot --nxaot-funcdiff build/aot/nxaot_funcdiff --work /tmp/x [--cc ghc]
+```
+
+[src/rt/host.h](src/rt/host.h), the minimal form of what the host will do (design 2.4, 3.3, 4, 5, 6.5, 8, 9.4), as a library (`nxaot_rt`) that
+nxaot_host, nxaot_funcdiff and nxaot_bench share. Decision against 9.4: the pack is a shared object linked by lld as a library inside `nxaot build`,
+and the host loads it with `dlopen`, as the design's host loads the pack's library (no LLVM in the host; the library's imports resolve against the
+executable, which exports them).
+
+- **The arena** (5.2): 8 GiB reserved at 2^36 (64 GiB, below 2^39) with `MAP_FIXED_NOREPLACE`, nothing accessible until mapped: the host-return
+  address `arena + 0x10` (no code), the main thread's guest stack (1 MiB at +16 MiB), its TLS block, a scratch area for nxaot_funcdiff, and the
+  module's image at +256 MiB, its one-to-one guest address (5.1): text and read-only data readable and never executable (5.3: a jump into guest
+  text faults), data and bss writable. State blocks and native stacks are outside it.
+- **Loading** (9.4): the library's descriptor is checked against the image (ABI, SHA-256, sizes; a mismatch stops with a red line and status 2),
+  `*base` is written, the line table and the function map are read. `--relocate` applies the module's relocations as dm/host's loader does (the
+  corpus's crt0 then skips its own); `--set` writes a symbol.
+- **A run**: a state block (x0 = 0, x1 = -1 as nxaot_run, x30 = the host-return address, SP and `tpidr_el0` the host's stack and TLS block, the
+  monitor clear: 6.5, single-threaded, `st->excl_*` the local monitor), MXCSR of the module's FPCR (7.1), then `enter(st, standard entry of
+  _start)`; a non-local transfer that reaches the host is dispatched as a new call.
+- **What the library imports**: `dm_aot_svc` (svcOutputDebugString prints a line, svcExitProcess ends the run; other SVCs stop with status 5),
+  `nxaot_rt_dispatch` (the miss path: the lookup table, a descriptor per target published with a release store; no entry: `[RED] aot: the indirect
+  branch at module+0x... to 0x... (module+0x...) has no compiled entry: the JIT fallback (design section 11) is phase 3` and status 3),
+  `nxaot_rt_trap` (a red line per reason; brk and undefined words status 1, the JIT's cases status 3), `dm_aot_cntpct` (CLOCK_MONOTONIC as 19.2 MHz
+  ticks, `guest_ns * 12 / 625` as `svcGetSystemTick`), and the floating-point helpers of [src/lift/runtime.cpp](src/lift/runtime.cpp).
+- **Faults** (5.4 is the host's job): SIGSEGV, SIGBUS, SIGILL, SIGFPE and SIGTRAP in guest code, on an alternate stack, are reported with the
+  faulting address and the guest instruction the line table gives (`[RED] aot: SIGSEGV at address ... in guest code (host pc ..., in the function at
+  module+0x..., guest instruction module+0x...)`), status 4. Dirty tracking (write-protected pages resumed after the fault) is dm/host's.
+- **Exit statuses** (`rt::Status`): 0 svcExitProcess, 1 trap, 2 usage or a library that does not match, 3 the JIT fallback is needed, 4 fault, 5
+  an SVC the corpus run time does not answer, 6 a return where none may be (the guest returned to the host from _start, a no-return callee came
+  back), 7 timeout and 8 stopped at an svc (nxaot_funcdiff).
+
+**The per-function differential test** (`nxaot_funcdiff`, CTest `corpus_funcdiff`, design 12 item 2 in its simple form): a pack built with
+`--all-entries`; after the host relocated the image, every function runs three times from one snapshot under the recompiled code and under dynarmic
+(whose memory callbacks allow exactly what the native mapping allows), with registers drawn from a seed (pointers into data, the scratch area and
+the stack, small integers, and non-canonical values that fault at once in both). Runs that end the same way are compared: in the correctness mode
+every register (x0..x30, SP, NZCV, v0..v31) and every written page, in the summary mode what the convention gives a caller (x0, x1, v0..v3 at a
+return, x0..x7 at an svc) and every written page. Runs that leave for the JIT (a `blr` to a random value), fault in both, or time out are counted
+apart.
+
+What dm/host must provide for the integration: the arena allocator (`dm_guest_alloc`, 5.2) and the module loader's mapping into it, `dm_guest_call`
+on top of `enter` (2.4), `svc_dispatch` behind `dm_aot_svc` (the block's `x` is its register array), the host-function page's addresses in the
+lookup path (`dm_aot_hostcall` for targets inside the page), thread creation with a state block and a native stack per thread, the counter and the
+dirty-tracking fault hook, and the JIT fallback of section 11 behind `nxaot_rt_dispatch`'s and `nxaot_rt_trap`'s JIT cases.
 
 ## Floating point and SIMD
 
@@ -312,6 +448,73 @@ and was stopped for the fix; the second ended without a result (its container wa
 `simd_ldst` found that the generator left `sp`-based addresses at the seed's random `sp`, which can lie within 256 bytes of the image's ends
 (both executors faulted on the same address); the generator now sets `sp` as it sets other base registers. `simd_misc`, `simd_shift` and
 `crypto` ran before the FMA fix, which does not reach them.
+
+### Phase 1: calls, the dispatcher, a jump table, throughput
+
+`nxaot_bench --sections calls,dispatch,spills,int_ops,pack` on the same machine (Intel Core i9-13950HX, LLVM's `alderlake`, Docker, Linux without a
+GPU), every module built by `nxaot build` into a shared object and run by the native run time; synthetic programs of x3 = 20,000,000 iterations,
+best of 5. The TSC runs at 2.419 GHz (the cores turbo well above it: a TSC cycle is about two core cycles here). In the W rows every guest function
+is kept out of line (`noinline`), so that a call is a call; the H+ rows are built as the max mode builds (LLVM inlines the leaf and the tail chain:
+0). ns per operation, minus the baseline's time per iteration (the loop alone, 0.03 ns: LLVM unrolls its doubling), divided by the operations per
+iteration; blr_hit against the direct call, blr_miss against blr_hit.
+
+| Program | swifttail W | ghc W | swifttail H+ | ghc H+ | What one operation is |
+|---|---:|---:|---:|---:|---|
+| leaf | 2.22 ns, 5.4 cycles | 2.23 ns, 5.4 | 0 (inlined) | 0 | `bl` to `add x0, x0, x0; ret`: a call and a return |
+| chain8 | 2.58 ns, 6.2 | 2.23 ns, 5.4 | 1.34 ns, 3.2 | 1.20 ns, 2.9 | one of 8 nested calls, each function with a frame record (`stp` / `ldp x29, x30`) |
+| saved | 3.55 ns, 8.6 | 3.75 ns, 9.1 | 1.95 ns, 4.7 | 1.96 ns, 4.8 | an iteration: a call to a function that saves and uses x19, x20, with x19..x22 live across it |
+| tail4 | 2.20 ns, 5.3 | 2.22 ns, 5.4 | 0 | 0 | a call into 3 tail calls (`b`) and a return |
+| blr_hit | +0.91 ns, 2.2 | +0.70 ns, 1.7 | 3.07 ns, 7.4 | 2.61 ns, 6.3 | `blr` to the same leaf: the inline cache hits (W: over a direct call) |
+| blr_miss | +22.1 ns, 54 | +22.9 ns, 55 | +19.7 ns, 48 | +22.0 ns, 53 | `blr` alternating between two targets: every call misses (the dispatcher's lookup and the slot's update) |
+| switch8 | 2.53 ns, 6.1 | 5.42 ns, 13.1 | 2.95 ns, 7.1 | 2.89 ns, 7.0 | an iteration through a switch of 8 cases (a byte table, `br`), a native jump table |
+
+Spills and reloads of the register allocator (tier W), the text, and the run time of the program natively (best of 5, warm):
+
+| NRO | Convention | Spills | Reloads | Text bytes | Call and tail-call sites | Run ms |
+|---|---|---:|---:|---:|---:|---:|
+| fnptr-gcc | swifttail | 169 | 309 | 31,437 | 93 | 0.005 |
+| | ghc | 161 | 382 | 29,002 | | 0.005 |
+| fnptr-clang | swifttail | 210 | 266 | 27,581 | 74 | 0.005 |
+| | ghc | 208 | 346 | 25,498 | | 0.005 |
+| switch-gcc | swifttail | 314 | 646 | 205,373 | 102 | 0.144 |
+| | ghc | 328 | 741 | 202,506 | | 0.138 |
+| switch-clang | swifttail | 361 | 629 | 57,245 | 73 | 0.100 |
+| | ghc | 377 | 697 | 54,490 | | 0.109 |
+
+The conventions cost the same per call and return; ghccc has no callee-saved host registers, so what lives across a call is spilled to the native
+stack (10 to 30 % more reloads on the corpus), and its fixed argument registers took one loop (switch8) to twice the time; it is faster on a deep
+chain of frame-building calls (no callee-saved registers to push in each) and on an inline-cache hit. swifttailcc is the default. preserve_none
+(LLVM 19) is the convention to measure again when nxaot.lock moves.
+
+Integer throughput, `int_ops-gcc.nro` with `int_ops_rounds = 200` (398,275,757 guest instructions as dynarmic counts them; best of 5; the native
+and the dynarmic runs print the same lines):
+
+| Executor | Seconds | Guest instructions per second |
+|---|---:|---:|
+| native, swifttailcc, balanced | 0.0611 | 6,514 M |
+| native, ghccc, balanced | 0.0612 | 6,504 M |
+| dynarmic's JIT, memory callbacks (`nxaot_run`) | 0.4256 | 936 M |
+| dynarmic's JIT, fastmem (`nxaot_run --fastmem`) | 0.2631 | 1,514 M |
+
+The recompiled code runs int_ops 4.3 times as fast as dynarmic with fastmem, 7 times as fast as with memory callbacks.
+
+The pack stage over the whole corpus (14 NROs, 86,141 guest instructions, one thread, swifttailcc; guest instructions per second of each stage;
+`switch-gcc`, 51,097 of them, dominates):
+
+| Tier | Analysis (discovery, census, plan) | Lifting | Optimisation and code generation | Link (lld) per NRO | Text | Peak memory |
+|---|---:|---:|---:|---:|---:|---:|
+| C | 37,988 | 156,921 | 23,570 | 0.005 s | 1,465 KiB | 232 MiB |
+| W (balanced) | 38,005 | 148,691 | 6,700 | 0.006 s | 742 KiB | 232 MiB |
+| H | 37,823 | 150,710 | 6,535 | 0.006 s | 733 KiB | 232 MiB |
+| H+ (max) | 37,525 | 157,530 | 6,199 | 0.005 s | 775 KiB | 232 MiB |
+
+These are far below design section 10's estimates (at least 10 million for analysis, 2 to 5 million for lifting, 150,000 to 300,000 for tier C,
+50,000 to 100,000 for tier W): at these rates Monster Hunter Rise's 31 million instructions would take about 95 minutes on one core in the balanced
+mode (77 of them optimisation and code generation), against the target of 10 minutes on 4 cores. Where the time goes,
+per stage of `switch-gcc` at tier W: discovery 1.0 s (jump-table regions lifted afresh per br, summaries that translate each instruction again per
+pass), lifting 0.5 s, optimisation 1.4 s, code generation 3.7 s (DWARF line info costs 5 to 10 % of it). Code generation dominates; the functions
+carry an alloca per register, the pending check after every call and the NaN-chain cold blocks. Shards in parallel, the per-function cache and the
+caching of the analyses (design 10, 13) are phase 5's; the numbers are the measured starting point.
 
 ## The lock file
 
@@ -449,7 +652,7 @@ The phases of design section 14, and where this folder stands:
 | Phase | Content | Here |
 |---|---|---|
 | 0. Census | the numbers per module | `nxaot census` over raw code; NROs and behaviour images are read (`nxaot module`) and FDE coverage, LSDA counts and the address-taken set come out of `nxaot discover`, not yet as census keys; NSO decompression (LZ4) and setjmp imports are not done |
-| 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | the state block, the lifter of those classes (one region of blocks per function), the harness (0 mismatches over 24,400 integer vectors), the module loader (NROs, behaviour images and their manifests), discovery over whole modules with jump tables on the lifted IR, exclusive windows and the interprocedural summaries (the facts of 2.3), the corpus (fourteen NROs from two toolchains, `PASS` under dynarmic). Not done: the calling convention in code (2.3: the summaries exist, the lowering that uses them does not), calls and returns (3), the dispatcher (4), the host's SVC path (`svc` only leaves the function), safepoints, ThinLTO, the cache, the corpus run natively on Apple silicon and recompiled on x86 (it needs the dispatcher and the host run time), the throughput measurements |
+| 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | **done** except what follows: the lifter (0 mismatches over 24,400 integer vectors), the module loader, discovery, the summaries; function mode with the convention of 2.3 in two LLVM mappings (swifttailcc, the default by the measurements, and ghccc for preserve_none, which LLVM 18.1 lacks), calls, returns checked against lr, tail calls, `pending` propagation with resume points at setjmp continuations and landing pads, the correctness mode; jump tables as switches, inline caches, standard entries, the lookup table, the miss path; `nxaot build` (tiers C, W, H, H+; the balanced and max modes; an object with the lookup table, function map and line table, a shared object by lld); `nxaot_host` (the arena below 2^39, the SVC path, the counter, faults through the line table); the corpus natively in both conventions and the correctness mode, equal to dynarmic and to the expected output; nxaot_funcdiff on every corpus function; the measurements ("Measurements"). Not done: the corpus natively on ARM64 hardware (an Apple-silicon Mac), safepoints (6.2: phase 3), the resume of a continuation that has no native frame and every other JIT case (phase 3: the run stops with status 3), one tier per function and profiles (phase 5), ThinLTO and the cache, functions split for size, the oracle-T / J / W comparisons, threads (one state block, one thread), the pack throughput targets of section 10 (measured far below them) |
 | 2. FP and SIMD | every FP, NEON and crypto lowering, NaN chains | every opcode the A64 frontend emits lowered; 0 mismatches over the committed vectors and 7,000,000 random floating-point and SIMD ones (10^6 per class for seven of the eight classes, `fp_seq` not completed; not the 10^8 of the acceptance); the chain checks measured. Not done: the row-13 FZ slow path for the basic operations, inline estimates, combined escape checks, the run-time helpers in the host |
-| 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | not started |
+| 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | next. In place from phase 1: `pending` propagation, resume points of setjmp continuations and landing pads, the host's dispatch of what reaches it; the JIT's cases stop the run with a [RED] line and status 3 (`nxaot_rt_trap`, `nxaot_rt_dispatch`) where `dm_jit_run` will continue |
 | 4. to 6. | games on the Intel Mac, performance, breadth | not started |

@@ -86,12 +86,19 @@ else()
 endif()
 
 # The lifter (src/lift): dynarmic IR -> LLVM IR, and the ORC JIT that runs lifted blocks in nxaot_vec
-add_library(nxaot_lift STATIC src/lift/lifter.cpp src/lift/lower_fp.cpp src/lift/lower_vector.cpp src/lift/lower_crypto.cpp src/lift/runtime.cpp
+# The floating-point helpers lifted code calls (src/lift/runtime.cpp): objects of nxaot_lift (its JIT defines them) and of every executable that
+# runs a pack (the pack's shared object resolves them against the executable)
+add_library(nxaot_runtime OBJECT src/lift/runtime.cpp)
+target_include_directories(nxaot_runtime PUBLIC include src)
+target_link_libraries(nxaot_runtime PUBLIC dynarmic merry::mcl fmt::fmt tsl::robin_map Boost::boost)
+target_compile_options(nxaot_runtime PRIVATE ${NXAOT_WARNINGS})
+
+add_library(nxaot_lift STATIC src/lift/lifter.cpp src/lift/lower_fp.cpp src/lift/lower_vector.cpp src/lift/lower_crypto.cpp src/lift/lower_calls.cpp
             src/lift/opcodes.cpp src/lift/jit.cpp)
 target_include_directories(nxaot_lift PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/gen")
 target_include_directories(nxaot_lift SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(nxaot_lift PUBLIC ${_llvm_defs})
-target_link_libraries(nxaot_lift PUBLIC nxaot_decode)
+target_link_libraries(nxaot_lift PUBLIC nxaot_decode PRIVATE nxaot_runtime)
 target_compile_options(nxaot_lift PRIVATE ${NXAOT_WARNINGS})
 if (NXAOT_LLVM_STATIC OR NOT LLVM_LINK_LLVM_DYLIB)
     llvm_map_components_to_libnames(_llvm_libs ${NXAOT_LLVM_COMPONENTS})
@@ -100,9 +107,33 @@ else()
     llvm_config(nxaot_lift USE_SHARED ${NXAOT_LLVM_COMPONENTS})
 endif()
 
+# The pack stage (src/build, aot-recompiler.md sections 9.2 to 9.4): whole modules in function mode, the tables, the descriptor
+# (include/nxaot/aot_module.h), the tier's passes, the object, and lld as a library for the shared object (section 13)
+find_package(LLD REQUIRED CONFIG HINTS "${LLVM_LIBRARY_DIR}/cmake/lld" "${LLVM_DIR}/../lld")
+add_library(nxaot_build STATIC src/build/plan.cpp src/build/pack.cpp)
+target_include_directories(nxaot_build SYSTEM PRIVATE ${LLD_INCLUDE_DIRS})
+target_link_libraries(nxaot_build PUBLIC nxaot_analysis nxaot_lift lldELF lldCommon)
+target_compile_options(nxaot_build PRIVATE ${NXAOT_WARNINGS})
+
 add_executable(nxaot src/main.cpp)
-target_link_libraries(nxaot PRIVATE nxaot_analysis nxaot_lift)
+target_link_libraries(nxaot PRIVATE nxaot_analysis nxaot_lift nxaot_build)
 target_compile_options(nxaot PRIVATE ${NXAOT_WARNINGS})
+
+# The native run time of a pack (src/rt, aot-recompiler.md sections 2.4, 3.3, 4, 5, 9.4): no LLVM code generation, the pack's shared object
+# loaded with dlopen; the library resolves the host's imports and the floating-point helpers against the executable (ENABLE_EXPORTS)
+add_library(nxaot_rt STATIC src/rt/host.cpp)
+target_include_directories(nxaot_rt PUBLIC include src)
+target_link_libraries(nxaot_rt PUBLIC nxaot_module ${CMAKE_DL_LIBS})
+target_compile_options(nxaot_rt PRIVATE ${NXAOT_WARNINGS})
+add_executable(nxaot_host src/rt/host_main.cpp)
+target_link_libraries(nxaot_host PRIVATE nxaot_rt nxaot_runtime)
+set_target_properties(nxaot_host PROPERTIES ENABLE_EXPORTS ON)
+target_compile_options(nxaot_host PRIVATE ${NXAOT_WARNINGS})
+# nxaot_funcdiff: every function of a pack against dynarmic from the same snapshot (aot-recompiler.md section 12, item 2)
+add_executable(nxaot_funcdiff src/rt/funcdiff.cpp)
+target_link_libraries(nxaot_funcdiff PRIVATE nxaot_rt nxaot_runtime dynarmic)
+set_target_properties(nxaot_funcdiff PROPERTIES ENABLE_EXPORTS ON)
+target_compile_options(nxaot_funcdiff PRIVATE ${NXAOT_WARNINGS})
 
 # zlib reads the compressed vector files (tests/vectors/*.tsv.gz); LLVM itself is built with it (LLVM_ENABLE_ZLIB), so it is no new dependency
 find_package(ZLIB REQUIRED)
@@ -116,8 +147,10 @@ target_link_libraries(nxaot_run PRIVATE nxaot_module nxaot_lift)
 target_compile_options(nxaot_run PRIVATE ${NXAOT_WARNINGS})
 
 # nxaot_bench: the cost of the NaN-chain checks and the x86 code of lifted floating point (README.md, "Measurements")
-add_executable(nxaot_bench src/bench/main.cpp)
-target_link_libraries(nxaot_bench PRIVATE nxaot_lift)
+add_executable(nxaot_bench src/bench/main.cpp src/bench/calls.cpp)
+target_link_libraries(nxaot_bench PRIVATE nxaot_lift nxaot_build nxaot_rt nxaot_runtime)
+target_compile_definitions(nxaot_bench PRIVATE NXAOT_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/corpus")
+set_target_properties(nxaot_bench PROPERTIES ENABLE_EXPORTS ON)
 target_compile_options(nxaot_bench PRIVATE ${NXAOT_WARNINGS})
 
 # Tests: the vectors (lifted against dynarmic) on this machine's CPU; the cryptographic vectors for x86-64-v3, which has no AES-NI, SHA or
@@ -139,4 +172,11 @@ add_test(NAME discover COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}
 add_test(NAME manifest COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_manifest.py" --nxaot $<TARGET_FILE:nxaot> --work "${CMAKE_CURRENT_BINARY_DIR}/manifest")
 add_test(NAME corpus_ref COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_corpus_run.py" --nxaot-run $<TARGET_FILE:nxaot_run>)
 add_test(NAME corpus_fp_current COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/corpus/gen_fp.py" --check)
-set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census discover manifest corpus_ref PROPERTIES TIMEOUT 900)
+# Phase 1 (aot-recompiler.md section 14): the corpus recompiled and run natively in both conventions, the correctness mode and the max mode,
+# against its expected output and the dynarmic run, with the dispatcher's lookup-table and unknown-target checks; and every function of every
+# NRO against dynarmic from the same snapshot (section 12, item 2)
+add_test(NAME corpus_native COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_corpus_native.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-host $<TARGET_FILE:nxaot_host> --nxaot-run $<TARGET_FILE:nxaot_run> --work "${CMAKE_CURRENT_BINARY_DIR}/native")
+add_test(NAME corpus_funcdiff COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_funcdiff.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-funcdiff $<TARGET_FILE:nxaot_funcdiff> --work "${CMAKE_CURRENT_BINARY_DIR}/funcdiff")
+set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census discover manifest corpus_ref corpus_native corpus_funcdiff PROPERTIES TIMEOUT 900)

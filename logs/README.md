@@ -6,7 +6,7 @@ The logs of host unit test runs, kept in the repository on purpose: when a run f
 |---|---|
 | `logs/linux/` | `sh dm/host/tests/run_host_tests.sh build/linux`, in the `nxnative-build` Docker image |
 | `logs/win64/` | `dm\host\tests\run_win64_tests.ps1` (PowerShell) or `sh dm/host/tests/run_host_tests.sh build/win64` (Git Bash), on a Windows PC, for the tree cross-built in Docker |
-| `logs/aot/` | `sh dm/tools/aot/tests/run_aot_tests.sh build/aot`, in the `nxnative-aot` Docker image: the recompiler's vector harness, census test, vectors-current check, discovery over the corpus, manifest test and corpus reference run ([dm/tools/aot/README.md](../dm/tools/aot/README.md)) |
+| `logs/aot/` | `sh dm/tools/aot/tests/run_aot_tests.sh build/aot`, in the `nxnative-aot` Docker image: the recompiler's vector harness, census test, vectors-current check, discovery over the corpus, manifest test, corpus reference run, the corpus recompiled and run natively, the per-function differential test and the benchmarks ([dm/tools/aot/README.md](../dm/tools/aot/README.md)) |
 
 ## Files
 

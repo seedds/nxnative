@@ -241,49 +241,55 @@ static RT_NOINLINE uint64_t op_tls(uint64_t add) {
     return tls_counter;
 }
 
+// The rounds of the operation loop in main: 1 for the committed output. A runner that measures throughput sets this exported symbol before
+// the program runs (nxaot_host and nxaot_run --set int_ops_rounds=N, nxaot_bench): the digests then cover N rounds, the checks stay 0
+volatile uint64_t int_ops_rounds = 1;
+
 int main(void) {
     uint64_t h_clz = RT_MIX_INIT, h_bits = RT_MIX_INIT, h_mul = RT_MIX_INIT, h_div = RT_MIX_INIT, h_misc = RT_MIX_INIT;
     unsigned bad_clz = 0, bad_cls = 0, bad_rbit = 0, bad_rev = 0, bad_pop = 0, bad_umulh = 0, bad_smulh = 0, bad_div = 0, bad_ror = 0;
     unsigned bad_crc = 0, bad_sel = 0, bad_fields = 0, bad_wide = 0;
-    for (unsigned i = 0; i < NIN; ++i) {
-        const uint64_t x = in(i);
-        h_clz = rt_mix(h_clz, op_clz(x));
-        bad_clz += op_clz(x) != ref_clz64(x);
-        bad_cls += op_cls(x) != ref_cls64(x);
-        bad_rbit += op_rbit(x) != ref_rbit64(x);
-        bad_rev += op_rev(x) != ref_rev64(x);
-        bad_rev += op_rev16(x) != (((x & 0x00ff00ff00ff00ffull) << 8) | ((x >> 8) & 0x00ff00ff00ff00ffull));
-        bad_rev += op_rev32(x) != ((ref_rev64(x) >> 32) | (ref_rev64(x) << 32));
-        bad_pop += op_popcount(x) != ref_popcount64(x);
-        h_bits = rt_mix(rt_mix(rt_mix(h_bits, op_rbit(x)), op_rev(x)), op_popcount(x));
-        for (unsigned j = 0; j < NIN; ++j) {
-            const uint64_t y = in(j * 7 + 3);
-            bad_umulh += op_umulh(x, y) != ref_umulh(x, y);
-            bad_smulh += op_smulh(x, y) != ref_smulh(x, y);
-            h_mul = rt_mix(rt_mix(h_mul, op_madd(x, y, i)), op_msub(x, y, j));
-            bad_wide += op_umull((uint32_t)x, (uint32_t)y) != (uint64_t)(uint32_t)x * (uint32_t)y;
-            bad_wide += (uint64_t)op_smull((int32_t)x, (int32_t)y) != (uint64_t)((int64_t)(int32_t)x * (int64_t)(int32_t)y);
-            if (y) {
-                bad_div += op_udiv(x, y) != ref_udiv(x, y);
-                bad_div += asm_udiv(x, y) != op_udiv(x, y);
-                if (!(x == 0x8000000000000000ull && y == ~0ull)) {
-                    bad_div += (uint64_t)asm_sdiv((int64_t)x, (int64_t)y) != (uint64_t)op_sdiv((int64_t)x, (int64_t)y);
+    for (uint64_t round = 0; round < int_ops_rounds; ++round) {
+        for (unsigned i = 0; i < NIN; ++i) {
+            const uint64_t x = in(i);
+            h_clz = rt_mix(h_clz, op_clz(x));
+            bad_clz += op_clz(x) != ref_clz64(x);
+            bad_cls += op_cls(x) != ref_cls64(x);
+            bad_rbit += op_rbit(x) != ref_rbit64(x);
+            bad_rev += op_rev(x) != ref_rev64(x);
+            bad_rev += op_rev16(x) != (((x & 0x00ff00ff00ff00ffull) << 8) | ((x >> 8) & 0x00ff00ff00ff00ffull));
+            bad_rev += op_rev32(x) != ((ref_rev64(x) >> 32) | (ref_rev64(x) << 32));
+            bad_pop += op_popcount(x) != ref_popcount64(x);
+            h_bits = rt_mix(rt_mix(rt_mix(h_bits, op_rbit(x)), op_rev(x)), op_popcount(x));
+            for (unsigned j = 0; j < NIN; ++j) {
+                const uint64_t y = in(j * 7 + 3);
+                bad_umulh += op_umulh(x, y) != ref_umulh(x, y);
+                bad_smulh += op_smulh(x, y) != ref_smulh(x, y);
+                h_mul = rt_mix(rt_mix(h_mul, op_madd(x, y, i)), op_msub(x, y, j));
+                bad_wide += op_umull((uint32_t)x, (uint32_t)y) != (uint64_t)(uint32_t)x * (uint32_t)y;
+                bad_wide += (uint64_t)op_smull((int32_t)x, (int32_t)y) != (uint64_t)((int64_t)(int32_t)x * (int64_t)(int32_t)y);
+                if (y) {
+                    bad_div += op_udiv(x, y) != ref_udiv(x, y);
+                    bad_div += asm_udiv(x, y) != op_udiv(x, y);
+                    if (!(x == 0x8000000000000000ull && y == ~0ull)) {
+                        bad_div += (uint64_t)asm_sdiv((int64_t)x, (int64_t)y) != (uint64_t)op_sdiv((int64_t)x, (int64_t)y);
+                    }
+                    h_div = rt_mix(h_div, op_udiv(x, y));
                 }
-                h_div = rt_mix(h_div, op_udiv(x, y));
+                bad_sel += op_select(x, y) != ref_select(x, y);
+                bad_fields += op_fields(x, y) != ref_fields(x, y);
+                bad_crc += __crc32d((uint32_t)y, x) != ref_crc((uint32_t)y, x, 8, 0xEDB88320u);
+                bad_crc += __crc32cw((uint32_t)y, (uint32_t)x) != ref_crc((uint32_t)y, x, 4, 0x82F63B78u);
+                bad_crc += __crc32b((uint32_t)y, (uint8_t)x) != ref_crc((uint32_t)y, x, 1, 0xEDB88320u);
+                bad_crc += __crc32ch((uint32_t)y, (uint16_t)x) != ref_crc((uint32_t)y, x, 2, 0x82F63B78u);
             }
-            bad_sel += op_select(x, y) != ref_select(x, y);
-            bad_fields += op_fields(x, y) != ref_fields(x, y);
-            bad_crc += __crc32d((uint32_t)y, x) != ref_crc((uint32_t)y, x, 8, 0xEDB88320u);
-            bad_crc += __crc32cw((uint32_t)y, (uint32_t)x) != ref_crc((uint32_t)y, x, 4, 0x82F63B78u);
-            bad_crc += __crc32b((uint32_t)y, (uint8_t)x) != ref_crc((uint32_t)y, x, 1, 0xEDB88320u);
-            bad_crc += __crc32ch((uint32_t)y, (uint16_t)x) != ref_crc((uint32_t)y, x, 2, 0x82F63B78u);
-        }
-        for (unsigned n = 0; n < 130; n += 13) {
-            bad_ror += op_ror(x, n) != ref_ror(x, n);
-            bad_ror += op_ror32((uint32_t)x, n) != (uint32_t)((((uint64_t)(uint32_t)x << 32 | (uint32_t)x) >> (n & 31)));
-            h_misc = rt_mix(h_misc, asm_lslv(x, n) ^ asm_asrv(x, n + 64));
-            bad_ror += asm_lslv(x, n) != (x << (n & 63));
-            bad_ror += asm_asrv(x, n) != (uint64_t)((int64_t)x >> (n & 63));
+            for (unsigned n = 0; n < 130; n += 13) {
+                bad_ror += op_ror(x, n) != ref_ror(x, n);
+                bad_ror += op_ror32((uint32_t)x, n) != (uint32_t)((((uint64_t)(uint32_t)x << 32 | (uint32_t)x) >> (n & 31)));
+                h_misc = rt_mix(h_misc, asm_lslv(x, n) ^ asm_asrv(x, n + 64));
+                bad_ror += asm_lslv(x, n) != (x << (n & 63));
+                bad_ror += asm_asrv(x, n) != (uint64_t)((int64_t)x >> (n & 63));
+            }
         }
     }
     RT_CHECK32("clz.ref", bad_clz, 0);

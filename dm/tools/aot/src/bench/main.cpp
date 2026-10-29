@@ -7,9 +7,11 @@
 //   unchecked  no NaN fix-up (NaNMode::Unchecked: inexact, the lower bound the checks are measured against)
 // each with the cumulative exception flags modelled (strict floating point) and not; and the same code on dynarmic's JIT for comparison.
 // It prints ns per iteration and the x86 instructions of the loop body lifted alone (one iteration, no loop), and the instructions each guest
-// memory access of a load / store kernel became (section 6.4: one x86 instruction per access).
+// memory access of a load / store kernel became (section 6.4: one x86 instruction per access). Then the measurements of phase 1
+// (src/bench/calls.h): the calling conventions, the dispatcher, a jump table, int_ops natively against dynarmic, the pack stage's throughput.
 //
-//   nxaot_bench [--cpu <llvm cpu>] [--iterations N] [--asm]
+//   nxaot_bench [--cpu <llvm cpu>] [--iterations N] [--asm] [--sections nan,calls,dispatch,spills,int_ops,pack] [--call-iterations N]
+//               [--rounds N] [--work <dir>] [--nxaot-run <path>]
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
@@ -23,10 +25,12 @@
 
 #include <immintrin.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 
+#include "bench/calls.h"
 #include "dynarmic/interface/A64/a64.h"
 #include "dynarmic/interface/A64/config.h"
 #include "lift/jit.h"
@@ -232,6 +236,18 @@ int main(int argc, char** argv) {
     std::string cpu;
     uint64_t iterations = 2'000'000;
     bool show_asm = false;
+    std::string sections = "nan,calls,dispatch,spills,int_ops,pack";
+    bench::CallsOptions co;
+    co.corpus = NXAOT_CORPUS_DIR;
+    {
+        // nxaot_run beside this executable (the build folder)
+        char self[4096] = {};
+        const ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+        std::string dir = n > 0 ? std::string(self, static_cast<size_t>(n)) : std::string();
+        dir = dir.substr(0, dir.find_last_of('/'));
+        co.nxaot_run = dir + "/nxaot_run";
+        co.work = dir + "/bench";
+    }
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--cpu" && i + 1 < argc) {
@@ -240,10 +256,31 @@ int main(int argc, char** argv) {
             iterations = std::strtoull(argv[++i], nullptr, 10);
         } else if (a == "--asm") {
             show_asm = true;
+        } else if (a == "--sections" && i + 1 < argc) {
+            sections = argv[++i];
+        } else if (a == "--call-iterations" && i + 1 < argc) {
+            co.iterations = std::strtoull(argv[++i], nullptr, 10);
+        } else if (a == "--rounds" && i + 1 < argc) {
+            co.rounds = std::strtoull(argv[++i], nullptr, 10);
+        } else if (a == "--work" && i + 1 < argc) {
+            co.work = argv[++i];
+        } else if (a == "--nxaot-run" && i + 1 < argc) {
+            co.nxaot_run = argv[++i];
         } else {
-            std::fprintf(stderr, "usage: nxaot_bench [--cpu <llvm cpu>] [--iterations N] [--asm]\n");
+            std::fprintf(stderr, "usage: nxaot_bench [--cpu <llvm cpu>] [--iterations N] [--asm] [--sections nan,calls,dispatch,spills,int_ops,pack]\n"
+                                 "                   [--call-iterations N] [--rounds N] [--work <dir>] [--nxaot-run <path>]\n");
             return 2;
         }
+    }
+    const auto has = [&](const char* s) { return ("," + sections + ",").find(std::string(",") + s + ",") != std::string::npos; };
+    co.cpu = cpu;
+    co.calls = has("calls");
+    co.dispatch = has("dispatch");
+    co.spills = has("spills");
+    co.int_ops = has("int_ops");
+    co.pack = has("pack");
+    if (!has("nan")) {
+        return co.calls || co.dispatch || co.spills || co.int_ops || co.pack ? bench::RunCalls(co) : 0;
     }
     void* want = reinterpret_cast<void*>(kGuestBase);
     if (mmap(want, kImageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) != want) {
@@ -359,6 +396,9 @@ int main(int argc, char** argv) {
     std::printf("\n");
     if (show_asm) {
         std::printf("---- memory kernel\n%s\n", mem_asm.c_str());
+    }
+    if (co.calls || co.dispatch || co.spills || co.int_ops || co.pack) {
+        return bench::RunCalls(co);
     }
     return 0;
 }

@@ -2,16 +2,23 @@
 // of design section 11, with the two supervisor calls the corpus makes: svcOutputDebugString (0x27, x0 = string, x1 = length), whose lines it
 // prints, and svcExitProcess (0x07), which ends the run. It is the corpus's reference output on x86 until the recompiled path exists (the
 // dispatcher and the host run time, phase 1 of section 14): a native run on ARM64 hardware and the recompiled code must print the same lines.
-//   nxaot_run <module.nro | name.aot.tsv> [--max-instructions N]
+//   nxaot_run <module.nro | name.aot.tsv> [--max-instructions N] [--set <symbol>=<value>]... [--quiet] [--fastmem]
+// --set writes a 64-bit value at a symbol of the image before the run (int_ops_rounds: the throughput measurement); --quiet counts the lines
+// instead of printing them; --fastmem lets dynarmic's JIT reach the module's memory directly (its fastmem arena, as an emulator configures it,
+// for the throughput comparison with the recompiled code) instead of through the callbacks. The run's time goes to standard error.
 // Exit status: 0 when the program left through svcExitProcess, 1 on a fault, an unknown SVC or the instruction budget, 2 on a usage error.
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
+
+#include <sys/mman.h>
 
 #include "decode/translate.h"
 #include "dynarmic/interface/A64/a64.h"
@@ -25,13 +32,41 @@ namespace {
 using namespace Dynarmic;
 
 constexpr uint64_t kBase = 0x80000000ull;  // where the module is mapped: any address works, dynarmic reaches memory through the callbacks
+constexpr unsigned kFastmemBits = 36;      // dynarmic's default fastmem arena: 2^36 bytes reserved, the module mapped at kBase inside it
+
+// The module's memory: an anonymous mapping, or with fastmem the part of dynarmic's arena that holds the module
+struct Memory {
+    uint8_t* p = nullptr;
+    size_t n = 0;
+    uint8_t* arena = nullptr;
+    uint8_t* data() const { return p; }
+    size_t size() const { return n; }
+};
 
 struct Runner final : A64::UserCallbacks {
-    explicit Runner(const nxaot::module::Image& m) : image(m), monitor(1) {
+    Runner(const nxaot::module::Image& m, bool fastmem) : image(m), monitor(1) {
         const uint64_t size = (m.bytes.size() + m.bss_size + 0xFFF) & ~0xFFFull;
-        mem.assign(size, 0);
+        mem.n = size;
+        if (fastmem) {
+            mem.arena = static_cast<uint8_t*>(mmap(nullptr, size_t{1} << kFastmemBits, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0));
+            mem.p = mem.arena + kBase;
+            mprotect(mem.p, size, PROT_READ | PROT_WRITE);
+        } else {
+            mem.p = static_cast<uint8_t*>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        }
         std::memcpy(mem.data(), m.bytes.data(), m.bytes.size());
+        if (fastmem) {
+            // Text and read-only data read-only, so that a store there faults and takes the callbacks' path, which reports it
+            mprotect(mem.p, m.data_off & ~0xFFFull, PROT_READ);
+        }
         A64::UserConfig conf;
+        if (fastmem) {
+            conf.fastmem_pointer = reinterpret_cast<uintptr_t>(mem.arena);
+            conf.fastmem_address_space_bits = kFastmemBits;
+            conf.silently_mirror_fastmem = false;
+            conf.recompile_on_fastmem_failure = true;
+            conf.fastmem_exclusive_access = true;
+        }
         conf.callbacks = this;
         conf.processor_id = 0;
         conf.global_monitor = &monitor;
@@ -42,7 +77,7 @@ struct Runner final : A64::UserCallbacks {
         conf.tpidr_el0 = &tpidr;
         conf.tpidrro_el0 = &tpidrro;
         conf.wall_clock_cntpct = true;
-        conf.enable_cycle_counting = true;
+        conf.enable_cycle_counting = !fastmem;  // the fastmem configuration is the design's (section 11): no cycle counting
         conf.define_unpredictable_behaviour = false;
         conf.code_cache_size = 64 * 1024 * 1024;
         // As nxaot_vec's reference: without A64GetSetElimination (README.md, "Known issues", 1)
@@ -148,8 +183,11 @@ struct Runner final : A64::UserCallbacks {
                 Fail("svcOutputDebugString with a string outside the module");
                 return;
             }
-            std::fwrite(mem.data() + (s - kBase), 1, n, stdout);
-            std::fputc('\n', stdout);
+            ++lines;
+            if (!quiet) {
+                std::fwrite(mem.data() + (s - kBase), 1, n, stdout);
+                std::fputc('\n', stdout);
+            }
             jit->SetRegister(0, 0);
             return;
         }
@@ -196,31 +234,47 @@ struct Runner final : A64::UserCallbacks {
     const nxaot::module::Image& image;
     ExclusiveMonitor monitor;
     std::unique_ptr<A64::Jit> jit;
-    std::vector<uint8_t> mem;
-    uint64_t tpidr = 0, tpidrro = 0, ticks = 0, executed = 0;
-    bool done = false, exited = false;
+    Memory mem;
+    uint64_t tpidr = 0, tpidrro = 0, ticks = 0, executed = 0, lines = 0;
+    bool done = false, exited = false, quiet = false;
     std::string failure;
 };
+
+int Usage() {
+    std::fprintf(stderr, "usage: nxaot_run <module.nro | name.aot.tsv> [--max-instructions N] [--set <symbol>=<value>]... [--quiet] [--fastmem]\n");
+    return 2;
+}
 
 }  // namespace
 
 int main(int argc, char** argv) {
     std::string path;
     uint64_t budget = 2'000'000'000ull;
+    bool quiet = false, fastmem = false;
+    std::vector<std::pair<std::string, uint64_t>> sets;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--max-instructions" && i + 1 < argc) {
             budget = std::strtoull(argv[++i], nullptr, 0);
+        } else if (a == "--set" && i + 1 < argc) {
+            const std::string kv = argv[++i];
+            const auto eq = kv.find('=');
+            if (eq == std::string::npos) {
+                return Usage();
+            }
+            sets.emplace_back(kv.substr(0, eq), std::strtoull(kv.c_str() + eq + 1, nullptr, 0));
+        } else if (a == "--quiet") {
+            quiet = true;
+        } else if (a == "--fastmem") {
+            fastmem = true;
         } else if (path.empty() && !a.empty() && a[0] != '-') {
             path = a;
         } else {
-            std::fprintf(stderr, "usage: nxaot_run <module.nro | name.aot.tsv> [--max-instructions N]\n");
-            return 2;
+            return Usage();
         }
     }
     if (path.empty()) {
-        std::fprintf(stderr, "usage: nxaot_run <module.nro | name.aot.tsv> [--max-instructions N]\n");
-        return 2;
+        return Usage();
     }
     std::string error;
     const auto image = nxaot::module::LoadModule(path, &error);
@@ -228,27 +282,44 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "nxaot_run: %s\n", error.c_str());
         return 2;
     }
-    Runner r{*image};
+    Runner r{*image, fastmem};
+    r.quiet = quiet;
+    for (const auto& [name, value] : sets) {
+        const nxaot::module::Symbol* sym = nullptr;
+        for (const auto& s : image->symbols) {
+            if (s.name == name && s.Defined()) {
+                sym = &s;
+            }
+        }
+        if (!sym || sym->value + 8 > r.mem.size()) {
+            std::fprintf(stderr, "nxaot_run: --set: no symbol %s in the image\n", name.c_str());
+            return 2;
+        }
+        std::memcpy(r.mem.data() + sym->value, &value, 8);
+    }
     r.ticks = budget;
     r.jit->SetPC(kBase + image->text_off);
     r.jit->SetRegister(0, 0);           // the homebrew ABI's environment pointer: none
     r.jit->SetRegister(1, ~0ull);       // and main thread handle (libnx's crt0: x1 = -1 on NRO entry)
     r.jit->SetSP(0);                    // crt0 sets its own stack
     r.jit->SetFpcr(0);
+    const auto t0 = std::chrono::steady_clock::now();
     while (!r.done) {
-        if (r.ticks == 0) {
+        if (r.ticks == 0 && !fastmem) {
             r.Fail("still running after " + std::to_string(budget) + " instructions");
             break;
         }
         r.jit->ClearHalt(HaltReason::UserDefined1);
         r.jit->Run();
     }
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::fflush(stdout);
     if (!r.exited) {
         std::printf("[RED] nxaot_run: %s\n", r.failure.c_str());
         return 1;
     }
-    std::fprintf(stderr, "nxaot_run: %s left through svcExitProcess after %llu instructions\n", path.c_str(),
-                 static_cast<unsigned long long>(r.executed));
+    std::fprintf(stderr, "nxaot_run: %s left through svcExitProcess after %llu instructions in %.6f s (%s), %llu lines\n", path.c_str(),
+                 static_cast<unsigned long long>(r.executed), seconds, fastmem ? "fastmem" : "memory callbacks",
+                 static_cast<unsigned long long>(r.lines));
     return 0;
 }

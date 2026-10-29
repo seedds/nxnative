@@ -7,6 +7,12 @@
 // (LiftOptions::fpcr, section 7.1): MXCSR holds its rounding mode and flush-to-zero while guest code runs (the host, or nxaot_vec, sets it), the
 // cumulative exception flags accumulate in MXCSR and in st->fpsr (section 7.4), and NaN results follow Arm's rules through the NaN chains of
 // section 7.3. A region that holds an IR opcode the lowering does not cover is refused whole (Lifted::unsupported), never lowered in part.
+//
+// Function mode (LiftOptions::plan, src/lift/lower_calls.cpp): one whole guest function becomes one LLVM function of the calling convention of
+// section 2.3 that calls the others: bl as a call, ret as a return checked against the entry's lr (section 3.3), b and br out of the function as
+// real tail calls, blr and unbounded br through a per-site inline cache and the dispatcher (section 4), svc as a host call (section 2.4), the
+// registers stored and reloaded at calls as the interprocedural summaries say (or all of them in the correctness mode), and every address the code
+// builds from its pc (adr, adrp, literal loads, return addresses) relative to the module's base, a run-time value (section 3.3).
 #pragma once
 
 #include <cstddef>
@@ -20,8 +26,14 @@
 #include "dynarmic/ir/opcodes.h"
 
 namespace llvm {
+class CallInst;
+class DISubprogram;
 class Function;
+class FunctionType;
+class GlobalVariable;
+class LLVMContext;
 class Module;
+class StructType;
 }  // namespace llvm
 
 namespace nxaot::lift {
@@ -51,11 +63,99 @@ enum class NaNMode {
     Unchecked,  // no NaN fix-up at all: inexact (x86 NaNs), for measuring the cost of the checks only (nxaot_bench); never in a pack
 };
 
+struct FunctionPlan;
+
 struct LiftOptions {
     uint32_t fpcr = 0;            // the FPCR the region is specialised for; only its mode bits (AHP, DN, FZ, RMode, FZ16) matter
     bool fpsr_flags = true;       // model the cumulative exception flags exactly (strict floating point; section 7.4)
     NaNMode nan_mode = NaNMode::Chains;
     Target target;
+    const FunctionPlan* plan = nullptr;  // function mode: one guest function lifted into plan->fn (the region names its entry and bounds)
+};
+
+// ---- Function mode: whole functions and the convention between them (aot-recompiler.md sections 2.3, 3.3, 4; src/build plans them) ----
+
+// A set of guest registers
+struct Regs {
+    uint32_t x = 0;  // bit i: x_i (x0..x30)
+    uint32_t v = 0;  // bit i: v_i (the whole 128-bit register)
+    bool sp = false, nzcv = false;
+    Regs operator|(const Regs& o) const { return {x | o.x, v | o.v, sp || o.sp, nzcv || o.nzcv}; }
+    Regs operator&(const Regs& o) const { return {x & o.x, v & o.v, sp && o.sp, nzcv && o.nzcv}; }
+    Regs operator-(const Regs& o) const { return {x & ~o.x, v & ~o.v, sp && !o.sp, nzcv && !o.nzcv}; }
+    bool operator==(const Regs&) const = default;
+    bool Empty() const { return !x && !v && !sp && !nzcv; }
+    static Regs All() { return {0x7FFFFFFFu, 0xFFFFFFFFu, true, true}; }
+    static Regs X(uint32_t bits) { return {bits, 0, false, false}; }
+    static Regs V(uint32_t bits) { return {0, bits, false, false}; }
+};
+
+// The LLVM mapping of the convention between recompiled functions (section 2.3). Both pass the state block, the guest SP, lr (the guest's x30:
+// the original return address, section 3.3) and x0..x3 in host registers, and return x0, x1 and v0..v3 as {i64, i64, <2 x i64> x 4}, which both
+// lower to RAX, RDX and XMM0..XMM3 (no memory)
+enum class CallConv : uint8_t {
+    // swifttailcc with st as swiftself (R13): the callee pops its argument area, so musttail calls between different prototypes are allowed, and
+    // every function has a signature of its own: x4..x7 and v0..v7 only when the callee reads them (sp, lr, x0..x3 in RDI, RSI, RDX, RCX, R8, R9;
+    // x4..x7 on the stack; v0..v7 in XMM0..XMM7). RBX, RBP and R12..R15 are callee-saved, as in the C convention
+    SwiftTail,
+    // The design's preserve_none candidate. LLVM 18.1, which nxaot.lock pins, has no preserve_nonecc (it came with LLVM 19); ghccc, the convention
+    // preserve_none was modelled on, is LLVM 18's stock convention with its defining property: every general register can carry an argument and
+    // none is callee-saved. One uniform signature: st, sp, lr, x0..x6 in R13, RBP, R12, RBX, R14, RSI, RDI, R8, R9, R15 and v0..v5 in XMM1..XMM6;
+    // x7, v6 and v7 always go through the state block. Frame pointers are off (RBP carries the guest SP)
+    Ghc,
+};
+const char* CallConvName(CallConv cc);  // "swifttail", "ghc"
+
+struct Convention {
+    CallConv cc = CallConv::SwiftTail;
+    Regs Passable() const;  // what may travel in host registers besides x0..x3: x4..x7 and v0..v7 (SwiftTail), x4..x6 and v0..v5 (Ghc)
+    unsigned LlvmCC() const;
+    llvm::StructType* RetType(llvm::LLVMContext& c) const;
+    // The signature of a function that is passed `pass` (Ghc: every passable register, whatever pass says)
+    llvm::FunctionType* Type(llvm::LLVMContext& c, const Regs& pass) const;
+    // Argument numbers in that signature: 0 st, 1 sp, 2 lr, then x_i and v_i (-1 when the signature has no argument for it)
+    int ArgX(const Regs& pass, unsigned i) const;
+    int ArgV(const Regs& pass, unsigned i) const;
+    void Apply(llvm::Function* f) const;     // the calling convention and the attributes of st (swiftself for SwiftTail, noalias)
+    void Apply(llvm::CallInst* call) const;  // the same at a call
+};
+
+// A function as its callers see it
+struct CalleeView {
+    llvm::Function* fn = nullptr;  // the specialised body
+    Regs pass;                     // what it takes in host registers: x0..x3, and the passable registers it reads
+    Regs writes;                   // what may hold another value when it returns: reloaded from the block after a call unless returned
+    uint32_t rv = 0;               // which of v0..v3 (bits 0..3) its return value holds; the others are poison
+    bool returns = true;           // it has a return path (the analysis' summary)
+    // writes is this function's own (a direct call). False for the indirect view, whose writes is a union over every function an indirect
+    // call may reach: the one that runs stores only what it writes itself, so a register it is passed and the union says may change must be
+    // current in the block before the call too
+    bool exact = true;
+};
+
+// What function mode needs to lift one guest function (src/build/plan.h computes it from the analysis)
+struct FunctionPlan {
+    Convention conv;
+    llvm::Function* fn = nullptr;   // the body to fill, declared with conv.Type(self.pass)
+    CalleeView self;
+    Regs live_after;                // LIVE_AFTER: what some caller may read after it returns (section 2.3)
+    uint64_t entry = 0, limit = 0;  // module offsets: the function's code lies in [entry, limit)
+    bool correctness = false;       // every register stored at every call and return and reloaded after every call: the reference mode
+    llvm::GlobalVariable* base = nullptr;  // i64: the module's base address, written by the host before guest code runs
+    std::function<const CalleeView*(uint64_t offset)> callee;  // the function that starts at a module offset; null when none does
+    CalleeView indirect;            // blr and dispatched br: the standard entry (every passable register; the union over address-taken functions)
+    std::function<std::vector<uint64_t>(uint64_t call_pc)> resume;    // the resume points of a call site (section 3.3), module offsets
+    std::function<const std::vector<uint64_t>*(uint64_t br)> tables;  // the jump table of a br (Region::tables)
+    std::vector<uint64_t> roots;    // block starts besides the entry that only a non-local transfer enters (landing pads)
+    // Run-time entry points (src/build/pack.cpp declares them; the host defines what they call)
+    llvm::Function* rt_dispatch = nullptr;     // preserve_all ptr (ptr st, i64 target, ptr slot, i64 site): an inline-cache miss
+    llvm::Function* rt_svc = nullptr;          // void dm_aot_svc(ptr st, i32 number), the C convention
+    llvm::Function* rt_trap = nullptr;         // noreturn void (ptr st, i64 offset, i32 reason): traps and the JIT's cases
+    llvm::Function* rt_counter = nullptr;      // preserve_most i64 (ptr st): mrs cntpct_el0 (section 8)
+    llvm::GlobalVariable* ic_empty = nullptr;  // the descriptor every inline cache starts with (it matches no guest address)
+    std::string ic_prefix;                     // inline-cache slots are named <prefix><site offset>
+    llvm::DISubprogram* debug = nullptr;       // debug locations, line = guest offset (section 9.2); null: none
+    std::string line_section;                  // the !pcsections section of the line table (section 3.5); empty: none
 };
 
 // The FPCR bits a block is specialised on: dynarmic's location descriptor keeps the same (frontend/A64/a64_location_descriptor.h, fpcr_mask)
@@ -109,6 +209,8 @@ struct Lifted {
     std::vector<Dynarmic::IR::Opcode> opcodes;  // every IR opcode of the region's blocks (after dead-code elimination), each once
     std::vector<int> dynarmic_issues;      // DynarmicIssue values the region's floating point meets, sorted, each once
     size_t blocks = 0;
+    // Function mode: the sites lowered
+    size_t calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0;
 };
 
 // Lifts the region into module as a function called name. The module's data layout should be the target's (lift/jit.h sets it)

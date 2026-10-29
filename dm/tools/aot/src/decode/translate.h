@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <unordered_map>
 
 #include "dynarmic/ir/basic_block.h"
 
@@ -20,10 +21,14 @@ using CodeReader = std::function<std::optional<uint32_t>(uint64_t vaddr)>;
 // The FPCR a block is translated for: blocks are specialised on it (section 7.1), 0 by default
 constexpr uint32_t kDefaultFpcr = 0;
 
+// The guest address each IR instruction of a block was translated from (the line table and debug locations of a pack, section 9.2)
+using InstPcs = std::unordered_map<const Dynarmic::IR::Inst*, uint64_t>;
+
 // One basic block from pc: dynarmic's A64::Translate loop (frontend/A64/translate/a64_translate.cpp) with nxaot's translation options (hints raise
 // their exceptions, so that yield and wfe stay visible to the lifter; the counter is a wall clock) and the extra encodings of TranslateExtra.
-// A word the reader does not supply ends the block with dynarmic's NoExecuteFault exception at that address
-Dynarmic::IR::Block TranslateBlock(uint64_t pc, const CodeReader& read, uint32_t fpcr = kDefaultFpcr);
+// A word the reader does not supply ends the block with dynarmic's NoExecuteFault exception at that address. With pcs, every instruction the
+// block holds is recorded with the guest address of the instruction it came from
+Dynarmic::IR::Block TranslateBlock(uint64_t pc, const CodeReader& read, uint32_t fpcr = kDefaultFpcr, InstPcs* pcs = nullptr);
 
 // One instruction alone, appended to block (the census's data-flow checks). False when the instruction ends a block
 bool TranslateOne(Dynarmic::IR::Block& block, uint64_t pc, uint32_t word);

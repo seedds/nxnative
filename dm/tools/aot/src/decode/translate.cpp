@@ -45,17 +45,23 @@ bool TranslateExtra(A64::TranslatorVisitor& v, uint32_t word) {
     return false;
 }
 
-IR::Block TranslateBlock(uint64_t pc, const CodeReader& read, uint32_t fpcr) {
+IR::Block TranslateBlock(uint64_t pc, const CodeReader& read, uint32_t fpcr, InstPcs* pcs) {
     const A64::LocationDescriptor descriptor{pc, FP::FPCR{fpcr}};
     IR::Block block{descriptor};
     A64::TranslatorVisitor visitor{block, descriptor, Options()};
     bool should_continue = true;
     do {
         const u64 at = visitor.ir.current_location->PC();
+        const IR::Inst* last = block.empty() ? nullptr : &block.back();
         if (const auto word = read(at)) {
             should_continue = Visit(visitor, *word);
         } else {
             should_continue = visitor.RaiseException(A64::Exception::NoExecuteFault);
+        }
+        if (pcs) {
+            for (auto it = block.rbegin(); it != block.rend() && &*it != last; ++it) {
+                (*pcs)[&*it] = at;
+            }
         }
         visitor.ir.current_location = visitor.ir.current_location->AdvancePC(4);
         block.CycleCount()++;

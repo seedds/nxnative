@@ -12,8 +12,13 @@
 //   nxaot opcodes --reach [--samples N] [--check]     the opcodes the A64 frontend emits (src/analysis/reach.h), with the decoder entries that emit
 //                                                     them; --check exits 1 when one of them is not lowered
 //   nxaot version                                     the toolchain of nxaot.lock this build was configured with
-// The lifter (src/lift) is exercised by nxaot_vec until the analysis and the pack stages exist (README.md, "What is not done yet").
+//   nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max] [--tier C|W|H|H+]
+//               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
+//                                                     the pack stage (src/build): every function of the module compiled into one object with
+//                                                     its lookup table, function map, line table and descriptor (include/nxaot/aot_module.h),
+//                                                     linked by lld into the shared object nxaot_host loads; prints the module's numbers
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -25,6 +30,7 @@
 #include "analysis/census.h"
 #include "analysis/discover.h"
 #include "analysis/reach.h"
+#include "build/pack.h"
 #include "dynarmic/ir/opcodes.h"
 #include "lift/opcodes.h"
 #include "module/image.h"
@@ -41,7 +47,10 @@ int Usage() {
                  "       nxaot module <module.nro | name.aot.tsv>\n"
                  "       nxaot census <raw ARM64 code file> --base <hex>\n"
                  "       nxaot opcodes [--reach [--samples N] [--check]]\n"
-                 "       nxaot version\n");
+                 "       nxaot version\n"
+                 "       nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max]\n"
+                 "                   [--tier C|W|H|H+] [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info]\n"
+                 "                   [--no-line-table] [--spills] [--asm <file.s>]\n");
     return 2;
 }
 
@@ -422,6 +431,114 @@ int Opcodes(int argc, char** argv) {
     return 0;
 }
 
+int Build(int argc, char** argv) {
+    using nxaot::build::Tier;
+    std::string path, object, shared;
+    nxaot::build::BuildOptions o;
+    bool tier_set = false;
+    for (int i = 2; i < argc; ++i) {
+        const std::string a = argv[i];
+        const bool has = i + 1 < argc;
+        if (a == "-o" && has) {
+            object = argv[++i];
+        } else if (a == "--shared" && has) {
+            shared = argv[++i];
+        } else if (a == "--cc" && has) {
+            const std::string v = argv[++i];
+            if (v == "swifttail") o.cc = nxaot::lift::CallConv::SwiftTail;
+            else if (v == "ghc" || v == "preserve_none") o.cc = nxaot::lift::CallConv::Ghc;
+            else return Usage();
+        } else if (a == "--mode" && has) {
+            o.mode = argv[++i];
+            if (o.mode != "balanced" && o.mode != "max") return Usage();
+        } else if (a == "--tier" && has) {
+            const std::string v = argv[++i];
+            tier_set = true;
+            if (v == "C") o.tier = Tier::C;
+            else if (v == "W") o.tier = Tier::W;
+            else if (v == "H") o.tier = Tier::H;
+            else if (v == "H+") o.tier = Tier::HPlus;
+            else return Usage();
+        } else if (a == "--correctness") {
+            o.correctness = true;
+        } else if (a == "--all-entries") {
+            o.all_entries = true;
+        } else if (a == "--cpu" && has) {
+            o.cpu = argv[++i];
+        } else if (a == "--fpsr-flags" && has) {
+            const std::string v = argv[++i];
+            o.fpsr_flags = v == "on" ? 1 : v == "off" ? 0 : -1;
+        } else if (a == "--no-debug-info") {
+            o.debug_info = false;
+        } else if (a == "--no-line-table") {
+            o.line_table = false;
+        } else if (a == "--spills") {
+            o.count_spills = true;
+        } else if (a == "--asm" && has) {
+            o.asm_path = argv[++i];
+            o.count_spills = true;
+        } else if (path.empty() && !a.empty() && a[0] != '-') {
+            path = a;
+        } else {
+            return Usage();
+        }
+    }
+    if (path.empty() || object.empty()) {
+        return Usage();
+    }
+    if (!tier_set) {
+        o.tier = o.mode == "max" ? Tier::HPlus : Tier::W;  // no profile: balanced is tier W everywhere, max tier H+ (section 9.3)
+    }
+    const auto image = Load(path);
+    if (!image) {
+        return 1;
+    }
+    nxaot::build::BuildStats s;
+    std::string error;
+    if (!nxaot::build::BuildObject(*image, o, object, &s, &error)) {
+        std::printf("[RED] nxaot build: %s: %s\n", path.c_str(), error.c_str());
+        return 1;
+    }
+    if (!shared.empty()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        std::string soname = shared.substr(shared.find_last_of('/') + 1);
+        if (!nxaot::build::LinkShared({object}, shared, soname, &error)) {
+            std::printf("[RED] nxaot build: %s\n", error.c_str());
+            return 1;
+        }
+        s.t_link = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+    for (const auto& n : s.notes) {
+        std::printf("%s\n", n.c_str());
+    }
+    const double analyse = s.t_discover + s.t_plan;
+    const double compile = s.t_opt + s.t_codegen;
+    const auto per_s = [&](double t) { return t > 0 ? static_cast<double>(s.words) / t : 0.0; };
+    std::printf("aot: %s %llu instructions %llu functions\n", s.module.c_str(), static_cast<unsigned long long>(s.words),
+                static_cast<unsigned long long>(s.functions));
+    std::printf("aot: tier %s (mode %s), convention %s%s, cpu %s, fpsr flags %s\n", nxaot::build::TierName(o.tier), o.mode.c_str(),
+                nxaot::lift::CallConvName(o.cc), o.correctness ? ", correctness mode" : "", s.cpu.c_str(), s.fpsr_flags ? "modelled" : "not modelled");
+    std::printf("aot: seconds discover %.3f plan %.3f lift %.3f optimise %.3f codegen %.3f link %.3f; peak memory %llu MiB\n", s.t_discover,
+                s.t_plan, s.t_lift, s.t_opt, s.t_codegen, s.t_link, static_cast<unsigned long long>(s.peak_rss_kib / 1024));
+    std::printf("aot: instructions per second: analysis %.0f, lifting %.0f, tier %s (optimise and codegen) %.0f\n", per_s(analyse), per_s(s.t_lift),
+                nxaot::build::TierName(o.tier), per_s(compile));
+    std::printf("aot: sites: calls %llu, indirect calls %llu, tail calls %llu, indirect tail calls %llu, returns %llu, svc %llu, traps %llu, "
+                "jump tables %llu, resume points %llu\n",
+                static_cast<unsigned long long>(s.calls), static_cast<unsigned long long>(s.indirect_calls),
+                static_cast<unsigned long long>(s.tail_calls), static_cast<unsigned long long>(s.indirect_tails),
+                static_cast<unsigned long long>(s.returns), static_cast<unsigned long long>(s.svcs), static_cast<unsigned long long>(s.traps),
+                static_cast<unsigned long long>(s.tables), static_cast<unsigned long long>(s.resume_sites));
+    std::printf("aot: standard entries %llu, lookup slots %llu, refused %llu, blocks %llu, text %llu bytes, object %llu bytes, line entries lost %llu",
+                static_cast<unsigned long long>(s.standard_entries), static_cast<unsigned long long>(s.lookup_slots),
+                static_cast<unsigned long long>(s.refused), static_cast<unsigned long long>(s.blocks), static_cast<unsigned long long>(s.text_bytes),
+                static_cast<unsigned long long>(s.object_bytes), static_cast<unsigned long long>(s.lines_lost));
+    if (o.count_spills) {
+        std::printf(", spills %llu, reloads %llu", static_cast<unsigned long long>(s.spills), static_cast<unsigned long long>(s.reloads));
+    }
+    std::printf("\n");
+    return s.refused ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -429,6 +546,9 @@ int main(int argc, char** argv) {
         return Usage();
     }
     const std::string cmd = argv[1];
+    if (cmd == "build") {
+        return Build(argc, argv);
+    }
     if (cmd == "discover") {
         return Discover(argc, argv);
     }

@@ -1,14 +1,17 @@
 // The lifter's lowering of one region (src/lift/lifter.h), shared by its source files: lifter.cpp (regions, terminals, registers, flags, integer
 // and memory operations), lower_fp.cpp (floating point, scalar and vector, with the NaN chains of aot-recompiler.md section 7.3), lower_vector.cpp
-// (integer vector and saturating operations) and lower_crypto.cpp (AES, SHA-256, SM4). Internal to src/lift.
+// (integer vector and saturating operations), lower_crypto.cpp (AES, SHA-256, SM4) and lower_calls.cpp (function mode: calls, returns, tail
+// calls, the inline caches, host calls; sections 2.3, 3.3, 4). Internal to src/lift.
 #pragma once
 
 #include <array>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <llvm/IR/IRBuilder.h>
@@ -241,6 +244,58 @@ public:
     // The 64-bit vector forms (2S, 4H): the result's only uses keep its low 64 bits (VectorZeroUpper, SetD), so the upper lanes, zeros from
     // GetD, are computed by nobody on Arm and must raise no exception here
     bool LowHalfOnly(const IR::Inst& inst) const;
+
+    // ---- Function mode (lower_calls.cpp; LiftOptions::plan, lifter.h) ----
+    const FunctionPlan* plan = nullptr;
+    bool Fn() const { return plan != nullptr; }
+    enum class EndKind : uint8_t { Other, Bl, Blr, Ret, Br };  // how a block's last guest instruction leaves it
+    struct End {
+        EndKind kind = EndKind::Other;
+        uint64_t target = 0;  // Bl: the callee's offset
+    };
+    std::map<uint64_t, End> ends;                       // per block start
+    std::map<uint64_t, std::vector<uint64_t>> succs;    // per block start: the successors inside the function
+    std::map<uint64_t, Regs> gen;                       // per block start: the registers it writes
+    std::map<uint64_t, Regs> dirty_in;                  // per block start: the registers newer than their copy in the block at its start
+    std::set<uint64_t> svc_blocks;                      // blocks that end in svc (it stores the whole register file)
+    std::set<std::pair<const IR::Inst*, size_t>> relative;  // immediate arguments that are module offsets (base-relative addresses)
+    decode::InstPcs inst_pcs;                           // the guest offset each IR instruction came from
+    std::unordered_map<Value*, uint64_t> rel_values;    // the base + offset values made for relative immediates, with their offsets
+    Value* base = nullptr;                              // the module's base address, loaded once at the entry
+    Value* entry_lr = nullptr;                          // the lr the function was entered with (section 3.3)
+    Regs cur_dirty;                                     // the block's dirty set at its end (dirty_in | gen)
+    Regs restore_block;                                 // restored registers whose block copy the function changed: stored again at returns
+    const IR::Inst* cur_inst = nullptr;                 // the instruction being lowered (relative immediates, line table, debug locations)
+    uint64_t cur_start = 0;                             // the block being lowered
+    Lifted* stats = nullptr;
+    unsigned lines_ = 0;
+
+    void FnClassify(uint64_t pc, const IR::Block& block, std::vector<uint64_t>& next);  // Discover: the block's end and successors
+    void FnRelative(uint64_t pc, IR::Block& block, const std::function<void(IR::Block&)>& passes);  // the base-relative immediates
+    void FnDataflow();
+    void FnPrologue();
+    void FnLowerTerminal(const IR::Terminal& t);
+    void FnGoto(Value* target);
+    void FnExit(Value* pc, uint32_t reason);
+    Value* Rel(uint64_t offset);                 // base + offset, remembered as an offset
+    std::optional<uint64_t> OffsetOf(Value* v);  // the module offset of a constant or base + offset value
+    uint64_t CurOffset() const;                  // the guest offset of the instruction being lowered
+    void LineEntry(llvm::Instruction* i, uint64_t offset);  // !pcsections: a line-table entry for i (section 3.5)
+    void StoreRegs(const Regs& r);
+    void ReloadRegs(const Regs& r);
+    std::vector<Value*> CallArgs(const CalleeView& c, llvm::FunctionType* type, Value* lr);
+    llvm::CallInst* EmitCall(const CalleeView& c, llvm::FunctionType* type, Value* callee, Value* lr, bool tail);
+    void FnCall(const CalleeView& c, llvm::FunctionType* type, Value* callee, uint64_t call_pc);
+    void FnCallDirect(uint64_t target, uint64_t call_pc);
+    void FnCallIndirect(Value* target, uint64_t call_pc);
+    void FnTail(const CalleeView& c, llvm::FunctionType* type, Value* callee);
+    void FnTailDirect(uint64_t target);
+    void FnTailIndirect(Value* target, uint64_t site);
+    void FnReturn(Value* target);
+    void FnTrap(Value* pc, uint32_t reason);
+    void FnSvc(Value* number, Value* next_pc);
+    Value* FnDispatch(Value* target, uint64_t site);  // the inline cache: the native standard entry of a guest address
+    llvm::Value* RetValue();                          // {x0, x1, v0..v3} of the current registers (poison outside self.rv)
 };
 
 }  // namespace nxaot::lift::detail

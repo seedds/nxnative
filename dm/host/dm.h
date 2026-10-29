@@ -54,6 +54,9 @@ typedef struct {
     struct { char name[32]; uint64_t off; } ue_cvar[8];   // Unreal console variables found by their registered names (patch_nso.py, ue_cvar.py; UE_CVAR:<name>): each one's TAutoConsoleVariable
     int n_ue_cvar;
     uint64_t fps_state_off;    // frame step state page (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3 and Breath of the Wild 1.9.0 main); 0 = none
+    // Further stubs the build's rewriter table names (patch_nso.py FS_KEYS; 0 = none): a variable frame step (VAR_STEP), the render buffer pool a render scale above 1.0 grows
+    // (RENDER_POOL, bytes), the docked 3D views' base size and the output size its stubs replace (VIEW_W / VIEW_H, OUTPUT_W / OUTPUT_H)
+    uint64_t var_step, render_pool, view_w, view_h, out_w, out_h;
     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
     uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
     uint64_t back_off, back_len;   // a second patch area after the image (patch_nso.py TWO: a text longer than a B reaches), inside size; 0 = none

@@ -1198,19 +1198,25 @@ obs += region_obs
 # State page = the page after the key page (zero in the file, read-write in both loaders): +0 float target fps written by the loader (fps_target, DM_FPS_TARGET; 0 = every stub
 # runs the original instructions), +4 30 fps movie/cinematic flag, +8 double lead (TOTK), +0x10 float render scale (TOTK, BotW), +0x18 double game seconds (TOTK),
 # +0x20 u32 step in vsyncs (host; 0 = not decided yet), +0x24 u32 a step the game fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update, marked by
-# its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed). Stub bodies assembled with clang
+# its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed). Fields a build's stubs read only when its fixups table names them
+# (the loader writes them for that build alone): +0x40 u64 output width | height << 32 and +0x48 float output width (OUTPUT_W / OUTPUT_H; 0 = the game's), +0x4c u32 render buffer pool
+# factor and +0x58 u64 bytes added to the game's heaps around it (RENDER_POOL; 0 = as the game sets them), +0x50 float variable frame step in 1/30 s units (VAR_STEP, written by the
+# host each frame; 0 = off). Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
-# no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, and ctx.render_scale = 1 marks a render-scale stub
+# no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = 1 marks a render-scale stub, and
+# ctx.keys[KEY] = value adds a row to the fixups table for stubs the loader writes further state page fields for (VAR_STEP, RENDER_POOL, VIEW_W / VIEW_H, OUTPUT_W / OUTPUT_H)
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
+FS_STATE_SIZE = 0x60
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
+FS_KEYS = {}   # further fixups table rows of the build's stubs (ctx.keys): the loader writes their state page fields for this build only
 if BUILD_ID in FRAME_STEP and NAME == 'main':
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
     if FAR:
         # The loader supplies zero-filled BSS/key pages for a front patch area.
         # Reserve the frame state after the key page there too; stubs reach it by ADRP.
         IMAGE_SIZE = FS_STATE_OFF + 0x4000
-    assert FS_STATE_OFF % 0x1000 == 0 and (FAR or FS_STATE_OFF + 0x40 <= PATCH_OFF) and not any(IMG[FS_STATE_OFF:]), 'frame step state page'
+    assert FS_STATE_OFF % 0x1000 == 0 and (FAR or FS_STATE_OFF + FS_STATE_SIZE <= PATCH_OFF) and not any(IMG[FS_STATE_OFF:]), 'frame step state page'
     def fs_site(off, orig):
         ob = bytes.fromhex(orig)
         assert IMG[off:off + len(ob)] == ob, f'frame step original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
@@ -1221,8 +1227,8 @@ if BUILD_ID in FRAME_STEP and NAME == 'main':
         for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
         cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why)); stat('frame_step')
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py)
-    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0)
-    FRAME_STEP[BUILD_ID](fs); RENDER_SCALE = fs.render_scale
+    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0, keys={})
+    FRAME_STEP[BUILD_ID](fs); RENDER_SCALE = fs.render_scale; FS_KEYS = fs.keys
 
 # ---- Spin waits (every module) ----
 # A guest loop that polls memory until another thread changes it fills only its own core on the Switch, where any higher-priority thread pinned there preempts it, so the
@@ -1544,6 +1550,7 @@ with open(P('fixups.tsv'), 'w') as f:
         for capability in PATCHES['CAPABILITIES'].get(BUILD_ID, ()):
             assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'
             f.write(f'# {capability}\t1\n')
+    for k, v in FS_KEYS.items(): f.write(f'# {k}\t{v}\n')   # the build's further stubs (ctx.keys): the loader reads them
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
 with open(P('gates.tsv'), 'w') as f:
     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')

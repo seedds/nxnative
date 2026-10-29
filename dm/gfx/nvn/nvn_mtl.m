@@ -11539,16 +11539,22 @@ static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mo
 // In fullscreen the Mac front end switches such a screen to a rate that is a multiple where it has one (front_screen_match), and the range is set again for it (link_sync)
 __attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_screen_match(int fps) { (void)fps; }   // front_mac.m; graphics unit tests and iOS have none
+__attribute__((weak)) int nvn_var_fps(void) { return 0; }   // hle_nvn.c: the cap of a variable frame step while it holds (0 = none)
+static int g_link_rate = 60;   // ticks a second of the current mode (link_range): 30 / 60 / 120, or a variable step's cap (mode 4)
+// Mode 4 (a variable frame step, which shows each frame on the next tick): the link runs at the step's cap, at most the screen's rate; on a screen whose rate is not a multiple of
+// it (120 on a 144 Hz screen) virtual ticks count at the cap, as for 60 below. Asked for 120 Hz, a 144 Hz screen fired the link on every other refresh, 72 Hz
 static CAFrameRateRange link_range(int mode) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_LINK_VTICK"); on = !(e && !strcmp(e, "0")); }
-    int rate = mode == 3 ? 30 : mode == 2 ? 120 : 60, hz = on ? front_screen_max_fps() : 0;
+    int hz = on ? front_screen_max_fps() : 0, rate = mode == 3 ? 30 : mode == 2 ? 120 : mode == 4 ? nvn_var_fps() : 60;
+    if (mode == 4) { int mx = front_screen_max_fps(); if (rate < 61) rate = 120; if (mx > 0 && rate > mx) rate = mx; }
+    g_link_rate = rate;
     if (mode != 2 && hz > rate && hz % rate) {
         if (g_link_vperiod != 1.0 / rate) MLOG("display link at the screen's %d Hz, counting a tick every 1/%d s (the screen's rate is not a multiple of it)", hz, rate);
         g_link_vhalf = 0.5 / hz; g_link_vperiod = 1.0 / rate;
         return CAFrameRateRangeMake(rate, hz, hz);
     }
     g_link_vperiod = 0;
-    return mode == 3 ? CAFrameRateRangeMake(30, 30, 30) : mode == 2 ? CAFrameRateRangeMake(60, 120, 120) : CAFrameRateRangeMake(60, 60, 60);
+    return mode == 3 ? CAFrameRateRangeMake(30, 30, 30) : mode == 2 ? CAFrameRateRangeMake(60, 120, 120) : mode == 4 ? CAFrameRateRangeMake(60, rate, rate) : CAFrameRateRangeMake(60, 60, 60);
 }
 // The display link's frame latency: 1 in a window, 2 in fullscreen (DM_PRESENT_LATENCY sets one for both). In a window the system calls back about 50 ms before the target display
 // time; in fullscreen it shows the layer directly and, at latency 1, calls back only one 60 Hz period (16 ms) ahead. There, on ProMotion screens (M4 Pro, M5 Max), it shows some
@@ -11558,7 +11564,7 @@ static CAFrameRateRange link_range(int mode) {
 __attribute__((weak)) int front_fullscreen(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 static int link_latency(void) { return g_present_latency > 0 ? g_present_latency : front_fullscreen() ? 2 : 1; }
 static const char *link_latency_why(void) { return g_present_latency > 0 ? "DM_PRESENT_LATENCY" : front_fullscreen() ? "fullscreen" : "window"; }
-static int g_link_mode = 1;   // Current mode of the display link object: 1 / 2 same as g_dm_present_link, 3 = power-saving mode 30 Hz
+static int g_link_mode = 1;   // Current mode of the display link object: 1 / 2 same as g_dm_present_link, 3 = power-saving mode 30 Hz, 4 = a variable frame step's cap
 static void *link_main(void *arg) {   // Display link thread: started when switching to display-link mode, exits when switching back to 0
     (void)arg;
     pthread_setname_np("nvn-present-link");
@@ -11588,7 +11594,9 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     if (g_rescue_mode) want = 0;
     pthread_mutex_unlock(&g_pq_mu);
     if (want && mtl_fps_target() == 30) want = 3;   // Power-saving mode: display link at 30 Hz
-    if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);
+    else if (want && nvn_var_fps()) want = 4;   // a variable frame step: the link at its cap
+    static int var_was; if (want == 4 && nvn_var_fps() != var_was) { var_was = nvn_var_fps(); applied = -1; }   // a new cap: the range again
+    if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : want == 4 ? nvn_var_fps() : 60);
     // The screen's rate changed (switched by front_screen_match, or another screen): the range again, virtual ticks or none. Taken only once the link object exists, so a change
     // while its thread starts (after link_main read the rate) is not lost
     static int hz_was; int hz = front_screen_max_fps(); CAMetalDisplayLink *lk = g_link;
@@ -11869,11 +11877,11 @@ int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) {
     // How many display-link ticks one frame takes: the game's present interval (vsyncs, 60 Hz) times 1 with a 60 Hz display link, times 2 with a 120 Hz one, halved and rounded up at 30 Hz.
     // A frame presented with interval N blocks the game for N vsyncs on the Switch, as the display callback holds it N ticks: games that scale their time step by the interval (BotW's VFR: interval / 2)
     // ran at double speed while they produced interval-2 frames every 60 Hz tick (iPhone log: Link sprinting with B, the interval flapping 1 ↔ 2)
-    if (vsyncs < 1) vsyncs = 1;
-    return mtl_link_wait_ticks(g_link_mode == 3 ? (vsyncs + 1) / 2 : vsyncs * (g_link_mode == 2 ? 2 : 1), timeout_ns);
+    // vsyncs 0: one tick of the link whatever its rate (a variable frame step shows each frame on the next refresh, hle_nvn.c vstep_tick; at 120 Hz a whole vsync is two ticks, 60 fps)
+    return mtl_link_wait_ticks(vsyncs < 1 ? 1 : (int)(((uint64_t)vsyncs * (uint64_t)g_link_rate + 59) / 60), timeout_ns);
 }
-// The display link's rate: 120 Hz (DM_PRESENT_LINK=2), 60, or 30 in power-saving mode
-int mtl_link_rate(void) { return g_link_mode == 3 ? 30 : g_link_mode == 2 ? 120 : 60; }
+// The display link's rate: 120 Hz (DM_PRESENT_LINK=2), 60, 30 in power-saving mode, or a variable step's cap (g_link_rate)
+int mtl_link_rate(void) { return g_link_rate; }
 // The same wait counted in the display link's own ticks: one per frame for a frame rate as high as the link's (present_interval display at DM_PRESENT_HZ=120 on a 120 Hz link)
 int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
     if (!mtl_link_active()) return 0;
@@ -11892,8 +11900,8 @@ int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns) {
 // The display's vsync for vi::GetDisplayVsyncEvent (hle_sdk16.c): returns 1 at the first display-link tick of the next 60 Hz vsync after *seen (the tick count it last returned, updated),
 // 0 when the link does not run, runs at 30 Hz (power saving: the 60 Hz event cannot come from it) or gives no tick within the timeout; the caller then keeps its own clock
 int mtl_link_wait_vsync(uint64_t *seen, uint64_t timeout_ns) {
-    if (!mtl_link_active() || g_link_mode == 3) return 0;
-    const uint64_t step = g_link_mode == 2 ? 2 : 1;
+    if (!mtl_link_active() || g_link_rate % 60) return 0;   // 30 Hz, or a variable step's cap that is not a multiple of 60
+    const uint64_t step = (uint64_t)g_link_rate / 60;
     pthread_mutex_lock(&g_link_mu);
     if (*seen > g_link_tick_n || g_link_tick_n > *seen + 4 * step) *seen = g_link_tick_n;   // first call, or far behind (a stall): from the current tick on, no burst
     struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);

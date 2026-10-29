@@ -1,8 +1,10 @@
 // NVN readback contract: a pending clear must reach both GPU buffer copies and CPU reads.
 // Expected 8x4 RGBA values are literal bytes, independent of the Metal replay's state.
 #define nvn_game_fps nvn_game_fps_mtl_default
+#define nvn_var_fps nvn_var_fps_mtl_default   // the same for nvn_var_fps (a variable frame step)
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
+#undef nvn_var_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
 #undef g_ft

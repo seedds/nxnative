@@ -6,6 +6,39 @@ How to build and install a game: [README](../README.md#how-to-play).
 - **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`.
 - **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. Copy `save/` and `pso_user.tsv` over from the old one to keep your progress.
 
+## Mac keyboard controls
+
+Click the game window to give it keyboard focus. The defaults are WASD for the
+left stick, J/K/U/I for A/B/X/Y, Q/E for L/R, Z/C for ZL/ZR, Return for Plus,
+Tab for Minus, the arrows for the D-pad, F/G for stick clicks and Space for shake.
+
+To remap keys for one Mac app, add `DM_KEYMAP=...` to that game's
+`~/Library/Application Support/nxnative/<title ID>/env.txt`, then restart it.
+Comma-separated `key=action` entries override only those keys. `None` disables
+a key. A malformed map is rejected as a whole, with the defaults retained.
+Keys refer to physical US-keyboard positions, so changing the macOS text layout
+does not change the controls. Shift, Control and Option include either side.
+
+For Need for Speed Hot Pursuit Remastered (`010029B0118E8000`), the default
+in-game controller layout can use these PC-style controls:
+
+```
+DM_KEYMAP=W=ZR,S=ZL,A=LLeft,D=LRight,Space=Y,Shift=A,RightShift=A,Return=A,Escape=B,P=Plus,V=R,Up=RUp,Down=RDown,Left=RLeft,Right=RRight
+```
+
+W accelerates, S brakes/reverses, A/D steer, Space uses the handbrake, Shift uses
+nitro, V changes camera, and arrows rotate the camera. Return confirms, Escape
+goes back, and P pauses. J/K still provide A/B, and the in-game prompts continue
+to show controller buttons. This follows the game's
+[Switch](https://eaassets-a.akamaihd.net/eahelp/manuals/nfs-hp-remastered-switch-en.pdf)
+and [PC](https://eaassets-a.akamaihd.net/eahelp/manuals/nfs-hp-remastered-pc-en.pdf)
+default controls.
+
+Actions: A, B, X, Y, LS, RS, L, R, ZL, ZR, Plus, Minus, Left, Up, Right, Down,
+LLeft, LRight, LUp, LDown, RLeft, RRight, RUp, RDown, Shake and None.
+Keys include letters, digits, punctuation, Space, Return (or Enter), Escape,
+Tab, Shift, Control, Option and arrow names. Unset `DM_KEYMAP` to restore defaults.
+
 ## Touch controls
 
 Tap **2D** / **3D** at the top to switch layouts; the app remembers your choice. Wonder, Engage, Dread, 13 Sentinels, Link's Awakening, Ace Attorney Investigations Collection, Unicorn Overlord, Rhythm Heaven Groove, Octopath Traveler 0, Pokémon Legends: Z-A, Cuphead, Absolum, Blasphemous 2, Brain Memory Training Academy, The Great Ace Attorney Chronicles, STEINS;GATE RE:BOOT, Big Brain Academy: Brain vs. Brain, Patrick's Parabox, Celeste, Raging Loop and Mario vs. Donkey Kong start in 2D, the other games in 3D (STEINS;GATE RE:BOOT's quick save is R3, in the 3D layout).

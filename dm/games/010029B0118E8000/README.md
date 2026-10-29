@@ -29,11 +29,16 @@ The rest of the profile is what `profile_guess.py` made of the survey: the 3.25 
 
 ## Services
 
+- **Mac verification (2026-10-29):** a user reported the game working after confirming the menu on an Apple M4 running macOS 26.6.2, with Xcode 27.1; the gameplay route and duration were not recorded. This was the initial 30 fps bring-up. Super Mario Galaxy 2 1.4.0 was also confirmed playable on the same Mac.
+- **Keyboard:** the optional [Mac key map](../../../docs/playing.md#mac-keyboard-controls) gives this game WASD driving, Shift nitro and Space handbrake without changing other games' controls. Custom-map gameplay verification is separate from the initial gameplay confirmation above.
+
 - Autolog, the game's online layer, finds no network (`nifm` answers as offline) and the game goes on to the career map after its connection screen.
 
 ## Found on this game
 
 General changes first needed here; each applies to every game:
+
+- [Mac keyboard bindings can be overridden per app](../../../docs/reference/services.md#mac-keyboard-bindings-can-be-overridden-per-app) (`keyboard_map.h`, `front_mac.m`).
 
 - [GLSLC outputs in Criterion's Bundle 2 resources](../../../docs/reference/shaders.md#glslc-outputs-in-criterions-bundle-2-resources) (`shader_split.py`)
 - [A texture upgrade while a draw binds its arguments ends the pass](../../../docs/reference/rendering.md#a-texture-upgrade-while-a-draw-binds-its-arguments-ends-the-pass) (`nvn_mtl.m`)

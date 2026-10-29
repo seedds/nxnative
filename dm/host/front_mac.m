@@ -11,6 +11,7 @@
 #import <GameController/GameController.h>
 #include "dm.h"
 #include "dm_input.h"
+#include "keyboard_map.h"
 #include "front.h"
 #include "hle.h"
 #include "pad_slots.h"
@@ -21,8 +22,7 @@
 #include <math.h>
 
 static CAMetalLayer *g_layer;
-static uint64_t g_btn;
-static int g_w, g_a, g_s, g_d;
+static dm_keyboard g_keyboard;
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
@@ -87,26 +87,14 @@ void front_screen_match(int fps) {
     g_match_want = fps; dispatch_async(dispatch_get_main_queue(), ^{ screen_match_apply(); });
 }
 static void push(void) {
-    int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    dm_input_set(g_btn, lx, ly, 0, 0);
-}
-static int key_bit(unsigned short code) {
-    switch (code) {
-        case 38: return 0;  case 40: return 1;  case 32: return 2;  case 34: return 3;    // J K U I → A B X Y
-        case 3: return 4;   case 5: return 5;                                            // F G → press stick
-        case 12: return 6;  case 14: return 7;  case 6: return 8;   case 8: return 9;    // Q E Z C → L R ZL ZR
-        case 36: return 10; case 48: return 11;                                          // Return Tab → + −
-        case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15; // ← ↑ → ↓
-    }
-    return -1;
+    uint64_t buttons; int32_t lx,ly,rx,ry;
+    dm_keyboard_state(&g_keyboard,&buttons,&lx,&ly,&rx,&ry);
+    dm_input_set(buttons,lx,ly,rx,ry);
 }
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
-    switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
-    int b = key_bit(c);
-    uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
-    g_btn = down ? (g_btn | m) : (g_btn & ~m);
+    if(c<128) g_keyboard.held[c]=down;
     push();
 }
 
@@ -186,7 +174,7 @@ static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 static void input_release(void) {
     g_input_on = 0;
     dm_motion_pro_active(0);
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+    memset(g_keyboard.held,0,sizeof g_keyboard.held); push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
@@ -289,9 +277,23 @@ void front_run(void (*guest)(void)) {
                 pads_changed(conn ? nil : c); }];
         dm_haptics_apple_init();
         pads_start();
-        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
+        dm_keyboard_init(&g_keyboard);
+        if(!dm_keyboard_configure(&g_keyboard,getenv("DM_KEYMAP"))) LOG("[RED] invalid DM_KEYMAP; using default keyboard controls");
+        else if(getenv("DM_KEYMAP")) LOG("front end: custom keyboard controls (DM_KEYMAP)");
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
+            if(e.type==NSEventTypeFlagsChanged) {
+                unsigned short c=e.keyCode; NSUInteger flag=(c==56 || c==60)?NSEventModifierFlagShift:(c==59 || c==62)?NSEventModifierFlagControl:(c==58 || c==61)?NSEventModifierFlagOption:0;
+                if(flag) { int down=(e.modifierFlags & flag)!=0;
+                    // Both physical sides use the aggregate modifier state, so releasing
+                    // one Shift while the other is held cannot release nitro early.
+                    if(flag==NSEventModifierFlagShift) g_keyboard.held[56]=g_keyboard.held[60]=down;
+                    else if(flag==NSEventModifierFlagControl) g_keyboard.held[59]=g_keyboard.held[62]=down;
+                    else g_keyboard.held[58]=g_keyboard.held[61]=down;
+                    push(); }
+                return e;
+            }
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
         }];
@@ -356,7 +358,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     dispatch_sync(dispatch_get_main_queue(), ^{
         // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
         // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+        memset(g_keyboard.held,0,sizeof g_keyboard.held); push();
         dm_touch_set(NULL, 0);
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];

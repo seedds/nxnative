@@ -384,12 +384,18 @@ If you prefer configuring dependencies manually:
 # Install Xcode Command Line Tools
 xcode-select --install
 
-# Install Homebrew dependencies
-brew install python@3.11 cmake ninja molten-vk libzip lz4 zstd spirv-cross
+# Install Homebrew dependencies (Python 3.12, 3.13, or 3.14 recommended)
+brew install python@3.13 cmake ninja molten-vk libzip lz4 zstd spirv-cross xcodegen dotnet
 
-# Install required Python packages
-pip3 install pycryptodome libhac
+# Install required Python packages for asset processing and shader translation
+python3.13 -m pip install lz4 capstone fonttools
+
+# (Optional) For compressed .nsz / .xcz files, install nsz (requires Python <= 3.14)
+python3.13 -m pip install nsz
 ```
+
+> [!NOTE]
+> `libhac` is a .NET C# library managed via NuGet and compiled automatically by `dotnet` for `nx_extract`. It is **not** a Python package.
 
 ---
 
@@ -585,12 +591,18 @@ Se preferir instalar manualmente pelo terminal:
 # 1. Instalar as ferramentas de linha de comando do Xcode
 xcode-select --install
 
-# 2. Instalar dependências via Homebrew
-brew install python@3.11 cmake ninja molten-vk libzip lz4 zstd spirv-cross
+# 2. Instalar dependências via Homebrew (Python 3.12, 3.13 ou 3.14 recomendados)
+brew install python@3.13 cmake ninja molten-vk libzip lz4 zstd spirv-cross xcodegen dotnet
 
-# 3. Instalar pacotes Python para extração de arquivos do Switch
-pip3 install pycryptodome libhac
+# 3. Instalar pacotes Python para extração de assets e tradução de shaders
+python3.13 -m pip install lz4 capstone fonttools
+
+# (Opcional) Para arquivos comprimidos .nsz / .xcz, instale o nsz (requer Python <= 3.14)
+python3.13 -m pip install nsz
 ```
+
+> [!NOTE]
+> `libhac` é uma biblioteca .NET C# gerenciada via NuGet e compilada automaticamente pelo `dotnet` para o `nx_extract`. **Não** é um pacote Python.
 
 ---
 

@@ -9,17 +9,17 @@
 #define T_REFL_CMP 1
 #include "t_refl_c.c"   // the corpus (CASES, limit_doc, BAD_TEXT), without its main
 
-// nvn_refl.c writes these numbers into dtt without a Metal header: they must be MTLTextureType's
-_Static_assert(NVN_MTL_TEX_1D == MTLTextureType1D, "MTLTextureType1D");
-_Static_assert(NVN_MTL_TEX_1D_ARRAY == MTLTextureType1DArray, "MTLTextureType1DArray");
-_Static_assert(NVN_MTL_TEX_2D == MTLTextureType2D, "MTLTextureType2D");
-_Static_assert(NVN_MTL_TEX_2D_ARRAY == MTLTextureType2DArray, "MTLTextureType2DArray");
-_Static_assert(NVN_MTL_TEX_2D_MULTISAMPLE == MTLTextureType2DMultisample, "MTLTextureType2DMultisample");
-_Static_assert(NVN_MTL_TEX_CUBE == MTLTextureTypeCube, "MTLTextureTypeCube");
-_Static_assert(NVN_MTL_TEX_CUBE_ARRAY == MTLTextureTypeCubeArray, "MTLTextureTypeCubeArray");
-_Static_assert(NVN_MTL_TEX_3D == MTLTextureType3D, "MTLTextureType3D");
-_Static_assert(NVN_MTL_TEX_2D_MULTISAMPLE_ARRAY == MTLTextureType2DMultisampleArray, "MTLTextureType2DMultisampleArray");
-_Static_assert(NVN_MTL_TEX_BUFFER == MTLTextureTypeTextureBuffer, "MTLTextureTypeTextureBuffer");
+// nvn_refl.c writes these numbers into dtt without a Metal header: they must be MTLTextureType's (compared as int: clang warns on comparing two enum types)
+_Static_assert((int)NVN_MTL_TEX_1D == (int)MTLTextureType1D, "MTLTextureType1D");
+_Static_assert((int)NVN_MTL_TEX_1D_ARRAY == (int)MTLTextureType1DArray, "MTLTextureType1DArray");
+_Static_assert((int)NVN_MTL_TEX_2D == (int)MTLTextureType2D, "MTLTextureType2D");
+_Static_assert((int)NVN_MTL_TEX_2D_ARRAY == (int)MTLTextureType2DArray, "MTLTextureType2DArray");
+_Static_assert((int)NVN_MTL_TEX_2D_MULTISAMPLE == (int)MTLTextureType2DMultisample, "MTLTextureType2DMultisample");
+_Static_assert((int)NVN_MTL_TEX_CUBE == (int)MTLTextureTypeCube, "MTLTextureTypeCube");
+_Static_assert((int)NVN_MTL_TEX_CUBE_ARRAY == (int)MTLTextureTypeCubeArray, "MTLTextureTypeCubeArray");
+_Static_assert((int)NVN_MTL_TEX_3D == (int)MTLTextureType3D, "MTLTextureType3D");
+_Static_assert((int)NVN_MTL_TEX_2D_MULTISAMPLE_ARRAY == (int)MTLTextureType2DMultisampleArray, "MTLTextureType2DMultisampleArray");
+_Static_assert((int)NVN_MTL_TEX_BUFFER == (int)MTLTextureTypeTextureBuffer, "MTLTextureTypeTextureBuffer");
 
 static int n_docs, n_mismatch, n_probes, n_probe_diff;
 

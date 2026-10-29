@@ -134,8 +134,8 @@ $(B)/t_fs_commit_list_tsan: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../save_s
 fs-tsan: $(B)/t_fs_commit_list_tsan
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_commit_list_tsan
 # The prefetch list's record and walk: one process per phase, phases 1 and 2 sharing one recorded list through DM_FS_USER (the recipe starts phase 1's directories new; the list itself is reset by phase 1)
-$(B)/t_fs_prefetch: t_fs_prefetch.c t_fs_stub.c ../hle_fs.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs_prefetch.c t_fs_stub.c ../hle_bigstack.c
+$(B)/t_fs_prefetch: t_fs_prefetch.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs_prefetch.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
 .PHONY: fs-prefetch
 fs-prefetch: $(B)/t_fs_prefetch
 	@mkdir -p "$(abspath $(B)/t_fp_p1)" "$(abspath $(B)/t_fp_p2)"

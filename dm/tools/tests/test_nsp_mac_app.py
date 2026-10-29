@@ -337,11 +337,81 @@ class PackReuse(unittest.TestCase):
                 self.failed_tool = None
         self.assert_repacked()
 
+    def test_signed_executables_get_new_inodes_without_changing_bytes_or_modes(self):
+        old_sign = pack_app.sign
+        before = {}
+        def record_sign(app, identity, codesign):
+            old_sign(app, identity, codesign)
+            for name in (pack_app.EXE, 'dmhost'):
+                f = app / 'Contents/MacOS' / name
+                subprocess.run(['xattr', '-w', 'org.nxnative.test-staging', name, f], check=True)
+                before[name] = (f.stat().st_ino, pack_app.digest(f), f.stat().st_mode)
+        with mock.patch.object(pack_app, 'sign', side_effect=record_sign): self.pack()
+        for name in before:
+            f = Path(self.args.out) / 'Contents/MacOS' / name
+            inode, content, mode = before[name]
+            self.assertNotEqual(f.stat().st_ino, inode, name)
+            self.assertEqual((pack_app.digest(f), f.stat().st_mode), (content, mode), name)
+            self.assertEqual(subprocess.run(['xattr', '-p', 'org.nxnative.test-staging', f], check=True, capture_output=True, text=True).stdout.strip(), name)
+        self.assertTrue(any('--verify' in cmd and '--deep' in cmd and '--strict' in cmd for cmd in self.commands))
+        self.assertFalse(any('.signed-' in str(p.name) for p in (Path(self.args.out) / 'Contents/MacOS').iterdir()))
+
+    def test_unswappable_existing_app_fails_before_17gb_copy(self):
+        self.pack()
+        previous = (Path(self.args.out) / 'Contents/Info.plist').read_bytes()
+        original_key = self.key.read_bytes()
+        self.args.name = 'different game name'
+        with mock.patch.object(pack_app, 'can_swap_app_dirs', return_value=False), self.assertRaisesRegex(SystemExit, 'new --out .* path or an APFS destination'):
+            self.pack()
+        self.assertEqual((Path(self.args.out) / 'Contents/Info.plist').read_bytes(), previous)
+        self.assertEqual(self.key.read_bytes(), original_key)
+        self.assertFalse(Path(self.args.out + '.partial').exists())
+
+    def test_refresh_failure_never_publishes_partial_bundle(self):
+        self.pack()
+        original = (Path(self.args.out) / 'Contents/Info.plist').read_bytes()
+        self.args.name += ' changed'
+        with mock.patch.object(pack_app, 'freshen_signed_executables', side_effect=OSError('mock new-inode failure')):
+            with self.assertRaisesRegex(OSError, 'new-inode failure'): self.pack()
+        self.assertEqual((Path(self.args.out) / 'Contents/Info.plist').read_bytes(), original)
+        self.assertFalse(self.key.exists())
+
+    def test_second_executable_refresh_failure_never_publishes_partial_bundle(self):
+        self.pack()
+        deployed = Path(self.args.out)
+        previous = (deployed / 'Contents/Info.plist').read_bytes()
+        old_inodes = {name: (deployed / 'Contents/MacOS' / name).stat().st_ino for name in (pack_app.EXE, 'dmhost')}
+        self.args.name += ' changed'
+        real_replace = os.replace
+        def fail_second_refresh(src, dst):
+            if str(dst).endswith('/Contents/MacOS/dmhost'):
+                raise OSError('injected second executable replacement failure')
+            return real_replace(src, dst)
+        with mock.patch.object(pack_app.os, 'replace', side_effect=fail_second_refresh):
+            with self.assertRaisesRegex(OSError, 'second executable replacement failure'): self.pack()
+        self.assertEqual((deployed / 'Contents/Info.plist').read_bytes(), previous)
+        self.assertEqual({name: (deployed / 'Contents/MacOS' / name).stat().st_ino for name in old_inodes}, old_inodes)
+        self.assertFalse(self.key.exists())
+
+    def test_strict_seal_failure_after_refresh_never_publishes_bundle(self):
+        self.pack()
+        previous = (Path(self.args.out) / 'Contents/Info.plist').read_bytes()
+        self.args.name += ' changed'
+        original_run = pack_app.run
+        def fail_deep_verification(cmd):
+            if '--verify' in cmd and '--strict' in cmd and '--deep' in cmd:
+                raise SystemExit('injected strict resource-seal failure')
+            return original_run(cmd)
+        with mock.patch.object(pack_app, 'run', side_effect=fail_deep_verification):
+            with self.assertRaisesRegex(SystemExit, 'strict resource-seal failure'): self.pack()
+        self.assertEqual((Path(self.args.out) / 'Contents/Info.plist').read_bytes(), previous)
+        self.assertFalse(self.key.exists())
+
     def test_failed_atomic_replacement_drops_key_and_keeps_old_app(self):
         self.pack(); before = (Path(self.args.out) / 'Contents/Info.plist').read_bytes()
         self.args.name = 'changed'
-        library = types.SimpleNamespace(renamex_np=mock.Mock(return_value=-1))
-        with mock.patch.object(pack_app.ctypes, 'CDLL', return_value=library), mock.patch.object(pack_app.ctypes, 'get_errno', return_value=5):
+        library = types.SimpleNamespace(renamex_np=mock.Mock(return_value=-1), copyfile=pack_app.ctypes.CDLL(None, use_errno=True).copyfile)
+        with mock.patch.object(pack_app, 'can_swap_app_dirs', return_value=True), mock.patch.object(pack_app.ctypes, 'CDLL', return_value=library), mock.patch.object(pack_app.ctypes, 'get_errno', return_value=5):
             with self.assertRaises(OSError): self.pack()
         self.assertFalse(self.key.exists())
         self.assertEqual((Path(self.args.out) / 'Contents/Info.plist').read_bytes(), before)
@@ -432,7 +502,7 @@ class App(unittest.TestCase):
         self.assertEqual((dm / 'pso_pairs.tsv').read_text(), 'other-vertex\tother-pixel\n')
 
     def test_split_pso_pairs(self):   # a profile without pso_pairs.tsv: the shader split's copy (--pso-pairs); the profile's own wins when it has one
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d, mock.patch.object(pack_app, 'sign', lambda *a: None), mock.patch('sys.stdout'):
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d, mock.patch('sys.stdout'):
             d = Path(d); (d / 'profile').mkdir(); (d / 'profile/shader_map.tsv').write_text('m'); (d / 'split.tsv').write_text('split-vertex\tsplit-pixel\n')
             a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / 'Split.app'); a.icon = None; a.tables = str(d / 'profile'); a.pso_pairs = str(d / 'split.tsv')
             pack_app.pack(a)
@@ -474,7 +544,10 @@ class App(unittest.TestCase):
         def pack(name, settings):
             (self.tmp / f'{name}.json').write_text(json.dumps(settings))
             a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / f'{name}.app'); a.icon = None; a.bundle_id = domain; a.settings = str(self.tmp / f'{name}.json')
-            with mock.patch.object(pack_app, 'sign', lambda *x: None), mock.patch('sys.stdout'): pack_app.pack(a)
+            # The packer now verifies the sealed app after signed executable
+            # inode refresh. Keep this fixture signed: skipping signing makes
+            # the strict verification fail before saved choices are tested.
+            with mock.patch('sys.stdout'): pack_app.pack(a)
             return self.tmp / f'{name}.app'
 
         def run(app, args=(), **env):
@@ -518,6 +591,7 @@ class App(unittest.TestCase):
             Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)
 
     def test_signed(self):   # ad-hoc, both the host and the bundle, never the hardened runtime (it refuses the executable memory the host makes for the game's code)
+        subprocess.run(['codesign', '--verify', '--deep', '--strict', self.app], check=True, capture_output=True)
         for target in (self.app, self.app / 'Contents/MacOS/dmhost'):
             subprocess.run(['codesign', '--verify', '--strict', target], check=True, capture_output=True)
             d = subprocess.run(['codesign', '-dv', target], capture_output=True, text=True).stderr
@@ -645,7 +719,7 @@ class App(unittest.TestCase):
         self.assertEqual(len(probed), 5); self.assertEqual(counted, [(self.tmp / 'aoc').resolve()])
 
     def test_copies(self):   # another volume (no APFS clone): plain copies, the same layout; a new app replaces the old one whole
-        with mock.patch.object(pack_app, 'can_clone', lambda *a: False), mock.patch.object(pack_app, 'sign', lambda *a: None), mock.patch('sys.stdout'):
+        with mock.patch.object(pack_app, 'can_clone', lambda *a: False), mock.patch('sys.stdout'):
             a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / 'Copy.app'); a.icon = None
             (self.tmp / 'Copy.app/Contents/stale').mkdir(parents=True)
             pack_app.pack(a)

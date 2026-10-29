@@ -7,7 +7,7 @@ SDK calls and system services the host answers (`dm/host/hle_*.c`). Each entry: 
 - **Symptom:** a Mac racing game works with controller buttons, but its fixed keyboard layout requires Z/C for the triggers and Space shakes instead of using the handbrake.
 - **Cause:** the Mac front end hard-coded its key map and did not process modifier-key changes.
 - **Fix:** `keyboard_map.h` applies optional `DM_KEYMAP` overrides to physical Mac key positions; the front end handles Shift, Control and Option changes, clears held keys on focus loss, and composes every held key before publishing input. Releasing one of two keys mapped to the same button does not release the other. Invalid maps retain all defaults. See [Mac keyboard controls](../playing.md#mac-keyboard-controls) for configuration and the racing layout.
-- **Found on:** [Need for Speed Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md). CPU tests cover the default layout, racing overrides, overlapping aliases, both stick directions, disabled keys, focus-style reset and malformed-map rollback. Custom-map gameplay verification remains open.
+- **Found on:** [Need for Speed Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md). CPU tests cover the default layout, racing overrides, overlapping aliases, both stick directions, disabled keys, focus-style reset and malformed-map rollback. The user confirmed the documented racing controls during Mac gameplay after restarting the rebuilt app (Apple M4, macOS 26.6.2, 2026-10-29).
 
 ## Service connections
 

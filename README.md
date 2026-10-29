@@ -578,7 +578,7 @@ Track our shipped milestones and upcoming features! Star the repository to follo
 
 <details>
 <summary><b>1. Why do I need <code>prod.keys</code> and where do I get them?</b></summary>
-Nintendo Switch software binaries and RomFS containers are encrypted with cryptographic keys unique to the platform. To legally decrypt and run code you own, you must dump your keys from your personal Nintendo Switch console using tools like <a href="https://github.com/shchmue/Lockpick_RCM">Lockpick_RCM</a>. Place the file at <code>~/.switch/prod.keys</code>.
+Nintendo Switch software binaries and RomFS containers are encrypted with cryptographic keys unique to the platform. To legally decrypt and run code you own, you must obtain your decryption keys: search for "Prod Keys" on Google and in Switch emulation communities to acquire your <code>prod.keys</code>. Place the file at <code>~/.switch/prod.keys</code> (or choose it directly in the <b>Settings</b> tab).
 </details>
 
 <details>
@@ -638,7 +638,7 @@ Bem-vindo ao guia oficial em português do **NxNative Launcher (v1.7.0)**! Esta 
 #### A. Requisitos de Sistema
 - Dispositivo com processador **Apple Silicon** (M1+ ou A17+).
 - macOS 13.0 (Ventura), 14.0 (Sonoma) ou 15.0 (Sequoia).
-- Chaves de descriptografia **`prod.keys`** extraídas do seu próprio Nintendo Switch via Lockpick_RCM (salve em `~/.switch/prod.keys`).
+- Chaves de descriptografia **`prod.keys`**: pesquise por "Prod Keys" no Google e em comunidades online de emulação para obter suas chaves (salve em `~/.switch/prod.keys` ou selecione diretamente na aba **Configurações**).
 
 #### B. Instalação Automática (Pelo Próprio Launcher)
 1. Abra o **NxNative_Launcher.app**.

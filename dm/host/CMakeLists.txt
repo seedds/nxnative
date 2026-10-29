@@ -117,10 +117,23 @@ endif()
 # main.c (it runs a frontend), and the Apple frontend files (*.m). front_sdl.c is the front end here. hle_fdstat.c compiles to nothing on Windows
 file(GLOB HLE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hle_*.c)
 list(FILTER HLE_SRC EXCLUDE REGEX "/hle_bigstack\\.c$")
-add_library(nxhost STATIC hle.c loader.c thread.c front_sdl.c ${HLE_SRC})
+set(NXHOST_SRC hle.c loader.c thread.c front_sdl.c)
+list(TRANSFORM NXHOST_SRC PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
+list(APPEND NXHOST_SRC ${HLE_SRC})
+# The host-call thunks of the x86-64 execution engine (docs/design/aot-recompiler.md 2.4): generated from the HLE entries of exactly the sources nxhost compiles,
+# so an entry in a file that is not built here gets no thunk. The generator also reads the quoted headers beside them (typedefs, wrapper macros). aot_hostfn.c is the
+# host-function page that gives each thunk its guest-visible address
+set(GEN_HLE_THUNKS ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_hle_thunks.py)
+set(HLE_THUNKS_C ${CMAKE_BINARY_DIR}/gen/hle_thunks.c)
+file(GLOB HOST_H CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.h ${CMAKE_CURRENT_SOURCE_DIR}/plat/*.h)
+add_custom_command(OUTPUT ${HLE_THUNKS_C}
+    COMMAND ${Python3_EXECUTABLE} ${GEN_HLE_THUNKS} -o ${HLE_THUNKS_C} ${NXHOST_SRC}
+    DEPENDS ${GEN_HLE_THUNKS} ${NXHOST_SRC} ${HOST_H}
+    COMMENT "host-call thunks from the HLE entries" VERBATIM)
+add_library(nxhost STATIC ${NXHOST_SRC} aot_hostfn.c ${HLE_THUNKS_C})
 add_dependencies(nxhost game_profile)
 target_compile_options(nxhost PRIVATE ${HOST_FLAGS})
-target_include_directories(nxhost PUBLIC ${GEN} ${PROFILE_DIR} ${REPO}/dm/third_party/stb_vorbis)
+target_include_directories(nxhost PUBLIC ${GEN} ${PROFILE_DIR} ${REPO}/dm/third_party/stb_vorbis ${REPO}/dm/tools/aot/include)
 target_link_libraries(nxhost PUBLIC nxplat vpx SDL3::SDL3-static)
 
 # ---- Unit tests (dm/host/tests: each includes the host sources it exercises, so a test links the platform layer, not nxhost) ----
@@ -220,6 +233,17 @@ host_test(t_movie_vpx SOURCES t_movie_vpx.c PROFILE VPX)
 # The NVN replay's draw and render-target state and its GPU-write ledger (dm/gfx/nvn, plain C; dm/gfx/tests/Makefile builds the same two on the Mac)
 host_test(t_state SOURCES ../../gfx/tests/t_state.c ../../gfx/nvn/nvn_state.c INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
 host_test(t_gpuwrite SOURCES ../../gfx/tests/t_gpuwrite.c ../../gfx/nvn/nvn_gpuwrite.c INCLUDES ${REPO}/dm/gfx/nvn)
+# The host-call thunks and the host-function page: the generator's output for the synthetic entries of t_hle_thunks_entries.c, which t_hle_thunks.c includes
+# (its death tests are skipped on Windows)
+set(T_HLE_THUNKS_C ${CMAKE_BINARY_DIR}/gen/t_hle_thunks.c)
+add_custom_command(OUTPUT ${T_HLE_THUNKS_C}
+    COMMAND ${Python3_EXECUTABLE} ${GEN_HLE_THUNKS} -o ${T_HLE_THUNKS_C} ${TESTS}/t_hle_thunks_entries.c
+    DEPENDS ${GEN_HLE_THUNKS} ${TESTS}/t_hle_thunks_entries.c ${HOST_H}
+    COMMENT "host-call thunks of the test entries" VERBATIM)
+add_custom_target(t_hle_thunks_gen DEPENDS ${T_HLE_THUNKS_C})
+set_source_files_properties(${TESTS}/t_hle_thunks.c PROPERTIES OBJECT_DEPENDS ${T_HLE_THUNKS_C})
+host_test(t_hle_thunks SOURCES t_hle_thunks.c t_hle_thunks_entries.c ../aot_hostfn.c PROFILE INCLUDES ${CMAKE_BINARY_DIR} ${REPO}/dm/tools/aot/include)
+add_dependencies(t_hle_thunks t_hle_thunks_gen)
 # fork() death tests
 host_test(t_heap_size SOURCES t_heap_size.c PROFILE POSIX)
 host_test(t_oe SOURCES t_oe.c PROFILE POSIX)

@@ -4,6 +4,13 @@ Update 1.0.3 (v196608) over the base game (v0), SDK 10.4.1. Criterion's engine (
 
 Status: plays on the Mac (Apple M4, 2026-10-28): boot, the Autolog connection screen (offline, it goes on by itself), the career map, car select and whole races (Grand Ocean Road, Mystic Lake Road, South Face Drive, First Offence with the gold medal), at 60 fps with sound, a Switch Pro Controller and saves. In two sessions of 7 and 11 minutes: no crash, no new red line; at 60 fps 81% of the 300-frame windows held 16.7 ms (the others, menus and loading screens, 18 ms), 0.37% of the frames dropped, GPU 6.3 ms a frame (p50), the main thread about 4 ms. iOS has not been tested.
 
+## Additional Mac verification (2026-10-29)
+
+- Apple M4, macOS 26.6.2, Xcode 27.1; base game plus update 1.0.3 (v196608).
+- The user confirmed that the Mac app reaches its menu and reported the game working. This independent bring-up used the original 30 fps settings; it does not establish a new measurement of the 60 fps profile above. The manual gameplay route and duration were not recorded.
+- The launch diagnostic ran for 55 seconds with Metal API validation, passed 1,200 frames and displayed the startup logos without a crash or missing-shader errors. All 2,154 discovered shaders compiled successfully.
+- No iPhone testing was performed in this verification.
+
 ## What it needs
 
 | Setting | Where | Why |

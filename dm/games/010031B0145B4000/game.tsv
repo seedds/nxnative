@@ -1,0 +1,47 @@
+# Game profile of Road 96 (Switch, update v327680 = 1.05 on the base game v0). Plays on the Mac
+# Format: see dm/games/README.md
+# Unity IL2CPP on SDK 11.4.3, NVN, FMOD (sound through AudioOut), VP8 movies through NintendoSDK_movie (subsdk0). The survey finds the strings of Unity 2019.3.0f5 and 2020.3.12f1.
+# Shaders: from the UnityFS bundles under Data/ (shader_split.py) and Unity's 11 GLSLC outputs in main
+
+# ---- Identity ----
+title_id	010031B0145B4000
+program_id	010031B0145B4000
+
+# ---- App ----
+name	Road 96
+ipa	Road96.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	1.05	main=eaf3511193618b2a4a6d908221acf3c3	subsdk0=507f19d1240d09d00992248e8a0fd77e	sdk=2d369d9999e3e10e665106f840ffff9b
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# subsdk0 = NintendoSDK_movie, which main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/sharedassets1.resource
+zip_store	.assets:.dat:.resource:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory). At startup the game takes pool − used as one 3.14 GB address region, and Unity maps its allocators beside it.
+# The NSP script's heap check (alias region used up to +4.27 GB of 4.38 GB, no heap set) wrote a 1 GB pool and kept Engage's 5 GB block (4.375 GB alias region). Both were wrong here:
+#   - 1 GB pool: the game's allocator ran out at 1.5 GB mapped, 10 s into the title, and an unchecked NULL from its block allocator (main+0x225ef4, a memset of 0x368 bytes at sdk+0x53b41c) crashed it.
+#   - 3285 MB pool (the Switch's, the survey's value) in the 4.375 GB alias region: the region was full at startup (+4.25 GB), and the next address reservation returned 0 about 30 s in
+#     (main+0x924c18, Unity's virtual block allocator writing through the NULL it got).
+# With a 3285 MB pool and a 7 GB block (6.375 GB alias region) the title ran 3,300 frames (110 s) with no red line and a flat 30 fps; the alias region's high-water mark was +4.76 GB, past the old 4.375 GB.
+# Not measured: the iPhone, and play beyond the title screens
+mem_reserve	0x1C0000000
+mem_alias	0x198000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Road 96 shaders
+
+# ---- Pipelines ----
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py). Without this key the bundled archive was built for near = -w and the
+# host skipped it ("the game's depth mode is not the one built for"), so every pipeline was built when first drawn: hitches of 0.1–1.8 s at each new scene
+depth_mode	zero

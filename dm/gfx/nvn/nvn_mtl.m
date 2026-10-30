@@ -93,8 +93,9 @@ static id<MTL4CommandAllocator> g_present_alloc4[3];
 static id<MTL4CommandBuffer> g_present_cb[3];
 static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct;
 static int g_vbuf_cache = 1;   // DM_NVN_VBUF_CACHE=0 restores the uncached path for A/B measurements
+static int g_vbuf_snap = 1;    // DM_NVN_VB_SNAP=0 binds the guest address itself (see vbuf_snap_fill: with it on, the bytes a draw fetches are frozen at draw time)
 static uint64_t g_vt_addr[31]; static uint32_t g_vt_valid;
-static uint64_t g_vbuf_resolve, g_vbuf_reuse, g_vbuf_set, g_vbuf_skip, g_vbuf_copies, g_vbuf_copy_bytes;   // copies: vertex streams at addresses not 4-byte aligned (vbuf_unaligned)
+static uint64_t g_vbuf_resolve, g_vbuf_reuse, g_vbuf_set, g_vbuf_skip, g_vbuf_copies, g_vbuf_copy_bytes;   // copies: vertex streams at addresses not 4-byte aligned, and streams snapped at draw time (vbuf_unaligned)
 static id<MTL4ArgumentTable> g_present_args;
 static id<MTLBuffer> g_present_uv[3];
 static uint64_t g_present_alloc_fence[3];
@@ -384,6 +385,7 @@ static void udc_selftest(void) {
 void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
+    const char *vbs = getenv("DM_NVN_VB_SNAP"); g_vbuf_snap = !(vbs && !strcmp(vbs, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
     g_dm_present_link = link ? atoi(link) : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
     const char *latency = getenv("DM_PRESENT_LATENCY");
@@ -1721,7 +1723,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[133];
+static int g_red_once[135];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -4772,10 +4774,10 @@ typedef struct { uint64_t gpu, epoch, writes; uint32_t sbw; int npend; } vbuf_co
 static nvn_hmap g_vbuf_unaligned = {.klen = 24};
 static uint64_t g_vbuf_write_epoch;   // shader writes invalidate snapshots without disturbing indirect conversions of the same draw
 static uint64_t g_vbuf_need[16];   // per stream: the bytes the draw reads when that is more than the bound size, else 0
-static uint64_t vbuf_unaligned(uint64_t addr, uint64_t size, uint64_t need, int prepare) {   // need: 0, or the copy's length (more than size; zeros past size)
+static uint64_t vbuf_unaligned(uint64_t addr, uint64_t size, uint64_t need, int prepare, int fresh) {   // need: 0, or the copy's length (more than size; zeros past size); fresh: copy again although this submission already holds a copy of the range
     uint64_t key[3] = {addr, size, need}, len = need > size ? need : size; vbuf_copy *c = nvn_hm_get(&g_vbuf_unaligned, key);
     if (c && !prepare) return c->gpu;
-    if (c) {
+    if (c && !fresh) {
         int changed = c->epoch != g_wr_epoch || c->writes != g_vbuf_write_epoch || c->sbw != g_sbw_gen || c->npend != g_npend;
         int dirty = size && (g_pend_over || g_sbw_over || (changed && nvn_sparse_gen())   // aliases may write through another guest address
             || (changed && sbw_hits(addr, addr + size))
@@ -4831,15 +4833,54 @@ static void vbuf_need(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di
         if (end > S.vbuf[st].size && end > g_vbuf_need[st]) g_vbuf_need[st] = end;
     }
 }
+// ---------- Vertex stream snapshots (DM_NVN_VB_SNAP; on unless set to 0) ----------
+// bind_vbufs hands the GPU the guest address itself: the pools are zero-copy buffers over the guest's own pages (mtl_pool_add) and no fence separates a draw from the CPU writes
+// of the frame after it. A console's GPU runs behind its CPU, so a ring slot filled for the next frame is in memory by the time the draw that reads it runs; here the GPU starts
+// about 0.2 ms after the commit, while the guest is still filling the next frame. A draw that reads a stream mid-write gets a tear -- and a tear in a position attribute is a
+// vertex at infinity, a beam or a spike across the frame -- while a draw that reads a slot the guest has not filled yet gets the previous screen's content. So the bytes a draw
+// fetches are frozen into the submission arena at draw time, as ubd_shadow freezes the uniform range a draw reads. The copy is per draw and not per submission: a game may fill a
+// ring slot and draw from it several times inside one submission, and a copy reused from the earlier draw would show that earlier content. Covers the streams bound through
+// bind_vbufs (hardware vertex fetch); a pulling pipeline reads them by pointer instead (pull_layout_fill). DM_NVN_VB_SNAP=0 binds the address.
+static uint64_t g_vbuf_snap_len[16];   // per stream: the bytes the draw fetches (0 = bind the guest address itself)
+// The cost has to be bounded: this title fetches about 700 MB of vertex data a frame, nearly all of it static meshes written once at load. What can race is the data the CPU
+// fills as it records -- the UI / immediate-mode class, a few KB per draw. So a small stream is always frozen, a medium one while the submission's budget lasts, and a large one
+// (a mesh, not a ring) never. Measured on the Years 5-7 front end before the budget existed: 1100 copies a frame, 724 MB.
+#define VBUF_SNAP_SMALL (16u << 10)    // always frozen: the immediate-mode class (the 168-vertex glyph stream is 4704 B)
+#define VBUF_SNAP_MAX (256u << 10)     // frozen while under the budget
+#define VBUF_SNAP_BUDGET (24u << 20)   // per submission, for the medium class
+static uint64_t g_vbuf_snap_used;      // bytes copied into the arena in this submission
+static void vbuf_snap_fill(const p_draw *dw, const p_draw_idx *di) {
+    static uint64_t sub;
+    if (sub != g_sub_serial) { sub = g_sub_serial; g_vbuf_snap_used = 0; }
+    memset(g_vbuf_snap_len, 0, sizeof g_vbuf_snap_len);
+    if (!g_vbuf_snap) return;
+    for (int s = 0; s < 16; s++) {
+        uint64_t addr = S.vbuf[s].address, last, len = 0;
+        if (!addr || (addr & 3) || g_vbuf_need[s]) continue;   // unaligned, or read past its bound size: vbuf_unaligned copies those already
+        int known = vstream_last(s, dw, di, &last);
+        for (int a = 0; a < 16 && a < S.nattr; a++) { va_st v = S.attr[a]; int eb = v.fmt ? vattr_bytes(v.fmt) : 0;
+            if (!eb || v.stream != s) continue;
+            uint64_t end = known ? last * (uint64_t)S.stream[s].stride + v.offset + (uint64_t)eb : S.vbuf[s].size;   // indirect or indexed: the bound size can hold every element the index buffer names
+            if (end > len) len = end; }
+        if (!len || len > VBUF_SNAP_MAX) continue;
+        if (len > VBUF_SNAP_SMALL) {
+            if (g_vbuf_snap_used + len > VBUF_SNAP_BUDGET) { RED_ONCE(134, "vertex snapshots reach the %u-byte budget of one submission at stream %d (%llu bytes): the rest of this submission's streams are bound as they are", (unsigned)VBUF_SNAP_BUDGET, s, (unsigned long long)len); continue; }
+            g_vbuf_snap_used += len;
+        }
+        g_vbuf_snap_len[s] = len;
+    }
+}
 static void vbuf_prepare(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {   // before the draw's render encoder: rf, dw / di the draw's vertex shader and record (NULL: no bounds)
     static uint64_t sub, gen, sparse;
     uint64_t pool_gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire), sparse_gen = nvn_sparse_gen();
     if (sub != g_sub_serial || gen != pool_gen || sparse != sparse_gen) nvn_hm_clear(&g_vbuf_unaligned, free);
     vbuf_need(rf, dw, di);
+    vbuf_snap_fill(dw, di);
     for (int s = 0; s < 16; s++) if ((S.vbuf[s].address & 3) || g_vbuf_need[s]) {
         if (g_vbuf_need[s]) { static int once; if (!once++) MLOG("a draw reads %llu bytes of vertex stream %d, bound with %llu: bound as a copy with zeros past the bound range, as Maxwell's fetch reads them", (unsigned long long)g_vbuf_need[s], s, (unsigned long long)S.vbuf[s].size); }
-        vbuf_unaligned(S.vbuf[s].address, S.vbuf[s].size, g_vbuf_need[s], 1);
+        vbuf_unaligned(S.vbuf[s].address, S.vbuf[s].size, g_vbuf_need[s], 1, 0);
     }
+    for (int s = 0; s < 16; s++) if (g_vbuf_snap_len[s]) vbuf_unaligned(S.vbuf[s].address, g_vbuf_snap_len[s], 0, 1, 1);
     sub = g_sub_serial; gen = pool_gen; sparse = sparse_gen;
 }
 // Resolved guest streams are separate from the table cache: vconv_bind may overwrite a stream's table slot.
@@ -4850,7 +4891,8 @@ static void bind_vbufs(id<MTL4RenderCommandEncoder> en) {
     for (int s = 0; s < 16; s++) {
         uint64_t addr = S.vbuf[s].address, gpu;
         if (!addr) continue;
-        if ((addr & 3) || g_vbuf_need[s]) { uint64_t c = vbuf_unaligned(addr, S.vbuf[s].size, g_vbuf_need[s], 0); if (c) { cache[s].addr = 0; enc_r_vbuf(en, VB_SLOT(s), c); continue; } }   // not cached: the copy is per submission
+        if ((addr & 3) || g_vbuf_need[s]) { uint64_t c = vbuf_unaligned(addr, S.vbuf[s].size, g_vbuf_need[s], 0, 0); if (c) { cache[s].addr = 0; enc_r_vbuf(en, VB_SLOT(s), c); continue; } }   // not cached: the copy is per submission
+        if (g_vbuf_snap_len[s]) { uint64_t c = vbuf_unaligned(addr, g_vbuf_snap_len[s], 0, 0, 1); if (c) { cache[s].addr = 0; enc_r_vbuf(en, VB_SLOT(s), c); continue; } }   // the draw-time snapshot made by vbuf_snap_fill
         if (g_vbuf_cache && cache[s].addr == addr && cache[s].gen == gen) { gpu = cache[s].gpu; g_vbuf_reuse++; }
         else {
             void *mb; uint64_t mo; g_vbuf_resolve++;
@@ -4876,7 +4918,7 @@ static void pull_layout_fill(pull_layout *Lp) {
     for (int st = 0; st < 16; st++) {
         uint64_t addr = S.vbuf[st].address, gpu; void *mb; uint64_t mo;
         if (!addr) continue;
-        if (!g_vbuf_need[st] || !(gpu = vbuf_unaligned(addr, S.vbuf[st].size, g_vbuf_need[st], 0)))   // a stream the draw reads past: its copy padded with zeros (vbuf_need)
+        if (!g_vbuf_need[st] || !(gpu = vbuf_unaligned(addr, S.vbuf[st].size, g_vbuf_need[st], 0, 0)))   // a stream the draw reads past: its copy padded with zeros (vbuf_need)
             if (!mtl_gpu_addr(addr, 1, &mb, &mo, &gpu)) continue;
         L.s[st].base = gpu & ~3ull; lo[st] = (uint32_t)(gpu & 3); L.s[st].stride = S.stream[st].stride; L.s[st].divisor = S.stream[st].divisor;
     }

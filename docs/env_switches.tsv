@@ -174,6 +174,7 @@ DM_NVN_UDC_AB	diagnostic	`=1` starts with the DontCare store for unwritten attac
 DM_NVN_UNWRITTEN_DC	switch	`0` turns off storing attachments a render pass did not write as DontCare (on by default; part of the TBDR store lookahead), for equivalence comparisons
 DM_NVN_UPLOAD_REUSE	switch	0 keeps the original one-block upload-slot policy; default retains bounded demand-sized primary and overflow buffers after completion.
 DM_NVN_VBSCAN	diagnostic	
+DM_NVN_VB_SNAP	switch	`0` binds the vertex stream's guest address itself: on (default) every stream a draw fetches is copied into that submission's arena at draw time, so a guest CPU write under a running GPU cannot tear a position attribute into a vertex at infinity (or show a ring slot not yet filled)
 DM_NVN_VBUF_CACHE	switch	`0` turns off the cache of resolved vertex stream addresses and vertex argument table writes across draws (on by default), for A/B runs
 DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a cached vertex conversion range (`vconv_range`) and reports differences
 DM_NVN_VCONV_CPU	switch	`=1` converts integer vertex inputs fed formats of another class on the CPU, as before, instead of through the shader's shadow inputs (`<key>_bv`)

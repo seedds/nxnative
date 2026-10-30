@@ -2,7 +2,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net11.0</TargetFramework>
+    <RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
+    <PublishAot Condition="'$(PublishAot)' == ''">true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RyuSrc Condition="'$(RyuSrc)' == ''">$(MSBuildThisFileDirectory)../../../third_party/ryujinx</RyuSrc>
@@ -11,9 +14,12 @@
     <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" />
     <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Common/Ryujinx.Common.csproj" />
   </ItemGroup>
-  <!-- Embeds its own source: the source-sha argument prints its hash, by which dmsh_chain.py checks that the translator was built from the in-repo source -->
+  <!-- Embed source and build policy: dmsh_chain.py checks that this binary matches the repository. -->
   <ItemGroup>
     <EmbeddedResource Include="Program.cs" LogicalName="src0" />
     <EmbeddedResource Include="dmsh_xlate.csproj" LogicalName="src1" />
+    <EmbeddedResource Include="../../../../Directory.Build.props" LogicalName="src2" />
+    <EmbeddedResource Include="../../../../global.json" LogicalName="src3" />
+    <EmbeddedResource Include="$(RyuSrc)/Directory.Build.props" LogicalName="src4" />
   </ItemGroup>
 </Project>

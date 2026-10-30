@@ -58,7 +58,7 @@ class CheckTools(unittest.TestCase):
             self.assertEqual(bad, [failure]); self.assertEqual(out, '')
 
     def test_missing_or_translator_still_fail(self):   # returned to dmsh_build.py, which stops with its own message
-        xlate = mismatch('dmsh_xlate.dll', '0' * 16)
+        xlate = mismatch('dmsh_xlate', '0' * 16)
         for bad, want in (([mismatch('metal_macosx', 'missing')],) * 2, ([mismatch('spirv-cross', 'missing')],) * 2, ([xlate, mismatch('metal_macosx', OTHER)], [xlate])):
             got, out = self.check(bad)
             self.assertEqual(got, want); self.assertEqual(out, '')

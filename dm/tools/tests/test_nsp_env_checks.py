@@ -1,5 +1,5 @@
 """NSP script environment checks (scripts/build_ipa_from_nsp.py), all before the extraction: an iOS build without Xcode's iOS SDK, a shader translator that does not start
-with the .NET it is given, a missing glslangValidator, and a Python under Rosetta each stop the build at once instead of at a shader step minutes later.
+from its bundled executable, a missing glslangValidator, and a Python under Rosetta each stop the build at once instead of at a shader step minutes later.
 Every input (xcrun, xcode-select, sysctl, the translator, PATH) is mocked: no Xcode, .NET, glslang or Rosetta needed."""
 import importlib.util
 from pathlib import Path
@@ -64,9 +64,9 @@ class Prereqs(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], [str(xlate), '--source-sha'])
         self.assertEqual(run.call_args.kwargs['env']['DOTNET_ROOT'], '/stale'); self.assertTrue(run.call_args.kwargs['timeout'])
 
-    def test_translator_without_its_runtime_stops(self):   # the apphost's exit 131: its first line, not an empty `xlate_source` at the shader step
-        with self.assertRaises(nsp.BuildError) as e: self.check(xlate=(131, '', 'You must install .NET to run this application.\n\nApp: x'))
-        self.assertIn('does not run (You must install .NET to run this application.)', str(e.exception)); self.assertIn('DOTNET_ROOT', str(e.exception))
+    def test_translator_failure_reports_stderr(self):
+        with self.assertRaises(nsp.BuildError) as e: self.check(xlate=(1, '', 'Invalid executable signature\nDetails: x'))
+        self.assertIn('does not run (Invalid executable signature)', str(e.exception)); self.assertIn('bundled ARM64 executable', str(e.exception))
         with self.assertRaisesRegex(nsp.BuildError, r'does not run \(exit code 0\)'): self.check(xlate=(0, ' \n', ''))
 
     def test_translator_that_cannot_start_or_hangs_stops(self):
@@ -122,7 +122,7 @@ class ChainCheck(unittest.TestCase):   # dmsh_build.py run directly (tool_lock.c
 
     def test_check_tools(self):
         bad = self.check('does not run (You must install .NET to run this application.)')
-        self.assertEqual(len(bad), 1, bad); self.assertIn('the translator does not run (You must install .NET', bad[0]); self.assertIn('.NET 10 runtime', bad[0])
+        self.assertEqual(len(bad), 1, bad); self.assertIn('the translator does not run (You must install .NET', bad[0]); self.assertIn('bundled ARM64 executable', bad[0])
         bad = self.check('0123456789abcdef')   # a translator that runs but was built from other source: the lock line and the rebuild line
         self.assertEqual(len(bad), 2, bad); self.assertIn('xlate_source: lock', bad[0]); self.assertIn('rebuild dmsh_xlate', bad[1])
 

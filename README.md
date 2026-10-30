@@ -29,6 +29,9 @@ brew install --cask dotnet-sdk
 python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; python_version < '3.14'"
 ```
 
+Install the **ARM64 .NET SDK 11.0.100-rc.3.26522.148** pinned in `global.json` from the
+[.NET 11 RC3 downloads](https://github.com/dotnet/core/blob/main/release-notes/11.0/preview/rc3/11.0.0-rc.3.md) if Homebrew supplies another version.
+
 **2. Put your game in a folder**: the game, plus its update and DLC if you have them (`.nsp`, `.xci`, `.nsz` or `.xcz`):
 
 ```

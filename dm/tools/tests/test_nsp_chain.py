@@ -37,6 +37,8 @@ class Header(Base):
         (self.repo / 'dm/gfx/tools').symlink_to(REPO / 'dm/gfx/tools'); (self.repo / 'dm/ios').symlink_to(REPO / 'dm/ios')
         (self.repo / 'dm/third_party').symlink_to(REPO / 'dm/third_party')
         (self.repo / 'dm/gfx/nvn/dmsh_abi.h').symlink_to(REPO / 'dm/gfx/nvn/dmsh_abi.h')   # the shader library ABI, a chain input beside the header
+        for name in ('global.json', 'Directory.Build.props'):
+            (self.repo / name).symlink_to(REPO / name)
         self.h = self.repo / nsp.CHAIN_H
         shutil.copy(REPO / nsp.CHAIN_H, self.h)
         self.env = {k: v for k, v in os.environ.items() if k != 'DM_GAME'}   # the version needs no game

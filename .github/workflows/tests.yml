@@ -122,7 +122,17 @@ jobs:
       # Metal (DMSH_TEST_METAL=1) and running it on the GPU (DMSH_TEST_GPU=1) stay local.
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: '10.0.x'   # dm/gfx/tools/dmsh_xlate_bin targets net10.0
+          global-json-file: global.json
+      - name: Publish and run the NativeAOT extractor
+        run: |
+          extract_out="$RUNNER_TEMP/nx-extract"
+          dotnet publish dm/tools/nx_extract -c Release -r osx-arm64 --self-contained true --artifacts-path "$RUNNER_TEMP/nx-extract-build" -o "$extract_out"
+          test ! -f "$extract_out/nx_extract.dll"
+          if DOTNET_ROOT="$RUNNER_TEMP/no-runtime" "$extract_out/nx_extract" > "$RUNNER_TEMP/nx-extract-usage.log" 2>&1; then
+            exit 1
+          else
+            test "$?" -eq 2   # expected usage error, with no installed runtime
+          fi
       - name: Install spirv-val   # spirv-cross is the in-repo build (dm/gfx/tools/spirv_cross_bin)
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1

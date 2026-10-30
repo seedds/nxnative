@@ -1,10 +1,12 @@
 """The in-repo spirv-cross (dm/gfx/tools/spirv_cross_bin, GitHub issue #242): the shader tools run it rather than the one on PATH, the lock records its fingerprint, it is the
-release build.sh pins, it runs on both Mac architectures, and SPIRV-Cross's licences are beside it. No Xcode or game files needed."""
+release build.sh pins, both bundled tools target Apple silicon, and SPIRV-Cross's licences are beside it. No Xcode or game files needed."""
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[3]
@@ -33,9 +35,22 @@ class Pin(unittest.TestCase):
         self.assertTrue(os.access(BIN / 'spirv-cross', os.X_OK))
         for f in ('LICENSE', 'LICENSES/Apache-2.0.txt', 'LICENSES/MIT.txt'): self.assertTrue((BIN / f).is_file(), f)
 
-    def test_universal(self):   # an Intel Mac runs it too, as the translator's launcher
-        r = subprocess.run(['lipo', '-archs', str(BIN / 'spirv-cross')], capture_output=True, text=True)
-        self.assertEqual(sorted(r.stdout.split()), ['arm64', 'x86_64'])
+    def test_apple_silicon(self):
+        for tool in (BIN / 'spirv-cross', BIN.parent / 'dmsh_xlate_bin/dmsh_xlate'):
+            with self.subTest(tool=tool.name):
+                r = subprocess.run(['lipo', '-archs', str(tool)], capture_output=True, text=True, check=True)
+                self.assertEqual(r.stdout.split(), ['arm64'])
+
+    def test_native_translator_runs_without_dotnet(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            exe = root / 'dmsh_xlate'
+            shutil.copy2(BIN.parent / 'dmsh_xlate_bin/dmsh_xlate', exe)
+            env = dict(os.environ, DOTNET_ROOT=str(root / 'no-runtime'),
+                       DOTNET_ROOT_ARM64=str(root / 'no-runtime'), DOTNET_MULTILEVEL_LOOKUP='0')
+            r = subprocess.run([str(exe), '--source-sha'], env=env, capture_output=True,
+                               text=True, check=True, timeout=30)
+            self.assertEqual(r.stdout.strip(), dmsh_chain.xlate_source_sha())
 
 
 if __name__ == '__main__':

@@ -1184,6 +1184,7 @@ if UE_CALL is not None:
     region_obs.append((UE_CALL, OBS_UE_MALLOC, f'{NOP:08x}', 'FMallocBinned3 constructor call (cut): the object in x0; the host puts its allocator\'s vtable in (hle_uemalloc.c)'))
 # Unreal's engine region (above): the gate on the store of its size, which the callback changes in that register and x1, the size the call asks for
 if UE_REGION is not None:
+    assert UE_REGION_REG is not None, 'engine region gate has no size register'
     assert UE_REGION not in kinds and not any(lo <= UE_REGION < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'engine region gate conflicts with a rewrite site {UE_REGION:#x}'
     region_obs.append((UE_REGION, OBS_UE_REGION | UE_REGION_REG << 8, f'{struct.unpack_from("<I", IMG, UE_REGION)[0]:08x}',
                        f'Unreal\'s engine region: its size in x{UE_REGION_REG}, stored before nninitStartup reserves it; the host gives what the alias region has room for (hle_svc.c)'))

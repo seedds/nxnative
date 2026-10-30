@@ -457,7 +457,7 @@ void mtl_init(void) {
     g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
     if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
     for (int i = 0; i < 3; i++) {
-        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];   // 8 crop + 4 box filter and sharpening
         if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
         res_add(g_present_uv[i]);
     }
@@ -10757,7 +10757,14 @@ void mtl_exec(const uint8_t *p) {
 }
 
 // ---------- Present: draw the swapchain texture to the CAMetalLayer; optional screenshot ----------
-static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
+static id<MTLRenderPipelineState> g_blit_pso, g_sharp_pso; static MTLPixelFormat g_blit_fmt;
+// DM_SHARPEN=0..1: contrast adaptive sharpening of the presented picture (0 = off, the default). Read once
+static float sharpen_amount(void) {
+    static float v = -1;
+    if (v < 0) { const char *e = getenv("DM_SHARPEN"); v = e ? strtof(e, NULL) : 0; if (v < 0) v = 0; if (v > 1) v = 1;
+                 if (v > 0) MLOG("DM_SHARPEN=%.2f: the presented picture is sharpened", v); }
+    return v;
+}
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
@@ -11101,8 +11108,37 @@ static void present_pipeline(MTLPixelFormat format) {
             "#include <metal_stdlib>\nusing namespace metal;\n"
             "struct V { float4 p [[position]]; float2 uv; };\n"
             "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
-            "struct Crop { float4 rect; float4 edge; };\n"
-            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n";
+            "struct Crop { float4 rect; float4 edge; float4 box; };\n"
+            // box.x: taps per axis (1 = one bilinear sample, as before). A single bilinear tap reads 4 texels whatever the
+            // reduction, so a picture scaled above the viewport and sampled down this way throws nearly all of it away.
+            // With n taps the whole footprint is averaged, which makes DM_PRESENT_UPSCALE_OUT above 1.0 real supersampling.
+            // box.yz: one source texel in uv. box.w: sharpening strength, 0 = off (the sharp function below)
+            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {\n"
+            "  float2 uv = clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw);\n"
+            "  int n = int(c.box.x);\n"
+            "  if (n <= 1) return t.sample(s, uv);\n"
+            "  float4 a = 0;\n"
+            "  for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) {\n"
+            "    float2 o = (float2(x, y) - 0.5 * float(n - 1)) * c.box.yz;\n"
+            "    a += t.sample(s, clamp(uv + o, c.edge.xy, c.edge.zw));\n"
+            "  }\n"
+            "  return a / float(n * n);\n"
+            "}\n"
+            // Contrast adaptive sharpening of the presented picture: the 5 tap cross around the pixel. The low pass is the
+            // mean of the four neighbours; adding back the difference lifts edges and leaves flat areas alone. The result is
+            // clamped to the neighbourhood's own range, so it cannot ring or halo. It runs on the final picture, so it needs
+            // nothing from the game. Taken instead of fs, not after it, so sharpening costs no extra pass
+            "fragment float4 sharp(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {\n"
+            "  float2 uv = clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw), d = c.box.yz;\n"
+            "  float3 e = t.sample(s, uv).rgb;\n"
+            "  float3 n0 = t.sample(s, clamp(uv + float2(-d.x, 0), c.edge.xy, c.edge.zw)).rgb;\n"
+            "  float3 n1 = t.sample(s, clamp(uv + float2( d.x, 0), c.edge.xy, c.edge.zw)).rgb;\n"
+            "  float3 n2 = t.sample(s, clamp(uv + float2(0, -d.y), c.edge.xy, c.edge.zw)).rgb;\n"
+            "  float3 n3 = t.sample(s, clamp(uv + float2(0,  d.y), c.edge.xy, c.edge.zw)).rgb;\n"
+            "  float3 lo = min(min(n0, n1), min(n2, n3)), hi = max(max(n0, n1), max(n2, n3));\n"
+            "  float3 r = e + (e - (n0 + n1 + n2 + n3) * 0.25) * c.box.w;\n"
+            "  return float4(clamp(r, min(lo, e), max(hi, e)), 1);\n"
+            "}\n";
         NSError *e = nil;
         id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src_msl) options:nil error:&e];
         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
@@ -11111,6 +11147,9 @@ static void present_pipeline(MTLPixelFormat format) {
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
+        pd.fragmentFunction = [lib newFunctionWithName:@"sharp"];
+        g_sharp_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        if (!g_sharp_pso) MLOG("[RED] present sharpening pipeline failed (%s); DM_SHARPEN does nothing", e.localizedDescription.UTF8String);
         g_blit_fmt = format;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
@@ -11189,6 +11228,16 @@ typedef struct { id<MTL4FXSpatialScaler> sc; id<MTLTexture> in, out; uint64_t ma
 static fx_state g_fx_present;   // only the present thread encodes or replaces the scaler
 static id<MTL4Compiler> g_fx_comp;
 static int g_fx_mode = -1;   // 1 = metalfx, 0 = off
+// DM_PRESENT_UPSCALE_OUT=1.0..4.0: the share of the viewport the scaler reconstructs at, before the present averages it
+// back down (the box filter in the present shader). 1.0, the default, reconstructs at the viewport and draws 1:1 as before;
+// above that, reconstructing large and sampling down is supersampling, which costs GPU time and nothing else. Read once
+static float fx_out(void) {
+    static float v = -1;
+    if (v < 0) { const char *e = getenv("DM_PRESENT_UPSCALE_OUT"); v = e ? strtof(e, NULL) : 1.0f;
+                 if (!(v >= 1.0f && v <= 4.0f)) { if (e && *e) MLOG("[RED] DM_PRESENT_UPSCALE_OUT=%s: 1.0 to 4.0; keeping 1.0", e); v = 1.0f; }
+                 if (v > 1.0f) MLOG("DM_PRESENT_UPSCALE_OUT=%.2f: MetalFX reconstructs at %.2f of the viewport and the present averages it down", v, v); }
+    return v;
+}
 static int fx_mode(void) {
     if (g_fx_mode >= 0) return g_fx_mode;
     const char *e = getenv("DM_PRESENT_UPSCALE"); int v = 0;
@@ -11209,6 +11258,9 @@ static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
 static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait) {
     NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
     if (fx_mode() != 1 || !fx_wanted(vp, cw, ch)) return nil;
+    { float k = fx_out();   // reconstruct above the viewport where asked: the present pass averages it back down
+      if (k > 1.0f) { ow = (NSUInteger)(vp.width * k + 0.5); oh = (NSUInteger)(vp.height * k + 0.5);
+                      if (ow > 16384 || oh > 16384) { ow = (NSUInteger)vp.width; oh = (NSUInteger)vp.height; } } }   // Metal's 2D texture limit
     if (!fx->sc || fx->in.width != cw || fx->in.height != ch || fx->in.pixelFormat != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
         NSUInteger key[6] = {cw, ch, raw.pixelFormat, ow, oh, out_pf};
         if (!memcmp(key, fx->refused, sizeof key)) return nil;
@@ -11271,9 +11323,16 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
     uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
     uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
+    // Taps per axis for the box filter: as many as the reduction, so the whole source footprint is averaged rather than the
+    // 4 texels one bilinear tap reads. 1 where the pass does not reduce, which is every case before DM_PRESENT_UPSCALE_OUT
+    { double red = fmax((double)cw / vp.width, (double)ch / vp.height); int n = (int)(red + 0.5);
+      if (n < 1) n = 1; if (n > 4) n = 4;   // 4x4 = 16 samples is the point of diminishing returns
+      uv[8] = (float)n; uv[9] = 1.0f / tw; uv[10] = 1.0f / th; uv[11] = sharpen_amount(); }
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
-    [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
+    [en setViewport:vp];
+    // Sharpening replaces the box filter rather than following it: both read the same constants, so only the pipeline changes
+    [en setRenderPipelineState:(sharpen_amount() > 0 && g_sharp_pso) ? g_sharp_pso : g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     m4_end(en);
     return up ? PRESENT_METALFX : PRESENT_STANDARD;
@@ -11282,7 +11341,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
 // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
     id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
-    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 12 options:MTLResourceStorageModeShared];
     if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
     id<MTLTexture> raw = present_raw_src(src);
     fx_state fx = {0};

@@ -43,6 +43,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_vorbis_divides
 	$(B)/t_movie_vpx
 	$(B)/t_movie_avc
+	$(B)/t_movie_legacy
 	$(B)/t_motion
 	$(B)/t_motion_apple
 	$(B)/t_pad_apple
@@ -283,3 +284,10 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+# Legacy movie construction and output-enum contract; synthetic fixture.
+run: $(B)/t_movie_legacy
+$(B)/t_movie_legacy: t_movie_legacy.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle.h ../dm.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -o $@ t_movie_legacy.c ../hle_movie_avc.c ../gen/vpx/libvpx.a -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
+.PHONY: movie_legacy
+movie_legacy: $(B)/t_movie_legacy
+	$(B)/t_movie_legacy

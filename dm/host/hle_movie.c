@@ -513,6 +513,13 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11De
 // SDK 4's constructor has no priority argument (Dark Souls Remastered, NintendoSDK_movie 4.5.0). Without this take-over the SDK built its own decoder and the host's Configure read it as a host one (a call through a null pointer)
 HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", "movie decoder (SDK 4, no priority): host implementation", void, h_movie_Decoder4,
           void **self, int type, int fmt, int mode) { h_movie_Decoder(self, type, fmt, mode, 0); }
+// SDK 3 has neither mode nor priority. Its CPU output enum uses 1 = PCM16 and 3 = NV12;
+// forwarding 3 unchanged would select the newer ABGR format. Other old formats remain unsupported.
+HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE", "movie decoder (SDK 3, CPU buffers): host implementation with the legacy output enum", void, h_movie_Decoder3,
+          void **self, int type, int fmt) {
+    int host_fmt = fmt == 1 ? MD_FMT_PCM16 : fmt == 3 ? MD_FMT_NV12 : 0;
+    h_movie_Decoder(self, type, host_fmt, 1, 0);
+}
 static void md_free(void **self) {
     mdec_t *d = md_of(self); if (!d) return;
     md_defer_drop(d);

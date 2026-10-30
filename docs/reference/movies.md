@@ -32,6 +32,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** both forms are taken over now (`hle_movie.c`).
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0; one boot).
 
+### SDK 3's `movie::Decoder` constructor and output enum
+
+- **Symptom:** a call through a null pointer in the host's `movie::Decoder::Configure` when the first movie starts.
+- **Cause:** SDK 3's C1 constructor has neither mode nor priority (`_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE`). Without its takeover the SDK constructs its own decoder, which later host methods read as a host object. Its output enum also differs: 3 means CPU NV12, whereas the newer enum uses 3 for ABGR.
+- **Fix:** take over this constructor and translate its supported PCM16 (1) and NV12 (3) requests to the existing CPU decoder. Unsupported old formats return the existing decoder failure; they cannot alias a newer format. Existing constructors and output-buffer size/alignment handling are unchanged.
+- **Found on:** Hyrule Warriors: Definitive Edition 1.0.1 (SDK 3.5.1; C1 calls for PCM16 and NV12). Its opening 1280×720 AVC movie plays through completion with unchanged output-buffer handling. Constructor, Configure, guarded synthetic CPU copies and unchanged modern constructors are covered by `dm/host/tests/t_movie_legacy.c`.
+
 ### The complete-object destructor
 
 - **Cause:** the game calls the complete-object destructor `movie::Decoder::~Decoder` (`D1`); the SDK's own one destroyed the host object as a `DecoderImpl`.

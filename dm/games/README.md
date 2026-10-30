@@ -76,6 +76,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Digimon Story Cyber Sleuth: Complete Edition](010014E00DB56000/README.md) | `010014E00DB56000` | 1.0.3 | 6.4.0 | Media.Vision MVGL | OpenGL |
 | [Donkey Kong Country Returns HD](01009D901BC56000/README.md) | `01009D901BC56000` | 1.1.0 | 18.3.5 | Unity 6000.0.28f1 IL2CPP | NVN |
 | [Donkey Kong Country: Tropical Freeze](0100C1F0051B6000/README.md) | `0100C1F0051B6000` | 1.0.2 | 4.4.0 | Retro Studios' engine | NVN |
+| [DRAGON QUEST III HD-2D Remake](01003E601E324000/README.md) | `01003E601E324000` | 1.1.2 | 16.2.6 | Unreal Engine 4.27 | NVN |
 | [DRAGON QUEST VII Reimagined](0100A9D01C446000/README.md) | `0100A9D01C446000` | 1.2.0 | 19.3.1 | Unreal Engine 4.27 | NVN |
 | [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](01006C300E9F0000/README.md) | `01006C300E9F0000` | 1.0.4 | 7.3.2 | Unreal Engine 4.18 | NVN |
 | [EA SPORTS FC 27](0100C49025D3E000/README.md) | `0100C49025D3E000` | 1.8d.310c | 22.2.0 | Frostbite 2025.1.2 (its NVN renderer in an NRO) | NVN |

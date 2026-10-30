@@ -10,6 +10,7 @@
 #   Registered cuts (CUTS of the patch files, restricted by NSO build ID, see "Registered patches"): before rewriting, the original bytes are asserted one by one and any mismatch aborts; results are listed in <name>.cuts.tsv
 #   Function-matched cuts (MATCH_CUTS of the selected game's patches.py): unknown builds only, unique complete-function and direct-callee fingerprints, then original-byte assertions
 #   Registered observation gates (OBS of the patch files, restricted by build ID): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
+#   Registered stubs (STUBS of the patch files, restricted by build ID, see "A build's own stubs"): a build's own instructions in the patch area, for a module of any name, entered by a B the stub puts at its site; both the site and the stub are listed in <name>.cuts.tsv
 # The key page only stores "actual key number × 8" at the end of the data segment, and patch code fetches thread slots indirectly through the key page: the loader may use any key number.
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR; a text longer than a B reaches adds a second one after the image, see TWO), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv
 import struct, re, sys, os, glob, shlex, types, importlib.util
@@ -66,6 +67,8 @@ else:
 #   OBS = {build ID: [(offset, number, original instruction word, reason)]}: observation gates. Numbers match OBS_* in the host's hle.h; the original instruction must be position
 #     independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns
 #   FRAME_STEP = {build ID: function(ctx)}: the frame step stubs of a main ("Frame step in whole vsyncs" below)
+#   STUBS = {build ID: function(ctx)}: a build's own instructions in the patch area, for a module of any name ("A build's own stubs" below); the same ctx as FRAME_STEP's,
+#     without the state page
 #   MATCH_CUTS = {module name: [nso_match rule, ...]}: fallback for modules without registered CUTS. Only the profile selected by DM_GAME participates; a derived profile uses
 #     the repository's rules, an external-only provisional profile its own. Missing or ambiguous matches are reported and skipped; known builds retain their exact CUTS.
 #     A rule of several functions applies whole or not at all. For such a module <name>.match.tsv lists the cuts of the profile's registered builds of it and each patch's result,
@@ -83,7 +86,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -1475,6 +1478,27 @@ spin_sites = [(g['T'], sorted(g['valid']), sum(len(g['nodes'][a]['ins']) for a i
 for g in spin_regions: spin_emit(g)
 if os.environ.get('DM_SPIN_LIST'):
     for T, bes, n in spin_sites: print(f'{NAME} spin wait {T:#x} ({n} instructions), back-edges ' + ' '.join(f'{b:#x}' for b in bes))
+
+# ---- A build's own stubs (STUBS of the patch files) ----
+# A file may define STUBS = {build ID: function(ctx)}: instructions of its own for a module of any name, in the patch area (FRAME_STEP is the same for a main, plus the
+# frame step state page; this one needs no state). ctx.here() / ctx.emit(word) assemble into the patch area, ctx.word(offset) reads the original word there,
+# ctx.site(offset, original bytes) asserts a site and that it is no rewrite site or window, and ctx.put(offset, words, reason) writes it (into the cuts, as a registered
+# patch). Emitted after every other stub, so no existing stub moves: a build's code goes at the end of the patch area and its own B points back to it
+STUBS = PATCHES['STUBS']
+if BUILD_ID in STUBS:
+    def st_site(off, orig):
+        """Assert that this build's stub may take the instruction(s) at off; the stub then puts a B there (ctx.put)"""
+        ob = bytes.fromhex(orig)
+        assert IMG[off:off + len(ob)] == ob, f'stub site original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
+        for o in range(off, off + len(ob), 4):
+            assert o not in kinds and not any(seg[0].address <= o < seg[-1].address + 4 for seg in windows), f'stub site is a rewrite site {o:#x}'
+    def st_put(off, words, why):
+        old = bytes(IMG[off:off + 4 * len(words)])
+        for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
+        cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why)); stat('stub')
+    def st_word(off): return struct.unpack_from('<I', IMG, off)[0]
+    use_area(0)
+    STUBS[BUILD_ID](types.SimpleNamespace(here=here, emit=emit, word=st_word, site=st_site, put=st_put))
 
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')

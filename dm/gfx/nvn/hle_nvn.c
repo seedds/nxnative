@@ -10,6 +10,7 @@
 // Environment switches: DM_NVN_FRAMES=N prints the call table per frame for the first N frames (default 3); DM_NVN_TSV=path writes the per-frame call table and timing to a TSV (DM_NVN_TSV_CALLS=0 writes timing only); DM_SLOWFRAME=1 writes only the per-frame breakdown of dropped frames to the log; DM_NVN_LOG=1 logs object creation.
 #include "../../host/hle.h"
 #include "nvn_protos.h"
+#include <stdio.h>   // FILE: the DM_NVN_SHDUMP copies written in nvnProgramSetShaders
 #include "nvn_count.h"
 #include "nvn_tex.h"
 #include "nvn_mtl.h"
@@ -27,7 +28,10 @@
 #include <sys/mman.h>
 #include <errno.h>
 #if TARGET_OS_OSX
-#define DM_MEM_CAP_DEFAULT_GB 24
+// Runaway host memory on a Mac that is already holding a game drags the whole machine into a kernel panic rather than just killing the host: on this 16 GB Mac two sessions
+// (4.4 GB + 1.2 GB resident) left 60 MB free and the kernel died in com.apple.filesystems.lifs at a NULL allocation. 24 GB can never fire on a 16 GB machine, so the cap is
+// the machine's memory minus a margin for macOS and the desktop: 6 GB still holds the guest's 3.14 GB heap plus the host's own textures and shader caches.
+#define DM_MEM_CAP_DEFAULT_GB 6
 #else
 #define DM_MEM_CAP_DEFAULT_GB 0
 #endif
@@ -655,6 +659,24 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         }
         // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
         if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
+        // DM_NVN_SHDUMP: write the stage's own bytes here, where the key above was computed. prog_get's dump runs at draw time and reads the code area through the pool address the game
+        // gave, which by then may hold something else: LEGO Harry Potter's launcher shaders (built in RAM by its engine) dumped as zero-filled 512-byte areas whose sha256 over
+        // control + code named no map row, so a shader captured that way can never be added. The bytes written here are the ones the key hashes (control +0x20 = the section's length).
+        if (dump && sd[i].control && (k->ok & (1u << i))) {
+            const char *shd = getenv("DM_NVN_SHDUMP"); char path[1024], key[17];
+            for (int j = 0; j < 8; j++) snprintf(key + j * 2, 3, "%02x", k->key[i][j]);
+            uint32_t ncode = 0; void *mb = NULL; uint64_t mo = 0;
+            memcpy(&ncode, (const uint8_t *)sd[i].control + 0x704, 4);
+            int have_code = sd[i].data && ncode && ncode < (1u << 24) && mtl_addr(sd[i].data, ncode, &mb, &mo);
+            (void)mb; (void)mo;
+            snprintf(path, sizeof path, "%s/SetShaders-%s.ctl", shd, key);
+            { int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd >= 0) { if (write(fd, sd[i].control, 0x880) < 0) {} close(fd); } }
+            if (have_code) {
+                snprintf(path, sizeof path, "%s/SetShaders-%s.code", shd, key);
+                int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd >= 0) { if (write(fd, (const void *)(uintptr_t)sd[i].data, ncode) < 0) {} close(fd); }   // the guest address keys_hash hashed, not the pool's host mapping
+            }
+        }
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;

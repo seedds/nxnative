@@ -250,7 +250,8 @@ static void install_key_page(module_t *m) {
     memset(page, 0, m->key_page_size);
     for (unsigned i = 0; i < KEY_N; i++) page[m->key_idx[i]] = (uint64_t)key_value(i) * 8;
     for (int k = 0; k < KEY_N; k++) if (!page[m->key_idx[k]]) die("%s: key page entry %d is 0 (host key not created) -- the game would read TSD slot 0", m->name, k);
-    if (mprotect(m->base + m->key_page_off, m->key_page_size, PROT_READ)) die("%s key page mprotect", m->name);
+    // Seal it read-only only when the module is mapped 16 KB page-aligned: map_image skews an image whose .data would otherwise share .text's page, and mprotect cannot touch part of a page
+    if (!((uintptr_t)m->base & 0x3FFF) && mprotect(m->base + m->key_page_off, m->key_page_size, PROT_READ)) die("%s key page mprotect", m->name);
     if (m->fps_state_off) install_fps_state(m);
 }
 
@@ -599,13 +600,26 @@ static void map_image(module_t *m, const char *dir) {
         return;
     }
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
-    m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (m->base == MAP_FAILED) die("%s mmap", m->name);
+    // Apple silicon refuses a page that is both writable and executable, so .text (must be read-only+execute) and .data (must be writable) have to start on different 16 KB pages.
+    // A small module can put them on one: LEGO Harry Potter Collection's main is 750 instructions — .text 0..0xbb8, .ro 0x1000..0x2864, .data 0x3000..0x33c8, bss to 0x4000.
+    // Map the image SKEW bytes past a page boundary so .data lands exactly on the next one; zero for every module whose .data is already page-aligned. SKEW is a multiple of
+    // 4 KB, so the guest's own ADRP page arithmetic (4 KB pages) is unchanged, but the module base is then not 16 KB aligned and install_key_page cannot seal the key page.
+    uint64_t skew = ((uint64_t)m->text_end + 0x3FFF) & ~0x3FFFull;   // the page .text ends in: is .data already past it?
+    skew = skew > (uint64_t)m->data_off ? (0x4000 - (m->data_off & 0x3FFF)) & 0x3FFF : 0;
+    uint8_t *map = mmap(NULL, skew + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (map == MAP_FAILED) die("%s mmap", m->name);
+    m->base = map + skew;
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
-    uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
-    if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
-    uint64_t po = m->patch_off & ~0x3FFFull;
-    if (mprotect(m->base + po, m->size - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
+    // Seal the pages holding .text (and .ro, which needs no execute but is read-only either way); .data and bss keep their own pages writable
+    uint64_t data_start = (uint64_t)(m->base + m->data_off), seal = ((uint64_t)m->base + m->text_end + 0x3FFF) & ~0x3FFFull;
+    if (seal > data_start) seal = data_start;
+    if (seal > (uint64_t)map && mprotect(map, seal - (uint64_t)map, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
+    // The patch area is execute-only, and from the first whole page inside it: with a skew its first bytes share a page with bss
+    if ((uint64_t)m->patch_off < sz) {
+        if (skew) LOG("[RED] %s: .data shares .text's 16 KB page, so the image is mapped skewed, and the patch area then starts inside a page that also holds bss: its first %#llx bytes cannot be execute-only", m->name, (unsigned long long)(((uint64_t)m->base + m->patch_off + 0x3FFF) & ~0x3FFFull) - ((uint64_t)m->base + m->patch_off));
+        uint64_t po = ((uint64_t)m->base + m->patch_off + 0x3FFF) & ~0x3FFFull, pe = ((uint64_t)m->base + sz + 0x3FFF) & ~0x3FFFull;
+        if (pe > po && mprotect((void *)po, pe - po, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
+    }
 }
 #endif
 

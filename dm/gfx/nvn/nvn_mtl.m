@@ -4039,12 +4039,42 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
 }
 void mtl_prog_release(prog_t *p) { if (p->serial) serial_del(p->serial); }
 
+// ---------- AtlasGuard (DM_NVN_ATLASGUARD=1): a draw that samples the glyph atlas with out-of-range texture coordinates ----------
+// The Years 5-7 "wall of glyphs" is the font atlas drawn as one screen-sized quad: once a coordinate runs past 1 the atlas tiles at its own cell pitch, and the
+// picture becomes a lattice of glyph cells (notes-artifact-text.md). The atlas is recognised once, at registration, and remembered on its descriptor record; a
+// draw that reads it then has its texture coordinates measured from the vertex streams it reads. Diagnostic only: no binding, draw, attachment or sampler changes.
+static int g_ag_on = -1, g_ag_nser; static uint64_t g_ag_ser[32];
+static int ag_on(void) {
+    if (g_ag_on < 0) {
+        const char *e = getenv("DM_NVN_ATLASGUARD"); g_ag_on = e && atoi(e) != 0;
+        const char *q = getenv("DM_NVN_ATLASGUARD_TEX");   // explicit serials, for a title whose atlas this does not recognise
+        for (; q && *q && g_ag_nser < 32; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) g_ag_ser[g_ag_nser++] = strtoull(q, NULL, 0);
+        if (g_ag_on) MLOG("DM_NVN_ATLASGUARD on: atlas draws get their texture-coordinate range measured; one line per frame (DM_NVN_ATLASGUARD_LOG=1: every atlas draw, DM_NVN_ATLASGUARD_TEX=<serial,...>: name the atlas by hand)");
+    }
+    return g_ag_on;
+}
+// 1 = the atlas, 0 = not, by creation path (2 = named by DM_NVN_ATLASGUARD_TEX). Called when a texture ID is registered.
+static int ag_is_atlas(const tex_t *t) {
+    if (!t || !ag_on()) return 0;
+    if (g_ag_nser) { for (int i = 0; i < g_ag_nser; i++) if (g_ag_ser[i] == t->serial) return 2; return 0; }
+    // A glyph cache the font engine rasterises into from the CPU must be LINEAR in a CPU-writable pool to see those writes at all (tex_linear, nvn_mtl.m:2452): that
+    // creation path is the atlas, whatever its size (SMBW's is 2048x8192 R8).
+    if ((t->d.flags & NVN_TEXTURE_FLAGS_LINEAR) && t->pool && (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED))) return 1;
+    // This title's atlas is no such cache: it is a loaded asset, one level of single-channel R8 in a CPU_NO_ACCESS pool (4096x2048, 8 MB; capture serials 76 and 339,
+    // the two are its pages). A one-level 8-bit 2D texture of at least 2M texels is a glyph coverage page and nothing else in this title's registry.
+    if (t->d.format == NVN_FORMAT_R8 && t->d.levels <= 1 && t->d.target == NVN_TEXTURE_TARGET_2D && (uint64_t)t->d.width * t->d.height >= (2u << 20)) return 1;
+    return 0;
+}
+// Lock-free copy of the flag, as g_tser is for the serial: the replay hot path cannot take g_rmu (registration runs on the recording thread)
+static _Atomic uint8_t g_tatlas[1 << 20];
+
 // ---------- Descriptor pool: texture ID / sampler ID → object ----------
 // At registration the whole texture object is snapshotted (NVN semantics: the descriptor has been written into the pool); view: the MTLTexture for that ID (a view or the base texture, held via CFBridgingRetain) and the serial-table / guest-write generations at the time it was obtained
 typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view_id, view_rid, view_ser, view_dirty; int view_pkg;   // view_pkg: CPU-written (packaged); only those depend on guest writes (view_dirty)
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
                  void *im, *im_of; uint64_t im_rid;                       // im: the view an image slot reads in the shader's pixel class (img_fit), im_of = the view it was built from
-                 int prev, next, retired, gone; uint64_t transient_sub; } treg_t;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views)
+                 int prev, next, retired, gone; uint64_t transient_sub; uint8_t atlas; } treg_t;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views)
+                                                                                                   // atlas: this texture is the glyph atlas (ag_is_atlas; mirrored lock-free in g_tatlas for the draw path)
 static treg_t *g_treg; static int g_ntreg;
 static nvn_hmap g_treg_serial = {.klen = 8};   // serial → first registered descriptor index + 1, under g_rmu
 static int *g_treg_transient; static size_t g_ntreg_transient, g_treg_transient_cap;
@@ -4214,7 +4244,9 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
             nvn_hm_put(&g_treg_serial, &t->serial, (void *)(uintptr_t)(id_ + 1));
         }
         if (id_ < (1 << 20)) atomic_store_explicit(&g_tser[id_], t ? t->serial : 0, memory_order_release);
+        rr->atlas = (uint8_t)ag_is_atlas(t);
     }
+    if (id_ < (1 << 20)) atomic_store_explicit(&g_tatlas[id_], rr->ok ? rr->atlas : 0, memory_order_release);
     os_unfair_lock_unlock(&g_rmu);
     {   // DM_NVN_TREG_ID=n logs every registration of texture ID n: what it holds from then on, and when (the frame being recorded)
         static int want = -2; if (want == -2) { const char *e = getenv("DM_NVN_TREG_ID"); want = e ? atoi(e) : -1; }
@@ -4481,11 +4513,18 @@ static inline __attribute__((always_inline)) uint64_t tex_fast_rid(int tid, void
     if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].view && g_treg[tid].view_ser == g_ser_gen && (!g_treg[tid].view_pkg || g_treg[tid].view_dirty == nvn_dirty_now())) { if (out) *out = g_treg[tid].view; return g_treg[tid].view_rid; }
     id<MTLTexture> t = tex_by_id(tid); if (out) *out = (__bridge void *)t; return t ? t.gpuResourceID._impl : 0;
 }
+// NVN wrap mode → Metal. NVNwrapMode: 0 clamp, 1 repeat, 2 mirror-clamp, 3 mirror-repeat, 4 clamp-to-border,
+// 5 mirror-clamp-to-border, 6 clamp-OGL, 7 mirror-clamp-OGL, 8 mirror-once-OGL.
+// A value this does not know is NOT repeat: a stray or not-yet-resolved descriptor then tiles the texture
+// wherever the texture coordinates run past 1, which is how a text draw turns into a wall of glyph cells
+// (the atlas repeats at its cell pitch). Clamp is the conservative reading; NVN's builder default (repeat)
+// arrives here as 1 and still means repeat.
 static MTLSamplerAddressMode wrapm(int w) {
-    switch (w) { case 0: case 7: return MTLSamplerAddressModeClampToEdge; case 1: return MTLSamplerAddressModeRepeat;
+    switch (w) { case 0: case 6: case 7: return MTLSamplerAddressModeClampToEdge; case 1: return MTLSamplerAddressModeRepeat;
         case 3: case 2: return MTLSamplerAddressModeMirrorClampToEdge; case 5: case 4: return MTLSamplerAddressModeClampToBorderColor;
-        case 6: return MTLSamplerAddressModeMirrorRepeat; }
-    return MTLSamplerAddressModeRepeat;
+        case 8: return MTLSamplerAddressModeMirrorClampToEdge; case 9: return MTLSamplerAddressModeMirrorRepeat; }
+    static int once; if (!once++) MLOG("[nvn] sampler wrap mode %d is not an NVN wrap mode: clamped to edge (tiling it would repeat the texture across the draw)", w);
+    return MTLSamplerAddressModeClampToEdge;
 }
 static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
@@ -9196,6 +9235,166 @@ static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) 
 void mtl_geomesh_stats(uint64_t *n, uint64_t *wait) { *n = g_geo_mesh_n; *wait = g_geo_mesh_wait; }
 void mtl_geohoist_stats(uint64_t *moved, uint64_t *runs, uint64_t *stops) { *moved = g_geo_hoisted; *runs = g_geo_hoist_runs; memset(stops, 0, 6 * sizeof *stops); stops[3] = g_geo_dependency_splits; }
 void mtl_cshoist_stats(uint64_t *moved, uint64_t *depth, uint64_t *stops) { *moved = g_csh_moved; *depth = g_csh_depth; for (int i = 0; i < 8; i++) stops[i] = g_csh_stop[i]; }
+// ---------- AtlasGuard: the draw-time half (see the block above the descriptor pool) ----------
+#define AG_MAX 16        // atlas draws remembered per frame (the ring the previous frame is compared from)
+#define AG_MAXV 4096     // vertices decoded per attribute
+typedef struct {
+    uint32_t pass, idx; int tid, stage; uint64_t ser; uint32_t w, h, nfmt; int mpf; uint8_t ws, wt, wr, src;   // src: 0 no stream bound, 1 attribute decoded, 2 raw stream dump
+    float u0, v0, u1, v1; int prim, count, nvread; uint64_t stream; uint32_t stride, sfmt, soff; float raw[4]; float ub[4];
+} ag_rec;
+static ag_rec g_ag_cur[AG_MAX], g_ag_prev[AG_MAX]; static int g_ag_ncur, g_ag_nprev;
+static uint64_t g_ag_frame = ~0ull; static uint32_t g_ag_idx; static int g_ag_reported, g_ag_first, g_ag_log = -1;
+static uint64_t g_ag_draws, g_ag_frames, g_ag_overs, g_ag_nostream, g_ag_noattr;
+// Component c of one element of NVN vertex format f. kind: 0 f32, 1 f16, 2 unorm8, 3 unorm16, 4 snorm8, 5 snorm16, 6/7/8/9/10 integer (u8, s8, u16, s16, u32/s32)
+static int ag_fmt(int f, int *nc, int *bpc, int *kind) {
+    if (f < 0x01 || f > 0x30) return 0;   // packed 16-bit, 10:10:10:2 and the i2f forms are not decoded (raw dump instead)
+    static const uint8_t kd[12] = {2, 4, 2, 7, 1, 3, 5, 8, 9, 0, 10, 10};   // UNORM8 SNORM8 UINT8 SINT8, F16 UNORM16 SNORM16 UINT16 SINT16, F32 UINT32 SINT32
+    static const uint8_t kb[12] = {1, 1, 1, 1, 2, 2, 2, 2, 2, 4, 4, 4};
+    int k = (f - 1) % 12; *nc = (f - 1) / 12 + 1; *bpc = kb[k]; *kind = kd[k]; return 1;
+}
+static float ag_comp(const uint8_t *p, int bpc, int kind, int c) {
+    p += (size_t)bpc * c;
+    switch (kind) {
+        case 0: { float v; memcpy(&v, p, 4); return v; }
+        case 1: { __fp16 h; memcpy(&h, p, 2); return (float)h; }
+        case 2: return p[0] / 255.0f;
+        case 3: { uint16_t v; memcpy(&v, p, 2); return v / 65535.0f; }
+        case 4: return (int8_t)p[0] / 127.0f;
+        case 5: { int16_t v; memcpy(&v, p, 2); return v / 32767.0f; }
+        case 6: return (float)p[0]; case 7: return (float)(int8_t)p[0];
+        case 8: { uint16_t v; memcpy(&v, p, 2); return (float)v; }
+        case 9: { int16_t v; memcpy(&v, p, 2); return (float)v; }
+        default: { uint32_t v; memcpy(&v, p, 4); return (float)(int32_t)v; }
+    }
+}
+// The address of vertex k of the draw, and its index element size (0 = not indexed). 0 = the draw's vertices cannot be located
+static int ag_vertex(int k, const p_draw *dw, const p_draw_idx *di, const uint8_t *ib, int isz, int64_t *vid) {
+    if (dw) { *vid = (int64_t)dw->first + k; return 1; }
+    if (!di || !ib) return 0;
+    uint32_t ix = isz == 2 ? ((const uint16_t *)ib)[k] : ((const uint32_t *)ib)[k];
+    *vid = (int64_t)ix + di->base_vertex; return 1;
+}
+// [u0,v0]..[u1,v1] of attribute a over the vertices the draw reads: 0 read, 1 not a per-vertex 2-component attribute, 2 could not be read
+static int ag_uv_attr(int a, const p_draw *dw, const p_draw_idx *di, float r[4], int *nread, uint32_t *sfmt, uint32_t *soff, uint64_t *saddr, uint32_t *sstride) {
+    int n = dw ? dw->count : di ? di->count : 0;
+    if (n < 1 || a < 0 || a >= S.nattr || S.attr[a].stream >= 16) return 1;
+    va_st at = S.attr[a]; vs_st sm = S.stream[at.stream]; NVNbufferRange vb = S.vbuf[at.stream];
+    int nc, bpc, kind;
+    if (!sm.stride || sm.divisor || !vb.address || !ag_fmt(at.fmt, &nc, &bpc, &kind) || nc < 2) return 1;
+    *sfmt = (uint32_t)at.fmt; *soff = at.offset; *saddr = vb.address; *sstride = sm.stride;
+    int isz = di ? (di->itype == 1 ? 2 : 4) : 0; const uint8_t *ib = NULL;
+    if (di) { void *m; uint64_t o; if (!mtl_addr(di->ibuf, (uint64_t)n * isz, &m, &o) || !(ib = [(__bridge id<MTLBuffer>)m contents])) return 2; ib += o; }
+    float u0 = 0, v0 = 0, u1 = 0, v1 = 0; int k, got = 0;
+    for (k = 0; k < n && k < AG_MAXV; k++) {
+        int64_t vid; if (!ag_vertex(k, dw, di, ib, isz, &vid)) return 2;
+        uint64_t off = (uint64_t)vid * sm.stride + at.offset;
+        if (vid < 0 || off + (uint64_t)nc * bpc > vb.size) break;   // past the bound range: nothing more the shader may read
+        void *mb; uint64_t mo; const uint8_t *base;
+        if (!mtl_addr(vb.address + off, (uint64_t)nc * bpc, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return 2;
+        float u = ag_comp(base + mo, bpc, kind, 0), v = ag_comp(base + mo, bpc, kind, 1);
+        if (!got) { u0 = u1 = u; v0 = v1 = v; got = 1; } else { if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; }
+    }
+    if (!got) return 2;
+    r[0] = u0; r[1] = v0; r[2] = u1; r[3] = v1; *nread = k; return 0;
+}
+// The first 4 floats of the first vertex of the first bound stream (route B: the values themselves, for reading offline)
+static void ag_raw_stream(const p_draw *dw, const p_draw_idx *di, ag_rec *r) {
+    for (int s = 0; s < 16; s++) {
+        if (!S.vbuf[s].address || !S.stream[s].stride) continue;
+        int isz = di ? (di->itype == 1 ? 2 : 4) : 0; const uint8_t *ib = NULL;
+        if (di) { void *m; uint64_t o; if (!mtl_addr(di->ibuf, (uint64_t)(di->count > 0 ? di->count : 1) * isz, &m, &o) || !(ib = [(__bridge id<MTLBuffer>)m contents])) continue; ib += o; }
+        int64_t vid; if (!ag_vertex(0, dw, di, ib, isz, &vid) || vid < 0) continue;
+        void *mb; uint64_t mo; const uint8_t *base;
+        if (!mtl_addr(S.vbuf[s].address + (uint64_t)vid * S.stream[s].stride, 16, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) continue;
+        memcpy(r->raw, base + mo, 16);
+        r->stream = S.vbuf[s].address; r->stride = S.stream[s].stride; r->sfmt = 0; r->soff = 0; r->src = 2; return;
+    }
+}
+static void ag_line(const char *tag, const ag_rec *r) {
+    char uv[80], ub[64];
+    if (r->src == 1) snprintf(uv, sizeof uv, "%g,%g..%g,%g", r->u0, r->v0, r->u1, r->v1);
+    else if (r->src == 2) { snprintf(uv, sizeof uv, "raw"); }
+    else snprintf(uv, sizeof uv, "none");
+    if (r->src != 1) snprintf(ub, sizeof ub, "%g,%g,%g,%g", r->ub[0], r->ub[1], r->ub[2], r->ub[3]); else snprintf(ub, sizeof ub, "-");
+    MLOG("[atlasguard] F%llu pass %u draw %u tex %d ser %llu %ux%u fmt %#x/mtl%d wrap %d,%d,%d uv %s verts %d/%d prim %d stream %#llx stride %u attr %#x+%u c0 %s %s",
+         (unsigned long long)g_ag_frame, r->pass, r->idx, r->tid, (unsigned long long)r->ser, r->w, r->h, r->nfmt, r->mpf,
+         r->ws, r->wt, r->wr, uv, r->nvread, r->count, r->prim, (unsigned long long)r->stream, r->stride, r->sfmt, r->soff, ub, tag);
+}
+// A new frame: this frame's atlas draws become the ring the next frame is compared against
+static void ag_roll(uint64_t f) {
+    memcpy(g_ag_prev, g_ag_cur, sizeof g_ag_prev); g_ag_nprev = g_ag_ncur; g_ag_ncur = 0; g_ag_idx = 0; g_ag_reported = 0; g_ag_frame = f;
+    if (g_ag_draws && f % 300 == 0)
+        MLOG("[atlasguard] F%llu atlas draws inspected %llu in %llu frames, %llu with no vertex stream, %llu with no decodable uv attribute, overshoots %llu",
+             (unsigned long long)f, (unsigned long long)g_ag_draws, (unsigned long long)g_ag_frames, (unsigned long long)g_ag_nostream, (unsigned long long)g_ag_noattr, (unsigned long long)g_ag_overs);
+}
+// Called for every draw, before it can return for any reason: the atlas it reads, the wrap modes in use and the texture-coordinate range of the vertices it reads
+static void ag_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+    if (!ag_on() || !pr) return;
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (f != g_ag_frame) { if (g_ag_log < 0) { const char *e = getenv("DM_NVN_ATLASGUARD_LOG"); g_ag_log = e && atoi(e) != 0; } ag_roll(f); }
+    g_ag_idx++;
+    int tid = 0, sid = 0, stage = -1;
+    for (int st = 0; st < 6 && !tid; st++) {
+        NvShader *sh = pr->sh[st]; if (!sh) continue;
+        for (int i = 0; i < sh->rf.nb; i++) {
+            const nvn_rbind *b = &sh->rf.b[i]; int t2 = 0, s2 = 0;
+            if ((b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) && b->reg < NTEX) { t2 = (int)(tex_slot_h(S.tex[st], S.img[st], b->reg) & 0xfffff); s2 = (int)((S.tex[st][b->reg] >> 20) & 0xfff); }
+            else if (b->kind == NVN_RB_TEXU) { uint32_t h = ubo_handle(st, b->reg, b->off); t2 = ubo_tex_id(h); s2 = (int)((h >> 20) & 0xfff); }
+            else continue;   // image slots, handle arrays and pool lookups: not this title's text draws, and the raw stream dump below still covers them
+            if (t2 <= 0 || t2 >= (1 << 20)) continue;
+            if (!atomic_load_explicit(&g_tatlas[t2], memory_order_relaxed)) continue;
+            tid = t2; sid = s2; stage = st; break;
+        }
+    }
+    if (!tid) return;
+    ag_rec r; memset(&r, 0, sizeof r);
+    {   // object fields (size, format): registration runs on the recording thread, so take the descriptor lock for the copy
+        os_unfair_lock_lock(&g_rmu);
+        if (tid < g_ntreg && g_treg[tid].ok) r.ser = g_treg[tid].t.serial, r.w = g_treg[tid].t.d.width, r.h = g_treg[tid].t.d.height, r.nfmt = g_treg[tid].t.d.format;
+        os_unfair_lock_unlock(&g_rmu);
+    }
+    r.tid = tid; r.stage = stage; r.pass = g_stat_pass + !g_enc; r.idx = g_ag_idx; r.count = dw ? dw->count : di->count; r.prim = dw ? dw->prim : di->prim;
+    {   // sampler wrap modes in use (NVN enum: 0 clamp, 1 repeat, 2 mirror-clamp, 3 mirror-repeat, 4..8)
+        os_unfair_lock_lock(&g_rmu);
+        if (sid > 0 && sid < g_nsreg && g_sreg_ok[sid]) { r.ws = g_sreg[sid].ws; r.wt = g_sreg[sid].wt; r.wr = g_sreg[sid].wr; }
+        os_unfair_lock_unlock(&g_rmu);
+    }
+    uint32_t pf = 0; uint8_t swz[4]; r.mpf = nvn_fmt_to_mtl(r.nfmt, &pf, swz) ? (int)pf : -1;
+    {   // the coordinates: every attribute the vertex shader is known to hand to an interpolator unchanged (or scaled from a uniform) as texture coordinates
+        NvShader *vs = pr->sh[0]; int attrs[16], na = 0;
+        if (vs) for (int l = 0; l < 32; l++) { int a = vs->rf.uv_attr[l]; if (a < 0) a = vs->rf.uv_aff_attr[l];
+            if (a >= 0 && a < 16 && S.attr[a].fmt) { int seen = 0; for (int q = 0; q < na; q++) seen |= attrs[q] == a; if (!seen && na < 16) attrs[na++] = a; } }
+        if (!na) {   // no uv attribute proved by the translator: report the stream values themselves
+            if (S.vbuf[0].address || S.vbuf[1].address || S.vbuf[2].address) ag_raw_stream(dw, di, &r);
+            if (r.src != 2) { r.src = 0; g_ag_nostream++; } else g_ag_noattr++;
+        } else {
+            int best = 2;
+            for (int q = 0; q < na; q++) { float v[4]; int nr = 0; uint32_t sf = 0, so = 0; uint64_t sa = 0; uint32_t ss = 0;
+                int why = ag_uv_attr(attrs[q], dw, di, v, &nr, &sf, &so, &sa, &ss);
+                if (why == 0) { r.src = 1; r.u0 = v[0]; r.v0 = v[1]; r.u1 = v[2]; r.v1 = v[3]; r.nvread = nr; r.sfmt = sf; r.soff = so; r.stream = sa; r.stride = ss; best = 0; break; }
+                if (why < best) best = why; }
+            if (r.src != 1) {   // nothing decodable: the raw values of the first bound stream
+                ag_raw_stream(dw, di, &r);
+                if (r.src == 2) g_ag_noattr++; else { r.src = 0; g_ag_nostream++; }
+            }
+        }
+    }
+    if (r.src == 0) {   // geometry generated from constants: the first 4 floats of the vertex stage's uniform slot 0 (the block that differs between the wall frame and its neighbours)
+        for (int q = 0; q < 4; q++) { float v = NAN; if (!ubo_float(0, (uint16_t)((0 << 8) | (0 << 2) | q), &v)) v = NAN; r.ub[q] = v; }
+    }
+    if (!g_ag_first) { g_ag_first = 1;
+        MLOG("[atlasguard] first atlas draw: F%llu tex %d ser %llu %ux%u fmt %#x (recognised at registration: %s)",
+             (unsigned long long)f, tid, (unsigned long long)r.ser, r.w, r.h, r.nfmt, g_ag_nser ? "named by DM_NVN_ATLASGUARD_TEX" : "creation path (single-channel 8-bit one-level page, or LINEAR in a CPU-writable pool)"); }
+    g_ag_draws++; if (g_ag_ncur == 0) g_ag_frames++;
+    ag_rec *slot = &g_ag_cur[g_ag_ncur < AG_MAX ? g_ag_ncur++ : AG_MAX - 1]; *slot = r;
+    int bad = r.src == 1 && (r.u1 > 1.5f || r.v1 > 1.5f || r.u0 < -0.5f || r.v0 < -0.5f);
+    if (bad) g_ag_overs++;
+    if (bad && g_ag_reported != (int)g_ag_frame) {   // one line for the frame, plus the same draw of the frame before it
+        g_ag_reported = (int)g_ag_frame;
+        ag_line("OVERSHOOT", &r);
+        for (int i = 0; i < g_ag_nprev; i++) if (g_ag_prev[i].tid == r.tid && g_ag_prev[i].idx == r.idx) { ag_line("prev", &g_ag_prev[i]); break; }
+    } else if (g_ag_log > 0) ag_line(bad ? "OVERSHOOT" : "ok", &r);
+}
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); draw_(dw, di); cp_end(5, start); }
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
@@ -9221,6 +9420,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!S.prog) { RED_ONCE(18, "no program bound before the draw"); PD("Z %llu draw skipped: no program bound", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *pr = g_geo_program ? g_geo_program : prog_get(S.prog);
     image_prepare(pr, 0x1f);
+    ag_draw(pr, dw, di);   // DM_NVN_ATLASGUARD: measure this draw's atlas coordinates (reads only; no draw is changed, skipped or clamped)
     draw_gs_check(pr);   // a geometry stage left with no function (see prog_fold_gs)
     if (!g_geo_program && S.rast_discard && S.tf_on) { tf_draw(pr, dw, di); return; }
     // Feedback captures rasterized draws too (Donkey Kong Country: Tropical Freeze's fur).

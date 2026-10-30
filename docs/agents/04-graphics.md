@@ -10,6 +10,8 @@ Do not stop at the obvious archive. In Mario the main `bfsha` held 4,888 of the 
 
 Validate a new title's coverage at run time: `DM_NVN_SHDUMP=<dir>` makes the host dump the control section and code of every program it can't find in the map; search those bytes in the game files to find the container that was missed.
 
+When there is no container to find — an engine that assembles its programs in RAM, so their bytes exist only in that run — the dump is the source. `dm/gfx/tools/dmsh_shdump.py <dump dir> <pkg dir> <map>` recomputes each pair's key with the host's rule, rejects a pair whose sha256 is not the key it was written under, and appends the rows the split cannot write (source `/shdump/<key>.ctl#SHDUMP@0x0`, package `<stage>_<group>.bin`) together with their records in the package directory the split wrote. What a profile commits is those keys and that provenance line, never the bytes: any user with the game and a dump of their own reproduces every row, and the build reads the bytes from their own dump. Run it after `shader_split.py`, which rewrites the map.
+
 ## 2. Key shaders by control section + code
 
 The host key is `sha256(control[0:0x880] + code)[:16]` (`prog_get` in `nvn_mtl.m`, `shader_split.py`). D2R keyed by the control section alone; in Mario, 6,367 shader pairs share a control section but differ in code. A different code length or layout in a new title must be reflected in both places.
@@ -69,7 +71,7 @@ What earlier titles needed beyond sections 1–5 is filed by mechanism: textures
 | `DM_NVN_CBDUMP=dir` (with PASSDUMP) | Raw uniform buffer contents per binding, and the source bytes of every buffer-to-texture copy into a 3D texture (`F<frame>_c3d_<serial>.bin`: what the game uploaded, before any layout question) |
 | `DM_NVN_HILITE=fskey,…` | Replace those fragment shaders with solid colours: tells "geometry is wrong" from "shading is wrong" |
 | `DM_NVN_DEPTHOVR=fskey,…` | Those fragment shaders' draws compare depth with `ALWAYS`: with `HILITE`, tells "the depth test rejects every fragment" from "nothing rasterizes". With `PASSDUMP`, the `D` line shows the depth range (`dr=`) and logic op (`lo=`), and `c` lines each recorded clear (slot, serial, mask, scissor; depth / stencil values) |
-| `DM_NVN_SHDUMP=dir` | Control + code of programs missing from the shader map |
+| `DM_NVN_SHDUMP=dir` | Control + code of the programs the host is given (`SetShaders-<key>.ctl` / `.code`, written where the key is computed) and of the ones missing from the map (`<key>.ctl` / `.code`, at their first draw); `dm/gfx/tools/dmsh_shdump.py` turns them into map rows |
 | `DM_NVN_VSDUMP=<file>` / `DM_NVN_VSDUMP_KEY=<vertex key>` | One native post-vertex capture: a u32 header (first vertex, count, stride in words, base instance), then the 144-word geometry records. Refuses shaders with writes. With key `*`, saves position-only files by draw/key; `DM_NVN_VSDUMP_FROM` selects the first frame, `DM_NVN_VSDUMP_MAX` limits captures (default 256). These diagnostics drain GPU work |
 | `DM_NVN_ALLOCPROF=1` | Metal allocation growth per replayed op type and per function, command allocator sizes, new textures |
 | `DM_NVN_CBDUMP_KEY=vskey` (with `CBDUMP` and `PASSDUMP_ALL`) | Only that vertex shader's draws: uniform buffers plus vertex streams and index buffer (`F<frame>_p<pass>_vb<stream>_<addr>.bin`, `_ib<type>_<addr>.bin`) |

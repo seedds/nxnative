@@ -6,6 +6,7 @@
 #   mrs tpidrro_el0     → read thread slot KTLR (Horizon ThreadLocalRegion pointer)
 #   svc #n, mrs cntpct_el0 → host gate (gate address taken from thread slot KGATE; once in C, gates.tsv is looked up by return point)
 #   sub sp, sp, xN      → xN rounded up to 16 first (Apple's kernel faults on a misaligned sp, Horizon does not; site_sp_align)
+#   ldxr rt,[rn]; cbnz rt,<it>; stxr ws,rk,[rn]; cbnz ws,<it> (a test-and-set lock acquire with no acquire ordering) → ldaxr (acquire_lock_sites; the Switch's Cortex-A57 keeps the loads after it in order in practice, Apple cores do not)
 #   spin wait loops     → a copy whose back-edges pass a spin gate (the host yields there; a busy poll costs nothing on the Switch, see "Spin waits")
 #   Registered cuts (CUTS of the patch files, restricted by NSO build ID, see "Registered patches"): before rewriting, the original bytes are asserted one by one and any mismatch aborts; results are listed in <name>.cuts.tsv
 #   Function-matched cuts (MATCH_CUTS of the selected game's patches.py): unknown builds only, unique complete-function and direct-callee fingerprints, then original-byte assertions
@@ -518,6 +519,24 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nso_code
 DATA_BLOCKS = nso_code.data_blocks(IMG, TEXT_END, md)
 CODE_RANGES = list(zip([0] + [e for _, e in DATA_BLOCKS], [s for s, _ in DATA_BLOCKS] + [TEXT_END]))
+def acquire_lock_sites(img, ranges):
+    """Offsets of exclusive test-and-set lock acquires without acquire ordering: ldxr rt,[rn]; cbnz rt,<the ldxr>; stxr ws,rk,[rn]; cbnz ws,<the ldxr> (w or x, rk not zero).
+    Cortex-A57 runs the loads after such a lock in order in practice (Armv8 does not require it); Apple cores may satisfy them before the lock is held, so two threads take the same queue item (Breath of the Wild 1.6.0 main:
+    412 of these, the job queue pop at main+0x13a0784 ran one job on two threads, see docs/reference/threads.md). Nintendo's own SDK locks use ldaxr"""
+    out = []
+    for s, e in ranges:
+        for o in range(s, e - 12, 4):
+            w = struct.unpack_from('<I', img, o)[0]
+            if w & 0xBFFFFC00 != 0x885F7C00: continue
+            c1, st, c2 = struct.unpack_from('<III', img, o + 4)
+            rt, rn, rs, rk = w & 31, w >> 5 & 31, st >> 16 & 31, st & 31
+            cbnz = lambda x, r, back: x & 0x7F00001F == 0x35000000 | r and x >> 5 & 0x7FFFF == 0x80000 - back   # cbnz r, <the ldxr>: back words
+            if cbnz(c1, rt, 1) and cbnz(c2, rs, 3) and st & 0xBFE0FC00 == 0x88007C00 and st >> 5 & 31 == rn and rk != 31 and rs not in (rn, rk):
+                out.append(o)
+    return out
+for o in acquire_lock_sites(IMG, CODE_RANGES):
+    struct.pack_into('<I', IMG, o, struct.unpack_from('<I', IMG, o)[0] | 0x8000)   # ldxr → ldaxr
+    stat('acquire_lock')
 md_lite = Cs(CS_ARCH_ARM64, CS_MODE_ARM)   # no details: the x18 scan reads only the operand text
 R18 = re.compile(r'\b[xw]18\b')
 def x18_words(lo, hi):

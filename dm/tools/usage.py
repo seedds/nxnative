@@ -174,6 +174,11 @@ def host_sources(root=REPO, rev=None):
     return files
 
 
+def unit(path):
+    """The file a source is compiled as: the topic parts of nvn_mtl.m (dm/tools/split_nvn_mtl.py) are part of its translation unit, so their static functions see each other"""
+    return 'dm/gfx/nvn/nvn_mtl.m' if re.fullmatch(r'dm/gfx/nvn/nvn_mtl_\w+\.inc', path) else path
+
+
 def host_graph(root=REPO, rev=None):
     """(callers: {(file, function): {(file, function) calling it}}, roots: {(file, function): {('nvn' | 'hle', name)}}, defs: {function: [files]}). A call resolves to the function
     of the same name in the calling file when there is one (static functions of the same name in several files), else to every file that defines it; a function defined in a
@@ -190,7 +195,7 @@ def host_graph(root=REPO, rev=None):
     for (rel, name), body in bodies.items():
         for c in set(CALL.findall(body)) - KEYWORDS - {name}:
             if c not in defs: continue
-            for f in ([rel] if rel in defs[c] else [x for x in defs[c] if (x, c) not in local]): callers[f, c].add((rel, name))
+            for f in ([rel] if rel in defs[c] else [x for x in defs[c] if (x, c) not in local or unit(x) == unit(rel)]): callers[f, c].add((rel, name))
     return callers, roots, defs
 
 

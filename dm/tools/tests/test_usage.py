@@ -43,6 +43,19 @@ class Usage(unittest.TestCase):
             self.assertEqual(usage.reach({('dm/gfx/nvn/f.h', 'step')}, callers, roots)[0], {('nvn', 'nvnQueuePresentTexture')})
             self.assertEqual(usage.reach({('dm/gfx/nvn/f.h', 'step')}, *usage.host_graph(Path(d))[:2])[0], set())
 
+    def test_parts_of_nvn_mtl_see_each_others_statics(self):   # the topic parts of nvn_mtl.m are one translation unit: a static function of one part is called from another
+        with tempfile.TemporaryDirectory() as d:
+            run = lambda *c: subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', *c], cwd=d, check=True, capture_output=True)
+            (Path(d) / 'dm/gfx/nvn').mkdir(parents=True); run('init', '-q')
+            (Path(d) / 'dm/gfx/nvn/hle_nvn.c').write_text('NVN(nvnQueuePresentTexture, void, int k) {\n    mtl_present(k);\n}\n')
+            (Path(d) / 'dm/gfx/nvn/nvn_mtl.m').write_text('void mtl_present(int k) {\n    step(k);\n}\n')
+            (Path(d) / 'dm/gfx/nvn/nvn_mtl_tex.inc').write_text('static int step(int k) {\n    return k;\n}\n')
+            (Path(d) / 'dm/gfx/nvn/other.m').write_text('static int step(int k) {\n    return k;\n}\n')
+            run('add', '.'); run('commit', '-qm', '1')
+            callers, roots, _ = usage.host_graph(Path(d))
+            self.assertEqual(usage.reach({('dm/gfx/nvn/nvn_mtl_tex.inc', 'step')}, callers, roots)[0], {('nvn', 'nvnQueuePresentTexture')})
+            self.assertEqual(usage.reach({('dm/gfx/nvn/other.m', 'step')}, callers, roots)[0], set())
+
     def test_rule_precedence(self):
         rules = usage.load_map()
         rs, mapped = usage.rules_for('dm/gfx/tools/dmsh_build.py', {'fs_uint'}, rules)

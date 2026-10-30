@@ -47,6 +47,41 @@ def rel(p):
 def linted(r):
     return r is not None and r.startswith(LINT_DIRS) and not r.startswith(SKIP)
 
+# nvn_mtl.m is cut into topic parts (nvn_mtl_<part>.inc, dm/tools/split_nvn_mtl.py). The static analyzer does not analyze functions defined in included files, so the
+# parts would drop out of its reach: tidy reads the file put back together, dm/host/gen/lint/nvn_mtl.m, as the host's source and counts its findings for nvn_mtl.m (the baseline
+# is the unsplit file's). A finding that another source (a test) reports in nvn_mtl.m or a part moves to the line it has in the put-back file.
+MTL = 'dm/gfx/nvn/nvn_mtl.m'
+MTL_PART = re.compile(r'dm/gfx/nvn/nvn_mtl_\w+\.inc')
+
+def joined_path(): return DB_DIR / 'lint' / 'nvn_mtl.m'
+
+def joined_tree():
+    # the joined text of the split file, and where each line of the parts went: (path, line of the part) -> line of the joined text
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    import split_nvn_mtl as sp
+    d = (REPO / MTL).parent
+    out, at, owner = [], {}, {sp.include_line(p): p for p in sp.PARTS}
+    for i, line in enumerate((d / 'nvn_mtl.m').read_text().splitlines(keepends=True), 1):
+        p = owner.get(line)
+        if p is None: out.append(line); at[(MTL, i)] = len(out); continue
+        hl = (d / sp.part_file(p)).read_text().splitlines(keepends=True)
+        k = sp.HEADER_LINES
+        while hl[k] == sp.PAD: k += 1
+        for j in range(k, len(hl)): out.append(hl[j]); at[(f'dm/gfx/nvn/{sp.part_file(p)}', j + 1)] = len(out)
+    return ''.join(out), at
+
+def write_joined():
+    joined_path().parent.mkdir(parents=True, exist_ok=True)
+    joined_path().write_text(joined_tree()[0])
+
+def joined_entry(e):
+    # the compile command of a split nvn_mtl.m, on its joined text (the quoted includes are found beside the original)
+    if rel(e['file']) != MTL: return e
+    if not any((REPO / MTL).parent.glob('nvn_mtl_*.inc')): joined_path().unlink(missing_ok=True); return e
+    write_joined()
+    args = e['arguments'][:-1]   # without the source
+    return {'directory': e['directory'], 'file': str(joined_path()), 'arguments': [*args[:1], f'-I{(REPO / MTL).parent}', *args[1:], str(joined_path())]}
+
 # ---------- compile database ----------
 def make_targets(d):
     # every t_* target of a test Makefile (the graphics and host tests), without the sanitizer variants (their sources are the plain tests')
@@ -88,7 +123,7 @@ def compdb(game):
     sysroot = subprocess.run(['xcrun', '--show-sdk-path'], capture_output=True, text=True).stdout.strip() if sys.platform == 'darwin' else ''
     runs = [('dm/host', ['dmhost']), ('dm/gfx/tex/tests', make_targets('dm/gfx/tex/tests')), ('dm/gfx/tests', make_targets('dm/gfx/tests')),
             ('dm/host/tests', make_targets('dm/host/tests')), ('dm/gfx/metal', ['all'])]
-    db = merge_entries(e for d, targets in runs for cwd, line in dry_run(d, targets, game) for e in entries(cwd, line, sysroot))
+    db = [joined_entry(e) for e in merge_entries(e for d, targets in runs for cwd, line in dry_run(d, targets, game) for e in entries(cwd, line, sysroot))]
     DB_DIR.mkdir(parents=True, exist_ok=True)
     (DB_DIR / 'compile_commands.json').write_text(json.dumps(db, indent=1) + '\n')
     print(f'{DB_DIR.relative_to(REPO)}/compile_commands.json: {len(db)} sources')
@@ -109,16 +144,21 @@ def tidy_one(tool, f):
     r = subprocess.run([tool, '-p', str(DB_DIR), '--quiet', f], capture_output=True, text=True, cwd=REPO)
     if r.returncode < 0 or 'PLEASE submit a bug report' in r.stderr:   # a crash would otherwise read as a file without findings
         sys.exit(f'[RED] lint_c: clang-tidy crashed on {rel(f)} (exit {r.returncode}):\n{r.stderr[-4000:]}')
-    return f, parse_diags(r.stdout)
+    return f, parse_diags(r.stdout, joined_path().exists())
 
-def parse_diags(text):
+def parse_diags(text, joined=False):
     # clang-tidy's findings in dm/host and dm/gfx as (file, line, column, check, message); a finding of several checks counts for each
-    out = []
+    out, at = [], joined_tree()[1] if joined else {}
     for line in text.split('\n'):
         m = DIAG.match(line)
         if not m: continue
         path, ln, col, _, msg, checks = m.groups()
         r = rel(path)
+        if r is None: continue
+        if joined and r == rel(joined_path()): r = MTL
+        elif joined and (r == MTL or MTL_PART.fullmatch(r)):
+            if (r, int(ln)) not in at: continue
+            r, ln = MTL, at[(r, int(ln))]
         if not linted(r): continue
         for check in checks.split(','):
             # the compiler's own warnings are the build's to report; a parse error is kept (the file was not fully checked)
@@ -193,7 +233,8 @@ def tidy(args):
     if not dbf.exists(): sys.exit(f'{dbf.relative_to(REPO)} is missing: run lint_c.py compdb first')
     if (args.update or args.rebaseline) and args.files: sys.exit('--update and --rebaseline write the whole baseline: run them without files')
     files = [e['file'] for e in json.loads(dbf.read_text())]
-    if args.files: files = [str((REPO / f).resolve()) for f in args.files]
+    if str(joined_path()) in files: write_joined()   # the parts may have changed since compdb
+    if args.files: files = [str(joined_path()) if f == MTL and joined_path().exists() else str((REPO / f).resolve()) for f in args.files]
     found = set()
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
         for i, (f, out) in enumerate(ex.map(lambda f: tidy_one(tool, f), files)):

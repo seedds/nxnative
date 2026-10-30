@@ -1,0 +1,1523 @@
+# dm/tools/split_nvn_mtl.py: part<TAB>block name, in file order (main = stays in nvn_mtl.m). Rewritten by --write-plan; a block missing here goes to the part before it.
+main	#import <Metal/Metal.h>
+main	#import <QuartzCore/CAMetalLayer.h>
+main	#import <QuartzCore/CAMetalDisplayLink.h>
+main	#import <MetalFX/MetalFX.h>
+main	#undef I
+main	#import <ImageIO/ImageIO.h>
+main	#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+main	#include <mach/mach_time.h>
+main	#include <mach/mach.h>
+main	#include <dlfcn.h>
+main	#include <sys/stat.h>
+main	#include <sys/mman.h>
+main	#include <sys/sysctl.h>
+main	#include <fcntl.h>
+main	#include <TargetConditionals.h>
+main	#if TARGET_OS_IPHONE
+main	#include "nvn_mtl.h"
+main	#include "nvn_obj.h"
+main	#include "../tex/nvn_fmt_mtl.h"
+main	#include "../tex/nvn_deswizzle.h"
+main	#include "../tex/nvn_deswizzle_gpu.h"
+main	#include "nvn_builtin.h"
+main	#include "nvn_dirty.h"
+main	#include "nvn_depth_clear.h"
+main	#include "nvn_refl.h"
+main	#include "nvn_cover.h"
+main	#include "nvn_primitive.h"
+main	#include "nvn_timestamp.h"
+main	#include "dmsh_chain.h" // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
+main	#include "game_profile.h" // game profile constants (profile id, the profile's switches)
+main	#define NTEX
+main	enum C2_TEX
+main	_Static_assert _Static_assert(C2_TEX + 8 * C2_TEX_SLOTS == C2_SEPTEX && C2_
+main	c0_ssbo_base
+main	tex_slot_h
+main	c2_handle;
+main	#include "nvn_hmap.h"
+main	#include "../../host/dm.h"
+main	#import <CommonCrypto/CommonDigest.h>
+main	#include <stdarg.h>
+main	#include <mach-o/dyld.h>
+main	#include <mach-o/fat.h>
+main	#include <libkern/OSByteOrder.h>
+main	#include <libgen.h>
+main	#include <pthread.h>
+main	#include <stdio.h>
+main	#include <stdlib.h>
+main	#include <string.h>
+main	#include <time.h>
+main	#include <unistd.h>
+main	#include <stdatomic.h>
+main	#include <errno.h>
+main	#include <execinfo.h>
+main	#include <os/lock.h>
+main	#include <objc/runtime.h>
+main	#pragma clang attribute push(__attribute__((objc_externally_retained)), apply_to = function)
+main	#define MLOG
+main	#define MDIE
+main	warm_start;
+main	shmap_load;
+main	prepare_on;
+main	g_warm_started
+main	warm_claim;
+main	g_dev
+main	g_l3_gpu_leaks
+main	g_nvn_deswz_gpu
+main	g_q
+main	g_q4
+main	g_classic_ok
+main	g_feedback_q
+main	g_present_qos
+main	#define ALLOC_MAX
+main	g_alloc4
+main	g_up_alloc4
+main	g_present_alloc4
+main	g_present_cb
+main	g_vt
+main	g_vbuf_cache
+main	g_vt_addr
+main	g_vbuf_resolve
+main	g_present_args
+main	g_present_uv
+main	g_present_alloc_fence
+main	g_present_alloc_done
+main	g_pq_mu
+main	g_pq_cv
+main	g_link_cv
+main	g_link_mu
+main	g_link_tick_ns
+main	g_link_dropped
+main	g_link_empty
+main	g_link_hold_until
+main	g_pq_inflight
+main	g_dm_present_link
+main	g_present_latency
+main	g_pq_done
+main	g_pq_read
+main	g_res
+main	g_res_dirty
+main	g_ev
+main	g_fence
+main	g_cut_copy
+main	g_mu
+main	g_cv
+main	g_done
+main	g_arena_made
+main	g_allocprof
+main	#define AP_B
+main	#define AP_E
+main	g_last_commit_error
+main	g_up_pending
+main	g_res_mu
+main	enum WS_SYNC
+main	ws_name
+main	g_ws_n
+main	ws_on
+main	ws_t0
+main	ws_put
+main	g_fend
+main	g_ws_wake_n
+main	ws_wake_pair
+main	ws_wake
+main	ws_fb
+main	g_ws_post
+main	ws_report
+main	#include "nvn_rec.h" // deferred encoding (DM_NVN_ENC_THREAD)
+main	g_res_objects
+main	g_image_heap_n
+main	resource_vis
+main	g_rs_site
+main	#define res_add
+main	res_add_at
+main	res_remove
+main	@interface NvImageHeap
+main	@implementation NvImageHeap
+main	g_image_heap_owner_key
+main	g_res_check_on
+main	res_check
+main	res_commit
+main	mtl_res_stats
+main	@interface NvDeferredRelease
+main	@implementation NvDeferredRelease
+main	g_deferred
+main	g_deferred_mu
+main	defer_obj_release_ex
+main	defer_obj_release
+main	defer_obj_unref
+main	defer_drain
+main	g_bf_want_mu
+main	g_bf_want_keys
+main	bf_want_note
+main	pool_ent
+main	g_pools
+main	g_pidx_ok
+main	g_keep
+main	g_pool_adds
+main	g_pool_res_n
+main	#define C1_BANK_SIZE
+main	#define C1_DECL_SIZE
+main	g_c1_banks
+main	g_c1_bank_off
+main	g_c1_count
+main	g_c1_full
+main	g_c1_full_valid
+main	g_cb_ext
+main	g_c1_lock
+main	udc_selftest
+main	mtl_init
+main	dm_mtl_l3_tick
+main	dm_mtl_l3_sample
+main	g_dead_pools
+main	enum PC_BITS
+main	g_pool_gen
+main	pc_ent
+main	t_pc
+main	pc_slot
+main	pc_get
+main	pc_put
+main	g_reg_gen
+main	pool_res
+main	mtl_pool_add
+main	mtl_pool_del
+main	g_pidx
+main	pidx_cmp
+main	pool_find
+main	mtl_addr
+main	mtl_gpu_addr
+submit	defer_reset;
+submit	post_op
+submit	mirror_rb_land;
+submit	g_seg
+submit	c
+submit	g_rc_skip
+submit	#define RC_PEND
+submit	g_rc_pend
+submit	g_rc_occ
+submit	rc_occ_add
+submit	rc_occ_has
+submit	rc_note
+submit	rc_value
+submit	vis_slot
+submit	vis_list
+submit	#define VIS_SLOTS
+submit	vis_buf
+submit	enum VIS_RING
+submit	g_vis_ring
+submit	g_vis
+submit	vis_in_ring
+submit	g_vis_on
+submit	g_vs
+submit	g_cnt_report
+submit	vis_clear
+submit	vis_snapshot
+submit	enum PEND_MAX
+submit	g_pend_lo
+submit	g_pend_head
+submit	g_pend_node
+submit	g_pend_wide
+submit	upd_ent
+submit	g_upd
+submit	enum SBW_N
+submit	g_sbwp
+submit	sbw_slot
+submit	enum SBW_GPU
+submit	g_sbw_gen
+submit	sbw_note
+submit	sbw_hits
+submit	pend_bucket
+submit	pend_reset
+submit	vc_gpu_write;
+submit	pend_add
+submit	pend_last
+submit	pend_hits
+submit	pend_read
+submit	zskip_zero
+submit	g_zskip_zero
+submit	g_zskip_cand
+submit	zskip_clear;
+submit	tbdr_on;
+submit	g_cb
+submit	g_blit
+submit	g_blit_alias
+submit	blit_vis
+submit	g_commit_blocks
+submit	g_alloc_fence
+submit	mtl_wait;
+submit	mtl_wait_at;
+submit	up_flush;
+submit	g_sub_thread
+submit	on_sub_thread
+submit	up_owner_check
+submit	up_wait_zero;
+submit	q_cb
+submit	g_post
+submit	objc_autoreleasePoolPush;
+submit	g_sub_pool
+submit	tbdr_on;#2
+submit	g_sub_serial
+submit	mtl_sub_begin
+submit	rp_end;
+submit	ser_gate
+submit	g_pass_swrite
+submit	img_fit_upgrade;
+submit	g_last_end_relaxed
+submit	g_bar_skip
+submit	gp_end;
+submit	m4_end
+submit	sw_mode;
+submit	barrier_game
+submit	mtl_barrier_stats
+submit	mtl_cut_count;
+submit	enum GP_MAX
+submit	gp_lab
+submit	g_gp_heap
+submit	g_gp_busy
+submit	g_bw_load
+submit	g_stat_pass
+submit	gp_active
+submit	gp_report;
+submit	gp_periodic_finish
+submit	gp_begin
+submit	gp_end
+submit	gp_report
+submit	enc_r_begin_pass
+submit	enc_r_end_pass
+submit	enc_r_begin
+submit	enc_r_end
+submit	enc_r_pso
+submit	enc_r_dss
+submit	enc_r_viewport
+submit	enc_r_scissor
+submit	enc_r_cull
+submit	enc_r_winding
+submit	enc_r_fill
+submit	enc_r_depth_bias
+submit	enc_r_depth_clip
+submit	enc_r_stencil_ref
+submit	enc_r_blend_color
+submit	enc_r_visibility
+submit	enc_r_vbuf
+submit	enc_r_args
+submit	enc_r_draw
+submit	enc_r_draw_instanced
+submit	enc_r_draw_indirect
+submit	enc_r_draw_indexed
+submit	enc_r_draw_indexed_indirect
+submit	ubd_land_compute;
+submit	enc_c_begin
+submit	enc_c_begin_concurrent
+submit	enc_c_end
+submit	enc_c_pso
+submit	enc_c_args
+submit	enc_c_dispatch
+submit	enc_c_dispatch_indirect
+submit	enc_b_begin
+submit	enc_b_end
+submit	enc_b_copy_buffer
+submit	enc_b_copy_buffer_texture
+submit	enc_b_copy_texture_buffer
+submit	enc_b_copy_texture
+submit	blit_note;
+submit	enum BW_MAX
+submit	g_bw_lo
+submit	g_blit_splits
+submit	mtl_blit_splits
+submit	enc_open;
+submit	g_blit_ct
+submit	blit_open
+submit	ubd_flush;
+submit	g_ubd_landing
+submit	blit_raw
+submit	ubd_land
+submit	ubd_land_compute
+submit	blit_barrier
+submit	mtl_blit_barriers
+submit	bw_hit
+submit	br_hit
+submit	g_wr_epoch
+submit	g_mdx_epoch
+submit	nvn_sparse_alias;
+submit	blit_buf
+submit	blit
+submit	mtl_sub_copy
+ubuf	g_ubs_buf
+ubuf	arena_alloc;
+ubuf	ubd_ent
+ubuf	enum UBD_MAX
+ubuf	g_ubd
+ubuf	g_ubd_deferred
+ubuf	ubd_on
+ubuf	mtl_ubd_stats
+ubuf	ubd_lazy
+ubuf	enum UBD_PF
+ubuf	g_ubd_pf
+ubuf	g_ubd_wide
+ubuf	ubd_pf_slot
+ubuf	ubd_pf_add
+ubuf	ubd_pf_hit
+ubuf	ubd_hits
+ubuf	ubd_covers
+ubuf	ubd_shadow
+ubuf	ubd_flush
+ubuf	ubd_read
+ubuf	ub_partial_on
+ubuf	enum GW_N
+ubuf	g_gw
+ubuf	g_gw_all
+ubuf	g_ubp_made
+ubuf	g_ubp_why
+ubuf	gw_slot
+ubuf	gw_put
+ubuf	gw_live
+ubuf	gw_commit
+ubuf	pend_since
+ubuf	nvn_host_readable;
+ubuf	enum UBP_CACHE
+ubuf	g_ubp_idx
+ubuf	ubp_ent
+ubuf	g_ubp_ready
+ubuf	g_ubpc
+ubuf	ubp_get
+ubuf	mtl_ubp_stats
+ubuf	mtl_ubp_why
+ubuf	mtl_sub_update
+ubuf	mtl_sub_fill
+ubuf	post
+ubuf	mtl_sub_event
+ubuf	mtl_sub_counter
+ubuf	mtl_counter_stats
+ubuf	guest_ns;
+ubuf	gpu_ticks
+ubuf	#define SEG_CLK_N
+ubuf	struct seg_clk
+ubuf	seg_ts
+ubuf	seg_clk_put
+ubuf	gpu_s_guest_ns
+ubuf	rep_ticks
+ubuf	bp_now
+ubuf	g_bp_t0
+ubuf	bp_t0
+ubuf	bootprof
+ubuf	g_bp_lib_n
+ubuf	g_up_total_ns
+ubuf	#define GRING
+ubuf	g_gpu
+ubuf	g_cur_frame
+ubuf	g_ub_n
+ubuf	g_ubp_on
+ubuf	mtl_ub_present
+ubuf	ub_var
+ubuf	ub_frame
+ubuf	ub_skip
+ubuf	ab_len;
+ubuf	g_cap_f0
+ubuf	gpu_capture_dir
+ubuf	gpu_capture_prune
+ubuf	gpu_capture_frame
+ubuf	mtl_set_frame
+ubuf	gpu_tag_begin
+ubuf	gpu_tag_done
+ubuf	gpu_tag_f
+ubuf	gpu_tag
+ubuf	mtl_gpu_ms
+ubuf	mtl_gpu_span
+ubuf	rp_flush;
+ubuf	cctx_snap;
+ubuf	lc_land;
+ubuf	post_rec
+ubuf	#define POST_RING
+ubuf	g_postr
+ubuf	g_post_mu
+ubuf	post_claim
+ubuf	post_run
+ubuf	post_complete
+ubuf	mtl_sub_commit
+ubuf	mtl_last_fence
+ubuf	mtl_last_commit_error
+ubuf	fast_wake
+ubuf	post_early
+ubuf	mtl_wait_at
+ubuf	mtl_wait
+ubuf	mtl_wait_acq
+ubuf	mtl_finish_gpu_at
+ubuf	#define mtl_finish_gpu
+ubuf	mtl_present_flush;
+ubuf	mtl_finish
+ubuf	present_drop_for_suspend;
+ubuf	snap_drain;
+ubuf	mtl_drain
+tex	#include "../../host/front.h"
+tex	g_red_once
+tex	#define RED_ONCE
+tex	#define VB_SLOT
+tex	fmt_compressed
+tex	fmt_depth
+tex	pfv_pair
+tex	g_pfv_srgb
+tex	tex_need_pfv
+tex	hm_rel
+tex	hm_get_id
+tex	hm_put_id
+tex	hm_del_id
+tex	g_by_serial
+tex	g_smu
+tex	g_ser_gen
+tex	alias_key
+tex	g_alias
+tex	g_alias_seen
+tex	g_image_desc
+tex	image_shape
+tex	image_desc_drop_pool
+tex	g_alias_set
+tex	g_alias_evicted
+tex	alias_has
+tex	treg_drop_pool_views;
+tex	cpu_tex_drop_pool;
+tex	mtl_alias_drop_pool
+tex	enum ALIAS_IDLE
+tex	g_alias_taken
+tex	g_ghost
+tex	serial_holds
+tex	alias_take_over
+tex	serial_get
+tex	serial_put
+tex	serial_del
+tex	enum NGHOST
+tex	g_tex_live
+tex	g_ghost#2
+tex	mtl_tex_init
+tex	obj_drop
+tex	tex_get
+tex	tex_put
+tex	@interface NvPkg
+tex	@implementation NvPkg
+tex	g_pkg_uploads
+tex	g_pfv_upgrades
+tex	dirtycheck
+tex	full_hash
+tex	pkg_edge_ranges
+tex	pkg_edges_take
+tex	pkg_edges_clean
+tex	pf_r32i
+tex	img_usage
+tex	tex_atomic_capable
+tex	tex_desc
+tex	tex_upgrade
+tex	tex_upgrade_pfv
+tex	g_upload_ns
+tex	g_upload_gpu_ns
+tex	g_up_cb
+tex	g_up_ce
+tex	g_up_alloc_busy
+tex	g_up_wmu
+tex	up_wake
+tex	up_wait_zero
+tex	g_up_seq
+tex	#define UP_BLOCK_SIZE
+tex	#define UP_SLOT_BLOCK
+tex	g_up_slot_blk
+tex	up_blit
+tex	g_up_blits
+tex	g_up_texs
+tex	g_up_block
+tex	g_up_block_off
+tex	g_up_keep
+tex	g_up_staging_bytes
+tex	#define UP_BATCH_BYTES
+tex	g_up_lost
+tex	up_lost_take
+tex	up_diag;
+tex	up_flush
+tex	up_begin
+tex	g_up_blocks_new
+tex	up_diag
+tex	up_alloc
+tex	g_up_pblock
+tex	up_param_alloc
+tex	up_blit_add
+tex	pkg_upload_;
+tex	nvn_host_readable;#2
+tex	nvn_sparse_pool;
+tex	nvn_sparse_since;
+tex	pkg_upload
+tex	mtl_upload_ns_take
+tex	mtl_upload_gpu_ns_take
+tex	mtl_create_stats
+tex	mtl_create_ns
+tex	mtl_upload_bytes
+tex	zblock_on
+tex	g_zb_ser
+tex	zb_report
+tex	pkg_upload_
+tex	mtl_pf_bytes
+tex	zero_buf
+tex	g_tex_zeroed
+tex	tex_zero_fill
+tex	nvn_flushed;
+tex	mem_any
+tex	tex_init_fill
+tex	clear_rect_zero;
+tex	tex_linear
+tex	g_cpu_tex_mu
+tex	g_cpu_tex
+tex	cpu_tex_drop_pool
+tex	mtl_tex_gpu_owned
+tex	mtl_tex_cpu_written
+tex	mtl_cpu_tex_count
+tex	tex_cpu_written
+tex	tex_mtl_;
+tex	tex_mtl
+tex	sparse_view
+tex	g_texinfo_ser
+tex	image_texture
+tex	tex_mtl_
+tex	mtl_mem_stat
+tex	mtl_pkg_stats
+tex	mtl_pkg_edge_skips
+tex	mtl_pkg_miss
+tex	mtl_vc_drop;
+tex	mtl_tex_release
+pass	R
+pass	zskip_fact
+pass	g_zskip_facts
+pass	g_zskip_nf
+pass	zskip_test_add
+pass	zskip_test_count
+pass	g_zskip_env
+pass	zskip_on
+pass	zskip_clear
+pass	zskip_del
+pass	zskip_has
+pass	zskip_add
+pass	zskip_zero_clear
+pass	zskip_commit_clears
+pass	zskip_target_zero
+pass	#ifdef NVN_RT_RANGE_TEST
+pass	g_enc
+pass	enc_open
+pass	g_pass
+pass	g_rp_layered
+pass	g_sm_plan
+pass	g_sm_pass
+pass	g_sm_npass
+pass	g_pso_amp
+pass	mtl_sm_stats
+pass	g_enc_pso
+pass	g_ed
+pass	enum ED_SREF
+pass	g_enc_vis
+pass	g_pso_dirty
+pass	g_stat_args_enc
+pass	g_stat_draw
+pass	g_kd_force
+pass	g_pd_a0
+pass	g_pd_every
+pass	passdump
+pass	dm_gfx_passdump_next
+pass	#define PD
+pass	blit_note
+pass	dm_guest_frame_tick
+pass	dm_detclock_enabled
+pass	guest_ns
+pass	att_bytes
+pass	mip_extent
+pass	pass_dims
+pass	pg_pass
+pass	#define PG_SLOTS
+pass	#define PG_RING
+pass	g_pg
+pass	g_pg_buf
+pass	g_pg_pass
+pass	g_pg_frame
+pass	g_pg_mu
+pass	args_dirty_all;
+pass	pg_stat
+pass	g_pg_st
+pass	pg_on
+pass	pg_sub_begin
+pass	pg_new
+pass	pg_render
+pass	pg_compute
+pass	pg_end_render
+pass	pg_commit
+pass	ts_after;
+pass	ms_after;
+pass	sd_att
+pass	g_sd
+pass	g_udc_ab
+pass	udc_on
+pass	tbdr_on
+pass	rt_range_on
+pass	g_ab_phase
+pass	ab_len
+pass	enum SW_MAX
+pass	sw_on_at
+pass	sw_mode
+pass	sw_on
+pass	enum AB_MAXF
+pass	g_ab_gpu
+pass	g_ab_bw1
+pass	flt_cmp
+pass	ab_frame
+pass	ab_report
+pass	mtl_ab_gpu
+pass	g_sd_dead_bytes
+pass	enum XV_INVALID
+pass	#define XV_TRIAL
+pass	xv_ent
+pass	g_xv
+pass	g_xv_disabled
+pass	g_xv_trial
+pass	xv_trial_get
+pass	g_xv_present
+pass	g_xv_dc
+pass	xv_touch
+pass	g_xv_touch
+pass	xv_tag
+pass	xv_tag_pass
+pass	xv_init
+pass	xv_disabled
+pass	xv_find
+pass	xv_drop
+pass	xv_drop_all_of
+pass	xv_set
+pass	xv_violation
+pass	xv_check
+pass	xv_good
+pass	xv_touch_add
+pass	xv_first_good
+pass	xv_present
+pass	xv_forward;
+pass	tbdr_on;#3
+pass	xv_on
+pass	mtl_xv_window_tex
+pass	xv_test_counts
+pass	sd_finish;
+pass	g_fd_dw
+pass	g_fd_n
+pass	g_fd_why
+pass	first_draw_covers;
+pass	pf_is_float
+pass	fz_load_covers;
+pass	g_lp
+pass	lp_finish;
+pass	g_enc_mode
+pass	g_rt_range_active
+pass	g_rt_merged
+pass	g_rt_merge_n
+pass	g_defer_replaying
+pass	fz_end;
+pass	defer_fallback;
+pass	g_el_w
+pass	enc_label_on
+pass	g_nbcrt
+pass	rp_end
+pass	pg_sub_begin_ext
+pass	pg_commit_ext
+pass	mtl_fmt_block
+pass	nvn_fmt_bc
+pass	bc_block_bytes
+pass	shrt_block
+pass	mtl_fmt_depth
+pass	bcrt_view
+pass	bcrt_t
+pass	g_bcrt
+pass	g_bcrt_sh
+pass	bcrt_is
+pass	bcrt_flush
+pass	bcrt_attach
+pass	rt_view_fmt
+pass	rt_dup_slot
+pass	attach
+pass	rp_begin_ex;
+pass	rp_begin
+pass	rp_begin_ex_;
+pass	rp_begin_ex
+pass	bare_dims;
+pass	rp_begin_ex_
+pass	rt_dims
+pass	rp_flush
+pass	scissor_full
+pass	clear_rect_zero
+shader	g_rmu
+shader	g_shmap
+shader	g_shmap_path
+shader	exe_rel
+shader	shmap_load
+shader	@interface NvShader
+shader	@implementation NvShader
+shader	#include "nvn_pso_skey.h"
+shader	#include "nvn_geometry.h"
+shader	#include "nvn_feedback.h"
+shader	@interface NvProg
+shader	@implementation NvProg
+shader	@interface WarmItem
+shader	@implementation WarmItem
+shader	g_shcache
+shader	c1_store
+shader	g_warm_items
+shader	g_warm_lock
+shader	g_warm_ready
+shader	g_warm_t0
+shader	g_warm_running
+shader	g_warm_shaders
+shader	g_warm_claim_shaders
+shader	bf_fn;
+shader	rt_range_bindings_ro;
+shader	g_pso_record
+shader	pso_record_file
+shader	pso_record
+shader	pso_user_path
+shader	g_pso_user
+shader	g_pso_user_seen
+shader	pso_user_file
+shader	pso_user_record
+shader	t_lib_layer
+shader	lib_from_file
+shader	g_depth_zero
+shader	mtl_set_depth_zero
+shader	g_fn4_lock
+shader	g_fn4
+shader	fn4_note
+shader	fn4_of
+shader	shader_load
+shader	cb_len
+shader	stage_of
+shader	#define NVN_RT_RANGE_RO_IMPL
+shader	rt_range_bindings_ro
+shader	rt_range_pr_ro
+shader	shader_get
+shader	shader_get_layer
+shader	prog_fold_gs
+shader	g_gs_miss_draws
+shader	draw_gs_check
+shader	g_builtin_lib
+shader	g_builtin
+shader	builtin_get
+shader	prog_get
+shader	mtl_prog_release
+shader	treg_t
+shader	g_treg
+shader	g_tser
+shader	g_sreg
+shader	treg_drop_im
+shader	vc_key
+shader	enum VC_WAYS
+shader	vc_set
+shader	g_vc
+shader	g_vc_hit
+shader	vc_rows_drop
+shader	vc_set_free
+shader	vc_get
+shader	vc_set_for
+shader	vc_put
+shader	mtl_vc_drop
+shader	mtl_vc_stats
+shader	vc_drop_pool
+shader	g_tb2_binds
+shader	tbuf_as_2d
+shader	mtl_tb2_stats
+shader	treg_drop_pool_views
+shader	mtl_reg_tex
+shader	mtl_reg_image
+shader	mtl_reg_samp
+shader	bh_fresh
+shader	ttype
+shader	g_tpool_n
+shader	g_origin_ll
+shader	mtl_set_origin_lower_left
+shader	g_queue_origin_ll
+shader	mtl_set_queue_origin_lower_left
+shader	mtl_set_tex_pool_n
+shader	tex_by_id
+shader	tex_fast
+shader	dummy_tex;
+shader	tex_fit
+shader	tex_fit_elem
+shader	g_tex_mis_n
+shader	mtl_tex_mis_count
+shader	tex_mis_note
+shader	mtl_pf_dpf
+shader	g_imfit_pend
+shader	img_fit_upgrade
+shader	img_fit
+shader	tex_fast_rid
+shader	wrapm
+shader	samp_by_id
+shader	samp_fast
+shader	@interface NvArena
+shader	@implementation NvArena
+shader	g_arenas
+shader	arena_new
+shader	enum ARENA_KEEP
+shader	arena_begin
+shader	arena_commit
+shader	arena_alloc
+state	S
+state	c2_handle
+state	g_args_dirty
+state	ubd_dirty
+state	#define VBUF_COPY_MAX
+state	vbuf_copy
+state	g_vbuf_unaligned
+state	g_vbuf_write_epoch
+state	vbuf_unaligned
+state	vbuf_prepare
+state	bind_vbufs
+state	enum PULL_SLOT
+state	pull_stream
+state	pull_layout
+state	_Static_assert _Static_assert(sizeof(pull_layout) == 320, " ");
+state	pull_layout_fill
+state	pull_bind
+state	bare_dims
+state	swrite_note
+state	udc_note_draw
+state	bind_stages
+state	prog_resolve
+state	g_state_inited
+state	state_reset
+state	queue_state
+state	g_queue_states
+state	mtl_queue_activate
+state	mtl_queue_forget
+state	vfmt_for_ct
+state	enum VCONV_SLOT0
+state	vconv_ncomp
+state	vconv_int
+state	vconv_i2f
+state	vconv_size
+state	vconv_uf
+state	vconv_elem
+state	vin_cpu
+state	g_vin_lock
+state	g_vin_loaded
+state	vin_fn
+state	g_pull_lock
+state	pull_load
+state	pull_fn
+state	vin_fmt
+state	vin_ct
+state	vin_on
+state	vconv_wanted
+state	vconv_fill
+state	enum VC_RGN
+state	ir_key
+state	ir_ent
+state	g_ir
+state	g_vc_rgn
+state	vc_on
+state	vc_check
+state	vc_rgn
+state	vc_rgn_mark
+state	vc_rgn_hit
+state	vc_gpu_write
+state	ix_minmax
+state	ix_range
+state	vc_draw_range
+state	vc_stat
+state	g_vconv
+state	vconv_bind
+state	vfmt
+state	bfac
+state	adv_blend
+state	bop
+state	g_pso_lmap
+state	g_fz_fn_lock
+state	NSString
+state	NSString#2
+state	g_pso
+state	g_pso_fail
+state	g_tf_mark
+state	g_geo_mark
+state	#define GEO_MARK
+state	#define AMP_MARK
+state	#define TF_MARK
+state	#define DISCARD_MARK
+state	mtl_fmt_uint
+state	pso_all_uint
+state	pf_int_kind;
+state	pso_mixed_uint
+state	pso_desc
+pso	pso4_on
+pso	g_comp4
+pso	g_arch4
+pso	enum PSO_ARCH_COMPACT
+pso	g_compact_enabled
+pso	g_compact_files
+pso	arch_compact_marker
+pso	arch_os_build
+pso	arch_compact_stamp
+pso	arch_compact_allowed
+pso	g_arch_q
+pso	@interface ArchEpoch
+pso	@implementation ArchEpoch
+pso	g_ep
+pso	g_arch_cap
+pso	g_arch_pending
+pso	g_pb_built
+pso	g_pt_hit_n
+pso	pbase_key
+pso	g_pbase
+pso	@interface PbaseBuild
+pso	@implementation PbaseBuild
+pso	g_pbase_pending
+pso	g_pbase_lock
+pso	pso_user_path;
+pso	g_arch_bundle
+pso	arch_macho_ok
+pso	arch_container_ok
+pso	arch_file_ok
+pso	pso_bundle_open
+pso	ga_dir
+pso	ga_list
+pso	ep_new
+pso	ep_enter
+pso	ep_leave
+pso	arch_capture
+pso	pso4_init
+pso	g_arch_flush_ok
+pso	arch_compact_finish;
+pso	arch_write
+pso	arch_flush
+pso	arch_flush_wait
+pso	arch_note_new
+pso	arch_compact_finish
+pso	pso_col4
+pso	pso_desc4
+pso	pbase_key_of
+pso	pso_build_ex
+pso	pso_build
+pso	pso_key_fill
+pso	#define PSO_PEND_MAX
+pso	enum PSO_PEND_ACTIVE
+pso	g_pp
+pso	g_pp_mu
+pso	g_pp_submit_mark
+pso	pso_predict_rest;
+pso	pso_pend_find
+pso	hybrid_on;
+pso	pp_bg_queue
+pso	g_pw_n
+pso	g_pw_why
+pso	pso_pend_slot
+pso	pso_pend_start
+pso	pso_pend_kick
+pso	pso_pend_demand
+pso	pso_pend_take
+pso	pso_pend_try
+pso	hybrid_on
+pso	g_pso_hy
+pso	g_pso_pull
+pso	g_hy_draws
+pso	g_hy_kick_set
+pso	pso_desc_pull
+pso	hybrid_get
+pso	mtl_hybrid_stats
+pso	mtl_pso_line
+pso	g_pre_running
+pso	g_pre_known
+pso	g_pre_known_n
+pso	pre_fail_head
+pso	pre_fail_load
+pso	pre_fn
+pso	pre_json
+pso	pre_desc
+pso	pre_pair
+pso	pre_stamp
+pso	pre_parse
+pso	enum PRE_PROBE
+pso	stamp_line
+pso	pso_bundle_covers
+pso	pso_prebuild
+pso	mtl_pso_prebuild_tool
+pso	prepare_on;#2
+pso	pso_prebuild_bg
+pso	pso_get_;
+pso	ms_fs_override;
+pso	pf_int_kind;#2
+pso	pso_fout_hint
+pso	pso_get
+pso	enum SM_AMP_MAX
+pso	g_sm_amp
+pso	sm_amp_get
+pso	pso_get_
+pso	warm_key
+pso	@interface WarmTask
+pso	@implementation WarmTask
+pso	g_warm_dict
+pso	g_warm_done
+pso	warm_stale
+pso	warm_shader
+pso	warm_enqueue
+pso	warm_parse
+pso	warm_task
+pso	warm_finish
+pso	mtl_warm_wait
+pso	front_progress;
+pso	front_progress
+pso	prepare_on
+pso	prepare_workers
+pso	warm_prepare
+pso	prepare_prebuild
+pso	warm_start
+args	dss_get
+args	g_dummy_img_rid
+args	dummy_tex
+args	dummy_img
+args	dummy_buf;
+args	dummy_tbuf
+args	enum TBS_BLOCK
+args	g_tbs_blk
+args	g_tbs_cache
+args	g_tbs_copies
+args	tbuf_shadow
+args	dummy_samp
+args	dummy_samp_rid
+args	dummy_buf
+args	dummy_buf_gpu
+args	img_binding
+args	image_prepare
+args	dummy_img_atomic
+args	img_atomic_ok
+args	g_draw_seq
+args	g_fb_src
+args	g_args_dirty#2
+args	g_args_reg_seen
+args	args_dirty_all
+args	args_sync_dirty
+args	bind_args
+args	support_buf
+args	support_gpu
+args	zero_bank
+args	zero_bank_gpu
+args	ubo_read
+args	ubo_handle
+args	ubo_tex_id
+args	ubo_samp_id
+args	g_dispatch_dim
+args	g_draw_binst
+args	g_c0_dim_buf
+args	g_geo_bind
+args	encode_args_;
+args	encode_args
+args	encode_args_
+args	g_quad_ib
+args	g_fan_ib
+args	#define SHARED_IB_N
+args	quad_ib_make
+args	fan_ib_make
+args	rp_begin;
+lookahead	g_exec_next
+lookahead	g_exec_cur
+lookahead	g_ret
+lookahead	g_rest
+lookahead	mtl_exec_rest
+lookahead	g_stat_ds_omit
+lookahead	g_stat_s_only
+lookahead	#define HOIST_MAX
+lookahead	g_hoist_skip
+lookahead	hoist_skipped
+lookahead	fz_cursor
+lookahead	fz_next
+lookahead	fuse_t
+lookahead	g_fz
+lookahead	defer_snap
+lookahead	defer_t
+lookahead	g_defer_slots
+lookahead	g_defer_cur
+lookahead	#define g_defer
+lookahead	sub_eq;
+lookahead	g_defer_n
+lookahead	g_defer_pend
+lookahead	g_defer_nact
+lookahead	g_defer_ab
+lookahead	draw;
+lookahead	defer_has_in_p
+lookahead	defer_has_active
+lookahead	defer_slot_free
+lookahead	defer_same_q_depth
+lookahead	defer_next
+lookahead	defer_release_one
+lookahead	defer_clear_all
+lookahead	hoist_take
+lookahead	enum DS_FREE
+lookahead	g_ds_why
+lookahead	ds_scan
+lookahead	g_exec_cur#2
+lookahead	sd_need
+lookahead	sdx_decide;
+lookahead	sd_finish
+lookahead	attr_read
+lookahead	first_draw_covers
+lookahead	nvn_dpool_base;
+lookahead	state_op
+lookahead	rt_sub;
+lookahead	g_pf_lock
+lookahead	g_pf_n
+lookahead	shader_prefetch_rest
+lookahead	pso_predict_rest_;
+lookahead	pso_predict_rest
+lookahead	pso_predict_rest_
+lookahead	fz_probe_cov2
+lookahead	fz_load_covers
+lookahead	lp_finish
+lookahead	rt_same
+lookahead	sm_on
+lookahead	sm_rt_slice
+lookahead	sm_scan
+lookahead	draw_samples_rt;
+lookahead	sm_plan
+lookahead	#define NVN_RT_RANGE_IMPL
+lookahead	rt_range_shape
+lookahead	#define NVN_RT_RANGE_DEPTH_IMPL
+lookahead	rt_range_note_depth
+lookahead	rt_range_same
+lookahead	tex_storage_overlap
+lookahead	draw_samples_rt
+lookahead	pass_ds_need
+lookahead	h_ser
+lookahead	sdx_ev
+lookahead	enum SDX_READ
+lookahead	#define SDX_NONE
+lookahead	g_sdx
+lookahead	#define SDX_HB
+lookahead	g_sdx_hk
+lookahead	sdx_bucket
+lookahead	g_sdx_op
+lookahead	g_exec_seq
+lookahead	g_pp_slot
+lookahead	g_rtx_seq
+lookahead	seq_push
+lookahead	sdx_ev_add
+lookahead	sdx_lvsl
+lookahead	sdx_walk
+lookahead	mtl_sub_index
+lookahead	sdx_seq
+lookahead	sdx_decide
+lookahead	xv_forward
+lookahead	rt_sub
+lookahead	hoist_try
+merge	fz_unskip
+merge	fz_reuse_op
+merge	fz_check_on
+merge	fz_snap
+merge	g_fzs
+merge	draw;#2
+merge	fz_snap_take
+merge	fz_check_run
+merge	fz_end
+merge	sub_eq
+merge	prog_samples_ser
+merge	g_defer_env_ab
+merge	defer_env
+merge	defer_on
+merge	defer_handle_sub
+merge	defer_prog_hits
+merge	defer_collect_reads
+merge	defer_rt_hits_reads
+merge	defer_q_superset
+merge	defer_take
+merge	defer_release
+merge	defer_env;
+merge	defer_reset
+merge	defer_apply_p_clear
+merge	defer_begin_q
+merge	defer_replay
+merge	defer_fallback
+merge	defer_cont
+merge	defer_pre
+merge	defer_try
+merge	fz_prefilter
+merge	fuse_try
+merge	bf_fn
+merge	ubo_float
+merge	zskip_fact_for
+merge	zskip_view_zero
+merge	zskip_vis_dead
+merge	zskip_can_draw
+merge	uv_proof
+merge	fz_p2_draw
+merge	kd_floats
+merge	kd_draw
+merge	g_ms_key
+merge	ms_on;
+merge	k_ms_phase
+merge	ms_phase_now
+merge	ms_fs_override
+merge	ms_on
+merge	g_ms_ppass
+merge	ms_draw
+merge	k_ms_msl
+merge	#define MS_BUF
+merge	#define MS_MAXE
+merge	ms_ent
+merge	ms_scan
+merge	g_ms_s
+merge	g_ms_curf
+merge	g_ms_att
+merge	g_ms_seq
+merge	ms_poll
+merge	ms_note
+merge	ms_after
+merge	g_fb_keys
+merge	fb_want
+merge	fb_snap_tex
+merge	fb_prepare
+indirect	#define IXC_MAX
+indirect	#define IXC_CAP
+indirect	ixc_ent
+indirect	g_ixc
+indirect	k_ixc_msl
+indirect	ixc_wanted
+indirect	ixc_find
+indirect	ixc_take
+indirect	ixc_run
+indirect	#define WIDE_MAX
+indirect	wide_ent
+indirect	g_wide
+indirect	k_wide_msl
+indirect	wide_wanted
+indirect	wide_find
+indirect	wide_take
+indirect	wide_run
+indirect	mdi_wait;
+indirect	g_ubpk_same
+indirect	ubp_check_on
+indirect	ubp_check
+indirect	ubd_conflict_sh
+indirect	ubd_conflict
+indirect	ubd_conflict_cs
+indirect	g_mdi_ev
+indirect	mdi_wait
+indirect	mdi_live
+indirect	#define MDX_SLOTS
+indirect	mdx_ent
+indirect	g_mdx
+indirect	k_mdx_msl
+indirect	mdx_wanted
+indirect	mdx_slot
+indirect	mdx_find
+indirect	mdx_run
+indirect	g_mdxc
+indirect	mdx_chain
+indirect	mdx_next
+indirect	#include "nvn_feedback.inc"
+indirect	#include "nvn_geometry.inc"
+indirect	lc_group
+indirect	enum LC_MAX
+indirect	g_lc
+indirect	g_lc_taken
+indirect	mtl_lc_stats
+indirect	lc_on
+indirect	lc_same
+indirect	lc_land
+indirect	lc_push
+indirect	lc_sampled
+indirect	lc_take
+indirect	lc_keeps
+draw	dispatch;
+draw	cshoist_on
+draw	csh_rng
+draw	enum CSH_RN
+draw	g_csh_op
+draw	csh_take
+draw	csh_add
+draw	csh_hit
+draw	csh_attachment_hit
+draw	csh_draw_reads
+draw	csh_cs
+draw	cs_hoist_try
+draw	mtl_cshoist_stats
+draw	draw
+draw	g_cps
+draw	warm_claim
+draw	dispatch_own
+draw	dispatch_enc
+draw	dispatch
+draw	tex_level_ok
+draw	copy_t2b
+draw	mtl_read_texels
+draw	tex_storage_dst
+draw	g_mrb_mu
+draw	mrb_note
+draw	mrb_pending
+draw	tex_gpu_touched
+draw	tex_storage_src
+draw	mirror_note
+draw	mirror_rb
+draw	mtl_pf_block_bytes
+draw	mirror_readback
+draw	mirror_rb_land
+draw	copy_b2t
+draw	fmt_int_or_ds
+draw	copy_t2t_draw
+draw	copy_t2t
+draw	mtl_pf_chmask
+draw	clear_tex_tri;
+draw	clear_tex
+draw	cctx_snap
+draw	nvn_game_fps
+draw	mtl_fps_target
+draw	cut_draws
+draw	g_cut_draw0
+draw	sub_cut
+draw	mtl_cut_count
+draw	mtl_copy_cut_count
+draw	pf_int_kind
+draw	clr_lib
+draw	clr_key
+draw	clr_pso
+draw	clr_dss
+draw	clr_scissor
+draw	clr_tri
+draw	clear_tex_tri
+draw	clr_note
+draw	g_clr_tri
+draw	clear_color_tri
+draw	clear_ds_tri
+draw	mtl_exec
+shot	g_blit_pso
+shot	g_blit_samp
+shot	g_present_n
+shot	mtl_present_count
+shot	mtl_res_snapshot
+shot	mtl_res_counts
+shot	#define SHOTQ_MAX
+shot	g_shotq
+shot	g_shotq_mu
+shot	present_encode;
+shot	enum PRESENT_FAILED
+shot	present_offscreen_m4;
+shot	present_offscreen_wait;
+shot	g_grab_cb
+shot	mtl_grab_next_present
+shot	grab_present
+shot	dm_gfx_shot_at
+shot	shot
+shot	g_td_frame
+shot	g_td_layers
+shot	td_layer_count
+shot	td_dump;
+shot	g_td_w
+shot	td_note
+shot	td_note_layer
+shot	dm_gfx_texraw
+shot	dm_gfx_texlist
+shot	dm_gfx_texdump_next
+shot	td_dump
+shot	g_ts_idx
+shot	g_ts_att
+shot	ts_note
+shot	ts_after
+shot	#define PRING
+shot	pres_ent
+shot	g_pres
+shot	mtl_presented_time
+shot	link_ent
+shot	g_link_ring
+shot	mtl_link_tick
+shot	g_drawable_ns
+shot	mtl_drawable_ns_take
+shot	mtl_display_hz
+shot	g_present_stall_ns
+shot	g_present_layer_resident
+shot	mtl_present_test_stall
+present	present_pipeline
+present	present_raw_src
+present	present_viewport
+present	present_crop_rect
+present	present_encode
+present	#define FX_REMAKE_PRESENTS
+present	fx_state
+present	g_fx_present
+present	g_fx_comp
+present	g_fx_mode
+present	fx_mode
+present	fx_wanted
+present	fx_encode
+present	present_encode_m4
+present	present_offscreen_m4
+present	present_offscreen_wait
+present	present_gpu_note
+present	g_link_it_tin
+present	present_now
+present	#define PQ
+present	pq_item
+present	g_ext_ev
+present	ext_wait
+present	snap_commit_wait;
+present	g_pq
+present	g_pq_in
+present	present_now;
+present	g_link_vperiod
+present	@interface NvMetalDisplayLinkDelegate
+present	#define STALL_NS
+present	#define STALL_RED_NS
+present	g_stall_t0
+present	#define LINK_RESCUE_NS
+present	g_rescue_mode
+present	g_rescue_back_at
+present	dm_focus_now
+present	dm_focus_in_since
+present	@implementation NvMetalDisplayLinkDelegate
+present	g_link
+present	g_link_owns_layer
+present	link_on
+present	front_screen_max_fps
+present	front_screen_match
+present	link_range
+present	g_link_mode
+present	link_main
+present	link_sync
+present	present_drop_for_suspend
+present	present_main
+present	mtl_present_qos
+present	present_start
+present	g_present_discard
+present	mtl_link_pause;
+present	mtl_present_discard
+present	present_enqueue;
+present	mtl_present
+present	mtl_device
+present	mtl_device_classic
+present	mtl_ext_tex
+present	mtl_present_ext
+present	dm_present_ns
+present	#define SNAP_MAX
+present	g_snap
+present	g_snap_alloc
+present	g_snap_res
+present	g_snap_next
+present	g_snap_n
+present	mtl_snap_on
+present	snap_commit_wait
+present	snap_drain
+present	mtl_snap_acquire_wait
+present	snap_take
+present	present_enqueue
+present	mtl_present_wait
+present	mtl_present_flush
+present	mtl_stats
+present	mtl_args_stats
+present	mtl_vbuf_stats
+present	mtl_use_stats
+present	mtl_ds_omit
+present	mtl_bw
+present	mtl_udc_saved_bytes
+present	mtl_has_window
+present	mtl_link_active
+present	mtl_link_stalled
+present	mtl_link_pause
+present	mtl_link_wait_tick
+present	mtl_link_rate
+present	mtl_link_wait_ticks
+present	mtl_link_wait_vsync
+present	g_prefetched_drawable
+present	mtl_present_take_prefetched
+main	#ifdef NVN_RT_RANGE_TEST#2
+main	mtl_wait_state_dump
+main	mtl_alloc_stats
+main	#pragma clang attribute pop

@@ -121,6 +121,42 @@ class ClangTidyOutput(unittest.TestCase):
         ])
 
 
+class SplitNvnMtl(unittest.TestCase):
+    """nvn_mtl.m is analyzed whole: the analyzer does not analyze functions of included files, and the baseline counts the unsplit file."""
+    def test_findings_of_other_sources_move_to_the_joined_text(self):
+        out = '\n'.join([f'{REPO}/dm/host/gen/lint/nvn_mtl.m:40:3: warning: Dereference of null pointer [clang-analyzer-core.NullDereference]',
+                         f'{REPO}/dm/gfx/nvn/nvn_mtl.m:7:3: warning: Realloc [bugprone-suspicious-realloc-usage]',
+                         f'{REPO}/dm/gfx/nvn/nvn_mtl_draw.inc:9:3: warning: Realloc [bugprone-suspicious-realloc-usage]',
+                         f'{REPO}/dm/gfx/nvn/nvn_mtl_draw.inc:2:3: warning: In the header [bugprone-suspicious-realloc-usage]',
+                         f'{REPO}/dm/gfx/nvn/nvn_geometry.inc:9:3: warning: Malloc [clang-analyzer-unix.Malloc]'])
+        at = {('dm/gfx/nvn/nvn_mtl.m', 7): 7, ('dm/gfx/nvn/nvn_mtl_draw.inc', 9): 700}
+        with mock.patch.object(lint, 'DB_DIR', REPO / 'dm/host/gen'), mock.patch.object(lint, 'joined_tree', return_value=('', at)):
+            self.assertEqual(lint.parse_diags(out, joined=True), [('dm/gfx/nvn/nvn_mtl.m', 40, 3, 'clang-analyzer-core.NullDereference', 'Dereference of null pointer'),
+                                                                  ('dm/gfx/nvn/nvn_mtl.m', 7, 3, 'bugprone-suspicious-realloc-usage', 'Realloc'),
+                                                                  ('dm/gfx/nvn/nvn_mtl.m', 700, 3, 'bugprone-suspicious-realloc-usage', 'Realloc'),
+                                                                  ('dm/gfx/nvn/nvn_geometry.inc', 9, 3, 'clang-analyzer-unix.Malloc', 'Malloc')])
+            self.assertEqual(len(lint.parse_diags(out)), 4)   # the file is not split: every finding stays where it is
+
+    def test_line_of_a_part_in_the_joined_text(self):
+        if not (REPO / 'dm/gfx/nvn/nvn_mtl_draw.inc').exists(): return
+        text, at = lint.joined_tree()
+        lines = text.splitlines()
+        for (path, n), j in list(at.items())[::97]:
+            self.assertEqual((REPO / path).read_text().splitlines()[n - 1], lines[j - 1])
+
+    def test_split_file_is_compiled_joined(self):
+        e = {'directory': str(REPO / 'dm/host'), 'file': str(REPO / lint.MTL), 'arguments': ['clang', '-O1', '-I../gfx/nvn/include', '-c', str(REPO / lint.MTL)]}
+        other = dict(e, file=str(REPO / 'dm/host/main.c'))
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(lint, 'DB_DIR', Path(d)):
+            self.assertEqual(lint.joined_entry(other), other)
+            j = lint.joined_entry(e)   # the repository's own nvn_mtl.m: split, or whole (then the entry stays)
+            if (REPO / 'dm/gfx/nvn/nvn_mtl_draw.inc').exists():
+                self.assertEqual(j['file'], str(Path(d) / 'lint/nvn_mtl.m'))
+                self.assertEqual(j['arguments'], ['clang', f'-I{REPO / "dm/gfx/nvn"}', '-O1', '-I../gfx/nvn/include', '-c', j['file']])
+                self.assertNotIn('#include "nvn_mtl_', Path(j['file']).read_text())
+            else: self.assertEqual(j, e)
+
+
 class CompileDatabase(unittest.TestCase):
     def test_compile_line(self):
         line = ('clang -O1 -g -Wall -Werror -fsanitize=thread -I../gfx/nvn/include -D DM_X=1 -isysroot /sdk -framework Metal -arch arm64 -c hle_hid.c ../gfx/vk/hle_vk.m '

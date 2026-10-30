@@ -7,6 +7,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
+#include <math.h>
+#include <stdatomic.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
@@ -268,6 +270,7 @@ static void read_layout(module_t *m, const char *dir) {
             if (m->n_ue_cvar == (int)(sizeof m->ue_cvar / sizeof *m->ue_cvar) || strlen(key + 8) >= sizeof m->ue_cvar[0].name) die("%s: too many Unreal console variables, or too long a name: %s", path, key);
             strcpy(m->ue_cvar[m->n_ue_cvar].name, key + 8); m->ue_cvar[m->n_ue_cvar++].off = v;
         }
+        else if (!strcmp(key, "CAMERA_ASPECT")) m->camera_aspect = v == 1;
         else if (!strcmp(key, "BUILD_ID")) sscanf(line, "# %*s %32s", m->build_id);
         else for (int k = 0; k < KEY_N; k++) {
             size_t n = strlen(kn[k]);
@@ -291,9 +294,50 @@ static void read_layout(module_t *m, const char *dir) {
 // (hle_nvn.c fstep_tick)
 uint8_t *dm_fps_state;
 static const char *g_fps_mod;   // the module holding the state page (for the log)
+// Drawable notifications may arrive before preload, and preload precedes launcher
+// environment settings on iOS. Keep the shape independently, but do not enable the
+// hook until dm_fps_state_apply runs immediately before the guest starts.
+static pthread_mutex_t g_aspect_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic(uint8_t *) g_aspect_state;
+static float g_aspect_drawable;
+static int g_aspect_enabled;
+static void aspect_publish_locked(void) {
+    uint8_t *state = atomic_load_explicit(&g_aspect_state, memory_order_relaxed);
+    if (!state) return;
+    float ratio = g_aspect_enabled ? g_aspect_drawable : 0;
+    uint32_t bits; memcpy(&bits, &ratio, sizeof bits);
+    atomic_store_explicit((_Atomic uint32_t *)(void *)(state + 0x40), bits, memory_order_release);
+}
+void dm_game_aspect_drawable(double width, double height) {
+    if (!(width > 0 && height > 0) || !isfinite(width) || !isfinite(height)) return;
+    double ratio = width / height;
+    // An ordinary/narrower display retains the game's original framing and bars.
+    float wide = isfinite(ratio) && ratio > 16.0 / 9.0 && ratio <= 8.0 ? (float)ratio : 0;
+    pthread_mutex_lock(&g_aspect_mu);
+    if (g_aspect_drawable != wide) { g_aspect_drawable = wide; aspect_publish_locked(); }
+    pthread_mutex_unlock(&g_aspect_mu);
+}
+float dm_game_aspect(void) {
+    uint8_t *state = atomic_load_explicit(&g_aspect_state, memory_order_acquire);
+    if (!state) return 0;
+    uint32_t bits = atomic_load_explicit((_Atomic uint32_t *)(void *)(state + 0x44), memory_order_acquire);
+    float ratio; memcpy(&ratio, &bits, sizeof ratio);
+    // Not the desired value: the guest publishes this only after writing the
+    // camera, including 0 after restoring the game's own ratio.
+    return ratio;
+}
 static void install_fps_state(module_t *m) {
-    if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+    if (m->fps_state_off > m->size || m->size - m->fps_state_off < 0x48 ||
+        m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name;
+    if (m->camera_aspect && !strcmp(m->name, "main") &&
+        (!strcmp(m->build_id, "cd57b23fa4bbad65803d9788c01821ee") ||
+         !strcmp(m->build_id, "277178b7dba1b6d4949a84778d4abc58"))) {
+        pthread_mutex_lock(&g_aspect_mu);
+        atomic_store_explicit(&g_aspect_state, dm_fps_state, memory_order_release);
+        aspect_publish_locked();
+        pthread_mutex_unlock(&g_aspect_mu);
+    }
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
@@ -342,6 +386,11 @@ void dm_fps_state_apply(void) {
             LOG("%s: screen shape %.3f: output 1920x%u, layout 1280x%u (DM_SCREEN_ASPECT; only builds with screen-shape stubs follow it)", g_fps_mod, a, oh, lh);
         }
     }
+    pthread_mutex_lock(&g_aspect_mu);
+    const char *wide = getenv("DM_WIDESCREEN");
+    g_aspect_enabled = !(wide && !strcmp(wide, "0"));
+    aspect_publish_locked();
+    pthread_mutex_unlock(&g_aspect_mu);
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
     LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
 }

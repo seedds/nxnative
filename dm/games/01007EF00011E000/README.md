@@ -83,6 +83,13 @@ Used at `DM_FPS_TARGET=0` and for the interval the framework keeps while the VFR
 - It finalizes its transient render targets before every submit and builds them again the next frame, which the storage-takeover rule guards with a 16-submission window (`alias_take_over`).
 - Windowed on the Mac with `present_now`'s residency commit: its title, 60 fps, no GPU error.
 
+### Widescreen
+
+- BOTW 1.9.0 main build `cd57b23fa4bbad65803d9788c01821ee` has a `CAMERA_ASPECT` capability. Its camera update rewrites the layer rectangle's aspect every frame at `main+0x10edae0..0x10edb10`; the rewriter asserts all 13 original words and redirects that block to a stub. State `+0x40` is the desired float ratio (zero keeps the original calculation), and `+0x44` acknowledges it only after writing projection `x19+0xc0`. The original dirty, near/far and rectangle operations are preserved. The camera singleton is at `[main+0x1e39d10]`, projection at singleton `+0x38`, vtable `main+0x1d05380`, aspect `+0xb0`.
+- A wider-than-16:9 drawable enables the override by default; `DM_WIDESCREEN=0` before launch disables it. Unsupported builds and narrower screens retain the game's framing. The wider camera renders into the existing 16:9 guest targets; the acknowledged ratio drives presentation, and layout quads receive centered inverse compensation. [Anamorphic presentation and UI handling](../../../docs/reference/rendering.md#anamorphic-widescreen-with-a-game-camera-override) describes the shared mechanism and limits.
+- Adapted from [MacNativeGames' BOTW camera writer](https://github.com/ly05010419/MacNativeGames/blob/main/games/totk/runtime/game_patches_botw.c) and Metal UI handling, under its MIT license; notices remain in `patches.py` and `nvn_aspect.h`.
+- Verification: emitted ARM64 instructions and host state lifecycle pass; the Mac host and unsigned iOS workspace build. Internal-drive outdoor gameplay at 16:9 and a wider drawable shows additional world with unchanged character/HUD proportions; inventory keeps its centered layout over the full-width blurred scene, and the map deliberately retains 16:9 bars. Secondary cameras, exhaustive world-marker/culling coverage and iPhone/iPad gameplay remain unverified.
+
 ### Upscaling (current)
 
 Handheld, the game draws 1280x720 into its 1920x1080 window textures and crops the window to it. Docked it scales its 900p scene to 1080p with one draw and draws the HUD on the 1080p target. The optional [MetalFX present](../../../docs/reference/rendering.md#the-present-upscales-through-metalfx) scales that presented picture in either mode; it cannot recover detail lost in the game's own upscale.

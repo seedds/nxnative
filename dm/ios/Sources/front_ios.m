@@ -55,6 +55,7 @@ static UILabel *front_ios_fps_label(void);
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    dm_game_aspect_drawable(l.drawableSize.width, l.drawableSize.height);
 }
 @end
 static void tv_attach(void);

@@ -83,6 +83,14 @@ HOST_BINDING = [
     ('k_nier_dr', '', '', {'what': "NieR's frame interval and dynamic-resolution floor at fixed addresses", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'checked': "both releases' mains, where these rows were found",
      'why': "the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses"}),
+    ('', '', 'cd57b23fa4bbad65803d9788c01821ee', {'what': 'BOTW rewritten frame-state capability gates', 'now': 'build', 'goal': 'host', 'purpose': 'runtime',
+     'why': 'the state protocol can ultimately be described by rewriter capability metadata rather than a game-specific host whitelist',
+     'kept': 'only the reviewed build is allowed to publish camera state; additional capabilities require separate validation',
+     'checked': 'loader capability, build, state bounds and lifecycle tests; original camera words and outdoor Mac gameplay'}),
+    ('', '', '277178b7dba1b6d4949a84778d4abc58', {'what': 'TOTK rewritten frame-state capability gate', 'now': 'build', 'goal': 'host', 'purpose': 'runtime',
+     'why': 'the state protocol can ultimately be described by rewriter capability metadata rather than a game-specific host whitelist',
+     'kept': 'only the reviewed build is allowed to publish camera state',
+     'checked': 'loader capability, build, state bounds and lifecycle tests; original projection words and opening-cave Mac gameplay'}),
 ]
 # Translator rules keyed by one shader's code hash: (the start of the rule's comment, entry)
 SHADER_BINDING = [

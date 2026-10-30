@@ -559,6 +559,16 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [The Legend of Zelda: Breath of the Wild — upscaling and measurements](../../dm/games/01007EF00011E000/README.md#upscaling-current).
 - **Limit:** the scaler takes the presented frame, including any filtering and HUD drawing the game already performed. Feeding it an earlier scene target would mean replacing a draw of the game's own, and nothing general identifies which draw is a plain upscale. Scaler support is checked at runtime; unsupported devices, sizes and formats use standard scaling.
 
+### Anamorphic widescreen with a game camera override
+
+- **Symptom:** a 16:9 game has side bars on a wider phone or Mac window; filling the drawable alone stretches its geometry.
+- **Cause:** display dimensions do not change the game's camera projection. The source texture's width/height also does not describe its intended display aspect once the game renders a wider camera into that same texture.
+- **Fix:** a verified, build-gated game patch publishes the drawable ratio to the camera and acknowledges it after the camera write. `dm_game_aspect()` exposes only that effective ratio; `present_viewport` uses it for standard, MetalFX and capture presentation, while preserving source crop validation. Without an acknowledged override the original aspect-fit remains. The iOS Metal view covers the root view; virtual controls keep their safe-area layout.
+- **UI:** layout quads on BOTW's final RGB10A2 canvas use an inverse, centered viewport/scissor transform. TOTK uses a floating-point final canvas and a verified layout-vertex-shader allowlist to avoid squeezing inventory scene quads. Fullscreen triangles and GPU-rendered scene pictures keep the full width. Canvas dimensions are learned at the swapchain pass so fresh transient canvas serials can be recognized. This is game-specific composition knowledge, not a universal projection-matrix heuristic.
+- **Found on:** [Breath of the Wild — widescreen](../../dm/games/01007EF00011E000/README.md#widescreen) and [Tears of the Kingdom — widescreen camera](../../dm/games/0100F2C0115B6000/README.md#widescreen-camera).
+- **Check:** eight ARM64 camera tests, loader lifecycle/build gates for both games, 44 presentation/UI classification checks, and the existing 88 GPU crop/capture/MetalFX checks. BOTW has outdoor Mac wide/16:9 comparison evidence; TOTK has opening-cave Mac gameplay checks. iPhone/iPad gameplay remains unverified; implementation tests do not substitute for gameplay validation.
+- **Limits:** existing guest render-target sizes are retained, so wider views have lower horizontal sample density. Secondary cameras, world markers, maps and cinematic layouts need their own validation; this does not promise edge-to-edge reauthoring of every game screen. `DM_WIDESCREEN=0` restores the original camera framing on the next launch.
+
 ### The NVN present crops by the vi layer crop
 
 - **Symptom:** in handheld mode the picture fills only two thirds of the screen's width and height, in the bottom-left corner (the top-left with the upper-left origin), the rest black.

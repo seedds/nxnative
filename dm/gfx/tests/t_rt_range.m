@@ -42,10 +42,11 @@ int main(int argc,char **argv){@autoreleasepool{enabled=1;for(int i=1;i<argc;i++
  uint8_t yellow[4]={255,255,0,0},green[4]={0,255,0,0}; // alpha is given 0 by the second draw's ONE/ ZERO; integer closed-form RGB yellow.
  for(int m=0;m<2;m++){unsigned bc=0,bd=0,bs=0;for(int i=0;i<64;i++){bc+=memcmp((uint8_t *)buffers[m][0].contents+4*i,small_depth && (i%8>=4||i/8>=4)?green:yellow,4)!=0;bd+=((float *)buffers[m][1].contents)[i]!=.75f;bs+=((uint8_t *)buffers[m][2].contents)[i]!=0x2d;}E("each 64 texels hand-computed yellow",0,bc);E("depth .75 seed kept",0,bd);E("stencil 0x2d seed kept",0,bs);E("samples after Reset, 120 indices / 40 triangles",2560,q[m][0]);}
  E("three planes original vs candidate byte for byte",0,memcmp(buffers[0][0].contents,buffers[1][0].contents,256)||memcmp(buffers[0][1].contents,buffers[1][1].contents,256)||memcmp(buffers[0][2].contents,buffers[1][2].contents,64));
- E("original guard: two passes",2,passes[0]);E("candidate one pass / default two passes",enabled&&!small_depth&&!sample_attachment?1:2,passes[1]);{ // DontCare (not stored if this pass did not write it): both passes' depth state enables only test, not write, so each pass saves one depth-stencil store = 8×8×5 bytes (Depth32F_S8 attachment model, 5 B/pixel)
+ E("original guard: two passes",2,passes[0]);E("candidate one pass / default two passes",enabled&&!small_depth&&!sample_attachment?1:2,passes[1]);{ // Combined storage retains both physical planes even with stencil disabled (#702): each full pass loads and stores 256 colour + 320 depth-stencil bytes = 1152, two = 2304.
+   // Small depth: (256 + 80) * 2 for the first pass, 256 * 2 for the second colour-only pass = 1184. A read-only full pass still saves its 320-byte depth-stencil store.
    const char *u=getenv("DM_NVN_UNWRITTEN_DC"); int udc=!(u&&!strcmp(u,"0")); unsigned dsb=udc&&!small_depth&&!sample_attachment?8*8*5:0;
-   E(udc?"original attachment model 2048−2×320 (DontCare)":"original attachment model 2048",(small_depth?1152:2048)-2*dsb,bytes[0]);
-   E(udc?"candidate attachment model 1024−320 (DontCare)":"candidate attachment model 1024 / default 2048",(small_depth?1152:enabled&&!sample_attachment?1024:2048)-(enabled&&!sample_attachment?1:2)*dsb,bytes[1]); }
+   E("original paired attachment traffic",(small_depth?1184:2304)-2*dsb,bytes[0]);
+   E("candidate paired attachment traffic",(small_depth?1184:enabled&&!sample_attachment?1152:2304)-(enabled&&!sample_attachment?1:2)*dsb,bytes[1]); }
  const char *dir=getenv("DM_GFX_FIXTURE_OUT");if(dir){char p[1024];for(int m=0;m<2;m++)for(int j=0;j<3;j++){snprintf(p,sizeof p,"%s/%s_%s.raw",dir,m?"candidate":"reference",j==0?"color":j==1?"depth":"stencil");FILE *f=fopen(p,"wb");if(!f||fwrite(buffers[m][j].contents,1,j==2?64:256,f)!=(j==2?64:256))abort();fclose(f);}}
  mtl_pool_del(ix);free(ix);printf("RT_RANGE_GPU cases=%d failed=%d\n",cases,bad);return bad!=0;
 }}

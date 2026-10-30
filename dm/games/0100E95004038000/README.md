@@ -42,6 +42,16 @@ three geometry shaders. DLC gameplay remains unvalidated.
 
 ## Rendering
 
+**Current, iPadOS pipeline validation ([#702](https://github.com/seedds/nxnative/issues/702)):**
+the reported opening-sequence abort is an invalid `Invalid / Depth32Float_Stencil8`
+pipeline, not a confirmed memory kill. The general renderer correction keeps
+[combined depth-stencil formats paired](../../../docs/reference/rendering.md#combined-depth-stencil-formats-stay-paired-in-passes-and-pipeline-keys)
+in physical attachments and live, predicted and historical pipeline keys while
+preserving the unused plane. The log uses the legacy pipeline compiler with
+TBDR off; its exact live pass remains unrecorded. Synthetic Metal tests validate
+the correction on the Mac. This is **awaiting on-device validation** for both
+playing and skipping the opening cutscene; no iPad gameplay result is claimed.
+
 **Resolved, hard-edged dark boxes in the indirect lighting (GitHub issue #643):**
 indoors and under decks a world-space box was much darker than the scene,
 darker with the time of day (Goldmouth Return Port), and elsewhere a lighter
@@ -229,6 +239,7 @@ that diagnostic launch did not yet have a shader map configured.
 
 ## Found on this game
 
+- [Combined depth-stencil formats stay paired in passes and pipeline keys](../../../docs/reference/rendering.md#combined-depth-stencil-formats-stay-paired-in-passes-and-pipeline-keys): the iPadOS validation abort; on-device replay remains open.
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers).
 - [Queue initialization captures the raster origin](../../../docs/reference/rendering.md#queue-initialization-captures-the-raster-origin).
 - [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own): the light probe lists; see [Rendering](#rendering).

@@ -1484,7 +1484,9 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     }
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
 }
+static void vbscan_later(int site);   // DM_NVN_VBSCAN (see its definition): re-read a probed vertex stream at the end of a submission / at a present
 uint64_t mtl_sub_commit(void) {
+    vbscan_later(0);   // DM_NVN_VBSCAN: the bytes as they stand at the end of the submission, before Metal gets the buffer
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
     rp_flush(); ubd_land();
@@ -1529,6 +1531,7 @@ uint64_t mtl_sub_commit(void) {
     g_cb = nil;
     g_commit_blocks = nil;
     objc_autoreleasePoolPop(g_sub_pool); g_sub_pool = NULL;
+    vbscan_later(2);   // DM_NVN_VBSCAN: the next submission's end, for a probe the earlier moments did not answer
     return fence;
 }
 
@@ -9517,6 +9520,124 @@ static void ds_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     MLOG("%s", ln);
     ds_vertdump((long)f, pass, dsidx, dw, di);
 }
+// DM_NVN_VBSCAN=<from>-<to>: settle *where* a draw's real vertex data is, when the bytes at the bound address are not
+// it. The title's glyph draws are the case: 168 vertices, stride 28, from a 3-slot ring that advances 8 MB per frame,
+// and on the first frame of a new screen the slot the draw binds still holds the data three frames old. Two causes
+// read the same at the draw: the guest wrote the vertices at another address (a host address bug to find) or had not
+// written them yet at submission (the host must copy, not bind live guest memory). This tells them apart without
+// changing a draw: for every stride-28 stream of 32 or more vertices on the chosen guest frames it compares the bound
+// bytes with the clean frame's first glyph vertex (vd-ds10/F1293_p1586_d1_s0.bin, 28 bytes), and when they differ it
+// searches the 48 MB around the bound address (the three ring slots) for that vertex, hashing 4704 bytes at every hit
+// (the glyph stream's size, so a hash can be compared with the clean dump's), then reads the same addresses again at
+// the end of the submission and at the next present: a vertex found elsewhere at the draw was written to another
+// address; one that appears only later was written after the submission.
+static const uint8_t vb_pat[28] = {
+    0xfe, 0xd4, 0x78, 0xbe, 0xf4, 0xfd, 0xd4, 0xbc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08,
+    0x70, 0x70, 0x70, 0x04, 0x00, 0x60, 0x6f, 0x3f, 0x00, 0xc0, 0x1c, 0x3f };
+enum { VB_RING = 0x1800000, VB_STREAM = 4704, VB_PROBES = 12, VB_CHUNK = 1 << 20 };
+static int vbscan_on(void) {
+    static long r[8][2]; static int nr = -1;
+    if (nr < 0) { nr = 0; const char *e = getenv("DM_NVN_VBSCAN");
+        if (e && *e) { char buf[256]; snprintf(buf, sizeof buf, "%s", e);
+            for (char *p = buf; p && *p && nr < 8; ) { char *c = strchr(p, ','); if (c) *c = 0;
+                long a = strtol(p, NULL, 0), b = a; const char *d = strchr(p, '-'); if (d) b = strtol(d + 1, NULL, 0);
+                r[nr][0] = a; r[nr][1] = b; nr++; p = c ? c + 1 : NULL; }
+            for (int i = 0; i < nr; i++) MLOG("DM_NVN_VBSCAN: the glyph streams of guest frames %ld-%ld are searched for their own vertices", r[i][0], r[i][1]); } }
+    long f = (long)atomic_load(&g_cur_frame);
+    for (int i = 0; i < nr; i++) if (f >= r[i][0] && f <= r[i][1]) return 1;
+    return 0;
+}
+static int vb_read(uint64_t addr, uint64_t len, void *dst) {   // the bytes of a guest address as the GPU's own buffer holds them (0: in no pool)
+    void *mb; uint64_t mo; if (!mtl_addr(addr, len, &mb, &mo)) return 0;
+    const uint8_t *c = [(__bridge id<MTLBuffer>)mb contents]; if (!c) return 0;
+    memcpy(dst, c + mo, (size_t)len); return 1;
+}
+static uint64_t vb_fnv(const void *p, size_t n) {   // FNV-1a 64: compares a 4704-byte block with the clean frame's dump
+    const uint8_t *b = p; uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001b3ull; }
+    return h;
+}
+static uint64_t vb_hash_at(uint64_t addr, uint64_t len) {   // hash of len bytes at addr (the block's own length, printed with it), 0 when unmapped
+    uint8_t blk[VB_STREAM]; if (len > sizeof blk) len = sizeof blk;
+    if (!vb_read(addr, len, blk)) return 0;
+    return vb_fnv(blk, (size_t)len);
+}
+typedef struct { uint64_t addr, len, frame, dist; int checks; } vb_probe;
+static vb_probe g_vbp[VB_PROBES]; static int g_nvbp;
+static int vb_ring(uint64_t vb0, int64_t *dist, int max, int *skipped) {   // occurrences of vb_pat in the three ring slots around vb0
+    uint64_t lo = vb0 > VB_RING ? vb0 - VB_RING : 0, hi = vb0 + VB_RING;
+    int n = 0; *skipped = 0;
+    for (uint64_t a = lo; a < hi; a += VB_CHUNK) {
+        uint64_t l = hi - a < VB_CHUNK ? hi - a : VB_CHUNK;
+        void *mb; uint64_t mo;
+        if (!mtl_addr(a, l + (hi - a > l ? sizeof vb_pat : 0), &mb, &mo)) { (*skipped)++; continue; }   // a chunk straddling a pool end: the next chunk re-reads the tail
+        const uint8_t *c = [(__bridge id<MTLBuffer>)mb contents]; if (!c) { (*skipped)++; continue; }
+        const uint8_t *p = c + mo, *q = p, *end = p + l;
+        while (q && q + sizeof vb_pat <= end) {
+            q = memmem(q, (size_t)(end - q), vb_pat, sizeof vb_pat);
+            if (!q) break;
+            if (n < max) dist[n] = (int64_t)(a + (uint64_t)(q - p)) - (int64_t)vb0;
+            n++; q += 1;
+        }
+    }
+    return n;
+}
+static uint64_t g_vb_last;   // the last glyph draw's stream address (its 8 MB ring slot's base is this rounded down)
+static const uint8_t vb_quad[16] = { 0x00, 0x00, 0x00, 0xbf, 0x00, 0x00, 0x00, 0xbf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe };
+static char vb_class(uint64_t addr) {   // Q: the frame's full-screen quad sits here, G: a glyph run, Z: zeros, ?: in no pool
+    uint8_t h[16]; if (!vb_read(addr, sizeof h, h)) return '?';
+    if (!memcmp(h, vb_quad, sizeof h)) return 'Q';
+    static const uint8_t z[16] = {0};
+    return !memcmp(h, z, sizeof h) ? 'Z' : 'G';
+}
+static void vbscan_draw(const p_draw *dw) {
+    if (!dw || !vbscan_on()) return;
+    if (S.stream[0].stride != 28 || dw->count < 32 || !S.vbuf[0].address) return;   // the glyph draws (a 4-vertex quad is not one)
+    uint64_t vb0 = S.vbuf[0].address, len = (uint64_t)dw->count * 28;
+    g_vb_last = vb0;
+    if (len > (1u << 20)) return;
+    uint8_t head[16]; if (!vb_read(vb0, sizeof head, head)) return;   // in no pool: bind_vbufs would have kept the previous buffer
+    int ok = !memcmp(head, vb_pat, sizeof head);
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (ok) { static int once; if (!once++) MLOG("VB F%llu vb0=%#llx count=%d len=%llu sig=ok (the clean case: the bound bytes are the glyph stream)", (unsigned long long)f, (unsigned long long)vb0, dw->count, (unsigned long long)len); return; }
+    int64_t dist[3] = {0}; int skipped = 0, nh = vb_ring(vb0, dist, 3, &skipped);
+    MLOG("VB F%llu p%llu vb0=%#llx count=%d len=%llu sig=BAD w0=%08x,%08x,%08x,%08x h=%016llx ring=%d%s",
+         (unsigned long long)f, (unsigned long long)(g_stat_pass + !g_enc), (unsigned long long)vb0, dw->count, (unsigned long long)len,
+         *(const uint32_t *)(head + 0), *(const uint32_t *)(head + 4), *(const uint32_t *)(head + 8), *(const uint32_t *)(head + 12),
+         (unsigned long long)vb_hash_at(vb0, len), nh, skipped ? " (some ring chunks are in no pool)" : "");
+    for (int i = 0; i < 3; i++) {
+        if (i >= nh) break;
+        uint64_t ha = (uint64_t)((int64_t)vb0 + dist[i]);
+        MLOG("VB F%llu   hit%d dist=%+lld h=%016llx", (unsigned long long)f, i + 1, (long long)dist[i], (unsigned long long)vb_hash_at(ha, len));
+            // keep the ring hits for the later reads: a vertex at another address *now* is a write that went elsewhere
+        if (g_nvbp < VB_PROBES) { g_vbp[g_nvbp++] = (vb_probe){ha, len, f, (uint64_t)dist[i], 0}; }
+    }
+    if (g_nvbp < VB_PROBES) g_vbp[g_nvbp++] = (vb_probe){vb0, len, f, 0, 0};
+}
+static void vbscan_later(int site) {   // site 0: end of the submission, 1: a present, 2: the next submission's end
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (site == 1 && vbscan_on() && g_vb_last) {   // at a present: which of the ring's slots holds a build, and at which of the frame's three stream offsets
+        uint64_t a0 = g_vb_last;   // the drawn stream's own slot; the ring's other slots are one stride either side
+        MLOG("VB @ring F%llu base=%#llx slot-1 %c%c%c slot0 %c%c%c slot+1 %c%c%c slot+2 %c%c%c (0 / 4704 / 9408: glyph run 1, run 2, the full-screen quad)",
+             (unsigned long long)f, (unsigned long long)a0,
+             vb_class(a0 - 0x800000), vb_class(a0 - 0x800000 + VB_STREAM), vb_class(a0 - 0x800000 + 2 * VB_STREAM),
+             vb_class(a0), vb_class(a0 + VB_STREAM), vb_class(a0 + 2 * VB_STREAM),
+             vb_class(a0 + 0x800000), vb_class(a0 + 0x800000 + VB_STREAM), vb_class(a0 + 0x800000 + 2 * VB_STREAM),
+             vb_class(a0 + 0x1000000), vb_class(a0 + 0x1000000 + VB_STREAM), vb_class(a0 + 0x1000000 + 2 * VB_STREAM));
+    }
+    if (!g_nvbp) return;
+    for (int i = 0; i < g_nvbp; i++) { vb_probe *p = &g_vbp[i];
+        if (p->checks >= 3) continue;
+        if (site == 0 && p->checks > 0) continue;   // one read per moment, in order: sub-end, present, next sub-end
+        if (site == 1 && p->checks != 1) continue;
+        if (site == 2 && p->checks != 2) continue;
+        uint64_t h = vb_hash_at(p->addr, p->len);
+        MLOG("VB @%s F%llu probe=%#llx dist=%+lld (seen at F%llu) h=%016llx%s", site == 0 ? "sub-end" : site == 1 ? "present" : "next-sub-end",
+             (unsigned long long)f, (unsigned long long)p->addr, (long long)p->dist, (unsigned long long)p->frame,
+             (unsigned long long)h, h ? "" : " (unmapped)");
+        p->checks++;
+    }
+}
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); draw_(dw, di); cp_end(5, start); }
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
@@ -9544,6 +9665,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     image_prepare(pr, 0x1f);
     ag_draw(pr, dw, di);   // DM_NVN_ATLASGUARD: measure this draw's atlas coordinates (reads only; no draw is changed, skipped or clamped)
     ds_draw(pr, dw, di);   // DM_NVN_DRAWSTATE: the per-draw state of a chosen frame range (reads only)
+    vbscan_draw(dw);   // DM_NVN_VBSCAN: where a glyph draw's own vertices are, when the bound bytes are not them (reads only)
     draw_gs_check(pr);   // a geometry stage left with no function (see prog_fold_gs)
     if (!g_geo_program && S.rast_discard && S.tf_on) { tf_draw(pr, dw, di); return; }
     // Feedback captures rasterized draws too (Donkey Kong Country: Tropical Freeze's fur).
@@ -11886,6 +12008,7 @@ static uint64_t snap_take(const tex_t *t) {
 }
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val) {
     atomic_store(&dm_present_ns, now_ns());
+    vbscan_later(1);   // DM_NVN_VBSCAN: the probed vertex streams as they stand at this present
     if (g_classic || atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait (g_classic: no Metal 4 queue to present on)
     if (t) { xv_check(t->serial, 0, 0, "present"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial; }
     // A texture whose content comes from its storage is uploaded when it is first resolved (and again when its pages change), in an upload batch only the submit thread may open.

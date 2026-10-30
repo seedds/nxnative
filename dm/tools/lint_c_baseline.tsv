@@ -29,7 +29,7 @@ dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	12
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.uninitialized.Assign	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullableDereferenced	5
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullablePassedToNonnull	15
-dm/gfx/nvn/nvn_mtl.m	clang-analyzer-osx.cocoa.RetainCount	3
+dm/gfx/nvn/nvn_mtl.m	clang-analyzer-osx.cocoa.RetainCount	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-security.ArrayBound	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-unix.cstring.NullArg	4
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-unix.cstring.UninitializedRead	3

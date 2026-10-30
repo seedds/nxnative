@@ -47,20 +47,20 @@ int main(void) {
     CHECK(!nvn_aspect_ui_draw(0, 6, 0), "world quad outside canvas stays untouched");
     CHECK(!nvn_aspect_ui_draw(1, 3, 0), "scene upscale fullscreen triangle stays untouched");
     CHECK(!nvn_aspect_ui_draw(1, 6, 1), "blurred rendered scene picture stays untouched");
-    CHECK(nvn_aspect_ui_shader(0, NULL), "BOTW packed-canvas classifier remains shader-independent");
-    static const char *const totk_ui[] = {
-        "7f2113e2d2db603f", "e9fd7b433dd1fe6c", "a662e313830baa26", "16684efcf1fa7d8d",
-        "3e11cee56c2686bb", "48c18ae6", "35cbc686dd8461b8", "4872bec9a5567f8b",
-        "9f47ed9055b2205a", "1a40e5f5ff257e13", "2117f58b153eef2c", "8d4e36d08baf8e73", "1469983f337e6bb2"
-    };
-    for (unsigned i = 0; i < sizeof totk_ui / sizeof *totk_ui; i++)
-        CHECK(nvn_aspect_ui_shader(1, totk_ui[i]), "TOTK layout shader is compensated on the float canvas");
-    CHECK(nvn_aspect_ui_shader(1, "7f2113e2d2db603f_b"), "translated shader variant keeps layout identity");
-    CHECK(!nvn_aspect_ui_shader(1, NULL), "float canvas with no vertex shader stays untouched");
-    CHECK(!nvn_aspect_ui_shader(1, "7d591779"), "inventory opaque scene quad stays untouched");
-    CHECK(!nvn_aspect_ui_shader(1, "0ac9a549"), "scene compose stays untouched after UI has started");
-    CHECK(!nvn_aspect_ui_shader(1, "7f2113e"), "partial shader prefix is not a layout identity");
-    CHECK(!(nvn_aspect_ui_draw(1, 6, 1) && nvn_aspect_ui_shader(1, totk_ui[0])), "TOTK layout sampling a rendered scene keeps full width");
+    CHECK(nvn_aspect_ui_shader(0, 0), "packed-canvas classifier remains shader-independent");
+    static const char prefixes[][9] = {"1234abcd", "fedcba98"};
+    CHECK(nvn_aspect_ui_prefix("1234abcd", prefixes, 2), "exact eight-character identity matches");
+    CHECK(nvn_aspect_ui_prefix("fedcba9876543210_b", prefixes, 2), "last table entry and translated variant match");
+    CHECK(nvn_aspect_ui_prefix("1234abcd00000000_other", prefixes, 2), "trailing key bits and route suffix do not restrict prefix matching");
+    CHECK(!nvn_aspect_ui_prefix(NULL, prefixes, 2), "missing shader does not match");
+    CHECK(!nvn_aspect_ui_prefix("", prefixes, 2), "empty shader does not match");
+    CHECK(!nvn_aspect_ui_prefix("1234abc", prefixes, 2), "seven-character partial identity does not match");
+    CHECK(!nvn_aspect_ui_prefix("1234abce00000000_b", prefixes, 2), "eighth-character mismatch does not match");
+    CHECK(!nvn_aspect_ui_prefix("01234abcd", prefixes, 2), "identity must start at the first character");
+    CHECK(!nvn_aspect_ui_prefix("1234abcd", NULL, 0), "empty profile never widens float-canvas classification");
+    CHECK(nvn_aspect_ui_shader(1, 1), "cached layout identity permits float-canvas compensation");
+    CHECK(!nvn_aspect_ui_shader(1, 0), "unclassified float-canvas draw stays untouched");
+    CHECK(!(nvn_aspect_ui_draw(1, 6, 1) && nvn_aspect_ui_shader(1, 1)), "even a classified layout sampling a rendered scene keeps full width");
     printf("aspect: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

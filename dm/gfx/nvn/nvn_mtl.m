@@ -34,6 +34,7 @@
 #include "nvn_aspect.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
+static const char g_aspect_ui_prefixes[][9] = DM_GAME_ASPECT_UI_PREFIXES;
 // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
 #define NTEX 256
 // The NVN driver's constant segments c0 and c2 (byte offsets, slot counts) and the binding kinds of the shader reflection have one definition, which the shader build reads too (dmsh_build.py through dmsh_abi.py)
@@ -3924,6 +3925,7 @@ static void shmap_read(void) {
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)
     uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    int aspect_ui_layout;   // immutable profile classification, set once with key in shader_load
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     id<MTLComputePipelineState> geo_pso; int geo_pso_failed, cps_failed;   // cps_failed: Metal refused this compute shader's pipeline (dispatch): its dispatches are skipped without asking again
     int16_t *geo_slot; uint32_t geo_words;   // a lean passthrough kernel (dmsh_geometry.lean): capture word -> record slot (-1: not read), record words
@@ -4175,6 +4177,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
             o->geo_words = (uint32_t)reads.count;
         } }
     o->fn = fn4_note([lib newFunctionWithName:entry], lib, entry, nil); o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key); o->ventry = entry;
+    if (stage == 0) o->aspect_ui_layout = nvn_aspect_ui_prefix(o->key, g_aspect_ui_prefixes, DM_GAME_ASPECT_UI_PREFIX_COUNT);
     // writes the layer (render_target_array_index, named in the library's metadata): its passes are layered and its pipelines get an input class (pso_desc). A library with layer entry points
     // names it for those alone: its main0 / main0_z write no layer
     if (stage == 0) o->layer_out = layer || (t_lib_layer && !j[@"entry_layer"]);
@@ -10447,7 +10450,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         }
         os_unfair_lock_unlock(&g_rmu);
         if (nvn_aspect_ui_draw(1, dw ? dw->count : di ? di->count : 0, scene_picture) &&
-            nvn_aspect_ui_shader(pf_is_float(g_pass.cfmt[0]), pr->sh[0] ? pr->sh[0]->key : NULL))
+            nvn_aspect_ui_shader(pf_is_float(g_pass.cfmt[0]), pr->sh[0] && pr->sh[0]->aspect_ui_layout))
             nvn_aspect_ui_scale(effective_aspect, &aspect_x, &aspect_y);
     }
     { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};

@@ -41,6 +41,11 @@ app_pool	0xCD500000
 tex_flush_upload	on
 render_cond	on
 tex_dirty_upload	on
+# Float-canvas layout vertex shader prefixes, adapted from MacNativeGames nvn_mtl.m.
+# Copyright (c) 2026 MacNativeGames contributors, MIT license.
+# https://github.com/ly05010419/MacNativeGames (full permission/warranty notice: dm/gfx/nvn/nvn_aspect.h).
+# Eight-character identity intentionally includes translation variants; inventory scene shaders are not layouts.
+aspect_ui_prefixes	7f2113e2 e9fd7b43 a662e313 16684efc 3e11cee5 48c18ae6 35cbc686 4872bec9 9f47ed90 1a40e5f5 2117f58b 8d4e36d0 1469983f
 # 60 fps (30 on the Switch): the host decides each frame's step in whole vsyncs and holds the frame that long (rewriter stubs at FPSLocker's sites, patches.py FRAME_STEP);
 # 30 when 60 does not hold, game time = real time. DM_FPS_TARGET=30 (Documents/env.txt on the iPhone) saves power, 0 = the game's own step. Until the host has decided a step
 # (the first frames) the stub steps by the measured frame time

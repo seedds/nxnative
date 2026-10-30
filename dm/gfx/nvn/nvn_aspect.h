@@ -23,27 +23,25 @@
 
 typedef struct { double x, y, w, h; } nvn_aspect_rect;
 
-/* The final 16:9 canvas is packed RGB10A2 in BOTW, floating-point in TOTK.
- * The caller supplies the Metal format classification; no title-ID switch. */
+/* The caller supplies the final canvas's Metal format classification. */
 static inline int nvn_aspect_canvas_candidate(double w, double h, unsigned level, int depth, int format_ok) {
     return format_ok && w >= 640 && h > 0 && fabs(w / h * 9 / 16 - 1) < 0.01 && level == 0 && !depth;
 }
 
-/* TOTK composes inventory scene quads into its float canvas after UI draws.
- * Only its layout shaders may be squeezed; the packed BOTW canvas retains its
- * existing six-index rule. Shader identities from MacNativeGames nvn_mtl.m
- * (MIT notice above); suffixes identify translation variants of the same code. */
-static inline int nvn_aspect_ui_shader(int float_canvas, const char *vertex) {
-    if (!float_canvas) return 1;
+/* Classify immutable shader identity once at setup. Eight-character prefixes
+ * intentionally accept translation variants and different trailing key bits.
+ * An empty profile never classifies a shader as a float-canvas layout. */
+static inline int nvn_aspect_ui_prefix(const char *vertex, const char prefixes[][9], unsigned count) {
     if (!vertex) return 0;
-    static const char *const ui[] = {
-        "7f2113e2", "e9fd7b43", "a662e313", "16684efc", "3e11cee5",
-        "48c18ae6", "35cbc686", "4872bec9", "9f47ed90", "1a40e5f5",
-        "2117f58b", "8d4e36d0", "1469983f"
-    };
-    for (unsigned i = 0; i < sizeof ui / sizeof *ui; i++)
-        if (!strncmp(vertex, ui[i], 8)) return 1;
+    for (unsigned i = 0; i < count; i++)
+        if (!strncmp(vertex, prefixes[i], 8)) return 1;
     return 0;
+}
+
+/* Packed canvases keep their shader-independent rule; floating-point canvases
+ * require the profile's cached layout classification. */
+static inline int nvn_aspect_ui_shader(int float_canvas, int layout_shader) {
+    return !float_canvas || layout_shader;
 }
 
 /* Zero effective aspect preserves the game's valid source rectangle's aspect. */
@@ -69,7 +67,7 @@ static inline nvn_aspect_rect nvn_aspect_ui_rect(nvn_aspect_rect r, double tw, d
     return (nvn_aspect_rect){tw / 2 + (r.x - tw / 2) * x, th / 2 + (r.y - th / 2) * y, r.w * x, r.h * y};
 }
 
-/* BOTW canvas quads are layouts, except GPU-rendered scene pictures. Scene
+/* Canvas quads are layouts, except GPU-rendered scene pictures. Scene
  * upscale/fullscreen triangles (3 vertices) and world geometry stay untouched. */
 static inline int nvn_aspect_ui_draw(int canvas, unsigned count, int scene_picture) {
     return canvas && count == 6 && !scene_picture;

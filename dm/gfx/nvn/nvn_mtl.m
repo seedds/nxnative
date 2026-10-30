@@ -3837,7 +3837,10 @@ static MTL4FunctionDescriptor *fn4_of(id<MTLFunction> f) {
 static int pso4_compiler(void);
 static os_unfair_lock g_fn_dev_lock = OS_UNFAIR_LOCK_INIT;
 static NSMapTable *g_fn_dev;   // a function fn_spec left unspecialized → the same function specialized through its library (NSNull until fn_dev needs it)
-static id<MTLFunction> fn_lib_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **e) { return fn4_note([lib newFunctionWithName:name constantValues:cv error:e], lib, name, cv); }
+static id<MTLFunction> fn_lib_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **e) {
+    if (!lib || !name || !cv) return nil;
+    return fn4_note([lib newFunctionWithName:name constantValues:cv error:e], lib, name, cv);
+}
 static id<MTLFunction> fn_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv, NSError **e) {
     if (!lib || !name) return nil;
     if (!pso4_compiler()) return fn_lib_spec(lib, name, cv, e);
@@ -3857,7 +3860,9 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
     if (!v) return f;
     if (v != NSNull.null) return v;
     MTL4SpecializedFunctionDescriptor *sd = (MTL4SpecializedFunctionDescriptor *)fn4_of(f); MTL4LibraryFunctionDescriptor *ld = (MTL4LibraryFunctionDescriptor *)sd.functionDescriptor;
-    NSError *e = nil; id<MTLFunction> s = fn_lib_spec(ld.library, ld.name, sd.constantValues, &e);
+    id<MTLLibrary> lib = ld.library; NSString *name = ld.name; MTLFunctionConstantValues *cv = sd.constantValues;
+    if (!lib || !name || !cv) return f;   // fn_spec notes all three
+    NSError *e = nil; id<MTLFunction> s = fn_lib_spec(lib, name, cv, &e);
     if (!s) { MLOG("[RED] function %s: specializing its function constants for an MTLDevice pipeline failed: %s", f.name.UTF8String, e.localizedDescription.UTF8String); return f; }
     os_unfair_lock_lock(&g_fn_dev_lock); [g_fn_dev setObject:s forKey:f]; os_unfair_lock_unlock(&g_fn_dev_lock);
     return s;

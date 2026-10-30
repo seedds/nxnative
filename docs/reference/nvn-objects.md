@@ -444,6 +444,14 @@ Games read this count as a position in their own command memory and size their h
 
 ## NVN entry points
 
+### A retired pool remains read-only
+
+- **Symptom:** a host system call writing into storage after its NVN pool was finalized fails with `EFAULT`; a direct write can fault after the tracker stopped owning the page.
+- **Cause:** `nvn_dirty_protect` found a live range without holding the slot mutex. Pool retirement could restore its pages to writable and mark the range dead before protect changed the page state to BUSY. Protect then set the retired storage read-only, with no live descriptor left to release it. The same window allowed the range slot to be reused during protection.
+- **Fix:** hold the pool-slot mutex across protect's lookup, page-state transitions and final `mprotect`. Pool creation and retirement already hold that mutex. The page-fault and host pre-write paths still take no slot mutex, so they can finish a BUSY transition while protect waits.
+- **Found on:** the iOS 16/17 fork's shared dirty tracker, extracted from compatibility commit `587d5206`; the lookup/retirement race is also present on current `main`. This is independent of the Metal renderer and GPU generation; no game's reported picture failure is attributed to it without a reproducing game trace.
+- **Check:** `t_dirty_retire_race` starts retirement between the live-range lookup and the first protection-state update, then writes 16 bytes through `read()`. With the lookup hook but without the fix, retirement completes and the write returns -1. With the fix, retirement completes after protection, unregisters the pool and the write returns 16. Existing `t_dirty_race` and `t_dirty_slots` cover page-state publication and shared/reused pool slots.
+
 ### Integer sampler border colours
 
 - **Symptom:** `[RED] NVN unimplemented function called: nvnSamplerBuilderSetBorderColorui` during renderer initialization.

@@ -96,7 +96,7 @@ int main(void) { @autoreleasepool {
     setenv("DM_NVN_TBDR","0",1); mtl_init();
     color.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D_ARRAY,.format=NVN_FORMAT_RGBA8,.width=8,.height=8,.depth=4,.levels=1,.samples=1};
     MTLTextureDescriptor *td=tex_desc(&color,0); td.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite|MTLTextureUsagePixelFormatView;
-    id<MTLTexture> texture=[g_dev newTextureWithDescriptor:td]; CHECK(texture!=nil,"array texture created"); res_add(texture); mtl_tex_init(&color); serial_put(color.serial,texture); mtl_reg_image(701,&color,NULL);
+    id<MTLTexture> texture=[g_dev newTextureWithDescriptor:td]; CHECK(texture!=nil,"array texture created"); res_add(texture); mtl_tex_init(&color); serial_put(color.serial,texture); mtl_reg_image(701,&color,NULL); // NOLINT(clang-analyzer-osx.cocoa.RetainCount): serial_put transfers a retained reference to g_by_serial; the analyzer does not model its C hash table.
     NSError *error=nil;
     id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint n[[vertex_id]]){return float4(n==1?3.0:-1.0,n==2?3.0:-1.0,0,1);}\n"
@@ -107,7 +107,7 @@ int main(void) { @autoreleasepool {
         "fragment float4 both(float4 p[[position]],constant A&a[[buffer(0)]]){stores(p,a,1);return float4(1,0,0,1);}\n"
         options:nil error:&error];
     CHECK(lib!=nil,"literal image-store shaders compile"); if(!lib){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return 1;}
-    for(unsigned mode=0;mode<3;mode++) {
+    for(unsigned mode=0;mode<3;mode++) { // NOLINT(clang-analyzer-osx.cocoa.RetainCount): the preceding iteration's NvProg is retained by g_by_serial through serial_put.
         NvProg *pr=[NvProg new]; pr->sh[0]=[NvShader new]; pr->sh[0]->fn=[lib newFunctionWithName:@"v"];
         NvShader *fs=[NvShader new]; pr->sh[1]=fs; fs->stage=1; fs->fn=[lib newFunctionWithName:mode==2?@"image_tail":mode?@"both":@"image_only"];
         fs->rf.color_known=1; fs->rf.color_mask=mode==1; fs->rf.nb=1;
@@ -116,6 +116,6 @@ int main(void) { @autoreleasepool {
         serial_put(programs[mode].serial,pr);
     }
     mapping_checks(prog_get(&programs[0]));
-    for(int mode=0;mode<8;mode++) for(int off=0;off<2;off++) run(mode,off);
+    for(int mode=0;mode<8;mode++) for(int off=0;off<2;off++) run(mode,off); // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the fixture programs throughout GPU replay.
     printf("IMAGE_ATTACHMENT_STORE %d checks, %d failed\n",checks,failed); return failed!=0;
 } }

@@ -4513,16 +4513,17 @@ static inline __attribute__((always_inline)) uint64_t tex_fast_rid(int tid, void
     if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].view && g_treg[tid].view_ser == g_ser_gen && (!g_treg[tid].view_pkg || g_treg[tid].view_dirty == nvn_dirty_now())) { if (out) *out = g_treg[tid].view; return g_treg[tid].view_rid; }
     id<MTLTexture> t = tex_by_id(tid); if (out) *out = (__bridge void *)t; return t ? t.gpuResourceID._impl : 0;
 }
-// NVN wrap mode → Metal. NVNwrapMode: 0 clamp, 1 repeat, 2 mirror-clamp, 3 mirror-repeat, 4 clamp-to-border,
-// 5 mirror-clamp-to-border, 6 clamp-OGL, 7 mirror-clamp-OGL, 8 mirror-once-OGL.
-// A value this does not know is NOT repeat: a stray or not-yet-resolved descriptor then tiles the texture
+// NVN wrap mode → Metal, per nvn.h NVNwrapMode: 0 clamp, 1 repeat, 2 mirror-clamp, 3 mirror-clamp-to-edge,
+// 4 mirror-clamp-to-border, 5 clamp-to-border, 6 mirrored-repeat, 7 clamp-to-edge. NVN has no mode 8 and no
+// "OGL" wrap modes; anything outside 0-7 is a stray or not-yet-resolved descriptor.
+// A value this does not know is NOT repeat: such a descriptor then tiles the texture
 // wherever the texture coordinates run past 1, which is how a text draw turns into a wall of glyph cells
 // (the atlas repeats at its cell pitch). Clamp is the conservative reading; NVN's builder default (repeat)
 // arrives here as 1 and still means repeat.
 static MTLSamplerAddressMode wrapm(int w) {
-    switch (w) { case 0: case 6: case 7: return MTLSamplerAddressModeClampToEdge; case 1: return MTLSamplerAddressModeRepeat;
-        case 3: case 2: return MTLSamplerAddressModeMirrorClampToEdge; case 5: case 4: return MTLSamplerAddressModeClampToBorderColor;
-        case 8: return MTLSamplerAddressModeMirrorClampToEdge; case 9: return MTLSamplerAddressModeMirrorRepeat; }
+    switch (w) { case 0: case 7: return MTLSamplerAddressModeClampToEdge; case 1: return MTLSamplerAddressModeRepeat;
+        case 2: case 3: return MTLSamplerAddressModeMirrorClampToEdge; case 4: case 5: return MTLSamplerAddressModeClampToBorderColor;
+        case 6: return MTLSamplerAddressModeMirrorRepeat; }
     static int once; if (!once++) MLOG("[nvn] sampler wrap mode %d is not an NVN wrap mode: clamped to edge (tiling it would repeat the texture across the draw)", w);
     return MTLSamplerAddressModeClampToEdge;
 }

@@ -170,7 +170,7 @@ DM_NVN_UB_LAZY	switch	`=<n>`: the most deferred inline uniform updates kept acro
 DM_NVN_UB_N	diagnostic	`=<frames>`: the length of each phase of the same-process alternating measurement `DM_NVN_UB` (default 180, minimum 60)
 DM_NVN_UB_PARTIAL	switch	`0`: a uniform block the deferred updates cover only in part ends the pass, as before; by default its shadow starts from memory and takes the submission's queued updates (on by default)
 DM_NVN_UDC_AB	diagnostic	`=1` starts with the DontCare store for unwritten attachments off and turns it on after the second screenshot, for an on/off picture comparison in one run
-DM_NVN_UNWRITTEN_DC	switch	`0` turns off storing attachments a render pass did not write as DontCare (on by default; part of the TBDR store lookahead), for equivalence comparisons
+DM_NVN_UNWRITTEN_DC	switch	`0` disables optional stores elided for loaded, unchanged attachments (on by default, independent of TBDR lookahead), for equivalence comparisons; mandatory image-write preservation stays active
 DM_NVN_UPLOAD_REUSE	switch	0 keeps the original one-block upload-slot policy; default retains bounded demand-sized primary and overflow buffers after completion.
 DM_NVN_VBUF_CACHE	switch	`0` turns off the cache of resolved vertex stream addresses and vertex argument table writes across draws (on by default), for A/B runs
 DM_NVN_VCONV_CHECK	diagnostic	`=1` scans the indices again at every reuse of a cached vertex conversion range (`vconv_range`) and reports differences

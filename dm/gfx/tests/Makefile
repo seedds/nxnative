@@ -9,12 +9,16 @@ endif
 GAME_DIR = ../../games/$(GAME)
 GAME_H = ../../host/gen/$(GAME)/game_profile.h
 
-CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H))
+# The host's shaders compiled for the Mac (host_msl_gen.h, made by the host Makefile from dm/gfx/msl; nvn/host_msl.m loads them)
+MSL_H = ../../host/gen/msl-macosx/host_msl_gen.h
+CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H)) -I$(dir $(MSL_H))
 GFX=$(filter-out ../nvn/hle_nvn.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m)))
-GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H)
+GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H) $(MSL_H)
 .DEFAULT_GOAL := t_nvn   # the profile header rule comes first, so keep the default goal as before
 $(GAME_H):
 	$(MAKE) -C ../../host game_profile GAME=$(GAME)
+$(MSL_H): $(wildcard ../msl/*.metal) ../tools/host_msl.py
+	$(MAKE) -C ../../host host_msl GAME=$(GAME)
 FW=-framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
 # Host crash.c is linked in as well: the write-protect unit tests go through the same page-fault hook as production
 # Tests that #include nvn_mtl.m link the rest of the NVN layer beside it (hle_nvn.c: memory pools, sparse pools, serials) and the host's large stack, with weak stubs of what they need of the host (t_host_stubs.c)
@@ -51,8 +55,10 @@ t_dirty_race: t_dirty_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_di
 	clang $(CFLAGS) -o $@ t_dirty_race.c ../../host/crash.c
 t_dirty_retire_race: t_dirty_retire_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_retire_race.c ../../host/crash.c
-t_builtin: t_builtin.m ../nvn/nvn_builtin.h
-	clang -O1 -g -Wall -fobjc-arc -o $@ t_builtin.m -framework Metal -framework Foundation
+t_host_msl: t_host_msl.m ../nvn/host_msl.m ../nvn/host_msl.h $(MSL_H)
+	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_host_msl.m ../nvn/host_msl.m -framework Metal -framework Foundation
+t_builtin: t_builtin.m ../nvn/nvn_builtin.h ../nvn/host_msl.m $(MSL_H)
+	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_builtin.m ../nvn/host_msl.m -framework Metal -framework Foundation
 t_vin: t_vin.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_vin.m -framework Metal -framework Foundation
 t_tbuf2d: t_tbuf2d.m ../nvn/nvn_tex.c ../nvn/nvn_tex.h
@@ -61,8 +67,8 @@ t_tbuf_align: t_tbuf_align.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf_align.m -framework Metal -framework Foundation
 t_sparse_layout: t_sparse_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang $(CFLAGS) -o $@ t_sparse_layout.c ../nvn/nvn_tex.c
-t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h
-	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
+t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/host_msl.m $(MSL_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c ../nvn/host_msl.m -framework Metal -framework Foundation
 t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -Wall -o $@ t_tex_layout.c ../nvn/nvn_tex.c
 t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h

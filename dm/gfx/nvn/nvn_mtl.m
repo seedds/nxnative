@@ -23,6 +23,7 @@
 #include "../tex/nvn_deswizzle.h"
 #include "../tex/nvn_deswizzle_gpu.h"
 #include "nvn_builtin.h"
+#include "host_msl.h"
 #include "nvn_dirty.h"
 #include "nvn_depth_clear.h"
 #include "nvn_refl.h"
@@ -80,6 +81,9 @@ static int g_warm_started;
 static void warm_claim(void);
 
 static id<MTLDevice> g_dev;
+// The shaders the host writes itself (built-in kernels, clears, copies, index conversions, geometry packing, the present: dm/gfx/msl), compiled when the host is built and loaded by
+// name (host_msl_lib), so none is compiled at run time. The diagnostic overrides (DM_NVN_HILITE, DM_NVN_MAGSCAN, DM_NVN_TEXDUMP) still compile theirs from source
+static id<MTLLibrary> host_lib(const char *name, NSError **e) { return host_msl_lib(g_dev, nil, name, e); }
 static NSMutableArray *g_l3_gpu_leaks;
 static int g_nvn_deswz_gpu;
 static id<MTLCommandQueue> g_q;
@@ -4002,7 +4006,7 @@ static NvShader *builtin_get(const char *ctl) {
         NvShader *o = g_builtin[@(ctl)];
         if (o) return o;
         if (!g_builtin_lib) {
-            NSError *e = nil; g_builtin_lib = [g_dev newLibraryWithSource:@(k_nvn_builtin_msl) options:nil error:&e];
+            NSError *e = nil; g_builtin_lib = host_lib("builtin", &e);
             if (!g_builtin_lib) MDIE("embedded compute kernel MSL compile failed: %s", e.localizedDescription.UTF8String);
         }
         o = [NvShader new]; o->fn = [g_builtin_lib newFunctionWithName:@(k_nvn_builtin_map[i].fn)]; o->stage = 5; o->builtin = k_nvn_builtin_map[i].fn;
@@ -8901,19 +8905,7 @@ static void fb_prepare(NvProg *pr) {
 #define IXC_CAP (3 * 16384)
 typedef struct { uint64_t ind, ibuf; int32_t prim, itype; uint64_t args, ixb; uint32_t ixlen; } ixc_ent;   // args 0: the record could not be converted
 static ixc_ent g_ixc[IXC_MAX]; static int g_ixc_n; static uint64_t g_ixc_epoch, g_ixc_sub, g_ixc_runs, g_ixc_splits;
-static const char k_ixc_msl[] =
-"#include <metal_stdlib>\nusing namespace metal;\n"
-"struct ajob { device const uint *rec; device uint *args; uint prim, cap; };\n"   // arrays record {count, instances, first, base instance}; cap: indices in the shared index buffer
-"kernel void ixc_arrays(device const ajob *j [[buffer(0)]], uint i [[threadgroup_position_in_grid]]) {\n"
-"  device const uint *s = j[i].rec; uint n = s[0], c = j[i].prim == 7 ? n / 4 * 6 : n >= 3 ? (n - 2) * 3 : 0;\n"
-"  device uint *d = j[i].args; d[0] = min(c, j[i].cap); d[1] = s[1]; d[2] = 0; d[3] = s[2]; d[4] = s[3]; }\n"
-"struct ejob { device const uint *rec; device const uchar *ib; device uint *out; device uint *args; uint prim, isz, ilen, cap; };\n"   // elements record {count, instances, first index, base vertex, base instance}; ilen: bytes readable at ib
-"kernel void ixc_expand(constant ejob &j [[buffer(0)]], uint i [[thread_position_in_grid]]) {\n"
-"  uint n = j.rec[0], m = min(j.prim == 7 ? n / 4 * 6 : j.prim == 6 ? (n >= 3 ? (n - 2) * 3 : 0) : n, j.cap);\n"
-"  if (i == 0) { j.args[0] = m; j.args[1] = j.rec[1]; j.args[2] = 0; j.args[3] = j.rec[3]; j.args[4] = j.rec[4]; }\n"
-"  if (i >= m) return;\n"
-"  uint t = i / 3, c = i % 3, p = j.prim == 7 ? t / 2 * 4 + (c ? c + (t & 1) : 0) : j.prim == 6 ? (c ? t + c : 0) : i, x = j.rec[2] + p;\n"   // quads (q, q+1+h, q+2+h), fans (0, t+1, t+2), as the CPU expansion in draw
-"  j.out[i] = (ulong)x * j.isz + j.isz > j.ilen ? 0u : j.isz == 1 ? uint(j.ib[x]) : j.isz == 2 ? uint(((device const ushort *)j.ib)[x]) : ((device const uint *)j.ib)[x]; }\n";
+// The kernels: dm/gfx/msl/ixc.metal
 static int ixc_wanted(const p_draw *dw, const p_draw_idx *di) {
     if (dw) return dw->ind && (dw->prim == 6 || dw->prim == 7);
     return di->ind && (di->prim == 6 || di->prim == 7 || di->itype == 0);
@@ -8930,7 +8922,7 @@ static void ixc_take(const p_draw *dw, const p_draw_idx *di) {
 static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
     static id<MTLComputePipelineState> ps[2]; static id<MTL4ArgumentTable> at; static int failed;
     if (failed) return;
-    if (!at) { NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_ixc_msl) options:nil error:&e];
+    if (!at) { NSError *e = nil; id<MTLLibrary> lib = host_lib("ixc", &e);
         for (int k = 0; k < 2 && lib; k++) { id<MTLFunction> f = [lib newFunctionWithName:k ? @"ixc_expand" : @"ixc_arrays"]; ps[k] = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil; }
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps[0] && ps[1] ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
         if (!at) { failed = 1; MLOG("[RED] indirect draw conversion: cannot create the compute pipeline %s (indirect draws of quads / fans / 8-bit indices are skipped)", e.localizedDescription.UTF8String); return; } }
@@ -8994,10 +8986,7 @@ static void ixc_run(const p_draw *dw, const p_draw_idx *di) {
 #define WIDE_MAX 256
 typedef struct { uint64_t ibuf; int32_t count; uint64_t gpu; } wide_ent;   // gpu: the 16-bit indices in the frame arena (0: not widened)
 static wide_ent g_wide[WIDE_MAX]; static int g_wide_n; static uint64_t g_wide_epoch, g_wide_sub, g_wide_runs, g_wide_draws, g_wide_splits;
-static const char k_wide_msl[] =
-"#include <metal_stdlib>\nusing namespace metal;\n"
-"struct wjob { device const uchar *src; device ushort *dst; uint n, shift; };\n"   // src: 16-byte aligned, the indices start shift bytes after it
-"kernel void wide_u8(device const wjob &j [[buffer(0)]], uint i [[thread_position_in_grid]]) { if (i < j.n) j.dst[i] = ushort(j.src[j.shift + i]); }\n";   // as the CPU widening (0xff stays 0x00ff)
+// The kernel wide_u8: dm/gfx/msl/wide.metal
 static int wide_wanted(const p_draw_idx *di) { return !di->ind && di->itype == 0 && di->prim != 6 && di->prim != 7 && di->count > 0 && pend_hits(di->ibuf, (uint64_t)di->count); }
 static const wide_ent *wide_find(const p_draw_idx *di) {
     if (g_wide_epoch != g_wr_epoch || g_wide_sub != g_sub_serial) return NULL;
@@ -9008,7 +8997,7 @@ static void wide_take(const p_draw_idx *di) { if (g_wide_n < WIDE_MAX && !wide_f
 static void wide_run(const p_draw_idx *di) {
     static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed;
     if (failed) return;
-    if (!at) { NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_wide_msl) options:nil error:&e]; id<MTLFunction> f = lib ? [lib newFunctionWithName:@"wide_u8"] : nil;
+    if (!at) { NSError *e = nil; id<MTLLibrary> lib = host_lib("wide", &e); id<MTLFunction> f = lib ? [lib newFunctionWithName:@"wide_u8"] : nil;
         ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
         if (!at) { failed = 1; MLOG("[RED] 8-bit index GPU expansion: cannot create the compute pipeline %s (the CPU expands them as before)", e.localizedDescription.UTF8String); return; } }
@@ -9126,12 +9115,7 @@ static int mdi_live(uint64_t cnt, int i) {
 #define MDX_SLOTS 16384   // a power of two; a scan fills at most a quarter
 typedef struct { uint64_t ind, cnt, out, tag; } mdx_ent;   // out: GPU address of the copy, 0 when the record or count is in no Metal buffer (those draws wait, mdi_live)
 static mdx_ent g_mdx[MDX_SLOTS]; static int g_mdx_n; static uint64_t g_mdx_tag = 1, g_mdx_ep = ~0ull, g_mdx_sub, g_mdx_runs, g_mdx_splits, g_mdx_draws, g_mdx_fast; static const uint8_t *g_mdx_stop;
-static const char k_mdx_msl[] =
-"#include <metal_stdlib>\nusing namespace metal;\n"
-"struct mjob { device const uint *rec; device const uint *cnt; device uint *out; uint i, words; };\n"   // draw i's record (words long), its multi-draw's count, the copy (null: padding)
-"kernel void mdx_mask(device const mjob *j [[buffer(0)]], uint t [[thread_position_in_grid]]) {\n"
-"  mjob m = j[t]; if (!m.out) return; bool live = m.i < *m.cnt;\n"
-"  for (uint k = 0; k < m.words; k++) m.out[k] = live ? m.rec[k] : 0u; }\n";
+// The kernel mdx_mask: dm/gfx/msl/mdx.metal
 static int mdx_wanted(const p_draw *dw, const p_draw_idx *di) { return dw ? dw->mdi_cnt && !ixc_wanted(dw, NULL) : di->mdi_cnt && !ixc_wanted(NULL, di); }
 static mdx_ent *mdx_slot(uint64_t ind, uint64_t cnt) {   // its entry in this tag, or the free slot for it
     for (uint64_t h = ((ind ^ cnt * 0xD6E8FEB86659FD93ull) * 0x9E3779B97F4A7C15ull) >> 50;; h = (h + 1) & (MDX_SLOTS - 1)) { mdx_ent *e = &g_mdx[h]; if (e->tag != g_mdx_tag || (e->ind == ind && e->cnt == cnt)) return e; }
@@ -9144,7 +9128,7 @@ static int mdx_find(uint64_t ind, uint64_t cnt, uint64_t *out) {   // → 1 when
 static void mdx_run(const p_draw *dw, const p_draw_idx *di) {
     static id<MTLComputePipelineState> ps; static id<MTL4ArgumentTable> at; static int failed;
     if (failed) return;
-    if (!at) { NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_mdx_msl) options:nil error:&e]; id<MTLFunction> f = [lib newFunctionWithName:@"mdx_mask"];
+    if (!at) { NSError *e = nil; id<MTLLibrary> lib = host_lib("mdx", &e); id<MTLFunction> f = [lib newFunctionWithName:@"mdx_mask"];
         ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; at = ps ? rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]) : nil;
         if (!at) { failed = 1; MLOG("[RED] indirect-count multi-draw masking: cannot create the compute pipeline %s (those draws wait for the GPU)", e.localizedDescription.UTF8String); return; } }
@@ -9850,13 +9834,7 @@ static int rb_swap_gpu(uint64_t src, size_t row, size_t img, uint64_t dst, size_
     static id<MTLComputePipelineState> ps; static int failed;
     if (failed) return 0;
     if (!ps) {
-        static const char *msl = "#include <metal_stdlib>\nusing namespace metal;\n"
-            "struct P { device const uchar *s; device uchar *d; uint w, h, row, img, drow, dimg, shift; };\n"
-            "kernel void rb_swap(constant P &p [[buffer(0)]], uint3 g [[thread_position_in_grid]]) {\n"
-            "  if (g.x >= p.w || g.y >= p.h) return;\n"
-            "  ushort v = ((device const ushort *)(p.s + g.z * p.img + g.y * p.row))[g.x], m = ushort(31u | 31u << p.shift);\n"
-            "  ((device ushort *)(p.d + g.z * p.dimg + g.y * p.drow))[g.x] = ushort((v & ~m) | (v & 31u) << p.shift | (v >> p.shift & 31u)); }\n";
-        NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(msl) options:nil error:&e];
+        NSError *e = nil; id<MTLLibrary> lib = host_lib("rb_swap", &e);
         id<MTLFunction> fn = [lib newFunctionWithName:@"rb_swap"];
         ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
         if (!ps) { failed = 1; MLOG("[RED] cannot create the red / blue exchange for RGB565-family copies: %s", e.localizedDescription.UTF8String); return 0; }
@@ -10086,20 +10064,7 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     if (!depth && (fmt_int_or_ds(s.pixelFormat) || fmt_int_or_ds(d.pixelFormat))) return 0;
     if (mtl_fmt_block(d.pixelFormat) || !(d.usage & MTLTextureUsageRenderTarget) || s.sampleCount > 1 || d.sampleCount > 1) return 0;
     if (!pso) {
-        static const char *src =
-            "#include <metal_stdlib>\nusing namespace metal;\n"
-            "struct V { float4 p [[position]]; };\n"
-            "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
-            // p[0] = source origin (texels) + source texels per destination texel, p[1] = destination origin + source level size
-            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {\n"
-            "  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; return t.sample(s, st / p[1].zw, level(0)); }\n"
-            "struct D { float d [[depth(any)]]; };\n"
-            "fragment D fsd(V in [[stage_in]], depth2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {\n"
-            "  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; D o; o.d = t.read(uint2(st)); return o; }\n"
-            "struct DS { float d [[depth(any)]]; uint s [[stencil]]; };\n"
-            "fragment DS fsds(V in [[stage_in]], depth2d<float> t [[texture(0)]], texture2d<uint> ts [[texture(1)]], constant float4 *p [[buffer(0)]]) {\n"
-            "  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; DS o; o.d = t.read(uint2(st)); o.s = ts.read(uint2(st)).r; return o; }\n";
-        NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&e];
+        NSError *e = nil; id<MTLLibrary> lib = host_lib("copy", &e);
         vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"]; fd = [lib newFunctionWithName:@"fsd"]; fds = [lib newFunctionWithName:@"fsds"];
         MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = YES; dss = [g_dev newDepthStencilStateWithDescriptor:dd];
         MTLStencilDescriptor *sd_ = [MTLStencilDescriptor new]; sd_.stencilCompareFunction = MTLCompareFunctionAlways; sd_.depthStencilPassOperation = MTLStencilOperationReplace;   // Replace writes the [[stencil]] output
@@ -10165,14 +10130,7 @@ static void draw_tex(const p_draw_tex *c) {
     float dw = c->d.x1 - c->d.x0, dh = c->d.y1 - c->d.y0;
     if (dw == 0 || dh == 0) return;
     if (!pso) {
-        static const char *src =
-            "#include <metal_stdlib>\nusing namespace metal;\n"
-            "struct V { float4 p [[position]]; };\n"
-            "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
-            // p[0] = destination origin + source texels per destination pixel, p[1] = source origin + source level size
-            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {\n"
-            "  float2 st = p[1].xy + (in.p.xy - p[0].xy) * p[0].zw; return t.sample(s, st / p[1].zw); }\n";
-        NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&e];
+        NSError *e = nil; id<MTLLibrary> lib = host_lib("draw_tex", &e);
         vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"];
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 1; ad.maxSamplerStateBindCount = 1; ad.maxBufferBindCount = 1; at = rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]);
         if (!vf || !ff || !at) { failed = 1; MLOG("[RED] cannot create the pipeline for nvnCommandBufferDrawTexture: %s", e.localizedDescription.UTF8String); return; }
@@ -10469,24 +10427,21 @@ static int pf_int_kind(MTLPixelFormat f) {   // the fragment output type a colou
         default: return 0;
     }
 }
-static id<MTLLibrary> clr_lib(int slot, int kind) {   // vertex clr_vs (the triangle, depth from buffer 0) and fragment clr_fs (colour slot `slot` of type `kind` from buffer 0)
-    static id<MTLLibrary> libs[8][3]; static uint8_t failed[8][3];
-    if (libs[slot][kind] || failed[slot][kind]) return libs[slot][kind];
-    static const char *ty[3] = {"float", "uint", "int"}; char src[720];
-    snprintf(src, sizeof src, "#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\n"
-             "vertex V clr_vs(uint i [[vertex_id]], device const float *z [[buffer(0)]]) { V o; o.p = float4(float2(float((i << 1) & 2), float(i & 2)) * 2.0 - 1.0, z[0], 1.0); return o; }\n"
-             "struct O { %s4 c [[color(%d)]]; };\nfragment O clr_fs(device const %s4 *v [[buffer(0)]]) { O o; o.c = v[0]; return o; }\n", ty[kind], slot, ty[kind]);
-    NSError *e = nil; libs[slot][kind] = [g_dev newLibraryWithSource:@(src) options:nil error:&e];
-    if (!libs[slot][kind]) { failed[slot][kind] = 1; MLOG("[RED] clear-triangle shader compile failed (slot %d kind %d): %s", slot, kind, e.localizedDescription.UTF8String); }
-    return libs[slot][kind];
+static id<MTLLibrary> clr_lib(void) {   // clr_vs (the triangle, depth from buffer 0) and clr_fs_<slot>_<float|uint|int> (that colour slot's value from buffer 0): dm/gfx/msl/clear.metal
+    static id<MTLLibrary> lib; static int failed;
+    if (lib || failed) return lib;
+    NSError *e = nil; lib = host_lib("clear", &e);
+    if (!lib) { failed = 1; MLOG("[RED] clear-triangle shaders: no library: %s", e.localizedDescription.UTF8String); }
+    return lib;
 }
 typedef struct { int32_t slot, kind, mask; uint32_t cfmt[8], dfmt, sfmt, samples; } clr_key;   // slot -1: a depth / stencil clear (no fragment function)
 static id<MTLRenderPipelineState> clr_pso(const clr_key *k) {
     static NSMutableDictionary<NSData *, id<MTLRenderPipelineState>> *cache; if (!cache) cache = [NSMutableDictionary dictionary];
     NSData *kd = [NSData dataWithBytes:k length:sizeof *k]; id<MTLRenderPipelineState> ps = cache[kd]; if (ps) return ps;
-    id<MTLLibrary> lib = clr_lib(k->slot < 0 ? 0 : k->slot, k->slot < 0 ? 0 : k->kind); if (!lib) return nil;
+    id<MTLLibrary> lib = clr_lib(); if (!lib) return nil;
+    static const char *ty[3] = {"float", "uint", "int"};
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = [lib newFunctionWithName:@"clr_vs"]; if (k->slot >= 0) d.fragmentFunction = [lib newFunctionWithName:@"clr_fs"];
+    d.vertexFunction = [lib newFunctionWithName:@"clr_vs"]; if (k->slot >= 0) d.fragmentFunction = [lib newFunctionWithName:[NSString stringWithFormat:@"clr_fs_%d_%s", k->slot, ty[k->kind]]];
     for (int i = 0; i < 8; i++) if (k->cfmt[i]) { d.colorAttachments[i].pixelFormat = (MTLPixelFormat)k->cfmt[i]; d.colorAttachments[i].writeMask = MTLColorWriteMaskNone; }   // the other attachments stay as they are
     if (k->slot >= 0) d.colorAttachments[k->slot].writeMask = (MTLColorWriteMask)((k->mask & 1 ? MTLColorWriteMaskRed : 0) | (k->mask & 2 ? MTLColorWriteMaskGreen : 0) | (k->mask & 4 ? MTLColorWriteMaskBlue : 0) | (k->mask & 8 ? MTLColorWriteMaskAlpha : 0));
     d.depthAttachmentPixelFormat = (MTLPixelFormat)k->dfmt; d.stencilAttachmentPixelFormat = (MTLPixelFormat)k->sfmt; d.rasterSampleCount = k->samples ? k->samples : 1;
@@ -11097,14 +11052,8 @@ static CAMetalLayer *g_present_layer_resident;
 void mtl_present_test_stall(uint64_t ns) { g_present_stall_ns = ns; }
 static void present_pipeline(MTLPixelFormat format) {
     if (!g_blit_pso || g_blit_fmt != format) {
-        static const char *src_msl =
-            "#include <metal_stdlib>\nusing namespace metal;\n"
-            "struct V { float4 p [[position]]; float2 uv; };\n"
-            "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
-            "struct Crop { float4 rect; float4 edge; };\n"
-            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n";
         NSError *e = nil;
-        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src_msl) options:nil error:&e];
+        id<MTLLibrary> lib = host_lib("present", &e);
         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];

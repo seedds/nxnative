@@ -19,6 +19,7 @@
 // Environment: DM_GL_LOG=1 logs object creation; DM_GL_CAPTURE=<dir> writes every shader source the game compiles (<key>.vert / <key>.frag, read by gl_shaders.py).
 #include "../../host/hle.h"
 #include "../nvn/nvn_mtl.h"
+#include "../nvn/host_msl.h"
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <mach/mach.h>
@@ -193,13 +194,6 @@ static void sh_load(void) {
 }
 static const shinfo *sh_find(const char *key, int frag) { shinfo k; memcpy(k.key, key, 16); k.frag = frag; return g_nsh ? bsearch(&k, g_sh, g_nsh, sizeof *g_sh, sh_cmp) : NULL; }
 
-// The layer's own shaders: a quad that clears what a scissored or masked glClear covers (a render pass can only clear its attachments whole)
-static const char *const g_util_src =
-    "#include <metal_stdlib>\nusing namespace metal;\n"
-    "struct V { float4 p [[position]]; };\n"
-    "vertex V clr_vs(uint i [[vertex_id]], constant float &z [[buffer(0)]]) { V o; float2 t = float2((i << 1) & 2, i & 2); o.p = float4(t * 2 - 1, z, 1); return o; }\n"
-    "fragment float4 clr_fs(constant float4 &c [[buffer(0)]]) { return c; }\n"
-    "fragment void clr_fs_none() {}\n";
 
 static void dev_init_once(void) {
     @autoreleasepool {
@@ -221,7 +215,7 @@ static void dev_init_once(void) {
         [g_arr0 replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:0 withBytes:&black bytesPerRow:4 bytesPerImage:0];
         g_samp0 = [g_dev newSamplerStateWithDescriptor:[MTLSamplerDescriptor new]];
         NSError *err = nil;
-        g_util = [g_dev newLibraryWithSource:@(g_util_src) options:nil error:&err];
+        g_util = host_msl_lib(g_dev, nil, "gl_util", &err);   // dm/gfx/msl/gl_util.metal: a quad that clears what a scissored or masked glClear covers (a render pass can only clear its attachments whole)
         if (!g_util) GLOG("[RED] the layer's own shaders do not compile: %s", err.localizedDescription.UTF8String);
         sh_load();
         mtl_set_origin_lower_left(1);   // the window image is stored bottom row first; the present flips it

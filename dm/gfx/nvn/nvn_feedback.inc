@@ -39,7 +39,7 @@ static uint64_t tf_prepare(NvShader *vs, uint64_t source_count, uint64_t order, 
         j.stride[b]=vs->tf_stride[b];j.capacity[b]=(uint32_t)S.tf[b].size;
     }
     if (!g_tf_prepare) {
-        NSError *e=nil; id<MTLLibrary> lib=[g_dev newLibraryWithSource:@(k_nvn_tf_msl) options:nil error:&e];
+        NSError *e=nil; id<MTLLibrary> lib=host_lib("tf",&e);
         if (lib) g_tf_prepare=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"tf_prepare"] error:&e];
         if (!g_tf_prepare) { MLOG("[RED] transform feedback prepare: %s",e.localizedDescription.UTF8String); return 0; }
     }

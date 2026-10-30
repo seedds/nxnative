@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../nvn/nvn_builtin.h"
+#include "../nvn/host_msl.h"
 
 enum { NREC = 40, N = 37, CAP = 64 };   // n = 37: spans two thread groups (32 + 5); elements 37..63 must keep the sentinel value
 
@@ -21,8 +22,8 @@ static void expect(int k, const uint64_t *s, uint64_t *e) {
 int main(void) {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
     NSError *err = nil;
-    id<MTLLibrary> lib = [dev newLibraryWithSource:@(k_nvn_builtin_msl) options:nil error:&err];
-    if (!lib) { printf("MSL compile failed %s\n", err.localizedDescription.UTF8String); return 1; }
+    id<MTLLibrary> lib = host_msl_lib(dev, nil, "builtin", &err);   // the library compiled when the host was built (dm/gfx/msl/builtin.metal)
+    if (!lib) { printf("no builtin library: %s\n", err.localizedDescription.UTF8String); return 1; }
     id<MTLCommandQueue> q = [dev newCommandQueue];
     // Source data: NREC 32-byte records (= 2×NREC 16-byte records), with values that have high bits set and wraparound cases where "the later is smaller than the earlier"
     uint64_t src[4 * NREC];

@@ -1,0 +1,11 @@
+# Fresh save: accept the default difficulty and Warriors controls, then enter
+# Select Mode after the logos finish. Deeper movie, battle and save/reload routes are
+# manual checks documented in README.md; this route does not enter amiibo.
+save	new
+keys	f300:A,f600:A,f900:A,42:A
+secs	65
+quick	65
+reach	1200@40
+window	45	15
+shots	50,60
+hang	20

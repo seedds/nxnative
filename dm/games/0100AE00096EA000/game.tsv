@@ -1,0 +1,34 @@
+# Hyrule Warriors: Definitive Edition 1.0.1, SDK 3.5.1. Mac bring-up and validation: README.md
+
+# ---- Identity ----
+title_id	0100AE00096EA000
+program_id	0100AE00096EA000
+
+# ---- App ----
+name	Hyrule Warriors: Definitive Edition
+ipa	HyruleWarriorsDefinitiveEdition.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1	1.0.1	main=815a2c19d176789688ff33ea875c26c5	subsdk0=8e7d6d12b5980b540e55f0feda56d246	subsdk1=798c30e126697f2222cf843f78f5c140	sdk=ae34e75d02925f4417b24499ad80c394
+package	v1
+shader_versions	v1
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	sound/BGMProduct.g1l
+zip_store	.arc:.g1l:.gz:.mp4:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares no system resource; the game uses SetHeapSize (observed 3.14 GB in the 3.25 GB heap region)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/data/=data /movie/=movie /sound/=sound
+shader_note	Hyrule Warriors: Definitive Edition shaders

@@ -1782,7 +1782,28 @@ def ue_legacy_shaders(path, rel, names, out):
     for name in names:
         d = pk.read(name, decode=oodle)
         label = re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))
-        ue_inline_shaders(d, f'/{rel}#{label}', out)
+        if name.endswith('.ushaderbytecode'): ue_archive_v1_shaders(d, f'/{rel}#{label}', out)
+        else: ue_inline_shaders(d, f'/{rel}#{label}', out)
+
+def ue_archive_v1_shaders(d, label, out):
+    """A shader code archive of the layout before version 2 in a legacy pak (uepak.archive_v1; Bloodstained: Ritual of the Night keeps all its material shaders there, bShareMaterialShaderCode on
+    with UE 4.18's pak): each shader is an LSLG record, zlib-compressed when its stored size is below its raw size; the stage is the record's tag"""
+    import zlib
+    ents = uepak.archive_v1(d)
+    if ents is None: red(f'{label}: a shader code archive of neither version 2 nor the earlier layout (uepak.archive_v1)')
+    for i, (off, size, raw) in enumerate(ents):
+        s = d[off:off + size]
+        if size != raw:
+            try: s = zlib.decompress(s)
+            except zlib.error as e: red(f'{label}: shader {i} does not inflate ({e})')
+        if len(s) != raw: red(f'{label}: shader {i} inflates to {len(s)} bytes, the table says {raw}')
+        rec = uepak.lslg(s)
+        if not rec: red(f'{label}: shader {i} is not an LSLG record')
+        tag, ctl, code = rec; st = UE_TAG.get(tag)
+        if not st: red(f'{label}: shader {i} has stage tag {tag}')
+        why = check(label, st, ctl, code)
+        if why: red(f'{label}: shader {i} ({st}): {why}')
+        out.append((f'{label}#UE{i}', st, ctl, code))
 
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 def ue_inline_shaders(d, label, out):

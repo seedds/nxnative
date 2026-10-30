@@ -150,14 +150,14 @@ class R:
         if n < 0: return self.raw(-2 * n).decode('utf-16-le')[:-1]
         return self.raw(n)[:-1].decode('utf-8', 'replace') if n else ''
 
-LEGACY = (4,)   # legacy pak versions read (the per-file index); 11 has the encoded one
+LEGACY = (4, 8)   # legacy pak versions read (the per-file index); 11 has the encoded one. 8 (UE 4.22: Bloodstained: Ritual of the Night 1.60) names its compression methods in the footer
 LEGACY_METHODS = {1: 'Zlib', 2: 'Gzip', 3: 'LZ5', 4: 'Custom'}   # compression flags of a legacy pak (3: DRAGON QUEST XI S's engine, see the header)
 
 def magic_back(f):
     """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 11's magic is 0xc8 from the end in
     Octopath Traveler 0 (UE5) and 0xcc in Unreal Engine 4.27 (DRAGON QUEST VII Reimagined: five whole 32-byte compression method names after the SHA-1)"""
     size = f.seek(0, 2)
-    for back, foot in ((0x2c, 0x2d), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21)):
+    for back, foot in ((0x2c, 0x2d), (0xac, 0xad), (0xc8, 0xc8 + 21), (0xcc, 0xcc + 21)):   # 0xac: version 8 (UE 4.22), the legacy footer and four 32-byte method names
         if size < foot: continue   # shorter than this footer
         f.seek(-back, 2); m, ver = struct.unpack('<II', f.read(8))
         if m == PAK_MAGIC: return back, ver
@@ -169,8 +169,11 @@ def pak_version(f):
 def footer(f):
     """(encrypted index, index offset, index size, compression method names by number from 1, version); ValueError when the index does not lie inside the file"""
     back, ver = magic_back(f)
-    if (ver in LEGACY or ver == 11) and (ver in LEGACY) != (back == 0x2c): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
-    if ver in LEGACY:
+    if (ver == 4) != (back == 0x2c) or (ver == 8) != (back == 0xac): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
+    if ver == 8:   # version 8 (UE 4.22): the legacy footer, then four 32-byte compression method names (the magic 0xac from the end)
+        f.seek(-(back + 1), 2); ft = f.read(back + 1); ioff, isz = struct.unpack_from('<QQ', ft, 9)
+        enc, methods = ft[0], [ft[45 + 32 * i:77 + 32 * i].rstrip(b'\0').decode('latin1') for i in range(4)]
+    elif ver in LEGACY:
         f.seek(-0x2d, 2); ft = f.read(0x2d); ioff, isz = struct.unpack_from('<QQ', ft, 9)
         enc, methods = ft[0], [LEGACY_METHODS.get(i, f'flags {i}') for i in range(1, 8)]
     elif ver != 11: raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
@@ -207,12 +210,12 @@ class Pak:
         if self.version in LEGACY:   # one FPakEntry per file, kept as parsed
             self.files = {}
             for _ in range(self.count):
-                name = r.fstr(); off, size, raw, meth = r.take('<qqqi'); r.raw(20)
+                name = r.fstr(); off, size, raw = r.take('<qqq'); meth = r.take('<B' if self.version == 8 else '<i'); r.raw(20)   # version 8 keeps the method index in one byte
                 blocks = [r.take('<qq') for _ in range(r.take('<i'))] if meth else []
-                e, bsz = r.take('<BI'); head = 53 + (4 + 16 * len(blocks) if meth else 0)
+                e, bsz = r.take('<BI'); head = (50 if self.version == 8 else 53) + (4 + 16 * len(blocks) if meth else 0)
                 if self.version < 5: blocks = [(s - off, t - s) for s, t in blocks]
                 else: blocks = [(s, t - s) for s, t in blocks]
-                self.files[name] = dict(off=off, raw=raw, size=size, method=LEGACY_METHODS.get(meth, f'flags {meth}') if meth else '', encrypted=e, block_size=bsz, blocks=blocks or [(head, size)])
+                self.files[name] = dict(off=off, raw=raw, size=size, method=(self.methods[meth - 1] if self.version == 8 else LEGACY_METHODS.get(meth, f'flags {meth}')) if meth else '', encrypted=e, block_size=bsz, blocks=blocks or [(head, size)])
             return
         r.take('<Q')
         if r.take('<i'): r.take('<QQ'); r.raw(20)   # path hash index (not needed with the full directory index)
@@ -247,7 +250,7 @@ class Pak:
         """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II: Zlib); any other
         method needs decode(block bytes, raw length) → bytes: the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
         e = self.entry(path)
-        if not e['method']: return self.read_at(e['off'] + 53, e['size'], e['encrypted'])
+        if not e['method']: return self.read_at(e['off'] + e['blocks'][0][0], e['size'], e['encrypted'])   # past the FPakEntry in front of the data (53 bytes, 50 in version 8)
         import zlib
         bad = (zlib.error,)   # a block its decoder refuses
         if e['method'] == 'Zlib': decode = zlib_block
@@ -279,6 +282,24 @@ def archive(b, what='shader code archive') -> dict:
     r.raw(16 * r.take('<I'))
     indices = list(r.array('I', r.take('<I')))
     return dict(maps=maps, shaders=shaders, indices=indices, code=r.o)
+
+def archive_v1(b):
+    """A shader code archive of an earlier layout. UE 4.22's version 1 (Bloodstained: Ritual of the Night 1.60: ShaderArchive-Global- and ShaderArchive-BloodstainedRotN-GLSL_SWITCH,
+    32,470 shaders in the second): u32 version 1, u32 entry count, then per entry the SHA-1 (20), u64 offset from the end of the table, stored and raw size (u32 each) and the frequency (u8).
+    Otherwise the one from before the versioned layout (Bloodstained: Ritual of the Night, a legacy version 4 pak: Content/ShaderArchive-GLSL_SWITCH.ushaderbytecode, 27,086 shaders):
+    u32 entry count, then per entry the shader's SHA-1 (20 bytes), its offset from the end of the table, stored size and raw size (u32 each), then the code. A shader stored smaller than its
+    raw size is one zlib stream. There is no frequency: the LSLG record's tag gives the stage. → [(offset from the start of b, stored size, raw size)], or None when b is not this layout"""
+    if len(b) < 8: return None
+    if struct.unpack_from('<I', b, 0)[0] == 1:
+        n = struct.unpack_from('<I', b, 4)[0]; base = 8 + 37 * n
+        if n and base <= len(b):
+            ents = [struct.unpack_from('<QII', b, 8 + 37 * i + 20) for i in range(n)]
+            if max(o + s for o, s, _ in ents) == len(b) - base and all(s <= r for _, s, r in ents): return [(base + o, s, r) for o, s, r in ents]
+    n = struct.unpack_from('<I', b, 0)[0]; base = 4 + 32 * n
+    if not n or base > len(b): return None
+    ents = [struct.unpack_from('<III', b, 4 + 32 * i + 20) for i in range(n)]
+    if max(o + s for o, s, _ in ents) != len(b) - base or any(s > r for _, s, r in ents): return None
+    return [(base + o, s, r) for o, s, r in ents]
 
 def decoded_archive(b, raws):
     """The archive with every shader replaced by its decoded bytes (raws, in entry order): the same tables, each entry's size = its raw size, the code laid out again

@@ -329,7 +329,7 @@ static void cap_head(void) {
     char exe[1024]; uint32_t en = sizeof exe; char commit[128] = "unknown";
     if (!_NSGetExecutablePath(exe, &en)) { char cmd[1400], *d = dirname(exe); snprintf(cmd, sizeof cmd, "git -C '%s' describe --always --dirty --abbrev=12 2>/dev/null", d);
         FILE *p = popen(cmd, "r"); if (p) { if (fgets(commit, sizeof commit, p)) commit[strcspn(commit, "\n")] = 0; else strlcpy(commit, "unknown", sizeof commit); pclose(p); } }
-    KV("format\t%u\n", CAP_VERSION); KV("iface\t%d\n", CAP_IFACE); KV("chain\t%s\n", DMSH_CHAIN); KV("commit\t%s\n", commit); KV("title\t%s\n", DM_GAME_ID); KV("build\t%s\n", dm_main_build());
+    KV("format\t%u\n", CAP_VERSION); KV("iface\t%d\n", CAP_IFACE); KV("chain\t%s\n", DMSH_CHAIN); KV("commit\t%s\n", commit); KV("title\t%s\n", dm_profile()->id); KV("build\t%s\n", dm_main_build());
     KV("frame\t%d\n", g_cap_frame); KV("frames\t1\n"); KV("mtl_frame\t%llu\n", (unsigned long long)atomic_load(&g_cur_frame));   // the replay layer's frame number: the replayer takes it, so frame-keyed diagnostics (DM_NVN_TEXDUMP, DM_NVN_PASSDUMP) select the same frame
     for (char **e = *_NSGetEnviron(); *e; e++) if (!strncmp(*e, "DM_", 3) && strncmp(*e, "DM_NVN_CAPTURE=", 15)) KV("env\t%s\n", *e);
 #undef KV

@@ -79,7 +79,8 @@ static void host_preload(int argc, char **argv) {
     {   // Which build this is: the commit the packer stamped into the app (DMCommit; a run outside an app has none), the shader chain the host loads, the profile
         CFBundleRef b = CFBundleGetMainBundle(); CFTypeRef c = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMCommit")) : NULL; char cs[64] = "not recorded";
         if (c && CFGetTypeID(c) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)c, cs, sizeof cs, kCFStringEncodingUTF8);
-        LOG("build: commit %s, shader chain %s, profile %s", cs, DMSH_CHAIN, DM_GAME_ID);
+        LOG("build: commit %s, shader chain %s, profile %s", cs, DMSH_CHAIN, dm_profile()->id);
+        if (getenv("DM_PROFILE")) dm_profile_log();   // a runtime profile: say what it holds
     }
     const char *race = getenv("DM_TEST_KEYRACE");
     if (race && *race) {
@@ -91,16 +92,17 @@ static void host_preload(int argc, char **argv) {
     }
     { void dm_term_install(void); dm_term_install(); }   // SIGTERM graceful exit (hle_lifecycle.c)
     { void crash_set_dump_hook(void (*)(void)); void svc_thread_dump(void); crash_set_dump_hook(svc_thread_dump); }   // Dump guest thread state on a crash
-    const char *names[argc + DM_GAME_NMOD]; int n = 0;
+    const struct dm_profile *prof = dm_profile();   // the game this process runs: the DM_PROFILE file, else the compiled profile
+    const char *names[argc + DM_PROF_MAX_MOD]; int n = 0;
     int i = 2;
     for (; i < argc && strcmp(argv[i], "--"); i++) names[n++] = argv[i];
     if (i < argc && !strcmp(argv[i], "--")) for (i++; i < argc && g_argc < 63; i++) g_argv[g_argc++] = argv[i];
-    else if (*DM_GAME_ARGS) {   // no "--" on the command line (the iOS app, the NSP script's Mac runs): the game profile's game_args, split at spaces
-        char *s = strdup(DM_GAME_ARGS);
+    else if (*prof->args) {   // no "--" on the command line (the iOS app, the NSP script's Mac runs): the game profile's game_args, split at spaces
+        char *s = strdup(prof->args);
         for (char *t = strtok(s, " "); t && g_argc < 63; t = strtok(NULL, " ")) g_argv[g_argc++] = t;
-        LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
+        LOG("game arguments from the game profile: %s", prof->args);
     }
-    if (!n) { static const char *def[] = DM_GAME_MODULES; for (int k = 0; k < DM_GAME_NMOD; k++) names[n++] = def[k]; }   // default module list from the game profile's modules (Mario: main sdk)
+    if (!n) for (int k = 0; k < prof->nmod; k++) names[n++] = prof->modules[k];   // default module list from the game profile's modules (Mario: main sdk)
     load_modules(argv[1], names, n);
     dm_cheats_init();   // the Atmosphère cheat files for this build (hle_cheats.c): picked by first 16 hex digits of main's build ID, which the loader knows now
     dm_sdk_major();   // logs the SDK version, which SDK-dependent behaviour follows (loader.c)

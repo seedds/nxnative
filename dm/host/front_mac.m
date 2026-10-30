@@ -728,7 +728,7 @@ static NSTextField *panel_note(NSString *text) {
 // the path came in. build: this build's ID (read from the engine on the main thread by the caller). Runs on a background
 // queue (findCheats:): it touches only the file system and Foundation, never AppKit or the cheats engine
 static NSArray<NSURL *> *found_cheat_files(NSString *build) {
-    NSString *tid = [NSString stringWithFormat:@"%016llX", (unsigned long long)DM_GAME_PROGRAM_ID];
+    NSString *tid = [NSString stringWithFormat:@"%016llX", (unsigned long long)dm_profile()->program_id];
     NSString *as = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support"];
     NSMutableArray<NSString *> *dirs = [NSMutableArray array];
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -816,7 +816,7 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
     const char *dirc = dm_cheats_dir_path();
     if (!dirc || !*dirc || strlen(dm_cheats_build()) != 16) { NSBeep(); return NO; }   // no folder, or no build ID to name a file by
     NSString *dir = engine_str(dirc), *build = engine_str(dm_cheats_build());
-    NSString *tid = [NSString stringWithFormat:@"%016llX", (unsigned long long)DM_GAME_PROGRAM_ID];
+    NSString *tid = [NSString stringWithFormat:@"%016llX", (unsigned long long)dm_profile()->program_id];
     NSFileManager *fm = NSFileManager.defaultManager;
     [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     BOOL any = NO;
@@ -1113,7 +1113,7 @@ void front_run(void (*guest)(void)) {
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
-        win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
+        win.title = @(dm_profile()->name);   // the game profile's name (game name label)
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
@@ -1151,7 +1151,7 @@ void front_run(void (*guest)(void)) {
         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
         NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:@"Window"];
         [[bar addItemWithTitle:@"" action:nil keyEquivalent:@""] setSubmenu:app];
-        [app addItemWithTitle:@"Quit " DM_GAME_NAME action:@selector(terminate:) keyEquivalent:@"q"];
+        [app addItemWithTitle:[@"Quit " stringByAppendingString:@(dm_profile()->name)] action:@selector(terminate:) keyEquivalent:@"q"];
         // Cheats (hle_cheats.c): the rows rebuild on every open through the delegate, the same rows the file reload changes
         g_cheats_menu = [DmCheatsMenuDelegate new];
         NSMenu *cm = [[NSMenu alloc] initWithTitle:@"Cheats"];

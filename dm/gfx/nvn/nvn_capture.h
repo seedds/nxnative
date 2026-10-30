@@ -68,7 +68,7 @@ typedef struct { uint32_t index; int32_t n; uint64_t pool; int64_t off; int32_t 
 typedef struct { int32_t tid; uint8_t ok, has_v, gone, pad; tex_t t; view_t v; } cap_treg;
 typedef struct { int32_t sid, pad; samp_par p; } cap_sreg;
 // per texture the frame reaches: live = initialized and not finalized (mtl_tex_init); cpu = its host texture is uploaded from its pool (CPU-written, or a texture the
-// flush tracking of DM_GAME_TEX_DIRTY_UPLOAD made packaged): the replay marks it CPU-written so it takes the same path
+// flush tracking of the profile's tex_dirty_upload made packaged): the replay marks it CPU-written so it takes the same path
 enum { CAP_TK_LIVE = 1, CAP_TK_CPU = 2 };
 typedef struct { tex_t t; uint32_t kind, pad; } cap_tknd;   // t: relocated
 typedef struct { tex_t t; uint32_t pixfmt, type, width, height, depth, levels, slices, samples, nsub, pad; } cap_tpix;   // t: relocated, the texture to create and fill

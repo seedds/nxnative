@@ -214,7 +214,8 @@ if __name__ == '__main__':
                 ('shared_font', 'SHARED_FONT_TTF'), ('pad_layout', 'PAD_LAYOUT'), ('op_mode', 'OPMODE'), ('perf_mode', 'PERF_BOOST'),
                 ('feedback_snap', 'FEEDBACK_SNAP'), ('tex_flush_upload', 'TEX_FLUSH_UPLOAD'), ('render_cond', 'RENDER_COND'),
                 ('tex_dirty_upload', 'TEX_DIRTY_UPLOAD'), ('tex_dyn_slots', 'TEX_DYN_SLOTS'), ('gpu_timestamps', 'GPU_TS_SEGMENT'),
-                ('vconv_range', 'VCONV_RANGE'), ('game_args', 'ARGS'), ('game_env', 'ENV')]
+                ('vconv_range', 'VCONV_RANGE'), ('stdalloc_cap', 'STDALLOC_CAP'), ('tex_bc_cpu', 'TEX_BC_CPU'), ('ue_texture_pool', 'UE_TEXTURE_POOL'),
+                ('enc_thread', 'ENC_THREAD'), ('game_args', 'ARGS'), ('game_env', 'ENV')]
         def val(macro):   # the header's C spelling → the file's plain spelling
             v = M.get('DM_GAME_' + macro)
             if v is None: return None
@@ -230,7 +231,9 @@ if __name__ == '__main__':
             v = val(macro)
             if v is not None: L.append(f'{key}\t{v}')
         api = [val('NVN_API_MAJOR'), val('NVN_API_MINOR')]
-        if api[0] is not None: L.append(f'device_api\t{api[0]}.{api[1] or 0}')
+        L.append(f'device_api\t{api[0]}.{api[1] or 0}' if api[0] is not None else 'device_api\t0.0')   # 0.0 = by the SDK version: a key left out would keep the compiled game's value
+        if val('SHARED_FONT_TTF') is None: L.append('shared_font\tauto')   # by the SDK version, likewise
+        L.append(f'shader_key_skip\t{val("SHADER_KEY_SKIP_OFF")}+{val("SHADER_KEY_SKIP_LEN")}')   # 0x0+0x0 = none: written always, a key left out would keep the compiled game's
         for b, d in re.findall(r'\{"([0-9a-f]+)", "([^"]*)"\}', M.get('DM_GAME_DISPLAY_VERSIONS', '')):
             L.append(f'display_version\t{b}\t{d}')
         text = '\n'.join(L) + '\n'

@@ -24,8 +24,8 @@ void dm_ue_cvar_tick(void) {
     if (state < 0) {
         state = 0;
         const char *e = getenv("DM_UE_TEXTURE_POOL");
-        target = e ? atoi(e) : TARGET_OS_IPHONE ? 0 : DM_GAME_UE_TEXTURE_POOL; src = e ? "DM_UE_TEXTURE_POOL" : "game profile ue_texture_pool";
-        if (target <= 0) { if (DM_GAME_UE_TEXTURE_POOL) LOG("main: Unreal r.Streaming.PoolSize left as the game sets it (%s)", e ? src : "iOS without DM_UE_TEXTURE_POOL"); return; }
+        target = e ? atoi(e) : TARGET_OS_IPHONE ? 0 : dm_profile()->ue_texture_pool; src = e ? "DM_UE_TEXTURE_POOL" : "game profile ue_texture_pool";
+        if (target <= 0) { if (dm_profile()->ue_texture_pool) LOG("main: Unreal r.Streaming.PoolSize left as the game sets it (%s)", e ? src : "iOS without DM_UE_TEXTURE_POOL"); return; }
         obj_off = dm_ue_cvar("r.Streaming.PoolSize");
         if (!obj_off) { LOG("[RED] main: Unreal r.Streaming.PoolSize not found in main by the rewriter (ue_cvar.py; %s %d MB not applied)", src, target); return; }
         LOG("main: Unreal r.Streaming.PoolSize at main+%#llx, raised to %d MB (%s)", (unsigned long long)obj_off, target, src);

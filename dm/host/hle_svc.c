@@ -366,11 +366,11 @@ static uint64_t alias_room(void) {
 static void stdalloc_init(uint64_t *r, int param) {
     (void)param;
     if (r[1]) return;   // a heap over memory the game passes in: no address region
-    uint64_t cap = DM_GAME_STDALLOC_CAP ? DM_GAME_STDALLOC_CAP : alias_room();
+    uint64_t cap = dm_profile()->stdalloc_cap ? dm_profile()->stdalloc_cap : alias_room();
     if (!cap || r[2] <= cap) return;
     char who[40]; uint64_t via; guest_caller(r, who, sizeof who, &via);
     LOG("[mem] StandardAllocator::Initialize(nullptr, %.2f GB) returning to %s: %.2f GB of address space, %s", r[2] / 1073741824.0, who, cap / 1073741824.0,
-        DM_GAME_STDALLOC_CAP ? "the profile's stdalloc_cap" : "what the alias region has room for (the profile key stdalloc_cap sets it)");
+        dm_profile()->stdalloc_cap ? "the profile's stdalloc_cap" : "what the alias region has room for (the profile key stdalloc_cap sets it)");
     r[2] = cap;
 }
 // ---- Unreal's engine region ----

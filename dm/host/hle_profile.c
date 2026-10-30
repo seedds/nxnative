@@ -103,6 +103,22 @@ static uint64_t num(const char *v, uint64_t dflt) {
 #ifndef DM_GAME_VCONV_RANGE
 #define DM_GAME_VCONV_RANGE 0
 #endif
+#ifndef DM_GAME_STDALLOC_CAP
+#define DM_GAME_STDALLOC_CAP 0ull
+#endif
+#ifndef DM_GAME_SHADER_KEY_SKIP_LEN
+#define DM_GAME_SHADER_KEY_SKIP_OFF 0
+#define DM_GAME_SHADER_KEY_SKIP_LEN 0
+#endif
+#ifndef DM_GAME_TEX_BC_CPU
+#define DM_GAME_TEX_BC_CPU 0
+#endif
+#ifndef DM_GAME_UE_TEXTURE_POOL
+#define DM_GAME_UE_TEXTURE_POOL 0
+#endif
+#ifndef DM_GAME_ENC_THREAD
+#define DM_GAME_ENC_THREAD 0
+#endif
 #ifndef DM_GAME_ARGS
 #define DM_GAME_ARGS ""
 #endif
@@ -142,6 +158,8 @@ static void defaults(void) {
 #else
     P.nvn_api_major = 0; P.nvn_api_minor = 0;
 #endif
+    P.stdalloc_cap = DM_GAME_STDALLOC_CAP; P.shader_skip_off = DM_GAME_SHADER_KEY_SKIP_OFF; P.shader_skip_len = DM_GAME_SHADER_KEY_SKIP_LEN;
+    P.tex_bc_cpu = DM_GAME_TEX_BC_CPU; P.ue_texture_pool = DM_GAME_UE_TEXTURE_POOL; P.enc_thread = DM_GAME_ENC_THREAD;
     copy_str(P.args, sizeof P.args, DM_GAME_ARGS);
     copy_str(P.genv, sizeof P.genv, DM_GAME_ENV);
     copy_str(P.source, sizeof P.source, "compiled game_profile.h");
@@ -172,6 +190,8 @@ static void set_kv(const char *k, const char *v) {
     else if (!strcmp(k, "sys_resource")) P.sys_resource = num(v, P.sys_resource);
     else if (!strcmp(k, "mem_map_limit")) P.mem_map_limit = truthy(v);
     else if (!strcmp(k, "display_version")) {   // build<TAB>version; one row per build (game.tsv's build rows give the same)
+        static int own;   // the file's rows replace the compiled game's, they do not join them
+        if (!own) { own = 1; P.nver = 0; }
         const char *t = strchr(v, '\t'); if (t && P.nver < DM_PROF_MAX_VER) {
             size_t n = (size_t)(t - v); if (n >= sizeof P.ver[0].build) n = sizeof P.ver[0].build - 1;
             memcpy(P.ver[P.nver].build, v, n); P.ver[P.nver].build[n] = 0;
@@ -188,7 +208,7 @@ static void set_kv(const char *k, const char *v) {
     else if (!strcmp(k, "fps_hold")) P.fps_hold = truthy(v);
     else if (!strcmp(k, "present_snap")) P.present_snap = truthy(v);
     else if (!strcmp(k, "pso_mtl4")) P.pso_mtl4 = truthy(v);
-    else if (!strcmp(k, "shared_font")) P.shared_font_ttf = !strcmp(v, "ttf") || !strcmp(v, "1");
+    else if (!strcmp(k, "shared_font")) P.shared_font_ttf = !strcmp(v, "auto") || !strcmp(v, "-1") ? -1 : !strcmp(v, "ttf") || !strcmp(v, "1");   // auto: by the SDK version (hle_sdk16.c)
     else if (!strcmp(k, "pad_layout")) P.pad_layout = !strcmp(v, "full") || !strcmp(v, "1") ? 1 : !strcmp(v, "touch") || !strcmp(v, "2") ? 2 : 0;
     else if (!strcmp(k, "op_mode")) P.opmode = !strcmp(v, "console") ? 1 : !strcmp(v, "handheld") ? 0 : truthy(v);
     else if (!strcmp(k, "perf_mode")) P.perf_boost = !strcmp(v, "boost") ? 1 : !strcmp(v, "follow") ? 0 : truthy(v);
@@ -200,6 +220,15 @@ static void set_kv(const char *k, const char *v) {
     else if (!strcmp(k, "gpu_timestamps")) P.gpu_ts_segment = !strcmp(v, "segment") || !strcmp(v, "1");
     else if (!strcmp(k, "vconv_range")) P.vconv_range = truthy(v);
     else if (!strcmp(k, "device_api")) { char *e; P.nvn_api_major = (int)strtol(v, &e, 10); if (e && *e == '.') P.nvn_api_minor = atoi(e + 1); }
+    else if (!strcmp(k, "stdalloc_cap")) P.stdalloc_cap = num(v, P.stdalloc_cap);
+    else if (!strcmp(k, "shader_key_skip")) {   // <offset>+<length>; empty or 0+0 = none
+        char *e; uint64_t o = strtoull(v, &e, 0);
+        if (e != v && *e == '+') { uint64_t l = strtoull(e + 1, NULL, 0); P.shader_skip_off = (uint32_t)o; P.shader_skip_len = (uint32_t)l; }
+        else P.shader_skip_off = P.shader_skip_len = 0;
+    }
+    else if (!strcmp(k, "tex_bc_cpu")) P.tex_bc_cpu = truthy(v);
+    else if (!strcmp(k, "ue_texture_pool")) P.ue_texture_pool = (int)num(v, (uint64_t)P.ue_texture_pool);
+    else if (!strcmp(k, "enc_thread")) P.enc_thread = truthy(v);
     else if (!strcmp(k, "game_args")) copy_str(P.args, sizeof P.args, v);
     else if (!strcmp(k, "game_env")) copy_str(P.genv, sizeof P.genv, v);
     // any other key (ipa, zip_store, shader_*, build, package, ...) is not a host constant: ignored
@@ -236,7 +265,7 @@ static void read_env(void) {
     static const char *keys[] = {"TITLE_ID","NAME","ROMFS_MARKER","PROGRAM_ID","MODULES","MEM_RESERVE","MEM_ALIAS","MEM_STACK","APP_POOL",
         "MEM_USED","SYS_RESOURCE","MEM_MAP_LIMIT","PRESENT_INTERVAL","CORE_PREEMPT","ALLOC_BIG_ALIGN","FPS_TARGET","FPS_HOLD","PRESENT_SNAP",
         "PSO_MTL4","SHARED_FONT","PAD_LAYOUT","OP_MODE","PERF_MODE","FEEDBACK_SNAP","TEX_FLUSH_UPLOAD","RENDER_COND","TEX_DIRTY_UPLOAD",
-        "TEX_DYN_SLOTS","GPU_TIMESTAMPS","VCONV_RANGE","DEVICE_API","GAME_ARGS","GAME_ENV", NULL};
+        "TEX_DYN_SLOTS","GPU_TIMESTAMPS","VCONV_RANGE","DEVICE_API","STDALLOC_CAP","SHADER_KEY_SKIP","TEX_BC_CPU","UE_TEXTURE_POOL","ENC_THREAD","GAME_ARGS","GAME_ENV", NULL};
     char k[64], name[96];
     for (int i = 0; keys[i]; i++) {
         snprintf(k, sizeof k, "%s", keys[i]);
@@ -278,4 +307,6 @@ void dm_profile_log(void) {
     LOG("  graphics flush %d dirty %d rcond %d dynslots %d gputs %d vconv %d nvn_api %d.%d  versions %d",
         p->tex_flush_upload, p->tex_dirty_upload, p->render_cond, p->tex_dyn_slots, p->gpu_ts_segment, p->vconv_range,
         p->nvn_api_major, p->nvn_api_minor, p->nver);
+    LOG("  more stdalloc_cap %#llx key_skip %#x+%#x bc_cpu %d ue_pool %d enc_thread %d",
+        (unsigned long long)p->stdalloc_cap, p->shader_skip_off, p->shader_skip_len, p->tex_bc_cpu, p->ue_texture_pool, p->enc_thread);
 }

@@ -489,7 +489,8 @@ static void test_puck_transaction_isolation(void) {
     hid_device(9,0x1304,2,0xff00,1,NO); hid_device(10,0x1304,3,0xff00,1,NO); steam_discover();
     DMController *peer=g_steam_hids[@9].raw, *raw=g_steam_hids[@10].raw;
     peer->connected=raw->connected=YES; controllers_changed(nil);
-    int slot=peer->slot; peer->input.buttons=DM_BTN_B; controller_publish(peer);
+    int slot=peer->slot; assert(slot>=0 && slot<DM_PLAYERS);
+    peer->input.buttons=DM_BTN_B; controller_publish(peer);
     unsigned routes=route_changes[slot], updates=pad_updates[slot];
     // A late native collection fails on port 3; only port 3 rolls back.
     NSMutableDictionary *source=[hid_device(11,0x1304,3,1,2,YES) mutableCopy];
@@ -509,7 +510,8 @@ static void test_unknown_hid_identity(BOOL raw_first) {
     if(raw_first) {
         [hid_registry removeObjectForKey:@9];
         hid_device(10,0x1303,0,0xff00,1,NO); steam_discover();
-        DMController *raw=g_steam_hids[@10].raw; raw->connected=YES; controllers_changed(nil);
+        DMController *raw=g_steam_hids[@10].raw; assert(raw);
+        raw->connected=YES; controllers_changed(nil);
         assert(raw->slot==0); raw->input.buttons=DM_BTN_A; controller_publish(raw);
         hid_registry[@9]=device;
     }

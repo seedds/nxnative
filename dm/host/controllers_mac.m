@@ -63,7 +63,7 @@ static void controller_attach_motion(DMController *d);
 static NSString *controller_map_key(DMController *d) { return [@"controller." stringByAppendingString:d.model]; }
 static void controller_load_map(DMController *d) {
     pad_physical_default(d->map, 0);
-    for(int i=0;i<IM_BUTTONS;i++) d->map[i]=g_button_map.to[i];
+    for(int i=0;i<IM_BUTTONS;i++) d->map[i]=g_button_map.to[i]; // NOLINT(bugprone-signed-char-misuse): -1 is the unbound mapping, not a character.
     d->pad_mode[0]=[d.model isEqual:@"Valve Triton"] ? PAD_DPAD : PAD_OFF;
     d->pad_mode[1]=[d.model isEqual:@"Valve Triton"] ? PAD_TOUCH : PAD_OFF;
     d->gyro_enabled=YES;
@@ -99,12 +99,12 @@ static void controller_reload_maps(void) {
 static BOOL controller_save_buttons(void) {
     NSMutableArray *entries=[NSMutableArray array];
     for(int i=0;i<IM_BUTTONS;i++) if(g_button_map.to[i]!=i) {
-        int to=g_button_map.to[i];
+        int to=g_button_map.to[i]; // NOLINT(bugprone-signed-char-misuse): preserve the -1 unbound mapping.
         NSString *name=to==63 ? @"Shake" : to<0 ? @"none" : @(im_names[to]);
         [entries addObject:[NSString stringWithFormat:@"%s=%@",im_names[i],name]];
     }
     BOOL ok=input_preference_write(g_controls_domain,@"launcher.DM_PAD_MAP",entries.count ? [entries componentsJoinedByString:@","] : nil);
-    for(DMController *d in g_devices) for(int i=0;i<IM_BUTTONS;i++) d->map[i]=g_button_map.to[i];
+    for(DMController *d in g_devices) for(int i=0;i<IM_BUTTONS;i++) d->map[i]=g_button_map.to[i]; // NOLINT(bugprone-signed-char-misuse): -1 is the unbound mapping, not a character.
     return ok;
 }
 static BOOL controller_set_button(int source, int target) {
@@ -777,10 +777,12 @@ void front_controllers_start(void) {
     g_legacy_maps=[NSDictionary dictionaryWithContentsOfFile:[root stringByAppendingPathComponent:@"controllers.plist"]];
     g_merge=getenv("DM_PAD_MERGE") && atoi(getenv("DM_PAD_MERGE"));
     static const char keyboard=0;
-    if (!g_merge && getenv("DM_KBD_PLAYER") && !strcmp(getenv("DM_KBD_PLAYER"),"own")) pad_slot_take(&g_slots,&keyboard,"keyboard");
+    const char *keyboard_player=getenv("DM_KBD_PLAYER");
+    if (!g_merge && keyboard_player && !strcmp(keyboard_player,"own")) pad_slot_take(&g_slots,&keyboard,"keyboard");
     // Independent devices are essential: the manager must not pre-open an
     // interface non-exclusively before steam_attach claims it exclusively.
-    if (!(getenv("DM_STEAM_HID") && !strcmp(getenv("DM_STEAM_HID"),"0"))) {
+    const char *steam_hid=getenv("DM_STEAM_HID");
+    if (!(steam_hid && !strcmp(steam_hid,"0"))) {
         g_steam_attempted=[NSMutableSet set];
         g_hid=IOHIDManagerCreate(kCFAllocatorDefault,kIOHIDManagerOptionIndependentDevices);
         NSMutableArray *matches=[NSMutableArray array];

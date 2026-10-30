@@ -2336,6 +2336,29 @@ def main(args=None):
     env.setdefault('DOTNET_CLI_TELEMETRY_OPTOUT', '1')
     env.setdefault('DOTNET_NOLOGO', '1')
     configure_dotnet(env)
+    xlate_bin = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'   # the fork's check of the root configure_dotnet chose (fork commit d0ed53df; the fork patch nsp-dotnet-root-verify)
+    def xlate_answers(root):
+        e = dict(env)
+        if root: e['DOTNET_ROOT'] = str(root)
+        else: e.pop('DOTNET_ROOT', None)
+        try:
+            r = subprocess.run([str(xlate_bin), '--source-sha'], capture_output=True, text=True, env=e, timeout=120)
+            return r.returncode == 0 and bool(r.stdout.strip())
+        except Exception:
+            return False
+    if xlate_bin.exists() and not xlate_answers(env.get('DOTNET_ROOT')):
+        cands = []
+        if dn := shutil.which('dotnet', path=env['PATH']):
+            real = Path(dn).resolve()
+            for base in (real.parent.parent, real.parent.parent.parent):
+                cands += [base / 'libexec', base]   # Homebrew's bin/../libexec; share/dotnet and aliases
+        cands += [Path.home() / '.dotnet', Path('/usr/local/share/dotnet'), Path('/opt/homebrew/opt/dotnet/libexec')]
+        if hit := next((c for c in cands if c.is_dir() and xlate_answers(c)), None):
+            env['DOTNET_ROOT'] = os.environ['DOTNET_ROOT'] = str(hit)
+            say(f'DOTNET_ROOT: {hit} (verified — the shader translator runs)')
+        elif env.get('DOTNET_ROOT'):
+            del env['DOTNET_ROOT']; os.environ.pop('DOTNET_ROOT', None)
+            say('DOTNET_ROOT: removed (none verified — the apphost searches its default locations)')
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable
     with package_title_reader(repo, keys, env) as from_package: app, fam = scan_nsps(nsp_dir, from_package)

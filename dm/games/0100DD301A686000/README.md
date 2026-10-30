@@ -117,6 +117,13 @@ verification; device validation remains open.
   and shaders are unchanged; both executables were refreshed and host and
   documentation/patch tests passed. The gameplay measurements above precede
   that final integration.
+- **Current validation limit:** rebasing onto `85578fc9` incorporated upstream
+  border-colour and logic-operation shader changes, producing chain
+  `572d66410ce2`. The Mac host builds; the synthetic CAS, border-colour,
+  logic-operation and feedback GPU tests pass. The full-game shader rebuild,
+  gameplay regression and IPA rebuild have not been repeated: the previous
+  extracted builds and shader caches are no longer available locally. The
+  gameplay, IPA and `validated.tsv` results above remain for chain `d54f11c2255c`.
 - **Open:** longer play sessions, later stages, later-checkpoint persistence,
   and iOS device performance/memory. The IPA requires iOS 26 or later.
 

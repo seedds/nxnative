@@ -10,6 +10,7 @@ The chain, each link unique or nothing is gated:
 - in that function, the one bl to the PLT stub of nn::os::AllocateAddressRegion(uintptr_t *, size_t) whose straight-line code (back to the branch before it) sets x0 to the region's
   base variable (adrp + add, or a mov of one) and stores the size in the word after it, the region's size variable: the last str xS, [xB, #lo + 8] before the call. x1 at the call
   is that size (S = 1, or x1 and xS set from one constant), and nothing after the store writes x1. The gate goes on the store, the register S passed in the gate number's upper bits.
+The instruction helper binds each decoded instruction; a successful discovery always supplies both the store offset and its size register, which the gate consumer asserts.
 The forms found: a csel of the default and the option's size rounded up to 4 KB, then str x1 (Unreal Engine 4.27 and 5: DRAGON QUEST VII Reimagined, OCTOPATH TRAVELER 0,
 FINAL FANTASY RESONANCE, SHIN MEGAMI TENSEI V: Vengeance); the default stored only when the variable is 0, then rounded up into x1 and stored again (OCTOPATH TRAVELER II, 4.27);
 str x8 of the default with x1 set from the same constant, reached only when the variable is 0 (Pikmin 4, 4.26); str x1 of the 16 GB default, reached only when the variable is 0
@@ -33,7 +34,7 @@ def size_store(img, call, start, md):
     vals, stores, x1_at = {}, [], None   # register → ('c', constant) | ('page',) | ('lo', the low 12 bits of an address)
     for ins in md.disasm(img[a:call], a):
         ops, m = ins.operands, ins.mnemonic
-        reg = lambda o: ins.reg_name(o.reg)
+        reg = lambda o, ins=ins: ins.reg_name(o.reg)
         if m == 'str' and reg(ops[0]).startswith('x') and ops[1].type == ARM64_OP_MEM and not ins.writeback and ops[1].mem.index == 0:   # str xS, [xB, #o]
             stores.append((ins.address, int(reg(ops[0])[1:]) if reg(ops[0]) != 'xzr' else None, ops[1].mem.disp, vals.get(reg(ops[0]))))
             continue

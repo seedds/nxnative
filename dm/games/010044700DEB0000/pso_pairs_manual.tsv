@@ -1,0 +1,7 @@
+# Vertex / pixel shader pairs this game needs and its files do not declare, merged into pso_pairs.tsv by shader_split.py (manual_pairs): vertex key <TAB> pixel key
+# Metal refuses a pipeline whose pixel shader reads a varying the vertex shader does not write. The shadow-application passes draw the two fragments below with
+# one fullscreen pull vertex shader (outputs locn0..2, no locn3), and they are the only consumers of the shadow atlas (texture serial 913): while their pipelines
+# fail, no shadow is drawn anywhere and the lighting composite silently does not run. The pair gives that vertex shader a dm_pad3 output (0,0,0,1) in dmsh_build.py's
+# vs_pad, and both pipelines link. Kept here because shader_split.py regenerates pso_pairs.tsv wholesale on every run.
+fa4f282f3b5ed0bd	421ae232a7b7df44
+fa4f282f3b5ed0bd	c275f18d9d3ca090

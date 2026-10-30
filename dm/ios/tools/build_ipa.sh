@@ -10,6 +10,9 @@
 #   DM_FRAMEWORK=1 (route C, docs/launcher-c-plan.md M1) compiles the game's modules into DmIOS.app/Frameworks/DmGame.framework instead of the executable
 #     (project-framework.yml): Gen/framework/ holds the framework's dm/ tables, profile.tsv and game.manifest.json; the framework is signed ad-hoc first
 #     (no entitlements: a dylib cannot hold them) and the app's executable second. Default 0: the build above, unchanged.
+#   DM_FRAMEWORK_ONLY=<folder> (route C's shell, docs/launcher-c-plan.md M2/M3) builds only this game's framework, unsigned, as
+#     <folder>/DmGame<title ID>.framework with its shader libraries (msl/), pipeline archive (pso/), launcher.json and icon inside, for
+#     build_shell.sh to embed in the shell app; no app, no IPA, no game files
 #   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none), GFXAPI=nvn / vulkan (default: by the shader libraries in MSL_IOS)
 #   The app name is the game name in the base NSP's control data ($W/data/v0/control.nacp, else the one next to the RomFS), the app version is the display version in the packed game's control data (the one next to the RomFS:
 #   nx_extract saves the update's there when an update is packed, else the base game's), the bundle ID is org.nxnative.<base game title ID in lowercase> (DM_DISPLAY_NAME / DM_APP_VERSION / DM_BUNDLE_ID override them);
@@ -32,6 +35,12 @@ if [ -z "${ROMFS:-}" ] && [ -f "$W/data/$PKG/RomFS.img" ]; then ROMFS=$W/data/$P
 PATCHED=${PATCHED:-$W/build/patched_$PKG}; ROMFS=${ROMFS:-$W/data/$PKG/RomFS}; MSL_IOS=${MSL_IOS:-$W/build/ios/dmsh_b}; AOC=${AOC-$W/data/aoc}
 PREPARE_XCODE=NO; [ "${1:-}" != --prepare-xcode ] || PREPARE_XCODE=YES
 FRAMEWORK=${DM_FRAMEWORK:-0}   # 1: the game's modules live in DmGame.framework (route C); 0: in the executable, as always
+# Route C's shell (DM_FRAMEWORK_ONLY=<folder>): only this game's framework, self-contained, for build_shell.sh to embed (no app, no IPA)
+FRAMEWORK_ONLY=${DM_FRAMEWORK_ONLY:-}; FW_NAME=DmGame
+if [ -n "$FRAMEWORK_ONLY" ]; then
+  [ "$PREPARE_XCODE" != YES ] || die "DM_FRAMEWORK_ONLY builds the game framework for the shell; it cannot be combined with --prepare-xcode"
+  FRAMEWORK=1; FW_NAME=DmGame$(echo "$GAME" | tr 'a-z' 'A-Z')   # unique in the shell's Frameworks/, where several games sit side by side
+fi
 OUT_IPA=${1:-$(dirname "$W")/$(gp ipa)}; O=$W/build/ios/pkg; DD=$O/dd
 XCODE_DD=${DM_XCODE_DERIVED_DATA:-$W/build/ios/xcode-dd}
 MODS=$(gp modules); MARKER=$(gp romfs_marker)
@@ -142,7 +151,9 @@ else t "no app icon ($ICON not found): the home-screen icon stays blank"; fi
 if [ "$FRAMEWORK" = 1 ]; then
   rm -rf Gen/framework && mkdir -p Gen/framework/dm || die "mkdir Gen/framework"
   cp -R Gen/dm/. Gen/framework/dm/ || die "copy the framework tables"
-  rm -rf Gen/framework/dm/font Gen/framework/dm/launcher.json Gen/framework/dm/env.txt
+  rm -rf Gen/framework/dm/font Gen/framework/dm/env.txt
+  # The one-game app reads its launcher.json from the app's dm/; the shell reads each game's from its framework (manifest key launcher)
+  [ -n "$FRAMEWORK_ONLY" ] || rm -f Gen/framework/dm/launcher.json
   python3 "$DM/games/game.py" profile "$GAME" Gen/framework/profile.tsv > /dev/null || die "game profile"
   # The manifest names the game data this framework was built for: the RomFS image's identity (dm/host/romfs_identity.h), as the
   # pack step's romfs.id does. That step's default is repeated here because the manifest is a build resource and has to exist now.
@@ -154,7 +165,7 @@ if [ "$FRAMEWORK" = 1 ]; then
   NRO_TABLE=$PATCHED/nro.tsv; [ -f "$NRO_TABLE" ] || NRO_TABLE=   # the NRO modules gen_embed.py packs: nro_count in the manifest
   python3 tools/gen_manifest.py Gen/framework/game.manifest.json --game "$GAME" --name "$DM_DISPLAY_NAME" \
     --display-version "$DM_APP_VERSION" --package-version "${PKG:-}" --modules "$MODS" ${NRO_TABLE:+--nro-table "$NRO_TABLE"} \
-    --chain "b-$V" --romfs-marker "$MARKER" --romfs-identity "$ROMFS_ID" > /dev/null || die "game manifest (gen_manifest.py)"
+    --chain "b-$V" --romfs-marker "$MARKER" --romfs-identity "$ROMFS_ID" --framework-name "$FW_NAME" > /dev/null || die "game manifest (gen_manifest.py)"
   printf 'OTHER_LDFLAGS = $(inherited) %s\n' "$F" > Gen/framework.xcconfig || die "framework link flags"
   t "framework: Gen/framework (modules $MODS, profile.tsv, game.manifest.json)"
 fi
@@ -185,6 +196,30 @@ if [ "$PREPARE_XCODE" = YES ]; then
   t "Xcode derived data: $XCODE_DD"
   t "scheme: $DM_SCHEME_NAME"
   t "ready: select your Team in Signing & Capabilities, select a physical device, and Run (Release)"
+  exit 0
+fi
+
+# DM_FRAMEWORK_ONLY: the framework target alone, unsigned (build_shell.sh's project embeds it and Xcode signs it with the shell), then the
+# game's per-game resources into it, so one folder is one game: the shader libraries (msl/<MSLDIR>, the shell's DM_MSL_DIR), the pipeline
+# archive (pso/, DM_PSO_BUNDLE) and the icon the shell's library shows. The game files and add-on content stay out (data, Documents/games/<id>/)
+if [ -n "$FRAMEWORK_ONLY" ]; then
+  t "xcodebuild (Release, unsigned, the game framework $FW_NAME only)"
+  mkdir -p "$O" "$FRAMEWORK_ONLY" || die "mkdir $FRAMEWORK_ONLY"
+  xcodebuild -project DmIOS.xcodeproj -target DmGame -configuration Release -sdk iphoneos \
+    CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= PRODUCT_NAME="$FW_NAME" PRODUCT_BUNDLE_IDENTIFIER="$DM_BUNDLE_ID.game" \
+    DM_XCODE_OUTPUT_ROOT="$DD" SYMROOT="$DD/Build/Products" OBJROOT="$DD/Build/Intermediates.noindex" build > "$O/build-framework.log" 2>&1 \
+    || { grep -E 'error:' "$O/build-framework.log" | head -20; die "xcodebuild, log $O/build-framework.log"; }
+  BUILT=$DD/Build/Products/Release-iphoneos/$FW_NAME.framework
+  [ -f "$BUILT/$FW_NAME" ] || die "no built framework $BUILT"
+  OUTFW=$FRAMEWORK_ONLY/$FW_NAME.framework; mkdir -p "$OUTFW"
+  rsync -a --delete --exclude /msl --exclude /pso --exclude /icon.png -- "$BUILT/" "$OUTFW/" || die "copy the framework to $OUTFW"
+  mkdir -p "$OUTFW/msl/$MSLDIR" && rsync -a --delete -- "$MSL_IOS/$MSLDIR/" "$OUTFW/msl/$MSLDIR/" || die "copy the shader libraries"
+  for old in "$OUTFW/msl/"*; do [ "$old" = "$OUTFW/msl/$MSLDIR" ] || rm -rf "$old"; done
+  if [ -n "$PSO" ]; then mkdir -p "$OUTFW/pso" && rsync -a --delete -- "$PSO/" "$OUTFW/pso/" || die "copy the pipeline archive"; else rm -rf "$OUTFW/pso"; fi
+  if [ -f "$ICON" ]; then sips -s format png -z 512 512 "$ICON" --out "$OUTFW/icon.png" > /dev/null || die "sips: cannot convert the icon $ICON"; else rm -f "$OUTFW/icon.png"; fi
+  python3 -c 'import json, sys; m = json.load(open(sys.argv[1])); sys.exit(m["framework_executable"] != sys.argv[2])' "$OUTFW/game.manifest.json" "$FW_NAME" \
+    || die "$OUTFW/game.manifest.json does not name $FW_NAME"
+  t "done: $OUTFW ($(du -sh "$OUTFW" | cut -f1); build_shell.sh embeds it in the shell)"
   exit 0
 fi
 

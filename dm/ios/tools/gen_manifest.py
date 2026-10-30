@@ -48,6 +48,8 @@ def manifest(args):
     if not modules or any(not re.match(r'^[A-Za-z0-9]+$', m) for m in modules):
         raise SystemExit(f'[RED] gen_manifest: --modules {args.modules!r} names no module or a module with an underscore '
                          '(the loader\'s embedded section names cannot hold one)')
+    if not re.match(r'^[A-Za-z][A-Za-z0-9_]*$', args.framework_name):
+        raise SystemExit(f'[RED] gen_manifest: --framework-name {args.framework_name!r} is not a bundle executable name')
     if not CHAIN.match(args.chain):
         raise SystemExit(f'[RED] gen_manifest: --chain {args.chain!r} is not written b-<version> (dm/gfx/nvn/dmsh_chain.h)')
     if args.romfs_identity and not args.romfs_identity.startswith('DMROMFSID1 '):
@@ -62,8 +64,8 @@ def manifest(args):
         'nro_count': nro_count(args.nro_table),
         'chain': args.chain,
         'loader': 'FR',                # a pure module container: the shell is the host (design §1.1 FR)
-        'framework': FRAMEWORK,
-        'framework_executable': FRAMEWORK_EXECUTABLE,
+        'framework': args.framework_name + '.framework',
+        'framework_executable': args.framework_name,
         'image_marker': IMAGE_MARKER,
         'profile': PROFILE,
         'shader_map': SHADER_MAP,
@@ -90,6 +92,9 @@ def main(argv=None):
     ap.add_argument('--romfs-marker', required=True, help='the profile\'s romfs_marker: a folder with it is this game\'s data')
     ap.add_argument('--romfs-identity', default='', help='the RomFS image identity line build_ipa.sh writes (empty for a folder)')
     ap.add_argument('--min-os', default='26.0', help='the minimum iOS version (project.yml\'s deployment target)')
+    ap.add_argument('--framework-name', default=FRAMEWORK_EXECUTABLE,
+                    help='the framework\'s product name: DmGame in the one-game app (M1), DmGame<title ID> in the shell, where several '
+                         'games\' frameworks sit side by side in Frameworks/')
     ap.add_argument('--built-by', help='who built it, for a log line (optional; a device or tool name)')
     args = ap.parse_args(argv)
     data = manifest(args)

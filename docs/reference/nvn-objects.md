@@ -151,6 +151,13 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix:** the hash is of the values, field by field, and a field at 0 adds nothing, so a field widened or added later keeps the hash of every shader that does not use it; `t_capture_live` pins the hash of one reflection. A capture records its hash kind (header `iface 2`), and `nvn_replay` refuses one of another kind with `capture again`: the captures made before have to be recorded again once.
 - **Found on:** the regression captures of [Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [Pokemon Scarlet](../../dm/games/0100A3D008C5C000/README.md), [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) and [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (2026-10-30, all four refused at f5aee5aa).
 
+### A capture fingerprint with a stale command count
+
+- **Symptom:** a frame capture reports `ops 52` even though its record walker accepts 53 command opcodes.
+- **Cause:** `OP_DRAW_TEX` and `OP_ALPHA_REF` increased `OP_COUNT_` to 53, but the layout fingerprint was advanced by only one.
+- **Fix:** the fingerprint reports 53; the synthetic capture test checks its count against `OP_COUNT_`. The replayer compares the whole fingerprint, so captures with the old text must be recorded again. No record payload or pointer relocation changes.
+- **Found on:** source review in [issue #687, finding 3](https://github.com/seedds/nxnative/issues/687), reproduced by the CPU-only `t_capture` fixture; no game-specific failure was reported.
+
 ## Command memory
 
 ### Host-lent command memory segments

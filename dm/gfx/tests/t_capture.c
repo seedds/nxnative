@@ -116,6 +116,8 @@ int main(void) {
 
     cap_writer w; CHECK(cap_open(&w, path), "open for writing");
     const char *lay = cap_layout(); cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
+    int format = 0, ops = 0;
+    CHECK(sscanf(lay, "format %d\nops %d", &format, &ops) == 2 && ops == OP_COUNT_, "layout describes every record op the walker accepts");
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};
         memcpy(b, &h, sizeof h); memcpy(b + sizeof h, (const void *)(uintptr_t)regs[r].lo, (size_t)regs[r].size); cap_put(&w, CAP_REGN, 1, b, sizeof h + regs[r].size, 1); }
     for (int i = 0; i < 3; i++) { uint8_t b[8 + 4096]; uint32_t hd[2] = {(uint32_t)i, (uint32_t)all[i]->n}; memcpy(b, hd, 8); memcpy(b + 8, enc_bytes[i], all[i]->n); cap_put(&w, CAP_SEGM, 1, b, 8 + all[i]->n, 1); }

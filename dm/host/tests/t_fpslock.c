@@ -46,7 +46,9 @@ static void check(int which) {
     setenv("DM_FPS_TARGET", which == 1 || which == 10 ? "30" : which == 2 || which == 11 ? "0" : "60", 1);
     int32_t *unity = (int32_t *)(base + 0x4afc868);
     *unity = which == 1 ? 60 : which == 4 ? -1 : which == 5 ? 0 : 30;
-    uint8_t object[0x500] = {0};
+    uint8_t object[0x500] = {0}, later[0x500] = {0};
+    uint8_t *stale = NULL; size_t page = (size_t)getpagesize();
+    uint32_t rate_off = 0x38, max_off = 0x34;
     float *f = NULL; int32_t *sync = NULL;
     if (which == 3) g_mod[0].build_id[0] = '0';
     if (which == 6) {
@@ -66,11 +68,38 @@ static void check(int which) {
         strcpy(g_mod[0].build_id, "a48c0de3bc353efa0e4d359bde05ef24");
         *(uintptr_t *)(base + 0xda20e38) = (uintptr_t)object;
         double *d = (double *)(object + 8); d[0] = d[1] = 30;
-    } else if (which == 15 || which == 16) {
+    } else if (which >= 15 && which <= 19) {
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         frostbite(base, object);
         *(float *)(object + 0x34) = 30; *(int32_t *)(object + 0x38) = 30;
         if (which == 16) *(uint64_t *)(object + 8) = 0;   // the cache word holds something else
+        if (which >= 17) {
+            // A second real settings lookup: the first cache must not hide it when a field cannot be read.
+            uint32_t *t = (uint32_t *)base;
+            adrp_add(t, 240, 1, 0x40000); adrp_add(t, 242, 2, 0x41008); t[244] = 0x94000000u;
+            *(uint64_t *)(later + 8) = (uint64_t)(uintptr_t)(base + 0x40000);
+            *(float *)(later + max_off) = 30; *(int32_t *)(later + rate_off) = 30;
+            *(uint64_t *)(base + 0x41008) = (uint64_t)(uintptr_t)later;
+            if (which != 19) {
+                stale = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+                assert(stale != MAP_FAILED);
+                uint8_t *first = stale + page - 0x38;
+                if (which == 18) {   // ForceSimRate remains readable; only MaxSimFps crosses into the protected page.
+                    rate_off = 0x34; max_off = 0x38;
+                    *(uint32_t *)(base + 0x3110) = max_off; *(uint32_t *)(base + 0x3130) = rate_off;
+                    *(float *)(later + max_off) = 30; *(int32_t *)(later + rate_off) = 30;
+                }
+                *(uint64_t *)(first + 8) = (uint64_t)(uintptr_t)(base + 0x40000);
+                *(int32_t *)(first + rate_off) = 30; *(float *)(first + max_off) = 30;
+                *(uint64_t *)(base + 0x41000) = (uint64_t)(uintptr_t)first;
+                assert(mprotect(stale + page, page, PROT_NONE) == 0);
+                uint64_t type; int32_t rate; float max;
+                assert(rd((uint64_t)(uintptr_t)(first + 8), &type, sizeof type));
+                assert(type == (uint64_t)(uintptr_t)(base + 0x40000));
+                assert(rd((uint64_t)(uintptr_t)(first + rate_off), &rate, sizeof rate) == (which == 18));
+                assert(rd((uint64_t)(uintptr_t)(first + max_off), &max, sizeof max) == (which == 17));
+            }
+        }
     } else if (which >= 9) {
         strcpy(g_mod[0].build_id, "b7f965b9d7227db8e29f04e84ea7331b");
         if (which == 12) g_mod[0].build_id[31] = '0';
@@ -101,19 +130,31 @@ static void check(int which) {
         dm_fps_lock_tick(); assert(writes == 2);
         *(int32_t *)(object + 0x38) = 30; dm_fps_lock_tick(); assert(*(int32_t *)(object + 0x38) == 60 && writes == 3);
     } else if (which == 16) assert(*(float *)(object + 0x34) == 30 && *(int32_t *)(object + 0x38) == 30 && writes == 0);
-    else if (which == 13) {
+    else if (which == 17 || which == 18) {
+        assert(fb.ncache == 2);
+        assert(*(int32_t *)(later + rate_off) == 60 && *(float *)(later + max_off) == 60 && writes == 2);
+        dm_fps_lock_tick(); assert(writes == 2);
+        *(int32_t *)(later + rate_off) = 30; *(float *)(later + max_off) = 30;
+        dm_fps_lock_tick();
+        assert(*(int32_t *)(later + rate_off) == 60 && *(float *)(later + max_off) == 60 && writes == 4);
+    } else if (which == 19) {
+        assert(fb.ncache == 2);
+        assert(*(int32_t *)(object + rate_off) == 60 && *(float *)(object + max_off) == 60 && writes == 2);
+        assert(*(int32_t *)(later + rate_off) == 30 && *(float *)(later + max_off) == 30);
+    } else if (which == 13) {
         assert(sync[0] == 2 && sync[1] == 2 && writes == 0);
         *(uintptr_t *)(base + 0x8adca10 + 0x10) = (uintptr_t)object;
         dm_fps_lock_tick();
         assert(sync[0] == 1 && sync[1] == 1 && writes == 2);
     }
     else assert(sync[0] == 2 && sync[1] == 2 && writes == 0);
+    if (stale) assert(munmap(stale, page * 2) == 0);
     munmap(base, len);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 17; i++) {
+    for (int i = argc > 1 ? atoi(argv[1]) : 0; i < (argc > 1 ? atoi(argv[1]) + 1 : 20); i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

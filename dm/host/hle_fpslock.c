@@ -200,7 +200,7 @@ static void fb_tick(int target, const char *src) {
     for (int j = 0; j < fb.ncache; j++) {
         uint64_t inst = 0, tinfo = 0; int32_t rate; float max;
         if (!rd((uint64_t)(uintptr_t)(fb.base + fb.cache[j]), &inst, sizeof inst) || !inst || !rd(inst + 8, &tinfo, sizeof tinfo) || tinfo != ti) continue;   // not made yet, or another word
-        if (!rd(inst + fb.off_rate, &rate, sizeof rate) || !rd(inst + fb.off_max, &max, sizeof max)) return;
+        if (!rd(inst + fb.off_rate, &rate, sizeof rate) || !rd(inst + fb.off_max, &max, sizeof max)) continue;   // a stale cache must not hide a later live instance
         if (rate != target) { int32_t *p = (int32_t *)(uintptr_t)(inst + fb.off_rate); dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, target, __ATOMIC_RELAXED); }
         if (max != (float)target) { float w = (float)target, *p = (float *)(uintptr_t)(inst + fb.off_max); dm_guest_write_prepare(p, sizeof *p); __atomic_store_n((uint32_t *)p, *(uint32_t *)&w, __ATOMIC_RELAXED); }
         if ((rate != target || max != (float)target) && nlog < 8) { nlog++; LOG("main: Frostbite simulation rate ForceSimRate %d, MaxSimFps %g → %d (%s)", rate, max, target, src); }

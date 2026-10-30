@@ -2,13 +2,12 @@
 // to the sysmodule, which loads it with nn::ro, calls its nnjitplugin* functions and lets it write code through a RW view of two code memories the game sees R-X and R--.
 // The host has no sysmodule: the public nn::jit functions are taken over, the plugin NRO is loaded as nn::ro loads one (loader.c nro_find / nro_load: the rewritten copy
 // the NSP script collected by its SHA-256, which the game's NRR registers) and called directly, on a host thread of its own with a large stack as the sysmodule's. The game's work buffer stays the plugin's RW view; the game's view is a second mapping
-// of the same pages (mach_vm_remap), R-X for the first code memory and R-- for the second. Call order and argument layout per switchbrew.org/wiki/JIT_services.
+// of the same pages (vm_remap, as loader.c: iOS has no mach_vm.h), R-X for the first code memory and R-- for the second. Call order and argument layout per switchbrew.org/wiki/JIT_services.
 // The code the plugin writes is not rewritten, so it must need no rewrite: no svc, no tpidr, no x18 (Super Mario 64's has none; its plugin and N64 code NRO use x18).
 #include "hle.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <pthread.h>
 #include <sys/mman.h>
 
@@ -63,8 +62,8 @@ static module_t *plugin_module(const uint8_t *nro, size_t size) {
 // ---------- Views of the game's work buffer ----------
 static uint64_t alias_of(void *rw, uint64_t size, int prot) {   // a second mapping of the same pages for the game, with the game's permissions
     if (!size) return 0;
-    mach_vm_address_t a = 0; vm_prot_t cur, max;
-    if (mach_vm_remap(mach_task_self(), &a, size, 0, VM_FLAGS_ANYWHERE, mach_task_self(), (mach_vm_address_t)rw, FALSE, &cur, &max, VM_INHERIT_NONE) != KERN_SUCCESS) die("jit: mach_vm_remap %#llx", (unsigned long long)size);
+    vm_address_t a = 0; vm_prot_t cur, max;
+    if (vm_remap(mach_task_self(), &a, (vm_size_t)size, 0, VM_FLAGS_ANYWHERE, mach_task_self(), (vm_address_t)rw, FALSE, &cur, &max, VM_INHERIT_NONE) != KERN_SUCCESS) die("jit: vm_remap %#llx", (unsigned long long)size);
     if (mprotect((void *)a, size, prot)) die("jit: mprotect code memory view");
     return a;
 }

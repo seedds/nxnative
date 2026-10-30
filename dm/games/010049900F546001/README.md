@@ -29,7 +29,7 @@ The host has no such sysmodule. Instead:
 
 - The plugin is the rewritten copy that `nro_collect.py` collected by its SHA-256, loaded through `nro_find` / `nro_load`.
 - It is called directly on a host thread with an 8 MB stack, as the sysmodule's thread would be.
-- The game's work buffer stays the plugin's RW view. The game's view is a second mapping of the same pages (`mach_vm_remap`).
+- The game's work buffer stays the plugin's RW view. The game's view is a second mapping of the same pages (`vm_remap`).
 - The call order and argument layout follow [switchbrew's JIT services page](https://switchbrew.org/wiki/JIT_services).
 
 The code the plugin writes is not rewritten, so it must need no rewrite. Super Mario 64's has none.

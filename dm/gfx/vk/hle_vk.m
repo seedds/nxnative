@@ -500,7 +500,11 @@ static VkDeviceSize img_bytes(const fmt_t *f, uint32_t w, uint32_t h, uint32_t d
 static VkImage *g_conv; static size_t g_nconv, g_capconv; static pthread_mutex_t g_convmu = PTHREAD_MUTEX_INITIALIZER;
 static void conv_add(VkImage im) {
     pthread_mutex_lock(&g_convmu);
-    if (g_nconv == g_capconv) { g_capconv = g_capconv ? g_capconv * 2 : 256; g_conv = realloc(g_conv, g_capconv * sizeof *g_conv); }
+    if (g_nconv == g_capconv) {
+        size_t cap = g_capconv ? g_capconv * 2 : 256; VkImage *n = realloc(g_conv, cap * sizeof *n);
+        if (!n) die("[vk] out of memory %zu", cap * sizeof *n);
+        g_conv = n; g_capconv = cap;
+    }
     g_conv[g_nconv++] = im; pthread_mutex_unlock(&g_convmu);
 }
 static void conv_remove(VkImage im) {
@@ -534,7 +538,8 @@ static void conv_sync(void) {
         if (!memcmp(src, im->shadow, im->size)) continue;
         memcpy(im->shadow, src, im->size);
         uint32_t ob = im->f->conv == CV_R4G4 ? 2 : 4; size_t need = (size_t)im->w * im->h * ob;
-        if (need > tcap) { tcap = need; tmp = realloc(tmp, tcap); }
+        if (!need) continue;
+        if (need > tcap) { uint8_t *n = realloc(tmp, need); if (!n) die("[vk] out of memory %zu", need); tmp = n; tcap = need; }
         conv_unpack(im, im->shadow, tmp);
         [im->tex replaceRegion:MTLRegionMake2D(0, 0, im->w, im->h) mipmapLevel:0 withBytes:tmp bytesPerRow:(NSUInteger)im->w * ob];
     }

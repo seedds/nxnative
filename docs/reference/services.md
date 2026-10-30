@@ -789,7 +789,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_jit.c` takes over the public `nn::jit` functions:
   - The plugin is the rewritten copy collected by the SHA-256 that the game's NRR registers, loaded through `loader.c` `nro_find` / `nro_load`.
   - It is called directly on a host thread with an 8 MB stack, as the sysmodule's thread would be.
-  - The game's work buffer is the plugin's RW view. The game's view is a second mapping of the same pages (`mach_vm_remap`), R-X for the first code memory and R-- for the second.
+  - The game's work buffer is the plugin's RW view. The game's view is a second mapping of the same pages (`vm_remap`), R-X for the first code memory and R-- for the second.
   - The call order and argument layout follow [switchbrew's JIT services page](https://switchbrew.org/wiki/JIT_services).
 - **Note:** the code the plugin writes is not rewritten, so it must need no rewrite (no `svc`, `tpidr` or x18). Super Mario 64's needs none. Its plugin and its N64 code NRO do use x18, and are rewritten.
 - **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md).

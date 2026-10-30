@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # A repeatable benchmark of a game in the Mac host: the same save, the same scripted route (button presses and stick moves at fixed times from start), the same measuring window,
 # and frame-time percentiles from the host's per-frame timing rows (DM_NVN_TSV): frame time (start to start), the interval each frame stayed on screen, GPU time, frames per second.
-# Variants run the same route with other settings, in turn and repeated, so two hosts or two sets of switches compare under the same load; a screenshot at the same moments of
-# every run shows whether a variant changes the picture.
+# Variants run the same route with other settings, in turn and repeated, so two hosts or two sets of switches compare under the same load; a screenshot after the measurement
+# window of every run shows whether a variant changes the picture without stalling a measured frame.
 # Usage: python3 scripts/bench.py <id>_build folder [options]   (the folder the NSP script made with --platform mac: tools/dmhost, the rewritten modules, the extracted RomFS,
 #   shader/cache and font; the game's title ID is the folder name's start). -h lists the options. Exit code 0 when every run gave frames, 1 otherwise.
 #   --route <name>: a route of the game's profile (dm/games/<id>/bench.tsv); the first one by default. --save <folder>: the save the route starts from (default <id>_build/run/save);
@@ -99,7 +99,9 @@ def run_one(a, gid, build, var, route, out, lock):
         if k not in ('host', 'msl', 'shmap', 'patched', 'pso'): env[k] = v
     (out / 'ctl').write_text('')
     end = route['from'] + route['secs'] + 2
-    shots = sorted(a.shots) if a.shots else [route['from'] + route['secs'] * f for f in (0.25, 0.75)]
+    # Readback/PNG capture can stall a frame and change adaptive pacing. Keep the
+    # default visual proof after the timing window, before the two-second exit tail.
+    shots = sorted(a.shots) if a.shots else [route['from'] + route['secs'] + 0.5]
     p = None
     if lock: wait_lock(lock)
     try:
@@ -120,7 +122,7 @@ def run_one(a, gid, build, var, route, out, lock):
     budget = 1000.0 / (a.fps or 60)
     s = summary(*frames(out / 'frames.tsv', route['from'], route['from'] + route['secs']), route['secs'], budget) if (out / 'frames.tsv').is_file() else {'frames': 0}
     log_text = (out / 'log.txt').read_text(errors='replace')
-    m = re.findall(r'variable frame step: [\d.]+ fps, game time .*?\(([\d.]+) of real time\)', log_text)
+    m = re.findall(r'frame step: game time [\d.]+ s in [\d.]+ s \(([\d.]+) of real time\)', log_text)
     if m: s['game_speed'] = float(m[-1])
     s['red_lines'] = sum(1 for ln in log_text.splitlines() if '[RED]' in ln)
     return s
@@ -176,7 +178,7 @@ def main():
     ap.add_argument('--env', action='append', default=[], help='KEY=VALUE for every variant (repeatable)')
     ap.add_argument('--pso-archive', help='DM_PSO_ARCHIVE for every variant (the pipeline archive; default the host\'s own)')
     ap.add_argument('--lock', default='', help='a lock file to hold while a game runs, shared with other measuring runs on this Mac')
-    ap.add_argument('--shots', type=lambda v: [float(x) for x in v.split(',')], help='screenshot times in seconds from host start, comma-separated (default: a quarter and three quarters into the window)')
+    ap.add_argument('--shots', type=lambda v: [float(x) for x in v.split(',')], help='screenshot times in seconds from host start, comma-separated (default: after the measurement window; in-window captures perturb timing)')
     ap.add_argument('--no-hud', action='store_true', help='no Metal performance HUD')
     ap.add_argument('--out', help='the output folder (default <id>_build/bench/<date-time>)')
     a = ap.parse_args()

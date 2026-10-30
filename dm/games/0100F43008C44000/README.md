@@ -66,6 +66,7 @@ Each item was found from a red line or a pass dump on the way through the langua
 
 ## Mac routes
 
+- **Resolved (2026-10-29):** the [Metal HUD Hide/Show menu](../../../docs/reference/rendering.md#metal-hud-stays-visible-after-hide-hud) works with `DM_METAL_HUD=1`. Update 2.0.2, M2 Max, macOS 26.6: the rebuilt host showed the HUD at language selection, Hide HUD removed it, and Show HUD restored it. This checked the frontend menu, not a new gameplay route.
 - A fresh save reaches play in Lumiose City with `DM_KBD=Taylor DM_KEYS="f450:A,f1200:LRight~1,f1600:A,f1900:Down,f2000:Down,f2100:A,f2400:A*80/90"`.
 - A save made there continues with `DM_KEYS="f300:A*3/150"` (play from about frame 600), and `LUp~12` then walks along the platform.
 - A 5-minute walk: GPU about 6 ms a frame, no crash.
@@ -74,6 +75,7 @@ Each item was found from a red line or a pass dump on the way through the langua
 
 General host changes first needed here; each applies to every game:
 
+- **Metal HUD menu visibility (resolved):** [Metal HUD stays visible after Hide HUD](../../../docs/reference/rendering.md#metal-hud-stays-visible-after-hide-hud).
 - **The pool enforced as on Horizon** (`mem_map_limit`, `hle_svc.c`): [the profile keys](../README.md#keys), [Maps past the application pool fail as on Horizon](../../../docs/reference/memory.md#maps-past-the-application-pool-fail-as-on-horizon).
 - **Trinity packs decoded with the game's own Oodle** (`trpfs_jobs` / `trinity_shaders`, `hle_oodle.c`, `DM_OODLE_HOST` / `DM_OODLE_MODULES`, set by the NSP script for any game with `ONEPACK` files): [BNSH in Trinity packs](../../../docs/reference/shaders.md#bnsh-in-trinity-packs), [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).
 - **SDK 19 calls:** csrng bytes, `GetAudioOutBufferCount` from the host queue, NVN state getters, `WaitForAddress` type 3, `OP_FENCE_SYNC`: [Cryptographically random bytes](../../../docs/reference/services.md#cryptographically-random-bytes), [AudioOut buffer count from the host queue](../../../docs/reference/audio.md#audioout-buffer-count-from-the-host-queue), [State read back through NVN getters](../../../docs/reference/nvn-objects.md#state-read-back-through-nvn-getters), [WaitForAddress type 3](../../../docs/reference/threads.md#waitforaddress-type-3-64-bit-wait-if-equal), [Fence syncs recorded in command buffers](../../../docs/reference/nvn-objects.md#fence-syncs-recorded-in-command-buffers).

@@ -2,6 +2,15 @@
 
 The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
+## Mac performance HUD
+
+### Metal HUD stays visible after Hide HUD
+
+- **Symptom:** with `DM_METAL_HUD=1`, Apple's Metal HUD menu changes from **Hide HUD** to **Show HUD**, but the overlay stays visible.
+- **Cause:** `front_mac.m` set the layer's `developerHUDProperties` to `mode=default`, forcing that layer's HUD on independently of the menu's visibility setting. `front_hud_env` already enables the HUD through `MTL_HUD_ENABLED` before the first Metal device is made.
+- **Fix:** leave the Mac layer's HUD properties unset and let Apple's menu control visibility. Keep the early environment setup; the iOS layer setup is unchanged.
+- **Found on:** a standalone AppKit/Metal reproducer on M2 Max, macOS 26.6: the same window with the layer override reproduced the failure; without it, Hide HUD removes the overlay and Show HUD restores it. The rebuilt host also passed both menu actions in [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#mac-routes).
+
 ## Textures and formats
 
 ### Null textures in diagnostic logs

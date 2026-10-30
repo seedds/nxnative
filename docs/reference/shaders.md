@@ -146,6 +146,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (the older KTGL).
 - **Note:** nine more shaders exist only at run time ([Built-in shaders compiled with the game's own GLSLC](#built-in-shaders-compiled-with-the-games-own-glslc)).
 
+### Headerless KTGL elixir shader archives
+
+- **Symptom:** a KTGL game builds with missing vertex and pixel shaders, leaving a black window with sound.
+- **Cause:** `.elixir.gz` post-effect archives can use repeated little-endian stored lengths followed by zlib streams, without the header and alignment of Three Houses' chunk format. The generic raw scan never sees the compressed GLSLC outputs. A shader can span two inflated chunks.
+- **Fix:** `shader_split.py` recognizes the headerless form by its `.elixir.gz` suffix and zlib header, joins the decoded chunks, then uses the existing validated GLSLC reader and deduplication. Each stream must finish inside its declared length and inflate to at most 16 KiB. A damaged archive is reported through the existing unreadable-file path; its partial shader results are discarded.
+- **Found on:** [Atelier Ryza DX, issue #680](https://github.com/seedds/nxnative/issues/680#issuecomment-6510848861). Synthetic fixtures cover extraction across chunk boundaries and malformed input. The reported game still needs its provisional profile's shader-key masking; no game files or gameplay were tested here, and the separate texture-type reports remain open.
+
 ### GLSLC outputs in FromSoftware's BND3 and dvdbnd archives
 
 - **How it is stored:** RomFS is two archives, `dvdbnd0.bdt` and `dvdbnd1.bdt` (3.6 GB), each indexed by the `.bhd5` beside it: `BHD5`, 0xff (little-endian), u32 1, u32 file size, u32 bucket count, u32 0, u64 bucket table offset; each 16-byte bucket `{u32 count, u32, u64 offset}` points at 16-byte entries `{u32 path hash, u32 size, u64 offset}` (paths only hashed). 5,184 entries are DCX containers (`DCX\0`, big-endian header, `DFLT` = a zlib stream at +0x4c), most of them BND3 archives (28-byte entries `{u8 flags, i32 size, u64 offset, i32 ID, u32 name offset, i32 unpacked size}` in formats 0x5c / 0x7c). Six BND3 archives in `dvdbnd0.bdt` hold the shaders, one GLSLC output per entry (`.vpo` vertex, `.fpo` pixel, named `Shader/FRPG_Sfx/NVNShaderBinary/ps/…` or by base name in the two FLVER material archives, 2,602 + 486 entries).

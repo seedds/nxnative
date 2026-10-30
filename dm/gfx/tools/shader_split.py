@@ -439,6 +439,23 @@ def kt_gz(d):
         o = (o + s + 0x7f) & ~0x7f
     return b''.join(out)
 
+def elixir_gz(d, label):
+    """KTGL's headerless .elixir.gz: repeated u32 stored length + zlib stream, each at most 0x4000 inflated bytes.
+    Atelier Ryza DX's post effects inflate to a CREA container; GLSLC outputs can cross chunk boundaries."""
+    import zlib
+    pos, out = 0, []
+    while pos < len(d):
+        if len(d) - pos < 4: red(f'{label}: truncated elixir chunk length at {pos:#x}')
+        size, = struct.unpack_from('<I', d, pos); pos += 4
+        if not size or size > len(d) - pos: red(f'{label}: invalid elixir chunk length at {pos - 4:#x}')
+        dec = zlib.decompressobj()
+        try: chunk = dec.decompress(d[pos:pos + size], 0x4001)
+        except zlib.error as e: red(f'{label}: invalid elixir zlib chunk at {pos:#x}: {e}')
+        if len(chunk) > 0x4000 or not dec.eof or dec.unused_data:
+            red(f'{label}: incomplete, oversized or trailing data in elixir chunk at {pos:#x}')
+        out.append(chunk); pos += size
+    return b''.join(out)
+
 def kt_shaders(d, label, out):
     """Three Houses' KTGL keeps its shaders in SPKG packages (patch*/nx/shader/*.spkg, and 132 entries of DATA1.bin), each holding G2S containers ('_S2G3000', as in Age of Calamity) of GLSLC outputs,
     and in '_SPK4100' packages without G2S (DATA1.bin entry 549, the post effects: 27 outputs); map and model archives in DATA1.bin carry packages of their own. So every inflated file or entry is
@@ -2408,6 +2425,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == BND2:   # a Criterion Bundle 2 (Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL): GLSLC outputs in its zlib resources (bnd2_shaders)
         found += bnd2_shaders(open(path, 'rb').read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if path.endswith('.elixir.gz') and head[4:5] == b'\x78':   # headerless KTGL zlib, distinct from Three Houses' chunks
+        with open(path, 'rb') as f: found += glslc_shaders(elixir_gz(f.read(), '/' + rel), '/' + rel, need=False)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == SPKG or head[:4] == b'\0\0\1\0' and path.endswith('.gz'):   # Three Houses' loose shader packages and chunked zlib files (kt_shaders)
         kt_shaders(open(path, 'rb').read(), '/' + rel, found)

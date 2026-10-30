@@ -775,12 +775,100 @@ static int tbdr_on(void);
 static void treg_finish_submission(void);
 
 static uint64_t g_sub_serial;   // Submission index (used by the parallel precompile's 'predict only once per submission')
+
+// ---------- DM_NVN_SUBMIT_LAG=<n>: a bounded submit lag (test instrument; 0 = off, the path as it was) ----------
+// The GPU reads guest pools with no staging copy and no fence (bind_vbufs binds the guest address itself), so a
+// title that records a draw before it fills the vertex ring slot that draw reads is safe only while its GPU runs
+// behind its CPU. A console's does; here the GPU is idle and starts about 0.2 ms after the commit, so it reads the
+// bytes the guest has not written yet. This holds a submission's commit for up to n further guest submissions, so
+// that guest CPU writes issued after the submit are in memory when the GPU reads them. A commit that is held is
+// simply not handed to the queue yet: the fence is still allocated in order, the allocator, the arena, the
+// visibility and the post ring of a held submission all stay in use (each is recycled only on its fence <= g_done),
+// and a present or any guest-visible wait releases it, so correctness of the API wins over the lag.
+// Release: n later submissions have begun | a guest wait that would block | that frame's present | a ms timeout.
+enum { LAG_MAX = 4 };
+static id g_lag_cb[LAG_MAX], g_lag_opts[LAG_MAX];
+static uint64_t g_lag_fence[LAG_MAX], g_lag_serial[LAG_MAX], g_lag_t0[LAG_MAX];
+static int g_lag_n, g_lag_env = -1; static long g_lag_ms = 50;
+static pthread_mutex_t g_lag_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_lag_cv = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t g_lag_pser[16];   // per present ticket: the submission serial the presented frame was recorded at
+static uint64_t g_lag_held, g_lag_rel_begin, g_lag_rel_wait, g_lag_rel_present, g_lag_rel_timeout, g_lag_pwait_n, g_lag_overtake;
+static double g_lag_pwait_max_ms;
+
+static int lag_env(void) {
+    if (__builtin_expect(g_lag_env >= 0, 1)) return g_lag_env;
+    const char *e = getenv("DM_NVN_SUBMIT_LAG"); int n = e ? atoi(e) : 0;
+    if (n < 0) n = 0; if (n > LAG_MAX) n = LAG_MAX;
+    const char *m = getenv("DM_NVN_SUBMIT_LAG_MS"); g_lag_ms = m ? atol(m) : 50; if (g_lag_ms < 5) g_lag_ms = 5;
+    if (n && rec_on()) { MLOG("[RED] DM_NVN_SUBMIT_LAG needs the synchronous encode path (DM_NVN_ENC_THREAD=0); not used"); n = 0; }
+    g_lag_env = n;
+    if (n) MLOG("submit lag (DM_NVN_SUBMIT_LAG=%d): a commit is held until %d further submission(s) have begun; a guest wait, that frame's present or %ld ms releases it", n, n, g_lag_ms);
+    return n;
+}
+static int lag_on(void) { return lag_env() > 0; }
+// Commit the oldest held submission. Caller holds g_lag_mu.
+static void lag_commit_head(void) {
+    id cb = g_lag_cb[0]; MTL4CommitOptions *o = g_lag_opts[0]; uint64_t f = g_lag_fence[0];
+    for (int i = 1; i < g_lag_n; i++) { g_lag_cb[i - 1] = g_lag_cb[i]; g_lag_opts[i - 1] = g_lag_opts[i]; g_lag_fence[i - 1] = g_lag_fence[i]; g_lag_serial[i - 1] = g_lag_serial[i]; g_lag_t0[i - 1] = g_lag_t0[i]; }
+    g_lag_cb[--g_lag_n] = nil; g_lag_opts[g_lag_n] = nil;
+    rec_commit(cb, o);    // the queue gets this submission's GPU work only now
+    rec_signal(g_ev, f);  // the guest's fast SyncWait wake (mtl_wait_at)
+    pthread_cond_broadcast(&g_lag_cv);
+}
+// why: 0 a submission began, 1 a guest wait on fence <= f, 2 that frame's present, 3 drain / teardown
+static void lag_pump(int why, uint64_t f) {
+    if (!g_lag_n) return;
+    pthread_mutex_lock(&g_lag_mu);
+    while (g_lag_n) {
+        uint64_t s = g_lag_serial[0], fe = g_lag_fence[0];
+        if ((now_ns() - g_lag_t0[0]) / 1000000ull > (uint64_t)g_lag_ms) { g_lag_rel_timeout++; lag_commit_head(); continue; }
+        int go = why == 1 ? fe <= f : why == 2 ? s <= f : why == 3 ? 1 : s + (uint64_t)g_lag_env <= g_sub_serial;
+        if (!go) break;
+        if (why == 1) g_lag_rel_wait++; else if (why == 2) g_lag_rel_present++; else if (why == 3) g_lag_rel_present++; else g_lag_rel_begin++;
+        lag_commit_head();
+    }
+    pthread_mutex_unlock(&g_lag_mu);
+}
+// A submission has been recorded and sealed: hand it to the queue now, or hold it (the caller has already given the
+// allocator, the arena, the visibility ring and the post ring their fence, so none of them can be recycled early).
+static void lag_push(id cb, MTL4CommitOptions *o, uint64_t fence) {
+    pthread_mutex_lock(&g_lag_mu);
+    if (g_lag_n == LAG_MAX) { g_lag_rel_timeout++; lag_commit_head(); }   // unreachable (8 allocators, 4 slots) but never grow
+    int i = g_lag_n++;
+    g_lag_cb[i] = cb; g_lag_opts[i] = o; g_lag_fence[i] = fence; g_lag_serial[i] = g_sub_serial; g_lag_t0[i] = now_ns();
+    g_lag_held++;
+    pthread_mutex_unlock(&g_lag_mu);
+}
+// The present must not overtake the submission that drew the frame it shows: wait for it to be committed (bounded;
+// on the bound the present wins and the work is committed here, which is the same release a present would make).
+static void lag_present(uint64_t ticket) {
+    if (!g_lag_n) return;
+    uint64_t s = atomic_load(&g_lag_pser[(ticket - 1) % 16]);
+    uint64_t w0 = now_ns();
+    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
+    uint64_t ns = (uint64_t)dl.tv_nsec + (uint64_t)g_lag_ms * 1000000ull;
+    dl.tv_sec += (time_t)(ns / 1000000000ull); dl.tv_nsec = (long)(ns % 1000000000ull);
+    pthread_mutex_lock(&g_lag_mu);
+    while (g_lag_n && g_lag_serial[0] <= s) pthread_cond_timedwait(&g_lag_cv, &g_lag_mu, &dl);
+    int still = g_lag_n && g_lag_serial[0] <= s;
+    pthread_mutex_unlock(&g_lag_mu);
+    if (still) { g_lag_overtake++; lag_pump(2, s); }   // the bound ran out: commit that frame's work and present
+    double ms = (now_ns() - w0) / 1e6; g_lag_pwait_n++; if (ms > g_lag_pwait_max_ms) g_lag_pwait_max_ms = ms;
+}
+void mtl_lag_line(char *out, size_t n) {   // DM_NVN_SUBMIT_LAG: the counters of the lag (empty when it is off)
+    if (g_lag_env <= 0) { out[0] = 0; return; }
+    snprintf(out, n, "held %llu, released by a later submit %llu, by a guest wait %llu, by a present %llu, by the %ld ms bound %llu; presents waited %llu (max %.1f ms), presents that overtook their submission %llu; held now %d",
+             (unsigned long long)g_lag_held, (unsigned long long)g_lag_rel_begin, (unsigned long long)g_lag_rel_wait, (unsigned long long)g_lag_rel_present,
+             g_lag_ms, (unsigned long long)g_lag_rel_timeout, (unsigned long long)g_lag_pwait_n, g_lag_pwait_max_ms, (unsigned long long)g_lag_overtake, g_lag_n);
+}
+
 // The first submission: the prepare step (warm_start), before anything of it is encoded. No GPU work: the submit entry (hle_nvn.c) calls it outside the graphics gate
 void mtl_prepare(void) {
     if (!g_warm_started && prepare_on()) { mtl_init(); shmap_load(); }
 }
 void mtl_sub_begin(void) {
     mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
+    lag_pump(0, 0);   // DM_NVN_SUBMIT_LAG: a submission has begun, so the one n submissions back may go to the queue now
     defer_drain();
     defer_reset();
     mtl_prepare();   // done by then in the submit entry; the replay tool (nvn_replay) reaches it here
@@ -1558,9 +1646,12 @@ uint64_t mtl_sub_commit(void) {
     if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
         [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
     [g_cb endCommandBuffer];
-    rec_commit(g_cb, o);
-    rec_signal(g_ev, fence);
-    rec_drain();
+    if (lag_on()) lag_push(g_cb, o, fence);   // DM_NVN_SUBMIT_LAG: handed to the queue when a later submission begins (or on a wait / present / bound)
+    else {
+        rec_commit(g_cb, o);
+        rec_signal(g_ev, fence);
+        rec_drain();
+    }
     g_alloc_fence[g_alloc_cur] = fence;
     g_cb = nil;
     g_commit_blocks = nil;
@@ -1580,6 +1671,10 @@ static void post_early(uint64_t fence) {
 }
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
+    // DM_NVN_SUBMIT_LAG: only a caller that is about to block must have this GPU work in the queue now. A zero-timeout
+    // poll releases nothing: that poll is the console's "still busy, carry on", and releasing on it defused the lag on
+    // the first poll of every frame (N=2: released by a guest wait 23,649 of 23,700 holds, the GPU never held back).
+    if (timeout_ns) lag_pump(1, fence);
     uint64_t w0 = ws_t0();
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
         uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
@@ -9554,6 +9649,81 @@ static void ds_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     MLOG("%s", ln);
     ds_vertdump((long)f, pass, dsidx, dw, di);
 }
+// DM_NVN_STATESCAN=<from>-<to>: for every draw of these guest frames, one line hashes every input the draw reads that a
+// pass dump cannot show -- each uniform block exactly as the shader reads it (deferred inline updates and partial
+// shadows laid over guest memory, via ubo_read, not the pre-copy ring block) and each bound vertex stream's referenced
+// span. Two frames' lines can then be diffed for the one input that changed, byte for byte, without dumping buffers.
+// A draw whose state, programs and texture serials are identical in two frames but whose picture is not must differ in
+// one of these. Reads only; no draw is changed, skipped or clamped. Off by default.
+static int ss_on(void) {
+    static long r[8][2]; static int nr = -1;
+    if (nr < 0) { nr = 0; const char *e = getenv("DM_NVN_STATESCAN");
+        if (e && *e) { char buf[256]; snprintf(buf, sizeof buf, "%s", e);
+            for (char *p = buf; p && *p && nr < 8; ) { char *c = strchr(p, ','); if (c) *c = 0;
+                long a = strtol(p, NULL, 0), b = a; const char *d = strchr(p, '-'); if (d) b = strtol(d + 1, NULL, 0);
+                r[nr][0] = a; r[nr][1] = b; nr++; p = c ? c + 1 : NULL; }
+            for (int i = 0; i < nr; i++) MLOG("DM_NVN_STATESCAN: the uniform blocks and vertex spans of guest frames %ld-%ld are hashed", r[i][0], r[i][1]); } }
+    long f = (long)atomic_load(&g_cur_frame);
+    for (int i = 0; i < nr; i++) if (f >= r[i][0] && f <= r[i][1]) return 1;
+    return 0;
+}
+static uint64_t ss_hash(const void *p, size_t n, uint64_t h) { const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001b3ull; } return h; }
+static void ss_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+    if (!pr || !ss_on()) return;
+    static uint64_t lastf = ~0ull; static long ord;
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (f != lastf) { lastf = f; ord = 0; }
+    long d = ord++;
+    char ln[4096]; int n = snprintf(ln, sizeof ln, "S F%llu d%ld p%llu vs=%s fs=%s prim=%d count=%ld idx=%d first=%lld",
+        (unsigned long long)f, d, (unsigned long long)(g_stat_pass + !g_enc), pr->sh[0] ? pr->sh[0]->key : "-",
+        pr->sh[1] ? pr->sh[1]->key : "-", dw ? dw->prim : di->prim, dw ? dw->count : (long)di->count, di != NULL,
+        (long long)(dw ? dw->first : 0));
+    // The vertex bytes the draw reads: for an indexed draw the span the indices name (as ds_vertdump), else first..first+count
+    long cnt = dw ? dw->count : (long)di->count; int64_t first = dw ? (int64_t)dw->first : 0;
+    if (di) {   // the indices are read on the CPU, exactly as the pass dump's vertex span is computed
+        int isz = di->itype == 1 ? 2 : 4;
+        void *m; uint64_t o;
+        if (cnt > 0 && cnt <= 300000 && mtl_addr(di->ibuf, (uint64_t)cnt * isz, &m, &o)) {
+            const uint8_t *ib = [(__bridge id<MTLBuffer>)m contents];
+            if (ib) { ib += o; int64_t lo = INT64_MAX, hi = INT64_MIN;
+                for (long k = 0; k < cnt; k++) { uint32_t ix = isz == 2 ? ((const uint16_t *)ib)[k] : ((const uint32_t *)ib)[k];
+                    int64_t v = (int64_t)ix + di->base_vertex; if (v < lo) lo = v; if (v > hi) hi = v; }
+                if (hi < lo) cnt = 0; else { first = lo; cnt = (long)(hi - lo + 1); } }
+        } else cnt = 0;
+    }
+    if (n > 0 && n < (int)sizeof ln) {
+        for (int s = 0; s < 16; s++) {
+            uint64_t st = S.stream[s].stride; if (!S.vbuf[s].address || !st) continue;
+            uint64_t off = (uint64_t)first * st, len = (uint64_t)cnt * st;
+            if (first < 0 || cnt <= 0 || off + len > S.vbuf[s].size) { n += snprintf(ln + n, sizeof ln - (size_t)n, " vb%d=%lld+%ld:skip", s, (long long)first, cnt); continue; }
+            void *mb; uint64_t mo;
+            if (!mtl_addr(S.vbuf[s].address + off, len, &mb, &mo)) { n += snprintf(ln + n, sizeof ln - (size_t)n, " vb%d=-", s); continue; }
+            const uint8_t *base = [(__bridge id<MTLBuffer>)mb contents]; if (!base) { n += snprintf(ln + n, sizeof ln - (size_t)n, " vb%d=-", s); continue; }
+            size_t hl = len < 4096 ? (size_t)len : 4096;   // the first 4 KB is enough to catch a stream that changed; '~' marks a truncated span
+            n += snprintf(ln + n, sizeof ln - (size_t)n, " vb%d=%lld+%ld%s%016llx", s, (long long)first, cnt,
+                          hl < len ? "~" : ":", (unsigned long long)ss_hash(base + mo, hl, 0xcbf29ce484222325ull ^ len));
+            if (n >= (int)sizeof ln) break;
+        }
+        // Every uniform block of every stage, as the shader reads it
+        for (int st = 0; st < 6; st++) { NvShader *sh = pr->sh[st]; if (!sh) continue;
+            for (int i = 0; i < sh->rf.nb; i++) {
+                const nvn_rbind *b = &sh->rf.b[i]; if (b->kind != NVN_RB_CBUF || b->reg < 0 || b->reg >= 16) continue;
+                const p_bind_buf *u = &S.ubo[st][b->reg];
+                if (!u->addr) { n += snprintf(ln + n, sizeof ln - (size_t)n, " cb%d.%d=none", st, b->reg); }
+                else { uint64_t ul = cb_len(sh, b->reg, u->size), cmp = ul < 4096 ? ul : 4096;
+                    uint8_t blk[4096]; ubo_read(st, b->reg, 0, (size_t)cmp, blk);
+                    uint64_t h = ss_hash(blk, (size_t)cmp, 0xcbf29ce484222325ull ^ ul);
+                    n += snprintf(ln + n, sizeof ln - (size_t)n, " cb%d.%d=%llu:%016llx", st, b->reg,
+                                  (unsigned long long)ul, (unsigned long long)h); }
+                if (n >= (int)sizeof ln) break;
+            }
+            if (n >= (int)sizeof ln) break;
+        }
+    }
+    if (n >= (int)sizeof ln) n = (int)sizeof ln - 1;
+    MLOG("%s", ln);
+}
 // DM_NVN_VBSCAN=<from>-<to>: settle *where* a draw's real vertex data is, when the bytes at the bound address are not
 // it. The title's glyph draws are the case: 168 vertices, stride 28, from a 3-slot ring that advances 8 MB per frame,
 // and on the first frame of a new screen the slot the draw binds still holds the data three frames old. Two causes
@@ -9699,6 +9869,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     image_prepare(pr, 0x1f);
     ag_draw(pr, dw, di);   // DM_NVN_ATLASGUARD: measure this draw's atlas coordinates (reads only; no draw is changed, skipped or clamped)
     ds_draw(pr, dw, di);   // DM_NVN_DRAWSTATE: the per-draw state of a chosen frame range (reads only)
+    ss_draw(pr, dw, di);   // DM_NVN_STATESCAN: hash every uniform block and vertex span this draw reads (reads only)
     vbscan_draw(dw);   // DM_NVN_VBSCAN: where a glyph draw's own vertices are, when the bound bytes are not them (reads only)
     draw_gs_check(pr);   // a geometry stage left with no function (see prog_fold_gs)
     if (!g_geo_program && S.rast_discard && S.tf_on) { tf_draw(pr, dw, di); return; }
@@ -11590,6 +11761,7 @@ static void present_gpu_note(double s, int fx) {
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts) {
+    lag_present(ticket);   // DM_NVN_SUBMIT_LAG: a present must not overtake the submission that drew the frame it shows
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
     if (bootprof() && (g_present_n == 1 || g_present_n % 120 == 0)) {
@@ -12068,6 +12240,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
+    atomic_store(&g_lag_pser[(tk - 1) % 16], g_sub_serial);   // DM_NVN_SUBMIT_LAG: the submission this frame was recorded at
     pipe_present(it->frame, tk, g_pq_in, g_pq_read, g_pq_done);   // DM_NVN_PIPE
     if (ss) { g_snap[slot].ticket = tk; atomic_fetch_add(&g_snap_next, 1); }
     pthread_cond_broadcast(&g_pq_cv);

@@ -179,7 +179,7 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
         model.apply()
         h.dismiss(animated: false) { done() }
     }
-    let h = UIHostingController(rootView: view)
+    let h = DmHostingController(rootView: view)
     h.modalPresentationStyle = .fullScreen
     host = h
     parent.present(h, animated: false)

@@ -1,4 +1,4 @@
-// iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides) + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture).
+// iOS front end: portrait puts 16:9 video above the gamepad; native horizontal folds set the separation when available.
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -12,9 +12,9 @@
 #include "save_sync.h"
 #import "CloudSaves.h"
 
-UIView *dm_gamepad_view(CGRect frame);
-void dm_gamepad_reset(void);
 void dm_gamepad_active(void);
+#import "DmLayout.h"
+
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
 const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
@@ -32,17 +32,40 @@ static UILabel *front_ios_fps_label(void);
 + (Class)layerClass { return CAMetalLayer.class; }
 - (instancetype)initWithFrame:(CGRect)f {
     if ((self = [super initWithFrame:f])) {
+        [self registerForTraitChanges:@[UITraitDisplayScale.class] withHandler:^(id<UITraitEnvironment> environment, UITraitCollection *previous) {
+            [(UIView *)environment setNeedsLayout];
+        }];
         CAMetalLayer *l = (CAMetalLayer *)self.layer;
         l.device = MTLCreateSystemDefaultDevice(); l.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        l.contentsScale = UIScreen.mainScreen.nativeScale; l.framebufferOnly = NO; l.opaque = YES;
+        l.contentsScale = MAX(self.traitCollection.displayScale, 1); l.framebufferOnly = NO; l.opaque = YES;
         self.backgroundColor = UIColor.blackColor;
     }
     return self;
 }
+- (void)didMoveToWindow { [super didMoveToWindow]; [self setNeedsLayout]; }
 - (void)layoutSubviews {
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
+    UIScreen *screen = self.window.windowScene.screen;
+    // Preserve native-pixel gameplay; UIKit text uses the view's displayScale.
+    l.contentsScale = screen ? screen.nativeScale : MAX(self.traitCollection.displayScale, 1);
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+}
+@end
+
+@interface DmRootView : UIView
+@end
+@implementation DmRootView
++ (BOOL)requiresConstraintBasedLayout { return YES; }
+- (void)updateConstraints {
+#if __has_include(<UIKit/UIHingeInteraction.h>)
+    if (@available(iOS 27.1, *)) {
+        // Reading here registers UIKit's automatic reserved-region invalidation.
+        [self reservedRegionsOfKind:UIViewReservedRegionKind.divisionRegionKind options:UIViewReservedRegionQueryOptionsIncludeInactive];
+        [self setNeedsLayout];
+    }
+#endif
+    [super updateConstraints];
 }
 @end
 
@@ -51,14 +74,30 @@ static UILabel *front_ios_fps_label(void);
 @property (nonatomic, strong) UIView *pad;
 @property (nonatomic, strong) UILabel *fps;
 @property (nonatomic) BOOL launched;
+@property (nonatomic) BOOL partiallyOpen;
+@property (nonatomic) NSInteger hingeStatus;
+@property (nonatomic) BOOL separated;
+@property (nonatomic, copy) NSString *layoutLog;
+#if __has_include(<UIKit/UIHingeInteraction.h>)
+- (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1));
+#endif
 - (void)startGame;
 @end
 static DmRootVC *g_root;
 static void launcher_done(void) { [g_root startGame]; }
 @implementation DmRootVC
+- (void)loadView { self.view = [DmRootView new]; }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
+#if __has_include(<UIKit/UIHingeInteraction.h>)
+    if (@available(iOS 27.1, *)) {
+        __weak DmRootVC *weakSelf = self;
+        [self.view addInteraction:[[UIHingeInteraction alloc] initWithUpdateHandler:^(UIHingeInteraction *interaction, UIHingeInteractionUpdate *update) {
+            [weakSelf hingeChanged:update.hinge];
+        }]];
+    }
+#endif
     front_ios_power_watch();
     if (!front_ios_boot_ok()) {   // No game files: show a hint and do not start the host
         UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
@@ -70,10 +109,22 @@ static void launcher_done(void) { [g_root startGame]; }
     }
     front_ios_audio_watch();
 }
+#if __has_include(<UIKit/UIHingeInteraction.h>)
+- (void)hingeChanged:(UIHinge *)hinge API_AVAILABLE(ios(27.1)) {
+    NSInteger status = hinge ? hinge.status : UIHingeStatusUnknown;
+    if (self.hingeStatus != status) {
+        self.hingeStatus = status;
+        LOG("front end: Duo hinge status %ld, angle %.3f", (long)status, hinge.angle);
+    }
+    self.partiallyOpen = status == UIHingeStatusPartiallyOpen;
+    [self.view setNeedsUpdateConstraints];
+    [self.view setNeedsLayout];
+}
+#endif
 // The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
 - (void)startGame {
     if (self.game) return;
-    dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (CloudSaves.m, save_sync.h)
+    dm_cloud_saves_env();   // Read the launcher cloud-save selection before the first save mount.
     front_hud_env();   // before the game view makes its device (an env file's DM_METAL_HUD sets it in main.m already)
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
@@ -92,11 +143,37 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    CGFloat w = b.size.width, h = b.size.height;   // Fit 16:9 into the whole screen
-    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
-    self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
-    if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
-        CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
+    CGRect division = CGRectNull;
+    NSMutableArray<NSString *> *regionLog = [NSMutableArray array];
+#if __has_include(<UIKit/UIHingeInteraction.h>)
+    if (@available(iOS 27.1, *)) {
+        for (UIViewReservedRegion *region in [self.view reservedRegionsOfKind:UIViewReservedRegionKind.divisionRegionKind options:UIViewReservedRegionQueryOptionsIncludeInactive]) {
+            [regionLog addObject:[NSString stringWithFormat:@"%@ active=%d", NSStringFromCGRect(region.frame), region.isActive]];
+            CGRect candidate = dm_horizontal_division(b, region.frame);
+            if (CGRectIsNull(division) && !CGRectIsNull(candidate)) division = candidate;
+        }
+    }
+#endif
+    BOOL duoPortrait = b.size.height > b.size.width && (self.hingeStatus != 0 || !CGRectIsNull(division));
+    UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
+    DmLayout layout = dm_layout(b, gameInsets, self.partiallyOpen, division);
+    self.game.frame = layout.game;
+    layout.topSafeOnly = duoPortrait;
+    UIInterfaceOrientationMask appMask = [UIApplication.sharedApplication supportedInterfaceOrientationsForWindow:self.view.window];
+    NSString *summary = [NSString stringWithFormat:@"bounds %@, orientation %ld, scene locked %d, root mask %#lx, app mask %#lx, hinge %ld, partial %d, divisions %@, mode %@", NSStringFromCGRect(b), (long)self.view.window.windowScene.effectiveGeometry.interfaceOrientation, self.view.window.windowScene.effectiveGeometry.isInterfaceOrientationLocked, (unsigned long)self.supportedInterfaceOrientations, (unsigned long)appMask, (long)self.hingeStatus, self.partiallyOpen, regionLog, layout.separated ? @"split" : @"overlay"];
+    if (![summary isEqualToString:self.layoutLog]) {
+        self.layoutLog = summary;
+        LOG("front end: Duo layout %s", summary.UTF8String);
+    }
+    if (layout.separated != self.separated) {
+        self.separated = layout.separated;
+        LOG("front end: Duo %s, video %s, controls %s", layout.separated ? "split" : "overlay", NSStringFromCGRect(layout.game).UTF8String, NSStringFromCGRect(layout.controls).UTF8String);
+    }
+    self.pad.frame = b;
+    dm_gamepad_arrange(self.pad, layout);
+    if (self.fps) {
+        CGRect s = CGRectIntersection(layout.controls, UIEdgeInsetsInsetRect(b, gameInsets));
+        CGFloat u = layout.separated ? MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3) : MIN(b.size.height / 430.0, 1.3);
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
     }
 }
@@ -114,7 +191,7 @@ static void launcher_done(void) { [g_root startGame]; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
 - (BOOL)prefersStatusBarHidden { return YES; }
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAll; }
 @end
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
 

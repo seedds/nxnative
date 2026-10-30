@@ -362,7 +362,11 @@ static Result au_start_at(void *g, void *lr) {
     pthread_mutex_unlock(&g_aos_lock);
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE", "start playback", Result, h_au_Start, void *g) { return au_start_at(g, __builtin_return_address(0)); }
+// StartAudioOut runs on the game's thread, and the first AudioOutputUnitStart of the process sets up the Core Audio session: HALC_ProxyIOContext::StartIOProc ->
+// +[AVAudioSession sharedInstance] -> CAReporter, which runs the Swift runtime's type demangler. On the guest stack that died with SIGBUS inside
+// swift::Demangle::TypeDecoder::decodeMangledTypeDecl (sp in the guest stack block, Arcade Archives RAINBOW ISLANDS 1.0.2, SDK 19.3.11, M1, macOS 27.2).
+// On the big host stack (hle_bigstack.c) the same start succeeds and the game plays with sound. The call site in the Start log line is then the trampoline's
+HLE_FORCE_BIG("_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE", "start playback", Result, h_au_Start, void *g) { return au_start_at(g, __builtin_return_address(0)); }
 // After the backend stops, return even its partly played buffer. FMOD can wait for these releases before joining its output thread (Pokemon Brilliant Diamond 1.0.0, PR #190).
 // g_aos_lock and backend_stop exclude the consumer; m excludes append/reclaim. Buffers appended while already stopped belong to the next Start, so only a started -> stopped transition calls this.
 static void au_release_pending(aout *a) {

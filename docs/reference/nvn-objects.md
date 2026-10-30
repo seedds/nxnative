@@ -454,10 +454,11 @@ Games read this count as a position in their own command memory and size their h
 
 ### Bound handles are the driver's 32-bit words
 
-- **Symptom:** `[RED] sampler ID 4096 not registered` (or another ID past the sampler pool), once, from the first frames on.
+- **Symptom:** `[RED] sampler ID 4096 not registered` (or another ID past the sampler pool), once, from the first frames on; `DrawTexture` records an incorrect sampler ID when a handle has nonzero upper bits.
 - **Cause:** NVN's texture, separate texture and sampler handles are 64-bit, but the driver writes each bound one into the c2 handle table as a 32-bit word (texture ID in bits 0-19, sampler ID in bits 20-31), so the GPU never sees the upper half. The host kept the whole 64 bits of the handles of `nvnCommandBufferBindTextures`, `BindSeparateTextures`, `BindSeparateSamplers` and `BindImages`, and took the sampler ID as the handle shifted right by 20. EA SPORTS FC 27 binds separate textures with bit 32 set (`0x1000001d1`, texture 0x1d1): a shader that takes its sampler from that combined word got ID 4096, where the GPU reads sampler 0. The single `nvnCommandBufferBindTexture` record already read its handle as 32 bits.
-- **Fix:** `bind_handles` (`hle_nvn.c`) keeps the low 32 bits of each handle before it moves the IDs to the part of the host's table of the pool the command buffer bound (which may then pass 12 bits).
+- **Fix:** `bind_handles` and `nvnCommandBufferDrawTexture` (`hle_nvn.c`) keep the low 32 bits of each handle before they move the IDs to the part of the host's table of the pool the command buffer bound (which may then pass 12 bits). `DrawTexture` previously shifted the full 64-bit value, so unused upper bits became part of its sampler ID; truncation must happen before extracting and rebasing the IDs. Zero IDs stay zero.
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), at the title and in the menus.
+- **Check:** `t_nvn` records `OP_DRAW_TEX` through the public NVN entry point with bit 32 or every upper bit set, zero texture and sampler IDs, and first and non-first descriptor pools; it checks the recorded handle and both rectangles. This reproduces [issue #687, finding 1](https://github.com/seedds/nxnative/issues/687) without game files; no game has been run with the `DrawTexture` correction here.
 
 ### Version and capability checks that fail quietly
 

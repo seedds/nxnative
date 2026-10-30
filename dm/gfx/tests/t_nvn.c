@@ -288,6 +288,41 @@ int main(void) {
         EXPECT("the bind reads the handle patched at its start + 0x10: slot 3, texture 1235, sampler 511", 1, rh.op == OP_BIND_TEX1 && bh->n == 1 && bh->first == 3 && bh->stage == NVN_SHADER_STAGE_FRAGMENT && bh->h[0] == patched);
         P(nvnCommandBufferFinalize)(&c2); P(nvnMemoryPoolFinalize)(&mp);
     }
+    // DrawTexture consumes the same low 32-bit descriptor word as ordinary binds,
+    // before adding the bound pools' bases; the unused upper half is not a sampler ID.
+    {
+        static uint8_t m[65536] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer c2;
+        NVNtexturePool tp[2]; NVNsamplerPool sp[2];
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnTexturePoolInitialize)(&tp[0], &mp, 4096, 256); P(nvnTexturePoolInitialize)(&tp[1], &mp, 12288, 256);
+        P(nvnSamplerPoolInitialize)(&sp[0], &mp, 20480, 512); P(nvnSamplerPoolInitialize)(&sp[1], &mp, 36864, 512);
+        P(nvnCommandBufferInitialize)(&c2, &dev);
+        const struct { uint64_t input, first, second; const char *name; } cases[] = {
+            {UINT64_C(0x0070002b), UINT64_C(0x0070002b), UINT64_C(0x2070012b), "DrawTexture: ordinary handle"},
+            {UINT64_C(0x10070002b), UINT64_C(0x0070002b), UINT64_C(0x2070012b), "DrawTexture: bit 32 ignored"},
+            {UINT64_C(0xffffffff0070002b), UINT64_C(0x0070002b), UINT64_C(0x2070012b), "DrawTexture: upper half ignored"},
+            {UINT64_C(0x10000002b), UINT64_C(0x2b), UINT64_C(0x12b), "DrawTexture: zero sampler stays zero"},
+            {UINT64_C(0xffffffff00700000), UINT64_C(0x00700000), UINT64_C(0x20700000), "DrawTexture: zero texture stays zero"},
+            {UINT64_C(0xffffffff00000000), 0, 0, "DrawTexture: both zero stay zero"},
+        };
+        const NVNdrawTextureRegion dst = {-2.5f, 4.25f, 90.5f, 120.75f}, src = {10.25f, 11.5f, 62.75f, 64.5f};
+        for (int pool_index = 0; pool_index < 2; pool_index++) for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
+            P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, 4096); P(nvnCommandBufferBeginRecording)(&c2);
+            P(nvnCommandBufferSetTexturePool)(&c2, &tp[pool_index]); P(nvnCommandBufferSetSamplerPool)(&c2, &sp[pool_index]);
+            size_t at = P(nvnCommandBufferGetCommandMemoryUsed)(&c2);
+            NVNdrawTextureRegion d = dst, s = src;
+            P(nvnCommandBufferDrawTexture)(&c2, (NVNtextureHandle)cases[i].input, &d, &s);
+            P(nvnCommandBufferEndRecording)(&c2); memset(&d, 0, sizeof d); memset(&s, 0, sizeof s);
+            op_hdr rh; p_draw_tex recorded; memcpy(&rh, m + at, sizeof rh); memcpy(&recorded, m + at + sizeof rh, sizeof recorded);
+            EXPECT("DrawTexture records OP_DRAW_TEX", OP_DRAW_TEX, rh.op);
+            EXPECT(cases[i].name, pool_index ? cases[i].second : cases[i].first, recorded.h);
+            EXPECT("DrawTexture preserves destination rectangle", 0, memcmp(&dst, &recorded.d, sizeof dst));
+            EXPECT("DrawTexture preserves source rectangle", 0, memcmp(&src, &recorded.s, sizeof src));
+        }
+        P(nvnCommandBufferFinalize)(&c2);
+        for (int i = 0; i < 2; i++) { P(nvnTexturePoolFinalize)(&tp[i]); P(nvnSamplerPoolFinalize)(&sp[i]); }
+        P(nvnMemoryPoolFinalize)(&mp);
+    }
     // Uniform bindings are measured into resource budgets too. A bounded binding needs
     // 8 header bytes plus 16 payload bytes; keep the full record for larger ranges.
     {

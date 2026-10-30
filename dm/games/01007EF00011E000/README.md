@@ -1,14 +1,14 @@
 # The Legend of Zelda: Breath of the Wild (`01007EF00011E000`)
 
-Update 1.9.0 (v1114112) over the base game, SDK 20.5.22. Nintendo EPD's engine (sead / agl / gsys / ksys, NintendoWare G3d / Ui2d / Vfx / Atk, Havok) on NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; `subsdk0` and `sdk` are the builds Tears of the Kingdom 1.4.3 runs ([0100F2C0115B6000](../0100F2C0115B6000/README.md)). Plays on the iPhone; 60 fps (30 on the Switch) through the host's frame step. The README lists its IPA at about 16 GB.
+Update 1.9.0 (v1114112) over the base game, SDK 20.5.22. Nintendo EPD's engine (sead / agl / gsys / ksys, NintendoWare G3d / Ui2d / Vfx / Atk, Havok) on NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`; `subsdk0` and `sdk` are the builds Tears of the Kingdom 1.4.3 runs ([0100F2C0115B6000](../0100F2C0115B6000/README.md)). Plays on the iPhone; 60 fps (30 on the Switch) through the host's frame step, on update 1.6.0 (v786432) too ([Update 1.6.0](#update-160-current)). The README lists its IPA at about 16 GB.
 
 ## What it needs
 
 | Setting | Where | Why |
 |---|---|---|
-| Frame step, `fps_target 60` | [`patches.py`](patches.py) `FRAME_STEP` (`main` `cd57b23f…`), [`game.tsv`](game.tsv) | 60 fps at normal speed; see [Frame rate](#frame-rate) |
-| Interval controller floor 2 → 1 (five cuts) and GPU-time path (two cuts) | `patches.py` `CUTS` | the game's own controller at `DM_FPS_TARGET=0` and while its VFR override holds; see [The game's own interval controller](#the-games-own-interval-controller) |
-| Render scale stubs | `patches.py` `frame_step` (`main+0x1266880`, `main+0x126686c`) | `DM_RENDER_SCALE`; see [Render scale](#render-scale) |
+| Frame step, `fps_target 60` | [`patches.py`](patches.py) `FRAME_STEP` (`main` `cd57b23f…` of 1.9.0, `8e9978d5…` of 1.6.0), [`game.tsv`](game.tsv) | 60 fps at normal speed; see [Frame rate](#frame-rate) |
+| Interval controller floor 2 → 1 (five cuts) and GPU-time path (two cuts); 1.6.0: floor 2 → 1 in the controller and the setter (nine cuts) | `patches.py` `CUTS` | the game's own controller at `DM_FPS_TARGET=0` and while its VFR override holds; see [The game's own interval controller](#the-games-own-interval-controller), [Update 1.6.0](#update-160-current) |
+| Render scale stubs (1.9.0 only) | `patches.py` `frame_step` (`main+0x1266880`, `main+0x126686c`) | `DM_RENDER_SCALE`; see [Render scale](#render-scale) |
 | `gpu_timestamps segment` | `game.tsv` | the interval controller and the dynamic resolution read the GPU time between the frame's two timestamp reports |
 | Integer output rows `8e2cc2671cae6020`, `93aa5e22a8202409` | [`shader_facts_manual.tsv`](shader_facts_manual.tsv) | agl's BC4 block encoder (3D and 2D source) writes `uint`; no PC version gives output types |
 | `pad_layout full` | `game.tsv` | the 3D gamepad layout: the right stick turns the camera |
@@ -43,6 +43,28 @@ Used at `DM_FPS_TARGET=0` and for the interval the framework keeps while the VFR
 - Measured on the Mac with two runs sharing the GPU under a heavy CPU load (load average about 75): GPU time p50 16–23 ms; the fixed run stayed at interval 2 (3 while the GPU time passed 1.9 vsyncs, 1 for under 2% of the frames) at 0.93–0.98 of real time (Σ VFR ratio / 30 per wall second, probe `main+0x151d3e0` `@x0+0x30`: +0x30 ratio, +0x34 interval). A run with the old timestamps (`DM_NVN_GPU_TS=submission`) spent 10–70% of its frames at interval 1 and ran at 0.78–0.95.
 - The same GPU time drives the dynamic resolution (`main+0x1267070`): a running average as a percentage of a 60 Hz frame scales the resolution down above 175% (29 ms) and back up below 150% (25 ms). With 0 it always sat at its maximum, and it still does whenever the game holds 30.
 - **Resolved: Link's move pace speeding up when pressing B (iPhone).** Sprinting flaps between interval 1 and 2 for runs of 6 or more frames, and the VFR step at interval 2 is a whole 30 fps tick. The acquire waited one display-link tick per frame whatever the interval, so the game kept producing frames every 16.7 ms while the screen held each interval-2 frame for 33 ms and dropped the one between (`old frames dropped by merging`): those runs went at double speed. `mtl_link_wait_tick` now waits as many ticks as the present interval.
+
+### Update 1.6.0 (current)
+
+Update 1.6.0 (v786432, `main` `8e9978d5…`) ran at 30 fps on the Mac: the game sets present interval 1 → 2 once it runs, and the VFR steps a whole 30 fps tick a frame. Its entries in `patches.py` carry 1.9.0's change over, found by disassembly and the zeldaret/botw sources (no 1.9.0 module was at hand for `nso_fnmap.py`). Its stubs are a function of their own, `frame_step_160`; the 1.9.0 entries are unchanged.
+
+- The interval controller in the main loop (`main+0x16148c0`): seven cuts lift its floors from 2 to 1 (`main+0x161499c` to `main+0x1614a74`). There `max(x, 2)` is `csel` with w20 = 2, so it becomes `csinc` with `wzr`. Its input is already max(CPU span, GPU time) while the interval is dynamic, so 1.9.0's two GPU-path cuts have no counterpart.
+- `setWaitVsyncInterval` (`main+0x1614d50`) has a floor of its own: it keeps clamp(interval, 2, max) at fw+0x238 for the getter, which the VFR reads, and hands the raw interval to `nvnWindowSetPresentInterval`. Two cuts (`main+0x1614d60`, `main+0x1614d68`) lower it to 1.
+- Frame-step stubs at `setWaitVsyncInterval` and `VFR::updateInterval` (`main+0x1c01180`; the VFR at `[main+0x2d1e170]`; ratio = interval / the base interval at VFR+0x150), as in 1.9.0.
+- Held buttons: this sead counts whole frames (`sead::ControllerBase::updateDerivativeParams_`, `main+0x126e3b0`: u32 counts, u8 delays and pulses). A stub at `main+0x126e4c4` skips a held button's test and count on the frames of a one-vsync step that start no 30 fps tick.
+- No render scale: no dynamic-resolution method was found (no `uking_dynamic_resolution_ratio`), so this build has no `DM_RENDER_SCALE` stub.
+
+Mac (M4 Pro), one save from the title into the Shrine of Resurrection, the same host and shaders in each run, headless unless said. A probe at `main+0x1c01224` (`@x0+0x30`) read the VFR's ratio and interval at each call:
+
+| Run | VFR interval (calls) | Log |
+|---|---|---|
+| Without the 1.6.0 patches | 2 (ratio 1.0) in 5,187 of 5,554, else 3 | `the game sets present interval 1 → 2`, then 2 ↔ 3 during the load |
+| Frame step, 60 | 1 (ratio 0.5) in 4,311 of 4,657, else 2 or 3 | `frame step: game time 30.48 s in 30.49 s (1.000 of real time); held 1 / 2 / 3 vsyncs 1800 / 0 / 0 frames` (three such lines, 1.000 / 1.000 / 1.001); frame p50 16.66 ms, 59.4 fps (a run without the probe) |
+| Frame step, 60, in a window behind the others | – | `game time 31.38 s in 31.39 s (1.000 of real time); held 1 / 2 / 3 vsyncs 1800 / 0 / 0 frames` (the other two lines 1.000 and 0.998, 1769 / 31 / 0); 4,403 of 4,465 frames at present interval 1, p50 16.66 ms, 57.2 fps |
+| `DM_FPS_TARGET=0` (the game's controller with the cuts) | 1 in 6,010 of 6,521, 2 and 3 during the load | present interval 1, `1 → 2` / `2 → 1` around long frames |
+| `DM_TEST_PRESENT_LAG=1,12` | 2 (ratio 1.0) from the step up on (3,470 of 5,290 calls in the run) | `frame step: hold 1 → 2 vsyncs at present 1783 (3 late frames …)`, `game time 60.25 s in 60.26 s (1.000 of real time); held 1 / 2 / 3 vsyncs 0 / 1800 / 0 frames`; frame p50 33.34 ms, 29.8 fps |
+
+Without a window the host does not hold the game's own present interval, so headless frame times count only in the frame-step runs. The `1 → 2` / `2 → 1` lines at a 60 fps step are the host's paid-back vsyncs (a step of 2 for one frame), not the game's controller. Held buttons counted 30 a second at 60 fps (a probe at `main+0x126e50c`: 241 counts in 8 s of a held stick, one every second frame), as at 30 fps; a menu's repeat was not watched.
 
 ### Render scale
 
@@ -242,6 +264,7 @@ General host changes first needed here; each applies to every game:
 - The GPU particles' compute dispatches and the G-buffer decals still split passes; about 800 MB of attachments a frame outdoors.
 - `DM_RENDER_SCALE` does not change the Mac's GPU time; the sources give no iPhone measurement.
 - The VFR override's `the game fixes its own step` path has not been reached on the Mac.
+- 1.6.0 ([Update 1.6.0](#update-160-current)): checked on the Mac only (headless, and one run in a window behind the others), with no menu's held-button repeat watched; no `DM_RENDER_SCALE` stub (its dynamic resolution was not found).
 - `game.tsv` still says "In bring-up", and its memory comment "until measured".
 - 05's `DM_PROBE_POLL` paragraph cites `PlacementMgr` in `main+0x5aaac0` as the one thread in guest code "for that flag" without naming the game; `PlacementMgr` is this game's.
 - Motion on iOS (a controller's gyro, and the phone's own while no controller supplies fresh samples) has not been tested on a device. Source arbitration, concurrent startup and upright orientation were corrected during review and are covered by unit tests; see [Live controller motion](../../../docs/reference/services.md#live-controller-motion). Motion shrines from issue #389 still need a device gameplay check.

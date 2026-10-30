@@ -210,6 +210,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** here (a built-in 120 Hz screen, a multiple of every link rate) a harness drove `front_mac.m` asked for 50 fps: no switch in the window, 120 → 50 Hz in fullscreen, 120 Hz again on leaving it, and 120 Hz after quitting in fullscreen; at 60 fps and with `DM_SCREEN_MATCH=0` nothing switched.
 - **Not checked:** the link's new range after a switch has not run here (Hades windowed and fullscreen paced at 60 as before).
 
+### The pointer stays on a Mac game
+
+- **Symptom:** the mouse pointer stayed on the picture of a Mac game, in a window and in fullscreen, until it was moved to a screen corner.
+- **Cause:** `front_run` never hid it. macOS hides the pointer only for an app that asks, and a game window is not one.
+- **Fix:** `front_mac.m` `front_run` hides it after `DM_CURSOR_HIDE` seconds (3 by default, `0` keeps it) without movement over the game view, and shows it on the next movement, click or scroll (a local event monitor and a 0.25 s timer). It is shown whenever the window is not key or the pointer is outside the game view, so the title bar and other windows keep theirs.
+- **Found on:** a game played with a controller (Console Mode), no game in particular.
+- **Not checked:** not yet run on a game here.
+
 ### Frame latency 2 for the display link in fullscreen
 
 - **Symptom:** on a ProMotion built-in screen, only in fullscreen, the frame step went 1 → 2 → 3 vsyncs on frames costing 0.1–0.6 vsyncs (`3 late frames; cost 0.32 vsyncs`) and the game presented 15 frames a second; a window, or the screen set to a fixed 60 Hz, did not do it. The `DM_NVN_TSV` rows show presents shown one 120 Hz refresh late (`@pres_at_ms` − `@link_target_ms` = 8.3 ms) with a skipped tick after each (`@link_gap_ms` 33 ms), and `@link_lead_ms` about 16 ms against about 50 ms in a window.

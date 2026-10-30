@@ -3,7 +3,8 @@
 // file serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up; a function with no
 // Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one despite a
 // mid-prewarm flush, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
-// one base; archive flushes preserve unrelated compiler state
+// one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library,
+// and an MTLDevice pipeline gets it specialized
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -392,6 +393,26 @@ int main(int argc, char **argv) { @autoreleasepool {
     EXPECT("blend of a disabled target dropped (7)", 0, k.blend[7].dst_rgb);
     EXPECT("depth format kept (an MTLDevice pipeline names it)", MTLPixelFormatDepth32Float, k.dfmt);
     EXPECT("stencil format kept", MTLPixelFormatStencil8, k.sfmt);
+    // a function that declares function constants (fn_spec, as shader_load loads one): on the Metal 4 path it stays unspecialized, with a specialized descriptor, and a
+    // pipeline is made from it; nothing is specialized through MTLLibrary, which compiles through the MTLDevice (the HUD's "Consider adopting MTL4Compiler")
+    {
+        id<MTLLibrary> cl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool k [[function_constant(0)]];\n"
+            "struct V { float4 p [[position]]; };\nvertex V cvs(uint i [[vertex_id]]) { V o; o.p = float4(is_function_constant_defined(k) && k ? 1 : 0, 0, 0, 1); return o; }\n"
+            "fragment float4 cfs() { return is_function_constant_defined(k) && k ? float4(1) : float4(0); }\nfragment float4 plain() { return float4(1); }\n" options:nil error:&err];
+        NSError *se = nil; id<MTLFunction> cf = fn_spec(cl, @"cfs", [MTLFunctionConstantValues new], &se), cv = fn_spec(cl, @"cvs", [MTLFunctionConstantValues new], &se);
+        EXPECT("constants: the function stays unspecialized on the Metal 4 path", 1, cf.functionConstantsDictionary.count);
+        EXPECT("constants: its descriptor specializes it", 1, [fn4_of(cf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]);
+        MTLRenderPipelineDescriptor *cd = [MTLRenderPipelineDescriptor new]; cd.vertexFunction = cv; cd.fragmentFunction = cf; cd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        uint64_t legacy0 = g_pb_legacy;
+        EXPECT("constants: a pipeline made from it", 1, pso_build(cd, &se) != nil);
+        EXPECT("constants: through the Metal 4 compiler", legacy0, g_pb_legacy);
+        // a fragment function with no Metal 4 descriptor (as the DM_NVN_HILITE override) sends the pipeline to the MTLDevice: its vertex function is specialized for it
+        cd.fragmentFunction = [cl newFunctionWithName:@"plain"]; se = nil;
+        EXPECT("constants: an MTLDevice pipeline made from it", 1, pso_build(cd, &se) != nil);
+        EXPECT("constants: that pipeline went through the MTLDevice", legacy0 + 1, g_pb_legacy);
+        EXPECT("constants: the vertex function given to it is specialized once", 1, fn_dev(cv) != cv && fn_dev(cv) == fn_dev(cv));
+        EXPECT("constants: a function without constants is its own", 1, fn_dev(cd.fragmentFunction) == cd.fragmentFunction);
+    }
     capture_preserves_foreign_folder();
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     printf("t_pso_archive: %d checks, %d failed\n", checks, failed);

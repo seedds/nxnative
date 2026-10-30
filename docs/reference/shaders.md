@@ -1084,8 +1084,19 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** `fragmentFunction main0 cannot be used to build a pipeline state` (a Metal validation assertion).
 - **Cause:** SPIRV-Cross declares an optional function constant, `spvLinearTextureAlignmentOverride`, in shaders that read a texel buffer, and Metal refuses any function with function constants until it is specialized.
-- **Fix:** `shader_load` specializes such functions with an empty set of values.
+- **Fix:** `shader_load` specializes such functions with an empty set of values. On the Metal 4 path the pipeline's descriptor specializes them, not the library: [Functions with function constants specialized by the pipeline, not the library](#functions-with-function-constants-specialized-by-the-pipeline-not-the-library).
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (one imgui pixel shader).
+
+### Functions with function constants specialized by the pipeline, not the library
+
+- **Symptom:** with Metal 4 pipelines on (the Mac; on iOS `pso_mtl4 on` or `DM_PSO_MTL4=1`), Apple's performance HUD says `Compiled 2 shaders. Total compilation time is 102.70ms. Consider adopting MTL4Compiler for more fine grained compilations` during play, when a shader with function constants loads.
+- **Cause:** a function that declares function constants must be specialized before it goes into a pipeline ([Function constants specialized at load](#function-constants-specialized-at-load)). The host did that through `MTLLibrary`'s `newFunctionWithName:constantValues:error:` when it loaded the shader (`shader_load`) and the libraries made from it (the pulling and shadow-input vertex entries, `pull_load` and `vin_fn`; the alpha test, `at_fn`). That call compiles through the MTLDevice, synchronously, on the thread that loads the shader. A Metal 4 pipeline does not need it: `fn4_note` already gives MTL4Compiler an `MTL4SpecializedFunctionDescriptor` with the same values.
+- **Fix:** `fn_spec` in `nvn_mtl.m`. With the Metal 4 compiler (`pso4_compiler`) the `MTLFunction` stays unspecialized and is noted with its constant values, so MTL4Compiler specializes it with the pipeline. Its reflection and argument encoders are the same as the specialized function's. A pipeline the MTLDevice builds after all (`pso_build`'s fallback, when a function has no Metal 4 descriptor, such as the `DM_NVN_HILITE` override) takes the function `fn_dev` specializes through the library, once per function. Unchanged:
+  - Compute shaders are still specialized at load: the MTLDevice builds their pipelines.
+  - Without the Metal 4 compiler, functions are specialized as before.
+  - The variants that differ only in their constant values still specialize through the library: the logic operation entries (`lo_fn`) and the readable-tile versions (`bf_fn`, `DM_NVN_TBDR`). Their pipelines would need one function object per set of values, and `newFunctionWithName:` may hand back the same object.
+- **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md#found-on-this-game) on an iPhone 17 Pro Max with Metal 4 pipelines turned on: the HUD warning when a shader loaded during play. On the Mac, with a probe that logs each MTLDevice compile, the specializations came from `shader_load` during the prepare step and again when a shader loaded during play. After the fix none were left, and the picture was the same.
+- **Check:** `t_pso_archive`. A function with a constant stays unspecialized, its descriptor specializes it, and a pipeline is made through the Metal 4 compiler. With a fragment function that has no descriptor, the pipeline goes through the MTLDevice with the vertex function specialized once.
 
 ### Layer-writing vertex shaders get the triangle class
 

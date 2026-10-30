@@ -2,7 +2,7 @@
 
 Update 1.0.3 (v196608) over the base game (v0), SDK 10.4.1. Criterion's engine (ported by Stellar Entertainment) on NVN, with Bink movies and Criterion's Bundle 2 (`.BNDL`) files. Modules `main`, `subsdk0` (GLSLC, NVN's runtime shader compiler; not loaded, nothing calls it), `subsdk1` (NintendoSDK_movie) and `sdk`.
 
-Status: plays on the Mac (Apple M4, 2026-10-28): boot, the Autolog connection screen (offline, it goes on by itself), the career map, car select and whole races (Grand Ocean Road, Mystic Lake Road, South Face Drive, First Offence with the gold medal), at 60 fps with sound, a Switch Pro Controller and saves. In two sessions of 7 and 11 minutes: no crash, no new red line; at 60 fps 81% of the 300-frame windows held 16.7 ms (the others, menus and loading screens, 18 ms), 0.37% of the frames dropped, GPU 6.3 ms a frame (p50), the main thread about 4 ms. iOS has not been tested.
+Status: plays on the Mac (Apple M4, 2026-10-28): boot, the Autolog connection screen (offline, it goes on by itself), the career map, car select and whole races (Grand Ocean Road, Mystic Lake Road, South Face Drive, First Offence with the gold medal), at 60 fps with sound, a Switch Pro Controller and saves. In two sessions of 7 and 11 minutes: no crash, no new red line; at 60 fps 81% of the 300-frame windows held 16.7 ms (the others, menus and loading screens, 18 ms), 0.37% of the frames dropped, GPU 6.3 ms a frame (p50), the main thread about 4 ms. An independent iPhone 18 Pro Max test on iOS 27.0.1 is recorded below.
 
 ## Additional Mac verification (2026-10-29)
 
@@ -10,6 +10,13 @@ Status: plays on the Mac (Apple M4, 2026-10-28): boot, the Autolog connection sc
 - The user confirmed that the Mac app reaches its menu and reported the game working. This independent bring-up used the original 30 fps settings; it does not establish a new measurement of the 60 fps profile above. The manual gameplay route and duration were not recorded.
 - The launch diagnostic ran for 55 seconds with Metal API validation, passed 1,200 frames and displayed the startup logos without a crash or missing-shader errors. All 2,154 discovered shaders compiled successfully.
 - No iPhone testing was performed in this verification.
+
+## iPhone verification (2026-10-30)
+
+- iPhone 18 Pro Max (`iPhone19,3`), iOS 27.0.1; base game plus update 1.0.3 (v196608), built with Xcode 27.1 and installed directly through Xcode using a free Personal Team.
+- The user confirmed that NFS works and looks good on the phone. The exact gameplay route and duration were not recorded.
+- The app log passed 6,000 rendered frames without a recorded crash. Sampled frame windows were around 16.7 ms (approximately 60 fps); this is not a claim of sustained 60 fps throughout all races. The log includes some audio underruns.
+- The provisioning profile included `com.apple.developer.kernel.increased-memory-limit`. The existing diagnostics for device queries 0x60/0x61 and vertex format 0x27 still appeared; no missing-shader errors were observed in the retrieved log.
 
 ## What it needs
 

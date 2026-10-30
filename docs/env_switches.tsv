@@ -104,6 +104,7 @@ DM_NVN_DIRECT_UPLOAD	switch	0 disables bounded direct RGBA16F array uploads and 
 DM_NVN_DIRTYCHECK	diagnostic	`=1` fully hashes pool content on every use to find changes the dirty-page tracking missed
 DM_NVN_DISPATCH_OWN	switch	`=1` gives every compute dispatch a compute encoder of its own with full barriers, as before (by default dispatches share the copy encoder); `DM_NVN_PASSGPU` does the same
 DM_NVN_DRAWSTATE	diagnostic	
+DM_NVN_DRAW_RANGE	diagnostic	`=<min>:<max>` keeps only the draws whose index in the guest frame is in that range and drops the rest: bisects which draw produces an artefact. `DM_NVN_DRAW_RANGE_FRAMES=<a>-<b>` applies it only to those guest frames, so the run still reaches the scene; the first drop is logged
 DM_NVN_DRAWSTATE_TEX	diagnostic	
 DM_NVN_DUAL_WANT	path	`=<file>`: appends the key of each pixel shader a pipeline blends with its output 1 as the second source, while it has no dual-source entry point, to that file, once per key (the profile's `dual_want.tsv`)
 DM_NVN_ENC_LABEL	diagnostic	`=1` labels every render encoder `p<pass in frame> <width>x<height> <first 8 digits of the first draw's fragment key> d<draws>` for Instruments traces
@@ -148,6 +149,8 @@ DM_NVN_SHMAP	path	The shader map (`shader_map.tsv`); `c1_full.tsv` and `pso_mani
 DM_NVN_SHOT	diagnostic	`=<frame>[,<frame>…]:<path>` saves the swapchain texture as an image at those frames (`%d` in the path = frame number)
 DM_NVN_SHOT_OUT	diagnostic	`=<W>x<H>` makes `DM_NVN_SHOT` capture the picture as the present pass upscales it to that size, the crop included, instead of the raw swapchain texture
 DM_NVN_SKIP_FS	diagnostic	`=<fragment key>[,…]` (up to 16) drops all draws of those fragment shaders, to measure their GPU cost or bisect a wrong draw; the picture is wrong
+DM_NVN_SKIP_DRAW	diagnostic	`=<min>:<max>` drops the draws whose index in the guest frame is in that range (the mirror of DM_NVN_DRAW_RANGE)
+DM_NVN_SKIP_FULLSCREEN	diagnostic	`=1` drops the small full-screen passes (count <= 6, prim 4 or 5): post-process, blit and composite draws
 DM_NVN_SKIP_SMALL	diagnostic	`=<width>` drops all draws whose target width is at most that, to measure the cost of tiny render passes; the picture is wrong
 DM_NVN_SLICE_MERGE	switch	`0` keeps passes into other layers of one array or cube texture level apart (on by default: they run as one layered pass)
 DM_NVN_SNAPRAW	diagnostic	`=1` makes `DM_NVN_TEXDUMP` also save each target's raw bytes, with a text header line, since converting an HDR target to an 8-bit image truncates

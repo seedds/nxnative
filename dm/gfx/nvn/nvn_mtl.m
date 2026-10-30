@@ -97,6 +97,7 @@ static int g_vbuf_snap;       // DM_NVN_VB_SNAP=1 freezes the bytes a draw fetch
 static int g_ibuf_snap;       // DM_NVN_IB_SNAP=1 freezes the indices a draw reads (see ibuf_snap). Off by default for the same reason as the vertex streams
 static uint64_t g_vt_addr[31]; static uint32_t g_vt_valid;
 static uint64_t g_vbuf_resolve, g_vbuf_reuse, g_vbuf_set, g_vbuf_skip, g_vbuf_copies, g_vbuf_copy_bytes;   // copies: vertex streams at addresses not 4-byte aligned, and streams snapped at draw time (vbuf_unaligned)
+static uint64_t g_draw_filtered;   // draws dropped by DM_NVN_DRAW_RANGE / DM_NVN_SKIP_DRAW / DM_NVN_SKIP_FULLSCREEN
 static id<MTL4ArgumentTable> g_present_args;
 static id<MTLBuffer> g_present_uv[3];
 static uint64_t g_present_alloc_fence[3];
@@ -9899,6 +9900,33 @@ static void vbscan_later(int site) {   // site 0: end of the submission, 1: a pr
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); draw_(dw, di); cp_end(5, start); }
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
+    // DM_NVN_DRAW_RANGE=<min>:<max> / DM_NVN_SKIP_DRAW=<min>:<max>: keep / drop the draws whose index in the guest frame is in the range,
+    // restricted further by DM_NVN_DRAW_RANGE_FRAMES=<a>-<b> (default every frame) so a run can still reach the scene under test.
+    // DM_NVN_SKIP_FULLSCREEN=1 drops the small full-screen passes (count <= 6, prim 4 or 5) -- post-process, blit and composite draws.
+    // A bisect on the draw index: each run drops one half and the per-present row profile (DM_NVN_REGLUM) says whether the artefact is still there.
+    { static int init; static long r0, r1, s0, s1, f0 = -1, f1 = -1; static int skipfs;
+      if (!init) { init = 1;
+          const char *e = getenv("DM_NVN_DRAW_RANGE"), *s = getenv("DM_NVN_SKIP_DRAW"), *w = getenv("DM_NVN_DRAW_RANGE_FRAMES");
+          r0 = r1 = s0 = s1 = -1;
+          if (e && sscanf(e, "%ld:%ld", &r0, &r1) != 2) { r0 = r1 = -1; MLOG("[RED] DM_NVN_DRAW_RANGE argument invalid: %s", e); }
+          if (s && sscanf(s, "%ld:%ld", &s0, &s1) != 2) { s0 = s1 = -1; MLOG("[RED] DM_NVN_SKIP_DRAW argument invalid: %s", s); }
+          if (w && sscanf(w, "%ld-%ld", &f0, &f1) != 2) { f0 = -1; MLOG("[RED] DM_NVN_DRAW_RANGE_FRAMES argument invalid: %s", w); }
+          skipfs = getenv("DM_NVN_SKIP_FULLSCREEN") != NULL;
+          if (r0 >= 0 || s0 >= 0 || skipfs) MLOG("draw filter: %s%s%s%s%sframes %ld-%ld", r0 >= 0 ? "keep " : "", r0 >= 0 ? "the draws in range " : "",
+              r0 >= 0 ? "" : "", s0 >= 0 ? "drop the draws in range " : "", skipfs ? "drop the small full-screen passes; " : "",
+              r0 >= 0 ? r0 : s0, r0 >= 0 ? r1 : s1, (long)f0, (long)f1); }
+      if (r0 >= 0 || s0 >= 0 || skipfs) {
+          static uint64_t cf, idx; uint64_t f = atomic_load(&g_cur_frame);
+          if (f != cf) { cf = f; idx = 0; }
+          long i = (long)idx++; int inwin = f0 < 0 || ((long)f >= f0 && (long)f <= f1);
+          if (inwin) {
+              int drop = 0;
+              if (r0 >= 0 && !(i >= r0 && i <= r1)) drop = 1;
+              if (s0 >= 0 && i >= s0 && i <= s1) drop = 1;
+              if (skipfs && S.prog) { int c = dw ? dw->count : di->count, p = dw ? dw->prim : di->prim; if (c <= 6 && (p == 4 || p == 5)) drop = 1; }
+              if (drop) { if (!g_draw_filtered++) MLOG("draw filter: first draw dropped (frame %llu, draw index %ld)", (unsigned long long)f, i); g_draw_filtered++; return; }
+          }
+      } }
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
         PD("j %llu draw-entry vs=%s fs=%s gs=%s prim=%d count=%d instances=%d indexed=%d indirect=%#llx discard=%d feedback=%d", g_stat_pass + !g_enc,
@@ -11858,12 +11886,20 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         [b endEncoding];
         unsigned long long n = g_present_n, tns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), gf = atomic_load(&g_cur_frame);
         [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; const uint8_t *q = rb.contents; uint64_t sum = 0;
+            // Row profile: adjacent-row mean differences (horizontal scanlines / banding) and 16 band means. A torn or mis-bound composite pass
+            // shows up here as a large scan score and alternating bands; ordinary 3D frames sit at a couple of luma units. Columns 6 and 7.
+            uint64_t scan = 0, prs = 0, band[16] = {0};
+            for (NSUInteger y = 0; y < h; y++) { const uint8_t *row = q + 4 * (y * w); uint64_t rs = 0;
+                for (NSUInteger x = 0; x < w; x++) rs += row[4 * x] + row[4 * x + 1] + row[4 * x + 2];
+                sum += rs; band[(y * 16) / (h ? h : 1)] += rs;
+                if (y) scan += rs > prs ? rs - prs : prs - rs; prs = rs; }
             uint8_t g[4096]; NSUInteger ng = 0;   // Subsampled grayscale thumbnail (every 4th row / column, at most 4096 points), recorded along with the mean, for per-frame image correlation analysis
             for (NSUInteger y = 0; y < h; y += 4) for (NSUInteger x = 0; x < w && ng < sizeof g; x += 4) { const uint8_t *px = q + 4 * (y * w + x); g[ng++] = (uint8_t)((px[0] + px[1] + px[2]) / 3); }
-            for (NSUInteger k = 0; k < w * h; k++) sum += q[4 * k] + q[4 * k + 1] + q[4 * k + 2];
             pthread_mutex_lock(&rlmu); fprintf(rlf, "%llu\t%llu\t%.4f\t", n, tns, sum / (3.0 * w * h));
             for (NSUInteger k = 0; k < ng; k++) fprintf(rlf, "%02x", g[k]);
             fprintf(rlf, "\t%llu", gf);   // 5th column: the guest frame this present belongs to (joins a luma row to DRAWSTATE/PASSDUMP frames)
+            fprintf(rlf, "\t%.3f\t", h > 1 ? scan / (3.0 * w * (h - 1)) : 0.0);   // 6th: mean |row(y) - row(y-1)| in luma units
+            for (int b = 0; b < 16; b++) { double v = band[b] / (3.0 * w * (h / 16.0)); fprintf(rlf, "%02x", (unsigned)(v < 0 ? 0 : v > 255 ? 255 : v)); }   // 7th: 16 band means as hex
             fputc('\n', rlf); fflush(rlf); pthread_mutex_unlock(&rlmu); }];
         [cb commit];
     }

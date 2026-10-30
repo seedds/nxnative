@@ -887,6 +887,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
   - [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md) (it skips clears under render conditions, as Tears of the Kingdom and Animal Crossing: New Horizons do).
   - Drawn unconditionally with no `render_cond`, nothing looked wrong in [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (no screen played looked wrong) or [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (nothing seen).
   - [Portal 2](../../dm/games/0100ABD01785C000/README.md) needs no `render_cond` and must not get it: NVIDIA's occlusion culling in its D3D9 layer (`IDirect3DDevice9::SetOcclusionShape`, `materialsystem.nro+0xc1130`) puts a mesh under `SetRenderEnableConditional(RENDER_IF_NOT_EQUAL, pair)` when its shape has a query, else `SetRenderEnable(true)`, so drawing everything only costs GPU time. With the key on, those conditions read 0 / 0 at replay (no report in the submission writes the pairs; memory later held `0xffff` / 0) and visible furniture vanished. **Open:** who writes those pairs and when.
+- **Check:** `t_nvn` validates timestamp units and that the reported time lies within submit/wait, independently of whether the profile enables `render_cond`. It does not require the counter field to mirror the timestamp: that legacy representation differs for conditional-rendering profiles.
 
 ## Vulkan layer
 

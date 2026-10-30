@@ -1485,6 +1485,38 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
 }
 static void vbscan_later(int site);   // DM_NVN_VBSCAN (see its definition): re-read a probed vertex stream at the end of a submission / at a present
+// DM_NVN_PIPE=<from>-<to> (diagnostic, guest frames, off by default): how deep the submission pipeline actually is.
+// inflight = fences committed but not completed when this one is committed: 1 means the previous frame's GPU work had already
+// completed (one frame in flight, the guest in lockstep with the GPU), 2 or more means the guest ran that far ahead.
+// commit->gpu_start is the wall time from the commit to the moment Metal began executing it; gpu is its span.
+typedef struct { _Atomic uint64_t fence, frame, t, inflight; } pipe_rec;
+static pipe_rec g_pipe[256];
+static long g_pipe_f0 = -2, g_pipe_f1;
+static int pipe_on(uint64_t f) {
+    if (__builtin_expect(g_pipe_f0 == -1, 1)) return 0;
+    if (g_pipe_f0 == -2) { const char *e = getenv("DM_NVN_PIPE");
+        g_pipe_f0 = e ? atol(e) : -1; g_pipe_f1 = e && strchr(e, '-') ? atol(strchr(e, '-') + 1) : g_pipe_f0;
+        if (g_pipe_f0 >= 0) MLOG("DM_NVN_PIPE: frames %ld-%ld", g_pipe_f0, g_pipe_f1); }
+    return g_pipe_f0 >= 0 && (long)f >= g_pipe_f0 && (long)f <= g_pipe_f1;
+}
+static void pipe_sub(uint64_t f, uint64_t fence, uint64_t done, uint64_t t) {
+    if (!pipe_on(f)) return;
+    pipe_rec *r = &g_pipe[fence % 256];
+    atomic_store(&r->frame, f); atomic_store(&r->t, t); atomic_store(&r->inflight, fence > done ? fence - done : 0); atomic_store(&r->fence, fence);
+}
+static void pipe_done(uint64_t fence, double g0, double g1, uint64_t t) {
+    pipe_rec *r = &g_pipe[fence % 256];
+    if (atomic_load(&r->fence) != fence) return;
+    uint64_t t0 = atomic_load(&r->t);
+    MLOG("P f=%llu fence=%llu inflight=%llu commit->gpu_start=%.3f ms gpu=%.3f ms commit->complete=%.3f ms",
+         (unsigned long long)atomic_load(&r->frame), (unsigned long long)fence, (unsigned long long)atomic_load(&r->inflight),
+         g0 > 0 ? (g0 - t0 / 1e9) * 1e3 : -1.0, g0 > 0 ? (g1 - g0) * 1e3 : -1.0, (t - t0) / 1e6);
+}
+static void pipe_present(uint64_t f, uint64_t tk, uint64_t qin, uint64_t qread, uint64_t qdone) {
+    if (!pipe_on(f)) return;
+    MLOG("Q f=%llu ticket=%llu queued=%llu read=%llu gpu_done=%llu", (unsigned long long)f, (unsigned long long)tk,
+         (unsigned long long)(qin - qread), (unsigned long long)qread, (unsigned long long)qdone);
+}
 uint64_t mtl_sub_commit(void) {
     vbscan_later(0);   // DM_NVN_VBSCAN: the bytes as they stand at the end of the submission, before Metal gets the buffer
     lc_land();   // clears still waiting (the command list ends with them)
@@ -1505,6 +1537,7 @@ uint64_t mtl_sub_commit(void) {
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; for (dispatch_block_t block in commit_blocks) block(); }];
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
+    pipe_sub(gpu_f, fence, g_done, now_ns());   // DM_NVN_PIPE
     NSString *cctx = @(cctx_snap());
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
     pthread_mutex_lock(&g_post_mu);
@@ -1513,6 +1546,7 @@ uint64_t mtl_sub_commit(void) {
     pthread_mutex_unlock(&g_post_mu);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
+        pipe_done(fence, cb.GPUStartTime, cb.GPUEndTime, now_ns());   // DM_NVN_PIPE
         if (ws_on()) ws_fb(fence, cb.GPUEndTime);
         uint64_t c0 = 0, c1 = 0; if (seg_ts()) { c0 = gpu_s_guest_ns(cb.GPUStartTime); c1 = gpu_s_guest_ns(cb.GPUEndTime); }
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int n, nv; int victim = [cb.error.description containsString:@"InnocentVictim"]; if (victim ? nv++ < 1 : n++ < 8) MLOG("[RED] command buffer error details fence=%llu: %s | GPU %.3f→%.3f", (unsigned long long)fence, cb.error.description.UTF8String, cb.GPUStartTime, cb.GPUEndTime); if (!victim) MLOG("[RED] state of the failed submission fence=%llu: %s", (unsigned long long)fence, cctx.UTF8String); MLOG("[RED] command buffer execution error: %s", cb.error.localizedDescription.UTF8String); }
@@ -12034,6 +12068,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
+    pipe_present(it->frame, tk, g_pq_in, g_pq_read, g_pq_done);   // DM_NVN_PIPE
     if (ss) { g_snap[slot].ticket = tk; atomic_fetch_add(&g_snap_next, 1); }
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);

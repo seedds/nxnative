@@ -222,6 +222,13 @@ To enroll a cut for any game's own module:
 - **Fix:** such a module (`TWO` in `patch_nso.py`: the text alone ends past the reach) gets two patch areas. The front one, 16 MB before the base, takes the sites below `SPLIT` (128 MB less the front area and 1 MB of margin for a stub's exits past its site); the back one, right after bss, the key page and the frame step page (`BACK_OFF`, 64 KB aligned), takes the others. A site's stubs and their branches back stay in its own area (`use_area`); when the front sites need more room, the rewriter runs again with exactly that size, and `B()` checks every branch. The file is the image, the front area padded to 16 KB, then the back area; `fixups.tsv` adds `BACK_OFF` and `BACK_LEN`, and `IMAGE_SIZE` covers the back area. The Mac loader copies it to `BACK_OFF` and seals it read-only and executable, the iOS embedding gives it a fourth section (`gen_embed.py`: `__TEXT,__dm<name>x2`) that the loader remaps there, and `svcQueryMemory` reports it as CodeData+RX like a patch area after the image (data and bss end at it). A module that does not need it is rewritten byte for byte as before.
 - **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) `main` (1.8d.310c): 185.6 MB of text, 177,058 sites; 3.9 MB of stubs in front and 3.2 MB at `BACK_OFF` `0xdec0000`.
 
+### The back patch area out of reach of the sites above SPLIT
+
+- **Symptom:** the rewrite of a module with two patch areas stops on a `B()` range assertion in `site_plain` (or another site kind) at a site just above `SPLIT`.
+- **Cause:** the back area sits after ro, data and bss. With a lot of them its stubs are more than 128 MB from the sites just above a `SPLIT` that a 16 MB front area puts at 111 MB, and those sites reach neither area.
+- **Fix:** `two_split` in `patch_nso.py` works out the lowest site a back area of up to 4 MB still reaches, with the 1 MB margin. When that lies above `SPLIT`, the front area is made just small enough that its sites reach 4 MB past it, and `SPLIT` goes halfway between; when no split reaches both ways, a `[RED]` line says so. Other modules keep their layout. Test: `dm/tools/tests/test_patch_split.py`.
+- **Found on:** Bloodstained: Ritual of the Night (`0100BF500207C000`) `main` (1.60): 132 MB of text, then 107 MB of ro, data and bss (`BACK_OFF` `0xefe0000`); a 6.1 MB front area (1.6 MB used), `SPLIT` `0x76e0000`, 476 KB of stubs at the back.
+
 ## Cuts and observation gates
 
 ### Observation gates on any relocatable instruction

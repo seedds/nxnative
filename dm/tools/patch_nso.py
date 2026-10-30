@@ -40,11 +40,27 @@ BIG_TEXT = FAR and MOD.text_end + FRONT > 0x8000000 - 0x10000
 # A text segment longer than the reach itself (EA SPORTS FC 27: 185.6 MB of text in main) leaves no gap before the base from which a B reaches its end, so the patch area is split in
 # two (TWO): the front area before the base takes the sites below SPLIT, the back area right after the image (after bss, the key page and the frame step page, at BACK_OFF) takes
 # the others. A site's stubs, and their branches back to it, stay in the area it belongs to; SPLIT keeps 1 MB of margin for a stub's exits past its site (a window's targets, a
-# switch's cases). The front area starts at 16 MB; when its sites need more, the rewriter runs again with exactly that size (DM_PATCH_FRONT), and B() checks every branch
+# switch's cases). two_split sizes the front area; when its sites need more, the rewriter runs again with exactly that size (DM_PATCH_FRONT), and B() checks every branch
 TWO = BIG_TEXT and MOD.text_end > 0x8000000 - 0x10000
-if TWO: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or 0x1000000
+def two_split(image_end, front=0):
+    """The two patch areas (TWO) of a module whose image with bss ends at image_end: (FRONT, SPLIT), or why no split reaches all of the text. front: the size a rerun asks for (DM_PATCH_FRONT).
+    The front area starts at 16 MB. Large ro, data and bss can put the back area beyond the reach of the sites just above SPLIT (Bloodstained: Ritual of the Night 1.60: 132 MB of text, then
+    107 MB of ro, data and bss, so the back area starts at 239 MB and the sites from SPLIT to about 117 MB reached neither area). back_lo is the lowest site whose stubs a back area of up to
+    4 MB still reaches, with SPLIT's 1 MB of margin. When it lies above SPLIT, the front area starts small enough that its sites reach 4 MB past back_lo, and SPLIT goes halfway between;
+    other modules keep their layout"""
+    size = front or 0x1000000
+    split = 0x8000000 - size - 0x100000
+    back_lo = ((((image_end + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) + 0x400000 + 0x100000 - 0x8000000   # BACK_OFF below, plus 4 MB and the margin, less the reach
+    if back_lo <= split: return size, split
+    if not front: size = (0x8000000 - 0x100000 - back_lo - 0x400000) & ~0xFFFF
+    if size <= 0 or 0x8000000 - size - 0x100000 <= back_lo: return f'no split of the patch area reaches all of the text: the back area reaches down to {back_lo:#x} only, with a {max(size, 0):#x}-byte front area'
+    return size, (back_lo + 0x8000000 - size - 0x100000) // 2 & ~0xFFFF
+SPLIT = None
+if TWO:
+    split = two_split(len(MOD.image) + bss, int(os.environ.get('DM_PATCH_FRONT', '0'), 0))
+    if isinstance(split, str): sys.exit(f'[RED] {NAME}: {split}')
+    FRONT, SPLIT = split
 elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
-SPLIT = 0x8000000 - FRONT - 0x100000 if TWO else None
 IMG = MOD.image
 if not FAR: IMG.extend(bytes(bss))
 TEXT_END = MOD.text_end

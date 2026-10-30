@@ -4,9 +4,10 @@ Update 1.21.1 (`v1245184`) over the base game. Unreal Engine 5.6.0
 (`SDK MW+EpicGames+UnrealEngine-5_6_0` in `main`), Nintendo SDK 20.5.17,
 NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`.
 
-**Current:** playable on the Mac through the prologue's first combat wave and
-the parking-lot transition. The unsigned iOS package builds and passes archive
-verification; device validation remains open.
+**Gameplay previously verified:** playable on the Mac through the prologue's
+first combat wave and the parking-lot transition. The unsigned iOS package
+built and passed archive verification; device validation remains open. These
+results predate the current allocator-discovery migration; see [Testing](#testing).
 
 ## Memory
 
@@ -16,8 +17,8 @@ verification; device validation remains open.
   engine-wide discovery in `ue_malloc.py` and `hle_uemalloc.c` use the existing
   host allocator replacement, a workaround for that platform limit. The former
   fixed constructor cut and host row are superseded by the discovery added in
-  `51904e70`; checking discovery on this build remains open until its extracted
-  modules are available again. See [Unreal's FMallocBinned3 replacement](../../../docs/reference/memory.md#unreals-fmallocbinned3-replaced-by-the-host-allocator).
+  `51904e70`. On the untouched 1.21.1 module, the finder returns the verified
+  constructor call and vtable below, with the name getter at slot 26. See [Unreal's FMallocBinned3 replacement](../../../docs/reference/memory.md#unreals-fmallocbinned3-replaced-by-the-host-allocator).
 - `nninitStartup` is a branch at `main+0x35107c0` to `+0x13370`. Its call at
   `+0x137f0` constructs the static allocator at `+0x7028210`; the constructor
   is `+0xae550`, and the verified 32-slot vtable is `+0x63b10b8`. These offsets
@@ -117,13 +118,42 @@ verification; device validation remains open.
   and shaders are unchanged; both executables were refreshed and host and
   documentation/patch tests passed. The gameplay measurements above precede
   that final integration.
-- **Current validation limit:** rebasing onto `85578fc9` incorporated upstream
+- **Previous rebase validation:** rebasing onto `85578fc9` incorporated upstream
   border-colour and logic-operation shader changes, producing chain
   `572d66410ce2`. The Mac host builds; the synthetic CAS, border-colour,
   logic-operation and feedback GPU tests pass. The full-game shader rebuild,
   gameplay regression and IPA rebuild have not been repeated: the previous
   extracted builds and shader caches are no longer available locally. The
   gameplay, IPA and `validated.tsv` results above remain for chain `d54f11c2255c`.
+- **Current rebase validation (2026-10-30):** rebased onto `fe6d3dfa` and
+  removed the fixed allocator cut and host row superseded by `51904e70`.
+  Registered cuts run before the engine finder, so leaving that cut would hide
+  the constructor call from discovery. The existing synthetic finder test
+  covers the relocated 32-slot UE5.6 layout (name getter slot 26). A fresh
+  code-only extraction of 1.21.1 confirms all registered module build IDs;
+  discovery on untouched main returns constructor `0xae550`, call `0x137f0`,
+  vtable `0x63b10b8` and getter slot 26, matching the removed fixed rule.
+  The production rewrite passes with exactly one cut at `0x137f0`, observation
+  gate 21 there (object in x0), and fixups `UE_MALLOC_VT=0x63b10b8` /
+  `UE_MALLOC_SLOT=0x1a`; no `[RED]` diagnostics occur.
+  Full shader and IPA rebuilds and gameplay remain unverified: no current
+  complete Mac build or shader cache is available for RePOP. The CAS
+  implementation and published translator are unchanged by this rebase;
+  the regenerated chain remains `572d66410ce2`. Fresh Mac host build and unit
+  tests, Python tools (684 tests, 19 optional skips), graphics Python tests
+  (161 tests, 7 optional skips), iOS packaging tests (39), documentation,
+  chain and engine discovery checks (36), translator lock and Python lint
+  (zero new findings) passed. The 11 CAS GPU cases, Mac/iOS Metal compilation,
+  unsupported-form rejection and production-IR address tests passed again.
+  The complete native Metal graphics suite and existing image-atomic tests
+  (13, including GPU execution) passed; optional external reflection samples
+  were skipped because their game-derived inputs are absent. A subsequent rebase
+  onto `6fe1927e` adds upstream's vibration-mounted query; the Mac host,
+  updated HID test (147 checks), and documentation/chain/discovery tests (36)
+  pass. The allocator and shader sources are unchanged by that rebase. A final
+  rebase onto `a5bf542f` incorporates upstream iOS external-display support;
+  Mac, allocator and shader sources are unchanged, and documentation/chain/UE
+  discovery tests (36) pass. No new IPA or iOS device testing was done.
 - **Open:** longer play sessions, later stages, later-checkpoint persistence,
   and iOS device performance/memory. The IPA requires iOS 26 or later.
 

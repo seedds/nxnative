@@ -7,7 +7,7 @@ NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`.
 **Gameplay previously verified:** playable on the Mac through the prologue's
 first combat wave and the parking-lot transition. The unsigned iOS package
 built and passed archive verification; device validation remains open. These
-results predate the current allocator-discovery migration; see [Testing](#testing).
+results predate the current allocator and region migrations; see [Testing](#testing).
 
 ## Memory
 
@@ -27,11 +27,18 @@ results predate the current allocator-discovery migration; see [Testing](#testin
   6 / 8 / 10, MallocZeroed / TryMallocZeroed in 11 / 12, QuantizeSize in 13,
   GetAllocationSize in 14. TLS allocation and release call through that
   vtable; no direct calls to the replaced allocation methods were found.
-- `game_args -SwitchVirtualAddressSpaceSize=4064` requests a 4064 MiB engine
-  region inside a 5 GiB guest block (`mem_reserve 0x140000000`,
-  `mem_alias 0x118000000`, `mem_stack 0x10000000`). The parser accepts MiB up
-  to 4095 and allocates the region when the option is supplied. The tested Mac route reached alias +2.76 GiB with about 1.50 GiB
-  mapped; the host allocator held about 0.50 GiB. Longer sessions are untested.
+- **Current, runtime unbooted:** the engine-wide region finder added in
+  `2006d5ed` finds the size store at `main+0x137cc` (x1), immediately before
+  the reservation call at `+0x137d0` in `nninitStartup`'s `+0x13370`.
+  `OBS_UE_REGION` sizes it from available alias space; the fixed
+  `game_args -SwitchVirtualAddressSpaceSize=4064` is removed. In this profile's
+  5 GiB guest block (`mem_reserve 0x140000000`, `mem_alias 0x118000000`,
+  `mem_stack 0x10000000`), the initial region budget is 4160 MiB (4.0625 GiB).
+  See [the shared region rule](../../../docs/reference/memory.md#unreals-engine-address-region-and-its-options).
+- **Historical gameplay:** the tested argument requested 4064 MiB, 96 MiB
+  less than the new initial budget. That Mac route reached alias +2.76 GiB
+  with about 1.50 GiB mapped; the host allocator held about 0.50 GiB. Those
+  measurements do not validate the new automatic region sizing or longer play.
 - `sys_resource 0x5000000` comes from the NPDM's 80 MiB system resource.
   SDK build `0023a1b06130cd795f7bc4613772af0a` already has the shared
   [62 MiB address-region node-area cut](../../../docs/reference/memory.md#the-sdks-address-region-node-area).
@@ -125,7 +132,7 @@ results predate the current allocator-discovery migration; see [Testing](#testin
   gameplay regression and IPA rebuild have not been repeated: the previous
   extracted builds and shader caches are no longer available locally. The
   gameplay, IPA and `validated.tsv` results above remain for chain `d54f11c2255c`.
-- **Current rebase validation (2026-10-30):** rebased onto `fe6d3dfa` and
+- **Earlier allocator-rebase validation (2026-10-30):** rebased onto `fe6d3dfa` and
   removed the fixed allocator cut and host row superseded by `51904e70`.
   Registered cuts run before the engine finder, so leaving that cut would hide
   the constructor call from discovery. The existing synthetic finder test
@@ -154,6 +161,20 @@ results predate the current allocator-discovery migration; see [Testing](#testin
   rebase onto `a5bf542f` incorporates upstream iOS external-display support;
   Mac, allocator and shader sources are unchanged, and documentation/chain/UE
   discovery tests (36) pass. No new IPA or iOS device testing was done.
+- **Current maintenance (2026-10-30):** rebased onto fixed main `2006d5ed`.
+  The generic region finder is verified on untouched main
+  `89f76888939adcdf69f8b0e647d84cad`; the 4064 MiB argument is superseded.
+  A native probe of the production host callback passes ten cases covering
+  4160 MiB sizing, an existing smaller limit, alias space already occupied,
+  invalid size registers and preservation of unrelated registers. Targeted
+  Python checks (64), the native Mac host build, full host unit suite and
+  translator lock pass. Python lint exits 1 with the same two upstream
+  findings as `2006d5ed` (394 versus the 392-entry ratchet); the candidate and
+  main logs are identical. The production rewrite passes with allocator gate
+  21 at `0x137f0` and region gate `0x11a` (observation 26, x1) at `0x137cc`,
+  one constructor cut, and no `[RED]` diagnostics. The shared CAS implementation
+  and chain `572d66410ce2` are unchanged; current runtime and IPA validation
+  remain open.
 - **Open:** longer play sessions, later stages, later-checkpoint persistence,
   and iOS device performance/memory. The IPA requires iOS 26 or later.
 

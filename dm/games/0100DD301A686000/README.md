@@ -168,9 +168,11 @@ results predate the current allocator and region migrations; see [Testing](#test
   4160 MiB sizing, an existing smaller limit, alias space already occupied,
   invalid size registers and preservation of unrelated registers. Targeted
   Python checks (64), the native Mac host build, full host unit suite and
-  translator lock pass. Python lint exits 1 with the same two upstream
-  findings as `2006d5ed` (394 versus the 392-entry ratchet); the candidate and
-  main logs are identical. The production rewrite passes with allocator gate
+  translator lock pass. Initial Python lint found the same two upstream
+  findings as `2006d5ed`. The subsequent CI fix binds the region finder's
+  instruction in its register helper and asserts the size-register invariant
+  before encoding the gate. The lint ratchet now passes with zero new findings;
+  all 35 targeted Unreal discovery and patch tests pass. The production rewrite passes with allocator gate
   21 at `0x137f0` and region gate `0x11a` (observation 26, x1) at `0x137cc`,
   one constructor cut, and no `[RED]` diagnostics. The shared CAS implementation
   and chain `572d66410ce2` are unchanged; current runtime and IPA validation

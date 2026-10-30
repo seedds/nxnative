@@ -14,7 +14,9 @@ static id src_hook(id self, SEL s, NSString *src, MTLCompileOptions *o, NSError 
 
 int main(void) { @autoreleasepool {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
-    Method m = class_getInstanceMethod([(id)dev class], @selector(newLibraryWithSource:options:error:)); g_old = method_setImplementation(m, (IMP)src_hook);
+    Method m = class_getInstanceMethod([(id)dev class], @selector(newLibraryWithSource:options:error:));
+    if (!m) { printf("FAIL: the device has no newLibraryWithSource:options:error: to count\n"); return 1; }
+    g_old = method_setImplementation(m, (IMP)src_hook);
     id<MTL4Compiler> comp = [dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:nil];
     int n = (int)(sizeof k_host_msl / sizeof *k_host_msl);
     CHECK(n >= 12, "%d host libraries", n);

@@ -121,6 +121,57 @@ int main(void) {
     EXPECT("MemoryPoolInitialize succeeds", 1, P(nvnMemoryPoolInitialize)(&pool, &pb));
     EXPECT("pool GPU address = storage address", (long long)(uintptr_t)poolmem, P(nvnMemoryPoolGetBufferAddress)(&pool));
 
+    // Engines may retarget a ring buffer with raw stores instead of SetStorage.
+    // These SDK offsets come from the guest writes reported in issue #723;
+    // deliberately do not use buf_t or its offsets to construct the writes.
+    {
+        NVNbufferBuilder bb = {0};
+        struct { uint64_t before; NVNbuffer buffer; uint64_t after; } guarded = {
+            .before = UINT64_C(0x1122334455667788), .after = UINT64_C(0x8877665544332211)
+        };
+        NVNbuffer *buffer = &guarded.buffer;
+        P(nvnBufferBuilderSetDevice)(&bb, &dev); P(nvnBufferBuilderSetDefaults)(&bb);
+        P(nvnBufferBuilderSetStorage)(&bb, &pool, 0x100, 0x200);
+        EXPECT("ring buffer initializes", 1, P(nvnBufferInitialize)(buffer, &bb));
+        EXPECT("initial buffer address", (uintptr_t)poolmem + 0x100, P(nvnBufferGetAddress)(buffer));
+        EXPECT("initial buffer size", 0x200, P(nvnBufferGetSize)(buffer));
+        uint64_t initial_offset, initial_size;
+        memcpy(&initial_offset, (uint8_t *)buffer + 0x18, 8);
+        memcpy(&initial_size, (uint8_t *)buffer + 0x20, 8);
+        EXPECT("initialized guest offset field", 0x100, initial_offset);
+        EXPECT("initialized guest size field", 0x200, initial_size);
+        const struct { uint64_t offset, size; } allocations[] = {{0x4000, 0x100}, {0x8000, 0x300}, {0, 0}};
+        for (unsigned i = 0; i < sizeof allocations / sizeof allocations[0]; i++) {
+            memcpy((uint8_t *)buffer + 0x18, &allocations[i].offset, 8);
+            memcpy((uint8_t *)buffer + 0x20, &allocations[i].size, 8);
+            EXPECT("guest ring store changes address", (uintptr_t)poolmem + allocations[i].offset, P(nvnBufferGetAddress)(buffer));
+            EXPECT("guest ring store changes map", (uintptr_t)poolmem + allocations[i].offset, (uintptr_t)P(nvnBufferMap)(buffer));
+            EXPECT("guest ring store changes offset", allocations[i].offset, P(nvnBufferGetMemoryOffset)(buffer));
+            EXPECT("guest ring store changes size", allocations[i].size, P(nvnBufferGetSize)(buffer));
+            EXPECT("guest ring store preserves pool", (uintptr_t)&pool, (uintptr_t)P(nvnBufferGetMemoryPool)(buffer));
+        }
+        EXPECT("ring stores preserve builder offset", 0x100, P(nvnBufferBuilderGetMemoryOffset)(&bb));
+        EXPECT("ring stores preserve builder size", 0x200, P(nvnBufferBuilderGetSize)(&bb));
+        P(nvnBufferFinalize)(buffer);
+        EXPECT("buffer leaves preceding object intact", UINT64_C(0x1122334455667788), guarded.before);
+        EXPECT("buffer leaves following object intact", UINT64_C(0x8877665544332211), guarded.after);
+
+        static uint8_t private_mem[4096] __attribute__((aligned(4096)));
+        NVNmemoryPoolBuilder private_pb = {0}; NVNmemoryPool private_pool;
+        P(nvnMemoryPoolBuilderSetDevice)(&private_pb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&private_pb);
+        P(nvnMemoryPoolBuilderSetStorage)(&private_pb, private_mem, sizeof private_mem);
+        P(nvnMemoryPoolBuilderSetFlags)(&private_pb, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+        EXPECT("GPU-only pool initializes", 1, P(nvnMemoryPoolInitialize)(&private_pool, &private_pb));
+        P(nvnBufferBuilderSetStorage)(&bb, &private_pool, 0x100, 0x200);
+        EXPECT("GPU-only buffer initializes", 1, P(nvnBufferInitialize)(buffer, &bb));
+        uint64_t offset = 0x400, size = 0x80;
+        memcpy((uint8_t *)buffer + 0x18, &offset, 8); memcpy((uint8_t *)buffer + 0x20, &size, 8);
+        EXPECT("GPU-only retargeted address", (uintptr_t)private_mem + 0x400, P(nvnBufferGetAddress)(buffer));
+        EXPECT("GPU-only retargeted size", 0x80, P(nvnBufferGetSize)(buffer));
+        EXPECT("GPU-only buffer stays unmappable", 0, (uintptr_t)P(nvnBufferMap)(buffer));
+        P(nvnBufferFinalize)(buffer); P(nvnMemoryPoolFinalize)(&private_pool);
+    }
+
     // 4. Texture storage size (block-linear: GOB = 64 B × 8 rows; block height from the GOB count of "height × 1.5": ≥16→16, ≥8→8 ...)
     //    256×256 RGBA8: 1024 B per row = 16 GOBs; height 256 rows = 32 GOB rows, block height 16 GOBs → 2 blocks; 16×2×(512×16) = 262144
     size_t al; EXPECT("256x256 RGBA8 size", 262144, tex_size(NVN_FORMAT_RGBA8, 256, 256, 0, &al));

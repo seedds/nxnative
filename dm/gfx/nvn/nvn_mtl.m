@@ -9395,6 +9395,127 @@ static void ag_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
         for (int i = 0; i < g_ag_nprev; i++) if (g_ag_prev[i].tid == r.tid && g_ag_prev[i].idx == r.idx) { ag_line("prev", &g_ag_prev[i]); break; }
     } else if (g_ag_log > 0) ag_line(bad ? "OVERSHOOT" : "ok", &r);
 }
+// DM_NVN_DRAWSTATE=<from>-<to>: for every draw of these guest frames, one line with the per-draw state a pass dump cannot
+// show -- the effective texture serial of every texture slot of every stage, every uniform block's first floats as the
+// shader reads them (deferred updates and partial shadows laid over guest memory, via ubo_read: NOT the pre-copy ring
+// block), the pipeline keys, the bound vertex streams with their attributes, the viewport and the scissor. Off by default;
+// no draw is changed, skipped or clamped. DM_NVN_VERTDUMP=<dir> additionally writes the vertex bytes the draw reads.
+static int ds_on(void) {
+    static long r[8][2]; static int nr = -1;
+    if (nr < 0) { nr = 0; const char *e = getenv("DM_NVN_DRAWSTATE");
+        if (e && *e) { char buf[256]; snprintf(buf, sizeof buf, "%s", e);
+            for (char *p = buf; p && *p && nr < 8; ) { char *c = strchr(p, ','); if (c) *c = 0;
+                long a = strtol(p, NULL, 0), b = a; const char *d = strchr(p, '-'); if (d) b = strtol(d + 1, NULL, 0);
+                r[nr][0] = a; r[nr][1] = b; nr++; p = c ? c + 1 : NULL; }
+            for (int i = 0; i < nr; i++) MLOG("DM_NVN_DRAWSTATE: per-draw state of guest frames %ld-%ld", r[i][0], r[i][1]); } }
+    long f = (long)atomic_load(&g_cur_frame);
+    for (int i = 0; i < nr; i++) if (f >= r[i][0] && f <= r[i][1]) return 1;
+    return 0;
+}
+static void ds_vertdump(long f, uint64_t pass, int idx, const p_draw *dw, const p_draw_idx *di) {
+    static const char *vd; static int vdinit;
+    if (!vdinit) { vdinit = 1; vd = getenv("DM_NVN_VERTDUMP"); if (vd) MLOG("DM_NVN_VERTDUMP: the vertex streams the dumped draws read go to %s", vd); }
+    if (!vd) return;
+    int64_t first = 0; long cnt = dw ? dw->count : (long)di->count;
+    const uint8_t *ib = NULL; int isz = 0;
+    if (di) {   // indexed: the vertices the indices name, as a contiguous span
+        if (!cnt || cnt > 300000) return;
+        isz = di->itype == 1 ? 2 : 4;
+        void *m; uint64_t o; if (!mtl_addr(di->ibuf, (uint64_t)cnt * isz, &m, &o)) return;
+        ib = [(__bridge id<MTLBuffer>)m contents]; if (!ib) return; ib += o;
+        int64_t lo = INT64_MAX, hi = INT64_MIN;
+        for (long k = 0; k < cnt; k++) { uint32_t ix = isz == 2 ? ((const uint16_t *)ib)[k] : ((const uint32_t *)ib)[k];
+            int64_t v = (int64_t)ix + di->base_vertex; if (v < lo) lo = v; if (v > hi) hi = v; }
+        if (hi < lo) return; first = lo; cnt = (long)(hi - lo + 1);
+    } else if (dw) first = (int64_t)dw->first;
+    for (int s = 0; s < 16; s++) {
+        uint64_t st = S.stream[s].stride; if (!S.vbuf[s].address || !st) continue;
+        uint64_t off = (uint64_t)first * st, len = (uint64_t)cnt * st;
+        if (first < 0 || len > (1u << 20) || off + len > S.vbuf[s].size) continue;
+        void *mb; uint64_t mo; if (!mtl_addr(S.vbuf[s].address + off, len, &mb, &mo)) continue;
+        const uint8_t *base = [(__bridge id<MTLBuffer>)mb contents]; if (!base) continue;
+        char p[1024]; snprintf(p, sizeof p, "%s/F%ld_p%llu_d%d_s%d.bin", vd, f, (unsigned long long)pass, idx, s);
+        FILE *o = fopen(p, "wb"); if (!o) continue; fwrite(base + mo, 1, (size_t)len, o); fclose(o);
+    }
+}
+static void ds_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+    if (!pr || !ds_on()) return;
+    // DM_NVN_DRAWSTATE_TEX=<w>x<h>: print only the draws that sample a texture of that size (the glyph atlas) or that have a
+    // texture slot which resolved to a dummy -- the two signatures a stale/atlas binding would leave; without it every draw prints.
+    static int fw = -1, fh; static int finit;
+    if (!finit) { finit = 1; const char *e = getenv("DM_NVN_DRAWSTATE_TEX"); fw = 0;
+        if (e && *e) { if (sscanf(e, "%dx%d", &fw, &fh) != 2) fw = 0; if (fw) MLOG("DM_NVN_DRAWSTATE_TEX: only draws sampling %dx%d or with a dummy slot", fw, fh); } }
+    int hit = fw ? 0 : 1;
+    uint64_t f = atomic_load(&g_cur_frame), pass = g_stat_pass + !g_enc;
+    static uint64_t dsp = ~0ull; static int dsidx;
+    if (pass != dsp) { dsp = pass; dsidx = 0; }
+    dsidx++;
+    char ln[3072]; int n = 0;
+    #define DS(...) do { if (n >= 0 && n < (int)sizeof ln - 1) { int w = snprintf(ln + n, sizeof ln - (size_t)n, __VA_ARGS__); \
+        n = w < 0 ? -1 : (w >= (int)sizeof ln - n ? (int)sizeof ln - 1 : n + w); } } while (0)
+    DS("D F%llu %llu d%d prim=%d count=%d inst=%d idx=%d first=%lld vs=%s fs=%s gs=%s", (unsigned long long)f, (unsigned long long)pass, dsidx,
+       dw ? dw->prim : di->prim, dw ? dw->count : di->count, dw ? dw->instances : di->instances, di != NULL,
+       (long long)(dw ? dw->first : 0), pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-", pr->sh[2] ? pr->sh[2]->key : "-");
+    if (S.has_vp) DS(" vp=%g,%g,%g,%g", S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3]); else DS(" vp=none");
+    if (R.has_sc) DS(" sc=%d,%d,%d,%d", R.sc.x, R.sc.y, R.sc.w, R.sc.h); else DS(" sc=none");
+    for (int s = 0; s < 16; s++) if (S.vbuf[s].address)
+        DS(" vb%d=%#llx/%u/%llu", s, (unsigned long long)S.vbuf[s].address, S.stream[s].stride, (unsigned long long)S.vbuf[s].size);
+    if (S.nattr) { DS(" attr="); for (int a = 0; a < S.nattr && a < 12; a++) DS("%s%d:f%d/s%d+%d", a ? "," : "", a, S.attr[a].fmt, S.attr[a].stream, S.attr[a].offset); }
+    os_unfair_lock_lock(&g_rmu);   // the registration tables may be grown by the game thread
+    for (int st = 0; st < 6; st++) {
+        NvShader *sh = pr->sh[st]; if (!sh) continue;
+        for (int i = 0; i < sh->rf.nb; i++) {
+            const nvn_rbind *b = &sh->rf.b[i]; int reg = b->reg, tid = 0;
+            if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) tid = (int)(tex_slot_h(S.tex[st], S.img[st], reg) & 0xfffff);
+            else if (b->kind == NVN_RB_TEXU) { uint32_t h = ubo_handle(st, reg, b->off); tid = ubo_tex_id(h);
+                DS(" st%d.tex%d* tid=%d", st, reg, tid); }
+            else if (b->kind == NVN_RB_IMG) tid = reg < 32 ? (int)(S.img[st][reg] & 0xfffff) : 0;
+            else continue;
+            void *tv = NULL; if (tid) tex_fast_rid(tid, &tv);
+            if (fw) { __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+                if (t && (int)t.width == fw && (int)t.height == fh) hit = 1;       // samples the atlas
+                if (tid && !tv) hit = 1; }                                          // a slot that resolved to a dummy
+            if (b->kind != NVN_RB_TEXU) DS(" st%d.tex%d tid=%d", st, reg, tid);
+            DS(" ser=%llu %s", (unsigned long long)(tid > 0 && tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0ull), tv ? "real" : "dummy");
+        }
+    }
+    os_unfair_lock_unlock(&g_rmu);
+    for (int st = 0; st < 6; st++) { NvShader *sh = pr->sh[st]; if (!sh) continue;
+        for (int i = 0; i < sh->rf.nb; i++) {
+            const nvn_rbind *b = &sh->rf.b[i]; if (b->kind != NVN_RB_CBUF || b->reg >= 16) continue;
+            const p_bind_buf *u = &S.ubo[st][b->reg];
+            if (!u->addr) { DS(" st%d.cb%d=none", st, b->reg); continue; }
+            uint64_t ul = cb_len(sh, b->reg, u->size); int nf = ul >= 32 ? 8 : (int)(ul / 4);
+            uint64_t cmp = ul < 512 ? ul : 512;
+            uint8_t gb[512], rd[512]; memset(gb, 0, sizeof gb); memset(rd, 0, sizeof rd);
+            memcpy(gb, (const void *)u->addr, (size_t)cmp);          // guest memory: the pre-copy ring block (stale by design while deferred)
+            ubo_read(st, b->reg, 0, (size_t)cmp, rd);                  // the bytes the shader actually reads: deferred updates over guest memory
+            const uint8_t *src = NULL; int cov = 0, mi = -1;
+            if (g_nubd) { cov = ubd_hits(u->addr, u->addr + ul) && ubd_covers(u->addr, u->addr + ul);
+                for (int j = g_nubd - 1; j >= 0; j--) if (g_ubd[j].lo <= u->addr && u->addr + ul <= g_ubd[j].hi) {
+                    src = (const uint8_t *)g_ubd[j].buf.contents + g_ubd[j].off + (size_t)(u->addr - g_ubd[j].lo); break; } }
+            int eqg = -1, eqr = -1;
+            if (src) { eqg = eqr = 1; for (uint64_t q = 0; q < cmp; q++) { if (gb[q] != src[q]) { eqg = 0; if (mi < 0) mi = (int)q; }
+                                                                       if (rd[q] != src[q]) eqr = 0; } }
+            float fg[4], fr[4], fs[4];
+            for (int q = 0; q < 4; q++) { memcpy(&fg[q], gb + 4 * q, 4); memcpy(&fr[q], rd + 4 * q, 4);
+                                          uint8_t z[4] = {0, 0, 0, 0}; memcpy(&fs[q], src ? src + 4 * q : z, 4); }
+            DS(" st%d.cb%d=%#llx/%llu f%d=%.9g,%.9g,%.9g,%.9g rd=%.9g,%.9g,%.9g,%.9g src=%.9g,%.9g,%.9g,%.9g cov=%d ubd=%d eqg=%d eqr=%d mi=%d",
+               st, b->reg, (unsigned long long)u->addr, (unsigned long long)u->size, nf,
+               fg[0], fg[1], fg[2], fg[3], fr[0], fr[1], fr[2], fr[3], fs[0], fs[1], fs[2], fs[3], cov, g_nubd, eqg, eqr, mi);
+            {   // DM_NVN_VERTDUMP: also the whole block as the shader reads it, so fields past the first 8 floats can be diffed offline
+                static const char *vd; static int vdinit2;
+                if (!vdinit2) { vdinit2 = 1; vd = getenv("DM_NVN_VERTDUMP"); }
+                if (vd && ul && ul <= (1u << 16)) { uint8_t *blk = malloc((size_t)ul);
+                    if (blk) { ubo_read(st, b->reg, 0, (size_t)ul, blk);
+                        char p[1024]; snprintf(p, sizeof p, "%s/F%llu_p%llu_st%d_cb%d.bin", vd, (unsigned long long)f, (unsigned long long)pass, st, b->reg);
+                        FILE *o = fopen(p, "wb"); if (o) { fwrite(blk, 1, (size_t)ul, o); fclose(o); } free(blk); } } }
+        } }
+    #undef DS
+    if (!hit) return;
+    MLOG("%s", ln);
+    ds_vertdump((long)f, pass, dsidx, dw, di);
+}
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); draw_(dw, di); cp_end(5, start); }
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
@@ -9421,6 +9542,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     __unsafe_unretained NvProg *pr = g_geo_program ? g_geo_program : prog_get(S.prog);
     image_prepare(pr, 0x1f);
     ag_draw(pr, dw, di);   // DM_NVN_ATLASGUARD: measure this draw's atlas coordinates (reads only; no draw is changed, skipped or clamped)
+    ds_draw(pr, dw, di);   // DM_NVN_DRAWSTATE: the per-draw state of a chosen frame range (reads only)
     draw_gs_check(pr);   // a geometry stage left with no function (see prog_fold_gs)
     if (!g_geo_program && S.rast_discard && S.tf_on) { tf_draw(pr, dw, di); return; }
     // Feedback captures rasterized draws too (Donkey Kong Country: Tropical Freeze's fur).
@@ -11341,13 +11463,14 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
         [b copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(x0, y0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4];
         [b endEncoding];
-        unsigned long long n = g_present_n, tns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        unsigned long long n = g_present_n, tns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), gf = atomic_load(&g_cur_frame);
         [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; const uint8_t *q = rb.contents; uint64_t sum = 0;
             uint8_t g[4096]; NSUInteger ng = 0;   // Subsampled grayscale thumbnail (every 4th row / column, at most 4096 points), recorded along with the mean, for per-frame image correlation analysis
             for (NSUInteger y = 0; y < h; y += 4) for (NSUInteger x = 0; x < w && ng < sizeof g; x += 4) { const uint8_t *px = q + 4 * (y * w + x); g[ng++] = (uint8_t)((px[0] + px[1] + px[2]) / 3); }
             for (NSUInteger k = 0; k < w * h; k++) sum += q[4 * k] + q[4 * k + 1] + q[4 * k + 2];
             pthread_mutex_lock(&rlmu); fprintf(rlf, "%llu\t%llu\t%.4f\t", n, tns, sum / (3.0 * w * h));
             for (NSUInteger k = 0; k < ng; k++) fprintf(rlf, "%02x", g[k]);
+            fprintf(rlf, "\t%llu", gf);   // 5th column: the guest frame this present belongs to (joins a luma row to DRAWSTATE/PASSDUMP frames)
             fputc('\n', rlf); fflush(rlf); pthread_mutex_unlock(&rlmu); }];
         [cb commit];
     }

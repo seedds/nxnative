@@ -43,6 +43,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_vorbis_divides
 	$(B)/t_movie_vpx
 	$(B)/t_movie_avc
+	$(B)/t_nfc
 	$(B)/t_motion
 	$(B)/t_motion_apple
 	$(B)/t_pad_apple
@@ -283,3 +284,10 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+# Public NFC availability and existing NFP contract.
+run: $(B)/t_nfc
+$(B)/t_nfc: t_nfc.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_nfc.c
+.PHONY: nfc
+nfc: $(B)/t_nfc
+	$(B)/t_nfc

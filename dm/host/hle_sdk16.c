@@ -163,6 +163,19 @@ HLE_FORCE("_ZN2nn2pl9EndVrModeEv", "leave VR mode (through am)", void, h_pl_EndV
 HLE_FORCE("_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionE", "shop upgrade page, out of scope; no-op", void, h_ec_ShowUpg, int ed) { DM_APPLET("shop"); LOG("ec::ShowShopApplicationInformationForUpgrade(%d) (cut)", ed); }
 HLE_FORCE("_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionERKNS_7account10UserHandleE", "shop upgrade page (given user), out of scope; no-op", void, h_ec_ShowUpgU, int ed, const void *user) { DM_APPLET("shop"); (void)user; LOG("ec::ShowShopApplicationInformationForUpgrade(%d, user) (cut)", ed); }
 
+// ---------- nfc: availability of the physical reader ----------
+// Older SDK clients can initialize/query nfc separately from nfp. Leaving these in the
+// SDK opens nfc:user even when all amiibo operations are taken over below. The host has
+// no NFC reader: initialization tracks library state, but NFC remains disabled so the
+// caller can display its own unavailable message. This does not change nfp's no-tag path.
+static _Atomic int g_nfc_state;   // 0 uninitialized, 1 initialized
+HLE_FORCE("_ZN2nn3nfc10InitializeEv", "NFC library init; the host has no physical NFC reader", void, h_nfc_Init, void) {
+    atomic_store(&g_nfc_state, 1); LOG("nfc::Initialize: NFC is disabled (the host has no NFC reader)");
+}
+HLE_FORCE("_ZN2nn3nfc8FinalizeEv", "NFC library finalize; no service session to close", void, h_nfc_Fini, void) { atomic_store(&g_nfc_state, 0); }
+HLE_FORCE("_ZN2nn3nfc8GetStateEv", "NFC library state: uninitialized (0) / initialized (1)", int, h_nfc_State, void) { return atomic_load(&g_nfc_state); }
+HLE_FORCE("_ZN2nn3nfc12IsNfcEnabledEv", "NFC is disabled: the host has no physical reader", unsigned, h_nfc_Enabled, void) { return 0; }
+
 // ---------- nfp: amiibo ----------
 // From Mario 1.2.1 the game initializes nfp at boot (v0 did not use it). The real SDK would connect to the sm: service, which the host lacks → abort, so the whole family is taken over.
 // The host has no NFC reader: it reports one NFC device on the currently connected controller (same as hle_hid.c) whose detection never finds a tag -- the same as real hardware with no amiibo at hand:

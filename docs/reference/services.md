@@ -287,6 +287,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the console six-axis sensor (`hid::*SevenSixAxisSensor*`) reports zero states; more `nfp` calls are hooked: `AttachActivateEvent` / `AttachDeactivateEvent`, the two-argument `Mount`, `Unmount`, `GetCommonInfo`, `GetRegisterInfo`, `GetState`, `Finalize`. The host answers as a console with no amiibo.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22). [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) 1.2.1 already initialized `nn::nfp` at boot ([A game update imports SDK calls the base game did not](#a-game-update-imports-sdk-calls-the-base-game-did-not)).
 
+### NFC initialization beside the amiibo library
+
+- **Symptom:** selecting amiibo initializes `nfp`, then the game connects to the unserved `nfc:user` service and aborts in `nn::nfc::Initialize`.
+- **Cause:** clients can initialize and query the general NFC library separately from the amiibo (`nfp`) library. The `nfp` hooks do not intercept the separate NFC service connection.
+- **Fix:** take over `nn::nfc::Initialize`, `Finalize`, `GetState` and `IsNfcEnabled` in `hle_sdk16.c`. Initialization/finalization track library state without a service session; availability remains false because the host has no physical reader. The caller can take its existing disabled-NFC path. The NFP device and no-tag behavior remain unchanged.
+- **Found on:** Hyrule Warriors: Definitive Edition 1.0.1 (SDK 3.5.1), entering amiibo. The disabled-NFC dialog can be dismissed and entered again. Its System Settings wording comes from the game; the host has no NFC-enable setting. `t_nfc.c` covers repeated lifecycle calls, forced registrations and coexistence with NFP detection.
+
 ### Vibration values flushed by the SDK's vibration graph
 
 - **Symptom:** abort in `nn::sm::Initialize` under `nn::hid::VibrationNode::Update`.

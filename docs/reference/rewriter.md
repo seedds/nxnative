@@ -227,7 +227,7 @@ To enroll a cut for any game's own module:
 - **Symptom:** the rewrite of a module with two patch areas stops on a `B()` range assertion in `site_plain` (or another site kind) at a site just above `SPLIT`.
 - **Cause:** the back area sits after ro, data and bss. With a lot of them its stubs are more than 128 MB from the sites just above a `SPLIT` that a 16 MB front area puts at 111 MB, and those sites reach neither area.
 - **Fix:** `two_split` in `patch_nso.py` works out the lowest site a back area of up to 4 MB still reaches, with the 1 MB margin. When that lies above `SPLIT`, the front area is made just small enough that its sites reach 4 MB past it, and `SPLIT` goes halfway between; when no split reaches both ways, a `[RED]` line says so. Other modules keep their layout. Test: `dm/tools/tests/test_patch_split.py`.
-- **Found on:** Bloodstained: Ritual of the Night (`0100BF500207C000`) `main` (1.60): 132 MB of text, then 107 MB of ro, data and bss (`BACK_OFF` `0xefe0000`); a 6.1 MB front area (1.6 MB used), `SPLIT` `0x76e0000`, 476 KB of stubs at the back.
+- **Found on:** [Bloodstained: Ritual of the Night](../../dm/games/0100BF500207C000/README.md) `main` (1.60): 132 MB of text, then 107 MB of ro, data and bss (`BACK_OFF` `0xefe0000`); a 6.1 MB front area (1.6 MB used), `SPLIT` `0x76e0000`, 476 KB of stubs at the back.
 
 ## Cuts and observation gates
 

@@ -254,7 +254,7 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the Switch) wit
 </tr>
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/atelier-ryza-dx.jpg" width="256" alt="Atelier Ryza: Ever Darkness &amp; the Secret Hideout DX"><br><small><b><a href="dm/games/0100199023B2E000/README.md">Atelier Ryza: Ever Darkness &amp; the Secret Hideout DX</a></b></small></td>
-<td></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/bloodstained-ritual-of-the-night.jpg" width="256" alt="Bloodstained: Ritual of the Night"><br><small><b><a href="dm/games/0100BF500207C000/README.md">Bloodstained: Ritual of the Night</a></b></small></td>
 <td></td>
 </tr>
 </table>

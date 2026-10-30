@@ -26,6 +26,7 @@ scripts/bench.py	-	the benchmark
 scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
 dm/tools/usage.py	-	the usage manifests
+dm/tools/il2cpp_sym.py	-	read-only IL2CPP address analysis; not part of a game build or the host
 dm/tools/impact_map.tsv	-	this map
 dm/tools/lint_python_baseline.tsv	-	the lint baseline
 dm/gfx/nvn/*	api:nvn	NVN on Metal: every NVN game

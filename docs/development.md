@@ -614,6 +614,21 @@ Each game's notes are in its profile folder, `dm/games/<id>/README.md`: what the
 | `insn_census.py` | Counts the instruction sites the rewriter must handle |
 | `nso_code.py` | Function ranges from `.eh_frame` and the data blocks in a text segment, which the rewriter and the census leave out |
 | `nso_syms.py` | Compares the SDK import surface of two games, or of one game (`-` for the reference) with the host hooks |
+| `il2cpp_sym.py` | Original NSO/NRO + matching Il2CppDumper `script.json` → nearest managed method at module-relative offsets; `--dis START[:END]` / `--count N` annotates direct branch targets ([IL2CPP names](#il2cpp-method-lookup)) |
 | `nro_collect.py` | The NRO modules a game registers in its NRRs, found as loose files, among an indexed archive's current files (`data.arc`) or by a scan, written out for the rewriter with `nro.tsv`; online SDKs are listed as refused |
 | `nvn_slots_got.py` | Builds the NVN fetch table and call sites (GOT-indirect loaders) |
 | `loader_census.py` | Which of the functions a name loader fetches (glad's GL loader over `eglGetProcAddress`, NVN's C proc loader) the code really calls: the GOT slots or globals the loader stores, loaded by other code (followed through registers, relocated GOT entries and `csel`, for LÖVE's glad) |
+
+### IL2CPP method lookup
+
+Run [Il2CppDumper](https://github.com/Perfare/Il2CppDumper) on the original module and its matching `global-metadata.dat` to produce `script.json`, then use:
+
+```bash
+python3 dm/tools/il2cpp_sym.py "$W/extract/exefs/main" "$W/il2cpp/script.json" 0x40c47c 0x40c478
+python3 dm/tools/il2cpp_sym.py "$W/extract/exefs/main" "$W/il2cpp/script.json" --dis 0x40c440 --count 24
+# An exclusive end offset can replace the count: --dis 0x40c440:0x40c4a0
+```
+
+The tool loads NSO/NRO segments with `nso.py`, prints the nearest preceding `ScriptMethod` name plus its offset, and annotates direct `b`/`bl` targets with Capstone. Aliases at one address are sorted and shown together. Use the exact original module/build that produced the table: inputs and `ScriptMethod.Address` must be module-relative offsets, not compressed-file offsets or absolute guest/Ghidra addresses. It rejects out-of-text addresses; a nearest preceding name does **not** prove function membership (the table has no function sizes and may omit native functions).
+
+For NSOs with separate file and memory offsets, Il2CppDumper's [NSO reader](https://github.com/Perfare/Il2CppDumper/blob/master/Il2CppDumper/ExecutableFormats/NSO.cs) may fail with `Sequence contains no matching element` while mapping MOD0. If its source still has `Position = header.TextSegment.FileOffset + modOffset + 4;`, change that line to `Position = MapVATR(modOffset) + 4;` and rebuild the dumper with the SDK its project targets. The correction is conditional and applies to the external dumper; it is not vendored here. Keep metadata, dumper output and all extracted files in the game's NSP work folder.

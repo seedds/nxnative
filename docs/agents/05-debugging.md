@@ -35,6 +35,8 @@ objdump -d --start-address=0x2ea1c0 --stop-address=0x2ea2b0 $W/elf/<module>.elf
 
 Prefix an offset with `@` (`... Decompile.java @0x49740`) to (re)create the function at exactly that address. Code reached only through vtables has no function, and Ghidra's analysis marked some `nn::os` imports (`LockMutex`) as non-returning, which cut many functions short right after the first lock. The script clears that flag and the call-return overrides on such calls before decompiling.
 
+For IL2CPP, use [managed method lookup](../development.md#il2cpp-method-lookup) with the original module and matching dumper table; offsets stay module-relative.
+
 Map GOT slots to NVN names with the survey table (`census/*_nvn_slots.tsv`): a call through `[x8, #0x3e8]` after `adrp x8, 0x35ad000` is GOT entry 0x35ad3e8.
 
 ## Probes without a debugger (`DM_PROBE`)

@@ -3011,7 +3011,10 @@ void ms_after(void);
 // On TBDR every attachment is written back to memory in full when the pass ends; Switch (Maxwell immediate-mode rendering) has no such cost. If an attachment is cleared in full before being read, the write-back is redundant (DontCare).
 // For the decision see mtl_sub_index / sdx_decide; only what can be proven within the same submission is accepted, and anything still undecided at the end of the submission is always written back.
 typedef struct { uint64_t ser, bytes; uint32_t lv, sl; int idx; uint8_t depth, state, ridx, drawn, why, load, wrote, wwhy; const char *wkey; int wslot; } sd_att;   // depth: 0 color 1 depth 2 stencil (the two parts of a combined depth-stencil texture are decided separately)   // state 0 undecided 1 needed 2 redundant; idx: color attachment index, -1 for depth
-static sd_att g_sd[9]; static int g_nsd;
+// Depth and stencil have independent store decisions, even in one combined texture.
+// Eight color targets therefore need ten records (XC2 uses the full set).
+enum { SD_ATT_MAX = 8 + 2 };
+static sd_att g_sd[SD_ATT_MAX]; static int g_nsd;
 static int g_udc_ab = -1, g_udc_ab_on;
 // Attachments this pass did not write (depth / stencil test only, color write mask 0, etc.) get their write-back changed to DontCare: the content is already in memory, saving one full write-back.
 // On by default: on Mac, same-process on / off screenshots follow the same distribution as the null control; on A19 Pro, private Depth32F_S8 / RGBA8 read back after DontCare differ in 0 places.
@@ -7372,10 +7375,10 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
 // Different levels / layers of the same texture are decided separately (a downsample chain writes level k and reads level k−1); a sampler binding counts as a read of the whole texture (conservative)
 static const uint8_t *g_exec_cur;   // The op currently being replayed (inclusive)
 static void sd_need(sd_att *t, int why) { if (!t->state) { t->state = 1; t->why = (uint8_t)why; } }   // why: 1 a draw reads it as a texture 2 as an attachment, drawn before cleared 3 copy 4 texture clear 5 scanned to the end undecided 6 no start point / index unavailable
-static int sdx_decide(uint8_t st[9]);   // Store lookahead decision (for the index see mtl_sub_index)
+static int sdx_decide(uint8_t st[SD_ATT_MAX]);   // Store lookahead decision (for the index see mtl_sub_index)
 static void sd_finish(void) {
     if (!g_nsd) return;
-    uint8_t nst[9];
+    uint8_t nst[SD_ATT_MAX];
     // Unchanged, loaded attachments already have their content in memory. Their proof depends only on writes in this pass, independently of future bindless readers or the optional lookahead.
     if (tbdr_on() && sdx_decide(nst)) { for (int i = 0; i < g_nsd; i++) if (nst[i] == 2) g_sd[i].state = 2; else sd_need(&g_sd[i], nst[i] >> 2); }
     else for (int i = 0; i < g_nsd; i++) sd_need(&g_sd[i], 6);   // Pass ended outside the list / index unavailable: always write back
@@ -7945,7 +7948,7 @@ static void sdx_seq(const uint8_t *p) {   // Every operation in mtl_exec: check 
     if (g_exec_seq >= g_sdx_nop || g_sdx_op[g_exec_seq] != p) { RED_ONCE(40, "store lookahead index does not match the replay order (index %u / %u); the remaining passes of this submission all store", g_exec_seq, g_sdx_nop); g_sdx_ok = 0; return; }
     g_exec_seq++;
 }
-static int sdx_decide(uint8_t st[9]) {   // st[i]: 2 redundant; otherwise why << 2 (the reason it is needed, same as sd_need). Returns 0 = index unavailable
+static int sdx_decide(uint8_t st[SD_ATT_MAX]) {   // st[i]: 2 redundant; otherwise why << 2 (the reason it is needed, same as sd_need). Returns 0 = index unavailable
     if (!g_sdx_ok || !g_exec_cur || !g_exec_seq || g_sdx_op[g_exec_seq - 1] != g_exec_cur) return 0;
     uint32_t P = g_exec_seq - 1;
     for (int i = 0; i < g_nsd; i++) { const sd_att *t = &g_sd[i]; st[i] = 5 << 2;

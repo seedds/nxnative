@@ -51,6 +51,10 @@ class FindTest(unittest.TestCase):
         call, vt, slot, why = find(image(slot=26, relocated=True))
         self.assertEqual((call, vt, slot), (CALLER + 4, VT, 26), why)
 
+    def test_ue_4_22_layout(self):   # Bloodstained: Ritual of the Night 1.60: the getter at slot 17 of 18
+        call, vt, slot, why = find(image(slot=17, relocated=True))
+        self.assertEqual((call, vt, slot), (CALLER + 4, VT, 17), why)
+
     def test_no_name_is_not_red(self):
         call, _, _, why = find(image(name=False))
         self.assertIsNone(call)

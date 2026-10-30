@@ -7,7 +7,8 @@ An online SDK (ONLINE_SDKS: Epic Online Services, by its export EOS_Platform_Cre
 The game passes nn::ro::LoadModule the NRO's bytes; the host finds the rewritten copy by that SHA-256 (hle_ro.c), so the names here are only labels: nro<index> in hash order.
 Where: a loose file whose bytes at +0x10 are NRO0 (Hades and Hades II ship their EOS SDK so); the .nro files among the current files of an archive with an index (Super Smash Bros. Ultimate's data.arc,
 read by dm/gfx/tools/smash_arc.py: 98 NROs, while the NRRs of every older release also register 666 superseded copies the archive still holds, which are left out); else a scan of the
-other RomFS files for stored NROs and zstd frames that inflate to one (on data.arc: all 764 registered hashes in 7 minutes)."""
+other RomFS files for stored NROs and zstd frames that inflate to one (on data.arc: all 764 registered hashes in 7 minutes); and NERD's Hagi .nrolz files, an NRO compressed with
+LZ4 (the uncompressed size as a big-endian u32, then one LZ4 block), which Hagi unpacks and loads (Super Mario 3D All-Stars' Super Mario Sunshine: its statically recompiled game)."""
 import hashlib, struct, sys
 from multiprocessing import Pool
 from romfs import os, open, mmap
@@ -102,6 +103,15 @@ def main():
             p = os.path.join(dp, f); sz = os.path.getsize(p)
             if f.endswith('.nrr') or sz < 0x40: continue
             with open(p, 'rb') as fh: head = fh.read(0x40)
+            if f.lower().endswith('.nrolz'):   # NERD's Hagi: LZ4 block behind its big-endian uncompressed size
+                import lz4.block
+                raw = open(p, 'rb').read()
+                try: body = lz4.block.decompress(raw[4:], uncompressed_size=struct.unpack('>I', raw[:4])[0])
+                except Exception: body = b''
+                if nro_size(body[:0x40]) == len(body):
+                    h = hashlib.sha256(body).digest()
+                    if h in want: found[h] = (os.path.relpath(p, romfs), 'lz4', body)
+                continue
             if nro_size(head) == sz:
                 body = open(p, 'rb').read(); h = hashlib.sha256(body).digest()
                 if h in want: found[h] = (os.path.relpath(p, romfs), 'loose', body)

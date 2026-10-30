@@ -105,7 +105,26 @@ HLE_FORCE("_ZN2nn2oe15EnableRecordingEv", "video recording switch; the host has 
 //   aborts when it gets 0 (The Legend of Zelda: Breath of the Wild 1.9.0); SDK 16 did not check. Report a fixed non-zero ID, used only as an identifier
 HLE_FORCE("_ZN2nn6applet23GetAppletResourceUserIdEv", "applet resource user ID; the host returns a fixed non-zero value", uint64_t, h_applet_Aruid, void) { return 0x80; }
 // Launch parameter (present only when another program launched this one with one; returns bool): the host never passes one
-HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "launch parameter: none", unsigned, h_oe_PopLaunchParam, size_t *out, void *buf, size_t n) { (void)buf; (void)n; if (out) *out = 0; return 0; }
+// Launch parameter: none, unless the profile's launch_param gives the one another program of the application would hand over (Super Mario 3D All-Stars' launcher starts
+// each game with its language and two volumes). Fields: lang8 (the language code GetDesiredLanguage gives), f32:<value>, u32:<value>, hex:<bytes>. Handed over once, as a popped parameter
+static uint64_t h_oe_GetLang(void);
+HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "launch parameter: the profile's launch_param, once", unsigned, h_oe_PopLaunchParam, size_t *out, uint8_t *buf, size_t n) {
+    static int popped; if (out) *out = 0;
+    if (popped || !*DM_GAME_LAUNCH_PARAM) return 0;
+    popped = 1;
+    uint8_t p[256]; size_t len = 0; char spec[512]; strlcpy(spec, DM_GAME_LAUNCH_PARAM, sizeof spec);
+    for (char *t = strtok(spec, " "); t && len < sizeof p - 8; t = strtok(NULL, " ")) {
+        if (!strcmp(t, "lang8")) { uint64_t v = h_oe_GetLang(); memcpy(p + len, &v, 8); len += 8; }
+        else if (!strncmp(t, "f32:", 4)) { float f = strtof(t + 4, NULL); memcpy(p + len, &f, 4); len += 4; }
+        else if (!strncmp(t, "u32:", 4)) { uint32_t u = (uint32_t)strtoul(t + 4, NULL, 0); memcpy(p + len, &u, 4); len += 4; }
+        else if (!strncmp(t, "hex:", 4)) for (const char *h = t + 4; h[0] && h[1] && len < sizeof p; h += 2) { unsigned b; sscanf(h, "%2x", &b); p[len++] = (uint8_t)b; }
+        else LOG("[RED] launch_param: field %s not understood", t);
+    }
+    if (len > n) len = n;
+    memcpy(buf, p, len); if (out) *out = len;
+    LOG("oe::TryPopLaunchParameter: %zu bytes from the profile (%s)", len, DM_GAME_LAUNCH_PARAM);
+    return 1;
+}
 // Tears of the Kingdom (SDK 20.5.22): the index of the program that launched this one in a multi-program application. The SDK asks the applet proxy, which the host never opens
 // (null read in applet::GetPreviousProgramIndex right after the window setup); -1 = launched from the home menu
 HLE_FORCE("_ZN2nn2oe23GetPreviousProgramIndexEv", "previous program index: launched from HOME, -1", int, h_oe_PrevProgram, void) { return -1; }

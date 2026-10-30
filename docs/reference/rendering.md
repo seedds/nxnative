@@ -979,6 +979,37 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - Timestamps are their submit's completion time; occlusion queries count into a per-submit visibility buffer, copied to the pool when the submit completes.
 - **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md): two timestamp pools and a 3,072-entry occlusion pool.
 
+### Specialization constants
+
+- **Symptom:** a pipeline with no Metal pipeline state, and its draws missing.
+- **Cause:** SPIRV-Cross keeps each SpecId as a Metal function constant of the same index. Metal builds no pipeline from a function whose constants have not been given.
+- **Fix:** the values in the pipeline's `VkSpecializationInfo` are set through `MTLFunctionConstantValues`. Any other constant keeps the default the translation wrote (`hle_vk.m` `spec_fn`).
+- **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md).
+
+### Packed 16-bit and 8-bit formats
+
+- Some packed formats map to a Metal format with the components in another order: A1R5G5B5 → BGR5A1, R5G5B5A1 → A1BGR5, R4G4B4A4 → ABGR4.
+- Formats Metal does not have at all (R4G4, B4G4R4A4, B5G6R5, B5G5R5A1) get a wider texture. The host unpacks the texels into it (`conv_unpack`).
+- This works only for linear images that the CPU writes. Before each submit, every converted image whose memory changed since its last unpack is unpacked again (`conv_sync`). The textures are small, N64 textures.
+- **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md).
+
+### Image clears, dynamic stencil and line width
+
+- `vkCmdClearColorImage` and `vkCmdClearDepthStencilImage` clear through a render pass of their own (`C_CLEARI`).
+- An image made with `TRANSFER_DST` usage also gets render-target usage, so that it can be cleared that way.
+- Dynamic stencil state:
+  - the reference is the encoder's;
+  - the compare and write masks belong to a Metal depth-stencil state, so the pipeline keeps its depth-stencil description and builds one state per set of masks, cached (`C_STENCIL`).
+- A dynamic line width is ignored: Metal draws 1-pixel lines.
+- **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md), [Super Mario Sunshine (Super Mario 3D All-Stars)](../../dm/games/010049900F546002/README.md).
+
+### `VK_EXT_debug_report`
+
+- **Symptom:** a call to address 0 at boot.
+- **Cause:** a game that enables the extension calls its functions without checking the lookup.
+- **Fix:** the layer reports nothing. The callback object is a token that is never called.
+- **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md).
+
 ### Not translated in the Vulkan layer: geometry shaders
 
 - **Symptom:** GX points and lines drawn as one-pixel points and lines.

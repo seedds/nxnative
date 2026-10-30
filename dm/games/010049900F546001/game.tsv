@@ -1,0 +1,41 @@
+# Super Mario 64 in Super Mario 3D All-Stars (program 1 of application 010049900F546000; update 1.1.4 = v393216), SDK 10.8.1.
+# Nintendo's N64 layer: the game's MIPS code statically recompiled to arm64 in an NRO (rom/Stardust_JP/05_UNSMJ3.002.nro, loaded with nn::ro), the rest through a JIT plugin
+# (nro/EmuSystemJITPlugin.nro, run by the host's nn::jit, hle_jit.c). Renders with Vulkan (dm/gfx/vk/hle_vk.m). Packed one program at a time: the NSP script's --program 1
+
+# ---- Identity ----
+title_id	010049900F546001
+program_id	010049900F546001
+
+# ---- App ----
+name	Super Mario 64
+ipa	SuperMario64.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v393216	1.1.4	main=e96321640d68646035496a0a1f082422	sdk=a847ad19684f06ea3628f1a0671c07c8
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_Vulkan), subsdk1 (NintendoSDK_OpenGL), subsdk2 (GLSLC)
+modules	main sdk
+romfs_marker	rom/Stardust_JP/01_UNSMJ3.002.bin
+zip_store	.cpio:.nro:.pcb:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 520 MB of bss (counted as used memory): a 2816 MB heap region
+mem_reserve	0xe0000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Message/=message /rom/=rom /nro/=nro /.nrr/=nrr
+shader_note	Super Mario 64 (Super Mario 3D All-Stars) shaders
+
+# ---- Launch ----
+# Super Mario 3D All-Stars' launcher (program 0) starts each game with oe::ExecuteProgram and a 16-byte parameter: the language code and two volumes (launcher main+0x10a54).
+# The host runs this program by itself (the NSP script's --program), so the profile hands the game the same parameter
+launch_param	lang8 f32:1 f32:1

@@ -479,8 +479,26 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** SDK 20 calls that reach a service, each one boot; SDK 20's `OpenAudioRenderer` aborts on an ARUID of 0.
 - **Cause:** the SDK's own `applet::GetAppletResourceUserId` returns 0 without am, and SDK 20's `OpenAudioRenderer` aborts on that.
-- **Fix:** `applet::GetAppletResourceUserId` reports 0x80; the VR-mode calls (`pl::IsVrMode` / `BeginVrMode` / `EndVrMode`; `BeginVrMode` returns 0xd08e, the SDK's own refusal); `pctl::CheckStereoVisionPermission` (bool, not permitted: the host has no VR display); `oe::TryPopLaunchParameter` (none) ([The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0, SDK 20.5.22). `oe::GetPreviousProgramIndex` reports −1: launched from the home menu ([The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) 1.4.3).
+- **Fix:** `applet::GetAppletResourceUserId` reports 0x80; the VR-mode calls (`pl::IsVrMode` / `BeginVrMode` / `EndVrMode`; `BeginVrMode` returns 0xd08e, the SDK's own refusal); `pctl::CheckStereoVisionPermission` (bool, not permitted: the host has no VR display); `oe::TryPopLaunchParameter` (none, or the profile's `launch_param`: [Launch parameters of a multi-program application](#launch-parameters-of-a-multi-program-application)) ([The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0, SDK 20.5.22). `oe::GetPreviousProgramIndex` reports −1: launched from the home menu ([The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) 1.4.3).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md).
+
+### Launch parameters of a multi-program application
+
+- **Symptom:** the game exits at boot, or starts with no language and both volumes at 0.
+- **Cause:** an application of several programs (Super Mario 3D All-Stars: launcher 0, Super Mario 64 1, Super Mario Sunshine 2, Super Mario Galaxy 3) starts its games with `oe::ExecuteProgram` and a launch parameter. The host runs one program by itself (the NSP script's `--program`), so nothing pushed a parameter.
+- **Fix:** the profile key `launch_param` describes the parameter, and `oe::TryPopLaunchParameter` hands it over once (`hle_oe.c`). Super Mario 3D All-Stars' launcher passes 16 bytes: the language code and two volumes (`lang8 f32:1 f32:1`).
+- **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md), [Super Mario Sunshine (Super Mario 3D All-Stars)](../../dm/games/010049900F546002/README.md).
+
+### The offline HTML session (`web::OfflineWebSession`)
+
+- **Symptom:** `UNIMPL _ZN2nn3web17OfflineWebSession…` at boot.
+- **Cause:** Super Mario 3D All-Stars' games start the launcher's pause-menu page (`launcher_pause_menu.htdocs`) hidden at boot, and talk to it through content messages.
+- **Fix:** the host has no browser (`hle_offline.c`):
+  - the session starts, and never exits on its own;
+  - it takes every message and sends none;
+  - its exit event is a real SystemEvent that is never signalled;
+  - `Appear` logs a red line.
+- **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md), [Super Mario Sunshine (Super Mario 3D All-Stars)](../../dm/games/010049900F546002/README.md).
 
 ### CPU overclock calls without an apm session
 
@@ -756,6 +774,25 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the Source engine asks each module it loads for `BuiltDebug`, which only its debug builds define. `ldr:ro` fails such a lookup on Horizon too, and the game takes the failure as "release build".
 - **Fix:** the host's answer was already Horizon's (a failure result). The line is no longer red when the module is a loaded one; a lookup in a module the host does not know stays red (`hle_ro.c`).
 - **Found on:** [Portal](../../dm/games/01007BB017812000/README.md).
+
+### LZ4-packed NROs (`.nrolz`)
+
+- NERD's Hagi keeps a recompiled game as an NRO packed as a big-endian u32 size, then one LZ4 block (`data/gekko/MarioSunshine/nx/MarioSunshine.nrolz`).
+- Hagi unpacks it and hands the image to `ro::LoadModule`, so its SHA-256 is the unpacked image's.
+- `dm/tools/nro_collect.py` unpacks such files too, and matches them against the NRRs as it does plain `.nro` files.
+- **Found on:** [Super Mario Sunshine (Super Mario 3D All-Stars)](../../dm/games/010049900F546002/README.md).
+
+### `nn::jit` and its plugin NRO
+
+- **Symptom:** `UNIMPL _ZN2nn3jit…` at boot. The game hands an NRO to `jit::CreateJitEnvironment` and waits for code.
+- **Cause:** on the Switch, the `jit:u` sysmodule loads the game's JIT plugin NRO. It calls the plugin's `nnjitplugin*` functions, and lets the plugin write code through a RW view of two code memories, which the game sees R-X and R--.
+- **Fix:** `hle_jit.c` takes over the public `nn::jit` functions:
+  - The plugin is the rewritten copy collected by the SHA-256 that the game's NRR registers, loaded through `loader.c` `nro_find` / `nro_load`.
+  - It is called directly on a host thread with an 8 MB stack, as the sysmodule's thread would be.
+  - The game's work buffer is the plugin's RW view. The game's view is a second mapping of the same pages (`mach_vm_remap`), R-X for the first code memory and R-- for the second.
+  - The call order and argument layout follow [switchbrew's JIT services page](https://switchbrew.org/wiki/JIT_services).
+- **Note:** the code the plugin writes is not rewritten, so it must need no rewrite (no `svc`, `tpidr` or x18). Super Mario 64's needs none. Its plugin and its N64 code NRO do use x18, and are rewritten.
+- **Found on:** [Super Mario 64 (Super Mario 3D All-Stars)](../../dm/games/010049900F546001/README.md).
 
 ### IL2CPP common string table intact
 

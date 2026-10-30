@@ -164,6 +164,35 @@ HLE_FORCE("_ZN2nn3web11ShowWebPageEPNS0_18WebPageReturnValueERKNS0_14ShowWebPage
 HLE_FORCE("_ZN2nn3web19ShowOfflineHtmlPageEPNS0_26OfflineHtmlPageReturnValueERKNS0_22ShowOfflineHtmlPageArgE", "offline HTML page applet (cut)", Result, h_web_Offline, void *rv, const void *arg) {
     (void)rv; (void)arg; LOG("web::ShowOfflineHtmlPage (cut)"); return RES_FAIL;
 }
+// The offline HTML session (a web applet kept in the background and shown on demand): Super Mario 3D All-Stars' games start the launcher's pause menu page
+// (launcher_pause_menu.htdocs) hidden at boot and talk to it through content messages. The host has no browser: the session starts, never exits on its own,
+// takes every message and sends none; its exit event is a real SystemEvent that is never signalled
+static uint8_t g_web_ev[0x40] __attribute__((aligned(16)));
+HLE_FORCE("_ZN2nn3web17OfflineWebSessionC1Ev", "offline HTML session object (host: no state in it)", void, h_ws_Ctor, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3web17OfflineWebSessionD1Ev", "offline HTML session object", void, h_ws_Dtor, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3web17OfflineWebSession17GetWorkBufferSizeEv", "offline HTML session work buffer: the host needs none", uint64_t, h_ws_WorkSize, void) { return 0x1000; }
+HLE_FORCE("_ZN2nn3web17OfflineWebSession10InitializeEPvm", "offline HTML session set-up", void, h_ws_Init, void *self, void *work, uint64_t size) { (void)self; (void)work; (void)size; }
+HLE_FORCE("_ZN2nn3web17OfflineWebSession8FinalizeEv", "offline HTML session", void, h_ws_Fini, void *self) { (void)self; }
+HLE_FORCE("_ZN2nn3web17OfflineWebSession5StartEPPNS_2os15SystemEventTypeERKNS0_22ShowOfflineHtmlPageArgE", "offline HTML session: started, hidden, with an exit event that is never signalled",
+          Result, h_ws_Start, void *self, void **ev, const char *arg) {
+    (void)self; hle_bind_system_event(g_web_ev, 0); if (ev) *ev = g_web_ev;
+    LOG("web: offline HTML session started for %s (the host shows no page)", arg ? arg : "?");   // ShowOfflineHtmlPageArg starts with the document path
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn3web17OfflineWebSession6AppearEv", "offline HTML session: showing the page (the host has none to show)", int, h_ws_Appear, void *self) {
+    (void)self; static int n; if (n++ < 8) LOG("[RED] web: the game shows its offline HTML page; the host has no browser"); return 1;
+}
+HLE_FORCE("_ZN2nn3web17OfflineWebSession21TrySendContentMessageEPKcm", "offline HTML session: a message to the page, taken and logged", int, h_ws_Send, void *self, const char *msg, uint64_t size) {
+    (void)self; static int n; if (n++ < 16) LOG("web: message to the page: %.*s", (int)(size > 200 ? 200 : size), msg ? msg : ""); return 1;
+}
+HLE_FORCE("_ZN2nn3web17OfflineWebSession24TryReceiveContentMessageEPmPcm", "offline HTML session: the page sends nothing", int, h_ws_Recv, void *self, uint64_t *got, char *buf, uint64_t size) {
+    (void)self; (void)buf; (void)size; if (got) *got = 0; return 0;
+}
+HLE_FORCE("_ZNK2nn3web17OfflineWebSession16NeedsWaitForExitEv", "offline HTML session: it never exits", int, h_ws_NeedsWait, const void *self) { (void)self; return 0; }
+HLE_FORCE("_ZN2nn3web17OfflineWebSession11RequestExitEv", "offline HTML session: exit asked", int, h_ws_ReqExit, void *self) { (void)self; return 1; }
+HLE_FORCE("_ZN2nn3web17OfflineWebSession11WaitForExitEPNS0_26OfflineHtmlPageReturnValueE", "offline HTML session: returns at once (the game constructed the return value)", Result, h_ws_WaitExit, void *self, void *rv) {
+    (void)self; (void)rv; return RES_OK;
+}
 
 // ---------- C interface (nnsocket* / nnssl*): offline as well. The arguments are all in registers and the host does not look at them ----------
 HLE_FORCE("nnsocketAccept", "offline (cut)", int, h_c_sk_Accept, void) { return -1; }

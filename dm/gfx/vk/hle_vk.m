@@ -56,12 +56,16 @@ static uint32_t umax(uint32_t a, uint32_t b) { return a > b ? a : b; }
 
 // ---------- Formats ----------
 enum { K_COLOR, K_INT, K_DEPTH, K_DS, K_STENCIL, K_BLOCK };
-typedef struct { VkFormat vk; MTLPixelFormat pf; MTLVertexFormat vf; uint8_t bytes, bw, bh, kind; } fmt_t;   // bytes per texel, or per block (bw x bh) for compressed formats
+typedef struct { VkFormat vk; MTLPixelFormat pf; MTLVertexFormat vf; uint8_t bytes, bw, bh, kind, conv; } fmt_t;   // bytes per texel, or per block (bw x bh) for compressed formats; conv: see FX
 #define FC(v, p, x, b) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormat##x, b, 1, 1, K_COLOR}
 #define FI(v, p, x, b) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormat##x, b, 1, 1, K_INT}
 #define FD(v, p, b, k) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormatInvalid, b, 1, 1, k}
 #define FB(v, p, b, w, h) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormatInvalid, b, w, h, K_BLOCK}
 #define FV(v, x, b) {VK_FORMAT_##v, MTLPixelFormatInvalid, MTLVertexFormat##x, b, 1, 1, K_COLOR}
+// Packed formats Metal does not have: the texture has a wider format and the host unpacks the texels into it (conv_unpack). Only for linear images the CPU writes (conv_sync):
+// Super Mario 3D All-Stars' Super Mario 64 keeps its N64 textures so, R4G4 among them
+enum { CV_NONE, CV_R4G4, CV_B4G4R4A4, CV_B5G6R5, CV_B5G5R5A1 };
+#define FX(v, p, b, c) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormatInvalid, b, 1, 1, K_COLOR, c}
 static const fmt_t g_fmts[] = {
     FC(R8_UNORM, R8Unorm, UCharNormalized, 1), FC(R8_SNORM, R8Snorm, CharNormalized, 1), FI(R8_UINT, R8Uint, UChar, 1), FI(R8_SINT, R8Sint, Char, 1),
     FC(R8G8_UNORM, RG8Unorm, UChar2Normalized, 2), FC(R8G8_SNORM, RG8Snorm, Char2Normalized, 2), FI(R8G8_UINT, RG8Uint, UChar2, 2), FI(R8G8_SINT, RG8Sint, Char2, 2),
@@ -71,7 +75,10 @@ static const fmt_t g_fmts[] = {
     FC(A8B8G8R8_UNORM_PACK32, RGBA8Unorm, UChar4Normalized, 4), FC(A8B8G8R8_SRGB_PACK32, RGBA8Unorm_sRGB, Invalid, 4),
     FC(A2B10G10R10_UNORM_PACK32, RGB10A2Unorm, UInt1010102Normalized, 4), FI(A2B10G10R10_UINT_PACK32, RGB10A2Uint, Invalid, 4),
     FC(B10G11R11_UFLOAT_PACK32, RG11B10Float, FloatRG11B10, 4), FC(E5B9G9R9_UFLOAT_PACK32, RGB9E5Float, FloatRGB9E5, 4),
-    FC(R5G6B5_UNORM_PACK16, B5G6R5Unorm, Invalid, 2),
+    FC(R5G6B5_UNORM_PACK16, B5G6R5Unorm, Invalid, 2), FC(A1R5G5B5_UNORM_PACK16, BGR5A1Unorm, Invalid, 2), FC(R5G5B5A1_UNORM_PACK16, A1BGR5Unorm, Invalid, 2),
+    FC(R4G4B4A4_UNORM_PACK16, ABGR4Unorm, Invalid, 2),   // Metal names a packed format's components from the low bits, Vulkan from the high bits
+    FX(R4G4_UNORM_PACK8, RG8Unorm, 1, CV_R4G4), FX(B4G4R4A4_UNORM_PACK16, RGBA8Unorm, 2, CV_B4G4R4A4), FX(B5G6R5_UNORM_PACK16, RGBA8Unorm, 2, CV_B5G6R5),
+    FX(B5G5R5A1_UNORM_PACK16, RGBA8Unorm, 2, CV_B5G5R5A1),
     FC(R16_UNORM, R16Unorm, UShortNormalized, 2), FC(R16_SNORM, R16Snorm, ShortNormalized, 2), FI(R16_UINT, R16Uint, UShort, 2), FI(R16_SINT, R16Sint, Short, 2),
     FC(R16_SFLOAT, R16Float, Half, 2),
     FC(R16G16_UNORM, RG16Unorm, UShort2Normalized, 4), FC(R16G16_SNORM, RG16Snorm, Short2Normalized, 4), FI(R16G16_UINT, RG16Uint, UShort2, 4),
@@ -184,7 +191,8 @@ struct VkDeviceMemory_T { VkDeviceSize size; uint32_t type; __strong id<MTLBuffe
 struct VkBuffer_T { VkDeviceSize size; VkBufferUsageFlags usage; VkDeviceMemory mem; VkDeviceSize off; };
 struct VkBufferView_T { VkBuffer buf; const fmt_t *f; VkDeviceSize off, range; __strong id<MTLTexture> tex; };
 struct VkImage_T { __strong id<MTLTexture> tex; const fmt_t *f; VkFormat fmt; VkImageType type; uint32_t w, h, d, mips, layers, samples; VkDeviceSize size; uint64_t serial;
-                  VkImageUsageFlags usage; uint32_t pitch; };   // pitch: row pitch of a linear image (its texture is made over the bound memory), 0 otherwise
+                  VkImageUsageFlags usage; uint32_t pitch;   // pitch: row pitch of a linear image (its texture is made over the bound memory), 0 otherwise
+                  VkDeviceMemory cmem; VkDeviceSize coff; uint8_t *shadow; };   // a linear image of a converted format (fmt_t.conv): its memory, and the texels last unpacked
 struct VkImageView_T { __strong id<MTLTexture> tex; VkImage img; };
 struct VkSampler_T { __strong id<MTLSamplerState> s; };
 struct VkShaderModule_T { const shinfo *si; __strong id<MTLFunction> fn, fn_d; char key[17]; int tried_d; };   // fn_d: the dual-source variant vk_<key>_d, looked up on first use
@@ -219,6 +227,9 @@ struct VkPipeline_T {
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
     int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
+    // Dynamic stencil state (Super Mario 3D All-Stars' Super Mario 64): the reference is the encoder's; the masks are part of a Metal depth-stencil state, so the
+    // pipeline keeps its depth-stencil description and builds the state for the masks set (one cached)
+    int dyn_sref, dyn_smask, stencil; VkStencilOpState sf, sb; MTLCompareFunction dcmp; int dwrite; uint64_t dss_key; __strong id<MTLDepthStencilState> dss_dyn;
 };
 struct VkCommandPool_T { struct VkCommandBuffer_T *cbs; };
 struct VkCommandBuffer_T { void *loader; VkCommandPool pool; struct VkCommandBuffer_T *prev, *next; uint8_t *buf; size_t n, cap; };
@@ -257,6 +268,15 @@ VK(vkCreateInstance, VkResult, const VkInstanceCreateInfo *ci, const VkAllocatio
     *out = &g_inst; return VK_SUCCESS;
 }
 VK(vkDestroyInstance, void, VkInstance i, const VkAllocationCallbacks *a) { (void)i; (void)a; }
+// VK_EXT_debug_report: a game that enabled it calls its functions without checking the lookup (Super Mario 3D All-Stars' Super Mario 64 called the null pointer).
+// The layer reports nothing, so the callback object is a token that is never called
+VK(vkCreateDebugReportCallbackEXT, VkResult, VkInstance i, const VkDebugReportCallbackCreateInfoEXT *ci, const VkAllocationCallbacks *a, VkDebugReportCallbackEXT *out) {
+    (void)i; (void)ci; (void)a; static uint64_t next; *out = (VkDebugReportCallbackEXT)(uintptr_t)(0x1000 + ++next); return VK_SUCCESS;
+}
+VK(vkDestroyDebugReportCallbackEXT, void, VkInstance i, VkDebugReportCallbackEXT cb, const VkAllocationCallbacks *a) { (void)i; (void)cb; (void)a; }
+VK(vkDebugReportMessageEXT, void, VkInstance i, VkDebugReportFlagsEXT f, VkDebugReportObjectTypeEXT t, uint64_t o, size_t loc, int32_t code, const char *layer, const char *msg) {
+    (void)i; (void)f; (void)t; (void)o; (void)loc; (void)code; VLOG("debug report from the game: %s: %s", layer ? layer : "-", msg ? msg : "-");
+}
 VK(vkEnumeratePhysicalDevices, VkResult, VkInstance i, uint32_t *n, VkPhysicalDevice *p) {
     (void)i; if (!p) { *n = 1; return VK_SUCCESS; }
     if (!*n) return VK_INCOMPLETE;
@@ -476,6 +496,50 @@ static VkDeviceSize img_bytes(const fmt_t *f, uint32_t w, uint32_t h, uint32_t d
     }
     return s * layers * samples;
 }
+// ---------- Converted formats (fmt_t.conv) ----------
+static VkImage *g_conv; static size_t g_nconv, g_capconv; static pthread_mutex_t g_convmu = PTHREAD_MUTEX_INITIALIZER;
+static void conv_add(VkImage im) {
+    pthread_mutex_lock(&g_convmu);
+    if (g_nconv == g_capconv) { g_capconv = g_capconv ? g_capconv * 2 : 256; g_conv = realloc(g_conv, g_capconv * sizeof *g_conv); }
+    g_conv[g_nconv++] = im; pthread_mutex_unlock(&g_convmu);
+}
+static void conv_remove(VkImage im) {
+    pthread_mutex_lock(&g_convmu);
+    for (size_t i = 0; i < g_nconv; i++) if (g_conv[i] == im) { g_conv[i] = g_conv[--g_nconv]; break; }
+    pthread_mutex_unlock(&g_convmu);
+}
+static uint32_t x4(uint32_t v) { return v * 17; } static uint32_t x5(uint32_t v) { return (v << 3) | (v >> 2); } static uint32_t x6(uint32_t v) { return (v << 2) | (v >> 4); }
+static void conv_unpack(VkImage im, const uint8_t *src, uint8_t *dst) {   // one row after another; dst rows are tightly packed
+    uint32_t ob = im->f->conv == CV_R4G4 ? 2 : 4;
+    for (uint32_t y = 0; y < im->h; y++) {
+        const uint8_t *r = src + (size_t)y * im->pitch; uint8_t *o = dst + (size_t)y * im->w * ob;
+        for (uint32_t x = 0; x < im->w; x++, o += ob) {
+            if (im->f->conv == CV_R4G4) { o[0] = (uint8_t)x4(r[x] >> 4); o[1] = (uint8_t)x4(r[x] & 15); continue; }
+            uint32_t v = r[2 * x] | (uint32_t)r[2 * x + 1] << 8;
+            switch (im->f->conv) {
+                case CV_B4G4R4A4: o[0] = (uint8_t)x4(v >> 4 & 15); o[1] = (uint8_t)x4(v >> 8 & 15); o[2] = (uint8_t)x4(v >> 12); o[3] = (uint8_t)x4(v & 15); break;
+                case CV_B5G6R5: o[0] = (uint8_t)x5(v & 31); o[1] = (uint8_t)x6(v >> 5 & 63); o[2] = (uint8_t)x5(v >> 11); o[3] = 255; break;
+                case CV_B5G5R5A1: o[0] = (uint8_t)x5(v >> 1 & 31); o[1] = (uint8_t)x5(v >> 6 & 31); o[2] = (uint8_t)x5(v >> 11); o[3] = v & 1 ? 255 : 0; break;
+            }
+        }
+    }
+}
+// Before a submit: every converted linear image whose memory changed since it was last unpacked is unpacked again (the textures are small: N64 textures)
+static void conv_sync(void) {
+    static uint8_t *tmp; static size_t tcap;
+    pthread_mutex_lock(&g_convmu);
+    for (size_t i = 0; i < g_nconv; i++) {
+        VkImage im = g_conv[i]; id<MTLBuffer> b = mem_buf(im->cmem); if (!b || !im->tex) continue;
+        const uint8_t *src = (const uint8_t *)b.contents + im->coff;
+        if (!memcmp(src, im->shadow, im->size)) continue;
+        memcpy(im->shadow, src, im->size);
+        uint32_t ob = im->f->conv == CV_R4G4 ? 2 : 4; size_t need = (size_t)im->w * im->h * ob;
+        if (need > tcap) { tcap = need; tmp = realloc(tmp, tcap); }
+        conv_unpack(im, im->shadow, tmp);
+        [im->tex replaceRegion:MTLRegionMake2D(0, 0, im->w, im->h) mipmapLevel:0 withBytes:tmp bytesPerRow:(NSUInteger)im->w * ob];
+    }
+    pthread_mutex_unlock(&g_convmu);
+}
 VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAllocationCallbacks *a, VkImage *out) {
     (void)d; (void)a; dev_init();
     const fmt_t *f = fmt_of(ci->format);
@@ -490,6 +554,7 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
         OLOG("CreateImage %p %ux%u format %d linear (pitch %u) usage %#x", (void *)im, im->w, im->h, ci->format, im->pitch, ci->usage);
         *out = im; return VK_SUCCESS;
     }
+    if (f->conv) { LOG("[vk] [RED] image format %d is converted only for linear images (this one is optimal)", ci->format); return VK_ERROR_FORMAT_NOT_SUPPORTED; }
     if (ci->tiling == VK_IMAGE_TILING_LINEAR) RED1("linear image %ux%u format %d levels %u layers %u: content does not follow the bound memory", ci->extent.width, ci->extent.height, ci->format, ci->mipLevels, ci->arrayLayers);
     @autoreleasepool {
         uint32_t layers = umax(1, ci->arrayLayers), samples = umax(1, ci->samples);
@@ -504,7 +569,7 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
         else td.textureType = layers > 1 ? MTLTextureType2DArray : MTLTextureType2D;
         td.arrayLength = cube ? layers / 6 : layers;
         MTLTextureUsage u = MTLTextureUsageShaderRead;
-        if (ci->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) u |= MTLTextureUsageRenderTarget;
+        if (ci->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) u |= MTLTextureUsageRenderTarget;   // a transfer destination may be cleared (C_CLEARI: a clearing pass)
         if (ci->usage & VK_IMAGE_USAGE_STORAGE_BIT) u |= MTLTextureUsageShaderWrite;
         // A stencil-aspect view of a depth-stencil image is an X32_Stencil8 view, which Metal allows only with the format-view usage (Vulkan needs no mutable-format flag for it;
         // the API validation layer aborts without it). As in the NVN layer, it costs nothing measured on a depth-stencil texture
@@ -520,7 +585,7 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
     }
     return VK_SUCCESS;
 }
-VKB(vkDestroyImage, void, VkDevice d, VkImage im, const VkAllocationCallbacks *a) { (void)d; (void)a; if (im) { im->tex = nil; free(im); } }
+VKB(vkDestroyImage, void, VkDevice d, VkImage im, const VkAllocationCallbacks *a) { (void)d; (void)a; if (im) { if (im->shadow) conv_remove(im); im->tex = nil; free(im->shadow); free(im); } }
 VK(vkGetImageMemoryRequirements, void, VkDevice d, VkImage im, VkMemoryRequirements *r) {
     (void)d; r->alignment = 4096; r->size = (im->size + 4095) & ~4095ull; r->memoryTypeBits = 7;
 }
@@ -538,6 +603,16 @@ VK(vkGetImageSubresourceLayout, void, VkDevice d, VkImage im, const VkImageSubre
 VKB(vkBindImageMemory, VkResult, VkDevice d, VkImage im, VkDeviceMemory m, VkDeviceSize off) {   // other images keep their own storage
     (void)d; if (!im->pitch) return VK_SUCCESS;
     id<MTLBuffer> b = mem_buf(m); if (!b) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    if (im->f->conv) {   // a texture of its own, unpacked from the memory before each submit that follows a change (conv_sync)
+        @autoreleasepool {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:im->f->pf width:im->w height:im->h mipmapped:NO];
+            td.storageMode = MTLStorageModeShared; td.usage = MTLTextureUsageShaderRead; im->tex = [g_dev newTextureWithDescriptor:td];
+        }
+        im->cmem = m; im->coff = off; im->shadow = calloc(1, im->size);
+        memset(im->shadow, 0xA5, im->size);   // differs from anything the game wrote, so the first submit unpacks it
+        conv_add(im);
+        return im->tex ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
     @autoreleasepool {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:im->f->pf width:im->w height:im->h mipmapped:NO];
         td.storageMode = MTLStorageModeShared; td.resourceOptions = MTLResourceStorageModeShared;
@@ -842,6 +917,25 @@ static int dual_source(const VkPipelineColorBlendStateCreateInfo *cb) {   // a b
     }
     return 0;
 }
+// Specialization constants: SPIRV-Cross keeps each SpecId as a Metal function constant of the same index, and Metal builds no pipeline from a function that has constants
+// until they are given (Super Mario 3D All-Stars' Super Mario 64). The values the pipeline gives are set; the others keep the defaults the translation wrote
+static id<MTLFunction> spec_fn(id<MTLFunction> fn, const char *key, int dual, const VkSpecializationInfo *si) {
+    if (!fn || !fn.functionConstantsDictionary.count) return fn;
+    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+    for (MTLFunctionConstant *c in fn.functionConstantsDictionary.allValues)
+        for (uint32_t i = 0; si && i < si->mapEntryCount; i++) {
+            const VkSpecializationMapEntry *e = &si->pMapEntries[i];
+            if (e->constantID != c.index || e->offset + e->size > si->dataSize) continue;
+            const uint8_t *v = (const uint8_t *)si->pData + e->offset; uint32_t w = 0; memcpy(&w, v, e->size < 4 ? e->size : 4);
+            if (c.type == MTLDataTypeBool) { bool b = w != 0; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:c.index]; }   // a VkBool32
+            else if (c.type == MTLDataTypeInt || c.type == MTLDataTypeUInt || c.type == MTLDataTypeFloat) [cv setConstantValue:&w type:c.type atIndex:c.index];
+            else RED1("specialization constant of Metal type %lu not handled", (unsigned long)c.type);
+        }
+    NSError *err = nil;
+    id<MTLFunction> f = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s%s", key, dual ? "_d" : ""] constantValues:cv error:&err];
+    if (!f) LOG("[vk] [RED] shader %s with its specialization constants: %s", key, err.localizedDescription.UTF8String);
+    return f;
+}
 static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
     VkPipeline p = zalloc(sizeof *p); p->layout = ci->layout;
     @autoreleasepool {
@@ -849,15 +943,14 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
         char keys[64] = ""; int dual = dual_source(ci->pColorBlendState);
         for (uint32_t s = 0; s < ci->stageCount; s++) {
             const VkPipelineShaderStageCreateInfo *st = &ci->pStages[s]; VkShaderModule m = st->module;
-            if (st->pSpecializationInfo && st->pSpecializationInfo->mapEntryCount) RED1("specialization constants not implemented");
-            if (st->stage == VK_SHADER_STAGE_VERTEX_BIT) { pd.vertexFunction = m->fn; p->vs = m->si; }
+            if (st->stage == VK_SHADER_STAGE_VERTEX_BIT) { pd.vertexFunction = spec_fn(m->fn, m->key, 0, st->pSpecializationInfo); p->vs = m->si; }
             else if (st->stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
                 if (dual && m->fn) {   // pipelines may be built on several threads
                     static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&mu);
                     if (!m->tried_d) { m->tried_d = 1; m->fn_d = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s_d", m->key]]; }
                     pthread_mutex_unlock(&mu);
                 }
-                pd.fragmentFunction = dual && m->fn_d ? m->fn_d : m->fn; p->fs = m->si;
+                pd.fragmentFunction = spec_fn(dual && m->fn_d ? m->fn_d : m->fn, m->key, dual && m->fn_d, st->pSpecializationInfo); p->fs = m->si;
             }
             else RED1("shader stage %#x not implemented", st->stage);
             strlcat(keys, s ? " " : "", sizeof keys); strlcat(keys, m->key, sizeof keys);
@@ -926,14 +1019,19 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
         if (df && ds) {
             MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
             if (fmt_has_depth(df) && ds->depthTestEnable) { dd.depthCompareFunction = (MTLCompareFunction)ds->depthCompareOp; dd.depthWriteEnabled = ds->depthWriteEnable != 0; }
-            if (fmt_has_stencil(df) && ds->stencilTestEnable) { dd.frontFaceStencil = stencil_d(&ds->front); dd.backFaceStencil = stencil_d(&ds->back); p->sref_f = ds->front.reference; p->sref_b = ds->back.reference; }
+            if (fmt_has_stencil(df) && ds->stencilTestEnable) { dd.frontFaceStencil = stencil_d(&ds->front); dd.backFaceStencil = stencil_d(&ds->back); p->sref_f = ds->front.reference; p->sref_b = ds->back.reference;
+                                                                p->stencil = 1; p->sf = ds->front; p->sb = ds->back; p->dcmp = dd.depthCompareFunction; p->dwrite = dd.depthWriteEnabled; }
             if (ds->depthBoundsTestEnable) RED1("depth bounds test not implemented");
             p->dss = [g_dev newDepthStencilStateWithDescriptor:dd];
         } else p->dss = g_dss_off;
         const VkPipelineDynamicStateCreateInfo *dy = ci->pDynamicState;
         for (uint32_t i = 0; dy && i < dy->dynamicStateCount; i++) {
             VkDynamicState s = dy->pDynamicStates[i];
-            if (s == VK_DYNAMIC_STATE_VIEWPORT) p->dyn_vp = 1; else if (s == VK_DYNAMIC_STATE_SCISSOR) p->dyn_sc = 1; else RED1("dynamic state %d not implemented (the imports have no matching set function)", s);
+            if (s == VK_DYNAMIC_STATE_VIEWPORT) p->dyn_vp = 1; else if (s == VK_DYNAMIC_STATE_SCISSOR) p->dyn_sc = 1;
+            else if (s == VK_DYNAMIC_STATE_STENCIL_REFERENCE) p->dyn_sref = 1;
+            else if (s == VK_DYNAMIC_STATE_LINE_WIDTH) continue;   // Metal draws lines one pixel wide whatever the width (Super Mario 64 sets 1)
+            else if (s == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK || s == VK_DYNAMIC_STATE_STENCIL_WRITE_MASK) p->dyn_smask |= s == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK ? 1 : 2;
+            else RED1("dynamic state %d not implemented (the imports have no matching set function)", s);
         }
         const VkPipelineViewportStateCreateInfo *vs = ci->pViewportState;
         if (!p->dyn_vp && vs && vs->pViewports && vs->viewportCount) { p->vp = vp_of(&vs->pViewports[0]); p->has_vp = 1; }
@@ -953,7 +1051,7 @@ VKB(vkCreateGraphicsPipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t
 VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; free(p); } }
 
 // ---------- Command buffers: recording ----------
-enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND };
+enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_CLEARI, C_STENCIL };
 typedef struct { uint32_t op, size; } chdr;
 typedef struct { VkRenderPass rp; VkFramebuffer fb; VkRect2D area; uint32_t nclear; VkClearValue clear[]; } c_brp;
 typedef struct { VkPipeline p; } c_pipe;
@@ -970,6 +1068,8 @@ typedef struct { uint32_t off, size; uint8_t data[]; } c_push;
 typedef struct { VkImage src, dst; uint32_t n; VkImageCopy r[]; } c_copyi;
 typedef struct { VkImage src; VkBuffer dst; uint32_t n; VkBufferImageCopy r[]; } c_copyi2b;
 typedef struct { VkQueryPool q; uint32_t first, n; } c_query;
+typedef struct { int what; VkStencilFaceFlags faces; uint32_t v; } c_stencil;   // what: 0 compare mask, 1 write mask, 2 reference
+typedef struct { VkImage im; int ds; VkClearValue v; uint32_t n; VkImageSubresourceRange r[]; } c_cleari;   // vkCmdClearColorImage / vkCmdClearDepthStencilImage
 static void *rec(VkCommandBuffer cb, uint32_t op, size_t sz) {
     size_t need = (sizeof(chdr) + sz + 7) & ~(size_t)7;
     if (cb->n + need > cb->cap) {
@@ -1047,6 +1147,19 @@ VK(vkCmdPushConstants, void, VkCommandBuffer cb, VkPipelineLayout l, VkShaderSta
 VK(vkCmdCopyImage, void, VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageCopy *r) {
     (void)sl; (void)dl; c_copyi *c = rec(cb, C_COPYI, sizeof *c + n * sizeof *r); c->src = src; c->dst = dst; c->n = n; memcpy(c->r, r, n * sizeof *r);
 }
+static void rec_stencil(VkCommandBuffer cb, int what, VkStencilFaceFlags faces, uint32_t v) { *(c_stencil *)rec(cb, C_STENCIL, sizeof(c_stencil)) = (c_stencil){what, faces, v}; }
+VK(vkCmdSetStencilCompareMask, void, VkCommandBuffer cb, VkStencilFaceFlags f, uint32_t v) { rec_stencil(cb, 0, f, v); }
+VK(vkCmdSetStencilWriteMask, void, VkCommandBuffer cb, VkStencilFaceFlags f, uint32_t v) { rec_stencil(cb, 1, f, v); }
+VK(vkCmdSetStencilReference, void, VkCommandBuffer cb, VkStencilFaceFlags f, uint32_t v) { rec_stencil(cb, 2, f, v); }
+static void rec_clear(VkCommandBuffer cb, VkImage im, int ds, const VkClearValue *v, uint32_t n, const VkImageSubresourceRange *r) {
+    c_cleari *c = rec(cb, C_CLEARI, sizeof *c + n * sizeof *r); c->im = im; c->ds = ds; c->v = *v; c->n = n; memcpy(c->r, r, n * sizeof *r);
+}
+VK(vkCmdClearColorImage, void, VkCommandBuffer cb, VkImage im, VkImageLayout lay, const VkClearColorValue *col, uint32_t n, const VkImageSubresourceRange *r) {
+    (void)lay; VkClearValue v; v.color = *col; rec_clear(cb, im, 0, &v, n, r);
+}
+VK(vkCmdClearDepthStencilImage, void, VkCommandBuffer cb, VkImage im, VkImageLayout lay, const VkClearDepthStencilValue *dsv, uint32_t n, const VkImageSubresourceRange *r) {
+    (void)lay; VkClearValue v; v.depthStencil = *dsv; rec_clear(cb, im, 1, &v, n, r);
+}
 VK(vkCmdCopyImageToBuffer, void, VkCommandBuffer cb, VkImage src, VkImageLayout lay, VkBuffer dst, uint32_t n, const VkBufferImageCopy *r) {
     (void)lay; c_copyi2b *c = rec(cb, C_COPYI2B, sizeof *c + n * sizeof *r); c->src = src; c->dst = dst; c->n = n; memcpy(c->r, r, n * sizeof *r);
 }
@@ -1077,6 +1190,7 @@ typedef struct {
     // The current render pass: its descriptor (attachments created with deferred store actions) and the store actions it ends with; cut = its encoder was ended
     // for a copy in the middle of the pass and is resumed (loading the attachments) at the next draw
     MTLRenderPassDescriptor *rpd; MTLStoreAction st_col[8], st_d, st_s; int cut;
+    uint32_t sdyn[3][2]; int sdyn_set[3], s_dirty;   // dynamic stencil compare mask / write mask / reference, front and back (C_STENCIL)
 } rs_t;
 #define DONE_RING 1024
 static uint64_t g_done_ns[DONE_RING];   // completion time of submit v at [v % DONE_RING] (timestamp query results)
@@ -1206,10 +1320,27 @@ static int pre_draw(rs_t *s) {
         [re setDepthBias:p->bias ? p->bias_c : 0 slopeScale:p->bias ? p->bias_s : 0 clamp:p->bias ? p->bias_cl : 0];
         [re setBlendColorRed:p->blend[0] green:p->blend[1] blue:p->blend[2] alpha:p->blend[3]];
         [re setStencilFrontReferenceValue:p->sref_f backReferenceValue:p->sref_b];
+        s->s_dirty = 1;
         if (p->has_vp && (!s->applied || !s->applied->has_vp || memcmp(&s->applied->vp, &p->vp, sizeof p->vp))) s->vp_dirty = 1;
         if (p->has_sc) s->sc_dirty = 1;
         s->applied = p;
     }
+    if (s->s_dirty && p->stencil && (p->dyn_sref || p->dyn_smask)) {   // dynamic stencil state, after the pipeline's own
+        if (p->dyn_sref) [re setStencilFrontReferenceValue:s->sdyn_set[2] ? s->sdyn[2][0] : p->sref_f backReferenceValue:s->sdyn_set[2] ? s->sdyn[2][1] : p->sref_b];
+        if (p->dyn_smask) {
+            VkStencilOpState f = p->sf, b = p->sb;
+            if ((p->dyn_smask & 1) && s->sdyn_set[0]) { f.compareMask = s->sdyn[0][0]; b.compareMask = s->sdyn[0][1]; }
+            if ((p->dyn_smask & 2) && s->sdyn_set[1]) { f.writeMask = s->sdyn[1][0]; b.writeMask = s->sdyn[1][1]; }
+            uint64_t key = (uint64_t)(f.compareMask & 0xFF) | (uint64_t)(f.writeMask & 0xFF) << 8 | (uint64_t)(b.compareMask & 0xFF) << 16 | (uint64_t)(b.writeMask & 0xFF) << 24 | 1ull << 32;
+            if (key != p->dss_key) {
+                MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+                dd.depthCompareFunction = p->dcmp; dd.depthWriteEnabled = p->dwrite; dd.frontFaceStencil = stencil_d(&f); dd.backFaceStencil = stencil_d(&b);
+                p->dss_dyn = [g_dev newDepthStencilStateWithDescriptor:dd]; p->dss_key = key;
+            }
+            [re setDepthStencilState:p->dss_dyn];
+        }
+    }
+    s->s_dirty = 0;
     if (s->vp_dirty) {
         MTLViewport v = p->has_vp ? p->vp : vp_of(&s->vp);
         [re setViewport:v]; s->vp_dirty = 0;
@@ -1347,6 +1478,42 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                 x->q->ticket[x->first] = q->v;
                 break;
             }
+            case C_STENCIL: { const c_stencil *x = c; if (x->faces & VK_STENCIL_FACE_FRONT_BIT) s->sdyn[x->what][0] = x->v; if (x->faces & VK_STENCIL_FACE_BACK_BIT) s->sdyn[x->what][1] = x->v;
+                              s->sdyn_set[x->what] = 1; s->s_dirty = 1; break; }
+            case C_CLEARI: {   // an image cleared outside a render pass (Super Mario 3D All-Stars' Super Mario 64 clears its depth buffer so): a pass per level and layer that only clears
+                const c_cleari *x = c; VkImage im = x->im;
+                if (!im || !im->tex) { RED1("a cleared image was not created"); break; }
+                if (s->re) { end_rp(s, 0); s->cut = 1; }
+                end_blit(s);
+                for (uint32_t i = 0; i < x->n; i++) {
+                    const VkImageSubresourceRange *r = &x->r[i];
+                    uint32_t nm = r->levelCount == VK_REMAINING_MIP_LEVELS ? im->mips - r->baseMipLevel : r->levelCount;
+                    uint32_t nl = im->type == VK_IMAGE_TYPE_3D ? 1 : r->layerCount == VK_REMAINING_ARRAY_LAYERS ? im->layers - r->baseArrayLayer : r->layerCount;
+                    for (uint32_t m = 0; m < nm; m++)
+                        for (uint32_t l = 0; l < nl; l++) {
+                            MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+                            if (!x->ds) {
+                                MTLRenderPassColorAttachmentDescriptor *a = d.colorAttachments[0]; a.texture = im->tex; a.level = r->baseMipLevel + m; a.slice = r->baseArrayLayer + l;
+                                a.loadAction = MTLLoadActionClear; a.storeAction = MTLStoreActionStore;
+                                const VkClearColorValue *cv = &x->v.color;
+                                a.clearColor = im->f->kind == K_INT ? MTLClearColorMake(cv->uint32[0], cv->uint32[1], cv->uint32[2], cv->uint32[3])
+                                                                     : MTLClearColorMake(cv->float32[0], cv->float32[1], cv->float32[2], cv->float32[3]);
+                            } else {
+                                if (fmt_has_depth(im->f) && (r->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)) {
+                                    MTLRenderPassDepthAttachmentDescriptor *a = d.depthAttachment; a.texture = im->tex; a.level = r->baseMipLevel + m; a.slice = r->baseArrayLayer + l;
+                                    a.loadAction = MTLLoadActionClear; a.storeAction = MTLStoreActionStore; a.clearDepth = x->v.depthStencil.depth;
+                                }
+                                if (fmt_has_stencil(im->f) && (r->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)) {
+                                    MTLRenderPassStencilAttachmentDescriptor *a = d.stencilAttachment; a.texture = im->tex; a.level = r->baseMipLevel + m; a.slice = r->baseArrayLayer + l;
+                                    a.loadAction = MTLLoadActionClear; a.storeAction = MTLStoreActionStore; a.clearStencil = x->v.depthStencil.stencil;
+                                }
+                                if (!d.depthAttachment.texture && !d.stencilAttachment.texture) continue;
+                            }
+                            [[s->cb renderCommandEncoderWithDescriptor:d] endEncoding];
+                        }
+                }
+                break;
+            }
             case C_QEND: if (s->re) [s->re setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0]; break;
             default: LOG("[vk] [RED] unknown command %u in the command buffer", h->op); return;
         }
@@ -1366,6 +1533,7 @@ static void done_advance(uint64_t v) {
 VKB(vkQueueSubmit, VkResult, VkQueue q, uint32_t n, const VkSubmitInfo *si, VkFence f) {
     (void)q; dm_gfx_enter();   // blocks while the app is in the background (iOS allows no GPU work there)
     @autoreleasepool {
+        conv_sync();
         pthread_mutex_lock(&g_qmu);
         id<MTLCommandBuffer> cb = [g_q commandBuffer];
         subq_t *sq = zalloc(sizeof *sq); sq->v = g_ev_val + 1;

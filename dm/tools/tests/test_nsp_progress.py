@@ -81,6 +81,47 @@ class Json(unittest.TestCase):
         self.assertFalse(es[2]['ok'])
         self.assertTrue('out' in es[3]['msg'] and 'err' in es[3]['msg'])
 
+class ShadersStale(unittest.TestCase):
+    """build_shaders tells a front end (event shaders_stale, json mode) that cached libraries cannot be reused, once, before it rebuilds them"""
+    class Stop(Exception): pass
+
+    def run_step(self, mode, chain_dir=None, digest='aaaa', stamp=None):
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            sh = Path(tmp) / 'sh'
+            for d in (['b-OLD'] if chain_dir is None else [chain_dir]):
+                (sh / 'cache' / d).mkdir(parents=True); (sh / 'cache' / d / 'x_b.metallib').write_text('')
+                if stamp: (sh / 'cache' / d / 'inputs.tsv').write_text(f'game\tg\ninputs\t{stamp}\n')
+            prog = nsp.Progress(mode)
+            g = mock.Mock(); g.table.return_value = Path(tmp) / 'none'
+            done = subprocess.CompletedProcess([], 0, stdout=f'{digest}\n', stderr='')
+            with contextlib.redirect_stdout(out), mock.patch.object(nsp, 'PROG', prog), mock.patch.object(nsp.threading, 'Thread'), \
+                 mock.patch.object(nsp, 'chain_of', return_value='NEW'), mock.patch.object(nsp.subprocess, 'run', return_value=done), \
+                 mock.patch.object(nsp, 'run', side_effect=self.Stop), mock.patch.object(nsp, 'rmtree'):
+                with self.assertRaises(self.Stop):
+                    nsp.build_shaders('py', Path(tmp), sh, Path(tmp) / 'xlate', {'WORK': tmp}, Path(tmp), g, mac=True)
+        return out.getvalue()
+
+    def events(self, text): return [e for e in (json.loads(l) for l in text.splitlines()) if e['ev'] == 'shaders_stale']
+
+    def test_chain_changed(self):
+        es = self.events(self.run_step('json'))
+        self.assertEqual(len(es), 1)
+        self.assertEqual([es[0][k] for k in ('reason', 'old', 'new', 'count')], ['chain', 'b-OLD', 'b-NEW', 1])
+
+    def test_inputs_changed(self):
+        es = self.events(self.run_step('json', chain_dir='b-NEW', digest='bbbb', stamp='aaaa'))
+        self.assertEqual([es[0][k] for k in ('reason', 'old', 'new', 'count')], ['inputs', 'aaaa', 'bbbb', 1])
+
+    def test_current_has_no_event(self):
+        self.assertEqual(self.events(self.run_step('json', chain_dir='b-NEW', digest='aaaa', stamp='aaaa')), [])
+
+    def test_no_json_unless_asked(self):
+        out = self.run_step('lines')
+        self.assertNotIn('shaders_stale', out)
+        self.assertIn('[NOTE] cached shader libraries cannot be reused (b-OLD -> b-NEW)', out)
+
+
 class Cli(unittest.TestCase):
     def test_argument_error_precedes_json_mode(self):
         r = subprocess.run([sys.executable, '-B', str(SCRIPT), '--progress', 'json', '--invalid-option'],

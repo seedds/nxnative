@@ -111,7 +111,7 @@ class Progress:
     """The console view of the build: one line per stage, "[k/n] stage · step", with a bar, done/total, percent, elapsed time and ETA when the work can be counted, else a spinner and the elapsed time.
     Modes: bar = the line is redrawn in place (a terminal, Spyder's console) and replaced by a ✓ line when the stage ends; lines = a plain line when a stage or step starts, every BEAT seconds and at the end
     (for output piped to a file); off = only each stage's start and end lines. Counters come from set(), or from a poll function that runs in a thread of its own (it may walk a big folder) and returns set()'s arguments.
-    Messages go through say(), which prints them above the live line. json (for a program that shows the build) = one JSON object per stdout line instead: the events stage, step, progress, stage_end and say;
+    Messages go through say(), which prints them above the live line. json (for a program that shows the build) = one JSON object per stdout line instead: the events stage, step, progress, stage_end, say and shaders_stale;
     a count change goes out at most every JSON_INTERVAL seconds (the ticker sends one held back), any other change at once"""
     SPIN, BLOCKS, POLL, JSON_INTERVAL = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏', ' ▏▎▍▌▋▊▉', 1.0, 0.5
 
@@ -193,6 +193,10 @@ class Progress:
                 self._json({'ev': 'stage_end', 'k': self.k, 'name': st.name, 'ok': ok, 'summary': summary, 'elapsed': round(time.time() - st.t0, 3)})
                 return
             self._out(f'[{clock()}] {"✓" if ok else "✗"} [{self.k}/{self.n}] {st.name} ({hms(time.time() - st.t0)})' + (f': {summary}' if summary else ''))
+
+    def event(self, ev, **fields):   # a build event beside the stage lines (json mode only: the human modes get the message that goes with it from say())
+        with self.lock:
+            if self.mode == 'json': self._json({'ev': ev, **fields})
 
     def say(self, msg):
         with self.lock:
@@ -1781,6 +1785,23 @@ def prune_stale_chains(sh, chain):
     return names
 
 
+def stale_shaders(py, repo, env, lib_dirs, chain):
+    """Why cached shader libraries cannot be reused by the build that starts: (reason, old, new, count) or None. 'chain': library folders b-<V> of another translation chain (lib_dirs: the
+    cache folders that hold them) have libraries and none of the current one has; old is those folders' names, new b-<chain>. 'inputs': the current chain's folder is stamped
+    (inputs.tsv) with other profile inputs than the profile has now (dmsh_chain.py --inputs); old and new are the two digests. count: the libraries that will be built again"""
+    def count(d): return sum(1 for _ in d.glob('*_b.metallib'))
+    cur = [d / f'b-{chain}' for d in lib_dirs]
+    if sum(count(d) for d in cur) == 0:
+        other = [d for l in lib_dirs for d in l.glob('b-*') if d.name != f'b-{chain}' and count(d)]
+        return ('chain', ', '.join(sorted({d.name for d in other})), f'b-{chain}', sum(count(d) for d in other)) if other else None
+    r = subprocess.run([str(py), str(repo / 'dm/gfx/tools/dmsh_chain.py'), '--inputs'], env=env, capture_output=True, text=True)
+    new = r.stdout.split()[-1] if r.returncode == 0 and r.stdout.split() else None
+    for d in cur:
+        have = lib_head(d)   # '# chain b-<V> inputs <digest>', None without a stamp
+        if new and have and have.split()[-1] != new: return ('inputs', have.split()[-1], new, count(d))
+    return None
+
+
 def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     """The iOS shader libraries (dmsh_build.py, which also builds the Mac's into sh/cache when the build wants them), or with mac only the Mac's (a Mac-only build: no IOSOUT). Returns the folder the host takes
     them from. Reused when the shader package (pkg_key, its content; None never reuses) and the chain's tools, translator binaries, profile and compilers are as at the last successful build:
@@ -1806,6 +1827,13 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
             prune_stale_chains(sh, chain)
             PROG.end(f'{note}, reused (inputs unchanged)'); return out
     else: key = None
+    try: stale = stale_shaders(py, repo, env, [sh / 'cache'] if mac else [sh / 'cache', ios], chain)
+    except Exception: stale = None   # a note never stops the build
+    if stale:
+        reason, old, new, n = stale
+        PROG.event('shaders_stale', reason=reason, old=old, new=new, count=n)
+        say(f'[NOTE] cached shader libraries cannot be reused ({old} -> {new}): ' + ('the translation chain changed' if reason == 'chain' else 'the game profile\'s shader inputs changed')
+            + f'; {n:,} libraries are built again (once per change; later builds reuse as before)')
     rmtree(kmac)
     if not mac: rmtree(kf)
     try: PROG.watch(ShaderWatch(g, libs, Path(env['WORK']), pso_pairs))

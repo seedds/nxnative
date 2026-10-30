@@ -93,8 +93,8 @@ static id<MTL4CommandAllocator> g_present_alloc4[3];
 static id<MTL4CommandBuffer> g_present_cb[3];
 static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct;
 static int g_vbuf_cache = 1;   // DM_NVN_VBUF_CACHE=0 restores the uncached path for A/B measurements
-static int g_vbuf_snap = 1;    // DM_NVN_VB_SNAP=0 binds the guest address itself (see vbuf_snap_fill: with it on, the bytes a draw fetches are frozen at draw time)
-static int g_ibuf_snap = 1;    // DM_NVN_IB_SNAP=0 binds the index buffer's guest address (see ibuf_snap: with it on, the indices a draw reads are frozen too)
+static int g_vbuf_snap;       // DM_NVN_VB_SNAP=1 freezes the bytes a draw fetches at draw time (see vbuf_snap_fill). Off by default: this engine writes vertex rings AFTER the draw is recorded and expects the GPU to read them later, so freezing them makes the stale read deterministic (a pink flash at the game-select transition in LEGO HP Years 5-7)
+static int g_ibuf_snap;       // DM_NVN_IB_SNAP=1 freezes the indices a draw reads (see ibuf_snap). Off by default for the same reason as the vertex streams
 static uint64_t g_vt_addr[31]; static uint32_t g_vt_valid;
 static uint64_t g_vbuf_resolve, g_vbuf_reuse, g_vbuf_set, g_vbuf_skip, g_vbuf_copies, g_vbuf_copy_bytes;   // copies: vertex streams at addresses not 4-byte aligned, and streams snapped at draw time (vbuf_unaligned)
 static id<MTL4ArgumentTable> g_present_args;
@@ -386,8 +386,8 @@ static void udc_selftest(void) {
 void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
-    const char *vbs = getenv("DM_NVN_VB_SNAP"); g_vbuf_snap = !(vbs && !strcmp(vbs, "0"));
-    const char *ibs = getenv("DM_NVN_IB_SNAP"); g_ibuf_snap = !(ibs && !strcmp(ibs, "0"));
+    const char *vbs = getenv("DM_NVN_VB_SNAP"); g_vbuf_snap = vbs && !strcmp(vbs, "1");
+    const char *ibs = getenv("DM_NVN_IB_SNAP"); g_ibuf_snap = ibs && !strcmp(ibs, "1");
     const char *link = getenv("DM_PRESENT_LINK");
     g_dm_present_link = link ? atoi(link) : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
     const char *latency = getenv("DM_PRESENT_LATENCY");

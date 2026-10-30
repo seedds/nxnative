@@ -5960,20 +5960,20 @@ static void pbase_key_of(MTLRenderPipelineDescriptor *d, pbase_key *k) {
         k->vl[i][0] = (uint32_t)l.stride; k->vl[i][1] = (uint32_t)l.stepFunction; k->vl[i][2] = (uint32_t)l.stepRate;
     }
 }
+// A pipeline with no Metal 4 descriptor, through the MTLDevice: from specialized functions (fn_dev)
+static id<MTLRenderPipelineState> pso_build_dev(MTLRenderPipelineDescriptor *d, NSError **e) {
+    id<MTLFunction> vf = fn_dev(d.vertexFunction), ff = fn_dev(d.fragmentFunction);
+    if (vf == d.vertexFunction && ff == d.fragmentFunction) return [g_dev newRenderPipelineStateWithDescriptor:d error:e];
+    MTLRenderPipelineDescriptor *dd = [d copy]; dd.vertexFunction = vf; dd.fragmentFunction = ff;
+    return [g_dev newRenderPipelineStateWithDescriptor:dd error:e];
+}
 // The pipeline pso_desc describes: its base (built, from the archive or already made), then specialized with its colour state. Called on several threads.
 // compile 0: nil on an archive miss (*e untouched), with no MTLDevice fallback. Prewarm compaction may still refresh a found base for serialization.
 static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, NSError **e, int compile) {
     pso4_init();
     int rast = d.rasterizationEnabled;
     MTL4RenderPipelineDescriptor *b = g_comp4 ? pso_desc4(d, rast) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
-    if (!b) {   // no Metal 4 descriptor: an MTLDevice pipeline, from specialized functions (fn_dev)
-        if (!compile) return nil;
-        g_pb_legacy++;
-        id<MTLFunction> vf = fn_dev(d.vertexFunction), ff = fn_dev(d.fragmentFunction);
-        MTLRenderPipelineDescriptor *dd = d;
-        if (vf != d.vertexFunction || ff != d.fragmentFunction) { dd = [d copy]; dd.vertexFunction = vf; dd.fragmentFunction = ff; }
-        return [g_dev newRenderPipelineStateWithDescriptor:dd error:e];
-    }
+    if (!b) { if (!compile) return nil; g_pb_legacy++; return pso_build_dev(d, e); }
     pbase_key bk; pbase_key_of(d, &bk);
     id<MTLRenderPipelineState> base = nil; PbaseBuild *job = nil; int owner = 0;
     for (;;) {

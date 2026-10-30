@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
+#include <strings.h>
 #include "dm_input.h"
 
 // BLE advertising: Nintendo's manufacturer company id, USB-style vendor id and the controller model ids.
@@ -90,9 +91,25 @@ static inline int ds2_report_parse(const uint8_t *d, size_t n, ds2_report *r) {
     return 1;
 }
 
-// Switch 2 raw buttons to nn::hid NpadButton bits (dm_input.h). Home, Capture, C, GL, GR and the rail SL/SR have no NpadButton here; iOS also
-// reserves Home and Capture as system gestures, so they are deliberately not forwarded.
-static inline uint64_t ds2_buttons(uint32_t b) {
+// Parse a button string from settings (e.g. DM_PAD_GL / DM_PAD_GR) to its NpadButton bit mask.
+static inline uint64_t ds2_btn_from_str(const char *s) {
+    if (!s || !*s || !strcmp(s, "none") || !strcmp(s, "0")) return 0;
+    if (!strcasecmp(s, "b")) return DM_BTN_B;
+    if (!strcasecmp(s, "a")) return DM_BTN_A;
+    if (!strcasecmp(s, "y")) return DM_BTN_Y;
+    if (!strcasecmp(s, "x")) return DM_BTN_X;
+    if (!strcasecmp(s, "lstick") || !strcasecmp(s, "ls") || !strcasecmp(s, "l3")) return DM_BTN_LS;
+    if (!strcasecmp(s, "rstick") || !strcasecmp(s, "rs") || !strcasecmp(s, "r3")) return DM_BTN_RS;
+    if (!strcasecmp(s, "zl")) return DM_BTN_ZL;
+    if (!strcasecmp(s, "zr")) return DM_BTN_ZR;
+    if (!strcasecmp(s, "l")) return DM_BTN_L;
+    if (!strcasecmp(s, "r")) return DM_BTN_R;
+    return 0;
+}
+
+// Switch 2 raw buttons to nn::hid NpadButton bits (dm_input.h). Home, Capture, C and the rail SL/SR have no NpadButton here; iOS also
+// reserves Home and Capture as system gestures, so they are deliberately not forwarded. GL and GR map to the given button masks (default none).
+static inline uint64_t ds2_buttons_mapped(uint32_t b, uint64_t gl_mask, uint64_t gr_mask) {
     uint64_t m = 0;
     if (b & DS2_BTN_A) m |= DM_BTN_A;
     if (b & DS2_BTN_B) m |= DM_BTN_B;
@@ -110,7 +127,13 @@ static inline uint64_t ds2_buttons(uint32_t b) {
     if (b & DS2_BTN_UP) m |= DM_BTN_UP;
     if (b & DS2_BTN_RIGHT) m |= DM_BTN_RIGHT;
     if (b & DS2_BTN_DOWN) m |= DM_BTN_DOWN;
+    if ((b & DS2_BTN_GL) && gl_mask) m |= gl_mask;
+    if ((b & DS2_BTN_GR) && gr_mask) m |= gr_mask;
     return m;
+}
+
+static inline uint64_t ds2_buttons(uint32_t b) {
+    return ds2_buttons_mapped(b, 0, 0);
 }
 
 // Stick calibration block (0x0B bytes): centre, max and min each a packed 12-bit pair. A user slot of 0xFFFFFF is unset; the factory slot is used then.

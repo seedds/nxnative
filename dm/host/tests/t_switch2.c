@@ -71,6 +71,25 @@ int main(void) {
     }
     assert(ds2_buttons(DS2_BTN_HOME | DS2_BTN_CAPTURE | DS2_BTN_C | DS2_BTN_GL | DS2_BTN_GR) == 0);   // no NpadButton / iOS system gesture
 
+    // Back buttons GL and GR mapping (DM_PAD_GL / DM_PAD_GR)
+    assert(ds2_btn_from_str(NULL) == 0);
+    assert(ds2_btn_from_str("") == 0);
+    assert(ds2_btn_from_str("none") == 0);
+    assert(ds2_btn_from_str("0") == 0);
+    assert(ds2_btn_from_str("b") == DM_BTN_B);
+    assert(ds2_btn_from_str("a") == DM_BTN_A);
+    assert(ds2_btn_from_str("y") == DM_BTN_Y);
+    assert(ds2_btn_from_str("x") == DM_BTN_X);
+    assert(ds2_btn_from_str("lstick") == DM_BTN_LS);
+    assert(ds2_btn_from_str("rstick") == DM_BTN_RS);
+    assert(ds2_btn_from_str("zl") == DM_BTN_ZL);
+    assert(ds2_btn_from_str("zr") == DM_BTN_ZR);
+    assert(ds2_btn_from_str("l") == DM_BTN_L);
+    assert(ds2_btn_from_str("r") == DM_BTN_R);
+    assert(ds2_buttons_mapped(DS2_BTN_GL, DM_BTN_B, DM_BTN_A) == DM_BTN_B);
+    assert(ds2_buttons_mapped(DS2_BTN_GR, DM_BTN_B, DM_BTN_A) == DM_BTN_A);
+    assert(ds2_buttons_mapped(DS2_BTN_GL | DS2_BTN_GR | DS2_BTN_A, DM_BTN_LS, DM_BTN_RS) == (DM_BTN_LS | DM_BTN_RS | DM_BTN_A));
+
     // Calibration block: centre, max, min, each a packed 12-bit pair. Full travel reaches +-1; the deadzone holds at the centre.
     uint8_t cal[11] = {0};
     uint32_t c = 2048u | (2048u << 12), mx = 2048u | (2048u << 12), mn = 2048u | (2048u << 12);

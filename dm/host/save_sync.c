@@ -368,7 +368,8 @@ static int fetch_timed(const char *cloud, const char *local, int ms) {   // fron
     if (!j) return -1;
     pthread_mutex_init(&j->mu, NULL); pthread_cond_init(&j->cv, NULL);
     snprintf(j->cloud, sizeof j->cloud, "%s", cloud); snprintf(j->local, sizeof j->local, "%s", local);
-    if (pthread_create(&t, NULL, fetch_thread, j)) { pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); return front_save_sync_fetch(cloud, local); }
+    // Fetching on this thread would bypass the time limit when no worker can be started.
+    if (pthread_create(&t, NULL, fetch_thread, j)) { pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); return -1; }
     pthread_detach(t);
     struct timespec ts; deadline(ms, &ts);
     pthread_mutex_lock(&j->mu);

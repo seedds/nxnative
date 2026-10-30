@@ -23,6 +23,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_thread_leak
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_case $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
+	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_fetch
 	$(B)/t_audio
 	$(B)/t_audio_spsc
 	$(B)/t_fpslock
@@ -114,6 +115,15 @@ $(B)/t_save_sync: t_save_sync.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_s
 .PHONY: save-sync
 save-sync: $(B)/t_save_sync
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
+# Rename only this test object's thread creation; no production failure-injection hook.
+$(B)/save_sync_fetch.o: ../save_sync.c ../save_sync.h | $(B)
+	$(CLANG) -O1 -Wall -Wno-unused-function -Dpthread_create=test_pthread_create -c -o $@ ../save_sync.c
+run: $(B)/t_save_sync_fetch
+$(B)/t_save_sync_fetch: t_save_sync_fetch.c t_fs_stub.c ../hle_fs.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h ../romfs_image.h $(GAME_H) $(B)/save_sync_fetch.o | $(B)
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_save_sync_fetch.c t_fs_stub.c ../hle_bigstack.c $(B)/save_sync_fetch.o
+.PHONY: save-sync-fetch
+save-sync-fetch: $(B)/t_save_sync_fetch
+	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_fetch
 $(B)/t_audio: t_audio.c ../hle_audio.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c -framework AudioToolbox
 $(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c ../hle.h ../dm.h $(GAME_H) | $(B)
@@ -251,7 +261,7 @@ include ../../sanitizers/sanitizers.mk
 asan:
 	@$(call san_fresh,$(B)/asan,$(ASAN_FLAGS))
 	$(ASAN_ENV) $(MAKE) B=$(B)/asan SAN="$(ASAN_FLAGS)" run
-TSAN_T = t_audio t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_altstack
+TSAN_T = t_audio t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_save_sync_fetch t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_altstack
 tsan-threads:
 	@$(call san_fresh,$(B)/tsan,$(TSAN_FLAGS))
 	$(TSAN_ENV) $(MAKE) B=$(B)/tsan SAN="$(TSAN_FLAGS)" tsan-threads-run
@@ -263,6 +273,7 @@ tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_commit_list
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_case
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync
+	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_fetch
 	$(B)/t_condvar
 	$(B)/t_condvar_old
 	$(B)/t_preempt

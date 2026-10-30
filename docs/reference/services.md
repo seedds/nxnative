@@ -153,6 +153,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_fs_commit_list` injects write failures after truncation in either of two independent saves, verifies that the other save commits its changes, and checks failure propagation through aliases, rename failure handling, and a failed recovery clone. It blocks writes and size changes through an alias while another save commits, then verifies that both Commit ABIs wait for the affected I/O and refuse its failure. `make -C dm/host/tests GAME=<title ID> fs-tsan` also checks concurrent first writes and failed file I/O concurrent with mounting another alias.
 - **Found on:** the [two-save host regression](../../dm/host/tests/t_fs_commit_list.c). [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) uses independent device and account saves.
 
+### Cloud save fetch when a worker cannot start
+
+- **Symptom:** the first save mount or a later cloud send can wait indefinitely when the cloud download stalls and the host cannot create its fetch thread.
+- **Cause:** `fetch_timed` (`save_sync.c`) called `front_save_sync_fetch` synchronously after `pthread_create` failed, bypassing the fetch time limit.
+- **Fix:** destroy the unused job's mutex and condition variable, free it, and return the existing cloud-unavailable result (`-1`). The mount keeps the local save; a later send reports failure without replacing the cloud save. Neither caller needs a synchronous fallback.
+- **Check:** `make -C dm/host/tests GAME=<title ID> save-sync-fetch` injects `EAGAIN` at the test build boundary and checks that mount and later-send paths never call the platform fetch or store. Real filesystem calls read, write and commit the local save successfully. The ordinary save-sync test still uses real worker creation and plain file copies.
+- **Found on:** code review, [issue #687, finding 5](https://github.com/seedds/nxnative/issues/687), reproduced in the [host regression](../../dm/host/tests/t_save_sync_fetch.c) with synthetic saves; no game or device cloud session was run.
+
 ### Save data size queries
 
 - **Symptom:** SIGSEGV at address 0 in `nn::fs::GetSaveDataSizeMax`, about 13 minutes into a new game.

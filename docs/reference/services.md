@@ -54,6 +54,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_sf.c` takes over the SDK's HIPC client entry points (`InitializeHipcServiceResolution`, `ConnectToHipcService`, `SendSyncRequest`, `CloseClientSessionHandle` and the control requests `QueryPointerBufferSize`, `ConvertSessionToDomain`, `DuplicateSession(Ex)`): a service it serves (`olsc:u`) gets a host session, and every request on it succeeds with zeroed output, which reads as backup off for every user. Any other name is refused with a red line, as `sm` refuses a service nobody registered (`npns` was never connected). `DM_SF_TRACE=1` dumps each request.
 - **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4).
 
+### Bluetooth LE events bound without a Bluetooth service
+
+- **Symptom:** `[RED] sf: the game connects to service bt itself, which the host does not serve` early in `nnMain`, then an `nn::diag` abort in `nn::bluetooth::InitializeBluetoothUserInterface` (`sdk+0xaec1c`); with that call answered, an abort in `nn::btm::user::AcquireBleScanEvent` (`sdk+0xb9028`).
+- **Cause:** the game initializes Bluetooth LE at start (`nn::bluetooth::InitializeBle`) and takes the five BLE events (scan, connection state, service discovery, MTU configuration, GATT operation) without checking a result: its link to a phone app. The SDK's client connects to the `bt` and `btm` services, which the host does not serve, and aborts when it cannot.
+- **Fix:** `hle_bluetooth.c`: `InitializeBle` is an init takeover (a no-op), and each `AcquireBle…Event` binds the game's `SystemEventType` to a kernel event that never fires (`hle_bind_system_event`), so no device is ever found. The scan, connection and GATT calls are taken over as a game comes to use them.
+- **Found on:** [Pokémon Violet](../../dm/games/01008F6008C5E000/README.md) (SDK 13.3.13; its Pokémon GO link, `main+0xa0aa7c`, 36 `nn::bluetooth` imports in all).
+
 ## SDK names that changed between versions
 
 ### Older SDK names for the same calls

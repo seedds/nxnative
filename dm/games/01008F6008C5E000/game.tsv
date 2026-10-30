@@ -1,0 +1,39 @@
+# Game profile of Pokémon Violet (Switch, base game v0 + update 4.0.0 = v786432)
+# Format: see dm/games/README.md
+# Game Freak's Trinity engine on SDK 13.3.13, NVN, Wwise. Every file lives in the Trinity packs of arc/data.trpfs (FlatBuffers, Oodle), as in Pokémon Legends: Z-A; started from the provisional
+# profile scripts/build_ipa_from_nsp.py wrote from its survey (dm/games/profile_guess.py)
+# ---- Identity ----
+title_id	01008F6008C5E000
+program_id	01008F6008C5E000
+# ---- App ----
+name	Pokémon Violet
+ipa	PokMonViolet.ipa
+app_category	public.app-category.games
+# the camera is on the right stick
+pad_layout	full
+# ---- Versions ----
+build	v786432	4.0.0	main=709bfd66115298640155fcc4979dba15	sdk=bb560bdfa85b4a97786ae2c3b7995df6
+package	v786432
+shader_versions	v786432
+# ---- Files ----
+# every module main imports from; subsdk0 (NintendoSDK_movie) is not loaded: main takes nothing from it the host does not supply
+modules	main sdk
+romfs_marker	arc/data.trpfs
+zip_store	.bk2:.bnk:.pck:.trpfd:.trpfs:.metallib
+# ---- Memory ----
+# nninitStartup (main+0x2b7da90) initializes its StandardAllocator with virtual address memory over 12 GB of address space (StandardAllocator::Initialize(nullptr, 0x300000000, false),
+# main+0x167d554), which the Switch's 64 GB alias region holds. Three cuts for 4.0.0 (patches.py and dm/tools/sdk_patches.py) make it fit the 5 GB block, as Pokémon Legends: Z-A's do:
+# the allocator gets 4 GB, the SDK's node area of 1 GB becomes 62 MB and regions of 1 GB and more are aligned to 32 MB instead of 1 GB
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+# nninitStartup allocates and frees all it can (pool − used memory) and the SDK keeps those pages mapped until a map fails: the pool is enforced as on Horizon, so it gives them back (hle_svc.c)
+mem_map_limit	on
+# ---- Shader split ----
+shader_groups	/audio/=audio /arc/=arc /demo/=demo /system/=system /event/=event
+shader_note	Pokémon Violet shaders
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
+depth_mode	zero

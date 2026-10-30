@@ -535,7 +535,8 @@ Games read this count as a position in their own command memory and size their h
   - `nvnCommandBufferDiscardColor`: a discarded target is undefined, so keeping its content is correct.
   - `nvnWindowGetCrop`: read back every few frames; before any `SetCrop` it is the whole first window texture.
   - `nvnSamplerBuilderGetLodClamp`.
-- **Found on:** [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the first two), [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2: the two getters).
+  - `nvnCommandBufferSetConservativeRasterDilate`: the dilation only matters with conservative rasterization on, which Metal lacks and `SetConservativeRasterEnable` already ignores.
+- **Found on:** [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the first two), [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2: the two getters), [Pokémon Violet](../../dm/games/01008F6008C5E000/README.md) (SDK 13.3.13: the dilation, set with conservative rasterization on).
 
 ### `nvnDeviceRegisterFastClearDepth` is a hint
 

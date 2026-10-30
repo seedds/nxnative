@@ -330,9 +330,12 @@ static NSTextField *prog_label(NSRect r, CGFloat size, NSFontWeight w, NSColor *
     NSTextField *t = [NSTextField labelWithString:@""]; t.frame = r; t.alignment = NSTextAlignmentCenter; t.textColor = c;
     t.font = [NSFont monospacedDigitSystemFontOfSize:size weight:w]; return t;
 }
+void (*front_progress_hook)(const char *title, long done, long total);
 void front_progress(const char *title, long done, long total) {
     if (!g_layer) return;
     NSString *tt = title ? @(title) : nil;
+    void (*hook)(const char *, long, long) = front_progress_hook;
+    if (hook) { dispatch_async(dispatch_get_main_queue(), ^{ hook(tt.UTF8String, done, total); }); return; }   // the host app draws it (front.h)
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; return; }
         if (!g_prog) {

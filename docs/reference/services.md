@@ -294,6 +294,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the flush calls it through the PLT, so an `HLE_FORCE` on that symbol catches it and returns success (`hle_hid.c`).
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 
+### Vibration device mounted query
+
+- **Symptom:** entering a Sand Kingdom pipe with rumble on crashes in `hid::detail::IsVibrationDeviceMounted`, after `[RED] sf: the game connects to service hid itself, which the host does not serve`.
+- **Cause:** `hid::IsVibrationDeviceMounted` lacked a host takeover, so its SDK service client reached unsupported `hid` IPC and dereferenced the missing service object. The surrounding vibration APIs already use the host's channel topology.
+- **Fix (resolved in synthetic tests; gameplay validation open):** `hle_hid.c` takes over the public query and returns a normalized boolean from `vib_targets`, as device information and sends do. A valid channel is mounted while its npad style has a routed haptics output, including controllers merged into player 1. Invalid or stale handles, no sink, disabled rumble and disconnected outputs report false; a playback suspension alone does not unmount a routed output. The host exposes no vibration device while rumble is disabled, consistent with its other vibration queries. `t_hid` resolves the real registered symbol and checks these states without hardware or game files.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md), issue [#715](https://github.com/seedds/nxnative/issues/715). The reported crash and symbolized stack establish the missing query; the Sand Kingdom route and physical rumble remain untested locally.
+
 ### Vibration handles before a controller is reported
 
 - **Symptom:** `DM_RUMBLE_LOG=1` shows the game's startup handle request answered with none, then every vibration value sent to handle 0 and reaching no output for the whole session, although a controller with haptics (a DualSense on the Mac) is connected. A game that rumbles would stay silent.

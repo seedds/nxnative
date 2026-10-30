@@ -11,6 +11,8 @@ static int hid_usleep(useconds_t usec);
 #undef clock_gettime
 #undef usleep
 #include "../pad_slots.h"
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
 
 static int checks, fails, g_mode = 1, g_signals;
 static void *g_signalled;
@@ -184,6 +186,47 @@ static void t_vibration(void) {
     CHECK(!h_hid_VibPermit(), "disconnecting the last output disables vibration");
     dm_haptics_init(vibration_sink, 0); dm_haptics_route(0, 1);
     CHECK(!h_hid_VibPermit() && !h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD), "rumble disabled: no vibration devices");
+}
+
+// Removing the takeover sends this SDK query to hid IPC; resolving by its guest symbol also checks that registration.
+static void t_vibration_mounted(void) {
+    unsigned long bytes = 0;
+    const hle_force_ent *entries = (const void *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &bytes);
+    unsigned (*mounted)(const uint32_t *) = NULL;
+    for (unsigned long i = 0; i < bytes / sizeof *entries; i++)
+        if (!strcmp(entries[i].name, "_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE")) mounted = entries[i].fn;
+    CHECK(mounted != NULL, "mounted query takes over the SDK's hid service client");
+    if (!mounted) return;
+
+    uint32_t h[2], id = 0;
+    g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(3);
+    dm_haptics_init(NULL, 1); dm_haptics_route(0, 1);
+    CHECK(mounted(&(uint32_t){3}) == 0, "no output sink: no mounted device");
+    dm_haptics_init(vibration_sink, 1);
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2 && mounted(&h[0]) == 0,
+          "cached startup handles are not mounted before output routing");
+    dm_haptics_route(0, 1); dm_haptics_route(1, 1);
+    CHECK(mounted(&h[0]) == 1 && mounted(&h[1]) == 1, "both routed motors are mounted");
+    CHECK(mounted(&(uint32_t){0x103}) == 1, "player 2's output bit is normalized to true");
+    const uint32_t invalid[] = {0, 4, 0x20003, 0x1000003, 0x203, 0xff03};
+    for (unsigned i = 0; i < sizeof invalid / sizeof *invalid; i++)
+        CHECK(mounted(&invalid[i]) == 0, "invalid style, motor, reserved byte or absent npad is not mounted");
+    CHECK(mounted(NULL) == 0, "a missing handle is not mounted");
+    dm_haptics_suspend(DM_HAPTICS_INACTIVE, 1);
+    CHECK(mounted(&h[0]) == 1, "suspending playback does not unmount the output");
+    dm_haptics_suspend(DM_HAPTICS_INACTIVE, 0);
+    dm_haptics_route(0, 0);
+    CHECK(mounted(&h[0]) == 0 && mounted(&(uint32_t){0x103}) == 1, "disconnect affects only that player's output");
+    ids((uint32_t[]){0, NPAD_HANDHELD}, 2);
+    CHECK(mounted(&h[0]) == 1, "a merged controller's output mounts player 1's channel");
+    g_mode = 0; id = NPAD_HANDHELD;
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2 && mounted(&h[0]) == 1 && mounted(&h[1]) == 1,
+          "handheld motors use the merged output");
+    CHECK(mounted(&(uint32_t){3}) == 0, "a stale docked handle is not mounted in handheld mode");
+    dm_haptics_route(1, 0);
+    CHECK(mounted(&h[0]) == 0, "disconnecting the last merged output unmounts the channel");
+    dm_haptics_init(vibration_sink, 0); dm_haptics_route(0, 1);
+    CHECK(mounted(&h[0]) == 0, "rumble disabled: the host exposes no mounted vibration device");
 }
 
 static void *vibration_sender(void *arg) {
@@ -485,6 +528,7 @@ int main(void) {
     t_script();
     t_vibration();
     t_rumble_log();
+    t_vibration_mounted();
     t_motion_threads();
     t_motion_live();
     t_motion_hid();

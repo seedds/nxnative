@@ -61,6 +61,8 @@ No `patches.py`. `op_mode` stays docked: Odyssey only takes its motion moves in 
 
 General host and tool changes first needed here; each applies to every game:
 
+- **Vibration device mounted query (synthetic fix; gameplay validation open):** [Vibration device mounted query](../../../docs/reference/services.md#vibration-device-mounted-query), reported in 1.4.1 when entering a Sand Kingdom pipe with rumble on ([#715](https://github.com/seedds/nxnative/issues/715)). The registered host query and its routing states are tested without game files; the pipe route and physical rumble still need device validation.
+
 - **Chinese language aliases in both settings equality operators:** [Chinese language aliases in settings comparisons](../../../docs/reference/services.md#chinese-language-aliases-in-settings-comparisons).
 - **BAHS pairs omitted from vertex padding:** [Pixel shader inputs the vertex shader does not write](../../../docs/reference/shaders.md#pixel-shader-inputs-the-vertex-shader-does-not-write).
 - **Front end at `-O1`** (`dmsh_build.py` and `ios_metal.py`): [Front end at -O1: Apple's control-flow lowering](../../../docs/reference/shaders.md#front-end-at--o1-apples-control-flow-lowering).

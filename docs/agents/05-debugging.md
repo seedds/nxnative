@@ -142,9 +142,7 @@ Instruments' Metal Resource Events didn't record this process from the command l
 
 ## Save failures
 
-`DM_TEST_FS_FAILAT=<point>[:<count>][,…]` makes steps of the save transaction fail with ENOSPC (`mountclone`, `reclone`, `guestname`, `renameback`; `noswap` instead injects an unsupported atomic-swap capability, `ENOTSUP`; `dm/host/tests/t_fs.c` sections 6–8). The game must keep running: a mount that cannot clone its work directory falls back to the committed saves read-only, and the iOS front end shows a notice.
-
-If `DM_SAVE` is on HFS+ (`errno=45`, `ENOTSUP`), the filesystem also lacks atomic `RENAME_SWAP` for nonempty directories. Copying the work directory cannot safely complete a transaction; the host rejects writable save mounts rather than risk the committed version. Set `DM_SAVE` to a writable **APFS** directory for the next launch while keeping game assets on the original drive. On swap-capable volumes lacking `clonefile`, `copyfile` recursively copies complete save trees before a swap, including xattrs. See [Save transactions require atomic directory exchange](../reference/services.md#save-transactions-require-atomic-directory-exchange).
+`DM_TEST_FS_FAILAT=<point>[:<count>][,…]` makes steps of the save transaction fail with ENOSPC (`mountclone`, `reclone`, `guestname`, `renameback`; `noswap` instead injects unsupported atomic-swap capability, `ENOTSUP`; `dm/host/tests/t_fs.c` sections 6–8). The game must keep running: a mount that cannot clone its work directory falls back to the committed saves read-only, and the iOS front end shows a notice.
 
 ## Render-pass investigation
 

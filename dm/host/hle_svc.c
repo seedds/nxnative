@@ -28,6 +28,15 @@ static uint64_t *g_alias_exposed;   // one bit per host page ever opened; protec
 static uint8_t *g_stack; static size_t g_stack_cap;
 // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
 int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < g_reserve; }
+// Base of a guest memory region as dmnt's MemoryAccessType numbers them (hle_cheat.c): 0 the main module, 1 the heap, 2 the alias region, 3 the whole address space (ASLR)
+uint64_t dm_guest_region_base(int region) {
+    switch (region) {
+    case 0: for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return (uint64_t)(uintptr_t)g_mod[i].base; return 0;
+    case 1: return (uint64_t)(uintptr_t)g_heap;
+    case 2: return (uint64_t)(uintptr_t)g_alias;
+    default: return (uint64_t)(uintptr_t)g_as;
+    }
+}
 
 static void *alias_windows_thread(void *arg);
 static void *regions_thread(void *arg);

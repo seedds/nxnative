@@ -193,6 +193,17 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
+### Cheats
+
+A Mac app packed with a cheat file (the NSP script's `--cheats`, see [The packing script in detail](development.md#the-packing-script-in-detail)) has a **Cheats** section with one switch per cheat. The file is in Atmosphère's format, for the game's `main` build.
+
+The app remembers the cheats you turn on. They run while you play, as on a console with Atmosphère. A cheat that changes the game's values may end up in your save when the game saves.
+
+In an `env.txt`:
+
+- `DM_CHEATS=<file>` names the cheat file;
+- `DM_CHEATS_ON=1,3` picks cheats by their number in that file, counting only the `[Name]` entries that have code.
+
 ### Cloud saves folder
 
 **Choose a folder…** picks the iCloud Drive folder the game's save is synced through, the one the iPhone app chose in its launcher's **Cloud saves**, or the game's own folder inside it, named after its title ID ([Cloud saves](#cloud-saves)); **Turn off** stops it. Off by default. macOS may ask once whether the app may open iCloud Drive; if the game log says `this app may not open iCloud Drive`, allow it in System Settings › Privacy & Security › Files and Folders. In an `env.txt`: `DM_SAVE_SYNC=<folder>`, or `DM_SAVE_SYNC=icloud` for iCloud Drive › nxnative Saves; the window then shows it fixed.

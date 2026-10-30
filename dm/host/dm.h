@@ -88,6 +88,10 @@ module_t *nro_find(const uint8_t sha256[32]);   // the mapped NRO with this hash
 int nro_refused(const uint8_t sha256[32]);      // an NRO the pack refused (an online SDK, nro.tsv "refused")
 void nro_load(module_t *m);     // relocate an NRO against the loaded modules and bind the earlier modules' imports it defines (the caller runs its init)
 void nro_unload(module_t *m);   // take an NRO out of the lookups and bind the imports that pointed into it again
+module_t *nro_newest_loaded(void);   // the NRO loaded last and still loaded, or NULL (loader.c)
+uint64_t dm_guest_region_base(int region);   // hle_svc.c: main, heap, alias region or address space, numbered as dmnt's MemoryAccessType
+uint64_t dm_input_buttons(void);   // hle_hid.c: player 1's held buttons
+void dm_cheats_start(void);   // hle_cheat.c: start the DM_CHEATS file's DM_CHEATS_ON cheats
 int svc_nro_deactivate(module_t *m);   // mark inactive under the memory map lock, refusing while a stack borrows its data
 void *module_sym(module_t *m, const char *name);
 int dm_sdk_major(void);   // SDK major version from the sdk module's version string (loader.c); 0 = unknown

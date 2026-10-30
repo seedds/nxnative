@@ -29,6 +29,7 @@ struct LauncherView: View {
             .padding([.horizontal, .top], 20)
             Form {
                 settingSections(basic: true)
+                CheatsSection()
                 CloudSavesSection()
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
@@ -69,6 +70,51 @@ struct LauncherView: View {
                 }
             }
         }
+    }
+}
+
+/// Cheats: the app's cheat file (Resources/dm/cheats.txt, Atmosphere's format, for the game's main build: pack_app.py --cheats), one toggle per cheat. The choice is kept in this app's
+/// preferences as cheats.on (the cheats' numbers in the file, master codes left out, as hle_cheat.c numbers them), which launcher.c hands to the host as DM_CHEATS_ON.
+/// No cheat file: no section
+struct CheatsSection: View {
+    @AppStorage("cheats.on") private var on = ""
+    private let names: [String] = CheatsSection.load()
+
+    var body: some View {
+        if !names.isEmpty {
+            Section {
+                ForEach(Array(names.enumerated()), id: \.offset) { i, name in
+                    Toggle(name, isOn: Binding(get: { chosen.contains(i + 1) }, set: { set(i + 1, $0) }))
+                }
+            } header: {
+                Text("Cheats")
+            } footer: {
+                Text("Turn on only the ones you want. A cheat that writes the game's values may end up in your save when the game saves.")
+            }
+        }
+    }
+
+    private var chosen: Set<Int> { Set(on.split(separator: ",").compactMap { Int($0) }) }
+    private func set(_ n: Int, _ v: Bool) {
+        var c = chosen; if v { c.insert(n) } else { c.remove(n) }
+        on = c.sorted().map(String.init).joined(separator: ",")
+    }
+
+    /// The cheats' names, numbered as the host's cheat engine numbers them: [Name] entries that have code; {Name} master codes always run and are not listed
+    static func load() -> [String] {
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/cheats.txt"),
+              let text = (try? String(contentsOf: url, encoding: .utf8)) ?? (try? String(contentsOf: url, encoding: .isoLatin1)) else { return [] }
+        var out: [String] = [], cur: String? = nil, code = false
+        for raw in text.components(separatedBy: .newlines) {
+            let l = raw.trimmingCharacters(in: .whitespaces)
+            if l.hasPrefix("[") || l.hasPrefix("{") {
+                if let c = cur, code { out.append(c) }
+                let close: Character = l.hasPrefix("[") ? "]" : "}"
+                cur = l.hasPrefix("[") ? l.dropFirst().split(separator: close, maxSplits: 1).first.map(String.init) : nil; code = false
+            } else if l.count >= 8 { code = true }
+        }
+        if let c = cur, code { out.append(c) }
+        return out
     }
 }
 

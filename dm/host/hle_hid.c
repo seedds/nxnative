@@ -58,6 +58,8 @@ void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t 
     if (!p) shake_note();
 }
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { dm_pad_set_player(0, buttons, lx, ly, rx, ry); }
+// The buttons player 1 holds now, from every source (keyboard / touch controls, the controller, scripted DM_KEYS), as NpadButton bits: what a cheat's key condition reads (hle_cheat.c)
+uint64_t dm_input_buttons(void) { return atomic_load(&g_btn) | atomic_load(&g_pad_btn[0]) | atomic_load(&g_sc_btn); }
 static void script_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_sc_btn, buttons); atomic_fetch_or(&g_sc_latch, buttons & ~old); atomic_store(&g_sc_axes, pack(lx, ly, rx, ry));
     shake_note();

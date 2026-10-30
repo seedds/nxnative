@@ -134,6 +134,20 @@ static void saved_choices(void) {   // after the env files, before the bundle's 
     }
 }
 
+// Cheats: an app packed with a cheat file (Resources/dm/cheats.txt, pack_app.py --cheats) runs the ones turned on in the settings window (Launcher.swift CheatsSection,
+// cheats.on in the app's preferences: their numbers in the file, master codes left out), with or without the window; a DM_CHEATS the environment or an env file set wins
+static void cheats(const char *dm) {
+    char p[2048]; snprintf(p, sizeof p, "%s/cheats.txt", dm);
+    if (getenv("DM_CHEATS") || access(p, R_OK)) return;
+    setenv("DM_CHEATS", p, 1);
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle()); char on[512] = "";
+    CFPropertyListRef v = domain ? CFPreferencesCopyAppValue(CFSTR("cheats.on"), domain) : NULL;
+    if (v && CFGetTypeID(v) == CFStringGetTypeID()) CFStringGetCString(v, on, sizeof on, kCFStringEncodingUTF8);
+    if (v) CFRelease(v);
+    if (!getenv("DM_CHEATS_ON")) setenv("DM_CHEATS_ON", on, 1);
+    fprintf(stderr, "launcher: cheats file %s, turned on: %s\n", p, *getenv("DM_CHEATS_ON") ? getenv("DM_CHEATS_ON") : "none");
+}
+
 // Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesSection, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC
 // (dm/host/save_sync.h), with or without the window; a DM_SAVE_SYNC the launch environment or an env file set wins. A front end may write the key too (docs/frontends.md, The cloud saves folder)
 static void cloud_saves_folder(void) {
@@ -191,6 +205,7 @@ int main(int argc, char **argv) {
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
     cloud_saves_folder();
+    cheats(dm);
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);

@@ -59,6 +59,7 @@ PSO_GPUS = ''                           # NVN games: GPU architectures the app g
                                         #   another device's name is in its log when the app has none for it), so the device does not build them on its first start; each adds about 650 MB to the app (Breath of the Wild) and minutes to a first build; 'none' = no archive;
                                         #   empty = by the game's profile: 'g18p' when it sets pso_mtl4 on (the Metal 4 path, the only one that reads the archive on iOS, is on for it), else 'none'
                                         #   PLATFORM 'mac-app': the Mac app's archive (Resources/pso), empty = this Mac's GPU (e.g. 'g14s' for an M2 Max), 'none' = the app builds its bases on its first start
+CHEATS = ''                             # Atmosphere cheats for the Mac app's settings window (--platform mac-app): a cheat file, or a folder laid out as switch-cheats-db (titles/<title ID>/cheats/<build ID>.txt) or holding <build ID>.txt; the file must match the packed main's build ID (first 16 hex digits)
 SHOW_FPS = True                         # True shows the game's frame rate on the iPhone (frames on screen per second, top left); DM_SHOW_FPS=0 / 1 in the app's Documents/env.txt changes it without a rebuild
 MOTION = True                           # True passes a gyro controller's motion (on iOS also the phone's own) to games that read it; False builds with DM_MOTION=0, for when motion misbehaves (DM_MOTION=1 in the app's Documents/env.txt turns it back on without a rebuild)
 SURVEY_ONLY = False                     # a game with no profile in dm/games: only write the survey, no provisional profile and no IPA
@@ -2099,6 +2100,19 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
+def cheat_file(src, app, patched):
+    """The cheat file for the packed main (CHEATS / --cheats): the file itself, or in a folder the one named after the main's build ID (first 16 hex digits, any case), as
+    switch-cheats-db lays them out (titles/<title ID>/cheats/<build ID>.txt) or loose (also <name>_<build ID>.txt); None (said) when there is none for this build"""
+    if not src: return None
+    src = Path(os.path.expanduser(src))
+    if src.is_file(): return src
+    bid = next((l.split()[2] for l in (patched / 'main.fixups.tsv').read_text().splitlines() if l.startswith('# BUILD_ID')), '')[:16].upper()
+    for d in (src / 'titles' / f'{app:016X}' / 'cheats', src / 'titles' / f'{app:016x}' / 'cheats', src):
+        for f in (d.glob('*.txt') if d.is_dir() else []):
+            if f.stem.upper() == bid or f.stem.upper().endswith('_' + bid): return f   # <build ID>.txt as switch-cheats-db names them, or <anything>_<build ID>.txt
+    say(f'no cheat file for main build {bid} in {src}: the app has no cheats'); return None
+
+
 def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus=''):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
@@ -2115,7 +2129,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
-                   ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings)):
+                   ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings), ('--cheats', cheat_file(CHEATS, app, patched))):
         if v: cmd += [opt, v]
     unchanged = False
     def line(ln):
@@ -2159,6 +2173,7 @@ def parse_args(argv):
     ap.add_argument('--keep-extracted', action=argparse.BooleanOptionalAction, help='keep the extracted game files after the IPA is built, for the next build (default: the KEEP_EXTRACTED setting, on)')
     ap.add_argument('--work-dir', help='the game\'s build folder, used as it is (default: the WORK_DIR setting, else <title ID>_build in the NSP folder); the extracted files, shader cache and temporary files live there, and the IPA or Mac app defaults to the folder holding it')
     ap.add_argument('--env-file', help='environment switches for a diagnostic build (one KEY=VALUE per line)')
+    ap.add_argument('--cheats', default=None, help='--platform mac-app: Atmosphere cheats for the settings window, a file or a folder (switch-cheats-db layout, or <build ID>.txt files): the one for the packed main build goes in (default: the CHEATS setting)')
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, g18p for a game whose profile sets pso_mtl4 on, else none). '
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
@@ -2236,6 +2251,7 @@ def main(args=None):
     args = args or parse_args([])
     PROG.mode = progress_mode(args.progress or PROGRESS)
     global ALLOW_DAMAGED; ALLOW_DAMAGED = args.allow_damaged or ALLOW_DAMAGED
+    global CHEATS; CHEATS = args.cheats if args.cheats is not None else CHEATS
     global ALLOW_SHADER_REGRESSIONS; ALLOW_SHADER_REGRESSIONS = args.allow_shader_regressions or ALLOW_SHADER_REGRESSIONS
     global ALLOW_OTHER_METAL; ALLOW_OTHER_METAL = args.allow_other_metal or ALLOW_OTHER_METAL
     here = Path(globals().get('__file__') or sys.argv[0]).resolve()

@@ -453,6 +453,8 @@ void nro_load(module_t *m) {
     LOG("NRO %s loaded (load %u, base %p): %u imports of the modules loaded before bound to it", m->name, m->loads, m->base, n);
 }
 
+module_t *nro_newest_loaded(void) { pthread_rwlock_rdlock(&g_modules_mu); module_t *m = NULL; for (int i = g_nloaded - 1; i >= 0 && !m; i--) if (g_loaded[i]->nro) m = g_loaded[i]; pthread_rwlock_unlock(&g_modules_mu); return m; }   // the cheats' region 4 (hle_svc.c)
+
 void nro_unload(module_t *m) {
     pthread_rwlock_wrlock(&g_modules_mu);
     if (!svc_nro_deactivate(m)) die("NRO %s: cannot unload while a mapped stack borrows its data", m->name);

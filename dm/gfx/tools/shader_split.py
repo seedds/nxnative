@@ -63,7 +63,8 @@ GAME = _game.load()   # the current game profile (DM_GAME, required): source gro
 GROUPS, NOTE = GAME.pairs('shader_groups'), GAME.get('shader_note')
 KEY_SKIP = tuple(int(x, 0) for x in GAME.get('shader_key_skip', '0+0').split('+'))   # control bytes the keys hash as zeros (key_ctl); dm/games/game.py checks the form
 # The sources are what the game files hold, with no profile switch: GLSLC outputs in main (glslc_shaders), the outputs the game compiles at run time when a capture is there (DM_GLSLC_CAPTURE,
-# hle_glslc.c), the shader code archives of Unreal paks once decoded on the Mac (uepak.py, DM_OODLE_JOB, hle_oodle.c); the NSP script decides from the files which of the last two to make
+# hle_glslc.c), the shader code archives of Unreal paks once decoded on the Mac (uepak.py, DM_OODLE_JOB, hle_oodle.c), and the programs a run dumped as missing from the map when that directory
+# is there (DM_NVN_SHDUMP, dumped_shaders); the NSP script decides from the files which of the first two to make
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')
 STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']
@@ -2514,6 +2515,42 @@ def uniq_keys(found):
         uniq.setdefault(key, (where, st, ctl, code))
     return uniq
 
+def dumped_shaders(d):
+    """The programs a run dumped as missing from the map (`DM_NVN_SHDUMP`, nvn_mtl.m): `<key>.ctl`, the 0x880-byte copy of the control section, and `<key>.code`, the code area (its length at
+    control +0x704). The name is the key the host computed, so the bytes are hashed again and a pair that does not hash to its own name is refused: a dump written at draw time (the old prog_get
+    site) reads a recycled pool address and hashes to nothing, and one such row in the map matches no draw. Every row carries the same label, /shdump/<key>#RAW@0x0, so the map and the package indices that follow it from its sort order do not depend on the directory a porter used"""
+    out = []
+    for nm in sorted(f for f in os.listdir(d) if f.endswith('.ctl')):
+        where = f'/shdump/{nm[:-4]}#RAW@0x0'   # a fixed label, not the directory's name: the map (and the package indices that follow its sort) must not depend on what a porter called the folder
+        cp = os.path.join(d, nm[:-4] + '.code')
+        if not os.path.isfile(cp): red(f'{where} has no .code beside it (an interrupted dump)')
+        ctl = open(os.path.join(d, nm), 'rb').read()
+        code = open(cp, 'rb').read()
+        st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
+        why = 'the code area header names no stage' if st is None else check(where, st, ctl, code)
+        key = None if why else skey(ctl, code)
+        if key and nm[:-4].removeprefix('SetShaders-') != key: why = f'the pair hashes to {key}, not the name (a dump of a control section the game had already freed)'
+        if why: red(f'{where}: {why}')
+        out.append((where, st, ctl, code))
+    return out
+
+def manual_pairs():
+    """Pairs a game needs and its files do not declare (the profile's `pso_pairs_manual.tsv`, the same two columns as pso_pairs.tsv): a program pair whose pixel shader reads a varying its
+    vertex shader does not write, with no BNSH variation or Unity program to pair them, makes Metal refuse the pipeline, and a pair that only one draw uses leaves that draw out of the picture
+    (Assassin's Creed: The Rebel Collection's two shadow-application pairs are the only consumers of its shadow atlas, so while they fail no shadow is drawn anywhere). Kept in the profile because
+    the split regenerates pso_pairs.tsv wholesale on every run"""
+    p = GAME.table('pso_pairs_manual.tsv')
+    if not os.path.exists(p): return set()
+    out = set()
+    with open(p) as f:
+        for n, ln in enumerate(f, 1):
+            if not ln.strip() or ln.lstrip().startswith('#'): continue
+            c = ln.split()
+            if len(c) != 2 or any(len(k) != 16 or any(ch not in '0123456789abcdef' for ch in k) for k in c):
+                red(f'{p}:{n}: a row is a vertex key and a pixel key, 16 hex digits each: {ln.strip()!r}')
+            out.add((c[0], c[1]))
+    return out
+
 def nso_image(path):   # an NSO's image (dm/tools/nso.py); nso.Error (a ValueError) on a damaged file
     import nso
     with open(path, 'rb') as f: return bytes(nso.load(f.read(), path).image)
@@ -2570,6 +2607,10 @@ def main():
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode')) if os.path.isdir(ued) else []
         if not names and uepak.unreal_paks(romfs, inline=False): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
+        # Programs the host dumped as missing from the map (`DM_NVN_SHDUMP`): <key>.ctl + <key>.code pairs, or <version dir>/shdump. A title whose shaders sit in a container the split
+        # cannot read gets its map from these, so the rows (and the package records they point at) stay the split's own output; a script appending to the map loses them at the next split
+        shd = os.environ.get('DM_NVN_SHDUMP') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'shdump')
+        if os.path.isdir(shd): found += dumped_shaders(shd)
         results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
     for romfs in dlc_v:
         name = os.path.basename(os.path.normpath(romfs))
@@ -2646,7 +2687,8 @@ def main():
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
-        f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
+        caps = any('#RAW@' in r[4] for r in rows)   # programs the host dumped (dumped_shaders): the only rows not from the game files
+        f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main' + ('; programs the host dumped as missing from the map' if caps else '') + ') → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
         for r in rows: f.write('\t'.join(map(str, r)) + '\n')
@@ -2663,9 +2705,10 @@ def main():
             f.write('# kind: evidence  vertex / pixel shader pairs within BNSH variations (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
             for a, b in sorted(pairs): f.write(f'{a}\t{b}\n')
     if psopairsout:
+        mp = manual_pairs()   # the profile's own pairs, which this table would otherwise drop on every split
         with open(psopairsout, 'w') as f:
-            f.write('# kind: evidence  supplemental vertex / pixel shader pairs (BAHS program variations and legacy Unity pass-input covers) for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
-            for a, b in sorted(prog - pairs): f.write(f'{a}\t{b}\n')
+            f.write('# kind: evidence  supplemental vertex / pixel shader pairs (BAHS program variations and legacy Unity pass-input covers' + (', and pso_pairs_manual.tsv' if mp else '') + ') for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
+            for a, b in sorted((prog | mp) - pairs): f.write(f'{a}\t{b}\n')
     print(f'shaders: {len(rows)} (' + ', '.join(f'{STAGE_NAME[s]} {n}' for s, n in sorted(stat.items())) + '); sources ' + ', '.join(f'{g} {n}' for g, n in per_src.most_common()) + f'; compute shader answers {len(facts)} rows' + (f'; variation pairs {len(pairs)}' if pairsout else ''))
 
 if __name__ == '__main__':

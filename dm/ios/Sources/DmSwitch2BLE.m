@@ -108,6 +108,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     ds2_cal _cal[2];
     float _deadzone;
     BOOL _motion, _rumble, _verbose;
+    uint64_t _glMask, _grMask;
     uint8_t _rumbleSeq;
     uint64_t _lastWrite, _lastReport;
     _Atomic int _lfAmp, _lfHz, _hfAmp, _hfHz;       // written by the haptics thread
@@ -126,6 +127,9 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
         e = getenv("DM_SW2_RUMBLE"); _rumble = !e || atoi(e);
         e = getenv("DM_SW2_DEADZONE"); _deadzone = e ? (float)atof(e) : 40.f;
         e = getenv("DM_SW2_VERBOSE"); _verbose = e && atoi(e);
+        e = getenv("DM_PAD_GL"); _glMask = ds2_btn_from_str(e);
+        e = getenv("DM_PAD_GR"); _grMask = ds2_btn_from_str(e);
+        if (_glMask || _grMask) LOG("switch2: back buttons GL=0x%llx GR=0x%llx", (unsigned long long)_glMask, (unsigned long long)_grMask);
         e = getenv("DM_SW2_BOND_MAC");
         if (e && *e) {
             unsigned v[6]; char sep;
@@ -313,7 +317,7 @@ static void ds2_rumble_dispatch(const dm_haptic_state *s) {
     float lx, ly, rx, ry;
     ds2_cal_apply(&_cal[0], r.lx, r.ly, _deadzone, &lx, &ly);
     ds2_cal_apply(&_cal[1], r.rx, r.ry, _deadzone, &rx, &ry);
-    dm_pad_set_player(self.slot, ds2_buttons(r.buttons),
+    dm_pad_set_player(self.slot, ds2_buttons_mapped(r.buttons, _glMask, _grMask),
                       (int32_t)lrintf(lx * 32767.f), (int32_t)lrintf(ly * 32767.f),
                       (int32_t)lrintf(rx * 32767.f), (int32_t)lrintf(ry * 32767.f));
     if (_motion) {

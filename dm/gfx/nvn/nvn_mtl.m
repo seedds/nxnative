@@ -94,6 +94,7 @@ static id<MTL4CommandBuffer> g_present_cb[3];
 static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct;
 static int g_vbuf_cache = 1;   // DM_NVN_VBUF_CACHE=0 restores the uncached path for A/B measurements
 static int g_vbuf_snap = 1;    // DM_NVN_VB_SNAP=0 binds the guest address itself (see vbuf_snap_fill: with it on, the bytes a draw fetches are frozen at draw time)
+static int g_ibuf_snap = 1;    // DM_NVN_IB_SNAP=0 binds the index buffer's guest address (see ibuf_snap: with it on, the indices a draw reads are frozen too)
 static uint64_t g_vt_addr[31]; static uint32_t g_vt_valid;
 static uint64_t g_vbuf_resolve, g_vbuf_reuse, g_vbuf_set, g_vbuf_skip, g_vbuf_copies, g_vbuf_copy_bytes;   // copies: vertex streams at addresses not 4-byte aligned, and streams snapped at draw time (vbuf_unaligned)
 static id<MTL4ArgumentTable> g_present_args;
@@ -386,6 +387,7 @@ void mtl_init(void) {
     if (g_dev) return;
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *vbs = getenv("DM_NVN_VB_SNAP"); g_vbuf_snap = !(vbs && !strcmp(vbs, "0"));
+    const char *ibs = getenv("DM_NVN_IB_SNAP"); g_ibuf_snap = !(ibs && !strcmp(ibs, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
     g_dm_present_link = link ? atoi(link) : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
     const char *latency = getenv("DM_PRESENT_LATENCY");
@@ -799,12 +801,13 @@ static double g_lag_pwait_max_ms;
 
 static int lag_env(void) {
     if (__builtin_expect(g_lag_env >= 0, 1)) return g_lag_env;
-    const char *e = getenv("DM_NVN_SUBMIT_LAG"); int n = e ? atoi(e) : 0;
+    const char *pl = getenv("DM_NVN_PIPE_LAG");   // the pipeline pacing (on by default): frame N's GPU work is committed when frame N+1 starts recording; 0 restores commit-at-present
+    const char *e = getenv("DM_NVN_SUBMIT_LAG"); int n = e ? atoi(e) : (pl ? atoi(pl) : 1);
     if (n < 0) n = 0; if (n > LAG_MAX) n = LAG_MAX;
     const char *m = getenv("DM_NVN_SUBMIT_LAG_MS"); g_lag_ms = m ? atol(m) : 50; if (g_lag_ms < 5) g_lag_ms = 5;
     if (n && rec_on()) { MLOG("[RED] DM_NVN_SUBMIT_LAG needs the synchronous encode path (DM_NVN_ENC_THREAD=0); not used"); n = 0; }
     g_lag_env = n;
-    if (n) MLOG("submit lag (DM_NVN_SUBMIT_LAG=%d): a commit is held until %d further submission(s) have begun; a guest wait, that frame's present or %ld ms releases it", n, n, g_lag_ms);
+    if (n) MLOG("pipeline pacing (%s=%d): a frame's GPU work is held until %d further submission(s) have begun recording; a guest wait, that frame's present (%ld ms bound) or teardown releases it", e ? "DM_NVN_SUBMIT_LAG" : "DM_NVN_PIPE_LAG", n, n, g_lag_ms);
     return n;
 }
 static int lag_on(void) { return lag_env() > 0; }
@@ -4842,6 +4845,7 @@ static void vbuf_need(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di
 // ring slot and draw from it several times inside one submission, and a copy reused from the earlier draw would show that earlier content. Covers the streams bound through
 // bind_vbufs (hardware vertex fetch); a pulling pipeline reads them by pointer instead (pull_layout_fill). DM_NVN_VB_SNAP=0 binds the address.
 static uint64_t g_vbuf_snap_len[16];   // per stream: the bytes the draw fetches (0 = bind the guest address itself)
+static uint64_t g_ibuf_snap_used;      // index bytes copied into the arena in this submission (see the index buffer snapshots below)
 // The cost has to be bounded: this title fetches about 700 MB of vertex data a frame, nearly all of it static meshes written once at load. What can race is the data the CPU
 // fills as it records -- the UI / immediate-mode class, a few KB per draw. So a small stream is always frozen, a medium one while the submission's budget lasts, and a large one
 // (a mesh, not a ring) never. Measured on the Years 5-7 front end before the budget existed: 1100 copies a frame, 724 MB.
@@ -4851,7 +4855,7 @@ static uint64_t g_vbuf_snap_len[16];   // per stream: the bytes the draw fetches
 static uint64_t g_vbuf_snap_used;      // bytes copied into the arena in this submission
 static void vbuf_snap_fill(const p_draw *dw, const p_draw_idx *di) {
     static uint64_t sub;
-    if (sub != g_sub_serial) { sub = g_sub_serial; g_vbuf_snap_used = 0; }
+    if (sub != g_sub_serial) { sub = g_sub_serial; g_vbuf_snap_used = 0; g_ibuf_snap_used = 0; }
     memset(g_vbuf_snap_len, 0, sizeof g_vbuf_snap_len);
     if (!g_vbuf_snap) return;
     for (int s = 0; s < 16; s++) {
@@ -4870,6 +4874,14 @@ static void vbuf_snap_fill(const p_draw *dw, const p_draw_idx *di) {
         g_vbuf_snap_len[s] = len;
     }
 }
+// ---------- Index buffer snapshots (DM_NVN_IB_SNAP; on unless set to 0) ----------
+// The index buffer is bound the way the vertex streams are: the guest address itself. A torn index buffer is not a torn position -- every
+// index still names a vertex that exists, so the vertex shader outputs a sane position and no clamp on its output can see the damage -- but a
+// triangle can join two unrelated vertices and become a sliver across the frame, with the mesh's colours interpolated along it. That is what
+// a torn dynamic mesh looks like: beams and rainbow fans during movement and camera cuts. Freezing the indices is what removes it. Index
+// buffers are small, so this is capped per draw and per submission instead of classed by size as the vertex streams are.
+#define IBUF_SNAP_MAX (512u << 10)     // per draw
+#define IBUF_SNAP_BUDGET (32u << 20)   // per submission
 static void vbuf_prepare(const nvn_refl *rf, const p_draw *dw, const p_draw_idx *di) {   // before the draw's render encoder: rf, dw / di the draw's vertex shader and record (NULL: no bounds)
     static uint64_t sub, gen, sparse;
     uint64_t pool_gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire), sparse_gen = nvn_sparse_gen();
@@ -10215,6 +10227,16 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         void *mb; uint64_t mo;
         uint64_t gpu;
         if (!mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &gpu)) { RED_ONCE(22, "index buffer is in no memory pool"); return; }
+        if (di->count > 0 && g_ibuf_snap) {   // the indices this draw reads, frozen at draw time (see ibuf_snap: a torn index buffer makes a sliver, not a wild vertex)
+            uint64_t nb = (uint64_t)di->count * (di->itype == 1 ? 2u : 4u);
+            const uint8_t *src = ((__bridge id<MTLBuffer>)mb).contents ? (const uint8_t *)((__bridge id<MTLBuffer>)mb).contents + mo : NULL;
+            if (src && nb <= IBUF_SNAP_MAX && !pend_hits(di->ibuf, nb) && !sbw_hits(di->ibuf, di->ibuf + nb) && !gw_live(di->ibuf, di->ibuf + nb)
+                && g_ibuf_snap_used + nb <= IBUF_SNAP_BUDGET) {
+                id<MTLBuffer> ab; size_t off = arena_alloc((size_t)((nb + 15) & ~15ull), &ab);
+                memcpy((uint8_t *)ab.contents + off, src, (size_t)nb);
+                gpu = ab.gpuAddress + off; g_ibuf_snap_used += nb; g_vbuf_copies++; g_vbuf_copy_bytes += nb;
+            }
+        }
         if (di->count) enc_r_draw_indexed(en, mp, di->count, di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32, gpu, ((__bridge id<MTLBuffer>)mb).length - mo,
                 di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
     }

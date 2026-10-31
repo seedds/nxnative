@@ -1,0 +1,46 @@
+# Area labels on pull requests (dm/tools/pr_areas.py): host, nvn, shader chain, … from the paths a PR changes, "game: <title ID>" for each profile it touches, and
+# "new game". pull_request_target runs with a token that may label, so this workflow checks out main only and never runs anything from the pull request: it reads the
+# PR's list of changed paths through the API and hands it to main's pr_areas.py. Labels are added, never removed. Run it by hand (workflow_dispatch) to label every open PR.
+name: pr-areas
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write          # creating a label
+  pull-requests: write   # adding it to a pull request
+
+concurrency:
+  group: pr-areas-${{ github.event.pull_request.number || 'all' }}
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}   # main, never the pull request's head
+          persist-credentials: false
+      - name: Label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          prs=${PR:-$(gh pr list --state open --limit 1000 --json number --jq '.[].number')}
+          declare -A made   # labels created or updated in this run
+          for n in $prs; do
+            gh pr view "$n" --json files --jq '.files[].path' | python3 dm/tools/pr_areas.py > labels.tsv
+            add=()
+            while IFS=$'\t' read -r name color desc; do
+              if [ -z "${made[$name]:-}" ]; then gh label create "$name" --color "$color" --description "$desc" --force > /dev/null; made[$name]=1; fi
+              add+=(--add-label "$name")
+            done < labels.tsv
+            if [ ${#add[@]} -gt 0 ]; then gh pr edit "$n" "${add[@]}" > /dev/null; fi
+            echo "#$n: $(cut -f1 labels.tsv | paste -sd, -)"
+          done

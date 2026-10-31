@@ -778,7 +778,7 @@ int hvk_tex_view_typed(hvk_tex *x, const view_t *v, int kind, int want_type, uin
     if (x->nviews == NVIEW) { hvk_defer(HVK_DEL_VIEW, x->views[0].v, 0, 0); memmove(x->views, x->views + 1, sizeof x->views[0] * (NVIEW - 1)); x->nviews--; }
     x->views[x->nviews].k = k; x->views[x->nviews++].v = out->view;
 done:
-    out->format = f; out->aspect = aspect; out->level = l0; out->layer0 = s0; out->layers = vt == VK_IMAGE_VIEW_TYPE_3D ? 1 : ns;
+    out->format = f; out->aspect = aspect; out->level = l0; out->levels = nl; out->layer0 = s0; out->layers = vt == VK_IMAGE_VIEW_TYPE_3D ? 1 : ns;
     out->w = mipdim(x->w, l0); out->h = mipdim(x->h, l0); out->cls = fmt_cls(f); out->samples = x->samples; out->t = x;
     if (kind == HVK_VIEW_SAMPLED && aspect == VK_IMAGE_ASPECT_STENCIL_BIT) out->cls = NVN_VK_UINT;
     return out->view != VK_NULL_HANDLE;

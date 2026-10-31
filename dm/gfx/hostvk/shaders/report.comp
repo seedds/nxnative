@@ -1,13 +1,15 @@
 // A counter report written by the GPU, in order (docs/design/vulkan-backend.md 4.6; vk_commands.c report_run): the samples passed since the counter's reset (the accumulator of
 // earlier segments plus this segment's occlusion query results) and the timestamp converted to NVN's 614.4 MHz ticks on the guest clock, as the 16 bytes {count, timestamp} at the
 // report's guest address. All addresses are buffer device addresses; 64-bit arithmetic in pairs of 32-bit words (no shaderInt64 needed).
-// flags: 1 sum the queries, 2 start from the accumulator (else 0), 4 store the sum into the accumulator, 8 the count field is the timestamp (a timestamp report), 16 a timestamp is given
+// flags: 1 sum the queries, 2 start from the accumulator (else 0), 4 store the sum into the accumulator, 8 the count field is the timestamp (a timestamp report), 16 a timestamp is given.
+// Step P8: every counter kind (pipeline statistics, primitives generated, transform feedback primitives written): the summed value is field `field` of each query's results,
+// which are `stride` 64-bit values apart (1 and 0 for the occlusion queries); acc is the counter type's own accumulator
 #version 460
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 layout(local_size_x = 1) in;
 layout(buffer_reference, std430, buffer_reference_align = 8) buffer Q { uvec2 v[]; };
-layout(push_constant) uniform P { uvec2 src, acc, ts, dst; uint nq, flags; uvec2 mul, g0, n0; } p;
+layout(push_constant) uniform P { uvec2 src, acc, ts, dst; uint nq, flags; uvec2 mul, g0, n0; uint stride, field; } p;
 uvec2 add64(uvec2 a, uvec2 b) { uint c; uint lo = uaddCarry(a.x, b.x, c); return uvec2(lo, a.y + b.y + c); }
 uvec2 sub64(uvec2 a, uvec2 b) { uint br; uint lo = usubBorrow(a.x, b.x, br); return uvec2(lo, a.y - b.y - br); }
 // (d * m) >> 32, modulo 2^64: m is a 32.32 fixed-point factor
@@ -21,7 +23,7 @@ void main() {
     uvec2 sum = uvec2(0u);
     if ((p.flags & 1u) != 0u) {
         if ((p.flags & 2u) != 0u) sum = Q(p.acc).v[0];
-        for (uint i = 0u; i < p.nq; i++) sum = add64(sum, Q(p.src).v[i]);
+        for (uint i = 0u; i < p.nq; i++) sum = add64(sum, Q(p.src).v[i * p.stride + p.field]);
         if ((p.flags & 4u) != 0u) Q(p.acc).v[0] = sum;
     }
     uvec2 t = uvec2(0u);

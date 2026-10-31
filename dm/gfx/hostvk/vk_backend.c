@@ -60,6 +60,7 @@ void hvk_report_counter(uint64_t type, uint64_t addr);
 void hvk_reset_counter(uint64_t type);
 void hvk_render_cond(const p_render_cond *rc);
 void hvk_tf_state(const p_tf_state *b);
+void hvk_tf_bind_note(void);
 
 // ---------- Bring-up and shutdown ----------
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
@@ -260,16 +261,18 @@ static int mem_budget(double *budget_mib, double *usage_mib) {
         if (p.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) { *budget_mib += b.heapBudget[i] / 1048576.0; *usage_mib += b.heapUsage[i] / 1048576.0; }
     return 1;
 }
-// The backend's resource line (hle_nvn.c gives it 400 bytes, so it stays short): commands, and texture memory (step P7, decision D1): every image, ASTC held compressed against ASTC decoded into RGBA8 (with what its blocks
+// The backend's resource line (hle_nvn.c gives it 400 bytes, so it stays short): commands (step P8: passes split before feedback draws, indirect quads converted on the GPU,
+// DrawTransformFeedback draws, draw-based copies), and texture memory (step P7, decision D1): every image, ASTC held compressed against ASTC decoded into RGBA8 (with what its blocks
 // take), the uploads by path, and the device-local budget where VK_EXT_memory_budget gives it
 void be_res_stats(char *out, size_t n) {
     if (!n) return;
     double mib = 1048576.0, bud, use;
-    int k = snprintf(out, n, "vulkan: passes %llu draws %llu dispatches %llu pipelines %llu shaders %llu barriers %llu pass splits %llu GPU vertex copies %llu GPU quad indices %llu; "
+    int k = snprintf(out, n, "vulkan: passes %llu draws %llu dispatches %llu pipelines %llu shaders %llu barriers %llu pass splits %llu GPU vertex copies %llu GPU quad indices %llu fb splits %llu ind quads %llu xfb draws %llu copy draws %llu; "
                      "textures %.1f MiB (ASTC %.1f native, %.1f decoded from %.1f of blocks), uploads GPU %llu CPU %llu, ASTC decodes %llu",
                      (unsigned long long)hvk.st_passes, (unsigned long long)hvk.st_draws, (unsigned long long)hvk.st_dispatches, (unsigned long long)hvk.st_pipelines,
                      (unsigned long long)hvk.st_shaders, (unsigned long long)hvk.st_barriers, (unsigned long long)hvk.st_pass_splits, (unsigned long long)hvk.st_vcopies_gpu,
-                     (unsigned long long)hvk.st_index_gpu, (double)atomic_load(&hvk.st_tex_bytes) / mib, (double)atomic_load(&hvk.st_astc_native_bytes) / mib,
+                     (unsigned long long)hvk.st_index_gpu, (unsigned long long)atomic_load(&hvk.st_feedback_splits), (unsigned long long)atomic_load(&hvk.st_quad_ind),
+                     (unsigned long long)atomic_load(&hvk.st_xfb_draws), (unsigned long long)atomic_load(&hvk.st_copy_draws), (double)atomic_load(&hvk.st_tex_bytes) / mib, (double)atomic_load(&hvk.st_astc_native_bytes) / mib,
                      (double)atomic_load(&hvk.st_astc_decoded_bytes) / mib, (double)atomic_load(&hvk.st_astc_block_bytes) / mib, (unsigned long long)atomic_load(&hvk.st_up_gpu),
                      (unsigned long long)atomic_load(&hvk.st_up_cpu), (unsigned long long)atomic_load(&hvk.st_astc_decodes));
     if (k > 0 && (size_t)k < n) {
@@ -353,7 +356,7 @@ void be_clear_ds(const uint8_t *rec, const op_hdr *h, const void *a) { (void)rec
 void be_draw(const uint8_t *rec, const op_hdr *h, const void *a) { if (!hvk.on) { NULLRED(); return; } p_draw t; hvk_draw(draw_rec(a, h->size, &t), NULL, rec, h->size); }
 void be_draw_idx(const uint8_t *rec, const op_hdr *h, const void *a) { if (!hvk.on) { NULLRED(); return; } p_draw_idx t; hvk_draw(NULL, draw_idx_rec(a, h->size, &t), rec, h->size); }
 void be_bind_program(const uint8_t *rec, const op_hdr *h, const void *a) { (void)rec; (void)h; (void)a; }   // the program is resolved at the draw (S.prog, S.cprog)
-void be_tf_bind(const uint8_t *rec, const op_hdr *h, const void *a) { (void)rec; (void)h; (void)a; }        // the buffers are S.tf's when a capture begins in a pass
+void be_tf_bind(const uint8_t *rec, const op_hdr *h, const void *a) { (void)rec; (void)h; (void)a; if (hvk.on) hvk_tf_bind_note(); }   // an open capture segment ends before its buffers change (vk_commands.c)
 void be_tf_state_note(const uint8_t *rec, const op_hdr *h, const void *a) { (void)rec; (void)h; (void)a; }
 void be_tf_state(const uint8_t *rec, const op_hdr *h, const void *a) { (void)rec; (void)h; if (hvk.on) hvk_tf_state(a); else NULLRED(); }
 void be_rast_discard(const uint8_t *rec, const op_hdr *h, const void *a) { (void)rec; (void)h; (void)a; }   // dynamic state: the next draw sets it from S

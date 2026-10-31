@@ -91,7 +91,13 @@ typedef struct {
     int host_mem, xfb, swapchain, gpl, eds2, eds3, vid, cr, calibrated_ext;   // the extension is listed (gpl: with VK_KHR_pipeline_library)
     int calibrated_khr, custom_border, uint8_khr, uint8_ext, depth_clip, push, divisor_khr, divisor_ext, m5;   // the backend's optional extensions (hostvk_dev.x)
     int dbc, budget;   // VK_EXT_depth_bias_control, VK_EXT_memory_budget (step P7)
+    int line_ext, line_khr, fbl, fbl_dyn, pgq, stencil_export, nv_swizzle;   // step P8: line rasterization, attachment feedback loops, primitives generated, stencil export, NV viewport swizzle
     VkPhysicalDeviceDepthBiasControlFeaturesEXT fdbc;
+    VkPhysicalDeviceLineRasterizationFeaturesEXT fline;
+    VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT ffbl;
+    VkPhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT ffbld;
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT fpgq;
+    VkPhysicalDeviceTransformFeedbackPropertiesEXT pxfb;
     VkPhysicalDeviceFeatures2 f;
     VkPhysicalDeviceVulkan12Features f12;
     VkPhysicalDeviceVulkan13Features f13;
@@ -146,6 +152,13 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     q->m5 = has_ext(q, VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     q->dbc = has_ext(q, VK_EXT_DEPTH_BIAS_CONTROL_EXTENSION_NAME);
     q->budget = has_ext(q, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    q->line_ext = has_ext(q, VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME);
+    q->line_khr = has_ext(q, VK_KHR_LINE_RASTERIZATION_EXTENSION_NAME);
+    q->fbl = has_ext(q, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
+    q->fbl_dyn = q->fbl && has_ext(q, VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
+    q->pgq = has_ext(q, VK_EXT_PRIMITIVES_GENERATED_QUERY_EXTENSION_NAME);
+    q->stencil_export = has_ext(q, VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
+    q->nv_swizzle = has_ext(q, VK_NV_VIEWPORT_SWIZZLE_EXTENSION_NAME);
     vkGetPhysicalDeviceProperties(p, &q->p.properties);
     if (q->p.properties.apiVersion < VK_API_VERSION_1_3) return;   // below the baseline: the 1.2 / 1.3 structures may not be chained
     void **next = &q->f.pNext;
@@ -164,6 +177,10 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->divisor_khr || q->divisor_ext) { q->fdiv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR; *next = &q->fdiv; next = &q->fdiv.pNext; }
     if (q->m5) { q->fm5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR; *next = &q->fm5; next = &q->fm5.pNext; }
     if (q->dbc) { q->fdbc.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT; *next = &q->fdbc; next = &q->fdbc.pNext; }
+    if (q->line_ext || q->line_khr) { q->fline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT; *next = &q->fline; next = &q->fline.pNext; }   // the KHR's structure type is the same value
+    if (q->fbl) { q->ffbl.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT; *next = &q->ffbl; next = &q->ffbl.pNext; }
+    if (q->fbl_dyn) { q->ffbld.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_FEATURES_EXT; *next = &q->ffbld; next = &q->ffbld.pNext; }
+    if (q->pgq) { q->fpgq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT; *next = &q->fpgq; next = &q->fpgq.pNext; }
     vkGetPhysicalDeviceFeatures2(p, &q->f);
     next = &q->p.pNext;
     q->p.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -172,6 +189,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->host_mem) { q->phost.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT; *next = &q->phost; next = &q->phost.pNext; }
     if (q->gpl) { q->pgpl.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT; *next = &q->pgpl; next = &q->pgpl.pNext; }
     if (q->eds3) { q->peds3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT; *next = &q->peds3; next = &q->peds3.pNext; }
+    if (q->xfb) { q->pxfb.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT; *next = &q->pxfb; next = &q->pxfb.pNext; }
     vkGetPhysicalDeviceProperties2(p, &q->p);
 }
 
@@ -414,7 +432,7 @@ static int make_instance(const hostvk_opts *o, hostvk_dev *d, char *err, size_t 
 
 // ---------- Logical device ----------
 static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char *err, size_t n) {
-    const char *ext[24]; uint32_t ne = 0;
+    const char *ext[32]; uint32_t ne = 0;
     ext[ne++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
     ext[ne++] = VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME;
     d->swapchain = o->want_surface != 0;
@@ -458,7 +476,27 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (d->x.depth_bias_control) ext[ne++] = VK_EXT_DEPTH_BIAS_CONTROL_EXTENSION_NAME;
     d->x.memory_budget = q->budget;
     if (d->x.memory_budget) ext[ne++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+    // Step P8 (design section 6): the native features. Layered rendering from the vertex stage; transform feedback's draw and queries (properties of the required extension);
+    // NVN's aliased lines as Bresenham lines (VK_KHR_line_rasterization was promoted from the EXT in header 1.3.280 with the same structures, as the three above); the
+    // primitives-generated query; stencil export for draw-based copies; NVIDIA's viewport swizzle with its dynamic state
     const VkPhysicalDeviceFeatures *cf = &q->f.features;
+    d->x.output_layer = q->f12.shaderOutputLayer != 0; d->x.output_viewport = q->f12.shaderOutputViewportIndex != 0;
+    d->x.tess_geom_point_size = cf->shaderTessellationAndGeometryPointSize != 0;
+    d->x.geometry_streams = q->fxfb.geometryStreams != 0;
+    d->x.xfb_draw = q->pxfb.transformFeedbackDraw != 0; d->x.xfb_queries = q->pxfb.transformFeedbackQueries != 0; d->x.xfb_buffers = q->pxfb.maxTransformFeedbackBuffers;
+    d->x.line_raster = (q->line_ext || q->line_khr) && q->fline.bresenhamLines;
+    d->x.line_bresenham = d->x.line_raster; d->x.line_rect = d->x.line_raster && q->fline.rectangularLines;
+    d->x.line_khr = d->x.line_raster && q->line_khr && (khr280 || !q->line_ext);
+    if (d->x.line_raster) ext[ne++] = d->x.line_khr ? VK_KHR_LINE_RASTERIZATION_EXTENSION_NAME : VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME;
+    d->x.line_mode_dynamic = d->x.line_raster && eds3 && q->feds3.extendedDynamicState3LineRasterizationMode;
+    d->x.feedback_loop = q->fbl && q->ffbl.attachmentFeedbackLoopLayout;
+    d->x.feedback_loop_dynamic = d->x.feedback_loop && q->fbl_dyn && q->ffbld.attachmentFeedbackLoopDynamicState;
+    d->x.prim_gen = q->pgq && q->fpgq.primitivesGeneratedQuery; d->x.prim_gen_discard = d->x.prim_gen && q->fpgq.primitivesGeneratedQueryWithRasterizerDiscard;
+    if (d->x.prim_gen) ext[ne++] = VK_EXT_PRIMITIVES_GENERATED_QUERY_EXTENSION_NAME;
+    d->x.stencil_export = q->stencil_export != 0;
+    if (d->x.stencil_export) ext[ne++] = VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME;
+    d->x.vp_swizzle_nv = q->nv_swizzle && eds3 && q->feds3.extendedDynamicState3ViewportSwizzle;
+    if (d->x.vp_swizzle_nv) ext[ne++] = VK_NV_VIEWPORT_SWIZZLE_EXTENSION_NAME;
     d->x.float64 = cf->shaderFloat64 != 0; d->x.int64 = cf->shaderInt64 != 0; d->x.int16 = cf->shaderInt16 != 0;
     d->x.storage_without_format = cf->shaderStorageImageReadWithoutFormat && cf->shaderStorageImageWriteWithoutFormat;
     d->x.multi_viewport = cf->multiViewport != 0; d->x.depth_bounds = cf->depthBounds != 0;
@@ -470,9 +508,11 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     f.features.shaderFloat64 = d->x.float64; f.features.shaderInt64 = d->x.int64; f.features.shaderInt16 = d->x.int16;
     f.features.shaderStorageImageReadWithoutFormat = f.features.shaderStorageImageWriteWithoutFormat = d->x.storage_without_format;
     f.features.multiViewport = d->x.multi_viewport; f.features.depthBounds = d->x.depth_bounds;
+    f.features.shaderTessellationAndGeometryPointSize = d->x.tess_geom_point_size;
     VkPhysicalDeviceVulkan12Features f12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     f12.drawIndirectCount = VK_TRUE; f12.timelineSemaphore = VK_TRUE; f12.bufferDeviceAddress = d->caps.buffer_device_address ? VK_TRUE : VK_FALSE;
     f12.hostQueryReset = d->x.host_query_reset; f12.samplerFilterMinmax = d->x.sampler_minmax; f12.samplerMirrorClampToEdge = d->x.mirror_clamp_to_edge;
+    f12.shaderOutputLayer = d->x.output_layer; f12.shaderOutputViewportIndex = d->x.output_viewport;
     VkPhysicalDeviceVulkan13Features f13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     f13.dynamicRendering = VK_TRUE; f13.synchronization2 = VK_TRUE; f13.subgroupSizeControl = VK_TRUE; f13.maintenance4 = q->f13.maintenance4;
     VkPhysicalDeviceTransformFeedbackFeaturesEXT fxfb = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT, NULL, VK_TRUE, q->fxfb.geometryStreams};
@@ -491,6 +531,8 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     feds3.extendedDynamicState3RasterizationSamples = (eds >> HOSTVK_EDS_SAMPLES) & 1;
     feds3.extendedDynamicState3SampleMask = (eds >> HOSTVK_EDS_SAMPLE_MASK) & 1;
     feds3.extendedDynamicState3AlphaToCoverageEnable = (eds >> HOSTVK_EDS_ALPHA_TO_COVERAGE) & 1;
+    feds3.extendedDynamicState3LineRasterizationMode = d->x.line_mode_dynamic;
+    feds3.extendedDynamicState3ViewportSwizzle = d->x.vp_swizzle_nv;
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT fvid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT, NULL, VK_TRUE};
     VkPhysicalDeviceConditionalRenderingFeaturesEXT fcr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT, NULL, VK_TRUE, VK_FALSE};
     VkPhysicalDeviceCustomBorderColorFeaturesEXT fcb = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, NULL, VK_TRUE, d->x.border_without_format};
@@ -499,6 +541,8 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR fdiv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR, NULL, VK_TRUE, q->fdiv.vertexAttributeInstanceRateZeroDivisor};
     VkPhysicalDeviceMaintenance5FeaturesKHR fm5 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR, NULL, VK_TRUE};
     VkPhysicalDeviceDepthBiasControlFeaturesEXT fdbc = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT, NULL, VK_TRUE, d->x.dbc_force_unorm, d->x.dbc_float, d->x.dbc_exact};
+    VkPhysicalDeviceLineRasterizationFeaturesEXT fline = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT, NULL, d->x.line_rect, d->x.line_bresenham};
+    VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT fpgq = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT, NULL, VK_TRUE, d->x.prim_gen_discard, VK_FALSE};
     void **next = &f.pNext;
     *next = &f12; next = &f12.pNext;
     *next = &f13; next = &f13.pNext;
@@ -514,6 +558,8 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (d->x.vertex_divisor) { *next = &fdiv; next = &fdiv.pNext; }
     if (d->x.maintenance5) { *next = &fm5; next = &fm5.pNext; }
     if (d->x.depth_bias_control) { *next = &fdbc; next = &fdbc.pNext; }
+    if (d->x.line_raster) { *next = &fline; next = &fline.pNext; }
+    if (d->x.prim_gen) { *next = &fpgq; next = &fpgq.pNext; }
     // One queue for graphics, compute and copies; the transfer-only family (transfer_family) gets a queue when uploads move to it
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, d->queue_family, 1, &prio};

@@ -64,9 +64,38 @@ static int fmt_blendable(VkFormat f) {
     if ((uint32_t)f < 256) atomic_store(&g_blendable[f], (uint8_t)(yes ? 2 : 1));
     return yes;
 }
-void hvk_blend_of(const blend_st *b, int on, VkFormat f, uint32_t wmask4, uint32_t *en, VkColorBlendEquationEXT *eq, VkColorComponentFlags *wm) {
+// An advanced blend mode (blend_st.adv, hle_nvn.c) replaces the blend functions (step P8, design 6). The Porter-Duff modes with uncorrelated overlap are sums of the source and
+// destination weighted by 1, 0, As, Ad and their complements (NV_blend_equation_advanced, premultiplied colours), which the fixed-function factors give exactly through the ADD
+// equation; a source that is not premultiplied is multiplied by As first, which only a source factor of ONE can take (SRC_ALPHA). The Metal backend's reduction (nvn_mtl.m
+// adv_blend), the same table. The other modes (multiply, screen, overlay, the HSL modes) and the other overlaps need VK_EXT_blend_operation_advanced (NVIDIA's drivers have it;
+// lavapipe does not, so no device here could run that path): they keep the state's own functions with a red line naming the mode, as on Metal
+static blend_st adv_blend(blend_st b) {
+    if (!b.adv) return b;
+    enum { Z = NVN_BLEND_FUNC_ZERO, O = NVN_BLEND_FUNC_ONE, SA = NVN_BLEND_FUNC_SRC_ALPHA, ISA = NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA, DA = NVN_BLEND_FUNC_DST_ALPHA, IDA = NVN_BLEND_FUNC_ONE_MINUS_DST_ALPHA };
+    static const uint8_t pd[][4] = {   // {source factor, destination factor} for colour, then for alpha
+        [NVN_BLEND_ADVANCED_MODE_ZERO] = {Z, Z, Z, Z},        [NVN_BLEND_ADVANCED_MODE_SRC] = {O, Z, O, Z},           [NVN_BLEND_ADVANCED_MODE_DST] = {Z, O, Z, O},
+        [NVN_BLEND_ADVANCED_MODE_SRC_OVER] = {O, ISA, O, ISA}, [NVN_BLEND_ADVANCED_MODE_DST_OVER] = {IDA, O, IDA, O},
+        [NVN_BLEND_ADVANCED_MODE_SRC_IN] = {DA, Z, DA, Z},     [NVN_BLEND_ADVANCED_MODE_DST_IN] = {Z, SA, Z, SA},
+        [NVN_BLEND_ADVANCED_MODE_SRC_OUT] = {IDA, Z, IDA, Z},  [NVN_BLEND_ADVANCED_MODE_DST_OUT] = {Z, ISA, Z, ISA},
+        [NVN_BLEND_ADVANCED_MODE_SRC_ATOP] = {DA, ISA, Z, O},  [NVN_BLEND_ADVANCED_MODE_DST_ATOP] = {IDA, SA, O, Z},
+        [NVN_BLEND_ADVANCED_MODE_XOR] = {IDA, ISA, IDA, ISA},  [NVN_BLEND_ADVANCED_MODE_PLUS] = {O, O, O, O},
+        [NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED] = {O, O, O, O}, [NVN_BLEND_ADVANCED_MODE_PLUS_CLAMPED_ALPHA] = {O, O, O, O},
+    };
+    const uint8_t *f = b.adv < sizeof pd / sizeof *pd && pd[b.adv][0] ? pd[b.adv] : NULL;
+    if (!f || b.adv_ovl || (b.adv_npm && f[0] != O && f[0] != Z)) {
+        static _Atomic uint64_t seen; uint64_t bit = 1ull << (b.adv & 63);
+        if (!(atomic_fetch_or(&seen, bit) & bit))
+            hostvk_log("[RED] [hostvk] advanced blend mode %#x (overlap %d, %spremultiplied source) has no fixed-function equivalent and VK_EXT_blend_operation_advanced is not used: "
+                       "the state's blend functions are used", (unsigned)b.adv, (int)b.adv_ovl, b.adv_npm ? "not " : "");
+        return b;
+    }
+    b.src_rgb = b.adv_npm && f[0] == O ? SA : f[0]; b.dst_rgb = f[1]; b.src_a = f[2]; b.dst_a = f[3];
+    b.eq_rgb = b.eq_a = NVN_BLEND_EQUATION_ADD;
+    return b;
+}
+void hvk_blend_of(const blend_st *b0, int on, VkFormat f, uint32_t wmask4, uint32_t *en, VkColorBlendEquationEXT *eq, VkColorComponentFlags *wm) {
     *en = on && f && fmt_blendable(f);
-    if (b->adv && *en) HVK_RED_ONCE("advanced blend mode %u: not implemented (blended with the blend functions)", (unsigned)b->adv);
+    blend_st bb = *en ? adv_blend(*b0) : *b0; const blend_st *b = &bb;
     *eq = (VkColorBlendEquationEXT){bf(b->src_rgb), bf(b->dst_rgb), bo(b->eq_rgb), bf(b->src_a), bf(b->dst_a), bo(b->eq_a)};
     if (bo(b->eq_rgb) == VK_BLEND_OP_MIN || bo(b->eq_rgb) == VK_BLEND_OP_MAX) { eq->srcColorBlendFactor = eq->dstColorBlendFactor = VK_BLEND_FACTOR_ONE; }
     if (bo(b->eq_a) == VK_BLEND_OP_MIN || bo(b->eq_a) == VK_BLEND_OP_MAX) { eq->srcAlphaBlendFactor = eq->dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE; }
@@ -105,6 +134,11 @@ void hvk_vertex_input(const hvk_shader *vs, const va_st attr[16], const vs_st st
 }
 
 // ---------- Keys (3.1) ----------
+uint8_t hvk_line_mode(VkSampleCountFlagBits samples, int a2c) {
+    if (!hvk.dev.x.line_raster) return 0;
+    if (samples > VK_SAMPLE_COUNT_1_BIT || a2c) return (uint8_t)(hvk.dev.x.line_rect ? VK_LINE_RASTERIZATION_MODE_RECTANGULAR_EXT : VK_LINE_RASTERIZATION_MODE_DEFAULT_EXT);
+    return (uint8_t)VK_LINE_RASTERIZATION_MODE_BRESENHAM_EXT;
+}
 void hvk_key_fill(hvk_gfx_key *k, hvk_shader *const sh[6], int klass, const hvk_key_src *s) {
     memset(k, 0, sizeof *k);
     int nc = s->nc > 8 ? 8 : s->nc;
@@ -133,7 +167,14 @@ void hvk_key_fill(hvk_gfx_key *k, hvk_shader *const sh[6], int klass, const hvk_
     }
     if ((k->topology_class == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || k->topology_class == HVK_TOPOLOGY_ANY) && klass == VK_PRIMITIVE_TOPOLOGY_POINT_LIST && !hvk.dev.x.maintenance5)
         HVK_RED_ONCE("points on a device without VK_KHR_maintenance5: a vertex stage that writes no PointSize draws them at an undefined size (the Vulkan chain writes none; nvnCommandBufferSetPointSize is not recorded)");
-    if (k->topology_class == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) { k->patch_points = 3; HVK_RED_ONCE("patches drawn with 3 control points: nvnCommandBufferSetPatchSize is not recorded (nvn_pipe.h's TODO list)"); }
+    if (hvk.dev.x.line_raster && !hvk.dev.x.line_mode_dynamic) { k->baked |= HVK_BAKE_LINE; k->line_mode = hvk_line_mode(s->samples, s->a2c); }
+    // The patch size (step P8): nvnCommandBufferSetPatchSize is not recorded (hle_nvn.c lists it among the no-ops; nvn_pipe.h's TODO list), so a draw of patches takes the control
+    // shader's own output vertex count, which equals the input patch size in the shaders seen (a hull shader that passes its control points through). Said once with a red line
+    if (k->topology_class == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {
+        k->patch_points = sh[3] && sh[3]->tcs_vertices ? sh[3]->tcs_vertices : 3;
+        HVK_RED_ONCE("patches drawn with the control shader's output vertex count as the patch size (first case %u%s): nvnCommandBufferSetPatchSize is not recorded by the frontend",
+                     (unsigned)k->patch_points, sh[3] && sh[3]->tcs_vertices ? "" : ", no control shader: 3");
+    }
     if (!hvk.dev.caps.vertex_input_dynamic && s->vin) {
         const hvk_vin *v = s->vin;
         k->baked |= HVK_BAKE_VERTEX;
@@ -169,6 +210,8 @@ uint32_t hvk_dyn_states(VkDynamicState *d, int vertex_dynamic, int colors, int b
     if (e >> HOSTVK_EDS_SAMPLES & 1) d[n++] = VK_DYNAMIC_STATE_RASTERIZATION_SAMPLES_EXT;
     if (e >> HOSTVK_EDS_SAMPLE_MASK & 1) d[n++] = VK_DYNAMIC_STATE_SAMPLE_MASK_EXT;
     if (e >> HOSTVK_EDS_ALPHA_TO_COVERAGE & 1) d[n++] = VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT;
+    if (hvk.dev.x.line_mode_dynamic) d[n++] = VK_DYNAMIC_STATE_LINE_RASTERIZATION_MODE_EXT;   // step P8
+    if (hvk.dev.x.vp_swizzle_nv) d[n++] = VK_DYNAMIC_STATE_VIEWPORT_SWIZZLE_NV;
     return n;
 }
 enum { L_VI, L_PR, L_FS, L_FO, L_N };   // the four libraries of design 3.2
@@ -182,6 +225,7 @@ static int dyn_part(VkDynamicState s) {   // which library a dynamic state belon
         case VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT: case VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT: case VK_DYNAMIC_STATE_LINE_WIDTH: case VK_DYNAMIC_STATE_DEPTH_BIAS:
         case VK_DYNAMIC_STATE_CULL_MODE: case VK_DYNAMIC_STATE_FRONT_FACE: case VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE: case VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE:
         case VK_DYNAMIC_STATE_PATCH_CONTROL_POINTS_EXT: case VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT: case VK_DYNAMIC_STATE_POLYGON_MODE_EXT:
+        case VK_DYNAMIC_STATE_LINE_RASTERIZATION_MODE_EXT: case VK_DYNAMIC_STATE_VIEWPORT_SWIZZLE_NV:
             return L_PR;
         case VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK: case VK_DYNAMIC_STATE_STENCIL_WRITE_MASK: case VK_DYNAMIC_STATE_STENCIL_REFERENCE: case VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE:
         case VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE: case VK_DYNAMIC_STATE_DEPTH_COMPARE_OP: case VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE: case VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE:
@@ -199,7 +243,7 @@ static uint32_t dyn_states_part(VkDynamicState *d, int part, int vertex_dynamic,
 // ---------- The level (3.6), the quirk table (3.2, risk 7) ----------
 static char g_level; static int g_gpl, g_opt_on = 1, g_trace;
 static uint32_t g_quirks; static const char *g_quirk_why;
-static hostvk_caps g_full_caps; static uint32_t g_full_eds, g_full_topo; static int g_full_saved;
+static hostvk_caps g_full_caps; static uint32_t g_full_eds, g_full_topo, g_full_line_dyn, g_full_swz; static int g_full_saved;
 // A row per vendor and driver where the pipelines of the two phases or of the levels are found to give different pixels (t_vk_gpl_identity on that device). Matched on the vendor
 // ID and the VkDriverId (0: any) and the driver version range [lo, hi] as the device reports it (0, 0: any). None is known: on Mesa's lavapipe 25.2.8 (VK_DRIVER_ID_MESA_LLVMPIPE)
 // the fast-linked, optimized and monolithic pipelines of levels A to D gave the same bits for every draw of t_vk_gpl_identity. A new row says how it was found
@@ -233,7 +277,7 @@ void hvk_pso_test_optimize(int on) { g_opt_on = on != 0; }
 
 // ---------- Libraries and pipelines ----------
 typedef struct { uint8_t cls, baked; uint8_t nvb, nva, nvd, pad[3]; VkVertexInputBindingDescription vb[16]; VkVertexInputAttributeDescription va[32]; VkVertexInputBindingDivisorDescriptionKHR vd[16]; } vi_key;
-typedef struct { const void *sh[4]; const void *layout; uint32_t patch_points; uint8_t depth_clip_ndc, poly_mode, depth_clamp, baked; } pr_key;
+typedef struct { const void *sh[4]; const void *layout; uint32_t patch_points; uint8_t depth_clip_ndc, poly_mode, depth_clamp, baked, line_mode, pad[3]; } pr_key;
 typedef struct { const void *fs; const void *layout; uint8_t entry, pad[7]; } fs_key;
 typedef struct { VkFormat color[8], depth, stencil; uint32_t samples, baked; uint8_t ccount, logic_en, logic_op, a2c; VkPipelineColorBlendAttachmentState blend[8]; } fo_key;
 typedef struct { _Atomic int state; VkPipeline p; } lib_ent;   // state: 0 being made, 1 made, 2 failed
@@ -274,6 +318,12 @@ static VkResult create(const VkGraphicsPipelineCreateInfo *ci0, VkPipeline *p, u
     if (r) *p = VK_NULL_HANDLE;
     return r;
 }
+// The tessellation state (step P8): the patch size, and the domain origin of NVN, whose tessellator is GL's (the lower-left origin of the domain coordinates: the winding of
+// the triangles it makes and gl_TessCoord as a GL program sees them), where Vulkan's default is the upper left (core since 1.1)
+static void tess_state(const hvk_gfx_key *k, VkPipelineTessellationStateCreateInfo *ts, VkPipelineTessellationDomainOriginStateCreateInfo *tdo) {
+    *tdo = (VkPipelineTessellationDomainOriginStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO, NULL, VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT};
+    *ts = (VkPipelineTessellationStateCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, tdo, 0, k->patch_points ? k->patch_points : 1};
+}
 static VkPipeline lib_make(int part, const pso_ent *e) {
     const hvk_gfx_key *k = &e->k; hvk_shader *const *sh = e->sh;
     int vdyn = hvk.dev.caps.vertex_input_dynamic;
@@ -287,11 +337,12 @@ static VkPipeline lib_make(int part, const pso_ent *e) {
     VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, NULL, 0,
         k->topology_class == HVK_TOPOLOGY_ANY ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : (VkPrimitiveTopology)k->topology_class, VK_FALSE};
     VkPipelineShaderStageCreateInfo stg[4]; uint32_t ns = 0;
-    VkPipelineTessellationStateCreateInfo ts = {VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, NULL, 0, k->patch_points ? k->patch_points : 1};
+    VkPipelineTessellationDomainOriginStateCreateInfo tdo; VkPipelineTessellationStateCreateInfo ts; tess_state(k, &ts, &tdo);
     VkPipelineViewportDepthClipControlCreateInfoEXT dcc = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT, NULL, k->depth_clip_ndc};
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, hvk.dev.x.depth_clip_control ? &dcc : NULL, 0, 0, NULL, 0, NULL};
-    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, NULL, 0, k->depth_clamp, VK_FALSE, (VkPolygonMode)k->poly_mode, VK_CULL_MODE_NONE,
-                                                 VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1};
+    VkPipelineRasterizationLineStateCreateInfoEXT ls = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT, NULL, (VkLineRasterizationModeEXT)k->line_mode, VK_FALSE, 0, 0};
+    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, (k->baked & HVK_BAKE_LINE) ? &ls : NULL, 0, k->depth_clamp, VK_FALSE,
+                                                 (VkPolygonMode)k->poly_mode, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1};
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, k->samples ? k->samples : VK_SAMPLE_COUNT_1_BIT, VK_FALSE, 0, NULL, k->a2c, VK_FALSE};
     VkPipelineColorBlendAttachmentState ba[8]; for (int i = 0; i < 8; i++) ba[i] = k->blend[i];
@@ -330,7 +381,8 @@ static lib_ent *lib_get(int part, const pso_ent *e, int *made, int *waited) {
             if (k->baked & HVK_BAKE_VERTEX) { u.vi.nvb = k->nvb; u.vi.nva = k->nva; u.vi.nvd = k->nvd; memcpy(u.vi.vb, k->vb, sizeof k->vb); memcpy(u.vi.va, k->va, sizeof k->va); memcpy(u.vi.vd, k->vd, sizeof k->vd); }
             klen = sizeof u.vi; break;
         case L_PR: u.pr.sh[0] = e->sh[0]; u.pr.sh[1] = e->sh[3]; u.pr.sh[2] = e->sh[4]; u.pr.sh[3] = e->sh[2]; u.pr.layout = e->l; u.pr.patch_points = k->patch_points;
-            u.pr.depth_clip_ndc = k->depth_clip_ndc; u.pr.poly_mode = k->poly_mode; u.pr.depth_clamp = k->depth_clamp; u.pr.baked = (uint8_t)(k->baked & (HVK_BAKE_RASTER | HVK_BAKE_PATCH));
+            u.pr.depth_clip_ndc = k->depth_clip_ndc; u.pr.poly_mode = k->poly_mode; u.pr.depth_clamp = k->depth_clamp; u.pr.baked = (uint8_t)(k->baked & (HVK_BAKE_RASTER | HVK_BAKE_PATCH | HVK_BAKE_LINE));
+            u.pr.line_mode = k->line_mode;
             klen = sizeof u.pr; break;
         case L_FS: u.fs.fs = e->sh[1]; u.fs.layout = e->l; u.fs.entry = k->entry[0]; klen = sizeof u.fs; break;
         case L_FO: memcpy(u.fo.color, k->color, sizeof k->color); u.fo.depth = k->depth; u.fo.stencil = k->stencil; u.fo.samples = k->samples; u.fo.ccount = k->ccount;
@@ -375,11 +427,12 @@ static VkPipeline mono_make(const pso_ent *e, uint64_t *t) {   // levels C and D
     VkPipelineVertexInputStateCreateInfo vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, !vdyn && k->nvd ? &vds : NULL, 0, vdyn ? 0 : k->nvb, k->vb, vdyn ? 0 : k->nva, k->va};
     VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, NULL, 0,
         k->topology_class == HVK_TOPOLOGY_ANY ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : (VkPrimitiveTopology)k->topology_class, VK_FALSE};
-    VkPipelineTessellationStateCreateInfo ts = {VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, NULL, 0, k->patch_points ? k->patch_points : 1};
+    VkPipelineTessellationDomainOriginStateCreateInfo tdo; VkPipelineTessellationStateCreateInfo ts; tess_state(k, &ts, &tdo);
     VkPipelineViewportDepthClipControlCreateInfoEXT dcc = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT, NULL, k->depth_clip_ndc};
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, hvk.dev.x.depth_clip_control ? &dcc : NULL, 0, 0, NULL, 0, NULL};
-    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, NULL, 0, k->depth_clamp, VK_FALSE, (VkPolygonMode)k->poly_mode, VK_CULL_MODE_NONE,
-                                                 VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1};
+    VkPipelineRasterizationLineStateCreateInfoEXT ls = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT, NULL, (VkLineRasterizationModeEXT)k->line_mode, VK_FALSE, 0, 0};
+    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, (k->baked & HVK_BAKE_LINE) ? &ls : NULL, 0, k->depth_clamp, VK_FALSE,
+                                                 (VkPolygonMode)k->poly_mode, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1};
     VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, k->samples ? k->samples : VK_SAMPLE_COUNT_1_BIT, VK_FALSE, 0, NULL, k->a2c, VK_FALSE};
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     VkPipelineColorBlendAttachmentState ba[8]; for (int i = 0; i < 8; i++) ba[i] = k->blend[i];
@@ -632,6 +685,7 @@ static void workers_stop(void) {
 void hvk_pso_init(void) {
     const char *e = getenv("DM_VK_PSO_TRACE"); g_trace = e && !strcmp(e, "1");
     g_full_caps = hvk.dev.caps; g_full_eds = hvk.dev.eds_present; g_full_topo = hvk.dev.x.topology_unrestricted; g_full_saved = 1;
+    g_full_line_dyn = hvk.dev.x.line_mode_dynamic; g_full_swz = hvk.dev.x.vp_swizzle_nv;
     level_rules(); quirks_find();
     hostvk_log("[hostvk] pipelines: level %c, %s%s", g_level, g_gpl ? "libraries with a fast link and an optimized relink in the background" : "monolithic, a draw waits for a pipeline it is the first to use",
                hvk.dev.x.topology_unrestricted ? "; one pipeline draws every topology class" : "");
@@ -657,8 +711,9 @@ void hvk_pso_test_level(char level) {
     drop_all();
     if (!g_full_saved) return;
     hvk.dev.caps = g_full_caps; hvk.dev.eds_present = g_full_eds; hvk.dev.x.topology_unrestricted = g_full_topo;
+    hvk.dev.x.line_mode_dynamic = g_full_line_dyn; hvk.dev.x.vp_swizzle_nv = g_full_swz;
     hostvk_caps *c = &hvk.dev.caps;
-    if (level == 'B' || level == 'D') { hvk.dev.eds_present = 0; c->eds3_blend = c->eds3_raster = 0; hvk.dev.x.topology_unrestricted = 0; }
+    if (level == 'B' || level == 'D') { hvk.dev.eds_present = 0; c->eds3_blend = c->eds3_raster = 0; hvk.dev.x.topology_unrestricted = 0; hvk.dev.x.line_mode_dynamic = 0; hvk.dev.x.vp_swizzle_nv = 0; }
     if (level == 'C' || level == 'D') c->gpl = c->gpl_fast_link = c->gpl_indep_interp = 0;
     if (level == 'D') c->vertex_input_dynamic = 0;
     if (level > c->device_level) c->level = level;

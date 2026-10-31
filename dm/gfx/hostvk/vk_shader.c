@@ -110,6 +110,11 @@ static int caps_missing(const uint32_t *w, size_t nw, char *why, size_t n) {
                 case 55: case 56: if (!hvk.dev.x.storage_without_format) need = "StorageImage*WithoutFormat"; break;
                 case 57: if (!hvk.dev.x.multi_viewport) need = "MultiViewport"; break;
                 case 53: if (!hvk.dev.caps.xfb) need = "TransformFeedback"; break;
+                case 54: if (!hvk.dev.x.geometry_streams) need = "GeometryStreams"; break;
+                case 23: case 24: if (!hvk.dev.x.tess_geom_point_size) need = "TessellationPointSize / GeometryPointSize"; break;
+                case 69: if (!hvk.dev.x.output_layer) need = "ShaderLayer (shaderOutputLayer)"; break;
+                case 70: if (!hvk.dev.x.output_viewport) need = "ShaderViewportIndex (shaderOutputViewportIndex)"; break;
+                case 5254: if (!hvk.dev.x.output_layer || !hvk.dev.x.output_viewport) need = "ShaderViewportIndexLayerEXT"; break;
                 default: break;
             }
             if (need) { size_t k = strlen(why); snprintf(why + k, n - k, "%s%s", k ? ", " : "", need); bad = 1; }
@@ -120,16 +125,28 @@ static int caps_missing(const uint32_t *w, size_t nw, char *why, size_t n) {
     return bad;
 }
 
-// Whether the module declares the Xfb execution mode (OpExecutionMode, opcode 16, mode 11): its draws capture while transform feedback is on
-static int module_xfb(const uint32_t *w, size_t nw) {
+// What the backend reads from a module's own declarations (step P8), up to its first function: the Xfb execution mode (OpExecutionMode, opcode 16, mode 11: its draws capture
+// while transform feedback is on), the XfbBuffer and XfbStride decorations (OpDecorate 71 / OpMemberDecorate 72, decorations 36 and 37) that give each capture buffer's vertex
+// stride (DrawTransformFeedback's vertex size), and a tessellation control shader's OutputVertices (mode 26: the patch size its draws are made with)
+static void module_scan(const uint32_t *w, size_t nw, hvk_shader *sh) {
+    struct { uint32_t id, member, buf, stride; } x[64]; int nx = 0;
     for (size_t i = 5; i < nw;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
-        if (!len) break;
-        if (op == 16 && len >= 3 && w[i + 2] == 11) return 1;
+        if (!len || i + len > nw) break;
+        if (op == 16 && len >= 3 && w[i + 2] == 11) sh->xfb = 1;
+        if (op == 16 && len >= 4 && w[i + 2] == 26 && sh->stage == 3) sh->tcs_vertices = (uint8_t)(w[i + 3] < 255 ? w[i + 3] : 255);
+        if ((op == 71 && len >= 4) || (op == 72 && len >= 5)) {
+            uint32_t id = w[i + 1], member = op == 72 ? w[i + 2] : UINT32_MAX, dec = w[i + (op == 72 ? 3 : 2)], val = w[i + (op == 72 ? 4 : 3)];
+            if (dec == 36 || dec == 37) {
+                int k = 0; while (k < nx && !(x[k].id == id && x[k].member == member)) k++;
+                if (k == nx && nx < 64) { x[nx].id = id; x[nx].member = member; x[nx].buf = UINT32_MAX; x[nx].stride = 0; nx++; }
+                if (k < nx) { if (dec == 36) x[k].buf = val; else x[k].stride = val; }
+            }
+        }
         if (op == 54) break;
         i += len;
     }
-    return 0;
+    for (int k = 0; k < nx; k++) if (x[k].buf < 4 && x[k].stride && x[k].stride < 65536) sh->xfb_stride[x[k].buf] = (uint16_t)x[k].stride;
 }
 
 // ---------- The reflection: the Vulkan form into the Metal form nvn_refl_from_json_text reads ----------
@@ -255,7 +272,7 @@ static hvk_shader *shader_from(const char *key, int stage, const uint32_t *code,
     char why[200];
     if (caps_missing(code, bytes / 4, why, sizeof why)) { snprintf(err, en, "the module needs %s, which this device lacks", why); free(sh); return NULL; }
     if (refl_vk(json, jn, sh, err, en)) { free(sh->rf.c1); free(sh); return NULL; }
-    sh->xfb = (uint8_t)module_xfb(code, bytes / 4);
+    module_scan(code, bytes / 4, sh);
     if (!(sh->module = hvk_module(code, bytes))) { snprintf(err, en, "vkCreateShaderModule failed"); free(sh->rf.c1); free(sh); return NULL; }
     if (!c1_make(sh)) { snprintf(err, en, "no memory for its constants"); vkDestroyShaderModule(hvk.d, sh->module, NULL); free(sh->rf.c1); free(sh); return NULL; }
     atomic_fetch_add(&hvk.st_shaders, 1);

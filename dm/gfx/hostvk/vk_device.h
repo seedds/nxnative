@@ -133,6 +133,19 @@ typedef struct hostvk_dev {
         uint32_t depth_bias_control : 1;      // VK_EXT_depth_bias_control with depthBiasControl: NVN depth 24 in a float format keeps its 24-bit bias unit (decision D10, step P7)
         uint32_t dbc_float : 1, dbc_force_unorm : 1, dbc_exact : 1;   // its floatRepresentation, leastRepresentableValueForceUnormRepresentation, depthBiasExact
         uint32_t memory_budget : 1;           // VK_EXT_memory_budget: the texture memory line gives the device-local budget (decision D1)
+        // Step P8 (design section 6): the native features Metal lacks
+        uint32_t output_layer : 1, output_viewport : 1;   // shaderOutputLayer, shaderOutputViewportIndex (1.2): a vertex or tessellation stage writes the layer / viewport (layered rendering without a geometry stage)
+        uint32_t tess_geom_point_size : 1;    // shaderTessellationAndGeometryPointSize: a tessellation or geometry stage may write PointSize
+        uint32_t geometry_streams : 1;        // transform feedback's geometryStreams: a geometry shader may emit to streams other than 0
+        uint32_t xfb_draw : 1, xfb_queries : 1;   // transformFeedbackDraw (vkCmdDrawIndirectByteCountEXT: DrawTransformFeedback), transformFeedbackQueries (primitives written)
+        uint32_t line_raster : 1, line_bresenham : 1, line_rect : 1;   // VK_EXT_line_rasterization (or KHR) with bresenhamLines / rectangularLines: NVN's aliased lines (GL's diamond-exit rule)
+        uint32_t line_khr : 1;                // the KHR name of it is the one enabled
+        uint32_t line_mode_dynamic : 1;       // extendedDynamicState3LineRasterizationMode (with VK_EXT_extended_dynamic_state3 enabled): the mode is set per draw, else baked into the key
+        uint32_t feedback_loop : 1, feedback_loop_dynamic : 1;   // VK_EXT_attachment_feedback_loop_layout, VK_EXT_attachment_feedback_loop_dynamic_state (design 5.5): recorded, see vk_commands.c
+        uint32_t prim_gen : 1, prim_gen_discard : 1;   // VK_EXT_primitives_generated_query (and WithRasterizerDiscard): NVN's PRIMITIVES_GENERATED counter
+        uint32_t stencil_export : 1;          // VK_EXT_shader_stencil_export: a fragment shader writes stencil (draw-based depth-stencil copies)
+        uint32_t vp_swizzle_nv : 1;           // VK_NV_viewport_swizzle with extendedDynamicState3ViewportSwizzle: NVN's viewport swizzles in fixed function (NVIDIA)
+        uint32_t xfb_buffers;                 // maxTransformFeedbackBuffers
     } x;
     char missing[1024];                   // what of design 9.1's optional list the device lacks, comma-separated, as the level line prints it ("" when nothing)
     char eds_missing[512];                // the dynamic states of level A it lacks, comma-separated

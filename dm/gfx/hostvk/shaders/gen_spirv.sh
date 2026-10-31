@@ -1,7 +1,8 @@
 #!/bin/sh
 # The SPIR-V of the Vulkan backend's own shaders (dm/gfx/hostvk/shaders, docs/design/vulkan-backend.md 2.7) and of its GPU tests' shaders (dm/gfx/tests/vk/shaders), compiled by
 # glslangValidator for Vulkan 1.3, validated with spirv-val and written as C arrays into <folder>/gen/<name>_<stage>.h (array <name>_<stage>_spv). The headers are committed, so
-# building needs no glslang. Variants: clear.frag for each colour slot and value type (clear_frag.h: clear_frag_s<slot>_k<kind>_spv), q.comp for the four counter kernels of
+# building needs no glslang. Variants: clear.frag for each colour slot and value type (clear_frag.h: clear_frag_s<slot>_k<kind>_spv), copy.frag for its three kinds (copy_frag.h:
+# copy_frag_k<kind>_spv: colour, depth, depth and stencil; step P8), q.comp for the four counter kernels of
 # nvn_builtin.h (q_val0.h, q_val8.h, q_dlt0.h, q_dlt8.h).
 #   sh dm/gfx/hostvk/shaders/gen_spirv.sh           regenerate the headers (run it after editing a shader)
 #   sh dm/gfx/hostvk/shaders/gen_spirv.sh --check   rebuild into a temporary folder and compare byte for byte with the committed headers: exit 0 when identical, 1 on a difference,
@@ -49,6 +50,8 @@ folder() {
                 for s in 0 1 2 3 4 5 6 7; do for k in 0 1 2; do compile "$src" "clear_frag_s${s}_k${k}_spv" "$key/clear_frag.h" -DSLOT=$s -DKIND=$k; done; done ;;
             hostvk/q.comp)
                 n=0; for q in q_val0 q_val8 q_dlt0 q_dlt8; do compile "$src" "${q}_spv" "$key/$q.h" -DKERNEL=$n; n=$((n + 1)); done ;;
+            hostvk/copy.frag)
+                for k in 0 1 2; do compile "$src" "copy_frag_k${k}_spv" "$key/copy_frag.h" -DKIND=$k; done ;;
             *) compile "$src" "${name}_${stage}_spv" "$key/${name}_${stage}.h" ;;
         esac
     done

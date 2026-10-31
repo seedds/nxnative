@@ -62,6 +62,7 @@ typedef struct {
     VkFormat format;
     VkImageAspectFlags aspect;
     uint32_t level, layer0, layers;   // the subresources of the view (an attachment view: one level)
+    uint32_t levels;           // the levels it covers from level on (step P8: a feedback draw is one whose sampled view covers an attached level)
     uint32_t w, h;             // that level's size
     uint8_t cls;               // NVN_VK_FLOAT / UINT / SINT / DS of the view's format
     VkSampleCountFlagBits samples;
@@ -129,6 +130,9 @@ typedef struct hvk_shader {
     uint8_t writes_storage;    // a writable storage buffer or image binding
     uint8_t builtin;           // one of the backend's own kernels (nvn_builtin.h's counter kernels)
     uint8_t xfb;               // the module declares the Xfb execution mode: it captures transform feedback
+    // Step P8: from the module itself (vk_shader.c module_scan)
+    uint16_t xfb_stride[4];    // the XfbStride of each transform feedback buffer its outputs are captured into (0: none): DrawTransformFeedback's vertex size (vk_commands.c)
+    uint8_t tcs_vertices;      // a tessellation control shader's OutputVertices: the patch size a draw is made with (nvnCommandBufferSetPatchSize is not recorded)
 } hvk_shader;
 typedef struct hvk_prog { hvk_shader *sh[6]; uint64_t serial; } hvk_prog;
 // The program's shaders, per NVN stage: loaded on first use from the shader map and the library (hvk_shader_dir), NULL with a red line for one that is missing. Submit thread
@@ -165,13 +169,17 @@ typedef struct {
     VkColorComponentFlags wmask[8];
     VkPipelineColorBlendAttachmentState blend[8];
     uint8_t logic_en, logic_op, poly_mode, depth_clamp, a2c;
+    uint8_t line_mode;         // VkLineRasterizationModeEXT when the device has line rasterization but cannot set the mode dynamically (HVK_BAKE_LINE; step P8)
     // vertex input when the device has no dynamic vertex input
     uint8_t nvb, nva;
     VkVertexInputBindingDescription vb[16];
     VkVertexInputAttributeDescription va[32];
     VkVertexInputBindingDivisorDescriptionKHR vd[16]; uint8_t nvd;
 } hvk_gfx_key;
-enum { HVK_BAKE_BLEND = 1, HVK_BAKE_RASTER = 2, HVK_BAKE_VERTEX = 4, HVK_BAKE_LOGIC_OP = 8, HVK_BAKE_PATCH = 16 };
+enum { HVK_BAKE_BLEND = 1, HVK_BAKE_RASTER = 2, HVK_BAKE_VERTEX = 4, HVK_BAKE_LOGIC_OP = 8, HVK_BAKE_PATCH = 16, HVK_BAKE_LINE = 32 };
+// The line rasterization mode of a draw (step P8): NVN's aliased lines are GL's (the diamond-exit rule), Vulkan's Bresenham lines, on a single-sample target without alpha to
+// coverage; rectangular lines otherwise (GL's multisample lines; Vulkan allows Bresenham lines only there). 0 (the default mode) without VK_EXT_line_rasterization
+uint8_t hvk_line_mode(VkSampleCountFlagBits samples, int a2c);
 // Graphics pipelines: vk_pso.h (vk_gpl.c, phase P5). Compute pipelines by their shader and layout (any thread)
 VkPipeline hvk_cs_pipeline(hvk_shader *cs, hvk_layout *l);
 // The dynamic states of a graphics pipeline made whole (a monolithic one: every state the device sets dynamically at the pipeline level, vk_gpl.c)
@@ -182,7 +190,7 @@ int hvk_bind_resources(VkCommandBuffer cb, hvk_layout *l, hvk_shader *const sh[6
 void hvk_pipeline_slot_reset(int slot);            // the slot's descriptor pools and set cache (its submission completed)
 void hvk_pipeline_shutdown(void);
 // The backend's own pipelines (vk_pipeline.c): one compute shader with push constants and buffer device addresses
-typedef enum { HVK_K_REPORT, HVK_K_PREDICATE, HVK_K_QUAD, HVK_K_ASTC, HVK_K_DESWIZZLE, HVK_K_DSPACK, HVK_K_N } hvk_kernel;   // ASTC decode, deswizzle, depth-stencil packing: P7
+typedef enum { HVK_K_REPORT, HVK_K_PREDICATE, HVK_K_QUAD, HVK_K_ASTC, HVK_K_DESWIZZLE, HVK_K_DSPACK, HVK_K_QUAD_IND, HVK_K_N } hvk_kernel;   // ASTC decode, deswizzle, depth-stencil packing: P7; indirect quads: P8
 int hvk_kernel_dispatch(VkCommandBuffer cb, hvk_kernel k, const void *push, uint32_t push_bytes, uint32_t groups);
 int hvk_kernel_dispatch3(VkCommandBuffer cb, hvk_kernel k, const void *push, uint32_t push_bytes, uint32_t gx, uint32_t gy, uint32_t gz);
 // The clear triangle (2.7): writes value into colour attachment slot (mask: channels) or the depth / stencil (slot -1), inside the open render pass with the pass's formats
@@ -190,6 +198,11 @@ int hvk_clear_tri(VkCommandBuffer cb, const VkFormat color[8], int ncolor, VkFor
                   uint32_t mask, const uint32_t value[4], float z, int write_depth, uint32_t stencil_mask, uint32_t stencil_ref, VkRect2D rect, VkExtent2D extent);
 // Descriptor microbenchmark access (dm/gfx/hostvk/tests/t_vk_descbench.c): counters of the set cache
 void hvk_desc_stats(uint64_t *hits, uint64_t *misses, uint64_t *writes);
+// A draw's descriptors read view v of a texture (sampled or storage): vk_commands.c notes whether it is attached to the open pass (a feedback draw, design 5.5; step P8)
+void hvk_feedback_note(const hvk_view *v);
+// Draw-based copies (design 2.7; step P8): src's view sv region sr into dst's view dv region dr, converting the format and scaling or mirroring, one pass per layer, outside any
+// pass (cb). 1 recorded, 0 not possible (logged by the caller)
+int hvk_copy_draw(VkCommandBuffer cb, const hvk_view *sv, const hvk_view *dv, const int32_t src[4], const int32_t dst[4], int linear, uint32_t layers);
 
 // ---------- Commands (vk_commands.c; design 4.5-4.9) ----------
 VkCommandBuffer hvk_pre(void);        // the open submission's prologue (uploads, zero-fills), begun on first use
@@ -221,6 +234,7 @@ typedef struct {
     // statistics (be_stats and the like)
     _Atomic uint64_t st_passes, st_draws, st_dispatches, st_pipelines, st_pipeline_ns, st_uploads, st_reuploads, st_upload_bytes, st_upload_ns;   // st_pipelines: made on the submit thread
     _Atomic uint64_t st_shaders, st_barriers, st_pass_splits;
+    _Atomic uint64_t st_feedback_splits, st_xfb_draws, st_quad_ind, st_copy_draws;   // step P8: passes split before a feedback draw, DrawTransformFeedback draws, indirect quads converted on the GPU, draw-based copies
     _Atomic uint64_t st_vcopies_gpu, st_index_gpu;   // unaligned vertex streams copied and quad indices expanded on the GPU (their source not readable on the CPU at encode time)
     // texture memory (step P7): every image's allocation, and of those the ASTC images held compressed and the RGBA8 decodes with the bytes their blocks take (decision D1)
     _Atomic int64_t st_tex_bytes, st_astc_native_bytes, st_astc_decoded_bytes, st_astc_block_bytes;

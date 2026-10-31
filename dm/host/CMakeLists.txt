@@ -131,7 +131,7 @@ file(GLOB HOST_H CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.h ${CMAKE_CURRE
 # The NVN interface layer (hle_nvn.c, with its dirty-page tracker and texture layout) and the plain C parts of the replay every graphics backend shares: the draw state, the GPU-write
 # ledger, handle resolution, the pool table, the decoder, the shader reflection parser (over cJSON) and the pipeline description, with dm/gfx/tex's deswizzling and format table.
 # They reach a backend only through dm/gfx/nvn/nvn_be.h. Part of nxhost, so the thunk generator reads their entries (NVN( and NVN_NOPROTO(, hle_nvn.c; NVN's own header through
-# -I). Apple builds keep dm/host/Makefile and the Metal backend; here the null backend (the nvn_null library below) answers until the Vulkan one (dm/gfx/hostvk, step M7).
+# -I). Apple builds keep dm/host/Makefile and the Metal backend; here nxhost links the Vulkan one (dm/gfx/hostvk, the nvn_vk library below; NXHOST_VULKAN=OFF: nvn_null).
 # nvn_names.c: the NVN names in load order, written from names.txt (nvn_thunks.S holds them on Apple)
 set(NVN_FRONTEND_SRC
     ${REPO}/dm/gfx/nvn/hle_nvn.c ${REPO}/dm/gfx/nvn/nvn_dirty.c ${REPO}/dm/gfx/nvn/nvn_tex.c ${REPO}/dm/gfx/nvn/nvn_state.c ${REPO}/dm/gfx/nvn/nvn_gpuwrite.c
@@ -155,7 +155,7 @@ file(GLOB NVN_H CONFIGURE_DEPENDS ${REPO}/dm/gfx/nvn/*.h ${REPO}/dm/gfx/nvn/incl
 list(APPEND HOST_H ${NVN_H})
 set(GEN_HLE_THUNKS_INC -I ${REPO}/dm/gfx/nvn/include)
 # The null backend (dm/gfx/nvn/nvn_null.c): every backend function as a red line on its first call and a neutral answer, for a host binary with no GPU backend yet; a library of its
-# own, so that a binary links exactly one backend (the Vulkan one replaces it, step M7)
+# own, so that a binary links exactly one backend (nxhost takes the Vulkan one unless NXHOST_VULKAN=OFF; t_frontend this one)
 add_library(nvn_null STATIC ${REPO}/dm/gfx/nvn/nvn_null.c)
 target_compile_options(nvn_null PRIVATE ${HOST_FLAGS})
 target_include_directories(nvn_null PRIVATE ${REPO}/dm/gfx/nvn/include)
@@ -297,7 +297,7 @@ endif()
 host_test(t_vk_device SOURCES ../../gfx/hostvk/tests/t_vk_device.c ${HOSTVK_SRC} PROFILE DEFS VK_NO_PROTOTYPES INCLUDES ${HOSTVK_INC} ENV ${HOSTVK_ENV})
 host_test(t_vk_import SOURCES ../../gfx/hostvk/tests/t_vk_import.c ${HOSTVK_SRC} PROFILE DEFS VK_NO_PROTOTYPES INCLUDES ${HOSTVK_INC} ENV ${HOSTVK_ENV})
 # The Vulkan backend behind dm/gfx/nvn/nvn_be.h (dm/gfx/hostvk; docs/design/vulkan-backend.md, step P3): a library of its own beside nvn_null, so that a binary links exactly one
-# backend (nxhost takes one at step M7). Its own shaders are SPIR-V arrays in committed headers (dm/gfx/hostvk/shaders/gen/, written by shaders/gen_spirv.sh), so building needs no glslang
+# backend (nxhost links it: NXHOST_VULKAN below). Its own shaders are SPIR-V arrays in committed headers (dm/gfx/hostvk/shaders/gen/, written by shaders/gen_spirv.sh), so building needs no glslang
 set(HOSTVK_BACKEND_SRC vk_backend.c vk_memory.c vk_texture.c vk_shader.c vk_pipeline.c vk_commands.c vk_device.c vk_import.c vk_gpl.c vk_cache.c vk_prewarm.c)   # the last three: phase P5
 list(TRANSFORM HOSTVK_BACKEND_SRC PREPEND ${REPO}/dm/gfx/hostvk/)
 list(APPEND HOSTVK_BACKEND_SRC ${REPO}/dm/gfx/tex/nvn_fmt_vk.c ${REPO}/dm/gfx/tex/astc_decode.c ${REPO}/dm/third_party/volk/volk.c)   # astc_decode.c: the CPU fallback of the ASTC decode (P7)
@@ -307,6 +307,17 @@ target_compile_options(nvn_vk PRIVATE ${HOST_FLAGS})
 target_compile_definitions(nvn_vk PUBLIC VK_NO_PROTOTYPES)
 target_include_directories(nvn_vk PUBLIC ${HOSTVK_INC} PRIVATE ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn/include)
 target_link_libraries(nvn_vk PUBLIC nxplat)
+# The graphics backend nxhost links (step M7, done at step P8): the Vulkan one on Linux and Windows, which takes the null backend's forms itself when no Vulkan device meets the
+# baseline of design 9.1 (vk_backend.c: one red line, nothing drawn, the CPU side runs); OFF links the null backend (nvn_null). t_frontend keeps the null backend either way. The
+# device comes up at the frontend's first call that needs it (a memory pool, a texture, a submission), as the Metal backend's mtl_init does: the host calls no be_init of its own.
+# The backend and the frontend in nxhost reference each other, so a binary links the pair twice (LINK_INTERFACE_MULTIPLICITY)
+option(NXHOST_VULKAN "nxhost links the Vulkan graphics backend (nvn_vk) instead of the null one (nvn_null)" ON)
+if(NXHOST_VULKAN)
+    target_link_libraries(nxhost PUBLIC nvn_vk)
+else()
+    target_link_libraries(nxhost PUBLIC nvn_null)
+endif()
+set_target_properties(nxhost PROPERTIES LINK_INTERFACE_MULTIPLICITY 2)
 # Its GPU tests (dm/gfx/tests/vk; t_vk_harness.h says what they share): the NVN frontend, as objects so that the backend's references to it resolve whatever the link order,
 # over nvn_vk, each drawing headless and reading pixels back. Without a Vulkan device they skip as t_vk_device does; CTest on Linux runs them on lavapipe under the validation layer
 add_library(nvn_front_obj OBJECT ${NVN_FRONTEND_SRC} ${NVN_NAMES_C})
@@ -366,6 +377,16 @@ if(NOT WIN32)
 endif()
 foreach(t IN ITEMS astc formats depth24 deswizzle)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk ${REPO}/dm/gfx/tex TMPDIR ENV ${HOSTVK_ENV})
+    target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
+endforeach()
+# The native features Metal lacks (docs/design/vulkan-backend.md section 6, step P8), on lavapipe under the validation layer as the GPU tests above, skipped without a Vulkan
+# device: t_vk_transform_feedback (the Metal test's captures, pauses, resumes, three streams, a geometry capture and DrawTransformFeedback, plus indexed and instanced captures
+# and two capturing pipelines in one pass), t_vk_geometry (the Metal test's geometry expansion over array, indexed, indirect and GPU-written draws, a line strip with adjacency
+# widened into quads, and layered rendering from the geometry and the vertex stage), t_vk_tessellation (quad and triangle domains, the triangles made counted by a capture),
+# t_vk_feedback (draws that sample their own attachment, the pass split when the pass wrote it) and t_vk_raster (Bresenham lines on levels A and D, advanced blend modes,
+# indirect quads, an array of descriptor handles, draw-based copies); t_vk_queries above covers the counters of step P8
+foreach(t IN ITEMS transform_feedback geometry tessellation feedback raster)
+    host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
 endforeach()
 # The NVN frontend linked over the null backend (step M6): its entry points called as C functions, a device, a queue and a memory pool made, a command list recorded, submitted and

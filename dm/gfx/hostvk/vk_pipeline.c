@@ -25,6 +25,9 @@
 #include "shaders/gen/astc_decode_comp.h"
 #include "shaders/gen/deswizzle_comp.h"
 #include "shaders/gen/ds_pack_comp.h"
+#include "shaders/gen/quad_ind_comp.h"
+#include "shaders/gen/copy_vert.h"
+#include "shaders/gen/copy_frag.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -286,6 +289,7 @@ static VkImageView tex_view_of(int st, int tid, const hvk_binding *d, const nvn_
         hvk_view hv;
         if (x && hvk_tex_view_typed(x, has_v ? &v : NULL, storage ? HVK_VIEW_STORAGE : HVK_VIEW_SAMPLED, d->dim, d->cls, &hv)) {
             if (write) hvk_tex_gpu_written(x);
+            hvk_feedback_note(&hv);   // an attachment of the open pass read by this draw (design 5.5, vk_commands.c)
             if (hv.cls != d->cls && !(hv.cls == NVN_VK_DS && d->cls == NVN_VK_FLOAT) && !storage)
                 HVK_RED_ONCE("stage %d binding %u: a texture of numeric class %d read through a declaration of class %d (first case, texture ID %d): bound as it is (the census of design 2.2)",
                              st, d->binding, hv.cls, d->cls, tid);
@@ -325,6 +329,62 @@ static int bank_alloc(int st, int bank, const hvk_shader *sh, uint32_t base_inst
     return 1;
 }
 static void dummy_ssbo(VkBuffer *buf, VkDeviceSize *off, VkDeviceSize *range) { *buf = g_zero; *off = 0; *range = 65536; }
+// Arrays of descriptors (step P8; the Metal backend's encode_args rules): element k of a TEXD / SAMPD binding (Ryujinx's fallback for handles it cannot trace to one slot: the
+// handle's IDs index slots, profile key tex_dyn_slots) is the texture of slot k (combined, else separate) and its sampler (separate slot k, else the combined handle's); of a
+// TEXA / SAMPA binding (the driver table read at a run-time index) the texture and the sampler of the c2 word at byte off + 8k (nvn_c2_handle); of a TEXU / SAMPU array the handle
+// at byte off + 8k of the uniform buffer. Every element is written (the shader indexes them at run time): an unbound one is the dummy of the declared type
+static int elem_tex(int st, const nvn_rbind *t, uint32_t k) {
+    if (!t) return 0;
+    switch (t->kind) {
+        case NVN_RB_TEXD: { uint64_t h = k < 128 ? (S.tex[st][k] ? S.tex[st][k] : S.tex[st][NVN_SEPTEX_SLOT0 + k]) : 0; return (int)(h & 0xfffff); }
+        case NVN_RB_TEXA: return (int)(nvn_c2_handle(st, t->off + 8u * k) & 0xfffff);
+        case NVN_RB_TEXU: return nvn_tid_from_handle(nvn_ubo_handle(st, t->reg, t->off + 8 * (int)k));
+        default: return tex_id(st, t);
+    }
+}
+static int elem_samp(int st, const nvn_rbind *s, const nvn_rbind *t, uint32_t k) {
+    (void)t;
+    if (!s) return 0;
+    switch (s->kind) {
+        case NVN_RB_SAMPD: { int sid = k < 128 ? (int)(S.samp[st][k] >> 20) : 0; if (!sid && k < NTEX) sid = (int)(S.tex[st][k] >> 20); return sid; }
+        case NVN_RB_SAMPA: return (int)(nvn_c2_handle(st, s->off + 8u * k) >> 20);
+        case NVN_RB_SAMPU: return nvn_sid_from_handle(nvn_ubo_handle(st, s->reg, s->off + 8 * (int)k));
+        default: return samp_id(st, s);
+    }
+}
+static int build_array(set_build *b, int st, const hvk_shader *sh, const hvk_binding *d, const lb *x, const nvn_rbind *rt, const nvn_rbind *rs) {
+    enum { MAXA = 256 };
+    uint32_t n = d->count;
+    if (n > MAXA) { HVK_RED_ONCE("shader %s: an array of %u descriptors at set %u binding %u, past the %d the backend writes: the draw is skipped", sh->key, d->count, d->set, d->binding, MAXA); return 0; }
+    if (x->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || x->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {   // buffer textures (TEXD of buffer textures)
+        VkWriteDescriptorSet *w = w_new(b, d->binding, x->type, n); if (!w || b->ntv + (int)n > MAXINFO) return 0;
+        int storage = x->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+        for (uint32_t k = 0; k < n; k++) {
+            int tid = elem_tex(st, rt, k); tex_t t; view_t vv; int hv = 0, ok;
+            pthread_mutex_lock(&hvk.tex_mu); ok = tid > 0 && hvk_reg_texture(tid, &t, &vv, &hv); pthread_mutex_unlock(&hvk.tex_mu);
+            VkBufferView v = ok && hvk_tex_is_buffer(&t) ? hvk_tex_buffer_view(&t, storage, NULL) : VK_NULL_HANDLE;
+            if (!v) v = hvk_dummy_texel_buffer(rt ? rt->dpf : NVN_DPF_FLOAT, storage);
+            if (!v) return 0;
+            b->tv[b->ntv + (int)k] = v;
+        }
+        w->pTexelBufferView = &b->tv[b->ntv]; mix(b, &b->tv[b->ntv], n * sizeof *b->tv); b->ntv += (int)n;
+        return 1;
+    }
+    if (x->type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && x->type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE && x->type != VK_DESCRIPTOR_TYPE_SAMPLER && x->type != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+        HVK_RED_ONCE("shader %s: an array of %u descriptors of type %d at set %u binding %u: not written, the draw is skipped", sh->key, n, (int)x->type, d->set, d->binding); return 0; }
+    VkDescriptorImageInfo ii[MAXA];
+    for (uint32_t k = 0; k < n; k++) {
+        uint8_t cls = d->cls;
+        ii[k] = (VkDescriptorImageInfo){VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL};
+        if (x->type != VK_DESCRIPTOR_TYPE_SAMPLER) ii[k].imageView = tex_view_of(st, elem_tex(st, rt, k), d, rt, x->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &cls, d->rw);
+        if (x->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || x->type == VK_DESCRIPTOR_TYPE_SAMPLER) {
+            int sid = rs ? elem_samp(st, rs, rt, k) : 0;
+            pthread_mutex_lock(&hvk.tex_mu); ii[k].sampler = hvk_reg_sampler(sid, cls); pthread_mutex_unlock(&hvk.tex_mu);
+        }
+        if (!ii[k].imageView && x->type != VK_DESCRIPTOR_TYPE_SAMPLER) return 0;
+    }
+    return w_image(b, d->binding, x->type, ii, n);
+}
 // The writes of the bindings of the shaders in sh that fall in set k of layout l
 static int build_set(set_build *b, const hvk_layout *l, int k, hvk_shader *const sh[6], uint32_t base_instance, const uint32_t dispatch[3], VkDeviceSize ubo_max) {
     for (int st = 0; st < 6; st++) if (sh[st]) for (int i = 0; i < sh[st]->nb; i++) {
@@ -335,11 +395,7 @@ static int build_set(set_build *b, const hvk_layout *l, int k, hvk_shader *const
         const nvn_rbind *rt = d->rb_tex >= 0 ? &sh[st]->rf.b[d->rb_tex] : NULL, *rs = d->rb_samp >= 0 ? &sh[st]->rf.b[d->rb_samp] : NULL;
         if (x->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) continue;   // the driver banks: written below for every dynamic binding
         if (d->count > 1 || (rt && (rt->kind == NVN_RB_TEXD || rt->kind == NVN_RB_TEXA || rt->n > 1)) || (rs && (rs->kind == NVN_RB_SAMPD || rs->kind == NVN_RB_SAMPA || rs->n > 1))) {
-            HVK_RED_ONCE("shader %s: an array of %u descriptors at set %u binding %u (dynamic or indexed handles): every element reads the dummy (phase P4)", sh[st]->key, d->count, d->set, d->binding);
-            VkDescriptorImageInfo ii[64]; uint32_t n = d->count > 64 ? 64 : d->count;
-            for (uint32_t e = 0; e < n; e++) ii[e] = (VkDescriptorImageInfo){hvk_default_sampler(), x->type == VK_DESCRIPTOR_TYPE_SAMPLER ? VK_NULL_HANDLE : hvk_dummy_view(rt ? rt->dtt : 0, rt ? rt->dpf : 0, x->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE), VK_IMAGE_LAYOUT_GENERAL};
-            if (x->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || x->type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || x->type == VK_DESCRIPTOR_TYPE_SAMPLER || x->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                { if (!w_image(b, d->binding, x->type, ii, n)) return 0; }
+            if (!build_array(b, st, sh[st], d, x, rt, rs)) return 0;
             continue;
         }
         switch (x->type) {
@@ -479,7 +535,7 @@ static int kernels_init(void) {
 static VkPipeline kernel_get(hvk_kernel k) {
     static const struct { const uint32_t *c; size_t n; } src[HVK_K_N] = {{report_comp_spv, sizeof report_comp_spv}, {predicate_comp_spv, sizeof predicate_comp_spv},
         {quad_index_comp_spv, sizeof quad_index_comp_spv}, {astc_decode_comp_spv, sizeof astc_decode_comp_spv}, {deswizzle_comp_spv, sizeof deswizzle_comp_spv},
-        {ds_pack_comp_spv, sizeof ds_pack_comp_spv}};
+        {ds_pack_comp_spv, sizeof ds_pack_comp_spv}, {quad_ind_comp_spv, sizeof quad_ind_comp_spv}};
     if (!kernels_init()) return VK_NULL_HANDLE;
     pthread_mutex_lock(&g_kernel_mu);
     if (!g_kernel[k]) {
@@ -558,7 +614,120 @@ int hvk_clear_tri(VkCommandBuffer cb, const VkFormat color[8], int ncolor, VkFor
     return 1;
 }
 
+// ---------- Draw-based copies (design 2.7; step P8) ----------
+// What vkCmdBlitImage cannot do: a colour copy between formats the device cannot blit (or a multisampled source), and a depth copy between two depth formats (blits need the same
+// one), as the Metal backend's copy_t2t_draw: one pass per layer over the destination region, the source read through a sampled view (bilinear for LINEAR_FILTER), the depth
+// written from the fragment shader, the stencil too where the device has VK_EXT_shader_stencil_export (else it is left as it was, said once). Integer formats are not drawn
+// (the Metal backend does not either: what a copy between an integer and a float format gives is not known), they keep the caller's red line
+typedef struct { VkFormat color, depth, stencil; uint32_t kind; } copy_key;
+static nvn_hmap g_copy;   // copy_key → VkPipeline (boxed)
+static VkDescriptorSetLayout g_copy_dsl; static VkPipelineLayout g_copy_pl; static VkShaderModule g_copy_vs, g_copy_fs[3]; static VkSampler g_copy_samp[2];
+static int copy_init(void) {
+    if (g_copy_pl) return 1;
+    VkDescriptorSetLayoutBinding bd[2] = {{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}, {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo di = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, 2, bd};
+    if (vkCreateDescriptorSetLayout(hvk.d, &di, NULL, &g_copy_dsl)) return 0;
+    VkPushConstantRange pc = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48};
+    VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &g_copy_dsl, 1, &pc};
+    if (vkCreatePipelineLayout(hvk.d, &pi, NULL, &g_copy_pl)) { g_copy_pl = VK_NULL_HANDLE; return 0; }
+    for (int i = 0; i < 2; i++) {
+        VkSamplerCreateInfo si = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, NULL, 0, i ? VK_FILTER_LINEAR : VK_FILTER_NEAREST, i ? VK_FILTER_LINEAR : VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 0, VK_FALSE, 1, VK_FALSE, VK_COMPARE_OP_ALWAYS, 0, 0,
+            VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, VK_FALSE};
+        if (vkCreateSampler(hvk.d, &si, NULL, &g_copy_samp[i])) return 0;
+    }
+    g_copy_vs = hvk_module(copy_vert_spv, sizeof copy_vert_spv);
+    g_copy_fs[0] = hvk_module(copy_frag_k0_spv, sizeof copy_frag_k0_spv); g_copy_fs[1] = hvk_module(copy_frag_k1_spv, sizeof copy_frag_k1_spv);
+    if (hvk.dev.x.stencil_export) g_copy_fs[2] = hvk_module(copy_frag_k2_spv, sizeof copy_frag_k2_spv);
+    return g_copy_vs && g_copy_fs[0] && g_copy_fs[1];
+}
+static VkPipeline copy_pipeline(const copy_key *k) {
+    if (!g_copy.klen) nvn_hm_init(&g_copy, sizeof *k);
+    VkPipeline *have = nvn_hm_get(&g_copy, k);
+    if (have) return *have;
+    VkPipelineShaderStageCreateInfo stg[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, g_copy_vs, "main", NULL},
+                                              {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, g_copy_fs[k->kind], "main", NULL}};
+    VkPipelineVertexInputStateCreateInfo vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, NULL, 0, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE};
+    VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, NULL, 0, 1, NULL, 1, NULL};
+    VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, NULL, 0, VK_FALSE, VK_FALSE, VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1};
+    VkPipelineMultisampleStateCreateInfo ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0, VK_SAMPLE_COUNT_1_BIT};
+    VkStencilOpState so = {VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 0xff, 0xff, 0};
+    VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, NULL, 0, k->kind > 0, k->kind > 0, VK_COMPARE_OP_ALWAYS, VK_FALSE, k->kind == 2, so, so, 0, 1};
+    VkPipelineColorBlendAttachmentState ba = {VK_FALSE, 0, 0, 0, 0, 0, 0, 0xf};
+    VkPipelineColorBlendStateCreateInfo cbs = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, NULL, 0, VK_FALSE, VK_LOGIC_OP_COPY, k->kind == 0 ? 1u : 0u, &ba};
+    VkDynamicState dsv[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dy = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, NULL, 0, 2, dsv};
+    VkPipelineRenderingCreateInfo ri = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, NULL, 0, k->kind == 0 ? 1u : 0u, &k->color, k->depth, k->stencil};
+    VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri, 0, 2, stg, &vi, &ia, NULL, &vp, &rs, &ms, &ds, &cbs, &dy, g_copy_pl, VK_NULL_HANDLE, 0, VK_NULL_HANDLE, -1};
+    VkPipeline p = VK_NULL_HANDLE;
+    if (vkCreateGraphicsPipelines(hvk.d, VK_NULL_HANDLE, 1, &ci, NULL, &p)) { p = VK_NULL_HANDLE; HVK_RED_ONCE("the draw-based copy pipeline could not be made (format %u / depth %u)", (unsigned)k->color, (unsigned)k->depth); }
+    VkPipeline *box = malloc(sizeof *box); if (box) { *box = p; nvn_hm_put(&g_copy, k, box); }
+    return p;
+}
+int hvk_copy_draw(VkCommandBuffer cb, const hvk_view *sv, const hvk_view *dv, const int32_t src[4], const int32_t dst[4], int linear, uint32_t layers) {
+    if (!copy_init() || !sv->view || !dv->view) return 0;
+    int depth = (dv->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0;
+    if (depth != ((sv->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0) || sv->cls == NVN_VK_UINT || sv->cls == NVN_VK_SINT || dv->cls == NVN_VK_UINT || dv->cls == NVN_VK_SINT) return 0;
+    if (dv->samples > VK_SAMPLE_COUNT_1_BIT) return 0;
+    hvk_view ssv = {0}; int stencil = 0;
+    if (depth && (dv->aspect & VK_IMAGE_ASPECT_STENCIL_BIT)) {   // the stencil too: from a stencil view of the source, where the device can export it
+        view_t vv = {0}; vv.set_levels = 1; vv.base_level = (uint8_t)sv->level; vv.nlevels = 1; vv.set_layers = 1; vv.min_layer = (uint16_t)sv->layer0; vv.nlayers = (uint16_t)sv->layers;
+        vv.set_dsmode = 1; vv.dsmode = NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL;
+        extern int hvk_tex_view_typed(hvk_tex *x, const view_t *v, int kind, int want_type, uint8_t want_cls, hvk_view *out);
+        if (hvk.dev.x.stencil_export && g_copy_fs[2] && hvk_tex_view_typed(sv->t, &vv, HVK_VIEW_SAMPLED, VK_IMAGE_VIEW_TYPE_2D_ARRAY, NVN_VK_UINT, &ssv) && (ssv.aspect & VK_IMAGE_ASPECT_STENCIL_BIT)) stencil = 1;
+        else HVK_RED_ONCE("draw-based depth-stencil copy without VK_EXT_shader_stencil_export (or a stencil view of the source): the stencil is left as it was");
+    }
+    copy_key k = {depth ? VK_FORMAT_UNDEFINED : dv->format, depth ? dv->format : VK_FORMAT_UNDEFINED, stencil ? dv->format : VK_FORMAT_UNDEFINED, depth ? (stencil ? 2u : 1u) : 0u};
+    VkPipeline p = copy_pipeline(&k);
+    if (!p) return 0;
+    slot_sets *ss = &g_slots[hvk_slot_index() & 15];
+    VkDescriptorSet set = set_alloc(ss, g_copy_dsl);
+    if (!set) return 0;
+    VkDescriptorImageInfo ii[2] = {{g_copy_samp[linear && !depth], sv->view, VK_IMAGE_LAYOUT_GENERAL}, {g_copy_samp[0], stencil ? ssv.view : sv->view, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii[0], NULL, NULL},
+                                 {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, 1, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii[1], NULL, NULL}};
+    vkUpdateDescriptorSets(hvk.d, stencil ? 2 : 1, w, 0, NULL);
+    uint32_t sw = sv->w ? sv->w : 1, sh = sv->h ? sv->h : 1;
+    int32_t dw = dst[2] > 0 ? dst[2] : 1, dh = dst[3] > 0 ? dst[3] : 1;
+    for (uint32_t z = 0; z < layers; z++) {
+        VkRenderingAttachmentInfo a = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, NULL, dv->view, VK_IMAGE_LAYOUT_GENERAL, 0, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE};
+        // one layer of the destination at a time: the caller's view is of the first, the others are made here
+        hvk_view lv = *dv;
+        if (z) {
+            view_t vv = {0}; vv.set_levels = 1; vv.base_level = (uint8_t)dv->level; vv.nlevels = 1; vv.set_layers = 1; vv.min_layer = (uint16_t)(dv->layer0 + z); vv.nlayers = 1;
+            if (!hvk_tex_view(dv->t, &vv, HVK_VIEW_ATTACH, &lv)) return z > 0;
+        }
+        a.imageView = lv.view;
+        VkRenderingInfo r1 = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, {lv.w, lv.h}}, 1, 0, depth ? 0u : 1u, depth ? NULL : &a, depth ? &a : NULL, stencil ? &a : NULL};
+        vkCmdBeginRendering(cb, &r1);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_copy_pl, 0, 1, &set, 0, NULL);
+        struct { float src[4], dst[4], layer, pad[3]; } pc = {{(float)src[0], (float)src[1], (float)src[2] / (float)dw, (float)src[3] / (float)dh}, {(float)dst[0], (float)dst[1], (float)sw, (float)sh}, (float)z, {0, 0, 0}};
+        if (src[2] < 0) pc.src[0] = (float)(src[0] - src[2]);   // mirrored in x: from the region's far edge, walking back
+        if (src[3] < 0) pc.src[1] = (float)(src[1] - src[3]);
+        vkCmdPushConstants(cb, g_copy_pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 36, &pc);
+        VkViewport v = {(float)dst[0], (float)dst[1], (float)dw, (float)dh, 0, 1};
+        VkRect2D sc = {{dst[0] > 0 ? dst[0] : 0, dst[1] > 0 ? dst[1] : 0}, {(uint32_t)dw, (uint32_t)dh}};
+        if ((uint32_t)sc.offset.x + sc.extent.width > lv.w) sc.extent.width = lv.w > (uint32_t)sc.offset.x ? lv.w - (uint32_t)sc.offset.x : 0;
+        if ((uint32_t)sc.offset.y + sc.extent.height > lv.h) sc.extent.height = lv.h > (uint32_t)sc.offset.y ? lv.h - (uint32_t)sc.offset.y : 0;
+        vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
+        if (sc.extent.width && sc.extent.height) vkCmdDraw(cb, 3, 1, 0, 0);
+        vkCmdEndRendering(cb);
+    }
+    atomic_fetch_add(&hvk.st_copy_draws, 1);
+    return 1;
+}
+
 void hvk_pipeline_shutdown(void) {
+    for (uint32_t i = 0; i < g_copy.cap; i++) if (g_copy.vals && g_copy.vals[i]) { if (*(VkPipeline *)g_copy.vals[i]) vkDestroyPipeline(hvk.d, *(VkPipeline *)g_copy.vals[i], NULL); free(g_copy.vals[i]); }
+    nvn_hm_clear(&g_copy, NULL);
+    if (g_copy_pl) vkDestroyPipelineLayout(hvk.d, g_copy_pl, NULL);
+    if (g_copy_dsl) vkDestroyDescriptorSetLayout(hvk.d, g_copy_dsl, NULL);
+    for (int i = 0; i < 2; i++) if (g_copy_samp[i]) vkDestroySampler(hvk.d, g_copy_samp[i], NULL);
+    if (g_copy_vs) vkDestroyShaderModule(hvk.d, g_copy_vs, NULL);
+    for (int i = 0; i < 3; i++) if (g_copy_fs[i]) vkDestroyShaderModule(hvk.d, g_copy_fs[i], NULL);
+    g_copy_pl = VK_NULL_HANDLE; g_copy_dsl = VK_NULL_HANDLE; g_copy_vs = VK_NULL_HANDLE; memset(g_copy_samp, 0, sizeof g_copy_samp); memset(g_copy_fs, 0, sizeof g_copy_fs);
     for (uint32_t i = 0; i < g_cso.cap; i++) if (g_cso.vals && g_cso.vals[i]) { if (*(VkPipeline *)g_cso.vals[i]) vkDestroyPipeline(hvk.d, *(VkPipeline *)g_cso.vals[i], NULL); free(g_cso.vals[i]); }
     nvn_hm_clear(&g_cso, NULL);
     for (uint32_t i = 0; i < g_clr.cap; i++) if (g_clr.vals && g_clr.vals[i]) { if (*(VkPipeline *)g_clr.vals[i]) vkDestroyPipeline(hvk.d, *(VkPipeline *)g_clr.vals[i], NULL); free(g_clr.vals[i]); }

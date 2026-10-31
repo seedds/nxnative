@@ -8,12 +8,18 @@
 // rasterization order, and a game barrier after storage writes ends the pass first (as the Metal backend's swrite_note).
 // Render passes: dynamic rendering, begun at the first draw or clear after SetRenderTargets; full clears before it become load operations (folded clears, as Metal's load
 // actions); a clear inside a pass, with a scissor or under a condition is vkCmdClearAttachments; one with a partial channel or stencil mask is the clear triangle (2.7, 5.5).
-// Counters (4.6): samples passed from precise occlusion queries, one per pass segment, timestamps from vkCmdWriteTimestamp2; at the next point outside a pass a kernel adds them up,
-// converts the timestamp to NVN's 614.4 MHz units on the guest clock (VK_KHR_calibrated_timestamps) and writes the 16-byte report into guest memory, in order on the GPU, so a
-// later command of the same submission reads it (the Metal backend's CPU reports cannot). Conditional rendering (4.7): a one-thread kernel compares the two counters into a
-// predicate word that the following passes test (VK_EXT_conditional_rendering).
-// Declared with a red line: indirect quads and fans, and indices or vertices the GPU writes earlier in the same submission that need a CPU conversion; other counter types
-// (pipeline statistics, primitives generated: phase P8); the alpha test; advanced blend modes; viewport swizzles other than a negated y; presentation (phase P4).
+// Counters (4.6): per pass segment, while a counter of its kind is counted, a precise occlusion query (samples passed), a pipeline statistics query (input vertices and
+// primitives, shader invocations, clipper primitives), a primitives-generated query and a transform feedback stream query (primitives written; step P8); timestamps from
+// vkCmdWriteTimestamp2; at the next point outside a pass a kernel adds a type's segments to its accumulator, converts the timestamp to NVN's 614.4 MHz units on the guest clock
+// (VK_KHR_calibrated_timestamps) and writes the 16-byte report into guest memory, in order on the GPU, so a later command of the same submission reads it (the Metal backend's
+// CPU reports cannot). Conditional rendering (4.7): a one-thread kernel compares the two counters into a predicate word that the following passes test
+// (VK_EXT_conditional_rendering). Transform feedback (design 6, step P8): native, its counters between segments the backend's own, DrawTransformFeedback through
+// vkCmdDrawIndirectByteCountEXT. Feedback draws (5.5, step P8): a draw that reads an attachment of its pass splits the pass when the pass wrote it, and a pass that only reads
+// an attachment does not store it. Indirect quads (step P8): converted on the GPU.
+// Declared with a red line: indices or vertices the GPU writes earlier in the same submission that need a CPU conversion other than quads; indirect draws with restart, 8-bit
+// indices without the device's support or line loops; the counter types Vulkan has no counter for (TESS_EVALUATION_SHADER_PRIMITIVES, ZCULL_STATS); the alpha test (its
+// reference is not recorded); advanced blend modes other than the Porter-Duff ones (VK_EXT_blend_operation_advanced is not used); viewport swizzles other than a negated y
+// without VK_NV_viewport_swizzle; tessellation without a control shader; presentation (phase P4).
 // Pipelines (phase P5): the draw fills its key through vk_gpl.c's hvk_key_fill and takes its pipeline from hvk_gfx_pipeline, which counts the time a draw waits for it; the first
 // submission starts the prewarm (vk_prewarm.c), as the Metal backend's does, since the vertex stage's depth mode is the game's by then.
 #include "plat/plat.h"
@@ -30,14 +36,21 @@
 #include <string.h>
 
 // ---------- Submission slots ----------
-enum { NSLOT = 8, NOCC = 4096, NTS = 1024 };
+enum { NSLOT = 8, NSEG = 4096, NTS = 1024 };
+// The query kinds of the counters (4.6; step P8): while a counter of a kind is counted, every pass segment opens one query of that kind. Occlusion (samples passed), pipeline
+// statistics (the ten graphics statistics in bit order: input vertices, input primitives, vertex shader invocations, geometry shader invocations and primitives, clipping
+// invocations and primitives, fragment shader invocations, tessellation control patches, tessellation evaluation invocations), primitives generated
+// (VK_EXT_primitives_generated_query) and transform feedback stream 0 (primitives written, primitives needed)
+enum { QK_OCC, QK_STAT, QK_PGEN, QK_XFB, QK_N };
+#define K_STAT_BITS 0x3ffu
+static const uint32_t k_qk_stride[QK_N] = {8, 80, 8, 16};   // bytes of one query's results (64-bit values)
 typedef enum { POST_EVENT, POST_COUNTER } post_kind;
 typedef struct { post_kind kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; } post_op;
 typedef struct {
     VkCommandPool pool; VkCommandBuffer pre, main; int pre_begun;
     uint64_t fence;            // the fence of the submission it holds, 0 when free
     hvk_chunk *chunks;
-    VkQueryPool occ, ts; uint32_t nocc, nts;
+    VkQueryPool qp[QK_N], ts; uint32_t nseg, nts;   // qp: NSEG queries of each kind (VK_NULL_HANDLE: a kind the device has not); nseg: the pass segments counted so far
     post_op *posts; int nposts, cposts;
 } slot_t;
 static slot_t g_slot[NSLOT];
@@ -148,12 +161,37 @@ int hvk_oneoff_end(VkCommandBuffer cb) {
     return r == VK_SUCCESS;
 }
 
-// ---------- Counters (4.6): the occlusion accumulator, the calibration ----------
-static VkBuffer g_acc; static VkDeviceMemory g_acc_mem; static VkDeviceAddress g_acc_dev;   // the samples-passed count folded so far (64 bits)
-static int g_counting, g_acc_valid;        // a ResetCounter(SAMPLES_PASSED) was seen; g_acc holds the count up to g_occ_first (else it is taken as 0)
-static uint32_t g_occ_first;               // the first query of this slot not yet added into g_acc
+// ---------- Counters (4.6): the accumulators, the calibration ----------
+// Each NVN counter type that is counted (from its first ResetCounter or ReportCounter on) has a 64-bit accumulator in g_acc (at 8 × type) holding its count up to the first
+// segment of the open submission it has not folded in yet (first), and reads as 0 until a report stores into it (valid). The NVN types map onto a query kind and a field of its
+// results; the ones Vulkan has no counter for are written on the CPU with a zero count, said once (k_ctr kind -1)
+enum { NCTR = 17 };
+static VkBuffer g_acc; static VkDeviceMemory g_acc_mem; static VkDeviceAddress g_acc_dev;
+static int g_qk_on[QK_N];                  // that kind is counted: each pass segment opens one of its queries
+static struct { uint8_t on, valid; uint32_t first; } g_ct[NCTR];
+static const struct { int8_t kind, field; const char *name; } k_ctr[NCTR] = {
+    [NVN_COUNTER_TYPE_TIMESTAMP] = {-1, 0, "TIMESTAMP"}, [NVN_COUNTER_TYPE_SAMPLES_PASSED] = {QK_OCC, 0, "SAMPLES_PASSED"},
+    [NVN_COUNTER_TYPE_INPUT_VERTICES] = {QK_STAT, 0, "INPUT_VERTICES"}, [NVN_COUNTER_TYPE_INPUT_PRIMITIVES] = {QK_STAT, 1, "INPUT_PRIMITIVES"},
+    [NVN_COUNTER_TYPE_VERTEX_SHADER_INVOCATIONS] = {QK_STAT, 2, "VERTEX_SHADER_INVOCATIONS"},
+    [NVN_COUNTER_TYPE_TESS_CONTROL_SHADER_INVOCATIONS] = {QK_STAT, 8, "TESS_CONTROL_SHADER_INVOCATIONS"},   // Vulkan counts the control shader's patches, as D3D's HSInvocations
+    [NVN_COUNTER_TYPE_TESS_EVALUATION_SHADER_INVOCATIONS] = {QK_STAT, 9, "TESS_EVALUATION_SHADER_INVOCATIONS"},
+    [NVN_COUNTER_TYPE_GEOMETRY_SHADER_INVOCATIONS] = {QK_STAT, 3, "GEOMETRY_SHADER_INVOCATIONS"}, [NVN_COUNTER_TYPE_FRAGMENT_SHADER_INVOCATIONS] = {QK_STAT, 7, "FRAGMENT_SHADER_INVOCATIONS"},
+    [NVN_COUNTER_TYPE_TESS_EVALUATION_SHADER_PRIMITIVES] = {-1, 0, "TESS_EVALUATION_SHADER_PRIMITIVES (no Vulkan statistic)"},
+    [NVN_COUNTER_TYPE_GEOMETRY_SHADER_PRIMITIVES] = {QK_STAT, 4, "GEOMETRY_SHADER_PRIMITIVES"},
+    [NVN_COUNTER_TYPE_CLIPPER_INPUT_PRIMITIVES] = {QK_STAT, 5, "CLIPPER_INPUT_PRIMITIVES"}, [NVN_COUNTER_TYPE_CLIPPER_OUTPUT_PRIMITIVES] = {QK_STAT, 6, "CLIPPER_OUTPUT_PRIMITIVES"},
+    [NVN_COUNTER_TYPE_PRIMITIVES_GENERATED] = {QK_PGEN, 0, "PRIMITIVES_GENERATED"},
+    [NVN_COUNTER_TYPE_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN] = {QK_XFB, 0, "TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN"},
+    [NVN_COUNTER_TYPE_ZCULL_STATS] = {-1, 0, "ZCULL_STATS (Maxwell's Z-cull: no Vulkan counterpart)"}, [NVN_COUNTER_TYPE_TIMESTAMP_TOP] = {-1, 0, "TIMESTAMP_TOP"},
+};
 static uint64_t g_cal_mul, g_cal_g0, g_cal_n0;   // NVN ticks = n0 + ((gpu ticks - g0) * mul >> 32)
-typedef struct { uint64_t dst; uint32_t q0, nq, ts, flags; } report_t;   // flags: 1 samples passed, 2 use the accumulator, 4 store into the accumulator, 8 timestamp counter value
+// Transform feedback's state (the section below): the capture's byte counters between pass segments, whether a capture is begun, the control buffers it was saved into
+static VkBuffer g_tfc; static VkDeviceMemory g_tfc_mem;
+static int g_tf_active;
+typedef struct { uint64_t ctl; uint32_t stride; uint8_t buf; } tf_ctl_ent;
+static tf_ctl_ent g_tf_tab[64]; static int g_tf_ntab, g_tf_next;
+// A report the kernel writes: its kind's queries q0 .. q0 + nq - 1, the timestamp query ts; flags: 1 sum the queries, 2 start from the accumulator, 4 store into the accumulator,
+// 8 the counter field is the timestamp (a timestamp report); kind and field: which results are summed; type: whose accumulator
+typedef struct { uint64_t dst; uint32_t q0, nq, ts, flags; int8_t kind, field; uint8_t type; } report_t;
 static report_t g_rep[64]; static int g_nrep;
 static void calibrate(void) {
     double period = hvk.lim.timestampPeriod > 0 ? hvk.lim.timestampPeriod : 1;
@@ -189,16 +227,40 @@ struct pass_t {
     VkRenderingAttachmentInfo da, sa; int has_d, has_s;
     VkFormat cfmt[8], dfmt, sfmt; uint8_t ccls[8]; hvk_view cv[8], dv;
     VkExtent2D extent; uint32_t layers; VkSampleCountFlagBits samples;
-    int swrite, occ_open; uint32_t occ_q; int cond_open, xfb_open, xfb_n;
+    int swrite, seg_open; uint32_t seg, seg_kinds; int cond_open, xfb_open; uint32_t xfb_mask;
+    uint32_t written;   // the attachments a command of this pass wrote (bit i colour slot i, 8 depth, 9 stencil): a draw that samples one of them begins a new pass (design 5.5; step P8)
+    uint32_t sampled;   // the attachments the draw being bound samples (hvk_feedback_note)
+    uint32_t store_none;   // attachments this pass only reads (a feedback pass): stored with STORE_OP_NONE, so the store is no write after the draws' sampled reads
+    int noting;         // hvk_bind_resources is building a draw's descriptors: its views are checked against the attachments
     int d24sub;   // the depth attachment is NVN depth 24 held in a 32-bit float format: the constant depth bias goes in 24-bit units (decision D10)
 };
 static pass_t P;
 static int pass_active(void) { return P.active; }
+// A pass segment of the counters (4.6): inside a pass, one query of each kind that is counted, ended at the pass end or at a report or reset of a counter
+static void seg_open(VkCommandBuffer cb) {
+    if (P.seg_open || g_cur < 0) return;
+    uint32_t kinds = 0; for (int k = 0; k < QK_N; k++) if (g_qk_on[k] && g_slot[g_cur].qp[k]) kinds |= 1u << k;
+    if (!kinds) return;
+    slot_t *s = &g_slot[g_cur];
+    if (s->nseg >= NSEG) { HVK_RED_ONCE("more than %d counter segments (pass segments) in one submission: the rest are not counted", NSEG); return; }
+    P.seg = s->nseg++; P.seg_kinds = kinds; P.seg_open = 1;
+    for (int k = 0; k < QK_N; k++) if (kinds >> k & 1) {
+        if (k == QK_XFB) vkCmdBeginQueryIndexedEXT(cb, s->qp[k], P.seg, 0, 0);
+        else vkCmdBeginQuery(cb, s->qp[k], P.seg, k == QK_OCC ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
+    }
+}
+static void seg_close(VkCommandBuffer cb) {
+    if (!P.seg_open) return;
+    slot_t *s = &g_slot[g_cur];
+    for (int k = 0; k < QK_N; k++) if (P.seg_kinds >> k & 1) { if (k == QK_XFB) vkCmdEndQueryIndexedEXT(cb, s->qp[k], P.seg, 0); else vkCmdEndQuery(cb, s->qp[k], P.seg); }
+    P.seg_open = 0;
+}
+static uint32_t g_store_none_next;         // the attachments the next pass stores with STORE_OP_NONE (a feedback split, hvk_draw)
 static int g_rc_skip;                      // SetRenderEnable(false): draws and clears are skipped
 static int g_cond_on; static VkBuffer g_cond_buf; static VkDeviceSize g_cond_off;   // a GPU condition: the predicate word the passes test
 static struct { int valid; VkPipeline pipe; } g_bound;   // the pipeline bound and whether the dynamic state shadow below holds
 static struct dyn_shadow { int valid; VkViewport vp; VkRect2D sc; uint32_t cull, front, topo, dt, dw, dcmp, st, sop[2][4], scm[2], swm[2], sref[2], rd, dbe, pr, poly, dclamp, a2c, samples, logic_en, logic, patch;
-                           float bias[3], bc[4], lw; VkColorComponentFlags wm[8]; uint32_t ben[8]; VkColorBlendEquationEXT beq[8]; } g_dyn;
+                           float bias[3], bc[4], lw; VkColorComponentFlags wm[8]; uint32_t ben[8]; VkColorBlendEquationEXT beq[8]; uint32_t line; VkViewportSwizzleNV swz; } g_dyn;
 static void reports_flush(void);
 static void cond_begin(VkCommandBuffer cb) {
     if (!g_cond_on || !hvk.dev.caps.cond_render) return;
@@ -245,7 +307,7 @@ static int pass_begin(VkCommandBuffer cb) {
         int dup = 0; for (int j = 0; j < i; j++) if (P.ca[j].imageView && same_sub(&P.cv[j], &P.cv[i])) dup = 1;
         if (dup) { HVK_NOTE_ONCE("one texture at two colour slots (first case slot %d): attached once, as the Metal backend's rt_dup_slot", i); P.cv[i].view = VK_NULL_HANDLE; continue; }
         P.ca[i].imageView = P.cv[i].view; P.cfmt[i] = P.cv[i].format; P.ccls[i] = P.cv[i].cls;
-        if (R.clear_c[i] && !g_cond_on) { P.ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; P.ca[i].clearValue = clear_value_of(P.cv[i].cls, &R.cc[i]); R.clear_c[i] = 0; }
+        if (R.clear_c[i] && !g_cond_on) { P.ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; P.ca[i].clearValue = clear_value_of(P.cv[i].cls, &R.cc[i]); R.clear_c[i] = 0; P.written |= 1u << i; }
         if (P.cv[i].w < w) w = P.cv[i].w;
         if (P.cv[i].h < h) h = P.cv[i].h;
         if (P.cv[i].layers < layers) layers = P.cv[i].layers;
@@ -260,8 +322,8 @@ static int pass_begin(VkCommandBuffer cb) {
                                            VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE};
             P.has_d = (P.dv.aspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0; P.has_s = (P.dv.aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
             P.da = P.sa = a;
-            if (P.has_d && R.clear_d && !g_cond_on) { P.da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; P.da.clearValue.depthStencil.depth = hvk_depth_clear_value(P.dv.format, R.cd); R.clear_d = 0; }
-            if (P.has_s && R.clear_s && !g_cond_on) { P.sa.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; P.sa.clearValue.depthStencil.stencil = R.cs & 0xff; R.clear_s = 0; }
+            if (P.has_d && R.clear_d && !g_cond_on) { P.da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; P.da.clearValue.depthStencil.depth = hvk_depth_clear_value(P.dv.format, R.cd); R.clear_d = 0; P.written |= 1u << 8; }
+            if (P.has_s && R.clear_s && !g_cond_on) { P.sa.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; P.sa.clearValue.depthStencil.stencil = R.cs & 0xff; R.clear_s = 0; P.written |= 1u << 9; }
             P.dfmt = P.has_d ? P.dv.format : VK_FORMAT_UNDEFINED; P.sfmt = P.has_s ? P.dv.format : VK_FORMAT_UNDEFINED;
             P.d24sub = P.has_d && hvk_tex_d24_substitute(x);
             if (P.dv.w < w) w = P.dv.w;
@@ -274,22 +336,26 @@ static int pass_begin(VkCommandBuffer cb) {
         w = R.has_sc && R.sc.x + R.sc.w > 0 ? (uint32_t)(R.sc.x + R.sc.w) : 1; h = R.has_sc && R.sc.y + R.sc.h > 0 ? (uint32_t)(R.sc.y + R.sc.h) : 1; layers = 1; samples = VK_SAMPLE_COUNT_1_BIT;
     }
     P.extent = (VkExtent2D){w, h}; P.layers = layers ? layers : 1; P.samples = samples ? samples : VK_SAMPLE_COUNT_1_BIT;
+    if (g_store_none_next) {   // a feedback pass: what it only reads is not stored (no write after the draws' reads of it; core in Vulkan 1.3)
+        for (int i = 0; i < P.nc; i++) if (g_store_none_next >> i & 1) P.ca[i].storeOp = VK_ATTACHMENT_STORE_OP_NONE;
+        if (g_store_none_next >> 8 & 1) P.da.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
+        if (g_store_none_next >> 9 & 1) P.sa.storeOp = VK_ATTACHMENT_STORE_OP_NONE;
+        P.store_none = g_store_none_next; g_store_none_next = 0;
+    }
     VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, P.extent}, P.layers, 0, (uint32_t)P.nc, P.ca, P.has_d ? &P.da : NULL, P.has_s ? &P.sa : NULL};
     vkCmdBeginRendering(cb, &ri);
     P.active = 1; g_bound.valid = 0; g_dyn.valid = 0;
     atomic_fetch_add(&hvk.st_passes, 1);
     cond_begin(cb);
-    if (g_counting && g_cur >= 0 && g_slot[g_cur].nocc < NOCC) {
-        P.occ_q = g_slot[g_cur].nocc++; vkCmdBeginQuery(cb, g_slot[g_cur].occ, P.occ_q, VK_QUERY_CONTROL_PRECISE_BIT); P.occ_open = 1;
-    } else if (g_counting) HVK_RED_ONCE("more than %d occlusion query segments in one submission: the rest are not counted", NOCC);
+    seg_open(cb);
     // under a condition the folded clears are made here, so the condition governs them (4.7)
     if (g_cond_on) {
         VkClearAttachment ca[10]; uint32_t n = 0;
-        for (int i = 0; i < P.nc; i++) if (R.clear_c[i] && P.ca[i].imageView) { ca[n++] = (VkClearAttachment){VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)i, clear_value_of(P.ccls[i], &R.cc[i])}; R.clear_c[i] = 0; }
+        for (int i = 0; i < P.nc; i++) if (R.clear_c[i] && P.ca[i].imageView) { ca[n++] = (VkClearAttachment){VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)i, clear_value_of(P.ccls[i], &R.cc[i])}; R.clear_c[i] = 0; P.written |= 1u << i; }
         if ((P.has_d && R.clear_d) || (P.has_s && R.clear_s)) {
             VkClearAttachment d = {0}; if (P.has_d && R.clear_d) { d.aspectMask |= VK_IMAGE_ASPECT_DEPTH_BIT; d.clearValue.depthStencil.depth = hvk_depth_clear_value(P.dfmt, R.cd); }
             if (P.has_s && R.clear_s) { d.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT; d.clearValue.depthStencil.stencil = R.cs & 0xff; }
-            ca[n++] = d; R.clear_d = R.clear_s = 0;
+            ca[n++] = d; R.clear_d = R.clear_s = 0; P.written |= 3u << 8;
         }
         if (n) { VkClearRect rr = {{{0, 0}, P.extent}, 0, P.layers}; vkCmdClearAttachments(cb, n, ca, 1, &rr); }
     }
@@ -300,7 +366,7 @@ static void pass_end_only(void) {
     if (!P.active) return;
     VkCommandBuffer cb = hvk_main();
     xfb_end(cb);
-    if (P.occ_open) { vkCmdEndQuery(cb, g_slot[g_cur].occ, P.occ_q); P.occ_open = 0; }
+    seg_close(cb);
     if (P.cond_open) { vkCmdEndConditionalRenderingEXT(cb); P.cond_open = 0; }
     vkCmdEndRendering(cb);
     P.active = 0; g_bound.valid = 0; g_need_barrier = 1;
@@ -328,7 +394,10 @@ static void slot_reset(int i) {
     s->pre_begun = 0;
     hvk_ring_slot_release(&s->chunks);
     hvk_pipeline_slot_reset(i);
-    if (hvk.dev.x.host_query_reset) { if (s->nocc) vkResetQueryPool(hvk.d, s->occ, 0, NOCC); if (s->nts) vkResetQueryPool(hvk.d, s->ts, 0, NTS); }
+    if (hvk.dev.x.host_query_reset) {
+        for (int k = 0; k < QK_N; k++) if (s->qp[k] && s->nseg) vkResetQueryPool(hvk.d, s->qp[k], 0, s->nseg);
+        if (s->nts) vkResetQueryPool(hvk.d, s->ts, 0, s->nts);
+    }
     s->nposts = 0; s->fence = 0;
 }
 void hvk_sub_begin(void);
@@ -343,21 +412,21 @@ void hvk_sub_begin(void) {
     hvk_ring_bind(&s->chunks);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vkBeginCommandBuffer(s->main, &bi);
-    if (!hvk.dev.x.host_query_reset) { VkCommandBuffer pre = hvk_pre(); vkCmdResetQueryPool(pre, s->occ, 0, NOCC); vkCmdResetQueryPool(pre, s->ts, 0, NTS); }
-    s->nocc = s->nts = 0; g_occ_first = 0;
+    if (!hvk.dev.x.host_query_reset) { VkCommandBuffer pre = hvk_pre(); for (int k = 0; k < QK_N; k++) if (s->qp[k]) vkCmdResetQueryPool(pre, s->qp[k], 0, NSEG); vkCmdResetQueryPool(pre, s->ts, 0, NTS); }
+    s->nseg = s->nts = 0;
+    for (int t = 0; t < NCTR; t++) g_ct[t].first = 0;   // the counters' segments of this submission start at its slot's first query
     g_open = atomic_load(&hvk_last_fence) + 1;
     g_need_barrier = 1; g_rc_skip = 0; g_cond_on = 0; g_nrep = 0;
     memset(&P, 0, sizeof P); g_bound.valid = 0; g_dyn.valid = 0;
     nvn_gw_reset();
-    if (g_counting && !g_acc_valid) {}   // the accumulator keeps its meaning across submissions
 }
-static void occ_fold(void);
+static void ctr_fold(void);
 uint64_t hvk_sub_commit(void);
 uint64_t hvk_sub_commit(void) {
     if (g_cur < 0) hvk_sub_begin();
     slot_t *s = &g_slot[g_cur];
     hvk_pass_end();
-    occ_fold();
+    ctr_fold();
     if (s->pre_begun) { hvk_full_barrier(s->pre); vkEndCommandBuffer(s->pre); }
     vkEndCommandBuffer(s->main);
     uint64_t f = g_open;
@@ -394,17 +463,28 @@ int hvk_commands_init(void) {
         VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, s->pool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 2};
         if (vkAllocateCommandBuffers(hvk.d, &ai, cbs)) return 0;
         s->pre = cbs[0]; s->main = cbs[1];
-        VkQueryPoolCreateInfo oq = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_OCCLUSION, NOCC, 0};
+        VkQueryPoolCreateInfo qi[QK_N] = {{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_OCCLUSION, NSEG, 0},
+            {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_PIPELINE_STATISTICS, NSEG, K_STAT_BITS},
+            {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT, NSEG, 0},
+            {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT, NSEG, 0}};
+        // pipelineStatisticsQuery is in the baseline (design 9.1); the primitives-generated query only where it may stay active under rasterizer discard (a query cannot be
+        // left out of the segments a discarded draw falls in: VUID-vkCmdDraw-primitivesGeneratedQueryWithRasterizerDiscard-06708)
+        int have[QK_N] = {1, 1, hvk.dev.x.prim_gen && hvk.dev.x.prim_gen_discard, hvk.dev.caps.xfb && hvk.dev.x.xfb_queries};
+        for (int k = 0; k < QK_N; k++) if (have[k] && vkCreateQueryPool(hvk.d, &qi[k], NULL, &s->qp[k])) return 0;
         VkQueryPoolCreateInfo tq = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, NULL, 0, VK_QUERY_TYPE_TIMESTAMP, NTS, 0};
-        if (vkCreateQueryPool(hvk.d, &oq, NULL, &s->occ) || vkCreateQueryPool(hvk.d, &tq, NULL, &s->ts)) return 0;
-        if (hvk.dev.x.host_query_reset) { vkResetQueryPool(hvk.d, s->occ, 0, NOCC); vkResetQueryPool(hvk.d, s->ts, 0, NTS); }
+        if (vkCreateQueryPool(hvk.d, &tq, NULL, &s->ts)) return 0;
+        if (hvk.dev.x.host_query_reset) { for (int k = 0; k < QK_N; k++) if (s->qp[k]) vkResetQueryPool(hvk.d, s->qp[k], 0, NSEG); vkResetQueryPool(hvk.d, s->ts, 0, NTS); }
     }
     VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, hvk.dev.queue_family};
     VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateCommandPool(hvk.d, &pi, NULL, &g_oneoff_pool) || vkCreateFence(hvk.d, &fi, NULL, &g_oneoff_fence)) return 0;
     void *map;
-    if (hvk_buffer_make(16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 1, &g_acc, &g_acc_mem, &map)) return 0;
-    memset(map, 0, 16);
+    if (hvk_buffer_make(8 * NCTR, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 1, &g_acc, &g_acc_mem, &map)) return 0;
+    memset(map, 0, 8 * NCTR);
+    // the capture's byte counters between pass segments (transform feedback, design 6): the backend's own, so a pause at a pass end never writes the game's control buffer
+    if (hvk.dev.caps.xfb && hvk_buffer_make(16, VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 1,
+                                            &g_tfc, &g_tfc_mem, &map)) return 0;
+    if (g_tfc) memset(map, 0, 16);
     if (hvk.dev.caps.buffer_device_address) { VkBufferDeviceAddressInfo ba = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, NULL, g_acc}; g_acc_dev = vkGetBufferDeviceAddress(hvk.d, &ba); }
     calibrate();
     g_quit = 0;
@@ -421,7 +501,7 @@ void hvk_commands_shutdown(void) {
     for (int i = 0; i < NSLOT; i++) {
         slot_t *s = &g_slot[i];
         hvk_ring_slot_release(&s->chunks);
-        if (s->occ) vkDestroyQueryPool(hvk.d, s->occ, NULL);
+        for (int k = 0; k < QK_N; k++) if (s->qp[k]) vkDestroyQueryPool(hvk.d, s->qp[k], NULL);
         if (s->ts) vkDestroyQueryPool(hvk.d, s->ts, NULL);
         if (s->pool) vkDestroyCommandPool(hvk.d, s->pool, NULL);
         free(s->posts); memset(s, 0, sizeof *s);
@@ -430,25 +510,29 @@ void hvk_commands_shutdown(void) {
     if (g_oneoff_fence) vkDestroyFence(hvk.d, g_oneoff_fence, NULL);
     if (g_timeline) vkDestroySemaphore(hvk.d, g_timeline, NULL);
     if (g_acc) { vkDestroyBuffer(hvk.d, g_acc, NULL); vkFreeMemory(hvk.d, g_acc_mem, NULL); hvk.dev.allocations--; }
+    if (g_tfc) { vkDestroyBuffer(hvk.d, g_tfc, NULL); vkFreeMemory(hvk.d, g_tfc_mem, NULL); hvk.dev.allocations--; }
+    g_tfc = VK_NULL_HANDLE; g_tf_active = 0; g_tf_ntab = 0;
     static_draw_buffers_free();
     g_oneoff_pool = VK_NULL_HANDLE; g_oneoff_fence = VK_NULL_HANDLE; g_timeline = VK_NULL_HANDLE; g_acc = VK_NULL_HANDLE;
-    g_cur = -1; g_next = 0; atomic_store(&g_done, 0); atomic_store(&hvk_last_fence, 0); g_counting = g_acc_valid = 0;
+    g_cur = -1; g_next = 0; atomic_store(&g_done, 0); atomic_store(&hvk_last_fence, 0); memset(g_qk_on, 0, sizeof g_qk_on); memset(g_ct, 0, sizeof g_ct);
 }
 
 // ---------- Counter reports (4.6) ----------
-typedef struct { uint32_t src[2], acc[2], ts[2], dst[2]; uint32_t nq, flags, mul[2], g0[2], n0[2]; } report_push;   // the kernel's push constants (shaders/report.comp)
+// The kernel's push constants (shaders/report.comp): the summed results are field `field` of each query, `stride` 64-bit values apart
+typedef struct { uint32_t src[2], acc[2], ts[2], dst[2]; uint32_t nq, flags, mul[2], g0[2], n0[2]; uint32_t stride, field; } report_push;
 static void addr2(uint32_t o[2], uint64_t a) { o[0] = (uint32_t)a; o[1] = (uint32_t)(a >> 32); }
 static void report_run(VkCommandBuffer cb, const report_t *r) {
     slot_t *s = &g_slot[g_cur];
-    hvk_alloc a; if (!hvk_ring_alloc((VkDeviceSize)(r->nq + 1) * 8, 16, &a)) return;
-    if (r->nq) vkCmdCopyQueryPoolResults(cb, s->occ, r->q0, r->nq, a.buf, a.off, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-    if (r->ts != UINT32_MAX) vkCmdCopyQueryPoolResults(cb, s->ts, r->ts, 1, a.buf, a.off + (VkDeviceSize)r->nq * 8, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    uint32_t stride = r->kind >= 0 ? k_qk_stride[r->kind] : 8;
+    hvk_alloc a; if (!hvk_ring_alloc((VkDeviceSize)r->nq * stride + 8, 16, &a)) return;
+    if (r->nq) vkCmdCopyQueryPoolResults(cb, s->qp[r->kind], r->q0, r->nq, a.buf, a.off, stride, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    if (r->ts != UINT32_MAX) vkCmdCopyQueryPoolResults(cb, s->ts, r->ts, 1, a.buf, a.off + (VkDeviceSize)r->nq * stride, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
     hvk_full_barrier(cb);
     VkBuffer db; VkDeviceSize doff; VkDeviceAddress dd = 0;
     if (r->dst && (!hvk_buf(r->dst, 16, &db, &doff, &dd) || !dd)) { HVK_RED_ONCE("counter report address %#llx is in no memory pool with a device address: not written", (unsigned long long)r->dst); return; }
     report_push p; memset(&p, 0, sizeof p);
-    addr2(p.src, a.dev); addr2(p.acc, g_acc_dev); addr2(p.ts, r->ts != UINT32_MAX ? a.dev + (VkDeviceAddress)r->nq * 8 : 0); addr2(p.dst, dd);
-    p.nq = r->nq; p.flags = r->flags | (r->ts != UINT32_MAX ? 16u : 0u);
+    addr2(p.src, a.dev); addr2(p.acc, g_acc_dev + 8 * (VkDeviceAddress)r->type); addr2(p.ts, r->ts != UINT32_MAX ? a.dev + (VkDeviceAddress)r->nq * stride : 0); addr2(p.dst, dd);
+    p.nq = r->nq; p.flags = r->flags | (r->ts != UINT32_MAX ? 16u : 0u); p.stride = stride / 8; p.field = (uint32_t)(r->field > 0 ? r->field : 0);
     addr2(p.mul, g_cal_mul); addr2(p.g0, g_cal_g0); addr2(p.n0, g_cal_n0);
     hvk_kernel_dispatch(cb, HVK_K_REPORT, &p, sizeof p, 1);
     g_need_barrier = 1;
@@ -472,52 +556,63 @@ static uint32_t ts_write(VkCommandBuffer cb, int top) {
     vkCmdWriteTimestamp2(cb, top ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, s->ts, q);
     return q;
 }
-static void occ_fold(void) {   // at the end of a submission: its queries go into the accumulator (the next submission's slot has its own pool)
-    if (!g_counting || g_cur < 0) return;
+static void ctr_fold(void) {   // at the end of a submission: every counted type's segments go into its accumulator (the next submission's slot has its own pools)
+    if (g_cur < 0) return;
     slot_t *s = &g_slot[g_cur];
-    if (g_occ_first >= s->nocc && g_acc_valid) return;
-    VkCommandBuffer cb = hvk_main();
-    hvk_barrier_if_needed(cb);
-    report_t r = {0, g_occ_first, s->nocc - g_occ_first, UINT32_MAX, 1u | (g_acc_valid ? 2u : 0u) | 4u};
-    report_run(cb, &r);
-    g_occ_first = s->nocc; g_acc_valid = 1;
+    for (int t = 0; t < NCTR; t++) {
+        if (!g_ct[t].on || (g_ct[t].first >= s->nseg && g_ct[t].valid)) continue;
+        VkCommandBuffer cb = hvk_main();
+        hvk_barrier_if_needed(cb);
+        report_t r = {0, g_ct[t].first, s->nseg - g_ct[t].first, UINT32_MAX, 1u | (g_ct[t].valid ? 2u : 0u) | 4u, k_ctr[t].kind, k_ctr[t].field, (uint8_t)t};
+        report_run(cb, &r);
+        g_ct[t].first = s->nseg; g_ct[t].valid = 1;
+    }
 }
+// A counter type starts being counted (its first reset or report): its kind's queries open from the next segment on. Called with the open segment closed
+static void ctr_start(int t) {
+    int k = k_ctr[t].kind;
+    g_qk_on[k] = 1;
+    if (!g_ct[t].on) { g_ct[t].on = 1; g_ct[t].valid = 0; g_ct[t].first = g_slot[g_cur].nseg; }
+}
+// The NVN counter types the device can count: its kind's query pool exists (pipeline statistics are in the baseline; primitives generated and transform feedback queries where present)
+static int ctr_mapped(uint64_t type) { return type < NCTR && k_ctr[type].kind >= 0 && g_cur >= 0 && g_slot[g_cur].qp[k_ctr[type].kind]; }
 void hvk_report_counter(uint64_t type, uint64_t addr);
 void hvk_report_counter(uint64_t type, uint64_t addr) {
     if (g_cur < 0) return;
     nvn_gw_sbw_note(addr, 16, SBW_REPORT);
     VkCommandBuffer cb = hvk_main();
     if (!hvk.dev.caps.buffer_device_address) { HVK_RED_ONCE("counter reports need buffer device addresses: written on the CPU at completion with a zero count"); post_add((post_op){POST_COUNTER, NULL, 0, 0, addr, (uint32_t)type}); return; }
-    if (type == NVN_COUNTER_TYPE_SAMPLES_PASSED) {
-        if (!g_counting) { g_counting = 1; g_acc_valid = 0; g_occ_first = g_slot[g_cur].nocc; }   // a report before any reset counts from here
-        if (P.active && P.occ_open) { vkCmdEndQuery(cb, g_slot[g_cur].occ, P.occ_q); P.occ_open = 0; }
-        if (!P.active) hvk_barrier_if_needed(cb);
-        uint32_t ts = ts_write(cb, 0);
-        slot_t *s = &g_slot[g_cur];
-        report_t r = {addr, g_occ_first, s->nocc - g_occ_first, ts, 1u | (g_acc_valid ? 2u : 0u) | 4u};
-        g_occ_first = s->nocc; g_acc_valid = 1;
-        if (P.active && s->nocc < NOCC) { P.occ_q = s->nocc++; vkCmdBeginQuery(cb, s->occ, P.occ_q, VK_QUERY_CONTROL_PRECISE_BIT); P.occ_open = 1; }
-        report_queue(r);
-        return;
-    }
     if (type == NVN_COUNTER_TYPE_TIMESTAMP || type == NVN_COUNTER_TYPE_TIMESTAMP_TOP) {
         if (!P.active) hvk_barrier_if_needed(cb);
         uint32_t ts = ts_write(cb, type == NVN_COUNTER_TYPE_TIMESTAMP_TOP);
-        report_queue((report_t){addr, 0, 0, ts, 8u});   // the counter field holds the timestamp too, as the Metal backend writes it
+        report_queue((report_t){addr, 0, 0, ts, 8u, -1, 0, (uint8_t)type});   // the counter field holds the timestamp too, as the Metal backend writes it
+        return;
+    }
+    if (ctr_mapped(type)) {   // a counter the GPU counts: its segments since the last report (or reset) are added to its accumulator, written with a timestamp
+        if (P.active) seg_close(cb); else hvk_barrier_if_needed(cb);
+        ctr_start((int)type);   // a report before any reset counts from here
+        uint32_t ts = ts_write(cb, 0);
+        slot_t *s = &g_slot[g_cur];
+        report_t r = {addr, g_ct[type].first, s->nseg - g_ct[type].first, ts, 1u | (g_ct[type].valid ? 2u : 0u) | 4u, k_ctr[type].kind, k_ctr[type].field, (uint8_t)type};
+        g_ct[type].first = s->nseg; g_ct[type].valid = 1;
+        if (P.active) seg_open(cb);
+        report_queue(r);
         return;
     }
     static _Atomic uint32_t seen;
     if (!(atomic_fetch_or(&seen, 1u << (type & 31)) >> (type & 31) & 1))
-        hostvk_log("[RED] [hostvk] counter type %llu (pipeline statistics, primitives generated, transform feedback, ZCull): not mapped (phase P8), the report is written on the CPU at completion with a zero count", (unsigned long long)type);
+        hostvk_log("[RED] [hostvk] counter type %llu (%s): no Vulkan counter on this device, the report is written on the CPU at completion with a zero count", (unsigned long long)type,
+                   type < NCTR ? k_ctr[type].name : "unknown");
     post_add((post_op){POST_COUNTER, NULL, 0, 0, addr, (uint32_t)type});
 }
 void hvk_reset_counter(uint64_t type);
 void hvk_reset_counter(uint64_t type) {
-    if (g_cur < 0 || type != NVN_COUNTER_TYPE_SAMPLES_PASSED) return;
+    if (g_cur < 0 || !ctr_mapped(type) || !hvk.dev.caps.buffer_device_address) return;
     VkCommandBuffer cb = hvk_main();
-    if (P.active && P.occ_open) { vkCmdEndQuery(cb, g_slot[g_cur].occ, P.occ_q); P.occ_open = 0; }
-    g_counting = 1; g_acc_valid = 0; g_occ_first = g_slot[g_cur].nocc;   // what was counted before is dropped: the accumulator reads as 0 until the next report stores into it
-    if (P.active && g_slot[g_cur].nocc < NOCC) { P.occ_q = g_slot[g_cur].nocc++; vkCmdBeginQuery(cb, g_slot[g_cur].occ, P.occ_q, VK_QUERY_CONTROL_PRECISE_BIT); P.occ_open = 1; }
+    if (P.active) seg_close(cb);
+    ctr_start((int)type);
+    g_ct[type].valid = 0; g_ct[type].first = g_slot[g_cur].nseg;   // what was counted before is dropped: the accumulator reads as 0 until the next report stores into it
+    if (P.active) seg_open(cb);
 }
 
 // ---------- Conditional rendering (4.7) ----------
@@ -546,47 +641,95 @@ void hvk_render_cond(const p_render_cond *rc) {
     g_cond_on = 1; g_cond_buf = a.buf; g_cond_off = a.off;
 }
 
-// ---------- Transform feedback ----------
+// ---------- Transform feedback (design 6, 2.2; step P8) ----------
+// Native VK_EXT_transform_feedback. A capture (Begin or Resume up to End or Pause) runs in pass segments: at a capturing draw the bound buffers of S.tf are bound and the capture
+// begun with the backend's own counter buffer g_tfc (four byte offsets), and it is ended into g_tfc at the pass end and before a pipeline is bound (Vulkan binds no pipeline
+// while a capture is active), so a resumed segment appends where the last one stopped. Begin zeroes g_tfc; Resume loads it from the game's control buffer; End and Pause save it
+// there (the first 16 bytes: the byte offset reached in each buffer, the layout the Metal backend's nvn_feedback.inc keeps too), outside any pass, in GPU order. A capture's
+// vertex size per buffer is the capturing shader's XfbStride (vk_shader.c), which End and Pause note for the control buffer: DrawTransformFeedback (recorded as an indirect array
+// draw at control + 16, hle_nvn.c) is drawn from that control buffer's byte offset with vkCmdDrawIndirectByteCountEXT, in GPU order (the Metal backend writes a vertex count at
+// control + 16 for its indirect draw instead; the game treats the 32 bytes as opaque either way). Rasterizer discard is dynamic state (OP_RAST_DISCARD, applied at each draw)
+static const hvk_shader *g_tf_sh;                         // the last pre-rasterization stage of the capture's latest capturing draw: its strides go to the control table
+static const tf_ctl_ent *tf_tab_find(uint64_t ctl) { for (int i = 0; i < g_tf_ntab; i++) if (g_tf_tab[i].ctl == ctl) return &g_tf_tab[i]; return NULL; }
+static void tf_tab_put(uint64_t ctl, const hvk_shader *sh) {
+    uint8_t buf = 0; uint32_t stride = 0;
+    for (int b = 0; sh && b < 4; b++) if (sh->xfb_stride[b] && S.tf[b].addr) { buf = (uint8_t)b; stride = sh->xfb_stride[b]; break; }   // buffer 0 when it is captured, as Maxwell's draw-auto counts
+    tf_ctl_ent *e = (tf_ctl_ent *)tf_tab_find(ctl);
+    if (!e) { e = &g_tf_tab[g_tf_ntab < 64 ? g_tf_ntab++ : (g_tf_next++ & 63)]; e->ctl = ctl; }
+    if (stride || !e->stride) { e->stride = stride; e->buf = buf; }
+}
 static int sh_xfb(const hvk_shader *s);
-static void xfb_begin(VkCommandBuffer cb) {
-    if (P.xfb_open || !S.tf_on || !hvk.dev.caps.xfb) return;
-    VkBuffer bufs[4], cbuf[4]; VkDeviceSize offs[4], sizes[4], coff[4]; uint32_t n = 0;
-    VkBuffer ctlb = VK_NULL_HANDLE; VkDeviceSize ctlo = 0; uint64_t ctl = 0;
-    for (int i = 0; i < 4; i++) if (S.tf[i].addr) ctl = 1;
+static const hvk_shader *last_prerast(hvk_shader *const sh[6]) { return sh[2] ? sh[2] : sh[4] ? sh[4] : sh[0]; }   // geometry, else tessellation evaluation, else vertex
+// The counter buffers of a segment: g_tfc at 4 i for each bound buffer i, none for the others (lavapipe 25.2.8 dereferences the stream-output target of every counter buffer
+// given at the end of a capture, bound or not: a counter for an unbound buffer crashed it)
+static uint32_t xfb_counters(uint32_t mask, VkBuffer cbuf[4], VkDeviceSize coff[4]) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < 4; i++) { cbuf[i] = (mask >> i & 1) ? g_tfc : VK_NULL_HANDLE; coff[i] = 4 * (VkDeviceSize)i; if (mask >> i & 1) n = i + 1; }
+    return n;
+}
+static void xfb_begin(VkCommandBuffer cb, const hvk_shader *last) {
+    if (P.xfb_open || !S.tf_on || !g_tf_active || !hvk.dev.caps.xfb || !g_tfc) return;
+    uint32_t mask = 0;
     for (uint32_t i = 0; i < 4; i++) {
-        if (!S.tf[i].addr || !hvk_buf(S.tf[i].addr, S.tf[i].size ? S.tf[i].size : 1, &bufs[i], &offs[i], NULL)) break;
-        sizes[i] = S.tf[i].size ? S.tf[i].size : VK_WHOLE_SIZE; n = i + 1;
+        VkBuffer b; VkDeviceSize o;
+        if (!S.tf[i].addr) { if (last && last->xfb_stride[i]) HVK_RED_ONCE("shader %s captures into transform feedback buffer %u, which is not bound: its outputs there are dropped", last->key, i); continue; }
+        VkDeviceSize size = S.tf[i].size ? S.tf[i].size : 4;
+        if (!hvk_buf(S.tf[i].addr, size, &b, &o, NULL)) { HVK_RED_ONCE("transform feedback buffer %u at %#llx (%llu bytes) is in no memory pool: not captured", i, (unsigned long long)S.tf[i].addr, (unsigned long long)size); continue; }
+        vkCmdBindTransformFeedbackBuffersEXT(cb, i, 1, &b, &o, &size);
+        mask |= 1u << i;
     }
-    if (!n) { HVK_RED_ONCE("transform feedback on with no capture buffer bound: nothing captured"); return; }
-    extern uint64_t hvk_tf_ctl;
-    ctl = hvk_tf_ctl;
-    if (!ctl || !hvk_buf(ctl, 16, &ctlb, &ctlo, NULL)) { HVK_RED_ONCE("transform feedback control buffer %#llx in no memory pool: captured from offset 0 and not saved", (unsigned long long)ctl); ctlb = VK_NULL_HANDLE; }
-    vkCmdBindTransformFeedbackBuffersEXT(cb, 0, n, bufs, offs, sizes);
-    for (uint32_t i = 0; i < n; i++) { cbuf[i] = ctlb; coff[i] = ctlo + 4 * i; }
-    vkCmdBeginTransformFeedbackEXT(cb, 0, ctlb ? n : 0, ctlb ? cbuf : NULL, ctlb ? coff : NULL);
-    P.xfb_open = 1; P.xfb_n = (int)n;
+    if (!mask) { HVK_RED_ONCE("transform feedback on with no capture buffer bound: nothing captured"); return; }
+    VkBuffer cbuf[4]; VkDeviceSize coff[4]; uint32_t n = xfb_counters(mask, cbuf, coff);
+    vkCmdBeginTransformFeedbackEXT(cb, 0, n, cbuf, coff);
+    P.xfb_open = 1; P.xfb_mask = mask; g_tf_sh = last;
 }
 static void xfb_end(VkCommandBuffer cb) {
     if (!P.xfb_open) return;
-    extern uint64_t hvk_tf_ctl;
-    VkBuffer ctlb = VK_NULL_HANDLE, cbuf[4]; VkDeviceSize ctlo = 0, coff[4];
-    if (hvk_tf_ctl && !hvk_buf(hvk_tf_ctl, 16, &ctlb, &ctlo, NULL)) ctlb = VK_NULL_HANDLE;
-    for (int i = 0; i < P.xfb_n; i++) { cbuf[i] = ctlb; coff[i] = ctlo + 4 * (VkDeviceSize)i; }
-    vkCmdEndTransformFeedbackEXT(cb, 0, ctlb ? (uint32_t)P.xfb_n : 0, ctlb ? cbuf : NULL, ctlb ? coff : NULL);
-    if (hvk_tf_ctl) nvn_gw_sbw_note(hvk_tf_ctl, 16, SBW_GPU);
+    VkBuffer cbuf[4]; VkDeviceSize coff[4]; uint32_t n = xfb_counters(P.xfb_mask, cbuf, coff);
+    vkCmdEndTransformFeedbackEXT(cb, 0, n, cbuf, coff);
+    for (int i = 0; i < 4; i++) if (P.xfb_mask >> i & 1) nvn_gw_sbw_note(S.tf[i].addr, S.tf[i].size, SBW_GPU);   // what later draws or copies read of the buffers comes from the GPU
     P.xfb_open = 0;
 }
-uint64_t hvk_tf_ctl;   // the control buffer of the capture in progress (its four byte offsets: the counters, nvn_feedback.h)
 void hvk_tf_state(const p_tf_state *b);
 void hvk_tf_state(const p_tf_state *b) {
     if (g_cur < 0) return;
-    if (!hvk.dev.caps.xfb) { HVK_RED_ONCE("transform feedback without VK_EXT_transform_feedback: not captured"); return; }
-    VkCommandBuffer cb = outside();   // a capture begins, pauses, resumes or ends between passes: the pass's end writes the counters into the control buffer
-    if (b->what == 0 || b->what == 3) {
-        hvk_tf_ctl = b->ctl;
-        if (b->what == 0 && b->ctl) { VkBuffer cbuf; VkDeviceSize co; if (hvk_buf(b->ctl, 16, &cbuf, &co, NULL)) { vkCmdFillBuffer(cb, cbuf, co & ~(VkDeviceSize)3, 16, 0); g_need_barrier = 1; } }
+    if (!hvk.dev.caps.xfb || !g_tfc) { HVK_RED_ONCE("transform feedback without VK_EXT_transform_feedback: not captured"); return; }
+    VkCommandBuffer cb = outside();   // a capture begins, pauses, resumes or ends between passes: the pass's end saved the counters into g_tfc
+    hvk_full_barrier(cb);             // after the capture's last counter write (and before a copy reads or writes them)
+    VkBuffer cb2; VkDeviceSize co = 0; int ctl_ok = b->ctl && hvk_buf(b->ctl, 16, &cb2, &co, NULL) && !(co & 3);
+    if (b->what == 0) {               // Begin: from byte 0 of every buffer
+        vkCmdFillBuffer(cb, g_tfc, 0, 16, 0); g_tf_active = 1; g_tf_sh = NULL;
+    } else if (b->what == 3) {        // Resume: where the control buffer's last save left off
+        if (ctl_ok) { VkBufferCopy c = {co, 0, 16}; vkCmdCopyBuffer(cb, cb2, g_tfc, 1, &c); }
+        else { HVK_RED_ONCE("transform feedback resumed from a control buffer at %#llx in no memory pool: resumed from byte 0", (unsigned long long)b->ctl); vkCmdFillBuffer(cb, g_tfc, 0, 16, 0); }
+        g_tf_active = 1;
+    } else {                          // End / Pause: the byte offsets reached saved into the control buffer, and noted for DrawTransformFeedback
+        if (ctl_ok) { VkBufferCopy c = {0, co, 16}; vkCmdCopyBuffer(cb, g_tfc, cb2, 1, &c); nvn_gw_pend_add(b->ctl, 16, 2); tf_tab_put(b->ctl, g_tf_sh); }
+        else if (b->ctl) HVK_RED_ONCE("transform feedback ended into a control buffer at %#llx in no memory pool (or not 4-byte aligned): not saved", (unsigned long long)b->ctl);
+        g_tf_active = 0;
     }
+    g_need_barrier = 1;
 }
+// A DrawTransformFeedback (an indirect array draw of one instance at a saved control buffer + 16): its vertex count is the control buffer's byte offset of the buffer it counts by,
+// divided by that buffer's vertex size, read by the GPU (vkCmdDrawIndirectByteCountEXT, in GPU order after the save). tf_auto_of: the control buffer's entry when dw is one
+static const tf_ctl_ent *tf_auto_of(const p_draw *dw) {
+    if (!dw || !dw->ind || dw->mdi_cnt || dw->count || dw->first || dw->ind < 16) return NULL;
+    return tf_tab_find(dw->ind - 16);
+}
+static void tf_draw_auto(VkCommandBuffer cb, const tf_ctl_ent *e, const p_draw *dw, uint32_t inst) {
+    if (!hvk.dev.x.xfb_draw || !e->stride) {
+        HVK_RED_ONCE("DrawTransformFeedback %s: skipped", !hvk.dev.x.xfb_draw ? "on a device without transformFeedbackDraw" : "of a capture whose shader declares no XfbStride");
+        return;
+    }
+    VkBuffer b; VkDeviceSize o;
+    if (!hvk_buf(e->ctl, 16, &b, &o, NULL)) return;
+    vkCmdDrawIndirectByteCountEXT(cb, inst, (uint32_t)dw->base_instance, b, o + 4 * (VkDeviceSize)e->buf, 0, e->stride);
+    atomic_fetch_add(&hvk.st_xfb_draws, 1);
+}
+
+// Transform feedback buffers rebound (OP_TF_BIND, before the state applies): an open capture segment ends first (its counters saved), so the next capturing draw binds the new ones
+void hvk_tf_bind_note(void);
+void hvk_tf_bind_note(void) { if (g_cur >= 0 && P.xfb_open) xfb_end(hvk_main()); }
 
 // ---------- Draws ----------
 static VkPrimitiveTopology topology(int prim, int *klass, int *convert) {
@@ -741,6 +884,7 @@ static int bind_vertex_buffers(VkCommandBuffer cb, const hvk_vin *v) {
     return 1;
 }
 static int g_mdi_skip_n; static uint64_t g_mdi_cnt;   // the records of an indirect-count multi-draw already drawn by its first one
+static int g_test_copy_draw;   // tests: draw-based copies for what a blit would do (hvk_test_copy_draw)
 static void dyn_apply(VkCommandBuffer cb, VkPrimitiveTopology topo, int strip, int restart_native, const hvk_gfx_key *k) {
     struct dyn_shadow n; memset(&n, 0, sizeof n);
     uint32_t tw = P.extent.width, th = P.extent.height;
@@ -748,8 +892,14 @@ static void dyn_apply(VkCommandBuffer cb, VkPrimitiveTopology topo, int strip, i
     if (!S.has_vp) { vp.minDepth = 0; vp.maxDepth = 1; }
     uint32_t sw; memcpy(&sw, S.vp_sw[0], 4);
     int flip = !atomic_load(&hvk.origin_ll);   // upper-left: NDC +y to the first row (Vulkan's default puts it on the last, as GL's lower-left does)
+    // Viewport swizzles (design 6): NEGATIVE_Y as a viewport flipped about its centre (every device, the Metal backend's way); the others through VK_NV_viewport_swizzle's dynamic state
+    // where the device has it (NVIDIA; not run here: lavapipe has not the extension); elsewhere they need a swizzle in the vertex stage, the shader chain's (phase P2), and are drawn
+    // unswizzled with a red line. NVN's swizzle values are VkViewportCoordinateSwizzleNV's, recorded XOR the identity (p_vp_swizzle)
+    n.swz = (VkViewportSwizzleNV){VK_VIEWPORT_COORDINATE_SWIZZLE_POSITIVE_X_NV, VK_VIEWPORT_COORDINATE_SWIZZLE_POSITIVE_Y_NV, VK_VIEWPORT_COORDINATE_SWIZZLE_POSITIVE_Z_NV, VK_VIEWPORT_COORDINATE_SWIZZLE_POSITIVE_W_NV};
     if (sw == 0x100) flip ^= 1;                // NEGATIVE_Y: clip y negated, the viewport flipped about its centre
-    else if (sw) HVK_RED_ONCE("viewport swizzle %d,%d,%d,%d not implemented (drawn unswizzled)", S.vp_sw[0][0], S.vp_sw[0][1] ^ 2, S.vp_sw[0][2] ^ 4, S.vp_sw[0][3] ^ 6);
+    else if (sw && hvk.dev.x.vp_swizzle_nv) n.swz = (VkViewportSwizzleNV){(VkViewportCoordinateSwizzleNV)(S.vp_sw[0][0] & 7), (VkViewportCoordinateSwizzleNV)((S.vp_sw[0][1] ^ 2) & 7),
+                                                                          (VkViewportCoordinateSwizzleNV)((S.vp_sw[0][2] ^ 4) & 7), (VkViewportCoordinateSwizzleNV)((S.vp_sw[0][3] ^ 6) & 7)};
+    else if (sw) HVK_RED_ONCE("viewport swizzle %d,%d,%d,%d without VK_NV_viewport_swizzle: drawn unswizzled (a vertex-stage swizzle is the shader chain's, phase P2)", S.vp_sw[0][0], S.vp_sw[0][1] ^ 2, S.vp_sw[0][2] ^ 4, S.vp_sw[0][3] ^ 6);
     if (flip) { vp.y += vp.height; vp.height = -vp.height; }
     if (vp.minDepth < 0) vp.minDepth = 0;
     if (vp.minDepth > 1) vp.minDepth = 1;
@@ -828,6 +978,9 @@ static void dyn_apply(VkCommandBuffer cb, VkPrimitiveTopology topo, int strip, i
     if ((e >> HOSTVK_EDS_SAMPLES & 1) && CH(samples)) vkCmdSetRasterizationSamplesEXT(cb, (VkSampleCountFlagBits)n.samples);
     if ((e >> HOSTVK_EDS_SAMPLE_MASK & 1) && (all || CH(samples))) { VkSampleMask m = 0xffffffffu; vkCmdSetSampleMaskEXT(cb, (VkSampleCountFlagBits)n.samples, &m); }
     if ((e >> HOSTVK_EDS_ALPHA_TO_COVERAGE & 1) && CH(a2c)) vkCmdSetAlphaToCoverageEnableEXT(cb, n.a2c);
+    n.line = hvk_line_mode(P.samples, S.ms.a2c);   // NVN's aliased lines (step P8; vk_backend.h hvk_line_mode)
+    if (hvk.dev.x.line_mode_dynamic && CH(line)) vkCmdSetLineRasterizationModeEXT(cb, (VkLineRasterizationModeEXT)n.line);
+    if (hvk.dev.x.vp_swizzle_nv && CH(swz)) vkCmdSetViewportSwizzleNV(cb, 0, 1, &n.swz);
     if (P.nc) {
         if ((e >> HOSTVK_EDS_BLEND_ENABLE & 1) && CH(ben)) vkCmdSetColorBlendEnableEXT(cb, 0, (uint32_t)P.nc, n.ben);
         if ((e >> HOSTVK_EDS_BLEND_EQUATION & 1) && CH(beq)) vkCmdSetColorBlendEquationEXT(cb, 0, (uint32_t)P.nc, n.beq);
@@ -858,6 +1011,53 @@ static void user_row(void) {
     if (nvn_pipe_from_state(&d, &S, vk, 0, inputs, fs ? fk : NULL, 1, cf, df, sf, (uint32_t)P.samples) == 0) hvk_prewarm_user_row(&d);
 }
 static int sh_xfb(const hvk_shader *s) { return s && s->xfb; }   // the module declares the Xfb execution mode: it captures
+// Indirect quads (step P8; the Metal backend's ixc_run): the record, which the GPU may write earlier in the submission, is read by the quad helper (shaders/quad_ind.comp) on the
+// GPU, outside the pass, into an indexed indirect record in the ring. Arrays (di NULL) index the shared quad list with first as the vertex offset; indexed ones get a 32-bit list of at
+// most QIND_CAP indices expanded from theirs (as the Metal backend's IXC_CAP). 1 done (*args, and *ix for the indexed list), 0 failed or not possible (said once)
+enum { QIND_CAP = 3 * 16384 };
+static int quads_ind_gpu(const p_draw *dw, const p_draw_idx *di, hvk_alloc *args, hvk_alloc *ix) {
+    VkBuffer b; VkDeviceSize o; VkDeviceAddress rec = 0, src = 0;
+    uint64_t ind = dw ? dw->ind : di->ind;
+    if (!hvk.dev.caps.buffer_device_address || !hvk_buf(ind, dw ? 16 : 20, &b, &o, &rec) || !rec || (rec & 3)) { HVK_RED_ONCE("indirect quads whose record is in no memory pool with a device address: skipped"); return 0; }
+    int isz = di ? (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4) : 0; uint64_t ilen = 0;
+    if (di) {   // what of the index buffer the pool holds from its start: the indices the record may name
+        uint64_t lo = di->ibuf & ~3ull, n = 1u << 20;
+        while (n >= 4 && !hvk_buf(lo, n, &b, &o, &src)) n >>= 1;
+        if (n < 4 || !src) { HVK_RED_ONCE("indirect indexed quads whose indices are in no memory pool with a device address: skipped"); return 0; }
+        ilen = n;
+    }
+    if (!hvk_ring_alloc(20, 16, args) || !args->dev) return 0;
+    if (di && (!hvk_ring_alloc((VkDeviceSize)QIND_CAP * 4, 16, ix) || !ix->dev)) return 0;
+    struct { uint32_t rec[2], args[2], out[2], ib[2], shift, isz, cap, mode, ilen, pad[3]; } p = {{(uint32_t)rec, (uint32_t)(rec >> 32)}, {(uint32_t)args->dev, (uint32_t)(args->dev >> 32)},
+        {di ? (uint32_t)ix->dev : 0, di ? (uint32_t)(ix->dev >> 32) : 0}, {(uint32_t)src, (uint32_t)(src >> 32)}, (uint32_t)(di ? di->ibuf & 3 : 0), (uint32_t)isz,
+        di ? (uint32_t)QIND_CAP : (uint32_t)QUAD_N * 6, di ? 1u : 0u, (uint32_t)ilen, {0, 0, 0}};
+    VkCommandBuffer cb = outside();
+    hvk_full_barrier(cb);   // after the writes the helper reads
+    if (!hvk_kernel_dispatch(cb, HVK_K_QUAD_IND, &p, sizeof p, di ? QIND_CAP / 64 : 1)) return 0;
+    g_need_barrier = 1; g_bound.valid = 0;   // the draw's index and indirect reads after the helper's writes
+    atomic_fetch_add(&hvk.st_quad_ind, 1);
+    return 1;
+}
+// What a draw writes of the pass's attachments (P.written; design 5.5): colour slots with a channel mask, depth with the test and writes on, stencil with the test on
+static uint32_t draw_writes(void) {
+    if (S.rast_discard) return 0;
+    uint32_t w = 0;
+    for (int i = 0; i < P.nc; i++) if (P.ca[i].imageView && (S.chmask.mask >> (4 * i) & 0xf)) w |= 1u << i;
+    if (P.has_d && S.ds.dt && S.ds.dw) w |= 1u << 8;
+    if (P.has_s && S.ds.st) w |= 1u << 9;
+    return w;
+}
+void hvk_feedback_note(const hvk_view *v) {   // a draw's descriptor reads view v: is it one of the pass's attachments (overlapping levels and layers)?
+    if (!P.active || !P.noting || !v || !v->t) return;
+    for (int i = 0; i < 10; i++) {
+        const hvk_view *a = i < 8 ? (i < P.nc && P.ca[i].imageView ? &P.cv[i] : NULL) : (i == 8 ? (P.has_d ? &P.dv : NULL) : (P.has_s ? &P.dv : NULL));
+        if (!a || a->t != v->t) continue;
+        uint32_t lv = v->levels ? v->levels : 1;
+        if (a->level < v->level || a->level >= v->level + lv) continue;
+        if (a->layer0 + a->layers <= v->layer0 || v->layer0 + v->layers <= a->layer0) continue;
+        P.sampled |= 1u << i;
+    }
+}
 void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32_t size);
 void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32_t size) {
     if (g_cur < 0 || g_rc_skip) return;
@@ -866,20 +1066,32 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
     if (!S.prog) { HVK_RED_ONCE("no program bound before the draw: skipped"); return; }
     hvk_prog *pr = hvk_prog_get(S.prog);
     if (!pr || !pr->sh[0]) { HVK_RED_ONCE("draw with no vertex shader (program ser=%llu): skipped", (unsigned long long)S.prog->serial); return; }
-    hvk_shader *sh[6] = {pr->sh[0], S.rast_discard ? pr->sh[1] : pr->sh[1], pr->sh[2], pr->sh[3], pr->sh[4], NULL};
+    hvk_shader *sh[6] = {pr->sh[0], pr->sh[1], pr->sh[2], pr->sh[3], pr->sh[4], NULL};
+    if (sh[4] && !sh[3]) {   // NVN tessellates with fixed-function levels when the program has no control shader; Vulkan needs one (and SetInner / OuterTessellationLevels are not recorded)
+        HVK_RED_ONCE("program with a tessellation evaluation shader and no control shader (%s): the fixed-function tessellation levels are not recorded, the draw is skipped", sh[4]->key);
+        return;
+    }
     if (!static_draw_buffers()) return;
-    if (S.color.alpha_func && S.color.alpha_func != NVN_ALPHA_FUNC_ALWAYS) HVK_RED_ONCE("alpha test function %u: not implemented (the translator's support buffer has it off)", (unsigned)S.color.alpha_func);
+    // The alpha test: the colour state's function is recorded but its reference value is not (nvnCommandBufferSetAlphaRef is only logged by the frontend, whose record format the
+    // Metal backend shares), and the translator is told the test is off; a compare and discard in the fragment shader (design 6) needs both: declared
+    if (S.color.alpha_func && S.color.alpha_func != NVN_ALPHA_FUNC_ALWAYS) HVK_RED_ONCE("alpha test function %u: not applied (the reference is not recorded and the translator has the test off)", (unsigned)S.color.alpha_func);
     int prim = dw ? dw->prim : di->prim, klass, conv;
     VkPrimitiveTopology topo = topology(prim, &klass, &conv);
     uint32_t inst = (uint32_t)(dw ? (dw->instances > 0 ? dw->instances : 1) : (di->instances > 0 ? di->instances : 1));
     uint64_t ind = dw ? dw->ind : di->ind;
-    // Indices: native, or converted on the CPU before the pass begins (the ring is host memory)
+    const tf_ctl_ent *tfa = tf_auto_of(dw);   // DrawTransformFeedback
+    if (tfa && conv) { HVK_RED_ONCE("DrawTransformFeedback of primitive %d (quads or line loops): skipped", prim); return; }
+    // Indices: native, or converted on the CPU before the pass begins (the ring is host memory), or for indirect quads on the GPU (quads_ind_gpu)
     VkBuffer ib = VK_NULL_HANDLE; VkDeviceSize ioff = 0; VkIndexType itype = VK_INDEX_TYPE_UINT32; uint32_t icount = 0; int restart_native = 1;
+    hvk_alloc qargs = {0}, qix = {0}; int qind = 0;
     if (di) {
         int isz = di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4; uint32_t all = isz == 1 ? 0xffu : isz == 2 ? 0xffffu : 0xffffffffu;
         int need_conv = conv == 2 || (S.restart.on && ((is_strip(topo) && S.restart.index != all) || !is_strip(topo))) || (isz == 1 && !hvk.dev.x.index_uint8) || conv == 1;
-        if (ind && need_conv) { HVK_RED_ONCE("indirect indexed draw of primitive %d with restart %d / 8-bit indices: needs the GPU index helper (phase P4), skipped", prim, S.restart.on); return; }
-        if (need_conv && !ind) {
+        if (ind && need_conv) {
+            if (conv != 2 || S.restart.on || mdi_cnt) { HVK_RED_ONCE("indirect indexed draw of primitive %d with restart %d / 8-bit indices%s: no GPU conversion for it, skipped", prim, S.restart.on, mdi_cnt ? " / a multi-draw" : ""); return; }
+            if (!quads_ind_gpu(NULL, di, &qargs, &qix)) return;
+            qind = 1; ib = qix.buf; ioff = qix.off; itype = VK_INDEX_TYPE_UINT32; topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        } else if (need_conv) {
             hvk_alloc a;
             if (conv == 1) { HVK_RED_ONCE("indexed line loops: not converted (drawn as line strips, the closing line missing)"); }
             if (!convert_indices(di, prim, &topo, &a, &icount)) return;
@@ -891,32 +1103,60 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
         }
         restart_native = !need_conv || is_strip(topo);
     } else if (conv == 2) {
-        if (ind) { HVK_RED_ONCE("indirect quads: need the GPU index helper (phase P4), skipped"); return; }
-        if (dw->count / 4 > QUAD_N) HVK_RED_ONCE("a quad draw of %d vertices: only the first %d quads are drawn", dw->count, QUAD_N);
+        if (ind) {
+            if (mdi_cnt) { HVK_RED_ONCE("an indirect-count multi-draw of quads: no GPU conversion for it, skipped"); return; }
+            if (!quads_ind_gpu(dw, NULL, &qargs, NULL)) return;
+            qind = 1; ib = g_quad_ib; ioff = 0; itype = VK_INDEX_TYPE_UINT32;
+        } else if (dw->count / 4 > QUAD_N) HVK_RED_ONCE("a quad draw of %d vertices: only the first %d quads are drawn", dw->count, QUAD_N);
         topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     } else if (conv == 1 && !ind) HVK_RED_ONCE("line loops: drawn as line strips (the closing line missing)");
     hvk_vin v; hvk_vertex_input(sh[0], S.attr, S.stream, bound_streams(), &v);
     if (!vertex_copies_gpu(&v)) return;   // before the pass: they end the one open
     VkCommandBuffer cb = hvk_main();
-    if (!pass_begin(cb)) return;
-    hvk_key_src src; key_src(&src, &v);
-    hvk_gfx_key k; hvk_key_fill(&k, sh, klass, &src);
-    hvk_layout *l = hvk_layout_for(sh);
-    if (!l) return;
-    memcpy(g_miss_sh, sh, sizeof g_miss_sh);
-    VkPipeline pipe = hvk_gfx_pipeline(sh, l, &k, user_row);   // a pipeline not ready yet is made or waited for here: the wait is counted (vk_gpl.c)
-    if (!pipe) return;
-    if (!g_bound.valid || g_bound.pipe != pipe) {
-        if (P.xfb_open && !sh_xfb(sh[2] ? sh[2] : sh[4] ? sh[4] : sh[0])) xfb_end(cb);   // the last stage before rasterization must capture while the capture is begun
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe); g_bound.pipe = pipe; g_bound.valid = 1;
+    hvk_key_src src; hvk_gfx_key k; hvk_layout *l = NULL; VkPipeline pipe = VK_NULL_HANDLE;
+    const hvk_shader *last = last_prerast(sh);
+    // A draw that reads an attachment of the open pass (a feedback draw, design 5.5) after a command of the pass wrote it begins a new pass: the full barrier between the two passes
+    // makes those writes visible to its reads (no barrier can run inside a dynamic-rendering pass on Vulkan 1.3). The draw's own reads of what it writes are the GPU's, as on Maxwell
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (!pass_begin(cb)) return;
+        key_src(&src, &v);
+        hvk_key_fill(&k, sh, klass, &src);
+        if (!(l = hvk_layout_for(sh))) return;
+        memcpy(g_miss_sh, sh, sizeof g_miss_sh);
+        if (!(pipe = hvk_gfx_pipeline(sh, l, &k, user_row))) return;   // a pipeline not ready yet is made or waited for here: the wait is counted (vk_gpl.c)
+        if (!g_bound.valid || g_bound.pipe != pipe) {
+            xfb_end(cb);   // no pipeline is bound while a capture is active: the capture pauses into its counters and resumes below
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe); g_bound.pipe = pipe; g_bound.valid = 1;
+        }
+        dyn_apply(cb, topo, is_strip(topo), restart_native, &k);
+        if (hvk.dev.caps.vertex_input_dynamic) vkCmdSetVertexInputEXT(cb, v.nb, v.b, v.na, v.a);
+        if (!bind_vertex_buffers(cb, &v)) return;
+        P.sampled = 0; P.noting = 1;
+        int ok = hvk_bind_resources(cb, l, sh, VK_PIPELINE_BIND_POINT_GRAPHICS, (uint32_t)(dw ? dw->base_instance : di->base_instance), NULL);
+        P.noting = 0;
+        if (!ok) return;
+        // the pass is split when the draw reads what the pass wrote (a read after a write: the barrier between passes), reads an attachment it does not write while the pass
+        // stores it (the store would write after the read: the new pass stores it with STORE_OP_NONE), or writes an attachment the pass stores with STORE_OP_NONE
+        uint32_t w = draw_writes();
+        if (!((P.sampled & P.written) || (P.sampled & ~w & ~P.store_none) || (w & P.store_none)) || attempt) break;
+        g_store_none_next = P.sampled & ~w;
+        xfb_end(cb);
+        pass_end_only();
+        atomic_fetch_add(&hvk.st_feedback_splits, 1);
+        HVK_NOTE_ONCE("a draw reads an attachment of its pass (attachments %#x, the pass wrote %#x, the draw writes %#x): the pass is split before it (design 5.5)", P.sampled, P.written, w);
     }
-    dyn_apply(cb, topo, is_strip(topo), restart_native, &k);
-    if (hvk.dev.caps.vertex_input_dynamic) vkCmdSetVertexInputEXT(cb, v.nb, v.b, v.na, v.a);
-    if (!bind_vertex_buffers(cb, &v)) return;
-    if (!hvk_bind_resources(cb, l, sh, VK_PIPELINE_BIND_POINT_GRAPHICS, (uint32_t)(dw ? dw->base_instance : di->base_instance), NULL)) return;
+    if (P.sampled) HVK_NOTE_ONCE("a draw samples an attachment it renders to (a feedback draw, first case attachments %#x): drawn in place, in the GENERAL layout", P.sampled);
     if (pr->sh[0]->writes_storage || (pr->sh[1] && pr->sh[1]->writes_storage)) P.swrite = 1;
-    if (S.tf_on && sh_xfb(sh[2] ? sh[2] : sh[4] ? sh[4] : sh[0])) xfb_begin(cb);
+    if (S.tf_on && sh_xfb(last)) xfb_begin(cb, last);
+    else if (P.xfb_open) xfb_end(cb);   // the last stage before rasterization must capture while a capture is active
+    P.written |= draw_writes();
     atomic_fetch_add(&hvk.st_draws, 1);
+    if (qind) {   // indirect quads: the helper's record (and list) are read by the GPU
+        vkCmdBindIndexBuffer(cb, ib, ioff, itype);
+        vkCmdDrawIndexedIndirect(cb, qargs.buf, qargs.off, 1, 20);
+        return;
+    }
+    if (tfa) { tf_draw_auto(cb, tfa, dw, inst); return; }
     if (dw && !ind) {
         if (conv == 2) { if (dw->count >= 4) { vkCmdBindIndexBuffer(cb, g_quad_ib, 0, VK_INDEX_TYPE_UINT32); vkCmdDrawIndexed(cb, (uint32_t)(dw->count / 4 > QUAD_N ? QUAD_N : dw->count / 4) * 6, inst, 0, dw->first, (uint32_t)dw->base_instance); } }
         else if (dw->count > 0) vkCmdDraw(cb, (uint32_t)dw->count, inst, (uint32_t)dw->first, (uint32_t)dw->base_instance);
@@ -1016,6 +1256,7 @@ void hvk_clear_color(const p_clear_color *c) {
         return;
     }
     VkCommandBuffer cb = hvk_main();
+    if (P.active && (P.store_none >> c->index & 1)) pass_end_only();   // a feedback pass does not store it (see hvk_draw)
     if (!pass_begin(cb)) return;
     if (!P.ca[c->index].imageView) { HVK_RED_ONCE("colour clear of slot %d, which the pass does not attach", c->index); return; }
     VkRect2D rr = clear_rect(); if (!rr.extent.width || !rr.extent.height) return;
@@ -1024,10 +1265,12 @@ void hvk_clear_color(const p_clear_color *c) {
         VkClearAttachment a = {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)c->index, clear_value_of(P.ccls[c->index], &cc)};
         VkClearRect cr = {rr, 0, P.layers};
         vkCmdClearAttachments(cb, 1, &a, 1, &cr);
+        P.written |= 1u << c->index;
         return;
     }
     uint32_t val[4]; value_of(P.ccls[c->index], c->rgba, val);
     if (hvk_clear_tri(cb, P.cfmt, P.nc, P.dfmt, P.sfmt, P.samples, c->index, kind_of_cls(P.ccls[c->index]), (uint32_t)mask, val, 0, 0, 0, 0, rr, P.extent)) { g_bound.valid = 0; g_dyn.valid = 0; }
+    P.written |= 1u << c->index;
     HVK_NOTE_ONCE("colour clear with a partial channel mask: drawn as a triangle (first case slot %d mask %#x)", c->index, mask);
 }
 void hvk_clear_ds(const p_clear_ds *c);
@@ -1045,12 +1288,14 @@ void hvk_clear_ds(const p_clear_ds *c) {
         return;
     }
     VkCommandBuffer cb = hvk_main();
+    if (P.active && (P.store_none & 3u << 8)) pass_end_only();   // a feedback pass does not store its depth / stencil (see hvk_draw)
     if (!pass_begin(cb)) return;
     VkRect2D rr = clear_rect(); if (!rr.extent.width || !rr.extent.height) return;
     float z = c->depth > 0 ? (c->depth < 1 ? c->depth : 1) : 0;
     if (partial_s) {   // the stencil bits of the mask only: the clear triangle (depth written with it when asked)
         static const uint32_t zv[4];
         if (hvk_clear_tri(cb, P.cfmt, P.nc, P.dfmt, P.sfmt, P.samples, -1, 0, 0, zv, z, c->depth_mask && P.has_d, sm, (uint32_t)c->stencil & 0xff, rr, P.extent)) { g_bound.valid = 0; g_dyn.valid = 0; }
+        P.written |= (c->depth_mask && P.has_d ? 1u << 8 : 0) | 1u << 9;
         return;
     }
     VkClearAttachment a = {0, 0, {{{0}}}};
@@ -1059,6 +1304,7 @@ void hvk_clear_ds(const p_clear_ds *c) {
     if (!a.aspectMask) return;
     VkClearRect cr = {rr, 0, P.layers};
     vkCmdClearAttachments(cb, 1, &a, 1, &cr);
+    P.written |= (a.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT ? 1u << 8 : 0) | (a.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT ? 1u << 9 : 0);
 }
 // ClearTexture: its region and mask, independently of the draw scissor (t_clear_tex); a whole level of every channel is vkCmdClear*Image, anything else a pass of its own
 void hvk_clear_tex(const p_clear_tex *c);
@@ -1274,8 +1520,21 @@ blit:;
               (!linear || (sp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
     uint8_t scl = 0, dcl = 0; hvk_tex_info(s, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &scl); hvk_tex_info(d, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &dcl);
     if ((scl == NVN_VK_UINT || scl == NVN_VK_SINT || dcl == NVN_VK_UINT || dcl == NVN_VK_SINT) && scl != dcl) can = 0;   // integer ↔ other classes: no blit
-    if ((sa | da) & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) { if (sf != df || scaled) can = 0; linear = 0; }
-    if (!can) { HVK_RED_ONCE("texture copy %ux%u format %u → %ux%u format %u%s: needs a draw-based copy (design 2.7, phase P4), skipped", c->sr.width, c->sr.height, (unsigned)sf, c->dr.width, c->dr.height, (unsigned)df, mirror ? " mirrored" : ""); return; }
+    if ((sa | da) & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) { if (sf != df) can = 0; linear = 0; }   // a depth blit scales within one format, nearest
+    if (g_test_copy_draw) can = 0;   // the test hook below
+    if (!can) {   // a draw-based copy (step P8, vk_pipeline.c hvk_copy_draw): float classes and depth formats, 2D and array layers, single-sampled
+        hvk_view svw, dvw; view_t va, vb; memset(&va, 0, sizeof va); memset(&vb, 0, sizeof vb);
+        va.set_levels = 1; va.base_level = (uint8_t)sl; va.nlevels = 1; va.set_layers = 1; va.min_layer = (uint16_t)(ss + (uint32_t)c->sr.zoffset); va.nlayers = (uint16_t)nz;
+        vb.set_levels = 1; vb.base_level = (uint8_t)dl; vb.nlevels = 1; vb.set_layers = 1; vb.min_layer = (uint16_t)(ds + (uint32_t)c->dr.zoffset); vb.nlayers = 1;
+        extern int hvk_tex_view_typed(hvk_tex *x, const view_t *v, int kind, int want_type, uint8_t want_cls, hvk_view *out);
+        int32_t src[4] = {c->sr.xoffset, c->sr.yoffset, (c->flags & NVN_COPY_FLAGS_MIRROR_X_BIT) ? -c->sr.width : c->sr.width, (c->flags & NVN_COPY_FLAGS_MIRROR_Y_BIT) ? -c->sr.height : c->sr.height};
+        int32_t dst[4] = {c->dr.xoffset, c->dr.yoffset, c->dr.width, c->dr.height};
+        if (!s3 && !d3 && sn == 1 && dn == 1 && hvk_tex_view_typed(s, &va, HVK_VIEW_SAMPLED, VK_IMAGE_VIEW_TYPE_2D_ARRAY, 0xff, &svw) && hvk_tex_view(d, &vb, HVK_VIEW_ATTACH, &dvw) &&
+            hvk_copy_draw(cb, &svw, &dvw, src, dst, (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) != 0, (uint32_t)nz)) { g_need_barrier = 1; g_bound.valid = 0; return; }
+        HVK_RED_ONCE("texture copy %ux%u format %u → %ux%u format %u%s: neither a blit nor a draw-based copy can do it (integer classes, 3D, multisampled), skipped",
+                     c->sr.width, c->sr.height, (unsigned)sf, c->dr.width, c->dr.height, (unsigned)df, mirror ? " mirrored" : "");
+        return;
+    }
     VkImageBlit r = {srl, {{c->sr.xoffset, c->sr.yoffset, 0}, {c->sr.xoffset + c->sr.width, c->sr.yoffset + c->sr.height, 1}},
                      drl, {{c->dr.xoffset, c->dr.yoffset, 0}, {c->dr.xoffset + c->dr.width, c->dr.yoffset + c->dr.height, 1}}};
     if (c->flags & NVN_COPY_FLAGS_MIRROR_X_BIT) { int32_t t = r.srcOffsets[0].x; r.srcOffsets[0].x = r.srcOffsets[1].x; r.srcOffsets[1].x = t; }
@@ -1309,6 +1568,11 @@ void hvk_set_rt(const p_set_rt *r) {
     R.rt = *r; R.has_rt = 1;
 }
 // For tests (dm/gfx/tests/vk/t_vk_queue_origin.c): the raster state the last draw was given (VkCullModeFlags, VkFrontFace) and whether its viewport was flipped
+// For tests (dm/gfx/tests/vk, step P8): the passes split before feedback draws, and draw-based copies forced for every copy a blit would do
+uint64_t hvk_test_feedback_splits(void);
+uint64_t hvk_test_feedback_splits(void) { return atomic_load(&hvk.st_feedback_splits); }
+void hvk_test_copy_draw(int on);
+void hvk_test_copy_draw(int on) { g_test_copy_draw = on != 0; }
 void hvk_test_raster(uint32_t *cull, uint32_t *front, int *flipped);
 void hvk_test_raster(uint32_t *cull, uint32_t *front, int *flipped) { *cull = g_dyn.cull; *front = g_dyn.front; *flipped = g_dyn.vp.height < 0; }
 void hvk_state_dirty(uint32_t mask);

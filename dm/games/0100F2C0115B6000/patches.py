@@ -7,11 +7,12 @@ from nso_asm import ADRP, B, NOP, STP_PRE
 # and main+0x3e562c). The stub replaces that logic: int fps = 60 / step, and the float fps (timing +0x24, unused, per masagrator's FPSLocker config for this build, which found the
 # sites) the same, which the consumers read. Until the host has decided a step (the first frames) the step is the measured frame time (timing frame +0xd8, 19.2 MHz
 # ticks), clamped to [1 / cap, 1 / 15 s]; game time that ran ahead after a short frame (the "lead", at most 0.25 s; totk-mobile) is paid back by later frames. Prerendered movies hold 30 (the host's movie flag, state +4, hle_movie.c
-# dm_movie_playing), the D-pad menu fade starts at full rate (FPSLocker's fix at main+0x1fbc80) and the swapchain argument at main+0xbe14a8 becomes 1 as in FPSLocker
-def frame_step(ctx):
+# dm_movie_playing), the D-pad menu fade starts at full rate (FPSLocker's fix at main+0x1fbc80) and the swapchain argument at main+0xbe14a8 becomes 1 as in FPSLocker.
+# Offsets in the comments are 1.4.3's; each build's sites are in the sites table below
+def frame_step(ctx, s):
     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
     # frame step (replaces ldrb w9,[x0,#0x58], the first instruction after the prologue)
-    fs_site(0x2db18c, '09604139')
+    fs_site(s['step'], '09604139')
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
     for w in (0xbd400200,   # ldr s0,[x16]           target fps
               0x1e202008,   # fcmp s0,#0.0
@@ -30,7 +31,7 @@ def frame_step(ctx):
               0x8b224084,   # add x4,x4,w2,uxtw
               0xf9001a04):  # str x4,[x16,#0x30]     vsyncs stepped
         emit(w)
-    emit(B(here(), 0x2db284))                                       # the original epilogue
+    emit(B(here(), s['epilogue']))                                  # the original epilogue
     for w in (0xf9406c22,   # elapsed: ldr x2,[x1,#0xd8]  last frame time in 19.2 MHz ticks
               0x9e630041,   # ucvtf d1,x2
               0x529f0003,   # mov w3,#0xf800
@@ -66,11 +67,11 @@ def frame_step(ctx):
               0x1e672a73,   # fadd d19,d19,d7
               0xfd000e13):  # str d19,[x16,#0x18]    game seconds stepped
         emit(w)
-    emit(B(here(), 0x2db284))                                       # the original epilogue
-    emit(0x39416009); emit(B(here(), 0x2db190))                     # off: ldrb w9,[x0,#0x58]; back
-    fs_put(0x2db18c, [B(0x2db18c, start)], 'frame step from the host in whole vsyncs, by elapsed time until it has decided one (state page target fps; 0 = original interval logic)')
+    emit(B(here(), s['epilogue']))                                  # the original epilogue
+    emit(0x39416009); emit(B(here(), s['step'] + 4))                # off: ldrb w9,[x0,#0x58]; back
+    fs_put(s['step'], [B(s['step'], start)], 'frame step from the host in whole vsyncs, by elapsed time until it has decided one (state page target fps; 0 = original interval logic)')
     # the two readers of the integer fps: float fps when on; the scvtf a few instructions later moves into the stub (s0 is not touched in between)
-    for site, cvt, r in ((0x2daa54, 0x2daa6c, 19), (0x3e562c, 0x3e5638, 22)):
+    for site, cvt, r in s['readers']:
         fs_site(site, struct.pack('<I', 0xbd425000 | r << 5).hex()); fs_site(cvt, '00d8215e')
         start = here(); emit(STP_PRE(16, 17, 31, -16)); emit(ADRP(16, here(), FS_STATE_OFF))
         for w in (0xb9400211,                # ldr w17,[x16]
@@ -84,30 +85,32 @@ def frame_step(ctx):
         emit(B(here(), site + 4))
         fs_put(site, [B(site, start)], 'game step reads the float fps (original integer fps and scvtf when off)')
         fs_put(cvt, [NOP], 'scvtf moved into the stub at the load')
-    # D-pad menu fade (w8 is overwritten right after the site)
-    fs_site(0x1fbc80, '0820201e0a04081f')
+    # D-pad menu fade (w8 is overwritten right after the site). The menu entry's base register and the fade's destination differ by build: x24 and s10 on 1.4.3, x25 and s9 on 1.4.2
+    fade, base, dst = s['fade']
+    fmadd = 0x1f080400 | dst   # fmadd s<dst>,s0,s8,s1
+    fs_site(fade, '0820201e' + struct.pack('<I', fmadd).hex())
     start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
     for w in (0xb9400108, 0x340001a8,       # ldr w8,[x8]; cbz w8,off (+52)
               0x1e202028, 0x54000101,       # fcmp s1,#0.0; b.ne go
-              0x785fa308, 0x7100151f, 0x540000a1,   # ldurh w8,[x24,#-6]; cmp w8,#5; b.ne go
-              0x785f8308, 0x7100151f, 0x54000041,   # ldurh w8,[x24,#-8]; cmp w8,#5; b.ne go
+              0x785fa008 | base << 5, 0x7100151f, 0x540000a1,   # ldurh w8,[x<base>,#-6]; cmp w8,#5; b.ne go
+              0x785f8008 | base << 5, 0x7100151f, 0x54000041,   # ldurh w8,[x<base>,#-8]; cmp w8,#5; b.ne go
               0x1e2e1008,                   # fmov s8,#1.0
-              0x1f08040a, 0x1e202008, 0x14000003,   # go: fmadd s10,s0,s8,s1; fcmp s0,#0.0; b end
-              0x1e202008, 0x1f08040a):      # off: the original fcmp s0,#0.0; fmadd s10,s0,s8,s1
+              fmadd, 0x1e202008, 0x14000003,   # go: fmadd s<dst>,s0,s8,s1; fcmp s0,#0.0; b end
+              0x1e202008, fmadd):           # off: the original fcmp s0,#0.0; fmadd s<dst>,s0,s8,s1
         emit(w)
-    emit(B(here(), 0x1fbc88))
-    fs_put(0x1fbc80, [B(0x1fbc80, start), NOP], 'D-pad menu fade starts at full rate under fractional steps (FPSLocker)')
+    emit(B(here(), fade + 8))
+    fs_put(fade, [B(fade, start), NOP], 'D-pad menu fade starts at full rate under fractional steps (FPSLocker)')
     # swapchain argument (x16 is dead before the bl that follows)
-    fs_site(0xbe14a8, '61a24039')
+    fs_site(s['swapchain'], '61a24039')
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
     for w in (0xb9400210, 0x34000070, 0x52800021, 0x14000002, 0x3940a261):   # ldr w16,[x16]; cbz w16,off; mov w1,#1; b end; off: ldrb w1,[x19,#0x28]
         emit(w)
-    emit(B(here(), 0xbe14ac))
-    fs_put(0xbe14a8, [B(0xbe14a8, start)], 'swapchain argument 1 when on (FPSLocker)')
+    emit(B(here(), s['swapchain'] + 4))
+    fs_put(s['swapchain'], [B(s['swapchain'], start)], 'swapchain argument 1 when on (FPSLocker)')
     # Render scale (state +0x10, float written by the loader: DM_RENDER_SCALE, 1.0 by default). main+0xd5c24 sizes each view: screen size x the view's scale (5/6 for the scene: 1600x896
     # docked) x the dynamic-resolution multiplier, clamped to 8..16384 and floored to the view's alignment. The stub multiplies both extents by the factor (s6, w8 and the flags are dead
     # at main+0xd5cc0: s6 is set to 8.0 right after); any factor but 1.0 also replaces the dynamic multiplier (main+0xd5d80) with 1, so the size is fixed. 1.0 = bit-exact original
-    fs_site(0xd5cc0, '08d0a8524008251e6108241e0401271e'); fs_site(0xd5d80, '062940bd')
+    fs_site(s['view'], '08d0a8524008251e6108241e0401271e'); fs_site(s['dynamic'], '062940bd')
     start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
     for w in (0xbd401106,   # ldr s6,[x8,#0x10]   render scale
               0x1e250840,   # fmul s0,s2,s5       (original)
@@ -119,8 +122,8 @@ def frame_step(ctx):
               0x52a8d008,   # skip: mov w8,#0x46800000 (original)
               0x1e270104):  # fmov s4,w8          (original)
         emit(w)
-    emit(B(here(), 0xd5cd0))
-    fs_put(0xd5cc0, [B(0xd5cc0, start)], 'view render size x the host render scale (1.0 = original)'); ctx.render_scale = 1
+    emit(B(here(), s['view'] + 0x10))
+    fs_put(s['view'], [B(s['view'], start)], 'view render size x the host render scale (1.0 = original)'); ctx.render_scale = 1
     start = here(); emit(0xbd402906); emit(ADRP(8, here(), FS_STATE_OFF))   # ldr s6,[x8,#0x28] (original: the dynamic multiplier); x8 is dead after it
     for w in (0xbd401107,   # ldr s7,[x8,#0x10]
               0x1e2e1010,   # fmov s16,#1.0
@@ -130,10 +133,18 @@ def frame_step(ctx):
               0x5400004d,   # b.le done (+8)      not set
               0x1e204206):  # fmov s6,s16         a fixed scale: no dynamic multiplier
         emit(w)
-    emit(B(here(), 0xd5d84))
-    fs_put(0xd5d80, [B(0xd5d80, start)], 'dynamic resolution only at render scale 1.0')
+    emit(B(here(), s['dynamic'] + 4))
+    fs_put(s['dynamic'], [B(s['dynamic'], start)], 'dynamic resolution only at render scale 1.0')
 
-FRAME_STEP = {'277178b7dba1b6d4949a84778d4abc58': frame_step}
+# Each build's sites. 1.4.2's: the frame step, the fps readers, the D-pad fade and the swapchain argument from FPSLocker's config for that build (5CB42B1CF25469FB.yaml), the render
+# scale sites by 1.4.3's bytes (one match each, at the same distance apart); every site's original instructions and the registers the stubs rely on checked by disassembly
+sites = {
+    '277178b7dba1b6d4949a84778d4abc58': {'step': 0x2db18c, 'epilogue': 0x2db284, 'readers': ((0x2daa54, 0x2daa6c, 19), (0x3e562c, 0x3e5638, 22)),   # 1.4.3
+                                         'fade': (0x1fbc80, 24, 10), 'swapchain': 0xbe14a8, 'view': 0xd5cc0, 'dynamic': 0xd5d80},
+    '5cb42b1cf25469fb0635fd046453d843': {'step': 0x2d4e68, 'epilogue': 0x2d4f60, 'readers': ((0x2d4730, 0x2d4748, 19), (0x37ea5c, 0x37ea68, 22)),   # 1.4.2
+                                         'fade': (0x387390, 25, 9), 'swapchain': 0xbbf258, 'view': 0x10250c, 'dynamic': 0x1025cc},
+}
+FRAME_STEP = {bid: lambda ctx, s=s: frame_step(ctx, s) for bid, s in sites.items()}
 
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)

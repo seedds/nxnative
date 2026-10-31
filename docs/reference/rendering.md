@@ -468,6 +468,15 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** `present_enqueue`, on the thread that queues the present, resolves a storage texture (`tex_from_storage`) when that is the submit thread and commits the upload batch (`up_flush`), so the display command buffer comes after the upload on the queue and the present thread finds the texture uploaded. For every game; a texture that is not taken from its storage is resolved on the present thread as before.
 - **Found on:** [Bastion](../../dm/games/010038600B27E000/README.md) (1.0.0, SDK 5.4.0: both 1920x1080 window textures written by `main+0x9374`).
 
+### iOS drawable metrics follow the rendering scene
+
+- **Symptom:** a rendering view attached to a screen other than the phone's main screen uses the phone's pixel scale and refresh capacity. Dedicated external output is not implemented; this is a source-level mismatch in the existing view and refresh lookup. A Newt probe also found that fractional fitted bounds published fractional pixel dimensions that differed from CAMetalLayer's actual drawable size.
+- **Cause:** `DmGameView` and `mtl_display_hz` read `UIScreen.mainScreen` instead of the rendering window's scene. Multiplying fitted point dimensions by native scale can produce fractional pixels, while the drawable uses whole pixels.
+- **Fix:** the view samples its `window.windowScene.screen` on the main thread, rounds the fitted view's physical size to the nearest whole pixel, and publishes the drawable's actual post-set dimensions, maximum refresh and current/potential EDR headroom under a small lock. Layout, display traits, brightness/mode notifications, scene geometry changes and activation refresh the snapshot. The present thread reads the copied refresh through `front_screen_max_fps`; it does not call UIKit. SDR output, aspect fit and the existing display-link policy are unchanged. Headroom is diagnostic only; no HDR output is enabled.
+- **Found on:** an iOS display-path source review. Physical external-display behavior remains unverified.
+- **Check:** `GAME=<id> python3 dm/ios/tools/build_scene_metrics_probe.py --output <new scratch directory>` builds an unsigned native probe. It uses the production view, root sizing and scene callback with inert host endpoints, checks scene scale/pixel dimensions, refresh/headroom publication, a real drawable and worker-thread reads, and writes `Documents/results.json` and `display.log` in its own `dev.anygame.display-verification` container. No game files or keys are used. The probe does not automate UI or verify an external screen.
+- **Apple API basis:** the selected iOS 27.2 SDK's `UIWindowScene.h` documents scene geometry callbacks from iOS 26, including moves between screens. `UIScreen.h` defines native scale, maximum refresh and changing EDR headroom; `UITraitCollection.h` defines the iOS 26 headroom-usage trait. The runtime keeps its iOS 26 baseline.
+
 ### The present upscales through MetalFX
 
 - **Symptom:** a game that renders below the screen's resolution looks soft on a phone, in a large Mac window or on a 4K screen.

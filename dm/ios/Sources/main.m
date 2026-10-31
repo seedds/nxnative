@@ -22,6 +22,7 @@ extern char **environ;
 int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
 UIViewController *front_ios_root(void);
 void front_ios_focus_event(int ev);
+void front_ios_scene_changed(UIWindowScene *scene);
 
 static char *g_argv[4]; static int g_argc;
 
@@ -205,9 +206,12 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
     [self.window makeKeyAndVisible];
 }
 - (void)sceneWillResignActive:(UIScene *)s { front_ios_focus_event(0); }
+- (void)windowScene:(UIWindowScene *)scene didUpdateEffectiveGeometry:(UIWindowSceneGeometry *)previous {
+    (void)previous; front_ios_scene_changed(scene);
+}
 - (void)sceneDidEnterBackground:(UIScene *)s { front_ios_focus_event(1); }
 - (void)sceneWillEnterForeground:(UIScene *)s { front_ios_focus_event(2); }
-- (void)sceneDidBecomeActive:(UIScene *)s { front_ios_focus_event(3); }
+- (void)sceneDidBecomeActive:(UIScene *)s { front_ios_scene_changed((UIWindowScene *)s); front_ios_focus_event(3); }
 @end
 
 int main(int argc, char **argv) {

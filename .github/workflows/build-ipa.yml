@@ -1,0 +1,153 @@
+# Build a game IPA with nxnative on GitHub's hosted macOS runners.
+# Add this file to a fork of seedds/nxnative at .github/workflows/build-ipa.yml
+#
+# The game files and prod.keys never touch GitHub or git: the runner downloads
+# them over a temporary tunnel from serve_game.ps1 running on your Windows PC.
+# When the build finishes, the IPA goes up as release parts (each under 2 GB).
+#
+# Runtime: the registered TotK profile (base v0 + update 1.4.3 = v720896)
+# needs no Mac-host boot, so this job stays compute and disk only.
+
+name: Build the game IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_url:
+        description: "The manifest URL that serve_game.ps1 printed"
+        required: true
+      app_name:
+        description: "App name on the iPhone home screen"
+        required: false
+        default: "Tears of the Kingdom"
+      package:
+        description: "Version to pack, e.g. v720896 (empty = the newest in the folder)"
+        required: false
+        default: ""
+      extra_flags:
+        description: "Flags for build_ipa_from_nsp.py; default builds a self-contained IPA (game files packed inside). Add --romfs separate only if the runner runs out of disk"
+        required: false
+        default: ""
+
+env:
+  # The toolchain the project supports (README: Xcode 27.1; dm/gfx/tools/dmsh_chain.lock: its Metal compiler),
+  # named by path so the image's default moving to another Xcode does not move this job.
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  IPA_NAME: zelda-totk
+
+permissions:
+  contents: write   # the job publishes the release with the IPA parts
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-ipa:
+    runs-on: xcode-27
+    timeout-minutes: 330
+    concurrency:
+      group: build-ipa
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Disk space before cleanup
+        run: df -h / "$RUNNER_TEMP"
+
+      - name: Free disk space
+        run: |
+          for d in /Applications/Xcode*.app; do
+            case "$d" in *Xcode_27.1*) ;; *) sudo rm -rf "$d" ;; esac
+          done
+          sudo rm -rf /usr/local/lib/node_modules 2>/dev/null || true
+          sudo rm -rf ~/Library/Android 2>/dev/null || true
+          brew cleanup --prune=all >/dev/null 2>&1 || true
+          df -h / "$RUNNER_TEMP"
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Install the Python packages the tools import
+        run: python -m pip install lz4 "capstone>=5,<6" fonttools
+
+      - name: Install the build tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          brew install xcodegen zstd glslang aria2
+          brew install --cask dotnet-sdk
+
+      - name: Toolchain check (Xcode, iOS SDK, Metal compiler)
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun -sdk iphoneos metal --version
+          python3 dm/gfx/tools/own_compilers.py --check-metal
+
+      - name: Fetch game files from serve_game.ps1 (your PC, over the tunnel)
+        working-directory: ${{ runner.temp }}
+        env:
+          MANIFEST_URL: ${{ inputs.manifest_url }}
+        run: |
+          set -e
+          curl -fsS --retry 10 --retry-delay 5 "$MANIFEST_URL" -o manifest.json
+          python3 - <<'PY' > dl.tsv
+          import json, sys
+          m = json.load(open('manifest.json'))
+          files = m.get('files', [])
+          if not files:
+              sys.exit('the manifest holds no files')
+          for e in files:
+              print(e['url'] + '\t' + e['out'])
+          PY
+          mkdir -p game
+          while IFS=$'\t' read -r url out; do
+            echo "downloading: $out"
+            aria2c --console-log-level=warn --summary-interval=60 --max-tries=30 --retry-wait=10 \
+              --connect-timeout=30 --continue --file-allocation=none \
+              --max-connection-per-server=8 --split=8 --min-split-size=50M \
+              -d game -o "$out" "$url"
+            echo "download complete: $out"
+          done < dl.tsv
+          ls -lh game
+          # The feeder on your PC can be stopped (Ctrl+C) from here on.
+          echo "ALL DOWNLOADS COMPLETE"
+
+      - name: Build the app and the IPA
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/out"
+          app="${{ inputs.app_name }}"
+          pkg="${{ inputs.package }}"
+          extra="${{ inputs.extra_flags }}"
+          args=(--work-dir "$RUNNER_TEMP/work" -o "$RUNNER_TEMP/out/${IPA_NAME}.ipa")
+          if [ -n "$app" ];   then args+=(--app-name "$app"); fi
+          if [ -n "$pkg" ];   then args+=(-p "$pkg"); fi
+          if [ -n "$extra" ]; then read -r -a extra_args <<< "$extra"; args+=("${extra_args[@]}"); fi
+          python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" -k "$RUNNER_TEMP/game/prod.keys" --progress lines "${args[@]}"
+          ls -lh "$RUNNER_TEMP/out"
+          rm -rf "$RUNNER_TEMP/game"
+
+      - name: Upload the IPA as release parts (each under 2 GB)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          mkdir -p parts
+          split -d -b 1900m "$RUNNER_TEMP/out/${IPA_NAME}.ipa" "parts/${IPA_NAME}.ipa.part-"
+          rm -f "$RUNNER_TEMP/out/${IPA_NAME}.ipa"
+          test -f "parts/${IPA_NAME}.ipa.part-00" || { echo "the IPA split produced nothing"; exit 1; }
+          ls -lh parts
+          tag="ipa-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" parts/"${IPA_NAME}".ipa.part-* \
+            --title "IPA (run $GITHUB_RUN_NUMBER)" \
+            --notes "Join the parts with join_ipa.ps1 from the kit, then follow the kit's install steps."
+          echo "Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete the transferred game files
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/game" "$RUNNER_TEMP/manifest.json" "$RUNNER_TEMP/dl.tsv"

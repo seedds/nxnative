@@ -194,6 +194,7 @@ DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (de
 DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
 DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
 DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
+DM_POOL_ZERO	switch	`0` / `all`, or unset: which memory pools the host zeroes when the game creates them. Unset (the default) zeroes a pool of exactly `0x800000` bytes (`nvnMemoryPoolInitialize`) and the buffers created inside it, which is the character-card mesh pool Super Mario Party Jamboree creates and never fills; `0` turns it off; `all` zeroes every pool up to 256 MB (an A/B that breaks pools created over live data, such as command memory)
 DM_PREEMPT	switch	`0` / `1` overrides the profile's `core_preempt`: also check already-runnable higher-priority peers on the caller's core after every thread SVC
 DM_PRELOAD	diagnostic	Set: on the Mac, runs the host's early background loading (`dm_host_preload_start`) as the iOS app does, to exercise that path
 DM_PRESENT_FIFO	switch	`0` makes the display link take the newest queued frame each tick, as before; by default it shows frames in order, at most one tick behind

@@ -203,7 +203,14 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size; o->vp = NULL; o->vmode = 0;
     if (!o->mem && (o->flags & 0x200)) { uint8_t *vr = vpool_reserve(o); if (vr) o->mem = vr; }   // a virtual pool's own address range until its first mapping decides (see MapVirtual)
-    else if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
+    else if (o->mem) {
+        // A memory pool the game creates is fresh memory on hardware: Horizon hands a process zeroed pages, and games rely on it.
+        // Super Mario Party Jamboree's character-card meshes live in one 8 MB pool the game never writes (the two auxiliary meshes
+        // of a card are meant to be degenerate), so when the port recycles a range that already holds another subsystem's data
+        // those draws render it as huge polygons. Zero it here. DM_POOL_ZERO: unset = this pool size only, 0 = off, all = every pool.
+        { static int z = -1; if (z < 0) { const char *e = getenv("DM_POOL_ZERO"); z = !e ? 1 : !strcmp(e, "0") ? 0 : !strcmp(e, "all") ? 2 : 1; }
+          if ((z == 1 && o->size == 0x800000u) || (z == 2 && o->size <= (256ull << 20))) { memset(o->mem, 0, (size_t)o->size); static int n; if (n++ < 8) LOG("[nvn] pool %p: zeroed %#llx bytes at creation (DM_POOL_ZERO=%d)", (void *)p, (unsigned long long)o->size, z); } }
+        mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
     if (!o->mem && !(o->flags & 0x200)) LOG("[RED] MemoryPoolInitialize: non-virtual pool has no storage flags=%#x size=%#llx", o->flags, o->size);
     if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
     OLOG("MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, o->size, o->flags);
@@ -1966,6 +1973,12 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
     // compressing encoder (when the pause menu opens, and near a save commit): the buffer's one use is a texture-to-buffer copy of the picture's own extent, which lies inside the pool. Not an error by itself: one line.
     if ((uint64_t)bb->off + bb->size > bb->pool->size) ONCE_LOG("BufferInitialize: a buffer reaches past the end of its pool (offset %#llx size %#llx pool %#llx); only an access that leaves the pool is an error, and it is reported where it happens", (unsigned long long)bb->off, (unsigned long long)bb->size, (unsigned long long)bb->pool->size);
     *(buf_t *)buf = (buf_t){MAGIC('B', 'U', 'F', 0), bb->pool, bb->off, bb->size};
+    // The game recreates a card's buffers for every card and expects fresh, zeroed memory for them (a console zeroes what it
+    // hands a process). Without this the revisit of a character reads the previous character's auxiliary mesh. DM_POOL_ZERO
+    // disables it together with the pool-level zero above. See the character-card note in the SMPJ pull request.
+    { static int z = -1; if (z < 0) { const char *e = getenv("DM_POOL_ZERO"); z = !e || strcmp(e, "0"); }
+      if (z && bb->pool->size == 0x800000u && bb->pool->mem) { uint8_t *q = bb->pool->mem + bb->off; memset(q, 0, (size_t)bb->size); {
+          static int n; if (n++ < 6) LOG("[nvn] BufferInitialize: zeroed %#llx bytes at %p in the card pool", (unsigned long long)bb->size, (void *)q); } } }
     OLOG("BufferInitialize %p pool=%p off=%#llx size=%#llx", (void *)buf, (const void *)bb->pool, (unsigned long long)bb->off, (unsigned long long)bb->size);
     return 1;
 }

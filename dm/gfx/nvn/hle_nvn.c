@@ -16,6 +16,7 @@
 #include "nvn_pace.h"
 #include "nvn_fstep.h"
 #include "nvn_timestamp.h"
+#include "nvn_poolpeak.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
 #include <mach/mach_time.h>
@@ -466,6 +467,18 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
         if (ti && o->d.width == tw && o->d.height == th) { static uint64_t n; if (n++ < 200) LOG("[nvn] TEXINFO init ser=%llu mem=%p pool=%p(mem %p size %#llx flags %#x) off=%#llx target=%d format=%#x flags=%#x samples=%d %ux%ux%u levels=%u stride=%u size=%#llx",
             (unsigned long long)o->serial, (void *)o->mem, (void *)o->pool, o->pool ? (void *)o->pool->mem : NULL, o->pool ? (unsigned long long)o->pool->size : 0ull, o->pool ? o->pool->flags : 0,
             (unsigned long long)o->off, o->d.target, o->d.format, o->d.flags, o->d.samples, o->d.width, o->d.height, o->d.depth, o->d.levels, o->d.stride, (unsigned long long)o->L.size); }
+    }
+    {   // DM_NVN_POOLPEAK=<MB> (diagnostic, nvn_poolpeak.h): for memory pools of at least that size, which 64 KB pages textures have ever been placed on; a line each time the set grows,
+        // with the largest range never used (how much room a game's render target pool has left, also when it allocates from both ends)
+        enum { PK_N = 8 }; static int on = -1; static uint64_t min_sz; static const void *pk_pool[PK_N]; static nvn_poolpeak pk[PK_N]; static int npk;
+        if (on < 0) { const char *e = getenv("DM_NVN_POOLPEAK"); on = e && atoi(e) > 0; min_sz = on ? (uint64_t)atoi(e) << 20 : 0; }
+        if (on && o->pool && o->pool->size >= min_sz && o->L.size) {
+            int i = 0; while (i < npk && pk_pool[i] != o->pool) i++;
+            if (i == npk && npk < PK_N && nvn_poolpeak_init(&pk[npk], o->pool->size)) pk_pool[npk++] = o->pool;
+            if (i < npk && nvn_poolpeak_add(&pk[i], o->off, o->L.size))
+                LOG("[nvn] pool peak: pool %p (%.1f MB): %.1f MB of it used so far, largest range never used %.1f MB (ser=%llu %ux%u format %#x at %#llx)", (void *)o->pool, o->pool->size / 1048576.0,
+                    pk[i].used / 16.0, nvn_poolpeak_gap(&pk[i]) / 16.0, (unsigned long long)o->serial, o->d.width, o->d.height, o->d.format, (unsigned long long)o->off);
+        }
     }
     // See SetPackagedTextureData. Linear textures are not re-uploaded as packaged: they are created on the pool buffer (tex_linear), whatever the pool's CPU access, and read what was copied in
     if (s->pkg_data && o->mem) {

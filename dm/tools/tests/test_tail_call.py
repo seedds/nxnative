@@ -103,6 +103,59 @@ class TailCall(unittest.TestCase):
                 words = THUNK.copy(); words[4] = word
                 self.assertFalse(self.check(words))
 
+    def test_multi_guard_framed_thunk_with_error_blocks(self):
+        # 16-byte frame with multiple forward guards to error suffix
+        words = [
+            0xa9bf7bfd,  # 0x00: stp x29, x30, [sp, #-0x10]!
+            0x910003fd,  # 0x04: mov x29, sp
+            0xb40000c0,  # 0x08: cbz x0, #0x20
+            0xf9400012,  # 0x0c: ldr x18, [x0]
+            0xb4000092,  # 0x10: cbz x18, #0x20
+            0xf9400652,  # 0x14: ldr x18, [x18, #8]
+            0xa8c17bfd,  # 0x18: ldp x29, x30, [sp], #0x10
+            0xd61f0240,  # 0x1c: br x18
+            0x940003f8,  # 0x20: bl #0x1000
+            0x00000000,  # 0x24: udf #0
+        ]
+        self.assertTrue(self.check(words, 7))
+        # Branch inside body targeting internal body must be rejected
+        bad_words = words.copy()
+        bad_words[2] = 0x14000002  # b #0x10
+        self.assertFalse(self.check(bad_words, 7))
+        # Branch in suffix jumping back into body must be rejected
+        bad_suffix = words.copy()
+        bad_suffix[8] = 0x17fffffc  # b #0x0
+        self.assertFalse(self.check(bad_suffix, 7))
+
+    def test_n_byte_framed_thunk_with_error_blocks(self):
+        # N-byte frame (callee saves and stack args)
+        words = [
+            0xd10083ff,  # 0x00: sub sp, sp, #0x20
+            0xa9017bfd,  # 0x04: stp x29, x30, [sp, #0x10]
+            0x910043fd,  # 0x08: add x29, sp, #0x10
+            0xb40000c0,  # 0x0c: cbz x0, #0x24
+            0xf9400012,  # 0x10: ldr x18, [x0]
+            0xaa0103e0,  # 0x14: mov x0, x1
+            0xa9417bfd,  # 0x18: ldp x29, x30, [sp, #0x10]
+            0x910083ff,  # 0x1c: add sp, sp, #0x20
+            0xd61f0240,  # 0x20: br x18
+            0x940003f7,  # 0x24: bl #0x1000
+            0x00000000,  # 0x28: udf #0
+        ]
+        self.assertTrue(self.check(words, 8))
+        # Stack size mismatch must be rejected
+        mismatch_stack = words.copy()
+        mismatch_stack[7] = 0x9100c3ff  # add sp, sp, #0x30
+        self.assertFalse(self.check(mismatch_stack, 8))
+        # Register x18 modified by arithmetic rather than load must be rejected
+        arithmetic_x18 = words.copy()
+        arithmetic_x18[4] = 0x8b000252  # add x18, x18, x0
+        self.assertFalse(self.check(arithmetic_x18, 8))
+        # Clobbering stack pointer in body must be rejected
+        alias_sp = words.copy()
+        alias_sp[5] = 0x9100001f  # mov sp, x0
+        self.assertFalse(self.check(alias_sp, 8))
+
 
 if __name__ == '__main__':
     unittest.main()

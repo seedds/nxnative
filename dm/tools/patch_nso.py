@@ -910,43 +910,96 @@ def tail_call_at_end(insl, j):
     if j + 1 != len(insl): return False
     for p in reversed(insl[:j]):
         if 'x18' not in [p.reg_name(r) for r in p.regs_access()[1]]: continue
-        return p.mnemonic == 'ldr' and bool(re.fullmatch(r'x18, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str))
+        return p.mnemonic in ('ldr', 'ldp') and bool(
+            re.fullmatch(r'x18, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str) or
+            re.fullmatch(r'x18, x\d+, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str)
+        )
     return False
 def tail_call(insl, j):
-    """Keep the existing terminal-tail rule; extend only the framed thunk with
-    a separate error call after its tail jump (Warm Snow, Unity IL2CPP).
-    The whole thunk must decode contiguously, restore its frame, and contain
-    only one forward null guard, this tail jump, and the trailing error call.
-    This deliberately does not generalize arbitrary mid-function br x18."""
+    """Keep the existing terminal-tail rule; extend only the framed thunks with trailing error/abort blocks
+    (Warm Snow, Ori and the Blind Forest, Unity IL2CPP). The whole thunk must decode contiguously,
+    the frame (x29, x30 and sp) must be restored before br x18, the last write of x18 must be a plain
+    pointer load, and all instructions after br x18 must be cold error blocks that never return or branch
+    back into the function body."""
     if j + 1 == len(insl): return tail_call_at_end(insl, j)
     if j < 4 or any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return False
     suffix = insl[j + 1:]
-    if suffix[0].mnemonic != 'bl' or any(p.mnemonic != 'udf' for p in suffix[1:]): return False
-    if insl[0].address <= suffix[0].operands[-1].imm <= insl[-1].address: return False
-    if insl[0].mnemonic != 'stp' or insl[0].op_str != 'x29, x30, [sp, #-0x10]!': return False
-    if insl[1].mnemonic != 'mov' or insl[1].op_str != 'x29, sp': return False
-    if insl[j - 1].mnemonic != 'ldp' or insl[j - 1].op_str != 'x29, x30, [sp], #0x10': return False
-    guard = insl[2]
-    if guard.mnemonic != 'cbz' or guard.operands[-1].imm != suffix[0].address: return False
-    load = None
-    for k in range(3, j - 1):
-        p = insl[k]
-        # Argument moves and memory transfers only. No hidden control flow,
-        # stack-pointer writes, or unmodelled instructions inside the new thunk form.
-        if p.mnemonic not in ('mov', 'ldr', 'ldur', 'ldp', 'str', 'stur', 'stp'): return False
+    body_addrs = {p.address for p in insl[:j + 1]}
+    fn_start, fn_end = insl[0].address, insl[-1].address
+    for p in suffix:
+        if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
+            tgt = p.operands[-1].imm
+            if tgt in body_addrs: return False
+            if p.mnemonic == 'bl' and (fn_start <= tgt <= fn_end): return False
+
+    epilogue = insl[max(0, j - 6):j]
+    restore_idx = next((k for k, p in enumerate(epilogue) if p.mnemonic == 'ldp' and bool(re.match(r'x29, x30, \[(sp|x29)', p.op_str))), None)
+    if restore_idx is None: return False
+    restore = epilogue[restore_idx]
+    for p in epilogue[restore_idx + 1:]:
         writes = {p.reg_name(r) for r in p.regs_access()[1]}
-        if writes & {'sp', 'wsp', 'fp', 'lr', 'x29', 'w29', 'x30', 'w30'}: return False
-        if p.mnemonic in ('str', 'stur', 'stp'):
-            # regs_access does not report memory writes. Only fixed caller stack
-            # argument slots are proven clear of the saved FP/LR at sp + [0, 16).
-            # Other bases may alias that frame, and a register offset is unproven.
-            if p.writeback: return False
-            mem = p.operands[-1].mem
-            if p.reg_name(mem.base) not in ('sp', 'fp', 'x29') or mem.index or mem.disp < 16: return False
-        if writes & {'x18', 'w18'}:
-            if load is not None or p.mnemonic != 'ldr' or not re.fullmatch(r'x18, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str): return False
-            load = p
-    return load is not None
+        if writes & {'x29', 'w29', 'x30', 'w30'}: return False
+        if p.mnemonic in ('str', 'stur', 'stp'): return False
+
+    # Standard 16-byte frame (Warm Snow / Ori virtual thunks)
+    if restore.op_str == 'x29, x30, [sp], #0x10':
+        if insl[0].mnemonic != 'stp' or insl[0].op_str != 'x29, x30, [sp, #-0x10]!': return False
+        if insl[1].mnemonic != 'mov' or insl[1].op_str != 'x29, sp': return False
+        if suffix[0].mnemonic == 'bl' or insl[2].mnemonic == 'cbz':
+            # Single-guard thunk (Warm Snow)
+            if suffix[0].mnemonic != 'bl' or any(p.mnemonic != 'udf' for p in suffix[1:]): return False
+            if insl[2].mnemonic != 'cbz' or insl[2].operands[-1].imm != suffix[0].address: return False
+            start_k = 3
+        else:
+            # Multi-guard thunk (Ori virtual invoke)
+            if suffix[-1].mnemonic not in ('udf', 'bl', 'b') and not any(p.mnemonic == 'udf' or p.mnemonic == 'bl' for p in suffix): return False
+            start_k = 2
+        for k in range(start_k, j - 1):
+            p = insl[k]
+            writes = {p.reg_name(r) for r in p.regs_access()[1]}
+            if writes & {'sp', 'wsp', 'fp', 'lr', 'x29', 'w29', 'x30', 'w30'}: return False
+            if p.mnemonic in ('str', 'stur', 'stp'):
+                if p.writeback: return False
+                mem = p.operands[-1].mem
+                if p.reg_name(mem.base) not in ('sp', 'fp', 'x29') or mem.index or mem.disp < 16: return False
+            elif p.mnemonic in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
+                if p.operands[-1].imm not in {s.address for s in suffix}: return False
+            elif p.mnemonic not in ('mov', 'ldr', 'ldur', 'ldp', 'str', 'stur', 'stp', 'add', 'sub', 'cmp', 'cmn', 'tst'):
+                return False
+    else:
+        # N-byte frame (Ori interface thunks)
+        m_add = re.fullmatch(r'sp, sp, #(0x[0-9a-f]+|\d+)', insl[j - 1].op_str) if insl[j - 1].mnemonic == 'add' else None
+        m_sub = re.fullmatch(r'sp, sp, #(0x[0-9a-f]+|\d+)', insl[0].op_str) if insl[0].mnemonic == 'sub' else None
+        if not m_add or not m_sub or int(m_add.group(1), 0) != int(m_sub.group(1), 0): return False
+        save_idx = next((k for k, p in enumerate(insl[:8]) if p.mnemonic == 'stp' and bool(re.match(r'x29, x30, \[(sp|x29)', p.op_str))), None)
+        if save_idx is None: return False
+        save_disp = insl[save_idx].operands[-1].mem.disp
+        if suffix[-1].mnemonic not in ('udf', 'bl', 'b') and not any(p.mnemonic == 'udf' or p.mnemonic == 'bl' for p in suffix): return False
+        for k in range(1, j - len(epilogue) + restore_idx):
+            p = insl[k]
+            writes = {p.reg_name(r) for r in p.regs_access()[1]}
+            if writes & {'sp', 'wsp'}: return False
+            if p.mnemonic in ('str', 'stur', 'stp'):
+                if p.writeback and not (p.mnemonic == 'stp' and bool(re.match(r'x29, x30, \[(sp|x29)', p.op_str))): return False
+                mem = p.operands[-1].mem
+                base_name = p.reg_name(mem.base)
+                if base_name not in ('sp', 'fp', 'x29') or mem.index: return False
+                if base_name in ('fp', 'x29') and (0 <= mem.disp < 16): return False
+                if base_name == 'sp' and (save_disp <= mem.disp < save_disp + 16) and k != save_idx: return False
+
+    # Check 3: Last write of x18 before br x18 must be a plain pointer load
+    for p in reversed(insl[:j]):
+        writes = {p.reg_name(r) for r in p.regs_access()[1]}
+        if 'x18' in writes or 'w18' in writes:
+            is_valid = p.mnemonic in ('ldr', 'ldp') and bool(
+                re.fullmatch(r'x18, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str) or
+                re.fullmatch(r'x18, x\d+, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str)
+            )
+            if not is_valid: return False
+            break
+    else: return False
+
+    return True
 
 def jump_bytes_far(insl, j):
     """The byte / halfword table form with its add further back (Octopath Traveler 0 main+0x37f9bc8: adr x18,#L; ldrb w0,[x17,x15]; add x18,x18,x0,lsl #2, then 17 register moves before br x18).

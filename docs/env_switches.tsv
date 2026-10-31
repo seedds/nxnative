@@ -32,6 +32,7 @@ DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the
 DM_ENV_LAUNCH_KEYS	switch	Set at launch by the Mac launcher (the launcher settings already in the environment) and the iOS app (every DM_* variable already in it) to the space-separated names; the settings screen keeps those values and shows them greyed out
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
+DM_FOCUS_NOTIFY	player	`=0` never tells the game about focus changes (front-end and library-applet ones), for games whose own out-of-focus handler stalls; the front end still releases input on blur (default 1: notify)
 DM_FONT_DIR	path	Folder of the shared-font stand-ins (`standard.ttf`, `nintendo_ext.ttf` with the button icons); the app, the Mac launcher and the NSP script set it
 DM_FORCE_STRICT	diagnostic	`=1` makes the loader fail on forced-hook entries no module references, instead of only noting them (for checking a mistyped list)
 DM_FPS	switch	`30` or `60` pins the frame rate the display link and frame pacing aim for; otherwise it follows the game's present interval (60, or 30 when the game asks for 30)

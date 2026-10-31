@@ -132,6 +132,10 @@ static class SwshXlate
         public bool QueryHostSupportsTextureShadowLod() => true;
         public bool QueryHostSupportsDepthClipControl() => false;   // Metal has no -1..1 clip control; the depth convention is not left to the translator, the rewrite is added per entry point in the MSL (see the file header)
         // Job reduced = true: relaxed precision - the translator marks NoContraction only on operations that must be exact (the default marks all: keeps the bit-exact results of Maxwell's separate rounding, at the cost of many optimization-disabled spvFMul etc. in the MSL)
+        // Profile key shader_sb_unaligned: storage offsets from the binding's base rounded down to 16 bytes, read from c0 at run time (GlobalToStorage), so a sub-word access keeps
+        // the address's low bits; the replay binds such buffers at that rounded base (nvn_mtl.m). Without it an offset counts from the exact base, which Metal cannot hold off a word
+        public bool QueryHasUnalignedStorageBuffer() => _job["sb_unaligned"] is JsonNode n && (bool)n;
+        public int QueryHostStorageBufferOffsetAlignment() => 16;
         public bool QueryHostReducedPrecision() => _job["reduced"] is JsonNode n && (bool)n;
         // Job softfloat64 = true: the host has no FP64, so Ryujinx's DoubleToFloat pass lowers double operations to float (Metal has no double type). Set only on the retry of a
         // shader whose first translation declared a 64-bit float (see Main): answering "no" for every shader would also drop the Float64 capability from all the others

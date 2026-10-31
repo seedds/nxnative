@@ -111,6 +111,7 @@ typedef struct hostvk_dev {
     uint32_t eds_present;                 // bit HOSTVK_EDS_*: that state can be dynamic on this device (as enabled: a forced level clears what it does not enable)
     uint32_t driver_id;                   // VkDriverId (VkPhysicalDeviceDriverProperties): the backend's per-vendor quirk table matches it (vk_gpl.c)
     int vk14, astc_ldr;                   // Vulkan 1.4 (device and loader), textureCompressionASTC_LDR
+    VkPhysicalDeviceFeatures enabled;     // the core features the device was made with (the guest Vulkan layer, guest_vk.c, compares a game's against them)
     // Optional features and extensions beyond the baseline and be_caps that the backend (vk_backend.h) uses where the device has them: hostvk_init enables each one present
     struct {
         uint32_t host_query_reset : 1;        // hostQueryReset (1.2): query pools reset on the CPU when a submission slot is reused

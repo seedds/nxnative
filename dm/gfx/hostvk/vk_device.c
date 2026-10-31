@@ -509,6 +509,15 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     f.features.shaderStorageImageReadWithoutFormat = f.features.shaderStorageImageWriteWithoutFormat = d->x.storage_without_format;
     f.features.multiViewport = d->x.multi_viewport; f.features.depthBounds = d->x.depth_bounds;
     f.features.shaderTessellationAndGeometryPointSize = d->x.tess_geom_point_size;
+    // Step P9a: what a game's own SPIR-V and draws may declare through the guest Vulkan layer (guest_vk.c), which shares this device: the 32-bit index range, gather offsets,
+    // MinLod, and dynamic indexing of descriptor arrays (Super Mario Galaxy's arrays of uniform buffers and textures), where the device has them. Nothing is paid unless used
+    f.features.fullDrawIndexUint32 = cf->fullDrawIndexUint32; f.features.shaderImageGatherExtended = cf->shaderImageGatherExtended;
+    f.features.shaderResourceMinLod = cf->shaderResourceMinLod;
+    f.features.shaderUniformBufferArrayDynamicIndexing = cf->shaderUniformBufferArrayDynamicIndexing;
+    f.features.shaderSampledImageArrayDynamicIndexing = cf->shaderSampledImageArrayDynamicIndexing;
+    f.features.shaderStorageBufferArrayDynamicIndexing = cf->shaderStorageBufferArrayDynamicIndexing;
+    f.features.shaderStorageImageArrayDynamicIndexing = cf->shaderStorageImageArrayDynamicIndexing;
+    d->enabled = f.features;
     VkPhysicalDeviceVulkan12Features f12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     f12.drawIndirectCount = VK_TRUE; f12.timelineSemaphore = VK_TRUE; f12.bufferDeviceAddress = d->caps.buffer_device_address ? VK_TRUE : VK_FALSE;
     f12.hostQueryReset = d->x.host_query_reset; f12.samplerFilterMinmax = d->x.sampler_minmax; f12.samplerMirrorClampToEdge = d->x.mirror_clamp_to_edge;

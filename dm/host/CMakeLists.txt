@@ -346,6 +346,24 @@ else()
     target_link_libraries(nxhost PUBLIC nvn_null)
 endif()
 set_target_properties(nxhost PROPERTIES LINK_INTERFACE_MULTIPLICITY 2)
+# The guest Vulkan layer on that backend (dm/gfx/hostvk/guest_vk.c; docs/design/vulkan-backend.md 8.1, step P9a): the game's vk* imports forwarded to the backend's device. A
+# library of its own beside nvn_vk, because it is a game-facing API layer like hle_nvn.c (import-table entries, host services: the frame tick, the vi layer crop, the graphics
+# gate), not part of the NVN backend that the GPU tests link; nxhost links it with the Vulkan backend. Its VK( / VKB( entries register in the import table and get host-call
+# thunks like the HLE entries: the thunk generator's command above runs again over nxhost's sources and the shim's, with the Vulkan headers on its include path, and its file is
+# the one compiled (APPEND keeps this change beside the backend it belongs to; folded into that command, the first run goes away). The thunk table references every entry's C
+# function, so linking it pulls the shim's object, and its entries, into a host binary
+set(GUEST_VK_SRC ${REPO}/dm/gfx/hostvk/guest_vk.c)
+add_library(guest_vk STATIC ${GUEST_VK_SRC})
+add_dependencies(guest_vk game_profile)
+target_compile_options(guest_vk PRIVATE ${HOST_FLAGS})
+target_include_directories(guest_vk PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn/include)
+target_link_libraries(guest_vk PUBLIC nvn_vk)
+if(NXHOST_VULKAN)
+    target_link_libraries(nxhost PUBLIC guest_vk)
+    add_custom_command(OUTPUT ${HLE_THUNKS_C} APPEND
+        COMMAND ${Python3_EXECUTABLE} ${GEN_HLE_THUNKS} -o ${HLE_THUNKS_C} ${GEN_HLE_THUNKS_INC} -I ${REPO}/dm/third_party/vulkan-headers/include ${NXHOST_SRC} ${GUEST_VK_SRC}
+        DEPENDS ${GUEST_VK_SRC} ${REPO}/dm/gfx/hostvk/guest_vk.h)
+endif()
 # Its GPU tests (dm/gfx/tests/vk; t_vk_harness.h says what they share): the NVN frontend, as objects so that the backend's references to it resolve whatever the link order,
 # over nvn_vk, each drawing headless and reading pixels back. Without a Vulkan device they skip as t_vk_device does; CTest on Linux runs them on lavapipe under the validation layer
 add_library(nvn_front_obj OBJECT ${NVN_FRONTEND_SRC} ${NVN_NAMES_C})
@@ -416,6 +434,14 @@ endforeach()
 foreach(t IN ITEMS transform_feedback geometry tessellation feedback raster)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
+endforeach()
+# The guest Vulkan layer (docs/design/vulkan-backend.md 8.1, step P9a): t_vk_guest drives guest_vk.c through the entry points a game gets from its vkGetInstanceProcAddr (found by
+# name in the import table, as the loader binds them) on lavapipe under the validation layer, skipped without a Vulkan device as the GPU tests above: the Tegra shape, memory,
+# buffers and images, render passes, pipelines (the two SPIR-V fix-ups among them), draws read back, queries, and a swapchain presented with a layer crop through the backend's
+# headless presenter; t_vk_spirv_fix runs the SPIR-V checks and fix-ups on hand-written modules (no device; spirv-val checks what they produce where it is installed)
+foreach(t IN ITEMS guest spirv_fix)
+    host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
+    target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj guest_vk nvn_vk)
 endforeach()
 # The NVN frontend linked over the null backend (step M6): its entry points called as C functions, a device, a queue and a memory pool made, a command list recorded, submitted and
 # handed by the decoder to the null backend (dm/gfx/tests/t_frontend.c). Here only: on Apple nvn_be.h's functions are the Metal backend's

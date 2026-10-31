@@ -5,9 +5,10 @@ Recompiled guest code (docs/design/aot-recompiler.md, section 2.4) calls a host 
 the dispatcher maps the slot to a thunk, which reads the arguments from the guest state block (dm_guest_state, dm/tools/aot/include/nxaot/guest_state.h) as
 AAPCS64 passes them, calls the C function on the host thread's own stack and writes its result back to the block. This script reads the host sources given on
 its command line, finds every HLE(, HLE_FORCE( and HLE_FORCE_BIG( entry (hle.h), also through a file's own wrapper macros (hle_net.c's SKF) and aliases
-(hle_fs.c's #define HLE_FORCE HLE_FORCE_BIG), and the NVN interface layer's NVN( and NVN_NOPROTO( entries (dm/gfx/nvn/hle_nvn.c: NVN(name, ret, params...), the
-entry named by the NVN function's name, its C function h_<name>), and writes one thunk per entry, the table hle_thunks[] sorted by mangled name (an NVN entry's
-name stands for it), and an extern declaration of each entry's C function (external on non-native builds: HLE_LINKAGE in hle.h).
+(hle_fs.c's #define HLE_FORCE HLE_FORCE_BIG), the NVN interface layer's NVN( and NVN_NOPROTO( entries (dm/gfx/nvn/hle_nvn.c: NVN(name, ret, params...), the
+entry named by the NVN function's name, its C function h_<name>) and the guest Vulkan layer's VK( and VKB( entries of the same form (dm/gfx/hostvk/guest_vk.c: named
+by the Vulkan function's name, registered in the HLE table), and writes one thunk per entry, the table hle_thunks[] sorted by mangled name (an NVN or Vulkan
+entry's name stands for it), and an extern declaration of each entry's C function (external on non-native builds: HLE_LINKAGE in hle.h).
 
 Argument rules (AAPCS64): integer and pointer parameters take the next x register (x0..x7), float and double the next v register (v0..v7, its low 32 or 64
 bits); a 32-bit parameter is the low half of its register, as a w register reads it. A parameter past the eighth of its class is read from the guest stack
@@ -15,7 +16,9 @@ bits); a 32-bit parameter is the low half of its register, as a w register reads
 Returns: integers and pointers in x0, a 32-bit or smaller value zero-extended (AAPCS64 leaves the upper bits unspecified, so guest code cannot depend on them;
 zero is the deterministic choice), long as its value (sign-extended), float and double in v0 with the rest of q0 cleared, void nothing.
 Parameter types come from the C spelling, the pointers, and the typedefs of the source and of the headers it includes with quotes (found beside the including
-file, then in the -I directories, as the compiler finds them). A struct whose one member is a 64-bit integer (NVN's separate texture and sampler handles) is
+file, then in the -I directories, as the compiler finds them); a Khronos Vulkan header (<vulkan/...>, in angle brackets or quotes) found in the -I directories
+is read by rules of its own (learn_vulkan_header: its include guard and platform conditionals would hide every typedef from the C reader). A struct whose one
+member is a 64-bit integer (NVN's separate texture and sampler handles) is
 passed as that integer: AAPCS64 gives an 8-byte composite one x register, and the host ABIs (System V, Windows x64) one integer register. A type the script
 does not know (any other struct or union by value, a sub-32-bit parameter, ..., an unknown typedef), an entry inside a preprocessor conditional other than
 #if 0 / #if 1 (and #ifdef / #ifndef __cplusplus, which is never defined in these C sources), or a C name used by two entries stops the run with file:line.
@@ -28,9 +31,9 @@ import os
 import re
 import sys
 
-MACROS = {"HLE": 3, "HLE_FORCE": 4, "HLE_FORCE_BIG": 4, "NVN": 2, "NVN_NOPROTO": 2}   # macro -> index of the first parameter argument (mangled, [why,] ret, cname, params...; name, ret, params...)
-NAMED = {"NVN", "NVN_NOPROTO"}   # entries named by an identifier, the NVN function's name, whose C function is h_<name> (dm/gfx/nvn/hle_nvn.c)
-TABLES = {"HLE": "hle", "HLE_FORCE": "force", "HLE_FORCE_BIG": "force", "NVN": "nvn", "NVN_NOPROTO": "nvn"}   # the host table each entry registers in (a name is unique within one)
+MACROS = {"HLE": 3, "HLE_FORCE": 4, "HLE_FORCE_BIG": 4, "NVN": 2, "NVN_NOPROTO": 2, "VK": 2, "VKB": 2}   # macro -> index of the first parameter argument (mangled, [why,] ret, cname, params...; name, ret, params...)
+NAMED = {"NVN", "NVN_NOPROTO", "VK", "VKB"}   # entries named by an identifier, the API function's name, whose C function is h_<name> (dm/gfx/nvn/hle_nvn.c, dm/gfx/hostvk/guest_vk.c)
+TABLES = {"HLE": "hle", "HLE_FORCE": "force", "HLE_FORCE_BIG": "force", "NVN": "nvn", "NVN_NOPROTO": "nvn", "VK": "hle", "VKB": "hle"}   # the host table each entry registers in (a name is unique within one)
 
 # Scalar types by C spelling (qualifiers removed, words joined by one space): (class, canonical C type).
 # Classes: x32 / x64 integer in an x register; f32 / f64 in a v register; small: a sub-32-bit integer (accepted as a return only)
@@ -304,6 +307,54 @@ def one_member_x64(base, typedefs):
     return r if r and r[0] == "x64" else None
 
 
+# The forms of a Khronos Vulkan header (generated from the API registry, one declaration per line): handles, enums, structs and unions, function pointer types, and
+# typedefs of integer types and of other Vulkan types (the flags, VkBool32, VkDeviceSize, the KHR aliases of promoted names)
+VK_HANDLE = re.compile(r"^\s*VK_DEFINE(?:_NON_DISPATCHABLE)?_HANDLE\((\w+)\)")
+VK_TAGGED = re.compile(r"^\s*typedef\s+(enum|struct|union)\s+(\w+)\s*\{")
+VK_PFN = re.compile(r"^\s*typedef\s+[\w\s*]+?\(\s*VKAPI_PTR\s*\*\s*(\w+)\s*\)")
+VK_TYPEDEF = re.compile(r"^\s*typedef\s+([\w\s*]+?)\s*\b(\w+)\s*;")
+
+
+def learn_vulkan_header(path, scope, seen):
+    """The typedef names a Khronos Vulkan header declares, with their class: a handle a pointer (VK_DEFINE_HANDLE, and VK_DEFINE_NON_DISPATCHABLE_HANDLE on 64-bit hosts:
+    a pointer there, and an 8-byte integer in one x register on the guest either way), an enum 32 bits, a function pointer type a pointer, a struct or union by value
+    unsupported (entries take them by pointer), any other typedef its type's class. Read line by line, not as C: the header's include guard and platform conditionals
+    would hide every typedef from parse_file. Its own include (vk_platform.h) declares no Vulkan type"""
+    real = os.path.realpath(path)
+    if real in seen:
+        return
+    seen.add(real)
+    with open(path, encoding="utf-8") as f:
+        text = re.sub(r"/\*.*?\*/", " ", f.read(), flags=re.S)
+    for line in text.split("\n"):
+        line = line.split("//", 1)[0]
+        m = VK_HANDLE.match(line)
+        if m:
+            scope.typedefs[m.group(1)] = ("ptr", "void *")
+            continue
+        m = VK_TAGGED.match(line)
+        if m:
+            scope.typedefs[m.group(2)] = ("x32", "uint32_t") if m.group(1) == "enum" else ("struct", f"{m.group(1)} {m.group(2)}")
+            continue
+        m = VK_PFN.match(line)
+        if m:
+            scope.typedefs[m.group(1)] = ("ptr", "void *")
+            continue
+        m = VK_TYPEDEF.match(line)
+        if not m or "(" in line:
+            continue
+        spelled = m.group(1)
+        words = [w for w in spelled.replace("*", " ").split() if w not in QUALIFIERS]
+        if "*" in spelled:
+            scope.typedefs[m.group(2)] = ("ptr", "void *")
+        elif words and words[0] in ("struct", "union"):
+            scope.typedefs[m.group(2)] = ("struct", " ".join(words[:2]))
+        elif words and words[0] == "enum":
+            scope.typedefs[m.group(2)] = ("x32", "uint32_t")
+        else:
+            scope.typedefs[m.group(2)] = resolve_words(words, scope.typedefs) or ("unknown", " ".join(words))
+
+
 def parse_file(path, scope=None, entries=None, seen=None, incs=()):
     """The entries of a source file. The typedefs and macros of headers it includes with quotes (beside it) are learned; headers hold no entries"""
     scope = scope or Scope()
@@ -357,7 +408,14 @@ def parse_file(path, scope=None, entries=None, seen=None, incs=()):
                 scope.macros[arg.split()[0]] = ("obj",)   # no longer an entry macro or a wrapper
             elif dname == "include" and active():
                 m = re.match(r'"([^"]+)"', arg)
-                if m:
+                v = re.match(r'[<"](vulkan/[^>"]+)[>"]', arg)
+                if v:   # a Khronos Vulkan header: found in the -I directories, read by its own rules
+                    for d in incs:
+                        inc = os.path.join(d, v.group(1))
+                        if os.path.isfile(inc):
+                            learn_vulkan_header(inc, scope, seen)
+                            break
+                elif m:
                     for d in (os.path.dirname(path),) + tuple(incs):   # beside the file, then the -I directories
                         inc = os.path.join(d, m.group(1))
                         if os.path.isfile(inc):
@@ -413,10 +471,10 @@ def take_entry(scope, base, name, args, path, line, entries):
     first = MACROS[base]
     if len(args) < first + 1 or not args[first - 1]:
         raise GenError(f"{path}:{line}: {name}( with {len(args)} arguments")
-    if base in NAMED:   # NVN(name, ret, params...): the entry is the NVN function, its C function h_<name>
+    if base in NAMED:   # NVN(name, ret, params...), VK(name, ret, params...): the entry is the API function, its C function h_<name>
         nm = args[0]
         if len(nm) != 1 or nm[0][0] != "id":
-            raise GenError(f"{path}:{line}: {name}: the NVN function's name is not one identifier")
+            raise GenError(f"{path}:{line}: {name}: the {'NVN' if base.startswith('NVN') else 'Vulkan'} function's name is not one identifier")
         entries.append({
             "macro": base, "path": path, "line": line, "mangled_lit": f'"{nm[0][1]}"', "mangled": nm[0][1], "cname": "h_" + nm[0][1],
             "typedefs": dict(scope.typedefs), "ret": [(k, v) for k, v, _ in args[1]], "params": [[(k, v) for k, v, _ in p] for p in args[first:]],

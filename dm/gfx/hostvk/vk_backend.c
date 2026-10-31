@@ -7,11 +7,12 @@
 // one [RED] line per function on its first call, a GPU that has finished everything, events and syncs written at once, the pool table kept), so a host without Vulkan still runs
 // its CPU side. The two forms live in this one library: a host binary links exactly one backend (dm/host/CMakeLists.txt: nxhost links hostvk; nvn_null.c stays the backend of the
 // CMake targets that do not link hostvk, t_frontend).
-// Declared here, with a red line and the phase that brings them: presentation, the display link and pacing (P4), the external producers of the guest Vulkan and GL layers (P9),
-// be_report's statistics lines (the per-frame statistics answer zero or what the backend counts).
+// Declared here, with a red line and the phase that brings them: presentation of NVN windows, the display link and pacing (P4), be_report's statistics lines (the per-frame
+// statistics answer zero or what the backend counts). The external producers (the guest Vulkan layer, guest_vk.c; step P9a) present through a headless presenter until P4.
 #include "plat/plat.h"
 #include "vk_backend.h"
 #include "vk_pso.h"
+#include "guest_vk.h"
 #include "../nvn/nvn_be.h"
 #include "../nvn/nvn_pools.h"
 #include "../nvn/nvn_replay.h"
@@ -87,8 +88,10 @@ int hvk_up(void) { pthread_once(&g_once, up_once); return hvk.on; }
 const hostvk_dev *hvk_device(void);
 const hostvk_dev *hvk_device(void) { return hvk_up() ? &hvk.dev : NULL; }
 void hvk_shutdown(void);
+static void pres_shutdown(void);
 void hvk_shutdown(void) {
     if (!hvk.on) return;
+    pres_shutdown();   // the headless presenter's copies finished, its objects released (external producers, step P9a)
     hvk_commands_shutdown();
     hvk_pso_shutdown(); hvk_prewarm_shutdown(); hvk_cache_shutdown();   // the workers stopped, every pipeline released, the cache written a last time
     hvk_pipeline_shutdown(); hvk_shader_shutdown(); hvk_tex_shutdown(); hvk_mem_shutdown();
@@ -208,7 +211,8 @@ int be_vsync_tick(uint64_t n, double *target, double *lead_ms, int *ticks, doubl
 double be_presented_time(uint64_t n) { (void)n; return 0; }   // 0: not shown yet
 int be_snap_on(void) { return 0; }
 uint64_t be_snap_acquire_wait(void) { return 0; }
-void be_present_wait(uint64_t ticket) { (void)ticket; }
+static void pres_wait(uint64_t v);
+void be_present_wait(uint64_t ticket) { pres_wait(ticket); }   // a ticket of be_present_ext (be_present gives none yet)
 int be_fps_target(void) {
     static int env = -2;
     if (env == -2) { const char *e = getenv("DM_FPS"); env = e ? atoi(e) : -1; if (env != 30 && env != 60) env = -1; }
@@ -217,11 +221,138 @@ int be_fps_target(void) {
 }
 int be_vsync_active(void) { return 0; }
 int be_vsync_wait(int vsyncs, uint64_t timeout_ns) { (void)vsyncs; (void)timeout_ns; DECLARED("vsync wait: no vsync source yet (phase P4, design 7.3)"); return 0; }
-// External producers (the guest Vulkan and GL layers on this host, phase P9): the shared device record is the backend's device layer
+// ---------- External producers (the guest Vulkan layer, guest_vk.c; step P9a) and the headless presenter ----------
+// The shared device record is the backend's device layer (hostvk_dev). be_ext_tex registers an image (hvk_ext_image, guest_vk.h) under a serial; be_present_ext presents one.
+// There is no window yet (phase P4), so the presenter is headless: each present copies the frame's region (the layer crop, else the whole image) into a host-visible buffer,
+// the picture a window would show (hvk_present_last reads it back). A present is one submission on the backend's queue: it waits for the producer's timeline value (ev,
+// ev_val), copies between two full barriers, so the copy is ordered against everything submitted before and after it on the queue whatever semaphores the producer used, and
+// signals the presenter's own timeline; that value is the ticket be_present_wait waits for. Up to PRES_N presents are in flight; the next one waits for the oldest. The period is
+// not used: nothing paces a headless present (the vsync source is phase P4's). The GL layer is not a producer here yet (design 8.2, decision D5)
 void *be_native_device(void) { return hvk_up() ? (void *)&hvk.dev : NULL; }
-uint64_t be_ext_tex(void *tex) { (void)tex; DECLARED("external textures of the guest Vulkan and GL layers: phase P9"); return 0; }
+typedef struct { VkImage image; VkFormat format; uint32_t w, h; } ext_ent;
+enum { PRES_N = 4 };
+static pthread_mutex_t g_ext_mu = PTHREAD_MUTEX_INITIALIZER;   // the registry and the presenter
+static ext_ent *g_ext; static uint32_t g_n_ext, g_cap_ext;      // serial s names g_ext[s - 1]; a dropped one has no image
+static VkCommandPool g_pres_pool; static VkCommandBuffer g_pres_cb[PRES_N]; static uint64_t g_pres_at[PRES_N];
+static VkSemaphore g_pres_tl; static uint64_t g_pres_n;         // the presenter's timeline and the last value submitted
+static VkBuffer g_screen; static VkDeviceMemory g_screen_mem; static void *g_screen_map; static VkDeviceSize g_screen_size;
+static hvk_present_info g_last;
+uint64_t be_ext_tex(void *tex) {
+    if (!hvk_up()) { NULLRED(); return 0; }
+    const hvk_ext_image *e = tex;
+    if (!e || !e->image) return 0;
+    pthread_mutex_lock(&g_ext_mu);
+    if (g_n_ext == g_cap_ext) {
+        uint32_t c = g_cap_ext ? 2 * g_cap_ext : 16; ext_ent *n = realloc(g_ext, c * sizeof *n);
+        if (!n) { pthread_mutex_unlock(&g_ext_mu); HVK_RED_ONCE("external texture registry: out of memory"); return 0; }
+        g_ext = n; g_cap_ext = c;
+    }
+    g_ext[g_n_ext++] = (ext_ent){e->image, e->format, e->width, e->height};
+    uint64_t s = g_n_ext;
+    pthread_mutex_unlock(&g_ext_mu);
+    return s;
+}
+void hvk_ext_tex_drop(uint64_t serial) {
+    pthread_mutex_lock(&g_ext_mu);
+    if (serial && serial <= g_n_ext) g_ext[serial - 1].image = VK_NULL_HANDLE;
+    pthread_mutex_unlock(&g_ext_mu);
+}
+static void pres_wait(uint64_t v) {   // the present of ticket v has finished reading its image
+    if (!v || !g_pres_tl) return;
+    VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, NULL, 0, 1, &g_pres_tl, &v};
+    uint64_t t0 = plat_now_ns();
+    while (vkWaitSemaphores(hvk.d, &wi, 1000000000ull) == VK_TIMEOUT)
+        if (plat_now_ns() - t0 > 5000000000ull) HVK_RED_ONCE("a present has waited over 5 s for its frame (the producer's timeline value is never signalled?)");
+}
+static int pres_make(void) {   // under g_ext_mu
+    if (g_pres_tl) return 1;
+    VkCommandPoolCreateInfo pi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, NULL, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, hvk.dev.queue_family};
+    VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, VK_NULL_HANDLE, VK_COMMAND_BUFFER_LEVEL_PRIMARY, PRES_N};
+    VkSemaphoreTypeCreateInfo ti = {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, NULL, VK_SEMAPHORE_TYPE_TIMELINE, 0};
+    VkSemaphoreCreateInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &ti, 0};
+    if (vkCreateCommandPool(hvk.d, &pi, NULL, &g_pres_pool)) { g_pres_pool = VK_NULL_HANDLE; return 0; }
+    ai.commandPool = g_pres_pool;
+    if (vkAllocateCommandBuffers(hvk.d, &ai, g_pres_cb) || vkCreateSemaphore(hvk.d, &si, NULL, &g_pres_tl)) {
+        vkDestroyCommandPool(hvk.d, g_pres_pool, NULL); g_pres_pool = VK_NULL_HANDLE; g_pres_tl = VK_NULL_HANDLE; return 0;
+    }
+    return 1;
+}
 uint64_t be_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]) {
-    (void)serial; (void)period; (void)ev; (void)ev_val; (void)crop; DECLARED("present of an external producer's frame: phase P4 / P9"); return 0; }
+    (void)period;
+    if (!hvk.on) { NULLRED(); return 0; }
+    pthread_mutex_lock(&g_ext_mu);
+    if (!serial || serial > g_n_ext || !g_ext[serial - 1].image) {
+        pthread_mutex_unlock(&g_ext_mu);
+        HVK_RED_ONCE("present of external texture %llu, which names no registered image: not shown", (unsigned long long)serial);
+        return 0;
+    }
+    const ext_ent e = g_ext[serial - 1];
+    uint32_t x = 0, y = 0, w = e.w, h = e.h;
+    if (crop && crop[0] >= 0 && crop[1] >= 0 && crop[2] > 0 && crop[3] > 0 && (uint32_t)crop[0] + (uint32_t)crop[2] <= e.w && (uint32_t)crop[1] + (uint32_t)crop[3] <= e.h) {
+        x = (uint32_t)crop[0]; y = (uint32_t)crop[1]; w = (uint32_t)crop[2]; h = (uint32_t)crop[3];
+    }
+    VkDeviceSize need = (VkDeviceSize)w * h * 4;
+    if (!pres_make()) { pthread_mutex_unlock(&g_ext_mu); HVK_RED_ONCE("the headless presenter's command pool or timeline could not be made: frames are not shown"); return 0; }
+    if (need > g_screen_size) {   // a larger picture: the copies in flight write the old buffer
+        pres_wait(g_pres_n);
+        if (g_screen) hvk_buffer_free(g_screen, g_screen_mem);
+        g_screen = VK_NULL_HANDLE; g_screen_mem = VK_NULL_HANDLE; g_screen_map = NULL; g_screen_size = 0;
+        if (hvk_buffer_make(need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 1, &g_screen, &g_screen_mem, &g_screen_map)) {
+            pthread_mutex_unlock(&g_ext_mu); HVK_RED_ONCE("the headless presenter's buffer of %llu bytes could not be made: frames are not shown", (unsigned long long)need); return 0;
+        }
+        g_screen_size = need;
+    }
+    int slot = (int)(g_pres_n % PRES_N);
+    pres_wait(g_pres_at[slot]);   // its command buffer is free again
+    VkCommandBuffer cb = g_pres_cb[slot];
+    vkResetCommandBuffer(cb, 0);
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
+    vkBeginCommandBuffer(cb, &bi);
+    hvk_full_barrier(cb);   // after the producer's frame and after the previous present's copy into the buffer
+    VkBufferImageCopy r = {0, w, h, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {(int32_t)x, (int32_t)y, 0}, {w, h, 1}};
+    vkCmdCopyImageToBuffer(cb, e.image, HVK_EXT_LAYOUT, g_screen, 1, &r);
+    VkMemoryBarrier2 mb[2] = {   // before whatever follows on the queue (the producer drawing into the image again) and before the host reads the buffer
+        {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, NULL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+         VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT},
+        {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, NULL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT}};
+    VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO, NULL, 0, 2, mb, 0, NULL, 0, NULL};
+    vkCmdPipelineBarrier2(cb, &di);
+    vkEndCommandBuffer(cb);
+    uint64_t v = g_pres_n + 1;
+    VkSemaphoreSubmitInfo wait = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, NULL, (VkSemaphore)ev, ev_val, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0};
+    VkSemaphoreSubmitInfo sig = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, NULL, g_pres_tl, v, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0};
+    VkCommandBufferSubmitInfo ci = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, NULL, cb, 0};
+    VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2, NULL, 0, ev ? 1u : 0u, &wait, 1, &ci, 1, &sig};
+    pthread_mutex_lock(&hvk.queue_mu); VkResult rs = vkQueueSubmit2(hvk.dev.queue, 1, &si, VK_NULL_HANDLE); pthread_mutex_unlock(&hvk.queue_mu);
+    if (rs) { pthread_mutex_unlock(&g_ext_mu); HVK_RED_ONCE("the headless present's submission failed (VkResult %d): the frame is not shown", rs); return 0; }
+    g_pres_n = v; g_pres_at[slot] = v;
+    g_last = (hvk_present_info){serial, v, g_last.frames + 1, x, y, w, h, e.format};
+    pthread_mutex_unlock(&g_ext_mu);
+    return v;
+}
+int hvk_present_last(void *texels, size_t n, hvk_present_info *info) {
+    pthread_mutex_lock(&g_ext_mu);
+    int ok = g_last.ticket != 0;
+    if (ok) {
+        pres_wait(g_last.ticket);
+        size_t bytes = (size_t)g_last.width * g_last.height * 4;
+        if (texels) memcpy(texels, g_screen_map, bytes < n ? bytes : n);
+        if (info) *info = g_last;
+    }
+    pthread_mutex_unlock(&g_ext_mu);
+    return ok;
+}
+static void pres_shutdown(void) {   // hvk_shutdown: every present finished, the presenter's objects released, the registry emptied
+    pthread_mutex_lock(&g_ext_mu);
+    pres_wait(g_pres_n);
+    if (g_pres_tl) vkDestroySemaphore(hvk.d, g_pres_tl, NULL);
+    if (g_pres_pool) vkDestroyCommandPool(hvk.d, g_pres_pool, NULL);
+    if (g_screen) hvk_buffer_free(g_screen, g_screen_mem);
+    g_pres_tl = VK_NULL_HANDLE; g_pres_pool = VK_NULL_HANDLE; g_screen = VK_NULL_HANDLE; g_screen_mem = VK_NULL_HANDLE; g_screen_map = NULL; g_screen_size = 0;
+    g_pres_n = 0; memset(g_pres_at, 0, sizeof g_pres_at); memset(&g_last, 0, sizeof g_last);
+    free(g_ext); g_ext = NULL; g_n_ext = g_cap_ext = 0;
+    pthread_mutex_unlock(&g_ext_mu);
+}
 
 // ---------- Frames and measurements ----------
 void be_set_frame(uint64_t f) { hvk.frame = f; }

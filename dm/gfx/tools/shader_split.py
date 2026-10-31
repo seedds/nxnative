@@ -977,6 +977,7 @@ def nlg_shaders(path, label, out):
     Every variant whose files are in RomFS is read (the 13 even records; the odd ones point into '.nxpc', which is not shipped), and the shaders found pair by order (checked one by one)"""
     import zlib
     d = open(path, 'rb').read(); stem = path[:-len('.dict')]
+    if d[4:6] == NLG4_DICT: return nlg4_shaders(d, stem, label, out)
     comp, recs, chunks, names = nlg_dict(d, label)
     files = {i: open(stem + nm, 'rb').read() for i, nm in enumerate(names) if os.path.exists(stem + nm)}
     patch = open(stem + '.patch', 'rb').read() if os.path.exists(stem + '.patch') else None
@@ -1022,6 +1023,93 @@ def nlg_shaders(path, label, out):
                     found.append((f'{label}#NLG{v}:{c}@{i * n:#x}', st, ctl, cd)); p += ln; i += 1
                 if found: out.extend(found); break
             else: red(f'{label}: variant {v} section {c} holds control sections, but no section of the variant holds their code areas in order')
+
+NLG4_DICT, NLG4_PATCH = b'\x04\x04', b'\x04\x05'
+NLG4_GROUP = [(1, 1), (2, 2), (1, 3), (2, 4)]   # (kind, number) of a shader's four entries
+def zstd_frame_len(d, p):
+    """Stored length of the zstd frame at p, from its header and block headers (RFC 8878: frame header descriptor {bits 0-1 dictionary ID size, bit 2 checksum, bit 5 single segment,
+    bits 6-7 content size}; 3-byte block headers {bit 0 last, bits 1-2 type (1 = RLE: one stored byte), bits 3-23 size})"""
+    fhd = d[p + 4]; single = fhd >> 5 & 1
+    q = p + 5 + (1 - single) + (0, 1, 2, 4)[fhd & 3] + ((single, 2, 4, 8)[fhd >> 6])
+    while True:
+        h = int.from_bytes(d[q:q + 3], 'little'); q += 3 + (1 if h >> 1 & 3 == 1 else h >> 3)
+        if h & 1: return q + 4 * (fhd >> 2 & 1) - p
+
+def nlg4_unzs(d):
+    """zstd frames, decompressed as one stream (the zstd command, as unzs; fed the bytes, since inside a RomFS image the path is not a file the command can open). A '.data' pads some
+    frames to 8 bytes (init.data: the third at 0x26688 after one ending at 0x26683) and the command stops at the padding, so each frame is measured and the zero gaps are left out"""
+    frames, p = [], 0
+    while p < len(d):
+        if d[p:p + 4] == ZSTD_MAGIC: n = zstd_frame_len(d, p); frames.append(d[p:p + n]); p += n
+        elif not d[p]: p += 1
+        else: red(f'not a zstd frame at {p:#x} ({d[p:p + 8].hex(" ")})')
+    return subprocess.run(['zstd', '-d', '-c', '-q'], input=b''.join(frames), capture_output=True, check=True).stdout
+
+def nlg4_programs(idx):
+    """The shader table of a revision-4 index: 12-byte entries {u8 kind (1 code area, 2 control section), u16 type, u8 number, u32 length, u32 offset in its section}, four per shader
+    numbered 1 to 4 (1 its code area, 2 its control section; 3 and 4 the same kinds in the '.debug' / '.nxpc' files, which are not shipped: offset 0xffffffff in a patch), all of one type
+    (0x0db4 in Mario Strikers: Battle League), found by its first group.
+    → [(code length, code offset, control length, control offset)]"""
+    for p in range(0, len(idx) - 48, 4):
+        e = [struct.unpack_from('<3I', idx, p + 12 * k) for k in range(4)]
+        if [(w0 & 0xff, w0 >> 24) for w0, _, _ in e] == NLG4_GROUP and len({w0 >> 8 & 0xffff for w0, _, _ in e}) == 1 and 0x760 <= e[1][1] <= 0x880: break
+    else: return []
+    kind, out = e[0][0] >> 8 & 0xffff, []
+    while p + 48 <= len(idx):
+        e = [struct.unpack_from('<3I', idx, p + 12 * k) for k in range(4)]
+        if [(w0 & 0xff, w0 >> 24) for w0, _, _ in e] != NLG4_GROUP or any(w0 >> 8 & 0xffff != kind for w0, _, _ in e): break
+        out.append((e[0][1], e[0][2], e[1][1], e[1][2])); p += 48
+    return out
+
+def nlg4_place(buf, offs, magics):
+    """Where a section starts in buf: the first start s for which every offset lands on one of magics (a control section, or a code area's header). → s, or None"""
+    first = min(offs)
+    for q in sorted(q for m in magics for q in range(buf.find(m), len(buf), 4) if q >= 0 and buf[q:q + 4] == m):
+        s = q - first
+        if s >= 0 and all(buf[s + o:s + o + 4] in magics for o in offs): return s
+    return None
+
+def nlg4_shaders(d, stem, label, out):
+    """Shaders of a revision-4 Next Level Games archive (Mario Strikers: Battle League; header u8 4, u8 4, u8 3 (zstd) after the magic, then 0x20 bytes, u32 stored length of the index and
+    six more words; the index is one zstd frame at +0x40). Unlike Luigi's Mansion 3's, the '.data' beside it is one stream of zstd frames (2 MB each, back to back) whose concatenation is the
+    archive's sections, and the index's shader table (nlg4_programs) gives each program's code area and control section as an offset in its section. Strikers keeps them all in init (2,648 in
+    1.0.0: 879 indices read, no other holds the table): the control sections back to back (0x880 bytes each), the code areas back to back in the same order.
+    An update ships '<name>.patch' (u8 4, u8 5, u8 3, u8 0, u32 inflated body length, u32 entry count of its new table, two more words, then the body: one zstd frame at +0x18) whose body
+    starts with the new table and the new shader table (3,149 programs in 1.3.2, the same count the game passes to nvnProgramSetShaders at boot); an offset below the old section's length
+    reads the old data, the rest the body's new data counted from that length (as Luigi's Mansion 3's patch_section).
+    Not read from the index yet: where each section starts in the stream (and in the body). Each is the one start for which every offset of its kind lands on a control section / a code area
+    that check() accepts, so a wrong start cannot pass; the layout of the rest of the index (sections, chunks, names) is not decoded. BNSH containers in any archive's data are read as everywhere else (scan_blob)"""
+    progs = nlg4_programs(nlg4_unzs(d[0x40:]))
+    data = nlg4_unzs(open(stem + '.data', 'rb').read())
+    patch = open(stem + '.patch', 'rb').read() if os.path.exists(stem + '.patch') else None
+    if patch and patch[4:6] != NLG4_PATCH: red(f'{label}: the patch header {patch[4:8].hex(" ")} is not a revision-4 patch')
+    body = nlg4_unzs(patch[0x18:]) if patch else b''
+    # NintendoWare Ui2d / Font keep BNSH containers in the data of other archives (Strikers' FrontEnd/Persistent: 19 of them, global, the tutorials): the menu text and the
+    # tutorial overlays draw with them (41 shaders; without them the run reported eight programs not in the shader map and the quick-match menu showed no text). Unchanged
+    # containers are in the base data, those an update replaced whole in the patch body
+    for name, buf in (('', data), ('.patch', body)):
+        if b'BNSH\0\0\0\0' in buf: scan_blob(buf, label + name, out)
+    if not progs: return   # no shader table: models, textures, sounds
+    def at(buf, s, o, n): return buf[s + o:s + o + n]
+    CTL, CODE = (CTL_MAGIC,), (GFX_MAGIC, CS_MAGIC)
+    old = progs
+    cs0, ks0 = nlg4_place(data, [p[3] for p in old], CTL), nlg4_place(data, [p[1] for p in old], CODE)
+    if cs0 is None or ks0 is None: red(f'{label}: no start of the control / code section fits all {len(old)} programs of the shader table')
+    ctl_old, code_old = max(p[2] + p[3] for p in old), max(p[0] + p[1] for p in old)
+    cs1, ks1 = None, None
+    if patch:
+        if len(body) != struct.unpack_from('<I', patch, 8)[0]: red(f'{label}: the patch body inflates to {len(body):#x} bytes, its header says {struct.unpack_from("<I", patch, 8)[0]:#x}')
+        progs = nlg4_programs(body)
+        if not progs: red(f'{label}: the patch body has no shader table')
+        nc, nk = [p[3] - ctl_old for p in progs if p[3] >= ctl_old], [p[1] - code_old for p in progs if p[1] >= code_old]
+        cs1, ks1 = nlg4_place(body, nc, CTL) if nc else 0, nlg4_place(body, nk, CODE) if nk else 0
+        if cs1 is None or ks1 is None: red(f'{label}: no start of the patch body\'s new control / code data fits its programs')
+    for i, (kn, ko, cn, co) in enumerate(progs):
+        ctl = at(data, cs0, co, cn) if co < ctl_old else at(body, cs1, co - ctl_old, cn)
+        code = at(data, ks0, ko, kn) if ko < code_old else at(body, ks1, ko - code_old, kn)
+        st = glslc_stage(ctl, code); why = 'no stage' if not st else check(label, st, ctl, code)
+        if why: red(f'{label}: program {i} of the shader table{" (patched)" if patch else ""}: {why}')
+        out.append((f'{label}#NLG4{"p" if patch else ""}:{i}', st, ctl, code))
 
 BHD5, DCX, BND3 = b'BHD5', b'DCX\0', b'BND3'
 def bhd5_entries(path):

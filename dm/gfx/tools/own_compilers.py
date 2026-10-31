@@ -2,6 +2,8 @@
 # dmsh_build.py as a player's Mac runs it: the NSP script builds the shader libraries through this file. dmsh_build.py stops when any tool differs from dmsh_chain.lock;
 # the translator (dmsh_xlate_bin), bundled SPIRV-Cross and Metal compilers (macOS and iOS) must match the lock. Issue #242 reported corruption with an untested Metal compiler;
 # its role remains unconfirmed. Another Metal compiler stops the build with installation instructions unless DM_ALLOW_OTHER_METAL=1 (the NSP script's --allow-other-metal).
+# A NEWER compiler of the recorded generation builds with a note instead of stopping: Xcode's auto-update bumps the compiler (27.1's 32023.921 to 27.2's
+# 32023.922) and a player cannot hold Xcode back. An older compiler, another generation or an unreadable version still stops.
 # The override reports the actual compiler, leaves the lock and chain version unchanged, and uses separate shader and variant cache entries keyed by that compiler and its SDK.
 # A missing tool, another translator or another SPIRV-Cross always fails (a missing iOS compiler only when the build compiles for iOS). On the maintainer's Mac dmsh_build.py keeps the strict check. This wrapper is not part of the chain version.
 # Usage: own_compilers.py <dmsh_build.py arguments>   (the environment as for dmsh_build.py)
@@ -47,9 +49,35 @@ def other_metal():
         if now != 'missing' and now != want.get('metal_' + sdk): out.append(('metal_' + sdk, want.get('metal_' + sdk), now))
     return out
 
+METAL_V = re.compile(r'Apple metal version (\d+)\.(\d+) \(metalfe-\d+\.\d+\.(\d+)\)')   # the lock records 'Apple metal version 32023.921 (metalfe-32023.921.6)'
+_noted: set = set()   # the newer-compiler note, once per build per compiler
+
+def metal_key(s):
+    m = METAL_V.fullmatch(s.strip())
+    return tuple(int(g) for g in m.groups()) if m else None
+
+def newer_metal(metal):
+    """Split the mismatches into the ones that still stop and the newer compilers of the recorded generation that may build: Xcode's auto-update bumps
+    the compiler (27.1's 32023.921 to 27.2's 32023.922) and a player cannot hold Xcode back, so a newer one of the same generation goes on with a note;
+    an older one, another generation or an unreadable version still stops (issue #242)."""
+    stop, newer = [], []
+    for pair in metal:
+        tested, actual = metal_key(pair[1]), metal_key(pair[2])
+        (newer if tested and actual and tested[0] == actual[0] and actual > tested else stop).append(pair)
+    return stop, newer
+
+def newer_note(newer):
+    fresh = [(k, w, a) for k, w, a in newer if (k, a) not in _noted]
+    if not fresh: return
+    _noted.update((k, a) for k, w, a in fresh)
+    print('note: built with a newer Metal compiler than the shaders were tested with (untested, GitHub issue #242): ' +
+          '; '.join(f'{k} {now} (tested: {want})' for k, want, now in fresh), flush=True)
+
 def check_metal():   # --check-metal: the stop message, '' when the build may go on
-    metal = other_metal()
-    return other_metal_message(metal) if metal and not allowed() else ''
+    stopping, newer = newer_metal(other_metal())
+    if stopping and not allowed(): return other_metal_message(stopping)
+    newer_note(newer)
+    return ''
 
 def ios_target():   # as dmsh_build.py picks its targets: a Mac-only build (the NSP script's --platform mac / mac-app) compiles nothing for iOS
     return 'ios' in (os.environ.get('DMSH_TARGETS') or ('mac,ios' if os.environ.get('IOSOUT') else 'mac')).split(',')
@@ -61,10 +89,11 @@ def check_tools():
         if m: own.append((m[1], m[2], m[3]))   # (lock key, tested, actual)
         elif not (b.startswith('metal_iphoneos: ') and b.endswith(' / actual missing') and not ios_target()): bad.append(b)   # a Mac without the iOS platform
     if bad: return bad
-    metal = own
-    if metal and not allowed(): sys.exit(other_metal_message(metal))
-    if own: print('note: built with this Mac\'s compilers, not the ones the shaders were tested with (dmsh_chain.lock): ' +
-                  '; '.join(f'{k} {now} (tested: {want})' for k, want, now in own) + (f' ({ALLOW}=1)' if metal else ''), flush=True)
+    stopping, newer = newer_metal(own)
+    newer_note(newer)
+    if stopping and not allowed(): sys.exit(other_metal_message(stopping))
+    if stopping: print('note: built with this Mac\'s compilers, not the ones the shaders were tested with (dmsh_chain.lock): ' +
+                       '; '.join(f'{k} {now} (tested: {want})' for k, want, now in stopping) + (f' ({ALLOW}=1)' if stopping else ''), flush=True)
     return []
 
 if __name__ == '__main__':

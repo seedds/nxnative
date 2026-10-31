@@ -25,6 +25,8 @@ nsp = importlib.util.module_from_spec(spec); spec.loader.exec_module(nsp)
 
 with open(dmsh_chain.LOCK) as _f: LOCKED = dict(l.rstrip('\n').split('\t', 1) for l in _f if '\t' in l and not l.startswith('#'))
 OTHER = 'Apple metal version 32023.850 (metalfe-32023.850.10)'   # Xcode 26's, say
+NEWER = 'Apple metal version 32023.922 (metalfe-32023.922.4)'   # Xcode 27.2's auto-updated compiler: the recorded generation, newer than the lock
+FOREIGN = 'Apple metal version 32024.100 (metalfe-32024.100.1)'   # another toolchain generation, however new
 
 
 def mismatch(key, actual): return f'{key}: lock {LOCKED[key]} / actual {actual}'
@@ -90,6 +92,37 @@ class CheckTools(unittest.TestCase):
                 msg = own_compilers.check_metal()
             self.assertEqual(bool(msg), stops, (actual, allow))
             if stops: self.assertIn(f'metal_macosx {OTHER}', msg); self.assertIn(f'metal_iphoneos {OTHER}', msg)
+
+    def test_newer_metal_builds_on(self):   # Xcode 27.2's auto-updated compiler of the recorded generation: a note, no stop (the wrapper's check_tools)
+        for key in ('metal_macosx', 'metal_iphoneos'):
+            own_compilers._noted.clear()
+            bad, out = self.check([mismatch(key, NEWER)])
+            self.assertEqual(bad, [])
+            self.assertIn('note: built with a newer Metal compiler than the shaders were tested with', out)
+            self.assertIn(f'{key} {NEWER} (tested: {LOCKED[key]})', out); self.assertIn('#242', out)
+        own_compilers._noted.clear()
+
+    def test_check_metal_lets_a_newer_compiler_go(self):   # --check-metal returns '' for the auto-updated compiler, with the note
+        own_compilers._noted.clear()
+        env = {k: v for k, v in os.environ.items() if k != own_compilers.ALLOW}
+        with mock.patch.object(own_compilers, 'metal_version', lambda sdk: NEWER), mock.patch.dict(os.environ, env, clear=True), redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(own_compilers.check_metal(), '')
+        self.assertIn('note: built with a newer Metal compiler', out.getvalue())
+        own_compilers._noted.clear()
+
+    def test_older_or_foreign_generation_still_stop(self):   # backward and cross-generation stay behind the override
+        for other in (OTHER, FOREIGN, 'Apple metal 32023.922'):
+            with self.subTest(other=other):
+                with self.assertRaises(SystemExit) as e: self.check([mismatch('metal_macosx', other)])
+                self.assertTrue(str(e.exception.code).startswith('[RED] '))
+        self.assertEqual(own_compilers.metal_key(LOCKED['metal_macosx']), (32023, 921, 6))
+        self.assertIsNone(own_compilers.metal_key('Apple metal 32023.922'))
+
+    def test_newer_and_stopping_together(self):   # a newer macOS compiler and an older iOS one: the iOS mismatch stops, both notes reach the log
+        own_compilers._noted.clear()
+        with self.assertRaises(SystemExit) as e: self.check([mismatch('metal_macosx', NEWER), mismatch('metal_iphoneos', OTHER)])
+        self.assertIn('metal_iphoneos', str(e.exception.code))
+        own_compilers._noted.clear()
 
 
 class NspScript(unittest.TestCase):

@@ -145,6 +145,23 @@ static LdnFullNetworkInfo g_network_info;
 static LdnFullNetworkInfo g_scan_results[32];
 static _Atomic int g_scan_result_count = 0;
 
+// Phase 3: Background listener thread
+#include <pthread.h>
+static pthread_t g_listener_thread;
+static _Atomic int g_listener_running = 0;
+
+// Connected clients tracking
+#define MAX_CONNECTED_CLIENTS 7
+typedef struct {
+    char ip[16];
+    LdnMacAddress mac;
+    int8_t node_id;
+    uint64_t last_seen_ns;
+} ConnectedClient;
+
+static ConnectedClient g_connected_clients[MAX_CONNECTED_CLIENTS];
+static _Atomic int g_connected_client_count = 0;
+
 // Socket and network utilities
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -286,6 +303,207 @@ static int ldn_receive_packet(uint8_t *type_out, void *data_out, size_t *data_le
     return 1;
 }
 
+static int ldn_receive_packet_with_sender(uint8_t *type_out, void *data_out, size_t *data_len_out, size_t max_len, char *sender_ip) {
+    if (g_ldn_socket < 0) return 0;
+
+    uint8_t packet[2048];
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+
+    ssize_t len = recvfrom(g_ldn_socket, packet, sizeof(packet), 0, (struct sockaddr *)&from, &fromlen);
+    if (len <= 0) return 0;
+
+    if (sender_ip) {
+        inet_ntop(AF_INET, &from.sin_addr, sender_ip, INET_ADDRSTRLEN);
+    }
+
+    *type_out = packet[0];
+    size_t payload_len = (size_t)(len - 1);
+
+    if (payload_len > 0 && data_out && payload_len <= max_len) {
+        memcpy(data_out, packet + 1, payload_len);
+        if (data_len_out) *data_len_out = payload_len;
+    }
+
+    return 1;
+}
+
+// Find connected client by IP
+static ConnectedClient* ldn_find_client_by_ip(const char *ip) {
+    int count = atomic_load(&g_connected_client_count);
+    for (int i = 0; i < count; i++) {
+        if (strcmp(g_connected_clients[i].ip, ip) == 0) {
+            return &g_connected_clients[i];
+        }
+    }
+    return NULL;
+}
+
+// Add connected client
+static int ldn_add_client(const char *ip, const LdnNodeInfo *node_info) {
+    int count = atomic_load(&g_connected_client_count);
+    if (count >= MAX_CONNECTED_CLIENTS) return -1;
+
+    // Find first free node ID (1-7, 0 is host)
+    int8_t node_id = -1;
+    for (int8_t i = 1; i <= MAX_CONNECTED_CLIENTS; i++) {
+        int found = 0;
+        for (int j = 0; j < count; j++) {
+            if (g_connected_clients[j].node_id == i) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            node_id = i;
+            break;
+        }
+    }
+    if (node_id < 0) return -1;
+
+    ConnectedClient *client = &g_connected_clients[count];
+    strncpy(client->ip, ip, 15);
+    client->ip[15] = 0;
+    memcpy(&client->mac, &node_info->mac_address, sizeof(LdnMacAddress));
+    client->node_id = node_id;
+    client->last_seen_ns = now_ns();
+
+    atomic_fetch_add(&g_connected_client_count, 1);
+    return node_id;
+}
+
+// Remove connected client
+static void ldn_remove_client(const char *ip) {
+    int count = atomic_load(&g_connected_client_count);
+    for (int i = 0; i < count; i++) {
+        if (strcmp(g_connected_clients[i].ip, ip) == 0) {
+            // Shift array down
+            for (int j = i; j < count - 1; j++) {
+                g_connected_clients[j] = g_connected_clients[j + 1];
+            }
+            atomic_fetch_sub(&g_connected_client_count, 1);
+            break;
+        }
+    }
+}
+
+// Background listener thread for auto-responding to packets
+static void* ldn_listener_thread(void* arg) {
+    (void)arg;
+
+    while (atomic_load(&g_listener_running)) {
+        uint8_t type;
+        union {
+            LdnFullNetworkInfo network_info;
+            LdnNodeInfo node_info;
+            uint8_t raw[2048];
+        } data;
+        size_t len;
+        char sender_ip[INET_ADDRSTRLEN];
+
+        if (ldn_receive_packet_with_sender(&type, &data, &len, sizeof(data), sender_ip)) {
+            int state = atomic_load(&g_ldn_state);
+
+            switch(type) {
+                case LDN_PACKET_SCAN:
+                    // Auto-respond to scan if we're hosting
+                    if (state == LDN_STATE_ACCESS_POINT_CREATED) {
+                        ldn_send_packet(LDN_PACKET_SCAN_RESP, &g_network_info,
+                                       sizeof(g_network_info), sender_ip);
+                    }
+                    break;
+
+                case LDN_PACKET_CONNECT:
+                    // Handle client connection
+                    if (state == LDN_STATE_ACCESS_POINT_CREATED && len >= sizeof(LdnNodeInfo)) {
+                        int8_t node_id = ldn_add_client(sender_ip, &data.node_info);
+                        if (node_id >= 0) {
+                            // Update network info with new node
+                            LdnNodeInfo *node = &g_network_info.ldn.nodes[node_id];
+                            memcpy(node, &data.node_info, sizeof(LdnNodeInfo));
+                            node->node_id = node_id;
+                            node->is_connected = 1;
+                            g_network_info.ldn.node_count++;
+
+                            // Send updated network info to all clients
+                            int count = atomic_load(&g_connected_client_count);
+                            for (int i = 0; i < count; i++) {
+                                ldn_send_packet(LDN_PACKET_SYNC, &g_network_info,
+                                              sizeof(g_network_info), g_connected_clients[i].ip);
+                            }
+                        }
+                    }
+                    break;
+
+                case LDN_PACKET_DISCONNECT:
+                    // Handle client disconnection
+                    if (state == LDN_STATE_ACCESS_POINT_CREATED && len >= sizeof(LdnNodeInfo)) {
+                        ConnectedClient *client = ldn_find_client_by_ip(sender_ip);
+                        if (client) {
+                            int8_t node_id = client->node_id;
+                            ldn_remove_client(sender_ip);
+
+                            // Clear node in network info
+                            g_network_info.ldn.nodes[node_id].is_connected = 0;
+                            g_network_info.ldn.node_count--;
+
+                            // Notify remaining clients
+                            int count = atomic_load(&g_connected_client_count);
+                            for (int i = 0; i < count; i++) {
+                                ldn_send_packet(LDN_PACKET_SYNC, &g_network_info,
+                                              sizeof(g_network_info), g_connected_clients[i].ip);
+                            }
+                        }
+                    }
+                    break;
+
+                case LDN_PACKET_SYNC:
+                    // Client receives network sync from host
+                    if ((state == LDN_STATE_STATION || state == LDN_STATE_STATION_CONNECTED)
+                        && len >= sizeof(LdnFullNetworkInfo)) {
+                        memcpy(&g_network_info, &data.network_info, sizeof(LdnFullNetworkInfo));
+                        if (state == LDN_STATE_STATION) {
+                            atomic_store(&g_ldn_state, LDN_STATE_STATION_CONNECTED);
+                        }
+                    }
+                    break;
+
+                case LDN_PACKET_DESTROY:
+                    // Host destroyed network
+                    if (state == LDN_STATE_STATION_CONNECTED) {
+                        atomic_store(&g_ldn_state, LDN_STATE_STATION);
+                    }
+                    break;
+            }
+        }
+
+        usleep(10000); // 10ms poll interval
+    }
+
+    return NULL;
+}
+
+// Start background listener
+static int ldn_start_listener(void) {
+    if (atomic_load(&g_listener_running)) return 1;
+
+    atomic_store(&g_listener_running, 1);
+    if (pthread_create(&g_listener_thread, NULL, ldn_listener_thread, NULL) != 0) {
+        atomic_store(&g_listener_running, 0);
+        return 0;
+    }
+
+    return 1;
+}
+
+// Stop background listener
+static void ldn_stop_listener(void) {
+    if (atomic_load(&g_listener_running)) {
+        atomic_store(&g_listener_running, 0);
+        pthread_join(g_listener_thread, NULL);
+    }
+}
+
 // ---------- prepo: telemetry reports. Saving / submitting all report success; nothing is sent ----------
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", "telemetry report save (user); nothing is sent, reports success", Result, h_prepo_SaveU, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveEv", "telemetry report save; nothing is sent, reports success", Result, h_prepo_Save, void *self) { (void)self; return RES_OK; }
@@ -308,6 +526,7 @@ HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless: initialization succeeds, 
     // Clear state
     memset(&g_network_info, 0, sizeof(g_network_info));
     atomic_store(&g_scan_result_count, 0);
+    atomic_store(&g_connected_client_count, 0);
 
     atomic_store(&g_ldn_state, LDN_STATE_INITIALIZED);
     atomic_store(&g_ldn_initialized, 1);
@@ -315,9 +534,11 @@ HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless: initialization succeeds, 
 }
 
 HLE_FORCE("_ZN2nn3ldn8FinalizeEv", "local wireless: finalize", void, h_ldn_Fini, void) {
+    ldn_stop_listener();
     ldn_socket_cleanup();
     atomic_store(&g_ldn_state, LDN_STATE_NONE);
     atomic_store(&g_ldn_initialized, 0);
+    atomic_store(&g_connected_client_count, 0);
 }
 
 HLE_FORCE("_ZN2nn3ldn8GetStateEv", "local wireless: returns current state", int, h_ldn_State, void) {
@@ -363,9 +584,31 @@ HLE_FORCE("_ZN2nn3ldn16CloseAccessPointEv", "local wireless: close access point"
     return RES_FAIL;
 }
 
-HLE_FORCE("_ZN2nn3ldn10DisconnectEv", "local wireless: disconnect", Result, h_ldn_Disc, void) {
+HLE_FORCE("_ZN2nn3ldn10DisconnectEv", "local wireless: disconnect from network", Result, h_ldn_Disc, void) {
     int state = atomic_load(&g_ldn_state);
     if (state == LDN_STATE_STATION_CONNECTED) {
+        // Build our node info to send disconnect
+        LdnNodeInfo our_node;
+        memset(&our_node, 0, sizeof(our_node));
+
+        uint32_t local_ip = 0, mask = 0;
+        if (ldn_get_local_ip(&local_ip, &mask)) {
+            ldn_ip_to_bytes(local_ip, our_node.ipv4_address.raw);
+            ldn_generate_mac(local_ip, &our_node.mac_address);
+        }
+
+        // Extract host IP from network info
+        const uint8_t *host_ip_bytes = g_network_info.ldn.nodes[0].ipv4_address.raw;
+        char host_ip[16];
+        snprintf(host_ip, sizeof(host_ip), "%d.%d.%d.%d",
+                 host_ip_bytes[0], host_ip_bytes[1], host_ip_bytes[2], host_ip_bytes[3]);
+
+        // Send disconnect to host
+        ldn_send_packet(LDN_PACKET_DISCONNECT, &our_node, sizeof(our_node), host_ip);
+
+        // Stop listener
+        ldn_stop_listener();
+
         atomic_store(&g_ldn_state, LDN_STATE_STATION);
         return RES_OK;
     }
@@ -375,6 +618,18 @@ HLE_FORCE("_ZN2nn3ldn10DisconnectEv", "local wireless: disconnect", Result, h_ld
 HLE_FORCE("_ZN2nn3ldn14DestroyNetworkEv", "local wireless: destroy network", Result, h_ldn_Destroy, void) {
     int state = atomic_load(&g_ldn_state);
     if (state == LDN_STATE_ACCESS_POINT_CREATED) {
+        // Notify all connected clients
+        int count = atomic_load(&g_connected_client_count);
+        for (int i = 0; i < count; i++) {
+            ldn_send_packet(LDN_PACKET_DESTROY, NULL, 0, g_connected_clients[i].ip);
+        }
+
+        // Stop listener
+        ldn_stop_listener();
+
+        // Clear clients
+        atomic_store(&g_connected_client_count, 0);
+
         atomic_store(&g_ldn_state, LDN_STATE_ACCESS_POINT);
         return RES_OK;
     }
@@ -434,7 +689,7 @@ HLE_FORCE("_ZN2nn3ldn11ScanPrivateEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", 
     return h_ldn_Scan(out, n, max, f, ch);
 }
 
-HLE_FORCE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", "local wireless: create network and respond to scans", Result, h_ldn_Create,
+HLE_FORCE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", "local wireless: create network and start background listener", Result, h_ldn_Create,
           const void *net_cfg, const void *sec_cfg, const void *user_cfg) {
     (void)sec_cfg;
 
@@ -487,8 +742,13 @@ HLE_FORCE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfi
         strcpy((char *)g_network_info.ldn.nodes[0].user_name, "Host");
     }
 
-    // Background: listen for scan requests and respond
-    // (Simplified - just respond when scanned, full impl would need thread)
+    // Clear connected clients
+    atomic_store(&g_connected_client_count, 0);
+
+    // Start background listener thread for auto-responding
+    if (!ldn_start_listener()) {
+        // Failed to start listener, but continue (will just not auto-respond)
+    }
 
     atomic_store(&g_ldn_state, LDN_STATE_ACCESS_POINT_CREATED);
     return RES_OK;
@@ -739,3 +999,59 @@ HLE_FORCE("_ZN2nn5album21GetSharePostedLastUrlEPcmRKNS0_7ShareIdE", "URL of the 
 HLE_FORCE("_ZN2nn5album14ShowAlbumFilesEv", "album applet: not shown", Result, h_album_Show, void) { return RES_FAIL; }
 // Pokémon Legends: Z-A (SDK 19): a screenshot of the current frame, taken by the capture service
 HLE_FORCE("_ZN2nn5album21SaveCurrentScreenshotENS0_17AlbumReportOptionE", "screenshot of the current frame (capsrv): no album, fails", Result, h_album_SaveCur, int report) { (void)report; LOG("album::SaveCurrentScreenshot (no album)"); return RES_FAIL; }
+
+// ---------- Phase 3: Connect/Disconnect handling ----------
+
+HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_10UserConfigEi", "local wireless: connect to network", Result, h_ldn_Connect,
+          const void *net_info, const void *user_cfg, int local_ver) {
+    (void)local_ver;
+    
+    int state = atomic_load(&g_ldn_state);
+    if (state != LDN_STATE_STATION) return RES_FAIL;
+    
+    const LdnFullNetworkInfo *network = (const LdnFullNetworkInfo *)net_info;
+    const LdnUserConfig *user = (const LdnUserConfig *)user_cfg;
+    
+    // Build our node info to send to host
+    LdnNodeInfo our_node;
+    memset(&our_node, 0, sizeof(our_node));
+
+    uint32_t local_ip = 0, mask = 0;
+    if (ldn_get_local_ip(&local_ip, &mask)) {
+        ldn_ip_to_bytes(local_ip, our_node.ipv4_address.raw);
+        ldn_generate_mac(local_ip, &our_node.mac_address);
+    }
+    
+    if (user) {
+        memcpy(our_node.user_name, user->user_name, LDN_USERNAME_MAX);
+    } else {
+        strcpy((char *)our_node.user_name, "Client");
+    }
+    
+    our_node.node_id = -1; // Host will assign
+    our_node.is_connected = 0;
+    our_node.local_communication_version = (int16_t)local_ver;
+    
+    // Extract host IP from network info
+    const uint8_t *host_ip_bytes = network->ldn.nodes[0].ipv4_address.raw;
+    char host_ip[16];
+    snprintf(host_ip, sizeof(host_ip), "%d.%d.%d.%d", 
+             host_ip_bytes[0], host_ip_bytes[1], host_ip_bytes[2], host_ip_bytes[3]);
+    
+    // Send connect request to host
+    ldn_send_packet(LDN_PACKET_CONNECT, &our_node, sizeof(our_node), host_ip);
+    
+    // Start listener to receive SYNC packets
+    ldn_start_listener();
+    
+    // Wait for sync (background thread will update state)
+    for (int i = 0; i < 100; i++) {
+        if (atomic_load(&g_ldn_state) == LDN_STATE_STATION_CONNECTED) {
+            return RES_OK;
+        }
+        usleep(10000); // 10ms
+    }
+    
+    // Timeout
+    return RES_FAIL;
+}

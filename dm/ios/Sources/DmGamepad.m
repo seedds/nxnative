@@ -26,6 +26,7 @@
 #include "motion_apple.h"
 #include "motion_fusion.h"
 #include "pad_apple.h"
+#include "dm_webpad.h"
 #include "pad_slots.h"
 #include <stdatomic.h>
 
@@ -483,6 +484,7 @@ static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_np
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : "each controller is a player of its own, the touch gamepad plays with player 1");
+    dm_webpad_start();
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil otherwise); returns whether a controller is in use
 static BOOL pads_merged(GCController *gone) {

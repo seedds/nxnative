@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>NX2Apple Controller Deck</title>
+<style>
+  :root {
+    --brandDark: #080B10;
+    --panelDark: #121620;
+    --surfaceMuted: #1E2430;
+    --borderSubtle: #262F3E;
+    --neonGreen: #22C55E;
+    --nintendoX: #38BDF8;
+    --nintendoY: #FACC15;
+    --nintendoB: #F87171;
+    --nintendoA: #4ADE80;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    background-color: var(--brandDark);
+    color: #f1f5f9;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+  }
+  body {
+    display: flex; flex-direction: column; justify-content: space-between;
+    padding: max(6px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  }
+
+  /* Header */
+  header {
+    width: 100%; display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 12px; z-index: 20; flex-shrink: 0;
+    border-bottom: 1px solid rgba(27, 34, 48, 0.7);
+    background: linear-gradient(to bottom, #0e131c, transparent);
+    border-radius: 12px 12px 0 0;
+  }
+  .brand-group { display: flex; align-items: center; gap: 8px; }
+  .brand-title { font-size: 16px; font-weight: 800; letter-spacing: -0.025em; color: #fff; display: flex; align-items: center; gap: 2px; }
+  .brand-title span { color: #ef4444; }
+  .brand-sub { font-size: 10px; color: #94a3b8; font-weight: 500; letter-spacing: 0.05em; }
+
+  .status-badge {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(18, 22, 32, 0.9); border: 1px solid var(--borderSubtle);
+    padding: 4px 12px; border-radius: 9999px; font-size: 12px;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.5);
+  }
+  .ping-dot { position: relative; display: flex; width: 8px; height: 8px; }
+  .ping-dot-core { position: relative; display: inline-flex; border-radius: 9999px; width: 8px; height: 8px; background-color: var(--neonGreen); }
+  .ping-dot-wave {
+    position: absolute; display: inline-flex; width: 100%; height: 100%;
+    border-radius: 9999px; background-color: var(--neonGreen); opacity: 0.75;
+    animation: pulse-wave 2.4s infinite cubic-bezier(0.4, 0, 0.6, 1);
+  }
+  @keyframes pulse-wave {
+    0%, 100% { opacity: 0.8; transform: scale(1); }
+    50% { opacity: 0.2; transform: scale(1.6); }
+  }
+
+  .status-ip { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 600; color: #e2e8f0; }
+  .status-dot { color: #64748b; font-size: 10px; }
+  .status-info { color: var(--neonGreen); font-family: ui-monospace, monospace; font-size: 11px; font-weight: 500; }
+  .status-slot { font-size: 11px; color: #cbd5e1; font-weight: 600; }
+
+  .util-group { display: flex; align-items: center; gap: 8px; }
+  .util-btn {
+    padding: 6px; border-radius: 8px; background: rgba(30, 36, 48, 0.6);
+    border: 1px solid var(--borderSubtle); color: #cbd5e1; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .util-btn:active { background: rgba(38, 47, 62, 0.9); }
+
+  /* Main Playfield */
+  main {
+    width: 100%; flex: 1; display: flex; flex-direction: column; justify-content: space-between;
+    position: relative; padding: 4px 6px; max-width: 1280px; margin: 0 auto;
+  }
+
+  /* Top Row Bumpers & Triggers */
+  .top-row { width: 100%; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding-top: 4px; }
+  .shoulder-cluster { display: flex; align-items: center; gap: 8px; }
+
+  /* Tactile Button Styling */
+  .gamepad-btn {
+    touch-action: none; cursor: pointer; user-select: none; -webkit-user-select: none;
+    transition: transform 0.06s ease, filter 0.06s ease, box-shadow 0.06s ease;
+    will-change: transform, box-shadow;
+    box-shadow: inset 0 1px 1px rgba(255,255,255,0.08), 0 4px 12px rgba(0,0,0,0.5);
+  }
+  .gamepad-btn:active, .gamepad-btn.pressed {
+    transform: scale(0.93) translateY(2px);
+    filter: brightness(1.25);
+    box-shadow: inset 0 3px 6px rgba(0,0,0,0.6), 0 1px 2px rgba(0,0,0,0.3);
+  }
+
+  /* Bumper Curves */
+  .btn-zl {
+    width: clamp(64px, 14vw, 96px); height: clamp(48px, 11vmin, 58px);
+    border-radius: 20px 8px 12px 24px;
+    background: linear-gradient(to bottom, #222a38, #121622);
+    border: 1px solid var(--borderSubtle);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: #cbd5e1; font-weight: bold; text-align: center;
+  }
+  .btn-l {
+    width: clamp(74px, 17vw, 112px); height: clamp(48px, 11vmin, 58px);
+    border-radius: 12px;
+    background: linear-gradient(to bottom, #283243, #161c28);
+    border: 1px solid var(--borderSubtle);
+    display: flex; align-items: center; justify-content: center;
+    color: #f8fafc; font-weight: 900; font-size: 16px;
+  }
+  .btn-r {
+    width: clamp(74px, 17vw, 112px); height: clamp(48px, 11vmin, 58px);
+    border-radius: 12px;
+    background: linear-gradient(to bottom, #283243, #161c28);
+    border: 1px solid var(--borderSubtle);
+    display: flex; align-items: center; justify-content: center;
+    color: #f8fafc; font-weight: 900; font-size: 16px;
+  }
+  .btn-zr {
+    width: clamp(64px, 14vw, 96px); height: clamp(48px, 11vmin, 58px);
+    border-radius: 8px 20px 24px 12px;
+    background: linear-gradient(to bottom, #222a38, #121622);
+    border: 1px solid var(--borderSubtle);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: #cbd5e1; font-weight: bold;
+  }
+  .trigger-sub { font-size: 9px; color: #94a3b8; font-family: ui-monospace, monospace; text-transform: uppercase; letter-spacing: 0.05em; }
+  .trigger-main { font-size: 15px; font-weight: 900; color: #f1f5f9; }
+
+  /* Center System Buttons */
+  .center-cluster { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .system-bar {
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(17, 22, 34, 0.85); border: 1px solid rgba(38, 47, 62, 0.6);
+    padding: 4px 12px; border-radius: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+  .btn-sys {
+    width: 36px; height: 36px; border-radius: 9999px;
+    background: #1b2230; border: 1px solid rgba(51, 65, 85, 0.6);
+    display: flex; align-items: center; justify-content: center;
+    color: #cbd5e1;
+  }
+  .btn-sys-sq {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: #181f2c; border: 1px solid rgba(51, 65, 85, 0.6);
+    display: flex; align-items: center; justify-content: center;
+    color: #94a3b8;
+  }
+  .btn-sys-home {
+    width: 36px; height: 36px; border-radius: 9999px;
+    background: #1e2637; border: 2px solid rgba(6, 182, 212, 0.4);
+    display: flex; align-items: center; justify-content: center;
+    color: #67e8f9;
+  }
+
+  /* Thumb Interaction Zones */
+  .thumb-zones {
+    width: 100%; flex: 1; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 8px; margin: 6px 0; position: relative;
+  }
+
+  /* Analog Stick Cluster */
+  .joystick-container { display: flex; flex-direction: column; align-items: center; justify-content: center; position: relative; }
+  .joystick-base {
+    position: relative; width: clamp(130px, 26vmin, 160px); height: clamp(130px, 26vmin, 160px);
+    border-radius: 9999px; background: linear-gradient(to bottom, #10141d, #171d29);
+    border: 2px solid var(--borderSubtle); box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center; touch-action: none; cursor: pointer;
+  }
+  .stick-guide-v { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; align-items: center; padding: 6px 0; pointer-events: none; opacity: 0.35; font-size: 9px; font-weight: bold; color: #cbd5e1; }
+  .stick-guide-h { position: absolute; inset: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 6px; pointer-events: none; opacity: 0.35; font-size: 9px; font-weight: bold; color: #cbd5e1; }
+
+  .joystick-thumb {
+    position: relative; width: clamp(74px, 15vmin, 90px); height: clamp(74px, 15vmin, 90px);
+    border-radius: 9999px; background: linear-gradient(135deg, #2a3447, #1c2331 50%, #131722);
+    border: 2px solid #3d4a61; box-shadow: inset 0 1px 1px rgba(255,255,255,0.08), 0 4px 12px rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center;
+    background-image: radial-gradient(circle, transparent 38%, rgba(255,255,255,0.05) 40%, transparent 42%),
+                      radial-gradient(circle, transparent 58%, rgba(255,255,255,0.04) 60%, transparent 62%),
+                      radial-gradient(circle, transparent 78%, rgba(255,255,255,0.03) 80%, transparent 82%);
+    transition: transform 0.04s ease-out; will-change: transform;
+  }
+  .thumb-cup {
+    width: clamp(38px, 8vmin, 48px); height: clamp(38px, 8vmin, 48px);
+    border-radius: 9999px; background: #141923; border: 1px solid #2a3547;
+    box-shadow: inset 0 4px 10px rgba(0,0,0,0.8), inset 0 -2px 4px rgba(255,255,255,0.06);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .thumb-center-dot {
+    width: 12px; height: 12px; border-radius: 9999px; background: #1f2838;
+    border: 1px solid rgba(51, 65, 85, 0.6); box-shadow: inset 0 1px 2px rgba(0,0,0,0.5);
+  }
+
+  .stick-label {
+    margin-top: 8px; font-size: 10px; font-family: ui-monospace, monospace; text-transform: uppercase;
+    letter-spacing: 0.05em; color: #94a3b8; background: rgba(30, 36, 48, 0.4);
+    padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(38, 47, 62, 0.4);
+  }
+
+  /* ABXY Cluster */
+  .abxy-container { display: flex; flex-direction: column; align-items: center; justify-content: center; position: relative; }
+  .abxy-plate {
+    position: relative; width: clamp(190px, 38vmin, 240px); height: clamp(190px, 38vmin, 240px);
+    border-radius: 9999px; background: linear-gradient(to bottom, #111520, #161d2a);
+    border: 2px solid var(--borderSubtle); box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .cross-bar-h { position: absolute; width: 68%; height: 28%; background: rgba(11, 14, 22, 0.8); border-radius: 9999px; pointer-events: none; }
+  .cross-bar-v { position: absolute; width: 28%; height: 68%; background: rgba(11, 14, 22, 0.8); border-radius: 9999px; pointer-events: none; }
+
+  .abxy-btn {
+    position: absolute; width: clamp(58px, 12vmin, 72px); height: clamp(58px, 12vmin, 72px);
+    border-radius: 9999px; background: linear-gradient(to bottom, #242c3d, #1a202d 50%, #121620);
+    border: 2px solid #3e4c66; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    box-shadow: inset 0 1px 1px rgba(255,255,255,0.08), 0 4px 12px rgba(0,0,0,0.5);
+  }
+  .abxy-btn .btn-char { font-size: clamp(20px, 4.5vmin, 26px); font-weight: 900; color: #fff; line-height: 1; }
+  .abxy-btn .color-pip { width: 6px; height: 6px; border-radius: 9999px; margin-top: 3px; }
+
+  .btn-pos-x { top: 6px; }
+  .btn-pos-x .color-pip { background-color: var(--nintendoX); }
+  .btn-pos-x.pressed, .btn-pos-x:active { border-color: var(--nintendoX); box-shadow: 0 0 12px rgba(56, 189, 248, 0.4); }
+
+  .btn-pos-y { left: 6px; }
+  .btn-pos-y .color-pip { background-color: var(--nintendoY); }
+  .btn-pos-y.pressed, .btn-pos-y:active { border-color: var(--nintendoY); box-shadow: 0 0 12px rgba(250, 204, 21, 0.4); }
+
+  .btn-pos-a { right: 6px; }
+  .btn-pos-a .color-pip { background-color: var(--nintendoA); }
+  .btn-pos-a.pressed, .btn-pos-a:active { border-color: var(--nintendoA); box-shadow: 0 0 12px rgba(74, 222, 128, 0.4); }
+
+  .btn-pos-b { bottom: 6px; }
+  .btn-pos-b .color-pip { background-color: var(--nintendoB); }
+  .btn-pos-b.pressed, .btn-pos-b:active { border-color: var(--nintendoB); box-shadow: 0 0 12px rgba(248, 113, 113, 0.4); }
+
+  /* PIN Modal */
+  #pin-modal {
+    display: none; position: fixed; inset: 0; z-index: 50;
+    background: rgba(8, 11, 16, 0.95); backdrop-filter: blur(10px);
+    align-items: center; justify-content: center; flex-direction: column; padding: 20px;
+  }
+  #pin-modal.show { display: flex; }
+  .pin-dialog {
+    background: #121620; border: 2px solid var(--borderSubtle); border-radius: 20px;
+    padding: 28px; max-width: 340px; width: 100%; text-align: center;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.8);
+  }
+  .pin-title { font-size: 20px; font-weight: 800; color: #fff; margin-bottom: 8px; }
+  .pin-desc { font-size: 13px; color: #94a3b8; margin-bottom: 20px; line-height: 1.4; }
+  .pin-box {
+    width: 100%; font-size: 28px; font-weight: 800; letter-spacing: 10px; text-align: center;
+    padding: 12px 14px; background: #080b10; border: 2px solid var(--borderSubtle); border-radius: 12px;
+    color: #fff; outline: none; margin-bottom: 20px;
+  }
+  .pin-box:focus { border-color: var(--nintendoX); }
+  .pin-btn {
+    width: 100%; padding: 13px; font-size: 16px; font-weight: 800; border-radius: 12px;
+    background: #ef4444; border: none; color: #fff; cursor: pointer; transition: background 0.1s;
+  }
+  .pin-btn:active { background: #dc2626; }
+
+  @media (orientation: portrait) {
+    #rotate-hint {
+      display: flex; position: fixed; inset: 0; z-index: 40;
+      background: rgba(8, 11, 16, 0.97); align-items: center; justify-content: center;
+      flex-direction: column; text-align: center; font-size: 17px; font-weight: 700; color: #e2e8f0;
+      padding: 24px;
+    }
+  }
+  @media (orientation: landscape) {
+    #rotate-hint { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Header Status -->
+<header>
+  <div class="brand-group">
+    <div class="brand-title">NX2<span>Apple</span></div>
+    <div class="brand-sub">— Controller Deck</div>
+  </div>
+
+  <div class="status-badge">
+    <span class="ping-dot">
+      <span class="ping-dot-wave" id="status-wave"></span>
+      <span class="ping-dot-core" id="status-dot"></span>
+    </span>
+    <span class="status-slot" id="player-slot">P-</span>
+    <span class="status-dot">•</span>
+    <span class="status-info" id="status-text">Connecting…</span>
+  </div>
+
+  <div class="util-group">
+    <button class="util-btn" id="haptic-toggle" title="Haptics">
+      <svg id="haptic-icon" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path d="M12 2v20M17 5v14M7 5v14M22 9v6M2 9v6" stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<!-- Main Playfield -->
+<main>
+  <!-- Top Bumpers & Shoulder Row -->
+  <div class="top-row">
+    <!-- Left Shoulder: ZL & L -->
+    <div class="shoulder-cluster">
+      <div class="gamepad-btn btn-zl" data-key="ZL">
+        <span class="trigger-sub">Trigger</span>
+        <span class="trigger-main">ZL</span>
+      </div>
+      <div class="gamepad-btn btn-l" data-key="L">L</div>
+    </div>
+
+    <!-- Center System Buttons: Minus, Capture, Home, Plus -->
+    <div class="center-cluster">
+      <div class="system-bar">
+        <div class="gamepad-btn btn-sys" data-key="MINUS" title="Minus (-)">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path d="M20 12H4" stroke-linecap="round"/></svg>
+        </div>
+        <div class="gamepad-btn btn-sys-sq" data-key="CAPTURE" title="Capture">
+          <svg width="12" height="12" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/></svg>
+        </div>
+        <div class="gamepad-btn btn-sys-home" data-key="HOME" title="Home">
+          <svg width="15" height="15" fill="currentColor" viewBox="0 0 20 20"><path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"/></svg>
+        </div>
+        <div class="gamepad-btn btn-sys" data-key="PLUS" title="Plus (+)">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4" stroke-linecap="round"/></svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Shoulder: R & ZR -->
+    <div class="shoulder-cluster">
+      <div class="gamepad-btn btn-r" data-key="R">R</div>
+      <div class="gamepad-btn btn-zr" data-key="ZR">
+        <span class="trigger-sub">Trigger</span>
+        <span class="trigger-main">ZR</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Thumb Zones (Left Joystick | Right ABXY) -->
+  <div class="thumb-zones">
+    <!-- Left Thumb: Analog Joystick -->
+    <div class="joystick-container">
+      <div class="joystick-base" id="joystick-base">
+        <div class="stick-guide-v"><span>▲</span><span>▼</span></div>
+        <div class="stick-guide-h"><span>◀</span><span>▶</span></div>
+        <div class="joystick-thumb" id="joystick-thumb">
+          <div class="thumb-cup">
+            <div class="thumb-center-dot"></div>
+          </div>
+        </div>
+      </div>
+      <div class="stick-label">Left Stick (L3 Press)</div>
+    </div>
+
+    <!-- Right Thumb: Large ABXY Diamond Pad -->
+    <div class="abxy-container">
+      <div class="abxy-plate" id="abxy-plate">
+        <div class="cross-bar-h"></div>
+        <div class="cross-bar-v"></div>
+
+        <!-- X (Top) -->
+        <div class="gamepad-btn abxy-btn btn-pos-x" data-key="X">
+          <span class="btn-char">X</span>
+          <span class="color-pip"></span>
+        </div>
+        <!-- Y (Left) -->
+        <div class="gamepad-btn abxy-btn btn-pos-y" data-key="Y">
+          <span class="btn-char">Y</span>
+          <span class="color-pip"></span>
+        </div>
+        <!-- A (Right) -->
+        <div class="gamepad-btn abxy-btn btn-pos-a" data-key="A">
+          <span class="btn-char">A</span>
+          <span class="color-pip"></span>
+        </div>
+        <!-- B (Bottom) -->
+        <div class="gamepad-btn abxy-btn btn-pos-b" data-key="B">
+          <span class="btn-char">B</span>
+          <span class="color-pip"></span>
+        </div>
+      </div>
+      <div class="stick-label">Nintendo Diamond Pad</div>
+    </div>
+  </div>
+</main>
+
+<!-- PIN Pairing Modal -->
+<div id="pin-modal">
+  <div class="pin-dialog">
+    <div class="pin-title">Enter Host PIN</div>
+    <div class="pin-desc">Enter the 4-digit PIN shown on the game screen to pair this controller.</div>
+    <input class="pin-box" id="pin-input" type="tel" maxlength="4" placeholder="••••" autocomplete="off" />
+    <button class="pin-btn" id="pin-submit">Connect Gamepad</button>
+  </div>
+</div>
+
+<div id="rotate-hint">Turn your phone sideways 🔄</div>
+
+<script>
+// Button Bits matching Switch nn::hid::NpadButton / dm_input.h
+const BITS = {
+  A: 1, B: 2, X: 4, Y: 8, LS: 16, RS: 32,
+  L: 64, R: 128, ZL: 256, ZR: 512,
+  PLUS: 1024, MINUS: 2048,
+  HOME: 0, CAPTURE: 0
+};
+
+// Keyboard mappings for desktop preview
+const KEY_MAP = {
+  KeyX: 1, Enter: 1,
+  KeyZ: 2, Backspace: 2,
+  KeyC: 4,
+  KeyV: 8,
+  KeyQ: 64,
+  KeyE: 128,
+  Digit1: 256,
+  Digit3: 512,
+  Equal: 1024,
+  Minus: 2048
+};
+const STICK_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD'];
+
+let hapticsEnabled = true;
+function triggerHaptic(ms = 18) {
+  if (hapticsEnabled && navigator.vibrate) {
+    try { navigator.vibrate(ms); } catch (e) {}
+  }
+}
+
+document.getElementById('haptic-toggle').addEventListener('click', () => {
+  hapticsEnabled = !hapticsEnabled;
+  triggerHaptic(30);
+  document.getElementById('haptic-icon').style.color = hapticsEnabled ? '#22C55E' : '#64748b';
+});
+
+// Touch and Button State
+const activeTouches = new Map(); // touchId -> bitmask
+const activeKeys = new Set();
+let lx = 0, ly = 0;
+let buttonMask = 0;
+let sentState = '';
+let lastAck = 0;
+let playerNum = null;
+let ws = null;
+let pingStart = 0;
+// Only read PIN from query param; never force stale incorrect PINs from localStorage
+let currentPin = new URLSearchParams(location.search).get('pin') || '';
+
+const statusDot = document.getElementById('status-dot');
+const statusWave = document.getElementById('status-wave');
+const statusText = document.getElementById('status-text');
+const playerSlot = document.getElementById('player-slot');
+const pinModal = document.getElementById('pin-modal');
+const pinInput = document.getElementById('pin-input');
+const pinSubmit = document.getElementById('pin-submit');
+
+function setStatusState(color, label, slotStr) {
+  statusDot.style.backgroundColor = color;
+  statusWave.style.backgroundColor = color;
+  if (label) statusText.textContent = label;
+  if (slotStr) playerSlot.textContent = slotStr;
+}
+
+function refreshButtonsUI() {
+  const prevMask = buttonMask;
+  buttonMask = 0;
+  for (const b of activeTouches.values()) buttonMask |= b;
+  for (const k of activeKeys) buttonMask |= (KEY_MAP[k] || 0);
+
+  if ((buttonMask & ~prevMask)) triggerHaptic(15);
+
+  document.querySelectorAll('.gamepad-btn').forEach(btn => {
+    const key = btn.getAttribute('data-key');
+    const bit = BITS[key] || 0;
+    if (bit) {
+      btn.classList.toggle('pressed', !!(buttonMask & bit));
+    }
+  });
+
+  sendState(false);
+}
+
+function sendState(force) {
+  const msg = buttonMask + ',' + lx.toFixed(3) + ',' + ly.toFixed(3);
+  if ((force || msg !== sentState) && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(msg);
+    sentState = msg;
+  }
+}
+
+// Multitouch handling for all buttons
+function bitAtPoint(x, y) {
+  const el = document.elementFromPoint(x, y);
+  const btn = el && el.closest('.gamepad-btn');
+  if (!btn) return 0;
+  const key = btn.getAttribute('data-key');
+  return BITS[key] || 0;
+}
+
+// Analog Stick Touch Logic
+const stickBase = document.getElementById('joystick-base');
+const stickThumb = document.getElementById('joystick-thumb');
+let stickTouchId = null;
+let baseRect = null;
+
+function updateStick(clientX, clientY) {
+  if (!baseRect) baseRect = stickBase.getBoundingClientRect();
+  const maxR = baseRect.width * 0.38; // Slightly larger throw ratio for easier reaching of 100% deflection
+  const cx = baseRect.left + baseRect.width / 2;
+  const cy = baseRect.top + baseRect.height / 2;
+  let dx = clientX - cx;
+  let dy = clientY - cy;
+  const dist = Math.hypot(dx, dy);
+  if (dist > maxR) {
+    dx = (dx / dist) * maxR;
+    dy = (dy / dist) * maxR;
+  }
+  stickThumb.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+
+  // Normalized direct coordinates [-1.0, 1.0]
+  let normX = dx / maxR;
+  let normY = -dy / maxR; // Switch Y is inverted (up is positive)
+
+  // Subtle deadzone
+  const mag = Math.hypot(normX, normY);
+  if (mag < 0.05) {
+    lx = 0;
+    ly = 0;
+  } else {
+    // Linear & responsive: no sticky snapping or locking onto down/up!
+    // A clean circular mapping with gentle axial damping only when clearly horizontal/vertical.
+    lx = Math.max(-1.0, Math.min(1.0, normX));
+    ly = Math.max(-1.0, Math.min(1.0, normY));
+  }
+
+  sendState(false);
+}
+
+function resetStick() {
+  stickThumb.style.transform = 'translate3d(0, 0, 0)';
+  lx = 0; ly = 0;
+  sendState(false);
+}
+
+// Global Touch Listeners
+window.addEventListener('touchstart', (e) => {
+  if (e.target.closest('#pin-modal')) return;
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (!baseRect) baseRect = stickBase.getBoundingClientRect();
+    const cx = baseRect.left + baseRect.width / 2;
+    const cy = baseRect.top + baseRect.height / 2;
+
+    // Check if touch is inside analog stick base
+    if (stickTouchId === null && Math.hypot(t.clientX - cx, t.clientY - cy) < baseRect.width * 0.58) {
+      stickTouchId = t.identifier;
+      triggerHaptic(10);
+      updateStick(t.clientX, t.clientY);
+    } else {
+      const bit = bitAtPoint(t.clientX, t.clientY);
+      if (bit) activeTouches.set(t.identifier, bit);
+    }
+  }
+  refreshButtonsUI();
+}, { passive: false });
+
+window.addEventListener('touchmove', (e) => {
+  if (e.target.closest('#pin-modal')) return;
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (t.identifier === stickTouchId) {
+      updateStick(t.clientX, t.clientY);
+    } else if (activeTouches.has(t.identifier)) {
+      activeTouches.set(t.identifier, bitAtPoint(t.clientX, t.clientY));
+    }
+  }
+  refreshButtonsUI();
+}, { passive: false });
+
+window.addEventListener('touchend', (e) => {
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (t.identifier === stickTouchId) {
+      stickTouchId = null;
+      resetStick();
+    }
+    activeTouches.delete(t.identifier);
+  }
+  refreshButtonsUI();
+}, { passive: false });
+
+window.addEventListener('touchcancel', (e) => {
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (t.identifier === stickTouchId) {
+      stickTouchId = null;
+      resetStick();
+    }
+    activeTouches.delete(t.identifier);
+  }
+  refreshButtonsUI();
+}, { passive: false });
+
+// Mouse fallback for desktop testing
+let isMouseDown = false;
+stickBase.addEventListener('mousedown', (e) => {
+  isMouseDown = true;
+  baseRect = stickBase.getBoundingClientRect();
+  updateStick(e.clientX, e.clientY);
+});
+window.addEventListener('mousemove', (e) => {
+  if (isMouseDown) updateStick(e.clientX, e.clientY);
+});
+window.addEventListener('mouseup', () => {
+  if (isMouseDown) {
+    isMouseDown = false;
+    resetStick();
+  }
+});
+
+// Desktop Keyboard mapping
+window.addEventListener('keydown', (e) => {
+  if (e.target === pinInput) return;
+  if (!(e.code in KEY_MAP) && !STICK_KEYS.includes(e.code)) return;
+  e.preventDefault();
+  activeKeys.add(e.code);
+  if (stickTouchId === null) {
+    lx = (activeKeys.has('KeyD') ? 1 : 0) - (activeKeys.has('KeyA') ? 1 : 0);
+    ly = (activeKeys.has('KeyW') ? 1 : 0) - (activeKeys.has('KeyS') ? 1 : 0);
+  }
+  refreshButtonsUI();
+});
+
+window.addEventListener('keyup', (e) => {
+  if (e.target === pinInput) return;
+  if (e.code in KEY_MAP || STICK_KEYS.includes(e.code)) {
+    e.preventDefault();
+    activeKeys.delete(e.code);
+    if (stickTouchId === null) {
+      lx = (activeKeys.has('KeyD') ? 1 : 0) - (activeKeys.has('KeyA') ? 1 : 0);
+      ly = (activeKeys.has('KeyW') ? 1 : 0) - (activeKeys.has('KeyS') ? 1 : 0);
+    }
+    refreshButtonsUI();
+  }
+});
+
+// PIN Dialog
+function showPinDialog() {
+  pinModal.classList.add('show');
+  pinInput.value = ''; // Always clear previous input so user can type freely without overwrite
+  pinInput.focus();
+}
+
+pinSubmit.addEventListener('click', () => {
+  currentPin = pinInput.value.trim();
+  pinModal.classList.remove('show');
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send('PIN:' + currentPin);
+  } else {
+    connectWS();
+  }
+});
+
+pinInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') pinSubmit.click();
+});
+
+// WebSocket Connection
+function connectWS() {
+  setStatusState('#eab308', 'Connecting…', 'P-');
+  const wsUrl = 'ws://' + location.host + '/ws?pin=' + encodeURIComponent(currentPin);
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    setStatusState('#38bdf8', 'Authenticating…', 'P-');
+    if (currentPin) ws.send('PIN:' + currentPin);
+    sendState(true);
+  };
+
+  ws.onmessage = (m) => {
+    lastAck = Date.now();
+    const data = m.data;
+    if (data === 'AUTH_REQUIRED' || data === 'AUTH_FAILED') {
+      setStatusState('#ef4444', 'PIN Required', 'P-');
+      showPinDialog();
+      return;
+    }
+    if (data.startsWith('player ')) {
+      pinModal.classList.remove('show');
+      playerNum = parseInt(data.split(' ')[1], 10);
+      setStatusState('#22c55e', 'Connected', 'P' + playerNum);
+    }
+  };
+
+  ws.onclose = () => {
+    playerNum = null;
+    setStatusState('#ef4444', 'Disconnected', 'P-');
+    setTimeout(connectWS, 1500);
+  };
+}
+
+// 50ms keep-alive tick
+setInterval(() => {
+  sendState(true);
+}, 50);
+
+window.addEventListener('resize', () => {
+  baseRect = null;
+});
+
+connectWS();
+</script>
+</body>
+</html>

@@ -265,9 +265,18 @@ HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7Displa
 }
 
 // ---------- diag ----------
-// The text after LogMetaData (NN_LOG) goes straight into the host log; an abort prints the call site and exits with a failure
+// The text after LogMetaData (NN_LOG) goes straight into the host log; an abort prints the call site and exits with a failure. A line the game keeps repeating is logged 20 times,
+// then once per 10,000 more with its count: DOOM retries a UDP socket every frame and wrote about 300 lines a second, 67,000 in a session on the iPhone, for nothing
 HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "game log → host log", void, h_diag_Put, const void *meta, const char *s, size_t n) {
-    (void)meta; while (n && (s[n - 1] == '\n' || s[n - 1] == '\0')) n--; if (n) LOG("[game] %.*s", (int)n, s);
+    (void)meta; while (n && (s[n - 1] == '\n' || s[n - 1] == '\0')) n--; if (!n) return;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static struct { uint64_t h; uint64_t n; } seen[64];
+    uint64_t h = 1469598103934665603ull; for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)s[i]) * 1099511628211ull;
+    pthread_mutex_lock(&mu);
+    int k = (int)(h % 64); if (seen[k].h != h) { seen[k].h = h; seen[k].n = 0; }
+    uint64_t c = ++seen[k].n;
+    pthread_mutex_unlock(&mu);
+    if (c <= 20) LOG("[game] %.*s", (int)n, s);
+    else if (c % 10000 == 0) LOG("[game] (repeated %llu times so far) %.*s", (unsigned long long)c, (int)n, s);
 }
 // Abort: report the call site (module + offset) and the guest backtrace, then exit
 static void diag_abort(uint32_t res, void *lr) {

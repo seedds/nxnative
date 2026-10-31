@@ -160,8 +160,16 @@ void dm_thread_native_wait(int entering) {
 // left both workers in this loop for good, and the game stopped presenting as New Story loaded
 int dm_yield_to_core_peers(int all) {
     thr_t *self = pthread_getspecific(g_keythr); if (!self) return 0;
+    // Hang-only backstop: an unbounded wait deadlocks games whose same-core workers spin
+    // in guest code without a guest wait (TotK boot on 9a56ecf: main thread yields forever,
+    // packaged textures never upload, black screen, #247). The default cap is 2 s: the wake
+    // protocol legitimately waits tens of ms (t_preempt's dispatcher relays), so only a true
+    // hang can ever reach it. DM_HANDOFF_CAP_US=0 restores the unbounded upstream wait.
+    static int cap_us = -1;
+    if (cap_us < 0) { const char *e = getenv("DM_HANDOFF_CAP_US"); cap_us = e ? atoi(e) : 2000000; }
     uint64_t bit = 1ull << (self->core & 63); int waited = 0;
     if (self->mask & ~bit) return 0;
+    uint64_t t0 = now_ns();
     for (;;) {
         int busy = 0;
         pthread_mutex_lock(&G);
@@ -169,6 +177,10 @@ int dm_yield_to_core_peers(int all) {
             if (t != self && t->started && !t->exited && !t->host_owned && t->mask == bit && t->prio < self->prio && thr_runnable(t) && (all || thr_in_handoff(t, self))) busy = 1;
         pthread_mutex_unlock(&G);
         if (!busy) return waited;
+        if (cap_us && now_ns() - t0 > (uint64_t)cap_us * 1000) {
+            static _Atomic int nlog; if (nlog++ < 8) LOG("same-core wake handoff hit its %d us cap (thread %#x priority %d core %d): a peer stays runnable without a guest wait", cap_us, self->handle, self->prio, self->core);
+            return -1;
+        }
         { struct timespec ts = {0, 50000}; nanosleep(&ts, 0); } waited = 1;
     }
 }

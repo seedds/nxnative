@@ -532,6 +532,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the NSP script took the game for an OpenGL one (`main imports EGL and names glShaderSource`), the GL shader capture found no shader, and the capture boot stopped with `[nvn-mtl] FATAL cannot read the shader map` from `h_nvnQueueSubmitCommands` called in an NRO (`nro8+0xc10d0`). → [NVN in NROs under an SDL main that names GL](../reference/rendering.md#nvn-in-nros-under-an-sdl-main-that-names-gl)
 - a jump to address 0 right after `glGetFloatv(0xb12)` (`lr=main+0x2d58c4`). → [Which GL functions a game calls](../reference/rendering.md#which-gl-functions-a-game-calls)
 - in a capture run every program links with no uniforms; the game's first `Shader:send` raises a Lua error and, on the Switch, its error handler quits (Any Lua error quits a LÖVE game). → [GL shaders put together at run time and captured](../reference/rendering.md#gl-shaders-put-together-at-run-time-and-captured)
+- an image-only fragment draw's writes disappear from the subresource also bound as its color attachment when the pass ends; other image layers retain their writes. → [Image stores into an attachment of their own pass](../reference/rendering.md#image-stores-into-an-attachment-of-their-own-pass)
 - read-only depth/stencil attachments are written back after every pass, and the periodic unwritten-store savings counter remains zero with the default configuration. → [Unwritten attachment stores without lookahead](../reference/rendering.md#unwritten-attachment-stores-without-lookahead)
 
 ## Shaders

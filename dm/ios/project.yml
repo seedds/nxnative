@@ -45,6 +45,8 @@ targets:
         DMShowFPS: ${DM_SHOW_FPS}           # YES = the frame-rate counter is on (front_ios.m; set by build_ipa.sh)
         DMLanguage: ${DM_LANG}              # the game language code (main.m sets DM_LANG from it; set by build_ipa.sh)
         LSSupportsGameMode: true
+        BGTaskSchedulerPermittedIdentifiers:   # a long prepare step continues in the background (front_ios.m bg_task_step)
+          - $(PRODUCT_BUNDLE_IDENTIFIER).prepare.*
         GCSupportsControllerUserInteraction: true   # Physical controllers (GameController)
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad

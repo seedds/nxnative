@@ -5,6 +5,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
+#import <BackgroundTasks/BackgroundTasks.h>
 #include <errno.h>
 #include "front.h"
 #include "hle.h"
@@ -212,12 +213,72 @@ static UILabel *front_ios_fps_label(void) {
     return l;
 }
 
+// A long prepare step keeps running when the player leaves the app (iOS 26: BGContinuedProcessingTask), with the system's progress in a Live Activity instead of the app
+// being suspended halfway. Asked for only when a step has run 2 s and the rate so far leaves 10 s or more, so a start from warm caches never shows it; one task per step,
+// its identifier <bundle ID>.prepare.<n> (Info.plist BGTaskSchedulerPermittedIdentifiers: <bundle ID>.prepare.*). Main thread only; the system can expire it (the player
+// cancels it in the Live Activity): the step itself goes on, it only loses the background time
+static id g_bg_task; static NSString *g_bg_id; static int g_bg_state;   // the step's task: 0 none yet, 1 submitted, 2 running, 3 no more for this step (failed, expired)
+static uint64_t g_bg_t0, g_bg_shown; static long g_bg_d0, g_bg_done, g_bg_total; static unsigned g_bg_n; static NSString *g_bg_step;
+static void bg_task_show(void) API_AVAILABLE(ios(26.0)) {
+    BGContinuedProcessingTask *t = g_bg_task; if (!t) return;
+    t.progress.totalUnitCount = g_bg_total; t.progress.completedUnitCount = g_bg_done;
+    uint64_t now = now_ns(); if (now - g_bg_shown < 1000000000ull) return;   // the subtitle's count once a second
+    g_bg_shown = now;
+    [t updateTitle:t.title subtitle:[NSString stringWithFormat:@"%@: %@ of %@", g_bg_step, [NSNumberFormatter localizedStringFromNumber:@(g_bg_done) numberStyle:NSNumberFormatterDecimalStyle],
+                                     [NSNumberFormatter localizedStringFromNumber:@(g_bg_total) numberStyle:NSNumberFormatterDecimalStyle]]];
+}
+static void bg_task_step(NSString *step, long done, long total) {   // front_progress on the main thread; step nil = the step ended
+    if (@available(iOS 26.0, *)) {
+        if (!step) {
+            if (g_bg_task) { ((BGContinuedProcessingTask *)g_bg_task).progress.completedUnitCount = g_bg_total; [(BGContinuedProcessingTask *)g_bg_task setTaskCompletedWithSuccess:YES]; LOG("front end: %s done, background task completed", g_bg_step.UTF8String); }
+            g_bg_task = nil; g_bg_id = nil; g_bg_state = 0; g_bg_t0 = 0; return;
+        }
+        g_bg_step = step; g_bg_done = done; g_bg_total = total;
+        if (g_bg_state == 2) { bg_task_show(); return; }
+        if (g_bg_state) return;
+        uint64_t now = now_ns();
+        if (!g_bg_t0) { g_bg_t0 = now; g_bg_d0 = done; return; }
+        double el = (now - g_bg_t0) / 1e9; long d = done - g_bg_d0;
+        if (el < 2 || d <= 0 || (double)(total - done) * el / d < 10) return;
+        NSString *bid = NSBundle.mainBundle.bundleIdentifier; if (!bid) { g_bg_state = 3; return; }
+        NSString *ident = [NSString stringWithFormat:@"%@.prepare.%u", bid, ++g_bg_n];
+        BOOL reg = [BGTaskScheduler.sharedScheduler registerForTaskWithIdentifier:ident usingQueue:dispatch_get_main_queue() launchHandler:^(__kindof BGTask *task) {
+            BGContinuedProcessingTask *t = task;
+            if (![ident isEqualToString:g_bg_id] || g_bg_state != 1) { [t setTaskCompletedWithSuccess:YES]; return; }   // its step ended before the system started it
+            g_bg_task = t; g_bg_state = 2; g_bg_shown = 0;
+            t.expirationHandler = ^{ dispatch_async(dispatch_get_main_queue(), ^{
+                LOG("front end: the system ended the background task of %s (the step goes on in the foreground)", g_bg_step.UTF8String);
+                if (g_bg_task == t) { g_bg_task = nil; g_bg_state = 3; }
+                [t setTaskCompletedWithSuccess:NO]; }); };
+            bg_task_show();
+        }];
+        if (!reg) { g_bg_state = 3; LOG("[RED] front end: background task %s not registered (Info.plist BGTaskSchedulerPermittedIdentifiers)", ident.UTF8String); return; }
+        g_bg_id = ident; g_bg_state = 1;
+        NSString *game = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: @"The game";
+        BGContinuedProcessingTaskRequest *rq = [[BGContinuedProcessingTaskRequest alloc] initWithIdentifier:ident title:game subtitle:step];
+        rq.strategy = BGContinuedProcessingTaskRequestSubmissionStrategyFail;   // now or not at all: a queued task would start after the step it is for
+        void (^failed)(NSError *) = ^(NSError *err) { dispatch_async(dispatch_get_main_queue(), ^{
+            if ([ident isEqualToString:g_bg_id] && g_bg_state == 1) g_bg_state = 3;
+            LOG("front end: background task for %s not started: %s", step.UTF8String, err.localizedDescription.UTF8String); }); };
+        LOG("front end: %s has about %.0f s left: asking to continue it in the background", step.UTF8String, (double)(total - done) * el / d);
+        if (@available(iOS 27.0, *)) {   // the completion form reports every error; not from the main thread
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                [BGTaskScheduler.sharedScheduler submitTaskRequest:rq completionHandler:^(NSError *err) { if (err) failed(err); }];
+            });
+        } else {
+            NSError *err = nil;
+            if (![BGTaskScheduler.sharedScheduler submitTaskRequest:rq error:&err]) failed(err);
+        }
+    }
+}
+
 // Progress screen of the prepare step (front.h front_progress): a dark view over the game's view and the pad, the title, a bar and a count, centered; UIKit views, so it draws while the game's thread waits
 static UIView *g_prog; static UILabel *g_prog_count; static UIProgressView *g_prog_bar; static UILabel *g_prog_title;
 void front_progress(const char *title, long done, long total) {
     if (!g_layer) return;
     NSString *tt = title ? @(title) : nil;
     dispatch_async(dispatch_get_main_queue(), ^{
+        bg_task_step(tt, done, total);
         if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; return; }
         if (!g_prog) {
             UIView *root = g_root.view; if (!root) return;

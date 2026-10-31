@@ -57,7 +57,11 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
 	$(B)/t_nro
 	$(B)/t_symbols
-run: $(B)/t_nro
+	$(B)/t_pad_map
+	$(B)/t_input_map
+	$(B)/t_pad_motion
+	$(B)/t_controllers_mac
+run: $(B)/t_nro $(B)/t_pad_motion $(B)/t_pad_map $(B)/t_controllers_mac
 run: $(B)/t_symbols
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
@@ -301,3 +305,16 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+run: $(B)/t_pad_motion
+$(B)/t_pad_motion: t_pad_motion.c ../pad_motion.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -o $@ t_pad_motion.c
+
+run: $(B)/t_pad_map $(B)/t_input_map
+$(B)/t_pad_map: t_pad_map.c ../pad_map.h ../steam_input.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -o $@ t_pad_map.c
+$(B)/t_controllers_mac: t_controllers_mac.m ../pad_apple.h ../input_map.h ../input_preferences_mac.h ../controllers_mac.m ../controllers_mac.h ../pad_map.h ../pad_motion.h ../steam_input.h ../pad_slots.h ../front.h ../dm_input.h ../haptics_apple.h ../hle_haptics.h ../dm.h ../motion_apple.h ../motion_pro_mac.h ../motion_pro.h $(GAME_H) | $(B)
+	$(CLANG) $(GINC) -O1 -fobjc-arc -Wall -Werror -Wno-unused-function -o $@ t_controllers_mac.m -framework Cocoa -framework GameController -framework IOKit
+
+$(B)/t_input_map: t_input_map.c ../input_map.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -o $@ t_input_map.c

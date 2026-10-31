@@ -63,6 +63,7 @@ Each app keeps the player's choices in its own preferences domain, its bundle ID
 
 - **Only choices that differ from the tested default are kept.** A setting the player left at its default follows the defaults of a later build. Remove a key when the player picks the default again. For "Reset to tested defaults", remove the keys of the settings the player can change; the app's own screen does that when Play applies the defaults, and keeps the saved choice of a setting fixed for this start.
 - **Checked when read.** The launcher uses a saved value only when this build still offers it: one of a `choice`'s options, a `toggle`'s `on` or `off`, or a number from a `range`'s `min` to `max`. It checks against the app's own list, which the packer copies into `Info.plist` as `DMSettings`. Any other value, a value that is not a string, or a key no setting has is ignored; it stays saved until the settings screen's Play replaces it with the player's choice. So a rebuild that stops offering a value falls back to its tested default.
+- **Controls are saved choices too, with another check.** `launcher.DM_KEYMAP` (keys) and `launcher.DM_PAD_MAP` (controller buttons) are strings in the same domain, in the form the environment variables take (`defaults write org.nxnative.<title ID> launcher.DM_PAD_MAP -string "A=B,B=A"`; the forms are in [env_switches.tsv](env_switches.tsv)). They are no `launcher.json` rows, so `DMSettings` cannot check them: the launcher checks them with the host's own parser (`input_map_valid` in `dm/host/input_map.h`, which the host and the launcher share). A value the host would not take whole (an unknown name, a key code past 127, a button where a key code belongs, an empty string, or a value that is not a string) is ignored and logged, though the host alone would apply the good entries of it. They follow the order below and `DM_SAVED_CHOICES=0`, and the launcher reads them whether or not its settings window ran: the window does not offer them.
 - **The order**, the first that sets a variable wins:
   1. the launch environment (a front end's launch overrides, a terminal);
   2. the player's `env.txt` (`~/Library/Application Support/nxnative/<title ID>/env.txt`; on the iPhone, `Documents/env.txt`);
@@ -72,6 +73,35 @@ Each app keeps the player's choices in its own preferences domain, its bundle ID
 - **Launch overrides are temporary.** A front end that starts the game with a variable in its environment overrides the saved choice for that start only. It writes the store only when the player means to keep the choice.
 - **`DM_SAVED_CHOICES=0`** (in the environment or an `env.txt`) starts with the tested defaults and leaves the saved choices as they are. **`DM_LAUNCHER=0`** only skips the settings screen (the iPhone's, or a Mac app's window): the saved choices still apply.
 - **A sandboxed front end** cannot write another app's preferences domain; this store is for front ends outside the App Sandbox, as NX2Apple is.
+
+### Controller-specific choices
+
+The Mac [controller panel](mac-controllers.md#controllers-and-mapping) reads
+and writes `launcher.DM_PAD_MAP` for the standard 16 buttons, shared by every
+controller for this game. Its Nintendo Positions preset removes the key;
+Xbox Labels writes `A=B,B=A,X=Y,Y=X`. `Shake` is also accepted as a target
+(`A=Shake`), in addition to the buttons and `none` from PR #386. Sources remain
+the 16 standard buttons. The keyboard map is independent.
+
+Extra inputs use `controller.<model>` dictionaries in the **same app domain**
+(for example `controller.Valve Triton`). No model dictionary may override the
+standard button map. Its optional fields are:
+
+| Field | Value | Default |
+|---|---|---|
+| `buttons` | Dictionary of physical source strings `16` through `23` to integer Switch targets `0` through `15`, `63` for Shake, or `-1` for Unassigned | All unassigned |
+| `pads` | Two integers, left then right: 0 Off, 1 D-pad, 2 Left stick, 3 Right stick, 4 Switch touchscreen | Triton `[1,4]`; other models `[0,0]` |
+| `gyro` | Boolean | true |
+
+Source order is L4/Paddle 1, R4/Paddle 2, L5/Paddle 3, R5/Paddle 4, left pad
+click, right pad click, Guide/Home, Quick Access/Share. These extra targets
+are final Switch functions, not inputs to `DM_PAD_MAP` again. A pad used as a
+D-pad supplies the ordinary D-pad sources and follows the standard map.
+Only fields differing from defaults are written; an empty model dictionary
+is removed. Malformed fields are ignored. `DM_SAVED_CHOICES=0` ignores these
+dictionaries too and never writes them. The panel reloads preferences when
+opened; external edits take effect then or at the next game start. Older
+`controllers.plist` files are read only by the panel's explicit import action.
 
 ### The cloud saves folder
 

@@ -1,0 +1,37 @@
+# Provisional game profile (survey-generated, brought up and found working on macOS 26.6 / iOS 26.5, 2026-10-29)
+# Deep Rock Galactic: Survivor, SDK 21, survey /Users/slava/Games/DRG-game/01003EC027CC8000_survey/survey.md
+
+# ---- Identity ----
+title_id	01003EC027CC8000
+program_id	01003EC027CC8000
+
+# ---- App ----
+name	Deep Rock Galactic: Survivor
+ipa	DeepRockGalacticSurvivor.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.0.3	main=84ca95b165e778e31a812f5e361d5845	subsdk0=ad9ab2f4d3a3f5beff99d002777afa57	sdk=f1dac4718472539c213a4892547608a5
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/resources.assets.resS
+zip_store	.assets:.bundle:.dat:.resource:.ress:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Deep Rock Galactic: Survivor shaders (provisional profile)
+
+# address regions: 2026-10-29, in its first 15 s in nnMain the game's regions reach alias +2.59 GB, within the profile's 4.38 GB alias region (what it takes later in play is not measured here) (rewrite 77db03de6bd6)

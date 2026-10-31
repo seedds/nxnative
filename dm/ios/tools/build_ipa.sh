@@ -149,7 +149,8 @@ fi
 
 t "xcodebuild (Release, unsigned, iPhone + iPad)"
 mkdir -p "$O"
-xcodebuild -project DmIOS.xcodeproj -scheme DmIOS -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
+# target-based build: this Xcode rejects scheme/destination resolution ("iOS 26.5 is not installed")
+xcodebuild -project DmIOS.xcodeproj -target DmIOS -configuration Release CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= DM_COPY_GAME_RESOURCES=NO \
   DM_XCODE_OUTPUT_ROOT="$DD" SYMROOT="$DD/Build/Products" OBJROOT="$DD/Build/Intermediates.noindex" build > "$O/build.log" 2>&1 \
   || { grep -E 'error:' "$O/build.log" | head -20; die "xcodebuild, log $O/build.log"; }

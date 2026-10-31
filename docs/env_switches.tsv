@@ -30,6 +30,7 @@ DM_ENTITLEMENTS	path	`=<plist>` gives a prepared Xcode project another entitleme
 DM_ENV_FILE	path	`=<file>` makes `build_ipa.sh` bake its `KEY=VALUE` lines into the app as `dm/env.txt`, applied at boot; `Documents/env.txt` overrides them
 DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the space-separated names an env file set; the settings screen keeps those values and shows them greyed out
 DM_ENV_LAUNCH_KEYS	switch	Set at launch by the Mac launcher (the launcher settings already in the environment) and the iOS app (every DM_* variable already in it) to the space-separated names; the settings screen keeps those values and shows them greyed out
+DM_EVENTS	switch	`=<path>` appends one JSON object per line to that file (created); `=fd:<N>` writes them to descriptor N (above 2; a child inherits it): the host's runtime events (the game reached its frame loop, shader preparation, [RED] lines, why it ended) and, from the Mac launcher, how the host exited. Unset: nothing is written ([Runtime events](frontends.md#runtime-events))
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
 DM_FONT_DIR	path	Folder of the shared-font stand-ins (`standard.ttf`, `nintendo_ext.ttf` with the button icons); the app, the Mac launcher and the NSP script set it

@@ -64,6 +64,7 @@ static void tv_attach(void);
 @property (nonatomic, strong) UILabel *fps;
 @property (nonatomic) BOOL launched;
 @property (nonatomic, strong) id tv;   // the TV scene accessory's registration (iOS 27)
+@property (nonatomic) BOOL coverScreen;   // a foldable's hinge is closed: the game is on the cover screen and may follow the phone into portrait
 - (void)startGame;
 @end
 static DmRootVC *g_root;
@@ -73,6 +74,19 @@ static void launcher_done(void) { [g_root startGame]; }
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
     front_ios_power_watch();
+    // On a foldable (iPhone Duo) the cover screen is phone-shaped and is held either way, so with the hinge closed the game follows the phone into portrait (the 16:9 picture
+    // letterboxes, viewDidLayoutSubviews); open, the inner screen and every phone without a hinge stay landscape. The interaction reports the state at once and on each change
+    if (@available(iOS 27.1, *)) {
+        __weak DmRootVC *weak = self;
+        [self.view addInteraction:[[UIHingeInteraction alloc] initWithUpdateHandler:^(UIHingeInteraction *i, UIHingeInteractionUpdate *u) {
+            (void)i; DmRootVC *me = weak; if (!me) return;
+            BOOL closed = u.hinge && u.hinge.status == UIHingeStatusClosed;
+            if (closed == me.coverScreen) return;
+            me.coverScreen = closed;
+            LOG("front end: hinge %s: %s", closed ? "closed" : "open", closed ? "the cover screen, portrait allowed" : "landscape only");
+            [me setNeedsUpdateOfSupportedInterfaceOrientations];
+        }]];
+    }
     if (!front_ios_boot_ok()) {   // No game files: show a hint and do not start the host
         UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
         lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -115,7 +129,7 @@ static void launcher_done(void) { [g_root startGame]; }
     CGRect b = self.view.bounds; if (!self.game) return;
     if (self.game.superview == self.view) self.game.frame = fit_16_9(b);   // on a TV the TV's view lays it out
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
-        CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
+        CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(MIN(b.size.width, b.size.height) / 430.0, 1.3);
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
     }
 }
@@ -133,7 +147,7 @@ static void launcher_done(void) { [g_root startGame]; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
 - (BOOL)prefersStatusBarHidden { return YES; }
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return self.coverScreen ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskLandscape; }
 @end
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
 

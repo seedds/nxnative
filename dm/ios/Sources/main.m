@@ -204,6 +204,10 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
     self.window.rootViewController = front_ios_root();
     [self.window makeKeyAndVisible];
 }
+// Info.plist lists landscape only (also the launch screen's); from iOS 27 the scene allows every orientation but upside down, so the root view controller can allow portrait
+// on a foldable's cover screen (front_ios.m supportedInterfaceOrientations; the hinge API is iOS 27.1). Each full-screen view controller states its own: the game's root and
+// the launcher stay landscape otherwise. Before iOS 27 this is not called and Info.plist decides, as before
+- (UIInterfaceOrientationMask)supportedInterfaceOrientationsForWindowScene:(UIWindowScene *)ws API_AVAILABLE(ios(27.0)) { (void)ws; return UIInterfaceOrientationMaskAllButUpsideDown; }
 - (void)sceneWillResignActive:(UIScene *)s { front_ios_focus_event(0); }
 - (void)sceneDidEnterBackground:(UIScene *)s { front_ios_focus_event(1); }
 - (void)sceneWillEnterForeground:(UIScene *)s { front_ios_focus_event(2); }

@@ -93,7 +93,8 @@ void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = g_res
 enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=4, I_HeapSize=5,
        I_TotalMem=6, I_UsedMem=7, I_DebuggerAttached=8, I_ResourceLimit=9, I_IdleTick=10, I_RandomEntropy=11,
        I_AslrAddr=12, I_AslrSize=13, I_StackAddr=14, I_StackSize=15, I_SysResTotal=16, I_SysResUsed=17,
-       I_ProgramId=18, I_InitProcIdRange=19, I_UserExcAddr=20, I_TotalNonSys=21, I_UsedNonSys=22, I_IsApplication=23, I_FreeThreadCount=24 };
+       I_ProgramId=18, I_InitProcIdRange=19, I_UserExcAddr=20, I_TotalNonSys=21, I_UsedNonSys=22, I_IsApplication=23, I_FreeThreadCount=24,
+       I_Nx2RegionAddr=29, I_Nx2RegionSize=30, I_Nx2RemoteSize=31, I_Nx2RemoteUsed=32, I_Nx2Granule=33 };
 
 static uint8_t g_seen[256];
 
@@ -685,6 +686,11 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // 96 threads (pm_spec.cpp BaseApplicationThreads; a boost raises it to 256). Monster Train 2's Unity 2022.3 player creates a thread only when this is at least 1: the 0 it got here
         // left its main thread waiting at boot for a thread it never created (main+0x3e1ac4)
         case I_FreeThreadCount: { int thr_limit_used(void); int u = thr_limit_used(); v = u < 96 ? 96 - u : 0; break; }
+        // Switch 2 ids. 29/30: the region VAMM reserves in, backed with MapPhysicalMemory, so the alias region's upper half (a guess, open: the console's real layout).
+        // 31/32: remote memory for the graphics servers, which do not run here. 33: VAMM's page granule; 0 makes it map a size of 0 and abort with 0xD401
+        case I_Nx2RegionAddr: v = (uint64_t)g_alias + g_alias_cap / 2; break;   case I_Nx2RegionSize: v = g_alias_cap / 2; break;
+        case I_Nx2RemoteSize: case I_Nx2RemoteUsed: v = 0; break;
+        case I_Nx2Granule: v = 0x1000; break;
         case I_UserExcAddr: { static _Alignas(0x1000) uint8_t ctx[0x1000]; v = (uint64_t)ctx; break; }   // user exception context area: newer SDKs' SetDyingMessageRegion writes to +0x1c0 (0 would write through a null pointer)
         default: v = 0; break;
         }

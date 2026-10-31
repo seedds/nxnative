@@ -2255,6 +2255,79 @@ static void rb_swap_rows(uint8_t *p, size_t wb, size_t rows, size_t nz, size_t r
         for (size_t i = 0; i < wb / 2; i++) q[i] = (uint16_t)((q[i] & ~m) | (q[i] & 31u) << shift | (q[i] >> shift & 31u));
     }
 }
+// Large textures in sparse pools: Mario Kart World's terrain arrays are 8192x8192x68, 1.45 GB of ASTC and 5.8 GB of BC6H, of which the game maps 3-12%, and nine layer pools it never maps. Backed whole, Metal runs
+// out of memory. On the console only the mapped tiles have memory, and an unmapped one reads zero; so here (Eglantine's SparseLayers and IsUnwrittenSparse, on Metal): a placement sparse texture, whose unmapped tiles
+// read zero, gets tiles from a sparse heap of its own, layer by layer, for each layer with any page mapped, and only those layers are uploaded and uploaded again when they change. One texture takes at most
+// SPARSE_LAYERS_CAP (Eglantine's figure); layers past it stay zero, reported. Open: an entry is never freed when its texture is finalized, and a layer whose pages all go unmapped keeps its memory
+enum { SPARSE_LAYERS_MIN = 32u << 20, SPARSE_LAYERS_MAX = 2048 };
+#define SPARSE_LAYERS_CAP (768ull << 20)
+@interface NvSparseLayers : NSObject { @public id<MTLTexture> tex; uint64_t gen, stamp, used; uint8_t bound[SPARSE_LAYERS_MAX]; } @end
+@implementation NvSparseLayers @end
+uint64_t nvn_sparse_mapped_bytes(const void *pool, uint64_t a, uint64_t n);
+static id<MTLTexture> sparse_layers_upload(const tex_t *t, MTLTextureDescriptor *d, uint64_t *stamp) {
+    static NSMutableDictionary *all; if (!all) all = [NSMutableDictionary new];
+    unsigned layers = t->d.target == 4 ? t->d.depth : 1;
+    if (!g_q4 || (t->d.target != 1 && t->d.target != 4) || rb_packed_shift(t->d.format) || layers > SPARSE_LAYERS_MAX) return nil;
+    NvSparseLayers *e = all[@(t->serial)];
+    if (!e) {
+        d.storageMode = MTLStorageModePrivate; d.hazardTrackingMode = MTLHazardTrackingModeUntracked; d.placementSparsePageSize = MTLSparsePageSize64;
+        id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d];
+        if (!mt) { RED_ONCE(903, "no sparse texture for %ux%ux%u format %#x target %d: backing it whole", t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target); return nil; }
+        res_add(mt);
+        e = [NvSparseLayers new]; e->tex = mt; all[@(t->serial)] = e;
+    }
+    id<MTLTexture> mt = e->tex;
+    MTLSize ts = [g_dev sparseTileSizeWithTextureType:mt.textureType pixelFormat:mt.pixelFormat sampleCount:1 sparsePageSize:MTLSparsePageSize64];
+    const uint64_t TILE = 64 * 1024;
+    NSUInteger first = mt.firstMipmapInTail, levels = mt.mipmapLevelCount;
+    uint64_t tail = first < levels ? (mt.tailSizeInBytes + TILE - 1) / TILE : 0, need = tail;
+    for (NSUInteger l = 0; l < MIN(first, levels); l++) need += (uint64_t)((MAX(t->d.width >> l, 1u) + ts.width - 1) / ts.width) * ((MAX(t->d.height >> l, 1u) + ts.height - 1) / ts.height);
+    int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+    uint64_t ls = t->L.layer_size, base = (uint64_t)(uintptr_t)t->mem, gen = nvn_sparse_gen(), now = nvn_dirty_now();
+    unsigned bound_new = 0, uploaded = 0;
+    for (unsigned y = 0; y < layers; y++) {
+        uint64_t a = base + y * ls;
+        if (!nvn_sparse_mapped_bytes(t->pool, a, ls)) continue;
+        if (e->bound[y] && !nvn_sparse_since(t->pool, a, ls, e->gen, e->stamp)) continue;
+        if (!e->bound[y]) {
+            if (e->used + need * TILE > SPARSE_LAYERS_CAP) { RED_ONCE(904, "sparse texture %ux%ux%u format %#x: layers past %llu MB stay zero", t->d.width, t->d.height, t->d.depth, t->d.format, SPARSE_LAYERS_CAP >> 20); continue; }
+            MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypePlacement; hd.storageMode = MTLStorageModePrivate; hd.hazardTrackingMode = MTLHazardTrackingModeUntracked; hd.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64; hd.size = need * TILE;
+            id<MTLHeap> heap = [g_dev newHeapWithDescriptor:hd];
+            if (!heap) { RED_ONCE(905, "no sparse heap of %llu bytes", need * TILE); continue; }
+            res_add(heap);
+            MTL4UpdateSparseTextureMappingOperation ops[20]; NSUInteger nops = 0, at = 0;
+            for (NSUInteger l = 0; l < MIN(first, levels) && nops < 19; l++) {
+                NSUInteger tw = (MAX(t->d.width >> l, 1u) + ts.width - 1) / ts.width, th = (MAX(t->d.height >> l, 1u) + ts.height - 1) / ts.height;
+                ops[nops++] = (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeMap, MTLRegionMake3D(0, 0, 0, tw, th, 1), l, y, at}; at += tw * th;
+            }
+            if (tail) ops[nops++] = (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeMap, MTLRegionMake3D(0, 0, 0, tail, 1, 1), first, y, at};
+            [g_q4 updateTextureMappings:mt heap:heap operations:ops count:nops];
+            e->bound[y] = 1; e->used += need * TILE; bound_new++;
+        }
+        uint8_t *part = malloc(ls); if (!part) MDIE("sparse layer copy of %llu bytes failed", (unsigned long long)ls);
+        nvn_sparse_copy(t->pool, part, a, ls);
+        size_t total = 0;
+        for (NSUInteger l = 0; l < levels; l++) total += (size_t)((MAX(t->d.width >> l, 1u) + bw - 1) / bw) * bpb * ((MAX(t->d.height >> l, 1u) + bh - 1) / bh);
+        up_begin();
+        id<MTLBuffer> stg = [g_dev newBufferWithLength:total ? total : 16 options:MTLResourceStorageModeShared];
+        res_add(stg); [g_up_keep addObject:stg];
+        size_t off = 0;
+        for (NSUInteger l = 0; l < levels; l++) {
+            uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u);
+            size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
+            if (nvn_deswizzle(&t->d, (unsigned)l, y, part - (uint64_t)y * ls, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
+            up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, 1), mt, y, l);
+            off += pitch * rows;
+        }
+        free(part);
+        up_flush();
+        uploaded++;
+    }
+    e->gen = gen; e->stamp = now;
+    if (stamp) { *stamp = now; nvn_sparse_protect(t->pool, base, t->L.size); }
+    static int nl; if (nl++ < 40) MLOG("sparse texture ser=%llu %ux%ux%u format %#x levels %lu (tail from %lu, tile %lux%lu): %.0f MB, layer %.1f MB; %u layers newly backed, %u uploaded, %.0f MB in all", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long)levels, (unsigned long)first, (unsigned long)ts.width, (unsigned long)ts.height, t->L.size / 1048576.0, ls / 1048576.0, bound_new, uploaded, e->used / 1048576.0);
+    return mt;
+}
 static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, MTLTextureUsage keep) {
     MTLTextureDescriptor *d = tex_desc(t, 1);
     if (!d) return nil;
@@ -2262,6 +2335,8 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     int rb_shift = rb_packed_shift(t->d.format);   // the RGB565 family is repacked into Metal's order on the CPU (rb_packed_shift)
     int direct = !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
     if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
+    // A large texture in a sparse pool gets memory only for the layers with mapped pages (sparse_layers_upload)
+    if (t->pool && nvn_sparse_pool(t->pool) && t->L.size >= SPARSE_LAYERS_MIN) { id<MTLTexture> sl = sparse_layers_upload(t, d, stamp); if (sl) return sl; }
     id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
                         && (reuse.usage & d.usage) == d.usage
                         ? reuse : [g_dev newTextureWithDescriptor:d];
@@ -4086,7 +4161,8 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
             MLOG("[RED] shader %s is not in the shader map (DM_NVN_SHDUMP=directory saves its control section and code area)", k.UTF8String);
             // DM_NVN_SHDUMP=directory: shaders missing from the map are saved as <key>.ctl (0x880-byte control section) and <key>.code (code area, length from control +0x704), to trace their source / add them to the map offline
             static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; }
-            if (shd) { char path[1024]; FILE *f; uint32_t ncode; memcpy(&ncode, (const uint8_t *)p->sd[i].control + 0x704, 4);   // with SHDUMP set the control section is the host's copy
+            if (shd) { char path[1024]; FILE *f; uint32_t ncode, v2[2]; memcpy(v2, (const uint8_t *)p->sd[i].control + 4, 8);   // with SHDUMP set the control section is the host's copy
+                memcpy(&ncode, (const uint8_t *)p->sd[i].control + (v2[0] == 0xc9 && (v2[1] == 0xb || v2[1] == 7) ? 0x44 : 0x704), 4);   // NVN2 keeps the code area's length at +0x44 (keys_hash)
                 snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, 0x880, f); fclose(f); }
                 snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
                 if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }

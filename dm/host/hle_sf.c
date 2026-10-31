@@ -36,6 +36,9 @@ HLE_FORCE("_ZN2nn2sf4hipc20ConnectToHipcServiceEPNS_3svc6HandleEPKc", "connect t
           uint32_t *out, const char *name) {
     for (size_t k = 0; k < sizeof sf_served / sizeof *sf_served; k++)
         if (!strncmp(name, sf_served[k], 8)) { *out = sf_new(sf_served[k], 0); LOG("sf: %s → host session %#x (every request succeeds with zeroed output)", sf_served[k], *out); return RES_OK; }
+    // Switch 2 SDKs (21+) reach many services the host has no hook for yet: answer them all with zeros and name each, so a boot gets as far as it can. Open: requests that must return a session or real data
+    int dm_sdk_major(void);
+    if (dm_sdk_major() >= 21) { *out = sf_new(name, 0); LOG("[RED] sf: %.8s auto-stubbed: every request succeeds with zeroed output", name); return RES_OK; }
     LOG("[RED] sf: the game connects to service %.8s itself, which the host does not serve", name);
     return 0xe15u;   // sm ResultNotRegistered
 }
@@ -94,4 +97,9 @@ HLE_FORCE("_ZN2nn2sf4hipc15SendSyncRequestENS_3svc6HandleEPvm", "send a request 
     size_t out = 0x10 + (dom ? 16 : 0);
     uint32_t *o = (uint32_t *)(base + out); o[0] = 0x4f434653; o[1] = ver; o[2] = RES_OK; o[3] = 0;   // "SFCO"; a domain's out-object count before it stays 0
     return RES_OK;
+}
+
+// Switch 2 camera: the game wraps the context's handle in its own session object and sends requests on it, so it has to be a session; every request succeeds with zeroed output and no camera ever appears
+HLE_FORCE("_ZN2nn6camera3sdk19CreateCameraContextEPNS_5gsdrv18UniqueNativeHandleE", "Switch 2 camera: a host session that answers everything with zeros", Result, h_nx2_CamCtx, uint32_t *h) {
+    *h = sf_new("nx2:cam", 0); return RES_OK;
 }

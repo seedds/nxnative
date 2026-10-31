@@ -176,7 +176,7 @@ NVN(nvnDeviceGetInteger, void, const NVNdevice *d, NVNdeviceInfo what, int *out)
         if (dm_glslc_gpu_code(&gv[0], &gv[1]) && (gv[0] > cur[0] || (gv[0] == cur[0] && gv[1] > cur[1]))) { cur[0] = gv[0]; cur[1] = gv[1]; }
         *out = w == 0x2E ? cur[0] : cur[1];
     }
-    if (w <= 1) { static int api[2] = {-1, -1}; if (api[0] < 0) { nvn_api(api); const char *e = getenv("DM_NVN_API"); if (e) sscanf(e, "%d.%d", &api[0], &api[1]); } *out = api[w]; }
+    if (w <= 1) { static int api[2] = {-1, -1}; if (api[0] < 0) { nvn_api(api); const char *e = getenv("DM_NVN_API"); if (e) sscanf(e, "%d.%d", &api[0], &api[1]); extern int nvn_gob_ounce; nvn_gob_ounce = api[0] >= 200; if (nvn_gob_ounce) LOG("[nvn] API %d: Switch 2 GOB layout", api[0]); } *out = api[w]; }
     OLOG("DeviceGetInteger %#x -> %d", w, *out);
 }
 NVN(nvnDeviceGetImageHandle, NVNimageHandle, const NVNdevice *d, int id) { (void)d; return (NVNimageHandle)id; }
@@ -609,6 +609,16 @@ static void pk_drop(const void *p) {
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0; void *mb; uint64_t mo;
     if (!sd->control) return 0;
+    // NVN2 (Switch 2): a 0xd8-byte section, c1's start at +0x40 and the code area's length at +0x44, nothing at +0x700 (nx2_split.py hashes the same); +4 and +8 tell it from an NVN1 section, whose +0x20 holds its length (+8 is 0xb or 7 in Mario Kart World, the same layout)
+    uint32_t v2[2]; memcpy(v2, (const uint8_t *)sd->control + 4, 8);
+    if (v2[0] == 0xc9 && (v2[1] == 0xb || v2[1] == 7)) {
+        memcpy(&ncode, (const uint8_t *)sd->control + 0x44, 4);
+        if (!sd->data || !ncode || ncode >= (1u << 24) || (mapped && !mtl_addr(sd->data, ncode, &mb, &mo))) return 0;
+        uint8_t md2[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX h2; CC_SHA256_Init(&h2);
+        CC_SHA256_Update(&h2, sd->control, 0xd8); CC_SHA256_Update(&h2, (const void *)(uintptr_t)sd->data, ncode);
+        CC_SHA256_Final(md2, &h2); memcpy(out, md2, 8);
+        return 1;
+    }
     memcpy(&ncode, (const uint8_t *)sd->control + 0x704, 4);
     int code = sd->data && ncode && ncode < (1u << 24);
     if (mapped && !(code && mtl_addr(sd->data, ncode, &mb, &mo))) return 0;
@@ -699,6 +709,25 @@ NVN(nvnQueueBuilderSetDefaults, void, NVNqueueBuilder *b) {
     NVNdevice *dev = QB(b)->dev; memset(b, 0, sizeof(queue_builder_t)); QB(b)->dev = dev;
     QB(b)->cmd_sz = 65536; QB(b)->comp_sz = 262144; QB(b)->ctl_sz = 16384; QB(b)->flush = 4096;   // Device defaults
 }
+// NVN2 (Switch 2): a program takes its shaders from a builder. The builder is the game's memory, of a size this host does not know; this stays in its first 24 bytes (the game's array of shader
+// data sits right below it on the stack, so the object is at least that). The array stays the game's until the program is initialized from the builder
+typedef struct { NVNdevice *d; const NVNshaderData *sd; int n; int pad; } prog_builder_t;
+NVN_NOPROTO(nvnProgramBuilderSetDefaults, void, void *b) { memset(b, 0, sizeof(prog_builder_t)); }
+NVN_NOPROTO(nvnProgramBuilderSetDevice, void, void *b, NVNdevice *d) { ((prog_builder_t *)b)->d = d; }
+NVN_NOPROTO(nvnProgramBuilderGetDevice, NVNdevice *, const void *b) { return ((const prog_builder_t *)b)->d; }
+NVN_NOPROTO(nvnProgramBuilderSetShaders, void, void *b, int n, const NVNshaderData *sd) { ((prog_builder_t *)b)->n = n; ((prog_builder_t *)b)->sd = sd; }
+NVN_NOPROTO(nvnProgramBuilderGetShaderCount, int, const void *b) { return ((const prog_builder_t *)b)->n; }
+NVN_NOPROTO(nvnProgramInitializeFromBuilder, NVNboolean, NVNprogram *p, const void *b) {
+    const prog_builder_t *s = b;
+    h_nvnProgramInitialize(p, s->d);
+    return s->n ? h_nvnProgramSetShaders(p, s->n, s->sd) : 1;
+}
+// NVN2 command buffer modes with nothing to do on Metal. Open: what recording mode 1 asks of the driver (the signature comes from the game's calls)
+NVN_NOPROTO(nvnCommandBufferSetRecordingMode, void, NVNcommandBuffer *c, int m) { (void)c; (void)m; }
+NVN_NOPROTO(nvnCommandBufferSetComputeOverlapMode, void, NVNcommandBuffer *c, int m) { (void)c; (void)m; }
+// NVN2: a queue may name a primary queue it works beside. The host has one Metal queue order, so nothing to keep
+NVN_NOPROTO(nvnQueueBuilderSetPrimaryQueue, void, NVNqueueBuilder *b, NVNqueue *q) { (void)b; (void)q; }
+NVN_NOPROTO(nvnQueueBuilderGetPrimaryQueue, NVNqueue *, const NVNqueueBuilder *b) { (void)b; return NULL; }
 NVN(nvnQueueBuilderSetDevice, void, NVNqueueBuilder *b, NVNdevice *d) { QB(b)->dev = d; }
 NVN(nvnQueueBuilderSetFlags, void, NVNqueueBuilder *b, int f) { QB(b)->flags = f; }
 NVN(nvnQueueBuilderSetCommandMemorySize, void, NVNqueueBuilder *b, size_t n) { QB(b)->cmd_sz = n; }
@@ -2439,6 +2468,15 @@ int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every pag
     pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); int ok = v != NULL;
     for (uint64_t o = v ? (a - (uint64_t)(uintptr_t)v->base) & ~0xFFFull : 0, end = v ? a - (uint64_t)(uintptr_t)v->base + n : 0; ok && o < end; o += 0x1000) { const vpte *e = o < v->size ? vpt_get(v, o) : NULL; ok = e && e->phys; }
     pthread_mutex_unlock(&g_vp_mu); return ok;
+}
+uint64_t nvn_sparse_mapped_bytes(const void *pool, uint64_t a, uint64_t n) {   // how much of [a, a+n) has memory behind it, a leaf never mapped costing one look
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a); uint64_t got = 0;
+    if (v) for (uint64_t o = (a - (uint64_t)(uintptr_t)v->base) & ~0xFFFull, end = a - (uint64_t)(uintptr_t)v->base + n; o < end && o < v->size; o += 0x1000) {
+        const vpte *e = vpt_get(v, o);
+        if (!e) { o |= (2u << 20) - 1; o -= 0xFFF; continue; }
+        if (e->phys) got += 0x1000;
+    }
+    pthread_mutex_unlock(&g_vp_mu); return got;
 }
 void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect, 0); }
 NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {

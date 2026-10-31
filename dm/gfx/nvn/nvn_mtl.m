@@ -11906,11 +11906,17 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; const uint8_t *q = rb.contents; uint64_t sum = 0;
             // Row profile: adjacent-row mean differences (horizontal scanlines / banding) and 16 band means. A torn or mis-bound composite pass
             // shows up here as a large scan score and alternating bands; ordinary 3D frames sit at a couple of luma units. Columns 6 and 7.
-            uint64_t scan = 0, prs = 0, band[16] = {0};
-            for (NSUInteger y = 0; y < h; y++) { const uint8_t *row = q + 4 * (y * w); uint64_t rs = 0;
-                for (NSUInteger x = 0; x < w; x++) rs += row[4 * x] + row[4 * x + 1] + row[4 * x + 2];
+            uint64_t scan = 0, prs = 0, band[16] = {0}, cscan = 0, crg = 0, cbg = 0;
+            for (NSUInteger y = 0; y < h; y++) { const uint8_t *row = q + 4 * (y * w); uint64_t rs = 0, r6 = 0, g6 = 0, b6 = 0;
+                for (NSUInteger x = 0; x < w; x++) { r6 += row[4 * x]; g6 += row[4 * x + 1]; b6 += row[4 * x + 2]; }
+                rs = r6 + g6 + b6;
                 sum += rs; band[(y * 16) / (h ? h : 1)] += rs;
-                if (y) scan += rs > prs ? rs - prs : prs - rs; prs = rs; }
+                if (y) { scan += rs > prs ? rs - prs : prs - rs;
+                    // Chroma rows: multi-coloured banding alternates in hue, not in luma (magenta and green rows can have the same luma), so the
+                    // luma profile above cannot see it. These two are the same measure on (R-G) and (B-G).
+                    uint64_t rg = r6 + 0x8000000000ull - g6, bg = b6 + 0x8000000000ull - g6;
+                    if (y == 1) { crg = rg; cbg = bg; } else { cscan += (rg > crg ? rg - crg : crg - rg) + (bg > cbg ? bg - cbg : cbg - bg); crg = rg; cbg = bg; } }
+                prs = rs; }
             uint8_t g[4096]; NSUInteger ng = 0;   // Subsampled grayscale thumbnail (every 4th row / column, at most 4096 points), recorded along with the mean, for per-frame image correlation analysis
             for (NSUInteger y = 0; y < h; y += 4) for (NSUInteger x = 0; x < w && ng < sizeof g; x += 4) { const uint8_t *px = q + 4 * (y * w + x); g[ng++] = (uint8_t)((px[0] + px[1] + px[2]) / 3); }
             pthread_mutex_lock(&rlmu); fprintf(rlf, "%llu\t%llu\t%.4f\t", n, tns, sum / (3.0 * w * h));
@@ -11918,9 +11924,37 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
             fprintf(rlf, "\t%llu", gf);   // 5th column: the guest frame this present belongs to (joins a luma row to DRAWSTATE/PASSDUMP frames)
             fprintf(rlf, "\t%.3f\t", h > 1 ? scan / (3.0 * w * (h - 1)) : 0.0);   // 6th: mean |row(y) - row(y-1)| in luma units
             for (int b = 0; b < 16; b++) { double v = band[b] / (3.0 * w * (h / 16.0)); fprintf(rlf, "%02x", (unsigned)(v < 0 ? 0 : v > 255 ? 255 : v)); }   // 7th: 16 band means as hex
+            fprintf(rlf, "\t%.3f", h > 2 ? cscan / (6.0 * w * (h - 2)) : 0.0);   // 8th: mean |row(R-G)| + |row(B-G)| change, i.e. colour banding
             fputc('\n', rlf); fflush(rlf); pthread_mutex_unlock(&rlmu); }];
         [cb commit];
     }
+    // DM_NVN_PRESENTPROF=<file>: per present, render the present pass into an offscreen texture -- the picture the window shows, i.e. src AFTER the
+    // present's own sampling and scaling -- and record its mean luma and row profile. DM_NVN_REGLUM measures src itself, so a difference between the
+    // two columns is produced by the present path, which no draw/dispatch filter can reach. Numeric only: no image is written.
+    { static int pp = -1; static FILE *ppf; 
+      if (pp < 0) { const char *e = getenv("DM_NVN_PRESENTPROF"); pp = e && (ppf = fopen(e, "w")) != NULL; 
+          if (e && !pp) MLOG("[RED] DM_NVN_PRESENTPROF: cannot open %s", e); }
+      if (pp) {
+          size_t w = 640, h = 360;
+          MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:w height:h mipmapped:NO];
+          d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+          id<MTLTexture> out = [g_dev newTextureWithDescriptor:d];
+          id<MTLBuffer> rb2 = out ? [g_dev newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared] : nil;
+          if (rb2) {
+              unsigned long long pn = g_present_n, pgf = atomic_load(&g_cur_frame);
+              void (^prof)(void) = ^{ id<MTLCommandBuffer> c2 = q_cb(); id<MTLBlitCommandEncoder> b2 = [c2 blitCommandEncoder];
+                  [b2 copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb2 destinationOffset:0 destinationBytesPerRow:w * 4 destinationBytesPerImage:w * h * 4];
+                  [b2 endEncoding];
+                  [c2 addCompletedHandler:^(id<MTLCommandBuffer> c) { (void)c; const uint8_t *q2 = rb2.contents; uint64_t sum = 0, scan = 0, prs = 0;
+                      for (size_t y = 0; y < h; y++) { const uint8_t *row = q2 + 4 * (y * w); uint64_t rs = 0;
+                          for (size_t x = 0; x < w; x++) rs += row[4 * x] + row[4 * x + 1] + row[4 * x + 2];
+                          sum += rs; if (y) scan += rs > prs ? rs - prs : prs - rs; prs = rs; }
+                      fprintf(ppf, "%llu\t%llu\t%.3f\t%.3f\n", pn, pgf, sum / (3.0 * w * h), scan / (3.0 * w * (h - 1))); fflush(ppf); }];
+                  [c2 commit]; };
+              if (g_q4) present_offscreen_m4(src, crop, out, ^(int ok) { if (ok) prof(); });
+              else { id<MTLCommandBuffer> draw = q_cb();
+                  if (present_encode(draw, src, out, crop)) { [draw addCompletedHandler:^(id<MTLCommandBuffer> c) { if (c.status == MTLCommandBufferStatusCompleted) prof(); }]; [draw commit]; } }
+          } } }
     // DM_NVN_SHOT=frame number[,frame number...]:path (%d in the path is replaced with the frame number)
     static long shots[4096]; static int nshot = -1; static const char *shot_path;   // up to 4096 frames (a burst over a frame range, for scoring frame by frame)
     if (nshot < 0) {
@@ -11942,6 +11976,11 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (g_grab_cb) grab_present(src, crop, layer.drawableSize);   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
     uint64_t dt0 = now_ns();
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
+    { static uint64_t last[4]; uint64_t sd[4] = {src.width, src.height, dr.texture.width, dr.texture.height};   // one line per change: a source that is not the drawable's size is resampled by the present
+      if (memcmp(sd, last, sizeof sd)) { memcpy(last, sd, sizeof sd);
+          MLOG("present geometry: source %lux%lu -> drawable %lux%lu (layer %.0fx%.0f, %s)", (unsigned long)src.width, (unsigned long)src.height,
+               (unsigned long)dr.texture.width, (unsigned long)dr.texture.height, (double)layer.drawableSize.width, (double)layer.drawableSize.height,
+               src.width == dr.texture.width && src.height == dr.texture.height ? "1:1" : "resampled"); } }
     if (!supplied) g_drawable_ns += now_ns() - dt0;
     if (!dr) return 0;
     int alloc_i = (int)(ticket % 3);

@@ -1,0 +1,48 @@
+# Super Mario Sunshine in Super Mario 3D All-Stars (program 2 of application 010049900F546000; update 1.1.4 = v393216), SDK 9.5.1.
+# NERD's Hagi layer: the GameCube's PowerPC code statically recompiled to arm64 in an LZ4-packed NRO (data/gekko/MarioSunshine/nx/MarioSunshine.nrolz, collected by nro_collect.py,
+# loaded with nn::ro). Renders with Vulkan (dm/gfx/vk/hle_vk.m), shaders captured at run time on the Mac. Packed one program at a time: the NSP script's --program 2
+
+# ---- Identity ----
+title_id	010049900F546002
+program_id	010049900F546002
+
+# ---- App ----
+name	Super Mario Sunshine
+ipa	SuperMarioSunshine.ipa
+app_category	public.app-category.games
+# Hagi: a 3D game pad (D-pad, right stick)
+pad_layout	full
+# Hagi (hagi.config): the Wii pointer is the touch screen in handheld mode
+op_mode	handheld
+
+# ---- Versions ----
+build	v393216	1.1.4	main=b21e3733e11d6fcf1a8d57ce51bef4a5	subsdk0=3b1090649ca17ee83e29f43600b63be5	sdk=cdb385c299fdba2786299ea08a86ca25
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk1 (NintendoSDK_OpenGL), subsdk2 (NintendoSDK_Vulkan)
+modules	main subsdk0 sdk
+romfs_marker	MarioSunshine/Super_Mario_Sunshine_Stardust-trimmed.gcm
+zip_store	.cache:.gcm:.har:.mp4:.nrolz:.png:.metallib
+
+# ---- Memory ----
+# The NPDM declares 8 MB of system resource (virtual address memory) and main sets a heap of 3.08 GB (SetHeapSize 0xc5400000): a 3.125 GB heap region.
+# Hagi's Memory.Initialize reserves a 4 GB + 2 MB address region for the GameCube memory (nn::os::AllocateAddressRegion), and its fiber scheduler then reserves 1 GB for the fiber
+# stacks (main+0x151218). The SDK's AddressRegionManager keeps the first 0x3fe00000 of the alias region as its node area and aligns a region of 1 GB or more to 1 GB, so the two regions
+# take 0x80000000-0x180200000 and 0x1c0000000-0x200000000 of the alias region: 8 GB. Without the second the scheduler never creates the CPU fiber and switches to an empty context
+# (a crash at main+0x15ec0c). The block is 256 MB in front + 8 GB alias region + 256 MB stack region + 3.25 GB heap region
+mem_reserve	0x2f0000000
+mem_alias	0x200000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x800000
+
+# ---- Shader split ----
+shader_groups	/data/=data /MarioSunshine/=mariosunshine /.nrr/=nrr
+shader_note	Super Mario Sunshine (Super Mario 3D All-Stars) shaders
+
+# ---- Launch ----
+# Super Mario 3D All-Stars' launcher (program 0) starts each game with oe::ExecuteProgram and a 16-byte parameter: the language code and two volumes (launcher main+0x10a54).
+# The host runs this program by itself (the NSP script's --program), so the profile hands the game the same parameter
+launch_param	lang8 f32:1 f32:1

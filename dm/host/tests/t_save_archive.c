@@ -14,6 +14,7 @@
 //   (8) nothing to export is its own answer, and a mount (the game running) refuses both directions;
 //   (9) an empty save (the game mounted but never saved) still round-trips.
 #include <dirent.h>
+#include <ftw.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -107,6 +108,7 @@ static int poke32(const char *path, long off, unsigned v) {
     return ok;
 }
 
+static int remove_entry(const char *path, const struct stat *sb, int type, struct FTW *ftw) { (void)sb; (void)type; (void)ftw; return remove(path); }
 int main(void) {
     char root[1024], a[1200], b[1200], c[1200], dev[1200], p[1400], x[1200], y[1200];
     const char *tp = getenv("TMPDIR");
@@ -291,7 +293,7 @@ int main(void) {
 
     printf("\n%d checks, %d failed\n", checks, fails);
     if (!fails) {   // leave a clean temp tree behind
-        char cmd[1300]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); if (system(cmd)) {}
+        nftw(root, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
     }
     return fails ? 1 : 0;
 }

@@ -80,6 +80,13 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ## File system and save data
 
+### Directory handle allocation failure
+
+- **Symptom:** the host crashes in `h_fs_OpenDirectory` when its folder-backed directory handle allocation fails.
+- **Cause:** `opendir` succeeded, but the following `calloc` of `dirh_t` was dereferenced without a null check. Returning early without cleanup would also leak the already-open `DIR`.
+- **Fix:** close the directory on allocation failure, preserve `errno` across cleanup, and return the existing filesystem failure through `err_res` before publishing a handle. The caller's output stays untouched, as on the other failed-open paths. `t_fs_directory.c` injects allocation failure in the real handler, checks the descriptor is closed and the output unchanged, then exercises successful open, count, read and close.
+- **Found on:** the [GCC audit in issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6523656102), reproduced with a synthetic directory and allocation fault injection; no game-specific failure was reported.
+
 ### The SDK's own `fs::IsMounted` reads an empty mount table
 
 - **Symptom:** IL2CPP "Could not open …/global-metadata.dat" (then a crash in its logger).

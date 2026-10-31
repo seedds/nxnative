@@ -19,6 +19,15 @@ static inline void dm_motion_attach(GCController *c, int player) {
             acc[0] = (float)(m.gravity.x + m.userAcceleration.x); acc[1] = (float)(m.gravity.y + m.userAcceleration.y); acc[2] = (float)(m.gravity.z + m.userAcceleration.z);
         } else { acc[0] = (float)m.acceleration.x; acc[1] = (float)m.acceleration.y; acc[2] = (float)m.acceleration.z; }
         rot[0] = (float)m.rotationRate.x; rot[1] = (float)m.rotationRate.y; rot[2] = (float)m.rotationRate.z;
+        // A Switch-mode pad can send a zero userAcceleration while its gyro works (that is the "zero-only GCMotion" of
+        // #296 seen from the other side: the rotation arrives, the linear motion does not). A game's swing detector reads
+        // the acceleration, so the wrist's tangential acceleration is added here while the pad reports none: 2 G per
+        // revolution/s, the same ratio the built-in shake uses (SHAKE_G / SHAKE_REV).
+        if (m.hasGravityAndUserAcceleration && fabsf((float)m.userAcceleration.x) + fabsf((float)m.userAcceleration.y) + fabsf((float)m.userAcceleration.z) < 0.02f) {
+            const float ksw = 2.0f / (2.0f * (float)M_PI);   // G per rad/s
+            acc[0] += ksw * rot[2];                          // a yaw swing throws the hand sideways
+            acc[1] -= ksw * rot[0];                          // a pitch swing throws it forwards / back
+        }
         // Some macOS controller drivers advertise motion but send only zeroes (#296). Those are no source until data arrives; later zeroes can be a real free-fall sample.
         if (!live) {
             if (acc[0] == 0 && acc[1] == 0 && acc[2] == 0 && rot[0] == 0 && rot[1] == 0 && rot[2] == 0) return;

@@ -98,6 +98,7 @@ static int g_ibuf_snap;       // DM_NVN_IB_SNAP=1 freezes the indices a draw rea
 static uint64_t g_vt_addr[31]; static uint32_t g_vt_valid;
 static uint64_t g_vbuf_resolve, g_vbuf_reuse, g_vbuf_set, g_vbuf_skip, g_vbuf_copies, g_vbuf_copy_bytes;   // copies: vertex streams at addresses not 4-byte aligned, and streams snapped at draw time (vbuf_unaligned)
 static uint64_t g_draw_filtered;   // draws dropped by DM_NVN_DRAW_RANGE / DM_NVN_SKIP_DRAW / DM_NVN_SKIP_FULLSCREEN
+static uint64_t g_draw_idx_of;     // this draw's index in its guest frame (the number DM_NVN_DRAW_RANGE tests, printed by DM_NVN_PASSDUMP)
 static id<MTL4ArgumentTable> g_present_args;
 static id<MTLBuffer> g_present_uv[3];
 static uint64_t g_present_alloc_fence[3];
@@ -9905,6 +9906,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // DM_NVN_SKIP_FULLSCREEN=1 drops the small full-screen passes (count <= 6, prim 4 or 5) -- post-process, blit and composite draws.
     // A bisect on the draw index: each run drops one half and the per-present row profile (DM_NVN_REGLUM) says whether the artefact is still there.
     { static int init; static long r0, r1, s0, s1, f0 = -1, f1 = -1; static int skipfs;
+      static uint64_t cf, idx; uint64_t f = atomic_load(&g_cur_frame);
+      if (f != cf) { cf = f; idx = 0; }
+      g_draw_idx_of = idx++;
       if (!init) { init = 1;
           const char *e = getenv("DM_NVN_DRAW_RANGE"), *s = getenv("DM_NVN_SKIP_DRAW"), *w = getenv("DM_NVN_DRAW_RANGE_FRAMES");
           r0 = r1 = s0 = s1 = -1;
@@ -9916,20 +9920,20 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
               r0 >= 0 ? "" : "", s0 >= 0 ? "drop the draws in range " : "", skipfs ? "drop the small full-screen passes; " : "",
               r0 >= 0 ? r0 : s0, r0 >= 0 ? r1 : s1, (long)f0, (long)f1); }
       if (r0 >= 0 || s0 >= 0 || skipfs) {
-          static uint64_t cf, idx; uint64_t f = atomic_load(&g_cur_frame);
-          if (f != cf) { cf = f; idx = 0; }
-          long i = (long)idx++; int inwin = f0 < 0 || ((long)f >= f0 && (long)f <= f1);
+          long i = (long)g_draw_idx_of; int inwin = f0 < 0 || ((long)f >= f0 && (long)f <= f1);
           if (inwin) {
               int drop = 0;
               if (r0 >= 0 && !(i >= r0 && i <= r1)) drop = 1;
               if (s0 >= 0 && i >= s0 && i <= s1) drop = 1;
               if (skipfs && S.prog) { int c = dw ? dw->count : di->count, p = dw ? dw->prim : di->prim; if (c <= 6 && (p == 4 || p == 5)) drop = 1; }
-              if (drop) { if (!g_draw_filtered++) MLOG("draw filter: first draw dropped (frame %llu, draw index %ld)", (unsigned long long)f, i); g_draw_filtered++; return; }
+              if (drop) { if (!g_draw_filtered++) MLOG("draw filter: first draw dropped (frame %llu, draw index %ld)", (unsigned long long)f, i); g_draw_filtered++;
+                  static uint64_t logged; if (g_draw_filtered / 1000 != logged) { logged = g_draw_filtered / 1000; MLOG("draw filter: %llu draws dropped so far (frame %llu)", (unsigned long long)g_draw_filtered, (unsigned long long)f); }
+                  return; }
           }
       } }
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
-        PD("j %llu draw-entry vs=%s fs=%s gs=%s prim=%d count=%d instances=%d indexed=%d indirect=%#llx discard=%d feedback=%d", g_stat_pass + !g_enc,
+        PD("j %llu draw-entry d=%llu vs=%s fs=%s gs=%s prim=%d count=%d instances=%d indexed=%d indirect=%#llx discard=%d feedback=%d", g_stat_pass + !g_enc, (unsigned long long)g_draw_idx_of,
            p && p->sh[0] ? p->sh[0]->key : "-", p && p->sh[1] ? p->sh[1]->key : "-", p && p->sh[2] ? p->sh[2]->key : "-",
            dw ? dw->prim : di->prim, dw ? dw->count : di->count, dw ? dw->instances : di->instances, di != NULL,
            (unsigned long long)(dw ? dw->ind : di->ind), S.rast_discard, S.tf_on); }
@@ -10314,6 +10318,20 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
     return e;
 }
 static void dispatch(const p_dispatch *dp) {
+    // DM_NVN_SKIP_DISPATCH=<min>:<max> drops compute dispatches by their index in the guest frame (the mirror of DM_NVN_DRAW_RANGE, which cannot see
+    // them): bloom, light shafts and other post-process chains are often compute, not draws. DM_NVN_DISPATCH_RANGE_FRAMES=<a>-<b> limits it to those frames.
+    { static int init; static long d0 = -1, d1 = -1, f0 = -1, f1 = -1; static uint64_t cf, idx, logged;
+      if (!init) { init = 1; const char *e = getenv("DM_NVN_SKIP_DISPATCH"), *w = getenv("DM_NVN_DISPATCH_RANGE_FRAMES");
+          if (e && sscanf(e, "%ld:%ld", &d0, &d1) != 2) { d0 = d1 = -1; MLOG("[RED] DM_NVN_SKIP_DISPATCH argument invalid: %s", e); }
+          if (w && sscanf(w, "%ld-%ld", &f0, &f1) != 2) { f0 = -1; }
+          if (d0 >= 0) MLOG("dispatch filter: drop the dispatches in range %ld-%ld, frames %ld-%ld", d0, d1, (long)f0, (long)f1); }
+      uint64_t f = atomic_load(&g_cur_frame); if (f != cf) { cf = f; idx = 0; }
+      long i = (long)idx++;
+      if (d0 >= 0 && (f0 < 0 || ((long)f >= f0 && (long)f <= f1)) && i >= d0 && i <= d1) {
+          if (!g_draw_filtered++) MLOG("dispatch filter: first dispatch dropped (frame %llu, index %ld)", (unsigned long long)f, i);
+          g_draw_filtered++;
+          if (g_draw_filtered / 100 != logged) { logged = g_draw_filtered / 100; MLOG("dispatch filter: %llu dispatches dropped so far (frame %llu)", (unsigned long long)g_draw_filtered, (unsigned long long)f); }
+          return; } }
     zskip_clear();
     g_wr_epoch++; g_mdx_epoch++;
     if (!S.cprog) { RED_ONCE(27, "no program bound before the dispatch"); return; }

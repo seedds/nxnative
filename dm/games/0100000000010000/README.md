@@ -77,6 +77,20 @@ General host and tool changes first needed here; each applies to every game:
 - **Small host segments for small grants** (`hostseg_size`): [Host-lent command memory segments](../../../docs/reference/nvn-objects.md#host-lent-command-memory-segments).
 - **Same-pass feedback snapshots without a per-game list** (a draw that writes the attachment it samples; one snapshot until the game's next barrier): [Same-pass feedback read through a snapshot](../../../docs/reference/rendering.md#same-pass-feedback-read-through-a-snapshot).
 
+## Language
+
+- **Chinese needs `zh-CN` / `zh-TW`, not `zh-Hans` / `zh-Hant`.** This SDK 7 build maps `oe::GetDesiredLanguage` to its region and text by comparing the code with `settings::Language` values (`main+0x977b30`, `main+0x977d30`): Japanese, the English and European codes, Korean and the old Chinese codes 6 (`zh-CN`) and 11 (`zh-TW`). `zh-Hans` (15) matches none, the game falls back to Japanese and keeps it in the save, so a later `DM_LANG` change shows Japanese until the save is new. With `DM_LANG=zh-CN` the title, menus and subtitles are Simplified Chinese (checked on the Mac from a new save).
+
+## Higher render resolutions (optional, Mac)
+
+The default stays at the game's docked 1600×900. `res/res1080.py`, `res/res1440.py` and `res/res2160.py` hold the registered cuts for 1920×1080, 2560×1440 and 3840×2160; they are not loaded (only `patches.py` is): copy one over `patches.py`, and for 1440p and 4K also raise `mem_reserve` / `app_pool` in `game.tsv` as its header says.
+
+- **Window and canvas:** `main+0x4bf2a4` (the framework's window size {1600, 900}), `main+0x4bf34c` (docked width and height handed to the graphics setup, `main+0x624ad0`) and `main+0x4e27bc` (the docked viewport set on an operation mode change). These alone give a 1080p swapchain and HUD with the 3D views still at 1600×900.
+- **The 3D views' clamp:** `main+0x5efc20` (one caller, `main+0x6f144c`) sets each view's render size to min(requested, a 1600×900 limit); its two `csel` become `nop`. Found by probing the render target creation (`main+0x989a90`) for 1600×900 targets and following their size back.
+- **Memory for 1440p and 4K:** the 2560×1440 targets first ran out of the 100 MB render target pool (`main+0x624b7c`, inside the 170 MB graphics heap at `main+0x624b4c`), then of `SceneHeap` (a frame heap of min(493 MB, the parent's largest block), `main+0x6a324c`) inside `SequenceHeap`. Raising the nn heap (`SetMemoryHeapSize` in `nninitStartup`, `main+0x4e321c`) did not help until the sead root heap's own fixed size (`main+0x4bf714`, 0xC0C00000) grew too; `StationedHeap`'s size (`main+0x6a2f30`) is computed in 32 bits and is widened. 1440p: nn heap 6 GB, root heap 4 GB, pool 300 MB, graphics heap 370 MB, `SceneHeap` 749 MB. 4K: nn heap 7.5 GB, root heap 6 GB, pool 700 MB, graphics heap 770 MB, `SceneHeap` 1.26 GB.
+- **Measured on a Mac (M4 Pro, 24 GB), Cap Kingdom:** 1080p 94 targets at 1920×1080, GPU p50 about 7.4 ms; 1440p 96 targets at 2560×1440, GPU about 6.8 ms; 4K 94 targets at 3840×2160, GPU about 7.3 ms (the GPU time is mostly not resolution bound here); all at 60 fps. Fifteen minutes of scripted walking each at 1080p and 1440p: no crash; Metal allocation levels off at about 3.0 GB (1080p) and 5.2 GB (1440p). Not tried on an iPhone, and only the Cap Kingdom was played.
+- **120 fps is not an option:** with `DM_PRESENT_HZ=120` the game presents 120 frames a second, but its logic steps once per frame (frame 5,000 shows the same cutscene moment as at 60 fps), so everything runs twice as fast.
+
 ## Open
 
 - The three thunder geometry shaders do not translate.

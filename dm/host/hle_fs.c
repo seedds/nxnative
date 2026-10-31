@@ -631,6 +631,17 @@ int dm_fs_clone_committed(const char *dir, const char *to) {
     pthread_mutex_unlock(&g_lock);
     errno = e; return r;
 }
+// Whether a save is mounted: save_archive.c (the launchers' export and import) must not read or replace a save while
+// the game holds the working directory that belongs to it. save_archive.c defines the same function weakly, for the
+// Mac launcher, which links the archive without the host and has no mount table to ask.
+int dm_fs_save_in_use(void);
+int dm_fs_save_in_use(void) {
+    PATH_LOCK(); pthread_mutex_lock(&g_lock);
+    int used = 0;
+    for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].commit[0]) { used = 1; break; }
+    pthread_mutex_unlock(&g_lock);
+    return used;
+}
 // Both Commit overloads share this transaction engine. Caller holds the path
 // and mount locks; front-end failure notification is delivered after unlocking.
 static Result commit_mount_locked(int i, int *notify_error) {

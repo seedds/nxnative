@@ -4,7 +4,7 @@ How to build and install a game: [README](../README.md#how-to-play).
 
 - **Settings:** a screen before the game starts sets frame rate, resolution, docked or handheld mode, language, rumble and more. Tap **Play**; your choices are remembered. What each one does: [Settings](settings.md).
 - **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`.
-- **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. Copy `save/` and `pso_user.tsv` over from the old one to keep your progress.
+- **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. Copy `save/` and `pso_user.tsv` over from the old one to keep your progress, or export the save from the launcher before reinstalling and import it into the new app ([Save data](#save-data)).
 
 ## Touch controls
 
@@ -31,6 +31,12 @@ Switch Pro Controller gyro on the Mac still needs the HID support being develope
 ## Game language
 
 English by default. Pick another when packing with `--language` (`-l`), by code or by name: `-l ja`, `-l zh-Hans`, `-l French` (`LANGUAGE` in Spyder). It must be one the game has; the script prints the game's languages and stops on one it lacks. To change it without rebuilding, pick another on the settings screen.
+
+## Save data
+
+The settings screen also keeps a save file: **Export Save Data…** writes the game's last saved progress to one `.dmsave` file, and **Import Save Data…** puts one back. On the iPhone the export lands in `Save Data` in the Files app under the game's name and opens the share sheet, so it can go to Files, AirDrop or another device; on the Mac both use the usual save and open panels. An import replaces the save only before the game starts, and keeps the replaced one beside it as `save.pre-import` (`save_device.pre-import` for a game with device save data), so a wrong import can be put back.
+
+The file carries what the game last committed: a save that was still being written when the app was killed is not in it, because the game itself starts from the last commit. It is nxnative's own format, not a Switch or other emulator save, and an archive made for another game is refused.
 
 ## Settings in a file
 

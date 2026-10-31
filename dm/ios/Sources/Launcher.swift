@@ -95,6 +95,9 @@ private struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let play: () -> Void
     @State private var memory = os_proc_available_memory()
+    @State private var saveMessage: String?
+    @State private var importing = false
+    @State private var exported: ShareItem?
 
     var body: some View {
         GeometryReader { geometry in
@@ -136,6 +139,14 @@ private struct LauncherView: View {
                             Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary)
                         }
                     }
+                    Section {
+                        Button("Export Save Data…") { exportSave() }
+                        Button("Import Save Data…") { importing = true }
+                    } header: {
+                        Text("Save data")
+                    } footer: {
+                        Text("Export keeps a copy of the game's last save as a file. Import replaces this device's save with one; the replaced save is kept beside it.")
+                    }
                 }
                 .listStyle(.insetGrouped)
                 .contentMargins(.horizontal, 12, for: .scrollContent)
@@ -148,6 +159,35 @@ private struct LauncherView: View {
                 memory = os_proc_available_memory()
                 try? await Task.sleep(for: .seconds(2))
             }
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: [SaveData.contentType], allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                Task { @MainActor in   // a save can be hundreds of megabytes: pack it off the main thread
+                    let scoped = url.startAccessingSecurityScopedResource()   // held until the import is done: the picker's file may be temporary
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    do {
+                        try await Task.detached { try SaveData.importArchive(from: url) }.value
+                        saveMessage = "Save data imported. The game starts with it."
+                    } catch { saveMessage = error.localizedDescription }
+                }
+            case .failure(let error): saveMessage = error.localizedDescription
+            }
+        }
+        .sheet(item: $exported) { ShareSheet(url: $0.url) }
+        .alert("Save data", isPresented: Binding(get: { saveMessage != nil }, set: { if !$0 { saveMessage = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(saveMessage ?? "") }
+    }
+
+    private func exportSave() {
+        Task { @MainActor in
+            do {
+                let url = try SaveData.defaultExportURL()
+                try await Task.detached { try SaveData.export(to: url) }.value
+                exported = ShareItem(url: url)
+            } catch { saveMessage = error.localizedDescription }
         }
     }
 
@@ -162,6 +202,15 @@ private struct LauncherView: View {
               let files = primary["CFBundleIconFiles"] as? [String], let last = files.last else { return nil }
         return UIImage(named: last)
     }
+}
+
+// The exported file, handed to the share sheet (Identifiable so .sheet(item:) presents it)
+private struct ShareItem: Identifiable { let id = UUID(); let url: URL }
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: [url], applicationActivities: nil) }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
 
 // Shows the launcher over the root view controller and calls done once the settings are in the environment; false (done is not called) when there is no launcher

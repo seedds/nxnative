@@ -42,6 +42,14 @@ struct LauncherView: View {
                         Text("Brings back all settings this game was tested with.")
                     }
                 }
+                Section {
+                    Button("Export Save Data…") { exportSave() }
+                    Button("Import Save Data…") { importSave() }
+                } header: {
+                    Text("Save data")
+                } footer: {
+                    Text("Export keeps a copy of the game's last save as a file. Import replaces this game's save with one; the replaced save is kept beside it.")
+                }
             }
             .formStyle(.grouped)
             .onScrollGeometryChange(for: CGFloat.self) {
@@ -69,6 +77,36 @@ struct LauncherView: View {
                 }
             }
         }
+    }
+
+    // The save panel starts where a player looks for a file; the archive is written there (SaveData.export)
+    private func exportSave() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [SaveData.contentType]
+        panel.nameFieldStringValue = SaveData.suggestedFileName()
+        panel.directoryURL = try? SaveData.defaultExportURL().deletingLastPathComponent()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try SaveData.export(to: url); alert("Save data", "Exported to \(url.path)") }
+        catch { alert("Save data", error.localizedDescription, style: .warning) }
+    }
+
+    private func importSave() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [SaveData.contentType]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try SaveData.importArchive(from: url); alert("Save data", "Imported. The game starts with it.") }
+        catch { alert("Save data", error.localizedDescription, style: .warning) }
+    }
+
+    private func alert(_ title: String, _ text: String, style: NSAlert.Style = .informational) {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = text
+        a.alertStyle = style
+        a.addButton(withTitle: "OK")
+        a.runModal()
     }
 }
 

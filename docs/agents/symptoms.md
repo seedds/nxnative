@@ -407,6 +407,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - red stub lines for NVN calls. → [NVN calls that were red stubs](../reference/nvn-objects.md#nvn-calls-that-were-red-stubs)
 - `nvnWindowGetPresentInterval`, `nvnCommandBufferSetCopyImageStride` missing. → [SDK 8 window and copy-stride entry points](../reference/nvn-objects.md#sdk-8-window-and-copy-stride-entry-points)
 - `[RED] texture bound to an image slot lacks the shader-write usage`, and compute image writes go to a dummy texture. → [Image bindings supply shader-write intent](../reference/nvn-objects.md#image-bindings-supply-shader-write-intent)
+- title scenery stretches into tall walls, or sampled surfaces use stale texture data. → [Populated sparse sampled storage hidden by an older texture alias](../reference/nvn-objects.md#populated-sparse-sampled-storage-hidden-by-an-older-texture-alias)
 
 ## Rendering
 
@@ -568,6 +569,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - black, jagged holes in the ground of a map (whole tiles of the terrain mesh missing while others draw), with about 25 distinct `[RED] shader … is not in the shader map` keys and `program has no vertex shader`, on a Unity game whose `Shader` objects all split cleanly. → [GLSLC outputs in a Unity TextAsset](../reference/shaders.md#glslc-outputs-in-a-unity-textasset)
 - `ValueError: …/Glow-Switch_0_P.utoc: shader group 0 has no chunk` from `uepak.py io_archive` while the NSP script decodes the shaders (`decode_ue_shaders`, after `[4/8] UE shader decode`). → [IoStore patch containers keep their shader groups in the base container](../reference/shaders.md#iostore-patch-containers-keep-their-shader-groups-in-the-base-container)
 - `[RED] …/Nicola-Switch_0_P.pak: the index is encrypted and no window of main decrypts it` from the NSP script before `[5/8] UE shader decode` (the message now reads `no key in main (a 32-byte window or two 16-byte literals its code stores together) decrypts it`). → [An Unreal pak key split into two 16-byte literals](../reference/shaders.md#an-unreal-pak-key-split-into-two-16-byte-literals)
+- title-screen elements are pink/purple with `[RED] shader … is not in the shader map`; a compute dispatch reports no mapped compute shader, although every extracted shader compiled. → [Oodle inline shader signatures need not be literal](../reference/shaders.md#oodle-inline-shader-signatures-need-not-be-literal)
 - `the RomFS has Unreal paks, but none … holds a shader code archive`, then `the shader split found no shaders in main or the RomFS`. → [Unreal Engine 4.27 shaders inline in cooked packages (LZ4)](../reference/shaders.md#unreal-engine-427-shaders-inline-in-cooked-packages-lz4)
 - `the shader split found no shaders in main or the RomFS`; the survey lists the RomFS as cooked packages (`.xxx`) and `.usm` movies only. → [Unreal Engine 3 shader caches (Oodle packages)](../reference/shaders.md#unreal-engine-3-shader-caches-oodle-packages)
 - shaders reported missing at random, and their dumped control sections are garbage (Unity). → [Program keys computed inside `nvnProgramSetShaders`](../reference/shaders.md#program-keys-computed-inside-nvnprogramsetshaders)
@@ -664,6 +666,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - geometry preparation dominates rendering CPU even after geometry passes have been batched; primitive assembly and capture-index deduplication repeat for unchanged meshes. → [Prepared geometry indices reused after byte comparison](../reference/shaders.md#prepared-geometry-indices-reused-after-byte-comparison)
 - geometry vertex-capture passes consume substantial GPU time before geometry compute or depth rasterization. → [Geometry capture initializes only missing words](../reference/shaders.md#geometry-capture-initializes-only-missing-words)
 - Apple's performance HUD (`DM_METAL_HUD=1`) says `Compiled 2 shaders. Total compilation time is 102.70ms. Consider adopting MTL4Compiler for more fine grained compilations` during play, with a dip in the frame-rate graph at that moment, for example when a new room first issues a scissored clear. → [The host's own shaders compiled from source at run time](../reference/shaders.md#the-hosts-own-shaders-compiled-from-source-at-run-time)
+- a version 6 pak fails extraction or produces impossible entry offsets and compression values. → [Compact legacy Unreal pak version 6 records](../reference/shaders.md#compact-legacy-unreal-pak-version-6-records)
 
 ## Game state
 

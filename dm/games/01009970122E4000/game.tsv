@@ -1,0 +1,45 @@
+# Borderlands 3 1.0.3: Mac opening gameplay, movement, save/quit and reload tested.
+
+# ---- Identity ----
+title_id	01009970122E4000
+program_id	01009970122E4000
+
+# ---- App ----
+name	Borderlands 3
+ipa	Borderlands3.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.0.3	main=ae2768797e3337ee209d7eab9574d475	sdk=835c229763ce5c1816a70f875bd70ccd
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	OakGame/Content/Paks/pakchunk1-Switch.pak
+zip_store	.bk2:.pak:.metallib
+
+# ---- Memory ----
+# Unreal reserves a 62 GiB address region; this build's FMallocBinned3 takes about 37 GiB of virtual space. Leave its unsupported slot-17 allocator layout intact and provide 64 GiB of Mac alias space. This is not a physical RAM requirement; an iPhone layout is not validated (README.md).
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 12 MB of system resource
+sys_resource	0xc00000
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Borderlands 3 shaders
+
+# address regions: 2026-10-30, in its first 15 s in nnMain the game's regions reach alias +62.06 GB, within the profile's 64.00 GB alias region (what it takes later in play is not measured here) (rewrite 173130128cf5)
+
+# Streamed sampled textures, including BGRA8 landscape heightmaps; see README.md.
+tex_flush_upload	on
+tex_dirty_upload	on
+
+# Mac quality improvement: 325 MB dropped close-up material mips near Lilith;
+# 325 -> 768 -> 325 -> 768 MB same-scene comparison; iPhone not validated.
+ue_texture_pool	768

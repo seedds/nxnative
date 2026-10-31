@@ -151,7 +151,7 @@ class R:
         if n < 0: return self.raw(-2 * n).decode('utf-16-le')[:-1]
         return self.raw(n)[:-1].decode('utf-8', 'replace') if n else ''
 
-LEGACY = (4,)   # legacy pak versions read (the per-file index); 11 has the encoded one
+LEGACY = (4, 6)   # legacy pak versions read (the per-file index); 11 has the encoded one
 LEGACY_METHODS = {1: 'Zlib', 2: 'Gzip', 3: 'LZ5', 4: 'Custom'}   # compression flags of a legacy pak (3: DRAGON QUEST XI S's engine, see the header)
 
 def magic_back(f):
@@ -223,6 +223,43 @@ def find_key(img, lo, hi, pak):
         if len(set(w)) >= 20 and opens(w): return w
     return None
 
+def legacy6_entries(data, offset, count, file_size, compact=False):
+    """Version 6's per-file index, with standard records or the compact 32-bit form.
+    The compact form omits hashes and block size (64 KiB); it is selected only after
+    every record, data range and trailing index padding has been checked.
+    Both forms use relative compressed-block offsets and the encrypted/delete flags.
+    """
+    r = R(data, offset, what='version 6 pak index'); files = {}
+    if not 0 <= count <= len(data) // 6: raise ValueError('invalid version 6 file count')
+    for _ in range(count):
+        name = r.fstr()
+        if not name or '\0' in name: raise ValueError('invalid version 6 file name')
+        off, size, raw, method = r.take('<qIIB' if compact else '<qqqi')
+        if not compact: r.raw(20)
+        if min(size, raw) < 0 or not 0 <= method <= 7: raise ValueError('invalid version 6 entry sizes or compression')
+        n = struct.unpack('<i', r.raw(4))[0] if method else 0
+        if not 0 <= n <= (len(data) - r.o) // 16: raise ValueError('invalid version 6 block count')
+        blocks = [r.take('<qq') for _ in range(n)]
+        flags = r.raw(1)[0]; bsz = 65536 if compact else struct.unpack('<I', r.raw(4))[0]
+        if flags & ~3: raise ValueError('unknown version 6 entry flags')
+        head = (18 if compact else 53) + (4 + 16 * n if method else 0)
+        deleted = bool(flags & 2)
+        if not deleted:
+            if off < 0 or off > file_size - head or size > file_size - off - head: raise ValueError('version 6 file data out of range')
+            if method:
+                if not bsz or n != (raw + bsz - 1) // bsz: raise ValueError('version 6 block count does not cover raw size')
+                end = head
+                for a, b in blocks:
+                    if not end <= a <= b <= head + size: raise ValueError('version 6 compressed block out of range')
+                    end = b
+        files[name] = dict(off=off, raw=raw, size=size, method=LEGACY_METHODS.get(method, f'flags {method}') if method else '',
+                           encrypted=flags & 1, deleted=deleted, block_size=bsz,
+                           blocks=[(a, b - a) for a, b in blocks] or [(head, size)], header_size=head)
+    padding = data[r.o:]
+    if len(padding) > 15 or (any(padding) and padding != data[:len(padding)]): raise ValueError('unconsumed version 6 index bytes')
+    return files
+
+
 class Pak:
     def __init__(self, path, key=None):
         self.path, self.key = path, key; self.f = open(path, 'rb')
@@ -230,6 +267,15 @@ class Pak:
         if enc and not key: raise ValueError(f'{path}: the index is encrypted and no key was given')
         r = R(self.read_at(ioff, isz, enc), what=f'{path}: the index')
         self.mount = r.fstr(); self.count = r.take('<i')
+        if self.version == 6:
+            file_size = self.f.seek(0, 2)
+            errors = []
+            for compact in (False, True):
+                try: self.files = legacy6_entries(r.b, r.o, self.count, file_size, compact)
+                except ValueError as e: errors.append(str(e)); continue
+                self.compact = compact
+                return
+            raise ValueError(f'{path}: neither version 6 index layout is valid: {"; ".join(errors)}')
         if self.version in LEGACY:   # one FPakEntry per file, kept as parsed
             self.files = {}
             for _ in range(self.count):
@@ -273,7 +319,8 @@ class Pak:
         """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II: Zlib); any other
         method needs decode(block bytes, raw length) → bytes: the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
         e = self.entry(path)
-        if not e['method']: return self.read_at(e['off'] + 53, e['size'], e['encrypted'])
+        if e.get('deleted'): raise ValueError(f'{path}: deleted pak record')
+        if not e['method']: return self.read_at(e['off'] + e.get('header_size', 53), e['size'], e['encrypted'])
         import zlib
         bad = (zlib.error,)   # a block its decoder refuses
         if e['method'] == 'Zlib': decode = zlib_block

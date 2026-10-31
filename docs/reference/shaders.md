@@ -383,6 +383,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `shader_split.py` (`ue_legacy_jobs`, `ue_inline_shaders`) decodes every file of the newest copy of each path with the game's own LZ5 and takes each zlib stream that inflates whole from exactly the length in front of it and starts with `LSLG` (every such stream in the files looked at). Records stored uncompressed are taken too, but none were seen.
 - **Found on:** [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md): 38,892 unique shaders (4,654 vertex, 33,981 pixel, 234 compute, 23 geometry) from 1,740 files; vertex and pixel shaders are paired as single-stage programs, as for Octopath Traveler 0.
 
+### Oodle inline shader signatures need not be literal
+
+- **Symptom:** title-screen elements are pink/purple with `[RED] shader … is not in the shader map`; a compute dispatch reports no mapped compute shader, although every extracted shader compiled.
+- **Cause:** the inline Oodle reader searched for literal `LSLG` inside compressed bytes. Borderlands 3's global cache has 2,889 framed streams, 31 without that literal in the first 32 bytes. Its cooked materials contain further examples.
+- **Fix:** `shader_split.py` scans the `8c0c` stream header and preceding raw/stored length fields, checks bounds, decodes and validates the resulting LSLG layout. A rejected signature candidate does not discard the rest of an archive: `oodle(..., probe=True)` accepts a decoder response of zero only as a failed candidate; broken transport and decoder setup remain errors. Regression fixtures include a compressed payload without literal LSLG and an invalid candidate followed by a valid stored record.
+- **Found on:** [Borderlands 3](../../dm/games/01009970122E4000/README.md) v196608, main build `ae2768797e3337ee209d7eab9574d475`. Corrected base/update and six-DLC scan recovered 696 additional unique shaders, for 84,949 total; all six keys missing in the title/gameplay run are present. No metadata masking or substituted shaders were needed. Fresh title rendering and opening gameplay were revalidated in the corrected local build.
+
 ### Unreal Engine 4.27 shaders inline in cooked packages (LZ4)
 
 - **Symptom:** `the RomFS has Unreal paks, but none … holds a shader code archive`, then `the shader split found no shaders in main or the RomFS`.
@@ -1183,3 +1190,11 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `t_host_msl` loads every library, with a swizzled `newLibraryWithSource:` that counts 0 calls, and finds all 24 clear functions. `t_builtin`, `t_geometry` and `t_deswz_gpu` use the built libraries.
 - **Build inputs:** Mac libraries use `MACOS_MIN` from `dm/mac/min_os.mk`, matching the host's deployment target; otherwise a newer SDK emits libraries older supported Macs cannot load and the host falls back to runtime compilation. Every build rechecks the compiler, SDK, deployment target and source contents, reusing the header only when all match. Installing the Metal toolchain after a source-only build therefore regenerates the libraries without a clean build.
 - **Build callers:** the NSP packer and regression harness generate the Mac header before checking their cached host executables, and include it in the host fingerprint. The standalone iOS compile check generates the iPhone header before its dry run, as the app build does. A dry run alone does not generate either header.
+
+### Compact legacy Unreal pak version 6 records
+
+- **Symptom:** a version 6 pak fails extraction or produces impossible entry offsets and compression values.
+- **Cause:** some legacy v6 archives use compact records: offset i64, stored/raw size u32, method u8, optional relative block ranges, then flags u8. They omit the standard entry hash and serialized block size; their blocks are 64 KiB. Encrypted index alignment may repeat the index prefix.
+- **Fix:** try standard v6 before compact v6 and accept only a layout whose complete file list, sizes, block coverage, flags, data ranges and final padding validate. Keep the legacy v4 absolute-offset path unchanged. Deleted records retain their own flag and cannot be read as content.
+- **Found on:** [Borderlands 3](../../dm/games/01009970122E4000/README.md), Switch update 1.0.3.
+- **Check:** `test_uepak_v6.py` uses synthetic standard/compact/encrypted/deleted/corrupt entries, including a compressed file spanning two blocks and encrypted index padding.

@@ -43,6 +43,7 @@ One row per profile; the notes are each profile's `README.md`.
 
 | Game | Title ID | Build | SDK | Engine | Graphics |
 |---|---|---|---|---|---|
+| [Borderlands 3](01009970122E4000/README.md) | `01009970122E4000` | 1.0.3 | 16.2.3 | Unreal Engine 4 | NVN |
 | [13 Sentinels: Aegis Rim](01003FC01670C000/README.md) | `01003FC01670C000` | 1.10 | 11.4.3 | Vanillaware's engine | NVN |
 | [13 Sentinels: Aegis Rim, Asian release](01008D7016438000/README.md) | `01008D7016438000` | 1.00 (base) | 11.4.3 | Vanillaware's engine | NVN |
 | [13 Sentinels: Aegis Rim, Japanese release](010045C014650000/README.md) | `010045C014650000` | 1.00 (base) | 10.8.2 | Vanillaware's engine | NVN |

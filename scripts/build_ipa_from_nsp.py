@@ -433,6 +433,7 @@ def is_package(path):   # what nx_extract's OpenNsp opens: an XCI / XCZ by the c
 
 
 def title_of(path, from_package=None):   # the ticket name (the first 16 digits of the rights ID = title ID), else [title ID] in the file name, else what the package itself says
+    if os.environ.get('NX_TITLE') and path.suffix.lower() in ('.xci', '.xcz'): return int(os.environ['NX_TITLE'], 16)   # --title-id: the application to read from a cartridge dump that holds several
     for n in pfs0_names(path):   # the ticket first: a file name's tag can be wrong (FFT's base NSP is tagged …0001, its ticket is …0000)
         if re.match(r'[0-9A-Fa-f]{32}\.tik$', n): return int(n[:16], 16)
     m = re.search(r'\[([0-9A-Fa-f]{16})\]', path.name)
@@ -2183,6 +2184,7 @@ def parse_args(argv):
         epilog='example: python3 scripts/build_ipa_from_nsp.py ~/nsp/"Super Mario Bros Wonder" -k ~/keys/prod.keys')
     ap.add_argument('nsp_dir', nargs='?', help='folder holding one game\'s NSPs (default: the NSP_DIR setting, else asked)')
     ap.add_argument('-k', '--keys', help='path of prod.keys (default: the PROD_KEYS setting, else asked)')
+    ap.add_argument('--title-id', help='the application to pack from a package that holds several (one XCI with two games): its title ID, 16 hex digits (default: the lowest one in the package)')
     ap.add_argument('-p', '--package', help='version packed into the IPA, e.g. v327680 / v0 (default: the newest in the folder)')
     ap.add_argument('-o', '--out', help='output IPA, or app with --platform mac-app (default: <the profile\'s ipa>, or <game name>.app, in the NSP folder)')
     ap.add_argument('--app-name', help='app name on the home screen (default: the game name in the base NSP)')
@@ -2277,6 +2279,9 @@ def report_profile_status(g, reg, pkg_ver, derived, provisional, artifact='IPA',
 def main(args=None):
     args = args or parse_args([])
     PROG.mode = progress_mode(args.progress or PROGRESS)
+    if args.title_id:
+        if not re.fullmatch(r'[0-9a-fA-F]{16}', args.title_id): raise BuildError('--title-id takes 16 hex digits')
+        os.environ['NX_TITLE'] = args.title_id   # nx_extract reads it (which application of a package that holds several)
     global ALLOW_DAMAGED; ALLOW_DAMAGED = args.allow_damaged or ALLOW_DAMAGED
     global ALLOW_SHADER_REGRESSIONS; ALLOW_SHADER_REGRESSIONS = args.allow_shader_regressions or ALLOW_SHADER_REGRESSIONS
     global ALLOW_OTHER_METAL; ALLOW_OTHER_METAL = args.allow_other_metal or ALLOW_OTHER_METAL

@@ -56,6 +56,7 @@ Mac repro of both: `DM_OE_SCRIPT=bg=1@20,bg=0@25`. The game froze after switchin
 
 ## Found on this game
 
+- **Packing (current):** packed from a two-game XCI with `--title-id` ([packing](../../../docs/reference/packing.md#a-cartridge-dump-that-holds-two-games-packs-only-the-first)).
 General host changes first needed here; each applies to every game:
 
 - **`precise::` min / max / clamp** in every translator (`dmsh_build.py` `precise`, `vk_shaders.py`, `gl_shaders.py`; issue 72): [min, max and clamp with a NaN operand](../../../docs/reference/shaders.md#min-max-and-clamp-with-a-nan-operand).

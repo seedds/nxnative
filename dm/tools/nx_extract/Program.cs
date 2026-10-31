@@ -33,6 +33,9 @@ using Path = System.IO.Path;
 static class P {
     [DllImport("libc", SetLastError = true)] static extern int clonefile(string src, string dst, uint flags);
 
+    // A cartridge dump may hold several applications (Super Mario Galaxy + Super Mario Galaxy 2 on one XCI): NX_TITLE=<16 hex digits> picks the one to read, else the lowest title ID is the game
+    static readonly ulong? Want = ulong.TryParse(Environment.GetEnvironmentVariable("NX_TITLE"), System.Globalization.NumberStyles.HexNumber, null, out ulong w) ? w : null;
+
     static int Main(string[] a) {
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
         bool image = Array.IndexOf(a, "--romfs-image") >= 0; a = Array.FindAll(a, s => s != "--romfs-image");
@@ -42,7 +45,7 @@ static class P {
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image);
         var basePkg = OpenNsp(ks, a[1], ContentMetaType.Application); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
-        Nca baseProg = Pick(basePkg, NcaContentType.Program) ?? throw new Exception("no Program NCA in the base NSP");
+        Nca baseProg = Pick(basePkg, NcaContentType.Program, Want) ?? throw new Exception("no Program NCA in the base NSP");
         Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, baseProg.Header.TitleId) ?? throw new Exception("no Program NCA of the base game's program in the update NSP");
         Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, baseProg.Header.TitleId);
         Console.WriteLine($"title {baseProg.Header.TitleId:x16}" + (updProg != null ? $", update {updProg.Header.TitleId:x16}" : ""));
@@ -89,7 +92,7 @@ static class P {
 
     static int Title(KeySet ks, string path) {
         ulong? id = null;
-        foreach (Nca n in OpenNsp(ks, path)) if (n.Header.ContentType == NcaContentType.Meta && (id == null || n.Header.TitleId < id)) id = n.Header.TitleId;
+        foreach (Nca n in OpenNsp(ks, path)) if (n.Header.ContentType == NcaContentType.Meta && (Want != null ? n.Header.TitleId == Want : id == null || n.Header.TitleId < id)) id = n.Header.TitleId;
         if (id == null) { Console.WriteLine($"[RED] no meta NCA in {Path.GetFileName(path)}"); return 5; }
         Console.WriteLine($"title {id:x16}");
         return 0;

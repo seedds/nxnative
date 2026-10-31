@@ -129,6 +129,20 @@
 - **Fix:** `dm/tools/nx_extract/Program.cs` `OpenNsp` reads the base package's content metas (`*.cnmt` in its Meta NCAs) and keeps only the NCAs that its Application content meta lists, and prints how many it left out. When none of them is a Program NCA (NCA files renamed, so their names are not content IDs), it prints a `[RED]` line and reads every NCA as before. An NSP or a base-only XCI keeps every NCA but its meta NCA, so it extracts as before (Balatro's NSPs and Monster Hunter Rise's XCI give identical manifests). The update is still taken from the update NSP in the folder; the one on the cartridge is not used, so an XCI alone packs the base game's version.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), a 1G+1U XCI (base v0 with update 1.4.3, whose 524 MB Program NCA is listed before the base's 17.1 GB one) beside the 1.4.3 update NSP ([PR #311](https://github.com/seedds/nxnative/pull/311)). Reproduced with a package of Balatro's update NSP followed by its base NSP: the base alone and the base with the update now give the same manifests and control data as the separate NSPs. Applies to any game's XCI that carries its update.
 
+### A cartridge dump that holds two games packs only the first
+
+- **Symptom:** an XCI with two applications (Super Mario Galaxy + Super Mario Galaxy 2 on one cartridge dump) always packs the first game; `build_ipa_from_nsp.py` never reaches the second.
+- **Cause:** the file name tags both title IDs and `title_of` takes the first; `nx_extract` takes the lowest title ID of the package's Program, Control and meta NCAs. Nothing could name another application.
+- **Fix:** `--title-id <16 hex digits>` on the script (it sets `NX_TITLE`, which `title_of` returns for an XCI / XCZ and `nx_extract` reads in `Main` and `Title`) packs that application. Without it, nothing changes. Each application has its own `<title ID>_build/` folder and app.
+- **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md), packed from the same XCI as [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md) with `--title-id 0100FD8022DAA000`.
+
+### The Vulkan shader step fails with `Argument list too long: 'xcrun'`
+
+- **Symptom:** `vk_shaders.py` stops with `OSError: [Errno 7] Argument list too long: 'xcrun'` after the Metal compiles, in the `metallib` link.
+- **Cause:** `metallib()` passed every `.air` file as an absolute path in one command. A game with thousands of generated modules (Super Mario Galaxy: 3,083 captured shaders, more with the dual-source variants) under a long NSP folder name exceeds macOS's 1 MB `ARG_MAX`.
+- **Fix:** `metallib()` runs from the files' common folder with relative paths and an absolute output path, so the command length no longer depends on the work folder's name.
+- **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), with its dump in a folder named after both games of the cartridge.
+
 ## Sparse base games
 
 ### The survey's build ID lookup stops on the base game alone with a hash error

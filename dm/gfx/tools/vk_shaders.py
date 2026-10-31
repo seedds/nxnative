@@ -152,7 +152,9 @@ def metallib(msls, out, sdk, extra):
         return a
     with cf.ThreadPoolExecutor(os.cpu_count()) as ex: airs = list(ex.map(comp, msls))
     lib = os.path.join(out, 'vk_shaders.metallib')
-    subprocess.run(['xcrun', '-sdk', sdk, 'metallib', *airs, '-o', lib], check=True)
+    # relative to their common folder: thousands of absolute paths under a long work folder pass ARG_MAX (1 MB on macOS) and xcrun fails with E2BIG
+    base = os.path.commonpath([os.path.dirname(x) for x in airs])
+    subprocess.run(['xcrun', '-sdk', sdk, 'metallib', *[os.path.relpath(x, base) for x in airs], '-o', os.path.abspath(lib)], check=True, cwd=base)
     return lib
 
 def main():

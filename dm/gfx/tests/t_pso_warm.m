@@ -34,6 +34,33 @@ static int fixtures(NSString *dir) {
     return 1;
 }
 
+// Hold the real first library load, not a replacement shader loader. The S and R tasks below
+// then reach warm_shader concurrently, while a different shader must still load successfully.
+@interface WarmGateDevice : NSObject {
+@public id<MTLDevice> device; dispatch_semaphore_t entered, release; _Atomic unsigned library_calls;
+}
+@end
+@implementation WarmGateDevice
+- (id)forwardingTargetForSelector:(SEL)selector { return device; }
+- (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error {
+    if (!atomic_fetch_add(&library_calls, 1)) {
+        dispatch_semaphore_signal(entered);
+        dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER);
+    }
+    return [device newLibraryWithData:data error:error];
+}
+@end
+
+static int wait_collision(void) {
+    uint64_t end = bp_now() + 5ull * NSEC_PER_SEC;
+    do {
+        os_unfair_lock_lock(&g_warm_dict_lock); uint64_t n = g_warm_load_stats.collisions; os_unfair_lock_unlock(&g_warm_dict_lock);
+        if (n) return 1;
+        usleep(1000);
+    } while (bp_now() < end);
+    return 0;
+}
+
 static NSString *row(const pso_key *key, int merged) {
     NvShader *vs = [NvShader new], *fs = [NvShader new];
     strcpy(vs->key, "warm-vs"); strcpy(fs->key, "warm-fs"); fs->stage = 1;
@@ -86,8 +113,75 @@ static void check_draw(const pso_key *raw, int merged, const uint8_t expected[4]
     g_pso_lmap = NULL;
 }
 
+static void singleflight(NSString *dir, int enabled) {
+    setenv("DM_NVN_WARM_DIAG", "1", 1); setenv("DM_NVN_WARM_SINGLEFLIGHT", enabled ? "1" : "0", 1);
+    warm_load_begin(); g_warm_items = [NSMutableArray array]; atomic_store(&g_warm_ready, 0);
+    for (NSString *extension in @[@"json", @"metallib"]) {
+        NSString *source = [dir stringByAppendingPathComponent:[@"warm-fs." stringByAppendingString:extension]];
+        NSString *target = [dir stringByAppendingPathComponent:[@"warm-other." stringByAppendingString:extension]];
+        if (![NSFileManager.defaultManager fileExistsAtPath:target])
+            EXPECT("unrelated fixture copied", 1, [NSFileManager.defaultManager copyItemAtPath:source toPath:target error:nil]);
+    }
+    pso_key key = {0}; key.cfmt[0] = MTLPixelFormatRGBA8Unorm; key.samples = 1; key.chmask = 15;
+    NSString *manifest = [dir stringByAppendingPathComponent:@"concurrent.tsv"];
+    NSString *text = [@"S\twarm-vs\t0\n" stringByAppendingString:row(&key, 0)];
+    EXPECT("concurrent manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
+    EXPECT("S and R are distinct real warm tasks", 2, tasks.count);
+    if (tasks.count != 2) return;
+    pso4_init();   // Match warm_start: initialize the real compiler before substituting the test device.
+    WarmGateDevice *gate = [WarmGateDevice new]; gate->device = g_dev;
+    gate->entered = dispatch_semaphore_create(0); gate->release = dispatch_semaphore_create(0);
+    g_dev = (id<MTLDevice>)gate;
+    dispatch_group_t callers = dispatch_group_create();
+    dispatch_group_async(callers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ warm_task(tasks[0]); });
+    EXPECT("first real shader load reaches device gate", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    dispatch_group_async(callers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ warm_task(tasks[1]); });
+    EXPECT("R task collides with S task while its load is held", 1, wait_collision());
+    // A dedicated worker avoids a failed assertion hanging the test behind the very global load lock it is meant to catch.
+    dispatch_group_t unrelated = dispatch_group_create();
+    __block NvShader *other = nil;
+    dispatch_group_async(unrelated, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { other = warm_shader(@"warm-other", 1); } });
+    EXPECT("unrelated shader finishes before owner is released", 0, dispatch_group_wait(unrelated, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    dispatch_semaphore_signal(gate->release);
+    dispatch_group_wait(callers, DISPATCH_TIME_FOREVER); dispatch_group_wait(unrelated, DISPATCH_TIME_FOREVER);
+    g_dev = gate->device;
+    EXPECT("unrelated shader loaded", 1, other != nil);
+    EXPECT("unique shader keys", 3, g_warm_load_stats.unique);
+    EXPECT("actual library loads", enabled ? 3 : 4, atomic_load(&gate->library_calls));
+    EXPECT("shader preparation loads", enabled ? 3 : 4, g_warm_load_stats.loads);
+    EXPECT("losing duplicate preparation", enabled ? 0 : 1, g_warm_load_stats.discarded);
+    NvShader *published = g_warm_dict[@"warm-vs"];
+    unsigned references = 0;
+    for (WarmItem *item in g_warm_items) {
+        if (item->kind == 0) { EXPECT("S task retains the published shader", 1, item->shader == published); references++; }
+        if (item->kind == 1) { EXPECT("R task retains the published shader", 1, item->vs == published); references++; }
+    }
+    EXPECT("both real callers returned the same shader", 2, references);
+    uint64_t cached_loads = g_warm_load_stats.loads;
+    EXPECT("cached lookup returns the published shader", 1, warm_shader(@"warm-vs", 0) == published);
+    EXPECT("cached lookup performs no preparation", cached_loads, g_warm_load_stats.loads);
+    warm_claim();
+    NvShader *vs = g_shcache[@"warm-vs"];
+    EXPECT("S and R publish one shader identity", 1, vs == g_warm_dict[@"warm-vs"]);
+    // Missing geometry reflection returns nil quietly. Warm callers share its negative result;
+    // a later demand caller still retries, and succeeds once real reflection appears.
+    EXPECT("failed warm load", 1, warm_shader(@"retry-gs", 2) == nil);
+    uint64_t loads = g_warm_load_stats.loads;
+    NSDictionary *reflection = @{@"chain": @DMSH_CHAIN, @"gs_slice": @{@"loc": @0, @"comp": @"x"}};
+    NSString *path = [dir stringByAppendingPathComponent:@"retry-gs.json"];
+    EXPECT("retry reflection written", 1, [[NSJSONSerialization dataWithJSONObject:reflection options:0 error:nil] writeToFile:path atomically:YES]);
+    EXPECT("failure stays cached for this warm phase", 1, warm_shader(@"retry-gs", 2) == nil);
+    EXPECT("warm failure is not loaded again", loads, g_warm_load_stats.loads);
+    EXPECT("demand loading still retries failed warm key", 1, shader_get(@"retry-gs", 2) != nil);
+    EXPECT("retry fixture removed", 1, [NSFileManager.defaultManager removeItemAtPath:path error:nil]);
+    g_warm_t0 = bp_now(); warm_finish();
+    g_shcache = nil; nvn_hm_clear(&g_pso, hm_rel);
+}
+
 static void scenario(NSString *dir, int merged) {
     nvn_hm_clear(&g_pso, hm_rel); g_shcache = nil; g_warm_items = [NSMutableArray array];
+    warm_load_begin();
     g_warm_rps = g_warm_claim_rps = 0; atomic_store(&g_warm_ready, 0);
     pso_key keys[4] = {0}; keys[0].cfmt[0] = MTLPixelFormatRGBA8Unorm; keys[0].samples = 1;
     int logical = merged ? 7 : 0;
@@ -133,6 +227,8 @@ int main(void) { @autoreleasepool {
     char dir[] = "/tmp/t_pso_warm.XXXXXX"; if (!mkdtemp(dir)) return 1;
     mtl_init();
     if (!fixtures(@(dir))) { fprintf(stderr, "failed to compile synthetic shader fixtures\n"); [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil]; return 1; }
+    singleflight(@(dir), 0); singleflight(@(dir), 1);
+    unsetenv("DM_NVN_WARM_DIAG"); unsetenv("DM_NVN_WARM_SINGLEFLIGHT");
     scenario(@(dir), 0); scenario(@(dir), 1);
     const char *mode = getenv("DM_PSO_MTL4");
     if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_comp4 != nil);

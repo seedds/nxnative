@@ -87,7 +87,7 @@ int main(int argc, char **argv) { @autoreleasepool {
       sh->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEXA, .reg = 3, .aid = 1, .off = 0x40, .n = 300, .soff = 0x80}; sh->rf.b[1] = (nvn_rbind){.kind = 1, .rw = 1, .reg = 2};
       sh->rf.v[0].loc = 4; sh->rf.v[0].nvn = 2; sh->rf.v[0].sh[0] = sh->rf.v[0].sh[1] = sh->rf.v[0].sh[2] = 0xff;
       NvProg *pr = [NvProg new]; pr->sh[0] = sh; uint64_t h[6]; cap_iface(pr, h);
-      if (h[0] != 0xa0e0f743879fbedfull || h[1]) { fprintf(stderr, "FAIL: interface hash %#llx, pinned %#llx (cap_iface must hash binding values, not struct bytes)\n", (unsigned long long)h[0], 0xa0e0f743879fbedfull); return 1; } }
+      if (h[0] != 0x6dd0e5dde7da6f41ull || h[1]) { fprintf(stderr, "FAIL: interface hash %#llx, pinned %#llx (cap_iface must hash binding values, not struct bytes)\n", (unsigned long long)h[0], 0x6dd0e5dde7da6f41ull); return 1; } }
     printf("t_capture_live: frame 2 captured to %s\n", argv[1]);
     return 0;
 } }

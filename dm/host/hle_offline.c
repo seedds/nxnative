@@ -1002,7 +1002,7 @@ HLE_FORCE("_ZN2nn5album21SaveCurrentScreenshotENS0_17AlbumReportOptionE", "scree
 
 // ---------- Phase 3: Connect/Disconnect handling ----------
 
-HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_10UserConfigEi", "local wireless: connect to network", Result, h_ldn_Connect,
+HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_10UserConfigEi", "local wireless: connect to network (simple)", Result, h_ldn_ConnectSimple,
           const void *net_info, const void *user_cfg, int local_ver) {
     (void)local_ver;
     

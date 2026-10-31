@@ -1,0 +1,42 @@
+# ---- Identity ----
+title_id	0100DD301A686000
+program_id	0100DD301A686000
+
+# ---- App ----
+name	LOLLIPOP CHAINSAW RePOP
+ipa	LollipopChainsawRePOP.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1245184	1.21.1	main=89f76888939adcdf69f8b0e647d84cad	subsdk0=ab62fe8edd07a6a293f885d54359e559	sdk=0023a1b06130cd795f7bc4613772af0a
+package	v1245184
+shader_versions	v1245184
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	lollipop/Content/Paks/pakchunk0-Switch.ucas
+zip_store	.bk2:.pak:.txt:.ucas:.utoc:.metallib
+
+# ---- Memory ----
+# ue_malloc.py finds FMallocBinned3 for replacement by the host allocator.
+# ue_region.py finds the engine region; the host sizes it from available alias space.
+# The 5 GiB block and 4.375 GiB alias region leave about 4.06 GiB for it.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 80 MB of system resource
+sys_resource	0x5000000
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	LOLLIPOP CHAINSAW RePOP 1.21.1 shaders
+
+# ---- Rendering and controls ----
+# The game requests zero-to-one depth. Seed the prebuilt pipelines accordingly.
+depth_mode	zero
+# All 12 dynamic buffer-texture shaders take handles only from c2 driver tables.
+tex_dyn_slots	on
+pad_layout	full

@@ -9,6 +9,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
 {
     static partial class InstEmit
     {
+        public static void AtomCas(EmitterContext context)
+        {
+            InstAtomCas op = context.GetOp<InstAtomCas>();
+
+            // nxnative: Maxwell ATOM.CAS has a signed byte displacement at bits 28-47,
+            // E at 48 and b32/b64 at 49 (envytools envydis/gm107.c, atommem0_imm /
+            // tabeef0sz). BcRz at 50-51 is not its width; those forms are unverified.
+            // Only even source-pair starts are verified; reject odd starts (and RZ).
+            if (op.Size64 || op.BcRz != 0 || (op.SrcB & 1) != 0)
+            {
+                throw new System.NotSupportedException("ATOM.CAS requires the verified 32-bit form and an even source register pair.");
+            }
+
+            int offset = (op.Imm20 << 12) >> 12;
+            (Operand addrLow, Operand addrHigh) = Get40BitsAddress(context, new Register(op.SrcA, RegisterType.Gpr), op.E, offset);
+            // The pair holds compare then replacement; return the old word, even
+            // on mismatch. Normal instruction predication guards both effects.
+            Operand result = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, addrLow, addrHigh,
+                GetSrcReg(context, op.SrcB), GetSrcReg(context, op.SrcB + 1));
+            context.Copy(GetDest(op.Dest), result);
+        }
+
         public static void Atom(EmitterContext context)
         {
             InstAtom op = context.GetOp<InstAtom>();
@@ -535,6 +557,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 Operand carry = context.ICompareLessUnsigned(addrLow, offs);
 
+                // nxnative: add the signed displacement's high word as well as
+                // the low-word carry. Otherwise every negative offset adds 2^32.
+                if (offset < 0)
+                {
+                    addrHigh = context.IAdd(addrHigh, Const(-1));
+                }
                 addrHigh = context.IAdd(addrHigh, context.ConditionalSelect(carry, Const(1), Const(0)));
             }
 

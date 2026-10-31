@@ -725,6 +725,12 @@ NVN_NOPROTO(nvnProgramInitializeFromBuilder, NVNboolean, NVNprogram *p, const vo
 // NVN2 command buffer modes with nothing to do on Metal. Open: what recording mode 1 asks of the driver (the signature comes from the game's calls)
 NVN_NOPROTO(nvnCommandBufferSetRecordingMode, void, NVNcommandBuffer *c, int m) { (void)c; (void)m; }
 NVN_NOPROTO(nvnCommandBufferSetComputeOverlapMode, void, NVNcommandBuffer *c, int m) { (void)c; (void)m; }
+// Variable rate shading lowers cost, not content, and stencil cull criteria only tune early culling: with neither, every pixel shades and the stencil test still decides
+NVN_NOPROTO(nvnCommandBufferBindShadingRateImage, void, NVNcommandBuffer *c, const void *t) { (void)c; (void)t; }
+NVN_NOPROTO(nvnCommandBufferShadingRateImagePalette, void, NVNcommandBuffer *c, int i, int v) { (void)c; (void)i; (void)v; }
+NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int f, int m) { (void)c; (void)f; (void)m; }
+// Mario Kart World sets modes 0 and 1. What a nonzero mode does is open
+NVN_NOPROTO(nvnCommandBufferSetGeometryProcessingMode, void, NVNcommandBuffer *c, int m) { (void)c; static int once; if (m && !once++) LOG("[RED] SetGeometryProcessingMode: mode %d ignored", m); }
 // NVN2: a queue may name a primary queue it works beside. The host has one Metal queue order, so nothing to keep
 NVN_NOPROTO(nvnQueueBuilderSetPrimaryQueue, void, NVNqueueBuilder *b, NVNqueue *q) { (void)b; (void)q; }
 NVN_NOPROTO(nvnQueueBuilderGetPrimaryQueue, NVNqueue *, const NVNqueueBuilder *b) { (void)b; return NULL; }

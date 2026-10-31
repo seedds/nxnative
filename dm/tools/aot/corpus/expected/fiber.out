@@ -1,0 +1,9 @@
+generator.count 0000000000000028 ok
+generator.sum 000000000000567c ok
+ring.token a3b447ef131572e9
+ring.laps 000000000000a170 ok
+callee_saved 0f12e8a198d68dde ok
+callee_saved.again d81c59cd954bf80a ok
+skip.return 000000000000002a ok
+skip.return_twice 0000000000000021 ok
+PASS 7

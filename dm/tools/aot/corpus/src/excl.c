@@ -2,7 +2,13 @@
 // -mno-outline-atomics keeps them inline), compare-and-swap with its early exit, 128-bit pairs (ldaxp / stlxp), acquire / release accesses
 // (ldar, stlr), clrex (the store after it fails), a spin lock, and a lock-free pop whose window loads through the value it loaded (the
 // ABA-sensitive shape of design section 6.5). Each loop runs many times with known results.
+// Then with threads (design sections 6.1 and 6.5; rt/thread.h): two workers released together (WaitForAddress / SignalToAddress) increment
+// shared counters with an ldaxr / stlxr loop, a compare-and-swap loop, a 128-bit pair through ldaxp / stlxp and a libnx-style mutex
+// (ArbitrateLock / ArbitrateUnlock when contended); a third thread runs the register-invariant loop of rt/pause.S, which the host's pause test
+// checks paused threads against (excl_pause_iterations long); the main thread sleeps, releases them and joins them (WaitSynchronization). The
+// totals must be exact.
 #include "rt.h"
+#include "thread.h"
 
 static volatile uint8_t u8v;
 static volatile uint16_t u16v;
@@ -85,6 +91,81 @@ static RT_NOINLINE void spin_unlock(volatile uint32_t *l) {
     __atomic_store_n(l, 0, __ATOMIC_RELEASE);
 }
 
+// ---- Threads ----
+
+#define WORKERS 2
+#define WORK_ITERATIONS 100000u
+// The register-invariant loop's iterations: exported, so that a runner can lengthen the threaded part (the safepoint test: nxaot_host --set)
+volatile uint64_t excl_pause_iterations = 20000000u;
+static uint8_t thread_stacks[WORKERS + 1][64 * 1024] __attribute__((aligned(16)));
+static rt_thread threads[WORKERS + 1];
+static volatile uint32_t go;
+static volatile uint64_t mt_add, mt_cas;
+static uint64_t mt_pair[2] __attribute__((aligned(16)));
+static volatile uint32_t mt_mutex;
+static uint64_t mt_locked;  // only under mt_mutex
+static volatile uint32_t mt_done;
+static volatile uint64_t mt_pause_result;
+
+static void wait_go(void) {
+    while (__atomic_load_n(&go, __ATOMIC_ACQUIRE) == 0) {
+        rt_svc_wait_for_address(&go, RT_ARB_WAIT_IF_EQUAL, 0, -1);
+    }
+}
+
+static void worker(rt_thread *self, void *arg) {
+    (void)arg;
+    wait_go();
+    for (uint32_t i = 0; i < WORK_ITERATIONS; ++i) {
+        __atomic_fetch_add(&mt_add, 1, __ATOMIC_SEQ_CST);
+        uint64_t old = __atomic_load_n(&mt_cas, __ATOMIC_RELAXED);
+        while (!__atomic_compare_exchange_n(&mt_cas, &old, old + 1, 1, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        }
+        if ((i & 3) == 0) {
+            uint64_t lo, hi;
+            do {
+                lo = __atomic_load_n(&mt_pair[0], __ATOMIC_RELAXED);
+                hi = __atomic_load_n(&mt_pair[1], __ATOMIC_RELAXED);
+            } while (!cas128(mt_pair, lo, hi, lo + 1, hi + 2));
+        }
+        if ((i & 15) == 0) {
+            rt_mutex_lock(&mt_mutex, self->handle);
+            mt_locked += 1;
+            rt_mutex_unlock(&mt_mutex, self->handle);
+        }
+    }
+    __atomic_fetch_add(&mt_done, 1, __ATOMIC_RELEASE);
+}
+
+static void pauser(rt_thread *self, void *arg) {
+    (void)self;
+    (void)arg;
+    wait_go();
+    mt_pause_result = nxaot_pause_loop(excl_pause_iterations) == excl_pause_iterations;
+}
+
+static void threaded(void) {
+    uint32_t started = 0;
+    for (unsigned i = 0; i < WORKERS; ++i) {
+        started |= rt_thread_start(&threads[i], worker, 0, thread_stacks[i], sizeof thread_stacks[i]);
+    }
+    started |= rt_thread_start(&threads[WORKERS], pauser, 0, thread_stacks[WORKERS], sizeof thread_stacks[WORKERS]);
+    RT_CHECK32("threads.started", started, 0);
+    rt_svc_sleep_thread(1000000);  // 1 ms: the threads reach their wait
+    __atomic_store_n(&go, 1, __ATOMIC_RELEASE);
+    RT_CHECK32("threads.released", rt_svc_signal_to_address(&go, RT_SIGNAL, 0, -1), 0);
+    for (unsigned i = 0; i <= WORKERS; ++i) {
+        rt_thread_join(&threads[i]);
+    }
+    RT_CHECK32("threads.done", mt_done, WORKERS);
+    RT_CHECK64("threads.fetch_add", mt_add, (uint64_t)WORKERS * WORK_ITERATIONS);
+    RT_CHECK64("threads.cas", mt_cas, (uint64_t)WORKERS * WORK_ITERATIONS);
+    rt_check128("threads.pair", mt_pair[0], mt_pair[1], (uint64_t)WORKERS * WORK_ITERATIONS / 4, (uint64_t)WORKERS * WORK_ITERATIONS / 2);
+    RT_CHECK64("threads.mutex", mt_locked, (uint64_t)WORKERS * WORK_ITERATIONS / 16);
+    RT_CHECK32("threads.mutex_free", mt_mutex, 0);
+    RT_CHECK32("threads.pause_loop", mt_pause_result, 1);
+}
+
 int main(void) {
     for (unsigned i = 0; i < 1000; ++i) {
         __atomic_fetch_add(&u8v, 3, __ATOMIC_SEQ_CST);
@@ -155,5 +236,7 @@ int main(void) {
     }
     RT_CHECK64("spinlock.guarded", guarded, 1999 * 2000 / 2);
     RT_CHECK32("spinlock.free", __atomic_load_n(&lock_word, __ATOMIC_ACQUIRE), 0);
+
+    threaded();
     return rt_finish();
 }

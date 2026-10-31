@@ -258,6 +258,8 @@ public:
     std::map<uint64_t, Regs> gen;                       // per block start: the registers it writes
     std::map<uint64_t, Regs> dirty_in;                  // per block start: the registers newer than their copy in the block at its start
     std::set<uint64_t> svc_blocks;                      // blocks that end in svc (it stores the whole register file)
+    std::set<uint64_t> nzcv_live;                       // block starts where NZCV is live (some path reads it before writing it): a poll there
+                                                        // stores it, elsewhere it is dead and a poll leaves its block copy as it was
     std::set<std::pair<const IR::Inst*, size_t>> relative;  // immediate arguments that are module offsets (base-relative addresses)
     decode::InstPcs inst_pcs;                           // the guest offset each IR instruction came from
     std::unordered_map<Value*, uint64_t> rel_values;    // the base + offset values made for relative immediates, with their offsets
@@ -296,6 +298,15 @@ public:
     void FnSvc(Value* number, Value* next_pc);
     Value* FnDispatch(Value* target, uint64_t site);  // the inline cache: the native standard entry of a guest address
     llvm::Value* RetValue();                          // {x0, x1, v0..v3} of the current registers (poison outside self.rv)
+    // The JIT fallback (section 11): a call or tail call to a target that is no compiled entry goes through plan->jit_entry; a continuation the
+    // compiled code cannot run (FPCR away from the specialisation, an untranslated encoding, code that runs into no entry) is handed to
+    // plan->rt_jit with the function's own return as the stop, and the function then returns what the JIT left in the block
+    void FnJitCall(uint64_t target, uint64_t call_pc);
+    void FnJitTail(Value* target);
+    void FnJitContinue(Value* pc, uint32_t reason);
+    // A safepoint poll (section 6.2): one compare and branch on st->poll; the cold path stores the dirty registers and pc (the block then holds
+    // the whole register file) and calls plan->rt_safepoint
+    void FnPoll(Value* pc, const Regs& dirty);
 };
 
 }  // namespace nxaot::lift::detail

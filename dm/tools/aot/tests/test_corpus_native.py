@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The corpus recompiled and run natively (CTest `corpus_native`; docs/design/aot-recompiler.md section 14, phase 1): every NRO of corpus.tsv is
-built by `nxaot build` into a shared object in each configuration below, run by nxaot_host, and must leave through svcExitProcess printing
-exactly corpus/expected/<program>.out and exactly what the dynarmic reference (nxaot_run) prints. Then two checks of the dispatcher (section 4):
-the lookup table of every NRO holds every function discovery found address-taken, and an indirect branch to a target with no compiled entry (a
-function pointer of fnptr set to the middle of a function) stops with the [RED] line naming it and the JIT-needed exit status.
+built by `nxaot build` into a shared object in each configuration below, run by nxaot_host (compiled entries natively, the JIT fallback of
+section 11 for the rest: the fiber program's continuations), and must leave through svcExitProcess printing exactly
+corpus/expected/<program>.out and exactly what the dynarmic reference (nxaot_run) prints. Then a check of the dispatcher (section 4): the lookup
+table of every NRO holds every function discovery found address-taken. The JIT's own modes and the dispatcher's misses into it are
+test_corpus_jit.py's (CTest corpus_jit).
 
   test_corpus_native.py --nxaot <nxaot> --nxaot-host <nxaot_host> --nxaot-run <nxaot_run> --work <dir> [--configs a,b,...] [--nro <name>]...
 
@@ -20,7 +21,6 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, '..', 'corpus')
-JIT_NEEDED = 3  # rt::kJit
 
 # name: (convention, mode, nxaot build flags); the default convention is swifttail
 CONFIGS = {
@@ -126,23 +126,6 @@ def main():
         else:
             print(f'{nro:<20} {"lookup":<24} {"ok":<8} {len(taken)} address-taken functions, all in the lookup table ({len(listed)} entries)')
 
-        # A deliberately unknown target: fnptr's hidden_ptr (called through blr) set to the second instruction of hidden_target
-        if program == 'fnptr':
-            syms = {}
-            for line in open(os.path.join(CORPUS, 'nro', nro[:-4] + '.syms.tsv')):
-                f = line.rstrip('\n').split('\t')
-                if len(f) >= 5 and not line.startswith("#"):
-                    syms[f[4]] = int(f[0], 16)
-            target = syms['hidden_target'] + 4
-            r = run([a.nxaot_host, so, path, '--relocate', '--set', f'hidden_ptr=@{target:#x}'])
-            want = f'(module+{target:#x}) has no compiled entry'
-            ok = r.returncode == JIT_NEEDED and any(l.startswith('[RED] aot: ') and want in l for l in r.stdout.splitlines())
-            if not ok:
-                bad += 1
-                print(f'{nro:<20} {"miss":<24} FAIL     exit {r.returncode}, last line {(r.stdout.strip().splitlines() or ["-"])[-1]!r}')
-            else:
-                red = [l for l in r.stdout.splitlines() if l.startswith('[RED] aot: ')][0]
-                print(f'{nro:<20} {"miss":<24} {"ok":<8} exit {r.returncode}: {red}')
     total = len(rows) * len(configs)
     print(f'corpus native run: {len(rows)} NROs x {len(configs)} configurations ({total} runs) and the dispatcher checks, {bad} failures')
     return 1 if bad else 0

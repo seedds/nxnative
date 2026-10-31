@@ -451,8 +451,8 @@ Integration:
   ```
 
 - Configuration [V for the fields]: `fastmem_pointer = 0` with the arena's address bits (one-to-one addresses), `fastmem_exclusive_access = true`, one `global_monitor` for every thread, `tpidr_el0` and `tpidrro_el0` pointing into the state block, `cntfrq_el0 = 19200000`, `ctr_el0 = 0x40000` (the rewriter's value), `dczid_el0 = 4`, `wall_clock_cntpct` with `GetCNTPCT` reading the host clock, `enable_cycle_counting = false`, and `CallSVC` calling `svc_dispatch` on the block. Its own handling of fastmem faults must run after the host's dirty-tracking hook [A].
-- Leaving the JIT for compiled code needs a small patch: a hook in its block lookup that stops `Run()` when the next block's address is a compiled entry [A].
-- Handing over state copies 31 general registers, SP, PC, 32 vector registers, NZCV, FPCR and FPSR between the block and the JIT, about 100 ns [A].
+- Leaving the JIT for compiled code needs no patch [V: phase 3]: the memory-read-code callback returns no instruction at a compiled entry and at a compiled call site's return address, so the block there ends in dynarmic's no-execute fault, whose `ExceptionRaised` callback halts `Run()` at no cost per executed block; `dm_jit_run` single-steps such an address first when it must run it itself (the alternative, one block per `Run()` with a host check, measured 40 to 45 ns per block against 4.7 to 4.9).
+- Handing over state copies 31 general registers, SP, PC, 32 vector registers, NZCV, FPCR and FPSR between the block and the JIT, about 100 ns [V: measured 102 to 109 ns both ways, dm/tools/aot/README.md, "Phase 3: the JIT fallback, safepoints, threads"].
 - One JIT instance per thread, made at its first use, with a small code cache (16 MB; dynarmic's default is 128 MB [V]).
 
 ## 12. Testing and verification

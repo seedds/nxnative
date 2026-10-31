@@ -3,7 +3,9 @@
 // integers, compares) over special values (signed zeros, infinities, quiet and signalling NaNs with payloads, denormals, the largest and
 // smallest normals, ties), single and double precision. Each instruction runs alone in inline assembly; its result bits are checked against the
 // result the Arm ARM's pseudocode gives with FPCR = 0, which gen_fp.py computes into fp_cases.h. One line per operation and precision: the
-// mismatches, then a digest of the results; the first mismatches are printed whole.
+// mismatches, then a digest of the results; the first mismatches are printed whole. Last, FPCR away from FPCR = 0 (design 7.1 and 11, case 3):
+// a function that divides under round towards zero and restores FPCR before it returns, and one that leaves round towards minus infinity to its
+// caller, which divides under it and restores FPCR itself; recompiled code specialised for FPCR = 0 hands both continuations to the JIT.
 #include "rt.h"
 #include "fp_cases.h"
 
@@ -26,6 +28,28 @@ static double from_d(uint64_t u) {
     double f;
     memcpy(&f, &u, 8);
     return f;
+}
+
+// ---- FPCR's rounding mode (RMode, bits 23:22: RN 0, RP 1, RM 2, RZ 3) ----
+static RT_NOINLINE uint64_t fpcr_get(void) {
+    uint64_t v;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(v));
+    return v;
+}
+static RT_NOINLINE void fpcr_set(uint64_t v) {
+    __asm__ volatile("msr fpcr, %0" : : "r"(v) : "memory");
+}
+static double fdiv(double a, double b) {
+    double q;
+    __asm__ volatile("fdiv %d0, %d1, %d2" : "=w"(q) : "w"(a), "w"(b));
+    return q;
+}
+static RT_NOINLINE double div_rz(double a, double b) {
+    const uint64_t old = fpcr_get();
+    __asm__ volatile("msr fpcr, %0" : : "r"(old | (3u << 22)) : "memory");
+    const double q = fdiv(a, b);
+    __asm__ volatile("msr fpcr, %0" : : "r"(old) : "memory");
+    return q;
 }
 
 #define BIN(insn) __asm__ volatile(insn " %s0, %s1, %s2" : "=w"(r) : "w"(fa), "w"(fb)); return bits_s(r)
@@ -200,5 +224,16 @@ int main(void) {
             RT_CHECK32(name, bad[k][p], 0);
         }
     }
+
+    const double ten = from_d(RT_OPAQUE(0x4024000000000000ull)), one = from_d(RT_OPAQUE(0x3FF0000000000000ull));
+    RT_CHECK64("fpcr.rn", bits_d(fdiv(one, ten)), 0x3FB999999999999Aull);
+    RT_CHECK64("fpcr.rz", bits_d(div_rz(one, ten)), 0x3FB9999999999999ull);
+    RT_CHECK64("fpcr.rz_restored", fpcr_get() & (3u << 22), 0);
+    const uint64_t old = fpcr_get();
+    fpcr_set(old | (2u << 22));  // RMode = RM, left to this caller
+    const double q = fdiv(from_d(RT_OPAQUE(0xBFF0000000000000ull)), ten);
+    fpcr_set(old);
+    RT_CHECK64("fpcr.rm_caller", bits_d(q), 0xBFB999999999999Aull);
+    RT_CHECK64("fpcr.rm_restored", fpcr_get(), old);
     return rt_finish();
 }

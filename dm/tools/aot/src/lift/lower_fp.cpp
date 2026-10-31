@@ -664,6 +664,9 @@ bool FunctionLifter::LowerFP(IR::Inst& inst) {
         const unsigned rounding = inst.GetArg(1).GetU8();
         const bool native_rounding = rounding == RMode();
         const bool f16_native = opts.target.f16c && !AHP() && !FZ16();
+        if (from == 32 && to == 16 && DN() && !AHP() && !FZ16()) {
+            Note(kIssueToHalfSignallingNaN);  // dynarmic's F16C path; the lowering raises IOC for a signalling NaN as Arm's FPConvert does
+        }
         if ((from == 32 && to == 64) || (from == 64 && to == 32)) {
             if (native_rounding) {
                 // cvtss2sd / cvtsd2ss: a P operation (x86 converts NaNs as Arm's FPConvertNaN does; DN forces the default NaN)

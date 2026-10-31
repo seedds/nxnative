@@ -33,6 +33,9 @@ dc0	2bc	func	global	rt_relocate
 1190	18	func	global	_Unwind_Resume
 11b0	18	func	global	__gcc_personality_v0
 11d0	0	map	local	$x.0
-11d0	440	func	global	main
-1610	240	func	local	run_s
-1850	240	func	local	run_d
+11d0	5a8	func	global	main
+1780	240	func	local	run_s
+19c0	240	func	local	run_d
+1c00	34	func	local	div_rz
+1c40	8	func	local	fpcr_get
+1c50	8	func	local	fpcr_set

@@ -30,6 +30,7 @@ struct BuildOptions {
     bool count_spills = false;                      // also compile to assembly and count the register allocator's spills and reloads
     std::string asm_path;                           // also write that assembly here (and count them)
     bool no_inline = false;                         // keep every guest function out of line (nxaot_bench measures calls)
+    bool safepoints = true;                         // polls at function entries and backward branches (section 6.2); off: --no-safepoints
 };
 
 struct BuildStats {

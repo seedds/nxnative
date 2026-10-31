@@ -18,6 +18,7 @@
 #include "build/pack.h"
 #include "module/image.h"
 #include "rt/host.h"
+#include "rt/jit.h"
 
 namespace nxaot::bench {
 
@@ -526,6 +527,121 @@ int RunCalls(const CallsOptions& o) {
             }
             std::printf("  %-4s %10" PRIu64 " %12.0f %12.0f %14.0f %12.4f %10" PRIu64 " %10" PRIu64 "\n", build::TierName(tier), words, words / analyse,
                         words / lift_s, words / compile, link / static_cast<double>(corpus.size()), text / 1024, peak / 1024);
+        }
+    }
+
+    if (o.polls || o.jit) {
+        // Phase 3 (design sections 6.2 and 11): int_ops-gcc built with and without safepoint polls, run natively and in the JIT fallback
+        const std::string nro = o.corpus + "/nro/int_ops-gcc.nro";
+        std::string err;
+        const auto image = module::LoadModule(nro, &err);
+        if (!image) {
+            std::printf("[RED] nxaot_bench: %s\n", err.c_str());
+            return 1;
+        }
+        Built polled, unpolled;
+        build::BuildOptions bo;
+        bo.cpu = o.cpu;
+        if (!BuildSo(*image, bo, Join(o.work, "int_ops.polls"), &polled, &error)) {
+            std::printf("[RED] nxaot_bench: int_ops: %s\n", error.c_str());
+            return 1;
+        }
+        bo.safepoints = false;
+        if (!BuildSo(*image, bo, Join(o.work, "int_ops.nopolls"), &unpolled, &error)) {
+            std::printf("[RED] nxaot_bench: int_ops: %s\n", error.c_str());
+            return 1;
+        }
+        // The fastest of o.repeats runs of _start (a host per configuration: the arena is one reservation per process)
+        const auto best_of = [&](const std::string& so, const rt::Options& ro, rt::Result* out) -> double {
+            auto host = rt::Host::Create(so, *image, ro, &error);
+            if (!host) {
+                return -1;
+            }
+            double best = 1e30;
+            for (int r = 0; r < o.repeats; ++r) {
+                const rt::Result res = host->RunStart();
+                if (res.status != rt::kExited) {
+                    error = res.message;
+                    return -1;
+                }
+                if (res.seconds < best) {
+                    best = res.seconds;
+                    if (out) {
+                        *out = res;
+                    }
+                }
+            }
+            return best;
+        };
+        if (o.polls) {
+            rt::Options ro;
+            ro.quiet = true;
+            ro.sets.emplace_back("int_ops_rounds", std::to_string(o.rounds));
+            const double with = best_of(polled.so, ro, nullptr), without = best_of(unpolled.so, ro, nullptr);
+            if (with < 0 || without < 0) {
+                std::printf("[RED] nxaot_bench: polls: %s\n", error.c_str());
+                return 1;
+            }
+            std::printf("\nsafepoint polls (design 6.2: function entries and backward branches) on int_ops-gcc.nro, int_ops_rounds = %" PRIu64
+                        ", best of %d:\n", o.rounds, o.repeats);
+            std::printf("  %-26s %10.4f s, text %" PRIu64 " bytes\n", "with polls (the default)", with, polled.stats.text_bytes);
+            std::printf("  %-26s %10.4f s, text %" PRIu64 " bytes\n", "without (--no-safepoints)", without, unpolled.stats.text_bytes);
+            std::printf("  the polls cost %+.1f %% of the run time, %+.1f %% of the text\n", (with / without - 1) * 100,
+                        (static_cast<double>(polled.stats.text_bytes) / static_cast<double>(unpolled.stats.text_bytes) - 1) * 100);
+        }
+        if (o.jit) {
+            rt::Options ro;
+            ro.quiet = true;
+            ro.jit_log = false;
+            ro.sets.emplace_back("int_ops_rounds", std::to_string(o.jit_rounds));
+            const double native = best_of(polled.so, ro, nullptr);
+            ro.jit = rt::JitMode::All;
+            rt::Result free_run, stepped;
+            const double jit_all = best_of(polled.so, ro, &free_run);
+            ro.jit_one_block = true;
+            const double one_block = best_of(polled.so, ro, &stepped);
+            if (native < 0 || jit_all < 0 || one_block < 0) {
+                std::printf("[RED] nxaot_bench: jit: %s\n", error.c_str());
+                return 1;
+            }
+            const double blocks = static_cast<double>(stepped.jit_run_calls);
+            // The hand-over alone, a minimal round trip (into dm_jit_run and out at a block with no code), an instance's creation
+            auto host = rt::Host::Create(polled.so, *image, rt::Options{}, &error);
+            if (!host) {
+                std::printf("[RED] nxaot_bench: jit: %s\n", error.c_str());
+                return 1;
+            }
+            alignas(64) static dm_guest_state st;
+            std::memset(&st, 0, sizeof st);
+            st.sp = rt::kStackBase + rt::kStackSize;
+            auto t0 = std::chrono::steady_clock::now();
+            dm_jit* j = dm_jit_create(&st);
+            const double create = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            double handover = 1e30, round = 1e30;
+            for (int r = 0; r < o.repeats; ++r) {
+                handover = std::min(handover, dm_jit_measure_handover(j, 1000000));
+                dm_jit_run(j, rt::kHostReturn);  // its block (no code) compiled once
+                const unsigned n = 200000;
+                t0 = std::chrono::steady_clock::now();
+                for (unsigned i = 0; i < n; ++i) {
+                    dm_jit_run(j, rt::kHostReturn);
+                }
+                round = std::min(round, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / n);
+            }
+            dm_jit_destroy(j);
+            std::printf("\nthe JIT fallback (design 11) on int_ops-gcc.nro, int_ops_rounds = %" PRIu64 ", best of %d:\n", o.jit_rounds, o.repeats);
+            std::printf("  %-44s %10.4f s\n", "compiled (mixed: no JIT entry)", native);
+            std::printf("  %-44s %10.4f s, %" PRIu64 " dm_jit_run, %" PRIu64 " Run() calls\n", "everything in the JIT (--jit-all)", jit_all,
+                        free_run.jit_runs, free_run.jit_run_calls);
+            std::printf("  %-44s %10.4f s, %.0f blocks\n", "one block per Run(), the next pc checked (--jit-one-block)", one_block, blocks);
+            // Per block: the time inside dm_jit_run (the instance's creation, about the figure below, is outside it), JIT compilation included
+            const double in_jit = free_run.jit_seconds, in_stepped = stepped.jit_seconds;
+            std::printf("  per block (time in dm_jit_run): %.2f ns in the JIT, %.2f ns with a Run() and a host check per block (+%.2f ns); compiled "
+                        "code %.1fx as fast as the JIT\n",
+                        in_jit / blocks * 1e9, in_stepped / blocks * 1e9, (in_stepped - in_jit) / blocks * 1e9, in_jit / native);
+            std::printf("  hand-over (31 x, SP, PC, 32 v, NZCV, FPCR, FPSR into the JIT and back): %.1f ns; a dm_jit_run round trip that stops at "
+                        "once: %.1f ns; a new instance (16 MB code cache): %.2f ms\n",
+                        handover * 1e9, round * 1e9, create * 1e3);
         }
     }
     return 0;

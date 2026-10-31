@@ -46,8 +46,10 @@ jobs:
       # Time budget: the committed vectors (179,296, most of them floating point and SIMD) take about 4 minutes on an 8-thread machine, and they run
       # once, in the runner, which logs them; CTest runs the other tests (the crypto vectors for x86-64-v3, the per-operation NaN mode, the reach
       # check, the census, the vectors-current check, discovery over the corpus, the manifest test, the corpus reference run under dynarmic, and
-      # phase 1's corpus_native, the 14 NROs recompiled in 4 configurations and run natively, about 45 s on that machine, and corpus_funcdiff,
-      # every function of every NRO against dynarmic in two modes, about 100 s; the runner repeats both, and its benchmark adds about 3 minutes).
+      # phase 1's corpus_native, the 18 NROs recompiled in 4 configurations and run natively, about 2.5 minutes on that machine, and
+      # corpus_funcdiff, every function of every NRO against dynarmic in two modes, about 2.5 minutes; phase 3's corpus_jit, every NRO natively, in the JIT and with no
+      # JIT, about 35 s, corpus_threads, the threaded programs 30 times each, about 11 s, and safepoints, the pause test, about 7 s; the runner
+      # repeats them all, and its benchmark adds about 3 minutes and its JIT and poll sections about 10 s).
       # Should the job outgrow its budget, trim the committed set (words_per_entry and seeds_per_word in dm/tools/aot/tests/gen_fp_simd.py), not
       # the classes it covers
       - name: CTest (all but the full vector run)

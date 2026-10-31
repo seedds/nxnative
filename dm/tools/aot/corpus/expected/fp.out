@@ -162,4 +162,9 @@ fp.ucvtf.s.digest 7b9ab5382c26ea35
 fp.ucvtf.s 00000000 ok
 fp.ucvtf.d.digest d50621ca30d1844b
 fp.ucvtf.d 00000000 ok
-PASS 82
+fpcr.rn 3fb999999999999a ok
+fpcr.rz 3fb9999999999999 ok
+fpcr.rz_restored 0000000000000000 ok
+fpcr.rm_caller bfb999999999999a ok
+fpcr.rm_restored 0000000000000000 ok
+PASS 87

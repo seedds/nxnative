@@ -8,8 +8,11 @@ module loader (NROs and behaviour images with their manifests), function discove
 exclusive windows and interprocedural summaries, a corpus of self-checking homebrew NROs with no game files, whole functions lifted with the calling
 convention of design 2.3 (calls, returns checked against lr, real tail calls, non-local returns), the dispatcher of section 4 (jump tables as
 switches, inline caches, the lookup table), the pack stage (`nxaot build`: one object and one shared object per module, linked by lld as a
-library), and a minimal native run time (`nxaot_host`): the fourteen corpus NROs run natively on x86-64 and print what dynarmic prints. No game runs
-through it yet, and nothing here touches the Apple builds.
+library), and a minimal native run time (`nxaot_host`); and phase 3: the JIT fallback of design section 11 on the vendored dynarmic, unmodified
+(what has no compiled entry runs in it and comes back to compiled code at the next compiled entry), non-local control flow through native frames
+and through the JIT (C++ exceptions entering LSDA landing pads, fibers, a return past the caller), guest threads on host threads with Horizon's
+thread and synchronization SVCs, and the safepoints of section 6.2. The eighteen corpus NROs run natively on x86-64, with everything in the JIT and
+with no JIT, and print what dynarmic prints. No game runs through it yet, and nothing here touches the Apple builds.
 
 ## What exists
 
@@ -24,16 +27,18 @@ through it yet, and nothing here touches the Apple builds.
 | ORC JIT | [src/lift/jit.cpp](src/lift/jit.cpp) | LLVM 18 ORC LLJIT, the default O2 pipeline, the host's CPU (`getHostCPUName` and its features) or a named level (`--cpu x86-64-v3`); the helpers as absolute symbols; the x86 assembly of a module (nxaot_bench) |
 | Vector harness | [src/vec/](src/vec/) (`nxaot_vec`) | every vector on dynarmic's own A64 JIT (the reference) and as lifted code, from one initial state; compares x0..x30, SP, NZCV, FPCR, FPSR (QC and the cumulative flags), TPIDR_EL0, v0..v31, the exit (pc, reason, svc number) and the 64 KiB memory image byte for byte. It runs lifted code as a host gate would: MXCSR from FPCR before, its flags into FPSR after, and a continuation lifted for the new pc and FPCR after a normal exit inside the code (`msr fpcr`) |
 | Vectors | [tests/vectors/](tests/vectors/), written by [tests/gen_vectors.py](tests/gen_vectors.py) and [tests/gen_fp_simd.py](tests/gen_fp_simd.py) | 179,296 vectors: 24,400 integer ones as `.tsv` (encodings written by hand from the Arm ARM), 154,896 floating-point and SIMD ones as `.tsv.gz` (every form of dynarmic's decoder table, fields swept, lanes of special values, 13 FPCR values: the variants of design section 12 and mixes) |
-| Benchmark | [src/bench/main.cpp](src/bench/main.cpp), [calls.cpp](src/bench/calls.cpp) (`nxaot_bench`) | the cost of the NaN-chain checks, the x86 instructions lifted code compiles to, the instructions per guest memory access; the two calling conventions on synthetic call chains and on the corpus (time per call, spills), the dispatcher per `blr` hit and miss, a jump table, int_ops natively against dynarmic, the pack stage's throughput per tier ("Measurements") |
+| Benchmark | [src/bench/main.cpp](src/bench/main.cpp), [calls.cpp](src/bench/calls.cpp) (`nxaot_bench`) | the cost of the NaN-chain checks, the x86 instructions lifted code compiles to, the instructions per guest memory access; the two calling conventions on synthetic call chains and on the corpus (time per call, spills), the dispatcher per `blr` hit and miss, a jump table, int_ops natively against dynarmic, the pack stage's throughput per tier; the safepoint polls' cost, the JIT fallback's hand-over, round trip, cost per block and instance creation ("Measurements") |
 | Census | [src/analysis/census.cpp](src/analysis/census.cpp) (`nxaot census`) | phase 0's numbers over a raw code blob as `key<TAB>count` lines |
 | Reach | [src/analysis/reach.cpp](src/analysis/reach.cpp) (`nxaot opcodes --reach`) | every entry of dynarmic's A64 decoder table translated with random fields: the opcodes the A64 frontend can emit; `--check` fails when one is not lowered |
 | Module loader | [src/module/](src/module/) (`nxaot module`, `nxaot image`, `nxaot manifest`) | an NRO, or a behaviour image with its manifest (design 1.1, 1.2), as one image keyed by its SHA-256 (1.4): segments, MOD0, the dynamic section, symbols, init and fini arrays, RELA / JMPREL / RELR relocations, `.eh_frame_hdr`, FDEs, LSDAs, data blocks in text; the manifest parser and writer ("Module loader and discovery") |
 | Discovery | [src/analysis/discover.cpp](src/analysis/discover.cpp), [jumptable.cpp](src/analysis/jumptable.cpp), [summary.cpp](src/analysis/summary.cpp) (`nxaot discover`) | design 1.3 over a whole module: function entries from every source with their provenance, a CFG per function, jump tables on the lifted IR, exclusive windows, the summaries of 2.3, the coverage of the text |
-| Reference runner | [src/run/main.cpp](src/run/main.cpp) (`nxaot_run`) | a corpus NRO under dynarmic's A64 JIT with the corpus's two SVCs: the corpus's reference output on x86; `--set` writes a symbol before the run, `--fastmem` gives dynarmic direct memory access (the throughput comparison) |
-| Corpus | [corpus/](corpus/) | seven self-checking C programs with a crt0 of their own, built with devkitA64 and with clang into fourteen committed NROs ("The corpus") |
+| Reference runner | [src/run/main.cpp](src/run/main.cpp) (`nxaot_run`) | a corpus NRO under dynarmic's A64 JIT with the corpus's SVCs (output, exit, the thread and synchronization SVCs, its guest threads as contexts switched round robin on one JIT: a deterministic interleaving): the corpus's reference output on x86; `--set` writes a symbol before the run, `--fastmem` gives dynarmic direct memory access (the throughput comparison) |
+| Corpus | [corpus/](corpus/) | nine self-checking programs (eight in C, one in C++) with a crt0 of their own, built with devkitA64 and with clang into eighteen committed NROs ("The corpus") |
 | Function mode | [src/lift/lower_calls.cpp](src/lift/lower_calls.cpp), [lifter.h](src/lift/lifter.h) (`FunctionPlan`, `Convention`) | one guest function as one LLVM function of the convention of design 2.3, swifttailcc or ghccc: calls, returns checked against lr, tail calls, the inline caches, svc as a host call, the stores and reloads the summaries allow ("Calls and returns") |
 | Pack stage | [src/build/](src/build/) (`nxaot build`) | the convention facts of a module (PASS, WRITES, LIVE_AFTER, RV, resume points: [plan.h](src/build/plan.h)), every function lifted into one module with the standard entries, the lookup table, the function map, the line table and the descriptor of [include/nxaot/aot_module.h](include/nxaot/aot_module.h); the tiers of design 9.3; an object, and a shared object by lld as a library |
-| Native run time | [src/rt/](src/rt/) (`nxaot_host`) | the arena below 2^39, the image at its one-to-one address, the library by `dlopen` with its identity checked, the state block, the SVC path, the dispatcher's miss path, traps and faults through the line table, the counter ("The native run time") |
+| Native run time | [src/rt/](src/rt/) (`nxaot_host`) | the arena below 2^39, the image at its one-to-one address, the library by `dlopen` with its identity checked, the state blocks, the SVC path, the dispatcher's miss path, traps and faults through the line table, the counter ("The native run time") |
+| JIT fallback | [src/rt/jit.h](src/rt/jit.h), [jit.cpp](src/rt/jit.cpp), the driver in [host.cpp](src/rt/host.cpp) | design 11: dynarmic's A64 JIT per guest thread behind `dm_jit_create` / `dm_jit_run` / `dm_jit_halt`, stopping at compiled entries and compiled call sites' returns with dynarmic unmodified, the hand-over of the register file both ways, the driver that takes compiled entries natively from it and propagates non-local transfers ("The JIT fallback") |
+| Threads and safepoints | [src/rt/host.cpp](src/rt/host.cpp), the polls in [lower_calls.cpp](src/lift/lower_calls.cpp) | design 6.1 to 6.5: guest threads on host threads with a state block and a native stack each, Horizon's thread and synchronization SVCs, the shared exclusive monitor; the polls of 6.2 and the pause protocol of dm/host's `SetThreadActivity`, with a pause test (`nxaot_host --pause-test`) ("Threads and safepoints") |
 | Per-function differential test | [src/rt/funcdiff.cpp](src/rt/funcdiff.cpp) (`nxaot_funcdiff`) | every function of a module from one register and memory snapshot under the recompiled code and under dynarmic, final registers and written memory compared (design 12, item 2) |
 | Runner | [tests/run_aot_tests.sh](tests/run_aot_tests.sh) | runs the tests and the benchmark and writes `logs/aot/` ([logs/README.md](../../../logs/README.md)) |
 | CI | [.github/workflows/aot.yml](../../../.github/workflows/aot.yml) | the image, the build, CTest and the runner on every pull request and push to `main` and `multiplataforma` |
@@ -51,7 +56,8 @@ docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 
 # configure, build, CTest (the vectors, the crypto vectors for x86-64-v3, the per-operation NaN mode, the reach check, the census, the vectors-current
 # check, discovery over the corpus, the manifest test, the corpus reference run, the fp cases current, the corpus run natively, the per-function
-# differential test); --tmpfs /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on a machine short of disk
+# differential test, the JIT fallback's three modes, the threaded programs, the safepoint pause test); --tmpfs /src/build:exec,uid=$(id -u),gid=$(id -g)
+# keeps the build tree in memory on a machine short of disk
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
 
@@ -68,8 +74,9 @@ already, and its packages are the Ubuntu 24.04 versions of the day it is built: 
 Linking: `libLLVM-18.so` from the image (the Ubuntu package is built with `LLVM_LINK_LLVM_DYLIB`); `-DNXAOT_LLVM_STATIC=ON` links the component
 libraries statically instead, as the distributed `nxaot` will be (design section 13). zlib (which LLVM itself links) reads the `.tsv.gz` vectors; lld's
 ELF driver (`liblldELF.a`, the image's `liblld-18-dev`) links the packs. The build tree takes about 74 MB, and the tests' objects and shared objects
-(corpus_native, corpus_funcdiff, the benchmark) about 56 MB more. On this repository's development machine (8 threads) the CTest run takes about 9
-minutes: the vectors 4 of them, corpus_native and corpus_funcdiff 1.5 each.
+(corpus_native, corpus_funcdiff, corpus_jit, corpus_threads, safepoints, the benchmark) about 30 to 60 MB more. On this repository's development
+machine (8 threads) the CTest run takes about 13 minutes: the vectors 4.5 of them, corpus_native and corpus_funcdiff 2.5 each, corpus_jit,
+corpus_threads and safepoints about a minute together.
 
 ## Running the harness and the census
 
@@ -203,12 +210,17 @@ upstream clang. [corpus/](corpus/):
 | `fp` | the operations of design 7.2 over special values, single and double: 5,928 cases whose results [corpus/gen_fp.py](corpus/gen_fp.py) computes from the Arm ARM's pseudocode (`FPAdd`, `FPMulAdd`, `FPRecipEstimate`, `FPToFixed`, `FPRoundInt`, ...) with FPCR = 0 |
 | `simd` | NEON intrinsics lane by lane against scalar references, the floating-point vector forms against the scalar instructions |
 | `sjlj` | setjmp / longjmp of [corpus/rt/setjmp.S](corpus/rt/setjmp.S): second returns, deep recursion, a handler stack, callee-saved registers |
-| `excl` | the C11 atomics of every width as `ldaxr` / `stlxr` loops, compare-and-swap, 128-bit pairs, `clrex`, a spin lock, an ABA-sensitive lock-free pop |
+| `excl` | the C11 atomics of every width as `ldaxr` / `stlxr` loops, compare-and-swap, 128-bit pairs, `clrex`, a spin lock, an ABA-sensitive lock-free pop; then with threads ([corpus/rt/thread.h](corpus/rt/thread.h)): two workers released together (`svcWaitForAddress` / `svcSignalToAddress`) increment shared counters through an `ldaxr` / `stlxr` loop, a compare-and-swap loop, an `ldaxp` / `stlxp` pair and a libnx-style mutex (`svcArbitrateLock` / `svcArbitrateUnlock` when contended), 100,000 times each, with the exact totals checked; a third thread runs the register-invariant loop of [corpus/rt/pause.S](corpus/rt/pause.S) (`excl_pause_iterations`, exported, 20 million by default) that the pause test checks; the main thread sleeps (`svcSleepThread`), releases and joins them (`svcWaitSynchronization`) |
+| `except` | C++ exceptions through the LSDA tables (design 3.4), [corpus/src/except.cpp](corpus/src/except.cpp) built as C++ with `-fexceptions` and no C++ library: objects whose destructors give every frame cleanup landing pads, thrown through deep recursion, a call through a pointer, a frame without cleanups, nested catchers and a rethrow, by the minimal personality-free unwinder of [corpus/rt/unwind.c](corpus/rt/unwind.c) (the FDE from `.eh_frame_hdr`, the CFA program, the LSDA's call-site table, the pad entered by a `ret` as libunwind and libgcc do it, `_Unwind_Resume`, a setjmp catcher); the destructors' count and order, callee-saved values across the unwind, the unwinder's frame and pad counts |
+| `fiber` | stack switching by hand ([corpus/rt/fiber.S](corpus/rt/fiber.S), two stacks besides the main one): a generator fiber, a ring of two fibers that switch from inside recursions, callee-saved registers across switches, and a callee that returns to its caller's caller; every switch returns to a call site that is not the caller's |
 
 The run time ([corpus/rt/](corpus/rt/)): `crt0.S` lays out an NRO's start as libnx's does (a branch over the header, MOD0's offset at +4, MOD0 in the
 text), sets SP to a stack of its own, relocates the module unless a loader did, points `tpidr_el0` at the TLS block, runs `DT_INIT` and the init
 array, calls `main` and leaves through `svcExitProcess`; `rt.c` prints one line per `svcOutputDebugString` (`dm/host/hle_svc.c` answers it) and
-ends with `PASS <checks>` or `FAIL <failed> of <checks>`; `mem.S` has `memcpy` and its kin, `nro.ld` the layout both linkers read.
+ends with `PASS <checks>` or `FAIL <failed> of <checks>`; `mem.S` has `memcpy` and its kin, `nro.ld` the layout both linkers read. For single
+programs: `thread.S` (Horizon's thread and synchronization SVCs as libnx wraps them), `thread.c` (a thread with its stack and TLS block, a mutex),
+`pause.S` (the register-invariant loop), `unwind.c` / `unwind.S` (the unwinder; built with `RT_UNWINDER`, rt.c then leaves `_Unwind_Resume` to it),
+`fiber.S` (the context switch and the return past the caller).
 
 ```sh
 sh dm/tools/aot/corpus/build_corpus.sh            # build both toolchains in Docker, write corpus/nro/ and corpus/corpus.tsv
@@ -221,17 +233,18 @@ python3 dm/tools/aot/corpus/gen_fp.py             # after a change to the fp cas
 
 GCC is devkitA64 15.2.0 from `devkitpro/devkita64:20260219` pinned by digest in `build_corpus.sh` (pulled on first use: about 700 MB compressed);
 with `DKP_ROOT` the same binaries run in the `nxnative-aot` image from a devkitPro tree, which `fetch_devkita64.py` extracts from the pinned image's
-layer (every digest checked, 190 MB) for a machine without the disk room for the image. clang is the image's clang-18 (`--target=aarch64-none-elf`).
-Common flags: `-O2 -mcpu=cortex-a57 -mno-outline-atomics -ffreestanding -fPIE -fno-stack-protector -ffp-contract=off -fno-math-errno`, PIE links with
+layer (every digest checked, 228 MB with the C++ compiler the except program needs) for a machine without the disk room for the image. clang is
+the image's clang-18 (`--target=aarch64-none-elf`). Common flags: `-O2 -mcpu=cortex-a57 -mno-outline-atomics -ffreestanding -fPIE
+-fno-stack-protector -ffp-contract=off -fno-math-errno` (C++: `-std=gnu++17 -fno-rtti -fno-threadsafe-statics` instead of `-std=gnu11`), PIE links with
 `--export-dynamic --hash-style=sysv --build-id=sha1` (GNU ld: RELA relocations; ld.lld: `-z pack-relative-relocs`, RELR); `corpus.tsv` lists
 every NRO with its compiler, flags and SHA-256. [tests/elf2nro.py](tests/elf2nro.py) writes the NROs (and the symbol tables `test_discover.py` compares
 with), byte for byte what devkitPro's `elf2nro` writes, which `build_corpus.sh` checks on every build. The builds are reproducible: no timestamps,
 paths relative to the corpus folder, build IDs over the content; `--check` rebuilds byte-identically.
 
 Run so far: under dynarmic (`nxaot_run`, CTest `corpus_ref`) and recompiled on x86-64 (`nxaot build` and `nxaot_host`, CTest `corpus_native`: both
-conventions, the correctness mode and the max mode): all fourteen NROs print `PASS`, the GCC and clang builds of each program the same lines, recorded
-in [corpus/expected/](corpus/expected/), and the native runs exactly what dynarmic prints. Not run: natively on ARM64 hardware (an Apple-silicon Mac;
-nothing here can). `int_ops` reads an exported `int_ops_rounds` (1 in the committed output) that a runner may set before the run (`--set
+conventions, the correctness mode and the max mode; CTest `corpus_jit`: with everything in the JIT and with no JIT): all eighteen NROs print `PASS`,
+the GCC and clang builds of each program the same lines, recorded in [corpus/expected/](corpus/expected/), and the native runs exactly what dynarmic
+prints. Not run: natively on ARM64 hardware (an Apple-silicon Mac; nothing here can). `int_ops` reads an exported `int_ops_rounds` (1 in the committed output) that a runner may set before the run (`--set
 int_ops_rounds=N`): its operation loop then runs N times, which the throughput measurement uses.
 
 ## Calls and returns
@@ -249,7 +262,7 @@ next function by a tail call). Design 2.3, 3.3 and 4, as implemented:
 - **The convention's facts** (`FnFacts`): PASS = x0..x3 and the passable registers the function may read (its summary's `reads`); WRITES = the
   summary's `writes`, plus v8..v15 when the function writes them at all (a `ldr d8` restore zeroes the high half, which callers must not keep);
   LIVE_AFTER, a fixed point over every call site of the module (what is read before being written after the call; a tail call passes on its own
-  function's; an indirect site counts for every standard entry; the host reads x0, x1, v0..v3); RV, the v0..v3 returned in host registers: the
+  function's; an indirect site counts for every standard entry; the host and the JIT read x0, x1, v0..v3 and SP); RV, the v0..v3 returned in host registers: the
   same over every chain of tail calls (a component of the tail-call graph; every standard entry is in one), the ones every returning member writes.
 - **Registers** live in allocas as in a region; at entry the passed ones come from the arguments, the rest from the block (unused loads go). A
   forward data flow over the function's blocks gives the **dirty** registers (newer than their block copy) at every block end. A call stores
@@ -272,9 +285,9 @@ next function by a tail call). Design 2.3, 3.3 and 4, as implemented:
   compare folds away where x30 is never written); else the whole register file to the block, the target in `st->pending` and a native return.
   After every call one compare and branch on `st->pending`: a resume point of the call site (the LSDA landing pad covering it; every setjmp
   continuation of the function, setjmp found by symbol) entered with this frame's SP takes it, reloading every register; otherwise the frame
-  returns at once, and the host dispatches what reaches it as a new call (a target with no compiled entry stops with the JIT-needed status: the
-  resume of a continuation in the middle of a function is the JIT's, phase 3). The sjlj program's longjmps (deep recursion, through a function
-  pointer, nested handlers, callee-saved registers) all resume this way.
+  returns at once, and the host dispatches what reaches it as a new call (a target with no compiled entry, a continuation in the middle of a
+  function, runs in the JIT: "The JIT fallback"). The sjlj program's longjmps (deep recursion, through a function pointer, nested handlers,
+  callee-saved registers) and the except program's landing pads (entered by its unwinder's `ret`, past every frame between) all resume this way.
 - **Calls and tail calls**: `bl` is a call of the callee's body with `lr = base + pc + 4`; `b`, `b.cond`, `cbz`, `tbz` to another function and a
   fall into the next one are `musttail` calls; a call the summaries say does not return traps if it returns.
 - **Indirect branches** (4): a recovered jump table is an LLVM `switch` over module offsets (the target minus the base), a native jump table, its
@@ -288,9 +301,10 @@ next function by a tail call). Design 2.3, 3.3 and 4, as implemented:
   wherever the host maps it (`*desc->base`, one invariant load per function). Each block is translated a second time 2^44 higher, and every 64-bit
   immediate that moved by exactly that much is such an address, lowered as `base + offset`.
 - **Host calls**: `svc` stores the dirty registers and `st->pc`, calls `dm_aot_svc(st, n)` (the C convention) and reloads x0..x8 (2.4); `mrs
-  cntpct_el0` is a `preserve_most` call of `dm_aot_cntpct` (8); `brk`, `udf`, undefined words, branches into the middle of other functions and `msr
-  fpcr` leaving the specialisation call `nxaot_rt_trap` with a reason (`include/nxaot/aot_module.h`). A function the lifter refuses becomes a body
-  that traps to the JIT (none in the corpus).
+  cntpct_el0` is a `preserve_most` call of `dm_aot_cntpct` (8); `brk`, `udf` and undefined words call `nxaot_rt_trap` with a reason
+  (`include/nxaot/aot_module.h`); branches into the middle of other functions go through `jit_entry`, and `msr fpcr` leaving the specialisation,
+  untranslated encodings and code that runs into no entry hand the rest of the function to `nxaot_rt_jit` ("The JIT fallback"). A function the
+  lifter refuses becomes a body that runs it in the JIT from its entry (none in the corpus). Safepoint polls: "Threads and safepoints".
 - **Tables in the object** ([include/nxaot/aot_module.h](include/nxaot/aot_module.h)): `.nxaot.lookup` (open addressing, module offset ->
   standard entry, self-relative), `.nxaot.fnmap` (every function's body and size), `nxaot_lines` (the line table, 3.5: every guest memory access's
   native address and guest offset, written by LLVM's `!pcsections`; LLVM 18 keeps those on memory instructions only, so call sites map through the
@@ -308,15 +322,20 @@ ended: the `exact` rule above).
 ```sh
 build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro       # the lines, as nxaot_run prints them; exit status of the run
 build/aot/nxaot_host /tmp/x/int_ops.so dm/tools/aot/corpus/nro/int_ops-gcc.nro --set int_ops_rounds=200 --quiet --repeat 5
-build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --relocate --set hidden_ptr=@0x1844   # a target with no entry: exit 3
+build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --relocate --set hidden_ptr=@0x1844   # a target with no entry: the JIT
+build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --jit-all     # everything in the JIT fallback; --jit-none: no JIT
+build/aot/nxaot_host /tmp/x/excl.so dm/tools/aot/corpus/nro/excl-gcc.nro --pause-test 50 --set excl_pause_iterations=200000000   # section 6.2
 build/aot/nxaot_host /tmp/x/fnptr.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --lookup     # the module offsets the lookup table holds
 build/aot/nxaot build dm/tools/aot/corpus/nro/fnptr-gcc.nro -o /tmp/x/all.o --shared /tmp/x/all.so --all-entries --correctness
 build/aot/nxaot_funcdiff /tmp/x/all.so dm/tools/aot/corpus/nro/fnptr-gcc.nro --seeds 3   # every function against dynarmic
 python3 dm/tools/aot/tests/test_corpus_native.py --nxaot build/aot/nxaot --nxaot-host build/aot/nxaot_host --nxaot-run build/aot/nxaot_run --work /tmp/x
 python3 dm/tools/aot/tests/test_funcdiff.py --nxaot build/aot/nxaot --nxaot-funcdiff build/aot/nxaot_funcdiff --work /tmp/x [--cc ghc]
+python3 dm/tools/aot/tests/test_corpus_jit.py --nxaot build/aot/nxaot --nxaot-host build/aot/nxaot_host --work /tmp/x     # mixed, jit-all, jit-none
+python3 dm/tools/aot/tests/test_threads.py --nxaot build/aot/nxaot --nxaot-host build/aot/nxaot_host --work /tmp/x [--runs N]
+python3 dm/tools/aot/tests/test_safepoints.py --nxaot build/aot/nxaot --nxaot-host build/aot/nxaot_host --work /tmp/x [--pauses N]
 ```
 
-[src/rt/host.h](src/rt/host.h), the minimal form of what the host will do (design 2.4, 3.3, 4, 5, 6.5, 8, 9.4), as a library (`nxaot_rt`) that
+[src/rt/host.h](src/rt/host.h), the minimal form of what the host will do (design 2.4, 3.3, 4, 5, 6, 8, 9.4, 11), as a library (`nxaot_rt`) that
 nxaot_host, nxaot_funcdiff and nxaot_bench share. Decision against 9.4: the pack is a shared object linked by lld as a library inside `nxaot build`,
 and the host loads it with `dlopen`, as the design's host loads the pack's library (no LLVM in the host; the library's imports resolve against the
 executable, which exports them).
@@ -329,32 +348,189 @@ executable, which exports them).
   `*base` is written, the line table and the function map are read. `--relocate` applies the module's relocations as dm/host's loader does (the
   corpus's crt0 then skips its own); `--set` writes a symbol.
 - **A run**: a state block (x0 = 0, x1 = -1 as nxaot_run, x30 = the host-return address, SP and `tpidr_el0` the host's stack and TLS block, the
-  monitor clear: 6.5, single-threaded, `st->excl_*` the local monitor), MXCSR of the module's FPCR (7.1), then `enter(st, standard entry of
-  _start)`; a non-local transfer that reaches the host is dispatched as a new call.
-- **What the library imports**: `dm_aot_svc` (svcOutputDebugString prints a line, svcExitProcess ends the run; other SVCs stop with status 5),
-  `nxaot_rt_dispatch` (the miss path: the lookup table, a descriptor per target published with a release store; no entry: `[RED] aot: the indirect
-  branch at module+0x... to 0x... (module+0x...) has no compiled entry: the JIT fallback (design section 11) is phase 3` and status 3),
-  `nxaot_rt_trap` (a red line per reason; brk and undefined words status 1, the JIT's cases status 3), `dm_aot_cntpct` (CLOCK_MONOTONIC as 19.2 MHz
-  ticks, `guest_ns * 12 / 625` as `svcGetSystemTick`), and the floating-point helpers of [src/lift/runtime.cpp](src/lift/runtime.cpp).
+  monitor clear: 6.5, `st->excl_*` the thread's local monitor), MXCSR of the module's FPCR (7.1), then `enter(st, standard entry of _start)`; a
+  non-local transfer that reaches the thread's outermost level is dispatched as a new call, or run in the JIT when it has no compiled entry (3.3,
+  "The JIT fallback"). The run ends when a thread calls svcExitProcess or fails: every other thread stops at its next poll, SVC, JIT block
+  boundary or wait, and is joined ("Threads and safepoints").
+- **What the library imports**: `dm_aot_svc` (the SVCs of "Threads and safepoints"; others stop with status 5), `nxaot_rt_dispatch` (the miss
+  path: the lookup table, a descriptor per target published with a release store; no entry: `jit_entry` with the target in `st->pc`, so the JIT
+  runs it; with `--jit-none`, `[RED] aot: the indirect branch at module+0x... to 0x... (module+0x...) has no compiled entry, and the JIT fallback
+  is off (--jit-none)` and status 3), `nxaot_rt_trap` (brk, undefined words and an untranslatable encoding status 1, a no-return call that
+  returned status 6), `nxaot_rt_jit` (the JIT fallback, "The JIT fallback"), `nxaot_rt_safepoint` (a poll, "Threads and safepoints"),
+  `dm_aot_cntpct` (CLOCK_MONOTONIC as 19.2 MHz ticks, `guest_ns * 12 / 625` as `svcGetSystemTick`), and the floating-point helpers of
+  [src/lift/runtime.cpp](src/lift/runtime.cpp).
 - **Faults** (5.4 is the host's job): SIGSEGV, SIGBUS, SIGILL, SIGFPE and SIGTRAP in guest code, on an alternate stack, are reported with the
   faulting address and the guest instruction the line table gives (`[RED] aot: SIGSEGV at address ... in guest code (host pc ..., in the function at
   module+0x..., guest instruction module+0x...)`), status 4. Dirty tracking (write-protected pages resumed after the fault) is dm/host's.
-- **Exit statuses** (`rt::Status`): 0 svcExitProcess, 1 trap, 2 usage or a library that does not match, 3 the JIT fallback is needed, 4 fault, 5
-  an SVC the corpus run time does not answer, 6 a return where none may be (the guest returned to the host from _start, a no-return callee came
-  back), 7 timeout and 8 stopped at an svc (nxaot_funcdiff).
+- **Exit statuses** (`rt::Status`): 0 svcExitProcess, 1 trap, 2 usage or a library that does not match, 3 the JIT fallback is needed and refused
+  (`--jit-none`, nxaot_funcdiff), 4 fault, 5 an SVC the corpus run time does not answer, 6 a return where none may be (the guest returned to the
+  host from _start or a thread's entry, a no-return callee came back), 7 timeout, 8 stopped at an svc (nxaot_funcdiff), 9 the pause test found a
+  state block inconsistent or made fewer pauses than asked.
 
 **The per-function differential test** (`nxaot_funcdiff`, CTest `corpus_funcdiff`, design 12 item 2 in its simple form): a pack built with
 `--all-entries`; after the host relocated the image, every function runs three times from one snapshot under the recompiled code and under dynarmic
 (whose memory callbacks allow exactly what the native mapping allows), with registers drawn from a seed (pointers into data, the scratch area and
 the stack, small integers, and non-canonical values that fault at once in both). Runs that end the same way are compared: in the correctness mode
 every register (x0..x30, SP, NZCV, v0..v31) and every written page, in the summary mode what the convention gives a caller (x0, x1, v0..v3 at a
-return, x0..x7 at an svc) and every written page. Runs that leave for the JIT (a `blr` to a random value), fault in both, or time out are counted
-apart.
+return, x0..x7 at an svc) and every written page. Runs that would leave for the JIT (a `blr` to a random value; it runs with `--jit-none`), fault
+in both, or time out are counted apart.
 
-What dm/host must provide for the integration: the arena allocator (`dm_guest_alloc`, 5.2) and the module loader's mapping into it, `dm_guest_call`
-on top of `enter` (2.4), `svc_dispatch` behind `dm_aot_svc` (the block's `x` is its register array), the host-function page's addresses in the
-lookup path (`dm_aot_hostcall` for targets inside the page), thread creation with a state block and a native stack per thread, the counter and the
-dirty-tracking fault hook, and the JIT fallback of section 11 behind `nxaot_rt_dispatch`'s and `nxaot_rt_trap`'s JIT cases.
+What dm/host must provide for the integration is listed at the end of "Threads and safepoints".
+
+## The JIT fallback
+
+Design section 11, on the vendored dynarmic with nothing changed in it ([src/rt/jit.h](src/rt/jit.h), [jit.cpp](src/rt/jit.cpp); the driver in
+[src/rt/host.cpp](src/rt/host.cpp), `Host::JitLoop`):
+
+```c
+dm_jit  *dm_jit_create(dm_guest_state *st);   // one instance per guest thread, made at its first use, on that thread's state block
+uint64_t dm_jit_run(dm_jit *j, uint64_t pc);  // st -> the JIT, run from pc until a stop, the JIT -> st; returns where the guest continues
+void     dm_jit_halt(dm_jit *j);              // from any thread: dm_jit_run returns at the next block boundary (pauses and stops)
+```
+
+(`dm_jit_reason` says which stop: a compiled entry, a compiled call site's return, a halt, no code, an SVC that ends the thread, a trap;
+`dm_jit_init` gives once per process what the host knows: the text, the module's FPCR, the stop addresses, the SVC path, the counter.)
+
+- **Configuration** (design 11): fastmem with pointer 0 and 39 address bits (the one-to-one arena; an access at or above 2^39 or a fault takes
+  the memory callbacks), `fastmem_exclusive_access` with one `ExclusiveMonitor` for every instance (64 processors), `tpidr_el0` and `tpidrro_el0`
+  pointing into the state block, `cntfrq_el0` = 19.2 MHz, `ctr_el0` = 0x40000, `dczid_el0` = 4 (with `hook_data_cache_operations`, so that `dc
+  zva` zeroes the aligned block: "Known issues", 2), `wall_clock_cntpct` with `GetCNTPCT` on the host clock, no cycle counting, `CallSVC` into the
+  host's SVC path on the whole register file, a 16 MB code cache, and `A64GetSetElimination` off ("Known issues", 1).
+- **Stopping at a compiled entry, unmodified.** The JIT must not run what has a compiled entry, and must stop where a native frame may wait for a
+  callee (the return address after every `bl` / `blr` of compiled code: the descriptor's `returns` table). dynarmic asks `MemoryReadCode` for
+  every instruction it translates, so the reader hands over no instruction at those addresses: the block that reaches one ends in dynarmic's own
+  NoExecuteFault exception, whose callback (`ExceptionRaised`) records the address and halts `Run()`. Translation caches the answer, so it costs
+  nothing in the blocks that run; it applies only while the JIT's FPCR has the mode bits compiled code was specialised for (the reader asks the
+  instance's FPCR, which dynarmic's block key also holds). To run such an address itself, `dm_jit_run` single-steps its instruction first
+  (dynarmic caches single-step blocks apart), then runs on. The alternatives the design names were measured against it: `HaltExecution` from a hook
+  is what the stop uses; running one block per `Run()` with cycle counting and checking the next pc in the host costs 35.6 ns more per block
+  (40.2 ns against the JIT's own 4.7 ns, "Measurements") and sees block boundaries only (a block that runs into the next function's entry without a
+  branch passes it). So no patch: [VENDOR.md](../../third_party/dynarmic/VENDOR.md) still describes an unchanged copy.
+- **The hand-over** (2.5, 11): `dm_jit_run` copies x0..x30, SP, PC, v0..v31, NZCV, FPCR and FPSR (with the cumulative flags compiled code left in
+  MXCSR, which it clears) into the instance, and back into the block when it stops: 102 to 109 ns both ways. The exclusive monitor is cleared both ways,
+  as an exception return clears it. At an SVC the JIT copies its state to the block, calls the host's SVC path, and takes the general registers back.
+- **When it runs** (design 11, cases 1 to 4), and how compiled code hands over:
+  1. an indirect branch to an address with no compiled entry: the dispatcher's miss path writes the target to `st->pc` and returns `jit_entry`
+     (a function of the pack with the standard entries' signature) instead of a standard entry; `jit_entry` stores what it is passed and calls
+     `nxaot_rt_jit(st, lr, sp)`; the inline cache keeps its descriptor, so the next call misses again. A direct `bl` or `b` to such an address
+     (never made by discovery: every target is an entry) calls or tail-calls `jit_entry` the same way;
+  2. a non-local transfer to a continuation with no native frame (a fiber switch, a return past the caller, a longjmp nobody recorded): the frames
+     propagate it (`st->pending`, 3.3) to the thread's outermost level, which runs it in the JIT when it has no compiled entry;
+  3. `msr fpcr` leaving the specialisation, an encoding the lifter leaves untranslated, code that runs into no entry: the function stores every
+     dirty register and pc, calls `nxaot_rt_jit(st, its entry's lr, its entry's SP)` and returns natively what the JIT left in the block;
+  4. a function the lifter refused: its body stores what it is passed and does the same from its entry.
+- **The driver** (`JitLoop`): runs the JIT until the guest returns to the lr it was given (lr alone decides, as a compiled function's own
+  return does: design 3.3), taking every compiled entry natively on the way (`enter` with the block's registers; its normal return continues in the
+  JIT at the lr it was entered with, x30 is that lr, and SP is the call's unless the function may change it: the lookup slot's
+  `NXAOT_LOOKUP_SP_KEPT`). A return address of compiled code reached with an SP above the one the JIT was entered with may be a native frame's
+  further out: nested, it is propagated to them (`st->pending`); at the outermost level nothing can own it and the JIT runs it. Back where the native
+  frame waits but under another FPCR than it was compiled for, the return is propagated too (the caller cannot go on under it). A halt is a
+  safepoint ("Threads and safepoints"); an SVC that ends the thread or the run leaves through the thread's base, outside dynarmic's `Run()`.
+- **Logging and counting**: every JIT entry is a discovery gap or a continuation without a native frame, logged once per address on standard error
+  as `[RED] aot: <why> at 0x... (module+0x...) runs in the JIT fallback (design section 11)` and counted (`nxaot_host`'s second summary line: runs,
+  distinct addresses, `Run()` calls, stepped stops, native calls, seconds). `NXAOT_JIT_TRACE=1` prints every JIT run and native call.
+- **Modes** (`nxaot_host`): mixed (the default), `--jit-all` (everything in the JIT: no stop at compiled entries, the dispatcher and the entries
+  never used), `--jit-none` (every case above stops the run with a [RED] line and status 3: phase 1's behaviour; nxaot_funcdiff runs so),
+  `--jit-one-block` (the measurement of the alternative above).
+- **Faults**: the host's handler is installed before dynarmic's (which comes with the first instance and hands every fault outside its code cache
+  to the previous handler): a fastmem fault in JIT code takes dynarmic's fallback to the memory callbacks, and a fault there is reported as a guest
+  fault "in a memory access of the JIT fallback near guest 0x..." (dynarmic first prints its own `Unhandled SIGSEGV` line on standard error).
+
+The corpus in the three modes (CTest `corpus_jit`, [tests/test_corpus_jit.py](tests/test_corpus_jit.py)): every NRO prints its expected lines
+mixed, with `--jit-all` and, where the mixed run needed no JIT, with `--jit-none`; fnptr's `hidden_ptr` pointed at the second instruction of
+`hidden_target` (a `blr` to an address with no entry) enters the JIT once, comes back to compiled code and prints what `--jit-all` prints. JIT
+entries in the mixed runs, all expected: `fiber` (its continuations after every switch, 29 and 54 addresses), `fp` (the FPCR checks: the rest
+of `div_rz` after its `msr fpcr`, case 3, back to compiled code at its return; and the rest of `fpcr_set`, which returns to its caller under RM:
+the JIT stops nowhere under another FPCR, so it runs `main` on under RM, then, FPCR restored, until `main` returns, taking compiled entries
+natively again; 8 and 9 addresses), `except-gcc` (5 targets of the opcode switch of rt/unwind.c's
+`run_program`: GCC's halfword table, whose base register is set in the function's prologue outside the loop that dispatches on it, is left
+unbounded by discovery, "the entry address depends on more than one value": a discovery gap of the kind the JIT exists for, which phase 5's
+feedback compiles).
+
+Found by these tests and fixed: after the JIT called a compiled entry natively, the block's SP and x30 were the copies some inner frame stored
+(they travel in host registers at every call, design 2.3), so the JIT continued with SP 32 bytes low and the next native call overwrote its
+caller's frame record (fiber's last check looped through `rt_finish`); the driver now takes x30 as the return address and SP as the call's when the
+function keeps SP, and `kHostReads` (what the host and the JIT read after a call) includes SP, so that a function that may change it stores it. The
+return check compared SP too, which a `br` through `jit_entry` from the middle of a function (an unbounded br, SP of the body) never matched at its
+return (SP of the entry); lr alone decides now.
+
+## Threads and safepoints
+
+**Threads** (design 6.1, 6.5; [src/rt/host.cpp](src/rt/host.cpp)): each guest thread is a host thread (pthreads, an 8 MB native stack, its own
+alternate signal stack), with a state block of its own (64-byte aligned, outside the arena) and, at its first use, a JIT instance. The SVCs, with
+the semantics and result codes of Horizon's kernel, mapped onto one lock and one condition variable (correctness first, as dm/host's
+`hle_thread.c`): CreateThread (0x08: x1 entry, x2 argument, x3 stack top; w1 the handle), StartThread (0x09), ExitThread (0x0A), SleepThread
+(0x0B), CloseHandle (0x16), WaitSynchronization on thread handles (0x18: signalled when the thread exited), ArbitrateLock / ArbitrateUnlock
+(0x1A, 0x1B: the waiters bit 0x40000000, the lock handed to the first waiter), WaitForAddress (0x34: types 0 to 2) and SignalToAddress (0x35:
+types 0 and 1); output lines are serialised. A thread that returns from its entry ends the run (Horizon requires svcExitThread); svcExitProcess on
+any thread, or a failure, stops every other thread at its next poll, SVC, JIT block boundary or wait (the poll byte, `dm_jit_halt`, the condition
+variable), and the run joins them. nxaot_run gives the reference the same SVCs with its threads as contexts on one dynarmic instance, switched round
+robin at a blocking SVC, at svcSleepThread and every 20,000 instructions: a deterministic interleaving.
+
+**The exclusive monitor across threads** (6.5): compiled code keeps the monitor in the thread's block (`st->excl_*`) and stores with a compare-and-
+swap against the value its `ldxr` read (`lock cmpxchg`, `cmpxchg16b` for pairs); the JIT's inline exclusives check dynarmic's monitor for the
+processor and then do `lock cmpxchg` against the value it read on the same memory
+(`dm/third_party/dynarmic/src/dynarmic/backend/x64/emit_x64_memory.cpp.inc:411-500`), so compiled code and the JIT interoperate through the memory
+itself (design 6.5's [A], checked in the emitter); a JIT store also clears other processors' reservations of the address, a compiled one does not,
+which a compare-and-swap does not need.
+
+**Memory ordering** (6.3), what the lifter emits ([src/lift/lifter.cpp](src/lift/lifter.cpp), `LowerMemory`, `LowerContext`) and LLVM 18 makes of
+it on x86-64 (checked with `llc-18` and in the excl pack's assembly):
+
+| ARM | LLVM | x86 |
+|---|---|---|
+| `ldr`, `str` and the other plain accesses | `load volatile`, `store volatile` | `mov` |
+| `ldar*` | `load atomic acquire` (natural alignment) | `mov` |
+| `stlr*` | `store atomic seq_cst` | `xchg` |
+| `ldxr` / `stxr`, `ldaxr` / `stlxr` | `load atomic` monotonic / acquire; `cmpxchg` monotonic / seq_cst | `mov`; `lock cmpxchg` (a full barrier either way) |
+| `ldxp` / `stxp` and the acquire / release pair | `load atomic i128`; `cmpxchg i128` | `lock cmpxchg16b` |
+| `dmb` and `dsb` of every kind | `fence seq_cst` (dynarmic's IR does not keep the option, so `dmb ishld` / `ishst` too) | `mfence` |
+
+Why it is sufficient: x86-TSO reorders only a later load before an earlier store to another address; acquire loads and release stores are
+free under TSO, the one ARM ordering TSO lacks (an `stlr` before a later `ldar`, RCsc) is the store-load one, which `xchg` gives, and `mfence` and
+`lock`-prefixed instructions order everything. The excl program's threaded part runs 25 times natively and 5 times in the JIT per compiler in
+CTest `corpus_threads` ([tests/test_threads.py](tests/test_threads.py)), with real host threads contending on every counter, and 200 times
+natively and 10 times in the JIT per compiler in a longer run (`--runs 200 --jit-runs 10`: 420 runs): every run gives the exact totals.
+
+**Safepoints** (6.2): recompiled code polls `st->poll` (a monotonic atomic byte: `cmpb $0, 856(%r13)` and a branch weighted cold) at the entry of
+every function that calls or tail-calls (every cycle of the call graph passes through one), at every branch to a block at or before its own start
+(every cycle of a function has such an edge: addresses cannot only grow around it) and before a jump-table switch that can branch back. A function
+that neither calls nor loops runs a bounded time and has no poll. The cold path stores the dirty registers (so the block holds the whole register
+file), NZCV only where some path reads it before writing it (a dead NZCV would keep every compare's flags materialised in the loop: the cost went
+from 17.9 % to 4.4 % on int_ops with it), and pc (the block the thread continues at), and calls `nxaot_rt_safepoint` through a preserve_all
+wrapper. `nxaot build --no-safepoints` leaves the polls out (measurements only). The pause protocol is dm/host's `SetThreadActivity`
+(`hle_thread.c`): the requester sets `pause_req` and the poll byte, halts the thread's JIT instance (the JIT polls nothing: `dm_jit_halt` stops it
+at the next block boundary, and dm_jit_run then copies its state to the block), and counts a thread inside an SVC (bit 0 of `svc_state`) as stopped
+at once, the block having been complete when the SVC was entered; such a thread waits at the SVC's exit until the resume. A stopped thread's block
+holds x0..x30, SP, pc, NZCV, v0..v31, FPCR, FPSR and the TLS registers; x0..x8 of a thread stopped inside an SVC may still change as the SVC writes
+its results. The resume clears the requests and the poll bytes and wakes every waiter.
+
+**The pause test** (CTest `safepoints`, [tests/test_safepoints.py](tests/test_safepoints.py); `nxaot_host --pause-test N`, in the manner of
+dm/host's `tests/t_preempt.c`): a host thread beside the guest's stops every guest thread N times at random intervals while more than one runs,
+reads every state block while the world is stopped, checks it (pc a guest instruction, SP in the arena and 16-byte aligned at a poll, and at the
+head of [corpus/rt/pause.S](corpus/rt/pause.S)'s loop the register invariant x20 = 2 × x19, x21 = ~x19, which a block written back incompletely or
+from another moment than its pc breaks), and resumes them. excl runs so with 50 pauses, 6 seeds natively and 2 in the JIT, per compiler: 800
+pauses, about 760 invariant checks, no inconsistent block, the output unchanged.
+
+**What dm/host must provide** for the integration, with the signatures this run time defines (include/nxaot/aot_module.h, src/rt/jit.h):
+
+- the arena allocator (`dm_guest_alloc`, 5.2) and the module loader's mapping into it; `*desc->base` written per module;
+- `void dm_aot_svc(dm_guest_state *st, uint32_t n)`: `svc_dispatch(n, st->x, ...)` on the block (its `x` is the gate frame's register array),
+  with the SVC entry and exit of the pause protocol (`thr_svc_enter` / `thr_svc_leave` on the block instead of the gate frame);
+- `void *nxaot_rt_dispatch(dm_guest_state *st, uint64_t target, const nxaot_ic_desc **slot, uint64_t site)`: the lookup table of the module that
+  holds target (several modules: a range lookup first), the host-function page (`dm_aot_hostcall` for targets inside it), and
+  `desc->jit_entry` with `st->pc = target`, `st->exit_reason = NXAOT_TRAP_JIT_MISS` for anything else;
+- `void nxaot_rt_trap(dm_guest_state *st, uint64_t offset, uint32_t reason)` (does not return), `void nxaot_rt_jit(dm_guest_state *st, uint64_t
+  lr, uint64_t sp)` (`Host::JitLoop`), `void nxaot_rt_safepoint(dm_guest_state *st)` (the pause wait of `hle_thread.c`), `uint64_t
+  dm_aot_cntpct(dm_guest_state *st)` (the guest clock, `DM_DETCLOCK` and the background wait included);
+- `dm_guest_call(st, addr, nargs, ...)` on top of `desc->enter` (2.4), with the outermost level of `Host::RunGuest` (a pending transfer
+  dispatched or given to the JIT);
+- thread creation with a state block (outside the arena), an 8 MB native stack, an alternate signal stack and a JIT instance at first use per
+  thread (`dm_jit_create`; `dm_jit_init` once with the text range, the module's FPCR, `stop_at`, the SVC path and the counter);
+  `SetThreadActivity` (0x32) setting the poll byte and calling `dm_jit_halt`, `GetThreadContext3` (0x33) filling `hz_ctx_t` from the block;
+- the dirty-tracking fault hook (5.4) ahead of dynarmic's fastmem handler: installed after the first JIT instance, chaining to it for faults it
+  does not handle (the corpus run time installs its own before, which is the other order);
+- the FPCR specialisation per module and per thread (`aot_fpcr`), and MXCSR at every entry into compiled code.
 
 ## Floating point and SIMD
 
@@ -516,6 +692,43 @@ pass), lifting 0.5 s, optimisation 1.4 s, code generation 3.7 s (DWARF line info
 carry an alloca per register, the pending check after every call and the NaN-chain cold blocks. Shards in parallel, the per-function cache and the
 caching of the analyses (design 10, 13) are phase 5's; the numbers are the measured starting point.
 
+### Phase 3: the JIT fallback, safepoints, threads
+
+`nxaot_bench --sections polls,jit` on the same machine (best of 5; timings vary by about 10 % from run to run):
+
+| What | Measured |
+|---|---|
+| Safepoint polls on int_ops-gcc (`int_ops_rounds` = 200): with them / without (`--no-safepoints`) | 0.0680 s / 0.0657 s: +3.5 % (+4.4 % and +8.4 % in two other runs, one beside another container's build); text 62,829 / 35,629 bytes (+76 %: the cold paths) |
+| The same before NZCV was stored only where live, and with polls at every function entry | +17.9 % (the flags of every compare kept materialised in the polling loops) |
+| Hand-over: x0..x30, SP, PC, v0..v31, NZCV, FPCR, FPSR into the JIT and back (`dm_jit_measure_handover`) | 102 to 109 ns (four runs) |
+| A `dm_jit_run` that stops at once (hand-over, `Run()`, a cached block with no code, its callback, the halt) | 133 to 137 ns |
+| Per block in the JIT, int_ops-gcc with `--jit-all` (`int_ops_rounds` = 20, 5,733,411 blocks; time inside `dm_jit_run`, translation included) | 4.7 to 4.9 ns |
+| Per block with one block per `Run()` and the next pc checked in the host (`--jit-one-block`, the alternative to the code-reader stops) | 40.2 ns (+35.6 ns; 45.0 ns, +40.0 ns, in the runner's run) |
+| Compiled code against the JIT on the same run | 4.0 times as fast (phase 1: 4.3 against dynarmic with fastmem in `nxaot_run`) |
+| A new JIT instance (16 MB code cache; dynarmic's emitter builds its fastmem and exclusive fallback thunks) | 27 to 32 ms; the first instance of a process and its first translations about 100 ms more (dynarmic's static decoder tables): the time of every `--jit-all` run of the small NROs and of the pause test's first pause in the JIT |
+
+The corpus with the JIT (CTest `corpus_jit`): ms of the run natively (mixed) and with `--jit-all`, the mixed run's JIT runs and the addresses they
+started at; the native times of the NROs that enter the JIT include an instance's creation and the first translations:
+
+| NRO | mixed ms | JIT runs / addresses | jit-all ms | | NRO | mixed ms | JIT runs / addresses | jit-all ms |
+|---|---:|---:|---:|---|---|---:|---:|---:|
+| int_ops-gcc | 0.506 | 0 | 104.5 | | int_ops-clang | 0.353 | 0 | 111.4 |
+| switch-gcc | 0.273 | 0 | 350.8 | | switch-clang | 0.147 | 0 | 127.3 |
+| fnptr-gcc | 0.036 | 0 | 106.2 | | fnptr-clang | 0.036 | 0 | 110.2 |
+| fp-gcc | 120.6 | 8 / 8 | 109.0 | | fp-clang | 106.5 | 9 / 9 | 122.6 |
+| simd-gcc | 0.098 | 0 | 117.5 | | simd-clang | 0.087 | 0 | 122.5 |
+| sjlj-gcc | 0.039 | 0 | 173.3 | | sjlj-clang | 0.040 | 0 | 107.5 |
+| excl-gcc | 586.5 | 0 | 337.8 | | excl-clang | 229.2 | 0 | 285.8 |
+| except-gcc | 100.7 | 1,618 / 5 | 130.6 | | except-clang | 0.690 | 0 | 117.6 |
+| fiber-gcc | 100.5 | 442 / 29 | 114.1 | | fiber-clang | 105.5 | 421 / 54 | 111.3 |
+
+excl's native time is its threaded part, and it varies from 7 ms to about 0.9 s from run to run (420 runs of `test_threads.py --runs 200`):
+the libnx-style mutex hands the lock to the first waiter in the kernel (ArbitrateUnlock), and with two workers contending a handoff waits for the
+waiter's wake-up through a condition variable, so a convoy forms on some runs; the totals are exact on every run. The pause test (CTest
+`safepoints`): 50 pauses with more than one thread running in each run; a thread at a poll stops within about 100 microseconds of the request (its
+wake-up from the previous resume), the longest stop natively 0.2 to 10 ms, in the JIT about 100 ms (a worker's first instance and translations).
+CTest's new tests take about 33 s (`corpus_jit`), 11 s (`corpus_threads`) and 7 s (`safepoints`).
+
 ## The lock file
 
 [nxaot.lock](nxaot.lock) names the LLVM release (`18.1.3`) and the dynarmic commit. The configure step stops when the LLVM package differs, or when
@@ -638,6 +851,18 @@ Values, QC and the other registers are compared exactly in every case.
     (`fmadd d1, d4, d5, d2`) with d2 a quiet NaN, d4 = 0, d5 = +inf under DN: the same. Found by the big sweep (`fp_seq`, `fmadd` with DN = 0
     under FPCR.RZ: the lifted run raised nothing and the reference IOC, a lowering bug, now fixed); the committed class `fma_invalid` (in
     `fp.tsv.gz`) covers every form. Lifted-only IOC.
+17. **Single to half with DN on AVX-512 hosts.** The Arm ARM's `FPConvert` raises Invalid Operation for a signalling NaN input whatever FPCR.DN
+    says (DN only chooses the default NaN as the result). dynarmic's F16C path for `FPSingleToHalf` (`fcvt h, s`, and `fcvtn` / `fcvtn2` of
+    single lanes, which its A64 frontend converts lane by lane) forces the default NaN before `vcvtps2ph` (`ForceToDefaultNaN`,
+    `backend/x64/emit_x64_floating_point.cpp:142`): on a host with AVX-512 F, VL and DQ through `vfpclassss` and a masked blend, which raise
+    nothing, so the signalling NaN never reaches an instruction that signals; on other hosts through `vcmpunordss`, which raises Invalid
+    Operation for it. So the reference agrees with the Arm ARM here and not on AVX-512 runners: found by the aot workflow on GitHub (an
+    icelake-server CPU), `4e216a04` (`fcvtn2 v4.8h, v16.4s`, FPCR 0x2000000, v16.s[0] = 0x7fbfffff) gave FPSR 0x14 from the reference and 0x15
+    lifted, and `0e2169b8` (`fcvtn v24.4h, v13.4s`, FPCR 0x3400000, v13.s[3] = 0xffa00000) 0x10 and 0x11 (simd_misc.17828 and .17877; the lanes are
+    the seed's, recomputed from `src/vec/vectors.cpp`). The lowering (`vcvtps2ph` on the operand, which signals) is right; the filter relaxes
+    lifted-only IOC for regions with a single-to-half conversion under DN only when the reference host has those AVX-512 features
+    (`KnownIssue::host`), so that on other hosts the bit is still compared exactly. The JIT fallback inherits the issue on such hosts. Lifted-only
+    IOC (AVX-512 hosts).
 
 Shared with dynarmic, not filtered, and open: x86 detects tininess after rounding and the Arm ARM before, so a result that rounds up to the
 smallest normal raises UFC on Arm and not here (FZ = 0); with FZ = 1, x86 flushes after rounding and Arm before, so add, subtract, multiply,
@@ -652,7 +877,7 @@ The phases of design section 14, and where this folder stands:
 | Phase | Content | Here |
 |---|---|---|
 | 0. Census | the numbers per module | `nxaot census` over raw code; NROs and behaviour images are read (`nxaot module`) and FDE coverage, LSDA counts and the address-taken set come out of `nxaot discover`, not yet as census keys; NSO decompression (LZ4) and setjmp imports are not done |
-| 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | **done** except what follows: the lifter (0 mismatches over 24,400 integer vectors), the module loader, discovery, the summaries; function mode with the convention of 2.3 in two LLVM mappings (swifttailcc, the default by the measurements, and ghccc for preserve_none, which LLVM 18.1 lacks), calls, returns checked against lr, tail calls, `pending` propagation with resume points at setjmp continuations and landing pads, the correctness mode; jump tables as switches, inline caches, standard entries, the lookup table, the miss path; `nxaot build` (tiers C, W, H, H+; the balanced and max modes; an object with the lookup table, function map and line table, a shared object by lld); `nxaot_host` (the arena below 2^39, the SVC path, the counter, faults through the line table); the corpus natively in both conventions and the correctness mode, equal to dynarmic and to the expected output; nxaot_funcdiff on every corpus function; the measurements ("Measurements"). Not done: the corpus natively on ARM64 hardware (an Apple-silicon Mac), safepoints (6.2: phase 3), the resume of a continuation that has no native frame and every other JIT case (phase 3: the run stops with status 3), one tier per function and profiles (phase 5), ThinLTO and the cache, functions split for size, the oracle-T / J / W comparisons, threads (one state block, one thread), the pack throughput targets of section 10 (measured far below them) |
+| 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | **done** except what follows: the lifter (0 mismatches over 24,400 integer vectors), the module loader, discovery, the summaries; function mode with the convention of 2.3 in two LLVM mappings (swifttailcc, the default by the measurements, and ghccc for preserve_none, which LLVM 18.1 lacks), calls, returns checked against lr, tail calls, `pending` propagation with resume points at setjmp continuations and landing pads, the correctness mode; jump tables as switches, inline caches, standard entries, the lookup table, the miss path; `nxaot build` (tiers C, W, H, H+; the balanced and max modes; an object with the lookup table, function map and line table, a shared object by lld); `nxaot_host` (the arena below 2^39, the SVC path, the counter, faults through the line table); the corpus natively in both conventions and the correctness mode, equal to dynarmic and to the expected output; nxaot_funcdiff on every corpus function; the measurements ("Measurements"). Not done: the corpus natively on ARM64 hardware (an Apple-silicon Mac), one tier per function and profiles (phase 5), ThinLTO and the cache, functions split for size, the oracle-T / J / W comparisons, the pack throughput targets of section 10 (measured far below them) |
 | 2. FP and SIMD | every FP, NEON and crypto lowering, NaN chains | every opcode the A64 frontend emits lowered; 0 mismatches over the committed vectors and 7,000,000 random floating-point and SIMD ones (10^6 per class for seven of the eight classes, `fp_seq` not completed; not the 10^8 of the acceptance); the chain checks measured. Not done: the row-13 FZ slow path for the basic operations, inline estimates, combined escape checks, the run-time helpers in the host |
-| 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | next. In place from phase 1: `pending` propagation, resume points of setjmp continuations and landing pads, the host's dispatch of what reaches it; the JIT's cases stop the run with a [RED] line and status 3 (`nxaot_rt_trap`, `nxaot_rt_dispatch`) where `dm_jit_run` will continue |
+| 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | **done** except what follows: the JIT fallback on dynarmic unmodified (`dm_jit_create` / `dm_jit_run` / `dm_jit_halt`, design 11's configuration, the stops at compiled entries and call sites' returns through the code reader, the hand-over measured), every case of section 11 handed to it (the dispatcher's misses, branches to no entry, FPCR away from the specialisation, untranslated encodings, code that runs into no entry, refused functions, continuations with no native frame), the driver that calls compiled entries natively and propagates non-local transfers; C++ exceptions through LSDA landing pads with a personality-free unwinder, fibers and a return past the caller in the corpus; guest threads with the thread and synchronization SVCs, per-thread state blocks, native stacks and JIT instances, the shared monitor; safepoint polls and the pause protocol with the pause test; the three JIT modes, the threads and the pause test in CTest. The acceptance: the exception, longjmp and thread corpus passes natively, in the JIT and with no JIT where none is needed; `--jit-all` and the compiled runs print the same lines; the pause test passes (CTest `corpus_jit`, `corpus_threads`, `safepoints`). Not done: dm/host's side (the list at the end of "Threads and safepoints"); the exactness of a JIT target's callee-saved registers is assumed (a compiled caller keeps what the union of address-taken functions preserves across an indirect call); the corpus has no untranslated encoding, no refused function and no run-off into a non-entry (those hand-overs are built and not run); priority and core of threads (FIFO order, no affinity), Horizon's other synchronization objects (events, condition variables: SignalProcessWideKey / WaitProcessWideKeyAtomic), SetThreadActivity and GetThreadContext3 themselves (the pause test plays their part); the fault hook's order against dynarmic's fastmem handler; the discovery gap except-gcc shows (a halfword jump table whose base is set before its loop) |
 | 4. to 6. | games on the Intel Mac, performance, breadth | not started |

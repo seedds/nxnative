@@ -19,6 +19,8 @@ struct CallsOptions {
     std::string corpus;                // dm/tools/aot/corpus
     std::string cpu;                   // the target CPU of the builds (empty: this machine's)
     bool calls = true, dispatch = true, int_ops = true, pack = true, spills = true;
+    bool polls = true, jit = true;     // phase 3: the safepoint polls' cost on int_ops; the JIT fallback's hand-over, round trip and blocks
+    uint64_t jit_rounds = 20;          // int_ops_rounds of the JIT runs
 };
 
 int RunCalls(const CallsOptions& o);

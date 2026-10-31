@@ -16,6 +16,7 @@
 // arguments or return values: the reference the differential tests compare the summary-driven mode with.
 #include <algorithm>
 #include <bit>
+#include <map>
 
 #include <llvm/ADT/StringExtras.h>
 #include <llvm/IR/CallingConv.h>
@@ -31,6 +32,7 @@
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/microinstruction.h"
 #include "dynarmic/ir/opcodes.h"
+#include "dynarmic/ir/terminal.h"
 #include "lift/function_lifter.h"
 #include "nxaot/aot_module.h"
 #include "nxaot/guest_state.h"
@@ -312,6 +314,71 @@ void FunctionLifter::FnDataflow() {
         }
     }
     restore_block = (stored & written) - plan->self.writes;
+
+    // Where NZCV is live (backward, over the function's blocks): a block reads it when an instruction or its terminal evaluates a condition, or
+    // reads the flags, before the block sets them; a call, a return, a tail call or an svc ends the function's knowledge, so NZCV counts as live
+    // after them. A safepoint poll stores NZCV only where it is live: storing a dead NZCV would keep the flags of every compare materialised in
+    // the loop that polls (design 6.2's cost)
+    const auto reads_cond = [](const IR::Terminal& t, const auto& self) -> bool {
+        if (const auto* i = boost::get<IR::Term::If>(&t)) {
+            return (i->if_ != IR::Cond::AL && i->if_ != IR::Cond::NV) || self(i->then_, self) || self(i->else_, self);
+        }
+        if (const auto* cb = boost::get<IR::Term::CheckBit>(&t)) {
+            return self(cb->then_, self) || self(cb->else_, self);
+        }
+        if (const auto* ch = boost::get<IR::Term::CheckHalt>(&t)) {
+            return self(ch->else_, self);
+        }
+        return false;
+    };
+    std::map<uint64_t, bool> use, def, out_unknown;
+    for (auto& [pc, block] : blocks) {
+        bool u = false, d = false;
+        for (const auto& inst : block) {
+            const IR::Opcode op = inst.GetOpcode();
+            if (!d) {
+                bool reads = op == IR::Opcode::A64GetNZCVRaw || op == IR::Opcode::A64GetCFlag;
+                for (size_t i = 0; i < inst.NumArgs() && !reads; ++i) {
+                    const IR::Value a = inst.GetArg(i);
+                    reads = a.GetType() == IR::Type::Cond && a.GetCond() != IR::Cond::AL && a.GetCond() != IR::Cond::NV;
+                }
+                u = u || reads;
+            }
+            d = d || op == IR::Opcode::A64SetNZCV || op == IR::Opcode::A64SetNZCVRaw;
+        }
+        if (!d && reads_cond(block.GetTerminal(), reads_cond)) {
+            u = true;
+        }
+        use[pc] = u;
+        def[pc] = d;
+        const End& e = ends[pc];
+        bool unknown = svc_blocks.count(pc) || e.kind != EndKind::Other;
+        for (const uint64_t n : succs[pc]) {
+            unknown = unknown || !blocks.count(n);
+        }
+        out_unknown[pc] = unknown;
+    }
+    std::map<uint64_t, bool> live_in;
+    for (bool again = true; again;) {
+        again = false;
+        for (auto it = blocks.rbegin(); it != blocks.rend(); ++it) {
+            const uint64_t pc = it->first;
+            bool out = out_unknown[pc];
+            for (const uint64_t n : succs[pc]) {
+                out = out || (blocks.count(n) && live_in[n]);
+            }
+            const bool in = use[pc] || (out && !def[pc]);
+            if (in != live_in[pc]) {
+                live_in[pc] = in;
+                again = true;
+            }
+        }
+    }
+    for (const auto& [pc, in] : live_in) {
+        if (in) {
+            nzcv_live.insert(pc);
+        }
+    }
 }
 
 // ---- Values ----
@@ -472,7 +539,83 @@ void FunctionLifter::FnPrologue() {
     B.CreateStore(B.getFalse(), check_bit);
     B.CreateStore(B.getFalse(), qc);
     B.CreateStore(B.getInt32(0), fpsr_bits);
+    // Section 6.2: a poll at the entry of every function that calls or tail-calls (every cycle of the call graph, recursion and chains of tail
+    // calls, passes through one), and at every backward branch (every loop: FnGoto). A function that does neither runs a bounded time, so the
+    // polls of the code around it bound its own: no poll at its entry
+    bool calls = false;
+    for (const auto& [pc, e] : ends) {
+        calls = calls || e.kind == EndKind::Bl || e.kind == EndKind::Blr || (e.kind == EndKind::Br && !table_targets.count(pc));
+    }
+    for (const auto& [pc, next] : succs) {
+        for (const uint64_t n : next) {
+            calls = calls || !InRegion(n);
+        }
+    }
+    if (calls) {
+        FnPoll(Rel(plan->entry), plan->self.pass | kSpLr);
+    }
     B.CreateBr(bbs.at(plan->entry));
+}
+
+// ---- Safepoints (section 6.2) ----
+
+void FunctionLifter::FnPoll(Value* pc, const Regs& dirty) {
+    if (!plan->safepoints || !plan->rt_safepoint) {
+        return;
+    }
+    // One compare and branch: the flag is read as a monotonic atomic, so that LLVM neither hoists it out of a loop nor merges two reads (the
+    // requester writes it from another thread); on x86 it is a plain cmpb
+    auto* flag = B.CreateAlignedLoad(B.getInt8Ty(), Field(offsetof(dm_guest_state, poll)), llvm::Align(1), "poll");
+    flag->setAtomic(llvm::AtomicOrdering::Monotonic);
+    auto* cold = BasicBlock::Create(C, "safepoint", F);
+    auto* cont = BasicBlock::Create(C, "polled", F);
+    llvm::MDBuilder md{C};
+    B.CreateCondBr(B.CreateICmpNE(flag, B.getInt8(0)), cold, cont, md.createBranchWeights(1, 1u << 20));
+    B.SetInsertPoint(cold);
+    // The registers newer than their block copy, then pc: the block holds the whole register file at a safepoint (a paused thread's context)
+    StoreRegs(plan->correctness ? Regs::All() : dirty);
+    FlushFpsr();
+    StoreField(pc, offsetof(dm_guest_state, pc));
+    auto* call = B.CreateCall(plan->rt_safepoint, {st});
+    call->setCallingConv(plan->rt_safepoint->getCallingConv());
+    B.CreateBr(cont);
+    B.SetInsertPoint(cont);
+}
+
+// ---- The JIT fallback (section 11) ----
+
+void FunctionLifter::FnJitCall(uint64_t target, uint64_t call_pc) {
+    // A call to an address that is no compiled entry: the JIT runs it, with this call's return as its stop (jit_entry; st->pc = the target)
+    ++stats->traps;
+    StoreField(Rel(target), offsetof(dm_guest_state, pc));
+    StoreField(B.getInt32(NXAOT_TRAP_JIT_TARGET), offsetof(dm_guest_state, exit_reason));
+    FnCall(plan->indirect, plan->conv.Type(C, plan->indirect.pass), plan->jit_entry, call_pc);
+    Goto(B.getInt64(cur_end));
+}
+
+void FunctionLifter::FnJitTail(Value* target) {
+    // A branch to an address that is no compiled entry (into the middle of another function): a tail call of jit_entry, whose stop is this
+    // function's return
+    ++stats->traps;
+    const auto off = OffsetOf(target);
+    StoreField(off ? Rel(*off) : target, offsetof(dm_guest_state, pc));
+    StoreField(B.getInt32(NXAOT_TRAP_JIT_TARGET), offsetof(dm_guest_state, exit_reason));
+    FnTail(plan->indirect, plan->conv.Type(C, plan->indirect.pass), plan->jit_entry);
+}
+
+void FunctionLifter::FnJitContinue(Value* pc, uint32_t reason) {
+    // The rest of this function cannot run as compiled code: every dirty register and pc to the block, the JIT from there until the guest
+    // returns where this function returns (its entry's lr and SP), then a native return of what the JIT left in the block (the whole register
+    // file; with st->pending set when the guest left non-locally, which the callers propagate)
+    ++stats->traps;
+    StoreRegs(plan->correctness ? Regs::All() : cur_dirty);
+    FlushFpsr();
+    const auto off = OffsetOf(pc);
+    StoreField(off ? Rel(*off) : pc, offsetof(dm_guest_state, pc));
+    StoreField(B.getInt32(reason), offsetof(dm_guest_state, exit_reason));
+    B.CreateCall(plan->rt_jit, {st, entry_lr, F->getArg(1)});
+    ReloadRegs(Regs::X(kRetX) | Regs::V(plan->self.rv));
+    B.CreateRet(RetValue());
 }
 
 // ---- Calls ----
@@ -562,7 +705,7 @@ void FunctionLifter::FnCall(const CalleeView& c, llvm::FunctionType* type, Value
 void FunctionLifter::FnCallDirect(uint64_t target, uint64_t call_pc) {
     const CalleeView* c = plan->callee(target);
     if (!c) {
-        FnTrap(Rel(target), NXAOT_TRAP_JIT_TARGET);  // discovery makes every bl target an entry; this is a bl into something else
+        FnJitCall(target, call_pc);  // discovery makes every bl target an entry; this is a bl into something else: the JIT's (section 11)
         return;
     }
     ++stats->calls;
@@ -601,7 +744,7 @@ void FunctionLifter::FnTail(const CalleeView& c, llvm::FunctionType* type, Value
 void FunctionLifter::FnTailDirect(uint64_t target) {
     const CalleeView* c = plan->callee(target);
     if (!c) {
-        FnTrap(Rel(target), NXAOT_TRAP_JIT_TARGET);
+        FnJitTail(Rel(target));
         return;
     }
     ++stats->tail_calls;
@@ -699,7 +842,16 @@ void FunctionLifter::FnExit(Value* pc, uint32_t reason) {
         FnTailDirect(*off);  // the code runs into the next function: a tail call to it
         return;
     }
-    FnTrap(pc, reason == DM_EXIT_NONE ? NXAOT_TRAP_JIT_FPCR : reason);
+    switch (reason) {
+    case DM_EXIT_NONE:         // msr fpcr left the specialisation (section 7.1): the JIT runs the rest under the new FPCR
+    case DM_EXIT_NO_CODE:      // the code runs into what is no function's entry
+    case DM_EXIT_UNTRANSLATED: // an encoding dynarmic's frontend leaves to an interpreter
+        FnJitContinue(pc, reason == DM_EXIT_NONE ? NXAOT_TRAP_JIT_FPCR : reason);
+        return;
+    default:                   // brk, undefined and unpredictable encodings: traps
+        FnTrap(pc, reason);
+        return;
+    }
 }
 
 // ---- Terminals ----
@@ -735,17 +887,28 @@ void FunctionLifter::FnGoto(Value* target) {
     if (const auto off = OffsetOf(target)) {
         const auto it = bbs.find(*off);
         if (it != bbs.end()) {
+            if (*off <= cur_start) {
+                // A branch to a block at or before this one: every cycle of the function holds at least one such edge (addresses cannot
+                // only grow around a cycle), so a poll here bounds the time between polls in any loop (section 6.2)
+                Regs dirty = cur_dirty;
+                dirty.nzcv = dirty.nzcv && nzcv_live.count(*off);
+                FnPoll(Rel(*off), dirty);
+            }
             B.CreateBr(it->second);
         } else if (plan->callee(*off)) {
             FnTailDirect(*off);  // b, b.cond, cbz, tbz to another function (section 2.3)
         } else {
-            FnTrap(target, NXAOT_TRAP_JIT_TARGET);  // into the middle of another function: the JIT's (section 11)
+            FnJitTail(target);  // into the middle of another function: the JIT's (section 11)
         }
         return;
     }
     const uint64_t site = cur_end - 4;
     if (cur_table) {
-        // A recovered jump table: an LLVM switch over the module offsets of its targets (section 4); another value goes to the dispatcher
+        // A recovered jump table: an LLVM switch over the module offsets of its targets (section 4); another value goes to the dispatcher.
+        // A case at or before this block closes a loop through the table: the poll comes before the switch, at the br itself
+        if (std::any_of(cur_table->begin(), cur_table->end(), [&](uint64_t t) { return t <= cur_start && bbs.count(t); })) {
+            FnPoll(Rel(site), cur_dirty);
+        }
         auto* other = BasicBlock::Create(C, "table_miss", F);
         auto* sw = B.CreateSwitch(B.CreateSub(target, base), other, static_cast<unsigned>(cur_table->size()));
         std::set<uint64_t> seen;

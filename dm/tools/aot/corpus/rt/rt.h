@@ -8,6 +8,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {  // the except program is C++ (src/except.cpp)
+#endif
+
 #define RT_NOINLINE __attribute__((noinline))
 #define RT_USED __attribute__((used))
 
@@ -53,5 +57,9 @@ int memcmp(const void *a, const void *b, size_t n);
 typedef uint64_t jmp_buf[22];
 __attribute__((returns_twice)) int setjmp(jmp_buf env);
 __attribute__((noreturn)) void longjmp(jmp_buf env, int value);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -15,7 +15,7 @@ using lift::Regs;
 namespace {
 
 constexpr uint32_t kCalleeSavedV = 0x0000FF00u;  // v8..v15: AAPCS64 keeps only their low halves; a d8 restore zeroes the high half
-const Regs kHostReads{0x3u, 0xFu, false, false};  // what the host reads after a guest function it called returns: x0, x1, v0..v3
+const Regs kHostReads{0x3u, 0xFu, true, false};  // what the host and the JIT read after a guest function they called returns: x0, x1, v0..v3, SP
 const Regs kSvcReads = Regs::X(0xFFu);            // the SVC convention (summary.cpp): arguments in x0..x7, results in x0..x17
 const Regs kSvcWrites = Regs::X(0x3FFFFu);
 

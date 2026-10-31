@@ -1,0 +1,20 @@
+normal.value 0000000000000010 ok
+normal.destroyed 0000000000000006 ok
+normal.order 00000000000f0c03
+throw.value 00000000000003e8 ok
+throw.destroyed 0000000000000009 ok
+throw.order 00000006d706e884
+deep.value 00000000000003eb ok
+deep.destroyed 00000000000000c6 ok
+deep.order 7f5444d4c0b6a983
+pointer.value 000000000000004d ok
+pointer.destroyed 0000000000000001 ok
+pointer.order 00000000000001fb ok
+callee_saved b2bfeceabbd0ca6c ok
+callee_saved.destroyed 0000000000000010 ok
+rethrow.value 0000000000001775 ok
+rethrow.destroyed 0000000000000007 ok
+rethrow.order 000000011322aa01
+unwind.frames 000000e8
+unwind.pads 000000e7
+PASS 13

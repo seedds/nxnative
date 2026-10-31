@@ -1,12 +1,16 @@
-// nxaot_run: runs a corpus NRO (dm/tools/aot/corpus) under dynarmic's A64 JIT, the reference executor of the vector harness and the JIT fallback
-// of design section 11, with the two supervisor calls the corpus makes: svcOutputDebugString (0x27, x0 = string, x1 = length), whose lines it
-// prints, and svcExitProcess (0x07), which ends the run. It is the corpus's reference output on x86 until the recompiled path exists (the
-// dispatcher and the host run time, phase 1 of section 14): a native run on ARM64 hardware and the recompiled code must print the same lines.
+// nxaot_run: runs a corpus NRO (dm/tools/aot/corpus) under dynarmic's A64 JIT, the reference executor of the vector harness and of the corpus,
+// with the supervisor calls the corpus makes: svcOutputDebugString (0x27, x0 = string, x1 = length), whose lines it prints, svcExitProcess
+// (0x07), which ends the run, and the thread and synchronization SVCs of corpus/rt/thread.h (0x08 CreateThread, 0x09 StartThread, 0x0A
+// ExitThread, 0x0B SleepThread, 0x16 CloseHandle, 0x18 WaitSynchronization, 0x1A ArbitrateLock, 0x1B ArbitrateUnlock, 0x34 WaitForAddress,
+// 0x35 SignalToAddress), with the semantics src/rt/host.cpp gives them. Guest threads are contexts on this one JIT, switched round robin at a
+// blocking SVC, at svcSleepThread and every 20,000 instructions, so the reference interleaving is deterministic (the corpus's threaded programs
+// print only totals, which every interleaving must give). A native run on ARM64 hardware and the recompiled code must print the same lines.
 //   nxaot_run <module.nro | name.aot.tsv> [--max-instructions N] [--set <symbol>=<value>]... [--quiet] [--fastmem]
 // --set writes a 64-bit value at a symbol of the image before the run (int_ops_rounds: the throughput measurement); --quiet counts the lines
 // instead of printing them; --fastmem lets dynarmic's JIT reach the module's memory directly (its fastmem arena, as an emulator configures it,
 // for the throughput comparison with the recompiled code) instead of through the callbacks. The run's time goes to standard error.
 // Exit status: 0 when the program left through svcExitProcess, 1 on a fault, an unknown SVC or the instruction budget, 2 on a usage error.
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -164,6 +168,110 @@ struct Runner final : A64::UserCallbacks {
         return true;
     }
 
+    // ---- Guest threads: contexts on this one JIT, switched round robin (Schedule) ----
+    enum class TState { Created, Ready, Blocked, Exited };
+    enum class Wait { None, Join, Lock, Addr };
+    struct GThread {
+        uint32_t handle = 0;
+        std::array<uint64_t, 31> x{};
+        uint64_t sp = 0, pc = 0, tpidr = 0;
+        std::array<A64::Vector, 32> v{};
+        uint32_t fpcr = 0, fpsr = 0, pstate = 0;
+        TState state = TState::Created;
+        Wait wait = Wait::None;
+        uint64_t addr = 0, seq = 0;
+        uint32_t tag = 0;
+        std::vector<uint32_t> handles;
+    };
+    static constexpr uint64_t kSlice = 20000;      // instructions a thread runs before the next one gets the JIT
+    static constexpr uint32_t kFirstHandle = 0x1000, kWaitMask = 0x40000000u;
+    static constexpr uint64_t kInvalidHandle = 0xE401, kInvalidState = 0xFA01, kInvalidEnumValue = 0xF001, kOutOfRange = 0xEE01;
+    std::vector<GThread> threads = MainThread();
+    size_t cur = 0;
+    bool switch_needed = false;
+    uint64_t seq = 0;
+
+    static std::vector<GThread> MainThread() {
+        std::vector<GThread> v(1);
+        v[0].handle = kFirstHandle;
+        v[0].state = TState::Ready;  // its context lives in the JIT while it runs
+        return v;
+    }
+    GThread* ByHandle(uint32_t h) {
+        return h >= kFirstHandle && h - kFirstHandle < threads.size() ? &threads[h - kFirstHandle] : nullptr;
+    }
+    void Yield() {
+        switch_needed = true;
+        jit->HaltExecution(HaltReason::UserDefined2);
+    }
+    void Block(Wait w) {
+        threads[cur].state = TState::Blocked;
+        threads[cur].wait = w;
+        threads[cur].seq = ++seq;
+        Yield();
+    }
+    void Wake(GThread& g, uint64_t x0) {
+        g.state = TState::Ready;
+        g.wait = Wait::None;
+        g.x[0] = x0;
+    }
+    void WakeJoiners() {
+        for (GThread& g : threads) {
+            if (g.state != TState::Blocked || g.wait != Wait::Join) {
+                continue;
+            }
+            for (size_t i = 0; i < g.handles.size(); ++i) {
+                const GThread* w = ByHandle(g.handles[i]);
+                if (w && w->state == TState::Exited) {
+                    Wake(g, 0);
+                    g.x[1] = i;
+                    break;
+                }
+            }
+        }
+    }
+    void Save(GThread& g) {
+        g.x = jit->GetRegisters();
+        g.sp = jit->GetSP();
+        g.pc = jit->GetPC();
+        g.v = jit->GetVectors();
+        g.fpcr = jit->GetFpcr();
+        g.fpsr = jit->GetFpsr();
+        g.pstate = jit->GetPstate();
+        g.tpidr = tpidr;
+    }
+    void Load(const GThread& g) {
+        jit->SetRegisters(g.x);
+        jit->SetSP(g.sp);
+        jit->SetPC(g.pc);
+        jit->SetVectors(g.v);
+        jit->SetFpcr(g.fpcr);
+        jit->SetFpsr(g.fpsr);
+        jit->SetPstate(g.pstate);
+        tpidr = g.tpidr;
+        jit->ClearExclusiveState();  // a context switch clears the local monitor
+    }
+    // After every Run(): the next ready thread, round robin, at the end of a slice or when the running one blocked, yielded or exited
+    void Schedule() {
+        if (threads.size() == 1 && !switch_needed) {
+            return;
+        }
+        switch_needed = false;
+        Save(threads[cur]);
+        for (size_t k = 1; k <= threads.size(); ++k) {
+            const size_t i = (cur + k) % threads.size();
+            if (threads[i].state == TState::Ready) {
+                if (i != cur) {
+                    cur = i;
+                    Load(threads[i]);
+                }
+                return;
+            }
+        }
+        Fail("every guest thread waits (a deadlock)");
+    }
+    bool Word(uint64_t addr) { return (addr & 3) == 0 && Inside(addr, 4); }
+
     void InterpreterFallback(A64::VAddr pc, size_t) override {
         const auto word = MemoryReadCode(pc);
         if (word && nxaot::decode::IsMrsCntvct(*word)) {
@@ -195,8 +303,150 @@ struct Runner final : A64::UserCallbacks {
             exited = true;
             Stop();
             return;
+        case 0x08: {  // CreateThread(x1 entry, x2 argument, x3 stack top, w4 priority, w5 core): w0 result, w1 handle
+            GThread g;
+            g.handle = kFirstHandle + static_cast<uint32_t>(threads.size());
+            g.x[0] = jit->GetRegister(2);
+            g.sp = jit->GetRegister(3);
+            g.pc = jit->GetRegister(1);  // x30 = 0: a return from the entry runs into no code (Horizon requires svcExitThread)
+            g.fpcr = jit->GetFpcr();
+            threads.push_back(g);
+            jit->SetRegister(0, 0);
+            jit->SetRegister(1, g.handle);
+            return;
+        }
+        case 0x09: {  // StartThread(w0 handle)
+            GThread* g = ByHandle(static_cast<uint32_t>(jit->GetRegister(0)));
+            if (!g || g->state != TState::Created) {
+                jit->SetRegister(0, g ? kInvalidState : kInvalidHandle);
+                return;
+            }
+            g->state = TState::Ready;
+            jit->SetRegister(0, 0);
+            return;
+        }
+        case 0x0A:  // ExitThread
+            if (cur == 0) {
+                Fail("svcExitThread on the main thread");
+                return;
+            }
+            threads[cur].state = TState::Exited;
+            WakeJoiners();
+            Yield();
+            return;
+        case 0x0B:  // SleepThread: a yield to the next ready thread
+            Yield();
+            return;
+        case 0x16:  // CloseHandle
+            jit->SetRegister(0, ByHandle(static_cast<uint32_t>(jit->GetRegister(0))) ? 0 : kInvalidHandle);
+            return;
+        case 0x18: {  // WaitSynchronization(x1 handles, w2 count, x3 timeout): w0 result, w1 index of the exited thread
+            const uint64_t handles = jit->GetRegister(1);
+            const int32_t count = static_cast<int32_t>(jit->GetRegister(2));
+            if (count < 1 || count > 0x40) {
+                jit->SetRegister(0, kOutOfRange);
+                return;
+            }
+            GThread& me = threads[cur];
+            me.handles.clear();
+            for (int32_t i = 0; i < count; ++i) {
+                const uint32_t h = static_cast<uint32_t>(Load(handles + 4u * static_cast<uint64_t>(i), 4));
+                if (!ByHandle(h)) {
+                    jit->SetRegister(0, kInvalidHandle);
+                    return;
+                }
+                me.handles.push_back(h);
+            }
+            for (size_t i = 0; i < me.handles.size(); ++i) {
+                if (ByHandle(me.handles[i])->state == TState::Exited) {
+                    jit->SetRegister(0, 0);
+                    jit->SetRegister(1, i);
+                    return;
+                }
+            }
+            Block(Wait::Join);
+            return;
+        }
+        case 0x1A: {  // ArbitrateLock(w0 owner handle, x1 address, w2 tag)
+            const uint32_t owner = static_cast<uint32_t>(jit->GetRegister(0));
+            const uint64_t addr = jit->GetRegister(1);
+            if (!Word(addr) || static_cast<uint32_t>(Load(addr, 4)) != (owner | kWaitMask)) {
+                jit->SetRegister(0, 0);
+                return;
+            }
+            threads[cur].addr = addr;
+            threads[cur].tag = static_cast<uint32_t>(jit->GetRegister(2));
+            Block(Wait::Lock);
+            return;
+        }
+        case 0x1B: {  // ArbitrateUnlock(x0 address): the first waiter takes the lock
+            const uint64_t addr = jit->GetRegister(0);
+            GThread* first = nullptr;
+            unsigned waiters = 0;
+            for (GThread& g : threads) {
+                if (g.state == TState::Blocked && g.wait == Wait::Lock && g.addr == addr) {
+                    ++waiters;
+                    if (!first || g.seq < first->seq) {
+                        first = &g;
+                    }
+                }
+            }
+            Store(addr, 4, first ? (first->tag | (waiters > 1 ? kWaitMask : 0)) : 0);
+            if (first) {
+                Wake(*first, 0);
+            }
+            jit->SetRegister(0, 0);
+            return;
+        }
+        case 0x34: {  // WaitForAddress(x0 address, w1 type, w2 value, x3 timeout)
+            const uint64_t addr = jit->GetRegister(0);
+            const uint32_t type = static_cast<uint32_t>(jit->GetRegister(1));
+            const int32_t value = static_cast<int32_t>(jit->GetRegister(2));
+            const int32_t v = Word(addr) ? static_cast<int32_t>(Load(addr, 4)) : 0;
+            if (type > 2) {
+                jit->SetRegister(0, kInvalidEnumValue);
+                return;
+            }
+            if ((type == 2 && v != value) || (type < 2 && !(v < value))) {
+                jit->SetRegister(0, kInvalidState);
+                return;
+            }
+            if (type == 1) {
+                Store(addr, 4, static_cast<uint32_t>(v - 1));
+            }
+            threads[cur].addr = addr;
+            Block(Wait::Addr);
+            return;
+        }
+        case 0x35: {  // SignalToAddress(x0 address, w1 type, w2 value, w3 count)
+            const uint64_t addr = jit->GetRegister(0);
+            const uint32_t type = static_cast<uint32_t>(jit->GetRegister(1));
+            const int32_t value = static_cast<int32_t>(jit->GetRegister(2)), count = static_cast<int32_t>(jit->GetRegister(3));
+            if (type == 1) {
+                if (static_cast<int32_t>(Load(addr, 4)) != value) {
+                    jit->SetRegister(0, kInvalidState);
+                    return;
+                }
+                Store(addr, 4, static_cast<uint32_t>(value + 1));
+            } else if (type != 0) {
+                Fail("SignalToAddress of type " + std::to_string(type));
+                return;
+            }
+            std::vector<GThread*> ws;
+            for (GThread& g : threads) {
+                if (g.state == TState::Blocked && g.wait == Wait::Addr && g.addr == addr) {
+                    ws.push_back(&g);
+                }
+            }
+            std::sort(ws.begin(), ws.end(), [](const GThread* a, const GThread* b) { return a->seq < b->seq; });
+            for (size_t i = 0; i < ws.size() && (count <= 0 || i < static_cast<size_t>(count)); ++i) {
+                Wake(*ws[i], 0);
+            }
+            jit->SetRegister(0, 0);
+            return;
+        }
         default:
-            Fail("svc " + Hex(swi) + " at module+" + Hex(jit->GetPC() - 4 - kBase) + ": the corpus makes only 0x27 and 0x07");
+            Fail("svc " + Hex(swi) + " at module+" + Hex(jit->GetPC() - 4 - kBase) + ": the corpus run time does not answer it");
         }
     }
     void ExceptionRaised(A64::VAddr pc, A64::Exception e) override {
@@ -228,7 +478,7 @@ struct Runner final : A64::UserCallbacks {
         executed += t;
         ticks = t > ticks ? 0 : ticks - t;
     }
-    std::uint64_t GetTicksRemaining() override { return ticks; }
+    std::uint64_t GetTicksRemaining() override { return std::min(ticks, kSlice); }  // a slice at most: then the next thread
     std::uint64_t GetCNTPCT() override { return 0; }
 
     const nxaot::module::Image& image;
@@ -310,7 +560,11 @@ int main(int argc, char** argv) {
             break;
         }
         r.jit->ClearHalt(HaltReason::UserDefined1);
+        r.jit->ClearHalt(HaltReason::UserDefined2);
         r.jit->Run();
+        if (!r.done) {
+            r.Schedule();
+        }
     }
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::fflush(stdout);

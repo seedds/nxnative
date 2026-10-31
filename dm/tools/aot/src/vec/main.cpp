@@ -73,7 +73,15 @@ struct KnownIssue {
     const char* what;
     uint32_t reference_only;  // bits the reference may have and the lifted run not
     uint32_t lifted_only;     // bits the lifted run may have and the reference not
+    bool (*host)() = nullptr; // the issue applies only on reference hosts where this returns true (a code path dynarmic takes by CPU feature)
 };
+
+// dynarmic's HostFeature::AVX512_OrthoFloat (backend/x64/host_feature.h): AVX-512 F, VL and DQ, with the OS saving their state; dynarmic takes
+// its vfpclass paths on such hosts
+bool HostAvx512OrthoFloat() {
+    static const bool has = __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512vl") && __builtin_cpu_supports("avx512dq");
+    return has;
+}
 
 constexpr uint32_t kIOC = 0x01, kDZC = 0x02, kOFC = 0x04, kUFC = 0x08, kIXC = 0x10, kIDC = 0x80;
 
@@ -103,6 +111,10 @@ const std::vector<KnownIssue>& KnownIssues() {
                                     "infinity times zero gives the default NaN with Invalid Operation in Arm's FPMulAdd; dynarmic's vector NaN "
                                     "correction returns the default NaN without it, and its DN paths are vfmadd alone, which raises nothing",
          0, kIOC},
+        {lift::kIssueToHalfSignallingNaN, "fcvt single to half, fcvtn, DN = 1, on hosts with AVX-512 F / VL / DQ: dynarmic forces the default NaN "
+                                          "through vfpclassss, which raises nothing, before vcvtps2ph, so a signalling NaN raises no Invalid "
+                                          "Operation; Arm's FPConvert raises it (on other hosts dynarmic's vcmpunordss does)",
+         0, kIOC, HostAvx512OrthoFloat},
     };
     return issues;
 }
@@ -274,9 +286,11 @@ int main(int argc, char** argv) {
     Reference reference;
     const lift::Target t = lifted->Target();
     std::printf("nxaot_vec: LLVM %s, dynarmic %.12s, target CPU %s\n", NXAOT_LOCK_LLVM, NXAOT_LOCK_DYNARMIC, lifted->Cpu().c_str());
-    std::printf("nxaot_vec: lowering uses fma %d f16c %d avx2 %d aes %d sha %d pclmul %d; NaN mode %s; FPSR flags %s, compared %s\n", t.fma, t.f16c, t.avx2,
+    std::printf("nxaot_vec: lowering uses fma %d f16c %d avx2 %d aes %d sha %d pclmul %d; NaN mode %s; FPSR flags %s, compared %s; reference host "
+                "AVX-512 F / VL / DQ %d\n", t.fma, t.f16c, t.avx2,
                 t.aes, t.sha, t.pclmul, nan_mode == lift::NaNMode::Chains ? "chains" : nan_mode == lift::NaNMode::PerOp ? "per operation" : "unchecked",
-                fpsr_model ? "modelled" : "not modelled", ignore_flags ? "without the cumulative exception bits" : no_filters ? "whole, no filters" : "whole");
+                fpsr_model ? "modelled" : "not modelled", ignore_flags ? "without the cumulative exception bits" : no_filters ? "whole, no filters" : "whole",
+                HostAvx512OrthoFloat() ? 1 : 0);
     std::printf("nxaot_vec: vectors from");
     for (const auto& p : paths) {
         std::printf(" %s", p.c_str());
@@ -380,7 +394,7 @@ int main(int argc, char** argv) {
                         for (const auto& k : KnownIssues()) {
                             const bool met = std::find(p.dynarmic_issues.begin(), p.dynarmic_issues.end(), k.number) != p.dynarmic_issues.end() ||
                                              std::find(got.issues.begin(), got.issues.end(), k.number) != got.issues.end();
-                            if (!met) {
+                            if (!met || (k.host && !k.host())) {
                                 continue;
                             }
                             ref_allowed |= k.reference_only;

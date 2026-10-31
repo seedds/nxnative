@@ -11,8 +11,9 @@ out=$2
 cd "$(dirname "$0")"
 mkdir -p "$out"
 
-PROGRAMS=${CORPUS_PROGRAMS:-"int_ops switch fnptr fp simd sjlj excl"}
+PROGRAMS=${CORPUS_PROGRAMS:-"int_ops switch fnptr fp simd sjlj excl except fiber"}
 COMMON="-O2 -mcpu=cortex-a57 -mno-outline-atomics -std=gnu11 -ffreestanding -fPIE -fno-stack-protector -ffp-contract=off -fno-math-errno -Wall -Wextra -Werror -Irt"
+CXXFLAGS="-std=gnu++17 -fno-rtti -fno-threadsafe-statics"
 LINK="-pie --no-dynamic-linker --eh-frame-hdr --export-dynamic --hash-style=sysv --build-id=sha1 -z text -z max-page-size=0x1000 -T rt/nro.ld"
 case $tc in
 gcc)
@@ -35,6 +36,7 @@ flags() {
     case $1 in
     int_ops) echo "-fno-asynchronous-unwind-tables -fno-unwind-tables" ;;  # no FDEs: discovery without unwind entries
     fnptr) echo "-fasynchronous-unwind-tables -fexceptions" ;;              # cleanup landing pads: LSDA call-site tables
+    except) echo "-fasynchronous-unwind-tables -fexceptions -DRT_UNWINDER" ;;  # C++ destructors' landing pads, rt/unwind.c's _Unwind_Resume
     *) echo "-fasynchronous-unwind-tables" ;;
     esac
 }
@@ -44,6 +46,9 @@ sources() {
     case $1 in
     switch) echo "src/switch.c src/switch_word.c" ;;
     sjlj) echo "src/sjlj.c rt/setjmp.S" ;;
+    excl) echo "src/excl.c rt/thread.c rt/thread.S rt/pause.S" ;;
+    except) echo "src/except.cpp rt/unwind.c rt/unwind.S rt/setjmp.S" ;;
+    fiber) echo "src/fiber.c rt/fiber.S" ;;
     *) echo "src/$1.c" ;;
     esac
 }
@@ -55,6 +60,7 @@ for p in $PROGRAMS; do
     pf=$(flags "$p")
     wide=""
     if [ "$tc" = clang ] && [ "$p" = switch ]; then wide="; src/switch_word.c: -mllvm -aarch64-enable-compress-jump-tables=false"; fi
+    if [ "$p" = except ]; then wide="; src/except.cpp: $CXXFLAGS"; fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$p" "$tc" "$version" "$COMMON $pf$wide" "$LDFLAGS" >> "$out/flags.tsv"
     for s in rt/crt0.S rt/mem.S rt/rt.c $(sources "$p"); do
         o="$out/$p.$(basename "$s" | tr . _).o"
@@ -62,8 +68,11 @@ for p in $PROGRAMS; do
         # clang's compressed jump tables (byte and halfword entries) are its default; the word-table source is built without them, so that
         # the corpus has clang's table-relative word tables too (GCC picks word entries there by the distance of its cases)
         if [ "$tc" = clang ] && [ "$s" = src/switch_word.c ]; then extra="-mllvm -aarch64-enable-compress-jump-tables=false"; fi
+        common=$COMMON
+        # C++ (the except program): its own standard instead of C's, no RTTI, no guarded statics (no C++ library behind it)
+        case $s in *.cpp) common=$(echo "$COMMON" | sed 's/-std=gnu11 //'); extra="$CXXFLAGS" ;; esac
         # shellcheck disable=SC2086
-        $CC $COMMON $pf $extra -c "$s" -o "$o"
+        $CC $common $pf $extra -c "$s" -o "$o"
         objs="$objs $o"
     done
     # shellcheck disable=SC2086

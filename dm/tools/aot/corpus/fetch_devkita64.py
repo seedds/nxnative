@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """devkitA64 from the pinned devkitpro/devkita64 image without pulling the image: for a machine without the disk room for it (about 3 GB
 unpacked; this takes about 190 MB). Reads the image index the digest names from Docker Hub, its linux/amd64 manifest, and the layer that
-holds /opt/devkitpro; checks every digest on the way; and extracts devkitA64 (without the C++ compiler, LTO, gdb and newlib, which the
-corpus does not use) and switch-tools' elf2nro into <dir>/opt/devkitpro. build_corpus.sh takes it with DKP_ROOT=<dir>/opt/devkitpro and
+holds /opt/devkitpro; checks every digest on the way; and extracts devkitA64 (with its C++ compiler, which the except program needs, and
+without LTO, gdb and newlib, which the corpus does not use) and switch-tools' elf2nro into <dir>/opt/devkitpro. build_corpus.sh takes it with DKP_ROOT=<dir>/opt/devkitpro and
 runs the same binaries the image has, in the nxnative-aot image.
 
   python3 dm/tools/aot/corpus/fetch_devkita64.py <dir>
@@ -19,7 +19,7 @@ REPO = 'devkitpro/devkita64'
 INDEX = 'sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282'  # devkitpro/devkita64:20260219, as build_corpus.sh pins
 LAYER = 'sha256:da5be4661c9ac4e389f9e5f939e58bff7d32bc60569fa7c14e849d5246881691'  # its last layer: dkp-pacman's switch-dev and devkitA64
 KEEP = ('opt/devkitpro/devkitA64/', 'opt/devkitpro/tools/bin/elf2nro')
-SKIP = ('/cc1plus', '/lto1', 'gdb', 'lto-dump')  # parts of names
+SKIP = ('/lto1', 'gdb', 'lto-dump')  # parts of names
 SKIP_TREES = ('opt/devkitpro/devkitA64/aarch64-none-elf/lib', 'opt/devkitpro/devkitA64/share')  # folders, themselves included
 
 

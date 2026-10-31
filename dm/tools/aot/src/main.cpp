@@ -14,6 +14,7 @@
 //   nxaot version                                     the toolchain of nxaot.lock this build was configured with
 //   nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max] [--tier C|W|H|H+]
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
+//               [--no-safepoints]
 //                                                     the pack stage (src/build): every function of the module compiled into one object with
 //                                                     its lookup table, function map, line table and descriptor (include/nxaot/aot_module.h),
 //                                                     linked by lld into the shared object nxaot_host loads; prints the module's numbers
@@ -50,7 +51,7 @@ int Usage() {
                  "       nxaot version\n"
                  "       nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max]\n"
                  "                   [--tier C|W|H|H+] [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info]\n"
-                 "                   [--no-line-table] [--spills] [--asm <file.s>]\n");
+                 "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints]\n");
     return 2;
 }
 
@@ -472,6 +473,8 @@ int Build(int argc, char** argv) {
             o.debug_info = false;
         } else if (a == "--no-line-table") {
             o.line_table = false;
+        } else if (a == "--no-safepoints") {
+            o.safepoints = false;  // no polls (section 6.2): the poll cost measurement
         } else if (a == "--spills") {
             o.count_spills = true;
         } else if (a == "--asm" && has) {

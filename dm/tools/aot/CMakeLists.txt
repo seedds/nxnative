@@ -121,9 +121,12 @@ target_compile_options(nxaot PRIVATE ${NXAOT_WARNINGS})
 
 # The native run time of a pack (src/rt, aot-recompiler.md sections 2.4, 3.3, 4, 5, 9.4): no LLVM code generation, the pack's shared object
 # loaded with dlopen; the library resolves the host's imports and the floating-point helpers against the executable (ENABLE_EXPORTS)
-add_library(nxaot_rt STATIC src/rt/host.cpp)
+# The JIT fallback (src/rt/jit.cpp, aot-recompiler.md section 11) is dynarmic's A64 JIT behind the C interface of the design; guest threads are
+# pthreads (section 6.1)
+find_package(Threads REQUIRED)
+add_library(nxaot_rt STATIC src/rt/host.cpp src/rt/jit.cpp)
 target_include_directories(nxaot_rt PUBLIC include src)
-target_link_libraries(nxaot_rt PUBLIC nxaot_module ${CMAKE_DL_LIBS})
+target_link_libraries(nxaot_rt PUBLIC nxaot_module nxaot_decode dynarmic Threads::Threads ${CMAKE_DL_LIBS})
 target_compile_options(nxaot_rt PRIVATE ${NXAOT_WARNINGS})
 add_executable(nxaot_host src/rt/host_main.cpp)
 target_link_libraries(nxaot_host PRIVATE nxaot_rt nxaot_runtime)
@@ -173,10 +176,19 @@ add_test(NAME manifest COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}
 add_test(NAME corpus_ref COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_corpus_run.py" --nxaot-run $<TARGET_FILE:nxaot_run>)
 add_test(NAME corpus_fp_current COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/corpus/gen_fp.py" --check)
 # Phase 1 (aot-recompiler.md section 14): the corpus recompiled and run natively in both conventions, the correctness mode and the max mode,
-# against its expected output and the dynarmic run, with the dispatcher's lookup-table and unknown-target checks; and every function of every
+# against its expected output and the dynarmic run, with the dispatcher's lookup-table check; and every function of every
 # NRO against dynarmic from the same snapshot (section 12, item 2)
 add_test(NAME corpus_native COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_corpus_native.py" --nxaot $<TARGET_FILE:nxaot>
          --nxaot-host $<TARGET_FILE:nxaot_host> --nxaot-run $<TARGET_FILE:nxaot_run> --work "${CMAKE_CURRENT_BINARY_DIR}/native")
 add_test(NAME corpus_funcdiff COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_funcdiff.py" --nxaot $<TARGET_FILE:nxaot>
          --nxaot-funcdiff $<TARGET_FILE:nxaot_funcdiff> --work "${CMAKE_CURRENT_BINARY_DIR}/funcdiff")
-set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census discover manifest corpus_ref corpus_native corpus_funcdiff PROPERTIES TIMEOUT 900)
+# Phase 3 (aot-recompiler.md sections 3.3, 3.4, 6 and 11): every NRO natively, with everything in the JIT and with no JIT, and the dispatcher's
+# miss into the JIT; the threaded programs many times on host threads and in the JIT; the pause test of section 6.2 on them
+add_test(NAME corpus_jit COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_corpus_jit.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/jit")
+add_test(NAME corpus_threads COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_threads.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/threads")
+add_test(NAME safepoints COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_safepoints.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/safepoints")
+set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census discover manifest corpus_ref corpus_native corpus_funcdiff corpus_jit
+                     corpus_threads safepoints PROPERTIES TIMEOUT 900)

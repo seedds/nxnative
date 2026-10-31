@@ -10,7 +10,7 @@
 // memory access of a load / store kernel became (section 6.4: one x86 instruction per access). Then the measurements of phase 1
 // (src/bench/calls.h): the calling conventions, the dispatcher, a jump table, int_ops natively against dynarmic, the pack stage's throughput.
 //
-//   nxaot_bench [--cpu <llvm cpu>] [--iterations N] [--asm] [--sections nan,calls,dispatch,spills,int_ops,pack] [--call-iterations N]
+//   nxaot_bench [--cpu <llvm cpu>] [--iterations N] [--asm] [--sections nan,calls,dispatch,spills,int_ops,pack,polls,jit] [--call-iterations N]
 //               [--rounds N] [--work <dir>] [--nxaot-run <path>]
 #include <algorithm>
 #include <chrono>
@@ -236,7 +236,7 @@ int main(int argc, char** argv) {
     std::string cpu;
     uint64_t iterations = 2'000'000;
     bool show_asm = false;
-    std::string sections = "nan,calls,dispatch,spills,int_ops,pack";
+    std::string sections = "nan,calls,dispatch,spills,int_ops,pack,polls,jit";
     bench::CallsOptions co;
     co.corpus = NXAOT_CORPUS_DIR;
     {
@@ -267,7 +267,7 @@ int main(int argc, char** argv) {
         } else if (a == "--nxaot-run" && i + 1 < argc) {
             co.nxaot_run = argv[++i];
         } else {
-            std::fprintf(stderr, "usage: nxaot_bench [--cpu <llvm cpu>] [--iterations N] [--asm] [--sections nan,calls,dispatch,spills,int_ops,pack]\n"
+            std::fprintf(stderr, "usage: nxaot_bench [--cpu <llvm cpu>] [--iterations N] [--asm] [--sections nan,calls,dispatch,spills,int_ops,pack,polls,jit]\n"
                                  "                   [--call-iterations N] [--rounds N] [--work <dir>] [--nxaot-run <path>]\n");
             return 2;
         }
@@ -279,8 +279,10 @@ int main(int argc, char** argv) {
     co.spills = has("spills");
     co.int_ops = has("int_ops");
     co.pack = has("pack");
+    co.polls = has("polls");
+    co.jit = has("jit");
     if (!has("nan")) {
-        return co.calls || co.dispatch || co.spills || co.int_ops || co.pack ? bench::RunCalls(co) : 0;
+        return co.calls || co.dispatch || co.spills || co.int_ops || co.pack || co.polls || co.jit ? bench::RunCalls(co) : 0;
     }
     void* want = reinterpret_cast<void*>(kGuestBase);
     if (mmap(want, kImageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) != want) {

@@ -174,7 +174,7 @@ llvm::StructType* DescType(llvm::LLVMContext& c) {
     auto* i64 = llvm::Type::getInt64Ty(c);
     auto* ptr = llvm::PointerType::get(c, 0);
     auto* name = llvm::ArrayType::get(llvm::Type::getInt8Ty(c), 32);
-    return llvm::StructType::get(c, {i32, i32, name, name, i64, i64, i64, i64, i32, i32, i32, i32, ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr});
+    return llvm::StructType::get(c, {i32, i32, name, name, i64, i64, i64, i64, i32, i32, i32, i32, ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, i64, ptr});
 }
 
 }  // namespace
@@ -281,7 +281,11 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
             args.push_back(&a);
         }
         auto* call = wb.CreateCall(target, args);
-        wb.CreateRet(call);
+        if (call->getType()->isVoidTy()) {
+            wb.CreateRetVoid();
+        } else {
+            wb.CreateRet(call);
+        }
         return w;
     };
     auto* dispatch_c = extern_fn("nxaot_rt_dispatch", llvm::FunctionType::get(ptr, {ptr, i64, ptr, i64}, false));
@@ -289,6 +293,12 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
     auto* counter_c = extern_fn("dm_aot_cntpct", llvm::FunctionType::get(i64, {ptr}, false));
     auto* counter = wrapper("nxaot.cntpct", counter_c, llvm::CallingConv::PreserveMost);
     counter->removeFnAttr(llvm::Attribute::Cold);
+    // Section 11: the JIT fallback, a C call from the code that hands it a continuation (and from jit_entry, below); section 6.2: the
+    // safepoint, through a preserve_all wrapper so that a poll's cold path saves nothing it does not store itself
+    auto* rt_jit = extern_fn("nxaot_rt_jit", llvm::FunctionType::get(b.getVoidTy(), {ptr, i64, i64}, false));
+    rt_jit->addFnAttr(llvm::Attribute::Cold);
+    auto* safepoint_c = extern_fn("nxaot_rt_safepoint", llvm::FunctionType::get(b.getVoidTy(), {ptr}, false));
+    auto* safepoint = wrapper("nxaot.safepoint", safepoint_c, llvm::CallingConv::PreserveAll);
 
     // ---- Debug information: a synthetic file per module, line = guest offset (section 9.2) ----
     std::unique_ptr<llvm::DIBuilder> dib;
@@ -395,6 +405,51 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
     }
     s.standard_entries = std_entries.size();
 
+    // ---- jit_entry (include/nxaot/aot_module.h): the JIT fallback with the standard entries' signature ----
+    // What it is passed to the block (the caller stored the rest: the block then holds the whole register file), the JIT from st->pc until
+    // the guest returns to lr, then x0, x1 and the standard entries' RV from the block (poison-equivalent when st->pending is set: the caller
+    // propagates the transfer before it looks at them)
+    auto* jit_entry = llvm::Function::Create(std_ty, llvm::GlobalValue::InternalLinkage, "nxaot.jit_entry", *m);
+    conv.Apply(jit_entry);
+    jit_entry->addFnAttr(llvm::Attribute::NoUnwind);
+    jit_entry->addFnAttr(llvm::Attribute::NoInline);
+    jit_entry->addFnAttr(llvm::Attribute::Cold);
+    jit_entry->addFnAttr("frame-pointer", "none");
+    jit_entry->addFnAttr(llvm::Attribute::getWithUWTableKind(ctx, llvm::UWTableKind::Async));
+    {
+        llvm::DISubprogram* sp = subprogram(jit_entry, 0);
+        llvm::IRBuilder<> jb{llvm::BasicBlock::Create(ctx, "entry", jit_entry)};
+        if (sp) {
+            jb.SetCurrentDebugLocation(llvm::DILocation::get(ctx, 0, 0, sp));
+        }
+        llvm::Value* st = jit_entry->getArg(0);
+        const auto field = [&](size_t off) { return jb.CreateConstInBoundsGEP1_64(i8, st, off); };
+        for (unsigned i = 0; i < 31; ++i) {
+            const int a = conv.ArgX(std_pass, i);
+            if (a >= 0 && (std_pass.x >> i & 1)) {
+                jb.CreateAlignedStore(jit_entry->getArg(static_cast<unsigned>(a)), field(offsetof(dm_guest_state, x) + 8 * i), llvm::Align(8));
+            }
+        }
+        for (unsigned i = 0; i < 32; ++i) {
+            const int a = conv.ArgV(std_pass, i);
+            if (a >= 0 && (std_pass.v >> i & 1)) {
+                jb.CreateAlignedStore(jit_entry->getArg(static_cast<unsigned>(a)), field(offsetof(dm_guest_state, v) + 16 * i), llvm::Align(16));
+            }
+        }
+        jb.CreateAlignedStore(jit_entry->getArg(1), field(offsetof(dm_guest_state, sp)), llvm::Align(8));
+        jb.CreateAlignedStore(jit_entry->getArg(2), field(offsetof(dm_guest_state, x) + 8 * 30), llvm::Align(8));
+        jb.CreateCall(rt_jit, {st, jit_entry->getArg(2), jit_entry->getArg(1)});
+        llvm::Value* r = llvm::PoisonValue::get(conv.RetType(ctx));
+        r = jb.CreateInsertValue(r, jb.CreateAlignedLoad(i64, field(offsetof(dm_guest_state, x)), llvm::Align(8)), 0);
+        r = jb.CreateInsertValue(r, jb.CreateAlignedLoad(i64, field(offsetof(dm_guest_state, x) + 8), llvm::Align(8)), 1);
+        for (unsigned i = 0; i < 4; ++i) {
+            if (plan.indirect_rv >> i & 1) {
+                r = jb.CreateInsertValue(r, jb.CreateAlignedLoad(v128, field(offsetof(dm_guest_state, v) + 16 * i), llvm::Align(16)), 2 + i);
+            }
+        }
+        jb.CreateRet(r);
+    }
+
     // ---- Lifting every function (function mode) ----
     t = Clock::now();
     lift::CalleeView indirect;
@@ -445,6 +500,10 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
         fp.rt_svc = svc;
         fp.rt_trap = trap;
         fp.rt_counter = counter;
+        fp.rt_jit = rt_jit;
+        fp.rt_safepoint = safepoint;
+        fp.jit_entry = jit_entry;
+        fp.safepoints = o.safepoints;
         fp.ic_empty = ic_empty;
         fp.ic_prefix = "nxaot.ic." + llvm::utohexstr(entry) + ".";
         fp.debug = subprogram(fp.fn, entry);
@@ -475,22 +534,49 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
         s.resume_sites += ff.continuations.size() + ff.pads.size();
         if (!l.function) {
             // Refused (an opcode the lowering does not cover, an internal error): a body that hands the function to the JIT fallback (section 11,
-            // case 4), so that the rest of the module still runs
+            // case 4), so that the rest of the module still runs: what it is passed to the block, the JIT from its entry until it returns to lr,
+            // then the native return of what the JIT left in the block
             ++s.refused;
             std::string why = l.error;
             for (const auto& op : l.unsupported) {
                 why += (why.empty() ? "" : ", ") + op;
             }
-            s.notes.push_back("[RED] nxaot build: " + fp.fn->getName().str() + " refused (" + why + "): it runs in the JIT fallback (phase 3)");
+            s.notes.push_back("[RED] nxaot build: " + fp.fn->getName().str() + " refused (" + why + "): it runs in the JIT fallback");
             llvm::Function* f = fp.fn;
             f->setLinkage(llvm::GlobalValue::InternalLinkage);
             llvm::IRBuilder<> fb{llvm::BasicBlock::Create(ctx, "entry", f)};
             if (fp.debug) {
                 fb.SetCurrentDebugLocation(llvm::DILocation::get(ctx, static_cast<unsigned>(entry), 0, fp.debug));
             }
-            auto* call = fb.CreateCall(trap, {f->getArg(0), fb.getInt64(entry), fb.getInt32(NXAOT_TRAP_JIT_REFUSED)});
-            call->setDoesNotReturn();
-            fb.CreateUnreachable();
+            llvm::Value* st = f->getArg(0);
+            const auto field = [&](size_t off) { return fb.CreateConstInBoundsGEP1_64(i8, st, off); };
+            for (unsigned i = 0; i < 31; ++i) {
+                const int a = conv.ArgX(ff.pass, i);
+                if (a >= 0 && (ff.pass.x >> i & 1)) {
+                    fb.CreateAlignedStore(f->getArg(static_cast<unsigned>(a)), field(offsetof(dm_guest_state, x) + 8 * i), llvm::Align(8));
+                }
+            }
+            for (unsigned i = 0; i < 32; ++i) {
+                const int a = conv.ArgV(ff.pass, i);
+                if (a >= 0 && (ff.pass.v >> i & 1)) {
+                    fb.CreateAlignedStore(f->getArg(static_cast<unsigned>(a)), field(offsetof(dm_guest_state, v) + 16 * i), llvm::Align(16));
+                }
+            }
+            fb.CreateAlignedStore(f->getArg(1), field(offsetof(dm_guest_state, sp)), llvm::Align(8));
+            fb.CreateAlignedStore(f->getArg(2), field(offsetof(dm_guest_state, x) + 8 * 30), llvm::Align(8));
+            llvm::Value* at = fb.CreateAdd(fb.CreateAlignedLoad(i64, base, llvm::Align(8)), fb.getInt64(entry));
+            fb.CreateAlignedStore(at, field(offsetof(dm_guest_state, pc)), llvm::Align(8));
+            fb.CreateAlignedStore(fb.getInt32(NXAOT_TRAP_JIT_REFUSED), field(offsetof(dm_guest_state, exit_reason)), llvm::Align(4));
+            fb.CreateCall(rt_jit, {st, f->getArg(2), f->getArg(1)});
+            llvm::Value* r = llvm::PoisonValue::get(conv.RetType(ctx));
+            r = fb.CreateInsertValue(r, fb.CreateAlignedLoad(i64, field(offsetof(dm_guest_state, x)), llvm::Align(8)), 0);
+            r = fb.CreateInsertValue(r, fb.CreateAlignedLoad(i64, field(offsetof(dm_guest_state, x) + 8), llvm::Align(8)), 1);
+            for (unsigned i = 0; i < 4; ++i) {
+                if (ff.rv >> i & 1) {
+                    r = fb.CreateInsertValue(r, fb.CreateAlignedLoad(v128, field(offsetof(dm_guest_state, v) + 16 * i), llvm::Align(16)), 2 + i);
+                }
+            }
+            fb.CreateRet(r);
         }
     }
     s.t_lift = Since(t);
@@ -528,7 +614,9 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
         std::vector<llvm::Constant*> rows;
         for (uint32_t i = 0; i < slots; ++i) {
             llvm::Constant* field = field_of(lookup_ty, lookup, i);
-            rows.push_back(llvm::ConstantStruct::get(entry_ty, {b.getInt64(keys[i]), targets[i] ? rel(targets[i], field) : b.getInt32(0), b.getInt32(0)}));
+            const auto ff = keys[i] == NXAOT_LOOKUP_EMPTY ? plan.fns.end() : plan.fns.find(keys[i]);
+            const uint32_t flags = ff != plan.fns.end() && !ff->second.writes.sp ? NXAOT_LOOKUP_SP_KEPT : 0u;
+            rows.push_back(llvm::ConstantStruct::get(entry_ty, {b.getInt64(keys[i]), targets[i] ? rel(targets[i], field) : b.getInt32(0), b.getInt32(flags)}));
         }
         lookup->setInitializer(llvm::ConstantArray::get(lookup_ty, rows));
     }
@@ -547,6 +635,21 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
         }
         fnmap->setInitializer(llvm::ConstantArray::get(fns_ty, rows));
     }
+    // The return addresses of every call site (bl, blr) of compiled code, sorted: where a native frame may wait for its callee, which the JIT
+    // fallback stops at besides the compiled entries (src/rt/jit.cpp)
+    std::vector<uint32_t> returns;
+    for (const auto& [entry, f] : d.functions) {
+        for (const auto& [pc, target] : f.calls) {
+            returns.push_back(static_cast<uint32_t>(pc + 4));
+        }
+    }
+    std::sort(returns.begin(), returns.end());
+    returns.erase(std::unique(returns.begin(), returns.end()), returns.end());
+    auto* returns_ty = llvm::ArrayType::get(i32, returns.size());
+    auto* returns_table = new llvm::GlobalVariable(*m, returns_ty, true, llvm::GlobalValue::InternalLinkage,
+                                                   llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint32_t>(returns)), "nxaot.returns");
+    returns_table->setSection(".nxaot.returns");
+    returns_table->setAlignment(llvm::Align(16));
     // The line table is the section !pcsections fills; the linker defines its bounds (weak: a module without entries has none)
     auto* lines_start = new llvm::GlobalVariable(*m, i8, true, llvm::GlobalValue::ExternalWeakLinkage, nullptr, "__start_nxaot_lines");
     auto* lines_stop = new llvm::GlobalVariable(*m, i8, true, llvm::GlobalValue::ExternalWeakLinkage, nullptr, "__stop_nxaot_lines");
@@ -603,7 +706,8 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
     auto* desc_ty = DescType(ctx);
     const llvm::StructLayout* layout = m->getDataLayout().getStructLayout(desc_ty);
     if (layout->getSizeInBytes() != sizeof(nxaot_module_desc) || layout->getElementOffset(12) != offsetof(nxaot_module_desc, base) ||
-        layout->getElementOffset(19) != offsetof(nxaot_module_desc, tool)) {
+        layout->getElementOffset(19) != offsetof(nxaot_module_desc, tool) || layout->getElementOffset(20) != offsetof(nxaot_module_desc, returns) ||
+        layout->getElementOffset(22) != offsetof(nxaot_module_desc, jit_entry)) {
         *error = "the descriptor's LLVM layout differs from include/nxaot/aot_module.h";
         return false;
     }
@@ -611,10 +715,11 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
     name_bytes.resize(32, '\0');
     const std::string tool = std::string("nxaot llvm ") + NXAOT_LOCK_LLVM + " dynarmic " + NXAOT_LOCK_DYNARMIC + " cc " + lift::CallConvName(o.cc) +
                              " tier " + TierName(o.tier) + " mode " + o.mode + (o.correctness ? " correctness" : "") +
-                             (o.all_entries ? " all-entries" : "") + " cpu " + s.cpu;
+                             (o.all_entries ? " all-entries" : "") + (o.safepoints ? "" : " no-safepoints") + " cpu " + s.cpu;
     auto* tool_str = b.CreateGlobalString(tool, "nxaot.tool", 0, m.get());
     const uint32_t flags = (o.cc == lift::CallConv::Ghc ? NXAOT_FLAG_GHC : 0) | (o.correctness ? NXAOT_FLAG_CORRECTNESS : 0) |
-                           (o.all_entries ? NXAOT_FLAG_ALL_ENTRIES : 0) | (fpsr ? NXAOT_FLAG_FPSR : 0);
+                           (o.all_entries ? NXAOT_FLAG_ALL_ENTRIES : 0) | (fpsr ? NXAOT_FLAG_FPSR : 0) |
+                           (o.safepoints ? NXAOT_FLAG_SAFEPOINTS : 0);
     auto* desc = new llvm::GlobalVariable(
         *m, desc_ty, true, llvm::GlobalValue::ExternalLinkage,
         llvm::ConstantStruct::get(
@@ -622,7 +727,8 @@ bool BuildObject(const module::Image& image, const BuildOptions& o, const std::s
                       llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint8_t>(image.sha256.data(), image.sha256.size())),
                       b.getInt64(image.bytes.size()), b.getInt64(image.TextEnd()), b.getInt64(image.bss_size), b.getInt64(image.text_off),
                       b.getInt32(0), b.getInt32(slots - 1), b.getInt32(plan.indirect_rv), b.getInt32(0), base, lookup, fnmap,
-                      b.getInt64(plan.fns.size()), lines_start, lines_stop, enter, tool_str}),
+                      b.getInt64(plan.fns.size()), lines_start, lines_stop, enter, tool_str, returns_table, b.getInt64(returns.size()),
+                      jit_entry}),
         "nxaot_module");
     desc->setAlignment(llvm::Align(8));
     if (dib) {

@@ -150,8 +150,13 @@ struct FunctionPlan {
     // Run-time entry points (src/build/pack.cpp declares them; the host defines what they call)
     llvm::Function* rt_dispatch = nullptr;     // preserve_all ptr (ptr st, i64 target, ptr slot, i64 site): an inline-cache miss
     llvm::Function* rt_svc = nullptr;          // void dm_aot_svc(ptr st, i32 number), the C convention
-    llvm::Function* rt_trap = nullptr;         // noreturn void (ptr st, i64 offset, i32 reason): traps and the JIT's cases
+    llvm::Function* rt_trap = nullptr;         // noreturn void (ptr st, i64 offset, i32 reason): traps
     llvm::Function* rt_counter = nullptr;      // preserve_most i64 (ptr st): mrs cntpct_el0 (section 8)
+    llvm::Function* rt_jit = nullptr;          // void nxaot_rt_jit(ptr st, i64 lr, i64 sp): the JIT fallback from st->pc (section 11)
+    llvm::Function* rt_safepoint = nullptr;    // preserve_all void (ptr st): a poll found st->poll set (section 6.2)
+    llvm::Function* jit_entry = nullptr;       // the JIT fallback with the standard entries' signature: calls and tail calls to a target with
+                                               // no compiled entry (st->pc = the target)
+    bool safepoints = true;                    // polls at the function's entry and at every branch to a block at or before its own start
     llvm::GlobalVariable* ic_empty = nullptr;  // the descriptor every inline cache starts with (it matches no guest address)
     std::string ic_prefix;                     // inline-cache slots are named <prefix><site offset>
     llvm::DISubprogram* debug = nullptr;       // debug locations, line = guest offset (section 9.2); null: none
@@ -200,6 +205,8 @@ enum DynarmicIssue : int {
     kIssueRSqrtEstimateNative = 14, // frsqrte (single, double): the native estimate raises Inexact (sqrtss / divss) or, through rsqrtss, nothing
     kIssueVectorUpperLanes = 15,    // 64-bit vector forms: dynarmic computes the zero upper lanes too (fdiv 0 / 0: IOC; frecpe, frsqrte of 0: DZC)
     kIssueMulAddInfZero = 16,       // fmla / fmls, and the fmadd family with DN: a quiet NaN addend with infinity times zero raises no Invalid Operation
+    kIssueToHalfSignallingNaN = 17, // fcvt single to half, fcvtn: with DN, on hosts with AVX-512 F, VL and DQ, dynarmic replaces NaNs by the default
+                                    // NaN through vfpclassss (which raises nothing) before vcvtps2ph, so a signalling NaN raises no Invalid Operation
 };
 
 struct Lifted {

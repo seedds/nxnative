@@ -375,6 +375,7 @@ int main(int argc, char** argv) {
     nxaot::rt::Options options;
     options.relocate = true;  // pointers in data are valid before any guest code runs
     options.quiet = true;
+    options.jit = nxaot::rt::JitMode::None;  // a run that would leave for the JIT is counted apart, as before (status kJit)
     // dynarmic first: its JIT installs a SIGSEGV handler of its own (for fastmem, unused here), which the host's then replaces, so that a
     // fault in recompiled code reaches the host's handler directly
     const Memory mem{*image};

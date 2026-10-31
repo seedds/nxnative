@@ -235,14 +235,17 @@ __attribute__((noreturn)) void rt_exit(void) {
     rt_svc_exit_process();
 }
 
-// ---- Unwinding: the corpus's cleanup landing pads are never entered (nothing throws), but -fexceptions code names these ----
+// ---- Unwinding: the corpus's cleanup landing pads are never entered (nothing throws), but -fexceptions code names these. The except program
+// unwinds through its pads with the personality-free unwinder of rt/unwind.c, which defines _Unwind_Resume itself (built with RT_UNWINDER) ----
 
 struct _Unwind_Exception;
+#ifndef RT_UNWINDER
 __attribute__((noreturn)) void _Unwind_Resume(struct _Unwind_Exception *e) {
     (void)e;
     rt_say("[RED] _Unwind_Resume: the corpus never unwinds");
     rt_svc_exit_process();
 }
+#endif
 
 int __gcc_personality_v0(int version, int actions, uint64_t exception_class, void *exception, void *context) {
     (void)version;

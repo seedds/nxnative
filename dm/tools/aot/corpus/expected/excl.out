@@ -23,4 +23,13 @@ stack.order cc5f55f1c7c16cd8
 stack.empty 0000000000000000 ok
 spinlock.guarded 00000000001e8098 ok
 spinlock.free 00000000 ok
-PASS 23
+threads.started 00000000 ok
+threads.released 00000000 ok
+threads.done 00000002 ok
+threads.fetch_add 0000000000030d40 ok
+threads.cas 0000000000030d40 ok
+threads.pair 00000000000186a0 000000000000c350 ok
+threads.mutex 00000000000030d4 ok
+threads.mutex_free 00000000 ok
+threads.pause_loop 00000001 ok
+PASS 32

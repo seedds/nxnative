@@ -1,11 +1,12 @@
 # Settings
 
-The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
+The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Picture**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Picture**, beside **Render scale**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Console mode](#console-mode), [Game language](#game-language)
+- [Picture](#picture): [Render scale](#render-scale), [Upscaling](#upscaling)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
-- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
+- [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Halve when hot](#halve-when-hot), [Frame-rate counter](#frame-rate-counter), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [TV](#tv)
 - [Settings in a file](#settings-in-a-file)
@@ -24,13 +25,21 @@ A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without
 
 Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and a few others) offer **30 fps** or **60 fps**. 60 is smoother; 30 is what the Switch ran and uses less power, so the phone stays cooler and the battery lasts longer. The game runs at real speed either way.
 
-### Render scale
-
-The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
-
 ### Console mode
 
 **Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.
+
+### Game language
+
+The game's own languages. The app was packed with one of them; pick another here without repacking.
+
+## Picture
+
+How the finished frame looks. These change what you see, not what the game runs as.
+
+### Render scale
+
+The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
 
 ### Upscaling
 
@@ -50,14 +59,6 @@ Breath of the Wild renders 1280x720 in handheld mode. Docked it renders its worl
 - **When to change it:** turn it on if the picture looks soft and the device has GPU time to spare: on a Mac, or on an iPhone in handheld mode at 30 fps. For long sessions at 60 fps on an iPhone leave it at Standard.
 - **Cost:** more GPU time each frame, which can increase heat on an iPhone. [Breath of the Wild's measurements](../dm/games/01007EF00011E000/README.md#upscaling-current) cover Mac and iPhone; the matching iPhone Standard run and MetalFX's share of the thermal cost remain unmeasured. Nothing changes while the game's picture is as large as the screen. Unsupported devices and sizes use Standard scaling.
 - **On the Mac:** choose **MetalFX** under **Upscaling** in the [settings window](#the-mac-settings-window)'s Advanced settings, or set `DM_PRESENT_UPSCALE=metalfx` in its `env.txt` (off by default). It helps in a large window or on a 4K screen.
-
-### Game language
-
-The game's own languages. The app was packed with one of them; pick another here without repacking.
-
-### Frame-rate counter
-
-Shows the frames per second at the top left.
 
 ## Controls
 
@@ -173,6 +174,18 @@ flowchart LR
 - **Off:** the game keeps aiming at 60; a late frame is shown one refresh later and the next one goes on as usual, so heavy scenes look less even but stay closer to 60 on average.
 - **When to change it:** turn it off if the game often falls to 30 fps although it is only slightly late.
 
+### Frame-rate counter
+
+Shows the frames per second at the top left.
+
+### Halve when hot
+
+While iOS reports the device as hot (thermal state *serious* or worse), the frame rate is held at 30 until the device has been cooler for 30 seconds. **On**, the default, lets it cool and keeps the motion even. **Off** keeps aiming for 60.
+
+- **When to change it:** with a phone cooler, or when even 30 is worse than an uneven 45 to 55 for you.
+- **Cost of turning it off:** more heat, and at that temperature iOS has already lowered the GPU clock, so some frames still miss.
+- **Note:** iOS can lower the clock well before it reports the device as hot. On an iPhone 17 Pro Max a third of frames were dropped for ten minutes while the thermal state read nominal, so this setting does not catch every slowdown.
+
 ### Performance HUD
 
 Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play.
@@ -234,6 +247,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |
 | Encode thread | `DM_NVN_ENC_THREAD` | `1`, `0` |
 | Hold frames when late | `DM_FPS_HOLD` | `on`, `off` |
+| Halve when hot | `DM_THERMAL_CAP` | `1`, `0` |
 | Performance HUD | `DM_METAL_HUD` | `1`, `0` |
 
 `DM_LAUNCHER=0` skips the settings screen; the choices you saved there still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults and keeps your saved choices for later. How the settings are listed for each game: [dm/games/settings.tsv](../dm/games/settings.tsv).

@@ -15,7 +15,7 @@ settings = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(settings)
 
 BOTW, WONDER = '01007EF00011E000', '010015100B514000'
-PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']
+PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_THERMAL_CAP', 'DM_SHOW_FPS', 'DM_METAL_HUD']
 
 
 def build(gid, api, platform=None):
@@ -30,7 +30,7 @@ class LauncherSettingsTests(unittest.TestCase):
         for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
             with self.subTest(api=api):
                 s = build(gid, api)['DM_PRESENT_UPSCALE']
-                self.assertEqual((s['kind'], s['section'], s['default']), ('choice', 'Game', 'off'))
+                self.assertEqual((s['kind'], s['section'], s['default']), ('choice', 'Picture', 'off'))
                 self.assertEqual(s['options'], [['off', 'Standard'], ['metalfx', 'MetalFX']])
 
     def test_frame_buffering_by_graphics_api(self):
@@ -49,7 +49,9 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(botw['DM_PSO_MTL4']['default'], '1')   # pso_mtl4 on
         self.assertEqual((wonder['DM_PRESENT_SNAP']['default'], wonder['DM_PSO_MTL4']['default']), ('0', '0'))
         self.assertEqual((botw['DM_PSO_PREBUILD']['default'], botw['DM_NVN_ENC_THREAD']['default'], botw['DM_METAL_HUD']['default']), ('1', '1', '0'))   # the host's iOS defaults
-        self.assertEqual(list(dict.fromkeys(s['section'] for s in botw.values())), ['Game', 'Controls', 'Performance'])
+        self.assertEqual(list(dict.fromkeys(s['section'] for s in botw.values())), ['Game', 'Picture', 'Controls', 'Performance'])
+        self.assertEqual([e for e, s in botw.items() if s['section'] == 'Picture'], ['DM_PRESENT_UPSCALE'])   # what the frame looks like, not what the game runs as
+        self.assertNotIn('DM_RENDER_SCALE', botw)   # its row needs the build's RENDER_SCALE stub, which this fixture has no rewriter table for
         self.assertNotIn('DM_FPS_HOLD', wonder)   # no frame step, as the Frame rate row
         self.assertIn('first start', botw['DM_PSO_PREBUILD']['note'])   # it runs once in the prepare step, before the first frame
 
@@ -95,7 +97,7 @@ class LauncherSettingsTests(unittest.TestCase):
             listed = settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
         rows = {s['env']: s for s in listed['settings']}
         self.assertEqual(listed['schema'], 1)
-        self.assertEqual([e for e, s in rows.items() if s.get('level') == 'basic'], ['DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_OPMODE', 'DM_LANG', 'DM_RUMBLE'])
+        self.assertEqual([e for e, s in rows.items() if s.get('level') == 'basic'], ['DM_FPS_TARGET', 'DM_OPMODE', 'DM_LANG', 'DM_RENDER_SCALE', 'DM_RUMBLE'])
         self.assertEqual(rows['DM_RUMBLE_GAIN']['needs'], 'DM_RUMBLE=1')
         self.assertFalse({'level', 'needs'} & set(rows['DM_METAL_HUD']), 'a row without meta has no optional fields')
 

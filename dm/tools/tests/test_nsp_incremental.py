@@ -586,6 +586,15 @@ class SplitShaders(Base):
         with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'): self.go(g, own=False)   # a failed check is not reused
         self.assertEqual(self.splits, 3)
 
+    def test_dumped_programs_are_not_part_of_the_comparison(self):
+        """A row a run dumped (/shdump/...#RAW@0x0) is what a session reached, not a fact about the game files: a profile holding one still splits with a porter's own dump directory, and with none."""
+        for n in self.NAMES[:3]: (self.src / n).write_text(f'# older header\n{n}\t{self.rows}\n')
+        (self.src / 'shader_map.tsv').write_text(f'# older header\nshader_map.tsv\t{self.rows}\nps_main.bin\t1\tpixel\t0123456789abcdef\t/shdump/0123456789abcdef#RAW@0x0\n')
+        g = game.Game(self.src)
+        self.assertEqual(self.go(g, own=False), nsp.package_key(self.pkg))   # the split emits no dumped row: not a difference in the game files
+        self.rows = 'other'; (self.ex / 'RomFS/b.bin').write_bytes(b'more')   # a changed file forces the split, and a row read from a game file is still compared
+        with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'): self.go(g, own=False)
+
     def test_damaged_never_reuses(self):
         g = self.own()
         with mock.patch.object(nsp, 'ALLOW_DAMAGED', True):

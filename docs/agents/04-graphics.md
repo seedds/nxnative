@@ -10,6 +10,8 @@ Do not stop at the obvious archive. In Mario the main `bfsha` held 4,888 of the 
 
 Validate a new title's coverage at run time: `DM_NVN_SHDUMP=<dir>` makes the host dump the control section and code of every program it can't find in the map; search those bytes in the game files to find the container that was missed.
 
+A dump directory is a source in its own right: `shader_split.py` reads `DM_NVN_SHDUMP` (or `<version dir>/shdump` beside the RomFS) back as one shader per `<key>.ctl` + `<key>.code` pair, keyed from the bytes and refused when they do not hash to the file's name. That keeps a title's dumped programs in the map across every re-split, where rows appended by hand or by a script are lost the next time the split rewrites it ([Programs a run dumped as missing from the map](../reference/shaders.md#programs-a-run-dumped-as-missing-from-the-map-dm_nvn_shdump)).
+
 ## 2. Key shaders by control section + code
 
 The host key is `sha256(control[0:0x880] + code)[:16]` (`prog_get` in `nvn_mtl.m`, `shader_split.py`). D2R keyed by the control section alone; in Mario, 6,367 shader pairs share a control section but differ in code. A different code length or layout in a new title must be reflected in both places.

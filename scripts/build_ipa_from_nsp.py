@@ -1576,6 +1576,10 @@ def data_rows(b):   # a table's data rows (without # comment lines: the header c
     return [l for l in b.splitlines() if not l.startswith(b'#')]
 
 
+def file_rows(b):   # the data rows that are facts about the game files: a program a run dumped (/shdump/...#RAW@0x0, shader_split.py dumped_shaders) depends on what a session reached
+    return [l for l in data_rows(b) if b'#RAW@' not in l]
+
+
 def dlc_only_shader_change(g, tables):
     """A different DLC shader union, with the registered non-DLC shaders and facts unchanged. Package indices may be re-numbered when an add-on is removed.
     Source ownership is the split's /aoc/<index>/ prefix; a module or base/update shader difference never qualifies for this shader-only derivation."""
@@ -1715,8 +1719,9 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     if provisional:   # a provisional profile takes the tables as they come
         for n in names: shutil.copyfile(tmp / 'tables' / n, g.table(n))
     else:
-        # Data rows byte-identical to the profile's = the same game files the tables were built from; if not, stop (the profile's tables are left alone). Only data rows are compared: the header of Engage's profile tables was written by an older shader_split
-        diff = [n for n in names if data_rows((tmp / 'tables' / n).read_bytes()) != data_rows(g.table(n).read_bytes())]
+        # Data rows byte-identical to the profile's = the same game files the tables were built from; if not, stop (the profile's tables are left alone). Only data rows are compared: the header of Engage's profile tables was written by an older shader_split.
+        # Rows a run dumped are left out: they are what a session reached, so a profile built from them still splits with a porter's own dump directory, and with none
+        diff = [n for n in names if file_rows((tmp / 'tables' / n).read_bytes()) != file_rows(g.table(n).read_bytes())]
         if diff: raise BuildError(f'the split shader tables differ from game profile {g.id}\'s: {", ".join(diff)} (game files not the versions the profile registers?)')
     rmtree(kf); swap_in(tmp / 'pkg', pkg); rmtree(tmp)
     note = (f'{int(m.group(1)):,} shaders' if m else '') + (f', {bad.group(1)} file(s) unreadable' if bad else '')

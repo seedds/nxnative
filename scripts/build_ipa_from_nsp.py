@@ -2065,6 +2065,16 @@ def mac_host(py, repo, work, env, logs, g):
         rmtree(kf); font.mkdir(parents=True, exist_ok=True)
         run([py, repo / 'dm/tools/make_ext_font.py', ttf], logs / 'make_ext_font.log', env=env)
         kf.write_text(f'{key}\n')
+    # The compact stand-in for a font engine that cannot load the standard one (compact_font.py: downloaded once into a cache, checked against its SHA-256). Without it (offline) the host
+    # falls back to macOS's Arial, so the build goes on
+    small, sk = font / 'standard_small.ttf', font / 'standard_small.key'
+    key = fingerprint(('files', [repo / 'dm/tools/compact_font.py']))
+    if not (small.is_file() and reused(sk, key) is not None):
+        PROG.set(step='compact font')
+        rmtree(sk); rmtree(small)
+        run([py, repo / 'dm/tools/compact_font.py', small], logs / 'compact_font.log', env=env, ok=(1,))
+        if small.is_file(): sk.write_text(f'{key}\n')
+        else: say(f'[YELLOW] no compact shared font (see {logs / "compact_font.log"}): a game whose font engine cannot load the standard one gets macOS\'s Arial')
     PROG.end(str(host))
     return host, font
 

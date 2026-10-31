@@ -58,6 +58,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** `render_once` looks up the `SdkMutexType` functions only when `update_lock` does not find `LockMutex` (`hle_audren.c`).
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (SDK 3.5.1), the first SDK 3 game through the audio renderer (Bayonetta 2's 3.6.0 plays through `AudioOut`).
 
+### SDK 3 signals a renderer event the game may have reused
+
+- **Symptom:** the game exits with 42 on its first audio frame: `Break#1 reason=0` in `os::SignalSystemEvent`, called from the public `ExecuteAudioRendererRendering` on the host's render thread (`render_main`).
+- **Cause:** SDK 3's CPU / manual `OpenAudioRenderer` keeps the `SystemEventType` in the handle (`handle[1]`), and the public `ExecuteAudioRendererRendering` signals it after every render (skipped when it is NULL). The DSP open the game asked for keeps no pointer to it (`handle[1] = 0`) and only attaches the service's kernel event, so a game may let the object go once the renderer is open. Little Nightmares (Unreal Engine 4) reuses its memory right away, and `SignalSystemEvent` found a state byte (+0x28) that was neither 1 nor 2 and aborted. The binding the host made of the event ([The renderer event as the service gives it](#the-renderer-event-as-the-service-gives-it-a-kernel-event)) was intact.
+- **Fix:** with SDK 3 the render thread passes NULL as the event and signals the kernel event through its binding (`hle_signal_system_event_binding`), the same event while the object lives (`g_ev_binding` in `hle_audren.c`). Other SDKs signal through the SDK as before.
+- **Found on:** Little Nightmares (`01002FC00412C000`, 1.0.4, SDK 3.5.1), from a provisional profile: it boots, renders, takes input and plays sound on the Mac (M2 Pro, macOS 27.2).
+
 ### Where the `AudioRenderSystem` sits in `AudioRendererImpl`
 
 - **Symptom:** the sound is choppy: about two of every three 5 ms blocks are silent (a `DM_AUDIO_DUMP`), with no underruns. The log's `catch-up renders so far` grows by one for each rendered frame (2000 of every 2000), and every update logs `no frame rendered before update N`.

@@ -92,6 +92,12 @@ enum { CQ = 4 }; static int16_t g_cq[CQ][FRAME_MAX * 2]; static int g_cq_n[CQ]; 
 static pthread_mutex_t g_cq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_cq_cv = PTHREAD_COND_INITIALIZER;   // the render thread signals each frame it takes off the queue (catch-up pacing)
 static void cq_popped(void) { pthread_mutex_lock(&g_cq_mu); pthread_cond_broadcast(&g_cq_cv); pthread_mutex_unlock(&g_cq_mu); }
 
+// SDK 3's public ExecuteAudioRendererRendering signals the SystemEventType it stored in the handle at open (sdk+0x17e690 in Little Nightmares 1.0.4: os::SignalSystemEvent(handle[1]),
+// skipped when it is NULL). On Horizon the game opened the DSP renderer, which keeps no pointer to that object (handle[1] = 0) and only attaches the service's kernel event to it,
+// so the game may let the object go: Little Nightmares (Unreal Engine 4) reuses its memory right after OpenAudioRenderer, and the first render aborted in SignalSystemEvent on a
+// state byte (+0x28) that was neither 1 nor 2. With SDK 3 the render thread passes NULL and signals the kernel event through its binding, which is the same event while the object lives
+static uint64_t g_ev_binding;
+
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // same as the front of hle_audio.c's AudioOutBuffer
 static void render_main(void *arg) {
     (void)arg;
@@ -112,7 +118,10 @@ static void render_main(void *arg) {
         const int16_t *src; int got;
         uint32_t h = atomic_load(&g_cq_head);
         if (h != atomic_load(&g_cq_tail)) { src = g_cq[h % CQ]; got = g_cq_n[h % CQ]; atomic_store(&g_cq_head, h + 1); cq_popped(); }   // play queued catch-up output first
-        else { g_frame_n = 0; exec(g_handle[0], g_handle[1]); src = g_frame; got = g_frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
+        else {
+            g_frame_n = 0; exec(g_handle[0], g_ev_binding ? NULL : g_handle[1]); src = g_frame; got = g_frame_n;
+            if (g_ev_binding) hle_signal_system_event_binding(g_ev_binding);
+        }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
         int n = got ? got : 240;
         gbuf *b = free_list[--nfree];
         if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
@@ -161,9 +170,14 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     // auto-clear event wakes only its highest-priority waiter, a kernel event wakes every waiter (each tries ResetSignal). Donkey Kong Country: Tropical Freeze waits on it from
     // two threads: its audio thread (priority 29) every frame, and the main thread while CAudioMemoryPool::Shutdown detaches a pool as a level loads (main+0x6fa8c); the audio
     // thread took every wake and the main thread waited forever. The renderer signals the event through os::SignalSystemEvent, which takes either kind
+    g_ev_binding = 0;
     if (ev && *(int32_t *)(param + P_DEVICE) == 0) {
         static void (*destroy)(void *); if (!destroy) destroy = gsym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE");
         destroy(ev); hle_bind_system_event(ev, 1);
+        if (dm_sdk_major() == 3 && handle[1] == ev) {
+            g_ev_binding = hle_system_event_binding(ev);
+            LOG("audren: SDK 3, the render thread signals the renderer event through its kernel binding (the game may reuse the SystemEventType)");
+        }
     }
     if (atomic_load(&g_open)) { LOG("[RED] audren: a second renderer (the host drives only one)"); return r; }
     g_handle[0] = handle[0]; g_handle[1] = handle[1]; atomic_store(&g_open, 1);

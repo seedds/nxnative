@@ -25,7 +25,7 @@ static void work_free(void *p) {
 
 enum { SDK_WORK = 0x760000, SERVICE_WORK = 0x61d000 };
 static int opens, starts, joins, closes, fail_open, nested;
-static int event_destroys, event_binds;
+static int event_destroys, event_binds, event_bindings, sdk_major = 16;
 static void *sdk_event;
 static void *sdk_work;
 static void *map_key, *map_value;
@@ -49,11 +49,13 @@ static Result sdk_open(void **handle, const uint8_t *param, void *work, size_t s
 static Result sdk_open_ev(void **handle, void *ev, const uint8_t *param, void *work, size_t size) {
     assert(ev);
     sdk_event = ev;
-    return nested ? h_ar_Open0(handle, param, work, size) : sdk_open(handle, param, work, size);
+    Result r = nested ? h_ar_Open0(handle, param, work, size) : sdk_open(handle, param, work, size);
+    if (!r && sdk_major == 3) handle[1] = ev;   // SDK 3's CPU / manual open keeps the event in the handle (sdk+0x17dffc in Little Nightmares 1.0.4)
+    return r;
 }
 static void sdk_destroy_event(void *ev) { assert(ev == sdk_event); event_destroys++; }
 static void sdk_close(void *obj, void *state) {
-    assert(obj == sdk_work && state == (uint8_t *)sdk_work + 0x80);
+    assert(obj == sdk_work && state == (sdk_major == 3 ? sdk_event : (uint8_t *)sdk_work + 0x80));
     assert(((uint8_t *)obj)[SDK_WORK - 1] == 0x5a);   // storage is alive through SDK teardown
     closes++;
 }
@@ -90,6 +92,9 @@ void hle_bind_system_event(void *ev, int ac) {
     assert(ev == sdk_event && ac == 1 && event_destroys == event_binds + 1);
     event_binds++;
 }
+int dm_sdk_major(void) { return sdk_major; }
+uint64_t hle_system_event_binding(void *ev) { assert(ev == sdk_event && event_binds); event_bindings++; return 0x77; }
+int hle_signal_system_event_binding(uint64_t binding) { (void)binding; return 1; }
 
 int main(void) {
     uint8_t param[P_SIZE] = {0}, saved[P_SIZE];
@@ -136,10 +141,18 @@ int main(void) {
         assert(handle[0] != work && map_value == backing);
         assert(((uint8_t *)work)[0] == 0xa5 && ((uint8_t *)work)[SERVICE_WORK - 1] == 0xa5);
         assert(!memcmp(param, saved, sizeof param));
+        assert(!g_ev_binding);   // a newer SDK signals the event through the SDK, as before
         h_ar_Close(handle[0], handle[1]);
         assert(!backing && !map_key && allocations == frees && closes == c + 1 && joins == starts);
     }
-    assert(event_destroys == 2 && event_binds == 2);   // event opens, including the nested route, replace the local event once
+    assert(event_destroys == 2 && event_binds == 2 && !event_bindings);   // event opens, including the nested route, replace the local event once
+    // SDK 3 keeps the event in the handle, and the game may reuse the object (Little Nightmares): the render thread signals it through its kernel binding
+    sdk_major = 3; nested = 0;
+    assert(!h_ar_Open(handle, event, param, work, SERVICE_WORK));
+    assert(handle[1] == event && event_binds == 3 && event_bindings == 1 && g_ev_binding == 0x77);
+    h_ar_Close(handle[0], handle[1]);
+    assert(!backing && !map_key && allocations == frees && joins == starts);
+    sdk_major = 16;
     fail_open = 1;
     int s = starts;
     assert(h_ar_Open0(handle, param, work, SERVICE_WORK));

@@ -39,3 +39,7 @@ shader_note	Borderlands 3 shaders
 # Streamed sampled textures, including BGRA8 landscape heightmaps; see README.md.
 tex_flush_upload	on
 tex_dirty_upload	on
+
+# Mac quality improvement: 325 MB dropped close-up material mips near Lilith;
+# 325 -> 768 -> 325 -> 768 MB same-scene comparison; iPhone not validated.
+ue_texture_pool	768

@@ -24,6 +24,7 @@ The input set tested included DLC indices 2, 3, 4, 5, 11 and 12. The corrected f
 ## Required profile settings
 
 - `tex_flush_upload on` and `tex_dirty_upload on`: sampled sparse-layout textures are populated by the CPU, including 128×128 BGRA8 landscape heightmaps with eight mips. Prepopulated storage must be uploaded before an older GPU-only alias can be returned.
+- `ue_texture_pool 768`: raise the Mac texture-streaming budget; see [the close-up comparison below](#texture-detail-near-lilith-mac-streaming-budget). The iPhone default is unchanged.
 - `mem_alias 0x1000000000` with a roughly 64 GiB virtual reservation: the game's default UE region reserves about 62 GiB, and its allocator takes about 37 GiB of virtual space. These are address-space reservations, not physical RAM requirements; the opening gameplay HUD showed roughly 4.1–4.3 GiB app memory in local runs.
 - Keep the game allocator intact. The survey found the FMallocBinned3 name getter in vtable slot 17, outside the automatic rewriter's supported layouts. No guessed allocator cut or game-specific executable address patch was introduced. A practical iPhone address-space layout needs separate work.
 
@@ -41,3 +42,13 @@ A broader GPU-ownership experiment was discarded: changing compressed-copy owner
 The tested local build passed 179 NVN command checks, 201 initial-texture checks, 83 readback/copy checks, 318 image-alias checks, 44 writable-image checks, 12 compact/archive/inline reader tests, 13 shader-chain tests and 11 documentation tests. Fixtures are synthetic; the texture regression samples three literal-colored mips of a new sparse RGBA object over previously empty GPU storage.
 
 The submission is rebased onto newer upstream code without changing the installed, player-tested app. Checks rerun on the submission and unavailable cross-game checks are listed in the pull request; do not interpret earlier counts as validation of every upstream change.
+
+## Texture detail near Lilith: Mac streaming budget
+
+A follow-up comparison on the same M4 Mac found a separate texture-detail limit after the renderer fixes: `r.Streaming.PoolSize` was **325 MB** in both the game-thread and render-thread copies. Lilith's face, hair and jacket stayed blurry at close range, as did nearby posters, shelves and props. The tested frame's texture views included base level 0 and the logged sampler bias was 0; those observations alone do not establish that every texture's content is correct.
+
+Using the host's existing `DM_CTL` / `cvari` diagnostic, we changed only the streaming budget at the same location: **325 → 768 → 325 → 768 MB**. Sharper materials streamed in at 768 MB, became blurry again at 325 MB, and sharpened again after restoring 768 MB. Screenshots and the command log were retained locally. The camera/location stayed approximately the same; character idle animation and lighting were not synchronized. This repeatable reversal identifies the engine's texture-residency budget as the limiting factor in this scene rather than merely waiting longer for loading.
+
+The recipe now sets **`ue_texture_pool 768`** using the existing [Unreal texture-pool mechanism](../../../docs/reference/rendering.md#unreals-texture-streaming-pool). This is a Mac quality improvement over the Switch's tested budget, not another shader or texture-ownership fix. The host finds the registered variable by name, raises a smaller positive pool, and preserves a larger or engine-managed value. No new fixed-address runtime rule, graphics patch or shader translation change is needed. An already-built Mac app can use `DM_UE_TEXTURE_POOL=768` in its environment file with the same host implementation. `DM_UE_TEXTURE_POOL=0` leaves the budget as the game sets it.
+
+The 768 MB target is a texture-streaming budget, not total app RAM usage. Validation covers this close-up scene and surrounding materials; it is not a long-duration or later-area memory benchmark, and does not establish that every remaining graphics issue has this cause. The profile default applies on Mac only. Do not opt an iPhone into the larger budget without separate memory testing. All comparisons used isolated saves; working saves were backed up and left unchanged.

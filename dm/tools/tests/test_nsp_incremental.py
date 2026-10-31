@@ -122,6 +122,20 @@ class DeriveProfile(Base):
         nsp.derive_profile(g, self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
         self.assertEqual(derived.table('shader_map.tsv').read_text(), 'generated DLC shader rows\n')
 
+    def test_derived_main_without_frame_step_stubs_keeps_the_games_step(self):
+        source = self.src / 'game.tsv'; source.write_text(source.read_text() + 'fps_target\t60\n')
+        (self.src / 'patches.py').write_text(f'def frame_step(ctx): pass\nFRAME_STEP = {{"{BID}": frame_step}}\n')   # stubs for the registered main only, never run
+        self.derive()
+        self.assertEqual(game.Game(self.pdir).get('fps_target'), '0')
+        self.assertIn('frame step stubs for other builds only', (self.pdir / 'game.tsv').read_text())
+        (self.src / 'patches.py').write_text(f'FRAME_STEP = {{"{BID}": 1, "{BID2}": 2}}\n')   # the derived main has stubs too
+        self.derive(); self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
+        (self.src / 'patches.py').write_text('CUTS = {}\n'); self.derive()   # no frame step in the profile
+        self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
+        (self.src / 'patches.py').write_text(f'FRAME_STEP = {{"{BID}": 1}}\n'); self.derive()
+        nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], shader_only=True)   # shader tables only: the settings stay
+        self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
+
     def test_missing_corrupt_and_duplicate_override_rows_derive_again(self):
         for change in ('missing', 'corrupt', 'override', 'indented override', 'truncated'):
             with self.subTest(change):

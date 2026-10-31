@@ -103,15 +103,74 @@ static const void *font_payload(const void *p) {
     pthread_mutex_unlock(&font_mu);
     return r;
 }
+// The compact stand-in, for a font engine that cannot load the standard one: DM_SHARED_FONT_SMALL or $DM_FONT_DIR/standard_small.ttf (Noto Sans Regular, 0.6 MB, which
+//   dm/tools/compact_font.py downloads at build time), then macOS's Arial. Mario Tennis Aces (SDK 4) loads the standard font into engines with 50 KB work buffers (main+0x3ebf8c),
+//   where Arial Unicode (23 MB) fails with error 201; its "?" glyph lookup (main+0x3ee4dc) then finds no font and main+0x3eacbc crashed at address 0x38
+static font_t small_f;
+static int small_done;
+static font_t font_small(void) {
+    pthread_mutex_lock(&font_mu);
+    if (!small_done) { small_done = 1; small_f = font_first("DM_SHARED_FONT_SMALL", "standard_small.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf");
+                 if (!small_f.p) LOG("[RED] no compact shared font (dm/tools/compact_font.py fetches DM_FONT_DIR/standard_small.ttf)"); }
+    font_t f = small_f;
+    pthread_mutex_unlock(&font_mu);
+    return f;
+}
+static int font_is_std(const void *p) {
+    pthread_mutex_lock(&font_mu);
+    int r = p && std_f.p && (p == std_f.p || p == std_f.p + 8);
+    pthread_mutex_unlock(&font_mu);
+    return r;
+}
 static uint32_t (*font_load)(void *, char *, const void *, unsigned, unsigned);
+static uint32_t (*font_err)(void *);
+static uint32_t (*font_init)(void *, void *, unsigned);
+static void (*font_fini)(void *);
 static pthread_once_t font_load_once = PTHREAD_ONCE_INIT;
 static void font_load_init(void) {
     font_load = guest_sym("_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj");
     if (!font_load) die("ScalableFontEngine::LoadFont not found in the guest");
+    font_err = guest_sym("_ZN2nn6fontll18ScalableFontEngine8GetErrorEv");
+    font_init = guest_sym("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj");
+    font_fini = guest_sym("_ZN2nn6fontll18ScalableFontEngine8FinalizeEv");
 }
-HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj", "shared font BFTTF allocation base → TTF payload; parsing and errors stay in the SDK", uint32_t, h_font_LoadFont, void *self, char *name, const void *data, unsigned index, unsigned capacity) {
+// Each engine's work buffer as Initialize got it, and whether a font loaded into it since. The engine is Monotype iType (LoadFont = FSS_load_font, GetError = FS_error, Initialize = FS_init_ex
+//   on the work buffer): a load that runs out of the buffer (error 201) leaves it used up, and the compact font then failed the same way in that engine. So the retry starts from a clean
+//   engine (Finalize, then Initialize on the same buffer), which only an engine with no font loaded yet can afford
+typedef struct { void *self, *buf; unsigned size; int fonts; } font_eng_t;
+static font_eng_t font_eng[64];
+static int font_neng;
+static font_eng_t *font_eng_of(void *self, int add) {   // with font_mu held
+    for (int i = 0; i < font_neng; i++) if (font_eng[i].self == self) return &font_eng[i];
+    if (!add) return NULL;
+    font_eng_t *e = &font_eng[font_neng < 64 ? font_neng++ : 63];   // a 65th engine reuses the last slot: it may only lose its retry
+    *e = (font_eng_t){self, NULL, 0, 0};
+    return e;
+}
+HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj", "font engine initialize: the SDK's, with the work buffer recorded for the compact shared font's retry (h_font_LoadFont)", uint32_t, h_font_Initialize, void *self, void *buf, unsigned size) {
     pthread_once(&font_load_once, font_load_init);
-    return font_load(self, name, font_payload(data), index, capacity);
+    if (!font_init) die("ScalableFontEngine::Initialize not found in the guest");
+    pthread_mutex_lock(&font_mu); font_eng_t *e = font_eng_of(self, 1); e->buf = buf; e->size = size; e->fonts = 0; pthread_mutex_unlock(&font_mu);
+    return font_init(self, buf, size);
+}
+// The standard stand-in is loaded first; only when the engine then reports an error, and holds no other font, is it started afresh and given the compact one, so every game that loads the
+// standard stand-in keeps its full coverage
+HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj", "shared font BFTTF allocation base → TTF payload, the compact stand-in when the engine cannot load the standard one; parsing and errors stay in the SDK", uint32_t, h_font_LoadFont, void *self, char *name, const void *data, unsigned index, unsigned capacity) {
+    pthread_once(&font_load_once, font_load_init);
+    uint32_t r = font_load(self, name, font_payload(data), index, capacity), e = font_err ? font_err(self) : 0;
+    pthread_mutex_lock(&font_mu);
+    font_eng_t *g = font_eng_of(self, 0), eng = g ? *g : (font_eng_t){0};
+    if (g && !e) g->fonts++;
+    pthread_mutex_unlock(&font_mu);
+    if (!e || !font_is_std(data) || !g || eng.fonts || !eng.buf || !font_fini) return r;
+    font_t s = font_small(); if (!s.p) return r;
+    font_fini(self); font_init(self, eng.buf, eng.size);
+    r = font_load(self, name, s.p + 8, index, capacity);
+    uint32_t e2 = font_err(self);
+    if (!e2) { pthread_mutex_lock(&font_mu); if ((g = font_eng_of(self, 0))) g->fonts++; pthread_mutex_unlock(&font_mu); }
+    static _Atomic int n;
+    if (!atomic_fetch_add(&n, 1) || e2) LOG("%sshared font: LoadFont failed with %u on the standard stand-in, the compact one gives %u (engine %p, work buffer %u bytes)", e2 ? "[RED] " : "", e, e2, self, eng.size);
+    return r;
 }
 // The address points straight at the TTF (past the 8-byte header) and the size excludes the header, except for a game on SDK 11 or later whose main imports ScalableFontEngineHelper::Decode
 //   (dm_sdk_major, dm_main_imports; the profile's shared_font overrides). Super Mario 3D World + Bowser's Fury (SDK 10) records shared fonts as type 0 (main+0x975658), calls no Decode and hands the address

@@ -1,0 +1,12 @@
+{
+	"path": "/",
+	"root": "/Volumes/mac15/games/Mario/0100000000010000_build/ipa/build/ios/pkg/dd/Build/Products/Release-iphoneos/DmIOS.app",
+	"bundle_id": "com.XiZS.KCypU5",
+	"bundle_version": "1.3.0",
+	"bundle_executable": "DmIOS",
+	"sha1": "MQpK2oR/7EJAacRPu+RH8l5LQM8=",
+	"sha256": "zKmfIKpDh4kTxITZ1yEtIhwvw1T5I2xC9zIGfTXnnu0=",
+	"name": "SUPER MARIO ODYSSEY",
+	"files": [ "DmIOS" ],
+	"changed": [ "DmIOS", "embedded.mobileprovision" ]
+}

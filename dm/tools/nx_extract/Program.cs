@@ -41,10 +41,22 @@ static class P {
         if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [--romfs-image]\n       nx_extract <prod.keys> --title <nsp|nsz|xci|xcz>"); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image);
-        var basePkg = OpenNsp(ks, a[1], ContentMetaType.Application); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
+        // DM_CARD_UPDATE=1: read every NCA in the container, the cartridge's own update patches included. Without it only
+        // the NCAs the base game's Application content meta lists are read (a 1G+1U card gives the base game, and the
+        // update is expected as its own NSP); with the update carried inside the card there is no separate NSP to give,
+        // and the base build alone can be a version no game profile was brought up on (Super Mario Odyssey 1.0.0 aborts
+        // in nninitStartup).
+        var basePkg = OpenNsp(ks, a[1], Environment.GetEnvironmentVariable("DM_CARD_UPDATE") == "1" ? null : ContentMetaType.Application); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
         Nca baseProg = Pick(basePkg, NcaContentType.Program) ?? throw new Exception("no Program NCA in the base NSP");
         Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, baseProg.Header.TitleId) ?? throw new Exception("no Program NCA of the base game's program in the update NSP");
-        Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, baseProg.Header.TitleId);
+        // DM_CARD_UPDATE=1 with no separate update NSP: a 1G+1U cartridge keeps the update's Program NCA after the base
+        // game's, so it is the patch the base game is layered with (its code, and its RomFS delta through the section).
+        if (updProg == null && Environment.GetEnvironmentVariable("DM_CARD_UPDATE") == "1") {
+            Nca card_upd = null;
+            foreach (Nca n in basePkg) if (n.Header.ContentType == NcaContentType.Program) card_upd = n;
+            if (card_upd != null && card_upd != baseProg) updProg = card_upd;
+        }
+        Nca ctrl = updProg != null && updPkg == null ? LastOf(basePkg, NcaContentType.Control, baseProg.Header.TitleId) : Pick(updPkg ?? basePkg, NcaContentType.Control, baseProg.Header.TitleId);
         Console.WriteLine($"title {baseProg.Header.TitleId:x16}" + (updProg != null ? $", update {updProg.Header.TitleId:x16}" : ""));
         string outDir = a[3], cmpDir = a.Length > 4 ? a[4] : null;
         if (ctrl != null) {   // control data (NACP): display version and game name; a raw copy goes to <output dir>/control.nacp for naming the app
@@ -171,6 +183,11 @@ static class P {
     }
     // A multi-program application has a Program and a Control NCA per program index (ROMANCE OF THE THREE KINGDOMS 8 REMAKE: its update 1.1.3 adds a whole second program,
     // title ID …0001, beside the game's patch, …0000): with no title ID the lowest one (program index 0, the game), else the NCA of that title ID
+    static Nca LastOf(List<Nca> l, NcaContentType t, ulong? id = null) {   // the last matching NCA: a card's update follows the base game's
+        Nca r = null;
+        foreach (Nca n in l) if (n.Header.ContentType == t && (id == null || n.Header.TitleId == id)) r = n;
+        return r;
+    }
     static Nca Pick(List<Nca> l, NcaContentType t, ulong? id = null) {
         Nca r = null;
         foreach (Nca n in l) if (n.Header.ContentType == t && (id == null ? r == null || n.Header.TitleId < r.Header.TitleId : n.Header.TitleId == id)) r = n;

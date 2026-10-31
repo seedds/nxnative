@@ -217,7 +217,6 @@ pyright	scripts/build_ipa_from_nsp.py	reportOptionalIterable	1	Object of type "N
 pyright	scripts/build_ipa_from_nsp.py	reportOptionalMemberAccess	1	"close" is not a known attribute of "None"
 pyright	scripts/build_ipa_from_nsp.py	reportOptionalOperand	1	Operator "-" not supported for "None"
 ruff	dm/gfx/tools/dmsh_build.py	F841	1	Local variable `sb_cb` is assigned to but never used
-ruff	dm/gfx/tools/pso_offline.py	F401	1	`shutil` imported but unused
 ruff	dm/gfx/tools/shader_split.py	B006	1	Do not use mutable data structures for argument defaults
 ruff	dm/gfx/tools/shader_split.py	B023	1	Function definition does not bind loop variable `c`
 ruff	dm/gfx/tools/shader_split.py	B023	1	Function definition does not bind loop variable `order`

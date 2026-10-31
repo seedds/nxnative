@@ -1050,6 +1050,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** no game: [GitHub issue #673](https://github.com/seedds/nxnative/issues/673), `t_pso_bundle` on an M4 Pro with macOS 26.6.2 and Xcode 27.1.
 - **Check:** `dm/tools/tests/test_pso_offline.py` (`test_macos_takes_this_macs_major_version`). `t_pso_bundle` builds its archive with the default and opens it on macOS 27.2: 52 checks pass with its libraries built for 27.0 and for 26.6 (`MACOSX_DEPLOYMENT_TARGET=26.6`), the mirror of the reporter's Mac; the same libraries in an archive made for 26.6 failed the 10 checks. Open: no run on macOS 26.x here.
 
+### Offline pipeline archive on a full disk
+
+- **Symptom:** `[RED] pso_offline: metal-tt failed for applegpu_<gpu> (exit 1)` with only `applegpu-nt command failed` in `metal-tt.<arch>.log`.
+- **Cause:** `metal-tt` writes one `.airp` per base and its `translate-*` folders in `TMPDIR` (the work folder), and it does not say when the volume is full. Cruis'n Blast's 33,858 bases failed with 366 MB free. A failed run also left its temporary files in `pso/mac-work`.
+- **Fix:** `pso_offline.py` clears those temporary files and stops before `metal-tt` when the work folder's volume has less than about 96 KB per base free (2 GB at least), and names the free space. When `metal-tt` still fails, it clears the temporary files and says when the volume is nearly full.
+- **Found on:** Cruis'n Blast (0100B41013C82000, version 1.0.7; no profile in this repository), on a Mac with 366 MB free.
+- **Check:** `dm/tools/tests/test_pso_offline.py` (`test_low_disk_space_stops_before_metal_tt`).
+
 ### Metal's build folders left by pipeline archive flushes
 
 - **Symptom:** the user cache folder (`getconf DARWIN_USER_CACHE_DIR`, then `com.apple.gpuarchiver/`) fills with `gpuarchiver-*` folders of 0.3–5 MB each, one per pipeline archive flush (456 folders, 2.5 GB after two days). Later folders are larger, up to about 127 MB (an M4 Pro, 2026-10-29: 19 GB in 423 folders after a day of Mac runs and regression checks); why they grew is **open**. A later compile can fail with `cannot open '…/gpuarchiver-…/PersistentState': No such file or directory`.

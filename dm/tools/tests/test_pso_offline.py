@@ -253,6 +253,12 @@ class Build(unittest.TestCase):
         self.assertEqual(list(self.out.glob('*.mtl4a')), [])
 
 
+    def test_low_disk_space_stops_before_metal_tt(self):   # Cruis'n Blast: a full volume made metal-tt fail with only "applegpu-nt command failed"
+        self.work.mkdir(parents=True); (self.work / 'translate-0001').write_bytes(b'x'); (self.work / 'a.airp').write_bytes(b'x')
+        with mock.patch.object(po.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(1 << 40, 1 << 40, 300 << 20)), self.assertRaises(SystemExit) as e: self.main()
+        self.assertIn('GB free', str(e.exception)); self.assertEqual(self.calls, [])
+        self.assertEqual(sorted(p.name for p in self.work.iterdir()), ['bases.mtl4-json'])   # a failed run's temporaries cleared
+
 class Default(unittest.TestCase):
     """Which games get an archive without DM_PSO_GPUS: build_ipa.sh's own lines, run with game.py's default form, so only a profile with pso_mtl4 on (the Metal 4 path, which alone
     reads the archive on iOS) gets g18p; an explicit DM_PSO_GPUS wins, also when empty"""

@@ -186,8 +186,20 @@ static void pads_changed(GCController *gone) {
 // Focus: a window that is no longer key sees no key-up, mouse-up or controller release, so whatever is held when it loses focus (another app, the text box, minimized) would
 // stay pressed in the game. The front end releases only what it pressed itself: scripted buttons and sticks have their own path, and the touch is also DM_KEYS / DM_CTL's (hle_hid.c).
 // Out of focus a controller's changes are ignored, so back in focus each controller is read as it is now (a button still held, a stick still deflected)
+// Controller events do not reset macOS's display-idle timer. The latency activity below prevents system sleep, not display sleep.
+// Keep the display awake only while the game window is key; never synthesize user input or prevent an explicit lock or sleep.
+static id g_display_activity;
+static void display_sleep_active(int active) {
+    if (active && !g_display_activity)
+        g_display_activity = [NSProcessInfo.processInfo beginActivityWithOptions:NSActivityIdleDisplaySleepDisabled reason:@"NxNative active game window"];
+    else if (!active && g_display_activity) {
+        [NSProcessInfo.processInfo endActivity:g_display_activity];
+        g_display_activity = nil;
+    }
+}
 static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 static void input_release(void) {
+    display_sleep_active(0);
     g_input_on = 0;
     dm_motion_pro_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
@@ -196,6 +208,7 @@ static void input_release(void) {
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
 }
 static void input_resume(void) {
+    display_sleep_active(1);
     g_input_on = 1;
     dm_motion_pro_active(1);
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
@@ -1178,6 +1191,7 @@ void front_run(void (*guest)(void)) {
         [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
+        display_sleep_active(win.isKeyWindow);   // the window may have become key before the observers were installed
         // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
         static guest_arg ga; ga.fn = guest;
         pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);

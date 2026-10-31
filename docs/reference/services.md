@@ -244,6 +244,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the host now signals it once when it is bound for a connected controller, and again when a player's controller connects or goes away.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0).
 
+### Mac display sleep during controller play
+
+- **Symptom:** the Mac dims or turns off its display and can reach the lock screen while the player is using a controller, including in fullscreen.
+- **Cause:** controller events do not reliably reset the macOS display-idle timer. The host's `NSActivityUserInitiated | NSActivityLatencyCritical` activity prevents idle system sleep but does not include `NSActivityIdleDisplaySleepDisabled`; fullscreen alone does not keep the display awake.
+- **Fix:** `front_mac.m` holds a separate Foundation `NSActivityIdleDisplaySleepDisabled` activity while the game window is key, releasing it when input loses focus or the window is minimized. Startup checks the current key-window state because the first focus notification can precede observer registration. Headless runs do not acquire this activity. This uses the SDK's documented native activity option, without synthetic input, timers, dependencies or changes to the user's power settings; explicit lock and sleep remain available.
+- **Validation:** `test_mac_display_sleep.py` compiles the production activity helper, input-focus functions and notification observers, then posts focus/minimize notifications for a state-only window double and queries real IOKit power assertions. It checks startup focus, duplicate events, background/minimize release, restoration and coexistence with the existing system-sleep activity, without opening a window. On the Mac, the running Mario Kart host held `PreventUserIdleDisplaySleep` with the reason `NxNative active game window`; the player confirmed that the display stays on during controller play (the matching-shader backport, not a full current-main regression run).
+- **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md), reported during controller play on a Mac.
+
 ### Six-axis sensors
 
 - **Symptom:** motion moves never happen; shaking does nothing (Super Mario Odyssey: cap throws by shaking).

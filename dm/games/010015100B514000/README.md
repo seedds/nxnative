@@ -14,7 +14,7 @@ No game-specific executable cuts. `dm/tools/sdk_patches.py`'s SDK-wide rules cut
 ## Versions
 
 - v0 (1.0.0), 1.0.1 (v65536) and 1.2.1 (v327680). With 1.2.1 layered over v0, unchanged files become APFS clones, so the merged RomFS adds only about 114 MB to the 3.5 GB base.
-- 1.2.1 imports 28 SDK functions v0 did not, which the host answers: `nn::nfp` (amiibo, initialized at boot) finds none, `pl::IsRunningOnOunce` (is this a Switch 2) is false, `ec::ShowShopApplicationInformationForUpgrade` is a no-op, `account::PopOpenUsers` returns none and `aoc::CountAddOnContent` none. Mario only reads the count from `PopOpenUsers` and falls back to `TryOpenPreselectedUser` on 0, and counts add-on content only on a Switch 2 (`hle_sdk16.c`, `hle_account.c`, `hle_misc.c`).
+- 1.2.1 imports 28 SDK functions v0 did not, which the host answers: `nn::nfp` (amiibo, initialized at boot) finds none until a scan ([Virtual amiibo (`nfp`)](../../../docs/reference/services.md#virtual-amiibo-nfp)), `pl::IsRunningOnOunce` (is this a Switch 2) is false, `ec::ShowShopApplicationInformationForUpgrade` is a no-op, `account::PopOpenUsers` returns none and `aoc::CountAddOnContent` none. Mario only reads the count from `PopOpenUsers` and falls back to `TryOpenPreselectedUser` on 0, and counts add-on content only on a Switch 2 (`hle_sdk16.c`, `hle_account.c`, `hle_misc.c`).
 - 1.2.1 compresses the NACP's title area (a u16 size, then raw deflate inflating to 32 entries of 0x300 bytes), which LibHac 0.19 does not decode; `nx_extract` and the NSP script do. Its patch NCA (key generation 17) makes hactool stop with `Invalid BKTR layout!`, which is why `nx_extract` uses LibHac.
 
 ## Memory

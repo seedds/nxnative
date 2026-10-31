@@ -44,7 +44,7 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** a game update aborts at boot where the base game ran.
 - **Cause:** the update imports SDK functions the base game didn't. Mario 1.2.1 added 28, among them `nn::nfp` (amiibo, initialized at boot), `pl::IsRunningOnOunce` (is this a Switch 2), `ec::ShowShopApplicationInformationForUpgrade`, `account::PopOpenUsers` and `aoc::CountAddOnContent`.
-- **Fix:** diff the undefined dynamic symbols of the two `main` modules before the first run, and read the call sites before choosing answers: Mario only reads the count from `PopOpenUsers` and falls back to `TryOpenPreselectedUser` on 0, and only counts add-on content when running on a Switch 2. The host answers as a Switch 1 with no amiibo and no add-on content (`hle_sdk16.c`, `hle_account.c`, `hle_misc.c`).
+- **Fix:** diff the undefined dynamic symbols of the two `main` modules before the first run, and read the call sites before choosing answers: Mario only reads the count from `PopOpenUsers` and falls back to `TryOpenPreselectedUser` on 0, and only counts add-on content when running on a Switch 2. The host answers as a Switch 1 with no add-on content, and with an amiibo only after a scan ([Virtual amiibo (`nfp`)](#virtual-amiibo-nfp)) (`hle_sdk16.c`, `hle_account.c`, `hle_misc.c`).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (update 1.2.1).
 
 ### Game-linked HIPC clients of system services
@@ -284,8 +284,22 @@ Most service calls can be found before they crash, before the first boot or the 
 ### SDK 20 six-axis sensor and amiibo (`nfp`) calls
 
 - **Symptom:** SDK 20 calls that reach a service; `nfp`'s `AttachActivateEvent` / `AttachDeactivateEvent` crashed in the SDK at `sdk+0x3f2a78`.
-- **Fix:** the console six-axis sensor (`hid::*SevenSixAxisSensor*`) reports zero states; more `nfp` calls are hooked: `AttachActivateEvent` / `AttachDeactivateEvent`, the two-argument `Mount`, `Unmount`, `GetCommonInfo`, `GetRegisterInfo`, `GetState`, `Finalize`. The host answers as a console with no amiibo.
+- **Fix:** the console six-axis sensor (`hid::*SevenSixAxisSensor*`) reports zero states; more `nfp` calls are hooked: `AttachActivateEvent` / `AttachDeactivateEvent`, the two-argument `Mount`, `Unmount`, `GetCommonInfo`, `GetRegisterInfo`, `GetState`, `Finalize`. The amiibo answers are in [Virtual amiibo (`nfp`)](#virtual-amiibo-nfp).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22). [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) 1.2.1 already initialized `nn::nfp` at boot ([A game update imports SDK calls the base game did not](#a-game-update-imports-sdk-calls-the-base-game-did-not)).
+
+### Virtual amiibo (`nfp`)
+
+- **Symptom:** the game searches for an amiibo and never finds one.
+- **Cause:** the host has no NFC reader.
+- **Fix:** `hle_nfp.c` keeps the nfp state of Ryujinx's virtual amiibo, with one NFC device on the connected controller. The game starts a search (state 1). The Mac front end offers **Amiibo → Show Amiibo Window** (⌘⇧A). It shows the Amiibo panel, a floating panel built like the Cheats panel: a header with the search state, **Show all amiibo**, **Random tag UUID** and a search field, a table of names and series, a details line, and **Scan**, **Reload List** and **Open Folder**. **Show all amiibo** is off by default: the table then lists only the amiibo of the running game (`DM_GAME_ID`). **Random tag UUID** is on by default. **Scan**, a double-click on a row or Return in the search field scans the selected amiibo; the panel stays open. While the game does not search (state other than 1), the header says "The game is not looking for an amiibo now" and Scan is disabled. The panel takes the keyboard only while the search field is edited; the game keeps running and stays in focus.
+  - **List:** the Amiibo panel downloads Ryujinx's `tags.json` the first time it opens and no copy exists, and keeps it as `amiibo_tags.json` in the amiibo folder. Delete that file to get a new list. A download over 16 MB or one that is not valid JSON is dropped.
+  - **Amiibo folder:** `DM_AMIIBO_DIR`, else `<DM_SAVE>_amiibo`, else `./amiibo`. It holds one file per amiibo, `<amiibo ID>.json`, in Ryujinx's file format, so files copy both ways between Ryujinx and the host. The application area and the dates live in that file. The host makes the file at the first scan and never changes the write counter or the dates. A file that does not parse is renamed to `<amiibo ID>.json.bad` and the host makes a new one.
+  - **Tag UUID:** 9 bytes. With **Random tag UUID** the host makes a new UUID for each scan, so a game that gives one reward per tag sees a new figure. A game that limits the reward per amiibo ID does not: Echoes of Wisdom ([note](../../dm/games/01008CF01BAAC000/README.md#found-on-this-game)) says the amiibo was used today. The application area stays, because it is keyed by the amiibo ID. Without it, the UUID stored in the file is used.
+  - **Events:** a scan sets the state to 2 (tag found), signals the activate event, waits 125 ms and signals the deactivate event, once per scan. The tag stays valid until `StopDetection` or `Finalize`. A scan while the state is not 1 is ignored and logged.
+  - **Result codes** (module 115, description in brackets): 64 `DeviceNotFound` for a handle other than the one device, 65 `WrongArgument` for a `Mount` with a model type other than 0 or a target with `(target & 3) == 0`, 73 `WrongDeviceState` for a call in a wrong state, 128 `ApplicationAreaIsNull` for an `OpenApplicationArea` with no area of that ID, 168 `ApplicationAreaAlreadyCreated` for a `CreateApplicationArea` on an existing area.
+  - **Log:** each scan, mount, unmount and application-area call writes one `nfp:` line with the amiibo ID and the result.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md).
+- **Note:** the nfp call flow of a game is unrecorded until its first Amiibo panel test.
 
 ### Vibration values flushed by the SDK's vibration graph
 

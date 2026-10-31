@@ -53,6 +53,7 @@ The development build is `01008CF01BAAC000_build/` beside the NSPs, with runs an
 
 ## Found on this game
 
+- **Virtual amiibo** (1.1.0, Mac, 2026-10-28): a scan gives the amiibo's item once per game day. **Random tag UUID** does not repeat it: a second scan of Zelda & Loftwing with a new UUID said the amiibo was used today, so the game limits the reward per amiibo, not per tag UUID. It writes no application area (`ApplicationAreas` empty, `WriteCounter` 0). [Virtual amiibo (`nfp`)](../../../docs/reference/services.md#virtual-amiibo-nfp).
 - **Mac app pair tables:** [Shader-pair tables in a Mac app](../../../docs/reference/shaders.md#shader-pair-tables-in-a-mac-app).
 - **An archive built for the profile's default GL depth was rejected at runtime:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
 - **Unused conditional cube inputs are not rendering errors:** [A 2D texture in a cube slot binds the zero cube](../../../docs/reference/rendering.md#a-2d-texture-in-a-cube-slot-binds-the-zero-cube).

@@ -49,6 +49,8 @@ static void mii_default(mii_charinfo *c, int gender, int index) {
     c->mole_scale = 4; c->mole_x = 2; c->mole_y = 20;
 }
 
+void dm_mii_default_charinfo(void *out) { mii_default(out, 0, 0); }   // default Mii 0 (male), as Database::Get returns it first
+
 // The object keeps its service pointer at +0, which the constructor zeroes and the destructor releases through its vtable when set; the host never sets it
 HLE_FORCE("_ZN2nn3mii8Database10InitializeEv", "mii:u service; the host's database: the six default Miis, none of the console's own", Result, h_mii_Init, void *self) {
     (void)self; LOG("mii: Database::Initialize (the six default Miis, none of the console's own)"); return RES_OK;

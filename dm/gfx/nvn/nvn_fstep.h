@@ -128,6 +128,23 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
 // made the same work at hold 2 look not slowed
 #define FSTEP_GPU_SLOW 1.3    // GPU time at the longer hold against its time at kmin
 #define FSTEP_GPU_N 30        // frames at the longer hold before the comparison counts
+// Variable frame step (a build whose rewriter table has VAR_STEP, fps_target 61 to 240; hle_nvn.c vstep_tick): each frame steps the game by the time the previous one took, in
+// 1/30 s units, from the starts of the frames (ns). The first frame after a reset (the start, or frames the whole-vsync step held, whose time that step has stepped already) takes
+// one frame at the cap. A step below NVN_VSTEP_MIN (1/240 s) is raised to it and the time that adds is a carry the next steps give back: at 240 on a 360 Hz screen the
+// display link's virtual ticks lie 2.78 and 5.56 ms apart in turn, and raising the short ones alone ran the game at 1.17 of real time. A step above NVN_VSTEP_MAX (the game's
+// own longest, 1.5) slows the game down, as on the Switch
+#define NVN_VSTEP_MIN 0.125f
+#define NVN_VSTEP_MAX 1.5f
+typedef struct { uint64_t prev; float carry; } nvn_vstep;
+static inline void nvn_vstep_reset(nvn_vstep *v) { v->prev = 0; v->carry = 0; }
+static inline float nvn_vstep_next(nvn_vstep *v, uint64_t start, int cap) {
+    float step = v->prev && start > v->prev ? (float)((start - v->prev) * 30e-9) + v->carry : 30.0f / cap;
+    v->prev = start;
+    if (step < NVN_VSTEP_MIN) { v->carry = step - NVN_VSTEP_MIN; step = NVN_VSTEP_MIN; if (v->carry < -NVN_VSTEP_MAX) v->carry = -NVN_VSTEP_MAX; }
+    else v->carry = 0;
+    return step > NVN_VSTEP_MAX ? NVN_VSTEP_MAX : step;
+}
+
 typedef struct { double ref, cur; int n, k; double ref_at[FSTEP_MAX + 1]; } nvn_fgpu;   // GPU time at kmin (running mean; of every kmin in ref_at); at the current hold k and its frame count
 static inline int nvn_fgpu_slow(const nvn_fgpu *g) { return g->n >= FSTEP_GPU_N && g->ref > 0 && g->cur >= FSTEP_GPU_SLOW * g->ref && g->cur > FSTEP_FIT * (g->k - 1); }
 // Once per frame, with the frame's GPU time (vsyncs; 0 = none finished yet) and the hold and probe state (nvn_fstep.probe) it ran under

@@ -61,6 +61,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** a request larger than the heap region returns 0xD001 (`hle_svc.c`, svc 0x1). The search then settles on 3.09 GB, the pool less the rewritten modules (the same LimitReached check as before).
 - **Found on:** [Donkey Kong Country: Tropical Freeze](../../dm/games/0100C1F0051B6000/README.md) (SDK 4.4.0).
 
+### A render buffer pool grown with the render scale
+
+- **Symptom:** above a render scale of about 1.3 a game crashes building its render buffers (Breath of the Wild: an allocation came back empty, then `RenderBufferContext` at `main+0xed7128`).
+- **Cause:** the game sizes its render buffer pool for the Switch's resolutions (BotW: gsys's two 115 MB pools, a compressible texture pool and a virtual range for it), and its fixed heaps, the application pool and the alias region around that pool have no room for more.
+- **Fix:** a build whose rewriter table names `RENDER_POOL` (with the pool's base size) takes a render scale above 1.0 on the Mac (`loader.c`, up to 3.0): its stub multiplies the pool by the scale's square rounded up (state page +0x4c), and the application pool, the alias region and the game's fixed heaps around the pool grow by what the pool adds plus 64 MB (state +0x58, `dm_mem_extra`, `hle_svc.c`). Where the views outgrow the game's output, the build's `OUTPUT_W` / `OUTPUT_H` stubs give the output their size (+0x40 / +0x48), so frames are composed at it rather than scaled down. The loader writes these fields only for a build whose table names them, so no game's constants are in the host. Not on iOS: the larger pool comes on top of the guest's address space, which iOS caps at a 6 GB reservation.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0: 1.2 = 1920×1080, 1.6 = 2560×1440, 2.4 = 3840×2160 docked; its note has the stub sites).
+- **Check:** the log line `render buffer pool ×<k>, <n> MB more application memory (DM_RENDER_SCALE …)`.
+
 ### `nninitStartup`'s heap only without virtual address memory
 
 - Not needed in the end for [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (1.0.0.2, SDK 17.5.3): the process heap of pull request #16. `nninitStartup` calls `SetMemoryHeapSize` / `AllocateMemoryBlock` only without virtual address memory, and nothing else in `main` calls them ([Virtual address memory follows the NPDM's system resource](#virtual-address-memory-follows-the-npdms-system-resource)).

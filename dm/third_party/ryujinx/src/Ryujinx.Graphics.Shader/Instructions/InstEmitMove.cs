@@ -88,9 +88,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             InstS2r op = context.GetOp<InstS2r>();
 
+            context.Copy(GetDest(op.Dest), EmitSReg(context, op.SReg));
+        }
+
+        private static Operand EmitSReg(EmitterContext context, SReg sreg)
+        {
             Operand src;
 
-            switch (op.SReg)
+            switch (sreg)
             {
                 case SReg.LaneId:
                     src = EmitLoadSubgroupLaneId(context);
@@ -184,7 +189,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     break;
             }
 
-            context.Copy(GetDest(op.Dest), src);
+            return src;
         }
 
         private static Operand EmitLoadSubgroupLaneId(EmitterContext context)

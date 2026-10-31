@@ -13,7 +13,7 @@ import dmsh_geometry, dmsh_atomic, dmsh_abi as abi   # abi: the driver segment l
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_logic, dmsh_mesh, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_logic, dmsh_mesh, dmsh_ampere, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -440,22 +440,35 @@ def early_fragment_tests(ctl, code):
     is left as it is: tested early, the depth it computes would not be the one tested"""
     return len(ctl) > 0x718 and ctl[0x718] != 0 and len(code) >= 0x50 and not struct.unpack_from('<I', code, 19 * 4)[0] & 2
 
+# NVN2's compute stage keeps its storage buffer table at c0 + 0x10 + 0x10 r (Donkey Kong Bananza: its compute shaders read 64-bit addresses at 0x10 / 0x20 / 0x30, written at 0x10
+# and 0x20, and the game binds compute slots 0, 1 and 2); the graphics stages keep NVN's (0x110 vertex, 0x510 pixel). finish() hands it to reflect() as res['ssbo_base']
+NVN2_C0_SSBO_CS = 0x10
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
-    c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
-    c1 = rec[0x38 + c1o:0x38 + c1t]
-    ab = vertex_ab(key, code, rec[ci:]) if stage == 'vs' else None
-    if ab: code, c1 = ab
-    if stage != 'cs': code = code[0x30:]   # strip the 0x30 header (the 0x50 SPH after it is read by the translator itself)
-    elif code[:4] == bytes.fromhex('79563412'):
-        # Compute in this game has a header (magic 0x12345679; D2R's package records have none): 0x30 header + zero padding, instructions start at code area +0x100 (measured on all 71; the BRA-to-self and the control words are 32-byte aligned to this start).
-        # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
-        if any(code[0x30:0x100]): sys.exit(f'[RED] {key}: compute code area +0x30..+0x100 is not all zero, so the instructions do not start at +0x100')
-        code = code[0x100:]
+    extra = {}
+    if dmsh_ampere.is_nvn2(rec[ci:]):
+        # NVN2 (Switch 2): Ampere code (a 0x80-byte SPH for the graphics stages, then the instructions, control +0x38 long), which the translator's Ampere
+        # frontend reads (job arch sm86); its c1 segment lies between control +0x40 and +0x44. The NVN control fields the steps below read (VertexA / B,
+        # transform feedback, early fragment tests) are not in an NVN2 section
+        c1 = dmsh_ampere.c1_segment(rec[ci:], code)
+        code = code[:dmsh_ampere.inst_len(rec[ci:])]
+        extra['arch'] = 'sm86'
+    else:
+        c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
+        c1 = rec[0x38 + c1o:0x38 + c1t]
+        ab = vertex_ab(key, code, rec[ci:]) if stage == 'vs' else None
+        if ab: code, c1 = ab
+        if stage != 'cs': code = code[0x30:]   # strip the 0x30 header (the 0x50 SPH after it is read by the translator itself)
+        elif code[:4] == bytes.fromhex('79563412'):
+            # Compute in this game has a header (magic 0x12345679; D2R's package records have none): 0x30 header + zero padding, instructions start at code area +0x100 (measured on all 71; the BRA-to-self and the control words are 32-byte aligned to this start).
+            # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
+            if any(code[0x30:0x100]): sys.exit(f'[RED] {key}: compute code area +0x30..+0x100 is not all zero, so the instructions do not start at +0x100')
+            code = code[0x100:]
+        tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
+        if tf: extra['tf'] = tf
+        if stage == 'ps' and early_fragment_tests(rec[ci:], code): extra['early_fragment_tests'] = True
     cp = os.path.join(w, key + '.bin'); open(cp, 'wb').write(code)
-    tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
-    ez = stage == 'ps' and early_fragment_tests(rec[ci:], code)
-    j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **({'tf': tf} if tf else {}), **({'early_fragment_tests': True} if ez else {}),
+    j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **extra,
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables
     if key not in FACTS: j['no_facts'] = True; return j, c1   # not in the answer table: queries use defaults (listed separately in the summary)
     j.update(FACTS[key])
@@ -710,6 +723,7 @@ def reflect(key, stage, msl, res):
         binds.append(e)
     # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base SSBO[stage], C0_ROW bytes per slot)
     base = SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot
+    base = res.get('ssbo_base', base)   # NVN2 compute (finish)
     sb_sorted = sorted(res['sbufs'], key=lambda b: b['binding'])
     for e in binds:
         if e['kind'] == abi.KIND_SBUF:
@@ -1131,6 +1145,7 @@ def finish(key, w, j, c1):
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
     res = json.load(open(os.path.join(w, key + '.res.json')))
+    if j.get('arch') == 'sm86' and j['stage'] == 'cs': res['ssbo_base'] = NVN2_C0_SSBO_CS
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = vs_depth(src)

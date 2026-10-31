@@ -97,9 +97,16 @@ def zstd_mod():
         except ImportError: red(f'Python {sys.version_info[0]}.{sys.version_info[1]} has no compression.zstd (3.14+): pip install backports.zstd')
     return zstd
 
+NVN2_KEY_CTL = 0x48
+def nvn2_ctl(ctl):
+    """An NVN2 (Switch 2) control section: version 0xc9 at +4, the code area's length at +0x44 (dmsh_ampere.py). +0x30 holds the section's length in BNSH files (0xd8; 0xd0 in
+    effects, 0x930 / 0x338 in sead's primitive drawer) and 0 in agl's BAHS files and in memory, so the key takes the first 0x48 bytes with +0x30 as zero (the host's keys_hash)"""
+    return len(ctl) >= NVN2_KEY_CTL and ctl[:4] == CTL_MAGIC and ctl[4:8] == b'\xc9\0\0\0'
+
 def ctl_len(ctl):
-    """Number of control bytes in the key: control +0x20 holds the section's own length. Every control section of Mario, Fire Emblem Engage, Metroid Dread and 13 Sentinels is at least 0x880 bytes, so the first 0x880 are used;
+    """Number of control bytes in the key: an NVN2 section's own length (+0x30; the host's keys_hash takes the same); else control +0x20 holds the section's own length. Every control section of Mario, Fire Emblem Engage, Metroid Dread and 13 Sentinels is at least 0x880 bytes, so the first 0x880 are used;
     SDK 10's Super Mario 3D World + Bowser's Fury has 2,888 that are only 0x850 bytes (the bfsha in ShaderData, 6 layouts), with other data right after them, so only their own length is used (the same as the host's keys_hash)"""
+    if nvn2_ctl(ctl): return NVN2_KEY_CTL
     n = struct.unpack_from('<I', ctl, 0x20)[0]
     return n if 0x760 <= n < 0x880 else 0x880
 
@@ -107,6 +114,7 @@ def key_ctl(ctl):
     """The control bytes in the key: ctl_len of them, with the profile's shader_key_skip range as zeros (the host's keys_hash does the same). Batman: Arkham Knight's engine shares one control section
     among shaders whose sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7; its shader_key_skip 0x770+0x78): masked, its 24,721 sections are 5,615"""
     c = ctl[:ctl_len(ctl)]
+    if nvn2_ctl(ctl): return c[:0x30] + bytes(4) + c[0x34:]
     return c[:KEY_SKIP[0]] + bytes(KEY_SKIP[1]) + c[KEY_SKIP[0] + KEY_SKIP[1]:] if KEY_SKIP[1] and KEY_SKIP[0] + KEY_SKIP[1] <= len(c) else c
 
 def skey(ctl, code):
@@ -118,6 +126,7 @@ def same_shader(a, b):
     (ca, ka), (cb, kb) = a, b
     n = struct.unpack_from('<I', ca, 0x20)[0] if len(ca) >= 0x24 else len(ca)
     n = n if 0x760 <= n <= min(len(ca), len(cb)) else max(len(ca), len(cb))
+    if nvn2_ctl(ca): return ka == kb and key_ctl(ca) == key_ctl(cb)
     o, ln = KEY_SKIP
     if ln and o + ln <= n: ca, cb = ca[:o] + ca[o + ln:n], cb[:o] + cb[o + ln:n]; n = n - ln   # shader_key_skip: the bytes the key leaves out may differ
     return ka == kb and ca[:n] == cb[:n]
@@ -125,6 +134,8 @@ def same_shader(a, b):
 def check(where, st, ctl, code):
     """control section and code area consistent; returns the reason if not"""
     if ctl[:4] != CTL_MAGIC or len(ctl) < 0x24 or len(ctl) < ctl_len(ctl): return 'bad control section'
+    if nvn2_ctl(ctl):   # NVN2: Ampere code, a 0x80-byte SPH and no code header; the control section names the code area's length at +0x44 (dmsh_ampere.py)
+        return None if struct.unpack_from('<I', ctl, 0x44)[0] == len(code) else 'control +0x44 does not match the code area length'
     # a compute code area may have no header (SDK 10's Super Mario 3D World + Bowser's Fury and D2R: instructions start at +0; dmsh_build strips only a 0x12345679 header)
     if st == 'cs' and code[:4] in (CS_MAGIC, GFX_MAGIC) and code[:4] != CS_MAGIC or st != 'cs' and code[:4] != GFX_MAGIC: return 'code area header magic does not match the stage'
     if struct.unpack_from('<I', ctl, 0x704)[0] != len(code): return 'control +0x704 does not match the code area length'
@@ -148,22 +159,44 @@ def bnsh_shaders(d, base, label):
             out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
     return out
 
+def nvn2_stage(ctl, code):   # an NVN2 shader's stage: compute by the control section's stage byte (+0x56: 5), else the SPH at the code area's start (no code header)
+    if len(ctl) > 0x56 and ctl[0x56] == 5: return 'cs'
+    return sph_stage(bytes(0x30) + code[:4]) if len(code) >= 4 else None
+
 def bahs_shaders(d, label):
     rsz, region = field(d, '<II', 0x18, f'{label} BAHS header')
     if region + rsz > len(d): red(f'{label} BAHS code region out of bounds')
     out = []
     for a in range(0, region - 16, 4):
         off, z, csz, rel = struct.unpack_from('<IIIi', d, a)
-        if z or not (csz in (0x880, 0x88c) or 0x760 <= csz < 0x880) or off % 0x100: continue   # control length: Mario 0x880 / 0x88c, 3D World's BAHS version 9 0x848
+        nvn2 = 0x48 <= csz < 0x10000 and 0 <= a + rel and a + rel + csz <= region and nvn2_ctl(d[a + rel:a + rel + csz])
+        # control length: Mario 0x880 / 0x88c, 3D World's BAHS version 9 0x848; NVN2 (Donkey Kong Bananza's agl resources) 0xd8
+        if z or not (nvn2 or csz in (0x880, 0x88c) or 0x760 <= csz < 0x880) or off % 0x100: continue
         c = a + rel
         if c < 0 or c + csz > region or d[c:c + 4] != CTL_MAGIC: continue
-        n = struct.unpack_from('<I', d, c + 0x704)[0]
+        n = struct.unpack_from('<I', d, c + (0x44 if nvn2 else 0x704))[0]
         if off + n > rsz: continue
         code, ctl = d[region + off:region + off + n], d[c:c + csz]
-        st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
+        st = nvn2_stage(ctl, code) if nvn2 else 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
         if not st or check(label, st, ctl, code): continue
         out.append((f'{label}#BAHS@{a:#x}', st, ctl, code))
     bahs_variations(d, label, [o[0] for o in out])
+    return out
+
+def sead_prim_shaders(d, label):
+    """sead's primitive drawer for NVN2 (Lib/sead/primitive_renderer/primitive_drawer_nvn2_shader.bin, Donkey Kong Bananza): four u32 offsets (vertex control section,
+    pixel control section, vertex code area, pixel code area); each control section names its own length (+0x30) and its code area's (+0x44)"""
+    if len(d) < 0x10: return []
+    offs = struct.unpack_from('<4I', d)
+    out = []
+    for st, c, k in (('vs', offs[0], offs[2]), ('ps', offs[1], offs[3])):
+        if not (0x10 <= c and c + 0x48 <= len(d) and nvn2_ctl(d[c:c + 0x48])): return []
+        own = struct.unpack_from('<I', d, c + 0x30)[0]
+        ctl = d[c:c + max(own, 0x48)]
+        n = struct.unpack_from('<I', ctl, 0x44)[0]
+        code = d[k:k + n]
+        if len(code) != n or nvn2_stage(ctl, code) != st or check(label, st, ctl, code): return []
+        out.append((f'{label}#SEADPRIM@{c:#x}', st, ctl, code))
     return out
 
 BAHS_VAR = {}   # BAHS entry label → the program variation it belongs to (bahs_variations; var_pairs pairs by it)
@@ -178,14 +211,16 @@ def bahs_variations(d, label, entries):
     arr = min(taken) - 0x18
     if arr < 0x20: return
     asz, acnt = struct.unpack_from('<II', d, arr)
-    if arr + asz + 8 > len(d) or acnt < len(taken): return
+    if arr + asz + 8 > len(d) or acnt < len(taken) - max(1, len(taken) // 100): return
     o, recs = arr + 8, []
     for _ in range(acnt):
         if o + 0x20 > arr + asz: return
         rs, kind = struct.unpack_from('<II', d, o)
         if rs < 0x20: return
         recs.append((o + 0x10, kind)); o += rs
-    if o != arr + asz or not taken <= {a for a, _ in recs}: return
+    # every entry bahs_shaders took is a record's, but for a stray match of its scan (Donkey Kong Bananza's agl_common: 1,556 taken, 1,555 records): up to 1 % may lie
+    # outside the array; only the records' entries are paired
+    if o != arr + asz or len(taken - {a for a, _ in recs}) > max(1, len(taken) // 100): return
     psz, pcnt = struct.unpack_from('<II', d, o)
     if o + psz > len(d) or not pcnt: return
     q, bases = o + 8, []
@@ -2265,6 +2300,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         for nm, m in sarc_members(d, label): scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
+    if shaders := sead_prim_shaders(d, label): out.extend(shaders); return
     if d[:len(TFXO)] == TFXO: out.extend(tfxo_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
     if d[:4] == PGDAT and len(d) >= 0x1c and (mem := pgdat_members(d, label)) is not None:   # PlatinumGames
@@ -2633,8 +2669,10 @@ def main():
         if rec.count(b'BTCDBTCD') != 1: red(f'key {key}: the record separator appears inside the record')
         rows.append((name, len(recs[name]), STAGE_NAME[st], key, where)); recs[name].append(bytes(rec)); stat[st] += 1
         if st == 'cs':
-            x, y, z = struct.unpack_from('<3I', ctl, 0x748); sh = struct.unpack_from('<I', ctl, 0x754)[0]
-            if not x * y * z: red(f'compute shader {key}: control +0x748 thread group is 0 ({where})')
+            # NVN2: the thread group at +0x58 (32 1 1 in Donkey Kong Bananza's effects); shared memory taken from +0x64, not yet seen nonzero (unverified)
+            at = (0x58, 0x64) if nvn2_ctl(ctl) else (0x748, 0x754)
+            x, y, z = struct.unpack_from('<3I', ctl, at[0]); sh = struct.unpack_from('<I', ctl, at[1])[0]
+            if not x * y * z: red(f'compute shader {key}: control +{at[0]:#x} thread group is 0 ({where})')
             facts[key] = {'local': [x, y, z], 'shared': (sh + 15) // 16 * 16}
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))

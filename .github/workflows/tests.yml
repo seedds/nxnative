@@ -17,10 +17,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # The toolchain the project supports (README: Xcode 27.1; dm/gfx/tools/dmsh_chain.lock: its Metal compiler), on GitHub's xcode-27 image (macOS 27, a preview image),
+  # The toolchain the project supports (README: Xcode 27.2; dm/gfx/tools/dmsh_chain.lock: its Metal compiler), on GitHub's xcode-27 image (macOS 27, a preview image),
   # named by path so the image's default moving to another Xcode does not move CI. The build check checks the Metal compiler against the lock first.
   # dm/tools/tests/test_ci_toolchain.py keeps this version, the image and README's in step
-  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
   GAME: 010015100B514000   # Super Mario Bros. Wonder: the profile the host and gfx tests are built for (any profile does; the tests are about code, not the game)
 
 defaults:

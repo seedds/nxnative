@@ -22,6 +22,14 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
+        /// Size in bytes of the constant buffer 1 data the host knows (an Ampere jump table ends there at the latest).
+        /// </summary>
+        int QueryConstantBuffer1Size()
+        {
+            return 0;
+        }
+
+        /// <summary>
         /// Gets a span of the specified memory location, containing shader code.
         /// </summary>
         /// <param name="address">GPU virtual address of the data</param>

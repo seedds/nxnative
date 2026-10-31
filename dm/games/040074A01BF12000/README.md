@@ -1,6 +1,6 @@
 # Donkey Kong Bananza (`040074A01BF12000`)
 
-A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `sdk`. **In bring-up, not playable:** on the Mac it boots into its frame loop and runs (audio renders, frames are presented), but it draws nothing, because the shader chain does not translate NVN2's Ampere shader code yet ([Open](#open)).
+A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `sdk`. **In bring-up, not playable:** on the Mac it boots to the mode-select menu, which renders correctly (panels and text); the game itself is not reached yet ([Open](#open)).
 
 ## What it needs
 
@@ -14,7 +14,12 @@ A Switch 2 game: update v458752 over the base game, SDK 20.5.19 built for the Sw
 
 - Packed from a dump folder (`base/`, `updates/458752/`, `dlc/040074a01bf13001/`) with [`scripts/pack_dump.py`](../../../scripts/pack_dump.py): the update's RomFS is the patched one (80,273 files, 8.6 GB; it drops 42 base files, among them the `Product.100` tables its `Product.200` ones replace), so it is packed on its own. The DLC (add-on content index 1, 8,000 files, 0.9 GB) mounts as `EmeraldRush`.
 - Shaders: `Shader/*.Nin_Ounce_NVN2.bfsha.zs` (BNSH) and `Shader/Project.Nin_Ounce_NVN2.release.sarc.zs`. The code is Volta / Ampere's 128-bit encoding (`0x794d` EXIT, `0x7918` NOP), not Maxwell's.
-- NVN2 control sections (dumped with `DM_NVN_SHDUMP`): magic `0x98761234`, version `0xc9`, shorter than NVN's 0x880 bytes (the next one follows at +0x810) and holding pointers the game relocates. The host's shader key reads the code size at NVN's `+0x704`, which here is half a pointer, so keys are wrong.
+- NVN2 control sections (dumped with `DM_NVN_SHDUMP`): magic `0x98761234`, version `0xc9`; +0x38 the instructions' length (SPH included), +0x40 that rounded to 0x100, +0x44 the code area's (the c1 segment lies between the two), +0x4c the register count, +0x58 compute's thread group. Their own length is at +0x30 in BNSH files only (0xd8; 0xd0 in effects, 0 in agl's BAHS and in memory), so the shader key hashes the first 0x48 bytes with +0x30 zeroed, plus the code area (`hle_nvn.c` `nvn_ctl_lens`, `shader_split.py` `key_ctl`).
+- The split reads the bfsha / BNSH files, agl's BAHS archives (`agl_common.sharcb` and the others: 1,555 shader records, one more than the archive counts, so the record check allows 1 % of strays) and sead's primitive drawer: 22,822 shaders, 15,573 variation pairs, 5,071 pipeline pairs.
+
+## Shaders
+
+The translator decodes Ampere code natively (job `arch: sm86`; [Ampere shader code](../../../docs/reference/shaders.md#ampere-shader-code-switch-2)): 22,751 of the 22,822 shaders translate. NVN2 keeps NVN's texture handle table in c[2] (0x20 + 8 slot) and the graphics stages' storage buffer tables in c[0] (0x110 vertex, 0x510 pixel); compute keeps its storage buffer table at c[0] + 0x10 + 0x10 slot (`dmsh_build.py` `NVN2_C0_SSBO_CS`) and its image handles in c[0] too.
 
 ## Boot (Mac)
 
@@ -28,7 +33,9 @@ Each step below stopped the boot before its fix:
 
 ## Open
 
-- **Shaders:** the chain decodes Maxwell only. Needed: NVN2 control sections (layout, code size, constant buffer and resource reflection) for the host's shader keys and the shader split, an Ampere decoder in the translator, and the split reading the NVN2 bfsha files.
+- **Shaders not translated (71):** 55 load through addresses read from memory (no storage buffer to turn the access into); 16 use instructions the frontend lacks (`LEPC` 0x34e, 0x958, 0x3a1, 0x3c4, 0x593).
+- Compute shaders' image handles in c[0]: the host does not resolve them yet.
+- No full shader build yet (boot keys only), so no library stamp, `c1_full.tsv` or `cb_extent.tsv`.
 - `oe::GetCurrentGraphicsScale`: which tier the console reports in which mode is not measured (the host answers 0 handheld, 1 console).
 - GetInfo types 29 and 30, and the 9 GB pool.
 - The NVN2 device values (`nvnDeviceGetInteger`) are still the Switch 1 ones.
@@ -37,3 +44,4 @@ Each step below stopped the boot before its fix:
 ## Found on this game
 
 - Everything under [Boot](#boot-mac) is new: the first Switch 2 game here.
+- [Ampere shader code (Switch 2)](../../../docs/reference/shaders.md#ampere-shader-code-switch-2): the translator's Ampere frontend, its scoreboard model and the IPA / texture / load semantics found on this game's menu (green boxes instead of text; no text).

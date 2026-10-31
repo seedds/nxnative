@@ -15,7 +15,8 @@ namespace Ryujinx.Graphics.Shader.Translation
         private const int GprMasks = 4;
         private const int PredMasks = 1;
         private const int FlagMasks = 1;
-        private const int TotalMasks = GprMasks + PredMasks + FlagMasks;
+        private const int UniformMasks = 2;   // uniform registers, uniform predicates (Ampere)
+        private const int TotalMasks = GprMasks + PredMasks + FlagMasks + UniformMasks;
 
         private struct RegisterMask : IEquatable<RegisterMask>
         {
@@ -25,8 +26,10 @@ namespace Ryujinx.Graphics.Shader.Translation
             public long GprMask3 { get; set; }
             public long PredMask { get; set; }
             public long FlagMask { get; set; }
+            public long UniformMask { get; set; }
+            public long UniformPredMask { get; set; }
 
-            public RegisterMask(long gprMask0, long gprMask1, long gprMask2, long gprMask3, long predMask, long flagMask)
+            public RegisterMask(long gprMask0, long gprMask1, long gprMask2, long gprMask3, long predMask, long flagMask, long uniformMask = 0, long uniformPredMask = 0)
             {
                 GprMask0 = gprMask0;
                 GprMask1 = gprMask1;
@@ -34,6 +37,8 @@ namespace Ryujinx.Graphics.Shader.Translation
                 GprMask3 = gprMask3;
                 PredMask = predMask;
                 FlagMask = flagMask;
+                UniformMask = uniformMask;
+                UniformPredMask = uniformPredMask;
             }
 
             public readonly long GetMask(int index)
@@ -46,6 +51,8 @@ namespace Ryujinx.Graphics.Shader.Translation
                     3 => GprMask3,
                     4 => PredMask,
                     5 => FlagMask,
+                    6 => UniformMask,
+                    7 => UniformPredMask,
                     _ => throw new ArgumentOutOfRangeException(nameof(index)),
                 };
             }
@@ -58,7 +65,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                     x.GprMask2 & y.GprMask2,
                     x.GprMask3 & y.GprMask3,
                     x.PredMask & y.PredMask,
-                    x.FlagMask & y.FlagMask);
+                    x.FlagMask & y.FlagMask,
+                    x.UniformMask & y.UniformMask,
+                    x.UniformPredMask & y.UniformPredMask);
             }
 
             public static RegisterMask operator |(RegisterMask x, RegisterMask y)
@@ -69,7 +78,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                     x.GprMask2 | y.GprMask2,
                     x.GprMask3 | y.GprMask3,
                     x.PredMask | y.PredMask,
-                    x.FlagMask | y.FlagMask);
+                    x.FlagMask | y.FlagMask,
+                    x.UniformMask | y.UniformMask,
+                    x.UniformPredMask | y.UniformPredMask);
             }
 
             public static RegisterMask operator ~(RegisterMask x)
@@ -80,7 +91,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                     ~x.GprMask2,
                     ~x.GprMask3,
                     ~x.PredMask,
-                    ~x.FlagMask);
+                    ~x.FlagMask,
+                    ~x.UniformMask,
+                    ~x.UniformPredMask);
             }
 
             public static bool operator ==(RegisterMask x, RegisterMask y)
@@ -105,12 +118,14 @@ namespace Ryujinx.Graphics.Shader.Translation
                        GprMask2 == other.GprMask2 &&
                        GprMask3 == other.GprMask3 &&
                        PredMask == other.PredMask &&
-                       FlagMask == other.FlagMask;
+                       FlagMask == other.FlagMask &&
+                       UniformMask == other.UniformMask &&
+                       UniformPredMask == other.UniformPredMask;
             }
 
             public readonly override int GetHashCode()
             {
-                return HashCode.Combine(GprMask0, GprMask1, GprMask2, GprMask3, PredMask, FlagMask);
+                return HashCode.Combine(GprMask0, GprMask1, GprMask2, GprMask3, PredMask, FlagMask, UniformMask, UniformPredMask);
             }
         }
 
@@ -351,6 +366,8 @@ namespace Ryujinx.Graphics.Shader.Translation
             Span<long> gprMasks = stackalloc long[4];
             long predMask = 0;
             long flagMask = 0;
+            long uniformMask = 0;
+            long uniformPredMask = 0;
 
             switch (register.Type)
             {
@@ -363,9 +380,15 @@ namespace Ryujinx.Graphics.Shader.Translation
                 case RegisterType.Flag:
                     flagMask = 1L << register.Index;
                     break;
+                case RegisterType.Uniform:
+                    uniformMask = 1L << register.Index;
+                    break;
+                case RegisterType.UniformPredicate:
+                    uniformPredMask = 1L << register.Index;
+                    break;
             }
 
-            return new RegisterMask(gprMasks[0], gprMasks[1], gprMasks[2], gprMasks[3], predMask, flagMask);
+            return new RegisterMask(gprMasks[0], gprMasks[1], gprMasks[2], gprMasks[3], predMask, flagMask, uniformMask, uniformPredMask);
         }
 
         private static bool Exchange(RegisterMask[] masks, int blkIndex, RegisterMask value)
@@ -470,9 +493,17 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 regType = RegisterType.Predicate;
             }
-            else
+            else if (i == GprMasks + PredMasks)
             {
                 regType = RegisterType.Flag;
+            }
+            else if (i == GprMasks + PredMasks + FlagMasks)
+            {
+                regType = RegisterType.Uniform;
+            }
+            else
+            {
+                regType = RegisterType.UniformPredicate;
             }
 
             return (regType, baseRegIndex);

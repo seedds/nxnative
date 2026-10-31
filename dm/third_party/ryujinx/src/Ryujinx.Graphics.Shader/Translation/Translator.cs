@@ -1,6 +1,7 @@
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
 
@@ -10,6 +11,7 @@ namespace Ryujinx.Graphics.Shader.Translation
     {
         private const int ThreadsPerWarp = 32;
         private const int HeaderSize = 0x50;
+        private const int AmpereHeaderSize = 0x80;
 
         internal readonly struct FunctionCode
         {
@@ -31,13 +33,15 @@ namespace Ryujinx.Graphics.Shader.Translation
             int localMemorySize;
             ShaderDefinitions definitions;
             DecodedProgram program;
+            bool ampere = options.Flags.HasFlag(TranslationFlags.Ampere);
+            int headerSize = ampere ? AmpereHeaderSize : HeaderSize;
 
             if (options.Flags.HasFlag(TranslationFlags.Compute))
             {
                 definitions = CreateComputeDefinitions(gpuAccessor);
                 localMemorySize = gpuAccessor.QueryComputeLocalMemorySize();
 
-                program = Decoder.Decode(definitions, gpuAccessor, address);
+                program = ampere ? Decoder.DecodeAmpere(definitions, gpuAccessor, address) : Decoder.Decode(definitions, gpuAccessor, address);
             }
             else
             {
@@ -46,7 +50,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                 definitions = CreateGraphicsDefinitions(gpuAccessor, header);
                 localMemorySize = GetLocalMemorySize(header);
 
-                program = Decoder.Decode(definitions, gpuAccessor, address + HeaderSize);
+                program = ampere
+                    ? Decoder.DecodeAmpere(definitions, gpuAccessor, address + (ulong)headerSize)
+                    : Decoder.Decode(definitions, gpuAccessor, address + (ulong)headerSize);
             }
 
             ulong maxEndAddress = 0;
@@ -62,7 +68,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
             }
 
-            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : HeaderSize);
+            int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : headerSize);
 
             return new TranslatorContext(address, size, localMemorySize, definitions, gpuAccessor, options, program);
         }
@@ -143,7 +149,12 @@ namespace Ryujinx.Graphics.Shader.Translation
         {
             initializationOperations = 0;
 
-            FunctionMatch.RunPass(program);
+            bool ampere = translatorContext.Options.Flags.HasFlag(TranslationFlags.Ampere);
+
+            if (!ampere)
+            {
+                FunctionMatch.RunPass(program);
+            }
 
             foreach (DecodedFunction function in program.Where(x => !x.IsCompilerGenerated).OrderBy(x => x.Address))
             {
@@ -170,7 +181,14 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                     context.EnterBlock(block.Address);
 
-                    EmitOps(context, block);
+                    if (ampere)
+                    {
+                        EmitOpsAmpere(context, block);
+                    }
+                    else
+                    {
+                        EmitOps(context, block);
+                    }
                 }
 
                 functions[index] = new(context.GetOperations());
@@ -311,6 +329,209 @@ namespace Ryujinx.Graphics.Shader.Translation
                 {
                     context.Store(storageKind, IoVariable.UserDefined, null, Const(location), Const(c), ConstF(c == 3 ? 1f : 0f));
                 }
+            }
+        }
+
+        // Ampere: the guard is bits 12..15 (a uniform predicate on the uniform datapath); BRA evaluates its guard with its condition itself.
+        // Scoreboards: a variable-latency instruction (one that sets a write barrier, control bits 110..113; 7 = none) writes its registers when the result
+        // arrives, and the compiler lets later instructions that do not wait on that barrier (wait mask, bits 116..122) read the registers' old values (LDG R2,
+        // [R2.64] then LDG R4, [R2.64 + 4] reads the address twice). Such an instruction's writes go to locals that start as the registers' values; they are
+        // copied to the registers before the first instruction that waits on the barrier, at DEPBAR, and at the end of the block.
+        private static void EmitOpsAmpere(EmitterContext context, Block block)
+        {
+            List<(Register Reg, Operand Value)>[] pending = new List<(Register, Operand)>[7];
+            int shadows = 0;
+            Stack<int> freeShadows = new();
+
+            void Commit(int barrier)
+            {
+                if (pending[barrier] != null)
+                {
+                    foreach ((Register reg, Operand value) in pending[barrier])
+                    {
+                        context.Copy(Register(reg), value);
+                        freeShadows.Push(value.GetRegister().Index);
+                    }
+
+                    pending[barrier] = null;
+                }
+            }
+
+            void CommitAll()
+            {
+                for (int b = 0; b < pending.Length; b++)
+                {
+                    Commit(b);
+                }
+            }
+
+            for (int opIndex = 0; opIndex < block.OpCodes.Count; opIndex++)
+            {
+                InstOp op = block.OpCodes[opIndex];
+                AmpereOp a = new(op);
+                int wait = a.Bits(116, 122);
+                int writeBarrier = a.Bits(110, 113);
+
+                for (int b = 0; b < 6; b++)
+                {
+                    if ((wait & (1 << b)) != 0)
+                    {
+                        Commit(b);
+                    }
+                }
+
+                if (a.Opcode == 0x91a || op.Props.HasFlag(InstProps.Bra))
+                {
+                    CommitAll();
+                }
+
+                if (context.TranslatorContext.Options.Flags.HasFlag(TranslationFlags.DebugMode))
+                {
+                    context.Add(new CommentNode($"0x{op.Address:X6}: 0x{op.RawOpCodeHi:X16}{op.RawOpCode:X16} {op.Name}"));
+                }
+
+                if (a.Pred == RegisterConsts.PredicateTrueIndex && a.PredInv)
+                {
+                    continue;
+                }
+
+                int opStart = context.OperationsCount;
+
+                Operand predSkipLbl = null;
+
+                if (a.Pred != RegisterConsts.PredicateTrueIndex && a.Opcode != Instructions.AmpereOpcodes.Bra)
+                {
+                    Operand label;
+
+                    if (opIndex == block.OpCodes.Count - 1 && block.HasNext())
+                    {
+                        label = context.GetLabel(block.Successors[0].Address);
+                    }
+                    else
+                    {
+                        label = Label();
+
+                        predSkipLbl = label;
+                    }
+
+                    RegisterType predType = Instructions.AmpereTable.HasUniformGuard(a.Opcode) ? RegisterType.UniformPredicate : RegisterType.Predicate;
+                    Operand pred = Register(a.Pred, predType);
+
+                    if (a.PredInv)
+                    {
+                        context.BranchIfTrue(label, pred);
+                    }
+                    else
+                    {
+                        context.BranchIfFalse(label, pred);
+                    }
+                }
+
+                context.CurrOp = op;
+
+                op.Emitter?.Invoke(context);
+
+                if (predSkipLbl != null)
+                {
+                    context.MarkLabel(predSkipLbl);
+                }
+
+                if (writeBarrier < 6 && !op.Props.HasFlag(InstProps.Bra))
+                {
+                    DeferAmpereWrites(context, opStart, pending, writeBarrier, ref shadows, freeShadows);
+                }
+            }
+
+            CommitAll();
+        }
+
+        // The registers written by the operations from opStart on become shadow registers (every use in the range too), each first set to the register's value
+        private static void DeferAmpereWrites(
+            EmitterContext context,
+            int opStart,
+            List<(Register Reg, Operand Value)>[] pendingAll,
+            int barrier,
+            ref int shadows,
+            Stack<int> freeShadows)
+        {
+            List<(Register Reg, Operand Value)> pending = pendingAll[barrier] ??= [];
+
+            int end = context.OperationsCount;
+            Dictionary<Register, Operand> locals = new();
+
+            for (int i = opStart; i < end; i++)
+            {
+                Operation operation = context.GetOperation(i);
+
+                for (int d = 0; d < operation.DestsCount; d++)
+                {
+                    Operand dest = operation.GetDest(d);
+
+                    if (dest != null && dest.Type == OperandType.Register && !locals.ContainsKey(dest.GetRegister()))
+                    {
+                        if (freeShadows.Count == 0 && shadows == RegisterConsts.ShadowsCount)
+                        {
+                            throw new InvalidOperationException("Ampere: more deferred register writes pending at once than shadow registers");
+                        }
+
+                        locals[dest.GetRegister()] = Register(freeShadows.Count != 0 ? freeShadows.Pop() : shadows++, RegisterType.Shadow);
+                    }
+                }
+            }
+
+            if (locals.Count == 0)
+            {
+                return;
+            }
+
+            for (int i = opStart; i < end; i++)
+            {
+                Operation operation = context.GetOperation(i);
+
+                for (int d = 0; d < operation.DestsCount; d++)
+                {
+                    Operand dest = operation.GetDest(d);
+
+                    if (dest != null && dest.Type == OperandType.Register && locals.TryGetValue(dest.GetRegister(), out Operand local))
+                    {
+                        operation.SetDest(d, local);
+                    }
+                }
+
+                for (int s = 0; s < operation.SourcesCount; s++)
+                {
+                    Operand src = operation.GetSource(s);
+
+                    if (src != null && src.Type == OperandType.Register && locals.TryGetValue(src.GetRegister(), out Operand local))
+                    {
+                        operation.SetSource(s, local);
+                    }
+                }
+            }
+
+            int at = opStart;
+
+            foreach ((Register reg, Operand local) in locals)
+            {
+                context.InsertOperation(at++, new Operation(Instruction.Copy, local, Register(reg)));
+
+                // A register written again before its earlier deferred write landed: the later write wins, the earlier shadow is free
+                foreach (List<(Register Reg, Operand Value)> list in pendingAll)
+                {
+                    if (list == null)
+                    {
+                        continue;
+                    }
+
+                    foreach ((Register r, Operand v) in list.FindAll(p => p.Reg.Equals(reg)))
+                    {
+                        freeShadows.Push(v.GetRegister().Index);
+                    }
+
+                    list.RemoveAll(p => p.Reg.Equals(reg));
+                }
+
+                pending.Add((reg, local));
             }
         }
 

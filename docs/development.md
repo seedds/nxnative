@@ -564,6 +564,16 @@ The first Xcode build copies the complete game, so allow free space on the game'
 
 Each prepared game is a scheme in the shared workspace (by default `NxNative.xcworkspace` beside the NSP folder; `--xcode-workspace`, `XCODE_WORKSPACE` in Spyder, collects games from different folders in one). Give each game its own bundle ID (`--bundle-id`) to keep them installed together; keep it when updating an installed game, as another ID is a separate app with separate saves. The script rejects a bundle ID that another project in the workspace uses. Preparing a game again regenerates only its project and keeps its Release bundle ID and team, including changes made in Xcode; `--bundle-id` / `--team-id` (`BUNDLE_ID` / `TEAM_ID` in Spyder, or `DM_TEAM_ID`) override them. Other manual project edits are replaced; edit `dm/ios/project.yml` for shared changes. Prepare a game again after changing its game files, profile, shaders or the project template; switching games needs only the scheme menu.
 
+### Install a signed build from the command line
+
+`scripts/install_ios_app.py` installs an already-signed development `.app` on a connected iPhone or iPad and launches it, for a prepared project's build or a bundle handed to you. It checks the bundle's `Info.plist`, code signature, embedded provisioning profile, profile expiry and the selected device's UDID before any device write:
+
+```sh
+python3 scripts/install_ios_app.py "<NSP folder>/<title ID>_build/xcode-derived-data/Build/Products/Release-iphoneos/DmIOS.app" --device "<name or UDID>"
+```
+
+The app must already be signed with a profile that includes the device; the tool does not sign or provision. `--list` shows the bundle and the connected iPhones and iPads without installing. Without `--device`, one connected device is used; with several, pass one by name or UDID. `--no-launch` installs only, and `--yes` skips the confirmation. A profile that names no devices, an expired profile, a mismatched bundle identity or a device missing from the profile stops before the install.
+
 ### Quick reinstalls
 
 A full install sends the whole app, about 11 GB for Animal Crossing: New Horizons (3 to 4 minutes). The game files can stay on the phone instead:

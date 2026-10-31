@@ -95,6 +95,10 @@ def header(g):
     vers = ', '.join('{' + q(b['main']) + ', ' + q(b['display']) + '}' for b in g.builds().values() if 'main' in b)
     pi = g.get('present_interval', 'game')   # present interval: game = as the game sets it (as on the Switch), display = one frame per display tick
     if pi not in ('game', 'display'): sys.exit(f'{g.id}: present_interval must be game or display: {pi}')
+    rsm = g.get('render_scale_max', '1.0')   # highest DM_RENDER_SCALE the game survives (loader.c, the iOS launcher's slider): above its own size a game renders into
+    try: rsm_f = float(rsm)                      # render target pools it sized for its own resolution, and how far that goes is per game, found by measurement (DM_NVN_POOLPEAK)
+    except ValueError: sys.exit(f'{g.id}: render_scale_max must be a number: {rsm}')
+    if not 1.0 <= rsm_f <= 3.0: sys.exit(f'{g.id}: render_scale_max must be 1.0 to 3.0: {rsm}')
     ft = g.get('fps_target', '0')   # frame rate cap of the rewriter's frame step (FRAME_STEP in the profile's patches.py: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0) or of the engine's own frame limit (hle_fpslock.c): 0 = the game's own step, 30 / 60
     if ft not in ('0', '30', '60'): sys.exit(f'{g.id}: fps_target must be 0, 30 or 60: {ft}')
     fh = g.get('fps_hold', 'on')   # whether the frame step may hold a frame longer than the cap's vsyncs when frames come late (hle_nvn.c fstep_tick): on / off
@@ -168,6 +172,7 @@ def header(g):
          f'#define DM_GAME_PRESENT_DISPLAY {int(pi == "display")}',
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',
          f'#define DM_GAME_ALLOC_BIG_ALIGN {int(aba == "on")}',
+         f'#define DM_GAME_RENDER_SCALE_MAX {rsm_f:.2f}f',
          f'#define DM_GAME_FPS_TARGET {int(ft)}',
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',

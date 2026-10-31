@@ -111,7 +111,9 @@ def build(gid, patched, control):
             if s['default'] not in [o[0] for o in opts]: s['default'] = opts[0][0]   # a default the game does not offer (a language it lacks): its first
             s['options'] = opts
         elif kind == 'range':
-            lo, hi, st = (float(x) for x in values.split(':'))
+            # A bound may be DM_GAME_<NAME>, so a slider stops where the game stops (DM_RENDER_SCALE at the profile's render_scale_max)
+            lo, hi, st = (float((macro(x, n) if x.startswith('DM_GAME_') else x).rstrip('f')) for x in values.split(':'))
+            if hi <= lo: continue   # nothing to choose: the game's own value is the only one
             s.update(min=lo, max=hi, step=st)
         elif kind == 'toggle':
             if s['default'] not in ('0', '1'): sys.exit(f'settings.tsv:{n}: a toggle defaults to 0 or 1: {s["default"]}')

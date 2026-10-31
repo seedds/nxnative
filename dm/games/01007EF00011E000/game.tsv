@@ -24,6 +24,12 @@ gpu_timestamps	segment
 # patches.py FRAME_STEP); 30 when 60 does not hold, game time = real time. DM_FPS_TARGET=30 (Documents/env.txt on the iPhone) saves power; 0 runs the game's own
 # interval controller (with the 60 fps cuts, which also serve while the game's VFR override is set)
 fps_target	60
+# Highest render scale this game survives. gsys sub-allocates every render target from one 115 MB render buffer pool it
+# sizes at start, so above its own resolution a scene eventually needs more than the pool holds and gsys::RenderBufferContext
+# takes a null back (SIGSEGV at main+0xed7128, address 0x20, while the field loads). Measured on an iPad Pro 13" M4 with
+# DM_NVN_POOLPEAK (docked, open world with the inventory and map opened): 112.8 MB of the 115 MB used at 1.40, which plays;
+# 1.45 crashes. 1.35 is the last step of the slider below that, so the ceiling is set there rather than at the edge
+render_scale_max	1.35
 # Tested defaults for this game (iPhone 17 Pro Max, iOS 27.0.1, docked, 60 fps target; GitHub issues #142 / #159): present snapshots keep the GPU from idling between frames,
 # which iOS's clock governor reads as headroom (30 fps without them, a steady 60 for 300 s with them and the encode thread); render pipelines through MTL4Compiler give the
 # pipeline archive, the prepare step and the hybrid pipelines on the iPhone too (5,100 prewarm lines prepared in 0.28 s at start instead of compiling on first use)

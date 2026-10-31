@@ -462,7 +462,7 @@ void mtl_init(void) {
     g_present_args = [g_dev newArgumentTableWithDescriptor:pad error:&ate];
     if (!g_present_args) MDIE("failed to create the present argument table: %s", ate.localizedDescription.UTF8String);
     for (int i = 0; i < 3; i++) {
-        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+        g_present_uv[i] = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];   // 8 floats for the picture's crop, 8 for the bars' image (present_encode_m4)
         if (!g_present_uv[i]) MDIE("failed to create present UV buffer[%d]", i);
         res_add(g_present_uv[i]);
     }
@@ -10803,6 +10803,7 @@ void mtl_exec(const uint8_t *p) {
 // ---------- Present: draw the swapchain texture to the CAMetalLayer; optional screenshot ----------
 static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
+static id<MTLRenderPipelineState> g_bar_blurh_pso, g_bar_blurv_pso, g_bar_dim_pso;   // the bars' blurred fill (present_pipeline, bar_prepare_m4)
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
 void mtl_res_snapshot(mtl_res_count *out) {
@@ -11149,6 +11150,10 @@ static void present_pipeline(MTLPixelFormat format) {
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs_blurh"]; g_bar_blurh_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs_blurv"]; g_bar_blurv_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs_dim"]; g_bar_dim_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        if (!g_bar_blurh_pso || !g_bar_blurv_pso || !g_bar_dim_pso) MDIE("present bar pipelines failed %s", e.localizedDescription.UTF8String);
         g_blit_fmt = format;
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
@@ -11285,6 +11290,76 @@ static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTe
     [fx->sc encodeToCommandBuffer:cb];
     return fx->out;
 }
+// DM_BAR_FILL=blur: the bars around a letterboxed picture show a dimmed, blurred copy of it (the settings screen's "Bars around the picture"). The picture's valid rectangle is drawn into a small
+// texture of the canvas's shape (128 wide), blurred along x and then y (taps two texels apart, so the blur spreads far and the texture stays small), and present_encode_m4 draws it over the
+// whole canvas darkened to half before the sharp picture goes on top. The picture fills the canvas in the small texture (not cropped): what lies beside a bar is the picture's own edge, stretched.
+// Three small passes and one full-canvas draw a frame, only while there are bars; not in a screenshot's present. Through MetalFX the scaled picture is what is blurred. The two small textures are kept resident; a canvas of
+// another shape (a rotation, a foldable opened or closed) makes new ones once the presents still on the GPU are done (as fx_encode does for its scaler)
+static _Atomic double g_present_aspect;   // width / height of the picture the last present showed (its valid rectangle), 0 = none yet
+double mtl_present_aspect(void) { return atomic_load_explicit(&g_present_aspect, memory_order_relaxed); }   // the front end maps touches onto the picture with it (DmGamepad.m)
+// DM_BAR_FILL=image: the bars show a still picture instead (the front end hands it over with mtl_set_bar_image: bar_background.jpg in the app), scaled to cover the canvas from its middle
+static int bar_mode(void) {   // 0 black, 1 blurred picture, 2 still image
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_BAR_FILL"); v = e && !strcmp(e, "blur") ? 1 : e && !strcmp(e, "image") ? 2 : 0;
+        if (v == 1) MLOG("present bars: a dimmed, blurred copy of the picture fills them (DM_BAR_FILL=blur)");
+        if (v == 2) MLOG("present bars: a still image fills them (DM_BAR_FILL=image)");
+    }
+    return v;
+}
+static CGImageRef g_bar_cg;                    // the image the front end handed over (retained)
+static __strong id<MTLTexture> g_bar_img;      // its texture, made on the present thread at the first present that needs it (the device may not exist when the front end calls)
+static _Atomic double g_bar_img_aspect;
+void mtl_set_bar_image(CGImageRef img) { if (img) { CGImageRetain(img); g_bar_cg = img; } }
+static id<MTLTexture> bar_image(void) {
+    if (g_bar_img || !g_bar_cg) return g_bar_img;
+    size_t w = CGImageGetWidth(g_bar_cg), h = CGImageGetHeight(g_bar_cg);
+    CGImageRef cg = g_bar_cg; g_bar_cg = NULL;   // one try
+    if (!w || !h || w > 8192 || h > 8192) { MLOG("[RED] present bars: the image is %zux%zu, not used", w, h); CGImageRelease(cg); return nil; }
+    uint8_t *px = calloc(w * h, 4); CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef cx = px && cs ? CGBitmapContextCreate(px, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little) : NULL;   // BGRA, the drawable's own layout: the bytes show as they are
+    if (cx) CGContextDrawImage(cx, CGRectMake(0, 0, w, h), cg);
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:w height:h mipmapped:NO];
+    d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModeShared;
+    id<MTLTexture> t = cx ? [g_dev newTextureWithDescriptor:d] : nil;
+    if (t) { [t replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:px bytesPerRow:w * 4]; t.label = @"present bars image"; res_add(t); res_commit(); g_bar_img = t; atomic_store(&g_bar_img_aspect, (double)w / h);
+        MLOG("present bars: the still image is %zux%zu", w, h); }
+    else MLOG("[RED] present bars: cannot make a texture of the image (%zux%zu)", w, h);
+    if (cx) CGContextRelease(cx); if (cs) CGColorSpaceRelease(cs); free(px); CGImageRelease(cg);
+    return g_bar_img;
+}
+static void bar_pass_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> to, id<MTLRenderPipelineState> pso, id<MTLTexture> from, id<MTLBuffer> uvb) {
+    MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
+    rp.colorAttachments[0].texture = to; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTL4RenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
+    if (!en) { MLOG("[RED] failed to create the M4 present bar encoder"); return; }
+    [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
+    [en setArgumentTable:g_present_args atStages:MTLRenderStageFragment];
+    [g_present_args setTexture:from.gpuResourceID atIndex:0]; [g_present_args setSamplerState:g_blit_samp.gpuResourceID atIndex:0]; [g_present_args setAddress:uvb.gpuAddress atIndex:0];
+    [en setViewport:(MTLViewport){0, 0, (double)to.width, (double)to.height, 0, 1}]; [en setRenderPipelineState:pso];
+    [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    m4_end(en);
+}
+static id<MTLTexture> bar_blur_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> tex, id<MTLBuffer> uvb, MTLPixelFormat f, double dw, double dh) {
+    static __strong id<MTLTexture> bt[2]; static NSUInteger bw, bh; static MTLPixelFormat bf;
+    NSUInteger w = 128, h = MAX((NSUInteger)1, (NSUInteger)lround(128.0 * dh / dw));
+    if (!bt[0] || bw != w || bh != h || bf != f) {
+        pthread_mutex_lock(&g_pq_mu); while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu);
+        res_remove(bt[0]); res_remove(bt[1]); bt[0] = bt[1] = nil;
+        for (int i = 0; i < 2; i++) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f width:w height:h mipmapped:NO];
+            td.storageMode = MTLStorageModePrivate; td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            bt[i] = [g_dev newTextureWithDescriptor:td]; bt[i].label = i ? @"present bars blur b" : @"present bars blur a";
+        }
+        if (!bt[0] || !bt[1]) { MLOG("[RED] present bars: cannot create the blur textures (%lux%lu)", (unsigned long)w, (unsigned long)h); bt[0] = bt[1] = nil; return nil; }
+        res_add(bt[0]); res_add(bt[1]); res_commit(); bw = w; bh = h; bf = f;
+        MLOG("present bars: blur textures %lux%lu for a canvas of %.0fx%.0f", (unsigned long)w, (unsigned long)h, dw, dh);
+    }
+    bar_pass_m4(cb, bt[0], g_blit_pso, tex, uvb);        // the picture, small
+    bar_pass_m4(cb, bt[1], g_bar_blurh_pso, bt[0], uvb);  // blurred along x
+    bar_pass_m4(cb, bt[0], g_bar_blurv_pso, bt[1], uvb);  // and along y
+    return bt[0];
+}
 // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
 // (fx: the scaler state to use, nil = bilinear). uvb: the pass's crop constants (one buffer per present allocator, written by the CPU)
 static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], id<MTLBuffer> uvb, fx_state *fx) {
@@ -11293,11 +11368,23 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     double dw = dst.width, dh = dst.height;
     MTLViewport vp = present_viewport(r[2], r[3], dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
+    if (r[2] && r[3]) atomic_store_explicit(&g_present_aspect, (double)r[2] / (double)r[3], memory_order_relaxed);
     id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
     if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1
+    int mode = !full && fx == &g_fx_present ? bar_mode() : 0;   // not in a screenshot's present
+    id<MTLTexture> bg = nil, img = mode == 2 ? bar_image() : nil;
+    float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
+    uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
+    uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
+    if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
+    if (mode == 1) bg = bar_blur_m4(cb, tex, uvb, dst.pixelFormat, dw, dh);
+    if (img) {   // the image covers the canvas, cropped from its middle (constants in the buffer's second half)
+        double ia = atomic_load(&g_bar_img_aspect), ca = dw / dh, w2 = ca > ia ? 1 : ca / ia, h2 = ca > ia ? ia / ca : 1;
+        uv[8] = (float)((1 - w2) / 2); uv[9] = (float)((1 - h2) / 2); uv[10] = (float)w2; uv[11] = (float)h2; uv[12] = 0; uv[13] = 0; uv[14] = 1; uv[15] = 1;
+    }
     MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
     rp.colorAttachments[0].texture = dst;
-    rp.colorAttachments[0].loadAction = full ? MTLLoadActionDontCare : MTLLoadActionClear;
+    rp.colorAttachments[0].loadAction = full || bg || img ? MTLLoadActionDontCare : MTLLoadActionClear;   // the bars' fill draws every pixel
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
     id<MTL4RenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
@@ -11306,11 +11393,14 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     [en setArgumentTable:g_present_args atStages:MTLRenderStageFragment];
     [g_present_args setTexture:tex.gpuResourceID atIndex:0];
     [g_present_args setSamplerState:g_blit_samp.gpuResourceID atIndex:0];
-    float *uv = uvb.contents; NSUInteger tw = tex.width, th = tex.height, cx = r[0], cy = r[1], cw = r[2], ch = r[3];
-    uv[0] = (float)cx / tw; uv[1] = (float)cy / th; uv[2] = (float)cw / tw; uv[3] = (float)ch / th;
-    uv[4] = (cx + 0.5f) / tw; uv[5] = (cy + 0.5f) / th; uv[6] = (cx + cw - 0.5f) / tw; uv[7] = (cy + ch - 0.5f) / th;
-    if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [g_present_args setAddress:uvb.gpuAddress atIndex:0];
+    if (bg || img) {   // the dimmed, blurred picture or the still image over the whole canvas, the sharp picture on top of it
+        if (bg) [g_present_args setTexture:bg.gpuResourceID atIndex:0];
+        else { [g_present_args setTexture:img.gpuResourceID atIndex:0]; [g_present_args setAddress:uvb.gpuAddress + 8 * sizeof(float) atIndex:0]; }
+        [en setViewport:(MTLViewport){0, 0, dw, dh, 0, 1}]; [en setRenderPipelineState:bg ? g_bar_dim_pso : g_blit_pso];
+        [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [g_present_args setTexture:tex.gpuResourceID atIndex:0]; [g_present_args setAddress:uvb.gpuAddress atIndex:0];
+    }
     [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     m4_end(en);
@@ -11320,7 +11410,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
 // returns whether it was submitted. Completion reports the encoding kind, or PRESENT_FAILED on a GPU error. Resources remain resident and retained until GPU completion.
 static int present_offscreen_m4(id<MTLTexture> src, const int crop[4], id<MTLTexture> out, void (^done)(int)) {
     id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer];
-    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 8 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> uvb = [g_dev newBufferWithLength:sizeof(float) * 16 options:MTLResourceStorageModeShared];
     if (!al || !cb || !uvb) { MLOG("[RED] offscreen present: no command allocator or buffer"); return 0; }
     id<MTLTexture> raw = present_raw_src(src);
     fx_state fx = {0};

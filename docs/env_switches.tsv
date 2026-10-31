@@ -40,6 +40,10 @@ DM_FPS_TARGET	player	Frame-rate cap: `30` or `60`, or `0` for the game's own lim
 DM_FS	diagnostic	When set, logs file opens, paths not found or not mounted, and a read summary every 64 MiB or 1000 reads
 DM_FSLOG	diagnostic	`=<file>` writes one TSV line per ReadFile: seconds since boot, guest path, offset, length and guest buffer address
 DM_FSLOG_HASH	diagnostic	With `DM_FSLOG`, adds a column with the FNV-1a 64 hash of the bytes read
+DM_FS_PREFETCH	switch	`1` starts the fs prefetch list's walk at one utility thread on the next launch: it reads the recorded RomFS ranges through the page cache at a capped rate, skipping what the game has read itself, so the game's later reads of those ranges hit the page cache (off by default, and only the image the game mounted as `rom`)
+DM_FS_PREFETCH_RATE	switch	`=<MiB/s>` the rate cap of the fs prefetch walk (default 24; `0` uncapped)
+DM_FS_RECORD	path	`=<path|1>` grows the fs prefetch list with the reads of the game's RomFS image (the mount named `rom`; offset and length rows only, `1` = the default file of `DM_FS_USER`)
+DM_FS_USER	path	The fs prefetch list's file (default `fs_user.tsv` in the parent of `DM_SAVE`)
 DM_FULLSCREEN	player	`1` (any value but `0`) starts the Mac window in fullscreen; `0` or unset, a window. The Mac settings window's Display mode
 DM_GAME	switch	Selects the game profile (a title ID under `dm/games` or `DM_GAMES_DIR`) for the Python tools and the rewriter; there is no default
 DM_GAMES_DIR	path	Profile folders outside the repository, separated by `:`, searched after `dm/games`; the NSP script points it at a provisional or derived profile
@@ -193,6 +197,7 @@ DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout w
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
 DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
+DM_PHASE	test	`=1..4` selects the record, prefetch, image-mismatch or malformed-list phase of `t_fs_prefetch`; set by `make fs-prefetch`
 DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
 DM_PREEMPT	switch	`0` / `1` overrides the profile's `core_preempt`: also check already-runnable higher-priority peers on the caller's core after every thread SVC
 DM_PRELOAD	diagnostic	Set: on the Mac, runs the host's early background loading (`dm_host_preload_start`) as the iOS app does, to exercise that path

@@ -136,6 +136,180 @@ static romfs_img *img_open(const char *path) {
     else LOG("[RED] fs RomFS image %s is not a complete image (copied in part? errno=%d)", path, errno);
     return m;
 }
+#include <sys/qos.h>
+__attribute__((weak)) void dm_host_helper_qos(qos_class_t q) { (void)q; }   // the strong one is hle_thread.c's (DM_QOS_MAP); tests and stubs take this
+// ---------- The RomFS image's reads as a prefetch list (DM_FS_RECORD / DM_FS_PREFETCH) ----------
+// The cost a first entry into a level hides: every nn::fs read of the RomFS image is a pread(2) over the app's storage, and a level load lands its blocks in such reads
+// (Super Mario Bros. Wonder on an iPhone: twenty 92–102 ms frames entering the first course, GPU 3.7 ms each, no pipeline compile and no upload among them — the reads the
+// game had not made before that course). DM_FS_RECORD=1 grows fs_user.tsv with the read coverage of the image (the mount named rom): a read that grew it by more than
+// 16 KiB appends its range once. With DM_FS_PREFETCH=1 the next launch starts one utility thread that reads the list's ranges through the page cache at a capped rate —
+// never a range the game has read itself meanwhile (they are the game's own work). What the OS keeps in its cache, the game's own later reads of cover hit in memory
+// instead of the storage. A row holds nothing but (offset, length) bytes, so a list travels between the players' devices: the consumer checks the image's size ('image' rows).
+// One interval set serves both features (recording wants coverage deltas, prefetch wants what the game read): behind one mutex; a game's loader threads read in parallel.
+// Off by default everywhere, and only image mounts: the Mac folder mount serves a whole APFS volume's cache already, prefetch there buys little and name-less range lists would
+// not transfer to an iPhone's image anyway
+typedef struct { uint64_t a, b; } fs_rng;   // [a, b) in image coordinates
+typedef struct { fs_rng *r; uint64_t n, cap; } fs_rset;
+
+static fs_rset g_fsrng; static pthread_mutex_t g_fsrng_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int g_fsrng_on;        // 1 once recording or prefetch is on: the read path tests only this and the tracked mount
+static _Atomic int g_fsimgrack = -1;  // the mount index whose image the reads of are tracked; -1 with both switches off
+static FILE *g_fsrec;                 // the list the recording appends to (NULL with recording off)
+
+// Insert [a, b) and merge with the neighbours it touches: returns the bytes it added (0 = it was already covered). The set stays ascending with no empty entries, so a
+// consumer walks it in storage order; O(log n) to find, O(k) over the k entries [a, b) touches (a level's read touches few)
+static uint64_t fs_rng_add(fs_rng **sp, uint64_t *n, uint64_t *cap, uint64_t a, uint64_t b) {
+    fs_rng *s = *sp;
+    if (a >= b) return 0;
+    uint64_t lo = 0, hi = *n;
+    while (lo < hi) { uint64_t mid = lo + (hi - lo) / 2; if (s[mid].b < a) lo = mid + 1; else hi = mid; }   // the first entry whose b >= a
+    uint64_t i = lo, covered = 0, ka = a, kb = b;
+    while (i < *n && s[i].a < b) {   // the entries [a, b) overlaps (the left-adjacent one merges through this too); a right-adjacent one stays its own entry, so the set holds what was read, not what adjacency could stretch
+        uint64_t ia = s[i].a > a ? s[i].a : a, ib = s[i].b < b ? s[i].b : b;
+        if (ib > ia) covered += ib - ia;
+        if (s[i].a < ka) ka = s[i].a;
+        if (s[i].b > kb) kb = s[i].b;
+        i++;
+    }
+    if (covered >= b - a) return 0;
+    uint64_t rest = *n - i;   // the entries after the swallowed run (i is one past it)
+    uint64_t need = lo + 1 + rest;
+    if (need > *cap) { uint64_t nc = *cap ? *cap * 2 : 16; while (need > nc) nc *= 2; fs_rng *t = realloc(s, nc * sizeof *t); if (!t) return 0; s = *sp = t; *cap = nc; }   // the set's owner learns the moved array too: s alone would keep writing into the old (first grow: the null) block
+    if (rest && i != lo + 1) memmove(s + lo + 1, s + i, rest * sizeof *s);   // the entries after the run shift one slot left, behind the merged one
+    s[lo] = (fs_rng){ka, kb};
+    *n = need;
+    return b - a - covered;
+}
+
+static void fs_rng_tracked(uint64_t a, uint64_t b) {   // the read path's insert (hle_fs ReadFile, image reads of the tracked mount)
+    pthread_mutex_lock(&g_fsrng_lock);
+    uint64_t added = fs_rng_add(&g_fsrng.r, &g_fsrng.n, &g_fsrng.cap, a, b);
+    if (g_fsrec && added >= (16 << 10))   // a read that grew the coverage past 16 KiB appends once, so the list has the real ranges of level loads, not one row per small seek; the consumer merges whatever it gets
+        if (fprintf(g_fsrec, "%llu\t%llu\n", (unsigned long long)a, (unsigned long long)(b - a)) > 0) fflush(g_fsrec);
+    pthread_mutex_unlock(&g_fsrng_lock);
+}
+
+// The list's file: DM_FS_USER names it (tests and unusual layouts); without it, as pso_user does with its list, it is fs_user.tsv in the parent of DM_SAVE (Documents on iOS)
+static void fs_user_path(char *out, size_t n) {
+    const char *u = getenv("DM_FS_USER"), *save = getenv("DM_SAVE");
+    if (u && *u) strlcpy(out, u, n);
+    else if (save && *save) {
+        char parent[1200]; strlcpy(parent, save, sizeof parent);
+        char *slash = strrchr(parent, '/'); if (slash && slash != parent) *slash = 0;
+        snprintf(out, n, "%s/fs_user.tsv", slash && slash != parent ? parent : ".");
+    } else strlcpy(out, "fs_user.tsv", n);
+}
+
+#define FS_PREFETCH_CHUNK (2 << 20)   // read granularity: the rate cap works between whole chunks, 2 MiB reaches the storage's parallelism, and the game's reads of a range left at a chunk edge still hit the cache it can already hold
+static uint64_t fs_prefetch_rate_bps(void) { const char *e = getenv("DM_FS_PREFETCH_RATE"); int mb = e && *e ? atoi(e) : 24; return mb < 0 ? 0 : (uint64_t)mb << 20; }   // bytes per second; 0 = uncapped
+
+// The prefetch worker. Its only argument is the image's descriptor (the image fd stays open for the whole run). It reads the list, merges its rows into a set of its own,
+// then reads every range at a capped rate, skipping whatever the game has read itself meanwhile (a read error ends it: the image is gone, no further range is reachable
+// either). Reads here have nothing to return to: bytes read through the page cache are simply in the OS cache for the game's own reads to hit
+static void *fs_prefetch_main(void *arg) {
+    int fd = (int)(intptr_t)arg;
+    dm_host_helper_qos(QOS_CLASS_UTILITY);   // below the game and its graphics, above idle: work a loading screen or the game's own later read would have done
+    char path[1200]; fs_user_path(path, sizeof path);
+    FILE *f = fopen(path, "r");
+    if (!f) { LOG("fs prefetch: no list at %s yet (record one with DM_FS_RECORD=1)", path); atomic_store(&g_fsimgrack, -1); return NULL; }
+    char *ln = NULL; size_t lc = 0;
+    uint64_t isz = 0, isz_row, nimg = 0, nrow = 0, bad = 0, off, len;
+    fs_rng *rs = NULL; uint64_t rn = 0, rc = 0; int f_open = 1;
+    while (f_open && getline(&ln, &lc, f) >= 0) {
+        if (!ln[0] || ln[0] == '#' || ln[0] == '\n') continue;   // comment and empty lines stay out
+        if (sscanf(ln, "image\t%llu", &isz_row) == 1) {   // the identity row: the image's bytes, one written per recording session's mount
+            if (!nimg) isz = isz_row;
+            else if (isz_row != isz) { LOG("[RED] fs prefetch: the list at %s holds images of two sizes (%llu, %llu); it is unusable", path, (unsigned long long)isz, (unsigned long long)isz_row); goto refuse; }
+            nimg++;
+            continue;
+        }
+        if (sscanf(ln, "%llu\t%llu", &off, &len) == 2 && len) { fs_rng_add(&rs, &rn, &rc, off, off + len); nrow++; continue; }   // merged as they come: ascending whatever order the rows are in
+        bad++;
+    }
+    fclose(f); f_open = 0; free(ln); ln = NULL;
+    if (!nrow) { LOG("fs prefetch: the list at %s holds no range yet (record one with DM_FS_RECORD=1 over the scenes played)", path); goto refuse; }
+    if (bad) LOG("fs prefetch: %llu malformed rows in the list at %s are ignored", (unsigned long long)bad, path);
+    if (nimg) {   // another image size means another game or another version of it: no list at all beats MiB of another version's blocks
+        struct stat st; int st_ok = !fstat(fd, &st);
+        if (nimg > 1) LOG("fs prefetch: the list's image rows come from %llu recording sessions, all one size", (unsigned long long)nimg);
+        if (!st_ok || (uint64_t)st.st_size != isz) {
+            LOG("fs prefetch: the list's image is %llu bytes, this image %lld: the list is skipped (record a new one with DM_FS_RECORD=1)", (unsigned long long)isz, st_ok ? (long long)st.st_size : -1LL);
+            goto refuse;
+        }
+    } else if (bad) {   // no size stamp and rows that do not parse: refuse the range rows (a stamp and a hand-made file can both be unreadable here, so the stamp decides)
+        LOG("[RED] fs prefetch: the list at %s carries no 'image' row and malformed rows; not reading it", path);
+        goto refuse;
+    }
+    uint64_t cov = 0; for (uint64_t k = 0; k < rn; k++) cov += rs[k].b - rs[k].a;
+    uint64_t rate = fs_prefetch_rate_bps();
+    LOG("fs prefetch: the list at %s: %llu ranges over %llu MiB of the image (%llu B)%s", path, (unsigned long long)nrow, (unsigned long long)(cov >> 20), (unsigned long long)isz,
+        bad ? ", with malformed rows ignored" : "");
+    struct timespec tw; clock_gettime(CLOCK_MONOTONIC, &tw); uint64_t t0 = (uint64_t)tw.tv_sec * 1000000000ull + (uint64_t)tw.tv_nsec, read_b = 0;
+    uint8_t *buf = malloc(FS_PREFETCH_CHUNK);
+    if (!buf) { atomic_store(&g_fsimgrack, -1); free(rs); return NULL; }
+    int stopped = 0;
+    for (uint64_t k = 0; !stopped && k < rn; k++) {
+        uint64_t a = rs[k].a, b = rs[k].b;
+        while (a < b) {
+            pthread_mutex_lock(&g_fsrng_lock);   // short hold: hop the front the game has read and size this chunk under it
+            for (;;) {   // usually one interval jump, rechecked at most once: what the game read already is its own work, not this thread's
+                uint64_t lo = 0, hi = g_fsrng.n;
+                while (lo < hi) { uint64_t mid = lo + (hi - lo) / 2; if (g_fsrng.r[mid].b <= a) lo = mid + 1; else hi = mid; }
+                if (lo < g_fsrng.n && g_fsrng.r[lo].a <= a && g_fsrng.r[lo].b > a) a = g_fsrng.r[lo].b; else break;
+            }
+            uint64_t cx = b - a < FS_PREFETCH_CHUNK ? b - a : FS_PREFETCH_CHUNK;
+            pthread_mutex_unlock(&g_fsrng_lock);
+            if (a >= b) break;
+            size_t done = 0;
+            while (done < cx) {
+                ssize_t r = pread(fd, buf + done, cx - done, (off_t)(a + done));
+                if (r < 0 && errno == EINTR) continue;
+                if (r <= 0) { stopped = 1; break; }
+                done += (size_t)r;
+            }
+            if (stopped) break;
+            read_b += done; a += done;
+            if (rate) {   // hold until time has earned this read: the cap bounds how far ahead of the game's own reads this thread gets
+                struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+                uint64_t spent = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec - t0;
+                double earned = (double)spent * rate / 1e9;
+                if ((double)read_b > earned) usleep((useconds_t)(((double)read_b - earned) / (double)rate * 1e6));
+            }
+        }
+        if (stopped) break;
+    }
+    free(buf); free(rs);
+    clock_gettime(CLOCK_MONOTONIC, &tw);
+    uint64_t took = (uint64_t)tw.tv_sec * 1000000000ull + (uint64_t)tw.tv_nsec - t0;
+    LOG("fs prefetch done: %.1f MiB through the page cache in %.1f s%s", read_b / 1048576.0, took / 1e9, stopped ? " (stopped early: the image is gone or a read failed)" : "");
+    return NULL;
+ refuse:   // f and ln: exactly one of the run's paths above closes and frees them, so a refuse that meets them still open frees them here
+    free(rs);
+    if (f_open) fclose(f);
+    free(ln);
+    return NULL;
+}
+
+// The mount's hook, called from mount_ex once an image mount of rom is registered: DM_FS_RECORD=<path|1> opens the list for appending ('1' = the default path),
+// DM_FS_PREFETCH=1 starts the worker on one detached thread. The switches are read here once, so the read path tests two atomics and nothing else
+static void fs_prefetch_start(int mi, uint64_t img_bytes) {
+    const char *r = getenv("DM_FS_RECORD"), *p = getenv("DM_FS_PREFETCH");
+    int rec = r && *r && strcmp(r, "0"), run = p && *p && strcmp(p, "0");
+    if (!rec && !run) return;
+    atomic_store(&g_fsrng_on, 1); atomic_store(&g_fsimgrack, mi);
+    if (rec) {
+        char path[1200]; fs_user_path(path, sizeof path);
+        g_fsrec = strcmp(r, "1") ? fopen(r, "a") : fopen(path, "a");   // =<explicit path> writes there, =1 the default
+        if (g_fsrec) { fprintf(g_fsrec, "image\t%llu\n", (unsigned long long)img_bytes); fflush(g_fsrec); LOG("fs record: appending the reads of %s to %s", g_mnt[mi].dir, strcmp(r, "1") ? r : path); }
+        else { LOG("[RED] fs record: cannot open the list (errno=%d); the reads are not recorded", errno); atomic_store(&g_fsimgrack, -1); return; }
+    }
+    if (run) {
+        pthread_t th;
+        if (pthread_create(&th, NULL, fs_prefetch_main, (void *)(intptr_t)g_mnt[mi].img->fd)) { LOG("[RED] fs prefetch: pthread_create failed (errno=%d); the list is not read", errno); return; }
+        pthread_detach(th);
+    }
+}
+
 // The entry a path names in an image: each component is a binary search of its directory's children, which the packer sorted by name (bytes, a shorter prefix first)
 static int64_t img_find(const romfs_img *m, const char *rest) {
     uint64_t k = 0;
@@ -234,6 +408,10 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     if (txn_err) front_save_failed(txn_err);
     if (!ro && !txn) mkdir(dir, 0755);
     LOG("fs mount %s: → %s%s%s", name, txn ? g_mnt[g_nmnt - 1].dir : dir, ro || txn_err ? " (read-only)" : txn ? " (transactional save: work directory, swapped in atomically on Commit)" : "", g_mnt[g_nmnt - 1].overlay[0] ? " (overlay first)" : "");
+    if (g_mnt[g_nmnt - 1].img && !strcmp(name, "rom")) {   // the game's own image: the recording and the prefetch list both belong to it
+        struct stat st; uint64_t isb = fstat(g_mnt[g_nmnt - 1].img->fd, &st) ? 0 : (uint64_t)st.st_size;
+        fs_prefetch_start(g_nmnt - 1, isb);
+    }
     return RES_OK;
 }
 static Result mount(const char *name, const char *dir, int ro) { return mount_ex(name, dir, ro, 0); }
@@ -777,6 +955,8 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         got += r;
     }
     *out = got;
+    if (atomic_load(&g_fsrng_on) && IMG_H(h) && (int)IMG_M(h) == atomic_load(&g_fsimgrack))   // only image reads: the list's coordinates are image offsets, so a folder mount's reads stay out
+        fs_rng_tracked((uint64_t)base + (uint64_t)off, (uint64_t)base + (uint64_t)off + got);
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)
         uint64_t fh = 0xcbf29ce484222325ull; if (hash_on) for (size_t i = 0; i < got; i++) fh = (fh ^ ((uint8_t *)buf)[i]) * 0x100000001b3ull;

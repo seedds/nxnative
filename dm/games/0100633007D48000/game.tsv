@@ -1,0 +1,39 @@
+# Game profile of Hollow Knight (Switch, base game v0 + update 1.5.12620 = v589824). Plays on the Mac
+# Format: see dm/games/README.md
+# Unity IL2CPP with FMOD, SDK 20.5.21, NVN: the shaders are Shader objects in data.unity3d and the UnityFS bundles of StreamingAssets (read by shader_split.py through unityfs.py).
+# Brought up from the NSP script's provisional profile with no host change: every value below is the guess of dm/games/profile_guess.py, checked by play
+
+# ---- Identity ----
+title_id	0100633007D48000
+program_id	0100633007D48000
+
+# ---- App ----
+name	Hollow Knight
+ipa	HollowKnight.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v589824	1.5.12620	main=d1ceb177087be472f4574be16ccd3b0f	subsdk0=a870a783a09f57256d3630b73485398e	sdk=c668ae02ea221e429677aa61d3dab7c6
+package	v589824
+shader_versions	v589824
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/resources.assets.resS
+zip_store	.dat:.mp4:.resource:.ress:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
+shader_groups	/Data/=data
+shader_note	Hollow Knight shaders
+
+# address regions: 2026-10-30, in its first 15 s in nnMain the game's regions reach alias +1.30 GB, within the profile's 4.38 GB alias region (what it takes later in play is not measured here)

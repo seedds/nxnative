@@ -4,7 +4,7 @@
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
-// Key map (Nintendo layout): WASD left stick, arrow keys D-pad, J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
+// Key map (Nintendo layout): WASD left stick, arrow keys D-pad (with Shift held: the right stick), J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
 // Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
@@ -28,6 +28,7 @@
 static CAMetalLayer *g_layer;
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
+static int g_left, g_up, g_right, g_down, g_shift;   // arrow keys: the D-pad, or the right stick while Shift is held
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
@@ -93,7 +94,8 @@ void front_screen_match(int fps) {
 }
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    dm_input_set(g_btn, lx, ly, 0, 0);
+    if (g_shift) { dm_input_set(g_btn, lx, ly, (g_right - g_left) * 32767, (g_up - g_down) * 32767); return; }
+    dm_input_set(g_btn | (uint64_t)g_left << 12 | (uint64_t)g_up << 13 | (uint64_t)g_right << 14 | (uint64_t)g_down << 15, lx, ly, 0, 0);
 }
 static int key_bit(unsigned short code) {
     switch (code) {
@@ -101,7 +103,6 @@ static int key_bit(unsigned short code) {
         case 3: return 4;   case 5: return 5;                                            // F G → press stick
         case 12: return 6;  case 14: return 7;  case 6: return 8;   case 8: return 9;    // Q E Z C → L R ZL ZR
         case 36: return 10; case 48: return 11;                                          // Return Tab → + −
-        case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15; // ← ↑ → ↓
     }
     return -1;
 }
@@ -109,6 +110,7 @@ static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
+    switch (c) { case 123: g_left = down; break; case 126: g_up = down; break; case 124: g_right = down; break; case 125: g_down = down; break; }   // ← ↑ → ↓ (push: D-pad or right stick)
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
     g_btn = down ? (g_btn | m) : (g_btn & ~m);
@@ -190,7 +192,7 @@ static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 static void input_release(void) {
     g_input_on = 0;
     dm_motion_pro_active(0);
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_left = g_up = g_right = g_down = g_shift = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
@@ -1158,8 +1160,12 @@ void front_run(void (*guest)(void)) {
                 pads_changed(conn ? nil : c); }];
         dm_haptics_apple_init();
         pads_start();
-        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
+            if (e.type == NSEventTypeFlagsChanged) {   // Shift moves the held arrow keys between the D-pad and the right stick
+                if (g_input_on) { g_shift = (e.modifierFlags & NSEventModifierFlagShift) != 0; push(); }
+                return e;
+            }
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
@@ -1225,7 +1231,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     dispatch_sync(dispatch_get_main_queue(), ^{
         // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
         // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
+        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_left = g_up = g_right = g_down = g_shift = 0; push();
         dm_touch_set(NULL, 0);
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];

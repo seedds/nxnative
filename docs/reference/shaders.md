@@ -19,6 +19,22 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); base and both supplied DLC packs yield 5,752 unique shaders.
 - **Check:** `test_vbf.py` covers raw and zlib blocks, shared/missing members, truncation, unaligned effects, loose shader keys and inconsistent lengths. All 5,752 programs translate on the Mac.
 
+### LZ4 blocks in Virtuos VBF archives
+
+- **Symptom:** the split leaves out a VBF archive with `[RED] <name>.vbf: error: Error -3 while decompressing data: incorrect header check (its shaders are left out)`; the game runs with sound but every frame is black, with `[RED] shader … is not in the shader map` and `program has no vertex shader`.
+- **Cause:** `vbf.py` took every compressed block for zlib. FINAL FANTASY XII THE ZODIAC AGE's `FFXII_TZA.vbf` keeps its blocks as raw LZ4 blocks (no frame, no size prefix): the first block of an effect starts with a literal token and `RYHP` (`f3 1a 52 59 48 50 …`), not a zlib header.
+- **Fix:** a compressed block whose first two bytes are a valid zlib header (deflate, header checksum a multiple of 31) is inflated as before; any other compressed block is decoded as an LZ4 block of the block's stored size. A block that fails to decode is a `ValueError`, so the split leaves out that file only.
+- **Found on:** FINAL FANTASY XII THE ZODIAC AGE (`0100EB100AB42000`, no profile yet): all 814 shader members of `FFXII_TZA.vbf` decode; the split goes from 3,100 shaders (72 from game data) to 6,431 (3,403 from game data), and 22 of the 29 keys a provisional build asked for in its first minute are found. The other 7 were Phyre's built-in programs in `main` (see below).
+- **Check:** `test_vbf.py` covers LZ4 blocks and a corrupt LZ4 block beside the zlib and raw cases.
+
+### Phyre programs in main
+
+- **Symptom:** the split prints `[RED] main control section @… : no code area: no data record points at one, …` for a Phyre game, and the game asks for those keys (`[RED] shader … is not in the shader map`, `program has no vertex shader`) as its first screens draw: black or magenta where the loading screen and the menus should be.
+- **Cause:** Phyre links its built-in programs into `main` the way it lays them out in effects: each code area (`0x12345678` header) right before its control section, with no data record pointing at either. `raw_shaders` looks only for code areas that a record or the code's own address building leads to, so it left them out.
+- **Fix:** the split also runs `phyre_shaders` on `main`, after the other readers of `main` and before `raw_shaders`, and keeps only the programs whose control sections no other reader took, so a main the other readers already cover yields the same tables.
+- **Found on:** FINAL FANTASY XII THE ZODIAC AGE (`0100EB100AB42000`, no profile yet): 23 programs, among them the 7 keys its title menu asked for; with them the menus and the UI after the first menu draw.
+- **Check:** the split leaves no `no code area` line on that `main`, and every key the run asks for is in the map.
+
 ### A file no reader reads
 
 - **Symptom:** the shader split stops on one archive with a Python traceback (an `IndexError` or `struct.error` naming no file), or a reader's `[RED]` line about a format it does not know, and nothing is written; the NSP script loses the build at the split.
@@ -646,6 +662,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** maintain a 64-bit write mask as ranges are added or promoted from read to write. Compare each write in the first job with all ranges in the second, then each write in the second with only reads in the first. Read-only jobs return immediately. Unknown access, overflow, half-open bounds and the 64-range limit retain their conservative behavior; the run's ordering policy is unchanged.
 - **Check:** `t_geometry_hazards` compares 4,096 generated pairs with the exhaustive scalar oracle and covers bit 63, duplicate promotion, adjacent bounds and overflow. All 22 checks, including the existing real-GPU storage/uniform dependency cases, pass with direct encoding, worker encoding and early submission disabled. The 914-check geometry suite passes with Metal validation. A balanced-order 60,000-call Mac benchmark of shared reads and disjoint writes reduces median predicate time from about 24.5 to 1.7 ms; this is an isolated CPU result, not game FPS.
 - **Found on:** [NieR:Automata iPhone CPU capture](../../dm/games/010056B015FE8000/README.md#iphone-resolution-and-frame-rate-controls).
+
+### An empty vertex stream kept every geometry draw out of a run
+
+- **Symptom:** a game whose frames are mostly geometry-shader draws stays GPU-bound by attachment traffic: a `DM_NVN_GPUPROF` frame shows hundreds of two-draw render passes (each geometry draw, then the reopened pass of its raster) and gigabytes of attachment loads and stores, and no `geometry hoist` line ever appears in the log; `[RED] vertex stream at an address not 4-byte aligned (0x1, 0 bytes)` is logged once.
+- **Cause:** the game leaves a vertex stream bound at address 1 with size 0. Two run checks looked at every one of the 16 streams, used or not: the lookahead's alignment test in `geo_prep` (a run may not prepare an unaligned stream ahead of intervening draws) returned -1 for it, and `geo_access_of` added it as a zero-length range, which `geo_access_add` marks unknown, so every pair of geometry draws counted as a dependency.
+- **Fix:** both skip a stream of size 0. Nothing reads from it and `vbuf_unaligned` never copies it, so neither the ordering nor the dependency proof changes for a stream that holds data.
+- **Found on:** FINAL FANTASY XII THE ZODIAC AGE (`0100EB100AB42000`, no profile yet): about 180 geometry draws a frame from two triangle-in, three-vertex-out shaders. On an M1 in handheld mode, gameplay went from 264 render passes and 2.9 GB load + 2.3 GB store a frame (GPU 52–68 ms, 12–17 fps) to 6,053 draws prepared in 153 runs by frame 1,500, GPU about 15 ms and a steady 30 fps, the game's own rate there.
 
 ### Parallel geometry index compaction
 

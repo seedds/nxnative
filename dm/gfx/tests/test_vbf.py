@@ -41,6 +41,22 @@ class Vbf(unittest.TestCase):
             with path.open('rb') as f:
                 with self.assertRaises(ValueError): vbf.read(f, entries[0])
 
+    def test_lz4_blocks(self):   # FFXII TZA's archive: LZ4 blocks, which zlib cannot read
+        import lz4.block
+        payload = b'RYHP' + bytes(range(256)) * 300
+        blocks = [lz4.block.compress(payload[i:i + 65536], store_size=False) for i in range(0, len(payload), 65536)]
+        names = b'a.fx.phyre\0'
+        hlen = 16 + 64 + 4 + len(names) + 2 * len(blocks)
+        header = struct.pack('<4sIQ', b'SRYK', hlen, 1) + bytes(32) + struct.pack('<IIQQQ', 0, 0, len(payload), hlen, 0)
+        header += struct.pack('<I', len(names) + 4) + names + struct.pack(f'<{len(blocks)}H', *map(len, blocks))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'test.vbf'; path.write_bytes(header + b''.join(blocks))
+            entries = vbf.entries(path)
+            with path.open('rb') as f: self.assertEqual(vbf.read(f, entries[0]), payload)
+            data = bytearray(path.read_bytes()); data[hlen:hlen + 8] = b'\xff' * 8; path.write_bytes(data)
+            with path.open('rb') as f:
+                with self.assertRaises(ValueError): vbf.read(f, entries[0])
+
     def test_effect_and_loose_programs_use_same_key(self):
         vs, ps = program('vs'), program('ps')
         effect = b'RYHP' + bytes(9) + vs + bytes(7) + ps

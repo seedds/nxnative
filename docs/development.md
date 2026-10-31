@@ -759,6 +759,77 @@ The game's own work and its frame rate stay as they are; the host avoids work of
 
 Each game's notes are in its profile folder, `dm/games/<id>/README.md`: what the profile needs and why, what was found on the game, Mac routes and open items. The [games table](../dm/games/README.md#games) lists them.
 
+## Host compiler settings
+
+The Mac host, graphics bridge and libvpx decoder use `-O3 -flto=full` at
+compilation and final link (`dm/host/Makefile`). This optimizes host C and
+Objective-C plus libvpx; the game's mapped ARM64 instructions are not recompiled.
+`VPX_OPT` inherits `NATIVE_OPT` and can be overridden independently. A Makefile
+change rebuilds libvpx objects as well as the host, so native archives made with
+the previous policy cannot hide the new LTO inputs. For a comparison build, use
+`make -B -C dm/host GAME=<id> NATIVE_OPT=-O1 dmhost` (or `-O2`). Use `-B` when
+changing flags: make does not track command-line variable changes. The NSP
+script takes its compile command from this Makefile and fingerprints it, so its
+cached Mac host rebuilds when the optimization policy changes.
+
+The Mac app launcher (`dm/mac/pack_app.py`) compiles C with `-O3 -flto=full`
+and Swift with `-O -whole-module-optimization -lto=llvm-full`, including the final
+link. The packer's input fingerprint includes its own source and the compiler
+identities, so a cached app rebuilds after these flag changes. These launcher
+settings do not change the Metal shader compiler policy or the iOS project.
+
+Applicability review of MacNativeGames' `pr/compiler-optimizations`
+(`91a0b9b9e3096a509bd47017e7a5df10a88bd147`):
+
+| Component | nxnative policy and reason |
+|---|---|
+| Mac host / graphics C and Objective-C | Ported `-O3 -flto=full`; previously `-O1` without LTO. No fast-math or machine-specific instruction-set flags. Gameplay performance still needs measurement on this host. |
+| Mac libvpx decoder | Inherits `-O3 -flto=full` through `VPX_OPT`; previously separate `-O2` native objects. Decoder objects now contain LLVM bitcode for optimization at the host's final link. iOS still compiles the codec through its own Xcode settings. |
+| Mac app launcher | C `-O3 -flto=full`; Swift `-O`, whole-module optimization and full LLVM LTO. Previously C `-O2` / Swift `-O` without explicit LTO or whole-module optimization. |
+| Ryujinx / translator C# | Keep .NET 10 and Release builds. The SDK already enables `Optimize` for Release; spelling it out adds no optimization. nxnative ships managed DLLs, not MacNativeGames' NativeAOT service. `OptimizationPreference=Speed` and `UseSizeOptimizedLinq=false` are NativeAOT publishing choices, so they do not improve this JIT build. No JIT tiering overrides or .NET 11 migration are needed for this port. |
+| SPIRV-Cross | Already built as CMake Release (`-O3 -DNDEBUG`). Keep the pinned universal binary and its chain fingerprint. The PR's full LTO, whole-program vtables and virtual-function elimination concern an offline tool and need a separate measured tool rebuild, rather than being required by the host change. |
+| SPIRV-Tools shader post-processing | Not ported: nxnative still passes the translator's SPIR-V directly to SPIRV-Cross. MacNativeGames' custom ordered `spirv-opt` passes, input/output validation, tool dependency and cache identity require a separate shader-chain port and precision/interface/regression checks. Optimizing the SPIRV-Cross executable itself is a different change. |
+| Offline Metal | Keep the existing `-O1`, `-fpreserve-invariance` and each platform's math policy. See [Apple's control-flow lowering](reference/shaders.md#front-end-at--o1-apples-control-flow-lowering). No Metal compiler or shader-chain change is included. |
+| iOS host | Keep the Xcode project's existing optimization settings. The iOS generator reads the Mac source list and defines, not `NATIVE_OPT`; this port changes Mac host builds only. |
+
+The Release default is documented in [C# code-generation options](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/compiler-options/code-generation#optimize).
+The NativeAOT distinction follows [Microsoft's optimization documentation](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/optimizing)
+and [.NET 10's LINQ feature-switch description](https://devblogs.microsoft.com/dotnet/performance-improvements-in-net-10/).
+Compiler flags alone do not establish a frame-rate improvement.
+
+Validation on this Mac: the Wonder host builds with `-O3 -flto=full`.
+Twelve CPU graphics tests pass with those same flags (dirty slots/races, texture
+layout, pacing, frame step, hash map, coverage, PSO keys, reflection, render-target
+ranges, present rescue and GPU-profile bookkeeping). Thirty-seven host unit-test
+commands pass; the full host run stops at the real AudioUnit test because audio
+setup returns status -1 here. The GPU suite compiles with the new flags but stops
+at `t_pso_archive` with `FATAL no Metal device`. The documentation tests pass.
+
+The production host and C/Swift launcher build with the settings above. The existing VP8/VP9 test passes its NV12 and
+RGBA pixel checks. Forty-five packaging, cache-reuse, settings and documentation
+tests pass, plus six real app checks for layout, metadata, signature, launching,
+SIGTERM forwarding and relocation. Those six use a valid icon fixture:
+the runner's system-ICNS conversion fails independently of these compiler flags.
+Launcher window interaction and end-to-end game performance were not measured.
+
+A local libvpx comparison uses 60 synthetic 1280×720 motion frames per codec,
+eight measured decodes per process after a validation/warm-up decode, four
+samples per setting in balanced ABBA order, and one/four decoder threads.
+The benchmark caller has the same flags in both settings; only the archive
+changes from native `-O2` objects to `-O3`/full-LTO bitcode. Checksums over all
+decoded planes match between settings. On the M1 Pro, median throughput changes were +0.79%
+(VP8, one thread), +0.83% (VP9, one), +1.72% (VP8, four) and +1.04% (VP9, four).
+These small fixture-specific changes do not establish a benefit in a game's
+movies or frame rate. Artifacts are in the local NSP work folder's
+`compiler-followup/` (`vpx-benchmark.json`, build/test logs and synthetic fixtures).
+
+`scripts/regress.py check --games` was attempted for Wonder, Tears of the Kingdom,
+Cuphead, Hades and Balatro: Nintendo and Unity NVN games plus Vulkan and OpenGL.
+It found no local Mac builds under the harness's configured `/Volumes/NX/games`
+root. Five-game regressions and a controlled gameplay performance comparison
+remain unchecked; these compiler settings do not establish a frame-rate
+improvement. The codec and launcher checks above cover those narrower paths.
+
 ## Tools (`dm/tools`)
 
 | Tool | What it does |

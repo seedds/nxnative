@@ -162,5 +162,63 @@ class Compute2021Tests(unittest.TestCase):
                 self.assertEqual(reader.p, size)
 
 
+def compute_6000_3():
+    # Independent wire fixture from the 6000.3 release dumps (Castlevania: Belmont's Curse): 2022.3's unique
+    # variants and variant indices, each resource with a resource type after its texture dimension.
+    code = shader_split.CS_MAGIC + bytes(60)
+    control = bytearray(0x880)
+    control[:4] = shader_split.CTL_MAGIC
+    struct.pack_into('<I', control, 0x20, len(control))
+    struct.pack_into('<I', control, 0x704, len(code))
+    struct.pack_into('<III', control, 0x748, 8, 8, 1)
+    header = [0] * 6 + [-1] * 6 + [0] * 12
+    header[11], header[17], header[23] = 0, len(control), len(code)
+    program = struct.pack('<24i', *header) + control + code
+    resource = string('_Source') + string('_Source') + struct.pack('<iiii', 0, -1, 2, 5)
+    kernel = (struct.pack('<iI', 1, 0)                         # cbVariantIndices
+              + struct.pack('<i', 0)                         # cbs
+              + struct.pack('<i', 1) + resource              # textures
+              + struct.pack('<3i', 0, 0, 0)                  # samplers, in/out buffers
+              + struct.pack('<i', len(program)) + program
+              + struct.pack('<4Iq', 3, 8, 8, 1, 0))
+    parent = (string('TextureCopy') + struct.pack('<i', 1) + kernel
+              + struct.pack('<i', 1) + string('') + struct.pack('<I', 0)
+              + struct.pack('<3i', 0, 0, 0))
+    variant = struct.pack('<iii', 38, 50, 1) + parent + struct.pack('<i', 0) + b'\1\0\0\0'
+    payload = string('VrsTexture') + struct.pack('<i', 1) + variant
+    type_hash = bytes.fromhex('43a0948a3f403068c0b31bff90ba0c9a')
+    metadata = (b'6000.3.0b4\0' + struct.pack('<i?iiBh', 38, False, 1, 72, 0, -1)
+                + type_hash + struct.pack('<i', 1))
+    metadata += bytes(-(20 + len(metadata)) % 4)
+    metadata += struct.pack('<qIII', 1, 0, len(payload), 0)
+    data = (struct.pack('>IIII', len(metadata), 0x100 + len(payload), 17, 0x100)
+            + bytes(4) + metadata).ljust(0x100, b'\0') + payload
+    return data, type_hash, bytes(control), code
+
+
+class Unity6000_3Tests(unittest.TestCase):
+    def test_stripped_compute_resource_type_reaches_shader_split(self):
+        data, type_hash, control, code = compute_6000_3()
+        trees = {(72, type_hash): unityfs.known_tree(72, type_hash)}
+        obj, = unityfs.serialized_objects(data, {}, {72}, trees)
+        kernel = obj[2]['variants'][0]['kernels'][0]['uniqueVariants'][0]
+        self.assertEqual(kernel['textures'][0]['resType'], 5)
+        self.assertEqual(kernel['threadGroupSize'], [8, 8, 1])
+        self.assertTrue(obj[2]['variants'][0]['resourcesResolved'])
+        le, doff, types, entries = unityfs._tables(data, {}, {72}, trees)
+        _, start, size, ti = entries[0]
+        reader = unityfs.Reader(data[doff + start:doff + start + size], le)
+        unityfs._read(reader, types[ti][2])
+        self.assertEqual(reader.p, size)
+        with contextlib.redirect_stdout(io.StringIO()): shaders = shader_split.unity_compute(data, 'fixture', trees)
+        self.assertEqual(shaders, [('fixture#VrsTexture#TextureCopy.0', 'cs', control, code)])
+
+    def test_shader_appends_local_identifier_to_6000_0(self):
+        old = unityfs.known_tree(48, bytes.fromhex('2ec7223dce3af4232b14ae1441bd7999'))
+        new = unityfs.known_tree(48, bytes.fromhex('57f0dd2d4ef24437b4655529a673a936'))
+        self.assertEqual([k.name for k in new.kids], [k.name for k in old.kids] + ['m_AssetLocalIdentifierInFile'])
+        self.assertEqual((new.kids[-1].type, new.kids[-1].flags), ('SInt64', 0))
+
+
 if __name__ == '__main__':
     unittest.main()

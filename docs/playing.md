@@ -14,7 +14,7 @@ In 3D, the right stick (the camera in most games) is not drawn: swipe on the rig
 
 A connected game controller hides the touch controls and keeps every button.
 
-**Joy-Con pairs.** On the Mac each Joy-Con arrives as a controller of its own, so a pair does not play: the left half has the d-pad and the stick but no A / B / X / Y, the right one the buttons but no d-pad. The two halves of a pair are bound into one player: the left half's d-pad, left stick, L / ZL and − and the right half's X / A / B / Y, right stick, R / ZR and + play as one Pro Controller would, and the right half's gyro drives the game's motion. `DM_JOYCON_PAIR=0` in `env.txt` keeps each half a player of its own. On the iPhone and iPad a pair already comes as one controller.
+**Joy-Con pairs.** macOS hands a pair of Joy-Cons over as one controller (`Joy-Con (L/R)`), which plays like any other pad. If the system presents the two halves separately instead, the host binds a left and a right one into a single player: the left half's d-pad, left stick, L / ZL and − and the right half's X / A / B / Y, right stick, R / ZR and + play as one Pro Controller would, the right half's gyro driving the game's motion, and a half that disconnects leaves the player to the other one. `DM_JOYCON_PAIR=0` in `env.txt` keeps each half a player of its own. On the iPhone and iPad a pair also comes as one controller.
 
 ## Rumble
 

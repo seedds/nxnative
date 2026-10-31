@@ -1,0 +1,5 @@
+# kind: evidence  Pokémon FireRed Version (Spanish Ver.) shaders (GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
+# column 5 records where each key first appears; no PC shader pairing supplied
+package	index	stage	dm_ctl_sha16	source
+ps_romfs.bin	0	pixel	b07622e162c73fdc	/glslc_capture/299207a91ea7a028.glslc#GLSLC@0x0
+vs_romfs.bin	0	vertex	5421488ea8e43481	/glslc_capture/e953ab66ae5789c6.glslc#GLSLC@0x0

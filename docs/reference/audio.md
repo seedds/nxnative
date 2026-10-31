@@ -248,8 +248,8 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 ### Audio device output volume and names
 
 - **Symptom:** an abort in `sm::Initialize` under `audio::GetAudioDeviceOutputVolume` (the game thread, `main+0xee8edc`).
-- **Fix:** the volume `SetAudioDeviceOutputVolume` sets is now kept and read back (`hle_audren.c`). `audio::GetAudioOutName` is hooked too.
-- **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (SDK 19.3.1, Unreal Engine 4.27: `GetAudioDeviceOutputVolume`); [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11: `GetAudioOutName`).
+- **Fix:** the volume `SetAudioDeviceOutputVolume` sets is now kept and read back (`hle_audren.c`). `audio::GetAudioOutName` is hooked too. `audio::SetDeviceOutputVolumeAutoTuneModeEnabled` (SDK 20), which opens `audren:u` for the device service and aborted with `Result 0xe15` at `sdk+0x225bac` (`[RED] sf: the game connects to service audren:u itself`), is a no-op: the host output has no loudness auto-tuning.
+- **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (SDK 19.3.1, Unreal Engine 4.27: `GetAudioDeviceOutputVolume`); [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11: `GetAudioOutName`); [Pokémon FireRed Version (Spanish Ver.)](../../dm/games/0100EB702342C000/README.md) (SDK 20.5.19: `SetDeviceOutputVolumeAutoTuneModeEnabled`, from `main` at start).
 - **Note:** older SDKs name some device calls differently (`ListAudioDeviceName` / `GetActiveAudioDeviceName`, `OpenDefaultAudioOut` in SDK 12; [Older SDK names for the same calls](services.md#older-sdk-names-for-the-same-calls)), and [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (SDK 7) aborted in `audio::AcquireAudioDeviceSwitchNotification` ([SDK calls that open a system service through sm](services.md#sdk-calls-that-open-a-system-service-through-sm)).
 
 ### No audio input devices

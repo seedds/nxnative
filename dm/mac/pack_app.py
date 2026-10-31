@@ -190,6 +190,54 @@ def selected_inputs(a):
     return mods, msls, pso, tables, pairs, fonts, files
 
 
+
+def freshen_signed_executables(app):
+    """Publish signed Mach-O bytes at fresh inodes before exposing the app.
+
+    macOS caches signed-code assessments by vnode; a binary first assessed while
+    still being copied/signed can remain blocked at dyld even after an ad-hoc
+    signature verifies. Apple recommends writing a new file and atomically
+    replacing the old inode. Refresh *after* both codesign operations; never
+    change the signed bytes, bundle seal or signing identity.
+    """
+    mac = app / 'Contents/MacOS'
+    # Python's shutil.copy2 does not preserve extended attributes on macOS.
+    # Use the native copyfile(3) so the fresh inode also keeps ACLs, ownership,
+    # permissions and provenance xattrs from the already-signed executable.
+    copyfile = ctypes.CDLL(None, use_errno=True).copyfile
+    copyfile.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint)
+    copyfile.restype = ctypes.c_int
+    COPYFILE_ALL = 0x0f  # COPYFILE_ACL | COPYFILE_STAT | COPYFILE_XATTR | COPYFILE_DATA
+    for name in (EXE, 'dmhost'):
+        src = mac / name
+        before = src.stat()
+        fd, sibling = tempfile.mkstemp(prefix=f'.{name}.signed-', dir=mac)
+        os.close(fd)
+        try:
+            if copyfile(os.fsencode(src), os.fsencode(sibling), None, COPYFILE_ALL):
+                err = ctypes.get_errno()
+                raise OSError(err, os.strerror(err), str(src))
+            copied = Path(sibling)
+            if digest(src) != digest(copied) or copied.stat().st_mode != before.st_mode:
+                raise SystemExit(f'signed executable was not copied byte-for-byte: {name}')
+            os.replace(sibling, src)
+            if src.stat().st_ino == before.st_ino:
+                raise SystemExit(f'could not refresh signed executable inode: {name}')
+        finally:
+            Path(sibling).unlink(missing_ok=True)
+
+
+def can_swap_app_dirs(parent):
+    """Probe atomic RENAME_SWAP on this volume using only two empty temp dirs."""
+    with tempfile.TemporaryDirectory(prefix='.nxnative-swap-test-', dir=parent) as scratch:
+        a, b = Path(scratch) / 'a', Path(scratch) / 'b'
+        a.mkdir(); b.mkdir()
+        swap = ctypes.CDLL(None, use_errno=True).renamex_np
+        swap.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        swap.restype = ctypes.c_int
+        return not swap(os.fsencode(a), os.fsencode(b), 2)  # RENAME_SWAP
+
+
 def replace_app(tmp, out):
     if out.exists():
         # RENAME_SWAP exchanges complete directories atomically; a failed swap leaves the old app at out.
@@ -235,6 +283,10 @@ def pack(a):
     except BaseException:
         key_file.unlink(missing_ok=True)
         raise
+    # Replacing a deployed app must be atomic. HFS+ lacks RENAME_SWAP; fail
+    # before copying many GiB, leaving the old app and its contents untouched.
+    if out.exists() and not can_swap_app_dirs(out.parent):
+        raise SystemExit(f'{out.parent} cannot atomically replace an existing Mac app: use a new --out .app path or an APFS destination')
     key_file.unlink(missing_ok=True)   # no failed attempt may leave a valid reuse key
     tmp = out.with_name(out.name + '.partial')
     shutil.rmtree(tmp, ignore_errors=True)
@@ -271,6 +323,8 @@ def pack(a):
     (c / 'Info.plist').write_bytes(plistlib.dumps(info))
     (c / 'PkgInfo').write_text('APPL????')
     step(f'signing ({"ad-hoc" if a.sign == "-" else a.sign})'); sign(tmp, a.sign, codesign)
+    freshen_signed_executables(tmp)
+    run([codesign, "--verify", "--strict", "--deep", tmp])  # full signed resource seal, before publishing
     had_old = out.exists()
     replace_app(tmp, out)
     key_tmp = key_file.with_name(key_file.name + '.partial')

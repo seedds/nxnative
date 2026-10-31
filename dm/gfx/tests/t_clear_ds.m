@@ -51,7 +51,7 @@ int main(void) { @autoreleasepool {
         ops.clear=(p_clear_ds){.depth=.25, .depth_mask=cases[i].depth, .stencil=0x3c, .stencil_mask=cases[i].mask};
         ops.end=(op_hdr){OP_END,sizeof(op_hdr)};
         int zero_init = i == sizeof cases/sizeof *cases - 1;
-        if (zero_init) tex_zero_fill(base); else mtl_exec((const uint8_t *)&ops);
+        if (zero_init) tex_zero_fill(base, 1); else mtl_exec((const uint8_t *)&ops);
         mtl_sub_commit(); mtl_drain();
         CHECK(!mtl_last_commit_error(), "production clear completes without GPU error");
         id<MTLTexture> stencil = [base newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];

@@ -64,7 +64,7 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN'})   # the Mac window's Display mode (front_mac.m reads 1 or 0)
+        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_UPSCALE'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); the render resolution (nvn_mtl.m)
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
@@ -75,6 +75,12 @@ class LauncherSettingsTests(unittest.TestCase):
                 ios, mac = build(gid, 'nvn', 'ios'), build(gid, 'nvn', 'mac')
                 self.assertEqual((ios['DM_PSO_MTL4']['default'], ios['DM_NVN_ENC_THREAD']['default']), (ios_pso, '1'))
                 self.assertEqual((mac['DM_PSO_MTL4']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', '0'))
+
+    def test_render_resolution_only_for_nvn_games_on_the_mac(self):   # shown: gfxapi:nvn&platform:mac, both must hold (a Vulkan game's Mac app and an NVN game's IPA have no row)
+        self.assertIn('DM_UPSCALE', build(BOTW, 'nvn', 'mac'))
+        self.assertNotIn('DM_UPSCALE', build(BOTW, 'vulkan', 'mac')); self.assertNotIn('DM_UPSCALE', build(BOTW, 'nvn', 'ios'))
+        s = build(BOTW, 'nvn', 'mac')['DM_UPSCALE']
+        self.assertEqual((s['kind'], s['default'], [o[0] for o in s['options']], s['level']), ('choice', '1', ['1', '1.5', '2'], 'basic'))   # the values the Render Resolution menu writes
 
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):

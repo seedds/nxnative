@@ -4,6 +4,7 @@
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
+// The Render Resolution menu picks the resolution upscaling factor (1×, 1.5×, 2×) for the next launch, kept as the saved choice launcher.DM_UPSCALE the app's launcher applies (nvn_mtl.m reads DM_UPSCALE).
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad, J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
 // Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
@@ -239,6 +240,62 @@ static void pads_start(void) {
 - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; }
 - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
 @end
+
+// Render Resolution menu: the game's 3D rendered at 1×, 1.5× or 2× its resolution (nvn_mtl.m, resolution upscaling; not the present-time Upscaling setting, DM_PRESENT_UPSCALE).
+// Textures keep the size they were made at, so a choice applies at the next launch. The choice is the saved choice launcher.DM_UPSCALE in the app's preferences (docs/frontends.md, Saved
+// choices): the one the settings window and front ends show, which the app's launcher puts into DM_UPSCALE before the host starts; only a choice that differs from the default 1× is kept.
+// A DM_UPSCALE set by the launch environment or an env file (DM_ENV_LAUNCH_KEYS / DM_ENV_FILE_KEYS, from launcher.c) wins over the saved choice, so the items are disabled then; so are
+// they in a host run outside an app (no bundle identifier: nothing applies a saved choice there, DM_UPSCALE sets the factor for the run). Item tags are the factor × 2 (2, 3, 4)
+static NSString *const kUpscaleKey = @"launcher.DM_UPSCALE";
+static const float kUpscaleFactors[] = {1, 1.5f, 2};
+// Whether DM_UPSCALE came from outside the saved choices: launcher.c lists the variables the launch environment and the env files set, space-separated
+static int upscale_fixed_outside(void) {
+    static const char *const keys[] = {"DM_ENV_LAUNCH_KEYS", "DM_ENV_FILE_KEYS"};
+    for (unsigned i = 0; i < 2; i++) {
+        const char *v = getenv(keys[i]); if (!v) continue;
+        for (const char *p = v; (p = strstr(p, "DM_UPSCALE")); p += 10) if ((p == v || p[-1] == ' ') && (p[10] == 0 || p[10] == ' ')) return 1;
+    }
+    return 0;
+}
+// The saved choice (1 when none or not one the menu offers), from the same key the launcher reads
+static float upscale_saved(void) {
+    NSString *v = [NSUserDefaults.standardUserDefaults stringForKey:kUpscaleKey];
+    for (unsigned i = 0; v && i < 3; i++) if (fabsf(v.floatValue - kUpscaleFactors[i]) < 0.01f) return kUpscaleFactors[i];
+    return 1;
+}
+@interface DmUpscaleMenu : NSObject <NSMenuDelegate> @end
+@implementation DmUpscaleMenu
+// A factor picked: kept for the next launch (the default 1× removes the key, as the store keeps only choices that differ from the default)
+- (void)pick:(NSMenuItem *)it {
+    float f = it.tag / 2.0f;
+    if (f == 1) [NSUserDefaults.standardUserDefaults removeObjectForKey:kUpscaleKey];
+    else [NSUserDefaults.standardUserDefaults setObject:[NSString stringWithFormat:@"%g", f] forKey:kUpscaleKey];
+    LOG("resolution upscaling: %gx saved as %s, applies at the next launch", f, kUpscaleKey.UTF8String);
+    if (it.menu) [self menuNeedsUpdate:it.menu];   // the item's menu (nullable in the SDK: an item outside a menu)
+}
+// Check mark on the saved choice; the last item tells what this run renders at and when a different choice takes effect
+- (void)menuNeedsUpdate:(NSMenu *)m {
+    float now = dm_gfx_upscale(), saved = upscale_saved();
+    int outside = upscale_fixed_outside(), app = NSBundle.mainBundle.bundleIdentifier != nil;
+    for (NSMenuItem *it in m.itemArray) if (it.tag) { it.state = fabsf(it.tag / 2.0f - saved) < 0.01f ? NSControlStateValueOn : NSControlStateValueOff; it.enabled = app && !outside; }
+    NSMenuItem *info = m.itemArray.lastObject;
+    info.title = outside ? [NSString stringWithFormat:@"Rendering at %g× (DM_UPSCALE set outside the app)", now]
+               : !app ? [NSString stringWithFormat:@"Rendering at %g× (DM_UPSCALE; saved choices need the Mac app)", now]
+               : fabsf(saved - now) > 0.01f ? [NSString stringWithFormat:@"Applies at next launch (now %g×)", now] : [NSString stringWithFormat:@"Rendering at %g×", now];
+}
+@end
+static DmUpscaleMenu *g_upscale_menu;   // the menu's target and delegate (NSMenu holds neither strongly)
+static NSMenu *upscale_menu(void) {
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@"Render Resolution"];
+    g_upscale_menu = [DmUpscaleMenu new]; m.delegate = g_upscale_menu;
+    NSString *names[] = {@"1× (game resolution)", @"1.5×", @"2×"};
+    for (int i = 0; i < 3; i++) { NSMenuItem *it = [m addItemWithTitle:names[i] action:@selector(pick:) keyEquivalent:@""]; it.target = g_upscale_menu; it.tag = 2 + i; }
+    [m addItem:NSMenuItem.separatorItem];
+    [m addItemWithTitle:@"" action:nil keyEquivalent:@""].enabled = NO;   // status line, filled by menuNeedsUpdate
+    m.autoenablesItems = NO;
+    [g_upscale_menu menuNeedsUpdate:m];
+    return m;
+}
 
 typedef struct { void (*fn)(void); } guest_arg;
 static void *guest_tramp(void *p) {
@@ -1148,6 +1205,7 @@ void front_run(void (*guest)(void)) {
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        [[bar addItemWithTitle:@"Render Resolution" action:nil keyEquivalent:@""] setSubmenu:upscale_menu()];
         NSApp.mainMenu = bar;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) dispatch_async(dispatch_get_main_queue(), ^{ [win toggleFullScreen:nil]; });

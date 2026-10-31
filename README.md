@@ -39,6 +39,8 @@ python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic "backports.zstd; 
   Super Mario Bros. Wonder [010015100B514800][v327680].nsp
 ```
 
+A cartridge dump whose secure partition also holds an update or DLC can be split into one NSP per title with `uv run --with cryptography scripts/xci_split.py <game.xci> <prod.keys> <out dir>` (without `<out dir>` it only lists the NCAs and their titles). Name the outputs `<name> [<title ID>][v0].nsp` and `<name> [<update title ID>][v<version>].nsp`.
+
 **3. Build**, with your game folder and your `prod.keys`:
 
 ```

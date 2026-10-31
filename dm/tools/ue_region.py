@@ -6,14 +6,17 @@ to give it: UE 4.26's nninitStartup reserves the region only when the option is 
 
 The chain, each link unique or nothing is gated:
 - the option's name, "SwitchVirtualAddressSpaceSize" (ASCII), in ro: a main without it has no engine region of this kind;
-- nninitStartup, the defined symbol: a b to the engine's function, or that function itself, whose bounds the FDEs give;
+- nninitStartup, the defined symbol: a b to the engine's function, or that function itself, which runs to the next function start (a defined symbol or a bl target);
 - in that function, the one bl to the PLT stub of nn::os::AllocateAddressRegion(uintptr_t *, size_t) whose straight-line code (back to the branch before it) sets x0 to the region's
   base variable (adrp + add, or a mov of one) and stores the size in the word after it, the region's size variable: the last str xS, [xB, #lo + 8] before the call. x1 at the call
   is that size (S = 1, or x1 and xS set from one constant), and nothing after the store writes x1. The gate goes on the store, the register S passed in the gate number's upper bits.
+  Only when no call has that form, a second pass takes a size variable apart from the base (UE 4.23): the default path follows ldr xT, [xB, #d]; cbnz xT, the variable's test, and
+  the size is the last str xS, [xB, #d] before the call, xB unchanged since the test and nothing stored through xB after it; the same checks of x1 follow.
 The forms found: a csel of the default and the option's size rounded up to 4 KB, then str x1 (Unreal Engine 4.27 and 5: DRAGON QUEST VII Reimagined, OCTOPATH TRAVELER 0,
 FINAL FANTASY RESONANCE, SHIN MEGAMI TENSEI V: Vengeance); the default stored only when the variable is 0, then rounded up into x1 and stored again (OCTOPATH TRAVELER II, 4.27);
 str x8 of the default with x1 set from the same constant, reached only when the variable is 0 (Pikmin 4, 4.26); str x1 of the 16 GB default, reached only when the variable is 0
-(DRAGON QUEST XI S, 4.18). OCTOPATH TRAVELER (4.18 without virtual address memory) has the same code; its nninitStartup never reaches it.
+(DRAGON QUEST XI S, 4.18); the second pass: str x8 of the default into a global of its own ([x24, #0x650]), x1 set from the same constant, reached only when the
+variable is 0 (SHIN MEGAMI TENSEI V, 4.23). OCTOPATH TRAVELER (4.18 without virtual address memory) has the same code; its nninitStartup never reaches it.
 Usage on its own: ue_region.py <module>... (what the chain finds in each)"""
 import bisect, re, struct, sys, os
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
@@ -24,18 +27,21 @@ ALLOCATE = '_ZN2nn2os21AllocateAddressRegionEPmm'
 def branch(ins):
     return ins.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or ins.mnemonic.startswith('b.')
 
-def size_store(img, call, start, md):
-    """(offset of the size store, its register S) for the bl at call, or a reason it is not the engine region's reservation"""
+def size_store(img, call, start, md, apart=False):
+    """(offset of the size store, its register S) for the bl at call, or a reason it is not the engine region's reservation. apart: find's second pass, a size variable apart from
+    the base variable"""
     a = call
     while a - 4 >= start and a - call > -64:
         if branch(next(md.disasm(img[a - 4:a], a - 4))): break
         a -= 4
-    vals, stores, x1_at = {}, [], None   # register → ('c', constant) | ('page',) | ('lo', the low 12 bits of an address)
-    for ins in md.disasm(img[a:call], a):
+    vals, stores, x1_at, wrote, through = {}, [], None, set(), []   # register → ('c', constant) | ('page',) | ('lo', the low 12 bits of an address); wrote: registers written
+    for ins in md.disasm(img[a:call], a):                           # so far; through: (address, base) of every store
         ops, m = ins.operands, ins.mnemonic
         reg = lambda o, ins=ins: ins.reg_name(o.reg)
+        if m.startswith('st'): through += [(ins.address, ins.reg_name(o.mem.base)) for o in ops if o.type == ARM64_OP_MEM]
         if m == 'str' and reg(ops[0]).startswith('x') and ops[1].type == ARM64_OP_MEM and not ins.writeback and ops[1].mem.index == 0:   # str xS, [xB, #o]
-            stores.append((ins.address, int(reg(ops[0])[1:]) if reg(ops[0]) != 'xzr' else None, ops[1].mem.disp, vals.get(reg(ops[0]))))
+            b = ins.reg_name(ops[1].mem.base)
+            stores.append((ins.address, int(reg(ops[0])[1:]) if reg(ops[0]) != 'xzr' else None, ops[1].mem.disp, vals.get(reg(ops[0])), b if b not in wrote else None))
             continue
         d = reg(ops[0]) if ops and ops[0].type == ARM64_OP_REG else ''
         v = None   # the value the instruction gives d, read before its writes clear what it reads (add x19, x19, #lo)
@@ -44,15 +50,27 @@ def size_store(img, call, start, md):
         elif m == 'mov' and ops[1].type == ARM64_OP_REG: v = vals.get(reg(ops[1]))
         elif m == 'adrp': v = ('page',)
         elif m == 'add' and len(ops) == 3 and ops[2].type == ARM64_OP_IMM and vals.get(reg(ops[1])) == ('page',): v = ('lo', ops[2].imm)
-        written = {ins.reg_name(w).replace('w', 'x', 1) for w in ins.regs_access()[1]}
+        written = {'sp' if r == 'wsp' else r.replace('w', 'x', 1) for r in map(ins.reg_name, ins.regs_access()[1])}
         for x in written: vals.pop(x, None)
+        wrote |= written
         if 'x1' in written: x1_at = ins.address
         if v: vals[d] = v
     x0 = vals.get('x0')
     if not x0 or x0[0] != 'lo': return None, 'x0 is no base variable'
-    stores = [s for s in stores if s[2] == x0[1] + 8]
-    if not stores: return None, 'no store of the size beside the base variable'
-    off, s, _, val = stores[-1]
+    if apart:   # the variable the default path tested: ldr xT, [xB, #d]; cbnz xT right before it, and stores to [xB, #d] with xB unchanged since
+        test = list(md.disasm(img[a - 8:a], a - 8)) if a - 8 >= start else []
+        if len(test) != 2 or test[1].mnemonic != 'cbnz' or test[0].mnemonic != 'ldr' or test[0].operands[1].type != ARM64_OP_MEM or test[0].writeback \
+                or test[0].operands[1].mem.index or test[0].reg_name(test[0].operands[0].reg) != test[1].reg_name(test[1].operands[0].reg):
+            return None, 'no ldr xT, [xB, #d]; cbnz xT before the default (the second pass)'
+        t, b, d = test[0].reg_name(test[0].operands[0].reg), test[0].reg_name(test[0].operands[1].mem.base), test[0].operands[1].mem.disp
+        if not t.startswith('x') or t in ('xzr', b): return None, f'no ldr xT, [xB, #d]; cbnz xT before the default: {t} tested (the second pass)'
+        near = [s for s in stores if s[4] == b and s[2] == d]
+        if not near: return None, f'no store to [{b}, #{d:#x}], the variable tested at {test[0].address:#x} (the second pass)'
+        if any(t > near[-1][0] and r == b for t, r in through): return None, f'a store through {b} after the size store at {near[-1][0]:#x} (the second pass)'
+    else:
+        near = [s for s in stores if s[2] == x0[1] + 8]
+        if not near: return None, 'no store of the size beside the base variable'
+    off, s, _, val, _ = near[-1]
     if s is None: return None, 'the size stored is xzr'
     if x1_at is not None and x1_at > off: return None, f'x1 written after the size store at {off:#x}'
     if s != 1 and (not val or val[0] != 'c' or vals.get('x1') != val): return None, f'x1 is not the x{s} stored at {off:#x}'
@@ -115,11 +133,17 @@ def find(img, text_end, ro_off, data_off):
     # nninitStartup is a b to the engine's function (Unreal Engine 4.26 to 5.6) or calls it first (DRAGON QUEST XI S, 4.18): the function itself and those it jumps to or calls
     entry = sym[0]
     fns = [target(entry)] if word(entry) >> 26 == 0x05 else [entry] + [target(a) for a in range(entry, entry + sym[1], 4) if word(a) >> 26 == 0x25]
-    found, why = [], []
+    found, why, calls = [], [], []
     for start in fns:
         for p in range(start, end(start), 4):
             if word(p) >> 26 != 0x25 or target(p) not in stubs: continue
+            calls.append((p, start))
             got, no = size_store(img, p, start, md)
+            if got: found.append((p, start, *got))
+            else: why.append(f'{p:#x}: {no}')
+    if not found:   # the second pass, only where the first finds nothing, so no main the first form holds for changes: a size variable apart from the base (SHIN MEGAMI TENSEI V)
+        for p, start in calls:
+            got, no = size_store(img, p, start, md, apart=True)
             if got: found.append((p, start, *got))
             else: why.append(f'{p:#x}: {no}')
     if len(found) != 1:

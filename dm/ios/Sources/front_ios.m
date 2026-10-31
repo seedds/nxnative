@@ -1,5 +1,5 @@
-// iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides) + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture);
-// with a TV connected the Metal view is on the TV and the phone shows the pad (DmTVSceneDelegate).
+// iOS front end (the iOS implementation of front.h): a 16:9 Metal view, centred with black bars on both sides or filling the screen (DM_ASPECT) + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture);
+// with a TV connected the Metal view is on the TV, 16:9 fitted whatever DM_ASPECT says, and the phone shows the pad (DmTVSceneDelegate).
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -23,6 +23,20 @@ const char *front_ios_device_message(void);   // main.m: why this device cannot 
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
 
 static CAMetalLayer *g_layer;
+// Where the game's 16:9 picture lies on the screen, by DM_ASPECT (the launcher's Screen setting): fit (default) centres it with black bars, zoom covers the screen and cuts off
+// what lies beyond it (the top and bottom on an iPhone), stretch fills the screen. The touch gamepad maps the game's touches on the same rectangle (DmGamepad.m pushGame)
+static int dm_aspect(void) {
+    static int a = -1;
+    if (a < 0) { const char *e = getenv("DM_ASPECT"); a = e && !strcmp(e, "zoom") ? 1 : e && !strcmp(e, "stretch") ? 2 : 0; }
+    return a;
+}
+static const char *dm_aspect_name(void) { return (const char *[]){"fit", "zoom", "stretch"}[dm_aspect()]; }
+CGRect dm_game_rect(CGRect b) {
+    CGFloat w = b.size.width, h = b.size.height; int a = dm_aspect();
+    if (a == 2) return b;
+    if ((w / h > 16.0 / 9.0) == (a == 0)) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
+    return CGRectMake(b.origin.x + floor((b.size.width - w) / 2), b.origin.y + floor((b.size.height - h) / 2), w, h);
+}
 static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
@@ -113,7 +127,16 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    if (self.game.superview == self.view) self.game.frame = fit_16_9(b);   // on a TV the TV's view lays it out
+    if (self.game.superview == self.view) {   // on a TV the TV's view lays it out
+        // The view stays 16:9 (its drawable follows its bounds, and present_encode bars a picture of another ratio): zoom makes it bigger than the screen, stretch widens it with a transform
+        CGRect r = dm_game_rect(b); CGFloat w = r.size.height * 16.0 / 9.0;
+        self.game.transform = CGAffineTransformIdentity;
+        self.game.bounds = CGRectMake(0, 0, w, r.size.height); self.game.center = CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r));
+        self.game.transform = CGAffineTransformMakeScale(r.size.width / w, 1);
+        static CGRect logged; if (!CGRectEqualToRect(logged, r)) { logged = r; [self.game layoutIfNeeded];   // the drawable size its layout sets
+            LOG("front end: screen %s, picture %.0fx%.0f at %.0f,%.0f on the %.0fx%.0f screen (points), drawable %.0fx%.0f", dm_aspect_name(), r.size.width, r.size.height, r.origin.x, r.origin.y,
+                b.size.width, b.size.height, ((CAMetalLayer *)self.game.layer).drawableSize.width, ((CAMetalLayer *)self.game.layer).drawableSize.height); }
+    }
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
@@ -143,7 +166,9 @@ UIViewController *front_ios_root(void) { return [DmRootVC new]; }
 @end
 @implementation DmTVVC
 - (void)viewDidLoad { [super viewDidLoad]; self.view.backgroundColor = UIColor.blackColor; }
-- (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; for (UIView *v in self.view.subviews) v.frame = fit_16_9(self.view.bounds); }
+- (void)viewDidLayoutSubviews {   // the view may come from the phone with the Screen setting's stretch transform, under which frame is undefined
+    [super viewDidLayoutSubviews]; for (UIView *v in self.view.subviews) { v.transform = CGAffineTransformIdentity; v.frame = fit_16_9(self.view.bounds); }
+}
 @end
 static UIWindow *g_tv; static int g_tv_mode_was = -1;
 static void tv_attach(void) {

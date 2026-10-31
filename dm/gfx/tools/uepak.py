@@ -151,8 +151,8 @@ class R:
         if n < 0: return self.raw(-2 * n).decode('utf-16-le')[:-1]
         return self.raw(n)[:-1].decode('utf-8', 'replace') if n else ''
 
-LEGACY = (4,)   # legacy pak versions read (the per-file index); 11 has the encoded one
-LEGACY_METHODS = {1: 'Zlib', 2: 'Gzip', 3: 'LZ5', 4: 'Custom'}   # compression flags of a legacy pak (3: DRAGON QUEST XI S's engine, see the header)
+LEGACY = (4, 8)   # legacy pak versions read (the per-file index); 11 has the encoded one
+LEGACY_METHODS = {1: 'Zlib', 2: 'Gzip', 3: 'LZ5', 4: 'Custom'}   # compression flags of a version 4 pak (3: DRAGON QUEST XI S's engine, see the header)
 
 def magic_back(f):
     """(how far from the end the footer's magic is, the pak version): a legacy footer is the last 0x2d bytes (magic 0x2c from the end); version 11's magic is 0xc8 from the end in
@@ -170,12 +170,13 @@ def pak_version(f):
 def footer(f):
     """(encrypted index, index offset, index size, compression method names by number from 1, version); ValueError when the index does not lie inside the file"""
     back, ver = magic_back(f)
-    if (ver in LEGACY or ver == 11) and (ver in LEGACY) != (back == 0x2c): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
-    if ver in LEGACY:
+    if ver not in LEGACY + (11,): raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
+    short = ver < 8   # version 4: no key GUID, compression flags instead of names
+    if short != (back == 0x2c): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
+    if short:
         f.seek(-0x2d, 2); ft = f.read(0x2d); ioff, isz = struct.unpack_from('<QQ', ft, 9)
         enc, methods = ft[0], [LEGACY_METHODS.get(i, f'flags {i}') for i in range(1, 8)]
-    elif ver != 11: raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
-    else:
+    else:   # version 8 (UE 4.22 to 4.24, SHIN MEGAMI TENSEI V: Zlib only) has version 11's footer, five method names in the last 0xcc bytes, before the encoded index of version 10
         f.seek(-(back + 21), 2); ft = f.read(back + 21); k = 21
         ioff, isz = struct.unpack_from('<QQ', ft, k + 8)
         enc, methods = ft[k - 1], [ft[k + 44 + 32 * i:k + 76 + 32 * i].rstrip(b'\0').decode('latin1') for i in range(5)]
@@ -190,7 +191,8 @@ def read_range(f, off, n, what):
 def code_keys(img, lo):
     """32-byte keys that main's code stores from two 16-byte literals: stp qA, qB, [x0] after ldr qA / qB, each from an adrp page plus its offset, within 8 instructions before it.
     UE_REGISTER_ENCRYPTION_KEY's callback copies a 32-byte array into its argument, and clang may split the array into two 16-byte constants that do not lie side by side
-    (DRAGON QUEST III HD-2D Remake: main+0xa3fd24 is adrp, adrp, ldr q0, ldr q1, stp q0, q1, [x0], ret), so no window of main holds the key"""
+    (DRAGON QUEST III HD-2D Remake: main+0xa3fd24 is adrp, adrp, ldr q0, ldr q1, stp q0, q1, [x0], ret; SHIN MEGAMI TENSEI V: main+0x14180c0, the halves 0x1460 bytes apart),
+    so no window of main holds the key"""
     w = struct.unpack_from(f'<{lo // 4}I', img)
     out = []
     for i, x in enumerate(w):
@@ -205,7 +207,7 @@ def code_keys(img, lo):
                 half[y & 31] = page[y >> 5 & 31] + (y >> 10 & 0xFFF) * 16
             else: page.pop(y & 31, None); half.pop(y & 31, None)   # anything else that may write the register ends what it held
         a, b = half.get(x & 31), half.get(x >> 10 & 31)
-        if a is not None and b is not None and a + 16 <= len(img) and b + 16 <= len(img): out.append(img[a:a + 16] + img[b:b + 16])
+        if a is not None and b is not None and 0 <= a <= len(img) - 16 and 0 <= b <= len(img) - 16: out.append(img[a:a + 16] + img[b:b + 16])   # a literal before the image is none
     return out
 
 def find_key(img, lo, hi, pak):
@@ -223,9 +225,19 @@ def find_key(img, lo, hi, pak):
         if len(set(w)) >= 20 and opens(w): return w
     return None
 
+_KEYS = {}
+def pak_key(pak, main_nso):
+    """The key of a pak whose index is encrypted, from the main of its version (find_key, once per main), or None for a pak whose index is not: find_key knows the key by the index
+    it decrypts, so the encrypted files of such a pak stay unread (Pak.read_at refuses them; no game here has one)"""
+    with open(pak, 'rb') as f: enc = footer(f)[0]
+    if not enc: return None
+    if main_nso not in _KEYS: _KEYS[main_nso] = find_key(*nso_image(main_nso), pak)
+    if _KEYS[main_nso] is None: raise ValueError(f'{pak}: the index is encrypted and no key in {main_nso} (a 32-byte window or two 16-byte literals its code stores together) decrypts it')
+    return _KEYS[main_nso]
+
 class Pak:
     def __init__(self, path, key=None):
-        self.path, self.key = path, key; self.f = open(path, 'rb')
+        self.path, self.key, self.deleted = path, key, set(); self.f = open(path, 'rb')   # deleted: the files a legacy patch pak removes from the view
         enc, ioff, isz, self.methods, self.version = footer(self.f)
         if enc and not key: raise ValueError(f'{path}: the index is encrypted and no key was given')
         r = R(self.read_at(ioff, isz, enc), what=f'{path}: the index')
@@ -238,7 +250,10 @@ class Pak:
                 e, bsz = r.take('<BI'); head = 53 + (4 + 16 * len(blocks) if meth else 0)
                 if self.version < 5: blocks = [(s - off, t - s) for s, t in blocks]
                 else: blocks = [(s, t - s) for s, t in blocks]
-                self.files[name] = dict(off=off, raw=raw, size=size, method=LEGACY_METHODS.get(meth, f'flags {meth}') if meth else '', encrypted=e, block_size=bsz, blocks=blocks or [(head, size)])
+                if e & 2: self.deleted.add(name); continue   # FPakEntry flags: 1 encrypted, 2 deleted (a patch pak's record of a file it removes)
+                if self.version >= 8 and (meth > len(self.methods) or meth and not self.methods[meth - 1]): raise ValueError(f'{path}: {name} names compression method {meth}, which the footer does not')
+                method = (self.methods[meth - 1] if self.version >= 8 else LEGACY_METHODS.get(meth, f'flags {meth}')) if meth else ''   # version 8: an index into the footer's names
+                self.files[name] = dict(off=off, raw=raw, size=size, method=method, encrypted=e & 1, block_size=bsz, blocks=blocks or [(head, size)])
             return
         r.take('<Q')
         if r.take('<i'): r.take('<QQ'); r.raw(20)   # path hash index (not needed with the full directory index)
@@ -270,7 +285,7 @@ class Pak:
         if meth > len(self.methods) or meth and not self.methods[meth - 1]: raise ValueError(f'{self.path}: {path} names compression method {meth}, which the footer does not')
         return dict(off=off, raw=raw, size=size, method=self.methods[meth - 1] if meth else '', encrypted=enc, block_size=bsz, blocks=blocks)
     def read(self, path, decode=None):
-        """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II: Zlib); any other
+        """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II and SHIN MEGAMI TENSEI V: Zlib); any other
         method needs decode(block bytes, raw length) → bytes: the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
         e = self.entry(path)
         if not e['method']: return self.read_at(e['off'] + 53, e['size'], e['encrypted'])

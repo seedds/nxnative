@@ -18,6 +18,11 @@
 // 23 DumpAllocatorStats, 24 IsInternallyThreadSafe, 25 ValidateHeap, 26 GetDescriptiveName, 27-29 OnMallocInitialized / OnPreFork / OnPostFork, 30-31 the free cached memory sizes (main+0x67df800;
 // the base FMalloc vtable main+0x67dff48 has 0 for the three pure slots 6 / 8 / 10, its 7 / 9 call +0x30 / +0x40, and its 11 and 12 are one function: +0x30, then memset). The zeroed slots
 // keep the guest's function, which calls Malloc through the vtable
+// Unreal Engine 4.23 (SHIN MEGAMI TENSEI V; the getter at slot 17) has no TryMalloc / TryRealloc yet, and nothing after GetDescriptiveName: 0-1 destructors, 2 Exec, 3 Malloc, 4 Realloc,
+// 5 Free, 6 QuantizeSize, 7 GetAllocationSize, 8 Trim, 9 SetupTLSCachesOnCurrentThread, 10 ClearAndDisableTLSCachesOnCurrentThread, 11 InitializeStatsMetadata, 12 UpdateStats,
+// 13 GetAllocatorStats, 14 DumpAllocatorStats, 15 IsInternallyThreadSafe, 16 ValidateHeap, 17 GetDescriptiveName (main+0x57e6238, 18 slots, the next vtable's header after them: Realloc and
+// GetAllocationSize hold the "unrecognized block" messages, 14 the BINNED3_ALLOCATOR_STATS one, 17 returns "Binned3", 6 indexes the small-pool table, 8 tests its bool, 11-13 return at once,
+// 15 and 16 return true). Its object is made as DRAGON QUEST VII Reimagined's: GCreateMalloc mallocs 0x1c38 bytes and constructs them (main+0x1713920 → main+0x17098b0)
 // Unreal Engine 3 (Batman: Arkham Knight, with a backported binned allocator) takes UE3's 32-bit sizes (DWORD Count / Alignment) and has no TryMalloc / TryRealloc: 0-1 destructors, 2 Exec,
 // 3 QuantizeSize, 4 Malloc, 5 Realloc, 6 Free (call sites by vtable offset: 4 / 5 / 6 at 8090 / 8423 / 20308; malloc main+0xb2e3d0 calls +0x20 with alignment 16), 13 the TLS cache flush,
 // 14 IsInternallyThreadSafe (1), 20 GetAllocationSize (stores a 32-bit size), 21 the TLS cache setup, 22 Trim (main+0x329a408). Its object is in the bss and its constructor is inlined into
@@ -28,13 +33,14 @@
 #include <stdatomic.h>
 
 // Slot layouts: which slots the host fills and which do nothing (up to 6; 0 ends the list); the others keep the guest's own functions
-enum { UE5, UE4_27, UE5_6, UE3 };
+enum { UE5, UE4_27, UE5_6, UE3, UE4_23 };
 // name: the slot of the name getter, which the rewriter reports (UE_MALLOC_SLOT); size32: the size arguments and results are 32-bit (UE3); try_malloc / try_realloc 0: no such slot
 static const struct { int name, nslot, malloc_, try_malloc, realloc_, try_realloc, free_, quantize, get_size, nothing[6]; bool size32; } k_lay[] = {
     [UE5] = { 22, 26, 6, 7, 8, 9, 10, 11, 12, { 13, 14, 15, 19 } },      // Trim, the TLS cache setup and teardown, DumpAllocatorStats
     [UE4_27] = { 19, 21, 3, 4, 5, 6, 7, 8, 9, { 10, 11, 12, 16 } },
     [UE5_6] = { 26, 32, 6, 7, 8, 9, 10, 13, 14, { 15, 16, 17, 18, 19, 23 } },   // Trim, the four TLS cache calls, DumpAllocatorStats
     [UE3] = { -1, 25, 4, 0, 5, 0, 6, 3, 20, { 13, 21, 22 }, true },   // the TLS cache flush and setup, Trim
+    [UE4_23] = { 17, 18, 3, 0, 4, 0, 5, 6, 7, { 8, 9, 10, 14 } },
 };
 static const struct { const char *build, *what; int layout; uint64_t obj, vtable, cut; uint32_t cut_insn; } k_ue[] = {   // cut_insn: the instruction the cut leaves
     // Batman: Arkham Knight 1.0.5: the allocator object (main+0x51818c0, bss), its vtable (main+0x329a408, 25 slots), the cut (main+0x192ec14: a branch past the inlined constructor)

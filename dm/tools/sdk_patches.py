@@ -177,7 +177,7 @@ def align(size, fingerprints, old_32m, old_1g, old_4m):   # the three large clas
 MATCH_CUTS = {'sdk': [
     # SDK 7.3.2 (DRAGON QUEST XI S), 8.2.1 (Super Smash Bros. Ultimate), 8.3.1 (Paper Mario: The Origami King)
     node(276, ['5c81bb821d119d00ffcda6c3a4f1b827fc08c084fa53995e3a6262b5bf37cded'], 0x10, 'e9230b32', '097ca052', 0xb0, 'e9230b32', '097ca052'),
-    # SDK 10.4.1 (Advance Wars 1+2), 10.4.8 (Pikmin 4)
+    # SDK 9.3.1 (SHIN MEGAMI TENSEI V), 10.4.1 (Advance Wars 1+2), 10.4.8 (Pikmin 4)
     node(272, ['6fe2b1b95eced45e081611b786a8ff80b656bdcad6bd58082ee3264f5163ec44'], 0x10, 'e8230b32', '087ca052', 0xac, 'e9230b32', '097ca052'),
     # SDK 11.4.3 (Pokémon Brilliant Diamond), 12.3.2 (OCTOPATH TRAVELER II), 12.3.9 (Xenoblade Chronicles 3), 13.3.5 (Mario + Rabbids Sparks of Hope), 14.3.0 (Batman: Arkham Knight)
     node(272, ['3ab9bc1471da6658c861c809d8aa43b3be34fd78a65f7136cb346e442a52968b', '14660c33f9b064a429405d34d1ab0d1b8fd3867d5b335e2831afb59c2a399746'],
@@ -190,7 +190,7 @@ MATCH_CUTS = {'sdk': [
     node(244, ['b02f0514e2cc25a65261ec23cefa9a1fe7b244b3db741f183deb334935541eee'], 0x10, '08fca752', '087ca052', 0x7c, '09fca752', '097ca052'),
     # SDK 22.2.0 (EA SPORTS FC 27, Well Dweller): the SDK 19 / 20 constructor, instruction for instruction up to its cold path, which gives each failing result its own abort (32 bytes more)
     node(276, ['8960fe237061c387226a3775daf750a646dd0ee12eccf3d1340248683a6a7d78'], 0x10, '08fca752', '087ca052', 0x7c, '09fca752', '097ca052'),
-    # SDK 7.3.2 (DRAGON QUEST XI S), 8.2.1 (Super Smash Bros. Ultimate), 8.3.1 (Paper Mario: The Origami King), 10.4.1 (Advance Wars 1+2), 10.4.8 (Pikmin 4)
+    # SDK 7.3.2 (DRAGON QUEST XI S), 8.2.1 (Super Smash Bros. Ultimate), 8.3.1 (Paper Mario: The Origami King), 9.3.1 (SHIN MEGAMI TENSEI V), 10.4.1 (Advance Wars 1+2), 10.4.8 (Pikmin 4)
     align(352, ['006abd214d94c93386735550cee4fe7708bc1f0d1812663123cfa3b9611f1533', '42167e4d3c710e11937e45a9e420fdd0ed9a410386c17da4d1d896b847d3b0d6'], 'eb030732', 'ea030232', 'e8030a32'),
     # SDK 11.4.0 (Pokémon Legends: Arceus, Kirby and the Forgotten Land): the next rule's size classes with 8 more bytes of body; the 4 GB StandardAllocator region of Arceus's nninitStartup
     # (the host's cap) fits after the 62 MB node area only with it

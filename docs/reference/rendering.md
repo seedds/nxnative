@@ -175,11 +175,11 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 ### Sparse textures take the block height of their 64 KB tile
 
-- **Symptom:** a CPU-filled texture shuffled into a patchwork of rectangles (OCTOPATH TRAVELER's world map on the traveler selection).
+- **Symptom:** a CPU-filled texture shuffled into a patchwork of rectangles (OCTOPATH TRAVELER's world map on the traveler selection); walls in bright and dark patches, their DXT5 lightmaps scrambled in 4-texel columns (SHIN MEGAMI TENSEI V's classroom).
 - **Cause:** a sparse 2D texture without a packaged layout is laid out with the block height of its 64 KB tile, whose shape in blocks is the standard one: 256×256, 256×128, 128×128, 128×64 and 64×64 blocks for 1, 2, 4, 8 and 16 bytes per block, i.e. 32, 16, 16, 8 and 8 GOBs. The host used the [automatic block height](#automatic-block-height-truncates): 16 GOBs for the 4096×2048 BC1 map (512 block rows), whose tiles then landed in the wrong places.
 - **Fix:** `nvn_tex.c` `sparse_tile_h` gives such a texture its tile's block height; a packaged layout still wins.
-- **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (Unreal Engine 4.18 flags its streamed and CPU-loaded textures sparse).
-- **Check:** the map's guest bytes deswizzled in Python at 1 to 32 GOBs read right only at 8; a 512×512 RGBA8 sprite sheet only at 16; [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md)'s packaged ASTC 6×6 textures (16 bytes per block) carry 8 in their layout. The 1- and 2-byte heights follow the same tile shapes and were not seen.
+- **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) (Unreal Engine 4.18 flags its streamed and CPU-loaded textures sparse). [SHIN MEGAMI TENSEI V](../../dm/games/010063B012DC6000/README.md): the classroom's 1024×1024 and 1024×512 DXT5 lightmaps (sparse, no packaged layout), read with 16 GOBs; with 8 the game's level 1 is its level 0 halved (mean difference of the blocks' first colour 23, against 139 or more with 16 in either level).
+- **Check:** the map's guest bytes deswizzled in Python at 1 to 32 GOBs read right only at 8; a 512×512 RGBA8 sprite sheet only at 16; [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md)'s packaged ASTC 6×6 textures (16 bytes per block) carry 8 in their layout. The 1- and 2-byte heights follow the same tile shapes and were not seen. A `t_tex` case checks SHIN MEGAMI TENSEI V's 1024×1024 DXT5 lightmap (8 GOBs, 3 tiled levels of 256×256 texels). To check a layout against a game's data, `memdump` a texture's storage, deswizzle level 0 and level 1 at each block height and compare level 1 with level 0 shrunk: the right height is the one where they agree.
 
 ### Sparse textures of 8- and 16-byte blocks: blocks at most 8 GOBs high
 

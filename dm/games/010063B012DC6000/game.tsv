@@ -1,0 +1,62 @@
+# SHIN MEGAMI TENSEI Ⅴ: ATLUS, Unreal Engine 4.23 (legacy version 8 paks, zlib, half the files encrypted), SDK 9.3.1, NVN, CRIWARE (ADX2 sound, Sofdec movies); base game 1.0.0.
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (docs/agents): the opening and the first school level
+
+# ---- Identity ----
+title_id	010063B012DC6000
+program_id	010063B012DC6000
+
+# ---- App ----
+name	SHIN MEGAMI TENSEI Ⅴ
+ipa	ShinMegamiTensei.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v0	1.0.0	main=4828bbb9e91e802470fec7ac68397bd1	subsdk0=5a7ada8dd7447c10aa244944f64d0aff	sdk=ad3fdfbd62a5f4b082d385ffe420d440
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# subsdk0 is NintendoSDK_movie (main imports from it)
+modules	main subsdk0 sdk
+romfs_marker	Project/Content/Paks/pakchunk0-Switch.pak
+zip_store	.awb:.pak:.usm:.metallib
+
+# ---- Graphics ----
+# 60 fps (30 on the Switch): the game caps Unreal at 30 twice. Its code sets t.MaxFPS 30 at run time (its config has no t.MaxFPS or FrameRateLimit; frame smoothing is off in
+# Engine/Config/Switch/SwitchEngine.ini), and the engine's Switch device profile sets rhi.syncinterval=2 (BaseSwitchDeviceProfiles.ini), the present interval 2 it asks for while
+# r.VSync=1 locks presents to vsync. The host writes t.MaxFPS 60 and rhi.SyncInterval 1 into its console variables, which the rewriter finds by name (hle_fpslock.c, dm/tools/ue_cvar.py); rhi.SyncInterval 1 alone left it at 30. Unreal steps
+# the game by the time that really passed.
+# DM_FPS_TARGET=30 (Documents/env.txt on the iPhone, or the settings screen) keeps the game's 30 and saves power
+fps_target	60
+
+# ---- Input ----
+# a 3D game: D-pad, right stick (camera) and L3 / R3 on the iPhone's virtual gamepad
+pad_layout	full
+
+# ---- Memory ----
+# Unreal Engine 4.23: nninitStartup (main+0x1885750) reserves one address region for the whole engine, 62 GB by default; the rewriter's engine-wide gate on the store of its size
+# (dm/tools/ue_region.py, its second pass: this build's size variable is a global apart from the base; hle_svc.c) gives it what the alias region has room for, 4.06 GB. Its FMallocBinned3 would take 37 GB of that region, so its
+# constructor call is cut (the rewriter's engine-wide cut, dm/tools/ue_malloc.py) and the engine's allocations go to a host malloc zone outside the guest block (dm/host/hle_uemalloc.c). The SDK-wide rules on the SDK 9.3.1 build (dm/tools/sdk_patches.py)
+# put the region 64 MB into the alias region: the node area 62 MB instead of 1 GB, and regions of 4 MB and more 2 MB aligned instead of by their size (1 GB for this one). Engage's 5 GB block: 256 MB in front +
+# 4.375 GB alias region + 256 MB stack region + 128 MB heap region (the game asks for a 4 MB heap)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 80 MB of system resource
+sys_resource	0x5000000
+
+# ---- Shader split ----
+# The engine's global shaders (Engine/GlobalShaderCache-GLSL_SWITCH.bin), the engine's own materials and the game's, inline in the cooked packages (as DRAGON QUEST XI S); the paks are
+# zlib-compressed, and half their files AES-encrypted with the key the game's code holds (uepak.py code_keys). The note is still the provisional profile's: shader_* keys are part of
+# every shader's cache key (dmsh_chain.profile_rows), and the libraries were built with it
+shader_groups	GlobalShaderCache=global #Engine/=engine #Project/=game
+shader_note	SHIN MEGAMI TENSEI Ⅴ shaders (provisional profile)
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
+depth_mode	zero
+
+# ---- Bring-up ----
+# The engine writes some textures' texels from the CPU into an ordinary pool after creating them (block-linear, no packaged layout, no WriteTexels): the classroom's 256x16 colour
+# grading LUT held its data in guest memory but read 0 on the host, the tonemapper's LUT came out 0 and the whole picture black
+tex_flush_upload	on
+tex_dirty_upload	on

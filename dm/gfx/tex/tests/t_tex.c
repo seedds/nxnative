@@ -233,6 +233,19 @@ int main(void) {
         CHECK(nvn_tex_level_offset(&d, 1) == 0x81000 && L.size == 0xBC400 && nvn_tex_level_gobs(&d, 0) == 43, "S not sparse: level 1 %#llx storage %#llx, expected 0x81000 / 0xbc400",
               (unsigned long long)nvn_tex_level_offset(&d, 1), (unsigned long long)L.size);
     }
+    // SHIN MEGAMI TENSEI V's lightmaps: 1024×1024 DXT5, sparse, no packaged layout. A sparse texture takes its 64 KB tile's block height, 8 GOBs for 16-byte blocks where the
+    // automatic choice gives 16, so a tile is 64 × 64 blocks (256 × 256 texels); the game's data decodes that way (its level 1 is level 0 halved). Not sparse it keeps 16; a sparse
+    // one with 4-byte blocks takes 16 too (its tile is 128 × 128 blocks)
+    {
+        nvn_texdesc d = {1, 0x44, 0x20, 0, 1024, 1024, 1, 11, 0, 0}; nvn_texlayout L; nvn_tex_layout(&d, &L); uint32_t tw, th, tz; int nt = nvn_tex_sparse_tiles(&d, &tw, &th, &tz);
+        CHECK(L.tileH == 3 && nvn_tex_level_offset(&d, 1) == 0x100000 && nvn_tex_level_offset(&d, 2) == 0x140000 && nvn_tex_level_offset(&d, 3) == 0x150000 && L.size == 0x160000,
+              "S DXT5 sparse: block height %u, levels at %#llx %#llx %#llx, storage %#llx; expected 3, 0x100000 0x140000 0x150000, 0x160000", L.tileH,
+              (unsigned long long)nvn_tex_level_offset(&d, 1), (unsigned long long)nvn_tex_level_offset(&d, 2), (unsigned long long)nvn_tex_level_offset(&d, 3), (unsigned long long)L.size);
+        CHECK(nt == 3 && tw == 256 && th == 256 && tz == 1, "S DXT5 sparse: tile %ux%ux%u, %d tiled levels; expected 256x256x1, 3", tw, th, tz, nt);
+        printf("  S 1024×1024 DXT5 sparse, no packaged layout: block height %u GOBs, tile %ux%u, %d tiled levels (expected 8, 256x256, 3)\n", 1u << L.tileH, tw, th, nt);
+        d.flags = 0; nvn_tex_layout(&d, &L); CHECK(L.tileH == 4, "S DXT5 not sparse: block height %u, expected 4", L.tileH);
+        nvn_texdesc b = {1, 0x9A, 0x20, 0, 512, 256, 1, 10, 0, 0}; nvn_tex_layout(&b, &L); CHECK(L.tileH == 4, "S BGRA8 sparse: block height %u, expected 4", L.tileH);
+    }
 
     printf("%s: %d/%d checks passed\n", fails ? "RED" : "all passed", checks - fails, checks);
     return fails ? 1 : 0;

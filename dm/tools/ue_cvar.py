@@ -4,8 +4,9 @@ and the host writes the variables the profile decides on (hle_fpslock.c: the fra
 ue_texture_pool).
 A TAutoConsoleVariable is a global in main's data: its static constructor loads the name (adrp + add), registers it through IConsoleManager (a blr), takes the object's address (adrp + add)
 and stores the variable's value pointer at +0x10 (str x0, [xN, #0x10]); the value holds the game thread's copy, then the render thread's. The same sequence registers every variable in the
-Unreal games here: OCTOPATH TRAVELER and Yoshi's Crafted World (UE 4.1x, UTF-32 names), Pikmin 4 (4.26), OCTOPATH TRAVELER II and DRAGON QUEST VII Reimagined (4.27, UTF-16), OCTOPATH
-TRAVELER 0 (UE 5, a base constructor called between the address and the store) and FINAL FANTASY RESONANCE (5.6). A name registered at two objects gives none, with a [RED] reason.
+Unreal games here: OCTOPATH TRAVELER and Yoshi's Crafted World (UE 4.1x, UTF-32 names), SHIN MEGAMI TENSEI V (4.23, UTF-16), Pikmin 4 (4.26), OCTOPATH TRAVELER II and
+DRAGON QUEST VII Reimagined (4.27, UTF-16), OCTOPATH TRAVELER 0 (UE 5, a base constructor called between the address and the store) and FINAL FANTASY RESONANCE (5.6). A name
+registered at two objects gives none, with a [RED] reason.
 Usage on its own: ue_cvar.py <module>... (the objects of NAMES in each)"""
 import re, struct, sys, os
 

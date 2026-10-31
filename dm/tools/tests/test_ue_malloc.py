@@ -51,6 +51,11 @@ class FindTest(unittest.TestCase):
         call, vt, slot, why = find(image(slot=26, relocated=True))
         self.assertEqual((call, vt, slot), (CALLER + 4, VT, 26), why)
 
+    def test_unreal_4_23_layout(self):   # 18 slots, the name getter at 17 (SHIN MEGAMI TENSEI V)
+        call, vt, slot, why = find(image(slot=17))
+        self.assertEqual((call, vt, slot), (CALLER + 4, VT, 17), why)
+        self.assertIn('4.23', why)
+
     def test_no_name_is_not_red(self):
         call, _, _, why = find(image(name=False))
         self.assertIsNone(call)

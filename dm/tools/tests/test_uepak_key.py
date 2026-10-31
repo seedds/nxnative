@@ -76,6 +76,15 @@ class KeySearch(unittest.TestCase):
         img = img[:0x40] + struct.pack('<7I', *w) + img[0x40 + 28:]
         self.assertEqual(uepak.code_keys(img, lo), [])
 
+    def test_literal_before_the_image(self):
+        """Literals on the page before the image are no key (sliced from a negative address they gave an empty one, and find_key's decrypt failed before the real key)"""
+        img, lo, hi = self.image(True)
+        code = [adrp(10, 0x80, -0x1000), adrp(11, 0x84, -0x1000), ldr_q(2, 10, 0xFF0), ldr_q(3, 11, 0xFF0), 0xAD000C02, RET]   # stp q2, q3, [x0]
+        img = img[:0x80] + struct.pack('<6I', *code) + img[0x80 + 24:]
+        self.assertEqual(uepak.code_keys(img, lo), [self.key])
+        p = Path(self.tmp.name) / 'a.pak'; pak(p, self.key)
+        self.assertEqual(uepak.find_key(img, lo, hi, str(p)), self.key)
+
 
 if __name__ == '__main__':
     unittest.main()

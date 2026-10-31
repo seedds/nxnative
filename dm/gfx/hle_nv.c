@@ -20,6 +20,11 @@ HLE_FORCE("_ZN2nv18InitializeGraphicsEPvm", WHY "; pool recorded for nv::GetGrap
     LOG("nv::InitializeGraphics: pool %.2f MB, recorded (the host's graphics layer allocates its own)", size / 1048576.0);
 }
 HLE_FORCE("_ZN2nv16FinalizeGraphicsEv", WHY, void, h_nv_Fin, void) { g_nv_pool = (typeof(g_nv_pool)){0}; }
+// nv::InitCheck aborts unless graphics are initialised. Its own implementation tests the SDK's flag, which nv::InitializeGraphics sets, and that runs on the host instead:
+// Donkey Kong Bananza (SDK 20.5.19 Ounce) calls it from main+0xe19d04 once gameplay starts, and aborted at sdk+0x57582c. The host's record of the initialisation answers it
+HLE_FORCE("_ZN2nv9InitCheckEv", WHY "; nv::InitializeGraphics recorded on the host", void, h_nv_InitCheck, void) {
+    if (!g_nv_pool.inited) die("nv::InitCheck: graphics not initialised (nv::InitializeGraphics was not called)");
+}
 // nv::MemoryInfo is 64-bit counters, the SDK fills them from sign-extended 32-bit driver counters. Its size follows the SDK: 0x20 bytes (four counters) on SDK 10 and older,
 // 0x40 bytes from SDK 11 on (where the SDK zeroes all 0x40 when nv is not initialised). Writing 0x40 on an old SDK overran the caller's record by 32 bytes (Hyrule Warriors:
 // Definitive Edition, SDK 3.5.1). Its own implementation reads the NV driver object, which the host never creates, so it faults: Well Dweller crashed there (sdk+0x4656c8,

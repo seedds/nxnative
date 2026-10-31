@@ -20,6 +20,44 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x23c, InstName.Hfma2, AHmma, N);
             x(0x83b, InstName.Lds, ALdsm, N);
             x(0x23a, InstName.Mov, AMovm, N);
+            x(0x3a1, InstName.Vote, AMatch, N);
+        }
+
+        // MATCH.ANY / .ALL Rd, Ra (Mesa NAK OpMatch: .U64 73, .ANY 79, the predicate of .ALL 81..84): the active lanes whose value (Ra, or Ra and Ra + 1) equals this lane's,
+        // as a lane mask; .ALL gives the active mask only when every active lane agrees, and 0 otherwise, and sets the predicate to whether they do
+        public static void AMatch(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            bool u64 = x.Bit(73), any = x.Bit(79);
+            Operand lo = AGpr(x.Ra), hi = u64 ? AGpr(x.Ra + 1) : null;
+            Operand active = context.Ballot(Const(IrConsts.True), 0);
+            Operand same = Const(0);
+
+            for (int lane = 0; lane < 32; lane++)
+            {
+                Operand eq = context.ICompareEqual(context.Shuffle(lo, Const(lane)), lo);
+
+                if (u64)
+                {
+                    eq = context.BitwiseAnd(eq, context.ICompareEqual(context.Shuffle(hi, Const(lane)), hi));
+                }
+
+                same = context.BitwiseOr(same, context.ConditionalSelect(eq, Const(1 << lane), Const(0)));
+            }
+
+            same = context.BitwiseAnd(same, active);
+            Operand all = context.ICompareEqual(same, active);
+            Operand res = any ? same : context.ConditionalSelect(all, active, Const(0));
+
+            if (x.Rd < RegisterConsts.RegisterZeroIndex)
+            {
+                context.Copy(Register(x.Rd, RegisterType.Gpr), res);
+            }
+
+            if (!any)
+            {
+                ASetPred(context, x.Bits(81, 84), all);
+            }
         }
 
         public static void RegisterAmpereHalfCompare(AmpereAluRegistrar alu)

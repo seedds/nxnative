@@ -266,6 +266,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), reported in [PR #261](https://github.com/seedds/nxnative/pull/261).
 - **Check:** `t_tex` compares both directions against the byte-address formula for 1,029 deterministic layouts, including 1D/2D/3D, arrays/cubes, packaged block dimensions, sparse mip tails, 1/2/3/4/6/8/12/16-byte formats, padded pitches and partial segments. All 5,334 checks pass, including under AddressSanitizer and UBSan. A local arm64 Mac comparison against the old implementation, Apple clang 21 at the host's `-O1`, measured 7.4–7.7 GB/s before and 35.1–37.6 GB/s after (4.6–5.1x) across 1024x1024 sparse ASTC 6x6, 2048x2048 BC7, 1920x1080 RGBA8 and 1280x720 RGBA16F. Each result is the median of seven runs copying about 128 MiB, with implementation order alternated. This is a CPU microbenchmark; no new gameplay run here.
 
+### The Switch 2's order inside a GOB
+
+- **Symptom:** a Switch 2 game's textures from its files keep their shapes but break up along every edge: misplaced 4×4 blocks (16-byte pieces) in a regular weave, invisible in flat areas. Normal maps make lit surfaces look woven; opacity masks punch holes.
+- **Cause:** the GOB (64 bytes × 8 rows) keeps its size and place, but the Switch 2 orders its 16-byte pieces x5 y2 x4 y1 y0 from the GOB's start, where the Tegra X1 orders them x5 y2 y1 x4 y0: offset bits 5 and 6 exchanged, (x%64/32)·256 + (y%8/4)·128 + (x%32/16)·64 + (y%4/2)·32 + (y%2)·16 + x%16. Block heights, sizes and level offsets are unchanged (the BNTX headers' block heights and sizes match `nvn_tex_layout`).
+- **Fix:** `nvn_gob_switch2` (`dm/gfx/tex/nvn_deswizzle.h`), set at `nvnDeviceInitialize` when the SDK targets the Switch 2 (`dm_sdk_ounce`): the CPU address formula, the CPU copy tables and both Metal untiling kernels take the Switch 2's order.
+- **Check:** `t_tex` checks the Switch 2's offsets by hand (B2) and both orders where they differ; `t_deswz_gpu` runs every case in both orders, the GPU kernels against the CPU copy.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#rendering): level 0 of its BNTX textures (BC7 `BaseRock000_Pnrm`, BC4 `ArenaLevelShadowMaskSunbeam00_Smsk`) decoded with every order of the five address bits; the X1's left the weave, this order alone gave clean images (mean neighbour difference 19.5 → 14.9 on the rock normal map, 21.0 → 15.7 on the BC4 mask).
+
 ### Packaged texture block dimensions and linear storage rows
 
 - **Symptom:** driver comparisons report the wrong block dimensions for packaged 2D / 3D textures, or too little storage for linear block-compressed textures (64x64 BC1 with stride 128: 2048 bytes instead of 8192).

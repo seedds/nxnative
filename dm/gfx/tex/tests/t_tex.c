@@ -155,6 +155,18 @@ int main(void) {
         CHECK(got == B[i].want, "B%u got %llu expected %llu", i, (unsigned long long)got, (unsigned long long)B[i].want);
         printf("  B%u (%u,%u,%u) → %llu %s  %s\n", i, B[i].x, B[i].y, B[i].z, (unsigned long long)got, got == B[i].want ? "✓" : "✗", B[i].how);
     }
+    // The Switch 2's order inside a GOB (nvn_deswizzle.h): bits 5 and 6 of the offset exchanged, x%32/16 at 64 and y%4/2 at 32. Where only one of the two is set the orders differ
+    printf("B2 address formula, the Switch 2's order inside a GOB: (x%%64/32)·256 + (y%%8/4)·128 + (x%%32/16)·64 + (y%%4/2)·32 + (y%%2)·16 + x%%16\n");
+    struct { uint32_t x, y; uint64_t want, x1; } B2[] = {{16, 0, 64, 32}, {0, 2, 32, 64}, {21, 5, 213, 181}, {17, 3, 113, 113}, {70, 9, 1558, 1558}};
+    nvn_gob_switch2 = 1;
+    for (unsigned i = 0; i < sizeof B2 / sizeof *B2; i++) {
+        uint64_t got = nvn_bl_offset(B2[i].x, B2[i].y, 0, 128, 32, 1, 0);
+        CHECK(got == B2[i].want, "B2 (%u,%u) got %llu expected %llu", B2[i].x, B2[i].y, (unsigned long long)got, (unsigned long long)B2[i].want);
+        printf("  B2 (%u,%u) → %llu %s (the X1's order: %llu)\n", B2[i].x, B2[i].y, (unsigned long long)got, got == B2[i].want ? "✓" : "✗", (unsigned long long)B2[i].x1);
+    }
+    nvn_gob_switch2 = 0;
+    for (unsigned i = 0; i < sizeof B2 / sizeof *B2; i++)
+        CHECK(nvn_bl_offset(B2[i].x, B2[i].y, 0, 128, 32, 1, 0) == B2[i].x1, "B2 (%u,%u) in the X1's order expected %llu", B2[i].x, B2[i].y, (unsigned long long)B2[i].x1);
 
     // ---------- E hand-built 3D: place markers into block-linear storage at hand-calculated addresses, decode, and verify where the markers land (round trip A only proves self-consistency, not whether the layout is right) ----------
     // Source of the block height / block depth rule: deko3d dk_image.cpp - for 3D textures block height is fixed at 1 GOB, block depth = pickTileSize(depth + depth/2).

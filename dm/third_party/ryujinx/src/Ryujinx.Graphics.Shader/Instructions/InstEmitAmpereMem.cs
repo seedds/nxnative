@@ -75,6 +75,63 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitIpa(context, idxAddress, addr, ipaOp, RegisterConsts.RegisterZeroIndex, false, x.Rd);
         }
 
+        // Geometry and tessellation stages. OUT (opcode 0x124 in the ALU forms): Rd = the new output handle, Ra the old, the stream in the second source; 78..80 emit (1),
+        // cut (2) or both, none being OUTFINAL. ISBERD Rd, [Ra]: the stage buffer entry of a vertex, which only ALD reads: Ra passes through, as on Maxwell. A geometry shader
+        // that ends its output through an exit stub sets it up first: LEPC R, R + offset → 0x357 installs it as the address EXIT continues at, and the stub runs OUTFINAL
+        // and 0x957 before its own EXIT. Per thread, with no output to finish, EXIT just ends the invocation: LEPC writes its own address (only the stub setup reads it),
+        // and 0x357 and 0x957 do nothing (Donkey Kong Bananza's geometry shader 5d537f7630ec3671, which writes its primitives to memory with ATOMG / STG and emits none)
+        public static void RegisterAmpereGeometry(AmpereAluRegistrar alu, AmpereRegistrar x)
+        {
+            const InstProps N = InstProps.None;
+
+            alu(0x124, InstName.Out, AOut);
+            x(0x923, InstName.Isberd, AIsberd, N);
+            x(0x34e, InstName.Lepc, ALepc, N);
+            x(0x357, InstName.Nop, ANop, N, writesRd: false);
+            x(0x957, InstName.Nop, ANop, N, writesRd: false);
+        }
+
+        public static void AOut(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int type = x.Bits(78, 80);
+
+            if (type != 0)
+            {
+                EmitOut(context, (type & 1) != 0, (type & 2) != 0);
+            }
+
+            if (x.Rd < RegisterConsts.RegisterZeroIndex)
+            {
+                context.Copy(Register(x.Rd, RegisterType.Gpr), AGpr(x.Ra));
+            }
+        }
+
+        public static void AIsberd(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Rd < RegisterConsts.RegisterZeroIndex)
+            {
+                context.Copy(Register(x.Rd, RegisterType.Gpr), AGpr(x.Ra));
+            }
+        }
+
+        public static void ALepc(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Rd < RegisterConsts.RegisterZeroIndex)
+            {
+                context.Copy(Register(x.Rd, RegisterType.Gpr), Const((int)context.CurrOp.Address));
+            }
+
+            if (x.Rd + 1 < RegisterConsts.RegisterZeroIndex)
+            {
+                context.Copy(Register(x.Rd + 1, RegisterType.Gpr), Const(0));
+            }
+        }
+
         // ALD Rd, a[Ra + addr], vtx: addr 40..50, vertex 32..40, count - 1 74..76, patch 76, physical (Ra the whole address) 77, output 79
         public static void AAld(EmitterContext context)
         {

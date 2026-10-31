@@ -2,12 +2,16 @@
 // Tegra X1 block-linear layout (public descriptions: deko3d / Ryujinx BlockLinearLayout):
 //   GOB = 64 bytes × 8 rows = 512 bytes; offset of (x byte, y row) within a GOB =
 //     (x%64/32)·256 + (y%8/2)·64 + (x%32/16)·32 + (y%2)·16 + x%16
+//   The Switch 2 (NVN2) orders a GOB's 16-byte pieces otherwise: (x%64/32)·256 + (y%8/4)·128 + (x%32/16)·64 + (y%4/2)·32 + (y%2)·16 + x%16 (nvn_gob_switch2)
 //   block = 1 GOB wide × 2^tileH GOBs high × 2^tileD GOBs deep, ordered y first then z within a block; blocks fill the level in x → y → z row-major order.
 // Level / layer start offsets and the actual block height and block depth of this level come from nvn_tex.c; here we only do intra-level addressing and copying.
 #include "nvn_deswizzle.h"
 #include <string.h>
 
+int nvn_gob_switch2;   // see nvn_deswizzle.h
+
 static uint32_t gob_off(uint32_t x, uint32_t y) {
+    if (nvn_gob_switch2) return (x % 64 / 32) * 256 + (y % 8 / 4) * 128 + (x % 32 / 16) * 64 + (y % 4 / 2) * 32 + (y % 2) * 16 + x % 16;
     return (x % 64 / 32) * 256 + (y % 8 / 2) * 64 + (x % 32 / 16) * 32 + (y % 2) * 16 + x % 16;
 }
 
@@ -50,8 +54,11 @@ static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *b
     // Hoist nvn_bl_offset's slice and row terms out of the segment loop. The block height and depth are powers of two,
     // so their division / remainder become shifts and masks. At x = 16*j the block column is j >> 2, and the segment
     // has one of four positions inside the GOB (x%64 = 0/16/32/48 -> 0/32/256/288); the y part depends only on y%8.
-    static const uint16_t kox[4] = {0, 32, 256, 288};                         // x%16 is always 0 here: segments start at multiples of 16
-    static const uint16_t koy[8] = {0, 16, 64, 80, 128, 144, 192, 208};       // (y%8/2)*64 + (y%2)*16
+    static const uint16_t kox1[4] = {0, 32, 256, 288};                        // x%16 is always 0 here: segments start at multiples of 16
+    static const uint16_t koy1[8] = {0, 16, 64, 80, 128, 144, 192, 208};      // (y%8/2)*64 + (y%2)*16
+    static const uint16_t kox2[4] = {0, 64, 256, 320};                        // the Switch 2's order (gob_off): x%32/16 at 64
+    static const uint16_t koy2[8] = {0, 16, 32, 48, 128, 144, 160, 176};      // (y%8/4)*128 + (y%4/2)*32 + (y%2)*16
+    const uint16_t *kox = nvn_gob_switch2 ? kox2 : kox1, *koy = nvn_gob_switch2 ? koy2 : koy1;
     uint32_t bh = 1u << th, bd = 1u << td;
     uint64_t block = 512ull * bh * bd, gobs_x = (uint64_t)(lb + 63) >> 6, blocks_y = ((uint64_t)rows + 8 * bh - 1) >> (3 + th);
     for (uint32_t z = 0; z < slices; z++) {

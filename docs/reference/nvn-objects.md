@@ -359,6 +359,13 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md): a 1280×720 R8 and a 640×360 RG8 texture; the buffer texture kept out is a 1,048,576-texel R32F one.
 - **Also found on:** [NieR:Automata The End of YoRHa Edition](../../dm/games/010056B015FE8000/README.md): the title background; the game note records the controlled comparison.
 
+### Block-compressed textures flagged `COMPRESSIBLE`
+
+- **Symptom:** with `tex_flush_upload` on, the 3D scene still draws untextured: characters as black silhouettes, the world in dark grey, the UI's button glyphs missing; `packaged textures: first uploads 10` over a whole run; `DM_NVN_TEXINFO` shows the art textures with `flags=0x8`.
+- **Cause:** `ft_add` left out every texture with `NVN_TEXTURE_FLAGS_COMPRESSIBLE`, which games usually set on render targets only. FINAL FANTASY XII THE ZODIAC AGE (Phyre) sets it on every texture, its BC5 / BC7 art included, copies the texels into a `CPU_CACHED` pool (flags 0xa4) and publishes them with `nvnMemoryPoolFlushMappedRange` (354 flushes by the end of init), so no texture was registered and none was uploaded.
+- **Fix:** `ft_add` keeps out a `COMPRESSIBLE` texture only when its format is not block-compressed (`nvn_fmt_bpb` block width 1): nothing renders to a BC or ASTC texture, so the flag says nothing about a render target there. Uncompressed `COMPRESSIBLE` textures stay out as before.
+- **Found on:** FINAL FANTASY XII THE ZODIAC AGE (`0100EB100AB42000`, no profile yet; `tex_flush_upload` on): 141 first uploads and 476 CPU-written textures alive in the opening area, which draws fully textured. With `tex_dirty_upload` on as well, the first write-protection fault on a registered texture stopped the loading (15 NVN calls a frame from frame 2 on, a magenta screen), so that key stays off for it; a magenta screen at the very start remains open.
+
 ### CPU writes with no flush, caught by page protection (`tex_dirty_upload`)
 
 - **Symptom:** magenta surfaces (Metal decodes an all-zero ASTC block as the error colour (1, 0, 1)); a zero BC block decodes black, which looks like missing light; black screen while the UI (or a dialog box) draws in the right places under `HILITE` or in the pass dump; `packaged textures: first uploads 0`.

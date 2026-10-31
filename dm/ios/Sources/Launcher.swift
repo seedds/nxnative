@@ -40,11 +40,11 @@ private struct CloudSavesSection: View {
         .sheet(isPresented: $picking) {
             DocumentPicker(types: [.folder]) { url in
                 picking = false
-                if dm_store_cloud_saves(url) {
+                if let why = dm_store_cloud_saves(url) {
+                    note = why
+                } else {
                     note = "Saved. The game uses this folder when you press Play."
                     refresh()
-                } else {
-                    note = "That folder could not be remembered — try a different one."
                 }
             } onCancel: { picking = false }
         }
@@ -55,7 +55,7 @@ private struct CloudSavesSection: View {
         var stale: ObjCBool = false
         folder = dm_cloud_saves_path(&stale) ?? ""
         if stale.boolValue && folder.isEmpty {
-            note = "The folder you chose before is no longer readable (the app was signed differently). Please choose it again."
+            note = "The folder you chose before cannot be used by this build; the app log names the reason. Please choose it again."
         }
     }
 }

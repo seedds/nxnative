@@ -41,6 +41,46 @@ def builds_of(g):   # {build ID: module name} of a profile's build rows (a profi
 
 
 class Registry(unittest.TestCase):
+    def test_southpark_allocator_regions_are_disjoint(self):
+        # South Park 1.05 builds the 512 KiB slab boundary across three MOVZ/MOVK
+        # instructions. A cut to the first MOVZ alone looked correct in isolation
+        # but the following unchanged MOVK cleared the region high bits, overlapping the large
+        # allocation class and crashing in its owner-pointer bookkeeping.
+        p = REPO / 'dm/games/01008F2005154000/patches.py'
+        cuts = load(p, 'southpark_boundary').CUTS['df15edaaf603e00cd7d8a01bd05a15c2']
+        words = {off: nb for off, ob, nb, why in cuts}
+        words[0x17fb308] = 'eaff9ff2'  # original trailing MOVK x10,#0xffff
+        x10 = 0
+        for off in (0x17fb300, 0x17fb304, 0x17fb308):
+            w = int.from_bytes(bytes.fromhex(words[off]), 'little')
+            self.assertEqual(w & 31, 10, f'{off:#x} must write x10')
+            self.assertEqual(w & 0x1f800000, 0x12800000, f'{off:#x} must be MOVZ/MOVK')
+            op, shift, imm = (w >> 29) & 3, 16 * ((w >> 21) & 3), (w >> 5) & 0xffff
+            if op == 2: x10 = imm << shift  # MOVZ
+            else:
+                self.assertEqual(op, 3)  # MOVK
+                x10 = (x10 & ~(0xffff << shift)) | (imm << shift)
+        self.assertEqual(x10, 0x6007ffff)
+        # The game's actual sequence adds the aligned region base, then masks
+        # DOWN to 512 KiB. The assembled MOVK pair already includes +0x7ffff.
+        self.assertEqual(x10 & ~0x7ffff, 0x60000000)
+        # Independently check the other class boundary and the outer reserve.
+        # The last MOVK changes only the low 16 bits of the second boundary.
+        def movz_imm(off, reg, width=64):
+            word = int.from_bytes(bytes.fromhex(words[off]), 'little')
+            self.assertEqual(word & 31, reg)
+            self.assertEqual((word >> 29) & 3, 2)
+            self.assertEqual(64 if word >> 31 else 32, width)
+            return ((word >> 5) & 0xffff) << (16 * ((word >> 21) & 3))
+        self.assertEqual(movz_imm(0x17fb2b0, 0), 0x100000000)
+        self.assertEqual(movz_imm(0x17fb2b8, 22), 0x100000000)
+        self.assertEqual(movz_imm(0x17fb2dc, 5, 32), 0x6000)
+        self.assertEqual(movz_imm(0x17fb30c, 11), 0x80000000)
+        self.assertEqual(movz_imm(0x17fb388, 10), 0x80000000)
+        self.assertEqual(0x6000 * 0x10000, 0x60000000)
+        self.assertEqual(0x80000000 - 0x60000000, 0x20000000)
+        self.assertEqual(0x100000000 - 0x80000000, 0x80000000)
+
     def test_no_build_claimed_twice(self):
         for kind in ('CUTS', 'OBS', 'FRAME_STEP', 'CAPABILITIES'):
             seen = {}

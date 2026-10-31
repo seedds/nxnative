@@ -11,6 +11,16 @@ CUTS = {
     (0x93e8c, 'ea030232', '0a80a052', 'VammManager occupied node area: 1 GB to 64 MB'),
     (0x93fe0, 'ea030232', '0a40a052', 'AllocateAddressRegion: align regions of 1 GB and more to 32 MB'),
   ],
+  # South Park: The Fractured But Whole 1.05, SDK 3.5.1, Snowdrop.
+  # This older implementation is outside the reviewed SDK-wide matcher rules.
+  # Its 1 GiB node area and large-region alignment prevent the compact 4 GiB
+  # engine reservation from fitting the 5 GiB guest block. Both node bounds
+  # and the alignment must be cut for this exact sdk build.
+  '8bb65519bc6399ab432e0ba7cdb16e2b': [
+    (0x8cc60, 'e9030232', '097ca052', 'SDK 3 AddressRegionManager: node-area upper bound 1 GiB to 62 MiB'),
+    (0x8ccf4, 'ea030232', '0a7ca052', 'SDK 3 AddressRegionManager: occupied node-area length 1 GiB to 62 MiB'),
+    (0x8ce48, 'ea030232', '0a40a052', 'SDK 3 AllocateAddressRegion: align 1 GiB+ regions to 32 MiB'),
+  ],
   # Pokemon Brilliant Diamond 1.3.0 (SDK 11.4.3): nninitStartup (main+0x2c1d5c) gives pool - used to StandardAllocator with virtual address memory.
   # Its first CentralHeap::Init aborts at sdk+0x2f98e4: the 1 GB node area leaves no room for the 1 GB-aligned 3.14 GB reservation in a 4.375 GB alias region.
   # The constructor (sdk+0x34e0b8) is the same mechanism as Engage's below: the limit and the occupied length must both shrink to 62 MB.
@@ -204,6 +214,11 @@ MATCH_CUTS = {'sdk': [
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
+    {'what': 'SDK 3.5.1 node area 1 GiB → 62 MiB and large-region alignment 1 GiB → 32 MiB (8bb65519)',
+     'now': 'build', 'goal': 'sdk', 'purpose': 'address space',
+     'why': 'the compact Snowdrop reservation needs the older SDK 3 AddressRegionManager layout; a reviewed function matcher could apply these cuts to other builds of this implementation',
+     'blocked': 'the SDK 3 implementation is not covered by the current SDK-wide matcher rules',
+     'checked': 'exact sdk words on South Park 1.05 and compact Mac progress through character customization and difficulty, 2026-10-27'},
     {'what': 'node area 1 GB → 62 MB and regions of 4 MB and more aligned to 2 MB, as SDK 20: the SDK-wide rules', 'now': 'sdk', 'goal': 'sdk', 'purpose': 'address space',
      'checked': '20 registered builds rewritten byte-identical with the rules alone, 2026-10-29 and 2026-10-30; the 2 MB alignment on every sdk build on the drive, 2026-10-30',
      'why': 'one rule per reviewed implementation; every sdk build without CUTS gets them'},

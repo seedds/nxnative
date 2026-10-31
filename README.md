@@ -259,7 +259,7 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the Switch) wit
 </tr>
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/metroid-prime-remastered.jpg" width="256" alt="Metroid Prime Remastered"><br><small><b><a href="dm/games/010012101468C000/README.md">Metroid Prime Remastered</a></b></small></td>
-<td></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/south-park-fractured-but-whole.jpg" width="256" alt="South Park: The Fractured But Whole"><br><small><b><a href="dm/games/01008F2005154000/README.md">South Park: The Fractured But Whole</a></b><br>30/60 fps with 1.05</small></td>
 <td></td>
 </tr>
 </table>

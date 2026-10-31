@@ -56,6 +56,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `sdk` | rows the rules would add the alignment cuts to (2d369d99, 12f16103, 311deab1) | address space | blocked: the games that reach them (Pokémon Brilliant Diamond, Monster Hunter Rise, 13 Sentinels: Aegis Rim; Brain Memory Training Academy; Ace Attorney Investigations Collection) have no Mac build: run one per build with the alignment cuts | checked: the rules resolved on each build's sdk, 2026-10-29 and 2026-10-30 | 12 | [sdk_patches.py](../../dm/tools/sdk_patches.py) | the rules give these builds the same node area cut and the three alignment cuts more; each row keeps the alignment out |
 | `build` → `sdk` | rows of builds not on the game drive (56ec2474, 9c73fb73, e01950c5) | address space | blocked: no copy on the drive to compare | judgement | 3 | [sdk_patches.py](../../dm/tools/sdk_patches.py) | likely what the rules give (each names one of their implementations) |
 | `build` → `game` | Unity BucketAllocator ALLOC_BUCKET: 255 blocks of 4 MB → 63 | address space | blocked: no extracted main of either Subnautica on the game drive to fingerprint | checked: the bucket allocator of five Unity 2021 and later mains (not Subnautica's), 2026-10-29 | 2 | [Subnautica](../../dm/games/0100429011144000/README.md); [Subnautica: Below Zero](../../dm/games/010014C011146000/README.md) | Unity 2019's constructor call takes the block count as a constant; Unity 2021 and later read the bucket sizes from boot.config with a default of one block (Cult of the Lamb, Monster Train 2, Blasphemous 2, BALL x PIT, Donkey Kong Country Returns HD; checked 2026-10-29) and need no cut, so no Unity rule. A function-matched rule could carry it over the game's updates |
+| `build` → `sdk` | SDK 3.5.1 node area 1 GiB → 62 MiB and large-region alignment 1 GiB → 32 MiB (8bb65519) | address space | blocked: the SDK 3 implementation is not covered by the current SDK-wide matcher rules | checked: exact sdk words on South Park 1.05 and compact Mac progress through character customization and difficulty, 2026-10-27 | 1 | [sdk_patches.py](../../dm/tools/sdk_patches.py) | the compact Snowdrop reservation needs the older SDK 3 AddressRegionManager layout; a reviewed function matcher could apply these cuts to other builds of this implementation |
 | `build` → `sdk` | VammManager node area and alignment, SDK 4.4.0 (9de92bad) | address space | blocked: one game ships it | judgement | 1 | [sdk_patches.py](../../dm/tools/sdk_patches.py) | an older implementation no rule covers (its large regions aligned to 32 MB, not the rules' 2 MB); a rule once a second game ships it |
 | `build` → `engine` | Criterion's 60 fps mode, frame ticks and game step at fixed addresses | frame rate | blocked: one game on that engine here | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | Frostbite's frame regulator at a fixed pointer | frame rate | blocked: one Frostbite game here | judgement | 1 | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | engine code other Frostbite games ship (the simulation's own rate is already set by name) |
@@ -67,6 +68,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
 | `build` → `game` | 60 fps frame step: the KIDS frame task and frame-rate block | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step |
+| `build` → `game` | Snowdrop three-pool allocator: 12 GiB reservation → 4 GiB with rebalanced classes | address space | blocked: other South Park builds and sustained allocation-class high-water have not been checked | checked: exact v1.05 main words and compact Mac progress through character customization and difficulty, 2026-10-27 | 1 | [South Park™: The Fractured But Whole™](../../dm/games/01008F2005154000/README.md) | the seven cuts describe this game build's own allocator layout and its unchecked reservation failure; a function-matched rule could carry the layout across verified updates |
 
 ## Summary
 
@@ -90,6 +92,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [South Park™: The Fractured But Whole™](#south-park-the-fractured-but-whole) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Subnautica](#subnautica) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
@@ -450,6 +453,21 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.3.0 `main`** `94ceae32…`
   - host [hle_fpslock.c:27](../../dm/host/hle_fpslock.c#L27): engine frame limit set to fps_target: Unity targetFrameRate
 
+### South Park™: The Fractured But Whole™
+
+[South Park™: The Fractured But Whole™](../../dm/games/01008F2005154000/README.md), `01008F2005154000`, [patches.py](../../dm/games/01008F2005154000/patches.py).
+
+- **`build` → `game`**, address space, blocked: other South Park builds and sustained allocation-class high-water have not been checked, checked: exact v1.05 main words and compact Mac progress through character customization and difficulty, 2026-10-27: Snowdrop three-pool allocator: 12 GiB reservation → 4 GiB with rebalanced classes. The seven cuts describe this game build's own allocator layout and its unchecked reservation failure; a function-matched rule could carry the layout across verified updates
+
+- **1.05 `main`** `df15edaa…` ([patches.py:42](../../dm/games/01008F2005154000/patches.py#L42))
+  - cut `+0x17fb2b0`: Snowdrop: reserve 4 GiB instead of 12 GiB (mov x0,#0x100000000)
+  - cut `+0x17fb2b8`: Snowdrop: combined region end 4 GiB instead of 12 GiB (mov x22,#0x100000000)
+  - cut `+0x17fb2dc`: Snowdrop large allocator: cap 64 KiB pages at 24576 (1.5 GiB) instead of 65536
+  - cut `+0x17fb300`: Snowdrop: initialize large / 512 KiB slabs boundary to 1.5 GiB (paired with following movk)
+  - cut `+0x17fb304`: Snowdrop: preserve 1.5 GiB when completing first boundary with +0x7ffff before 512 KiB alignment
+  - cut `+0x17fb30c`: Snowdrop: second class boundary 512 KiB / 64 KiB slabs at 2 GiB, formerly 8 GiB
+  - cut `+0x17fb388`: Snowdrop: 64 KiB slab range starts at 2 GiB; following movk supplies 0xffff alignment mask
+
 ### Subnautica
 
 [Subnautica](../../dm/games/0100429011144000/README.md), `0100429011144000`, [patches.py](../../dm/games/0100429011144000/patches.py).
@@ -566,6 +584,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.py)), applied to every game that ships the build. They fit the SDK's address-space layout into an iPhone's guest block. The games listed are those whose profile registers the build.
 
+- **`build` → `sdk`**, address space, blocked: the SDK 3 implementation is not covered by the current SDK-wide matcher rules, checked: exact sdk words on South Park 1.05 and compact Mac progress through character customization and difficulty, 2026-10-27: SDK 3.5.1 node area 1 GiB → 62 MiB and large-region alignment 1 GiB → 32 MiB (8bb65519). The compact Snowdrop reservation needs the older SDK 3 AddressRegionManager layout; a reviewed function matcher could apply these cuts to other builds of this implementation
 - **`sdk`**, address space, at goal, checked: 20 registered builds rewritten byte-identical with the rules alone, 2026-10-29 and 2026-10-30; the 2 MB alignment on every sdk build on the drive, 2026-10-30: node area 1 GB → 62 MB and regions of 4 MB and more aligned to 2 MB, as SDK 20: the SDK-wide rules. One rule per reviewed implementation; every sdk build without CUTS gets them
 - **`build` → `sdk`**, address space, blocked: the games that reach them (Pokémon Brilliant Diamond, Monster Hunter Rise, 13 Sentinels: Aegis Rim; Brain Memory Training Academy; Ace Attorney Investigations Collection) have no Mac build: run one per build with the alignment cuts, checked: the rules resolved on each build's sdk, 2026-10-29 and 2026-10-30: rows the rules would add the alignment cuts to (2d369d99, 12f16103, 311deab1). The rules give these builds the same node area cut and the three alignment cuts more; each row keeps the alignment out
 - **`build` → `sdk`**, address space, blocked: no copy on the drive to compare, judgement: rows of builds not on the game drive (56ec2474, 9c73fb73, e01950c5). Likely what the rules give (each names one of their implementations)
@@ -575,22 +594,26 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
   - cut `+0x93dfc`: VammManager node area limit: 1 GB to 64 MB
   - cut `+0x93e8c`: VammManager occupied node area: 1 GB to 64 MB
   - cut `+0x93fe0`: AllocateAddressRegion: align regions of 1 GB and more to 32 MB
-- **sdk** `2d369d99…` ([sdk_patches.py:18](../../dm/tools/sdk_patches.py#L18)): 13 Sentinels: Aegis Rim (Asia) 1.00, 13 Sentinels: Aegis Rim 1.10, Big Brain Academy: Brain vs. Brain 1.2.0, Mario Party Superstars 1.1.1, Metroid Dread 2.1.0, Monster Hunter Rise 16.0.2, Pokémon Brilliant Diamond 1.3.0
+- **sdk** `8bb65519…` ([sdk_patches.py:19](../../dm/tools/sdk_patches.py#L19)): South Park™: The Fractured But Whole™ 1.05
+  - cut `+0x8cc60`: SDK 3 AddressRegionManager: node-area upper bound 1 GiB to 62 MiB
+  - cut `+0x8ccf4`: SDK 3 AddressRegionManager: occupied node-area length 1 GiB to 62 MiB
+  - cut `+0x8ce48`: SDK 3 AllocateAddressRegion: align 1 GiB+ regions to 32 MiB
+- **sdk** `2d369d99…` ([sdk_patches.py:28](../../dm/tools/sdk_patches.py#L28)): 13 Sentinels: Aegis Rim (Asia) 1.00, 13 Sentinels: Aegis Rim 1.10, Big Brain Academy: Brain vs. Brain 1.2.0, Mario Party Superstars 1.1.1, Metroid Dread 2.1.0, Monster Hunter Rise 16.0.2, Pokémon Brilliant Diamond 1.3.0
   - cut `+0x34e0c8`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x34e164`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `56ec2474…` ([sdk_patches.py:27](../../dm/tools/sdk_patches.py#L27)): Fire Emblem Engage 2.0.0
+- **sdk** `56ec2474…` ([sdk_patches.py:37](../../dm/tools/sdk_patches.py#L37)): Fire Emblem Engage 2.0.0
   - cut `+0x346430`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x3464cc`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `311deab1…` ([sdk_patches.py:35](../../dm/tools/sdk_patches.py#L35)): Ace Attorney Investigations Collection 1.0.0.2, ROMANCE OF THE THREE KINGDOMS 8 REMAKE 1.1.3
+- **sdk** `311deab1…` ([sdk_patches.py:45](../../dm/tools/sdk_patches.py#L45)): Ace Attorney Investigations Collection 1.0.0.2, ROMANCE OF THE THREE KINGDOMS 8 REMAKE 1.1.3
   - cut `+0x139468`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x1394fc`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `12f16103…` ([sdk_patches.py:43](../../dm/tools/sdk_patches.py#L43)): Brain Memory Training Academy 1.0.0, Unicorn Overlord (Asia) 1.05, Unicorn Overlord 1.05
+- **sdk** `12f16103…` ([sdk_patches.py:53](../../dm/tools/sdk_patches.py#L53)): Brain Memory Training Academy 1.0.0, Unicorn Overlord (Asia) 1.05, Unicorn Overlord 1.05
   - cut `+0x134778`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x13480c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `9c73fb73…` ([sdk_patches.py:50](../../dm/tools/sdk_patches.py#L50)): Patrick's Parabox 1.0.1
+- **sdk** `9c73fb73…` ([sdk_patches.py:60](../../dm/tools/sdk_patches.py#L60)): Patrick's Parabox 1.0.1
   - cut `+0x37c3b0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x37c44c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `e01950c5…` ([sdk_patches.py:58](../../dm/tools/sdk_patches.py#L58)): Hollow Knight: Silksong 1.0.30000
+- **sdk** `e01950c5…` ([sdk_patches.py:68](../../dm/tools/sdk_patches.py#L68)): Hollow Knight: Silksong 1.0.30000
   - cut `+0x145bfc`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x145c68`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
 
@@ -620,6 +643,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | Key and value | Games | Binding | Why |
 |---|---|---|---|
 | `enc_thread on` | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | `game` → `host`, gap | what iOS does for every game: a default for every game after `regress.py check` on the games |
+| `fps_target 30` | [South Park™: The Fractured But Whole™](../../dm/games/01008F2005154000/README.md) | `game`, at goal | a choice per game |
 | `game_env DOTNET_GCRegionRange=60000000` | [Absolum](../../dm/games/0100A83022A22000/README.md) | `game`, at goal | measured for the game's regions |
 | `present_snap on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with: a default for every game after `regress.py check` on the games |
 | `pso_mtl4 on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with on an iPhone: a default for every game after `regress.py check` on the games |

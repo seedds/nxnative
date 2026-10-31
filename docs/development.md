@@ -732,6 +732,8 @@ The settings:
 
 An archive is made again only when its inputs change: the consumed libraries' bytes and stamp (`inputs.tsv`), the stamp above, the architecture, the minimum OS, `metal-tt`'s version and `pso_offline.py` itself (keys in `$W/build/ios/pso/work`). A shader rebuild with another Metal compiler can change the library bytes without changing the profile or chain stamp, so the stamp alone is insufficient. Archive validation and fallback regressions are recorded under [Offline pipeline archive reuse and fallback](reference/shaders.md#offline-pipeline-archive-reuse-and-fallback).
 
+A base the GPU compiler rejects (`metal-tt` exit 1 with `Max Unstruct ID N ... exceeds supported limit`) does not fail the archive: `pso_offline.py` finds it by halving the script, leaves its pair to the device (`rest_pairs.tsv`, `rejected_base` lines in `archive.tsv`) and builds the rest ([the entry](reference/shaders.md#bases-the-gpu-compiler-rejects-the-archive-step-fails)). If the archive cannot be made at all, the NSP script warns and packs the app without it (`--pso-strict` / `DM_PSO_STRICT=1`: fail; `--gpu none`: skip the step).
+
 ## Power
 
 The game's own work and its frame rate stay as they are; the host avoids work of its own that the Switch never did. Every 300 frames the log has a `power` line (CPU energy in watts and per frame, CPU time, wakeups, thermal state, the threads that yield most) and a `residency set` line; [05](agents/05-debugging.md) explains them.

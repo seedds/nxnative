@@ -666,12 +666,16 @@ class Script(unittest.TestCase):
         ran, tmp = [], Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.said = []; self.settings_env = {}
         if kw.get('work'): tmp = kw['work']
         out = tmp / 'G.app'; shutil.rmtree(out, ignore_errors=True)
-        def fake_run(cmd, log, env=None, cwd=None, on_line=None):
+        def fake_run(cmd, log, env=None, cwd=None, on_line=None, fatal=True):
             ran.append([str(c) for c in cmd])
             if str(cmd[1]).endswith('dm/games/settings.py'):   # the launcher settings, before the packer
                 self.settings_env = env; Path(cmd[-1]).write_text('{}'); return
             if not on_line:   # pso_offline.py: its archive, or none when every eligible pair has function constants
                 o = Path(cmd[cmd.index('--out') + 1]); o.mkdir(parents=True, exist_ok=True)
+                if kw.get('pso_fail'):   # metal-tt failed: run() raises, or with fatal=False returns the exit code
+                    (o / 'applegpu_g14s.mtl4a.partial').write_bytes(b'half')
+                    if fatal: raise nsp.BuildError('pso_offline.py exit code 1')
+                    return 1
                 if not kw.get('no_bases'): (o / f'{cmd[cmd.index("--gpu") + 1]}.mtl4a').write_bytes(b'arch')
                 return
             (out / 'Contents/MacOS').mkdir(parents=True); (out / 'Contents/MacOS/dmhost').write_bytes(b'x')
@@ -679,10 +683,11 @@ class Script(unittest.TestCase):
             on_line(f'app: {out}')
         g = types.SimpleNamespace(table=lambda n: tmp / 'profile' / n, get={'app_category': 'public.app-category.games', 'romfs_marker': 'a/b'}.get)
         g.id = '01008CF01BAAC000'
-        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
+        self.prog = mock.Mock()
+        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', self.prog), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
-                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''))
+                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), kw.get('env', {}), tmp, gpus=kw.get('gpus', ''))
         self.pso_cmd = next((c for c in ran if c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
@@ -723,6 +728,26 @@ class Script(unittest.TestCase):
         shutil.rmtree(tmp / 'pso')
         o, _ = self.pack_cmd('nvn', work=tmp, no_bases=True)   # every eligible pair has function constants: pso_offline.py makes no archive, the app is packed without one
         self.assertNotIn('--pso', o); self.assertIsNotNone(self.pso_cmd)
+
+    def test_pso_archive_failure_is_a_warning(self):   # the archive is an optimization: the app builds its pipelines on its first start without it (LNPANDY/NX2Apple#98)
+        tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)
+        (tmp / 'profile').mkdir(); (tmp / 'profile/shader_pairs.tsv').write_text('v\tf\n')
+        o, _ = self.pack_cmd('nvn', work=tmp, pso_fail=True)
+        self.assertNotIn('--pso', o)   # packed without the archive
+        self.assertIn(mock.call('failed, the app is packed without one', warn=True), self.prog.end.call_args_list)   # a warning, not a failed stage
+        self.assertNotIn(mock.call(ok=False), self.prog.end.call_args_list)
+        self.assertTrue(any(m.startswith('[RED] pipeline archive: pso_offline.py failed') and '--pso-strict' in m for m in self.said))
+        self.assertFalse((tmp / 'pso/mac').exists())   # no half archive left to be picked up
+        with self.assertRaises(nsp.BuildError): self.pack_cmd('nvn', work=tmp, pso_fail=True, env={'DM_PSO_STRICT': '1'})   # --pso-strict / DM_PSO_STRICT=1: the build fails
+
+    def test_run_not_fatal_returns_the_exit_code(self):
+        log = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, log)
+        with mock.patch.object(nsp, 'PROG', mock.Mock()) as prog:
+            self.assertEqual(nsp.run([sys.executable, '-c', 'print("last"); raise SystemExit(3)'], log / 'x.log', fatal=False), 3)
+            self.assertNotIn(mock.call(ok=False), prog.end.call_args_list)   # the caller ends the stage
+            self.assertIn('last', prog.say.call_args[0][0])
+            self.assertEqual(nsp.run([sys.executable, '-c', 'pass'], log / 'x.log'), 0)
+            with self.assertRaises(nsp.BuildError): nsp.run([sys.executable, '-c', 'raise SystemExit(3)'], log / 'x.log')
 
 
 if __name__ == '__main__':

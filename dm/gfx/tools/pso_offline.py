@@ -15,8 +15,12 @@
 #                    it matches and a probe of a few bases finds them in the archive
 #   rest_pairs.tsv   the pairs the device still builds (only when there are any)
 #   archive.tsv      what was built: architectures, OS minimum, toolchain, bases (for people and logs; the host does not read it)
+# A base the GPU compiler rejects (metal-tt exit 1 with `Max Unstruct ID N in function agc.main in shader M exceeds supported limit`, seen on applegpu_g13g = M1: Super Mario Odyssey's
+#   alRenderMaterialUber) fails the whole archive. Its `shader M` is the backend's own job counter, not an index into the script (docs/reference/shaders.md, Bases the GPU compiler rejects),
+#   so the failing bases are found by halving the script (the messages' count says which half holds them), dropped, and the archive is made again, in at most three rounds. Their pairs
+#   go into rest_pairs.tsv with the pairs that have function constants (the device builds them), and archive.tsv lists them (`rejected_base`). Any other metal-tt failure is fatal
 # Each archive is made again only when its key changes (key.<arch> in the work folder): this file, the chain version, the libraries' bytes and stamp (inputs.tsv), the stamp above,
-# the architecture, the platform and minimum OS, and metal-tt's version.
+# the architecture, the platform and minimum OS, metal-tt's version and the bases it rejected (work/rejected.<arch>.tsv: another compiler tries them again).
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
 #          [--depth gl|zero] [--platform ios|macos] [--os-min 27.0] [--script-only]
 #   --game: the profile (DM_GAMES_DIR as for game.py) whose shader_pairs.tsv and pso_pairs.tsv are the pairs, and whose depth_mode key the depth mode, unless --pairs / --depth say;
@@ -25,10 +29,12 @@
 #   --os-min: the archives' system (default: for iOS the SDK's major version, e.g. 27.0; for macOS the major version this Mac runs, since the Mac app is built for the Mac that builds it).
 #   A device opens only an archive of its own major version (macOS 27.2 refused archives made for 26.0 and 26.6 and opened those for 27.0 and 27.2), and builds the bases itself
 #   otherwise: the SDK's version on a Mac whose system is older than its Xcode's SDK (macOS 26.6 with Xcode 27.1) left that Mac without them (GitHub issue #673)
-import argparse, hashlib, json, os, shutil, struct, subprocess, sys, time
+import argparse, hashlib, json, os, re, shutil, struct, subprocess, sys, time
 from pathlib import Path
 
 LAYER = b'render_target_array_index'
+LIMIT = re.compile(r'Max Unstruct ID \d+ in function \S+ in shader \d+ exceeds supported limit')   # applegpu-nt: a function past the backend's control-flow ID budget
+ROUNDS, PROBES = 3, 160   # rounds of (find the rejected bases, build again), and metal-tt runs the search may spend in all
 COLOUR = ('pixel_format', 'write_mask', 'blending_state', 'alpha_blend_operation', 'rgb_blend_operation', 'destination_alpha_blend_factor', 'destination_rgb_blend_factor',
           'source_alpha_blend_factor', 'source_rgb_blend_factor')
 
@@ -83,8 +89,9 @@ def functions(path):
     return dict(zip(names, consts))
 
 
-def plan(lib_dir, chain, pairs, zero):
-    """The bases the archive holds: [(vertex library, vertex entry, pixel library, pixel entry)], the pairs left to the device (function constants), and counts of the pairs left out"""
+def plan(lib_dir, chain, pairs, zero, owners=None):
+    """The bases the archive holds: [(vertex library, vertex entry, pixel library, pixel entry)], the pairs left to the device (function constants), and counts of the pairs left out.
+    owners: a dict that gets each base's pairs (which pairs the device builds when the compiler rejects the base)"""
     lib_dir = Path(lib_dir); js, fns, layer = {}, {}, {}
     def refl(key):
         if key not in js:
@@ -113,6 +120,7 @@ def plan(lib_dir, chain, pairs, zero):
         if ventry not in vf or fentry not in ff: left['entry'] += 1; continue
         if vf[ventry] or ff[fentry]: rest.append((vk, fk)); continue
         b = (vl, ventry, fl, fentry)
+        if owners is not None: owners.setdefault(b, []).append((vk, fk))
         if b not in seen: seen.add(b); bases.append(b)
     return bases, rest, left
 
@@ -160,6 +168,83 @@ def os_min_default(platform):
     return v.split('.')[0] + '.0'
 
 
+def run_tt(a, arch, osmin, work, js, out, log):
+    """metal-tt on a script: (exit code, its log). Its temporary files go on the work folder's volume"""
+    cmd = ['xcrun', '-sdk', sdk(a.platform), 'metal-tt', '-arch', arch, f'-{a.platform}-version-min', osmin, str(js), '-o', str(out)]
+    with open(log, 'w') as f:
+        r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))
+    return r.returncode, Path(log).read_text(errors='replace')
+
+
+def find_rejected(count, res, probe, budget=None):
+    """Which of count bases the compiler rejects. res: (exit code, log) of metal-tt on all of them. probe(indices) -> (exit code, log) of a script of just those. The messages name a job
+    number of the backend, not a base (and a base that passes may have them too), so the bases are found by halving: the messages of a half are counted, and when they are all of them
+    the other half is not run. A base is rejected when metal-tt fails on it alone and its log has the message. Returns [(index, message)]; raises RuntimeError when the budget of
+    metal-tt runs is spent"""
+    runs, budget = [0], budget or PROBES
+    def ask(idx):
+        runs[0] += 1
+        if runs[0] > budget: raise RuntimeError(f'more than {budget} metal-tt runs to find the rejected bases')
+        return probe(idx)
+    def search(idx, k, res):   # k messages are in idx; res: the result for exactly idx, when there is one
+        if len(idx) == 1:
+            rc, t = res or ask(idx)
+            m = LIMIT.search(t); return [(idx[0], m.group(0))] if rc and m else []
+        h = len(idx) // 2; ra = ask(idx[:h]); ka = len(LIMIT.findall(ra[1]))
+        out = search(idx[:h], ka, ra) if ka else []
+        return out + (search(idx[h:], k - ka, None) if k > ka else [])
+    return search(list(range(count)), len(LIMIT.findall(res[1])), res)
+
+
+def rejected_load(path):
+    """The bases a compiler rejected, from work/rejected.<arch>.tsv: [(base, message)]"""
+    try: lines = [l.split('\t') for l in Path(path).read_text().split('\n') if l and not l.startswith('#')]
+    except OSError: return []
+    return [(tuple(c[:4]), c[4] if len(c) > 4 else '') for c in lines if len(c) >= 4]
+
+
+def rejected_save(path, rej):
+    if rej: Path(path).write_text('# bases this architecture\'s compiler rejects (pso_offline.py): vertex library, entry, pixel library, entry, its message\n'
+                                  + ''.join('\t'.join([*b, m]) + '\n' for b, m in rej))
+    else: Path(path).unlink(missing_ok=True)
+
+
+def archive_key(parts, rejected):
+    """The key an archive is reused by: its inputs (parts) and the bases the compiler rejected"""
+    return hashlib.sha256('\0'.join([*parts, hashlib.sha256(repr(sorted(rejected)).encode()).hexdigest()]).encode()).hexdigest()[:16]
+
+
+def probe_tt(a, arch, osmin, work, lib_dir, use, idx):
+    """metal-tt on a script of just the bases use[i], i in idx: (exit code, log)"""
+    pj = work / f'probe.{arch}.mtl4-json'; pj.write_bytes(json.dumps(script(lib_dir, [use[i] for i in idx]), indent=1).encode())
+    return run_tt(a, arch, osmin, work, pj, work / f'probe.{arch}.mtl4a', work / f'probe.{arch}.log')
+
+
+def make_archive(a, arch, osmin, work, lib_dir, bases, js, part):
+    """metal-tt on the script of every base into part, again without the bases the compiler rejects (find_rejected) while it fails with the limit message, at most ROUNDS times.
+    Returns [(base, message)] of the bases dropped; part is absent when none is left. Exits on any other failure"""
+    rej, use, sjs, log = [], bases, js, work / f'metal-tt.{arch}.log'
+    for rnd in range(ROUNDS + 1):
+        if rnd: sjs = work / f'bases.{arch}.mtl4-json'; sjs.write_bytes(json.dumps(script(lib_dir, use), indent=1).encode())
+        print(f'pso_offline: {arch}: metal-tt, {len(use)} bases (minutes) ...', flush=True)
+        rc, text = run_tt(a, arch, osmin, work, sjs, part, log)
+        if not rc and part.is_file(): break
+        why = None   # set when the run ends here
+        if not rc or not LIMIT.search(text): why = ''
+        elif rnd == ROUNDS: why = f' after {ROUNDS} rounds that dropped the bases the compiler rejects'
+        else:
+            try: found = find_rejected(len(use), (rc, text), lambda idx, use=use: probe_tt(a, arch, osmin, work, lib_dir, use, idx))
+            except RuntimeError as e: why = f' ({e})'
+            else:
+                if not found: why = ' (no base of the script fails alone with the compiler\'s limit message)'
+        if why is not None: sys.exit(f'[RED] pso_offline: metal-tt failed for {arch} (exit {rc}){why}: {text[-2000:]}')
+        rej += [(use[i], m) for i, m in found]; gone = {b for b, _ in rej}; use = [b for b in bases if b not in gone]
+        print(f'pso_offline: {arch}: {len(found)} bases rejected by the compiler (round {rnd + 1}): {found[0][1]}', flush=True)
+        if not use: part.unlink(missing_ok=True); break
+    for f in work.glob(f'probe.{arch}.*'): f.unlink()
+    return rej
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Build the pipeline archive of a game\'s shader pairs offline (metal-tt)')
     ap.add_argument('--msl', required=True, help='the shader libraries, b-<chain version> (with their reflection <key>_b.json)')
@@ -190,7 +275,7 @@ def main(argv=None):
     zero = a.depth == 'zero'
     t0 = time.time()
     pairs = read_pairs(text)
-    bases, rest, left = plan(lib_dir, chain, pairs, zero)
+    owners = {}; bases, rest, left = plan(lib_dir, chain, pairs, zero, owners)
     work.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
     js = work / 'bases.mtl4-json'   # metal-tt takes the format from the extension: .mtl4-json is Metal 4's (.mtlp-json is the Metal 3 format)
     body = json.dumps(script(lib_dir, bases), indent=1).encode()
@@ -205,28 +290,31 @@ def main(argv=None):
     osmin = a.os_min or os_min_default(a.platform); tv = tool_version(a.platform) if bases else 'not used (function constants only)'
     inputs = (lib_dir / 'inputs.tsv').read_text() if (lib_dir / 'inputs.tsv').is_file() else ''
     libraries = library_digest(lib_dir, bases)
+    rejects = {}   # per architecture: [(base, message)]
     for arch in archs:
-        key = hashlib.sha256('\0'.join([Path(__file__).read_text(), chain, inputs, libraries, st, arch, a.platform, osmin, tv, hashlib.sha256(body).hexdigest()]).encode()).hexdigest()[:16]
-        dst, kf = out / f'{arch}.mtl4a', work / f'key.{arch}'
-        if dst.is_file() and kf.is_file() and kf.read_text().strip() == key: print(f'pso_offline: {arch}: reused ({dst.stat().st_size / 2**20:.0f} MB)'); continue
-        kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)
-        part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
-        cmd = ['xcrun', '-sdk', sdk(a.platform), 'metal-tt', '-arch', arch, f'-{a.platform}-version-min', osmin, str(js), '-o', str(part)]
-        t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases (minutes) ...', flush=True)
-        with open(work / f'metal-tt.{arch}.log', 'w') as log:
-            r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))   # its temporary files on the work folder's volume
-        if r.returncode or not part.is_file():
-            sys.exit(f'[RED] pso_offline: metal-tt failed for {arch} (exit {r.returncode}): {(work / f"metal-tt.{arch}.log").read_text()[-2000:]}')
-        os.replace(part, dst); kf.write_text(key + '\n')
+        rf, dst, kf = work / f'rejected.{arch}.tsv', out / f'{arch}.mtl4a', work / f'key.{arch}'
+        parts = [Path(__file__).read_text(), chain, inputs, libraries, st, arch, a.platform, osmin, tv, hashlib.sha256(body).hexdigest()]
+        key = archive_key(parts, rejected_load(rf))
+        if dst.is_file() and kf.is_file() and kf.read_text().strip() == key:
+            rejects[arch] = rejected_load(rf); print(f'pso_offline: {arch}: reused ({dst.stat().st_size / 2**20:.0f} MB)'); continue
+        kf.unlink(missing_ok=True); dst.unlink(missing_ok=True); rf.unlink(missing_ok=True)   # a compiler that came later tries the rejected bases again
+        part, t1 = work / f'{arch}.mtl4a.partial', time.time(); part.unlink(missing_ok=True)
+        rej = make_archive(a, arch, osmin, work, lib_dir, bases, js, part); rejects[arch] = rej; rejected_save(rf, rej)
+        if rej: print(f'[RED] pso_offline: {arch}: {len(rej)} bases the compiler rejects ({rej[0][1]}) left to the device (it builds their pipelines; they may fail there too)')
+        if not part.is_file(): print(f'pso_offline: {arch}: no base left for an archive'); continue
+        os.replace(part, dst); kf.write_text(archive_key(parts, rej) + '\n')
         print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s')
     for f in out.glob('*.mtl4a'):   # architectures no longer asked for
         if f.stem not in archs: f.unlink()
     (out / 'prebuilt.tsv').write_text(st)
     rp = out / 'rest_pairs.tsv'
+    gone = {b for rej in rejects.values() for b, _ in rej}   # a base one architecture's compiler rejects is left to the device on all (another's archive holds it: the device finds it there)
+    if gone: rest = rest + [pr for b in bases if b in gone for pr in owners[b]]
     if rest: rp.write_text(''.join(f'{v}\t{f}\n' for v, f in rest))
     else: rp.unlink(missing_ok=True)
     (out / 'archive.tsv').write_text(f'# the pipeline archive made offline (dm/gfx/tools/pso_offline.py); the host reads prebuilt.tsv, not this file\narch\t{" ".join(archs)}\n'
-                                     f'platform\t{a.platform}\t{osmin}\ntoolchain\t{tv}\nbases\t{len(bases)}\nrest\t{len(rest)}\n')
+                                     f'platform\t{a.platform}\t{osmin}\ntoolchain\t{tv}\nbases\t{len(bases)}\nrest\t{len(rest)}\n'
+                                     + (f'rejected\t{len(gone)}\n' + ''.join(f'rejected_base\t{ar}\t' + '\t'.join([*b, m]) + '\n' for ar, rej in sorted(rejects.items()) for b, m in rej) if gone else ''))
     return 0
 
 

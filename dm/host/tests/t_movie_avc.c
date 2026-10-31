@@ -12,6 +12,7 @@ uint64_t now_ns(void) { return 1; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
 void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
 void dm_host_helper_qos(qos_class_t q) { (void)q; }
+void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size) { (void)fn; (void)arg; (void)prio; (void)stack_size; return NULL; }   // the deferred signals' thread: none here, the queue is inspected
 
 typedef struct { uint8_t p[512]; unsigned bit; } writer;
 static void put(writer *w, unsigned v, unsigned n) {
@@ -55,6 +56,9 @@ static void drain(int nout) {
     for (int i = 0; i < 3; i++) queue_picture(d.avc);
     d.pend[0].in = 0; d.pend[0].pts = 777; d.pend[0].flags = 4; d.npend = 1; d.ninfree = MD_NIN - 1;
     md_pump(&d);
+    // a video decoder's results come from its own thread, which is not a guest thread: queued for the deferred thread, due at once, not signalled (md_pump_ev)
+    int queued_out = 0; for (int i = 0; i < g_ndfq; i++) if (g_dfq[i].d == &d && g_dfq[i].ev == 1) { assert(g_dfq[i].due == now_ns()); queued_out = 1; }
+    assert(queued_out); md_defer_drop(&d); assert(!g_ndfq);
     void *self[2] = { NULL, &d }; int got = 0, idx, left; int64_t pts; uint32_t flags;
     for (;;) {   // the client returns each output it takes, so the next one is always ready
         assert(!h_movie_AcqOut(self, &idx, &pts, &flags, &left));

@@ -81,6 +81,7 @@ typedef struct {
     struct { int in, off, size; int64_t pts; uint32_t flags; } pend[MD_NIN]; int npend;   // input packets waiting to be decoded (in arrival order)
     // Decoding: dmu lets only one guest thread take and decode packets at a time (packets enter libvpx in order); wmu / wcv hand one job to the host thread and wait for it
     pthread_mutex_t dmu, wmu; pthread_cond_t wcv; pthread_t wk;
+    pthread_mutex_t pkm; pthread_cond_t pkc; pthread_t pk; int pk_go, pk_quit, pk_on;   // the decoder's own thread: the SDK decodes on a codec thread, not on the caller's
     int job; const uint8_t *jp; int jn, jslot, jgot; int64_t jpts, jpts_out; int jflush;
     mavc *avc; int avc_drain; int64_t drain_pts; // H.264 (hle_movie_avc.c); avc_drain: the end-of-stream packet's output had a picture; the pictures still queued leave one per free slot, then an empty output with the
                                                  // end-of-stream flag and the packet's time (drain_pts)
@@ -428,6 +429,33 @@ static void md_job(mdec_t *d, int job) {
     while (d->job != MDJ_NONE) pthread_cond_wait(&d->wcv, &d->wmu);
     pthread_mutex_unlock(&d->wmu);
 }
+// The SDK queues a video packet and returns: its codec thread decodes it and signals each result once the hardware has finished it. The host decoded inside the call
+// that started the decode, so the game's thread stayed in SendInputBufferForDecode / ReleaseOutputBufferIndex for the whole decode (3-8 ms a packet). Mario Strikers:
+// Battle League's movie worker (MoviePlayerWorker) feeds its decoder that way while the owner thread stops the movie, destroys the player and clears its pointer
+// (main+0xab55a4); the worker, still inside its iteration, then read the cleared player (main+0xab4e18, address 0) at the opening movie's first skip or a menu change.
+// A video decoder now decodes on its own thread (md_pump_thread): the send and release calls queue the work and return, and the teardown lands between the worker's
+// iterations. That thread is not a guest thread and SignalEvent is guest code, so its results go through the deferred queue, due at once; Stop, Flush and the destructor
+// drop those not yet delivered. Audio decoders decode on the caller and signal at once: their players feed one packet per signal and a packet decodes quickly
+static void md_pump_ev(mdec_t *d, int ev) { if (MD_AUDIO(d)) md_event(d, ev); else md_defer_at(d, ev, now_ns()); }
+static void md_pump(mdec_t *d);
+static void *md_pump_thread(void *arg) {
+    mdec_t *d = arg;
+    pthread_setname_np("dm movie pump");
+    pthread_mutex_lock(&d->pkm);
+    for (;;) {
+        while (!d->pk_go && !d->pk_quit) pthread_cond_wait(&d->pkc, &d->pkm);
+        if (d->pk_quit) break;
+        d->pk_go = 0; pthread_mutex_unlock(&d->pkm);
+        md_pump(d);
+        pthread_mutex_lock(&d->pkm);
+    }
+    pthread_mutex_unlock(&d->pkm);
+    return NULL;
+}
+static void md_pump_async(mdec_t *d) {   // decode what is queued on the decoder's thread
+    if (!d->pk_on) { md_pump(d); return; }
+    pthread_mutex_lock(&d->pkm); d->pk_go = 1; pthread_cond_signal(&d->pkc); pthread_mutex_unlock(&d->pkm);
+}
 // while packets are queued and an output slot is free, decode the head packet, until the queue is empty or every slot is taken; signal the input / output events by the result
 static void md_pump(mdec_t *d) {
     dm_host_lock(&d->dmu);
@@ -442,7 +470,7 @@ static void md_pump(mdec_t *d) {
             d->out[s].pic = got; d->out[s].pts = got ? d->jpts_out : d->drain_pts; d->out[s].flags = got ? 0 : 4; d->outq[d->noutq++] = s;
             if (!got) d->avc_drain = 0;
             pthread_mutex_unlock(&d->mu);
-            md_event(d, 1);
+            md_pump_ev(d, 1);
             continue;
         }
         int slot = -1;
@@ -469,8 +497,8 @@ static void md_pump(mdec_t *d) {
         if (more) { d->avc_drain = 1; d->drain_pts = pk.pts; }
         int ineos = d->in_eos;
         pthread_mutex_unlock(&d->mu);
-        if (!ineos) md_event(d, 0);   // no input is announced after an end-of-stream packet (h_movie_AcqIn)
-        if (ready) md_event(d, 1);
+        if (!ineos) md_pump_ev(d, 0);   // no input is announced after an end-of-stream packet (h_movie_AcqIn)
+        if (ready) md_pump_ev(d, 1);
     }
     pthread_mutex_unlock(&d->dmu);
 }
@@ -505,6 +533,8 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11De
     d->nout = !audio ? MD_NOUT_VIDEO : type == MD_TYPE_AAC ? MD_NOUT_AAC : MD_NOUT;
     for (int i = 0; i < MD_NIN; i++) { d->in[i] = malloc(MD_INCAP); d->infree[i] = i; }
     d->ninfree = MD_NIN;
+    pthread_mutex_init(&d->pkm, NULL); pthread_cond_init(&d->pkc, NULL);
+    if (!audio) { if (pthread_create(&d->pk, NULL, md_pump_thread, d)) die("movie: failed to create the decoder's thread"); d->pk_on = 1; }
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1 << 20);
     if (pthread_create(&d->wk, &a, md_worker, d)) die("movie: failed to create the decoder thread");
     pthread_attr_destroy(&a);
@@ -525,6 +555,9 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE", "mov
 }
 static void md_free(void **self) {
     mdec_t *d = md_of(self); if (!d) return;
+    // The pump thread first, before its pending signals are dropped, the decoder thread is told to quit and any buffer is freed: a pump still running queues signals for
+    // this decoder (md_defer_at), and one queued after the drop would reach the deferred thread after free(d)
+    if (d->pk_on) { pthread_mutex_lock(&d->pkm); d->pk_quit = 1; pthread_cond_signal(&d->pkc); pthread_mutex_unlock(&d->pkm); pthread_join(d->pk, NULL); }
     md_defer_drop(d);
     if (!MD_AUDIO(d)) atomic_store_explicit(&g_movie_pic_ns, 0, memory_order_relaxed);
     self[1] = NULL;
@@ -535,6 +568,7 @@ static void md_free(void **self) {
     for (int i = 0; i < MD_NIN; i++) free(d->in[i]);
     for (int k = 0; k < MD_NOUT; k++) free(d->out[k].frm);
     free(d->vhdr[0]); free(d->vhdr[1]);
+    pthread_mutex_destroy(&d->pkm); pthread_cond_destroy(&d->pkc);
     pthread_mutex_destroy(&d->mu); pthread_mutex_destroy(&d->dmu); pthread_mutex_destroy(&d->wmu); pthread_cond_destroy(&d->wcv); free(d);
 }
 HLE_FORCE("_ZN5movie7DecoderD2Ev", "movie decoder destructor: frees the host object", void, h_movie_DecD2, void **self) { md_free(self); }
@@ -680,7 +714,7 @@ HLE_FORCE("_ZN5movie7Decoder24SendInputBufferForDecodeEiiilj", "movie decoder: s
     pthread_mutex_unlock(&d->mu);
     MD_TRACE(d, 7, "SendInputBufferForDecode index %d offset %d length %d time %lld µs flags %#x (%d packets queued)", i, off, size, (long long)pts, flags, queued);
     if (fmt_now) md_event(d, 2);
-    md_pump(d);
+    md_pump_async(d);
     return 0;
 }
 
@@ -780,7 +814,7 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     int n = md_rendered(d, i), queued = d->npend, drain = d->avc_drain;
     pthread_mutex_unlock(&d->mu);
     if (n) MD_TRACE(d, 13, "GetOutputBuffer index %d: %d earlier rendered output%s returned (%d packets queued%s)", i, n, n > 1 ? "s" : "", queued, drain ? ", H.264 pictures draining" : "");
-    if (n && (queued || drain)) md_pump(d);
+    if (n && (queued || drain)) md_pump_async(d);
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE", "movie decoder: get a frame", int, h_movie_GetOut, void **self, int i, void *buf) {
@@ -827,7 +861,7 @@ static int md_rel(mdec_t *d, int i) {
     MD_TRACE(d, 13, "release output index %d%s (%d packets queued%s)", i, held ? "" : ": not held by the client, nothing to release", queued, drain ? ", H.264 pictures draining" : "");
     // An H.264 drain waits for a free slot too: AI: THE SOMNIUM FILES (Unity 2017.4) held all 16 video slots when its logo movie's end-of-stream packet came, the drain stopped
     // with no packet queued, the last pictures and the end-of-stream flag never came out, and the game waited for the movie's end for good
-    if (held && (queued || drain)) md_pump(d);
+    if (held && (queued || drain)) md_pump_async(d);
     return held;
 }
 HLE_FORCE("_ZN5movie7Decoder24ReleaseOutputBufferIndexEi", "movie decoder: release an output index (decodes queued packets again)", int, h_movie_RelOut, void **self, int i) {

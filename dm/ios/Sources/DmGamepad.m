@@ -463,7 +463,10 @@ static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge;
 static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 32767); }
+static void read_halves(GCExtendedGamepad *g);
+static int split(GCController *c);
 static void read_pad(GCExtendedGamepad *g) {
+    if (split(g.controller)) { read_halves(g); return; }
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
     dm_haptics_apple_controller(p, g.controller);
     _Static_assert(DM_BTN_A == 1u << B_A && DM_BTN_B == 1u << B_B && DM_BTN_X == 1u << B_X && DM_BTN_Y == 1u << B_Y, "face button bits");
@@ -480,6 +483,80 @@ static void read_pad(GCExtendedGamepad *g) {
 static void pad_keep_system_buttons(GCController *c) { for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled; }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
+// A pair of Joy-Con held sideways (the launcher's Players section, LauncherControllers.swift; DM_JOYCON_SIDEWAYS=1 / 0 in the environment
+// wins): iPadOS hands the two halves over as one combined controller, which then becomes two players, the left half on the controller's own
+// slot and the right half on a second one (keyed by g_right_half). Each half is read as a single Joy-Con held sideways: its stick turned a
+// quarter (the left half's top to the left, the right half's top to the right) and its four buttons by their new positions (right A, bottom B,
+// top X, left Y); its + or − is +. The rail's SL / SR are not in the combined profile, so each half's own shoulder buttons stand in: L or R
+// is L, ZL or ZR is R.
+static NSMapTable<GCController *, NSObject *> *g_right_half;   // controller -> the owner of its right half's slot
+static int joycon_pair(GCController *c) {
+    NSString *n = [[c.productCategory ?: @"" stringByAppendingString:c.vendorName ?: @""] lowercaseString];
+    return c.extendedGamepad && ([n containsString:@"joy-con"] || [n containsString:@"joycon"]);
+}
+// What the launcher's Players section and this file agree on (LauncherControllers.swift does the same): a controller's key is its name and
+// which of the controllers of that name it is, in GameController's order ("Joy-Con (L/R)#2" is the second pair); the saved players.order
+// (an array of keys) is the player order chosen there, the others following in connection order; players.joyconSideways.<pair number> how
+// a Joy-Con pair is held (players.joyconSideways without a number is the default for every pair; DM_JOYCON_SIDEWAYS=1 / 0 in the
+// environment wins over both).
+static NSString *pad_key(GCController *c, NSArray<GCController *> *all) {
+    NSString *name = c.vendorName ?: c.productCategory;
+    NSUInteger k = 0;
+    for (GCController *o in all) { if ([(o.vendorName ?: o.productCategory) isEqualToString:name]) k++; if (o == c) break; }
+    return [NSString stringWithFormat:@"%@#%lu", name, (unsigned long)k];
+}
+static NSUInteger pair_number(GCController *c, NSArray<GCController *> *all) {
+    NSUInteger n = 0;
+    for (GCController *o in all) { if (joycon_pair(o)) n++; if (o == c) break; }
+    return n;
+}
+static int sideways(GCController *c) {
+    const char *e = getenv("DM_JOYCON_SIDEWAYS");
+    if (e && *e) return strcmp(e, "0") != 0;
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    NSString *pair = [NSString stringWithFormat:@"players.joyconSideways.%lu", (unsigned long)pair_number(c, GCController.controllers)];
+    return [d objectForKey:pair] ? [d boolForKey:pair] : [d boolForKey:@"players.joyconSideways"];
+}
+static int split(GCController *c) { return !g_merge && joycon_pair(c) && sideways(c); }
+// The controllers in the player order chosen in the launcher; a stable sort, so the others keep their connection order
+static NSArray<GCController *> *in_player_order(NSArray<GCController *> *all) {
+    NSArray<NSString *> *order = [NSUserDefaults.standardUserDefaults stringArrayForKey:@"players.order"] ?: @[];
+    NSMutableArray *keyed = [NSMutableArray array];
+    for (GCController *c in all) { NSUInteger i = [order indexOfObject:pad_key(c, all)]; [keyed addObject:@[@(i == NSNotFound ? NSUIntegerMax : i), @(keyed.count), c]]; }
+    [keyed sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) {
+        NSComparisonResult r = [a[0] compare:b[0]]; return r != NSOrderedSame ? r : [a[1] compare:b[1]]; }];
+    NSMutableArray *out = [NSMutableArray array]; for (NSArray *k in keyed) [out addObject:k[2]];
+    return out;
+}
+static void read_halves(GCExtendedGamepad *g) {
+    int pl = pad_slot_of(&g_slots, (__bridge const void *)g.controller), pr = pad_slot_of(&g_slots, (__bridge const void *)[g_right_half objectForKey:g.controller]);
+    uint64_t l = 0, r = 0;
+    #define K(btn, m, bit) if (btn.isPressed) m |= 1ull << bit
+    K(g.dpad.down, l, B_A); K(g.dpad.left, l, B_B); K(g.dpad.right, l, B_X); K(g.dpad.up, l, B_Y);        // left half: top turned to the left
+    K(g.buttonX, r, B_A); K(g.buttonA, r, B_B); K(g.buttonY, r, B_X); K(g.buttonB, r, B_Y);                // right half: top turned to the right
+                                                                                                         // (GameController names a Joy-Con's buttons by their labels, pad_apple.h,
+                                                                                                         // and does not turn them with the pair: X, A, Y, B are then right, bottom,
+                                                                                                         // top, left, checked by logging each press on an iPad)
+    K(g.buttonOptions, l, B_PLUS); K(g.buttonMenu, r, B_PLUS);
+    K(g.leftShoulder, l, B_L); K(g.leftTrigger, l, B_R); K(g.rightShoulder, r, B_L); K(g.rightTrigger, r, B_R);   // L / R in place of SL / SR (see above)
+    if (g.leftThumbstickButton) K(g.leftThumbstickButton, l, B_LS); if (g.rightThumbstickButton) K(g.rightThumbstickButton, r, B_LS);
+    #undef K
+    GCControllerDirectionPad *ls = g.leftThumbstick, *rs = g.rightThumbstick;
+    if (pl >= 0) { dm_haptics_apple_controller(pl, g.controller); dm_pad_set_player(pl, l, axis(-ls.yAxis.value), axis(ls.xAxis.value), 0, 0); }
+    if (pr >= 0) dm_pad_set_player(pr, r, axis(rs.yAxis.value), axis(-rs.xAxis.value), 0, 0);
+}
+// How many players the game takes (hle_hid.c, from SetSupportedNpadIdType), kept for the launcher's next start (players.max): the game
+// says it once it runs, so this looks again a few times in its first minute
+static void remember_accepted(void) {
+    static int scheduled;
+    NSUInteger n = dm_pad_players_accepted();
+    if ([NSUserDefaults.standardUserDefaults integerForKey:@"players.max"] != (NSInteger)n) {
+        [NSUserDefaults.standardUserDefaults setInteger:(NSInteger)n forKey:@"players.max"];
+        LOG("front end: the game takes %lu player%s", (unsigned long)n, n == 1 ? "" : "s");
+    }
+    if (scheduled++) return;
+    for (int s = 5; s <= 60; s += 5) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)s * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ scheduled = 1; remember_accepted(); });
+}
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : "each controller is a player of its own, the touch gamepad plays with player 1");
@@ -505,16 +582,28 @@ static BOOL pads_slotted(GCController *gone) {
         g_held[p].extendedGamepad.valueChangedHandler = nil;
         dm_motion_detach(g_held[p], p);   // player 1's: the phone's gyro (if on) takes over from its next sample
         dm_haptics_apple_controller(p, nil);
+        NSObject *half = [g_right_half objectForKey:g_held[p]];
+        if (half) {   // its right half's player too
+            int q = pad_slot_of(&g_slots, (__bridge const void *)half);
+            if (q >= 0) { pad_slot_free(&g_slots, (__bridge const void *)half); dm_pad_set_player(q, 0, 0, 0, 0, 0); }
+            [g_right_half removeObjectForKey:g_held[p]];
+        }
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     }
-    for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
+    for (GCController *c in in_player_order(now)) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
         g_held[p] = c; pad_keep_system_buttons(c);
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; read_pad(g); };
         dm_motion_attach(c, p);
-        npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
+        if (split(c)) {
+            if (!g_right_half) g_right_half = [NSMapTable strongToStrongObjectsMapTable];
+            NSObject *half = [g_right_half objectForKey:c] ?: [NSObject new];
+            [g_right_half setObject:half forKey:c];
+            int q = pad_slot_take(&g_slots, (__bridge const void *)half, [@(pad_name(c)) stringByAppendingString:@" (R)"].UTF8String);
+            LOG("controller '%s' connected, held sideways: left half player %d, right half player %d%s", pad_name(c), p + 1, q + 1, c.motion.hasRotationRate ? " (gyro: the left half's player)" : "");
+        } else { npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : ""); }
         read_pad(c.extendedGamepad);
     }
     dm_pad_players(pad_slot_mask(&g_slots));
@@ -524,6 +613,7 @@ static BOOL pads_slotted(GCController *gone) {
     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
     if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
     BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
+    remember_accepted();
     dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
 }
 @end

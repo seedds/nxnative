@@ -14,6 +14,8 @@ In 3D, the right stick (the camera in most games) is not drawn: swipe on the rig
 
 A connected game controller hides the touch controls and keeps every button.
 
+**Players.** Each connected controller is a player of its own, for local multiplayer: the settings screen's **Players** section lists them as P1, P2, … in the order the game gets them, and its arrows change that order. A pair of Joy-Con is one player held upright, or two held sideways (the left Joy-Con first, then the right). iPadOS does not pass on SL and SR, so each Joy-Con's own shoulder buttons stand in: L or R is L, ZL or ZR is R. Once the game has run, the section also shows how many players it takes, and greys out the controllers past that. Which two Joy-Con make a pair is up to iPadOS and iOS: to pair them differently, connect them again in Settings › Bluetooth.
+
 ## Rumble
 
 Game vibration uses the iPhone's haptic engine or a compatible connected controller. Controllers with separate left/right haptic outputs keep those effects separate. The settings screen's **Game rumble** and **Rumble strength** control it independently of **Touch feedback**. Phone rumble approximates the Switch's effects; physical feel and controller compatibility still need device testing.

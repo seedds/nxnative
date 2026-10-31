@@ -61,6 +61,7 @@ DM_HITCH_DUMP	diagnostic	`=<ms>[:<s>]`: when no frame has been presented for tha
 DM_HLECOUNT	diagnostic	`=<file>` (`%d` = process ID) writes at exit a TSV of how many times the guest called each HLE function, zero counts included
 DM_ICON	path	`=<image>` gives `build_ipa.sh` another app icon (default the `icon.jpg` beside the RomFS)
 DM_IMPORTS	diagnostic	When set, logs each import the loader binds to a host function and each forced takeover
+DM_JOYCON_SIDEWAYS	switch	On iOS, `=1` holds every Joy-Con pair sideways (one player per Joy-Con), `=0` upright (one player per pair), over the launcher's Players section
 DM_KBD	switch	`=<text>`: the system keyboard returns that text as OK without showing an input box; unset with no window, it returns cancel
 DM_KBD_PLAYER	switch	`own` makes the Mac keyboard player 1 on its own, with controllers from player 2 on (by default the first controller shares player 1 with the keyboard)
 DM_KEYS	switch	Scripted input: `<seconds or f<frame>>:<key>[+key][~hold or ~f<frames>][*count/interval],…` presses buttons, sticks, touches and `Shake` at those times; `=@<file>` reads the steps from the file

@@ -1,0 +1,28 @@
+# Shin chan: Shiro and the Coal Town (Unity 2021.3.18f1, NVN + IL2CPP + FMOD, SDK 15.3.2), update 1.0.2.
+# Started from the NSP script's provisional profile; the alias region is raised because Unity's virtual allocator
+# mapped 4.26 GB of the 4.375 GB it had and then wrote at NULL + 0x3fffe0 (a 4 MB pool - 0x20): see
+# docs/reference/memory.md "Size-class alignment doubles Unity's regions".
+title_id	010049901D704000
+program_id	010049901D704000
+
+name	Shin chan: Shiro and the Coal Town
+ipa	ShinChanShiroAndTheCoalTown.ipa
+app_category	public.app-category.games
+pad_layout	full
+
+build	v1	1.0.2	main=b6acb0f1227e5a35499f621b0055635c	subsdk0=368f01d5cb42f06cd125dc739d036719	sdk=8618895246b420329b77746b960a66ab
+package	v1
+shader_versions	v1
+
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/Movie/Coal_OP_1080p.mp4
+zip_store	.bundle:.dat:.json:.mp4:.ress:.metallib
+
+mem_reserve	0x200000000
+mem_alias	0x180000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+shader_groups	/Data/=data
+shader_note	Shin chan: Shiro and the Coal Town (Unity 2021.3) shaders

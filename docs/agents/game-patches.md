@@ -45,7 +45,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Unity's Application.targetFrameRate at a fixed address | frame rate | gap | judgement | 1 | [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) | an IL2CPP player registers the setter by its icall name, so the field can be found in any Unity game; whether to raise it stays the profile's |
 | `build` → `game` | frame limiter 30 → 60 fps and the 1/60 update step | frame rate | gap | judgement | 1 | [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) | the game's own limiter constant and fixed step |
 | `build` → `game` | frame limiter spin: its branch back cut | frame rate | gap | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the engine's own spin limiter; a function-matched rule could carry it over the game's updates |
-| `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code |
+| `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in these builds (1.9.0, 1.6.0); Tears of the Kingdom shares sead but not this code |
 | `build` → `game` | job pool wake-up | race | gap | judgement | 1 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md) | a lost wake-up in the game's own job pool, not a host or SDK difference |
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
@@ -94,7 +94,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
-| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 16 | 0 | 8 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -503,7 +503,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), `01007EF00011E000`, [patches.py](../../dm/games/01007EF00011E000/patches.py).
 
-- **`build` → `game`**, frame rate, gap, judgement: interval controller: the lower bound and the GPU-time path. Sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code
+- **`build` → `game`**, frame rate, gap, judgement: interval controller: the lower bound and the GPU-time path. Sead::GameFrameworkNx's interval controller in these builds (1.9.0, 1.6.0); Tears of the Kingdom shares sead but not this code
 - **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: 60 fps frame step and render scale (ksys::VFR). The game's own frame code; the frame-step state page is general
 
 - **1.9.0 `main`** `cd57b23f…` ([patches.py:14](../../dm/games/01007EF00011E000/patches.py#L14))
@@ -520,6 +520,19 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x1266880`: 3D view scale = the host render scale (1.0 = the game's dynamic resolution)
   - frame step `+0x151d3d0`: VFR::updateInterval: its own override published for the host (state page target fps; 0 = original)
   - render scale stub (the launcher offers DM_RENDER_SCALE)
+- **1.6.0 `main`** `8e9978d5…` ([patches.py:34](../../dm/games/01007EF00011E000/patches.py#L34))
+  - cut `+0x161499c`: lower bound of the candidate interval: mov v2.16b,v12.16b (2.0) → mov v2.16b,v11.16b (1.0)
+  - cut `+0x16149c4`: lower bound of the candidate interval: cmp w9,#2 → cmp w9,#1
+  - cut `+0x1614a00`: step-down target recorded when stepping up, max(candidate - 1, 2) → max(candidate - 1, 1): cmp w10,#2 → cmp w10,#1
+  - cut `+0x1614a04`: step-down target recorded when stepping up: csel w10,w10,w20,gt → csinc w10,w10,wzr,gt
+  - cut `+0x1614a60`: stepping down stops at < 3 → at < 2: cmp w1,#3 → cmp w1,#2
+  - cut `+0x1614a70`: next step-down target, max(target - 1, 2) → max(target - 1, 1): cmp w8,#2 → cmp w8,#1
+  - cut `+0x1614a74`: next step-down target: csel w8,w8,w20,gt → csinc w8,w8,wzr,gt
+  - cut `+0x1614d60`: setWaitVsyncInterval keeps an interval of 1 (the getter, VFR): cmp w1,#2 → cmp w1,#1
+  - cut `+0x1614d68`: setWaitVsyncInterval keeps an interval of 1: floor fmov s0,#2.0 → fmov s0,#1.0
+  - frame step `+0x126e4c4`: held-button tests and counts once per 30 fps tick at a one-vsync step (menu repeat in game time)
+  - frame step `+0x1614d50`: setWaitVsyncInterval: the host's step unless the VFR override is set (state page target fps; 0 = the game's interval)
+  - frame step `+0x1c01180`: VFR::updateInterval: its own override published for the host (state page target fps; 0 = original)
 
 ### The Legend of Zelda: Link's Awakening
 

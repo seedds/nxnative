@@ -86,11 +86,26 @@ os.makedirs(pkg, exist_ok=True)
 for f in os.listdir(pkg):
     if f.endswith('.bin'): os.unlink(os.path.join(pkg, f))
 recs, rows, rej, why, facts, texbuf = collections.defaultdict(list), [], [], collections.Counter(), {}, collections.Counter()
+brx = collections.Counter()
+# A jump table in c1 holds native addresses (16 bytes an instruction), which is where a computed branch goes on the console. Lowered, the instructions are elsewhere: left as they were, the targets are wrong blocks or none,
+# and a program that reaches one spins for good, the GPU at 100% and the game waiting for it. Each entry becomes its instruction's address in the layout the branches assume (+0x50, then two instructions, a scheduling word, three...)
+def jump_tables(c1, native, tables):
+    done = set()
+    for base in tables:
+        for o in range(base, len(c1) - 3, 4):
+            if o in done: continue
+            v = struct.unpack_from('<I', c1, o)[0]
+            if not v or v % 16 or v // 16 >= len(native): break
+            i = native[v // 16]
+            struct.pack_into('<I', c1, o, 0x50 + i * 8 + (i + 1) // 3 * 8); done.add(o); brx['table entries'] += 1
+    return bytes(c1)
 at = 0
 while at < len(d):
-    n, nlow, nwhy, tb = struct.unpack_from('<4I', d, at); at += 16
+    n, nlow, nwhy, tb, nmap, ntab, nbrx = struct.unpack_from('<7I', d, at); at += 28
     low = d[at:at + nlow]; at += nlow
     reason = d[at:at + nwhy].decode(); at += nwhy
+    native = struct.unpack_from(f'<{nmap}I', d, at); at += nmap * 4
+    tables = struct.unpack_from(f'<{ntab}I', d, at); at += ntab * 4
     key = order[n]; label, st, code, c1o, local = progs[key]
     if nlow: texbuf['none' if tb == 0xffffffff else tb] += 1
     if not nlow: rej.append((key, st, reason, label)); why[reason] += 1; continue
@@ -108,7 +123,8 @@ while at < len(d):
     low = struct.pack(f'<{len(words)}Q', *words) + bytes(8)
     # NVN1-shaped: 0x30 header with the stage's magic, the SPH, the lowered instructions, c1; a control section whose only meaningful fields say where c1 is
     body = bytes.fromhex('79563412') + bytes(0xfc) + low if st == 'cs' else bytes.fromhex('78563412') + bytes(0x2c) + code[:0x50] + low
-    c1 = code[c1o:]
+    c1 = jump_tables(bytearray(code[c1o:]), native, tables)
+    if nbrx: brx['programs'] += 1; brx['branches'] += nbrx; brx['branches with no table found'] += nbrx - ntab
     ctl = bytearray(0x880); ctl[:4] = bytes.fromhex('34127698'); struct.pack_into('<2I', ctl, 0x700, len(body), len(body) + len(c1))
     body += c1
     if st == 'cs': facts[key] = {'local': list(local), 'shared': 0}
@@ -116,6 +132,7 @@ while at < len(d):
     name = f'{st}_{group}.bin'
     rec = bytearray(b'BTCDBTCD' + bytes(0x30)); struct.pack_into('<2I', rec, 0x28, len(ctl), len(body)); rec += body + ctl
     rows.append((name, len(recs[name]), STAGE_NAME[st], key, label)); recs[name].append(bytes(rec))
+print('computed branches', dict(brx))
 for name, rr in recs.items():
     with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
 with open(mapout, 'w') as f:

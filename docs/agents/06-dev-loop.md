@@ -2,6 +2,23 @@
 
 One page for people and agents: the tools this repository has for building, running, debugging, measuring and checking a change, when to use which, and what a pull request needs. It links to where each tool is described instead of repeating it. Game files, keys, builds and runs stay outside the repository ([AGENTS.md](../../AGENTS.md)).
 
+## Before starting work
+
+Before task-specific investigation or implementation, check for existing reports, completed work and related changes. Read the repository instructions and identify the task first, then:
+
+1. **Search the target repository's issues and PRs.** Use the upstream repository the PR will target, not only a personal fork. Include open and closed issues and open, merged and closed PRs. Search by symptoms and exact error text, game name or title ID, subsystem, affected files and symbols; use several focused queries rather than one long query. Search titles, bodies and comments. For example:
+
+   ```sh
+   gh search issues --repo seedds/nxnative --include-prs --match title,body,comments --limit 100 '<terms>'
+   ```
+
+   Leave out state filters to include all states. GitHub's web search is also suitable. If a result limit is reached, narrow the queries or retrieve more results before drawing a conclusion.
+2. **Read relevant matches.** Read descriptions, discussion, linked issues and PRs, and the actual diffs. Check each PR's current status and whether its implementation is present in the target branch and this checkout. A closed PR may have been superseded or applied in another commit; its title or closed state alone does not prove the work is done.
+3. **Report existing implementations before proceeding.** Put the issue and PR links, their status, what they cover and any remaining gap in the chat and any handoff to another agent. If a PR already implements the requested work, point to it and avoid reimplementing it. If it is open or absent from this checkout, explain that rather than treating its absence as new work. Continue only with an uncovered part of the task, making the overlap explicit.
+4. **Use related work.** For a PR that overlaps without solving the same problem, consider its findings, approach, review feedback, tests and changed interfaces when choosing the new implementation. Account for dependencies and possible conflicts. Cite the related PR in the new PR's description and explain what was reused or how the changes fit together; do not assume an unmerged change is available on the target branch.
+5. **Link reports to the resulting PR.** When an existing issue reports the problem, reference it in the PR description. Use `Fixes #<number>` only when the PR fully resolves that issue; use `Related to #<number>` for partial coverage or context. Identify remaining work explicitly, and preserve these links when updating the PR description. Follow [the PR template](../../.github/pull_request_template.md).
+6. **Make the check's limits visible.** State what was searched and summarize the result, including when no relevant match was found. If GitHub access or search fails, say that the check is incomplete and why; use available local history and references, but do not claim there is no existing work. Repeat the search when the task's scope changes and before opening the PR, since another contributor may have worked on it in the meantime.
+
 ## 1. Build and run on the Mac
 
 | Step | Tool | Details |

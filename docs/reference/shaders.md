@@ -19,6 +19,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); base and both supplied DLC packs yield 5,752 unique shaders.
 - **Check:** `test_vbf.py` covers raw and zlib blocks, shared/missing members, truncation, unaligned effects, loose shader keys and inconsistent lengths. All 5,752 programs translate on the Mac.
 
+### LZ4 blocks in Virtuos VBF archives
+
+- **Symptom:** the split leaves out a VBF archive with `[RED] <name>.vbf: error: Error -3 while decompressing data: incorrect header check (its shaders are left out)`; the game runs with sound but every frame is black, with `[RED] shader … is not in the shader map` and `program has no vertex shader`.
+- **Cause:** `vbf.py` took every compressed block for zlib. FINAL FANTASY XII THE ZODIAC AGE's `FFXII_TZA.vbf` keeps its blocks as raw LZ4 blocks (no frame, no size prefix): the first block of an effect starts with a literal token and `RYHP` (`f3 1a 52 59 48 50 …`), not a zlib header.
+- **Fix:** a compressed block whose first two bytes are a valid zlib header (deflate, header checksum a multiple of 31) is inflated as before; any other compressed block is decoded as an LZ4 block of the block's stored size. A block that fails to decode is a `ValueError`, so the split leaves out that file only.
+- **Found on:** FINAL FANTASY XII THE ZODIAC AGE (`0100EB100AB42000`, no profile yet): all 814 shader members of `FFXII_TZA.vbf` decode; the split goes from 3,100 shaders (72 from game data) to 6,431 (3,403 from game data), and 22 of the 29 keys a provisional build asked for in its first minute are found. Seven control sections in `main` with no code area remain open.
+- **Check:** `test_vbf.py` covers LZ4 blocks and a corrupt LZ4 block beside the zlib and raw cases.
+
 ### A file no reader reads
 
 - **Symptom:** the shader split stops on one archive with a Python traceback (an `IndexError` or `struct.error` naming no file), or a reader's `[RED]` line about a format it does not know, and nothing is written; the NSP script loses the build at the split.

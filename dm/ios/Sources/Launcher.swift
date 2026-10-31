@@ -30,6 +30,18 @@ private struct GameDataSection: View {
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             Button(picked.isEmpty ? "Choose game data…" : "Choose a different location…") { picking = true }
+                // The sheet sits on the button, not on the Section: SwiftUI hands a Section's modifiers to every row, so one tap presented a picker per row and they invalidated each other (LNPANDY/NX2Apple#315).
+                .sheet(isPresented: $picking) {
+                    DocumentPicker(types: [.item]) { url in
+                        picking = false
+                        if dm_store_picked_data(url) {
+                            note = "Saved. The game uses this location when you press Play."
+                            refresh()
+                        } else {
+                            note = "That location could not be remembered — try a different one."
+                        }
+                    } onCancel: { picking = false }
+                }
             if !picked.isEmpty {
                 Button("Use the app's own data again", role: .destructive) {
                     dm_clear_picked_data(); refresh(); note = ""
@@ -39,17 +51,6 @@ private struct GameDataSection: View {
             Text(note.isEmpty
                  ? "Pick the game's romfs.img or its RomFS folder — an external drive or iCloud Drive works. The app remembers the choice; a re-signed build asks once more."
                  : note)
-        }
-        .sheet(isPresented: $picking) {
-            DocumentPicker(types: [.item]) { url in
-                picking = false
-                if dm_store_picked_data(url) {
-                    note = "Saved. The game uses this location when you press Play."
-                    refresh()
-                } else {
-                    note = "That location could not be remembered — try a different one."
-                }
-            } onCancel: { picking = false }
         }
         .onAppear(perform: refresh)
     }
@@ -85,6 +86,18 @@ private struct CloudSavesSection: View {
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             Button(folder.isEmpty ? "Choose a folder in iCloud Drive…" : "Choose a different folder…") { picking = true }
+                // The sheet sits on the button, not on the Section: SwiftUI hands a Section's modifiers to every row, so one tap presented a picker per row and they invalidated each other (LNPANDY/NX2Apple#315).
+                .sheet(isPresented: $picking) {
+                    DocumentPicker(types: [.folder]) { url in
+                        picking = false
+                        if dm_store_cloud_saves(url) {
+                            note = "Saved. The game uses this folder when you press Play."
+                            refresh()
+                        } else {
+                            note = "That folder could not be remembered — try a different one."
+                        }
+                    } onCancel: { picking = false }
+                }
             if !folder.isEmpty {
                 Button("Turn off cloud saves", role: .destructive) {
                     dm_clear_cloud_saves(); refresh(); note = ""
@@ -94,17 +107,6 @@ private struct CloudSavesSection: View {
             Text(note.isEmpty
                  ? "Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
                  : note)
-        }
-        .sheet(isPresented: $picking) {
-            DocumentPicker(types: [.folder]) { url in
-                picking = false
-                if dm_store_cloud_saves(url) {
-                    note = "Saved. The game uses this folder when you press Play."
-                    refresh()
-                } else {
-                    note = "That folder could not be remembered — try a different one."
-                }
-            } onCancel: { picking = false }
         }
         .onAppear(perform: refresh)
     }

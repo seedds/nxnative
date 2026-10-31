@@ -27,6 +27,13 @@
 
 ## RomFS images
 
+### RomFS image paths and shader groups fail on Windows
+
+- **Symptom:** a Windows build cannot read a resource inside `RomFS.img`, or its shader sources have backslash-separated labels that do not match the profile's slash-separated groups.
+- **Cause:** the image reader splits host paths only on `/` and assumes `pread` exists; Windows uses `\\` and does not provide `pread`. Text-mode file descriptors can also alter binary bytes. Shader source labels inherited the host's separator.
+- **Fix:** normalize host paths before finding the image, open its descriptor in binary mode, and seek then read on platforms without `pread`. Normalize source labels for base games and DLC to `/`. Synthetic image-reader tests check bounded reads and portable labels.
+- **Found on:** a Windows-built Rhythm Heaven Groove 1.0.0 IPA, reported to launch on an iPhone. The Windows front end also required separate fixes; no Mac regression run was available.
+
 ### RomFS folder transfers fail or leave stale game files
 
 - **Symptom:** `devicectl` copying a large RomFS folder fails with POSIX error 24 (`EMFILE`) or spends most of its time on small files; deleting an old folder during iOS startup hits the launch watchdog. A push after changing extracted files can also keep sending old assets if an image is reused solely because it exists.

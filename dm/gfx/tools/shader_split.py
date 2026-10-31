@@ -1078,20 +1078,26 @@ def nlg4_shaders(d, stem, label, out):
     starts with the new table and the new shader table (3,149 programs in 1.3.2, the same count the game passes to nvnProgramSetShaders at boot); an offset below the old section's length
     reads the old data, the rest the body's new data counted from that length (as Luigi's Mansion 3's patch_section).
     Not read from the index yet: where each section starts in the stream (and in the body). Each is the one start for which every offset of its kind lands on a control section / a code area
-    that check() accepts, so a wrong start cannot pass; the layout of the rest of the index (sections, chunks, names) is not decoded, and an archive without a shader table is left out"""
+    that check() accepts, so a wrong start cannot pass; the layout of the rest of the index (sections, chunks, names) is not decoded. BNSH containers in any archive's data are read as everywhere else (scan_blob)"""
     progs = nlg4_programs(nlg4_unzs(d[0x40:]))
-    if not progs: return   # no shader table: models, textures, sounds (878 of Strikers' 879 archives)
     data = nlg4_unzs(open(stem + '.data', 'rb').read())
+    patch = open(stem + '.patch', 'rb').read() if os.path.exists(stem + '.patch') else None
+    if patch and patch[4:6] != NLG4_PATCH: red(f'{label}: the patch header {patch[4:8].hex(" ")} is not a revision-4 patch')
+    body = nlg4_unzs(patch[0x18:]) if patch else b''
+    # NintendoWare Ui2d / Font keep BNSH containers in the data of other archives (Strikers' FrontEnd/Persistent: 19 of them, global, the tutorials): the menu text and the
+    # tutorial overlays draw with them (41 shaders; without them the run reported eight programs not in the shader map and the quick-match menu showed no text). Unchanged
+    # containers are in the base data, those an update replaced whole in the patch body
+    for name, buf in (('', data), ('.patch', body)):
+        if b'BNSH\0\0\0\0' in buf: scan_blob(buf, label + name, out)
+    if not progs: return   # no shader table: models, textures, sounds
     def at(buf, s, o, n): return buf[s + o:s + o + n]
     CTL, CODE = (CTL_MAGIC,), (GFX_MAGIC, CS_MAGIC)
-    old = progs; patch = open(stem + '.patch', 'rb').read() if os.path.exists(stem + '.patch') else None
+    old = progs
     cs0, ks0 = nlg4_place(data, [p[3] for p in old], CTL), nlg4_place(data, [p[1] for p in old], CODE)
     if cs0 is None or ks0 is None: red(f'{label}: no start of the control / code section fits all {len(old)} programs of the shader table')
     ctl_old, code_old = max(p[2] + p[3] for p in old), max(p[0] + p[1] for p in old)
-    body, cs1, ks1 = b'', None, None
+    cs1, ks1 = None, None
     if patch:
-        if patch[4:6] != NLG4_PATCH: red(f'{label}: the patch header {patch[4:8].hex(" ")} is not a revision-4 patch')
-        body = nlg4_unzs(patch[0x18:])
         if len(body) != struct.unpack_from('<I', patch, 8)[0]: red(f'{label}: the patch body inflates to {len(body):#x} bytes, its header says {struct.unpack_from("<I", patch, 8)[0]:#x}')
         progs = nlg4_programs(body)
         if not progs: red(f'{label}: the patch body has no shader table')

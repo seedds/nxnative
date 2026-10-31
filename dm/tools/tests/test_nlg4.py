@@ -1,5 +1,5 @@
 """shader_split: revision-4 Next Level Games archives (Mario Strikers: Battle League). zstd frames padded between them decompress as one stream; the shader table is read by
-its four-entry groups; a program's code area and control section come from the base '.data' or, past the old section's length, from the patch body. No game files needed."""
+its four-entry groups; a program's code area and control section come from the base '.data' or, past the old section's length, from the patch body; BNSH containers are looked for in the data and the patch body of every archive. No game files needed."""
 import os
 import struct
 import subprocess
@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
@@ -71,8 +72,19 @@ class Archive(unittest.TestCase):
     def test_no_shader_table_is_quiet(self):
         with tempfile.TemporaryDirectory() as d:
             self.write(d, 'a.dict', ss.NLG_DICT + ss.NLG4_DICT + b'\x03\x00' + bytes(0x38) + zs(bytes(0x100)))
+            self.write(d, 'a.data', zs(os.urandom(0x200).replace(b'BNSH', b'\0' * 4)))
             out = []; ss.nlg_shaders(os.path.join(d, 'a.dict'), '/a.dict', out)
             self.assertEqual(out, [])
+
+    def test_bnsh_in_the_data_and_the_patch_body(self):   # NintendoWare Ui2d / Font containers in an archive without a shader table (Strikers' FrontEnd/Persistent)
+        bnsh = b'BNSH\0\0\0\0' + bytes(range(256))
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(ss, 'scan_blob') as scan:
+            self.write(d, 'a.dict', ss.NLG_DICT + ss.NLG4_DICT + b'\x03\x00' + bytes(0x38) + zs(bytes(0x100)))
+            self.write(d, 'a.data', zs(b'\1' * 0x40 + bnsh))
+            body = b'\2' * 0x20 + bnsh
+            self.write(d, 'a.patch', ss.NLG_DICT + ss.NLG4_PATCH + b'\x03\x00' + struct.pack('<I', len(body)) + bytes(12) + zs(body))
+            out = []; ss.nlg_shaders(os.path.join(d, 'a.dict'), '/a.dict', out)
+            self.assertEqual([(c.args[0], c.args[1]) for c in scan.call_args_list], [(b'\1' * 0x40 + bnsh, '/a.dict'), (body, '/a.dict.patch')])
 
 
 if __name__ == '__main__':

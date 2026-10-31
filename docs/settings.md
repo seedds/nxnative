@@ -24,6 +24,8 @@ A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without
 
 Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and a few others) offer **30 fps** or **60 fps**. 60 is smoother; 30 is what the Switch ran and uses less power, so the phone stays cooler and the battery lasts longer. The game runs at real speed either way.
 
+A few other games run their own clock and only ask the Switch for every second refresh (DOOM); for those the app offers **30 fps** (as on the Switch) or **60 fps**, which shows a frame on every refresh. 60 needs about twice the GPU time: where the GPU cannot keep up, frames come late and the controls feel behind. **60 fps (30 when it does not fit)** runs at 60 while frames fit and holds a steady 30 when they stop fitting, trying 60 again once the scene is light, as the frame step does for the games above ([Hold frames when late](#hold-frames-when-late)).
+
 ### Render scale
 
 The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.

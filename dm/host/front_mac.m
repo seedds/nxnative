@@ -21,6 +21,7 @@
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
 #include "pad_apple.h"
+#include "dm_webpad.h"
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -210,6 +211,7 @@ static void pads_start(void) {
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     pads_changed(nil);
     dm_motion_pro_start(pro_devices_changed);
+    dm_webpad_start();
 }
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,
@@ -256,6 +258,101 @@ static void *guest_tramp(void *p) {
 
 // Metal reads MTL_HUD_ENABLED when the process makes its first device, which can be before the window: set from DM_METAL_HUD before main (set in front_run, the HUD did not show)
 __attribute__((constructor)) static void hud_env(void) { front_hud_env(); }
+
+// WebPad PIN pairing in-game overlay
+static NSVisualEffectView *g_webpad_overlay = nil;
+static NSTimer *g_webpad_overlay_timer = nil;
+
+@interface DmWebpadOverlayHandler : NSObject
++ (void)closeClicked;
+@end
+
+@implementation DmWebpadOverlayHandler
++ (void)closeClicked {
+    if (g_webpad_overlay) {
+        [g_webpad_overlay removeFromSuperview];
+        g_webpad_overlay = nil;
+    }
+    if (g_webpad_overlay_timer) {
+        [g_webpad_overlay_timer invalidate];
+        g_webpad_overlay_timer = nil;
+    }
+}
+@end
+
+static void webpad_pin_prompt_handler(const char *pin, const char *client_ip) {
+    (void)client_ip;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!pin) {
+            // Dismiss overlay if no clients are pending authentication
+            [DmWebpadOverlayHandler closeClicked];
+            return;
+        }
+        if (!g_win || !g_win.contentView) return;
+        NSView *cv = g_win.contentView;
+        NSString *pinStr = @(pin);
+
+        if (!g_webpad_overlay) {
+            CGFloat w = 340, h = 135;
+            NSRect frame = NSMakeRect(floor((cv.bounds.size.width - w) / 2), cv.bounds.size.height - h - 28, w, h);
+            g_webpad_overlay = [[NSVisualEffectView alloc] initWithFrame:frame];
+            g_webpad_overlay.material = NSVisualEffectMaterialHUDWindow;
+            g_webpad_overlay.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+            g_webpad_overlay.state = NSVisualEffectStateActive;
+            g_webpad_overlay.wantsLayer = YES;
+            g_webpad_overlay.layer.cornerRadius = 16.0;
+            g_webpad_overlay.layer.borderColor = [NSColor colorWithWhite:1.0 alpha:0.18].CGColor;
+            g_webpad_overlay.layer.borderWidth = 1.0;
+            g_webpad_overlay.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin;
+
+            // Close button (X) in top-right
+            NSButton *closeBtn = [NSButton buttonWithTitle:@"✕" target:[DmWebpadOverlayHandler class] action:@selector(closeClicked)];
+            closeBtn.frame = NSMakeRect(w - 32, h - 32, 24, 24);
+            closeBtn.bordered = NO;
+            closeBtn.font = [NSFont systemFontOfSize:13 weight:NSFontWeightBold];
+            closeBtn.contentTintColor = [NSColor colorWithWhite:0.75 alpha:1.0];
+            [g_webpad_overlay addSubview:closeBtn];
+
+            // Subtitle / Title
+            NSTextField *titleLbl = [NSTextField labelWithString:@"🎮 Wi-Fi Controller Pairing"];
+            titleLbl.frame = NSMakeRect(16, h - 34, w - 50, 20);
+            titleLbl.font = [NSFont systemFontOfSize:13 weight:NSFontWeightBold];
+            titleLbl.textColor = [NSColor colorWithCalibratedRed:0.29 green:0.87 blue:0.50 alpha:1.0];
+            [g_webpad_overlay addSubview:titleLbl];
+
+            NSTextField *subLbl = [NSTextField labelWithString:@"A phone is requesting to join. Enter PIN:"];
+            subLbl.frame = NSMakeRect(16, h - 54, w - 32, 16);
+            subLbl.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+            subLbl.textColor = [NSColor colorWithWhite:0.8 alpha:1.0];
+            [g_webpad_overlay addSubview:subLbl];
+
+            // PIN display badge
+            NSTextField *pinLbl = [NSTextField labelWithString:pinStr];
+            pinLbl.tag = 999;
+            pinLbl.frame = NSMakeRect((w - 180) / 2, 14, 180, 48);
+            pinLbl.alignment = NSTextAlignmentCenter;
+            pinLbl.font = [NSFont monospacedDigitSystemFontOfSize:32 weight:NSFontWeightHeavy];
+            pinLbl.textColor = [NSColor whiteColor];
+            pinLbl.wantsLayer = YES;
+            pinLbl.layer.backgroundColor = [NSColor colorWithWhite:0.0 alpha:0.45].CGColor;
+            pinLbl.layer.cornerRadius = 10.0;
+            pinLbl.layer.borderColor = [NSColor colorWithCalibratedRed:0.29 green:0.87 blue:0.50 alpha:0.4].CGColor;
+            pinLbl.layer.borderWidth = 1.5;
+            [g_webpad_overlay addSubview:pinLbl];
+
+            [cv addSubview:g_webpad_overlay];
+        } else {
+            NSTextField *pinLbl = [g_webpad_overlay viewWithTag:999];
+            if (pinLbl) pinLbl.stringValue = pinStr;
+        }
+
+        if (g_webpad_overlay_timer) [g_webpad_overlay_timer invalidate];
+        g_webpad_overlay_timer = [NSTimer scheduledTimerWithTimeInterval:30.0 repeats:NO block:^(NSTimer * _Nonnull timer) {
+            (void)timer;
+            [DmWebpadOverlayHandler closeClicked];
+        }];
+    });
+}
 
 // ---------- Cheats: the menu and the panel (hle_cheats.c holds every state; these only show it and call it) ----------
 
@@ -1187,6 +1284,7 @@ void front_run(void (*guest)(void)) {
                 if (!c.extendedGamepad || g_merge) LOG("controller %s: %s%s", conn ? "connected" : "disconnected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
                 pads_changed(conn ? nil : c); }];
         dm_haptics_apple_init();
+        dm_webpad_set_pin_prompt_cb(webpad_pin_prompt_handler);
         pads_start();
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual

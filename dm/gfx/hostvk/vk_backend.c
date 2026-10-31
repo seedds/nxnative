@@ -249,11 +249,33 @@ uint64_t be_upload_bytes(void) { return atomic_load(&hvk.st_upload_bytes); }
 void be_create_stats(uint64_t *lib, uint64_t *pso) { *lib = atomic_load(&hvk.st_shaders); *pso = atomic_load(&hvk.st_pipelines); }
 void be_create_ns(uint64_t *lib_ns, uint64_t *pso_ns) { *lib_ns = 0; *pso_ns = atomic_load(&hvk.st_pipeline_ns); }   // pso_ns: the time draws waited for their pipelines
 void be_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none) { *draws = *made = *none = 0; }
+// The device-local heaps' budget and use (VK_EXT_memory_budget), in MiB; 0 when the device has not the extension
+static int mem_budget(double *budget_mib, double *usage_mib) {
+    *budget_mib = *usage_mib = 0;
+    if (!hvk.on || !hvk.dev.x.memory_budget) return 0;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT b = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 p = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &b};
+    vkGetPhysicalDeviceMemoryProperties2(hvk.dev.phys, &p);
+    for (uint32_t i = 0; i < p.memoryProperties.memoryHeapCount; i++)
+        if (p.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) { *budget_mib += b.heapBudget[i] / 1048576.0; *usage_mib += b.heapUsage[i] / 1048576.0; }
+    return 1;
+}
+// The backend's resource line (hle_nvn.c gives it 400 bytes, so it stays short): commands, and texture memory (step P7, decision D1): every image, ASTC held compressed against ASTC decoded into RGBA8 (with what its blocks
+// take), the uploads by path, and the device-local budget where VK_EXT_memory_budget gives it
 void be_res_stats(char *out, size_t n) {
-    if (n) snprintf(out, n, "vulkan: passes %llu draws %llu dispatches %llu pipelines %llu shaders %llu barriers %llu pass splits %llu GPU vertex copies %llu GPU quad indices %llu",
-                    (unsigned long long)hvk.st_passes, (unsigned long long)hvk.st_draws, (unsigned long long)hvk.st_dispatches, (unsigned long long)hvk.st_pipelines,
-                    (unsigned long long)hvk.st_shaders, (unsigned long long)hvk.st_barriers, (unsigned long long)hvk.st_pass_splits, (unsigned long long)hvk.st_vcopies_gpu,
-                    (unsigned long long)hvk.st_index_gpu);
+    if (!n) return;
+    double mib = 1048576.0, bud, use;
+    int k = snprintf(out, n, "vulkan: passes %llu draws %llu dispatches %llu pipelines %llu shaders %llu barriers %llu pass splits %llu GPU vertex copies %llu GPU quad indices %llu; "
+                     "textures %.1f MiB (ASTC %.1f native, %.1f decoded from %.1f of blocks), uploads GPU %llu CPU %llu, ASTC decodes %llu",
+                     (unsigned long long)hvk.st_passes, (unsigned long long)hvk.st_draws, (unsigned long long)hvk.st_dispatches, (unsigned long long)hvk.st_pipelines,
+                     (unsigned long long)hvk.st_shaders, (unsigned long long)hvk.st_barriers, (unsigned long long)hvk.st_pass_splits, (unsigned long long)hvk.st_vcopies_gpu,
+                     (unsigned long long)hvk.st_index_gpu, (double)atomic_load(&hvk.st_tex_bytes) / mib, (double)atomic_load(&hvk.st_astc_native_bytes) / mib,
+                     (double)atomic_load(&hvk.st_astc_decoded_bytes) / mib, (double)atomic_load(&hvk.st_astc_block_bytes) / mib, (unsigned long long)atomic_load(&hvk.st_up_gpu),
+                     (unsigned long long)atomic_load(&hvk.st_up_cpu), (unsigned long long)atomic_load(&hvk.st_astc_decodes));
+    if (k > 0 && (size_t)k < n) {
+        if (mem_budget(&bud, &use)) snprintf(out + k, n - (size_t)k, "; device-local %.0f of %.0f MiB", use, bud);
+        else snprintf(out + k, n - (size_t)k, "; no memory budget");
+    }
 }
 void be_barrier_stats(uint64_t *skip, uint64_t *full) { *skip = 0; *full = atomic_load(&hvk.st_barriers); }
 uint32_t be_present_qos(void) { return 0; }   // PLAT_QOS_UNSPECIFIED: no present thread yet

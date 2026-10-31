@@ -300,7 +300,7 @@ host_test(t_vk_import SOURCES ../../gfx/hostvk/tests/t_vk_import.c ${HOSTVK_SRC}
 # backend (nxhost takes one at step M7). Its own shaders are SPIR-V arrays in committed headers (dm/gfx/hostvk/shaders/gen/, written by shaders/gen_spirv.sh), so building needs no glslang
 set(HOSTVK_BACKEND_SRC vk_backend.c vk_memory.c vk_texture.c vk_shader.c vk_pipeline.c vk_commands.c vk_device.c vk_import.c vk_gpl.c vk_cache.c vk_prewarm.c)   # the last three: phase P5
 list(TRANSFORM HOSTVK_BACKEND_SRC PREPEND ${REPO}/dm/gfx/hostvk/)
-list(APPEND HOSTVK_BACKEND_SRC ${REPO}/dm/gfx/tex/nvn_fmt_vk.c ${REPO}/dm/third_party/volk/volk.c)
+list(APPEND HOSTVK_BACKEND_SRC ${REPO}/dm/gfx/tex/nvn_fmt_vk.c ${REPO}/dm/gfx/tex/astc_decode.c ${REPO}/dm/third_party/volk/volk.c)   # astc_decode.c: the CPU fallback of the ASTC decode (P7)
 add_library(nvn_vk STATIC ${HOSTVK_BACKEND_SRC})
 add_dependencies(nvn_vk game_profile)
 target_compile_options(nvn_vk PRIVATE ${HOST_FLAGS})
@@ -340,6 +340,32 @@ endif()
 # background and with the prebuild, cold and warm). The last two run themselves again as child processes for each start (t_vk_harness.h hv_spawn)
 foreach(t IN ITEMS gpl_identity pipeline_cache prewarm)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
+    target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
+endforeach()
+# Textures (docs/design/vulkan-backend.md section 5, step P7): t_astc, the ASTC decoder in plain C (dm/gfx/tex/astc_decode.c) over blocks it writes and predicts (every host, no
+# Vulkan); on lavapipe under the validation layer as the GPU tests above: t_vk_astc (synthetic ASTC of every block size held natively, decoded by the compute shader and decoded by
+# the C decoder: the compute decode equal to the C one bit for bit, lavapipe's own decode compared), t_vk_formats (every row of the format table with a path, sampled and drawn,
+# through the device's formats and through every substitute), t_vk_depth24 (DEPTH24 and DEPTH24_STENCIL8 as D24 and as 32-bit float with the bias of decision D10, uploads,
+# copies and partial clears of the depth-stencil formats, stencil views) and t_vk_deswizzle (the GPU deswizzle against the CPU one, bit for bit, with both timed)
+host_test(t_astc SOURCES ../../gfx/tex/tests/t_astc.c ../../gfx/tex/astc_decode.c INCLUDES ${REPO}/dm/gfx/tex ${REPO}/dm/gfx/tex/tests)
+# t_astc_mesa: the same decoder against an independent one, Mesa's, through desktop OpenGL on llvmpipe (lavapipe's Vulkan device has no ASTC). CTest only, on Linux where EGL
+# and GL are found (the nxnative-build image); it exits 77 (skipped) without a GL context or the ASTC extension. Test-only: nothing of the host links EGL or GL
+if(NOT WIN32)
+    find_path(EGL_INCLUDE EGL/egl.h)
+    find_library(EGL_LIB EGL)
+    find_library(GL_LIB GL)
+    if(EGL_INCLUDE AND EGL_LIB AND GL_LIB)
+        add_executable(t_astc_mesa ${REPO}/dm/gfx/tex/tests/t_astc_mesa.c ${REPO}/dm/gfx/tex/astc_decode.c)
+        target_compile_options(t_astc_mesa PRIVATE ${HOST_FLAGS})
+        target_include_directories(t_astc_mesa PRIVATE ${EGL_INCLUDE} ${REPO}/dm/gfx/tex/tests)
+        target_link_libraries(t_astc_mesa PRIVATE ${EGL_LIB} ${GL_LIB})
+        add_test(NAME t_astc_mesa COMMAND t_astc_mesa)
+        set_tests_properties(t_astc_mesa PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+        string(APPEND MANIFEST "# CTest only: t_astc_mesa (EGL and GL: the ASTC decoder against Mesa's)\n")
+    endif()
+endif()
+foreach(t IN ITEMS astc formats depth24 deswizzle)
+    host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk ${REPO}/dm/gfx/tex TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
 endforeach()
 # The NVN frontend linked over the null backend (step M6): its entry points called as C functions, a device, a queue and a memory pool made, a command list recorded, submitted and

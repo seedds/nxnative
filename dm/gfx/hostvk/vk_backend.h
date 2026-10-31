@@ -45,6 +45,10 @@ typedef enum { HVK_DEL_IMPORT, HVK_DEL_BUFFER, HVK_DEL_IMAGE, HVK_DEL_VIEW, HVK_
 void hvk_defer(hvk_del_kind kind, void *obj, uint64_t a, uint64_t b);   // a, b: the second and third handles (an image's memory) or a pointer to free
 void hvk_deferred_run(uint64_t done);   // release what the fences up to done let go
 void hvk_mem_shutdown(void);
+// The upload scratch (step P7): a device-local buffer with a device address that the GPU deswizzle and ASTC decode write and the image copies read, band after band, the caller
+// ordering the uses with barriers. 0 without buffer device addresses or for more than HVK_SCRATCH_MAX bytes (the caller then cuts its work into bands of at most that)
+enum { HVK_SCRATCH_MAX = 32u << 20 };
+int hvk_scratch(VkDeviceSize n, VkBuffer *buf, VkDeviceAddress *addr);
 // The ring: per submission slot (vk_commands.c owns the slots)
 typedef struct hvk_chunk hvk_chunk;
 void hvk_ring_slot_release(hvk_chunk **chunks);   // the slot's chunks go back to the free list (its submission completed)
@@ -77,6 +81,10 @@ const tex_t *hvk_tex_desc(hvk_tex *t);
 // The registry (be_reg_tex / be_reg_image / be_reg_samp): what a texture ID and a sampler ID name. Caller holds hvk.tex_mu
 int hvk_reg_texture(int tid, tex_t *t, view_t *v, int *has_view);   // 1 when tid names a live registration (*t, *v its snapshot)
 VkSampler hvk_reg_sampler(int sid, uint8_t cls);           // the sampler for a texture of numeric class cls (integer borders for integer classes); the default sampler for an unregistered ID
+// cls | HVK_CLS_NO_LINEAR: the view's format cannot be filtered linearly (integer formats, and float formats without SAMPLED_IMAGE_FILTER_LINEAR on the device): the sampler
+// filters it nearest, as the hardware reads an integer texture through a linear sampler (Vulkan forbids the linear sampler there, VUID-vkCmdDraw-magFilter-04553)
+enum { HVK_CLS_NO_LINEAR = 0x80 };
+int hvk_fmt_linear_filter(VkFormat f);                      // the device filters f linearly (cached)
 // Dummies for unbound slots: a zero texture of the type and class a shader declares (enum nvn_dtt, NVN_DPF_*), a zero texel buffer, a zero storage image
 VkImageView hvk_dummy_view(int dtt, int dpf, int storage);
 VkBufferView hvk_dummy_texel_buffer(int dpf, int storage);
@@ -86,6 +94,16 @@ void hvk_tex_shutdown(void);
 void hvk_tex_frame_begin(void);
 // A CPU read of a texture (be_read_texels)
 void hvk_tex_read(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img);
+// Buffer ↔ texture copies whose texels are not the image's (step P7; vk_commands.c hvk_copy_b2t asks first): a texture held as the RGBA8 decode of ASTC (buffer → texture: the
+// blocks decoded on the GPU into the region), and a depth / stencil texture whose guest packing is not Vulkan's per-aspect layout (both directions, packed or split on the GPU).
+// Returns 1 when it recorded the copy, 0 when the copy is an ordinary one, -1 when it cannot be done (logged). cb: outside a pass (VK_NULL_HANDLE: only whether the texture's
+// copies come here, 1 or 0, nothing recorded); src: the buffer's guest address; row and img: the buffer's row and image strides in bytes
+int hvk_tex_copy_special(hvk_tex *x, VkCommandBuffer cb, int to_buffer, uint64_t src, size_t row, size_t img, unsigned level, unsigned layer0, const NVNcopyRegion *r);
+// What a pass needs of its depth attachment for the depth bias (decision D10): 1 when the texture is NVN depth 24 held in a 32-bit float format
+int hvk_tex_d24_substitute(hvk_tex *x);
+int hvk_tex_dbc_float(void);   // VK_EXT_depth_bias_control's float representation is on (and a test has not turned it off)
+// The aspects a buffer copy of the texture's NVN format reaches in its image (a STENCIL8 held in D32_SFLOAT_S8_UINT: its stencil only)
+VkImageAspectFlags hvk_tex_copy_aspect(hvk_tex *x);
 
 // ---------- Shaders (vk_shader.c; design 2.3, 2.6) ----------
 // One binding of a shader as the pipeline layout sees it: one descriptor (a combined texture and its sampler are one binding with two reflection entries)
@@ -164,8 +182,9 @@ int hvk_bind_resources(VkCommandBuffer cb, hvk_layout *l, hvk_shader *const sh[6
 void hvk_pipeline_slot_reset(int slot);            // the slot's descriptor pools and set cache (its submission completed)
 void hvk_pipeline_shutdown(void);
 // The backend's own pipelines (vk_pipeline.c): one compute shader with push constants and buffer device addresses
-typedef enum { HVK_K_REPORT, HVK_K_PREDICATE, HVK_K_QUAD, HVK_K_N } hvk_kernel;
+typedef enum { HVK_K_REPORT, HVK_K_PREDICATE, HVK_K_QUAD, HVK_K_ASTC, HVK_K_DESWIZZLE, HVK_K_DSPACK, HVK_K_N } hvk_kernel;   // ASTC decode, deswizzle, depth-stencil packing: P7
 int hvk_kernel_dispatch(VkCommandBuffer cb, hvk_kernel k, const void *push, uint32_t push_bytes, uint32_t groups);
+int hvk_kernel_dispatch3(VkCommandBuffer cb, hvk_kernel k, const void *push, uint32_t push_bytes, uint32_t gx, uint32_t gy, uint32_t gz);
 // The clear triangle (2.7): writes value into colour attachment slot (mask: channels) or the depth / stencil (slot -1), inside the open render pass with the pass's formats
 int hvk_clear_tri(VkCommandBuffer cb, const VkFormat color[8], int ncolor, VkFormat depth, VkFormat stencil, VkSampleCountFlagBits samples, int slot, uint8_t kind,
                   uint32_t mask, const uint32_t value[4], float z, int write_depth, uint32_t stencil_mask, uint32_t stencil_ref, VkRect2D rect, VkExtent2D extent);
@@ -203,6 +222,9 @@ typedef struct {
     _Atomic uint64_t st_passes, st_draws, st_dispatches, st_pipelines, st_pipeline_ns, st_uploads, st_reuploads, st_upload_bytes, st_upload_ns;   // st_pipelines: made on the submit thread
     _Atomic uint64_t st_shaders, st_barriers, st_pass_splits;
     _Atomic uint64_t st_vcopies_gpu, st_index_gpu;   // unaligned vertex streams copied and quad indices expanded on the GPU (their source not readable on the CPU at encode time)
+    // texture memory (step P7): every image's allocation, and of those the ASTC images held compressed and the RGBA8 decodes with the bytes their blocks take (decision D1)
+    _Atomic int64_t st_tex_bytes, st_astc_native_bytes, st_astc_decoded_bytes, st_astc_block_bytes;
+    _Atomic uint64_t st_up_gpu, st_up_cpu, st_astc_decodes;   // subresources uploaded through the GPU kernels and through the CPU, ASTC subresources decoded
 } hvk_t;
 extern hvk_t hvk;
 int hvk_up(void);                     // the device is up, initializing it on the first call (pthread_once): 0 = the null forms

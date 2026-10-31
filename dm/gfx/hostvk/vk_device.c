@@ -90,6 +90,8 @@ typedef struct {
     VkExtensionProperties *ext; uint32_t n_ext;
     int host_mem, xfb, swapchain, gpl, eds2, eds3, vid, cr, calibrated_ext;   // the extension is listed (gpl: with VK_KHR_pipeline_library)
     int calibrated_khr, custom_border, uint8_khr, uint8_ext, depth_clip, push, divisor_khr, divisor_ext, m5;   // the backend's optional extensions (hostvk_dev.x)
+    int dbc, budget;   // VK_EXT_depth_bias_control, VK_EXT_memory_budget (step P7)
+    VkPhysicalDeviceDepthBiasControlFeaturesEXT fdbc;
     VkPhysicalDeviceFeatures2 f;
     VkPhysicalDeviceVulkan12Features f12;
     VkPhysicalDeviceVulkan13Features f13;
@@ -142,6 +144,8 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     q->divisor_khr = has_ext(q, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     q->divisor_ext = has_ext(q, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     q->m5 = has_ext(q, VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+    q->dbc = has_ext(q, VK_EXT_DEPTH_BIAS_CONTROL_EXTENSION_NAME);
+    q->budget = has_ext(q, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     vkGetPhysicalDeviceProperties(p, &q->p.properties);
     if (q->p.properties.apiVersion < VK_API_VERSION_1_3) return;   // below the baseline: the 1.2 / 1.3 structures may not be chained
     void **next = &q->f.pNext;
@@ -159,6 +163,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->depth_clip) { q->fdcc.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT; *next = &q->fdcc; next = &q->fdcc.pNext; }
     if (q->divisor_khr || q->divisor_ext) { q->fdiv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR; *next = &q->fdiv; next = &q->fdiv.pNext; }
     if (q->m5) { q->fm5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR; *next = &q->fm5; next = &q->fm5.pNext; }
+    if (q->dbc) { q->fdbc.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT; *next = &q->fdbc; next = &q->fdbc.pNext; }
     vkGetPhysicalDeviceFeatures2(p, &q->f);
     next = &q->p.pNext;
     q->p.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -444,6 +449,15 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     d->x.maintenance5 = q->m5 && q->fm5.maintenance5;
     if (d->x.maintenance5) ext[ne++] = VK_KHR_MAINTENANCE_5_EXTENSION_NAME;
     if (d->x.vertex_divisor) ext[ne++] = d->x.divisor_khr ? VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME : VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
+    // Step P7: VK_EXT_depth_bias_control, for NVN depth 24 held in a 32-bit float format (decision D10: the constant bias in 24-bit units), and VK_EXT_memory_budget, which the
+    // texture memory line reads (decision D1)
+    d->x.depth_bias_control = q->dbc && q->fdbc.depthBiasControl;
+    d->x.dbc_float = d->x.depth_bias_control && q->fdbc.floatRepresentation;
+    d->x.dbc_force_unorm = d->x.depth_bias_control && q->fdbc.leastRepresentableValueForceUnormRepresentation;
+    d->x.dbc_exact = d->x.depth_bias_control && q->fdbc.depthBiasExact;
+    if (d->x.depth_bias_control) ext[ne++] = VK_EXT_DEPTH_BIAS_CONTROL_EXTENSION_NAME;
+    d->x.memory_budget = q->budget;
+    if (d->x.memory_budget) ext[ne++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
     const VkPhysicalDeviceFeatures *cf = &q->f.features;
     d->x.float64 = cf->shaderFloat64 != 0; d->x.int64 = cf->shaderInt64 != 0; d->x.int16 = cf->shaderInt16 != 0;
     d->x.storage_without_format = cf->shaderStorageImageReadWithoutFormat && cf->shaderStorageImageWriteWithoutFormat;
@@ -484,6 +498,7 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     VkPhysicalDeviceDepthClipControlFeaturesEXT fdcc = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT, NULL, VK_TRUE};
     VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR fdiv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR, NULL, VK_TRUE, q->fdiv.vertexAttributeInstanceRateZeroDivisor};
     VkPhysicalDeviceMaintenance5FeaturesKHR fm5 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR, NULL, VK_TRUE};
+    VkPhysicalDeviceDepthBiasControlFeaturesEXT fdbc = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT, NULL, VK_TRUE, d->x.dbc_force_unorm, d->x.dbc_float, d->x.dbc_exact};
     void **next = &f.pNext;
     *next = &f12; next = &f12.pNext;
     *next = &f13; next = &f13.pNext;
@@ -498,6 +513,7 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (d->x.depth_clip_control) { *next = &fdcc; next = &fdcc.pNext; }
     if (d->x.vertex_divisor) { *next = &fdiv; next = &fdiv.pNext; }
     if (d->x.maintenance5) { *next = &fm5; next = &fm5.pNext; }
+    if (d->x.depth_bias_control) { *next = &fdbc; next = &fdbc.pNext; }
     // One queue for graphics, compute and copies; the transfer-only family (transfer_family) gets a queue when uploads move to it
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, d->queue_family, 1, &prio};

@@ -190,6 +190,7 @@ struct pass_t {
     VkFormat cfmt[8], dfmt, sfmt; uint8_t ccls[8]; hvk_view cv[8], dv;
     VkExtent2D extent; uint32_t layers; VkSampleCountFlagBits samples;
     int swrite, occ_open; uint32_t occ_q; int cond_open, xfb_open, xfb_n;
+    int d24sub;   // the depth attachment is NVN depth 24 held in a 32-bit float format: the constant depth bias goes in 24-bit units (decision D10)
 };
 static pass_t P;
 static int pass_active(void) { return P.active; }
@@ -262,6 +263,7 @@ static int pass_begin(VkCommandBuffer cb) {
             if (P.has_d && R.clear_d && !g_cond_on) { P.da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; P.da.clearValue.depthStencil.depth = hvk_depth_clear_value(P.dv.format, R.cd); R.clear_d = 0; }
             if (P.has_s && R.clear_s && !g_cond_on) { P.sa.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; P.sa.clearValue.depthStencil.stencil = R.cs & 0xff; R.clear_s = 0; }
             P.dfmt = P.has_d ? P.dv.format : VK_FORMAT_UNDEFINED; P.sfmt = P.has_s ? P.dv.format : VK_FORMAT_UNDEFINED;
+            P.d24sub = P.has_d && hvk_tex_d24_substitute(x);
             if (P.dv.w < w) w = P.dv.w;
             if (P.dv.h < h) h = P.dv.h;
             if (P.dv.layers < layers) layers = P.dv.layers;
@@ -787,7 +789,18 @@ static void dyn_apply(VkCommandBuffer cb, VkPrimitiveTopology topo, int strip, i
     if (CH(vp)) vkCmdSetViewportWithCount(cb, 1, &n.vp);
     if (CH(sc)) vkCmdSetScissorWithCount(cb, 1, &n.sc);
     if (CH(lw)) vkCmdSetLineWidth(cb, n.lw);
-    if (CH(bias)) vkCmdSetDepthBias(cb, n.bias[0], n.bias[2], n.bias[1]);
+    if (CH(bias)) {
+        if (P.d24sub && hvk_tex_dbc_float()) {   // decision D10: one unit of NVN depth 24's constant bias is 2^-24, given as a float offset (r = 1), exact where the device says so
+            VkDepthBiasRepresentationInfoEXT rep = {VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT, NULL, VK_DEPTH_BIAS_REPRESENTATION_FLOAT_EXT, hvk.dev.x.dbc_exact};
+            VkDepthBiasInfoEXT bi = {VK_STRUCTURE_TYPE_DEPTH_BIAS_INFO_EXT, &rep, n.bias[0] * 0x1p-24f, n.bias[2], n.bias[1]};
+            vkCmdSetDepthBias2EXT(cb, &bi);
+        } else {
+            if (P.d24sub && n.bias[0] != 0)
+                HVK_RED_ONCE("constant depth bias on NVN depth 24 held in a 32-bit float format without VK_EXT_depth_bias_control's float representation (decision D10): given as it "
+                             "is, which is one 2^-24 unit only where the primitive's largest depth is in [0.5, 1), half that in [0.25, 0.5) and so on (smaller depths: possible shadow acne)");
+            vkCmdSetDepthBias(cb, n.bias[0], n.bias[2], n.bias[1]);
+        }
+    }
     if (CH(bc)) vkCmdSetBlendConstants(cb, n.bc);
     if (CH(scm)) { vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_FRONT_BIT, n.scm[0]); vkCmdSetStencilCompareMask(cb, VK_STENCIL_FACE_BACK_BIT, n.scm[1]); }
     if (CH(swm)) { vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_FRONT_BIT, n.swm[0]); vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_BACK_BIT, n.swm[1]); }
@@ -1064,14 +1077,36 @@ void hvk_clear_tex(const p_clear_tex *c) {
     int fmt_view = c->has_view && c->view.set_format && c->view.format != c->tex->d.format;
     int whole = !c->r.xoffset && !c->r.yoffset && (uint32_t)c->r.width >= lw && (uint32_t)c->r.height >= lh;
     if (asp & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+        asp = hvk_tex_copy_aspect(x);   // the aspects of the NVN format (a STENCIL8 held in D32_SFLOAT_S8_UINT: its stencil)
         VkClearDepthStencilValue dv = {0, 0};
         if (asp & VK_IMAGE_ASPECT_DEPTH_BIT) { dv.depth = hvk_depth_clear_value(ifmt, c->c.f[0]); if (asp & VK_IMAGE_ASPECT_STENCIL_BIT) dv.stencil = c->c.u[1] & 0xff; }
         else dv.stencil = c->c.u[0] & 0xff;
         if (whole) {
             VkImageSubresourceRange r = {asp, lv, 1, is3d ? 0 : l0 + (uint32_t)c->r.zoffset, is3d ? 1 : (uint32_t)nz};
             vkCmdClearDepthStencilImage(cb, hvk_tex_image(x), VK_IMAGE_LAYOUT_GENERAL, &dv, 1, &r);
-        } else HVK_RED_ONCE("texture clear of part of a depth / stencil level: not done (first case %dx%d of %ux%u)", c->r.width, c->r.height, lw, lh);
-        g_need_barrier = 1; return;
+            g_need_barrier = 1; return;
+        }
+        // part of a level (step P7): a pass per layer over the level with the texture as its depth / stencil attachment, cleared in the region (vkCmdClearAttachments)
+        for (int z = 0; z < nz; z++) {
+            vv.set_levels = 1; vv.base_level = (uint8_t)lv; vv.nlevels = 1; vv.set_layers = 1; vv.min_layer = (uint16_t)(l0 + (unsigned)c->r.zoffset + (unsigned)z); vv.nlayers = 1;
+            vv.set_format = 0;
+            if (!hvk_tex_view(x, &vv, HVK_VIEW_ATTACH, &v)) return;
+            VkRenderingAttachmentInfo a = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, NULL, v.view, VK_IMAGE_LAYOUT_GENERAL, 0, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE};
+            VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, NULL, 0, {{0, 0}, {v.w, v.h}}, 1, 0, 0, NULL, (v.aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? &a : NULL, (v.aspect & VK_IMAGE_ASPECT_STENCIL_BIT) ? &a : NULL};
+            hvk_barrier_if_needed(cb);
+            vkCmdBeginRendering(cb, &ri);
+            long x0 = c->r.xoffset > 0 ? c->r.xoffset : 0, y0 = c->r.yoffset > 0 ? c->r.yoffset : 0, x1 = (long)c->r.xoffset + c->r.width, y1 = (long)c->r.yoffset + c->r.height;
+            if (x1 > (long)v.w) x1 = (long)v.w;
+            if (y1 > (long)v.h) y1 = (long)v.h;
+            if (x1 > x0 && y1 > y0) {
+                VkClearAttachment ca = {asp, 0, {.depthStencil = dv}};
+                VkClearRect cr = {{{(int32_t)x0, (int32_t)y0}, {(uint32_t)(x1 - x0), (uint32_t)(y1 - y0)}}, 0, 1};
+                vkCmdClearAttachments(cb, 1, &ca, 1, &cr);
+            }
+            vkCmdEndRendering(cb);
+            g_need_barrier = 1;
+        }
+        return;
     }
     uint32_t fm = chmask_of(ifmt), mask = (uint32_t)c->mask & fm;
     if (!mask) return;
@@ -1161,10 +1196,9 @@ static void level_size(hvk_tex *x, unsigned level, uint32_t *w, uint32_t *h, uin
     uint32_t W, H, D; hvk_tex_info(x, NULL, NULL, &W, &H, &D, NULL, NULL, NULL, NULL);
     *w = W >> level ? W >> level : 1; *h = H >> level ? H >> level : 1; *d = D >> level ? D >> level : 1;
 }
-static VkImageAspectFlags copy_aspect(VkImageAspectFlags a, const char *what) {
-    if ((a & VK_IMAGE_ASPECT_DEPTH_BIT) && (a & VK_IMAGE_ASPECT_STENCIL_BIT)) { HVK_RED_ONCE("%s of a combined depth-stencil texture: the depth plane only (the packing of D24S8 / D32FS8 in guest memory is phase P7)", what); return VK_IMAGE_ASPECT_DEPTH_BIT; }
-    return a;
-}
+// The aspects a texture copy reaches: both of a combined depth-stencil format (the stencil travels with the depth: rendering.md, "Depth-stencil copies carry the stencil"), the
+// stencil alone of a STENCIL8 held in D32_SFLOAT_S8_UINT
+static VkImageAspectFlags copy_aspect(hvk_tex *x) { return hvk_tex_copy_aspect(x); }
 void hvk_copy_b2t(const p_copy_b2t *c, int to_buffer);
 void hvk_copy_b2t(const p_copy_b2t *c, int to_buffer) {
     if (g_cur < 0 || !c->tex) return;
@@ -1177,8 +1211,17 @@ void hvk_copy_b2t(const p_copy_b2t *c, int to_buffer) {
     int is3d = c->tex->d.target == NVN_TEXTURE_TARGET_3D, nz = c->r.depth > 0 ? c->r.depth : 1;
     VkBuffer b; VkDeviceSize off;
     if (!hvk_buf(c->src, img * (size_t)nz, &b, &off, NULL)) { HVK_RED_ONCE("%s copy with a buffer outside the memory pools: skipped", to_buffer ? "texture→buffer" : "buffer→texture"); return; }
-    VkFormat f; VkImageAspectFlags asp; hvk_tex_info(x, &f, &asp, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
-    asp = copy_aspect(asp, to_buffer ? "texture→buffer copy" : "buffer→texture copy");
+    VkImageAspectFlags asp = copy_aspect(x);
+    // texels the image does not hold as the guest packs them (step P7): ASTC held decoded, depth and stencil packed together, a format converted at upload
+    int special = hvk_tex_copy_special(x, VK_NULL_HANDLE, to_buffer, 0, 0, 0, 0, 0, NULL);   // the probe form: 1 when this texture's copies are special (nothing is recorded)
+    if (special) {
+        VkCommandBuffer cb = outside();
+        int sp = hvk_tex_copy_special(x, cb, to_buffer, c->src, row, img, level, layer0, &c->r);
+        if (sp > 0) { if (to_buffer) nvn_gw_sbw_note(c->src, img * (size_t)nz, SBW_GPU); else hvk_tex_gpu_written(x); }
+        g_need_barrier = 1;
+        return;
+    }
+    if ((asp & VK_IMAGE_ASPECT_DEPTH_BIT) && (asp & VK_IMAGE_ASPECT_STENCIL_BIT)) { HVK_RED_ONCE("%s copy of a combined depth-stencil format the backend does not pack: skipped", to_buffer ? "texture→buffer" : "buffer→texture"); return; }
     if (row % (size_t)bpb || off % (VkDeviceSize)(bpb % 4 ? (bpb == 2 ? 2 : bpb == 1 ? 1 : bpb) : 4)) {
         HVK_RED_ONCE("%s copy with a row stride (%llu) or offset not a multiple of the texel size (%d): skipped", to_buffer ? "texture→buffer" : "buffer→texture", (unsigned long long)row, bpb); return; }
     VkCommandBuffer cb = outside();
@@ -1205,8 +1248,8 @@ void hvk_copy_t2t(const p_copy_t2t *c) {
     int mirror = c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT);
     int scaled = c->sr.width != c->dr.width || c->sr.height != c->dr.height;
     int sbpb = nvn_fmt_bpb(c->src->d.format, NULL, NULL), dbpb = nvn_fmt_bpb(c->dst->d.format, NULL, NULL);
-    VkImageSubresourceLayers srl = {copy_aspect(sa, "texture copy"), sl, s3 ? 0 : ss + (uint32_t)c->sr.zoffset, s3 ? 1 : (uint32_t)nz};
-    VkImageSubresourceLayers drl = {copy_aspect(da, "texture copy"), dl, d3 ? 0 : ds + (uint32_t)c->dr.zoffset, d3 ? 1 : (uint32_t)nz};
+    VkImageSubresourceLayers srl = {(copy_aspect(s) & copy_aspect(d)) ? copy_aspect(s) & copy_aspect(d) : copy_aspect(s), sl, s3 ? 0 : ss + (uint32_t)c->sr.zoffset, s3 ? 1 : (uint32_t)nz};
+    VkImageSubresourceLayers drl = {(copy_aspect(s) & copy_aspect(d)) ? copy_aspect(s) & copy_aspect(d) : copy_aspect(d), dl, d3 ? 0 : ds + (uint32_t)c->dr.zoffset, d3 ? 1 : (uint32_t)nz};
     if ((c->flags & DM_COPY_RESOLVE) && sn > 1) {   // Downsample of a multisampled texture: a resolve
         VkImageResolve r = {srl, {c->sr.xoffset, c->sr.yoffset, 0}, drl, {c->dr.xoffset, c->dr.yoffset, 0}, {(uint32_t)c->sr.width, (uint32_t)c->sr.height, 1}};
         if (sf != df) HVK_RED_ONCE("multisample resolve between formats %u and %u: Vulkan resolves within one format (done as it is)", (unsigned)sf, (unsigned)df);

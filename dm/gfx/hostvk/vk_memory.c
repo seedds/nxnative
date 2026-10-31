@@ -170,6 +170,26 @@ int hvk_ring_alloc(VkDeviceSize n, VkDeviceSize align, hvk_alloc *out) {
     return 1;
 }
 
+// ---------- The upload scratch (vk_texture.c's GPU paths, design 4.3) ----------
+// One device-local buffer with a device address, which the GPU deswizzle and the ASTC decode write band after band and the image copies read; the caller orders the uses with
+// barriers (a band's kernel waits for the previous band's copy). It grows to the largest band asked for, at most HVK_SCRATCH_MAX; the old one goes when the GPU is done with it
+static VkBuffer g_scr; static VkDeviceMemory g_scr_mem; static VkDeviceSize g_scr_size; static VkDeviceAddress g_scr_addr;
+int hvk_scratch(VkDeviceSize n, VkBuffer *buf, VkDeviceAddress *addr) {
+    if (!hvk.dev.caps.buffer_device_address || !n || n > HVK_SCRATCH_MAX) return 0;
+    if (n > g_scr_size) {
+        if (g_scr) hvk_defer(HVK_DEL_BUFFER, g_scr, (uint64_t)(uintptr_t)g_scr_mem, 0);
+        g_scr = VK_NULL_HANDLE; g_scr_mem = VK_NULL_HANDLE; g_scr_size = 0; g_scr_addr = 0;
+        VkDeviceSize want = n < (4u << 20) ? (4u << 20) : (n + 0xfffff) & ~(VkDeviceSize)0xfffff;
+        if (want > HVK_SCRATCH_MAX) want = HVK_SCRATCH_MAX;
+        VkBufferUsageFlags u = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        if (hvk_buffer_make(want, u, 0, &g_scr, &g_scr_mem, NULL)) { HVK_RED_ONCE("the upload scratch of %llu bytes could not be made: uploads go through the CPU", (unsigned long long)want); return 0; }
+        VkBufferDeviceAddressInfo ba = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, NULL, g_scr};
+        g_scr_addr = vkGetBufferDeviceAddress(hvk.d, &ba); g_scr_size = want;
+    }
+    *buf = g_scr; *addr = g_scr_addr;
+    return 1;
+}
+
 // ---------- Deferred release ----------
 typedef struct { hvk_del_kind kind; void *obj; uint64_t a, b, fence; } del_ent;
 static del_ent *g_del; static size_t g_ndel, g_cdel; static pthread_mutex_t g_del_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -206,6 +226,7 @@ void hvk_deferred_run(uint64_t done) {
     }
 }
 void hvk_mem_shutdown(void) {
+    if (g_scr) { hvk_buffer_free(g_scr, g_scr_mem); g_scr = VK_NULL_HANDLE; g_scr_mem = VK_NULL_HANDLE; g_scr_size = 0; g_scr_addr = 0; }
     hvk_deferred_run(UINT64_MAX);
     while (g_free_chunks) { hvk_chunk *c = g_free_chunks; g_free_chunks = c->next; chunk_destroy(c); }
     pthread_mutex_lock(&hvk.mu);

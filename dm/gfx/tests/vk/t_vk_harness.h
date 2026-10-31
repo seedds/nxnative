@@ -333,3 +333,66 @@ static void hv_update(hv_cmds *c, void *dst, const void *data, uint32_t n) {   /
     hv_emit(c, OP_UPDATE_UB, rec, 16 + n);
 }
 static void hv_fill(hv_cmds *c, void *dst, uint64_t n, uint32_t value) { p_clear_buf f = {(uint64_t)(uintptr_t)dst, n, value, 0}; hv_emit(c, OP_CLEAR_BUF, &f, sizeof f); }
+
+// ---------- Textures the test fills, and sampling them (the tests of step P7) ----------
+#include "../../tex/nvn_deswizzle.h"
+// The backend's switches for textures made from now on (vk_texture.c; -1 keeps one): ASTC decoded, the deswizzle (0 by size, 1 GPU, 2 CPU), NVN depth 24 in the float formats,
+// every row's substitute; the bytes of a band of the GPU upload paths; the depth bias without VK_EXT_depth_bias_control's float representation; the texture memory counters
+void hvk_test_tex_opts(int astc_decode, int deswizzle, int d24_d32f, int force_alt);
+void hvk_test_band_bytes(uint32_t n);
+void hvk_test_no_depth_bias_control(int on);
+void hvk_test_tex_mem(int64_t mem[4], uint64_t up[3]);
+// A texture of the frontend with storage in pool p at *off (advanced past it, 4 KiB aligned), packaged with a block height of 2^log2bh GOBs and a block depth of 2^log2bd, so its
+// storage is its content (uploaded at its first use); layers: the depth of an array or 3D texture (1 otherwise)
+static void hv_texture(NVNtexture *t, hv_pool *p, size_t *off, int target, int format, uint32_t w, uint32_t h, uint32_t depth, uint32_t levels, int flags, int log2bh, int log2bd) {
+    NVNtextureBuilder tb; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetDevice(&tb, &g_dev); h_nvnTextureBuilderSetTarget(&tb, target);
+    h_nvnTextureBuilderSetFormat(&tb, format); h_nvnTextureBuilderSetSize2D(&tb, (int)w, (int)h); h_nvnTextureBuilderSetDepth(&tb, (int)depth);
+    h_nvnTextureBuilderSetLevels(&tb, (int)levels); h_nvnTextureBuilderSetFlags(&tb, flags);
+    if (!(flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) {
+        NVNpackagedTextureLayout lay; memset(&lay, 0, sizeof lay); ((uint8_t *)&lay)[0] = (uint8_t)(log2bh | log2bd << 4);
+        h_nvnTextureBuilderSetPackagedTextureLayout(&tb, &lay);
+    }
+    *off = (*off + 4095) & ~(size_t)4095;
+    size_t n = (size_t)h_nvnTextureBuilderGetStorageSize(&tb);
+    if (*off + n > p->size) { fprintf(stderr, "texture storage past the pool (%zu + %zu of %zu)\n", *off, n, p->size); exit(2); }
+    h_nvnTextureBuilderSetStorage(&tb, &p->pool, (ptrdiff_t)*off);
+    h_nvnTextureInitialize(t, &tb);
+    *off += n;
+}
+// Linear data (rows of blocks pitch bytes apart; a 3D level's slices one after the other) into a level / layer of a packaged texture's storage
+static int hv_tex_fill(NVNtexture *t, unsigned level, unsigned layer, const void *lin, size_t pitch) {
+    const tex_t *x = (const tex_t *)(const void *)t;
+    return nvn_swizzle(&x->d, level, layer, lin, pitch, x->mem) == 0;
+}
+// The texels texture ID id gives a fragment shader that fetches them (texelFetch of level 0: fetch.frag, fetch_u.frag, fetch_i.frag; prog), w x h of them into an RGBA32F /
+// RGBA32UI / RGBA32I target (target_fmt), 16 bytes each into out
+static int hv_fetch(NVNqueue *q, hv_cmds *c, const NVNprogram *prog, const NVNtexturePool *tp, const NVNsamplerPool *sp, int id, int target_fmt, uint32_t w, uint32_t h, void *out) {
+    tex_t target = hv_tex(NVN_TEXTURE_TARGET_2D, target_fmt, w, h, 1, 1, 0);
+    const tex_t *rt[1] = {&target};
+    hv_rt(c, 1, rt, NULL);
+    p_set_pool tpp = {(const dpool_t *)tp}, spp = {(const dpool_t *)sp}; hv_emit(c, OP_SET_TEX_POOL, &tpp, sizeof tpp); hv_emit(c, OP_SET_SAMP_POOL, &spp, sizeof spp);
+    hv_bind(c, prog, 3); hv_depth(c, 0, 0, NVN_DEPTH_FUNC_ALWAYS); hv_cull(c, NVN_FACE_NONE);
+    p_bind_tex1 b = {1, 0, (uint64_t)(uint32_t)id | (uint64_t)1 << 20, nvn_dpool_base(tp, 1), nvn_dpool_base(sp, 0)}; hv_emit(c, OP_BIND_TEX1, &b, sizeof b);
+    hv_draw(c, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3, 1);
+    hv_submit(q, c);
+    return hv_read(&target, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 0, w, h, 16, out);
+}
+// A level / layer (a 3D level: d slices) of a texture's image, an aspect of it (0: the image's), read back tight: rows of blocks of bpb bytes (bw x bh texels; 1 x 1 for an
+// uncompressed format, bpb its texel size), slice after slice
+static int hv_read_blocks(const tex_t *t, VkImageAspectFlags aspect, unsigned level, unsigned layer, uint32_t w, uint32_t h, uint32_t d, int bw, int bh, int bpb, void *out) {
+    VkFormat f; VkImageAspectFlags a; VkImage img = hvk_test_image(t, &f, &a);
+    if (!img) return 0;
+    size_t bytes = (size_t)((w + (uint32_t)bw - 1) / (uint32_t)bw) * (size_t)bpb * ((h + (uint32_t)bh - 1) / (uint32_t)bh) * d;
+    VkBuffer b; VkDeviceMemory m; void *map;
+    if (hvk_buffer_make((VkDeviceSize)bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 1, &b, &m, &map)) return 0;
+    VkCommandBuffer cb; int ok = 0;
+    if (hvk_oneoff_begin(&cb)) {
+        hvk_full_barrier(cb);
+        VkBufferImageCopy r = {0, 0, 0, {aspect ? aspect : a, level, layer, 1}, {0, 0, 0}, {w, h, d}};
+        vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, b, 1, &r);
+        hvk_full_barrier(cb);
+        if ((ok = hvk_oneoff_end(cb))) memcpy(out, map, bytes);
+    }
+    hvk_buffer_free(b, m);
+    return ok;
+}

@@ -1,0 +1,67 @@
+// Depth-stencil texels between the guest's packing and Vulkan's per-aspect buffer layout (docs/design/vulkan-backend.md 5.5, decision D10; vk_texture.c hvk_tex_copy_special):
+// buffer → texture copies split the guest's texels into a depth plane and a stencil plane that the backend copies into the image's two aspects, texture → buffer copies join
+// the planes the backend copied out of the image into the guest's texels. One invocation per four texels of a row (one 32-bit word of the stencil plane).
+// fmt: 0 DEPTH24_STENCIL8 held in D24_UNORM_S8_UINT (the guest word: depth in bits 0-23, stencil in 24-31; the depth plane holds such words, its top byte ignored),
+//      1 DEPTH24_STENCIL8 held in D32_SFLOAT_S8_UINT (the depth plane holds floats: z / (2^24 - 1), and back rounded to nearest), 2 DEPTH24 held in D32_SFLOAT (no stencil),
+//      3 DEPTH32F_STENCIL8 (eight guest bytes: the float depth, then the stencil in the low byte of the second word).
+// mode: 0 split (guest → planes), 1 join (planes → guest). Push constants: the guest's, depth plane's and stencil plane's device addresses; the region's texels (w, h, slices); the
+// guest's row and slice strides; the planes' row strides (bytes; the stencil plane's a multiple of 4)
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 16, local_size_y = 4) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer W { uint v[]; };
+layout(push_constant) uniform P { uvec2 guest, dpl, spl; uint w, h, nz, grow, gimg, drow, srow, mode, fmt; } p;
+uvec2 addr_add(uvec2 a, uint off) { uint c; uint lo = uaddCarry(a.x, off, c); return uvec2(lo, a.y + c); }
+// D24 ↔ float exactly, in integer steps (vk_texture.c depth_of24 and z24_of: the same steps and why): z / (2^24 - 1) rounded to the nearest float, f * (2^24 - 1) rounded to the
+// nearest integer
+float depth_of(uint z) {
+    z &= 0xFFFFFFu;
+    if (z == 0u) return 0.0;
+    if (z == 0xFFFFFFu) return 1.0;
+    int b = findMSB(z);
+    uint m = (z << uint(23 - b)) + 1u;
+    return uintBitsToFloat(uint(b + 103) << 23 | (m & 0x7FFFFFu));
+}
+uint z24_of(float f) {
+    if (!(f > 0.0)) return 0u;
+    if (f >= 1.0) return 0xFFFFFFu;
+    uint bits = floatBitsToUint(f);
+    int ex = int(bits >> 23), t = 150 - ex;
+    if (ex == 0 || t >= 49) return 0u;
+    uint m = (bits & 0x7FFFFFu) | 0x800000u, br, c;
+    uint lo = usubBorrow(m << 24, m, br), hi = (m >> 8) - br;   // a = m * 2^24 - m
+    if (t - 1 < 32) { lo = uaddCarry(lo, 1u << uint(t - 1), c); hi += c; } else hi += 1u << uint(t - 33);
+    return t < 32 ? (lo >> uint(t)) | (hi << uint(32 - t)) : hi >> uint(t - 32);
+}
+void main() {
+    uint x4 = gl_GlobalInvocationID.x * 4u, y = gl_GlobalInvocationID.y, z = gl_GlobalInvocationID.z;
+    if (x4 >= p.w || y >= p.h || z >= p.nz) return;
+    bool stencil = p.fmt != 2u;
+    uint gw = p.fmt == 3u ? 2u : 1u;   // guest words a texel
+    W g = W(addr_add(p.guest, z * p.gimg + y * p.grow));
+    W d = W(addr_add(p.dpl, (z * p.h + y) * p.drow));
+    W s = W(addr_add(p.spl, (z * p.h + y) * p.srow));
+    if (p.mode == 0u) {
+        uint sw = 0u;
+        for (uint k = 0u; k < 4u; k++) {
+            uint x = x4 + k;
+            if (x >= p.w) break;
+            uint g0 = g.v[x * gw], sb = p.fmt == 3u ? g.v[x * 2u + 1u] & 0xFFu : g0 >> 24;
+            d.v[x] = p.fmt == 0u || p.fmt == 3u ? g0 : floatBitsToUint(depth_of(g0));
+            sw |= (stencil ? sb : 0u) << (8u * k);
+        }
+        if (stencil) s.v[x4 / 4u] = sw;
+    } else {
+        uint sw = stencil ? s.v[x4 / 4u] : 0u;
+        for (uint k = 0u; k < 4u; k++) {
+            uint x = x4 + k;
+            if (x >= p.w) break;
+            uint dv = d.v[x], sb = sw >> (8u * k) & 0xFFu;
+            if (p.fmt == 0u) g.v[x] = (dv & 0xFFFFFFu) | sb << 24;
+            else if (p.fmt == 1u) g.v[x] = z24_of(uintBitsToFloat(dv)) | sb << 24;
+            else if (p.fmt == 2u) g.v[x] = z24_of(uintBitsToFloat(dv));
+            else { g.v[x * 2u] = dv; g.v[x * 2u + 1u] = sb; }
+        }
+    }
+}

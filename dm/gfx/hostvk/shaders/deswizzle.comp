@@ -1,0 +1,27 @@
+// The GPU deswizzle of block-linear textures at upload (docs/design/vulkan-backend.md 4.3, 5.3): the counterpart of dm/gfx/tex/nvn_deswizzle.c (and of the Metal backend's
+// tex/nvn_deswizzle_gpu.m), reading the texture's storage in guest memory (the imported pool, a buffer device address) and writing its linear rows into a buffer the backend then
+// copies into the image (vk_texture.c). One invocation per 16-byte segment of a linear row (a GOB row is four of them); x: the segment, y: the block row within the band, z: the
+// slice within the band. The output rows are dst_pitch bytes apart, a multiple of 16 (the backend pads them), so every segment is copied whole; bytes past a row's end land in the
+// padding and are not copied to the image.
+// Push constants: source and output device addresses (the source at the level and layer's start); the level's row bytes, block rows and slices as nvn_deswizzle_geom gives them;
+// the GOB columns as laid out (nvn_tex_level_gobs), block height and depth (log2 GOBs); the band: block rows [y0, y0 + nrows) of slices [z0, z0 + nz); the output pitch.
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 64) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Src { uint v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Dst { uint v[]; };
+layout(push_constant) uniform P { uvec2 src, dst; uint row_bytes, rows, slices, gobs_x, th, td, y0, nrows, z0, nz, dst_pitch; } p;
+uvec2 addr_add(uvec2 a, uint off) { uint c; uint lo = uaddCarry(a.x, off, c); return uvec2(lo, a.y + c); }
+void main() {
+    uint x = gl_GlobalInvocationID.x * 16u, y = p.y0 + gl_GlobalInvocationID.y, z = p.z0 + gl_GlobalInvocationID.z;
+    if (x >= p.row_bytes || y >= p.y0 + p.nrows || y >= p.rows || z >= p.z0 + p.nz || z >= p.slices) return;
+    uint bh = 1u << p.th, bd = 1u << p.td, block = 512u * bh * bd, blocks_y = (p.rows + 8u * bh - 1u) >> (3u + p.th);
+    // nvn_bl_offset: the block layer (depth), the block row, the block column, the GOB within the block, the segment within the GOB
+    uint off = (z >> p.td) * p.gobs_x * blocks_y * block + (y >> (3u + p.th)) * p.gobs_x * block + (x >> 6u) * block
+             + ((z & (bd - 1u)) * bh + ((y & (8u * bh - 1u)) >> 3u)) * 512u
+             + (x % 64u / 32u) * 256u + (y % 8u / 2u) * 64u + (x % 32u / 16u) * 32u + (y % 2u) * 16u;
+    Src s = Src(addr_add(p.src, off));
+    Dst d = Dst(addr_add(p.dst, ((z - p.z0) * p.nrows + (y - p.y0)) * p.dst_pitch + x));
+    d.v[0] = s.v[0]; d.v[1] = s.v[1]; d.v[2] = s.v[2]; d.v[3] = s.v[3];
+}

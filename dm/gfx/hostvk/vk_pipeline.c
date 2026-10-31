@@ -22,6 +22,9 @@
 #include "shaders/gen/report_comp.h"
 #include "shaders/gen/predicate_comp.h"
 #include "shaders/gen/quad_index_comp.h"
+#include "shaders/gen/astc_decode_comp.h"
+#include "shaders/gen/deswizzle_comp.h"
+#include "shaders/gen/ds_pack_comp.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -286,7 +289,7 @@ static VkImageView tex_view_of(int st, int tid, const hvk_binding *d, const nvn_
             if (hv.cls != d->cls && !(hv.cls == NVN_VK_DS && d->cls == NVN_VK_FLOAT) && !storage)
                 HVK_RED_ONCE("stage %d binding %u: a texture of numeric class %d read through a declaration of class %d (first case, texture ID %d): bound as it is (the census of design 2.2)",
                              st, d->binding, hv.cls, d->cls, tid);
-            *cls = hv.cls;
+            *cls = (uint8_t)(hv.cls | (hvk_fmt_linear_filter(hv.format) ? 0 : HVK_CLS_NO_LINEAR));   // the sampler filters it nearest (vk_texture.c samp_make)
             return hv.view;
         }
         if (x) HVK_RED_ONCE("stage %d binding %u: no view of texture ID %d fits the declared type %d (first case): the dummy is bound", st, d->binding, tid, d->dim);
@@ -464,29 +467,42 @@ VkPipeline hvk_cs_pipeline(hvk_shader *cs, hvk_layout *l) {
 // ---------- The backend's own pipelines ----------
 static VkPipelineLayout g_kpl;   // the kernels' layout: 128 bytes of push constants, no set
 static VkPipeline g_kernel[HVK_K_N];
+static pthread_mutex_t g_kernel_mu = PTHREAD_MUTEX_INITIALIZER;
 static int kernels_init(void) {
     if (g_kpl) return 1;
     VkPushConstantRange pc = {VK_SHADER_STAGE_ALL, 0, 128};
     VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &pc};
     if (vkCreatePipelineLayout(hvk.d, &pi, NULL, &g_kpl)) { g_kpl = VK_NULL_HANDLE; return 0; }
-    const struct { const uint32_t *c; size_t n; } src[HVK_K_N] = {{report_comp_spv, sizeof report_comp_spv}, {predicate_comp_spv, sizeof predicate_comp_spv}, {quad_index_comp_spv, sizeof quad_index_comp_spv}};
-    for (int i = 0; i < HVK_K_N; i++) {
-        VkShaderModule m = hvk_module(src[i].c, src[i].n);
-        if (!m) return 0;
-        VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", NULL}, g_kpl, VK_NULL_HANDLE, -1};
-        VkResult r = vkCreateComputePipelines(hvk.d, VK_NULL_HANDLE, 1, &ci, NULL, &g_kernel[i]);
-        vkDestroyShaderModule(hvk.d, m, NULL);
-        if (r) { g_kernel[i] = VK_NULL_HANDLE; return 0; }
+    return 1;
+}
+// A kernel's pipeline, made at its first use (the ASTC decoder is large: a device that never decodes never compiles it)
+static VkPipeline kernel_get(hvk_kernel k) {
+    static const struct { const uint32_t *c; size_t n; } src[HVK_K_N] = {{report_comp_spv, sizeof report_comp_spv}, {predicate_comp_spv, sizeof predicate_comp_spv},
+        {quad_index_comp_spv, sizeof quad_index_comp_spv}, {astc_decode_comp_spv, sizeof astc_decode_comp_spv}, {deswizzle_comp_spv, sizeof deswizzle_comp_spv},
+        {ds_pack_comp_spv, sizeof ds_pack_comp_spv}};
+    if (!kernels_init()) return VK_NULL_HANDLE;
+    pthread_mutex_lock(&g_kernel_mu);
+    if (!g_kernel[k]) {
+        VkShaderModule m = hvk_module(src[k].c, src[k].n);
+        if (m) {
+            VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", NULL}, g_kpl, VK_NULL_HANDLE, -1};
+            if (vkCreateComputePipelines(hvk.d, VK_NULL_HANDLE, 1, &ci, NULL, &g_kernel[k])) g_kernel[k] = VK_NULL_HANDLE;
+            vkDestroyShaderModule(hvk.d, m, NULL);
+        }
     }
-    return 1;
+    VkPipeline p = g_kernel[k];
+    pthread_mutex_unlock(&g_kernel_mu);
+    return p;
 }
-int hvk_kernel_dispatch(VkCommandBuffer cb, hvk_kernel k, const void *push, uint32_t push_bytes, uint32_t groups) {
-    if (!kernels_init() || !g_kernel[k]) { HVK_RED_ONCE("the backend's compute kernels could not be made (buffer device address: %d)", hvk.dev.caps.buffer_device_address); return 0; }
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_kernel[k]);
+int hvk_kernel_dispatch3(VkCommandBuffer cb, hvk_kernel k, const void *push, uint32_t push_bytes, uint32_t gx, uint32_t gy, uint32_t gz) {
+    VkPipeline p = kernel_get(k);
+    if (!p) { HVK_RED_ONCE("the backend's compute kernel %d could not be made (buffer device address: %d)", (int)k, hvk.dev.caps.buffer_device_address); return 0; }
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     vkCmdPushConstants(cb, g_kpl, VK_SHADER_STAGE_ALL, 0, push_bytes, push);
-    vkCmdDispatch(cb, groups ? groups : 1, 1, 1);
+    vkCmdDispatch(cb, gx ? gx : 1, gy ? gy : 1, gz ? gz : 1);
     return 1;
 }
+int hvk_kernel_dispatch(VkCommandBuffer cb, hvk_kernel k, const void *push, uint32_t push_bytes, uint32_t groups) { return hvk_kernel_dispatch3(cb, k, push, push_bytes, groups, 1, 1); }
 // The clear triangle's fragment modules: one per colour slot and value type (shaders/clear.frag, compiled 24 times by gen_spirv.sh)
 #define CF(s) {{clear_frag_s##s##_k0_spv, sizeof clear_frag_s##s##_k0_spv}, {clear_frag_s##s##_k1_spv, sizeof clear_frag_s##s##_k1_spv}, {clear_frag_s##s##_k2_spv, sizeof clear_frag_s##s##_k2_spv}}
 static const struct { const uint32_t *c; size_t n; } k_clear_frag[8][3] = {CF(0), CF(1), CF(2), CF(3), CF(4), CF(5), CF(6), CF(7)};

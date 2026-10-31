@@ -4,7 +4,7 @@ Issues and pull requests are welcome. This page says how a change gets in; what 
 
 ## Reporting a problem
 
-Open an issue with the bug report form. It asks for what a problem is traced with: the nxnative commit, the shader chain version, the game's title ID and version, the device and OS, how the game was built and run, environment overrides, and the whole log of the run. [Playing](docs/playing.md) says where the iPhone app's log is; a Mac app writes `~/Library/Logs/nxnative/<title ID>.log`.
+Open an issue with the bug report form. From the command line or an agent (`gh issue create`, the API) the form isn't shown, so write its fields as headings in the body ([06-dev-loop.md](docs/agents/06-dev-loop.md#8-opening-an-issue-or-a-pull-request)). It asks for what a problem is traced with: the nxnative commit, the shader chain version, the game's title ID and version, the device and OS, how the game was built and run, environment overrides, and the whole log of the run. [Playing](docs/playing.md) says where the iPhone app's log is; a Mac app writes `~/Library/Logs/nxnative/<title ID>.log`.
 
 `python3 scripts/bug_report.py <title ID | path to the .app | NSP folder>` collects most of this into one zip to attach: `report.md` with the game, commit, chain version, device, settings and the list of files, plus the Mac app's logs, the NSP script's logs under `<title ID>_build/logs` and recent crash reports. Add `--ios-log log.txt` for an iPhone log. It reads only text logs and settings, never game files or keys; it writes your home folder as `~` and drops lines that look like key material. Look at the zip before you attach it.
 
@@ -27,7 +27,7 @@ Never commit or attach game files, keys, title keys or anything extracted from a
 - **The README gallery.** After Mac gameplay testing, add its screenshot to `docs/images/` and its row to [gallery.tsv](docs/images/gallery.tsv), then run `python3 dm/tools/docs_gallery.py`. The table preserves your chosen order; notes hold the IPA size and noteworthy features or limitations. Leave the note empty until the IPA size is measured. Concurrent additions merge in the TSV; regenerate README to resolve a conflict inside its gallery. Conflicting rows for one game need a manual resolution before regeneration.
 - **The shader chain.** After changing one of its tools, run `python3 dm/gfx/tools/dmsh_chain.py --header` and commit `dm/gfx/nvn/dmsh_chain.h` with the change. Every game's shaders are then rebuilt, so say which games you checked.
 - **Tests.** CI runs the host tests, the CPU-only graphics tests, the tool tests and the builds ([Continuous integration](docs/development.md#continuous-integration)). GitHub's runners have no Metal 4, so run the GPU tests on an Apple-silicon Mac: `make -C dm/gfx/tests GAME=<id> run`.
-- **The PR text.** Fill in the template: what and why, what was checked (tests, games, devices), and which docs changed.
+- **The PR text.** Fill in the template (`gh pr create` doesn't apply it, so keep its sections): what and why, what was checked (tests, games, devices), and which docs changed.
 
 ## Large changes and other platforms
 

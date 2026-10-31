@@ -17,6 +17,26 @@ For the build steps of the whole project see [README.md](../../README.md) and [d
 
 - **Interface layer `nvn/hle_nvn.c`**: host-side objects are stored in place in the memory the game allocates for NVN objects; the layouts are in `nvn/nvn_obj.h`, and each has a static assertion guaranteeing it does not exceed NVN's reserved size. Commands are recorded into the command memory provided by the game, in the record format of `nvn_obj.h`.
 - **Replay layer `nvn/nvn_mtl.m`**: at submit time it replays the record stream as Metal commands.
+  `nvn_mtl.m` is the only compiled file: it keeps the includes, the residency set, deferred release, `mtl_init` and the memory pools, and `#include`s topic parts (`nvn/nvn_mtl_<part>.inc`, one translation unit, every static shared) at the place their code stood:
+
+  | Part | Holds |
+  |---|---|
+  | `nvn_mtl_submit.inc` | queries, submission, encoder wrappers, blit helpers |
+  | `nvn_mtl_ubuf.inc` | inline uniform updates, commit, wait |
+  | `nvn_mtl_tex.inc` | textures, alias tables, upload paths |
+  | `nvn_mtl_pass.inc` | render passes, pass dumps, store lookahead |
+  | `nvn_mtl_shader.inc` | shader map, shader loading, descriptor pool |
+  | `nvn_mtl_state.inc` | draw state, vertex conversion, `pso_desc` |
+  | `nvn_mtl_pso.inc` | Metal 4 pipelines, archive, hybrid, prebuild |
+  | `nvn_mtl_args.inc` | depth-stencil states, dummy resources, `encode_args` |
+  | `nvn_mtl_lookahead.inc` | pass lookahead, hoisting, prediction |
+  | `nvn_mtl_merge.inc` | pass merge, deferred passes, fuse |
+  | `nvn_mtl_indirect.inc` | indirect draws, transform feedback |
+  | `nvn_mtl_draw.inc` | `draw`, `dispatch`, copies, clears, `mtl_exec` |
+  | `nvn_mtl_shot.inc` | screenshots, texture dumps |
+  | `nvn_mtl_present.inc` | the present path |
+
+  The cut is mechanical and made by `dm/tools/split_nvn_mtl.py` (whole top-level blocks, nothing renamed or reordered; the plan is `dm/tools/split_nvn_mtl_plan.tsv`). After a merge conflict in `nvn_mtl.m` or a part, run `python3 dm/tools/split_nvn_mtl.py --join`, resolve in the whole file, and run the script again; `--check` proves the round trip. The split commit is in `.git-blame-ignore-revs` (GitHub's blame honours it; locally `git config blame.ignoreRevsFile .git-blame-ignore-revs`).
   - Memory pools are created as zero-copy `MTLBuffer`s, with the GPU address equal to the CPU address, so only unified-memory devices are supported.
   - The visible effects of "GPU completion" (sync objects becoming ready, events writing their value, counters) happen only after the Metal command buffer has actually completed.
   - Pipeline states and depth-stencil states are cached by state hash; at startup, shaders and pipelines are pre-built according to the warm-up manifests (the bundled seed `pso_manifest.tsv`, then this device's `pso_user.tsv`; see below): with a window, on every core before the game's first frame behind a "Preparing shaders" screen (docs/development.md, "The prepare step"), else in the background. A pipeline that fails to build is cached as failed and reported once with its shader keys.

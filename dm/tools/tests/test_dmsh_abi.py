@@ -49,6 +49,7 @@ def py_literals(text):   # the same for Python source
 
 def abi_literals(path):
     text = (REPO / path).read_text()
+    if path.endswith('/nvn_mtl.m'): text += ''.join(p.read_text() for p in sorted((REPO / path).parent.glob('nvn_mtl_*.inc')))   # its topic parts (split_nvn_mtl.py)
     lits = py_literals(text) if path.endswith('.py') else c_literals(text)
     return collections.Counter(f'{v:#x}' if k == 'int' else repr(v) for k, v in lits if (k == 'int' and v in NUMBERS) or (k == 'str' and v in abi.KINDS))
 

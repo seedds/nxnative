@@ -33,19 +33,19 @@ dm/gfx/hle_nv.c	hle:_ZN2nv*	graphics-library lifecycle and memory-query exports
 dm/gfx/nvn/*	api:nvn	NVN on Metal: every NVN game
 dm/gfx/nvn/dmsh_chain.h	shader:stage:*	the chain version: every game's NVN shader libraries
 dm/gfx/nvn/dmsh_abi.h	shader:stage:*	the shader library ABI (driver segment layout, binding kinds): every game's NVN shader libraries and their replay
-dm/gfx/nvn/nvn_mtl.m:atomic|imga	shader:image_atomic*	image atomics on Metal
-dm/gfx/nvn/nvn_mtl.m:warm_|prepare|prebuild|front_progress	present:pipeline_prepare	the prepare step and the prebuild before the first frame
-dm/gfx/nvn/nvn_mtl.m:pso_arch|arch_|pso_bundle	present:pipeline_archive	the pipeline archive
-dm/gfx/nvn/nvn_mtl.m:^tf_|xfb	shader:transform_feedback	transform feedback
-dm/gfx/nvn/nvn_mtl.m:^geo_|^gs_	shader:stage:gs	geometry shaders
-dm/gfx/nvn/nvn_mtl.m:^lo_|^lop_	nvn:nvnColorStateSetLogicOp	logic operations
-dm/gfx/nvn/nvn_mtl.m:prog_swrites|swrite_note	nvn:nvnCommandBufferBarrier	ordering barriers and shader writes in a draw pass
-dm/gfx/nvn/nvn_mtl.m:^at_|^atest_	nvn:nvnColorStateSetAlphaTest	the alpha test
-dm/gfx/nvn/nvn_mtl.m:pull_|hybrid	shader:pulling_vertex_inputs	pulling vertex inputs and the hybrid pipelines
-dm/gfx/nvn/nvn_mtl.m:fb_snap|fetch	shader:readable_tile	readable tiles and feedback snapshots
-dm/gfx/nvn/nvn_mtl.m:tbuf	shader:texture_buffer	texture buffers
-dm/gfx/nvn/nvn_mtl.m:mdi_|mdx_	nvn:nvnCommandBufferMultiDraw*	indirect multi-draws
-dm/gfx/nvn/nvn_mtl.m:present|snap|metalfx|upscale	present:*	the present path
+dm/gfx/nvn/nvn_mtl*:atomic|imga	shader:image_atomic*	image atomics on Metal
+dm/gfx/nvn/nvn_mtl*:warm_|prepare|prebuild|front_progress	present:pipeline_prepare	the prepare step and the prebuild before the first frame
+dm/gfx/nvn/nvn_mtl*:pso_arch|arch_|pso_bundle	present:pipeline_archive	the pipeline archive
+dm/gfx/nvn/nvn_mtl*:^tf_|xfb	shader:transform_feedback	transform feedback
+dm/gfx/nvn/nvn_mtl*:^geo_|^gs_	shader:stage:gs	geometry shaders
+dm/gfx/nvn/nvn_mtl*:^lo_|^lop_	nvn:nvnColorStateSetLogicOp	logic operations
+dm/gfx/nvn/nvn_mtl*:prog_swrites|swrite_note	nvn:nvnCommandBufferBarrier	ordering barriers and shader writes in a draw pass
+dm/gfx/nvn/nvn_mtl*:^at_|^atest_	nvn:nvnColorStateSetAlphaTest	the alpha test
+dm/gfx/nvn/nvn_mtl*:pull_|hybrid	shader:pulling_vertex_inputs	pulling vertex inputs and the hybrid pipelines
+dm/gfx/nvn/nvn_mtl*:fb_snap|fetch	shader:readable_tile	readable tiles and feedback snapshots
+dm/gfx/nvn/nvn_mtl*:tbuf	shader:texture_buffer	texture buffers
+dm/gfx/nvn/nvn_mtl*:mdi_|mdx_	nvn:nvnCommandBufferMultiDraw*	indirect multi-draws
+dm/gfx/nvn/nvn_mtl*:present|snap|metalfx|upscale	present:*	the present path
 dm/gfx/tex/*	api:*	texture layouts: every game
 dm/gfx/vk/*	api:vulkan	Vulkan on Metal
 dm/gfx/gl/*	api:gl	OpenGL on Metal

@@ -327,7 +327,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** a Unity game's split finds several times the shaders of comparable games, and the shader build runs for hours.
 - **Cause:** Unity compiles each shader variant once per graphics hardware tier (a subprogram's `m_ShaderHardwareTier`, or the tier index of `m_PlayerSubPrograms` from Unity 2022) and ships all three when their code differs, while the player runs one. The tier is found by checking the keys of the shaders a run loads (`DM_PSO_RECORD`) against each key's tier; on the Switch it was tier 2 (Unity's Tier3).
 - **Fix:** the profile key `unity_tier` ([dm/games/README.md](../../dm/games/README.md)): `unity_code_blobs` in `shader_split.py` keeps only that tier's programs and those the tiers share. Without the key every tier is read, so other profiles split as before. A game whose tiers compile to the same code shares one program among them, and the key changes nothing there.
-- **Found on:** Overcooked! All You Can Eat (Unity 2019.4.11f1): 520,394 shaders, 173,454 with the key.
+- **Found on:** [Overcooked! All You Can Eat](../../dm/games/0100F28011892000/README.md) (Unity 2019.4.11f1): 520,394 shaders, 173,454 with the key.
 
 ### Unity variants and passes the player never draws
 
@@ -344,7 +344,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   Unity 2019.4 keeps a pass's tags in `m_State.m_Tags` as `{first, second}` entries, with the key `LIGHTMODE` and the value upper-cased (`META`, `FORWARDBASE`, `FORWARDADD`, `SHADOWCASTER`).
 - **Fix:** the profile keys `unity_skip_keywords` and `unity_skip_passes` ([dm/games/README.md](../../dm/games/README.md)): `unity_skipped` and `unity_pass_drawn` in `shader_split.py` leave those programs out; a program shared with a kept pass stays. A left-out keyword variant has a twin with the `_OFF` keyword or without it, which Unity picks when the keyword is not enabled.
 - **Limits:** the data shows what the scenes set, not what scripts change at run time (a script can give a light a cookie). A left-out variant the player asks for is not drawn, and the host logs `failed to load shader <key>_b`; each profile that uses the keys notes what was checked.
-- **Found on:** Overcooked! All You Can Eat (Unity 2019.4.11f1): 173,454 shaders with `unity_tier`, 45,221 with both keys.
+- **Found on:** [Overcooked! All You Can Eat](../../dm/games/0100F28011892000/README.md) (Unity 2019.4.11f1): 173,454 shaders with `unity_tier`, 45,221 with both keys.
 
 ### Unity ComputeShader objects
 

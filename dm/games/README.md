@@ -145,6 +145,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Super Mario Bros. Wonder](010015100B514000/README.md) | `010015100B514000` | 1.2.1 (and 1.0.0) | 16.2.12 (1.0.0: 16.2.0) | Nintendo EPD (sead / agl) | NVN |
 | [Super Mario Galaxy](010099C022B96000/README.md) | `010099C022B96000` | 1.3.1 | 18.3.5 | NERD's Hagi Wii layer (recompiled PowerPC) | Vulkan |
 | [Super Mario Galaxy 2](0100FD8022DAA000/README.md) | `0100FD8022DAA000` | 1.4.0 | 18.3.5 | NERD's Hagi Wii layer (recompiled PowerPC) | Vulkan |
+| [SpongeBob SquarePants: Titans of the Tide](0100A0902789A000/README.md) | `0100A0902789A000` | 1.4.0 | 20.5.6 | Unreal Engine 5.x | NVN |
 | [Super Mario Odyssey](0100000000010000/README.md) | `0100000000010000` | 1.4.1 | 7.3.2 | Nintendo EPD (sead / agl, NintendoWare) | NVN |
 | [Super Mario Party Jamboree](0100965017338000/README.md) | `0100965017338000` | 2.3.0 | 17.5.9 | NintendoWare Bezel Engine 2.9 | NVN |
 | [Super Monkey Ball Banana Rumble](010031F019294000/README.md) | `010031F019294000` | 2.20 | 17.5.8 | Unity 2022.3.30f1 IL2CPP, CRIWARE, FMOD | NVN |

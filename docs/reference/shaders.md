@@ -663,6 +663,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `t_geometry_hazards` compares 4,096 generated pairs with the exhaustive scalar oracle and covers bit 63, duplicate promotion, adjacent bounds and overflow. All 22 checks, including the existing real-GPU storage/uniform dependency cases, pass with direct encoding, worker encoding and early submission disabled. The 914-check geometry suite passes with Metal validation. A balanced-order 60,000-call Mac benchmark of shared reads and disjoint writes reduces median predicate time from about 24.5 to 1.7 ms; this is an isolated CPU result, not game FPS.
 - **Found on:** [NieR:Automata iPhone CPU capture](../../dm/games/010056B015FE8000/README.md#iphone-resolution-and-frame-rate-controls).
 
+### An empty vertex stream kept every geometry draw out of a run
+
+- **Symptom:** a game whose frames are mostly geometry-shader draws stays GPU-bound by attachment traffic: a `DM_NVN_GPUPROF` frame shows hundreds of two-draw render passes (each geometry draw, then the reopened pass of its raster) and gigabytes of attachment loads and stores, and no `geometry hoist` line ever appears in the log; `[RED] vertex stream at an address not 4-byte aligned (0x1, 0 bytes)` is logged once.
+- **Cause:** the game leaves a vertex stream bound at address 1 with size 0. Two run checks looked at every one of the 16 streams, used or not: the lookahead's alignment test in `geo_prep` (a run may not prepare an unaligned stream ahead of intervening draws) returned -1 for it, and `geo_access_of` added it as a zero-length range, which `geo_access_add` marks unknown, so every pair of geometry draws counted as a dependency.
+- **Fix:** both skip a stream of size 0. Nothing reads from it and `vbuf_unaligned` never copies it, so neither the ordering nor the dependency proof changes for a stream that holds data.
+- **Found on:** FINAL FANTASY XII THE ZODIAC AGE (`0100EB100AB42000`, no profile yet): about 180 geometry draws a frame from two triangle-in, three-vertex-out shaders. On an M1 in handheld mode, gameplay went from 264 render passes and 2.9 GB load + 2.3 GB store a frame (GPU 52–68 ms, 12–17 fps) to 6,053 draws prepared in 153 runs by frame 1,500, GPU about 15 ms and a steady 30 fps, the game's own rate there.
+
 ### Parallel geometry index compaction
 
 - **Symptom:** geometry-heavy rendering spends substantial GPU time compacting the geometry shader's emitted indices.

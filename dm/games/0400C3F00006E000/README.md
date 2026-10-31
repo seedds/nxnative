@@ -10,7 +10,7 @@ Update 1.8.0 (917504), SDK 21.4.0, on NVN2 (Switch 2). In bring-up on the Mac: i
 | `render_cond on` | `game.tsv` | the 3D scene was black: its clears are conditional, as on Tears of the Kingdom |
 | 20 GB guest layout, `app_pool 0x263000000` | `game.tsv` | the game is told 9.55 GiB and plans all of it |
 
-Shaders come from `dm/gfx/tools/nx2_split.py` (SM86 lowered to Maxwell by `nx2_lower`, which is GPL-3.0-or-later, see its README), then `dmsh_build.py`, then `nx2_reflect.py`. About 240 of them exist only at run time: a run with `DM_NVN_SHDUMP` saves them and `NX2_DUMPS` adds them, so the map here holds keys no game file gives.
+Shaders come from `dm/gfx/tools/nx2_split.py` (SM86 lowered to Maxwell by `nx2_lower`, which is GPL-3.0-or-later, see its README), then `dmsh_build.py`, then `nx2_res.py` and `nx2_reflect.py`. About 240 of them exist only at run time: a run with `DM_NVN_SHDUMP` saves them and `NX2_DUMPS` adds them, so the map here holds keys no game file gives.
 
 ## Open
 

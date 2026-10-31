@@ -1,0 +1,47 @@
+# A new bug report whose "Device and OS" field names a device README's Requirements excludes (an Intel Mac, iOS below 26, an iPhone before the 15 Pro, an iPad without
+# an M-series chip) gets the `unsupported device` label and one friendly comment pointing to that table. Only clear cases count (dm/tools/issue_device_check.py): an
+# ambiguous or missing device does nothing, and a wrong label is removed by a maintainer on the reporter's word. It never closes, locks or assigns anything.
+# Triggered on `opened` only: a later edit of the field never adds a second comment, and the comment carries <!-- device-check --> so a re-run of the job finds it and skips.
+# The issue's text reaches the script through $GITHUB_EVENT_PATH (a file), never through a `run:` line, so a title or body cannot inject shell.
+name: issue-device-check
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# Actions are pinned to commit SHAs (the tag in the comment), as in tests.yml.
+jobs:
+  device-check:
+    name: Label bug reports from unsupported devices
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the Device and OS field
+        id: check
+        run: python3 dm/tools/issue_device_check.py --comment-file "$RUNNER_TEMP/device-check.md"
+      - name: Label and comment once
+        if: steps.check.outputs.status == 'unsupported'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh label create "unsupported device" --force --color d4c5f9 \
+            --description "Reported from a device outside README's Requirements"
+          gh issue edit "$ISSUE_NUMBER" --add-label "unsupported device"
+          if gh api "repos/$GH_REPO/issues/$ISSUE_NUMBER/comments" --paginate --jq '.[].body' | grep -qF '<!-- device-check -->'; then
+            echo "already commented"
+          else
+            gh issue comment "$ISSUE_NUMBER" --body-file "$RUNNER_TEMP/device-check.md"
+          fi

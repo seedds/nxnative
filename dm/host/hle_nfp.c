@@ -20,7 +20,7 @@ static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0
 
 typedef struct { char *p; size_t n, cap; } sbuf;
 static void sb_put(sbuf *b, const char *s, size_t n) {
-    if (b->n + n + 1 > b->cap) { size_t cap = (b->n + n + 1) * 2; char *t = realloc(b->p, cap); if (!t) die("amiibo: string buffer allocation failed"); b->p = t; b->cap = cap; }
+    if (!b->p || b->n + n + 1 > b->cap) { size_t cap = (b->n + n + 1) * 2; char *t = realloc(b->p, cap); if (!t) die("amiibo: string buffer allocation failed"); b->p = t; b->cap = cap; }
     memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
 }
 static void sb_str(sbuf *b, const char *s) { sb_put(b, s, strlen(s)); }

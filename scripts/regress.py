@@ -570,6 +570,10 @@ def build_summary(m):
 
 def host_for(tree, g, jobs):
     srcs = [p for d in HOST_DIRS for p in sorted((tree.path / d).iterdir()) if p.is_file() and p.suffix in ('.c', '.m', '.h', '.S', '.inc')]
+    if (tree.path / 'dm/gfx/tools/host_msl.py').is_file():   # older baseline revisions compiled these sources at run time
+        r = sh(['make', '-s', f'GAME={g.id}', 'host_msl'], cwd=tree.path / 'dm/host', env=g.env(tree))
+        if r.returncode: raise HarnessError(f'{g.id}: host shader libraries of {tree.id} do not build:\n{r.stdout}{r.stderr}')
+        srcs.append(tree.path / 'dm/host/gen/msl-macosx/host_msl_gen.h')   # includes sources, compiler, SDK and deployment target, even on a cache hit
     key = digest(srcs + [tree.path / 'dm/host/Makefile', g.profile_dir(tree) / 'game.tsv', tree.path / 'dm/games/game.py'], g.id.encode())[:16]
     dst = game_root(g) / 'host' / key / 'dmhost'
     if dst.is_file(): return dst, key, 0

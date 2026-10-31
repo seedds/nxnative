@@ -13,7 +13,7 @@
 #   Registered observation gates (OBS of the patch files, restricted by build ID): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
 # The key page only stores "actual key number × 8" at the end of the data segment, and patch code fetches thread slots indirectly through the key page: the loader may use any key number.
 # Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR; a text longer than a B reaches adds a second one after the image, see TWO), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv, <name>.changed.tsv (the text words whose instructions no longer run as the file has them)
-import struct, re, sys, os, glob, shlex, types, importlib.util
+import struct, re, sys, os, glob, shlex, types, importlib.util, multiprocessing, signal
 from itertools import combinations
 import capstone
 if capstone.cs_version()[0] != 5:   # the rewriter uses Capstone 5's names (CS_ARCH_ARM64, ARM64_OP_*), which Capstone 6 renamed: see "Capstone API version" in docs/reference/rewriter.md
@@ -22,6 +22,12 @@ from capstone import *
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
 import nso, nso_asm
 from nso_asm import *   # the instruction encoders (B, ADRP, LDRX, ...), shared with the per-build patch files
+
+# The NSP script terminates a failed or cancelled rewrite with SIGTERM. Exit through the pool's context manager so it reaps the workers too.
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+try: WORKERS = int(os.environ.get('DM_REWRITE_J') or os.cpu_count() or 1)
+except ValueError: sys.exit('[RED] DM_REWRITE_J must be a positive integer')
+if WORKERS < 1: sys.exit('[RED] DM_REWRITE_J must be a positive integer')
 
 src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 # An NSO, or an NRO (a module the game loads at run time with nn::ro, Super Smash Bros. Ultimate's fighter code), rewritten as an NSO of the same layout would be. nso.py checks the file
@@ -570,7 +576,27 @@ def x18_words(lo, hi):
             if R18.search(op): out.add(addr)
         a = last + 4 if last + 4 >= end else last + 8   # the chunk is done, or the word after the last decoded one is no instruction
     return out
-x18 = set().union(*(x18_words(s, e) for s, e in CODE_RANGES))
+# The x18 scan and the spin wait search only read the original image, so they can run in worker processes.
+def in_parallel(fn, jobs):
+    """Returns [fn(*job) for job in jobs], computed in forked worker processes.
+    The workers are forked on each call, so they see the module's state as it is at that point."""
+    if WORKERS < 2 or len(jobs) < 2:
+        return [fn(*job) for job in jobs]
+    with multiprocessing.get_context('fork').Pool(min(WORKERS, len(jobs))) as pool:
+        return pool.starmap(fn, jobs)
+
+def find_x18_words():
+    """x18_words over all the code, in 1 MB pieces"""
+    pieces = []
+    for start, end in CODE_RANGES:
+        for lo in range(start, end, 0x100000):
+            pieces.append((lo, min(lo + 0x100000, end)))
+    words = set()
+    for found in in_parallel(x18_words, pieces):
+        words |= found
+    return words
+
+x18 = find_x18_words()
 kinds = {}
 # Spin wait candidates (see "Spin waits" below): backward direct branches (b, b.cond, cbz / cbnz, tbz / tbnz) at most SPIN_WIN bytes back, by target
 SPIN_WIN, SPIN_TOPS = 512, {0x16, 0x17, 0x54, 0x34, 0x35, 0xB4, 0xB5, 0x36, 0x37, 0xB6, 0xB7}
@@ -1507,7 +1533,22 @@ def spin_emit(g):
         if x.mnemonic == 'b': put_branch(b, cpy[T])
         else: st = here(); emit(spin_rebranch(x, here(), cpy[T])); emit(B(here(), b + 4)); put_branch(b, st)
     stat('spin')
-spin_regions = [g for g in (spin_region(T, spin_cand[T]) for T in sorted(spin_cand)) if g]   # all found on the unchanged image first: emitting patches back-edges
+spin_heads = sorted(spin_cand)
+
+def spin_heads_with_region(first, step):
+    return [T for T in spin_heads[first::step] if spin_region(T, spin_cand[T])]
+
+def find_spin_regions():
+    """spin_region for every candidate head that has one, in address order. Each job takes every nth head, so the slow stretches
+    of code are spread across the workers. A region holds capstone objects, which can't be sent back from a worker, so the workers
+    only say which heads have one and the regions are built again here."""
+    step = min(8 * WORKERS, len(spin_heads))
+    heads = []
+    for found in in_parallel(spin_heads_with_region, [(first, step) for first in range(step)]):
+        heads += found
+    return [spin_region(T, spin_cand[T]) for T in sorted(heads)]
+
+spin_regions = find_spin_regions()   # all found on the unchanged image first: emitting patches back-edges
 spin_sites = [(g['T'], sorted(g['valid']), sum(len(g['nodes'][a]['ins']) for a in g['R'])) for g in spin_regions]
 for g in spin_regions: spin_emit(g)
 if os.environ.get('DM_SPIN_LIST'):

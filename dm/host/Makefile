@@ -35,10 +35,12 @@ $(VPX_LIB): $(VPX_OBJ)
 # The host's own Metal shaders (dm/gfx/msl/*.metal) compiled for MSL_SDK into gen/msl-<sdk>/host_msl_gen.h (dm/gfx/tools/host_msl.py; dm/gfx/nvn/host_msl.m loads them), so the host
 # compiles no MSL at run time. The iOS build (dm/ios/tools/gen_build.py) makes it with MSL_SDK=iphoneos, for the app's deployment target (MSL_MIN_iphoneos, as project.yml)
 MSL_SDK ?= macosx
+MSL_MIN_macosx = $(MACOS_MIN)
 MSL_MIN_iphoneos = 26.0
 MSL_SRC = $(sort $(wildcard ../gfx/msl/*.metal))
 MSL_H = gen/msl-$(MSL_SDK)/host_msl_gen.h
-$(MSL_H): $(MSL_SRC) ../gfx/tools/host_msl.py
+# Recheck the toolchain and target on every build; the generator keeps the header unchanged when its inputs match.
+$(MSL_H): $(MSL_SRC) ../gfx/tools/host_msl.py FORCE
 	python3 ../gfx/tools/host_msl.py --sdk $(MSL_SDK) $(if $(MSL_MIN_$(MSL_SDK)),--min $(MSL_MIN_$(MSL_SDK))) $@ $(MSL_SRC)
 .PHONY: host_msl
 host_msl: $(MSL_H)

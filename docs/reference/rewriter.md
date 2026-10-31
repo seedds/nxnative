@@ -331,6 +331,16 @@ To enroll a cut for any game's own module:
 - **Fix:** registered games rewrite with the revision's original profile; provisional games retain their external profile path. Shader builds continue using their writable copies. The harness regression covers both selections.
 - **Found on:** [NieR:Automata geometry review](../../dm/games/010056B015FE8000/README.md#geometry-optimization-review), when comparing rewrites after reconciling PRs #336 and #416.
 
+## Rewriter performance
+
+### Parallel scans preserve rewrite output
+
+- **Symptom:** packing spends most of the rewrite step on the x18 scan and the spin-wait search, using one core per module. Cancelling a parallel rewrite can leave its workers running; `DM_REWRITE_J=0` or a negative value can silently omit spin gates, and the NSP script can ignore an explicit worker limit.
+- **Cause:** both searches analyse an unchanged image, but ran sequentially. A default SIGTERM exits without unwinding the pool's context manager. The spin search's job count assumed a positive worker count, and the NSP script always replaced the caller's setting with its automatic budget.
+- **Fix:** `patch_nso.py` scans code ranges in 1 MB pieces and distributes spin candidates across forked workers. Each pool inherits the image and analysis state at that pass; workers return addresses, and the parent rebuilds accepted spin regions in address order before emitting patches. SIGTERM exits through Python's cleanup so the pool terminates and joins its children. `DM_REWRITE_J` must be a positive integer (`1` runs serially), checked before loading modules; the NSP script honours an explicit value and otherwise chooses its budget from the core and module counts. These changes apply to every NSO and NRO; patch selection and runtime semantics stay the same.
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game).
+- **Check:** synthetic tests cover SIGTERM during active pool jobs, invalid counts and explicit worker limits through the packing script. The original speed measurements and module comparisons are in [PR #761](https://github.com/seedds/nxnative/pull/761); their timings are contributor measurements, not local regression results. Local game validation is recorded in Breath of the Wild's note; other games and NROs have no new local runtime validation here.
+
 ## Checking a rewriter change
 
 Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.

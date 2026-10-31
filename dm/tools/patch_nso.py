@@ -689,6 +689,11 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
         if not m: continue
         if wname(m.group(1)) in idx: cmp = p; break
         if masked:   # the checked register must be "the same source & the same mask", with the source unchanged up to the index's and
+            # A 64-bit and with 0xffffffff only zero-extends, so a 32-bit check of its source bounds it: Mario Tennis Aces main+0x358368 has cmp w8,#4; b.hi; and x18,x8,#0xffffffff;
+            # ldrsw x18,[x16,x18,lsl #2]
+            if masked[1] == 0xffffffff and wname(m.group(1)) == masked[0] and m.group(1)[0] == 'w' and \
+               not any(masked[0] in [wname(ctx[z].reg_name(r)) for r in ctx[z].regs_access()[1]] for z in range(i + 1, masked[2])):
+                cmp = p; break
             for q in range(i - 1, -1, -1):
                 w = [wname(ctx[q].reg_name(r)) for r in ctx[q].regs_access()[1]]
                 if wname(m.group(1)) not in w: continue

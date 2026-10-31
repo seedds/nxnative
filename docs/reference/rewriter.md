@@ -79,6 +79,13 @@ To enroll a cut for any game's own module:
 - **Fix:** in its last pass (`far_base`), `jump_offsets` accepts `cmp xI, #N` on the index too. The earlier passes are unchanged, so modules that rewrote before come out the same.
 - **Found on:** [OCTOPATH TRAVELER](../../dm/games/010057D006492000/README.md) `main+0x1676f58` (1.0.5), the only such site in that `main`.
 
+### Index zero-extended after a 32-bit bounds check
+
+- **Symptom:** `jump table <addr>` assertion in `patch_nso.py` where the index is made with a 64-bit `and` by `0xffffffff` after the check (`cmp w8, #4; b.hi; and x18, x8, #0xffffffff; ldrsw x18, [x16, x18, lsl #2]; add x18, x18, x16; br x18`).
+- **Cause:** `jump_offsets` took the `and` as a mask and looked for the same mask on the checked register, which has none, so no form matched.
+- **Fix:** a 64-bit `and` with `0xffffffff` only zero-extends, so `jump_offsets` accepts a 32-bit `cmp` of its source when the source is unchanged between the check and the `and`. Only sites that matched nothing before are affected.
+- **Found on:** Mario Tennis Aces (0100BDE00862A000) `main+0x35837c` (1.0.0), a 5-entry table whose targets all lie in the function; with the fix `main`, `subsdk0` and `sdk` rewrite.
+
 ### Index masked in the block that branches to the dispatch
 
 - **Symptom:** `jump table <addr>` assertion in a Unity / IL2CPP `main` whose dispatch checks a fresh mask of another register than the one it indexes with.

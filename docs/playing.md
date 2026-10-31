@@ -12,7 +12,7 @@ Tap **2D** / **3D** at the top to switch layouts; the app remembers your choice.
 
 In 3D, the right stick (the camera in most games) is not drawn: swipe on the right third of the screen, starting anywhere off the buttons. In Super Mario Galaxy and Super Mario Galaxy 2, other touches outside the controls move the pointer; in Captain Toad: Treasure Tracker they touch the game's screen (touch blocks, stun enemies), and in Big Brain Academy: Brain vs. Brain too (its menus and activities).
 
-A connected game controller hides the touch controls and keeps every button.
+A connected game controller hides the touch controls and keeps every button. Its A and B buttons follow the settings screen's **A/B buttons** choice, Nintendo or Xbox / PlayStation.
 
 ## Rumble
 

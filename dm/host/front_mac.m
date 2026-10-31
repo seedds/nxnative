@@ -7,6 +7,7 @@
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad, J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
 // Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
+// a Joy-Con's two halves are one player instead (pad_joycon.h), DM_JOYCON_PAIR=0 keeping each half a controller of its own;
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -21,6 +22,7 @@
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
 #include "pad_apple.h"
+#include "pad_joycon.h"
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -122,11 +124,41 @@ static void on_key(NSEvent *e, int down) {
 // With DM_PAD_MERGE=1 every controller is player 1, as before (the last one moved wins; when the last one goes away its buttons and sticks are released)
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
-static int g_merge, g_kbd_own;
+// A Joy-Con pair is one player (pad_joycon.h): its two halves are kept here, and the slot is held by the pair itself (&g_pair[p]) rather than by a
+// controller, so a half that goes away leaves the player to the other one. msrc is the half whose gyro feeds the player's six-axis sensor: the right
+// one while it has a gyroscope, else the left one, as on a Switch (a pair's motion comes from the right Joy-Con)
+typedef struct { GCController *l, *r, *msrc; } joy_pair;
+static joy_pair g_pair[DM_PLAYERS];
+static int g_merge, g_kbd_own, g_pair_on;
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
+// The slot a controller plays on: its own, or that of the pair it is a half of (-1 for neither)
+static int pad_slot_for(GCController *c) {
+    int p = pad_slot_of(&g_slots, (__bridge const void *)c);
+    for (int q = 0; p < 0 && q < DM_PLAYERS; q++) if (g_pair[q].l == c || g_pair[q].r == c) p = q;
+    return p;
+}
+static int slot_used(int p) { return g_held[p] != nil || g_pair[p].l || g_pair[p].r; }
+// A pair's one state (pad_joycon.h) to its player; the right half is its rumble target (hle_haptics.c drives one controller per player)
+static void pair_read(int p) {
+    GCExtendedGamepad *l = g_pair[p].l.extendedGamepad, *r = g_pair[p].r.extendedGamepad;
+    if (!l && !r) return;
+    dm_joy_state s = dm_joy_pair_state(l, r);
+    dm_haptics_apple_controller(p, g_pair[p].r ?: g_pair[p].l);
+    dm_pad_set_player(p, s.buttons, pad_axis(s.lx), pad_axis(s.ly), pad_axis(s.rx), pad_axis(s.ry));
+}
+// The pair's six-axis sensor: the right half's gyro, the left one's while the right has none or is gone. Detaching the old source first clears the
+// player's motion, so the new source's first sample is not read as a jump from the old one's
+static void pair_motion(int p) {
+    GCController *r = g_pair[p].r, *l = g_pair[p].l;
+    GCController *src = r.motion.hasRotationRate ? r : l.motion.hasRotationRate ? l : nil;
+    if (src == g_pair[p].msrc) return;
+    if (g_pair[p].msrc) dm_motion_detach(g_pair[p].msrc, p);
+    if ((g_pair[p].msrc = src)) dm_motion_attach(src, p);
+}
 static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
-    int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
+    int p = g_merge ? 0 : pad_slot_for(g.controller); if (p < 0) return;
+    if (g_pair[p].l == g.controller || g_pair[p].r == g.controller) { pair_read(p); return; }   // a Joy-Con half: the pair's one state
     dm_haptics_apple_controller(p, g.controller);
     uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
     #define K(btn, bit) if (btn.isPressed) m |= bit
@@ -171,9 +203,39 @@ static void pads_changed(GCController *gone) {
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
         dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     }
-    for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
-        int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
-        if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
+    // A Joy-Con pair: the half that went away leaves the player to the other one, which plays with what it has (the left one alone moves, presses
+    // L / ZL / − and points; the right one's buttons and stick play), and its own buttons are released. The player is freed when both halves are gone
+    for (int p = 0; p < DM_PLAYERS; p++) for (int side = 0; side < 2; side++) {
+        GCController *h = side ? g_pair[p].r : g_pair[p].l;
+        if (!h || (h != gone && [now containsObject:h])) continue;
+        npad_name(p, nb, sizeof nb);
+        if (side ? g_pair[p].l : g_pair[p].r) LOG("controller '%s' disconnected: the other half of the pair keeps player %d (npad %s)", pad_name(h), p + 1, nb);
+        else LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(h), p + 1, nb);
+        h.extendedGamepad.valueChangedHandler = nil;
+        if (g_pair[p].msrc == h) { dm_motion_detach(h, p); g_pair[p].msrc = nil; }
+        if (side) g_pair[p].r = nil; else g_pair[p].l = nil;
+        if (!slot_used(p)) { pad_slot_free(&g_slots, &g_pair[p]); dm_haptics_apple_controller(p, nil); dm_pad_set_player(p, 0, 0, 0, 0, 0); }
+        else { pair_motion(p); pair_read(p); }   // the state of the half that stayed, so nothing the gone one held stays pressed
+    }
+    for (GCController *c in now) if (c.extendedGamepad && c != gone && pad_slot_for(c) < 0) {
+        int side = g_pair_on ? dm_joycon_side(c.productCategory, c.vendorName) : DM_JOY_NONE, p = -1;
+        if (side == DM_JOY_L || side == DM_JOY_R) {
+            for (int q = 0; p < 0 && q < DM_PLAYERS; q++)   // its partner's player, when the other half is already there (one that stayed, or came back)
+                if (side == DM_JOY_L ? (!g_pair[q].l && g_pair[q].r) : (!g_pair[q].r && g_pair[q].l)) p = q;
+            if (p < 0 && (p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c))) >= 0) pad_slot_owner(&g_slots, p, &g_pair[p]);
+            if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
+            if (side == DM_JOY_L) g_pair[p].l = c; else g_pair[p].r = c;
+            pad_keep_system_buttons(c);
+            c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
+            pair_motion(p); pair_read(p);
+            npad_name(p, nb, sizeof nb);
+            if (g_pair[p].l && g_pair[p].r) LOG("controller '%s' connected: the Joy-Con pair is player %d (npad %s)%s", pad_name(c), p + 1, nb, g_pair[p].msrc ? ", with motion (gyro)" : "");
+            else LOG("controller '%s' connected: a lone Joy-Con half is player %d (npad %s)%s", pad_name(c), p + 1, nb, g_pair[p].msrc ? ", with motion (gyro)" : "");
+            continue;
+        }
+        if ((p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c))) < 0) {
+            LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue;
+        }
         g_held[p] = c; pad_keep_system_buttons(c);
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
         dm_motion_attach(c, p);
@@ -193,17 +255,18 @@ static void input_release(void) {
     g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
-    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    else for (int p = 0; p < DM_PLAYERS; p++) if (slot_used(p)) dm_pad_set_player(p, 0, 0, 0, 0, 0);
 }
 static void input_resume(void) {
     g_input_on = 1;
     dm_motion_pro_active(1);
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
-    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
+    else for (int p = 0; p < DM_PLAYERS; p++) if (g_pair[p].l || g_pair[p].r) pair_read(p); else if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
 }
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
+    e = getenv("DM_JOYCON_PAIR"); g_pair_on = !e || atoi(e);   // =0: a Joy-Con half stays a controller of its own
     static const char kbd = 0;
     if (g_kbd_own) pad_slot_take(&g_slots, &kbd, "keyboard");   // holds player 1 for good
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : g_kbd_own ? "the keyboard is player 1, each controller a player of its own from player 2 on (DM_KBD_PLAYER=own)"

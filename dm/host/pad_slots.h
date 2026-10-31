@@ -31,6 +31,10 @@ static int pad_slot_free(pad_slots *s, const void *owner) {
     int p = pad_slot_of(s, owner); if (p >= 0) s->owner[p] = NULL;
     return p;
 }
+// The slot keeps its player but changes holder: a Joy-Con pair's two halves are one player, so the slot a half took becomes the pair's (front_mac.m)
+static void pad_slot_owner(pad_slots *s, int p, const void *owner) {
+    if (p >= 0 && p < DM_PLAYERS && s->owner[p]) s->owner[p] = owner;
+}
 static uint32_t pad_slot_mask(const pad_slots *s) {   // bit p: slot p is held
     uint32_t m = 0; for (int i = 0; i < DM_PLAYERS; i++) if (s->owner[i]) m |= 1u << i;
     return m;

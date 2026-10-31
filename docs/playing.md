@@ -14,6 +14,8 @@ In 3D, the right stick (the camera in most games) is not drawn: swipe on the rig
 
 A connected game controller hides the touch controls and keeps every button.
 
+**Joy-Con pairs.** On the Mac each Joy-Con arrives as a controller of its own, so a pair does not play: the left half has the d-pad and the stick but no A / B / X / Y, the right one the buttons but no d-pad. The two halves of a pair are bound into one player: the left half's d-pad, left stick, L / ZL and − and the right half's X / A / B / Y, right stick, R / ZR and + play as one Pro Controller would, and the right half's gyro drives the game's motion. `DM_JOYCON_PAIR=0` in `env.txt` keeps each half a player of its own. On the iPhone and iPad a pair already comes as one controller.
+
 ## Rumble
 
 Game vibration uses the iPhone's haptic engine or a compatible connected controller. Controllers with separate left/right haptic outputs keep those effects separate. The settings screen's **Game rumble** and **Rumble strength** control it independently of **Touch feedback**. Phone rumble approximates the Switch's effects; physical feel and controller compatibility still need device testing.

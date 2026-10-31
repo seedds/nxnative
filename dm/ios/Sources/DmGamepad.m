@@ -27,6 +27,7 @@
 #include "motion_fusion.h"
 #include "pad_apple.h"
 #include "pad_slots.h"
+#include "dm_switch2.h"
 #include <stdatomic.h>
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
@@ -130,6 +131,7 @@ static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 
 @interface DmGamepad : UIView
+- (void)externalPad:(BOOL)on;   // a controller outside GameController (Switch 2 BLE) holds a player: hide the touch gamepad like a physical pad does
 @end
 static __weak DmGamepad *g_view;
 static void pads_start(void);   // Physical controllers, below
@@ -462,6 +464,31 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge;
+
+// A controller that is not in GameController (the iOS Switch 2 BLE path) takes a player through the same slot table, so it competes with
+// GameController controllers for players 1-8 and a reconnected one gets its player back. Called from the Bluetooth queue; the table belongs to
+// the main thread, where GameController's connect/disconnect notifications run.
+int dm_pad_external_claim(const void *owner, const char *name) {
+    __block int p = -1;
+    dispatch_block_t take = ^{
+        p = pad_slot_take(&g_slots, owner, name);
+        if (p < 0) return;
+        dm_pad_players(pad_slot_mask(&g_slots));
+        [g_view externalPad:YES];
+    };
+    if (NSThread.isMainThread) take(); else dispatch_sync(dispatch_get_main_queue(), take);
+    return p;
+}
+void dm_pad_external_release(const void *owner) {
+    dispatch_block_t drop = ^{
+        int p = pad_slot_free(&g_slots, owner);
+        if (p < 0) return;
+        dm_pad_set_player(p, 0, 0, 0, 0, 0);
+        dm_pad_players(pad_slot_mask(&g_slots));
+        [g_view externalPad:pad_slot_mask(&g_slots) != 0];
+    };
+    if (NSThread.isMainThread) drop(); else dispatch_sync(dispatch_get_main_queue(), drop);
+}
 static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 32767); }
 static void read_pad(GCExtendedGamepad *g) {
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0) return;
@@ -483,6 +510,7 @@ static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_np
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : "each controller is a player of its own, the touch gamepad plays with player 1");
+    dm_switch2_start();   // Nintendo Switch 2 Pro Controller over CoreBluetooth: iOS has no system support for it (DmSwitch2BLE.m)
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil otherwise); returns whether a controller is in use
 static BOOL pads_merged(GCController *gone) {
@@ -520,11 +548,15 @@ static BOOL pads_slotted(GCController *gone) {
     dm_pad_players(pad_slot_mask(&g_slots));
     return pad_slot_mask(&g_slots) != 0;
 }
+- (void)externalPad:(BOOL)on {   // a Switch 2 BLE controller took or freed a player: same effect as a GameController connect/disconnect
+    _padOff = on; _controls.hidden = on; [self reset];
+}
 - (void)padsChanged:(NSNotification *)note {
     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
     if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
     BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
-    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
+    BOOL inUse = any || pad_slot_mask(&g_slots) != 0;   // a Switch 2 BLE controller hides the touch gamepad too
+    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = inUse; self->_controls.hidden = inUse; [self reset]; });   // the touch gamepad hides while any controller is in use
 }
 @end
 

@@ -38,6 +38,7 @@
 static dispatch_queue_t queue;
 static NSMutableArray<DmRumbleChannel *> *channels[DM_PLAYERS];
 static GCController *controllers[DM_PLAYERS];
+static void (*bleSink[DM_PLAYERS])(const dm_haptic_state *);   // see dm_haptics_apple_set_ble
 #if TARGET_OS_IPHONE
 static BOOL phoneSupported;
 #endif
@@ -303,6 +304,7 @@ static BOOL ds4_route(int p, GCController *controller) {
 static void apply(dm_haptic_state s) {
     dispatch_async(queue, ^{ @autoreleasepool {
         if (s.epoch != dm_haptics_epoch(s.player)) return;
+        if (bleSink[s.player]) { bleSink[s.player](&s); return; }   // a non-GameController controller owns this player
         NSArray<DmRumbleChannel *> *out = channels[s.player];
 #if !TARGET_OS_IPHONE
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
@@ -374,11 +376,26 @@ static void configure(int p, GCController *controller) {
 void dm_haptics_apple_controller(int p, GCController *controller) {
     if (!queue || p < 0 || p >= DM_PLAYERS) return;
     pthread_mutex_lock(&routeLock);
+    if (!controller && bleSink[p]) { pthread_mutex_unlock(&routeLock); return; }   // a BLE controller holds this player
+    if (controller) bleSink[p] = NULL;                                              // GameController takes the player back
     if (controllers[p] != controller) {
         controllers[p] = controller;
         dm_haptics_route(p, 0);   // invalidate queued work before changing hardware
         dispatch_sync(queue, ^{ configure(p, controller); });
     }
+    pthread_mutex_unlock(&routeLock);
+}
+void dm_haptics_apple_set_ble(int p, void (*sink)(const dm_haptic_state *)) {
+    if (!queue || p < 0 || p >= DM_PLAYERS) return;
+    pthread_mutex_lock(&routeLock);
+    bleSink[p] = sink;
+    dm_haptics_route(p, 0);   // drop queued snapshots before the route changes
+    dispatch_sync(queue, ^{
+        for (DmRumbleChannel *c in channels[p]) [c stop];
+        channels[p] = [NSMutableArray new];
+        if (sink) dm_haptics_route(p, 1);
+        else configure(p, controllers[p]);   // back to the GameController controller, or the phone for player 1
+    });
     pthread_mutex_unlock(&routeLock);
 }
 static void suspend(unsigned reason, BOOL on) {

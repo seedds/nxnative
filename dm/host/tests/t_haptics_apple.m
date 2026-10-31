@@ -158,6 +158,8 @@ static void send_pair(float left, float right) {
     dm_haptics_send(u, 2); drain();
 }
 static int made;   // engines the test factories made
+static dm_haptic_state bleLast; static int bleCalls;   // the BLE sink's last state
+static void ble_capture(const dm_haptic_state *s) { bleLast = *s; bleCalls++; }
 int main(void) { @autoreleasepool {
     queue = dispatch_queue_create("test.rumble", DISPATCH_QUEUE_SERIAL);
     dispatch_queue_set_specific(queue, &queue, &queue, NULL);
@@ -303,6 +305,18 @@ int main(void) { @autoreleasepool {
     else assert(channels[0].count == 2 && [channels[0][0] isKindOfClass:DmDs4Channel.class] && ds.haptics.attempts == 0);
     dm_haptics_apple_controller(0, nil); drain();
     assert(ds4_crc((const uint8_t *)"123456789", 9) == 0xCBF43926u);   // the report's CRC32 (IEEE, reflected)
+    // iOS Switch 2 BLE route: a non-GameController sink owns the player, survives a nil GameController update, and hands the player back when cleared.
+    dm_haptics_apple_set_ble(0, ble_capture); drain();
+    send_pair(0.4f, 0.2f);
+    assert(bleCalls > 0 && fabsf(bleLast.motor[0].amplitude_low - 0.4f) < 1e-5f && (dm_haptics_available() & 1));
+    dm_haptics_apple_controller(0, nil); drain();
+    assert(bleSink[0] == ble_capture);   // a nil GameController update must not steal the player from the BLE controller
+    int calls = bleCalls; send_pair(0.1f, 0.1f); assert(bleCalls > calls);
+    TestController *gc = [TestController new]; gc.haptics = [TestHaptics new];
+    dm_haptics_apple_controller(0, (id)gc); drain();
+    assert(bleSink[0] == NULL);          // a real GameController takes the player back
+    dm_haptics_apple_controller(0, nil); dm_haptics_apple_set_ble(0, NULL); drain();
+    assert(bleSink[0] == NULL && !(dm_haptics_available() & 1));
     dm_haptics_apple_shutdown();
     puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, level cutoff and the DualShock 4 route passed");
 } }

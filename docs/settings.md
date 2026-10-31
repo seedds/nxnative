@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Left back button](#left-back-button), [Right back button](#right-back-button), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [TV](#tv)
@@ -64,6 +64,14 @@ Shows the frames per second at the top left.
 ### Touch feedback
 
 A light tap from the phone when you press an on-screen button.
+
+### Left back button
+
+On a controller with back buttons (such as a Switch 2 Pro Controller over Bluetooth), map the left back button (GL) to duplicate a face button, stick click, or trigger (B, A, Y, X, L3, R3, ZL, ZR). Off (None) by default.
+
+### Right back button
+
+On a controller with back buttons, map the right back button (GR) to duplicate a face button, stick click, or trigger. Off (None) by default.
 
 ### Game rumble
 

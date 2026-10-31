@@ -41,6 +41,8 @@ targets:
         UIRequiresFullScreen: true
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false
+        NSBluetoothAlwaysUsageDescription: "A Nintendo Switch 2 Pro Controller connects over Bluetooth so games can use it; iOS has no built-in support for this controller."
+        NSBluetoothPeripheralUsageDescription: "A Nintendo Switch 2 Pro Controller connects over Bluetooth so games can use it; iOS has no built-in support for this controller."
         LSApplicationCategoryType: ${DM_APP_CATEGORY}   # game profile app_category
         DMShowFPS: ${DM_SHOW_FPS}           # YES = the frame-rate counter is on (front_ios.m; set by build_ipa.sh)
         DMLanguage: ${DM_LANG}              # the game language code (main.m sets DM_LANG from it; set by build_ipa.sh)
@@ -77,6 +79,7 @@ targets:
       ENABLE_BITCODE: NO
       GCC_C_LANGUAGE_STANDARD: gnu11
       OTHER_CFLAGS: $(inherited) -mcpu=apple-a18   # The host assembly contains LSE atomic instructions, which the default baseline does not accept
+      OTHER_LDFLAGS: $(inherited) -framework CoreBluetooth   # DmSwitch2BLE.m: the Switch 2 Pro Controller is a proprietary BLE device, not a GameController one
       CLANG_ENABLE_OBJC_ARC: YES
       SWIFT_VERSION: "5.0"                         # Launcher.swift (SwiftUI)
       SWIFT_OBJC_BRIDGING_HEADER: Sources/DmIOS-Bridging-Header.h   # CloudSaves.h (the cloud-save folder pick)

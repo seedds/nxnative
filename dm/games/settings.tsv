@@ -23,6 +23,8 @@ DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=bas
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
+DM_PAD_GL	choice	none=None,b=B (Sprint / Cancel),a=A (Jump / Confirm),y=Y,x=X,lstick=Left stick click (L3),rstick=Right stick click (R3),zl=ZL trigger,zr=ZR trigger	none	always	Controls	Left back button
+DM_PAD_GR	choice	none=None,b=B (Sprint / Cancel),a=A (Jump / Confirm),y=Y,x=X,lstick=Left stick click (L3),rstick=Right stick click (R3),zl=ZL trigger,zr=ZR trigger	none	always	Controls	Right back button
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
 DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff

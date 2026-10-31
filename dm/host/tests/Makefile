@@ -51,6 +51,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_pad_apple
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
+	$(B)/t_switch2
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
 	$(B)/t_haptics
 	$(B)/t_haptics_apple
@@ -171,6 +172,13 @@ $(B)/t_motion_pro: t_motion_pro.c ../motion_pro.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_motion_pro.c
 $(B)/t_motion_pro_mac: t_motion_pro_mac.m ../motion_pro_mac.h ../motion_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_motion_pro_mac.m -framework Foundation -framework GameController -framework IOKit
+# The Switch 2 controller protocol, checked without Bluetooth (the same header DmSwitch2BLE.m uses)
+run: $(B)/t_switch2
+$(B)/t_switch2: t_switch2.c ../../ios/Sources/dm_switch2_proto.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. -I../.. -I../../ios/Sources -o $@ t_switch2.c
+.PHONY: switch2
+switch2: $(B)/t_switch2
+	$(B)/t_switch2
 $(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c
 $(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)

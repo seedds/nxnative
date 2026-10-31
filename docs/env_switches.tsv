@@ -191,6 +191,8 @@ DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on e
 DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads when `shader_split.py` decodes Trinity packs; set by the NSP script
 DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
+DM_PAD_GL	player	`=<none|b|a|y|x|lstick|rstick|zl|zr|l|r>` maps the Switch 2 Pro Controller left back button (GL) to an NpadButton (default `none`; launcher choice)
+DM_PAD_GR	player	`=<none|b|a|y|x|lstick|rstick|zl|zr|l|r>` maps the Switch 2 Pro Controller right back button (GR) to an NpadButton (default `none`; launcher choice)
 DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
 DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
 DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
@@ -275,6 +277,11 @@ DM_SPIN	switch	`0` makes the rewriter's spin gate return at once, so guest poll 
 DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it found and sends through a spin gate
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
+DM_SW2_BOND_MAC	diagnostic	`=<aa:bb:cc:dd:ee:ff>` sends the four `0x15` bond commands so a Switch 2 Pro Controller wakes toward this host address; off by default, because iOS exposes no public way to read the iPhone's own Bluetooth address
+DM_SW2_DEADZONE	player	`=<counts>` centre deadzone of a Switch 2 Pro Controller's sticks in raw 12-bit counts (default 40; `DmSwitch2BLE.m`)
+DM_SW2_MOTION	switch	`1` publishes the Switch 2 Pro Controller's IMU to the six-axis sensor; off by default because the raw counts and axis order are not verified on hardware (inferred from the Switch Pro IMU map)
+DM_SW2_RUMBLE	switch	`0` turns off HD rumble on a Switch 2 Pro Controller (on by default)
+DM_SW2_VERBOSE	diagnostic	`=1` logs one Switch 2 Pro Controller input sample every 90 reports (buttons, sticks, battery)
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
 DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment for buffer textures when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset

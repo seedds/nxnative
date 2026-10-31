@@ -5,6 +5,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
+#import <GameController/GameController.h>
 #include <errno.h>
 #include "front.h"
 #include "hle.h"
@@ -265,6 +266,53 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     if (!r) return 0;
     snprintf(out, out_cap, "%s", text.UTF8String ? text.UTF8String : "");
     return 1;
+}
+
+// Controller applet (front.h front_controller_applet, hle_hid.c): a UIAlertController on the main thread that lists the connected controllers and keeps Continue disabled until the game's minimum
+// is connected; the game thread waits on a semaphore. Compile-checked only (dm/ios/tools/compile_check.py), not run on a device. The iPhone has one player (the touch controls and every
+// controller are player 1: DmGamepad.m), so a game that needs two or more players is answered at once (hle_hid.c, front_player_capacity). A timer in the common run-loop modes refreshes the list and reads the pads: the Switch's
+// A (the right face button) continues, B (the bottom one) cancels, on an edge only
+int front_player_capacity(void) { return 1; }   // the touch controls and every controller are player 1 (DmGamepad.m)
+int front_controller_applet(int min, int max, const char *explain, int *count, uint32_t *selected) {
+    (void)selected;
+    if (!g_layer) return FRONT_CA_CANCELLED;
+    __block int result = FRONT_CA_CANCELLED;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *vc = nil;
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) if ([s isKindOfClass:UIWindowScene.class]) for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow) vc = w.rootViewController;
+        while (vc.presentedViewController) vc = vc.presentedViewController;
+        if (!vc) { LOG("[RED] front end: no window for the controller applet"); result = FRONT_CA_CANCELLED; dispatch_semaphore_signal(done); return; }
+        NSString *need = min == max || max <= 0 ? [NSString stringWithFormat:@"This game needs %d controller%s.", min, min == 1 ? "" : "s"]
+                                                : [NSString stringWithFormat:@"This game needs %d to %d controllers.", min, max];
+        if (explain && *explain) need = [need stringByAppendingFormat:@"\n%s", explain];
+        UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"Connect controllers" message:nil preferredStyle:UIAlertControllerStyleAlert];
+        __block NSTimer *tm = nil; __block BOOL finished = NO;
+        void (^finish)(BOOL) = ^(BOOL ok) {   // once: a pad press and the button can both arrive
+            if (finished) return;
+            finished = YES; [tm invalidate];
+            if (ok) { result = FRONT_CA_OK; *count = dm_controller_applet_players(max); }
+            dispatch_semaphore_signal(done);
+        };
+        UIAlertAction *go = [UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x; finish(YES); }];
+        UIAlertAction *cancel = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *x) { (void)x; finish(NO); }];
+        [ac addAction:go]; [ac addAction:cancel]; ac.preferredAction = go;
+        __block BOOL held = NO; for (GCController *c in GCController.controllers) if (c.extendedGamepad.buttonB.isPressed || c.extendedGamepad.buttonA.isPressed) held = YES;
+        void (^refresh)(void) = ^{
+            NSMutableString *t = [NSMutableString stringWithString:need]; [t appendString:@"\n\nPlayer 1: touch controls"];
+            for (GCController *c in GCController.controllers) if (c.extendedGamepad) [t appendFormat:@" and %s", c.vendorName.UTF8String ?: "a controller"];
+            ac.message = t; go.enabled = dm_controller_applet_players(max) >= min;
+            BOOL ok = NO, no = NO; for (GCController *c in GCController.controllers) { ok |= c.extendedGamepad.buttonB.isPressed; no |= c.extendedGamepad.buttonA.isPressed; }
+            if ((ok || no) && !held && ((ok && go.enabled) || no)) { BOOL yes = ok && go.enabled; finish(yes); [ac dismissViewControllerAnimated:YES completion:nil]; return; }
+            held = ok || no;
+        };
+        refresh();
+        tm = [NSTimer timerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *t) { (void)t; refresh(); }];
+        [NSRunLoop.mainRunLoop addTimer:tm forMode:NSRunLoopCommonModes];
+        [vc presentViewController:ac animated:YES completion:nil];
+    });
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);   // the guest clock keeps running meanwhile, as with the keyboard (hle_swkbd.c)
+    return result;
 }
 
 // Save write failed (most likely the phone's storage is full): show a notice on the main thread without blocking the game. hle_fs.c calls this when a save transaction is refused or a mount has to fall back to read-only;

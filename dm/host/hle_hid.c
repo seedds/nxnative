@@ -3,11 +3,12 @@
 // players 2..8 are full-key controllers on No2..No8 (ids 1..7) while the front end reports a controller for them (dm_pad_players; the Mac gives each physical controller a player
 // of its own, front_mac.m). A player whose npad the game does not support (SetSupportedNpadIdType) is not reported: in a one-player game it feeds player 1, otherwise it is not used.
 // Six-axis sensor: one per connected controller (two for handheld), at rest lying flat, player 1's shaken side to side while the front end holds DM_BTN_SHAKE (see the six-axis section below).
-// Vibration follows the player assignments through hle_haptics.c. Mouse and keyboard: not connected; the controller applet reports the connected players with player 1 selected.
+// Vibration follows the player assignments through hle_haptics.c. Mouse and keyboard: not connected; the controller applet reports the connected players with player 1 selected, and waits when the game needs more (controller_applet.h).
 #include "hle.h"
 #include "hle_haptics.h"
 #include "dm_input.h"
 #include "front.h"
+#include "controller_applet.h"
 #include <stdatomic.h>
 #include <unistd.h>
 #include <strings.h>
@@ -506,24 +507,46 @@ HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj", "Joy-Con single assi
 HLE_FORCE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", "swap controller ids; ignored by the host", void, h_hid_Swap, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; }
 HLE_FORCE("_ZN2nn3hid21StartLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStart, void) {}
 HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R assignment mode; ignored by the host", void, h_hid_LrStop, void) {}
-// Controller applet (system UI): report the connected players right away, with player 1's controller selected. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; };
-// ControllerSupportArg starts with { int8 playerCountMin, playerCountMax }: the count is capped at the maximum. Fewer players than the minimum: on a Switch the applet stays open
-// until enough controllers connect or the player closes it, and the SDK's ShowControllerSupportCore (Mario Kart 8 Deluxe 4.0.0 sdk+0x24eeb0) turns the applet's result into
-// 0 success, 2 → 2202-3102, anything else → ResultControllerSupportCanceled (2202-3101). The host has nothing to wait for, so it answers as the player closing it. An OK with
-// fewer players is an answer a Switch never gives: Mario Kart 8 Deluxe asks for two in 2P and opened the applet again every few frames on it (GitHub issue #550)
+// Controller applet (system UI): report the connected players, with player 1's controller selected. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; };
+// ControllerSupportArg starts with { int8 playerCountMin, playerCountMax, u8 takeOverConnection, leftJustify, permitJoyDual, singleMode } (controller_applet.h): the count is capped at the maximum.
+// With enough players connected the host answers at once. Fewer players than the minimum: on a Switch the applet stays open until enough controllers connect or the player closes it, and the SDK's
+// ShowControllerSupportCore (Mario Kart 8 Deluxe 4.0.0 sdk+0x24eeb0) turns the applet's result into 0 success, 2 → 2202-3102, anything else → ResultControllerSupportCanceled (2202-3101).
+// A front end that can show the applet's screen (front.h front_controller_applet: a sheet on the Mac, an alert on the iPhone) is asked then and this thread waits in it, as Horizon's applet does,
+// until enough players are connected (OK, with the count then) or the player cancels (answered as the player closing it: 3101). With no front end (the weak default below, headless runs) there
+// is nothing to wait for, so it answers as the player closing it at once. An OK with fewer players is an answer a Switch never gives: Mario Kart 8 Deluxe asks for two in 2P and opened the
+// applet again every few frames on it (GitHub issue #550). The explain texts are not shown: their offset in the argument depends on the argument's version (4 or 8 players, 0x21 or 0x81 bytes
+// each), which this overload does not receive (open)
 #define RES_CTRL_CANCELED (202u | 3101u << 9)
-static Result ctrl_support(int32_t *info, const int8_t *arg) {
+int dm_controller_applet_players(int max) {   // the connected players as the applet reports them now (front ends read it while their screen is up)
     int count = 0; for (int p = 0; p < DM_PLAYERS; p++) count += reported(p);
-    int canceled = arg && arg[0] > count;
+    return ca_count(count, max);
+}
+// The most players the front end can report (front.h), cut by the npads the game supports: only a minimum within it is worth a sheet
+static int applet_capacity(void) {
+    int n = front_player_capacity(), sup = 0;
+    for (int p = 0; p < DM_PLAYERS; p++) sup += (p == 0 || (atomic_load(&g_ids_supported) & id_bit((uint32_t)p)) != 0);
+    return n < sup ? n : sup;
+}
+__attribute__((weak)) int front_player_capacity(void) { return 1; }   // no front end: the keyboard / touch player only
+__attribute__((weak)) int front_controller_applet(int min, int max, const char *explain, int *count, uint32_t *selected) {   // no front end: nothing to wait for, closed as the player would
+    (void)min; (void)max; (void)explain; (void)count; (void)selected; return FRONT_CA_CANCELLED;
+}
+static Result hid_controller_support(int32_t *info, const int8_t *arg, front_controller_applet_fn ask, int capacity) {
+    int min = arg ? arg[0] : 0, max = arg ? arg[1] : 4, single = arg ? arg[5] != 0 : 0;
+    ca_normalize(&min, &max, single);
+    int count = dm_controller_applet_players(max); uint32_t selected = connected_id();
+    int canceled = 0;
+    if (ca_ask(min, max, 0, count, capacity)) {
+        if (ask(min, max, NULL, &count, &selected) != FRONT_CA_OK) { canceled = 1; count = dm_controller_applet_players(max); }
+    } else if (min > count) canceled = 1;   // a minimum the front end cannot reach: its sheet could only be cancelled, so it is answered as that, without showing one
     if (arg) LOG("hid controller applet: %d to %d players wanted, %d connected%s", arg[0], arg[1], count, canceled ? ": too few, closed as the player would (canceled)" : "");
-    if (arg && arg[1] > 0 && count > arg[1]) count = arg[1];
-    if (info) { info[0] = count; info[1] = (int32_t)connected_id(); }
+    if (info) { info[0] = count; info[1] = (int32_t)selected; }
     return canceled ? RES_CTRL_CANCELED : RES_OK;
 }
-HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; the host reports the connected players right away (canceled with fewer than the minimum)",
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "controller applet; answers at once, or waits for the players the game needs (canceled with fewer than the minimum when no front end can ask)",
           Result, h_hid_ShowCtrl, int32_t *info, const int8_t *arg) {
     DM_APPLET("controller support");
-    return ctrl_support(info, arg);
+    return hid_controller_support(info, arg, front_controller_applet, applet_capacity());
 }
 // Six-axis sensor (accelerometer + gyroscope) of the connected controller. SixAxisSensorState (0x60): acceleration in G, angular velocity in revolutions / s, angle in revolutions,
 // direction = the controller's three axes. At rest it lies flat: gravity (0, 0, -1), no rotation, the identity direction. While shaking (DM_BTN_SHAKE: the iPhone shaken, DmGamepad.m;
@@ -769,7 +792,7 @@ HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "player LED: the Switch's patte
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "controller color", Result, h_hid_Color, uint32_t *c, const uint32_t *id) { (void)id; ctrl_color(c); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", "left and right Joy-Con colors", Result, h_hid_Color2, uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; ctrl_color(l); ctrl_color(r); return RES_OK; }
-HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return ctrl_support(NULL, arg); }
+HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "controller applet (no result wanted); the host answers as the overload above", Result, h_hid_ShowCtrl0, const int8_t *arg) { DM_APPLET("controller support"); return hid_controller_support(NULL, arg, front_controller_applet, applet_capacity()); }
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "strap guide applet; not shown by the host", Result, h_hid_Strap, void) { DM_APPLET("controller strap guide"); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "controller firmware update applet; not shown by the host", Result, h_hid_FwUpd, const void *arg) { DM_APPLET("controller firmware update"); (void)arg; return RES_OK; }
 

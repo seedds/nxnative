@@ -1246,6 +1246,61 @@ void front_progress(const char *title, long done, long total) {
     });
 }
 
+// Controller applet (front.h front_controller_applet, hle_hid.c): a sheet on the game window that lists the connected controllers and keeps Continue disabled until the game's minimum is connected.
+// The game thread waits on a semaphore while the main thread runs the sheet (beginSheetModalForWindow, not runModal: the main thread stays free for the GameController notifications and the
+// game's own window); a 30 Hz timer in the common run-loop modes (the sheet runs in a modal mode) refreshes the list from the slot table (main thread only, as pads_changed) and reads the
+// pads' buttons itself, since while the sheet is key the game window resigns and pad_read ignores them (input_release): the Switch's A (the right face button, as pad_read maps it)
+// continues and B (the bottom one) cancels, on an edge only, so the A that was already held when the sheet opened does nothing
+static NSString *applet_players(void) {
+    NSMutableString *t = [NSMutableString new];
+    if (g_merge) {
+        for (GCController *c in GCController.controllers) if (c.extendedGamepad) [t appendFormat:@"Player 1: %s\n", pad_name(c)];
+        if (!t.length) [t appendString:@"Player 1: keyboard\n"];
+    } else {
+        for (int p = 0; p < DM_PLAYERS; p++) {
+            if (g_slots.owner[p]) [t appendFormat:@"Player %d: %s%s\n", p + 1, g_slots.last[p], p == 0 && !g_kbd_own ? " (and the keyboard)" : ""];
+            else if (p == 0) [t appendString:@"Player 1: keyboard\n"];
+        }
+    }
+    return [t stringByTrimmingCharactersInSet:NSCharacterSet.newlineCharacterSet];
+}
+int front_player_capacity(void) { return g_merge ? 1 : DM_PLAYERS; }   // a controller per slot (pad_slots.h); DM_PAD_MERGE makes them all player 1
+int front_controller_applet(int min, int max, const char *explain, int *count, uint32_t *selected) {
+    (void)selected;
+    if (!g_layer || !g_win) return FRONT_CA_CANCELLED;
+    __block int result = FRONT_CA_CANCELLED;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAlert *a = [NSAlert new];
+        a.messageText = @"Connect controllers";
+        NSString *need = min == max || max <= 0 ? [NSString stringWithFormat:@"This game needs %d controller%s.", min, min == 1 ? "" : "s"]
+                                                : [NSString stringWithFormat:@"This game needs %d to %d controllers.", min, max];
+        a.informativeText = [need stringByAppendingString:explain && *explain ? [NSString stringWithFormat:@"\n%s", explain] : @"\nConnect them, then choose Continue (A on a controller)."];
+        NSButton *go = [a addButtonWithTitle:@"Continue"]; NSButton *cancel = [a addButtonWithTitle:@"Cancel"];
+        cancel.keyEquivalent = @"\033";
+        NSTextField *list = [NSTextField wrappingLabelWithString:applet_players()];
+        list.frame = NSMakeRect(0, 0, 320, 96); a.accessoryView = list;
+        __block BOOL held = NO; for (GCController *c in GCController.controllers) if (c.extendedGamepad.buttonB.isPressed || c.extendedGamepad.buttonA.isPressed) held = YES;
+        void (^refresh)(void) = ^{
+            list.stringValue = applet_players();
+            go.enabled = dm_controller_applet_players(max) >= min;
+            BOOL ok = NO, no = NO; for (GCController *c in GCController.controllers) { ok |= c.extendedGamepad.buttonB.isPressed; no |= c.extendedGamepad.buttonA.isPressed; }
+            if ((ok || no) && !held) { if (ok && go.enabled) [go performClick:nil]; else if (no) [cancel performClick:nil]; }
+            held = ok || no;
+        };
+        refresh();
+        NSTimer *tm = [NSTimer timerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *t) { (void)t; refresh(); }];
+        [NSRunLoop.mainRunLoop addTimer:tm forMode:NSRunLoopCommonModes];
+        [a beginSheetModalForWindow:g_win completionHandler:^(NSModalResponse resp) {
+            [tm invalidate];
+            if (resp == NSAlertFirstButtonReturn) { result = FRONT_CA_OK; *count = dm_controller_applet_players(max); }
+            dispatch_semaphore_signal(done);
+        }];
+    });
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);   // the guest clock keeps running meanwhile, as with the keyboard (hle_swkbd.c)
+    return result;
+}
+
 // Software keyboard input box (front.h): the main thread shows an NSAlert + text field and the guest thread waits synchronously for the result. Not shown in windowless mode (returns -1, the caller treats it as cancel)
 extern int g_swkbd_min_chars;   // hle_swkbd.c: this input's minimum length from ShowKeyboardArg; the applet keeps OK disabled until the text is long enough
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {

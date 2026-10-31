@@ -87,6 +87,13 @@
 - **Fix:** a setting's default may be `<ios>|<mac>`, selected before resolving a profile macro or build variable. Metal 4 uses `DM_GAME_PSO_MTL4|1`, the encode thread `1|0`. The generator validates the platform and the pair. Tests cover a profile with Metal 4 on and one with it off, and both platforms; the host and shader chain are unchanged.
 - **Found on:** synthetic metadata generation for [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) while reviewing [PR #352](https://github.com/seedds/nxnative/pull/352); checked against the native defaults, without a gameplay run.
 
+### The Mac settings window stays on screen after Play
+
+- **Symptom:** in a Mac app, the settings window stays on screen after **Play**, not responding (a spinning cursor over it), until the game ends.
+- **Cause:** the window runs in the launcher's process (`dm/mac/Launcher.swift`). `finish` ordered the window out and stopped `NSApp.run`; then `launcher.c` started the host and blocked in `waitpid`, so the main thread never ran another run-loop pass. A window's order-out is committed only at the end of such a pass, and its default fade-out runs over several passes, so the window never left the screen. With the run loop kept running, the same order-out took effect at once.
+- **Fix:** `finish` sets the window's `animationBehavior` to `.none` before the order-out, and `dm_mac_launcher` calls `CATransaction.flush()` after `run()` returns, before it hands back to `launcher.c`. Neither alone was enough. Check: a copy of the window with a timed Play and a `CGWindowListCopyWindowInfo` probe while the thread then blocks; the window was still listed 2 and 4 s after Play before the fix, and gone 3 times in 3 after it. `test_launcher_storage.py` and `test_nsp_mac_app.py` pass.
+- **Found on:** the Mac app of [Breath of the Wild](../../dm/games/01007EF00011E000/README.md); applies to every Mac app.
+
 ## External drives
 
 ### A game folder on an exFAT drive reads one update as two, or fails to remove a folder

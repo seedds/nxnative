@@ -10,7 +10,7 @@ GAME_DIR = ../../games/$(GAME)
 GAME_H = ../../host/gen/$(GAME)/game_profile.h
 
 CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H))
-GFX=$(filter-out ../nvn/hle_nvn.c ../nvn/nvn_null.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m))) ../../third_party/cjson/cJSON.c ../../host/plat/plat_apple.c   # cJSON: the JSON reader of nvn_refl.c, as in the host Makefile; plat_apple.c: the platform layer (plat.h) hle_nvn.c and nvn_dirty.c call since step M6; nvn_null.c: the null backend of the hosts without Metal
+GFX=$(filter-out ../nvn/hle_nvn.c ../nvn/nvn_null.c ../tex/nvn_fmt_vk.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m))) ../../third_party/cjson/cJSON.c ../../host/plat/plat_apple.c   # cJSON: the JSON reader of nvn_refl.c, as in the host Makefile; plat_apple.c: the platform layer (plat.h) hle_nvn.c and nvn_dirty.c call since step M6; nvn_null.c: the null backend of the hosts without Metal; nvn_fmt_vk.c: the Vulkan backend's format table (it includes the Vulkan headers, which need the include root CMake adds)
 GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H)
 .DEFAULT_GOAL := t_nvn   # the profile header rule comes first, so keep the default goal as before
 $(GAME_H):

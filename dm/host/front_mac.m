@@ -105,6 +105,14 @@ static int key_bit(unsigned short code) {
     }
     return -1;
 }
+// AppKit restores the cursor on mouse movement; hide only over the active game
+// content so controller input cannot hide it over another app or the title bar.
+static void cursor_hide_for_input(void) {
+    if (!g_win.isKeyWindow || !NSApp.isActive) return;
+    NSView *view = g_win.contentView;
+    NSPoint p = [view convertPoint:g_win.mouseLocationOutsideOfEventStream fromView:nil];
+    if (NSPointInRect(p, view.bounds)) [NSCursor setHiddenUntilMouseMoves:YES];
+}
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
@@ -112,6 +120,7 @@ static void on_key(NSEvent *e, int down) {
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
     g_btn = down ? (g_btn | m) : (g_btn & ~m);
+    if (down && (m || c == 13 || c == 0 || c == 1 || c == 2)) cursor_hide_for_input();
     push();
 }
 
@@ -134,6 +143,8 @@ static void pad_read(GCExtendedGamepad *g) {
     K(g.buttonMenu, DM_BTN_PLUS); K(g.buttonOptions, DM_BTN_MINUS); K(g.leftThumbstickButton, DM_BTN_LS); K(g.rightThumbstickButton, DM_BTN_RS);   // nil on pads without them: not pressed
     K(g.dpad.left, DM_BTN_LEFT); K(g.dpad.up, DM_BTN_UP); K(g.dpad.right, DM_BTN_RIGHT); K(g.dpad.down, DM_BTN_DOWN);
     #undef K
+    if (m || fabsf(g.leftThumbstick.xAxis.value) > 0.15f || fabsf(g.leftThumbstick.yAxis.value) > 0.15f ||
+        fabsf(g.rightThumbstick.xAxis.value) > 0.15f || fabsf(g.rightThumbstick.yAxis.value) > 0.15f) cursor_hide_for_input();
     dm_pad_set_player(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
 }
 // Home and Capture: without this macOS takes them as system gestures (Home opens the Games app); the host gives them no function
@@ -188,6 +199,7 @@ static void pads_changed(GCController *gone) {
 // Out of focus a controller's changes are ignored, so back in focus each controller is read as it is now (a button still held, a stick still deflected)
 static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 static void input_release(void) {
+    [NSCursor setHiddenUntilMouseMoves:NO];
     g_input_on = 0;
     dm_motion_pro_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; push();

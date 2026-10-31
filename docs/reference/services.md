@@ -340,6 +340,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** every menu, the cards, the map's drag and flick worked by touch with it. `DM_TOUCH_LOG=1` logs each gesture entry, and a `DM_CTL` line `drag <x0> <y0> <x1> <y1> [seconds]` moves a finger for testing pans and swipes on the Mac.
 - **Found on:** [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md) (SDK 12.3.3, Koei Tecmo's KTGL).
 
+### Mac pointer remains over controller gameplay
+
+- **Symptom:** the Mac mouse pointer stays over the game picture when playing with a controller or keyboard.
+- **Cause:** `front_mac.m` did not ask AppKit to hide the pointer on gameplay input.
+- **Fix:** recognized keyboard presses and controller buttons or sticks beyond 0.15 call `NSCursor.setHiddenUntilMouseMoves(YES)` only while the game is key, the app is active and the pointer is inside the content view. AppKit restores it on mouse movement; `input_release` restores it on focus loss. There is no cursor hide/unhide counter or new setting, and title-bar, mouse/touch and other-app input paths are unchanged.
+- **Checks:** `test_mac_cursor.py` compiles the real keyboard/cursor implementation with windowless AppKit doubles: no window, inactive app, non-key window, pointer outside content, recognized presses, releases, unknown keys, WASD and suspended input. The unmodified upstream implementation fails the recognized-press assertion. Actual cursor rendering, controller hardware and fullscreen transitions still require interactive validation.
+- **Found on:** a local Pokemon: Let's Go, Pikachu! Mac app (game profile in PR #573); this front-end behavior is independent of the game and graphics API.
+
 ### Mouse, keyboard and key code maps
 
 - **Symptom:** the first boot aborted in `hid::GetMouseState` (the SDK's mouse resource was never initialized).

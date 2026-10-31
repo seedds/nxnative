@@ -40,6 +40,8 @@ Lines like `DM_OPMODE=0` (handheld mode: lower resolution, higher frame rate) in
 
 A Mac app shows the game's settings in a window before the game starts ([The Mac settings window](settings.md#the-mac-settings-window)). Its `env.txt` is `~/Library/Application Support/nxnative/<title ID>/env.txt`, and its log is `~/Library/Logs/nxnative/<title ID>.log`. [NX2Apple](https://github.com/LNPANDY/NX2Apple)'s library can also start it with the settings you pick there.
 
+While the game window is active and the mouse is over its content, keyboard gameplay input or controller buttons/stick movement hide the mouse pointer. Moving the mouse shows it again; changing focus also restores it. Mouse/touch controls remain unchanged.
+
 ## Shaders on first sight
 
 Short stutters the first time a new scene appears are normal: the app compiles graphics for it once and remembers them for the next launch. What it remembered, and what the game's list names, is built before the game starts, behind "Preparing shaders" and a progress bar when that takes more than half a second.

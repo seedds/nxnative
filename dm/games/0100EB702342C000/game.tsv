@@ -1,0 +1,44 @@
+# Pokémon FireRed Version (Spanish Ver.): Nintendo's Game Boy Advance player (NVN, GLSLC at run time) with the game's ROM in the RomFS. Started from the provisional profile; see README.md
+# SDK 20.5.19
+
+# ---- Identity ----
+title_id	0100EB702342C000
+program_id	0100EB702342C000
+
+# ---- App ----
+name	Pokémon FireRed Version (Spanish Ver.)
+ipa	PokMonFireRedVersionSpanishVer.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=6c9770f51b9ff125bd42ae27039974cb	subsdk0=cd3cc7e5082efeca93bd5d39ff3c17b9	sdk=8bfebccd6f5c1392597b364b9ab22a8d
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	FireRed_s.gba
+zip_store	.gba:.metallib
+
+# ---- Memory ----
+# the NPDM declares 2 MB of system resource (virtual address memory) and main sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for
+mem_reserve	0x140000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 2 MB of system resource
+sys_resource	0x200000
+
+# ---- Shader split ----
+shader_groups	/=romfs
+shader_note	Pokémon FireRed Version (Spanish Ver.): 2 shaders, GLSL in main compiled through GLSLC at run time
+
+# ---- Heap check on the Mac ----
+# the game asked for a 3.14 GB heap: a 3.250 GB heap region
+mem_alias	0x50000000
+
+# heap check: 2026-11-01, the heap request did not fit; set mem_alias
+
+# address regions: 2026-11-01, no address regions (rewrite ea9ca0567bed)
+# the modules take 0x6600000, more than the 64 MB default: main sizes its heap as pool − used, and without this SetHeapSize overruns the pool and the game aborts (main+0x15fa70)
+mem_used	0x7000000

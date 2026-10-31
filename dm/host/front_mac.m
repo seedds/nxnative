@@ -1309,6 +1309,7 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
     }
     _loading = 1; LOG("amiibo: downloading the amiibo list");
     NSURL *url = [NSURL URLWithString:@"https://raw.githubusercontent.com/Ryubing/Nfc/refs/heads/main/tags.json"];
+    if (!url) { _loading = 0; return; }
     [[NSURLSession.sharedSession dataTaskWithURL:url completionHandler:^(NSData *d, NSURLResponse *r, NSError *err) {
         long status = [r isKindOfClass:NSHTTPURLResponse.class] ? (long)((NSHTTPURLResponse *)r).statusCode : 0;
         NSArray *list = status == 200 ? amiibo_list_parse(d) : nil;

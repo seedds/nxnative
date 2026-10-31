@@ -20,7 +20,7 @@ static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0
 
 typedef struct { char *p; size_t n, cap; } sbuf;
 static void sb_put(sbuf *b, const char *s, size_t n) {
-    if (b->n + n + 1 > b->cap) { b->cap = (b->n + n + 1) * 2; b->p = realloc(b->p, b->cap); }
+    if (b->n + n + 1 > b->cap) { size_t cap = (b->n + n + 1) * 2; char *t = realloc(b->p, cap); if (!t) die("amiibo: string buffer allocation failed"); b->p = t; b->cap = cap; }
     memcpy(b->p + b->n, s, n); b->n += n; b->p[b->n] = 0;
 }
 static void sb_str(sbuf *b, const char *s) { sb_put(b, s, strlen(s)); }
@@ -141,7 +141,7 @@ static int parse_areas(const char **p, amiibo_file *f) {
             js_ws(p);
             if (*(*p)++ != ':') { free(k); goto bad; }
             int rc;
-            if (!strcmp(k, "ApplicationAreaId")) { unsigned long long v; rc = js_uint(p, &v); if (!rc && v > 0xffffffffull) rc = -1; a.id = (uint32_t)v; have_id = !rc; }
+            if (!strcmp(k, "ApplicationAreaId")) { unsigned long long v = 0; rc = js_uint(p, &v); if (!rc && v > 0xffffffffull) rc = -1; a.id = (uint32_t)v; have_id = !rc; }
             else if (!strcmp(k, "ApplicationArea")) {
                 if (js_null(p)) rc = 0;
                 else { char *s = js_string(p); rc = -1; if (s) { free(a.data); a.data = b64_decode(s, &a.size); rc = a.data ? 0 : -1; free(s); } }
@@ -154,8 +154,9 @@ static int parse_areas(const char **p, amiibo_file *f) {
             goto bad;
         }
         if (!have_id) goto bad;
-        f->areas = realloc(f->areas, (f->n_areas + 1) * sizeof *f->areas);
-        f->areas[f->n_areas++] = a;
+        amiibo_area *t = realloc(f->areas, (f->n_areas + 1) * sizeof *f->areas);
+        if (!t) die("amiibo: application area allocation failed");
+        f->areas = t; f->areas[f->n_areas++] = a;
         js_ws(p);
         if (**p == ',') { (*p)++; continue; }
         if (**p == ']') { (*p)++; return 0; }
@@ -184,7 +185,7 @@ static int amiibo_parse(const char *text, amiibo_file *f) {
         char *k = js_string(&p); if (!k) goto bad;
         js_ws(&p);
         if (*p++ != ':') { free(k); goto bad; }
-        int rc = 0; unsigned long long v;
+        int rc = 0; unsigned long long v = 0;
         if (!strcmp(k, "TagUuid")) {
             if (js_null(&p)) f->uuid_len = 0;
             else { char *s = (js_ws(&p), js_string(&p)); size_t n; uint8_t *d = s ? b64_decode(s, &n) : NULL; free(s); if (!d || n > sizeof f->uuid) rc = -1; else { memcpy(f->uuid, d, n); f->uuid_len = (int)n; } free(d); }
@@ -471,7 +472,7 @@ HLE_FORCE("_ZN2nn3nfp15GetRegisterInfoEPNS0_12RegisterInfoERKNS0_12DeviceHandleE
     nfp_lock(); Result r = nfp_need_mount(h); if (r) return nfp_unlock(r);
     uint8_t *o = out; memset(o, 0, 0x100);
     dm_mii_default_charinfo(o);
-    const char *nick = getenv("DM_NICK"); uint16_t mii_nick[11];
+    const char *nick = getenv("DM_NICK"); uint16_t mii_nick[11] = {0};
     nfp_utf16(mii_nick, 10, nick ? nick : "Player"); memcpy(o + 0x10, mii_nick, sizeof mii_nick);   // CharInfo nickname, UTF-16
     nfp_date(g_nfp_file.first, o + 0x58);
     snprintf((char *)o + 0x5c, 0x29, "%s", g_nfp_file.nick);   // amiibo nickname, UTF-8; font region 0 at 0x85
@@ -514,7 +515,7 @@ static Result nfp_create_area(const NfpDeviceHandle *h, const NfpAreaCreateInfo 
     if (ci->size > NFP_AREA_SIZE) r = NFP_RES_WRONG_ARGUMENT;
     else if (a && !recreate) r = NFP_RES_AREA_EXISTS;
     else {
-        if (!a) { g_nfp_file.areas = realloc(g_nfp_file.areas, (g_nfp_file.n_areas + 1) * sizeof *g_nfp_file.areas); a = &g_nfp_file.areas[g_nfp_file.n_areas++]; *a = (amiibo_area){ ci->id, NULL, 0 }; }
+        if (!a) { amiibo_area *t = realloc(g_nfp_file.areas, (g_nfp_file.n_areas + 1) * sizeof *g_nfp_file.areas); if (!t) die("amiibo: application area allocation failed"); g_nfp_file.areas = t; a = &g_nfp_file.areas[g_nfp_file.n_areas++]; *a = (amiibo_area){ ci->id, NULL, 0 }; }
         nfp_area_set(a, ci->data, ci->size); amiibo_save(&g_nfp_file);
     }
     LOG("nfp: %sApplicationArea %s area %#x, %u bytes → %#x", recreate ? "Recreate" : "Create", g_nfp_file.id, ci->id, ci->size, r);

@@ -5,3 +5,4 @@ dm_bright_levels.inc
 *.h.tmp
 *.inc.tmp
 gen/
+webpad_html.h

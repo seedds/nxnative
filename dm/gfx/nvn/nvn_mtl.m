@@ -4930,10 +4930,11 @@ static int prog_swrites(NvProg *pr) {
         for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_SBUFP)) { w |= st == 0 ? 1 : st == 1 ? 2 : 4; break; } }
     return w;
 }
+static void rt_sub(const p_set_rt *r, int k, uint64_t *ser, int *lv, int *sl);;
 static void order_note(NvProg *pr) {   // after each draw of the pass: does it read memory in a stage after the vertex stage (anything bound there but samplers and driver data)
     for (int st = 1; pr && st < 6 && !g_pass_late_res; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
         for (int i = 0; i < sh->rf.nb; i++) { int k = sh->rf.b[i].kind;
-            if (k != NVN_RB_SAMP && k != NVN_RB_SAMPT && k != NVN_RB_SAMPU && k != NVN_RB_SAMPI && k != NVN_RB_SAMPD && k != NVN_RB_SAMPA && k != NVN_RB_SAMPP && k != NVN_RB_SUPPORT && k != NVN_RB_C1 && k != NVN_RB_DRV0 && k != NVN_RB_DRV2) { g_pass_late_res = 1; break; } } }
+            if (k != NVN_RB_SAMP && k != NVN_RB_SAMPT && k != NVN_RB_SAMPU && k != NVN_RB_SAMPI && k != NVN_RB_SAMPD && k != NVN_RB_SAMPA && k != NVN_RB_SAMPP && k != NVN_RB_SUPPORT && k != NVN_RB_C1 && k != NVN_RB_DRV0 && k != NVN_RB_DRV2 && k != NVN_RB_DRV17) { g_pass_late_res = 1; break; } } }
 }
 // A draw that writes, after an ordering barrier in a pass whose earlier draws did not write (g_pass_order): when those draws read memory only in their vertex stage, or the barrier
 // orders only primitives (whose fragments NVN leaves unordered too), a barrier inside the pass from the vertex stage to the stages that write keeps the pass and its attachments (the
@@ -7328,6 +7329,18 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_SUPPORT) {   // support_buffer: scale 1.0, BGRA swap 0, viewport transform not disabled (viewport fields are not read)
             slots[aid] = support_gpu();
             USE(support_buf(), MTLResourceUsageRead);
+        } else if (b->kind == NVN_RB_DRV17) {
+            // Switch 2 full-screen passes read a parameter block from constant bank 24 that the console provides itself; the lowering moves it to bank 17 (Eglantine's BlitConstantsPass gives its layout, measured
+            // there on blits covering the whole target): texel size at 0x0 and 0x10, size at 0x8, a UV scale of 1 at 0x18, the UV clamp 0,0..1,1 at 0x30, a zero dither bias at 0x40, the source rectangle
+            // 0,0..W-1,H-1 as integers at 0x50. Read as c0 it held the storage buffer table, and the frame's last passes came out black. Open: a blit over part of its target
+            id<MTLBuffer> db; size_t doff = arena_alloc(0x100, &db); uint8_t *d = (uint8_t *)db.contents + doff; memset(d, 0, 0x100);
+            float w = 1, h = 1;
+            if (R.has_rt && R.rt.n && R.rt.color[0]) { uint64_t s_; int lv = 0, sl; rt_sub(&R.rt, 0, &s_, &lv, &sl); w = (float)MAX(R.rt.color[0]->d.width >> lv, 1u); h = (float)MAX(R.rt.color[0]->d.height >> lv, 1u); }
+            else if (R.has_rt && R.rt.depth) { w = (float)R.rt.depth->d.width; h = (float)R.rt.depth->d.height; }
+            const float iw = 1.f / w, ih = 1.f / h, one = 1.f; const uint32_t rx = (uint32_t)w - 1, ry = (uint32_t)h - 1;
+            memcpy(d, &iw, 4); memcpy(d + 4, &ih, 4); memcpy(d + 0x10, &iw, 4); memcpy(d + 0x14, &ih, 4); memcpy(d + 8, &w, 4); memcpy(d + 0xc, &h, 4);
+            memcpy(d + 0x18, &one, 4); memcpy(d + 0x1c, &one, 4); memcpy(d + 0x38, &one, 4); memcpy(d + 0x3c, &one, 4); memcpy(d + 0x58, &rx, 4); memcpy(d + 0x5c, &ry, 4);
+            slots[aid] = db.gpuAddress + doff; USE(db, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_DRV0 || b->kind == NVN_RB_DRV2) {
             // NVN driver constant segments: those proven unread by static analysis at packaging time are supplied as 0; those read are filled on the spot from the current bindings - c0 = storage buffer table (base + 0x10 r: address 64 bits, size 32 bits),
             // c2 = the handle tables (DMSH_C2_*), the values being the NVN handles the game gave at bind time; positions read outside the tables are registered at packaging time and reported a failure at load time

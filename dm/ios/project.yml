@@ -1,6 +1,7 @@
 # iOS project (xcodegen); build_ipa.sh generates Gen/ and the game resource paths first. Xcode stages resources before signing; the unsigned IPA command skips that copy and packs directly from the external drive.
 name: DmIOS
 options:
+  developmentLanguage: en
   bundleIdPrefix: ${DM_BUNDLE_ID}
   deploymentTarget:
     iOS: "26.0"   # Graphics replay uses Metal 4 (MTL4CommandQueue etc., from iOS 26)

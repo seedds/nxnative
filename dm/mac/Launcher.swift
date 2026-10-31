@@ -21,8 +21,8 @@ struct LauncherView: View {
             HStack(spacing: 12) {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(info("CFBundleName") ?? "Game").font(.title2.weight(.semibold))
-                    Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
+                    Text(info("CFBundleName") ?? launcherString("Game")).font(.title2.weight(.semibold))
+                    Text(String(format: launcherString("Version %@"), info("CFBundleShortVersionString") ?? "1.0")).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
@@ -31,15 +31,15 @@ struct LauncherView: View {
                 settingSections(basic: true)
                 CloudSavesSection()
                 Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
+                    DisclosureGroup(launcherString("Advanced settings"), isExpanded: $advanced) {}
                 }
                 if advanced {
                     settingSections(basic: false)
                     Section {
-                        Button("Reset to tested defaults") { m.reset() }
+                        Button(launcherString("Reset to tested defaults")) { m.reset() }
                             .disabled(!m.changed)
                     } footer: {
-                        Text("Brings back all settings this game was tested with.")
+                        Text(launcherString("Brings back all settings this game was tested with."))
                     }
                 }
             }
@@ -50,10 +50,10 @@ struct LauncherView: View {
                 fit(extraHeight)
             }
             HStack {
-                Toggle("Show this window at launch", isOn: $show).toggleStyle(.checkbox)
+                Toggle(launcherString("Show this window at launch"), isOn: $show).toggleStyle(.checkbox)
                 Spacer()
-                Button("Quit") { done(false) }
-                Button("Play") { done(true) }.keyboardShortcut(.defaultAction)
+                Button(launcherString("Quit")) { done(false) }
+                Button(launcherString("Play")) { done(true) }.keyboardShortcut(.defaultAction)
             }
             .padding(20)
         }
@@ -64,7 +64,7 @@ struct LauncherView: View {
         ForEach(m.sections(basic: basic), id: \.self) { section in
             let rows = m.rows(in: section, basic: basic)
             if !rows.isEmpty {
-                Section(section) {
+                Section(rows[0].displaySection()) {
                     ForEach(rows) { SettingRow(s: $0, m: m) }
                 }
             }
@@ -84,26 +84,26 @@ struct CloudSavesSection: View {
 
     var body: some View {
         Section {
-            LabeledContent("Cloud saves") {
-                Text(fixed.map { "\(Self.shown($0)) (env.txt)" } ?? (folder.isEmpty ? "Off" : Self.shown(folder)))
+            LabeledContent(launcherString("Cloud saves")) {
+                Text(fixed.map { String(format: launcherString("%@ (env.txt)"), Self.shown($0)) } ?? (folder.isEmpty ? launcherString("Off") : Self.shown(folder)))
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
             }
             if fixed == nil {
                 HStack {
-                    Button(folder.isEmpty ? "Choose a folder…" : "Choose a different folder…", action: choose)
-                    if !folder.isEmpty { Button("Turn off") { folder = "" } }
+                    Button(folder.isEmpty ? launcherString("Choose a folder…") : launcherString("Choose a different folder…"), action: choose)
+                    if !folder.isEmpty { Button(launcherString("Turn off")) { folder = "" } }
                 }
             }
         } footer: {
-            Text("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder.")
+            Text(launcherString("Choose the iCloud Drive folder the iPhone app uses for this game. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in the save's -backups folder."))
         }
     }
 
     private func choose() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false; panel.canCreateDirectories = true
-        panel.prompt = "Use for Cloud Saves"
-        panel.message = "The folder the iPhone app chose in its launcher's Cloud saves"
+        panel.prompt = launcherString("Use for Cloud Saves")
+        panel.message = launcherString("The folder the iPhone app chose in its launcher's Cloud saves")
         panel.directoryURL = URL(fileURLWithPath: folder.isEmpty ? Self.drive : folder)
         if panel.runModal() == .OK, let url = panel.url { folder = url.path }
     }
@@ -113,7 +113,7 @@ struct CloudSavesSection: View {
     /// A path under iCloud Drive as the Finder and the Files app name it: iCloud Drive › Documents › dev › Zelda; any other path as it is
     static func shown(_ path: String) -> String {
         guard path == drive || path.hasPrefix(drive + "/") else { return path }
-        return (["iCloud Drive"] + path.dropFirst(drive.count).split(separator: "/").map(String.init)).joined(separator: " › ")
+        return ([launcherString("iCloud Drive")] + path.dropFirst(drive.count).split(separator: "/").map(String.init)).joined(separator: " › ")
     }
 }
 
@@ -125,10 +125,10 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     init(_ model: LauncherModel) { self.model = model }
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        let name = info("CFBundleName") ?? "Game"
+        let name = info("CFBundleName") ?? launcherString("Game")
         let menu = NSMenu(), item = NSMenuItem(), app = NSMenu()
-        app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        app.addItem(withTitle: "Quit \(name)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        app.addItem(withTitle: launcherString("Close Window"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        app.addItem(withTitle: String(format: launcherString("Quit %@"), name), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self

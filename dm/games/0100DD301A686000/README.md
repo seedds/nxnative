@@ -4,10 +4,11 @@ Update 1.21.1 (`v1245184`) over the base game. Unreal Engine 5.6.0
 (`SDK MW+EpicGames+UnrealEngine-5_6_0` in `main`), Nintendo SDK 20.5.17,
 NVN. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`.
 
-**Gameplay previously verified:** playable on the Mac through the prologue's
-first combat wave and the parking-lot transition. The unsigned iOS package
-built and passed archive verification; device validation remains open. These
-results predate the current allocator and region migrations; see [Testing](#testing).
+**Gameplay confirmed by the user (2026-10-31).** The earlier instrumented Mac
+route reached the prologue's first combat wave and parking-lot transition.
+Its measurements and the unsigned iOS archive verification predate the
+current allocator and region migrations; device validation remains open.
+See [Testing](#testing) for the distinction between current and historical evidence.
 
 ## Memory
 
@@ -27,7 +28,7 @@ results predate the current allocator and region migrations; see [Testing](#test
   6 / 8 / 10, MallocZeroed / TryMallocZeroed in 11 / 12, QuantizeSize in 13,
   GetAllocationSize in 14. TLS allocation and release call through that
   vtable; no direct calls to the replaced allocation methods were found.
-- **Current, runtime unbooted:** the engine-wide region finder added in
+- **Current automatic sizing:** the engine-wide region finder added in
   `2006d5ed` finds the size store at `main+0x137cc` (x1), immediately before
   the reservation call at `+0x137d0` in `nninitStartup`'s `+0x13370`.
   `OBS_UE_REGION` sizes it from available alias space; the fixed
@@ -82,6 +83,11 @@ results predate the current allocator and region migrations; see [Testing](#test
 
 ## Testing
 
+- **Current user confirmation (2026-10-31):** the user reports that the game
+  was manually tested and works, and requested no further automated game
+  runs. This confirmation has no recorded route, frame-time or memory
+  measurements. The detailed gameplay and IPA results below remain historical;
+  no new automated gameplay comparison or iOS device test is claimed.
 - 2026-10-29: the NSP survey and merged extraction passed for 1.21.1. The
   module build IDs and allocator registration were verified from the binary.
 - The 15-second address-region check reached the frame loop with the host
@@ -161,7 +167,7 @@ results predate the current allocator and region migrations; see [Testing](#test
   rebase onto `a5bf542f` incorporates upstream iOS external-display support;
   Mac, allocator and shader sources are unchanged, and documentation/chain/UE
   discovery tests (36) pass. No new IPA or iOS device testing was done.
-- **Current maintenance (2026-10-30):** rebased onto fixed main `2006d5ed`.
+- **Earlier region maintenance (2026-10-30):** rebased onto fixed main `2006d5ed`.
   The generic region finder is verified on untouched main
   `89f76888939adcdf69f8b0e647d84cad`; the 4064 MiB argument is superseded.
   A native probe of the production host callback passes ten cases covering

@@ -13,6 +13,16 @@ name	Super Mario Bros. Wonder
 ipa	SMBWMobile.ipa
 app_category	public.app-category.action-games
 
+# ---- Graphics ----
+# Tested on the record device (an iPhone 19,4, the Duo; update 1.2.1): the app runs today on the MTLDevice path, where every unseen shader pair compiles on the submit thread
+# (the log's long frames carry 1,052 on-the-spot compiles over a session, up to a 1,014 ms frame; the same record replays the seed list's 760 lines in 0.06 s). The Metal 4 path
+# gives iOS what the Mac already has: the pipeline archive made offline, the prepare step, the bases and the hybrid pipelines. The bases compile on the Mac for both families the
+# profile names (3,697 bases: 67 MB for g19p, on Apple M2 Pro in 113 s); what the device finds missing it builds behind the prepare screen. Device checks still open: the archive
+# opens on the Duo, the hybrids hold in gameplay, the prepare step's first-start build time (the fallback path when the archive is unusable) and the steady-state GPU cost
+pso_mtl4	on
+# the GPU families the offline archive compiles for (applegpu names): g18p = iPhone 17's A19 / A19 Pro; g19p = the Duo's (iPhone 19,4)
+pso_gpu	g18p g19p
+
 # ---- Versions ----
 # build <version> <display version> <module>=<build ID>...: the NSP script accepts only these builds (fixed addresses do not hold on other builds); the host reports the display version by main's build ID
 build	v0	1.0.0	main=cd6e42aee7934f4d8393cd43893ae25e	sdk=3053b22935e32ddf15ef81997603e5c2

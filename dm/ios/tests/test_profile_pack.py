@@ -15,7 +15,8 @@ import game
 class ProfilePackTests(unittest.TestCase):
     def test_pulling_libraries_follow_compiled_profile_and_explicit_override(self):
         # (game, IOS_PULL, with a pipeline archive, _bp libraries packed): an archive's bases are made of the pulling libraries, so an IPA with one carries them whatever IOS_PULL says
-        cases = [('01007EF00011E000', None, False, True), ('010015100B514000', None, False, False),
+        cases = [('01007EF00011E000', None, False, True), ('010015100B514000', None, False, True),
+                 ('010028600EBDA000', None, False, False),
                  ('01007EF00011E000', '0', False, False), ('010015100B514000', '1', False, True),
                  ('010015100B514000', None, True, True), ('01007EF00011E000', '0', True, True)]
         for gid, override, with_pso, included in cases:

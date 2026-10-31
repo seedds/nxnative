@@ -3,6 +3,7 @@ DM_AB	diagnostic	`=<frames>` splits the run into phases of that many frames and 
 DM_ALIAS_SIZE	diagnostic	`=<bytes>` gives the guest an alias region of that size instead of the profile's (at least 256 MB, whole host pages; the heap and stacks stay as they are): `0x1000000000`, the Switch's 64 GB, holds what a game reserves unchanged; the NSP script's address region check sets it (Mac only: an iPhone has no room)
 DM_ALIAS_WINDOWS	diagnostic	`=<MB>` logs every 30 s how much of each window of that size in the alias region is mapped (windows aligned to their size in absolute addresses)
 DM_ALLOW_OTHER_METAL	switch	`1` lets `own_compilers.py` build the shader libraries with a Metal compiler other than the one in `dmsh_chain.lock` (it stops otherwise, GitHub issue #242); the NSP script sets it for `--allow-other-metal`
+DM_AMIIBO_DIR	path	Folder of virtual amiibo files, one `<amiibo ID>.json` each in Ryujinx's format, and the cached `amiibo_tags.json`; default `<DM_SAVE>_amiibo`, else `./amiibo`
 DM_AOC_DIR	path	Folder of add-on content: one numbered subfolder per DLC index holding that DLC's RomFS, reported by `aoc` and mounted read-only; the app, the Mac launcher and the NSP script set it when the build has DLC
 DM_AOC_OWNED	switch	`0` reports no add-on content even when `DM_AOC_DIR` has some, for runs without the DLC
 DM_APP_VERSION	switch	Overrides the IPA's version in `build_ipa.sh`; by default it is the packed game's display version from its control data (the update's when one is packed)

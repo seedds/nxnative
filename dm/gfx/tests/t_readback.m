@@ -21,11 +21,16 @@ static int cases, failed;
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, weak) id<MTLBuffer> lastBuffer;
 @property(nonatomic) NSUInteger allocations;
+@property(nonatomic) NSUInteger watchLength;   // buffers of this length are also kept, weakly, in watched
+@property(nonatomic, strong) NSHashTable *watched;
+@property(nonatomic) NSUInteger watchedMade;
 @end
 @implementation ReadbackDevice
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options {
     id<MTLBuffer> buffer = [_device newBufferWithLength:length options:options];
-    _lastBuffer = buffer; _allocations++; return buffer;
+    _lastBuffer = buffer; _allocations++;
+    if (length == _watchLength) { if (!_watched) _watched = [NSHashTable weakObjectsHashTable]; [_watched addObject:buffer]; _watchedMade++; }
+    return buffer;
 }
 - (id)forwardingTargetForSelector:(SEL)selector { (void)selector; return _device; }
 @end
@@ -122,6 +127,42 @@ static void packed_copies(int format, int tid) {
     memset(got, 0xEE, 4); h_nvnTextureReadTexels(&upcopy, NULL, &region, (uint8_t *)got); snprintf(n, sizeof n, "%s copy into a packaged texture, guest red in its storage", f); EXPECT(n, 1, (got[0] & used) == red && (got[1] & used) == red);
     h_nvnTextureFinalize(&upcopy); h_nvnTextureFinalize(&upclr); h_nvnTextureFinalize(&up);
     h_nvnTextureFinalize(&cleared); h_nvnTextureFinalize(&copied); nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
+}
+
+// A render pass's readback buffer (mirror_readback) is released by the submission's post-ops. A game thread in nvnSyncWait runs them itself when it wakes on the GPU's signal before
+// the feedback handler (post_early), and its implicit pool never drains: Tears of the Kingdom kept every such buffer, its GPU memory grew about 27 MB/s until the memory watchdog ended it.
+// This thread's outer pool stays open as such a thread's does. Who runs the post-ops is a race, so the pass is repeated, each time into a new packaged texture (one that took its
+// readback is the GPU's afterwards and is not read back again). Metal holds the last submission's buffer until its command allocator is reset by the next one, so one may remain;
+// before the fix 19 of 20 remained, with the debug layer or without
+static NSUInteger watched_alive(ReadbackDevice *d) { @autoreleasepool { return d.watched.allObjects.count; } }   // its own pool: allObjects returns them retained and autoreleased
+static void early_wait_readbacks(void) {
+    enum { N = 20, STRIDE = 32768 };
+    void *mem = NULL; size_t len = 65536 + N * STRIDE; if (posix_memalign(&mem, getpagesize(), len)) abort(); memset(mem, 0, len);
+    pool_t pool = {.mem=mem, .size=len}; mtl_pool_add(mem, len); nvn_dirty_add_range(mem, len);
+    NVNtextureBuilder tb; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetWidth(&tb, 8); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    NVNpackagedTextureLayout lay = {{1, 0, 0, 0, 7, 0, 1, 0}}; h_nvnTextureBuilderSetPackagedTextureLayout(&tb, &lay);
+    NVNcommandBuffer cmd; EXPECT("early-wait command init", 1, h_nvnCommandBufferInitialize(&cmd, NULL));
+    h_nvnCommandBufferAddCommandMemory(&cmd, (const NVNmemoryPool *)&pool, 0, 65536);
+    ReadbackDevice *device = [ReadbackDevice new]; device.device = g_dev; device.watchLength = 8 * 4 * 4;   // the readback of the 8x4 RGBA8 target
+    for (int i = 0; i < N; i++) {
+        NVNtexture rt; h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 65536 + (ptrdiff_t)i * STRIDE);
+        if (!h_nvnTextureInitialize(&rt, &tb)) { EXPECT("early-wait packaged render target init", 1, 0); break; }
+        h_nvnCommandBufferBeginRecording(&cmd);
+        const NVNtexture *targets[] = {&rt}; const NVNtextureView *views[] = {NULL};
+        h_nvnCommandBufferSetRenderTargets(&cmd, 1, targets, views, NULL, NULL);
+        float color[] = {0.4f, 0.2f, 0.8f, 1.f}; h_nvnCommandBufferClearColor(&cmd, 0, color, 15);
+        NVNsync sync; h_nvnSyncInitialize(&sync, NULL);
+        h_nvnCommandBufferFenceSync(&cmd, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        NVNcommandHandle h = h_nvnCommandBufferEndRecording(&cmd);
+        g_dev = (id)device; state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)h); mtl_sub_commit(); g_dev = device.device;
+        h_nvnSyncWait(&sync, 5000000000ull);
+        h_nvnSyncFinalize(&sync); h_nvnTextureFinalize(&rt);
+    }
+    // The feedback handler retires the buffers (defer_drain) after the post-ops, whoever ran them
+    for (int t = 0; t < 2000 && watched_alive(device) > 1; t++) usleep(1000);
+    EXPECT("early-wait passes: every render pass into a packaged texture made its readback buffer", N, (int)device.watchedMade);
+    EXPECT("early-wait passes: readback buffers kept with the waiter's pool open, at most the last", 1, watched_alive(device) <= 1);
+    nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
 }
 
 int main(void) { @autoreleasepool {
@@ -221,6 +262,7 @@ int main(void) { @autoreleasepool {
     h_nvnTextureFinalize(&pk6); h_nvnTextureFinalize(&pk5); h_nvnTextureFinalize(&pk3); h_nvnTextureFinalize(&pk7); h_nvnTextureFinalize(&pk4); h_nvnTextureFinalize(&pk2);
     h_nvnTextureFinalize(&pk); h_nvnTextureFinalize(&tex); nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
     sparse_reads(&region, expected);
+    early_wait_readbacks();
     packed_copies(NVN_FORMAT_RGB565, 500); packed_copies(NVN_FORMAT_RGB5A1, 501); packed_copies(NVN_FORMAT_RGB5, 502);
     printf("READBACK cases=%d failed=%d\n", cases, failed); return failed != 0;
 } }

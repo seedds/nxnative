@@ -1482,7 +1482,9 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
 }
 // Both GPU feedback and an early waiter complete records in submission order.
 // Delayed callbacks carry their fence, never the identity of a recyclable slot.
-static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
+// Its own autorelease pool: an early waiter is a game thread in nvnSyncWait, whose implicit pool never drains. The post-ops release Metal objects (a render pass's readback buffer,
+// mirror_rb_land) through it, so every one a waiter ran stayed alive for good: Tears of the Kingdom's GPU memory grew about 27 MB/s until the memory watchdog ended it at 24 GB.
+static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) { @autoreleasepool {
     uint64_t now = guest_ns();
     for (uint64_t f = g_done + 1; f <= fence; f++) {
         post_rec *r = &g_postr[f % POST_RING];
@@ -1495,7 +1497,7 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
         post_run(r, f == fence && c1 ? c0 : seg_ts() ? start : 0, f == fence && c1 ? c1 : seg_ts() ? now : 0);
     }
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
-}
+} }
 uint64_t mtl_sub_commit(void) {
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)

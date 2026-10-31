@@ -262,7 +262,7 @@ static void mirror_completion(void) {
 }
 
 int main(void) { @autoreleasepool {
-    alarm(60); setbuf(stdout, NULL);   // GPU, callback and pthread failures must not leave the check target hanging.
+    alarm(60); if (setvbuf(stdout, NULL, _IONBF, 0)) abort();   // GPU, callback and pthread failures must not leave the check target hanging.
     mtl_init();
     void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 524288)) abort(); memset(mem, 0, 524288);
     // Registered with the dirty tracker as nvnMemoryPoolInitialize does: a packaged texture in an untracked pool is re-uploaded from its storage at every use, which would discard what the GPU wrote into it

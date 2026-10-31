@@ -517,22 +517,36 @@ HLE_FORCE("_ZN2nn3ldn14ConnectPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConf
     return h_ldn_Connect(a, b, d, v, o);
 }
 
-HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", "local wireless: get network info (Phase 1: stub)", Result, h_ldn_NetInfo, void *o) {
-    (void)o;
+HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", "local wireless: get current network info", Result, h_ldn_NetInfo, void *o) {
     int state = atomic_load(&g_ldn_state);
-    if (state == LDN_STATE_ACCESS_POINT_CREATED || state == LDN_STATE_STATION_CONNECTED) {
-        return RES_OK;
+    if (state != LDN_STATE_ACCESS_POINT_CREATED && state != LDN_STATE_STATION_CONNECTED) {
+        return RES_FAIL;
     }
-    return RES_FAIL;
+
+    if (o) {
+        memcpy(o, &g_network_info, sizeof(LdnFullNetworkInfo));
+    }
+
+    return RES_OK;
 }
 
-HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless: get IPv4 (Phase 1: returns zeros)", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) {
-    if (a) *a = 0;
-    if (m) *m = 0;
+HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless: get local WiFi IPv4 address", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) {
     int state = atomic_load(&g_ldn_state);
-    if (state == LDN_STATE_ACCESS_POINT_CREATED || state == LDN_STATE_STATION_CONNECTED) {
+    if (state != LDN_STATE_ACCESS_POINT_CREATED && state != LDN_STATE_STATION_CONNECTED) {
+        if (a) *a = 0;
+        if (m) *m = 0;
+        return RES_FAIL;
+    }
+
+    uint32_t ip, mask;
+    if (ldn_get_local_ip(&ip, &mask)) {
+        if (a) *a = ip;
+        if (m) *m = mask;
         return RES_OK;
     }
+
+    if (a) *a = 0;
+    if (m) *m = 0;
     return RES_FAIL;
 }
 

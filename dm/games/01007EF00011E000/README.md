@@ -190,6 +190,7 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 ## Found on this game
 
+- [Benchmark captures perturb the measured frame pacing](../../../docs/reference/frame-rate.md#benchmark-captures-perturb-the-measured-frame-pacing).
 - **Resolved, two stale chain folders held 4.4 GB:** [Old shader library folders grew a game's build folder with each chain change](../../../docs/reference/shaders.md#old-shader-library-folders-grew-a-games-build-folder-with-each-chain-change).
 - **Resolved: 1.6.0 (v786432) crashed 10-60 s into the first scene (issue #251)** in `h_nvnBufferGetAddress` (`main+0x14ef6e0`, reader `main+0x14ef440`) and in other places (`main+0x12970dc`, `+0x13615f4`, `+0x1445d48`, `+0x1db5cb8`, `+0x1472470`): the game's job queue (`main+0x13a0730`) takes its lock with a bare `ldxr` (no acquire), so on Apple cores two workers popped the same job, and two threads built draw lists into one view and arena (`main+0x14e8884` begin, commit `main+0x14ee3c0`). [Lock acquire without acquire ordering runs a queue item twice](../../../docs/reference/threads.md#lock-acquire-without-acquire-ordering-runs-a-queue-item-twice).
 - **Resolved build guard and cache isolation; rendering cause open:** [Tested tools and compiler-specific shader caches](../../../docs/reference/shaders.md#tested-tools-and-compiler-specific-shader-caches).

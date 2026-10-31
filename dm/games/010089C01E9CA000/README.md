@@ -1,6 +1,6 @@
 # SteamWorld Heist II (`010089C01E9CA000`)
 
-Update 1.5.1 (v262144), SDK 17.5.6, on NVN (79 shaders, GLSLC programs). Modules `main`, `subsdk0` (`NintendoSDK_movie`) and `sdk`. Thunderful's own engine (the SteamWorld series' engine, from Image & Form), with its shaders, scripts and data in two zip `.pak` archives in RomFS. The standard host and rewriter run this build with no game-specific fix: no shader overrides, rewriter cuts or host changes. The profile is the NSP script's provisional one, unchanged apart from its names ([What it needs](#what-it-needs)). Only this update is registered in the profile.
+Update 1.5.1 (v262144), SDK 17.5.6, on NVN (79 shaders, GLSLC programs). Modules `main`, `subsdk0` (`NintendoSDK_movie`) and `sdk`. Thunderful's own engine (the SteamWorld series' engine, from Image & Form), with its shaders, scripts and data in two zip `.pak` archives in RomFS. The standard host and rewriter run this build with no game-specific fix: no shader overrides, rewriter cuts or host changes. The profile keeps the NSP script's provisional memory layout and records the observed depth mode ([What it needs](#what-it-needs)). Only this update is registered in the profile.
 
 On the Mac (2026-10-29, a short gameplay check): the Thunderful logo, the title menu, a new game (Experienced, with the tutorial), the 80 s intro movie, then the first mission (Royal Navy Shipyard): its dialogue, the move cursor and a move, at 60 fps (frame time p50 16.67 ms, GPU p50 about 8.5 ms at 1080p) with audio and no `[RED]` line. In a second run the start menu listed the save (Game 1, 00:01:01, Find Leeway's Submarine) and Continue Game put the crew back in the mission, so the save and its reload work. The unsigned IPA is built with the frame rate counter but not tested on an iPhone.
 
@@ -8,6 +8,7 @@ On the Mac (2026-10-29, a short gameplay check): the Thunderful logo, the title 
 
 | Setting | Where | Why |
 |---|---|---|
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth; offline pipeline bases must use the matching vertex entry |
 | 3.25 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | the provisional layout, which holds: `main` sets a heap of at most the pool − 64 MB |
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares 0 MB of system resource: `IsVirtualAddressMemoryEnabled` is false, as on Horizon |
 | `modules main subsdk0 sdk` | `game.tsv` | `main` imports the movie decoder from `subsdk0` |
@@ -21,6 +22,7 @@ On the Mac (2026-10-29, a short gameplay check): the Thunderful logo, the title 
 
 ## Shaders
 
+- **Resolved: offline depth metadata.** Update 1.5.1 selects near-zero NVN depth in `run/r3.log` (through frame 2,400), with no later GL switch. A short isolated boot reproduced the call with matching registered module IDs; evidence is in `010089C01E9CA000-work/depth-mode-audit/boot-20261031/` beside the NSPs. The profile now declares `depth_mode zero` for the [shared archive mechanism](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). This confirms the input; rebuilt archive acceptance and performance were not retested.
 - **Current:** 79 distinct shaders from the `.nvns` GLSLC files in `Core/Game2.pak`, all translated for the Mac.
 - **Open:** the prewarm list (`pso_manifest.tsv`) is empty. On the first Mac boot, before the build had a pipeline archive, draws waited for pipelines a few times: 20–95 ms on the title and the menus, and one frame of 399 ms when the first mission loaded (12 draws, 350 ms). A run after the NSP script's prebuild found its bases in the archive. A list recorded through the title and the first mission would spare the iPhone's first start those waits.
 
@@ -40,7 +42,7 @@ On the Mac (2026-10-29, a short gameplay check): the Thunderful logo, the title 
 
 ## Found on this game
 
-Nothing new: it runs on mechanisms found on other games.
+- **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
 
 ## Open
 

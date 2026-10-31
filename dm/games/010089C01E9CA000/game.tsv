@@ -1,5 +1,5 @@
 # SteamWorld Heist II (Thunderful's own engine), SDK 17.5.6, NVN.
-# Started from the NSP script's provisional profile; brought up on the Mac with no change to it (README.md).
+# Started from the NSP script's provisional profile; the observed depth mode is recorded for offline builds (README.md).
 
 # ---- Identity ----
 title_id	010089C01E9CA000
@@ -31,5 +31,7 @@ app_pool	0xCD500000
 sys_resource	0x0
 
 # ---- Shader split ----
+# The registered build selects near-zero NVN depth; offline pipeline bases use main0_z.
+depth_mode	zero
 shader_groups	/Core/=core
 shader_note	SteamWorld Heist II shaders

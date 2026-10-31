@@ -268,6 +268,14 @@ t_rt_depth_ro: t_rt_depth_ro.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_depth_ro.m $(MTL_T_SRC) $(FW)
 t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_pending.m $(MTL_T_SRC) $(FW)
+t_pso_depth_stencil: t_pso_depth_stencil.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_depth_stencil.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_depth_stencil
+check_t_pso_depth_stencil: t_pso_depth_stencil
+	DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	DM_NVN_ENC_THREAD=1 DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	DM_NVN_ENC_THREAD=1 DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
 t_pull: t_pull.m ../tools/dmsh_pull.metal $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pull.m $(MTL_T_SRC) $(FW)
 check_t_pull: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -346,6 +354,13 @@ t_clear_tex: t_clear_tex.m $(MTL_T_DEP)
 .PHONY: check_t_clear_tex
 check_t_clear_tex: t_clear_tex
 	MTL_DEBUG_LAYER=1 ./t_clear_tex
+t_attachment_capacity: t_attachment_capacity.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_attachment_capacity.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_attachment_capacity
+check_t_attachment_capacity: t_attachment_capacity
+	@for compiler in 0 1; do for td in 0 1; do for enc in 0 1; do \
+	    DM_PSO_MTL4=$$compiler DM_NVN_TBDR=$$td DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_attachment_capacity || exit $$?; \
+	done; done; done
 t_unwritten_store: t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_unwritten_store.m $(MTL_T_SRC) $(FW)
 check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1

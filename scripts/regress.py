@@ -65,7 +65,8 @@
 #   PAIR = {"vs", "entry", "ps", "missing": [locnN], "type": ["locnN vs-type/ps-type"]}
 #   RUN = {"exit": code or -signal or null (stopped by the harness), "crash": {"line", "type", "signal"} or null, "hang_at_s", "hang_sample" (file name or null), "hang_dump" (the log holds the host's state dump), "first_frame_s", "max_frame", "reached",
 #          "prepare_s", "prebuild": {"secs", "pairs", "built", "archived", "failed", "done", "hang"}, "fps", "frame_p50", "frame_p99", "frame_max", "dropped", "over_budget",
-#          "peak_footprint_mb", "red": {normalized text: count}, "shots": {<s>: {"dhash"}}, "secs", "modules", "host"}
+#          "peak_footprint_mb", "red": {normalized text: count}, "shots": {<s>: {"dhash"}}, "secs", "modules", "host",
+#          "pipeline": {"depth_profile": "gl"|"zero", "depth_runtime": ["gl"|"zero"], "stamp_mismatch": bool} (NVN only; no depth observation = [])}
 #   status per game, worst first: ERROR (the harness could not check it), NEW-FAIL (something that worked in the baseline fails: a shader, the interface check, a crash, a hang, the frame
 #   not reached), REGRESSION (new [RED] lines, a screenshot beyond the tolerance, frame time, memory or prepare time worse beyond it), CHANGED (MSL or numbers differ, nothing worse),
 #   PASS. "known" lists failures the baseline has too (they do not fail the check).
@@ -373,6 +374,11 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     mf = out / 'manifest.json'
     if mf.is_file():
         m = json.loads(mf.read_text()); m['secs'] = 0
+        lib = out / f'b-{v}'
+        if g.kind == 'nvn' and m.get('hashes') != NVN_HASHES and (lib / '_b_build.json').is_file():   # made by an older nvn_manifest: its hashes would not compare with this one's
+            say(f'  {g.id}: hashing the outputs of chain {v} again (manifest hashes {m.get("hashes", 1)} → {NVN_HASHES})')
+            m['shaders'] = nvn_manifest(lib, jobs); m['hashes'] = NVN_HASHES
+            mf.write_text(json.dumps({k: x for k, x in m.items() if k != 'secs'}, indent=0))
         # The archive planner and depth mode can change without changing the translation chain.
         if g.kind == 'nvn': m['interface'] = interface_check(tree, g, out)
         return m, out
@@ -411,17 +417,26 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     m = {'key': key, 'kind': g.kind, 'chain': v, 'inputs': inp, 'tree': tree.id, 'game': g.id, 'total': len(shaders), 'ok': st['ok'], 'failed': len(shaders) - st['ok'],
          'failed_by_status': {k: n for k, n in st.items() if k != 'ok'}, 'build_secs': round(time.time() - t0, 1), 'shaders': shaders}
     if g.kind == 'vk': m['build_failed'] = rc != 0
-    if g.kind == 'nvn': m['interface'] = interface_check(tree, g, out)
+    if g.kind == 'nvn': m['interface'] = interface_check(tree, g, out); m['hashes'] = NVN_HASHES
     mf.write_text(json.dumps(m, indent=0))
     m['secs'] = m['build_secs']
     return m, out
 
 
-def refl_hash(p):
+NVN_HASHES = 2   # how nvn_manifest hashes; a reused manifest of another number is hashed again from its outputs (2: variant reflections without the chain stamps)
+
+
+def refl_canon(p):
+    """A reflection's JSON without the chain stamps (chain, chain_metal, chain_compiler), which every chain change rewrites; None when it does not read"""
     try: j = json.loads(Path(p).read_bytes())
     except (OSError, ValueError): return None
     for k in ('chain', 'chain_metal', 'chain_compiler'): j.pop(k, None)
-    return hashlib.sha256(json.dumps(j, sort_keys=True).encode()).hexdigest()[:16]
+    return json.dumps(j, sort_keys=True).encode()
+
+
+def refl_hash(p):
+    j = refl_canon(p)
+    return j and hashlib.sha256(j).hexdigest()[:16]
 
 
 def nvn_manifest(lib, jobs):
@@ -439,7 +454,11 @@ def nvn_manifest(lib, jobs):
         var = [n for n in names if n not in (f'{k}_b.metal', f'{k}_b.json', f'{k}_b.metallib')]
         if var:
             h = hashlib.sha256()
-            for n in var: h.update(n[16:].encode()); sha256_file(lib / n, h)
+            for n in var:   # reflections without their chain stamps; MSL and metallibs as bytes (a metallib is the only output of some variants, and the same MSL compiles to the same bytes)
+                h.update(n[16:].encode())
+                j = refl_canon(lib / n) if n.endswith('.json') else None
+                if j is None: sha256_file(lib / n, h)
+                else: h.update(j)
             e['var'] = h.hexdigest()[:16]
         return k, e
     with cf.ThreadPoolExecutor(max(2, jobs)) as ex: return dict(ex.map(one, rows))
@@ -759,6 +778,14 @@ def read_log(text):
     return red, crash, float(m[-1]) if m else None, pb
 
 
+def pipeline_status(text, zero):
+    """The depth selected by NVN versus the profile's archive input, and a bundled archive whose stamp was rejected (issue #758).
+    No depth line means unknown, not GL: a route that never initializes NVN gives no evidence about the game's mode."""
+    modes = re.findall(r'\[(?:nvn-mtl|nvn)\] depth mode:? near=(0|-w)\b', text)
+    return {'depth_profile': 'zero' if zero else 'gl', 'depth_runtime': list(dict.fromkeys('zero' if m == '0' else 'gl' for m in modes)),
+            'stamp_mismatch': bool(re.search(r'pipeline archive bundled with the app: made for [^\n]*, this run needs ', text))}
+
+
 def crash_report(t0):
     d = Path.home() / 'Library/Logs/DiagnosticReports'
     for p in sorted(d.glob('dmhost*.ips'), key=lambda p: p.stat().st_mtime, reverse=True) if d.is_dir() else []:
@@ -817,7 +844,8 @@ def save_digest(d):
 def smoke_context(g, art, route, a, hardware):
     """Reuse a baseline only for the same route, save bytes, build artifacts, machine and run settings. Old records without this context are recorded again."""
     env = {k: v for k, v in os.environ.items() if k.startswith(('DM_', 'DMSH_', 'XLATE_'))}
-    return json.loads(json.dumps({'route': route, 'save': save_digest(save_source(g, route)), 'host': art['host_key'], 'modules': art['modules_key'], 'chain': art['manifest']['key'],
+    # Version 2 also records pipeline_status: older cached runs cannot establish whether the profile matched runtime depth.
+    return json.loads(json.dumps({'checks': 2, 'route': route, 'save': save_digest(save_source(g, route)), 'host': art['host_key'], 'modules': art['modules_key'], 'chain': art['manifest']['key'],
                                  'profile': digest(sorted(art['profile'].glob('*.tsv'))), 'machine': hardware, 'tools': a.tools_fp, 'env': env, 'overrides': a.env,
                                  'no_hud': a.no_hud, 'runs': a.runs, 'prebuild_limit': a.prebuild_limit, 'prebuild_hang': a.prebuild_hang}))
 
@@ -862,6 +890,7 @@ def smoke_run(g, tree, art, route, quick, outdir, a):
                     frames=outdir / 'frames.tsv' if g.kind == 'nvn' else None)
     text = (outdir / 'log.txt').read_text(errors='replace')
     red, crash_line, prep, _ = read_log(text)
+    if g.kind == 'nvn': res['pipeline'] = pipeline_status(text, g.get_depth_zero)
     res.update(exit=r['exit'], hang_at_s=r['hang_at_s'], hang_sample=r['hang_sample'], hang_dump='state dump (DM_CTL dump)' in text, first_frame_s=r['first_frame_s'], max_frame=r['max_frame'], peak_footprint_mb=r['peak_mb'], busy=r['busy'],
                prepare_s=prep, red=dict(red), crash=None, covered=text.count('front end: window covered'))
     if crash_line or (r['exit'] not in (None, 0)):
@@ -985,6 +1014,10 @@ def run_failures(r, route):
     if r.get('hang_at_s') is not None: f.append(f"hang (no frame after {r['hang_at_s']} s)")
     if r.get('reached') is False and route.get('reach'): f.append(f"frame {route['reach'][0]} not reached by {route['reach'][1]:g} s (max {r.get('max_frame')})")
     if r.get('max_frame', -1) < 0: f.append('no frame')
+    pipeline = r.get('pipeline') or {}
+    for mode in pipeline.get('depth_runtime', []):
+        if mode != pipeline['depth_profile']: f.append(f"profile depth_mode {pipeline['depth_profile']} disagrees with runtime depth_mode {mode}: rebuild the pipeline archive with the observed mode")
+    if pipeline.get('stamp_mismatch'): f.append('bundled pipeline archive stamp does not match this run (chain, depth or pairs): rebuild the archive')
     pb = r.get('prebuild')
     if pb:
         if pb.get('exit') != 0: f.append(f"prebuild did not exit successfully (exit {pb.get('exit')})")

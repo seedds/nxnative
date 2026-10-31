@@ -34,6 +34,8 @@ app_pool	0xCD500000
 sys_resource	0x0
 
 # ---- Shader split ----
+# The game selects near=0 with nvnDeviceSetDepthMode; offline pipeline bases must use main0_z too.
+depth_mode	zero
 shader_groups	/region_common/=regioncommon /regionEU/=regioneu /regionUS/=regionus /regionJP/=regionjp /regionCN/=regioncn /regionKR/=regionkr /regionTW/=regiontw
 shader_note	The Legend of Zelda: Echoes of Wisdom shaders
 

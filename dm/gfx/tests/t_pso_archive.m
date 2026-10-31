@@ -3,7 +3,8 @@
 // file serves the base again without compiling; a flush of bases without a vertex layout is a p<seq> file, where a base with a layout is not looked up; a function with no
 // Metal 4 descriptor keeps the MTLDevice path; pso_key_norm drops what no pipeline depends on; compaction merges the files the prewarm took bases from into one despite a
 // mid-prewarm flush, and a compaction that did not finish is not tried again on the same system build; depth-only draws write depth; concurrent colour variants compile
-// one base; archive flushes preserve unrelated compiler state
+// one base; archive flushes preserve unrelated compiler state; a function with function constants is specialized by its pipeline's descriptor, not through its library,
+// and an MTLDevice pipeline gets it specialized
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -39,6 +40,43 @@ static id<MTLFunction> test_fn(id<MTLLibrary> lib, NSString *name, int registere
     MTLFunctionConstantValues *cv = f.functionConstantsDictionary.count ? [MTLFunctionConstantValues new] : nil;
     if (cv) f = [lib newFunctionWithName:name constantValues:cv error:nil];
     return registered ? fn4_note(f, lib, name, cv) : f;
+}
+// Hold one function's first library specialization while another caller requests it and an unrelated function specializes.
+@interface FunctionGateLibrary : NSObject {
+@public id<MTLLibrary> library; NSString *name; dispatch_semaphore_t entered, extra, release; _Atomic int calls;
+}
+@end
+@implementation FunctionGateLibrary
+- (id)forwardingTargetForSelector:(SEL)selector { return library; }
+- (id<MTLFunction>)newFunctionWithName:(NSString *)entry constantValues:(MTLFunctionConstantValues *)values error:(NSError **)error {
+    if ([entry isEqualToString:name]) {
+        if (!atomic_fetch_add(&calls, 1)) { dispatch_semaphore_signal(entered); dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER); }
+        else dispatch_semaphore_signal(extra);
+    }
+    return [library newFunctionWithName:entry constantValues:values error:error];
+}
+@end
+static void concurrent_functions(id<MTLLibrary> library) {
+    FunctionGateLibrary *gate = [FunctionGateLibrary new]; gate->library = library; gate->name = @"cvs";
+    gate->entered = dispatch_semaphore_create(0); gate->extra = dispatch_semaphore_create(0); gate->release = dispatch_semaphore_create(0);
+    id<MTLLibrary> lib = (id<MTLLibrary>)gate;
+    id<MTLFunction> vf = fn_spec(lib, @"cvs", [MTLFunctionConstantValues new], NULL), ff = fn_spec(lib, @"cfs", [MTLFunctionConstantValues new], NULL);
+    dispatch_group_t group = dispatch_group_create(), other = dispatch_group_create(); dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    dispatch_semaphore_t started = dispatch_semaphore_create(0); __block id<MTLFunction> first, second, separate;
+    dispatch_group_async(group, q, ^{ @autoreleasepool { first = fn_dev(vf); } });
+    EXPECT("concurrent functions: first specialization entered", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    dispatch_group_async(group, q, ^{ @autoreleasepool { dispatch_semaphore_signal(started); second = fn_dev(vf); } });
+    EXPECT("concurrent functions: overlapping caller started", 0, dispatch_semaphore_wait(started, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    dispatch_group_async(other, q, ^{ @autoreleasepool { separate = fn_dev(ff); } });
+    EXPECT("concurrent functions: unrelated function progresses", 0, dispatch_group_wait(other, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    EXPECT("concurrent functions: unrelated result specialized", 1, separate && separate != ff && !separate.functionConstantsDictionary.count);
+    EXPECT("concurrent functions: overlapping caller does not specialize again", 1, dispatch_semaphore_wait(gate->extra, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) != 0);
+    dispatch_semaphore_signal(gate->release); dispatch_group_wait(group, DISPATCH_TIME_FOREVER); dispatch_group_wait(other, DISPATCH_TIME_FOREVER);
+    EXPECT("concurrent functions: both callers share the specialized result", 1, first && first != vf && first == second && !first.functionConstantsDictionary.count);
+    // Re-registering the same library entry must preserve the function's cached specialization.
+    id<MTLFunction> again = fn_spec(lib, @"cvs", [MTLFunctionConstantValues new], NULL);
+    EXPECT("concurrent functions: reloading retains the result", 1, fn_dev(again) == first);
+    EXPECT("concurrent functions: one library specialization", 1, gate->calls);
 }
 // Hold the first base build while other callers request colour variants and an unrelated base.
 @interface ArchiveGateCompiler : NSObject {
@@ -392,6 +430,27 @@ int main(int argc, char **argv) { @autoreleasepool {
     EXPECT("blend of a disabled target dropped (7)", 0, k.blend[7].dst_rgb);
     EXPECT("depth format kept (an MTLDevice pipeline names it)", MTLPixelFormatDepth32Float, k.dfmt);
     EXPECT("stencil format kept", MTLPixelFormatStencil8, k.sfmt);
+    // a function that declares function constants (fn_spec, as shader_load loads one): on the Metal 4 path it stays unspecialized, with a specialized descriptor, and a
+    // pipeline is made from it; nothing is specialized through MTLLibrary, which compiles through the MTLDevice (the HUD's "Consider adopting MTL4Compiler")
+    {
+        id<MTLLibrary> cl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool k [[function_constant(0)]];\n"
+            "struct V { float4 p [[position]]; };\nvertex V cvs(uint i [[vertex_id]]) { V o; o.p = float4(is_function_constant_defined(k) && k ? 1 : 0, 0, 0, 1); return o; }\n"
+            "fragment float4 cfs() { return is_function_constant_defined(k) && k ? float4(1) : float4(0); }\nfragment float4 plain() { return float4(1); }\n" options:nil error:&err];
+        concurrent_functions(cl);
+        NSError *se = nil; id<MTLFunction> cf = fn_spec(cl, @"cfs", [MTLFunctionConstantValues new], &se), cv = fn_spec(cl, @"cvs", [MTLFunctionConstantValues new], &se);
+        EXPECT("constants: the function stays unspecialized on the Metal 4 path", 1, cf.functionConstantsDictionary.count);
+        EXPECT("constants: its descriptor specializes it", 1, [fn4_of(cf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]);
+        MTLRenderPipelineDescriptor *cd = [MTLRenderPipelineDescriptor new]; cd.vertexFunction = cv; cd.fragmentFunction = cf; cd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        uint64_t legacy0 = g_pb_legacy;
+        EXPECT("constants: a pipeline made from it", 1, pso_build(cd, &se) != nil);
+        EXPECT("constants: through the Metal 4 compiler", legacy0, g_pb_legacy);
+        // a fragment function with no Metal 4 descriptor (as the DM_NVN_HILITE override) sends the pipeline to the MTLDevice: its vertex function is specialized for it
+        cd.fragmentFunction = [cl newFunctionWithName:@"plain"]; se = nil;
+        EXPECT("constants: an MTLDevice pipeline made from it", 1, pso_build(cd, &se) != nil);
+        EXPECT("constants: that pipeline went through the MTLDevice", legacy0 + 1, g_pb_legacy);
+        EXPECT("constants: the vertex function given to it is specialized once", 1, fn_dev(cv) != cv && fn_dev(cv) == fn_dev(cv));
+        EXPECT("constants: a function without constants is its own", 1, fn_dev(cd.fragmentFunction) == cd.fragmentFunction);
+    }
     capture_preserves_foreign_folder();
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
     printf("t_pso_archive: %d checks, %d failed\n", checks, failed);

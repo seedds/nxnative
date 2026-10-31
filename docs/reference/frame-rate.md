@@ -20,6 +20,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** probes confirmed the legacy result: the framework presents at interval 1, VFR reports interval 1 with ratio 0.5, and when a frame runs long the game steps back to 2 with ratio 1, so the game speed does not change.
 - **Note:** the zeldaret/botw decompilation (`VFR.cpp`) gave the semantics; 1.9.0's addresses were found by the constants (`60 / interval`, the `fmov s11, #2.0` floor).
 
+### Benchmark captures perturb the measured frame pacing
+
+- **Symptom:** otherwise stationary gameplay benchmarks show roughly 125–135 ms frame spikes at their verification screenshots; adaptive-cap results vary between runs.
+- **Cause:** `scripts/bench.py` requested readback/PNG captures one-quarter and three-quarters through the timing window. The game frame stalls while the image is captured, and the adaptive frame-step controller can react to that stall. It is not evidence of equivalent renderer or pipeline-compilation work.
+- **Fix:** request the default verification screenshot half a second after the measurement window, within the existing two-second exit tail. `--shots` remains an explicit diagnostic override; in-window captures are not uncontaminated performance evidence. Game-speed reports also parse the host's current `frame step: game time …` log format.
+- **Check:** pre-refresh Mac BOTW 1.9.0 outdoor and TOTK 1.4.3 opening-cave logs put screenshot completion beside 125–135 ms frames, with shorter submit/GPU spans and no new pipelines. Subsequent runs used post-window screenshots; a TOTK launcher smoke report recovered `game_speed: 1.0` with the corrected parser. Those runs used shader chain `fda42ce035db`, not this branch's `b3ca4b7c621f`; no fresh runtime check on this branch is claimed. The six existing benchmark behavior tests are retained, not newly executed here.
+- **Found on:** [BOTW](../../dm/games/01007EF00011E000/README.md#gpu-work) and [TOTK](../../dm/games/0100F2C0115B6000/README.md#frame-rate) on Mac routes.
+
 ### A thermally serious iPhone holds 30 fps
 
 - **Symptom:** on an iPhone, a game with the frame step at 60 fps drops a frame in most windows after a few minutes, and its GPU time per frame roughly doubles to triples (17-26 ms for the same scenes).

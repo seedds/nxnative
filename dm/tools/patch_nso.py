@@ -12,7 +12,7 @@
 #   Function-matched cuts (MATCH_CUTS of the selected game's patches.py): unknown builds only, unique complete-function and direct-callee fingerprints, then original-byte assertions
 #   Registered observation gates (OBS of the patch files, restricted by build ID): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
 # The key page only stores "actual key number × 8" at the end of the data segment, and patch code fetches thread slots indirectly through the key page: the loader may use any key number.
-# Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR; a text longer than a B reaches adds a second one after the image, see TWO), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv
+# Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR; a text longer than a B reaches adds a second one after the image, see TWO), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv, <name>.changed.tsv (the text words whose instructions no longer run as the file has them)
 import struct, re, sys, os, glob, shlex, types, importlib.util
 from itertools import combinations
 import capstone
@@ -46,6 +46,7 @@ if TWO: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or 0x1000000
 elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
 SPLIT = 0x8000000 - FRONT - 0x100000 if TWO else None
 IMG = MOD.image
+ORIG_TEXT = bytes(IMG[:MOD.text_end])   # the text as the file has it, before any cut or site: <name>.changed.tsv compares against it
 if not FAR: IMG.extend(bytes(bss))
 TEXT_END = MOD.text_end
 RO_OFF, DATA_OFF = MOD.segments[1][0], MOD.segments[2][0]
@@ -1183,6 +1184,7 @@ if UE_CALL is not None:
     region_obs.append((UE_CALL, OBS_UE_MALLOC, f'{NOP:08x}', 'FMallocBinned3 constructor call (cut): the object in x0; the host puts its allocator\'s vtable in (hle_uemalloc.c)'))
 # Unreal's engine region (above): the gate on the store of its size, which the callback changes in that register and x1, the size the call asks for
 if UE_REGION is not None:
+    assert UE_REGION_REG is not None, 'engine region gate has no size register'
     assert UE_REGION not in kinds and not any(lo <= UE_REGION < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'engine region gate conflicts with a rewrite site {UE_REGION:#x}'
     region_obs.append((UE_REGION, OBS_UE_REGION | UE_REGION_REG << 8, f'{struct.unpack_from("<I", IMG, UE_REGION)[0]:08x}',
                        f'Unreal\'s engine region: its size in x{UE_REGION_REG}, stored before nninitStartup reserves it; the host gives what the alias region has room for (hle_svc.c)'))
@@ -1557,6 +1559,28 @@ with open(P('sites.tsv'), 'w') as f:
 with open(P('cuts.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, ob, nb, why in cuts: f.write(f'{off:#x}\t{ob}\t{nb}\t{why}\n')   # Columns: offset, original bytes, new bytes, reason
+# The text words whose instructions no longer run as the file has them: every word this rewriter changed (sites, cuts, lock
+# acquires, jump tables), the windows whose copies in the patch area run instead, and the spin waits' instructions, which run
+# from their copies after the first pass. Runs of offset and length; the host's cheat engine refuses a write into any of them
+# (hle_cheats.c main_write_pages: a cheat's instruction there would undo a site or never run)
+def changed_runs():
+    words = set()
+    for o in range(0, TEXT_END, 0x1000):   # whole blocks first: almost all of the text is unchanged
+        if IMG[o:o + 0x1000] != ORIG_TEXT[o:o + 0x1000]:
+            words.update(w for w in range(o, min(o + 0x1000, TEXT_END), 4) if IMG[w:w + 4] != ORIG_TEXT[w:w + 4])
+    for wseg in windows: words.update(range(wseg[0].address, wseg[-1].address + 4, 4))
+    for g in spin_regions:
+        for a in g['R']:
+            n = g['nodes'][a]; pre = n.get('pre', 0)
+            words.update(a + 4 * (i - pre) for i in range(len(n['ins'])))
+    runs = []
+    for w in sorted(words):
+        if runs and runs[-1][0] + runs[-1][1] == w: runs[-1][1] += 4
+        else: runs.append([w, 4])
+    return runs
+with open(P('changed.tsv'), 'w') as f:
+    f.write(f'# BUILD_ID\t{BUILD_ID}\n')
+    for off, n in changed_runs(): f.write(f'{off:#x}\t{n:#x}\n')   # Columns: offset, length in bytes
 with open(P('obs.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, oid, ow, why in obs: f.write(f'{off:#x}\t{oid}\t{ow}\t{why}\n')

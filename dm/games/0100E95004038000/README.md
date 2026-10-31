@@ -42,6 +42,38 @@ three geometry shaders. DLC gameplay remains unvalidated.
 
 ## Rendering
 
+**Current, iPadOS pipeline validation ([#702](https://github.com/seedds/nxnative/issues/702)):**
+the reported opening-sequence abort is an invalid `Invalid / Depth32Float_Stencil8`
+pipeline, not a confirmed memory kill. The general renderer correction keeps
+[combined depth-stencil formats paired](../../../docs/reference/rendering.md#combined-depth-stencil-formats-stay-paired-in-passes-and-pipeline-keys)
+in physical attachments and live, predicted and historical pipeline keys while
+preserving the unused plane. The log uses the legacy pipeline compiler with
+TBDR off; its original live pass remains unrecorded. The reporter confirms
+`b925591522f0` reaches cutscenes and normal gameplay on iPad. The subsequent
+smearing investigation below identifies another cause of malformed pipeline
+formats; playing and skipping the opening with the complete correction remain
+separate device checks.
+
+**Current, angle-dependent character smearing (2026-10-30):** on an M4 iPad
+(iPadOS 26.6.2), Rex's silhouette and body smear while stationary, change with
+the viewing angle, and can clear when another character walks nearer. The
+`b925591522f0` log uses legacy pipelines, threaded encoding and TBDR off. Frame
+2610 contains 76 var122 skinning draws: 74 execute, but passes 874367 and 874378
+skip the 319-vertex and 56-vertex updates after pipeline rejection. Their
+passes begin with eight color targets and depth/stencil `260/260`, while the
+failed keys contain depth `0x01010104` and stencil `260`.
+
+A device write watchpoint identifies `udc_note_draw`. The nine-element `g_sd`
+ends exactly where `g_pass` begins in this build. Its tenth, 56-byte stencil
+record overlaps the pass cache: write flags at offsets 34/35 change depth
+`0x00000104` to `0x01010104`. The general correction is
+[ten attachment records for eight colors and depth-stencil](../../../docs/reference/rendering.md#ten-attachment-records-for-eight-colors-and-depth-stencil).
+Disabling only the unwritten-store tracking (`g_udc_ab=0`, TBDR still off) in
+the running app clears Rex at the same camera angle; this is a diagnostic
+control, not the shipped fix. AddressSanitizer reproduces the old overflow
+without game files. The corrected ledger and lookahead arrays pass the GPU
+regression; the rebuilt permanent correction still needs iPad testing.
+
 **Resolved, hard-edged dark boxes in the indirect lighting (GitHub issue #643):**
 indoors and under decks a world-space box was much darker than the scene,
 darker with the time of day (Goldmouth Return Port), and elsewhere a lighter
@@ -229,6 +261,8 @@ that diagnostic launch did not yet have a shader map configured.
 
 ## Found on this game
 
+- [Ten attachment records for eight colors and depth-stencil](../../../docs/reference/rendering.md#ten-attachment-records-for-eight-colors-and-depth-stencil): the iPad character smear and malformed skinning pipeline formats.
+- [Combined depth-stencil formats stay paired in passes and pipeline keys](../../../docs/reference/rendering.md#combined-depth-stencil-formats-stay-paired-in-passes-and-pipeline-keys): combined storage on iPadOS; see [Rendering](#rendering).
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers).
 - [Queue initialization captures the raster origin](../../../docs/reference/rendering.md#queue-initialization-captures-the-raster-origin).
 - [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own): the light probe lists; see [Rendering](#rendering).

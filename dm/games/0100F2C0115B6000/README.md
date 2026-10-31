@@ -80,6 +80,8 @@ Game-specific findings. The general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [Benchmark captures perturb the measured frame pacing](../../../docs/reference/frame-rate.md#benchmark-captures-perturb-the-measured-frame-pacing).
+
 General host changes first needed here; each applies to every game:
 
 - **Resolved in the host: render passes into textures uploaded from their storage** write the storage, and storage-backed textures get render-target use when attached: [Render passes into textures uploaded from their storage](../../../docs/reference/nvn-objects.md#render-passes-into-textures-uploaded-from-their-storage). Covered by `t_readback`; checked on the Mac along the grass route.

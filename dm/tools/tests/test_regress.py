@@ -283,6 +283,38 @@ class Regress(unittest.TestCase):
             check.assert_called_once()
             self.assertEqual(manifest['interface'], current)
 
+    def test_variant_hash_ignores_chain_stamps(self):   # 2026-10-31: DKC Tropical Freeze reported 720 changed shaders whose variants differed only in the stamps
+        k = '0123456789abcdef'
+        def lib(td, chain='c1', compiler='x1', bindings=(0,), msl='kernel void main0() {}', pull=b'\x01'):
+            d = Path(td); stamp = {'chain': chain, 'chain_metal': 'mac', 'chain_compiler': compiler}
+            (d / '_b_build.json').write_text(json.dumps([{'key': k, 'st': 'ok'}]))
+            (d / f'{k}_b.json').write_text(json.dumps({'key': k + '_b', **stamp}))
+            (d / f'{k}_bg0.json').write_text(json.dumps({'key': k + '_bg0', 'bindings': list(bindings), **stamp}))
+            (d / f'{k}_bg0.metal').write_text(msl)
+            (d / f'{k}_bp.metallib').write_bytes(pull)   # pull variants leave only their metallib here
+            return regress.nvn_manifest(d, 1)[k]['var']
+        def var(**kw):
+            with tempfile.TemporaryDirectory() as td: return lib(td, **kw)
+        base = var()
+        self.assertEqual(var(chain='c2', compiler='x2'), base)
+        for change in ({'bindings': (1,)}, {'msl': 'kernel void main0() { }'}, {'pull': b'\x02'}):
+            self.assertNotEqual(var(**change), base, change)
+
+    def test_reused_manifest_of_older_hashes_is_hashed_again(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); g = NS(id='game', kind='nvn', folder=root)
+            out = regress.game_root(g) / 'chain/key'; (out / 'b-v').mkdir(parents=True)
+            (out / 'b-v/_b_build.json').write_text('[]')
+            (out / 'manifest.json').write_text(json.dumps({'kind': 'nvn', 'shaders': {'old': {}}, 'interface': {'bad': []}}))
+            fresh = {'k': {'st': 'ok', 'var': 'new'}}
+            with patch.object(regress, 'ROOT', root), patch.object(regress, 'chain_key', return_value=('v', 'i', 'key')), \
+                    patch.object(regress, 'interface_check', return_value={'bad': []}), patch.object(regress, 'nvn_manifest', return_value=fresh) as hashed:
+                manifest, _ = regress.chain_build(NS(), g, NS(tools_fp='', jobs=1))
+                self.assertEqual((manifest['shaders'], manifest['hashes']), (fresh, regress.NVN_HASHES))
+                self.assertEqual(json.loads((out / 'manifest.json').read_text())['hashes'], regress.NVN_HASHES)
+                regress.chain_build(NS(), g, NS(tools_fp='', jobs=1))
+            hashed.assert_called_once()   # a manifest of the current hashes is reused as it is
+
     def test_smoke_requires_prebuild_and_screenshots(self):
         route = {'reach': (100, 10.0), 'shots': [8]}
         good = {'exit': None, 'max_frame': 500, 'reached': True, 'prebuild': {'exit': 0, 'done': True, 'failed': 0},
@@ -293,6 +325,37 @@ class Regress(unittest.TestCase):
                 self.assertTrue(regress.smoke_diff([good], [bad], route)[0]['NEW-FAIL'])
         self.assertTrue(regress.smoke_diff([good], [dict(good, shots={})], route)[0]['NEW-FAIL'])
         self.assertTrue(regress.run_failures({'exit': None, 'max_frame': -1, 'reached': False}, {'reach': None}))
+
+    def test_smoke_detects_archive_profile_mismatches(self):
+        # The harness makes its own archive, so a profile/runtime mismatch must also fail without a bundled archive.
+        depth = '[dm] [nvn-mtl] depth mode: near=0, vertex shaders use the main0_z entry\n'
+        rejected = ('[dm] [nvn-mtl] pipeline archive bundled with the app: made for chain b3ca4b7c621f; depth near=-w; '
+                    'pairs 255241 f6cf106d01da3da8, this run needs chain b3ca4b7c621f; depth near=0; pairs 255241 f6cf106d01da3da8: '
+                    'the device builds the bases it does not hold (the game\'s depth mode is not the one built for: the profile key depth_mode)\n')
+        cases = [(False, depth, 'profile depth_mode gl'), (True, depth, None),
+                 (True, '[dm] [nvn] depth mode near=-w (GL)\n', 'profile depth_mode zero'),
+                 (True, depth + rejected, 'bundled pipeline archive stamp'),
+                 (True, depth + rejected.replace('depth near=-w', 'depth near=0').replace('made for chain b3ca4b7c621f', 'made for chain old'), 'bundled pipeline archive stamp'),
+                 (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: made for (no prebuilt.tsv), this run needs chain current; depth near=0: the device builds the bases it does not hold\n', 'bundled pipeline archive stamp'),
+                 (False, '', None), (False, '[dm] [nvn] depth mode near=-w (GL)\n', None),
+                 (True, depth + '[dm] [nvn-mtl] pipeline archive bundled with the app: holds the bases of every shader pair (16 of 16 probed bases found, 26.0 ms)\n', None)]
+        route = dict(secs=10, quick=10, prebuild='off', keys='', reach=None, shots=[], hang=20)
+        for zero, text, failure in cases:
+            with self.subTest(zero=zero, text=text), tempfile.TemporaryDirectory() as td:
+                out = Path(td)
+                def watched(cmd, env, cwd, log, *args, text=text, **kw):
+                    log.write_text(text)
+                    return dict(exit=None, hang_at_s=None, hang_sample=None, first_frame_s=1, max_frame=500, peak_mb=100, busy=False, presents=[])
+                with patch.object(regress, 'run_env', return_value=({}, None)), patch.object(regress, 'run_watched', watched):
+                    run = regress.smoke_run(NS(kind='nvn', id='game', get_depth_zero=zero), None,
+                                            dict(host='host', modules='modules', host_key='h', modules_key='m'), route, True, out, None)
+                failures = regress.run_failures(run, route)
+                if failure:
+                    self.assertTrue(any(failure in f for f in failures), failures)
+                    good = dict(run, pipeline={})
+                    self.assertTrue(regress.smoke_diff([good], [run], route)[0]['NEW-FAIL'])
+                    self.assertIn('pipeline', regress.public_run(run))
+                else: self.assertEqual(failures, [])
 
     def test_each_candidate_screenshot_is_checked(self):
         route = {'reach': None}
@@ -524,7 +587,8 @@ class Validated(unittest.TestCase):
         route = {'reach': (120, 5), 'shots': [4]}
         green = {'exit': None, 'max_frame': 180, 'reached': True, 'secs': 6, 'shots': {'4': {'dhash': '0123456789abcdef', 'rgb16': '00' * 768}}}
         for failure in ({'crash': {'signal': 'SIGSEGV'}}, {'exit': 1}, {'hang_at_s': 3}, {'max_frame': -1},
-                        {'reached': False}, {'prebuild': {'exit': 1}}, {'shots': {}}):
+                        {'reached': False}, {'prebuild': {'exit': 1}}, {'shots': {}},
+                        {'pipeline': {'depth_profile': 'gl', 'depth_runtime': ['zero']}}, {'pipeline': {'stamp_mismatch': True}}):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as td:
                 failed = green | failure
                 levels, known, _ = regress.smoke_diff([failed], [failed], route)

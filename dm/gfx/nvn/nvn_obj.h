@@ -246,6 +246,11 @@ int nvn_tex_mirror_t2t(const tex_t *s, unsigned sl, unsigned ss, const NVNcopyRe
 // A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section (its own length when shorter) + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
 // a stage whose code area was not yet in any memory pool then is computed the first time it is asked for. Returns 0 = no such stage
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
+// The control section's fields a shader the split missed needs to be translated at run time (nvn_maxmetal.m), kept by SetShaders, since the game may free the section once it returns:
+// c1_off = control +0x700 (where c1 starts in the code area), ncode = +0x704 (the code area's length), early_z = +0x718 (early fragment tests), local = +0x748 (a compute shader's thread
+// group). NULL: SetShaders saw no control section
+typedef struct { uint32_t c1_off, ncode, local[3]; uint8_t early_z, ok; } prog_ctl_t;
+const prog_ctl_t *prog_ctl(const prog_t *p, unsigned stage);
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
 // New serial (> 0, globally increasing)

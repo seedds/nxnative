@@ -1,6 +1,6 @@
 # dm/gfx — graphics layer (NVN → Metal)
 
-The Switch version of the game draws with NVN (the Switch's native graphics interface). The graphics layer reimplements this interface on top of Apple's Metal: every NVN call the game makes lands here, is recorded as a command, and is replayed as Metal commands at submit time. The game's shaders are not translated at run time; they are translated offline, once, on a computer, into Metal shader libraries (when the computer has no Apple Metal compiler, the final compile step moves to the phone; see below).
+The Switch version of the game draws with NVN (the Switch's native graphics interface). The graphics layer reimplements this interface on top of Apple's Metal: every NVN call the game makes lands here, is recorded as a command, and is replayed as Metal commands at submit time. The game's shaders are translated offline, once, on a computer, into Metal shader libraries (when the computer has no Apple Metal compiler, the final compile step moves to the phone; see below). Only a shader the split missed is translated at run time, by maxmetal (see [Shaders the split missed](#shaders-the-split-missed)).
 
 For the build steps of the whole project see [README.md](../../README.md) and [docs/development.md](../../docs/development.md) (the tools they need: Xcode, xcodegen, .NET SDK, zstd, and the Python packages lz4 / capstone / fonttools; spirv-cross is the in-repo build `tools/spirv_cross_bin`); this page covers only the graphics layer's own matters.
 
@@ -28,7 +28,7 @@ For which Metal object each NVN object and command lands on, see [nvn_metal_mapp
 
 ### Shader translation chain
 
-The game's shaders are GPU machine code for the Tegra X1 (the Maxwell instruction set). The translation from this machine code to Metal Shading Language is not done on the phone; all of it happens offline:
+The game's shaders are GPU machine code for the Tegra X1 (the Maxwell instruction set). The translation from this machine code to Metal Shading Language happens offline (a shader the split missed is the exception, [below](#shaders-the-split-missed)):
 
 ```
 Original Switch shader package
@@ -58,6 +58,12 @@ The whole chain is driven by `tools/dmsh_build.py`; `scripts/build_ipa_from_nsp.
 - **Several game versions**: `shader_split.py` takes comma-separated RomFS and `main` lists (base game first) and writes the union; the map, facts and pairs tables currently cover Mario v0 and 1.2.1.
 - **`dm/games/<id>/pso_manifest.tsv`**: the warm-up seed manifest bundled with the app: shaders (`S`), render pipelines (`R`, the hex of `pso_skey` in `nvn/nvn_pso_skey.h`) and compute pipelines (`C`) to pre-build at startup. The row order is the pre-build order (first use); do not sort it. Its companion is `pso_user.tsv`, which the host appends next to the save directory whenever it has to build something on the spot, and which is pre-built after the seed at the next launch. Both name shaders by key and describe pipeline settings only, so a list recorded on one device works on any other; lines a build cannot use are skipped. Recorded lines can be appended to the seed below its header (currently empty).
 - **Shaders embedded in the program itself**: the main program additionally contains 4 compute shaders that are not in the shader package; they were hand-written as MSL from the disassembly and are in `nvn/nvn_builtin.h`.
+
+### Shaders the split missed
+
+A program whose key is not in the shader map was missed by `shader_split.py`. The host translates it on the spot, on the Mac and the iPhone / iPad, with maxmetal (`dm/third_party/maxmetal`: Maxwell straight to MSL, plain C), whose NVN mode writes the binding layout of `dmsh_abi.h` and a reflection the host reads as the offline chain's (`nvn/nvn_maxmetal.m`). The request comes from the code area and the control fields `nvnProgramSetShaders` keeps (`prog_ctl` in `hle_nvn.c`: c1, the code length, early fragment tests, the compute thread group); texture slots take their instruction's type, as the offline chain does for a key `shader_facts.tsv` lacks. A vertex shader gets both depth entry points (`main0`, `main0_z`). The MSL and reflection are kept as `<key>_b.metal` / `<key>_b.json` in `shader_rt/b-<V>/` beside `pso_user.tsv` (on iOS in Documents), and the library is compiled from the MSL with `newLibraryWithSource` (Metal's own cache serves later starts); a translation of another maxmetal revision is made again. The shader is recorded in `pso_user.tsv` like any other, so the next start prewarms it.
+
+A translation has none of what the offline chain adds after translating: the pulling, shadow-input, alpha test, logic operation and readable-tile libraries, the raster facts, and lines in `c1_full.tsv` and `cb_extent.tsv`. The host takes each as absent: its c1 gets its own 64 KiB, its uniform bindings are copied whole, its draws wait for their pipeline rather than drawing with a pulling one. maxmetal translates vertex, pixel and compute shaders (not geometry or tessellation, nor a vertex shader in two parts), and only combined texture handles (not the separate textures Unity, Unreal and RE Engine bind); a shader it cannot translate is dropped as before, with the reason in the `[RED]` line. Either way the split still lacks the shader: `DM_NVN_SHDUMP` saves it to find the container. `DM_NVN_MAXMETAL=0` turns the translation off; `DM_SHADER_RT=folder` keeps the translations elsewhere.
 
 Binding conventions followed during translation (the NVN driver's layout, the same in every game: `tools/dmsh_build.py`, filled at run time by `nvn/nvn_mtl.m`):
 
@@ -133,6 +139,7 @@ The tests in `dm/gfx/tests` compile the production code in directly and need a M
 | `t_nvn` | Interface layer: fetches addresses from `nvnBootstrapLoader` the way the game does, all the way through to presentation |
 | `t_builtin` | The 4 embedded compute shaders |
 | `t_refl`, `t_hmap`, `t_cover`, `t_pace`, `t_pso_skey`, `t_dirty_slots` | Reflection parsing, hash table, full-coverage proof, pacer, pipeline manifest key, dirty page tracking |
+| `t_maxmetal` | Run-time translation of shaders the split missed: hand-assembled vertex, pixel and compute code areas through maxmetal, the reflection conversion, the library compile, the argument buffer layout `shader_load` requires, and the translations kept for a later start |
 | `t_pso_warm` | Historical manifest normalization and deduplication, draw-time cache reuse and GPU pixels for normal and merged passes, through MTLDevice and Metal 4 |
 | `t_deswz_gpu` | GPU deswizzling |
 | `t_present_crop` | Presentation cropping |
@@ -148,6 +155,7 @@ Resource locations:
 
 | Switch | Effect |
 |---|---|
+| `DM_SHADER_RT=folder` | Where the run-time translations of shaders the split missed are kept, in `b-<V>/` beneath it (default: `shader_rt/` beside `pso_user.tsv`; [Shaders the split missed](#shaders-the-split-missed)) |
 | `DM_NVN_SHMAP=path` | The shader map. The default is `../games/<id>/shader_map.tsv` relative to the executable's directory; `c1_full.tsv` and `pso_manifest.tsv` are taken from the same directory |
 | `DM_MSL_DIR=directory` | The parent directory of the shader libraries; the host loads from `b-<V>/` beneath it. When running the host on a Mac, set it to `$DM_ROOT/build/cache/metal_shader_cache` |
 | `DM_PSO_MANIFEST=path` or `off` | Use a different warm-up manifest, or turn warm-up off |

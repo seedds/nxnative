@@ -1,6 +1,6 @@
 # 04 — Graphics: NVN on Metal for a new title
 
-The graphics layer records NVN commands into its own command format (`dm/gfx/nvn/hle_nvn.c`) and replays them as Metal 4 at submit time (`nvn_mtl.m`). Shaders are never translated at run time: the original Maxwell shader binaries are translated offline (Ryujinx's translator → SPIR-V → spirv-cross → metallib) and looked up by key. See `dm/gfx/README.md` for the full pipeline; this page lists what changes per title.
+The graphics layer records NVN commands into its own command format (`dm/gfx/nvn/hle_nvn.c`) and replays them as Metal 4 at submit time (`nvn_mtl.m`). The original Maxwell shader binaries are translated offline (Ryujinx's translator → SPIR-V → spirv-cross → metallib) and looked up by key; only a shader the split missed is translated at run time, by maxmetal ([Shaders the split missed](../../dm/gfx/README.md#shaders-the-split-missed)). See `dm/gfx/README.md` for the full pipeline; this page lists what changes per title.
 
 ## 1. Find every shader container
 
@@ -8,7 +8,7 @@ Do not stop at the obvious archive. In Mario the main `bfsha` held 4,888 of the 
 
 `dm/gfx/tools/shader_split.py <RomFS> <ExeFS main> <pkg dir> <map out> <facts out> [<pairs out>]` scans **every** RomFS file (zstd-decompressed, SARC expanded recursively) and `main`, and recognizes the containers listed by engine in [reference/shaders.md](../reference/shaders.md#containers-by-engine). The pairs table lists the (vertex key, pixel key) of every BNSH variation or Unity program. Unity shaders need a second pass: files whose type trees are missing are scanned again once the bundles have supplied the `Shader` tree (or with the one `unityfs.py` has written out for that hash, when no bundle has it). For a base game plus an update, give RomFS and `main` as comma-separated lists, base first: keys are content hashes, so the output is the union of both versions and one shader build serves both (Mario 1.2.1 recompiled 3,451 of its pixel shaders; v0 rows keep their package indices).
 
-Validate a new title's coverage at run time: `DM_NVN_SHDUMP=<dir>` makes the host dump the control section and code of every program it can't find in the map; search those bytes in the game files to find the container that was missed.
+Validate a new title's coverage at run time: every program the map lacks gets a `[RED] shader … is not in the shader map` line, whether maxmetal then translated it or not, and `DM_NVN_SHDUMP=<dir>` makes the host dump its control section and code; search those bytes in the game files to find the container that was missed. The run-time translation keeps the game drawing meanwhile, but without the offline chain's extras ([Shaders the split missed](../../dm/gfx/README.md#shaders-the-split-missed)); `DM_NVN_MAXMETAL=0` shows what the split alone gives.
 
 ## 2. Key shaders by control section + code
 
@@ -70,6 +70,7 @@ What earlier titles needed beyond sections 1–5 is filed by mechanism: textures
 | `DM_NVN_HILITE=fskey,…` | Replace those fragment shaders with solid colours: tells "geometry is wrong" from "shading is wrong" |
 | `DM_NVN_DEPTHOVR=fskey,…` | Those fragment shaders' draws compare depth with `ALWAYS`: with `HILITE`, tells "the depth test rejects every fragment" from "nothing rasterizes". With `PASSDUMP`, the `D` line shows the depth range (`dr=`) and logic op (`lo=`), and `c` lines each recorded clear (slot, serial, mask, scissor; depth / stencil values) |
 | `DM_NVN_SHDUMP=dir` | Control + code of programs missing from the shader map |
+| `DM_NVN_MAXMETAL=0` | Programs missing from the shader map are dropped instead of translated at run time by maxmetal |
 | `DM_NVN_VSDUMP=<file>` / `DM_NVN_VSDUMP_KEY=<vertex key>` | One native post-vertex capture: a u32 header (first vertex, count, stride in words, base instance), then the 144-word geometry records. Refuses shaders with writes. With key `*`, saves position-only files by draw/key; `DM_NVN_VSDUMP_FROM` selects the first frame, `DM_NVN_VSDUMP_MAX` limits captures (default 256). These diagnostics drain GPU work |
 | `DM_NVN_ALLOCPROF=1` | Metal allocation growth per replayed op type and per function, command allocator sizes, new textures |
 | `DM_NVN_CBDUMP_KEY=vskey` (with `CBDUMP` and `PASSDUMP_ALL`) | Only that vertex shader's draws: uniform buffers plus vertex streams and index buffer (`F<frame>_p<pass>_vb<stream>_<addr>.bin`, `_ib<type>_<addr>.bin`) |

@@ -24,8 +24,16 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** the split leaves out a VBF archive with `[RED] <name>.vbf: error: Error -3 while decompressing data: incorrect header check (its shaders are left out)`; the game runs with sound but every frame is black, with `[RED] shader … is not in the shader map` and `program has no vertex shader`.
 - **Cause:** `vbf.py` took every compressed block for zlib. FINAL FANTASY XII THE ZODIAC AGE's `FFXII_TZA.vbf` keeps its blocks as raw LZ4 blocks (no frame, no size prefix): the first block of an effect starts with a literal token and `RYHP` (`f3 1a 52 59 48 50 …`), not a zlib header.
 - **Fix:** a compressed block whose first two bytes are a valid zlib header (deflate, header checksum a multiple of 31) is inflated as before; any other compressed block is decoded as an LZ4 block of the block's stored size. A block that fails to decode is a `ValueError`, so the split leaves out that file only.
-- **Found on:** FINAL FANTASY XII THE ZODIAC AGE (`0100EB100AB42000`, no profile yet): all 814 shader members of `FFXII_TZA.vbf` decode; the split goes from 3,100 shaders (72 from game data) to 6,431 (3,403 from game data), and 22 of the 29 keys a provisional build asked for in its first minute are found. Seven control sections in `main` with no code area remain open.
+- **Found on:** FINAL FANTASY XII THE ZODIAC AGE (`0100EB100AB42000`, no profile yet): all 814 shader members of `FFXII_TZA.vbf` decode; the split goes from 3,100 shaders (72 from game data) to 6,431 (3,403 from game data), and 22 of the 29 keys a provisional build asked for in its first minute are found. The other 7 were Phyre's built-in programs in `main` (see below).
 - **Check:** `test_vbf.py` covers LZ4 blocks and a corrupt LZ4 block beside the zlib and raw cases.
+
+### Phyre programs in main
+
+- **Symptom:** the split prints `[RED] main control section @… : no code area: no data record points at one, …` for a Phyre game, and the game asks for those keys (`[RED] shader … is not in the shader map`, `program has no vertex shader`) as its first screens draw: black or magenta where the loading screen and the menus should be.
+- **Cause:** Phyre links its built-in programs into `main` the way it lays them out in effects: each code area (`0x12345678` header) right before its control section, with no data record pointing at either. `raw_shaders` looks only for code areas that a record or the code's own address building leads to, so it left them out.
+- **Fix:** the split also runs `phyre_shaders` on `main`, after the other readers of `main` and before `raw_shaders`, and keeps only the programs whose control sections no other reader took, so a main the other readers already cover yields the same tables.
+- **Found on:** FINAL FANTASY XII THE ZODIAC AGE (`0100EB100AB42000`, no profile yet): 23 programs, among them the 7 keys its title menu asked for; with them the menus and the UI after the first menu draw.
+- **Check:** the split leaves no `no code area` line on that `main`, and every key the run asks for is in the map.
 
 ### A file no reader reads
 

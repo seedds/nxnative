@@ -1,7 +1,8 @@
 // nn::oe (application operating environment): on the real device the console state is queried through the am/oe services; the host gives fixed state directly.
 // oe::Initialize is in hle_sdkinit.c, not here.
-// Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default en-US; the iOS app sets it from the IPA's DMLanguage, main.m).
+// Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default: on the Mac the first of the Mac's own preferred languages the game supports, else en-US; the iOS app sets it from the IPA's DMLanguage, main.m).
 #include "hle.h"
+#include <TargetConditionals.h>   // TARGET_OS_IPHONE: the Mac's language default (below) is not built into the iOS app
 
 // The operation mode is runtime state (the front end can change it: iOS overheat downgrade switches to handheld): the single source is here, taken once from DM_OPMODE at startup, the environment variable is not read again afterwards
 #include <stdatomic.h>
@@ -241,8 +242,160 @@ HLE_FORCE("_ZN2nn2oe28SetResumeNotificationEnabledEb", "resume notification swit
 HLE_FORCE("_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", "operation mode change notification switch", void, h_oe_SetOpModeNtf, unsigned on) { g_ntf_opmode = on & 0xff; }
 HLE_FORCE("_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", "performance mode change notification switch", void, h_oe_SetPerfModeNtf, unsigned on) { g_ntf_perfmode = on & 0xff; }
 
+// ---------- Game language: DM_LANG, else (Mac) the user's macOS language ----------
+// The game language is a Switch language code (an entry of dm_lang_code). DM_LANG names it (the iOS app sets it from the IPA, a player or a profile can set it); on the Mac nothing
+// sets it, so the host derives it once from the Mac's own preferred languages (lang_mac.m) and the languages the game's control data lists, and sets DM_LANG so every reader
+// (GetDesiredLanguage, GetRegionCode, the front end) agrees. An explicit DM_LANG wins; the iOS app always sets one, so none of this is compiled for it.
+#if !TARGET_OS_IPHONE
+// A code this table produces is looked up in dm_lang_code, so the codes the system offers are written down once (hle_sdk16.c) and a mapping that named another string yields
+// nothing instead of handing the game a language the settings service does not know.
+static const char *lang_code(const char *code) {
+    for (int i = 0; i < DM_LANG_COUNT; i++) if (!strcmp(dm_lang_code[i], code)) return dm_lang_code[i];
+    return NULL;
+}
+// A macOS language identifier ("it-IT", "zh-Hans-CN", "en-GB") → the Switch code for it, NULL when the Switch has no such language (sv-SE, pl-PL, ...).
+// macOS names a language as language[-script][-region]: the language alone picks most codes, the script separates Simplified from Traditional Chinese, and the region separates
+// the pairs the Switch keeps apart — en-US / en-GB, es-419 (Latin America) / es, pt-BR / pt. Regions of one country with no own code (fr-BE, de-AT, en-AU) fall on the code
+// of their language; English is the exception, where everything but the US takes the British code (as the packing script does with en-AU).
+static const char *lang_map(const char *tag) {
+    char part[4][8]; int np = 0;
+    for (const char *s = tag; *s && np < 4; np++) {
+        int len = 0;
+        while (s[len] && s[len] != '-' && s[len] != '_' && len < 7) len++;
+        for (int i = 0; i < len; i++) { char c = s[i]; part[np][i] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c); }   // identifiers are case-insensitive
+        part[np][len] = 0;
+        s += len;
+        if (*s == '-' || *s == '_') s++;
+        if (!len) break;   // an empty subtag ("xx--yy"): stop here rather than read on
+    }
+    if (!np || !part[0][0]) return NULL;
+    const char *script = NULL, *region = NULL;
+    for (int i = 1; i < np; i++) {
+        if (!strcmp(part[i], "hans") || !strcmp(part[i], "hant")) script = part[i];
+        else if (strlen(part[i]) == 2 || strlen(part[i]) == 3) region = part[i];   // a region, or 419 for Latin America
+    }
+    const char *lang = part[0];
+    if (!strcmp(lang, "ja")) return lang_code("ja");
+    if (!strcmp(lang, "de")) return lang_code("de");
+    if (!strcmp(lang, "it")) return lang_code("it");
+    if (!strcmp(lang, "nl")) return lang_code("nl");
+    if (!strcmp(lang, "ru")) return lang_code("ru");
+    if (!strcmp(lang, "ko")) return lang_code("ko");
+    if (!strcmp(lang, "en")) return lang_code(!region || !strcmp(region, "us") ? "en-US" : "en-GB");
+    if (!strcmp(lang, "fr")) return lang_code(region && !strcmp(region, "ca") ? "fr-CA" : "fr");
+    if (!strcmp(lang, "es")) return lang_code(!region || !strcmp(region, "es") ? "es" : "es-419");
+    if (!strcmp(lang, "pt")) return lang_code(region && !strcmp(region, "br") ? "pt-BR" : "pt");
+    if (!strcmp(lang, "zh")) {
+        int hant = script ? !strcmp(script, "hant") : region && (!strcmp(region, "tw") || !strcmp(region, "hk") || !strcmp(region, "mo"));
+        return lang_code(hant ? "zh-Hant" : "zh-Hans");
+    }
+    return NULL;
+}
+// The same language for another region, as the packing script's LANG_NEAR (build_ipa_from_nsp.py): the pairs differ only in region, so a game with one of them takes the other —
+// a Mac set to British English plays an American-English-only game in English instead of falling through to the next language on the list.
+static const char *const k_lang_near[][2] = {{"en-US", "en-GB"}, {"fr", "fr-CA"}, {"es", "es-419"}, {"pt", "pt-BR"}};
+static const char *lang_near(const char *code) {
+    for (unsigned i = 0; i < sizeof k_lang_near / sizeof *k_lang_near; i++)
+        if (!strcmp(k_lang_near[i][0], code)) return lang_code(k_lang_near[i][1]);
+        else if (!strcmp(k_lang_near[i][1], code)) return lang_code(k_lang_near[i][0]);
+    return NULL;
+}
+// The language to give the game: the first preferred language, in order, that the game supports (a region mate counts as supported); when the control data names no usable
+// language, the first preferred one the Switch has a code for. When none of the Mac's languages is among the game's, the fallback is en-US only when the game has it — Horizon
+// gives a game only languages its control data lists — else the game's first (have[0], the packing script's own fallback), which is closer than an English the game does not have.
+static const char *lang_choose(const char *const *pref, int npref, const char *const *have, int nhave) {
+    for (int i = 0; i < npref; i++) {
+        const char *c = lang_map(pref[i]);
+        if (!c) continue;
+        if (!nhave) return c;
+        for (int k = 0; k < nhave; k++) if (!strcmp(have[k], c)) return c;
+        const char *near = lang_near(c);
+        if (near) for (int k = 0; k < nhave; k++) if (!strcmp(have[k], near)) return near;
+    }
+    if (nhave) {
+        for (int k = 0; k < nhave; k++) if (!strcmp(have[k], "en-US")) return lang_code("en-US");
+        return have[0];   // en-US is not among the game's languages: its first is closer than an English the game does not have
+    }
+    return lang_code("en-US");
+}
+// The game's languages from its control data (NACP SupportedLanguageFlag), the same check the packing script makes (dm/tools/nacp.py --languages): Horizon gives a game only
+// languages its control data lists, so the default has to respect them. The extraction writes control.nacp beside the version's RomFS folder, which the host is handed as
+// DM_ROMFS (<extraction>/<version>/RomFS); a host started without DM_ROMFS looks in DM_ROOT.
+#define NACP_LANG_OFF 0x302C   // SupportedLanguageFlag: bit i = the NACP's i-th language
+// The NACP's language order (nacp.py LANGUAGES) as indexes into dm_lang_code: it starts with American then British English and otherwise follows the settings order, so the
+// flag's bits are mapped through this instead of listing the codes a second time
+static const unsigned char k_nacp_order[] = {1, 12, 0, 2, 3, 14, 5, 4, 8, 13, 9, 10, 7, 16, 15, 17};
+static int nacp_path(char *buf, size_t n) {   // the control.nacp to read into buf: 1 when one was named
+    const char *romfs = getenv("DM_ROMFS"), *root = getenv("DM_ROOT");
+    if (romfs && *romfs) {
+        char dir[512];
+        strlcpy(dir, romfs, sizeof dir);
+        size_t l = strlen(dir);
+        while (l > 1 && dir[l - 1] == '/') dir[--l] = 0;
+        char *slash = strrchr(dir, '/');
+        if (slash && slash != dir) { *slash = 0; snprintf(buf, n, "%s/control.nacp", dir); return 1; }
+    }
+    if (root && *root) { snprintf(buf, n, "%s/control.nacp", root); return 1; }
+    return 0;
+}
+static int nacp_lang_flag(const char *path, unsigned *mask) {   // the flag at NACP_LANG_OFF: 1 when read
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    unsigned char b[4];
+    int ok = !fseek(f, NACP_LANG_OFF, SEEK_SET) && fread(b, 1, sizeof b, f) == sizeof b;
+    fclose(f);
+    if (!ok) return 0;
+    *mask = (unsigned)b[0] | (unsigned)b[1] << 8 | (unsigned)b[2] << 16 | (unsigned)b[3] << 24;
+    return 1;
+}
+static void lang_join(char *buf, size_t n, const char *const *s, int ns, const char *sep) {   // the strings joined for the log line (a long list is cut)
+    size_t used = 0;
+    if (n) buf[0] = 0;
+    for (int i = 0; i < ns && used + 1 < n; i++) {
+        int w = snprintf(buf + used, n - used, "%s%s", i ? sep : "", s[i]);
+        if (w < 0) break;
+        used += (size_t)w;
+        if (used >= n) used = n - 1;
+    }
+}
+// Give the game its language, once, before the first query. Called by lang_once; the unit test calls it directly to repeat the choice with another environment.
+static void lang_default_init(void) {
+    const char *e = getenv("DM_LANG");
+    if (e && *e) return;   // an explicit DM_LANG (the iOS app, a player, a profile) keeps winning
+    char tags[256];
+    int n = dm_mac_preferred_languages(tags, sizeof tags);
+    if (n <= 0) return;   // no list from macOS: keep en-US, as before
+    const char *pref[8]; int npref = 0;
+    for (char *save, *t = strtok_r(tags, " ", &save); t && npref < 8; t = strtok_r(NULL, " ", &save)) pref[npref++] = t;
+    char path[600], have_str[160], pref_str[256];
+    const char *have[DM_LANG_COUNT]; int nhave = 0;
+    unsigned mask = 0;
+    int named = nacp_path(path, sizeof path), known = named && nacp_lang_flag(path, &mask);
+    for (unsigned i = 0; known && i < sizeof k_nacp_order / sizeof *k_nacp_order; i++)
+        if (mask >> i & 1) have[nhave++] = dm_lang_code[k_nacp_order[i]];
+    const char *code = lang_choose(pref, npref, have, nhave);
+    setenv("DM_LANG", code, 1);
+    lang_join(pref_str, sizeof pref_str, pref, npref, ", ");
+    lang_join(have_str, sizeof have_str, have, nhave, " ");
+    // The one line that says where the language came from: what macOS offered, and which of those the game has (or why that is unknown)
+    LOG("language: %s (macOS preferred %s; game supports %s)", code, pref_str,
+        known ? (nhave ? have_str : "unknown: its control data lists none")
+              : named ? "unknown: no control.nacp there" : "unknown: no control.nacp (set DM_LANG to choose)");
+    if (!known && named) LOG("language: looked for the control data at %s", path);
+}
+#else
+static void lang_default_init(void) {}   // iOS: main.m always sets DM_LANG from the IPA (Info.plist DMLanguage), so there is nothing to derive
+#endif
+static pthread_once_t g_lang_once = PTHREAD_ONCE_INIT;
+static void lang_once(void) { pthread_once(&g_lang_once, lang_default_init); }
+// Resolve the default language at startup (main.c, before the guest's first thread runs): lang_default_init may setenv("DM_LANG"), and setenv while other threads
+// call getenv is a data race, so the one write happens while the host is still single-threaded. The hooks below still call lang_once (a no-op by then) for hosts
+// that never call this, such as the unit tests
+void dm_lang_init(void) { lang_once(); }
+
 // nn::settings::LanguageCode = struct { char string[8]; }, 8 bytes returned by value in x0
-HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "system language query; value from DM_LANG", uint64_t, h_oe_GetLang, void) {
+HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "system language query; DM_LANG when set, on the Mac else the first macOS preferred language the game supports", uint64_t, h_oe_GetLang, void) {
+    lang_once();
     const char *e = getenv("DM_LANG");
     char code[8] = {0};
     strncpy(code, e && *e ? e : "en-US", sizeof code - 1);
@@ -253,6 +406,7 @@ HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "system language query; value from 
 // The console's region (Animal Crossing: New Horizons 3.0.3): the SDK asks settings::system::GetRegionCode, which reaches set:sys. A region that fits the language the game is given:
 // 0 Japan, 1 the Americas, 2 Europe, 4 Hong Kong / Taiwan / Korea (nn::settings::system::RegionCode; 3 Australia and 5 China are left out, no language points at them alone)
 HLE_FORCE("_ZN2nn2oe13GetRegionCodeEv", "console region (set:sys); from DM_LANG", int, h_oe_GetRegion, void) {
+    lang_once();
     const char *e = getenv("DM_LANG"); if (!e || !*e) e = "en-US";
     int r = !strncmp(e, "ja", 2) ? 0 : !strncmp(e, "ko", 2) || !strncmp(e, "zh", 2) ? 4 : !strcmp(e, "en-US") || !strcmp(e, "fr-CA") || !strcmp(e, "es-419") || !strcmp(e, "pt-BR") ? 1 : 2;
     static int once; if (!once++) LOG("oe::GetRegionCode: %d for language %s", r, e);

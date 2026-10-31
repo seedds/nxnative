@@ -12,12 +12,13 @@ QUIET = $(if $(findstring -fsanitize,$(SAN)),,2>/dev/null)
 GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 GAME_H = ../gen/$(GAME)/game_profile.h
-run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_pctl $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats
+run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_pctl $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_lang
 	$(B)/t_language
 	$(B)/t_heap_size
 	$(B)/t_touch
 	$(B)/t_gesture
 	$(B)/t_oe $(QUIET)
+	TMPDIR="$(abspath $(B))" $(B)/t_lang $(QUIET)
 	$(B)/t_fs $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_commit_list
 	$(B)/t_thread_leak
@@ -77,8 +78,8 @@ $(B)/t_audren_layout: t_audren_layout.c ../hle_audren.c ../hle.h ../dm.h $(GAME_
 .PHONY: audren-layout
 audren-layout: $(B)/t_audren_layout
 	$(B)/t_audren_layout
-$(B)/t_system_event: t_system_event.c ../hle_thread.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_system_event.c
+$(B)/t_system_event: t_system_event.c ../hle_thread.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) ../lang.c | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_system_event.c ../lang.c
 .PHONY: system-event
 system-event: $(B)/t_system_event
 	$(B)/t_system_event
@@ -151,13 +152,13 @@ $(B)/t_altstack: t_altstack.c t_altstack_stub.c ../crash.c ../dm.h $(GAME_H) | $
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_altstack.c t_altstack_stub.c ../crash.c
 $(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c
-$(B)/t_shared_font: t_shared_font.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_shared_font.c
+$(B)/t_shared_font: t_shared_font.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) ../lang.c | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_shared_font.c ../lang.c
 run: $(B)/t_nv
 $(B)/t_nv: t_nv.c ../../gfx/hle_nv.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_nv.c
-$(B)/t_language: t_language.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -fsanitize=address,undefined -I.. $(GINC) -o $@ t_language.c
+$(B)/t_language: t_language.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) ../lang.c | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -fsanitize=address,undefined -I.. $(GINC) -o $@ t_language.c ../lang.c
 $(B)/t_motion: t_motion.c ../motion_fusion.h | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -o $@ t_motion.c -lm
 run: $(B)/t_motion_apple
@@ -181,8 +182,10 @@ $(B)/t_haptics_apple: t_haptics_apple.m ../haptics_apple.m ../haptics_apple.h ..
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_haptics_apple.m ../hle_haptics.c -framework Cocoa -framework GameController -framework CoreHaptics -framework IOKit
 $(B)/t_time: t_time.c ../hle_time.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_time.c
-$(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
+$(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) ../lang.c | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c ../lang.c
+$(B)/t_lang: t_lang.c ../hle_oe.c ../lang.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_lang.c ../lang.c
 $(B)/t_condvar: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -DDM_TEST_HOOKS -I.. $(GINC) -o $@ t_condvar.c t_condvar_stub.c ../hle_thread.c
 $(B)/t_condvar_old: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
@@ -254,8 +257,8 @@ memory-profile: $(B)/t_svc_memory
 run: memory memory-dirty memory-profile
 
 # A native blocking notification wait must release the thread's guest core.
-$(B)/t_notify_sched: t_notify_sched.c t_condvar_stub.c ../hle_thread.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_THREAD_ENTER -I.. $(GINC) -o $@ t_notify_sched.c t_condvar_stub.c
+$(B)/t_notify_sched: t_notify_sched.c t_condvar_stub.c ../hle_thread.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) ../lang.c | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_THREAD_ENTER -I.. $(GINC) -o $@ t_notify_sched.c t_condvar_stub.c ../lang.c
 .PHONY: notify-scheduler
 notify-scheduler: $(B)/t_notify_sched
 	$(B)/t_notify_sched

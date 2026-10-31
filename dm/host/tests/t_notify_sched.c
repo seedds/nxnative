@@ -23,6 +23,7 @@ static int observed_wait(pthread_cond_t *cv, pthread_mutex_t *mu) {
 void dm_audio_suspend(int on) { (void)on; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
+int dm_mac_preferred_languages(char *out, size_t n) { (void)out; (void)n; return 0; }   // the Mac's language default (hle_oe.c lang_default_init) is not what this test exercises: no preferred languages
 static void timeout(int sig) { (void)sig; const char message[] = "[RED] notification scheduler test timed out\n"; write(2, message, sizeof message - 1); _exit(99); }
 static void notify(uint64_t unused) {
     (void)unused;

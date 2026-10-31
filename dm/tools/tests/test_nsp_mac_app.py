@@ -374,6 +374,7 @@ class App(unittest.TestCase):
         for n, b in (('main.patched.bin', b'code'), ('main.fixups.tsv', b'f'), ('main.gates.tsv', b'g'), ('main.cuts.tsv', b'c'), ('main.obs.tsv', b'o'), ('main.changed.tsv', b'w'), ('main.sites.tsv', b's'), ('build_src.sha256', b'h')):
             (t / 'patched' / n).write_bytes(b)
         (t / 'romfs/region_common/audio/edward.bfsar').write_bytes(b'snd')
+        (t / 'control.nacp').write_bytes(b'nacp')   # beside romfs/, as the extraction keeps it: copied to Resources/control.nacp
         (t / 'cache/b-0123456789ab/k_b.metallib').write_bytes(b'lib'); (t / 'cache/b-0123456789ab/inputs.tsv').write_text('# stamp\n')
         (t / 'cache/b-0123456789ab/k_b.json').write_text('{}'); (t / 'cache/b-0123456789ab/k_b.metal').write_text('msl'); (t / 'cache/b-0123456789ab/_b_build.json').write_text('[]')
         (t / 'cache/cas').mkdir()   # the Metal compile cache: not for the app
@@ -422,6 +423,7 @@ class App(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in (c / 'Resources/msl/b-0123456789ab').iterdir()), ['inputs.tsv', 'k_b.json', 'k_b.metallib'])
         self.assertEqual((c / 'Resources/msl/b-0123456789ab/k_b.metallib').read_bytes(), b'lib')
         self.assertTrue((c / 'Resources/romfs/region_common/audio/edward.bfsar').is_file())
+        self.assertEqual((c / 'Resources/control.nacp').read_bytes(), b'nacp')   # the game's control data beside romfs/, whose languages the host checks
         self.assertTrue((c / 'Resources/aoc/1/x').is_file()); self.assertTrue((c / 'Resources/dm/font/nintendo_ext.ttf').is_file())
         self.assertEqual(sorted(p.name for p in (c / 'Resources/pso').iterdir()), ['applegpu_g14s.mtl4a', 'prebuilt.tsv'])   # the pipeline archive and its stamp only
         self.assertEqual((c / 'Resources/AppIcon.icns').read_bytes()[:4], b'icns')
@@ -542,6 +544,21 @@ class App(unittest.TestCase):
         self.assertIn('standin host output', (logs / f'{TID}.prev.log').read_text())
         self.assertEqual(self.host_run()['DM_LANG'], 'fr')   # Info.plist DMLanguage
 
+    def test_no_language(self):   # packed without --lang: no DMLanguage, and the launcher sets no DM_LANG, so the host follows the Mac's preferred languages
+        a = types.SimpleNamespace(**vars(self.args)); a.lang = None
+        self.assertNotIn('DMLanguage', pack_app.info_plist(a, '14.0', True))
+        listed = self.tmp / 'no-language.json'   # a Game language row, whose default without --lang is the game's first language (settings.py): not fixed in the app either
+        listed.write_text(json.dumps({'game': TID, 'settings': [{'env': 'DM_LANG', 'kind': 'choice', 'section': 'Game', 'label': 'Game language', 'note': '', 'default': 'ja',
+                                                                  'options': [['ja', 'Japanese'], ['ko', 'Korean']]}]}))
+        a.settings = str(listed); self.assertNotIn('DMLanguage', pack_app.info_plist(a, '14.0', True))
+        app = self.tmp / 'No language.app'; shutil.rmtree(app, ignore_errors=True); shutil.copytree(self.app, app)
+        plist = app / 'Contents/Info.plist'
+        info = plistlib.loads(plist.read_bytes()); del info['DMLanguage']; plist.write_bytes(plistlib.dumps(info))
+        home = self.tmp / 'home'; (home / 'host_run.txt').unlink(missing_ok=True)
+        p = subprocess.run([app / 'Contents/MacOS/nxnative'], env=dict(HOME=str(home), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin'), capture_output=True, timeout=30)
+        self.assertEqual(p.returncode, 7)
+        self.assertNotIn('DM_LANG', self.host_run())
+
     def test_sigterm(self):   # forwarded to the host, whose exit code comes back
         p = self.launch(wait=True)
         for _ in range(100):
@@ -652,6 +669,15 @@ class App(unittest.TestCase):
         self.assertTrue((self.tmp / 'Copy.app/Contents/Resources/romfs/region_common/audio/edward.bfsar').is_file())
         self.assertFalse((self.tmp / 'Copy.app/Contents/stale').exists()); self.assertFalse((self.tmp / 'Copy.app/Contents/Resources/AppIcon.icns').exists())
 
+    def test_nacp_fallback(self):   # an update packed with only the base game's control data: --nacp names it, copied to Resources/control.nacp
+        with mock.patch.object(pack_app, 'can_clone', lambda *a: False), mock.patch.object(pack_app, 'sign', lambda *a: None), mock.patch('sys.stdout'):
+            a = types.SimpleNamespace(**vars(self.args))
+            upd = self.tmp / 'upd' / 'RomFS'; upd.mkdir(parents=True); a.romfs = str(upd); a.marker = None; a.icon = None
+            fallback = self.tmp / 'base-control.nacp'; fallback.write_bytes(b'base-nacp')
+            a.nacp = str(fallback); a.out = str(self.tmp / 'Fallback.app')
+            pack_app.pack(a)
+        self.assertEqual((self.tmp / 'Fallback.app/Contents/Resources/control.nacp').read_bytes(), b'base-nacp')
+
 
 class Script(unittest.TestCase):
     def test_options(self):
@@ -682,10 +708,18 @@ class Script(unittest.TestCase):
         with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
-                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''))
+                        kw.get('aoc'), gfx, kw.get('lang', 'en-US'), kw.get('nacp'), g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''))
         self.pso_cmd = next((c for c in ran if c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
+
+    def test_pack_command_language(self):   # --lang only for a language asked for; '' (none asked) leaves it out, so the app follows the Mac
+        self.assertEqual(self.pack_cmd('nvn', lang='fr')[0]['--lang'], 'fr')
+        self.assertNotIn('--lang', self.pack_cmd('nvn', lang='')[0])
+
+    def test_pack_command_nacp(self):   # the base game's control.nacp is the fallback the app packs beside romfs/ when the packed version has none
+        self.assertEqual(self.pack_cmd('nvn', nacp=Path('/x/base/control.nacp'))[0]['--nacp'], '/x/base/control.nacp')
+        self.assertNotIn('--nacp', self.pack_cmd('nvn')[0])
 
     def test_pack_command(self):
         o, tmp = self.pack_cmd('nvn')

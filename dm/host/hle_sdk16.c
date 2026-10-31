@@ -293,7 +293,7 @@ HLE_FORCE("_ZN2nn4diag13GetSymbolNameEPcmm", "symbol name; the host provides non
 
 // ---------- settings: language enum <-> language code ----------
 // On the real device MakeLanguageCode asks the settings service; the table is public and fixed (nn::settings::Language order). LanguageCode = char[8]
-static const char *const k_lang_code[] = {"ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR"};
+// The codes themselves are lang.c's dm_lang_code: hle_oe.c gives the game a language from the same table (the Mac's own preferred languages)
 // The real operators compare bytes with MakeLanguageCode(lang). Older games (Super Mario Odyssey, SDK 7.3.2) compare
 // GetDesiredLanguage's code for Chinese only with Language::Chinese (6) and Taiwanese (11), so the system must hand
 // them zh-CN / zh-TW, while DM_LANG carries zh-Hans / zh-Hant (the NSP script's spelling for the control data's
@@ -301,8 +301,8 @@ static const char *const k_lang_code[] = {"ja", "en-US", "fr", "de", "it", "es",
 // one script match here instead, in both operator directions. Do not rewrite GetDesiredLanguage or collapse Make /
 // the available list: newer games use the distinct entries and their indices (SimplifiedChinese 15 / TraditionalChinese 16).
 static unsigned language_code_matches(int32_t lang, const char *code) {
-    if ((unsigned)lang >= sizeof k_lang_code / sizeof *k_lang_code) return 0;
-    if (!strncmp(k_lang_code[lang], code, 8)) return 1;
+    if ((unsigned)lang >= DM_LANG_COUNT) return 0;
+    if (!strncmp(dm_lang_code[lang], code, 8)) return 1;
     switch (lang) {
         case 6:  return !strncmp(code, "zh-Hans", 8);
         case 15: return !strncmp(code, "zh-CN", 8);
@@ -320,18 +320,18 @@ HLE_FORCE("_ZN2nn8settingseqERKNS0_12LanguageCodeERKNS0_8LanguageE", "language c
 }
 HLE_FORCE("_ZN2nn8settings12LanguageCode4MakeENS0_8LanguageE", "language enum → language code (8 bytes returned by value)", uint64_t, h_set_LangMake, int lang) {
     char code[8] = {0};
-    if ((unsigned)lang < sizeof k_lang_code / sizeof *k_lang_code) strncpy(code, k_lang_code[lang], sizeof code);
+    if ((unsigned)lang < DM_LANG_COUNT) strncpy(code, dm_lang_code[lang], sizeof code);
     uint64_t v; memcpy(&v, code, 8); return v;
 }
 // Every language code the system offers, in nn::settings::Language order, as the settings service lists them; returns how many were written (Paper Mario: The Thousand-Year Door, SDK 15:
 // nnMain asks for 32 and takes the index of GetDesiredLanguage's code in the list as its language, main+0x327888; the SDK's own version aborted in sm::Initialize)
 HLE_FORCE("_ZN2nn8settings25GetAvailableLanguageCodesEPNS0_12LanguageCodeEi", "available language codes (the fixed system table)", int, h_set_AvailLang, char *out, int count) {
     int n = 0;
-    for (; n < count && n < (int)(sizeof k_lang_code / sizeof *k_lang_code); n++) { memset(out + 8 * n, 0, 8); strncpy(out + 8 * n, k_lang_code[n], 8); }
+    for (; n < count && n < (int)(DM_LANG_COUNT); n++) { memset(out + 8 * n, 0, 8); strncpy(out + 8 * n, dm_lang_code[n], 8); }
     return n;
 }
 // How many codes that list holds (Catherine: Full Body, SDK 8.2.1: nnMain compares LanguageCode::Make(0 … count − 1) with GetDesiredLanguage's code and keeps the matching index,
 // main+0x117590; the SDK's own version aborted in sm::Initialize)
 HLE_FORCE("_ZN2nn8settings29GetAvailableLanguageCodeCountEv", "number of available language codes (the fixed system table)", int, h_set_AvailLangN, void) {
-    return (int)(sizeof k_lang_code / sizeof *k_lang_code);
+    return (int)(DM_LANG_COUNT);
 }

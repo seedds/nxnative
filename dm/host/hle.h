@@ -49,6 +49,16 @@ typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
 // The game's call site inside a HLE_FORCE_BIG implementation: pass __builtin_return_address(0), which after a stack switch is the entry's own (hle_bigstack.c)
 void *dm_bigstack_caller(void *ra);
 
+// The Switch's language codes in nn::settings::Language order, as the settings service lists them (hle_sdk16.c). The host gives the game one of these (DM_LANG, or the Mac's own
+// preferred languages through hle_oe.c), so the table lives in one place and everything that needs the set of codes reads it here
+#define DM_LANG_COUNT 18
+extern const char *const dm_lang_code[DM_LANG_COUNT];
+// The Mac's preferred language identifiers, in order, space-separated in out (e.g. "it-IT en-US"); returns how many were written (0 when macOS gives no list).
+// Implemented in lang_mac.m, which the iOS build leaves out; only the non-iOS path of hle_oe.c calls it
+int dm_mac_preferred_languages(char *out, size_t n);
+// Fix the game's language once, before any guest thread starts (hle_oe.c; main.c calls it): sets DM_LANG from the Mac's preferences when it is unset
+void dm_lang_init(void);
+
 // Operation mode (0 handheld / 1 docked): owned by hle_oe.c, and the hid controller style follows it; the front end can switch it at runtime
 int dm_opmode(void);
 void dm_set_opmode(int m);          // On change, push notification 30 / 31 according to the switches the game has turned on

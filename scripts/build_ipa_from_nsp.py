@@ -51,7 +51,7 @@ PLATFORM = 'ios'                        # 'ios' = the IPA (or the Xcode project)
 MAC_SIGN = ''                            # PLATFORM 'mac-app': the codesign identity for the app, e.g. 'Developer ID Application: <name> (<team>)' (empty = ad-hoc); never with the hardened runtime
 TEAM_ID = ''                            # optional Apple team ID; empty = DM_TEAM_ID environment, saved Xcode selection, or select in Xcode
 XCODE_WORKSPACE = ''                    # shared .xcworkspace (empty = NxNative.xcworkspace beside the game's NSP folder)
-LANGUAGE = ''                           # game language, a code or a name: 'ja', 'fr', 'de', 'es', 'zh-Hans', 'zh-Hant', 'ko', 'Japanese', ... (empty = English); it must be one the game supports (the console line lists them);
+LANGUAGE = ''                           # game language, a code or a name: 'ja', 'fr', 'de', 'es', 'zh-Hans', 'zh-Hant', 'ko', 'Japanese', ... (empty = English, except --platform mac-app, where empty follows the Mac's languages); it must be one the game supports (the console line lists them);
                                         #   DM_LANG=<code> in the app's Documents/env.txt changes it without a rebuild
 KEEP_EXTRACTED = True                   # keep the extracted game files after the IPA is built (saves extraction next time; as big as the game files); False deletes them
 DM_ENV_FILE = ''                        # optional: environment switches for a diagnostic build (one KEY=VALUE per line)
@@ -2035,13 +2035,15 @@ def mac_host(py, repo, work, env, logs, g):
 def mac_run(work, game, patched, host, font, msl, aoc, gfx, lang, env, logs, g, env_file=''):
     """The command that runs the game in a window with sound after a Mac-only build (PLATFORM 'mac'; docs/development.md, Build by hand (Mac), step 5): its save and temporary storage in
     <id>_build/run (kept from run to run), the extracted RomFS, the Mac shader libraries (msl), the DLC, the profile's shader map (a host outside dm/host does not find it beside itself;
-    c1_full.tsv and cb_extent.tsv are read beside it), the game language, and the switches of an environment file (DM_ENV_FILE / --env-file)"""
+    c1_full.tsv and cb_extent.tsv are read beside it), the game language when one was asked for (--language / LANGUAGE; left out, the Mac host follows the Mac's languages), and the
+    switches of an environment file (DM_ENV_FILE / --env-file)"""
     rd = work / 'run'
     for d in ('save', 'temp'): (rd / d).mkdir(parents=True, exist_ok=True)
     renv = {'DM_ROOT': work, 'DM_ROMFS': rfs.source(game), 'DM_SAVE': rd / 'save', 'DM_TEMP': rd / 'temp', 'DM_MSL_DIR': msl, 'DM_FONT_DIR': font}
     if aoc: renv['DM_AOC_DIR'] = aoc
     if gfx == 'nvn': renv['DM_NVN_SHMAP'] = g.table('shader_map.tsv')
-    renv.update(DM_LANG=lang, DM_WINDOW=1, DM_AUDIO=1)
+    renv.update(DM_WINDOW=1, DM_AUDIO=1)
+    if lang: renv['DM_LANG'] = lang   # only a language asked for (--language / LANGUAGE) is fixed; without one the Mac host follows the Mac's languages (hle_oe.c)
     if env_file: renv.update(env_file_pairs(env_file))
     if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file():
         if not g.table('pso_pairs.tsv').is_file() and (work / 'shader/pso_pairs.tsv').is_file(): renv['DM_PSO_PAIRS'] = work / 'shader/pso_pairs.tsv'   # split_shaders' copy
@@ -2104,7 +2106,7 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
-def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus=''):
+def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, nacp, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus=''):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
     the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS), the launcher settings and an environment file.
@@ -2116,7 +2118,9 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     settings = work / 'app/launcher.json'; settings.parent.mkdir(parents=True, exist_ok=True)
     run([py, repo / 'dm/games/settings.py', g.id, patched, game / 'control.nacp', settings], logs / 'mac_settings.log', env=dict(env, GFXAPI=gfx, SETTINGS_PLATFORM='mac', DM_LANG=lang))
     cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
-           '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']
+           '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--sign', sign or '-']
+    if lang: cmd += ['--lang', lang]   # only a language asked for (--language / LANGUAGE) is fixed in the app; without one the game follows the Mac's languages
+    if nacp: cmd += ['--nacp', str(nacp)]   # the base game's control.nacp, the fallback the app packs beside romfs.img when the packed version has none of its own
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
@@ -2159,7 +2163,7 @@ def parse_args(argv):
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
     ap.add_argument('--team-id', help='Apple developer team ID (default: TEAM_ID setting, DM_TEAM_ID environment, or saved Xcode selection)')
     ap.add_argument('--xcode-workspace', help='workspace collecting prepared games (default: NxNative.xcworkspace beside the NSP folder; use with --prepare-xcode)')
-    ap.add_argument('-l', '--language', help='game language, a code or a name: ja, fr, de, es, it, nl, pt, ru, ko, zh-Hans, zh-Hant, en-GB, fr-CA, es-419, pt-BR, Japanese, ... (default: the LANGUAGE setting, else English); '
+    ap.add_argument('-l', '--language', help='game language, a code or a name: ja, fr, de, es, it, nl, pt, ru, ko, zh-Hans, zh-Hant, en-GB, fr-CA, es-419, pt-BR, Japanese, ... (default: the LANGUAGE setting, else English; --platform mac-app: empty follows the Mac\'s languages); '
                     'it must be one the game supports, which the console lists')
     ap.add_argument('--keep-extracted', action=argparse.BooleanOptionalAction, help='keep the extracted game files after the IPA is built, for the next build (default: the KEEP_EXTRACTED setting, on)')
     ap.add_argument('--work-dir', help='the game\'s build folder, used as it is (default: the WORK_DIR setting, else <title ID>_build in the NSP folder); the extracted files, shader cache and temporary files live there, and the IPA or Mac app defaults to the folder holding it')
@@ -2457,7 +2461,7 @@ def main(args=None):
     if mac_pack:   # a Mac app: the Mac host, then the app packed from it and the build's files
         host, font = mac_host(py, repo, work, env, logs, g)
         if not icon: say('[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
-        mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
+        mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang if lang_in else '', base / 'control.nacp', g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
                 (args.gpu or PSO_GPUS).strip())
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
@@ -2466,7 +2470,7 @@ def main(args=None):
         return
     if mac:   # a Mac-only build ends with the Mac host and the command that runs the game
         host, font = mac_host(py, repo, work, env, logs, g)
-        cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file)
+        cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang if lang_in else '', env, logs, g, env_file)
         rmtree(work / 'tmp')
         say(f'done: the game runs on the Mac with this command (its save in {work / "run/save"}, kept from run to run; DM_WINDOW=1 opens a window, DM_AUDIO=1 plays sound):')
         PROG.say(cmd)

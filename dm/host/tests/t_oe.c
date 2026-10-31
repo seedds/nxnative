@@ -11,6 +11,7 @@ uint64_t now_ns(void) { return 0; }
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
+int dm_mac_preferred_languages(char *out, size_t n) { (void)out; (void)n; return 0; }   // the Mac's language default (t_lang.c tests it): no list, as on iOS
 // The notification event (hle_thread.c binds a kernel event): the unit test only tracks whether it is signalled
 static int ev_bound, ev_sig;
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; ev_bound = 1; }

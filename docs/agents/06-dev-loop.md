@@ -64,6 +64,8 @@ Reading the report (`report.md` beside `report.json` in `<root>/reports/`): one 
 
 ## 7. Before you open a pull request
 
+**Every commit** (once per clone: `pip install pre-commit && pre-commit install`): the hooks in `.pre-commit-config.yaml` refuse game files and keys, run the Python lint ratchet with CI's pinned ruff and pyright when Python changed, and run `test_docs`, the `DM_*` registry test and the chain header check. That is the fast part of CI, a few seconds; `pre-commit run --all-files` runs it by hand. The rest below stays manual.
+
 By what the change touches (the largest that applies):
 
 - **Docs only:** `python3 -m unittest dm/tools/tests/test_docs.py`; after a change to `docs/reference`, `python3 dm/tools/docs_symptoms.py`; after editing `docs/images/gallery.tsv`, `python3 dm/tools/docs_gallery.py` (also resolves conflicts inside README's generated gallery).

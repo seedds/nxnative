@@ -1,0 +1,39 @@
+# The fast part of CI, run by git before each commit, so a commit that CI would fail on stops on your machine instead of on main.
+# Once per clone: pip install pre-commit && pre-commit install. Then `git commit` runs the hooks below; `pre-commit run --all-files` runs them by hand,
+# and `git commit --no-verify` skips them. pre-commit keeps its environments in ~/.cache/pre-commit (PRE_COMMIT_HOME moves them, e.g. to the NSP drive).
+# The checks themselves are the repository's own (dm/tools/tests, dm/tools/lint_python.py), so CI and the hook cannot disagree; the GPU tests and regress.py stay manual
+# (docs/agents/06-dev-loop.md). The lint hook's packages are .github/requirements/lint.txt's pins (dm/tools/tests/test_precommit.py keeps them equal).
+default_install_hook_types: [pre-commit]
+repos:
+  - repo: local
+    hooks:
+      - id: no-game-files
+        name: no game files or keys
+        language: fail
+        entry: game files, keys and anything extracted from a game never go into the repository (AGENTS.md)
+        files: '(?i)(\.(nsp|nsz|xci|xcz|nca|ncz|nso|nro|nacp|romfs)$|(^|/)(prod|title|dev)\.keys$)'
+      - id: lint-python
+        name: ruff and pyright (ratchet)
+        language: python
+        entry: python dm/tools/lint_python.py
+        additional_dependencies: [ruff==0.17.2, pyright==1.1.414, lz4==4.4.5, capstone==5.0.9, fonttools==4.67.0]
+        types: [python]
+        pass_filenames: false
+      - id: docs
+        name: docs links, notes, symptom index, word limits
+        language: system
+        entry: python3 -m unittest dm/tools/tests/test_docs.py
+        always_run: true
+        pass_filenames: false
+      - id: env-switches
+        name: every DM_* switch registered
+        language: system
+        entry: python3 -m unittest dm/tools/tests/test_env_switches.py
+        always_run: true
+        pass_filenames: false
+      - id: chain-header
+        name: shader chain header current
+        language: system
+        entry: python3 -m unittest dm.tools.tests.test_nsp_chain.Header.test_committed_current
+        always_run: true
+        pass_filenames: false

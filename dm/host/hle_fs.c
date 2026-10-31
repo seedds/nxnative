@@ -108,6 +108,15 @@ __attribute__((weak)) void front_save_failed(int err) { LOG("front_save_failed(e
 // DM_FSLOG=<file>: each ReadFile logs one TSV line "seconds since boot\tguest path\toffset\tlength\tguest buffer address" (which bytes boot read, for offline reverse lookup against the manifest)
 static FILE *g_fslog; static char *g_fdpath[4096]; static pthread_mutex_t g_fslog_lock = PTHREAD_MUTEX_INITIALIZER;
 static void fslog_init(void) { static int done; if (done) return; done = 1; const char *e = getenv("DM_FSLOG"); if (e && !(g_fslog = fopen(e, "w"))) die("cannot open DM_FSLOG %s", e); if (g_fslog) setvbuf(g_fslog, NULL, _IOLBF, 0); }   // line-buffered: runs end at the time-limit alarm or a crash, which never flush stdio
+// Read metering for the graphics layer's long-frame record (dm_fs_frame_take): a long frame whose whole-frame time is far above what the GPU and the submit thread took often
+// carries the game's own loading, and a blocked nn::fs read inside that load is invisible there (Super Mario Bros. Wonder on an iPhone, frames 785–809: 92–102 ms whole frame,
+// GPU 3.7 ms, no pipeline compile, no upload — one of the reads behind those frames or more CPU work in the game). Counters are atomics: a game's loading threads read in
+// parallel (Wonder's ModuleSystem workers); each frame tick consumes them, so the counters refer to the frame the tick closes. Directory listing, metadata and file creation
+// are left out: the reads are what loads level data at scale, and the rest would only keep the line noisy
+static _Atomic uint64_t g_frf_n, g_frf_bytes, g_frf_ns;
+void dm_fs_frame_take(uint64_t *n, uint64_t *bytes, uint64_t *ns) {
+    *n = atomic_exchange(&g_frf_n, 0); *bytes = atomic_exchange(&g_frf_bytes, 0); *ns = atomic_exchange(&g_frf_ns, 0);
+}
 
 static const char *envdir(const char *var, const char *rel, char *buf, size_t n) {
     const char *v = getenv(var);
@@ -751,7 +760,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
 }
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) { h = FH_IN(h);
     if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
-    size_t got = 0; int reprep = 0, fd = (int)h; int64_t base = 0;
+    size_t got = 0; int reprep = 0, fd = (int)h; int64_t base = 0; uint64_t t_read0 = now_ns();   // timed whole: a blocked first read is the cost, not the retries
     if (IMG_H(h)) {   // an image entry: read the image's descriptor at the entry's offset, never past its end
         const img_ent *x = &g_mnt[IMG_M(h)].img->e[IMG_K(h)];
         fd = g_mnt[IMG_M(h)].img->fd; base = (int64_t)x->a;
@@ -777,6 +786,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         got += r;
     }
     *out = got;
+    atomic_fetch_add(&g_frf_n, 1); atomic_fetch_add(&g_frf_bytes, got); atomic_fetch_add(&g_frf_ns, now_ns() - t_read0);   // successful calls only: a failed read's cost and its bytes are not game loading
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)
         uint64_t fh = 0xcbf29ce484222325ull; if (hash_on) for (size_t i = 0; i < got; i++) fh = (fh ^ ((uint8_t *)buf)[i]) * 0x100000001b3ull;

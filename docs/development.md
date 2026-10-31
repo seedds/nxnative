@@ -422,7 +422,7 @@ Reuse works as for the IPA. Each shader output has its own key, named after the 
 
 ### A benchmark on the Mac
 
-`scripts/bench.py <NSP folder>/<id>_build` runs a game prepared with `--platform mac` along a fixed route and reports frame-time percentiles, so two hosts or two sets of switches compare under the same conditions. The route is a line of the profile's `bench.tsv`: the button presses and stick moves at fixed seconds from the start (`DM_KEYS`), and the window that is measured, from when the scene is loaded. Each run starts from a copy of the same save (`--save`, by default `<id>_build/run/save`, which is not changed), and its numbers come from the host's per-frame rows (`DM_NVN_TSV`):
+`scripts/bench.py <NSP folder>/<id>_build` runs a game prepared with `--platform mac` along a fixed route and reports frame-time percentiles, so two hosts or two sets of switches compare under the same conditions. The route is a line of the profile's `bench.tsv`: the button presses and stick moves at fixed seconds from the start (`DM_KEYS`), and the window that is measured, from when the scene is loaded. Each run starts from a copy of the same save (`--save`, by default `<id>_build/run/save`, which is not changed), and its numbers come from the host's per-frame rows (`DM_NVN_TSV`; the iPhone launcher's Frame times section records the same rows on the device and counts them the same way, `LauncherFrameTimes.swift`):
 - the frame time (start to start) and the time each frame stayed on screen, at p50 / p95 / p99 / max, with the frames that stayed longer than 1.5 frame times;
 - the GPU time per frame (p50 / p95), the frames the system dropped, and the game's speed against real time where the frame step logs it;
 - the `[RED]` lines of the run.

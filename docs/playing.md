@@ -28,6 +28,10 @@ Switch Pro Controller gyro on the Mac still needs the HID support being develope
 
 **Shaking.** Shake the iPhone to shake the controller, in games that read its motion: Super Mario Odyssey's motion moves (such as the cap throw on a shake) need it, and Odyssey only takes them in its default docked mode. A light bump does not count; a sharp flick of the phone does.
 
+## Frame times
+
+To see where a game slows down or stutters, turn on **Record frame times** in the settings screen's **Frame times** section: each play is then recorded until the game quits. The next time the app opens, the recording is listed there by its start time, with its frames, average fps, median and 1% low frame times, the worst frame and the hitches (frames over 50 ms). Tap it for the curve, by frame rate or by frame time, with the hitches marked. A recording grows by about 4 MB a minute while the game runs and is cut to about a twelfth (the time, frame time, presentation and GPU time of each frame) when the app opens again; its size is shown, and a swipe or **Delete all recordings** removes recordings. The files are in `Documents/frame-times/` (the Files app), in the host's `DM_NVN_TSV` format, which `scripts/bench.py` counts the same way.
+
 ## Game language
 
 English by default. Pick another when packing with `--language` (`-l`), by code or by name: `-l ja`, `-l zh-Hans`, `-l French` (`LANGUAGE` in Spyder). It must be one the game has; the script prints the game's languages and stops on one it lacks. To change it without rebuilding, pick another on the settings screen.

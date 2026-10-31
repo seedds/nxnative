@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Touch feedback strength](#touch-feedback-strength), [D-pad diagonals](#d-pad-diagonals), [Controls toward the edges](#controls-toward-the-edges), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [TV](#tv)
@@ -16,7 +16,7 @@ Each game comes with the settings it was tested with: its profile in this reposi
 
 When you change a setting and tap **Play**, the app keeps your choice, also when a later build of the app ships other defaults. A setting you leave at its default is not stored: it follows the defaults of the build you have, so a newer build's tested settings reach you without doing anything. **Reset to tested defaults** at the bottom sets every setting back to its default, and **Play** then forgets your choices, so the game's defaults apply again. For testing, a line in `Documents/env.txt` overrides any setting ([Settings in a file](#settings-in-a-file)).
 
-A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter and Touch feedback, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
+A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter, Touch feedback, Touch feedback strength, D-pad diagonals and Controls toward the edges, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
 
 ## Game
 
@@ -63,7 +63,19 @@ Shows the frames per second at the top left.
 
 ### Touch feedback
 
-A light tap from the phone when you press an on-screen button.
+A light tap from the phone when you press an on-screen button. **On press and release** adds a softer tap when you let go, so a key feels pressed and released.
+
+### Touch feedback strength
+
+How firm the touch feedback is: 100% is the default light tap; lower is softer, and above 100% it switches to a firmer tap, strongest at 200%.
+
+### D-pad diagonals
+
+How wide the diagonals of the on-screen D-pad are (in the **Pad** and **3D** layouts): at 50% (the default) each diagonal takes 45° between two directions; lower it if you press a diagonal by mistake, 0% leaves four directions only.
+
+### Controls toward the edges
+
+How far the bottom controls (the stick or D-pad on the left, A/B/X/Y on the right) sit in the black bars beside the 16:9 picture: higher covers less of the game, 100% puts them against the screen's sides (closer to the rounded corners). 50% is the default.
 
 ### Game rumble
 
@@ -224,7 +236,10 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
-| Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
+| Touch feedback | `DM_TOUCH_HAPTICS` | `1` on press, `2` on press and release, `0` |
+| Touch feedback strength | `DM_TOUCH_HAPTICS_GAIN` | `0.2` to `2` |
+| D-pad diagonals | `DM_DPAD_DIAGONAL` | `0` to `1` |
+| Controls toward the edges | `DM_TOUCH_EDGE` | `0` to `1` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |

@@ -211,6 +211,7 @@ static int write_archive(FILE *f, const ents *l, uint64_t title_id, char *err, s
             crc = crc_update(crc, buf, got);
             if (!write_all(f, buf, got)) break;
             left -= got;
+            if (got < want) break;   // a short read is the end of the file (or an error): do not read the stream again
         }
         io = !left && !ferror(in);
         fclose(in);
@@ -456,7 +457,7 @@ int dm_save_import(const char *path, uint64_t title_id, char *err, size_t errlen
         if (!fix_guest_name(subject, name)) { rc = fail(DM_SAVE_ERR_IO, err, errlen, "Cannot name %s: %s.", subject, strerror(errno)); break; }
         if ((crc ^ 0xffffffffu) != get32(crc_bytes)) { rc = fail(DM_SAVE_ERR_FORMAT, err, errlen, "The save data is damaged: the checksum of %s does not match.", name); break; }
     }
-    int extra = !rc && (fgetc(f) != EOF || ferror(f));
+    int extra = !rc && !feof(f) && !ferror(f) && fgetc(f) != EOF;
     fclose(f); free(buf);
     if (!rc && extra) rc = fail(DM_SAVE_ERR_FORMAT, err, errlen, "The save data has bytes after its last entry.");
     if (!rc && !have_save) rc = fail(DM_SAVE_ERR_FORMAT, err, errlen, "The save data has no save folder.");

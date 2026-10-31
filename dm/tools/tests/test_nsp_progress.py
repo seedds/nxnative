@@ -112,5 +112,23 @@ class HumanModes(unittest.TestCase):
             self.assertEqual('\r' in text, mode == 'bar')
             self.assertEqual(ticker is None, mode == 'off')
 
+class ExtractSummary(unittest.TestCase):
+    """extracted(): the extract stage's file count and size from nx_extract's summary lines, the decimal point and a locale's decimal comma alike"""
+    def parse(self, text):
+        """extracted() of a log holding text, written to a temporary folder"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'extract_v0.log'; log.write_text(text)
+            return nsp.extracted(log)
+
+    def test_point_and_comma(self):
+        rows = '{d}/ExeFS: 5 files 13{s}6 MB, 0 identical to the compare dir (cloned), 13{s}6 MB newly written\n{d}/RomFS: 5 files 4402{s}4 MB, 0 identical to the compare dir (cloned), 4402{s}4 MB newly written\n'
+        want = (10, int((13.6 + 4402.4) * 2**20))
+        self.assertEqual(self.parse(rows.format(d='/x/v0.partial', s='.')), want)
+        self.assertEqual(self.parse(rows.format(d='/x/v0.partial', s=',')), want)   # an nx_extract that used the locale's format (it-IT)
+
+    def test_older_and_missing(self):
+        self.assertEqual(self.parse('ExeFS | 3 files 12 MB\nRomFS | 7 files 2.5 MB\n'), (10, int(14.5 * 2**20)))   # the older "| N files X MB" form
+        self.assertIsNone(self.parse('title 01003fc01670c000\n'))
+
 if __name__ == '__main__':
     unittest.main()

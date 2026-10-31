@@ -991,9 +991,11 @@ def _importable(m):
 
 
 def extracted(log):   # (files, bytes) from the summary lines nx_extract wrote to log ("<dir>: N files X MB, ..." for ExeFS + RomFS; older logs have "| N files X MB"); None without them
-    try: rows = re.findall(r'[:|] (\d+) files ([\d.]+) MB', log.read_text(errors='replace'))
+    # nx_extract writes the size with a decimal point; logs from builds that formatted it with the user's locale have a decimal comma ("13,6 MB" on a Mac set to Italian),
+    # and such a log is still read as the previous extraction's size estimate. The size has one decimal and no thousands separator, so a comma can only be the decimal one
+    try: rows = re.findall(r'[:|] (\d+) files (\d+[.,]\d+|\d+) MB', log.read_text(errors='replace'))
     except OSError: return None
-    return (sum(int(n) for n, _ in rows), int(sum(float(mb) for _, mb in rows) * 2**20)) if rows else None
+    return (sum(int(n) for n, _ in rows), int(sum(float(mb.replace(',', '.')) for _, mb in rows) * 2**20)) if rows else None
 
 
 def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g):   # the build IDs are checked by the caller (build_mismatch)

@@ -1465,6 +1465,9 @@ static int post_claim(post_rec *r, uint64_t fence) {
     return 1;
 }
 static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
+    // A guest SyncWait may run completion on a thread whose outer pool never drains.
+    // MTLBuffer.contents may autorelease its receiver; keep that lifetime inside the completed copy.
+    @autoreleasepool {
     int n = r->n; post_op *ops = r->ops; seg_clk *sc = r->sc; uint32_t seg_last = r->seg_last;
     for (int i = 0; i < n; i++) {
         if (ops[i].kind == 1) { if (ops[i].mode == 1) *ops[i].val += ops[i].v; else *ops[i].val = ops[i].v; }
@@ -1479,6 +1482,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     free(ops); seg_clk_put(sc); r->ops = NULL; r->sc = NULL;
     atomic_store(&r->claimed, 1);
     pthread_mutex_unlock(&g_post_mu);
+    }
 }
 // Both GPU feedback and an early waiter complete records in submission order.
 // Delayed callbacks carry their fence, never the identity of a recyclable slot.

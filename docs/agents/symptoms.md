@@ -105,6 +105,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - the iPhone app is killed for memory; resident memory grows steadily (about 0.2 MB a frame) while the residency set and the texture counts stay flat. → [Deferred-release drain without an autorelease pool](../reference/memory.md#deferred-release-drain-without-an-autorelease-pool)
 - travelling produces a brief multi-GB footprint spike, then memory returns to its earlier level; periodic memory lines can miss the peak. Upload diagnostics show many swapped-out blocks still alive in one batch. → [Upload staging grows within one rendering submission](../reference/memory.md#upload-staging-grows-within-one-rendering-submission)
 - GPU memory grows with repeated `nvnTextureReadTexels` calls on a long-lived game thread, even after each readback completes. → [GPU readback without an autorelease pool](../reference/memory.md#gpu-readback-without-an-autorelease-pool)
+- process footprint and Metal allocation grow during stationary gameplay even after readback fences complete; the deferred-release queue and command allocator sizes remain bounded. → [Completion readbacks survive a guest waiter's pool](../reference/memory.md#completion-readbacks-survive-a-guest-waiters-pool)
 
 ## Threads
 

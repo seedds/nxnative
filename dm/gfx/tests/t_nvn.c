@@ -476,6 +476,35 @@ int main(void) {
         EXPECT("lists of 56..504 bytes stay in their 512 (no host segment)", (504 - 56) / 8 + 1, jumps_fit);
         P(nvnCommandBufferFinalize)(&c3); P(nvnMemoryPoolFinalize)(&mp);
     }
+    // UE callbacks grant exactly their minimum, including 40-byte first grants.
+    // Keep those bytes in the guest pool, so overflow can be reclaimed on reuse.
+    {
+        NVNcommandBuffer tiny; P(nvnCommandBufferInitialize)(&tiny, &dev);
+        static uint8_t bytes[4096] __attribute__((aligned(4096)));
+        NVNmemoryPoolBuilder mb; NVNmemoryPool mp;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetDevice)(&mb, &dev);
+        P(nvnMemoryPoolBuilderSetStorage)(&mb, bytes, sizeof bytes);
+        P(nvnMemoryPoolBuilderSetFlags)(&mb, NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+        P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferBeginRecording)(&tiny);
+        P(nvnCommandBufferAddCommandMemory)(&tiny, &mp, 0, 40);
+        EXPECT("40-byte callback grant uses guest memory", (uintptr_t)bytes, (uintptr_t)CB(&tiny)->cur);
+        uint8_t *first = cmd_alloc(CB(&tiny), 24); put_hdr(first, OP_END, 24);
+        P(nvnCommandBufferEndRecording)(&tiny);
+        EXPECT("small recording handle stays in guest memory", (uintptr_t)bytes, (uintptr_t)CB(&tiny)->begin);
+        P(nvnCommandBufferAddCommandMemory)(&tiny, &mp, 0, 40);
+        P(nvnCommandBufferBeginRecording)(&tiny);
+        first = cmd_alloc(CB(&tiny), 24); put_hdr(first, OP_END, 24);
+        cmd_alloc(CB(&tiny), 24); // overflow has a guest origin, not an orphan
+        int segment = -1;
+        for (int i = 0; i < g_nhostseg; i++) if (CB(&tiny)->cur > g_hostseg[i].mem && CB(&tiny)->cur <= g_hostseg[i].mem + g_hostseg[i].n) segment = i;
+        EXPECT("overflow segment was allocated", 1, segment >= 0);
+        P(nvnCommandBufferEndRecording)(&tiny);
+        P(nvnCommandBufferAddCommandMemory)(&tiny, &mp, 0, 40);
+        EXPECT("regrant reclaims small-grant overflow", 0, segment >= 0 ? g_hostseg[segment].busy : -1);
+        P(nvnCommandBufferFinalize)(&tiny); P(nvnMemoryPoolFinalize)(&mp);
+    }
+
     // 5b''. Host segment sizes (hostseg_size), as Super Mario Odyssey grants 512 bytes from an empty pool before recording: such a grant gets a HOSTSEG_SMALL segment; a recording
     //       that outgrows it with no callback JUMPs into a full one and replays whole through its first handle; a record larger than HOSTSEG_SZ gets a segment that holds it;
     //       a free small segment is not taken for a full one, and the cap counts every segment's bytes

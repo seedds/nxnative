@@ -51,7 +51,24 @@ static void run(int format, uint64_t serial, uint32_t pool_flags, int c0) {   //
     mtl_tex_release(&u);mtl_tex_release(&t);
     mtl_pool_del(mem);mtl_drain();free(mem);
 }
-int main(void){@autoreleasepool{mtl_init();
+// Sparse, uncompressed sampled content can replace an older GPU-only alias
+// before the replacement object is initialized (Borderlands 3 terrain heights).
+static void sparse_initial(void) {
+    if (!DM_GAME_TEX_DIRTY_UPLOAD) return;
+    void *mem=NULL; if(posix_memalign(&mem,getpagesize(),262144))abort(); memset(mem,0,262144);
+    pool_t pool={.mem=mem,.size=262144,.flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED}; mtl_pool_add(mem,262144);
+    tex_t t={.magic=MAGIC('T','E','X',0),.serial=9870,.pool=&pool,.mem=mem};
+    t.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.flags=NVN_TEXTURE_FLAGS_SPARSE,.width=128,.height=128,.depth=1,.levels=8,.samples=1}; nvn_tex_layout(&t.d,&t.L);
+    mtl_tex_init(&t); mtl_sub_begin(); CHECK("empty sparse alias resolves",tex_mtl(&t)!=nil); finish();
+    dm_guest_write_prepare(mem,t.L.size);
+    uint8_t linear[128*128*4];
+    for(int lv=0;lv<8;lv++){unsigned w=MAX(128u>>lv,1u); for(unsigned i=0;i<w*w;i++)for(int c=0;c<4;c++)linear[i*4+c]=colors[lv%4][c]?255:0;
+        CHECK("sparse RGBA fixture swizzles",!nvn_swizzle(&t.d,lv,0,linear,w*4,mem));}
+    tex_t replacement=t; replacement.serial=9871; mtl_tex_init(&replacement); mtl_sub_begin(); id<MTLTexture> image=tex_mtl(&replacement); finish();
+    expect(image,0,"new sparse object uploads populated storage instead of the old alias");
+    mtl_tex_release(&replacement); mtl_tex_release(&t); mtl_pool_del(mem); mtl_drain(); nvn_dirty_remove_range(mem); free(mem);
+}
+int main(void){@autoreleasepool{mtl_init(); sparse_initial();
     const uint32_t uncached=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED,cached=NVN_MEMORY_POOL_FLAGS_CPU_CACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED;
     run(NVN_FORMAT_RGBA_ASTC_6x6,9750,uncached,0);run(NVN_FORMAT_RGBA_ASTC_6x6_SRGB,9751,uncached,0);run(NVN_FORMAT_RGBA_ASTC_6x6,9752,cached,3);
     printf("t_initial_uncached: %d checks, %d failed\n",checks,failed);return failed!=0;}}

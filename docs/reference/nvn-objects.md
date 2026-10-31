@@ -168,6 +168,8 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Fix** (`hle_nvn.c`): the pool now grows on demand (256 KB segments, abort only beyond 1 GB; `hostseg_take`). A segment is released only when the game re-grants memory overlapping the guest bytes of the recording that jumped into it (`hostseg_release` in `AddCommandMemory`): the game records setup blocks once and keeps `CallCommands`-ing them for many frames, so recycling segments after a fixed number of frames would overwrite live recordings. An empty-pool grant of at most 4 KB outside a recording gets a 4 KB segment, a record larger than 256 KB gets a segment that holds it, and the cap counts every segment's bytes (`hostseg_size`).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (the many small command buffers: its opening course, per the comment at `HOSTSEG_SZ` in `hle_nvn.c`), [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (it hands out many 512-byte grants before recording, and with no recording to reclaim them by, 256 KB each reached the cap entering the Wooded Kingdom: the 4 KB segments).
 
+A non-null pool with a small grant is not an empty pool. Borderlands 3's UE callback supplies exactly the requested 40 or 56 bytes. Rejecting every grant below 64 bytes made its recordings start in host memory without a guest origin, so re-granting the ring could not reclaim them and the pool reached 1 GiB near frame 3005. `AddCommandMemory` now accepts a grant large enough for the 8-byte record header; the allocator still checks each record and its JUMP reserve. The isolated test reached gameplay, with host segments stabilizing at 51 / 13 MiB through frame 5909. Regression `t_nvn.c` covers the small guest grant, handle and overflow reclamation. Borderlands 3 is still a provisional profile outside the repository; full gameplay/save reload validation is pending.
+
 ### What `GetCommandMemoryUsed` counts
 
 Games read this count as a position in their own command memory and size their heaps and slots from it, so it must be what NVN counts.
@@ -584,3 +586,11 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### Populated sparse sampled storage hidden by an older texture alias
+
+- **Symptom:** title scenery stretches into tall walls, or sampled surfaces use stale texture data.
+- **Cause:** the CPU fills sparse-layout sampled texture storage before initializing a new texture object. The first-use upload accepted compressed non-sparse content only; an uncompressed heightmap could reuse an older GPU-only Metal texture at the same pool address and offset. Writes before registration do not produce a later dirty event.
+- **Fix:** for `tex_dirty_upload` profiles, first-use content detection also accepts populated CPU-visible sparse sampled storage, including uncompressed formats, before the GPU alias lookup. Image, compressible, linear, multisample, virtual-pool and CPU_NO_ACCESS paths remain excluded. Keep the existing GPU-copy mirroring rules; changing ownership merely because a copy writes a compressed texture can prevent its storage mirror from being updated.
+- **Found on:** [Borderlands 3](../../dm/games/01009970122E4000/README.md), update 1.0.3: 128×128 BGRA8 landscape heightmaps with sparse layout and eight mip levels.
+- **Check:** `t_initial_uncached` resolves an empty sparse GPU alias, fills its storage, then verifies the literal colors in three mip levels sampled through a new texture object at that address.

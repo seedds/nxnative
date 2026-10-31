@@ -53,6 +53,7 @@
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
+from typing import Literal, overload
 import collections, concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, time, zlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
@@ -1689,7 +1690,11 @@ def smash_arc_shaders(path, rel, ents, out):
             if len(out) == n and b'\x91\x68\x86\x19' in b: out.extend(glslc_shaders(b, label, need=False))
 
 _OODLE = None
-def oodle(comp, n):
+@overload
+def oodle(comp: bytes, n: int, *, probe: Literal[False] = False) -> bytes: ...
+@overload
+def oodle(comp: bytes, n: int, *, probe: Literal[True]) -> bytes | None: ...
+def oodle(comp, n, *, probe=False):
     """The game's own decoder: OodleLZ_Decompress (Trinity's packs are Oodle Mermaid, Pokémon Legends: Arceus's GFPAK entries Oodle Kraken, and Oodle is linked into main), or LZ5_decompress_safe (DRAGON QUEST XI S's legacy Unreal paks):
     one Mac host per worker process in its tool mode (dm/host/hle_oodle.c, DM_OODLE_SERVE), fed over a pipe. DM_OODLE_HOST = the host, DM_OODLE_MODULES = the rewritten modules it loads
     (the NSP script sets both for a game with Trinity packs, Oodle PKZ or GFPAK entries, or legacy Unreal paks, profile_guess.py shader_sources)"""
@@ -1697,6 +1702,7 @@ def oodle(comp, n):
     if _OODLE is None:
         import tempfile
         host, mods = os.environ.get('DM_OODLE_HOST'), os.environ.get('DM_OODLE_MODULES')
+        if (not host or not mods) and probe and b'LSLG' not in comp[:32]: return None   # a coincidental header must not require a decoder in other engines
         if not host or not mods: red('Oodle- or LZ5-compressed game files: set DM_OODLE_HOST (the Mac host, make -C dm/host GAME=<id> dmhost) and DM_OODLE_MODULES (the rewritten modules) to decode them with the game\'s own decoder')
         err = tempfile.TemporaryFile()
         _OODLE = (subprocess.Popen([host, mods], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, env=dict(os.environ, DM_OODLE_SERVE='1')), err)
@@ -1705,6 +1711,7 @@ def oodle(comp, n):
         p.stdin.write(struct.pack('<QQ', len(comp), n)); p.stdin.write(comp); p.stdin.flush()
         got = struct.unpack('<Q', p.stdout.read(8))[0]
     except (BrokenPipeError, struct.error): got = None
+    if got == 0 and probe: return None   # a signature scan candidate, not an established stream
     if got != n:
         err.seek(0); red(f'the game\'s decoder in the Mac host failed on a {len(comp)} → {n} byte stream; ---- host output ----\n' + err.read().decode(errors='replace')[-3000:])
     return p.stdout.read(n)
@@ -1767,7 +1774,7 @@ def ue3_shaders(d, label):
     return out
 
 UE_LEGACY = 'UE legacy pak'
-def ue_legacy_jobs(files, parts=64):
+def ue_legacy_jobs(files, parts=64, main_nsos=()):
     """Unreal paks whose shaders are inline in the cooked packages (uepak.inline_shaders): legacy paks (version 4, DRAGON QUEST XI S: pakchunk0-Switch.pak and pakchunk1-Switch.pak, 13.8 GB,
     and the update's *_0_P.pak) and version 11 paks without shader code archives (OCTOPATH TRAVELER II: Majesty-Switch.pak, 3.3 GB). The engine mounts them all as one view, and a patch pak
     (name ending in _P.pak) wins over the others for the same path. Only the newest copy of each path is scanned. → ([(pak path, rel, (UE_LEGACY, names)), …] in about equal raw sizes, the pak paths taken)"""
@@ -1776,24 +1783,40 @@ def ue_legacy_jobs(files, parts=64):
         except (OSError, ValueError, struct.error): return False
     paks = [(p, r) for p, r in files if p.endswith('.pak') and inline(p)]
     if not paks: return [], set()
-    view = {}
+    view, pak_keys, keys, images = {}, {}, [], []
+    def read_pak(path):
+        with open(path, 'rb') as f: encrypted = uepak.footer(f)[0]
+        if not encrypted: return uepak.Pak(path), None
+        for key in keys:
+            try: return uepak.Pak(path, key), key
+            except ValueError: pass
+        if not images: images.extend(uepak.nso_image(n) for n in main_nsos)
+        for image, lo, hi in images:
+            key = uepak.find_key(image, lo, hi, path)
+            if key:
+                pk = uepak.Pak(path, key); keys.append(key)
+                return pk, key
+        raise ValueError('encrypted pak index: no matching embedded key in the supplied main modules')
     for p, r in sorted(paks, key=lambda x: (x[1].endswith('_P.pak'), x[1])):   # patch paks last, so they replace; one view per pak folder (one per version given)
         try:   # all of a pak's names or none: a patch pak read halfway would still replace the base pak's files
-            pk = uepak.Pak(p)
-            view.update({(os.path.dirname(p), os.path.normpath(pk.mount + name)): (p, r, name, pk.entry(name)['raw']) for name in pk.files})
+            pk, pak_keys[p] = read_pak(p)
+            for name in pk.files:
+                entry = pk.entry(name); identity = (os.path.dirname(p), os.path.normpath(pk.mount + name))
+                if entry.get('deleted'): view.pop(identity, None)
+                else: view[identity] = (p, r, name, entry['raw'])
         except (OSError, ValueError) as e: print(f'[RED] /{r}: the pak cannot be read ({e}); its shaders are left out', flush=True)
     jobs, cur, size, step = [], collections.defaultdict(list), 0, sum(v[3] for v in view.values()) / parts
     for p, r, name, raw in sorted(view.values(), key=lambda x: (x[1], x[2])):
         cur[(p, r)].append(name); size += raw
-        if size >= step: jobs += [(p_, r_, (UE_LEGACY, tuple(ns))) for (p_, r_), ns in cur.items()]; cur, size = collections.defaultdict(list), 0
-    jobs += [(p_, r_, (UE_LEGACY, tuple(ns))) for (p_, r_), ns in cur.items()]
+        if size >= step: jobs += [(p_, r_, (UE_LEGACY, tuple(ns), pak_keys[p_])) for (p_, r_), ns in cur.items()]; cur, size = collections.defaultdict(list), 0
+    jobs += [(p_, r_, (UE_LEGACY, tuple(ns), pak_keys[p_])) for (p_, r_), ns in cur.items()]
     return jobs, {p for p, _ in paks}
 
 _PAKS = {}
-def ue_legacy_shaders(path, rel, names, out):
+def ue_legacy_shaders(path, rel, names, out, key=None):
     """Files of an Unreal pak with inline shaders (ue_legacy_jobs), each decoded block by block (Zlib and LZ4 in uepak.py; others with the game's own decoder, DRAGON QUEST XI S: LZ5) and scanned
     for the shader records the engine keeps inline"""
-    pk = _PAKS.get(path) or _PAKS.setdefault(path, uepak.Pak(path))
+    pk = _PAKS.get(path) or _PAKS.setdefault(path, uepak.Pak(path, key))
     for name in names:
         d = pk.read(name, decode=oodle)
         label = re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))
@@ -1825,8 +1848,18 @@ def ue_inline_shaders(d, label, out):
         try: s = z.decompress(d[i:i + n])
         except zlib.error: continue
         if z.eof and not z.unused_data and s[:4] == b'LSLG': take(s, i)
+    # Oodle may encode the first LSLG bytes as matches rather than literals.
+    # Locate the framed stream, not a signature inside its compressed payload.
+    for m in re.finditer(b'\x8c\x0c', d):
+        j = m.start()
+        if j < 12: continue
+        raw = int.from_bytes(d[j - 12:j - 4], 'little'); n = int.from_bytes(d[j - 4:j], 'little')
+        if not 8 <= n < raw <= 1 << 26 or n > len(d) - j: continue
+        s = oodle(d[j:j + n], raw, probe=True)
+        if s is not None and len(s) == raw and uepak.lslg(s): take(s, j)
     for m in re.finditer(b'LSLG', d):
-        i = m.start(); n = int.from_bytes(d[i - 4:i], 'little') if i >= 4 else 0
+        i = m.start()
+        n = int.from_bytes(d[i - 4:i], 'little') if i >= 4 else 0
         if 2 <= n <= len(d) - i and uepak.lslg(d[i:i + n]): take(d[i:i + n], i); continue
         for j in range(i - 1, max(i - 6, 4) - 1, -1):   # an LZ4 block whose first literals start here: token at j, then (literal length 15 and up) its length bytes
             t, ext = d[j] >> 4, d[j + 1:i]
@@ -2415,7 +2448,7 @@ def scan_file_in(args):
         zip_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == UE_LEGACY:   # files of a legacy Unreal pak (ue_legacy_jobs)
-        ue_legacy_shaders(path, rel, args[2][1], found)
+        ue_legacy_shaders(path, rel, args[2][1], found, args[2][2] if len(args[2]) > 2 else None)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == FB_CAS:   # CompiledBytecode resources of a Frostbite cas file (frostbite_jobs)
         frostbite_shaders(path, rel, args[2][1], found)
@@ -2582,7 +2615,7 @@ def main():
     big = [j for p, r in files for j in (linkdata_jobs(p, r) or [])]   # Three Houses' 6.9 GB DATA1.bin: one job per range of entries, not one read of the whole file
     pak_jobs, paks = kpka_jobs(files)   # Monster Hunter Rise's PAKs: the newest copy of each path, in ranges of entries
     tr_jobs, trp = trpfs_jobs(files)   # Pokémon Legends: Z-A's Trinity packs (data.trpfs and its index data.trpfd), decoded by the game's own Oodle in the Mac host
-    ue_jobs, uep = ue_legacy_jobs(files)   # Unreal paks with inline shaders: DRAGON QUEST XI S's legacy ones (the game's own LZ5 in the Mac host), OCTOPATH TRAVELER II's (Zlib)
+    ue_jobs, uep = ue_legacy_jobs(files, main_nsos=main_v)   # Unreal paks with inline shaders: DRAGON QUEST XI S's legacy ones (the game's own LZ5 in the Mac host), OCTOPATH TRAVELER II's (Zlib)
     bd_jobs, bdts = bdt_jobs(files)   # Dark Souls Remastered's dvdbnd archives: the entries of each .bdt by its .bhd5 index, in ranges
     arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
     pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host

@@ -429,6 +429,19 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
   - [Paper Mario: The Origami King](../../dm/games/0100A3900C3E2000/README.md#rendering): magenta 16×16 blocks on the Mac (Apple M6) from its anti-aliasing pass `8dc20835c07cd7ff` (`shaders/aa.bfsha`) on the 1920×1080 RGB10A2 scene, the only shader `DM_NVN_FB_SNAP=all` snapshotted; about one block a frame at Peach's castle before, none with it listed.
 - **Note:** the cost. Breath of the Wild's G-buffer decals write and sample their own targets (`4d3d5a4408c2e8d9`, `753d0169ae3ce4f0` and others on the 1600×900 G-buffer), about 460 such draws a frame outdoors on the Great Plateau; a fresh snapshot for each (`DM_NVN_FB_SNAP=all`) takes the Mac's GPU time from about 4 to 28 ms a frame (frame time 16.6 → 36.6 ms before). Between the game's barriers they need about ten snapshots a frame, and about 50 draws reuse each: GPU time p50 3.5–4.1 ms with `DM_NVN_FB_SNAP=0` and 3.7–4.5 ms with the rule over four runs each (2026-10-30, Apple M6, the outdoor save looking around, frames 4,800–6,900; the frame time stays at its 30 fps budget). The decals had shown no blocks on the iPhone; the snapshot makes them read what the Switch guarantees rather than what the tile happened to hold. `DM_NVN_FB_SNAP=all` with a screenshot detector shows whether blocks come from such a draw at all, and a pass dump (`N … same-pass feedback sampling` lines after the draw's `K` keys) names the shaders.
 
+### Feedback snapshot allocation churn
+
+- **Symptom:** the submit thread repeatedly creates and retires private feedback textures even though the bounded cache already contains stale allocations of the required format and dimensions.
+- **Cause:** round-robin replacement follows image identity, not allocation shape. A mixed full-size, quarter-size and sRGB working set can select an incompatible slot while another slot holds a reusable allocation.
+- **Fix:** `fb_snap` still checks the exact image/level/layer key first and keeps contents valid only within the same game barrier and submission. On a key miss it prefers a stale allocation with matching format and dimensions before falling back to round-robin replacement. Every selected entry is pinned for the current draw, including valid hits, so a later attachment cannot overwrite an earlier attachment's snapshot after a shape-based jump. The cache stays at eight entries; a stale allocation still receives its required copy. No game-specific policy or new runtime switch.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_feedback` includes mixed-format/size pressure beyond cache capacity, barriers and unwaited submissions, swizzled/sRGB pixel readback, and a four-attachment draw whose original images are overwritten before the weighted readback. Run with each `DM_NVN_ENC_THREAD=0/1` and `DM_NVN_BARRIER=full/game` combination and Metal validation.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), the stationary cave save on an M2 Pro, macOS 27.2, shader chain `b3ca4b7c621f`. Same-binary unprofiled comparisons used the fully contained 90–135 second warm intervals; the table is submit-thread CPU time, not total frame time or an FPS percentage. TOTK had two runs per variant; BOTW had one uncapped outdoor pair. FPS did not improve consistently in TOTK and stayed essentially flat in BOTW.
+
+| Submit-thread CPU, ms/frame | Round-robin | Stale-shape reuse |
+| --- | ---: | ---: |
+| TOTK cave | 3.323 | 2.523 |
+| BOTW outdoors | 5.775 | 5.761 |
+
 ### Lower-left window origin
 
 - **Symptom:** text a game renders into textures for the title and the menus comes out upside down, while the scene looks right.

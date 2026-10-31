@@ -21,6 +21,7 @@
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
 #include "pad_apple.h"
+#include "pad_hid_mac.h"
 #include <signal.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -192,14 +193,36 @@ static void input_release(void) {
     dm_motion_pro_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
-    if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
+    if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } if (g_hidpads) dm_pad_set(0, 0, 0, 0, 0); }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    for (hid_pad *d = g_hidpads; !g_merge && d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
 }
 static void input_resume(void) {
     g_input_on = 1;
     dm_motion_pro_active(1);
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
+    for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_read(d);
+}
+// Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name
+static void hidpad_read(hid_pad *d) {
+    if (!g_input_on) return;
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, d); if (p < 0) return;
+    int32_t s[4]; pad_hid_sticks(&d->st, s);
+    dm_pad_set_player(p, pad_hid_buttons(&d->st), s[0], s[1], s[2], s[3]);
+}
+static void hidpad_attach(hid_pad *d) {
+    int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
+    if (p < 0) { LOG("controller '%s' (HID) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
+    npad_name(p, nb, sizeof nb); LOG("controller '%s' (HID) connected: player %d (npad %s)", d->name, p + 1, nb);
+    dm_pad_players(pad_slot_mask(&g_slots));
+    hidpad_read(d);
+}
+static void hidpad_detach(hid_pad *d) {
+    int p = g_merge ? 0 : pad_slot_free(&g_slots, d); char nb[16]; if (p < 0) return;
+    npad_name(p, nb, sizeof nb); LOG("controller '%s' (HID) disconnected: player %d (npad %s) is free", d->name, p + 1, nb);
+    dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
+    dm_pad_players(pad_slot_mask(&g_slots));
 }
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
@@ -210,6 +233,7 @@ static void pads_start(void) {
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     pads_changed(nil);
     dm_motion_pro_start(pro_devices_changed);
+    hidpad_start();
 }
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,

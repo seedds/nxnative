@@ -117,7 +117,7 @@ class PackReuse(unittest.TestCase):
             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
+            'host/romfs_image.h': b'validator', 'host/input_map.h': b'maps', 'host/dm_input.h': b'buttons', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -198,6 +198,7 @@ class PackReuse(unittest.TestCase):
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift',   # the settings window's sources
+                 'host/input_map.h', 'host/dm_input.h',   # the launcher's headers
                  'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
@@ -513,6 +514,58 @@ class App(unittest.TestCase):
             r = run(pack('Rebuilt', listed))
             self.assertEqual((r.get('DM_FPS_TARGET'), r['DM_LANG']), (None, 'ja'))   # the host's tested default; the other saved choices still hold
             self.assertIn('saved choice DM_FPS_TARGET=30 ignored', (self.tmp / f'home/Library/Logs/nxnative/{TID}.log').read_text())
+        finally:
+            subprocess.run(['defaults', 'delete', domain], capture_output=True)
+            Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)
+
+    def test_saved_controls(self):
+        """launcher.DM_KEYMAP and launcher.DM_PAD_MAP: saved choices that are no launcher.json rows, checked by the host's own parser (input_map.h) instead of DMSettings;
+        same order as the other saved choices (the environment and the env files win) and the same DM_SAVED_CHOICES=0"""
+        domain = f'org.nxnative.test.{uuid.uuid4().hex}'   # never a real game's domain
+        a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / 'Controls.app'); a.icon = None; a.bundle_id = domain
+        with mock.patch.object(pack_app, 'sign', lambda *x: None), mock.patch('sys.stdout'): pack_app.pack(a)   # launcher.json has no settings: only the controls are saved choices here
+        app = Path(a.out); log = self.tmp / f'home/Library/Logs/nxnative/{TID}.log'
+
+        def run(**env):
+            p = self.launch(app=app, **env); out = p.communicate(timeout=30)[0].decode()
+            self.assertEqual(p.returncode, 7, out)
+            return self.host_run(), log.read_text()
+
+        def save(key, *value): subprocess.run(['defaults', 'write', domain, f'launcher.{key}', *value], check=True)
+        sup_env = self.tmp / f'home/Library/Application Support/nxnative/{TID}/env.txt'
+        try:
+            r, text = run()
+            self.assertEqual((r.get('DM_KEYMAP'), r.get('DM_PAD_MAP')), (None, None))   # nothing saved: the host's own defaults
+            save('DM_KEYMAP', '-string', 'A=40,B=38,RUp=126'); save('DM_PAD_MAP', '-string', 'A=B,B=A')
+            r, text = run()
+            self.assertEqual((r['DM_KEYMAP'], r['DM_PAD_MAP']), ('A=40,B=38,RUp=126', 'A=B,B=A'))   # a valid saved keymap and pad map are applied
+            self.assertIn('launcher: env DM_KEYMAP=A=40,B=38,RUp=126 (saved choice)', text)
+            r, text = run(DM_KEYMAP='X=7')   # a front end's launch override wins for that start
+            self.assertEqual((r['DM_KEYMAP'], r['DM_PAD_MAP']), ('X=7', 'A=B,B=A'))
+            self.assertIn('saved choice DM_KEYMAP=A=40,B=38,RUp=126 not used: DM_KEYMAP=X=7 is set', text)
+            sup_env.parent.mkdir(parents=True, exist_ok=True); sup_env.write_text('DM_PAD_MAP=Y=X\n')   # the player's env.txt wins too
+            try:
+                r, text = run()
+                self.assertEqual((r['DM_KEYMAP'], r['DM_PAD_MAP']), ('A=40,B=38,RUp=126', 'Y=X'))
+                self.assertIn('saved choice DM_PAD_MAP=A=B,B=A not used', text)
+            finally: sup_env.unlink()
+            r, text = run(DM_SAVED_CHOICES='0')   # the tested defaults; the saved values stay saved
+            self.assertEqual((r.get('DM_KEYMAP'), r.get('DM_PAD_MAP')), (None, None))
+            self.assertIn('saved choices ignored (DM_SAVED_CHOICES=0)', text)
+            self.assertEqual(subprocess.run(['defaults', 'read', domain, 'launcher.DM_KEYMAP'], capture_output=True, text=True).stdout.strip(), 'A=40,B=38,RUp=126')
+            for bad in ('Q=1', 'A=40,Q=1', 'A=128', 'A=abc', 'A=LUp'):   # a value the host would not take whole: ignored, logged, the rest still apply
+                with self.subTest(bad=bad):
+                    save('DM_KEYMAP', '-string', bad)
+                    r, text = run()
+                    self.assertNotIn('DM_KEYMAP', r)
+                    self.assertEqual(r['DM_PAD_MAP'], 'A=B,B=A')
+                    self.assertIn(f'saved choice DM_KEYMAP={bad} ignored: the host does not take it', text)
+            save('DM_PAD_MAP', '-string', 'A=40')   # a key code is no button; a keymap value is no pad map
+            r, text = run(); self.assertNotIn('DM_PAD_MAP', r); self.assertIn('saved choice DM_PAD_MAP=A=40 ignored', text)
+            save('DM_PAD_MAP', '-string', '')   # empty: nothing to apply
+            r, text = run(); self.assertNotIn('DM_PAD_MAP', r); self.assertIn('saved choice DM_PAD_MAP= ignored', text)
+            save('DM_PAD_MAP', '-float', '1.5')   # not a string
+            r, text = run(); self.assertNotIn('DM_PAD_MAP', r); self.assertIn('saved choice for DM_PAD_MAP ignored: not a string', text)
         finally:
             subprocess.run(['defaults', 'delete', domain], capture_output=True)
             Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)

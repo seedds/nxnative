@@ -484,6 +484,27 @@ if(NXHOST_JIT)
     target_link_libraries(t_aot_host PRIVATE nxhost_jit)
 endif()
 set_tests_properties(t_aot_host PROPERTIES TIMEOUT 600)
+# A game module through the engine's game-module path (t_aot_module.c): the synthetic module of dm/tools/tests/aot_synth.py (no game files), its behaviour image and
+# manifest as patch_nso.py --aot writes them, packed by build_packs.sh into <packs>/module; loader.c's load_modules maps it, registers its gates, binds its imports into
+# its GOT (a host function of t_aot_module_entries.c, an unimplemented import) and loads its pack; the module runs through dm_aot_run, and its SetHeapSize reaches the
+# stub backend's be_guest_map; an image that is not its manifest's and a pack of another image are refused. The same packs as t_aot_host (without them, a note and a pass)
+set(T_AOT_MODULE_THUNKS_C ${CMAKE_BINARY_DIR}/gen/t_aot_module_thunks.c)
+add_custom_command(OUTPUT ${T_AOT_MODULE_THUNKS_C}
+    COMMAND ${Python3_EXECUTABLE} ${GEN_HLE_THUNKS} -o ${T_AOT_MODULE_THUNKS_C} ${TESTS}/t_aot_module_entries.c
+    DEPENDS ${GEN_HLE_THUNKS} ${TESTS}/t_aot_module_entries.c ${HOST_H}
+    COMMENT "host-call thunks of t_aot_module's entries" VERBATIM)
+host_test(t_aot_module SOURCES t_aot_module.c t_aot_module_entries.c t_aot_module_stub.c ${AOT_TEST_SRC} ../hle.c PROFILE INCLUDES ${REPO}/dm/tools/aot/include)
+target_sources(t_aot_module PRIVATE ${T_AOT_MODULE_THUNKS_C})
+target_compile_definitions(t_aot_module PRIVATE "T_AOT_PACKS=\"${NXAOT_PACKS}\"")
+set_target_properties(t_aot_module PROPERTIES ENABLE_EXPORTS ON)   # the pack's imports resolve against it, as against nxhost
+if(NXHOST_JIT)
+    target_compile_definitions(t_aot_module PRIVATE NXHOST_JIT=1)
+    target_link_libraries(t_aot_module PRIVATE nxhost_jit)
+endif()
+set_tests_properties(t_aot_module PROPERTIES TIMEOUT 300)
+# The memory SVCs' announcements to the graphics backend (hle_svc.c be_guest_map / be_guest_unmap; docs/design/vulkan-backend.md 4.2), recorded by a stub backend on
+# the small layout of t_svc_memory: which SVCs commit and decommit, the ranges, and that an unmapped range was still readable when announced
+host_test(t_guest_map SOURCES t_guest_map.c INCLUDES ${TESTS}/memory_profile)
 
 # fork() death tests
 host_test(t_heap_size SOURCES t_heap_size.c PROFILE POSIX)

@@ -64,6 +64,29 @@ void dm_aot_guest_name(uint64_t guest, char *out, size_t n);
 // A host pc in compiled code as the guest function and instruction the function map and line table give (3.5); 0 when host_pc is not in a pack (signal-safe)
 int dm_aot_where(uint64_t host_pc, char *out, size_t n);
 uint64_t dm_aot_code_lo(void), dm_aot_code_hi(void);   // the lowest and highest guest text address of the loaded packs' images (the JIT's code range)
+// A game module's pack (loader.c, "The game-module path"): <dir>/<name>.aot.so (.aot.dll on Windows), beside the manifest <name>.aot.tsv and the behaviour image <name>.image.bin
+// it was built from (nxaot build <dir>/<name>.aot.tsv -o <object> --shared <dir>/<name>.aot.so). The game's input folder is <NSP folder>/<id>_build/aot_<version>/, beside the
+// rewritten modules of Apple's patched_<version>/
+#if defined(_WIN32)
+#define DM_AOT_PACK_SUFFIX ".aot.dll"
+#else
+#define DM_AOT_PACK_SUFFIX ".aot.so"
+#endif
+// Load module m's pack from dir with the identity of its image (the SHA-256 the loader computed over image.bin, its size, text and bss): 0, or 1 with the reason in err
+int dm_aot_load_module_pack(module_t *m, const char *dir, const uint8_t sha256[32], uint64_t image_size, uint64_t text_end, uint64_t bss, char *err, size_t errn);
+
+// ---------- Imports of the modules the engine maps (design 2.4) ----------
+// loader.c bind_sym: what an import of module m (named name) binds to, from the address v Apple would bind: unchanged for a module outside the arena (a test's hand-made image),
+// 0 (an undefined weak import), a loaded module's definition and guest memory; a host function's slot in the host-function page (aot_hostfn.h dm_guest_fn); an
+// unimplemented import's named stub (hle.c resolve_import returns &unimpl_stubs[k]) its slot in the stub page. A host function with no host-call thunk stops the load with a red line
+uint64_t dm_aot_bind(const module_t *m, const char *name, uint64_t v);
+// The named stubs of unimplemented imports: Apple's entry.S assembles 4096 (hle.c MAX_STUB); here the array is only their identities, never executed, and each has a slot of
+// DM_AOT_HOSTFN_SLOT bytes in the stub page, in the arena after the host-function page (readable, brk words). A guest call to slot k runs hle.c unimpl_c(k, x): its UNIMPL line
+// once and 0 in x0, as Apple's stub does
+#define DM_AOT_STUBS 4096
+extern uint64_t unimpl_stubs[DM_AOT_STUBS];
+uint64_t dm_aot_stub_addr(unsigned k);     // the guest address of stub k's slot
+long dm_aot_stub_index(uint64_t guest);    // the stub whose slot starts at guest, -1 for any other address
 
 // ---------- Guest threads (design 6.1) ----------
 // A guest thread's engine state: the state block (64-byte aligned, outside the arena, at offset 0 so that a block names its thread), the base its guest code
@@ -142,6 +165,10 @@ DM_AOT_EXPORT void nxaot_rt_trap(dm_guest_state *st, uint64_t offset, uint32_t r
 DM_AOT_EXPORT void nxaot_rt_jit(dm_guest_state *st, uint64_t lr, uint64_t sp);
 DM_AOT_EXPORT void nxaot_rt_safepoint(dm_guest_state *st);
 DM_AOT_EXPORT uint64_t dm_aot_cntpct(dm_guest_state *st);
+// An observation gate or a spin wait's back-edge at guest address pc (a manifest's obs and spin rows, registered by loader.c in hle.c's gate table): st holds the whole register
+// file, which an observer may change (OBS_STDALLOC_INIT writes x2), so the caller reloads x0..x29 after it; a spin wait's back-off runs as an SVC frame (hle.c gate_dispatch).
+// The lifter's call of design 1.1: nxaot's packs (ABI 2) do not make it yet, so only the host calls it today (t_aot_module)
+DM_AOT_EXPORT void dm_aot_gate(dm_guest_state *st, uint64_t pc);
 
 // ---------- Faults (aot_fault.c) ----------
 void crash_install(void);                  // the fault handlers (signals on POSIX, a vectored exception handler on Windows); once

@@ -26,6 +26,8 @@ uint8_t *dm_aot_image_map(const uint8_t *bytes, size_t len, size_t bss, uint64_t
 struct dm_guest_state;
 struct dm_guest_state *dm_aot_self_state(void);
 uint64_t dm_guest_call(struct dm_guest_state *st, uint64_t addr, int nargs, ...);
+// What an import of a module the engine mapped binds to: a host function's guest-visible slot, an unimplemented import's stub slot (aot_arena.c, design 2.4)
+uint64_t dm_aot_bind(const module_t *m, const char *name, uint64_t v);
 #endif
 
 static pthread_key_t key_value(unsigned i) {
@@ -304,6 +306,9 @@ static uint64_t bind_sym(module_t *m, const Elf64_Sym *s, int *other, int *weak0
     const char *nm = m->strtab + s->st_name;
     *weak0 = !v && !s->st_shndx && ELF64_ST_BIND(s->st_info) == STB_WEAK && !loaded_sym(nm) && !hle_implements(nm);
     if (!v && !*weak0) v = resolve_sym(m, nm);
+#if !DM_NATIVE_EXEC
+    v = dm_aot_bind(m, nm, v);   // x86-64 engine: a host function or stub as its guest-visible address, so a compiled blr through the GOT reaches it through the dispatcher
+#endif
     return v;
 }
 
@@ -622,6 +627,7 @@ static void map_image(module_t *m, const char *dir) {
 }
 #endif
 
+#if DM_NATIVE_EXEC   // the x86-64 engine's load_modules takes the recompiler's input instead (below, "The game-module path")
 void load_modules(const char *dir, const char **names, int n) {
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
@@ -652,6 +658,7 @@ void load_modules(const char *dir, const char **names, int n) {
     if (g_flag.bootprof) LOG("① breakdown: mapping (read + copy + seal pages) %.1f ms, dynamic section parsing %.1f ms, gate registration %.1f ms, relocation + forced takeover %.1f ms, total %.1f ms",
                              tm / 1e6, tp / 1e6, tg / 1e6, tr / 1e6, (now_ns() - t0) / 1e6);
 }
+#endif
 
 // Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.
 // The timing is decided by nn::init::Start: after nninitStartup and _init_libc2, before nnMain (the 4th argument callback of Start).
@@ -670,12 +677,21 @@ void run_module_inits(void) {
 #if !DM_NATIVE_EXEC
 
 // ---- The x86-64 execution engine's module images ----
-// A module image as it is: an NRO file (and later the behaviour image `patch_nso.py --aot` writes, design 1.1), whose code runs from the pack the caller loads
+// A module image as it is: an NRO file (a game's modules come through load_modules below, from their manifests), whose code runs from the pack the caller loads
 // for it (aot_arena.c dm_aot_pack_load). Mapped one to one in the arena at a base the engine chooses (the pack's code is base-relative: 3.3), [0, ro_off)
 // readable and never executable, the rest writable, bss zero; its dynamic section parsed; loaded (in the symbol lookups) and relocated and bound as
 // load_modules relocates every module (relocations are data: 9.4). Modules added this way share g_mod with load_modules, at a fixed capacity, since
 // module_t pointers never move
 #define AOT_MAX_MODULES 64
+// The image one to one in the arena (aot_arena.c dm_aot_image_map: [0, ro_off) readable and never executable, the rest readable and writable, bss zero) and the module's
+// layout fields as load_modules' mapping sets them on Apple. key_page_off is the end of the mapping, where Apple's key page would begin: the end of the module's data and
+// bss for dm_sdk_major's search and QueryMemory's read-only runs (none here)
+static void aot_place(module_t *m, const uint8_t *bytes, size_t len, size_t bss, uint64_t text_end, uint64_t ro_off, uint64_t data_off) {
+    size_t mapped = 0;
+    m->base = dm_aot_image_map(bytes, len, bss, ro_off, &mapped);
+    m->size = mapped; m->text_end = text_end; m->ro_off = ro_off; m->data_off = data_off; m->image_size = len; m->file_image_len = len;
+    m->key_page_off = mapped; m->key_page_size = 0; m->patch_off = 0;
+}
 module_t *loader_add_image(const char *name, const uint8_t *bytes, size_t len, size_t bss, uint64_t text_end, uint64_t ro_off, uint64_t data_off) {
     pthread_rwlock_wrlock(&g_modules_mu);
     if (!g_mod) {
@@ -686,9 +702,7 @@ module_t *loader_add_image(const char *name, const uint8_t *bytes, size_t len, s
     if (g_nmod >= g_mod_capacity) die("%s: no room for another module (%d)", name, g_mod_capacity);
     module_t *m = &g_mod[g_nmod];
     strlcpy(m->name, name, sizeof m->name);
-    size_t mapped = 0;
-    m->base = dm_aot_image_map(bytes, len, bss, ro_off, &mapped);
-    m->size = mapped; m->text_end = text_end; m->ro_off = ro_off; m->data_off = data_off; m->image_size = len; m->file_image_len = len;
+    aot_place(m, bytes, len, bss, text_end, ro_off, data_off);
     parse_dynamic(m);
     m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     if (!g_force_hits) force_init();
@@ -696,5 +710,214 @@ module_t *loader_add_image(const char *name, const uint8_t *bytes, size_t len, s
     pthread_rwlock_unlock(&g_modules_mu);
     LOG("%s: base %p size %#zx (image %#zx, bss %#zx; x86-64 engine)", name, (void *)m->base, m->size, len, bss);
     return m;
+}
+
+// ---- The game-module path of the x86-64 execution engine (docs/design/aot-recompiler.md 1.1, 1.2, 9.4) ----
+// load_modules' folder holds the recompiler's input, as it holds the rewritten modules on Apple (dm/tools/aot/README.md, "A game module in the host"). Per module:
+//   <name>.aot.tsv    the manifest patch_nso.py --aot wrote: the module, the NSO build ID and the SHA-256 of the image; layout, aux, data, obs, spin, cut and oracle rows
+//                     (patch_nso.py, "The recompiler's input"; nxaot reads the same text: dm/tools/aot/src/module/manifest.cpp)
+//   <name>.image.bin  the behaviour image: the NSO's segments as the rewriter decompressed them (it reads the LZ4 of the NSO, as for Apple's <name>.patched.bin: the host decompresses
+//                     nothing), with the cuts and the frame step's branches, none of Apple's rewrites
+//   <name>.aot.so     the pack `nxaot build` made from the two (.aot.dll on Windows; aot.h DM_AOT_PACK_SUFFIX)
+// The image is checked against its manifest (size, layout, SHA-256: refused with both hashes) and mapped one to one in the arena as loader_add_image maps one; the build ID
+// goes to module_t.build_id, as fixups.tsv's on Apple, for the host's per-build behaviour (dm_main_build); the aux row places the frame step's state page; the obs and spin rows
+// go into hle.c's gate table at their guest addresses, which on Apple holds the gate blocks' return addresses (dm_aot_gate dispatches them: aot_run.c). Then every module is
+// relocated and bound (dm_aot_bind: host functions and unimplemented imports at their guest-visible slots), and its pack loaded with the image's identity (aot_arena.c)
+int dm_aot_load_module_pack(module_t *m, const char *dir, const uint8_t sha256[32], uint64_t image_size, uint64_t text_end, uint64_t bss, char *err, size_t errn);
+typedef struct { uint64_t off, param, word; uint32_t num; } aot_obs_t;
+typedef struct { uint64_t head, edge; } aot_edge_t;
+typedef struct {
+    char module[64], build_id[72], sha256[65];
+    uint64_t text_end, ro_off, data_off, bss, image_size, aux_off, aux_len, fps_state;
+    int layout, aux, rows[4];   // rows: data, cut, oracle (T, J and W), comments
+    aot_obs_t *obs; int nobs;
+    aot_edge_t *edge; int nedge, nspin;
+    uint8_t sha[32];            // the image's, computed
+} aot_manifest_t;
+
+static uint8_t *aot_read(const char *path, size_t *n) {   // a whole file, NUL-terminated; NULL when it cannot be read
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    uint8_t *p = NULL; size_t cap = 0, len = 0, got;
+    do {
+        if (len + 65536 + 1 > cap) { cap = (len + 65536 + 1) * 2; uint8_t *q = realloc(p, cap); if (!q) { free(p); fclose(f); return NULL; } p = q; }
+        got = fread(p + len, 1, 65536, f); len += got;
+    } while (got);
+    int bad = ferror(f); fclose(f);
+    if (bad) { free(p); return NULL; }
+    p[len] = 0; *n = len;
+    return p;
+}
+static int aot_hex(const char *s, uint64_t *v) {   // hex with or without 0x, as nxaot's reader takes it
+    char *e;
+    if (!*s || *s == '-' || *s == '+' || *s == ' ') return 0;
+    errno = 0; *v = strtoull(s, &e, 16);
+    return !*e && !errno;
+}
+static int aot_dec(const char *s, uint64_t *v) {
+    char *e;
+    if (*s < '0' || *s > '9') return 0;
+    errno = 0; *v = strtoull(s, &e, 10);
+    return !*e && !errno;
+}
+static int aot_hexbytes(const char *s) { size_t n = strlen(s); if (!n || n % 2) return 0; for (; *s; s++) if (!strchr("0123456789abcdefABCDEF", *s)) return 0; return 1; }
+
+// The manifest's rows into t, every row checked as nxaot's reader checks it; 0, or 1 with the reason in err
+static int aot_parse(char *text, aot_manifest_t *t, const char *path, char *err, size_t errn) {
+    int line = 0, header = 0;
+    for (char *s = text, *next; s && *s; s = next) {
+        next = strchr(s, '\n');
+        if (next) *next++ = 0;
+        line++;
+        size_t ln = strlen(s);
+        if (ln && s[ln - 1] == '\r') s[--ln] = 0;
+        if (!ln) continue;
+        char *f[16]; int nf = 0;
+        f[nf++] = s;
+        for (char *p = s; *p && nf < 16; p++) if (*p == '\t') { *p = 0; f[nf++] = p + 1; }
+        uint64_t a = 0, b = 0, c = 0, d = 0;
+        if (!header) {
+            if (nf != 4 || strcmp(f[0], "# nxaot-manifest 1") || !*f[1] || strlen(f[1]) >= sizeof t->module || !*f[2] || strlen(f[2]) >= sizeof t->build_id ||
+                strlen(f[3]) != 64 || !aot_hexbytes(f[3]) || !aot_hexbytes(f[2])) {
+                snprintf(err, errn, "%s line %d: not a manifest of version 1 ('# nxaot-manifest 1', the module, the build ID in hex, the SHA-256 of the image)", path, line); return 1;
+            }
+            snprintf(t->module, sizeof t->module, "%s", f[1]); snprintf(t->build_id, sizeof t->build_id, "%s", f[2]); snprintf(t->sha256, sizeof t->sha256, "%s", f[3]);
+            header = 1; continue;
+        }
+        const char *k = f[0], *bad = NULL;
+        if (k[0] == '#') { t->rows[3]++; continue; }
+        if (!strcmp(k, "layout")) {
+            if (nf != 11 || strcmp(f[1], "text_end") || strcmp(f[3], "ro_off") || strcmp(f[5], "data_off") || strcmp(f[7], "bss") || strcmp(f[9], "image_size") ||
+                !aot_hex(f[2], &t->text_end) || !aot_hex(f[4], &t->ro_off) || !aot_hex(f[6], &t->data_off) || !aot_hex(f[8], &t->bss) || !aot_hex(f[10], &t->image_size))
+                bad = "layout: text_end <hex> ro_off <hex> data_off <hex> bss <hex> image_size <hex>";
+            else if (t->layout++) bad = "a second layout row";
+            else if (!(t->text_end <= t->ro_off && t->ro_off <= t->data_off && t->data_off <= t->image_size)) bad = "layout: text_end <= ro_off <= data_off <= image_size does not hold";
+        } else if (!strcmp(k, "aux")) {
+            if (nf != 5 || strcmp(f[3], "fps_state") || !aot_hex(f[1], &t->aux_off) || !aot_hex(f[2], &t->aux_len) || !aot_hex(f[4], &t->fps_state)) bad = "aux: <offset> <length> fps_state <offset>";
+            else if (t->aux++) bad = "a second aux row";
+        } else if (!strcmp(k, "data") || !strcmp(k, "oracle-W")) {
+            if (nf != 3 || !aot_hex(f[1], &a) || !aot_hex(f[2], &b) || b < a) bad = "data / oracle-W: <start> <end> with start <= end";
+            else t->rows[k[0] == 'd' ? 0 : 2]++;
+        } else if (!strcmp(k, "obs")) {
+            if (nf != 5 || !aot_hex(f[1], &a) || !aot_dec(f[2], &b) || b > 0xFF || !aot_hex(f[3], &c) || !aot_hex(f[4], &d) || d > 0xFFFFFFFFu)
+                bad = "obs: <offset> <number (decimal, below 256)> <parameter> <original instruction word>";
+            else {
+                aot_obs_t *o = realloc(t->obs, (size_t)(t->nobs + 1) * sizeof *o);
+                if (!o) die("aot: no memory for a manifest");
+                t->obs = o; t->obs[t->nobs++] = (aot_obs_t){a, c, d, (uint32_t)b};
+            }
+        } else if (!strcmp(k, "spin") || !strcmp(k, "oracle-T")) {
+            if (nf != 3 || !aot_hex(f[1], &a)) bad = "spin / oracle-T: <offset> <offset>[,<offset>...]";
+            for (char *p = nf == 3 ? f[2] : NULL, *q; !bad && p; p = q) {
+                q = strchr(p, ',');
+                if (q) *q++ = 0;
+                if (!aot_hex(p, &b)) { bad = "spin / oracle-T: <offset> <offset>[,<offset>...]"; break; }
+                if (k[0] == 's') {
+                    aot_edge_t *e = realloc(t->edge, (size_t)(t->nedge + 1) * sizeof *e);
+                    if (!e) die("aot: no memory for a manifest");
+                    t->edge = e; t->edge[t->nedge++] = (aot_edge_t){a, b};
+                }
+            }
+            if (!bad) { if (k[0] == 's') t->nspin++; else t->rows[2]++; }
+        } else if (!strcmp(k, "cut")) {
+            if (nf < 5 || !aot_hex(f[1], &a) || !aot_hexbytes(f[2]) || !aot_hexbytes(f[3]) || strlen(f[2]) != strlen(f[3])) bad = "cut: <offset> <old hex> <new hex> <reason>";
+            else t->rows[1]++;
+        } else if (!strcmp(k, "oracle-J")) {
+            if (nf != 4 || !aot_hex(f[1], &a) || !aot_hex(f[2], &b) || !aot_dec(f[3], &c) || (c != 1 && c != 2)) bad = "oracle-J: <br offset> <base> <width: 1 or 2>";
+            else t->rows[2]++;
+        } else bad = "an unknown row kind";
+        if (bad) { snprintf(err, errn, "%s line %d: %s", path, line, bad); return 1; }
+    }
+    if (!header) { snprintf(err, errn, "%s: empty, not a manifest", path); return 1; }
+    if (!t->layout) { snprintf(err, errn, "%s: no layout row", path); return 1; }
+    return 0;
+}
+
+static void aot_hexstr(const uint8_t *b, size_t n, char *out) { for (size_t i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", b[i]); }
+
+// Module m's manifest and image from dir: checked, mapped, its gates registered, its dynamic section parsed. 0, or 1 with the reason in err
+static int aot_map_module(module_t *m, const char *dir, aot_manifest_t *t, char *err, size_t errn) {
+    char path[1024], ipath[1024];
+    snprintf(path, sizeof path, "%s/%s.aot.tsv", dir, m->name);
+    snprintf(ipath, sizeof ipath, "%s/%s.image.bin", dir, m->name);
+    size_t n = 0, len = 0;
+    char *text = (char *)aot_read(path, &n);
+    if (!text) { snprintf(err, errn, "%s: cannot read it (errno %d): rewrite the module with dm/tools/patch_nso.py <NSO> <out> %s --aot %s", path, errno, m->name, dir); return 1; }
+    int bad = aot_parse(text, t, path, err, errn);
+    free(text);
+    if (bad) return 1;
+    if (strcmp(t->module, m->name)) { snprintf(err, errn, "%s is the manifest of module %s, not of %s", path, t->module, m->name); return 1; }
+    uint8_t *img = aot_read(ipath, &len);
+    if (!img) { snprintf(err, errn, "%s: cannot read the image %s names (errno %d)", ipath, path, errno); return 1; }
+    char have[65], want[65];
+    plat_sha256(img, len, t->sha);
+    aot_hexstr(t->sha, 32, have);
+    snprintf(want, sizeof want, "%s", t->sha256);
+    for (char *c = want; *c; c++) if (*c >= 'A' && *c <= 'F') *c += 'a' - 'A';
+    const uint64_t end = t->image_size + t->bss;
+    const char *why = NULL;
+    if (len != t->image_size) why = "its size is not the layout's image_size";
+    else if (strcmp(have, want)) why = "its SHA-256 is not the manifest's";
+    else if (t->text_end & 3 || !t->text_end) why = "the layout's text_end is no whole number of instructions";
+    else if (t->aux && (t->fps_state < t->data_off || t->fps_state + 0x40 > end || t->aux_off < t->data_off || t->aux_len > t->image_size || t->aux_off > t->image_size - t->aux_len))
+        why = "its aux row lies outside the image's data";
+    for (int i = 0; !why && i < t->nobs; i++) {
+        uint32_t w;
+        if (t->obs[i].off >= t->text_end || t->obs[i].off & 3 || !t->obs[i].num) { why = "an obs row names no instruction of the text, or number 0"; break; }
+        memcpy(&w, img + t->obs[i].off, 4);
+        if (w != t->obs[i].word) { why = "an obs row's original word is not the image's (the gate's instruction must be the original one)"; break; }
+    }
+    for (int i = 0; !why && i < t->nedge; i++)
+        if (t->edge[i].head >= t->text_end || t->edge[i].edge >= t->text_end || (t->edge[i].head | t->edge[i].edge) & 3) why = "a spin row names no instruction of the text";
+    if (why) {
+        snprintf(err, errn, "%s does not match %s (%s): image %zu bytes, SHA-256 %s; manifest image_size %llu, SHA-256 %s. Rewrite the module again with patch_nso.py --aot",
+                 ipath, path, why, len, have, (unsigned long long)t->image_size, want);
+        free(img); return 1;
+    }
+    aot_place(m, img, len, (size_t)t->bss, t->text_end, t->ro_off, t->data_off);
+    free(img);
+    snprintf(m->build_id, sizeof m->build_id, "%.32s", t->build_id);   // the first 16 bytes, as fixups.tsv's BUILD_ID on Apple
+    if (t->aux) { m->fps_state_off = t->fps_state; dm_fps_state = m->base + t->fps_state; g_fps_mod = m->name; }   // the frame step's state page (install_fps_state on Apple)
+    parse_dynamic(m);
+    for (int i = 0; i < t->nobs; i++) gate_register((uint64_t)(uintptr_t)m->base + t->obs[i].off, "obs", (int)(t->obs[i].num | t->obs[i].param << 8), t->obs[i].off);
+    for (int i = 0; i < t->nedge; i++) gate_register((uint64_t)(uintptr_t)m->base + t->edge[i].edge, "spin", 0, t->edge[i].head);
+    // The gates are the host's observers and the spin waits' back-off (Apple's gates.tsv): packs of ABI 2 call neither yet (nxaot lifts the original instruction and the plain
+    // back-edge), so what they do is missing until the lifter calls dm_aot_gate at these addresses
+    if (t->nobs || t->nspin)
+        LOG("[RED] aot: %s's manifest has %d observation gates and %d spin waits (%d back-edges), registered at their guest addresses; its pack does not call them yet "
+            "(nxaot's ABI 2 has no gate sites, design 1.1): the observers and the spin back-off do not run", m->name, t->nobs, t->nspin, t->nedge);
+    LOG("%s: base %p size %#zx (behaviour image %#zx, bss %#llx; build %s; %d data blocks, %d cuts, %d oracle rows%s; x86-64 engine)", m->name, (void *)m->base, m->size, len,
+        (unsigned long long)t->bss, m->build_id, t->rows[0], t->rows[1], t->rows[2], t->aux ? ", frame step state page" : "");
+    return 0;
+}
+
+void load_modules(const char *dir, const char **names, int n) {
+    const uint64_t t0 = now_ns();
+    char err[1200];
+    allocate_modules(n, NULL);
+    aot_manifest_t *man = calloc((size_t)n, sizeof *man);
+    if (!man) die("aot: no memory for %d manifests", n);
+    for (int i = 0; i < n; i++) {   // every module mapped and parsed first, then relocated (cross-module symbols must all be in place), as on Apple
+        module_t *m = &g_mod[i];
+        strlcpy(m->name, names[i], sizeof m->name);
+        if (aot_map_module(m, dir, &man[i], err, sizeof err)) die("[RED] aot: %s", err);
+        m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
+    }
+    force_init();
+    for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]);
+    force_check();
+    FILE *nros = open_nros(dir);
+    if (nros) {   // NROs (nn::ro) on this path: patch_nso.py --aot and nxaot build per NRO, and nro.tsv rows for them, are not done yet
+        fclose(nros);
+        LOG("[RED] aot: %s/nro.tsv lists NROs, which the x86-64 engine does not map yet: ro::LoadModule finds none of them", dir);
+    }
+    for (int i = 0; i < n; i++) {
+        module_t *m = &g_mod[i];
+        if (dm_aot_load_module_pack(m, dir, man[i].sha, man[i].image_size, man[i].text_end, man[i].bss, err, sizeof err)) die("[RED] aot: %s", err);
+        free(man[i].obs); free(man[i].edge);
+    }
+    free(man);
+    { void hlecount_seal(void); hlecount_seal(); }
+    LOG("aot: %d modules from %s mapped, relocated and their packs loaded in %.1f ms", n, dir, (now_ns() - t0) / 1e6);
 }
 #endif

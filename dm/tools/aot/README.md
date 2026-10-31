@@ -42,6 +42,7 @@ with no JIT, and print what dynarmic prints. No game runs through it yet, and no
 | Per-function differential test | [src/rt/funcdiff.cpp](src/rt/funcdiff.cpp) (`nxaot_funcdiff`) | every function of a module from one register and memory snapshot under the recompiled code and under dynarmic, final registers and written memory compared (design 12, item 2) |
 | Runner | [tests/run_aot_tests.sh](tests/run_aot_tests.sh) | runs the tests and the benchmark and writes `logs/aot/` ([logs/README.md](../../../logs/README.md)) |
 | Host run time | [dm/host/aot.h](../../host/aot.h), `dm/host/aot_*.c`, CTest `t_aot_host` | what dm/host provides for packs: the arena below 2^39, packs loaded, the SVC path, the dispatcher, `dm_guest_call`, guest threads with safepoints on hle_thread.c, faults, the floating-point helpers in C; the corpus run through the host's loader, SVC dispatcher and thread layer ("Threads and safepoints") |
+| Game modules | `patch_nso.py --aot`, dm/host/loader.c `load_modules`, CTest `t_aot_module`, `t_guest_map` | the recompiler's input written by the rewriter (a behaviour image and its manifest) and read by the host: the image checked and mapped, gates registered, imports bound into the GOT, the pack loaded; guest memory announced to the graphics backend ("A game module in the host") |
 | CI | [.github/workflows/aot.yml](../../../.github/workflows/aot.yml) | the image, the build, CTest and the runner on every pull request and push to `main` and `multiplataforma`; then the corpus packed, `t_aot_host` in the host's image and with the JIT fallback here, and the floating-point differential test |
 
 Vendored: [dm/third_party/dynarmic](../../third_party/dynarmic/VENDOR.md), the fork `azahar-emu/dynarmic` at `a46601580d55` (A64 frontend, IR, x86-64
@@ -141,7 +142,33 @@ in text: an NRO's header after its entry branch (+4..+0x80: word +4 is MOD0's of
 lies in the text; for a behaviour image, the manifest's `data` rows. A manifest (`<name>.aot.tsv`, every row kind of design 1.2:
 [src/module/manifest.h](src/module/manifest.h)) names its image `<name>.image.bin` beside it; the image's SHA-256 must be the one in its header.
 `nxaot image` writes that form for an NRO (its bytes unchanged, so the key is the same SHA-256; a manifest with `layout` and `data` rows), so the
-tool reads one input form whatever `patch_nso.py --aot` will add.
+tool reads one input form for NROs and game modules.
+
+**Game modules: `patch_nso.py --aot`** ([dm/tools/patch_nso.py](../patch_nso.py), "The recompiler's input"; [rewriter.md](../../../docs/reference/rewriter.md#the-recompilers-input---aot)).
+`patch_nso.py <NSO> <out dir> <name> --aot <aot dir>` rewrites the module as before, Apple's outputs byte for byte unchanged, and also writes
+`<aot dir>/<name>.image.bin` and `<name>.aot.tsv`. The image is the NSO's text, read-only data and data as the rewriter decompressed them (the LZ4 of
+the NSO is read there, as for Apple's `<name>.patched.bin`: neither the host nor nxaot decompresses anything), with the registered and matched cuts
+and the frame step's branches applied, before any of Apple's rewrites. The manifest has every row kind of design 1.2 in the canonical order of
+`WriteManifest`, so `nxaot manifest` prints it back unchanged. Where it, the design and [src/module/manifest.cpp](src/module/manifest.cpp) differ,
+`manifest.cpp` is the format:
+
+| Row | Design 1.2 | Written |
+|---|---|---|
+| the command | `patch_nso.py --aot <NSO> <out dir> <name>`, the image instead of `patched.bin` | `--aot <dir>` after the usual arguments, besides Apple's outputs: one rewrite gives both, and a test checks that Apple's outputs are unchanged |
+| `layout` | `bss` | the zero bytes after `image_size`; 0 when the image holds them (a module with FRAME_STEP, below) |
+| `aux` | the stubs "at the same offset" as in the patch area | the behaviour image has no patch area: the build's own FRAME_STEP function assembles its stubs again at the page after the state page (state page at `FPS_STATE_OFF`, as on Apple), and the image goes on to their end, bss and the key page's place as zeros. A module whose bss puts that past a `b`'s reach of the text (a FAR module) fails the rewrite at the `B()` assertion: the manifest's unsigned offsets cannot place the region before the base |
+| `data` | `nso_code.data_blocks` | those, the MOD0 offset word at +4, and MOD0 with its `LNY` records when the text holds it, as nxaot reads an NRO (`NroDataBlocks`) |
+| `obs` | `<number> <parameter>` | the OBS number's low 8 bits (decimal) and its bits 8 up (hex), as hle.c's gate table splits them |
+| `oracle-J` | `<base> <width>` | `sites.tsv`'s J rows hold the landing pads' count (256, or the halfword table's entries), not the width: the rewriter records the entries' width (1 or 2) for the manifest |
+| `oracle-W` | `<lo> <hi>` | `sites.tsv`'s W rows: `hi` is past the `cbz` / `cbnz` that follows the store when one does; nxaot's windows end past the store |
+
+Checked on a synthetic module, with no game files ([dm/tools/tests/aot_synth.py](../tests/aot_synth.py): an NSO of hand-assembled AArch64, every
+encoding checked with llvm-mc; its patch file has a cut, an observation gate and a frame step), by [test_aot_manifest.py](../tests/test_aot_manifest.py):
+every row against the image's and the NSO's bytes; where capstone and lz4 are installed (tests.yml's tool tests; neither Docker image has them),
+`patch_nso.py` with and without `--aot` (Apple's outputs identical) and the image and manifest equal to `aot_synth.py`'s; with `NXAOT=<nxaot>` (this
+image, aot.yml) the manifest's round trip, nxaot's discovery against the oracle rows (design 12, item 5: the byte table's base and width, the offset
+table's targets index by index, the window's start, its end four bytes short as said above, 0 words uncovered) and `nxaot build`. nxaot does not
+compare the oracle rows itself at pack time yet.
 
 **Discovery** ([src/analysis/discover.h](src/analysis/discover.h)) takes the entries of design 1.3 in its order and records each entry's provenance
 (`fn` rows: every source that named it; the first is its primary one): the module's entry, FDEs, `STT_FUNC` symbols (not with `--symbols-as-oracle`),
@@ -176,7 +203,7 @@ a remainder computed with a multiply and shifts that no LLVM analysis bounds.
 **Exclusive windows** ([src/analysis/summary.cpp](src/analysis/summary.cpp)): from each `ld(a)x(r|p)` the straight line (conditional branches fall
 through) to its `st(l)x(r|p)`, never past a second exclusive load (the rewriter's rules); `cas` when no other load is inside (compare-and-swap
 semantics are equivalent, design 6.5), `aba` when a load reads through the loaded value, `load` for another load; the others are counted unpaired.
-The rewriter's `oracle-W` rows are a subset (its x18 windows) and are not compared yet.
+The rewriter's `oracle-W` rows are a subset (its x18 windows), compared on the synthetic module by test_aot_manifest.py ("Game modules" above).
 
 **Summaries** (design 2.3, the facts only): per function the registers it may read before writing them (backward liveness, a call's reads and its
 must-writes), may change (everything written, callees included, minus what it restores), must write on every return path, and whether it is
@@ -194,7 +221,8 @@ count, region start, past calls, targets), `br`, `call`, `win`, `pad`, `gap` (un
 summary. `NXAOT_DUMP_REGION=<br pc>` prints the optimised IR of every region tried for that br; `NXAOT_DEBUG_REGION=1` the outcome of each.
 
 What is not done: the census numbers of phase 0 over whole modules (FDE coverage, LSDA counts, setjmp imports, the address-taken set: all available
-from `nxaot discover` now, not folded into `nxaot census`), `oracle-T` / `oracle-J` / `oracle-W` comparisons (the parser reads them), the
+from `nxaot discover` now, not folded into `nxaot census`), the `oracle-T` / `oracle-J` / `oracle-W` comparisons at pack time (the parser reads
+them; test_aot_manifest.py compares them on the synthetic module), the
 non-local control flow census beyond landing pads (setjmp by symbol, SP from memory), functions split for size (design 9.3), and the measured
 throughput on game modules: every region is lifted afresh and the dominators and the fixed points are plain, which the corpus does not stress.
 
@@ -518,8 +546,9 @@ pauses, about 760 invariant checks, no inconsistent block, the output unchanged.
 (dm/host/tests/t_aot_host.c) runs the corpus through it, packed by [tests/build_packs.sh](tests/build_packs.sh):
 
 - **done**: the arena allocator (5.2; aot_arena.c `dm_guest_reserve`, `dm_guest_alloc`, `dm_guest_free`: 8 GiB at 2^36 through the platform
-  layer's new `plat_vm_reserve_at`, the host-function page first) and the module loader's mapping into it (loader.c: `loader_add_image` for an
-  image as it is, an NRO, and `map_image`, which `load_modules` uses for the rewriter's output; text readable and never executable);
+  layer's new `plat_vm_reserve_at`, the host-function page first, then the stub page) and the module loader's mapping into it (loader.c:
+  `loader_add_image` for an image as it is, an NRO, and `load_modules` for a game's modules from their manifests: "A game module in the host" below;
+  text readable and never executable);
   `*desc->base` written per module (`dm_aot_pack_load`, after the identity checks of 9.4). hle_svc.c's guest block (heap, alias and stack
   regions), thread.c's TLS blocks and thread-local regions (into the block's `tpidr_el0` / `tpidrro_el0`), GetInfo's user exception context and
   the main thread's guest stack live in the arena. **Open**: NVN's virtual pools (`hle_nvn.c`) and Unreal's heap (`hle_uemalloc.c`), still host
@@ -565,6 +594,49 @@ test: 3 seeds of 50 pauses per compiler, 130 to 200 stops at polls and 130 to 14
 host call: fnptr's `hidden_ptr` set to a host function's slot, the program's check passes through it. Dirty pages (protected again every 0.5 ms):
 int_ops 1 write fault a run, excl from 4 to 634, all stores of compiled code; with the JIT, fiber's pages also take stores of JIT code (0 to 5 a run
 outside compiled code, none inside the JIT's memory callbacks). `t_aot_host` takes 3 to 5 s.
+
+## A game module in the host
+
+What a game's module needs from dm/host on x86-64 beside the run time above, written and checked without a game (phase 4's first half; CTest
+`t_aot_module`, `t_guest_map`):
+
+- **The input.** The modules' folder the host is given holds, per module, the manifest and behaviour image `patch_nso.py --aot` wrote ("Game modules"
+  above) and the pack nxaot built from them: `<name>.aot.tsv`, `<name>.image.bin`, `<name>.aot.so` (`.aot.dll` on Windows; aot.h
+  `DM_AOT_PACK_SUFFIX`). For a game that folder is `<NSP folder>/<id>_build/aot_<version>/`, beside Apple's `patched_<version>/`; the per-function cache
+  of design 13 stays in the work folder (`<id>-work/aot-cache/`). The image is decompressed already: the rewriter reads the NSO's LZ4, as it does for
+  Apple's `patched.bin`, so the host has no LZ4 and the pack and the manifest name the same bytes.
+- **The loader** (dm/host/loader.c, "The game-module path"; x86-64's `load_modules`, under `!DM_NATIVE_EXEC`: Apple's is unchanged): every row of the
+  manifest checked as nxaot's reader checks it; the image's size, layout and SHA-256 against the manifest (a mismatch stops the load with a [RED]
+  line naming both hashes); the image mapped one to one in the arena as `loader_add_image` maps one (text readable and never executable, the rest
+  readable and writable, bss zero); the build ID into `module_t.build_id`, as fixups.tsv's on Apple, so `dm_main_build` and per-build behaviour
+  work; the aux row's state page as the frame step's (`dm_fps_state`); every module mapped and parsed before any is relocated, as on Apple; then
+  each pack loaded with the identity of its image (`dm_aot_load_module_pack`: a pack of another image is refused with both hashes). NROs listed in
+  `nro.tsv` are not mapped on this path yet (a [RED] line; `ro::LoadModule` then finds none).
+- **Imports in the GOT** (design 2.4; aot_arena.c `dm_aot_bind`, called at the end of loader.c's `bind_sym`, so `relocate` and the NRO rebinds
+  take it): for a module in the arena, a host function (an HLE, HLE_FORCE or NVN entry) binds to its slot of the host-function page, and an import
+  nothing implements to the slot of its named stub in a stub page after it (4096 slots, as hle.c's `MAX_STUB`; `unimpl_stubs` is only their
+  identities here). A compiled `blr` through the GOT misses the inline cache and goes through `nxaot_rt_dispatch` and `jit_entry` to the slot's
+  thunk, or to hle.c's `unimpl_c` (the `UNIMPL` line once, 0 in x0, as Apple's stub). A host function with no thunk stops the load with a [RED] line
+  naming the import: hle_table.c's libc passthrough has none yet (it binds only where no module defines the symbol). Modules outside the arena
+  (the unit tests' hand-made images) keep the host addresses Apple binds.
+- **Observation gates and spin waits** (the manifest's `obs` and `spin` rows): registered in hle.c's gate table at the guest address of the observed
+  instruction and of each valid back-edge, with the number and parameter or the head Apple's `gates.tsv` gives, and dispatched by `dm_aot_gate(st,
+  pc)` (aot_run.c: `gate_dispatch` over the block's registers, which an observer may change). nxaot's packs (ABI 2) do not call it yet: the lifter's
+  call of design 1.1 and gate sites in the pack's tables are still to come, and until then a module with such rows gets a [RED] line at load (its observers, among them
+  `OBS_STDALLOC_INIT`, which caps StandardAllocator's address space, and the spin waits' back-off, do not run).
+- **Guest memory and the graphics backend** (hle_svc.c, docs/design/vulkan-backend.md 4.2): SetHeapSize growing, MapMemory's destination and
+  MapPhysicalMemory call `be_guest_map` with the host range they opened, after opening it; SetHeapSize shrinking and UnmapPhysicalMemory call
+  `be_guest_unmap` with the range they are about to close, while it is still accessible, so an import of it goes first. UnmapMemory leaves its pages
+  accessible and calls neither; a request that changes nothing calls neither. Apple's `nvn_be.h` has them as empty inline functions and the SVCs
+  do not call them there. `t_guest_map` (28 checks) records every call through a stub backend on t_svc_memory's small layout.
+
+`t_aot_module` ([dm/host/tests/t_aot_module.c](../../host/tests/t_aot_module.c)) runs the synthetic module of [aot_synth.py](../tests/aot_synth.py)
+through this path, packed by [tests/build_packs.sh](tests/build_packs.sh) into `<packs>/module`: 24 checks in the run (the GOT's two slots, the
+relocated pointer, the image's permissions, the build ID, the state page, both gates through `dm_aot_gate`, then `dm_aot_run` from the entry: the host
+function through the GOT and the dispatcher, the stub, SetHeapSize reaching `be_guest_map` with the heap's range, both x18 jump tables, the exclusive
+window, the spin wait, the cut function, a relocated pointer, OutputDebugString and ExitProcess, with `results[]` as expected), and two refusals (an
+image that is not its manifest's, the pack of another image), each with a [RED] line naming both SHA-256s. It shows the input path and the binding
+on a module made for the purpose: not a real NSO, not a game's size or imports, and no pack calls a gate yet.
 
 ## Floating point and SIMD
 
@@ -918,4 +990,4 @@ The phases of design section 14, and where this folder stands:
 | 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | **done** except what follows: the lifter (0 mismatches over 24,400 integer vectors), the module loader, discovery, the summaries; function mode with the convention of 2.3 in two LLVM mappings (swifttailcc, the default by the measurements, and ghccc for preserve_none, which LLVM 18.1 lacks), calls, returns checked against lr, tail calls, `pending` propagation with resume points at setjmp continuations and landing pads, the correctness mode; jump tables as switches, inline caches, standard entries, the lookup table, the miss path; `nxaot build` (tiers C, W, H, H+; the balanced and max modes; an object with the lookup table, function map and line table, a shared object by lld); `nxaot_host` (the arena below 2^39, the SVC path, the counter, faults through the line table); the corpus natively in both conventions and the correctness mode, equal to dynarmic and to the expected output; nxaot_funcdiff on every corpus function; the measurements ("Measurements"). Not done: the corpus natively on ARM64 hardware (an Apple-silicon Mac), one tier per function and profiles (phase 5), ThinLTO and the cache, functions split for size, the oracle-T / J / W comparisons, the pack throughput targets of section 10 (measured far below them) |
 | 2. FP and SIMD | every FP, NEON and crypto lowering, NaN chains | every opcode the A64 frontend emits lowered; 0 mismatches over the committed vectors and 7,000,000 random floating-point and SIMD ones (10^6 per class for seven of the eight classes, `fp_seq` not completed; not the 10^8 of the acceptance); the chain checks measured. Not done: the row-13 FZ slow path for the basic operations, inline estimates, combined escape checks, the run-time helpers in the host |
 | 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | **done** except what follows: the JIT fallback on dynarmic unmodified (`dm_jit_create` / `dm_jit_run` / `dm_jit_halt`, design 11's configuration, the stops at compiled entries and call sites' returns through the code reader, the hand-over measured), every case of section 11 handed to it (the dispatcher's misses, branches to no entry, FPCR away from the specialisation, untranslated encodings, code that runs into no entry, refused functions, continuations with no native frame), the driver that calls compiled entries natively and propagates non-local transfers; C++ exceptions through LSDA landing pads with a personality-free unwinder, fibers and a return past the caller in the corpus; guest threads with the thread and synchronization SVCs, per-thread state blocks, native stacks and JIT instances, the shared monitor; safepoint polls and the pause protocol with the pause test; the three JIT modes, the threads and the pause test in CTest. The acceptance: the exception, longjmp and thread corpus passes natively, in the JIT and with no JIT where none is needed; `--jit-all` and the compiled runs print the same lines; the pause test passes (CTest `corpus_jit`, `corpus_threads`, `safepoints`). dm/host's side done for the corpus (`dm/host/aot_*.c`, CTest `t_aot_host`; its open items are in the list at the end of "Threads and safepoints"). Not done: the exactness of a JIT target's callee-saved registers is assumed (a compiled caller keeps what the union of address-taken functions preserves across an indirect call); the corpus has no untranslated encoding, no refused function and no run-off into a non-entry (those hand-overs are built and not run); priority and core of threads (FIFO order, no affinity), Horizon's other synchronization objects in this run time (events, condition variables: SignalProcessWideKey / WaitProcessWideKeyAtomic; dm/host's thread layer has them); the discovery gap except-gcc shows (a halfword jump table whose base is set before its loop) |
-| 4. to 6. | games on the Intel Mac, performance, breadth | not started. Prepared for phase 4: the host's run time of packs (dm/host/aot_*.c; Linux checked by `t_aot_host`, Windows written and not run, the Intel Mac not built: the aot files are CMake's, and aot_fault.c reads Linux's signal context). Still to come for a first game module: `patch_nso.py --aot` and the loader's reading of its image and manifest (layout, data, `obs` and `spin` rows), NSO decompression (LZ4) on that path, the binding of `dm_guest_fn` addresses into a module's GOT (loader.c `bind_sym` / `force_lookup`), one pack for every module or a common standard-entry signature (cross-pack calls go through `enter` now), main.c's start sequence through `dm_guest_call`, a host program for x86-64, Boost in the host's image for the JIT fallback |
+| 4. to 6. | games on the Intel Mac, performance, breadth | not started. Prepared for phase 4: the host's run time of packs (dm/host/aot_*.c; Linux checked by `t_aot_host`, Windows written and not run, the Intel Mac not built: the aot files are CMake's, and aot_fault.c reads Linux's signal context). Phase 4's first half, without a game ("A game module in the host"): `patch_nso.py --aot` with its manifest checked against nxaot's reader and discovery, the loader's game-module path (manifest, image, gates, packs), NSO decompression on that path (the rewriter's, as for Apple: nothing in the host), host functions and unimplemented imports bound into a module's GOT, `be_guest_map` / `be_guest_unmap` from the memory SVCs; CTest `t_aot_module` and `t_guest_map`. Still to come for a first game module: the lifter's calls of the observation gates and spin waits (design 1.1), the frame step's aux region lifted, NROs on the game-module path, thunks for hle_table.c's libc passthrough, one pack for every module or a common standard-entry signature (cross-pack calls go through `enter` now), main.c's start sequence through `dm_guest_call`, a host program for x86-64, Boost in the host's image for the JIT fallback |

@@ -19,6 +19,10 @@ void *dm_guest_alloc(size_t n) { (void)n; abort(); }
 uint8_t *dm_aot_image_map(const uint8_t *bytes, size_t len, size_t bss, uint64_t ro_end, size_t *mapped) { (void)bytes; (void)len; (void)bss; (void)ro_end; (void)mapped; abort(); }
 struct dm_guest_state *dm_aot_self_state(void) { return NULL; }
 uint64_t dm_guest_call(struct dm_guest_state *st, uint64_t addr, int nargs, ...) { (void)st; (void)addr; (void)nargs; abort(); }
+uint64_t dm_aot_bind(const module_t *m, const char *name, uint64_t v) { (void)m; (void)name; return v; }   // modules outside the arena keep host addresses (aot_arena.c)
+int dm_aot_load_module_pack(module_t *m, const char *dir, const uint8_t sha256[32], uint64_t image_size, uint64_t text_end, uint64_t bss, char *err, size_t errn) {
+    (void)m; (void)dir; (void)sha256; (void)image_size; (void)text_end; (void)bss; (void)err; (void)errn; abort();
+}
 #endif
 
 typedef struct {

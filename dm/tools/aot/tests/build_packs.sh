@@ -5,6 +5,9 @@
 #   sh dm/tools/aot/tests/build_packs.sh <nxaot build folder> <out folder>
 # The objects nxaot writes beside each shared object are deleted; each NRO's build log is kept as <out>/<name>.log. Exit status 1 when a build
 # fails (its log is printed), 2 on a usage error.
+# Then the synthetic game module of CTest t_aot_module (dm/host/tests/t_aot_module.c) into <out>/module: dm/tools/tests/aot_synth.py writes its NSO,
+# its patch file and, through patch_nso.py's own writer, the behaviour image and manifest patch_nso.py --aot writes for it (main.image.bin,
+# main.aot.tsv), and `nxaot build` packs them into main.aot.so beside them, as a game's packs lie beside their manifests; its log is <out>/module.log
 set -eu
 
 if [ $# -ne 2 ]; then
@@ -34,4 +37,12 @@ for nro in $(grep -v '^#' "$corpus/corpus.tsv" | cut -f1); do
     rm -f "$out/$name.o"
     n=$((n + 1))
 done
-echo "build_packs.sh: $n packs in $out ($(($(date +%s) - start)) s)"
+rm -rf "$out/module"
+if ! { python3 "$here/../../tests/aot_synth.py" "$out/module" &&
+       "$nxaot" build "$out/module/main.aot.tsv" -o "$out/module/main.o" --shared "$out/module/main.aot.so"; } > "$out/module.log" 2>&1; then
+    cat "$out/module.log" >&2
+    echo "build_packs.sh: the synthetic module's pack failed" >&2
+    exit 1
+fi
+rm -f "$out/module/main.o"
+echo "build_packs.sh: $n packs and the synthetic module's in $out ($(($(date +%s) - start)) s)"

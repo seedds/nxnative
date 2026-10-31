@@ -1,6 +1,6 @@
 // The host-function page (aot_hostfn.h; docs/design/aot-recompiler.md 2.4). Slot i of the page is hle_thunks[i] (gen/hle_thunks.c, sorted by mangled name);
-// dm_guest_fn finds a function's slot through a copy of the table sorted by function address. Nothing binds these addresses into the game yet: on x86 the loader's
-// bind_sym / force_lookup (loader.c) return dm_guest_fn(fn) where Apple returns the C function's address, a later step of the port
+// dm_guest_fn finds a function's slot through a copy of the table sorted by function address. On x86 the loader binds them into the game's GOT: bind_sym (loader.c) ends in
+// dm_aot_bind (aot_arena.c), which returns the host-function page slot of dm_guest_fn(fn) where Apple returns the C function's address
 #include "aot_hostfn.h"
 #include "dm.h"
 #include <stdatomic.h>

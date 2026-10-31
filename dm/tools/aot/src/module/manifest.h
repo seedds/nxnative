@@ -1,7 +1,8 @@
 // The manifest of a behaviour image (docs/design/aot-recompiler.md section 1.2): TSV, one row kind per line, beside <name>.image.bin. patch_nso.py
-// --aot will write it for game modules (a later task); `nxaot image` writes one with layout and data rows for an NRO (src/module/image.h), so that
+// --aot writes it for game modules (its writer, aot_manifest, prints this file's canonical form; where it and the design differ, this reader is the
+// format: dm/tools/aot/README.md, "Game modules"); `nxaot image` writes one with layout and data rows for an NRO (src/module/image.h), so that
 // the tool has one input form. Numbers are hex, written with 0x as the rewriter's tables are (patch_nso.py, sites.tsv), read with or without it;
-// the observation number is decimal, as OBS_* in dm/host/dm.h.
+// the observation number is decimal, as OBS_* in dm/host/dm.h (their low 8 bits; bits 8 up are the parameter). dm/host/loader.c reads the same rows.
 #pragma once
 
 #include <cstdint>

@@ -13,6 +13,10 @@
 void *dm_guest_reserve(size_t n);
 void *dm_guest_alloc(size_t n);
 int dm_aot_main_stack(uint64_t *lo, uint64_t *size);
+// The graphics backend (dm/gfx/nvn/nvn_be.h; docs/design/vulkan-backend.md 4.2): guest memory the SVCs below commit, and guest memory they are about to decommit, so that the
+// Vulkan backend releases an import of it first. Apple's nvn_be.h has them as empty inline functions (Metal needs neither): on Apple the SVCs do not call them
+void be_guest_map(void *mem, uint64_t size);
+void be_guest_unmap(void *mem, uint64_t size);
 #endif
 
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
@@ -440,9 +444,15 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             pthread_mutex_unlock(&g_map_lock); regs[0] = 0x10801; return 0;
         }
         int rc = 0;
+#if !DM_NATIVE_EXEC
+        if (size < g_heap_cur) be_guest_unmap(g_heap + size, g_heap_cur - size);   // the heap shrinks: its end is decommitted below
+#endif
         if (size > g_heap_cur) rc = plat_vm_protect(g_heap + g_heap_cur, size - g_heap_cur, PLAT_PROT_READ | PLAT_PROT_WRITE);
         else if (size < g_heap_cur) rc = plat_vm_protect(g_heap + size, g_heap_cur - size, PLAT_PROT_NONE);
         if (rc) die("SetHeapSize mprotect failed: req=%#zx errno=%d", size, errno);
+#if !DM_NATIVE_EXEC
+        if (size > g_heap_cur) be_guest_map(g_heap + g_heap_cur, size - g_heap_cur);   // the heap grew
+#endif
         if (g_flag.svc) LOG("SetHeapSize %#zx -> base %p mprotect=%d errno=%d", size, g_heap, rc, errno);
         else if (size > g_heap_cur) LOG("[mem] heap %.2f GB (heap region %.2f GB)", size / 1073741824.0, g_heap_cap / 1073741824.0);
         g_heap_cur = size;
@@ -469,6 +479,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         uint64_t lo = dst & ~mask, hi = (dst + size + mask) & ~mask;
         if (plat_vm_protect((void *)lo, hi - lo, PLAT_PROT_READ | PLAT_PROT_WRITE)) die("MapMemory mprotect errno=%d", errno);
         dm_guest_write_prepare((void *)lo, hi - lo);
+#if !DM_NATIVE_EXEC
+        be_guest_map((void *)lo, hi - lo);   // the destination is committed (UnmapMemory leaves its pages accessible: no decommit, so no be_guest_unmap there)
+#endif
         memcpy((void *)dst, (void *)src, size);   // move semantics: the source region is not accessed while mapped (Horizon makes it inaccessible)
         map_add(dst, size, src, 0x0B /*MappedMemory*/);
         pthread_mutex_unlock(&g_map_lock);
@@ -604,10 +617,16 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             if ((mhi - hi) / 4096 != (uint64_t)alias_unmapped(hi - (uintptr_t)g_alias, mhi - hi)) mhi -= pg;
         }
         if (changed && mhi > mlo) {
+#if !DM_NATIVE_EXEC
+            if (!commit) be_guest_unmap((void *)mlo, mhi - mlo);   // the host pages decommitted below
+#endif
             if (plat_vm_protect((void *)mlo, mhi - mlo, commit ? PLAT_PROT_READ | PLAT_PROT_WRITE : PLAT_PROT_NONE))
                 die("SVC %#x mprotect %p+%#zx errno=%d", num, (void *)a, size, errno);
             if (commit) dm_guest_write_prepare((void *)mlo, mhi - mlo);
             else (void)plat_vm_discard((void *)mlo, mhi - mlo);
+#if !DM_NATIVE_EXEC
+            if (commit) be_guest_map((void *)mlo, mhi - mlo);   // the host pages committed above
+#endif
         }
         if (commit && changed) alias_initialize(off, size);
         if (g_flag.svc) LOG("%sPhysicalMemory %p+%#zx", commit ? "Map" : "Unmap", (void *)a, size);

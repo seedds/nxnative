@@ -2,7 +2,7 @@
 // The arena: one reservation of DM_AOT_ARENA_SIZE at DM_AOT_ARENA_BASE, below 2^39 (the Switch's 39-bit address space, which a guest may rely on), made at start
 // with plat_vm_reserve_at; nothing in it is accessible until taken. A guest address is the host address of the same byte (5.1): recompiled loads and stores
 // use guest addresses directly, and host code keeps using guest pointers as C pointers. The arena's first page stays inaccessible (DM_AOT_HOST_RETURN lies
-// in it); the host-function page of aot_hostfn.c follows (2.4); then whatever the host hands the guest: hle_svc.c's guest block (heap, alias and stack
+// in it); the host-function page of aot_hostfn.c and the stub page of unimplemented imports follow (2.4); then whatever the host hands the guest: hle_svc.c's guest block (heap, alias and stack
 // regions), module images, TLS blocks and thread-local regions (thread.c), the main thread's guest stack. Fresh memory is taken from the bottom up; ranges
 // given back (dm_guest_free) are reused first and zeroed then. Pages are 4 KiB on Linux and Windows, as Horizon's, so protections are exact (5.3).
 // Packs: the shared object (DLL on Windows) `nxaot build` makes for a module, loaded once, its identity checked against the image it was compiled from
@@ -25,6 +25,7 @@ typedef struct { uint64_t a, n; } span_t;
 static span_t g_free[MAX_FREE];  // ranges given back, sorted by address, adjacent ones joined (g_mem_lock)
 static int g_nfree;
 
+static uint64_t g_stub_page;     // the named stubs' slots (aot.h), after the host-function page
 static size_t page(void) { static size_t pg; if (!pg) pg = plat_page_size(); return pg; }
 static uint64_t round_up(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
 
@@ -49,8 +50,15 @@ static void arena_init_once(void) {
     uint64_t hp = take_fresh(n, page());
     if (plat_vm_protect((void *)(uintptr_t)hp, n, PLAT_PROT_READ | PLAT_PROT_WRITE)) die("aot: host-function page at %#llx: protection failed (errno %d)", (unsigned long long)hp, errno);
     dm_aot_hostfn_init(hp, n);
-    LOG("aot: arena %#llx..%#llx (%llu GiB, below 2^39), host-function page %#llx (%zu slots)", (unsigned long long)DM_AOT_ARENA_BASE,
-        (unsigned long long)(DM_AOT_ARENA_BASE + DM_AOT_ARENA_SIZE), (unsigned long long)(DM_AOT_ARENA_SIZE >> 30), (unsigned long long)hp, hle_thunks_count);
+    // The stub page (aot.h): a slot per named stub of an unimplemented import, brk words, read-only
+    const size_t sn = round_up((size_t)DM_AOT_STUBS * DM_AOT_HOSTFN_SLOT, page());
+    g_stub_page = take_fresh(sn, page());
+    if (plat_vm_protect((void *)(uintptr_t)g_stub_page, sn, PLAT_PROT_READ | PLAT_PROT_WRITE)) die("aot: stub page at %#llx: protection failed (errno %d)", (unsigned long long)g_stub_page, errno);
+    for (size_t i = 0; i < sn / 4; i++) ((uint32_t *)(uintptr_t)g_stub_page)[i] = DM_AOT_HOSTFN_POISON;
+    if (plat_vm_protect((void *)(uintptr_t)g_stub_page, sn, PLAT_PROT_READ)) die("aot: stub page at %#llx: read-only protection failed (errno %d)", (unsigned long long)g_stub_page, errno);
+    LOG("aot: arena %#llx..%#llx (%llu GiB, below 2^39), host-function page %#llx (%zu slots), stub page %#llx (%d slots)", (unsigned long long)DM_AOT_ARENA_BASE,
+        (unsigned long long)(DM_AOT_ARENA_BASE + DM_AOT_ARENA_SIZE), (unsigned long long)(DM_AOT_ARENA_SIZE >> 30), (unsigned long long)hp, hle_thunks_count,
+        (unsigned long long)g_stub_page, DM_AOT_STUBS);
 }
 void dm_aot_arena_init(void) { pthread_once(&g_once, arena_init_once); }
 
@@ -121,6 +129,33 @@ uint8_t *dm_aot_image_map(const uint8_t *bytes, size_t len, size_t bss, uint64_t
     return b;
 }
 
+// ---------- Imports: host functions and unimplemented imports at guest-visible addresses (design 2.4) ----------
+uint64_t unimpl_stubs[DM_AOT_STUBS];   // hle.c resolve_import hands out &unimpl_stubs[k]; on Apple entry.S assembles them, here they are identities only
+
+uint64_t dm_aot_stub_addr(unsigned k) {
+    dm_aot_arena_init();
+    if (k >= DM_AOT_STUBS) die("aot: stub %u of %d", k, DM_AOT_STUBS);
+    return g_stub_page + (uint64_t)k * DM_AOT_HOSTFN_SLOT;
+}
+
+long dm_aot_stub_index(uint64_t guest) {
+    if (!g_stub_page || guest < g_stub_page || (guest - g_stub_page) % DM_AOT_HOSTFN_SLOT) return -1;
+    const uint64_t k = (guest - g_stub_page) / DM_AOT_HOSTFN_SLOT;
+    return k < DM_AOT_STUBS ? (long)k : -1;
+}
+
+uint64_t dm_aot_bind(const module_t *m, const char *name, uint64_t v) {
+    if (!m || !dm_aot_in_arena((uint64_t)(uintptr_t)m->base, 1)) return v;                  // a module the engine did not map: host addresses, as Apple binds them
+    if (!v || module_of((const void *)(uintptr_t)v) || dm_aot_in_arena(v, 1)) return v;      // undefined weak (0), a loaded module's definition, guest memory
+    const uint64_t s0 = (uint64_t)(uintptr_t)unimpl_stubs;
+    if (v >= s0 && v < s0 + sizeof unimpl_stubs) return dm_aot_stub_addr((unsigned)((v - s0) / sizeof *unimpl_stubs));   // hle.c's named stub k
+    for (size_t i = 0; i < hle_thunks_count; i++)
+        if ((uint64_t)(uintptr_t)hle_thunks[i].fn == v) return dm_guest_fn(hle_thunks[i].fn);   // an HLE / HLE_FORCE / NVN entry: its slot
+    const char *sym = plat_addr_symbol((const void *)(uintptr_t)v, NULL);
+    die("[RED] aot: %s imports %s, which binds to the host function at %#llx (%s), and that function has no host-call thunk (dm/host/tools/gen_hle_thunks.py makes one per "
+        "HLE, HLE_FORCE and NVN entry; hle_table.c's libc passthrough has none): compiled code could not call it", m->name, name, (unsigned long long)v, sym ? sym : "no symbol");
+}
+
 // ---------- Packs ----------
 typedef struct { uint64_t native; uint64_t off; } map_t;   // a native address and the module offset of its guest function or instruction
 struct dm_aot_pack {
@@ -179,12 +214,14 @@ dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identi
     void *lib = lib_open(path, err, errn);
     if (!lib) return NULL;
     const nxaot_module_desc *d = lib_sym(lib, "nxaot_module");
-    const char *bad = NULL; char why[160];
+    const char *bad = NULL; char why[400];
     if (!d) bad = "it has no nxaot_module descriptor (not a pack of nxaot build)";
     else if (d->abi != NXAOT_MODULE_ABI) { snprintf(why, sizeof why, "its descriptor has ABI %u, this host reads %u", d->abi, NXAOT_MODULE_ABI); bad = why; }
     else if (memcmp(d->sha256, id->sha256, 32) || d->image_size != id->image_size || d->text_end != id->text_end || d->bss_size != id->bss_size) {
-        snprintf(why, sizeof why, "it was compiled from another image than %s (SHA-256 or layout differ: image %#llx / %#llx, text %#llx / %#llx, bss %#llx / %#llx)", m->name,
-                 (unsigned long long)d->image_size, (unsigned long long)id->image_size, (unsigned long long)d->text_end, (unsigned long long)id->text_end,
+        char hp[65], hi[65];   // the pack's image and the mapped one, by SHA-256
+        for (int i = 0; i < 32; i++) { snprintf(hp + 2 * i, 3, "%02x", d->sha256[i]); snprintf(hi + 2 * i, 3, "%02x", id->sha256[i]); }
+        snprintf(why, sizeof why, "it was compiled from another image than %s: the pack's SHA-256 %s, the image's %s (image %#llx / %#llx bytes, text %#llx / %#llx, bss %#llx / %#llx)",
+                 m->name, hp, hi, (unsigned long long)d->image_size, (unsigned long long)id->image_size, (unsigned long long)d->text_end, (unsigned long long)id->text_end,
                  (unsigned long long)d->bss_size, (unsigned long long)id->bss_size);
         bad = why;
     }
@@ -224,6 +261,17 @@ dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identi
         (unsigned long long)d->fn_count, d->lookup_mask + 1, p->nlines, (unsigned long long)d->return_count, (unsigned long long)p->code_lo, (unsigned long long)p->code_hi,
         d->tool ? d->tool : "");
     return p;
+}
+
+int dm_aot_load_module_pack(module_t *m, const char *dir, const uint8_t sha256[32], uint64_t image_size, uint64_t text_end, uint64_t bss, char *err, size_t errn) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s" DM_AOT_PACK_SUFFIX, dir, m->name);
+    dm_aot_identity id;
+    memcpy(id.sha256, sha256, 32); id.image_size = image_size; id.text_end = text_end; id.bss_size = bss;
+    if (dm_aot_pack_load(path, m, &id, err, errn)) return 0;
+    size_t k = strlen(err);   // how to make it, after the reason
+    snprintf(err + k, errn > k ? errn - k : 0, " (nxaot build %s/%s.aot.tsv -o <object> --shared %s makes the pack of this image)", dir, m->name, path);
+    return 1;
 }
 
 const nxaot_module_desc *dm_aot_pack_desc(const dm_aot_pack *p) { return p->desc; }

@@ -44,6 +44,8 @@ static void *memory_reserve(size_t n) {
 // The rest of the x86-64 engine's side of hle_svc.c, which this fixture does not reach (no user exception context, no main-thread guest stack)
 void *dm_guest_alloc(size_t n) { (void)n; abort(); }
 int dm_aot_main_stack(uint64_t *lo, uint64_t *size) { (void)lo; (void)size; return 0; }
+void be_guest_map(void *mem, uint64_t size) { (void)mem; (void)size; }     // the graphics backend's view of guest memory (t_guest_map counts the calls)
+void be_guest_unmap(void *mem, uint64_t size) { (void)mem; (void)size; }
 #endif
 #undef plat_vm_protect
 #undef plat_page_size

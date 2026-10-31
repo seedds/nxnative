@@ -290,6 +290,10 @@ To enroll a cut for any game's own module:
 - **Fix:** `relr_apply` in `loader.c`; `DM_LOADHASH` and `nvn_slots_got.py` read it too. The loader's log line counts them as `relr=`.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) 1.9.0 (SDK 20).
 
+## The recompiler's input (--aot)
+
+`patch_nso.py <NSO> <out dir> <name> --aot <aot dir>` rewrites the module as without it, every output byte for byte the same, and also writes the input of the x86-64 recompiler ([aot-recompiler.md](../design/aot-recompiler.md) 1.1, 1.2): `<aot dir>/<name>.image.bin`, the behaviour image (the NSO's segments as the rewriter decompressed them, with the cuts and the frame step's branches, none of Apple's rewrites), and `<name>.aot.tsv`, its manifest (the module, build ID and SHA-256 of the image; its layout; the frame step's stubs, assembled again by the build's FRAME_STEP function in an aux region after the state page; data blocks in text; observation gates, spin waits and cuts; the rewriter's x18 jump tables and windows as oracle rows for nxaot to check). The rows and where they differ from the design: [dm/tools/aot/README.md, Module loader and discovery](../../dm/tools/aot/README.md#module-loader-and-discovery) ("Game modules"); the host's side: [A game module in the host](../../dm/tools/aot/README.md#a-game-module-in-the-host). `dm/tools/tests/test_aot_manifest.py` checks both on a synthetic module, Apple's outputs with and without `--aot` among them (it needs capstone and lz4, as the rewriter does).
+
 ## Checking a rewriter change
 
 Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.

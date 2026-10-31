@@ -63,7 +63,8 @@ jobs:
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot \
             sh dm/tools/aot/tests/run_aot_tests.sh build/aot
       # The host's run time of recompiled code (dm/host/aot_*.c; dm/tools/aot/README.md, "Threads and safepoints", the dm/host list): every corpus NRO
-      # packed by nxaot with the default options into build/packs, then dm/host built with that folder and its test t_aot_host run (CTest): each NRO
+      # packed by nxaot with the default options into build/packs (and the synthetic game module of t_aot_module into build/packs/module, below), then
+      # dm/host built with that folder and its test t_aot_host run (CTest): each NRO
       # mapped by the host's loader in the arena below 2^39, its pack loaded, _start run through the host's SVC dispatcher and thread layer, the lines
       # compared with corpus/expected; excl's threads and its pause test through SetThreadActivity and GetThreadContext3; a guest call into the
       # host-function page; write-protected data pages resumed by a fault hook. First in the host's own image (docker/Dockerfile.build, built here: it has
@@ -91,6 +92,28 @@ jobs:
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
             "cmake -S dm/host -B build/host-jit -G Ninja -DGAME=010015100B514000 -DNXHOST_JIT=ON -DSDL_UNIX_CONSOLE_BUILD=ON -DNXAOT_PACKS=/src/build/packs && cmake --build build/host-jit --target t_aot_host && ctest --test-dir build/host-jit -R '^t_aot_host\$' --output-on-failure -V"
+      # A game module through the host's game-module path (dm/host/tests/t_aot_module.c; dm/tools/aot/README.md, "A game module in the host"): the synthetic module
+      # build_packs.sh wrote into build/packs/module (dm/tools/tests/aot_synth.py: its behaviour image and manifest as patch_nso.py --aot writes them, packed by nxaot)
+      # mapped by loader.c's load_modules from its manifest, its imports bound into its GOT (a host function, an unimplemented import), run through dm_aot_run, its
+      # SetHeapSize reaching the graphics backend's be_guest_map; an image that is not its manifest's and a pack of another image refused. In the build folders of the
+      # t_aot_host steps (configured there), so only the test is compiled: a few seconds each
+      - name: The host on a game module (t_aot_module, nxnative-build)
+        if: ${{ !cancelled() && steps.packs.outcome == 'success' }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build sh -c \
+            "cmake -S dm/host -B build/host -G Ninja -DGAME=010015100B514000 -DNXAOT_PACKS=/src/build/packs && cmake --build build/host --target t_aot_module t_guest_map && ctest --test-dir build/host -R '^(t_aot_module|t_guest_map)\$' --output-on-failure -V"
+      - name: The host on a game module with the JIT fallback (t_aot_module, NXHOST_JIT, nxnative-aot)
+        if: ${{ !cancelled() && steps.packs.outcome == 'success' }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
+            "cmake -S dm/host -B build/host-jit -G Ninja -DGAME=010015100B514000 -DNXHOST_JIT=ON -DSDL_UNIX_CONSOLE_BUILD=ON -DNXAOT_PACKS=/src/build/packs && cmake --build build/host-jit --target t_aot_module && ctest --test-dir build/host-jit -R '^t_aot_module\$' --output-on-failure -V"
+      # patch_nso.py --aot's manifest read by nxaot (dm/tools/tests/test_aot_manifest.py): the round trip through nxaot's reader and writer, the rewriter's oracle rows
+      # reproduced by nxaot's discovery, the pack built. The part that runs patch_nso.py itself needs capstone and lz4, which this image lacks: tests.yml's tool tests run it
+      - name: The recompiler's input from patch_nso.py --aot (test_aot_manifest.py with nxaot)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e NXAOT=build/aot/nxaot -v "$(pwd):/src" -w /src nxnative-aot \
+            python3 -m unittest -v dm/tools/tests/test_aot_manifest.py
       - name: The host's floating-point helpers against nxaot's (aot_fp_diff.sh)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |

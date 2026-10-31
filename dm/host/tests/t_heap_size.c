@@ -36,6 +36,8 @@ int thr_limit_used(void) { return 0; }
 void *dm_guest_reserve(size_t n) { return plat_vm_reserve(n); }
 void *dm_guest_alloc(size_t n) { (void)n; abort(); }
 int dm_aot_main_stack(uint64_t *lo, uint64_t *size) { (void)lo; (void)size; return 0; }
+void be_guest_map(void *mem, uint64_t size) { (void)mem; (void)size; }     // the graphics backend's view of guest memory (t_guest_map counts the calls)
+void be_guest_unmap(void *mem, uint64_t size) { (void)mem; (void)size; }
 #endif
 int dm_ue_heap_owns(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; } // No Unreal allocator is installed in this fixture.
 void dm_guest_write_prepare(void *addr, size_t size) { (void)addr; (void)size; }

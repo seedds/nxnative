@@ -10,6 +10,9 @@
 //   nxaot_rt_trap       brk, undefined encodings, a no-return call that returned: a [RED] line and a process stop
 //   nxaot_rt_safepoint  a poll found the poll byte set (6.2): the pause of SetThreadActivity (hle_thread.c), or a process stop
 //   dm_aot_cntpct       mrs cntpct_el0 / cntvct_el0 (8): the guest clock in 19.2 MHz ticks, as svcGetSystemTick and Apple's counter gate read it
+//   dm_aot_gate         a manifest's observation gate or spin wait back-edge (loader.c registers them in hle.c's gate table): the lifter's call of design 1.1, which no
+//                       pack makes yet
+// A call to the stub page (aot.h: an import nothing implements) is answered as a host call is, by hle.c's unimpl_c
 // Guest code runs with the MXCSR of the module's FPCR (7.1), set at every entry into compiled code from the host; host calls run with the guest thread's MXCSR,
 // as host calls run with the guest's FPCR on Apple
 #include "aot.h"
@@ -118,6 +121,15 @@ static void host_call(dm_aot_thread *t, uint64_t pc) {
     t->st.pc = t->st.x[30];   // the guest goes on at its return address
 }
 
+// A guest call reached the slot of unimplemented import k (aot.h, the stub page): hle.c's unimpl_c logs it once and answers 0, as Apple's entry.S stub does
+static void stub_call(dm_aot_thread *t, long k) {
+    uint64_t unimpl_c(unsigned idx, uint64_t *regs);   // hle.c
+    atomic_fetch_add_explicit(&c_host_calls, 1, memory_order_relaxed);
+    t->st.x[0] = unimpl_c((unsigned)k, t->st.x);
+    check_stop(t);
+    t->st.pc = t->st.x[30];
+}
+
 // A compiled entry the JIT loop reached: its standard entry with the block's registers (2.5), under the MXCSR of the thread's FPCR
 static void native_call(dm_aot_thread *t, const dm_aot_pack *p, const void *entry) {
     _mm_setcsr(dm_aot_guest_mxcsr(t->st.fpcr));
@@ -183,7 +195,7 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why) {
     case DM_JIT_HALTED: safepoint(t); return;        // a pause or a stop
     case DM_JIT_CALLBACK: dm_aot_leave(atomic_load(&t->exiting) ? DM_AOT_LEFT_EXIT : DM_AOT_LEFT_STOP);   // the svc ended the thread or the process
     case DM_JIT_NO_CODE:
-        if (stop == DM_AOT_HOST_RETURN || stop == lr || dm_aot_hostfn_name(stop)) return;
+        if (stop == DM_AOT_HOST_RETURN || stop == lr || dm_aot_hostfn_name(stop) || dm_aot_stub_index(stop) >= 0) return;
         {
             char at[64], msg[200];
             dm_aot_guest_name(stop, at, sizeof at);
@@ -217,6 +229,7 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
         }
         if (pc == DM_AOT_HOST_RETURN) { st->pending = pc; return; }   // the guest returned to the host while native frames wait
         if (dm_aot_hostfn_name(pc)) { host_call(t, pc); continue; }   // a host function through its guest-visible address (2.4)
+        if (dm_aot_stub_index(pc) >= 0) { stub_call(t, dm_aot_stub_index(pc)); continue; }   // an unimplemented import
         if (mode) {
             const dm_aot_pack *p;
             const nxaot_lookup_entry *e = dm_aot_find(pc, &p);
@@ -248,6 +261,7 @@ static void run_guest(dm_aot_thread *t, uint64_t pc) {
         if (pc == DM_AOT_HOST_RETURN) return;
         st->pc = pc;
         if (dm_aot_hostfn_name(pc)) { host_call(t, pc); pc = st->pc; continue; }
+        if (dm_aot_stub_index(pc) >= 0) { stub_call(t, dm_aot_stub_index(pc)); pc = st->pc; continue; }
         if (module_mode(st)) {
             const dm_aot_pack *p;
             const nxaot_lookup_entry *e = dm_aot_find(pc, &p);
@@ -401,7 +415,7 @@ DM_AOT_EXPORT void *nxaot_rt_dispatch(dm_guest_state *st, uint64_t target, const
     // No compiled entry in the caller's pack: jit_entry with the target in st->pc. The slot keeps its descriptor, so the next call misses again
     if (e) atomic_fetch_add_explicit(&c_cross, 1, memory_order_relaxed);
     st->pc = target;
-    st->exit_reason = e ? REASON_CROSS : dm_aot_hostfn_name(target) ? REASON_HOSTCALL : NXAOT_TRAP_JIT_MISS;
+    st->exit_reason = e ? REASON_CROSS : dm_aot_hostfn_name(target) || dm_aot_stub_index(target) >= 0 ? REASON_HOSTCALL : NXAOT_TRAP_JIT_MISS;
     return (void *)dm_aot_pack_jit_entry(caller);
 }
 
@@ -432,4 +446,10 @@ DM_AOT_EXPORT uint64_t dm_aot_cntpct(dm_guest_state *st) {
     (void)st;
     guest_clock_read_wait();          // waits while the app is in the background (hle_os.c)
     return guest_ns() * 12 / 625;     // 19.2 MHz, as svcGetSystemTick (hle_svc.c) and the counter gate (hle.c) compute it
+}
+
+// An observation gate or a spin wait's back-edge (aot.h): hle.c's gate table, as dm_gate's frame reaches it on Apple, with the block's registers as the frame
+DM_AOT_EXPORT void dm_aot_gate(dm_guest_state *st, uint64_t pc) {
+    uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);   // hle.c
+    (void)gate_dispatch(pc, st->x);
 }

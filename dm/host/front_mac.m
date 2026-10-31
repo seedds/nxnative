@@ -20,6 +20,7 @@
 #include "haptics_apple.h"
 #include "motion_apple.h"
 #include "motion_pro_mac.h"
+#include "motion_joycon_mac.h"
 #include "pad_apple.h"
 #include <signal.h>
 #include <math.h>
@@ -148,6 +149,16 @@ static void pro_players_changed(GCController *gone) {
     dm_motion_pro_players(count, player);
 }
 static void pro_devices_changed(void) { pro_players_changed(nil); }
+// The Joy-Con pad's player, for the HID IMU reader (motion_joycon_mac.h): Apple gives a Joy-Con pair no motion at all, so the right
+// unit's own reports are the player's six-axis source. Counted from the slots above, like the Pro Controller's reader.
+static void joycon_players_changed(void) {
+    int count = 0, player = -1;
+    for (GCController *c in GCController.controllers) if (c.extendedGamepad && [c.productCategory containsString:@"Joy-Con"]) {
+        count++; player = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c);
+    }
+    dm_motion_joycon_players(count, player);
+}
+static void joycon_devices_changed(void) { joycon_players_changed(); }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
     if (g_merge) {
@@ -160,6 +171,7 @@ static void pads_changed(GCController *gone) {
         if (gone) dm_motion_detach(gone, 0);
         if (!any) { dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }
         pro_players_changed(gone);
+        joycon_players_changed();   // the merged player, so a Joy-Con's HID motion reaches it too
         return;
     }
     NSArray<GCController *> *now = GCController.controllers; char nb[16];
@@ -182,6 +194,7 @@ static void pads_changed(GCController *gone) {
     }
     dm_pad_players(pad_slot_mask(&g_slots));
     pro_players_changed(gone);
+    joycon_players_changed();
 }
 // Focus: a window that is no longer key sees no key-up, mouse-up or controller release, so whatever is held when it loses focus (another app, the text box, minimized) would
 // stay pressed in the game. The front end releases only what it pressed itself: scripted buttons and sticks have their own path, and the touch is also DM_KEYS / DM_CTL's (hle_hid.c).
@@ -190,6 +203,7 @@ static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 static void input_release(void) {
     g_input_on = 0;
     dm_motion_pro_active(0);
+    dm_motion_joycon_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
@@ -198,6 +212,7 @@ static void input_release(void) {
 static void input_resume(void) {
     g_input_on = 1;
     dm_motion_pro_active(1);
+    dm_motion_joycon_active(1);
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
 }
@@ -210,6 +225,7 @@ static void pads_start(void) {
                                                                            : "each controller is a player of its own, the keyboard plays with player 1");
     pads_changed(nil);
     dm_motion_pro_start(pro_devices_changed);
+    dm_motion_joycon_start(joycon_devices_changed);
 }
 
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,

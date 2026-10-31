@@ -16,6 +16,15 @@
 - **Fix:** the NSP script checks the environment before extracting anything: `check_native_python` stops under Rosetta (`sysctl.proc_translated`), and `check_prereqs` starts the translator once with `--source-sha` and stops with its first message line (`check_translator`). It also checks glslang and, for an iPhone build, the iOS SDK (`check_ios_sdk`, before the Metal check, whose message would blame the Metal toolchain). `own_compilers.py` no longer asks a Mac-only shader build (`DMSH_TARGETS=mac`) for the iOS Metal compiler. `tool_lock.py` records `--source-sha`'s failure instead of its empty stdout (`xlate_embedded`: `does not run (<first message line>)`), so `dmsh_build.py` run directly and `--update-lock` stop with the same message as the NSP script, without the lock and rebuild lines. The tool checks used to be in `dmsh_chain.py`, which is part of the chain version and of every shader's cache key, so that fix rebuilt every library; they now live in `tool_lock.py`, outside both, and a change to them rebuilds nothing.
 - **Found on:** NX2Apple builds ([LNPANDY/NX2Apple#31](https://github.com/LNPANDY/NX2Apple/issues/31), item 3; [PR #477](https://github.com/seedds/nxnative/pull/477), [PR #487](https://github.com/seedds/nxnative/pull/487)); reproduced with `arch -x86_64`. Applies to every game.
 
+## Launcher text
+
+### Launcher buttons and settings cannot be translated
+
+- **Symptom:** the iOS and Mac launchers show English settings and buttons regardless of the app's language, and contributors must edit source code to translate them.
+- **Cause:** UI literals have no bundled string table; dynamic labels from `launcher.json` are rendered verbatim and have no translation keys.
+- **Fix:** both launchers look up a shared `Launcher.strings` table. The settings generator adds optional stable keys while retaining English fallbacks and the original values. Both app packers include the locale resources. The translation and compatibility contract is in [Translating the built-in launchers](../frontends.md#translating-the-built-in-launchers).
+- **Found on:** [issue #775](https://github.com/seedds/nxnative/issues/775), covering both launchers. Native synthetic bundle tests cover translation, fallback, section identity and saved values; no game files are required.
+
 ## IPA archives
 
 ### A streamed file changes size and the IPA fails its CRC check

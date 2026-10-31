@@ -108,7 +108,7 @@ class PackReuse(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix='pack-reuse-', dir=TEST_ROOT)).resolve()
         self.addCleanup(shutil.rmtree, self.tmp)
         t = self.tmp
-        for d in ('patched', 'romfs/empty', 'msl', 'profile', 'font', 'aoc/1', 'pso', 'bin', 'sdk', 'source', 'host', 'tools', 'ios/Sources'):
+        for d in ('patched', 'romfs/empty', 'msl', 'profile', 'font', 'aoc/1', 'pso', 'bin', 'sdk', 'source', 'host', 'tools', 'ios/Sources/Resources/en.lproj'):
             (t / d).mkdir(parents=True)
         files = {
             'dmhost': b'host', 'patched/main.patched.bin': b'code', 'patched/main.fixups.tsv': b'fixups',
@@ -118,6 +118,7 @@ class PackReuse(unittest.TestCase):
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
+            'ios/Sources/Resources/en.lproj/Launcher.strings': b'"Play" = "Play";',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -185,6 +186,23 @@ class PackReuse(unittest.TestCase):
         packed = Path(self.args.out) / 'Contents/Resources/msl/msl/linked.metallib'
         self.assertEqual(os.readlink(packed), 'right.metallib')
         self.assert_reused()
+
+    def test_localization_tables_are_packed_and_invalidate_reuse(self):
+        self.pack(); self.assert_reused()
+        source = self.tmp / 'ios/Sources/Resources'
+        resources = Path(self.args.out) / 'Contents/Resources'
+        self.assertEqual((resources / 'en.lproj/Launcher.strings').read_bytes(), (source / 'en.lproj/Launcher.strings').read_bytes())
+        translated = source / 'fr.lproj/Launcher.strings'
+        translated.parent.mkdir()
+        translated.write_text('"Play" = "Translated play";')
+        self.assert_repacked()
+        self.assertEqual((resources / 'fr.lproj/Launcher.strings').read_bytes(), translated.read_bytes())
+        translated.write_text('"Play" = "Updated play";')
+        self.assert_repacked()
+        self.assertEqual((resources / 'fr.lproj/Launcher.strings').read_bytes(), translated.read_bytes())
+        translated.unlink()
+        self.assert_repacked()
+        self.assertFalse((resources / 'fr.lproj/Launcher.strings').exists())
 
     def test_unchanged_reuses_before_partial_clone_compile_and_sign(self):
         self.pack()

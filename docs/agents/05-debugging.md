@@ -142,7 +142,7 @@ Instruments' Metal Resource Events didn't record this process from the command l
 
 ## Save failures
 
-`DM_TEST_FS_FAILAT=<point>[:<count>][,…]` makes steps of the save transaction fail with ENOSPC (`mountclone`, `reclone`, `guestname`, `renameback`; `dm/host/tests/t_fs.c` section 6). The game must keep running: a mount that cannot clone its work directory falls back to the committed saves read-only, and the iOS front end shows a notice.
+`DM_TEST_FS_FAILAT=<point>[:<count>][,…]` makes steps of the save transaction fail with ENOSPC (`mountclone`, `reclone`, `guestname`, `renameback`; `noswap` instead injects unsupported atomic-swap capability, `ENOTSUP`; `dm/host/tests/t_fs.c` sections 6–8). The game must keep running: a mount that cannot clone its work directory falls back to the committed saves read-only, and the iOS front end shows a notice.
 
 ## Render-pass investigation
 

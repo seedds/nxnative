@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <stdatomic.h>
 #include <sys/clonefile.h>
+#include <copyfile.h>
+#include <sys/attr.h>
 #include <sys/xattr.h>
 #include "romfs_image.h"
 #include "save_sync.h"
@@ -184,6 +186,34 @@ static int img_path(const char *p, int *mi, int64_t *k) {
     }
     return 0;
 }
+// A save commit publishes two nonempty directory trees with RENAME_SWAP. A
+// recursive copy alone does not make that publication atomic: HFS+ can copy a
+// tree but does not advertise VOL_CAP_INT_RENAME_SWAP. Fail closed there rather
+// than allow writes that cannot be committed without exposing partial saves.
+static int save_can_swap(const char *dir) {
+    if (dm_fs_test_fail("noswap")) { errno = ENOTSUP; return 0; }
+    struct attrlist a = {.bitmapcount = ATTR_BIT_MAP_COUNT, .volattr = ATTR_VOL_CAPABILITIES};
+    struct { uint32_t length; vol_capabilities_attr_t caps; } v = {0};
+    if (getattrlist(dir, &a, &v, sizeof v, 0)) return 0;
+    return (v.caps.valid[VOL_CAPABILITIES_INTERFACES] & VOL_CAP_INT_RENAME_SWAP) &&
+           (v.caps.capabilities[VOL_CAPABILITIES_INTERFACES] & VOL_CAP_INT_RENAME_SWAP);
+}
+// clonefile is a fast APFS snapshot. Some filesystems support atomic directory
+// exchange but not cloning: copy the entire tree, including POSIX metadata,
+// ACLs and guest-name xattrs, before attempting the atomic swap. Never fall
+// back for a genuine I/O / out-of-space error. A failed copy leaves no partial
+// destination that a later transaction could mistake for a complete snapshot.
+static int save_snapshot(const char *src, const char *dst) {
+    if (!clonefile(src, dst, 0)) return 0;
+    if (errno != ENOTSUP) return -1;
+    struct stat st;
+    if (!lstat(dst, &st) && rm_tree(dst)) return -1;
+    if (!copyfile(src, dst, NULL, COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_NOFOLLOW | COPYFILE_EXCL)) return 0;
+    int e = errno;
+    if (!lstat(dst, &st)) rm_tree(dst);
+    errno = e;
+    return -1;
+}
 static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     pthread_once(&g_txn_lock_once, txn_locks_init);
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
@@ -210,7 +240,8 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
         const char *why = NULL;
         if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear the work directory left over from last time";
         else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear the .new left over from last time";
-        else if (dm_fs_test_fail("mountclone") || clonefile(dir, work, 0)) why = "cloning the work directory failed";
+        else if (!save_can_swap(dir)) { errno = ENOTSUP; why = "filesystem cannot atomically exchange save directories (use an APFS DM_SAVE)"; }
+        else if (dm_fs_test_fail("mountclone") || save_snapshot(dir, work)) why = "cloning the work directory failed";
         if (why) { txn_err = errno ? errno : EIO; g_mnt[g_nmnt].ro = 1; strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
             LOG("[RED] save transaction: %s (%s, errno=%d) -- mounting the committed directory %s read-only instead: saves cannot be written this session, the committed version is unchanged", why, work, txn_err, dir); }
         else {
@@ -658,7 +689,7 @@ static Result commit_mount_locked(int i, int *notify_error) {
         // (the next commit is refused again and recloning is retried); the committed version is unchanged (before, the work directory was deleted first and then recloned, and a failed clone called die, so with a full disk the process exited and the work directory was gone)
         char re[1100]; snprintf(re, sizeof re, "%s.re", g_mnt[i].dir); int rerr = 0;
         if (!access(re, F_OK) && rm_tree(re)) rerr = errno ? errno : EIO;
-        else if (dm_fs_test_fail("reclone") || clonefile(g_mnt[i].commit, re, 0)) { rerr = errno ? errno : EIO; rm_tree(re); }
+        else if (dm_fs_test_fail("reclone") || save_snapshot(g_mnt[i].commit, re)) { rerr = errno ? errno : EIO; rm_tree(re); }
         else if (renamex_np(re, g_mnt[i].dir, RENAME_SWAP)) { rerr = errno ? errno : EIO; rm_tree(re); }
         else rm_tree(re);                                               // the swapped-out tainted work directory
         if (rerr) { save_poison_txn(txn, perr); LOG("[RED] save transaction: recloning the work directory failed errno=%d -- the work directory is left as it is and stays tainted (the next commit is refused again and retries), the committed version is unchanged", rerr); }
@@ -668,8 +699,8 @@ static Result commit_mount_locked(int i, int *notify_error) {
     }
     char neu[1100]; snprintf(neu, sizeof neu, "%s.new", g_mnt[i].commit);
     Result r = RES_OK;
-    if (!access(neu, F_OK)) rm_tree(neu);
-    if (clonefile(g_mnt[i].dir, neu, 0)) { LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
+    if (!access(neu, F_OK) && rm_tree(neu)) { LOG("[RED] save commit: clearing %s failed errno=%d (committed version unchanged)", neu, errno); return RES_FAIL; }
+    if (save_snapshot(g_mnt[i].dir, neu)) { LOG("[RED] save commit: snapshot %s failed errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
     else if (renamex_np(neu, g_mnt[i].commit, RENAME_SWAP)) { LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", errno); rm_tree(neu); r = RES_FAIL; }
     else rm_tree(neu);                                                  // the old version that was swapped out
     // Timing readouts (integer microseconds, no floating point): how long the clone + atomic swap took; how long in total from this transaction's first save write to the end of the commit (the game writing files + the commit; 0 = no save write in this transaction)
@@ -853,12 +884,16 @@ HLE_FORCE("_ZN2nn2fs15CreateDirectoryEPKc", "fsp-srv → mkdir(2)", Result, h_fs
     if (set_guest_name(hp, path)) { int e = errno; rmdir(hp); errno = e; return err_res("mkdir name", hp); }
     return RES_OK; }
 static int rm_tree(const char *p) {
+    struct stat st;
+    if (lstat(p, &st)) return -1;
+    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
     DIR *d = opendir(p); if (!d) return -1;
     struct dirent *e; char c[1024]; int rc = 0;
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         snprintf(c, sizeof c, "%s/%s", p, e->d_name);
-        rc |= e->d_type == DT_DIR ? rm_tree(c) : unlink(c);
+        if (lstat(c, &st)) rc = -1;
+        else rc |= S_ISDIR(st.st_mode) ? rm_tree(c) : unlink(c);   // Never recurse through a symlink.
     }
     closedir(d);
     return rc | rmdir(p);

@@ -153,6 +153,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_fs_commit_list` injects write failures after truncation in either of two independent saves, verifies that the other save commits its changes, and checks failure propagation through aliases, rename failure handling, and a failed recovery clone. It blocks writes and size changes through an alias while another save commits, then verifies that both Commit ABIs wait for the affected I/O and refuse its failure. `make -C dm/host/tests GAME=<title ID> fs-tsan` also checks concurrent first writes and failed file I/O concurrent with mounting another alias.
 - **Found on:** the [two-save host regression](../../dm/host/tests/t_fs_commit_list.c). [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) uses independent device and account saves.
 
+### Save transactions require atomic directory exchange
+
+- **Symptom:** `[RED] save transaction: cloning the work directory failed ... errno=45` on an external HFS+ drive, followed by a read-only save mount and failed writes such as `profile.sys`.
+- **Cause:** `clonefile` uses APFS copy-on-write snapshots, unavailable on HFS+ (`ENOTSUP`). Copying the files is not enough: the host's `Commit` publishes a whole nonempty directory tree through `renamex_np(RENAME_SWAP)`, which HFS+ does **not** advertise (`VOL_CAP_INT_RENAME_SWAP`). A non-atomic rename sequence could lose the committed save on crash.
+- **Fix:** `hle_fs.c` verifies atomic directory-exchange support before enabling a writable save transaction. On a swap-capable volume where cloning returns `ENOTSUP`, it uses a recursive `copyfile(COPYFILE_ALL | COPYFILE_NOFOLLOW)` snapshot, preserving file contents, ACLs and guest-name extended attributes, at mount, rollback and Commit. Incomplete copies are removed and never published; other cloning failures do not trigger a copy. A volume without atomic exchange instead mounts its existing save read-only and notifies the front end. **To save on HFS+, set `DM_SAVE` to an APFS directory** (the Mac's home/Application Support is suitable); the game's RomFS and shader cache may stay on HFS+. No automatic migration or unsafe non-atomic commit is attempted.
+- **Check:** `dm/host/tests/t_fs.c` forces `clonefile` failures and incomplete `copyfile` output, checks metadata preservation, failed-transaction rollback and recovery, and verifies that missing swap support prevents writes. `getattrlist(ATTR_VOL_CAPABILITIES)` on the affected HFS+ volume reports no advertised directory-swap support, versus support on APFS.
+- **Found on:** [South Park: The Fractured But Whole port PR #662](https://github.com/seedds/nxnative/pull/662) (development Mac run with its save path on a Journaled HFS+ external volume).
+
 ### Save data size queries
 
 - **Symptom:** SIGSEGV at address 0 in `nn::fs::GetSaveDataSizeMax`, about 13 minutes into a new game.

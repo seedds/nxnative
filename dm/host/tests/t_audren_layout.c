@@ -127,7 +127,7 @@ static void test_malformed(int sdk, int bad) {
     assert(dup2(fileno(log), STDERR_FILENO) >= 0);
     int got = capture(list, n, out);
     fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
-    char text[2048]; rewind(log); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
+    char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
     assert(got == 0);
     assert(!strstr(text, "by command ID:"));
     assert(strstr(text, "malformed"));
@@ -157,7 +157,7 @@ static void test_histogram(void) {
     assert(dup2(fileno(log), STDERR_FILENO) >= 0);
     int16_t out[FRAME_MAX * 2]; assert(capture(cl, len, out) == 0);
     fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
-    char text[2048]; rewind(log); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
+    char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
     const char *hist = strstr(text, "by command ID:"); assert(hist);
     hist += strlen("by command ID:");
     const char *end = strchr(hist, '\n'); assert(end && end - hist <= 512);

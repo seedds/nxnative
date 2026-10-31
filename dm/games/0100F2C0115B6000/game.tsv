@@ -16,7 +16,9 @@ app_category	public.app-category.adventure-games
 pad_layout	full
 
 # ---- Versions ----
+# 1.4.2 (v655360) has its own frame step sites in patches.py; it is packed from a profile derived from it (its own shaders: these tables were made from 1.4.3's files)
 build	v720896	1.4.3	main=277178b7dba1b6d4949a84778d4abc58	subsdk0=f39f4c431234c72eb520cfdd1001bbcf	sdk=574284b40c06cf1821a44857939083be
+build	v655360	1.4.2	main=5cb42b1cf25469fb0635fd046453d843	subsdk0=3308c1d216f788397d1451c8345a16cd	sdk=5cf080e800530a7f25bd528ec875c27b
 package	v720896
 shader_versions	v720896
 

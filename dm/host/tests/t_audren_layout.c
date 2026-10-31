@@ -21,6 +21,9 @@ int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
+int dm_sdk_major(void) { return 0; }
+uint64_t hle_system_event_binding(void *ev) { (void)ev; return 0; }
+int hle_signal_system_event_binding(uint64_t binding) { (void)binding; return 0; }
 
 enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 static int32_t mix[NMIX * SAMPLES];

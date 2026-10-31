@@ -203,8 +203,8 @@ void hid_keys_init(void) {
 //   "env KEY=VALUE" sets a switch read at the time of use (DM_NVN_SNAPRAW for the next texdump), "cvarf <main offset> <value>" sets an Unreal float console variable
 //   (hle_fpslock.c dm_ctl_cvar_f32; "cvari" an int one), "peek <address> <count>" logs that many floats of guest memory, "memdump <address> <bytes> <path>" saves guest memory
 //   to a file (a buffer texture's storage, which the pass dump's tbuf lines print, holds what the GPU wrote: buffer textures are views of the pool), "texlist <NVN target>" logs the
-//   registered textures of that target (2 = 3D) with storage address and block-linear layout (nvn_mtl.m dm_gfx_texlist), "texraw <serial> <path>"
-//   saves a host texture's level 0 raw (nvn_mtl.m dm_gfx_texraw), "drag <x0> <y0> <x1> <y1> [seconds=0.3]" moves one finger in a straight line between the two normalized picture
+//   registered textures of that target (2 = 3D) with storage address and block-linear layout (nvn_mtl.m dm_gfx_texlist), "texraw <serial>[.<level>] <path>"
+//   saves one level (0 by default) of a host texture raw (nvn_mtl.m dm_gfx_texraw), "drag <x0> <y0> <x1> <y1> [seconds=0.3]" moves one finger in a straight line between the two normalized picture
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
 //   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "#…" is ignored.
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
@@ -220,7 +220,7 @@ static void *ctl_main(void *arg) {
                 if (!strcmp(line, "dump")) { crash_dump_now("DM_CTL dump"); continue; }
                 if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
-                if (!strncmp(line, "texraw ", 7)) { void dm_gfx_texraw(uint64_t serial, const char *path); char *e2; uint64_t s = strtoull(line + 7, &e2, 10); while (*e2 == ' ') e2++; dm_gfx_texraw(s, e2); continue; }
+                if (!strncmp(line, "texraw ", 7)) { void dm_gfx_texraw(uint64_t serial, unsigned level, const char *path); char *e2; uint64_t s = strtoull(line + 7, &e2, 10); unsigned lv = *e2 == '.' ? (unsigned)strtoul(e2 + 1, &e2, 10) : 0; while (*e2 == ' ') e2++; dm_gfx_texraw(s, lv, e2); continue; }
                 if (!strncmp(line, "peek ", 5)) { void dm_ctl_peek(uint64_t a, int n); char *e2; uint64_t a = strtoull(line + 5, &e2, 16); dm_ctl_peek(a, (int)strtol(e2, NULL, 0)); continue; }
                 if (!strncmp(line, "memdump ", 8)) { void dm_ctl_memdump(uint64_t a, uint64_t n, const char *path); char *e2, *e3; uint64_t a = strtoull(line + 8, &e2, 16), n = strtoull(e2, &e3, 0);
                                                      while (*e3 == ' ') e3++; dm_ctl_memdump(a, n, e3); continue; }

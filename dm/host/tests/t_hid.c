@@ -38,7 +38,7 @@ void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 void hle_signal_system_event(void *g) { g_signalled = g; g_signals++; }
 int hle_signal_bound_system_event(void *g) { g_signalled = g; g_signals++; return 1; }
 void dm_gfx_texlist(int target) { (void)target; }
-void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; }
+void dm_gfx_texraw(uint64_t serial, unsigned level, const char *path) { (void)serial; (void)level; (void)path; }
 void dm_ctl_peek(uint64_t a, int n) { (void)a; (void)n; }
 void crash_dump_now(const char *why) { (void)why; }
 void dm_ctl_memdump(uint64_t a, uint64_t n, const char *path) { (void)a; (void)n; (void)path; }

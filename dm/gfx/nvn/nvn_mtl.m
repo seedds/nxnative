@@ -9685,12 +9685,12 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (enc_label_on() && !g_el_draws++ && pr->sh[1]) { memcpy(g_el_key, pr->sh[1]->key, 8); g_el_key[8] = 0; }
     if (passdump()) {   // Characteristics of a render pass's first draw (to judge whether the load can be omitted: full screen, no blending, writes all channels, does not depend on depth); with DM_NVN_PASSDUMP_ALL every draw is recorded
         static uint64_t last_pass = ~0ull; static int all = -1; if (all < 0) all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
-        if (all || g_kd_force) PD("d %llu bv=%d bi=%d first=%d vs=%s fs=%s vc=%d inst=%d blend=%#x b0=%#llx dt=%d dw=%d df=%d cull=%d st=%d sf=%d,%d sop=%d,%d,%d/%d,%d,%d smask=%#x,%#x/%#x,%#x sref=%#x,%#x ib=%#llx it=%d cmask=%#x b1=%#llx b2=%#llx b3=%#llx po=%d/%g,%g,%g dc=%d", g_stat_pass, di ? di->base_vertex : 0, di ? di->base_instance : 0, dw ? dw->first : 0, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-",
+        if (all || g_kd_force) PD("d %llu bv=%d bi=%d first=%d vs=%s fs=%s vc=%d inst=%d blend=%#x b0=%#llx dt=%d dw=%d df=%d cull=%d st=%d sf=%d,%d sop=%d,%d,%d/%d,%d,%d smask=%#x,%#x/%#x,%#x sref=%#x,%#x ib=%#llx it=%d cmask=%#x b1=%#llx b2=%#llx b3=%#llx po=%d/%g,%g,%g dc=%d a2c=%d/%d af=%d", g_stat_pass, di ? di->base_vertex : 0, di ? di->base_instance : 0, dw ? dw->first : 0, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-",
                     dw ? dw->count : di->count, dw ? dw->instances : di->instances, S.color.blend_en, (unsigned long long)*(uint64_t *)&S.blend[0], (int)S.ds.dt, (int)S.ds.dw, (int)S.ds.df, (int)S.poly.cull,
                     (int)S.ds.st, (int)S.ds.sf_f, (int)S.ds.sf_b, (int)S.ds.fail_f, (int)S.ds.zfail_f, (int)S.ds.zpass_f,
                     (int)S.ds.fail_b, (int)S.ds.zfail_b, (int)S.ds.zpass_b, S.st_vmask[0], S.st_vmask[1], S.st_wmask[0], S.st_wmask[1], S.st_ref[0], S.st_ref[1],
                     di ? (unsigned long long)di->ibuf : 0ull, di ? di->itype : 0, S.chmask.mask, (unsigned long long)*(uint64_t *)&S.blend[1], (unsigned long long)*(uint64_t *)&S.blend[2], (unsigned long long)*(uint64_t *)&S.blend[3],
-                    (int)S.poly.offset_en, S.po.factor, S.po.units, S.po.clamp, S.depth_clamp);
+                    (int)S.poly.offset_en, S.po.factor, S.po.units, S.po.clamp, S.depth_clamp, (int)S.ms.a2c, (int)S.ms.a2c_dither, (int)S.color.alpha_func);
         if (all && pr->sh[0]) {   // Content fingerprint of each constant buffer of the vertex stage (to judge whether a draw is completely identical across frames: used by the shadow cache etc.); when unreadable (a write pending execution in this submit) record P
             char ub[400]; size_t o = 0; NvShader *v = pr->sh[0];
             for (int i = 0; i < v->rf.nb && o < sizeof ub - 40; i++) if (v->rf.b[i].kind == NVN_RB_CBUF && v->rf.b[i].reg < 16) {
@@ -10973,18 +10973,20 @@ void td_note_layer(id<MTLTexture> t, uint64_t ser, NSUInteger lv, NSUInteger sl)
     [g_td_list addObject:@[t, @(ser), @(lv), @(sl)]];
 }
 // The next frame's targets, on request (the Mac's DM_CTL "texdump <path>", hle_hid.c): the path is kept (strdup), the frame number is the one after the current
-// The Mac's DM_CTL "texraw <serial> <path>" (hle_hid.c): level 0 / slice 0 of the host texture behind a serial, raw, after the GPU finishes (header line: width height Metal format bytes per row);
-// for a texture that is no render target (a default texture, a lookup table) whose content a shader depends on
-void dm_gfx_texraw(uint64_t serial, const char *path) {
+// The Mac's DM_CTL "texraw <serial>[.<level>] <path>" (hle_hid.c): one level (0 by default) / slice 0 of the host texture behind a serial, raw, after the GPU finishes (header line: width height
+// Metal format bytes per row); for a texture that is no render target (a default texture, a lookup table) whose content a shader depends on
+void dm_gfx_texraw(uint64_t serial, unsigned level, const char *path) {
     __unsafe_unretained id o = tex_get(serial);
+    if ([o isKindOfClass:[NvPkg class]]) { NvPkg *pk = o; o = pk->view ? pk->view : pk->tex; }   // a packaged texture: what the draws sample (a sparse one's view starts at its finest mapped level)
     if (!o || ![o conformsToProtocol:@protocol(MTLTexture)]) { MLOG("[texraw] ser=%llu: no host texture", (unsigned long long)serial); return; }
     id<MTLTexture> t = o; mtl_finish_gpu();
     if (t.storageMode == MTLStorageModeMemoryless || t.pixelFormat == MTLPixelFormatInvalid) return;
-    NSUInteger w = t.width, h = t.height, row = w * 16, sz = row * h;   // 16 bytes a texel: a multiple of every uncompressed texel size
+    if (level >= t.mipmapLevelCount) { MLOG("[texraw] ser=%llu: no level %u (the host texture has %lu)", (unsigned long long)serial, level, (unsigned long)t.mipmapLevelCount); return; }
+    NSUInteger w = MAX(t.width >> level, 1), h = MAX(t.height >> level, 1), row = MAX(w, 4) * 16, sz = row * MAX(h, 4);   // 16 bytes a texel: a multiple of every uncompressed texel size
     id<MTLBuffer> buf = [g_dev newBufferWithLength:sz options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
     MTLBlitOption bo = t.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone;
-    [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:sz options:bo];
+    [b copyFromTexture:t sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:sz options:bo];
     [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
     FILE *f = fopen(path, "wb"); if (f) { fprintf(f, "%lu %lu %lu %lu\n", (unsigned long)w, (unsigned long)h, (unsigned long)t.pixelFormat, (unsigned long)row); fwrite(buf.contents, 1, sz, f); fclose(f); }
     const uint8_t *p = buf.contents;

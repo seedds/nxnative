@@ -128,6 +128,8 @@ dm/host/front_mac.m	present:*	the Mac front end
 dm/host/dm_input.h	hle:*hid*	the shared input interface
 dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
 dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
+dm/host/pad_joycon.h	hle:*hid*	a Joy-Con pair's one pad and its six-axis source
+dm/host/pad_slots.h	hle:*hid*	the player slot of each physical controller
 dm/host/motion_fusion.h	hle:*SixAxisSensor*	six-axis motion mapping and orientation
 dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro Controller IMU decoder
 dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller raw motion transport and routing

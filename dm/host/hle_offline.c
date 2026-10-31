@@ -1,9 +1,25 @@
 // Networking and peripheral system services (out of scope: online play, local wireless, friends, telemetry, SSL) as seen through newer SDKs: all made "unavailable", the game takes its offline branch.
 // Only entry points that go to a service are hooked; library functions that only read and write the game's own buffers (prepo Add / Array / Struct, err ErrorResultVariant, friends getters, socket byte-order conversion) keep running in the SDK.
 // Return convention as in hle_friends.c: Result returns RES_FAIL ("saved / submitted" kinds return RES_OK so the game does not retry); bool returns false; events get a bound SystemEvent that never fires.
+// UPDATE 2026-10-31: LDN (local wireless) now implements local network discovery for same-WiFi multiplayer
 #include "hle.h"
+#include <string.h>
+#include <stdatomic.h>
 
 static _Alignas(16) uint8_t g_ev_ldn[0x100];
+
+// LDN state machine for local wireless
+enum {
+    LDN_STATE_NONE = 0,
+    LDN_STATE_INITIALIZED = 1,
+    LDN_STATE_ACCESS_POINT = 2,
+    LDN_STATE_ACCESS_POINT_CREATED = 3,
+    LDN_STATE_STATION = 4,
+    LDN_STATE_STATION_CONNECTED = 5,
+};
+
+static _Atomic int g_ldn_state = LDN_STATE_NONE;
+static _Atomic int g_ldn_initialized = 0;
 
 // ---------- prepo: telemetry reports. Saving / submitting all report success; nothing is sent ----------
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", "telemetry report save (user); nothing is sent, reports success", Result, h_prepo_SaveU, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
@@ -14,36 +30,180 @@ HLE_FORCE("_ZN2nn5prepo12AddSessionIdEPNS0_10PlayReportEPKc", "telemetry session
 HLE_FORCE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", "telemetry internet connection status: no service connection, nothing added, reports success", Result, h_prepo_AddNet, void *rep, const char *a, const char *b, const char *c) { (void)rep; (void)a; (void)b; (void)c; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo28RequestImmediateTransmissionEv", "telemetry immediate upload; nothing is sent, reports success", Result, h_prepo_Tx, void) { return RES_OK; }
 
-// ---------- ldn: local wireless. Initialization fails, state is always "none" ----------
-HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless (cut): initialization fails", Result, h_ldn_Init, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn8FinalizeEv", "local wireless (cut)", void, h_ldn_Fini, void) {}
-HLE_FORCE("_ZN2nn3ldn8GetStateEv", "local wireless (cut): state 0 (none)", int, h_ldn_State, void) { return 0; }
-HLE_FORCE("_ZN2nn3ldn22AttachStateChangeEventEPNS_2os15SystemEventTypeE", "local wireless state event: bound, never fires", void, h_ldn_Attach, void *ev) { hle_bind_system_event(ev, 0); (void)g_ev_ldn; }
-HLE_FORCE("_ZN2nn3ldn11OpenStationEv", "local wireless (cut)", Result, h_ldn_OpenSta, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn12CloseStationEv", "local wireless (cut)", Result, h_ldn_CloseSta, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn15OpenAccessPointEv", "local wireless (cut)", Result, h_ldn_OpenAp, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16CloseAccessPointEv", "local wireless (cut)", Result, h_ldn_CloseAp, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn10DisconnectEv", "local wireless (cut)", Result, h_ldn_Disc, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14DestroyNetworkEv", "local wireless (cut)", Result, h_ldn_Destroy, void) { return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless scan (cut): 0 found", Result, h_ldn_Scan, void *out, int *n, int max, const void *f, int ch) { (void)out; (void)max; (void)f; (void)ch; if (n) *n = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn11ScanPrivateEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless scan (cut): 0 found", Result, h_ldn_ScanP, void *out, int *n, int max, const void *f, int ch) { (void)out; (void)max; (void)f; (void)ch; if (n) *n = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", "local wireless (cut)", Result, h_ldn_Create,
-          const void *a, const void *b, const void *c) { (void)a; (void)b; (void)c; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn20CreateNetworkPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_17SecurityParameterERKNS0_10UserConfigEiPKNS0_12AddressEntryE", "local wireless (cut)",
-          Result, h_ldn_CreateP, const void *a, const void *b, const void *c, const void *d, int n, const void *e) { (void)a; (void)b; (void)c; (void)d; (void)n; (void)e; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless (cut)", Result, h_ldn_Connect,
-          const void *a, const void *b, const void *c, int v, int o) { (void)a; (void)b; (void)c; (void)v; (void)o; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14ConnectPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_17SecurityParameterERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless (cut)",
-          Result, h_ldn_ConnectP, const void *a, const void *b, const void *c, const void *d, int v, int o) { (void)a; (void)b; (void)c; (void)d; (void)v; (void)o; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", "local wireless (cut)", Result, h_ldn_NetInfo, void *o) { (void)o; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless (cut)", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) { if (a) *a = 0; if (m) *m = 0; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn20GetSecurityParameterEPNS0_17SecurityParameterE", "local wireless (cut)", Result, h_ldn_SecPrm, void *o) { (void)o; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless (cut)", Result, h_ldn_Adv, const void *d, uint64_t n) { (void)d; (void)n; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn19GetDisconnectReasonEv", "local wireless (cut): 0", int, h_ldn_DiscReason, void) { return 0; }
-HLE_FORCE("_ZN2nn3ldn20AddAcceptFilterEntryENS0_10MacAddressE", "local wireless (cut)", Result, h_ldn_Filter, uint64_t mac) { (void)mac; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", "local wireless (cut)", Result, h_ldn_Policy, int p) { (void)p; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn6RejectENS0_11Ipv4AddressE", "local wireless (cut)", Result, h_ldn_Reject, uint32_t a) { (void)a; return RES_FAIL; }
-HLE_FORCE("_ZN2nn3ldn16GetNetworkConfigEPNS0_13NetworkConfigE", "local wireless (cut)", Result, h_ldn_NetCfg, void *o) { (void)o; return RES_FAIL; }
+// ---------- ldn: local wireless - Local network multiplayer (Phase 1: state machine) ----------
+
+HLE_FORCE("_ZN2nn3ldn10InitializeEv", "local wireless: initialization succeeds, enables local network discovery", Result, h_ldn_Init, void) {
+    if (atomic_load(&g_ldn_initialized)) return RES_OK;
+    atomic_store(&g_ldn_state, LDN_STATE_INITIALIZED);
+    atomic_store(&g_ldn_initialized, 1);
+    return RES_OK;
+}
+
+HLE_FORCE("_ZN2nn3ldn8FinalizeEv", "local wireless: finalize", void, h_ldn_Fini, void) {
+    atomic_store(&g_ldn_state, LDN_STATE_NONE);
+    atomic_store(&g_ldn_initialized, 0);
+}
+
+HLE_FORCE("_ZN2nn3ldn8GetStateEv", "local wireless: returns current state", int, h_ldn_State, void) {
+    return atomic_load(&g_ldn_state);
+}
+
+HLE_FORCE("_ZN2nn3ldn22AttachStateChangeEventEPNS_2os15SystemEventTypeE", "local wireless state event", void, h_ldn_Attach, void *ev) {
+    hle_bind_system_event(ev, 0);
+    (void)g_ev_ldn;
+}
+
+HLE_FORCE("_ZN2nn3ldn11OpenStationEv", "local wireless: open station (client mode)", Result, h_ldn_OpenSta, void) {
+    int expected = LDN_STATE_INITIALIZED;
+    if (atomic_compare_exchange_strong(&g_ldn_state, &expected, LDN_STATE_STATION)) {
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
+
+HLE_FORCE("_ZN2nn3ldn12CloseStationEv", "local wireless: close station", Result, h_ldn_CloseSta, void) {
+    int state = atomic_load(&g_ldn_state);
+    if (state == LDN_STATE_STATION || state == LDN_STATE_STATION_CONNECTED) {
+        atomic_store(&g_ldn_state, LDN_STATE_INITIALIZED);
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
+
+HLE_FORCE("_ZN2nn3ldn15OpenAccessPointEv", "local wireless: open access point (host mode)", Result, h_ldn_OpenAp, void) {
+    int expected = LDN_STATE_INITIALIZED;
+    if (atomic_compare_exchange_strong(&g_ldn_state, &expected, LDN_STATE_ACCESS_POINT)) {
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
+
+HLE_FORCE("_ZN2nn3ldn16CloseAccessPointEv", "local wireless: close access point", Result, h_ldn_CloseAp, void) {
+    int state = atomic_load(&g_ldn_state);
+    if (state == LDN_STATE_ACCESS_POINT || state == LDN_STATE_ACCESS_POINT_CREATED) {
+        atomic_store(&g_ldn_state, LDN_STATE_INITIALIZED);
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
+
+HLE_FORCE("_ZN2nn3ldn10DisconnectEv", "local wireless: disconnect", Result, h_ldn_Disc, void) {
+    int state = atomic_load(&g_ldn_state);
+    if (state == LDN_STATE_STATION_CONNECTED) {
+        atomic_store(&g_ldn_state, LDN_STATE_STATION);
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
+
+HLE_FORCE("_ZN2nn3ldn14DestroyNetworkEv", "local wireless: destroy network", Result, h_ldn_Destroy, void) {
+    int state = atomic_load(&g_ldn_state);
+    if (state == LDN_STATE_ACCESS_POINT_CREATED) {
+        atomic_store(&g_ldn_state, LDN_STATE_ACCESS_POINT);
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
+
+HLE_FORCE("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless: scan for networks (Phase 1: returns 0)", Result, h_ldn_Scan,
+          void *out, int *n, int max, const void *f, int ch) {
+    (void)out; (void)max; (void)f; (void)ch;
+    if (n) *n = 0;
+    // Phase 1: just log that scan was called
+    return RES_OK;
+}
+
+HLE_FORCE("_ZN2nn3ldn11ScanPrivateEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local wireless: scan private", Result, h_ldn_ScanP,
+          void *out, int *n, int max, const void *f, int ch) {
+    return h_ldn_Scan(out, n, max, f, ch);
+}
+
+HLE_FORCE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", "local wireless: create network (Phase 1: state transition only)", Result, h_ldn_Create,
+          const void *a, const void *b, const void *c) {
+    (void)a; (void)b; (void)c;
+    int state = atomic_load(&g_ldn_state);
+    if (state == LDN_STATE_ACCESS_POINT) {
+        atomic_store(&g_ldn_state, LDN_STATE_ACCESS_POINT_CREATED);
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
+
+HLE_FORCE("_ZN2nn3ldn20CreateNetworkPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_17SecurityParameterERKNS0_10UserConfigEiPKNS0_12AddressEntryE", "local wireless: create network private",
+          Result, h_ldn_CreateP, const void *a, const void *b, const void *c, const void *d, int n, const void *e) {
+    (void)c; (void)d; (void)n; (void)e;
+    return h_ldn_Create(a, b, d);
+}
+
+HLE_FORCE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless: connect (Phase 1: state transition only)", Result, h_ldn_Connect,
+          const void *a, const void *b, const void *c, int v, int o) {
+    (void)a; (void)b; (void)c; (void)v; (void)o;
+    int state = atomic_load(&g_ldn_state);
+    if (state == LDN_STATE_STATION) {
+        atomic_store(&g_ldn_state, LDN_STATE_STATION_CONNECTED);
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
+
+HLE_FORCE("_ZN2nn3ldn14ConnectPrivateERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_17SecurityParameterERKNS0_10UserConfigEiNS0_13ConnectOptionE", "local wireless: connect private",
+          Result, h_ldn_ConnectP, const void *a, const void *b, const void *c, const void *d, int v, int o) {
+    (void)c;
+    return h_ldn_Connect(a, b, d, v, o);
+}
+
+HLE_FORCE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", "local wireless: get network info (Phase 1: stub)", Result, h_ldn_NetInfo, void *o) {
+    (void)o;
+    int state = atomic_load(&g_ldn_state);
+    if (state == LDN_STATE_ACCESS_POINT_CREATED || state == LDN_STATE_STATION_CONNECTED) {
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
+
+HLE_FORCE("_ZN2nn3ldn14GetIpv4AddressEPNS0_11Ipv4AddressEPNS0_10SubnetMaskE", "local wireless: get IPv4 (Phase 1: returns zeros)", Result, h_ldn_Ip, uint32_t *a, uint32_t *m) {
+    if (a) *a = 0;
+    if (m) *m = 0;
+    int state = atomic_load(&g_ldn_state);
+    if (state == LDN_STATE_ACCESS_POINT_CREATED || state == LDN_STATE_STATION_CONNECTED) {
+        return RES_OK;
+    }
+    return RES_FAIL;
+}
+
+HLE_FORCE("_ZN2nn3ldn20GetSecurityParameterEPNS0_17SecurityParameterE", "local wireless: get security parameter", Result, h_ldn_SecPrm, void *o) {
+    (void)o;
+    return RES_OK;
+}
+
+HLE_FORCE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", "local wireless: set advertise data", Result, h_ldn_Adv, const void *d, uint64_t n) {
+    (void)d; (void)n;
+    return RES_OK;
+}
+
+HLE_FORCE("_ZN2nn3ldn19GetDisconnectReasonEv", "local wireless: disconnect reason", int, h_ldn_DiscReason, void) {
+    return 0;
+}
+
+HLE_FORCE("_ZN2nn3ldn20AddAcceptFilterEntryENS0_10MacAddressE", "local wireless: add accept filter", Result, h_ldn_Filter, uint64_t mac) {
+    (void)mac;
+    return RES_OK;
+}
+
+HLE_FORCE("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", "local wireless: set accept policy", Result, h_ldn_Policy, int p) {
+    (void)p;
+    return RES_OK;
+}
+
+HLE_FORCE("_ZN2nn3ldn6RejectENS0_11Ipv4AddressE", "local wireless: reject station", Result, h_ldn_Reject, uint32_t a) {
+    (void)a;
+    return RES_OK;
+}
+
+HLE_FORCE("_ZN2nn3ldn16GetNetworkConfigEPNS0_13NetworkConfigE", "local wireless: get network config", Result, h_ldn_NetCfg, void *o) {
+    (void)o;
+    return RES_OK;
+}
 
 // ---------- socket: offline. Initialization succeeds (the network library's global init depends on it), every later operation fails with errno = ENETDOWN ----------
 enum { SK_ENETDOWN = 50, SK_EAI_FAIL = 4 };

@@ -192,6 +192,15 @@ class PackReuse(unittest.TestCase):
         self.assert_reused()
         self.assertEqual((partial / 'leave').read_text(), 'untouched')
 
+    def test_show_fps_change_repacks_and_keeps_the_new_default(self):
+        self.args.show_fps = False
+        self.pack(); self.assert_reused()
+        self.args.show_fps = True
+        self.assert_repacked()
+        info = plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
+        self.assertIs(info.get('DMShowFPS'), True)
+        self.assert_reused()
+
     def test_each_selected_file_content_invalidates_even_with_same_stat(self):
         self.pack()
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
@@ -468,12 +477,13 @@ class App(unittest.TestCase):
             {'env': 'DM_FPS_HOLD', 'kind': 'toggle', 'section': 'Performance', 'label': 'Hold', 'note': '', 'default': 'on', 'on': 'on', 'off': 'off'},
             {'env': 'DM_LANG', 'kind': 'choice', 'section': 'Game', 'label': 'Language', 'note': '', 'default': 'fr', 'options': [['fr', 'French'], ['ja', 'Japanese']]},
             {'env': 'DM_BOTH', 'kind': 'choice', 'section': 'Game', 'label': 'Both', 'note': '', 'default': 'bundle', 'options': [['bundle', 'b'], ['player', 'p'], ['saved', 's']]},
-            {'env': 'DM_BAKED', 'kind': 'toggle', 'section': 'Game', 'label': 'Baked', 'note': '', 'default': '1', 'on': '1', 'off': '0'}]}
+            {'env': 'DM_BAKED', 'kind': 'toggle', 'section': 'Game', 'label': 'Baked', 'note': '', 'default': '1', 'on': '1', 'off': '0'},
+            {'env': 'DM_METAL_HUD', 'kind': 'toggle', 'section': 'Performance', 'label': 'Performance HUD', 'note': '', 'default': '0', 'on': '1', 'off': '0'}]}
         sup = self.tmp / f'home/Library/Application Support/nxnative/{TID}'; sup.mkdir(parents=True, exist_ok=True); (sup / 'env.txt').write_text('DM_BOTH=player\n')
 
         def pack(name, settings):
             (self.tmp / f'{name}.json').write_text(json.dumps(settings))
-            a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / f'{name}.app'); a.icon = None; a.bundle_id = domain; a.settings = str(self.tmp / f'{name}.json')
+            a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / f'{name}.app'); a.icon = None; a.bundle_id = domain; a.settings = str(self.tmp / f'{name}.json'); a.show_fps = True
             with mock.patch.object(pack_app, 'sign', lambda *x: None), mock.patch('sys.stdout'): pack_app.pack(a)
             return self.tmp / f'{name}.app'
 
@@ -487,11 +497,12 @@ class App(unittest.TestCase):
             app = pack('Saved', listed)
             self.assertEqual(plistlib.loads((app / 'Contents/Info.plist').read_bytes())['DMSettings'][:3],
                              [{'env': 'DM_FPS_TARGET', 'values': ['30', '60']}, {'env': 'DM_RENDER_SCALE', 'min': 0.5, 'max': 1.0}, {'env': 'DM_FPS_HOLD', 'values': ['on', 'off']}])
-            for key, value in [('DM_FPS_TARGET', '30'), ('DM_RENDER_SCALE', '0.75'), ('DM_FPS_HOLD', 'maybe'), ('DM_LANG', 'ja'), ('DM_BOTH', 'saved'), ('DM_BAKED', '0')]: save(key, '-string', value)
+            for key, value in [('DM_FPS_TARGET', '30'), ('DM_RENDER_SCALE', '0.75'), ('DM_FPS_HOLD', 'maybe'), ('DM_LANG', 'ja'), ('DM_BOTH', 'saved'), ('DM_BAKED', '0'), ('DM_METAL_HUD', '0')]: save(key, '-string', value)
             save('DM_OPMODE', '-string', '0')   # not one of this build's settings
             r = run(app)   # from Finder or the Dock: no environment of its own
             self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE'], r.get('DM_FPS_HOLD')), ('30', '0.75', None))   # a value the toggle never takes is ignored
             self.assertEqual(r['DM_LANG'], 'ja')   # a saved choice before the packed language
+            self.assertEqual(r['DM_METAL_HUD'], '0')   # saved HUD off wins over --show-fps
             self.assertEqual((r['DM_BOTH'], r['DM_BAKED']), ('player', '1'))   # the player's env.txt and the bundle's win over a saved choice
             self.assertNotIn('DM_OPMODE', r)
             self.assertEqual((r['DM_ENV_FILE_KEYS'], r['DM_ENV_LAUNCH_KEYS']), ('DM_BOTH DM_BAKED', ''))   # what the settings window keeps: the env files' variables
@@ -502,6 +513,7 @@ class App(unittest.TestCase):
             self.assertEqual(r['DM_FPS_TARGET'], '30')
             self.assertEqual(subprocess.run(['defaults', 'read', domain, 'launcher.DM_FPS_TARGET'], capture_output=True, text=True).stdout.strip(), '30')
             r = run(app, DM_SAVED_CHOICES='0')
+            self.assertEqual(r['DM_METAL_HUD'], '1')   # the build default when saved choices are ignored
             self.assertEqual((r.get('DM_FPS_TARGET'), r.get('DM_RENDER_SCALE'), r['DM_LANG']), (None, None, 'fr'))
             save('DM_RENDER_SCALE', '-float', '0.75')   # not a string
             self.assertNotIn('DM_RENDER_SCALE', run(app))
@@ -516,6 +528,36 @@ class App(unittest.TestCase):
         finally:
             subprocess.run(['defaults', 'delete', domain], capture_output=True)
             Path(os.path.expanduser(f'~/Library/Preferences/{domain}.plist')).unlink(missing_ok=True)
+
+    def test_show_fps_reaches_the_host_and_environment_overrides_win(self):
+        # The real packer and launcher must deliver the build choice before the host creates Metal's device.
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            tmp = Path(tmp)
+            a = types.SimpleNamespace(**vars(self.args)); a.out = str(tmp / 'HUD.app'); a.icon = None
+            source = {'game': TID, 'settings': [{'env': 'DM_METAL_HUD', 'kind': 'toggle', 'default': '0', 'on': '1', 'off': '0'}]}
+            a.settings = str(tmp / 'launcher.json'); Path(a.settings).write_text(json.dumps(source))
+            cases = [('default', None, None, None), ('bundle', '0', None, None),
+                     ('player', '0', '1', None), ('process', '0', '1', '0')]
+            for enabled in (False, True):
+                a.show_fps = enabled
+                with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(a)
+                packed = json.loads((Path(a.out) / 'Contents/Resources/dm/launcher.json').read_text())
+                self.assertEqual(packed['settings'][0]['default'], '1' if enabled else '0')
+                self.assertEqual(json.loads(Path(a.settings).read_text()), source)   # never rewrite the input settings
+                for name, baked, player, process in cases:
+                    with self.subTest(enabled=enabled, source=name):
+                        home = tmp / f'home-{enabled}-{name}'; home.mkdir()
+                        sup = home / f'Library/Application Support/nxnative/{TID}'; sup.mkdir(parents=True)
+                        bundle_env = Path(a.out) / 'Contents/Resources/dm/env.txt'
+                        bundle_env.write_text('' if baked is None else f'DM_METAL_HUD={baked}\n')
+                        if player is not None: (sup / 'env.txt').write_text(f'DM_METAL_HUD={player}\n')
+                        env = dict(HOME=str(home), PATH='/usr/bin:/bin', DM_LAUNCHER='0', DM_SAVED_CHOICES='0')
+                        if process is not None: env['DM_METAL_HUD'] = process
+                        r = subprocess.run([Path(a.out) / 'Contents/MacOS/nxnative'], env=env, capture_output=True, timeout=30)
+                        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+                        values = dict(line.split('=', 1) for line in (home / 'host_run.txt').read_text().splitlines())
+                        want = {'default': '1' if enabled else '0', 'bundle': '0', 'player': '1', 'process': '0'}[name]
+                        self.assertEqual(values.get('DM_METAL_HUD'), want)
 
     def test_signed(self):   # ad-hoc, both the host and the bundle, never the hardened runtime (it refuses the executable memory the host makes for the game's code)
         for target in (self.app, self.app / 'Contents/MacOS/dmhost'):
@@ -682,10 +724,20 @@ class Script(unittest.TestCase):
         with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
-                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''))
+                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''),
+                        **({'show_fps': kw['show_fps']} if 'show_fps' in kw else {}))
         self.pso_cmd = next((c for c in ran if c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if c[1].endswith('dm/games/settings.py'))
+        self.pack_argv = ran[-1]
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
+
+    def test_show_fps_build_default_and_command_line_override(self):
+        for default, flags, wanted in [(True, [], '--show-fps'), (False, [], '--no-show-fps'),
+                                       (False, ['--show-fps'], '--show-fps'), (True, ['--no-show-fps'], '--no-show-fps')]:
+            with self.subTest(default=default, flags=flags), mock.patch.object(nsp, 'SHOW_FPS', default):
+                a = nsp.parse_args(['--platform', 'mac-app'] + flags)
+                self.pack_cmd('nvn', **({'show_fps': a.show_fps} if a.show_fps is not None else {}))
+                self.assertIn(wanted, self.pack_argv)
 
     def test_pack_command(self):
         o, tmp = self.pack_cmd('nvn')

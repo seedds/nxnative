@@ -16,6 +16,15 @@
 - **Fix:** the NSP script checks the environment before extracting anything: `check_native_python` stops under Rosetta (`sysctl.proc_translated`), and `check_prereqs` starts the translator once with `--source-sha` and stops with its first message line (`check_translator`). It also checks glslang and, for an iPhone build, the iOS SDK (`check_ios_sdk`, before the Metal check, whose message would blame the Metal toolchain). `own_compilers.py` no longer asks a Mac-only shader build (`DMSH_TARGETS=mac`) for the iOS Metal compiler. `tool_lock.py` records `--source-sha`'s failure instead of its empty stdout (`xlate_embedded`: `does not run (<first message line>)`), so `dmsh_build.py` run directly and `--update-lock` stop with the same message as the NSP script, without the lock and rebuild lines. The tool checks used to be in `dmsh_chain.py`, which is part of the chain version and of every shader's cache key, so that fix rebuilt every library; they now live in `tool_lock.py`, outside both, and a change to them rebuilds nothing.
 - **Found on:** NX2Apple builds ([LNPANDY/NX2Apple#31](https://github.com/LNPANDY/NX2Apple/issues/31), item 3; [PR #477](https://github.com/seedds/nxnative/pull/477), [PR #487](https://github.com/seedds/nxnative/pull/487)); reproduced with `arch -x86_64`. Applies to every game.
 
+## Mac apps
+
+### The Mac app drops the FPS setting and Metal HUD menu
+
+- **Symptom:** a Mac app built with `--show-fps` has neither the Metal performance overlay nor its Metal HUD menu.
+- **Cause:** the NSP script returned from its Mac packaging path before applying `SHOW_FPS` / `--show-fps`. The older bundler carried that preference into the app, but the current launcher received no HUD default. The Mac host enables Apple's HUD through `DM_METAL_HUD`, and Apple adds its menu when the HUD is enabled.
+- **Fix:** `scripts/build_ipa_from_nsp.py` passes the resolved choice to `dm/mac/pack_app.py`, which stores `DMShowFPS` in `Info.plist`. `dm/mac/launcher.c` sets `DM_METAL_HUD` from it before spawning the host, after reading environment files and the player's saved or window choices so those retain precedence. The packed `launcher.json` HUD row uses the same build default. `--no-show-fps` disables the bundled default; changing the option invalidates bundle reuse. Tests pack and launch a stand-in host to verify both defaults and process, player-file and bundled-file overrides.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md); applies to every Mac app. The packaging and launch environment are tested without game files; the restored menu still needs a visual check in a running game.
+
 ## IPA archives
 
 ### A streamed file changes size and the IPA fails its CRC check

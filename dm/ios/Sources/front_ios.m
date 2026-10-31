@@ -9,6 +9,7 @@
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
+#include "dm_notices.h"
 #include "haptics_apple.h"
 #include "save_sync.h"
 #import "CloudSaves.h"
@@ -24,6 +25,8 @@ bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.
 
 static CAMetalLayer *g_layer;
 static void front_ios_power_watch(void);
+int dm_thermal_now(void);   // defined with the power watch below
+static void note_show(const dm_notice_t *n);   // status notices, below
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
 
@@ -99,6 +102,8 @@ static void launcher_done(void) { [g_root startGame]; }
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
+    // Status notices from the events, after the settings screen applied DM_NOTICES and before the pad reports its controllers; the heat one only while the thermal cap (hle_nvn.c) can hold 30 fps
+    { const char *tc = getenv("DM_THERMAL_CAP"); dm_notices_install(!(tc && !strcmp(tc, "0")), dm_thermal_now(), note_show); }
     dm_haptics_apple_init();
     self.pad = dm_gamepad_view(self.view.bounds);
     self.pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -186,9 +191,11 @@ static void front_ios_power_watch(void) {
     g_brightness = UIScreen.mainScreen.brightness;
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
-        (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
+        (void)n; dm_event_thermal(dm_thermal_now());   // runtime events (dm_events.h): only a change is an event
+        LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
         (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); }];
+    dm_event_thermal(dm_thermal_now());   // the state the run starts in
     LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off");
 }
 
@@ -210,6 +217,34 @@ static UILabel *front_ios_fps_label(void) {
     }];
     LOG("front end: frame-rate counter on");
     return l;
+}
+
+// Status notices (dm_notices.h): one pill at the top of the game's view, drawn from the runtime events; the hook runs on the events' writer thread, so the view is changed on the main thread.
+// The prepare step's own progress screen (front_progress) is not repeated here: only the background prewarm, controller and heat notices come through.
+static UIView *g_note; static UILabel *g_note_label; static dm_notice_view_t g_note_view;
+static void note_refresh(void) {   // main thread
+    const char *t = dm_notice_view_text(&g_note_view, CACurrentMediaTime());
+    UIView *root = g_root.view;
+    if (!t || !root) { g_note.hidden = YES; return; }
+    if (!g_note) {
+        g_note_label = [UILabel new]; g_note_label.textColor = UIColor.whiteColor; g_note_label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+        g_note = [UIView new]; g_note.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6]; g_note.layer.cornerRadius = 12; g_note.userInteractionEnabled = NO;
+        g_note.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleBottomMargin;
+        [g_note addSubview:g_note_label];
+    }
+    g_note_label.text = @(t); [g_note_label sizeToFit];
+    CGSize ls = g_note_label.frame.size, bs = CGSizeMake(ls.width + 28, ls.height + 12);
+    g_note_label.frame = CGRectMake(14, 6, ls.width, ls.height);
+    g_note.frame = CGRectMake(floor((root.bounds.size.width - bs.width) / 2), root.safeAreaInsets.top + 8, bs.width, bs.height);
+    [root addSubview:g_note]; [root bringSubviewToFront:g_note];   // above the pad and the progress screen
+    g_note.hidden = NO;
+}
+static void note_show(const dm_notice_t *n) {
+    dm_notice_t c = *n;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        dm_notice_view_apply(&g_note_view, &c, CACurrentMediaTime()); note_refresh();
+        if (c.act == DM_NOTICE_SHOW) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((c.seconds + 0.05) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ note_refresh(); });
+    });
 }
 
 // Progress screen of the prepare step (front.h front_progress): a dark view over the game's view and the pad, the title, a bar and a count, centered; UIKit views, so it draws while the game's thread waits

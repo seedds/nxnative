@@ -652,6 +652,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         LOG("Break#%d reason=%#llx Result=%#x svc at %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
         dm_backtrace(regs[29]);
         if (regs[0] & 0x80000000ull) return 0;   // notification only, can continue
+        { char d[96]; snprintf(d, sizeof d, "Break reason %#llx, Result %#x", (unsigned long long)regs[0], res); dm_event_end("guest_break", d); dm_events_flush(200); }
         _exit(42);
     }
     case 0x1E: guest_clock_read_wait(); regs[0] = 0; regs[1] = guest_ns() * 12 / 625; return 0;   // GetSystemTick

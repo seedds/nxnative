@@ -1025,6 +1025,19 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Echoes of Wisdom](../../dm/games/01008CF01BAAC000/README.md#rendering-and-shaders), update 1.1.0: a 308.4 ms frame, 283.5 ms of it pipeline acquisition and 5.9 ms GPU work; with the tables the offline prebuild built all 7,495 bases. [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#pipelines-on-a-cold-start): frames of 100–546 ms before, none of its bases compiled on the first start after.
 - **Check:** `test_nsp_mac_app`: `App.test_pipeline_pair_tables`, `App.test_split_pso_pairs` and `App.test_layout` fail without the tables in the packer; `Script.test_pack_command` checks the split's copy is passed only when the profile has no `pso_pairs.tsv`.
 
+### Cold draws without a prepared pulling base
+
+- **Symptom:** a new pipeline stalls a cold gameplay frame even though the shader libraries and native seed manifest are present; the periodic report attributes the delay to `pulling base not made yet`.
+- **Cause:** a translated library is not a Metal pipeline base. The hybrid stand-in needs the pulling base for that vertex/fragment pair before the native descriptor misses. Native seed preparation and all-pair pulling preparation are different coverage sets.
+- **Fix:** use the existing pipeline prebuild and archive path rather than add another compiler cache. `DM_PSO_PREBUILD=tool` waits for workers and serialization before exiting; require its completion counts and inspect `prebuild_failed.tsv`, since exit zero and `prebuilt.tsv` alone do not establish coverage. `DM_PSO_PAIRS` appends to `shader_pairs.tsv`, rather than replacing it. A completed route-local subset tests those candidates only; general preparation must include both full pair tables and the correct depth, shader chain and device target. Consume the prepared archive with `DM_PSO_PREBUILD=0` to avoid overlapping preparation and measured gameplay.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#files-and-shaders), 1.4.3, opening-cave route on Apple M2 Pro / macOS 27.2.0, chain `b3ca4b7c621f`. Two fresh-application-archive comparisons retained the same seed, save and route, with no captured native user manifest injected. Fourteen captured vertex/fragment pairs built fourteen pulling bases with no failures; the first tool run took 1.11 s elapsed and 50.5 MiB maximum RSS. No engine or shader-chain change was needed.
+- **Measured classified waits over each run:** the table concerns missing-base waits, not frame time or FPS. Every prepared interval's summed wait was below a 60 Hz frame budget; no consistent warm-FPS gain was established. These are route-local Mac results, not whole-game coverage or phone measurements.
+
+  | Fresh-archive comparison | Unprepared waits | Prepared waits |
+  |---|---:|---:|
+  | First | 14 / 402.4 ms | 6 / 0.7 ms |
+  | Repeat | 14 / 411.9 ms | 6 / 0.9 ms |
+
 ### Offline pipeline archive reuse and fallback
 
 - **Symptom:** a truncated `.mtl4a` reaches `MTL4ArchiveImpl::loadFromURL`; the bundle reports coverage with `0 of 0 probed bases found`; rebuilt shader libraries reuse an archive of their old binaries; or packing fails with `pso_offline: no base to build` when every eligible pair has function constants, or when the profile's `shader_pairs.tsv` holds only its header (`--platform mac-app`, [GitHub issue #338](https://github.com/seedds/nxnative/issues/338)).

@@ -398,7 +398,7 @@ static void* ldn_listener_thread(void* arg) {
             LdnNodeInfo node_info;
             uint8_t raw[2048];
         } data;
-        size_t len;
+        size_t len = 0;
         char sender_ip[INET_ADDRSTRLEN];
 
         if (ldn_receive_packet_with_sender(&type, &data, &len, sizeof(data), sender_ip)) {
@@ -658,7 +658,7 @@ HLE_FORCE("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", "local w
         // Process incoming packets
         uint8_t type;
         LdnFullNetworkInfo info;
-        size_t len;
+        size_t len = 0;
 
         while (ldn_receive_packet(&type, &info, &len, sizeof(info))) {
             if (type == LDN_PACKET_SCAN_RESP && len == sizeof(LdnFullNetworkInfo)) {

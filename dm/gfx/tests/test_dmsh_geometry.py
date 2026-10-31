@@ -383,10 +383,14 @@ class MeshPassthrough(unittest.TestCase):
                 r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fmodules-cache-path=' + d + '/modules', str(Path(d, 'm.metal')), '-o', str(Path(d, 'm.air'))], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr[-2000:])
 
-    def test_compose_rejects_clip_z(self):
+    def test_compose_clip_z_before_the_gl_rewrite(self):   # the GL entry hands the kernel 2 z' - w (the captured z), the _z entry z as it is
         lean, _ = dmsh_geometry.lean(LEAN_KERNEL, 134)
-        with self.assertRaisesRegex(ValueError, 'clip z'):
-            dmsh_mesh.compose(MESH_VS, MESH_HEAD + lean, [2])
+        src = dmsh_mesh.compose(MESH_VS, MESH_HEAD + lean, [2])
+        gl, z = src.split('[[mesh]] void dm_mesh(')[1].split('[[mesh]] void dm_mesh_z(')
+        self.assertIn('as_type<float>((2.0f * dm_o.', gl)
+        self.assertNotIn('2.0f * dm_o.', z)
+        with self.assertRaisesRegex(ValueError, 'reads nothing'):
+            dmsh_mesh.compose(MESH_VS, MESH_HEAD + lean, [])
 
     @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE') and shutil.which('xcrun'), 'requires the offline translator and Metal compiler')
     def test_translated_primitive_id_crosses_mesh_groups(self):

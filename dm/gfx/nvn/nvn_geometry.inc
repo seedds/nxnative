@@ -374,12 +374,27 @@ enum { GEO_MESH_PRIMS = 32, GEO_MESH_DRAW_SLOT = 12, GEO_MESH_GS_SLOT = 13 };   
 typedef struct { uint64_t ib; uint32_t itype, first, count; int32_t base_vertex; uint32_t base_instance, pad; } geo_mesh_args;   // dmsh_mesh.py dm_mesh_draw
 static struct { int on, miss; __unsafe_unretained id<MTLFunction> fn; __unsafe_unretained NvShader *lean; geo_mesh_args a; } g_geo_mesh;
 // The mesh entry for this draw's program, or nil (the compute path draws it)
+// Primitive restart on: a triangle list whose indices hold no restart value draws the same with it off, so the mesh path may take it. DOOM leaves restart on for its pre-pass
+// meshes (16-bit, the value 0xffff), which kept all ~170 culling draws a frame on the compute path, each ending the render pass. The indices are read on the CPU, as the
+// compute path's capture does; a range the GPU may still write is left to the compute path
+static int geo_list_no_restart(const p_draw_idx *di) {
+    int size = 1 << di->itype; uint64_t n = (uint64_t)di->count * size;
+    if (!nvn_host_readable(di->ibuf, n) || geo_cpu_hazard(di->ibuf, n)) return 0;
+    uint32_t r = S.restart.index & (size == 1 ? 255u : size == 2 ? 65535u : UINT32_MAX); const uint8_t *p = (const uint8_t *)(uintptr_t)di->ibuf;
+    if (size == 2) { const uint16_t *q = (const uint16_t *)p; uint16_t r16 = (uint16_t)r; int hit = 0; for (int i = 0; i < di->count; i++) hit |= q[i] == r16; return !hit; }
+    if (size == 4) { const uint32_t *q = (const uint32_t *)p; int hit = 0; for (int i = 0; i < di->count; i++) hit |= q[i] == r; return !hit; }
+    return !memchr(p, (int)r, (size_t)di->count);
+}
 static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     if (!geo_mesh_on()) return nil;
     int prim = dw ? dw->prim : di->prim, instances = dw ? dw->instances : di->instances, count = dw ? dw->count : di->count;
     NvShader *vs = pr->sh[0];
-    if (prim != 4 || count < 3 || instances > 1 || (dw ? dw->ind : di->ind) || (di && (S.restart.on || di->itype < 0 || di->itype > 2)) || S.rast_discard || S.tf_on ||
-        !vs || !vs->has_pull || vs->layer_out || vs->discard_fn || !vs->fn || pr->sh[3] || pr->sh[4]) return nil;
+    if (prim != 4 || count < 3 || instances > 1 || (dw ? dw->ind : di->ind) || (di && (di->itype < 0 || di->itype > 2 || (S.restart.on && !geo_list_no_restart(di)))) || S.rast_discard || S.tf_on ||
+        !vs || !vs->has_pull || vs->layer_out || vs->discard_fn || !vs->fn || pr->sh[3] || pr->sh[4]) {
+        static int n; if (n++ < 8) MLOG("geometry mesh: not taken for vertex %s: prim %d, instances %d, indirect %d, restart %d, index type %d, discard %d, feedback %d, pulling %d, layer %d, discard entry %d, tessellation %d",
+            vs ? vs->key : "-", prim, instances, (dw ? dw->ind : di->ind) != 0, di && S.restart.on, di ? di->itype : -1, S.rast_discard, S.tf_on, vs && vs->has_pull, vs && vs->layer_out, vs && vs->discard_fn, pr->sh[3] || pr->sh[4]);
+        return nil;
+    }
     NvShader *lean = geo_lean_pick(pr, NULL, 3, instances); if (!lean) return nil;
     if (!vs->geo_mesh) vs->geo_mesh = [NSMutableDictionary dictionary];
     NSString *k = @(lean->key); id f = vs->geo_mesh[k];
@@ -387,7 +402,7 @@ static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_id
         NSString *path = [NSString stringWithFormat:@"%@/%.16s_%.16s_m3.metallib", g_msl_dir, vs->key, lean->key];
         id<MTLLibrary> lib = [NSFileManager.defaultManager fileExistsAtPath:path] ? [g_dev newLibraryWithURL:[NSURL fileURLWithPath:path] error:nil] : nil;
         f = lib ? [lib newFunctionWithName:[vs->fn.name isEqualToString:@"main0_z"] ? @"dm_mesh_z" : @"dm_mesh"] : nil;
-        static int n; if (f || n++ < 16) MLOG("geometry mesh: vertex %s kernel %s %s", vs->key, lean->key, f ? "has a mesh library" : "has no mesh library (geo_mesh.tsv): the compute path draws it");
+        static int n; if (f || n++ < 256) MLOG("geometry mesh: vertex %s kernel %s %s", vs->key, lean->key, f ? "has a mesh library" : "has no mesh library (geo_mesh.tsv): the compute path draws it");
         vs->geo_mesh[k] = f = f ?: NSNull.null;
     }
     return f == NSNull.null ? nil : f;

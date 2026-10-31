@@ -29,7 +29,10 @@
 #define FSTEP_DEBT_MAX 15.0   // debt kept at most (0.25 s): the rest of a long stall (a load) is dropped, not replayed
 #define FSTEP_HOLD0 60.0      // vsyncs since the last step up before a trial: 1 s, doubled after each failed trial up to 8 s
 #define FSTEP_HOLD_MAX 480.0
-#define FSTEP_GRACE 30        // a probe's first frames, whose lateness neither fails it nor counts toward a step up (the controller lowered the clock within 10 frames of a step to 30)
+#define FSTEP_GRACE 120       // a probe's first frames, whose lateness neither fails it nor counts toward a step up (the controller lowered the clock within 10 frames of a step to 30).
+                              // 30 frames is half a second at 60 fps, which measures how fast the controller LOWERS the clock; raising it again is slower, and on an M4 iPad every
+                              // probe failed inside that window (182 ups / 180 downs a minute, 11% of frames at hold 1). 120 frames gives the clock 2 s to come back up
+
 #define FSTEP_SAME 1.1        // the cost at the longer hold against the cost that held kmin: at most this much is the same scene (BotW at hold 2: 1.0–1.07 times its hold-1 GPU time)
 
 typedef struct {

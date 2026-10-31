@@ -6,7 +6,7 @@ Mac bring-up of Switch update 1.0.3 (`v196608`), SDK 16.2.3, UE4/NVN, Wwise and 
 
 Tested on Apple M4 / macOS 27.2 on 2026-10-31. The title menu and opening Chapter 1 gameplay load; the Beastmaster character walks and jumps, normal save/quit writes the character and profile, and Continue loads the saved character after restarting the app. The player also reported playing successfully afterward. The final packaged app was tested with isolated saves in Docked/standard mode and its saved Handheld/MetalFX settings. Normal user saves were backed up and were not replaced by test saves.
 
-This is opening-area validation, not a full-game compatibility claim. Later chapters, combat beyond the opening, each DLC's gameplay and long sessions remain unchecked. No iPhone build is claimed: see Memory below. An existing pipeline-archive compaction warning (issue #342) preserves its files and did not prevent these tests.
+This is opening-area validation, not a full-game compatibility claim. Later chapters, combat beyond the opening, each DLC's gameplay and long sessions remain unchecked. No iPhone build is claimed: see the memory settings below. An existing pipeline-archive compaction warning (issue #342) preserves its files and did not prevent these tests.
 
 ## Reproduce the Mac build
 

@@ -30,6 +30,13 @@ void guest_clock_read_wait(void) {}
 uint64_t guest_ns(void) { return 0; }
 uint64_t dm_entropy64(void) { return 0; }
 int thr_limit_used(void) { return 0; }
+#if !DM_NATIVE_EXEC
+// The x86-64 execution engine's side of hle_svc.c: the guest block from its arena (here a plain reservation, as before), no user exception context and no
+// main-thread guest stack in this fixture
+void *dm_guest_reserve(size_t n) { return plat_vm_reserve(n); }
+void *dm_guest_alloc(size_t n) { (void)n; abort(); }
+int dm_aot_main_stack(uint64_t *lo, uint64_t *size) { (void)lo; (void)size; return 0; }
+#endif
 int dm_ue_heap_owns(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; } // No Unreal allocator is installed in this fixture.
 void dm_guest_write_prepare(void *addr, size_t size) { (void)addr; (void)size; }
 // This fixture calls the SVC dispatcher directly, without rewritten guest gates.

@@ -22,6 +22,9 @@
 #include <mach/mach.h>
 #include <dlfcn.h>
 #endif
+#if !DM_NATIVE_EXEC
+#include "aot.h"   // the x86-64 execution engine (aot_*.c): a guest thread's state block, its safepoints, process stop
+#endif
 
 #define R_TIMEOUT     0xEA01u   // Kernel module 1, description 117
 #define R_CANCELLED   0xEC01u   // 118
@@ -89,6 +92,12 @@ typedef struct thr {
     const uint32_t *whs; int whn;   // WaitSynchronization's handle array (guest memory, valid while the thread waits there): a signal wakes only waiters that hold the signalled object
     int ctx_ok; uint64_t ctx_x[29], ctx_fp, ctx_lr, ctx_sp, ctx_pc; uint32_t ctx_pstate, ctx_fpcr, ctx_fpsr; __uint128_t ctx_v[32];
     pthread_cond_t pcv;
+#if !DM_NATIVE_EXEC
+    // The x86-64 execution engine: the thread's state block (aot_thread.c), which holds its whole register file wherever it is stopped (at a safepoint poll,
+    // inside an SVC, in the JIT: design 6.2) and which SetThreadActivity pokes and GetThreadContext3 reads, under G. NULL before the thread runs guest code and
+    // once it exited (thread_exit clears it under G before the block goes)
+    dm_guest_state *st;
+#endif
 } thr_t;
 static thr_t *g_all;
 extern __thread _Atomic int dm_host_work;   // declared in hle.h too; defined in hle_nvn.c
@@ -287,6 +296,9 @@ static void qos_apply(thr_t *t) {   // on the thread itself, holding G (prio and
 // A host helper thread (audio notify / silent sink, vsync, movie decode) created from a guest thread inherits that thread's class; under DM_QOS_MAP it sets its own instead
 void dm_host_helper_qos(plat_qos_t q) { if (g_qos_map) plat_qos_set_self(q); }
 static const char *thr_name(thr_t *t, char *buf, size_t n);
+#if !DM_NATIVE_EXEC
+static void thread_exit(thr_t *t);
+#endif
 static void *thread_main(void *p) {
     thr_t *t = p;
     pthread_setspecific(g_keythr, t);
@@ -300,8 +312,18 @@ static void *thread_main(void *p) {
     guest_thread_init();
     pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); pthread_mutex_unlock(&G);
     { char nb[48], hn[64]; snprintf(hn, sizeof hn, "%#x %s", t->handle, thr_name(t, nb, sizeof nb)); plat_thread_set_name(hn); }   // the guest's name (set before StartThread) for sample / Instruments
+#if DM_NATIVE_EXEC || defined(DM_TEST_THREAD_ENTER)   // the notification scheduler test supplies a C entry for real thread SVCs
     dm_thread_enter(t->entry, t->arg, t->stack_top);   // Does not return: the guest must exit through ExitThread
     die("guest thread entry returned");
+#else
+    // The x86-64 execution engine: the thread's state block, published under G for SetThreadActivity and GetThreadContext3, then its entry through
+    // dm_guest_call on this thread's native stack (aot_thread.c). It comes back when the thread left its guest code: through ExitThread (thread_exit then
+    // marked it exited, and t may be gone), or through a process stop or a fault, which mark it here
+    { dm_guest_state *st = dm_aot_thread_begin(); pthread_mutex_lock(&G); t->st = st; pthread_mutex_unlock(&G); }
+    if (dm_aot_thread_run(t->entry, t->arg, t->stack_top) != DM_AOT_LEFT_EXIT) thread_exit(t);
+    dm_aot_thread_end();
+    return NULL;
+#endif
 }
 static void thr_free(thr_t *t) {   // Holding G; unlink from the all-threads chain and free
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
@@ -317,9 +339,16 @@ static void thread_exit(thr_t *t) {
     t->exited = 1;
     wake_sync_waiters(t);   // Synchronization waiters on this thread re-check
     pthread_setspecific(g_keythr, NULL);
+#if !DM_NATIVE_EXEC
+    t->st = NULL;   // its state block goes once the thread has left its guest code (aot_thread.c)
+#endif
     if (t->closed) thr_free(t);
     pthread_mutex_unlock(&G);
+#if DM_NATIVE_EXEC || defined(DM_TEST_THREAD_ENTER)
     pthread_exit(NULL);
+#else
+    dm_aot_thread_exiting();   // the x86-64 engine: the thread leaves its guest code when this SVC returns (aot_run.c), and thread_main ends it
+#endif
 }
 void dm_thread_returned(void) { die("guest thread entry function returned (Horizon requires ExitThread)"); }
 
@@ -356,7 +385,11 @@ static void on_pause_sig(int sig, siginfo_t *si, void *uc_) {
 // called by the gate on SVC entry / exit (gate_dispatch in hle.c)
 void thr_svc_enter(uint64_t *regs, uint64_t pc) {
     thr_t *t = pthread_getspecific(g_keythr); if (!t) return;
+#if DM_NATIVE_EXEC
     t->svc_pc = pc; t->svc_x18 = (uint64_t)(uintptr_t)pthread_getspecific(g_key18); atomic_store(&t->svc_regs, regs); atomic_fetch_or(&t->svc_state, 1);
+#else
+    t->svc_pc = pc; atomic_store(&t->svc_regs, regs); atomic_fetch_or(&t->svc_state, 1);   // the x86-64 engine: regs is the state block (x at its offset 0), x18 an ordinary register in it
+#endif
     if (atomic_load_explicit(&t->qos_pending, memory_order_relaxed) && atomic_exchange(&t->qos_pending, 0)) {
         pthread_mutex_lock(&G); qos_apply(t); pthread_mutex_unlock(&G);
     }
@@ -382,7 +415,9 @@ static void pause_poke(thr_t *t) {
 #if DM_NATIVE_EXEC
     pthread_kill(t->pt, SIGUSR2);
 #else
-    (void)t;
+    // The x86-64 engine: the poll byte its compiled code reads at function entries and loop back-edges, and its JIT instance halted (design 6.2). Under G,
+    // which thread_exit holds while it clears t->st before the block goes
+    pthread_mutex_lock(&G); dm_aot_thread_poke(t->st); pthread_mutex_unlock(&G);
 #endif
 }
 // Horizon svc::ThreadContext (arm64, 0x320 bytes)
@@ -390,6 +425,15 @@ typedef struct { uint64_t r[29], fp, lr, sp, pc; uint32_t pstate, pad; __uint128
 _Static_assert(sizeof(hz_ctx_t) == 0x320, "ThreadContext");
 static void ctx_fill(const thr_t *t, hz_ctx_t *o) {   // holding G, t is stopped
     memset(o, 0, sizeof *o);
+#if !DM_NATIVE_EXEC
+    // The x86-64 engine: the state block holds the whole register file of a thread stopped at a poll, inside an SVC or in the JIT (design 2.1, 6.2), x18 included
+    const dm_guest_state *s = t->st;
+    if (s) {
+        for (int i = 0; i < 29; i++) o->r[i] = s->x[i];
+        o->fp = s->x[29]; o->lr = s->x[30]; o->sp = s->sp; o->pc = s->pc; o->pstate = s->nzcv;
+        memcpy(o->v, s->v, sizeof o->v); o->fpcr = s->fpcr; o->fpsr = s->fpsr; o->tpidr = s->tpidr_el0;
+    }
+#else
     const uint64_t *r = atomic_load(&t->svc_regs);
     if (r) {   // gate frame: x0..x30 at +0, q0..q31 at +256, nzcv / fpsr / fpcr at +768 / +776 / +784; the stack top before the gate = frame + 800
         for (int i = 0; i < 29; i++) o->r[i] = r[i];
@@ -400,6 +444,7 @@ static void ctx_fill(const thr_t *t, hz_ctx_t *o) {   // holding G, t is stopped
         memcpy(o->r, t->ctx_x, sizeof o->r); o->fp = t->ctx_fp; o->lr = t->ctx_lr; o->sp = t->ctx_sp; o->pc = t->ctx_pc; o->pstate = t->ctx_pstate;
         memcpy(o->v, t->ctx_v, sizeof o->v); o->fpcr = t->ctx_fpcr; o->fpsr = t->ctx_fpsr;
     }
+#endif
 }
 
 // DM_HITCH_DUMP=<ms>[:<s>] (diagnostic): when no frame has been presented for <ms>, from <s> seconds after the start on, log every guest thread once per stall: priority, core and
@@ -493,6 +538,9 @@ uint32_t svc_thread_main_init(void) {
     pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
     t->started = 1; t->prio = 44; t->core = 0; t->mask = 7; t->pt = pthread_self(); t->mport = plat_thread_self(); t->host_work = &dm_host_work;
     t->qos = (uint32_t)plat_qos_self();
+#if !DM_NATIVE_EXEC
+    t->st = dm_aot_thread_begin();   // the x86-64 engine: the main thread's state block (aot_thread.c)
+#endif
     pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; t->all = g_all; g_all = t; pthread_mutex_unlock(&G);
     pthread_setspecific(g_keythr, t);
     plat_thread_set_name("0x1001 main thread");
@@ -664,7 +712,11 @@ void svc_thread_dump(void) {
         // pushed (x30 = the return address into the wrapper's caller, which the backtrace skips: the wrappers are leaf functions), the guest stack at the SVC follows at regs + 816.
         // Read page by page up to the first unreadable one: a thread waiting near its stack top (a shallow worker) has PROT_NONE stack region above it, and one read would fail whole
         uint64_t *sr = atomic_load(&t->svc_regs);
+#if DM_NATIVE_EXEC
         if (sr && t->wkind) { uint64_t stk[160]; size_t got = 0, pg = plat_page_size(); uint64_t sa = (uint64_t)(uintptr_t)((uint8_t *)sr + 800);
+#else
+        if (sr && t->wkind) { uint64_t stk[160]; size_t got = 0, pg = plat_page_size(); uint64_t sa = ((const dm_guest_state *)(const void *)sr)->sp;   // x86-64 engine: sr is the state block
+#endif
             while (got < sizeof stk) { size_t n = sizeof stk - got, g4 = 0, room = pg - ((sa + got) & (pg - 1)); if (n > room) n = room;
                 if (plat_mem_read(sa + got, (uint8_t *)stk + got, n, &g4) || g4 != n) break;
                 got += n; }
@@ -863,7 +915,11 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         t->prio = (int)regs[4]; t->core = (int)regs[5] >= 0 ? (int)regs[5] : 0; t->mask = 1ull << t->core;
         t->born_ns = now_ns(); t->born_tick = dm_thread_tick_fn ? dm_thread_tick_fn() : 0;
         pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; pthread_mutex_unlock(&G);
+#if DM_NATIVE_EXEC
         pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1 << 20);
+#else
+        pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 8 << 20);   // x86-64 engine: guest code's own frames are on this native stack (design 3.2, 6.1: at least 8 MB)
+#endif
         pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);   // Host resources are reclaimed on exit (the guest waits through the handle, no join)
         pthread_t pt; if (pthread_create(&pt, &a, thread_main, t)) die("pthread_create");
         pthread_attr_destroy(&a);
@@ -920,14 +976,25 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             int st = atomic_fetch_or(&t->svc_state, 2);
             if (!t->started || t->exited || (st & 1)) t->paused = 1;
             uint64_t t0 = now_ns(); int warned = 0;
+#if DM_NATIVE_EXEC
             while (!t->paused && !t->exited) {
+#else
+            while (!t->paused && !t->exited && dm_aot_stop_status() < 0) {   // x86-64 engine: a process stop ends this wait too (the thread leaves its guest code)
+#endif
                 pthread_mutex_unlock(&G); pause_poke(t); pthread_mutex_lock(&G);
                 if (t->paused || t->exited) break;
                 struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 100000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
                 pthread_cond_timedwait(&t->pcv, &G, &dl);
                 if (!warned && now_ns() - t0 > 1000000000ull) { warned = 1; LOG("[RED] thread %#x still not suspended after more than 1 second (stuck in host code?)", t->handle); }
             }
+#if DM_NATIVE_EXEC
         } else { atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); pthread_cond_broadcast(&t->pcv); }
+#else
+        // x86-64 engine: the resume also clears paused. A thread counted as stopped inside an SVC (paused set above) and resumed before the SVC returns leaves
+        // it through thr_svc_leave's fast path, which does not clear it; left set, the next pause of that thread while it runs guest code would return at once
+        // with the thread still running (and GetThreadContext3 would read a block that keeps changing). Found by t_aot_host's pause test
+        } else { atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); t->paused = 0; pthread_cond_broadcast(&t->pcv); }
+#endif
         pthread_mutex_unlock(&G);
         { static int n; if (n++ < 4) LOG("SetThreadActivity %#x → %s (%s)", (uint32_t)regs[0], act ? "pause" : "resume", r ? "failed" : "ok"); }
         regs[0] = (uint64_t)r; return 1;
@@ -1172,3 +1239,40 @@ void hle_clear_system_event(void *ev) {   // Clear a bound service-layer SystemE
     }
     pthread_mutex_unlock(&G);
 }
+#if !DM_NATIVE_EXEC
+
+// ---------- The x86-64 execution engine's side (aot.h) ----------
+// A poll found the calling thread's poll byte set (aot_run.c nxaot_rt_safepoint, after it cleared the byte): wait here while SetThreadActivity pauses it,
+// as on_pause_sig waits on Apple; its state block holds its whole register file meanwhile. 1 when it waited
+int thr_safepoint(void) {
+    thr_t *t = pthread_getspecific(g_keythr);
+    if (!t || !atomic_load(&t->pause_req)) return 0;
+    int waited = 0;
+    pthread_mutex_lock(&G);
+    while (t->pause_req) { t->paused = 1; waited = 1; pthread_cond_broadcast(&t->pcv); pthread_cond_wait(&t->pcv, &G); }
+    t->paused = 0;
+    pthread_mutex_unlock(&G);
+    return waited;
+}
+// Process stop (aot_run.c dm_aot_stop): every kernel wait woken and cancelled, every pause released, so that each guest thread reaches the end of its SVC
+// or its next poll and leaves its guest code
+void thr_stop_all(void) {
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t; t = t->all) {
+        if (t->exited) continue;
+        t->cancel = 1;   // a WaitSynchronization in progress returns ResultCancelled
+        if (t->wkind) wake(t, R_CANCELLED);
+        atomic_store(&t->pause_req, 0); atomic_fetch_and(&t->svc_state, ~2); pthread_cond_broadcast(&t->pcv);
+    }
+    pthread_mutex_unlock(&G);
+}
+// The handles of the live guest threads (started, not exited, the handle not closed), but except's: for a host thread that pauses them (the corpus test)
+int thr_handles(uint32_t *out, int max, uint32_t except) {
+    int n = 0;
+    pthread_mutex_lock(&G);
+    for (thr_t *t = g_all; t && n < max; t = t->all)
+        if (t->started && !t->exited && !t->closed && !t->host_owned && t->handle != except) out[n++] = t->handle;
+    pthread_mutex_unlock(&G);
+    return n;
+}
+#endif

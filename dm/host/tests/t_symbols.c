@@ -43,6 +43,13 @@ uint64_t guest_ns(void) { return 0; }
 void guest_clock_read_wait(void) {}
 void hlecount_seal(void) {}
 int svc_nro_deactivate(module_t *m) { m->loaded = 0; return 1; }   // no memory mappings in this fixture
+#if !DM_NATIVE_EXEC
+// The x86-64 execution engine's side of loader.c (aot_arena.c, aot_run.c), which this fixture does not reach: its modules are made by hand and run no guest code
+void *dm_guest_alloc(size_t n) { (void)n; abort(); }
+uint8_t *dm_aot_image_map(const uint8_t *bytes, size_t len, size_t bss, uint64_t ro_end, size_t *mapped) { (void)bytes; (void)len; (void)bss; (void)ro_end; (void)mapped; abort(); }
+struct dm_guest_state *dm_aot_self_state(void) { return NULL; }
+uint64_t dm_guest_call(struct dm_guest_state *st, uint64_t addr, int nargs, ...) { (void)st; (void)addr; (void)nargs; abort(); }
+#endif
 void thr_svc_enter(uint64_t *r, uint64_t a) { (void)r; (void)a; }
 void thr_svc_leave(void) {}
 void dm_spin_wait(uint64_t r, uint64_t a) { (void)r; (void)a; }

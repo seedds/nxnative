@@ -41,7 +41,8 @@ with no JIT, and print what dynarmic prints. No game runs through it yet, and no
 | Threads and safepoints | [src/rt/host.cpp](src/rt/host.cpp), the polls in [lower_calls.cpp](src/lift/lower_calls.cpp) | design 6.1 to 6.5: guest threads on host threads with a state block and a native stack each, Horizon's thread and synchronization SVCs, the shared exclusive monitor; the polls of 6.2 and the pause protocol of dm/host's `SetThreadActivity`, with a pause test (`nxaot_host --pause-test`) ("Threads and safepoints") |
 | Per-function differential test | [src/rt/funcdiff.cpp](src/rt/funcdiff.cpp) (`nxaot_funcdiff`) | every function of a module from one register and memory snapshot under the recompiled code and under dynarmic, final registers and written memory compared (design 12, item 2) |
 | Runner | [tests/run_aot_tests.sh](tests/run_aot_tests.sh) | runs the tests and the benchmark and writes `logs/aot/` ([logs/README.md](../../../logs/README.md)) |
-| CI | [.github/workflows/aot.yml](../../../.github/workflows/aot.yml) | the image, the build, CTest and the runner on every pull request and push to `main` and `multiplataforma` |
+| Host run time | [dm/host/aot.h](../../host/aot.h), `dm/host/aot_*.c`, CTest `t_aot_host` | what dm/host provides for packs: the arena below 2^39, packs loaded, the SVC path, the dispatcher, `dm_guest_call`, guest threads with safepoints on hle_thread.c, faults, the floating-point helpers in C; the corpus run through the host's loader, SVC dispatcher and thread layer ("Threads and safepoints") |
+| CI | [.github/workflows/aot.yml](../../../.github/workflows/aot.yml) | the image, the build, CTest and the runner on every pull request and push to `main` and `multiplataforma`; then the corpus packed, `t_aot_host` in the host's image and with the JIT fallback here, and the floating-point differential test |
 
 Vendored: [dm/third_party/dynarmic](../../third_party/dynarmic/VENDOR.md), the fork `azahar-emu/dynarmic` at `a46601580d55` (A64 frontend, IR, x86-64
 backend and the externals its build needs; 19 MB).
@@ -375,7 +376,7 @@ every register (x0..x30, SP, NZCV, v0..v31) and every written page, in the summa
 return, x0..x7 at an svc) and every written page. Runs that would leave for the JIT (a `blr` to a random value; it runs with `--jit-none`), fault
 in both, or time out are counted apart.
 
-What dm/host must provide for the integration is listed at the end of "Threads and safepoints".
+What dm/host provides for the integration (dm/host/aot_*.c) is listed, item by item, at the end of "Threads and safepoints".
 
 ## The JIT fallback
 
@@ -512,25 +513,58 @@ head of [corpus/rt/pause.S](corpus/rt/pause.S)'s loop the register invariant x20
 from another moment than its pc breaks), and resumes them. excl runs so with 50 pauses, 6 seeds natively and 2 in the JIT, per compiler: 800
 pauses, about 760 invariant checks, no inconsistent block, the output unchanged.
 
-**What dm/host must provide** for the integration, with the signatures this run time defines (include/nxaot/aot_module.h, src/rt/jit.h):
+**What dm/host provides** for the integration (`dm/host/aot_*.c`, [dm/host/aot.h](../../host/aot.h); built by dm/host/CMakeLists.txt only, where
+`DM_NATIVE_EXEC` is 0), item by item against the signatures this run time defines (include/nxaot/aot_module.h, src/rt/jit.h); CTest `t_aot_host`
+(dm/host/tests/t_aot_host.c) runs the corpus through it, packed by [tests/build_packs.sh](tests/build_packs.sh):
 
-- the arena allocator (`dm_guest_alloc`, 5.2) and the module loader's mapping into it; `*desc->base` written per module;
-- `void dm_aot_svc(dm_guest_state *st, uint32_t n)`: `svc_dispatch(n, st->x, ...)` on the block (its `x` is the gate frame's register array),
-  with the SVC entry and exit of the pause protocol (`thr_svc_enter` / `thr_svc_leave` on the block instead of the gate frame);
-- `void *nxaot_rt_dispatch(dm_guest_state *st, uint64_t target, const nxaot_ic_desc **slot, uint64_t site)`: the lookup table of the module that
-  holds target (several modules: a range lookup first), the host-function page (`dm_aot_hostcall` for targets inside it), and
-  `desc->jit_entry` with `st->pc = target`, `st->exit_reason = NXAOT_TRAP_JIT_MISS` for anything else;
-- `void nxaot_rt_trap(dm_guest_state *st, uint64_t offset, uint32_t reason)` (does not return), `void nxaot_rt_jit(dm_guest_state *st, uint64_t
-  lr, uint64_t sp)` (`Host::JitLoop`), `void nxaot_rt_safepoint(dm_guest_state *st)` (the pause wait of `hle_thread.c`), `uint64_t
-  dm_aot_cntpct(dm_guest_state *st)` (the guest clock, `DM_DETCLOCK` and the background wait included);
-- `dm_guest_call(st, addr, nargs, ...)` on top of `desc->enter` (2.4), with the outermost level of `Host::RunGuest` (a pending transfer
-  dispatched or given to the JIT);
-- thread creation with a state block (outside the arena), an 8 MB native stack, an alternate signal stack and a JIT instance at first use per
-  thread (`dm_jit_create`; `dm_jit_init` once with the text range, the module's FPCR, `stop_at`, the SVC path and the counter);
-  `SetThreadActivity` (0x32) setting the poll byte and calling `dm_jit_halt`, `GetThreadContext3` (0x33) filling `hz_ctx_t` from the block;
-- the dirty-tracking fault hook (5.4) ahead of dynarmic's fastmem handler: installed after the first JIT instance, chaining to it for faults it
-  does not handle (the corpus run time installs its own before, which is the other order);
-- the FPCR specialisation per module and per thread (`aot_fpcr`), and MXCSR at every entry into compiled code.
+- **done**: the arena allocator (5.2; aot_arena.c `dm_guest_reserve`, `dm_guest_alloc`, `dm_guest_free`: 8 GiB at 2^36 through the platform
+  layer's new `plat_vm_reserve_at`, the host-function page first) and the module loader's mapping into it (loader.c: `loader_add_image` for an
+  image as it is, an NRO, and `map_image`, which `load_modules` uses for the rewriter's output; text readable and never executable);
+  `*desc->base` written per module (`dm_aot_pack_load`, after the identity checks of 9.4). hle_svc.c's guest block (heap, alias and stack
+  regions), thread.c's TLS blocks and thread-local regions (into the block's `tpidr_el0` / `tpidrro_el0`), GetInfo's user exception context and
+  the main thread's guest stack live in the arena. **Open**: NVN's virtual pools (`hle_nvn.c`) and Unreal's heap (`hle_uemalloc.c`), still host
+  memory;
+- **done**: `dm_aot_svc` (aot_run.c): `svc_dispatch(n, st->x, ...)` between `thr_svc_enter` / `thr_svc_leave` on the block; svcExitProcess
+  stops the process (every guest thread leaves at its next poll, SVC or kernel wait, hle_thread.c `thr_stop_all`);
+- **done**: `nxaot_rt_dispatch`: the lookup table of the pack whose image holds the target, the host-function page through `jit_entry` (the
+  target in `st->pc`, and `nxaot_rt_jit` runs the slot's thunk, `dm_aot_hostcall`), another pack's entry through `jit_entry` and that pack's
+  `enter` (ABI 2 does not record the standard entries' signature, which differs between packs), `jit_entry` with `NXAOT_TRAP_JIT_MISS` for the
+  rest. **Open**: the packs are scanned in order (FINAL FANTASY X/X-2 has 1,432 NROs: a sorted index then);
+- **done**: `nxaot_rt_trap`, `nxaot_rt_jit` (`Host::JitLoop` in C), `nxaot_rt_safepoint` (hle_thread.c `thr_safepoint`: SetThreadActivity's
+  pause wait), `dm_aot_cntpct` (`guest_ns() * 12 / 625` after `guest_clock_read_wait`, as svcGetSystemTick and the counter gate);
+- **done**: `dm_guest_call` on top of `enter`, with the outermost level of `Host::RunGuest`; the outermost call on a thread is the base it leaves
+  through (ExitThread, a process stop, a trap, a fault). loader.c's `run_module_inits` calls DT_INIT through it. **Open**: the other places the
+  host calls guest code as a C function (main.c's start sequence, hle_ro.c's init and fini, hle_guestthread.c's host-created threads, whose
+  entry is a host function and needs a slot);
+- **done**: thread creation (hle_thread.c's x86-64 form: an 8 MB native stack, the state block made when the thread starts, its alternate signal
+  stack, a JIT instance at first use); SetThreadActivity (0x32) setting the poll byte and halting the JIT instance; GetThreadContext3 (0x33)
+  filling `hz_ctx_t` from the block. The host's pause test found that SetThreadActivity's resume does not clear `paused`: a thread paused inside
+  an SVC and resumed before the SVC returns leaves through `thr_svc_leave`'s fast path with it set, and its next pause, while it runs guest code,
+  returns at once with the thread still running (before the fix none of 150 pauses stopped a thread at a poll; after it, 130 to 200 stops at
+  polls). Fixed for x86-64 (the resume clears it, under `!DM_NATIVE_EXEC`); Apple's code has the same path (there GetThreadContext3 then returns a
+  zeroed context), and its one-statement fix waits for a Mac test;
+- **done**: the dirty-tracking fault hook (5.4) ahead of dynarmic's fastmem handler (aot_fault.c, the portable host's fault handling where crash.c
+  is Apple's: installed at start, installed again in front of dynarmic's after its first instance, chaining to it for faults the hooks leave); a
+  fault in compiled code or in the JIT's memory callbacks is reported at its guest instruction (the line table, 3.5) and stops the process
+  (status 4). Windows: a vectored exception handler that redirects a guest fault to an ordinary frame, written and not run;
+- **done**: MXCSR at every entry into compiled code (the module's FPCR). **Open**: `aot_fpcr` per profile (the host takes the first pack's FPCR, and
+  a pack specialised for another gets a [RED] line), the cumulative FPSR flags compiled code keeps in MXCSR across a JIT hand-over (cleared there,
+  as in nxaot_host);
+- **done**: the floating-point helpers of src/lift/runtime.h in C (dm/host/aot_fp.c: the functions of dynarmic's common/fp and common/crypto that
+  runtime.cpp wraps, ported, since the host's build image has no C++ library or Boost), checked against runtime.cpp by dm/host/tests/aot_fp_diff.sh
+  (in this image; CI runs it): 8,391,100 cases (every half-precision operand of the unary operations, round to integral and the conversions from
+  half under ten FPCR values; 300,000 random cases per operation), 0 mismatches; two deliberate mutations of the port gave 47,233 and 95,648.
+
+The corpus in the host (CTest `t_aot_host`, each run a child process whose lines are hle_svc.c's `[guest]` lines of svcOutputDebugString;
+docker/README.md, "The recompiled corpus in the host"): built without the JIT fallback (the nxnative-build image), 13 of the 18 NROs print their
+expected lines and exit 0, and fp-gcc, fp-clang, fiber-gcc, fiber-clang and except-gcc stop with status 3 and a [RED] line naming the address
+(fp at its `msr fpcr`, fiber at its first continuation, except-gcc at the opcode switch of rt/unwind.c); with it (`NXHOST_JIT`, this image) all 18
+do, entering the JIT at as many addresses as nxaot_host does ("The JIT fallback": fp 8 and 9, fiber 29 and 54, except-gcc 5). excl's threads: 6 runs
+per compiler, exact totals, 4 guest threads on hle_thread.c (56 to about 25,000 SVCs a run: the mutex handoff's convoy of "Measurements"). The pause
+test: 3 seeds of 50 pauses per compiler, 130 to 200 stops at polls and 130 to 140 register-invariant checks per compiler, 0 inconsistent blocks. A
+host call: fnptr's `hidden_ptr` set to a host function's slot, the program's check passes through it. Dirty pages (protected again every 0.5 ms):
+int_ops 1 write fault a run, excl from 4 to 634, all stores of compiled code; with the JIT, fiber's pages also take stores of JIT code (0 to 5 a run
+outside compiled code, none inside the JIT's memory callbacks). `t_aot_host` takes 3 to 5 s.
 
 ## Floating point and SIMD
 
@@ -746,6 +780,10 @@ includes (`clang -M` over every compile command) are 795 files, 4.2 MB (mpl 224,
 such a list is specific to the compilers and configurations it was taken with (MSVC or llvm-mingw may need more of `boost/config` and mpl's
 preprocessed headers).
 
+dm/host's JIT fallback (`NXHOST_JIT`, the same dynarmic) needs the same headers, which the host's image (docker/Dockerfile.build) does not have: there
+the host builds without it, and CI builds it in this image. Adding `libboost-dev` to Dockerfile.build in a layer of its own is the follow-up (not done:
+the development machine's disk).
+
 ## Lifter coverage
 
 `nxaot opcodes` lists the 725 opcodes of dynarmic's IR: 589 lowered and 136 that never appear in an A64 block: 133 of the AArch32 frontend (its own;
@@ -879,5 +917,5 @@ The phases of design section 14, and where this folder stands:
 | 0. Census | the numbers per module | `nxaot census` over raw code; NROs and behaviour images are read (`nxaot module`) and FDE coverage, LSDA counts and the address-taken set come out of `nxaot discover`, not yet as census keys; NSO decompression (LZ4) and setjmp imports are not done |
 | 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | **done** except what follows: the lifter (0 mismatches over 24,400 integer vectors), the module loader, discovery, the summaries; function mode with the convention of 2.3 in two LLVM mappings (swifttailcc, the default by the measurements, and ghccc for preserve_none, which LLVM 18.1 lacks), calls, returns checked against lr, tail calls, `pending` propagation with resume points at setjmp continuations and landing pads, the correctness mode; jump tables as switches, inline caches, standard entries, the lookup table, the miss path; `nxaot build` (tiers C, W, H, H+; the balanced and max modes; an object with the lookup table, function map and line table, a shared object by lld); `nxaot_host` (the arena below 2^39, the SVC path, the counter, faults through the line table); the corpus natively in both conventions and the correctness mode, equal to dynarmic and to the expected output; nxaot_funcdiff on every corpus function; the measurements ("Measurements"). Not done: the corpus natively on ARM64 hardware (an Apple-silicon Mac), one tier per function and profiles (phase 5), ThinLTO and the cache, functions split for size, the oracle-T / J / W comparisons, the pack throughput targets of section 10 (measured far below them) |
 | 2. FP and SIMD | every FP, NEON and crypto lowering, NaN chains | every opcode the A64 frontend emits lowered; 0 mismatches over the committed vectors and 7,000,000 random floating-point and SIMD ones (10^6 per class for seven of the eight classes, `fp_seq` not completed; not the 10^8 of the acceptance); the chain checks measured. Not done: the row-13 FZ slow path for the basic operations, inline estimates, combined escape checks, the run-time helpers in the host |
-| 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | **done** except what follows: the JIT fallback on dynarmic unmodified (`dm_jit_create` / `dm_jit_run` / `dm_jit_halt`, design 11's configuration, the stops at compiled entries and call sites' returns through the code reader, the hand-over measured), every case of section 11 handed to it (the dispatcher's misses, branches to no entry, FPCR away from the specialisation, untranslated encodings, code that runs into no entry, refused functions, continuations with no native frame), the driver that calls compiled entries natively and propagates non-local transfers; C++ exceptions through LSDA landing pads with a personality-free unwinder, fibers and a return past the caller in the corpus; guest threads with the thread and synchronization SVCs, per-thread state blocks, native stacks and JIT instances, the shared monitor; safepoint polls and the pause protocol with the pause test; the three JIT modes, the threads and the pause test in CTest. The acceptance: the exception, longjmp and thread corpus passes natively, in the JIT and with no JIT where none is needed; `--jit-all` and the compiled runs print the same lines; the pause test passes (CTest `corpus_jit`, `corpus_threads`, `safepoints`). Not done: dm/host's side (the list at the end of "Threads and safepoints"); the exactness of a JIT target's callee-saved registers is assumed (a compiled caller keeps what the union of address-taken functions preserves across an indirect call); the corpus has no untranslated encoding, no refused function and no run-off into a non-entry (those hand-overs are built and not run); priority and core of threads (FIFO order, no affinity), Horizon's other synchronization objects (events, condition variables: SignalProcessWideKey / WaitProcessWideKeyAtomic), SetThreadActivity and GetThreadContext3 themselves (the pause test plays their part); the fault hook's order against dynarmic's fastmem handler; the discovery gap except-gcc shows (a halfword jump table whose base is set before its loop) |
-| 4. to 6. | games on the Intel Mac, performance, breadth | not started |
+| 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | **done** except what follows: the JIT fallback on dynarmic unmodified (`dm_jit_create` / `dm_jit_run` / `dm_jit_halt`, design 11's configuration, the stops at compiled entries and call sites' returns through the code reader, the hand-over measured), every case of section 11 handed to it (the dispatcher's misses, branches to no entry, FPCR away from the specialisation, untranslated encodings, code that runs into no entry, refused functions, continuations with no native frame), the driver that calls compiled entries natively and propagates non-local transfers; C++ exceptions through LSDA landing pads with a personality-free unwinder, fibers and a return past the caller in the corpus; guest threads with the thread and synchronization SVCs, per-thread state blocks, native stacks and JIT instances, the shared monitor; safepoint polls and the pause protocol with the pause test; the three JIT modes, the threads and the pause test in CTest. The acceptance: the exception, longjmp and thread corpus passes natively, in the JIT and with no JIT where none is needed; `--jit-all` and the compiled runs print the same lines; the pause test passes (CTest `corpus_jit`, `corpus_threads`, `safepoints`). dm/host's side done for the corpus (`dm/host/aot_*.c`, CTest `t_aot_host`; its open items are in the list at the end of "Threads and safepoints"). Not done: the exactness of a JIT target's callee-saved registers is assumed (a compiled caller keeps what the union of address-taken functions preserves across an indirect call); the corpus has no untranslated encoding, no refused function and no run-off into a non-entry (those hand-overs are built and not run); priority and core of threads (FIFO order, no affinity), Horizon's other synchronization objects in this run time (events, condition variables: SignalProcessWideKey / WaitProcessWideKeyAtomic; dm/host's thread layer has them); the discovery gap except-gcc shows (a halfword jump table whose base is set before its loop) |
+| 4. to 6. | games on the Intel Mac, performance, breadth | not started. Prepared for phase 4: the host's run time of packs (dm/host/aot_*.c; Linux checked by `t_aot_host`, Windows written and not run, the Intel Mac not built: the aot files are CMake's, and aot_fault.c reads Linux's signal context). Still to come for a first game module: `patch_nso.py --aot` and the loader's reading of its image and manifest (layout, data, `obs` and `spin` rows), NSO decompression (LZ4) on that path, the binding of `dm_guest_fn` addresses into a module's GOT (loader.c `bind_sym` / `force_lookup`), one pack for every module or a common standard-entry signature (cross-pack calls go through `enter` now), main.c's start sequence through `dm_guest_call`, a host program for x86-64, Boost in the host's image for the JIT fallback |

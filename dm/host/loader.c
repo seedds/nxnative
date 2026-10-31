@@ -18,6 +18,15 @@ enum { KEY_K18, KEY_KTLS, KEY_KTLR, KEY_KGATE, KEY_N };
 uint64_t resolve_import(module_t *m, const char *name);
 int hle_implements(const char *name);
 void gate_register(uint64_t ret_addr, const char *kind, int arg, uint64_t orig);
+#if !DM_NATIVE_EXEC
+// The x86-64 execution engine (aot.h): module images one to one in its arena below 2^39 (design 5.1, 5.2), never executable (3.2: their code runs from the
+// pack's library), and guest functions the host calls entered through dm_guest_call (2.4)
+void *dm_guest_alloc(size_t n);
+uint8_t *dm_aot_image_map(const uint8_t *bytes, size_t len, size_t bss, uint64_t ro_end, size_t *mapped);
+struct dm_guest_state;
+struct dm_guest_state *dm_aot_self_state(void);
+uint64_t dm_guest_call(struct dm_guest_state *st, uint64_t addr, int nargs, ...);
+#endif
 
 static pthread_key_t key_value(unsigned i) {
     switch (i) {
@@ -573,24 +582,43 @@ static void map_image(module_t *m, const char *dir) {
         if (sz < fl) die("%s is shorter than FILE_IMAGE_LEN %#llx", path, (unsigned long long)fl);
         m->size = m->image_size; m->patch_len = (sz - fl + 0x3FFF) & ~0x3FFFull;
         if (m->patch_len > pre) die("%s patch area of %#llx bytes does not fit in the %#llx before the base", path, (unsigned long long)m->patch_len, (unsigned long long)pre);
+#if DM_NATIVE_EXEC
         uint8_t *a = plat_vm_alloc(pre + m->size);
+#else
+        uint8_t *a = dm_guest_alloc(pre + m->size);   // x86-64 engine: in the arena
+#endif
         if (!a) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - fl); free(raw); install_key_page(m);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
+#if DM_NATIVE_EXEC
         if (plat_vm_protect(m->base, rx, PLAT_PROT_READ | PLAT_PROT_EXEC)) die("%s mprotect text", m->name);
         if (plat_vm_protect(a, m->patch_len, PLAT_PROT_READ | PLAT_PROT_EXEC)) die("%s mprotect patch", m->name);
+#else
+        if (plat_vm_protect(m->base, rx, PLAT_PROT_READ)) die("%s mprotect text", m->name);   // x86-64 engine: readable, never executable (design 3.2)
+        if (plat_vm_protect(a, m->patch_len, PLAT_PROT_READ)) die("%s mprotect patch", m->name);
+#endif
         if (pre > m->patch_len && plat_vm_protect(a + m->patch_len, pre - m->patch_len, PLAT_PROT_NONE)) die("%s mprotect gap", m->name);
         return;
     }
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
+#if DM_NATIVE_EXEC
     m->base = plat_vm_alloc(m->size);
+#else
+    m->base = dm_guest_alloc(m->size);   // x86-64 engine: in the arena
+#endif
     if (!m->base) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
+#if DM_NATIVE_EXEC
     if (plat_vm_protect(m->base, rx, PLAT_PROT_READ | PLAT_PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;
     if (plat_vm_protect(m->base + po, m->size - po, PLAT_PROT_READ | PLAT_PROT_EXEC)) die("%s mprotect patch", m->name);
+#else
+    if (plat_vm_protect(m->base, rx, PLAT_PROT_READ)) die("%s mprotect text", m->name);   // x86-64 engine: readable, never executable (design 3.2)
+    uint64_t po = m->patch_off & ~0x3FFFull;
+    if (plat_vm_protect(m->base + po, m->size - po, PLAT_PROT_READ)) die("%s mprotect patch", m->name);
+#endif
 }
 #endif
 
@@ -632,6 +660,41 @@ void run_module_inits(void) {
         module_t *m = &g_mod[i];
         if (!m->init || m->nro) continue;   // an NRO's init runs when the game loads it (hle_ro.c)
         LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);
+#if DM_NATIVE_EXEC
         ((void (*)(void))(m->base + m->init))();
+#else
+        dm_guest_call(dm_aot_self_state(), (uint64_t)(uintptr_t)(m->base + m->init), 0);   // x86-64 engine: guest code from the host (design 2.4)
+#endif
     }
 }
+#if !DM_NATIVE_EXEC
+
+// ---- The x86-64 execution engine's module images ----
+// A module image as it is: an NRO file (and later the behaviour image `patch_nso.py --aot` writes, design 1.1), whose code runs from the pack the caller loads
+// for it (aot_arena.c dm_aot_pack_load). Mapped one to one in the arena at a base the engine chooses (the pack's code is base-relative: 3.3), [0, ro_off)
+// readable and never executable, the rest writable, bss zero; its dynamic section parsed; loaded (in the symbol lookups) and relocated and bound as
+// load_modules relocates every module (relocations are data: 9.4). Modules added this way share g_mod with load_modules, at a fixed capacity, since
+// module_t pointers never move
+#define AOT_MAX_MODULES 64
+module_t *loader_add_image(const char *name, const uint8_t *bytes, size_t len, size_t bss, uint64_t text_end, uint64_t ro_off, uint64_t data_off) {
+    pthread_rwlock_wrlock(&g_modules_mu);
+    if (!g_mod) {
+        g_mod_capacity = AOT_MAX_MODULES;
+        g_mod = calloc((size_t)g_mod_capacity, sizeof *g_mod); g_loaded = calloc((size_t)g_mod_capacity, sizeof *g_loaded);
+        if (!g_mod || !g_loaded) die("cannot allocate %d module slots", g_mod_capacity);
+    }
+    if (g_nmod >= g_mod_capacity) die("%s: no room for another module (%d)", name, g_mod_capacity);
+    module_t *m = &g_mod[g_nmod];
+    strlcpy(m->name, name, sizeof m->name);
+    size_t mapped = 0;
+    m->base = dm_aot_image_map(bytes, len, bss, ro_off, &mapped);
+    m->size = mapped; m->text_end = text_end; m->ro_off = ro_off; m->data_off = data_off; m->image_size = len; m->file_image_len = len;
+    parse_dynamic(m);
+    m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
+    if (!g_force_hits) force_init();
+    relocate(m);
+    pthread_rwlock_unlock(&g_modules_mu);
+    LOG("%s: base %p size %#zx (image %#zx, bss %#zx; x86-64 engine)", name, (void *)m->base, m->size, len, bss);
+    return m;
+}
+#endif

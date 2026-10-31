@@ -16,9 +16,21 @@ static _Atomic long g_freed_req;   // number of frees
 static void t_free(void *p) { if (!p) return; atomic_fetch_sub(&g_live_blocks, 1); atomic_fetch_add(&g_freed_req, 1); free(p); }
 #define calloc t_calloc
 #define free t_free
+#if !defined(__APPLE__) || !defined(__aarch64__)
+// thread.c's form for the x86-64 engine takes the TLS block and the thread-local region from the engine's arena: counted here as the calloc / free they replace
+static void *t_guest_alloc(size_t n) { return t_calloc(1, n); }
+static void t_guest_free(void *p, size_t n) { (void)n; t_free(p); }
+#define dm_guest_alloc t_guest_alloc
+#define dm_guest_free t_guest_free
+#endif
 #include "../thread.c"
 #undef calloc
 #undef free
+#if !DM_NATIVE_EXEC
+#undef dm_guest_alloc
+#undef dm_guest_free
+void dm_aot_set_tls(uint64_t tpidr_el0, uint64_t tpidrro_el0) { (void)tpidr_el0; (void)tpidrro_el0; }   // the engine's state block: none here
+#endif
 
 pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 void dm_gate(void) {}

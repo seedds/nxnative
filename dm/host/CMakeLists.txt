@@ -113,8 +113,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # ---- The portable host sources ----
-# Not here: the parts tied to native ARM64 execution (entry.S, hle_bigstack.c, crash.c, probe.c; the x86-64 execution engine, Phase 2, replaces them), the program entry
-# main.c (it runs a frontend), and the Apple frontend files (*.m). front_sdl.c is the front end here. hle_fdstat.c compiles to nothing on Windows
+# Not here: the parts tied to native ARM64 execution (entry.S, hle_bigstack.c, crash.c, probe.c; the x86-64 execution engine replaces them: aot_*.c below, aot_fault.c
+# for crash.c's fault hooks), the program entry main.c (it runs a frontend), and the Apple frontend files (*.m). front_sdl.c is the front end here. hle_fdstat.c
+# compiles to nothing on Windows
 file(GLOB HLE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hle_*.c)
 list(FILTER HLE_SRC EXCLUDE REGEX "/hle_bigstack\\.c$")
 set(NXHOST_SRC hle.c loader.c thread.c front_sdl.c)
@@ -165,11 +166,38 @@ add_custom_command(OUTPUT ${HLE_THUNKS_C}
     COMMAND ${Python3_EXECUTABLE} ${GEN_HLE_THUNKS} -o ${HLE_THUNKS_C} ${GEN_HLE_THUNKS_INC} ${NXHOST_SRC}
     DEPENDS ${GEN_HLE_THUNKS} ${NXHOST_SRC} ${HOST_H}
     COMMENT "host-call thunks from the HLE entries" VERBATIM)
-add_library(nxhost STATIC ${NXHOST_SRC} aot_hostfn.c ${HLE_THUNKS_C})
+# The x86-64 execution engine (docs/design/aot-recompiler.md; dm/host/aot.h): the run time of a pack's recompiled code in the host. Its arena below 2^39, module
+# images and packs (aot_arena.c), what a pack imports and dm_guest_call (aot_run.c), guest threads (aot_thread.c), faults (aot_fault.c) and the floating-point
+# helpers (aot_fp.c). A pack's library resolves those imports against the executable that links them (ENABLE_EXPORTS)
+set(AOT_SRC aot_hostfn.c aot_arena.c aot_run.c aot_thread.c aot_fault.c aot_fp.c)
+add_library(nxhost STATIC ${NXHOST_SRC} ${AOT_SRC} ${HLE_THUNKS_C})
 add_dependencies(nxhost game_profile)
 target_compile_options(nxhost PRIVATE ${HOST_FLAGS})
 target_include_directories(nxhost PUBLIC ${GEN} ${PROFILE_DIR} ${REPO}/dm/third_party/stb_vorbis ${REPO}/dm/tools/aot/include)
 target_link_libraries(nxhost PUBLIC nxplat vpx SDL3::SDL3-static)
+# The JIT fallback of the engine (design section 11): dynarmic's A64 JIT behind the C interface of dm/tools/aot/src/rt/jit.h, the glue nxaot's own run time uses
+# (jit.cpp, with the decoder glue it calls). dynarmic needs C++20 and Boost's headers, which the nxnative-aot image has and nxnative-build does not, so it is an
+# option, off by default: without it, guest code with no compiled entry stops the process with a [RED] line and status 3 (aot.h DM_AOT_JIT_NEEDED)
+option(NXHOST_JIT "x86-64 execution engine: build the JIT fallback (dynarmic; needs C++20 and Boost's headers)" OFF)
+if(NXHOST_JIT)
+    enable_language(CXX)
+    find_package(Boost 1.57)
+    if(NOT Boost_FOUND)
+        message(FATAL_ERROR "NXHOST_JIT needs Boost's headers (dynarmic includes boost/icl and boost/variant): build in the nxnative-aot image (docker/Dockerfile.aot)")
+    endif()
+    set(DYNARMIC_TESTS OFF CACHE BOOL "" FORCE)
+    set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+    set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
+    set(DYNARMIC_USE_BUNDLED_EXTERNALS ON CACHE BOOL "" FORCE)
+    set(DYNARMIC_FRONTENDS "A64" CACHE STRING "" FORCE)
+    add_subdirectory(${REPO}/dm/third_party/dynarmic ${CMAKE_BINARY_DIR}/dynarmic EXCLUDE_FROM_ALL)
+    add_library(nxhost_jit STATIC ${REPO}/dm/tools/aot/src/rt/jit.cpp ${REPO}/dm/tools/aot/src/decode/translate.cpp)
+    set_target_properties(nxhost_jit PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    target_include_directories(nxhost_jit PUBLIC ${REPO}/dm/tools/aot/include ${REPO}/dm/tools/aot/src)
+    target_link_libraries(nxhost_jit PUBLIC dynarmic merry::mcl fmt::fmt tsl::robin_map Boost::boost)
+    target_compile_definitions(nxhost PUBLIC NXHOST_JIT=1)
+    target_link_libraries(nxhost PUBLIC nxhost_jit)
+endif()
 
 # ---- Unit tests (dm/host/tests: each includes the host sources it exercises, so a test links the platform layer, not nxhost) ----
 # host_test(<name> SOURCES <files> [PROFILE] [VPX] [SDL] [POSIX] [DEFS <macros>] [RUNS <arguments; one run each, "-" = none>] [TMPDIR] [ENV <VAR=value ...>])
@@ -265,10 +293,10 @@ host_test(t_nro SOURCES t_nro.c PROFILE)
 host_test(t_fs SOURCES t_fs.c t_fs_stub.c PROFILE TMPDIR)
 host_test(t_fs_commit_list SOURCES t_fs_commit_list.c t_fs_stub.c PROFILE TMPDIR)
 host_test(t_fs_case SOURCES t_fs_case.c PROFILE TMPDIR)
-host_test(t_condvar SOURCES t_condvar.c t_condvar_stub.c ../hle_thread.c PROFILE DEFS DM_TEST_HOOKS)
-host_test(t_condvar_old SOURCES t_condvar.c t_condvar_stub.c ../hle_thread.c PROFILE DEFS DM_TEST_HOOKS DM_TEST_CV_OLD_ORDER)
-host_test(t_preempt SOURCES t_preempt.c t_condvar_stub.c PROFILE RUNS - --all-peers)
-host_test(t_notify_sched SOURCES t_notify_sched.c t_condvar_stub.c PROFILE DEFS DM_TEST_THREAD_ENTER RUNS - --all-peers)
+host_test(t_condvar SOURCES t_condvar.c t_condvar_stub.c ../hle_thread.c PROFILE DEFS DM_TEST_HOOKS INCLUDES ${REPO}/dm/tools/aot/include)
+host_test(t_condvar_old SOURCES t_condvar.c t_condvar_stub.c ../hle_thread.c PROFILE DEFS DM_TEST_HOOKS DM_TEST_CV_OLD_ORDER INCLUDES ${REPO}/dm/tools/aot/include)
+host_test(t_preempt SOURCES t_preempt.c t_condvar_stub.c PROFILE RUNS - --all-peers INCLUDES ${REPO}/dm/tools/aot/include)
+host_test(t_notify_sched SOURCES t_notify_sched.c t_condvar_stub.c PROFILE DEFS DM_TEST_THREAD_ENTER RUNS - --all-peers INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_movie_vpx SOURCES t_movie_vpx.c PROFILE VPX)
 # The NVN replay's draw and render-target state and its GPU-write ledger (dm/gfx/nvn, plain C; dm/gfx/tests/Makefile builds the same two on the Mac)
 host_test(t_state SOURCES ../../gfx/tests/t_state.c ../../gfx/nvn/nvn_state.c INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
@@ -406,13 +434,38 @@ add_custom_target(t_hle_thunks_gen DEPENDS ${T_HLE_THUNKS_C})
 set_source_files_properties(${TESTS}/t_hle_thunks.c PROPERTIES OBJECT_DEPENDS ${T_HLE_THUNKS_C})
 host_test(t_hle_thunks SOURCES t_hle_thunks.c t_hle_thunks_entries.c ../aot_hostfn.c PROFILE INCLUDES ${CMAKE_BINARY_DIR} ${REPO}/dm/tools/aot/include)
 add_dependencies(t_hle_thunks t_hle_thunks_gen)
+# The x86-64 execution engine in the host on the corpus of dm/tools/aot (t_aot_host.c): every corpus NRO mapped by the host's loader, its pack loaded, _start run
+# through dm_aot_run with the host's SVC path, its lines compared with corpus/expected; excl's threads on hle_thread.c, its pause test through SetThreadActivity
+# and GetThreadContext3; a guest call into the host-function page; a write-protected data segment resumed by a fault hook. Each run is a child process. The packs
+# come from dm/tools/aot/tests/build_packs.sh (the nxnative-aot image): this option, or the environment variable NXAOT_PACKS when it is empty; with neither the
+# test prints a note and passes (the Windows runner, a tree built without the packs). Its own host functions get thunks from the generator, as the host's do
+set(NXAOT_PACKS "" CACHE PATH "folder of the corpus packs (dm/tools/aot/tests/build_packs.sh) that t_aot_host runs; empty: the environment variable NXAOT_PACKS")
+set(T_AOT_HOST_THUNKS_C ${CMAKE_BINARY_DIR}/gen/t_aot_host_thunks.c)
+add_custom_command(OUTPUT ${T_AOT_HOST_THUNKS_C}
+    COMMAND ${Python3_EXECUTABLE} ${GEN_HLE_THUNKS} -o ${T_AOT_HOST_THUNKS_C} ${TESTS}/t_aot_host_entries.c
+    DEPENDS ${GEN_HLE_THUNKS} ${TESTS}/t_aot_host_entries.c ${HOST_H}
+    COMMENT "host-call thunks of t_aot_host's entries" VERBATIM)
+set(AOT_TEST_SRC)
+foreach(f IN LISTS AOT_SRC ITEMS hle_svc.c hle_thread.c thread.c loader.c)
+    list(APPEND AOT_TEST_SRC ../${f})
+endforeach()
+host_test(t_aot_host SOURCES t_aot_host.c t_aot_host_entries.c t_aot_host_stub.c ${AOT_TEST_SRC} PROFILE INCLUDES ${REPO}/dm/tools/aot/include)
+target_sources(t_aot_host PRIVATE ${T_AOT_HOST_THUNKS_C})
+target_compile_definitions(t_aot_host PRIVATE "T_AOT_CORPUS=\"${REPO}/dm/tools/aot/corpus\"" "T_AOT_PACKS=\"${NXAOT_PACKS}\"")
+set_target_properties(t_aot_host PROPERTIES ENABLE_EXPORTS ON)   # a pack's library resolves dm_aot_svc, nxaot_rt_* and the floating-point helpers against it
+if(NXHOST_JIT)
+    target_compile_definitions(t_aot_host PRIVATE NXHOST_JIT=1)
+    target_link_libraries(t_aot_host PRIVATE nxhost_jit)
+endif()
+set_tests_properties(t_aot_host PROPERTIES TIMEOUT 600)
+
 # fork() death tests
 host_test(t_heap_size SOURCES t_heap_size.c PROFILE POSIX)
 host_test(t_oe SOURCES t_oe.c PROFILE POSIX)
 host_test(t_fpslock SOURCES t_fpslock.c PROFILE POSIX)
 host_test(t_audren_layout SOURCES t_audren_layout.c PROFILE POSIX)
 host_test(t_shared_font SOURCES t_shared_font.c PROFILE POSIX)
-host_test(t_system_event SOURCES t_system_event.c PROFILE POSIX)
+host_test(t_system_event SOURCES t_system_event.c PROFILE POSIX INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_symbols SOURCES t_symbols.c PROFILE POSIX)
 host_test(t_svc_memory SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile)
 host_test(t_svc_memory_unlimited SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile DEFS DM_GAME_MEM_MAP_LIMIT=0)

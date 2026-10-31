@@ -7,6 +7,13 @@
 #include <sched.h>
 #include <time.h>
 #include <stdatomic.h>
+#if !DM_NATIVE_EXEC
+// The x86-64 execution engine (aot.h, aot_arena.c): what the guest sees lives in its arena below 2^39 (design 5.2): the guest block, the user exception
+// context area; and the main thread's guest stack is one the host made there
+void *dm_guest_reserve(size_t n);
+void *dm_guest_alloc(size_t n);
+int dm_aot_main_stack(uint64_t *lo, uint64_t *size);
+#endif
 
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
 // It only takes address space, not memory.
@@ -40,7 +47,11 @@ static void mem_init_once(void) {
     size_t alias = DM_GAME_MEM_ALIAS; const char *as = getenv("DM_ALIAS_SIZE");
     if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
     g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
+#if DM_NATIVE_EXEC
     g_as = plat_vm_reserve(g_reserve);
+#else
+    g_as = dm_guest_reserve(g_reserve);   // x86-64 engine: in the arena (inaccessible until the heap, stack and alias regions open their pages, as here)
+#endif
     if (!g_as) die("reserve guest AS");
     // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 1.625 GB.
     // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
@@ -280,7 +291,11 @@ static _Thread_local uint64_t t_rgn_size, t_rgn_via; static _Thread_local char t
 // Where a request at an sdk function's entry gate returns to in the game: buf gets "main+0x…", *via the outermost sdk return address on the way (0 = none)
 static void guest_caller(const uint64_t *r, char *buf, size_t n, uint64_t *via) {
     // at the function's entry the return address is the x30 the gate block pushed above the gate's register frame (regs + 800: x29, x30; entry.S), x30 itself holds the gate's own
+#if DM_NATIVE_EXEC
     uint64_t lr = r[101], fp = r[29]; module_t *m = module_of((void *)(uintptr_t)lr);
+#else
+    uint64_t lr = r[30], fp = r[29]; module_t *m = module_of((void *)(uintptr_t)lr);   // x86-64 engine: r is the state block, whose x30 is the caller's (design 2.4)
+#endif
     *via = 0;
     for (int i = 0; i < 32 && m && !strcmp(m->name, "sdk"); i++) {
         *via = lr - (uint64_t)(uintptr_t)m->base;   // AArch64 frame records: [fp] = the caller's fp, [fp + 8] = its return address
@@ -393,6 +408,10 @@ static void *regions_thread(void *arg) {
 }
 
 int svc_thread(int num, uint64_t *regs);   // hle_thread.c: thread and synchronization kind
+#if !DM_NATIVE_EXEC
+static uint64_t g_user_exc;   // GetInfo UserExceptionContextAddress: a page of the arena (x86-64 engine)
+static void user_exc_alloc(void) { g_user_exc = (uint64_t)(uintptr_t)dm_guest_alloc(0x1000); }
+#endif
 
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     { void hlecount_svc(int); hlecount_svc(num); }   // DM_HLECOUNT: svc counts by number
@@ -529,7 +548,12 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             // The address lies in "the current host thread's stack": report the whole stack (state 0xB = stack). When the SDK initializes the main thread record it queries here with the sp at that moment and takes the reported range as the main thread stack;
             // later nn::os::GetCurrentStackInfo asserts that sp is still inside that range and aborts if not. Previously every address outside the guest address space was reported as "the 4 KiB page containing it",
             // so the main thread stack was recorded as one page. Whether the sp at init and a later sp share a page depends on the absolute position of the host stack top, which moves with the total length of environment variables / launch arguments (a different environment occasionally aborts at startup).
+#if DM_NATIVE_EXEC
             uint64_t top = 0, ssz = 0; plat_thread_stack(&top, &ssz);
+#else
+            // x86-64 engine: the guest stack the host made for the calling thread (the main thread's, in the arena); its native stack is no guest memory
+            uint64_t top = 0, ssz = 0, slo = 0; if (dm_aot_main_stack(&slo, &ssz)) top = slo + ssz;
+#endif
             if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
             // Other host memory: report "free, no permissions" (the 4 KiB page around it) as Horizon does for unmapped addresses. It used to report Code+RX, and GetExceptionInfo walking back from main merged on through host memory down to 0
             else { base=addr & ~0xFFFull; size=0x1000; state=0/*Free*/; perm=0; } }
@@ -638,7 +662,11 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // 96 threads (pm_spec.cpp BaseApplicationThreads; a boost raises it to 256). Monster Train 2's Unity 2022.3 player creates a thread only when this is at least 1: the 0 it got here
         // left its main thread waiting at boot for a thread it never created (main+0x3e1ac4)
         case I_FreeThreadCount: { int thr_limit_used(void); int u = thr_limit_used(); v = u < 96 ? 96 - u : 0; break; }
+#if DM_NATIVE_EXEC
         case I_UserExcAddr: { static _Alignas(0x1000) uint8_t ctx[0x1000]; v = (uint64_t)ctx; break; }   // user exception context area: newer SDKs' SetDyingMessageRegion writes to +0x1c0 (0 would write through a null pointer)
+#else
+        case I_UserExcAddr: { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, user_exc_alloc); v = g_user_exc; break; }   // the same area, in the arena (x86-64 engine)
+#endif
         default: v = 0; break;
         }
         regs[0] = 0; regs[1] = v; return 0;

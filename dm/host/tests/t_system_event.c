@@ -54,6 +54,15 @@ int dm_main_imports(const char *prefix) { (void)prefix; return 1; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
 uint32_t hle_hid_connected_npad(void) { return 0; }
+#if !DM_NATIVE_EXEC
+// The x86-64 execution engine's side of hle_thread.c (aot_thread.c), which this test does not link: no thread here runs recompiled guest code
+dm_guest_state *dm_aot_thread_begin(void) { return NULL; }
+int dm_aot_thread_run(uint64_t entry, uint64_t arg, uint64_t sp) { (void)entry; (void)arg; (void)sp; abort(); }
+void dm_aot_thread_end(void) {}
+void dm_aot_thread_exiting(void) {}
+void dm_aot_thread_poke(dm_guest_state *st) { (void)st; }
+int dm_aot_stop_status(void) { return -1; }   // the process never stops here
+#endif
 static uint32_t create_event(void *p, int mode, int interprocess) {
     (void)mode; assert(interprocess);
     uint64_t r[32] = {0}; assert(svc_thread(0x45, r) && !r[0]);

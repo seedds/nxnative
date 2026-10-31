@@ -80,6 +80,12 @@ void *plat_vm_alloc(size_t n);                           // readable and writabl
 int plat_vm_protect(void *a, size_t n, int prot);        // a and n in whole pages
 int plat_vm_discard(void *a, size_t n);                  // the pages' contents may be dropped (MADV_FREE; Windows decommits them, and a later protect makes them zero pages)
 int plat_vm_release(void *a, size_t n);                  // a whole range from plat_vm_reserve / plat_vm_alloc
+#if !DM_NATIVE_EXEC
+// The x86-64 execution engine's arena (docs/design/aot-recompiler.md 5.2): n bytes of address space reserved at exactly addr (both whole allocation
+// granules), inaccessible, no memory charged; NULL when any of it is taken (nothing there is mapped over, and the range never moves). Released with
+// plat_vm_release; parts of it open and close with plat_vm_protect / plat_vm_discard as a plat_vm_reserve range does
+void *plat_vm_reserve_at(uint64_t addr, size_t n);
+#endif
 // The mapped region at or after addr and its protection (PLAT_PROT_*); 0 on success, nonzero when there is none
 int plat_vm_query(uint64_t addr, uint64_t *base, uint64_t *size, int *prot);
 // Copy n bytes from addr without faulting: 0 when all were read; nonzero when part of the range is unreadable (*got = the bytes read)

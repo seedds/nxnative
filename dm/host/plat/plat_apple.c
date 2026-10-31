@@ -78,6 +78,15 @@ void *plat_vm_alloc(size_t n) { void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, 
 int plat_vm_protect(void *a, size_t n, int prot) { return mprotect(a, n, prot); }
 int plat_vm_discard(void *a, size_t n) { return madvise(a, n, MADV_FREE); }
 int plat_vm_release(void *a, size_t n) { return munmap(a, n); }
+#if !DM_NATIVE_EXEC
+// The x86-64 execution engine's arena on an Intel Mac: macOS has no MAP_FIXED_NOREPLACE, so the address is a hint and a range that is taken gives another
+void *plat_vm_reserve_at(uint64_t addr, size_t n) {
+    void *want = (void *)(uintptr_t)addr, *p = mmap(want, n, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) return NULL;
+    if (p != want) { munmap(p, n); errno = EEXIST; return NULL; }
+    return p;
+}
+#endif
 int plat_vm_query(uint64_t addr, uint64_t *base, uint64_t *size, int *prot) {   // hle_uemalloc.c, hle_fs.c: vm_region_64 (iOS has no mach_vm.h)
     vm_address_t at = (vm_address_t)addr; vm_size_t sz = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
     kern_return_t kr = vm_region_64(mach_task_self(), &at, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj);

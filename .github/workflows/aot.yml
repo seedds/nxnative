@@ -1,7 +1,8 @@
 # The ahead-of-time recompiler nxaot (dm/tools/aot, Phase 2 of the port: docs/design/migration-status.md): its Docker image, its build, the corpus
 # rebuilt with both toolchains, CTest and the test runner that writes logs/aot/ (the vector harness, discovery over the corpus, the corpus
-# recompiled and run natively, the per-function differential test, the benchmarks), with the commands of dm/tools/aot/README.md. Nothing here
-# builds or runs a game.
+# recompiled and run natively, the per-function differential test, the benchmarks), with the commands of dm/tools/aot/README.md; then the host's
+# run time of recompiled code (dm/host/aot_*.c) on the corpus packed here, with and without the JIT fallback, and the differential test of its
+# floating-point helpers. Nothing here builds or runs a game.
 name: aot
 
 on:
@@ -61,6 +62,40 @@ jobs:
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot \
             sh dm/tools/aot/tests/run_aot_tests.sh build/aot
+      # The host's run time of recompiled code (dm/host/aot_*.c; dm/tools/aot/README.md, "Threads and safepoints", the dm/host list): every corpus NRO
+      # packed by nxaot with the default options into build/packs, then dm/host built with that folder and its test t_aot_host run (CTest): each NRO
+      # mapped by the host's loader in the arena below 2^39, its pack loaded, _start run through the host's SVC dispatcher and thread layer, the lines
+      # compared with corpus/expected; excl's threads and its pause test through SetThreadActivity and GetThreadContext3; a guest call into the
+      # host-function page; write-protected data pages resumed by a fault hook. First in the host's own image (docker/Dockerfile.build, built here: it has
+      # no Boost, so no JIT fallback, and the programs that need it stop with status 3 as the test expects), then in this image with the JIT fallback
+      # (NXHOST_JIT; SDL as a console build, since this image has no X11 or Wayland headers), then the differential test of the host's floating-point
+      # helpers (dm/host/aot_fp.c) against nxaot's (runtime.cpp). Time added, measured on the development machine (8 threads): packs 27 s, the host and
+      # its test 48 s, with the JIT 98 s, the floating-point test 27 s; the host image's build took 43 s on GitHub (port.yml); about 6 to 8 minutes in
+      # all on a 4-vCPU runner (estimated)
+      - name: Corpus packs (build/packs)
+        id: packs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot \
+            sh dm/tools/aot/tests/build_packs.sh build/aot build/packs
+      - name: Build the host image
+        if: ${{ !cancelled() && steps.packs.outcome == 'success' }}
+        run: docker build -t nxnative-build -f docker/Dockerfile.build docker
+      - name: The host on the corpus (t_aot_host, nxnative-build)
+        if: ${{ !cancelled() && steps.packs.outcome == 'success' }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build sh -c \
+            "cmake -S dm/host -B build/host -G Ninja -DGAME=010015100B514000 -DNXAOT_PACKS=/src/build/packs && cmake --build build/host --target t_aot_host && ctest --test-dir build/host -R '^t_aot_host\$' --output-on-failure -V"
+      - name: The host on the corpus with the JIT fallback (t_aot_host, NXHOST_JIT, nxnative-aot)
+        if: ${{ !cancelled() && steps.packs.outcome == 'success' }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
+            "cmake -S dm/host -B build/host-jit -G Ninja -DGAME=010015100B514000 -DNXHOST_JIT=ON -DSDL_UNIX_CONSOLE_BUILD=ON -DNXAOT_PACKS=/src/build/packs && cmake --build build/host-jit --target t_aot_host && ctest --test-dir build/host-jit -R '^t_aot_host\$' --output-on-failure -V"
+      - name: The host's floating-point helpers against nxaot's (aot_fp_diff.sh)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot \
+            sh dm/host/tests/aot_fp_diff.sh build/fpdiff
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

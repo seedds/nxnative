@@ -13,6 +13,13 @@ static uint64_t missing;
 uint64_t resolve_import(module_t *m, const char *name) { (void)m; (void)name; return (uint64_t)&missing; }
 int hle_implements(const char *name) { (void)name; return 0; }
 int svc_nro_deactivate(module_t *m) { m->loaded = 0; return 1; }   // no memory mappings in this fixture
+#if !DM_NATIVE_EXEC
+// The x86-64 execution engine's side of loader.c (aot_arena.c, aot_run.c), which this fixture does not reach: its modules are made by hand and run no guest code
+void *dm_guest_alloc(size_t n) { (void)n; abort(); }
+uint8_t *dm_aot_image_map(const uint8_t *bytes, size_t len, size_t bss, uint64_t ro_end, size_t *mapped) { (void)bytes; (void)len; (void)bss; (void)ro_end; (void)mapped; abort(); }
+struct dm_guest_state *dm_aot_self_state(void) { return NULL; }
+uint64_t dm_guest_call(struct dm_guest_state *st, uint64_t addr, int nargs, ...) { (void)st; (void)addr; (void)nargs; abort(); }
+#endif
 
 typedef struct {
     Elf64_Sym sym[4];

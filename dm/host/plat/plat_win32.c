@@ -139,6 +139,13 @@ size_t plat_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return si.dwPa
 size_t plat_vm_granularity(void) { SYSTEM_INFO si; GetSystemInfo(&si); return si.dwAllocationGranularity; }
 void *plat_vm_reserve(size_t n) { void *p = VirtualAlloc(NULL, n, MEM_RESERVE, PAGE_NOACCESS); if (!p) fail(); return p; }
 void *plat_vm_alloc(size_t n) { void *p = VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); if (!p) fail(); return p; }
+// VirtualAlloc with an address reserves exactly there (rounded down to the 64 KiB allocation granularity, of which the arena's base is a multiple) or fails
+void *plat_vm_reserve_at(uint64_t addr, size_t n) {
+    void *want = (void *)(uintptr_t)addr, *p = VirtualAlloc(want, n, MEM_RESERVE, PAGE_NOACCESS);
+    if (!p) { fail(); return NULL; }
+    if (p != want) { VirtualFree(p, 0, MEM_RELEASE); errno = EEXIST; return NULL; }
+    return p;
+}
 static DWORD win_prot(int prot) {
     switch (prot & 7) {
     case PLAT_PROT_NONE: return PAGE_NOACCESS;

@@ -32,10 +32,19 @@ static void *memory_reserve(size_t n) {
 #define plat_page_size memory_getpagesize
 #define plat_vm_protect memory_mprotect
 #define plat_vm_reserve memory_reserve
+#if !DM_NATIVE_EXEC
+#define dm_guest_reserve memory_reserve   // the x86-64 engine's form of the same reservation (hle_svc.c mem_init_once)
+#endif
 #define abort memory_abort
 #include "../hle_svc.c"
 #undef abort
 #undef plat_vm_reserve
+#if !DM_NATIVE_EXEC
+#undef dm_guest_reserve
+// The rest of the x86-64 engine's side of hle_svc.c, which this fixture does not reach (no user exception context, no main-thread guest stack)
+void *dm_guest_alloc(size_t n) { (void)n; abort(); }
+int dm_aot_main_stack(uint64_t *lo, uint64_t *size) { (void)lo; (void)size; return 0; }
+#endif
 #undef plat_vm_protect
 #undef plat_page_size
 

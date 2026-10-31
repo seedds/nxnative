@@ -106,6 +106,13 @@ size_t plat_vm_granularity(void) { return (size_t)sysconf(_SC_PAGESIZE); }
 // so a 5 GB guest block does not fail under the kernel's heuristic overcommit on a smaller machine; pages count when first written
 void *plat_vm_reserve(size_t n) { void *p = mmap(NULL, n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0); return p == MAP_FAILED ? NULL : p; }
 void *plat_vm_alloc(size_t n) { void *p = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); return p == MAP_FAILED ? NULL : p; }
+// MAP_FIXED_NOREPLACE (Linux 4.17): exactly there or EEXIST, never over a mapping; a kernel before it takes the address as a hint, hence the check
+void *plat_vm_reserve_at(uint64_t addr, size_t n) {
+    void *want = (void *)(uintptr_t)addr, *p = mmap(want, n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+    if (p == MAP_FAILED) return NULL;
+    if (p != want) { munmap(p, n); errno = EEXIST; return NULL; }
+    return p;
+}
 int plat_vm_protect(void *a, size_t n, int prot) { return mprotect(a, n, prot); }
 int plat_vm_discard(void *a, size_t n) {
 #ifdef MADV_FREE

@@ -51,15 +51,19 @@ static int fixtures(NSString *dir) {
 }
 @end
 
-static int wait_collision(void) {
-    uint64_t end = bp_now() + 5ull * NSEC_PER_SEC;
-    do {
-        os_unfair_lock_lock(&g_warm_dict_lock); uint64_t n = g_warm_load_stats.collisions; os_unfair_lock_unlock(&g_warm_dict_lock);
-        if (n) return 1;
-        usleep(1000);
-    } while (bp_now() < end);
-    return 0;
+// Observe the second caller's lookup under the production dictionary lock. Even if the test
+// releases the device gate immediately, the owner cannot publish until this caller unlocks.
+@interface WarmLookupDictionary : NSObject {
+@public NSMutableDictionary *dictionary; dispatch_semaphore_t second_lookup; unsigned lookups;
 }
+@end
+@implementation WarmLookupDictionary
+- (id)forwardingTargetForSelector:(SEL)selector { return dictionary; }
+- (id)objectForKeyedSubscript:(id)key {
+    if ([key isEqual:@"warm-vs"] && ++lookups == 2) dispatch_semaphore_signal(second_lookup);
+    return dictionary[key];
+}
+@end
 
 static NSString *row(const pso_key *key, int merged) {
     NvShader *vs = [NvShader new], *fs = [NvShader new];
@@ -113,9 +117,10 @@ static void check_draw(const pso_key *raw, int merged, const uint8_t expected[4]
     g_pso_lmap = NULL;
 }
 
-static void singleflight(NSString *dir, int enabled) {
-    setenv("DM_NVN_WARM_DIAG", "1", 1); setenv("DM_NVN_WARM_SINGLEFLIGHT", enabled ? "1" : "0", 1);
+static void singleflight(NSString *dir) {
     warm_load_begin(); g_warm_items = [NSMutableArray array]; atomic_store(&g_warm_ready, 0);
+    WarmLookupDictionary *lookup = [WarmLookupDictionary new]; lookup->dictionary = g_warm_dict;
+    lookup->second_lookup = dispatch_semaphore_create(0); g_warm_dict = (NSMutableDictionary *)lookup;
     for (NSString *extension in @[@"json", @"metallib"]) {
         NSString *source = [dir stringByAppendingPathComponent:[@"warm-fs." stringByAppendingString:extension]];
         NSString *target = [dir stringByAppendingPathComponent:[@"warm-other." stringByAppendingString:extension]];
@@ -137,7 +142,7 @@ static void singleflight(NSString *dir, int enabled) {
     dispatch_group_async(callers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ warm_task(tasks[0]); });
     EXPECT("first real shader load reaches device gate", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
     dispatch_group_async(callers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ warm_task(tasks[1]); });
-    EXPECT("R task collides with S task while its load is held", 1, wait_collision());
+    EXPECT("R task reaches S task's key while its load is held", 0, dispatch_semaphore_wait(lookup->second_lookup, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
     // A dedicated worker avoids a failed assertion hanging the test behind the very global load lock it is meant to catch.
     dispatch_group_t unrelated = dispatch_group_create();
     __block NvShader *other = nil;
@@ -145,34 +150,28 @@ static void singleflight(NSString *dir, int enabled) {
     EXPECT("unrelated shader finishes before owner is released", 0, dispatch_group_wait(unrelated, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
     dispatch_semaphore_signal(gate->release);
     dispatch_group_wait(callers, DISPATCH_TIME_FOREVER); dispatch_group_wait(unrelated, DISPATCH_TIME_FOREVER);
-    g_dev = gate->device;
     EXPECT("unrelated shader loaded", 1, other != nil);
-    EXPECT("unique shader keys", 3, g_warm_load_stats.unique);
-    EXPECT("actual library loads", enabled ? 3 : 4, atomic_load(&gate->library_calls));
-    EXPECT("shader preparation loads", enabled ? 3 : 4, g_warm_load_stats.loads);
-    EXPECT("losing duplicate preparation", enabled ? 0 : 1, g_warm_load_stats.discarded);
-    NvShader *published = g_warm_dict[@"warm-vs"];
+    EXPECT("actual library loads", 3, atomic_load(&gate->library_calls));
+    NvShader *published = warm_shader(@"warm-vs", 0);
     unsigned references = 0;
     for (WarmItem *item in g_warm_items) {
         if (item->kind == 0) { EXPECT("S task retains the published shader", 1, item->shader == published); references++; }
         if (item->kind == 1) { EXPECT("R task retains the published shader", 1, item->vs == published); references++; }
     }
     EXPECT("both real callers returned the same shader", 2, references);
-    uint64_t cached_loads = g_warm_load_stats.loads;
     EXPECT("cached lookup returns the published shader", 1, warm_shader(@"warm-vs", 0) == published);
-    EXPECT("cached lookup performs no preparation", cached_loads, g_warm_load_stats.loads);
+    EXPECT("cached lookups perform no library loads", 3, atomic_load(&gate->library_calls));
+    g_dev = gate->device;
     warm_claim();
     NvShader *vs = g_shcache[@"warm-vs"];
-    EXPECT("S and R publish one shader identity", 1, vs == g_warm_dict[@"warm-vs"]);
+    EXPECT("S and R publish one shader identity", 1, vs == published);
     // Missing geometry reflection returns nil quietly. Warm callers share its negative result;
     // a later demand caller still retries, and succeeds once real reflection appears.
     EXPECT("failed warm load", 1, warm_shader(@"retry-gs", 2) == nil);
-    uint64_t loads = g_warm_load_stats.loads;
     NSDictionary *reflection = @{@"chain": @DMSH_CHAIN, @"gs_slice": @{@"loc": @0, @"comp": @"x"}};
     NSString *path = [dir stringByAppendingPathComponent:@"retry-gs.json"];
     EXPECT("retry reflection written", 1, [[NSJSONSerialization dataWithJSONObject:reflection options:0 error:nil] writeToFile:path atomically:YES]);
     EXPECT("failure stays cached for this warm phase", 1, warm_shader(@"retry-gs", 2) == nil);
-    EXPECT("warm failure is not loaded again", loads, g_warm_load_stats.loads);
     EXPECT("demand loading still retries failed warm key", 1, shader_get(@"retry-gs", 2) != nil);
     EXPECT("retry fixture removed", 1, [NSFileManager.defaultManager removeItemAtPath:path error:nil]);
     g_warm_t0 = bp_now(); warm_finish();
@@ -222,13 +221,13 @@ static void scenario(NSString *dir, int merged) {
 }
 
 int main(void) { @autoreleasepool {
+    alarm(60);   // A regression in owner/waiter progress must fail rather than hang the suite.
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_NVN_PREDICT", "0", 1);
     unsetenv("DM_NVN_HILITE"); unsetenv("DM_NVN_MAGSCAN"); unsetenv("DM_PSO_RECORD"); unsetenv("DM_PSO_USER"); unsetenv("DM_SAVE");
     char dir[] = "/tmp/t_pso_warm.XXXXXX"; if (!mkdtemp(dir)) return 1;
     mtl_init();
     if (!fixtures(@(dir))) { fprintf(stderr, "failed to compile synthetic shader fixtures\n"); [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil]; return 1; }
-    singleflight(@(dir), 0); singleflight(@(dir), 1);
-    unsetenv("DM_NVN_WARM_DIAG"); unsetenv("DM_NVN_WARM_SINGLEFLIGHT");
+    singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
     const char *mode = getenv("DM_PSO_MTL4");
     if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_comp4 != nil);

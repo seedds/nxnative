@@ -4593,6 +4593,20 @@ static MTLSamplerAddressMode wrapm(int w) {
         case 6: return MTLSamplerAddressModeMirrorRepeat; }
     return MTLSamplerAddressModeRepeat;
 }
+// Filtering the host can raise for any game, because it builds every sampler the game uses: the setting
+// is a floor, never a ceiling, so a game that asks for more keeps what it asked for.
+static float dm_aniso(void) {
+    static float v = -1;
+    if (v < 0) { const char *e = getenv("DM_ANISO"); v = e ? strtof(e, NULL) : 0; if (v < 1) v = 0; if (v > 16) v = 16;
+                 if (v) MLOG("DM_ANISO=%g: every sampler filters at least this anisotropy", v); }
+    return v;
+}
+static int dm_trilinear(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_TRILINEAR"); v = e && atoi(e) ? 1 : 0;
+                 if (v) MLOG("DM_TRILINEAR=1: a sampler that filters linearly also blends mip levels"); }
+    return v;
+}
 static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
     if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];
@@ -4601,10 +4615,25 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.magFilter = p.magf ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
     d.minFilter = (p.minf == 1 || p.minf == 3 || p.minf == 5) ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
     d.mipFilter = p.minf <= 1 ? MTLSamplerMipFilterNotMipmapped : (p.minf == 2 || p.minf == 3) ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear;
+    // DM_TRILINEAR=1 blends between mip levels where the game picked the nearer one, which is the seam that
+    // runs across ground and walls at the distance a mip changes. Only a sampler that already filters the
+    // texture itself is raised, so nearest-filtered art (menus, lookup tables) keeps the mips the game chose.
+    // A mip filter is also what makes DM_ANISO below do anything, so the two go together on such a sampler.
+    if (dm_trilinear() && d.mipFilter == MTLSamplerMipFilterNearest && d.minFilter == MTLSamplerMinMagFilterLinear)
+        d.mipFilter = MTLSamplerMipFilterLinear;
     d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
-    d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    // DM_ANISO=2..16 raises the game's own anisotropy to at least that, for every sampler. The games were
+    // built for a handheld and mostly ask for 1, so ground and wall textures blur at a glancing angle.
+    // Sampling only: no render target, no allocation, and a sampler that asks for more keeps what it asked for.
+    // Only a sampler that reads a mipmapped colour texture is raised. A comparison sampler is a shadow map: anisotropy
+    // changes which depth texels the comparison averages, and across a cascade boundary the two sides then disagree,
+    // which draws a line along the join on open ground (seen in Breath of the Wild's fields). A reduction sampler is a
+    // min or max pyramid, whose value has to stay the extreme of the footprint. Without mipmaps there is no second level.
+    { float a = p.aniso;
+      if (!p.cmp_mode && !p.reduction && d.mipFilter != MTLSamplerMipFilterNotMipmapped && dm_aniso() > a) a = dm_aniso();
+      d.maxAnisotropy = a < 1 ? 1 : a > 16 ? 16 : (NSUInteger)a; }
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction

@@ -2,20 +2,29 @@
 // The host is not exec'ed: macOS privacy checks (TCC) attribute a child's file access to the app that launched it, while a launcher that hands its process over (a shell script exec'ing
 // dmhost) gets EPERM on every open on a removable volume, with no prompt, signed or not. The launcher forwards SIGTERM / SIGINT / SIGHUP to the host and returns its exit code.
 // Bundle layout: Resources/romfs.img (the game's RomFS image; legacy romfs/ also supported), Resources/msl/<b-chain | vk | gl> (the Mac shader libraries), Resources/aoc/<index> (DLC), Resources/pso (the pipeline archive made
-// offline, handed to the host as DM_PSO_BUNDLE as the iOS app's main.m does), Resources/dm (the rewritten modules, the shader tables and pairs, font/, env.txt). Saves, the pipeline list and temporary files go to ~/Library/Application Support/nxnative/<title ID>/, the host's output to ~/Library/Logs/nxnative/<title ID>.log
-// (the previous run's kept as <title ID>.prev.log). Environment switches: one KEY=VALUE per line in <Application Support folder>/env.txt, then Resources/dm/env.txt (the first one wins; neither
-// replaces a variable already set), as the iOS app reads Documents/env.txt and dm/env.txt. Then the player's saved choices: launcher.<VAR> strings in the app's preferences domain (its bundle ID), which a
+// offline, handed to the host as DM_PSO_BUNDLE as the iOS app's main.m does), Resources/dm (the rewritten modules, the shader tables and pairs, font/, env.txt). What the app keeps per game (save/, save.work/,
+// temp/, pso_user.tsv, pso_archive/, the player's env.txt; DM_ROOT and the working folder) is in its data folder: ~/Library/Application Support/nxnative/<title ID>/, with the host's output in
+// ~/Library/Logs/nxnative/<title ID>.log (the previous run's kept as <title ID>.prev.log). A dataFolder string in the app's preferences domain (its bundle ID) names another data folder, absolute
+// or relative to the folder the .app is in; that folder is the game's own (no <title ID> level), and its log is in <data folder>/log/ under the same names. On the first start with it (no save/
+// there yet) the old save and pso_user.tsv are copied across, never moved; a folder that cannot be made or written is a [RED] line and ~/Library as before (docs/frontends.md, Data folder).
+// Environment switches: one KEY=VALUE per line in <data folder>/env.txt, then Resources/dm/env.txt (the first one wins; neither
+// replaces a variable already set), as the iOS app reads Documents/env.txt and dm/env.txt. Then the player's saved choices: launcher.<VAR> strings in the app's preferences domain, which a
 // front end or a settings window writes, each checked against the bundle's settings (Info.plist DMSettings, from launcher.json) and used only for a variable still unset; DM_SAVED_CHOICES=0 ignores them.
-// So the order is: the launch environment, the player's env.txt, the bundle's, saved choices, the host's tested defaults (docs/frontends.md, Saved choices).
+// So the order is: the launch environment, the player's env.txt, the bundle's, saved choices, the host's tested defaults (docs/frontends.md, Saved choices). The data folder is a default too:
+// DM_SAVE, DM_TEMP, DM_ROOT or DM_PSO_USER set in one of those places wins over it, each for its own path (DM_SAVE moves only the save).
+// DM_LOG_DIR names the log's folder (same places, over the data folder's log/); a relative DM_SAVE or DM_LOG_DIR is in the folder the .app is in. The log is opened after the env files are read;
+// what is printed before goes to a temporary file that is copied into it. An unusable DM_LOG_DIR is a [RED] line and ~/Library/Logs/nxnative.
 // Before the host starts, the settings window (dm/mac/Launcher.swift dm_mac_launcher, linked in by pack_app.py) runs in this process and puts the player's settings into the environment; it keeps
 // what the launch environment and the env files set (DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS). DM_LAUNCHER=0 or --no-launcher (open <app> --args --no-launcher) starts the game without the window,
 // with the saved choices; so does "Show this window at launch" turned off.
 #include <CoreFoundation/CoreFoundation.h>
+#include <copyfile.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <removefile.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -67,10 +76,69 @@ static int modules_present(const char *dm) {   // the packer's inventory detects
     return 1;
 }
 
-static void mkdirs(const char *path) {   // mkdir -p
+static int mkdirs(const char *path) {   // mkdir -p; -1 with errno when the last level is neither made nor there
     char p[PATH_MAX]; snprintf(p, sizeof p, "%s", path);
     for (char *s = p + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(p, 0755); *s = '/'; }
-    mkdir(p, 0755);
+    return mkdir(p, 0755) && errno != EEXIST ? -1 : 0;
+}
+
+static int writable_dir(const char *dir) {   // a folder a file can be made in: access(W_OK) says yes on a read-only volume or where privacy checks refuse the open
+    char p[PATH_MAX]; struct stat st;
+    if (stat(dir, &st) || !S_ISDIR(st.st_mode) || snprintf(p, sizeof p, "%s/.nxnative-write-test.%d", dir, (int)getpid()) >= (int)sizeof p) return 0;
+    int fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0644); if (fd < 0) return 0;
+    close(fd); unlink(p); return 1;
+}
+
+// The app's data folder (docs/frontends.md, Data folder): dataFolder in the app's preferences domain, as a front end writes it with defaults write <bundle ID> dataFolder <path>.
+// 0: not set (~/Library, as before); 1: out is the folder, made and writable; -1: set but unusable, msg says why (the caller falls back to ~/Library). msg is printed once the log is open.
+static int data_folder(const char *contents, char *out, size_t n, char *msg, size_t mn) {
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle()); if (!domain) return 0;
+    CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("dataFolder"), domain); if (!v) return 0;
+    char key[PATH_MAX], app[PATH_MAX], path[PATH_MAX];
+    int ok = CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, key, sizeof key, kCFStringEncodingUTF8) && *key; CFRelease(v);
+    if (!ok) { snprintf(msg, mn, "[RED] launcher: dataFolder is not a path (a non-empty string): keeping the data in ~/Library"); return -1; }
+    snprintf(app, sizeof app, "%s", contents); *strrchr(app, '/') = 0; *strrchr(app, '/') = 0;   // .../<folder>/<game>.app/Contents → .../<folder>, which a relative path is in
+    if ((key[0] == '/' ? snprintf(path, sizeof path, "%s", key) : snprintf(path, sizeof path, "%s/%s", app, key)) >= (int)sizeof path) {
+        snprintf(msg, mn, "[RED] launcher: dataFolder %s is too long a path: keeping the data in ~/Library", key); return -1;
+    }
+    if (mkdirs(path) || !writable_dir(path)) { snprintf(msg, mn, "[RED] launcher: data folder %s (dataFolder %s) cannot be made or written (%s): keeping the data in ~/Library", path, key, strerror(errno)); return -1; }
+    if (!realpath(path, out)) snprintf(out, n, "%s", path);   // .. and symbolic links resolved, for the log and the host
+    snprintf(msg, mn, "launcher: data folder %s (dataFolder %s)", out, key);
+    return 1;
+}
+
+static int copy_tree(const char *from, const char *to) {   // a copy beside the target, renamed into place when whole: a copy cut short leaves no half save, and the next start tries again
+    char part[PATH_MAX];
+    if (snprintf(part, sizeof part, "%s.copying", to) >= (int)sizeof part) { errno = ENAMETOOLONG; return -1; }
+    removefile(part, NULL, REMOVEFILE_RECURSIVE);
+    if (copyfile(from, part, NULL, COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_NOFOLLOW_SRC) || rename(part, to)) {
+        int e = errno; removefile(part, NULL, REMOVEFILE_RECURSIVE); errno = e; return -1;
+    }
+    return 0;
+}
+
+// The first start with a data folder (no save/ in it yet): the save and the pipeline list in ~/Library are copied across, never moved, so going back to ~/Library finds them as they were.
+// Only the paths the data folder holds for this start: DM_SAVE or DM_PSO_USER set elsewhere keeps its own. The committed save only: the host clones save.work/ from it at mount.
+static void migrate(const char *lib, const char *data) {
+    struct stat st; char from[PATH_MAX], to[PATH_MAX];
+    if (!getenv("DM_SAVE")) {
+        // save_device/ (a game that mounts device save data too: hle_fs.c h_fs_MountDeviceSave) first, save/ last: save/ marks the copy done. A save_device/ without save/ is
+        // what a copy cut short left, so it is replaced. If either fails, this start keeps both in ~/Library (the host finds save_device/ beside DM_SAVE).
+        for (int i = 0; i < 2; i++) {
+            const char *sub = i ? "save" : "save_device";
+            snprintf(from, sizeof from, "%s/%s", lib, sub); snprintf(to, sizeof to, "%s/%s", data, sub);
+            if (stat(from, &st) || !S_ISDIR(st.st_mode)) continue;
+            if (!i) removefile(to, NULL, REMOVEFILE_RECURSIVE);
+            if (!copy_tree(from, to)) { fprintf(stderr, "launcher: first start with the data folder: copied %s to %s (the old one stays)\n", from, to); continue; }
+            snprintf(to, sizeof to, "%s/save", lib);
+            fprintf(stderr, "[RED] launcher: cannot copy %s to the data folder %s (%s): this start keeps the save in %s, the next one tries again\n", from, data, strerror(errno), to);
+            setenv("DM_SAVE", to, 1); return;
+        }
+    }
+    snprintf(from, sizeof from, "%s/pso_user.tsv", lib); snprintf(to, sizeof to, "%s/pso_user.tsv", data);
+    if (getenv("DM_PSO_USER") || stat(from, &st) || !stat(to, &st)) return;
+    if (!copyfile(from, to, NULL, COPYFILE_ALL | COPYFILE_EXCL)) fprintf(stderr, "launcher: first start with the data folder: copied %s to %s (the old one stays)\n", from, to);
+    else fprintf(stderr, "launcher: cannot copy %s to %s (%s): the pipelines it lists are built again as the game meets them\n", from, to, strerror(errno));
 }
 
 static void env_file(const char *path) {   // KEY=VALUE lines, # starts a comment; a variable already set stays
@@ -146,6 +214,32 @@ static void cloud_saves_folder(void) {
     if (v) CFRelease(v);
 }
 
+// What the launcher prints before its log is open (the log's folder can come from an env.txt it has not read yet) goes to an unnamed temporary file, and is copied into the log first.
+static FILE *g_pre; static int g_err = -1;
+static void pre_begin(void) {
+    fflush(stderr); g_pre = tmpfile();   // none: those lines stay on the original stderr
+    if (g_pre && (g_err = dup(2)) >= 0) dup2(fileno(g_pre), 2);
+}
+static void pre_end(int fd) {   // fd: the open log (it becomes stdout and stderr), or -1: the lines go back to the original stderr
+    if (!g_pre) { if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); } return; }
+    fflush(stderr);
+    int to = fd >= 0 ? fd : g_err; char buf[4096]; ssize_t r; off_t at = 0;
+    while ((r = pread(fileno(g_pre), buf, sizeof buf, at)) > 0) { at += r; for (ssize_t w = 0, k; w < r; w += k) if ((k = write(to, buf + w, (size_t)(r - w))) <= 0) break; }
+    if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); } else dup2(g_err, 2);
+    close(g_err); fclose(g_pre); g_pre = NULL;
+}
+
+// A relative DM_SAVE or DM_LOG_DIR is in the folder the .app is in, as a relative dataFolder is: a library that moves keeps working. The host and the rest of the launcher only see the absolute path.
+static void resolve_relative(const char *name, const char *app) {
+    const char *v = getenv(name); char path[PATH_MAX];
+    if (!v || !*v || *v == '/') return;
+    if (snprintf(path, sizeof path, "%s/%s", app, v) >= (int)sizeof path) {
+        fprintf(stderr, "[RED] launcher: %s=%s is too long a path from %s: ignored\n", name, v, app); unsetenv(name); return;
+    }
+    fprintf(stderr, "launcher: %s=%s is relative: %s in the folder the app is in\n", name, v, path);
+    setenv(name, path, 1);
+}
+
 int main(int argc, char **argv) {
     char self[PATH_MAX], exe[PATH_MAX]; uint32_t n = sizeof self;
     if (_NSGetExecutablePath(self, &n) || !realpath(self, exe)) return 1;
@@ -168,22 +262,37 @@ int main(int argc, char **argv) {
         return 1;
     }
     const char *home = getenv("HOME"); if (!home || !*home) return 1;
-    char sup[PATH_MAX], save[PATH_MAX], temp[PATH_MAX], logs[PATH_MAX], log[PATH_MAX], prev[PATH_MAX];
-    snprintf(sup, sizeof sup, "%s/Library/Application Support/nxnative/%s", home, id);
+    char lib[PATH_MAX], sup[PATH_MAX], save[PATH_MAX], temp[PATH_MAX], logs[PATH_MAX], log[PATH_MAX], prev[PATH_MAX], note[3 * PATH_MAX], app[PATH_MAX];
+    snprintf(app, sizeof app, "%s", contents); *strrchr(app, '/') = 0; *strrchr(app, '/') = 0;   // .../<folder>/<game>.app/Contents → .../<folder>
+    snprintf(lib, sizeof lib, "%s/Library/Application Support/nxnative/%s", home, id);
+    int moved = data_folder(contents, sup, sizeof sup, note, sizeof note);   // the key first: the player's env.txt is in the folder it names
+    if (moved != 1) snprintf(sup, sizeof sup, "%s", lib);
     snprintf(save, sizeof save, "%s/save", sup); snprintf(temp, sizeof temp, "%s/temp", sup);
-    snprintf(logs, sizeof logs, "%s/Library/Logs/nxnative", home);
-    snprintf(log, sizeof log, "%s/%s.log", logs, id); snprintf(prev, sizeof prev, "%s/%s.prev.log", logs, id);
-    mkdirs(save); mkdirs(temp); mkdirs(logs);
-    rename(log, prev);
-    int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); setvbuf(stdout, NULL, _IOLBF, 0); }
+    mkdirs(temp);   // save/ once the copy of an old one is decided
+    pre_begin();   // the log is opened once the env files are read: DM_LOG_DIR may be in one
     fprintf(stderr, "launcher: %s (%s), host %s\n", name, id, host);
+    if (moved) fprintf(stderr, "%s\n", note);
     CFArrayRef rules = setting_rules();   // the settings the launch environment already set: the window shows them, fixed
     for (CFIndex i = 0; rules && i < CFArrayGetCount(rules); i++) { char env[128]; if (rule_env(CFArrayGetValueAtIndex(rules, i), env, sizeof env) && getenv(env)) add_key(&g_launch_keys, env); }
     snprintf(p, sizeof p, "%s/env.txt", sup); env_file(p);
     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
     free(g_file_keys); free(g_launch_keys);
+    resolve_relative("DM_SAVE", app); resolve_relative("DM_LOG_DIR", app);
+    // The log's folder: DM_LOG_DIR, else the data folder's log/, else ~/Library/Logs/nxnative. A DM_LOG_DIR that cannot be made or written is a [RED] line and ~/Library/Logs/nxnative.
+    snprintf(logs, sizeof logs, "%s/Library/Logs/nxnative", home);
+    const char *want = getenv("DM_LOG_DIR");
+    if (want && *want) {
+        if (!mkdirs(want) && writable_dir(want)) snprintf(logs, sizeof logs, "%s", want);
+        else fprintf(stderr, "[RED] launcher: DM_LOG_DIR %s cannot be made or written (%s): the log is in %s\n", want, strerror(errno), logs);
+    } else if (moved == 1) snprintf(logs, sizeof logs, "%s/log", sup);
+    mkdirs(logs);
+    snprintf(log, sizeof log, "%s/%s.log", logs, id); snprintf(prev, sizeof prev, "%s/%s.prev.log", logs, id);
+    rename(log, prev);
+    int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    pre_end(fd);
+    if (fd >= 0) setvbuf(stdout, NULL, _IOLBF, 0);
+    else fprintf(stderr, "[RED] launcher: cannot open the log %s (%s)\n", log, strerror(errno));
     int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
@@ -191,7 +300,14 @@ int main(int argc, char **argv) {
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
     cloud_saves_folder();
+    resolve_relative("DM_SAVE", app);   // a saved choice or the window may have set it
+    if (moved == 1) {   // the data folder holds the pipeline list (and pso_archive/ beside it) also when DM_SAVE puts the save elsewhere; without one, the host's default: beside save/
+        if (stat(save, &st)) migrate(lib, sup);
+        snprintf(p, sizeof p, "%s/pso_user.tsv", sup); setenv("DM_PSO_USER", p, 0);
+    }
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
+    // The save folder, whatever set it: the host makes only its last level before it clones the save, and mounts the save read-only when that fails. A DM_SAVE the player chose stays theirs: no fallback here.
+    if (mkdirs(getenv("DM_SAVE"))) fprintf(stderr, "[RED] launcher: cannot make the save folder %s (%s): the host mounts the save read-only, nothing is saved\n", getenv("DM_SAVE"), strerror(errno));
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);

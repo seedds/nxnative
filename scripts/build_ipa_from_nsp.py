@@ -1838,10 +1838,12 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     # a stale key keeps no old library, and restores only the targets it builds. The Metal compile cache gives back every
     # library whose MSL was compiled before.
     keep_mac = not mac and next((sh / 'cache' / f'b-{chain}').glob('*_b.metallib'), None) is not None
-    benv = dict(env, XLATE=str(xlate), IOSOUT=str(ios), DMSH_TARGETS='mac' if mac else 'mac,ios' if keep_mac else 'ios')
+    benv = dict(env, XLATE=str(xlate), IOSOUT=str(ios), DMSH_TARGETS='mac' if mac else 'mac,ios' if keep_mac else 'ios',
+                PYTHONUTF8='1')   # PYTHONUTF8: no locale lookup (a libc lock every thread waits on) per tool pipe
     if ALLOW_OTHER_METAL: benv['DM_ALLOW_OTHER_METAL'] = '1'
     if mac: del benv['IOSOUT']   # dmsh_build.py builds the iOS libraries only with IOSOUT
-    run([py, repo / 'dm/gfx/tools/own_compilers.py', sh / 'pkg', sh / 'cache'], log, env=benv)
+    sh_py = shutil.which('python3.14t', path=env.get('PATH')) or py   # a free-threaded Python when installed (uv python install 3.14t): dmsh_build.py's per-shader Python work then runs on every core, not one
+    run([sh_py, repo / 'dm/gfx/tools/own_compilers.py', sh / 'pkg', sh / 'cache'], log, env=benv)
     PROG.watch(None)
     if not chain_tables(py, repo, sh, env, logs, g, chain): raise BuildError(f'no stamped Mac shader outputs in {sh / "cache" / f"b-{chain}"} (inputs.tsv): dmsh_build.py did not finish a full build')
     what = 'Mac' if mac else 'iOS'

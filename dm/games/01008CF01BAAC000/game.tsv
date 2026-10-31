@@ -33,6 +33,10 @@ app_pool	0xCD500000
 # NPDM META +0x14 is zero: virtual address memory is disabled.
 sys_resource	0x0
 
+# ---- Rendering ----
+# The game selects near = 0; build the offline pipeline archive for the same mode.
+depth_mode	zero
+
 # ---- Shader split ----
 shader_groups	/region_common/=regioncommon /regionEU/=regioneu /regionUS/=regionus /regionJP/=regionjp /regionCN/=regioncn /regionKR/=regionkr /regionTW/=regiontw
 shader_note	The Legend of Zelda: Echoes of Wisdom shaders

@@ -367,6 +367,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Bayonetta 2](../../dm/games/01007960049A0000/README.md): every frame starts with a pass whose colour target is 32x32 (then 256x256 ones) beside the 1280x720 depth buffer, and the game clears the depth there; the story's opening narration showed its scene in a 32x32 or 256x256 square of a black screen. [Bayonetta](../../dm/games/010076F0049A2000/README.md) needed nothing more.
 - **Not checked:** the fix in other games beyond the unit tests.
 
+### Clears of layered render targets in a pass that is not layered
+
+- **Symptom:** a point light (a lantern, a lighter) lights only one side of the room with straight, sharp edges, and everything else around it is dark as if in shadow; a dump of the shadow cube (DM_CTL `texraw`, every face) shows face 0 drawn and faces 1-5 all zero; more generally, layers above the first of an array, cube or 3D target keep their old or zero content after a clear.
+- **Cause:** NVN clears every layer of the render target view that is bound (the whole texture without a layer range). A clear folded into a Metal pass's load action clears only the layers the pass attaches, and a pass that is not layered (`renderTargetArrayLength` unset) attaches one. When the clear lands in such a pass (the vertex capture pass of a geometry shader draw, a lazy clear landed on its own), the other layers kept zero depth from creation, every fragment the later layered pass drew there failed the depth test, and the comparison sampler read them as fully shadowed.
+- **Fix:** `rp_begin_ex_` (`nvn_mtl.m`, `att_layers`) clears a cleared attachment whose view covers more layers than a pass that is not layered in a pass of its own, with `renderTargetArrayLength` set to the view's layers, and loads it in the real one, as it does for attachments larger than the pass ([Clears of attachments larger than the render pass](#clears-of-attachments-larger-than-the-render-pass)). A view limited to some layers clears only those. The pass dump prints `C … cleared in a pass of its own (… N layers …)`. `t_clear_layers` runs the production replay on a cube depth target and a 2D array colour target, with and without layer ranges.
+- **Found on:** Little Nightmares (`01002FC00412C000`, Unreal Engine 4, a provisional profile): its point lights' one-pass cube shadows (geometry shader `ffc21034b958840b`, which emits each triangle into the six faces) clear the 512x512 cube in the pass that captures the vertex shader's output; only the +X face was cleared, so the lantern's and the lighter's light passed only through that face.
+- **Not checked:** other games beyond the unit tests and Little Nightmares.
+
 ### Lazy clears folded into the next pass
 
 - **Fix:** lazy clears (`DM_NVN_LAZY_CLEAR`) fold clear-only passes into the pass that follows.

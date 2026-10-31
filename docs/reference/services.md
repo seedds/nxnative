@@ -559,6 +559,22 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `Poll` and `Select` with nothing to wait on (no descriptors, or only negative ones, which POSIX ignores) now wait out their timeout and return 0, in every mangling the host takes over, including SDK 4's `Select(int, fd_set*, …, timeval*)`; an endless timeout returns 0 after 100 ms, since a thread inside a host hook pauses for IL2CPP's collector only once the hook returns (`hle_net.c`, `dm_guest_sleep_ns` in `hle_thread.c`).
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0; one boot). Guest CPU fell from 1,030 to 60 ms per second.
 
+### Real socket sends and interrupted polls retain their errors
+
+- **Symptom:** with `DM_NET=1`, an oversized broadcast datagram reports success although neither the broadcast nor its peer copies were sent; an interrupted `Poll` returns -1 but `GetLastError` reports 0.
+- **Cause:** broadcast replication discarded the peer sends' results and replaced any initial failure with the requested byte count. The live `Poll` path returned the host result without saving its error.
+- **Fix:** a successful original send or peer copy establishes success; if every send fails, keep an error. Save `Poll`'s error on failure and clear the previous error on success (`hle_net.c`).
+- **Found on:** the synthetic socket regression test, without game files.
+- **Check:** `t_net` sends a datagram beyond IPv4 UDP's payload limit and interrupts a socket poll with `SIGUSR1` on the polling thread; both return their actual error, and a subsequent successful poll clears it. The ordinary loopback and broadcast-delivery checks still pass.
+
+### Socket address outputs respect the caller's capacity
+
+- **Symptom:** with `DM_NET=1`, `RecvFrom` overwrites bytes beyond a short source-address buffer; `Accept` and `GetSockName` leave short buffers and their lengths unchanged.
+- **Cause:** the host-to-guest conversion always copied 16 bytes, while the other callers skipped conversion unless the entire address fit. `Accept` also discarded the output length.
+- **Fix:** copy only the supplied capacity and report the full 16-byte address length, including when the buffer is truncated (`hle_net.c`).
+- **Found on:** the synthetic socket regression test, without game files.
+- **Check:** `t_net` supplies four-byte address capacities to UDP receive, socket-name lookup and TCP accept, checking the returned length and the untouched bytes beyond each capacity.
+
 ## Settings, languages and fonts
 
 ### Language codes

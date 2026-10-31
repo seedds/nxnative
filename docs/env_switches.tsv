@@ -83,6 +83,9 @@ DM_MOTION_HID	switch	On the Mac, `0` disables the passive Switch Pro Controller 
 DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second per source (phone / GameController / controller HID; acceleration in G, gyro in revolutions/s), for checking the axes: flat and still reads acc 0 0 -1
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
+DM_NET	switch	`=1` runs the game's `nn::socket` calls on real host sockets and reports `nifm` online (default off: every socket call fails with ENETDOWN, as before)
+DM_NET_PEERS	switch	`=ip,ip,…` with `DM_NET=1`: a send to a broadcast-style address (255.255.255.255, the interface's own address, its /24's .255) also goes as unicast to each peer, for LAN discovery over a network without broadcast (a Tailscale tailnet)
+DM_NET_PROBE	switch	`=ip` with `DM_NET=1`: the address whose route picks the interface `nifm` reports (no packet is sent; default the first `DM_NET_PEERS` entry, else 8.8.8.8)
 DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage)

@@ -67,3 +67,24 @@ int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)
+
+// DM_NET=1: real sockets (hle_net.c). The guest descriptor is a host descriptor; offline, every call reports ENETDOWN as before.
+// DM_NET_PEERS lists the unicast peers a broadcast-style send is replicated to (the Tailscale path); DM_NET_PROBE overrides the route probe.
+int dm_net_online(void);
+uint32_t dm_net_own_ip(void);   // the interface unicast leaves through (0 = unknown)
+void dm_net_ipconfig(uint32_t *ip, uint32_t *mask, uint32_t *gw, uint32_t *d0, uint32_t *d1);   // nifm's IpConfigInfo
+int dm_sk_socket(int fam, int type, int proto);
+int dm_sk_bind(int s, const void *a, unsigned n);
+int dm_sk_connect(int s, const void *a, unsigned n);
+int dm_sk_listen(int s, int n);
+int dm_sk_accept(int s, void *a, unsigned *n);
+int dm_sk_close(int s);
+int dm_sk_shutdown(int s, int how);
+int dm_sk_name(int s, void *a, unsigned *n, int peer);   // peer: GetPeerName / GetSockName
+int dm_sk_sockopt(int s, int l, int o, const void *v, unsigned *n, int set);
+int dm_sk_fcntl(int s, int c, long a);
+long dm_sk_send(int s, const void *b, unsigned long n, int f);
+long dm_sk_recv(int s, void *b, unsigned long n, int f);
+long dm_sk_sendto(int s, const void *b, unsigned long n, int f, const void *a, unsigned al);
+long dm_sk_recvfrom(int s, void *b, unsigned long n, int f, void *a, unsigned *al);
+int dm_sk_last_error(void);

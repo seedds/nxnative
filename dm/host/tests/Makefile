@@ -111,6 +111,13 @@ $(B)/t_gesture: t_gesture.c ../hle_touch.c ../front.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_gesture.c ../hle_touch.c
 $(B)/t_thread_leak: t_thread_leak.c ../thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_thread_leak.c
+# Fresh processes exercise pthread_once with each environment input.
+$(B)/t_game_env: t_game_env.c ../hle_os.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_game_env.c
+.PHONY: game-env
+game-env: $(B)/t_game_env
+	@for mode in empty invalid whitespace valid profile; do $(B)/t_game_env $$mode || exit 1; done
+run: game-env
 $(B)/t_fs: t_fs.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
 # Inject only the folder handle allocation; directory I/O remains real.

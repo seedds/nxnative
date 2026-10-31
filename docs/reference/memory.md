@@ -228,6 +228,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (.NET NativeAOT on SDK 18.3.2).
 - **Check:** boot once on the Mac with a 64 GB alias region (`mem_reserve 0x1030000000`, `mem_alias 0x1008000000`) and probe `VammManager::AllocateAddressRegion`'s success path (`sdk+0x13bf8c`: x21 size, x22 address) with `DM_SVC=1`'s map log.
 
+### Game environment input with no assignments
+
+- **Symptom:** one game-environment string allocation leaks per process when the input is empty or contains no assignments.
+- **Cause:** `game_env_init` duplicated the input for tokenization, but no entry in `g_env_kv` retained that storage when no token contained `=`. The `pthread_once` initializer made this a one-time leak, not growth during gameplay.
+- **Fix:** free the duplicate when no assignment was accepted. Accepted values keep their process-lifetime backing storage. `t_game_env.c` exercises the real `getenv` takeover with empty, invalid, whitespace, valid and profile-default inputs; it checks allocation ownership, SDK fallback, retained values and once-only initialization.
+- **Found on:** the [GCC audit in issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6523656102), reproduced with synthetic environment inputs; no game-specific failure was reported.
+
 ### A 62 GB page allocator behind `nu::VirtualAllocHook`
 
 - **Symptom:** the game aborts in its static initialisers, before `nnMain`, when its own 62 GB address region fails (`main+0x37c9bd0`, `AllocateAddressRegion(&p, 0xf80000000)` at `main+0x37c9a5c`).

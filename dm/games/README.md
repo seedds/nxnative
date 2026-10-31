@@ -54,6 +54,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [AI: THE SOMNIUM FILES - nirvanA Initiative](0100713016CCC000/README.md) | `0100713016CCC000` | 1.0.2 | 13.3.5 | Unity 2020.3.30f1 IL2CPP | NVN |
 | [ANIMAL WELL](010020D01AD24000/README.md) | `010020D01AD24000` | 1.0.10 | 20.5.7 | its own (not named) | NVN |
 | [Animal Crossing: New Horizons](01006F8002326000/README.md) | `01006F8002326000` | 3.0.3 | 20.5.4 | Nintendo EPD (sead / agl / gsys) | NVN |
+| [Assassin's Creed: The Rebel Collection](010044700DEB0000/README.md) | `010044700DEB0000` | 1.0.0 (base) | 8 | Ubisoft AnvilNext (`scimitar` archives) | NVN |
 | [Atelier Ryza: Ever Darkness & the Secret Hideout DX](0100199023B2E000/README.md) | `0100199023B2E000` | 1.2.0 | 18.3.2 | Gust's engine on Koei Tecmo's KTGL | NVN |
 | [Baba Is You](01002CD00A51C000/README.md) | `01002CD00A51C000` | 1.0.12 | 19.3.3 | Multimedia Fusion 2 game on MP2 Games' runtime (Lua) | NVN |
 | [BALL x PIT](010086A022444000/README.md) | `010086A022444000` | 1.293 | 20.5.19 | Unity 6000.0.62f1 IL2CPP | NVN |

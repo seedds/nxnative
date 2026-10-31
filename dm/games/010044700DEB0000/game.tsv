@@ -1,0 +1,48 @@
+# Game profile of Assassin's Creed: The Rebel Collection (Switch, base v0 = 1.0.0; the collection holds Assassin's Creed IV: Black Flag and Assassin's Creed Rogue).
+# Format: see dm/games/README.md
+# Ubisoft's AnvilNext engine on NVN, SDK 8 (sdk build 3ae34e689d7a35f13cbf42bfd672af8b). Modules main + sdk.
+# The collection is a shell that starts the game as another program of itself: nn::oe::ExecuteProgram(0, "/launcher:off /gamesoundlanguage:en ..."), with the SDK's
+# by-name nn::vi::OpenDisplay("Default") first. The host hooks both (docs/reference/services.md), so the shell re-launches the host into the game (the note's bring-up).
+# RomFS: 28 Ubisoft "scimitar" .forge archives (11.2 GB) hold the game data and 45,853 shader-library records whose payloads are packed, and no reader decodes them
+# (docs/reference/shaders.md), so the shader map is main's 326 programs plus the programs a run dumped as missing from the map: shader_split.py reads a
+# DM_NVN_SHDUMP directory back as a source, and /shdump/=main files them in main's package. The note says what was played and what is still open.
+
+# ---- Identity ----
+title_id	010044700DEB0000
+program_id	010044700DEB0000
+
+# ---- App ----
+name	Assassin’s Creed® The Rebel Collection
+ipa	AssassinsCreedTheRebelCollection.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=85f5d5ab6187f60289071e09d41163e2	sdk=3ae34e689d7a35f13cbf42bfd672af8b
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+# the archive every .forge is layered under (an update adds its own copies of these)
+romfs_marker	DataNX_CaribbeanSea.forge
+# stored in the app, not compressed: the movies and the forge data are already compressed
+zip_store	.bik:.bk2:.forge:.pck:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+# /shdump/ is a host dump directory (DM_NVN_SHDUMP, shader_split.py's dumped_shaders): its programs belong to main's package, the only package with game-file rows
+shader_groups	/videos/=videos /dlc_10/=dlc10 /sounddata/=sounddata /dlc_1/=dlc1 /dlc_2/=dlc2 /shdump/=main
+shader_note	Assassin's Creed: The Rebel Collection shaders
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x6e00000

@@ -131,7 +131,7 @@ docker build -t nxnative-chain -f docker/Dockerfile.chain docker
 
 # the Vulkan translator, into build/xlate_vk (dmsh_chain_vk.py looks for it there; XLATE_VK names another dll)
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain \
-  dotnet build -c Release dm/gfx/tools/dmsh_xlate_vk --artifacts-path build/xlate_vk
+  dotnet build -c Release -m:1 dm/gfx/tools/dmsh_xlate_vk --artifacts-path build/xlate_vk
 
 # the tools against the lock, then the tests on synthetic Maxwell shaders (no game files)
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain sh -c \

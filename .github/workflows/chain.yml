@@ -75,7 +75,8 @@ jobs:
         id: build
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-chain \
-            dotnet build -c Release dm/gfx/tools/dmsh_xlate_vk --artifacts-path build/xlate_vk
+            # -m:1: one MSBuild node; with --artifacts-path, parallel nodes building the Ryujinx projects raced on Spv.Generator.deps.json (run 2)
+            dotnet build -c Release -m:1 dm/gfx/tools/dmsh_xlate_vk --artifacts-path build/xlate_vk
       - name: Check the tools against dmsh_chain_vk.lock
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |

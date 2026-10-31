@@ -1,0 +1,68 @@
+# A daily triage report on the open pull requests and issues (dm/tools/triage_report.py): which PRs are in main already, which look like duplicates, which conflict
+# with main and since when, which link no issue, and which issues have no reply and no label. Fixed rules, listed in docs/development.md (Triage report).
+# The report goes to the job summary. It never closes, labels or comments on anything: the maintainer decides.
+# No pull request's code is checked out or run. The job checks out main, fetches every open PR's head into the object store, and git merges trees there (merge-tree).
+# Optional: with the repository variable TRIAGE_REPORT_ISSUE set to an issue number, the publish job replaces that one issue's body with the report. It never comments.
+name: triage-report
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: triage-report
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+# Actions are pinned to commit SHAs (the tag in the comment), as in tests.yml.
+jobs:
+  report:
+    name: Triage report
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main   # the report is about main, also when started from another branch
+          fetch-depth: 0   # main's history: "since" and the commits that name a PR
+          persist-credentials: false
+      - name: Report on the open pull requests and issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 dm/tools/triage_report.py --fetch origin > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: triage-report
+          path: report.md
+          retention-days: 7
+
+  publish:
+    name: Replace the body of the triage issue
+    needs: report
+    if: vars.TRIAGE_REPORT_ISSUE != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: triage-report
+      - name: Edit the issue's body (no comment)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ vars.TRIAGE_REPORT_ISSUE }}
+        run: gh issue edit "$ISSUE" --body-file report.md

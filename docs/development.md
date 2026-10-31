@@ -308,6 +308,42 @@ Raising `LLVM_VERSION` takes a new baseline in the same change
 (`tidy --rebaseline`; `dm/tools/tests/test_lint_c.py` checks that the two name
 the same release).
 
+### Triage report
+
+`.github/workflows/triage-report.yml` runs `dm/tools/triage_report.py` every
+day and puts its report in the job summary. The report lists open pull requests
+and issues by fixed rules over the GitHub API and git. It never closes, labels
+or comments on anything. The maintainer decides what to do with each row.
+
+- Already in `main`: merging the PR into `main` changes nothing, or a commit
+  on `main` made after the PR was opened names it as "PR #N". The second rule
+  also finds a PR that a commit replaces or only takes part of. Read the commit
+  before closing the PR. A change that landed reworked and unnamed is missed.
+- Likely duplicates: open PRs that add `dm/games/<title ID>/game.tsv` for the
+  same game, or for a game `main` already has. An update or DLC title ID counts
+  as its base game. Also PRs whose title words overlap by at least 30% and
+  whose changed files overlap by at least 15%.
+- Conflicts with `main`: `git merge-tree` reports a conflict. "Since" is the
+  first commit on `main` after the PR's merge base that the PR no longer merges
+  cleanly with, found by bisection over the commits that touch the PR's files.
+  The date is that commit's date. A rebase moves it. It shows "unknown" when the bisection does not hold.
+- Pull requests without a linked issue: GitHub links none, and the title and
+  body name none after "Fixes", "Closes", "Resolves", "Part of", "Refs",
+  "Related to", "See" or "Issue". A reference to a closed PR counts as a link.
+- Issues with no reply and no label: no comment from anyone but the author or
+  a bot. "Named by" lists the open PRs that link the issue.
+
+A PR in the first section shows in no other. The workflow checks out `main`
+only. It fetches each open PR's head into the object store and never
+checks out or runs it. With the repository variable `TRIAGE_REPORT_ISSUE` set to
+an issue number, the workflow also replaces that issue's body with the report.
+It edits that one issue and never comments. To run it locally, from a clone
+whose `origin` is this repository:
+
+```sh
+GH_TOKEN=$(gh auth token) python3 dm/tools/triage_report.py --fetch origin > report.md   # --limit 0 lists every row
+```
+
 ## The packing script in detail
 
 `scripts/build_ipa_from_nsp.py` (`-h` lists every option):

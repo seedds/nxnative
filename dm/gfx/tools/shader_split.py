@@ -62,6 +62,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import uepak
 GAME = _game.load()   # the current game profile (DM_GAME, required): source group rules and the table header note
 GROUPS, NOTE = GAME.pairs('shader_groups'), GAME.get('shader_note')
 KEY_SKIP = tuple(int(x, 0) for x in GAME.get('shader_key_skip', '0+0').split('+'))   # control bytes the keys hash as zeros (key_ctl); dm/games/game.py checks the form
+UNITY_TIER = int(GAME.get('unity_tier', '-1'))   # the Unity hardware tier the player runs (unity_code_blobs); -1: every tier, as the committed tables were split
+UNITY_SKIP_KW = frozenset(GAME.get('unity_skip_keywords', '').split())   # Unity keywords the game data never enables: programs compiled with any of them are left out (unity_shaders)
+UNITY_SKIP_PASSES = frozenset(GAME.get('unity_skip_passes', '').upper().split())   # pass LightMode tags the player never draws (Meta: the editor's lightmapper only): their programs are left out (unity_code_blobs)
 # The sources are what the game files hold, with no profile switch: GLSLC outputs in main (glslc_shaders), the outputs the game compiles at run time when a capture is there (DM_GLSLC_CAPTURE,
 # hle_glslc.c), the shader code archives of Unreal paks once decoded on the Mac (uepak.py, DM_OODLE_JOB, hle_oodle.c); the NSP script decides from the files which of the last two to make
 
@@ -2147,11 +2150,25 @@ def unity_stages(o):
 def unity_code_blobs(o):
     """Shader object → the subprogram indices that hold program code, or None when every entry does (before Unity 2022). Unity 2022 also keeps the parameters of each program in the blob
     as entries of their own (m_ParameterBlobIndices of each program), and the player's programs are m_PlayerSubPrograms[tier][].m_BlobIndex (Ace Attorney Investigations Collection, Unity 2022.3).
-    Both fields came together: UnityPy's type trees for 2020.3.18 (Engage) and 2021.3 have neither, so older games read every entry as before"""
-    progs = [p.get(f) or {} for sub in (o.get('m_ParsedForm') or {}).get('m_SubShaders', []) for p in sub.get('m_Passes', [])
+    Both fields came together: UnityPy's type trees for 2020.3.18 (Engage) and 2021.3 have neither, so older games read every entry as before.
+    With the profile's unity_tier, only that tier's programs: Unity compiles each variant once per hardware tier and the player runs one. Overcooked! All You Can Eat (2019.4.11f1) has
+    503,394 bundle programs, 167,798 per tier with no key shared between tiers, and the 132 its title loaded on the Mac were all tier 2 (Unity's Tier3)"""
+    progs = [p.get(f) or {} for sub in (o.get('m_ParsedForm') or {}).get('m_SubShaders', []) for p in sub.get('m_Passes', []) if unity_pass_drawn(p)
              for f in ('progVertex', 'progFragment', 'progGeometry', 'progHull', 'progDomain')]
-    if not any('m_ParameterBlobIndices' in p for p in progs): return None
-    return {sp['m_BlobIndex'] for p in progs for tier in p.get('m_PlayerSubPrograms', []) for sp in tier}
+    if any('m_ParameterBlobIndices' in p for p in progs):
+        tiers = lambda p: p.get('m_PlayerSubPrograms', [])
+        return {sp['m_BlobIndex'] for p in progs for t, tier in enumerate(tiers(p)) if UNITY_TIER in (-1, t) or len(tiers(p)) <= UNITY_TIER for sp in tier}
+    if UNITY_TIER == -1 and not UNITY_SKIP_PASSES: return None
+    return {sp['m_BlobIndex'] for p in progs for sp in p.get('m_SubPrograms', []) if sp.get('m_ShaderHardwareTier', UNITY_TIER) in (UNITY_TIER, -1) or UNITY_TIER == -1}
+
+def unity_pass_drawn(p):
+    """False for a pass whose LightMode tag is in the profile's unity_skip_passes. Unity draws a LightMode=Meta pass only in the editor, to feed albedo and emission to the
+    lightmapper; Overcooked! All You Can Eat ships 2,736 tier-2 Meta programs of its Standard variants"""
+    tags = [t for m in (p, p.get('m_State') or {}) for t in (m.get('m_Tags') or {}).get('tags') or []]   # Unity 2019.4 keeps them in m_State, as {first, second} entries
+    return not any(t['first'].upper() == 'LIGHTMODE' and t['second'].upper() in UNITY_SKIP_PASSES for t in tags)
+
+def unity_skipped(kw, lkw):   # a program compiled with a keyword of the profile's unity_skip_keywords (global or local)
+    return not UNITY_SKIP_KW.isdisjoint(kw + lkw)
 
 def unity_compute(x, base, trees):
     """ComputeShader objects (class 72) of a serialized file → [(where, 'cs', control, code)]: each kernel variant's code is a program code with one stage, compute (Monster Train 2,
@@ -2214,7 +2231,8 @@ def unity_shaders(d, label, out, trees):
             legacy = {}
             for plat, k, sp in unityfs.shader_programs(o, unity_code_blobs(o)):
                 where = f'{label}{":" + node if node else ""}#{name}#var{plat}.{k}'
-                code = unityfs.subprogram(sp)[4]
+                _, _, kw, lkw, code, _ = unityfs.subprogram(sp)
+                if unity_skipped(kw, lkw): continue
                 programs = unity_program(code, where, stages.get(k))
                 out.extend((where, st, ctl, cd) for st, ctl, cd in programs)
                 if len(code) >= 0x14 and code[0x10:0x14] == CTL_MAGIC: legacy[plat, k] = programs[0]

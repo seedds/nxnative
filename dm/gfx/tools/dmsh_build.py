@@ -440,9 +440,6 @@ def early_fragment_tests(ctl, code):
     is left as it is: tested early, the depth it computes would not be the one tested"""
     return len(ctl) > 0x718 and ctl[0x718] != 0 and len(code) >= 0x50 and not struct.unpack_from('<I', code, 19 * 4)[0] & 2
 
-# NVN2's compute stage keeps its storage buffer table at c0 + 0x10 + 0x10 r (Donkey Kong Bananza: its compute shaders read 64-bit addresses at 0x10 / 0x20 / 0x30, written at 0x10
-# and 0x20, and the game binds compute slots 0, 1 and 2); the graphics stages keep NVN's (0x110 vertex, 0x510 pixel). finish() hands it to reflect() as res['ssbo_base']
-NVN2_C0_SSBO_CS = 0x10
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
     extra = {}
@@ -453,6 +450,10 @@ def job_for(key, name, rec, w):
         c1 = dmsh_ampere.c1_segment(rec[ci:], code)
         code = code[:dmsh_ampere.inst_len(rec[ci:])]
         extra['arch'] = 'sm86'
+        # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
+        # buffer and texture entries (+0xb1, +0xb2, +0xb3) and gives the size (+0xba); the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs
+        # AMapC0). Graphics keeps NVN's tables
+        if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4]
     else:
         c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
         c1 = rec[0x38 + c1o:0x38 + c1t]
@@ -723,7 +724,6 @@ def reflect(key, stage, msl, res):
         binds.append(e)
     # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base SSBO[stage], C0_ROW bytes per slot)
     base = SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot
-    base = res.get('ssbo_base', base)   # NVN2 compute (finish)
     sb_sorted = sorted(res['sbufs'], key=lambda b: b['binding'])
     for e in binds:
         if e['kind'] == abi.KIND_SBUF:
@@ -1145,7 +1145,6 @@ def finish(key, w, j, c1):
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
     res = json.load(open(os.path.join(w, key + '.res.json')))
-    if j.get('arch') == 'sm86' and j['stage'] == 'cs': res['ssbo_base'] = NVN2_C0_SSBO_CS
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = vs_depth(src)

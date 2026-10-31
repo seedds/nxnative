@@ -1,3 +1,4 @@
+using System;
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.Translation;
@@ -108,7 +109,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             (ASrc a, ASrc b) = ASecond(context, x);
 
-            Operand res = context.FPMultiply(AFloat(context, a), AFloat(context, b));
+            Operand fa = AFloat(context, a), fb = AFloat(context, b);
+            Operand res = AFmz(context, x, fa, fb, context.FPMultiply(fa, fb), ConstF(0));
 
             // Bits 84..86: the product times 2^(v - 4) (4: no scale)
             int scale = x.Bits(84, 87);
@@ -131,9 +133,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x);
 
-            Operand res = context.FPFusedMultiplyAdd(AFloat(context, a), AFloat(context, b), AFloat(context, c));
+            Operand fa = AFloat(context, a), fb = AFloat(context, b), fc = AFloat(context, c);
+            Operand res = AFmz(context, x, fa, fb, context.FPFusedMultiplyAdd(fa, fb, fc), fc);
 
             ASet(context, x, context.FPSaturate(res, x.Bit(77)));
+        }
+
+        // .FMZ (bit 76 of FMUL and FFMA, NAK's dnz): a product with a zero factor is zero, whatever the other factor (Direct3D 9's rule; Inf or NaN times 0 is 0, not NaN)
+        private static Operand AFmz(EmitterContext context, AmpereOp x, Operand a, Operand b, Operand res, Operand zeroProduct)
+        {
+            if (!x.Bit(76))
+            {
+                return res;
+            }
+
+            Operand zero = context.BitwiseOr(context.FPCompareEqual(a, ConstF(0)), context.FPCompareEqual(b, ConstF(0)));
+
+            return context.ConditionalSelect(zero, zeroProduct, res);
         }
 
         public static void AFmnmx(EmitterContext context)
@@ -197,8 +213,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             res = x.Bits(74, 80) switch
             {
-                0 => context.FPCosine(res),
-                1 => context.FPSine(res),
+                0 => context.FPCosine(context.FPMultiply(res, ConstF(2f * MathF.PI))),   // Volta and later: the argument is in turns (the compiler multiplies by 1 / 2pi first,
+                1 => context.FPSine(context.FPMultiply(res, ConstF(2f * MathF.PI))),     // NAK lowers fsin / fcos the same way); Maxwell's came through RRO instead
                 2 => context.FPExponentB2(res),
                 3 => context.FPLogarithmB2(res),
                 4 => context.FPReciprocal(res),
@@ -506,9 +522,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, "ULDC with its bank in a uniform register");
             }
 
-            Operand index = x.Opcode == 0xabb ? Register(x.Bits(24, 30), RegisterType.Uniform) : Const(0);
-
-            ALoadConstant(context, x, x.Bits(54, 59), index, (int)x.SignedField(38, 54), uniform: true);
+            if (x.Opcode == 0xabb)
+            {
+                ALoadConstant(context, x, x.Bits(54, 59), Register(x.Bits(24, 30), RegisterType.Uniform), (int)x.SignedField(38, 54), uniform: true);
+            }
+            else
+            {
+                (int bank, int offset) = AMapC0(context, x.Bits(54, 59), (int)x.SignedField(38, 54));
+                ALoadConstant(context, x, bank, Const(0), offset, uniform: true);
+            }
         }
 
         // LDC Rd, c[bank][Ra + offset]
@@ -521,7 +543,15 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 throw AFail(context, "LDC with a bindless bank or an address mode");
             }
 
-            ALoadConstant(context, x, x.Bits(54, 59), Register(x.Ra, RegisterType.Gpr), (int)x.SignedField(38, 54), uniform: false);
+            if (x.Ra == RegisterConsts.RegisterZeroIndex)
+            {
+                (int bank, int offset) = AMapC0(context, x.Bits(54, 59), (int)x.SignedField(38, 54));
+                ALoadConstant(context, x, bank, Const(0), offset, uniform: false);
+            }
+            else
+            {
+                ALoadConstant(context, x, x.Bits(54, 59), Register(x.Ra, RegisterType.Gpr), (int)x.SignedField(38, 54), uniform: false);
+            }
         }
 
         private static void ALoadConstant(EmitterContext context, AmpereOp x, int bank, Operand index, int offset, bool uniform)

@@ -290,7 +290,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void ASurface(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            (int handle, int cbufSlot) = ATexHandle(x);
+            (int handle, int cbufSlot) = ATexHandle(context, x);
             bool formatted = x.Opcode is 0xb97 or 0xb9b;
             SuDim dim = (SuDim)x.Bits(61, 64);
             SuSize size = formatted ? 0 : (SuSize)x.Bits(73, 76);
@@ -338,12 +338,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // The constant buffer word that holds the texture handle (40..59: word offset 0..14, bank 14..19). NVN keeps the handle table in c[2]
-        // (0x20 + 8 slot), the texture buffer Ryujinx assumes; a handle in another bank is passed with its bank.
-        private static (int Handle, int CbufSlot) ATexHandle(AmpereOp x)
+        // (0x20 + 8 slot), the texture buffer Ryujinx assumes; NVN2 compute's handles in c[0] are mapped there (AMapC0); a handle in another bank is passed
+        // with its bank.
+        private static (int Handle, int CbufSlot) ATexHandle(EmitterContext context, AmpereOp x)
         {
-            int bank = x.Bits(54, 59);
+            (int bank, int offset) = AMapC0(context, x.Bits(54, 59), x.Bits(40, 54) * 4);
 
-            return (x.Bits(40, 54), bank == 2 ? TextureOperation.DefaultCbufSlot : bank);
+            return (offset >> 2, bank == 2 ? TextureOperation.DefaultCbufSlot : bank);
         }
 
         // The two source blocks of a texture instruction from Ra and Rb (n0 and n1 registers). With .SCR (60) the whole sequence was spread over the two
@@ -492,7 +493,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     break;
             }
 
-            (int handle, int cbufSlot) = ATexHandle(x);
+            (int handle, int cbufSlot) = ATexHandle(context, x);
             List<Operand> sources = [];
             Operand arrayIndex = null;
 
@@ -679,7 +680,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             int query = x.Bits(62, 64);
             int mask = x.Bits(72, 76);
-            (int handle, int cbufSlot) = ATexHandle(x);
+            (int handle, int cbufSlot) = ATexHandle(context, x);
             SamplerType type = context.TranslatorContext.GpuAccessor.QuerySamplerType(handle);
 
             int count = BitOperations.PopCount((uint)mask);

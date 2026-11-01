@@ -2260,6 +2260,9 @@ NVN(nvnTextureBuilderSetPackagedTextureData, void, NVNtextureBuilder *b, const v
 // NativeImageInitialize then TextureInitializeFromNativeImage, an abort when either fails). The host's handles come from nvn_native_image_new (hle_misc.c, the chat camera video storage):
 // a size, no picture. NativeImageInitialize gives the image host storage, zeroed (no camera picture), and TextureInitializeFromNativeImage a 2D texture of the builder's format on it.
 // The builder is the SDK's, its setters stay in the sdk (sdk 21.4.0 +0x6bb070..0x6bb0f0): device at +0, handle +8, memory permission +0xc, format +0x10. NVNnativeImage is 0x1a0 bytes
+// The graphics system (nn::gs) is the host's: the SDK's check that it was booted (gs::sdk::BootGraphicsSystem, which the SDK's NVN driver runs) passes. Mario Kart World checks it before it
+// opens its camera (main+0xcdebf4)
+HLE_FORCE("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "graphics system booted: the host's graphics layer stands in for it", void, h_gs_Check, const char *who, size_t n) { (void)who; (void)n; }
 typedef struct { NVNdevice *dev; uint32_t handle, perm, format; } nimg_builder_t;
 typedef struct { uint32_t magic, format, w, h; pool_t pool; uint8_t *mem; size_t size; } nimg_t;
 _Static_assert(sizeof(nimg_t) <= 0x1a0, "nimg_t exceeds NVNnativeImage (0x1a0 bytes)");

@@ -578,13 +578,20 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** abort in `sm::Initialize` under `nn::settings::GetAvailableLanguageCodes` (early in `nnMain`, `main+0x327888`); abort in `sm::Initialize` under `nn::settings::GetAvailableLanguageCodeCount()` (`main+0x117590`).
 - **Cause:** Paper Mario asks for up to 32 codes and takes the index of `oe::GetDesiredLanguage`'s code in the list as its language. Catherine compares `LanguageCode::Make(0 … count − 1)` with `GetDesiredLanguage`'s code.
-- **Fix:** the host lists the system's codes in `nn::settings::Language` order, the table `LanguageCode::Make` uses, and reports the count of that table (`hle_sdk16.c`).
+- **Fix:** the host lists the system's codes in `nn::settings::Language` order, the table `LanguageCode::Make` uses, and reports the count of that table (`dm_lang_code` in `dm/host/lang.c`, read by the `hle_sdk16.c` hooks).
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) (SDK 15.3.2, the codes), [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (SDK 8.2.1, the count; one boot).
 
 ### Region code from the language
 
 - **Fix:** `oe::GetRegionCode` answers from the language: Japan, the Americas, Europe or Hong Kong / Taiwan / Korea.
 - **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4; found in `main`'s imports before the first boot).
+
+### Game language default from the Mac's preferred languages
+
+- **Symptom:** a Mac app packed without a language runs in English even though the player's Mac is set to another language.
+- **Cause:** on iOS the app sets `DM_LANG` from the IPA's `DMLanguage` (`main.m`); the Mac has nothing that sets it, so the game got the host's `en-US` default.
+- **Fix:** the Mac host derives the language once at startup (`hle_oe.c` `lang_default_init`, called by `dm_lang_init` before any guest thread runs): `lang_mac.m` reads the Mac's preferred languages (`[NSLocale preferredLanguages]`, the System Settings order), `hle_oe.c` maps each to a Switch language code (`it-IT` → `it`, `en-AU` → `en-GB`, `es-MX` → `es-419`, `zh-Hant-HK` → `zh-Hant`, …) and picks the first the game's control data lists — `control.nacp` beside the version's RomFS folder (the folder above `DM_ROMFS`; `pack_app.py` copies it to `Resources/control.nacp`, with the base game's as the fallback for an update), the same file `nacp.py --languages` reads — with the same stand-in for another region's language as the packing script (`en-GB` for `en-US`, `fr` for `fr-CA`, `es` for `es-419`, `pt` for `pt-BR`). An explicit `DM_LANG` still wins. Without a `control.nacp` the first preferred language the Switch has a code for is used; when none of the Mac's languages is among the game's, the fallback is `en-US` only when the game has it, else the game's first language. The choice is logged (`language: it (macOS preferred it-IT, en-GB; game supports en-US en-GB ja fr de es it)`).
+- **Found on:** every game on macOS (general).
 
 ### Shared font address: BFTTF header or bare TTF
 

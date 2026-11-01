@@ -669,7 +669,7 @@ class MacApp(Base):
             on_line(f'app: {out}' + (', reused (inputs unchanged)' if len(packs) > 1 else ''))
         with mock.patch.object(nsp, 'run', side_effect=pack):
             for i in range(2):
-                result = nsp.mac_app(sys.executable, REPO, out, TID, t, self.ex, t / 'patched', t / 'host', t / 'font', t / 'shader', None, 'vulkan', 'en-US',
+                result = nsp.mac_app(sys.executable, REPO, out, TID, t, self.ex, t / 'patched', t / 'host', t / 'font', t / 'shader', None, 'vulkan', 'en-US', None,   # no fallback control.nacp
                                      game.Game(self.src), 'Game', '1.0.0', 'org.nxnative.test', None, '', {}, t)
                 self.assertIsNone(result)
                 if i: nsp.PROG.end.assert_called_with('Game.app, reused (inputs unchanged)')

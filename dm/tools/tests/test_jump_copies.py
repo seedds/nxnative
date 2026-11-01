@@ -21,7 +21,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -70,6 +70,39 @@ LDRSW_X18 = 0xb8a07800 | 6 << 16 | 27 << 5 | 18           # ldrsw x18, [x27, x6,
 
 def cbz_w18(frm, to): return 0x34000000 | (((to - frm) >> 2) & 0x7ffff) << 5 | 18
 def bhi(frm, to): return 0x54000008 | (((to - frm) >> 2) & 0x7ffff) << 5
+
+
+class AdrOffsetBounds(unittest.TestCase):
+    """ADR-relative dispatches can compare the full 64-bit table index."""
+    TABLE = 0x4040
+    TARGETS = [0, 8, 36, 40, 44]
+
+    def run_site(self, wide=True, index=9, clobber=NOP):
+        # adrp/add x15; cmp x9,#4; b.hi; adr x18,.; ldrsw x0,[x15,x9,lsl #2]; add x18,x18,x0; br x18.
+        # The compare and ADR bases are independent, as in DRAGON QUEST I & II's copy dispatch.
+        words = [ADRP(15, 0, self.TABLE), ADDI(15, 15, self.TABLE & 0xfff),
+                 (0xf100001f if wide else 0x7100001f) | 4 << 10 | index << 5, bhi(12, 44), clobber,
+                 0x10000012, 0xb8a07800 | 9 << 16 | 15 << 5, ADDR(18, 18, 0), BR(18), RET, RET, RET]
+        for i, target in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - 20)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(len(ins), len(words))
+        return scope['jump_adr_offsets'](ins, 8)
+
+    def test_64_bit_comparison_bounds_the_table(self):
+        self.assertEqual(self.run_site(), self.TARGETS)
+
+    def test_32_bit_comparison_keeps_its_existing_targets(self):
+        self.assertEqual(self.run_site(wide=False), self.TARGETS)
+
+    def test_unrelated_checks_and_changed_indices_are_refused(self):
+        self.assertIsNone(self.run_site(index=8))
+        for wide in (False, True):
+            with self.subTest(wide=wide):
+                self.assertIsNone(self.run_site(clobber=mov(9, 0, wide)))
+
+    def test_a_copy_must_be_bounded_by_its_source(self):
+        self.assertEqual(self.run_site(index=0, clobber=mov(9, 0, False)), self.TARGETS)
 
 
 class ForwardBase(unittest.TestCase):

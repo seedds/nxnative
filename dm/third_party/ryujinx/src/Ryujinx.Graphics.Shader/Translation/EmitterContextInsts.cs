@@ -126,6 +126,12 @@ namespace Ryujinx.Graphics.Shader.Translation
             return context.Add(Instruction.Barrier);
         }
 
+        // nxnative: a barrier for the lanes of one subgroup (SPIR-V OpControlBarrier with subgroup scope; Metal simdgroup_barrier)
+        public static Operand SubgroupBarrier(this EmitterContext context)
+        {
+            return context.Add(Instruction.SubgroupBarrier);
+        }
+
         public static Operand BitCount(this EmitterContext context, Operand a)
         {
             return context.Add(Instruction.BitCount, Local(), a);

@@ -135,6 +135,15 @@ To enroll a cut for any game's own module:
 - **Fix:** `jump_adr_offsets`, tried only where the table-relative form is not found. The bounds check can be on a register copied into the index (`mov w16, w15`), and the table base can be built far from the dispatch; then every `adrp` + `add` pair in the function that builds that register is tried, and a table is accepted only if exactly one makes every target an instruction of the function.
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) `main+0x393bb0` and others.
 
+### ADR-relative jump tables with 64-bit bounds
+
+- **Symptom:** `AssertionError: jump table 30ee50c` while rewriting an ADR-relative dispatch with `cmp x9,#4`.
+- **Cause:** `jump_adr_offsets` recognized only 32-bit bounds comparisons, although a comparison of the full 64-bit index also bounds the table. Its backward copy tracking could also retain a destination whose old value had been overwritten.
+- **Fix:** accept either comparison width for the tracked index. When following a 32-bit index copy backward, replace the destination with its source, so an earlier check of the overwritten destination cannot justify the load. Other writes still invalidate the match; table and target validation are unchanged.
+- **Found on:** [DRAGON QUEST I & II HD-2D Remake](../../dm/games/0100D7C01F254000/README.md), `main+0x30ee50c` (five targets).
+- **Check:** `dm/tools/tests/test_jump_copies.py` exercises both comparison widths, unrelated checks, overwritten indices and a bounds check on the copied source with real AArch64 instructions.
+- **Open:** as in the existing 32-bit form, this recognizer assumes the comparison has an effective unsigned bounds guard; it does not prove guard/flag validity or that every incoming path passes the check. This game's actual dispatch has `b.hi` with unchanged flags. Validating those branches remains separate from this fix.
+
 ### Byte tables indexed by x30 (capstone register names)
 
 - **Symptom:** `jump table <addr>` assertion on a byte table indexed by x30 (`adr x18, #L; ldrb w30, [x14, x12]; add x18, x18, x30, lsl #2; br x18`).
@@ -168,11 +177,18 @@ To enroll a cut for any game's own module:
 
 ### Loaded method-pointer tail call before an error block
 
-- **Symptom:** `jump table 53e9c` while rewriting Warm Snow 2.1.4's Unity IL2CPP `main`.
-- **Cause:** a framed thunk loads a method pointer into `x18`, moves arguments, restores its frame and executes `br x18`. A separate null-error call follows it. The terminal-tail recognizer requires the jump to end the function.
-- **Fix:** keep the existing terminal-tail rule unchanged. Only for nonterminal jumps, recognize a contiguous decoded thunk with the standard 16-byte FP/LR frame, a single forward `cbz` to the trailing error call, plain argument moves/transfers, one pointer load into `x18`, and the matching frame restore. Reject additional control flow, stack-pointer/frame-register/link-register writes, pointer clobbers and undecoded gaps. Stores must use a fixed offset of at least 16 from the unchanged `sp` or frame pointer, so they write caller stack arguments above the saved FP/LR. Checking register writes alone does not protect that saved pair; stores through other bases or dynamic offsets may alias it and are rejected. An unframed loaded-pointer jump followed by other blocks remains unsupported: ending a basic block alone does not prove a tail call.
-- **Found on:** Warm Snow 2.1.4, `main` build `306fc054203275803dcbceba7fb7c392`, at `+0x53e9c`. Its game profile is deliberately outside this change.
-- **Check:** `dm/tools/tests/test_tail_call.py` covers acceptance and rejection with synthetic AArch64 instructions, including saved-frame stores, safe caller argument stores, unproven store addresses, 32-bit and 64-bit SP/FP/LR clobbers (including `wsp`), the unframed guarded block and the previously accepted terminal tail with an intervening conditional branch. Actual game rewrite/build results and remaining coverage are recorded in the PR; no game assets are required by the tests.
+- **Symptom:** `jump table 53e9c` while rewriting Warm Snow 2.1.4's Unity IL2CPP `main`, or `jump table 108bb70` on Ori and the Blind Forest: Definitive Edition.
+- **Cause:** a framed IL2CPP method loads a method pointer into `x18` (`ldr`, or `ldp` with the next field), moves its arguments, restores its frame and executes `br x18`, with code after the `br`: error blocks in a small thunk, the function's other paths in a larger one. The terminal-tail recognizer requires the jump to end the function.
+- **Fix:** keep the terminal rule, which proves no frame, unchanged. For a `br x18` with code after it, `tail_call` proves that the frame is gone, because a jump inside a function needs that function's frame. A wrong accept turns a jump table into a call without any error, so what is not proven stays at `jump table <addr>`. It holds for both frames:
+  - **Pointer:** the last write of `x18` is `ldr x18, [xN, #imm]` or `ldp x18, xM, [xN, #imm]`.
+  - **The path to the `br`:** no call or jump after that load or the frame restore, whichever is first, no branch or store after the restore, and no branch from anywhere lands past the restore. A guard may land before it: real code skips a reload of the pointer that way.
+  - **Frame registers:** nothing else on the way writes `sp`, `x29` or `x30`, except that `x29` may be set once to the saved pair's address, and no branch re-enters the frame's setup.
+  - **Stack stores:** a fixed offset from `sp` or the set `x29`, whose bytes stay clear of the saved pair; a register offset or writeback is rejected, and so is any exclusive or atomic access, whatever its base, which the rule does not model.
+  - **After the `br`:** no branch comes back to the `br` or ahead of it, and no direct call lands in the function.
+  - **A 16-byte thunk** (`stp x29, x30, [sp, #-0x10]!; mov x29, sp`, restored by the instruction before the `br`) proves more, as Warm Snow's does: no calls, no stores through other bases, every guard goes to the code after the `br`, at least one does, and that code is error blocks that hold a call out of the function, end in a call, a trap or a branch among themselves, and hold no `ret`, `br` or `blr`.
+  - **A function** (`sub sp, sp, #N` first, `add sp, sp, #N` right before the `br`, `x29, x30` saved to and restored from one slot inside the N bytes) is ordinary compiled code: its body may branch, loop and call, as IL2CPP's lazy init does, its stores through other bases cannot be proven apart from its callees' and are allowed, and any of its other paths may follow the `br`. A jump through another register in its body has unknown targets and is rejected.
+- **Found on:** Warm Snow 2.1.4, `main` build `306fc054203275803dcbceba7fb7c392`, at `+0x53e9c`. Ori and the Blind Forest: Definitive Edition, `main` build `228b944fcb08ae56180369be66727558`, at `+0x108bb70`, `+0x108ca70`, `+0x13ff8f0`, `+0x14008a0`.
+- **Check:** `dm/tools/tests/test_tail_call.py` covers both forms and rejects each broken proof with synthetic AArch64 instructions; no game assets are required by the tests. The function form was measured on real framed tail calls through other registers in Unity mains, whose shapes it must accept.
 
 ## Exclusive windows
 

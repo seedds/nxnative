@@ -370,8 +370,22 @@ class Regress(unittest.TestCase):
                 regress.run_heavy(['build'], Path(td) / 'build.log', td, {}, NS(pause_lock=Path(td) / 'lock'), 'build')
             self.assertTrue(any(c.args[1] == regress.signal.SIGSTOP for c in kill.call_args_list))
 
+    def test_idle_msbuild_workers_do_not_block_measurements(self):
+        worker = '/usr/local/share/dotnet/dotnet /sdk/10.0.403/MSBuild.dll /nodemode:1 /nodeReuse:true'
+        jobs = [(300, 1, 'S', '0.0', worker),
+                (301, 1, 'S', '12.0', worker),
+                (302, 1, 'U', '0.0', worker),
+                (303, 70, 'S', '0.0', worker),
+                (304, 1, 'S', '0.0', '/usr/local/share/dotnet/dotnet build project.csproj'),
+                (305, 1, 'S', '0.0', worker.replace('/nodeReuse:true', '/nodeReuse:false'))]
+        def process_list(command, **kwargs):
+            has_cpu = '%cpu=' in command[-1]
+            return NS(stdout='\n'.join(f'{pid} {parent} {state} ' + (f'{cpu} ' if has_cpu else '') + cmd for pid, parent, state, cpu, cmd in jobs))
+        with patch.object(regress, 'sh', process_list):
+            self.assertEqual(regress.heavy_jobs(), [f'{pid} {cmd}' for pid, _, _, _, cmd in jobs[1:]])
+
     def test_heavy_jobs_recognizes_harness_descendants_outside_shared_root(self):
-        processes = '100 1 S python3 /source/scripts/regress.py check\n101 100 S python3 /trees/dmsh_build.py\n102 101 R metal /games/title-work/regress/tmp/shader.metal\n103 1 R metal /another/build.metal\n104 100 R make dmhost\n'
+        processes = '100 1 S 0.0 python3 /source/scripts/regress.py check\n101 100 S 0.0 python3 /trees/dmsh_build.py\n102 101 R 90.0 metal /games/title-work/regress/tmp/shader.metal\n103 1 R 90.0 metal /another/build.metal\n104 100 R 90.0 make dmhost\n'
         with patch.object(regress, 'sh', return_value=NS(stdout=processes)), patch.object(regress.os, 'getpid', return_value=200):
             self.assertEqual(regress.heavy_jobs(), ['103 metal /another/build.metal', '104 make dmhost'])
 

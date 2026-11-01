@@ -3,6 +3,7 @@ Exercise the builder's real key/restore functions without game files or Xcode.
 """
 import ast
 import collections
+import concurrent.futures as cf
 import hashlib
 import importlib.util
 import json
@@ -43,8 +44,9 @@ class ShaderCache(unittest.TestCase):
                        CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'')
         (root / 'out').mkdir()
         names = {'tool_fingerprint', 'shader_key', 'cache_path', 'cache_outputs', 'restore_cache', 'publish_cache', 'atomic_json', 'cache_meta_path',
-                 'bf_digest', 'bf_cache_root', 'bf_cache_restore'}
+                 'bf_digest', 'bf_cache_root', 'bf_cache_restore', 'vs_pad'}
         tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
+        self.tree = tree
         nodes: list[ast.stmt] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
         self.assertEqual({n.name for n in nodes if isinstance(n, ast.FunctionDef)}, names)
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
@@ -125,6 +127,84 @@ class ShaderCache(unittest.TestCase):
         self.assertTrue(self.ns['restore_cache']('key', 'digest'))
         self.assertEqual((Path(self.ns['out']) / 'key_b.metal').read_text(), 'MSL')
         self.assertFalse((Path(self.ns['out']) / 'key_b.metallib').exists())
+
+    def selected_keys(self, want, locations, pairs):
+        functions: list[ast.stmt] = [n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == 'build_keys']
+        self.assertEqual(len(functions), 1, 'the partial build needs its paired-pixel dependency selection')
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
+        return self.ns['build_keys'](want, locations, pairs)
+
+    def test_partial_selection_adds_known_pairs_and_full_selection_keeps_every_shader(self):
+        locations = {'vertex': None, 'pixel': None, 'other': None}
+        pairs = {'vertex': {'pixel', 'not-in-package'}}
+        self.assertEqual(self.selected_keys({'vertex'}, locations, pairs), ['pixel', 'vertex'])
+        self.assertEqual(self.selected_keys(set(), locations, pairs), ['other', 'pixel', 'vertex'])
+
+    def test_partial_cleanup_removes_dependency_outputs_before_rebuilding(self):
+        vertex, pixel, other = '1' * 16, '2' * 16, '3' * 16
+        locations, pairs = dict.fromkeys((vertex, pixel, other)), {vertex: {pixel}}
+        self.selected_keys({vertex}, locations, pairs)
+        out = Path(self.ns['out'])
+        for key in locations: (out / (key + '_b.metal')).write_text('stale source')
+        (out / (pixel + '_bf.metallib')).write_bytes(b'stale dependency variant')
+        # Execute the real selection and cleanup block, stopping before temporary jobs or tools start.
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'keys' for t in n.targets))
+        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'w' for t in n.targets))
+        self.ns.update(want={vertex}, loc=locations, PAIRS=pairs, INPUTS='inputs')
+        exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
+        self.assertEqual(self.ns['want'], {vertex, pixel})
+        self.assertFalse((out / (vertex + '_b.metal')).exists())
+        self.assertFalse((out / (pixel + '_b.metal')).exists())
+        self.assertFalse((out / (pixel + '_bf.metallib')).exists())
+        self.assertEqual((out / (other + '_b.metal')).read_text(), 'stale source')
+
+    def test_missing_paired_pixel_source_cannot_publish_a_vertex_cache_entry(self):
+        out = Path(self.ns['out'])
+        self.ns['PAIRS'] = {'vertex': {'available-pixel', 'missing-pixel'}}
+        (out / 'available-pixel_b.metal').write_text('one dependency is present')
+        (out / 'vertex_b.metal').write_text('un-padded vertex')
+        (out / 'vertex_b.metallib').write_bytes(b'un-padded library')
+        (out / 'vertex_b.json').write_text(json.dumps({'stage': 'vs', 'vs_pad': []}))
+        self.ns['publish_cache']('vertex', 'digest', 'rule', 'source')
+        self.assertFalse(Path(self.ns['cache_meta_path']('vertex')).exists())
+        self.assertFalse(self.ns['restore_cache']('vertex', 'digest'))
+
+    def test_vertex_only_request_retains_padding_on_subsequent_full_cache_reuse(self):
+        vertex, pixel = '1' * 16, '2' * 16   # lexical order puts the vertex first; the real phase ordering must put its pixel first.
+        locations, pairs = dict.fromkeys((vertex, pixel)), {vertex: {pixel}}
+        keys = self.selected_keys({vertex}, locations, pairs)
+        self.ns['PAIRS'] = pairs
+        out, built = Path(self.ns['out']), []
+        vertex_source = ('struct main0_out\n{\n    float4 value [[user(locn0)]];\n};\n'
+                         'vertex main0_out main0()\n{\n    main0_out out = {};\n    return out;\n}\n')
+        pixel_source = 'struct main0_in\n{\n    float4 value [[user(locn7)]];\n};\n'
+
+        def finish_key(key):
+            built.append(key)
+            if key == pixel: src, refl = pixel_source, {'stage': 'ps'}
+            else:
+                src, padded = self.ns['vs_pad'](key, vertex_source)
+                refl = {'stage': 'vs', 'vs_pad': padded}
+            (out / (key + '_b.metal')).write_text(src)
+            # Substitute only the Metal compiler; selection, padding, publication and restoration are the real builder functions.
+            (out / (key + '_b.metallib')).write_bytes(b'compiled:' + src.encode())
+            (out / (key + '_b.json')).write_text(json.dumps(refl))
+            self.ns['publish_cache'](key, key + '-digest', 'rule', 'source')
+            return key, 'ok', '', refl
+
+        phase = next(n for n in self.tree.body if isinstance(n, ast.With) and any(
+            isinstance(s, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'res' for t in s.targets) for s in n.body))
+        self.ns.update(cf=cf, NJ=1, keys=keys, fin=finish_key)
+        exec(compile(ast.Module(body=[phase], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), self.ns)
+        self.assertEqual(built, [pixel, vertex])
+        self.assertIn('dm_pad7 [[user(locn7)]]', (out / (vertex + '_b.metal')).read_text())
+        expected = {p.name: json.loads(p.read_text()) if p.suffix == '.json' else p.read_bytes() for p in out.iterdir()}
+        for path in out.iterdir(): path.unlink()
+        # A later full build restores the vertex before the pixel, as the cache lookup loop does.
+        for key in self.selected_keys(set(), locations, pairs):
+            self.assertTrue(self.ns['restore_cache'](key, key + '-digest'))
+        self.assertEqual({p.name: json.loads(p.read_text()) if p.suffix == '.json' else p.read_bytes() for p in out.iterdir()}, expected)
+        self.assertEqual(json.loads((out / (vertex + '_b.json')).read_text())['vs_pad'], [7])
 
 
 class TargetSelection(unittest.TestCase):

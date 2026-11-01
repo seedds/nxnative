@@ -125,6 +125,9 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         VoteAll,
         VoteAllEqual,
         VoteAny,
+        // nxnative: Ampere HMMA.16816 with an f16 accumulator, lowered to a call by TensorPass, and a barrier for the lanes of one subgroup
+        MatrixMultiplyAdd,
+        SubgroupBarrier,
 
         Count,
 

@@ -21,6 +21,7 @@ int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
+uint32_t hle_dup_readable_handle(uint32_t h) { return h; }
 
 enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 static int32_t mix[NMIX * SAMPLES];
@@ -108,16 +109,80 @@ static void test(int sdk, int incomplete) {
     assert(capture(list, n, out) == SAMPLES);   // detection stays valid for later full frames
 }
 
-int main(void) {
+// Malformed lists after layout selection must leave the histogram/sink scan pending
+// and must never produce PCM, even when a valid sink precedes the malformed tail.
+static void test_malformed(int sdk, int bad) {
+    g_sink_id = sdk == 21 ? 0x14 : 0x13;
+    int16_t out[FRAME_MAX * 2];
+    size_t n = build(sdk, NCMD);
+    *(uint32_t *)(list + 4) = 1;
+    assert(capture(list, 0x20 + 0x40, out) == 0);   // select the layout without a sink or histogram
+    int sink_id = g_sink_id;
+    n = build(sdk, NCMD);
+    if (bad < 2) memset(list + 0x20 + (size_t)bad * 0x40, 0, 0x40);
+    else { *(uint32_t *)(list + 4) = NCMD + 1; memset(list + n, 0, 0x40); n += 0x40; }
+    for (size_t i = 0; i < sizeof out / sizeof *out; i++) out[i] = 1234;
+
+    FILE *log = tmpfile(); assert(log);
+    fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
+    assert(dup2(fileno(log), STDERR_FILENO) >= 0);
+    int got = capture(list, n, out);
+    fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
+    char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
+    assert(got == 0);
+    assert(!strstr(text, "by command ID:"));
+    assert(strstr(text, "malformed"));
+    assert(g_sink_id == sink_id && !g_sink4 && !g_sink5);
+    for (size_t i = 0; i < sizeof out / sizeof *out; i++) assert(out[i] == 1234);
+
+    // A subsequent valid full list still discovers the SDK 4/5 sink and yields stereo.
+    n = build(sdk, NCMD);
+    for (int i = 0; i < SAMPLES; i++) { mix[i] = 700; mix[SAMPLES + i] = -900; }
+    assert(capture(list, n, out) == SAMPLES);
+    for (int i = 0; i < SAMPLES; i++) assert(out[2 * i] == 700 && out[2 * i + 1] == -900);
+    // Validation also applies after the histogram has already been logged.
+    *(uint32_t *)(list + 4) = NCMD + 1; memset(list + n, 0, 0x40);
+    assert(capture(list, n + 0x40, out) == 0);
+}
+
+static void test_histogram(void) {
+    // 64 IDs x 1000 commands need 566 bytes of histogram text, more than its 512-byte buffer.
+    // Disabled commands keep this a formatter test without dereferencing sink payloads.
+    enum { COUNT = 64000, SIZE = 8 };
+    size_t len = 0x20 + COUNT * SIZE;
+    uint8_t *cl = calloc(1, len); assert(cl);
+    *(uint32_t *)(cl + 4) = COUNT;
+    for (int i = 0; i < COUNT; i++) { uint8_t *q = cl + 0x20 + i * SIZE; put(q, 16, i / 1000, SIZE); q[4] = 0; }
+    FILE *log = tmpfile(); assert(log);
+    fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
+    assert(dup2(fileno(log), STDERR_FILENO) >= 0);
+    int16_t out[FRAME_MAX * 2]; assert(capture(cl, len, out) == 0);
+    fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
+    char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
+    const char *hist = strstr(text, "by command ID:"); assert(hist);
+    hist += strlen("by command ID:");
+    const char *end = strchr(hist, '\n'); assert(end && end - hist <= 512);
+    assert(strstr(hist, " 0×1000 1×1000"));
+    free(cl);
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--histogram")) { test_histogram(); return 0; }
+    if (argc == 2 && !strcmp(argv[1], "--malformed")) { test_malformed(16, 0); return 0; }
     test_headers();
     const int sdks[] = {4, 5, 6, 16, 21};
-    for (size_t i = 0; i < sizeof sdks / sizeof *sdks; i++) for (int incomplete = 0; incomplete <= 1; incomplete++) {
+    for (size_t i = 0; i < sizeof sdks / sizeof *sdks; i++) for (int scenario = 0; scenario <= 4; scenario++) {
         // Each renderer format starts in a fresh process, including capture's one-time layout and sink detection.
         pid_t pid = fork(); assert(pid >= 0);
-        if (!pid) { test(sdks[i], incomplete); _exit(0); }
+        if (!pid) {
+            if (scenario <= 1) test(sdks[i], scenario);
+            else test_malformed(sdks[i], scenario - 2);
+            _exit(0);
+        }
         int status; assert(waitpid(pid, &status, 0) == pid);
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    puts("audren layout: unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
+    test_histogram();
+    puts("audren layout: bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
     return 0;
 }

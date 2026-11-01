@@ -80,7 +80,10 @@ static void check(int which) {
         *(uintptr_t *)(base + 0x8adca10 + 0x10) = which == 13 ? 0 : (uintptr_t)object;
         sync = (int32_t *)object; sync[0] = sync[1] = which == 10 ? 1 : 2;
     }
+    int engine = which != 3 && which != 12;   // a limiter the host writes: any but another build's main (3) and a main the rewriter found no Unreal variable in (12)
+    if (which & 1) assert(dm_fps_lock_engine() == engine);   // the graphics layer's present cap may ask before the first present (the acquire)
     dm_fps_lock_tick();
+    assert(dm_fps_lock_engine() == engine);
     if (which == 0) {
         assert(*unity == 60 && writes == 1);
         dm_fps_lock_tick(); assert(writes == 1);

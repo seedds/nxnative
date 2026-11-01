@@ -27,8 +27,8 @@ env:
   # the version it was made with; dm/tools/tests/test_lint_c.py keeps the two in step: raising LLVM means a new baseline (lint_c.py tidy --rebaseline) in the same change.
   LLVM_VERSION: 23.1.4
   LLVM_SHA256: 0f8b0db925ab54a63028d788e85b14abaa25492e9608819728c17f6786948da4
-  # The toolchain the project supports (README: Xcode 27.1) on GitHub's xcode-27 image, named by path: the SDK's headers are part of what clang-tidy reads
-  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  # The toolchain the project supports (README: Xcode 27.2) on GitHub's xcode-27 image, named by path: the SDK's headers are part of what clang-tidy reads
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
   GAME: 010015100B514000   # Super Mario Bros. Wonder: the profile header the sources are parsed with (any profile does)
 
 defaults:

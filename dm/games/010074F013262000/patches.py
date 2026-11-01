@@ -1,7 +1,8 @@
 # Xenoblade Chronicles 3: changes to its own modules, checked by NSO build ID.
 # Nintendo SDK module changes belong to dm/tools/sdk_patches.py.
 CUTS = {
-    # 2.2.1: nninitStartup reserves 60 GB for Monolith's allocator. Its first
+    # 2.2.0 / 2.2.1 share this main build ID (issue #847; see README.md).
+    # nninitStartup reserves 60 GB for Monolith's allocator. Its first
     # arena reserves 4 GB + 128 KB, maps the first 128 KB for bookkeeping, and
     # takes additional pages on demand. iOS cannot reserve that address space.
     # The original arena commits 203 MB at the title and 225 MB in the opening

@@ -6,3 +6,5 @@ int dm_focus_now(void) { return test_focus; }
 uint64_t dm_focus_in_since(void) { return test_focus_since; }
 extern int test_fullscreen;
 int front_fullscreen(void) { return test_fullscreen; }
+extern int test_variable_refresh;
+int front_screen_variable_refresh(void) { return test_variable_refresh; }

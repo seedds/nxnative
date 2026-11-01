@@ -49,6 +49,7 @@ General host changes first needed here; each applies to every game:
 
 - **Movies:** [SDK 3's `movie::Decoder` constructor takes a type and a format only](../../../docs/reference/movies.md#sdk-3s-moviedecoder-constructor-takes-a-type-and-a-format-only).
 - **Power:** [Short timed waits are polls](../../../docs/reference/threads.md#short-timed-waits-are-polls).
+- **amiibo:** [NFC initialization beside the amiibo library](../../../docs/reference/services.md#nfc-initialization-beside-the-amiibo-library): entering amiibo from the title screen aborted in `nn::nfc::Initialize` (GitHub issue #708); the game now shows its "NFC is disabled" message.
 
 ## Open
 

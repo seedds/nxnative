@@ -5,8 +5,9 @@
 # Layout (little-endian):
 #   header  32 bytes: magic "DMROMFS1", u64 index offset, u64 index size, u64 entry count
 #   data    each file's bytes, one after another
-#   index   entry count entries of 24 bytes: u64 a, u64 b, u32 name offset, u16 name length, u8 type (0 directory, 1 file), u8 0
+#   index   entry count entries of 24 bytes: u64 a, u64 b, u32 name offset, u16 name length, u8 type (0 directory, 1 file), u8 flags
 #           a directory: a = its first child's entry, b = its number of children; a file: a = data offset in the image, b = size
+#           flags: 0, or 1 on a file that failed the NCA's hash check and was written as read (nx_extract --allow-damaged; the host names it in its log)
 #           then the names, one pool. Entry 0 is the root (empty name). Each directory's children are consecutive entries sorted by name (bytes), so a lookup is a
 #           binary search per path component; directories are numbered breadth-first.
 # The index comes last, so a copy cut off partway has no valid index (the header points past the end of the file) and the host refuses it.

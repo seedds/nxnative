@@ -109,6 +109,10 @@ enum { ALLOC_SHARE = 64 };   // submissions one allocator serves before the next
 enum { SUB_FLIGHT_MAX = ALLOC_MAX * ALLOC_SHARE };
 static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n, g_alloc_cur;   // Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
 static id<MTL4CommandAllocator> g_up_alloc4[3];
+// Per-frame queue columns for perf.tsv (mtl_frame_queue_take, hle_nvn.c): how long the main submission waited for a command allocator, how many submissions began, and at their begin the most
+// allocators and submissions the GPU had not finished, and the deepest present queue; they show when the CPU runs further ahead of the GPU than usual (waits at WS_ALLOC / WS_ACQ)
+static _Atomic uint64_t g_fq_alloc_ns, g_fq_subs, g_fq_busy, g_fq_lag, g_fq_pq;
+static void fq_max(_Atomic uint64_t *m, uint64_t v) { uint64_t o = atomic_load(m); while (v > o && !atomic_compare_exchange_weak(m, &o, v)) {} }
 static id<MTL4CommandAllocator> g_present_alloc4[3];
 static id<MTL4CommandBuffer> g_present_cb[3];
 static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct, g_ot;   // g_ot: the object stage of a task / mesh draw (mesh_tasks_draw)
@@ -1524,11 +1528,13 @@ void mtl_sub_begin(void) {
     int alloc_i = -1; uint64_t done = g_done, alloc_frame = atomic_load(&g_cur_frame);
     int alloc_share = g_alloc_used && g_alloc_frame == alloc_frame && g_alloc_shared < ALLOC_SHARE && allocprof_level() != 2;
     if (alloc_share) alloc_i = g_alloc_cur;
+    { uint64_t busy = 0; for (int i = 0; i < g_alloc_n; i++) busy += g_alloc_fence[i] > done;
+      atomic_fetch_add(&g_fq_subs, 1); fq_max(&g_fq_busy, busy); fq_max(&g_fq_lag, g_fence > done ? g_fence - done : 0); }
     for (int i = 0; alloc_i < 0 && i < g_alloc_n; i++) if (g_alloc_fence[i] <= done) { alloc_i = i; break; }
     if (alloc_i < 0 && g_alloc_n < ALLOC_MAX) { NSError *ae = nil; MTL4CommandAllocatorDescriptor *ad = [MTL4CommandAllocatorDescriptor new];
         g_alloc4[g_alloc_n] = [g_dev newCommandAllocatorWithDescriptor:ad error:&ae]; if (!g_alloc4[g_alloc_n]) MDIE("failed to create a new MTL4CommandAllocator: %s", ae.localizedDescription.UTF8String);
         alloc_i = g_alloc_n++; g_alloc_grown++; }
-    if (alloc_i < 0) { alloc_i = 0; for (int i = 1; i < g_alloc_n; i++) if (g_alloc_fence[i] < g_alloc_fence[alloc_i]) alloc_i = i; g_alloc_waits++; mtl_wait_at(g_alloc_fence[alloc_i], UINT64_MAX, WS_ALLOC); }
+    if (alloc_i < 0) { alloc_i = 0; for (int i = 1; i < g_alloc_n; i++) if (g_alloc_fence[i] < g_alloc_fence[alloc_i]) alloc_i = i; g_alloc_waits++; uint64_t aw0 = now_ns(); mtl_wait_at(g_alloc_fence[alloc_i], UINT64_MAX, WS_ALLOC); atomic_fetch_add(&g_fq_alloc_ns, now_ns() - aw0); }
     if (allocprof_level() == 2) {   // the GPU is done with this allocator (picked free, or waited for): what it holds is the last submission encoded with it
         if (g_alloc4[alloc_i].allocatedSize) { uint64_t z = g_alloc4[alloc_i].allocatedSize; g_cm_sub_n++; g_cm_sub_sum += z; if (z > g_cm_sub_max) g_cm_sub_max = z;
             int hb = 0; while (hb < 6 && z >= (4ull << 20) << hb) hb++; g_cm_hist[hb]++; }
@@ -5081,6 +5087,7 @@ static int sw_mode(const char *name, int dflt) {
     return m;
 }
 static inline int sw_on(int m) { return sw_on_at(m, atomic_load_explicit(&g_ab_phase, memory_order_relaxed)); }
+int mtl_ab_mask(void) { int m = 0; for (int i = 0; i < g_sw_n; i++) if (g_sw_mode[i] >= 2 && sw_on(g_sw_mode[i])) m |= 1 << i; return m; }   // the frame rows' @ab: bit i = the i-th ab switch (sw_mode order) on in this phase
 // Each phase is reported once its frames' GPU times have arrived (8 frames late) as an [ab] line: the switches on in it, GPU time and whole frame time (p50 / p90 / mean over the phase
 // without its first quarter, while the GPU clock and the frame step settle), and attachment traffic and render passes per frame (the bandwidth ledger)
 enum { AB_MAXF = 4096 };
@@ -16709,6 +16716,10 @@ int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, doubl
 }
 static _Atomic uint64_t g_drawable_ns;   // Accumulated wall clock waiting for nextDrawable in present (timing instrumentation)
 uint64_t mtl_drawable_ns_take(void) { return atomic_exchange(&g_drawable_ns, 0); }
+void mtl_frame_queue_take(double q[5]) {   // and zero: allocator wait ms, submissions, allocators busy (max), submissions unfinished (max), present queue depth (max)
+    q[0] = atomic_exchange(&g_fq_alloc_ns, 0) / 1e6; q[1] = (double)atomic_exchange(&g_fq_subs, 0); q[2] = (double)atomic_exchange(&g_fq_busy, 0);
+    q[3] = (double)atomic_exchange(&g_fq_lag, 0); q[4] = (double)atomic_exchange(&g_fq_pq, 0);
+}
 // Maximum refresh rate (Hz) of the screen when there is a window; returns 0 without a window. Mac uses CoreGraphics display modes (thread-safe C interface; the present configuration is read on the game thread)
 int mtl_display_hz(void) {
     if (!front_metal_layer()) return 0;
@@ -17726,7 +17737,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
     pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
-    uint64_t tk = ++g_pq_in;
+    uint64_t tk = ++g_pq_in; fq_max(&g_fq_pq, g_pq_in - g_pq_done);
     g_pres_tin[tk % PRING] = it->t_in;
     g_pres_frm[tk % PRING] = it->frame;
     if (ss) { g_snap[slot].ticket = tk; atomic_fetch_add(&g_snap_next, 1); if (copy) *copy = g_snap[slot].ev; }

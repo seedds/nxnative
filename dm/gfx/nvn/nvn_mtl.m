@@ -2928,6 +2928,21 @@ static id<MTLTexture> tex_made(const tex_t *t) {
     if ([have isKindOfClass:[NvPkg class]]) { NvPkg *pk = have; return pk->view ? pk->view : pk->tex; }
     return have;
 }
+// NVN formats whose Metal format is the other one of an sRGB / linear pair (g_pfv_srgb) of a format's Metal format: up to 4, zero-terminated (an RGBA8 texture has RGBA8_SRGB and RGBX8_SRGB)
+static const uint8_t *srgb_twins(uint32_t f) {
+    static uint8_t tw[256][5]; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        for (int a = 1; a < 256; a++) { uint32_t pa = 0, pb = 0; uint8_t sw[4]; int n = 0;
+            if (!nvn_fmt_to_mtl(a, &pa, sw) || !pa) continue;
+            for (int b = 1; b < 256 && n < 4; b++) {
+                if (b == a || !nvn_fmt_to_mtl(b, &pb, sw) || !pb || pa == pb) continue;
+                for (size_t i = 0; i < sizeof g_pfv_srgb / sizeof *g_pfv_srgb; i++)
+                    if ((pa == g_pfv_srgb[i].a && pb == g_pfv_srgb[i].b) || (pa == g_pfv_srgb[i].b && pb == g_pfv_srgb[i].a)) { tw[a][n++] = (uint8_t)b; break; }
+            }
+        }
+    });
+    return f < 256 ? tw[f] : tw[0];
+}
 static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return nil;
@@ -3048,19 +3063,17 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     if (shared) { tex_put(t->serial, shared); return shared; }
     {   // NVN textures over the same storage share its bytes. One that differs from a shared texture only by the other format of an sRGB / linear pair is a view of it: as its own Metal
         // texture, Mario Kart World's Grand Prix movie (an RGBA8 render target the YUV pass writes, sampled by the composite through an RGBA8_SRGB texture) showed a frozen frame
-        MTLTextureDescriptor *d = tex_desc(t, 0); id<MTLTexture> v = nil;
-        if (d && d.sampleCount <= 1 && (d.textureType == MTLTextureType2D || d.textureType == MTLTextureType2DArray)) {
-            pthread_mutex_lock(&g_smu);
-            for (uint32_t i = 0; i < g_alias.cap && !v; i++) if (g_alias.vals[i]) {
-                alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
-                if (k.pool != ak.pool || k.off != ak.off || k.d.format == ak.d.format) continue;
-                k.d.format = ak.d.format; if (memcmp(&k.d, &ak.d, sizeof k.d)) continue;
-                id<MTLTexture> b = (__bridge id)g_alias.vals[i];
-                if (b.pixelFormat == d.pixelFormat || tex_need_pfv(b.pixelFormat, d.pixelFormat) || b.textureType != d.textureType) continue;
-                v = [b newTextureViewWithPixelFormat:d.pixelFormat textureType:b.textureType levels:NSMakeRange(0, b.mipmapLevelCount) slices:NSMakeRange(0, b.arrayLength) swizzle:b.swizzle];
-                if (v) { memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k); nvn_hm_put(&g_alias_seen, &k, (void *)(uintptr_t)(g_fence + 1)); }
-            }
-            pthread_mutex_unlock(&g_smu);
+        // The other formats of the pair are looked up directly (srgb_twins), with the rest of the key unchanged; the descriptor is built only when one is shared
+        const uint8_t *tw = srgb_twins(ak.d.format); id<MTLTexture> v = nil;
+        for (int j = 0; j < 4 && tw[j] && !v; j++) {
+            alias_key k; memcpy(&k, &ak, sizeof k); k.d.format = tw[j];   // memcpy keeps the zeroed padding the table hashes
+            pthread_mutex_lock(&g_smu); id<MTLTexture> b = hm_get_id(&g_alias, &k); pthread_mutex_unlock(&g_smu);
+            if (!b) continue;
+            MTLTextureDescriptor *d = tex_desc(t, 0);
+            if (!d || d.sampleCount > 1 || (d.textureType != MTLTextureType2D && d.textureType != MTLTextureType2DArray)) break;
+            if (b.pixelFormat == d.pixelFormat || tex_need_pfv(b.pixelFormat, d.pixelFormat) || b.textureType != d.textureType) continue;
+            v = [b newTextureViewWithPixelFormat:d.pixelFormat textureType:b.textureType levels:NSMakeRange(0, b.mipmapLevelCount) slices:NSMakeRange(0, b.arrayLength) swizzle:b.swizzle];
+            if (v) { pthread_mutex_lock(&g_smu); nvn_hm_put(&g_alias_seen, &k, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu); }
         }
         if (v) { tex_put(t->serial, v); return v; }
     }

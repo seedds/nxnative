@@ -2,8 +2,10 @@
 // used to construct later viewports can change independently. Check actual
 // culling and front_facing pixels while alternating two queues on one device.
 #define nvn_game_fps nvn_game_fps_mtl_default
+#define nvn_var_fps nvn_var_fps_mtl_default   // the same for nvn_var_fps (a variable frame step)
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
+#undef nvn_var_fps
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
 #undef g_ft

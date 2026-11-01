@@ -64,8 +64,8 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | ThreadedStreamBuffer load-acquires | race | blocked: no game files of those games on the drive to compare | judgement | 1 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](../../dm/games/0100CE4010AAC000/README.md) | the race is in Unity 2018.4's ThreadedStreamBuffer, engine code other Unity games of that era ship (Cuphead, AI: THE SOMNIUM FILES, Raging Loop): a function-matched rule per Unity version |
 | `build` → `game` | 60 fps frame step (112 sites) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step) |
 | `build` → `game` | 60 fps frame step and render scale | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's own timing object |
-| `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
 | `build` → `game` | 60 fps frame step: the KIDS frame task and frame-rate block | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the game's own frame code; only the host's frame-step state page is shared. Fire Emblem: Three Houses and Taiko Risshiden V DX run on KTGL too, with other frame code |
+| `build` → `game` | frame step (whole vsyncs and variable), render scale, output size, heaps and render buffer pool (ksys::VFR and the game setup code) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step |
 
 ## Summary
@@ -94,7 +94,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
-| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 18 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -504,7 +504,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), `01007EF00011E000`, [patches.py](../../dm/games/01007EF00011E000/patches.py).
 
 - **`build` → `game`**, frame rate, gap, judgement: interval controller: the lower bound and the GPU-time path. Sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code
-- **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: 60 fps frame step and render scale (ksys::VFR). The game's own frame code; the frame-step state page is general
+- **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, judgement: frame step (whole vsyncs and variable), render scale, output size, heaps and render buffer pool (ksys::VFR and the game setup code). The game's own frame code; the frame-step state page is general
 
 - **1.9.0 `main`** `cd57b23f…` ([patches.py:14](../../dm/games/01007EF00011E000/patches.py#L14))
   - cut `+0x112670c`: lower bound of the candidate interval: fmov s0,s11 (2.0) → fmov s0,s10 (1.0)
@@ -514,11 +514,29 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x1126794`: stepping down stops at < 3 → at < 2: cmp w9,#3 → cmp w9,#2
   - cut `+0x112691c`: interval controller always takes the GPU time path (CPU span timing): cbz x0,#0x1126934 → b #0x1126928
   - cut `+0x1126974`: interval controller always takes the GPU time path (takes max(CPU span, GPU time)): cbz x0,#0x112698c → b #0x1126980
+  <details><summary>18 frame-step sites</summary>
+
+  - frame step `+0x71c`: nninitStartup heap size = the game's + the host's added bytes (state page +0x58)
+  - frame step `+0xc617c0`: RootHeap size = the game's + the host's added bytes (state page +0x58)
+  - frame step `+0xc61ef4`: output size global = the host's (state page +0x40; 0 = 1920x1080)
+  - frame step `+0xc61f28`: output size global = the host's (state page +0x40; 0 = 1920x1080)
   - frame step `+0xeb0f88`: held-button counts step by the VFR ratio (menu repeat in game time at any frame step)
-  - frame step `+0x11269b8`: setWaitVsyncInterval: the host's step unless the VFR override is set (state page target fps; 0 = the game's interval)
+  - frame step `+0x106d328`: render buffer pool size × the host factor (state page +0x4c; 0 = the game's 115 MB)
+  - frame step `+0x11269b8`: setWaitVsyncInterval: the host's step unless the VFR override is set (state page target fps; 0 = the game's interval); latches the variable step
+  - frame step `+0x125f118`: interval step: the VFR's frame ratio × 2 in place of max(interval, 1) (UI animation / fade)
+  - frame step `+0x12618c4`: output size global = the host's (state page +0x40; 0 = 1920x1080)
+  - frame step `+0x12660cc`: docked output width = the host's (state page +0x48; 0 = 1920.0)
+  - frame step `+0x12660d4`: docked render size = the host's output size
+  - frame step `+0x1266104`: docked window crop = the host's output size
   - frame step `+0x126686c`: scale apply block taken every frame when the host render scale is not 1.0
   - frame step `+0x1266880`: 3D view scale = the host render scale (1.0 = the game's dynamic resolution)
+  - frame step `+0x1280ecc`: interval step: the VFR's frame ratio × 2 in place of max(interval, 1) (UI animation / fade)
+  - frame step `+0x128106c`: physics step ratio at least 0.5 (three substeps)
   - frame step `+0x151d3d0`: VFR::updateInterval: its own override published for the host (state page target fps; 0 = original)
+  - frame step `+0x151d484`: VFR::updateInterval: the published frame ratio is the host's variable step (state page +0x54, latched) when set, unless the game overrides its interval
+
+  </details>
+
   - render scale stub (the launcher offers DM_RENDER_SCALE)
 
 ### The Legend of Zelda: Link's Awakening

@@ -309,6 +309,32 @@ int main(void) {
         sim m = {0}; m.s.shown_slack = 60.0 / 165; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 1.32, 1, 3, 0);
         check(m.s.k == 2, "  the slack does not hide work: 22 ms frames still step to hold 2");
     }
+    {   // Variable frame step (nvn_vstep_next): frames start at the given intervals (ms, repeating); game time is the sum of the steps (1/30 s units → s), real time the sum of the intervals
+        struct { int cap; double ms[2]; const char *what; } vc[] = {
+            {120, {8.3333, 8.3333}, "variable step, steady 120: 8.33 ms steps, game time = real time"},
+            {120, {6.9444, 13.8889}, "  120 on a 144 Hz screen (ticks 6.9 / 13.9 ms apart): game time = real time"},
+            {240, {2.7778, 5.5556}, "  240 on a 360 Hz screen (ticks 2.8 / 5.6 ms apart): the 1/240 s floor's carry keeps real time"},
+            {240, {2.7778, 2.7778}, "  frames faster than the floor (360 fps): at most 1/240 s a frame, the carry stays bounded"},
+        };
+        for (int c = 0; c < 4; c++) {
+            nvn_vstep v = {0}; uint64_t t = 1000000000ull; double game = 0, real = 0, mn = 1e9;
+            for (int i = 0; i < 2400; i++) {
+                float st = nvn_vstep_next(&v, t, vc[c].cap);
+                if (i) { game += st / 30.0; mn = st < mn ? st : mn; }
+                double d = vc[c].ms[i & 1]; t += (uint64_t)(d * 1e6); if (i < 2399) real += d / 1000;
+            }
+            snprintf(b, sizeof b, "%s (%.4f of real time, carry %.3f)", vc[c].what, game / real, v.carry);
+            check(c < 3 ? fabs(game / real - 1) < 0.002 : game / real < 1.51 && mn >= NVN_VSTEP_MIN && v.carry >= -NVN_VSTEP_MAX, b);
+        }
+        nvn_vstep v = {0}; uint64_t t = 1000000000ull;
+        for (int i = 0; i < 120; i++, t += 8333333) nvn_vstep_next(&v, t, 120);
+        nvn_vstep_reset(&v); t += 1000000000ull;   // a second of whole-vsync frames (a cutscene): the variable step is reset
+        float first = nvn_vstep_next(&v, t, 120), second = nvn_vstep_next(&v, t + 8333333, 120);
+        snprintf(b, sizeof b, "  after a second of whole-vsync frames: one frame at the cap, not the second (%.3f, then %.3f)", first, second);
+        check(fabsf(first - 0.25f) < 1e-4 && fabsf(second - 0.25f) < 1e-3, b);
+        nvn_vstep w = {0}; nvn_vstep_next(&w, 1000000000ull, 120); float slow = nvn_vstep_next(&w, 1060000000ull, 120);
+        check(slow == NVN_VSTEP_MAX, "  a 60 ms frame steps at most 1.5 (50 ms): the game slows down, as on the Switch");
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

@@ -163,7 +163,7 @@ def build_rows(gs):   # {build ID: [(game, display version, module)]}
 def frame_step_sites(fn):   # (offset, reason) of each site a FRAME_STEP function writes, and whether it marks a render-scale stub
     pos, puts = [0x8000000], []
     def emit(w): pos[0] += 4
-    ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0)
+    ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, keys={})
     fn(ctx)
     return sorted(puts), ctx.render_scale
 

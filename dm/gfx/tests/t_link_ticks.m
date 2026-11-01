@@ -17,8 +17,10 @@ static int test_pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, cons
 #define clock_gettime test_clock_gettime
 #define pthread_cond_timedwait test_pthread_cond_timedwait
 #define nvn_game_fps nvn_game_fps_mtl_default
+#define nvn_var_fps nvn_var_fps_mtl_default   // the same for nvn_var_fps (a variable frame step)
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
+#undef nvn_var_fps
 #undef pthread_cond_timedwait
 #undef clock_gettime
 #define g_ft g_ft_hle
@@ -67,7 +69,7 @@ int main(void) { @autoreleasepool {
     setenv("DM_FPS_TARGET", "0", 1);
     g_dm_present_link = 2; g_link = (CAMetalDisplayLink *)[NSObject new];   // a link is "on" while the object is set; nothing calls it here
     CHECK(mtl_link_active(), "the link counts as active");
-    g_link_mode = 2;
+    g_link_mode = 2; g_link_rate = 120;   // link_range sets both
     CHECK(mtl_link_rate() == 120, "a 120 Hz link reports 120");
     double a = per_wait(0, 1), b = per_wait(1, 1), c = per_wait(1, 2);
     printf("120 Hz link: interval 1 waits %.2f ticks, one own tick %.2f, two own ticks %.2f\n", a, b, c);
@@ -92,12 +94,12 @@ int main(void) { @autoreleasepool {
     state[0] = 30;
     acquire_ticks(120, 1, 1, 4, "the 30 fps frame step keeps two 60 Hz vsyncs");
     dm_fps_state = NULL;
-    g_link_mode = 1;
+    g_link_mode = 1; g_link_rate = 60;   // link_range sets both
     CHECK(mtl_link_rate() == 60, "a 60 Hz link reports 60");
     a = per_wait(0, 1);
     CHECK(a == 1, "a 60 Hz link: one tick per vsync");
     acquire_ticks(120, 1, 1, 1, "a 60 Hz link limits display 120 Hz to one tick");
-    g_link_mode = 3;
+    g_link_mode = 3; g_link_rate = 30;   // link_range sets both
     CHECK(mtl_link_rate() == 30, "the 30 Hz power-saving link reports 30");
     acquire_ticks(120, 1, 1, 1, "a 30 Hz link limits display 120 Hz to one tick");
     acquire_ticks(60, 0, 2, 1, "a 30 Hz link keeps game interval 2 at one tick");

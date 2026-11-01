@@ -1,6 +1,6 @@
 # South Park: The Fractured But Whole, update 1.05 (v327680), Snowdrop.
 # Experimental phone-sized virtual address reservation; only exact original words
-# of this main's NSO build ID may be replaced. No Mac/iPhone gameplay validation yet.
+# of this main's NSO build ID may be replaced. See README.md for validation limits.
 #
 # The allocator previously reserves 12 GiB as three adjacent 4 GiB address ranges
 # (large blocks, 512 KiB slabs, 64 KiB slabs). In a 5 GiB guest block that

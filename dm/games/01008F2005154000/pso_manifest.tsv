@@ -1,2 +1,2 @@
-# Placeholder: no prewarm entries recorded for the experimental 1.05 profile.
-# S	shader key	stage / R	render pipeline key / C	compute shader key
+# Prewarm seed list (shipped in the app, next to shader_map.tsv). Rows: S<TAB>shader key<TAB>stage / R<TAB>render pipeline key (pso_skey hex) / C<TAB>compute shader key.
+# Provisional profile: empty until recorded on the Mac (DM_PSO_MANIFEST=off DM_PSO_RECORD).

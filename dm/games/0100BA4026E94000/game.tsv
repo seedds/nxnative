@@ -1,0 +1,40 @@
+# Provisional game profile (hand-written from the extraction, modelled on the DRG provisional profile)
+# Castlevania: Belmont's Curse, SDK 21, Unity/IL2CPP
+
+# ---- Identity ----
+title_id	0100BA4026E94000
+program_id	0100BA4026E94000
+
+# ---- App ----
+name	Castlevania: Belmont's Curse
+ipa	CastlevaniaBelmontsCurse.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.1.0	main=0f1169aa7d0fa4529c861f96adec306e	subsdk0=8205ead9e1f93d8b2337feaddefac330	sdk=8af286d7bfb124125a15e96a39cb1ab7
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk subsdk0
+romfs_marker	Data/StreamingAssets/aa/settings.json
+zip_store	.assets:.bundle:.dat:.resource:.ress:.metallib
+
+# ---- Memory ----
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Castlevania: Belmont's Curse shaders (provisional profile)
+
+# ---- Heap check on the Mac ----
+# no heap set and the alias region used up to +4.25 GB of 4.38 GB in the heap check: a 1 GB pool, so StandardAllocator's region leaves the game room for its own
+app_pool	0x40000000
+
+# heap check: 2026-10-29, no heap set; set app_pool
+
+# address regions: 2026-10-29, in its first 15 s in nnMain the game's regions reach alias +2.55 GB, within the profile's 4.38 GB alias region (what it takes later in play is not measured here) (rewrite 4ba84186a2ff)

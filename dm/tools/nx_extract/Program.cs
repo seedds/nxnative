@@ -61,7 +61,9 @@ static class P {
             return 4;
         }
         // Code section: the update's ExeFS is complete; opening it layered over the base gives the same result
-        IFileSystem exefs = updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);
+        IFileSystem exefs;
+        try { exefs = updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid); }
+        catch (Exception e) { Console.WriteLine($"code section integrity failed ({e.GetType().Name}: {e.Message}); retrying leniently (hash errors tolerated)"); exefs = updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.IgnoreOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.IgnoreOnInvalid); }
         Copy(exefs, Path.Combine(outDir, "ExeFS"), null);
         string[] mods = Directory.GetFiles(Path.Combine(outDir, "ExeFS")); Array.Sort(mods, StringComparer.Ordinal);
         foreach (string p in mods) {   // build ID of every NSO module (main, sdk, subsdk*, rtld...)
@@ -78,7 +80,9 @@ static class P {
             Console.WriteLine("program has no data section: empty RomFS");
             return Damaged();
         }
-        IStorage romfs = updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        IStorage romfs;
+        try { romfs = updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid); }
+        catch (Exception e) { Console.WriteLine($"romfs integrity failed ({e.GetType().Name}: {e.Message}); retrying leniently (hash errors tolerated)"); romfs = updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid); }
         // the same RomFS without hash checks, for reading damaged files as they are (--allow-damaged)
         g_lenient = () => new RomFsFileSystem(updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid));
         if (manifest) Manifest(new RomFsFileSystem(romfs), Path.Combine(outDir, "romfs_manifest.tsv"));

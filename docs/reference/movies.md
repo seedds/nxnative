@@ -235,6 +235,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): 101 guide movies (`Movie/*.webm`, VP9 960×540, no sound); its player reads the pictures as NV12 (`ReadDecoderOutputImageNv12`, output format 3).
 - **Open:** AV1 (no decoder on the host: Initialize fails with a red line, so a client takes its error path instead of reaching the service), encrypted input, native image handles (the GPU route of decoded pictures), alias pools and the readback of part of a picture are not served (each prints a red line once). No game here plays VP8 or H.264 through this API yet: those paths are checked by the test only. Donkey Kong Bananza's player imports all four decoders; its movies are VP9.
 
+### SDK 21's video decoder names
+
+- **Symptom:** `game called nn::diag abort: Result 0, call site sdk+0x32f998` when a movie starts, with `nn::codec::InitializeVp9DecoderByTransferMemory` and `movie::VideoDecoder::Configure` (`subsdk0`) in the backtrace.
+- **Cause:** SDK 21 renamed part of the API the host takes over ([`nn::codec` video decoders taken over](#nncodec-video-decoders-taken-over)): `Initialize…DecoderByTransferMemory` (with the work memory) and `Initialize…DecoderByRemoteMemory` replace the two `Initialize…Decoder` overloads and take an output mode (`VideoDecoderOutputMode`); `Get…DecoderSubmissionReadyEvent` takes only the decoder and returns the event (the SDK's returns the type + 8); `MakeDecodeImagePreference` takes an `ImageTilingMode` instead of a `CodecMode`, and `InitializeDecoderImagePool` has no `CodecMode`. The work buffer calculations are gone. The other entry points keep their names. Unserved, the SDK's own Initialize asked the decoder service and aborted on its result.
+- **Fix:** `hle_codec_video.c` serves the new names for VP8, VP9 and H.264 on the same host decoder; AV1's two fail as before. Arguments past the eighth sit in 8-byte stack slots in the guest's calls (AAPCS64), where Apple's ABI packs smaller ones, so the output format and mode of the `ByTransferMemory` overloads are declared 64-bit. The same held for SDK 20's `InitializeH264Decoder` overload with an output mode: declared 32-bit, it read the parameter sets from the mode's slot (no game reached it).
+- **Check:** `t_codec_video` calls the new entry points through a function type with every argument 64-bit, as the guest passes them: image preference and pool, a VP9 decoder by transfer memory with its event and one decoded picture, the H.264 parameter sets of both overloads with an output mode, a VP8 decoder by remote memory, AV1's refusal.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (sdk 21.4.0): the Grand Prix's cup opening movie (`Movie/KinokoOp.webm`, VP9 2560×1440, 1,423 pictures, output mode 1, read as NV12).
+
 ## Movie players
 
 ### Unity's video planes and checking the movie path

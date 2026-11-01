@@ -180,6 +180,34 @@ static void fb_tick(int target, const char *src) {
     }
 }
 
+// Unreal int console variables a build gets a fixed value for, whatever the FPS choice: the TAutoConsoleVariable object in main's bss (value pointer at +0x10, game- and render-thread copies).
+// Minecraft Dungeons II 1.1.1.0: r.BloomQuality (registered at main+0x7e7a4, default 5) to 0. On the Mac its bloom's last blur passes (30x34 and 60x34, fragment shaders 762a3933d873c16b and
+// 37c206…) came out as blocks of other content in some runs, from the title screen on: orange and cream rectangles over the whole picture and the HUD, the campfire green. The inputs, shaders,
+// draw state and load / store choices of those passes were the same as in runs without it; the cause is not found. Setting it to 0 in the running game removed the rectangles at once
+static const struct { const char *build, *what; uint64_t obj_off; int32_t value; } k_cvars[] = {
+    { "9e9d887d59f7f7db176b35e3379258b9", "Unreal r.BloomQuality", 0x9dc6060, 0 },
+};
+static void cvar_tick(void) {
+    static int state = -1, rows[8], nrow, nlog[8]; static uint8_t *base;
+    if (state < 0) {
+        state = 0;
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))
+            for (int k = 0; k < (int)(sizeof k_cvars / sizeof *k_cvars) && nrow < 8; k++) if (!strcmp(g_mod[i].build_id, k_cvars[k].build)) { rows[nrow++] = k; base = g_mod[i].base; }
+        const char *e = getenv("DM_GAME_CVARS"); state = nrow > 0 && !(e && *e == '0');   // DM_GAME_CVARS=0: the game's own values
+        if (nrow && !state) LOG("main: fixed console variables left as the game sets them (DM_GAME_CVARS=0)");
+    }
+    if (!state) return;
+    for (int r = 0; r < nrow; r++) {
+        int k = rows[r]; uint64_t obj;
+        if (!rd((uint64_t)(uintptr_t)(base + k_cvars[k].obj_off + 0x10), &obj, sizeof obj) || !obj) continue;   // not created yet
+        for (int c = 0; c < 2; c++) {
+            int32_t cur, *p = (int32_t *)(uintptr_t)(obj + 4 * (uint64_t)c);
+            if (!rd((uint64_t)(uintptr_t)p, &cur, sizeof cur) || cur == k_cvars[k].value) continue;
+            dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, k_cvars[k].value, __ATOMIC_RELAXED);
+            if (nlog[r] < 4) { nlog[r]++; LOG("main: %s (%s thread) %d → %d", k_cvars[k].what, c ? "render" : "game", cur, k_cvars[k].value); }
+        }
+    }
+}
 // The Unreal rows of this main: the profile's frame-limit variable and the present intervals, at the objects the rewriter found (0 rows: not an Unreal main). *missing: an Unreal main
 // (the rewriter found some of its variables) without the profile's frame-limit variable
 static int ue_rows(const module_t *m, lock_t *out, int *missing) {
@@ -196,6 +224,7 @@ static int ue_rows(const module_t *m, lock_t *out, int *missing) {
 
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
+    cvar_tick();
     static lock_t ue[3]; static const lock_t *rows[NLOCKS + 3]; static int state = -2, nrow, nlog[NLOCKS + 3], target, nier, ue_missing; static uint8_t *base; static const char *src; static uint32_t display;
     if (state == -1) return;
     if (state == -2) {

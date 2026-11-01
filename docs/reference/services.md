@@ -454,8 +454,15 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Symptom:** SIGSEGV in `android::Surface::getQueuedFrameNumber` under `nn::vi::GetLatestFrameNumber`.
 - **Cause:** Unreal paces frames by the layer's frame number (`main+0x10140e8`); the SDK reads the vi service's surface, which the host never made.
-- **Fix:** `hle_vi.c` answers with the frames presented so far; `ListFrameHistory` returns no entries.
+- **Fix:** `hle_vi.c` answers with the frames presented so far.
 - **Found on:** [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md).
+
+### Layer frame history
+
+- **Symptom:** the boot stops for good right after the intro movie, CPU idle and every thread waiting: the game thread in Unreal's frame end sync (`main+0x15015f0` → the render fence wait `main+0x1500cf0`), the render and RHI threads idle, the hitch dump's `no present for 3000 ms` (Minecraft Dungeons II).
+- **Cause:** the game's Viewport Thread (`main+0x142afb0`) wakes on the vsync event, lists the layer's frame history with `vi::ListFrameHistory` and passes each newly presented frame (state 2, a frame number it has not seen) to the event its RHI's flip thread waits on; the frame end sync waits for that flip once the menu turns it on. The host returned no entries, so no flip was ever reported.
+- **Fix:** the host keeps the last 8 presents (`dm_vi_frame_presented`, called at each present in `hle_nvn.c`) and lists them newest first; with no buffer it returns how many there are. `FrameInfo` (0x28 bytes) as that reader uses it: +0 state, +8 frame number, +0x18 and +0x20 system ticks (both the present's guest tick here); +0x10 is unread and left 0.
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md). It also turns on [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md)'s limiter phase lock, which stayed off with no entries (not yet checked on that game, open).
 
 ### Default display panel identifier
 
@@ -566,6 +573,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Pikmin 4](../../dm/games/0100B7C00933A000/README.md) (Unreal Engine 4.26.2); [Hades](../../dm/games/0100535012974000/README.md) (the 50 ms hold).
 - **Check:** 12 of 12 boots with four hosts at once reached the title, with both fixes; a host that answers at once hung 1 of 4 in the same test.
 - **Note:** how it was found: the hung boots' logs diverged from good ones at the save probe (`DM_FS=1`), the thread dumps showed nothing but idle waits, and `DM_PROBE` on the state machine, then `peek` lines in a hung run's `DM_CTL` file, followed the pointers to the status word (a probe on the hot path slowed the boot enough to hide the race: 8 of 8 good).
+
+### An ssl context offline
+
+- **Symptom:** `XblInitialize failed: 0x80070057` and Unreal's fatal logger right at boot (Minecraft Dungeons II, `main+0x4238230`); the null `HCInitArgs` check in libHttpClient's `http_singleton` create (`main+0x7030280` → `0x7030468`) is the visible failure, but the first `HCInitialize` (with arguments, from XSAPI) had already returned `0x80004005` and left no singleton.
+- **Cause:** libHttpClient's Nintendo provider creates an `nn::ssl::Context` while `HCInitialize` runs (`main+0x7030ae4`, "Failed to create ssl context") and fails the whole initialization without it. The host answered `ssl::Context::Create` with a failure, as it did every ssl call. On Horizon the context lives in the console's own ssl service and needs no network, so it is created offline; only connections on it fail.
+- **Fix:** `ssl::Context::Create` and `Destroy` succeed (`hle_net.c`); `Connection` calls still fail.
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md) (1.1.1.0; Unreal Engine 5 with XSAPI / XAL).
 
 ### Socket `Poll` and `Select` with nothing to wait on
 

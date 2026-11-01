@@ -2,6 +2,7 @@
 // Host: returns host static objects; when hooking up Metal, the native window corresponds to the front end's CAMetalLayer (front_metal_layer()).
 #include "../host/hle.h"
 #include <stdatomic.h>
+#include <pthread.h>
 
 static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414c};
 static struct { uint32_t magic; void *layer; } g_native = {0x4e49574e, 0};
@@ -54,9 +55,30 @@ uint64_t dm_nvn_frame_count(void);
 HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest frame number: the frames presented so far", Result, h_vi_FrameNo, uint64_t *out, const void *layer) {
     (void)layer; *out = dm_nvn_frame_count(); return RES_OK;
 }
-HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: none kept, 0 entries", int, h_vi_FrameHist, void *out, int n, const void *layer) {
-    (void)out; (void)layer; static int once; if (!once++) LOG("vi::ListFrameHistory (%d entries asked): the host keeps no frame history, 0 returned", n);
-    return 0;
+// The layer's frame history: the last FRAME_HIST presents, newest first. Minecraft Dungeons II's Viewport Thread (main+0x142afb0) wakes on the vsync event, asks how many entries there are
+// (out NULL, n 0), lists them and takes the first with state 2 whose frame number it has not seen; its time stamps (+0x18, +0x20, system ticks) go to a queue and an event that its RHI's flip thread
+// waits on, and the game thread's frame end sync waits for that flip. With no history the boot stopped for good once that sync began, right after the intro (every thread waiting).
+// FrameInfo (0x28 bytes) as that reader uses it: +0 state (2 = presented), +8 frame number, +0x18 and +0x20 time stamps; +0x10 is not read and is left 0. Both time stamps are the present's
+// guest tick: the host has no separate queue and display times
+enum { FRAME_HIST = 8, FRAME_PRESENTED = 2 };
+typedef struct { uint64_t state, number, unknown, t0, t1; } vi_frame_info;
+static pthread_mutex_t g_hist_lock = PTHREAD_MUTEX_INITIALIZER;
+static vi_frame_info g_hist[FRAME_HIST]; static unsigned g_hist_n, g_hist_head;
+void dm_vi_frame_presented(uint64_t number) {   // hle_nvn.c, at each present
+    uint64_t tick = guest_ns() * 12 / 625;   // 19.2 MHz, as svc GetSystemTick
+    pthread_mutex_lock(&g_hist_lock);
+    g_hist_head = (g_hist_head + 1) % FRAME_HIST;
+    g_hist[g_hist_head] = (vi_frame_info){ FRAME_PRESENTED, number, 0, tick, tick };
+    if (g_hist_n < FRAME_HIST) g_hist_n++;
+    pthread_mutex_unlock(&g_hist_lock);
+}
+HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: the last presents, newest first", int, h_vi_FrameHist, void *out, int n, const void *layer) {
+    (void)layer;
+    pthread_mutex_lock(&g_hist_lock);
+    int k = out ? (n < (int)g_hist_n ? n : (int)g_hist_n) : (int)g_hist_n;   // no buffer: the number there is
+    for (int i = 0; out && i < k; i++) ((vi_frame_info *)out)[i] = g_hist[(g_hist_head + FRAME_HIST - i) % FRAME_HIST];
+    pthread_mutex_unlock(&g_hist_lock);
+    return k < 0 ? 0 : k;
 }
 // Rhythm Heaven Groove (SDK 21) asks for the built-in panel's identity at start (main+0xa9a4); the SDK's version calls through the vi service object the host never made (SIGSEGV at +0x20).
 //   The game reads a u32 kind and, when it is 2 or more, 0x14 more bytes that it hands on; any other answer makes it hand on zeros. The host has no panel: an all-zero identifier, kind 0

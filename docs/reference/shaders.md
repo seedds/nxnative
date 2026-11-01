@@ -1207,3 +1207,18 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `t_host_msl` loads every library, with a swizzled `newLibraryWithSource:` that counts 0 calls, and finds all 24 clear functions. `t_builtin`, `t_geometry` and `t_deswz_gpu` use the built libraries.
 - **Build inputs:** Mac libraries use `MACOS_MIN` from `dm/mac/min_os.mk`, matching the host's deployment target; otherwise a newer SDK emits libraries older supported Macs cannot load and the host falls back to runtime compilation. Every build rechecks the compiler, SDK, deployment target and source contents, reusing the header only when all match. Installing the Metal toolchain after a source-only build therefore regenerates the libraries without a clean build.
 - **Build callers:** the NSP packer and regression harness generate the Mac header before checking their cached host executables, and include it in the host fingerprint. The standalone iOS compile check generates the iPhone header before its dry run, as the app build does. A dry run alone does not generate either header.
+
+### Metal 4 bases shared across colour formats
+
+- **Symptom:** after a screen that draws a model into targets of its own (Minecraft Dungeons II's inventory, with its hero preview), the same models in the scene are drawn with noise and black flicker from then on (the hero, the campfire, pickups). Metal 4 only (macOS 26; the MTLDevice path, `DM_PSO_MTL4=0`, draws them right).
+- **Cause:** a Metal 4 base pipeline leaves the colour attachments open and is specialized for each colour state (`newRenderPipelineStateBySpecializationWithDescriptor`). The host kept one base object per descriptor (`g_pbase`, keyed by `pbase_key`), so the hero's material was specialized from one base object for the scene's targets and then for the preview's targets of other formats. Specializing one base object for other colour formats broke the pipelines already specialized from it for the first ones. A base object per format set, or no base, draws them right; whether blending or the write mask alone can do the same is not known (sharing across those was not seen to break).
+- **Fix:** `pbase_key` holds the colour formats its specializations take (`cfmt`), so each format set gets a base object of its own. The base's descriptor still leaves them open, so the archive and the prebuild find the same base for every set; the extra bases are compiled or looked up on the pipeline threads.
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md).
+- **Check:** the same inventory input script from the same save: noise after the first inventory visit before the fix; none in two runs after it, the second with two inventory round trips. Frame time p50 16.7 ms before and after.
+
+### Integer colour attachments on Metal 4 bases
+
+- **Symptom:** a fragment shader that writes a float output into an integer colour attachment gets a pipeline on Metal 4 and draws undefined values, where the MTLDevice path refuses the same pipeline.
+- **Cause:** Metal checks a fragment output's type against its attachment's format only when it compiles with the format known, not when it specializes a base whose formats were left open.
+- **Fix:** a pipeline with an integer colour attachment is compiled whole, with its colour formats (`pso_build_ex` in `nvn_mtl.m`), so Metal refuses it as on the MTLDevice path, with the same `[RED]` line. The shader's output type is the open part: the profile's fact table can name it (`{"fout":{"0":"uint"}}`).
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md): `31f5c2a62e017a2d` writes a `float4` into an R8Uint target (refused now; its fact row is not added yet, open).

@@ -318,16 +318,19 @@ int main(int argc, char **argv) { @autoreleasepool {
         printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
         return failed != 0;
     }
-    // pipelines differing only in colour state share one base
+    // pipelines differing only in blending and write mask share one base; other colour formats get a base object of their own (a base object specialized for other formats
+    // broke the pipelines already specialized from it: Metal 4 bases shared across colour formats, docs/reference/shaders.md)
     same_pixels("RGBA8 blended, RGBA16F all channels", MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll);
     EXPECT("first pipeline: its base compiled", 1, g_pb_built);
-    same_pixels("RGBA16F, RGBA8 red and green", MTLPixelFormatRGBA16Float, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskRed | MTLColorWriteMaskGreen);
-    same_pixels("RGBA8, RGBA8 no channel", MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskNone);
-    EXPECT("other colour states: the same base", 1, g_pb_built);
-    EXPECT("other colour states: base reused", 2, g_pb_reused);
-    EXPECT("one specialization per pipeline", 3, g_pb_spec);
+    same_pixels("RGBA8, RGBA16F red and green", MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA16Float, MTLColorWriteMaskRed | MTLColorWriteMaskGreen);
+    same_pixels("RGBA8, RGBA16F no channel", MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA16Float, MTLColorWriteMaskNone);
+    EXPECT("other blending and write masks: the same base", 1, g_pb_built);
+    EXPECT("other blending and write masks: base reused", 2, g_pb_reused);
+    same_pixels("RGBA16F, RGBA8: other formats", MTLPixelFormatRGBA16Float, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll);
+    EXPECT("other colour formats: a base of their own", 2, g_pb_built);
+    EXPECT("one specialization per pipeline", 4, g_pb_spec);
     // the archive: flushed to a file, a later start takes the base from it without compiling
-    EXPECT("one base waits for the archive", 1, g_arch_new);
+    EXPECT("each base waits for the archive", 2, g_arch_new);
     ArchEpoch *ep0 = g_ep;
     arch_flush_wait();
     NSString *file = [@(dir) stringByAppendingPathComponent:@"00000.mtl4a"];
@@ -340,6 +343,9 @@ int main(int argc, char **argv) { @autoreleasepool {
     same_pixels("from the archive: RGBA8 blended, RGBA16F", MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA16Float, MTLColorWriteMaskAll);
     EXPECT("base from the archive", 1, g_pb_archived);
     EXPECT("no base compiled", built, g_pb_built);
+    same_pixels("from the archive: RGBA16F, RGBA8", MTLPixelFormatRGBA16Float, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll);
+    EXPECT("other formats: base from the archive", 2, g_pb_archived);
+    EXPECT("other formats: no base compiled", built, g_pb_built);
     // a flush whose bases all read their vertices themselves (no vertex layout) is a p<seq> file; a base with a layout is never looked up in one
     MTLRenderPipelineDescriptor *nd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
     nd.vertexFunction = fn4_note([g_lib newFunctionWithName:@"vs0"], g_lib, @"vs0", nil); nd.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];

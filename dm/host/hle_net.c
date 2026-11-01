@@ -105,8 +105,10 @@ HLE_FORCE("nnsocketSetLastErrno", "socket error code kept by the host", void, h_
 #define SSF(m, cname, ...) HLE_FORCE(m, "ssl service (cut): fails", Result, cname, __VA_ARGS__)
 HLE_FORCE("_ZN2nn3ssl10InitializeEv", "same as nnsslInitialize: succeeds, creates no session (cut)", Result, h_ssl_InitCpp, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn3ssl8FinalizeEv", "pairs with Initialize (cut)", Result, h_ssl_FinCpp, void) { return RES_OK; }
-SSF("_ZN2nn3ssl7Context6CreateENS1_10SslVersionE", h_ssl_CtxCreate, void *self, int v) { (void)self; (void)v; return RES_FAIL; }
-SSF("_ZN2nn3ssl7Context7DestroyEv", h_ssl_CtxDestroy, void *self) { (void)self; return RES_FAIL; }
+// Context::Create only opens a context in the console's own ssl service and needs no network, so it succeeds offline on hardware; connections on it then fail.
+// libHttpClient's Nintendo provider creates one at HCInitialize (main+0x7030ae4 in Minecraft Dungeons II) and fails the whole initialization without it
+HLE_FORCE("_ZN2nn3ssl7Context6CreateENS1_10SslVersionE", "context in the local ssl service: succeeds offline, as on hardware (cut)", Result, h_ssl_CtxCreate, void *self, int v) { (void)self; (void)v; return RES_OK; }
+HLE_FORCE("_ZN2nn3ssl7Context7DestroyEv", "pairs with Context::Create (cut)", Result, h_ssl_CtxDestroy, void *self) { (void)self; return RES_OK; }
 SSF("_ZN2nn3ssl7Context19RegisterInternalPkiEPmNS1_11InternalPkiE", h_ssl_CtxRegPki, void *self, uint64_t *id, int p) { (void)self; (void)id; (void)p; return RES_FAIL; }
 SSF("_ZN2nn3ssl7Context9RemovePkiEm", h_ssl_CtxRemovePki, void *self, uint64_t id) { (void)self; (void)id; return RES_FAIL; }
 SSF("_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj", h_ssl_BiBufSize, uint32_t *o, void *ids, unsigned n) { (void)ids; (void)n; if (o) *o = 0; return RES_FAIL; }

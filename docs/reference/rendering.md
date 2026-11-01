@@ -157,6 +157,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** on an M1 Pro with `DM_TBUF_ALIGN=64`, a Mac that cannot see the problem otherwise: `[RED]` lines naming the same shaders and slots as the phone's log on the base this was found on (18 of them, `094a2d11253f126c_b` slots 18/19/20, `f54830a75e07e14a_b` slot 20, `6797af67f88a4ddd_b` slot 0), and a static terrain patch that stops being static — `YAVG` two values 0.008 apart alternating frame to frame, against one value for 12 frames with the alignment the Mac reports. With the copy in, the same forced alignment fails nothing, copies 5,058 times over the run (4,592 MB, about 2 copies and 2 MB a frame) and leaves the single value the aligned path gives; with the Mac's own alignment no texture takes the copy. Three Houses' own frames on the phone then hold 60 fps with the flicker gone.
 - **Not checked:** another device's alignment (the value is read, not assumed); a game whose such buffer is written by the GPU in the same submission (the copy would be stale).
 
+### Buffer texture views made again every frame
+
+- **Symptom:** frames held up in submit while walking, the RHI thread spending about a quarter of its time in `newTextureWithDescriptor:offset:bytesPerRow:` (Minecraft Dungeons II at 1080p: 25 ms frames and 47 fps windows with GPU time to spare).
+- **Cause:** Unreal makes new buffer texture objects over the same storage every frame, and the host made a new Metal view for each texture object.
+- **Fix:** buffer texture views are shared through a cache of their own (`btex_get` / `btex_put` in `nvn_mtl.m`), keyed by pool, offset and description (the `IMAGE` flag stays in the key, as it changes the view's usage). A view is counted by the serials resolving to it; one no serial uses stays resident for reuse until 2,048 such views wait, then the oldest goes, and the views over a pool go with it. The cache is kept apart from the alias table: there a new entry takes over the storage of overlapping entries, and Unreal's transient pools hold render targets and buffers in the same memory, so a first version on the alias table evicted live targets (the scene and its history turned to black blocks and red and green noise from the main menu on).
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md).
+
 ### Automatic block height truncates
 
 - **Symptom:** torn digits and a background in blue steps (Rhythm Heaven Groove's latency calibration).

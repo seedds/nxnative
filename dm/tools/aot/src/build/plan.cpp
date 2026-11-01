@@ -46,6 +46,10 @@ Regs ToRegs(const analysis::RegSet& r) {
     return {r.x, r.v, r.sp, r.nzcv};
 }
 
+Regs StdPass(const lift::Convention& conv) {
+    return Regs::X(0xFu) | conv.Passable();
+}
+
 Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const lift::Convention& conv, bool all_entries) {
     Plan p;
     const auto& fns = d.functions;
@@ -199,7 +203,10 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         ind_must = {};
     }
     p.indirect_writes = ind_writes;
-    p.indirect_pass = Regs::X(0xFu) | (ind_reads & conv.Passable());
+    // The standard entries' signature (section 2.3: "one fixed signature"; include/nxaot/aot_module.h, ABI 3): the same in every pack of a
+    // convention, so that an indirect call may enter a standard entry of another pack directly (an NRO's function from main, main's from the
+    // NRO): x0..x3 and every passable register in host registers, whatever the module's address-taken functions read
+    p.indirect_pass = StdPass(conv);
 
     // LIVE_AFTER (section 2.3): the union over a function's call sites of what is read before being written after the call; a tail call
     // passes on its own function's; an indirect call site counts for every standard entry; the host reads x0, x1 and v0..v3
@@ -332,11 +339,22 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
             rv[c] &= ff.writes.v & 0xFu;
         }
     }
+    // The standard entries' component returns the fixed signature's v registers in host registers (kStdRv: none), whatever its members write:
+    // they store what they write of v0..v3 at their returns instead (it is in LIVE_AFTER for every standard entry: kHostReads), where a caller
+    // in any pack reloads it
+    rv[uf.Find(ind_node)] = kStdRv;
     for (auto& [entry, ff] : p.fns) {
         ff.component = uf.Find(node[entry]);
         ff.rv = rv[ff.component];
     }
-    p.indirect_rv = rv.count(uf.Find(ind_node)) ? rv[uf.Find(ind_node)] : 0;
+    p.indirect_rv = kStdRv;
+    // The blocks a function's walk reached outside its own range: the aux region's (the frame step's stubs, design 1.1), lifted as its code
+    for (auto& [entry, ff] : p.fns) {
+        const analysis::Function& f = fns.at(entry);
+        for (const auto& [start, b] : f.blocks) {
+            if (start < f.entry || start >= f.limit) ff.extra.emplace_back(b.start, b.end);
+        }
+    }
     return p;
 }
 

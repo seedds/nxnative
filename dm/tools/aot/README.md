@@ -19,7 +19,7 @@ with no JIT, and print what dynarmic prints. No game runs through it yet, and no
 | Piece | Where | What it does |
 |---|---|---|
 | State block | [include/nxaot/guest_state.h](include/nxaot/guest_state.h) | `dm_guest_state` of design section 2.1, C, 64-byte aligned, every offset asserted; host-only fields `cnt` (the counter `mrs cntpct_el0` / `cntvct_el0` read in a region; a pack calls the host instead) and `exit_reason` / `exit_arg` |
-| Pack descriptor | [include/nxaot/aot_module.h](include/nxaot/aot_module.h) | what a pack's library holds for a module (the descriptor, the lookup table, function map and line table, the inline-cache descriptors) and what it imports from the host (the SVC path, the miss path, traps, the counter), C |
+| Pack descriptor | [include/nxaot/aot_module.h](include/nxaot/aot_module.h) | what a pack's library holds for a module (the descriptor of ABI 3, the lookup table, function map and line table, the gate sites, the standard entries' signature, the inline-cache descriptors) and what it imports from the host (the SVC path, the miss path, traps, the gates, the counter), C |
 | Decoder glue | [src/decode/translate.cpp](src/decode/translate.cpp) | dynarmic's A64 translation loop with nxaot's options (hints raise their exceptions, wall-clock counter) and the encodings dynarmic leaves to an interpreter that nxaot translates itself (`mrs xN, cntvct_el0`) |
 | Lifter | [src/lift/lifter.cpp](src/lift/lifter.cpp), [src/lift/opcodes.cpp](src/lift/opcodes.cpp) | dynarmic IR blocks of a region to one LLVM function `void f(dm_guest_state *st)`: registers (x0..x30, SP, v0..v31) in allocas that SROA / mem2reg promote, NZCV as four `i1` compared directly against the operands of the `subs` / logical operation that set them, stored only when written; guest memory as `inttoptr` volatile accesses (alignment 1, 16 bytes for `ldr q`), `ldar` acquire, `stlr` sequentially consistent, exclusives as `cmpxchg` against `st->excl_*`, `dc zva` zeroing the aligned 64 bytes; `svc`, `brk`, `udf` and undefined encodings leave with `st->pc` and `st->exit_reason`. A region holding an IR opcode the lowering does not cover is refused whole |
 | Floating point and SIMD | [src/lift/lower_fp.cpp](src/lift/lower_fp.cpp), [lower_vector.cpp](src/lift/lower_vector.cpp), [lower_crypto.cpp](src/lift/lower_crypto.cpp), [function_lifter.h](src/lift/function_lifter.h) | the lowering of section 7: FPCR as a compile-time specialisation, the NaN chains, Arm's NaN, min / max, rounding and conversion rules, saturation with FPSR.QC, the cumulative exception flags, AES-NI / SHA-NI / PCLMULQDQ with software forms ("Floating point and SIMD" below) |
@@ -61,7 +61,8 @@ docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 # configure, build, CTest (the vectors, the crypto vectors for x86-64-v3, the per-operation NaN mode, the reach check, the census, the vectors-current
 # check, discovery over the corpus, the manifest test, the corpus reference run, the fp cases current, the corpus run natively, the per-function
 # differential test, the JIT fallback's three modes, the threaded programs, the safepoint pause test, the per-function cache, the indirect calls'
-# reloads); --tmpfs /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on a machine short of disk
+# reloads and the standard entries' signature, the line tables); --tmpfs /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on
+# a machine short of disk
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
 
@@ -79,8 +80,8 @@ Linking: `libLLVM-18.so` from the image (the Ubuntu package is built with `LLVM_
 libraries statically instead, as the distributed `nxaot` will be (design section 13). zlib (which LLVM itself links) reads the `.tsv.gz` vectors; lld's
 ELF driver (`liblldELF.a`, the image's `liblld-18-dev`) links the packs. The build tree takes about 74 MB, and the tests' objects and shared objects
 (corpus_native, corpus_funcdiff, corpus_jit, corpus_threads, safepoints, the benchmark) about 30 to 60 MB more. On this repository's development
-machine (8 vCPUs) the CTest run takes about 10 minutes (589 s): the vectors 4 of them, corpus_native 1.3 and corpus_funcdiff 1.6, corpus_jit,
-corpus_threads and safepoints 37 s together, cache 16 s and plan 3 s.
+machine (8 vCPUs) the CTest run takes about 11 minutes (639 s with ABI 3, 18 tests): the vectors 4 of them, corpus_native 1.4 and corpus_funcdiff
+1.7, corpus_jit, corpus_threads and safepoints 33 s together, cache 20 s, plan 2 s and lines 25 s.
 
 ## Running the harness and the census
 
@@ -158,7 +159,7 @@ and the frame step's branches applied, before any of Apple's rewrites. The manif
 |---|---|---|
 | the command | `patch_nso.py --aot <NSO> <out dir> <name>`, the image instead of `patched.bin` | `--aot <dir>` after the usual arguments, besides Apple's outputs: one rewrite gives both, and a test checks that Apple's outputs are unchanged |
 | `layout` | `bss` | the zero bytes after `image_size`; 0 when the image holds them (a module with FRAME_STEP, below) |
-| `aux` | the stubs "at the same offset" as in the patch area | the behaviour image has no patch area: the build's own FRAME_STEP function assembles its stubs again at the page after the state page (state page at `FPS_STATE_OFF`, as on Apple), and the image goes on to their end, bss and the key page's place as zeros. A module whose bss puts that past a `b`'s reach of the text (a FAR module) fails the rewrite at the `B()` assertion: the manifest's unsigned offsets cannot place the region before the base |
+| `aux` | the stubs "at the same offset" as in the patch area | the behaviour image has no patch area: the build's own FRAME_STEP function assembles its stubs again at the page after the state page (state page at `FPS_STATE_OFF`, as on Apple), and the image goes on to their end, bss and the key page's place as zeros. A module whose bss puts that past a `b`'s reach of the text (a FAR module) fails the rewrite at the `B()` assertion: the manifest's unsigned offsets cannot place the region before the base. nxaot lifts the region's code as part of the functions whose walks branch into it ("Calls and returns", The aux region) |
 | `data` | `nso_code.data_blocks` | those, the MOD0 offset word at +4, and MOD0 with its `LNY` records when the text holds it, as nxaot reads an NRO (`NroDataBlocks`) |
 | `obs` | `<number> <parameter>` | the OBS number's low 8 bits (decimal) and its bits 8 up (hex), as hle.c's gate table splits them |
 | `oracle-J` | `<base> <width>` | `sites.tsv`'s J rows hold the landing pads' count (256, or the halfword table's entries), not the width: the rewriter records the entries' width (1 or 2) for the manifest |
@@ -178,7 +179,8 @@ compare the oracle rows itself at pack time yet.
 their function (tail calls), landing pads outside their function, jump-table targets that are other functions' entries, `adr` and `adrp` + `add`
 text addresses that no function's code reaches and no function's FDE or symbol range holds (inside one they are a root of it: a table base, a resume
 point), and last the gap sweep (the first word that is not padding of every stretch no function reached; inside a function's own range it is a
-root of that function, not an entry). A walk follows a function's direct branches in `[entry, limit)`, the limit being the next entry or the FDE's
+root of that function, not an entry). A behaviour image's aux region (the frame step's stubs) is code of every function whose direct branches
+reach it, its blocks part of that function's walk, never an entry of its own. A walk follows a function's direct branches in `[entry, limit)`, the limit being the next entry or the FDE's
 end, by dynarmic's decoder table and the Arm ARM's fields ([src/analysis/insn.h](src/analysis/insn.h)); `br x30` is a return (design 3.3), a call to
 a function the summaries prove does not return does not fall through, and landing pads are reached from the calls their call-site range covers.
 Coverage: every text word outside data blocks is in a function, padding (`nop` or zero) or reported as uncovered; undefined words inside functions
@@ -340,16 +342,45 @@ next function by a tail call). Design 2.3, 3.3 and 4, as implemented:
   (`include/nxaot/aot_module.h`); branches into the middle of other functions go through `jit_entry`, and `msr fpcr` leaving the specialisation,
   untranslated encodings and code that runs into no entry hand the rest of the function to `nxaot_rt_jit` ("The JIT fallback"). A function the
   lifter refuses becomes a body that runs it in the JIT from its entry (none in the corpus). Safepoint polls: "Threads and safepoints".
+- **Gates** (design 1.1; the manifest's `obs` and `spin` rows): before an observed instruction (the translation stops there, so a block starts
+  at it) the code stores every register newer than the block, `pc` = the instruction, calls `nxaot_rt_gate(st, offset)` through a `preserve_all`
+  wrapper and reloads x0..x29 (an observer may change them: `OBS_STDALLOC_INIT` writes x2); where a spin wait's back-edge is taken to its head, the
+  same with `pc` = the head and no reload, then the edge's safepoint poll. The descriptor lists the sites (`gates`, sorted, kind and argument), the
+  unit checks that its code calls every site its function's blocks hold (a pack that would not serve one fails), and dm/host checks them against
+  the manifest's rows ("A game module in the host"). A module without such rows imports no `nxaot_rt_gate`.
+- **The aux region** (design 1.1; the manifest's `aux` row, the frame step's stubs): code of every function whose walk branches into it, never a
+  function of its own. Discovery follows a function's direct branches into the region and back (`Inside`), the lifter's region and reader take it
+  (`Region::extra`), so a stub and the code around its site are one LLVM function, as on Apple the patch area runs between two instructions of
+  the function: the stub's `b` back is a branch inside the function, wherever the site is (an entry, the middle of a loop), with no tail call that
+  would hand a stale x30 to the next part. The unit's cache key holds the region's words its function reaches.
+- **The standard entries' one signature** (design 2.3, ABI 3): x0..x3 and the convention's passable registers in host registers (swifttailcc:
+  x4..x7 and v0..v7; ghccc: x4..x6 and v0..v5), x0 and x1 returned in host registers and v0..v3 through the block (rv 0: the standard entries'
+  tail-call component returns no v register in host registers, its members store what they write of v0..v3 at their returns, where every
+  standard entry's LIVE_AFTER has them), whatever the module's address-taken functions read: the same in every pack of a convention and mode, so
+  the dispatcher binds an inline cache of one pack to another pack's standard entry (a call into an NRO, an NRO calling its loader back) and the
+  next call goes there directly. The descriptor records it (`std_x`, `std_v`, `rv`).
 - **Tables in the tables' object** ([include/nxaot/aot_module.h](include/nxaot/aot_module.h)): `.nxaot.lookup` (open addressing, module offset ->
-  standard entry, self-relative), `.nxaot.fnmap` (every function's body and size), `nxaot_lines` (the line table, 3.5: every guest memory access's
-  native address and guest offset, written by LLVM's `!pcsections`; LLVM 18 keeps those on memory instructions only, so call sites map through the
-  DWARF line table, line = guest offset in a synthetic `<module>.s`, `--no-debug-info` drops it) and the exported descriptor `nxaot_module`.
+  standard entry, self-relative), `.nxaot.fnmap` (every function's body and size), `.nxaot.gates` and the exported descriptor `nxaot_module`;
+  **the line table** (3.5) is `lines.o`'s, made once every unit is compiled: `.nxaot.fnlines` (a run per function, parallel to the function map)
+  and `.nxaot.lines` ({native address - the body's, guest offset}, each run sorted). Each unit marks its guest memory accesses with
+  `!pcsections` into the section `.nxaot_pcs` of its object; LLVM writes, per metadata node, the addresses of every machine instruction that
+  carries it and then the guest offset once (`AsmPrinter::emitPCSections`), so the section is no array of pairs (ABI 2's readers took it for one:
+  246 of fnptr-gcc's 415 entries and 8,812 of switch-gcc's 24,293 were misread). `ReadLineMarks` (src/build/pack.cpp) tells the words apart by
+  the unit object's relocations (only addresses have one), files each address under the body symbol that holds it, and sets `SHF_EXCLUDE` on the
+  section, which lld then drops: the pack holds nxaot's table only, the same whatever order LLVM wrote the groups in. Call sites and the other
+  native addresses map through the DWARF line table (line = guest offset in a synthetic `<module>.s`; `--no-debug-info` drops it). The selection
+  DAG gives an access's mark to every machine instruction it lowers it to (a `cmpxchg`'s `lock cmpxchg` and the `setcc` of its success), all of
+  them the right guest instruction; in 8 of the 58,843 accesses of the 24 packs test_lines.py builds LLVM folded a load into its user and unfolded it again,
+  and the mark ended on a neighbouring instruction of the same lowering: a fault at that load is reported at the nearest entry before it, which
+  the report says. CTest `lines` (`nxaot lines <pack> <module>`) checks every entry of every corpus pack against the code and the module.
 - **Tiers** (9.3, `--tier`): C (SROA, instcombine, simplifycfg, DCE; FastISel), W (LLVM's O1 pipeline, codegen Less), H (O2), H+ (O3, codegen
   Aggressive). Without a profile the pack modes are one tier for every function: `balanced` W, `max` H+. One tier per module for now. At C and W
   every function is a compile unit of its own, at H and H+ a shard of neighbouring functions ("Pack throughput"): H and H+ inline within a shard
   (design 9.3), not across shards (ThinLTO's import is phase 5b's).
 
-Found by the tests and fixed in the lowering: a preserving callee that stored its own x29 before an inner call left that copy in the block, which a
+Found by the tests and fixed in the lowering: a guest call site that two lifted blocks hold (the block that runs into a loop's head holds the
+loop's first instructions, and the head's block holds them again) had an inline cache per copy, so the second copy missed again what the first had
+learnt (t_aot_hostfn's cross-pack loop: one dispatcher miss after the warm-up); a site now has one slot per function (`FnDispatch`). And: a preserving callee that stored its own x29 before an inner call left that copy in the block, which a
 later callee saved in its frame record (nxaot_funcdiff, summary mode: the missing "store the restored value again" rule); an indirect call reloaded
 x3 from the block after the call because some address-taken function writes x3, while the leaf that ran stored nothing (nxaot_bench's blr loop never
 ended: the `exact` rule above); an indirect call reloaded only what the module's own functions may write, so in a module where none writes v0 the
@@ -397,7 +428,8 @@ executable, which exports them).
   runs it; with `--jit-none`, `[RED] aot: the indirect branch at module+0x... to 0x... (module+0x...) has no compiled entry, and the JIT fallback
   is off (--jit-none)` and status 3), `nxaot_rt_trap` (brk, undefined words and an untranslatable encoding status 1, a no-return call that
   returned status 6), `nxaot_rt_jit` (the JIT fallback, "The JIT fallback"), `nxaot_rt_safepoint` (a poll, "Threads and safepoints"),
-  `dm_aot_cntpct` (CLOCK_MONOTONIC as 19.2 MHz ticks, `guest_ns * 12 / 625` as `svcGetSystemTick`), and the floating-point helpers of
+  `nxaot_rt_gate` (a gate of design 1.1, which only behaviour images with obs or spin rows have: here a pause point like a safepoint, no
+  observer; dm/host's runs them), `dm_aot_cntpct` (CLOCK_MONOTONIC as 19.2 MHz ticks, `guest_ns * 12 / 625` as `svcGetSystemTick`), and the floating-point helpers of
   [src/lift/runtime.cpp](src/lift/runtime.cpp).
 - **Faults** (5.4 is the host's job): SIGSEGV, SIGBUS, SIGILL, SIGFPE and SIGTRAP in guest code, on an alternate stack, are reported with the
   faulting address and the guest instruction the line table gives (`[RED] aot: SIGSEGV at address ... in guest code (host pc ..., in the function at
@@ -566,10 +598,15 @@ pauses, about 760 invariant checks, no inconsistent block, the output unchanged.
   memory;
 - **done**: `dm_aot_svc` (aot_run.c): `svc_dispatch(n, st->x, ...)` between `thr_svc_enter` / `thr_svc_leave` on the block; svcExitProcess
   stops the process (every guest thread leaves at its next poll, SVC or kernel wait, hle_thread.c `thr_stop_all`);
-- **done**: `nxaot_rt_dispatch`: the lookup table of the pack whose image holds the target, the host-function page through `jit_entry` (the
-  target in `st->pc`, and `nxaot_rt_jit` runs the slot's thunk, `dm_aot_hostcall`), another pack's entry through `jit_entry` and that pack's
-  `enter` (ABI 2 does not record the standard entries' signature, which differs between packs), `jit_entry` with `NXAOT_TRAP_JIT_MISS` for the
-  rest. **Open**: the packs are scanned in order (FINAL FANTASY X/X-2 has 1,432 NROs: a sorted index then);
+- **done**: `nxaot_rt_dispatch`: the lookup table of the pack whose image holds the target, bound in the call site's inline cache when that pack
+  is the caller's or records the same standard-entry signature, convention and mode (ABI 3: a cross-pack call then goes to the other pack's
+  standard entry directly from the next call on, counted in `dm_aot_stats_t.cross_pack`), the host-function page through `jit_entry` (the
+  target in `st->pc`, and `nxaot_rt_jit` runs the slot's thunk, `dm_aot_hostcall`), a pack of another signature through `jit_entry` and that
+  pack's `enter` (`cross_pack_handovers`: none with nxaot's packs), `jit_entry` with `NXAOT_TRAP_JIT_MISS` for the rest. **Open**: the packs are
+  scanned in order (FINAL FANTASY X/X-2 has 1,432 NROs: a sorted index then);
+- **done**: `nxaot_rt_gate` (aot_run.c): the site's gate of the calling pack's descriptor (the return address names the pack), `dm_aot_gate` at
+  its guest address (hle.c `gate_dispatch`: the observer on the block's registers, or the spin wait's back-off as an SVC frame, where a pause
+  stops the thread with its whole register file in the block), then a process stop leaves; counted (`obs_gates`, `spin_gates`);
 - **done**: `nxaot_rt_trap`, `nxaot_rt_jit` (`Host::JitLoop` in C), `nxaot_rt_safepoint` (hle_thread.c `thr_safepoint`: SetThreadActivity's
   pause wait), `dm_aot_cntpct` (`guest_ns() * 12 / 625` after `guest_clock_read_wait`, as svcGetSystemTick and the counter gate);
 - **done**: `dm_guest_call` on top of `enter`, with the outermost level of `Host::RunGuest`; the outermost call on a thread is the base it leaves
@@ -632,9 +669,13 @@ What a game's module needs from dm/host on x86-64 beside the run time above, wri
   (the unit tests' hand-made images) keep the host addresses Apple binds.
 - **Observation gates and spin waits** (the manifest's `obs` and `spin` rows): registered in hle.c's gate table at the guest address of the observed
   instruction and of each valid back-edge, with the number and parameter or the head Apple's `gates.tsv` gives, and dispatched by `dm_aot_gate(st,
-  pc)` (aot_run.c: `gate_dispatch` over the block's registers, which an observer may change). nxaot's packs (ABI 2) do not call it yet: the lifter's
-  call of design 1.1 and gate sites in the pack's tables are still to come, and until then a module with such rows gets a [RED] line at load (its observers, among them
-  `OBS_STDALLOC_INIT`, which caps StandardAllocator's address space, and the spin waits' back-off, do not run).
+  pc)` (aot_run.c: `gate_dispatch` over the block's registers, which an observer may change), which the pack's code reaches through
+  `nxaot_rt_gate` ("Calls and returns", Gates). Once the pack is loaded, load_modules checks the manifest's rows against the gate sites its
+  descriptor lists (aot_arena.c `dm_aot_pack_check_gates`): a site no row names refuses the pack (one of another manifest), a row the pack does not
+  serve (no discovered function holds it; nxaot build says so too) is a [RED] line each, its observer or back-off not running; then
+  `aot: <module>: N gates (... observation gates, ... spin wait back-edges) called by its pack, M not`.
+- **The frame step's aux region**: the stubs run as compiled code of the functions whose sites branch to them ("Calls and returns", The aux
+  region), reading and writing the state page at `FPS_STATE_OFF` as on Apple.
 - **Guest memory and the graphics backend** (hle_svc.c, docs/design/vulkan-backend.md 4.2): SetHeapSize growing, MapMemory's destination and
   MapPhysicalMemory call `be_guest_map` with the host range they opened, after opening it; SetHeapSize shrinking and UnmapPhysicalMemory call
   `be_guest_unmap` with the range they are about to close, while it is still accessible, so an import of it goes first. UnmapMemory leaves its pages
@@ -642,12 +683,18 @@ What a game's module needs from dm/host on x86-64 beside the run time above, wri
   do not call them there. `t_guest_map` (28 checks) records every call through a stub backend on t_svc_memory's small layout.
 
 `t_aot_module` ([dm/host/tests/t_aot_module.c](../../host/tests/t_aot_module.c)) runs the synthetic module of [aot_synth.py](../tests/aot_synth.py)
-through this path, packed by [tests/build_packs.sh](tests/build_packs.sh) into `<packs>/module`: 24 checks in the run (the GOT's two slots, the
-relocated pointer, the image's permissions, the build ID, the state page, both gates through `dm_aot_gate`, then `dm_aot_run` from the entry: the host
-function through the GOT and the dispatcher, the stub, SetHeapSize reaching `be_guest_map` with the heap's range, both x18 jump tables, the exclusive
-window, the spin wait, the cut function, a relocated pointer, OutputDebugString and ExitProcess, with `results[]` as expected), and two refusals (an
-image that is not its manifest's, the pack of another image), each with a [RED] line naming both SHA-256s. It shows the input path and the binding
-on a module made for the purpose: not a real NSO, not a game's size or imports, and no pack calls a gate yet.
+through this path, packed by [tests/build_packs.sh](tests/build_packs.sh) into `<packs>/module`: 30 checks in the run (the GOT's two slots, the
+relocated pointer, the image's permissions, the build ID, the state page, both gates through `dm_aot_gate`, the pack's gate sites, then `dm_aot_run`
+from the entry: the host function through the GOT and the dispatcher, the stub, SetHeapSize reaching `be_guest_map` with the heap's range, both x18
+jump tables, the exclusive window, the spin wait, the observed function twice, the cut function, the frame step's function through its stub, a
+relocated pointer, OutputDebugString and ExitProcess, with `results[]` as expected), and the pack's own gate calls: the observer runs before the
+observed instruction with x0 (41, then 1), x19 and x30 as the guest has them there and the row's parameter, and the x0 + 1000 it writes is what the
+instruction reads (results 1042 and 1002); the spin wait's flag is 0 for the run, so the loop spins, its back-edge reaching the host's back-off
+(hundreds to thousands of times) until a host thread sets the flag after three; the frame step's stub ran once (it counts at state +0x30). Then 7
+checks in the parent: the loader's gate line, the fault probe (its pointer set to the arena's first page: the report must say `guest instruction
+main+0xc8`, the probe's load, exactly), and two refusals (an image that is not its manifest's, the pack of another image), each with a [RED] line
+naming both SHA-256s. It shows the input path, the binding and the gates on a module made for the purpose: not a real NSO, not a game's size, imports,
+observers or spin waits.
 
 ## Floating point and SIMD
 
@@ -988,10 +1035,10 @@ the unit only, so the number of workers changes nothing in the pack; the objects
 the link. `--workers 0` (the default) takes one worker per CPU this process may run on (`sched_getaffinity`), at most one per 512 MiB of
 `MemAvailable` (the whole pack stays under 240 MiB with 8 workers at tier W on the benchmark, under 600 MiB in the max mode: below).
 
-Packs are deterministic but for one section: LLVM 18 writes the `!pcsections` groups of a function in the order of a `DenseMap` keyed by
-metadata pointers (`AsmPrinter::emitPCSections`), so two compilations of the same unit can order `nxaot_lines` differently (the baseline's packs
-of the corpus differed there too from one run to the next, and nowhere else). A warm repack reuses the cached objects and is byte for byte the
-cold pack.
+Packs are deterministic: LLVM 18 writes the `!pcsections` groups of a function in the order of a `DenseMap` keyed by metadata pointers
+(`AsmPrinter::emitPCSections`), so two compilations of the same unit can order its marks' section differently, but that section stays out of the
+link (`SHF_EXCLUDE`) and the pack's line table is nxaot's, sorted ("Calls and returns"): two cold packs of switch-gcc are the same but for the
+soname (checked after ABI 3; before it they differed in `nxaot_lines`). A warm repack reuses the cached objects and is byte for byte the cold pack.
 
 The speedup (best of 3 per worker count by the whole pack's time; discovery's jump tables run on as many threads as there are workers):
 
@@ -1091,14 +1138,14 @@ per core and the analysis's are the gap; phase 5b's items below close it.
   and the tool's, or per function as the objects are) is what a warm repack within a minute needs.
 - **One process per module**: dynarmic's decoder table costs 60 to 70 ms per process; FINAL FANTASY X/X-2's 1,432 NROs packed one process each
   would pay it 1,432 times (one pack for every module, phase 4's list, removes it).
-- **Found, not fixed here, open**: (1) the line table's entries are not {native, offset} pairs whenever several machine instructions share one
-  guest access's metadata node (a guest `ldp`, a loop rotated or duplicated by LLVM): LLVM writes such a group as all its addresses and then the
-  offset once (`AsmPrinter::emitPCSections`), and both readers (src/rt/host.cpp, dm/host/aot_arena.c) take 8-byte pairs, so every entry after
-  the first group is read out of step: in the baseline's packs 246 of fnptr-gcc's 415 entries and 8,812 of switch-gcc's 24,293 name an address
-  outside the library's code or an offset outside the module's text. Fault reports that go through it name wrong guest instructions; the
-  readers need to parse the groups (dm/host is outside this change), or the table another emission. (2) LLVM 18 orders those groups by pointer
-  hash: two compilations of a unit can order `nxaot_lines` differently (the rest is byte for byte the same). (3) Discovery does not bound a
-  table index computed from several values (above).
+- **Found here, fixed since (ABI 3)**: (1) the line table's entries were not {native, offset} pairs whenever several machine instructions share
+  one guest access's metadata node (a guest `ldp`, dc zva's stores, a loop rotated or duplicated by LLVM): LLVM writes such a group as all its
+  addresses and then the offset once (`AsmPrinter::emitPCSections`), and both readers took 8-byte pairs: 246 of fnptr-gcc's 415 entries and 8,812
+  of switch-gcc's 24,293 named an address outside the library's code or an offset outside the module's text. nxaot now reads the groups back from
+  each unit's object by their relocations and writes a table of its own ("Calls and returns"); CTest `lines` checks every entry (fnptr-gcc now
+  487 entries, switch-gcc 24,378, all at instructions of their function's code and at loads and stores of its guest code). (2) LLVM 18 orders
+  those groups by pointer hash: the marks' section is now kept out of the link, and the packs are deterministic. **Open**: (3) discovery does
+  not bound a table index computed from several values (above).
 
 ## The lock file
 
@@ -1255,4 +1302,4 @@ The phases of design section 14, and where this folder stands:
 | 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | **done** except what follows: the lifter (0 mismatches over 24,400 integer vectors), the module loader, discovery, the summaries; function mode with the convention of 2.3 in two LLVM mappings (swifttailcc, the default by the measurements, and ghccc for preserve_none, which LLVM 18.1 lacks), calls, returns checked against lr, tail calls, `pending` propagation with resume points at setjmp continuations and landing pads, the correctness mode; jump tables as switches, inline caches, standard entries, the lookup table, the miss path; `nxaot build` (tiers C, W, H, H+; the balanced and max modes; an object with the lookup table, function map and line table, a shared object by lld); `nxaot_host` (the arena below 2^39, the SVC path, the counter, faults through the line table); the corpus natively in both conventions and the correctness mode, equal to dynarmic and to the expected output; nxaot_funcdiff on every corpus function; the measurements ("Measurements"). Not done: the corpus natively on ARM64 hardware (an Apple-silicon Mac), one tier per function and profiles (phase 5), ThinLTO, functions split for size, the oracle-T / J / W comparisons, the pack throughput targets of section 10 (not met: "Pack throughput") |
 | 2. FP and SIMD | every FP, NEON and crypto lowering, NaN chains | every opcode the A64 frontend emits lowered; 0 mismatches over the committed vectors and 7,000,000 random floating-point and SIMD ones (10^6 per class for seven of the eight classes, `fp_seq` not completed; not the 10^8 of the acceptance); the chain checks measured. Not done: the row-13 FZ slow path for the basic operations, inline estimates, combined escape checks, the run-time helpers in the host |
 | 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | **done** except what follows: the JIT fallback on dynarmic unmodified (`dm_jit_create` / `dm_jit_run` / `dm_jit_halt`, design 11's configuration, the stops at compiled entries and call sites' returns through the code reader, the hand-over measured), every case of section 11 handed to it (the dispatcher's misses, branches to no entry, FPCR away from the specialisation, untranslated encodings, code that runs into no entry, refused functions, continuations with no native frame), the driver that calls compiled entries natively and propagates non-local transfers; C++ exceptions through LSDA landing pads with a personality-free unwinder, fibers and a return past the caller in the corpus; guest threads with the thread and synchronization SVCs, per-thread state blocks, native stacks and JIT instances, the shared monitor; safepoint polls and the pause protocol with the pause test; the three JIT modes, the threads and the pause test in CTest. The acceptance: the exception, longjmp and thread corpus passes natively, in the JIT and with no JIT where none is needed; `--jit-all` and the compiled runs print the same lines; the pause test passes (CTest `corpus_jit`, `corpus_threads`, `safepoints`). dm/host's side done for the corpus (`dm/host/aot_*.c`, CTest `t_aot_host`; its open items are in the list at the end of "Threads and safepoints"). Not done: the exactness of a JIT target's callee-saved registers is assumed (a compiled caller keeps what the union of address-taken functions preserves across an indirect call); the corpus has no untranslated encoding, no refused function and no run-off into a non-entry (those hand-overs are built and not run); priority and core of threads (FIFO order, no affinity), Horizon's other synchronization objects in this run time (events, condition variables: SignalProcessWideKey / WaitProcessWideKeyAtomic; dm/host's thread layer has them); the discovery gap except-gcc shows (a halfword jump table whose base is set before its loop) |
-| 4. to 6. | games on the Intel Mac, performance, breadth | phase 5's first half, pack throughput, done ("Pack throughput": the stages measured and logged, the analysis's causes fixed, compile units on workers, the per-function cache; section 10's targets extrapolated and not met; what is left is phase 5b's); the rest not started. Prepared for phase 4: the host's run time of packs (dm/host/aot_*.c; Linux checked by `t_aot_host`, Windows written and not run, the Intel Mac not built: the aot files are CMake's, and aot_fault.c reads Linux's signal context). Phase 4's first half, without a game ("A game module in the host"): `patch_nso.py --aot` with its manifest checked against nxaot's reader and discovery, the loader's game-module path (manifest, image, gates, packs), NSO decompression on that path (the rewriter's, as for Apple: nothing in the host), host functions and unimplemented imports bound into a module's GOT, `be_guest_map` / `be_guest_unmap` from the memory SVCs; CTest `t_aot_module` and `t_guest_map`. Still to come for a first game module: the lifter's calls of the observation gates and spin waits (design 1.1), the frame step's aux region lifted, NROs on the game-module path, thunks for hle_table.c's libc passthrough, one pack for every module or a common standard-entry signature (cross-pack calls go through `enter` now), main.c's start sequence through `dm_guest_call`, a host program for x86-64, Boost in the host's image for the JIT fallback |
+| 4. to 6. | games on the Intel Mac, performance, breadth | phase 5's first half, pack throughput, done ("Pack throughput": the stages measured and logged, the analysis's causes fixed, compile units on workers, the per-function cache; section 10's targets extrapolated and not met; what is left is phase 5b's); the rest not started. Prepared for phase 4: the host's run time of packs (dm/host/aot_*.c; Linux checked by `t_aot_host`, Windows written and not run, the Intel Mac not built: the aot files are CMake's, and aot_fault.c reads Linux's signal context). Phase 4's first half, without a game ("A game module in the host"): `patch_nso.py --aot` with its manifest checked against nxaot's reader and discovery, the loader's game-module path (manifest, image, gates, packs), NSO decompression on that path (the rewriter's, as for Apple: nothing in the host), host functions and unimplemented imports bound into a module's GOT, `be_guest_map` / `be_guest_unmap` from the memory SVCs; CTest `t_aot_module` and `t_guest_map`. Done since, in nxaot (ABI 3): the lifter's calls of the observation gates and spin waits (design 1.1; the descriptor's gate sites, checked by the host against the manifest's rows), the frame step's aux region lifted as code of the functions that branch into it, the standard entries' common signature (calls between packs bound in inline caches, no JIT hand-over), the line table nxaot's own and read correctly by both readers (CTest `lines`). Still to come for a first game module: NROs on the game-module path, thunks for hle_table.c's libc passthrough, main.c's start sequence through `dm_guest_call`, a host program for x86-64, Boost in the host's image for the JIT fallback (some of these are the host's and done since there: docs/design/migration-status.md) |

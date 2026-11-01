@@ -2,16 +2,17 @@
 // (include/nxaot/aot_module.h), dm_guest_call with the outermost level of a guest thread, and process stop.
 //   dm_aot_svc          svc #n: the block holds the whole register file; svc_dispatch (hle_svc.c) answers on st->x as on the gate frame on Apple, between
 //                       thr_svc_enter / thr_svc_leave (hle_thread.c: a thread paused inside an SVC); svcExitProcess stops the process
-//   nxaot_rt_dispatch   an inline-cache miss: the lookup table of the pack that holds the target (a descriptor published in the site's slot), else the
-//                       caller pack's jit_entry with the target in st->pc: the host-function page (a host call), another pack's entry, or the JIT fallback
+//   nxaot_rt_dispatch   an inline-cache miss: the lookup table of the pack that holds the target, the caller's or another of the same standard-entry signature (ABI 3:
+//                       a descriptor published in the site's slot, so the next call goes there directly), else the caller pack's jit_entry with the target in
+//                       st->pc: the host-function page (a host call), another pack of another signature (its enter), or the JIT fallback
 //   nxaot_rt_jit        what compiled code hands over (jit_entry's call, msr fpcr, untranslated encodings, refused functions): host calls, compiled entries
 //                       called natively through the pack's enter trampoline, non-local transfers propagated (3.3), the rest in the JIT (dynarmic, NXHOST_JIT)
 //                       or, without it, a [RED] line per address and a process stop with status DM_AOT_JIT_NEEDED
 //   nxaot_rt_trap       brk, undefined encodings, a no-return call that returned: a [RED] line and a process stop
 //   nxaot_rt_safepoint  a poll found the poll byte set (6.2): the pause of SetThreadActivity (hle_thread.c), or a process stop
 //   dm_aot_cntpct       mrs cntpct_el0 / cntvct_el0 (8): the guest clock in 19.2 MHz ticks, as svcGetSystemTick and Apple's counter gate read it
-//   dm_aot_gate         a manifest's observation gate or spin wait back-edge (loader.c registers them in hle.c's gate table): the lifter's call of design 1.1, which no
-//                       pack makes yet
+//   nxaot_rt_gate       the lifter's call of design 1.1 at a gate site of the pack's descriptor: dm_aot_gate at its guest address
+//   dm_aot_gate         a manifest's observation gate or spin wait back-edge (loader.c registers them in hle.c's gate table): the observer, or the back-off as an SVC frame
 // dm_guest_call nests: a host function guest code called may call guest code again on the same thread (aot.h), each level a base of its own that guest code leaving
 // returns through, the host call around it leaving in turn (host_call). dm_gcall is the form the host's plain-pointer call sites use (aot.h DM_GUEST_CALL)
 // A call to the stub page (aot.h: an import nothing implements) is answered as a host call is, by hle.c's unimpl_c
@@ -33,7 +34,7 @@ void thr_svc_leave(void);
 // Why compiled code handed a continuation to nxaot_rt_jit, besides the NXAOT_TRAP_* reasons: host-private values of st->exit_reason
 enum { REASON_HOSTCALL = 0x100, REASON_CROSS = 0x101 };
 
-static _Atomic uint64_t c_svcs, c_host_calls, c_misses, c_cross, c_safepoints, c_jit_runs;
+static _Atomic uint64_t c_svcs, c_host_calls, c_misses, c_cross, c_safepoints, c_jit_runs, c_cross_handovers, c_obs_gates, c_spin_gates;
 static _Atomic int g_stop = -1;   // the status of the process stop, -1 while running
 
 // ---------- Process stop and leaving guest code ----------
@@ -438,6 +439,7 @@ void dm_aot_stats(dm_aot_stats_t *o) {
     memset(o, 0, sizeof *o);
     o->svcs = atomic_load(&c_svcs); o->host_calls = atomic_load(&c_host_calls); o->misses = atomic_load(&c_misses); o->cross_pack = atomic_load(&c_cross);
     o->safepoints = atomic_load(&c_safepoints); o->jit_runs = atomic_load(&c_jit_runs); o->threads = dm_aot_threads_made();
+    o->cross_pack_handovers = atomic_load(&c_cross_handovers); o->obs_gates = atomic_load(&c_obs_gates); o->spin_gates = atomic_load(&c_spin_gates);
     pthread_mutex_lock(&g_seen_lock); o->jit_addresses = (uint64_t)g_nseen; pthread_mutex_unlock(&g_seen_lock);
 }
 
@@ -480,20 +482,23 @@ static const nxaot_ic_desc *desc_for(uint64_t guest, const void *native) {
 
 DM_AOT_EXPORT void *nxaot_rt_dispatch(dm_guest_state *st, uint64_t target, const nxaot_ic_desc **slot, uint64_t site) {
     (void)site;
-    // The pack whose code missed: its jit_entry has the standard entries' signature its call sites use (another pack's standard entries may take other
-    // registers in host registers, so a call into another pack goes through enter, from nxaot_rt_jit)
+    // The pack whose code missed: its call sites pass the standard entries' signature its descriptor records (std_x, std_v, rv: ABI 3)
     const dm_aot_pack *caller = dm_aot_pack_of_code((uint64_t)(uintptr_t)__builtin_return_address(0));
     if (!caller) die("aot: a dispatcher miss from outside every pack (return address %p)", __builtin_return_address(0));
     const dm_aot_pack *p = NULL;
     const nxaot_lookup_entry *e = dm_aot_find(target, &p);
-    if (e && p == caller) {
+    // A standard entry of the caller's pack, or of another pack with the same signature, convention and mode (a cross-pack call: an NRO's function from main, main's
+    // called back from the NRO): published in the site's slot, so the next call there enters it directly, with no host on the way
+    if (e && (p == caller || nxaot_same_std_abi(dm_aot_pack_desc(caller), dm_aot_pack_desc(p)))) {
         const void *native = dm_aot_entry_of(e);
         atomic_fetch_add_explicit(&c_misses, 1, memory_order_relaxed);
+        if (p != caller) atomic_fetch_add_explicit(&c_cross, 1, memory_order_relaxed);
         __atomic_store_n(slot, desc_for(target, native), __ATOMIC_RELEASE);
         return (void *)native;
     }
-    // No compiled entry in the caller's pack: jit_entry with the target in st->pc. The slot keeps its descriptor, so the next call misses again
-    if (e) atomic_fetch_add_explicit(&c_cross, 1, memory_order_relaxed);
+    // No standard entry the caller can call: jit_entry with the target in st->pc (a host call; another pack's entry of another signature, through its enter; the JIT
+    // fallback). The slot keeps its descriptor, so the next call misses again
+    if (e) atomic_fetch_add_explicit(&c_cross_handovers, 1, memory_order_relaxed);
     st->pc = target;
     st->exit_reason = e ? REASON_CROSS : dm_aot_hostfn_name(target) || dm_aot_stub_index(target) >= 0 ? REASON_HOSTCALL : NXAOT_TRAP_JIT_MISS;
     return (void *)dm_aot_pack_jit_entry(caller);
@@ -532,4 +537,18 @@ DM_AOT_EXPORT uint64_t dm_aot_cntpct(dm_guest_state *st) {
 DM_AOT_EXPORT void dm_aot_gate(dm_guest_state *st, uint64_t pc) {
     uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);   // hle.c
     (void)gate_dispatch(pc, st->x);
+}
+
+// The lifter's call of design 1.1 (include/nxaot/aot_module.h): the gate site at module offset site of the pack whose code called (through its nxaot.gate wrapper, so the
+// return address lies in the pack's code). The block holds the whole register file and st->pc: an observer reads and may change x0..x29 (the code reloads them), the spin
+// back-off may sleep and be paused there as in an SVC (hle.c gate_dispatch). A process stop leaves at once
+DM_AOT_EXPORT void nxaot_rt_gate(dm_guest_state *st, uint64_t site) {
+    dm_aot_thread *t = (dm_aot_thread *)st;
+    const dm_aot_pack *p = dm_aot_pack_of_code((uint64_t)(uintptr_t)__builtin_return_address(0));
+    const nxaot_gate_site *g = p ? nxaot_gate_at(dm_aot_pack_desc(p), site) : NULL;
+    if (!g) die("[RED] aot: a gate call at module offset %#llx that no loaded pack's gate table lists (return address %p)", (unsigned long long)site, __builtin_return_address(0));
+    atomic_fetch_add_explicit(g->kind == NXAOT_GATE_OBS ? &c_obs_gates : &c_spin_gates, 1, memory_order_relaxed);
+    dm_aot_gate(st, dm_aot_pack_base(p) + site);
+    if (atomic_load(&t->exiting)) dm_aot_leave(DM_AOT_LEFT_EXIT);
+    check_stop(t);
 }

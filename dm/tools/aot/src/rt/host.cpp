@@ -372,14 +372,19 @@ std::unique_ptr<Host> Host::Create(const std::string& library, const module::Ima
         return nullptr;
     }
     *d.base = kModuleBase;
-    for (const nxaot_line_entry* e = d.lines; e && e < d.lines_end; ++e) {
-        h->lines.emplace_back(reinterpret_cast<uint64_t>(&e->native) + static_cast<int64_t>(e->native), e->offset);
-    }
-    std::sort(h->lines.begin(), h->lines.end());
+    // The function map and the line table (section 3.5; ABI 3: a run of {native - body, offset} per function), as absolute native addresses
     for (uint64_t i = 0; i < d.fn_count; ++i) {
         const nxaot_fn_entry& f = d.fns[i];
-        h->fn_by_native.emplace_back(reinterpret_cast<uint64_t>(&f.body) + static_cast<int64_t>(f.body), f.offset);
+        const uint64_t body = reinterpret_cast<uint64_t>(&f.body) + static_cast<int64_t>(f.body);
+        h->fn_by_native.emplace_back(body, f.offset);
+        if (d.fn_lines && d.lines) {
+            for (uint32_t k = 0; k < d.fn_lines[i].count; ++k) {
+                const nxaot_line_entry& e = d.lines[d.fn_lines[i].first + k];
+                h->lines.emplace_back(body + e.native, e.offset);
+            }
+        }
     }
+    std::sort(h->lines.begin(), h->lines.end());
     std::sort(h->fn_by_native.begin(), h->fn_by_native.end());
     for (const auto& [addr, size] : {std::pair{kStackBase, kStackSize}, std::pair{kTlsBase, kTlsSize}, std::pair{kScratchBase, kScratchSize}}) {
         if (mprotect(reinterpret_cast<void*>(addr), size, PROT_READ | PROT_WRITE) != 0) {
@@ -1493,6 +1498,13 @@ __attribute__((visibility("default"))) void nxaot_rt_jit(dm_guest_state* st, uin
 }
 
 __attribute__((visibility("default"))) void nxaot_rt_safepoint(dm_guest_state* st) {
+    nxaot::rt::g_run.host->Safepoint(st);
+}
+
+// Design 1.1: an observation gate or a spin wait's back-edge. This run time has no observers (dm/host's gate table, hle.c, has them) and runs only
+// the corpus, whose NROs have no gate rows: a gate here is a pause point like a safepoint, and its observer returns after one pass, as Apple's gate
+// returns with no callback attached
+__attribute__((visibility("default"))) void nxaot_rt_gate(dm_guest_state* st, uint64_t) {
     nxaot::rt::g_run.host->Safepoint(st);
 }
 

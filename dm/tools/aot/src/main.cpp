@@ -24,12 +24,20 @@
 //                                                     line table, descriptor: include/nxaot/aot_module.h) linked by lld into the shared object
 //                                                     nxaot_host loads (--shared) and / or one relocatable object (-o); prints the module's
 //                                                     numbers, the seconds of each stage and the cache's hits and misses
+//   nxaot lines <pack.so> <module.nro | name.aot.tsv> the line table of a pack against its code and its module (design 3.5; CTest lines): every
+//                                                     entry's native address must start an x86 instruction that accesses memory, inside the
+//                                                     body of its function, and its offset must name an A64 load, store or dc zva of that
+//                                                     function's code (discovery's blocks); exit 1 on a mismatch
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -48,7 +56,22 @@
 #include <llvm/Support/FileSystem.h>
 
 #include <llvm/IR/PassTimingInfo.h>
+#include <llvm/MC/MCAsmInfo.h>
+#include <llvm/MC/MCContext.h>
+#include <llvm/MC/MCDisassembler/MCDisassembler.h>
+#include <llvm/MC/MCInst.h>
+#include <llvm/MC/MCInstrInfo.h>
+#include <llvm/MC/MCRegisterInfo.h>
+#include <llvm/MC/MCSubtargetInfo.h>
+#include <llvm/MC/MCTargetOptions.h>
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/Object/ObjectFile.h>
 #include <llvm/Pass.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/TargetParser/Host.h>
+
+#include "nxaot/aot_module.h"
 
 namespace {
 
@@ -65,7 +88,8 @@ int Usage() {
                  "       nxaot build <module.nro | name.aot.tsv> [-o <object.o>] [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max]\n"
                  "                   [--tier C|W|H|H+] [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info]\n"
                  "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes]\n"
-                 "                   [--ir <file.ll>]\n");
+                 "                   [--ir <file.ll>]\n"
+                 "       nxaot lines <pack.so> <module.nro | name.aot.tsv>\n");
     return 2;
 }
 
@@ -637,7 +661,202 @@ int Build(int argc, char** argv) {
         std::printf(", spills %llu, reloads %llu", static_cast<unsigned long long>(s.spills), static_cast<unsigned long long>(s.reloads));
     }
     std::printf("\n");
+    std::printf("aot: line table %llu entries; gate sites %llu (design 1.1)\n", static_cast<unsigned long long>(s.line_entries),
+                static_cast<unsigned long long>(s.gate_sites));
     return s.refused ? 1 : 0;
+}
+
+// The line table of a pack (design 3.5, include/nxaot/aot_module.h) against the code it describes and the module it was compiled from (CTest
+// lines): read from the shared object's sections (.nxaot.fnmap, .nxaot.fnlines, .nxaot.lines: image-relative, so the file has them resolved), every
+// entry's native address decoded by LLVM's x86 disassembler from the start of its function's body (it must start an instruction), and its guest
+// offset checked against the module: an A64 load or store (the encoding group op0 = x1x0) or dc zva, in a block of the function the body compiles
+// (discovery), or of another function (inlined into it at tiers H and H+, counted apart). The entries of one guest instruction in one body are
+// every machine instruction LLVM made from its marked access (the selection DAG gives the IR instruction's !pcsections to every node it lowers it
+// to: a cmpxchg's lock cmpxchg and the setcc of its success, an address's and, ...): the accesses none of whose entries loads or stores are counted
+// and listed as notes (LLVM moved the mark off the memory instruction), not as errors of the table
+int Lines(int argc, char** argv) {
+    if (argc != 4) {
+        return Usage();
+    }
+    const std::string pack = argv[2];
+    const auto image = Load(argv[3]);
+    if (!image) {
+        return 1;
+    }
+    auto bin = llvm::object::ObjectFile::createObjectFile(pack);
+    if (!bin) {
+        std::printf("[RED] nxaot lines: %s: %s\n", pack.c_str(), llvm::toString(bin.takeError()).c_str());
+        return 1;
+    }
+    const llvm::object::ObjectFile& obj = *bin->getBinary();
+    struct Sec {
+        uint64_t addr = 0;
+        llvm::StringRef data;
+        bool found = false;
+    };
+    std::map<std::string, Sec> secs;
+    std::vector<Sec> code;
+    for (const llvm::object::SectionRef& s : obj.sections()) {
+        auto name = s.getName();
+        auto data = s.getContents();
+        if (!name || !data) {
+            if (!name) llvm::consumeError(name.takeError());
+            if (!data) llvm::consumeError(data.takeError());
+            continue;
+        }
+        const Sec x{s.getAddress(), *data, true};
+        secs[name->str()] = x;
+        if (s.isText()) code.push_back(x);
+    }
+    const Sec fnmap = secs[".nxaot.fnmap"], fnlines = secs[".nxaot.fnlines"], lines = secs[".nxaot.lines"];
+    if (!fnmap.found || !fnlines.found || !lines.found) {
+        std::printf("[RED] nxaot lines: %s has no line table (.nxaot.fnmap, .nxaot.fnlines and .nxaot.lines)\n", pack.c_str());
+        return 1;
+    }
+    const size_t nfn = fnmap.data.size() / sizeof(nxaot_fn_entry), nlines = lines.data.size() / sizeof(nxaot_line_entry);
+    if (fnlines.data.size() != nfn * sizeof(nxaot_fn_lines)) {
+        std::printf("[RED] nxaot lines: %s: %zu functions in the map, %zu runs of lines\n", pack.c_str(), nfn, fnlines.data.size() / sizeof(nxaot_fn_lines));
+        return 1;
+    }
+    const nxaot::analysis::Discovery d = nxaot::analysis::Discover(*image);
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetDisassembler();
+    const std::string triple = llvm::sys::getProcessTriple();
+    std::string err;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, err);
+    if (!target) {
+        std::printf("[RED] nxaot lines: %s\n", err.c_str());
+        return 1;
+    }
+    std::unique_ptr<llvm::MCRegisterInfo> mri(target->createMCRegInfo(triple));
+    llvm::MCTargetOptions mopts;
+    std::unique_ptr<llvm::MCAsmInfo> mai(target->createMCAsmInfo(*mri, triple, mopts));
+    std::unique_ptr<llvm::MCSubtargetInfo> sti(target->createMCSubtargetInfo(triple, llvm::sys::getHostCPUName(), ""));
+    std::unique_ptr<llvm::MCInstrInfo> mii(target->createMCInstrInfo());
+    llvm::MCContext mctx(llvm::Triple(triple), mai.get(), mri.get(), sti.get());
+    std::unique_ptr<llvm::MCDisassembler> dis(target->createMCDisassembler(*sti, mctx));
+    if (!dis) {
+        std::printf("[RED] nxaot lines: no x86 disassembler in this LLVM\n");
+        return 1;
+    }
+    const auto code_at = [&](uint64_t a) -> llvm::ArrayRef<uint8_t> {
+        for (const Sec& s : code) {
+            if (a >= s.addr && a - s.addr < s.data.size()) {
+                return llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t*>(s.data.data()) + (a - s.addr), s.data.size() - (a - s.addr));
+            }
+        }
+        return {};
+    };
+    const auto in_blocks = [](const nxaot::analysis::Function& f, uint64_t off) {
+        auto it = f.blocks.upper_bound(off);
+        if (it == f.blocks.begin()) return false;
+        --it;
+        return off >= it->second.start && off < it->second.end;
+    };
+    uint64_t checked = 0, bad = 0, bad_entries = 0, inlined = 0, with_lines = 0, accesses = 0, memory = 0;
+    const auto report = [&](const std::string& what) {
+        if (++bad <= 20) std::printf("[RED] nxaot lines: %s\n", what.c_str());
+        bad_entries += what.rfind("entry ", 0) == 0;
+    };
+    // Whether the instruction at an address loads or stores: a prefix the disassembler gives as an instruction of its own (lock) is part of the next
+    const auto accesses_memory = [&](uint64_t a, const llvm::MCInst& first, uint64_t first_size) {
+        llvm::MCInst inst = first;
+        uint64_t size = first_size;
+        for (int k = 0; k < 4; ++k) {
+            const llvm::MCInstrDesc& desc = mii->get(inst.getOpcode());
+            if (desc.mayLoad() || desc.mayStore()) return true;
+            if (!llvm::StringRef(mii->getName(inst.getOpcode())).ends_with("_PREFIX")) return false;
+            a += size;
+            const llvm::ArrayRef<uint8_t> bytes = code_at(a);
+            if (bytes.empty() || dis->getInstruction(inst, size, bytes, a, llvm::nulls()) != llvm::MCDisassembler::Success) return false;
+        }
+        return false;
+    };
+    for (size_t i = 0; i < nfn; ++i) {
+        nxaot_fn_entry fe;
+        nxaot_fn_lines fl;
+        std::memcpy(&fe, fnmap.data.data() + i * sizeof fe, sizeof fe);
+        std::memcpy(&fl, fnlines.data.data() + i * sizeof fl, sizeof fl);
+        const uint64_t body = fnmap.addr + i * sizeof fe + offsetof(nxaot_fn_entry, body) + static_cast<uint64_t>(static_cast<int64_t>(fe.body));
+        if (static_cast<uint64_t>(fl.first) + fl.count > nlines) {
+            report("the function at " + X(fe.offset) + " names lines past the table's end");
+            continue;
+        }
+        with_lines += fl.count != 0;
+        const auto f = d.functions.find(fe.offset);
+        uint64_t pc = body;
+        llvm::MCInst inst;
+        uint64_t inst_size = 0;
+        uint32_t last = 0;
+        std::map<uint32_t, bool> loads_or_stores;  // per guest offset of the body: whether one of its entries' instructions loads or stores
+        std::map<uint32_t, std::string> names;     // and its entries' instructions, for the report
+        for (uint32_t k = 0; k < fl.count; ++k) {
+            nxaot_line_entry e;
+            std::memcpy(&e, lines.data.data() + (static_cast<size_t>(fl.first) + k) * sizeof e, sizeof e);
+            ++checked;
+            const std::string at = "entry " + std::to_string(fl.first + k) + " (function " + X(fe.offset) + ", native body+" + X(e.native) +
+                                   ", guest " + X(e.offset) + ")";
+            if (k && e.native < last) {
+                report(at + ": the function's run is not sorted by native address");
+                continue;
+            }
+            last = e.native;
+            // The native side: an instruction starts there (decoded from the body's start on), and it loads or stores
+            const uint64_t want = body + e.native;
+            bool boundary = false;
+            while (pc <= want) {
+                const llvm::ArrayRef<uint8_t> bytes = code_at(pc);
+                uint64_t size = 0;
+                if (bytes.empty() || dis->getInstruction(inst, size, bytes, pc, llvm::nulls()) != llvm::MCDisassembler::Success || !size) {
+                    break;
+                }
+                if (pc == want) {
+                    boundary = true;
+                    inst_size = size;
+                    break;
+                }
+                pc += size;
+            }
+            if (!boundary) {
+                report(at + ": " + X(want) + " starts no instruction of the function's code");
+                continue;
+            }
+            loads_or_stores[e.offset] = loads_or_stores[e.offset] || accesses_memory(want, inst, inst_size);
+            names[e.offset] += " " + std::string(mii->getName(inst.getOpcode())) + "@" + X(want);
+            // The guest side: a load, store or dc zva of the function's code
+            const auto w = image->InCode(e.offset) ? image->Word(e.offset) : std::nullopt;
+            if (!w || !((*w & 0x0A000000u) == 0x08000000u || (*w & 0xFFFFFFE0u) == 0xD50B7420u)) {
+                report(at + ": the guest word there (" + (w ? X(*w) : std::string("none")) + ") is no load, store or dc zva");
+                continue;
+            }
+            if (f == d.functions.end() || !in_blocks(f->second, e.offset)) {
+                const bool elsewhere = std::any_of(d.functions.begin(), d.functions.end(), [&](const auto& g) { return in_blocks(g.second, e.offset); });
+                if (!elsewhere) {
+                    report(at + ": the guest instruction is in no function's code");
+                    continue;
+                }
+                ++inlined;
+            }
+        }
+        for (const auto& [offset, mem] : loads_or_stores) {
+            ++accesses;
+            memory += mem;
+            if (!mem && accesses - memory <= 20) {
+                // LLVM's code generation moved the access's mark off its memory instruction (a load folded into the instruction that uses it, unfolded
+                // again later: the unfolded load has no mark, and the mark is on an instruction made from the same node). A fault at that load is then
+                // reported at the nearest entry before it, which says so: counted, not an error of the table
+                const auto w = image->Word(offset);
+                std::printf("nxaot lines: note: the function at %s, guest instruction %s (%s): no entry of the access is an x86 load or store:%s\n",
+                            X(fe.offset).c_str(), X(offset).c_str(), w ? X(*w).c_str() : "?", names[offset].c_str());
+            }
+        }
+    }
+    std::printf("nxaot lines %s: %llu entries in %llu of %zu functions; %llu at loads and stores of their own function's code, %llu of a function "
+                "inlined into it; %llu bad; %llu guest accesses, %llu with an x86 load or store among their entries\n",
+                pack.c_str(), static_cast<unsigned long long>(checked), static_cast<unsigned long long>(with_lines), nfn,
+                static_cast<unsigned long long>(checked - bad_entries - inlined), static_cast<unsigned long long>(inlined), static_cast<unsigned long long>(bad),
+                static_cast<unsigned long long>(accesses), static_cast<unsigned long long>(memory));
+    return bad || checked == 0 ? 1 : 0;
 }
 
 }  // namespace
@@ -649,6 +868,9 @@ int main(int argc, char** argv) {
     const std::string cmd = argv[1];
     if (cmd == "build") {
         return Build(argc, argv);
+    }
+    if (cmd == "lines") {
+        return Lines(argc, argv);
     }
     if (cmd == "plan") {
         return PlanCmd(argc, argv);

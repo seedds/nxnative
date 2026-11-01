@@ -45,6 +45,11 @@ public:
             const uint64_t pc = img.text_off + 4 * i;
             insns[i] = ClassifyWord(*img.Word(pc), pc);
         }
+        aux_insns.resize(img.aux_size / 4);
+        for (size_t i = 0; i < aux_insns.size(); ++i) {
+            const uint64_t pc = img.aux_off + 4 * i;
+            aux_insns[i] = ClassifyWord(*img.Word(pc), pc);
+        }
     }
 
     Discovery Run() {
@@ -114,15 +119,21 @@ private:
     }
 
     // ---- Helpers ----
-    bool Code(uint64_t pc) const { return img.InText(pc) && !(pc & 3) && !img.InData(pc); }
-    const Insn& At(uint64_t pc) const { return insns[(pc - img.text_off) / 4]; }
-    bool Inside(const Function& f, uint64_t pc) const { return pc >= f.entry && pc < f.limit && Code(pc); }
+    // Code: the text outside its data blocks (TextCode), and the aux region of a behaviour image (AuxCode: the frame step's stubs, design 1.1).
+    // Functions start in the text only. The aux region is reached by the branches the cuts put into the text (a stub's entry) and leaves by its
+    // own branches back: its blocks belong to every function whose walk reaches them (Inside), so a stub and the code around its site are one
+    // function, as on Apple, where the stub is patch-area code between two instructions of that function
+    bool TextCode(uint64_t pc) const { return img.InText(pc) && !(pc & 3) && !img.InData(pc); }
+    bool AuxCode(uint64_t pc) const { return img.InAux(pc) && !(pc & 3); }
+    bool Code(uint64_t pc) const { return TextCode(pc) || AuxCode(pc); }
+    const Insn& At(uint64_t pc) const { return AuxCode(pc) ? aux_insns[(pc - img.aux_off) / 4] : insns[(pc - img.text_off) / 4]; }
+    bool Inside(const Function& f, uint64_t pc) const { return (pc >= f.entry && pc < f.limit && TextCode(pc)) || AuxCode(pc); }
     // A jump-table target: a decoded instruction of the function, or the entry of another function (a computed tail call: a table of pointers)
     bool ValidTarget(const Function& f, uint64_t t) const { return Code(t) && At(t).kind != Kind::Undefined && (Inside(f, t) || fns.count(t)); }
 
     bool AddEntry(uint64_t pc, uint32_t prov) {
-        if (!Code(pc)) {
-            return false;
+        if (!TextCode(pc)) {
+            return false;  // the aux region's code is part of the functions that reach it
         }
         auto [it, inserted] = fns.try_emplace(pc);
         it->second.entry = pc;
@@ -153,7 +164,7 @@ private:
         AddEntry(img.text_off, kProvStart);
         for (size_t i = 0; i < img.fdes.size(); ++i) {
             const auto& fde = img.fdes[i];
-            if (!Code(fde.start)) {
+            if (!TextCode(fde.start)) {
                 out.notes.push_back("[RED] discover: the FDE at " + Hex(fde.offset) + " starts at " + Hex(fde.start) + ", not an instruction of the text");
                 continue;
             }
@@ -288,7 +299,14 @@ private:
                 }
             }
         }
-        f.end = covered.empty() ? f.entry : *covered.rbegin() + 4;
+        // The end of its text: the aux region's blocks lie past the data, outside the function's own range
+        f.end = f.entry;
+        for (auto it = covered.rbegin(); it != covered.rend(); ++it) {
+            if (TextCode(*it)) {
+                f.end = *it + 4;
+                break;
+            }
+        }
         // adr and adrp + add that build text addresses, per block (an adrp's page is forgotten when its register is written)
         for (const auto& [start, b] : f.blocks) {
             uint64_t page[32];
@@ -671,7 +689,7 @@ private:
     bool Addresses() {
         bool added = false;
         for (const auto& [t, pc] : refs) {
-            if (!Code(t)) continue;
+            if (!TextCode(t)) continue;
             if (fns.count(t)) {
                 fns[t].prov |= kProvAdr;
                 continue;
@@ -717,6 +735,7 @@ private:
         std::vector<bool> covered(insns.size());
         for (const auto& [entry, f] : fns) {
             for (const auto& [start, b] : f.blocks) {
+                if (!img.InText(b.start)) continue;  // the aux region's blocks
                 for (uint64_t pc = b.start; pc < b.end; pc += 4) covered[(pc - img.text_off) / 4] = true;
             }
         }
@@ -776,6 +795,7 @@ private:
         for (const auto& [entry, f] : fns) {
             c.undefined += f.undefined;
             for (const auto& [start, b] : f.blocks) {
+                if (!img.InText(b.start)) continue;  // the aux region's blocks: not text
                 for (uint64_t pc = b.start; pc < b.end; pc += 4) covered[(pc - img.text_off) / 4] = true;
             }
         }
@@ -816,6 +836,7 @@ private:
     Discovery out;
     std::map<uint64_t, Function>& fns = out.functions;
     std::vector<Insn> insns;
+    std::vector<Insn> aux_insns;           // the aux region's words (Image::aux_off)
     std::set<uint64_t> dirty;
     bool limits_stale = false;
     std::map<uint64_t, uint32_t> pending;  // entries code names: bl and tail-call targets, landing pads and table targets outside

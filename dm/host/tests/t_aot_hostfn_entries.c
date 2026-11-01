@@ -40,6 +40,15 @@ static void body(void *arg) {
     g_body.handle = thr_cur_handle();
     g_body.r = dm_guest_call(dm_aot_self_state(), (uint64_t)(uintptr_t)guest_sym("synth_triple"), 1, g_body.x);
 }
+// The cross-pack loop's marks (aot_synth.py HF_CROSS_PASSES): the engine's counters after its first pass (0) and after its last (1), so that the test sees what the passes after
+// the warm-up cost the dispatcher: nothing, the inline caches calling the other pack's standard entries directly (ABI 3)
+dm_aot_stats_t g_t_hf_mark[2];
+_Atomic int g_t_hf_marks;
+HLE("t_hf_mark", void, t_hf_mark, uint64_t phase) {
+    dm_aot_stats(&g_t_hf_mark[phase & 1]);
+    g_t_hf_marks++;
+}
+
 HLE("t_hf_spawn", uint64_t, t_hf_spawn, uint64_t x) {
     g_body.x = x;
     void *tt = dm_guest_thread_spawn(body, NULL, 44, 0x10000);

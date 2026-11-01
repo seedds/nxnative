@@ -571,6 +571,16 @@ std::optional<Image> LoadModule(const std::string& path, std::string* error) {
         for (const auto& r : manifest->data) {
             m.data_blocks.push_back({r.lo, r.hi, "manifest"});
         }
+        if (manifest->aux && manifest->aux->length) {
+            // The frame step's stub region (design 1.1): code after the image's data, whole instructions inside the image
+            const auto& a = *manifest->aux;
+            if ((a.offset & 3) || (a.length & 3) || a.offset < l.data_off || !m.InImage(a.offset, a.length)) {
+                *error = path + ": the aux row " + X(a.offset) + " +" + X(a.length) + " is no run of instructions in the image after its data";
+                return std::nullopt;
+            }
+            m.aux_off = a.offset;
+            m.aux_size = a.length;
+        }
         m.manifest = std::move(manifest);
         ParseModule(m);
     } else {

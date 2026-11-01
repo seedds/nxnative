@@ -591,20 +591,23 @@ dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identi
     p->base = (uint64_t)(uintptr_t)m->base; p->size = round_up(id->image_size + id->bss_size, page()); p->text_end = id->text_end;
     snprintf(p->name, sizeof p->name, "%s", m->name);
     *d->base = p->base;   // 3.3: return addresses and every pc-built address are base + module offset
-    // The function map and the line table (3.5), image-relative in the library, as absolute native addresses sorted for the fault reports
+    // The function map and the line table (3.5; ABI 3: per function a run of {native - body, guest offset}), image-relative in the library, as absolute native
+    // addresses sorted for the fault reports
     p->nfns = (size_t)d->fn_count;
     p->fns = malloc((p->nfns ? p->nfns : 1) * sizeof *p->fns);
-    for (size_t i = 0; i < p->nfns; i++) {
-        const nxaot_fn_entry *f = &d->fns[i];
-        p->fns[i] = (map_t){(uint64_t)(uintptr_t)&f->body + (uint64_t)(int64_t)f->body, f->offset};
-    }
-    p->nlines = d->lines && d->lines_end > d->lines ? (size_t)(d->lines_end - d->lines) : 0;
+    p->nlines = 0;
+    for (size_t i = 0; d->fn_lines && d->lines && i < p->nfns; i++) p->nlines += d->fn_lines[i].count;
     p->lines = malloc((p->nlines ? p->nlines : 1) * sizeof *p->lines);
-    for (size_t i = 0; i < p->nlines; i++) {
-        const nxaot_line_entry *e = &d->lines[i];
-        p->lines[i] = (map_t){(uint64_t)(uintptr_t)&e->native + (uint64_t)(int64_t)e->native, e->offset};
-    }
     if (!p->fns || !p->lines) die("aot: no memory for a pack's tables");
+    for (size_t i = 0, k = 0; i < p->nfns; i++) {
+        const nxaot_fn_entry *f = &d->fns[i];
+        const uint64_t body = (uint64_t)(uintptr_t)&f->body + (uint64_t)(int64_t)f->body;
+        p->fns[i] = (map_t){body, f->offset};
+        for (uint32_t j = 0; d->fn_lines && d->lines && j < d->fn_lines[i].count; j++, k++) {
+            const nxaot_line_entry *e = &d->lines[d->fn_lines[i].first + j];
+            p->lines[k] = (map_t){body + e->native, e->offset};
+        }
+    }
     qsort(p->fns, p->nfns, sizeof *p->fns, map_cmp);
     qsort(p->lines, p->nlines, sizeof *p->lines, map_cmp);
     lib_code_range(p, &p->code_lo, &p->code_hi);
@@ -616,10 +619,39 @@ dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identi
     g_packs[n] = p;
     atomic_store_explicit(&g_npacks, n + 1, memory_order_release);
     pthread_mutex_unlock(&g_pack_lock);
-    LOG("aot: pack %s for %s at %p: %llu functions, %u lookup slots, %zu line entries, %llu returns, code %#llx..%#llx; %s", path, m->name, (void *)m->base,
-        (unsigned long long)d->fn_count, d->lookup_mask + 1, p->nlines, (unsigned long long)d->return_count, (unsigned long long)p->code_lo, (unsigned long long)p->code_hi,
-        d->tool ? d->tool : "");
+    LOG("aot: pack %s for %s at %p: %llu functions, %u lookup slots, %zu line entries, %llu returns, %llu gate sites, code %#llx..%#llx; %s", path, m->name,
+        (void *)m->base, (unsigned long long)d->fn_count, d->lookup_mask + 1, p->nlines, (unsigned long long)d->return_count, (unsigned long long)d->gate_count,
+        (unsigned long long)p->code_lo, (unsigned long long)p->code_hi, d->tool ? d->tool : "");
     return p;
+}
+
+int dm_aot_pack_check_gates(const module_t *m, const dm_aot_gate_row *rows, int n, int *unserved, char *err, size_t errn) {
+    const dm_aot_pack *p = NULL;
+    dm_aot_find((uint64_t)(uintptr_t)m->base, &p);
+    *unserved = 0;
+    if (!p) { snprintf(err, errn, "%s has no pack loaded", m->name); return 1; }
+    const nxaot_module_desc *d = p->desc;
+    // Every site of the pack's is a row of the manifest, with its kind and argument: the code calls the host there, and the gate table must hold the gate
+    for (uint64_t i = 0; i < d->gate_count; i++) {
+        const nxaot_gate_site *g = &d->gates[i];
+        int found = 0;
+        for (int k = 0; k < n && !found; k++) found = rows[k].offset == g->offset && rows[k].kind == g->kind && rows[k].arg == g->arg;
+        if (!found) {
+            snprintf(err, errn, "the pack of %s calls a gate at %s+%#x (%s, argument %#llx) that its manifest has no row for: a pack of another manifest", m->name, m->name,
+                     g->offset, g->kind == NXAOT_GATE_OBS ? "an observation gate" : "a spin wait's back-edge", (unsigned long long)g->arg);
+            return 1;
+        }
+    }
+    // Every row of the manifest the pack serves: the ones it does not are a [RED] line each (nxaot build said why: no discovered code holds them)
+    for (int k = 0; k < n; k++) {
+        const nxaot_gate_site *g = rows[k].offset <= UINT32_MAX ? nxaot_gate_at(d, rows[k].offset) : NULL;
+        if (g && g->kind == rows[k].kind && g->arg == rows[k].arg) continue;
+        (*unserved)++;
+        LOG("[RED] aot: %s's manifest has %s at %s+%#llx that its pack does not call (no compiled code holds it: see nxaot build's log): %s", m->name,
+            rows[k].kind == NXAOT_GATE_OBS ? "an observation gate" : "a spin wait's back-edge", m->name, (unsigned long long)rows[k].offset,
+            rows[k].kind == NXAOT_GATE_OBS ? "its observer does not run" : "the loop spins without the back-off");
+    }
+    return 0;
 }
 
 int dm_aot_load_module_pack(module_t *m, const char *dir, const uint8_t sha256[32], uint64_t image_size, uint64_t text_end, uint64_t bss, char *err, size_t errn) {

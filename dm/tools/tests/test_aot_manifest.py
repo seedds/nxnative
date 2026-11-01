@@ -139,6 +139,17 @@ class ManifestRows(unittest.TestCase):
         self.assertEqual(u32(self.image, hi - 8) & 0xFFE0FC00, 0x8800FC00, 'stlxr w')
         self.assertEqual(u32(self.image, hi - 4) >> 24, 0x35, 'the cbnz after the store, which sites.tsv counts in the window')
 
+    def test_probes(self):
+        """What t_aot_module's child sets and checks: the spin wait's flag (FLAG_VALUE in the image, so a plain run ends the loop at once), the fault probe (its pointer
+        0, its load the only word of its kind in the text, which the host's fault report must name), the frame step's stub counting its passes at state +0x30"""
+        self.assertEqual(u32(self.image, S.FLAG), S.FLAG_VALUE)
+        self.assertEqual(struct.unpack_from('<Q', self.image, S.FAULTPTR)[0], 0)
+        self.assertEqual([u32(self.image, a) for a in range(0, S.TEXT_END, 4)].count(S.FAULT_WORD), 1)
+        ((off, length, _, _),) = self.kind('aux')
+        stub = [u32(self.image, a) for a in range(int(off, 16), int(off, 16) + int(length, 16), 4)]
+        self.assertEqual(stub[1:4], [0xB9403211, 0x11000631, 0xB9003211], 'ldr w17, [x16, #0x30]; add w17, w17, #1; str w17, [x16, #0x30]')
+        self.assertEqual(len(S.EXPECTED), 13); self.assertLessEqual(len(S.EXPECTED), S.NRESULTS)
+
     def test_writer_is_canonical(self):
         """nxaot's WriteManifest form: the rows' hex as %#llx (0x0 for zero), the obs number in decimal"""
         for _, f in self.rows:
@@ -289,11 +300,24 @@ class HostFnModule(unittest.TestCase):
         self.assertEqual(rows, [['sub', hashlib.sha256(b).hexdigest(), str(len(b))]])
 
     def test_expected_results(self):
-        self.assertEqual(S.HF_EXPECTED[:12], [19, 0x40200000, 1030, 1056, 123, 0, 42, 0, 0, 1012, 77, 0], 't_aot_hostfn.c EXPECTED holds these numbers')
+        # [9]: four passes of sub_fn(5) = 1012 through the cross-pack loop
+        self.assertEqual(S.HF_EXPECTED[:12], [19, 0x40200000, 1030, 1056, 123, 0, 42, 0, 0, 4048, 77, 0], 't_aot_hostfn.c EXPECTED holds these numbers')
         # the host calling guest code back (t_aot_hostfn.c RE_EXPECTED): nested with ten arguments, x22 kept, two levels deep, from a host-created guest thread,
         # from a plain host thread, the system event's binding (any non-zero value), the wait on its readable handle
-        self.assertEqual(S.HF_EXPECTED[13:], [1045, 0x1234, 116, 1054, 1064, None, 0], 't_aot_hostfn.c RE_EXPECTED holds these numbers')
+        self.assertEqual(S.HF_EXPECTED[13:20], [1045, 0x1234, 116, 1054, 1064, None, 0], 't_aot_hostfn.c RE_EXPECTED holds these numbers')
+        # the cross-pack loop (t_aot_hostfn.c CROSS_EXPECTED): four passes of sub_call(synth_triple, 7) = 22, LookupModuleSymbol(sub_call)
+        self.assertEqual(S.HF_EXPECTED[20:], [88, 0], 't_aot_hostfn.c CROSS_EXPECTED holds these numbers')
         self.assertLessEqual(len(S.HF_EXPECTED), S.HF_NRESULTS)
+
+    def test_cross_pack_loop(self):
+        """main's loop calls sub_fn and sub_call through registers (blr, the inline caches the dispatcher binds across packs) and sub_call calls main back"""
+        items, _ = S.hf_text()
+        L, words = S.assemble(items)
+        word = dict(words)
+        loop = range(L['hf_cross'], L['hf_cross_next'], 4)
+        self.assertIn(S.blr(23), [word[a] for a in loop]); self.assertIn(S.blr(24), [word[a] for a in loop])
+        sub = S.sub_nro()
+        self.assertIn(struct.pack('<I', S.blr(9)), sub[S.SUB_CODE:S.SUB_TEXT_END], 'sub_call calls its argument through a register')
 
     @unittest.skipUnless(shutil.which('llvm-mc-18'), 'llvm-mc-18 is not installed (the nxnative-aot image has it)')
     def test_encoders(self):
@@ -302,6 +326,14 @@ class HostFnModule(unittest.TestCase):
         r = subprocess.run(['llvm-mc-18', '-triple=aarch64', '-show-encoding', str(src)], capture_output=True, text=True, check=True)
         got = [int(''.join(reversed(m.split(','))).replace('0x', ''), 16) for m in re.findall(r'encoding: \[([^\]]+)\]', r.stdout)]
         self.assertEqual(got, [w for _, w in S.HF_ENCODINGS])
+
+    @unittest.skipUnless(shutil.which('llvm-mc-18'), 'llvm-mc-18 is not installed (the nxnative-aot image has it)')
+    def test_branch_encoders(self):
+        """The branch encoders (a label's distance in the word), by llvm-mc-18's disassembly"""
+        words = ' '.join(f'{b:#04x}' for _, w in S.HF_BRANCHES for b in struct.pack('<I', w))
+        r = subprocess.run(['llvm-mc-18', '--disassemble', '-triple=aarch64'], input=words, capture_output=True, text=True, check=True)
+        got = [ln.strip() for ln in r.stdout.splitlines() if ln.strip() and not ln.strip().startswith('.')]
+        self.assertEqual(got, [t for t, _ in S.HF_BRANCHES])
 
     @unittest.skipUnless(NXAOT and os.access(NXAOT, os.X_OK), 'NXAOT names no nxaot executable')
     def test_nxaot_reads_and_packs(self):

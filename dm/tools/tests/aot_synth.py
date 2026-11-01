@@ -12,7 +12,11 @@ The module has every row kind of the manifest: a data block in text (4 KiB of wo
 the observation gate, a spin wait (ldr; cbz back), the cut and the frame step's branch, the frame step's stub in the auxiliary region, and the rewriter's oracle
 rows: an x18 byte jump table (oracle-J), an x18 offset table (oracle-T) and an x18 exclusive window (oracle-W). Its entry, run by t_aot_module, calls a host
 function through its GOT (t_aot_mod_combine, an HLE entry of the test), an import nothing implements (t_aot_mod_missing), SetHeapSize, the functions above
-(the frame step's function excepted), a function through a relocated pointer, OutputDebugString, and stores what each returned in `results`, then ExitProcess.
+(the frame step's through its stub in the aux region, which counts its passes at the state page's +0x30 as the games' stubs count vsyncs there), a function
+through a relocated pointer, OutputDebugString, and stores what each returned in `results`, then ExitProcess. Two data words are 0 for a plain run and set by
+t_aot_module's child for its checks: synth_flag (the spin wait's flag: 9 in the image, so the loop ends at once; 0 there, so the loop spins until the host sets
+it, its back-edge passing the spin gate) and synth_faultptr (0: a fault probe in the entry is skipped; an address no page backs: the probe's ldr x9, [x9] faults
+there, and the host's fault report must name that instruction).
 Every encoding was checked with llvm-mc-18 (nxnative-aot image). No game bytes, no keys."""
 import ast
 import hashlib
@@ -36,7 +40,9 @@ MOD0, DYNAMIC, SYMTAB = 0x2000, 0x2020, 0x2100
 RELA, JMPREL, EH_HDR, EH_FRAME = 0x2400, 0x2440, 0x2480, 0x2500
 BTAB, TTAB, MSG = 0x2700, 0x2710, 0x2740
 GOT, FNPTR, RESULTS = 0x3000, 0x3010, 0x3040
-COUNTER, FLAG = RESULTS + 96, RESULTS + 100   # after the 12 results
+NRESULTS = 16                                  # the results array's words (13 used)
+COUNTER, FLAG, FAULTPTR = RESULTS + 8 * NRESULTS, RESULTS + 8 * NRESULTS + 4, RESULTS + 8 * NRESULTS + 8   # after the results
+FLAG_VALUE = 9                                 # the spin wait's flag in the image: the loop ends at once (f_spin returns it)
 MESSAGE = b'aot module: done'
 DATA_WORD = 0x01000000                 # op0 0, op1 0000 with bits 24:16 set: unallocated, never an instruction
 OBS_NUMBER = 23 | 5 << 8               # OBS_REGION_GOT (dm/host/dm.h) with the parameter 5
@@ -44,8 +50,11 @@ OBS_NUMBER = 23 | 5 << 8               # OBS_REGION_GOT (dm/host/dm.h) with the 
 KEY_PAGE_OFF = (DATA_END + BSS + 0x3FFF) & ~0x3FFF
 FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
 AUX_OFF = FS_STATE_OFF + 0x4000
-# What the entry stores in results[i], i = 0..11 (t_aot_module checks them; results[3] is the heap's base, any address)
-EXPECTED = [7 * 1000 + 3, 0, 0, None, 0x1234, 30, 400, 2, 9, 42, 2, 2]
+# What the entry stores in results[i], i = 0..12 (t_aot_module checks them; results[3] is the heap's base, any address; results[12] is f_fs's 5, through the frame step's
+# stub in the aux region). f_obs runs twice, for results[9] (x0 = 41) and through the relocated pointer for results[11] (x0 = 1): t_aot_module's observer adds 1000 to the x0
+# it sees at the gate, so the host test expects 1042 and 1002 there
+EXPECTED = [7 * 1000 + 3, 0, 0, None, 0x1234, 30, 400, 2, FLAG_VALUE, 42, 2, 2, 5]
+FAULT_WORD = 0xF9400129                # ldr x9, [x9]: the fault probe's load, the only such word of the text
 
 
 # ---------- Encoders (A64; each checked against llvm-mc) ----------
@@ -54,6 +63,10 @@ def bl(t): return lambda pc, L: 0x94000000 | ((L[t] - pc) >> 2 & 0x3FFFFFF)
 def bhi(t): return lambda pc, L: 0x54000008 | ((L[t] - pc) >> 2 & 0x7FFFF) << 5
 def cbz_w(rt, t): return lambda pc, L: 0x34000000 | ((L[t] - pc) >> 2 & 0x7FFFF) << 5 | rt
 def cbnz_w(rt, t): return lambda pc, L: 0x35000000 | ((L[t] - pc) >> 2 & 0x7FFFF) << 5 | rt
+def cbz_x(rt, t): return lambda pc, L: 0xB4000000 | ((L[t] - pc) >> 2 & 0x7FFFF) << 5 | rt
+def cbnz_x(rt, t): return lambda pc, L: 0xB5000000 | ((L[t] - pc) >> 2 & 0x7FFFF) << 5 | rt
+def bne(t): return lambda pc, L: 0x54000001 | ((L[t] - pc) >> 2 & 0x7FFFF) << 5
+def cmp_x(rn, imm): return 0xF100001F | imm << 10 | rn << 5                          # cmp xn, #imm (subs xzr, xn, #imm)
 def adr(rd, t):
     def enc(pc, L):
         imm = (L[t] if isinstance(t, str) else t) - pc
@@ -103,7 +116,10 @@ def text_items():
         (None, add_x(0, 19, FLAG - RESULTS)), (None, bl('f_spin')), (None, str_x(0, 19, 64)),
         (None, movz_x(0, 41)), (None, bl('f_obs')), (None, str_x(0, 19, 72)),
         (None, bl('f_cut')), (None, str_x(0, 19, 80)),
-        (None, adrp(16, FNPTR)), (None, ldr_x(16, 16, lo(FNPTR))), (None, movz_x(0, 1)), (None, blr(16)), (None, str_x(0, 19, 88)),
+        (None, bl('f_fs')), (None, str_x(0, 19, 96)),                                                         # the frame step's function, through its stub
+        # the fault probe: synth_faultptr is 0 in the image; t_aot_module's fault run sets an address no page backs, and fault_ld faults there
+        (None, ldr_x(9, 19, FAULTPTR - RESULTS)), (None, cbz_x(9, 'no_fault')), ('fault_ld', FAULT_WORD),
+        ('no_fault', adrp(16, FNPTR)), (None, ldr_x(16, 16, lo(FNPTR))), (None, movz_x(0, 1)), (None, blr(16)), (None, str_x(0, 19, 88)),
         (None, adrp(0, MSG)), (None, add_x(0, 0, lo(MSG))), (None, movz_x(1, len(MESSAGE))), (None, svc(0x27)),   # OutputDebugString
         (None, svc(0x07)), (None, brk(1)),                                                                     # ExitProcess
         # a byte jump table through x18 (the rewriter's J form): target = base + 4 * entry
@@ -179,7 +195,8 @@ def eh_frame():
 
 
 SYMBOLS = [('t_aot_mod_combine', 0, 0x12, 0, 0), ('t_aot_mod_missing', 0, 0x12, 0, 0),
-           ('results', 3, 0x11, RESULTS, 104), ('synth_got', 3, 0x11, GOT, 16), ('synth_fnptr', 3, 0x11, FNPTR, 8)] + \
+           ('results', 3, 0x11, RESULTS, 8 * NRESULTS), ('synth_got', 3, 0x11, GOT, 16), ('synth_fnptr', 3, 0x11, FNPTR, 8),
+           ('synth_flag', 3, 0x11, FLAG, 4), ('synth_faultptr', 3, 0x11, FAULTPTR, 8)] + \
           [(name, 1, 0x12, s, e - s) for (name, _), (s, e) in zip(FUNCS, FN_RANGES)]
 
 
@@ -213,7 +230,7 @@ def image():
     img[BTAB:BTAB + 4] = bytes([0, 2, 4, 6])
     for i, c in enumerate(TTAB_ORDER): struct.pack_into('<i', img, TTAB + 4 * i, L[c] - TTAB)
     img[MSG:MSG + len(MESSAGE)] = MESSAGE
-    struct.pack_into('<II', img, COUNTER, 0, 9)   # the window's counter, the spin wait's flag
+    struct.pack_into('<II', img, COUNTER, 0, FLAG_VALUE)   # the window's counter, the spin wait's flag (synth_faultptr after them stays 0)
     return img
 
 
@@ -236,7 +253,8 @@ CUTS = {{'{BUILD_ID}': [({L['f_cut']:#x}, '20008052', '40008052', 'synthetic: f_
 OBS = {{'{BUILD_ID}': [({L['f_obs']:#x}, {OBS_NUMBER}, '91000400', 'synthetic: an observation gate at f_obs (number 23, parameter 5)')]}}
 def frame_step(ctx):
     ctx.site({L['f_fs']:#x}, 'a0008052')
-    start = ctx.here(); ctx.emit(ADRP(16, ctx.here(), ctx.state)); ctx.emit(0xb9400211)   # ldr w17, [x16]: the target fps
+    start = ctx.here(); ctx.emit(ADRP(16, ctx.here(), ctx.state))
+    ctx.emit(0xb9403211); ctx.emit(0x11000631); ctx.emit(0xb9003211)                         # ldr w17, [x16, #0x30]; add w17, w17, #1; str w17, [x16, #0x30]: a pass counted
     ctx.emit(0x528000a0); ctx.emit(B(ctx.here(), {L['f_fs'] + 4:#x}))                      # the original mov w0, #5, back
     ctx.put({L['f_fs']:#x}, [B({L['f_fs']:#x}, start)], 'synthetic frame step: f_fs through its stub')
 FRAME_STEP = {{'{BUILD_ID}': frame_step}}
@@ -308,8 +326,12 @@ def manifest_text(t):
 #   [6]  t_hf_spawn(14) creates a guest thread through hle_guestthread.c (nn::os::CreateThread, StartThread, WaitThread, DestroyThread, malloc and free are this
 #        module's: a bump allocator in bss and the thread SVCs); its host body calls synth_triple(14) on the new thread: 42 when it ran on another guest thread
 #   [7]  nn::ro::LoadModule of the NRO the host put in guest memory (nro_image): hle_ro.c maps it through nro.tsv, loads sub.aot.so, relocates it (its strlen import
-#        at the passthrough's slot) and runs its DT_INIT (sub_flag = 1000) as a guest call: 0; [8] LookupModuleSymbol(sub_fn): 0; [9] sub_fn(5) = 5 + strlen("sub nro")
-#        + sub_flag = 1012; [10] sub_value through main's own GOT, a stub until the load bound it to the NRO: 77; [11] after UnloadModule, the GOT is the stub again: 0
+#        at the passthrough's slot) and runs its DT_INIT (sub_flag = 1000) as a guest call: 0; [8] LookupModuleSymbol(sub_fn): 0; [21] LookupModuleSymbol(sub_call): 0;
+#        then HF_CROSS_PASSES passes of a loop with three calls between the packs (ABI 3: the standard entries' common signature, an inline cache bound to the other
+#        pack's entry): main calls sub_fn(5) = 5 + strlen("sub nro") + sub_flag = 1012, and sub_call(synth_triple, 7), which calls main's synth_triple(7) back and adds 1:
+#        22; [9] the sum of sub_fn's, [20] of sub_call's. The host's t_hf_mark(0) after the first pass and t_hf_mark(1) after the last snapshot the dispatcher's
+#        counters: the three sites miss in the first pass only (t_aot_hostfn checks 0 misses after that warm-up, and no hand-over through the JIT fallback's path)
+#        [10] sub_value through main's own GOT, a stub until the load bound it to the NRO: 77; [11] after UnloadModule, the GOT is the stub again: 0
 # then the host calling guest code back (aot.h dm_gcall, DM_GUEST_CALL: the plain-pointer calls of Apple's text), main having registered its callback hf_cb with t_re_register:
 #   [13] t_re_fire(1): the host calls hf_cb(data, 1, 2, ..., 9) from inside that host call, on this thread (nested re-entry), ten arguments, the 9th and 10th on the guest stack:
 #        *data (1000) + 1 + 2 + ... + 9 = 1045; [14] x22, set to 0x1234 before the call and stored after it (a callee-saved register across the nested call)
@@ -324,24 +346,26 @@ def manifest_text(t):
 HF_DIR_NAME = 'hostfn'
 HF_BUILD_ID = 'aa08' * 8
 HF_TEXT_END, HF_RO_OFF, HF_DATA_OFF, HF_DATA_END, HF_BSS = 0x1000, 0x1000, 0x2000, 0x3000, 0x40000
-HF_MOD0, HF_DYNAMIC, HF_SYMTAB, HF_RELA, HF_JMPREL, HF_EH_HDR, HF_EH_FRAME = 0x1000, 0x1020, 0x1100, 0x1880, 0x1A80, 0x1AA0, 0x1B40   # the string table grew past 0x1800 (the t_ga_* imports)
-HF_MSG, HF_CONSTF, HF_NAME = 0x1E00, 0x1E20, 0x1E40
+HF_MOD0, HF_DYNAMIC, HF_SYMTAB, HF_RELA, HF_JMPREL, HF_EH_HDR, HF_EH_FRAME = 0x1000, 0x1020, 0x1100, 0x1880, 0x1AA0, 0x1AC0, 0x1B60   # the string table grew past 0x1800 (the t_ga_* and t_hf_mark imports)
+HF_MSG, HF_CONSTF, HF_NAME, HF_NAME2 = 0x1E00, 0x1E20, 0x1E40, 0x1E48
 HF_CBDATA, HF_EV = 0x2340, 0x2380   # hf_cb's data word (1000), the SystemEventType t_re_bind binds (write handle, read handle)
 HF_CBDATA_VALUE = 1000
-HF_GOT, HF_RESULTS, HF_VT, HF_VT2, HF_NROIMG, HF_HEAPPTR, HF_ROMOD, HF_OUT = 0x2000, 0x2100, 0x2200, 0x2240, 0x2280, 0x2288, 0x22C0, 0x2300
+HF_GOT, HF_RESULTS, HF_VT, HF_VT2, HF_NROIMG, HF_HEAPPTR, HF_ROMOD, HF_OUT, HF_OUT2 = 0x2000, 0x2100, 0x2200, 0x2240, 0x2280, 0x2288, 0x22C0, 0x2300, 0x2308
+HF_CROSS_PASSES = 4                 # the passes of the cross-pack loop (three calls between the packs each)
 HF_HEAP = HF_DATA_END   # bss: the bump allocator's memory
 HF_MESSAGE = b'hostfn module: done'
 HF_SUB_MESSAGE = b'sub nro'
 HF_GOT_SYMS = ['strlen', 'sqrtf', 't_hf_get', 't_hf_install', 't_hf_spawn', '_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi',
                '_ZN2nn2ro18LookupModuleSymbolEPmPKNS0_6ModuleEPKc', 'sub_value', '_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE',
-               't_re_register', 't_re_fire', 't_re_thread', 't_re_hostthread', 't_re_deep', 't_re_leaf', 't_re_bind', 't_re_stop',
+               't_re_register', 't_re_fire', 't_re_thread', 't_re_hostthread', 't_re_deep', 't_re_leaf', 't_re_bind', 't_re_stop', 't_hf_mark',
                't_ga_buf', 't_ga_str', 't_ga_local', 't_ga_outside']
 HF_JUMP_SLOT = {'sub_value'}   # in DT_JMPREL (rebound at the NRO's load and unload as a game's lazily bound functions); the rest GLOB_DAT
 HF_SQRT_IN, HF_SQRT_OUT = 6.25, 2.5
 # What main stores in results[i] (None: checked by the host otherwise)
 HF_EXPECTED = [len(HF_MESSAGE), struct.unpack('<I', struct.pack('<f', HF_SQRT_OUT))[0], 5 * 6 + 1000, 7 * 8 + 1000, 123, 0, 42, 0, 0,
-               5 + len(HF_SUB_MESSAGE) + 1000, 77, 0, None,
-               HF_CBDATA_VALUE + 1 + 44, 0x1234, 3 * 5 + 100 + 1, HF_CBDATA_VALUE + 10 + 44, HF_CBDATA_VALUE + 20 + 44, None, 0]
+               HF_CROSS_PASSES * (5 + len(HF_SUB_MESSAGE) + 1000), 77, 0, None,
+               HF_CBDATA_VALUE + 1 + 44, 0x1234, 3 * 5 + 100 + 1, HF_CBDATA_VALUE + 10 + 44, HF_CBDATA_VALUE + 20 + 44, None, 0,
+               HF_CROSS_PASSES * (3 * 7 + 1), 0]
 HF_NRESULTS = 24   # the results array's words
 # Host memory the guest sees (dm/host/aot.h; t_aot_hostfn_entries.c's t_ga_* entries): what main stores in ga_results[i] (None: checked by the host otherwise)
 #   [0] the buffer t_ga_buf hands it (garena, in the arena below 2^39); [1] the word main reads from it (the host wrote HF_GA_WORD)
@@ -379,7 +403,16 @@ HF_ENCODINGS = [   # (llvm-mc's text, the word above): test_aot_manifest.py's Nx
     ('mov x22, #4660', movz_x(22, 0x1234)), ('add x1, x9, #4', add_x(1, 9, 4)), ('mov x3, #0', movz_x(3, 0)), ('add x0, x0, #1', add_x(0, 0, 1)), ('brk #0x3', brk(3)),
     ('ldrb w0, [x20]', ldrb(0, 20, 0)), ('mov x20, x0', mov_x(20, 0)), ('mov x0, x20', mov_x(0, 20)), ('ldr x1, [x0]', ldr_x(1, 0, 0)), ('ldr x2, [x0, #24]', ldr_x(2, 0, 24)),
     ('add x0, x1, x2', add_xr(0, 1, 2)), ('str x0, [x21, #8]', str_x(0, 21, 8)),
+    # the cross-pack loop and sub_call; the synthetic module's fault probe and frame-step stub
+    ('ldr x23, [x23, #768]', ldr_x(23, 23, 0x300)), ('add x26, x26, x0', add_xr(26, 26, 0)), ('add x27, x27, x0', add_xr(27, 27, 0)), ('mov x1, #7', movz_x(1, 7)),
+    ('add x25, x25, #1', add_x(25, 25, 1)), ('cmp x25, #4', cmp_x(25, 4)), ('mov x9, x0', mov_x(9, 0)), ('mov x0, x1', mov_x(0, 1)), ('blr x9', blr(9)),
+    ('str x26, [x19, #72]', str_x(26, 19, 72)), ('str x27, [x19, #160]', str_x(27, 19, 160)),
+    ('ldr x9, [x9]', FAULT_WORD), ('ldr x9, [x19, #136]', ldr_x(9, 19, 136)), ('ldr w17, [x16, #48]', 0xB9403211), ('add w17, w17, #1', 0x11000631),
+    ('str w17, [x16, #48]', 0xB9003211), ('str x0, [x19, #96]', str_x(0, 19, 96)),
 ]
+# The branch encoders with a label 8 bytes on, against llvm-mc-18's disassembly of their words (test_aot_manifest.py test_branch_encoders)
+HF_BRANCHES = [('cbz\tx9, #8', cbz_x(9, 't')(0, {'t': 8})), ('cbnz\tx25, #8', cbnz_x(25, 't')(0, {'t': 8})), ('b.ne\t#8', bne('t')(0, {'t': 8})),
+               ('cbz\tx9, #-8', cbz_x(9, 't')(8, {'t': 0}))]
 
 
 def assemble(items, base=0):
@@ -434,8 +467,17 @@ def hf_text():
     t += got_load(5) + [(None, adrp(0, HF_ROMOD)), (None, add_x(0, 0, lo12(HF_ROMOD))), (None, adrp(1, HF_NROIMG)), (None, ldr_x(1, 1, lo12(HF_NROIMG))),
                         (None, movz_x(2, 0)), (None, movz_x(3, 0)), (None, movz_x(4, 0)), (None, blr(16)), (None, str_x(0, 19, r(7)))]
     t += got_load(6) + [(None, adrp(0, HF_OUT)), (None, add_x(0, 0, lo12(HF_OUT))), (None, adrp(1, HF_ROMOD)), (None, add_x(1, 1, lo12(HF_ROMOD))),
-                        (None, adrp(2, HF_NAME)), (None, add_x(2, 2, lo12(HF_NAME))), (None, blr(16)), (None, str_x(0, 19, r(8))),
-                        (None, adrp(16, HF_OUT)), (None, ldr_x(16, 16, lo12(HF_OUT))), (None, movz_x(0, 5)), (None, blr(16)), (None, str_x(0, 19, r(9)))]
+                        (None, adrp(2, HF_NAME)), (None, add_x(2, 2, lo12(HF_NAME))), (None, blr(16)), (None, str_x(0, 19, r(8)))]
+    t += got_load(6) + [(None, adrp(0, HF_OUT2)), (None, add_x(0, 0, lo12(HF_OUT2))), (None, adrp(1, HF_ROMOD)), (None, add_x(1, 1, lo12(HF_ROMOD))),
+                        (None, adrp(2, HF_NAME2)), (None, add_x(2, 2, lo12(HF_NAME2))), (None, blr(16)), (None, str_x(0, 19, r(21)))]
+    # The cross-pack loop: x23 = sub_fn, x24 = sub_call, x25 the pass, x26 and x27 the sums; t_hf_mark(0) after the first pass, t_hf_mark(1) after the last
+    t += [(None, adrp(23, HF_OUT)), (None, ldr_x(23, 23, lo12(HF_OUT))), (None, adrp(24, HF_OUT2)), (None, ldr_x(24, 24, lo12(HF_OUT2))),
+          (None, movz_x(25, 0)), (None, movz_x(26, 0)), (None, movz_x(27, 0)),
+          ('hf_cross', movz_x(0, 5)), (None, blr(23)), (None, add_xr(26, 26, 0)),
+          (None, adr(0, 'hf_triple')), (None, movz_x(1, 7)), (None, blr(24)), (None, add_xr(27, 27, 0)),
+          (None, cbnz_x(25, 'hf_cross_next'))] + got_load(17) + [(None, movz_x(0, 0)), (None, blr(16)),
+          ('hf_cross_next', add_x(25, 25, 1)), (None, cmp_x(25, HF_CROSS_PASSES)), (None, bne('hf_cross'))]
+    t += got_load(17) + [(None, movz_x(0, 1)), (None, blr(16)), (None, str_x(26, 19, r(9))), (None, str_x(27, 19, r(20)))]
     t += got_load(7) + [(None, blr(16)), (None, str_x(0, 19, r(10)))]
     t += got_load(8) + [(None, adrp(0, HF_ROMOD)), (None, add_x(0, 0, lo12(HF_ROMOD))), (None, blr(16))]
     t += got_load(7) + [(None, blr(16)), (None, str_x(0, 19, r(11)))]
@@ -451,11 +493,12 @@ def hf_text():
     # Host memory the guest sees (dm/host/aot.h): a buffer, a string and a scoped array the host hands main, all in the arena; then host memory on purpose (the arena guard)
     g = lambda i: 8 * i   # ga_results[i], x21 its base
     t += [(None, adrp(21, HF_GA_RESULTS)), (None, add_x(21, 21, lo12(HF_GA_RESULTS)))]
-    t += got_load(17) + [(None, blr(16)), (None, str_x(0, 21, g(0))), (None, ldr_x(0, 0, 0)), (None, str_x(0, 21, g(1)))]
-    t += got_load(18) + [(None, blr(16)), (None, mov_x(20, 0)), (None, str_x(0, 21, g(2)))] + got_load(0) + \
+    ga = lambda name: got_load(HF_GOT_SYMS.index(name))   # the slot by name: the list grows at its end
+    t += ga('t_ga_buf') + [(None, blr(16)), (None, str_x(0, 21, g(0))), (None, ldr_x(0, 0, 0)), (None, str_x(0, 21, g(1)))]
+    t += ga('t_ga_str') + [(None, blr(16)), (None, mov_x(20, 0)), (None, str_x(0, 21, g(2)))] + got_load(0) + \
          [(None, mov_x(0, 20)), (None, blr(16)), (None, str_x(0, 21, g(3))), (None, ldrb(0, 20, 0)), (None, str_x(0, 21, g(4)))]
-    t += got_load(19) + [(None, adr(0, 'hf_sum2')), (None, blr(16)), (None, str_x(0, 21, g(5)))]
-    t += got_load(20) + [(None, adr(0, 'hf_sum2')), (None, blr(16)), (None, mov_x(20, 0))] + got_load(0) + [(None, mov_x(0, 20)), (None, blr(16)), (None, str_x(0, 21, g(6)))]
+    t += ga('t_ga_local') + [(None, adr(0, 'hf_sum2')), (None, blr(16)), (None, str_x(0, 21, g(5)))]
+    t += ga('t_ga_outside') + [(None, adr(0, 'hf_sum2')), (None, blr(16)), (None, mov_x(20, 0))] + got_load(0) + [(None, mov_x(0, 20)), (None, blr(16)), (None, str_x(0, 21, g(6)))]
     t += [(None, adrp(0, HF_MSG)), (None, add_x(0, 0, lo12(HF_MSG))), (None, movz_x(1, len(HF_MESSAGE))), (None, svc(0x27))]
     t += got_load(16) + [(None, blr(16)), (None, svc(0x07)), (None, brk(1))]
     # malloc(n): a bump allocator over bss, 16-byte steps (hf_heapptr starts at the heap: a relative relocation); free: nothing
@@ -520,6 +563,7 @@ def hf_image():
     struct.pack_into('<f', img, HF_CONSTF, HF_SQRT_IN)
     struct.pack_into('<Q', img, HF_CBDATA, HF_CBDATA_VALUE)
     img[HF_NAME:HF_NAME + 7] = b'sub_fn\0'
+    img[HF_NAME2:HF_NAME2 + 9] = b'sub_call\0'
     return img, L['hf_end']
 
 
@@ -531,19 +575,22 @@ def hf_manifest(img, f_end):
 
 
 def sub_nro():
-    """The NRO main loads: sub_init (its DT_INIT: sub_flag = 1000), sub_fn(x) = x + strlen("sub nro") (through its own GOT) + sub_flag, sub_value() = 77"""
+    """The NRO main loads: sub_init (its DT_INIT: sub_flag = 1000), sub_fn(x) = x + strlen("sub nro") (through its own GOT) + sub_flag, sub_value() = 77,
+    sub_call(fn, x) = fn(x) + 1 (a call back into the module that loaded it, through a register)"""
     items = [('sub_init', adrp(9, SUB_FLAG)), (None, movz_x(10, 1000)), (None, str_x(10, 9, lo12(SUB_FLAG))), (None, RET),
              ('sub_fn', STP_PRE(29, 30, 31, -32)), (None, str_x(19, 31, 16)), (None, MOV_FP_SP), (None, mov_x(19, 0)),
              (None, adrp(0, SUB_MSG)), (None, add_x(0, 0, lo12(SUB_MSG))), (None, adrp(16, SUB_GOT)), (None, ldr_x(16, 16, lo12(SUB_GOT))), (None, blr(16)),
              (None, add_xr(0, 0, 19)), (None, adrp(9, SUB_FLAG)), (None, ldr_x(9, 9, lo12(SUB_FLAG))), (None, add_xr(0, 0, 9)),
              (None, ldr_x(19, 31, 16)), (None, LDP_POST(29, 30, 31, 32)), (None, RET),
-             ('sub_value', movz_x(0, 77)), (None, RET), ('sub_end', None)]
+             ('sub_value', movz_x(0, 77)), (None, RET),
+             ('sub_call', STP_FP_LR), (None, MOV_FP_SP), (None, mov_x(9, 0)), (None, mov_x(0, 1)), (None, blr(9)), (None, add_x(0, 0, 1)), (None, LDP_FP_LR), (None, RET),
+             ('sub_end', None)]
     L, words = assemble(items, SUB_CODE)
     img = bytearray(SUB_DATA_END)
     for off, w in words: struct.pack_into('<I', img, off, w)
     struct.pack_into('<II', img, 0, B(0, L['sub_value']), SUB_MOD0)   # the entry branch (to a function that returns), the MOD0 offset word
-    order = ['sub_init', 'sub_fn', 'sub_value', 'sub_end']
-    ranges = [(L[order[i]], L[order[i + 1]]) for i in range(3)]
+    order = ['sub_init', 'sub_fn', 'sub_value', 'sub_call', 'sub_end']
+    ranges = [(L[order[i]], L[order[i + 1]]) for i in range(len(order) - 1)]
     symbols = [('strlen', 0, 0x12, 0, 0), ('sub_flag', 3, 0x11, SUB_FLAG, 8)] + [(n, 1, 0x12, s, e - s) for n, (s, e) in zip(order, ranges)]
     hdr, frame = eh_frame_at(SUB_EH_FRAME, SUB_EH_HDR, ranges)
     end = dynamic_tables(img, SUB_MOD0, SUB_DYNAMIC, SUB_SYMTAB, SUB_RELA, symbols, [(SUB_GOT, 1025, 1, 0)], extra=[(12, L['sub_init'])],

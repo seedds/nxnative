@@ -7,6 +7,7 @@ import shlex
 import struct
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +15,9 @@ REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('romfs_image', REPO / 'dm/tools/romfs_image.py')
 assert spec is not None and spec.loader is not None
 image = importlib.util.module_from_spec(spec); spec.loader.exec_module(image)
+spec = importlib.util.spec_from_file_location('romfs', REPO / 'dm/tools/romfs.py')   # the readers' view of an image (bounded entry reads)
+assert spec is not None and spec.loader is not None
+romfs = importlib.util.module_from_spec(spec); spec.loader.exec_module(romfs)
 
 
 class Images(unittest.TestCase):
@@ -24,8 +28,8 @@ class Images(unittest.TestCase):
         root = Path(cls.tools.name)
         source = root / 'validate.c'
         source.write_text('#include "romfs_image.h"\nint main(int argc, char **argv) {\n'
-                          'if (argc != 2) return 2; romfs_img *m = romfs_image_open(argv[1]);\n'
-                          'if (!m) return 1; romfs_image_close(m); return 0; }\n')
+                          '    if (argc != 2) return 2;\n    romfs_img *m = romfs_image_open(argv[1]);\n'
+                          '    if (!m) return 1;\n    romfs_image_close(m);\n    return 0;\n}\n')
         cls.validator = root / 'validate'
         subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-I', str(REPO / 'dm/host'),
                         str(source), '-o', str(cls.validator)], check=True)
@@ -129,6 +133,40 @@ class Images(unittest.TestCase):
         image.pack(self.src, self.dst)
         self.assertTrue(self.valid()); self.assertEqual(self.content('A'), b'upper')
         self.assertEqual(self.content('a'), b'lower')
+
+    def test_entry_reads_without_pread(self):
+        """romfs.py's bounded entry reads where os.pread does not exist (Windows): a seek and a read under the file's lock, the same bytes as with pread, from
+        several threads at once on one reader and on several"""
+        data = bytes(range(256)) * 300
+        (self.src / 'data').mkdir(); (self.src / 'data/blob').write_bytes(data); (self.src / 'data/other').write_bytes(b'x' * 1000)
+        image.pack(self.src, self.dst)
+        def read_all(path, chunks):
+            out = []
+            with romfs.open(self.dst / path, 'rb', buffering=0) as f:
+                for off, n in chunks:
+                    f.seek(off); out.append(f.read(n))
+            return out
+        chunks = [(0, 10), (len(data) - 5, 100), (12345, 4096), (len(data) + 7, 3)]
+        want = [data[o:o + n] for o, n in chunks]
+        with_pread = read_all('data/blob', chunks)
+        self.assertEqual(with_pread, want)
+        with patch.object(romfs, '_pread', None):
+            self.assertEqual(read_all('data/blob', chunks), want)
+            self.assertEqual(read_all('data/other', [(0, 2000)]), [b'x' * 1000], 'an entry read stops at its end')
+            with romfs.open(self.dst / 'data/blob', 'rb', buffering=0) as shared:
+                errors = []
+                def worker(k):
+                    try:
+                        for i in range(200):
+                            off = (k * 7919 + i * 131) % (len(data) - 64)
+                            got = romfs._read_at(shared.fd, 64, shared.start + off, shared.lock)
+                            if got != data[off:off + 64]: errors.append((k, i))
+                    except Exception as e:   # noqa: BLE001 (any failure fails the test below)
+                        errors.append(e)
+                threads = [threading.Thread(target=worker, args=(k,)) for k in range(4)]
+                for t in threads: t.start()
+                for t in threads: t.join()
+                self.assertEqual(errors, [], 'reads of one descriptor from four threads, each seeking under the lock')
 
     def test_size_consistent_invalid_index_is_rejected(self):
         for raw in (image.HEAD.pack(image.MAGIC, 32, 0, 0),

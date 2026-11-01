@@ -45,13 +45,18 @@ bool TranslateExtra(A64::TranslatorVisitor& v, uint32_t word) {
     return false;
 }
 
-IR::Block TranslateBlock(uint64_t pc, const CodeReader& read, uint32_t fpcr, InstPcs* pcs) {
+IR::Block TranslateBlock(uint64_t pc, const CodeReader& read, uint32_t fpcr, InstPcs* pcs, const StopBefore& stop) {
     const A64::LocationDescriptor descriptor{pc, FP::FPCR{fpcr}};
     IR::Block block{descriptor};
     A64::TranslatorVisitor visitor{block, descriptor, Options()};
     bool should_continue = true;
     do {
         const u64 at = visitor.ir.current_location->PC();
+        if (stop && at != pc && stop(at)) {
+            // A block must start here: this one ends with a link to it, as dynarmic ends a single-stepped block (a64_translate.cpp)
+            visitor.ir.SetTerm(IR::Term::LinkBlock{*visitor.ir.current_location});
+            break;
+        }
         const IR::Inst* last = block.empty() ? nullptr : &block.back();
         if (const auto word = read(at)) {
             should_continue = Visit(visitor, *word);

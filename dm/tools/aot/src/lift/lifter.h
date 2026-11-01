@@ -18,8 +18,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "decode/translate.h"
@@ -161,6 +164,14 @@ struct FunctionPlan {
     std::string ic_prefix;                     // inline-cache slots are named <prefix><site offset>
     llvm::DISubprogram* debug = nullptr;       // debug locations, line = guest offset (section 9.2); null: none
     std::string line_section;                  // the !pcsections section of the line table (section 3.5); empty: none
+    // The gates of design 1.1 (the manifest's obs and spin rows, include/nxaot/aot_module.h): the host's observers and the spin waits' back-off.
+    // An observation gate at a module offset: a block starts there, and before its instruction the code stores every register newer than the
+    // block (the block then holds the whole register file), pc = the instruction, calls rt_gate(st, offset) and reloads x0..x29 (an observer may
+    // change them). A spin wait's back-edge (the branch at its key, to the head its value names): where that branch is taken to the head, the
+    // code stores the same and pc = the head, calls rt_gate(st, back-edge offset) and goes on with the safepoint poll of a backward branch
+    std::set<uint64_t> obs_gates;
+    std::map<uint64_t, uint64_t> spin_gates;
+    llvm::Function* rt_gate = nullptr;         // preserve_all void (ptr st, i64 site): nxaot_rt_gate (null when the module has no gate)
 };
 
 // The FPCR bits a block is specialised on: dynarmic's location descriptor keeps the same (frontend/A64/a64_location_descriptor.h, fpcr_mask)
@@ -177,6 +188,9 @@ struct CallEffect {
 struct Region {
     uint64_t entry = 0;
     uint64_t lo = 0, hi = 0;  // blocks that start in [lo, hi) are lifted into the function; a transfer anywhere else leaves it with st->pc set
+    // More ranges [lo, hi) whose blocks belong to the region when its code reaches them: a behaviour image's aux region (the frame step's
+    // stubs, design 1.1), part of every function that branches into it
+    std::vector<std::pair<uint64_t, uint64_t>> extra;
     size_t max_blocks = 64;
     // For the analyses (src/analysis/jumptable.cpp); the defaults lift a region as the vector harness and the benchmark need it.
     // follow: the block starts the region may enter besides the entry (empty: every one in [lo, hi))
@@ -218,6 +232,7 @@ struct Lifted {
     size_t blocks = 0;
     // Function mode: the sites lowered
     size_t calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0;
+    std::vector<uint64_t> gates;           // the gate sites (FunctionPlan::obs_gates, spin_gates) the function's code calls, sorted, each once
 };
 
 // Lifts the region into module as a function called name. The module's data layout should be the target's (lift/jit.h sets it)

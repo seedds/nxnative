@@ -3,7 +3,8 @@
 # Usage: game.py list (list all profiles); game.py <id> <key> [<default>] (print that key's value, for shell; without a default a missing key is an error); game.py header <id> <out.h> (generate the host's game_profile.h);
 #   game.py dir <id> (print the profile folder); game.py link <id> <link> (point a symlink at the profile folder: make cannot take paths with spaces)
 #   From Python: import game; g = game.load() (takes DM_GAME; there is no default game: unset is an error that lists the profiles); game.by_title(title ID); g.get / g.words / g.int / g.builds() / g.table(file name)
-# DM_GAMES_DIR (folders separated by ':') adds profile folders outside the repository, searched after dm/games: the NSP script writes a provisional profile for a game without one into
+# DM_GAMES_DIR (folders separated by os.pathsep: ':' on Linux and macOS, ';' on Windows, whose paths hold a ':' after the drive letter; the NSP script joins it so) adds profile
+#   folders outside the repository, searched after dm/games: the NSP script writes a provisional profile for a game without one into
 #   <NSP folder>/<id>_build/profile/<id>/ and points DM_GAMES_DIR at <id>_build/profile, so the shader tools, the host build and build_ipa.sh all find it.
 #   DM_GAMES_FIRST=1 searches DM_GAMES_DIR before dm/games (the NSP script's --provisional: a provisional profile for a game that has one in dm/games, to test the guesses)
 import os, re, sys
@@ -46,8 +47,8 @@ class Game:
         return [tuple(w.split('=', 1)) for w in self.words(key)]
 
 
-def extra_dirs():   # profile folders outside the repository (DM_GAMES_DIR), searched after dm/games
-    return [Path(p) for p in os.environ.get('DM_GAMES_DIR', '').split(':') if p]
+def extra_dirs():   # profile folders outside the repository (DM_GAMES_DIR, os.pathsep between them as the NSP script joins them), searched after dm/games
+    return [Path(p) for p in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if p]
 
 
 def search_dirs():   # dm/games, then DM_GAMES_DIR; DM_GAMES_FIRST=1 the other way round

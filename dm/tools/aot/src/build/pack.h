@@ -50,6 +50,8 @@ struct BuildStats {
     uint64_t calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0, tables = 0, resume_sites = 0;
     uint64_t spills = 0, reloads = 0, object_bytes = 0, text_bytes = 0;
     uint64_t lines_lost = 0;  // line-table entries the backend could not keep (an access folded into another instruction)
+    uint64_t line_entries = 0;  // the line table's entries (lines.o: one per native guest memory access)
+    uint64_t gate_sites = 0;    // the gate sites compiled code calls (design 1.1: the manifest's obs and spin rows its functions hold)
     // Seconds. Lifting, verification, optimisation and code generation are summed over the units (CPU seconds of the workers), the others are
     // the wall clock of their stage
     double t_discover = 0, t_plan = 0, t_lift = 0, t_opt = 0, t_codegen = 0, t_link = 0;

@@ -15,6 +15,7 @@ from pathlib import Path as _Path
 import stat as _stat
 import struct
 import sys
+import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -109,11 +110,23 @@ def source(extraction):
 
 
 _fd_ranges = {}
+# Reads at an offset: os.pread on POSIX; Windows has none, so there a read seeks the descriptor first, under the file's lock (a reader shared between threads
+# then cannot move another read's position between its seek and its read). O_BINARY: Windows opens descriptors in text mode otherwise (CR LF and ^Z translated)
+_pread = getattr(_os, 'pread', None)
+_O_BINARY = getattr(_os, 'O_BINARY', 0)
+
+
+def _read_at(fd, size, offset, lock):
+    if _pread is not None: return _pread(fd, size, offset)
+    with lock:
+        _os.lseek(fd, offset, _os.SEEK_SET)
+        return _os.read(fd, size)
 
 
 class _File(io.RawIOBase):
     def __init__(self, image, k):
-        self.fd = _os.open(image.path, _os.O_RDONLY)
+        self.fd = _os.open(image.path, _os.O_RDONLY | _O_BINARY)
+        self.lock = threading.Lock()
         self.start, self.length = image.entry(k)[:2]
         self.pos = 0
         _fd_ranges[self.fd] = (self.start, self.length)
@@ -127,7 +140,7 @@ class _File(io.RawIOBase):
         self.pos = pos; return pos
     def readinto(self, buffer):
         size = min(len(buffer), max(0, self.length - self.pos))
-        data = _os.pread(self.fd, size, self.start + self.pos)
+        data = _read_at(self.fd, size, self.start + self.pos, self.lock)
         buffer[:len(data)] = data; self.pos += len(data)
         return len(data)
     def close(self):

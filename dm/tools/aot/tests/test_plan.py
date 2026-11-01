@@ -9,6 +9,9 @@ The host-function module is also checked with its one function that writes v0 (h
 module writes v0, the case where the reload set used to be the module's own union and a call site kept its own v0 after sqrtf returned a float
 through the GOT (README.md, "Pack throughput").
 
+Every module's standard entries must have the one signature of ABI 3 (include/nxaot/aot_module.h), whatever its address-taken functions read or
+write: x0..x7 and v0..v7 in host registers, rv 0, so that a call site of one pack may enter another pack's standard entry directly.
+
   test_plan.py --nxaot <nxaot> --work <dir>
 
 Exit 0 when every check holds.
@@ -23,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, '..', 'corpus')
 TOOLS_TESTS = os.path.join(HERE, '..', '..', 'tests')
 FOREIGN = {f'x{i}' for i in range(9)} | {f'v{i}' for i in range(4)}  # AAPCS64's result registers (analysis::ForeignWrites)
+STD_PASS = {f'x{i}' for i in range(8)} | {f'v{i}' for i in range(8)}  # the standard entries' fixed signature under swifttailcc (build/plan.h StdPass)
 NOP = 0xD503201F
 
 
@@ -60,6 +64,10 @@ def check(nxaot, name, path):
     missing = FOREIGN - regs(indirect['writes'])
     if missing:
         bad.append(f'the indirect view does not reload {sorted(missing)}')
+    # ABI 3: the standard entries' one signature, the same in every pack (a call may enter another pack's standard entry directly): under swifttailcc
+    # x0..x7 and v0..v7 in host registers, x0 and x1 returned in host registers and v0..v3 through the block
+    if regs(indirect['pass']) != STD_PASS or indirect['rv'] != '0':
+        bad.append(f'the standard entries\' signature is pass {indirect["pass"]} rv {indirect["rv"]}, not the fixed x0-x7,v0-v7 rv 0')
     sites = [(e, f) for e, f in fns if int(f['indirect'])]
     for e, f in sites:
         m = FOREIGN - regs(f['writes'])

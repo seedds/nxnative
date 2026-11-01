@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -35,6 +36,7 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/MC/MCSubtargetInfo.h>
 #include <llvm/MC/TargetRegistry.h>
+#include <llvm/Object/ELFObjectFile.h>
 #include <llvm/Object/ObjectFile.h>
 #include <llvm/Pass.h>
 #include <llvm/Passes/PassBuilder.h>
@@ -81,8 +83,13 @@ double Since(Clock::time_point t) {
 // functions and shards
 constexpr uint64_t kWorkerMemory = 512ull << 20;
 
-// The cache key's format: changed whenever what a key covers changes (UnitKey)
-constexpr const char* kUnitKeyFormat = "nxaot-unit 1";
+// The cache key's format: changed whenever what a key covers changes (UnitKey). 2: the gate sites and the aux region's code, the line marks'
+// section, the standard entries' fixed signature (ABI 3)
+constexpr const char* kUnitKeyFormat = "nxaot-unit 2";
+
+// The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
+// the link (SHF_EXCLUDE)
+constexpr const char* kLineMarks = ".nxaot_pcs";
 
 std::string Sanitize(std::string s) {
     if (s.size() > 4 && s.compare(s.size() - 4, 4, ".nro") == 0) {
@@ -205,7 +212,49 @@ llvm::StructType* DescType(llvm::LLVMContext& c) {
     auto* i64 = llvm::Type::getInt64Ty(c);
     auto* ptr = llvm::PointerType::get(c, 0);
     auto* name = llvm::ArrayType::get(llvm::Type::getInt8Ty(c), 32);
-    return llvm::StructType::get(c, {i32, i32, name, name, i64, i64, i64, i64, i32, i32, i32, i32, ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, i64, ptr});
+    return llvm::StructType::get(c, {i32, i32, name, name, i64, i64, i64, i64, i32, i32, i32, i32, ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, i64, ptr,
+                                     i32, i32, ptr, i64});
+}
+
+// The gates of design 1.1 the module's manifest asks for (its obs and spin rows), include/nxaot/aot_module.h
+struct Gates {
+    std::map<uint64_t, uint64_t> obs;   // observed instruction -> the number | parameter << 8
+    std::map<uint64_t, uint64_t> spin;  // back-edge branch -> the head
+    bool Empty() const { return obs.empty() && spin.empty(); }
+};
+
+Gates GatesOf(const module::Image& image) {
+    Gates g;
+    if (!image.manifest) {
+        return g;
+    }
+    for (const auto& o : image.manifest->obs) {
+        g.obs[o.offset] = o.number | o.parameter << 8;
+    }
+    for (const auto& s : image.manifest->spin) {
+        for (const uint64_t e : s.back_edges) {
+            g.spin[e] = s.head;
+        }
+    }
+    return g;
+}
+
+// The gate sites in a function's code (the blocks discovery's walk reached, the aux region's among them), sorted by offset: the gates its compiled
+// code calls. An observation gate whose instruction a block holds; a spin wait's back-edge that ends a block (a branch ends its block)
+std::vector<nxaot_gate_site> GateSitesOf(const analysis::Function& f, const Gates& g) {
+    std::vector<nxaot_gate_site> out;
+    for (const auto& [start, b] : f.blocks) {
+        for (auto it = g.obs.lower_bound(b.start); it != g.obs.end() && it->first < b.end; ++it) {
+            out.push_back({static_cast<uint32_t>(it->first), NXAOT_GATE_OBS, it->second});
+        }
+        if (b.end >= 4) {
+            if (const auto it = g.spin.find(b.end - 4); it != g.spin.end()) {
+                out.push_back({static_cast<uint32_t>(it->first), NXAOT_GATE_SPIN, it->second});
+            }
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const nxaot_gate_site& a, const nxaot_gate_site& b) { return a.offset < b.offset; });
+    return out;
 }
 
 // ---- What every module of a pack shares ----
@@ -221,12 +270,16 @@ struct Common {
     std::string triple, cpu, features;
     lift::Target target;
     std::string tool;    // the toolchain's identity for the cache keys: nxaot.lock, LLVM, this executable's SHA-256
+    Gates gates;                          // the manifest's gate rows
+    std::vector<nxaot_gate_site> served;  // the gate sites compiled code calls (some function's code holds them), sorted: the descriptor's table
+
+    std::vector<nxaot_gate_site> SitesOf(uint64_t entry) const { return GateSitesOf(d.functions.at(entry), gates); }
 };
 
 // The counts of one unit (or of the tables' object), which a pack sums and the cache keeps beside each unit's object
 struct UnitStats {
     uint64_t blocks = 0, calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0, refused = 0;
-    uint64_t lines_lost = 0, spills = 0, reloads = 0, text_bytes = 0, object_bytes = 0;
+    uint64_t lines_lost = 0, spills = 0, reloads = 0, text_bytes = 0, object_bytes = 0, gates = 0;
     double t_lift = 0, t_verify = 0, t_opt = 0, t_codegen = 0;
     std::vector<std::string> notes;
 
@@ -234,7 +287,7 @@ struct UnitStats {
         cache::Facts f;
         f.counts = {{"blocks", blocks}, {"calls", calls}, {"indirect_calls", indirect_calls}, {"tail_calls", tail_calls},
                     {"indirect_tails", indirect_tails}, {"returns", returns}, {"svcs", svcs}, {"traps", traps}, {"refused", refused},
-                    {"lines_lost", lines_lost}, {"text_bytes", text_bytes}, {"object_bytes", object_bytes}};
+                    {"lines_lost", lines_lost}, {"text_bytes", text_bytes}, {"object_bytes", object_bytes}, {"gates", gates}};
         f.notes = notes;
         return f;
     }
@@ -256,10 +309,198 @@ struct UnitStats {
         u.lines_lost = get("lines_lost");
         u.text_bytes = get("text_bytes");
         u.object_bytes = get("object_bytes");
+        u.gates = get("gates");
         u.notes = f.notes;
         return u;
     }
 };
+
+// ---- The line table (design 3.5; include/nxaot/aot_module.h) ----
+// Each unit marks its guest memory accesses with !pcsections, into the section kLineMarks of its object. For each metadata node LLVM writes the
+// native address of every machine instruction that carries it (each a 32-bit pc-relative relocation to the code) and then the node's data once,
+// here the guest offset (AsmPrinter::emitPCSections). Several machine instructions share a node whenever LLVM splits or duplicates an access (a
+// guest ldp, dc zva's eight stores, a loop rotated or unrolled), so the section is no array of {native, offset} pairs, which the readers of ABI 2
+// took it for: in the corpus 246 of fnptr-gcc's 415 entries and 8,812 of switch-gcc's 24,293 named an address outside the code or an offset
+// outside the text. Its words are told apart by their relocations, which only the unit's object has: ReadLineMarks reads them after code
+// generation (and from a cached object), attributes each address to the function whose symbol holds it, and MarkExcluded sets SHF_EXCLUDE on the
+// section, which the link then drops. The pack's table is nxaot's own (lines.o: CompileLines), a run per function of {native - body, offset}
+struct LineRow {
+    uint64_t fn = 0;              // the module offset of the function whose body holds the native address
+    uint32_t native = 0, offset = 0;  // bytes from the start of that body, and the guest instruction's module offset
+};
+
+// The function symbols of a unit's code that are bodies (<prefix>+0x<offset>) or standard entries (<body>.std): the module offset of the body
+std::optional<uint64_t> BodyOf(llvm::StringRef name, const std::string& prefix, bool* std_entry) {
+    const std::string head = prefix + "+0x";
+    if (!name.starts_with(head)) {
+        return std::nullopt;
+    }
+    name = name.drop_front(head.size());
+    *std_entry = name.consume_back(".std");
+    uint64_t v = 0;
+    if (name.getAsInteger(16, v)) {
+        return std::nullopt;
+    }
+    return v;
+}
+
+bool ReadLineMarks(llvm::StringRef object, const std::string& prefix, std::vector<LineRow>* rows, uint64_t* lost, std::string* error) {
+    auto file = llvm::object::ObjectFile::createObjectFile(llvm::MemoryBufferRef(object, "unit"));
+    if (!file) {
+        *error = "the line marks: " + llvm::toString(file.takeError());
+        return false;
+    }
+    const auto* elf = llvm::dyn_cast<llvm::object::ELF64LEObjectFile>(file->get());
+    if (!elf) {
+        *error = "the line marks: the unit's object is not ELF64";
+        return false;
+    }
+    std::optional<llvm::object::SectionRef> marks;
+    for (const llvm::object::SectionRef& s : elf->sections()) {
+        auto name = s.getName();
+        if (!name) {
+            llvm::consumeError(name.takeError());
+            continue;
+        }
+        if (*name == kLineMarks) {
+            marks = s;
+            break;
+        }
+    }
+    if (!marks) {
+        return true;  // no guest memory access in the unit
+    }
+    auto data = marks->getContents();
+    if (!data) {
+        *error = "the line marks: " + llvm::toString(data.takeError());
+        return false;
+    }
+    // The section's relocations: the words that are native addresses, each the code-section offset it names (S + A of R_X86_64_PC32: the
+    // difference to the word itself, as emitLabelDifference writes it)
+    std::map<uint64_t, uint64_t> address_at;
+    std::optional<llvm::object::SectionRef> code;
+    for (const llvm::object::SectionRef& rs : elf->sections()) {
+        auto target = rs.getRelocatedSection();
+        if (!target) {
+            llvm::consumeError(target.takeError());
+            continue;
+        }
+        if (*target == elf->section_end() || **target != *marks) {
+            continue;
+        }
+        for (const llvm::object::RelocationRef& r : rs.relocations()) {
+            const llvm::object::ELFRelocationRef er{r};
+            auto addend = er.getAddend();
+            const llvm::object::symbol_iterator sym = r.getSymbol();
+            if (!addend || sym == elf->symbol_end() || r.getType() != llvm::ELF::R_X86_64_PC32) {
+                if (!addend) llvm::consumeError(addend.takeError());
+                *error = "the line marks: a relocation that is no R_X86_64_PC32 to the code";
+                return false;
+            }
+            auto value = sym->getValue();
+            auto sec = sym->getSection();
+            if (!value || !sec || *sec == elf->section_end()) {
+                if (!value) llvm::consumeError(value.takeError());
+                if (!sec) llvm::consumeError(sec.takeError());
+                *error = "the line marks: a relocation to no section";
+                return false;
+            }
+            if (code && **sec != *code) {
+                *error = "the line marks name more than one code section";
+                return false;
+            }
+            code = **sec;
+            address_at[r.getOffset()] = *value + static_cast<uint64_t>(*addend);
+        }
+    }
+    if (!code) {
+        return true;
+    }
+    // The functions of that section by address: bodies (their rows) and standard entries (no guest access of their own)
+    struct Fn {
+        uint64_t lo = 0, hi = 0, body = 0;
+        bool std_entry = false;
+    };
+    std::vector<Fn> fns;
+    for (const llvm::object::ELFSymbolRef s : elf->symbols()) {
+        if (s.getELFType() != llvm::ELF::STT_FUNC) continue;
+        auto sec = s.getSection();
+        auto name = s.getName();
+        auto value = s.getValue();
+        if (!sec || !name || !value) {
+            if (!sec) llvm::consumeError(sec.takeError());
+            if (!name) llvm::consumeError(name.takeError());
+            if (!value) llvm::consumeError(value.takeError());
+            continue;
+        }
+        if (*sec == elf->section_end() || **sec != *code) continue;
+        Fn f;
+        if (const auto body = BodyOf(*name, prefix, &f.std_entry)) {
+            f.lo = *value;
+            f.hi = *value + s.getSize();
+            f.body = *body;
+            fns.push_back(f);
+        }
+    }
+    std::sort(fns.begin(), fns.end(), [](const Fn& a, const Fn& b) { return a.lo < b.lo; });
+    const llvm::StringRef bytes = *data;
+    std::vector<uint64_t> group;
+    for (uint64_t p = 0; p + 4 <= bytes.size(); p += 4) {
+        if (const auto it = address_at.find(p); it != address_at.end()) {
+            group.push_back(it->second);
+            continue;
+        }
+        uint32_t offset = 0;
+        std::memcpy(&offset, bytes.data() + p, 4);
+        if (group.empty()) {
+            *error = "the line marks: a guest offset with no native address before it at +" + std::to_string(p);
+            return false;
+        }
+        for (const uint64_t native : group) {
+            auto f = std::upper_bound(fns.begin(), fns.end(), native, [](uint64_t a, const Fn& g) { return a < g.lo; });
+            if (f == fns.begin() || native >= std::prev(f)->hi || std::prev(f)->std_entry) {
+                ++*lost;  // outside every body (none expected)
+                continue;
+            }
+            --f;
+            rows->push_back({f->body, static_cast<uint32_t>(native - f->lo), offset});
+        }
+        group.clear();
+    }
+    if (!group.empty() || bytes.size() % 4) {
+        *error = "the line marks end in native addresses with no guest offset after them";
+        return false;
+    }
+    return true;
+}
+
+// Sets SHF_EXCLUDE on the line marks' section of an ELF64 object in place, so that the link drops it (lld discards SHF_EXCLUDE input sections,
+// and the relocations that apply to them); nothing else of the object changes
+bool MarkExcluded(std::string* object, std::string* error) {
+    const auto u16 = [&](size_t at) { uint16_t v; std::memcpy(&v, object->data() + at, 2); return v; };
+    const auto u32 = [&](size_t at) { uint32_t v; std::memcpy(&v, object->data() + at, 4); return v; };
+    const auto u64 = [&](size_t at) { uint64_t v; std::memcpy(&v, object->data() + at, 8); return v; };
+    if (object->size() < 64 || std::memcmp(object->data(), "\x7f" "ELF\x02\x01", 6) != 0) {
+        *error = "the unit's object is not ELF64 little-endian";
+        return false;
+    }
+    const uint64_t shoff = u64(0x28);
+    const uint16_t shentsize = u16(0x3A), shnum = u16(0x3C), shstrndx = u16(0x3E);
+    if (shentsize < 64 || shstrndx >= shnum || shoff + static_cast<uint64_t>(shnum) * shentsize > object->size()) {
+        *error = "the unit's object has no section header table";
+        return false;
+    }
+    const uint64_t strtab = u64(shoff + static_cast<uint64_t>(shstrndx) * shentsize + 0x18);
+    for (uint16_t i = 0; i < shnum; ++i) {
+        const uint64_t h = shoff + static_cast<uint64_t>(i) * shentsize;
+        const uint64_t name = strtab + u32(h);
+        if (name < object->size() && std::strncmp(object->data() + name, kLineMarks, object->size() - name) == 0) {
+            const uint64_t flags = u64(h + 8) | llvm::ELF::SHF_EXCLUDE;
+            std::memcpy(object->data() + h + 8, &flags, 8);
+        }
+    }
+    return true;
+}
 
 // What a module (the tables' object or a unit) holds of the run time and of the code every unit shares. The tables' object defines the
 // module's base, the empty inline-cache descriptor, the slow-path wrappers and jit_entry; a unit declares them. Every name is hidden: lld
@@ -269,6 +510,7 @@ struct Kit {
     llvm::GlobalVariable* base = nullptr;
     llvm::GlobalVariable* ic_empty = nullptr;
     llvm::Function *svc = nullptr, *trap = nullptr, *dispatch = nullptr, *counter = nullptr, *rt_jit = nullptr, *safepoint = nullptr;
+    llvm::Function* gate = nullptr;  // nxaot_rt_gate's preserve_all wrapper, in a module with gate sites only (design 1.1)
     llvm::Function* jit_entry = nullptr;
     llvm::FunctionType* std_ty = nullptr;  // the standard entries' one signature (section 2.3)
     // Debug information: a synthetic file per module, line = guest offset (section 9.2)
@@ -393,6 +635,14 @@ Kit MakeKit(llvm::Module& m, const Common& c, bool tables) {
     k.rt_jit->addFnAttr(llvm::Attribute::Cold);
     k.safepoint = wrapper("nxaot.safepoint", safepoint_ty, tables ? extern_fn("nxaot_rt_safepoint", safepoint_ty) : nullptr,
                           llvm::CallingConv::PreserveAll);
+    // Design 1.1: the gates (observation gates, spin waits' back-edges), through a preserve_all wrapper: the code stored every register the
+    // block lacks before the call, and keeps the rest of its host registers across it. Only a module with gate sites imports nxaot_rt_gate.
+    // Not cold: an observation gate runs at every pass of its instruction, a spin wait's at every pass of its loop
+    if (!c.served.empty()) {
+        auto* gate_ty = llvm::FunctionType::get(b.getVoidTy(), {ptr, i64}, false);
+        k.gate = wrapper("nxaot.gate", gate_ty, tables ? extern_fn("nxaot_rt_gate", gate_ty) : nullptr, llvm::CallingConv::PreserveAll);
+        k.gate->removeFnAttr(llvm::Attribute::Cold);
+    }
 
     // ---- jit_entry (include/nxaot/aot_module.h): the JIT fallback with the standard entries' signature ----
     // What it is passed to the block (the caller stored the rest: the block then holds the whole register file), the JIT from st->pc until
@@ -465,9 +715,10 @@ llvm::Function* Body(llvm::Module& m, const Common& c, uint64_t entry, const FnF
     return f;
 }
 
-// Whether a function has a standard entry of its own (section 2.3); with ghccc a body that takes every passable register is its own
+// Whether a function has a standard entry of its own (section 2.3); with ghccc a body that takes every passable register and returns the fixed
+// signature's v registers is its own
 bool HasStdEntry(const Common& c, const FnFacts& ff) {
-    return ff.host_callable && !(c.conv.cc == lift::CallConv::Ghc && ff.pass == c.plan.indirect_pass);
+    return ff.host_callable && !(c.conv.cc == lift::CallConv::Ghc && ff.pass == c.plan.indirect_pass && ff.rv == c.plan.indirect_rv);
 }
 
 // The standard entry of a host-callable function: declared, or defined (every passable register in, what the body does not take stored to the
@@ -689,25 +940,51 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const std::vector<uin
         fp.ic_empty = k.ic_empty;
         fp.ic_prefix = "nxaot.ic." + llvm::utohexstr(entry) + ".";
         fp.debug = k.Subprogram(body, entry);
-        fp.line_section = o.line_table ? "nxaot_lines" : "";
+        fp.line_section = o.line_table ? kLineMarks : "";
+        // The gates its code holds (design 1.1), which its compiled code must call: checked against what the lifter emitted below
+        const std::vector<nxaot_gate_site> sites = c.SitesOf(entry);
+        for (const auto& g : sites) {
+            if (g.kind == NXAOT_GATE_OBS) fp.obs_gates.insert(g.offset);
+            else fp.spin_gates[g.offset] = g.arg;
+        }
+        fp.rt_gate = k.gate;
         lift::Region region;
         region.entry = entry;
         region.lo = entry;
         region.hi = ff.limit;
+        if (c.image.aux_size) {
+            region.extra.emplace_back(c.image.aux_off, c.image.aux_off + c.image.aux_size);  // the frame step's stubs (design 1.1)
+        }
         region.max_blocks = size_t{1} << 20;
         lo.plan = &fp;
         const module::Image& image = c.image;
         const uint64_t limit = ff.limit;
         const decode::CodeReader read = [&image, entry, limit](uint64_t a) -> std::optional<uint32_t> {
-            if (a < entry || a >= limit) {
+            if ((a < entry || a >= limit) && !image.InAux(a)) {
                 return std::nullopt;  // a block runs to the function's limit: the next function's entry is reached by a tail call
             }
-            if (!image.InText(a) || image.InData(a)) {
+            if (!image.InCode(a)) {
                 return std::nullopt;
             }
             return image.Word(a);
         };
         const lift::Lifted l = lift::LiftRegion(m, body->getName().str(), region, read, lo);
+        if (l.function) {
+            std::vector<uint64_t> want;
+            for (const auto& g : sites) want.push_back(g.offset);
+            if (want != l.gates) {
+                std::string list;
+                for (const uint64_t g : want) list += " " + llvm::utohexstr(g);
+                *error = "[RED] nxaot build: " + body->getName().str() + " holds the gate sites" + list + " but its code calls " +
+                         std::to_string(l.gates.size()) + " of them (design 1.1: every obs and spin row a function's code holds must be served)";
+                return false;
+            }
+            st->gates += l.gates.size();
+        } else if (!sites.empty()) {
+            *error = "[RED] nxaot build: " + body->getName().str() + " holds " + std::to_string(sites.size()) +
+                     " gate sites and the lifter refused it: the JIT fallback that would run it calls no gate (design 1.1)";
+            return false;
+        }
         st->blocks += l.blocks;
         st->calls += l.calls;
         st->indirect_calls += l.indirect_calls;
@@ -883,11 +1160,32 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
                                                    llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint32_t>(returns)), "nxaot.returns");
     returns_table->setSection(".nxaot.returns");
     returns_table->setAlignment(llvm::Align(16));
-    // The line table is the section !pcsections fills; the linker defines its bounds (weak: a module without entries has none)
-    auto* lines_start = new llvm::GlobalVariable(*m, i8, true, llvm::GlobalValue::ExternalWeakLinkage, nullptr, "__start_nxaot_lines");
-    auto* lines_stop = new llvm::GlobalVariable(*m, i8, true, llvm::GlobalValue::ExternalWeakLinkage, nullptr, "__stop_nxaot_lines");
-    lines_start->setVisibility(llvm::GlobalValue::HiddenVisibility);
-    lines_stop->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    // The line table: lines.o defines it once every unit is compiled (CompileLines, "The line table" above); none with --no-line-table
+    llvm::Constant* fn_lines = llvm::ConstantPointerNull::get(ptr);
+    llvm::Constant* lines = llvm::ConstantPointerNull::get(ptr);
+    if (o.line_table) {
+        auto* fl = new llvm::GlobalVariable(*m, i8, true, llvm::GlobalValue::ExternalLinkage, nullptr, "nxaot.fn_lines");
+        auto* ln = new llvm::GlobalVariable(*m, i8, true, llvm::GlobalValue::ExternalLinkage, nullptr, "nxaot.lines");
+        Hide(fl);
+        Hide(ln);
+        fn_lines = fl;
+        lines = ln;
+    }
+    // The gate sites compiled code calls (design 1.1), sorted by offset: what the host checks the manifest's obs and spin rows against
+    llvm::Constant* gates = llvm::ConstantPointerNull::get(ptr);
+    if (!c.served.empty()) {
+        auto* site_ty = llvm::StructType::get(ctx, {i32, i32, i64});
+        std::vector<llvm::Constant*> rows;
+        for (const auto& g : c.served) {
+            rows.push_back(llvm::ConstantStruct::get(site_ty, {b.getInt32(g.offset), b.getInt32(g.kind), b.getInt64(g.arg)}));
+        }
+        auto* gates_ty = llvm::ArrayType::get(site_ty, rows.size());
+        auto* table = new llvm::GlobalVariable(*m, gates_ty, true, llvm::GlobalValue::InternalLinkage, llvm::ConstantArray::get(gates_ty, rows),
+                                               "nxaot.gates");
+        table->setSection(".nxaot.gates");
+        table->setAlignment(llvm::Align(16));
+        gates = table;
+    }
 
     // enter(st, standard entry): the C convention into the pack's convention, every passable register from st; x0, x1 and the standard entries'
     // RV back to st unless the guest left through a non-local transfer (st->pending: the block then holds the whole register file)
@@ -939,8 +1237,10 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
     auto* desc_ty = DescType(ctx);
     const llvm::StructLayout* layout = m->getDataLayout().getStructLayout(desc_ty);
     if (layout->getSizeInBytes() != sizeof(nxaot_module_desc) || layout->getElementOffset(12) != offsetof(nxaot_module_desc, base) ||
+        layout->getElementOffset(16) != offsetof(nxaot_module_desc, fn_lines) || layout->getElementOffset(17) != offsetof(nxaot_module_desc, lines) ||
         layout->getElementOffset(19) != offsetof(nxaot_module_desc, tool) || layout->getElementOffset(20) != offsetof(nxaot_module_desc, returns) ||
-        layout->getElementOffset(22) != offsetof(nxaot_module_desc, jit_entry)) {
+        layout->getElementOffset(22) != offsetof(nxaot_module_desc, jit_entry) || layout->getElementOffset(23) != offsetof(nxaot_module_desc, std_x) ||
+        layout->getElementOffset(25) != offsetof(nxaot_module_desc, gates) || layout->getElementOffset(26) != offsetof(nxaot_module_desc, gate_count)) {
         *error = "the descriptor's LLVM layout differs from include/nxaot/aot_module.h";
         return false;
     }
@@ -961,8 +1261,8 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
                       llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint8_t>(image.sha256.data(), image.sha256.size())),
                       b.getInt64(image.bytes.size()), b.getInt64(image.TextEnd()), b.getInt64(image.bss_size), b.getInt64(image.text_off),
                       b.getInt32(0), b.getInt32(slots - 1), b.getInt32(plan.indirect_rv), b.getInt32(0), k.base, lookup, fnmap,
-                      b.getInt64(plan.fns.size()), lines_start, lines_stop, enter, tool_str, returns_table, b.getInt64(returns.size()),
-                      k.jit_entry}),
+                      b.getInt64(plan.fns.size()), fn_lines, lines, enter, tool_str, returns_table, b.getInt64(returns.size()),
+                      k.jit_entry, b.getInt32(plan.indirect_pass.x), b.getInt32(plan.indirect_pass.v), gates, b.getInt64(c.served.size())}),
         "nxaot_module");
     desc->setAlignment(llvm::Align(8));
     if (k.dib) {
@@ -974,6 +1274,49 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
         m->print(out, nullptr);
     }
     return Finish(*m, c, tm, object, st, asm_text, error);
+}
+
+// ---- lines.o: the line table, from every unit's line marks (ReadLineMarks), once all are compiled ----
+// nxaot.fn_lines: a {first, count} run per function in the function map's order; nxaot.lines: {native - body, offset} per guest memory access,
+// each run sorted by native address (include/nxaot/aot_module.h)
+bool CompileLines(const Common& c, llvm::TargetMachine& tm, const std::vector<LineRow>& all, std::string* object, UnitStats* st, uint64_t* count,
+                  std::string* error) {
+    llvm::LLVMContext ctx;
+    Diagnose(ctx, st);
+    llvm::Module m{c.prefix + ".lines", ctx};
+    m.setDataLayout(tm.createDataLayout());
+    m.setTargetTriple(tm.getTargetTriple().str());
+    std::map<uint64_t, std::vector<std::pair<uint32_t, uint32_t>>> by_fn;
+    for (const LineRow& r : all) {
+        by_fn[r.fn].emplace_back(r.native, r.offset);
+    }
+    std::vector<uint32_t> index, rows;
+    for (const auto& [entry, ff] : c.plan.fns) {
+        auto it = by_fn.find(entry);
+        std::vector<std::pair<uint32_t, uint32_t>> run;
+        if (it != by_fn.end()) {
+            run = std::move(it->second);
+            std::sort(run.begin(), run.end());
+            run.erase(std::unique(run.begin(), run.end()), run.end());
+        }
+        index.push_back(static_cast<uint32_t>(rows.size() / 2));
+        index.push_back(static_cast<uint32_t>(run.size()));
+        for (const auto& [native, offset] : run) {
+            rows.push_back(native);
+            rows.push_back(offset);
+        }
+    }
+    *count = rows.size() / 2;
+    const auto table = [&](const char* name, const char* section, const std::vector<uint32_t>& words) {
+        auto* init = llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint32_t>(words));
+        auto* g = new llvm::GlobalVariable(m, init->getType(), true, llvm::GlobalValue::ExternalLinkage, init, name);
+        Hide(g);
+        g->setSection(section);
+        g->setAlignment(llvm::Align(8));
+    };
+    table("nxaot.fn_lines", ".nxaot.fnlines", index);
+    table("nxaot.lines", ".nxaot.lines", rows);
+    return Finish(m, c, tm, object, st, nullptr, error);
 }
 
 // ---- The cache key of a unit (design section 13) ----
@@ -1034,8 +1377,14 @@ std::string UnitKey(const Common& c, uint64_t entry) {
         if (added) refs.push_back(target);
         return it->second;
     };
-    for (uint64_t pc = entry; pc < ff.limit; pc += 4) {
-        const auto w = img.InText(pc) && !img.InData(pc) ? img.Word(pc) : std::nullopt;
+    // The words of [entry, limit), then of its blocks in the aux region (the frame step's stubs it reaches, design 1.1)
+    std::vector<uint64_t> pcs;
+    for (uint64_t pc = entry; pc < ff.limit; pc += 4) pcs.push_back(pc);
+    for (const auto& [lo, hi] : ff.extra) {
+        for (uint64_t pc = lo; pc < hi; pc += 4) pcs.push_back(pc);
+    }
+    for (const uint64_t pc : pcs) {
+        const auto w = img.InCode(pc) ? img.Word(pc) : std::nullopt;
         uint32_t word = w.value_or(0), number = 0;
         bool relative = false;
         if (w) {
@@ -1068,6 +1417,13 @@ std::string UnitKey(const Common& c, uint64_t entry) {
     list.clear();
     for (const uint64_t r : refs) list += std::to_string(r) + ",";
     k.Add("refs", list);
+    list.clear();
+    for (const auto& [lo, hi] : ff.extra) list += std::to_string(lo) + "-" + std::to_string(hi) + ",";
+    k.Add("extra", list);
+    // The gates its code calls (design 1.1): their sites, kinds and arguments
+    list.clear();
+    for (const auto& g : c.SitesOf(entry)) list += std::to_string(g.offset) + ":" + std::to_string(g.kind) + ":" + std::to_string(g.arg) + ",";
+    k.Add("gates", list);
     // The convention facts of every function the code references: its direct branch targets, the next function (a block that runs to the
     // limit tail-calls it), its tables' targets and resume points
     std::set<uint64_t> referenced(refs.begin(), refs.end());
@@ -1249,7 +1605,30 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         }
         tms.push_back(std::move(tm));
     }
-    Common c{image, o, d, plan, conv, Sanitize(image.name), fpsr, tms[0]->getTargetTriple().str(), s.cpu, s.features, TargetOf(*tms[0]), ""};
+    // The gates (design 1.1): the manifest's obs and spin rows the functions' code holds are served (the units call them, CompileUnit checks
+    // it); a row no discovered code holds is not, and the host, which checks every row against the descriptor, says so as well
+    Common c{image, o, d, plan, conv, Sanitize(image.name), fpsr, tms[0]->getTargetTriple().str(), s.cpu, s.features, TargetOf(*tms[0]), "",
+             GatesOf(image), {}};
+    {
+        std::map<uint64_t, nxaot_gate_site> served;
+        for (const auto& [entry, f] : d.functions) {
+            for (const auto& g : GateSitesOf(f, c.gates)) served[g.offset] = g;
+        }
+        for (const auto& [off, g] : served) c.served.push_back(g);
+        for (const auto& [off, arg] : c.gates.obs) {
+            if (!served.count(off)) {
+                s.notes.push_back("[RED] nxaot build: the observation gate at " + c.prefix + "+0x" + llvm::utohexstr(off) +
+                                  " is in no discovered function's code: the pack does not call it (its observer will not run)");
+            }
+        }
+        for (const auto& [off, head] : c.gates.spin) {
+            if (!served.count(off)) {
+                s.notes.push_back("[RED] nxaot build: the spin wait back-edge at " + c.prefix + "+0x" + llvm::utohexstr(off) +
+                                  " is in no discovered function's code: the pack does not call its gate");
+            }
+        }
+        s.gate_sites = c.served.size();
+    }
 
     std::optional<cache::Cache> cache;
     // --asm, --spills and --ir want every unit compiled (the cache keeps objects, not their assembly or IR)
@@ -1281,6 +1660,14 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         bool hit = false;
         uint64_t read = 0, written = 0;
         double t_key = 0;
+        std::vector<LineRow> lines;  // the unit's line marks (ReadLineMarks)
+        uint64_t lines_outside = 0;  // marks in no body
+    };
+    // A unit's object: its line marks read back and its marks' section kept out of the link (in the cache too: a hit is read the same way)
+    const auto line_marks = [&](std::string* object, Result& res, bool fresh) {
+        if (!o.line_table) return true;
+        if (fresh && !MarkExcluded(object, &res.error)) return false;
+        return ReadLineMarks(*object, c.prefix, &res.lines, &res.lines_outside, &res.error);
     };
     std::vector<Result> results(units.size() + 1);
     std::atomic<size_t> next{0};
@@ -1312,6 +1699,15 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
                     res.read = bytes;
                     res.st = UnitStats::FromFacts(facts);
                     res.path = cache->ObjectPath(key);
+                    if (o.line_table) {
+                        auto buf = llvm::MemoryBuffer::getFile(res.path);
+                        if (!buf) {
+                            res.error = "cannot read " + res.path + ": " + buf.getError().message();
+                            continue;
+                        }
+                        std::string cached = (*buf)->getBuffer().str();
+                        line_marks(&cached, res, false);
+                    }
                     continue;
                 }
             }
@@ -1320,6 +1716,9 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
             }
             if (!CompileUnit(c, *tm, entries, &object, &res.st, o.ir_path.empty() ? nullptr : &res.ir, o.asm_path.empty() ? nullptr : &res.asm_text,
                              &res.error)) {
+                continue;
+            }
+            if (!line_marks(&object, res, true)) {
                 continue;
             }
             if (cache) {
@@ -1347,15 +1746,20 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     }
     s.t_compile_wall = Since(t);
 
-    // ---- The results, in link order: the tables' object, then the units by entry ----
+    // ---- The results, in link order: the tables' object, then the units by entry, then the line table's ----
     std::string ir, asm_text;
+    std::vector<LineRow> lines;
     for (size_t r = 0; r < results.size(); ++r) {
-        const Result& res = results[r];
+        Result& res = results[r];
         if (!res.error.empty()) {
             *error = res.error;
             return false;
         }
         objects->push_back(res.path);
+        lines.insert(lines.end(), res.lines.begin(), res.lines.end());
+        res.lines.clear();
+        res.lines.shrink_to_fit();
+        s.lines_lost += res.lines_outside;
         const UnitStats& u = res.st;
         s.blocks += u.blocks;
         s.calls += u.calls;
@@ -1387,6 +1791,21 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         }
         ir += res.ir;
         asm_text += res.asm_text;
+    }
+    if (o.line_table) {
+        const auto tl = Clock::now();
+        UnitStats ls;
+        std::string object;
+        if (!CompileLines(c, *tms[0], lines, &object, &ls, &s.line_entries, error)) {
+            return false;
+        }
+        const std::string path = work_dir + "/lines.o";
+        if (!WriteFile(path, object, error)) {
+            return false;
+        }
+        objects->push_back(path);
+        s.object_bytes += ls.object_bytes;
+        s.t_compile_wall += Since(tl);
     }
     if (!o.ir_path.empty() && !WriteFile(o.ir_path, ir, error)) {
         return false;

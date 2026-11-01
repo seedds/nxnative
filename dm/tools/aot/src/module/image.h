@@ -77,8 +77,16 @@ struct Image {
     std::optional<Manifest> manifest;
     std::vector<std::string> warnings;
 
+    // The auxiliary code region of a behaviour image (the manifest's aux row: the frame step's stubs, design 1.1), [aux_off, aux_off + aux_size)
+    // in the image after its data; empty for an NRO. Its code is lifted as part of the functions that branch into it (the cuts that put branches
+    // there), never as functions of its own (src/analysis/discover.cpp)
+    uint64_t aux_off = 0, aux_size = 0;
+
     uint64_t TextEnd() const { return text_off + text_size; }
     bool InText(uint64_t off) const { return off >= text_off && off < TextEnd(); }
+    bool InAux(uint64_t off) const { return aux_size && off >= aux_off && off - aux_off < aux_size; }
+    // Code the lifter may read: the text outside its data blocks, and the aux region (4-aligned)
+    bool InCode(uint64_t off) const { return !(off & 3) && ((InText(off) && !InData(off)) || InAux(off)); }
     bool InImage(uint64_t off, uint64_t n) const { return off <= bytes.size() && n <= bytes.size() - off; }
     std::optional<uint32_t> Word(uint64_t off) const;  // the instruction word at off (4-aligned, inside the image)
     std::optional<uint64_t> U64(uint64_t off) const;

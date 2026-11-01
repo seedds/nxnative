@@ -739,6 +739,13 @@ uint64_t loader_named_stub(const char *name) {
 // go into hle.c's gate table at their guest addresses, which on Apple holds the gate blocks' return addresses (dm_aot_gate dispatches them: aot_run.c). Then every module is
 // relocated and bound (dm_aot_bind: host functions and unimplemented imports at their guest-visible slots), and its pack loaded with the image's identity (aot_arena.c)
 int dm_aot_load_module_pack(module_t *m, const char *dir, const uint8_t sha256[32], uint64_t image_size, uint64_t text_end, uint64_t bss, char *err, size_t errn);
+// aot.h's (this file is compiled into unit tests that include it without the engine's headers): the manifest's gate rows against the pack's gate sites
+#ifndef DM_AOT_GATE_ROW
+#define DM_AOT_GATE_ROW
+typedef struct dm_aot_gate_row { uint64_t offset, arg; uint32_t kind; } dm_aot_gate_row;
+#endif
+enum { AOT_GATE_OBS = 1, AOT_GATE_SPIN = 2 };   // include/nxaot/aot_module.h NXAOT_GATE_OBS, NXAOT_GATE_SPIN
+int dm_aot_pack_check_gates(const module_t *m, const dm_aot_gate_row *rows, int n, int *unserved, char *err, size_t errn);
 typedef struct { uint64_t off, param, word; uint32_t num; } aot_obs_t;
 typedef struct { uint64_t head, edge; } aot_edge_t;
 typedef struct {
@@ -896,11 +903,8 @@ static int aot_map_module(module_t *m, const char *dir, aot_manifest_t *t, char 
     parse_dynamic(m);
     for (int i = 0; i < t->nobs; i++) gate_register((uint64_t)(uintptr_t)m->base + t->obs[i].off, "obs", (int)(t->obs[i].num | t->obs[i].param << 8), t->obs[i].off);
     for (int i = 0; i < t->nedge; i++) gate_register((uint64_t)(uintptr_t)m->base + t->edge[i].edge, "spin", 0, t->edge[i].head);
-    // The gates are the host's observers and the spin waits' back-off (Apple's gates.tsv): packs of ABI 2 call neither yet (nxaot lifts the original instruction and the plain
-    // back-edge), so what they do is missing until the lifter calls dm_aot_gate at these addresses
-    if (t->nobs || t->nspin)
-        LOG("[RED] aot: %s's manifest has %d observation gates and %d spin waits (%d back-edges), registered at their guest addresses; its pack does not call them yet "
-            "(nxaot's ABI 2 has no gate sites, design 1.1): the observers and the spin back-off do not run", m->name, t->nobs, t->nspin, t->nedge);
+    // The gates are the host's observers and the spin waits' back-off (Apple's gates.tsv): the pack's code calls them (nxaot_rt_gate, design 1.1) at the sites its
+    // descriptor lists, which load_modules checks against these rows once the pack is loaded (aot_arena.c dm_aot_pack_check_gates)
     LOG("%s: base %p size %#zx (behaviour image %#zx, bss %#llx; build %s; %d data blocks, %d cuts, %d oracle rows%s; x86-64 engine)", m->name, (void *)m->base, m->size, len,
         (unsigned long long)t->bss, m->build_id, t->rows[0], t->rows[1], t->rows[2], t->aux ? ", frame step state page" : "");
     return 0;
@@ -1000,6 +1004,15 @@ void load_modules(const char *dir, const char **names, int n) {
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         if (dm_aot_load_module_pack(m, dir, man[i].sha, man[i].image_size, man[i].text_end, man[i].bss, err, sizeof err)) die("[RED] aot: %s", err);
+        // The manifest's gates against the sites the pack's code calls (design 1.1): a pack of another manifest is refused; a row it does not serve is a [RED] line
+        dm_aot_gate_row *rows = calloc((size_t)(man[i].nobs + man[i].nedge) + 1, sizeof *rows);
+        if (!rows) die("aot: no memory for %s's gate rows", m->name);
+        int nrows = 0, unserved = 0;
+        for (int k = 0; k < man[i].nobs; k++) rows[nrows++] = (dm_aot_gate_row){man[i].obs[k].off, man[i].obs[k].num | man[i].obs[k].param << 8, AOT_GATE_OBS};
+        for (int k = 0; k < man[i].nedge; k++) rows[nrows++] = (dm_aot_gate_row){man[i].edge[k].edge, man[i].edge[k].head, AOT_GATE_SPIN};
+        if (dm_aot_pack_check_gates(m, rows, nrows, &unserved, err, sizeof err)) die("[RED] aot: %s", err);
+        if (nrows) LOG("aot: %s: %d gates (%d observation gates, %d spin wait back-edges) called by its pack, %d not", m->name, nrows - unserved, man[i].nobs, man[i].nedge, unserved);
+        free(rows);
         free(man[i].obs); free(man[i].edge);
     }
     free(man);

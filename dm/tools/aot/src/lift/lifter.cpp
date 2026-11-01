@@ -201,7 +201,7 @@ void FunctionLifter::Discover(Lifted& out) {
         if (blocks.count(pc) || blocks.size() >= region.max_blocks || (Fn() && !InRegion(pc))) {
             continue;
         }
-        IR::Block block = decode::TranslateBlock(pc, read, fpcr, Fn() ? &inst_pcs : nullptr);
+        IR::Block block = decode::TranslateBlock(pc, read, fpcr, Fn() ? &inst_pcs : nullptr, Fn() ? GateStops() : decode::StopBefore{});
         passes(block);
         if (Fn()) {
             FnRelative(pc, block, passes);
@@ -348,6 +348,7 @@ Lifted FunctionLifter::Run(const std::string& name) {
     }
     out.function = F;
     out.dynarmic_issues.assign(issues.begin(), issues.end());
+    out.gates.assign(gates_emitted.begin(), gates_emitted.end());
     return out;
 }
 
@@ -436,6 +437,15 @@ void FunctionLifter::LowerBlock(IR::Block& block) {
     cur_start = A64::LocationDescriptor{block.Location()}.PC();
     if (Fn()) {
         cur_dirty = dirty_in[cur_start] | gen[cur_start];
+        if (plan->obs_gates.count(cur_start)) {
+            // An observation gate (design 1.1): before the block's first instruction, the one observed (the translation stops before it, so a
+            // block starts there), with the registers as they are before it
+            cur_inst = nullptr;
+            if (plan->debug) {
+                B.SetCurrentDebugLocation(llvm::DILocation::get(C, static_cast<unsigned>(cur_start), 0, plan->debug));
+            }
+            FnGate(cur_start, Rel(cur_start), dirty_in[cur_start], true);
+        }
     }
     for (auto& inst : block) {
         if (inst.GetOpcode() == IR::Opcode::Void) {

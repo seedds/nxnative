@@ -487,6 +487,9 @@ std::shared_ptr<const RegionMemo::Outcome> AnalyseRegion(const module::Image& im
     region.entry = e;
     region.lo = fn.entry;
     region.hi = fn.limit;
+    if (image.aux_size) {
+        region.extra.emplace_back(image.aux_off, image.aux_off + image.aux_size);  // the frame step's stubs: code of the functions that reach them
+    }
     region.max_blocks = 4 * slice.size() + 16;
     region.follow = [&slice](uint64_t pc) { return slice.count(pc) > 0; };
     region.calls = calls;
@@ -601,7 +604,7 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
         return b.end >= 4 && calls(b.end - 4).has_value();
     };
     const decode::CodeReader read = [&image](uint64_t pc) -> std::optional<uint32_t> {
-        if (!image.InText(pc) || image.InData(pc)) return std::nullopt;
+        if (!image.InCode(pc)) return std::nullopt;
         return image.Word(pc);
     };
     std::string shape_why = "no closed region reaches the br", lifted_why;  // the reason of the last region lifted wins
@@ -659,7 +662,7 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
         std::vector<uint64_t> key{br, e, fn.entry, fn.limit, calls ? 1u : 0u, options.max_table, slice.size()};
         key.insert(key.end(), slice.begin(), slice.end());
         for (const uint64_t s : slice) {
-            for (uint64_t pc = s; pc < fn.limit; pc += 4) {
+            for (uint64_t pc = s; pc < fn.limit || image.InAux(pc); pc += 4) {
                 const auto w = read(pc);
                 if (!w) break;
                 const Insn i = ClassifyWord(*w, pc);

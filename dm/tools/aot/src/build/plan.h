@@ -33,16 +33,22 @@ struct FnFacts {
     std::map<uint64_t, uint64_t> pads;        // call pc -> the landing pad of the LSDA call site covering it
     std::map<uint64_t, std::vector<uint64_t>> tables;  // br pc -> jump-table targets
     std::vector<uint64_t> roots;              // landing pads inside the function
+    std::vector<std::pair<uint64_t, uint64_t>> extra;  // its blocks outside [entry, limit): the aux region's (design 1.1), [start, end) each
     size_t words = 0;
 };
 
 struct Plan {
     std::map<uint64_t, FnFacts> fns;
-    lift::Regs indirect_pass;    // the standard entries' one signature: x0..x3 and the passable registers some host-callable function reads
-    lift::Regs indirect_writes;  // the union of WRITES over the functions an indirect call may reach (the standard entries)
-    uint32_t indirect_rv = 0;    // RV of their component
+    lift::Regs indirect_pass;    // the standard entries' one signature, the same in every pack of the convention: StdPass
+    lift::Regs indirect_writes;  // the union of WRITES over the functions an indirect call may reach (the standard entries), AAPCS64's results
+    uint32_t indirect_rv = 0;    // RV of their component: kStdRv
     size_t live_after_rounds = 0;
 };
+
+// The standard entries' fixed signature (design 2.3; include/nxaot/aot_module.h, ABI 3): x0..x3 and the convention's passable registers in
+// host registers (swifttailcc: x4..x7 and v0..v7; ghccc: x4..x6 and v0..v5), x0 and x1 returned in host registers and v0..v3 through the block
+lift::Regs StdPass(const lift::Convention& conv);
+constexpr uint32_t kStdRv = 0;
 
 lift::Regs ToRegs(const analysis::RegSet& r);
 

@@ -102,7 +102,7 @@ uint8_t *dm_aot_image_map(const uint8_t *bytes, size_t len, size_t bss, uint64_t
 typedef struct dm_aot_pack dm_aot_pack;
 // The identity a pack's descriptor must match: the image it was compiled from
 typedef struct { uint8_t sha256[32]; uint64_t image_size, text_end, bss_size; } dm_aot_identity;
-// Load the pack's library for module m (mapped, relocated): dlopen (LoadLibrary on Windows), the descriptor of ABI 2 checked against id, the module's base
+// Load the pack's library for module m (mapped, relocated): dlopen (LoadLibrary on Windows), the descriptor of NXAOT_MODULE_ABI (3) checked against id, the module's base
 // written to *desc->base, the line table and function map indexed, the pack registered with the dispatcher. NULL with the reason in err when it does not load
 // or does not match
 dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identity *id, char *err, size_t errn);
@@ -129,6 +129,15 @@ uint64_t dm_aot_code_lo(void), dm_aot_code_hi(void);   // the lowest and highest
 #endif
 // Load module m's pack from dir with the identity of its image (the SHA-256 the loader computed over image.bin, its size, text and bss): 0, or 1 with the reason in err
 int dm_aot_load_module_pack(module_t *m, const char *dir, const uint8_t sha256[32], uint64_t image_size, uint64_t text_end, uint64_t bss, char *err, size_t errn);
+// The gates a module's manifest asks for (its obs and spin rows, design 1.1) against the gate sites its loaded pack's code calls (the descriptor's gates, ABI 3):
+// kind NXAOT_GATE_OBS (offset: the observed instruction; arg: the number | parameter << 8) or NXAOT_GATE_SPIN (offset: a back-edge; arg: its head). A site of
+// the pack's that no row names, or names otherwise, is a pack of another manifest: 1 with the reason in err. A row the pack does not serve (its code holds no
+// discovered function, nxaot build said so) is a [RED] line each, and *unserved their count: its observer or back-off does not run. 0 otherwise
+#ifndef DM_AOT_GATE_ROW
+#define DM_AOT_GATE_ROW   // loader.c declares the same (it is compiled into unit tests without the engine's headers)
+typedef struct dm_aot_gate_row { uint64_t offset, arg; uint32_t kind; } dm_aot_gate_row;
+#endif
+int dm_aot_pack_check_gates(const module_t *m, const dm_aot_gate_row *rows, int n, int *unserved, char *err, size_t errn);
 
 // ---------- Imports of the modules the engine maps (design 2.4) ----------
 // loader.c bind_sym: what an import of module m (named name) binds to, from the address v Apple would bind: unchanged for a module outside the arena (a test's hand-made image),
@@ -303,9 +312,14 @@ static inline uint64_t dm_gc_arg(uint64_t v, int isptr, const char *file, unsign
      (__typeof__((f)(__VA_ARGS__)))dm_gcall((const void *)(uintptr_t)(f), DM_GC_N(__VA_ARGS__)                                       \
                                             DM_GC_CAT(DM_GC_M, DM_GC_N(__VA_ARGS__))(DM_GC_N(__VA_ARGS__), __VA_ARGS__)))
 
-// Counters (the engine's own; the corpus test reads them)
+// Counters (the engine's own; the tests read them)
+//   misses               dispatcher misses that bound an inline cache to a standard entry: of the calling pack's, or of another pack's (cross_pack)
+//   cross_pack           of those, the ones into another pack: the inline cache then calls that pack's standard entry directly (the same signature, ABI 3)
+//   cross_pack_handovers calls into another pack of another signature or mode, handed over through jit_entry and that pack's enter at every call
+//   obs_gates, spin_gates  calls of the packs' gates (nxaot_rt_gate, design 1.1): observation gates, spin waits' back-edges
 typedef struct {
     uint64_t svcs, host_calls, misses, cross_pack, safepoints, jit_runs, jit_addresses, threads;
+    uint64_t cross_pack_handovers, obs_gates, spin_gates;
 } dm_aot_stats_t;
 void dm_aot_stats(dm_aot_stats_t *out);
 uint32_t dm_aot_guest_mxcsr(uint32_t fpcr);   // the MXCSR guest code runs with (7.1): exceptions masked, RMode as rounding control, FZ as FTZ and DAZ
@@ -318,9 +332,11 @@ DM_AOT_EXPORT void nxaot_rt_jit(dm_guest_state *st, uint64_t lr, uint64_t sp);
 DM_AOT_EXPORT void nxaot_rt_safepoint(dm_guest_state *st);
 DM_AOT_EXPORT uint64_t dm_aot_cntpct(dm_guest_state *st);
 // An observation gate or a spin wait's back-edge at guest address pc (a manifest's obs and spin rows, registered by loader.c in hle.c's gate table): st holds the whole register
-// file, which an observer may change (OBS_STDALLOC_INIT writes x2), so the caller reloads x0..x29 after it; a spin wait's back-off runs as an SVC frame (hle.c gate_dispatch).
-// The lifter's call of design 1.1: nxaot's packs (ABI 2) do not make it yet, so only the host calls it today (t_aot_module)
+// file, which an observer may change (OBS_STDALLOC_INIT writes x2), so the caller reloads x0..x29 after it; a spin wait's back-off runs as an SVC frame (hle.c gate_dispatch)
 DM_AOT_EXPORT void dm_aot_gate(dm_guest_state *st, uint64_t pc);
+// The lifter's call of design 1.1 (include/nxaot/aot_module.h): compiled code at the gate site at module offset site of its pack (an entry of the descriptor's gates)
+// with st holding the whole register file and st->pc; dm_aot_gate at the site's guest address, then a process stop leaves from here
+DM_AOT_EXPORT void nxaot_rt_gate(dm_guest_state *st, uint64_t site);
 
 // ---------- Faults (aot_fault.c) ----------
 void crash_install(void);                  // the fault handlers (signals on POSIX, a vectored exception handler on Windows); once

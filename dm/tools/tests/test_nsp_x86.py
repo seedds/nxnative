@@ -315,5 +315,19 @@ class Apple(unittest.TestCase):   # what the Apple builds run is as it was: no -
         self.assertTrue(notes[3].startswith('the GLSLC capture boots the game in the Mac host, which windows does not have'))
 
 
+class ProfileDirs(unittest.TestCase):   # DM_GAMES_DIR as the script joins it (os.pathsep), read by game.py: on Windows a ';' list of paths with drive letters
+    def test_split_on_pathsep(self):
+        with mock.patch.object(game.os, 'pathsep', ';'), mock.patch.dict(os.environ, {'DM_GAMES_DIR': r'C:\games\a_build\profile;;D:\more'}):
+            self.assertEqual(game.extra_dirs(), [Path(r'C:\games\a_build\profile'), Path(r'D:\more')], 'a drive letter\'s colon is no separator')
+
+    def test_profile_found_in_the_second_folder(self):
+        tmp = Path(tempfile.mkdtemp()).resolve(); self.addCleanup(shutil.rmtree, tmp)
+        (tmp / 'one').mkdir(); (tmp / 'two' / ID).mkdir(parents=True); (tmp / 'two' / ID / 'game.tsv').write_text(f'title_id\t{ID}\n')
+        joined = os.pathsep.join([str(tmp / 'one'), str(tmp / 'two')])   # as build_ipa_from_nsp.py writes it
+        with mock.patch.dict(os.environ, {'DM_GAMES_DIR': joined}):
+            self.assertEqual(game.extra_dirs(), [tmp / 'one', tmp / 'two'])
+            self.assertEqual(game.find_dir(ID), tmp / 'two' / ID)
+
+
 if __name__ == '__main__':
     unittest.main()

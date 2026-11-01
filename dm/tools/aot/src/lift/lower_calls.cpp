@@ -209,7 +209,7 @@ void FunctionLifter::FnRelative(uint64_t pc, IR::Block& block, const std::functi
         }
         return read(a - kProbeDelta);
     };
-    IR::Block probe = decode::TranslateBlock(pc + kProbeDelta, shifted, fpcr);
+    IR::Block probe = decode::TranslateBlock(pc + kProbeDelta, shifted, fpcr, nullptr, GateStops(kProbeDelta));
     passes(probe);
     auto a = block.begin();
     auto b = probe.begin();
@@ -615,6 +615,34 @@ void FunctionLifter::FnPoll(Value* pc, const Regs& dirty) {
     B.SetInsertPoint(cont);
 }
 
+// ---- The gates of design 1.1: observation gates and spin waits' back-edges ----
+
+decode::StopBefore FunctionLifter::GateStops(uint64_t delta) const {
+    if (!plan || plan->obs_gates.empty()) {
+        return {};
+    }
+    const std::set<uint64_t>* obs = &plan->obs_gates;
+    return [obs, delta](uint64_t a) { return a >= delta && obs->count(a - delta) > 0; };
+}
+
+void FunctionLifter::FnGate(uint64_t site, Value* pc, const Regs& dirty, bool reload) {
+    if (!plan->rt_gate) {
+        error = "a gate at " + llvm::utohexstr(site) + " without the run time's gate entry";
+        return;
+    }
+    // The block holds the whole register file at a gate, as on Apple the gate frame does (dm_gate saves every register): the observer reads it,
+    // and a thread the spin wait's back-off pauses has its context there (GetThreadContext3)
+    StoreRegs(plan->correctness ? Regs::All() : dirty);
+    FlushFpsr();
+    StoreField(pc, offsetof(dm_guest_state, pc));
+    auto* call = B.CreateCall(plan->rt_gate, {st, B.getInt64(site)});
+    call->setCallingConv(plan->rt_gate->getCallingConv());
+    if (reload) {
+        ReloadRegs(plan->correctness ? Regs::All() : Regs::X(0x3FFFFFFFu));  // x0..x29: an observer may change them (OBS_STDALLOC_INIT writes x2)
+    }
+    gates_emitted.insert(site);
+}
+
 // ---- The JIT fallback (section 11) ----
 
 void FunctionLifter::FnJitCall(uint64_t target, uint64_t call_pc) {
@@ -794,9 +822,14 @@ void FunctionLifter::FnTailIndirect(Value* target, uint64_t site) {
 // the load of the native entry beside the compare); a miss calls the dispatcher through a preserve_all wrapper, which looks the target up in the
 // module's table and replaces the slot's descriptor
 Value* FunctionLifter::FnDispatch(Value* target, uint64_t site) {
-    auto* slot = new llvm::GlobalVariable(M, B.getPtrTy(), false, llvm::GlobalValue::InternalLinkage, plan->ic_empty,
-                                          plan->ic_prefix + llvm::utohexstr(site));
-    slot->setAlignment(llvm::Align(8));
+    // One slot per guest call site: a site that two lifted blocks hold (a block that runs into a loop's head holds the loop's first instructions too, and the head's own
+    // block holds them again) shares its cache, so that what one copy learnt the other does not miss again
+    const std::string name = plan->ic_prefix + llvm::utohexstr(site);
+    llvm::GlobalVariable* slot = M.getNamedGlobal(name);
+    if (!slot) {
+        slot = new llvm::GlobalVariable(M, B.getPtrTy(), false, llvm::GlobalValue::InternalLinkage, plan->ic_empty, name);
+        slot->setAlignment(llvm::Align(8));
+    }
     auto* desc = B.CreateAlignedLoad(B.getPtrTy(), slot, llvm::Align(8), "ic");
     desc->setAtomic(llvm::AtomicOrdering::Unordered);
     Value* guest = B.CreateAlignedLoad(B.getInt64Ty(), desc, llvm::Align(8), "ic_guest");
@@ -918,6 +951,16 @@ void FunctionLifter::FnLowerTerminal(const IR::Terminal& t) {
 
 void FunctionLifter::FnGoto(Value* target) {
     if (const auto off = OffsetOf(target)) {
+        if (cur_end >= 4) {
+            // A spin wait's back-edge taken back to its head (design 1.1): the host's back-off, as Apple's copy of the loop passes its spin gate
+            // on that edge. Then the edge's safepoint poll, as any backward branch's
+            const auto spin = plan->spin_gates.find(cur_end - 4);
+            if (spin != plan->spin_gates.end() && spin->second == *off) {
+                Regs dirty = cur_dirty;
+                dirty.nzcv = dirty.nzcv && nzcv_live.count(*off);
+                FnGate(cur_end - 4, Rel(*off), dirty, false);
+            }
+        }
         const auto it = bbs.find(*off);
         if (it != bbs.end()) {
             if (*off <= cur_start) {

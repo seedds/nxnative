@@ -73,7 +73,15 @@ public:
     // ---- Phase 1: translate the region's blocks and check their opcodes ----
     void Discover(Lifted& out);
     static void Successors(const IR::Terminal& t, const IR::Block& block, std::vector<uint64_t>& out);
-    bool InRegion(uint64_t pc) const { return pc >= region.lo && pc < region.hi; }
+    bool InRegion(uint64_t pc) const {
+        if (pc >= region.lo && pc < region.hi) return true;
+        for (const auto& [lo, hi] : region.extra) {
+            if (pc >= lo && pc < hi) return true;
+        }
+        return false;
+    }
+    // Function mode: the translation stops before an observation gate's instruction, which then starts a block (the gate comes before it)
+    decode::StopBefore GateStops(uint64_t delta = 0) const;
 
     // ---- Phase 2: lowering ----
     void Prologue();
@@ -309,6 +317,10 @@ public:
     // A safepoint poll (section 6.2): one compare and branch on st->poll; the cold path stores the dirty registers and pc (the block then holds
     // the whole register file) and calls plan->rt_safepoint
     void FnPoll(Value* pc, const Regs& dirty);
+    // A gate of design 1.1 (FunctionPlan::obs_gates, spin_gates): the dirty registers and pc to the block (it then holds the whole register file),
+    // plan->rt_gate(st, site), and with reload x0..x29 from the block again (an observer may change them)
+    void FnGate(uint64_t site, Value* pc, const Regs& dirty, bool reload);
+    std::set<uint64_t> gates_emitted;                   // the gate sites the function's code calls (Lifted::gates)
 };
 
 }  // namespace nxaot::lift::detail

@@ -43,7 +43,8 @@ configure_file(src/nxaot_lock.h.in "${CMAKE_CURRENT_BINARY_DIR}/gen/nxaot_lock.h
 # LLVM: the shared libLLVM where the package was built with one (the Ubuntu packages of the image are), else the static component libraries.
 # NXAOT_LLVM_STATIC=ON links the components statically, as the distributed nxaot will be (aot-recompiler.md section 13)
 option(NXAOT_LLVM_STATIC "Link the LLVM component libraries statically instead of libLLVM" OFF)
-set(NXAOT_LLVM_COMPONENTS core support orcjit native nativecodegen asmparser asmprinter passes analysis mc transformutils)
+set(NXAOT_LLVM_COMPONENTS core support orcjit native nativecodegen asmparser asmprinter passes analysis mc transformutils mcdisassembler
+    ${LLVM_NATIVE_ARCH}disassembler object)
 
 # dynarmic: the A64 frontend (the lifter's semantics) and the x86-64 backend (the reference executor of nxaot_vec). Its own tests, the A32 frontend and its
 # precompiled headers are off; warnings of vendored code are not ours to fix
@@ -201,5 +202,9 @@ add_test(NAME cache COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/te
 # another pack may be the callee)
 add_test(NAME plan COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_plan.py" --nxaot $<TARGET_FILE:nxaot>
          --work "${CMAKE_CURRENT_BINARY_DIR}/plan")
+# The line table (aot-recompiler.md section 3.5): every entry of every corpus pack and of the synthetic modules' names an x86 load or store of its
+# function's body and the A64 load or store of that function's guest code it was lifted from (nxaot lines)
+add_test(NAME lines COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lines.py" --nxaot $<TARGET_FILE:nxaot>
+         --work "${CMAKE_CURRENT_BINARY_DIR}/lines")
 set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census discover manifest corpus_ref corpus_native corpus_funcdiff corpus_jit
-                     corpus_threads safepoints cache plan PROPERTIES TIMEOUT 900)
+                     corpus_threads safepoints cache plan lines PROPERTIES TIMEOUT 900)

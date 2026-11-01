@@ -10,8 +10,10 @@
 //     from there; host functions the host writes into guest memory (t_hf_install: dm_guest_fnptr), one with a thunk, one without (its stub answers 0, with a [RED] line when
 //     handed over and an UNIMPL line when called); a guest thread the host creates through hle_guestthread.c (the module's own nn::os functions and malloc, its thread entry
 //     the slot of spawn_tramp), whose host body calls the module's synth_triple on the new thread; an NRO loaded at run time through hle_ro.c (loader.c loader_nro_map:
-//     its nro.tsv row, its image mapped from the game's bytes, its pack loaded, its strlen import bound, its DT_INIT a guest call), a symbol looked up in it and called
-//     (a call into another pack), main's own import of it rebound at the load and again at UnloadModule
+//     its nro.tsv row, its image mapped from the game's bytes, its pack loaded, its strlen import bound, its DT_INIT a guest call), two symbols looked up in it and
+//     called four times in a loop, one of them calling main back (calls between packs: the dispatcher binds the call site's inline cache to the other pack's standard
+//     entry, whose signature every pack shares since ABI 3, so after the first pass no call reaches the host; t_hf_mark snapshots the counters after the first pass and
+//     after the last), main's own import of it rebound at the load and again at UnloadModule
 //   then the host calling the module's code back (aot.h dm_gcall, DM_GUEST_CALL: the form of the host's plain-pointer call sites): main registers its callback hf_cb with
 //     t_re_register; t_re_fire calls it from inside that host call on the same thread (nested re-entry), with ten arguments (two on the guest stack) and x22 kept around it;
 //     t_re_deep nests two levels (host, guest, host, guest); t_re_thread calls it from a guest thread the host creates (the audio renderer's render thread is one);
@@ -54,6 +56,9 @@ Result h_ro_LoadModule(void *mod, const void *image, void *buf, size_t size, int
 Result h_ro_LookupModuleSymbol(uintptr_t *out, const void *mod, const char *name);
 void h_ro_UnloadModule(void *mod);
 extern _Atomic uint64_t g_t_hf_calls[3];
+void t_hf_mark(uint64_t phase);
+extern dm_aot_stats_t g_t_hf_mark[2];   // the engine's counters after the cross-pack loop's first pass and after its last
+extern _Atomic int g_t_hf_marks;
 struct t_re_seen { int fire_depth, leaf_depth, thread_other, host_fresh, host_ctx, signalled, stop_left, stop_depth, stop_status, stop_resumed; uint64_t stop_r; };
 extern struct t_re_seen g_re_seen;     // what the t_re_* entries saw (t_aot_hostfn_entries.c)
 extern pthread_mutex_t g_re_stop_mu;   // t_re_stop's lock
@@ -64,12 +69,12 @@ extern struct t_ga_seen g_ga_seen;
 static int below_2_39(uint64_t a, uint64_t n) { return dm_aot_in_arena(a, n) && a + n <= 1ull << 39; }
 
 // aot_synth.py's HF_EXPECTED (results[12], the pointer t_hf_get handed over, is checked against the slot of t_hf_mul)
-static const uint64_t EXPECTED[12] = {19, 0x40200000, 1030, 1056, 123, 0, 42, 0, 0, 1012, 77, 0};
+static const uint64_t EXPECTED[12] = {19, 0x40200000, 1030, 1056, 123, 0, 42, 0, 0, 4048, 77, 0};
 static const char *const STEP[12] = {"strlen through the GOT (the C library passthrough)", "sqrtf(6.25f) through the GOT, the float's bits",
                                      "the host function t_hf_get returned, called with blr", "the same, from the module's table hf_vt[1]",
                                      "hf_vt2[0], written by the host through dm_guest_fnptr (t_hf_add)", "hf_vt2[1], a host function with no thunk: its stub answers 0",
                                      "t_hf_spawn: a guest thread made through hle_guestthread.c ran synth_triple(14)", "nn::ro::LoadModule of sub.nro",
-                                     "nn::ro::LookupModuleSymbol(sub_fn)", "sub_fn(5) in the NRO's pack: 5 + strlen + the flag its DT_INIT set",
+                                     "nn::ro::LookupModuleSymbol(sub_fn)", "sub_fn(5) in the NRO's pack, four passes of the cross-pack loop: 4 x (5 + strlen + the flag its DT_INIT set)",
                                      "sub_value through main's GOT, bound to the NRO at its load", "sub_value through main's GOT after UnloadModule: the stub again"};
 // aot_synth.py HF_EXPECTED[13..19]: the host calling guest code back (results[18], the event's binding, is any non-zero value)
 static const uint64_t RE_EXPECTED[7] = {1045, 0x1234, 116, 1054, 1064, 0, 0};
@@ -78,7 +83,12 @@ static const char *const RE_STEP[7] = {"t_re_fire(1): hf_cb(data, 1, 2..9) calle
                                        "t_re_thread(10): hf_cb from a guest thread the host created (hle_guestthread.c)",
                                        "t_re_hostthread(20): hf_cb from a host thread that is no guest thread (a guest context of its own)", "(the binding)",
                                        "svcWaitSynchronization(timeout 0) on the readable handle of the event t_re_bind bound and signalled"};
-enum { HF_GOT_STRLEN, HF_GOT_SQRTF, HF_GOT_GET, HF_GOT_INSTALL, HF_GOT_SPAWN, HF_GOT_LOAD, HF_GOT_LOOKUP, HF_GOT_SUB_VALUE, HF_GOT_UNLOAD };   // aot_synth.py HF_GOT_SYMS
+// aot_synth.py HF_EXPECTED[20..21]: the cross-pack loop
+static const uint64_t CROSS_EXPECTED[2] = {88, 0};
+static const char *const CROSS_STEP[2] = {"sub_call(synth_triple, 7) four times: the NRO's pack calls main's synth_triple back, 4 x (21 + 1)",
+                                          "nn::ro::LookupModuleSymbol(sub_call)"};
+enum { HF_CROSS_SITES = 3 };   // the loop's calls between packs: main -> sub_fn, main -> sub_call, sub_call -> main's synth_triple
+enum { HF_GOT_STRLEN, HF_GOT_SQRTF, HF_GOT_GET, HF_GOT_INSTALL, HF_GOT_SPAWN, HF_GOT_LOAD, HF_GOT_LOOKUP, HF_GOT_SUB_VALUE, HF_GOT_UNLOAD, HF_GOT_MARK = 17 };   // aot_synth.py HF_GOT_SYMS
 enum { SUB_GOT = 0x2000, SUB_FLAG = 0x2008 };   // aot_synth.py: the NRO's GOT slot (strlen) and the word its DT_INIT sets
 
 // ---------- The child: one run ----------
@@ -123,7 +133,8 @@ static void *guest_main(void *arg) {
           "GOT: strlen and sqrtf at the slots of the passthrough's libc_strlen and libc_sqrtf (%#llx, %#llx)", (unsigned long long)got[HF_GOT_STRLEN],
           (unsigned long long)got[HF_GOT_SQRTF]);
     check(is_slot_of(got[HF_GOT_GET], (const void *)t_hf_get, "t_hf_get") && is_slot_of(got[HF_GOT_INSTALL], (const void *)t_hf_install, "t_hf_install") &&
-          is_slot_of(got[HF_GOT_SPAWN], (const void *)t_hf_spawn, "t_hf_spawn"), "GOT: the test's entries at their slots");
+          is_slot_of(got[HF_GOT_SPAWN], (const void *)t_hf_spawn, "t_hf_spawn") && is_slot_of(got[HF_GOT_MARK], (const void *)t_hf_mark, "t_hf_mark"),
+          "GOT: the test's entries at their slots");
     check(is_slot_of(got[HF_GOT_LOAD], (const void *)h_ro_LoadModule, "h_ro_LoadModule") && is_slot_of(got[HF_GOT_LOOKUP], (const void *)h_ro_LookupModuleSymbol, "h_ro_LookupModuleSymbol") &&
           is_slot_of(got[HF_GOT_UNLOAD], (const void *)h_ro_UnloadModule, "h_ro_UnloadModule"), "GOT: nn::ro's forced take-overs (hle_ro.c) at their slots");
     check(dm_aot_stub_index(got[HF_GOT_SUB_VALUE]) >= 0, "GOT: sub_value, which no loaded module defines yet, at stub slot %ld", dm_aot_stub_index(got[HF_GOT_SUB_VALUE]));
@@ -164,6 +175,26 @@ static void *guest_main(void *arg) {
               "the NRO's pack sub.aot.so is loaded, its strlen import at the passthrough's slot, its DT_INIT ran (sub_flag %llu)", (unsigned long long)sf);
     }
     check(dm_aot_stub_index(got[HF_GOT_SUB_VALUE]) >= 0, "GOT: sub_value at its stub slot again after UnloadModule");
+    // Calls between packs (ABI 3): both packs record the standard entries' one signature, so the dispatcher binds each call site to the other pack's entry and later passes
+    // go there directly; nothing goes through jit_entry, the other pack's enter or the JIT fallback
+    for (int i = 0; i < 2; i++)
+        check(results[20 + i] == CROSS_EXPECTED[i], "results[%d] = %#llx (expected %#llx): %s", 20 + i, (unsigned long long)results[20 + i],
+              (unsigned long long)CROSS_EXPECTED[i], CROSS_STEP[i]);
+    const dm_aot_pack *sp2 = NULL;
+    if (sub) dm_aot_find((uint64_t)(uintptr_t)sub->base + 0x80, &sp2);
+    check(sp2 && nxaot_same_std_abi(dm_aot_pack_desc(p), dm_aot_pack_desc(sp2)) && dm_aot_pack_desc(p)->std_x == 0xFFu && dm_aot_pack_desc(p)->std_v == 0xFFu &&
+          dm_aot_pack_desc(p)->rv == 0, "main's and sub's packs record the same standard-entry signature (x0..x7, v0..v7 in host registers, rv 0)");
+    const dm_aot_stats_t *w0 = &g_t_hf_mark[0], *w1 = &g_t_hf_mark[1];
+    check(g_t_hf_marks == 2 && w0->cross_pack == HF_CROSS_SITES && w1->misses == w0->misses && w1->cross_pack == w0->cross_pack &&
+          w1->cross_pack_handovers == 0 && w1->jit_addresses == 0 && w1->jit_runs == 0,
+          "the cross-pack loop: its %d call sites bound in the first pass (%llu cross-pack bindings), then %llu dispatcher misses over the other 3 passes (9 calls between "
+          "the packs), %llu hand-overs through jit_entry, %llu JIT addresses", HF_CROSS_SITES, (unsigned long long)w0->cross_pack,
+          (unsigned long long)(w1->misses - w0->misses), (unsigned long long)w1->cross_pack_handovers, (unsigned long long)w1->jit_addresses);
+    dm_aot_stats_t se;
+    dm_aot_stats(&se);
+    check(se.cross_pack == HF_CROSS_SITES + 1 && se.cross_pack_handovers == 0,
+          "after the loop, sub_value through main's GOT: one more call site bound to the NRO's pack (%llu in all), still no hand-over (%llu)",
+          (unsigned long long)se.cross_pack, (unsigned long long)se.cross_pack_handovers);
     // The host calling guest code back
     for (int i = 0; i < 7; i++)
         if (i != 5) check(results[13 + i] == RE_EXPECTED[i], "results[%d] = %#llx (expected %#llx): %s", 13 + i, (unsigned long long)results[13 + i], (unsigned long long)RE_EXPECTED[i], RE_STEP[i]);
@@ -217,9 +248,11 @@ static int child(const char *dir) {
     pthread_join(th, NULL);
     dm_aot_stats_t s;
     dm_aot_stats(&s);
-    printf("t_aot_hostfn: run status %d, %d checks, %d failed; %llu SVCs, %llu host calls, %llu dispatcher misses, %llu cross-pack calls, %llu threads\n", g_status,
-           g_checks, g_fails, (unsigned long long)s.svcs, (unsigned long long)s.host_calls, (unsigned long long)s.misses, (unsigned long long)s.cross_pack,
-           (unsigned long long)s.threads);
+    const unsigned long long warm = g_t_hf_marks == 2 ? (unsigned long long)(g_t_hf_mark[1].misses - g_t_hf_mark[0].misses) : ~0ull;
+    printf("t_aot_hostfn: run status %d, %d checks, %d failed; %llu SVCs, %llu host calls, %llu dispatcher misses (%llu after the cross-pack loop's warm-up), "
+           "%llu cross-pack calls bound in inline caches, %llu cross-pack hand-overs, %llu JIT addresses, %llu threads\n", g_status, g_checks, g_fails,
+           (unsigned long long)s.svcs, (unsigned long long)s.host_calls, (unsigned long long)s.misses, warm, (unsigned long long)s.cross_pack,
+           (unsigned long long)s.cross_pack_handovers, (unsigned long long)s.jit_addresses, (unsigned long long)s.threads);
     fflush(NULL);
     _exit(g_fails ? 1 : g_status);
 }

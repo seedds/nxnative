@@ -81,6 +81,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (SDK 20).
 - **Note:** the same SDK's other `AudioRenderSystem` layout is in [SDK 20's `AudioRenderSystem` layout](#sdk-20s-audiorendersystem-layout).
 
+### Several renderers open at once
+
+- **Symptom:** `[RED] audren: a second renderer (the host drives only one)` on a game that really opens two, with the first renderer's sound barely audible (85 of 36,000 rendered frames non-silent), and after the intro the game freezes with its frame counter stopped while audio callbacks go on. The hitch dump (`DM_HITCH_DUMP`) shows the main thread waiting for a mutex that another thread owns, and that thread in `nn::os::WaitSystemEvent` (a loop around `ReleaseVoiceSlot`, `RequestUpdateAudioRenderer`, `IsMemoryPoolAttached`).
+- **Cause:** the host kept one renderer in globals (handle, open flag, render thread, catch-up queue, resampler history), so a second `OpenAudioRenderer` was refused and started no render thread. Nothing signalled that renderer's event, and the thread that released its voices and memory pools waited for it forever, holding the game's render mutex.
+- **Fix:** `hle_audren.c` keeps this state per renderer (`ar_t`, up to `AR_MAX` = 4): each renderer has its own render thread, its own host PCM output (up to 8 outputs exist) and its own catch-up queue, and the SDK's render and update hooks find their renderer by the system pointer (`ar_for`: seen before, else handle + 0x60, else the renderer of the calling render thread). Rendering itself stays serialized by one lock.
+- **Found on:** [Red Dead Redemption](../../dm/games/01007820196A6000/README.md): RAGE opens two renderers.
+
 ### A renderer below 48 kHz with no upsampler on the CPU
 
 - **Symptom:** SIGSEGV at address 0x18 in `UpsamplerManager::Allocate` on the render thread.

@@ -656,6 +656,8 @@ static vis_buf g_vis_ring[VIS_RING]; static int g_vis_ring_n, g_vis_ring_i = -1;
 static id<MTLBuffer> g_vis; static uint32_t g_vis_n;   // This submission's visibility buffer and number of slots used
 static int vis_in_ring(id<MTLBuffer> b) { for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].buf == b) return 1; return 0; }
 static int g_vis_on, g_vis_counting, g_vis_cur = -1; static uint64_t g_vis_cur_pass;
+static void post(post_op o);
+static int g_occ_delta; static uint64_t g_occ_cum;   // a game that never calls ResetCounter(SAMPLES_PASSED) reads the counter as a running total (see the report handling): g_occ_delta at encode time, g_occ_cum (the total so far) at completion, in submission order
 static vis_slot *g_vs; static int g_nvs, g_vscap;      // Slots since the last reset
 static uint64_t g_cnt_report[32], g_cnt_reset[32];       // Report / reset counts per counter type (diagnostics)
 static void vis_clear(void) { for (int i = 0; i < g_nvs; i++) CFRelease(g_vs[i].buf); g_nvs = 0; g_vis_cur = -1; }
@@ -823,6 +825,7 @@ void mtl_sub_begin(void) {
     // The overflow buffer created when the previous submission ran out of slots (see g_vis_n >= VIS_SLOTS): retire it. It used to be just cleared here and stayed in the residency set for good (from d2r-mobile 2eb575877)
     if (g_vis && !vis_in_ring(g_vis)) defer_obj_release(g_vis);
     g_npost = 0; g_vis = nil; g_vis_n = 0; g_vis_cur = -1; pend_reset();
+    if (g_occ_delta && g_nvs) { post((post_op){5, NULL, 0, 0, 0, 0, vis_snapshot()}); vis_clear(); }   // the previous submission's visibility buffer is reused later: take its samples into the total now
     zskip_clear(); g_zskip_count = 0;
     int pick = -1;
     for (int i = 0; i < g_vis_ring_n; i++) if (g_vis_ring[i].fence <= g_done) { pick = i; break; }
@@ -1504,7 +1507,13 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
         else if (ops[i].kind == 3) {   // Samples passed: the sum of all slots since the reset
             vis_list *l = ops[i].vis; uint64_t sum = 0;
             for (int k = 0; k < l->n; k++) { sum += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
-            free(l); uint64_t rec[2] = {sum, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
+            free(l); if (ops[i].mode) sum = g_occ_cum += sum;   // running total
+            uint64_t rec[2] = {sum, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
+        }
+        else if (ops[i].kind == 5) {   // samples of draws no report has taken yet, folded into the running total before their visibility buffer is reused
+            vis_list *l = ops[i].vis;
+            for (int k = 0; k < l->n; k++) { g_occ_cum += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
+            free(l);
         }
         else if (ops[i].kind == 4) mirror_rb_land(ops[i].vis);
         else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {(ops[i].type == 0 || ops[i].type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // render_cond: a timestamp report's counter field is 0, as on the GPU (see rc_value)
@@ -7071,6 +7080,7 @@ static int img_atomic_ok(id<MTLTexture> t, const nvn_rbind *b) {
 // Snapshot substitution for same-pass feedback sampling (registered by fb_prepare, used by encode_args; see the notes before draw)
 static uint64_t g_draw_seq, g_fb_seq, g_fb_count; static int g_fb_n, g_fb_rebind;
 static __unsafe_unretained id<MTLTexture> g_fb_src[4]; static __strong id<MTLTexture> g_fb_use[4]; static uint64_t g_fb_rid[4];
+static int g_fbd_dirty;   // the scene depth changed since its feedback snapshot (a depth-writing draw or a clear; see fb_prepare)
 static uint8_t g_args_dirty[6] = {1, 1, 1, 1, 1, 1};
 static uint64_t g_args_reg_seen, g_args_dirty_seen, g_args_ser_seen;
 static inline void args_dirty_all(void) { memset(g_args_dirty, 1, sizeof g_args_dirty); }
@@ -9140,6 +9150,7 @@ static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUI
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
 static void fb_prepare(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
+    if (R.rt.depth && S.ds.dw) g_fbd_dirty = 1;   // this draw writes the depth a snapshot would hold
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
     if (!pr || !pr->sh[1] || !R.rt.n || g_fz.active || g_defer_replaying || !fb_mode()) return;
     NvShader *fs = pr->sh[1];
@@ -9147,11 +9158,12 @@ static void fb_prepare(NvProg *pr) {
     uint32_t wm = 0;   // the attachments this draw writes
     for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k] && ((S.chmask.mask >> (4 * k)) & 0xf) && (fs->rf.color_known ? fs->rf.color_mask >> k & 1 : 1)) wm |= 1u << k;
     if (g_enc && (wm & g_fb_rmask)) { g_fb_split++; rp_end(); fb_pass_sync(); }   // an earlier draw of this pass read an attachment this one writes: it must not see these writes
-    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= NTEX) continue;
-        int tid = (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff); if (!tid) continue;
+    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i]; if ((b->kind != NVN_RB_TEX && b->kind != NVN_RB_TEXU) || (b->kind == NVN_RB_TEX && b->reg >= NTEX) || (b->kind == NVN_RB_TEXU && b->n)) continue;
+        int tid = b->kind == NVN_RB_TEXU ? ubo_tex_id(ubo_handle(1, b->reg, b->off)) : (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff); if (!tid) continue;   // TEXU: the handle is in a uniform buffer (RDR); an array of handles is not looked at here
         os_unfair_lock_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0; os_unfair_lock_unlock(&g_rmu);
         if (!ser) continue;
-        for (int k = 0; k < R.rt.n && k < 8 && g_fb_n < 4; k++) { if (!R.rt.color[k] || R.rt.color[k]->serial != ser) continue;
+        for (int k = 0; k <= 8 && g_fb_n < 4; k++) { if (k < 8 ? (k >= R.rt.n || !R.rt.color[k]) : (!R.rt.depth || !S.ds.dt || S.ds.dw)) continue;   // k == 8: the depth attachment (a lighting draw that rebuilds positions from the scene depth it is also tested against)
+            if ((k < 8 ? R.rt.color[k]->serial : R.rt.depth->serial) != ser) continue;
             uint64_t aser; int lv, sl; rt_sub(&R.rt, k, &aser, &lv, &sl);
             os_unfair_lock_lock(&g_rmu); void *tv = NULL; tex_fast_rid(tid, &tv); id<MTLTexture> t = (__bridge id<MTLTexture>)tv; os_unfair_lock_unlock(&g_rmu);
             if (!t) continue;
@@ -9160,7 +9172,7 @@ static void fb_prepare(NvProg *pr) {
             if (tl + t.mipmapLevelCount <= (NSUInteger)lv || tl > (NSUInteger)lv) continue;   // the sampled levels do not include the attachment's level (mip generation etc.): not feedback
             NSUInteger tn = t.textureType == MTLTextureType2DArray || t.textureType == MTLTextureTypeCubeArray || t.textureType == MTLTextureType2DMultisampleArray ? t.arrayLength * (t.textureType == MTLTextureTypeCubeArray ? 6 : 1) : t.textureType == MTLTextureTypeCube ? 6 : 1;
             if (ts + tn <= (NSUInteger)sl || ts > (NSUInteger)sl) continue;   // nor its layer: not feedback
-            if (g_fb_mode == 1 && !((wm | g_fb_wmask) >> k & 1)) { g_fb_rmask |= 1u << k; continue; }   // nothing in this pass has written it so far: read directly
+            if (k < 8 && g_fb_mode == 1 && !((wm | g_fb_wmask) >> k & 1)) { g_fb_rmask |= 1u << k; continue; }   // nothing in this pass has written it so far: read directly
             // Mip-chain passes (render level n while the view covers the chain, sampling a lower level): the draw samples a view of the levels below n instead, with the same base and
             // so the same level numbers. Sampling the full view read the attachment's level too: a linear mip filter fetches the next level even at weight 0, and on Apple's GPUs an
             // attached level read through a texture holds no defined data. Donkey Kong Bananza's environment cube (128x128, 8 levels, R11G11B10F, levels 1..7 each drawn from the one
@@ -9180,13 +9192,14 @@ static void fb_prepare(NvProg *pr) {
                 RED_ONCE(80, "same-pass feedback sampling: the sampled view is not a single-level 2D view of the attachment's level and layer (type %lu levels %lu+%lu layer %lu, attachment level %d layer %d, shader %s); left as is", (unsigned long)t.textureType, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)ts, lv, sl, fs->key);
                 continue; }
             NSUInteger w = MAX(base.width >> lv, 1ul), h = MAX(base.height >> lv, 1ul); int fresh;
-            fb_cache_t *e = fb_snap(ser, lv, sl, base.pixelFormat, w, h, g_fb_mode == 2, &fresh); if (!e) continue;
+            fb_cache_t *e = fb_snap(ser, lv, sl, base.pixelFormat, w, h, g_fb_mode == 2 || (k == 8 && g_fbd_dirty), &fresh); if (!e) continue;
             id<MTLTexture> snap = e->snap;
             if (fresh) {
                 if (g_enc) rp_end();
                 id<MTL4ComputeCommandEncoder> be = blit(); enc_b_copy_texture(be, base, (NSUInteger)sl, (NSUInteger)lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), snap, 0, 0, MTLOriginMake(0, 0, 0));
             } else if (g_enc && (g_fb_rmask >> k & 1)) rp_end();   // an earlier draw of this pass read the attachment directly: it must not see this pass's writes
             if (!g_enc) fb_pass_sync();
+            if (k == 8) g_fbd_dirty = 0;   // this snapshot holds the depth as it is now
             MTLTextureSwizzleChannels sw = t.swizzle;
             int same = t.pixelFormat == snap.pixelFormat && sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
             id<MTLTexture> use = same ? snap : [snap newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:sw];
@@ -10910,6 +10923,7 @@ static void clear_color_tri(const p_clear_color *c) {
        (unsigned long)sc.x, (unsigned long)sc.y, (unsigned long)sc.width, (unsigned long)sc.height, c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
 }
 static void clear_ds_tri(const p_clear_ds *c) {
+    g_fbd_dirty = 1;   // the depth a feedback snapshot holds changes
     unsigned want_s = (unsigned)c->stencil_mask & 0xff;
     if (!c->depth_mask && !want_s) return;
     id<MTL4RenderCommandEncoder> en = rp_begin();
@@ -10962,7 +10976,11 @@ void mtl_exec(const uint8_t *p) {
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8); g_cnt_report[t & 31]++;
                 PD("Q report type=%llu cmd=%p dst=%#llx", (unsigned long long)t, p, (unsigned long long)ad);
                 if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : 2);
-                if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) { post((post_op){3, NULL, 0, 0, ad, (uint32_t)t, vis_snapshot()}); g_vis_cur = -1; }
+                if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) {
+                    // The NVN counter is a running total: a game may never reset it and subtract two reports (Red Dead Redemption: about 108 reports a frame, no ResetCounter, and a draw it takes for hidden when the difference is 0, so far
+                    // characters lost their bodies). Until a reset is seen, counting starts with the first report and every report writes the total so far
+                    if (!g_vis_on) { g_vis_on = g_vis_counting = g_occ_delta = 1; if (g_enc && !g_enc_has_vis) { PD("M %llu occlusion query counting starts: render pass split here", g_stat_pass); rp_end(); } }
+                    post((post_op){3, NULL, (uint32_t)g_occ_delta, 0, ad, (uint32_t)t, vis_snapshot()}); if (g_occ_delta) vis_clear(); g_vis_cur = -1; }
                 else mtl_sub_counter(ad, (uint32_t)t);
                 break; }
             case OP_RENDER_COND: { const p_render_cond *rc = a;   // recorded only with the profile key render_cond (hle_nvn.c)
@@ -10978,7 +10996,7 @@ void mtl_exec(const uint8_t *p) {
 #ifdef NVN_RT_RANGE_TEST
                     rr_reset();
 #endif
-                    g_vis_on = 1; g_vis_counting = 1; vis_clear();
+                    g_occ_delta = 0; g_vis_on = 1; g_vis_counting = 1; vis_clear();
                     // The first reset can come inside a render pass that was begun without a visibility buffer (Octopath Traveler 0: Unreal's occlusion queries, once at boot): split the pass
                     // here, so the continuation is begun with the buffer and its samples are counted (they used not to be: RED "occlusion query counting began in a pass without a visibility buffer")
                     if (g_enc && !g_enc_has_vis) { PD("M %llu occlusion query counting starts: render pass split here", g_stat_pass); rp_end(); } }

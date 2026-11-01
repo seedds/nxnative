@@ -1,0 +1,12 @@
+# Boot smoke route for scripts/regress.py (docs/development.md, The regression harness): key <TAB> value
+# A save from the cabin after the new-game intro (saves/farm in the NSP folder: RDR2SAVE0.SAV and the rest of the game's save folder). Plus and A alternate from 22 s through the legal screens and the title,
+# A three more times at 75 s until John has control (the minimap shows at about 85 s), LUp walks him out of the cabin from 100 s; he stands in the farm view with the tree in front of the barn from about 112 s.
+# The game runs at 29.9 frames a second from its first frame at about 12 s (frame 3,070 at 115 s). No screenshot before he stands: where the walk ends moves from run to run
+save	saves/farm
+keys	22:Plus*6/8,25:A*6/8,75:A*3/6,100:LUp~4,108:LUp~2
+secs	140
+quick	60
+reach	2900@115
+window	112	26
+shots	118,128
+hang	20

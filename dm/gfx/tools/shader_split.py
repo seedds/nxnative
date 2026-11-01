@@ -24,6 +24,8 @@
 #   · Trinity packs (Game Freak, Pokémon Legends: Z-A): BNSH inside the files of arc/data.trpfs (Oodle Mermaid, decoded by the game's own decoder in the Mac host), see trpfs_jobs and trinity_shaders
 #   · SPK (Capcom's MT Framework, The Great Ace Attorney Chronicles): the shader package inside an ARC archive (zlib entries), code area + control section per shader, see mtarc_members and mtspk_shaders
 #   · BEA (NintendoWare Bezel Engine archives, Big Brain Academy: Brain vs. Brain): BNSH in the .bfsha entries of the archives (zstd entries), see bea_members
+#   · pk (Double Eleven's packages, Red Dead Redemption's language selection): zlib members of a .pkdswitch listed by its .pkiswitch, GLSLC outputs inside, see pk_members
+#   · RPF6 (Rockstar's RAGE, Red Dead Redemption): 'rgxd' shader resources in the zstd entries of the AES-encrypted RPF6 archives (key in main), a code area and a control section per record, see rpf6.py and rgxd_shaders
 #   · MGFX (MonoGame effects, Celeste, Bastion): the effects in its XNB files and SpriteBatch's in main, each shader a control section and a code area (version 5: a whole GLSLC output), see mgfx_effect
 #   · dvdbnd (FromSoftware, Dark Souls Remastered): GLSLC outputs in the BND3 archives (DCX zlib entries) of the .bdt files, indexed by the .bhd5 beside each, see bhd5_entries and bdt_shaders
 #   · data.arc (Super Smash Bros. Ultimate, smash_arc.py): GLSLC outputs in its SSBH shader databases and BNSH in its effects and UI layouts, each of its current files (zstd) scanned, see smash_arc_jobs
@@ -59,7 +61,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../games')); import game as _game
 from profile_guess import glsl_sources
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import uepak
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import uepak, rpf6
 GAME = _game.load()   # the current game profile (DM_GAME, required): source group rules and the table header note
 GROUPS, NOTE = GAME.pairs('shader_groups'), GAME.get('shader_note')
 KEY_SKIP = tuple(int(x, 0) for x in GAME.get('shader_key_skip', '0+0').split('+'))   # control bytes the keys hash as zeros (key_ctl); dm/games/game.py checks the form
@@ -2359,7 +2361,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#RGXD@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -2445,6 +2447,61 @@ UE_TAG ={'SV': 'vs', 'SH': 'hs', 'SD': 'ds', 'SG': 'gs', 'SP': 'ps', 'SC': 'cs'}
 def main_imports(img):   # the names main imports (its dynamic symbols)
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../tools')); import nso_syms
     return {s for s, defined, _ in nso_syms.dynsyms(img) if not defined}
+
+RGXD = b'rgxd'
+def rgxd_shaders(d, label):
+    """Red Dead Redemption's shader resources ('rgxd', the RAGE shader files in shaders.rpf, rpf6.py): after the reflection names, each shader is a record {u32 0x19866891, u32 code length,
+    u32 length of the control section and what follows it}, then the code area (SPH first) and the control section, the reverse of a GLSLC output's order; the record's length can exceed the control section's own (+0x20, 0x880) by a trailer of up to 0x54 bytes, which is not part of the shader. Every record is one stage (3,413 in shaders.rpf: 2,089 vertex, 1,324
+    pixel); the engine binds vertex and pixel programs by name at run time, so they are paired as single-stage programs (separable_pairs). main holds 168 more of these records, byte-packed
+    (not 4-byte aligned) behind the names of the resources they belong to ('Proj', '_Blit'): the language selection and loading screens' shaders"""
+    out = []
+    for m in re.finditer(b'\x91\x68\x86\x19', d):
+        h = m.start()
+        if h + 12 > len(d): continue
+        nk, nctl = struct.unpack_from('<II', d, h + 4); c = h + 12 + nk
+        if nctl < 0x760 or c + nctl > len(d) or d[c:c + 4] != CTL_MAGIC: continue
+        own = struct.unpack_from('<I', d, c + 0x20)[0]   # the control section's own length; the record's can be up to 0x54 bytes longer (a trailer: 0x88c, 0x8a4 … for 0x880)
+        if own > nctl or own < 0x760 or own & 3: continue
+        code, ctl = d[h + 12:c], d[c:c + own]
+        st = glslc_stage(ctl, code)
+        why = check(label, st, ctl, code) if st else 'no stage'
+        if why: red(f'{label} RGXD @{h:#x}: {why}')
+        out.append((f'{label}#RGXD@{h:#x}', st, ctl, code))
+    return out
+
+def rpf6_files(files, mainnso):
+    """The RPF6 archives among the RomFS files, with the AES key found in main (rpf6.find_key)"""
+    rpfs = []
+    for p, r in files:
+        with open(p, 'rb') as f:
+            if f.read(4) == rpf6.MAGIC: rpfs.append((p, r))
+    if not rpfs: return [], None
+    img, lo, hi = uepak.nso_image(mainnso)
+    key = rpf6.find_key(img, lo, hi, rpfs[0][0])
+    if not key: red('the RomFS has RPF6 archives, but no 32-byte window of main decrypts the first one\'s table of contents')
+    return rpfs, key
+
+def rpf6_shaders(path, rel, key, found):
+    """The shader resources of one RPF6 archive: every entry that starts with 'rgxd' (read from its first block, so the other archives' gigabytes are not decoded)"""
+    zstd = zstd_mod(); es, other = rpf6.entries(path, key)
+    if other: print(f'{rel}: {other} RPF6 records of other kinds (resources) not read', flush=True)
+    with open(path, 'rb') as f:
+        for e in es:
+            if rpf6.read(f, e, zstd, 4) == RGXD: found += rgxd_shaders(rpf6.read(f, e, zstd), f'/{rel}/{e[0]:08x}')   # None (not zstd) is not rgxd
+
+def pk_members(index, data, label):
+    """Double Eleven's packages (Red Dead Redemption: d11extra/langselect.pkiswitch + .pkdswitch): the index is u32 version 3, u32 0, u32 count, then one 16-byte entry per member {u32 length, u32 stored
+    length, u32 offset into the data file, u32 checksum}; a member is one zlib stream, or stored when the two lengths are equal. → [(entry number, bytes)]"""
+    ver, zero, n = struct.unpack_from('<3I', index, 0)
+    if ver != 3 or zero or 12 + 16 * n > len(index): red(f'{label}: not a version 3 package index')
+    out = []
+    for i in range(n):
+        raw, stored, off, _ = struct.unpack_from('<4I', index, 12 + 16 * i)
+        if off + stored > len(data): red(f'{label}: member {i} is outside the data file')
+        m = data[off:off + stored] if raw == stored else zlib.decompress(data[off:off + stored])
+        if len(m) != raw: red(f'{label}: member {i} has {len(m)} bytes, the index says {raw}')
+        out.append((i, m))
+    return out
 
 def glslc_module(exefs):   # a module of the profile's that defines glslcCompile, beside main in its ExeFS (profile_guess.py build_sources); None: main's import is never bound
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../tools')); import nso_syms
@@ -2558,6 +2615,9 @@ def scan_file_in(args):
     if head[:4] == b'BERG':   # Snowdrop's SDF data slices: shader objects in individual compressed records
         with open(path, 'rb') as f: found += snowdrop_shaders(f.read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if ext == '.pkdswitch' and os.path.isfile(stem + '.pkiswitch'):   # a Double Eleven package (pk_members): GLSLC outputs among its members
+        for i, m in pk_members(open(stem + '.pkiswitch', 'rb').read(), open(path, 'rb').read(), '/' + rel): found += glslc_shaders(m, f'/{rel}/{i}', need=False)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == MTARC:   # an MT Framework archive (mtarc_members): its shader package
         mtarc_shaders(open(path, 'rb').read(), '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2661,6 +2721,7 @@ def main():
         found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
+        found += rgxd_shaders(img, 'main' + ('@' + tag if tag else ''))   # Red Dead Redemption's built-in shaders: rgxd records byte-packed in main (168), before raw_shaders so the 44 that happen to be aligned are not reported there
         found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c for _, _, c, _ in found})
         # GLSLC outputs the game compiles at run time, captured on the Mac (hle_glslc.c): <version dir>/glslc_capture, or DM_GLSLC_CAPTURE. A game needs them when main holds GLSL sources and
         # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
@@ -2683,6 +2744,10 @@ def main():
     keys = {}
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))
+    rpfs, rkey = rpf6_files(files, main_v[0])   # Red Dead Redemption's RPF6 archives (rpf6.py): the shader resources of each, in this process
+    for p, r in rpfs:
+        found = []; rpf6_shaders(p, r, rkey, found); results.append((r, uniq_keys(found), var_pairs(found), {}))
+    done = {p for p, _ in rpfs}; files = [(p, r) for p, r in files if p not in done]
     big = [j for p, r in files for j in (linkdata_jobs(p, r) or [])]   # Three Houses' 6.9 GB DATA1.bin: one job per range of entries, not one read of the whole file
     pak_jobs, paks = kpka_jobs(files)   # Monster Hunter Rise's PAKs: the newest copy of each path, in ranges of entries
     tr_jobs, trp = trpfs_jobs(files)   # Pokémon Legends: Z-A's Trinity packs (data.trpfs and its index data.trpfd), decoded by the game's own Oodle in the Mac host
@@ -2751,6 +2816,7 @@ def main():
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
+                                            ('Rockstar rgxd', any('#RGXD@' in r[4] for r in rows)),
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')

@@ -33,6 +33,9 @@
 #include <sys/wait.h>
 #else
 #include <process.h>
+#include <windows.h>   // the vectored exception handler of dm_fault_hook_register
+#undef near   // minwindef.h's empty 16-bit pointer qualifiers: the tests use near and far as names (t_vk_guest.c near(), t_vk_depth16_clear.c far)
+#undef far
 #endif
 
 // ---------- The entry points the tests call (each NVNT_<name> of nvn_protos.h is the type hle_nvn.c checks its h_<name> against) ----------
@@ -83,7 +86,21 @@ void dm_fault_hook_register(int (*fn)(void *, int, void *)) {
     sigaction(SIGSEGV, &sa, &g_old_segv);
 }
 #else
-void dm_fault_hook_register(int (*fn)(void *, int, void *)) { g_fault_hook = fn; }   // Windows: the tests skip without a Vulkan driver before any upload (a vectored handler is the CPU port's)
+// A write to a page the dirty tracker protected (VirtualProtect through plat_vm_protect) is an access violation: the hook unprotects and stamps the page, and the write runs again,
+// as dm/host/aot_fault.c's handler does in the host; anything else goes on to the next handler (a crash as before)
+static LONG CALLBACK on_access_violation(EXCEPTION_POINTERS *e) {
+    if (e->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters >= 2 && g_fault_hook) {
+        void *addr = (void *)(uintptr_t)e->ExceptionRecord->ExceptionInformation[1];
+        const int is_write = e->ExceptionRecord->ExceptionInformation[0] == 1;
+        if (g_fault_hook(addr, is_write, e->ContextRecord)) return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+void dm_fault_hook_register(int (*fn)(void *, int, void *)) {
+    static PVOID veh;
+    g_fault_hook = fn;
+    if (!veh) veh = AddVectoredExceptionHandler(1, on_access_violation);
+}
 #endif
 
 // The backend's test hooks (dm/gfx/hostvk): its device, a full shutdown, and the image behind a texture object for readbacks

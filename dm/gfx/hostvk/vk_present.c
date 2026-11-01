@@ -141,6 +141,13 @@ static int fmt_srgb(VkFormat f) { return f == VK_FORMAT_R8G8B8A8_SRGB || f == VK
 static void ring_put(uint64_t n, double t) { if (n) W.ring[n % PRES_RING] = (pres_ent){n, t}; }   // under g_mu
 
 // ---------- The vsync source ----------
+// The display timing's actual present times anchor the clock where their time base is known: CLOCK_MONOTONIC, plat_now_ns's clock, on Linux. On Windows (open) no driver documents
+// it, so there the FIFO acquire anchors the clock, as on a device without display timing (show() says so once)
+#if defined(_WIN32)
+#define DISPLAY_TIMES 0
+#else
+#define DISPLAY_TIMES hvk.dev.x.display_timing
+#endif
 // A new anchor (a refresh's time on plat_now_ns's clock): the ticks are laid on it when the screen runs at a multiple of 60 Hz
 static void anchor(uint64_t t, int kind) {
     pthread_mutex_lock(&v_mu);
@@ -282,7 +289,7 @@ static int sc_make(void) {
         }
         char modes[96] = ""; for (uint32_t i = 0; i < nm; i++) snprintf(modes + strlen(modes), sizeof modes - strlen(modes), "%s%s", i ? " " : "", mode_name(m[i]));
         hostvk_log("[hostvk] window presenter: format %d colour space %d, present mode %s (the surface has %s), vsync source %s", W.fmt, W.cs, mode_name(W.mode), modes,
-                                  hvk.dev.x.present_wait ? "VK_KHR_present_wait" : hvk.dev.x.display_timing ? "VK_GOOGLE_display_timing" : "the FIFO acquire (no present wait, no display timing)");
+                                  hvk.dev.x.present_wait ? "VK_KHR_present_wait" : DISPLAY_TIMES ? "VK_GOOGLE_display_timing" : "the FIFO acquire (no present wait, no display timing)");
     }
     VkCompositeAlphaFlagBitsKHR alpha = (c.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
                                        : (VkCompositeAlphaFlagBitsKHR)(c.supportedCompositeAlpha & -c.supportedCompositeAlpha);
@@ -522,7 +529,7 @@ static int show(snap_t *s) {
         uint64_t t1 = plat_now_ns();
         if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
             if (r == VK_SUBOPTIMAL_KHR) W.recreate = 1;   // presented as it is, then made again
-            if (t1 - t0 > 2000000ull && W.mode == VK_PRESENT_MODE_FIFO_KHR && !hvk.dev.x.present_wait && !hvk.dev.x.display_timing) anchor(t1, 1);   // FIFO released an image at a refresh
+            if (t1 - t0 > 2000000ull && W.mode == VK_PRESENT_MODE_FIFO_KHR && !hvk.dev.x.present_wait && !DISPLAY_TIMES) anchor(t1, 1);   // FIFO released an image at a refresh
             break;
         }
         if (r == VK_ERROR_OUT_OF_DATE_KHR) { W.recreate = 1; continue; }
@@ -624,9 +631,9 @@ static int show(snap_t *s) {
             for (uint32_t i = 0; i < k; i++) ring_put(pt[i].presentID, (double)pt[i].actualPresentTime / 1e9);
             pthread_mutex_unlock(&g_mu);
             anchor(pt[k - 1].actualPresentTime, 2);
-#else   // open: no Windows driver documents the time base of actualPresentTime (plat_now_ns is QueryPerformanceCounter's), so the times are not used
-            HVK_RED_ONCE("window presenter: VK_GOOGLE_display_timing's present times have no known time base on Windows: not used, so the vsync clock is not phase-locked to the "
-                         "screen (it runs free at 60 Hz) and presented frames have no times");
+#else   // open: no Windows driver documents the time base of actualPresentTime (plat_now_ns is QueryPerformanceCounter's), so the times are not used (DISPLAY_TIMES)
+            HVK_RED_ONCE("window presenter: VK_GOOGLE_display_timing's present times have no known time base on Windows: not used; the FIFO acquire anchors the vsync clock "
+                         "instead (coarser than the present times) and presented frames have no times");
 #endif
         }
     }

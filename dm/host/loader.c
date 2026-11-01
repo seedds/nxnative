@@ -746,6 +746,7 @@ typedef struct dm_aot_gate_row { uint64_t offset, arg; uint32_t kind; } dm_aot_g
 #endif
 enum { AOT_GATE_OBS = 1, AOT_GATE_SPIN = 2 };   // include/nxaot/aot_module.h NXAOT_GATE_OBS, NXAOT_GATE_SPIN
 int dm_aot_pack_check_gates(const module_t *m, const dm_aot_gate_row *rows, int n, int *unserved, char *err, size_t errn);
+void dm_aot_gate_rows(const module_t *m, const dm_aot_gate_row *rows, int n);
 typedef struct { uint64_t off, param, word; uint32_t num; } aot_obs_t;
 typedef struct { uint64_t head, edge; } aot_edge_t;
 typedef struct {
@@ -899,7 +900,10 @@ static int aot_map_module(module_t *m, const char *dir, aot_manifest_t *t, char 
     aot_place(m, img, len, (size_t)t->bss, t->text_end, t->ro_off, t->data_off);
     free(img);
     snprintf(m->build_id, sizeof m->build_id, "%.32s", t->build_id);   // the first 16 bytes, as fixups.tsv's BUILD_ID on Apple
-    if (t->aux) { m->fps_state_off = t->fps_state; dm_fps_state = m->base + t->fps_state; g_fps_mod = m->name; }   // the frame step's state page (install_fps_state on Apple)
+    if (t->aux) {   // the frame step's state page (install_fps_state on Apple), and its stubs' region, which the JIT fallback takes as code (aot_run.c jit_code_ranges)
+        m->fps_state_off = t->fps_state; dm_fps_state = m->base + t->fps_state; g_fps_mod = m->name;
+        m->aux_off = t->aux_off; m->aux_len = t->aux_len;
+    }
     parse_dynamic(m);
     for (int i = 0; i < t->nobs; i++) gate_register((uint64_t)(uintptr_t)m->base + t->obs[i].off, "obs", (int)(t->obs[i].num | t->obs[i].param << 8), t->obs[i].off);
     for (int i = 0; i < t->nedge; i++) gate_register((uint64_t)(uintptr_t)m->base + t->edge[i].edge, "spin", 0, t->edge[i].head);
@@ -1011,6 +1015,7 @@ void load_modules(const char *dir, const char **names, int n) {
         for (int k = 0; k < man[i].nobs; k++) rows[nrows++] = (dm_aot_gate_row){man[i].obs[k].off, man[i].obs[k].num | man[i].obs[k].param << 8, AOT_GATE_OBS};
         for (int k = 0; k < man[i].nedge; k++) rows[nrows++] = (dm_aot_gate_row){man[i].edge[k].edge, man[i].edge[k].head, AOT_GATE_SPIN};
         if (dm_aot_pack_check_gates(m, rows, nrows, &unserved, err, sizeof err)) die("[RED] aot: %s", err);
+        dm_aot_gate_rows(m, rows, nrows);   // the JIT fallback's gate sites: every row, so it serves those no compiled code holds when it reaches them
         if (nrows) LOG("aot: %s: %d gates (%d observation gates, %d spin wait back-edges) called by its pack, %d not", m->name, nrows - unserved, man[i].nobs, man[i].nedge, unserved);
         free(rows);
         free(man[i].obs); free(man[i].edge);

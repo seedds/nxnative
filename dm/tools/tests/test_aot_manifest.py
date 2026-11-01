@@ -112,10 +112,16 @@ class ManifestRows(unittest.TestCase):
         for lo, hi in S.FN_RANGES: self.assertFalse(lo < e and s < hi, 'no function in a data block')
 
     def test_obs_and_spin(self):
-        ((off, num, param, word),) = self.kind('obs')
+        ((off, num, param, word), (hoff, hnum, hparam, hword)) = self.kind('obs')
         off = int(off, 16)
         self.assertEqual((int(num), int(param, 16), int(word, 16)), (S.OBS_NUMBER & 0xFF, S.OBS_NUMBER >> 8, u32(self.image, off)))
         self.assertIn(off, [lo for lo, _ in S.FN_RANGES], 'a gate at a function entry')
+        # the hidden function's gate: in the data block after the last FDE, so no pack holds it (t_aot_module: the JIT fallback serves it)
+        hoff = int(hoff, 16)
+        self.assertEqual((hoff, int(hnum), int(hparam, 16), int(hword, 16)), (S.L['f_hidden'], S.OBS_HIDDEN & 0xFF, S.OBS_HIDDEN >> 8, S.HIDDEN_WORD))
+        self.assertEqual(u32(self.image, hoff), S.HIDDEN_WORD)
+        s, e = [(int(a, 16), int(b, 16)) for a, b in self.kind('data')][1]
+        self.assertTrue(s <= hoff < e, 'the hidden function lies in a data block: discovery never decodes it')
         ((head, edges),) = self.kind('spin')
         head, edges = int(head, 16), [int(x, 16) for x in edges.split(',')]
         for be in edges:
@@ -145,6 +151,8 @@ class ManifestRows(unittest.TestCase):
         self.assertEqual(u32(self.image, S.FLAG), S.FLAG_VALUE)
         self.assertEqual(struct.unpack_from('<Q', self.image, S.FAULTPTR)[0], 0)
         self.assertEqual([u32(self.image, a) for a in range(0, S.TEXT_END, 4)].count(S.FAULT_WORD), 1)
+        self.assertEqual([u32(self.image, a) for a in range(0, S.TEXT_END, 4)].count(S.HIDDEN_WORD), 1, 'the hidden function\'s first word, which t_aot_module finds')
+        self.assertEqual(struct.unpack_from('<Q', self.image, S.HIDDEN)[0], 0, 'synth_hidden: the call skipped in a plain run')
         ((off, length, _, _),) = self.kind('aux')
         stub = [u32(self.image, a) for a in range(int(off, 16), int(off, 16) + int(length, 16), 4)]
         self.assertEqual(stub[1:4], [0xB9403211, 0x11000631, 0xB9003211], 'ldr w17, [x16, #0x30]; add w17, w17, #1; str w17, [x16, #0x30]')

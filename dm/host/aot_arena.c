@@ -649,7 +649,11 @@ int dm_aot_pack_check_gates(const module_t *m, const dm_aot_gate_row *rows, int 
         (*unserved)++;
         LOG("[RED] aot: %s's manifest has %s at %s+%#llx that its pack does not call (no compiled code holds it: see nxaot build's log): %s", m->name,
             rows[k].kind == NXAOT_GATE_OBS ? "an observation gate" : "a spin wait's back-edge", m->name, (unsigned long long)rows[k].offset,
+#if NXHOST_JIT
+            "served by the JIT fallback if it reaches that code (aot_run.c dm_aot_gate_rows), by nothing in compiled code");
+#else
             rows[k].kind == NXAOT_GATE_OBS ? "its observer does not run" : "the loop spins without the back-off");
+#endif
     }
     return 0;
 }
@@ -743,13 +747,3 @@ int dm_aot_where(uint64_t host_pc, char *out, size_t n) {
     return 1;
 }
 
-uint64_t dm_aot_code_lo(void) {
-    int n = atomic_load_explicit(&g_npacks, memory_order_acquire); uint64_t lo = UINT64_MAX;
-    for (int i = 0; i < n; i++) if (g_packs[i]->base < lo) lo = g_packs[i]->base;
-    return n ? lo : 0;
-}
-uint64_t dm_aot_code_hi(void) {
-    int n = atomic_load_explicit(&g_npacks, memory_order_acquire); uint64_t hi = 0;
-    for (int i = 0; i < n; i++) if (g_packs[i]->base + g_packs[i]->text_end > hi) hi = g_packs[i]->base + g_packs[i]->text_end;
-    return hi;
-}

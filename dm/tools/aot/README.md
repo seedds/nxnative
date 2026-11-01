@@ -480,7 +480,7 @@ path, the counter. `dm_jit_run_past` goes on after a gate the host served, `dm_j
   (40.2 ns against the JIT's own 4.7 ns, "Measurements") and sees block boundaries only (a block that runs into the next function's entry without a
   branch passes it). So no patch: [VENDOR.md](../../third_party/dynarmic/VENDOR.md) still describes an unchanged copy.
 - **Gates** (design 1.1 and 11). The JIT runs the guest's original code, so it stops where compiled code calls `nxaot_rt_gate`: the host's
-  `stop_at` marks a pack's gate sites (`DM_JIT_GATE_AT`, from the descriptor's `gates`), and the code reader hands over no instruction there either,
+  `stop_at` marks every manifest's gate rows (`DM_JIT_GATE_AT`; `load_modules` hands them to `aot_run.c`), and the code reader hands over no instruction there either,
   under any FPCR, unless compiled code takes the address itself (an entry or a return under its FPCR, whose code calls the gate). The run returns
   `DM_JIT_GATE` with the gate's instruction not run and the whole register file in the block; the host serves the gate on the block (the
   observer, which may change x0..x29, or the back-off as an SVC frame) and calls `dm_jit_run_past`, which runs that one instruction as a single-step
@@ -488,10 +488,14 @@ path, the counter. `dm_jit_run_past` goes on after a gate the host served, `dm_j
   runs the back-off only when it went back to the head, as compiled code calls it on the taken edge only. `dm_jit_run` at a gate site returns at
   once, before anything is copied, so a host call or a continuation that starts at an observed instruction serves its gate first. Both the block
   that stops before the site and the step are translated once and cached (the step apart, as dynarmic keys single-step blocks), so the lookup costs
-  only at translation and code with no gate runs as before. The host's side is `dm/host/aot_run.c` (`jit_stop_at`, `run_jit`); a manifest row no
-  pack serves (no compiled code holds it: a `[RED] ` line at load) has no site, so the JIT does not serve it either. nxaot's own runner has no gates.
+  only at translation and code with no gate runs as before. The host's side is `dm/host/aot_run.c` (`jit_stop_at`, `run_jit`). A manifest row no
+  pack serves (no compiled code holds it: a `[RED] ` line at load) is a stop too, so its gate is served when the JIT reaches that code (t_aot_module's
+  hidden function). An encoding the lifter does not translate at an observed instruction hands that instruction over after its block called the gate
+  (`lifter.cpp`, the block's start; `lower_calls.cpp` `FnExit`): `nxaot_rt_jit` then runs it with `dm_jit_run_past`, so the gate is served once.
+  nxaot's own runner has no gates.
 - **Code ranges.** The JIT translates only inside the ranges the host gives (`dm_jit_range`): `nxaot_host` the module's text and its aux region
-  when the image has one; the host every loaded module's text and aux region (the frame-step stubs, design 1.1), and again with each NRO loaded
+  when the image has one; the host every loaded module's text and aux region (the frame-step stubs, design 1.1: the manifest's aux row, which
+  `module_t` keeps), and again with each NRO loaded
   later (every instance drops its translations before its next run, as a block may end where there was no code before).
 - **The hand-over** (2.5, 11): `dm_jit_run` copies x0..x30, SP, PC, v0..v31, NZCV, FPCR and FPSR (with the cumulative flags compiled code left in
   MXCSR, which it clears) into the instance, and back into the block when it stops: 102 to 109 ns both ways. The exclusive monitor is cleared both ways,

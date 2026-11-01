@@ -55,6 +55,15 @@ AUX_OFF = FS_STATE_OFF + 0x4000
 # it sees at the gate, so the host test expects 1042 and 1002 there
 EXPECTED = [7 * 1000 + 3, 0, 0, None, 0x1234, 30, 400, 2, FLAG_VALUE, 42, 2, 2, 5]
 FAULT_WORD = 0xF9400129                # ldr x9, [x9]: the fault probe's load, the only such word of the text
+# The hidden function: a manifest obs row on code no pack holds (design 11). Its two words follow the last FDE, in the stretch nso_code.data_blocks takes for data, so
+# discovery never decodes them and nxaot build serves no gate there (the host's load prints the row's [RED] line); the entry calls it only through a pointer it computes
+# from synth_hidden (0 in the image: the call is skipped; t_aot_module's child stores the function's offset ^ HIDDEN_KEY where the host has the JIT fallback, which then
+# runs it and serves its gate). The observer adds 1000 to the x0 it sees, so results[13] = HIDDEN_X0 + 2 + 1000 in that run
+HIDDEN = FAULTPTR + 8                  # synth_hidden: the function's offset ^ HIDDEN_KEY, or 0
+HIDDEN_KEY = 0xA5A5
+OBS_HIDDEN = 23 | 6 << 8               # the same observer as OBS_NUMBER, parameter 6
+HIDDEN_X0 = 7
+HIDDEN_WORD = 0x91000800               # add x0, x0, #2: the hidden function's first word, observed; the only such word of the text
 
 
 # ---------- Encoders (A64; each checked against llvm-mc) ----------
@@ -67,6 +76,7 @@ def cbz_x(rt, t): return lambda pc, L: 0xB4000000 | ((L[t] - pc) >> 2 & 0x7FFFF)
 def cbnz_x(rt, t): return lambda pc, L: 0xB5000000 | ((L[t] - pc) >> 2 & 0x7FFFF) << 5 | rt
 def bne(t): return lambda pc, L: 0x54000001 | ((L[t] - pc) >> 2 & 0x7FFFF) << 5
 def cmp_x(rn, imm): return 0xF100001F | imm << 10 | rn << 5                          # cmp xn, #imm (subs xzr, xn, #imm)
+def eor_w(rd, rn, rm): return 0x4A000000 | rm << 16 | rn << 5 | rd                   # eor wd, wn, wm
 def adr(rd, t):
     def enc(pc, L):
         imm = (L[t] if isinstance(t, str) else t) - pc
@@ -120,7 +130,10 @@ def text_items():
         # the fault probe: synth_faultptr is 0 in the image; t_aot_module's fault run sets an address no page backs, and fault_ld faults there
         (None, ldr_x(9, 19, FAULTPTR - RESULTS)), (None, cbz_x(9, 'no_fault')), ('fault_ld', FAULT_WORD),
         ('no_fault', adrp(16, FNPTR)), (None, ldr_x(16, 16, lo(FNPTR))), (None, movz_x(0, 1)), (None, blr(16)), (None, str_x(0, 19, 88)),
-        (None, adrp(0, MSG)), (None, add_x(0, 0, lo(MSG))), (None, movz_x(1, len(MESSAGE))), (None, svc(0x27)),   # OutputDebugString
+        # the hidden function, when synth_hidden holds its offset ^ HIDDEN_KEY: x16 = module base + offset, called with x0 = HIDDEN_X0, its result in results[13]
+        (None, ldr_w(16, 19, HIDDEN - RESULTS)), (None, cbz_w(16, 'no_hidden')), (None, movz_w(17, HIDDEN_KEY)), (None, eor_w(16, 16, 17)), (None, adr(17, 0)),
+        (None, add_xr(16, 17, 16)), (None, movz_x(0, HIDDEN_X0)), (None, blr(16)), (None, str_x(0, 19, 104)),
+        ('no_hidden', adrp(0, MSG)), (None, add_x(0, 0, lo(MSG))), (None, movz_x(1, len(MESSAGE))), (None, svc(0x27)),   # OutputDebugString
         (None, svc(0x07)), (None, brk(1)),                                                                     # ExitProcess
         # a byte jump table through x18 (the rewriter's J form): target = base + 4 * entry
         ('f_j', cmp_w(0, 3)), (None, bhi('f_j_def')), (None, adr(16, BTAB)), (None, ldrb_uxtw(9, 16, 0)), (None, adr(18, 'f_j_base')),
@@ -141,6 +154,7 @@ def text_items():
         ('f_obs', ADD_X0_1), (None, RET),
         ('f_cut', MOV_W0_1), (None, RET),
         ('f_fs', MOV_W0_5), (None, RET), ('f_end', None),
+        ('f_hidden', HIDDEN_WORD), (None, RET),                                                                  # no FDE, no symbol: data to discovery
     ]
     functions = [('synth_start', 'start'), ('synth_jump_byte', 'f_j'), ('synth_jump_offset', 'f_t'), ('synth_window', 'f_window'),
                  ('synth_spin', 'f_spin'), ('synth_observed', 'f_obs'), ('synth_cut', 'f_cut'), ('synth_frame_step', 'f_fs')]
@@ -197,7 +211,7 @@ def eh_frame():
 SYMBOLS = [('t_aot_mod_combine', 0, 0x12, 0, 0), ('t_aot_mod_missing', 0, 0x12, 0, 0),
            ('results', 3, 0x11, RESULTS, 8 * NRESULTS), ('synth_got', 3, 0x11, GOT, 16), ('synth_fnptr', 3, 0x11, FNPTR, 8),
            ('synth_flag', 3, 0x11, FLAG, 4), ('synth_faultptr', 3, 0x11, FAULTPTR, 8)] + \
-          [(name, 1, 0x12, s, e - s) for (name, _), (s, e) in zip(FUNCS, FN_RANGES)]
+          [(name, 1, 0x12, s, e - s) for (name, _), (s, e) in zip(FUNCS, FN_RANGES)] + [('synth_hidden', 3, 0x11, HIDDEN, 8)]
 
 
 def image():
@@ -250,7 +264,8 @@ def nso(img):
 PATCHES = f'''# The synthetic module of dm/tools/tests/aot_synth.py (no game): a registered cut, an observation gate and a frame step, as a profile's patches.py has them
 from nso_asm import ADRP, B
 CUTS = {{'{BUILD_ID}': [({L['f_cut']:#x}, '20008052', '40008052', 'synthetic: f_cut returns 2 instead of 1')]}}
-OBS = {{'{BUILD_ID}': [({L['f_obs']:#x}, {OBS_NUMBER}, '91000400', 'synthetic: an observation gate at f_obs (number 23, parameter 5)')]}}
+OBS = {{'{BUILD_ID}': [({L['f_obs']:#x}, {OBS_NUMBER}, '91000400', 'synthetic: an observation gate at f_obs (number 23, parameter 5)'),
+                     ({L['f_hidden']:#x}, {OBS_HIDDEN}, '91000800', 'synthetic: an observation gate at f_hidden, which no pack holds (number 23, parameter 6)')]}}
 def frame_step(ctx):
     ctx.site({L['f_fs']:#x}, 'a0008052')
     start = ctx.here(); ctx.emit(ADRP(16, ctx.here(), ctx.state))
@@ -295,7 +310,7 @@ def aot_tables():
         'image': behaviour, 'layout': (TEXT_END, RO_OFF, DATA_OFF, 0), 'aux': (AUX_OFF, len(aux), FS_STATE_OFF),
         # nso_code.data_blocks: the gap after the last FDE (more than a quarter of its words decode as nothing); the MOD0 offset word
         'data': [(4, 8), (FN_RANGES[-1][1], TEXT_END)],
-        'obs': [(L['f_obs'], OBS_NUMBER, ADD_X0_1)],
+        'obs': [(L['f_obs'], OBS_NUMBER, ADD_X0_1), (L['f_hidden'], OBS_HIDDEN, HIDDEN_WORD)],
         'spins': [(L['f_spin'], [L['f_spin_be']])],
         'cuts': cuts,
         'windows': [(L['f_w_loop'], L['f_w_cbnz'] + 4)],                 # sites.tsv W: from the exclusive load to past the cbnz after the store

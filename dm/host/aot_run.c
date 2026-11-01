@@ -165,10 +165,36 @@ static const nxaot_gate_site *gate_in(const dm_aot_pack *p, uint64_t pc) {
     return d->gate_count && off <= UINT32_MAX ? nxaot_gate_at(d, off) : NULL;
 }
 
+// Every manifest's gate rows at their guest addresses, whether a pack serves them or not (loader.c load_modules gives each module's: dm_aot_gate_rows), sorted: the
+// JIT fallback's gate sites. A row no pack serves (its code is in no compiled function: the [RED] line of dm_aot_pack_check_gates) is served when the JIT reaches it.
+// Written while load_modules maps the modules, before guest code runs; only read after
+typedef struct { uint64_t pc, head; uint32_t kind; } gate_row;   // head: a spin wait's head, a guest address
+static gate_row *g_rows;
+static size_t g_nrows;
+static int row_cmp(const void *a, const void *b) { const uint64_t x = ((const gate_row *)a)->pc, y = ((const gate_row *)b)->pc; return x < y ? -1 : x > y; }
+void dm_aot_gate_rows(const module_t *m, const dm_aot_gate_row *rows, int n) {
+    if (n <= 0) return;
+    gate_row *r = realloc(g_rows, (g_nrows + (size_t)n) * sizeof *r);
+    if (!r) die("aot: no memory for %s's gate rows", m->name);
+    const uint64_t base = (uint64_t)(uintptr_t)m->base;
+    for (int i = 0; i < n; i++) r[g_nrows++] = (gate_row){base + rows[i].offset, rows[i].kind == NXAOT_GATE_SPIN ? base + rows[i].arg : 0, rows[i].kind};
+    qsort(r, g_nrows, sizeof *r, row_cmp);
+    g_rows = r;
+}
+static const gate_row *gate_row_at(uint64_t pc) {
+    size_t lo = 0, hi = g_nrows;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (g_rows[mid].pc == pc) return &g_rows[mid];
+        if (g_rows[mid].pc < pc) lo = mid + 1; else hi = mid;
+    }
+    return NULL;
+}
+
 // A gate the guest reached (compiled code's nxaot_rt_gate, or the JIT stopped at its site): counted, dm_aot_gate with the block's registers, then a thread that
 // ended or a process stop leaves from here
-static void serve_gate(dm_aot_thread *t, uint64_t pc, const nxaot_gate_site *g) {
-    atomic_fetch_add_explicit(g->kind == NXAOT_GATE_OBS ? &c_obs_gates : &c_spin_gates, 1, memory_order_relaxed);
+static void serve_gate(dm_aot_thread *t, uint64_t pc, uint32_t kind) {
+    atomic_fetch_add_explicit(kind == NXAOT_GATE_OBS ? &c_obs_gates : &c_spin_gates, 1, memory_order_relaxed);
     dm_aot_gate(&t->st, pc);
     if (atomic_load(&t->exiting)) dm_aot_leave(DM_AOT_LEFT_EXIT);
     check_stop(t);
@@ -177,28 +203,24 @@ static void serve_gate(dm_aot_thread *t, uint64_t pc, const nxaot_gate_site *g) 
 #if NXHOST_JIT
 static pthread_once_t g_jit_once = PTHREAD_ONCE_INIT;
 // Where the JIT stops (jit.h stop_at), asked once per translated instruction: a compiled entry (continued natively), a compiled call site's return (a native
-// frame may wait there), and a gate site of a pack (its observer or back-off, served by run_jit; compiled code serves the gates it reaches itself). Under
-// DM_AOT_JIT_ALL only the gate sites. A manifest's gate row no pack serves (a [RED] line at load: no compiled code holds it) has no site here either
+// frame may wait there), and a manifest's gate row (its observer or back-off, served by run_jit; compiled code serves the gates it reaches itself), the rows
+// no pack serves included. Under DM_AOT_JIT_ALL only the gate rows
 static int jit_stop_at(void *ctx, uint64_t pc) {
     (void)ctx;
-    const dm_aot_pack *p = NULL;
-    const nxaot_lookup_entry *e = dm_aot_find(pc, &p);
     int k = 0;
-    if (!jit_all()) k = e ? DM_JIT_ENTRY : dm_aot_is_return(pc) ? DM_JIT_RETURN : 0;
-    if (gate_in(p, pc)) k |= DM_JIT_GATE_AT;
+    if (!jit_all()) k = dm_aot_find(pc, NULL) ? DM_JIT_ENTRY : dm_aot_is_return(pc) ? DM_JIT_RETURN : 0;
+    if (gate_row_at(pc)) k |= DM_JIT_GATE_AT;
     return k;
 }
 static int jit_svc(void *ctx, dm_guest_state *st, uint32_t n) { (void)ctx; return aot_svc(st, n); }
 DM_AOT_EXPORT uint64_t dm_aot_cntpct(dm_guest_state *st);
 static uint64_t jit_cntpct(void *ctx, dm_guest_state *st) { (void)ctx; return dm_aot_cntpct(st); }
 
-// The JIT's code (jit.h dm_jit_range): every loaded module's text, and its aux region where it has one: the frame step's stubs, which patch_nso.py --aot
-// assembles into the page after the state page, up to the end of the behaviour image (patch_nso.py AOT_AUX_OFF = FS_STATE_OFF + 0x4000; module_t keeps
-// the state page's offset from the manifest's aux row, loader.c aot_map_module). The host-function page and DM_AOT_HOST_RETURN lie outside every range.
-// NROs mapped at ro::LoadModule after the JIT's first use join at the next run_jit (g_nmod grew)
+// The JIT's code (jit.h dm_jit_range): every loaded module's text, and its aux region where it has one (the frame step's stubs: the manifest's aux row, which
+// loader.c aot_map_module keeps in module_t). The host-function page and DM_AOT_HOST_RETURN lie outside every range. NROs mapped at ro::LoadModule after the
+// JIT's first use join at the next run_jit (g_nmod grew)
 static pthread_mutex_t g_code_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_code_nmod = -1;   // g_nmod when the ranges were last given to the JIT
-#define AUX_AFTER_STATE 0x4000
 static unsigned jit_code_ranges(dm_jit_range *r, int n) {
     unsigned k = 0;
     for (int i = 0; i < n; i++) {
@@ -206,7 +228,7 @@ static unsigned jit_code_ranges(dm_jit_range *r, int n) {
         const uint64_t base = (uint64_t)(uintptr_t)m->base;
         if (!m->base) continue;
         r[k++] = (dm_jit_range){base, base + m->text_end};
-        if (m->fps_state_off && m->image_size > m->fps_state_off + AUX_AFTER_STATE) r[k++] = (dm_jit_range){base + m->fps_state_off + AUX_AFTER_STATE, base + m->image_size};
+        if (m->aux_len) r[k++] = (dm_jit_range){base + m->aux_off, base + m->aux_off + m->aux_len};
     }
     return k;
 }
@@ -258,8 +280,9 @@ int dm_aot_jit_stop_at(uint64_t pc) { return jit_stop_at(NULL, pc); }
 int dm_aot_jit_stop_at(uint64_t pc) { (void)pc; return 0; }
 #endif
 
-// Run st->pc in the JIT until it stops; without it, the [RED] line and the process stop
-static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why) {
+// Run st->pc in the JIT until it stops; without it, the [RED] line and the process stop. past: compiled code served the observation gate at st->pc already
+// (nxaot_rt_jit), so its instruction runs at once
+static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why, int past) {
     const uint64_t pc = t->st.pc;
     char name[64];
     dm_aot_guest_name(pc, name, sizeof name);
@@ -292,18 +315,16 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why) {
     if (*why && first_time(pc)) LOG("[RED] aot: %s at %s runs in the JIT fallback (design section 11)", *why, name);
     atomic_fetch_add_explicit(&c_jit_runs, 1, memory_order_relaxed);
     t_jit_running = 1;
-    uint64_t stop = dm_jit_run(j, pc);
+    uint64_t stop = past ? dm_jit_run_past(j, pc, 0) : dm_jit_run(j, pc);
     t_jit_running = 0;
     *why = jit_all() ? "the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL)" : "a non-local transfer to a continuation with no native frame";
     // A gate site (design 1.1, as compiled code calls nxaot_rt_gate there): the JIT stopped before its instruction with the whole register file in the block
     while (dm_jit_reason(j) == DM_JIT_GATE) {
-        const dm_aot_pack *p = NULL;
-        dm_aot_find(stop, &p);
-        const nxaot_gate_site *g = gate_in(p, stop);
-        if (!g) die("aot: the JIT fallback stopped at a gate site %#llx that no pack lists", (unsigned long long)stop);
+        const gate_row *g = gate_row_at(stop);
+        if (!g) die("aot: the JIT fallback stopped at a gate site %#llx that no manifest lists", (unsigned long long)stop);
         if (g->kind == NXAOT_GATE_OBS) {
             // An observation gate: the observer first (it may change x0..x29, which the JIT takes back), then its instruction and on, without stopping there again
-            serve_gate(t, stop, g);
+            serve_gate(t, stop, g->kind);
             t_jit_running = 1;
             stop = dm_jit_run_past(j, stop, 0);
             t_jit_running = 0;
@@ -316,7 +337,7 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why) {
         stop = dm_jit_run_past(j, edge, 1);
         t_jit_running = 0;
         if (dm_jit_reason(j) != DM_JIT_STEPPED) break;
-        if (stop == dm_aot_pack_base(p) + g->arg) serve_gate(t, edge, g);
+        if (stop == g->head) serve_gate(t, edge, g->kind);
         *why = NULL;
         return;
     }
@@ -357,13 +378,20 @@ static _Noreturn void nonlocal_out(dm_aot_thread *t, uint64_t pc) {
 // compiled entries natively on the way (their normal return continues at the lr they were called with, x30). A return address of compiled code reached
 // with an SP above the one this frame was entered with is a non-local transfer (3.3): nested, it is propagated to the native frames further out
 // (st->pending); at the outermost level of a guest call nothing can own it and the JIT runs it, unless that guest call is nested in a host call and the transfer
-// leaves it (sp is then the SP the call was made with: nonlocal_out)
-static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, const char *why) {
+// leaves it (sp is then the SP the call was made with: nonlocal_out). first: a continuation compiled code cannot run itself (an encoding it does not translate),
+// run in the JIT even at a compiled entry (which would hand it over again); with served, at an observation gate compiled code has just served
+static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, const char *why, uint64_t first, int served) {
     dm_guest_state *st = &t->st;
     for (;;) {
         check_stop(t);
         const uint64_t pc = st->pc;
         const int mode = module_mode(st);
+        if (first) {
+            const int past = pc == first && served;
+            const int own = pc == first;
+            first = 0;
+            if (own) { run_jit(t, lr, &why, past); continue; }
+        }
         // The return the native frame waits for: lr alone decides, as a compiled function's own return does (3.3)
         if (pc == lr) {
             st->pending = outermost || mode ? 0 : pc;   // under another FPCR the frame cannot go on: its callers propagate the transfer
@@ -389,7 +417,7 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
             if (!outermost && st->sp > sp && dm_aot_is_return(pc)) { st->pending = pc; return; }   // a native frame further out may wait there
             if (outermost && t->depth > 1 && st->sp > sp && dm_aot_is_return(pc)) nonlocal_out(t, pc);
         }
-        run_jit(t, lr, &why);
+        run_jit(t, lr, &why, 0);
     }
 }
 
@@ -420,7 +448,7 @@ static void run_guest(dm_aot_thread *t, uint64_t pc) {
                 continue;
             }
         }
-        jit_loop(t, DM_AOT_HOST_RETURN, sp0, 1, why);
+        jit_loop(t, DM_AOT_HOST_RETURN, sp0, 1, why, 0, 0);
         st->pending = 0;
         return;
     }
@@ -638,7 +666,20 @@ DM_AOT_EXPORT void nxaot_rt_jit(dm_guest_state *st, uint64_t lr, uint64_t sp) {
     dm_aot_thread *t = (dm_aot_thread *)st;
     const uint32_t reason = st->exit_reason;
     st->exit_reason = 0;
-    jit_loop(t, lr, sp, 0, jit_why(reason));
+    // An encoding the lifter does not translate: compiled code stored the block and hands over at that instruction. When it is an observation gate's (a block starts
+    // there, design 1.1), the lifter called the gate first (lifter.cpp, the block's start; lower_calls.cpp FnExit, FnJitContinue): the JIT runs its instruction at once
+    // instead of stopping to serve the gate a second time. Every other hand-over comes from code that did not serve a gate at its target (a call or branch to an address
+    // with no compiled entry, msr fpcr, which goes on after its instruction, a refused function)
+    uint64_t first = 0;
+    int served = 0;
+    if (reason == NXAOT_TRAP_UNTRANSLATED) {
+        const dm_aot_pack *p = NULL;
+        dm_aot_find(st->pc, &p);
+        const nxaot_gate_site *g = gate_in(p, st->pc);
+        first = st->pc;
+        served = g && g->kind == NXAOT_GATE_OBS;
+    }
+    jit_loop(t, lr, sp, 0, jit_why(reason), first, served);
     _mm_setcsr(dm_aot_guest_mxcsr(dm_aot_module_fpcr()));   // back to compiled code under its specialisation (jit_loop returns pending otherwise)
 }
 
@@ -672,5 +713,5 @@ DM_AOT_EXPORT void nxaot_rt_gate(dm_guest_state *st, uint64_t site) {
     const dm_aot_pack *p = dm_aot_pack_of_code((uint64_t)(uintptr_t)__builtin_return_address(0));
     const nxaot_gate_site *g = p ? nxaot_gate_at(dm_aot_pack_desc(p), site) : NULL;
     if (!g) die("[RED] aot: a gate call at module offset %#llx that no loaded pack's gate table lists (return address %p)", (unsigned long long)site, __builtin_return_address(0));
-    serve_gate(t, dm_aot_pack_base(p) + site, g);
+    serve_gate(t, dm_aot_pack_base(p) + site, g->kind);
 }

@@ -23,6 +23,9 @@
 //     same registers and its x0 taken back, the spin wait's back-off on the taken back-edge only; the frame step's stub runs from the aux region, one of the JIT's
 //     code ranges; the fault probe's load is named exactly (the JIT's memory abort, jit.h). Each run also times guest calls of three leaf functions from the host
 //     (no gate, an untaken spin back-edge, an observation gate) and the JIT's stop lookup per translated instruction, for design 11's figures
+//   with the JIT fallback, both runs also reach the hidden function (aot_synth.py HIDDEN): a manifest obs row on code no pack holds (the load's [RED] line, "1 not"),
+//     called through a pointer the entry computes, so the JIT runs it and serves its gate: the observer sees x0 = 7, x19 = &results and the call's return address,
+//     and the 1000 it adds is what the add reads (results[13] = 1009); 3 observation gate calls in the run instead of 2
 // What this does not show: a real NSO or a real game (no game files here), a real observer's or the back-off's effect on a game
 //   t_aot_module [--module <dir>]
 //     the module's folder: --module, else <packs>/module with the packs of NXAOT_PACKS (the environment variable, else the CMake option); with none, a note and exit 0
@@ -62,6 +65,8 @@ static const char BUILD_ID[] = "aa07aa07aa07aa07aa07aa07aa07aa07";
 enum { OBS_NUMBER = 23, OBS_PARAMETER = 5 };   // the module's gate: OBS_REGION_GOT with parameter 5
 enum { FLAG_VALUE = 9, SPIN_PASSES = 3 };      // aot_synth.py FLAG_VALUE; the spin gates the host waits for before it sets the flag
 #define FAULT_WORD 0xF9400129u                 // aot_synth.py FAULT_WORD: ldr x9, [x9], the fault probe's load
+enum { HIDDEN_PARAMETER = 6, HIDDEN_X0 = 7, HIDDEN_KEY = 0xA5A5 };   // aot_synth.py OBS_HIDDEN's parameter, HIDDEN_X0, HIDDEN_KEY
+#define HIDDEN_WORD 0x91000800u                // aot_synth.py HIDDEN_WORD: add x0, x0, #2, the hidden function's observed first word
 
 // ---------- The child: one run ----------
 static int g_checks, g_fails, g_status = DM_AOT_USAGE, g_fault_run, g_jit_forced;   // g_jit_forced: DM_AOT_JIT_ALL is set (the parent's runs 5 and 6)
@@ -78,7 +83,14 @@ static void check(int ok, const char *fmt, ...) {
 // own call, design 1.1) also the registers the observed instruction will read, and it changes x0, which the code must reload after the gate
 static int g_obs_hits, g_obs_param, g_obs_in_run, g_obs_run_hits;
 static uint64_t *g_obs_regs, g_obs_x5, g_obs_run_x0[2], g_obs_run_x19[2], g_obs_run_x30[2];
+static int g_hidden_hits;
+static uint64_t g_hidden_x0, g_hidden_x19, g_hidden_x30;
 static void observer(uint64_t *regs, int param) {
+    if (param == HIDDEN_PARAMETER) {   // the hidden function's gate, which only the JIT fallback serves
+        g_hidden_hits++; g_hidden_x0 = regs[0]; g_hidden_x19 = regs[19]; g_hidden_x30 = regs[30];
+        regs[0] += 1000;
+        return;
+    }
     g_obs_hits++; g_obs_regs = regs; g_obs_param = param; g_obs_x5 = regs[5];
     if (g_obs_in_run) {
         const int k = g_obs_run_hits++ & 1;
@@ -223,13 +235,27 @@ static void *guest_main(void *arg) {
         for (int r = 0; r < reps; r++)
             for (uint64_t a = 0; a < 0x1000; a += 4, looks++) sink += (uint64_t)dm_aot_jit_stop_at(base + a);
         t_look = (double)(plat_now_ns() - l0) / (double)looks;
-        printf("t_aot_module: timing (%s): a guest call from the host of synth_cut %.0f ns, of synth_spin through its untaken back-edge gate %.0f ns (+%.0f), "
-               "of synth_observed through its observation gate %.0f ns (+%.0f); the JIT's stop lookup %.1f ns per translated instruction (%llu)\n",
+        printf("t_aot_module: timing (%s): a guest call from the host of synth_cut %.0f ns, of synth_spin through its untaken back-edge gate %.0f ns (%+.0f), "
+               "of synth_observed through its observation gate %.0f ns (%+.0f); the JIT's stop lookup %.1f ns per translated instruction (%llu)\n",
                g_jit_forced ? "JIT-forced" : "compiled", t_cut, t_spin, t_spin - t_cut, t_obs, t_obs - t_cut, t_look, (unsigned long long)(sink & 0xF));
         check(f_cut && t_cut > 0 && t_spin > 0 && t_obs > 0, "the timing calls returned");
     }
     dm_aot_stats_t s0;
     dm_aot_stats(&s0);   // the counts before the run: the timing's observation gate calls are not the run's
+    // The hidden function: its offset ^ HIDDEN_KEY in synth_hidden makes the entry call it, which only a host with the JIT fallback can run (design 11)
+    uint32_t *hidden = module_sym(m, "synth_hidden");
+    const uint64_t hidden_at = text_find_word(m, HIDDEN_WORD);
+    uint64_t hidden_ret = 0;   // the return address of the entry's blr x16 after its mov x0, #7
+    for (uint64_t a = 0; a + 8 <= m->text_end && !hidden_ret; a += 4) {
+        uint32_t w0, w1; memcpy(&w0, m->base + a, 4); memcpy(&w1, m->base + a + 4, 4);
+        if (w0 == 0xD28000E0u && w1 == 0xD63F0200u) hidden_ret = a + 8;
+    }
+    check(hidden && hidden_at && hidden_ret && !*hidden, "the hidden function at main+%#llx (no symbol, no FDE), called from main+%#llx through synth_hidden (0 in the image)",
+          (unsigned long long)hidden_at, (unsigned long long)(hidden_ret - 4));
+    int hidden_on = 0;
+#if NXHOST_JIT
+    if (hidden && hidden_at) { *hidden = (uint32_t)hidden_at ^ HIDDEN_KEY; hidden_on = 1; }
+#endif
     g_spin_flag = flag;
     *flag = 0;   // the spin wait spins until spin_release sets it
     pthread_t releaser;
@@ -252,9 +278,17 @@ static void *guest_main(void *arg) {
           (unsigned long long)g_obs_run_x30[0], g_obs_param, (unsigned long long)results[9], (unsigned long long)results[11]);
     dm_aot_stats_t s;
     dm_aot_stats(&s);
-    check(g_released_by_gates && g_spins_at_release >= SPIN_PASSES && s.spin_gates >= SPIN_PASSES && s.obs_gates - s0.obs_gates == 2,
-          "the spin wait's back-edge reached the host's back-off %llu times before the flag was set (%llu in all; released by the gates: %d); 2 observation gate calls (%llu)",
-          (unsigned long long)g_spins_at_release, (unsigned long long)s.spin_gates, g_released_by_gates, (unsigned long long)(s.obs_gates - s0.obs_gates));
+    check(g_released_by_gates && g_spins_at_release >= SPIN_PASSES && s.spin_gates >= SPIN_PASSES && s.obs_gates - s0.obs_gates == 2u + (unsigned)hidden_on,
+          "the spin wait's back-edge reached the host's back-off %llu times before the flag was set (%llu in all; released by the gates: %d); %d observation gate calls (%llu)",
+          (unsigned long long)g_spins_at_release, (unsigned long long)s.spin_gates, g_released_by_gates, 2 + hidden_on, (unsigned long long)(s.obs_gates - s0.obs_gates));
+    if (hidden_on)
+        check(g_hidden_hits == 1 && g_hidden_x0 == HIDDEN_X0 && g_hidden_x19 == (uint64_t)(uintptr_t)results && g_hidden_x30 == base + hidden_ret &&
+                  results[13] == HIDDEN_X0 + 2 + 1000,
+              "the hidden function's gate, which no pack serves, served by the JIT fallback: %d call, x0 %llu, x19 = &results, x30 main+%#llx (expected main+%#llx); "
+              "the observer's x0 + 1000 is what its add read (results[13] %llu)", g_hidden_hits, (unsigned long long)g_hidden_x0,
+              (unsigned long long)(g_hidden_x30 - base), (unsigned long long)hidden_ret, (unsigned long long)results[13]);
+    else
+        check(g_hidden_hits == 0 && results[13] == 0, "no JIT fallback: the hidden function is not called (results[13] %llu)", (unsigned long long)results[13]);
 #if NXHOST_JIT
     if (g_jit_forced) {
         // Every instruction ran in the JIT: no dispatcher miss (only compiled code misses), and its gate stops served the gates checked above
@@ -423,8 +457,20 @@ int main(int argc, char **argv) {
     verdict(r.status == 0 && cst == 0 && cks >= 20 && cfail == 0, "the run: every check of the child passed and the module ended with ExitProcess");
     verdict(strstr(r.out, "[guest] aot module: done") != NULL, "the module's OutputDebugString line");
     verdict(strstr(r.out, "UNIMPL t_aot_mod_missing") != NULL, "the unimplemented import answered by its stub (an UNIMPL line)");
-    verdict(strstr(r.out, "aot: main: 2 gates (1 observation gates, 1 spin wait back-edges) called by its pack, 0 not") != NULL && !strstr(r.out, "its pack does not call"),
-            "the loader: every gate row of the manifest is a gate site the pack's code calls (design 1.1)");
+    {
+        // The hidden function's row is the one the pack does not serve (no compiled code holds it): one [RED] line naming it, at the offset the child found
+        unsigned long long hidden_at = 0;
+        const char *h = strstr(r.out, "check ok   the hidden function at main+");
+        if (h) sscanf(h, "check ok   the hidden function at main+%llx", &hidden_at);
+        char want_red[96];
+        snprintf(want_red, sizeof want_red, "has an observation gate at main+%#llx that its pack does not call", hidden_at);
+        int reds = 0;
+        for (const char *q = strstr(r.out, "its pack does not call"); q; q = strstr(q + 1, "its pack does not call")) reds++;
+        printf("      %s\n", red_line(r.out, "its pack does not call"));
+        verdict(strstr(r.out, "aot: main: 2 gates (2 observation gates, 1 spin wait back-edges) called by its pack, 1 not") != NULL && hidden_at && reds == 1 &&
+                    strstr(red_line(r.out, "its pack does not call"), want_red),
+                "the loader: every gate row of the manifest is a gate site the pack's code calls but the hidden function's, which no compiled code holds (design 1.1)");
+    }
     free(r.out);
     // 2. The fault probe: the host's fault report names the faulting guest instruction (the line table)
     run_child_mode(argv[0], "--fault", dir, &r);

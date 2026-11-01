@@ -82,6 +82,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x204, InstName.R2p, AR2p, N, writesRd: false);
             x(0x803, InstName.P2r, AP2r, N);
             x(0x203, InstName.P2r, AP2r, N);
+            x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
             x(0x81c, InstName.Psetp, APlop3, N, writesRd: false);
             x(0x89c, InstName.Psetp, APlop3, N, uniform: true, writesRd: false);
             x(0x806, InstName.Vote, AVote, N);
@@ -1115,6 +1116,38 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand mask = x.Opcode == 0x803 ? Const((int)x.Imm32) : Register(x.Rb, RegisterType.Gpr);
 
             EmitP2r(context, Register(x.Ra, RegisterType.Gpr), Register(x.Rd, RegisterType.Gpr), mask, (ByteSel)x.Bits(76, 78), false);
+        }
+
+        // UP2UR URd, UPR, URZ, mask (32..64): bit k of URd is UPk where mask bit k is set, the other bits zero. Only the form Mario Kart World encodes:
+        // URZ at 24..32, word 2 (64..96) 0x08000000, mask within UP0..UP6 (the Eglantine fork's lower_to_maxwell.h:709, which checks the same fields)
+        public static void AUp2ur(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            uint mask = x.Imm32;
+
+            if (x.Ra != RegisterConsts.UniformZeroIndex || x.Bits(64, 96) != 0x08000000 || mask > 0x7f)
+            {
+                throw AFail(context, "UP2UR form");
+            }
+
+            int rd = ARd(x, uniform: true);
+
+            if (rd == RegisterConsts.UniformZeroIndex)
+            {
+                return;
+            }
+
+            Operand res = Const(0);
+
+            for (int k = 0; k < RegisterConsts.UniformPredsCount; k++)
+            {
+                if ((mask & (1u << k)) != 0)
+                {
+                    res = context.BitwiseOr(res, context.ConditionalSelect(APredReg(k, uniform: true), Const(1 << k), Const(0)));
+                }
+            }
+
+            context.Copy(ADestReg(rd, uniform: true), res);
         }
 
         // PLOP3 Pd0, Pd1, a (87..90), b (77..80), c (68..71; uniform with bit 67), lut0 (64..67 | 72..77 << 3), lut1 (16..24)

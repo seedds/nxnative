@@ -172,7 +172,8 @@ def bahs_variations(d, label, entries):
     (0 vertex, 1 fragment, 3 compute), two u32, the 16-byte entry bahs_shaders reads) and right after it a program array (u32 byte size, u32 count, then per program: u32 record size,
     u32 name length, u32 stage mask, u32 index of its first binary, its name, its macros). A program's binaries run from its first index to the next program's; the n-th vertex binary
     and the n-th fragment binary in that range are one variation. Breath of the Wild: 109 of the 543 pairs drawn on a cold start in Zora's Domain came from these files, and none was in
-    shader_pairs.tsv, which paired only BNSH variations. A file whose arrays do not read back (another layout, or an entry bahs_shaders took that no record holds) gives no pairs"""
+    shader_pairs.tsv, which paired only BNSH variations. Programs with any stage besides vertex and fragment have no direct vertex / fragment pair: an intermediate geometry or
+    tessellation stage supplies the fragment inputs. A file whose arrays do not read back (another layout, or an entry bahs_shaders took that no record holds) gives no pairs"""
     if not entries: return
     taken = {int(e.rsplit('@', 1)[1], 16) for e in entries}
     arr = min(taken) - 0x18
@@ -197,6 +198,9 @@ def bahs_variations(d, label, entries):
     if q != o + psz: return
     bases.append(acnt)
     for p in range(pcnt):
+        # These bases link vertex directly to fragment. Keep extracting every stage, but do not invent that link for a program with an intermediate (or unknown) stage.
+        # Check all binary records, including those the shader reader could not extract.
+        if any(k > 1 for _, k in recs[bases[p]:bases[p + 1]]): continue
         seen = [0, 0]
         for i in range(bases[p], bases[p + 1]):
             a, k = recs[i]

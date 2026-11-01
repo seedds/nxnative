@@ -1207,3 +1207,10 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `t_host_msl` loads every library, with a swizzled `newLibraryWithSource:` that counts 0 calls, and finds all 24 clear functions. `t_builtin`, `t_geometry` and `t_deswz_gpu` use the built libraries.
 - **Build inputs:** Mac libraries use `MACOS_MIN` from `dm/mac/min_os.mk`, matching the host's deployment target; otherwise a newer SDK emits libraries older supported Macs cannot load and the host falls back to runtime compilation. Every build rechecks the compiler, SDK, deployment target and source contents, reusing the header only when all match. Installing the Metal toolchain after a source-only build therefore regenerates the libraries without a clean build.
 - **Build callers:** the NSP packer and regression harness generate the Mac header before checking their cached host executables, and include it in the host fingerprint. The standalone iOS compile check generates the iPhone header before its dry run, as the app build does. A dry run alone does not generate either header.
+
+### BAHS pairs must not bypass intermediate stages
+
+- **Symptom:** a generated BAHS pair links vertex outputs directly to fragment inputs even when the program contains geometry or tessellation stages.
+- **Cause:** the pairing pass counts vertex and fragment records without proving that they are adjacent pipeline stages. An intermediate binary can still be present in the program table when its shader reader did not extract it.
+- **Fix:** inspect every binary-kind record in the complete program range before constructing a direct vertex/fragment pair. Programs with a kind above 1 produce no such direct pair; the extraction and actual intermediate-stage translation remain unchanged. Neighboring direct programs retain their own pairs.
+- **Found on:** synthetic BAHS program arrays in [test_bahs_pairs.py](../../dm/gfx/tests/test_bahs_pairs.py), covering direct variations, geometry/tessellation/unknown stages, an unextracted intermediate record and adjacent unaffected programs. No game files or measured gameplay improvement are claimed by these fixtures.

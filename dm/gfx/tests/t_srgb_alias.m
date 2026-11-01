@@ -28,6 +28,19 @@ int main(void) { @autoreleasepool {
     encoder = blit(); enc_b_copy_texture_buffer(encoder, view, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(4,4,1), dst, 0, 16, sizeof pixels);
     mtl_sub_commit(); mtl_drain();
     CHECK(!memcmp(dst.contents, pixels, sizeof pixels), "pixels written through the linear texture read back through the sRGB one");
+    // The linear texture upgraded after the view was made (image writes): the view follows the upgraded storage
+    id<MTLTexture> up = tex_upgrade(&lin, base, MTLTextureUsageShaderWrite, base.pixelFormat), view2 = tex_mtl(&srgb);
+    CHECK(up != base && tex_mtl(&lin) == up, "the linear texture is upgraded");
+    CHECK(view2.parentTexture == up && view2.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB, "the sRGB texture is a view of the upgraded storage");
+    for (int i = 0; i < 16; i++) ((uint32_t *)src.contents)[i] = 0x88776655u + (uint32_t)i;
+    mtl_sub_begin(); encoder = blit();
+    enc_b_copy_buffer_texture(encoder, src, 0, 16, sizeof pixels, MTLSizeMake(4,4,1), up, 0, 0, MTLOriginMake(0,0,0));
+    encoder = blit(); enc_b_copy_texture_buffer(encoder, view2, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(4,4,1), dst, 0, 16, sizeof pixels);
+    mtl_sub_commit(); mtl_drain();
+    CHECK(!memcmp(dst.contents, src.contents, sizeof pixels), "pixels written through the upgraded linear texture read back through the sRGB view");
+    // An upgrade asked through the view upgrades the parent; the view is made again on it
+    id<MTLTexture> up2 = tex_upgrade(&srgb, view2, MTLTextureUsageRenderTarget, view2.pixelFormat);
+    CHECK(up2.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB && up2.parentTexture == tex_mtl(&lin) && tex_mtl(&lin) != up && tex_mtl(&srgb) == up2, "an upgrade through the view upgrades the parent and keeps the pair sharing");
     printf("sRGB / linear aliases: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

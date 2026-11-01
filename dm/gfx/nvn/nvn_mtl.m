@@ -16702,8 +16702,87 @@ static void pres_seen(uint64_t pn, double tt) {
 }
 // Ring of the display-link tick that took each present (written on the display-link callback thread, read 8 presents later for DM_NVN_TSV, as g_pres): its target display time
 // (seconds, CACurrentMediaTime base), how long before it the callback ran, the callbacks since the previous present's (1 = no tick without a frame) and the longest interval between them
-typedef struct { uint64_t n; double target, lead_ms, gap_ms; int ticks; } link_ent;
+// Where the callback that took a present spent its time (ms): the submission deadline's slack (update.targetTimestamp − the present call: negative = past it), the snapshot and
+// external-producer waits, present_now's allocator wait, the callback's own run (entry to exit), the idle time since the previous callback exited (near 0 = the previous one ran
+// up to this one), the longest held callback since the previous present and the wait for g_pq_mu. They tell a tick the system did not deliver from one our own callback delayed
+typedef struct { uint64_t n; double target, lead_ms, gap_ms; int ticks; double slack_ms, wait_ms, alloc_ms, run_ms, idle_ms, held_ms, lock_ms; } link_ent;
 static link_ent g_link_ring[PRING];
+// The screen moving under the display link (DM_PRESENT_RESYNC=1, default; 0 off). Measured on Breath of the Wild in fullscreen on a ProMotion Mac (DM_NVN_TSV, runs 4-10): at one
+// frame (87, 251, 342, 355 s into a session, no timer of ours) the system starts showing every frame exactly 4.17 ms (1/240 s) after the link's target and keeps that offset;
+// nothing on our side changes at that frame. From then on the link calls back a tick late about every 11-12 frames: our callbacks run 0.16 ms with no wait and present 8.1 ms
+// before their deadline, and the link thread sits idle 20.7 ms before each late one (run 9). That costs 56 fps on the 60 Hz link and 58.6 on the 120 Hz link, at frame latency
+// 2 and 1 alike, and a link made again keeps the offset. Without the link (mode 0: the present thread takes drawables and presents each frame for its period) the game held
+// 60.03 fps for 15 minutes (run 10). So once LINK_SHIFT_N presents in a row were shown LINK_SHIFT_MS or more after their targets (three quarters of them; a frame a whole refresh
+// late is a miss of its own; half of them, as when run 6's offset flipped each second at 60 fps, is not the steady shift), a 60 fps game leaves the link for mode 0, where it
+// fits (link_leave_ok): fullscreen on a variable-refresh screen, which shows a frame when it is presented, at any rate. Fixed-rate screens (frame latency 1, where the shift was
+// not seen) and windows keep the link; leaving those conditions takes pacing back to it. What the system changes at the shift is open (docs/reference/frame-rate.md)
+#define LINK_SHIFT_N 120
+#define LINK_SHIFT_MS 2.0
+typedef struct { int late, n; } link_shift_t;
+static int link_shift_judge(link_shift_t *s, double late_ms) {   // one presented frame: 1 when a full window was steadily shown after its targets
+    s->n++; s->late += late_ms >= LINK_SHIFT_MS;
+    if (s->n < LINK_SHIFT_N) return 0;
+    int late = s->late >= LINK_SHIFT_N * 3 / 4; s->n = s->late = 0;
+    return late;
+}
+// Pacing may leave the display link for the screen's shift: fullscreen on a variable-refresh screen, at any rate. Not on a fixed-rate screen, not in a window
+static int link_leave_ok(int fullscreen, int variable) { return fullscreen && variable; }
+// The offset of the frames on screen against their targets, and when it moves (the log line that dates the system's shift): level is the settled offset; a new one (cand) settles
+// after LINK_OFFSET_N presents within 1 ms of it. Isolated presents at neither are skipped (after the shift about one in twelve is on its target, and a few a refresh off); three in a
+// row at the old level, or three in a row at neither, start the count again. Returns 1 on the present that settles it, with *first the first present at it and *was the offset before
+#define LINK_OFFSET_N 30
+#define LINK_OFFSET_LOG 8
+typedef struct { double level, cand; int have, n, back, odd; uint64_t first; } link_offset_t;
+static int link_offset_note(link_offset_t *o, double late_ms, uint64_t pn, uint64_t *first, double *was) {
+    if (!o->have) { o->level = late_ms; o->have = 1; return 0; }
+    if (fabs(late_ms - o->level) < 1.0) { if (++o->back >= 3) o->n = 0; return 0; }
+    o->back = 0;
+    if (o->n && fabs(late_ms - o->cand) >= 1.0) { if (++o->odd >= 3) o->n = 0; else return 0; }
+    if (!o->n) { o->cand = late_ms; o->n = 1; o->odd = 0; o->first = pn; return 0; }
+    o->odd = 0;
+    if (++o->n < LINK_OFFSET_N) return 0;
+    *first = o->first; *was = o->level; o->level = o->cand; o->n = 0; return 1;
+}
+__attribute__((weak)) int front_fullscreen(void);
+__attribute__((weak)) int front_screen_variable_refresh(void);
+__attribute__((weak)) int front_screen_max_fps(void);
+static int link_latency(void);
+static link_shift_t g_link_shift; static link_offset_t g_link_offset; static int g_link_moved, g_link_leave;   // under g_pq_mu; moved: pacing left the link (mode 0) because of the shift; leave: the presented handler asks link_sync to leave it
+static int link_resync_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_PRESENT_RESYNC"); v = !(e && !strcmp(e, "0")); } return v; }
+static void link_late_note(uint64_t pn, double presented) {   // a frame's actual presentation time against its display-link target (the presented handler, under g_pq_mu)
+    link_ent e = g_link_ring[pn % PRING]; if (e.n != pn || !(presented > 0) || !(e.target > 0)) return;
+    double late_ms = (presented - e.target) * 1e3; if (late_ms > 20) return;   // a frame shown a whole refresh late or more is a miss of its own (a stall, a heavy frame), not the grid
+    int fs = front_fullscreen(), vrr = front_screen_variable_refresh(), hz = front_screen_max_fps(); uint64_t first; double was;
+    static unsigned moves, quiet; static uint64_t quiet_at;   // the first LINK_OFFSET_LOG moves in full, then a count a minute (Breath of the Wild run 6: the offset went 0 ↔ 4.15 ms about once a second for four minutes)
+    if (link_offset_note(&g_link_offset, late_ms, pn, &first, &was)) {
+        uint64_t t = now_ns();
+        if (++moves <= LINK_OFFSET_LOG) {
+            pres_ent f2 = g_pres[(pn - 2) % PRING]; double cb = e.target - e.lead_ms / 1e3;
+            MLOG("display link: frames now reach the screen %.2f ms after the link's targets (was %.2f) from present %llu; callback %.2f ms after present %llu reached the screen, lead %.2f ms; screen %d Hz %s, %s, frame latency %d, pacing mode %d",
+                 g_link_offset.level, was, (unsigned long long)first, f2.n == pn - 2 && f2.t > 0 ? (cb - f2.t) * 1e3 : -1.0,
+                 (unsigned long long)(pn - 2), e.lead_ms, hz, vrr ? "variable refresh" : "fixed refresh", fs ? "fullscreen" : "window", link_latency(), g_dm_present_link);
+            if (moves == LINK_OFFSET_LOG) quiet_at = t + 60000000000ull;
+        } else if (++quiet && t >= quiet_at) {
+            MLOG("display link: the frames' offset against the link's targets moved %u more times in the last minute or more (now %.2f ms)", quiet, g_link_offset.level);
+            quiet = 0; quiet_at = t + 60000000000ull;
+        }
+    }
+    // Mode 1 only: 1 is the default; 2 (120 Hz link) is a DM_PRESENT_LINK choice, which keeps the link though it also loses frames after the shift (58.6 fps)
+    if (!link_resync_on() || g_link_moved || g_link_leave || g_dm_present_link != 1 || !link_shift_judge(&g_link_shift, late_ms)) return;
+    if (link_leave_ok(fs, vrr) && mtl_fps_target() == 60) {
+        // Only a request: link_sync, on the game's present thread, sets the mode and invalidates the link in one step. Setting the mode here would stop the callback taking frames
+        // while the link still owns the layer, and a game waiting in mtl_present_wait for an untaken frame would wait forever (the ticking link keeps the stall drop from firing)
+        g_link_leave = 1;
+        MLOG("display link: %d presents shown %.2f ms after their targets: pacing leaves the link at the next present, the present thread presents each frame (DM_PRESENT_LINK=0)", LINK_SHIFT_N, g_link_offset.level);
+    } else {
+        static int said; if (!said++) MLOG("display link: %d presents shown %.2f ms after their targets; pacing stays on the link (screen %d Hz %s, %s: leaving it needs fullscreen on a variable-refresh screen and a 60 fps game)",
+                                          LINK_SHIFT_N, late_ms, hz, vrr ? "variable refresh" : "fixed refresh", fs ? "fullscreen" : "window");
+    }
+}
+int mtl_link_detail(uint64_t n, double v[7]) {   // link_ent's callback timing for the n-th present: slack, wait, alloc, run, idle, held, lock (ms); 0 when there is none
+    link_ent e = g_link_ring[n % PRING]; if (e.n != n || !(e.run_ms > 0)) return 0;
+    v[0] = e.slack_ms; v[1] = e.wait_ms; v[2] = e.alloc_ms; v[3] = e.run_ms; v[4] = e.idle_ms; v[5] = e.held_ms; v[6] = e.lock_ms; return 1;
+}
 int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms) {
     link_ent e = g_link_ring[n % PRING]; if (e.n != n) return 0;
     *target = e.target; *lead_ms = e.lead_ms; *ticks = e.ticks; *gap_ms = e.gap_ms; return 1;
@@ -17235,6 +17314,8 @@ static void present_gpu_note(double s, int fx) {   // fx: 0 bilinear, 1 MetalFX 
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
 static int snap_up_for(int slot, uint64_t gen, NSUInteger dw, NSUInteger dh, MTLPixelFormat pf, id<MTLTexture> *up, MTLViewport *vp);   // the snapshot ring (below)
 static void snap_up_stale(int slot, uint64_t gen);
+// For the display-link timing rows (link_ent): present_now's last wait for its command allocator and the time it called present (CACurrentMediaTime, seconds)
+static double g_pn_alloc_s, g_pn_present_at;
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], id<CAMetalDrawable> supplied, double target_ts, int up_slot, uint64_t up_gen) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
@@ -17305,10 +17386,13 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!supplied) g_drawable_ns += now_ns() - dt0;
     if (!dr) return 0;
     int alloc_i = (int)(ticket % 3);
+    g_pn_alloc_s = 0;
     if (g_present_alloc_fence[alloc_i]) {
+        double a0 = CACurrentMediaTime();
         pthread_mutex_lock(&g_pq_mu);
         while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         pthread_mutex_unlock(&g_pq_mu);
+        g_pn_alloc_s = CACurrentMediaTime() - a0;
     }
     [g_present_alloc4[alloc_i] reset];
     [g_q4 waitForDrawable:dr];
@@ -17363,8 +17447,10 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         CFTimeInterval tt = d.presentedTime;
         g_pres[pn % PRING] = (pres_ent){pn, tt > 0 ? tt : -1};
         pres_seen(pn, tt);
+        pthread_mutex_lock(&g_pq_mu); link_late_note(pn, tt); pthread_mutex_unlock(&g_pq_mu);   // against the display link's target for this frame (the screen moving under the link)
     }];
     // Each frame is displayed for at least one present period: when the GPU completion time jitters around a 120 Hz refresh boundary, the paired "25 ms + 8.33 ms" stutter no longer appears
+    g_pn_present_at = CACurrentMediaTime();
     if (target_ts > 0) [dr present];
     else if (period > 0) [dr presentAfterMinimumDuration:period]; else [dr present];
 #endif
@@ -17404,6 +17490,7 @@ static uint64_t g_stall_t0, g_stall_drop, g_stall_n; static int g_stall_red, g_s
 #define LINK_RESCUE_NS 500000000ull
 static _Atomic int g_rescue_mode;   // Also read by link_on without g_pq_mu, to stop pacing on silent ticks immediately
 static uint64_t g_rescue_back_at, g_rescue_back_ns = 3000000000ull, g_rescue_n;
+static int link_takes(void) { return g_dm_present_link && !g_rescue_mode; }   // under g_pq_mu: the display-link callback takes queued frames (mode and rescue change only in link_sync and mtl_present_wait, on the game's threads)
 // The display link watchdog only recognizes the "active" state: when the App loses active status (pulling down Control Center / notifications, incoming call, system popup) and in the background the system does not call back anyway, and the picture is covered too -- the frame-drop fallback stays as before,
 // but it is not counted as stuck and no failure is reported; the stall is measured from the later of "the most recent callback / the most recent activation" (A16 logs: 8–17 seconds inactive and 17 seconds in the background were both reported as "stuck in foreground")
 __attribute__((weak)) int dm_focus_now(void) { return 1; }   // The host's hle_oe.c provides the strong definition; when graphics unit tests do not link the host it is treated as always active
@@ -17427,10 +17514,21 @@ static void link_drain_note(double cb, double age, int dropped) {
     int k = nvn_link_drain_next(&g_link_drain, cb, age, 1.0 / rate, atomic_load(&g_link_blocked_ns) / 1e9, ok);
     if (k) atomic_store(&g_link_drain_req, k);
 }
+// One tick of the display link in seconds: a counted virtual tick (link_range) or one callback at the link's rate (120, 60 or 30 Hz)
+static double link_tick_s(void) { return g_link_vperiod > 0 ? g_link_vperiod : 1.0 / mtl_link_rate(); }
+// How long the link callback keeps a presented frame on screen before it takes the next one: the frame's present period when that covers two or more of the link's ticks, 0 when
+// the next tick may take a frame. Measured in the link's own ticks, not in 60 Hz vsyncs: a 60 fps game's 16.7 ms frame on a 120 Hz link (DM_PRESENT_LINK=2) holds two ticks, as an
+// interval-2 frame holds two on a 60 Hz link. A fixed "period > 25 ms" let every 120 Hz tick take a frame: with present snapshots, where the ring slot each present frees paces
+// the game, Breath of the Wild then ran one frame per 8.3 ms tick at 1.16 of real time (87 fps, game time 30.3 s in 26.0 s) on the 120 Hz link
+static double link_hold_s(double period) { double tick = link_tick_s(); return tick > 0 && period > 1.5 * tick ? period : 0; }
+// The callback's run on every return (link_ent): when it exited, and the longest run of the callbacks that took no frame since the previous present
+static double g_cb_exit, g_cb_held_max; static int g_cb_took;
+static void link_cb_done(double *entry) { double t = CACurrentMediaTime(); if (!g_cb_took && t - *entry > g_cb_held_max) g_cb_held_max = t - *entry; g_cb_exit = t; }
 @implementation NvMetalDisplayLinkDelegate
 - (void)metalDisplayLink:(CAMetalDisplayLink *)link needsUpdate:(CAMetalDisplayLinkUpdate *)update {
     (void)link;
-    double cb = CACurrentMediaTime();
+    double cb = CACurrentMediaTime(), idle = g_cb_exit > 0 ? cb - g_cb_exit : -1;
+    __attribute__((cleanup(link_cb_done))) double cb_entry = cb; g_cb_took = 0;
     pthread_mutex_lock(&g_pq_mu);
     if (g_stall_t0) { uint64_t since = dm_focus_in_since(), t = now_ns();
         MLOG("display link recovered: stalled %.0f ms (%.0f ms of it active), fallback dropped %llu frames (stall #%llu)", (t - g_stall_t0) / 1e6, (t - (g_stall_t0 > since ? g_stall_t0 : since)) / 1e6, (unsigned long long)g_stall_drop, (unsigned long long)g_stall_n); g_stall_t0 = 0; }
@@ -17450,9 +17548,11 @@ static void link_drain_note(double cb, double age, int dropped) {
     g_link_tick_n++;
     pthread_cond_broadcast(&g_link_cv);
     pthread_mutex_unlock(&g_link_mu);
+    double l0 = CACurrentMediaTime();
     pthread_mutex_lock(&g_pq_mu);
-    if (!g_dm_present_link || g_rescue_mode || g_pq_read == g_pq_in) { if (g_dm_present_link && !g_rescue_mode) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
-    // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
+    double lock_s = CACurrentMediaTime() - l0;
+    if (!link_takes() || g_pq_read == g_pq_in) { if (link_takes()) g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
+    // The previous frame's period covers two or more link ticks (link_hold_s: interval >= 2, or any 60 fps frame on a 120 Hz link): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
     if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
     uint64_t first = g_pq_read + 1, ticket = g_pq_in;
@@ -17466,13 +17566,21 @@ static void link_drain_note(double cb, double age, int dropped) {
     if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); } }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
     if (ticket > 1 && g_pq_done < ticket - 1) g_pq_done = ticket - 1;
     g_link_ring[ticket % PRING] = (link_ent){ticket, update.targetPresentationTimestamp, (update.targetPresentationTimestamp - cb) * 1e3, gap_max * 1e3, nticks}; nticks = 0; gap_max = 0;
+    double held_s = g_cb_held_max; g_cb_held_max = 0; g_cb_took = 1;
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
     link_drain_note(cb, cb - it.t_in, ticket > first);
     int submitted;
+    double w0 = CACurrentMediaTime();
     ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+    double wait_s = CACurrentMediaTime() - w0; g_pn_present_at = 0; g_pn_alloc_s = 0;
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp, it.up_slot, it.up_gen); mtl_tex_unpin(it.t.serial); }
-    g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
+    {   // written without g_pq_mu (the fields above are written under it): only this callback writes them, and hle_nvn.c reads them 8 presents later
+        link_ent *le = &g_link_ring[ticket % PRING]; double t1 = CACurrentMediaTime();
+        le->slack_ms = g_pn_present_at > 0 ? (update.targetTimestamp - g_pn_present_at) * 1e3 : -999; le->wait_ms = wait_s * 1e3; le->alloc_ms = g_pn_alloc_s * 1e3;
+        le->run_ms = (t1 - cb) * 1e3; le->idle_ms = idle * 1e3; le->held_ms = held_s * 1e3; le->lock_ms = lock_s * 1e3;
+    }
+    double hold = submitted ? link_hold_s(it.period) : 0; g_link_hold_until = hold > 0 ? update.targetPresentationTimestamp + hold : 0;
     if (!submitted) {
         pthread_mutex_lock(&g_pq_mu);
         if (ticket > g_pq_done) g_pq_done = ticket;
@@ -17557,6 +17665,12 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     if (g_rescue_mode && (want != g_rescue_mode || now_ns() >= g_rescue_back_at)) {
         g_rescue_mode = 0; g_stall_t0 = 0; __atomic_store_n(&g_link_tick_ns, now_ns(), __ATOMIC_RELAXED);
         MLOG("display link: rescue ended, trying pacing mode %d (frame %llu)", want, (unsigned long long)atomic_load(&g_cur_frame));
+    }
+    if (g_link_leave) { g_link_leave = 0; if (want == 1 && !g_rescue_mode) { g_dm_present_link = want = 0; g_link_moved = 1; } }   // asked by link_late_note; a mode set meanwhile wins
+    else if (g_link_moved && want) { g_link_moved = 0; g_link_shift = (link_shift_t){0}; }   // a runtime setting (DM_AB, the settings) put pacing back on a link: it wins, and the shift is judged afresh
+    if (g_link_moved && (!link_leave_ok(front_fullscreen(), front_screen_variable_refresh()) || mtl_fps_target() != 60)) {   // left for the shift (link_late_note), and the screen, window or rate no longer fits it
+        g_link_moved = 0; g_dm_present_link = want = 1; g_link_shift = (link_shift_t){0};
+        MLOG("display link: pacing back on the link (screen %d Hz %s, %s)", front_screen_max_fps(), front_screen_variable_refresh() ? "variable refresh" : "fixed refresh", front_fullscreen() ? "fullscreen" : "window");
     }
     if (g_rescue_mode) want = 0;
     pthread_mutex_unlock(&g_pq_mu);

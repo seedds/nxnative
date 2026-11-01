@@ -1,0 +1,37 @@
+# Game profile of Dead Cells (Switch, update 1.25.0 = v3014656). Plays on the Mac
+# Format: see dm/games/README.md
+# Motion Twin's game on Heaps and HashLink (HL/C compiled into main), SDK 13.3.5, with its own NVN driver (nx.nvn.NvnDriver). The shaders are in res1.pak: shaders.cache.nx holds each program's
+# GLSL and its GLSLC output in base64 (shader_split.py heaps_shaders). main imports GLSLC (subsdk0), but the runs so far compiled nothing with it
+
+# ---- Identity ----
+title_id	0100646009FBE000
+program_id	0100646009FBE000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Dead Cells
+ipa	DeadCells.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v3014656	1.25.0	main=6e35ee0a240291430df6cccb49578378	subsdk0=c366dfa35272b8ac489629858902568b	sdk=3644a6760469451cabc99f00c540acc2
+package	v3014656
+shader_versions	v3014656
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = GLSLC, which main imports)
+modules	main subsdk0 sdk
+romfs_marker	res1.pak
+zip_store	.pak:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource, so IsVirtualAddressMemoryEnabled is false and nninitStartup sets a heap: 3.06 GB of the hardware pool, in a 3.25 GB heap region of the 4 GB block
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/=romfs
+shader_note	Dead Cells shaders

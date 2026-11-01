@@ -273,6 +273,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), reported in [PR #261](https://github.com/seedds/nxnative/pull/261).
 - **Check:** `t_tex` compares both directions against the byte-address formula for 1,029 deterministic layouts, including 1D/2D/3D, arrays/cubes, packaged block dimensions, sparse mip tails, 1/2/3/4/6/8/12/16-byte formats, padded pitches and partial segments. All 5,334 checks pass, including under AddressSanitizer and UBSan. A local arm64 Mac comparison against the old implementation, Apple clang 21 at the host's `-O1`, measured 7.4–7.7 GB/s before and 35.1–37.6 GB/s after (4.6–5.1x) across 1024x1024 sparse ASTC 6x6, 2048x2048 BC7, 1920x1080 RGBA8 and 1280x720 RGBA16F. Each result is the median of seven runs copying about 128 MiB, with implementation order alternated. This is a CPU microbenchmark; no new gameplay run here.
 
+### The Switch 2's order inside a GOB
+
+- **Symptom:** a Switch 2 game's textures from its files keep their shapes but break up along every edge: misplaced 4×4 blocks (16-byte pieces) in a regular weave, invisible in flat areas. Normal maps make lit surfaces look woven; opacity masks punch holes.
+- **Cause:** the GOB (64 bytes × 8 rows) keeps its size and place, but the Switch 2 orders its 16-byte pieces x5 y2 x4 y1 y0 from the GOB's start, where the Tegra X1 orders them x5 y2 y1 x4 y0: offset bits 5 and 6 exchanged, (x%64/32)·256 + (y%8/4)·128 + (x%32/16)·64 + (y%4/2)·32 + (y%2)·16 + x%16. Block heights, sizes and level offsets are unchanged (the BNTX headers' block heights and sizes match `nvn_tex_layout`).
+- **Fix:** `nvn_gob_switch2` (`dm/gfx/tex/nvn_deswizzle.h`), set at `nvnDeviceInitialize` when the SDK targets the Switch 2 (`dm_sdk_ounce`): the CPU address formula, the CPU copy tables and both Metal untiling kernels take the Switch 2's order.
+- **Check:** `t_tex` checks the Switch 2's offsets by hand (B2) and both orders where they differ; `t_deswz_gpu` runs every case in both orders, the GPU kernels against the CPU copy.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#rendering): level 0 of its BNTX textures (BC7 `BaseRock000_Pnrm`, BC4 `ArenaLevelShadowMaskSunbeam00_Smsk`) decoded with every order of the five address bits; the X1's left the weave, this order alone gave clean images (mean neighbour difference 19.5 → 14.9 on the rock normal map, 21.0 → 15.7 on the BC4 mask).
+
 ### Packaged texture block dimensions and linear storage rows
 
 - **Symptom:** driver comparisons report the wrong block dimensions for packaged 2D / 3D textures, or too little storage for linear block-compressed textures (64x64 BC1 with stride 128: 2048 bytes instead of 8192).
@@ -503,6 +511,13 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** report the translator's supported GPU-code range, through 1.16, independently of the linked SDK. Precompiled shaders can come from a newer compiler: ASTRAL CHAIN links SDK 6.4 but ships 1.15 objects, defeating the earlier SDK-based floor. Keep the additional floor from a GLSLC the game carries (`hle_nvn.c`; that GLSLC check: [GLSLC GPU code version against the driver's range](shaders.md#glslc-gpu-code-version-against-the-drivers-range)). `t_nvn.c` checks the advertised range even without a loaded SDK.
 - **Note:** a wider range only lets more shaders pass such checks.
 - **Found on:** [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2, PlatinumGames' engine); [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (its GLSLC 8.2.1 set the earlier SDK 8 value); [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (the table's 1.14); [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) (SDK 6.4, precompiled GPU code 1.15).
+
+### The Switch 2's device values
+
+- **Symptom:** none seen: a Switch 2 game asking `nvnDeviceGetInteger` got the Tegra X1's values (measured on a Switch 1), and items past 0x5F answered 0 with a red line.
+- **Cause:** NVN2 is compiled into the game's own `sdk`, and its answers differ: the procedure table's `DeviceGetInteger` calls a switch over the items (Donkey Kong Bananza's sdk 20.5.19: `sdk+0x5d9960`, items 0 to 0xA9, the default 231) that falls back on a table lookup (`sdk+0x5c0a20`). The item numbers are NVN's (API 231.30 at 0 / 1, GPU code 201.0 to 201.17 at 0x2E to 0x31, 201 = 0xc9, the version of its shaders' control sections). Ampere's differ from the X1's in 32 vertex bindings and attributes, 1,024 compute threads, an unbounded dispatch width, 16 texture levels, 16 KB scratch granularity, 2 KB shader code padding and 32 separate sampler bindings, and items 0x60 to 0xA9 are new. Seventeen items come from the device's own GPU description at run time (scratch scale factors, L2 size, texture layers and sizes, linear stride alignment, pool page size and others), which the binary cannot give.
+- **Fix:** `g_devinfo2` (`hle_nvn.c`), taken for an SDK with the Switch 2's spec (`dm_sdk_ounce`): NVN2's constants, read statically, except vertex bindings and attributes, which stay 16, all the host's tables hold. The run-time items keep the X1 table's value below 0x60 and answer 0 with a red line above it.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): plays as before with the new values (a 6,900-frame run at 60 fps, no red line).
 
 ### Extensions fetched by name and called unchecked
 

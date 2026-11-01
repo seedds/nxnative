@@ -42,6 +42,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             Add(Instruction.AtomicXor,                GenerateAtomicXor);
             Add(Instruction.Ballot,                   GenerateBallot);
             Add(Instruction.Barrier,                  GenerateBarrier);
+            Add(Instruction.SubgroupBarrier,          GenerateSubgroupBarrier);
             Add(Instruction.BitCount,                 GenerateBitCount);
             Add(Instruction.BitfieldExtractS32,       GenerateBitfieldExtractS32);
             Add(Instruction.BitfieldExtractU32,       GenerateBitfieldExtractU32);
@@ -252,6 +253,17 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             context.ControlBarrier(
                 context.Constant(context.TypeU32(), Scope.Workgroup),
                 context.Constant(context.TypeU32(), Scope.Workgroup),
+                context.Constant(context.TypeU32(), MemorySemanticsMask.WorkgroupMemory | MemorySemanticsMask.AcquireRelease));
+
+            return OperationResult.Invalid;
+        }
+
+        // nxnative: the lanes of one subgroup (Metal: simdgroup_barrier), with their workgroup memory accesses ordered
+        private static OperationResult GenerateSubgroupBarrier(CodeGenContext context, AstOperation operation)
+        {
+            context.ControlBarrier(
+                context.Constant(context.TypeU32(), Scope.Subgroup),
+                context.Constant(context.TypeU32(), Scope.Subgroup),
                 context.Constant(context.TypeU32(), MemorySemanticsMask.WorkgroupMemory | MemorySemanticsMask.AcquireRelease));
 
             return OperationResult.Invalid;
@@ -1782,14 +1794,29 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
 
+            // nxnative: a load or store through a physical storage buffer pointer must state its alignment (a 32-bit word)
+            bool physical = operation.StorageKind == StorageKind.GlobalMemory;
+
             if (isStore)
             {
-                context.Store(pointer, context.Get(varType, operation.GetSource(operation.SourcesCount - 1)));
+                SpvInstruction store = context.Store(pointer, context.Get(varType, operation.GetSource(operation.SourcesCount - 1)), physical ? MemoryAccessMask.Aligned : (MemoryAccessMask)int.MaxValue);
+
+                if (physical)
+                {
+                    store.AddOperand((SpvLiteralInteger)4);
+                }
+
                 return OperationResult.Invalid;
             }
             else
             {
-                SpvInstruction result = context.Load(context.GetType(varType), pointer);
+                SpvInstruction result = context.Load(context.GetType(varType), pointer, physical ? MemoryAccessMask.Aligned : (MemoryAccessMask)int.MaxValue);
+
+                if (physical)
+                {
+                    result.AddOperand((SpvLiteralInteger)4);
+                }
+
                 return new OperationResult(varType, result);
             }
         }
@@ -1805,6 +1832,20 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             switch (storageKind)
             {
+                case StorageKind.GlobalMemory:
+                    // nxnative: an address traced to no storage buffer, already moved to the host's GPU address (GlobalToStorage.TryGenerateRawStorageOp):
+                    // a physical storage buffer pointer to its 32-bit word, from the address's low and high words
+                    SpvInstruction addressWords = context.CompositeConstruct(
+                        context.TypeVector(context.TypeU32(), 2),
+                        context.Get(AggregateType.U32, operation.GetSource(0)),
+                        context.Get(AggregateType.U32, operation.GetSource(1)));
+
+                    varType = AggregateType.U32;
+
+                    return context.ConvertUToPtr(
+                        context.TypePointer(StorageClass.PhysicalStorageBuffer, context.TypeU32()),
+                        context.Bitcast(context.TypeInt(64, 0), addressWords));
+
                 case StorageKind.ConstantBuffer:
                 case StorageKind.StorageBuffer:
                     if (operation.GetSource(srcIndex++) is not AstOperand bindingIndex || bindingIndex.Type != OperandType.Constant)

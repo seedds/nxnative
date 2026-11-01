@@ -20,7 +20,10 @@
 // the loader's module table (loader.c allocates it from the NSO list and the NRO manifest), here a fixed array: "main"
 // and the second modules "sdk" and "sdk2"
 static module_t mods[3]; module_t *g_mod = mods; int g_nmod;
-uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+// The test's clock starts at 0 and moves 1 µs a call, so the idle thread (started by the first loaded file) always finds a present in its last 250 ms and stands down:
+// every pass is the test's own. On the real clock it ran passes of its own between the test's whenever a step took longer than 250 ms (a loaded machine), and the C4
+// auto-repeat counter rose once more while A was held ("C4: released: nothing fires" failed)
+uint64_t now_ns(void) { static _Atomic uint64_t t; return atomic_fetch_add(&t, 1000) + 1000; }
 void dm_guest_write_prepare(void *addr, size_t len) { (void)addr; (void)len; }   // no dirty-page tracking in the test
 static uint8_t *heap; static size_t heap_open;   // the guest heap (hle_svc.c): a plain buffer, opened in full
 void dm_guest_heap_range(uint64_t *base, size_t *open_len) { *base = (uint64_t)(uintptr_t)heap; *open_len = heap_open; }
@@ -524,7 +527,7 @@ int main(void) {
     cheats_pass();
     CHECK(rd32(0x43B8) == 0xAABBCCDD && !dm_cheat_why_at(ptr)[0] && entry("Ptr")[0].fails == 1, "once the pointer is set the chase works and the note goes");
     char pv2[512]; dm_cheat_preview(fl, pv2, sizeof pv2);
-    CHECK(strstr(pv2, "read at guest address 0x10 fails") && g_cheat[fl].fails == 2, "the dry run describes a failed read and counts nothing");
+    CHECK(strstr(pv2, "read at guest address 0x10 fails") && fl >= 0 && g_cheat[fl].fails == 2, "the dry run describes a failed read and counts nothing");
 
     // ---- registers: shared by the cheats of one pass (masters first), reset between passes; the dry run replays the pass ----
     fresh("regs", "[P2]\n40010000 00000000 00000005\n"   // r1 = 5

@@ -3,51 +3,91 @@
 #define main geometry_fixture_main
 #include "t_geometry.m"
 #undef main
-// Independent scalar oracle: the pre-optimization predicate examines every
-// pair, including read/read pairs. The optimized write mask must agree exactly.
+// Independent scalar oracle: a job may join a run only when no pair of its
+// ranges and an earlier job's ranges overlaps with at least one of them a write.
 static __attribute__((noinline)) int access_reference(const geo_access *a,const geo_access *b) {
     if(a->unknown||b->unknown)return 1;
     for(int i=0;i<a->n;i++)for(int j=0;j<b->n;j++)
         if((a->r[i].write||b->r[j].write)&&a->r[i].lo<b->r[j].hi&&b->r[j].lo<a->r[i].hi)return 1;
     return 0;
 }
-static __attribute__((noinline)) int access_candidate(const geo_access *a,const geo_access *b) {return geo_access_conflict(a,b);}
+static int run_reference(const geo_access *jobs,int n,const geo_access *b) {for(int i=0;i<n;i++)if(access_reference(&jobs[i],b))return 1;return 0;}
+static geo_run_access run_u;
+static int run_candidate(const geo_access *jobs,int n,const geo_access *b) {
+    run_u.w.n=run_u.r.n=run_u.unknown=0;for(int i=0;i<n;i++)geo_run_note(&run_u,&jobs[i]);return geo_run_conflict(&run_u,b);
+}
 static uint32_t access_random(uint32_t *s){*s^=*s<<13;*s^=*s>>17;*s^=*s<<5;return *s;}
 static void access_contract(void) {
-    uint32_t seed=0x91b73e42;int mismatches=0,asymmetry=0;
+    uint32_t seed=0x91b73e42;int mismatches=0,conflicts=0;static geo_access jobs[GEO_RUN];
     for(int trial=0;trial<4096;trial++) {
-        geo_access a={0},b={0};geo_access *v[2]={&a,&b};
-        for(int side=0;side<2;side++) {
-            unsigned n=access_random(&seed)%66;
-            for(unsigned k=0;k<n;k++) {
-                uint64_t lo=0x1000+(access_random(&seed)%512)*32ull;
-                if((trial&7)==1&&side)lo+=1ull<<32;
-                int write=(trial&7)==0?0:(access_random(&seed)%8)==0;
-                geo_access_add(v[side],lo,1+access_random(&seed)%256,write);
+        int n=1+access_random(&seed)%(trial&1?4:GEO_RUN-1);memset(jobs,0,sizeof jobs);
+        for(int side=0;side<=n;side++) {
+            unsigned k=access_random(&seed)%(trial%5==0?66:12);
+            for(unsigned q=0;q<k;q++) {
+                // dense addresses make touching, nested and partly overlapping ranges common
+                uint64_t lo=0x1000+(access_random(&seed)%(trial&2?4096:512))*32ull;
+                if((trial&7)==1&&side==n)lo+=1ull<<32;
+                int write=(trial&7)==0?0:(access_random(&seed)%(trial&4?64:8))==0;
+                geo_access_add(&jobs[side],lo,1+access_random(&seed)%256,write);
             }
         }
-        if(trial%29==0)geo_access_add(&a,UINT64_MAX-3,8,1);
-        if(trial%31==0)geo_access_add(&b,0x1000,0,0);
-        mismatches+=access_candidate(&a,&b)!=access_reference(&a,&b);
-        asymmetry+=access_candidate(&a,&b)!=access_candidate(&b,&a);
+        if(trial%29==0)geo_access_add(&jobs[access_random(&seed)%(n+1)],UINT64_MAX-3,8,1);
+        if(trial%31==0)geo_access_add(&jobs[n],0x1000,0,0);
+        int c=run_candidate(jobs,n,&jobs[n]);conflicts+=c;
+        mismatches+=c!=run_reference(jobs,n,&jobs[n]);
     }
-    EXPECT("4096 access sets agree with scalar dependency oracle",0,mismatches);
-    EXPECT("dependency relation remains symmetric",0,asymmetry);
+    EXPECT("4096 runs agree with scalar dependency oracle",0,mismatches);
+    EXPECT("random runs cover both outcomes",1,conflicts>200&&conflicts<3900);
     geo_access a={0},b={0};for(int i=0;i<64;i++)geo_access_add(&a,0x1000+i*64,32,0);
-    EXPECT("64 read ranges do not conflict",0,access_candidate(&a,&a));
+    EXPECT("64 read ranges do not conflict",0,run_candidate(&a,1,&a));
     geo_access_add(&b,0x1000+63*64+32,32,1);
-    EXPECT("adjacent half-open ranges stay independent",0,access_candidate(&a,&b));
+    EXPECT("adjacent half-open ranges stay independent",0,run_candidate(&a,1,&b));
+    EXPECT("adjacent write before reads stays independent",0,run_candidate(&b,1,&a));
     b=(geo_access){0};geo_access_add(&b,0x1000+63*64+31,32,1);
-    EXPECT("one-byte overlap with range 63 is detected",1,access_candidate(&a,&b));
+    EXPECT("one-byte overlap with range 63 is detected",1,run_candidate(&a,1,&b));
     geo_access_add(&a,0x1000+63*64,32,1);
     EXPECT("duplicate range promoted to write sets bit 63",1ull<<63,a.writes);
     b=(geo_access){0};geo_access_add(&b,0x1000+63*64,1,0);
-    EXPECT("promoted write conflicts with later read",1,access_candidate(&a,&b));
+    EXPECT("promoted write conflicts with later read",1,run_candidate(&a,1,&b));
+    geo_access w[2]={0};geo_access_add(&w[0],0x2000,16,1);geo_access_add(&w[1],0x2010,16,1);b=(geo_access){0};geo_access_add(&b,0x200f,2,0);
+    EXPECT("read across two merged writes is detected",1,run_candidate(w,2,&b));
+    b=(geo_access){0};geo_access_add(&b,0x2020,16,0);
+    EXPECT("read just past merged writes stays independent",0,run_candidate(w,2,&b));
     geo_access_add(&a,0x100000,1,0);
-    EXPECT("range overflow remains conservative",1,access_candidate(&a,&(geo_access){0}));
+    EXPECT("range overflow remains conservative",1,run_candidate(&a,1,&(geo_access){0}));
+    EXPECT("earlier overflow remains conservative",1,run_candidate(w,2,&a));
+}
+// After a drain in this submission, a CPU read waits only for writes encoded after it (drw_valid)
+static void drain_contract(void) {
+    pend_reset(); g_sub_serial = 41; g_drain_sub = ~0ull;
+    sbw_note(0x10000, 64, SBW_GPU);
+    EXPECT("no drain: a write earlier in the submission is a hazard",1,geo_cpu_hazard(0x10000,4));
+    drw_drained();
+    EXPECT("drained: an earlier write no longer counts",0,geo_cpu_hazard(0x10000,4));
+    EXPECT("the drain re-encodes bindings",1,g_args_dirty[0]&&g_args_dirty[2]);
+    sbw_note(0x20000, 16, SBW_GPU);
+    EXPECT("a storage write after the drain counts",1,geo_cpu_hazard(0x2000c,4));
+    EXPECT("only where it wrote",0,geo_cpu_hazard(0x20010,4));
+    pend_add(0x30000, 8, 2);
+    EXPECT("a copy after the drain counts",1,geo_cpu_hazard(0x30004,4));
+    g_wr_epoch++; g_wr_geo++;
+    EXPECT("a geometry kernel's epoch keeps the list",1,drw_valid());
+    g_wr_epoch++;
+    EXPECT("another epoch bump (feedback) drops it",0,drw_valid());
+    EXPECT("then the submission-wide sets answer",1,geo_cpu_hazard(0x10000,4));
+    drw_drained(); sbw_note(0x40000, 0, SBW_GPU);
+    EXPECT("a write of unknown size drops the list",0,drw_valid());
+    drw_drained(); for (int i = 0; i <= DRW_N; i++) sbw_note(0x1000000 + (uint64_t)i * 0x2000, 16, SBW_GPU);
+    EXPECT("an overflowing list drops it",0,drw_valid());
+    drw_drained(); for (int i = 0; i < 4 * DRW_N; i++) sbw_note(0x1000000 + (uint64_t)i * 16, 16, SBW_GPU);
+    EXPECT("adjacent writes merge instead of overflowing",1,drw_valid()&&g_ndrw==1);
+    g_sub_serial++;
+    EXPECT("a new submission has no drain",0,drw_valid());
+    pend_reset();
 }
 static int access_benchmark(void) {
-    static geo_access jobs[64];for(int i=0;i<64;i++) {
+    // the shape of Donkey Kong Bananza's runs: shared reads, one private write each, no conflict
+    static geo_access jobs[GEO_RUN];for(int i=0;i<GEO_RUN;i++) {
         for(int j=0;j<32;j++)geo_access_add(&jobs[i],0x1000+j*64,32,0);
         geo_access_add(&jobs[i],0x100000+i*4096,32,1);
     }
@@ -55,9 +95,11 @@ static int access_benchmark(void) {
     for(int trial=0;trial<12;trial++) {
         double times[2];for(int turn=0;turn<2;turn++) {
             int mode=(trial&1)?1-turn:turn;
-            int (*volatile f)(const geo_access*,const geo_access*)=mode?access_candidate:access_reference;
             uint64_t t=bp_now();unsigned sum=0;
-            for(unsigned k=0;k<60000;k++){unsigned i=k%64,j=(i+1+(k/64)%63)%64;sum+=f(&jobs[i],&jobs[j]);}
+            for(int k=0;k<200;k++) {   // one whole run, each job checked against the jobs before it
+                if(mode){run_u.w.n=run_u.r.n=run_u.unknown=0;geo_run_note(&run_u,&jobs[0]);for(int i=1;i<GEO_RUN;i++){sum+=geo_run_conflict(&run_u,&jobs[i]);geo_run_note(&run_u,&jobs[i]);}}
+                else for(int i=1;i<GEO_RUN;i++)sum+=run_reference(jobs,i,&jobs[i]);
+            }
             times[mode]=(bp_now()-t)/1e6;sink+=sum;
         }
         printf("ACCESS_BENCH %d reference_ms %.6f candidate_ms %.6f\n",trial,times[0],times[1]);
@@ -99,6 +141,6 @@ static void dependency(int uniform) {
 }
 int main(int argc,char **argv){@autoreleasepool{
     if(argc>1&&!strcmp(argv[1],"--access-bench"))return access_benchmark();
-    access_contract();mtl_init();dependency(0);dependency(1);
+    access_contract();drain_contract();mtl_init();dependency(0);dependency(1);
     printf("t_geometry_hazards: %d checks, %d failed\n",checks,failed);return failed!=0;
 }}

@@ -458,6 +458,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the filter now gets a host vtable (`ngc_vtable` in `hle_misc.c`): each slot of the SDK's `_ZTVN2nn3ngc15ProfanityFilterE` is matched by address with the class's methods, and slots the loader already bound to forced take-overs keep them. The `unsigned short` and `char16_t` overloads are taken over by name too, as are the `char` overload, `SetMaskMode` and `Finalize` (`hle_misc.c`). Nothing is masked or reported.
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (the vtable); [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0; one boot: the UTF-16 overload by name); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the `char` overload, `SetMaskMode`, `Finalize`).
 
+### `nn::ngc` China-region profanity check and mask
+
+- **Symptom:** `[RED] sf: the game connects to service ngct:u itself, which the host does not serve`, then `Break#1 reason=0 Result=0xe15` from the SDK when the player name is entered after a race (Cruis'n Blast).
+- **Cause:** `nn::ngc::CheckProfanityWordsInTextForPlatformRegionChina` and `MaskProfanityWordsInTextForPlatformRegionChina` are free functions, not `ProfanityFilter` methods. They go through `nn::ngc::t::Match`, which opens the `ngct:u` service, and the host does not serve it.
+- **Fix:** both are taken over by name in `hle_offline.c`, next to the newer `ProfanityFilter` overloads: the check reports no profanity, and the mask leaves the text unchanged.
+- **Found on:** Cruis'n Blast (0100B41013C82000, SDK 10, version 1.0.7; no profile in this repository).
+
 ## Display, window and operation mode
 
 ### `vi::CreateLayer` with the layer's size

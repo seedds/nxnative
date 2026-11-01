@@ -13,7 +13,7 @@ import dmsh_geometry, dmsh_atomic, dmsh_abi as abi   # abi: the driver segment l
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_logic, dmsh_mesh, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_vin, dmsh_pull, dmsh_alpha, dmsh_logic, dmsh_mesh, dmsh_ampere, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
 _bad = tool_lock.check_tools()
 if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
@@ -48,6 +48,57 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
+
+# Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks) reaches the MSL as a call of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1, out D1) → D0, with
+# the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma, TensorPass, HelperFunctionManager.GenerateHmma16816F16). The
+# translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block: A row-major (halves 0..255, 16 a row), B transposed
+# (256..383, row n, 16 halves of k, loaded transposed), C / D row-major (384..511, 8 a row). Per HMMA on an M4 Pro: 1.08 ns a SIMD-group against 5.4 for the shuffle emulation
+HMMA_BODY = '''{
+    threadgroup uint* s = &%(scr)s[uint(%(blk)s)];
+    uint g = uint(%(lane)s) >> 2, t = uint(%(lane)s) & 3;
+    s[g * 8 + t] = uint(%(a0)s); s[(g + 8) * 8 + t] = uint(%(a1)s); s[g * 8 + 4 + t] = uint(%(a2)s); s[(g + 8) * 8 + 4 + t] = uint(%(a3)s);
+    s[128 + g * 8 + t] = uint(%(b0)s); s[128 + g * 8 + 4 + t] = uint(%(b1)s);
+    s[192 + g * 4 + t] = uint(%(acc0)s); s[192 + (g + 8) * 4 + t] = uint(%(acc1)s);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup half* h = (threadgroup half*)s;
+    simdgroup_half8x8 a00, a01, a10, a11, b0, b1, c0, c1;
+    simdgroup_load(a00, h, 16, ulong2(0, 0)); simdgroup_load(a01, h, 16, ulong2(8, 0)); simdgroup_load(a10, h, 16, ulong2(0, 8)); simdgroup_load(a11, h, 16, ulong2(8, 8));
+    simdgroup_load(b0, h + 256, 16, ulong2(0, 0), true); simdgroup_load(b1, h + 256, 16, ulong2(8, 0), true);
+    simdgroup_load(c0, h + 384, 8, ulong2(0, 0)); simdgroup_load(c1, h + 384, 8, ulong2(0, 8));
+    simdgroup_multiply_accumulate(c0, a00, b0, c0); simdgroup_multiply_accumulate(c0, a01, b1, c0);
+    simdgroup_multiply_accumulate(c1, a10, b0, c1); simdgroup_multiply_accumulate(c1, a11, b1, c1);
+    simdgroup_store(c0, h + 384, 8, ulong2(0, 0)); simdgroup_store(c1, h + 384, 8, ulong2(0, 8));
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    uint d0 = s[192 + g * 4 + t], d1 = s[192 + (g + 8) * 4 + t];
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    %(d1)s = as_type<%(dt)s>(d1);
+    return as_type<%(rt)s>(d0);
+}'''
+def hmma_msl(msl):
+    m = re.search(r'\n(\w+) dmsh_hmma16816_f16\(([^)]*)\)\n\{', msl)
+    if not m: return msl
+    params, depth, cur = [], 0, ''   # commas inside template arguments (spvUnsafeArray<uint, N>) do not separate parameters
+    for ch in m.group(2) + ',':
+        depth += {'<': 1, '>': -1}.get(ch, 0)
+        if ch == ',' and depth == 0: params.append(cur.strip()); cur = ''
+        else: cur += ch
+    scr = [x for x in params if x.startswith('threadgroup ')]
+    plain = [x for x in params if not x.startswith('threadgroup ')]
+    if len(scr) != 1 or len(plain) != 11: raise ValueError('dmsh_hmma16816_f16: unexpected parameters ' + m.group(2)[:200])
+    def group1(pattern, text, how=re.search):   # the first group of a match the helper's signature must have
+        found = how(pattern, text)
+        if not found: raise ValueError('dmsh_hmma16816_f16: unexpected parameter ' + text[:100])
+        return found.group(1)
+    name = lambda x: group1(r'(\w+)$', x)
+    names = [name(x) for x in plain]
+    dt = group1(r'thread (\w+)&', plain[10], re.match)
+    v = dict(zip(['lane', 'blk', 'a0', 'a1', 'a2', 'a3', 'b0', 'b1', 'acc0', 'acc1', 'd1'], names), scr=name(scr[0]), dt=dt, rt=m.group(1))
+    start = m.end() - 1; depth = 0
+    for i in range(start, len(msl)):
+        depth += {'{': 1, '}': -1}.get(msl[i], 0)
+        if depth == 0: break
+    else: raise ValueError('dmsh_hmma16816_f16: body not closed')
+    return msl[:start] + HMMA_BODY % v + msl[i + 1:]
 # Border colours: Maxwell's sampler takes any RGBA border colour, Metal's only transparent black, opaque black or opaque white, and the host's sampler gets the nearest of them
 # (nvn_border.h). A filtered sample is linear in the border colour, r = Σ w·texel + w_border·B, so two samples through samplers that differ only in their border colour give the rest:
 # with Metal colours Bn (the sampler) and Bw (its twin), r = s_n + (s_w - s_n)·k, k = (B - Bn) / (Bw - Bn) per channel. Each sampler member a shader samples gets a twin member
@@ -444,20 +495,34 @@ def early_fragment_tests(ctl, code):
 
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = name[:2]
-    c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
-    c1 = rec[0x38 + c1o:0x38 + c1t]
-    ab = vertex_ab(key, code, rec[ci:]) if stage == 'vs' else None
-    if ab: code, c1 = ab
-    if stage != 'cs': code = code[0x30:]   # strip the 0x30 header (the 0x50 SPH after it is read by the translator itself)
-    elif code[:4] == bytes.fromhex('79563412'):
-        # Compute in this game has a header (magic 0x12345679; D2R's package records have none): 0x30 header + zero padding, instructions start at code area +0x100 (measured on all 71; the BRA-to-self and the control words are 32-byte aligned to this start).
-        # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
-        if any(code[0x30:0x100]): sys.exit(f'[RED] {key}: compute code area +0x30..+0x100 is not all zero, so the instructions do not start at +0x100')
-        code = code[0x100:]
+    extra = {}
+    if dmsh_ampere.is_nvn2(rec[ci:]):
+        # NVN2 (Switch 2): Ampere code (a 0x80-byte SPH for the graphics stages, then the instructions, control +0x38 long), which the translator's Ampere
+        # frontend reads (job arch sm86); its c1 segment lies between control +0x40 and +0x44. The NVN control fields the steps below read (VertexA / B,
+        # transform feedback, early fragment tests) are not in an NVN2 section
+        c1 = dmsh_ampere.c1_segment(rec[ci:], code)
+        code = code[:dmsh_ampere.inst_len(rec[ci:])]
+        extra['arch'] = 'sm86'
+        # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
+        # buffer and texture entries (+0xb1, +0xb2, +0xb3) and gives the size (+0xba); the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs
+        # AMapC0). Graphics keeps NVN's tables
+        if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4]
+    else:
+        c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
+        c1 = rec[0x38 + c1o:0x38 + c1t]
+        ab = vertex_ab(key, code, rec[ci:]) if stage == 'vs' else None
+        if ab: code, c1 = ab
+        if stage != 'cs': code = code[0x30:]   # strip the 0x30 header (the 0x50 SPH after it is read by the translator itself)
+        elif code[:4] == bytes.fromhex('79563412'):
+            # Compute in this game has a header (magic 0x12345679; D2R's package records have none): 0x30 header + zero padding, instructions start at code area +0x100 (measured on all 71; the BRA-to-self and the control words are 32-byte aligned to this start).
+            # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
+            if any(code[0x30:0x100]): sys.exit(f'[RED] {key}: compute code area +0x30..+0x100 is not all zero, so the instructions do not start at +0x100')
+            code = code[0x100:]
+        tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
+        if tf: extra['tf'] = tf
+        if stage == 'ps' and early_fragment_tests(rec[ci:], code): extra['early_fragment_tests'] = True
     cp = os.path.join(w, key + '.bin'); open(cp, 'wb').write(code)
-    tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
-    ez = stage == 'ps' and early_fragment_tests(rec[ci:], code)
-    j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **({'tf': tf} if tf else {}), **({'early_fragment_tests': True} if ez else {}),
+    j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(), **extra,
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables
     if key not in FACTS: j['no_facts'] = True; return j, c1   # not in the answer table: queries use defaults (listed separately in the summary)
     j.update(FACTS[key])
@@ -717,6 +782,10 @@ def reflect(key, stage, msl, res):
         if e['kind'] == abi.KIND_SBUF:
             b = sb_sorted[e['index']] if e['index'] < len(sb_sorted) else None
             off = b['cb_offset'] * 4 if b and b['cb_slot'] == 0 else None
+            if b and b['cb_slot'] == abi.GMEM_MAP_CB_SLOT:   # not a game buffer: for addresses traced to no storage buffer, the host's pool table (offset 0) or the write log (DMSH_GMEM_LOG_CB_OFFSET)
+                if b['cb_offset'] == abi.GMEM_LOG_CB_OFFSET: e.update(kind=abi.KIND_GMEM_LOG, rw=True); continue
+                # rw: one of those accesses writes (the translator notes each one with its operation: Load, Store or an atomic)
+                e.update(kind=abi.KIND_GMEM_MAP, rw=any(re.search(r'operation "(Store|Atomic\w*)" traced to no storage buffer', n) for n in res.get('notes', ()))); continue
             if stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
                 e.update(kind=abi.KIND_UBO_PTR, reg=(off - abi.C0_CS_UBO) // abi.C0_ROW)   # compute-stage uniform slot r: address at c0[C0_CS_UBO + 0x10 r], read through global memory (checked against cs_lut_combine_c reading cb10[66])
             elif b and b['cb_slot'] >= 3:   # the address is in the game's own uniform buffer c[n] = uniform slot n - 3 (Monster Hunter Rise's compute shaders: c3 + 0x38); the replay reads it there
@@ -1126,6 +1195,8 @@ def finish(key, w, j, c1):
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
+    try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)
+    except ValueError as e: return 'HMMA rewrite failed', str(e)[:160], None
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)

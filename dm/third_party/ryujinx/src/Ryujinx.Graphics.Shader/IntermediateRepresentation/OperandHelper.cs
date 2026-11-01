@@ -42,11 +42,11 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
 
         public static Operand Register(Register reg)
         {
-            if (reg.IsRZ)
+            if (reg.IsRZ || reg.IsURZ)
             {
                 return Const(0);
             }
-            else if (reg.IsPT)
+            else if (reg.IsPT || reg.IsUPT)
             {
                 return Const(IrConsts.True);
             }

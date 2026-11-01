@@ -14,6 +14,7 @@ void dm_vi_layer_crop(int c[4]) { memset(c, 0, 4 * sizeof *c); }
 int dm_opmode(void) { return 1; }
 uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 uint64_t guest_ns(void) { return 0; }
+uint64_t guest_ticks(void) { return 0; }
 void guest_clock_read_wait(void) {}
 void thr_svc_enter(uint64_t *r, uint64_t a) { (void)r; (void)a; }
 void thr_svc_leave(void) {}

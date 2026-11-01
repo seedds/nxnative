@@ -215,6 +215,11 @@ namespace Ryujinx.Graphics.Shader.Translation
             _operations.Add(operation);
         }
 
+        // The Ampere frontend's scoreboard model rewrites an instruction's operations after emitting them (Translator.EmitOpsAmpere)
+        internal Operation GetOperation(int index) => _operations[index];
+
+        internal void InsertOperation(int index, Operation operation) => _operations.Insert(index, operation);
+
         public void MarkLabel(Operand label)
         {
             Add(Instruction.MarkLabel, label);

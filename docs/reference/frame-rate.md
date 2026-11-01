@@ -96,9 +96,16 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 - **Symptom:** GPU time reads 32 times too small when a game converts raw NVN counter timestamps itself.
 - **Cause:** the host wrote reports in 19.2 MHz CPU ticks, while the raw NVN timestamp field uses 614.4 MHz ticks (384 ticks per 625 ns). Games calling `nvnDeviceGetTimestampInNanoseconds` saw correct time because its inverse conversion had the same wrong rate, but an inline conversion read a 16 ms span as 0.5 ms.
-- **Fix:** `nvn_timestamp.h` shares the 614.4 MHz conversions between all report writes (`gpu_ticks`, `rep_ticks`) and `nvnDeviceGetTimestampInNanoseconds`. Wide integer products preserve long uptimes. The guest clock epoch stays the same; CPU system counters stay at 19.2 MHz, and the API still returns nanoseconds.
+- **Fix:** `nvn_timestamp.h` shares the 614.4 MHz conversions between all report writes (`gpu_ticks`, `rep_ticks`) and `nvnDeviceGetTimestampInNanoseconds`. Wide integer products preserve long uptimes. The guest clock epoch stays the same; CPU system counters stay at 19.2 MHz (31.25 MHz on the Switch 2: [next entry](#the-switch-2s-system-tick-is-3125-mhz)), and the API still returns nanoseconds.
 - **Found on:** [NieR:Automata The End of YoRHa Edition](../../dm/games/010056B015FE8000/README.md), whose dynamic-resolution controller subtracts two raw report timestamps and converts the difference inline.
 - **Check:** `t_timestamp` checks known vectors, long uptimes, round-trip precision and the game's exact inline arithmetic. `t_nvn` checks the API's known units and bounds a completed report between submit and fence wait.
+
+### The Switch 2's system tick is 31.25 MHz
+
+- **Symptom:** a Switch 2 game holds 20 or 30 fps on the Mac although its frame work fits in one vsync: its frame-rate controller raises the present interval (`the game sets present interval 1 → 3` in the log) and never steps back down.
+- **Cause:** the Switch 2's SDK converts the system counter at 31.25 MHz (`nn::os::GetSystemTickFrequency` answers `0x1dcd650`; it reads `cntpct_el0` itself and converts with that constant), while the host served the counter (the `cntpct` gate and `svc GetSystemTick`) at the Switch's 19.2 MHz. Every span the game measured in ticks came out 1.63 times too short, and a nanosecond time it converted to ticks (`nn::os::ConvertToTick`) landed 1.63 times later than a counter read taken at the same moment. A controller that compares a GPU timestamp with a CPU tick stamp then saw a frame that ended long after it started.
+- **Fix:** `guest_ticks` (`hle_os.c`) gives the counter on the guest clock at the rate of the game's SDK: 32 ns a tick when the `sdk` module names its spec `Ounce` (`dm_sdk_ounce`), 19.2 MHz otherwise. Both the `cntpct` gate (`hle.c`) and `svc GetSystemTick` (`hle_svc.c`) read it. NVN's 614.4 MHz report timestamps ([Raw NVN timestamp units](#raw-nvn-timestamp-units)) are unchanged.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): its controller (`main+0x204c20`, called from `main+0x204a64` and `main+0x203718`) measures `ConvertToTick(nvnDeviceGetTimestampInNanoseconds(report))` minus a tick stamp taken at the frame's start (`main+0x204618`); a probe read 0x11d69767da4 against 0xaf5b673f04, a ratio of 1.6276 = 31.25 / 19.2. It set interval 3 and ran at 20 fps (50 ms frames); with the fix its first level runs at 60 fps (frame time p50 16.7 ms over 200 s, interval 1, raised only for a moment at loading hitches).
 
 ## Engine frame limiters
 

@@ -177,6 +177,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 HelperFunctionName.SharedAtomicMinS32 => GenerateSharedAtomicSigned(id, isMin: true),
                 HelperFunctionName.SharedStore8 => GenerateSharedStore8(id),
                 HelperFunctionName.SharedStore16 => GenerateSharedStore16(id),
+                HelperFunctionName.Hmma16816F16 => GenerateHmma16816F16(id),
                 _ => throw new ArgumentException($"Invalid function name {functionName}"),
             };
         }
@@ -198,6 +199,74 @@ namespace Ryujinx.Graphics.Shader.Translation
             context.Return(result);
 
             return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, $"SharedAtomic{(isMin ? "Min" : "Max")}_{id}", true, 2, 0);
+        }
+
+        // nxnative: Ampere HMMA.16816 with an f16 accumulator, D (16 x 8) = A (16 x 16) * B (16 x 8) + C, for one warp (Metal SIMD-group). In: the lane, the word
+        // offset of this subgroup's 256-word block of the scratch shared memory `id`, A (4 words), B (2), C (2); returns D's first word, the second through the out argument. Fragments (PTX mma.m16n8k16): lane L, g = L / 4,
+        // t = L % 4; A word r: row g + 8 (r & 1), k 2t + 8 (r >> 1) and + 1; B word r: k 2t + 8 r and + 1 of column g; C / D word r: row g + 8 r, columns 2t, 2t + 1.
+        // The block holds A row-major (words 0..127, 8 a row), B transposed (128..191: row n, 8 words of k) and C / D row-major (192..255, 4 a row), so every lane stores its
+        // packed words as they are. This body computes D from the block lane by lane; the shader build replaces it in the Metal source (dmsh_build.py, HMMA_MSL) with
+        // simdgroup_matrix loads, multiply-accumulates and a store into the same block, which needs no other change: the name, the arguments and the block are the contract
+        private static Function GenerateHmma16816F16(int id)
+        {
+            EmitterContext context = new();
+
+            Operand lane = Argument(0);
+            Operand bse = Argument(1);
+            Operand g = context.ShiftRightU32(lane, Const(2));
+            Operand t = context.BitwiseAnd(lane, Const(3));
+
+            Operand At(Operand row, int word) => context.IAdd(bse, context.IAdd(context.ShiftLeft(row, Const(3)), context.IAdd(t, Const(word))));
+            Operand g8 = context.IAdd(g, Const(8));
+
+            context.Store(StorageKind.SharedMemory, id, At(g, 0), Argument(2));
+            context.Store(StorageKind.SharedMemory, id, At(g8, 0), Argument(3));
+            context.Store(StorageKind.SharedMemory, id, At(g, 4), Argument(4));
+            context.Store(StorageKind.SharedMemory, id, At(g8, 4), Argument(5));
+            context.Store(StorageKind.SharedMemory, id, context.IAdd(Const(128), At(g, 0)), Argument(6));
+            context.Store(StorageKind.SharedMemory, id, context.IAdd(Const(128), At(g, 4)), Argument(7));
+
+            Operand Ct(Operand row) => context.IAdd(bse, context.IAdd(Const(192), context.IAdd(context.ShiftLeft(row, Const(2)), t)));
+
+            context.Store(StorageKind.SharedMemory, id, Ct(g), Argument(8));
+            context.Store(StorageKind.SharedMemory, id, Ct(g8), Argument(9));
+
+            context.SubgroupBarrier();
+
+            Operand[] d = new Operand[2];
+
+            for (int q = 0; q < 2; q++)
+            {
+                Operand row = q == 0 ? g : g8;
+                Operand cw = Argument(8 + q);
+                Operand[] acc = [context.UnpackHalf2x16Low(cw), context.UnpackHalf2x16High(cw)];
+                Operand rowBase = context.IAdd(bse, context.ShiftLeft(row, Const(3)));
+
+                for (int j = 0; j < 2; j++)
+                {
+                    Operand col = context.IAdd(context.ShiftLeft(t, Const(1)), Const(j));
+                    Operand colBase = context.IAdd(bse, context.IAdd(Const(128), context.ShiftLeft(col, Const(3))));
+
+                    for (int kw = 0; kw < 8; kw++)
+                    {
+                        Operand aw = context.Load(StorageKind.SharedMemory, id, context.IAdd(rowBase, Const(kw)));
+                        Operand bw = context.Load(StorageKind.SharedMemory, id, context.IAdd(colBase, Const(kw)));
+                        acc[j] = context.FPFusedMultiplyAdd(context.UnpackHalf2x16Low(aw), context.UnpackHalf2x16Low(bw), acc[j]);
+                        acc[j] = context.FPFusedMultiplyAdd(context.UnpackHalf2x16High(aw), context.UnpackHalf2x16High(bw), acc[j]);
+                    }
+                }
+
+                d[q] = context.PackHalf2x16(acc[0], acc[1]);
+            }
+
+            // The next HMMA of this subgroup overwrites the block: every lane has read it by then
+            context.SubgroupBarrier();
+
+            context.Copy(Argument(10), d[1]);
+
+            context.Return(d[0]);
+
+            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, "dmsh_hmma16816_f16", true, 10, 1);
         }
 
         private static Function GenerateSharedStore8(int id)

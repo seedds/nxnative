@@ -1,6 +1,6 @@
 # Mario Kart World (`0400C3F00006E000`)
 
-A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (C library) + `sdk`. **In bring-up**: the game reaches its frame loop on the Mac (about 90 frames), then stalls when the GPU runs out of memory ([Open](#open)). iOS is untested.
+A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (C library) + `sdk`. **In bring-up**: the game runs its frame loop on the Mac (the boot's 60 s watch window: 1,073 frames, 57 fps between frames 600 and 900; the picture is not yet checked, [Open](#open)). iOS is untested.
 
 ## What it needs
 
@@ -43,16 +43,24 @@ Each step below stopped the boot before its fix:
 1. A null memory block in `nnMain` (`CRASH sig=11 addr=0x10 pc=main+0x5dd3ac`): the game allocates a fixed 7.04 GB block from its heap, which the Switch 1 pool could not hold. The Switch 2 pool, 9 GB (`app_pool`, [What it needs](#what-it-needs)).
 2. `nn::diag abort: Result 0xe15` in `hid::InitializeNmouse`, then in `chat::Initialize` (GameChat), then `CheckGraphicsSystemInitialized` before the camera context: Switch 2 services the host does not serve. Answered with nothing connected ([Switch 2 mouse, GameChat and camera with nothing connected](../../../docs/reference/services.md#switch-2-mouse-gamechat-and-camera-with-nothing-connected)). The chat camera storage needed NVN2 native images ([NVN2 native images](../../../docs/reference/nvn-objects.md#nvn2-native-images)); the camera session fails "open camera" with the result the game takes as "no camera".
 3. `CRASH pc=0` after `vi::SetLayerNextHdrAdjustableBezierMetadata` (`main+0x959ae4`), in the first frames ([Switch 2 HDR metadata on a layer the host never made](../../../docs/reference/services.md#switch-2-hdr-metadata-on-a-layer-the-host-never-made)).
+4. GPU out of memory after about 90 frames (`kIOGPUCommandBufferCallbackErrorOutOfMemory`, then the present watchdog; "GPU allocated" 21 to 24 GB): six sparse terrain arrays of 8192x8192x68 with 12 levels (two of 6.1 GB, format 0x50; four of 1.5 GB, ASTC 8x8) in virtual pools the game maps only in part, made as whole textures. Now Metal placement sparse textures, mapped and filled tile by tile from the page table ([Sparse textures in sparse virtual pools as Metal placement sparse textures](../../../docs/reference/nvn-objects.md#sparse-textures-in-sparse-virtual-pools-as-metal-placement-sparse-textures)): after 60 s 26,593 Metal tiles (1.7 GB) in 7 heaps, GPU allocated 14.2 GB, process footprint 12.6 GiB (with the 9 GB pool).
+
+Memory after 60 s (`run11.log`): GPU allocated 14.2 GB, footprint 12.6 GiB, 7 placement heaps of 256 MB.
 
 ## Open
 
-- **GPU out of memory after about 90 frames** (`[RED] upload command buffer execution error: … Insufficient Memory`, then `[RED] watchdog: no progress … stage present frame`; "GPU allocated" 21 to 24 GB on a 36 GB Mac). Six sparse texture arrays (flag 0x20) of 8192x8192x68 with 12 levels, two of 5.67 GB and four of 1.42 GB (17 GB), in virtual pools the game maps only in part: the host makes each a full private Metal texture. Needs a decision: Metal sparse textures, or another way to give a sparse texture only its mapped tiles.
-- The NVN2 calls reported as unimplemented in the first frames: `CommandBufferDrawMeshTasks`, `CommandBufferBindShadingRateImage`, `CommandBufferShadingRateImagePalette`; unknown names `nvn*CooperativeVectorMatrix*`, `nvn*PoolWriteDescriptorTableData`.
+- The picture: not yet compared with a capture (the title and the menus are the next milestone).
+- `[RED] failed to create compute pipeline: Threadgroup memory size (49152) exceeds the maximum threadgroup memory allowed (32768)`, 3,138 times in 60 s: a compute shader declares 48 KB of shared memory, which Ampere has and an Apple GPU's threadgroup does not (32 KB). Its dispatches are skipped. Which shader, and what it computes, is not identified yet (the pipeline failure does not name its key).
+- 63 shaders missing from the cache (`failed to load shader …: cannot open …/b-3c66991eb439/….metallib`, 16 compute and 2 pixel programs with no shader): none of their keys is in the full build's 11,522 libraries, so they are the runtime-only shaders (about 240 by #834) that a `DM_NVN_SHDUMP` run collects (Goal: build order).
+- The NVN2 calls reported as unimplemented: `CommandBufferDrawMeshTasks` (302 times in 60 s), `CommandBufferBindShadingRateImage`, `CommandBufferShadingRateImagePalette`; unknown names `nvn*CooperativeVectorMatrix*`, `nvn*PoolWriteDescriptorTableData`.
+- `SetRenderEnableConditional: the host draws anyway for now`: `render_cond` is not set yet (the clears are conditional, #834).
+- The display link stalled 7 times in the first 50 s (`display link recovered: stalled … ms`), with 253 dropped frames up to frame 600; after that 2 dropped in 300 frames.
 - The camera's other commands (29 at the first frames) fail as "no camera"; their meaning is not known.
 - `pad_layout` and `app_category` are judgement, not measured.
 
 ## Found on this game
 
+- [Sparse textures in sparse virtual pools as Metal placement sparse textures](../../../docs/reference/nvn-objects.md#sparse-textures-in-sparse-virtual-pools-as-metal-placement-sparse-textures)
 - [Switch 2 mouse, GameChat and camera with nothing connected](../../../docs/reference/services.md#switch-2-mouse-gamechat-and-camera-with-nothing-connected)
 - [Switch 2 HDR metadata on a layer the host never made](../../../docs/reference/services.md#switch-2-hdr-metadata-on-a-layer-the-host-never-made)
 - [NVN2 native images](../../../docs/reference/nvn-objects.md#nvn2-native-images)

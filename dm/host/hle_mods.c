@@ -52,7 +52,7 @@ static char **subdirs(const char *dir, int *n) {
         if (e->d_name[0] == '.') continue;
         char p[1024]; snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
         if (!is_dir(p)) continue;
-        if (*n == cap && !(v = realloc(v, (cap = cap ? cap * 2 : 16) * sizeof *v))) die("mods: out of memory");
+        if (*n == cap) { cap = cap ? cap * 2 : 16; char **nv = realloc(v, cap * sizeof *v); if (!nv) die("mods: out of memory"); v = nv; }
         v[(*n)++] = strdup(e->d_name);
     }
     closedir(d);

@@ -109,7 +109,6 @@ dm/host/crash.c	bugprone-command-processor	1
 dm/host/haptics_apple.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/host/hle_fs.c	bugprone-suspicious-realloc-usage	4
 dm/host/hle_fs.c	clang-analyzer-unix.Errno	2
-dm/host/hle_fs.c	clang-analyzer-unix.cstring.NullArg	1
 dm/host/hle_haptics.c	bugprone-suspicious-memory-comparison	1
 dm/host/hle_hid.c	bugprone-signed-char-misuse	1
 dm/host/hle_hid.c	clang-analyzer-unix.Stream	2
@@ -118,7 +117,6 @@ dm/host/hle_movie_avc.c	clang-analyzer-nullability.NullableDereferenced	1
 dm/host/hle_os.c	clang-analyzer-unix.Malloc	1
 dm/host/hle_sdk16.c	bugprone-not-null-terminated-result	4
 dm/host/hle_thread.c	bugprone-sizeof-expression	1
-dm/host/loader.c	clang-analyzer-security.ArrayBound	1
 dm/host/tests/t_audio.c	clang-analyzer-core.StackAddressEscape	2
 dm/host/tests/t_audio_device.c	bugprone-assert-side-effect	1
 dm/host/tests/t_audio_spsc.c	clang-analyzer-core.StackAddressEscape	1

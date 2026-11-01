@@ -41,6 +41,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < argc; i++) fprintf(f, "argv%d=%s\n", i, argv[i]);
     char cwd[1024]; fprintf(f, "cwd=%s\n", getcwd(cwd, sizeof cwd)); fclose(f);
     printf("standin host output\n"); fflush(stdout);
+    if (getenv("STANDIN_SIGNAL")) abort();   // a crashed host: the launcher must report the signal
     if (getenv("STANDIN_WAIT")) { signal(SIGTERM, term); for (;;) pause(); }
     return 7;
 }
@@ -117,7 +118,7 @@ class PackReuse(unittest.TestCase):
             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
+            'host/romfs_image.h': b'validator', 'host/dm_events.c': b'events', 'host/dm_events.h': b'events.h', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -196,7 +197,7 @@ class PackReuse(unittest.TestCase):
         self.pack()
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
-                 'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
+                 'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c', 'host/dm_events.c',
                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift',   # the settings window's sources
                  'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
@@ -550,6 +551,41 @@ class App(unittest.TestCase):
         time.sleep(0.2)
         p.send_signal(signal.SIGTERM); p.communicate(timeout=30)
         self.assertEqual(p.returncode, 3)
+
+    def events(self, name, **env):   # the launcher's runtime events (docs/frontends.md, Runtime events) of one start, as parsed JSON lines
+        path = self.tmp / name; path.unlink(missing_ok=True)
+        p = self.launch(DM_EVENTS=str(path), **env); p.communicate(timeout=30)
+        return p, [json.loads(ln) for ln in path.read_text().splitlines()]
+
+    def test_exit_event_code(self):   # one line, the host's exit code, in the build events' envelope
+        p, ev = self.events('ev_code.jsonl')
+        self.assertEqual(p.returncode, 7)
+        self.assertEqual([e['ev'] for e in ev], ['exit'])
+        self.assertEqual({k: ev[0][k] for k in ('code', 'signal', 'reason')}, {'code': 7, 'signal': None, 'reason': 'exited'})
+        self.assertLess(abs(ev[0]['t'] - time.time()), 60)
+
+    def test_exit_event_signal(self):   # a host that crashed cannot report: the launcher says which signal
+        p, ev = self.events('ev_signal.jsonl', STANDIN_SIGNAL='1')
+        self.assertEqual(p.returncode, 128 + signal.SIGABRT)
+        self.assertEqual([(e['ev'], e['code'], e['signal'], e['reason']) for e in ev], [('exit', None, int(signal.SIGABRT), 'signal')])
+
+    def test_exit_event_after_sigterm(self):
+        path = self.tmp / 'ev_term.jsonl'; path.unlink(missing_ok=True)
+        p = self.launch(wait=True, DM_EVENTS=str(path))
+        for _ in range(100):
+            if (self.tmp / 'home/host_run.txt').exists() and 'STANDIN_WAIT' in self.host_run(): break
+            time.sleep(0.05)
+        time.sleep(0.2)
+        p.send_signal(signal.SIGTERM); p.communicate(timeout=30)
+        ev = [json.loads(ln) for ln in path.read_text().splitlines()]
+        self.assertEqual([(e['ev'], e['code'], e['signal']) for e in ev], [('exit', 3, None)])
+
+    def test_exit_event_unset_and_bad_value(self):   # without DM_EVENTS nothing is written; a bad value costs one log line and the game still runs
+        p = self.launch(); out, _ = p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 7)
+        p = self.launch(DM_EVENTS='/nonexistent-dir/x.jsonl'); p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 7)
+        self.assertIn('DM_EVENTS: cannot open the file', (self.tmp / f'home/Library/Logs/nxnative/{TID}.log').read_text())
 
     def test_missing_data(self):
         broken = self.tmp / 'Broken.app'; shutil.rmtree(broken, ignore_errors=True)

@@ -5,7 +5,7 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 - [Building: the NSP script](#building-the-nsp-script)
 - [The settings list](#the-settings-list)
 - [Starting a game](#starting-a-game)
-- [What a front end cannot see yet](#what-a-front-end-cannot-see-yet)
+- [Runtime events](#runtime-events)
 
 ## Building: the NSP script
 
@@ -96,6 +96,24 @@ Cheats are files, not settings: the host (`dm/host/hle_cheats.c`) reads Atmosph√
 - **The iPhone.** The engine is compiled into the iOS host too (without safe mode), with the same folder rule, but the iOS app sets neither `DM_CHEATS` nor `DM_ROOT`, so cheats are off there unless `Documents/env.txt` names a folder with `DM_CHEATS`; even then they write data only, never code (the app's code pages are signed). Giving the iOS app a default, `Documents/cheats`, is the natural next step once a front end wants to manage cheats on a device; it is not in this change.
 - **Carrying a file to another build.** `scripts/cheat_anchor.py` imports a cheat file into a version-independent source and compiles it for any build of the game ([the rewriter reference](reference/rewriter.md#cheats-carried-across-game-updates)). A front end need not know about it: the compiled `<build ID>.txt` is an ordinary cheat file, and its `.meta.tsv` makes the panel richer.
 
-## What a front end cannot see yet
+## Runtime events
 
-While a game runs, the host says what happens only in its log, as text meant for people: a controller that connects or goes away, the preparing of shaders before the first frame, a red line. A front end that reads the log to show these would break when a line's wording changes. Events a program can read (one JSON object per line, as the NSP script's) would be the next piece of this interface; until then, treat log lines as diagnostics, not as an interface.
+While a game runs, the host and the Mac launcher say what happens as events a program can read, so a front end need not read the log (whose wording changes). A front end names where they go with `DM_EVENTS` in the start's environment: `DM_EVENTS=<path>` appends to that file (created), `DM_EVENTS=fd:<N>` writes to descriptor N, which must be open and above 2 (the game's child process inherits it, so a pipe the front end reads works). Unset, nothing is written and the game pays one branch per event. A value that cannot be used (a path that does not open, a descriptor that is not open) leaves one `[RED] DM_EVENTS: ...` line in the log and the game runs without events.
+
+Each line is one JSON object in the envelope of the build events above: `ev` (the event) and `t` (Unix time, seconds), then the event's fields. Numbers are numbers, and a field that does not apply is `null` where it is listed so, otherwise absent. A reader ignores events and fields it does not know; a field that is listed keeps its meaning.
+
+| `ev` | Fields | When |
+|---|---|---|
+| `frame_loop` | `elapsed` (seconds since the host started) | once: the game presented its first frame, so it is in its frame loop |
+| `shaders` | `phase` (`prewarm`: the shaders and pipelines of the prewarm lists; `prebuild`: the bases of every shader pair), `state` (`start`, `progress`, `done`), `done`, `total` (counts of lines or pairs), `elapsed` (seconds since the phase started) | the prepare step before the first frame, which a game with a window runs at every start (without a window, only with `DM_PSO_PREPARE=1`); `progress` at most every 0.5 s |
+| `red` | `text` (the log line without its `[dm] ` prefix, so it starts with `[RED] `, or with a tag such as `[vk] ` and then `[RED] `; cut at 399 bytes) | a `[RED]` line the host logs through `LOG`, at most 20 a second |
+| `end` | `reason` (`terminated`: the host was asked to end (SIGTERM, the app's termination); `guest_break`: the game called Break), `text` (a detail, absent when there is none) | the host knows why it is ending |
+| `exit` | `code` (the host's exit code, `null` when it died on a signal), `signal` (its number, `null` when it did not), `reason` (`exited`, `signal`, `spawn_failed`, `wait_failed`) | written by the Mac app's launcher after the host ended; nothing follows it |
+
+Any event can carry `dropped`, the number of events lost since the last line that was written (the queue was full, or `red` lines came faster than the limit).
+
+**Guarantees.** Delivery is best effort and never holds the game up: the host copies each event into a small queue, and a background thread writes it, one `write()` for each line, so no line is torn between writers; the launcher and the host append to the same stream. Events are in the order they were emitted, per process; the launcher's `exit` is the last. A write that fails (a full disk, a closed or full pipe) turns the stream off for the rest of the run, with one `[RED]` line in the log. A host that crashes (a signal, `abort`) writes nothing more, so a front end that wants to know how a game ended reads `exit` (the launcher reports the signal) and treats a missing `exit` as a launcher that was killed too. A game started without the Mac launcher (the iPhone app, `dmhost` by hand) has no `exit`. The launcher writes `exit` only when it started the host: choosing Quit in the settings window ends it without one.
+
+**Not yet** (separate changes): controller connected or disconnected, thermal state, saves (a `save` event can follow the save-commit hook), and progress of the background prewarm that runs when there is no prepare step. The app's own front ends receive the same events as typed callbacks (`dm_events_set_hook` in `dm/host/dm_events.h`), not as JSON.
+
+A test (`dm/tools/tests/test_runtime_events.py`) fails on an event or field the code emits that this section does not list.

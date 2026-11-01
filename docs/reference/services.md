@@ -595,6 +595,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
 
+### Local wireless over the network (ldn_mitm's LAN protocol, station role)
+
+- **Symptom:** the game says parental controls are on when its local wireless menu opens; behind it every `nn::ldn` call fails.
+- **Cause:** the cuts above answer every `pctl` free-communication query "never", and `ldn::Initialize` fails.
+- **Fix:** with `DM_LDN_PEER=<IPv4 of a Switch running ldn_mitm>` in `env.txt`, `hle_offline.c` speaks the station side of [ldn_mitm](https://github.com/spacemeowx2/ldn_mitm)'s LAN protocol: UDP 11452 `Scan` / `ScanResp` sent to that address (a unicast: no multicast entitlement on iOS), then TCP 11452 `Connect` / `SyncNetwork`. The 12-byte packet header, the zero-run compression and the 0x480-byte `NetworkInfo` are ldn_mitm's. `pctl` answers "allowed", and `nifm` reports a network (this device's address, the mask, the peer as gateway) once the game has called `SetLocalNetworkMode(true)`. Without the variable nothing changes.
+- **Also needed for a session:** the game's traffic goes through the host's BSD sockets (`dm_bsd_*` in `hle_offline.c`), with errno numbers translated to the Linux ones Horizon's bsd service reports (EAGAIN is 11: Pia read Apple's 35 as a failed matchmaking, 2618-0006); a datagram for the subnet's broadcast address is also sent to each other node, and the device's own broadcasts are not handed back to it. `friends::GetPlayHistoryRegistrationKey` builds a key (Ryujinx's layout, blank HMAC) and `AddPlayHistory` succeeds: Pia builds one key per local player when it joins and leaves the session on a failure (Animal Crossing, `main+0x16c698`).
+- **Not done:** the access point role (`CreateNetwork`). Log lines start with `[ldn]`; the first calls of each kind carry their guest call site and a stack scan.
+- **Found on:** Animal Crossing: New Horizons 3.0.3 (untested against a Switch when written).
+
 ### Network requests stay on hold before they settle
 
 - **Symptom:** the boot sits at a black loading screen for good, CPU nearly idle, every thread waiting, about 1 boot in 6 (3 in 4 with four Mac hosts at once); the title movie is never opened, and the save files are never probed.

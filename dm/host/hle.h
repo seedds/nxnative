@@ -67,3 +67,14 @@ int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)
+// Local wireless over the network (hle_offline.c, DM_LDN_PEER): whether it is configured, and the nifm answers that follow from it
+int dm_ldn_enabled(void);
+int dm_nifm_available(void);
+void dm_nifm_ipconfig(uint32_t *out5);   // address, mask, gateway, dns1, dns2 (network byte order)
+// nn::socket on the host's BSD sockets while local wireless over the network is configured (hle_offline.c)
+int dm_bsd_errno(void); int dm_bsd_socket(int, int, int); int dm_bsd_close(int); int dm_bsd_shutdown(int, int); int dm_bsd_bind(int, const void *, unsigned); int dm_bsd_listen(int, int);
+int dm_bsd_connect(int, const void *, unsigned); int dm_bsd_accept(int, void *, unsigned *);
+long dm_bsd_recvfrom(int, void *, unsigned long, int, void *, unsigned *); long dm_bsd_sendto(int, const void *, unsigned long, int, const void *, unsigned);
+int dm_bsd_getsockname(int, void *, unsigned *); int dm_bsd_getsockopt(int, int, int, void *, unsigned *); int dm_bsd_setsockopt(int, int, int, const void *, unsigned);
+int dm_bsd_fcntl(int, int, long); int dm_bsd_poll(void *, uint64_t, int);
+void dm_bsd_note_lr(void *lr, void *fp);   // the guest call site (and its frame, for a backtrace) of the nn::socket call being served (the trace shows it)

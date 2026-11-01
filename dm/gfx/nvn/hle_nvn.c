@@ -2028,6 +2028,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     // Actual presentation interval (windowed mode): taken 8 presents late (the presented callback has arrived by then), as the difference between the n-th and the (n−1)-th; −1 = discarded
     if (o->presents > 9) { uint64_t n = o->presents - 8; double a_ = mtl_presented_time(n), b_ = mtl_presented_time(n - 1);
         if (a_ < 0) trow(f - 8, "@presented_ms", -1); else if (a_ > 0 && b_ > 0) trow(f - 8, "@presented_ms", (a_ - b_) * 1e3);
+        { double mtl_present_gpu_ms(uint64_t), mtl_snap_gpu_ms(uint64_t); double pg = mtl_present_gpu_ms(n), sg = mtl_snap_gpu_ms(n);   // the present command buffer's GPU time (MetalFX and the present pass) and the snapshot's (the copy and, at the snapshot, the scaler): both on the game's queue
+          if (pg > 0) trow(f - 8, "@present_gpu_ms", pg); if (sg > 0) trow(f - 8, "@snap_gpu_ms", sg); }
         g_pres_exp[g_presn % TWIN] = g_pres_exp_last = pres_expect_ms(n);
         g_pres_iv[g_presn++ % TWIN] = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0);
         { double iv_ = a_ < 0 ? -1 : (a_ > 0 && b_ > 0 ? (a_ - b_) * 1e3 : 0); mtl_ub_present(iv_); }   // same-process alternating measurement (DM_NVN_UB) tallies on-screen present intervals per phase; when off it is just one atomic read

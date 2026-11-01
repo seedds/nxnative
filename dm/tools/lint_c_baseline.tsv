@@ -63,7 +63,6 @@ dm/gfx/tests/t_present_alloc.m	clang-analyzer-nullability.NullablePassedToNonnul
 dm/gfx/tests/t_present_crop.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_present_rescue.m	bugprone-unsafe-functions	1
 dm/gfx/tests/t_present_snap.m	bugprone-unsafe-functions	1
-dm/gfx/tests/t_present_snap.m	clang-analyzer-nullability.NullablePassedToNonnull	1
 dm/gfx/tests/t_present_snap.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_primitive_restart.m	clang-analyzer-osx.cocoa.RetainCount	1
 dm/gfx/tests/t_primitive_restart.m	clang-analyzer-unix.cstring.UninitializedRead	1

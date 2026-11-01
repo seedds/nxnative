@@ -24,6 +24,16 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 vulkan-validationlayers glslang-tools spirv-tools \
  && rm -rf /var/lib/apt/lists/* \
  && dpkg-query -W -f '${Package} ${Version}\n' mesa-vulkan-drivers libvulkan1 vulkan-validationlayers glslang-tools spirv-tools 'libllvm*'
+# The engine's JIT fallback (dm/host/CMakeLists.txt NXHOST_JIT: dynarmic, C++20, includes boost/icl and boost/variant): Boost's headers, as the recompiler's image has them
+# (Dockerfile.aot), and clang++ 18 (already in the image with clang-18) as the C++ compiler CMake finds. A layer of its own at the end, so the layers above stay cached;
+# the versions apt resolved are printed (docker/README.md records them)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libboost-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100 \
+ && update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++-18 100 \
+ && dpkg-query -W -f '${db:Status-Abbrev}${Package} ${Version}\n' 'libboost*' clang-18 libstdc++-13-dev | sed -n 's/^ii *//p'
+ENV CXX=clang++
 # The worktree is mounted at /src; git refuses repositories owned by another user without this (system-wide: the container also runs as the caller's user, HOME=/tmp,
 # and the test runner reads the commit with git)
 RUN git config --system --add safe.directory '*'

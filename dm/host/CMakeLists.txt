@@ -192,21 +192,48 @@ target_compile_options(nxhost PRIVATE ${HOST_FLAGS})
 target_include_directories(nxhost PUBLIC ${GEN} ${PROFILE_DIR} ${REPO}/dm/third_party/stb_vorbis ${REPO}/dm/tools/aot/include)
 target_link_libraries(nxhost PUBLIC nxplat vpx SDL3::SDL3-static)
 # The JIT fallback of the engine (design section 11): dynarmic's A64 JIT behind the C interface of dm/tools/aot/src/rt/jit.h, the glue nxaot's own run time uses
-# (jit.cpp, with the decoder glue it calls). dynarmic needs C++20 and Boost's headers, which the nxnative-aot image has and nxnative-build does not, so it is an
-# option, off by default: without it, guest code with no compiled entry stops the process with a [RED] line and status 3 (aot.h DM_AOT_JIT_NEEDED)
-option(NXHOST_JIT "x86-64 execution engine: build the JIT fallback (dynarmic; needs C++20 and Boost's headers)" OFF)
+# (jit.cpp, with the decoder glue it calls). dynarmic needs a C++20 compiler and Boost's headers, which both images have (docker/Dockerfile.build since its Boost layer,
+# Dockerfile.aot), so it is on by default where both are found (the engine is part of every tree this file configures: x86-64, not Apple), off with a configure-time
+# message where they are not (the Windows cross-build image has no Boost): without it, guest code with no compiled entry stops the process with a [RED] line and status 3
+# (aot.h DM_AOT_JIT_NEEDED). -DNXHOST_JIT=ON makes it required (the CI's Linux job), -DNXHOST_JIT=OFF leaves it out.
+# Known gaps, declared, not fixed here: the JIT runs the guest's original code, so the observation gates and spin gates of the packs (nxaot's gate rows: the per-build
+# observation and spin-wait hooks the compiled code calls) are not called inside it; and its code range (dm_aot_code_lo / dm_aot_code_hi: the packs' guest text) leaves out
+# the aux region, so frame-step stubs placed there are not run by it
+include(CheckLanguage)
+check_language(CXX)
+find_package(Boost 1.57 QUIET)
+if(CMAKE_CXX_COMPILER AND Boost_FOUND)
+    set(NXHOST_JIT_DEFAULT ON)
+else()
+    set(NXHOST_JIT_DEFAULT OFF)
+endif()
+option(NXHOST_JIT "x86-64 execution engine: build the JIT fallback (dynarmic; needs C++20 and Boost's headers)" ${NXHOST_JIT_DEFAULT})
+if(NOT NXHOST_JIT)
+    message(STATUS "NXHOST_JIT off (C++ compiler: '${CMAKE_CXX_COMPILER}', Boost found: ${Boost_FOUND}): no JIT fallback; guest code with no compiled entry stops the "
+                   "process with status 3 (docker/Dockerfile.build has what the JIT needs)")
+endif()
 if(NXHOST_JIT)
     enable_language(CXX)
     find_package(Boost 1.57)
     if(NOT Boost_FOUND)
-        message(FATAL_ERROR "NXHOST_JIT needs Boost's headers (dynarmic includes boost/icl and boost/variant): build in the nxnative-aot image (docker/Dockerfile.aot)")
+        message(FATAL_ERROR "NXHOST_JIT needs Boost's headers (dynarmic includes boost/icl and boost/variant): build in the nxnative-build or nxnative-aot image (docker/)")
     endif()
+    message(STATUS "NXHOST_JIT on: the JIT fallback (dynarmic) with Boost ${Boost_VERSION} and ${CMAKE_CXX_COMPILER}")
     set(DYNARMIC_TESTS OFF CACHE BOOL "" FORCE)
     set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
     set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
     set(DYNARMIC_USE_BUNDLED_EXTERNALS ON CACHE BOOL "" FORCE)
     set(DYNARMIC_FRONTENDS "A64" CACHE STRING "" FORCE)
-    add_subdirectory(${REPO}/dm/third_party/dynarmic ${CMAKE_BINARY_DIR}/dynarmic EXCLUDE_FROM_ALL)
+    # dynarmic and its mcl force CMAKE_BUILD_TYPE=Release into the cache when it is empty, which would make the whole tree a Release build: -O3 -DNDEBUG on every host
+    # test, whose assert() calls then vanish (t_svc_memory, t_heap_size, t_audren_work, t_preempt and t_notify_sched failed that way). With no build type chosen,
+    # dynarmic's directories get Release as a variable of their own scope and the cache stays empty
+    if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_BUILD_TYPE Release)
+        add_subdirectory(${REPO}/dm/third_party/dynarmic ${CMAKE_BINARY_DIR}/dynarmic EXCLUDE_FROM_ALL)
+        unset(CMAKE_BUILD_TYPE)
+    else()
+        add_subdirectory(${REPO}/dm/third_party/dynarmic ${CMAKE_BINARY_DIR}/dynarmic EXCLUDE_FROM_ALL)
+    endif()
     add_library(nxhost_jit STATIC ${REPO}/dm/tools/aot/src/rt/jit.cpp ${REPO}/dm/tools/aot/src/decode/translate.cpp)
     set_target_properties(nxhost_jit PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
     target_include_directories(nxhost_jit PUBLIC ${REPO}/dm/tools/aot/include ${REPO}/dm/tools/aot/src)
@@ -501,7 +528,11 @@ set(T_GL_LIB ${CMAKE_BINARY_DIR}/gen/gl_test)
 file(GLOB T_GL_SHADER_FILES CONFIGURE_DEPENDS ${T_GL_SHADERS}/*.vert ${T_GL_SHADERS}/*.frag)
 host_test(t_vk_guest_gl SOURCES ../../gfx/tests/vk/t_vk_guest_gl.c ../../gfx/hle_vi.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
 target_link_libraries(t_vk_guest_gl PRIVATE nvn_front_obj guest_gl nvn_vk)
-target_compile_definitions(t_vk_guest_gl PRIVATE "T_GL_SHADERS=\"${T_GL_SHADERS}\"" "T_GL_LIB=\"${T_GL_LIB}\"" DM_TEST_GUEST_C)   # DM_TEST_GUEST_C: hle_vi.c's native form (no arena)
+target_compile_definitions(t_vk_guest_gl PRIVATE "T_GL_SHADERS=\"${T_GL_SHADERS}\"" "T_GL_LIB=\"${T_GL_LIB}\"")
+# t_vk_guest_gl takes the x86-64 engine's arena as t_vk_guest does: guest_gl.c puts what the game sees of host memory there (its buffer mappings as imported arena pages, its
+# strings, its fence objects) and the test checks it lies below 2^39; hle_vi.c's objects are the arena's too
+target_sources(t_vk_guest_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/aot_arena.c ${CMAKE_CURRENT_SOURCE_DIR}/aot_hostfn.c)
+target_include_directories(t_vk_guest_gl PRIVATE ${REPO}/dm/tools/aot/include)
 find_program(GLSLANG_VALIDATOR glslangValidator)
 if(GLSLANG_VALIDATOR)
     add_custom_command(OUTPUT ${T_GL_LIB}/gl-vk/gl_shaders.tsv

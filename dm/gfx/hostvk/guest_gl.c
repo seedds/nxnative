@@ -16,7 +16,9 @@
 //     timeline value and paces by the swap interval, as hle_gl.m does;
 //   · buffers live in host-visible coherent memory mapped for good (up to 256 KiB from 4 MiB slabs, larger ones with an allocation of their own): glBufferData on a buffer the
 //     GPU may still read gets new memory (orphaning), glBufferSubData copies it first; glBufferStorage + glMapBufferRange hand the game the mapping itself (LÖVE's persistently
-//     mapped streams), and glFenceSync / glClientWaitSync are values of the timeline (waiting on a fence of the frame being recorded submits it first);
+//     mapped streams), and glFenceSync / glClientWaitSync are values of the timeline (waiting on a fence of the frame being recorded submits it first). What the game sees of
+//     host memory (those mappings, the strings of glGetString, glGetStringi and eglQueryString, the fence objects) is guest memory in the x86-64 engine's arena below 2^39
+//     ("Memory the game sees" below);
 //   · textures are made on first use from the levels given so far (Vulkan, as Metal, needs the level count up front), device-local; uploads go through transient host-visible
 //     memory with a copy in command order;
 //   · shaders come from the SPIR-V library gl_shaders.py --vk writes (<DM_MSL_DIR>/gl-vk/): a shader is found by the hash of its source and its stage; the table lists its
@@ -50,6 +52,13 @@
 
 void dm_vi_layer_size(int *w, int *h);                          // dm/gfx/hle_vi.c (part of nxhost): the size of the last sized vi::CreateLayer, 0 x 0 for none
 const void *plat_table_swhle(size_t *bytes);                    // dm/host/hle.c (PLAT_TABLE_DEFINE): the swhle entries of every object file
+// The x86-64 engine's arena (dm/host/aot.h, "Host memory the guest sees"; dm/host/aot_arena.c, part of nxhost and linked by t_vk_guest_gl): this file is built only for the
+// port's hosts, which always have the engine, so it calls the arena directly (aot.h itself needs nxaot's headers, which this library's include path does not have)
+void *dm_guest_alloc(size_t n);                                 // whole pages of the arena, zero, readable and writable
+void dm_guest_free(void *p, size_t n);
+void *dm_garena_alloc(size_t n, size_t align);                  // a garena block, zero
+void dm_garena_free(void *p);
+const char *dm_garena_literal(const char *s);                   // an arena copy of a string with static storage, made once
 
 #define GLOG(...) LOG("[gl] " __VA_ARGS__)
 #define RED1(...) do { static _Atomic int once_; if (!atomic_exchange(&once_, 1)) LOG("[gl] [RED] " __VA_ARGS__); } while (0)
@@ -173,10 +182,11 @@ enum { D_BUF, D_IMG, D_VIEW, D_PIPE, D_MOD, D_PLAYOUT, D_DSL, D_SLAB };
 typedef struct { int kind; uint64_t serial, a, b, c; } defer_t;
 static defer_t *g_def; static int g_ndef, g_capdef;
 static void slab_put(void *slab, uint32_t idx);
+static void own_free(void *own);
 static void mem_free(VkDeviceMemory m, VkDeviceSize size) { if (m) { vkFreeMemory(hvk.d, m, NULL); hvk.dev.allocations--; g_mem_tex -= (int64_t)size; } }
 static void release(const defer_t *d) {
     switch (d->kind) {
-        case D_BUF: hvk_buffer_free((VkBuffer)(uintptr_t)d->a, (VkDeviceMemory)(uintptr_t)d->b); g_mem_buf -= (int64_t)d->c; break;
+        case D_BUF: own_free((void *)(uintptr_t)d->a); g_mem_buf -= (int64_t)d->c; break;
         case D_IMG: vkDestroyImage(hvk.d, (VkImage)(uintptr_t)d->a, NULL); mem_free((VkDeviceMemory)(uintptr_t)d->b, d->c); g_n_tex_img--; break;
         case D_VIEW: vkDestroyImageView(hvk.d, (VkImageView)(uintptr_t)d->a, NULL); break;
         case D_PIPE: vkDestroyPipeline(hvk.d, (VkPipeline)(uintptr_t)d->a, NULL); break;
@@ -200,7 +210,8 @@ static void defer_run(void) {
 }
 
 // ---------- Transient memory: staging for uploads, the uniform blocks of draws, converted indices, the values of disabled attributes ----------
-// Bump allocation in 4 MiB host-visible coherent buffers, each reused once the submission that last used it completed (hle_gl.m's arena)
+// Bump allocation in 4 MiB host-visible coherent buffers, each reused once the submission that last used it completed (hle_gl.m's arena). The layer's own: the game never
+// sees an address in it (the layer copies the game's data in), so it stays the driver's mapping, outside the x86-64 engine's arena
 #define ARENA_BYTES (4u << 20)
 typedef struct { VkBuffer buf; VkDeviceMemory mem; uint8_t *map; VkDeviceSize size, used; uint64_t serial; } arena_t;
 static arena_t *g_arena; static int g_narena, g_caparena, g_cur_arena = -1;
@@ -228,41 +239,77 @@ static int arena_alloc(VkDeviceSize n, VkDeviceSize align, galloc *out) {
     return 1;
 }
 
+// ---------- Memory the game sees: in the x86-64 engine's arena below 2^39 ----------
+// The memory glMapBufferRange hands the game (persistent maps included: LÖVE writes its streams through them for the whole run) is guest memory: on the x86-64 engine every
+// host address the guest's code reads, writes or keeps lies in the arena below 2^39 (docs/design/aot-recompiler.md 5.2; dm/host/aot.h, "Host memory the guest sees"). So each
+// buffer slab and each buffer of its own is a block of arena pages (dm_guest_alloc) imported with VK_EXT_external_memory_host (hostvk_import, vk_import.c: the baseline's
+// extension, design 4.2, which vk_device.c requires), as guest_vk.c's gmem_import does for the guest Vulkan layer's mappings: the game's pointer is the arena's and the GPU
+// reads the same pages. Not a copy path (the game writing a shadow in the arena that the layer copies into the driver's mapping): a persistent map gives the layer no point
+// at which to copy (the game writes while earlier parts of the buffer are read by the GPU, fenced by glFenceSync alone; glFlushMappedBufferRange is optional for a coherent
+// map), so a copy at each draw or submission would cost the whole buffer each time. The import's memory type must be HOST_COHERENT, as the driver memory it replaces: the
+// layer flushes nothing. A refused import, or one of a type that is not coherent, gets the driver's own mapping with a red line: outside the arena, so a game on such a
+// device reads a pointer above 2^39 (open: no device here refuses; lavapipe imports as one coherent type, dm/gfx/hostvk/README.md)
+typedef struct { VkBuffer buf; VkDeviceMemory mem; uint8_t *map; hostvk_import_t im; void *block; size_t block_n; } hmem_t;   // block: the arena pages of an import, else NULL
+static int hmem_make(VkDeviceSize n, hmem_t *h) {
+    memset(h, 0, sizeof *h);
+    const size_t pg = plat_page_size(), al = hvk.dev.caps.min_import_alignment > pg ? (size_t)hvk.dev.caps.min_import_alignment : pg;
+    const size_t sz = ((size_t)n + al - 1) / al * al, bn = sz + (al > pg ? al : 0);   // room to align a block that is only page-aligned
+    uint8_t *block = dm_guest_alloc(bn), *at = (uint8_t *)(((uintptr_t)block + al - 1) & ~(uintptr_t)(al - 1));
+    const VkResult r = hostvk_import(&hvk.dev, at, sz, &h->im);   // logs why when the driver refuses it
+    const int incoherent = !r && !(h->im.flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (incoherent) hostvk_import_release(&hvk.dev, &h->im);
+    else if (!r) { h->buf = h->im.buf; h->map = at; h->block = block; h->block_n = bn; return 1; }
+    dm_guest_free(block, bn);
+    RED1("buffer memory the game maps (%llu bytes) is not arena pages: %s; the driver's own mapping, outside the arena below 2^39", (unsigned long long)n,
+         incoherent ? "the import's memory type is not HOST_COHERENT, which the layer's unflushed writes need" : "the import was refused");
+    void *map = NULL;
+    if (hvk_buffer_make(n, buf_usage(), 1, &h->buf, &h->mem, &map)) { memset(h, 0, sizeof *h); return 0; }
+    h->map = map;
+    return 1;
+}
+static void hmem_free(hmem_t *h) {   // the GPU is done with it
+    if (h->block) { hostvk_import_release(&hvk.dev, &h->im); dm_guest_free(h->block, h->block_n); }   // the import first, then its pages back to the arena
+    else hvk_buffer_free(h->buf, h->mem);
+    memset(h, 0, sizeof *h);
+}
+
 // ---------- Buffer memory: host-visible coherent, mapped for good ----------
 // Up to 256 KiB from 4 MiB slabs of one size class each (a power of two from 256 bytes), each slab one VkBuffer; a larger buffer is an allocation of its own. A game's many
-// small vertex and index buffers would otherwise each take one of maxMemoryAllocationCount's allocations (4,096 on many desktop drivers)
+// small vertex and index buffers would otherwise each take one of maxMemoryAllocationCount's allocations (4,096 on many desktop drivers). Both are hmem_t: arena pages
 #define SLAB_BYTES (4u << 20)
 enum { SLAB_MIN = 8, SLAB_MAX = 18 };
-typedef struct slab { VkBuffer buf; VkDeviceMemory mem; uint8_t *map; uint32_t cls, n, nfree; uint32_t *fl; struct slab *next; } slab_t;
+typedef struct slab { hmem_t h; uint32_t cls, n, nfree; uint32_t *fl; struct slab *next; } slab_t;
 static slab_t *g_slabs[SLAB_MAX - SLAB_MIN + 1];
-typedef struct { VkBuffer buf; VkDeviceSize off, cap; uint8_t *map; slab_t *slab; uint32_t idx; VkDeviceMemory own; } bmem_t;
+typedef struct { VkBuffer buf; VkDeviceSize off, cap; uint8_t *map; slab_t *slab; uint32_t idx; hmem_t *own; } bmem_t;
 static void slab_put(void *slab, uint32_t idx) { slab_t *s = slab; s->fl[s->nfree++] = idx; }
+static void own_free(void *own) { hmem_free(own); free(own); }
 static int bmem_alloc(VkDeviceSize n, bmem_t *m) {
     memset(m, 0, sizeof *m);
     if (!n) n = 16;
     int c = SLAB_MIN; while (c <= SLAB_MAX && (1ull << c) < n) c++;
     if (c > SLAB_MAX) {
-        void *map = NULL; n = (n + 255) & ~(VkDeviceSize)255;
-        if (hvk_buffer_make(n, buf_usage(), 1, &m->buf, &m->own, &map)) { LOG("[gl] [RED] a buffer of %llu bytes could not be made", (unsigned long long)n); m->buf = VK_NULL_HANDLE; return 0; }
-        m->map = map; m->cap = n; g_mem_buf += (int64_t)n; return 1;
+        n = (n + 255) & ~(VkDeviceSize)255;
+        hmem_t *own = zalloc(sizeof *own);
+        if (!hmem_make(n, own)) { free(own); LOG("[gl] [RED] a buffer of %llu bytes could not be made", (unsigned long long)n); return 0; }
+        m->buf = own->buf; m->map = own->map; m->own = own; m->cap = n; g_mem_buf += (int64_t)n; return 1;
     }
     slab_t **head = &g_slabs[c - SLAB_MIN], *s = *head;
     while (s && !s->nfree) s = s->next;
     if (!s) {
-        s = zalloc(sizeof *s); s->cls = (uint32_t)c; s->n = SLAB_BYTES >> c; void *map = NULL;
-        if (hvk_buffer_make(SLAB_BYTES, buf_usage(), 1, &s->buf, &s->mem, &map)) { free(s); LOG("[gl] [RED] a buffer slab of %u bytes could not be made", SLAB_BYTES); return 0; }
-        s->map = map; s->fl = zalloc(s->n * sizeof *s->fl);
+        s = zalloc(sizeof *s); s->cls = (uint32_t)c; s->n = SLAB_BYTES >> c;
+        if (!hmem_make(SLAB_BYTES, &s->h)) { free(s); LOG("[gl] [RED] a buffer slab of %u bytes could not be made", SLAB_BYTES); return 0; }
+        s->fl = zalloc(s->n * sizeof *s->fl);
         for (uint32_t i = 0; i < s->n; i++) s->fl[i] = s->n - 1 - i;
         s->nfree = s->n; s->next = *head; *head = s; g_mem_buf += SLAB_BYTES;
     }
     uint32_t i = s->fl[--s->nfree];
-    m->buf = s->buf; m->off = (VkDeviceSize)i << c; m->cap = 1ull << c; m->map = s->map + m->off; m->slab = s; m->idx = i;
+    m->buf = s->h.buf; m->off = (VkDeviceSize)i << c; m->cap = 1ull << c; m->map = s->h.map + m->off; m->slab = s; m->idx = i;
     return 1;
 }
 static void bmem_release(bmem_t *m, uint64_t use) {   // back to its slab (or freed) once the GPU no longer reads it
     if (!m->buf) return;
     if (m->slab) defer(D_SLAB, use, H(m->slab), m->idx, 0);
-    else defer(D_BUF, use, H(m->buf), H(m->own), m->cap);
+    else defer(D_BUF, use, H(m->own), 0, m->cap);
     memset(m, 0, sizeof *m);
 }
 
@@ -1580,20 +1627,24 @@ static const char *const g_exts[] = {"GL_ARB_ES3_2_compatibility", "GL_ARB_ES3_c
     "GL_EXT_texture_compression_s3tc", "GL_EXT_texture_filter_anisotropic", "GL_ARB_vertex_array_object", "GL_ARB_direct_state_access", "GL_ARB_half_float_vertex",
     "GL_ARB_framebuffer_object", "GL_ARB_texture_float", "GL_EXT_texture_sRGB", "GL_KHR_texture_compression_astc_ldr", "GL_NV_shadow_samplers_cube"};
 #define NEXTS (int)(sizeof g_exts / sizeof *g_exts)
+// The strings these return (and eglQueryString's) are read by the game: arena copies of the layer's literals, each made once (dm_garena_literal, found again by the literal's
+// address), so the guest's pointer lies below 2^39 ("Memory the game sees" above)
 GL(glGetString, const char *, GLenum n) {
+    const char *s = "";
     switch (n) {
-        case GL_VENDOR: return "NVIDIA Corporation";
-        case GL_RENDERER: return "NVIDIA Tegra X1 (nvgpu)/integrated (Vulkan)";
-        case GL_VERSION: return "4.5.0 NVIDIA 349.00";
-        case GL_SHADING_LANGUAGE_VERSION: return "4.50 NVIDIA";
-        case GL_EXTENSIONS: {   // the compatibility profile's one string
+        case GL_VENDOR: s = "NVIDIA Corporation"; break;
+        case GL_RENDERER: s = "NVIDIA Tegra X1 (nvgpu)/integrated (Vulkan)"; break;
+        case GL_VERSION: s = "4.5.0 NVIDIA 349.00"; break;
+        case GL_SHADING_LANGUAGE_VERSION: s = "4.50 NVIDIA"; break;
+        case GL_EXTENSIONS: {   // the compatibility profile's one string, complete before its first copy
             static char all[1024]; if (!all[0]) { size_t o = 0; for (int i = 0; i < NEXTS && o + 2 < sizeof all; i++) o += (size_t)snprintf(all + o, sizeof all - o, "%s ", g_exts[i]); }
-            return all;
+            s = all; break;
         }
+        default: RED1("glGetString(%#x) not implemented", n); break;
     }
-    RED1("glGetString(%#x) not implemented", n); return "";
+    return dm_garena_literal(s);
 }
-GL(glGetStringi, const char *, GLenum n, GLuint i) { return n == GL_EXTENSIONS && i < (GLuint)NEXTS ? g_exts[i] : NULL; }
+GL(glGetStringi, const char *, GLenum n, GLuint i) { return n == GL_EXTENSIONS && i < (GLuint)NEXTS ? dm_garena_literal(g_exts[i]) : NULL; }
 GL(glGetIntegerv, void, GLenum p, GLint *v) {
     switch (p) {
         case GL_NUM_EXTENSIONS: *v = NEXTS; return;
@@ -1724,10 +1775,13 @@ GL(glFlushMappedBufferRange, void, GLenum target, GLintptr off, GLsizeiptr len) 
 
 // ---------- Sync objects ----------
 // A fence is the serial of the submission being recorded when it was made, signalled on the layer's timeline when that submission completes. LÖVE fences each third of its
-// stream buffers at the end of a frame and waits for the fence three frames later, before it writes that third again
+// stream buffers at the end of a frame and waits for the fence three frames later, before it writes that third again. The object is an opaque handle the game only passes
+// back (glClientWaitSync, glWaitSync, glDeleteSync) and never reads through, so host memory would do; it is a garena block all the same, because GLsync is a void * to the
+// host-call thunks (gen_hle_thunks.py's OPAQUE handle types are the Vulkan and EGL ones), whose arena guard (DM_AOT_ARENA_CHECK=1) checks it as a pointer result and argument,
+// and 16 bytes of the garena cost no more than calloc's
 typedef struct { uint64_t serial; } gsync_t;
-GL(glFenceSync, void *, GLenum cond, GLbitfield flags) { (void)cond; (void)flags; gsync_t *s = zalloc(sizeof *s); s->serial = g_serial; return s; }
-GL(glDeleteSync, void, void *s) { free(s); }
+GL(glFenceSync, void *, GLenum cond, GLbitfield flags) { (void)cond; (void)flags; gsync_t *s = dm_garena_alloc(sizeof *s, 0); s->serial = g_serial; return s; }
+GL(glDeleteSync, void, void *s) { dm_garena_free(s); }
 GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) { (void)s; (void)flags; (void)timeout; }   // a GPU-side wait: the submissions run in order on one queue
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     gsync_t *s = sy;
@@ -2379,6 +2433,8 @@ static void frame_end(void) {
     hvk_cache_tick(plat_now_ns());   // the disk cache is written 10 s after the last of a burst of new pipelines
     dm_guest_frame_tick();
 }
+// The EGL handles (the display, a static of the layer; the configuration, context and surfaces, small integers) are opaque: the game only passes them back and never reads
+// through them, so they stay host values on the x86-64 engine (gen_hle_thunks.py's OPAQUE handle types: its arena guard leaves them out)
 EGL(eglGetDisplay, EGLDisplay, void *native) { (void)native; dev_init(); return (EGLDisplay)&g_egl; }
 EGL(eglInitialize, EGLBoolean, EGLDisplay d, EGLint *major, EGLint *minor) { (void)d; dev_init(); g_egl.init = 1; if (major) *major = 1; if (minor) *minor = 5; return EGL_TRUE; }
 EGL(eglTerminate, EGLBoolean, EGLDisplay d) { (void)d; return EGL_TRUE; }
@@ -2412,8 +2468,9 @@ EGL(eglGetConfigAttrib, EGLBoolean, EGLDisplay d, EGLConfig cfg, EGLint attr, EG
 }
 EGL(eglQueryString, const char *, EGLDisplay d, EGLint name) {
     (void)d;
-    switch (name) { case 0x3053: return "NVIDIA"; case 0x3054: return "1.5"; case 0x3055: return "EGL_KHR_create_context"; case 0x308d: return "OpenGL"; }   // VENDOR, VERSION, EXTENSIONS, CLIENT_APIS
-    return NULL;
+    const char *s = NULL;
+    switch (name) { case 0x3053: s = "NVIDIA"; break; case 0x3054: s = "1.5"; break; case 0x3055: s = "EGL_KHR_create_context"; break; case 0x308d: s = "OpenGL"; break; }   // VENDOR, VERSION, EXTENSIONS, CLIENT_APIS
+    return s ? dm_garena_literal(s) : NULL;   // the game reads it: an arena copy, as glGetString's
 }
 EGL(eglGetError, EGLint, void) { return 0x3000; }   // SUCCESS
 EGL(eglQueryAPI, EGLenum, void) { return 0x30a2; }   // OPENGL_API
@@ -2539,7 +2596,7 @@ void guest_gl_shutdown(void) {
     g_win.made = 0;
     for (int i = 0; i < 5; i++) { defer(D_VIEW, 0, H(g_dummy_view[i]), 0, 0); g_dummy_view[i] = VK_NULL_HANDLE; gimg_drop(&g_dummy[i], 0); }
     defer_run();
-    for (int c = 0; c <= SLAB_MAX - SLAB_MIN; c++) for (slab_t *s = g_slabs[c], *nx; s; s = nx) { nx = s->next; hvk_buffer_free(s->buf, s->mem); free(s->fl); free(s); g_slabs[c] = NULL; }
+    for (int c = 0; c <= SLAB_MAX - SLAB_MIN; c++) for (slab_t *s = g_slabs[c], *nx; s; s = nx) { nx = s->next; hmem_free(&s->h); free(s->fl); free(s); g_slabs[c] = NULL; }
     for (int i = 0; i < g_narena; i++) hvk_buffer_free(g_arena[i].buf, g_arena[i].mem);
     free(g_arena); g_arena = NULL; g_narena = g_caparena = 0; g_cur_arena = -1;
     for (int i = 0; i < g_nsmp; i++) vkDestroySampler(hvk.d, g_smp[i].s, NULL);

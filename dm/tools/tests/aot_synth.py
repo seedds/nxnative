@@ -346,7 +346,7 @@ def manifest_text(t):
 HF_DIR_NAME = 'hostfn'
 HF_BUILD_ID = 'aa08' * 8
 HF_TEXT_END, HF_RO_OFF, HF_DATA_OFF, HF_DATA_END, HF_BSS = 0x1000, 0x1000, 0x2000, 0x3000, 0x40000
-HF_MOD0, HF_DYNAMIC, HF_SYMTAB, HF_RELA, HF_JMPREL, HF_EH_HDR, HF_EH_FRAME = 0x1000, 0x1020, 0x1100, 0x1880, 0x1AA0, 0x1AC0, 0x1B60   # the string table grew past 0x1800 (the t_ga_* and t_hf_mark imports)
+HF_MOD0, HF_DYNAMIC, HF_SYMTAB, HF_RELA, HF_JMPREL, HF_EH_HDR, HF_EH_FRAME = 0x1000, 0x1020, 0x1100, 0x1880, 0x1AC0, 0x1AE0, 0x1B80   # the string table grew past 0x1800 (the t_ga_* and t_hf_mark imports); RELA past 0x1AA0 (gmtime_r's)
 HF_MSG, HF_CONSTF, HF_NAME, HF_NAME2 = 0x1E00, 0x1E20, 0x1E40, 0x1E48
 HF_CBDATA, HF_EV = 0x2340, 0x2380   # hf_cb's data word (1000), the SystemEventType t_re_bind binds (write handle, read handle)
 HF_CBDATA_VALUE = 1000
@@ -358,7 +358,7 @@ HF_SUB_MESSAGE = b'sub nro'
 HF_GOT_SYMS = ['strlen', 'sqrtf', 't_hf_get', 't_hf_install', 't_hf_spawn', '_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi',
                '_ZN2nn2ro18LookupModuleSymbolEPmPKNS0_6ModuleEPKc', 'sub_value', '_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE',
                't_re_register', 't_re_fire', 't_re_thread', 't_re_hostthread', 't_re_deep', 't_re_leaf', 't_re_bind', 't_re_stop', 't_hf_mark',
-               't_ga_buf', 't_ga_str', 't_ga_local', 't_ga_outside']
+               't_ga_buf', 't_ga_str', 't_ga_local', 't_ga_outside', 'gmtime_r']
 HF_JUMP_SLOT = {'sub_value'}   # in DT_JMPREL (rebound at the NRO's load and unload as a game's lazily bound functions); the rest GLOB_DAT
 HF_SQRT_IN, HF_SQRT_OUT = 6.25, 2.5
 # What main stores in results[i] (None: checked by the host otherwise)
@@ -372,10 +372,16 @@ HF_NRESULTS = 24   # the results array's words
 #   [2] the string t_ga_str hands it (an arena copy of a literal); [3] strlen of it through the GOT; [4] its first byte, read by main itself
 #   [5] t_ga_local(hf_sum2): the host passes hf_sum2 an array of its scoped region (11, 0, 0, 44), which main reads: 55, + 1000 when the array was in the arena
 #   [6] t_ga_outside(hf_sum2): the host passes hf_sum2 a host stack array and returns a host string on purpose (the arena guard's lines, DM_AOT_ARENA_CHECK=1); strlen of it: 7
+#   [7] gmtime_r(&hf_time, &hf_tm) through the GOT (the C library passthrough, dm/host/libc_pass.c): the pointer it returns (main's own struct tm at HF_TM); [8] the tm_zone
+#       the call wrote there (glibc's layout: nine ints, tm_gmtoff at 40, tm_zone at 48), which the host checks is an arena copy of the C library's zone name (0 on Windows,
+#       whose struct tm has no tm_zone); [9] its tm_year, read by main itself (HF_GM_TIME is in 2001)
 HF_GA_RESULTS = 0x2400
 HF_GA_WORD = 0x1122334455667788
 HF_GA_STRING = b'guest string'
-HF_GA_EXPECTED = [None, HF_GA_WORD, None, len(HF_GA_STRING), HF_GA_STRING[0], 11 + 44 + 1000, len(b'outside')]
+HF_TM, HF_TIME = 0x2480, 0x24C0   # main's struct tm (56 bytes on glibc), the time_t gmtime_r converts
+HF_TM_YEAR, HF_TM_ZONE = 20, 48   # tm_year and tm_zone in glibc's struct tm (Apple's layout)
+HF_GM_TIME = 1000000000           # 2001-09-09 01:46:40 UTC
+HF_GA_EXPECTED = [None, HF_GA_WORD, None, len(HF_GA_STRING), HF_GA_STRING[0], 11 + 44 + 1000, len(b'outside'), None, None, 2001 - 1900]
 # The NRO: text (with the NRO header at +0x10), read-only data (MOD0 and the dynamic tables), data, bss
 SUB_CODE, SUB_TEXT_END, SUB_RO_OFF, SUB_DATA_OFF, SUB_DATA_END, SUB_BSS = 0x80, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000
 SUB_MOD0, SUB_DYNAMIC, SUB_SYMTAB, SUB_RELA, SUB_EH_HDR, SUB_EH_FRAME, SUB_MSG = 0x1000, 0x1020, 0x1100, 0x1400, 0x1500, 0x1580, 0x1900
@@ -403,6 +409,10 @@ HF_ENCODINGS = [   # (llvm-mc's text, the word above): test_aot_manifest.py's Nx
     ('mov x22, #4660', movz_x(22, 0x1234)), ('add x1, x9, #4', add_x(1, 9, 4)), ('mov x3, #0', movz_x(3, 0)), ('add x0, x0, #1', add_x(0, 0, 1)), ('brk #0x3', brk(3)),
     ('ldrb w0, [x20]', ldrb(0, 20, 0)), ('mov x20, x0', mov_x(20, 0)), ('mov x0, x20', mov_x(0, 20)), ('ldr x1, [x0]', ldr_x(1, 0, 0)), ('ldr x2, [x0, #24]', ldr_x(2, 0, 24)),
     ('add x0, x1, x2', add_xr(0, 1, 2)), ('str x0, [x21, #8]', str_x(0, 21, 8)),
+    # gmtime_r through the GOT (HF_GA_EXPECTED[7..9])
+    ('add x1, x1, #1152', add_x(1, 1, HF_TM & 0xFFF)), ('add x0, x0, #1216', add_x(0, 0, HF_TIME & 0xFFF)), ('str x0, [x21, #56]', str_x(0, 21, 56)),
+    ('ldr x0, [x20, #48]', ldr_x(0, 20, HF_TM_ZONE)), ('str x0, [x21, #64]', str_x(0, 21, 64)), ('ldr w0, [x20, #20]', ldr_w(0, 20, HF_TM_YEAR)),
+    ('str x0, [x21, #72]', str_x(0, 21, 72)),
     # the cross-pack loop and sub_call; the synthetic module's fault probe and frame-step stub
     ('ldr x23, [x23, #768]', ldr_x(23, 23, 0x300)), ('add x26, x26, x0', add_xr(26, 26, 0)), ('add x27, x27, x0', add_xr(27, 27, 0)), ('mov x1, #7', movz_x(1, 7)),
     ('add x25, x25, #1', add_x(25, 25, 1)), ('cmp x25, #4', cmp_x(25, 4)), ('mov x9, x0', mov_x(9, 0)), ('mov x0, x1', mov_x(0, 1)), ('blr x9', blr(9)),
@@ -499,6 +509,10 @@ def hf_text():
          [(None, mov_x(0, 20)), (None, blr(16)), (None, str_x(0, 21, g(3))), (None, ldrb(0, 20, 0)), (None, str_x(0, 21, g(4)))]
     t += ga('t_ga_local') + [(None, adr(0, 'hf_sum2')), (None, blr(16)), (None, str_x(0, 21, g(5)))]
     t += ga('t_ga_outside') + [(None, adr(0, 'hf_sum2')), (None, blr(16)), (None, mov_x(20, 0))] + got_load(0) + [(None, mov_x(0, 20)), (None, blr(16)), (None, str_x(0, 21, g(6)))]
+    # The C library's struct tm (libc_pass.c): gmtime_r(&hf_time, &hf_tm); the pointer it returns, the tm_zone it wrote, and tm_year read through that pointer
+    t += ga('gmtime_r') + [(None, adrp(0, HF_TIME)), (None, add_x(0, 0, lo12(HF_TIME))), (None, adrp(1, HF_TM)), (None, add_x(1, 1, lo12(HF_TM))), (None, blr(16)),
+                           (None, str_x(0, 21, g(7))), (None, mov_x(20, 0)), (None, ldr_x(0, 20, HF_TM_ZONE)), (None, str_x(0, 21, g(8))),
+                           (None, ldr_w(0, 20, HF_TM_YEAR)), (None, str_x(0, 21, g(9)))]
     t += [(None, adrp(0, HF_MSG)), (None, add_x(0, 0, lo12(HF_MSG))), (None, movz_x(1, len(HF_MESSAGE))), (None, svc(0x27))]
     t += got_load(16) + [(None, blr(16)), (None, svc(0x07)), (None, brk(1))]
     # malloc(n): a bump allocator over bss, 16-byte steps (hf_heapptr starts at the heap: a relative relocation); free: nothing
@@ -562,6 +576,7 @@ def hf_image():
     img[HF_MSG:HF_MSG + len(HF_MESSAGE)] = HF_MESSAGE
     struct.pack_into('<f', img, HF_CONSTF, HF_SQRT_IN)
     struct.pack_into('<Q', img, HF_CBDATA, HF_CBDATA_VALUE)
+    struct.pack_into('<q', img, HF_TIME, HF_GM_TIME)
     img[HF_NAME:HF_NAME + 7] = b'sub_fn\0'
     img[HF_NAME2:HF_NAME2 + 9] = b'sub_call\0'
     return img, L['hf_end']

@@ -308,6 +308,10 @@ class HostFnModule(unittest.TestCase):
         # the cross-pack loop (t_aot_hostfn.c CROSS_EXPECTED): four passes of sub_call(synth_triple, 7) = 22, LookupModuleSymbol(sub_call)
         self.assertEqual(S.HF_EXPECTED[20:], [88, 0], 't_aot_hostfn.c CROSS_EXPECTED holds these numbers')
         self.assertLessEqual(len(S.HF_EXPECTED), S.HF_NRESULTS)
+        # gmtime_r through the GOT (t_aot_hostfn.c HF_GOT_GMTIME_R, HF_TM, HF_TM_YEAR_2001): its slot, main's struct tm, the tm_year of HF_GM_TIME
+        self.assertEqual((S.HF_GOT_SYMS.index('gmtime_r'), S.HF_TM, S.HF_GA_EXPECTED[7:]), (22, 0x2480, [None, None, 101]), 't_aot_hostfn.c holds these numbers')
+        self.assertLessEqual(S.HF_GA_RESULTS + 8 * len(S.HF_GA_EXPECTED), S.HF_TM, 'ga_results ends before main\'s struct tm')
+        self.assertLessEqual(S.HF_TM + 56, S.HF_TIME)
 
     def test_cross_pack_loop(self):
         """main's loop calls sub_fn and sub_call through registers (blr, the inline caches the dispatcher binds across packs) and sub_call calls main back"""

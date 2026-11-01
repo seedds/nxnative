@@ -6,7 +6,8 @@
 // culling by GL's winding, scissored and masked clears, gl_FragCoord in GL's orientation, a persistently mapped vertex stream rewritten after its fence, an index buffer
 // orphaned while a draw reads it, a disabled attribute's current value, a triangle fan, uploads before and among a frame's draws, a framebuffer object sampled and blitted
 // (straight, scaled and flipped), mipmaps generated (a texture of all its levels, and one of one level), glReadPixels (rows bottom first, as GL lays them out) and the
-// presented picture read back from the backend's headless presenter (upright: it flips the bottom-up rows). Every validation message fails the test; without a Vulkan device
+// presented picture read back from the backend's headless presenter (upright: it flips the bottom-up rows); what the game sees of host memory (the buffer mappings, a slab's
+// and one of its own, the strings, a fence object) in the x86-64 engine's arena below 2^39. Every validation message fails the test; without a Vulkan device
 // it skips as the other GPU tests do (t_vk_harness.h), and without a shader library (no glslangValidator when the tree was configured, or a runner on another machine) it
 // skips with a note. DM_GL_STUBS: a child process (hv_spawn) checks the reporting stub
 #include "t_vk_harness.h"
@@ -15,6 +16,15 @@
 #include "../../hostvk/guest_vk.h"
 
 PLAT_TABLE_DEFINE(swhle)   // the import table (dm/host/hle.c defines it in a host binary)
+// The x86-64 engine's arena below 2^39 (dm/host/aot_arena.c, linked here: dm/host/CMakeLists.txt), where the layer puts what the game sees of host memory (guest_gl.c, "Memory
+// the game sees": the buffer mappings as arena pages imported with VK_EXT_external_memory_host, the strings, the fence objects), as in nxhost-run; and what aot_arena.c and
+// aot_hostfn.c take from the rest of the host, as t_vk_guest gives it: no host-call thunks, no loader
+#include "../../../host/aot.h"
+#include "../../../host/aot_hostfn.h"
+const hle_thunk_ent hle_thunks[1] = {{0}};
+const size_t hle_thunks_count = 0;
+uint64_t loader_named_stub(const char *name) { (void)name; return 0; }
+static int below_2_39(const void *p, uint64_t n) { return p && dm_aot_in_arena((uint64_t)(uintptr_t)p, n) && (uint64_t)(uintptr_t)p + n <= 1ull << 39; }
 enum { WW = 64, WH = 48 };
 Result h_vi_CreateLayerWH(void **out, void *disp, int w, int h);   // dm/gfx/hle_vi.c (linked): the game's vi::CreateLayer of a given size, which the window surface takes
 
@@ -22,12 +32,12 @@ typedef uint32_t GLenum, GLuint, GLbitfield; typedef int32_t GLint, GLsizei; typ
 enum {
     GL_TRIANGLES = 4, GL_TRIANGLE_FAN = 6, GL_LESS = 0x201, GL_FRONT = 0x404, GL_BACK = 0x405, GL_CULL_FACE = 0xb44, GL_DEPTH_TEST = 0xb71, GL_VIEWPORT = 0xba2,
     GL_SCISSOR_TEST = 0xc11, GL_TEXTURE_2D = 0xde1, GL_UNSIGNED_BYTE = 0x1401, GL_UNSIGNED_SHORT = 0x1403, GL_FLOAT = 0x1406, GL_COLOR = 0x1800, GL_RGBA = 0x1908,
-    GL_RENDERER = 0x1f01, GL_NEAREST = 0x2600, GL_NEAREST_MIPMAP_NEAREST = 0x2700, GL_TEXTURE_MAG_FILTER = 0x2800, GL_TEXTURE_MIN_FILTER = 0x2801, GL_RGBA8 = 0x8058,
+    GL_RENDERER = 0x1f01, GL_EXTENSIONS = 0x1f03, GL_NEAREST = 0x2600, GL_NEAREST_MIPMAP_NEAREST = 0x2700, GL_TEXTURE_MAG_FILTER = 0x2800, GL_TEXTURE_MIN_FILTER = 0x2801, GL_RGBA8 = 0x8058,
     GL_TEXTURE0 = 0x84c0, GL_ARRAY_BUFFER = 0x8892, GL_ELEMENT_ARRAY_BUFFER = 0x8893, GL_STATIC_DRAW = 0x88e4, GL_DEPTH24_STENCIL8 = 0x88f0, GL_FRAGMENT_SHADER = 0x8b30,
     GL_VERTEX_SHADER = 0x8b31, GL_COMPILE_STATUS = 0x8b81, GL_LINK_STATUS = 0x8b82, GL_ACTIVE_UNIFORMS = 0x8b86, GL_FLOAT_T = 0x1406, GL_BOOL = 0x8b56,
     GL_READ_FRAMEBUFFER = 0x8ca8, GL_DRAW_FRAMEBUFFER = 0x8ca9, GL_COLOR_ATTACHMENT0 = 0x8ce0, GL_FRAMEBUFFER = 0x8d40, GL_RENDERBUFFER = 0x8d41,
     GL_DEPTH_STENCIL_ATTACHMENT = 0x821a, GL_SYNC_GPU_COMMANDS_COMPLETE = 0x9117, GL_ALREADY_SIGNALED = 0x911a, GL_CONDITION_SATISFIED = 0x911c, GL_CONTEXT_PROFILE_MASK = 0x9126,
-    GL_MAP_WRITE_BIT = 0x2, GL_MAP_PERSISTENT_BIT = 0x40, GL_MAP_COHERENT_BIT = 0x80, GL_SYNC_FLUSH_COMMANDS_BIT = 0x1,
+    GL_MAP_READ_BIT = 0x1, GL_MAP_WRITE_BIT = 0x2, GL_MAP_PERSISTENT_BIT = 0x40, GL_MAP_COHERENT_BIT = 0x80, GL_SYNC_FLUSH_COMMANDS_BIT = 0x1,
     GL_COLOR_BUFFER_BIT = 0x4000, GL_DEPTH_BUFFER_BIT = 0x100,
 };
 
@@ -36,7 +46,7 @@ enum {
     X(eglChooseConfig, uint32_t, (void *, const int32_t *, void **, int32_t, int32_t *)) X(eglGetConfigAttrib, uint32_t, (void *, void *, int32_t, int32_t *)) \
     X(eglCreateContext, void *, (void *, void *, void *, const int32_t *)) X(eglCreateWindowSurface, void *, (void *, void *, void *, const int32_t *)) \
     X(eglMakeCurrent, uint32_t, (void *, void *, void *, void *)) X(eglSwapInterval, uint32_t, (void *, int32_t)) X(eglSwapBuffers, uint32_t, (void *, void *)) \
-    X(eglGetProcAddress, void *, (const char *))
+    X(eglGetProcAddress, void *, (const char *)) X(eglQueryString, const char *, (void *, int32_t))
 #define GLFNS(X) \
     X(glGenBuffers, void, (GLsizei, GLuint *)) X(glBindBuffer, void, (GLenum, GLuint)) X(glBufferData, void, (GLenum, GLsizeiptr, const void *, GLenum)) \
     X(glBufferStorage, void, (GLenum, GLsizeiptr, const void *, GLbitfield)) X(glMapBufferRange, void *, (GLenum, GLintptr, GLsizeiptr, GLbitfield)) \
@@ -62,7 +72,7 @@ enum {
     X(glDrawArrays, void, (GLenum, GLint, GLsizei)) X(glDrawElements, void, (GLenum, GLsizei, GLenum, const void *)) \
     X(glDrawElementsBaseVertex, void, (GLenum, GLsizei, GLenum, const void *, GLint)) X(glFenceSync, void *, (GLenum, GLbitfield)) \
     X(glClientWaitSync, GLenum, (void *, GLbitfield, uint64_t)) X(glDeleteSync, void, (void *)) X(glReadPixels, void, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) \
-    X(glGetIntegerv, void, (GLenum, GLint *)) X(glGetString, const char *, (GLenum)) X(glFinish, void, (void))
+    X(glGetIntegerv, void, (GLenum, GLint *)) X(glGetString, const char *, (GLenum)) X(glFinish, void, (void)) X(glGetStringi, const char *, (GLenum, GLuint))
 static struct {
 #define DECL(n, r, a) r (*n) a;
     EGLFNS(DECL) GLFNS(DECL)
@@ -128,6 +138,7 @@ static int stubs_child(void) {
 }
 
 int main(int argc, char **argv) {
+    dm_aot_arena_init();   // the arena first, as nxhost-run's start makes it (main_x86.c)
     if (argc > 1 && !strcmp(argv[1], "stubs")) return stubs_child();
     hv_up("t_vk_guest_gl");
     char tsv[700]; snprintf(tsv, sizeof tsv, "%s/gl-vk/gl_shaders.tsv", T_GL_LIB);
@@ -166,6 +177,12 @@ int main(int argc, char **argv) {
     const char *rend = G.glGetString(GL_RENDERER);
     snprintf(name, sizeof name, "the context: core profile, viewport %d %d %d %d (the surface's 64x48), renderer '%s'", vp[0], vp[1], vp[2], vp[3], rend ? rend : "");
     t(name, prof == 1 && vp[0] == 0 && vp[1] == 0 && vp[2] == WW && vp[3] == WH && rend && strstr(rend, "Vulkan"));
+    // The strings the game reads are guest memory: arena copies below 2^39, each made once (guest_gl.c, "Memory the game sees")
+    const char *ext = G.glGetString(GL_EXTENSIONS), *ext0 = G.glGetStringi(GL_EXTENSIONS, 0), *eext = G.eglQueryString(dpy, 0x3055);   // EGL_EXTENSIONS
+    snprintf(name, sizeof name, "glGetString, glGetStringi and eglQueryString in the arena below 2^39: renderer %p, extensions %p, extension 0 %p ('%s'), EGL's %p ('%s')",
+             (const void *)rend, (const void *)ext, (const void *)ext0, ext0 ? ext0 : "", (const void *)eext, eext ? eext : "");
+    t(name, below_2_39(rend, strlen(rend) + 1) && ext && below_2_39(ext, strlen(ext) + 1) && ext0 && below_2_39(ext0, strlen(ext0) + 1) && strstr(ext, ext0) &&
+      eext && below_2_39(eext, strlen(eext) + 1) && !strcmp(eext, "EGL_KHR_create_context") && G.glGetString(GL_RENDERER) == rend && G.eglQueryString(dpy, 0x3055) == eext);
     int status = hv_spawn(argv[0], "stubs");
     snprintf(name, sizeof name, "DM_GL_STUBS=1 (a child process): a name the layer lacks gets a stub that returns 0 (exit status %d)", status);
     t(name, status == 0);
@@ -215,11 +232,23 @@ int main(int argc, char **argv) {
     uint8_t *map = G.glMapBufferRange(GL_ARRAY_BUFFER, 0, 4096, GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
     t("glBufferStorage + glMapBufferRange: a persistent mapping", map != NULL);
     if (!map) return hv_finish();
+    t("the persistent mapping lies in the arena below 2^39 (a slab of arena pages imported with VK_EXT_external_memory_host)", below_2_39(map, 4096));
     G.glEnableVertexAttribArray((GLuint)aVP); G.glVertexAttribPointer((GLuint)aVP, 2, GL_FLOAT, 0, 12, (const void *)0);
     G.glEnableVertexAttribArray((GLuint)aVC); G.glVertexAttribPointer((GLuint)aVC, 4, GL_UNSIGNED_BYTE, 1, 12, (const void *)8);
     static const uint16_t quad_idx[6] = {0, 1, 2, 0, 2, 3}, tri_idx[6] = {0, 1, 2, 0, 1, 2};
     G.glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo); G.glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof quad_idx, quad_idx, GL_STATIC_DRAW);
     static const float ident[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    // The other mappings: a buffer glBufferData filled (from a slab: the quad's bytes read back through it) and one above the slabs' 256 KiB (memory of its own), both arena pages
+    GLuint big; G.glGenBuffers(1, &big);
+    G.glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    const uint8_t *vmap = G.glMapBufferRange(GL_ARRAY_BUFFER, 0, sizeof quad, GL_MAP_READ_BIT);
+    G.glBindBuffer(GL_ARRAY_BUFFER, big); G.glBufferStorage(GL_ARRAY_BUFFER, 512 << 10, NULL, GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+    uint8_t *bmap = G.glMapBufferRange(GL_ARRAY_BUFFER, 0, 512 << 10, GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+    if (bmap) { bmap[0] = 1; bmap[(512 << 10) - 1] = 2; }
+    snprintf(name, sizeof name, "the mappings of a filled buffer (%p, its bytes as glBufferData wrote them) and of a 512 KiB one (%p, memory of its own) lie in the arena below 2^39",
+             (const void *)vmap, (const void *)bmap);
+    t(name, below_2_39(vmap, sizeof quad) && !memcmp(vmap, quad, sizeof quad) && below_2_39(bmap, 512 << 10) && bmap[0] == 1 && bmap[(512 << 10) - 1] == 2);
+    G.glBindBuffer(GL_ARRAY_BUFFER, sbo);
 
     // ---------- Frame 1 ----------
     G.glViewport(0, 0, WW, WH); G.glClearColor(0, 0, 0, 1); G.glClearDepthf(1); G.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -248,6 +277,7 @@ int main(int argc, char **argv) {
     stream_quad(map, 16, 16, 24, 24, (const uint8_t[]){0, 0, 255, 255});
     G.glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void *)0);   // blue: varyings matched by name, attributes at the bound indices
     void *fence = G.glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    t("glFenceSync: the fence object is a garena block below 2^39 (the thunks' arena guard checks GLsync as a pointer)", below_2_39(fence, 8));
     G.glReadPixels(0, 0, WW, WH, GL_RGBA, GL_UNSIGNED_BYTE, g_rp);
     px("glReadPixels (row 0 at the bottom), A: level 0 at depth 0.25, culling GL's back faces", rp(2, 2), 255, 0, 0, 0);
     px("the quad drawn with GL's front faces culled is not there", rp(2, 12), 0, 0, 0, 0);

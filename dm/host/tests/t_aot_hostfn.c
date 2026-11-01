@@ -23,7 +23,8 @@
 //   then host memory the guest sees (aot.h, "Host memory the guest sees"): t_ga_buf hands main a garena buffer, which it reads; t_ga_str an arena copy of a literal, which it
 //     reads and hands to strlen; t_ga_local passes main's hf_sum2 an array of the thread's scoped region (DM_GLOCAL); each address lies in the arena below 2^39. t_ga_outside
 //     hands over host memory on purpose (a host stack array to hf_sum2, a host string returned and passed on to strlen): run again with DM_AOT_ARENA_CHECK=1 (1b), the guard
-//     flags exactly those three, once each, and nothing else the run exchanges
+//     flags exactly those three, once each, and nothing else the run exchanges; then gmtime_r through the GOT into main's own struct tm, whose tm_zone the passthrough
+//     (libc_pass.c) leaves as an arena copy of the C library's zone name
 //   a refusal: the same folder without sub.aot.so: ro::LoadModule fails with a [RED] line naming the pack, and the module's call through the missing symbol stops the run
 // What this does not show: a real NRO, SDK or game (no game files here); Windows (a DLL pack: not built here)
 //   t_aot_hostfn [--module <dir>]
@@ -51,7 +52,7 @@ uint32_t svc_thread_main_init(void);   // hle_thread.c
 // The host functions the module reaches (t_aot_hostfn_entries.c, libc_pass.c, hle_ro.c) and the entries' counters
 uint64_t t_hf_mul(uint64_t a, uint64_t b), t_hf_add(uint64_t a, uint64_t b);
 void *t_hf_get(void); void t_hf_install(void **vt); uint64_t t_hf_spawn(uint64_t x);
-size_t libc_strlen(const char *s); float libc_sqrtf(float x);
+size_t libc_strlen(const char *s); float libc_sqrtf(float x); struct tm *libc_gmtime_r(const int64_t *t, struct tm *out);
 Result h_ro_LoadModule(void *mod, const void *image, void *buf, size_t size, int flag);
 Result h_ro_LookupModuleSymbol(uintptr_t *out, const void *mod, const char *name);
 void h_ro_UnloadModule(void *mod);
@@ -88,7 +89,9 @@ static const uint64_t CROSS_EXPECTED[2] = {88, 0};
 static const char *const CROSS_STEP[2] = {"sub_call(synth_triple, 7) four times: the NRO's pack calls main's synth_triple back, 4 x (21 + 1)",
                                           "nn::ro::LookupModuleSymbol(sub_call)"};
 enum { HF_CROSS_SITES = 3 };   // the loop's calls between packs: main -> sub_fn, main -> sub_call, sub_call -> main's synth_triple
-enum { HF_GOT_STRLEN, HF_GOT_SQRTF, HF_GOT_GET, HF_GOT_INSTALL, HF_GOT_SPAWN, HF_GOT_LOAD, HF_GOT_LOOKUP, HF_GOT_SUB_VALUE, HF_GOT_UNLOAD, HF_GOT_MARK = 17 };   // aot_synth.py HF_GOT_SYMS
+enum { HF_GOT_STRLEN, HF_GOT_SQRTF, HF_GOT_GET, HF_GOT_INSTALL, HF_GOT_SPAWN, HF_GOT_LOAD, HF_GOT_LOOKUP, HF_GOT_SUB_VALUE, HF_GOT_UNLOAD, HF_GOT_MARK = 17,
+       HF_GOT_GMTIME_R = 22 };   // aot_synth.py HF_GOT_SYMS
+enum { HF_TM = 0x2480, HF_TM_YEAR_2001 = 101 };   // aot_synth.py: main's struct tm that gmtime_r fills, and the tm_year of HF_GM_TIME
 enum { SUB_GOT = 0x2000, SUB_FLAG = 0x2008 };   // aot_synth.py: the NRO's GOT slot (strlen) and the word its DT_INIT sets
 
 // ---------- The child: one run ----------
@@ -135,6 +138,8 @@ static void *guest_main(void *arg) {
     check(is_slot_of(got[HF_GOT_GET], (const void *)t_hf_get, "t_hf_get") && is_slot_of(got[HF_GOT_INSTALL], (const void *)t_hf_install, "t_hf_install") &&
           is_slot_of(got[HF_GOT_SPAWN], (const void *)t_hf_spawn, "t_hf_spawn") && is_slot_of(got[HF_GOT_MARK], (const void *)t_hf_mark, "t_hf_mark"),
           "GOT: the test's entries at their slots");
+    check(is_slot_of(got[HF_GOT_GMTIME_R], (const void *)libc_gmtime_r, "libc_gmtime_r"), "GOT: gmtime_r at the slot of the passthrough's libc_gmtime_r (%#llx)",
+          (unsigned long long)got[HF_GOT_GMTIME_R]);
     check(is_slot_of(got[HF_GOT_LOAD], (const void *)h_ro_LoadModule, "h_ro_LoadModule") && is_slot_of(got[HF_GOT_LOOKUP], (const void *)h_ro_LookupModuleSymbol, "h_ro_LookupModuleSymbol") &&
           is_slot_of(got[HF_GOT_UNLOAD], (const void *)h_ro_UnloadModule, "h_ro_UnloadModule"), "GOT: nn::ro's forced take-overs (hle_ro.c) at their slots");
     check(dm_aot_stub_index(got[HF_GOT_SUB_VALUE]) >= 0, "GOT: sub_value, which no loaded module defines yet, at stub slot %ld", dm_aot_stub_index(got[HF_GOT_SUB_VALUE]));
@@ -226,6 +231,18 @@ static void *guest_main(void *arg) {
         check(ga[6] == 7 && g_ga_seen.outside_sum == 11 && !below_2_39((uint64_t)(uintptr_t)&g_ga_seen, 1),
               "t_ga_outside: host memory on purpose, outside the arena: main read the host stack array (5 + 6 = %llu) and strlen of the host string (%llu)",
               (unsigned long long)g_ga_seen.outside_sum, (unsigned long long)ga[6]);
+        // The C library's struct tm (libc_pass.c): gmtime_r wrote main's own struct; the zone name pointer it left there is an arena copy of the C library's static string
+#if defined(_WIN32)
+        check(ga[7] == base + HF_TM && ga[9] == HF_TM_YEAR_2001 && ga[8] == 0,
+              "gmtime_r through the GOT: main's struct tm at %#llx, tm_year %llu; Windows' struct tm has no tm_zone, so the guest's stays 0 (%#llx)", (unsigned long long)ga[7],
+              (unsigned long long)ga[9], (unsigned long long)ga[8]);
+#else
+        const char *zone = (const char *)(uintptr_t)ga[8];
+        const int zone_ok = ga[8] && below_2_39(ga[8], 1) && below_2_39(ga[8], strlen(zone) + 1) && !strcmp(zone, "GMT");
+        check(ga[7] == base + HF_TM && ga[9] == HF_TM_YEAR_2001 && zone_ok,
+              "gmtime_r through the GOT: main's struct tm at %#llx, tm_year %llu, its tm_zone %#llx ('%s') an arena copy below 2^39 of the C library's zone name",
+              (unsigned long long)ga[7], (unsigned long long)ga[9], (unsigned long long)ga[8], zone_ok ? zone : "?");
+#endif
     }
     return NULL;
 }

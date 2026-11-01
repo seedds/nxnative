@@ -90,8 +90,30 @@ PASS(log2, double, double x) { return log2(x); }
 PASS(lroundf, int64_t, float x) { return (int64_t)llroundf(x); }
 
 // ---------- Calendar time: the guest's time_t is a 64-bit integer (time_t is 64 bits on Linux and with mingw-w64 too; copied, not reinterpreted) ----------
-PASS(mktime, int64_t, struct tm *tm) { return (int64_t)mktime(tm); }
-PASS(timegm, int64_t, struct tm *tm) { return (int64_t)timegm(tm); }
-PASS(gmtime_r, struct tm *, const int64_t *t, struct tm *out) { time_t v = (time_t)*t; return gmtime_r(&v, out); }
-PASS(localtime_r, struct tm *, const int64_t *t, struct tm *out) { time_t v = (time_t)*t; return localtime_r(&v, out); }
+// The zone name glibc writes into the guest's struct tm (tm_zone: a pointer to the C library's own static strings, "GMT" or the local zone's) is read by the guest: on the
+// x86-64 engine it becomes an arena copy (dm_garena_literal; aot.h, "Host memory the guest sees"), as hle_time.c's take-overs do. Only a pointer the call wrote is replaced:
+// mktime and timegm leave the struct as it was when they fail, and its tm_zone is then the guest's own. Windows' struct tm has no tm_zone; Apple's text (hle_table.c, and the
+// native form under DM_NATIVE_EXEC or DM_TEST_GUEST_C) hands over the C library's pointer as it is
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C) || defined(_WIN32)
+#define GUEST_TM_ZONE(r) r
+#define GUEST_TM_CALL(f, tm) f(tm)
+#else
+#include "aot.h"
+static struct tm *guest_tm_zone(struct tm *r) {   // the result of gmtime_r / localtime_r: on success the call wrote every field, tm_zone too
+    if (r && r->tm_zone) r->tm_zone = dm_garena_literal(r->tm_zone);
+    return r;
+}
+static time_t guest_tm_call(time_t (*f)(struct tm *), struct tm *tm) {   // mktime / timegm: tm_zone replaced only when the call wrote it
+    const char *was = tm->tm_zone;
+    const time_t r = f(tm);
+    if (tm->tm_zone && tm->tm_zone != was) tm->tm_zone = dm_garena_literal(tm->tm_zone);
+    return r;
+}
+#define GUEST_TM_ZONE(r) guest_tm_zone(r)
+#define GUEST_TM_CALL(f, tm) guest_tm_call(f, tm)
+#endif
+PASS(mktime, int64_t, struct tm *tm) { return (int64_t)GUEST_TM_CALL(mktime, tm); }
+PASS(timegm, int64_t, struct tm *tm) { return (int64_t)GUEST_TM_CALL(timegm, tm); }
+PASS(gmtime_r, struct tm *, const int64_t *t, struct tm *out) { time_t v = (time_t)*t; return GUEST_TM_ZONE(gmtime_r(&v, out)); }
+PASS(localtime_r, struct tm *, const int64_t *t, struct tm *out) { time_t v = (time_t)*t; return GUEST_TM_ZONE(localtime_r(&v, out)); }
 PASS(strftime, size_t, char *s, size_t max, const char *fmt, const struct tm *tm) { return strftime(s, max, fmt, tm); }

@@ -42,7 +42,7 @@ jobs:
         id: build
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build sh -c \
-            "cmake -S dm/host -B build/linux -G Ninja -DGAME=$GAME -DNXHOST_PROGRAM=ON && cmake --build build/linux --target all nxhost-run"
+            "cmake -S dm/host -B build/linux -G Ninja -DGAME=$GAME -DNXHOST_PROGRAM=ON -DNXHOST_JIT=ON && cmake --build build/linux --target all nxhost-run"
       - name: CTest
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build \

@@ -675,7 +675,10 @@ NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a
 static _Atomic uint64_t g_sync_ns;
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     const sync_t *o = (const sync_t *)s;
-    if (!o->fenced) { static int once; if (getenv("DM_SYNC_UNFENCED_SIGNALED")) { if (!once++) LOG("[nvn] SyncWait on a sync never fenced: signaled (test)"); return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; } return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED; }
+    if (!o->fenced) {   // the profile's sync_unfenced (DOOM polls its frame sync before its first fence); DM_SYNC_UNFENCED_SIGNALED=1 / 0 overrides it
+        static int on = -1; if (on < 0) { const char *e = getenv("DM_SYNC_UNFENCED_SIGNALED"); on = e ? atoi(e) > 0 : DM_GAME_SYNC_UNFENCED; if (on) LOG("[nvn] SyncWait on a sync never fenced: signaled"); }
+        return on ? NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
+    }
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
     uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)

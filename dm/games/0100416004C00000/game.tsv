@@ -1,0 +1,51 @@
+# Game profile of DOOM (2016) (Switch, 1.4 = v262144). Plays on the Mac and the iPhone (menus, the campaign's first levels, 30 fps)
+# Format: see dm/games/README.md
+# id Tech 6 on SDK 6.4.0, NVN; Wwise audio. Its shaders are GLSLC outputs in the renderProg entries of the .resources files, found through the newest .pindex
+# (shader_split.py idtech_shaders). What the host and chain needed for it: README.md
+
+# ---- Identity ----
+title_id	0100416004C00000
+program_id	0100416004C00000
+
+# ---- App ----
+name	DOOM
+ipa	Doom.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v262144	1.4	main=2847991952b3d7abd228624fcd3b0779	sdk=e29be8ad6778527aa248310d0c71a8a5
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+# not loaded, main takes nothing from it the host does not supply: subsdk0 (1,659 instructions, no imports the host lacks)
+modules	main sdk
+romfs_marker	base/gameresources.resources
+zip_store	.bik:.bk2:.bnk:.index:.mega2:.pages:.patch:.pck:.pindex:.png:.preload:.resources:.xml:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 42 MB of bss (counted as used memory): a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/base/=base /virtualtextures/=virtualtextures
+shader_note	DOOM shaders
+# id Tech 6's pre-pass geometry shader appends 16-bit index lists at 2-byte boundaries with 32-bit compare-and-swaps
+shader_sb_unaligned	on
+
+# ---- NVN ----
+# the render thread waits on its frame sync before it has fenced it once (boot stopped at "Initializing renderSystem media"): a sync never fenced counts as signaled
+sync_unfenced	signaled
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x5b28000
+
+# ---- Launcher ----
+# DOOM asks for interval 2; id Tech 6 runs at any frame rate on PC (game speed at 60 not measured here): the launcher offers 60 fps (display mode)
+present_choice	on

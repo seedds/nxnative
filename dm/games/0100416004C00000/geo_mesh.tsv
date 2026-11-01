@@ -1,0 +1,16 @@
+# kind: evidence  vertex key <TAB> geometry key: DOOM's depth pre-pass draws each mesh through geometry shader 38d8127afde928b3, which culls its triangles and appends the visible ones' indices for the colour pass (16-bit, atomic append); its culling shaders and their vertex shaders, from pass dumps of the first level
+2306542003502ed0	38d8127afde928b3
+4f33f99165742087	38d8127afde928b3
+ac3eb2edc067e6b7	e174c6bd26026776
+2e000cbb7ebc506d	ffdce93f088cbe5c
+d76490052fba0c02	ffdce93f088cbe5c
+97d5ef0aee4e35e2	1751093df6fb9610
+3ad348f387bad4bc	dda008a70742f48b
+40d37f7beba02aa6	e174c6bd26026776
+4ada57ba6be313dd	e174c6bd26026776
+4bf05d36c0685c1c	e174c6bd26026776
+7364a3e1f4245de5	dda008a70742f48b
+ba5290bd38513664	38d8127afde928b3
+cee0bd7f467b98d5	dda008a70742f48b
+d732499aeea349b2	dda008a70742f48b
+f00ad3f751e6b9b5	e174c6bd26026776

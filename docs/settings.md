@@ -67,6 +67,14 @@ Shows the frames per second at the top left.
 
 A light tap from the phone when you press an on-screen button.
 
+### Touchpad aiming
+
+The right half of the screen becomes a touchpad for the right stick: the faster your finger moves, the further the stick tilts, and it returns to the centre when your finger stops. There is no stick to drag away from its centre, so aiming starts with the first movement. The AIM button in the top-right corner opens a slider for its sensitivity (0.5× to 5×), which the app remembers. Off: the right side is a stick that follows your finger.
+
+### Motion as a Pro Controller
+
+When a game sees the on-screen controls as a Pro Controller, the phone's motion reaches it as that controller held flat in your hands, so turning the upright phone left and right turns the camera. DOOM needs it: it takes a Pro Controller's turning from the axis that points up out of the controller, which an upright phone barely moves. Off: the phone's own axes reach the controller unchanged. It changes nothing in handheld mode or with a real controller.
+
 ### Game rumble
 
 The game's vibration, on the phone or on a connected controller.
@@ -227,6 +235,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
+| Touchpad aiming | `DM_TOUCH_AIM` | `1`, `0` |
+| Motion as a Pro Controller | `DM_PHONE_FLAT` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |

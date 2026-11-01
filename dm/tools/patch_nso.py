@@ -962,6 +962,69 @@ def jump_zero_extended(insl, j):
     targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
     addresses = {p.address for p in insl}
     return targets if all(t in addresses and not head < t <= end for t in targets) else None
+def jump_adr_far_check(insl, j):
+    """The adr-relative form of jump_adr_offsets with its bounds check scheduled far ahead of its branch (Yakuza Kiwami 1.01 main+0x91b24c: cmp w21,#3, then 23 float and
+    bitfield instructions that write neither w21 nor the flags, then b.hi; mov w16,w21; adrp x17 + add x17,x17,#0xa7c; adr x18,#L; ldrsw x0,[x17,x16,lsl #2]; add x18,x18,x0;
+    br x18: the cmp 31 instructions before the br, where jump_adr_offsets looks 16 back). The check is found by the flags its b.hi reads, not by a distance: back from the load
+    through straight-line code, following index copies, the first control flow must be the b.hi, and before it the first instruction that writes the flags must be a cmp of the
+    index with an immediate. From that cmp to the br there may be no call, branch, system call, trap or undecodable word, and no write of the checked index; the loaded entry stays
+    unchanged up to the add and x18 up to the br; no branch or known jump table of the function may enter the run past the cmp, and the b.hi must leave it. Every target must be a
+    decoded instruction of the function outside the run, and the table base comes from its register's writer chain (adrp + add, through copies). Tried after every older recognizer, so the tables they recognized keep their targets. Returns all targets, or None"""
+    canon = {'lr': 'x30', 'fp': 'x29'}   # capstone's names for x30 and x29
+    def gpr(name): return num(canon.get(name, name))
+    def writes(p):   # the general registers p writes, by number; a compare's first operand is listed as written but only the flags change, and an unnamed register could be any
+        if p.mnemonic in ('cmp', 'cmn', 'tst'): return set()
+        names = [p.reg_name(r) for r in p.regs_access()[1]]
+        return set(range(32)) if None in names else {gpr(n) for n in names} - {None}
+    def flags(p):   # writes NZCV: by name for the compares and flag-setting arithmetic, and by capstone's list of written registers
+        return p.mnemonic in ('cmp', 'cmn', 'tst', 'ccmp', 'ccmn', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'adds', 'subs', 'ands', 'bics', 'adcs', 'sbcs', 'negs', 'ngcs',
+                              'setf8', 'setf16', 'rmif', 'cfinv', 'axflag', 'xaflag') or (p.mnemonic == 'msr' and 'nzcv' in p.op_str) or \
+            any(p.reg_name(r) == 'nzcv' for r in p.regs_access()[1])
+    def control(p):   # a branch, call, return, system call or trap: other paths, and registers changed out of capstone's sight
+        return p.mnemonic.startswith('b.') or p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'udf', 'eret',
+                                                              'drps', 'braa', 'brab', 'braaz', 'brabz', 'blraa', 'blrab', 'blraaz', 'blrabz', 'retaa', 'retab')
+    lo = max(0, j - 16)   # the dispatch itself as jump_adr_offsets finds it; only the check may be further back
+    ka = next((k for k in range(j - 1, lo - 1, -1) if insl[k].mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', insl[k].op_str)), None)
+    if ka is None: return None
+    ops = insl[ka].op_str.split(', ')[1:]
+    for e, a in (ops, ops[::-1]):   # e = the loaded entry, a = the adr base
+        if e == a: continue
+        kl = next((k for k in range(ka - 1, lo - 1, -1) if insl[k].mnemonic == 'ldrsw' and re.fullmatch(rf'{e}, \[x\d+, x\d+, lsl #2\]', insl[k].op_str)), None)
+        kw = next((k for k in range(ka - 1, lo - 1, -1) if gpr(a) in writes(insl[k])), None)   # the nearest writer of the adr base
+        if kl is None or kw is None or insl[kw].mnemonic != 'adr': continue
+        ml = re.fullmatch(rf'{e}, \[(x\d+), x(\d+), lsl #2\]', insl[kl].op_str)
+        if ml is None: continue
+        tb_reg, ix = ml.groups()
+        run = insl[kl:j + 1]
+        if any(q.address != p.address + 4 for p, q in zip(run, run[1:])) or any(control(p) for p in run[1:-1]): return None
+        if any(gpr(e) in writes(p) for p in insl[kl + 1:ka]) or any(18 in writes(p) for p in insl[ka + 1:j]): return None
+        idx, kh, kc, mc = int(ix), None, None, None
+        for k in range(kl - 1, -1, -1):   # back from the load to the check
+            p = insl[k]
+            if p.address + 4 != insl[k + 1].address: return None   # an undecodable word may hide a write or a branch
+            if control(p):
+                if kh is not None or p.mnemonic != 'b.hi': return None   # the one control flow of the run: the check's b.hi
+                kh = k; continue
+            if kh is not None and flags(p):   # the flags the b.hi reads must come from a compare of the index
+                mc = re.fullmatch(r'[wx](\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
+                if mc is None or int(mc.group(1)) != idx: return None
+                kc = k; break
+            m = re.fullmatch(r'w(\d+), w(\d+)', p.op_str) if p.mnemonic == 'mov' else None
+            if m and int(m.group(1)) == idx: idx = int(m.group(2)); continue   # an index copy: the check is on its source
+            if idx in writes(p): return None   # the index changes after the check
+        if kc is None or mc is None: return None
+        head, end = insl[kc].address, insl[j].address
+        if head <= insl[kh].operands[0].imm <= end: return None   # the b.hi must leave the run
+        for p in insl:   # no entry into the run past the check
+            if (p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.')) and p.operands[-1].type == ARM64_OP_IMM and head < p.operands[-1].imm <= end: return None
+        if any(head < t <= end for targets in tabjumps.values() for t in targets): return None
+        if any(b <= end and b + 4 * width > head + 4 for b, width in jumps.values()): return None
+        n, at = int(mc.group(2), 0) + 1, insl[kw].operands[1].imm
+        tb = copied_base(insl, kl, tb_reg)   # the base's own writer chain, where a 32-bit write clobbers it too; never a candidate the targets merely fit
+        t = [at + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)] if tb is not None and 0 <= tb and tb + 4 * n <= len(IMG) else None
+        addresses = {p.address for p in insl}
+        return t if t and all(x in addresses and not head < x <= end for x in t) else None
+    return None
 def forward_table_base(insl, k, rb, n):
     """A loop's base initialized after its dispatch in address order (Blasphemous 1.0.8 main+0xae95f8: x17 is set at +0xae96dc, then the block branches backward).
     Used only after every older recognizer failed. Require exactly two writers of the full base in the function, an adjacent adrp + add after the load, no call that can clobber it,
@@ -1399,6 +1462,7 @@ for fa, fb in funcs:
                 if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
                 if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
+                if not tgt: tgt = jump_adr_far_check(insl, j)   # the adr-relative form with its cmp scheduled far before its b.hi: the check found by the flags the b.hi reads
                 assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)

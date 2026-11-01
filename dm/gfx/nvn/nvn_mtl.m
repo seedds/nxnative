@@ -2669,12 +2669,16 @@ static int tex_cpu_content(const tex_t *t) {
     if (unc) {   // an uncompressed one: not a display or video-decode texture, not depth / stencil, and its pool has no GPU write
         if (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE)) return 0;
         uint32_t pf = 0; uint8_t swz[4]; if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf || (pf >= 250 && pf <= 262)) return 0;   // 250..262: Depth16Unorm … X24_Stencil8
-        uint64_t k = (uint64_t)(uintptr_t)t->pool;
-        pthread_mutex_lock(&g_cpu_tex_mu); int gw = nvn_hm_get(&g_pool_gpuw, &k) != NULL; pthread_mutex_unlock(&g_cpu_tex_mu);
-        if (gw) return 0;
     }
     if (!mem_any(t->mem, t->L.size)) return 0;
-    if (unc) { uint64_t s = t->serial; pthread_mutex_lock(&g_cpu_tex_mu); nvn_hm_put(&g_cpu_unc, &s, (void *)t->pool); pthread_mutex_unlock(&g_cpu_tex_mu); }
+    if (unc) {   // the pool check and the entry under one lock: a mark between them would leave the texture CPU-written in a pool the GPU writes, with no drop to come
+        uint64_t k = (uint64_t)(uintptr_t)t->pool, s = t->serial;
+        pthread_mutex_lock(&g_cpu_tex_mu);
+        int gw = nvn_hm_get(&g_pool_gpuw, &k) != NULL;
+        if (!gw) nvn_hm_put(&g_cpu_unc, &s, (void *)t->pool);
+        pthread_mutex_unlock(&g_cpu_tex_mu);
+        if (gw) return 0;
+    }
     static uint64_t n[2]; if (n[unc]++ < 4) MLOG("texture written by the CPU before its first use ser=%llu %ux%ux%u format %#x (%s) pool flags %#x: uploaded from its storage, re-uploaded when it changes (%llu so far)",
                                          (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, unc ? "uncompressed, pool with no GPU write" : "block-compressed", t->pool->flags, (unsigned long long)n[unc]);
     return 1;

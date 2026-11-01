@@ -129,6 +129,8 @@ static int dm_fs_test_fail(const char *pt) {
 }
 static int in_txn_dir(const char *hp) { return save_txn_from_path(hp); }
 static int rm_tree(const char *p);
+static int rm_entry(const char *c);
+static void save_legacy_names(const char *work);
 // Reads and checks a RomFS image's header and index; NULL (and a red line) when it is not a complete image
 static romfs_img *img_open(const char *path) {
     romfs_img *m = romfs_image_open(path);
@@ -220,7 +222,8 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
             g_mnt[g_nmnt].txn_root = g_nmnt;
             atomic_store(&g_mnt[g_nmnt].poison, 0);
             atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
-            strlcpy(g_mnt[g_nmnt].dir, work, sizeof g_mnt[0].dir); }
+            strlcpy(g_mnt[g_nmnt].dir, work, sizeof g_mnt[0].dir);
+            save_legacy_names(work); }
     } else strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
     g_mnt[g_nmnt].img = NULL;
     struct stat ist;
@@ -418,6 +421,61 @@ static int set_guest_name(const char *hp, const char *path) {
     if (strcmp(physical, guest)) return setxattr(hp, FS_GUEST_NAME, guest, strlen(guest), 0, XATTR_NOFOLLOW);
     if (!removexattr(hp, FS_GUEST_NAME, XATTR_NOFOLLOW) || errno == ENOATTR) return 0;
     return -1;
+}
+// Saves written before backslashes separated path components (fwd_slashes): those builds took a backslash as part of a name, so The Legend of Zelda: Link's Awakening's
+// save:\savedata0.bin is a file named "\savedata0.bin" in the save folder, which save:/savedata0.bin no longer finds (every file of the file select showed "New game").
+// Right after the mount clones the work directory, each entry whose guest name holds a backslash is cloned (a file, or a directory with its tree) to the path that name
+// names now, unless something is there already, and is then marked (FS_BACKSLASH_COPIED) so that it is done once: a copy the game deletes later (an erased file) does not
+// come back at the next mount. All of it in the work directory: it reaches the committed save with the game's own Commit, and a kill or a remount before that does it
+// again. The old entry stays (a build before the change still reads it), and nothing is overwritten. The caller holds PATH_LOCK
+#define FS_BACKSLASH_COPIED "org.d2rmobile.backslash-copied"
+typedef struct { char *src, *from; } legacy_ent;   // the old entry's host path and guest path
+static int legacy_ent_cmp(const void *a, const void *b) { return strcmp(((const legacy_ent *)a)->from, ((const legacy_ent *)b)->from); }
+// Gathers the old entries below dir (guest path gdir) before anything changes: a directory with an old name is cloned whole, so it is not entered, and symlinks are not followed
+static void legacy_find(const char *dir, const char *gdir, legacy_ent **v, size_t *n, size_t *cap) {
+    DIR *d = opendir(dir); if (!d) return;
+    struct dirent *e; char guest[0x301], hp[1024], gp[1024];
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !guest_name(dir, e->d_name, guest, sizeof guest)) continue;
+        if (snprintf(hp, sizeof hp, "%s/%s", dir, e->d_name) >= (int)sizeof hp || snprintf(gp, sizeof gp, "%s/%s", gdir, guest) >= (int)sizeof gp) continue;
+        if (!strchr(guest, '\\')) { if (e->d_type == DT_DIR) legacy_find(hp, gp, v, n, cap); continue; }
+        if (getxattr(hp, FS_BACKSLASH_COPIED, NULL, 0, 0, XATTR_NOFOLLOW) >= 0) continue;
+        if (*n == *cap) { legacy_ent *w = realloc(*v, (*cap = *cap ? *cap * 2 : 8) * sizeof *w); if (!w) die("save backslash name allocation failed"); *v = w; }
+        legacy_ent *x = &(*v)[(*n)++];
+        if (!(x->src = strdup(hp)) || !(x->from = strdup(gp))) die("save backslash name allocation failed");
+    }
+    closedir(d);
+}
+// Clones src to the normalized guest path to ("/a/b") under root, making its parent directories as needed, each by its exact guest name as a create does:
+// 1 cloned, 0 the path is there already, -1 failed (errno)
+static int legacy_clone(const char *root, const char *src, const char *to) {
+    char hp[1024]; strlcpy(hp, root, sizeof hp);
+    for (const char *rest = to; *rest; ) {
+        const char *part0 = rest + 1, *end = strchr(part0, '/'); if (!end) end = part0 + strlen(part0);
+        size_t k = end - part0; char part[0x301];
+        if (k >= sizeof part) { errno = ENAMETOOLONG; return -1; }
+        memcpy(part, part0, k); part[k] = 0; rest = end;
+        if (path_component(hp, sizeof hp, part, 0, 0)) { if (!*rest) return 0; continue; }
+        if (errno != ENOENT || !path_component(hp, sizeof hp, part, 1, 0)) return -1;   // a free physical name (another one when APFS matches the name by case)
+        if (*rest ? mkdir(hp, 0755) : clonefile(src, hp, CLONE_NOFOLLOW)) return -1;
+        if (set_guest_name(hp, part)) { int e = errno; rm_entry(hp); errno = e; return -1; }
+        if (!*rest) return 1;
+    }
+    return 0;   // a name of backslashes only: the root
+}
+static void save_legacy_names(const char *work) {
+    legacy_ent *v = NULL; size_t n = 0, cap = 0;
+    legacy_find(work, "", &v, &n, &cap);
+    if (n) qsort(v, n, sizeof *v, legacy_ent_cmp);
+    for (size_t i = 0; i < n; i++) {
+        char fwd[1024], to[1024]; const char *from = v[i].from + 1;   // guest paths without the leading slash in the log
+        int r = norm_rest(fwd_slashes(v[i].from, fwd, sizeof fwd), to, sizeof to) ? legacy_clone(work, v[i].src, to) : -1;
+        if (r < 0) LOG("[RED] save: %s (named by a build before backslashes separated paths) cannot be copied to the path it names now errno=%d: the game does not see it", from, errno);
+        else if (setxattr(v[i].src, FS_BACKSLASH_COPIED, "1", 1, 0, XATTR_NOFOLLOW)) LOG("[RED] save: %s cannot be marked as copied errno=%d: the next mount looks at it again", from, errno);
+        if (r > 0) LOG("save: %s copied to %s (named by a build before backslashes separated paths; the old entry stays)", from, to + 1);
+        free(v[i].src); free(v[i].from);
+    }
+    free(v);
 }
 static Result err_res(const char *op, const char *path) {
     if (errno == ENOENT || errno == ENOTDIR) { if (g_flag.fs) LOG("fs %s not found: %s", op, path); return RES_PATH_NOT_FOUND; }   // Logged under DM_FS=1 (the game often probes with "not found", not logged by default)

@@ -101,6 +101,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the guest gets the host's handle shifted left by 4, 16-byte aligned like an AArch64 heap block (`FH_OUT` / `FH_IN`). Each guest path resolver (`img_path`, `host_path_ex`, `set_guest_name`, `dir_snapshot`) turns backslashes into slashes first, so overlays, `..` and guest names see the same path (`hle_fs.c`; `dm/host/tests/t_fs.c`).
 - **Found on:** Metroid Prime 4: Beyond (SDK 19; bring-up in [issue #229](https://github.com/seedds/nxnative/issues/229), from [PR #513](https://github.com/seedds/nxnative/pull/513)); not in the games table yet.
 
+### Saves named by a build before backslash paths
+
+- **Symptom:** after a rebuild on an engine with [backslash paths](#file-handles-with-low-bits-set-and-backslash-paths), a game's save looks lost: Link's Awakening shows every file of its file select as "New game", while its save folder still holds files named `\savedata0.bin` and `\screenshot0.bin`.
+- **Cause:** a build before that change took a backslash as part of a name, so a game that opens `save:\savedata0.bin` wrote a file named `\savedata0.bin`. The host now looks for `savedata0.bin`.
+- **Fix:** at each transactional save mount, right after the work folder is cloned, `save_legacy_names` (`hle_fs.c`) clones each entry whose guest name has a backslash (a file, or a folder with its tree) to the path that name names now, making its parent folders, and marks the old entry (the attribute `org.d2rmobile.backslash-copied`) so that this happens once and a file the game erases later stays erased. It never overwrites an entry and keeps the old one (a build before the change still reads it). It works in the work folder only: the copies reach the committed save with the game's own `Commit`, and a kill before that leaves the committed save as it was, to be copied again at the next mount. Each copy logs one line, `save: \savedata0.bin copied to savedata0.bin (…)`. A name that leads above the save's root, or a copy the disk refuses, logs a red line and is tried again at the next mount.
+- **Check:** `dm/host/tests/t_fs_backslash.c` (`make -C dm/host/tests GAME=<title ID> fs-backslash`).
+- **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md).
+- **Note:** a save packed for cloud saves (`save_sync.c`) carries only the guest-name attribute, not the mark. A device that receives a save in which the game erased a copied file copies the old entry again.
+
 ### C library path checks ask the file system's limits
 
 - **Symptom:** Addressables never start (no `StreamingAssets/aa/settings.json` in the `DM_FS=1` output at all), then a null asset crash (`main+0x31100ec`).

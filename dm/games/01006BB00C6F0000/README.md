@@ -71,6 +71,7 @@ General host changes first needed here; each applies to every game:
 - **`shader_facts_manual.tsv`** for facts the machine code cannot tell: [dm/games/README.md](../README.md).
 - **The DeviceSink found by its size** (`capture` in `hle_audren.c`), the SDK 8 parameter size, `oe` notifications, the npad style event: [SDK 8: command IDs numbered differently](../../../docs/reference/audio.md#sdk-8-command-ids-numbered-differently), [SDK 8's longer `AudioRendererParameter`](../../../docs/reference/audio.md#sdk-8s-longer-audiorendererparameter), [The oe notification event and its queue](../../../docs/reference/threads.md#the-oe-notification-event-and-its-queue), [Npad style set update event](../../../docs/reference/services.md#npad-style-set-update-event).
 - **Jump tables checked on another register** (`jump_offsets`): [Offset jump tables with the bounds check on another register](../../../docs/reference/rewriter.md#offset-jump-tables-with-the-bounds-check-on-another-register).
+- **Saves named by a build before backslash paths** (`save_legacy_names`): the game opens `save:\savedata<n>.bin` and `save:\screenshot<n>.bin`, which builds before backslash paths stored as files named `\savedata<n>.bin`: [Saves named by a build before backslash paths](../../../docs/reference/services.md#saves-named-by-a-build-before-backslash-paths).
 - **Racy crashes under CPU load and observation gates**: [05, Racy crashes](../../../docs/agents/05-debugging.md#racy-crashes-load-trace-gates).
 
 ## Open

@@ -28,6 +28,7 @@ static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
 
 @interface DmGameView : UIView
+@property (nonatomic, copy) NSString *geometryLog;
 @end
 @implementation DmGameView
 + (Class)layerClass { return CAMetalLayer.class; }
@@ -48,7 +49,16 @@ static UILabel *front_ios_fps_label(void);
 - (void)layoutSubviews {
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
+    UIWindowScene *scene = self.window.windowScene;
+    // Moving an application window between displays need not reparent its Metal view.
+    // Refresh its pixel scale on layout; the separate TV scene keeps tv_attach's 1080p cap.
+    if ([scene.session.role isEqualToString:UIWindowSceneSessionRoleApplication]) l.contentsScale = scene.screen.nativeScale;
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    if (!scene) return;
+    NSString *geometry = [NSString stringWithFormat:@"role %@, orientation %ld, scene %@, window %@, view %@, drawable %@, scale %.3f, window transform %@",
+        scene.session.role, (long)scene.effectiveGeometry.interfaceOrientation, NSStringFromCGRect(scene.effectiveGeometry.coordinateSpace.bounds),
+        NSStringFromCGRect(self.window.bounds), NSStringFromCGRect(self.bounds), NSStringFromCGSize(l.drawableSize), l.contentsScale, NSStringFromCGAffineTransform(self.window.transform)];
+    if (![geometry isEqualToString:self.geometryLog]) { self.geometryLog = geometry; LOG("front end: display geometry %s", geometry.UTF8String); }
 }
 @end
 static CGRect fit_16_9(CGRect b) {   // the largest centered 16:9 rectangle in b
@@ -117,7 +127,10 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    if (self.game.superview == self.view) self.game.frame = fit_16_9(b);   // on a TV the TV's view lays it out
+    if (self.game.superview == self.view) {
+        self.game.frame = fit_16_9(b);   // on a TV the TV's view lays it out
+        [self.game setNeedsLayout];   // a desktop display move can change scale without changing point size
+    }
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);
@@ -137,7 +150,11 @@ static void launcher_done(void) { [g_root startGame]; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
 - (BOOL)prefersStatusBarHidden { return YES; }
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    // Permit native iPad window geometry instead of fullscreen rotation compatibility.
+    // The game stays 16:9 inside UIKit's actual window bounds; phones retain landscape.
+    return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? UIInterfaceOrientationMaskAll : UIInterfaceOrientationMaskLandscape;
+}
 @end
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
 

@@ -221,6 +221,14 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
     self.window.rootViewController = front_ios_root();
     [self.window makeKeyAndVisible];
 }
+- (void)windowScene:(UIWindowScene *)scene didUpdateEffectiveGeometry:(UIWindowSceneGeometry *)previous {
+    // UIKit calls this when the application window moves to another display, too.
+    [self.window.rootViewController.view setNeedsLayout];
+    [self.window.rootViewController.view layoutIfNeeded];
+    fprintf(stderr, "[dm] front end: application scene geometry, orientation %ld, bounds %s, screen %s, native scale %.3f\n",
+        (long)scene.effectiveGeometry.interfaceOrientation, NSStringFromCGRect(scene.effectiveGeometry.coordinateSpace.bounds).UTF8String,
+        NSStringFromCGRect(scene.screen.bounds).UTF8String, scene.screen.nativeScale);
+}
 - (void)sceneWillResignActive:(UIScene *)s { front_ios_focus_event(0); }
 - (void)sceneDidEnterBackground:(UIScene *)s { front_ios_focus_event(1); }
 - (void)sceneWillEnterForeground:(UIScene *)s { front_ios_focus_event(2); }

@@ -1136,6 +1136,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** a missing seed list is logged and left out; the device list is still warmed, and the prewarm returns only when neither list exists. Host only.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): before, a 13,200-frame session had 154 frames over 100 ms (122 mostly compiling, the worst 7.1 s), 87 s of compiling on the submit thread and 95 draws with a hybrid pipeline; after, the start warmed the 2,484-line device list in 7.6 s (1,002 bases from the archive), compacted 98 archive files into one and ran the prebuild once (20,647 pairs, 116 s before the first frame), and a 17,700-frame session had 68 such frames (40 compiling, the worst 1.9 s), 12 s of compiling and 5,320 hybrid draws. The game has a seed list now.
 
+### The prepare step's prebuild re-entering the shader map's once block
+
+- **Symptom:** a Mac app (a window, so the prepare step runs) dies at its first draw, after `pipeline prewarm done` and `pipeline bases so far`: `CRASH sig=5 addr=_dispatch_once_wait.cold.1+0xc8`, `bt: pso_prebuild … __shmap_load_block_invoke … mtl_prog_prefetch … h_nvnProgramSetShaders`, `launcher: the host exited with 133`. To the player, the app closes right after Play is pressed in its launcher window.
+- **Cause:** `shmap_load` (`dm/gfx/nvn/nvn_mtl.m`) ran the whole map load, and `warm_start` at its end, in one `dispatch_once` block. With a prepare step, `warm_start` runs the prewarm and then `prepare_prebuild` on the same thread, and `pso_prebuild` calls `shmap_load` again: a `dispatch_once` entered again from its own block traps in libdispatch. It came in when `pso_prebuild` started loading the map itself and the prebuild moved into the prepare step (2026-10-24 and 10-25); a game reaches it when its hybrid prebuild is on and the shader map is first loaded inside the once block.
+- **Fix:** `warm_start` runs after the once block, guarded by its own atomic flag, so the inner `shmap_load` finds the map loaded and returns. The prewarm still runs on the first caller's thread before the first frame. Host only; the prewarm, prebuild, bundle and archive tests pass.
+- **Found on:** [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md#found-on-this-game): a Mac app built on 2026-11-01 closed about a second after Play was pressed in its launcher window, before the game drew a frame.
+
 ### Shader libraries loaded when the program is made
 
 - **Symptom:** the first frame that draws with new programs loads their shader libraries on the submit thread (`[longframe] ... shader libraries N, X ms`): tens of milliseconds with the files cached, seconds when the drive is slow.

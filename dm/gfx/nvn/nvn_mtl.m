@@ -3679,7 +3679,15 @@ static NSString *exe_rel(const char *rel) {
 }
 // Shader mapping table (output of tools/shader_map.py): at runtime only 'Switch control section key → stage' is used; shaders are always translations of the Switch originals (tools/dmsh_build.py produces <key>_b.metallib + reflection offline)
 static void shmap_load_(void);
-static void shmap_load(void) { static dispatch_once_t once; dispatch_once(&once, ^{ shmap_load_(); }); }   // once, from any thread (the submit thread and the prefetch, mtl_prog_prefetch)
+// once, from any thread (the submit thread and the prefetch, mtl_prog_prefetch). The prewarm starts after the map's once block, not inside it: the prewarm reaches pso_prebuild,
+// which calls shmap_load itself, and a dispatch_once entered again from its own block traps (SIGTRAP in _dispatch_once_wait; Pokémon Legends: Arceus at its first draw, prepare step
+// with the hybrid prebuild). The flag lets that inner call return with the map loaded; the prewarm runs on the first caller's thread as before
+static void warm_start(void);
+static void shmap_load(void) {
+    static dispatch_once_t once; static _Atomic int warm;
+    dispatch_once(&once, ^{ shmap_load_(); });
+    if (!atomic_exchange(&warm, 1)) warm_start();
+}
 static void shmap_load_(void) {
     if (g_shmap) return;
     const char *e = getenv("DM_NVN_SHMAP");
@@ -3728,7 +3736,6 @@ static void shmap_load_(void) {
             g_cb_ext = d; MLOG("uniform read extents: %lu shaders (cb_extent.tsv)", (unsigned long)d.count); }
     }
     MLOG("shader route B (translated Switch originals): shader map %lu entries (%s), metallib directory %s", (unsigned long)g_shmap.count, path.UTF8String, g_msl_dir.UTF8String);
-    warm_start();
 }
 
 @interface NvShader : NSObject { @public id<MTLFunction> fn, tf_fn, discard_fn, fn_u, fn_m, fn_d, geo_fn; uint8_t mask_m;   // fn_u: the integer-output entry point (dmsh_build.py fs_uint), for pipelines whose colour attachments are all unsigned integer (pso_desc); fn_m: the mixed one, its outputs in mask_m unsigned integer; fn_d: the dual-source one (dmsh_build.py fs_dual)

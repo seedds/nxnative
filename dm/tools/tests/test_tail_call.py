@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import struct
 import sys
+from typing import Callable, cast
 import unittest
 
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
@@ -117,7 +118,7 @@ class TailCall(unittest.TestCase):
         self.assertFalse(self.check([LDP(18, 17, 0, 16), BR(18), 0x94000400], 1))
         ins = decode([LDP(18, 17, 0, 16), ADDI(0, 0, 8), BR(18), 0])
         del ins[1]
-        self.assertFalse(scope['tail_call'](ins, 1))
+        self.assertFalse(cast(Callable[[list, int], bool], scope['tail_call'])(ins, 1))
 
     def test_stores_must_not_overwrite_saved_frame(self):
         for base in (31, 29):   # sp and the unchanged frame pointer

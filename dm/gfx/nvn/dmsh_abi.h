@@ -96,3 +96,10 @@
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
+
+// Compute shared memory past the threadgroup memory every Apple GPU gives a kernel (MTLDevice maxThreadgroupMemoryLength): the build moves it into a device buffer, one slice per threadgroup
+// (dmsh_build.py tg_spill; the reflection's "tgmem" = the slice's bytes), which the host binds at this compute buffer index (nvn_mtl.m tgm_gpu). The buffer starts with DMSH_TGMEM_HEAD bytes:
+// a uint, the bytes of slices after the head, then a uint the shader sets to 1 when a threadgroup lies past them
+#define DMSH_TGMEM_LIMIT 32768
+#define DMSH_TGMEM_BUFFER 30
+#define DMSH_TGMEM_HEAD 16

@@ -18,6 +18,7 @@
 #include "nvn_fstep.h"
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
+#include "../../host/sysprof.h"
 #include "nvn_dirty.h"
 #include <mach/mach_time.h>
 #include <CommonCrypto/CommonDigest.h>
@@ -1415,7 +1416,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
         if (pace) { if (last && now_ns() < last + step) sleep_until_ns(last + step); last = now_ns(); }
     }
     pace_ns += mtl_snap_acquire_wait();   // ring capacity is waited for at acquire, where the game does not hold its present lock
-    g_acq_wait_ns += wait; trow(g_frame, "@late_ms", wait ? (now_ns() - at) / 1e6 : 0);
+    g_acq_wait_ns += wait; { uint64_t n_ = now_ns(); trow(g_frame, "@late_ms", wait && n_ > at ? (n_ - at) / 1e6 : 0); }   // past the texture's slot time (a display-link tick can return before it: 0)
     // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
     uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
     if (tk) { uint64_t w0 = now_ns(); mtl_present_wait(tk); g_pq_wait_ns += now_ns() - w0; }
@@ -1438,6 +1439,7 @@ static void dump_frame(void) {
         const char *e = getenv("DM_NVN_FRAMES"); if (e) nframes = atoi(e);
         const char *c = getenv("DM_NVN_TSV_CALLS"); if (c) calls = atoi(c);   // 0 = write only the @ timing rows (pulling files from a real device has a size limit, and the call-count rows take about 2/3)
         const char *t = getenv("DM_NVN_TSV"); if (t && !(g_tsv = fopen(t, "w"))) LOG("[RED] cannot open %s", t);
+        if (g_tsv) dm_sysprof_start();   // the system's side of each frame (sysprof.m): GPU clock, power, limits, the process role
         if (g_tsv) fprintf(g_tsv, "# kind: nvn-per-frame  value = call count when name is an NVN function name; names starting with @ are timing probes (ms / count)\nframe\tname\tvalue\n");
     }
     uint64_t total = 0; unsigned nfn = 0;
@@ -1949,6 +1951,16 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
             uint64_t pc = (uint64_t)(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000000000ull + (uint64_t)(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) * 1000ull;
             if (pproc) trow(f, "@proc_cpu_ms", (pc - pproc) / 1e6); pproc = pc;
             trow(f, "@call_ms", (t0 - g_t0_ns) / 1e6);
+            dm_sysprof sp;   // the latest 100 ms system sample (sysprof.m)
+            if (dm_sysprof_get(&sp)) {
+                if (sp.gpu_mhz >= 0) { trow(f, "@gpu_mhz", sp.gpu_mhz); trow(f, "@gpu_on", sp.gpu_on); }
+                if (sp.gpu_w >= 0) trow(f, "@gpu_w", sp.gpu_w);
+                if (sp.boost >= 0) trow(f, "@gpu_boost", sp.boost);
+                if (sp.cltm >= 0) trow(f, "@gpu_cltm", sp.cltm);
+                if (sp.droop >= 0) trow(f, "@gpu_droop", sp.droop);
+                trow(f, "@role", sp.role); trow(f, "@thermal", sp.thermal); trow(f, "@low_power", sp.low_power);
+            }
+            if (getenv("DM_AB")) trow(f, "@ab", mtl_ab_mask());   // which DM_AB switches were on for this frame, so a report compares them over one session (perf_report.py)
         }
         trow(f, "@passes", (double)(ps - prev_pass)); trow(f, "@draws", (double)(dr - prev_draw));
         static uint64_t pl, pst, pf, pudc; uint64_t l, st, fu; mtl_bw(&l, &st, &fu);

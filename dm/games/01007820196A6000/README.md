@@ -11,7 +11,7 @@ On the Mac: the Rockstar legal screens, the title and its scenes, the new-game i
 | `romfs_marker audio_switch.rpf` | [`game.tsv`](game.tsv) | the largest RomFS file (6.3 GB) |
 | `zip_store .bk2:.pkdswitch:.rpf:.metallib` | `game.tsv` | big files that do not compress |
 | `mem_reserve`, `mem_alias`, `mem_stack`, `app_pool`, `mem_used` | `game.tsv` | the NPDM declares 0 MB of system resource, so `IsVirtualAddressMemoryEnabled` is false as on Horizon; `main` sets a heap of at most the pool − 64 MB − 1207 MB of bss. The values are the survey's guess (`profile_guess.py`), and the game boots and plays with them |
-| `shader_groups`, `shader_note` | `game.tsv` | the survey's guess from the RomFS top-level folders (`/redemption/`, `/cero/`, `/d11extra/`). They label little here, and they are inputs of the shader libraries: changing them restamps the libraries, so they stay until the shaders are next rebuilt |
+| `shader_groups` | `game.tsv` | the survey's guess from the RomFS top-level folders (`/redemption/`, `/cero/`, `/d11extra/`). The shaders are not in files of those names, so the groups label little. `shader_groups` and `shader_note` are inputs of the shader libraries: changing either restamps them |
 
 No game-specific host code: every fix below is general.
 
@@ -58,5 +58,5 @@ General host and tool changes first needed here; each applies to every game:
 - Vertex and pixel shaders are paired as a cover, not by the names in the `rgxd` headers.
 - The 26,892 RPF6 records of other packings are not read; they may hold more shaders.
 - The depth snapshot splits each pass that samples depth: GPU time in the farm went from about 6 to about 10 ms a frame. Taking the snapshot once at the start of the pass would cut that.
-- `shader_note` still says "provisional profile" and `pso_manifest.tsv` is empty (see What it needs and Files and shaders).
+- `pso_manifest.tsv` is empty (see Files and shaders).
 - Not run through `scripts/regress.py`; no smoke route (`smoke.tsv`) and no benchmark route; not tried on the iPhone; play past the farm is untested.

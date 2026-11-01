@@ -326,7 +326,7 @@ uint64_t dm_guest_call(dm_guest_state *st, uint64_t addr, int nargs, ...) {
     return r;
 }
 
-int dm_aot_run(uint64_t entry, uint64_t x0, uint64_t x1, double *seconds) {
+dm_guest_state *dm_aot_main_begin(void) {
     dm_guest_state *st = dm_aot_thread_begin();
     dm_aot_thread *t = dm_aot_self();
     if (!t->stack_lo) {   // the main thread's guest stack (2.4): its native stack is the host's, and QueryMemory reports this one (hle_svc.c)
@@ -336,13 +336,16 @@ int dm_aot_run(uint64_t entry, uint64_t x0, uint64_t x1, double *seconds) {
     st->sp = t->stack_lo + t->stack_size;
     st->fpcr = dm_aot_module_fpcr();   // the FPCR the packs are specialised for (7.1): its block may predate them (hle_thread.c svc_thread_main_init)
     t->left = DM_AOT_LEFT_NONE;
-    const uint64_t t0 = plat_now_ns();
-    dm_guest_call(st, entry, 2, x0, x1);
+    return st;
+}
+
+int dm_aot_main_left(void) { const dm_aot_thread *t = dm_aot_self(); return t ? t->left : DM_AOT_LEFT_NONE; }
+
+int dm_aot_main_end(const char *returned) {
+    dm_aot_thread *t = dm_aot_self();
     if (t->left == DM_AOT_LEFT_NONE) {
-        char at[64], msg[160];
-        dm_aot_guest_name(entry, at, sizeof at);
-        snprintf(msg, sizeof msg, "[RED] aot: guest code returned to the host from its entry %s", at);
-        dm_aot_stop(DM_AOT_RETURNED, msg);
+        if (returned) dm_aot_stop(DM_AOT_RETURNED, returned);
+        else dm_aot_stop(DM_AOT_EXITED, NULL);   // nnMain returned: Horizon's process ends as after svcExitProcess
     } else if (t->left == DM_AOT_LEFT_EXIT) {
         // The main thread ended through svcExitThread: the process goes on with its other threads until one ends it, or none is left
         while (dm_aot_stop_status() < 0 && dm_aot_threads_live() > 0) plat_sleep_ns(10000000);
@@ -351,6 +354,17 @@ int dm_aot_run(uint64_t entry, uint64_t x0, uint64_t x1, double *seconds) {
     int status = dm_aot_stop_status();
     int stuck = dm_aot_threads_wait(10000);
     if (stuck) { LOG("[RED] aot: %d guest threads did not stop within 10 s of the end of the run (no poll, SVC or wait reached?)", stuck); status = DM_AOT_STUCK; }
+    return status;
+}
+
+int dm_aot_run(uint64_t entry, uint64_t x0, uint64_t x1, double *seconds) {
+    dm_guest_state *st = dm_aot_main_begin();
+    const uint64_t t0 = plat_now_ns();
+    dm_guest_call(st, entry, 2, x0, x1);
+    char at[64], msg[160];
+    dm_aot_guest_name(entry, at, sizeof at);
+    snprintf(msg, sizeof msg, "[RED] aot: guest code returned to the host from its entry %s", at);
+    const int status = dm_aot_main_end(msg);
     if (seconds) *seconds = (double)(plat_now_ns() - t0) * 1e-9;
     return status;
 }

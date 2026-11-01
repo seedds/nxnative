@@ -1,6 +1,6 @@
 // Faults of the x86-64 execution engine (docs/design/aot-recompiler.md 5.4; aot.h), and the part of crash.c the portable host needs (crash.c itself is Apple's:
 // Mach thread states, ARM signal contexts, ESR): the registry of page-fault hooks and host pre-write hooks (dm.h), a fault handler per platform, the
-// alternate signal stacks, dm_backtrace.
+// alternate signal stacks, dm_backtrace, and crash.c's progress watchdog and state dump (DM_WATCH, DM_WATCH_STALL, crash_watch_*, crash_dump_now).
 // The order of 5.4: the hooks first (nvn_dirty.c's dirty-page tracker; is_write comes from the page-fault error code; the hook unprotects the page and the
 // faulting instruction runs again, which is safe because every guest access is one x86 instruction, 6.4), then, with the JIT built in (NXHOST_JIT),
 // dynarmic's fastmem handler (a fault in its code cache falls back to its memory callbacks), then the report. A fault in a pack's code, or in a memory access
@@ -20,6 +20,77 @@
 #if NXHOST_JIT
 #include "rt/jit.h"   // dm_jit_access_pc: the guest access a memory callback of the JIT is making
 #endif
+
+// ---------- The progress watchdog and the state dump (dm.h; crash.c's on Apple, the same rules) ----------
+// DM_WATCH=<s> ends the process after that many seconds (crash.c: alarm and SIGALRM, its report, status 128 + 14) and turns the stall watchdog on; DM_WATCH_STALL=<s> alone turns the
+// stall watchdog on (15 s with DM_WATCH): no progress (crash_watch_progress, or a presented frame before the game's run) for that long logs a [RED] line, dumps the guest threads
+// and the graphics wait points and exits with 128 + 14; a stall of a second or more after the game's run began dumps them (at most 3 times, 10 s apart). Neither is on unless set.
+// The timer is plat_after_ms (Windows has no SIGALRM); DM_WATCH_SAMPLE is the Mac's (/usr/bin/sample) and not read here
+static _Atomic uint64_t g_watch_last_ns, g_watch_count;
+static _Atomic uint32_t g_watch_tick;
+static _Atomic int g_watch_pregame = 1, g_watch_stage_idx;
+static char g_watch_stage[2][256] = {"startup", "startup"};
+static unsigned g_watch_stall;
+static void (*g_dump_hook)(void);   // the guest threads' state (hle_thread.c svc_thread_dump, registered by the host program)
+static void (*g_wait_dump)(void);   // the graphics side's wait points
+enum { WATCH_SIGNAL = 14 };         // SIGALRM's number, the status crash.c ends a watchdog run with (128 + 14)
+uint64_t crash_watch_progress_count(void) { return atomic_load(&g_watch_count); }
+void crash_watch_progress(uint32_t tick, const char *stage) {
+    int next = 1 - atomic_load(&g_watch_stage_idx);
+    if (stage && *stage) snprintf(g_watch_stage[next], sizeof g_watch_stage[next], "%s", stage);
+    atomic_store(&g_watch_tick, tick);
+    atomic_store(&g_watch_stage_idx, next);
+    atomic_fetch_add(&g_watch_count, 1);
+    atomic_store(&g_watch_last_ns, plat_now_ns());
+}
+void crash_watch_frame(void) { if (atomic_load(&g_watch_pregame)) crash_watch_progress(0, "present frame"); }   // hle_os.c: every present
+void crash_watch_pregame_done(void) { atomic_store(&g_watch_pregame, 0); }
+void crash_watch_pregame_again(void) { atomic_store(&g_watch_pregame, 1); }
+void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
+void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
+void crash_dump_now(const char *why) {
+    fprintf(stderr, "[dm] state dump (%s): tick %u / stage %s\n", why, atomic_load(&g_watch_tick), g_watch_stage[atomic_load(&g_watch_stage_idx)]);
+    if (g_dump_hook) g_dump_hook();
+    if (g_wait_dump) g_wait_dump();
+}
+static void watch_alarm(void) {   // DM_WATCH's time is up
+    fprintf(stderr, "[dm] CRASH sig=%d (DM_WATCH: the run's time limit)\n", WATCH_SIGNAL);
+    if (g_dump_hook) g_dump_hook();
+    fflush(stderr);
+    _exit(128 + WATCH_SIGNAL);
+}
+static void *watchdog_main(void *arg) {
+    (void)arg;
+    plat_thread_set_name("watchdog");
+    for (;;) {
+        plat_sleep_ns(250000000ull);
+        uint64_t last = atomic_load(&g_watch_last_ns), now = plat_now_ns();   // last first: then last <= now (crash.c has the reason)
+        if (last > now) continue;
+        { static int dumps; static uint64_t last_dump, dumped_for;
+          if (g_watch_stall && !atomic_load(&g_watch_pregame) && atomic_load(&g_watch_tick) > 0 && now - last >= 1000000000ull && now - last < (uint64_t)g_watch_stall * 1000000000ull
+              && dumps < 3 && dumped_for != last && (!last_dump || now - last_dump >= 10000000000ull)) { dumps++; last_dump = now; dumped_for = last; crash_dump_now("progress stalled for over 1 second"); } }
+        if (g_watch_stall && now - last >= (uint64_t)g_watch_stall * 1000000000ull) {
+            int idx = atomic_load(&g_watch_stage_idx);
+            LOG("[RED] watchdog: no progress since second %llu, stuck at tick %u / stage %s", (unsigned long long)((now - last) / 1000000000ull), atomic_load(&g_watch_tick), g_watch_stage[idx]);
+            if (g_dump_hook) g_dump_hook();
+            if (g_wait_dump) g_wait_dump();
+            fflush(stderr);
+            _exit(128 + WATCH_SIGNAL);
+        }
+    }
+    return NULL;
+}
+static void watch_install(void) {
+    const char *watch = getenv("DM_WATCH"), *stall = getenv("DM_WATCH_STALL");
+    if (watch && atoi(watch) > 0) plat_after_ms((unsigned)atoi(watch) * 1000u, watch_alarm);
+    if (watch || stall) {
+        g_watch_stall = stall && atoi(stall) > 0 ? (unsigned)atoi(stall) : 15;
+        atomic_store(&g_watch_last_ns, plat_now_ns());
+        pthread_t th;
+        if (pthread_create(&th, NULL, watchdog_main, NULL)) die("watchdog thread");
+        pthread_detach(th);
+    }
+}
 
 // ---------- The hooks (dm.h) ----------
 #define MAX_FAULT_HOOK 4
@@ -82,6 +153,7 @@ static _Noreturn void host_crash(int sig, void *addr, uint64_t pc) {
     fprintf(stderr, "[dm] CRASH sig=%d addr=%p (%s)\n", sig, addr, where);
     dm_aot_thread *t = dm_aot_self();
     if (t && t->depth) dm_backtrace(t->st.x[29]);   // the guest frames around the host code, from the last x29 written back
+    if (g_dump_hook) g_dump_hook();                 // every guest thread's state, as crash.c's report ends on Apple
     fflush(stderr);
     _exit(128 + sig);
 }
@@ -125,6 +197,7 @@ static void install_once(void) {
     sigemptyset(&sa.sa_mask);
     static const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP};
     for (size_t i = 0; i < sizeof sigs / sizeof *sigs; i++) sigaction(sigs[i], &sa, NULL);
+    watch_install();
 }
 void crash_install(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
@@ -190,7 +263,7 @@ static LONG CALLBACK on_exception(EXCEPTION_POINTERS *e) {
     }
     return EXCEPTION_CONTINUE_SEARCH;   // dynarmic's handler for its code cache, a system DLL's own handler, or the process's unhandled-exception path
 }
-static void install_once(void) { g_veh = AddVectoredExceptionHandler(1, on_exception); }
+static void install_once(void) { g_veh = AddVectoredExceptionHandler(1, on_exception); watch_install(); }
 void crash_install(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, install_once);

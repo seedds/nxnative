@@ -146,6 +146,9 @@ typedef struct hostvk_dev {
         uint32_t prim_gen : 1, prim_gen_discard : 1;   // VK_EXT_primitives_generated_query (and WithRasterizerDiscard): NVN's PRIMITIVES_GENERATED counter
         uint32_t stencil_export : 1;          // VK_EXT_shader_stencil_export: a fragment shader writes stencil (draw-based depth-stencil copies)
         uint32_t vp_swizzle_nv : 1;           // VK_NV_viewport_swizzle with extendedDynamicState3ViewportSwizzle: NVN's viewport swizzles in fixed function (NVIDIA)
+        // Step P4a (design 7.3): the window presenter's vsync source, enabled only with a surface wanted (want_surface)
+        uint32_t present_wait : 1;            // VK_KHR_present_id and VK_KHR_present_wait with presentId and presentWait: when each present reached the screen
+        uint32_t display_timing : 1;          // VK_GOOGLE_display_timing: the refresh duration and the actual present times
         uint32_t xfb_buffers;                 // maxTransformFeedbackBuffers
     } x;
     char missing[1024];                   // what of design 9.1's optional list the device lacks, comma-separated, as the level line prints it ("" when nothing)

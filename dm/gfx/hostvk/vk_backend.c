@@ -2,17 +2,20 @@
 // the frontend's state, handle and pool code calls in its backend (nvn_state.h, nvn_resolve.h, nvn_pools.h), and be_get_caps / be_guest_map / be_guest_unmap of design 1.5.
 // The device comes up on the first call that needs it (as the Metal backend's mtl_init), through hostvk_init: DM_VK_DEVICE=<index> picks the physical device (design 10 item 4),
 // DM_VK_VALIDATION=1 turns the Khronos validation layer on with synchronization validation (design 10 item 7), DM_VK_LEVEL=A|B|C|D makes the device as one of that level of design
-// 3.6 would be (for tests and measurements of levels C and D on one machine; phase P5). No window yet (the presenter is phase P4).
+// 3.6 would be (for tests and measurements of levels C and D on one machine; phase P5). With a Vulkan window registered by the host program (vk_present.h), the device is made with
+// VK_KHR_swapchain and frames go to the window presenter (vk_present.c, step P4a); otherwise, or with DM_VK_HEADLESS=1, to the headless presenter below.
 // Fallback: when no Vulkan device meets the baseline (no loader, no driver, a device below design 9.1), every function takes the null backend's form instead (dm/gfx/nvn/nvn_null.c:
 // one [RED] line per function on its first call, a GPU that has finished everything, events and syncs written at once, the pool table kept), so a host without Vulkan still runs
 // its CPU side. The two forms live in this one library: a host binary links exactly one backend (dm/host/CMakeLists.txt: nxhost links hostvk; nvn_null.c stays the backend of the
 // CMake targets that do not link hostvk, t_frontend).
-// Declared here, with a red line and the phase that brings them: presentation of NVN windows, the display link and pacing (P4), be_report's statistics lines (the per-frame
-// statistics answer zero or what the backend counts). The external producers (the guest Vulkan layer, guest_vk.c; step P9a) present through a headless presenter until P4.
+// Declared here, with a red line and the phase that brings them: be_report's statistics lines (the per-frame statistics answer zero or what the backend counts), the DM_CTL
+// diagnostics of the Metal backend (dm_gfx_shot_at and the texture and pass dumps, nvn_mtl.m). Presentation and the vsync source: vk_present.c in a window (step P4a), the
+// headless presenter below without one.
 #include "plat/plat.h"
 #include "vk_backend.h"
 #include "vk_pso.h"
 #include "guest_vk.h"
+#include "vk_present.h"
 #include "../nvn/nvn_be.h"
 #include "../nvn/nvn_pools.h"
 #include "../nvn/nvn_replay.h"
@@ -66,7 +69,9 @@ void hvk_tf_bind_note(void);
 // ---------- Bring-up and shutdown ----------
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static char g_why[1024];   // why the device is not up (for the null forms' red line)
+static _Atomic int g_tried;   // the bring-up ran (a function that needs the device was called)
 static void up_once(void) {
+    atomic_store(&g_tried, 1);
     hostvk_opts o = {-1, 0, 0};
     const char *e = getenv("DM_VK_DEVICE");
     if (e && *e) { char *end; long v = strtol(e, &end, 10); if (*end || v < 0) hostvk_log("[RED] [hostvk] DM_VK_DEVICE=%s is not a device index: the first device that meets the baseline is used", e); else o.device_index = (int)v; }
@@ -74,8 +79,15 @@ static void up_once(void) {
     o.validation = e && *e && strcmp(e, "0") != 0;
     e = getenv("DM_VK_LEVEL");
     if (e && *e) { if ((e[0] >= 'A' && e[0] <= 'D') && !e[1]) o.force_level = e[0]; else hostvk_log("[RED] [hostvk] DM_VK_LEVEL=%s is not A, B, C or D: the device's level is used", e); }
+    o.want_surface = hvk_win_wanted();   // a Vulkan window: VK_KHR_swapchain and the surface's instance extensions (vk_present.c makes the surface at the first present)
     int rc = hostvk_init(&o, &hvk.dev, g_why, sizeof g_why);
+    if (rc && o.want_surface) {   // a device without what a window needs (VK_KHR_swapchain, the surface's instance extensions): headless rather than none
+        hostvk_log("[RED] [hostvk] no Vulkan device with a window's needs (%s): the device is made again without them, and frames go to the headless presenter", g_why);
+        o.want_surface = 0;
+        rc = hostvk_init(&o, &hvk.dev, g_why, sizeof g_why);
+    }
     if (rc) { hostvk_log("[RED] [hostvk] no Vulkan device for the NVN backend (%s): the null backend's forms answer, nothing is drawn", g_why); return; }
+    hvk_win_device_up(o.want_surface);
     hvk.d = hvk.dev.device; hvk.lim = hvk.dev.props.limits;
     if (!hvk.dev.caps.buffer_device_address) hostvk_log("[RED] [hostvk] the device has no buffer device address: counter reports and conditional rendering are not written by the GPU");
     if (!hvk_commands_init()) { hostvk_log("[RED] [hostvk] the command layer could not be made: the null backend's forms answer"); hostvk_destroy(&hvk.dev); hvk.d = VK_NULL_HANDLE; return; }
@@ -91,6 +103,7 @@ void hvk_shutdown(void);
 static void pres_shutdown(void);
 void hvk_shutdown(void) {
     if (!hvk.on) return;
+    hvk_win_shutdown();   // the window presenter's threads stopped, its swapchain, snapshots and surface released (step P4a)
     pres_shutdown();   // the headless presenter's copies finished, its objects released (external producers, step P9a)
     hvk_commands_shutdown();
     hvk_pso_shutdown(); hvk_prewarm_shutdown(); hvk_cache_shutdown();   // the workers stopped, every pipeline released, the cache written a last time
@@ -145,9 +158,10 @@ int be_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     return ok;
 }
 // Guest memory committed / about to be decommitted (design 1.5, 1.6; hle_svc.c is to call them with the CPU port): imports are per pool in phase P3, so a commit needs nothing;
-// a decommit under a live pool releases its import first (vk_memory.c)
-void be_guest_map(void *mem, uint64_t size) { (void)mem; (void)size; if (!hvk.on) NULLRED(); }
-void be_guest_unmap(void *mem, uint64_t size) { if (hvk.on) hvk_guest_unmap(mem, size); else NULLRED(); }
+// a decommit under a live pool releases its import first (vk_memory.c). Before the device's bring-up was asked for (a game sizes its heap before it makes an NVN device; the host
+// program's first guest memory SVCs) there is no import to release and nothing missing: the null forms' red line is for a device that could not be made
+void be_guest_map(void *mem, uint64_t size) { (void)mem; (void)size; if (!hvk.on && atomic_load(&g_tried)) NULLRED(); }
+void be_guest_unmap(void *mem, uint64_t size) { if (hvk.on) hvk_guest_unmap(mem, size); else if (atomic_load(&g_tried)) NULLRED(); }
 void nvn_pool_hook_use(nvn_pool *p) { if (hvk.on) hvk_pool_hook_use(p); }   // nothing to make resident
 void nvn_pool_hook_del(nvn_pool *p) { if (hvk.on) hvk_pool_hook_del(p); }   // the import goes when the GPU is done with it
 
@@ -194,41 +208,67 @@ int be_wait_acq(uint64_t fence, uint64_t timeout_ns) { if (hvk.on) return hvk_wa
 void be_finish(void) { if (hvk.on) hvk_finish(); else NULLRED(); }
 void be_drain(void) { if (hvk.on) hvk_finish(); else NULLRED(); }
 
-// ---------- Presentation and pacing: phase P4 (the presenter, the vsync source of design 7) ----------
-uint64_t be_present(const tex_t *t, double period_s, const int crop[4]) {
-    (void)t; (void)period_s; (void)crop;
-    if (!hvk.on) { NULLRED(); return 0; }
-    DECLARED("present: no presenter yet (phase P4, design 7): the frame is not shown");
-    return 0;   // no ticket to wait for
-}
-void be_present_flush(void) { if (!hvk.on) NULLRED(); }
-int be_has_window(void) { return 0; }   // headless (phase P3)
-int be_display_hz(void) { return 0; }
-int be_vsync_wait_ticks(int ticks, uint64_t timeout_ns) { (void)ticks; (void)timeout_ns; DECLARED("vsync wait: no vsync source yet (phase P4, design 7.3): the caller paces on its own clock"); return 0; }
-int be_vsync_rate(void) { return 0; }
-int be_vsync_stalled(void) { return 0; }
-int be_vsync_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms) { (void)n; (void)target; (void)lead_ms; (void)ticks; (void)gap_ms; return 0; }
-double be_presented_time(uint64_t n) { (void)n; return 0; }   // 0: not shown yet
-int be_snap_on(void) { return 0; }
-uint64_t be_snap_acquire_wait(void) { return 0; }
+// ---------- Presentation and pacing (design 7; the window presenter and the vsync source are vk_present.c's, step P4a) ----------
+// A present goes to the window presenter while it is on or about to start (hvk_win_ready), else to the headless presenter below. Their tickets are kept apart by WIN_TICKET, so a
+// ticket waits on the presenter that gave it. Without a window the vsync functions answer "no source", and hle_nvn.c paces on its own clock, as it did before the presenter
+#define WIN_TICKET (1ull << 62)
+static uint64_t pres_headless(uint64_t serial, VkImage image, VkFormat format, VkImageLayout layout, uint32_t iw, uint32_t ih, void *ev, uint64_t ev_val, const int crop[4]);
 static void pres_wait(uint64_t v);
-void be_present_wait(uint64_t ticket) { pres_wait(ticket); }   // a ticket of be_present_ext (be_present gives none yet)
+static void pres_flush(void);
+uint64_t be_present(const tex_t *t, double period_s, const int crop[4]) {
+    (void)period_s;   // the window presenter's FIFO and the acquire's vsync wait pace the frames (hle_nvn.c); the headless one paces nothing
+    if (!hvk.on) { NULLRED(); return 0; }
+    // The window's texture as the GPU left it: a texture no submission wrote (its content the CPU's) would need an upload, which only a submission records (vk_texture.c)
+    if (!t || !hvk_tex_gpu_owned(t->serial)) { HVK_RED_ONCE("present of a texture no submission wrote (first ser=%llu): not shown", (unsigned long long)(t ? t->serial : 0)); return 0; }
+    hvk_tex *x = hvk_tex_get(t);
+    VkFormat fmt = VK_FORMAT_UNDEFINED; uint32_t w = 0, h = 0; VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+    if (!x || !hvk_tex_info(x, &fmt, NULL, &w, &h, NULL, NULL, NULL, &samples, NULL) || samples != VK_SAMPLE_COUNT_1_BIT) {
+        HVK_RED_ONCE("present of texture ser=%llu, which has no single-sampled image: not shown", (unsigned long long)t->serial); return 0;
+    }
+    int flip = atomic_load(&hvk.origin_ll);   // NVN's lower-left window origin: the image is stored bottom row first
+    if (hvk_win_ready()) { uint64_t v = hvk_win_present(hvk_tex_image(x), fmt, VK_IMAGE_LAYOUT_GENERAL, w, h, crop, flip, VK_NULL_HANDLE, 0); return v ? v | WIN_TICKET : 0; }
+    return pres_headless(0, hvk_tex_image(x), fmt, VK_IMAGE_LAYOUT_GENERAL, w, h, NULL, 0, crop);   // NVN's images stay in GENERAL (vk_texture.c)
+}
+void be_present_flush(void) { if (!hvk.on) { NULLRED(); return; } hvk_win_flush(); pres_flush(); }
+int be_has_window(void) { return hvk_win_on(); }
+int be_display_hz(void) { return hvk_win_display_hz(); }
+int be_vsync_wait_ticks(int ticks, uint64_t timeout_ns) { return hvk_vsync_wait_ticks(ticks, timeout_ns); }
+int be_vsync_rate(void) { return hvk_vsync_rate(); }
+int be_vsync_stalled(void) { return hvk_vsync_stalled(); }
+int be_vsync_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms) { (void)n; (void)target; (void)lead_ms; (void)ticks; (void)gap_ms; return 0; }   // the display link's per-tick record: none here
+double be_presented_time(uint64_t n) { return hvk_win_presented_time(n); }
+int be_snap_on(void) { return 0; }   // the window presenter's snapshots free the game's texture at once by construction (design 7.2): no ring for hle_nvn.c to manage
+uint64_t be_snap_acquire_wait(void) { return 0; }
+void be_present_wait(uint64_t ticket) { if (ticket & WIN_TICKET) hvk_win_present_wait(ticket & ~WIN_TICKET); else pres_wait(ticket); }
 int be_fps_target(void) {
     static int env = -2;
     if (env == -2) { const char *e = getenv("DM_FPS"); env = e ? atoi(e) : -1; if (env != 30 && env != 60) env = -1; }
     extern int nvn_game_fps(void) __attribute__((weak));
     return env > 0 ? env : nvn_game_fps && nvn_game_fps() == 30 ? 30 : 60;   // the Metal backend's rule (mtl_fps_target)
 }
-int be_vsync_active(void) { return 0; }
-int be_vsync_wait(int vsyncs, uint64_t timeout_ns) { (void)vsyncs; (void)timeout_ns; DECLARED("vsync wait: no vsync source yet (phase P4, design 7.3)"); return 0; }
+int be_vsync_active(void) { return hvk_vsync_active(); }
+int be_vsync_wait(int vsyncs, uint64_t timeout_ns) { return hvk_vsync_wait(vsyncs, timeout_ns); }
+// The Metal backend's DM_CTL diagnostics (hle_hid.c "shot", "texlist", "texraw", "texdump", "passdump"; nvn_mtl.m): not on Vulkan yet, each a red line on its first call. The window
+// presenter's readback (vk_present.h, for the tests) is where a screenshot would come from
+void dm_gfx_shot_at(long k, const char *path);
+void dm_gfx_texlist(int target);
+void dm_gfx_texraw(uint64_t serial, const char *path);
+void dm_gfx_texdump_next(const char *path);
+void dm_gfx_passdump_next(long n);
+void dm_gfx_shot_at(long k, const char *path) { (void)k; DECLARED("DM_CTL shot: screenshots are the Metal backend's (nvn_mtl.m), not written on Vulkan yet: %s not saved", path); }
+void dm_gfx_texlist(int target) { (void)target; DECLARED("DM_CTL texlist: the Metal backend's texture list (nvn_mtl.m), not on Vulkan yet"); }
+void dm_gfx_texraw(uint64_t serial, const char *path) { (void)serial; (void)path; DECLARED("DM_CTL texraw: the Metal backend's raw texture dump (nvn_mtl.m), not on Vulkan yet"); }
+void dm_gfx_texdump_next(const char *path) { (void)path; DECLARED("DM_CTL texdump: the Metal backend's render-target dump (nvn_mtl.m), not on Vulkan yet"); }
+void dm_gfx_passdump_next(long n) { (void)n; DECLARED("DM_CTL passdump: the Metal backend's pass dump (nvn_mtl.m), not on Vulkan yet"); }
 // ---------- External producers (the guest Vulkan layer, guest_vk.c; step P9a) and the headless presenter ----------
-// The shared device record is the backend's device layer (hostvk_dev). be_ext_tex registers an image (hvk_ext_image, guest_vk.h) under a serial; be_present_ext presents one.
-// There is no window yet (phase P4), so the presenter is headless: each present copies the frame's region (the layer crop, else the whole image) into a host-visible buffer,
-// the picture a window would show (hvk_present_last reads it back). A present is one submission on the backend's queue: it waits for the producer's timeline value (ev,
-// ev_val), copies between two full barriers, so the copy is ordered against everything submitted before and after it on the queue whatever semaphores the producer used, and
-// signals the presenter's own timeline; that value is the ticket be_present_wait waits for. Up to PRES_N presents are in flight; the next one waits for the oldest. The period is
-// not used: nothing paces a headless present (the vsync source is phase P4's). With the lower-left window origin (be_set_origin_lower_left: the guest GL layer, guest_gl.c, stores
-// its images bottom row first, as GL lays them out) the region's rows are copied bottom up, so the picture is upright, as the Metal backend's present flips it
+// The shared device record is the backend's device layer (hostvk_dev). be_ext_tex registers an image (hvk_ext_image, guest_vk.h) under a serial; be_present_ext presents one, through
+// the window presenter when it is on (vk_present.c), else through the headless presenter here, which also takes be_present's NVN frames without a window (DM_VK_HEADLESS=1, no
+// Vulkan window): each present copies the frame's region (the layer crop, else the whole image) into a host-visible buffer, the picture a window would show (hvk_present_last
+// reads it back). A present is one submission on the backend's queue: it waits for the producer's timeline value (ev, ev_val), copies between two full barriers, so the copy is
+// ordered against everything submitted before and after it on the queue whatever semaphores the producer used, and signals the presenter's own timeline; that value is the ticket
+// be_present_wait waits for. Up to PRES_N presents are in flight; the next one waits for the oldest. The period is not used: nothing paces a headless present (there is no vsync
+// source without a window). With the lower-left window origin (be_set_origin_lower_left: the guest GL layer, guest_gl.c, stores its images bottom row first, as GL lays them out;
+// NVN's lower-left window origin) the region's rows are copied bottom up, so the picture is upright, as the Metal backend's present flips it
 void *be_native_device(void) { return hvk_up() ? (void *)&hvk.dev : NULL; }
 typedef struct { VkImage image; VkFormat format; uint32_t w, h; } ext_ent;
 enum { PRES_N = 4 };
@@ -288,6 +328,26 @@ uint64_t be_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_va
         return 0;
     }
     const ext_ent e = g_ext[serial - 1];
+    pthread_mutex_unlock(&g_ext_mu);
+    if (hvk_win_ready()) {
+        uint64_t v = hvk_win_present(e.image, e.format, HVK_EXT_LAYOUT, e.w, e.h, crop, atomic_load(&hvk.origin_ll), (VkSemaphore)ev, ev_val);
+        return v ? v | WIN_TICKET : 0;
+    }
+    return pres_headless(serial, e.image, e.format, HVK_EXT_LAYOUT, e.w, e.h, ev, ev_val, crop);
+}
+static int texel4(VkFormat f) {   // the headless presenter's buffer holds 4-byte texels
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+    case VK_FORMAT_A8B8G8R8_SRGB_PACK32: case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_A2R10G10B10_UNORM_PACK32: case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+    case VK_FORMAT_R8G8B8A8_SNORM: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_UINT:
+        return 1;
+    default: return 0;
+    }
+}
+static uint64_t pres_headless(uint64_t serial, VkImage image, VkFormat format, VkImageLayout layout, uint32_t iw, uint32_t ih, void *ev, uint64_t ev_val, const int crop[4]) {
+    const ext_ent e = {image, format, iw, ih};
+    if (!texel4(format)) { HVK_RED_ONCE("the headless presenter keeps 4-byte texels: a frame in format %d is not copied", format); return 0; }
+    pthread_mutex_lock(&g_ext_mu);
     uint32_t x = 0, y = 0, w = e.w, h = e.h;
     if (crop && crop[0] >= 0 && crop[1] >= 0 && crop[2] > 0 && crop[3] > 0 && (uint32_t)crop[0] + (uint32_t)crop[2] <= e.w && (uint32_t)crop[1] + (uint32_t)crop[3] <= e.h) {
         x = (uint32_t)crop[0]; y = (uint32_t)crop[1]; w = (uint32_t)crop[2]; h = (uint32_t)crop[3];
@@ -315,11 +375,11 @@ uint64_t be_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_va
         if (h > nrows) { VkBufferImageCopy *n = realloc(rows, h * sizeof *n); if (n) { rows = n; nrows = h; } }
         uint32_t k = h <= nrows ? h : 0;
         for (uint32_t i = 0; i < k; i++) rows[i] = (VkBufferImageCopy){(VkDeviceSize)(h - 1 - i) * w * 4, w, 1, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {(int32_t)x, (int32_t)(y + i), 0}, {w, 1, 1}};
-        if (k) vkCmdCopyImageToBuffer(cb, e.image, HVK_EXT_LAYOUT, g_screen, k, rows);
+        if (k) vkCmdCopyImageToBuffer(cb, e.image, layout, g_screen, k, rows);
         else HVK_RED_ONCE("the headless presenter's row list could not be made: the frame is not shown");
     } else {
         VkBufferImageCopy r = {0, w, h, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {(int32_t)x, (int32_t)y, 0}, {w, h, 1}};
-        vkCmdCopyImageToBuffer(cb, e.image, HVK_EXT_LAYOUT, g_screen, 1, &r);
+        vkCmdCopyImageToBuffer(cb, e.image, layout, g_screen, 1, &r);
     }
     VkMemoryBarrier2 mb[2] = {   // before whatever follows on the queue (the producer drawing into the image again) and before the host reads the buffer
         {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, NULL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -352,6 +412,7 @@ int hvk_present_last(void *texels, size_t n, hvk_present_info *info) {
     pthread_mutex_unlock(&g_ext_mu);
     return ok;
 }
+static void pres_flush(void) { pthread_mutex_lock(&g_ext_mu); uint64_t v = g_pres_n; pthread_mutex_unlock(&g_ext_mu); pres_wait(v); }
 static void pres_shutdown(void) {   // hvk_shutdown: every present finished, the presenter's objects released, the registry emptied
     pthread_mutex_lock(&g_ext_mu);
     pres_wait(g_pres_n);
@@ -422,7 +483,7 @@ void be_res_stats(char *out, size_t n) {
     }
 }
 void be_barrier_stats(uint64_t *skip, uint64_t *full) { *skip = 0; *full = atomic_load(&hvk.st_barriers); }
-uint32_t be_present_qos(void) { return 0; }   // PLAT_QOS_UNSPECIFIED: no present thread yet
+uint32_t be_present_qos(void) { return hvk_win_qos(); }   // the window presenter's thread (vk_present.c); PLAT_QOS_UNSPECIFIED without one
 uint64_t be_cut_count(void) { return 0; }
 uint64_t be_copy_cut_count(void) { return 0; }
 uint64_t be_blit_splits(void) { return atomic_load(&hvk.st_pass_splits); }

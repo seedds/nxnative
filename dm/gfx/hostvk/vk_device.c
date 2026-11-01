@@ -92,6 +92,9 @@ typedef struct {
     int calibrated_khr, custom_border, uint8_khr, uint8_ext, depth_clip, push, divisor_khr, divisor_ext, m5;   // the backend's optional extensions (hostvk_dev.x)
     int dbc, budget;   // VK_EXT_depth_bias_control, VK_EXT_memory_budget (step P7)
     int line_ext, line_khr, fbl, fbl_dyn, pgq, stencil_export, nv_swizzle;   // step P8: line rasterization, attachment feedback loops, primitives generated, stencil export, NV viewport swizzle
+    int present_id, present_wait, display_timing;   // step P4a: the window presenter's vsync source
+    VkPhysicalDevicePresentIdFeaturesKHR fpid;
+    VkPhysicalDevicePresentWaitFeaturesKHR fpw;
     VkPhysicalDeviceDepthBiasControlFeaturesEXT fdbc;
     VkPhysicalDeviceLineRasterizationFeaturesEXT fline;
     VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT ffbl;
@@ -159,6 +162,9 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     q->pgq = has_ext(q, VK_EXT_PRIMITIVES_GENERATED_QUERY_EXTENSION_NAME);
     q->stencil_export = has_ext(q, VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
     q->nv_swizzle = has_ext(q, VK_NV_VIEWPORT_SWIZZLE_EXTENSION_NAME);
+    q->present_id = has_ext(q, VK_KHR_PRESENT_ID_EXTENSION_NAME);
+    q->present_wait = has_ext(q, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+    q->display_timing = has_ext(q, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
     vkGetPhysicalDeviceProperties(p, &q->p.properties);
     if (q->p.properties.apiVersion < VK_API_VERSION_1_3) return;   // below the baseline: the 1.2 / 1.3 structures may not be chained
     void **next = &q->f.pNext;
@@ -181,6 +187,8 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->fbl) { q->ffbl.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT; *next = &q->ffbl; next = &q->ffbl.pNext; }
     if (q->fbl_dyn) { q->ffbld.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_FEATURES_EXT; *next = &q->ffbld; next = &q->ffbld.pNext; }
     if (q->pgq) { q->fpgq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT; *next = &q->fpgq; next = &q->fpgq.pNext; }
+    if (q->present_id) { q->fpid.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR; *next = &q->fpid; next = &q->fpid.pNext; }
+    if (q->present_wait) { q->fpw.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR; *next = &q->fpw; next = &q->fpw.pNext; }
     vkGetPhysicalDeviceFeatures2(p, &q->f);
     next = &q->p.pNext;
     q->p.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
@@ -497,6 +505,12 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (d->x.stencil_export) ext[ne++] = VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME;
     d->x.vp_swizzle_nv = q->nv_swizzle && eds3 && q->feds3.extendedDynamicState3ViewportSwizzle;
     if (d->x.vp_swizzle_nv) ext[ne++] = VK_NV_VIEWPORT_SWIZZLE_EXTENSION_NAME;
+    // Step P4a (design 7.3): the window presenter's vsync source, with a surface only (both extensions name the swapchain's presents): when each present reached the screen
+    // (present id and present wait), else the refresh duration and the actual present times (VK_GOOGLE_display_timing)
+    d->x.present_wait = o->want_surface && q->present_id && q->present_wait && q->fpid.presentId && q->fpw.presentWait;
+    if (d->x.present_wait) { ext[ne++] = VK_KHR_PRESENT_ID_EXTENSION_NAME; ext[ne++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME; }
+    d->x.display_timing = o->want_surface && q->display_timing;
+    if (d->x.display_timing) ext[ne++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
     d->x.float64 = cf->shaderFloat64 != 0; d->x.int64 = cf->shaderInt64 != 0; d->x.int16 = cf->shaderInt16 != 0;
     d->x.storage_without_format = cf->shaderStorageImageReadWithoutFormat && cf->shaderStorageImageWriteWithoutFormat;
     d->x.multi_viewport = cf->multiViewport != 0; d->x.depth_bounds = cf->depthBounds != 0;
@@ -569,6 +583,9 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (d->x.depth_bias_control) { *next = &fdbc; next = &fdbc.pNext; }
     if (d->x.line_raster) { *next = &fline; next = &fline.pNext; }
     if (d->x.prim_gen) { *next = &fpgq; next = &fpgq.pNext; }
+    VkPhysicalDevicePresentIdFeaturesKHR fpid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, NULL, VK_TRUE};
+    VkPhysicalDevicePresentWaitFeaturesKHR fpw = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR, NULL, VK_TRUE};
+    if (d->x.present_wait) { *next = &fpid; next = &fpid.pNext; *next = &fpw; next = &fpw.pNext; }
     // One queue for graphics, compute and copies; the transfer-only family (transfer_family) gets a queue when uploads move to it
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, d->queue_family, 1, &prio};

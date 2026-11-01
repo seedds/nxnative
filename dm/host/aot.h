@@ -146,6 +146,14 @@ uint64_t dm_guest_call(dm_guest_state *st, uint64_t addr, int nargs, ...);
 // the JIT fallback needed and not built in, a fault, guest code returning to the host); then every other guest thread is stopped (6.2's polls, SVCs, waits)
 // and waited for, at most 10 s. Returns the status; *seconds the guest time
 int dm_aot_run(uint64_t entry, uint64_t x0, uint64_t x1, double *seconds);
+// dm_aot_run in parts, for a start that makes several outermost calls on the main thread (the host program's SDK bootstrap, main_x86.c: nn::init::Start's steps, then nnMain):
+//   dm_aot_main_begin  the calling thread's block with the main guest stack and the packs' FPCR, left reset; every dm_guest_call on it then starts from that stack
+//   dm_aot_main_left   why the calling thread's guest code left (DM_AOT_LEFT_*): DM_AOT_LEFT_NONE after a call that returned, else the start goes no further
+//   dm_aot_main_end    the end of the main thread's guest code: a return to the host (left still DM_AOT_LEFT_NONE) is a process stop with DM_AOT_RETURNED and the [RED] line
+//                      `returned`, or with DM_AOT_EXITED when returned is NULL (nnMain returning ends the process as on Horizon); then as dm_aot_run, the status
+dm_guest_state *dm_aot_main_begin(void);
+int dm_aot_main_left(void);
+int dm_aot_main_end(const char *returned);
 // Stop the process's guest code: the first status wins; every guest thread leaves at its next poll, SVC, JIT block boundary or kernel wait. why: a [RED]
 // line, logged once (NULL for none)
 void dm_aot_stop(int status, const char *why);

@@ -230,13 +230,22 @@ static int vsync_tick(vsync_event_t *v) {   // 0: the event is gone and this thr
     return 0;
 }
 __attribute__((weak)) int mtl_link_wait_vsync(uint64_t *seen, uint64_t timeout_ns) { (void)seen; (void)timeout_ns; return 0; }   // nvn_mtl.m
+#if !DM_NATIVE_EXEC
+// The portable host: the Vulkan window presenter's vsync source in the display link's place (dm/gfx/hostvk/vk_present.c, design 7.3), the same contract as mtl_link_wait_vsync. This
+// default answers "no source" in a build without that backend (nvn_null, the host tests that include this file), and the thread below keeps its own clock then, as without a window
+__attribute__((weak)) int be_vsync_wait_vsync(uint64_t *seen, uint64_t timeout_ns) { (void)seen; (void)timeout_ns; return 0; }
+#endif
 static void *vsync_thread(void *arg) {
     vsync_event_t *v = arg;
     dm_host_helper_qos(PLAT_QOS_USER_INTERACTIVE);   // the game paces frames on this event
     const char *e = getenv("DM_VSYNC_HZ"); double hz = e ? atof(e) : 60.0; if (hz <= 0) hz = 60.0;
     uint64_t period = (uint64_t)(1e9 / hz), next = now_ns() + period, seen = 0;
     for (;;) {
+#if DM_NATIVE_EXEC
         if (!e && mtl_link_wait_vsync(&seen, 2 * period)) { if (!vsync_tick(v)) break; next = now_ns() + period; continue; }
+#else
+        if (!e && be_vsync_wait_vsync(&seen, 2 * period)) { if (!vsync_tick(v)) break; next = now_ns() + period; continue; }
+#endif
         uint64_t t = now_ns(); if (next > t) plat_sleep_ns(next - t);
         if (!vsync_tick(v)) break;
         next += period; if (now_ns() > next + 4 * period) next = now_ns() + period;   // do not try to catch up when far behind

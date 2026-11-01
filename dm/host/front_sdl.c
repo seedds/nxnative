@@ -107,8 +107,8 @@ static void on_key(SDL_Scancode c, int down) {
 }
 
 // ---------- Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted ----------
-// Normalized on the centered 16:9 picture, as front_mac.m: its present fits the game's picture into the view with black bars. The Vulkan presenter (Phase 4) must fit it the same way,
-// or change this with it; until then nothing is drawn there and the picture area is the window's content, letterboxed to 16:9
+// Normalized on the centered 16:9 picture, as front_mac.m: its present fits the game's picture into the view with black bars. The Vulkan presenter (dm/gfx/hostvk/vk_present.c) fits
+// the frame's region the same way, centred with its own aspect, which is 16:9 for the Switch's 1280x720 and 1920x1080 frames; a region of another aspect would need this to follow it
 static int g_mouse_down;
 static void mouse_touch(float x, float y) {
     if (!g_input_on || !g_win) return;
@@ -535,6 +535,17 @@ int front_vk_create_surface(void *vk_instance, void **vk_surface_out) {
     *vk_surface_out = (void *)v.surface;
     return 0;
 }
+// The window's size in pixels for the presenter's swapchain (front.h): kept by the main thread from SDL's events, read by the present thread. 0x0 while minimized
+static _Atomic int g_px_w, g_px_h, g_px_min;
+static void px_update(void) {   // main thread
+    int w = 0, h = 0;
+    if (g_win && SDL_GetWindowSizeInPixels(g_win, &w, &h)) { g_px_w = w; g_px_h = h; }
+}
+int front_vk_pixel_size(int *w, int *h) {
+    if (!g_win || !w || !h) return -1;
+    *w = g_px_min ? 0 : g_px_w; *h = g_px_min ? 0 : g_px_h;
+    return 0;
+}
 
 // ---------- The event loop ----------
 static void toggle_fullscreen(void) { SDL_SetWindowFullscreen(g_win, !(SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN)); }
@@ -563,18 +574,18 @@ static void handle(const SDL_Event *e) {   // main thread
         break;
     case SDL_EVENT_WINDOW_MINIMIZED:
         if (g_minimized) break;
-        g_minimized = 1; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1);
+        g_minimized = 1; g_px_min = 1; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1);
         break;
     case SDL_EVENT_WINDOW_RESTORED: case SDL_EVENT_WINDOW_MAXIMIZED:   // out of the dock or taskbar, at its old size or maximized; RESTORED also follows a maximized window shrinking back
         if (!g_minimized) break;
-        g_minimized = 0; dm_gfx_suspend(0); dm_audio_suspend(0);
+        g_minimized = 0; g_px_min = 0; px_update(); dm_gfx_suspend(0); dm_audio_suspend(0);
         if (g_has_focus && !g_ti.active) { input_resume(); dm_focus_set(1); } else dm_focus_set(2);
         break;
     case SDL_EVENT_WINDOW_ENTER_FULLSCREEN: case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN: case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
     case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED: case SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED:
         screen_match_apply(); break;
     case SDL_EVENT_WINDOW_EXPOSED: case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:   // the software renderer takes the new surface by itself
-        prog_tick(SDL_GetTicks(), 1); break;
+        px_update(); prog_tick(SDL_GetTicks(), 1); break;   // and the presenter's swapchain the new size (front_vk_pixel_size)
     case SDL_EVENT_JOYSTICK_ADDED:
         if (!SDL_IsGamepad(e->jdevice.which)) LOG("controller connected: %s (no gamepad mapping in SDL: not used)", SDL_GetJoystickNameForID(e->jdevice.which) ?: "?");
         break;
@@ -646,6 +657,7 @@ static void front_sdl_open(void) {
     const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0 or unset: a window
     if (fs && strcmp(fs, "0")) SDL_SetWindowFullscreen(g_win, true);
     screen_fps_update();
+    px_update();
     haptics_start();
     pads_start();
 }

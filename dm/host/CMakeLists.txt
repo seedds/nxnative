@@ -114,8 +114,8 @@ endif()
 
 # ---- The portable host sources ----
 # Not here: the parts tied to native ARM64 execution (entry.S, hle_bigstack.c, crash.c, probe.c; the x86-64 execution engine replaces them: aot_*.c below, aot_fault.c
-# for crash.c's fault hooks), the program entry main.c (it runs a frontend), and the Apple frontend files (*.m). front_sdl.c is the front end here. hle_fdstat.c
-# compiles to nothing on Windows
+# for crash.c's fault hooks and watchdog), the program entries (Apple's main.c; main_x86.c is the program nxhost-run below), and the Apple frontend files (*.m).
+# front_sdl.c is the front end here. hle_fdstat.c compiles to nothing on Windows
 file(GLOB HLE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hle_*.c)
 list(FILTER HLE_SRC EXCLUDE REGEX "/hle_bigstack\\.c$")
 set(NXHOST_SRC hle.c loader.c thread.c front_sdl.c)
@@ -338,7 +338,8 @@ host_test(t_vk_device SOURCES ../../gfx/hostvk/tests/t_vk_device.c ${HOSTVK_SRC}
 host_test(t_vk_import SOURCES ../../gfx/hostvk/tests/t_vk_import.c ${HOSTVK_SRC} PROFILE DEFS VK_NO_PROTOTYPES INCLUDES ${HOSTVK_INC} ENV ${HOSTVK_ENV})
 # The Vulkan backend behind dm/gfx/nvn/nvn_be.h (dm/gfx/hostvk; docs/design/vulkan-backend.md, step P3): a library of its own beside nvn_null, so that a binary links exactly one
 # backend (nxhost links it: NXHOST_VULKAN below). Its own shaders are SPIR-V arrays in committed headers (dm/gfx/hostvk/shaders/gen/, written by shaders/gen_spirv.sh), so building needs no glslang
-set(HOSTVK_BACKEND_SRC vk_backend.c vk_memory.c vk_texture.c vk_shader.c vk_pipeline.c vk_commands.c vk_device.c vk_import.c vk_gpl.c vk_cache.c vk_prewarm.c)   # the last three: phase P5
+set(HOSTVK_BACKEND_SRC vk_backend.c vk_memory.c vk_texture.c vk_shader.c vk_pipeline.c vk_commands.c vk_device.c vk_import.c vk_gpl.c vk_cache.c vk_prewarm.c   # vk_gpl, vk_cache, vk_prewarm: phase P5
+    vk_present.c)   # the window presenter and the vsync source (step P4a)
 list(TRANSFORM HOSTVK_BACKEND_SRC PREPEND ${REPO}/dm/gfx/hostvk/)
 list(APPEND HOSTVK_BACKEND_SRC ${REPO}/dm/gfx/tex/nvn_fmt_vk.c ${REPO}/dm/gfx/tex/astc_decode.c ${REPO}/dm/third_party/volk/volk.c)   # astc_decode.c: the CPU fallback of the ASTC decode (P7)
 add_library(nvn_vk STATIC ${HOSTVK_BACKEND_SRC})
@@ -378,6 +379,27 @@ target_include_directories(guest_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${GEN} $
 target_link_libraries(guest_gl PUBLIC nvn_vk)
 if(NXHOST_VULKAN)
     target_link_libraries(nxhost PUBLIC guest_vk guest_gl)
+endif()
+
+# ---- The host program: nxhost-run (main_x86.c; docker/README.md, "Running the host program") ----
+# nxhost-run <the game's aot_<version> folder> [module...] [-- game arguments]: the game's modules through the x86-64 engine's loader, the SDK start and nnMain as guest calls on
+# the engine's main thread, the SDL3 front end (DM_WINDOW) and the Vulkan backend with its window presenter. Named nxhost-run, not nxhost: that is the library every test builds on,
+# and the name says what the program does, as Apple's dmhost runs a game's rewritten modules. The library is linked whole (--whole-archive): a pack's library resolves the engine's
+# entry points and floating-point helpers against the executable (ENABLE_EXPORTS) when the game loads it, so they must be in it although nothing in the program calls them.
+# Windows: the UTF-8 code page manifest, and a 64 MiB main thread stack (front_sdl.c gives the guest thread 64 MiB with a window; without one the guest runs on the main thread)
+option(NXHOST_PROGRAM "build the host program nxhost-run (main_x86.c)" ON)
+if(NXHOST_PROGRAM)
+    add_executable(nxhost-run main_x86.c ${WIN32_MANIFEST_RC})
+    add_dependencies(nxhost-run game_profile)
+    target_compile_options(nxhost-run PRIVATE ${HOST_FLAGS})
+    target_link_libraries(nxhost-run PRIVATE -Wl,--whole-archive nxhost -Wl,--no-whole-archive)
+    set_target_properties(nxhost-run PROPERTIES ENABLE_EXPORTS ON)
+    if(NXHOST_VULKAN)
+        target_compile_definitions(nxhost-run PRIVATE NXHOST_VULKAN=1)   # registers the front end's window with the presenter (vk_present.h)
+    endif()
+    if(WIN32)
+        target_link_options(nxhost-run PRIVATE -Wl,--stack,67108864)
+    endif()
 endif()
 # Its GPU tests (dm/gfx/tests/vk; t_vk_harness.h says what they share): the NVN frontend, as objects so that the backend's references to it resolve whatever the link order,
 # over nvn_vk, each drawing headless and reading pixels back. Without a Vulkan device they skip as t_vk_device does; CTest on Linux runs them on lavapipe under the validation layer
@@ -480,6 +502,13 @@ else()
     target_compile_definitions(t_vk_guest_gl PRIVATE T_GL_NO_GLSLANG=1)
     string(APPEND MANIFEST "# t_vk_guest_gl skips: glslangValidator was not found when the tree was configured (no GL shader library)\n")
 endif()
+# The window presenter and the vsync source (dm/gfx/hostvk/vk_present.c; docs/design/vulkan-backend.md 7.2 to 7.4, step P4a), on lavapipe under the validation layer as the GPU tests
+# above: a swapchain on a surface of VK_EXT_headless_surface (the window the test registers in place of the front end's), frames of a known picture through be_present_ext, read
+# back from the swapchain images as they go to the presentation engine: the raw bytes of an sRGB frame, the layer crop, the bilinear scale and the black letterbox, the lower-left
+# origin's flip, a new window size remaking the swapchain, the vsync source's ticks; the headless presenter with DM_VK_HEADLESS=1. Skipped without a Vulkan device; without
+# VK_EXT_headless_surface only the headless parts run (a note says what did not)
+host_test(t_vk_present SOURCES t_vk_present.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/hostvk RUNS - --mailbox --headless TMPDIR ENV ${HOSTVK_ENV})
+target_link_libraries(t_vk_present PRIVATE nvn_front_obj nvn_vk)
 # The NVN frontend linked over the null backend (step M6): its entry points called as C functions, a device, a queue and a memory pool made, a command list recorded, submitted and
 # handed by the decoder to the null backend (dm/gfx/tests/t_frontend.c). Here only: on Apple nvn_be.h's functions are the Metal backend's
 host_test(t_frontend SOURCES ../../gfx/tests/t_frontend.c ../../gfx/nvn/hle_nvn.c ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_tex.c ../../gfx/nvn/nvn_state.c ../../gfx/nvn/nvn_pools.c
@@ -539,6 +568,14 @@ if(NXHOST_JIT)
     target_link_libraries(t_aot_module PRIVATE nxhost_jit)
 endif()
 set_tests_properties(t_aot_module PROPERTIES TIMEOUT 300)
+# The host program itself (t_host_program.c): nxhost-run, found beside the test, run as a child process on t_aot_module's synthetic module (DM_AOT_RAW=1: it has no SDK) with
+# SDL's dummy drivers and the headless Vulkan presenter, through its window path (DM_WINDOW=1) and its windowless one; its exit status and its log lines checked; the SDK start's
+# refusal of a module set without nnMain; the usage. Without the packs only the usage and the refusal run (a note says so), as on the Windows runner
+if(NXHOST_PROGRAM)
+    host_test(t_host_program SOURCES t_host_program.c DEFS "T_AOT_PACKS=\"${NXAOT_PACKS}\"")
+    add_dependencies(t_host_program nxhost-run)
+    set_tests_properties(t_host_program PROPERTIES TIMEOUT 300)
+endif()
 # The memory SVCs' announcements to the graphics backend (hle_svc.c be_guest_map / be_guest_unmap; docs/design/vulkan-backend.md 4.2), recorded by a stub backend on
 # the small layout of t_svc_memory: which SVCs commit and decommit, the ranges, and that an unmapped range was still readable when announced
 host_test(t_guest_map SOURCES t_guest_map.c INCLUDES ${TESTS}/memory_profile)

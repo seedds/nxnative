@@ -227,7 +227,8 @@ int be_vsync_wait(int vsyncs, uint64_t timeout_ns) { (void)vsyncs; (void)timeout
 // the picture a window would show (hvk_present_last reads it back). A present is one submission on the backend's queue: it waits for the producer's timeline value (ev,
 // ev_val), copies between two full barriers, so the copy is ordered against everything submitted before and after it on the queue whatever semaphores the producer used, and
 // signals the presenter's own timeline; that value is the ticket be_present_wait waits for. Up to PRES_N presents are in flight; the next one waits for the oldest. The period is
-// not used: nothing paces a headless present (the vsync source is phase P4's). The GL layer is not a producer here yet (design 8.2, decision D5)
+// not used: nothing paces a headless present (the vsync source is phase P4's). With the lower-left window origin (be_set_origin_lower_left: the guest GL layer, guest_gl.c, stores
+// its images bottom row first, as GL lays them out) the region's rows are copied bottom up, so the picture is upright, as the Metal backend's present flips it
 void *be_native_device(void) { return hvk_up() ? (void *)&hvk.dev : NULL; }
 typedef struct { VkImage image; VkFormat format; uint32_t w, h; } ext_ent;
 enum { PRES_N = 4 };
@@ -309,8 +310,17 @@ uint64_t be_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_va
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     vkBeginCommandBuffer(cb, &bi);
     hvk_full_barrier(cb);   // after the producer's frame and after the previous present's copy into the buffer
-    VkBufferImageCopy r = {0, w, h, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {(int32_t)x, (int32_t)y, 0}, {w, h, 1}};
-    vkCmdCopyImageToBuffer(cb, e.image, HVK_EXT_LAYOUT, g_screen, 1, &r);
+    if (atomic_load(&hvk.origin_ll)) {   // the image is stored bottom row first: one region per row, the last row first
+        static VkBufferImageCopy *rows; static uint32_t nrows;
+        if (h > nrows) { VkBufferImageCopy *n = realloc(rows, h * sizeof *n); if (n) { rows = n; nrows = h; } }
+        uint32_t k = h <= nrows ? h : 0;
+        for (uint32_t i = 0; i < k; i++) rows[i] = (VkBufferImageCopy){(VkDeviceSize)(h - 1 - i) * w * 4, w, 1, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {(int32_t)x, (int32_t)(y + i), 0}, {w, 1, 1}};
+        if (k) vkCmdCopyImageToBuffer(cb, e.image, HVK_EXT_LAYOUT, g_screen, k, rows);
+        else HVK_RED_ONCE("the headless presenter's row list could not be made: the frame is not shown");
+    } else {
+        VkBufferImageCopy r = {0, w, h, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {(int32_t)x, (int32_t)y, 0}, {w, h, 1}};
+        vkCmdCopyImageToBuffer(cb, e.image, HVK_EXT_LAYOUT, g_screen, 1, &r);
+    }
     VkMemoryBarrier2 mb[2] = {   // before whatever follows on the queue (the producer drawing into the image again) and before the host reads the buffer
         {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, NULL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
          VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT},

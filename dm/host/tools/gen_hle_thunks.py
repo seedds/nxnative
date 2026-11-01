@@ -6,9 +6,10 @@ the dispatcher maps the slot to a thunk, which reads the arguments from the gues
 AAPCS64 passes them, calls the C function on the host thread's own stack and writes its result back to the block. This script reads the host sources given on
 its command line, finds every HLE(, HLE_FORCE( and HLE_FORCE_BIG( entry (hle.h), also through a file's own wrapper macros (hle_net.c's SKF) and aliases
 (hle_fs.c's #define HLE_FORCE HLE_FORCE_BIG), the NVN interface layer's NVN( and NVN_NOPROTO( entries (dm/gfx/nvn/hle_nvn.c: NVN(name, ret, params...), the
-entry named by the NVN function's name, its C function h_<name>) and the guest Vulkan layer's VK( and VKB( entries of the same form (dm/gfx/hostvk/guest_vk.c: named
-by the Vulkan function's name, registered in the HLE table), and writes one thunk per entry, the table hle_thunks[] sorted by mangled name (an NVN or Vulkan
-entry's name stands for it), and an extern declaration of each entry's C function (external on non-native builds: HLE_LINKAGE in hle.h).
+entry named by the NVN function's name, its C function h_<name>), the guest Vulkan layer's VK( and VKB( entries of the same form (dm/gfx/hostvk/guest_vk.c: named
+by the Vulkan function's name, registered in the HLE table) and the guest OpenGL layer's GL(, GLB( and EGL( entries, also of that form (dm/gfx/hostvk/guest_gl.c: named
+by the GL or EGL function's name, in the HLE table; their GL types are the layer's own typedefs), and writes one thunk per entry, the table hle_thunks[] sorted by mangled
+name (an NVN, Vulkan, GL or EGL entry's name stands for it), and an extern declaration of each entry's C function (external on non-native builds: HLE_LINKAGE in hle.h).
 
 Argument rules (AAPCS64): integer and pointer parameters take the next x register (x0..x7), float and double the next v register (v0..v7, its low 32 or 64
 bits); a 32-bit parameter is the low half of its register, as a w register reads it. A parameter past the eighth of its class is read from the guest stack
@@ -31,9 +32,10 @@ import os
 import re
 import sys
 
-MACROS = {"HLE": 3, "HLE_FORCE": 4, "HLE_FORCE_BIG": 4, "NVN": 2, "NVN_NOPROTO": 2, "VK": 2, "VKB": 2}   # macro -> index of the first parameter argument (mangled, [why,] ret, cname, params...; name, ret, params...)
-NAMED = {"NVN", "NVN_NOPROTO", "VK", "VKB"}   # entries named by an identifier, the API function's name, whose C function is h_<name> (dm/gfx/nvn/hle_nvn.c, dm/gfx/hostvk/guest_vk.c)
-TABLES = {"HLE": "hle", "HLE_FORCE": "force", "HLE_FORCE_BIG": "force", "NVN": "nvn", "NVN_NOPROTO": "nvn", "VK": "hle", "VKB": "hle"}   # the host table each entry registers in (a name is unique within one)
+MACROS = {"HLE": 3, "HLE_FORCE": 4, "HLE_FORCE_BIG": 4, "NVN": 2, "NVN_NOPROTO": 2, "VK": 2, "VKB": 2, "GL": 2, "GLB": 2, "EGL": 2}   # macro -> index of the first parameter argument (mangled, [why,] ret, cname, params...; name, ret, params...)
+NAMED = {"NVN", "NVN_NOPROTO", "VK", "VKB", "GL", "GLB", "EGL"}   # entries named by an identifier, the API function's name, whose C function is h_<name> (dm/gfx/nvn/hle_nvn.c, dm/gfx/hostvk/guest_vk.c, guest_gl.c)
+TABLES = {"HLE": "hle", "HLE_FORCE": "force", "HLE_FORCE_BIG": "force", "NVN": "nvn", "NVN_NOPROTO": "nvn", "VK": "hle", "VKB": "hle", "GL": "hle", "GLB": "hle", "EGL": "hle"}   # the host table each entry registers in (a name is unique within one)
+API = {"NVN": "NVN", "NVN_NOPROTO": "NVN", "VK": "Vulkan", "VKB": "Vulkan", "GL": "GL", "GLB": "GL", "EGL": "EGL"}   # a named entry's API, for its messages
 
 # Scalar types by C spelling (qualifiers removed, words joined by one space): (class, canonical C type).
 # Classes: x32 / x64 integer in an x register; f32 / f64 in a v register; small: a sub-32-bit integer (accepted as a return only)
@@ -471,10 +473,10 @@ def take_entry(scope, base, name, args, path, line, entries):
     first = MACROS[base]
     if len(args) < first + 1 or not args[first - 1]:
         raise GenError(f"{path}:{line}: {name}( with {len(args)} arguments")
-    if base in NAMED:   # NVN(name, ret, params...), VK(name, ret, params...): the entry is the API function, its C function h_<name>
+    if base in NAMED:   # NVN(name, ret, params...), VK(name, ret, params...), GL / EGL(name, ret, params...): the entry is the API function, its C function h_<name>
         nm = args[0]
         if len(nm) != 1 or nm[0][0] != "id":
-            raise GenError(f"{path}:{line}: {name}: the {'NVN' if base.startswith('NVN') else 'Vulkan'} function's name is not one identifier")
+            raise GenError(f"{path}:{line}: {name}: the {API[base]} function's name is not one identifier")
         entries.append({
             "macro": base, "path": path, "line": line, "mangled_lit": f'"{nm[0][1]}"', "mangled": nm[0][1], "cname": "h_" + nm[0][1],
             "typedefs": dict(scope.typedefs), "ret": [(k, v) for k, v, _ in args[1]], "params": [[(k, v) for k, v, _ in p] for p in args[first:]],

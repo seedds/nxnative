@@ -162,9 +162,21 @@ target_compile_options(nvn_null PRIVATE ${HOST_FLAGS})
 target_include_directories(nvn_null PRIVATE ${REPO}/dm/gfx/nvn/include)
 target_link_libraries(nvn_null PUBLIC nxplat)
 
+# The graphics backend nxhost links (below): the Vulkan one unless NXHOST_VULKAN=OFF. With it, the guest graphics API layers on that backend are part of a host binary too
+# (dm/gfx/hostvk: guest_vk.c, the guest Vulkan shim of step P9a; guest_gl.c, the guest OpenGL layer of step P9b; their libraries below), so their entries (VK( / VKB(,
+# GL( / GLB( / EGL() get host-call thunks like the HLE entries: the generator's one run reads nxhost's sources and theirs, with the Vulkan headers on its include path
+option(NXHOST_VULKAN "nxhost links the Vulkan graphics backend (nvn_vk) instead of the null one (nvn_null)" ON)
+set(GUEST_VK_SRC ${REPO}/dm/gfx/hostvk/guest_vk.c)
+set(GUEST_GL_SRC ${REPO}/dm/gfx/hostvk/guest_gl.c)
+set(HLE_THUNKS_SRC ${NXHOST_SRC})
+if(NXHOST_VULKAN)
+    list(APPEND HLE_THUNKS_SRC ${GUEST_VK_SRC} ${GUEST_GL_SRC})
+    list(APPEND GEN_HLE_THUNKS_INC -I ${REPO}/dm/third_party/vulkan-headers/include)
+    list(APPEND HOST_H ${REPO}/dm/gfx/hostvk/guest_vk.h ${REPO}/dm/gfx/hostvk/guest_gl.h)
+endif()
 add_custom_command(OUTPUT ${HLE_THUNKS_C}
-    COMMAND ${Python3_EXECUTABLE} ${GEN_HLE_THUNKS} -o ${HLE_THUNKS_C} ${GEN_HLE_THUNKS_INC} ${NXHOST_SRC}
-    DEPENDS ${GEN_HLE_THUNKS} ${NXHOST_SRC} ${HOST_H}
+    COMMAND ${Python3_EXECUTABLE} ${GEN_HLE_THUNKS} -o ${HLE_THUNKS_C} ${GEN_HLE_THUNKS_INC} ${HLE_THUNKS_SRC}
+    DEPENDS ${GEN_HLE_THUNKS} ${HLE_THUNKS_SRC} ${HOST_H}
     COMMENT "host-call thunks from the HLE entries" VERBATIM)
 # The x86-64 execution engine (docs/design/aot-recompiler.md; dm/host/aot.h): the run time of a pack's recompiled code in the host. Its arena below 2^39, module
 # images and packs (aot_arena.c), what a pack imports and dm_guest_call (aot_run.c), guest threads (aot_thread.c), faults (aot_fault.c) and the floating-point
@@ -338,8 +350,8 @@ target_link_libraries(nvn_vk PUBLIC nxplat)
 # The graphics backend nxhost links (step M7, done at step P8): the Vulkan one on Linux and Windows, which takes the null backend's forms itself when no Vulkan device meets the
 # baseline of design 9.1 (vk_backend.c: one red line, nothing drawn, the CPU side runs); OFF links the null backend (nvn_null). t_frontend keeps the null backend either way. The
 # device comes up at the frontend's first call that needs it (a memory pool, a texture, a submission), as the Metal backend's mtl_init does: the host calls no be_init of its own.
-# The backend and the frontend in nxhost reference each other, so a binary links the pair twice (LINK_INTERFACE_MULTIPLICITY)
-option(NXHOST_VULKAN "nxhost links the Vulkan graphics backend (nvn_vk) instead of the null one (nvn_null)" ON)
+# The backend and the frontend in nxhost reference each other, so a binary links the pair twice (LINK_INTERFACE_MULTIPLICITY). The option is declared above, with the thunk
+# generator's command
 if(NXHOST_VULKAN)
     target_link_libraries(nxhost PUBLIC nvn_vk)
 else()
@@ -349,20 +361,23 @@ set_target_properties(nxhost PROPERTIES LINK_INTERFACE_MULTIPLICITY 2)
 # The guest Vulkan layer on that backend (dm/gfx/hostvk/guest_vk.c; docs/design/vulkan-backend.md 8.1, step P9a): the game's vk* imports forwarded to the backend's device. A
 # library of its own beside nvn_vk, because it is a game-facing API layer like hle_nvn.c (import-table entries, host services: the frame tick, the vi layer crop, the graphics
 # gate), not part of the NVN backend that the GPU tests link; nxhost links it with the Vulkan backend. Its VK( / VKB( entries register in the import table and get host-call
-# thunks like the HLE entries: the thunk generator's command above runs again over nxhost's sources and the shim's, with the Vulkan headers on its include path, and its file is
-# the one compiled (APPEND keeps this change beside the backend it belongs to; folded into that command, the first run goes away). The thunk table references every entry's C
-# function, so linking it pulls the shim's object, and its entries, into a host binary
-set(GUEST_VK_SRC ${REPO}/dm/gfx/hostvk/guest_vk.c)
+# thunks like the HLE entries (the generator's command above reads its source, GUEST_VK_SRC). The thunk table references every entry's C function, so linking it pulls the
+# shim's object, and its entries, into a host binary
 add_library(guest_vk STATIC ${GUEST_VK_SRC})
 add_dependencies(guest_vk game_profile)
 target_compile_options(guest_vk PRIVATE ${HOST_FLAGS})
 target_include_directories(guest_vk PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn/include)
 target_link_libraries(guest_vk PUBLIC nvn_vk)
+# The guest OpenGL layer on that backend (dm/gfx/hostvk/guest_gl.c; docs/design/vulkan-backend.md 8.2, step P9b): dm/gfx/gl/hle_gl.m's state machine with a Vulkan encoder, for
+# the games that render with NVIDIA's desktop GL through EGL. A library of its own beside guest_vk, for the same reason; its GL( / GLB( / EGL( entries get thunks through the same
+# generator command (GUEST_GL_SRC), which pulls its object into a host binary. Its shaders are the SPIR-V library dm/gfx/tools/gl_shaders.py --vk writes (<DM_MSL_DIR>/gl-vk/)
+add_library(guest_gl STATIC ${GUEST_GL_SRC})
+add_dependencies(guest_gl game_profile)
+target_compile_options(guest_gl PRIVATE ${HOST_FLAGS})
+target_include_directories(guest_gl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn/include)
+target_link_libraries(guest_gl PUBLIC nvn_vk)
 if(NXHOST_VULKAN)
-    target_link_libraries(nxhost PUBLIC guest_vk)
-    add_custom_command(OUTPUT ${HLE_THUNKS_C} APPEND
-        COMMAND ${Python3_EXECUTABLE} ${GEN_HLE_THUNKS} -o ${HLE_THUNKS_C} ${GEN_HLE_THUNKS_INC} -I ${REPO}/dm/third_party/vulkan-headers/include ${NXHOST_SRC} ${GUEST_VK_SRC}
-        DEPENDS ${GUEST_VK_SRC} ${REPO}/dm/gfx/hostvk/guest_vk.h)
+    target_link_libraries(nxhost PUBLIC guest_vk guest_gl)
 endif()
 # Its GPU tests (dm/gfx/tests/vk; t_vk_harness.h says what they share): the NVN frontend, as objects so that the backend's references to it resolve whatever the link order,
 # over nvn_vk, each drawing headless and reading pixels back. Without a Vulkan device they skip as t_vk_device does; CTest on Linux runs them on lavapipe under the validation layer
@@ -443,6 +458,28 @@ foreach(t IN ITEMS guest spirv_fix)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj guest_vk nvn_vk)
 endforeach()
+# The guest OpenGL layer (docs/design/vulkan-backend.md 8.2, step P9b): t_vk_guest_gl drives guest_gl.c through the EGL and GL entries a game gets (eglGetProcAddress found by
+# name in the import table, the GL names from it) on lavapipe under the validation layer, skipped without a Vulkan device as the GPU tests above. Its shader library is built
+# here from the GLSL of dm/gfx/tests/vk/shaders/gl by dm/gfx/tools/gl_shaders.py --vk, so every build checks the tool's output against the layer (glslang 15 in the
+# nxnative-build image; nothing generated is committed, so no glslang version is pinned); where glslangValidator is missing the test is built and skips with a note
+set(T_GL_SHADERS ${REPO}/dm/gfx/tests/vk/shaders/gl)
+set(T_GL_LIB ${CMAKE_BINARY_DIR}/gen/gl_test)
+file(GLOB T_GL_SHADER_FILES CONFIGURE_DEPENDS ${T_GL_SHADERS}/*.vert ${T_GL_SHADERS}/*.frag)
+host_test(t_vk_guest_gl SOURCES ../../gfx/tests/vk/t_vk_guest_gl.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
+target_link_libraries(t_vk_guest_gl PRIVATE nvn_front_obj guest_gl nvn_vk)
+target_compile_definitions(t_vk_guest_gl PRIVATE "T_GL_SHADERS=\"${T_GL_SHADERS}\"" "T_GL_LIB=\"${T_GL_LIB}\"")
+find_program(GLSLANG_VALIDATOR glslangValidator)
+if(GLSLANG_VALIDATOR)
+    add_custom_command(OUTPUT ${T_GL_LIB}/gl-vk/gl_shaders.tsv
+        COMMAND ${Python3_EXECUTABLE} ${REPO}/dm/gfx/tools/gl_shaders.py ${T_GL_SHADERS} ${T_GL_LIB} --vk
+        DEPENDS ${REPO}/dm/gfx/tools/gl_shaders.py ${REPO}/dm/gfx/tools/dmsh_spv.py ${T_GL_SHADER_FILES}
+        COMMENT "the GL test's SPIR-V library (gl_shaders.py --vk)" VERBATIM)
+    add_custom_target(t_vk_guest_gl_lib DEPENDS ${T_GL_LIB}/gl-vk/gl_shaders.tsv)
+    add_dependencies(t_vk_guest_gl t_vk_guest_gl_lib)
+else()
+    target_compile_definitions(t_vk_guest_gl PRIVATE T_GL_NO_GLSLANG=1)
+    string(APPEND MANIFEST "# t_vk_guest_gl skips: glslangValidator was not found when the tree was configured (no GL shader library)\n")
+endif()
 # The NVN frontend linked over the null backend (step M6): its entry points called as C functions, a device, a queue and a memory pool made, a command list recorded, submitted and
 # handed by the decoder to the null backend (dm/gfx/tests/t_frontend.c). Here only: on Apple nvn_be.h's functions are the Metal backend's
 host_test(t_frontend SOURCES ../../gfx/tests/t_frontend.c ../../gfx/nvn/hle_nvn.c ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_tex.c ../../gfx/nvn/nvn_state.c ../../gfx/nvn/nvn_pools.c

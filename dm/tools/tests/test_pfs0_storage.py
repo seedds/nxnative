@@ -17,9 +17,12 @@ DOTNET = shutil.which('dotnet')
 @unittest.skipUnless(DOTNET, '.NET SDK 10 is required')
 class Pfs0Storage(unittest.TestCase):
     def test_read_only_header_and_payload(self):
+        assert DOTNET is not None
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            version = ET.parse(ROOT / 'dm/tools/nx_extract/nx_extract.csproj').find('.//PackageReference[@Include="LibHac"]').get('Version')
+            package = ET.parse(ROOT / 'dm/tools/nx_extract/nx_extract.csproj').find('.//PackageReference[@Include="LibHac"]')
+            assert package is not None
+            version = package.attrib['Version']
             (tmp / 'test.csproj').write_text(f'''<Project Sdk="Microsoft.NET.Sdk">
 <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><AllowUnsafeBlocks>true</AllowUnsafeBlocks><StartupObject>Pfs0StorageTests</StartupObject></PropertyGroup>
 <ItemGroup><PackageReference Include="LibHac" Version="{escape(version)}" />

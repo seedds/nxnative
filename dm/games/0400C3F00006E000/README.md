@@ -1,6 +1,6 @@
 # Mario Kart World (`0400C3F00006E000`)
 
-A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (C library) + `sdk`. **Plays on the Mac** (Apple M3 Max, macOS 27.0.1), with open items ([Open](#open)): boot, the title, the main menu and the first race of the 150cc Mushroom Cup Grand Prix (Mario Bros. Circuit), all 3 laps, driven by hand (the user's run `user_check.log`, 2026-11-01, chain a8e15f3b482b); a later run to frame about 13,200 had no crash. A second run (`user_race2.log`, 2026-11-01, recorded to `user_race2.keys`) drove two races of the Shell Cup by hand in a row, to frame about 32,100 with no crash; the same 20 shaders failed to load (no new one on these courses) and `nvnCommandBufferDrawMeshTasks` was called 9,697 times. The user saw the water's textures and some ground textures missing; otherwise it played. The kart drives and takes items; the scripted run to the first race had a p50 frame time of 16.6 ms (about 60 fps). Some geometry is missing (task / mesh shaders) and the first use of each pipeline compiles it. iOS is not tested.
+A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (C library) + `sdk`. **Plays on the Mac** (Apple M3 Max, macOS 27.0.1), with open items ([Open](#open)): boot, the title, the main menu and the first race of the 150cc Mushroom Cup Grand Prix (Mario Bros. Circuit), all 3 laps, driven by hand (the user's run `user_check.log`, 2026-11-01, chain a8e15f3b482b); a later run to frame about 13,200 had no crash. A second run (`user_race2.log`, 2026-11-01, recorded to `user_race2.keys`) drove two races of the Shell Cup by hand in a row, to frame about 32,100 with no crash; the same 20 shaders failed to load (no new one on these courses) and `nvnCommandBufferDrawMeshTasks` was called 9,697 times. The user saw the water's textures and some ground textures missing (fixed: [Rendering](#rendering)); otherwise it played. The kart drives and takes items; the scripted run to the first race had a p50 frame time of 16.6 ms (about 60 fps). Some geometry is missing (task / mesh shaders) and the first use of each pipeline compiles it. iOS is not tested.
 
 ## What it needs
 
@@ -58,6 +58,10 @@ The title and the main menu match the game as it is known: the title drives Mari
 
 The first race matches the game as it is known: after "Start Grand Prix?" the map of the cup's courses, the Mushroom Cup movie (Mario Bros. Circuit, Crown City, Whistlestop Summit, DK Spaceport, the cup's emblem), the course flyover, the grid at the Mario Kart arch with Lakitu's lights, 3, 2, 1, GO!, the HUD (coins, lap 1/3, place, the course map, the item box). The rainbow bands of the sky, the water and the lit floors are resolved (item 2 above).
 
+In the open world:
+
+1. The flat ground behind the title (one flat colour on a flat plane: the snow course, under Bowser's castle, over the water) and the ground and water textures missing in the Shell Cup run. The open-world terrain is drawn as patches whose uncompressed maps (a 260x260 R16 heightmap, RG8, RGBA8, R11G11B10F and a 68x68 RGBA16 map) the game writes from the CPU, without a flush, into a `CPU_CACHED | GPU_CACHED` pool the GPU never writes; the host made them textures of zeros, so every patch was a flat plane. Uncompressed textures now take their storage at first use in a pool with no GPU write ([Uncompressed storage the CPU wrote, in a pool the GPU does not write](../../../docs/reference/nvn-objects.md#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-does-not-write)). Checked 2026-11-02: the title run (`fx2_4250.png`) shows rolling grass hills with dirt paths, and the user's Shell Cup recording replayed to its first race (Koopa Troopa Beach, `fx1_10000/10500/11000.png`) shows textured sand and water.
+
 ## Boot (Mac)
 
 Each step below stopped the boot before its fix:
@@ -85,8 +89,6 @@ Memory after 60 s (`run11.log`): GPU allocated 14.2 GB, footprint 12.6 GiB, 7 pl
 - `nvnCommandBufferShadingRateImagePalette` and `BindShadingRateImage` are not implemented (about 2,800 calls a race): the game draws at the full pixel rate. Unknown names: `nvn*CooperativeVectorMatrix*`, `nvn*PoolWriteDescriptorTableData`.
 - The 0x59f instruction of `ab77eaee44cfef88` is named SURED (immediate form) in Mel's nvdisasm opcode list, <https://gitlab.freedesktop.org/mhenning/re/-/tree/main/opclass>, `opclass86`); its fields are not known.
 - Program `078997bf631992c5` (0x481 above) is labelled compute by the split but starts with a vertex-type SPH: the split's stage label is wrong for it.
-- The intro flyover (the attract movie before the title) shows the ground without its texture (user's report, 2026-11-01; also before the shader fixes of chain bcd4adc6f52c). On the snow course behind the title the ground is one flat bluish colour without texture detail, while the rocks, the kart and the sky look right (user's screenshot, 2026-11-01, kept in the work folder). The cause is not known. A candidate, not checked: the terrain virtual texture (the sparse 8192x8192x68 arrays, served as Metal placement sparse textures) has no data in its tiles. #834 reports that array layers past 768 MB stayed zero, and Eden-NS2's `NX2_NOTES.md` (row 87) reports the same texture unbacked, with the ground black.
-- In the Shell Cup run (`user_race2.log`) some ground textures were missing; the cause is not known, and the terrain candidate of the item above may be the same. The water's textures were missing too; not analysed.
 - Under `DM_DETCLOCK` the game stops after frame 3 (`user_7d.log`; inferred from comparing logs, not proven): runs and recordings go without it.
 - Not done: the prewarm seed list (`pso_manifest.tsv`), so each pipeline compiles at its first use.
 - The display link stalled 7 times in the first 50 s (`display link recovered: stalled … ms`), with 253 dropped frames up to frame 600; after that 2 dropped in 300 frames.
@@ -95,6 +97,7 @@ Memory after 60 s (`run11.log`): GPU allocated 14.2 GB, footprint 12.6 GiB, 7 pl
 
 ## Found on this game
 
+- [Uncompressed storage the CPU wrote, in a pool the GPU does not write](../../../docs/reference/nvn-objects.md#uncompressed-storage-the-cpu-wrote-in-a-pool-the-gpu-does-not-write)
 - [Sparse textures in sparse virtual pools as Metal placement sparse textures](../../../docs/reference/nvn-objects.md#sparse-textures-in-sparse-virtual-pools-as-metal-placement-sparse-textures)
 - [Switch 2 mouse, GameChat and camera with nothing connected](../../../docs/reference/services.md#switch-2-mouse-gamechat-and-camera-with-nothing-connected)
 - [Switch 2 HDR metadata on a layer the host never made](../../../docs/reference/services.md#switch-2-hdr-metadata-on-a-layer-the-host-never-made)

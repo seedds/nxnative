@@ -44,7 +44,7 @@ State on 2026-11-01. Plan: `docs/superpowers/2026-11-01-mkw-profile-plan.md`. PR
 
 - Boot no other game before Task 11.
 - Runs are muted.
-- Commits as `seedds`.
+- Commits as `legoxz`: a plain `git commit` with the checkout's identity, not AGENTS.md's `seedds` identity.
 - Push and the PR only on the user's command.
 
 ## Known outside the code

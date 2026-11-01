@@ -3,7 +3,8 @@
 # glslangValidator for Vulkan 1.3, validated with spirv-val and written as C arrays into <folder>/gen/<name>_<stage>.h (array <name>_<stage>_spv). The headers are committed, so
 # building needs no glslang. Variants: clear.frag for each colour slot and value type (clear_frag.h: clear_frag_s<slot>_k<kind>_spv), copy.frag for its three kinds (copy_frag.h:
 # copy_frag_k<kind>_spv: colour, depth, depth and stencil; step P8), q.comp for the four counter kernels of
-# nvn_builtin.h (q_val0.h, q_val8.h, q_dlt0.h, q_dlt8.h).
+# nvn_builtin.h (q_val0.h, q_val8.h, q_dlt0.h, q_dlt8.h), fsr_rcas.comp for its two targets (fsr_rcas_comp.h: fsr_rcas_comp_k<kind>_spv: rgba8, any format; decision D4).
+# fsr_easu.comp and fsr_rcas.comp include AMD's FSR 1 headers from dm/third_party/fsr1 by a path relative to themselves.
 #   sh dm/gfx/hostvk/shaders/gen_spirv.sh           regenerate the headers (run it after editing a shader)
 #   sh dm/gfx/hostvk/shaders/gen_spirv.sh --check   rebuild into a temporary folder and compare byte for byte with the committed headers: exit 0 when identical, 1 on a difference,
 #                                                   77 (skipped) when glslang or spirv-val is missing or is not the version the headers were made with
@@ -52,6 +53,8 @@ folder() {
                 n=0; for q in q_val0 q_val8 q_dlt0 q_dlt8; do compile "$src" "${q}_spv" "$key/$q.h" -DKERNEL=$n; n=$((n + 1)); done ;;
             hostvk/copy.frag)
                 for k in 0 1 2; do compile "$src" "copy_frag_k${k}_spv" "$key/copy_frag.h" -DKIND=$k; done ;;
+            hostvk/fsr_rcas.comp)
+                for k in 0 1; do compile "$src" "fsr_rcas_comp_k${k}_spv" "$key/fsr_rcas_comp.h" -DKIND=$k; done ;;
             *) compile "$src" "${name}_${stage}_spv" "$key/${name}_${stage}.h" ;;
         esac
     done

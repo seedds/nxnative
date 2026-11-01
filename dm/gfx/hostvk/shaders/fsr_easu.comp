@@ -1,0 +1,40 @@
+// FSR 1's first pass at present (docs/design/vulkan-backend.md 7.4, decision D4; vk_present.c, DM_PRESENT_UPSCALE=fsr): EASU, AMD FidelityFX Super Resolution 1.0's edge-adaptive
+// spatial upsampling, from the snapshot (the frame's region in its raw UNORM format, sampled with a linear clamp-to-edge sampler: the values are the stored bytes, so EASU filters
+// in the picture's own gamma space, as FSR 1 wants) into the EASU image (R8G8B8A8_UNORM, the size of the picture's rectangle on the screen). The 32-bit path of the unmodified
+// dm/third_party/fsr1 headers, with the gather callbacks they ask for; the constants (FsrEasuCon) are computed here, from the sizes.
+// Push constants: in_size = the snapshot's size, out_size = the picture's rectangle; flip (the lower-left origin: the snapshot's rows bottom up): each output pixel takes EASU's
+// value at the mirrored row, so the picture comes out upright, as the blit's swapped rows make it. off and sharpness belong to fsr_rcas.comp (one pipeline layout for both).
+// One workgroup of 64 invocations filters a 16 x 16 tile, four pixels each (AMD's ARmp8x8 order); pixels past out_size are not written.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D dst;
+layout(push_constant) uniform P { ivec2 in_size, out_size, off; int flip; float sharpness; } p;
+#define A_GPU 1
+#define A_GLSL 1
+#include "../../../third_party/fsr1/ffx_a.h"
+#define FSR_EASU_F 1
+AF4 FsrEasuRF(AF2 q) { return textureGather(src, q, 0); }
+AF4 FsrEasuGF(AF2 q) { return textureGather(src, q, 1); }
+AF4 FsrEasuBF(AF2 q) { return textureGather(src, q, 2); }
+#include "../../../third_party/fsr1/ffx_fsr1.h"
+void filter_at(AU2 ip, AU4 c0, AU4 c1, AU4 c2, AU4 c3) {
+    if (ip.x >= uint(p.out_size.x) || ip.y >= uint(p.out_size.y)) return;
+    AU2 at = p.flip != 0 ? AU2(ip.x, uint(p.out_size.y - 1) - ip.y) : ip;
+    AF3 c;
+    FsrEasuF(c, at, c0, c1, c2, c3);
+    imageStore(dst, ASU2(ip), AF4(c, 1.0));
+}
+void main() {
+    AU4 c0, c1, c2, c3;
+    FsrEasuCon(c0, c1, c2, c3, AF1(p.in_size.x), AF1(p.in_size.y), AF1(p.in_size.x), AF1(p.in_size.y), AF1(p.out_size.x), AF1(p.out_size.y));
+    AU2 gxy = ARmp8x8(gl_LocalInvocationID.x) + AU2(gl_WorkGroupID.x << 4u, gl_WorkGroupID.y << 4u);
+    filter_at(gxy, c0, c1, c2, c3);
+    gxy.x += 8u;
+    filter_at(gxy, c0, c1, c2, c3);
+    gxy.y += 8u;
+    filter_at(gxy, c0, c1, c2, c3);
+    gxy.x -= 8u;
+    filter_at(gxy, c0, c1, c2, c3);
+}

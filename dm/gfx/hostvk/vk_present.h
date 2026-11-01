@@ -6,8 +6,10 @@
 //     be_present_wait returns once the copy is done: the game's texture is free then, as Apple's present snapshots make it (design 7.2). An sRGB frame is copied into its UNORM
 //     twin, so its stored bytes reach the screen unchanged (the Switch scans the bytes out; Metal's present_raw_src).
 //   The present thread: takes the snapshots in order, acquires a swapchain image, clears it black (the letterbox bars), blits the snapshot into the centred rectangle of the window
-//     that keeps the frame's aspect (bilinear, nearest at one to one; the lower-left origin flipped), and presents it. The swapchain follows the window's size (recreated on
-//     VK_ERROR_OUT_OF_DATE_KHR, VK_SUBOPTIMAL_KHR, or when the front end reports another size), FIFO by default (decision D12; DM_VK_PRESENT_MODE=mailbox opts into MAILBOX
+//     that keeps the frame's aspect (bilinear, nearest at one to one; the lower-left origin flipped), and presents it. DM_PRESENT_UPSCALE (design 7.4, decision D4; vk_present.c
+//     "Scaling") changes the scaling: `fsr` runs AMD FidelityFX Super Resolution 1.0 (EASU then RCAS, two compute passes in the same command buffer) where the picture is shown
+//     larger than the game renders it, `integer` scales by nearest neighbour at the largest whole multiple that fits; `off` (the default) is the bilinear blit.
+//     The swapchain follows the window's size (recreated on VK_ERROR_OUT_OF_DATE_KHR, VK_SUBOPTIMAL_KHR, or when the front end reports another size), FIFO by default (decision D12; DM_VK_PRESENT_MODE=mailbox opts into MAILBOX
 //     where the surface has it; IMMEDIATE is not offered, design 7.3), at least three images (minImageCount respected), a UNORM format of 8 or 10 bits in SRGB_NONLINEAR.
 //   The vsync source (design 7.3): a thread ticks at 60 Hz (be_vsync_rate), phase-locked to the screen's refreshes when the screen runs at a multiple of 60 Hz: the anchor is the time
 //     a present reached the screen (VK_KHR_present_wait with VK_KHR_present_id where the device has them, else VK_GOOGLE_display_timing's actual present time where it has that),
@@ -60,6 +62,11 @@ typedef struct {
     int32_t dst[4];                                   // the picture's rectangle in the window: x, y, w, h (the rest is the black letterbox)
     uint32_t src_w, src_h; int flip, linear;          // the region shown, flipped, filtered bilinearly
     int timing;                                       // the vsync source's anchor: 0 none yet, 1 an acquire that waited, 2 VK_GOOGLE_display_timing, 3 VK_KHR_present_wait
+    int upscale;                                      // how the picture was scaled: 0 the blit, 1 FSR 1 with RCAS writing the swapchain image, 2 FSR 1 through a second
+                                                      // intermediate image blitted one to one, 3 integer (nearest at a whole multiple)
 } hvk_win_info;
 void hvk_win_readback(int on);
 int hvk_win_last(void *texels, size_t n, hvk_win_info *info);
+// The upscaler's settings as DM_PRESENT_UPSCALE and DM_PRESENT_SHARPEN would give them (NULL: unset), from the next frame shown on; no_direct 1 keeps FSR's RCAS off the
+// swapchain image (the second intermediate image, as on a surface without storage). After the first present; the swapchain is made again for its usage
+void hvk_win_upscale(const char *mode, const char *sharpen, int no_direct);

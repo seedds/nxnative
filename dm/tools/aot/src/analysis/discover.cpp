@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <deque>
 #include <optional>
 #include <set>
@@ -15,6 +16,7 @@
 
 #include "analysis/insn.h"
 #include "analysis/jumptable.h"
+#include "analysis/parallel.h"
 #include "analysis/summary.h"
 
 #include <llvm/ADT/ArrayRef.h>
@@ -37,14 +39,20 @@ std::string Hex(uint64_t v) {
 
 class Discoverer {
 public:
-    Discoverer(const module::Image& image, const DiscoverOptions& options) : img(image), opts(options), cache(std::make_shared<InsnCache>(image)) {
+    Discoverer(const module::Image& image, const DiscoverOptions& options)
+            : img(image), opts(options), cache(std::make_shared<InsnCache>(image)), pool(std::make_unique<Pool>(options.threads)) {
+        out.times.threads = pool->Threads();
         const Timer t{out.times.classify};
         const size_t n = img.text_size / 4;
         insns.resize(n);
-        for (size_t i = 0; i < n; ++i) {
-            const uint64_t pc = img.text_off + 4 * i;
-            insns[i] = ClassifyWord(*img.Word(pc), pc);
-        }
+        // Each word alone: in chunks on the pool
+        constexpr size_t kChunk = 1 << 14;
+        pool->For((n + kChunk - 1) / kChunk, [&](size_t c) {
+            for (size_t i = c * kChunk; i < std::min(n, (c + 1) * kChunk); ++i) {
+                const uint64_t pc = img.text_off + 4 * i;
+                insns[i] = ClassifyWord(*img.Word(pc), pc);
+            }
+        });
         aux_insns.resize(img.aux_size / 4);
         for (size_t i = 0; i < aux_insns.size(); ++i) {
             const uint64_t pc = img.aux_off + 4 * i;
@@ -77,9 +85,10 @@ public:
         }
         timed(tm.summaries, [&] { Taken(); RunSummaries(); return true; });
         timed(tm.windows, [&] {
-            for (auto& [entry, f] : fns) {
-                FindWindows(img, f);
-            }
+            // Each function's own windows: on the pool
+            std::vector<Function*> all;
+            for (auto& [entry, f] : fns) all.push_back(&f);
+            pool->For(all.size(), [&](size_t k) { FindWindows(img, *all[k]); }, 64);
             return true;
         });
         timed(tm.finish, [&] { Names(); Cover(); Oracle(); return true; });
@@ -113,7 +122,8 @@ private:
             return;
         }
         ++out.times.summarise_runs;
-        Summarise(img, fns, cache.get(), &summary_memo, &out.times.summary_rounds, &out.times.summary_computes);
+        Summarise(img, fns, cache.get(), &summary_memo, &out.times.summary_rounds, &out.times.summary_computes, pool.get(),
+                  &out.times.summary_sweeps);
         out.times.summary_reused = summary_memo.hits;
         summarised_key = std::move(key);
     }
@@ -191,7 +201,16 @@ private:
     }
 
     // ---- The walk: a function's instructions from its entry and roots, by the direct branches, inside [entry, limit) ----
-    void Walk(Function& f) {
+    // What a walk finds for the whole discovery: entries code names (pending) and text addresses adr / adrp + add build (refs), in the order
+    // the walk found them; WalkDirty applies them in function order
+    struct WalkOut {
+        std::vector<std::pair<uint64_t, uint32_t>> pending;
+        std::vector<std::pair<uint64_t, uint64_t>> refs;
+    };
+
+    // Reads the image, the set of functions and the summaries, and writes only the function, its walk count and state, and out: walks of
+    // different functions run at once (WalkDirty)
+    void Walk(Function& f, WalkOut& wout) {
         f.blocks.clear();
         f.calls.clear();
         f.indirect.clear();
@@ -241,15 +260,15 @@ private:
                 }
                 switch (i.kind) {
                 case Kind::B:
-                    if (!branch_to(i.target)) pending[i.target] |= kProvTail;
+                    if (!branch_to(i.target)) wout.pending.emplace_back(i.target, kProvTail);
                     break;
                 case Kind::BCond:
-                    if (!branch_to(i.target)) pending[i.target] |= kProvTail;
+                    if (!branch_to(i.target)) wout.pending.emplace_back(i.target, kProvTail);
                     leaders.insert(pc + 4);
                     work.push_back(pc + 4);
                     break;
                 case Kind::BL:
-                    pending[i.target] |= kProvCall;
+                    wout.pending.emplace_back(i.target, kProvCall);
                     if (!Returns(i.target)) break;
                     [[fallthrough]];
                 case Kind::BLR:
@@ -314,9 +333,9 @@ private:
             for (uint64_t pc = b.start; pc < b.end; pc += 4) {
                 const Insn& i = At(pc);
                 if (i.adr) {
-                    refs[i.target] = pc;
+                    wout.refs.emplace_back(i.target, pc);
                 } else if (i.add_imm && (have >> i.rn & 1)) {
-                    refs[page[i.rn] + i.target] = pc;
+                    wout.refs.emplace_back(page[i.rn] + i.target, pc);
                 }
                 if (i.kind == Kind::Normal) have &= ~(1u << i.rd);
                 if (i.adrp) {
@@ -325,9 +344,9 @@ private:
                 }
             }
         }
-        ++version[f.entry];
+        ++version.find(f.entry)->second;
         const std::array<uint8_t, 32> digest = StateDigest(f);
-        WalkState& ws = walk_state[f.entry];
+        WalkState& ws = walk_state.find(f.entry)->second;
         if (ws.digest != digest) {
             ws.digest = digest;
             ++ws.changes;
@@ -421,20 +440,34 @@ private:
     // A bl to a function with no return path does not come back: what follows it is not that function's code (often the next function,
     // which then has no other entry: the gap sweep finds it)
     bool Returns(uint64_t callee) const {
-        if (!summarised.count(callee)) return true;  // not summarised yet (a function found since): taken to return
-        return fns.at(callee).summary.returns;
+        const auto it = std::lower_bound(summarised.begin(), summarised.end(), callee);
+        if (it == summarised.end() || *it != callee) return true;  // not summarised yet (a function found since): taken to return
+        return summarised_returns[static_cast<size_t>(it - summarised.begin())];
     }
 
-    // After the summaries: walk again every function with a call whose fall-through disagrees with them, either way
+    // After the summaries: walk again every function with a call whose fall-through disagrees with them, either way. The functions the
+    // summaries cover and whether each returns are kept in address order (their summaries change only at the next run, after which this
+    // runs again)
     bool CutNoreturn() {
         summarised.clear();
-        for (const auto& [entry, f] : fns) summarised.insert(entry);
-        for (auto& [entry, f] : fns) {
+        summarised_returns.clear();
+        std::vector<const Function*> all;
+        for (const auto& [entry, f] : fns) {
+            summarised.push_back(entry);
+            summarised_returns.push_back(f.summary.returns);
+            all.push_back(&f);
+        }
+        std::vector<uint8_t> again(all.size());
+        pool->For(all.size(), [&](size_t k) {
+            const Function& f = *all[k];
             for (const auto& [start, b] : f.blocks) {
                 if (b.term != Term::Call) continue;
                 const bool has = std::any_of(b.succ.begin(), b.succ.end(), [](const auto& s) { return s.second == Edge::Return; });
-                if (has != (Returns(b.target) && Inside(f, b.end))) dirty.insert(entry);
+                if (has != (Returns(b.target) && Inside(f, b.end))) again[k] = 1;
             }
+        }, 256);
+        for (size_t k = 0; k < all.size(); ++k) {
+            if (again[k]) dirty.insert(all[k]->entry);
         }
         return !dirty.empty();
     }
@@ -444,8 +477,21 @@ private:
         if (dirty.empty()) return false;
         const std::set<uint64_t> todo = std::move(dirty);
         dirty.clear();
+        // The walks on the pool (each writes its own function and output; the maps' slots exist before), their entries and addresses
+        // applied in function order afterwards, as the walks one after another made them
+        std::vector<Function*> walks;
         for (const uint64_t e : todo) {
-            if (const auto it = fns.find(e); it != fns.end()) Walk(it->second);
+            if (const auto it = fns.find(e); it != fns.end()) {
+                walks.push_back(&it->second);
+                version[e];
+                walk_state[e];
+            }
+        }
+        std::vector<WalkOut> outs(walks.size());
+        pool->For(walks.size(), [&](size_t k) { Walk(*walks[k], outs[k]); }, 8);
+        for (const WalkOut& o : outs) {
+            for (const auto& [t, prov] : o.pending) pending[t] |= prov;
+            for (const auto& [t, pc] : o.refs) refs[t] = pc;
         }
         return true;
     }
@@ -593,20 +639,9 @@ private:
             if (!f.indirect.empty()) jobs.push_back({&f, version[entry], walk_state[entry].changes, &tried[entry], &region_memo[entry]});
         }
         std::vector<TablesOut> outs(jobs.size());
-        std::atomic<size_t> next{0};
-        const auto work = [&] {
-            for (size_t i; (i = next.fetch_add(1)) < jobs.size();) {
-                TablesOf(*jobs[i].f, calls, jobs[i].walk, jobs[i].state, *jobs[i].tries, *jobs[i].memo, outs[i]);
-            }
-        };
-        const unsigned threads = static_cast<unsigned>(std::min<size_t>(Threads(), jobs.size()));
-        if (threads <= 1) {
-            work();
-        } else {
-            std::vector<std::thread> pool;
-            for (unsigned i = 0; i < threads; ++i) pool.emplace_back(work);
-            for (auto& th : pool) th.join();
-        }
+        pool->For(jobs.size(), [&](size_t i) {
+            TablesOf(*jobs[i].f, calls, jobs[i].walk, jobs[i].state, *jobs[i].tries, *jobs[i].memo, outs[i]);
+        }, 2, 1);
         bool found = false;
         for (size_t i = 0; i < jobs.size(); ++i) {
             const TablesOut& o = outs[i];
@@ -621,13 +656,6 @@ private:
             out.regions_reused += o.reused;
         }
         return found;
-    }
-
-    // The threads discovery tries jump tables on (DiscoverOptions::threads; 0: one per CPU)
-    unsigned Threads() const {
-        if (opts.threads) return opts.threads;
-        const unsigned h = std::thread::hardware_concurrency();
-        return h ? h : 1;
     }
 
     // ---- Tentative tables: with their cases walked, the table must come out of a closed region that includes them, as it went in ----
@@ -732,42 +760,63 @@ private:
 
     // ---- The gap sweep: the first word after padding of every stretch no function reached becomes a candidate entry ----
     bool Gaps() {
-        std::vector<bool> covered(insns.size());
-        for (const auto& [entry, f] : fns) {
-            for (const auto& [start, b] : f.blocks) {
-                if (!img.InText(b.start)) continue;  // the aux region's blocks
-                for (uint64_t pc = b.start; pc < b.end; pc += 4) covered[(pc - img.text_off) / 4] = true;
-            }
-        }
-        bool added = false;
-        for (size_t i = 0; i < insns.size(); ++i) {
-            const uint64_t pc = img.text_off + 4 * i;
-            if (covered[i] || !Code(pc) || insns[i].word == kNop || insns[i].word == 0 || insns[i].kind == Kind::Undefined) continue;
-            // One candidate per stretch no function reached, padding included (a nop inside a function, as lld's adrp + add -> nop + adr
-            // relaxation leaves, is no function boundary): the first word that is no padding, after covered code, data or the text's start.
-            // An undefined word ends the stretch: what follows it may be code again
-            size_t j = i;
-            while (j > 0 && !covered[j - 1] && Code(img.text_off + 4 * (j - 1)) && insns[j - 1].kind != Kind::Undefined &&
-                   (insns[j - 1].word == kNop || insns[j - 1].word == 0)) {
-                --j;
-            }
-            const bool starts = j == 0 || covered[j - 1] || !Code(img.text_off + 4 * (j - 1)) || insns[j - 1].kind == Kind::Undefined;
-            if (!starts || gap_tried.count(pc)) continue;
-            gap_tried.insert(pc);
-            if (Function* o = Owner(pc)) {
-                // Code inside a function's own range that its walk did not reach (the cases of a table not bounded, code after a call that
-                // does not return): a root of that function, not an entry of its own
-                if (o->roots.insert(pc).second) {
-                    o->speculative.insert(pc);
-                    dirty.insert(o->entry);
-                    added = true;
+        const std::vector<uint8_t> covered = Covered();
+        // The candidates, found in chunks on the pool: they depend only on the covered words and on the words themselves (and gap_tried,
+        // which only the loop below changes, for the candidate it takes)
+        constexpr size_t kChunk = 1 << 14;
+        const size_t n = insns.size();
+        std::vector<std::vector<uint64_t>> found((n + kChunk - 1) / kChunk);
+        pool->For(found.size(), [&](size_t c) {
+            for (size_t i = c * kChunk; i < std::min(n, (c + 1) * kChunk); ++i) {
+                const uint64_t pc = img.text_off + 4 * i;
+                if (covered[i] || !Code(pc) || insns[i].word == kNop || insns[i].word == 0 || insns[i].kind == Kind::Undefined) continue;
+                // One candidate per stretch no function reached, padding included (a nop inside a function, as lld's adrp + add -> nop +
+                // adr relaxation leaves, is no function boundary): the first word that is no padding, after covered code, data or the
+                // text's start. An undefined word ends the stretch: what follows it may be code again
+                size_t j = i;
+                while (j > 0 && !covered[j - 1] && Code(img.text_off + 4 * (j - 1)) && insns[j - 1].kind != Kind::Undefined &&
+                       (insns[j - 1].word == kNop || insns[j - 1].word == 0)) {
+                    --j;
                 }
-                continue;
+                const bool starts = j == 0 || covered[j - 1] || !Code(img.text_off + 4 * (j - 1)) || insns[j - 1].kind == Kind::Undefined;
+                if (starts) found[c].push_back(pc);
             }
-            if (AddEntry(pc, kProvGap)) added = true;
+        });
+        bool added = false;
+        for (const auto& chunk : found) {
+            for (const uint64_t pc : chunk) {
+                if (gap_tried.count(pc)) continue;
+                gap_tried.insert(pc);
+                if (Function* o = Owner(pc)) {
+                    // Code inside a function's own range that its walk did not reach (the cases of a table not bounded, code after a call
+                    // that does not return): a root of that function, not an entry of its own
+                    if (o->roots.insert(pc).second) {
+                        o->speculative.insert(pc);
+                        dirty.insert(o->entry);
+                        added = true;
+                    }
+                    continue;
+                }
+                if (AddEntry(pc, kProvGap)) added = true;
+            }
         }
         if (added) Limits();
         return added;
+    }
+
+    // The text words some function's walk reached (the aux region's blocks are not text). Functions' text blocks lie in their own
+    // [entry, limit), which do not overlap: each function's are marked on the pool
+    std::vector<uint8_t> Covered() {
+        std::vector<uint8_t> covered(insns.size());
+        std::vector<const Function*> all;
+        for (const auto& [entry, f] : fns) all.push_back(&f);
+        pool->For(all.size(), [&](size_t k) {
+            for (const auto& [start, b] : all[k]->blocks) {
+                if (!img.InText(b.start)) continue;
+                for (uint64_t pc = b.start; pc < b.end; pc += 4) covered[(pc - img.text_off) / 4] = 1;
+            }
+        }, 256);
+        return covered;
     }
 
     void Taken() {
@@ -832,6 +881,7 @@ private:
     const module::Image& img;
     DiscoverOptions opts;
     std::shared_ptr<InsnCache> cache;  // the instruction facts the summaries read (summary.h), kept for the plan
+    std::unique_ptr<Pool> pool;        // the analysis's threads (DiscoverOptions::threads)
     std::optional<std::vector<std::tuple<uint64_t, uint64_t, bool, bool>>> summarised_key;  // RunSummaries: what the last summaries saw
     Discovery out;
     std::map<uint64_t, Function>& fns = out.functions;
@@ -848,7 +898,8 @@ private:
     SummaryMemo summary_memo;                                     // the summaries computed so far
     std::set<uint64_t> gap_tried;
     std::map<uint64_t, uint64_t> sym_end;  // symbol entries and their ends, when symbols are a source
-    std::set<uint64_t> summarised;         // the functions the last summaries cover: calls to those without a return path do not fall through
+    std::vector<uint64_t> summarised;      // the functions the last summaries cover, in address order: calls to those without a return path
+    std::vector<uint8_t> summarised_returns;  // do not fall through (Returns)
 };
 
 }  // namespace
@@ -888,7 +939,31 @@ std::string RegSet::Str() const {
 }
 
 Discovery Discover(const module::Image& image, const DiscoverOptions& options) {
-    return Discoverer{image, options}.Run();
+    const auto cpu = [] {
+        timespec ts{};
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+        return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
+    };
+    const double c0 = cpu();
+    Discovery d = Discoverer{image, options}.Run();
+    d.times.cpu = cpu() - c0;
+    return d;
+}
+
+std::string TimesLine(const DiscoverTimes& t) {
+    char buf[1024];
+    std::snprintf(buf, sizeof buf,
+                  "threads %u; seconds classify %.3f walk %.3f tables %.3f (%llu tries, %llu skipped, %llu regions, %llu reused) summaries %.3f "
+                  "(%u runs, %u skipped, %llu rounds, %llu sweeps, %llu computed, %llu reused, %llu words, %llu translations) sources %.3f "
+                  "windows %.3f finish %.3f; CPU %.3f",
+                  t.threads, t.classify, t.walk, t.tables, static_cast<unsigned long long>(t.table_tries),
+                  static_cast<unsigned long long>(t.table_tries_skipped), static_cast<unsigned long long>(t.regions),
+                  static_cast<unsigned long long>(t.regions_reused), t.summaries, t.summarise_runs, t.summarise_skipped,
+                  static_cast<unsigned long long>(t.summary_rounds), static_cast<unsigned long long>(t.summary_sweeps),
+                  static_cast<unsigned long long>(t.summary_computes), static_cast<unsigned long long>(t.summary_reused),
+                  static_cast<unsigned long long>(t.distinct_words), static_cast<unsigned long long>(t.translations), t.sources, t.windows,
+                  t.finish, t.cpu);
+    return buf;
 }
 
 }  // namespace nxaot::analysis

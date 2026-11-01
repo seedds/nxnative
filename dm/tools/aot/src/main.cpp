@@ -1,9 +1,11 @@
 // nxaot: the ahead-of-time ARM64 -> x86-64 recompiler (docs/design/aot-recompiler.md). Subcommands today:
-//   nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>]
+//   nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times]
 //                                                     function discovery, CFGs, jump tables, exclusive windows and summaries of a module
 //                                                     (src/analysis/discover.h): one line per function and the summary; --tsv writes every
-//                                                     row kind; --symbols-as-oracle takes no symbol as a source and compares with them
-//   nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries]
+//                                                     row kind; --symbols-as-oracle takes no symbol as a source and compares with them;
+//                                                     --threads: the analysis's threads (0 or none: one per CPU; the result is the same);
+//                                                     --times: the seconds of its steps on standard error
+//   nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N]
 //                                                     the pack stage's convention facts (src/build/plan.h): the indirect view and per function
 //                                                     PASS, WRITES, LIVE_AFTER, RV, a standard entry, its indirect sites
 //   nxaot image <module.nro> <out dir> [<name>]       the behaviour-image form of an NRO: <name>.image.bin and its manifest <name>.aot.tsv
@@ -84,8 +86,8 @@ namespace {
 
 int Usage() {
     std::fprintf(stderr,
-                 "usage: nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>]\n"
-                 "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries]\n"
+                 "usage: nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times]\n"
+                 "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N]\n"
                  "       nxaot image <module.nro> <out dir> [<name>]\n"
                  "       nxaot manifest <name.aot.tsv>\n"
                  "       nxaot module <module.nro | name.aot.tsv>\n"
@@ -124,12 +126,17 @@ int Discover(int argc, char** argv) {
     using namespace nxaot::analysis;
     std::string path, tsv;
     DiscoverOptions opts;
+    bool times = false;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--symbols-as-oracle") {
             opts.symbols = false;
         } else if (a == "--tsv" && i + 1 < argc) {
             tsv = argv[++i];
+        } else if (a == "--threads" && i + 1 < argc) {
+            opts.threads = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (a == "--times") {
+            times = true;
         } else if (path.empty() && !a.empty() && a[0] != '-') {
             path = a;
         } else {
@@ -144,6 +151,9 @@ int Discover(int argc, char** argv) {
         return 1;
     }
     const Discovery d = Discover(*image, opts);
+    if (times) {
+        std::fprintf(stderr, "nxaot discover: %s\n", TimesLine(d.times).c_str());
+    }
     std::vector<std::string> rows;
     const std::string mode = opts.symbols ? "symbols as a source" : "symbols as the oracle";
     rows.push_back("# nxaot discover\t" + image->name + "\t" + image->Sha256Hex() + "\t" + mode);
@@ -283,9 +293,12 @@ int PlanCmd(int argc, char** argv) {
     std::string path;
     nxaot::lift::Convention conv;
     bool all_entries = false;
+    unsigned threads = 0;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--cc" && i + 1 < argc) {
+        if (a == "--threads" && i + 1 < argc) {
+            threads = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (a == "--cc" && i + 1 < argc) {
             const std::string v = argv[++i];
             if (v == "swifttail") conv.cc = nxaot::lift::CallConv::SwiftTail;
             else if (v == "ghc") conv.cc = nxaot::lift::CallConv::Ghc;
@@ -305,8 +318,10 @@ int PlanCmd(int argc, char** argv) {
     if (!image) {
         return 1;
     }
-    const nxaot::analysis::Discovery d = nxaot::analysis::Discover(*image);
-    const nxaot::build::Plan plan = nxaot::build::MakePlan(*image, d, conv, all_entries);
+    nxaot::analysis::DiscoverOptions dopts;
+    dopts.threads = threads;
+    const nxaot::analysis::Discovery d = nxaot::analysis::Discover(*image, dopts);
+    const nxaot::build::Plan plan = nxaot::build::MakePlan(*image, d, conv, all_entries, threads);
     const auto str = [](const nxaot::lift::Regs& r) { return nxaot::analysis::RegSet{r.x, r.v, r.sp, r.nzcv}.Str(); };
     std::printf("# nxaot plan\t%s\t%s\n", image->name.c_str(), image->Sha256Hex().c_str());
     std::printf("indirect\tpass\t%s\twrites\t%s\trv\t%u\n", str(plan.indirect_pass).c_str(), str(plan.indirect_writes).c_str(), plan.indirect_rv);

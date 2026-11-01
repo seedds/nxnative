@@ -5,6 +5,7 @@
 #include <numeric>
 #include <unordered_map>
 
+#include "analysis/parallel.h"
 #include "analysis/summary.h"
 
 namespace nxaot::build {
@@ -50,15 +51,23 @@ Regs StdPass(const lift::Convention& conv) {
     return Regs::X(0xFu) | conv.Passable();
 }
 
-Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const lift::Convention& conv, bool all_entries) {
+Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const lift::Convention& conv, bool all_entries, unsigned threads) {
     Plan p;
     const auto& fns = d.functions;
-    // The register effects of every instruction: discovery's cache (one translation per distinct word), or one of the plan's own
+    analysis::Pool pool{threads};
+    // The register effects of every instruction: discovery's cache (one translation per distinct word), or one of the plan's own; prepared
+    // for every function's instructions, so that the passes below only read it, on the pool
     std::unique_ptr<analysis::InsnCache> own;
     analysis::InsnCache* insns = d.insns.get();
     if (!insns) {
         own = std::make_unique<analysis::InsnCache>(image);
         insns = own.get();
+    }
+    {
+        std::vector<const analysis::Function*> all;
+        all.reserve(fns.size());
+        for (const auto& [entry, f] : fns) all.push_back(&f);
+        insns->Prepare(all, &pool);
     }
     const auto fxs = [&](uint64_t pc) { const auto& f = insns->Fx(pc); return std::make_pair(ToRegs(f.use), ToRegs(f.def)); };
 
@@ -145,24 +154,35 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         return e;
     };
 
-    // Every register a function or its callees write (raw): the v8..v15 among them have a new high half when it returns
+    // The functions in address order, with their discovery view: the passes below run over them on the pool, each writing its own facts
+    std::vector<FnFacts*> order;
+    std::vector<const analysis::Function*> views;
     for (auto& [entry, ff] : p.fns) {
-        const analysis::Function& f = fns.at(entry);
-        for (const auto& [start, b] : f.blocks) {
+        order.push_back(&ff);
+        views.push_back(&fns.at(entry));
+    }
+    const size_t n = order.size();
+
+    // Every register a function or its callees write (raw): the v8..v15 among them have a new high half when it returns. A union over the
+    // call graph from each function's own writes: rounds in which every function takes the union of its callees' sets of the last round
+    // (Jacobi) reach the least fixed point above them, as rounds over the functions in address order seeing this round's sets did
+    pool.For(n, [&](size_t k) {
+        for (const auto& [start, b] : views[k]->blocks) {
             for (uint64_t pc = b.start; pc < b.end; pc += 4) {
-                ff.raw = ff.raw | fxs(pc).second;
+                order[k]->raw = order[k]->raw | fxs(pc).second;
             }
         }
-    }
+    }, 64);
+    std::vector<Regs> next(n);
     for (bool changed = true; changed;) {
         changed = false;
         Regs ind;
         for (const uint64_t e : callable) {
             ind = ind | p.fns.at(e).raw;
         }
-        for (auto& [entry, ff] : p.fns) {
-            const analysis::Function& f = fns.at(entry);
-            Regs r = ff.raw;
+        pool.For(n, [&](size_t k) {
+            const analysis::Function& f = *views[k];
+            Regs r = order[k]->raw;
             for (const auto& [start, b] : f.blocks) {
                 const EndFx e = end_of(f, b);
                 if (e.kind == EndFx::Svc) {
@@ -175,8 +195,11 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
                     r = r | (it == p.fns.end() ? Regs::All() : it->second.raw);
                 }
             }
-            if (!(r == ff.raw)) {
-                ff.raw = r;
+            next[k] = r;
+        }, 64);
+        for (size_t k = 0; k < n; ++k) {
+            if (!(next[k] == order[k]->raw)) {
+                order[k]->raw = next[k];
                 changed = true;
             }
         }
@@ -214,19 +237,28 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         ff.live_after = ff.host_callable ? kHostReads : Regs{};
     }
     // What a function adds to its callees' LIVE_AFTER is a function of its own LIVE_AFTER (and of facts fixed here), and LIVE_AFTER only grows
-    // by unions: a function whose LIVE_AFTER did not change since its last pass would add again what it added then, and is not passed again
-    std::map<uint64_t, Regs> passed_with;
+    // by unions: a function whose LIVE_AFTER did not change since its last pass would add again what it added then, and is not passed again.
+    // The functions of a round are passed on the pool, each into its own additions, which are joined (unions) after the round
+    std::vector<Regs> passed_with(n);
+    std::vector<uint8_t> passed(n);
+    struct Adds {
+        std::vector<std::pair<uint64_t, Regs>> to;  // (callee, what is live after its call sites or tail calls here)
+        Regs ind;                                   // the same for every standard entry (indirect sites)
+    };
+    std::vector<Adds> adds(n);
     for (bool changed = true; changed;) {
         changed = false;
         ++p.live_after_rounds;
-        std::map<uint64_t, Regs> add;
-        Regs add_ind;
-        for (auto& [entry, ff] : p.fns) {
-            if (const auto seen = passed_with.find(entry); seen != passed_with.end() && seen->second == ff.live_after) {
-                continue;
+        pool.For(n, [&](size_t k) {
+            FnFacts& ff = *order[k];
+            Adds& out = adds[k];
+            out = {};
+            if (passed[k] && passed_with[k] == ff.live_after) {
+                return;
             }
-            passed_with[entry] = ff.live_after;
-            const analysis::Function& f = fns.at(entry);
+            passed[k] = 1;
+            passed_with[k] = ff.live_after;
+            const analysis::Function& f = *views[k];
             std::map<uint64_t, Regs> live_in;
             for (bool again = true; again;) {
                 again = false;
@@ -260,16 +292,16 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
                     } else if (e.kind == EndFx::Svc) {
                         live = live | after | kSvcReads;
                     } else if (e.kind == EndFx::Call || e.kind == EndFx::Tail) {
-                        const Regs out = e.kind == EndFx::Call ? after : ff.live_after;
+                        const Regs out_regs = e.kind == EndFx::Call ? after : ff.live_after;
                         if (e.indirect) {
-                            live = live | (out - ind_must) | ind_reads;
-                            add_ind = add_ind | out;
+                            live = live | (out_regs - ind_must) | ind_reads;
+                            out.ind = out.ind | out_regs;
                         }
                         for (const uint64_t t : e.targets) {
                             Regs reads, must;
                             callee(t, reads, must);
-                            live = live | (out - must) | reads;
-                            add[t] = add[t] | out;
+                            live = live | (out_regs - must) | reads;
+                            out.to.emplace_back(t, out_regs);
                         }
                     }
                     for (uint64_t pc = b.end; pc > b.start;) {
@@ -283,6 +315,12 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
                     }
                 }
             }
+        }, 16);
+        std::map<uint64_t, Regs> add;
+        Regs add_ind;
+        for (const Adds& a : adds) {
+            for (const auto& [t, r] : a.to) add[t] = add[t] | r;
+            add_ind = add_ind | a.ind;
         }
         for (auto& [t, r] : add) {
             const auto it = p.fns.find(t);

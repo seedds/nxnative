@@ -2,11 +2,12 @@
 """The pack stage's caches (CTest `cache`; docs/design/aot-recompiler.md section 13, README.md "Pack throughput"): the per-function cache of compiled
 units and the analysis cache.
 
-Every NRO of corpus.tsv packed into a new cache (every unit a miss, every function in one, the analysis computed and stored), then again (every
-unit a hit, nothing compiled, the analysis read from the cache, and the shared object byte for byte the cold one's, also with another number of
-workers); then one NRO with one instruction word changed (a movz immediate in a function without a jump table, so that discovery and the
-convention facts stay the same, which `nxaot discover --tsv` confirms) misses one unit only, the group that holds that function, and its
-analysis (another image); the same NRO at another tier misses every unit and takes the analysis from the cache (the analysis does not depend on
+Every NRO of corpus.tsv packed into a new cache (every unit a miss, every function in one, the analysis computed on the workers and stored),
+then again (every unit a hit, nothing compiled, the analysis read from the cache and not run, and the shared object byte for byte the cold
+one's, also with another number of workers); then one NRO with one instruction word changed (a movz immediate in a function without a jump
+table, so that discovery and the convention facts stay the same, which `nxaot discover --tsv` confirms) misses one unit only, the group that
+holds that function, and its analysis (another image), which runs again on the workers and writes the entry a pack with one worker writes
+(README.md, "Phase 5c"); the same NRO at another tier misses every unit and takes the analysis from the cache (the analysis does not depend on
 the tier). Then the analysis cache's entries are never trusted when they cannot be: an entry with a byte changed (its checksum fails), cut short,
 or with a payload that does not parse (with a valid checksum) is ignored and written again, and each such pack is byte for byte the cold one.
 
@@ -29,9 +30,10 @@ CORPUS = os.path.join(HERE, '..', 'corpus')
 
 
 class Pack:
-    def __init__(self, functions, hits, misses, fn_hits, fn_misses, analysis):
+    def __init__(self, functions, hits, misses, fn_hits, fn_misses, analysis, analysis_threads):
         self.functions, self.hits, self.misses, self.fn_hits, self.fn_misses, self.analysis = (functions, hits, misses, fn_hits, fn_misses,
                                                                                               analysis)
+        self.analysis_threads = analysis_threads  # the threads the analysis ran on; 0 when the analysis cache held it
 
 
 def build(nxaot, path, so, cache, *extra):
@@ -39,10 +41,11 @@ def build(nxaot, path, so, cache, *extra):
     m = re.search(r'^aot: \S+ \d+ instructions (\d+) functions$', r.stdout, re.M)
     c = re.search(r'^aot: cache \S+: (\d+) hits, (\d+) misses \(units; functions (\d+) hit, (\d+) missed\)', r.stdout, re.M)
     an = re.search(r'^aot: analysis cache: (.*), [0-9.]+ s$', r.stdout, re.M)
+    t = re.search(r'^aot: analysis on (\d+) threads', r.stdout, re.M)
     if r.returncode != 0 or not m or not c or not an:
         print(r.stdout + r.stderr)
         raise SystemExit(f'test_cache.py: nxaot build {path} failed (exit {r.returncode})')
-    return Pack(int(m.group(1)), int(c.group(1)), int(c.group(2)), int(c.group(3)), int(c.group(4)), an.group(1))
+    return Pack(int(m.group(1)), int(c.group(1)), int(c.group(2)), int(c.group(3)), int(c.group(4)), an.group(1), int(t.group(1)) if t else 0)
 
 
 def discover(nxaot, path, tsv):
@@ -116,21 +119,32 @@ def main():
         w = build(a.nxaot, path, warm, cache, '--workers', '1')
         same = open(cold, 'rb').read() == open(warm, 'rb').read()
         ok = (c.hits == 0 and c.fn_hits == 0 and c.fn_misses == c.functions and c.analysis.startswith('miss') and w.misses == 0 and
-              w.fn_hits == w.functions == c.functions and w.fn_misses == 0 and w.analysis == 'hit' and same)
+              w.fn_hits == w.functions == c.functions and w.fn_misses == 0 and w.analysis == 'hit' and same and c.analysis_threads > 0 and
+              w.analysis_threads == 0)
         bad += not ok
         total += c.functions
         print(f'{nro:<20} {c.functions:>9} {f"{c.hits}/{c.misses}":>19} {f"{w.hits}/{w.misses}":>19} {c.analysis[:4] + ", " + w.analysis:<22}  '
               f'{"identical" if same else "DIFFERS"}{"" if ok else "  FAIL"}')
     print(f'cold and warm: {len(nros)} NROs, {total} functions')
 
-    # One instruction word changed: only the unit that holds its function misses, and the analysis (another image)
+    # One instruction word changed: only the unit that holds its function misses, and the analysis (another image), which runs again on the
+    # workers (README.md, "Phase 5c"): its entry is the one a pack with one worker writes
     src = os.path.join(CORPUS, 'nro', a.changed)
     copy, entry, pc = changed_word(a.nxaot, src, a.work)
-    p = build(a.nxaot, copy, os.path.join(a.work, 'changed.so'), cache)
-    ok = p.misses == 1 and p.fn_misses >= 1 and p.fn_hits + p.fn_misses == p.functions and p.analysis == 'miss (none)'
+    p = build(a.nxaot, copy, os.path.join(a.work, 'changed.so'), cache, '--workers', '4')
+    ok = (p.misses == 1 and p.fn_misses >= 1 and p.fn_hits + p.fn_misses == p.functions and p.analysis == 'miss (none)' and
+          p.analysis_threads == 4)
+    entries = {}
+    for workers in (1, 4):
+        own = os.path.join(a.work, f'changed-w{workers}')
+        build(a.nxaot, copy, os.path.join(own, 'changed.so'), own, '--workers', str(workers))
+        entries[workers] = [open(e, 'rb').read() for e in sorted(glob.glob(os.path.join(own, 'analysis', '*.bin')))]
+    same_entry = len(entries[1]) == 1 and entries[1] == entries[4]
+    ok = ok and same_entry
     bad += not ok
     print(f'changed word at {pc:#x} (the function at {entry:#x}) of {a.changed}: {p.functions} functions, units {p.hits} hits, {p.misses} misses '
-          f'({p.fn_misses} functions in the missed unit); analysis {p.analysis}{"" if ok else "  FAIL"}')
+          f'({p.fn_misses} functions in the missed unit); analysis {p.analysis} on {p.analysis_threads} threads, its entry '
+          f'{"the same" if same_entry else "NOT the same"} with 1 worker{"" if ok else "  FAIL"}')
 
     # Another tier: every unit misses; the analysis is the same
     p = build(a.nxaot, src, os.path.join(a.work, 'tier_c.so'), cache, '--tier', 'C')

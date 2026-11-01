@@ -223,3 +223,8 @@ add_test(NAME pack_windows COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_
          --readobj "${LLVM_TOOLS_BINARY_DIR}/llvm-readobj" --objdump "${LLVM_TOOLS_BINARY_DIR}/llvm-objdump" --work "${CMAKE_CURRENT_BINARY_DIR}/pack_windows")
 set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census discover manifest corpus_ref corpus_native corpus_funcdiff corpus_jit
                      corpus_threads safepoints cache plan lines split profile pack_windows PROPERTIES TIMEOUT 900)
+# Phase 5c (aot-recompiler.md sections 1.3 and 10): the analysis on threads gives the analysis on one thread, byte for byte: discovery's TSV
+# and lines, the plan, the analysis cache's entry and the pack, with 1 and 8 threads, for every corpus NRO and the synthetic modules
+add_test(NAME analysis_threads COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_analysis_threads.py"
+         --nxaot $<TARGET_FILE:nxaot> --work "${CMAKE_CURRENT_BINARY_DIR}/analysis_threads")
+set_tests_properties(analysis_threads PROPERTIES TIMEOUT 900)

@@ -7,8 +7,10 @@
 
 #include <map>
 #include <memory>
+#include <vector>
 
 #include "analysis/discover.h"
+#include "analysis/parallel.h"
 #include "module/image.h"
 
 namespace nxaot::analysis {
@@ -23,7 +25,9 @@ RegFx InstructionFx(uint64_t pc, uint32_t word);
 // effects (InstructionFx) and the preservation analysis' view of its dynarmic IR. Both are a function of the word alone, except immediates that
 // are the pc plus a constant (adr, adrp, bl's return address, literal addresses), which are kept relative: so each distinct word is translated
 // by dynarmic once (twice, to find those immediates) for the whole module, instead of once per visit. A word whose IR depends on its pc in any
-// other way is translated at each visit, as before. One per module, kept by Discovery for the plan; not thread-safe
+// other way is translated at each visit, as before. One per module, kept by Discovery for the plan. Prepare makes the facts of every
+// instruction of the functions it is given on the pool's threads; afterwards Fx and the summaries' interpretation of those instructions only
+// read the cache, from any number of threads. An instruction not prepared is made at its first use, on one thread only
 class InsnCache {
 public:
     explicit InsnCache(const module::Image& image);
@@ -31,6 +35,9 @@ public:
     InsnCache(const InsnCache&) = delete;
     InsnCache& operator=(const InsnCache&) = delete;
     const RegFx& Fx(uint64_t pc);  // InstructionFx of the word at pc; RegFx{} where the image has no word
+    // The facts of every instruction of the functions' blocks, the distinct new words translated on the pool; a function whose walk state
+    // (Function::state, when not 0) is the one it was last prepared with is skipped
+    void Prepare(const std::vector<const Function*>& functions, Pool* pool);
     uint64_t Distinct() const;     // distinct words seen
     uint64_t Translations() const; // dynarmic translations made
     struct Impl;                   // summary.cpp
@@ -51,9 +58,10 @@ struct SummaryMemo {
 
 // Fills Function::summary for every function; address_taken must be set already. cache: the module's instruction cache (null: a cache of this
 // call's own); memo: null, or the summaries of earlier runs (Function::state must then name each function's code). rounds and computes, when
-// given, count the fixed point's rounds and the summaries it computed (DiscoverTimes)
+// given, count the fixed point's rounds and the summaries it computed (DiscoverTimes); sweeps, the passes over the functions within the rounds.
+// pool: null (one thread), or the threads the summaries of a round are computed on: the result is the same with any number (summary.cpp, Run)
 void Summarise(const module::Image& image, std::map<uint64_t, Function>& functions, InsnCache* cache = nullptr, SummaryMemo* memo = nullptr,
-               uint64_t* rounds = nullptr, uint64_t* computes = nullptr);
+               uint64_t* rounds = nullptr, uint64_t* computes = nullptr, Pool* pool = nullptr, uint64_t* sweeps = nullptr);
 
 // Fills Function::windows and unpaired_exclusive
 void FindWindows(const module::Image& image, Function& fn);

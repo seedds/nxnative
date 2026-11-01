@@ -52,7 +52,8 @@ constexpr uint32_t kStdRv = 0;
 
 lift::Regs ToRegs(const analysis::RegSet& r);
 
-// The facts for every discovered function; all_entries gives every function a standard entry (nxaot_funcdiff calls any of them)
-Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const lift::Convention& conv, bool all_entries);
+// The facts for every discovered function; all_entries gives every function a standard entry (nxaot_funcdiff calls any of them). threads: the
+// threads its per-function passes run on (0: one per CPU); the plan is the same with any number (README.md, "Phase 5c")
+Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const lift::Convention& conv, bool all_entries, unsigned threads = 1);
 
 }  // namespace nxaot::build

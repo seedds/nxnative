@@ -2203,7 +2203,23 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     }
     t = Clock::now();
     if (!warm) {
-        fresh_plan = MakePlan(image, d, conv, o.all_entries);
+        // The analysis runs on the workers too, the same plan with any number of them; its threads and CPU seconds (discovery's from its
+        // own times, the plan's from the process's) beside the stage line's wall seconds (README.md, "Phase 5c")
+        const auto cpu = [] {
+            struct rusage ru {};
+            getrusage(RUSAGE_SELF, &ru);
+            return static_cast<double>(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) +
+                   1e-6 * static_cast<double>(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec);
+        };
+        const double c0 = cpu();
+        fresh_plan = MakePlan(image, d, conv, o.all_entries, workers);
+        const auto& dt = d.times;
+        char line[256];
+        std::snprintf(line, sizeof line,
+                      "aot: analysis on %u threads: discover CPU %.3f s, plan %.3f s wall, CPU %.3f s; summaries %llu rounds in %llu sweeps",
+                      dt.threads, dt.cpu, Since(t), cpu() - c0, static_cast<unsigned long long>(dt.summary_rounds),
+                      static_cast<unsigned long long>(dt.summary_sweeps));
+        s.notes.push_back(line);
     }
     const Plan& plan = warm ? cached.plan : fresh_plan;
     s.t_plan = Since(t);

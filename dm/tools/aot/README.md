@@ -31,7 +31,7 @@ with no JIT, and print what dynarmic prints. No game runs through it yet, and no
 | Census | [src/analysis/census.cpp](src/analysis/census.cpp) (`nxaot census`) | phase 0's numbers over a raw code blob as `key<TAB>count` lines |
 | Reach | [src/analysis/reach.cpp](src/analysis/reach.cpp) (`nxaot opcodes --reach`) | every entry of dynarmic's A64 decoder table translated with random fields: the opcodes the A64 frontend can emit; `--check` fails when one is not lowered |
 | Module loader | [src/module/](src/module/) (`nxaot module`, `nxaot image`, `nxaot manifest`) | an NRO, or a behaviour image with its manifest (design 1.1, 1.2), as one image keyed by its SHA-256 (1.4): segments, MOD0, the dynamic section, symbols, init and fini arrays, RELA / JMPREL / RELR relocations, `.eh_frame_hdr`, FDEs, LSDAs, data blocks in text; the manifest parser and writer ("Module loader and discovery") |
-| Discovery | [src/analysis/discover.cpp](src/analysis/discover.cpp), [jumptable.cpp](src/analysis/jumptable.cpp), [summary.cpp](src/analysis/summary.cpp) (`nxaot discover`) | design 1.3 over a whole module: function entries from every source with their provenance, a CFG per function, jump tables on the lifted IR, exclusive windows, the summaries of 2.3, the coverage of the text |
+| Discovery | [src/analysis/discover.cpp](src/analysis/discover.cpp), [jumptable.cpp](src/analysis/jumptable.cpp), [summary.cpp](src/analysis/summary.cpp) (`nxaot discover`) | design 1.3 over a whole module: function entries from every source with their provenance, a CFG per function, jump tables on the lifted IR, exclusive windows, the summaries of 2.3, the coverage of the text; on a pool of threads ([parallel.h](src/analysis/parallel.h), `--threads`) with the one-thread result ("Phase 5c") |
 | Reference runner | [src/run/main.cpp](src/run/main.cpp) (`nxaot_run`) | a corpus NRO under dynarmic's A64 JIT with the corpus's SVCs (output, exit, the thread and synchronization SVCs, its guest threads as contexts switched round robin on one JIT: a deterministic interleaving): the corpus's reference output on x86; `--set` writes a symbol before the run, `--fastmem` gives dynarmic direct memory access (the throughput comparison) |
 | Corpus | [corpus/](corpus/) | nine self-checking programs (eight in C, one in C++) with a crt0 of their own, built with devkitA64 and with clang into eighteen committed NROs ("The corpus") |
 | Function mode | [src/lift/lower_calls.cpp](src/lift/lower_calls.cpp), [lifter.h](src/lift/lifter.h) (`FunctionPlan`, `Convention`) | one guest function as one LLVM function of the convention of design 2.3, swifttailcc or ghccc: calls, returns checked against lr, tail calls, the inline caches, svc as a host call, the stores and reloads the summaries allow ("Calls and returns") |
@@ -61,7 +61,7 @@ docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 # configure, build, CTest (the vectors, the crypto vectors for x86-64-v3, the per-operation NaN mode, the reach check, the census, the vectors-current
 # check, discovery over the corpus, the manifest test, the corpus reference run, the fp cases current, the corpus run natively, the per-function
 # differential test, the JIT fallback's three modes, the threaded programs, the safepoint pause test, the pack caches, the indirect calls'
-# reloads and the standard entries' signature, the line tables, functions split for size, tiers by profile, Windows packs); --tmpfs
+# reloads and the standard entries' signature, the line tables, functions split for size, tiers by profile, Windows packs, the analysis on threads); --tmpfs
 # /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on a machine short of disk
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
@@ -83,7 +83,8 @@ packs"). The build tree takes about 74 MB, and the tests' objects and shared obj
 (corpus_native, corpus_funcdiff, corpus_jit, corpus_threads, safepoints, the benchmark) about 30 to 60 MB more. On this repository's development
 machine (8 vCPUs) the CTest run takes about 11 minutes (639 s with ABI 3, 18 tests): the vectors 4 of them, corpus_native 1.4 and corpus_funcdiff
 1.7, corpus_jit, corpus_threads and safepoints 33 s together, cache 20 s, plan 2 s and lines 25 s. Phase 5b's two (20 tests): split 43 s and
-profile 7 s; with `ctest -j2` the whole run took 342 s.
+profile 7 s; with `ctest -j2` the whole run took 342 s. Phase 5c's `analysis_threads` (21 tests): 42 s; the whole run 681 s on a machine other
+builds were loading (cache 16 s).
 
 ## Running the harness and the census
 
@@ -1002,7 +1003,8 @@ CTest's new tests take about 33 s (`corpus_jit`), 11 s (`corpus_threads`) and 7 
 
 Phase 5 (design sections 9.3, 10 and 13): where the pack stage's time went, the causes fixed, the units compiled on worker threads and the
 per-function cache (phase 5a, the first sections below), then the compile stage's rate, functions split for size, units of several functions,
-the analysis cache and tiers by profile (phase 5b, "Phase 5b" below). No game module is on the development machine, so the corpus and a
+the analysis cache and tiers by profile (phase 5b, "Phase 5b" below), then the analysis on the workers (phase 5c, "Phase 5c" below). No game
+module is on the development machine, so the corpus and a
 game-shaped benchmark are measured and the rest is extrapolated per instruction.
 
 ```sh
@@ -1018,11 +1020,14 @@ optimisation and code generation are the units' seconds summed and the others wa
 regions, summary runs, rounds, computed and reused summaries, the distinct words translated); `aot: units <n> (...), workers <n>`; `aot: split
 functions <n> into <p> parts, <t> transfers between parts, joined in <s> s`; with `--profile`, `aot: profile <file>: <s> samples at <o> offsets,
 <x> outside every function`; with `--cache`, `aot: cache <dir>: <h> hits, <m> misses (units; functions <fh> hit, <fm> missed), <r> bytes read,
-<w> bytes written, keys <s> s` and `aot: analysis cache: hit | miss (<why>), <s> s`. `--time-passes` prints LLVM's pass timers (one worker);
+<w> bytes written, keys <s> s` and `aot: analysis cache: hit | miss (<why>), <s> s`; when the analysis ran, `aot: analysis on <n> threads:
+discover CPU <s> s, plan <s> s wall, CPU <s> s; summaries <r> rounds in <s> sweeps` (phase 5c: it runs on the workers). `--time-passes` prints
+LLVM's pass timers (one worker);
 `--ir` writes the lifted IR before the tier's passes, `--ir-opt` after them (what code generation is given). `--no-groups` (one function per
 unit at tiers C and W, as phase 5a), `--no-split` and `--split-above N` are for measurements and tests. `NXAOT_CHECK_PROGRAMS=1` runs every
 cached abstract program of the summaries beside the interpretation of dynarmic's IR it replaces and stops at the first difference;
-`NXAOT_TRACE=1` prints each unit before it is compiled.
+`NXAOT_TRACE=1` prints each unit before it is compiled; `NXAOT_DEBUG_SUMMARIES=1` prints each round of the summaries (its sweeps, the
+functions looked at and computed: "Phase 5c").
 
 **The benchmark** ([tests/gen_bench.py](tests/gen_bench.py)): a C program generated from a seed, built with the corpus's run time and clang
 flags, with unwind tables and no exported symbols but main's: thousands of functions, most of one to three statements (accessors, arithmetic),
@@ -1503,6 +1508,259 @@ of it).
 - **One process per module**: unchanged.
 - **ThinLTO import, devirtualisation, function ordering, LLVM's sample profile at tier H**: open (5 and 6 above).
 
+### Phase 5c
+
+The analysis (discovery and the plan) on the workers, with every result byte for byte the one-thread result and phase 5b's. Measured as
+phase 5b was, on the same machine, which other agents' builds and tests shared during these runs (best of 3; each table says the one-minute
+load average its runs saw where it mattered); checked by CTest (21 of 21, `analysis_threads` new) and the identity checks below. Gap code at
+tier C (design section 10) was not done (6 below).
+
+```sh
+build/aot/nxaot discover <module> [--threads N] [--times]   # the analysis's threads (0 or none: one per CPU); its steps' seconds on stderr
+build/aot/nxaot plan <module> [--threads N]
+python3 dm/tools/aot/tests/test_analysis_threads.py --nxaot build/aot/nxaot --work /tmp/at [--module <nro>]... [--baseline <phase 5b nxaot>]
+```
+
+`nxaot build` runs the analysis on its `--workers` (the jump tables did already) and logs `aot: analysis on <n> threads: ...` (above).
+
+#### 1. Where the single-threaded analysis went
+
+Measured on phase 5b's binary (18054f9) over the 16,000-function benchmark: its stage lines with one worker and with eight (the jump tables
+ran on the workers already), and the summaries, the sources and the plan split by timers added for the measurement (an instrumented build:
+the timers add about a tenth to the summaries; since removed). Seconds:
+
+| Step | 1 worker | 8 workers | What it is |
+|---|---:|---:|---|
+| words | 0.13 | 0.15 | every text word through dynarmic's decoder table (`ClassifyWord`) |
+| walks | 1.91 | 1.83 | the CFGs of the functions walked again, over discovery's 60 rounds |
+| jump tables | 17.34 | 2.85 | 42,515 tries (17,939 skipped), 14,306 regions lifted, 239,041 taken from the memo |
+| summaries | 7.08 | 6.83 | 24 runs (1 skipped), 168 rounds, 57,461 summaries computed, 831,727 from the memo |
+| of which: the instructions' facts | 1.05 | | 537,702 distinct words, four dynarmic translations each (`InsnCache`) |
+| the memo's lookups | 1.38 | | the inputs of 889,188 summaries built and compared |
+| computing | 4.80 | | the blocks' register effects 1.60, liveness 0.05, must-writes 0.19, preservation 2.95 |
+| the rest of the rounds | 0.46 | | the "need" checks, the unions |
+| sources | 1.14 | 1.02 | the gap sweep 0.61, the calls that do not return 0.47, `adr` addresses 0.10, the rest 0.04 |
+| windows | 0.22 | 0.21 | |
+| names, coverage | 0.03 | 0.03 | |
+| the census's FPSR answer | 0.001 | 0.002 | `ReadsFpsr` |
+| plan | 0.64 | 0.61 | the writes' fixed point 0.22, LIVE_AFTER 0.37, RV and the indirect view 0.04 |
+| the analysis | 28.54 | 13.57 | |
+
+With the jump tables on the workers, everything but them ran on one thread: 10.7 of the 13.6 s, the summaries alone half of the analysis.
+
+#### 2. The summaries on the workers
+
+[src/analysis/summary.cpp](src/analysis/summary.cpp) (`Summariser::Run`). A run of the summaries is phase 1's fixed point: rounds over every
+function in address order, each function's summary computed from its code and from the summaries it reads as they are at that moment (its
+callees'; for blr and unbounded br the union over the address-taken functions): Gauss-Seidel, from one start (nothing read or written,
+every function preserving and returning) until a round changes nothing or 64 rounds. The order of the rounds matters because the transfer
+functions are not monotone, so a Jacobi scheme (every function of a round from the last round's summaries) may stop at another fixed point
+or need other rounds. Which ones, in the order from the start toward the end of the iteration:
+
+- **returns**: whether a callee returns decides which of a function's exits are return paths, and its restored set is the intersection over
+  those (`Compute`, the verdicts), so a tail callee found not to return drops an exit and the restored set can grow back; the union over the
+  address-taken functions takes writes, must-writes and preservation from those that return only (`TakenAgg`), so a function found not to
+  return shrinks the union's writes.
+- **`must - restored`** (and `writes - restored`): a callee that stops preserving x19 leaves fewer registers restored in its caller, whose
+  must-writes then grow (x19 written on every path and no longer restored).
+- **the stack slots of the abstract interpretation**: a store through an address the analysis does not know is taken not to reach the save
+  slots (`WriteSlot`), so a callee that now writes SP leaves a later store through SP unknown, and the slot keeps the saved value the store
+  would have overwritten.
+
+The SCC scheme (components of the call graph in topological order, each iterated by one thread) has the same question inside a component
+(its members' order still decides), and the union over the address-taken functions joins every function with blr or an unbounded br to every
+address-taken one: on the 16,000-function benchmark one component holds 4,558 of the 16,276 functions (28 %) and the other 11,718 are alone;
+on the 4,000-function one, 1,191 of 4,088 (counted from `nxaot discover --tsv`'s call and br rows, tail calls left out).
+
+What runs in parallel instead is each round. In round r, function i's summary is a function of its own code (its walk state and exported
+flag, fixed during the run), of the round-r summaries of the functions before it in address order that it reads, and of the round-(r-1)
+summaries of the others, itself included: a lower-triangular system, which has one solution in whatever order its equations are solved. `Run`
+solves it on the pool: the functions in levels (past every callee before them in address order, and a function with blr or an unbounded br
+past the address-taken functions before it that have neither, so that the union it reads has their summaries of the sweep), a level's
+functions at once, the union over the address-taken functions before a function taken from what the round knows when its level starts, and
+sweeps over the levels until one finds every function's inputs those of its last computation. After a sweep only a union can be stale (an
+address-taken function with blr computed in the same level or a later one); a sweep that computes nothing has found the round's solution,
+which is the address-order loop's round, so the rounds, the stop and the 64-round limit are the loop's. A function is looked at in a sweep
+only when something its inputs read changed at or after its last look (epochs numbered by the rounds' starts and the levels' steps, the same
+on any number of threads); a level's stale functions are found first and the pool is woken for 32 or more; a function whose inputs were seen
+in an earlier run takes that run's summary from the memo, as in phase 5a. The summaries' counts are the same on any number of threads: on
+the 16,000-function benchmark 168 rounds (phase 5b's) in 360 sweeps, 58,544 summaries computed against phase 5b's 57,461 (a sweep computes
+some functions with a union that is not final yet), 530,345 from the memo.
+
+Before a run, the instructions of every function whose walk changed since the last run get their facts (`InsnCache::Prepare`): the new
+distinct words are found per shard of words, translated by dynarmic on the pool (four translations each) and entered shard after shard;
+afterwards the summaries only read the cache. Measured and changed on the way, each keeping the result: the abstract interpretation joined a
+state into a successor by copying both states and comparing them, now in place (`State::JoinFrom`); the program of an instruction filled 24
+pairs of values before running at every instruction interpreted, now left uninitialised until written (the preservation analysis 2.08 →
+1.46 s on one thread); a function's inputs are compared with its last ones without building them (`SameInputs`); the callees of each
+function are found on the pool. Computing the 16,000-function benchmark's summaries took 4.80 s on one thread in phase 5b (the blocks'
+effects 1.60, preservation 2.95), 2.81 s now (1.09 and 1.46; both instrumented).
+
+#### 3. Discovery's other steps and the plan
+
+One pool of threads per discovery ([src/analysis/parallel.h](src/analysis/parallel.h): the calling thread and `--workers` - 1 others, items
+handed out in chunks of neighbouring indices from an atomic counter), used by every step whose items are independent; each item writes only
+its own results, which are applied in index order afterwards, so that nothing depends on which thread ran what:
+
+- **The walks** (`WalkDirty`, `Walk`): the functions to walk again, on the pool; a walk reads the image, the set of functions and the
+  summaries and writes its own function, its walk count and state, and its own lists of the entries code names (`bl` and tail-call targets)
+  and of the text addresses `adr` / `adrp` + `add` build, which are then applied in function order, as walks one after another left them.
+- **The words** (the constructor): every text word classified (`ClassifyWord`, dynarmic's decoder table) in chunks.
+- **The gap sweep** (`Gaps`, `Covered`): the covered words marked per function (their text blocks lie in their own `[entry, limit)`), the
+  candidates found in chunks (a function of the covered words and the words alone), then taken in address order as before (`Owner` and
+  `AddEntry` read what the earlier candidates added).
+- **The calls that do not return** (`CutNoreturn`): each function checked on its own; the functions the last summaries cover and whether each
+  returns are kept in address order (they rebuilt a `std::set` of every entry at each call, and every check looked the callee up in it and
+  in the function map; the summaries change only at the next run, after which this runs again): the sources' seconds on one thread 0.89 →
+  0.78 on the 16,000-function benchmark, 0.25 → 0.18 with 8 threads for this step alone.
+- **The jump tables** (`Tables`): on the same pool, one function at a time (their costs differ by orders of magnitude).
+- **The windows** (`FindWindows`): each function's own.
+- **The plan** ([src/build/plan.cpp](src/build/plan.cpp), `MakePlan(..., threads)`): every function's own writes on the pool; the writes'
+  fixed point over the call graph (a union from each function's own writes: rounds in which every function takes its callees' sets of the last
+  round reach the least fixed point above the start, which rounds seeing this round's sets in address order reached; the rounds are not
+  recorded); LIVE_AFTER's rounds (already rounds that apply their additions at the end: `live_after_rounds`, which the analysis cache keeps,
+  is the same) with each function passed on the pool into its own additions, joined after the round. RV and the indirect view stay on one
+  thread (0.04 s).
+
+Left on one thread, measured: the sources (FDEs, symbols, the dynamic section, relocations: 0.016 s), the function boundaries (`Limits`), the
+landing pads, the pending entries, the `adr` addresses (0.095 s), Verify (0.025 s), the census's FPSR answer in the pack stage (`ReadsFpsr`,
+0.002 s), the names, the coverage and the oracle (0.03 s).
+
+#### 4. Identity
+
+The results are the same on any number of threads by construction (every parallel step writes only its own items' results, applied in index
+order; each round of the summaries has one solution), and checked byte for byte:
+
+- CTest `analysis_threads` ([tests/test_analysis_threads.py](tests/test_analysis_threads.py)): for every corpus NRO, the synthetic game module
+  and the host-function module's two (21 modules), `nxaot discover --tsv` (its TSV and its printed lines, with symbols as a source and as the
+  oracle) and `nxaot plan` with 1 thread and with 8; `nxaot build --cache` with 1 worker and with 8, each into a cache of its own: the analysis
+  cache's entry (discovery's view and the plan, under the same key) and the shared object: 5 outputs per module, 105 in all, the same.
+- Against phase 5b's binary (`--baseline`, 8 outputs per module): the same discover and plan outputs for the 21 modules and both benchmarks
+  (184 outputs); the corpus's 18 packs and both benchmarks' packs built by both with 8 workers, byte for byte the same, and their analysis
+  entries' payloads the same (the key differs: it holds the tool's SHA-256; the 16,000-function benchmark's payload is 1,576,746 bytes).
+- Both benchmarks (`--module`, by hand: the 16,000-function benchmark's packs take minutes with one worker): the 8 outputs the same.
+- CTest `cache`: a warm repack runs no analysis; a pack after one changed word runs it on the given workers and writes the entry a pack with
+  one worker writes.
+- The `manifest`, `discover`, `plan` and `lines` CTests pass unchanged, and the other 16.
+
+#### 5. The warm path and a partial miss
+
+A warm repack with nothing changed reads the analysis from the cache and runs none of it (phase 5b); CTest `cache` now also checks that no
+analysis ran (no `aot: analysis on` line). The analysis cache is keyed by the module's image, its manifest file and the tool, so one changed
+instruction word misses the whole analysis: discovery is a fixed point over the whole module (a word can change a function's walk, its
+summary and through the unions every summary that reads it), and nothing smaller than the module is a sound key for it. What the key
+invalidates, then, is the analysis, which runs again on the workers, and the unit holding the changed function, which compiles again; every
+other unit is a hit. CTest `cache` checks this on fnptr-gcc with one `movz` changed: one unit missed, the analysis missed and run on 4
+threads, its entry byte for byte the one a pack of the same copy with one worker writes. Measured on the 16,000-function benchmark with one
+`movz` changed past the middle of its text (the units of the original in the cache):
+
+| 16,000-function benchmark, 8 workers, seconds | phase 5b: whole pack | its analysis | phase 5c: whole pack | its analysis |
+|---|---:|---:|---:|---:|
+| cold, into a new cache (one run) | 40.97 | 13.18 | 35.12 | 6.20 |
+| warm repack (the analysis read from the cache, every unit a hit) | 0.83 | 0.07 | 0.82 | 0.06 |
+| one `movz` changed (the analysis missed and run again; the changed unit compiled in the first of the three runs, a hit in the other two) | 14.20 (first 14.46) | 13.34 | 7.05 (first 7.19) | 6.44 |
+
+A repack after a small change of the module costs half what it did, nearly all of it the analysis, now on the workers; carried over per
+instruction as below, Monster Hunter Rise's `main` would take its analysis's 2.9 to 4.0 minutes on the reference machine (5.1 to 7.1 in
+phase 5b) plus the warm repack's 27 to 37 seconds, against the warm repack's target of a minute (which the design sets for an unchanged
+module).
+
+#### 6. Gap code at tier C: not done
+
+Left as phase 5b left it, with what this phase found: the game-shaped benchmark has no gap code (all 16,276 functions of the 16,000-function
+one have an FDE; `summary provenance ... gap 0/0`), and neither has the corpus, so nothing here measures it; the change belongs to the units'
+tiers in pack.cpp (`Units`, the tiers by profile), which another change was editing during this phase. Games without FDEs (FINAL FANTASY
+RESONANCE's 94 MB, 95 % without them) are where it matters.
+
+#### The analysis and the packs after phase 5c
+
+The analysis alone (`nxaot discover --times` for its steps, `nxaot plan` for discovery and the plan together), best of 3 (one run with one
+thread), phase 5b's binary and this one in the same session on a machine with no other work (the load average, 1.2 to 4.5, is the
+measurements' own); seconds, the process's CPU seconds, its peak memory:
+
+| Seconds | 16,000: phase 5b, 8 workers | phase 5c, 1 thread | phase 5c, 8 threads | 4,000: phase 5b, 8 workers | phase 5c, 1 thread | phase 5c, 8 threads |
+|---|---:|---:|---:|---:|---:|---:|
+| words | 0.13 | 0.14 | 0.16 | 0.11 | 0.08 | 0.10 |
+| walks | 1.82 | 1.99 | 0.38 | 0.41 | 0.41 | 0.14 |
+| jump tables | 2.93 | 18.35 | 2.43 | 0.95 | 4.11 | 0.90 |
+| summaries | 6.71 | 5.53 | 2.64 | 1.88 | 1.73 | 1.53 |
+| sources | 0.98 | 0.79 | 0.52 | 0.18 | 0.15 | 0.14 |
+| windows | 0.22 | 0.21 | 0.03 | 0.05 | 0.05 | 0.02 |
+| names, coverage | 0.01 | 0.03 | 0.03 | 0.01 | 0.01 | 0.01 |
+| discovery, wall (CPU) | 13.39 (30.81) | 27.38 (27.02) | 6.55 (29.62) | 3.67 | 6.63 (6.53) | 2.94 (8.93) |
+| discovery and plan (`nxaot plan`), wall (CPU) | 13.61 (30.86) | 27.55 (27.51) | 6.59 (30.28) | 3.78 (8.72) | 6.73 (6.71) | 2.91 (8.94) |
+| instructions per second (`nxaot plan`) | 159,000 | 78,500 | 328,100 | 141,100 | 79,300 | 183,300 |
+| peak memory (`nxaot plan`) | 359 MiB | 330 MiB | 341 MiB | 136 MiB | 127 MiB | 134 MiB |
+
+Phase 5b's steps are those of its fastest pack below (its `aot: discover seconds` line; `nxaot discover` of phase 5b prints no times). On the
+16,000-function benchmark the analysis is 2.1 times as fast with 8 workers as phase 5b's (6.59 against 13.61 s) and 4.2 times its own one
+thread, for the same CPU seconds (about 30); the jump tables, parallel already, are now one of its two largest steps with the summaries. The
+4,000-function benchmark gains less (1.3 times phase 5b's alone, 1.5 inside the packs below; 2.3 times its one thread): its summaries take
+240 rounds in 504 sweeps (10 rounds per run where the larger one takes 7) over a quarter of the functions, and the rounds' and levels' fixed
+costs (a pass over the stale functions, the unions' prefixes, a wake of the pool) weigh more; they shrink relative to the work as a module
+grows. Peak memory does not grow (the summaries' last inputs per function against phase 5b's per-run bookkeeping).
+
+Whole packs at tier W, no cache, phase 5b's binary and this one interleaved run by run, best of 3 by the whole pack (the 4,000-function
+benchmark with one worker: one run each); seconds; "analysis" is discovery and the plan (wall; this binary's CPU seconds of them in
+parentheses, from `aot: analysis on`), "compile" the units' wall time; peak memory over the three runs:
+
+| Pack | phase 5b: analysis | compile | whole pack | peak memory | phase 5c: analysis (CPU) | compile | whole pack | peak memory |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16,000-function benchmark, 8 workers | 13.43 | 27.35 | 41.33 | 445 .. 459 MiB | 6.68 (31.6) | 28.32 | 35.37 | 400 .. 417 MiB |
+| 4,000-function benchmark, 8 workers | 3.70 | 6.74 | 10.60 | 234 .. 242 MiB | 2.40 (8.2) | 6.86 | 9.38 | 228 .. 244 MiB |
+| 4,000-function benchmark, 1 worker | 6.64 | 62.63 | 69.41 | 125 MiB | 6.71 | 61.84 | 68.70 | 126 MiB |
+| switch-gcc, 8 workers | 0.14 | 0.50 | 0.68 | 137 .. 143 MiB | 0.17 (0.19) | 0.52 | 0.72 | 136 .. 141 MiB |
+| fnptr-gcc, 8 workers | 0.08 | 0.10 | 0.19 | 90 .. 91 MiB | 0.08 (0.08) | 0.10 | 0.21 | 90 .. 91 MiB |
+
+The 16,000-function benchmark's pack takes 14 % less (the analysis from a third of it to a fifth), the 4,000-function one's 12 %. The
+compile stage is the same code and the same units (their wall times move by a few percent between interleaved runs). A small NRO pays
+about 0.02 to 0.03 s more for its analysis: two pools of threads made and woken (discovery's and the plan's) for work of a few
+milliseconds (switch-gcc's analysis: 0.14 to 0.18 s in phase 5b, 0.16 to 0.20 now). Peak memory with 8 workers stays where phase 5b had
+it: the 4,000-function benchmark between 228 and 244 MiB in both binaries' runs (phase 5b's table: 232), the 16,000-function one lower
+(400 .. 417 against 445 .. 459 MiB; not looked into).
+
+#### Extrapolation to the games after phase 5c
+
+Phase 5b's model and assumptions (the benchmark's rates per instruction, Mario 8.5 and Monster Hunter Rise 31 million instructions, the
+reference machine's core at r = 0.5 to 0.7 of one of this machine's vCPUs and its 8 threads as 5 of them), with the analysis no longer one
+thread's: its one-thread and 8-thread times on the 16,000-function benchmark (`nxaot plan`, discovery and the plan: 27.55 and 6.59 s; phase
+5b's 28.54, from its one-worker pack, and 13.61) split it into a serial part S and a parallel part P (T1 = S + P, T8 = S + P / 8: S = 3.6 s
+and P = 24.0 s now, 11.5 and 17.1 s in phase 5b, where only the jump tables ran on the workers), and on the reference machine S takes S / r
+and P takes P / (5 r). The compile stage is phase 5b's (its code did not change): 77,700 instructions per second here with 8 workers at tier W,
+132,300 with a profile of 10 % (H) and 90 % (C), 52,800 in the max mode, divided by 5 r / 8 there. Phase 5b's analysis, measured in the same
+session, goes through the same model in the column "after phase 5b" (its figures are within 0.1 to 0.5 minutes of phase 5b's own table, which
+took the 4,000-function benchmark's rates and the whole analysis as one thread's). These are extrapolations, not measurements: no game module
+and no reference machine is here.
+
+| Pack | Mode | This machine, 8 workers | Reference machine (r = 0.7 .. 0.5) | after phase 5b | Target |
+|---|---|---:|---:|---:|---:|
+| Mario `main` and `sdk` | balanced, no profile (tier W) | 2.3 min | 5.0 .. 6.9 min | 5.6 .. 7.8 min | at most 3 min |
+| Mario `main` and `sdk` | balanced with a profile (10 % H, the rest C) | 1.5 min | 3.2 .. 4.5 min | 3.8 .. 5.4 min | at most 3 min |
+| Mario `main` and `sdk` | max (H+) | 3.1 min | 6.9 .. 9.7 min | 7.5 .. 10.5 min | at most 30 min |
+| Monster Hunter Rise `main` | balanced, no profile (tier W) | 8.2 min | 18.1 .. 25.3 min | 20.3 .. 28.4 min | at most 10 min |
+| Monster Hunter Rise `main` | balanced with a profile (10 % H, the rest C) | 5.5 min | 11.8 .. 16.5 min | 14.0 .. 19.6 min | at most 10 min |
+| Monster Hunter Rise `main` | max (H+) | 11.4 min | 25.2 .. 35.3 min | 27.4 .. 38.4 min | at most 30 min |
+
+The analysis on the reference machine falls from 1.4 .. 2.0 to 0.8 .. 1.1 minutes for Mario and from 5.1 .. 7.1 to 2.9 .. 4.0 for Monster Hunter
+Rise; with a profile it is now a quarter of a balanced pack (Mario 47 of 194 s at r = 0.7), where it was more than a third. Still not met:
+the balanced packs (Mario with a profile 1.1 to 1.5 times its 3 minutes, Monster Hunter Rise 1.2 to 1.7 times its 10), now bounded by the
+compile stage at tier C and H (three quarters of the time), and Monster Hunter Rise's max pack at r = 0.5. Met as before: Mario's max pack,
+both warm repacks, and now Monster Hunter Rise's max pack at r = 0.7.
+
+#### What is left
+
+- **The jump tables** are now the analysis's largest part on the workers (their regions lifted and simplified by LLVM: 17 of the
+  16,000-function benchmark's 28 seconds of discovery on one thread); they were parallel already, and their CPU is unchanged.
+- **The summaries' runs**: 24 runs of up to 7 rounds each on the 16,000-function benchmark, every run from the fixed start (a run that
+  started from the last run's summaries could end at another fixed point: the transfer functions are not monotone, 2 above); the memo makes
+  most of a later run's functions lookups.
+- **The memo's memory**: per function up to 8 sets of inputs (2 + 7 words per callee) with their summaries, and now the inputs of each
+  function's last computation; at Monster Hunter Rise's estimated 600,000 functions that is some hundreds of MiB, not measured on a module of
+  that size.
+- **Gap code at tier C** (6 above), **code generation** at tier W, **the cache across game updates**, **one process per module**, **ThinLTO
+  import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5b left them.
+- The runner [tests/run_aot_tests.sh](tests/run_aot_tests.sh) lists its tests by hand and does not run `analysis_threads` yet.
+
 ## The lock file
 
 [nxaot.lock](nxaot.lock) names the LLVM release (`18.1.3`) and the dynarmic commit. The configure step stops when the LLVM package differs, or when
@@ -1658,4 +1916,4 @@ The phases of design section 14, and where this folder stands:
 | 1. Skeleton | decoding, discovery, lifting of integer / memory / branch / call code, state block, dispatcher, SVC path, vector harness, calling-convention benchmarks | **done** except what follows: the lifter (0 mismatches over 24,400 integer vectors), the module loader, discovery, the summaries; function mode with the convention of 2.3 in two LLVM mappings (swifttailcc, the default by the measurements, and ghccc for preserve_none, which LLVM 18.1 lacks), calls, returns checked against lr, tail calls, `pending` propagation with resume points at setjmp continuations and landing pads, the correctness mode; jump tables as switches, inline caches, standard entries, the lookup table, the miss path; `nxaot build` (tiers C, W, H, H+; the balanced and max modes; an object with the lookup table, function map and line table, a shared object by lld); `nxaot_host` (the arena below 2^39, the SVC path, the counter, faults through the line table); the corpus natively in both conventions and the correctness mode, equal to dynarmic and to the expected output; nxaot_funcdiff on every corpus function; the measurements ("Measurements"). Not done: the corpus natively on ARM64 hardware (an Apple-silicon Mac), one tier per function and profiles (phase 5), ThinLTO, functions split for size, the oracle-T / J / W comparisons, the pack throughput targets of section 10 (not met: "Pack throughput") |
 | 2. FP and SIMD | every FP, NEON and crypto lowering, NaN chains | every opcode the A64 frontend emits lowered; 0 mismatches over the committed vectors and 7,000,000 random floating-point and SIMD ones (10^6 per class for seven of the eight classes, `fp_seq` not completed; not the 10^8 of the acceptance); the chain checks measured. Not done: the row-13 FZ slow path for the basic operations, inline estimates, combined escape checks, the run-time helpers in the host |
 | 3. Control flow and JIT | resume points, `pending`, safepoints, dynarmic integration | **done** except what follows: the JIT fallback on dynarmic unmodified (`dm_jit_create` / `dm_jit_run` / `dm_jit_halt`, design 11's configuration, the stops at compiled entries and call sites' returns through the code reader, the hand-over measured), every case of section 11 handed to it (the dispatcher's misses, branches to no entry, FPCR away from the specialisation, untranslated encodings, code that runs into no entry, refused functions, continuations with no native frame), the driver that calls compiled entries natively and propagates non-local transfers; C++ exceptions through LSDA landing pads with a personality-free unwinder, fibers and a return past the caller in the corpus; guest threads with the thread and synchronization SVCs, per-thread state blocks, native stacks and JIT instances, the shared monitor; safepoint polls and the pause protocol with the pause test; the three JIT modes, the threads and the pause test in CTest. The acceptance: the exception, longjmp and thread corpus passes natively, in the JIT and with no JIT where none is needed; `--jit-all` and the compiled runs print the same lines; the pause test passes (CTest `corpus_jit`, `corpus_threads`, `safepoints`). dm/host's side done for the corpus (`dm/host/aot_*.c`, CTest `t_aot_host`; its open items are in the list at the end of "Threads and safepoints"). Not done: the exactness of a JIT target's callee-saved registers is assumed (a compiled caller keeps what the union of address-taken functions preserves across an indirect call); the corpus has no untranslated encoding, no refused function and no run-off into a non-entry (those hand-overs are built and not run); priority and core of threads (FIFO order, no affinity), Horizon's other synchronization objects in this run time (events, condition variables: SignalProcessWideKey / WaitProcessWideKeyAtomic; dm/host's thread layer has them); the discovery gap except-gcc shows (a halfword jump table whose base is set before its loop) |
-| 4. to 6. | games on the Intel Mac, performance, breadth | phase 5's first half, pack throughput, done ("Pack throughput": the stages measured and logged, the analysis's causes fixed, compile units on workers, the per-function cache; section 10's targets extrapolated and not met; what is left is phase 5b's); the rest not started. Prepared for phase 4: the host's run time of packs (dm/host/aot_*.c; Linux checked by `t_aot_host`, Windows written and not run (the packs it loads, DLLs, are made: "Windows packs"), the Intel Mac not built: the aot files are CMake's, and aot_fault.c reads Linux's signal context). Phase 4's first half, without a game ("A game module in the host"): `patch_nso.py --aot` with its manifest checked against nxaot's reader and discovery, the loader's game-module path (manifest, image, gates, packs), NSO decompression on that path (the rewriter's, as for Apple: nothing in the host), host functions and unimplemented imports bound into a module's GOT, `be_guest_map` / `be_guest_unmap` from the memory SVCs; CTest `t_aot_module` and `t_guest_map`. Done since, in nxaot (ABI 3): the lifter's calls of the observation gates and spin waits (design 1.1; the descriptor's gate sites, checked by the host against the manifest's rows), the frame step's aux region lifted as code of the functions that branch into it, the standard entries' common signature (calls between packs bound in inline caches, no JIT hand-over), the line table nxaot's own and read correctly by both readers (CTest `lines`). Still to come for a first game module: NROs on the game-module path, thunks for hle_table.c's libc passthrough, main.c's start sequence through `dm_guest_call`, a host program for x86-64, Boost in the host's image for the JIT fallback (some of these are the host's and done since there: docs/design/migration-status.md) |
+| 4. to 6. | games on the Intel Mac, performance, breadth | phase 5's first half, pack throughput, done ("Pack throughput": the stages measured and logged, the analysis's causes fixed, compile units on workers, the per-function cache; section 10's targets extrapolated and not met; then phase 5b (the compile stage's rate, functions split for size, groups of functions, the analysis cache, tiers by profile) and phase 5c (the analysis on the workers, byte for byte the one-thread analysis): "Phase 5b", "Phase 5c"); the rest not started. Prepared for phase 4: the host's run time of packs (dm/host/aot_*.c; Linux checked by `t_aot_host`, Windows written and not run (the packs it loads, DLLs, are made: "Windows packs"), the Intel Mac not built: the aot files are CMake's, and aot_fault.c reads Linux's signal context). Phase 4's first half, without a game ("A game module in the host"): `patch_nso.py --aot` with its manifest checked against nxaot's reader and discovery, the loader's game-module path (manifest, image, gates, packs), NSO decompression on that path (the rewriter's, as for Apple: nothing in the host), host functions and unimplemented imports bound into a module's GOT, `be_guest_map` / `be_guest_unmap` from the memory SVCs; CTest `t_aot_module` and `t_guest_map`. Done since, in nxaot (ABI 3): the lifter's calls of the observation gates and spin waits (design 1.1; the descriptor's gate sites, checked by the host against the manifest's rows), the frame step's aux region lifted as code of the functions that branch into it, the standard entries' common signature (calls between packs bound in inline caches, no JIT hand-over), the line table nxaot's own and read correctly by both readers (CTest `lines`). Still to come for a first game module: NROs on the game-module path, thunks for hle_table.c's libc passthrough, main.c's start sequence through `dm_guest_call`, a host program for x86-64, Boost in the host's image for the JIT fallback (some of these are the host's and done since there: docs/design/migration-status.md) |

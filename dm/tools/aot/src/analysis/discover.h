@@ -155,7 +155,8 @@ struct DiscoverOptions {
     bool symbols = true;          // take STT_FUNC symbols as a source (false: --symbols-as-oracle, they are only compared with)
     unsigned max_table = 4096;    // the most entries a jump table may have
     unsigned region_depth = 12;   // the dominators of a br block a jump-table region may start at
-    unsigned threads = 0;         // the threads jump tables are tried on (the result is the same with any number); 0: one per CPU
+    unsigned threads = 0;         // the analysis's threads: walks, jump tables, summaries, windows, scans (the result is the same with any
+                                  // number: README.md, "Phase 5c"); 0: one per CPU
 };
 
 // Where discovery's time goes (seconds of each step over all rounds; `nxaot build` and `nxaot discover --times` print them)
@@ -167,14 +168,17 @@ struct DiscoverTimes {
     double sources = 0;    // the other steps: sources, pads, pending entries, addresses, the gap sweep, the no-return cuts
     double windows = 0;    // exclusive windows
     double finish = 0;     // names, coverage, the oracle
+    double cpu = 0;        // the process's CPU seconds over the whole discovery (every thread's)
     unsigned summarise_runs = 0;     // Summarise calls
     unsigned summarise_skipped = 0;  // calls not made: nothing they read had changed since the last
     uint64_t summary_rounds = 0;     // fixed-point rounds over all of them
+    uint64_t summary_sweeps = 0;     // passes over the functions' levels within those rounds (summary.cpp, Run)
     uint64_t summary_computes = 0;   // summaries computed over all of them
     uint64_t summary_reused = 0;     // summaries taken from the memo of earlier runs (summary.h, SummaryMemo)
     uint64_t distinct_words = 0;     // distinct instruction words the summaries translated (InsnCache)
     uint64_t translations = 0;       // dynarmic translations they made
     uint64_t regions = 0, table_tries = 0, table_tries_skipped = 0, regions_reused = 0;  // Discovery's counts of the same names
+    unsigned threads = 1;            // the threads the analysis ran on (DiscoverOptions::threads)
 };
 
 class InsnCache;  // src/analysis/summary.h
@@ -194,5 +198,9 @@ struct Discovery {
 };
 
 Discovery Discover(const module::Image& image, const DiscoverOptions& options = {});
+
+// The times as one line: "threads N; seconds classify .. walk .. tables .. (tries ..) summaries .. (runs .., rounds .., sweeps .., ...) sources ..
+// windows .. finish ..; CPU .." (nxaot discover --times)
+std::string TimesLine(const DiscoverTimes& t);
 
 }  // namespace nxaot::analysis

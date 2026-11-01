@@ -44,6 +44,7 @@ class Suatom(unittest.TestCase):
 # S2R R40, SR_TID.X; STS.128 [R40.X16 + 0x500], R24 as Mario Kart World's froxel compute shader fd413f04f59c161e encodes it (stride 78..80 = 3, X16); EXIT
 S2R_TID = (0x000fe20000002100, 0x0000000000287919)
 STS128_X16 = (0x000fe2000000cc00, 0x0005001828007388)
+STRIDE = 3 << 14   # the stride field, bits 78..80 of the instruction (half-open: 78 and 79), in the high word
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
@@ -57,7 +58,7 @@ class SharedStride(unittest.TestCase):
         self.assertRegex(self.store(STS128_X16[0]), r'<< (uint\()?4')
 
     def test_x1_keeps_the_register(self):
-        self.assertNotRegex(self.store(STS128_X16[0] & ~(3 << 14)), r'<< (uint\()?4')
+        self.assertNotRegex(self.store(STS128_X16[0] & ~STRIDE), r'<< (uint\()?4')
 
 
 if __name__ == '__main__':

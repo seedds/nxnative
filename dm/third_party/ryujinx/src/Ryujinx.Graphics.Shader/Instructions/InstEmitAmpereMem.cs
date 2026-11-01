@@ -311,7 +311,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // ---- local and shared memory ----
 
         // The 32-bit address of a local / shared access: Ra plus the uniform register (at urLo in the uniform form, bit 91). A shared access scales Ra by
-        // the stride at 78..80 (X1, X4, X8, X16; NAK's OffsetStride): Mario Kart World's froxel compute shaders index vec4 slots as LDS.128 [Ra.X16 + imm]
+        // the stride at 78..80 (0..3: X1, X4, X8, X16). Inferred, not documented: from NAK's encoder as recalled (OffsetStride) and Mario Kart World's SASS,
+        // whose 32-bit LDS / STS carry 1 (X4) and 128-bit ones 3 (X16), as its froxel compute shaders index vec4 slots as LDS.128 [Ra.X16 + imm]
         private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo, bool shared)
         {
             Operand addr = Register(x.Ra, RegisterType.Gpr);

@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Mode: **serial** (the user's answer, 2026-11-01). One author at a time in the main checkout `/Users/lego/github/switch/nxnative-nx2`.
+- Mode: **serial** (the user's answer, 2026-11-01). One author at a time in the main checkout `/Users/lego/github/switch/nxnative` (the worktree `nxnative-nx2` until 2026-11-01).
 - Branch: `feature/2026-11-01-mkw-profile` from `origin/nx2` (`c805059a`), rebased onto `origin/main` (`cd859c38`) after Task 6; the PR goes to `main` (the user's decision, 2026-11-01). Every commit: `git -c user.name=seedds -c user.email=seedds@gmail.com commit` (AGENTS.md). No push, no PR without the user's command.
 - Commit order: each general fix (host, translator, tools) is its own commit, before the profile and docs commits that use it. Commit subjects follow the repository's style, a plain sentence (for example `c805059a Donkey Kong Bananza plays on the Mac: terrain through loaded pointers, …`), not Conventional Commits. The approved plan is the ask that AGENTS.md ("Commit only when asked") requires for the commits it names.
 - Dump: `/Users/lego/github/switch/mkw/` (`base/` = 1.0.0, `updates/917504/` = 1.8.0). Build folder `/Users/lego/github/switch/mkw/0400C3F00006E000_build`, work folder `/Users/lego/github/switch/mkw/0400C3F00006E000-work`. Nothing from the game in the repository; no key values printed.

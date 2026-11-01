@@ -4,8 +4,8 @@ State on 2026-11-01. Plan: `docs/superpowers/2026-11-01-mkw-profile-plan.md`. PR
 
 ## Where the work is
 
-- Branch `feature/2026-11-01-mkw-profile`, rebased onto `origin/main` (`cd859c38`). Not pushed. The pull request goes to `main`.
-- Worktree: `/Users/lego/github/switch/nxnative-nx2`. The name is historical: the branch is not on `nx2`.
+- Branch `feature/2026-11-01-mkw-profile`, rebased onto `origin/main` (`cd859c38`, still the newest upstream main). Not pushed. The pull request goes to `seedds/nxnative` `main`, from the GitHub account `legoxz` (its fork).
+- Checkout: the main checkout `/Users/lego/github/switch/nxnative` (moved from the worktree `nxnative-nx2` on 2026-11-01; that worktree is removed).
 - Run ledger (git-ignored): `.superpowers/sdd/2026-11-01-mkw-profile-plan/progress.md`, with the task reports and the review reports in the same folder.
 - Python for every tool: `.superpowers/sdd/2026-11-01-mkw-profile-plan/py`. It is CPython 3.14 with lz4, capstone and fonttools from the local uv cache. Homebrew `python3` 3.15 has none of them.
 - Shader tools need `DOTNET_ROOT=/opt/homebrew/opt/dotnet/libexec`.
@@ -53,4 +53,4 @@ The external BenQ monitor on Thunderbolt drops its link during heavy game runs (
 
 ## Resume
 
-In a new session in the worktree: `implementuj docs/superpowers/2026-11-01-mkw-profile-plan.md`. The ledger marks done tasks. Start with open item 1.
+In a new session in `/Users/lego/github/switch/nxnative`: `implementuj docs/superpowers/2026-11-01-mkw-profile-plan.md`. The ledger marks done tasks. Start with open item 1.

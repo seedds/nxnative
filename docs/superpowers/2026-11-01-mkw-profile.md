@@ -13,7 +13,7 @@ Why: Mario Kart World is the second Switch 2 game after Donkey Kong Bananza (`04
   - `base/`: version 1.0.0. `exefs/` has main, main.npdm, rtld, sdk, subsdk0. `romfs/`.
   - `updates/917504/`: version 1.8.0. `exefs/` has main, main.npdm, rtld, sdk, subsdk0, subsdk1. `romfs/`.
 - Build IDs of 1.8.0, from the handover and #834's `game.tsv`: main `d00e4f399e411d0613aa8d26b1c02fef`, sdk `7a68b13d88183767fb9c7babffe89f3d`, subsdk0 `746302f49f095cfca3d2188423c2bd77`, subsdk1 `8dec9c0b1bed821364e77b10a07b9a28`. The first task reads them from the dump's NSOs and compares.
-- Repository: worktree `/Users/lego/github/switch/nxnative-nx2` on `origin/nx2` (`c805059a`).
+- Repository: started in the worktree `/Users/lego/github/switch/nxnative-nx2` on `origin/nx2` (`c805059a`); now the main checkout `/Users/lego/github/switch/nxnative` on `origin/main`.
 - Precedent: Donkey Kong Bananza, the first Switch 2 game here. Its note `dm/games/040074A01BF12000/README.md`, its profile, its commits `aca482f8..c805059a`, its build folder `/Users/lego/github/switch/dkb/040074A01BF12000_build` and its `/Users/lego/github/switch/dkb/run.sh`.
 - PR #834 (`origin/pr834`): facts about the game only. See Anti-goals.
 
@@ -80,7 +80,7 @@ Source: `git show origin/pr834:dm/games/0400C3F00006E000/README.md` and `game.ts
 ## Decisions
 
 - **Scope** (the user's answer): playable races on the Mac, then the games table row and the PR.
-- **Branch and PR:** the branch `feature/2026-11-01-mkw-profile`, started from `origin/nx2` and rebased onto `origin/main` (`cd859c38`) after upstream merged `nx2` into `main` (the user's decision, 2026-11-01). One PR into `main` at the end. Commits as `seedds` (`git -c user.name=seedds -c user.email=seedds@gmail.com commit`, AGENTS.md). Push and the PR only on the user's command.
+- **Branch and PR:** the branch `feature/2026-11-01-mkw-profile`, started from `origin/nx2` and rebased onto `origin/main` (`cd859c38`) after upstream merged `nx2` into `main` (the user's decision, 2026-11-01). One PR into `main` at the end. Commits as `seedds` (`git -c user.name=seedds -c user.email=seedds@gmail.com commit`, AGENTS.md). Push and the PR only on the user's command; the PR comes from the GitHub account `legoxz`.
 - **Commit order:** each general fix (host, translator, tools) is its own commit, before the profile and docs commits that use it. Then a commit can be reverted alone if it regresses another game.
 - **Folders:** the build folder `/Users/lego/github/switch/mkw/0400C3F00006E000_build` (the default of `pack_dump.py`) and the work folder `/Users/lego/github/switch/mkw/0400C3F00006E000-work`, beside the dump. Donkey Kong Bananza's are under `/Users/lego/github/switch/dkb/` the same way. The game's folder is the NSP folder of AGENTS.md.
 - **NVN2 API version:** a general rule before a profile key. The task that meets the game's check reads the checks of both games in their binaries. If one answer satisfies both (major 231 and the larger minor), the host gives it for every Switch 2 SDK, with the comment at `hle_nvn.c:186-187` updated. The regression run checks Donkey Kong Bananza. `device_api` goes into the profile only if no general answer satisfies both games.

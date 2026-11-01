@@ -170,11 +170,10 @@ def tg_spill(msl):
     k = re.search(r'^kernel void \w+\((.*)\)\n\{\n', msl, re.M)
     if not k: return msl, 0
     decl = re.compile(r'^    threadgroup (?:spvUnsafeArray<(\w+), (\d+)>|(\w+)) (\w+)(?:\[(\d+)\])?;\n', re.M)
-    arrays = []
+    arrays = []   # variables of a type not in TG_ELEM (atomic_uint, uint3, a struct) count as 0 bytes and are never moved: within the limit the kernel stays as it is, past it Metal refuses it as before
     for m in decl.finditer(msl, k.end()):
         elem = m.group(1) or m.group(3)
-        if elem not in TG_ELEM: raise ValueError(f'threadgroup variable {m.group(4)} of type {elem}')
-        arrays.append((TG_ELEM[elem] * int(m.group(2) or m.group(5) or 1), m))
+        arrays.append((TG_ELEM.get(elem, 0) * int(m.group(2) or m.group(5) or 1), m))
     total = sum(n for n, _ in arrays)
     if total <= abi.TGMEM_LIMIT: return msl, 0
     size, m = max(arrays, key=lambda a: a[0])

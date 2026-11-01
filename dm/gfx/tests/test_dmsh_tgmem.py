@@ -84,6 +84,10 @@ class Rule(unittest.TestCase):
         src = HEAD + SMALL
         self.assertEqual(tg_spill(src), (src, 0))
 
+    def test_within_the_limit_with_other_types_unchanged(self):   # types the rule cannot size do not fail a kernel that needs no move
+        src = HEAD + SMALL.replace('    threadgroup uint _38;\n', '    threadgroup atomic_uint _38;\n    threadgroup uint3 _39[16];\n    threadgroup S _41;\n')
+        self.assertEqual(tg_spill(src), (src, 0))
+
     def test_position_added_when_the_kernel_has_none(self):
         src = HEAD + BIG.replace(', uint3 gl_WorkGroupID [[threadgroup_position_in_grid]]', '').replace('gl_WorkGroupID', 'uint3(0u)')
         out, _ = tg_spill(src)

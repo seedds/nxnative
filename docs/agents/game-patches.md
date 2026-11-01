@@ -94,7 +94,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
-| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 41 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -514,11 +514,52 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x1126794`: stepping down stops at < 3 → at < 2: cmp w9,#3 → cmp w9,#2
   - cut `+0x112691c`: interval controller always takes the GPU time path (CPU span timing): cbz x0,#0x1126934 → b #0x1126928
   - cut `+0x1126974`: interval controller always takes the GPU time path (takes max(CPU span, GPU time)): cbz x0,#0x112698c → b #0x1126980
+  <details><summary>41 frame-step sites</summary>
+
+  - frame step `+0x27ae0`: Pane::Calculate: a HUD widget at the edge moved to the taller screen's edge with its children, full-screen backgrounds stretched (duo_anchor.c)
+  - frame step `+0x2df28`: projected texture fitted to the layout: a pane as tall as the taller screen maps its whole height
+  - frame step `+0xc61ef4`: output size static, nnMain: 1920x1080 → the host's height
+  - frame step `+0xc61f28`: output size static, nnMain (second path)
+  - frame step `+0xc61f5c`: layout size static, nnMain: 1280x720 → the host's layout height
+  - frame step `+0xde85dc`: 720.0 with 1280.0 (screen position in layout space)
+  - frame step `+0xdea070`: 720.0 with 1280.0 (screen position / layout size)
+  - frame step `+0xdea678`: 720.0 with 1280.0
+  - frame step `+0xdf19ac`: 720.0: output size / layout size (the layout scale)
+  - frame step `+0xe27b44`: 720.0 stored with 1280.0
   - frame step `+0xeb0f88`: held-button counts step by the VFR ratio (menu repeat in game time at any frame step)
+  - frame step `+0xeb48b8`: sead::PerspectiveProjection fovy widened for a view of the screen's ratio (more above and below, 16:9 sides), stored widened
+  - frame step `+0xeb4968`: sead::PerspectiveProjection fovy widened for a view of the screen's ratio (more above and below, 16:9 sides), stored widened
+  - frame step `+0xeb49d0`: sead::PerspectiveProjection fovy widened for a view of the screen's ratio (more above and below, 16:9 sides), stored widened
+  - frame step `+0xeb4a50`: PerspectiveProjection matrix: the HUD camera (16:9, near 1, far 10000) takes the screen's ratio and a widened vertical angle
+  - frame step `+0xef1388`: 1280x720 in a descriptor
+  - frame step `+0xf59b2c`: capture pane Calculate: a full-screen capture made as tall as the screen (duo_anchor.c)
+  - frame step `+0xf5a0dc`: capture: the screen's layout height instead of the layout file's 720 (texture size, copied rect)
+  - frame step `+0xf5a4b8`: capture: the screen's layout height instead of the layout file's 720 (texture size, copied rect)
+  - frame step `+0xf60cc0`: capture pane Calculate: a full-screen capture made as tall as the screen (duo_anchor.c)
+  - frame step `+0xf6e798`: 720.0 with 1280.0 (screen position)
+  - frame step `+0xf75ba4`: screen copy into a 16:9 picture (camera photo): the screen's middle 16:9 band, not the whole taller screen squashed into it
+  - frame step `+0x100817c`: 720.0 with 1280.0 passed as a layout size
+  - frame step `+0x1059730`: 1280x720 layout size of an object
+  - frame step `+0x106bb6c`: 1280x720 default sizes of a layer
+  - frame step `+0x10ee094`: main camera fovy getter: widened like the projection (culling tests)
+  - frame step `+0x10ee0cc`: main camera fovy getter in degrees: widened like the projection
   - frame step `+0x11269b8`: setWaitVsyncInterval: the host's step unless the VFR override is set (state page target fps; 0 = the game's interval)
+  - frame step `+0x12618c4`: output size static, its getter
+  - frame step `+0x1261920`: layout size static, its getter
+  - frame step `+0x12660d4`: docked display size 1920x1080
+  - frame step `+0x12660f0`: docked viewport height 1080
+  - frame step `+0x1266124`: handheld display size 1280x720
+  - frame step `+0x1266134`: scaled display height 720.0
+  - frame step `+0x1266188`: handheld viewport height 720
   - frame step `+0x126686c`: scale apply block taken every frame when the host render scale is not 1.0
   - frame step `+0x1266880`: 3D view scale = the host render scale (1.0 = the game's dynamic resolution)
+  - frame step `+0x127a2f8`: map footprint trail: its viewport and projection at the 720 pane's half-height, not the taller frame's
+  - frame step `+0x13f9704`: 1280x720 passed as a size
   - frame step `+0x151d3d0`: VFR::updateInterval: its own override published for the host (state page target fps; 0 = original)
+  - frame step `+0x1544644`: 720.0 with 1280.0
+
+  </details>
+
   - render scale stub (the launcher offers DM_RENDER_SCALE)
 
 ### The Legend of Zelda: Link's Awakening
@@ -623,6 +664,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `game_env DOTNET_GCRegionRange=60000000` | [Absolum](../../dm/games/0100A83022A22000/README.md) | `game`, at goal | measured for the game's regions |
 | `present_snap on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with: a default for every game after `regress.py check` on the games |
 | `pso_mtl4 on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with on an iPhone: a default for every game after `regress.py check` on the games |
+| `screen_aspect on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game`, at goal | the output size is the host's, but the stubs that follow it (projections, layout panes, screen copies) are this build's code |
 | `shader_key_skip 0x770+0x78` | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | `game`, at goal | the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key |
 | `shader_key_skip 0x7d0+0x18` | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | `game`, at goal | the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key |
 | `stdalloc_cap 0xa0000000` | [Absolum](../../dm/games/0100A83022A22000/README.md) | `game`, at goal | what the regions after it need, measured by the NSP script's region check; the host's cap is the default |

@@ -1,4 +1,4 @@
-"""Virtuos SRYK archives (FFX/X-2 Switch): two MD5 tables, 32-byte file records, names and 64 KB zlib/raw blocks.
+"""Virtuos SRYK archives (FFX/X-2 and FFXII TZA Switch): two MD5 tables, 32-byte file records, names and 64 KB zlib, LZ4 or raw blocks.
 Read members through romfs.open so archives inside a RomFS image need no extraction. Missing/shared entries have offset UINT64_MAX.
 """
 import struct
@@ -40,10 +40,14 @@ def read(f, entry):
         n = min(65536, size); length = length or 65536
         data = f.read(length)
         if len(data) != length: raise ValueError(f'{name}: truncated VBF block')
-        if length != n:
+        if length != n and data[0] & 0x0f == 8 and int.from_bytes(data[:2], 'big') % 31 == 0:   # a zlib header (FFX/X-2)
             dec = zlib.decompressobj()
             data = dec.decompress(data, n + 1)
             if not dec.eof or dec.unconsumed_tail: raise ValueError(f'{name}: invalid VBF compressed block')
+        elif length != n:   # an LZ4 block (FFXII TZA)
+            import lz4.block
+            try: data = lz4.block.decompress(data, uncompressed_size=n)
+            except lz4.block.LZ4BlockError as e: raise ValueError(f'{name}: invalid VBF compressed block ({e})') from None
         if len(data) != n: raise ValueError(f'{name}: VBF block size mismatch')
         chunks.append(data); size -= n
     return b''.join(chunks)

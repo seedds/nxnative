@@ -292,7 +292,7 @@ static void geo_access_add(geo_access *a, uint64_t lo, uint64_t size, int write)
 // only when external buffer accesses cannot communicate between its jobs.
 static geo_access geo_access_of(NvProg *pr, NvShader *gs) {
     geo_access a={0};
-    for (int i=0;i<16;i++) geo_access_add(&a,S.vbuf[i].address,S.vbuf[i].size,0);
+    for (int i=0;i<16;i++) if (S.vbuf[i].size) geo_access_add(&a,S.vbuf[i].address,S.vbuf[i].size,0);   // an empty stream reads nothing (an unknown range otherwise)
     for (int st=0;st<3;st++) {
         NvShader *sh=st==2?gs:pr->sh[st]; if (!sh) continue;
         if (sh->rf.drv_read[0]) a.unknown=1;
@@ -495,7 +495,8 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
     // of intervening draws. The single-draw path keeps main's ordered copies.
     if (!may_wait) {
         if (ind) return -1;
-        for (int i = 0; i < 16; i++) if (S.vbuf[i].address & 3) return -1;
+        // An empty stream is never copied (vbuf_unaligned): FINAL FANTASY XII THE ZODIAC AGE leaves one bound at address 1, size 0, which kept every one of its geometry draws out of a run
+        for (int i = 0; i < 16; i++) if (S.vbuf[i].size && (S.vbuf[i].address & 3)) return -1;
     }
     int drained = g_geo_split_depth != 0;
     if (geo_conversion_hazard(vs) || (ind && geo_cpu_hazard(ind, dw0 ? 16 : 20))) {

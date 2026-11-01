@@ -52,6 +52,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         public int LocalVertexIndexInstanceRateMemoryId { get; private set; }
         public int LocalGeometryOutputVertexCountMemoryId { get; private set; }
         public int LocalGeometryOutputIndexCountMemoryId { get; private set; }
+        public int LocalGeometryPrimitiveOpenMemoryId { get; private set; }
 
         public ShaderProperties Properties { get; }
 
@@ -65,8 +66,10 @@ namespace Ryujinx.Graphics.Shader.Translation
             _stage = stage;
             _stagePrefix = GetShaderStagePrefix(stage);
 
-            _cbSlotToBindingMap = new SetBindingPair[18];
-            _sbSlotToBindingMap = new SetBindingPair[16];
+            // Constant buffer banks 0-17 (Maxwell's), and 24: NVN2's push constants (c[24])
+            _cbSlotToBindingMap = new SetBindingPair[25];
+            // Storage buffers the global-to-storage pass found: the stage's storage buffer table and, for compute, its uniform buffer address table (NVN 16 + 16 slots)
+            _sbSlotToBindingMap = new SetBindingPair[32];
             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
             _sbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
 
@@ -122,6 +125,20 @@ namespace Ryujinx.Graphics.Shader.Translation
             }
         }
 
+        // nxnative: the scratch of Ampere HMMA (InstEmitAmpereTensor.AHmma, helper dmsh_hmma16816_f16): a shared memory of its own, 256 words for each subgroup of the
+        // workgroup, made the first time an HMMA needs it
+        public int HmmaScratchMemoryId { get; private set; } = -1;
+
+        public int GetHmmaScratchMemoryId(int subgroups)
+        {
+            if (HmmaScratchMemoryId < 0)
+            {
+                HmmaScratchMemoryId = Properties.AddSharedMemory(new MemoryDefinition("hmma_scratch", AggregateType.Array | AggregateType.U32, 256 * subgroups));
+            }
+
+            return HmmaScratchMemoryId;
+        }
+
         public void SetVertexAsComputeLocalMemories(ShaderStage stage, InputTopology inputTopology)
         {
             LocalVertexDataMemoryId = AddMemoryDefinition("local_vertex_data", AggregateType.Array | AggregateType.FP32, Reservations.OutputSizePerInvocation);
@@ -137,6 +154,8 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                 LocalGeometryOutputVertexCountMemoryId = AddMemoryDefinition("local_geometry_output_vertex", AggregateType.U32);
                 LocalGeometryOutputIndexCountMemoryId = AddMemoryDefinition("local_geometry_output_index", AggregateType.U32);
+                if (Reservations.GeometryInputFixed)
+                    LocalGeometryPrimitiveOpenMemoryId = AddMemoryDefinition("local_geometry_primitive_open", AggregateType.U32);
             }
         }
 
@@ -393,6 +412,26 @@ namespace Ryujinx.Graphics.Shader.Translation
             }
 
             return new SetBindingPair(setIndex, binding);
+        }
+
+        // nxnative: the types other instructions gave the texture whose handle word is at the given offset of constant buffer cbufSlot (whatever sampler it was paired with),
+        // for BindlessElimination.TryTableHandle; arrays of handles are left out
+        public List<SamplerType> GetTextureTypes(int cbufSlot, int textureOffset, bool isImage)
+        {
+            List<SamplerType> types = new();
+
+            foreach ((TextureInfo info, TextureMeta meta) in isImage ? _usedImages : _usedTextures)
+            {
+                (int offset, _, _) = TextureHandle.UnpackOffsets(info.Handle);
+                (int slot, _) = TextureHandle.UnpackSlots(info.CbufSlot, cbufSlot);
+
+                if (info.ArrayLength == 1 && meta.AccurateType && slot == cbufSlot && offset == textureOffset)
+                {
+                    types.Add(meta.Type);
+                }
+            }
+
+            return types;
         }
 
         private static TextureMeta MergeTextureMeta(TextureMeta meta, TextureMeta existingMeta)

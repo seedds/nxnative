@@ -25,14 +25,14 @@ romfs_marker	Data/data.unity3d
 zip_store	.bundle:.wem:.unity3d:.metallib
 
 # ---- Presentation ----
-# The original sets present interval 2 (30 fps on the Switch). A rewriter cut on 2.0.0 main (patch_nso.py, QualitySettings.set_vSyncCount can only set 1) takes the game's own 60 fps path:
+# The original sets present interval 2 (30 fps on the Switch). A rewriter cut on 2.0.0 main (patches.py, QualitySettings.set_vSyncCount can only set 1) takes the game's own 60 fps path:
 # frame-counted logic steps by GameTime.VsyncFixedCount (= vSyncCount), so a count of 1 at 60 fps runs at the speed of the original at 30 fps. The game then sets interval 1 itself and game mode gives 60 fps.
 # Measured on the Mac (holding Down for 0.45 s in the save list): 60 fps with the cut and the original 30 fps both move 6 slots; without the cut, 60 fps forced by DM_PRESENT_INTERVAL=display reaches the end (9 or more), i.e. frame-counted logic speeds up
 
 # ---- Memory ----
 # The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup hands all free memory (application pool − 64 MB) to StandardAllocator as virtual address memory,
 # one address region in the alias region (1 GB aligned). Unity's low-level virtual allocator also calls AllocateAddressRegion itself (each block aligned by size: 2.25 MB takes 4 MB, 16.25 MB takes 20 MB),
-# about 1.05 GB in the prologue battle. Newer SDKs' AddressRegionManager first takes about 1 GB at the start of the alias region as its node area; patch_nso.py registers a cut for this game's sdk build that shrinks it to 62 MB (the hardware's alias region is 64 GB and does not care).
+# about 1.05 GB in the prologue battle. Newer SDKs' AddressRegionManager first takes about 1 GB at the start of the alias region as its node area; dm/tools/sdk_patches.py registers a cut for this game's sdk build that shrinks it to 62 MB (the hardware's alias region is 64 GB and does not care).
 # Measured (prologue to the battle, 12 minutes): StandardAllocator commits only 0.58 GB and Unity's own regions 0.97 GB, 1.55 GB in all. So the pool is reported as 2.5 GB (StandardAllocator about 2.44 GB, four times its use),
 # and the block fits in 5 GB = 256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region (Engage never calls SetHeapSize; thread stacks are placed at random in the stack region). 5 GB is the total proven on a phone (D2R);
 # without the "extended virtual addressing" entitlement iOS allows one reservation of at most 6 GB, but Metal and the rest need address space too (Engage allocates about 1 GB of GPU memory on the Mac), so the former 6 GB block left no margin on a phone.
@@ -45,3 +45,5 @@ app_pool	0xA0000000
 # engine built-ins (data.unity3d, Resources/unity default resources) go to engine, the Addressables bundles to assets
 shader_groups	/data.unity3d=engine /Resources/=engine /StreamingAssets/=assets
 shader_note	Fire Emblem Engage shaders
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
+depth_mode	zero

@@ -2,11 +2,14 @@
 #include <stdint.h>
 #include <string.h>
 #include "nvn_obj.h"
+#include "nvn_pso_ds.h"
 
 typedef struct {
     const void *vs, *fs; uint32_t cfmt[8], dfmt, sfmt, samples, blend_en, chmask, a2c; blend_st blend[8];
     va_st attr[16]; vs_st stream[16];
     uint8_t lmap[8]; const void *fsfn;
+    uint32_t atest, logic;   // atest: 1 = drawn with the alpha test, the fragment from the shader's alpha test library <key>_ba (nvn_mtl.m atest_key); last, so a prewarm row written before it reads as 0
+                             // logic: 1 = drawn with a logic operation, the fragment from the logic operation library <key>_bl (lop_key); in what was padding (0 in older rows)
 } pso_key;
 
 typedef struct {
@@ -15,6 +18,17 @@ typedef struct {
 } pso_fz_desc;
 
 typedef struct { char vs[24], fs[24]; uint8_t vs_stage, fs_stage, merged, fz; pso_fz_desc fz_desc; pso_key k; } pso_skey;
+
+// Drop blend factors when blending is disabled, and blend / mask bits for absent normal-pass attachments. Merged passes index logical blend / mask state through lmap,
+// so physical formats cannot decide which logical targets to drop. Depth / stencil formats stay for MTLDevice pipelines, paired for combined storage (nvn_pso_ds.h). Normalize both live keys and old prewarm rows.
+// See docs/reference/shaders.md, Pipeline keys omit unused colour state; measurements belong to the linked game notes.
+static inline void pso_key_norm(pso_key *k, int merged) {
+    pso_ds_pair(&k->dfmt, &k->sfmt);
+    for (int i = 0; i < 8; i++) {
+        if (!merged && !k->cfmt[i]) { k->blend_en &= ~(1u << i); k->chmask &= ~(0xfu << (4 * i)); }
+        if (!(k->blend_en >> i & 1)) memset(&k->blend[i], 0, sizeof k->blend[i]);
+    }
+}
 
 static inline void pso_skey_from(const pso_key *k, NvShader *vs, NvShader *fs, int merged, const pso_fz_desc *fz, pso_skey *out) {
     memset(out, 0, sizeof *out);
@@ -35,8 +49,9 @@ static inline void pso_skey_hex(const pso_skey *key, char *out) {
 }
 
 static inline int pso_skey_parse(const char *hex, pso_skey *out) {
-    size_t n = sizeof *out * 2;
-    if (!hex || strlen(hex) != n) return -1;
+    size_t n = sizeof *out * 2, old = n - 2 * (sizeof out->k.atest + sizeof out->k.logic);   // a row from before the alpha test field: the key without it, alpha test off
+    if (!hex || (strlen(hex) != n && strlen(hex) != old)) return -1;
+    if (strlen(hex) == old) { memset(out, 0, sizeof *out); n = old; }
     uint8_t *p = (uint8_t *)out;
     for (size_t i = 0; i < n; i += 2) {
         int a = hex[i] >= '0' && hex[i] <= '9' ? hex[i] - '0' : hex[i] >= 'a' && hex[i] <= 'f' ? hex[i] - 'a' + 10 : hex[i] >= 'A' && hex[i] <= 'F' ? hex[i] - 'A' + 10 : -1;
@@ -44,5 +59,6 @@ static inline int pso_skey_parse(const char *hex, pso_skey *out) {
         if (a < 0 || b < 0) return -1;
         p[i / 2] = (uint8_t)(a << 4 | b);
     }
+    pso_key_norm(&out->k, out->merged);
     return 0;
 }

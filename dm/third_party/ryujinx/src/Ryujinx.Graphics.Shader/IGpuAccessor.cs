@@ -8,6 +8,9 @@ namespace Ryujinx.Graphics.Shader
     /// </summary>
     public interface IGpuAccessor : ILogger
     {
+        // Fixed VS capture ABI used by the offline Metal geometry path.
+        bool QueryGeometryInputFixed() => false;
+
         /// <summary>
         /// Reads data from the constant buffer 1.
         /// </summary>
@@ -16,6 +19,23 @@ namespace Ryujinx.Graphics.Shader
         uint ConstantBuffer1Read(int offset)
         {
             return 0;
+        }
+
+        /// <summary>
+        /// Size in bytes of the constant buffer 1 data the host knows (an Ampere jump table ends there at the latest).
+        /// </summary>
+        int QueryConstantBuffer1Size()
+        {
+            return 0;
+        }
+
+        /// <summary>
+        /// NVN2 (Switch 2) compute shaders: the counts of the shader's own driver constant layout in c[0] (uniform buffer entries, storage buffer entries, texture
+        /// handles), its size and the bytes of its push constants, from the control section; null for other shaders.
+        /// </summary>
+        int[] QueryAmpereComputeC0Layout()
+        {
+            return null;
         }
 
         /// <summary>

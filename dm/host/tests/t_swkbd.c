@@ -21,6 +21,7 @@ static uint8_t arg[0x500], work[0x1000], sbuf[0x7d4];
 static struct { uint8_t *p; uint64_t n; } str = {sbuf, sizeof sbuf};
 static void mkarg(int utf8, int maxlen, const uint16_t *init, int ilen) {
     memset(arg, 0, sizeof arg); memset(work, 0, sizeof work); memset(sbuf, 0xAA, sizeof sbuf);
+    str.n = sizeof sbuf;   // a fresh String per call, its capacity at +8 (the SDK only reads it)
     static const uint16_t title[] = {0x8D77, 0x540D, 0};                 // U+8D77 U+540D, the game's "Name your character" title
     memcpy(arg + 0x24, title, sizeof title);
     memcpy(arg + 0x3ac, &maxlen, 4); arg[0x3bd] = (uint8_t)utf8;
@@ -35,6 +36,8 @@ static int bytes_eq(const uint8_t *want, size_t n) {   // the first n bytes equa
     return 1;
 }
 
+void dm_applet_enter(const char *name) { (void)name; }   // hle_oe.c: ShowKeyboard holds the game out of focus; swkbd_show, tested here, does not
+void dm_applet_leave(void) {}
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }   // the real implementation is in hle_os.c; the unit test does not care about the clock
 int main(void) {
     unsetenv("DM_KBD");
@@ -46,6 +49,7 @@ int main(void) {
     static const uint8_t w1[] = {0xC3, 0x9C, 0x6E, 0xC3, 0xAF, 0xE5, 0x90, 0x8D, 0x00};   // U+00DC n U+00EF U+540D + terminating 0
     CHECK(r == 0, "Result %#x expected 0", r);
     CHECK(bytes_eq(w1, sizeof w1), "UTF-8 write-back bytes differ");
+    CHECK(str.n == sizeof sbuf, "String byte count %llu changed, the SDK leaves the capacity", (unsigned long long)str.n);
     CHECK(!strcmp(g_title, "\xE8\xB5\xB7\xE5\x90\x8D"), "title decoded as '%s', expected U+8D77 U+540D", g_title);
     CHECK(!strcmp(g_init, "Hero"), "initial text decoded as '%s', expected Hero", g_init);
     CHECK(g_max == 16, "limit %d expected 16", g_max);
@@ -55,6 +59,7 @@ int main(void) {
     r = swkbd_show(&str, arg, stub);
     CHECK(r == 0x29F, "Result %#x expected 0x29F", r);
     CHECK(sbuf[0] == 0xAA && sbuf[sizeof sbuf - 1] == 0xAA, "cancel changed the buffer");
+    CHECK(str.n == sizeof sbuf, "cancel changed the String byte count");
 
     printf("3 no window (input returns -1) → treated as cancel 0x29F\n");
     mkarg(1, 16, hero, 4); g_ret = -1;
@@ -65,6 +70,7 @@ int main(void) {
     r = swkbd_show(&str, arg, stub);
     static const uint8_t w4[] = {0x41, 0x00, 0x0D, 0x54, 0x00, 0x00};   // 'A' U+540D terminating 0 (little endian)
     CHECK(r == 0 && bytes_eq(w4, sizeof w4), "UTF-16 write-back bytes differ");
+    CHECK(str.n == sizeof sbuf, "String byte count %llu changed, the SDK leaves the capacity", (unsigned long long)str.n);
     CHECK(g_init[0] == 0, "initial length 0 should give no initial text");
 
     printf("5 maximum length truncation (3 characters)\n");
@@ -72,6 +78,7 @@ int main(void) {
     swkbd_show(&str, arg, stub);
     static const uint8_t w5[] = {'A', 'B', 'C', 0};
     CHECK(bytes_eq(w5, sizeof w5), "truncation result differs");
+    CHECK(str.n == sizeof sbuf, "String byte count %llu changed, the SDK leaves the capacity", (unsigned long long)str.n);
 
     printf("6 truncation does not split a surrogate pair (limit 2 units, a + U+1F600 needs 3 units)\n");
     mkarg(1, 2, hero, 4); g_ret = 1; g_reply = "a\xF0\x9F\x98\x80";

@@ -1,0 +1,44 @@
+# Game profile of Hollow Knight (Switch, update 1.5.12620 = v589824). Plays on the Mac
+# Format: see dm/games/README.md
+# Unity 6000.0.61f1 (IL2CPP) with FMOD, SDK 20.5.21, NVN; subsdk0 is the movie module, which plays the opening cinematic (MP4). The shaders are Shader objects in data.unity3d and the UnityFS bundles of StreamingAssets, read by unityfs.py.
+# Docked (1920x1080; present interval 2 while a cinematic plays) with the 2D pad layout: B jumps, Y attacks
+
+# ---- Identity ----
+title_id	0100633007D48000
+program_id	0100633007D48000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Hollow Knight
+ipa	HollowKnight.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v589824	1.5.12620	main=d1ceb177087be472f4574be16ccd3b0f	subsdk0=a870a783a09f57256d3630b73485398e	sdk=c668ae02ea221e429677aa61d3dab7c6
+package	v589824
+shader_versions	v589824
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/resources.assets.resS
+zip_store	.dat:.mp4:.resource:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true. As with Silksong's Unity 6, main never sets a heap and the log shows no StandardAllocator: Unity maps its memory itself in the alias region.
+# The 5 GB block of the other Unity games with virtual address memory (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region). The SDK-wide node area cut applies (dm/tools/sdk_patches.py MATCH_CUTS).
+# Measured on the Mac in King's Pass: the alias region's high-water mark +1.75 GB, 1.25 GB mapped. The pool is the hardware's (3.2 GB): Unity only reads it through QueryMemoryInfo, and nothing maps against it
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- Graphics ----
+# the game sets near = 0 at startup (log: "depth mode near=0"): the pipeline bases made before the game runs take the main0_z vertex entries
+depth_mode	zero
+
+# ---- Shader split (shader_split.py; Unity Shader and ComputeShader objects, read by unityfs.py) ----
+# everything is under Data/: the player's serialized files and the StreamingAssets bundles
+shader_groups	/Data/=data
+shader_note	Hollow Knight shaders

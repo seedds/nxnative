@@ -1,5 +1,7 @@
 // Shared-font ownership and LoadFont forwarding through the real forced registration; no game module or font file is needed.
 #include "../hle_sdk16.c"
+void dm_applet_enter(const char *name) { (void)name; }   // hle_oe.c: the shop stand-ins hold the game out of focus
+void dm_applet_leave(void) {}
 #include <mach-o/getsect.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
@@ -21,7 +23,7 @@ void *guest_sym(const char *name) {
     CHECK(!strcmp(name, "_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj"), "original symbol lookup");
     return missing ? NULL : original;
 }
-module_t g_mod[MAX_MOD];
+module_t *g_mod;
 int g_nmod;
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 0; }
@@ -31,6 +33,8 @@ module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
 void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; }
 void hle_signal_system_event(void *ev) { (void)ev; }
+uint64_t hle_system_event_binding(void *ev) { (void)ev; return 1; }
+int hle_signal_system_event_binding(uint64_t binding) { (void)binding; return 1; }
 uint32_t hle_hid_connected_npad(void) { return 0; }
 void dm_host_helper_qos(qos_class_t q) { (void)q; }
 extern const struct mach_header_64 _mh_execute_header;

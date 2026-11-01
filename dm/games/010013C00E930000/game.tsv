@@ -29,7 +29,7 @@ zip_store	.assets:.bin:.bundle:.dat:.mp4:.ress:.metallib
 # ---- Memory ----
 # The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true. Unity 6's nninitStartup (main+0x118cb70) only queries the memory info and sets the TLS allocator:
 # no heap and no StandardAllocator; Unity takes its memory itself through nn::os::AllocateAddressRegion and AllocateMemoryPages in the alias region. The 5 GB block of the other Unity games
-# with virtual address memory (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region), with the node area cut for this sdk build (patch_nso.py). Measured on the
+# with virtual address memory (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region), with the node area cut for this sdk build (dm/tools/sdk_patches.py). Measured on the
 # Mac: the alias region's high-water mark +2.26 GB in the first room of play (+3.00 GB before the cut), 1.51 GB mapped, resident 2.1 GB and 1.25 GB of GPU memory, flat for 100 s of play.
 # The pool is the hardware's (3.2 GB): Unity only reads it through QueryMemoryInfo, and nothing maps against it
 sys_resource	0x1000000

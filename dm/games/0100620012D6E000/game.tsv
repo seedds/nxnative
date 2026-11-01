@@ -44,3 +44,5 @@ shader_note	Big Brain Academy: Brain vs. Brain shaders
 # handheld with Boost 1920x1080 (the window crop goes from 1280x720 to 1920x1080 once the game sees Boost)
 op_mode	handheld
 perf_mode	boost
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
+depth_mode	zero

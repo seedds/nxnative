@@ -6,12 +6,16 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <limits.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
 
-module_t g_mod[MAX_MOD];
+module_t *g_mod;
 int g_nmod;
+// Stable module addresses live in g_mod; lookup order follows activation, including unload/reload.
+static module_t **g_loaded; static int g_nloaded, g_mod_capacity;
+static pthread_rwlock_t g_modules_mu = PTHREAD_RWLOCK_INITIALIZER;
 pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 enum { KEY_K18, KEY_KTLS, KEY_KTLR, KEY_KGATE, KEY_N };
 
@@ -49,6 +53,7 @@ static void parse_dynamic(module_t *m) {
         case DT_SYMTAB: m->symtab = (const Elf64_Sym *)(m->base + d->d_un.d_ptr); break;
         case DT_STRTAB: m->strtab = (const char *)(m->base + d->d_un.d_ptr); break;
         case DT_INIT: m->init = d->d_un.d_ptr; break;
+        case DT_FINI: m->fini = d->d_un.d_ptr; break;
         case DT_INIT_ARRAY: m->init_array = d->d_un.d_ptr; break;
         case DT_INIT_ARRAYSZ: m->init_arraysz = d->d_un.d_val; break;
     }
@@ -92,9 +97,13 @@ void *module_sym(module_t *m, const char *name) {
                if (l != r) { g_symchk_bad++; LOG("[RED] DM_SYMCHECK: %s in %s hash %p ≠ linear %p", name, m->name, r, l); } }
     return r;
 }
-void *guest_sym(const char *name) {
-    for (int i = 0; i < g_nmod; i++) { void *p = module_sym(&g_mod[i], name); if (p) return p; }
+static void *loaded_sym(const char *name) {   // caller holds g_modules_mu, or is doing startup relocation before guest threads run
+    for (int i = 0; i < g_nloaded; i++) { void *p = module_sym(g_loaded[i], name); if (p) return p; }
     return NULL;
+}
+void *guest_sym(const char *name) {
+    pthread_rwlock_rdlock(&g_modules_mu); void *p = loaded_sym(name); pthread_rwlock_unlock(&g_modules_mu);
+    return p;
 }
 // For modules with the patch area before the base (patch_off < 0) addresses in the patch area count too, as for modules whose patch area follows the image (crash reports, the GC pause's "in guest code" test)
 module_t *module_of(const void *p) {
@@ -116,7 +125,8 @@ int dm_main_imports(const char *prefix) {
     return 0;
 }
 
-// SDK major version, from the version string the SDK's libraries keep in the sdk module's read-only data ("NintendoSDK_nnSdk-10_4_0"; SDK 12 spells it NintendoSdk_).
+// SDK major version, from the version string the SDK's libraries keep in the sdk module's read-only data ("NintendoSDK_nnSdk-10_4_0"; SDK 12 spells it NintendoSdk_;
+// Switch 2 SDKs name a variant first: "NintendoSdk_nnSdk-Generic_20_5_19", Donkey Kong Bananza).
 // Behaviour that follows the SDK version is decided by it (the NVN API version, the shared-font layout), not by the game profile. 0 = no sdk module or no version string
 int dm_sdk_major(void) {
     static int major = -1;
@@ -124,36 +134,62 @@ int dm_sdk_major(void) {
     major = 0;
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) {
         const char *b = (const char *)g_mod[i].base + g_mod[i].ro_off, *e = (const char *)g_mod[i].base + g_mod[i].key_page_off;   // read-only data, data and bss
-        for (const char *p = b; (p = memmem(p, (size_t)(e - p), "_nnSdk-", 7)); p += 7)
-            if (p - b >= 11 && !strncasecmp(p - 11, "NintendoSDK", 11) && p[7] >= '0' && p[7] <= '9') {
-                major = atoi(p + 7); LOG("sdk: NintendoSDK nnSdk-%.12s (major %d)", p + 7, major); break; }
+        for (const char *p = b; (p = memmem(p, (size_t)(e - p), "_nnSdk-", 7)); p += 7) {
+            if (p - b < 11 || strncasecmp(p - 11, "NintendoSDK", 11)) continue;
+            const char *v = p + 7;
+            while (v < e && ((*v >= 'A' && *v <= 'Z') || (*v >= 'a' && *v <= 'z'))) v++;   // a variant name ("Generic") and its '_'
+            if (v > p + 7 && v < e && *v == '_') v++;
+            if (v < e && *v >= '0' && *v <= '9') { major = atoi(v); LOG("sdk: NintendoSDK nnSdk-%.20s (major %d)", p + 7, major); break; }
+        }
     }
     if (!major) LOG("[RED] sdk: no SDK version string in the sdk module; SDK-dependent behaviour takes the newer SDKs' side");
     return major;
 }
 
+// Whether the sdk module was built for the Switch 2 ("Ounce"): its file system access log line names the build spec ("FS_ACCESS: { sdk_version: 20.5.19, spec: Ounce }";
+// Switch 1 SDKs say "spec: NX"). The Switch 2's NVN (NVN2) reports another API version (hle_nvn.c nvn_api)
+int dm_sdk_ounce(void) {
+    static int ounce = -1;
+    if (ounce >= 0) return ounce;
+    ounce = 0;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) {
+        const char *b = (const char *)g_mod[i].base + g_mod[i].ro_off, *e = (const char *)g_mod[i].base + g_mod[i].key_page_off;
+        if (memmem(b, (size_t)(e - b), "spec: Ounce", 11)) ounce = 1;
+    }
+    if (ounce) LOG("sdk: built for the Switch 2 (spec: Ounce)");
+    return ounce;
+}
+
 // Cross-module symbol resolution: first look for a definition in the loaded modules, and only if not found hand over to HLE / stubs
 static uint64_t resolve_sym(module_t *m, const char *name) {
-    for (int i = 0; i < g_nmod; i++) { void *p = module_sym(&g_mod[i], name); if (p) return (uint64_t)p; }
+    void *p = loaded_sym(name); if (p) return (uint64_t)p;
     return resolve_import(m, name);
 }
 
 // Forced take-over table (hle.h HLE_FORCE, the __DATA,swforce section): a hit overrides the definition inside the module
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
+static unsigned *g_fidx, g_fmask;   // name hash over the table: force_lookup runs for every named relocation, and each lookup used to strcmp its way through all 722 entries (the swhle table's scan is hashed the same way, hle.c)
 static void force_init(void) {
     unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
-    for (unsigned i = 0; i < g_nforce; i++)
-        for (unsigned j = i + 1; j < g_nforce; j++)
-            if (!strcmp(g_force[i].name, g_force[j].name)) die("duplicate entry in the forced takeover list: %s", g_force[i].name);
+    unsigned cap = 16; while (cap < g_nforce * 2) cap <<= 1;
+    g_fidx = calloc(cap, sizeof *g_fidx); g_fmask = cap - 1;
+    for (unsigned i = 0; i < g_nforce; i++)   // insertion doubles as the duplicate check (a wrong list must still fail loudly, at once)
+        for (unsigned j = sym_hash(g_force[i].name) & g_fmask;; j = (j + 1) & g_fmask) {
+            if (!g_fidx[j]) { g_fidx[j] = i + 1; break; }
+            if (!strcmp(g_force[g_fidx[j] - 1].name, g_force[i].name)) die("duplicate entry in the forced takeover list: %s", g_force[i].name);
+        }
 }
 static void *force_lookup(const char *name) {
-    for (unsigned i = 0; i < g_nforce; i++)
+    if (!g_fmask) return NULL;
+    for (unsigned j = sym_hash(name) & g_fmask; g_fidx[j]; j = (j + 1) & g_fmask) {
+        unsigned i = g_fidx[j] - 1;
         if (!strcmp(g_force[i].name, name)) {
             if (!g_force_hits[i]++ && g_flag.imports) LOG("force %s  (%s)", name, g_force[i].why);
             void *hlecount_wrap(const char *, const char *, void *); return hlecount_wrap("FORCE", name, g_force[i].fn);   // A counting stub when DM_HLECOUNT is set
         }
+    }
     return NULL;
 }
 // Generic host: the list serves several games, so entries a game does not reference are only noted; with DM_FORCE_STRICT=1 it still fails loudly (for checking a mistyped list)
@@ -171,18 +207,26 @@ static void read_layout(module_t *m, const char *dir) {
     FILE *f = fopen(path, "r");
     if (!f) die("open %s", path);
     static const char *kn[KEY_N] = {"K18", "KTLS", "KTLR", "KGATE"};
-    char line[256], key[32]; unsigned long v; unsigned seen = 0;
+    char line[256], key[48]; unsigned long v; unsigned seen = 0;
     while (fgets(line, sizeof line, f)) {
-        if (sscanf(line, "# %31s %lx", key, &v) != 2) die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
+        if (sscanf(line, "# %47s %lx", key, &v) != 2) die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
         if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // may be negative (patch area before the base)
         else if (!strcmp(key, "IMAGE_SIZE")) m->image_size = v;
         else if (!strcmp(key, "FILE_IMAGE_LEN")) m->file_image_len = v;
+        else if (!strcmp(key, "BACK_OFF")) m->back_off = v;
+        else if (!strcmp(key, "BACK_LEN")) m->back_len = v;
         else if (!strcmp(key, "KEY_PAGE_OFF")) m->key_page_off = v;
         else if (!strcmp(key, "KEY_PAGE_SIZE")) m->key_page_size = v;
         else if (!strcmp(key, "TEXT_END")) m->text_end = v;
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+        else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
+        else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
+        else if (!strncmp(key, "UE_CVAR:", 8)) {
+            if (m->n_ue_cvar == (int)(sizeof m->ue_cvar / sizeof *m->ue_cvar) || strlen(key + 8) >= sizeof m->ue_cvar[0].name) die("%s: too many Unreal console variables, or too long a name: %s", path, key);
+            strcpy(m->ue_cvar[m->n_ue_cvar].name, key + 8); m->ue_cvar[m->n_ue_cvar++].off = v;
+        }
         else if (!strcmp(key, "BUILD_ID")) sscanf(line, "# %*s %32s", m->build_id);
         else for (int k = 0; k < KEY_N; k++) {
             size_t n = strlen(kn[k]);
@@ -196,6 +240,9 @@ static void read_layout(module_t *m, const char *dir) {
         die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
     if (m->patch_off < 0 && (!m->image_size || !m->file_image_len || m->file_image_len % 0x4000 || m->patch_off % 0x4000 || m->key_page_off + m->key_page_size > m->image_size))
         die("%s: patch area before the base, but IMAGE_SIZE / FILE_IMAGE_LEN missing or wrong", path);
+    if ((m->back_off || m->back_len) && (m->patch_off >= 0 || !m->back_len || m->back_off % 0x4000 || m->back_len % 0x4000 || m->back_off < m->key_page_off + m->key_page_size
+                                         || m->back_off + m->back_len != m->image_size))
+        die("%s: back patch area, but BACK_OFF / BACK_LEN missing or wrong", path);
 }
 
 // Frame step state (the page after the key page, read-write; layout in patch_nso.py FRAME_STEP): the rewriter's stubs step the game by the host's whole vsyncs capped at this
@@ -260,48 +307,179 @@ static unsigned relr_apply(module_t *m, uint64_t relr, uint64_t relrsz, uint64_t
     return n;
 }
 
-static void relocate(module_t *m) {
-    uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0, relr = 0, relrsz = 0;
+// The address a symbol relocation of module m binds to, as Horizon's rtld would with the modules loaded now (forced take-over, then the loaded modules in load order, then HLE / stub).
+// *other: the module's own definition was taken over by an earlier module's; *weak0: an undefined weak symbol nothing defines, bound to 0
+static uint64_t bind_sym(module_t *m, const Elf64_Sym *s, int *other, int *weak0) {
+    uint64_t v = (uint64_t)force_lookup(m->strtab + s->st_name);
+    *other = *weak0 = 0;
+    // Symbols the module defines itself are also looked up globally in load order (the ELF default; Horizon's rtld does the same): the definition of an earlier-loaded module overrides a later one; only local / non-default visibility binds to itself.
+    // Engage's main defines its own operator new / delete (Unity's memory manager) and sdk has a copy too (forwarding to malloc / free): previously sdk bound its own delete,
+    // so blocks from main's new were freed by sdk's libc++ string code into the SDK heap, and CentralHeap::Free reported NotNMallocPtr
+    if (!v && s->st_shndx) {
+        uint64_t self = (uint64_t)m->base + s->st_value;
+        v = ELF64_ST_BIND(s->st_info) == STB_LOCAL || ELF64_ST_VISIBILITY(s->st_other) != STV_DEFAULT ? self : resolve_sym(m, m->strtab + s->st_name);
+        if (!v) v = self;
+        *other = v != self;
+    }
+    // An undefined weak symbol that no module defines and the host does not implement is 0, as Horizon's rtld binds it: the code tests its address before calling it.
+    // Octopath Traveler 0's main imports the thread_local init function _ZTHN13LowLevelTasks5FTask10ActiveTaskE weakly; a named stub made it look defined and the game called it
+    const char *nm = m->strtab + s->st_name;
+    *weak0 = !v && !s->st_shndx && ELF64_ST_BIND(s->st_info) == STB_WEAK && !loaded_sym(nm) && !hle_implements(nm);
+    if (!v && !*weak0) v = resolve_sym(m, nm);
+    return v;
+}
+
+typedef struct { const Elf64_Rela *tab[2]; uint64_t n[2]; uint64_t relr, relrsz; } relocs_t;
+static relocs_t relocs_of(const module_t *m) {
+    uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0; relocs_t r = {0};
     for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
         case DT_RELA: rela = d->d_un.d_ptr; break;
         case DT_RELASZ: relasz = d->d_un.d_val; break;
         case DT_JMPREL: jmprel = d->d_un.d_ptr; break;
         case DT_PLTRELSZ: pltsz = d->d_un.d_val; break;
-        case DT_RELR: relr = d->d_un.d_ptr; break;
-        case DT_RELRSZ: relrsz = d->d_un.d_val; break;
+        case DT_RELR: r.relr = d->d_un.d_ptr; break;
+        case DT_RELRSZ: r.relrsz = d->d_un.d_val; break;
     }
+    r.tab[0] = (const Elf64_Rela *)(m->base + rela); r.tab[1] = (const Elf64_Rela *)(m->base + jmprel);
+    r.n[0] = relasz / sizeof(Elf64_Rela); r.n[1] = pltsz / sizeof(Elf64_Rela);
+    return r;
+}
+
+static void relocate(module_t *m) {
+    relocs_t rl = relocs_of(m);
     int cnt[3] = {0}, nint = 0, nweak0 = 0;
-    unsigned nrelr = relr ? relr_apply(m, relr, relrsz, (uint64_t)m->base) : 0;
-    const Elf64_Rela *tabs[2] = {(const Elf64_Rela *)(m->base + rela), (const Elf64_Rela *)(m->base + jmprel)};
-    uint64_t sizes[2] = {relasz, pltsz};
+    unsigned nrelr = rl.relr ? relr_apply(m, rl.relr, rl.relrsz, (uint64_t)m->base) : 0;
     for (int t = 0; t < 2; t++)
-        for (uint64_t i = 0; i < sizes[t] / sizeof(Elf64_Rela); i++) {
-            const Elf64_Rela *r = &tabs[t][i];
+        for (uint64_t i = 0; i < rl.n[t]; i++) {
+            const Elf64_Rela *r = &rl.tab[t][i];
             uint64_t *where = (uint64_t *)(m->base + r->r_offset);
             unsigned type = ELF64_R_TYPE(r->r_info), si = ELF64_R_SYM(r->r_info);
             if (type == R_AARCH64_RELATIVE) { *where = (uint64_t)m->base + r->r_addend; cnt[0]++; continue; }
-            const Elf64_Sym *s = &m->symtab[si];
-            uint64_t v = (uint64_t)force_lookup(m->strtab + s->st_name);
-            // Symbols the module defines itself are also looked up globally in load order (the ELF default; Horizon's rtld does the same): the definition of an earlier-loaded module overrides a later one; only local / non-default visibility binds to itself.
-            // Engage's main defines its own operator new / delete (Unity's memory manager) and sdk has a copy too (forwarding to malloc / free): previously sdk bound its own delete,
-            // so blocks from main's new were freed by sdk's libc++ string code into the SDK heap, and CentralHeap::Free reported NotNMallocPtr
-            if (!v && s->st_shndx) {
-                uint64_t self = (uint64_t)m->base + s->st_value;
-                v = ELF64_ST_BIND(s->st_info) == STB_LOCAL || ELF64_ST_VISIBILITY(s->st_other) != STV_DEFAULT ? self : resolve_sym(m, m->strtab + s->st_name);
-                if (!v) v = self;
-                if (v != self && nint++ < 8) LOG("%s: %s bound to an earlier module's definition (%s)", m->name, m->strtab + s->st_name, module_of((void *)v) ? module_of((void *)v)->name : "?");
-            }
-            // An undefined weak symbol that no module defines and the host does not implement is 0, as Horizon's rtld binds it: the code tests its address before calling it.
-            // Octopath Traveler 0's main imports the thread_local init function _ZTHN13LowLevelTasks5FTask10ActiveTaskE weakly; a named stub made it look defined and the game called it
-            const char *nm = m->strtab + s->st_name;
-            int weak0 = !v && !s->st_shndx && ELF64_ST_BIND(s->st_info) == STB_WEAK && !guest_sym(nm) && !hle_implements(nm);
-            if (weak0 && nweak0++ < 8) LOG("%s: undefined weak %s bound to 0", m->name, nm);
-            if (!v && !weak0) v = resolve_sym(m, nm);
+            const Elf64_Sym *s = &m->symtab[si]; int other, weak0;
+            uint64_t v = bind_sym(m, s, &other, &weak0);
+            if (other && nint++ < 8) LOG("%s: %s bound to an earlier module's definition (%s)", m->name, m->strtab + s->st_name, module_of((void *)v) ? module_of((void *)v)->name : "?");
+            if (weak0 && nweak0++ < 8) LOG("%s: undefined weak %s bound to 0", m->name, m->strtab + s->st_name);
             if (type == R_AARCH64_JUMP_SLOT) { *where = v; cnt[2]++; }
             else { *where = v + r->r_addend; cnt[1]++; }       // ABS64 / GLOB_DAT
         }
-    LOG("%s: reloc relative=%d relr=%u abs/glob=%d jump=%d%s", m->name, cnt[0], nrelr, cnt[1], cnt[2], nint ? " (some bound to an earlier module's definition)" : "");
+    if (!m->nro || m->loads <= 1)
+        LOG("%s: reloc relative=%d relr=%u abs/glob=%d jump=%d%s", m->name, cnt[0], nrelr, cnt[1], cnt[2], nint ? " (some bound to an earlier module's definition)" : "");
     if (nint > 8) LOG("%s: %d bound to an earlier module's definition in all", m->name, nint);
+}
+
+// ---- NRO modules (nn::ro, hle_ro.c) ----
+// A game may load modules at run time: nn::ro::LoadModule hands over an NRO image it read from its files (Super Smash Bros. Ultimate: the fighters' code, 98 NROs in data.arc, whose
+// exports main imports: 1,045 lua2cpp::create_agent_* functions). iOS runs no code loaded at run time, so the NROs are rewritten offline like the other modules (dm/tools/nro_collect.py,
+// patch_nso.py) and listed in <patched dir>/nro.tsv with their SHA-256. All are mapped at start (code read-only + execute from then on); none takes part in symbol lookups until the game
+// loads it. A load restores the NRO's data and bss as rewritten (after the first), relocates it against the modules loaded then, in load order (Horizon's rtld does the same), and binds the
+// symbol relocations of the modules loaded before it that it defines and nothing loaded defined (Horizon: BindVariables, and functions bound lazily at their first call): main's lua2cpp
+// imports are stubs until then. Only data is written, so the same works with code embedded in the iOS executable. An unload binds every relocation that pointed into the NRO again
+static void map_image(module_t *m, const char *dir);
+static uint8_t g_refused[16][32]; static int g_nrefused;   // NROs the pack refused (online SDKs, nro.tsv rows named "refused")
+int nro_refused(const uint8_t sha256[32]) {
+    for (int i = 0; i < g_nrefused && i < 16; i++) if (!memcmp(g_refused[i], sha256, 32)) return 1;
+    return 0;
+}
+static FILE *open_nros(const char *dir) {
+    char path[1024]; snprintf(path, sizeof path, "%s/nro.tsv", dir);
+    const char *off = getenv("DM_NRO");
+    if (off && !atoi(off)) { LOG("NRO: loading off (DM_NRO=0): every LoadModule fails"); return NULL; }
+    return fopen(path, "r");
+}
+// Final Fantasy X/X-2 registers 1,432 NROs, exceeding the old 128-slot array before nnMain. Size both tables from the actual manifest before any module pointer escapes;
+// never realloc them, since nn::ro handles and the activation list retain module_t pointers. Refused SDK rows need no slot.
+static void allocate_modules(int n, FILE *nros) {
+    char line[512], name[16];
+    if (n <= 0) die("no modules to load");
+    if (nros) {
+        while (fgets(line, sizeof line, nros)) {
+            if (line[0] == '#' || sscanf(line, "%15s", name) != 1 || !strcmp(name, "refused")) continue;
+            if (n == INT_MAX) die("too many modules");
+            n++;
+        }
+        if (ferror(nros) || fseek(nros, 0, SEEK_SET)) die("cannot read NRO manifest");
+    }
+    g_mod_capacity = n;
+    g_mod = calloc((size_t)n, sizeof *g_mod); g_loaded = calloc((size_t)n, sizeof *g_loaded);
+    if (!g_mod || !g_loaded) die("cannot allocate %d module slots", n);
+}
+static void preload_nros(const char *dir, FILE *f) {
+    char path[1024], line[512]; snprintf(path, sizeof path, "%s/nro.tsv", dir);
+    if (!f) return;
+    int n0 = g_nmod; size_t data = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        char name[16], hex[65]; unsigned size;
+        if (sscanf(line, "%15s %64s %u", name, hex, &size) != 3 || strlen(hex) != 64) die("%s: bad row %s", path, line);
+        if (!strcmp(name, "refused")) {   // an online SDK the pack left out (dm/tools/nro_collect.py ONLINE_SDKS): LoadModule refuses its hash
+            if (g_nrefused < (int)(sizeof g_refused / sizeof *g_refused)) for (int k = 0; k < 32; k++) sscanf(hex + 2 * k, "%2hhx", &g_refused[g_nrefused][k]);
+            g_nrefused++; continue;
+        }
+        if (g_nmod >= g_mod_capacity) die("%s: NRO manifest grew while loading", path);
+        module_t *m = &g_mod[g_nmod];
+        strlcpy(m->name, name, sizeof m->name); m->nro = 1; m->nro_size = size;
+        for (int k = 0; k < 32; k++) sscanf(hex + 2 * k, "%2hhx", &m->sha256[k]);
+        read_layout(m, dir); map_image(m, dir); parse_dynamic(m); register_gates(m, dir);
+        // The NRO header gives initialized data separately from bss. Keep only those bytes: bss is known zero before the first load, even for FFX's 925 MB static heap.
+        m->pristine_len = *(const uint32_t *)(m->base + 0x34);
+        if (*(const uint32_t *)(m->base + 0x30) != m->data_off || m->pristine_len > m->key_page_off - m->data_off) die("%s: NRO data layout mismatch", m->name);
+        data += m->pristine_len;
+        g_nmod++;
+    }
+    fclose(f);
+    LOG("NRO: %d modules mapped (%s), loaded when the game asks; initialized data %.1f MB, snapshotted on first load", g_nmod - n0, path, data / 1048576.0);
+}
+
+module_t *nro_find(const uint8_t sha256[32]) {
+    for (int i = 0; i < g_nmod; i++) if (g_mod[i].nro && !memcmp(g_mod[i].sha256, sha256, 32)) return &g_mod[i];
+    return NULL;
+}
+
+// Bind the symbol relocations of module k again: those whose symbol nm defines (load) or whose slot points into nm (unload). Returns how many changed
+static unsigned rebind(module_t *k, module_t *nm, int load) {
+    relocs_t rl = relocs_of(k); unsigned n = 0;
+    uint64_t lo = (uint64_t)nm->base, hi = lo + nm->size;
+    for (int t = 0; t < 2; t++)
+        for (uint64_t i = 0; i < rl.n[t]; i++) {
+            const Elf64_Rela *r = &rl.tab[t][i];
+            unsigned type = ELF64_R_TYPE(r->r_info);
+            if (type == R_AARCH64_RELATIVE) continue;
+            const Elf64_Sym *s = &k->symtab[ELF64_R_SYM(r->r_info)];
+            uint64_t *where = (uint64_t *)(k->base + r->r_offset), add = type == R_AARCH64_JUMP_SLOT ? 0 : (uint64_t)r->r_addend, cur = *where - add;
+            if (load ? s->st_shndx || !module_sym(nm, k->strtab + s->st_name) : !(cur >= lo && cur < hi)) continue;
+            int other, weak0; uint64_t v = bind_sym(k, s, &other, &weak0);
+            if (v != cur) { *where = v + add; n++; }
+        }
+    return n;
+}
+
+void nro_load(module_t *m) {
+    pthread_rwlock_wrlock(&g_modules_mu);
+    // No guest code can modify an inactive NRO before its first load. Copy here, before relocation/init: eagerly copying FFX/X-2's 1,432 modules committed 5.8 GB of mostly unused bss.
+    if (!m->pristine) {
+        if (!(m->pristine = malloc(m->pristine_len ? m->pristine_len : 1))) die("%s: pristine data copy", m->name);
+        memcpy(m->pristine, m->base + m->data_off, m->pristine_len);
+    }
+    if (m->loads) {
+        memcpy(m->base + m->data_off, m->pristine, m->pristine_len);
+        memset(m->base + m->data_off + m->pristine_len, 0, m->key_page_off - m->data_off - m->pristine_len);
+    }
+    m->loads++; m->loaded = 1; g_loaded[g_nloaded++] = m;
+    relocate(m);
+    unsigned n = 0;
+    for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded && &g_mod[i] != m) n += rebind(&g_mod[i], m, 1);
+    pthread_rwlock_unlock(&g_modules_mu);
+    LOG("NRO %s loaded (load %u, base %p): %u imports of the modules loaded before bound to it", m->name, m->loads, m->base, n);
+}
+
+void nro_unload(module_t *m) {
+    pthread_rwlock_wrlock(&g_modules_mu);
+    if (!svc_nro_deactivate(m)) die("NRO %s: cannot unload while a mapped stack borrows its data", m->name);
+    for (int i = 0; i < g_nloaded; i++) if (g_loaded[i] == m) { memmove(g_loaded + i, g_loaded + i + 1, (size_t)(--g_nloaded - i) * sizeof *g_loaded); break; }
+    unsigned n = 0;
+    for (int i = 0; i < g_nmod; i++) if (g_mod[i].loaded) n += rebind(&g_mod[i], m, 0);
+    pthread_rwlock_unlock(&g_modules_mu);
+    LOG("NRO %s unloaded: %u imports that pointed into it bound again", m->name, n);
 }
 
 // DM_LOADHASH=1 (diagnostics): after loading, output an address-independent sha256 per module, to prove that the load results of "early start / no early start" are byte-identical.
@@ -364,12 +542,35 @@ static void remap_at(module_t *m, vm_address_t to, const void *from, unsigned lo
     if ((cur & need) != need) die("%s permissions after vm_remap %#x, missing %#x", m->name, cur, need);
 }
 #define IMAGE_MH (&_mh_execute_header)
+// The NRO modules (loader.c "NRO modules") are packed instead of getting sections of their own: a Mach-O file has at most 255 sections, and Super Smash Bros. Ultimate's 98 NROs would
+// take 294. gen_embed.py puts their pieces one after another, each 16K aligned, in __TEXT,__dm_nro_x0 / __DM_NRO_W,__img / __TEXT,__dm_nro_x1, and __DATA,__dm_nro_tab lists them:
+// 32 bytes of name, then the offset and length of its x0, W and x1 pieces in their sections (u64 each). A module name never holds an underscore, so these names meet no module's
+typedef struct { char name[32]; uint64_t off[3][2]; } nro_ent;
+static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, const uint8_t **w, unsigned long *zw, const uint8_t **x1, unsigned long *z1) {
+    unsigned long zt, s0, sw, s1;
+    const nro_ent *t = (const nro_ent *)getsectiondata(IMAGE_MH, "__DATA", "__dm_nro_tab", &zt);
+    const uint8_t *b0 = getsectiondata(IMAGE_MH, "__TEXT", "__dm_nro_x0", &s0), *bw = getsectiondata(IMAGE_MH, "__DM_NRO_W", "__img", &sw), *b1 = getsectiondata(IMAGE_MH, "__TEXT", "__dm_nro_x1", &s1);
+    if (!t || !b0 || !bw || !b1) return 0;
+    for (unsigned long i = 0; i < zt / sizeof *t; i++) if (!strncmp(t[i].name, name, sizeof t[i].name)) {
+        *x0 = b0 + t[i].off[0][0]; *z0 = t[i].off[0][1]; *w = bw + t[i].off[1][0]; *zw = t[i].off[1][1]; *x1 = b1 + t[i].off[2][0]; *z1 = t[i].off[2][1];
+        return 1;
+    }
+    return 0;
+}
 static void map_image(module_t *m, const char *dir) {
     (void)dir;
     char sx0[17], sx1[17], dm[17]; snprintf(sx0, sizeof sx0, "__dm%sx0", m->name); snprintf(sx1, sizeof sx1, "__dm%sx1", m->name); snprintf(dm, sizeof dm, "__DM%sW", m->name);
-    unsigned long z0, zw, z1;
-    const uint8_t *x0 = getsectiondata(IMAGE_MH, "__TEXT", sx0, &z0), *w = getsectiondata(IMAGE_MH, dm, "__img", &zw), *x1 = getsectiondata(IMAGE_MH, "__TEXT", sx1, &z1);
+    unsigned long z0 = 0, zw = 0, z1 = 0;
+    const uint8_t *x0 = NULL, *w = NULL, *x1 = NULL;
+    if (m->nro) { if (!nro_pieces(m->name, &x0, &z0, &w, &zw, &x1, &z1)) die("NRO %s: not in the embedded NRO table (__DATA,__dm_nro_tab)", m->name); }
+    else { x0 = getsectiondata(IMAGE_MH, "__TEXT", sx0, &z0); w = getsectiondata(IMAGE_MH, dm, "__img", &zw); x1 = getsectiondata(IMAGE_MH, "__TEXT", sx1, &z1); }
     if (!x0 || !w || !x1) die("embedded sections %s / %s / %s missing", sx0, dm, sx1);
+    // The back patch area (patch_nso.py TWO) is a fourth section, __dm<name>x2; NROs never have one (nro_pieces holds three pieces)
+    unsigned long z2 = 0; const uint8_t *x2 = NULL;
+    if (m->back_len) {
+        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%sx2", m->name);
+        if (m->nro || !(x2 = getsectiondata(IMAGE_MH, "__TEXT", sx2, &z2)) || z2 != m->back_len || ((uintptr_t)x2 & 0x3FFF)) die("embedded back patch area %s missing or wrong", sx2);
+    }
     // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
     int front = m->patch_off < 0;
     if (z0 + zw != (front ? m->file_image_len : (uint64_t)m->patch_off) || (z0 & 0x3FFF) || (zw & 0x3FFF) || (z1 & 0x3FFF) || ((uintptr_t)x0 & 0x3FFF) || ((uintptr_t)w & 0x3FFF) || ((uintptr_t)x1 & 0x3FFF))
@@ -382,7 +583,10 @@ static void map_image(module_t *m, const char *dir) {
     base += pre;
     remap_at(m, base, x0, z0, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     remap_at(m, base + z0, w, zw, TRUE, VM_PROT_READ | VM_PROT_WRITE);
-    remap_at(m, base + m->patch_off, x1, z1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    // A module with nothing to rewrite has an empty patch area (87 of Super Smash Bros. Ultimate's 98 NROs: no x18, SVC or TLS register use); vm_remap refuses 0 bytes
+    // (KERN_INVALID_ARGUMENT), which stopped the app at launch on an iPhone at the first such NRO (found in PR #94)
+    if (z1) remap_at(m, base + m->patch_off, x1, z1, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (z2) remap_at(m, base + m->back_off, x2, z2, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     m->base = (uint8_t *)base; install_key_page(m);
 }
 #else
@@ -402,14 +606,17 @@ static void map_image(module_t *m, const char *dir) {
     size_t sz; uint8_t *raw = slurp(path, &sz);
     if (m->patch_off < 0) {
         // Patch area before the base: file = the first part of the image (text + ro + data) + patch area; bss and the key page are anonymous zero pages. The gap from the patch area's end to the base is left inaccessible (PROT_NONE)
-        uint64_t pre = (uint64_t)-m->patch_off, fl = m->file_image_len;
-        if (sz < fl) die("%s is shorter than FILE_IMAGE_LEN %#llx", path, (unsigned long long)fl);
-        m->size = m->image_size; m->patch_len = (sz - fl + 0x3FFF) & ~0x3FFFull;
+        // With a back patch area (patch_nso.py TWO) the file ends with it, BACK_LEN bytes, copied to BACK_OFF in the image
+        uint64_t pre = (uint64_t)-m->patch_off, fl = m->file_image_len, bl = m->back_len;
+        if (sz < fl + bl) die("%s is shorter than FILE_IMAGE_LEN %#llx + BACK_LEN %#llx", path, (unsigned long long)fl, (unsigned long long)bl);
+        m->size = m->image_size; m->patch_len = (sz - bl - fl + 0x3FFF) & ~0x3FFFull;
         if (m->patch_len > pre) die("%s patch area of %#llx bytes does not fit in the %#llx before the base", path, (unsigned long long)m->patch_len, (unsigned long long)pre);
         uint8_t *a = mmap(NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
-        memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - fl); free(raw); install_key_page(m);
+        memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - bl - fl); if (bl) memcpy(m->base + m->back_off, raw + sz - bl, bl);
+        free(raw); install_key_page(m);
+        if (bl && mprotect(m->base + m->back_off, bl, PROT_READ | PROT_EXEC)) die("%s mprotect back patch", m->name);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
         if (mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
@@ -427,10 +634,16 @@ static void map_image(module_t *m, const char *dir) {
 }
 #endif
 
+static char g_module_dir[1024];   // the folder the modules were loaded from (dm_module_dir)
+const char *dm_module_dir(void) { return g_module_dir; }
+
 void load_modules(const char *dir, const char **names, int n) {
+    strlcpy(g_module_dir, dir, sizeof g_module_dir);
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;
+    FILE *nros = open_nros(dir);
+    allocate_modules(n, nros);
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         strlcpy(m->name, names[i], sizeof m->name);
@@ -444,11 +657,12 @@ void load_modules(const char *dir, const char **names, int n) {
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
         t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
         LOG("%s: base %p size %#zx", names[i], m->base, m->size);
-        g_nmod++;
+        m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }
     force_init();
     t = now_ns(); for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]); tr = now_ns() - t;
     force_check();
+    preload_nros(dir, nros);   // mapped now, relocated when the game loads them (hle_ro.c)
     { void hlecount_seal(void); hlecount_seal(); }   // DM_HLECOUNT: relocation done, seal the counting stub pages as read-only executable
     if (getenv("DM_SYMCHECK")) LOG("DM_SYMCHECK: %lu symbol lookups at load time, hash and linear disagree %lu", g_symchk_n, g_symchk_bad);
     if (g_flag.bootprof) LOG("① breakdown: mapping (read + copy + seal pages) %.1f ms, dynamic section parsing %.1f ms, gate registration %.1f ms, relocation + forced takeover %.1f ms, total %.1f ms",
@@ -460,7 +674,7 @@ void load_modules(const char *dir, const char **names, int n) {
 void run_module_inits(void) {
     for (int i = 0; i < g_nmod; i++) {
         module_t *m = &g_mod[i];
-        if (!m->init) continue;
+        if (!m->init || m->nro) continue;   // an NRO's init runs when the game loads it (hle_ro.c)
         LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);
         ((void (*)(void))(m->base + m->init))();
     }

@@ -2,13 +2,15 @@
 // For build and run see dm/gfx/tests/Makefile (make -C dm/gfx/tests).
 #include "../nvn/hle_nvn.c"
 uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
+_Atomic uint64_t dm_present_ns;   // when the last present was made (hle_thread.c, DM_HITCH_DUMP); unit test stub
 #include "../tex/nvn_deswizzle.h"
 #include <time.h>
 void *front_metal_layer(void) { return NULL; }   // no window in unit tests: present only counts
 module_t *module_of(const void *p) { (void)p; return NULL; }   // no guest modules in unit tests
-module_t g_mod[MAX_MOD]; int g_nmod;                            // host symbols that crash.c depends on
+module_t *g_mod; int g_nmod;                            // host symbols that crash.c depends on
 void svc_thread_dump(void) {}
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; } // Tests use host-thread stacks.
+void dm_vi_layer_crop(int c[4]) { c[0] = c[1] = c[2] = c[3] = 0; }   // no vi layer crop in unit tests (hle_vi.c)
 void crash_install(void);
 void nvn_present_config(int hz, int display_mode);
 #include <fcntl.h>
@@ -55,6 +57,39 @@ static size_t tex_size(int fmt, int w, int h, int flags, size_t *align) {
 }
 
 int main(void) {
+    // Engine-native limiters have no FPS state page. Their launcher cap must
+    // still pace presents and select the display-link rate in display mode.
+    { win_t w={.interval=1};nvn_present_config(60,1);dm_fps_state=NULL;
+      setenv("DM_FPS_TARGET","30",1);g_present_cap=-1;
+      EXPECT("native 30 cap: display interval",2,present_itv(&w));
+      EXPECT("native 30 cap: period ns",33333333,present_period(&w));
+      EXPECT("native 30 cap: display-link target",30,nvn_game_fps());
+      EXPECT("native cap does not enable frame-step stubs",0,fstep_on());
+      setenv("DM_FPS_TARGET","60",1);g_present_cap=-1;
+      EXPECT("native 60 cap: period ns",16666666,present_period(&w));
+      EXPECT("native 60 cap: display-link target",60,nvn_game_fps());
+      setenv("DM_FPS_TARGET","0",1);g_present_cap=-1;w.interval=2;
+      EXPECT("no cap preserves display pacing",1,present_itv(&w));nvn_present_config(60,0);
+      EXPECT("no cap preserves game pacing",2,present_itv(&w));
+      _Alignas(8) uint8_t state[64]={0};float cap=60;memcpy(state,&cap,4);dm_fps_state=state;
+      EXPECT("stub state takes precedence over env",60,fps_present_cap());
+      *(uint32_t *)(state+4)=1;
+      EXPECT("the state page's movie flag is the host's copy, not read for the cap",60,fps_present_cap());
+      dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
+    }
+    // No frame step page and no engine limiter the host writes (a main the profile's
+    // stubs or limiter rows do not know): nothing makes the game follow the cap, so
+    // presentation keeps the game's own interval (Tears of the Kingdom 1.4.2 at 2x).
+    { win_t w={.interval=2};nvn_present_config(60,0);dm_fps_state=NULL;g_engine_stub=0;
+      setenv("DM_FPS_TARGET","60",1);g_present_cap=-1;
+      EXPECT("no limiter: the 60 cap is not applied",0,fps_present_cap());
+      EXPECT("no limiter: the game's present interval stays",2,present_itv(&w));
+      setenv("DM_FPS_TARGET","30",1);g_present_cap=-1;w.interval=1;
+      EXPECT("no limiter: the 30 cap is not applied",1,present_itv(&w));
+      _Alignas(8) uint8_t state[64]={0};float cap=60;memcpy(state,&cap,4);dm_fps_state=state;
+      EXPECT("a frame step page needs no limiter",60,fps_present_cap());
+      dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;g_engine_stub=1;nvn_present_config(0,0);
+    }
     crash_install();   // the same SIGSEGV / SIGBUS handling as production (the page-fault hook is dispatched from within it)
     // 1. Bootstrap address lookup: bootstrap gets GetProcAddress, then uses it to get all the names
     PFNNVNBOOTSTRAPLOADERPROC boot = (PFNNVNBOOTSTRAPLOADERPROC)h_nvnBootstrapLoader;
@@ -71,6 +106,32 @@ int main(void) {
     EXPECT("uniform buffer alignment (256 measured on X1)", 256, v);
     P(nvnDeviceGetInteger)(&dev, NVN_DEVICE_INFO_TEXTURE_DESCRIPTOR_SIZE, &v); EXPECT("texture descriptor size (32)", 32, v);
     P(nvnDeviceGetInteger)(&dev, NVN_DEVICE_INFO_QUEUE_COMMAND_MEMORY_MIN_SIZE, &v); EXPECT("queue command memory minimum (65536)", 65536, v);
+    // Precompiled shaders need not match the linked SDK: ASTRAL CHAIN (SDK 6.4)
+    // ships GPU code 1.15. Advertise the translator's supported range even with no SDK.
+    P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x2E, &v); EXPECT("newest GPU code major", 1, v);
+    P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x30, &v); EXPECT("newest GPU code minor", 16, v);
+    P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x2F, &v); EXPECT("oldest GPU code major", 1, v);
+    P(nvnDeviceGetInteger)(&dev, (NVNdeviceInfo)0x31, &v); EXPECT("oldest GPU code minor", 5, v);
+    // The Switch 2 table (NVN2's own constants, read from Donkey Kong Bananza's sdk): its GPU code range and Ampere's limits, the host's 16 vertex slots, and the run-time items
+    EXPECT("NVN2: API 231.30", 231 * 100 + 30, g_devinfo2[0] * 100 + g_devinfo2[1]);
+    EXPECT("NVN2: GPU code 201.0 to 201.17", 1, g_devinfo2[0x2E] == 201 && g_devinfo2[0x30] == 17 && g_devinfo2[0x2F] == 201 && g_devinfo2[0x31] == 0);
+    EXPECT("NVN2: 1,024 compute threads, an unbounded dispatch width", 1, g_devinfo2[0x1F] == 1024 && g_devinfo2[0x20] == 2147483647);
+    EXPECT("NVN2: the host's 16 vertex bindings and attributes, not Ampere's 32", 1, g_devinfo2[0x06] == 16 && g_devinfo2[0x0E] == 16);
+    EXPECT("NVN2: the memory pool page size is read at run time", DEVINFO_RT, g_devinfo2[NVN_DEVICE_INFO_MEMORY_POOL_PAGE_SIZE]);
+    EXPECT("NVN2: items up to 0xA9", 0xAA, (int)(sizeof g_devinfo2 / sizeof *g_devinfo2));
+
+    NVNsamplerBuilder sb; NVNsampler sampler;
+    P(nvnSamplerBuilderSetDefaults)(&sb);
+    const uint32_t opaque_black[4] = {0, 0, 0, 1};
+    P(nvnSamplerBuilderSetBorderColorui)(&sb, opaque_black);
+    P(nvnSamplerInitialize)(&sampler, &sb);
+    EXPECT("unsigned integer border alpha is numeric", 1, ((samp_t *)&sampler)->p.border[3] == 1.f);
+    P(nvnSamplerFinalize)(&sampler);
+    const int opaque_white[4] = {1, 1, 1, 1};
+    P(nvnSamplerBuilderSetBorderColori)(&sb, opaque_white);
+    P(nvnSamplerInitialize)(&sampler, &sb);
+    EXPECT("signed integer border RGB is numeric", 1, ((samp_t *)&sampler)->p.border[0] == 1.f && ((samp_t *)&sampler)->p.border[2] == 1.f);
+    P(nvnSamplerFinalize)(&sampler);
 
     // 3. Memory pool: GPU address = the storage address given by the game
     static uint8_t poolmem[1 << 20] __attribute__((aligned(4096)));
@@ -79,6 +140,57 @@ int main(void) {
     P(nvnMemoryPoolBuilderSetStorage)(&pb, poolmem, sizeof poolmem); P(nvnMemoryPoolBuilderSetFlags)(&pb, 0x24);
     EXPECT("MemoryPoolInitialize succeeds", 1, P(nvnMemoryPoolInitialize)(&pool, &pb));
     EXPECT("pool GPU address = storage address", (long long)(uintptr_t)poolmem, P(nvnMemoryPoolGetBufferAddress)(&pool));
+
+    // Engines may retarget a ring buffer with raw stores instead of SetStorage.
+    // These SDK offsets come from the guest writes reported in issue #723;
+    // deliberately do not use buf_t or its offsets to construct the writes.
+    {
+        NVNbufferBuilder bb = {0};
+        struct { uint64_t before; NVNbuffer buffer; uint64_t after; } guarded = {
+            .before = UINT64_C(0x1122334455667788), .after = UINT64_C(0x8877665544332211)
+        };
+        NVNbuffer *buffer = &guarded.buffer;
+        P(nvnBufferBuilderSetDevice)(&bb, &dev); P(nvnBufferBuilderSetDefaults)(&bb);
+        P(nvnBufferBuilderSetStorage)(&bb, &pool, 0x100, 0x200);
+        EXPECT("ring buffer initializes", 1, P(nvnBufferInitialize)(buffer, &bb));
+        EXPECT("initial buffer address", (uintptr_t)poolmem + 0x100, P(nvnBufferGetAddress)(buffer));
+        EXPECT("initial buffer size", 0x200, P(nvnBufferGetSize)(buffer));
+        uint64_t initial_offset, initial_size;
+        memcpy(&initial_offset, (uint8_t *)buffer + 0x18, 8);
+        memcpy(&initial_size, (uint8_t *)buffer + 0x20, 8);
+        EXPECT("initialized guest offset field", 0x100, initial_offset);
+        EXPECT("initialized guest size field", 0x200, initial_size);
+        const struct { uint64_t offset, size; } allocations[] = {{0x4000, 0x100}, {0x8000, 0x300}, {0, 0}};
+        for (unsigned i = 0; i < sizeof allocations / sizeof allocations[0]; i++) {
+            memcpy((uint8_t *)buffer + 0x18, &allocations[i].offset, 8);
+            memcpy((uint8_t *)buffer + 0x20, &allocations[i].size, 8);
+            EXPECT("guest ring store changes address", (uintptr_t)poolmem + allocations[i].offset, P(nvnBufferGetAddress)(buffer));
+            EXPECT("guest ring store changes map", (uintptr_t)poolmem + allocations[i].offset, (uintptr_t)P(nvnBufferMap)(buffer));
+            EXPECT("guest ring store changes offset", allocations[i].offset, P(nvnBufferGetMemoryOffset)(buffer));
+            EXPECT("guest ring store changes size", allocations[i].size, P(nvnBufferGetSize)(buffer));
+            EXPECT("guest ring store preserves pool", (uintptr_t)&pool, (uintptr_t)P(nvnBufferGetMemoryPool)(buffer));
+        }
+        EXPECT("ring stores preserve builder offset", 0x100, P(nvnBufferBuilderGetMemoryOffset)(&bb));
+        EXPECT("ring stores preserve builder size", 0x200, P(nvnBufferBuilderGetSize)(&bb));
+        P(nvnBufferFinalize)(buffer);
+        EXPECT("buffer leaves preceding object intact", UINT64_C(0x1122334455667788), guarded.before);
+        EXPECT("buffer leaves following object intact", UINT64_C(0x8877665544332211), guarded.after);
+
+        static uint8_t private_mem[4096] __attribute__((aligned(4096)));
+        NVNmemoryPoolBuilder private_pb = {0}; NVNmemoryPool private_pool;
+        P(nvnMemoryPoolBuilderSetDevice)(&private_pb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&private_pb);
+        P(nvnMemoryPoolBuilderSetStorage)(&private_pb, private_mem, sizeof private_mem);
+        P(nvnMemoryPoolBuilderSetFlags)(&private_pb, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+        EXPECT("GPU-only pool initializes", 1, P(nvnMemoryPoolInitialize)(&private_pool, &private_pb));
+        P(nvnBufferBuilderSetStorage)(&bb, &private_pool, 0x100, 0x200);
+        EXPECT("GPU-only buffer initializes", 1, P(nvnBufferInitialize)(buffer, &bb));
+        uint64_t offset = 0x400, size = 0x80;
+        memcpy((uint8_t *)buffer + 0x18, &offset, 8); memcpy((uint8_t *)buffer + 0x20, &size, 8);
+        EXPECT("GPU-only retargeted address", (uintptr_t)private_mem + 0x400, P(nvnBufferGetAddress)(buffer));
+        EXPECT("GPU-only retargeted size", 0x80, P(nvnBufferGetSize)(buffer));
+        EXPECT("GPU-only buffer stays unmappable", 0, (uintptr_t)P(nvnBufferMap)(buffer));
+        P(nvnBufferFinalize)(buffer); P(nvnMemoryPoolFinalize)(&private_pool);
+    }
 
     // 4. Texture storage size (block-linear: GOB = 64 B × 8 rows; block height from the GOB count of "height × 1.5": ≥16→16, ≥8→8 ...)
     //    256×256 RGBA8: 1024 B per row = 16 GOBs; height 256 rows = 32 GOB rows, block height 16 GOBs → 2 blocks; 16×2×(512×16) = 262144
@@ -195,9 +307,11 @@ int main(void) {
     P(nvnQueueBuilderSetQueueMemory)(&qb, qmem, qsz);
     EXPECT("QueueInitialize succeeds", 1, P(nvnQueueInitialize)(&q, &qb));
     NVNcommandHandle hs[2] = {h1, h2};
+    uint64_t counter_before = now_ns();
     P(nvnQueueSubmitCommands)(&q, 2, hs);
     NVNsync sf; P(nvnSyncInitialize)(&sf, &dev); P(nvnQueueFenceSync)(&q, &sf, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
     int wr = P(nvnSyncWait)(&sf, 5000000000ull);
+    uint64_t counter_after = now_ns();
     EXPECT("fence wait after submit succeeds (0 or 1)", 1, wr == 0 || wr == 1);
     int ub_ok = 1;
     for (int k = 0; k < 20; k++) for (int i = 0; i < 16; i++) { uint32_t w; memcpy(&w, ub + k * 64 + i * 4, 4); ub_ok &= w == (uint32_t)(k * 100 + i); }
@@ -205,7 +319,13 @@ int main(void) {
     EXPECT("event value: h1(7,+5), then h2 copies and runs h1(7,+5) again = 12", 12, P(nvnEventGetValue)(&ev));
     EXPECT("buffer copy 64 B identical", 0, memcmp(src, dst, 64));
     uint64_t ts[2]; memcpy(ts, cnt, 16);
-    EXPECT("counter timestamp written (non-zero)", 1, ts[0] != 0 && ts[0] == ts[1]);
+    EXPECT("counter timestamp written (non-zero)", 1, ts[1] != 0);
+    EXPECT("its counter field: the time, 0 with the profile's render_cond (as on the GPU)", DM_GAME_RENDER_COND ? 0 : ts[1], ts[0]);
+    NVNcounterData fixed_counter = {0, 614400};
+    EXPECT("614400 raw counter ticks = 1 ms", 1000000, P(nvnDeviceGetTimestampInNanoseconds)(&dev, &fixed_counter));
+    NVNcounterData reported_counter; memcpy(&reported_counter, cnt, sizeof reported_counter);
+    uint64_t counter_ns = P(nvnDeviceGetTimestampInNanoseconds)(&dev, &reported_counter);
+    EXPECT("report converted to ns lies inside submit/wait", 1, counter_ns + 2 >= counter_before && counter_ns <= counter_after);
 
     // 5a. Command memory per recording, as GetCommandMemoryUsed reports it (games size prerecorded command blocks by it: Breath of the Wild records one scratch draw per mesh):
     //     no BEGIN record, a plain indexed draw without the indirect / multi-draw fields, and the handle is the first record; an indirect draw keeps its address
@@ -213,10 +333,21 @@ int main(void) {
         static uint8_t m[4096] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer c2;
         P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
         P(nvnCommandBufferInitialize)(&c2, &dev);
+        // Control memory is unused by the host's command stream: a supplied
+        // block has its full size available, even after recording commands.
+        static uint8_t ctl[512];
+        EXPECT("control free before AddControlMemory", 0, P(nvnCommandBufferGetControlMemoryFree)(&c2));
+        P(nvnCommandBufferAddControlMemory)(&c2, ctl, sizeof ctl);
+        EXPECT("control block size after grant", sizeof ctl, P(nvnCommandBufferGetControlMemorySize)(&c2));
+        EXPECT("control block free after grant", sizeof ctl, P(nvnCommandBufferGetControlMemoryFree)(&c2));
         P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
         P(nvnCommandBufferDrawElementsBaseVertex)(&c2, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x10000, 5);
         NVNcommandHandle hd = P(nvnCommandBufferEndRecording)(&c2);
         EXPECT("plain indexed draw recording: 0x28 + END", 0x30, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        EXPECT("recording uses no control memory", 0, P(nvnCommandBufferGetControlMemoryUsed)(&c2));
+        EXPECT("control capacity remains available", sizeof ctl, P(nvnCommandBufferGetControlMemoryFree)(&c2));
+        P(nvnCommandBufferAddControlMemory)(&c2, ctl, 128);
+        EXPECT("new control block replaces capacity", 128, P(nvnCommandBufferGetControlMemoryFree)(&c2));
         op_hdr rh; memcpy(&rh, m, sizeof rh); p_draw_idx dt; const p_draw_idx *d = draw_idx_rec(m + 8, rh.size, &dt);
         EXPECT("its handle is the draw record", 1, (const uint8_t *)hd == m && rh.op == OP_DRAW_IDX);
         EXPECT("draw read back: count, base vertex, no indirect address", 1, d->count == 36 && d->base_vertex == 5 && d->ibuf == 0x10000 && !d->ind && !d->mdi_cnt);
@@ -234,10 +365,120 @@ int main(void) {
         size_t at = P(nvnCommandBufferGetCommandMemoryUsed)(&c2);
         P(nvnCommandBufferBindTexture)(&c2, NVN_SHADER_STAGE_FRAGMENT, 3, (NVNtextureHandle)(0x1ff00000u | 1234));
         P(nvnCommandBufferEndRecording)(&c2);
-        EXPECT("single texture bind recording: 0x20 + END", 0x28, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        EXPECT("single texture bind recording, first pools: 0x18 + END", 0x20, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
         uint32_t patched = 0x1ff00000u | 1235; memcpy(m + at + 0x10, &patched, 4);
         memcpy(&rh, m, sizeof rh); p_bind_handles bt; const p_bind_handles *bh = bind_rec(rh.op, m + 8, &bt);
         EXPECT("the bind reads the handle patched at its start + 0x10: slot 3, texture 1235, sampler 511", 1, rh.op == OP_BIND_TEX1 && bh->n == 1 && bh->first == 3 && bh->stage == NVN_SHADER_STAGE_FRAGMENT && bh->h[0] == patched);
+        // With another pool bound the record keeps the pool bases after the handle, and the read adds them
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        ((cmd_t *)&c2)->tex_base = 7; ((cmd_t *)&c2)->samp_base = 3;
+        P(nvnCommandBufferBindTexture)(&c2, NVN_SHADER_STAGE_VERTEX, 2, (NVNtextureHandle)(5u << 20 | 1234));
+        P(nvnCommandBufferEndRecording)(&c2); ((cmd_t *)&c2)->tex_base = ((cmd_t *)&c2)->samp_base = 0;
+        EXPECT("single texture bind recording, other pools: 0x20 + END", 0x28, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        memcpy(&rh, m, sizeof rh); bh = bind_rec(rh.op, m + 8, &bt);
+        EXPECT("the bind adds the pool bases: stage, slot 2, texture 1241, sampler 8", 1, bh->stage == NVN_SHADER_STAGE_VERTEX && bh->first == 2 && bh->h[0] == (8u << 20 | 1241));
+        // State binds carry only the state object's bytes: 16 bytes for a 4-byte state, 24 for an 8-byte one or the multisample state
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        NVNpolygonState ps; P(nvnPolygonStateSetDefaults)(&ps); P(nvnPolygonStateSetCullFace)(&ps, NVN_FACE_BACK); P(nvnCommandBufferBindPolygonState)(&c2, &ps);
+        NVNdepthStencilState dss; P(nvnDepthStencilStateSetDefaults)(&dss); P(nvnDepthStencilStateSetDepthFunc)(&dss, NVN_DEPTH_FUNC_GREATER); P(nvnCommandBufferBindDepthStencilState)(&c2, &dss);
+        NVNmultisampleState mss; P(nvnMultisampleStateSetDefaults)(&mss); P(nvnMultisampleStateSetSamples)(&mss, 4); P(nvnCommandBufferBindMultisampleState)(&c2, &mss);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("polygon, depth-stencil and multisample binds: 16 + 24 + 24 + END", 72, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        {   op_hdr h1, h2, h3; memcpy(&h1, m, 8); memcpy(&h2, m + 16, 8); memcpy(&h3, m + 40, 8);
+            const p_bind_state *s1 = (const p_bind_state *)(m + 8), *s2 = (const p_bind_state *)(m + 24), *s3 = (const p_bind_state *)(m + 48);
+            poly_st pr; ds_st dr; ms_st mr; memcpy(&pr, s1->bytes, sizeof pr); memcpy(&dr, s2->bytes, sizeof dr); memcpy(&mr, s3->bytes, sizeof mr);
+            EXPECT("the state records read back: kinds, cull, depth function, samples", 1, h1.op == OP_BIND_STATE && h1.size == 16 && s1->kind == 4 && pr.cull == NVN_FACE_BACK
+                   && h2.op == OP_BIND_STATE && h2.size == 24 && s2->kind == 5 && dr.df == NVN_DEPTH_FUNC_GREATER && h3.op == OP_BIND_STATE && h3.size == 24 && s3->kind == 3 && mr.samples == 4); }
+        P(nvnCommandBufferFinalize)(&c2); P(nvnMemoryPoolFinalize)(&mp);
+    }
+    // Uniform bindings are measured into resource budgets too. A bounded binding needs
+    // 8 header bytes plus 16 payload bytes; keep the full record for larger ranges.
+    {
+        static uint8_t m[4096] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer c2;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&c2, &dev);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferBindUniformBuffer)(&c2, NVN_SHADER_STAGE_FRAGMENT, 13, UINT64_C(0x123456789abc0000), 65536);
+        NVNcommandHandle first = P(nvnCommandBufferEndRecording)(&c2);
+        size_t first_size = P(nvnCommandBufferGetCommandMemoryUsed)(&c2);
+        EXPECT("maximum uniform range: 24-byte bind + END", 32, first_size);
+        op_hdr rh; memcpy(&rh, m, sizeof rh);
+        EXPECT("bounded uniform record is 24 bytes", 24, rh.size);
+        p_bind_buf decoded; const p_bind_buf *b = bind_buf_rec(rh.op, m + 8, &decoded);
+        EXPECT("bounded uniform decode keeps stage, index, address, size", 1,
+               b->stage == NVN_SHADER_STAGE_FRAGMENT && b->index == 13 && b->addr == UINT64_C(0x123456789abc0000) && b->size == 65536);
+        op_hdr end; memcpy(&end, m + rh.size, sizeof end);
+        EXPECT("uniform bind preserves its adjacent END", 1, end.op == OP_END && end.size == 8 && (const uint8_t *)first == m);
+        uint8_t saved[64]; memcpy(saved, m, first_size);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, (ptrdiff_t)first_size, sizeof m - first_size); P(nvnCommandBufferBeginRecording)(&c2);
+        NVNbufferRange ranges[] = {{UINT64_C(0xfedcba9876540000), 256}, {UINT64_C(0x1122334455660000), 0}};
+        P(nvnCommandBufferBindUniformBuffers)(&c2, NVN_SHADER_STAGE_VERTEX, 2, 2, ranges);
+        P(nvnCommandBufferEndRecording)(&c2);
+        memset(ranges, 0, sizeof ranges);
+        EXPECT("plural uniform binds: 2 x 24 + END", 56, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        EXPECT("independent uniform recording preserves predecessor", 0, memcmp(saved, m, first_size));
+        size_t pos = first_size;
+        memcpy(&rh, m + pos, sizeof rh); b = bind_buf_rec(rh.op, m + pos + 8, &decoded);
+        EXPECT("plural first uniform keeps copied range and slot", 1,
+               b->stage == NVN_SHADER_STAGE_VERTEX && b->index == 2 && b->addr == UINT64_C(0xfedcba9876540000) && b->size == 256);
+        pos += rh.size;
+        memcpy(&rh, m + pos, sizeof rh); b = bind_buf_rec(rh.op, m + pos + 8, &decoded);
+        EXPECT("plural second uniform preserves zero range and next slot", 1,
+               b->stage == NVN_SHADER_STAGE_VERTEX && b->index == 3 && b->addr == UINT64_C(0x1122334455660000) && b->size == 0);
+        memcpy(&end, m + pos + rh.size, sizeof end);
+        EXPECT("plural uniform binds preserve their END", 1, end.op == OP_END && end.size == 8);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 512, sizeof m - 512); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferBindUniformBuffer)(&c2, NVN_SHADER_STAGE_COMPUTE, 3, UINT64_C(0xffff123456780000), UINT64_C(0x100000001));
+        P(nvnCommandBufferEndRecording)(&c2);
+        memcpy(&rh, m + 512, sizeof rh);
+        EXPECT("wide uniform range keeps full record + END", 40, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        EXPECT("wide uniform range keeps full opcode and size", 1, rh.op == OP_BIND_UBO && rh.size == 32);
+        b = bind_buf_rec(rh.op, m + 520, &decoded);
+        EXPECT("wide uniform decode preserves all 64 bits", 1,
+               b->stage == NVN_SHADER_STAGE_COMPUTE && b->index == 3 && b->addr == UINT64_C(0xffff123456780000) && b->size == UINT64_C(0x100000001));
+        P(nvnCommandBufferFinalize)(&c2); P(nvnMemoryPoolFinalize)(&mp);
+    }
+    // One vertex range needs 8 header bytes plus 16 payload bytes; arrays and
+    // ranges wider than 32 bits retain the general representation.
+    {
+        static uint8_t m[4096] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer c2;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&c2, &dev);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferBindVertexBuffer)(&c2, 15, UINT64_C(0xfedcba9876540000), UINT32_MAX);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("single vertex buffer: 24-byte bind + END", 32, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        op_hdr rh, end; memcpy(&rh, m, sizeof rh); memcpy(&end, m + rh.size, sizeof end);
+        EXPECT("single vertex binding record is 24 bytes", 24, rh.size);
+        EXPECT("single vertex binding preserves adjacent END", 1, end.op == OP_END && end.size == 8);
+        p_bind_vbuf tmp; const p_bind_vbuf *b = vbuf_rec(rh.op, m + 8, &tmp);
+        EXPECT("single vertex decode preserves slot, full address, maximum size", 1,
+               b->first == 15 && b->n == 1 && b->r[0].address == UINT64_C(0xfedcba9876540000) && b->r[0].size == UINT32_MAX);
+        NVNbufferRange ranges[] = {{UINT64_C(0x1122334455660000), 0}, {UINT64_C(0x9988776655440000), 256}};
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 128, sizeof m - 128); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferBindVertexBuffers)(&c2, 3, 1, ranges); P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("one-element vertex array: 24-byte bind + END", 32, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        memcpy(&rh, m + 128, sizeof rh); b = vbuf_rec(rh.op, m + 136, &tmp);
+        EXPECT("one-element vertex array decode preserves zero range", 1,
+               b->first == 3 && b->n == 1 && b->r[0].address == UINT64_C(0x1122334455660000) && b->r[0].size == 0);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 256, sizeof m - 256); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferBindVertexBuffers)(&c2, 4, 2, ranges); P(nvnCommandBufferEndRecording)(&c2);
+        memset(ranges, 0, sizeof ranges);
+        EXPECT("two vertex ranges retain array record + END", 56, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        memcpy(&rh, m + 256, sizeof rh);
+        EXPECT("two vertex ranges retain array opcode", OP_BIND_VBUF, rh.op);
+        b = vbuf_rec(rh.op, m + 264, &tmp);
+        EXPECT("vertex array decode preserves both copied ranges", 1,
+               b->first == 4 && b->n == 2 && b->r[0].address == UINT64_C(0x1122334455660000) && !b->r[0].size &&
+               b->r[1].address == UINT64_C(0x9988776655440000) && b->r[1].size == 256);
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 384, sizeof m - 384); P(nvnCommandBufferBeginRecording)(&c2);
+        P(nvnCommandBufferBindVertexBuffer)(&c2, 7, UINT64_C(0xabcd123456780000), UINT64_C(0x100000001)); P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("wide vertex range retains full record + END", 40, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        memcpy(&rh, m + 384, sizeof rh);
+        EXPECT("wide vertex range retains array opcode", OP_BIND_VBUF, rh.op);
+        b = vbuf_rec(rh.op, m + 392, &tmp);
+        EXPECT("wide vertex range decode preserves all 64 bits", 1,
+               b->first == 7 && b->n == 1 && b->r[0].address == UINT64_C(0xabcd123456780000) && b->r[0].size == UINT64_C(0x100000001));
         P(nvnCommandBufferFinalize)(&c2); P(nvnMemoryPoolFinalize)(&mp);
     }
     // 5b'. Fixed slots sized by GetCommandMemoryUsed, as Tears of the Kingdom gives each model's prerecorded lists (GitHub issue #61): a list measured at S bytes is recorded
@@ -266,9 +507,15 @@ int main(void) {
             for (int guard = 0; guard < 8; guard++) {
                 op_hdr h; memcpy(&h, p, sizeof h);
                 if (h.op == OP_JUMP) { const uint8_t *t; memcpy(&t, p + 8, 8); int in = t >= m && t < m + sizeof m;
-                    for (int i = 0; i < g_nhostseg; i++) in |= t >= g_hostseg[i].mem && t < g_hostseg[i].mem + HOSTSEG_SZ;
+                    for (int i = 0; i < g_nhostseg; i++) in |= t >= g_hostseg[i].mem && t < g_hostseg[i].mem + g_hostseg[i].n;
                     if (!in) { ok = 0; break; } jumped = 1; p = t; continue; }
-                if (k < 4) ops[k] = (int)h.op; k++;
+                uint32_t op = h.op;
+                if (op == OP_BIND_UBO || op == OP_BIND_UBO_SMALL) {
+                    p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, p + 8, &tmp);
+                    ok &= b->stage == NVN_SHADER_STAGE_FRAGMENT && b->index == 4 && b->addr == 0x20000 && b->size == 0x100;
+                    op = OP_BIND_UBO;
+                }
+                if (k < 4) ops[k] = (int)op; k++;
                 if (h.op == OP_END) break;
                 p += h.size;
             }
@@ -278,8 +525,47 @@ int main(void) {
         }
         printf("(first broken slot size %d)\n", first_bad);
         EXPECT("slotted lists replay whole after the next slot is recorded", 0, broken);
-        EXPECT("lists of 64..504 bytes stay in their 512 (no host segment)", (504 - 64) / 8 + 1, jumps_fit);
+        EXPECT("lists of 56..504 bytes stay in their 512 (no host segment)", (504 - 56) / 8 + 1, jumps_fit);
         P(nvnCommandBufferFinalize)(&c3); P(nvnMemoryPoolFinalize)(&mp);
+    }
+    // 5b''. Host segment sizes (hostseg_size), as Super Mario Odyssey grants 512 bytes from an empty pool before recording: such a grant gets a HOSTSEG_SMALL segment; a recording
+    //       that outgrows it with no callback JUMPs into a full one and replays whole through its first handle; a record larger than HOSTSEG_SZ gets a segment that holds it;
+    //       a free small segment is not taken for a full one, and the cap counts every segment's bytes
+    {
+        NVNcommandBuffer c4, c5; P(nvnCommandBufferInitialize)(&c4, &dev); P(nvnCommandBufferInitialize)(&c5, &dev);
+        EXPECT("empty pool, 512 bytes, outside a recording: a small segment", HOSTSEG_SMALL, hostseg_size(CB(&c4), 1, 512));
+        EXPECT("empty pool, 0 bytes: a full segment", HOSTSEG_SZ, hostseg_size(CB(&c4), 1, 0));
+        EXPECT("empty pool, more than HOSTSEG_SMALL: a full segment", HOSTSEG_SZ, hostseg_size(CB(&c4), 1, HOSTSEG_SMALL + 1));
+        EXPECT("a record larger than HOSTSEG_SZ: a segment that holds it", 1, hostseg_size(CB(&c4), 0, HOSTSEG_SZ + 64) >= HOSTSEG_SZ + 64 + 16);
+        P(nvnCommandBufferAddCommandMemory)(&c4, NULL, 0, 512);
+        uint8_t *small = CB(&c4)->cur;
+        EXPECT("the grant lends HOSTSEG_SMALL bytes", HOSTSEG_SMALL, CB(&c4)->end - small);
+        P(nvnCommandBufferBeginRecording)(&c4);
+        EXPECT("empty pool, 512 bytes, inside a recording: a full segment", HOSTSEG_SZ, hostseg_size(CB(&c4), 1, 512));
+        static uint8_t dst[8192] __attribute__((aligned(4096))), d1[32], d2[HOSTSEG_SMALL + 256];
+        memset(dst, 0, sizeof dst); memset(d1, 0x35, sizeof d1); memset(d2, 0x6A, sizeof d2);
+        NVNmemoryPoolBuilder db; NVNmemoryPool dp; P(nvnMemoryPoolBuilderSetDefaults)(&db); P(nvnMemoryPoolBuilderSetStorage)(&db, dst, sizeof dst); P(nvnMemoryPoolInitialize)(&dp, &db);
+        P(nvnCommandBufferUpdateUniformBuffer)(&c4, (uintptr_t)dst, sizeof dst, 0, sizeof d1, d1);
+        P(nvnCommandBufferUpdateUniformBuffer)(&c4, (uintptr_t)dst, sizeof dst, 64, sizeof d2, d2);
+        NVNcommandHandle h4 = P(nvnCommandBufferEndRecording)(&c4);
+        op_hdr h0, h1; memcpy(&h0, small, sizeof h0); memcpy(&h1, small + h0.size, sizeof h1);
+        EXPECT("the handle is the small segment's start", (uintptr_t)small, h4);
+        EXPECT("the record that does not fit follows a JUMP", OP_JUMP, h1.op);
+        P(nvnQueueSubmitCommands)(&q, 1, &h4); P(nvnQueueFinish)(&q);
+        EXPECT("the first record replays", 0, memcmp(dst, d1, sizeof d1));
+        EXPECT("the record past the JUMP replays", 0, memcmp(dst + 64, d2, sizeof d2));
+        P(nvnCommandBufferBeginRecording)(&c4);
+        uint8_t *big = cmd_alloc(CB(&c4), HOSTSEG_SZ + 64);
+        EXPECT("a record larger than HOSTSEG_SZ fits its segment with OP_RESERVE after it", 1, CB(&c4)->end - big >= HOSTSEG_SZ + 64 + OP_RESERVE);
+        P(nvnCommandBufferEndRecording)(&c4);
+        pthread_mutex_lock(&g_hostseg_mu); int si = -1; for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].mem == small) si = i; if (si >= 0) g_hostseg[si].busy = 0; pthread_mutex_unlock(&g_hostseg_mu);
+        P(nvnCommandBufferAddCommandMemory)(&c5, NULL, 0, 0);
+        EXPECT("a free small segment is not taken for a full one", 1, si >= 0 && CB(&c5)->cur != small && CB(&c5)->end - CB(&c5)->cur == HOSTSEG_SZ);
+        P(nvnCommandBufferAddCommandMemory)(&c5, NULL, 0, 512);
+        EXPECT("but is taken again for a small one", 1, CB(&c5)->cur == small);
+        uint64_t sum = 0; for (int i = 0; i < g_nhostseg; i++) sum += g_hostseg[i].n;
+        EXPECT("the cap counts every segment's bytes", sum, g_hostseg_bytes);
+        P(nvnCommandBufferFinalize)(&c4); P(nvnCommandBufferFinalize)(&c5); P(nvnMemoryPoolFinalize)(&dp);
     }
 
     // 5b. Sync must hold the CPU back: first queue 24 copies of 64 MiB to keep the GPU busy, with the last one copying src to dst;
@@ -321,6 +607,9 @@ int main(void) {
     EXPECT("texture width", 1280, P(nvnTextureGetWidth)(&sc[0]));
     NVNtexture *scp[2] = {&sc[0], &sc[1]};
     NVNwindowBuilder wb; NVNwindow win; P(nvnWindowBuilderSetDevice)(&wb, &dev); P(nvnWindowBuilderSetDefaults)(&wb);
+    NVNtexture *missing_first[2] = {NULL, &sc[1]};
+    P(nvnWindowBuilderSetTextures)(&wb, 2, missing_first);
+    EXPECT("WindowInitialize with null first texture", 1, P(nvnWindowInitialize)(&win, &wb));
     P(nvnWindowBuilderSetTextures)(&wb, 2, scp); EXPECT("WindowInitialize succeeds", 1, P(nvnWindowInitialize)(&win, &wb));
     int idx[4];
     for (int f = 0; f < 4; f++) {
@@ -375,6 +664,33 @@ int main(void) {
         P(nvnMemoryPoolFinalize)(&rp);
     }
 
+    // 6b2. MINIMAL_LAYOUT storage: two 320x320 two-byte textures back to back, as before the mesh data in Tears of the Kingdom's Depths (GitHub issue #183). Each takes 204,800 bytes;
+    // WriteTexels of the first must leave the second, and the bytes after both, alone
+    {
+        enum { bytes = 320 * 320 * 2, guard = 65536 };
+        static uint8_t ms[2 * bytes + guard] __attribute__((aligned(16384)));
+        static uint8_t px[bytes], back[bytes];
+        memset(ms, 0xa7, sizeof ms);
+        for (int i = 0; i < bytes; i++) px[i] = (uint8_t)(i * 19 + (i >> 8));
+        NVNmemoryPoolBuilder mpb; NVNmemoryPool mp; P(nvnMemoryPoolBuilderSetDefaults)(&mpb); P(nvnMemoryPoolBuilderSetStorage)(&mpb, ms, sizeof ms);
+        P(nvnMemoryPoolInitialize)(&mp, &mpb);
+        NVNtexture mt[2]; NVNtextureBuilder b;
+        for (int k = 0; k < 2; k++) {
+            P(nvnTextureBuilderSetDevice)(&b, &dev); P(nvnTextureBuilderSetDefaults)(&b);
+            P(nvnTextureBuilderSetSize2D)(&b, 320, 320); P(nvnTextureBuilderSetFlags)(&b, NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT);
+            P(nvnTextureBuilderSetFormat)(&b, k ? NVN_FORMAT_RGB565 : NVN_FORMAT_RGB5A1);
+            P(nvnTextureBuilderSetStorage)(&b, &mp, k * bytes); P(nvnTextureInitialize)(&mt[k], &b);
+            EXPECT("MINIMAL_LAYOUT 320x320 two-byte texture takes 204,800 bytes", bytes, P(nvnTextureGetStorageSize)(&mt[k]));
+            NVNcopyRegion all = {0, 0, 0, 320, 320, 1};
+            P(nvnTextureWriteTexels)(&mt[k], NULL, &all, px);
+            int bad = 0; for (int i = (k + 1) * bytes; i < (int)sizeof ms; i++) bad += ms[i] != 0xa7;
+            EXPECT("MINIMAL_LAYOUT WriteTexels leaves the storage after the texture alone", 0, bad);
+            P(nvnTextureReadTexels)(&mt[k], NULL, &all, back);
+            EXPECT("MINIMAL_LAYOUT texels read back as written", 0, memcmp(px, back, bytes));
+        }
+        P(nvnTextureFinalize)(&mt[0]); P(nvnTextureFinalize)(&mt[1]); P(nvnMemoryPoolFinalize)(&mp);
+    }
+
     // 6c. Write-protected dirty pages: after a packaged texture is uploaded its pool pages are read-only; game write → page fault → mark dirty → re-upload on next use; a direct host read() write needs prepare first
     {
         static uint8_t wb_[256 << 10] __attribute__((aligned(16384)));
@@ -417,6 +733,34 @@ int main(void) {
         mtl_pkg_stats(&up, &re); EXPECT("host write triggers a re-upload, 2 in total", 2, re - re0);
         P(nvnMemoryPoolFinalize)(&wp);
     }
+    // 6c1. Writes beside a texture (pkg_edges_clean): the texture starts 4 KB into a host page whose first 4 KB hold other data (Pokémon Sword: the pool's object). A write there dirties the
+    //      page, but the texture's bytes are as uploaded: protected again, no re-upload; a write into the texture's own bytes in that page still re-uploads
+    {
+        static uint8_t eb_[256 << 10] __attribute__((aligned(16384)));
+        NVNmemoryPoolBuilder epb; NVNmemoryPool ep; P(nvnMemoryPoolBuilderSetDefaults)(&epb); P(nvnMemoryPoolBuilderSetStorage)(&epb, eb_, sizeof eb_);
+        P(nvnMemoryPoolInitialize)(&ep, &epb);
+        NVNtextureBuilder b; NVNtexture te; NVNpackagedTextureLayout lay = {{1, 0, 0, 0, 7, 0, 1, 0}};
+        P(nvnTextureBuilderSetDevice)(&b, &dev); P(nvnTextureBuilderSetDefaults)(&b); P(nvnTextureBuilderSetWidth)(&b, 16); P(nvnTextureBuilderSetHeight)(&b, 8);
+        P(nvnTextureBuilderSetFormat)(&b, NVN_FORMAT_RGBA8); P(nvnTextureBuilderSetPackagedTextureLayout)(&b, &lay);
+        P(nvnTextureBuilderSetStorage)(&b, &ep, 0x11000); P(nvnTextureInitialize)(&te, &b);
+        nvn_texdesc dd = ((tex_t *)&te)->d;
+        uint8_t lin[16 * 8 * 4], *store = eb_ + 0x11000, *outb = eb_ + 0x30000;
+        FILLPAT(5); nvn_swizzle(&dd, 0, 0, lin, 64, store);
+        NVNcopyRegion all = {0, 0, 0, 16, 8, 1};
+        #define GPU_READ_EQ_E(k, name) do { P(nvnCommandBufferBeginRecording)(&cb); P(nvnCommandBufferSetCopyRowStride)(&cb, 0); \
+            P(nvnCommandBufferCopyTextureToBuffer)(&cb, &te, NULL, &all, (NVNbufferAddress)outb, 0); NVNcommandHandle hh = P(nvnCommandBufferEndRecording)(&cb); \
+            P(nvnQueueSubmitCommands)(&q, 1, &hh); P(nvnQueueFinish)(&q); FILLPAT(k); EXPECT(name, 0, memcmp(outb, lin, sizeof lin)); } while (0)
+        uint64_t up0, re0, es0, up, re; mtl_pkg_stats(&up0, &re0); es0 = mtl_pkg_edge_skips();
+        GPU_READ_EQ_E(5, "texture sharing its host page: first upload = version 5");
+        for (int i = 0; i < 3; i++) { eb_[0x10800 + i] ^= 0x5a; GPU_READ_EQ_E(5, "a write beside the texture: still version 5"); }
+        mtl_pkg_stats(&up, &re);
+        EXPECT("writes beside the texture: no re-upload", 0, re - re0);
+        EXPECT("writes beside the texture: found clean three times", 3, mtl_pkg_edge_skips() - es0);
+        FILLPAT(6); nvn_swizzle(&dd, 0, 0, lin, 64, store);
+        GPU_READ_EQ_E(6, "a write into the texture's own bytes in that page: version 6");
+        mtl_pkg_stats(&up, &re); EXPECT("a write into the texture: re-upload +1", 1, re - re0);
+        P(nvnMemoryPoolFinalize)(&ep);
+    }
 
     // 6c2. WriteTexels region writes: the result must be byte-identical to "decode the whole level → patch the region → re-encode" (Metroid Dread's minimap writes one texel at a time, which used to cost a whole-level round trip each).
     //      RGBA8 100×37 (width not a whole number of GOBs), BC1 64×64 (4×4 blocks, 8 bytes per block), RGBA16F 33×17 two-layer array; several regions each, including 1×1, a whole row, GOB-crossing and the whole level
@@ -456,6 +800,48 @@ int main(void) {
         }
         EXPECT("WriteTexels region write byte-identical to a whole-level round trip (15 cases)", 0, bad); EXPECT("WriteTexels region case count", 15, n);
         P(nvnMemoryPoolFinalize)(&wtp);
+    }
+
+    // 6c3. GPU copies mirrored into the destination's storage (nvn_tex_mirror_t2t / nvn_tex_mirror_b2t, the streamer's level copies): a region of a level copied from a texture of other
+    //      dimensions (another block height) and a whole level, byte-identical to "decode the source level → patch the destination level → re-encode", with the rest of the pool untouched;
+    //      RGBA8 and BC1; the same regions from a linear buffer with a padded row stride
+    {
+        static uint8_t mmem[1 << 18] __attribute__((aligned(16384)));
+        NVNmemoryPoolBuilder mb; NVNmemoryPool mp; P(nvnMemoryPoolBuilderSetDevice)(&mb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&mb);
+        P(nvnMemoryPoolBuilderSetStorage)(&mb, mmem, sizeof mmem); P(nvnMemoryPoolBuilderSetFlags)(&mb, 0x24); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        struct { int fmt, sw, dw; int rg[2][6]; } cs[] = {   // source sw×sw with 3 levels, destination dw×dw with 4 levels at pool offset 0x20000; regions (sx, sy, dx, dy, w, h): level 0 → 1, then level 1 → 2
+            {NVN_FORMAT_RGBA8, 32, 64, {{8, 4, 4, 8, 16, 12}, {0, 0, 0, 0, 16, 16}}},
+            {NVN_FORMAT_RGBA_DXT1, 64, 128, {{8, 4, 4, 8, 16, 12}, {0, 0, 0, 0, 32, 32}}},
+        };
+        int bad = 0, n = 0; uint32_t seed = 777;
+        for (unsigned c = 0; c < sizeof cs / sizeof cs[0]; c++) {
+            NVNtextureBuilder b; NVNtexture s, d; P(nvnTextureBuilderSetDevice)(&b, &dev); P(nvnTextureBuilderSetDefaults)(&b); P(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_2D); P(nvnTextureBuilderSetFormat)(&b, cs[c].fmt);
+            P(nvnTextureBuilderSetSize3D)(&b, cs[c].sw, cs[c].sw, 1); P(nvnTextureBuilderSetLevels)(&b, 3); P(nvnTextureBuilderSetStorage)(&b, &mp, 0); P(nvnTextureInitialize)(&s, &b);
+            P(nvnTextureBuilderSetSize3D)(&b, cs[c].dw, cs[c].dw, 1); P(nvnTextureBuilderSetLevels)(&b, 4); P(nvnTextureBuilderSetStorage)(&b, &mp, 0x20000); P(nvnTextureInitialize)(&d, &b);
+            const tex_t *ts = (const tex_t *)&s, *td = (const tex_t *)&d; int bw, bh, bpb = nvn_fmt_bpb(cs[c].fmt, &bw, &bh);
+            for (int k = 0; k < 2; k++) {
+                static uint8_t want[1 << 18], slin[1 << 16], dlin[1 << 16], src[1 << 16];
+                unsigned sl = (unsigned)k, dl = (unsigned)k + 1; int sx = cs[c].rg[k][0], sy = cs[c].rg[k][1], dx = cs[c].rg[k][2], dy = cs[c].rg[k][3], w = cs[c].rg[k][4], h = cs[c].rg[k][5];
+                size_t slp = (size_t)(((cs[c].sw >> sl) + bw - 1) / bw) * bpb, dlp = (size_t)(((cs[c].dw >> dl) + bw - 1) / bw) * bpb, wbb = (size_t)((w + bw - 1) / bw) * bpb, hbb = (size_t)(h + bh - 1) / bh;
+                NVNcopyRegion sr = {sx, sy, 0, w, h, 1}, dr = {dx, dy, 0, w, h, 1};
+                for (size_t i = 0; i < sizeof mmem; i++) mmem[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 3;
+                memcpy(want, mmem, sizeof mmem);
+                nvn_deswizzle(&ts->d, sl, 0, ts->mem, slin, slp); nvn_deswizzle(&td->d, dl, 0, td->mem, dlin, dlp);
+                for (size_t r = 0; r < hbb; r++) memcpy(dlin + ((size_t)dy / bh + r) * dlp + (size_t)(dx / bw) * bpb, slin + ((size_t)sy / bh + r) * slp + (size_t)(sx / bw) * bpb, wbb);
+                nvn_swizzle(&td->d, dl, 0, dlin, dlp, want + 0x20000);
+                n++; if (nvn_tex_mirror_t2t(ts, sl, 0, &sr, td, dl, 0, &dr) || memcmp(want, mmem, sizeof mmem)) bad++;
+                for (size_t i = 0; i < sizeof mmem; i++) mmem[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 3;
+                memcpy(want, mmem, sizeof mmem);
+                size_t row = wbb + 16; for (size_t i = 0; i < row * hbb; i++) src[i] = (uint8_t)(seed = seed * 1103515245u + 12345u) >> 5;
+                nvn_deswizzle(&td->d, dl, 0, td->mem, dlin, dlp);
+                for (size_t r = 0; r < hbb; r++) memcpy(dlin + ((size_t)dy / bh + r) * dlp + (size_t)(dx / bw) * bpb, src + r * row, wbb);
+                nvn_swizzle(&td->d, dl, 0, dlin, dlp, want + 0x20000);
+                n++; if (nvn_tex_mirror_b2t(td, dl, 0, &dr, src, row, row * hbb) || memcmp(want, mmem, sizeof mmem)) bad++;
+            }
+            P(nvnTextureFinalize)(&s); P(nvnTextureFinalize)(&d);
+        }
+        EXPECT("copies mirrored into the destination's storage, byte-identical to a level round trip (8 cases)", 0, bad); EXPECT("copy mirror case count", 8, n);
+        P(nvnMemoryPoolFinalize)(&mp);
     }
 
     // 6d. Lifecycle: in-flight GPU work is 0 when suspend returns; submits are blocked during suspend and let through after resume

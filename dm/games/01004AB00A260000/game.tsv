@@ -1,4 +1,4 @@
-# Game profile of DARK SOULS: REMASTERED (Switch, update 1.0.3 = v196608; base game v0 not extracted). Plays on the iPhone and the Mac (title, character creation, the opening, the Undead Asylum at 60 fps with sound; 30 on the Switch, rewriter cuts lift its limiter and halve its fixed frame step, patch_nso.py)
+# Game profile of DARK SOULS: REMASTERED (Switch, update 1.0.3 = v196608; base game v0 not extracted). Plays on the iPhone and the Mac (title, character creation, the opening, the Undead Asylum at 60 fps with sound; 30 on the Switch, rewriter cuts lift its limiter and halve its fixed frame step, patches.py)
 # Format: see dm/games/README.md
 # FromSoftware's engine (dantelion2) on SDK 4.5.0, the oldest so far, NVN, Havok, FMOD through AudioOut; subsdk0 is the SDK's movie library (H.264 MP4 movies, decoded by the host).
 # Files are in two dvdbnd archives (dvdbnd0.bdt / dvdbnd1.bdt, each indexed by its .bhd5; DCX zlib entries, BND3 archives inside), which the game reads itself

@@ -17,7 +17,7 @@ pad_layout	full
 
 # ---- Presentation ----
 # KTGL updates the game 60 times a second on the main thread and presents the latest update from its render thread with the render mode's interval (2 on the Switch: 30 fps).
-# Rewriter cuts on 1.2.0 main (patch_nso.py) set every mode's interval to 1, as in the engine's own 60 fps modes, so game mode gives 60 fps at the same game speed;
+# Rewriter cuts on 1.2.0 main (patches.py) set every mode's interval to 1, as in the engine's own 60 fps modes, so game mode gives 60 fps at the same game speed;
 # one more drops the render thread's forced 30 fps in the opening movie and scenes such as character creation; two more make the frame limiter sleep instead of yield
 # and the render thread wait a frame instead of 16 µs
 

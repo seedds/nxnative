@@ -126,6 +126,12 @@ namespace Ryujinx.Graphics.Shader.Translation
             return context.Add(Instruction.Barrier);
         }
 
+        // nxnative: a barrier for the lanes of one subgroup (SPIR-V OpControlBarrier with subgroup scope; Metal simdgroup_barrier)
+        public static Operand SubgroupBarrier(this EmitterContext context)
+        {
+            return context.Add(Instruction.SubgroupBarrier);
+        }
+
         public static Operand BitCount(this EmitterContext context, Operand a)
         {
             return context.Add(Instruction.BitCount, Local(), a);
@@ -233,11 +239,31 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public static Operand EmitVertex(this EmitterContext context)
         {
+            if (context.VertexAsCompute && context.ResourceManager.Reservations.GeometryInputFixed)
+            {
+                Operand end = Label();
+                Operand count = context.Load(StorageKind.LocalMemory, context.ResourceManager.LocalGeometryOutputVertexCountMemoryId);
+                context.BranchIfTrue(end, context.ICompareGreaterOrEqualUnsigned(count, Const(context.TranslatorContext.Definitions.MaxOutputVertices)));
+                context.Store(StorageKind.LocalMemory, context.ResourceManager.LocalGeometryPrimitiveOpenMemoryId, Const(1));
+                context.Add(Instruction.EmitVertex);
+                context.MarkLabel(end);
+                return null;
+            }
             return context.Add(Instruction.EmitVertex);
         }
 
         public static Operand EndPrimitive(this EmitterContext context)
         {
+            if (context.VertexAsCompute && context.ResourceManager.Reservations.GeometryInputFixed)
+            {
+                Operand end = Label();
+                Operand open = context.Load(StorageKind.LocalMemory, context.ResourceManager.LocalGeometryPrimitiveOpenMemoryId);
+                context.BranchIfTrue(end, context.ICompareEqual(open, Const(0)));
+                context.Store(StorageKind.LocalMemory, context.ResourceManager.LocalGeometryPrimitiveOpenMemoryId, Const(0));
+                context.Add(Instruction.EndPrimitive);
+                context.MarkLabel(end);
+                return null;
+            }
             return context.Add(Instruction.EndPrimitive);
         }
 

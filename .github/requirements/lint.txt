@@ -1,0 +1,7 @@
+# The Python lint job's tools (.github/workflows/lint-python.yml, dm/tools/lint_python.py), pinned: their findings change with their versions, so raising one
+# goes with `python3 dm/tools/lint_python.py --rebaseline` in the same commit. The last three are the packages the tools import (as in tests.yml), so pyright resolves them.
+ruff==0.17.2
+pyright==1.1.414
+lz4==4.4.5
+capstone==5.0.9
+fonttools==4.67.0

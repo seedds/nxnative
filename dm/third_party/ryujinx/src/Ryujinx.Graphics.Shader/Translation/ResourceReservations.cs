@@ -24,6 +24,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         public int ReservedStorageBuffers { get; }
         public int ReservedTextures { get; }
         public int ReservedImages { get; }
+        public bool GeometryInputFixed { get; }
         public int InputSizePerInvocation { get; }
         public int OutputSizePerInvocation { get; }
         public int OutputSizeInBytesPerInvocation => OutputSizePerInvocation * sizeof(uint);
@@ -81,14 +82,28 @@ namespace Ryujinx.Graphics.Shader.Translation
             if (vertexAsCompute)
             {
                 _offsets = new();
+                GeometryInputFixed = gpuAccessor.QueryGeometryInputFixed();
 
                 if (vacInput.HasValue)
                 {
-                    InputSizePerInvocation = FillIoOffsetMap(gpuAccessor, StorageKind.Input, vacInput.Value);
+                    InputSizePerInvocation = GeometryInputFixed ? FillGeometryInputMap() : FillIoOffsetMap(gpuAccessor, StorageKind.Input, vacInput.Value);
                 }
 
                 OutputSizePerInvocation = FillIoOffsetMap(gpuAccessor, StorageKind.Output, vacOutput);
             }
+        }
+
+        // Matches dmsh_geometry.py: independent stages meet through the Maxwell attribute map.
+        private int FillGeometryInputMap()
+        {
+            for (int c = 0; c < 4; c++) _offsets.Add(new(StorageKind.Input, IoVariable.Position, 0, c), c);
+            _offsets.Add(new(StorageKind.Input, IoVariable.PointSize), 4);
+            for (int c = 0; c < 8; c++) _offsets.Add(new(StorageKind.Input, IoVariable.ClipDistance, 0, c), 5 + c);
+            _offsets.Add(new(StorageKind.Input, IoVariable.Layer), 13);
+            _offsets.Add(new(StorageKind.Input, IoVariable.ViewportIndex), 14);
+            for (int a = 0; a < 32; a++) for (int c = 0; c < 4; c++)
+                _offsets.Add(new(StorageKind.Input, IoVariable.UserDefined, a, c), 16 + 4 * a + c);
+            return 144;
         }
 
         private int FillIoOffsetMap(IGpuAccessor gpuAccessor, StorageKind storageKind, IoUsage vacUsage)

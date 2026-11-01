@@ -3,7 +3,7 @@
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
-module_t g_mod[MAX_MOD]; int g_nmod;
+module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 
@@ -14,7 +14,7 @@ static int fail, count;
 
 static void check_color(int blue, const prog_t *pg, tex_t t[4]) {
     uint64_t same = g_fzc_same, diff = g_fzc_diff;
-    state_reset(); S.prog = pg;
+    state_reset(); S.prog = pg; S.bst[0] = S.bst[1] = pg;   // the redraw takes the program again from the per-stage bindings (prog_resolve)
     memset(&R, 0, sizeof R); R.has_rt = 1; R.rt.n = 4;
     for (int i = 0; i < 4; i++) R.rt.color[i] = &t[i];
     R.clear_c[3] = 1; R.cc[3] = MTLClearColorMake(!blue, 0, blue, 1);
@@ -28,6 +28,8 @@ static void check_color(int blue, const prog_t *pg, tex_t t[4]) {
     mtl_sub_begin(); rp_begin_ex(1); rp_end();
     uint64_t f = mtl_sub_commit();
     EXPECT("GPU done", 1, mtl_wait(f, 5000000000ull));
+    // the comparison runs in the submission's commit feedback handler, which a SyncWait woken by the GPU's own signal (DM_NVN_FAST_WAKE) does not wait for
+    for (int i = 0; i < 2000 && g_fzc_same - same + g_fzc_diff - diff == 0; i++) usleep(1000);
     EXPECT(blue ? "negative control: blue merged result vs red plain result, really compared as different attachments" : "physical c3 → logical c0, really compared as the same red attachment",
            1, blue ? g_fzc_diff - diff : g_fzc_same - same);
     EXPECT("exactly one comparison recorded for this case, none missed or duplicated", 1, g_fzc_same - same + g_fzc_diff - diff);

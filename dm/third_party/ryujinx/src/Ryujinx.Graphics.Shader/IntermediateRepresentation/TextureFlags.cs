@@ -16,6 +16,13 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         Offsets = 1 << 7,
         Coherent = 1 << 8,
 
+        // Preserve the surface instruction's OOB policy through IR. IGN drops
+        // the operation; TRAP/unknown must not silently become IGN on Metal.
+        AtomicBoundsMask = 3 << 20,
+        AtomicDiscardResult = 1 << 22,
+        AtomicMetal = 1 << 23,
+        AtomicPredicateResult = 1 << 24,
+
         AtomicMask = 15 << 16,
 
         Add = 0 << 16,

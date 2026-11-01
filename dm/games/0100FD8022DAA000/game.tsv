@@ -34,7 +34,7 @@ zip_store	.arc:.ast:.bmp:.cache:.har:.png:.szs:.zst:.metallib
 
 # ---- Memory ----
 # NPDM system resource 8 MB. As in Galaxy: no SetHeapSize, the game's memory is main's 2.6 GB bss. Unlike Galaxy, the movie player's StandardAllocator takes 384 MB of
-# virtual address memory (main+0x62c280: Initialize(nullptr, 0x18000000)), which the alias region holds after the SDK's node area (cut to 62 MB in patch_nso.py for this sdk build).
+# virtual address memory (main+0x62c280: Initialize(nullptr, 0x18000000)), which the alias region holds after the SDK's node area (cut to 62 MB in dm/tools/sdk_patches.py for this sdk build).
 # So the block is 1.25 GB = 256 MB in front + 512 MB alias region + 256 MB stack region + 256 MB heap region; with main's 2.7 GB image about 4 GB of address space, as Galaxy's.
 # Footprint on the Mac (M4 Pro, the opening's first stage): 1.93 GB, flat from 2 to 5 minutes (Metal 1.0 GB)
 mem_reserve	0x50000000

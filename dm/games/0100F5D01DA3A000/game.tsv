@@ -26,7 +26,7 @@ zip_store	.assets:.dat:.json:.resource:.ress:.metallib
 
 # ---- Memory ----
 # The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup (main+0x73ad60) hands application pool − used memory to StandardAllocator as virtual address memory
-# and never calls SetMemoryHeapSize. The node area cut for this sdk build (patch_nso.py) shrinks the AddressRegionManager's node area to 62 MB, as for Ace Attorney Investigations Collection.
+# and never calls SetMemoryHeapSize. The node area cut for this sdk build (dm/tools/sdk_patches.py) shrinks the AddressRegionManager's node area to 62 MB, as for Ace Attorney Investigations Collection.
 # Measured with probes on VammManager::AllocateAddressRegion's success path (sdk+0x1348b8: x21 size, x22 address) and FreeAddressRegion (sdk+0x135100): StandardAllocator takes 960 MB at +64 MB,
 # Unity's own regions (main+0x11bb4cc) hold about 0.54 GB more, and over four minutes of level loads the live regions end at +2.0 to +2.1 GB; in 20 minutes the mapped high-water mark stopped at +2.51 GB
 # (about 4 minutes in), at most 0.5 GB mapped, about 0.75 GB resident on the Mac. So Ace Attorney Investigations Collection's layout: a 1 GB pool and the 5 GB block

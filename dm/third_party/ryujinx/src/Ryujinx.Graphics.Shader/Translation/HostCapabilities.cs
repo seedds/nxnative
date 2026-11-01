@@ -2,6 +2,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 {
     class HostCapabilities
     {
+        public readonly bool MetalImageAtomics;
         public readonly bool ReducedPrecision;
         public readonly bool SupportsFragmentShaderInterlock;
         public readonly bool SupportsFragmentShaderOrderingIntel;
@@ -23,8 +24,10 @@ namespace Ryujinx.Graphics.Shader.Translation
             bool supportsShaderFloat64,
             bool supportsShaderNonUniformIndexing,
             bool supportsTextureShadowLod,
-            bool supportsViewportMask)
+            bool supportsViewportMask,
+            bool metalImageAtomics)
         {
+            MetalImageAtomics = metalImageAtomics;
             ReducedPrecision = reducedPrecision;
             SupportsFragmentShaderInterlock = supportsFragmentShaderInterlock;
             SupportsFragmentShaderOrderingIntel = supportsFragmentShaderOrderingIntel;

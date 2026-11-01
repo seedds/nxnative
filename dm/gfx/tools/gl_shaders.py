@@ -23,8 +23,11 @@
 # <TAB> where it came from
 # Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
 import concurrent.futures as cf, hashlib, json, os, re, subprocess, sys, tempfile
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
+from romfs import os, open
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mvgl
+from dmsh_chain import SPIRV_CROSS   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
 
 VEC_TYPES = {'float', 'vec2', 'vec3', 'vec4', 'int', 'ivec2', 'ivec3', 'ivec4', 'uint', 'uvec2', 'uvec3', 'uvec4', 'bool', 'mat2', 'mat3', 'mat4'}
 
@@ -35,20 +38,12 @@ def text_of(b):
     return b[:z] if z >= 0 else b
 
 def nso_strings(path):
-    """'#version' strings of an NSO's read-only segment (lz4 segments, as dm/tools/nso.py decompresses them)"""
-    import lz4.block, struct
-    d = open(path, 'rb').read()
-    flags = struct.unpack_from('<I', d, 0xc)[0]; fo, mo, sz = struct.unpack_from('<III', d, 0x20); csz = struct.unpack_from('<I', d, 0x64)[0]
-    img = d[fo:fo + csz]
-    if flags >> 1 & 1: img = lz4.block.decompress(img, uncompressed_size=sz)
-    out, i = [], 0
-    while True:
-        i = img.find(b'#version', i)
-        if i < 0: break
-        if i == 0 or img[i - 1] == 0:
-            out.append(text_of(img[i:i + 0x10000]))
-        i += 8
-    return out
+    """'#version <number>' strings of an NSO's read-only segment (dm/tools/nso.py); a main that links glslang (Balatro's LÖVE) also has its messages that start with '#version:'.
+    nso.Error (a ValueError) on a damaged file"""
+    import nso
+    with open(path, 'rb') as f: m = nso.load(f.read(), path)
+    (mo, sz) = m.segments[1]; img = bytes(m.image[mo:mo + sz])
+    return [text_of(img[m.start():m.start() + 0x10000]) for m in re.finditer(rb'(?:^|(?<=\0))#version [0-9]', img)]
 
 def sources(roots):
     """(source bytes, stage or None, where) for every shader in the input paths"""
@@ -69,7 +64,8 @@ def sources(roots):
                         st = 'vert' if nm.endswith('_vp.shad') else 'frag' if nm.endswith('_fp.shad') else None
                         yield text_of(a.read(nm)), st, f'/{os.path.relpath(p, r)}:{nm}'
                 elif fn.endswith(('.vert', '.frag')):
-                    yield text_of(open(p, 'rb').read()), fn.rsplit('.', 1)[1], '/' + os.path.relpath(p, r)
+                    with open(p, 'rb') as f: source = text_of(f.read())
+                    yield source, fn.rsplit('.', 1)[1], '/' + os.path.relpath(p, r)
 
 # NVIDIA's GLSL compiler accepts more than the GLSL ES 3.20 specification, and glslang does not; these fix-ups run on the preprocessed text (glslang -E, so macros are expanded):
 #   · the GLSL ES 1.0 texture functions (89 of Digimon's fragment shaders call textureCube; with -V glslang reads textureCube as Vulkan's texture type, so a macro cannot rename it);
@@ -105,8 +101,41 @@ def fixups(t):
 def glsl_type(t, refl):
     return refl['types'][t]['name'] if t in refl.get('types', {}) else t
 
+def uni_members(refl, ms, prefix, base, f, bools):
+    """Table rows for default block members. A struct's members recurse with their dotted name, which is the name the game passes to GL (u_LightEnv.m_dirLights_dir[0]); the
+    reflection gives a nested member's offset relative to its parent, so the parent's offset is added"""
+    for mb in ms:
+        arr = mb.get('array', [])
+        name = prefix + mb['name']
+        if len(arr) > 1: return f'uniform {name}: arrays of arrays'
+        if 'members' in refl['types'].get(mb['type'], {}):
+            if arr: return f'uniform {name}: an array of structs is not implemented'
+            e = uni_members(refl, refl['types'][mb['type']]['members'], name + '.', base + mb['offset'], f, bools)
+            if e: return e
+            continue
+        ty = glsl_type(mb['type'], refl)
+        if ty == 'uint' and mb['name'] in bools: ty = 'bool'
+        if ty not in VEC_TYPES: return f'uniform {name}: type {ty} (structs are not implemented)'
+        f.append(f'u:{name}={base + mb["offset"]}:{ty}:{arr[0] if arr else 0}:{mb.get("array_stride", 0)}')
+
+# GLSL ES 1.00, with its version statement (#version 100) or, as GameMaker's runner writes it, without one (Well Dweller's 93 run-time shaders): `attribute`, `varying`, `texture2D`, `gl_FragColor`, precision statements and
+# lowp / mediump / highp qualifiers. SPIR-V needs ES 3.10 or newer, so the text is rewritten before preprocessing (glslang rejects those keywords in 310). Metal has no use for the precision qualifiers;
+# the texture functions stay for fixups(), which renames them after preprocessing (a macro could hide one)
+def es100(t, stage):
+    t = re.sub(r'^[ \t]*precision[ \t]+\w+[ \t]+\w+[ \t]*;\r?[ \t]*\r?\n', '', t, flags=re.M)
+    t = re.sub(r'\b(?:lowp|mediump|highp)\b[ \t]*', '', t)
+    t = re.sub(r'\battribute\b', 'in', t)
+    t = re.sub(r'\bvarying\b', 'out' if stage == 'vert' else 'in', t)
+    if stage == 'frag' and 'gl_FragColor' in t:
+        t = 'out vec4 gm_FragColor;\n' + t.replace('gl_FragColor', 'gm_FragColor')
+    t = re.sub(r'\bsample\b', 'gm_sample', t)   # `sample` became a reserved word after ES 1.00 (GameMaker's sprite shaders use it as a variable)
+    return '#version 310 es\nprecision highp float;\nprecision highp int;\n' + t
+
 def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
+    t = src.decode('latin1')
+    v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
+    if not v or v.group(1) == '100': src = es100(t.replace(v.group(0), '', 1) if v else t, stage).encode('latin1')
     g = os.path.join(tmp, f'{key}.{stage}'); spv = g + '.spv'; msl = os.path.join(tmp, f'{key}_{stage[0]}.metal')
     open(g + '.in', 'wb').write(src)
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)
@@ -115,30 +144,29 @@ def translate(src, stage, key, tmp):
     open(g, 'w').write(fixups(pre))
     r = subprocess.run(['glslangValidator', '-V', '-R', '--aml', '--amb', '-S', stage, g, '-o', spv], capture_output=True, text=True)
     if r.returncode: return 'glslang: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
-    refl = json.loads(subprocess.run(['spirv-cross', spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
-    cmd = ['spirv-cross', spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
+    refl = json.loads(subprocess.run([SPIRV_CROSS, spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
+    cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-decoration-binding', '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
     if stage == 'vert': cmd.append('--fixup-clipspace')
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: return 'spirv-cross: ' + r.stderr.strip()[:300]
     m = open(msl).read()
     # Varyings by name: the out struct of a vertex shader and the in struct of a fragment shader (stage_in members of a vertex shader are [[attribute(n)]])
     m = re.sub(r'(\b(\w+)\s+\[\[)user\(locn\d+\)', lambda x: f'{x.group(1)}user({x.group(2)})', m)
+    m = re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', m)   # a NaN operand gives the other one, as on the Switch's GPU (vk_shaders.py PRECISE)
     open(msl, 'w').write(m)
     f = []
     if stage == 'vert':
         for v in refl.get('inputs', []): f.append(f'a:{v["name"]}={v["location"]}:{v["type"]}')
     else:
         for v in refl.get('outputs', []): f.append(f'o:{v["name"]}={v["location"]}')
+    # a bool uniform is a uint in the SPIR-V block (it has no bool members), but the game asks GL for its declared type: LÖVE's Shader:send takes only a boolean for a GLSL bool
+    bools = {n for n in re.findall(r'\buniform\s+(?:(?:lowp|mediump|highp)\s+)?bool\s+(\w+)\s*;', pre)}
     for u in refl.get('ubos', []):
         t = refl['types'][u['type']]
         if t['name'] != 'gl_DefaultUniformBlock': return f'uniform block {t["name"]} is not the default block'
         f.append(f'b:{u["binding"]}:{u["block_size"]}')
-        for mb in t['members']:
-            arr = mb.get('array', [])
-            if len(arr) > 1: return f'uniform {mb["name"]}: arrays of arrays'
-            ty = glsl_type(mb['type'], refl)
-            if ty not in VEC_TYPES: return f'uniform {mb["name"]}: type {ty} (structs are not implemented)'
-            f.append(f'u:{mb["name"]}={mb["offset"]}:{ty}:{arr[0] if arr else 0}:{mb.get("array_stride", 0)}')
+        e = uni_members(refl, t['members'], '', 0, f, bools)
+        if e: return e
     for t in refl.get('textures', []):
         if t.get('array'): return f'sampler array {t["name"]}'
         f.append(f't:{t["name"]}={t["binding"]}:{t["type"]}')
@@ -192,14 +220,17 @@ def main():
         tsv = ['# GL shaders (dm/gfx/tools/gl_shaders.py): key = sha256(GLSL source)[:16], Metal function gl_<key>_v / gl_<key>_f; a: vertex inputs, u: default uniform block members '
                '(offset:type:count:stride), b: the block (slot:size), t: combined samplers (slot:type), o: fragment outputs',
                '# ' + ' '.join(subprocess.run(['glslangValidator', '--version'], capture_output=True, text=True).stdout.split()[:3]) + '; spirv-cross '
-               + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run(['spirv-cross', '--revision'], capture_output=True, text=True)).split())]
+               + ' '.join((lambda r: r.stdout + r.stderr)(subprocess.run([SPIRV_CROSS, '--revision'], capture_output=True, text=True)).split())]
         tsv += [f'{k[0]}\t{v[0]}\t{" ".join(v[1])}\t{v[3]}' for k, v in sorted(seen.items())]
         dirs = [(os.path.join(out, 'gl'), 'macosx', [])]
-        if ios: dirs.append((os.path.join(ios, 'gl'), 'iphoneos', ['-mios-version-min=18.0']))
+        if ios: dirs.append((os.path.join(ios, 'gl'), 'iphoneos', ['-mios-version-min=18.0', '-fmetal-math-mode=relaxed']))   # relaxed as in vk_shaders.py and ios_metal.py: no NaN / Inf assumption on the iPhone's GPU compiler
         msls = [v[2] for v in seen.values()]
         for d, sdk, extra in dirs:
             lib = metallib(msls, d, sdk, extra)
             open(os.path.join(d, 'gl_shaders.tsv'), 'w').write('\n'.join(tsv) + '\n')
             print(f'{sdk}: {len(seen)} shaders ({sum(1 for v in seen.values() if v[0] == "vert")} vertex) → {lib}' + (f'; {len(failed)} failed' if failed else ''))
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    import nso
+    try: main()
+    except nso.Error as e: red(str(e))   # a damaged main

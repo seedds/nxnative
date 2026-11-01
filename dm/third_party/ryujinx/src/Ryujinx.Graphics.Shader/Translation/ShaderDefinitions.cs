@@ -156,7 +156,15 @@ namespace Ryujinx.Graphics.Shader.Translation
             _graphicsState = graphicsState;
             GpPassthrough = gpPassthrough;
             ThreadsPerInputPrimitive = threadsPerInputPrimitive;
-            OutputTopology = outputTopology;
+            // Native geometry passthrough inherits the input primitive; its
+            // SPH output declaration is unused. Compute emulation must expose
+            // the same primitive to index compaction and raster replay.
+            OutputTopology = gpPassthrough ? graphicsState.Topology switch
+            {
+                InputTopology.Points => OutputTopology.PointList,
+                InputTopology.Lines or InputTopology.LinesAdjacency => OutputTopology.LineStrip,
+                _ => OutputTopology.TriangleStrip,
+            } : outputTopology;
             MaxOutputVertices = gpPassthrough ? graphicsState.Topology.InputVertexCountNoAdjacency : maxOutputVertices;
             ImapTypes = imapTypes;
             OmapTargets = omapTargets;
@@ -337,8 +345,12 @@ namespace Ryujinx.Graphics.Shader.Translation
             return _graphicsState.AttributeTypes[location].HasFlag(AttributeType.PackedRgb10A2Signed);
         }
 
-        public int GetGeometryOutputIndexBufferStridePerInstance()
+        public int GetGeometryOutputIndexBufferStridePerInstance(bool fixedInput = false)
         {
+            // Even a strip with fewer than three vertices can be ended. Empty
+            // ends are ignored by the fixed-input emitter, so at most one
+            // restart per emitted vertex is needed.
+            if (fixedInput) return MaxOutputVertices * 2;
             return MaxOutputVertices + OutputTopology switch
             {
                 OutputTopology.LineStrip => MaxOutputVertices / 2,
@@ -347,9 +359,9 @@ namespace Ryujinx.Graphics.Shader.Translation
             };
         }
 
-        public int GetGeometryOutputIndexBufferStride()
+        public int GetGeometryOutputIndexBufferStride(bool fixedInput = false)
         {
-            return GetGeometryOutputIndexBufferStridePerInstance() * ThreadsPerInputPrimitive;
+            return GetGeometryOutputIndexBufferStridePerInstance(fixedInput) * ThreadsPerInputPrimitive;
         }
     }
 }

@@ -1,6 +1,7 @@
 // The game's own decoder, for the offline shader tools. Unreal Engine games compress each shader in their shader code archives with Oodle (Octopath Traveler 0: every entry of the
 // two .ushaderbytecode files in pakchunk0-Switch.pak, block header 8C 0A = Mermaid), Game Freak's Trinity engine every file of its packs (Pokémon Legends: Z-A: arc/data.trpfs, compression
-// type 3), and DRAGON QUEST XI S (Unreal Engine 4.18) the files of its paks with LZ5 2.0 (pak compression method 3; each block starts with the LZ5 level, 0x2d). Shaders are translated offline
+// type 3), PlatinumGames' engine the entries of its PKZ archives (Bayonetta 3: OodleKraken, block header 8C 06), and DRAGON QUEST XI S (Unreal Engine 4.18) the files of its paks with LZ5 2.0
+// (pak compression method 3; each block starts with the LZ5 level, 0x2d). Shaders are translated offline
 // only and Oodle's decoder is not open source, so they are decoded on the Mac with the copy statically linked into main (LZ5 the same way, so the tools need no decoder of their own), in one
 // of two modes:
 // DM_OODLE_JOB=<job file> runs the decoder on every record right before nnMain, writes <job file>.out and exits (the NSP script, Unreal);
@@ -31,14 +32,23 @@ static uint64_t func_start(const module_t *m, uint64_t off) {   // start of the 
     for (uint64_t i = 0; i < n; i++) { uint64_t s = eh_read(b, &o, tenc, ehs); eh_read(b, &o, tenc, ehs); if (s <= off && s > best) best = s; }
     return best;
 }
-static uint64_t oodle_find(const module_t *m) {
-    static const char nm[] = "OodleLZ_Decompress";   // sizeof includes the terminating NUL
-    const uint8_t *b = m->base, *ro = b + m->ro_off, *re = b + m->data_off;
-    uint64_t strs[8]; int ns = 0;
-    for (const uint8_t *p = ro; ns < 8 && (p = memmem(p, (size_t)(re - p), nm, sizeof nm)); p += sizeof nm) if (p[-1] == 0) strs[ns++] = (uint64_t)(p - b);
-    if (!ns) die("DM_OODLE_JOB: main has no \"OodleLZ_Decompress\" string: no Oodle decoder to find");
-    uint64_t fn = 0; int nfn = 0;
-    for (uint64_t pc = 0; pc + 4 <= m->text_end; pc += 4) {
+static uint64_t func_next(const module_t *m, uint64_t off) {   // start of the function after the one holding off (the text end when there is none)
+    const uint8_t *b = m->base; uint32_t m0; int32_t eh; memcpy(&m0, b + 4, 4); memcpy(&eh, b + m0 + 16, 4);
+    uint64_t ehs = m0 + (int64_t)eh, o = ehs + 4, best = m->text_end; int penc = b[ehs + 1], cenc = b[ehs + 2], tenc = b[ehs + 3];
+    eh_read(b, &o, penc, ehs); uint64_t n = eh_read(b, &o, cenc, ehs);
+    for (uint64_t i = 0; i < n; i++) { uint64_t s = eh_read(b, &o, tenc, ehs); eh_read(b, &o, tenc, ehs); if (s > off && s < best) best = s; }
+    return best;
+}
+// The functions whose code takes the address of a NUL-terminated string of main's read-only data (adrp + add) that holds needle: with whole, the string is needle; else the needle is anywhere
+// in it, and the address taken is the string's start. Up to max distinct functions into fns, in address order; returns how many
+static int str_fns(const module_t *m, const char *needle, int whole, uint64_t *fns, int max) {
+    const uint8_t *b = m->base, *ro = b + m->ro_off, *re = b + m->data_off; size_t len = strlen(needle);
+    uint64_t strs[16]; int ns = 0, nf = 0;
+    for (const uint8_t *p = ro; ns < 16 && (p = memmem(p, (size_t)(re - p), needle, len)); p += len) {
+        const uint8_t *s = p; while (s > ro && s[-1]) s--;
+        if (!whole || (s == p && p[len] == 0)) strs[ns++] = (uint64_t)(s - b);
+    }
+    for (uint64_t pc = 0; ns && pc + 4 <= m->text_end; pc += 4) {
         uint32_t w; memcpy(&w, b + pc, 4);
         if ((w & 0x9F000000) != 0x90000000) continue;   // adrp xd, page
         int64_t imm = (int64_t)(((w >> 29) & 3) | (((w >> 5) & 0x7FFFF) << 2)); if (imm & (1 << 20)) imm -= 1 << 21;
@@ -47,12 +57,66 @@ static uint64_t oodle_find(const module_t *m) {
             uint32_t w2; memcpy(&w2, b + pc + 4 * k, 4);
             if ((w2 & 0xFF800000) != 0x91000000 || ((w2 >> 5) & 31) != (w & 31)) continue;   // add xd, xn = xd of the adrp, #imm
             uint64_t a = page + ((w2 >> 10) & 0xFFF);
-            for (int s = 0; s < ns; s++) if (a == strs[s]) { uint64_t f = func_start(m, pc + 4 * k); if (f != fn) { fn = f; nfn++; } }
+            for (int s = 0; s < ns; s++) if (a == strs[s]) {
+                uint64_t f = func_start(m, pc + 4 * k); int seen = 0;
+                for (int i = 0; i < nf; i++) seen |= fns[i] == f;
+                if (!seen && nf < max) fns[nf++] = f;
+            }
             break;
         }
     }
-    if (nfn != 1) die("DM_OODLE_JOB: %d functions reference \"OodleLZ_Decompress\" in main (expected exactly 1)", nfn);
-    return fn;
+    for (int i = 1; i < nf; i++) for (int j = i; j > 0 && fns[j - 1] > fns[j]; j--) { uint64_t t = fns[j]; fns[j] = fns[j - 1]; fns[j - 1] = t; }
+    return nf;
+}
+static uint64_t oodle_find(const module_t *m) {   // 0: main has no "OodleLZ_Decompress" name string
+    uint64_t fns[4]; int nfn = str_fns(m, "OodleLZ_Decompress", 1, fns, 4);
+    if (nfn > 1) die("DM_OODLE_JOB: %d functions reference \"OodleLZ_Decompress\" in main (expected exactly 1)", nfn);
+    return nfn ? fns[0] : 0;
+}
+
+// Oodle's streaming decoder, for a main that has no "OodleLZ_Decompress" name (Bayonetta 3 1.2.0, PlatinumGames: it reads its PKZ archives only through the streaming API, main+0xcbc698 /
+// +0xcbc7f8, so OodleLZ_Decompress was never linked in). The four functions come from Oodle's oodlelzcompressors.cpp, whose path two of them pass to its error handler with a line number:
+// OodleLZDecoder_MemorySizeNeeded, the one of the two that also takes the message "OODLE ERROR : OodleLZ_Decompress: asked to decode Legacy compressor", and OodleLZDecoder_DecodeSome,
+// the other; between them lie OodleLZDecoder_Create (right after the first) and OodleLZDecoder_Destroy (right before the second), in the library's own order (main+0x12fefd0, +0x12ff110,
+// +0x12ff2d0, +0x12ff2f0 there). Checked as far as the code allows: exactly two functions reference the path, the legacy message is in the first, and exactly two functions lie between them
+typedef int32_t (*lzd_size_fn)(int32_t compressor, int64_t raw_len);
+typedef void *(*lzd_create_fn)(int32_t compressor, int64_t raw_len, void *mem, int64_t mem_size);
+typedef void (*lzd_destroy_fn)(void *dec);
+// OodleLZDecoder_DecodeSome(decoder, out, decBuf, decBufPos, decBufferSize, decBufAvail, compPtr, compAvail, fuzzSafe, checkCRC, verbosity, threadPhase): arguments 9-12 on the stack, 64-bit
+// here so the Apple and AAPCS64 stack layouts agree; out = {s32 decoded, s32 compressed bytes used, s32 current quantum's raw length, s32 its compressed length}
+typedef int32_t (*lzd_some_fn)(void *dec, int32_t *out, void *buf, int64_t pos, int64_t size, int64_t avail, const void *comp, int64_t comp_avail, int64_t fuzz, int64_t crc, int64_t verb, int64_t phase);
+static struct { lzd_size_fn size; lzd_create_fn create; lzd_destroy_fn destroy; lzd_some_fn some; } g_lzd;
+static uint64_t lzd_find(const module_t *m) {
+    uint64_t src[4], leg[4]; int ns = str_fns(m, "oodlelzcompressors.cpp", 0, src, 4), nl = str_fns(m, "OODLE ERROR : OodleLZ_Decompress: asked to decode Legacy compressor", 0, leg, 4);
+    if (ns != 2 || nl != 1 || leg[0] != src[0])
+        die("DM_OODLE_JOB: main has no \"OodleLZ_Decompress\" name and no streaming decoder to find (%d functions reference oodlelzcompressors.cpp, %d the legacy compressor message)", ns, nl);
+    uint64_t create = func_next(m, src[0]), destroy = func_next(m, create);
+    if (func_next(m, destroy) != src[1]) die("DM_OODLE_JOB: Oodle's streaming decoder at main+%#llx / +%#llx: not two functions between them", (unsigned long long)src[0], (unsigned long long)src[1]);
+    const uint8_t *b = m->base;
+    g_lzd.size = (lzd_size_fn)(void *)(b + src[0]); g_lzd.create = (lzd_create_fn)(void *)(b + create); g_lzd.destroy = (lzd_destroy_fn)(void *)(b + destroy); g_lzd.some = (lzd_some_fn)(void *)(b + src[1]);
+    return src[1];
+}
+// The compressor an Oodle stream names in its first block header (byte 0: 0x8C or 0xCC; byte 1 low 7 bits: the decoder: 6 Kraken, 10 Mermaid / Selkie, 12 Leviathan) as the API's
+// OodleLZ_Compressor (Kraken 8, Mermaid 9, Leviathan 13), which Create sizes its memory for; -1 when it is none of them
+static int32_t lzd_compressor(const uint8_t *c, int64_t cl) {
+    if (cl < 2 || (c[0] & 0x0F) != 0x0C) return -1;
+    switch (c[1] & 0x7F) { case 6: return 8; case 10: return 9; case 12: return 13; default: return -1; }
+}
+static int64_t lzd_run(const void *c, int64_t cl, void *r, int64_t rl, void *scratch, int64_t scratch_n) {
+    int32_t comp = lzd_compressor(c, cl); if (comp < 0) return -1;
+    int64_t need = g_lzd.size(comp, rl); void *mem = scratch, *own = NULL;
+    if (need <= 0) return -1;
+    if (need + 64 > scratch_n) { if (!(own = malloc((size_t)need + 64))) return -1; mem = own; }
+    void *dec = g_lzd.create(comp, rl, mem, need + 64);   // Create keeps 16 bytes for its own alignment
+    if (!dec) { free(own); return -1; }
+    int64_t pos = 0, cpos = 0;
+    while (pos < rl) {
+        int32_t out[4] = {0};
+        if (!g_lzd.some(dec, out, r, pos, rl, rl - pos, (const uint8_t *)c + cpos, cl - cpos, 1, 0, 0, 3) || (out[0] <= 0 && out[1] <= 0)) break;   // fuzz safe, no CRC check, silent, unthreaded
+        pos += out[0]; cpos += out[1];
+    }
+    g_lzd.destroy(dec); free(own);
+    return pos;
 }
 
 // OodleLZ_Decompress(compBuf, compBufSize, rawBuf, rawLen, fuzzSafe, checkCRC, verbosity, decBufBase, decBufSize, fpCallback, callbackUserData, decoderMemory, decoderMemorySize, threadPhase).
@@ -68,12 +132,14 @@ static void dec_find(const char *mode) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
         void *p = module_sym(&g_mod[i], "LZ5_decompress_safe");
         if (p) { g_dec.name = "LZ5_decompress_safe"; g_dec.lz5 = (lz5_fn)p; g_dec.off = (uint64_t)((uint8_t *)p - g_mod[i].base); return; }
-        g_dec.off = oodle_find(&g_mod[i]); g_dec.oodle = (oodle_fn)(void *)(g_mod[i].base + g_dec.off); g_dec.name = "OodleLZ_Decompress"; return;
+        if ((g_dec.off = oodle_find(&g_mod[i]))) { g_dec.oodle = (oodle_fn)(void *)(g_mod[i].base + g_dec.off); g_dec.name = "OodleLZ_Decompress"; return; }
+        g_dec.off = lzd_find(&g_mod[i]); g_dec.name = "OodleLZDecoder_DecodeSome"; return;
     }
     die("%s: no main module", mode);
 }
 static int64_t dec_run(const void *c, int64_t cl, void *r, int64_t rl, void *scratch, int64_t scratch_n) {
     if (g_dec.lz5) return cl > INT32_MAX || rl > INT32_MAX ? -1 : g_dec.lz5(c, r, (int32_t)cl, (int32_t)rl);
+    if (!g_dec.oodle) return lzd_run(c, cl, r, rl, scratch, scratch_n);
     return g_dec.oodle(c, cl, r, rl, 1, 0, 0, NULL, 0, NULL, NULL, scratch, scratch_n, 3);   // fuzz safe, no CRC check, silent, unthreaded
 }
 

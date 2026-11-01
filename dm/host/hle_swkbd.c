@@ -5,7 +5,7 @@
 //     +0x3ac maximum length, +0x3b0 minimum length, +0x3bd isUseUtf8, +0x3c0 offset of the initial text within the work buffer, +0x3c4 UTF-16 length of the initial text;
 //     work buffer pointer / size at +0x4d0 / +0x4d8 (handed to the applet together with CreateLargeStorage)
 //   SetInitialTextUtf8 0x3a74c0: UTF-8 → UTF-16 written to work buffer+offset (offset 0x14, at most 500 characters + terminating 0)
-//   ReadCloseResultAndString 0x3a63f0: output storage = u32 CloseResult + text area; the text area is copied as is into String{+0 pointer, +8 byte count}
+//   ReadCloseResultAndString 0x3a63f0: output storage = u32 CloseResult + text area; the text area is copied as is into String{+0 pointer, +8 capacity}, at most the capacity, which it only reads (Pikmin 4: sdk+0x39b7d0)
 //   ShowKeyboard wrap-up 0x3a6acc: CloseResult == 0 (OK) → Result 0, otherwise (cancel) → 0x29F; GetRequiredStringBufferSize = 0x7D4
 // A game that sets isUseUtf8 = 1 after MakePreset reads the result back as a C string; UTF-16 output is supported as well per the original convention.
 // No window and DM_KBD unset: return as cancel (no popup, no hang). DM_KBD="text": no popup, return that text directly as OK (windowless testing / lockstep comparison).
@@ -56,6 +56,7 @@ size_t swkbd_u8_to_u16(const char *s, size_t max_units, uint16_t *out, size_t ca
 // hle_charname.c also lets bytes ≥0x80 through (Chinese names), so the rule becomes: English letters or Chinese characters, at most 15 UTF-8 bytes in total (3 bytes per Chinese character, at most 5).
 // While the naming panel is open the front end blocks on the spot by this rule and writes the rule in the dialog. diag.c maintains this flag from UI messages.
 int g_swkbd_name_panel;
+int g_swkbd_min_chars = -1;     // ≥0 = this input needs at least that many characters (ShowKeyboardArg's minimum length; the applet keeps OK disabled until the text is long enough, so the front end's box keeps itself up until then)
 int g_swkbd_numeric_max = -1;   // ≥0 = this input is a quantity box, value = upper limit (set by dm_textinput.c, read by the front end input box, set back to -1 after use)
 int (*g_swkbd_unfilter)(void);   // registered by the host (dm_charname_unfilter in hle_charname.c; NULL in unit tests): keyboard requests from the naming panel bypass the game's ASCII typing filter
 typedef int (*swkbd_input_fn)(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap);
@@ -65,7 +66,7 @@ Result swkbd_show(void *out, const void *arg_, swkbd_input_fn input) {
     swkbd_u16_to_u8((const uint16_t *)(arg + ARG_HEADER), HEADER_N, title, sizeof title);
     swkbd_u16_to_u8((const uint16_t *)(arg + ARG_SUB), SUB_N, sub, sizeof sub);
     swkbd_u16_to_u8((const uint16_t *)(arg + ARG_GUIDE), GUIDE_N, guide, sizeof guide);
-    int32_t maxlen, ilen, ioff; memcpy(&maxlen, arg + ARG_MAXLEN, 4); memcpy(&ilen, arg + ARG_INIT_LEN, 4); memcpy(&ioff, arg + ARG_INIT_OFF, 4);
+    int32_t maxlen, minlen, ilen, ioff; memcpy(&maxlen, arg + ARG_MAXLEN, 4); memcpy(&minlen, arg + ARG_MINLEN, 4); memcpy(&ilen, arg + ARG_INIT_LEN, 4); memcpy(&ioff, arg + ARG_INIT_OFF, 4);
     const uint8_t *work; memcpy(&work, arg + ARG_WORKBUF, 8);
     if (ilen > 0 && work) swkbd_u16_to_u8((const uint16_t *)(work + ioff), (size_t)ilen, init, sizeof init);
 
@@ -77,9 +78,10 @@ Result swkbd_show(void *out, const void *arg_, swkbd_input_fn input) {
     // Test switch DM_TEST_SWKBD_HOLD_MS=<ms> (with DM_KBD): the keyboard stays up that long before DM_KBD's text is returned, the way a player types into the input box (for reproducing on the Mac what the game's other threads do meanwhile)
     static int hold = -1; if (hold < 0) { const char *h = getenv("DM_TEST_SWKBD_HOLD_MS"); hold = h ? atoi(h) : 0; }
     if (script && hold > 0) usleep((useconds_t)hold * 1000);
-    int r = script ? (snprintf(text, sizeof text, "%s", script), 1) : input(title, sub, guide, init, maxlen > 0 ? maxlen : 0, text, sizeof text);
+    int r = script ? (snprintf(text, sizeof text, "%s", script), 1) : (g_swkbd_min_chars = minlen > 0 ? minlen : -1, input(title, sub, guide, init, maxlen > 0 ? maxlen : 0, text, sizeof text));
     g_swkbd_numeric_max = -1;   // the numeric box mark applies to this one time only (set by dm_textinput.c before bringing up the keyboard)
-    LOG("swkbd: title '%s' initial '%s' limit %d → %s%s%s", title, init, maxlen,
+    g_swkbd_min_chars = -1;     // the minimum length applies to this one time only
+    LOG("swkbd: title '%s' initial '%s' limit %d min %d → %s%s%s", title, init, maxlen, minlen,
         r > 0 ? "OK '" : r == 0 ? "cancel" : "no window, treated as cancel", r > 0 ? text : "", r > 0 ? "'" : "");
     if (r <= 0) return SWKBD_RESULT_CANCELED;
     if (g_swkbd_name_panel && g_swkbd_unfilter && g_swkbd_unfilter()) LOG("swkbd: naming panel -- turned off the game's ASCII input filter on the returned string (Chinese names allowed, see hle_charname.c)");
@@ -88,7 +90,7 @@ Result swkbd_show(void *out, const void *arg_, swkbd_input_fn input) {
     if (!buf || !cap) return RES_OK;                         // same as the SDK: if String has no buffer, the text is not read
     memset(buf, 0, cap);
     uint16_t u16[1003]; size_t n = swkbd_u8_to_u16(text, maxlen > 0 ? (size_t)maxlen : 1002, u16, 1003);   // truncate to the character limit (counted in UTF-16 units)
-    if (arg[ARG_UTF8]) swkbd_u16_to_u8(u16, n, (char *)buf, cap);
+    if (arg[ARG_UTF8]) swkbd_u16_to_u8(u16, n, (char *)buf, cap);   // String's +8 stays the game's capacity: ReadCloseResultAndString only reads it (Pikmin 4's sdk+0x39b81c)
     else memcpy(buf, u16, (n + 1) * 2 <= cap ? n * 2 : (cap / 2 - 1) * 2);
     { const char *lag = getenv("DM_TEST_SWKBD_LAG_MS"); if (lag) usleep((useconds_t)atoi(lag) * 1000); }   // test: slow down "keyboard handed back → the game's thread gets the result" to verify that auto-accept does not jump the gun   // front end path cleanup (dm_cursor.c): auto-accept after the name is typed on the naming page
     return RES_OK;
@@ -96,6 +98,7 @@ Result swkbd_show(void *out, const void *arg_, swkbd_input_fn input) {
 
 HLE_FORCE("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", "software keyboard applet → host native input box (DM_KBD gives the text directly)",
           Result, h_swkbd_Show, void *out, const void *arg) {
+    DM_APPLET("software keyboard");
     return swkbd_show(out, arg, front_text_input);
 }
 

@@ -3,7 +3,7 @@
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
-module_t g_mod[MAX_MOD]; int g_nmod;
+module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int fail, count, all_independent;
@@ -23,7 +23,8 @@ static void state(chain *c, int kind, const void *s, size_t n) {
     p_bind_state b={.kind=kind}; if(n>sizeof b.bytes) abort(); memcpy(b.bytes,s,n); emit(c,OP_BIND_STATE,&b,sizeof b);
 }
 static tex_t texture(unsigned w, unsigned levels, int depth) {
-    static uint64_t ser=5000; tex_t t={.magic=MAGIC('T', 'E', 'X', 0), .serial =ser++}; t.d.width=t.d.height=w;
+    static uint64_t ser=5000; tex_t t={.magic=MAGIC('T', 'E', 'X', 0), .serial =ser, .off=(int64_t)(ser-5000)<<20}; ser++;   // own storage offset: textures of one description on one (null) pool at one offset are one shared texture (g_alias)
+    t.d.width=t.d.height=w;
     t.d.depth=t.d.samples=1; t.d.levels=levels; t.d.target=NVN_TEXTURE_TARGET_2D;
     t.d.format=depth?NVN_FORMAT_DEPTH32F_STENCIL8:NVN_FORMAT_RGBA8; return t;
 }
@@ -128,16 +129,22 @@ static uint64_t query_case(int reordered, int mode) {
     const char *names[]={"query","same_range_query","later_reset_overrides_query"};
     save_raw(names[mode],reordered,q,sizeof q); mtl_pool_del(c.p); free(c.p); return q[0];
 }
-static void uniform_case(int reordered,uint8_t pixels[256]) {
+static void uniform_case(int reordered,int compact,uint8_t pixels[256]) {
     void *mem=NULL; if(posix_memalign(&mem,getpagesize(),getpagesize())) abort(); memset(mem,0,getpagesize());
     float red[4]={1,0,0,1},green[4]={0,1,0,1}; memcpy(mem,red,16); mtl_pool_add(mem,getpagesize());
     tex_t a=texture(8,1,0),b=texture(8,1,0),out=texture(8,1,0),e=texture(8,1,0); chain c=make_chain();
     clear(&c,&out,0,NULL,0,0,0); clear(&c,&e,0,NULL,0,0,0); stencil(&c,0,8,1,255,255,0); blending(&c,0);
-    p_bind_buf ub={.stage=1,.index=0,.addr=(uint64_t)mem,.size=16}; emit(&c,OP_BIND_UBO,&ub,sizeof ub);
+    if(compact) {
+        p_bind_ubo_small ub={.stage=1,.index=0,.addr=(uint64_t)mem,.size=16}; emit(&c,OP_BIND_UBO_SMALL,&ub,sizeof ub);
+    } else {
+        p_bind_buf ub={.stage=1,.index=0,.addr=(uint64_t)mem,.size=16}; emit(&c,OP_BIND_UBO,&ub,sizeof ub);
+    }
     if(!reordered) { clear(&c,&a,0,NULL,0,0,0); draw_prog(&c,4,0); }
     struct { uint64_t dst,n; float color[4]; } update={(uint64_t)mem,16,{0}}; memcpy(update.color,green,16); emit(&c,OP_UPDATE_UB,&update,sizeof update);
     if(reordered) { clear(&c,&a,0,NULL,0,0,0); draw_prog(&c,4,0); }
     clear(&c,&b,0,NULL,0,0,0); draw_prog(&c,4,0); result r=execute(&c,&a,&b,&out,&e,NULL); save_result("UB_write",reordered,&r); memcpy(pixels,r.a,256);
+    EXPECT("uniform replay restores canonical stage and slot",1,S.ubo[1][0].stage==1&&S.ubo[1][0].index==0);
+    EXPECT("uniform replay restores full address and size",1,S.ubo[1][0].addr==(uint64_t)mem&&S.ubo[1][0].size==16);
     uniform_pixels("second draw after the UB update always green",r.b,0,255,0,255); mtl_pool_del(mem); free(mem);
 }
 // A view's accessible range cannot be judged by base alone: the shader reads relative to the second level/second layer, and G writes that subresource.
@@ -252,7 +259,11 @@ int main(int argc,char **argv) { @autoreleasepool {
     }
     uint64_t q0=query_case(0,0),q1=query_case(1,0); EXPECT("reset original range 4x4 samples passed",16,q0); EXPECT("across-reset negative 4x4+8x8 samples passed",80,q1);
     EXPECT("query lifetime must not count as independent",all_independent?1:0,q0==q1);
-    uint8_t u0[256],u1[256]; uniform_case(0,u0); uniform_case(1,u1); uniform_pixels("UB original order first draw red",u0,255,0,0,255); uniform_pixels("across UB write first draw green",u1,0,255,0,255);
+    uint8_t u0[256],u1[256],uc0[256],uc1[256]; uniform_case(0,0,u0); uniform_case(1,0,u1);
+    uniform_case(0,1,uc0); uniform_case(1,1,uc1);
+    uniform_pixels("UB original order first draw red",u0,255,0,0,255); uniform_pixels("across UB write first draw green",u1,0,255,0,255);
+    EXPECT("compact UB original order matches full record pixels",0,memcmp(u0,uc0,256));
+    EXPECT("compact UB reordered matches full record pixels",0,memcmp(u1,uc1,256));
     EXPECT("UB write must not move across draws",all_independent?1:0,!memcmp(u0,u1,256));
     for(int array=0;array<2;array++) { const char *name=array?"whole_slice_range":"whole_mip_range"; printf("CASE %s\n",name);
         result o=range_case(array,0),r=range_case(array,1); uniform_pixels("range original order second subresource blue",o.b,0,0,255,255);

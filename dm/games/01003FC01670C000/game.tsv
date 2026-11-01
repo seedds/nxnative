@@ -38,3 +38,5 @@ alloc_big_align	on
 # ---- Shader split (shader_split.py: GLSLC outputs in main, each a single-stage program, 838 ProgramSetShaders at startup; BindProgram's stage bits combine vertex and pixel per draw) ----
 shader_groups	ROBO=cpk
 shader_note	13 Sentinels: Aegis Rim shaders
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
+depth_mode	zero

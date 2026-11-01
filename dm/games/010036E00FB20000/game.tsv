@@ -45,3 +45,5 @@ tex_dirty_upload	on
 # ---- Shader split (shader_split.py; MT Framework SPK in an ARC archive) ----
 shader_groups	/nativeNXx64/=nativenxx64
 shader_note	The Great Ace Attorney Chronicles shaders
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
+depth_mode	zero

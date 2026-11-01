@@ -35,3 +35,5 @@ app_pool	0xCD500000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/region_common/shader/=shader /region_common/effect/=effect /ui/=layout
 shader_note	Link's Awakening shaders
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py)
+depth_mode	zero

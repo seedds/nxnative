@@ -1,0 +1,48 @@
+# Python lint and types over scripts/ and the tools under dm/: ruff (lint rules for bugs, never formatting) and pyright in basic mode, configured in pyproject.toml.
+# A ratchet: the findings the code had when this came in are in dm/tools/lint_python_baseline.tsv, so the job fails only on a new finding, and on a fixed one still
+# listed there (`python3 dm/tools/lint_python.py --update` shrinks it). On a pull request the baseline may not grow over the base branch's either.
+# ty (Astral's type checker, beta) runs beside it as advisory: its findings go to the job summary and never fail the build.
+# The tool versions are pinned in .github/requirements/lint.txt; docs/development.md has the commands.
+name: lint-python
+
+on:
+  pull_request:
+    paths: ['**.py', pyproject.toml, .github/requirements/lint.txt, .github/workflows/lint-python.yml, dm/tools/lint_python_baseline.tsv]
+  push:
+    branches: [main]
+    paths: ['**.py', pyproject.toml, .github/requirements/lint.txt, .github/workflows/lint-python.yml, dm/tools/lint_python_baseline.tsv]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-python-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+# Actions are pinned to commit SHAs (the tag in the comment), as in tests.yml.
+jobs:
+  lint:
+    name: ruff and pyright (ratchet)
+    runs-on: ubuntu-24.04   # pyproject.toml fixes the platform pyright assumes (Darwin), so the findings match a Mac's
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: .github/requirements/lint.txt
+      - name: Install the pinned tools
+        run: python -m pip install -r .github/requirements/lint.txt
+      - name: Base branch's baseline (pull requests)
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+      - name: ruff and pyright against the baseline
+        run: python dm/tools/lint_python.py ${{ github.event_name == 'pull_request' && '--against FETCH_HEAD' || '' }}

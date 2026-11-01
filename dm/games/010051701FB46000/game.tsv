@@ -28,7 +28,7 @@ zip_store	.assets:.bundle:.dat:.mp4:.resource:.ress:.metallib
 
 # ---- Memory ----
 # The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup hands application pool − used memory to StandardAllocator as virtual address memory
-# and never calls SetMemoryHeapSize. The node area cut for this sdk build (patch_nso.py, Super Mario Galaxy's) shrinks the AddressRegionManager's node area to 62 MB. With the hardware pool
+# and never calls SetMemoryHeapSize. The node area cut for this sdk build (dm/tools/sdk_patches.py, Super Mario Galaxy's) shrinks the AddressRegionManager's node area to 62 MB. With the hardware pool
 # (3.2 GB) StandardAllocator's region took the alias region to +3.9 GB in nninitStartup; the layout of Ace Attorney Investigations Collection: a 1 GB pool and the 5 GB block
 # (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region). Measured on the Mac: the alias region mapped up to +3.25 GB within 90 s and flat for 12 minutes
 # (+3.5 GB in a run to the first shop), at most 1.75 GB mapped (the host does not hold the game to the pool, as for Ace Attorney)

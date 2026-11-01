@@ -54,13 +54,13 @@ typedef struct {
 } NVNdeviceBuilder;
 
 typedef struct {
-    // TODO: reverse and define this as it looks like it's not an opaque type.
-    char dummy[1];
+    int numTiledLevels;                   // levels laid out in whole 64 KB tiles; the rest are the mip tail
+    int tileWidth, tileHeight, tileDepth; // one tile in texels
+    char reserved[16];
 } NVNtextureSparseTileLayout;
 
 typedef struct {
-    // TODO: reverse and define this as it looks like it's not an opaque type.
-    char dummy[1];
+    float x0, y0, x1, y1;                 // nvnCommandBufferDrawTexture: a rectangle in the render target (pixels) or in the texture
 } NVNdrawTextureRegion;
 
 typedef struct {

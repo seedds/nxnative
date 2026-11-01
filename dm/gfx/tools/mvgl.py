@@ -9,7 +9,9 @@
 # bit 7 stored), the length and the stored length in that width, then the stream: a 32-bit control word per 32 items (bit 0 first, 0 = literal byte, 1 = match),
 # refilled when only its sentinel bit is left; a match is 1 to 4 bytes by its low 3 bits (offset and length - 3, see MATCH). The last 8 bytes are always literals.
 # Usage: mvgl.py list <archive> [ext]   |   mvgl.py get <archive> <name>.<ext> <out file>
-import struct, sys
+import os, struct, sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
+from romfs import os, open
 
 MATCH = [(0xff, 2, 0, 0, 1), (0xffff, 2, 0, 0, 2), (0xffff, 6, 15, 2, 2), (0xffffff, 8, 31, 3, 3),
          (0xff, 2, 0, 0, 1), (0xffff, 2, 0, 0, 2), (0xffff, 6, 15, 2, 2), (0xffffffff, 11, 255, 3, 4)]   # mask, offset shift, length mask, length shift, size

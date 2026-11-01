@@ -12,6 +12,8 @@ name	Pokémon Legends: Z-A
 ipa	PokMonLegendsZA.ipa
 app_category	public.app-category.games
 pad_layout	simple
+# the game sets the near=0 depth mode (nvnDeviceSetDepthMode): the pipeline bases made before it runs take the main0_z vertex entries
+depth_mode	zero
 
 # ---- Versions ----
 build	v393216	2.0.2	main=b1f12fd919eae86ab8a978317677e64b	sdk=df7a3960c74c3a4803f826c587153252
@@ -26,7 +28,7 @@ zip_store	.bnk:.pck:.trpfd:.trpfs:.metallib
 
 # ---- Memory ----
 # nninitStartup (main+0x1b2e650) initializes its StandardAllocator with virtual address memory over 12 GB of address space (StandardAllocator::Initialize(nullptr, 0x300000000), main+0x1b3e3ec),
-# which the Switch's 64 GB alias region holds. Two cuts for 2.0.2 (dm/tools/patch_nso.py) make it fit the 5 GB block proven on a phone: the allocator gets 4 GB and the SDK's node area 62 MB instead
+# which the Switch's 64 GB alias region holds. Two cuts for 2.0.2 (patches.py and dm/tools/sdk_patches.py) make it fit the 5 GB block proven on a phone: the allocator gets 4 GB and the SDK's node area 62 MB instead
 # of 1 GB, so the alias region holds 62 MB + 4 GB (SDK 19 puts the region 4 MB aligned right after the node area)
 mem_reserve	0x140000000
 mem_alias	0x110000000

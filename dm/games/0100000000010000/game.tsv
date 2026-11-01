@@ -27,11 +27,6 @@ mem_alias	0x10000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 
-# ---- Layout captures ----
-# The HUD's counters (coin, regional coin) and other layout panes sample single-channel render targets mapped (R, 0, 0, 1) and use their alpha as the mask, as in Breath of the Wild:
-# read literally the panes came out as solid white cards. All 26 pixel-shader variants of the layout library (main's BNSH at 0x132c000)
-alpha_from_red	10bc9dd3825aec43 b9f0ca8022fbf9c2 4a7a63babf7a7f26 8d62cf444ba464bb 45df8d0a9963f552 71c48f95aa237856 ea95d9d8187d7500 db795e562f6ff4a2 88f7690ba13f9bca f6d7326dffcb030e 630cf891f10737f7 5cbeb3b0dc0fb242 323f44906717b824 c3aa5fd0d7b4cf8b ef78a74dcd99c62c 4081e659d6378648 233213b9bd8c8f5d e61e0be9f8906d53 c94174a0313de58d 2e56d8a39003cb57 8e768f35a7d9e589 7466b0ff0fc92d6e 04f46e974ed7af5c cb67cdd49f92c73c b5e04646ba8552ca 261b0556223fd2c1
-
 # ---- Shader split ----
 shader_groups	/ObjectData/=objectdata /StageData/=stagedata /SoundData/=sounddata /LayoutData/=layoutdata /LocalizedData/=localizeddata /EventData/=eventdata /MovieData/=moviedata /SystemData/=systemdata /ShaderData/=shaderdata /EffectData/=effectdata
 shader_note	Super Mario Odyssey shaders

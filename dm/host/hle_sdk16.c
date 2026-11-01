@@ -26,7 +26,6 @@ HLE_FORCE("_ZN2nn2oe24SetExpectedVolumeBalanceEff", "volume balance; the host ig
 HLE_FORCE("_ZN2nn2oe25GetProgramTotalActiveTimeEv", "total active time → time since the host started", int64_t, h_oe_ActiveTime, void) { return (int64_t)(now_ns() - g_t0_ns); }
 HLE_FORCE("_ZN2nn2oe31EnterExitRequestHandlingSectionEv", "exit request critical section; the host exits through SIGTERM / the lifecycle", void, h_oe_EnterExit, void) {}
 HLE_FORCE("_ZN2nn2oe31LeaveExitRequestHandlingSectionEv", "exit request critical section; the host ignores it", void, h_oe_LeaveExit, void) {}
-HLE_FORCE("_ZN2nn2oe38SetUserInactivityDetectionTimeExtendedEb", "extended auto-sleep delay; the host ignores it", void, h_oe_Inactivity, unsigned on) { (void)on; }
 
 // ---------- time ----------
 // CalendarTime = { int16 year; int8 month, day, hour, minute, second }, returned by value (within 8 bytes, in x0)
@@ -152,16 +151,29 @@ HLE_FORCE("_ZN2nn2pl13GetSharedFontEPiPNS0_14SharedFontDataEiNS_8settings12Langu
 }
 // Whether running on a Switch 2 (codename Ounce) (returns bool): the host reports false, as a Switch 1. Mario 1.2.1 uses it to decide whether to count add-on content (the upgrade pack) and suggest the Switch 2 Edition
 HLE_FORCE("_ZN2nn2pl16IsRunningOnOunceEv", "running on Switch 2: no", unsigned, h_pl_IsOunce, void) { return 0; }
-// The Legend of Zelda: Breath of the Wild (SDK 20): asks for the shared fonts to be loaded before querying their state; the host's stand-in fonts are there on demand. VR mode (the Labo VR goggles): the host never enters VR; the query is always false, entering / leaving is a no-op
+// The Legend of Zelda: Breath of the Wild (SDK 20): asks for the shared fonts to be loaded before querying their state; the host's stand-in fonts are there on demand. VR mode (the Labo VR goggles): the host never enters VR; the query is always false,
+// and BeginVrMode returns what the SDK's own returns when pctl::CheckStereoVisionPermission refuses (hle_misc.c), 0xd08e (BotW's sdk+0x412970; Super Smash Bros. Ultimate tests it with cbz); EndVrMode is a no-op
 HLE_FORCE("_ZN2nn2pl21RequestSharedFontLoadENS0_14SharedFontTypeE", "request shared font load; the stand-in font is always available, no-op", void, h_pl_ReqLoad, int type) { (void)type; }
 HLE_FORCE("_ZN2nn2pl8IsVrModeEv", "VR mode: no", unsigned, h_pl_IsVr, void) { return 0; }
-HLE_FORCE("_ZN2nn2pl11BeginVrModeEv", "enter VR mode (through am); the host does not", void, h_pl_BeginVr, void) { LOG("pl::BeginVrMode (the host does not enter VR)"); }
+HLE_FORCE("_ZN2nn2pl11BeginVrModeEv", "enter VR mode (through am); the host does not: stereo vision not permitted", Result, h_pl_BeginVr, void) { LOG("pl::BeginVrMode (the host does not enter VR)"); return 0xd08e; }
 HLE_FORCE("_ZN2nn2pl9EndVrModeEv", "leave VR mode (through am)", void, h_pl_EndVr, void) {}
 
 // ---------- ec: shop applet (the upgrade-to-Switch-2-Edition page) ----------
 // The shop is out of scope: no-op. The game does not look at the return value (both overloads are handled as returning nothing)
-HLE_FORCE("_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionE", "shop upgrade page, out of scope; no-op", void, h_ec_ShowUpg, int ed) { LOG("ec::ShowShopApplicationInformationForUpgrade(%d) (cut)", ed); }
-HLE_FORCE("_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionERKNS_7account10UserHandleE", "shop upgrade page (given user), out of scope; no-op", void, h_ec_ShowUpgU, int ed, const void *user) { (void)user; LOG("ec::ShowShopApplicationInformationForUpgrade(%d, user) (cut)", ed); }
+HLE_FORCE("_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionE", "shop upgrade page, out of scope; no-op", void, h_ec_ShowUpg, int ed) { DM_APPLET("shop"); LOG("ec::ShowShopApplicationInformationForUpgrade(%d) (cut)", ed); }
+HLE_FORCE("_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionERKNS_7account10UserHandleE", "shop upgrade page (given user), out of scope; no-op", void, h_ec_ShowUpgU, int ed, const void *user) { DM_APPLET("shop"); (void)user; LOG("ec::ShowShopApplicationInformationForUpgrade(%d, user) (cut)", ed); }
+
+// ---------- nfc: the NFC library beside nfp ----------
+// A game can call nn::nfc itself next to nn::nfp (Hyrule Warriors: Definitive Edition, on entering amiibo); left in the SDK, nfc::Initialize connects to nfc:user, which the host lacks → abort.
+// The host answers as a console whose NFC is switched off: the game shows its own "NFC is disabled" message. Open: nfp below answers as a console with NFC on and no amiibo,
+// so a game that asks both gets two different consoles; answering IsNfcEnabled true would match nfp, but the game's amiibo path after it is untested (docs/reference/services.md).
+static _Atomic int g_nfc_state;   // 0 uninitialized, 1 initialized
+HLE_FORCE("_ZN2nn3nfc10InitializeEv", "NFC library init; the host has no physical NFC reader", void, h_nfc_Init, void) {
+    atomic_store(&g_nfc_state, 1); LOG("nfc::Initialize: NFC is disabled (the host has no NFC reader)");
+}
+HLE_FORCE("_ZN2nn3nfc8FinalizeEv", "NFC library finalize; no service session to close", void, h_nfc_Fini, void) { atomic_store(&g_nfc_state, 0); }
+HLE_FORCE("_ZN2nn3nfc8GetStateEv", "NFC library state: uninitialized (0) / initialized (1)", int, h_nfc_State, void) { return atomic_load(&g_nfc_state); }
+HLE_FORCE("_ZN2nn3nfc12IsNfcEnabledEv", "NFC switched on or off (returns bool): off, see the open note above", unsigned, h_nfc_Enabled, void) { return 0; }
 
 // ---------- nfp: amiibo ----------
 // From Mario 1.2.1 the game initializes nfp at boot (v0 did not use it). The real SDK would connect to the sm: service, which the host lacks → abort, so the whole family is taken over.
@@ -215,19 +227,36 @@ HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_
 // ---------- vi: vsync event ----------
 // The game passes a SystemEventType; after binding, a host thread fires it at 60 Hz (DM_VSYNC_HZ can change it). While the display link presents, the event follows its ticks, as a
 // Switch's follows its display: Super Mario Galaxy 2 runs the Wii's VI retrace (and with it each emulated frame) on this event, and on a clock of the host's own the frames drifted
-// against the screen's vsyncs, two in some display-link ticks and none in others (iPhone: about one tick in seven, a stutter the frame-rate counter showed as 50 to 60)
+// against the screen's vsyncs, two in some display-link ticks and none in others (iPhone: about one tick in seven, a stutter the frame-rate counter showed as 50 to 60).
+// One thread per binding lifetime: repeated requests must not double its rate.
+// A destroyed binding retires its worker even if another service reuses the same
+// guest storage and handle number before the next tick (MacNativeGames dab728a).
 void dm_host_helper_qos(qos_class_t q);   // hle_thread.c
+typedef struct vsync_event { void *ev; uint64_t binding; struct vsync_event *next; } vsync_event_t;
+static pthread_mutex_t g_vs_mu = PTHREAD_MUTEX_INITIALIZER;
+static vsync_event_t *g_vs_events;
+static int vsync_tick(vsync_event_t *v) {   // 0: the event is gone and this thread has left the table
+    if (hle_signal_system_event_binding(v->binding)) return 1;
+    pthread_mutex_lock(&g_vs_mu);
+    vsync_event_t **p = &g_vs_events; while (*p && *p != v) p = &(*p)->next;
+    if (*p) *p = v->next;
+    pthread_mutex_unlock(&g_vs_mu);
+    LOG("vi: vsync event %p destroyed by the game, its thread ends", v->ev);
+    return 0;
+}
 __attribute__((weak)) int mtl_link_wait_vsync(uint64_t *seen, uint64_t timeout_ns) { (void)seen; (void)timeout_ns; return 0; }   // nvn_mtl.m
-static void *vsync_thread(void *ev) {
+static void *vsync_thread(void *arg) {
+    vsync_event_t *v = arg;
     dm_host_helper_qos(QOS_CLASS_USER_INTERACTIVE);   // the game paces frames on this event
     const char *e = getenv("DM_VSYNC_HZ"); double hz = e ? atof(e) : 60.0; if (hz <= 0) hz = 60.0;
     uint64_t period = (uint64_t)(1e9 / hz), next = now_ns() + period, seen = 0;
     for (;;) {
-        if (!e && mtl_link_wait_vsync(&seen, 2 * period)) { hle_signal_system_event(ev); next = now_ns() + period; continue; }
+        if (!e && mtl_link_wait_vsync(&seen, 2 * period)) { if (!vsync_tick(v)) break; next = now_ns() + period; continue; }
         uint64_t t = now_ns(); if (next > t) { struct timespec ts = {(time_t)((next - t) / 1000000000ull), (long)((next - t) % 1000000000ull)}; nanosleep(&ts, NULL); }
-        hle_signal_system_event(ev); next += period; if (now_ns() > next + 4 * period) next = now_ns() + period;   // do not try to catch up when far behind
+        if (!vsync_tick(v)) break;
+        next += period; if (now_ns() > next + 4 * period) next = now_ns() + period;   // do not try to catch up when far behind
     }
-    return NULL;
+    free(v); return NULL;
 }
 // Image memory needed for an indirect layer (an applet's picture handed to the game to draw, such as the inline keyboard): on hardware it asks the vi service. Computed as linear RGBA8, 4 KB aligned (Super Mario 3D World + Bowser's Fury's inline keyboard asks for 1280x720)
 HLE_FORCE("_ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii", "indirect layer image memory: RGBA8 linear, 4 KB aligned", Result, h_vi_IndirectReq, size_t *size, size_t *align, int w, int h) {
@@ -235,8 +264,16 @@ HLE_FORCE("_ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii", "indirect laye
 }
 HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", "vsync event: a host thread signals it at 60 Hz", Result, h_vi_VsyncEvent, void *ev, void *disp) {
     (void)disp; hle_bind_system_event(ev, 1);
-    pthread_t th; if (pthread_create(&th, NULL, vsync_thread, ev)) die("cannot start the vsync thread"); pthread_detach(th);
-    LOG("vi::GetDisplayVsyncEvent: %p signalled by the host at 60 Hz", ev); return RES_OK;
+    uint64_t binding = hle_system_event_binding(ev);
+    pthread_mutex_lock(&g_vs_mu);
+    int running = 0; for (vsync_event_t *v = g_vs_events; v; v = v->next) running |= v->binding == binding;
+    if (!running) {
+        vsync_event_t *v = calloc(1, sizeof *v); if (!v) die("cannot allocate a vsync event");
+        v->ev = ev; v->binding = binding; v->next = g_vs_events; g_vs_events = v;
+        pthread_t th; if (pthread_create(&th, NULL, vsync_thread, v)) die("cannot start the vsync thread"); pthread_detach(th);
+    }
+    pthread_mutex_unlock(&g_vs_mu);
+    LOG("vi::GetDisplayVsyncEvent: %p signalled by the host at 60 Hz%s", ev, running ? " (its thread already runs)" : ""); return RES_OK;
 }
 
 // ---------- diag ----------
@@ -254,19 +291,44 @@ static void diag_abort(uint32_t res, void *lr) {
 HLE_FORCE("_ZN2nn4diag6detail9AbortImplEv", "game aborted", void, h_diag_Abort0, void) { diag_abort(0, __builtin_return_address(0)); }
 HLE_FORCE("_ZN2nn4diag6detail9AbortImplEPKNS_6ResultE", "game aborted (with Result)", void, h_diag_AbortR, const uint32_t *r) { diag_abort(r ? *r : 0, __builtin_return_address(0)); }
 HLE_FORCE("_ZN2nn4diag12GetBacktraceEPmi", "backtrace; the host provides none (0 frames)", int, h_diag_Bt, uint64_t *out, int n) { (void)out; (void)n; return 0; }
+// An assert, a C++ exception that nothing caught (std::terminate) or an SDK check reached VAbortImpl: print where it came from and the message's FORMAT, which
+// names the failure on its own ("libc++abi: terminating due to uncaught exception of type ...", Well Dweller's first boot). The arguments the format would fill
+// are not expanded: the host cannot read a __va_list the guest built (its register save area holds the guest's general-purpose registers, and the pointers in
+// it are the ones libc++abi passed by value, so the host's vsnprintf prints rubbish where %s is).
+HLE_FORCE("_ZN2nn4diag6detail10VAbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserExceptionInfoES3_RSt9__va_list", "SDK abort message", void, h_diag_VAbort,
+          const char *fn, const char *expr, const char *file, int line, const void *res, const void *info, const char *fmt, void *ap) {
+    (void)info; (void)ap;
+    LOG("[diag] abort at %s: %s (%s:%d) message format %s", fn ? fn : "?", expr ? expr : "?", file ? file : "?", line, fmt ? fmt : "?");
+    diag_abort(res ? *(const uint32_t *)res : 0, __builtin_return_address(0));   // VAbortImpl never returns to its caller
+}
 HLE_FORCE("_ZN2nn4diag13GetSymbolNameEPcmm", "symbol name; the host provides none (empty string)", uint64_t, h_diag_SymName, char *buf, size_t n, uint64_t addr) { (void)addr; if (buf && n) buf[0] = 0; return 0; }
 
 // ---------- settings: language enum <-> language code ----------
 // On the real device MakeLanguageCode asks the settings service; the table is public and fixed (nn::settings::Language order). LanguageCode = char[8]
 static const char *const k_lang_code[] = {"ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR"};
+// The real operators compare bytes with MakeLanguageCode(lang). Older games (Super Mario Odyssey, SDK 7.3.2) compare
+// GetDesiredLanguage's code for Chinese only with Language::Chinese (6) and Taiwanese (11), so the system must hand
+// them zh-CN / zh-TW, while DM_LANG carries zh-Hans / zh-Hant (the NSP script's spelling for the control data's
+// Simplified and Traditional Chinese). Which spelling the system picks for a title is not known: both spellings of
+// one script match here instead, in both operator directions. Do not rewrite GetDesiredLanguage or collapse Make /
+// the available list: newer games use the distinct entries and their indices (SimplifiedChinese 15 / TraditionalChinese 16).
+static unsigned language_code_matches(int32_t lang, const char *code) {
+    if ((unsigned)lang >= sizeof k_lang_code / sizeof *k_lang_code) return 0;
+    if (!strncmp(k_lang_code[lang], code, 8)) return 1;
+    switch (lang) {
+        case 6:  return !strncmp(code, "zh-Hans", 8);
+        case 15: return !strncmp(code, "zh-CN", 8);
+        case 11: return !strncmp(code, "zh-Hant", 8);
+        case 16: return !strncmp(code, "zh-TW", 8);
+        default: return 0;
+    }
+}
 HLE_FORCE("_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE", "language enum vs. language code comparison (returns bool)", unsigned, h_set_LangEq, const int32_t *lang, const char *code) {
-    if ((unsigned)*lang >= sizeof k_lang_code / sizeof *k_lang_code) return 0;
-    return strncmp(k_lang_code[*lang], code, 8) == 0;
+    return language_code_matches(*lang, code);
 }
 // The reversed comparison and making a code from the enum (Super Mario 3D World + Bowser's Fury, SDK 10: its first comparison in nnMain connected to the settings service)
 HLE_FORCE("_ZN2nn8settingseqERKNS0_12LanguageCodeERKNS0_8LanguageE", "language code vs. language enum comparison (returns bool)", unsigned, h_set_LangEq2, const char *code, const int32_t *lang) {
-    if ((unsigned)*lang >= sizeof k_lang_code / sizeof *k_lang_code) return 0;
-    return strncmp(k_lang_code[*lang], code, 8) == 0;
+    return language_code_matches(*lang, code);
 }
 HLE_FORCE("_ZN2nn8settings12LanguageCode4MakeENS0_8LanguageE", "language enum → language code (8 bytes returned by value)", uint64_t, h_set_LangMake, int lang) {
     char code[8] = {0};

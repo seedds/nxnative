@@ -2,13 +2,14 @@
 // Dummy texture type MTLTextureType: 1D=0 1DArray=1 2D=2 2DArray=3 Cube=5 CubeArray=6 3D=7
 #import "../nvn/nvn_refl.h"
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
-#include "dmsh_chain.h"   // the game profile folder (-I from the Makefile)
+#include "dmsh_chain.h"   // dm/gfx/nvn (-I from the Makefile)
 
 enum { C = NVN_RB_CBUF, S = NVN_RB_SAMP, T = NVN_RB_TEX, I = NVN_RB_IMG, TB = NVN_RB_TBUF };
 enum { F = NVN_DPF_FLOAT, U = NVN_DPF_UINT, D = NVN_DPF_DEPTH };
-static int fail, n;
+static int fail, n, skipped;
 static void check(const char *what, long want, long got) {
     n++; int ok = want == got; fail += !ok;
     if (!ok) printf("  %-40s expected %ld → got %ld ✗\n", what, want, got);
@@ -16,12 +17,25 @@ static void check(const char *what, long want, long got) {
 static NSDictionary *load(const char *key) {
     NSString *p = [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache/b-%s/%s.json", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work", DMSH_CHAIN, key];   // the library of the current translation chain version
     NSData *d = [NSData dataWithContentsOfFile:p];
-    if (!d) { printf("[RED] missing reflection sample %s\n", p.UTF8String); fail++; return nil; }
+    if (!d) { printf("SKIP: no reflection sample %s (the samples are translated shaders of Super Mario Bros. Wonder in the NSP script's build cache; DM_ROOT or ~/dm-work/build/cache/metal_shader_cache), the checks on it do not run\n", p.UTF8String); skipped++; return nil; }
     return [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
 }
 
 int main(void) { @autoreleasepool {
     nvn_refl r; char err[160] = "";
+    {   // native image atomics (dmsh_atomic.py): one read_write image, marked atomic by the build; an image the shader only stores to is not
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[
+            @{@"kind": @"img", @"reg": @2, @"arg_id": @0, @"msl_name": @"cp_i_cb2_4C_r32ui", @"msl_type": @"texture_buffer<uint, access::read_write>", @"atomic": @YES},
+            @{@"kind": @"img", @"reg": @3, @"arg_id": @1, @"msl_name": @"cp_i_cb2_4E_r32ui", @"msl_type": @"texture3d<uint, access::write>"}]};
+        check("atomic image: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("atomic image: IMG kind", NVN_RB_IMG, r.b[0].kind);
+        check("atomic image: texture type", MTLTextureTypeTextureBuffer, r.b[0].dtt);
+        check("atomic image: unsigned format", NVN_DPF_UINT, r.b[0].dpf);
+        check("atomic image: written", 1, r.b[0].rw);
+        check("atomic image: atomic flag", 1, r.b[0].atom);
+        check("stored image: 3D texture type", MTLTextureType3D, r.b[1].dtt);
+        check("stored image: no atomic flag", 0, r.b[1].atom);
+    }
     {   int f0 = fail;   // Route A is retired: PC-chain reflection (no route = B) must be rejected
         NSDictionary *pc = @{@"arg_buffer_index": @0, @"bindings": @[@{@"type": @"cbuffer", @"reg": @10, @"arg_id": @0, @"access": @"constant", @"msl_type": @"constant cb1_struct*"}], @"vertex_inputs": @[]};
         check("PC chain reflection (no route = B) fails", 1, nvn_refl_from_json(pc, &r, err, sizeof err) != 0);
@@ -77,6 +91,6 @@ int main(void) { @autoreleasepool {
         check("B texture without a resolved slot fails", 1, nvn_refl_from_json(b2, &r, err, sizeof err) != 0);
         printf("%-60s %s\n", "B negative control: unknown kind / missing slot", fail == f1 ? "✓" : "✗");
     }
-    printf("== %d checks, %d failed ==\n", n, fail);
+    printf("== %d checks, %d failed, %d sample files missing (those checks skipped) ==\n", n, fail, skipped);
     return fail != 0;
 } }

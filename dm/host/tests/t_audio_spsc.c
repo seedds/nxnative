@@ -1,5 +1,6 @@
 // hle_audio.c lock-free queue stress test: three threads producing / playing / reclaiming 100 thousand blocks concurrently, the byte stream and reclaim order checked one by one by sequence number, no event lost.
 #include "../hle_audio.c"
+__thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
 #include <sched.h>
 #include <time.h>
 
@@ -20,6 +21,7 @@ void hle_signal_system_event(void *g) {
 }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 module_t *module_of(const void *p) { (void)p; return NULL; }   // call sites in the log: no guest modules in the unit test
+int dm_guest_as_contains(uintptr_t a) { (void)a; return 0; }   // hle_svc.c: no guest address space in the unit test, so the big-stack take-overs (Start / Stop / CloseAudioOut, hle_bigstack.c) run on the calling host stack
 void dm_host_helper_qos(qos_class_t q) { (void)q; }   // hle_thread.c: the helper threads keep the default class in the unit test
 
 typedef struct {
@@ -95,7 +97,28 @@ static void *release_reader(void *p) {
     return NULL;
 }
 
+static int stop_pending(void) {
+    char out[64], ev[64]; uint8_t prm[16], bytes[5][8] = {{0}}, played[13]; gbuf buffers[5] = {0};
+    h_au_InitParam(prm); if (h_au_Open(out, ev, NULL, prm)) return 1;
+    aout *a = ao(out); atomic_store(&a->state, STATE_STARTED);   // deterministic callback, no backend thread
+    atomic_store(&a->q_head, UINT32_MAX-2); atomic_store(&a->q_tail, UINT32_MAX-2);
+    atomic_store(&a->rel_head, UINT32_MAX-1); atomic_store(&a->rel_tail, UINT32_MAX-1);
+    for (int i=0; i<5; i++) { buffers[i].ptr=bytes[i]; buffers[i].size=buffers[i].cap=8; if (!h_au_Append(out,&buffers[i])) return 1; }
+    pull(a,played,sizeof played);   // one released buffer followed by a partly played one
+    a->rel_sem=dispatch_semaphore_create(0);
+    h_au_Stop(out);
+    int failed = h_au_BufCount(out)!=0 || a->pos!=0 || dispatch_semaphore_wait(a->rel_sem,dispatch_time(DISPATCH_TIME_NOW,100000000))!=0;
+    for (int i=0; i<5; i++) failed |= h_au_Released(out)!=&buffers[i];
+    h_au_Stop(out); failed |= h_au_Released(out)!=NULL;
+    // Buffers queued while stopped belong to the next Start; a repeated Stop keeps them.
+    h_au_Append(out,&buffers[0]); h_au_Stop(out); failed |= h_au_BufCount(out)!=1;
+    atomic_store(&a->state,STATE_STARTED); h_au_Stop(out); failed |= h_au_Released(out)!=&buffers[0] || h_au_Released(out)!=NULL;
+    h_au_Close(out);
+    printf("Stop releases partial/pending buffers in order, signals and preserves pre-start buffers: %s\n",failed?"FAIL":"PASS");
+    atomic_store(&g_sig,0); return failed;
+}
 int main(void) {
+    if (stop_pending()) return 1;
     char out[64], ev[64]; uint8_t prm[16];
     test_ctx t = {0};
     t.bufs = calloc(NBUF, sizeof *t.bufs); t.data = calloc(NBUF, sizeof *t.data); t.sizes = calloc(NBUF, sizeof *t.sizes); t.scratch = malloc(512);

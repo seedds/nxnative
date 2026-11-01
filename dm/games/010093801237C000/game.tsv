@@ -33,11 +33,6 @@ mem_alias	0x10000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 
-# ---- Threads ----
-# Same-core preemption approximation (hle_thread.c): the movie player's main thread (priority 44, core 0) posts "unlink the holders" to the dispatcher thread and leaves messages for the worker thread (both priority 30, core 0 only), then frees the object and builds a new one in place without waiting;
-# on hardware they preempt the main thread at once and finish first. Without the approximation about half of the runs crashed at the intro / title movie changes (SignalEvent on a null MultiWait, main+0x225338 reading a freed object); with it 12 runs in a row were clean
-core_preempt	on
-
 # ---- Shader split (shader_split.py; MSHD containers) ----
 shader_groups	/system/shd/=shd
 shader_note	Metroid Dread shaders

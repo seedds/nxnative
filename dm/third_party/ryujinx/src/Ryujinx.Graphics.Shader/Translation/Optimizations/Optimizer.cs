@@ -34,7 +34,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     BindlessToArray.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
                 }
 
-                BindlessElimination.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
+                BindlessElimination.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor, deferSeveral: true);
 
                 // FragmentCoord only exists on fragment shaders, so we don't need to check other stages.
                 if (context.Stage == ShaderStage.Fragment)
@@ -47,6 +47,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 {
                     DoubleToFloat.RunPass(context.Hfm, context.Blocks[blkIndex]);
                 }
+            }
+
+            // nxnative: the reads whose handle merges several c[2] handles, once every other read has registered its texture (BindlessElimination.TryTableHandle)
+            for (int blkIndex = 0; blkIndex < context.Blocks.Length; blkIndex++)
+            {
+                BindlessElimination.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
             }
 
             // Run optimizations one last time to remove any code that is now optimizable after above passes.
@@ -384,7 +390,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     if (src.UseOps.Remove(node) && src.UseOps.Count == 0)
                     {
                         Debug.Assert(src.AsgOp != null);
-                        nodes.Enqueue(src.AsgOp);
+
+                        // nxnative (from MacNativeGames' translator patch 0002, after Ryujinx_Optime 01a1e37f): follow only into a producer that will be removed
+                        // itself. One with side effects (an atomic, a call) stays in the block when its result is unused, so its sources are still live; dropping
+                        // their uses here let the next dead-code pass delete the chain that feeds it, and the atomic then read undefined values.
+                        if (!HasSideEffects(src.AsgOp))
+                        {
+                            nodes.Enqueue(src.AsgOp);
+                        }
                     }
                 }
             }

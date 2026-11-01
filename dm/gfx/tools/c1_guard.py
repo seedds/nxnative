@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 # c1_guard.py <dmsh_b version dir> <output tsv>: lists the shaders whose reads of c1 (the shader's embedded constant segment) are not proven to stay inside the span the host's
 # shared c1 banks give them. nvn_mtl.m c1_store packs the c1 of unlisted shaders into 4 MB banks: the data rounded up to 256 bytes, then a 256-byte zero gap, then the next shader's data.
-# A listed shader gets an exclusive 64 KiB of zeros instead (reads past the data return 0, as on the Switch). The host loads the list only when its header names its chain version.
+# A listed shader gets an exclusive 64 KiB of zeros instead (reads past the data return 0, as on the Switch). The host loads the list only when its header names its library's chain version
+# and inputs stamp (dmsh_chain.py table_head). dmsh_build.py runs it after each full build.
 # An index is proven when interval arithmetic over the whole expression, following each variable's definition, gives 0 <= index and 16 * (index + 1) <= that span (_m0 is float4[4096]).
 # Literals, & K, % K, >> K, min, max, clamp and casts bound a value; inputs, buffer reads and anything not understood are unbounded. Every stage's c1 counts (vp_, fp_, cp_, gp_ ...).
 # The first version followed only the last variable of an index and took any mask, min or clamp it met as proof: `_1 + (_2 & 3u)` with _1 read from an input passed,
 # masks wider than the data passed, and compute shaders (cp_c1) were never checked.
 import datetime
 import json
+import multiprocessing
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dmsh_chain   # noqa: E402
 
 
 ACCESS = re.compile(r"\b[a-z]+_c1\)\._m0\[([^\]]+)\]")
@@ -19,6 +24,7 @@ ASSIGNMENT = re.compile(r"(?<![\w.])(_\d+)\s*(?:<<|>>|[-+*/%&|^])?=(?!=)|(?<![\w
 TOKEN = re.compile(r"\s*(0[xX][0-9a-fA-F]+[uU]?|\d+\.\d*(?:[eE][-+]?\d+)?f?|\d+[uU]?|[A-Za-z_]\w*(?:\.\w+)*|\.\w+|<<|>>|<=|>=|==|!=|&&|\|\||[-+*/%&|^~!?:(),<>\[\]])")
 UNBOUNDED = (None, None)
 CASTS = {"int", "uint", "short", "ushort", "long", "ulong"}
+OUTPUT = re.compile(r"[0-9a-f]{16}_b\w*\.(metal|json)")   # what dmsh_build.py writes: <key>_b.metal, <key>_bg0.json ... (as its OUT_KEY); nothing else in the folder is a shader
 BINARY = {"||": 1, "&&": 2, "|": 3, "^": 4, "&": 5, "==": 6, "!=": 6, "<": 7, ">": 7, "<=": 7, ">=": 7, "<<": 8, ">>": 8, "+": 9, "-": 9, "*": 10, "/": 10, "%": 10}
 
 
@@ -196,29 +202,37 @@ def proven(index, definitions, span):
     return span is not None and known(low, high) and low >= 0 and 16 * (high + 1) <= span
 
 
+def outputs(version_dir, ext):
+    """The names of the shader build's .<ext> outputs in version_dir, sorted. Other files are left out: on an exFAT or FAT drive macOS writes a binary AppleDouble `._<name>` beside each file"""
+    return [n for n in sorted(os.listdir(version_dir)) if (m := OUTPUT.fullmatch(n)) and m.group(1) == ext]
+
+
+def unproven(job):
+    """(version dir, a .metal file name) → the shader's key when one of its c1 reads is not proven bounded, else None. Each shader is checked on its own, so main()
+    spreads them over every core, as cb_extent.py does (Breath of the Wild's 19,592 libraries, FINAL FANTASY RESONANCE's 73,496: minutes on one core)"""
+    version_dir, name = job
+    with open(os.path.join(version_dir, name), encoding="utf-8") as stream:
+        source = stream.read()
+    accesses = set(ACCESS.findall(source))
+    if not accesses:
+        return None
+    key = name[:-len("_b.metal")] if name.endswith("_b.metal") else name[:-6]
+    definitions = definitions_of(source)
+    span = c1_span(os.path.join(version_dir, key + "_b.json"))
+    return None if all(proven(index, definitions, span) for index in accesses) else key
+
+
 def main():
     if len(sys.argv) != 3:
         raise SystemExit(f"usage: {sys.argv[0]} <dmsh_b version dir> <output tsv>")
     version_dir, output = map(os.path.abspath, sys.argv[1:])
-    keys = []
-    for name in sorted(os.listdir(version_dir)):
-        if not name.endswith(".metal"):
-            continue
-        path = os.path.join(version_dir, name)
-        with open(path, encoding="utf-8") as stream:
-            source = stream.read()
-        accesses = set(ACCESS.findall(source))
-        if not accesses:
-            continue
-        key = name[:-len("_b.metal")] if name.endswith("_b.metal") else name[:-6]
-        definitions = definitions_of(source)
-        span = c1_span(os.path.join(version_dir, key + "_b.json"))
-        if not all(proven(index, definitions, span) for index in accesses):
-            keys.append(key)
+    jobs = [(version_dir, name) for name in outputs(version_dir, "metal")]
+    with multiprocessing.Pool() as pool:   # map keeps the sorted order, so the list is the same as one core's
+        keys = [key for key in pool.map(unproven, jobs, chunksize=64) if key]
     os.makedirs(os.path.dirname(output), exist_ok=True)
     with open(output, "w", encoding="utf-8", newline="") as stream:
         stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-        stream.write(f"# chain {os.path.basename(version_dir)} {stamp}\n")
+        stream.write(f"{dmsh_chain.table_head(version_dir)} {stamp}\n")   # the library's chain version and the profile inputs it was built from
         for key in keys:
             stream.write(key + "\n")
     print(f"not proven bounded: {len(keys)} shaders")

@@ -6,6 +6,7 @@
 #include HLE_OE_SOURCE
 #include <signal.h>
 #include <sys/wait.h>
+void dm_thread_native_wait(int entering) { (void)entering; } // queue-only test, without the guest scheduler
 uint64_t now_ns(void) { return 0; }
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
@@ -17,7 +18,7 @@ void hle_signal_system_event(void *g) { (void)g; ev_sig = 1; }
 void hle_clear_system_event(void *g) { (void)g; ev_sig = 0; }
 static int checks, fails;
 #define CHECK(c, s) do { checks++; int ok = !!(c); fails += !ok; printf("%s %s\n", ok ? "✓" : "✗", s); } while (0)
-static void reset(void) { g_mqh = g_mqn = 0; g_focus = 1; g_opmode = 1; g_ntf_opmode = g_ntf_perfmode = 0; g_focus_mode = -1; }
+static void reset(void) { g_mqh = g_mqn = 0; g_focus = 1; g_seen = 1; g_applets = 0; g_opmode = 1; g_ntf_opmode = g_ntf_perfmode = 0; g_focus_mode = -1; }
 static int pop_is(uint32_t want) { uint32_t m = 999; return h_oe_TryPopMsg(&m) && m == want; }
 static int empty(void) { uint32_t m = 999; return !h_oe_TryPopMsg(&m) && m == 999; }
 static int child_kind;
@@ -58,6 +59,13 @@ static int child_burst(int kind) {
 }
 int main(void) {
     unsetenv("DM_OE_SCRIPT"); reset();
+    CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "inactivity extension starts disabled");
+    h_oe_InactivityExtSafe(1);
+    CHECK(h_oe_InactivityMode() == 1 && h_oe_InactivityExtQ(), "normal inactivity extension is mode 1");
+    h_oe_InactivityExt(1);
+    CHECK(h_oe_InactivityMode() == 2 && h_oe_InactivityExtQ(), "unsafe inactivity extension is mode 2");
+    h_oe_InactivityExtSafe(0x100);
+    CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "clearing the extension restores mode 0");
     CHECK(empty(), "empty queue at start: returns false and leaves the output alone");
     dm_focus_set(1); dm_set_opmode(1); CHECK(empty(), "same state sends no notification");
     dm_focus_set(3); CHECK(h_oe_GetFocus() == 3, "background state 3 can be queried before popping");
@@ -122,5 +130,28 @@ int main(void) {
     CHECK(pop_is(15) && empty(), "focus mode 2: focus notification 15");
     h_oe_SetFocusMode(1); dm_focus_set(2);
     CHECK(pop_is(15) && empty(), "focus mode 1: focus notification 15");
+    // Library applets (DM_APPLET): on Horizon an applet the application opens takes its focus, 15 with OutOfFocus on the way in and 15 with InFocus on the way out. Mario Kart 8
+    // Deluxe applies the controller applet's answer only after that InFocus notification (GitHub issue #550). The front end's own state is kept apart from the applet's
+    reset();
+    dm_applet_enter("test"); CHECK(h_oe_GetFocus() == 2 && pop_is(15) && empty(), "applet opens over a game in focus: 15, state 2");
+    dm_applet_leave(); CHECK(h_oe_GetFocus() == 1 && pop_is(15) && empty(), "applet closes: 15, state 1");
+    dm_applet_enter("test"); dm_applet_leave();
+    CHECK(pop_is(15) && empty() && h_oe_GetFocus() == 1, "an applet answered at once: one 15 (not popped in between), queried as 1");
+    CHECK(dm_focus_now() == 1, "an applet leaves the front end's own state alone");
+    dm_applet_enter("test"); pop_is(15);
+    dm_focus_set(2); CHECK(empty() && h_oe_GetFocus() == 2 && dm_focus_now() == 2, "window loses focus while an applet is open: no change the game sees");
+    dm_focus_set(1); CHECK(empty() && h_oe_GetFocus() == 2, "window regains focus while an applet is open: still 2, the applet keeps focus");
+    dm_applet_leave(); CHECK(pop_is(15) && empty() && h_oe_GetFocus() == 1, "then the applet closes: 15, state 1");
+    dm_applet_enter("test"); pop_is(15); dm_focus_set(2); dm_applet_leave();
+    CHECK(empty() && h_oe_GetFocus() == 2, "applet closes while the window is out of focus: still 2, no notification");
+    dm_focus_set(1); CHECK(pop_is(15) && empty() && h_oe_GetFocus() == 1, "window regains focus after the applet closed: 15, state 1");
+    dm_applet_enter("test"); pop_is(15); dm_focus_set(3);
+    CHECK(pop_is(15) && empty() && h_oe_GetFocus() == 3, "background while an applet is open: 15, state 3");
+    dm_focus_set(2); dm_focus_set(1); CHECK(pop_is(15) && empty() && h_oe_GetFocus() == 2, "back to the foreground with the applet still open: 15, state 2");
+    dm_applet_enter("test"); dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 2, "a nested applet: the outer one keeps the game out of focus");
+    dm_applet_leave(); CHECK(pop_is(15) && empty() && h_oe_GetFocus() == 1, "the outer applet closes: 15, state 1");
+    h_oe_SetFocusMode(3); dm_applet_enter("test");
+    CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
+    dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

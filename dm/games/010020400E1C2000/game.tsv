@@ -28,7 +28,7 @@ zip_store	.assets:.dat:.jpg:.mp4:.png:.resource:.ress:.metallib
 
 # ---- Memory ----
 # The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup hands application pool − used memory to StandardAllocator as virtual address memory,
-# one address region in the alias region, and the game never calls SetMemoryHeapSize. The cuts for this sdk build (patch_nso.py, DRAGON QUEST XI S's) put that region 64 MB into the alias region
+# one address region in the alias region, and the game never calls SetMemoryHeapSize. The cuts for this sdk build (dm/tools/sdk_patches.py, DRAGON QUEST XI S's) put that region 64 MB into the alias region
 # (node area 62 MB, regions of 1 GB and more 32 MB aligned). Unlike Unity 2020 and 2022 (Ace Attorney Investigations Collection, Monster Train 2: a 1 GB pool), Unity 2018.3 reserves no
 # address regions of its own: every page the game maps lies in StandardAllocator's region (Mac, DM_SVC map log over the title, the tutorial and the opening: 377 MB mapped at the peak),
 # so the hardware pool (3.2 GB, StandardAllocator to +3.21 GB of the 4.375 GB alias region) leaves no address space short, and only mapped pages cost memory.
@@ -40,5 +40,7 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 
 # ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
+# The registered build selects near-zero NVN depth; offline pipeline bases use main0_z.
+depth_mode	zero
 shader_groups	/Data/=data
 shader_note	Raging Loop shaders

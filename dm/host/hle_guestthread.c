@@ -11,20 +11,32 @@ typedef void (*tt_fn)(void *tt);
 static void *need(const char *n) { void *p = guest_sym(n); if (!p) die("host guest thread: missing symbol %s", n); return p; }
 // an entry shim: first register the thread as host-created (hle_thread.c dm_yield_to_core_peers does not wait for them), then run fn
 typedef struct { void (*fn)(void *); void *arg; } spawn_arg;
+typedef struct { _Alignas(16) uint8_t tt[0x200]; void *stack_alloc; } host_thread;
 void dm_thread_mark_host(void);
 static void spawn_tramp(void *p) { spawn_arg a = *(spawn_arg *)p; free(p); dm_thread_mark_host(); a.fn(a.arg); }
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size) {
     spawn_arg *sa = malloc(sizeof *sa); if (!sa) die("host guest thread: allocation failed"); sa->fn = fn; sa->arg = arg; fn = spawn_tramp; arg = sa;
     stack_size = (stack_size + 0xfff) & ~(size_t)0xfff;
-    void *tt = calloc(1, 0x200);                                 // nn::os::ThreadType (0x1c0 bytes, with headroom)
-    void *stack = aligned_alloc(0x1000, stack_size);              // the SDK requires the stack to be 4 KiB aligned and its size a multiple of 4 KiB
-    if (!tt || !stack) die("host guest thread: allocation failed");
-    int rc = ((create_fn)need("_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi"))(tt, fn, arg, stack, stack_size, prio);
+    host_thread *t = calloc(1, sizeof *t);                       // ThreadType is first, 0x1c0 bytes with headroom
+    if (!t) die("host guest thread: allocation failed");
+    // CreateThread borrows this range through MapMemory. Host malloc has no
+    // guest backing/state (the audio worker failed here in Tears of the Kingdom).
+    // Use SDK malloc, retaining the raw pointer until DestroyThread copies back.
+    t->stack_alloc = ((void *(*)(size_t))need("malloc"))(stack_size + 0xfff);
+    if (!t->stack_alloc) die("host guest thread: stack allocation failed");
+    void *stack = (void *)(((uintptr_t)t->stack_alloc + 0xfff) & ~(uintptr_t)0xfff);
+    int rc = ((create_fn)need("_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi"))(t->tt, fn, arg, stack, stack_size, prio);
     if (rc) die("host guest thread: CreateThread failed %#x", rc);
-    ((tt_fn)need("_ZN2nn2os11StartThreadEPNS0_10ThreadTypeE"))(tt);
-    return tt;
+    ((tt_fn)need("_ZN2nn2os11StartThreadEPNS0_10ThreadTypeE"))(t->tt);
+    return t;
 }
-void dm_guest_thread_join(void *tt) { ((tt_fn)need("_ZN2nn2os10WaitThreadEPNS0_10ThreadTypeE"))(tt); ((tt_fn)need("_ZN2nn2os13DestroyThreadEPNS0_10ThreadTypeE"))(tt); }
+void dm_guest_thread_join(void *tt) {
+    ((tt_fn)need("_ZN2nn2os10WaitThreadEPNS0_10ThreadTypeE"))(tt);
+    ((tt_fn)need("_ZN2nn2os13DestroyThreadEPNS0_10ThreadTypeE"))(tt);
+    host_thread *t = tt;
+    ((void (*)(void *))need("free"))(t->stack_alloc);
+    free(t);
+}
 
 static struct { int malloc_ok, lock_owned, handle; } g_st;
 static void selftest_body(void *arg) {

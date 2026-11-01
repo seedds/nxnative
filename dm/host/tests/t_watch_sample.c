@@ -53,24 +53,15 @@ static _Noreturn void sample_exit(int status) {
     assert(actions_live == 0);
     _exit(status);
 }
-// This adapter also makes the old system() implementation safe to test. Only the
-// executable is substituted; the shell still parses its original output path.
-static int sample_system(const char *command) {
-    const char prefix[] = "/usr/bin/sample";
-    assert(!strncmp(command, prefix, sizeof prefix - 1));
-    char redirected[4096];
-    int n = snprintf(redirected, sizeof redirected, "./sampler%s", command + sizeof prefix - 1);
-    assert(n > 0 && (size_t)n < sizeof redirected);
-    return system(redirected);
-}
 #define posix_spawn_file_actions_init sample_init
 #define posix_spawn_file_actions_addopen sample_open
 #define posix_spawn_file_actions_adddup2 sample_dup
 #define posix_spawn_file_actions_destroy sample_destroy
 #define posix_spawn sample_spawn
 #define waitpid sample_wait
-#define system sample_system
 #define _exit sample_exit
+// A regression to a shell must fail to compile, not execute the fixture's paths.
+#pragma GCC poison system
 #include "../crash.c"
 #undef posix_spawn_file_actions_init
 #undef posix_spawn_file_actions_addopen
@@ -78,7 +69,6 @@ static int sample_system(const char *command) {
 #undef posix_spawn_file_actions_destroy
 #undef posix_spawn
 #undef waitpid
-#undef system
 #undef _exit
 
 module_t *g_mod;
@@ -92,8 +82,9 @@ static int recorder(int argc, char **argv) {
     assert(!fclose(f));
     puts("SAMPLER_STDOUT");
     fputs("SAMPLER_STDERR\n", stderr);
-    if (!strcmp(getenv("WATCH_TEST_FAULT"), "exit")) return 7;
-    if (!strcmp(getenv("WATCH_TEST_FAULT"), "signal")) raise(SIGTERM);
+    const char *injected = getenv("WATCH_TEST_FAULT");
+    if (injected && !strcmp(injected, "exit")) return 7;
+    if (injected && !strcmp(injected, "signal")) raise(SIGTERM);
     return 0;
 }
 static int checks, failures;
@@ -112,7 +103,9 @@ static void run_case(const char *path, enum fault inject, const char *name) {
         fault = inject;
         if (path) assert(!setenv("DM_WATCH_SAMPLE", path, 1));
         else assert(!unsetenv("DM_WATCH_SAMPLE"));
-        assert(!setenv("WATCH_TEST_FAULT", inject == EXIT_BAD ? "exit" : inject == SIGNAL_BAD ? "signal" : "none", 1));
+        // Normal sampling also covers a recorder launched without fault controls.
+        if (inject == NONE) assert(!unsetenv("WATCH_TEST_FAULT"));
+        else assert(!setenv("WATCH_TEST_FAULT", inject == EXIT_BAD ? "exit" : inject == SIGNAL_BAD ? "signal" : "none", 1));
         g_watch_stall = 1;
         atomic_store(&g_watch_last_ns, 0);
         watchdog_main(NULL);

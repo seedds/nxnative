@@ -1,6 +1,6 @@
 # Mario Kart World (`0400C3F00006E000`)
 
-A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (C library) + `sdk`. **In bring-up**: the game runs its frame loop on the Mac (the boot's 60 s watch window: 1,073 frames, 57 fps between frames 600 and 900; the picture is not yet checked, [Open](#open)). iOS is untested.
+A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (C library) + `sdk`. **In bring-up**: on the Mac the game shows its title ("Press L + R to start" over a 3D drive through Mario Bros. Circuit) and its main menu (Single Player, Multiplayer, Online Play, Wireless Play); the 3D scene has rainbow bands where it is bright ([Open](#open)). No race is tested yet; iOS is untested.
 
 ## What it needs
 
@@ -10,6 +10,7 @@ A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for
 | `app_pool 0x240000000` | `game.tsv` | the Switch 2's 9 GB, as Donkey Kong Bananza's (not measured). `nnMain` allocates a fixed 7.04 GB memory block from its heap (`main+0xca866c`); with the Switch 1 pool (3,285 MiB) the heap was 1.68 GB, the block null, and the game crashed at `main+0x5dd3ac`. `nninitStartup` sizes the heap as the pool less about 1.53 GB: 7.47 GB |
 | `mem_reserve 0x2d0000000`, `mem_alias 0xb0000000`, `mem_stack 0x10000000` | `game.tsv` | the heap check with the 9 GB pool (`SetHeapSize OOM: req 0x1de400000`): an 8 GB heap region. The alias region keeps 2.75 GB: the sdk's address region node area takes its first 1 GB |
 | `romfs_marker Movie/StaffRoll_00.webm` | `game.tsv` | a file of the 1.8.0 RomFS |
+| `render_cond on` | `game.tsv` | agl's render buffer binding wraps its clears in render conditions, as in Donkey Kong Bananza: `SetRenderEnableConditional(RENDER_IF_NOT_EQUAL)` at `main+0x49e194`, then `ClearColor` at `main+0x49e1c0`. Without the key every clear ran, and the title's 3D scene was black but for a few specks under the 2D layout |
 | NVN2 API 231.39 | `hle_nvn.c` `nvn_api` | the game requires major 231 and minor ≥ 39 (`main+0xdd0890`, after `nvnDeviceGetInteger` items 0 and 1); its own `sdk` answers 231.39 (`DeviceGetInteger` at `sdk+0x65b680`; Donkey Kong Bananza's sdk answers 231.30). The host gives 231.39 to every Switch 2 SDK, which also meets Donkey Kong Bananza's minor ≥ 30 |
 
 ## Files
@@ -36,6 +37,16 @@ A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for
 
 - The translator warns `Attribute offset 0x5C is not valid.` in 2,838 shaders (Donkey Kong Bananza's build has none). Open: not analysed.
 
+## Rendering
+
+The scene renders into 2048x1152 targets (RGBA16F colour). The window textures are 3840x2160, and the game draws its picture into their top left 2048x1152 and crops the window to it (`nvnWindowSetCrop`, `WindowCrop 0,0 2048x1152` in the log; 2560x1440 at the first frames). The window shows the crop. A `DM_NVN_SHOT` or `DM_CTL` `shot` without `DM_NVN_SHOT_OUT` saves the whole window texture, so the picture fills only its top left: take screenshots with `DM_NVN_SHOT_OUT=1920x1080`.
+
+On the way to the title:
+
+1. Black 3D scene: only the 2D layout ("Press L + R to start", "Ver. 1.8.0") over black with a few specks. The clears under render conditions ran unconditionally (`render_cond`, [What it needs](#what-it-needs)).
+
+The title and the main menu match the game as it is known: the title drives Mario's kart through Mario Bros. Circuit (the canyon, the tunnel with the course's name) with "Press L + R to start" and "Ver. 1.8.0"; L + R opens the main menu over the same drive, with Single Player (selected, the 1P marker), Multiplayer, Online Play, Wireless Play, three round buttons and "Free Roam" on the + button. What differs is in [Open](#open).
+
 ## Boot (Mac)
 
 Each step below stopped the boot before its fix:
@@ -45,15 +56,17 @@ Each step below stopped the boot before its fix:
 3. `CRASH pc=0` after `vi::SetLayerNextHdrAdjustableBezierMetadata` (`main+0x959ae4`), in the first frames ([Switch 2 HDR metadata on a layer the host never made](../../../docs/reference/services.md#switch-2-hdr-metadata-on-a-layer-the-host-never-made)).
 4. GPU out of memory after about 90 frames (`kIOGPUCommandBufferCallbackErrorOutOfMemory`, then the present watchdog; "GPU allocated" 21 to 24 GB): six sparse terrain arrays of 8192x8192x68 with 12 levels (two of 6.1 GB, format 0x50; four of 1.5 GB, ASTC 8x8) in virtual pools the game maps only in part, made as whole textures. Now Metal placement sparse textures, mapped and filled tile by tile from the page table ([Sparse textures in sparse virtual pools as Metal placement sparse textures](../../../docs/reference/nvn-objects.md#sparse-textures-in-sparse-virtual-pools-as-metal-placement-sparse-textures)): after 60 s 26,593 Metal tiles (1.7 GB) in 7 heaps, GPU allocated 14.2 GB, process footprint 12.6 GiB (with the 9 GB pool).
 
+To the main menu (Mac): `DM_KEYS=f4000:L+R~0.5` from a fresh save. The title asks for L + R from about frame 3400 and the main menu shows by frame 4300 (with `DM_PRESENT_LINK=0`, so a window behind others still presents every frame). No movie started and no `nv::InitCheck` abort came in 3 minutes on the title without input (#834 saw one when the attract movie started).
+
 Memory after 60 s (`run11.log`): GPU allocated 14.2 GB, footprint 12.6 GiB, 7 placement heaps of 256 MB.
 
 ## Open
 
-- The picture: not yet compared with a capture (the title and the menus are the next milestone).
-- `[RED] failed to create compute pipeline: Threadgroup memory size (49152) exceeds the maximum threadgroup memory allowed (32768)`, 3,138 times in 60 s: a compute shader declares 48 KB of shared memory, which Ampere has and an Apple GPU's threadgroup does not (32 KB). Its dispatches are skipped. Which shader, and what it computes, is not identified yet (the pipeline failure does not name its key).
+- In the title's sky, at frame 3400 of the route: a dark band with rainbow streaks over the left half and a flat grey column from the horizon to the top of the picture. Not analysed; likely the same bloom fault (below) or the sky.
+- Rainbow bands in the bright parts of the 3D scene: vertical colour bands in the sky near the horizon, on the water and on lit floors (in the tunnel the floor turns white with cyan bands). They come from the bloom: its bright pass (pixel shader `c44cb8e46dbcfd4f`, the 512x288 `RGBX16_SNORM` target, pass 876646 in the menu's pass dump) colours what it extracts by its brightness, and its output already holds the bands; the composite (`3d81a859ffbb99f5`) adds them to the scene. The scene's lit areas are much brighter than they should be (the tunnel floor is white). Suspected, not checked: the exposure, which a shader among the 16 runtime-only compute shaders that do not load (below) or the six 48 KB threadgroup compute shaders computes.
+- `[RED] failed to create compute pipeline for <key>: Threadgroup memory size (49152) exceeds the maximum threadgroup memory allowed (32768)`: six compute shaders up to the main menu (`04dedc705a7ef88b`, `2a89b6d4df731b8d`, `7caf175d0e2ada58`, `a8310cf7c7acd0fe`, `c37db932f3076403`, `e2a5bd13907993e3`), each declares 48 KB of shared memory (the control section's +0x64), which Ampere has and an Apple GPU's threadgroup does not (32 KB). Their dispatches are skipped. All 168 shaders with 48 KB come from `DrivePassShaderDefault.sharcb`; the six run 64 threads, write storage buffers and use their shared memory with no barrier, 48-byte records indexed from the thread's number. What they compute is not known.
 - 63 shaders missing from the cache (`failed to load shader …: cannot open …/b-3c66991eb439/….metallib`, 16 compute and 2 pixel programs with no shader): none of their keys is in the full build's 11,522 libraries, so they are the runtime-only shaders (about 240 by #834) that a `DM_NVN_SHDUMP` run collects (Goal: build order).
 - The NVN2 calls reported as unimplemented: `CommandBufferDrawMeshTasks` (302 times in 60 s), `CommandBufferBindShadingRateImage`, `CommandBufferShadingRateImagePalette`; unknown names `nvn*CooperativeVectorMatrix*`, `nvn*PoolWriteDescriptorTableData`.
-- `SetRenderEnableConditional: the host draws anyway for now`: `render_cond` is not set yet (the clears are conditional, #834).
 - The display link stalled 7 times in the first 50 s (`display link recovered: stalled … ms`), with 253 dropped frames up to frame 600; after that 2 dropped in 300 frames.
 - The camera's other commands (29 at the first frames) fail as "no camera"; their meaning is not known.
 - `pad_layout` and `app_category` are judgement, not measured.

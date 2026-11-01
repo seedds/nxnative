@@ -2,7 +2,7 @@
 
 Base game 1.0.1, SDK 15.3.2. Rockstar's RAGE engine as Double Eleven ported it to the Switch (the engine's classes are in the `d11` namespace; threads are named `[RAGE] …` and `[RDR2] Render Thread`), on NVN. Modules `main` and `sdk`. The profile has no `patches.py`: the rewriter runs with its defaults.
 
-On the Mac: the Rockstar legal screens, the title and its scenes, the new-game intro and the Ricketts farm, where John walks around with the audio, the foliage and the characters drawn as on the Switch. Not played further than the farm and its surroundings; not tried on the iPhone; no IPA built. The Mac app is 11.5 GB, almost all of it the RomFS.
+On the Mac: the Rockstar legal screens, the title and its scenes, the new-game intro and the Ricketts farm, where John walks around with the audio, the foliage and the characters drawn as on the Switch. Not played further than the farm and its surroundings; not tried on the iPhone; no IPA built (the README gallery's ~11.5 GB is the Mac app's size, almost all of it the RomFS stored as it is).
 
 ## What it needs
 
@@ -28,7 +28,7 @@ No game-specific host code: every fix below is general.
 - 3,583 shaders, none from GLSLC files in the RomFS: 3,413 in `shaders.rpf` (134 `rgxd` resources, each with reflection names and the code and control section of its shaders, in the reverse of GLSLC order), 168 unaligned `rgxd` records in `main` and 2 in `langselect.pkdswitch`: [Rockstar RAGE shaders in RPF6 archives (rgxd)](../../../docs/reference/shaders.md#rockstar-rage-shaders-in-rpf6-archives-rgxd). 2,134 are vertex and 1,449 pixel shaders.
 - Single-stage programs: `shader_split.py` pairs them as a cover of two pixel shaders for every vertex shader; the real pairing happens at draw time. The engine pairs by name (`GfxDevice_c::GetShaderProgram`); the names in the `rgxd` headers are not used yet.
 - `main` holds no glslc, no `#version` and no `NVNS` / `BNSH`.
-- The shader tables are the split's output, `shader_pairs.tsv` and `pso_pairs.tsv` for the pairs. `pso_manifest.tsv` is empty: no prewarm run has been recorded on the Mac. Prebuilding the pipeline archive at the first start takes about 4,268 pairs.
+- The shader tables are the split's output, `shader_pairs.tsv` and `pso_pairs.tsv` for the pairs. `pso_manifest.tsv` is the host's `pso_user.tsv` of a play-through on the Mac (boot, legal screens, title, New Game, the intro, the farm) with the duplicates taken out: 792 shaders and 629 render pipelines. The pipeline archive's prebuild covers 4,268 pairs and takes 18 s on the M4.
 
 ## Audio
 
@@ -41,6 +41,8 @@ No game-specific host code: every fix below is general.
 - The blacksmith at his grindstone, east past the tree: five `LUp+LRight~1.2` steps 2 s apart, then `LRight~1.3` and `LUp~1.5`. The NPCs wander, so a hat-only character is not a fixed test; the blacksmith stands still.
 - The title scenes show the foliage too, but they cycle and differ from run to run.
 - The window has to be visible: a window another window covers is throttled and `shot` requests stall.
+- `smoke.tsv` is the same route for `scripts/regress.py` (`DM_KEYS`: `22:Plus*6/8,25:A*6/8,75:A*3/6,100:LUp~4,108:LUp~2`, shots at 118 s and 128 s). It needs a save from the cabin after the intro in `<NSP folder>/saves/farm`; the game's own save folder is enough (`RDR2SAVE0.SAV` and the other `.SAV` files). The frame it must reach is 2,900 by 115 s (29.9 fps from a first frame at about 12 s).
+- `regress.py check` of this branch against `main` (Apple M4): the baseline host hangs at frame 904 on the second renderer (`[RED] audren: a second renderer (the host drives only one)`), the candidate reaches frame 3,767 at 29.9 fps (p99 33.7 ms, peak 1,581 MB) with the one `[RED]` line of Rendering. 3,583 of 3,583 shaders build in both, none newly failing, no MSL changed.
 
 ## Found on this game
 
@@ -59,4 +61,4 @@ General host and tool changes first needed here; each applies to every game:
 - The 26,892 RPF6 records of other packings are not read; they may hold more shaders.
 - The depth snapshot splits each pass that samples depth: GPU time in the farm went from about 6 to about 10 ms a frame. Taking the snapshot once at the start of the pass would cut that.
 - `pso_manifest.tsv` is empty (see Files and shaders).
-- Not run through `scripts/regress.py`; no smoke route (`smoke.tsv`) and no benchmark route; not tried on the iPhone; play past the farm is untested.
+- No benchmark route (`bench.tsv`); not tried on the iPhone; play past the farm is untested. `regress.py` has only this game and Balatro to run on this Mac, and Balatro has no route (and the chain check does not cover OpenGL games): other games' runs are unchecked.

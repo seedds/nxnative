@@ -4531,7 +4531,7 @@ void mtl_tb2_stats(uint64_t *binds, uint64_t *made, uint64_t *fail, uint64_t *co
 // the game can free the object, so for a reader holding g_rmu an ID not marked names a pool object that still exists. Under g_rmu
 static void treg_gone(treg_t *r) {
     r->gone = 1;
-    if (r->view) { defer_obj_unref((__bridge id)r->view); CFRelease(r->view); r->view = NULL; r->view_id = r->view_rid = 0; treg_drop_im(r); }
+    treg_drop_views(r);
 }
 static void treg_drop_pool_views(const void *pool) {
     os_unfair_lock_lock(&g_rmu);

@@ -5,12 +5,16 @@ NROs (`nxaot build --profile <file>`: one line per sample, `<offset> <count>`, t
 sample outside every function and a count of 0. In the balanced mode the sampled functions are compiled at tier H and the others at tier C, in
 the max mode at H+ and H; the log's tier counts (`aot: tiers C <n> W <n> H <n> H+ <n>`) and the profile line must say so, and each pack, run
 natively, must print exactly corpus/expected/<program>.out. A profile with a malformed line stops the build with the line's number.
+Then the profile the host's sampler writes (dm/host/aot_profile.c, DM_AOT_PROFILE: t_aot_module's profile run writes one for this module), in its own form, for the synthetic
+game module of dm/tools/tests/aot_synth.py: its hot loop (synth_hot) and synth_cut sampled at their entries, under the sampler's header lines; the balanced pack of the module's
+manifest must log `aot: tiers C <n> W 0 H 2 H+ 0` and count every sample, none outside a function.
 
   test_profile.py --nxaot <nxaot> --nxaot-host <nxaot_host> --work <dir> [--nro <name>]...
 
 Exit 0 when everything holds.
 """
 import argparse
+import hashlib
 import os
 import re
 import subprocess
@@ -18,6 +22,18 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, '..', 'corpus')
+AOT_SYNTH = os.path.join(HERE, '..', '..', 'tests', 'aot_synth.py')
+# A profile as the host's sampler writes it (dm/host/aot_profile.c dm_aot_profile_write; this text is t_aot_module's profile run's file with the offsets, the SHA-256 and the pack's
+# path filled in): '#' lines, then `<entry offset> <samples>`, most samples first
+HOST_PROFILE = '''\
+# nxaot profile: guest functions sampled by the x86-64 engine (dm/host/aot_profile.c, DM_AOT_PROFILE); nxaot build --profile <this file>
+# module main, build ID {bid}, image SHA-256 {sha}
+# pack {pack}
+# 405 samples in 2 of its 10 functions; 1000 Hz of each guest thread's CPU time, 1 of 1 threads sampled; all modules: 446 samples, 405 in compiled code, 0 in host calls and SVCs of compiled functions, 0 in the JIT fallback, 41 elsewhere in the host
+# <module offset of a function's entry> <samples>
+{hot:#x} 400
+{cut:#x} 5
+'''
 
 
 def run(cmd):
@@ -92,6 +108,29 @@ def main():
                     why = f'native run exit {r.returncode}, output {"differs" if r.stdout != expected else "matches"}'
             bad += bool(why)
             print(f'{nro:<16} {mode:<9} tiers C W H H+ {got}  {why or "ok"}')
+    # The host's profile of the synthetic game module (aot_synth.py): synth_hot and synth_cut at tier H, the rest at C
+    synth = os.path.join(a.work, 'synth')
+    r = run([sys.executable, AOT_SYNTH, synth])
+    if r.returncode != 0:
+        bad += 1
+        print(f'aot_synth.py: exit {r.returncode}: {(r.stdout + r.stderr).strip()[-300:]}')
+    else:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(AOT_SYNTH)))
+        import aot_synth as synth_mod
+        with open(os.path.join(synth, 'main.image.bin'), 'rb') as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+        so = os.path.join(a.work, 'synth.balanced.so')
+        profile = os.path.join(a.work, 'synth.profile')
+        with open(profile, 'w') as f:
+            f.write(HOST_PROFILE.format(bid=synth_mod.BUILD_ID, sha=sha, pack=os.path.join(synth, 'main.aot.so'), hot=synth_mod.L['f_hot'], cut=synth_mod.L['f_cut']))
+        b = run([a.nxaot, 'build', os.path.join(synth, 'main.aot.tsv'), '--shared', so, '--profile', profile])
+        t = re.search(r'^aot: tiers C (\d+) W (\d+) H (\d+) H\+ (\d+)', b.stdout, re.M)
+        p = re.search(r'^aot: profile \S+: (\d+) samples at (\d+) offsets, (\d+) outside every function', b.stdout, re.M)
+        got = tuple(int(x) for x in t.groups()) if t else None
+        ok = b.returncode == 0 and got and got[0] >= 1 and got[1:] == (0, 2, 0) and p and (int(p.group(1)), int(p.group(2)), int(p.group(3))) == (405, 2, 0)
+        bad += not ok
+        print(f'{"synthetic module":<16} {"balanced":<9} tiers C W H H+ {got}  {"ok" if ok else "FAIL: " + (p.group(0) if p else (b.stdout + b.stderr).strip()[-300:])}'
+              '  (the host sampler\'s profile)')
     # A malformed line stops the build, naming it
     broken = os.path.join(a.work, 'broken.profile')
     with open(broken, 'w') as f:
@@ -100,7 +139,7 @@ def main():
     ok = b.returncode != 0 and 'broken.profile:2:' in b.stdout
     bad += not ok
     print(f'a malformed profile: exit {b.returncode}, {"names line 2" if ok else "FAIL"}')
-    print(f'tiers by profile: {len(nros)} NROs x 2 modes and a malformed profile, {bad} failures')
+    print(f'tiers by profile: {len(nros)} NROs x 2 modes, the host sampler\'s profile of the synthetic module and a malformed profile, {bad} failures')
     return 1 if bad else 0
 
 

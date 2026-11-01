@@ -14,6 +14,8 @@
 // instead of the SDK start: for a module without the SDK (t_host_program's synthetic module, homebrew). It is a switch and not a guess from the missing SDK symbols, because a game's
 // module list that lacks its sdk module would otherwise run main's rtld entry as homebrew: without it a module set with no nnMain stops with a [RED] line that names the switch.
 // DM_VK_HEADLESS=1 keeps the Vulkan backend's frames off the window (dm/gfx/hostvk/vk_present.c).
+// The engine's sampler: DM_AOT_PROFILE=<folder> (DM_AOT_PROFILE_HZ) writes the profile of the run, <folder>/<module>.tsv, when the process exits (aot.h, "The sampler"); the packer reads it
+// from <NSP folder>/<id>-work/profile/ for the next packs (nxaot build --profile; docs/development.md). Linux only for now.
 #include "aot.h"
 #include "front.h"
 #include <stdatomic.h>
@@ -151,6 +153,7 @@ static void host_preload(int argc, char **argv) {
     { void guest_vk_set_arena(void *(*alloc)(size_t n), void (*release)(void *p, size_t n)); guest_vk_set_arena(dm_guest_alloc, dm_guest_free); }
 #endif
     crash_install();       // aot_fault.c: the engine's fault handlers, the alternate signal stack, DM_WATCH / DM_WATCH_STALL
+    dm_aot_profile_init(); // aot_profile.c: DM_AOT_PROFILE=<folder>, the sampler; at exit() (the game's end, the window closed; not SIGTERM's _exit) <folder>/<module>.tsv
     const char *race = getenv("DM_TEST_KEYRACE");
     if (race && *race) LOG("[RED] DM_TEST_KEYRACE tests Apple's TSD thread slots (loader.c tsd_check); the x86-64 engine keeps the thread registers in its state blocks: not run");
     { void dm_term_install(void); dm_term_install(); }   // SIGTERM / console close: the graceful exit (hle_lifecycle.c)

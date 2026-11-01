@@ -42,6 +42,7 @@ static dm_aot_thread *thread_make(int host) {
     pthread_mutex_unlock(&g_lock);
     atomic_fetch_add(&g_made, 1);
     t_self = t;
+    dm_aot_profile_thread_begin();       // aot_profile.c: this thread's sampling timer, when DM_AOT_PROFILE is set
     return t;
 }
 
@@ -84,6 +85,7 @@ void dm_aot_host_thread_active(int on) {
 // The block goes, and its guest stack (after the thread's guest code left; t is the calling thread's, which may be ending: a key destructor passes it)
 static void thread_free(dm_aot_thread *t) {
     if (t->depth) die("aot: a guest thread ended with guest code on its stack");
+    dm_aot_profile_thread_end();         // its sampling timer stops before the block goes (the handler reads the block)
     pthread_mutex_lock(&g_lock);
     for (dm_aot_thread **p = &g_threads; *p; p = &(*p)->next) if (*p == t) { *p = t->next; break; }
     g_live -= !t->host;   // a host thread's context counts only while it runs guest code (dm_aot_host_thread_active)

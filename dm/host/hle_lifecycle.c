@@ -11,6 +11,9 @@ void dm_host_shutdown(const char *why) {
     uint64_t t0 = now_ns(); LOG("received %s: graceful exit", why);
     plat_after_ms(1500, shutdown_late);
     hlecount_flush();                               // DM_HLECOUNT: _exit does not run atexit, write a copy here
+#if !DM_NATIVE_EXEC
+    { int dm_aot_profile_write(void); dm_aot_profile_write(); }   // DM_AOT_PROFILE (aot_profile.c): the sample profile too, for the same reason; nothing without the switch
+#endif
     dm_audio_suspend(1);
     dm_gfx_suspend(1);
     LOG("graceful exit done (%.3f s)", (now_ns() - t0) / 1e9);

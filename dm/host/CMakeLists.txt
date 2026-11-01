@@ -184,8 +184,9 @@ add_custom_command(OUTPUT ${HLE_THUNKS_C}
     COMMENT "host-call thunks from the HLE entries" VERBATIM)
 # The x86-64 execution engine (docs/design/aot-recompiler.md; dm/host/aot.h): the run time of a pack's recompiled code in the host. Its arena below 2^39, module
 # images and packs (aot_arena.c), what a pack imports and dm_guest_call (aot_run.c), guest threads (aot_thread.c), faults (aot_fault.c) and the floating-point
-# helpers (aot_fp.c). A pack's library resolves those imports against the executable that links them (ENABLE_EXPORTS)
-set(AOT_SRC aot_hostfn.c aot_arena.c aot_run.c aot_thread.c aot_fault.c aot_fp.c)
+# helpers (aot_fp.c), and the sampler that writes nxaot's profiles (aot_profile.c, DM_AOT_PROFILE). A pack's library resolves those imports against the executable that links them
+# (ENABLE_EXPORTS)
+set(AOT_SRC aot_hostfn.c aot_arena.c aot_run.c aot_thread.c aot_fault.c aot_fp.c aot_profile.c)
 add_library(nxhost STATIC ${NXHOST_SRC} ${AOT_SRC} ${HLE_THUNKS_C})
 add_dependencies(nxhost game_profile)
 target_compile_options(nxhost PRIVATE ${HOST_FLAGS})

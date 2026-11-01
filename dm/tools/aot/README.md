@@ -1413,14 +1413,21 @@ at tier H and the others at tier C; in the max mode at H+ and H. Without a profi
 
 Separated by spaces or a tab; an offset may repeat (the counts add up); a count of 0 does not make its function hot; an offset in no function
 is counted (`aot: profile <file>: <s> samples at <o> offsets, <x> outside every function`) and ignored; a malformed line stops the build with
-its file and line number. The host does not write this file yet (design 12's sampler, `dm/games/<id>/aot_profile/<build ID>.tsv` with
-function offsets, samples and instruction offsets, is to come; this format is its instruction-offset column). The counts only choose the tier:
+its file and line number. The x86-64 host writes this file: `DM_AOT_PROFILE=<folder>` (`dm/host/aot_profile.c`, Linux for now) samples
+every thread that runs guest code about 1,000 times per second of its CPU time (a CPU-time timer per thread and `SIGPROF`; the interrupted
+pc through the pack's function map, a host call or SVC counted for the guest function that made it) and at exit writes `<folder>/<module>.tsv`,
+one line per sampled function at its entry offset under `#` lines naming the module, its build ID, its image's SHA-256 and the pack; the NSP
+script passes `<NSP folder>/<id>-work/profile/<module>.tsv` to the module's next pack (docs/development.md, the x86 packing section;
+`--no-profile` ignores it). Design 12's form (`dm/games/<id>/aot_profile/<build ID>.tsv` with instruction offsets) is not what it writes:
+function entries are what the tiers need. CTest `t_aot_module` (dm/host) checks a written profile's hot function, and `profile` below builds
+the synthetic module with a profile in the host's form. The counts only choose the tier:
 LLVM's sample profile (the design's "the sample profile" of tier H) is not fed from them yet. A function's tier is part of its cache key;
 units are of one tier each. CTest `profile` ([tests/test_profile.py](tests/test_profile.py)): a profile written by hand for fnptr-gcc,
 fp-clang, except-gcc and switch-gcc (three functions sampled at their entries, last instructions and a second offset, a sample outside every
 function, a count of 0): the logged tiers are C n-3 and H 3 in the balanced mode, H n-3 and H+ 3 in the max mode (fnptr-gcc: `aot: tiers C 58
 W 0 H 3 H+ 0`), the profile line counts what the file holds, and every pack prints its expected output; a malformed profile stops the build
-naming its line.
+naming its line; and the synthetic game module of dm/tools/tests/aot_synth.py with a profile in the host sampler's form (its header lines,
+`synth_hot` and `synth_cut` at their entries) logs `aot: tiers C <n> W 0 H 2 H+ 0`.
 
 #### 6. ThinLTO import: not done
 
@@ -1491,7 +1498,7 @@ of it).
   about 140,000 instructions per second here, its summaries' fixed point and walks on one thread. The analysis cache removes it from a warm
   repack only.
 - **Code generation** is three quarters of the compile at tier W; what is left of the lowering's fat is small (above), so tier C for code the
-  profile never samples is the lever, and with it the host's sampler that writes the profiles.
+  profile never samples is the lever; the host's sampler now writes the profiles (`DM_AOT_PROFILE`, "Tiers by profile"), and no game has been profiled yet.
 - **The cache across game updates**: unchanged (the lowering writes module offsets into the code).
 - **One process per module**: unchanged.
 - **ThinLTO import, devirtualisation, function ordering, LLVM's sample profile at tier H**: open (5 and 6 above).

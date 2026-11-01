@@ -29,7 +29,11 @@
 // What this does not show: a real NSO or a real game (no game files here), a real observer's or the back-off's effect on a game
 //   t_aot_module [--module <dir>]
 //     the module's folder: --module, else <packs>/module with the packs of NXAOT_PACKS (the environment variable, else the CMake option); with none, a note and exit 0
-//   t_aot_module --run <dir>     one run (the child); --fault <dir>: the fault run
+//   the sampler (Linux; aot_profile.c, DM_AOT_PROFILE): a run of about 0.4 s in synth_hot (aot_synth.py's hot loop) and 0.04 s of guest calls of synth_cut from the host, with
+//     DM_AOT_PROFILE set: the profile the process writes at exit, <folder>/main.tsv, names the module, its build ID and its image's SHA-256, every line of it is
+//     `<offset> <samples>` as nxaot build --profile reads it, and synth_hot's entry has the most samples (more than half); the same run without the switch writes nothing,
+//     and the time per pass of synth_hot with and without it is the sampler's overhead on compiled code
+//   t_aot_module --run <dir>     one run (the child); --fault <dir>: the fault run; --profile <dir>: the sampler's run
 #include "../aot.h"
 #include "../aot_hostfn.h"
 #if NXHOST_JIT
@@ -69,7 +73,7 @@ enum { HIDDEN_PARAMETER = 6, HIDDEN_X0 = 7, HIDDEN_KEY = 0xA5A5 };   // aot_synt
 #define HIDDEN_WORD 0x91000800u                // aot_synth.py HIDDEN_WORD: add x0, x0, #2, the hidden function's observed first word
 
 // ---------- The child: one run ----------
-static int g_checks, g_fails, g_status = DM_AOT_USAGE, g_fault_run, g_jit_forced;   // g_jit_forced: DM_AOT_JIT_ALL is set (the parent's runs 5 and 6)
+static int g_checks, g_fails, g_status = DM_AOT_USAGE, g_fault_run, g_jit_forced, g_profile_run;   // g_jit_forced: DM_AOT_JIT_ALL is set (the parent's runs 5 and 6)
 static const char *g_dir;
 static void check(int ok, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -150,6 +154,33 @@ static dm_jit_counts jit_counts(void) {
 }
 #endif
 
+// The sampler's run (DM_AOT_PROFILE set by the parent, or not): synth_hot called from the host with 2^22 passes until 0.4 s have gone (its sums checked), then synth_cut
+// for 0.04 s; the profile is written at exit (child: exit, not _exit). The time per pass of synth_hot is printed for the overhead
+static void profile_run(module_t *m) {
+    uint8_t *f_hot = module_sym(m, "synth_hot"), *f_cut = module_sym(m, "synth_cut");
+    check(f_hot && f_cut, "the module's synth_hot and synth_cut");
+    if (!f_hot || !f_cut) return;
+    const char *want = getenv("DM_AOT_PROFILE");
+    check(dm_aot_profile_on() == (want && *want), "the sampler is %s (DM_AOT_PROFILE %s)", dm_aot_profile_on() ? "on" : "off", want && *want ? want : "unset");
+    dm_guest_state *st = dm_aot_main_begin();
+    const uint64_t n = 1u << 22;
+    uint64_t calls = 0;
+    int sums = 1;
+    const uint64_t t0 = plat_now_ns();
+    while (plat_now_ns() - t0 < 400000000ull) {
+        sums &= dm_guest_call(st, (uint64_t)(uintptr_t)f_hot, 1, n) == n * (n + 1) / 2;
+        calls++;
+    }
+    const double per_pass = (double)(plat_now_ns() - t0) / ((double)calls * (double)n);
+    uint64_t cuts = 0;
+    const uint64_t t1 = plat_now_ns();
+    while (plat_now_ns() - t1 < 40000000ull) for (int i = 0; i < 1000; i++, cuts++) dm_guest_call(st, (uint64_t)(uintptr_t)f_cut, 0);
+    printf("t_aot_profile: synth_hot at main+%#llx, synth_cut at main+%#llx: %llu calls of synth_hot (%llu passes each, %.4f ns per pass), %llu calls of synth_cut\n",
+           (unsigned long long)(f_hot - m->base), (unsigned long long)(f_cut - m->base), (unsigned long long)calls, (unsigned long long)n, per_pass, (unsigned long long)cuts);
+    check(sums && calls > 0, "synth_hot's sums (n (n + 1) / 2 for n = %llu, %llu calls)", (unsigned long long)n, (unsigned long long)calls);
+    g_status = DM_AOT_EXITED;
+}
+
 static void *guest_main(void *arg) {
     (void)arg;
     guest_thread_init();                             // thread.c: TLS block and thread-local region in the arena
@@ -157,6 +188,7 @@ static void *guest_main(void *arg) {
     const char *names[] = {"main"};
     load_modules(g_dir, names, 1);                   // dies with a [RED] line when the module or its pack is refused
     module_t *m = &g_mod[0];
+    if (g_profile_run) { profile_run(m); return NULL; }
     const uint64_t base = (uint64_t)(uintptr_t)m->base;
     uint64_t *got = module_sym(m, "synth_got"), *fnptr = module_sym(m, "synth_fnptr"), *results = module_sym(m, "results");
     uint8_t *f_obs = module_sym(m, "synth_observed"), *f_spin = module_sym(m, "synth_spin");
@@ -334,6 +366,7 @@ static int child(const char *dir) {
            "%llu spin gate calls\n", g_status, g_checks, g_fails, (unsigned long long)s.svcs, (unsigned long long)s.host_calls, (unsigned long long)s.misses,
            (unsigned long long)s.jit_addresses, (unsigned long long)s.obs_gates, (unsigned long long)s.spin_gates);
     fflush(NULL);
+    if (g_profile_run) exit(g_fails ? 1 : g_status);   // exit: the sampler's writer runs (atexit)
     _exit(g_fails ? 1 : g_status);
 }
 
@@ -430,6 +463,7 @@ static int tampered(const char *dir, const char *sub, int fix_manifest, char *ou
 int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--run")) return child(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--fault")) { g_fault_run = 1; return child(argv[2]); }
+    if (argc == 3 && !strcmp(argv[1], "--profile")) { g_profile_run = 1; return child(argv[2]); }
     char dir[1024] = "";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--module") && i + 1 < argc) snprintf(dir, sizeof dir, "%s", argv[++i]);
@@ -528,6 +562,57 @@ int main(int argc, char **argv) {
     free(r.out);
 #else
     puts("note: this build has no JIT fallback (NXHOST_JIT off): the JIT-forced run and fault are skipped");
+#endif
+    // 6. The sampler (DM_AOT_PROFILE, aot_profile.c): the profile run with the switch and without it
+#if defined(_WIN32)
+    puts("note: the sampler is Linux-only for now (aot_profile.c): the profile run is skipped");
+#else
+    {
+        const char *pdir = "t_aot_module.tmp/profile", *pfile = "t_aot_module.tmp/profile/main.tsv";
+        mkdir("t_aot_module.tmp", 0755);
+        remove(pfile);
+        set_env("DM_AOT_PROFILE", pdir);
+        run_child_mode(argv[0], "--profile", dir, &r);
+        set_env("DM_AOT_PROFILE", NULL);
+        fputs(r.out, stdout);
+        unsigned long long hot = 0, cut = 0, calls = 0, passes = 0;
+        double on_ns = 0, off_ns = 0;
+        const char *h = strstr(r.out, "t_aot_profile: synth_hot at main+");
+        if (h) sscanf(h, "t_aot_profile: synth_hot at main+%llx, synth_cut at main+%llx: %llu calls of synth_hot (%llu passes each, %lf ns per pass)", &hot, &cut, &calls, &passes, &on_ns);
+        size_t n = 0;
+        char *text = (char *)slurp(pfile, &n);
+        int rows = 0, bad_lines = 0, shown = 0, header = 0;
+        unsigned long long top = 0, top_n = 0, hot_n = 0, total = 0;
+        char want_head[160];
+        snprintf(want_head, sizeof want_head, "# module main, build ID %s, image SHA-256 ", BUILD_ID);
+        for (char *line = text, *next; line && *line; line = next) {
+            next = strchr(line, '\n');
+            if (next) *next++ = 0;
+            if (shown++ < 8) printf("      | %s\n", line);
+            if (line[0] == '#') { header += !strncmp(line, want_head, strlen(want_head)) && strlen(line) == strlen(want_head) + 64; continue; }
+            unsigned long long off = 0, cnt = 0; char extra = 0;
+            if (sscanf(line, "%llx %llu %c", &off, &cnt, &extra) != 2 || strncmp(line, "0x", 2)) { bad_lines++; continue; }
+            rows++; total += cnt;
+            if (cnt > top_n) { top_n = cnt; top = off; }
+            if (off == hot) hot_n = cnt;
+        }
+        printf("      %d functions sampled, %llu samples; the most at main+%#llx (%llu), synth_hot main+%#llx (%llu)\n", rows, total, top, top_n, hot, hot_n);
+        verdict(r.status == 0 && strstr(r.out, "check ok   synth_hot's sums") && text && header == 1 && !bad_lines && rows >= 1 && hot && top == hot && hot_n * 2 > total &&
+                    strstr(r.out, "aot: profile: t_aot_module.tmp/profile/main.tsv: "),
+                "the sampler (DM_AOT_PROFILE): the profile written at exit names the module, its build ID and image, every line is <offset> <samples>, and synth_hot has the most");
+        free(text);
+        free(r.out);
+        remove(pfile);
+        run_child_mode(argv[0], "--profile", dir, &r);
+        h = strstr(r.out, "t_aot_profile: synth_hot at main+");
+        if (h) sscanf(h, "t_aot_profile: synth_hot at main+%llx, synth_cut at main+%llx: %llu calls of synth_hot (%llu passes each, %lf ns per pass)", &hot, &cut, &calls, &passes, &off_ns);
+        FILE *none = fopen(pfile, "rb");
+        verdict(r.status == 0 && !none && strstr(r.out, "check ok   the sampler is off"), "without DM_AOT_PROFILE: the sampler is off and no profile is written");
+        if (none) fclose(none);
+        printf("t_aot_module: the sampler's cost on compiled code: synth_hot %.4f ns per pass with DM_AOT_PROFILE (1000 Hz), %.4f without (%+.2f %%)\n", on_ns, off_ns,
+               off_ns > 0 ? 100.0 * (on_ns - off_ns) / off_ns : 0.0);
+        free(r.out);
+    }
 #endif
     printf("t_aot_module: %d checks, %d failed\n", checks, fails);
     return fails != 0;

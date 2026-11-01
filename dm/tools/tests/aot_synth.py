@@ -76,6 +76,7 @@ def cbz_x(rt, t): return lambda pc, L: 0xB4000000 | ((L[t] - pc) >> 2 & 0x7FFFF)
 def cbnz_x(rt, t): return lambda pc, L: 0xB5000000 | ((L[t] - pc) >> 2 & 0x7FFFF) << 5 | rt
 def bne(t): return lambda pc, L: 0x54000001 | ((L[t] - pc) >> 2 & 0x7FFFF) << 5
 def cmp_x(rn, imm): return 0xF100001F | imm << 10 | rn << 5                          # cmp xn, #imm (subs xzr, xn, #imm)
+def subs_x(rd, rn, imm): return 0xF1000000 | imm << 10 | rn << 5 | rd               # subs xd, xn, #imm
 def eor_w(rd, rn, rm): return 0x4A000000 | rm << 16 | rn << 5 | rd                   # eor wd, wn, wm
 def adr(rd, t):
     def enc(pc, L):
@@ -153,11 +154,13 @@ def text_items():
         # the observation gate's function, the cut's and the frame step's
         ('f_obs', ADD_X0_1), (None, RET),
         ('f_cut', MOV_W0_1), (None, RET),
-        ('f_fs', MOV_W0_5), (None, RET), ('f_end', None),
+        ('f_fs', MOV_W0_5), (None, RET),
+        # a hot loop for the host's sampler (t_aot_module's profile run, DM_AOT_PROFILE): x0 + (x0 - 1) + ... + 1 for x0 > 0, a loop of x0 passes
+        ('f_hot', movz_x(1, 0)), ('f_hot_loop', add_xr(1, 1, 0)), (None, subs_x(0, 0, 1)), (None, bne('f_hot_loop')), (None, mov_x(0, 1)), (None, RET), ('f_end', None),
         ('f_hidden', HIDDEN_WORD), (None, RET),                                                                  # no FDE, no symbol: data to discovery
     ]
     functions = [('synth_start', 'start'), ('synth_jump_byte', 'f_j'), ('synth_jump_offset', 'f_t'), ('synth_window', 'f_window'),
-                 ('synth_spin', 'f_spin'), ('synth_observed', 'f_obs'), ('synth_cut', 'f_cut'), ('synth_frame_step', 'f_fs')]
+                 ('synth_spin', 'f_spin'), ('synth_observed', 'f_obs'), ('synth_cut', 'f_cut'), ('synth_frame_step', 'f_fs'), ('synth_hot', 'f_hot')]
     return t, functions
 
 

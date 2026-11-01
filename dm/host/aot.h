@@ -199,6 +199,9 @@ typedef struct dm_aot_thread {
     struct dm_aot_thread *next;        // the live threads (process stop)
     void *mem;                         // the allocation that holds this struct
     int host;                          // a host thread that is no guest thread, given a guest context by dm_gcall (counted live only while it runs guest code)
+    // Where the sampler (aot_profile.c, DM_AOT_PROFILE) puts a sample taken outside compiled code: 0 for guest code or the run time, DM_AOT_PROF_JIT inside the JIT fallback,
+    // else the guest address whose host code runs (a host call's return address, an SVC's instruction). Written by aot_run.c on this thread, read by its signal handler
+    volatile uint64_t prof_at;
 } dm_aot_thread;
 dm_aot_thread *dm_aot_self(void);          // the calling thread's, NULL when it never ran guest code
 dm_guest_state *dm_aot_thread_begin(void); // the calling thread's state block, made at its first call (x30 the host-return address, FPCR the packs')
@@ -342,6 +345,33 @@ DM_AOT_EXPORT void nxaot_rt_gate(dm_guest_state *st, uint64_t site);
 // The JIT fallback's stop kind at guest address pc (rt/jit.h stop_at: DM_JIT_ENTRY or DM_JIT_RETURN, or'ed with DM_JIT_GATE_AT at a manifest's gate row; only the gate under
 // DM_AOT_JIT_ALL), as its code reader asks once per translated instruction; 0 without NXHOST_JIT. For tests and measurements (t_aot_module times it)
 int dm_aot_jit_stop_at(uint64_t pc);
+
+// ---------- The sampler (aot_profile.c; dm/tools/aot/README.md, "Tiers by profile") ----------
+// DM_AOT_PROFILE=<folder> (docs/env_switches.tsv): every thread that runs guest code is sampled DM_AOT_PROFILE_HZ times (1000 by default) per second of its own CPU time, and at process
+// exit (atexit, or dm_aot_profile_write before it) <folder>/<module>.tsv is written for every module with samples: the profile `nxaot build --profile` reads (one module per file), one
+// line `<module offset of a function's entry> <samples>` per sampled function, most samples first, under '#' lines naming the module, its build ID, its image's SHA-256 and its pack.
+// A sample in a pack's code counts for the function the pack's function map gives (a split function's parts and a group's functions each map to their own entry); one in a host call
+// or an SVC for the guest function that made it (dm_aot_thread.prof_at); one in the JIT fallback or elsewhere in the host only in the totals. Linux: a CPU-time timer per thread
+// (timer_create, CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID) and a SIGPROF handler on the thread's alternate stack that reads the interrupted rip; the counts are per function and
+// pack (relaxed atomic adds), the totals per thread, nothing allocated or locked in the handler. Windows: not yet, a [RED] line when the switch is set
+#define DM_AOT_PROF_JIT 1
+void dm_aot_profile_init(void);            // the switches read, the handler installed and the writer registered with atexit; once (the first thread to run guest code makes it too)
+int dm_aot_profile_on(void);               // DM_AOT_PROFILE is set and the sampler runs
+void dm_aot_profile_thread_begin(void);    // aot_thread.c: the calling thread made its state block (its timer starts)
+void dm_aot_profile_thread_end(void);      // aot_thread.c: the calling thread's block goes (its timer stops; its totals are kept)
+int dm_aot_profile_write(void);            // the files now, sampling stopped (once: later calls and the atexit writer do nothing); 0 when written
+// The sampler's lookups (aot_arena.c): async-signal-safe (no lock, no allocation: a pack's tables are complete before it is published and never change)
+int dm_aot_pack_count(void);
+const dm_aot_pack *dm_aot_pack_at(int i);
+// The function of compiled code at host_pc, as its index in pack *pack's functions by module offset (dm_aot_pack_fn): >= 0; -1 when host_pc is in no pack's code; -2 in a pack's code
+// but in none of its functions (the tables' object: enter, jit_entry, the slow-path wrappers)
+long dm_aot_fn_of_code(uint64_t host_pc, int *pack);
+long dm_aot_fn_of_guest(uint64_t guest, int *pack);   // the function whose guest code [entry, entry + size) holds guest, as above; -1 when none
+size_t dm_aot_pack_fn_count(const dm_aot_pack *p);
+uint64_t dm_aot_pack_fn(const dm_aot_pack *p, size_t i);   // the module offset of the entry of its i-th function by module offset
+_Atomic uint64_t *dm_aot_pack_samples(const dm_aot_pack *p);   // the sampler's count per function (index as dm_aot_pack_fn), made at the load when DM_AOT_PROFILE is set; else NULL
+const module_t *dm_aot_pack_module(const dm_aot_pack *p);
+const char *dm_aot_pack_path(const dm_aot_pack *p);
 
 // ---------- Faults (aot_fault.c) ----------
 void crash_install(void);                  // the fault handlers (signals on POSIX, a vectored exception handler on Windows); once

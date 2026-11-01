@@ -518,6 +518,7 @@ void *dm_guest_fnptr_named(const void *fn, const char *name) { return fnptr(fn, 
 
 // ---------- Packs ----------
 typedef struct { uint64_t native; uint64_t off; } map_t;   // a native address and the module offset of its guest function or instruction
+typedef struct { uint64_t off, end; } fn_range_t;          // a guest function's module offsets: [entry, entry + its guest size)
 struct dm_aot_pack {
     void *lib;
     const nxaot_module_desc *desc;
@@ -527,6 +528,13 @@ struct dm_aot_pack {
     map_t *fns, *lines;              // sorted by native address
     size_t nfns, nlines;
     char name[16];
+    // The sampler's view (aot_profile.c): the functions by module offset with their guest ends, each native-sorted row's index among them, the code of the tables' object
+    // (enter, jit_entry, the slow-path wrappers) from tables_lo when it follows every function, the counts when DM_AOT_PROFILE is set, the library's path
+    fn_range_t *by_off;
+    uint32_t *fn_rank;               // parallel to fns
+    uint64_t tables_lo;
+    _Atomic uint64_t *samples;       // parallel to by_off; NULL without DM_AOT_PROFILE
+    char *path;
 };
 #define MAX_PACKS 4096   // FINAL FANTASY X/X-2 registers 1,432 NROs (services.md); one pack per module for now
 static dm_aot_pack *g_packs[MAX_PACKS];
@@ -536,6 +544,29 @@ static pthread_mutex_t g_pack_lock = PTHREAD_MUTEX_INITIALIZER;
 static int map_cmp(const void *a, const void *b) {
     uint64_t x = ((const map_t *)a)->native, y = ((const map_t *)b)->native;
     return x < y ? -1 : x > y;
+}
+static int range_cmp(const void *a, const void *b) {
+    uint64_t x = ((const fn_range_t *)a)->off, y = ((const fn_range_t *)b)->off;
+    return x < y ? -1 : x > y;
+}
+// The sampler's tables (aot.h, "The sampler"), made before the pack is published
+static void sampler_tables(dm_aot_pack *p, const char *path) {
+    const nxaot_module_desc *d = p->desc;
+    p->by_off = malloc((p->nfns ? p->nfns : 1) * sizeof *p->by_off);
+    p->fn_rank = malloc((p->nfns ? p->nfns : 1) * sizeof *p->fn_rank);
+    p->path = strdup(path);
+    if (!p->by_off || !p->fn_rank || !p->path) die("aot: no memory for a pack's tables");
+    for (size_t i = 0; i < p->nfns; i++) p->by_off[i] = (fn_range_t){d->fns[i].offset, d->fns[i].offset + d->fns[i].size};
+    qsort(p->by_off, p->nfns, sizeof *p->by_off, range_cmp);
+    for (size_t i = 0; i < p->nfns; i++) {   // each native-sorted row's function among them (one row per guest function, ABI 3)
+        size_t lo = 0, hi = p->nfns;
+        while (lo < hi) { size_t mid = lo + (hi - lo) / 2; if (p->by_off[mid].off < p->fns[i].off) lo = mid + 1; else hi = mid; }
+        p->fn_rank[i] = (uint32_t)lo;
+    }
+    const uint64_t enter = (uint64_t)(uintptr_t)d->enter, jit = (uint64_t)(uintptr_t)d->jit_entry;
+    p->tables_lo = enter < jit ? enter : jit;
+    const char *prof = getenv("DM_AOT_PROFILE");   // read here too: a test links the arena without the sampler
+    if (prof && *prof && !(p->samples = calloc(p->nfns ? p->nfns : 1, sizeof *p->samples))) die("aot: no memory for a pack's sample counts");
 }
 
 #if defined(_WIN32)
@@ -642,6 +673,7 @@ dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identi
     qsort(p->fns, p->nfns, sizeof *p->fns, map_cmp);
     qsort(p->lines, p->nlines, sizeof *p->lines, map_cmp);
     lib_code_range(p, &p->code_lo, &p->code_hi);
+    sampler_tables(p, path);
     pthread_mutex_lock(&g_pack_lock);
     int n = atomic_load_explicit(&g_npacks, memory_order_relaxed);
     if (n >= MAX_PACKS) die("aot: more than %d packs", MAX_PACKS);
@@ -778,3 +810,40 @@ int dm_aot_where(uint64_t host_pc, char *out, size_t n) {
     return 1;
 }
 
+// ---------- The sampler's lookups (aot.h, "The sampler"): async-signal-safe ----------
+int dm_aot_pack_count(void) { return atomic_load_explicit(&g_npacks, memory_order_acquire); }
+const dm_aot_pack *dm_aot_pack_at(int i) { return i >= 0 && i < dm_aot_pack_count() ? g_packs[i] : NULL; }
+size_t dm_aot_pack_fn_count(const dm_aot_pack *p) { return p->nfns; }
+uint64_t dm_aot_pack_fn(const dm_aot_pack *p, size_t i) { return p->by_off[i].off; }
+_Atomic uint64_t *dm_aot_pack_samples(const dm_aot_pack *p) { return p->samples; }
+const module_t *dm_aot_pack_module(const dm_aot_pack *p) { return p->mod; }
+const char *dm_aot_pack_path(const dm_aot_pack *p) { return p->path; }
+
+long dm_aot_fn_of_code(uint64_t host_pc, int *pack) {
+    const int n = atomic_load_explicit(&g_npacks, memory_order_acquire);
+    for (int i = 0; i < n; i++) {
+        const dm_aot_pack *p = g_packs[i];
+        if (host_pc < p->code_lo || host_pc >= p->code_hi) continue;
+        *pack = i;
+        // The last function body at or before host_pc: a split function's parts lie after its body (one section, nxaot's JoinParts), a group's functions each after their own
+        // body; code past the last body from the tables' object on is the run time's
+        const map_t *f = last_at(p->fns, p->nfns, host_pc);
+        if (!f || (host_pc >= p->tables_lo && f->native < p->tables_lo)) return -2;
+        return (long)p->fn_rank[f - p->fns];
+    }
+    return -1;
+}
+
+long dm_aot_fn_of_guest(uint64_t guest, int *pack) {
+    const int n = atomic_load_explicit(&g_npacks, memory_order_acquire);
+    for (int i = 0; i < n; i++) {
+        const dm_aot_pack *p = g_packs[i];
+        if (guest - p->base >= p->size) continue;
+        *pack = i;
+        const uint64_t off = guest - p->base;
+        size_t lo = 0, hi = p->nfns;   // the last function whose entry is at or before off
+        while (lo < hi) { size_t mid = lo + (hi - lo) / 2; if (p->by_off[mid].off <= off) lo = mid + 1; else hi = mid; }
+        return lo && off < p->by_off[lo - 1].end ? (long)(lo - 1) : -1;
+    }
+    return -1;
+}

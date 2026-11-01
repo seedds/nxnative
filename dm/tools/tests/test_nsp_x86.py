@@ -31,7 +31,7 @@ NXAOT ='''#!{py}
 import os, sys
 a = sys.argv[1:]
 usage = ('usage: nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--mode balanced|max]'
-         + ('' if os.environ.get('FAKE_NXAOT_OLD') else ' [--workers N] [--cache <dir>] [--target linux|windows]'))
+         + ('' if os.environ.get('FAKE_NXAOT_OLD') else ' [--workers N] [--cache <dir>] [--target linux|windows] [--profile <file>]'))
 if a[:1] != ['build'] or len(a) < 2: sys.stderr.write(usage + '\\n'); sys.exit(2)
 src, obj, so = a[1], a[a.index('-o') + 1], a[a.index('--shared') + 1]
 windows = '--target' in a and a[a.index('--target') + 1] == 'windows'
@@ -197,6 +197,35 @@ class Linux(Pack):
         self.pack('linux', '--pack-mode', 'max')
         self.assertEqual([c[c.index('--mode') + 1] for c in self.tools('nxaot')], ['max', 'max'])
 
+    def test_sample_profiles(self):   # <NSP folder>/<id>-work/profile/<module>.tsv (dm/host/aot_profile.c writes them): nxaot build --profile, part of the pack's key; --no-profile
+        self.pack()
+        sha = (self.aot / 'main.aot.tsv').read_text().split('\n', 1)[0].split('\t')[3]
+        prof = self.wdir / 'profile'; prof.mkdir(parents=True)
+        self.assertIn(f'\n# export DM_AOT_PROFILE={prof}\nexec ', (self.work / 'run.sh').read_text())   # run.sh shows how to record one
+        head = '# nxaot profile: guest functions sampled by the x86-64 engine (dm/host/aot_profile.c, DM_AOT_PROFILE); nxaot build --profile <this file>\n'
+        (prof / 'main.tsv').write_text(head + f'# module main, build ID {BID}, image SHA-256 {sha}\n# pack x\n# <module offset of a function\'s entry> <samples>\n0x100 40\n0x200 2\n')
+        (prof / 'nro0.tsv').write_text(head + f'# module nro0, build ID none, image SHA-256 {"00" * 32}\n0x10 5\n')   # recorded on another image: not used
+        self.pack()
+        tmp = self.work / 'tmp/aot'
+        self.assertEqual(self.tools('nxaot'), [   # main's key changed with its profile; nro0's did not
+            [str(self.nxaot), 'build', str(self.aot / 'main.aot.tsv'), '-o', str(tmp / 'main.o'), '--shared', str(tmp / 'main.aot.so'), '--mode', 'balanced', '--cache', str(self.wdir / 'aot-cache'),
+             '--profile', str(prof / 'main.tsv')]])
+        self.assertIn(f'main: sample profile {prof / "main.tsv"} (42 samples at 2 functions): those at tier H, the others at C', self.said)
+        self.assertTrue(any(m.startswith(f'the sample profile {prof / "nro0.tsv"} was recorded on another image of nro0') for m in self.said), self.said)
+        self.pack(); self.assertEqual(self.tools('nxaot'), [])   # reused while it is unchanged
+        self.pack('linux', '--pack-mode', 'max')
+        self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--profile', str(prof / 'main.tsv')], ['--cache', str(self.wdir / 'aot-cache')]])
+        self.assertIn(f'main: sample profile {prof / "main.tsv"} (42 samples at 2 functions): those at tier H+, the others at H', self.said)
+        self.pack('linux', '--no-profile', '--pack-mode', 'max')   # ignored: main packed again without it
+        self.assertEqual([Path(c[2]).name for c in self.tools('nxaot')], ['main.aot.tsv'])
+        self.assertEqual([c for c in self.tools('nxaot') if '--profile' in c], [])
+        self.assertIn(f'--no-profile: the sample profiles in {prof} are not used', self.said)
+        (prof / 'main.tsv').write_text('0x100 many\n')   # one that does not parse: packed without it, said
+        self.pack('linux', '--pack-mode', 'max'); self.assertEqual(self.tools('nxaot'), [])
+        self.assertTrue(any(m.startswith(f'[RED] the sample profile {prof / "main.tsv"} does not parse') for m in self.said), self.said)
+        with self.assertRaisesRegex(nsp.BuildError, '--no-profile make the packs'):
+            nsp.main(nsp.parse_args([str(self.nsp_dir), '-k', str(self.keys), '--platform', 'ios', '--no-profile']))
+
     def test_removed_module_and_nros_leave_no_stale_input(self):
         self.pack()
         (self.game / 'RomFS/.nrr/game.nrr').unlink()   # an update without NRRs
@@ -209,7 +238,7 @@ class Linux(Pack):
             self.pack('linux', '--aot-workers', '3')
         for c in self.tools('nxaot'): self.assertNotIn('--cache', c); self.assertNotIn('--workers', c)
         self.assertIn('this nxaot has no --cache option: every function is compiled again on each pack', self.said)
-        self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), {'--cache', '--workers', '--target'})
+        self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), {'--cache', '--workers', '--target', '--profile'})
         (self.aot / 'main.aot.so').unlink(); self.pack('linux', '--aot-workers', '3')
         self.assertEqual(self.tools('nxaot')[0][-4:], ['--cache', str(self.wdir / 'aot-cache'), '--workers', '3'])
 
@@ -297,6 +326,7 @@ class Windows(Pack):
         self.assertIn(f'\r\nif not defined NXHOST set "NXHOST={REPO / "build/win64/nxhost-run.exe"}"\r\n"%NXHOST%" "{self.aot}" %*\r\n', cmd)
         self.assertIn(f'\r\nset "DM_SAVE={self.wdir / "run/save"}"\r\n', cmd)
         self.assertIn('x86_64-w64-mingw32.cmake', cmd)
+        self.assertIn(f'\r\nrem set "DM_AOT_PROFILE={self.wdir / "profile"}"\r\n', cmd)
         # a second run reuses every step
         first = {p.name: p.read_bytes() for p in aot.iterdir() if p.is_file()}
         self.pack('windows')

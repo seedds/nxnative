@@ -38,10 +38,12 @@ static class P {
         bool image = Array.IndexOf(a, "--romfs-image") >= 0; a = Array.FindAll(a, s => s != "--romfs-image");
         g_allow = Array.IndexOf(a, "--allow-damaged") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged");
         if (a.Length == 3 && a[1] == "--title") return Title(ExternalKeyReader.ReadKeyFile(a[0]), a[2]);
-        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [--romfs-image]\n       nx_extract <prod.keys> --title <nsp|nsz|xci|xcz>"); return 2; }
+        if (a.Length == 3 && a[1] == "--contents") return Contents(ExternalKeyReader.ReadKeyFile(a[0]), a[2]);
+        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [<DLC title ID>] [--romfs-image]\n       nx_extract <prod.keys> --title <nsp|nsz|xci|xcz>\n       nx_extract <prod.keys> --contents <nsp|nsz|xci|xcz>"); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
-        if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image);
-        var basePkg = OpenNsp(ks, a[1], ContentMetaType.Application); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
+        if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image, a.Length > 4 ? Convert.ToUInt64(a[4], 16) : null);
+        // the update's NCAs only: a merged package (base game + update + DLC in one NSP) is given as both the base game and the update, and its base Program NCA has the update's title ID
+        var basePkg = OpenNsp(ks, a[1], ContentMetaType.Application); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2], ContentMetaType.Patch);
         Nca baseProg = Pick(basePkg, NcaContentType.Program) ?? throw new Exception("no Program NCA in the base NSP");
         Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, baseProg.Header.TitleId) ?? throw new Exception("no Program NCA of the base game's program in the update NSP");
         Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, baseProg.Header.TitleId);
@@ -95,6 +97,24 @@ static class P {
         return 0;
     }
 
+    // Every content meta of a package, one line each: "content <type> <title ID> <version>". A merged package (base game + update + DLC in one NSP, or a cartridge dump with its
+    // update) lists several; build_ipa_from_nsp.py then takes the one file as the base game, the update and the DLC
+    static int Contents(KeySet ks, string path) {
+        int n = 0;
+        foreach (Nca m in OpenNsp(ks, path)) {
+            if (m.Header.ContentType != NcaContentType.Meta) continue;
+            IFileSystem mfs = m.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+            foreach (DirectoryEntryEx e in mfs.EnumerateEntries("*.cnmt", SearchOptions.Default)) {
+                using var f = new UniqueRef<IFile>();
+                mfs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                var c = new Cnmt(f.Release().AsStream());
+                Console.WriteLine($"content {c.Type} {c.TitleId:x16} {c.TitleVersion.Version}"); n++;
+            }
+        }
+        if (n == 0) { Console.WriteLine($"[RED] no content meta in {Path.GetFileName(path)}"); return 5; }
+        return 0;
+    }
+
     static bool Sparse(Nca n) {
         for (int i = 0; i < 4; i++) if (n.Header.IsSectionEnabled(i) && n.Header.GetFsHeader(i).ExistsSparseLayer()) return true;
         return false;
@@ -113,9 +133,10 @@ static class P {
     }
 
     // DLC NSP: one data NCA (content type PublicData / Data) + a meta NCA + the ticket; only the data NCA's RomFS is written
-    static int Aoc(KeySet ks, string nsp, string outDir, bool image) {
-        var pkg = OpenNsp(ks, nsp);
-        Nca data = Pick(pkg, NcaContentType.PublicData) ?? Pick(pkg, NcaContentType.Data) ?? throw new Exception("no data NCA in the DLC NSP");
+    // id: the DLC's title ID, for a merged package that holds several add-on contents (and the base game)
+    static int Aoc(KeySet ks, string nsp, string outDir, bool image, ulong? id = null) {
+        var pkg = OpenNsp(ks, nsp);   // every NCA: Pick takes the DLC's own data NCA by its title ID
+        Nca data = Pick(pkg, NcaContentType.PublicData, id) ?? Pick(pkg, NcaContentType.Data, id) ?? throw new Exception(id == null ? "no data NCA in the DLC NSP" : $"no data NCA of add-on content {id:x16} in {Path.GetFileName(nsp)}");
         Console.WriteLine($"add-on content {data.Header.TitleId:x16}");
         Directory.CreateDirectory(image ? Path.GetDirectoryName(outDir) : outDir);
         var fs = new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid));
@@ -166,7 +187,7 @@ static class P {
             Console.WriteLine($"[RED] no NCA of {Path.GetFileName(path)} matches its {only} content meta by name (renamed NCA files?); reading all {ncas.Count}");
             return ncas;
         }
-        if (other > 0) Console.WriteLine($"leaving out {other} NCAs of {Path.GetFileName(path)} that its {only} content meta does not list (an update on the cartridge)");
+        if (other > 0) Console.WriteLine($"leaving out {other} NCAs of {Path.GetFileName(path)} that its {only} content meta does not list (another title in the package: an update on the cartridge, or a merged NSP)");
         return kept;
     }
     // A multi-program application has a Program and a Control NCA per program index (ROMANCE OF THE THREE KINGDOMS 8 REMAKE: its update 1.1.3 adds a whole second program,

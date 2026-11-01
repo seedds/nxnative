@@ -428,6 +428,27 @@ def pfs0_names(path):   # NSP = PFS0: list the file names inside
     return [strs[o:strs.index(b'\0', o)].decode(errors='replace') for o in (struct.unpack_from('<I', ent, i * 0x18 + 0x10)[0] for i in range(n))]
 
 
+def hfs0_names(f, off):   # an XCI's HFS0 partition at off: [(name, offset of its data from the file's start)]
+    f.seek(off); h = f.read(16)
+    if h[:4] != b'HFS0': return []
+    n, st = struct.unpack_from('<II', h, 4)
+    ent, strs = f.read(n * 0x40), f.read(st); data = off + 16 + n * 0x40 + st
+    return [(strs[no:strs.index(b'\0', no)].decode(errors='replace'), data + o) for o, no in (struct.unpack_from('<Q8xI', ent, i * 0x40) for i in range(n))]
+
+
+def package_names(path):   # the file names inside a package: an NSP's PFS0, or an XCI's secure partition (the NCAs nx_extract reads)
+    with open(path, 'rb') as f:
+        h = f.read(0x140)
+        if h[0x100:0x104] != b'HEAD': return pfs0_names(path)
+        secure = dict(hfs0_names(f, struct.unpack_from('<Q', h, 0x130)[0])).get('secure')
+        return [n for n, _ in hfs0_names(f, secure)] if secure else []
+
+
+def is_merged(path):   # several content metas in one package: base game + update (+ DLC) in one NSP, or a cartridge dump with its update (1G+1U)
+    try: return sum(n.lower().endswith('.cnmt.nca') for n in package_names(path)) > 1
+    except (OSError, ValueError, struct.error): return False
+
+
 def is_package(path):   # what nx_extract's OpenNsp opens: an XCI / XCZ by the card header's magic at 0x100, else a PFS0 (NSP, NSZ)
     with open(path, 'rb') as f: h = f.read(0x104)
     return h[:4] == b'PFS0' or h[0x100:] == b'HEAD'
@@ -456,6 +477,16 @@ def package_title_reader(repo, keys, env):
             except BuildError: return None
             m = re.search(r'^title ([0-9a-f]{16})$', log.read_text(errors='replace'), re.M)
             return int(m.group(1), 16) if m else None
+        def contents(path):   # a merged package's content metas: [(type, title ID, version)] (`nx_extract <keys> --contents <package>`), None when they cannot be read
+            if not nx:
+                if not shutil.which('dotnet', path=env.get('PATH')): raise BuildError(f'{path.name} holds several titles (base game, update, DLC in one file): reading them needs dotnet (.NET SDK 10)')
+                nx.append(build_nx_extract(repo, work, work / 'logs', env))
+            log = work / 'logs/contents.log'
+            try: run([nx[0], keys, '--contents', path], log, env=env, ok=(5,))
+            except BuildError: return None
+            out = [(t, int(i, 16), int(v)) for t, i, v in re.findall(r'^content (\w+) ([0-9a-f]{16}) (\d+)$', log.read_text(errors='replace'), re.M)]
+            return out or None
+        read.contents = contents
         yield read
 
 
@@ -467,10 +498,19 @@ def version_of(path):
 COMPRESSED = {'.nsz': '.nsp', '.xcz': '.xci'}   # nsz's compressed NSP / XCI and what nsz -D makes of them
 
 
-def scan_nsps(nsp_dir, from_package=None):
+def scan_nsps(nsp_dir, from_package=None, contents_of=None):
     """Group by game: {application title ID: {'base': path, 'updates': [(version, path)], 'dlc': [(title ID, version, path)]}}. An NSZ / XCZ is listed as it is (its ticket names
-    the title as an NSP's does) and converted afterwards (decompress_nsz). A package with neither is asked for its title ID: from_package(path) (package_title_reader)"""
+    the title as an NSP's does) and converted afterwards (decompress_nsz). A package with neither is asked for its title ID: from_package(path) (package_title_reader).
+    A merged package (several content metas: base game + update + DLC in one NSP) is asked for its contents, contents_of(path) -> [(type, title ID, version)], and the one file
+    counts as each of them: nx_extract takes the base game's, the update's or a DLC's NCAs from it by content meta type"""
     fams, unknown = {}, []
+    def add(p, tid, version):
+        low = tid & 0xFFF   # base …000, update …800, DLC = base + 0x1000 + index
+        app = tid if low == 0 else tid & ~0xFFF if low == 0x800 else (tid & ~0xFFF) - 0x1000
+        f = fams.setdefault(app, {'base': None, 'updates': [], 'dlc': []})
+        if low == 0: f['base'] = p
+        elif low == 0x800: f['updates'].append((version, p))
+        else: f['dlc'].append((tid, version, p))
     for p in sorted([*nsp_dir.glob('*.nsp'), *nsp_dir.glob('*.xci'), *nsp_dir.glob('*.nsz'), *nsp_dir.glob('*.xcz')]):   # a base game may be a cartridge dump (.xci: Monster Hunter Rise); nx_extract reads its secure partition
         if p.name.startswith('._'): continue   # an AppleDouble file: on an exFAT / FAT drive macOS keeps a file's extended attributes (a download's quarantine flag) in `._<name>`, one beside each game file; is_package would skip it too, with a line for each
         if p.stat().st_size == 0:   # an empty file left by an incomplete download (the Zelda BotW folder holds a 0-byte DLC NSP next to the complete (1).nsp)
@@ -479,14 +519,13 @@ def scan_nsps(nsp_dir, from_package=None):
             say(f'skipping {p.name}: neither an NSP (PFS0) nor an XCI (HEAD at 0x100)'); continue
         if p.suffix in COMPRESSED and p.with_suffix(COMPRESSED[p.suffix]).exists():
             say(f'skipping {p.name}: {p.with_suffix(COMPRESSED[p.suffix]).name} is beside it'); continue
+        if contents_of and is_merged(p) and (cs := [(t, i, v) for t, i, v in contents_of(p) or () if t in ('Application', 'Patch', 'AddOnContent')]):
+            say(f'{p.name} holds several titles: ' + ', '.join(f'{"base game" if t == "Application" else "update" if t == "Patch" else "DLC"} {i:016X} v{v}' for t, i, v in cs))
+            for t, i, v in cs: add(p, i, v if t != 'Application' else None)
+            continue
         tid = title_of(p, from_package)
         if tid is None: unknown.append(p); continue
-        low = tid & 0xFFF   # base …000, update …800, DLC = base + 0x1000 + index
-        app = tid if low == 0 else tid & ~0xFFF if low == 0x800 else (tid & ~0xFFF) - 0x1000
-        f = fams.setdefault(app, {'base': None, 'updates': [], 'dlc': []})
-        if low == 0: f['base'] = p
-        elif low == 0x800: f['updates'].append((version_of(p), p))
-        else: f['dlc'].append((tid, version_of(p), p))
+        add(p, tid, version_of(p))
     if len(fams) == 1 and len(unknown) == 1 and next(iter(fams.values()))['base'] is None:   # a base game converted from a cartridge may have neither tags nor a ticket; build IDs are checked afterwards
         next(iter(fams.values()))['base'] = unknown[0]
     if not fams: raise BuildError(f'no NSP with a readable title ID in {nsp_dir}')
@@ -527,7 +566,7 @@ def decompress_nsz(nsp_dir, app, fam, keys, env, work=None):
     and the file is moved into nsp/ only when nsz exits 0, so a partial one is never taken for a whole one; a conversion is reused while its source has the same name, size and
     modification time. nsz -D prints an NCA hash mismatch but goes on and exits 0: nx_extract's hash check catches a damaged file (ALLOW_DAMAGED)"""
     paths = [fam['base']] + [p for _, p in fam['updates']] + [p for _, _, p in fam['dlc']]
-    todo = [p for p in paths if p.suffix in COMPRESSED]
+    todo = list(dict.fromkeys(p for p in paths if p.suffix in COMPRESSED))   # a merged package is the base game, the update and DLC: converted once
     if not todo: return fam
     nsz, keys_opt = nsz_command(env), []
     if nsz[0] != sys.executable: keys_opt = ['--keys', keys.resolve()]   # a standalone nsz looks for keys beside itself, not in cwd: it takes them by --keys (nsz_command)
@@ -587,7 +626,7 @@ def extract_bytes(picks, clones):
     """What the extraction writes, estimated from the NSPs' sizes. Later versions clone the base game's RomFS when the base is extracted alone (v0) and the volume supports clones:
     then each NSP counts once (by path: two NSPs can have the same size). Otherwise every version is a full copy of the base game with its update"""
     if clones and any(u is None for _, u in picks.values()): return sum(p.stat().st_size for p in {p for b, u in picks.values() for p in (b, u) if p})
-    return sum(b.stat().st_size + (u.stat().st_size if u else 0) for b, u in picks.values())
+    return sum(b.stat().st_size + (u.stat().st_size if u and u != b else 0) for b, u in picks.values())   # a merged package is both: counted once
 
 
 def can_clone(d):   # whether this volume supports APFS clones (nx_extract uses them to save space; without them it writes full copies)
@@ -1014,7 +1053,7 @@ def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g):   # the build IDs 
     last = extracted(log)   # the last extraction of this version (its log is about to be overwritten) has the exact size; without one, the NSPs' size is the estimate
     def poll():
         n, b = tree_size(tmp); return {'done': b, 'note': f'{n:,} files'}
-    PROG.stage(f'extract {name}', poll=poll, unit='B', total=last[1] if last else base.stat().st_size + (upd.stat().st_size if upd else 0), est=not last)
+    PROG.stage(f'extract {name}', poll=poll, unit='B', total=last[1] if last else base.stat().st_size + (upd.stat().st_size if upd and upd != base else 0), est=not last)
     run([nx, keys, base, upd or '-', tmp, '--romfs-image'] + (['--allow-damaged'] if ALLOW_DAMAGED else []), log)
     swap_in(tmp, dst)
     n, b = extracted(log) or (0, 0)
@@ -1041,7 +1080,7 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
         idx = tid - app - 0x1000
         PROG.set(step='extracting', done=i, total=len(best), unit='DLC')
         say(f'DLC index {idx}: {p.name}')
-        run([nx, keys, '--aoc', p, tmp / f'{idx}.img', '--romfs-image'], logs / f'aoc_{idx}.log')
+        run([nx, keys, '--aoc', p, tmp / f'{idx}.img', '--romfs-image'] + ([f'{tid:016x}'] if is_merged(p) else []), logs / f'aoc_{idx}.log')   # a merged package: name the DLC
     swap_in(tmp, dst)
     kf.write_text(f'{key}\n{len(best)} DLC\n')
     PROG.end(f'{len(best)} DLC')
@@ -2316,7 +2355,7 @@ def main(args=None):
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable
-    with package_title_reader(repo, keys, env) as from_package: app, fam = scan_nsps(nsp_dir, from_package)
+    with package_title_reader(repo, keys, env) as from_package: app, fam = scan_nsps(nsp_dir, from_package, from_package.contents)
     fam = decompress_nsz(nsp_dir, app, fam, keys, env, work_dir(args))
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
     g, provisional, shadowed = None if force else gamemod.by_title(app), False, False

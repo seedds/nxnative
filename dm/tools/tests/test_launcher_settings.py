@@ -82,12 +82,12 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
     def test_defaults_follow_each_platform_host(self):
-        # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.
-        for gid, ios_pso in ((BOTW, '1'), (WONDER, '0')):
+        # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac the profile's enc_thread (Breath of the Wild on, Wonder off).
+        for gid, ios_pso, mac_enc in ((BOTW, '1', '1'), (WONDER, '0', '0')):
             with self.subTest(game=gid):
                 ios, mac = build(gid, 'nvn', 'ios'), build(gid, 'nvn', 'mac')
                 self.assertEqual((ios['DM_PSO_MTL4']['default'], ios['DM_NVN_ENC_THREAD']['default']), (ios_pso, '1'))
-                self.assertEqual((mac['DM_PSO_MTL4']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', '0'))
+                self.assertEqual((mac['DM_PSO_MTL4']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', mac_enc))
 
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):

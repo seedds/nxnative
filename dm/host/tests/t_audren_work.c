@@ -14,12 +14,13 @@ static int work_alloc(void **out, size_t align, size_t size) {
     return r;
 }
 static void work_free(void *p) {
-    if (p) { assert(p == backing); backing = NULL; backing_size = 0; frees++; }
+    if (p == backing && p) { backing = NULL; backing_size = 0; frees++; }   // Close also frees the renderer's own struct (ar_t), which is not the work buffer
     free(p);
 }
 #define posix_memalign work_alloc
 #define free work_free
 #include "../hle_audren.c"
+static ar_t *the_ar(void) { ar_t *r = NULL; for (int i = 0; i < AR_MAX; i++) if (g_ars[i]) r = g_ars[i]; return r; }   // the one renderer a test opens
 #undef posix_memalign
 #undef free
 
@@ -84,7 +85,7 @@ void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stac
     (void)fn; (void)arg; (void)prio; (void)stack; starts++; return (void *)1;
 }
 void dm_guest_thread_join(void *tt) {
-    assert(tt == (void *)1 && !atomic_load(&g_open));
+    assert(tt == (void *)1 && the_ar() && !atomic_load(&the_ar()->open));
     assert(((uint8_t *)sdk_work)[SDK_WORK - 1] == 0x5a);   // storage also survives the render thread
     joins++;
 }
@@ -148,7 +149,7 @@ int main(void) {
         assert(!memcmp(param, saved, sizeof param));
         if (route) {
             assert((uint8_t *)sdk_event >= (uint8_t *)g_rev && (uint8_t *)sdk_event < (uint8_t *)(g_rev + 4));
-            assert(g_handle[1] == (event_in_handle ? sdk_event : (uint8_t *)sdk_work + 0x80));
+            assert(the_ar()->handle[1] == (event_in_handle ? sdk_event : (uint8_t *)sdk_work + 0x80));
             memset(event, 0xee, sizeof event);   // the game may reuse its object at once (LEGO Star Wars: on its stack; Little Nightmares): nothing refers to it
         }
         int d = event_destroys;

@@ -624,6 +624,9 @@ static int show(snap_t *s) {
             for (uint32_t i = 0; i < k; i++) ring_put(pt[i].presentID, (double)pt[i].actualPresentTime / 1e9);
             pthread_mutex_unlock(&g_mu);
             anchor(pt[k - 1].actualPresentTime, 2);
+#else   // open: no Windows driver documents the time base of actualPresentTime (plat_now_ns is QueryPerformanceCounter's), so the times are not used
+            HVK_RED_ONCE("window presenter: VK_GOOGLE_display_timing's present times have no known time base on Windows: not used, so the vsync clock is not phase-locked to the "
+                         "screen (it runs free at 60 Hz) and presented frames have no times");
 #endif
         }
     }

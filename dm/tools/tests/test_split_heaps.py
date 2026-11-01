@@ -33,6 +33,7 @@ class HeapsPak(unittest.TestCase):
             data = b'firstsecond!'
             d = pak(folder('', [file_entry('a.png', 0, 5), folder('sub', [file_entry('shaders.cache.nx', 5, 7, wide=True)])]), data, version)
             got = ss.heaps_pak_files(io.BytesIO(d))
+            assert got is not None, 'a Heaps archive was not read as one'
             self.assertEqual([(n, s) for n, _, s in got], [('/a.png', 5), ('/sub/shaders.cache.nx', 7)])
             self.assertEqual(d[got[1][1]:got[1][1] + got[1][2]], b'second!')
 

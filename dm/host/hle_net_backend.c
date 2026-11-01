@@ -570,8 +570,7 @@ static int net_getaddrinfo(const char *host, const char *service, const void *hi
     if (input.flags & 1) h.ai_flags |= AI_PASSIVE; if (input.flags & 2) h.ai_flags |= AI_CANONNAME;
     if (input.flags & 4) h.ai_flags |= AI_NUMERICHOST; if (input.flags & 8) h.ai_flags |= AI_NUMERICSERV;
     if (input.flags & 1024) h.ai_flags |= AI_ADDRCONFIG;
-    const char *lookup = host;
-    dm_guest_host_wait_begin(); int code = getaddrinfo(lookup, service, &h, &native), err = errno; dm_guest_host_wait_end();
+    dm_guest_host_wait_begin(); int code = getaddrinfo(host, service, &h, &native), err = errno; dm_guest_host_wait_end();
     if (code) { if (code == EAI_SYSTEM) net_error(net_errno(err)); return net_gai_error(code); }
     net_ai_allocation *allocation = calloc(1, sizeof *allocation);
     if (!allocation) { freeaddrinfo(native); return 6; }
@@ -582,7 +581,7 @@ static int net_getaddrinfo(const char *host, const char *service, const void *hi
     dm_net_addrinfo *first = NULL, **tail = &first;
     for (struct addrinfo *p = native; p; p = p->ai_next) {
         if (p->ai_family != AF_INET || p->ai_addrlen < sizeof(struct sockaddr_in)) continue;
-        const char *canonical = lookup != host && (input.flags & 2) ? host : p->ai_canonname;
+        const char *canonical = p->ai_canonname;
         size_t name_size = canonical ? strlen(canonical) + 1 : 0;
         dm_net_addrinfo *node = calloc(1, sizeof *node + sizeof(nx_addr) + name_size);
         if (!node) { net_ai_destroy(allocation); freeaddrinfo(native); return 6; }

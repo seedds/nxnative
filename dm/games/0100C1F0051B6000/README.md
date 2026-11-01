@@ -33,6 +33,7 @@ No rendering key: the title logo and menu panels that needed `tex_flush_upload` 
 
 ## Audio and services
 
+- **Resolved: audio crackle through play, no underruns** (GitHub issue #676). The main thread updates the renderer once per video frame beside the audio thread, and the host rendered an early frame for each: [A second update inside one frame is not a missing frame](../../../docs/reference/audio.md#a-second-update-inside-one-frame-is-not-a-missing-frame).
 - **Resolved: the frame loop stopped for good after the last menu (Continue), with audio still running.** The main thread waited in `CAudioMemoryPool::Shutdown` (`main+0x6fa8c`, detaching the menu's audio pool as the first level loads) on the renderer event, which the sound thread (`main+0x971e8`, priority 29) also waits on every frame; the host's CPU renderer made that event a local one, which wakes only the higher-priority thread: [The renderer event as the service gives it: a kernel event](../../../docs/reference/audio.md#the-renderer-event-as-the-service-gives-it-a-kernel-event).
 - **Resolved: SIGSEGV at `sdk+0x15b73c`** as the intro cinematic starts: `oe::GetUserInactivityDetectionTimeExtensionMode`, called from `CScreenDimmingUtil::DisableScreenDimming` (`main+0x647d0`) whenever a cinematic camera starts: [oe calls answered without an applet proxy](../../../docs/reference/services.md#oe-calls-answered-without-an-applet-proxy).
 

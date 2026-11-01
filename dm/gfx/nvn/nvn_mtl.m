@@ -1635,7 +1635,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[150];
+static int g_red_once[151];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -2729,6 +2729,7 @@ static void sp_sync(NvPkg *pk, const tex_t *t, int all) {
     nvn_sparse_tile_state(t->pool, mem, s->size, 0x10000, pk->vgen, pk->stamp, st);
     if (all) { memset(s->up, 0, s->ngt); memset(s->lup, 0, (size_t)s->slices * s->levels); }
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
+    if (!bpb) { RED_ONCE(150, "placement sparse texture format %#x has no block size: its tiles are not synced (ser=%llu)", d->format, (unsigned long long)t->serial); free(st); return; }
     uint64_t loff[17]; for (uint32_t l = 0; l < s->levels; l++) loff[l] = nvn_tex_level_offset(d, l); loff[s->levels] = s->layer_size;
     // 1. the Metal units the guest's mappings want
     uint8_t *want = calloc(s->nunit, 1); if (!want) MDIE("sparse texture plan allocation failed");
@@ -10403,7 +10404,7 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(void) {
 static id<MTLBuffer> g_tgm_buf;
 static uint64_t tgm_gpu(NvShader *cs, uint64_t groups) {
     uint64_t have = g_tgm_buf ? g_tgm_buf.length - DMSH_TGMEM_HEAD : 0, need = groups * cs->rf.tgmem;
-    if (g_tgm_buf && ((volatile uint32_t *)g_tgm_buf.contents)[1]) {
+    if (g_tgm_buf && atomic_load_explicit((_Atomic uint32_t *)g_tgm_buf.contents + 1, memory_order_relaxed)) {
         RED_ONCE(146, "shared memory in a device buffer: a threadgroup of an indirect dispatch lay past the bound of %llu bytes (shader %s or an earlier one); the buffer doubles", (unsigned long long)have, cs->key);
         need = MAX(need, have * 2);
     }

@@ -1,5 +1,6 @@
 # The games gallery in README.md, in the order it shows them (dm/tools/docs_gallery.py writes it from this table). A new game: its screenshot in docs/images and a row here,
-# usually at the end. Columns: image, name (caption and alt text), note (a remark, such as "60 fps with 1.0.1", or empty), and the title ID that links the name to its note.
+# usually at the end (Switch 2 games go first). Columns: image, name (caption and alt text), note (a remark, such as "60 fps with 1.0.1", or empty), and the title ID that links the name to its note.
+donkey-kong-bananza.jpg	Donkey Kong Bananza	Switch 2, Mac only, from a dump	040074A01BF12000
 mario-kart-8-deluxe.jpg	Mario Kart 8 Deluxe	no Mii heads	0100152000022000
 mario-vs-donkey-kong.jpg	Mario vs. Donkey Kong		0100B99019412000
 paper-mario-the-thousand-year-door.jpg	Paper Mario: The Thousand-Year Door	60 fps with 1.0.1	0100ECD018EBE000
@@ -117,4 +118,3 @@ hyrule-warriors-definitive-edition.jpg	Hyrule Warriors: Definitive Edition		0100
 metroid-prime-remastered.jpg	Metroid Prime Remastered		010012101468C000
 dragon-quest-i-ii-hd-2d-remake.jpg	DRAGON QUEST I & II HD-2D Remake		0100D7C01F254000
 dead-cells.jpg	Dead Cells		0100646009FBE000
-donkey-kong-bananza.jpg	Donkey Kong Bananza	Switch 2, Mac only, from a dump	040074A01BF12000

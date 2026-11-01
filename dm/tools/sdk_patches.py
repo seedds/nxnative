@@ -6,6 +6,14 @@ CUTS = {
   # Snowdrop's compact 3 GB region follows its small metadata reservation;
   # 1 GB placement alignment still cannot fit it in the iPhone guest block.
   # Platform-limit cuts: 64 MB node area and 32 MB large-region alignment.
+  # South Park: The Fractured But Whole 1.05, SDK 3.5.1: the same older VammManager as Kingdom Battle's SDK 4.4.0 (constructor +0x8cc3c, occupied
+  # range +0x8ccf4, AllocateAddressRegion's alignment choice +0x8ce38), each instruction 0x1e4 / 0x1e8 bytes apart as there. Snowdrop's region,
+  # cut to 3 GB in the game's patches.py, needs room after the node area and 32 MB alignment, as on Kingdom Battle.
+  '8bb65519bc6399ab432e0ba7cdb16e2b': [
+    (0x8cc60, 'e9030232', '0980a052', 'VammManager node area limit: 1 GB to 64 MB'),
+    (0x8ccf4, 'ea030232', '0a80a052', 'VammManager occupied node area: 1 GB to 64 MB'),
+    (0x8ce48, 'ea030232', '0a40a052', 'AllocateAddressRegion: align regions of 1 GB and more to 32 MB'),
+  ],
   '9de92bad67c4150268943ab4843ace65': [
     (0x93dfc, 'e9030232', '0980a052', 'VammManager node area limit: 1 GB to 64 MB'),
     (0x93e8c, 'ea030232', '0a80a052', 'VammManager occupied node area: 1 GB to 64 MB'),

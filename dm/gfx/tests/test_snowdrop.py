@@ -34,6 +34,17 @@ def archive(*records):
     return b'BERG' + struct.pack('<I', 22) + bytes(48) + b''.join(records)
 
 
+def cache(raw, kind=0x13c):   # a bare .mcache file (South Park: The Fractured But Whole): its 0xabcd00d4 head, then the body
+    return struct.pack('<5I', 0xabcd00d4, kind, 0, len(raw), len(raw)) + raw
+
+
+def zlib_blocks(data, wbits=10):   # as the SDF data slices store a file: one zlib stream per 64 KB, a small window (zlib header 0x28 0x15)
+    out = b''
+    for i in range(0, len(data), 0x10000):
+        c = zlib.compressobj(9, zlib.DEFLATED, wbits); out += c.compress(data[i:i + 0x10000]) + c.flush()
+    return out
+
+
 class SnowdropTests(unittest.TestCase):
     def test_zlib_records_and_headerless_compute(self):
         ctl, code = map(bytearray, shader('cs'))
@@ -127,6 +138,23 @@ class SnowdropTests(unittest.TestCase):
             self.assertIn('shaders: 1', result.stdout)
             self.assertIn('/aoc/7/content#SNOWDROP@', outputs[1].read_text())
 
+
+    def test_bare_zlib_cache_files(self):
+        # Older SDF slices keep each .mcache as a bare zlib stream with no c5 / c6 record header: one small, one over 64 KB (two streams), and other assets
+        # (a zlib stream that is not a cache, uncompressed bytes) between them
+        small = cache(b'reflection\0' + b''.join(shader('vs')))
+        big = cache(random.Random(1).randbytes(0x12000) + b''.join(shader('ps')) + b''.join(shader('cs')), kind=0x65)
+        data = archive(zlib_blocks(small), zlib_blocks(b'other asset' * 100), b'\x28\x15 not a stream', zlib_blocks(big), zlib_blocks(b'x' * 50))
+        found = split.snowdrop_shaders(data, '/bare')
+        self.assertEqual([s for _, s, _, _ in found], ['vs', 'ps', 'cs'])
+        self.assertTrue(all('#SDFZLIB@' in w for w, *_ in found))
+        for (_, stage, ctl, code) in found: self.assertEqual((ctl, code), shader(stage))
+
+    def test_bare_zlib_cache_cut_short_is_red(self):
+        big = zlib_blocks(cache(random.Random(2).randbytes(0x18000) + b''.join(shader('vs'))))
+        first = zlib.decompressobj(); first.decompress(big); cut = len(big) - len(first.unused_data)   # the first 64 KB stream only
+        with self.assertRaises(SystemExit) as e: split.snowdrop_shaders(archive(big[:cut]), '/short')
+        self.assertIn('[RED]', str(e.exception))
 
 if __name__ == '__main__':
     unittest.main()

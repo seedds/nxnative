@@ -50,6 +50,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
+| `build` → `game` | Snowdrop three-pool allocator: 12 GB of ranges → 4 GB | address space | gap | checked: disassembly of the initializer and of the free / slab paths that read the range fields; pool use measured on the Mac, 2026-10-31 | 1 | [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md) | Kingdom Battle's routine from an older source: the pool bounds are separate immediates (two of them split across a mov and movk), not one size field, so Kingdom Battle's cuts do not carry over; a function-matched rule could follow the game's updates. The cause, an iPhone's address space, is a platform limit |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
@@ -90,6 +91,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [South Park: The Fractured But Whole](#south-park-the-fractured-but-whole) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Subnautica](#subnautica) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
@@ -450,6 +452,21 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.3.0 `main`** `94ceae32…`
   - host [hle_fpslock.c:27](../../dm/host/hle_fpslock.c#L27): engine frame limit set to fps_target: Unity targetFrameRate
 
+### South Park: The Fractured But Whole
+
+[South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md), `01008F2005154000`, [patches.py](../../dm/games/01008F2005154000/patches.py).
+
+- **`build` → `game`**, address space, gap, checked: disassembly of the initializer and of the free / slab paths that read the range fields; pool use measured on the Mac, 2026-10-31: Snowdrop three-pool allocator: 12 GB of ranges → 4 GB. Kingdom Battle's routine from an older source: the pool bounds are separate immediates (two of them split across a mov and movk), not one size field, so Kingdom Battle's cuts do not carry over; a function-matched rule could follow the game's updates. The cause, an iPhone's address space, is a platform limit
+
+- **1.05 `main`** `df15edaa…` ([patches.py:17](../../dm/games/01008F2005154000/patches.py#L17))
+  - cut `+0x17fb2b0`: Snowdrop allocator: reserve 4 GB instead of 12 GB (mov x0,#0x100000000)
+  - cut `+0x17fb2b8`: Snowdrop allocator: combined range end 12 GB -> 4 GB (mov x22,#0x100000000), the 64 KB pool end
+  - cut `+0x17fb2dc`: Snowdrop large allocator: maximum 64 KB page count 65536 -> 24576, matching its 1.5 GB range (mov w5,#0x6000)
+  - cut `+0x17fb300`: Snowdrop 512 KB pool start: base + 4 GB + 0x7ffff -> base + 1.5 GB + 0x7ffff (mov x10,#0x60070000; +0x17fb308 sets the low half)
+  - cut `+0x17fb304`: Snowdrop 512 KB pool start: movk x10,#7,lsl #16 is folded into the mov above; this slot repeats +0x17fb308 (movk x10,#0xffff)
+  - cut `+0x17fb30c`: Snowdrop 512 KB pool end: base + 8 GB -> base + 2 GB (mov x11,#0x80000000)
+  - cut `+0x17fb388`: Snowdrop 64 KB pool start: base + 8 GB + 0xffff -> base + 2 GB + 0xffff (mov x10,#0x80000000; +0x17fb38c sets the low half)
+
 ### Subnautica
 
 [Subnautica](../../dm/games/0100429011144000/README.md), `0100429011144000`, [patches.py](../../dm/games/0100429011144000/patches.py).
@@ -571,26 +588,30 @@ Cuts of Nintendo SDK `sdk` builds ([sdk_patches.py](../../dm/tools/sdk_patches.p
 - **`build` → `sdk`**, address space, blocked: no copy on the drive to compare, judgement: rows of builds not on the game drive (56ec2474, 9c73fb73, e01950c5). Likely what the rules give (each names one of their implementations)
 - **`build` → `sdk`**, address space, blocked: one game ships it, judgement: VammManager node area and alignment, SDK 4.4.0 (9de92bad). An older implementation no rule covers (its large regions aligned to 32 MB, not the rules' 2 MB); a rule once a second game ships it
 
-- **sdk** `9de92bad…` ([sdk_patches.py:9](../../dm/tools/sdk_patches.py#L9)): Mario + Rabbids Kingdom Battle 1.9.589692
+- **sdk** `8bb65519…` ([sdk_patches.py:12](../../dm/tools/sdk_patches.py#L12)): South Park: The Fractured But Whole 1.05
+  - cut `+0x8cc60`: VammManager node area limit: 1 GB to 64 MB
+  - cut `+0x8ccf4`: VammManager occupied node area: 1 GB to 64 MB
+  - cut `+0x8ce48`: AllocateAddressRegion: align regions of 1 GB and more to 32 MB
+- **sdk** `9de92bad…` ([sdk_patches.py:17](../../dm/tools/sdk_patches.py#L17)): Mario + Rabbids Kingdom Battle 1.9.589692
   - cut `+0x93dfc`: VammManager node area limit: 1 GB to 64 MB
   - cut `+0x93e8c`: VammManager occupied node area: 1 GB to 64 MB
   - cut `+0x93fe0`: AllocateAddressRegion: align regions of 1 GB and more to 32 MB
-- **sdk** `2d369d99…` ([sdk_patches.py:18](../../dm/tools/sdk_patches.py#L18)): 13 Sentinels: Aegis Rim (Asia) 1.00, 13 Sentinels: Aegis Rim 1.10, Big Brain Academy: Brain vs. Brain 1.2.0, Mario Party Superstars 1.1.1, Metroid Dread 2.1.0, Monster Hunter Rise 16.0.2, Pokémon Brilliant Diamond 1.3.0
+- **sdk** `2d369d99…` ([sdk_patches.py:26](../../dm/tools/sdk_patches.py#L26)): 13 Sentinels: Aegis Rim (Asia) 1.00, 13 Sentinels: Aegis Rim 1.10, Big Brain Academy: Brain vs. Brain 1.2.0, Mario Party Superstars 1.1.1, Metroid Dread 2.1.0, Monster Hunter Rise 16.0.2, Pokémon Brilliant Diamond 1.3.0
   - cut `+0x34e0c8`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x34e164`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `56ec2474…` ([sdk_patches.py:27](../../dm/tools/sdk_patches.py#L27)): Fire Emblem Engage 2.0.0
+- **sdk** `56ec2474…` ([sdk_patches.py:35](../../dm/tools/sdk_patches.py#L35)): Fire Emblem Engage 2.0.0
   - cut `+0x346430`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x3464cc`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `311deab1…` ([sdk_patches.py:35](../../dm/tools/sdk_patches.py#L35)): Ace Attorney Investigations Collection 1.0.0.2, ROMANCE OF THE THREE KINGDOMS 8 REMAKE 1.1.3
+- **sdk** `311deab1…` ([sdk_patches.py:43](../../dm/tools/sdk_patches.py#L43)): Ace Attorney Investigations Collection 1.0.0.2, ROMANCE OF THE THREE KINGDOMS 8 REMAKE 1.1.3
   - cut `+0x139468`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x1394fc`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `12f16103…` ([sdk_patches.py:43](../../dm/tools/sdk_patches.py#L43)): Brain Memory Training Academy 1.0.0, Unicorn Overlord (Asia) 1.05, Unicorn Overlord 1.05
+- **sdk** `12f16103…` ([sdk_patches.py:51](../../dm/tools/sdk_patches.py#L51)): Brain Memory Training Academy 1.0.0, Unicorn Overlord (Asia) 1.05, Unicorn Overlord 1.05
   - cut `+0x134778`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x13480c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `9c73fb73…` ([sdk_patches.py:50](../../dm/tools/sdk_patches.py#L50)): Patrick's Parabox 1.0.1
+- **sdk** `9c73fb73…` ([sdk_patches.py:58](../../dm/tools/sdk_patches.py#L58)): Patrick's Parabox 1.0.1
   - cut `+0x37c3b0`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x37c44c`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
-- **sdk** `e01950c5…` ([sdk_patches.py:58](../../dm/tools/sdk_patches.py#L58)): Hollow Knight: Silksong 1.0.30000
+- **sdk** `e01950c5…` ([sdk_patches.py:66](../../dm/tools/sdk_patches.py#L66)): Hollow Knight: Silksong 1.0.30000
   - cut `+0x145bfc`: AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000
   - cut `+0x145c68`: AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000
 

@@ -134,6 +134,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Sea of Stars](01008C0016544000/README.md) | `01008C0016544000` | 2.0.59001 | 16.2.0 | Unity 2021.3.25f1 IL2CPP | NVN |
 | [SHIN MEGAMI TENSEI V: Vengeance](010069C01AB82000/README.md) | `010069C01AB82000` | 1.0.3 | 15.3.2 | Unreal Engine 4.27 | NVN |
 | [Silver Pines](0100D5B026844000/README.md) | `0100D5B026844000` | 1.0.0 (base) | 21.4.7 | Unity 6000.3.15f1 IL2CPP | NVN |
+| [South Park: The Fractured But Whole](01008F2005154000/README.md) | `01008F2005154000` | 1.05 | 3.5.1 | Ubisoft Snowdrop | NVN |
 | [STEINS;GATE RE:BOOT](01008BC024FDE000/README.md) | `01008BC024FDE000` | 1.0.3 | 20.5.17 | M2's ADV engine | NVN |
 | [Stardew Valley](0100E65002BB8000/README.md) | `0100E65002BB8000` | 1.6.15.13 | 20.5.27 | MonoGame (C# → C++ by BRUTE) | NVN |
 | [SteamWorld Dig](01009320084A4000/README.md) | `01009320084A4000` | 1.12.0 | 3.4.0 | Image & Form's own engine (SteamWorld) | NVN |

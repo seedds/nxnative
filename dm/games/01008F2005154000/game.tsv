@@ -1,0 +1,41 @@
+# Game profile of South Park: The Fractured But Whole (Switch, update 1.05 = v327680). Ubisoft's Snowdrop engine on NVN, with Havok and Wwise, SDK 3.5.1: the same engine generation as
+# Mario + Rabbids Kingdom Battle (010067300059A000), whose memory cuts and shader record layout it shares. Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	01008F2005154000
+program_id	01008F2005154000
+
+# ---- App ----
+name	South Park: The Fractured But Whole
+ipa	SouthParkTheFracturedButWhole.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v327680	1.05	main=df15edaaf603e00cd7d8a01bd05a15c2	subsdk0=6c8a6b30bd5e6ca1206e8b1cdcc93bf7	sdk=8bb65519bc6399ab432e0ba7cdb16e2b
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	camel/sdf/nx/data/sdf-A-0130.sdfdata
+zip_store	.dds:.sdfdata:.sdftoc:.txt:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself.
+# Snowdrop's page allocator reserved 12 GB there; patches.py cuts it to 3 GB, and sdk_patches.py the SDK's 1 GB node area to 64 MB (README.md, Memory)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+# the shaders are GLSLC outputs in the shader cache files (camel/shadercache/nx/*.mcache), bare zlib streams in the SDF data slices (shader_split.py snowdrop_zlib)
+shader_groups	/camel/=camel
+shader_note	South Park: The Fractured But Whole shaders
+
+# ---- Rendering and input ----
+# as Kingdom Battle, the same Snowdrop generation: to be confirmed on this game's first frames
+depth_mode	zero
+pad_layout	full

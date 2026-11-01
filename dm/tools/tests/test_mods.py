@@ -21,7 +21,7 @@ TID = '01006F8002326000'
 BID = 'ff1d1c05670db6021c85b624a710b963'
 
 
-def write(root, rel, data=b'x'):
+def write(root, rel, data: bytes | str = b'x'):
     p = Path(root) / rel; p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(data if isinstance(data, bytes) else data.encode()); return p
 

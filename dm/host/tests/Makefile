@@ -48,7 +48,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_movie_vpx
 	$(B)/t_movie_avc
 	$(B)/t_nv
-	$(B)/t_nfc
+	TMPDIR="$(abspath $(B))" $(B)/t_nfc
 	$(B)/t_motion
 	$(B)/t_motion_apple
 	$(B)/t_pad_apple
@@ -176,11 +176,11 @@ $(B)/t_nv: t_nv.c ../../gfx/hle_nv.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_nv.c
 # nn::nfc answered without nfc:user (NFC disabled), beside the nfp no-tag answers
 run: $(B)/t_nfc
-$(B)/t_nfc: t_nfc.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_nfc.c
+$(B)/t_nfc: t_nfc.c ../hle_sdk16.c ../hle_nfp.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_nfc.c ../hle_bigstack.c
 .PHONY: nfc
 nfc: $(B)/t_nfc
-	$(B)/t_nfc
+	TMPDIR="$(abspath $(B))" $(B)/t_nfc
 $(B)/t_language: t_language.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -fsanitize=address,undefined -I.. $(GINC) -o $@ t_language.c
 $(B)/t_motion: t_motion.c ../motion_fusion.h | $(B)

@@ -114,9 +114,11 @@ endif()
 # what each depends on, LLVM's SHA-256)
 find_package(LLD REQUIRED CONFIG HINTS "${LLVM_LIBRARY_DIR}/cmake/lld" "${LLVM_DIR}/../lld")
 find_package(Threads REQUIRED)
-add_library(nxaot_build STATIC src/build/plan.cpp src/build/pack.cpp src/build/analysis_cache.cpp src/cache/cache.cpp)
+# A Windows pack (--target windows, README.md "Windows packs"): the same ELF objects joined, converted to COFF (src/build/coff.cpp) and linked by lld's
+# COFF driver into a DLL
+add_library(nxaot_build STATIC src/build/plan.cpp src/build/pack.cpp src/build/coff.cpp src/build/analysis_cache.cpp src/cache/cache.cpp)
 target_include_directories(nxaot_build SYSTEM PRIVATE ${LLD_INCLUDE_DIRS})
-target_link_libraries(nxaot_build PUBLIC nxaot_analysis nxaot_lift lldELF lldCommon Threads::Threads)
+target_link_libraries(nxaot_build PUBLIC nxaot_analysis nxaot_lift lldELF lldCOFF lldCommon Threads::Threads)
 target_compile_options(nxaot_build PRIVATE ${NXAOT_WARNINGS})
 
 add_executable(nxaot src/main.cpp)
@@ -214,5 +216,10 @@ add_test(NAME split COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/te
 # counts and the native run
 add_test(NAME profile COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_profile.py" --nxaot $<TARGET_FILE:nxaot>
          --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/profile")
+# Windows packs (README.md "Windows packs", aot-recompiler.md 9.4): switch-gcc, fp-gcc and the synthetic modules as DLLs, checked with LLVM's
+# llvm-readobj and llvm-objdump against their ELF packs: a PE DLL for x86-64 that imports from no module, its exports, its descriptor and tables,
+# its import table and thunks, its base relocations, its line table, the code function by function, determinism; a call of anything else refused
+add_test(NAME pack_windows COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pack_windows.py" --nxaot $<TARGET_FILE:nxaot>
+         --readobj "${LLVM_TOOLS_BINARY_DIR}/llvm-readobj" --objdump "${LLVM_TOOLS_BINARY_DIR}/llvm-objdump" --work "${CMAKE_CURRENT_BINARY_DIR}/pack_windows")
 set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census discover manifest corpus_ref corpus_native corpus_funcdiff corpus_jit
-                     corpus_threads safepoints cache plan lines split profile PROPERTIES TIMEOUT 900)
+                     corpus_threads safepoints cache plan lines split profile pack_windows PROPERTIES TIMEOUT 900)

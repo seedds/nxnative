@@ -102,7 +102,8 @@ uint8_t *dm_aot_image_map(const uint8_t *bytes, size_t len, size_t bss, uint64_t
 typedef struct dm_aot_pack dm_aot_pack;
 // The identity a pack's descriptor must match: the image it was compiled from
 typedef struct { uint8_t sha256[32]; uint64_t image_size, text_end, bss_size; } dm_aot_identity;
-// Load the pack's library for module m (mapped, relocated): dlopen (LoadLibrary on Windows), the descriptor of NXAOT_MODULE_ABI (3) checked against id, the module's base
+// Load the pack's library for module m (mapped, relocated): dlopen (LoadLibrary on Windows, then the DLL's import slots bound against this executable's exports:
+// nxaot_imports, dm/tools/aot/README.md "Windows packs"; the DLL may lie anywhere, outside the arena), the descriptor of NXAOT_MODULE_ABI (3) checked against id, the module's base
 // written to *desc->base, the line table and function map indexed, the pack registered with the dispatcher. NULL with the reason in err when it does not load
 // or does not match
 dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identity *id, char *err, size_t errn);

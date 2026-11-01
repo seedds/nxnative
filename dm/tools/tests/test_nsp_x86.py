@@ -1,7 +1,8 @@
 """NSP script packs for Windows and Linux (scripts/build_ipa_from_nsp.py --platform linux / windows): the recompiler's input (patch_nso.py --aot, one run beside Apple's outputs) and nro.tsv in
-<id>_build/aot_<version>/, nxaot build of every module and NRO into <name>.aot.so, the Vulkan shader steps (dmsh_build_vk.py, gl_shaders.py --vk, none for a guest Vulkan game), the run script,
-Windows stopping at the packs, and the reuse of every step on a second run. Real fingerprints, a fake nxaot that writes its pack, mock runs of the other tools; synthetic NSO headers, a fake NRO
-in a fake RomFS and a synthetic control.nacp: no game files, keys, .NET, Docker or Xcode needed (temporary files only)."""
+<id>_build/aot_<version>/, nxaot build of every module and NRO into <name>.aot.so (Linux) or with --target windows into <name>.aot.dll (Windows), the Vulkan shader steps (dmsh_build_vk.py,
+gl_shaders.py --vk, none for a guest Vulkan game), the run script, an nxaot without --target stopping a Windows pack at the start, and the reuse of every step on a second run. Real fingerprints,
+a fake nxaot that writes its pack, mock runs of the other tools; synthetic NSO headers, a fake NRO in a fake RomFS and a synthetic control.nacp: no game files, keys, .NET, Docker or Xcode
+needed (temporary files only)."""
 import hashlib
 import importlib.util
 import os
@@ -26,15 +27,18 @@ ID = f'{TID:016X}'
 BID, BID2 = 'ab' * 16, 'cd' * 16
 REAL_POPEN, REAL_RUN, TRUE = subprocess.Popen, nsp.run, shutil.which('true')   # TRUE: what every tool the script looks for on PATH is found as
 NXAOT ='''#!{py}
-# a stand-in for nxaot: `nxaot build` with no input prints the usage (exit 2); a build writes the object and the pack
+# a stand-in for nxaot: `nxaot build` with no input prints the usage (exit 2); a build writes the object and the pack (a DLL with --target windows)
 import os, sys
 a = sys.argv[1:]
-usage = 'usage: nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--mode balanced|max]' + ('' if os.environ.get('FAKE_NXAOT_OLD') else ' [--workers N] [--cache <dir>]')
+usage = ('usage: nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--mode balanced|max]'
+         + ('' if os.environ.get('FAKE_NXAOT_OLD') else ' [--workers N] [--cache <dir>] [--target linux|windows]'))
 if a[:1] != ['build'] or len(a) < 2: sys.stderr.write(usage + '\\n'); sys.exit(2)
 src, obj, so = a[1], a[a.index('-o') + 1], a[a.index('--shared') + 1]
+windows = '--target' in a and a[a.index('--target') + 1] == 'windows'
+if windows != so.endswith('.dll'): sys.stderr.write('a .dll needs --target windows\\n'); sys.exit(2)
 with open(src, 'rb') as f: head = f.read(64)
 with open(obj, 'wb') as f: f.write(b'object')
-with open(so, 'wb') as f: f.write(b'\\x7fELF pack of ' + head)
+with open(so, 'wb') as f: f.write((b'MZ DLL pack of ' if windows else b'\\x7fELF pack of ') + head)
 print('aot:', os.path.basename(src), 'packed')
 '''
 
@@ -136,7 +140,7 @@ class Pack(unittest.TestCase):
     # ---- helpers ----
     def pack(self, platform='linux', *extra):
         self.ran.clear(); self.rewrites.clear(); self.said.clear()
-        args = nsp.parse_args([str(self.nsp_dir), '-k', str(self.keys), '--platform', platform] + (['--nxaot', str(self.nxaot)] if platform == 'linux' else []) + list(extra))
+        args = nsp.parse_args([str(self.nsp_dir), '-k', str(self.keys), '--platform', platform, '--nxaot', str(self.nxaot)] + list(extra))
         nsp.main(args)
 
     def tools(self, name): return [c for t, c in self.ran if t == name]
@@ -205,7 +209,7 @@ class Linux(Pack):
             self.pack('linux', '--aot-workers', '3')
         for c in self.tools('nxaot'): self.assertNotIn('--cache', c); self.assertNotIn('--workers', c)
         self.assertIn('this nxaot has no --cache option: every function is compiled again on each pack', self.said)
-        self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), {'--cache', '--workers'})
+        self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), {'--cache', '--workers', '--target'})
         (self.aot / 'main.aot.so').unlink(); self.pack('linux', '--aot-workers', '3')
         self.assertEqual(self.tools('nxaot')[0][-4:], ['--cache', str(self.wdir / 'aot-cache'), '--workers', '3'])
 
@@ -271,18 +275,46 @@ class Linux(Pack):
 
 
 class Windows(Pack):
-    def test_stops_at_the_packs_after_everything_else(self):
-        with self.assertRaisesRegex(nsp.BuildError, r'the packs are not built: .*phase 5b'): self.pack('windows')
-        self.assertEqual(self.tools('nxaot'), [])
-        self.assertEqual(sorted(p.name for p in self.aot.iterdir()), ['main.aot.tsv', 'main.image.bin', 'nro.tsv'])
+    def test_dlls_run_cmd_and_reuse(self):
+        self.pack('windows')
+        aot, nro_dir, tmp = self.aot, self.work / 'nro_v0', self.work / 'tmp/aot'
+        # nxaot with --target windows: the manifest and the NRO file into DLLs beside them, the COFF object in the temporary folder, the cache in the work folder
+        self.assertEqual(self.tools('nxaot'), [
+            [str(self.nxaot), 'build', str(aot / 'main.aot.tsv'), '-o', str(tmp / 'main.obj'), '--shared', str(tmp / 'main.aot.dll'), '--mode', 'balanced', '--target', 'windows',
+             '--cache', str(self.wdir / 'aot-cache')],
+            [str(self.nxaot), 'build', str(nro_dir / 'nro0.nro'), '-o', str(tmp / 'nro0.obj'), '--shared', str(tmp / 'nro0.aot.dll'), '--mode', 'balanced', '--target', 'windows',
+             '--cache', str(self.wdir / 'aot-cache')]])
+        self.assertEqual(sorted(p.name for p in aot.iterdir()), ['.keys-windows', 'main.aot.dll', 'main.aot.tsv', 'main.image.bin', 'nro.tsv', 'nro0.aot.dll'])
+        self.assertTrue((aot / 'main.aot.dll').read_bytes().startswith(b'MZ DLL pack of # nxaot-manifest 1'))
+        self.assertEqual((aot / 'nro0.aot.dll').read_bytes(), b'MZ DLL pack of ' + self.nro[:64])
+        self.assertFalse((self.work / 'tmp').exists())
         self.assertEqual(len(self.tools('dmsh_build_vk.py')), 1)
+        self.assertTrue(any(m.startswith('recompiler: ') and m.endswith(', DLLs: --target windows)') for m in self.said))
+        self.assertTrue(any(m.startswith('done: the windows pack of ') for m in self.said))
+        # run.cmd: the nxhost-run command line, CRLF lines
         cmd = (self.work / 'run.cmd').read_bytes().decode()
         self.assertTrue(cmd.startswith('@echo off\r\n')); self.assertNotIn('\n', cmd.replace('\r\n', ''))
         self.assertIn(f'\r\nif not defined NXHOST set "NXHOST={REPO / "build/win64/nxhost-run.exe"}"\r\n"%NXHOST%" "{self.aot}" %*\r\n', cmd)
         self.assertIn(f'\r\nset "DM_SAVE={self.wdir / "run/save"}"\r\n', cmd)
         self.assertIn('x86_64-w64-mingw32.cmake', cmd)
-        with self.assertRaisesRegex(nsp.BuildError, 'phase 5b'): self.pack('windows')   # the same stop, every step before it reused
-        self.assertEqual((self.rewrites, self.tools('dmsh_build_vk.py')), ([], []))
+        # a second run reuses every step
+        first = {p.name: p.read_bytes() for p in aot.iterdir() if p.is_file()}
+        self.pack('windows')
+        self.assertEqual((self.rewrites, self.tools('nxaot'), self.tools('dmsh_build_vk.py')), ([], [], []))
+        self.assertEqual({p.name: p.read_bytes() for p in aot.iterdir() if p.is_file()}, first)
+        # a Linux pack of the same folder keeps its own keys: neither undoes the other's packs
+        self.pack('linux')
+        self.assertEqual([Path(c[c.index('--shared') + 1]).name for c in self.tools('nxaot')], ['main.aot.so', 'nro0.aot.so'])
+        self.assertEqual(sorted(p.name for p in aot.iterdir() if p.name.startswith('.') or 'aot.' in p.name and not p.name.endswith('.tsv')),
+                         ['.keys', '.keys-windows', 'main.aot.dll', 'main.aot.so', 'nro0.aot.dll', 'nro0.aot.so'])
+        self.pack('windows'); self.assertEqual(self.tools('nxaot'), [])
+        self.pack('linux'); self.assertEqual(self.tools('nxaot'), [])
+
+    def test_nxaot_without_target_stops_at_the_start(self):
+        with mock.patch.dict(os.environ, {'FAKE_NXAOT_OLD': '1'}):
+            with self.assertRaisesRegex(nsp.BuildError, 'writes no Windows packs .*no --target option'): self.pack('windows')
+        self.assertEqual((self.ran, self.rewrites), ([], []))   # before any long step (nxaot_options runs nxaot itself for its usage)
+        self.assertFalse(self.aot.exists())
 
 
 class Apple(unittest.TestCase):   # what the Apple builds run is as it was: no --aot, an Apple rewrite's key never taken for the port's (nor the other way round)
@@ -311,7 +343,9 @@ class Apple(unittest.TestCase):   # what the Apple builds run is as it was: no -
         S = sources('nvn') | {'glslc_capture': (True, 'GLSLC')}
         self.assertEqual(nsp.port_notes('linux', sources('vulkan'))[1], 'on linux the game\'s SPIR-V goes to the driver (dm/gfx/hostvk/guest_vk.c): no shader step')
         notes = nsp.port_notes('windows', S, ro=True)
-        self.assertIn('phase 5b', notes[0]); self.assertIn('nro.tsv', notes[1]); self.assertIn('dmsh_build_vk.py', notes[2])
+        self.assertIn('the packs are DLLs (nxaot build --target windows)', notes[0]); self.assertIn('nro.tsv', notes[1]); self.assertIn('(<name>.aot.dll)', notes[1])
+        self.assertIn('dmsh_build_vk.py', notes[2])
+        self.assertNotIn('DLL', nsp.port_notes('linux', S, ro=True)[0]); self.assertIn('(<name>.aot.so)', nsp.port_notes('linux', S, ro=True)[1])
         self.assertTrue(notes[3].startswith('the GLSLC capture boots the game in the Mac host, which windows does not have'))
 
 

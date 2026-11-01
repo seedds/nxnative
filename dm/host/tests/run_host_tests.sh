@@ -36,6 +36,14 @@ commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || commit=unknown
 if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no -- . ':(exclude)logs' 2>/dev/null | head -n 1)" ]; then commit="$commit (with uncommitted changes)"; fi
 started=$(now)
 
+# The AOT tests take their packs from NXAOT_PACKS (dm/tools/aot/tests/build_packs.sh's output; on a Windows tree <build>/packs/win64 when it exists, as
+# run_win64_tests.ps1 takes it), and t_aot_host the checkout's corpus: the path compiled in is the container's. Without packs those tests pass with a note
+packs=${NXAOT_PACKS:-}
+if [ -z "$packs" ] && [ "$platform" = win64 ] && [ -d "$build/packs/win64" ]; then packs=$native_build/packs/win64; fi
+[ -z "$packs" ] || { NXAOT_PACKS=$packs; export NXAOT_PACKS; }
+corpus=$repo/dm/tools/aot/corpus
+if [ "$platform" = win64 ] && (cd "$corpus" && pwd -W) >/dev/null 2>&1; then corpus=$(cd "$corpus" && pwd -W); fi
+
 tab=$(printf '\t')
 results=$build/.run_host_tests.$$
 : > "$results"
@@ -45,6 +53,7 @@ while IFS="$tab" read -r name exe args tmp; do
     total=$((total + 1))
     log=$logs/$name.log
     argv=; [ "$args" = - ] || argv=" $args"
+    if [ -n "$packs" ] && [ "$name" = t_aot_host ]; then args="$([ "$args" = - ] || echo "$args") --corpus $corpus"; argv=" $args"; fi
     env=; [ "$tmp" = tmpdir ] && { mkdir -p "$build/tmp"; env="TMPDIR=$tmpdir "; }
     cmdline="cd $native_build && $env${wrap:+$wrap }./$exe$argv"
     printf 'date: %s\ncommit: %s\ncommand: %s\n\n' "$(now)" "$commit" "$cmdline" > "$log"
@@ -63,6 +72,7 @@ done < "$manifest"
 total_line="$total runs: $passed passed, $failed failed"
 {
     printf 'date: %s\ncommit: %s\ncommand: %s\n' "$started" "$commit" "$invoked"
+    [ -z "$packs" ] || echo "packs: $packs"
     printf 'directory: %s\nhost: %s\nbuild folder: %s\n' "$started_in" "$(uname -srm 2>/dev/null || echo unknown)" "$native_build"
     [ -n "$timed" ] || echo "timeout: none (no GNU timeout on PATH): a hanging test stops the run"
     sed -n '2,$s/^# //p' "$manifest"

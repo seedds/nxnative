@@ -62,6 +62,7 @@
 #include "analysis/discover.h"
 #include "analysis/insn.h"
 #include "build/analysis_cache.h"
+#include "build/coff.h"
 #include "build/plan.h"
 #include "cache/cache.h"
 #include "nxaot/aot_module.h"
@@ -69,6 +70,7 @@
 #include "nxaot_lock.h"
 
 LLD_HAS_DRIVER(elf)
+LLD_HAS_DRIVER(coff)
 
 namespace nxaot::build {
 
@@ -980,9 +982,69 @@ llvm::Function* StdEntry(const Kit& k, const Common& c, uint64_t entry, const Fn
     return e;
 }
 
+// ---- Windows packs (--target windows; README.md, "Windows packs"; docs/design/aot-recompiler.md 9.4) ----
+// A Windows pack's code is a Linux pack's: its units are compiled for the same Linux triple, as ELF objects, with the same conventions, state
+// block, inline caches, line marks, gate sites, split parts and groups. The Windows triple is not an option with LLVM 18: its swifttailcc
+// assigns arguments as Win64's C convention does (four in registers, 128-bit vectors by reference) and a musttail call to a prototype with
+// more stack arguments stops code generation ("Can't handle guaranteed tail call under win64 yet"), and !pcsections, the line marks, has no
+// COFF section (AsmPrinter::emitPCSections switches to a null section). What differs is only where the code meets the host, which is a
+// Windows program (Win64 C convention, exceptions dispatched on the faulting thread's stack):
+//   - every call of a run-time entry the host exports (IsHostImport) and nxaot.enter, which the host calls, take the Win64 convention
+//     (win64cc: rcx, rdx, r8, r9 and the 32-byte home area; rsi, rdi and xmm6..xmm15 preserved), the C convention of the host's compiler;
+//   - no function uses the red zone: Windows writes the exception record and context of a fault below the faulting rsp, where SysV code may
+//     keep values (the dirty tracker's write faults resume the faulting instruction, 5.4);
+// both only in a Windows pack, whose units' cache keys say so. The objects are then joined (ld.lld -r), converted to COFF (coff.h) and linked
+// by lld-link (LinkWindows). The pack's imports are not the PE loader's: a pack is loaded by nxhost-run.exe and by every test program that
+// links the engine (t_aot_host.exe, t_aot_module.exe, t_aot_hostfn.exe), and a PE import names one module. So, as a Linux pack's imports
+// resolve against whatever executable loads it, the pack reaches each run-time entry through a thunk (imports.o: `jmp *slot`, the PLT's
+// instruction) and a slot that the host's loader binds against the executable that loads it (dm/host/aot_arena.c, the exported table
+// nxaot_imports of include/nxaot/aot_module.h); a call of anything else fails the pack (CompileImports)
+
+// The run-time entries a pack may import (include/nxaot/aot_module.h; src/lift/runtime.h for the floating-point helpers)
+constexpr const char* kHostImports[] = {"dm_aot_svc",         "nxaot_rt_dispatch",  "nxaot_rt_trap",         "nxaot_rt_jit",
+                                        "nxaot_rt_safepoint", "nxaot_rt_gate",      "dm_aot_cntpct",         "nxaot_rt_fp_unary",
+                                        "nxaot_rt_fp_binary", "nxaot_rt_fp_muladd", "nxaot_rt_fp_round_int", "nxaot_rt_fp_to_fixed",
+                                        "nxaot_rt_fp_convert", "nxaot_rt_aes"};
+
+}  // namespace
+
+bool IsHostImport(const std::string& name) {
+    return std::find_if(std::begin(kHostImports), std::end(kHostImports), [&](const char* k) { return name == k; }) != std::end(kHostImports);
+}
+
+namespace {
+
+// The host's boundary of a module of a Windows pack (above): the Win64 convention at the run-time entries' calls and at nxaot.enter, no red zone
+void AdaptForWindows(llvm::Module& m) {
+    for (llvm::Function& f : m) {
+        if (f.isIntrinsic()) {
+            continue;
+        }
+        if (!f.isDeclaration()) {
+            f.addFnAttr(llvm::Attribute::NoRedZone);
+            if (f.getName() == "nxaot.enter") {
+                f.setCallingConv(llvm::CallingConv::Win64);  // the host's call: desc->enter(st, entry)
+            }
+            continue;
+        }
+        if (!IsHostImport(f.getName().str())) {
+            continue;  // the pack's own (bodies, entries, wrappers): hidden, defined by another unit; anything else fails CompileImports
+        }
+        f.setCallingConv(llvm::CallingConv::Win64);
+        for (llvm::User* u : f.users()) {
+            if (auto* call = llvm::dyn_cast<llvm::CallBase>(u); call && call->getCalledOperand() == &f) {
+                call->setCallingConv(llvm::CallingConv::Win64);
+            }
+        }
+    }
+}
+
 // The module's last steps: the verifier, the tier's passes, native code (and assembly for --spills / --asm) into *object
 bool Finish(llvm::Module& m, const Common& c, llvm::TargetMachine& tm, Tier tier, std::string* object, UnitStats* st, std::string* asm_text,
             std::string* error, std::string* ir_text = nullptr) {
+    if (c.o.windows) {
+        AdaptForWindows(m);
+    }
     auto t = Clock::now();
     std::string verify;
     llvm::raw_string_ostream verify_out{verify};
@@ -1617,6 +1679,84 @@ bool CompileLines(const Common& c, llvm::TargetMachine& tm, const std::vector<Li
     return Finish(m, c, tm, c.o.tier, object, st, nullptr, error);
 }
 
+// ---- imports.o of a Windows pack ("Windows packs" above) ----
+// Every symbol the other objects call and none of them defines must be a run-time entry of the host (IsHostImport), else the pack fails, naming
+// it. Per entry: a hidden thunk of its name, `jmp *nxaot.imp.<name>(%rip)` (the code calls it as a Linux pack's code calls its PLT entry), and
+// that slot (zero until the host binds it); then the exported table nxaot_imports of include/nxaot/aot_module.h, {name, slot} per entry in
+// the order of the names, ended by {0, 0}, which the host's loader binds against the executable that loads the pack (dm/host/aot_arena.c)
+bool CompileImports(const Common& c, llvm::TargetMachine& tm, const std::vector<std::string>& objects, std::string* object, UnitStats* st,
+                    std::vector<std::string>* imports, std::string* error) {
+    std::set<std::string> defined, undefined;
+    for (const std::string& path : objects) {
+        auto buf = llvm::MemoryBuffer::getFile(path);
+        if (!buf) {
+            *error = "cannot read " + path + ": " + buf.getError().message();
+            return false;
+        }
+        auto file = llvm::object::ObjectFile::createObjectFile((*buf)->getMemBufferRef());
+        if (!file) {
+            *error = path + ": " + llvm::toString(file.takeError());
+            return false;
+        }
+        for (const llvm::object::SymbolRef& s : (*file)->symbols()) {
+            auto flags = s.getFlags();
+            auto name = s.getName();
+            if (!flags || !name) {
+                if (!flags) llvm::consumeError(flags.takeError());
+                if (!name) llvm::consumeError(name.takeError());
+                continue;
+            }
+            if (*flags & llvm::object::SymbolRef::SF_Undefined) {
+                undefined.insert(name->str());
+            } else if (*flags & llvm::object::SymbolRef::SF_Global) {
+                defined.insert(name->str());
+            }
+        }
+    }
+    std::string unknown;
+    imports->clear();
+    for (const std::string& u : undefined) {
+        if (defined.count(u)) continue;
+        if (IsHostImport(u)) {
+            imports->push_back(u);
+        } else {
+            unknown += (unknown.empty() ? "" : ", ") + u;
+        }
+    }
+    if (!unknown.empty()) {
+        *error = "the pack calls " + unknown + ", which the host does not export to packs (include/nxaot/aot_module.h, src/lift/runtime.h): a "
+                 "Windows pack imports the run-time entries only";
+        return false;
+    }
+    std::string s = "\t.section\t.text.nxaot.imports,\"ax\",@progbits\n";
+    for (const std::string& name : *imports) {
+        s += "\t.p2align\t4, 0xcc\n\t.globl\t" + name + "\n\t.hidden\t" + name + "\n\t.type\t" + name + ",@function\n" + name + ":\n\tjmpq\t*nxaot.imp." +
+             name + "(%rip)\n\t.size\t" + name + ", .-" + name + "\n";
+    }
+    s += "\t.section\t.bss.nxaot.imports,\"aw\",@nobits\n\t.p2align\t3\n";
+    for (const std::string& name : *imports) {
+        const std::string slot = "nxaot.imp." + name;
+        s += "\t.globl\t" + slot + "\n\t.hidden\t" + slot + "\n\t.type\t" + slot + ",@object\n\t.size\t" + slot + ", 8\n" + slot + ":\n\t.zero\t8\n";
+    }
+    s += "\t.section\t.rodata.nxaot.imports,\"a\",@progbits\n";
+    for (size_t i = 0; i < imports->size(); ++i) {
+        s += ".Lnxaot.import." + std::to_string(i) + ":\n\t.asciz\t\"" + (*imports)[i] + "\"\n";
+    }
+    s += "\t.section\t.data.rel.ro.nxaot.imports,\"aw\",@progbits\n\t.p2align\t3\n\t.globl\tnxaot_imports\n\t.type\tnxaot_imports,@object\n\t.size\t"
+         "nxaot_imports, " + std::to_string(16 * (imports->size() + 1)) + "\nnxaot_imports:\n";
+    for (size_t i = 0; i < imports->size(); ++i) {
+        s += "\t.quad\t.Lnxaot.import." + std::to_string(i) + "\n\t.quad\tnxaot.imp." + (*imports)[i] + "\n";
+    }
+    s += "\t.quad\t0\n\t.quad\t0\n";
+    llvm::LLVMContext ctx;
+    Diagnose(ctx, st);
+    llvm::Module m{c.prefix + ".imports", ctx};
+    m.setDataLayout(tm.createDataLayout());
+    m.setTargetTriple(tm.getTargetTriple().str());
+    m.setModuleInlineAsm(s);
+    return Finish(m, c, tm, c.o.tier, object, st, nullptr, error);
+}
+
 // ---- The cache key of a unit (design section 13) ----
 
 void AddRegs(cache::KeyBuilder& k, std::string_view name, const lift::Regs& r) {
@@ -1640,6 +1780,9 @@ std::string UnitKey(const Common& c, uint64_t entry) {
     k.Add("tier", TierName(c.TierOf(entry))).Add("cc", lift::CallConvName(o.cc)).Add("correctness", o.correctness).Add("debug_info", o.debug_info);
     k.Add("line_table", o.line_table).Add("safepoints", o.safepoints).Add("no_inline", o.no_inline).Add("fpsr", c.fpsr).Add("fpcr", uint64_t{0});
     k.Add("prefix", c.prefix);
+    if (o.windows) {
+        k.Add("host", "windows: win64cc run-time calls, no red zone");  // a Windows pack's units (AdaptForWindows); a Linux pack's keys are as before
+    }
     AddRegs(k, "indirect_pass", c.plan.indirect_pass);
     AddRegs(k, "indirect_writes", c.plan.indirect_writes);
     k.Add("indirect_rv", c.plan.indirect_rv);
@@ -2327,6 +2470,27 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         s.object_bytes += ls.object_bytes;
         s.t_compile_wall += Since(tl);
     }
+    if (o.windows) {
+        // imports.o: the run-time entries the objects call, their thunks and slots, and the table the host binds ("Windows packs")
+        UnitStats is;
+        std::string object;
+        if (!CompileImports(c, *tms[0][static_cast<size_t>(o.tier)], *objects, &object, &is, &s.imports, error)) {
+            return false;
+        }
+        for (const std::string& n : is.notes) {
+            if (n.rfind("[RED] ", 0) == 0) {
+                *error = "imports.o: " + n;  // the thunks' assembly did not assemble
+                return false;
+            }
+            s.notes.push_back(n);
+        }
+        const std::string path = work_dir + "/imports.o";
+        if (!WriteFile(path, object, error)) {
+            return false;
+        }
+        objects->push_back(path);
+        s.object_bytes += is.object_bytes;
+    }
     if (!o.ir_path.empty() && !WriteFile(o.ir_path, ir, error)) {
         return false;
     }
@@ -2382,6 +2546,62 @@ bool LinkRelocatable(const std::vector<std::string>& objects, const std::string&
     if (r.retCode != 0) {
         *error = "lld -r: " + err_s.str();
         return false;
+    }
+    return true;
+}
+
+bool LinkWindows(const std::vector<std::string>& objects, const std::string& work_dir, const std::string& dll, const std::string& coff_object,
+                 bool debug_info, BuildStats* stats, std::string* error) {
+    // One relocatable ELF object of the whole module (ld.lld -r keeps one copy of each comdat group: the shared helpers of the units), in COFF
+    if (const std::error_code ec = llvm::sys::fs::create_directories(work_dir)) {
+        *error = "cannot create " + work_dir + ": " + ec.message();
+        return false;
+    }
+    const std::string whole = work_dir + "/whole.o";
+    if (!LinkRelocatable(objects, whole, error)) {
+        return false;
+    }
+    auto buf = llvm::MemoryBuffer::getFile(whole);
+    if (!buf) {
+        *error = "cannot read " + whole + ": " + buf.getError().message();
+        return false;
+    }
+    std::string coff;
+    CoffStats cs;
+    if (!ElfToCoff((*buf)->getBuffer(), debug_info, &coff, &cs, error)) {
+        return false;
+    }
+    stats->coff_sections = cs.sections;
+    stats->coff_symbols = cs.symbols;
+    stats->coff_relocations = cs.relocations;
+    const std::string obj = coff_object.empty() ? work_dir + "/whole.obj" : coff_object;
+    if (!WriteFile(obj, coff, error)) {
+        return false;
+    }
+    if (dll.empty()) {
+        return true;
+    }
+    // The DLL: lld's COFF driver as a library. No entry point and no C library: the DLL runs nothing when it is loaded and imports from no
+    // module (its run-time entries are bound by the host: "Windows packs"); every section kept (/opt:noref: as the ELF link keeps them, and
+    // the descriptor reaches what it needs anyway); the time stamp from the contents (/Brepro), so a pack is the same from build to build;
+    // the export table holds the descriptor and the import table; DWARF kept as a MinGW program keeps it (/debug:dwarf), no PDB
+    const std::string out = "/out:" + dll;
+    std::vector<const char*> args{"lld-link",     "/nologo",     "/dll",     "/noentry",       "/nodefaultlib",
+                                  "/machine:x64", "/noimplib",   "/Brepro",  "/incremental:no", "/opt:noref",
+                                  "/opt:noicf",   "/export:nxaot_module,DATA", "/export:nxaot_imports,DATA", out.c_str()};
+    if (debug_info) {
+        args.push_back("/debug:dwarf");
+    }
+    args.push_back(obj.c_str());
+    std::string so, se;
+    llvm::raw_string_ostream out_s{so}, err_s{se};
+    const lld::Result r = lld::lldMain(args, out_s, err_s, {{lld::WinLink, &lld::coff::link}});
+    if (r.retCode != 0) {
+        *error = "lld-link: " + err_s.str() + out_s.str();
+        return false;
+    }
+    if (!err_s.str().empty()) {
+        stats->notes.push_back("nxaot build: lld-link: " + err_s.str());  // warnings
     }
     return true;
 }

@@ -111,7 +111,7 @@ or from Git Bash:
 sh dm/host/tests/run_host_tests.sh build/win64
 ```
 
-Both run every test program of `build/win64` with a 120 s limit each (`-TimeoutSeconds` in PowerShell, `TIMEOUT=<seconds>` for the shell script), print `PASS`, `FAIL` or `TIMEOUT` per run and a total, write `logs/win64/<test>.log` and `logs/win64/summary.txt`, and exit with 0 when every run passed and 1 otherwise. `-ExecutionPolicy Bypass` applies to that one command only (Windows refuses unsigned scripts by default); `-BuildDir` and `-LogDir` choose other folders. A test that crashes ends with an NTSTATUS exit code, which the PowerShell runner also prints in hex: `0xC0000005` is an access violation, `0xC0000409` a fast fail, which is also how `abort()` and a failed `assert` end a program built on the UCRT. The PowerShell runner sets `SEM_NOGPFAULTERRORBOX` for the tests it starts (`SetErrorMode`, which child processes inherit), so an access violation ends that test at once instead of waiting on an error dialog; a dialog that still appears (from Git Bash, or for a fast fail where Windows Error Reporting is set to show one) holds the test until its time limit.
+Both run every test program of `build/win64` with a 120 s limit each (`-TimeoutSeconds` in PowerShell, `TIMEOUT=<seconds>` for the shell script), print `PASS`, `FAIL` or `TIMEOUT` per run and a total, write `logs/win64/<test>.log` and `logs/win64/summary.txt`, and exit with 0 when every run passed and 1 otherwise. The AOT tests run the Windows packs of `build\packs\win64` when that folder exists (`-Packs <folder>` names another; [The recompiled corpus in the host](#the-recompiled-corpus-in-the-host)), and `summary.txt` says which. `-ExecutionPolicy Bypass` applies to that one command only (Windows refuses unsigned scripts by default); `-BuildDir` and `-LogDir` choose other folders. A test that crashes ends with an NTSTATUS exit code, which the PowerShell runner also prints in hex: `0xC0000005` is an access violation, `0xC0000409` a fast fail, which is also how `abort()` and a failed `assert` end a program built on the UCRT. The PowerShell runner sets `SEM_NOGPFAULTERRORBOX` for the tests it starts (`SetErrorMode`, which child processes inherit), so an access violation ends that test at once instead of waiting on an error dialog; a dialog that still appears (from Git Bash, or for a fast fail where Windows Error Reporting is set to show one) holds the test until its time limit.
 
 ### When a run fails: commit the logs
 
@@ -163,7 +163,8 @@ The host's run time of recompiled guest code (`dm/host/aot_*.c`, [aot.h](../dm/h
 
 ```sh
 # the packs: nxaot built in its image (dm/tools/aot/README.md), then every corpus NRO packed into build/packs (18 shared objects, about 2.5 MB), and the
-# synthetic game module of t_aot_module into build/packs/module (dm/tools/tests/aot_synth.py: its manifest, behaviour image and pack)
+# synthetic game module of t_aot_module into build/packs/module (dm/tools/tests/aot_synth.py: its manifest, behaviour image and pack); then all of them again
+# as Windows packs (DLLs, nxaot build --target windows) into build/packs/win64, for the Windows PC (below)
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot --target nxaot && sh dm/tools/aot/tests/build_packs.sh build/aot build/packs'
 
@@ -184,6 +185,8 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh dm/host/tests/aot_fp_diff.sh build/fpdiff
 ```
 
+**On the Windows PC** the same four AOT tests (`t_aot_host`, `t_aot_module`, `t_aot_hostfn`, `t_host_program`) load the Windows packs: DLLs that `nxaot build --target windows` makes ([dm/tools/aot/README.md, Windows packs](../dm/tools/aot/README.md#windows-packs)), which import from no module and have their run-time entries bound by the loading program (`aot_arena.c`, `nxaot_imports`), so one pack serves `nxhost-run.exe` and every test program. `build_packs.sh` writes them into `<out>/win64`: `<name>.dll` per corpus NRO and `module/`, `hostfn/` with their inputs and `main.aot.dll`, `sub.aot.dll`. The PowerShell runner ([below](#running-the-windows-tests-on-the-pc)) looks for them in `build\packs\win64` of the checkout (the folder the command above writes, on Linux or from Git Bash with Docker Desktop; copied there from another machine), or takes `-Packs <folder>` or `NXAOT_PACKS`; it sets `NXAOT_PACKS` for every test it runs and gives `t_aot_host` the checkout's corpus (`--corpus dm\tools\aot\corpus`: the path compiled in is the container's). Without them the four tests pass with a note, as before. From Git Bash, `run_host_tests.sh` takes `NXAOT_PACKS` from the environment only.
+
 `NXAOT_PACKS` in the environment does the same as the CMake option for a tree configured without it. `t_aot_module` takes the module from `<packs>/module` ([dm/tools/aot/README.md, A game module in the host](../dm/tools/aot/README.md#a-game-module-in-the-host)) and passes with a note without it, as `t_aot_host` does; it writes the copies its two refusals load into `t_aot_module.tmp/` in the build folder. In `nxnative-build` the JIT fallback is built in by default ([The JIT fallback](#the-jit-fallback)), so the corpus programs that need it (fp, fiber, except-gcc) run to their expected output through it; in a tree without it (`-DNXHOST_JIT=OFF`) they stop with status 3 and a `[RED] ` line naming the address, as the test then expects. A machine short of disk keeps the build trees in memory (`--tmpfs /src/build:exec,uid=$(id -u),gid=$(id -g)`) and the packs in a folder on disk mounted into the second container.
 
 ## Running the host program
@@ -192,7 +195,8 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src
 
 ```sh
 # pack the game on the system it runs on (docs/development.md, "Packing for Windows and Linux"): <id>_build/aot_<version>/, the Vulkan shaders, and <id>_build/run.sh
-# (run.cmd on Windows, which stops before the packs: phase 5b), which runs the command below with the pack's own paths; nxaot is build/aot/nxaot unless --nxaot names it
+# (run.cmd on Windows, whose packs are DLLs), which runs the command below with the pack's own paths; nxaot is build/aot/nxaot unless --nxaot names it (on Windows a
+# script that runs it in its Docker image: nxaot is a Linux program)
 python3 scripts/build_ipa_from_nsp.py "<NSP folder>" -k <prod.keys> --platform linux
 
 # <id>_build/aot_<version>/ holds, per module, <name>.aot.tsv and <name>.image.bin (patch_nso.py --aot) and <name>.aot.so (nxaot build; .aot.dll on Windows),

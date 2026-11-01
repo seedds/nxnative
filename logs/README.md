@@ -5,13 +5,13 @@ The logs of host unit test runs, kept in the repository on purpose: when a run f
 | Folder | Written by |
 |---|---|
 | `logs/linux/` | `sh dm/host/tests/run_host_tests.sh build/linux`, in the `nxnative-build` Docker image |
-| `logs/win64/` | `dm\host\tests\run_win64_tests.ps1` (PowerShell) or `sh dm/host/tests/run_host_tests.sh build/win64` (Git Bash), on a Windows PC, for the tree cross-built in Docker |
+| `logs/win64/` | `dm\host\tests\run_win64_tests.ps1` (PowerShell) or `sh dm/host/tests/run_host_tests.sh build/win64` (Git Bash), on a Windows PC, for the tree cross-built in Docker; the AOT tests with the Windows packs of `build\packs\win64` when it exists ([docker/README.md](../docker/README.md#the-recompiled-corpus-in-the-host)) |
 | `logs/aot/` | `sh dm/tools/aot/tests/run_aot_tests.sh build/aot`, in the `nxnative-aot` Docker image: the recompiler's vector harness, census test, vectors-current check, discovery over the corpus, manifest test, corpus reference run, the corpus recompiled and run natively, the per-function differential test, the JIT fallback's modes, the threaded programs, the safepoint pause test and the benchmarks ([dm/tools/aot/README.md](../dm/tools/aot/README.md)) |
 
 ## Files
 
 - `<test>.log`, one per run of a test program, named after the run as `build/<platform>/host_tests.tsv` names it (a run with arguments has them in its name: `t_preempt--all-peers.log`). It starts with three lines: `date:` (UTC), `commit:` (`git rev-parse HEAD` of the checkout, followed by `(with uncommitted changes)` when tracked files outside `logs/` differed from it) and `command:` (the exact command that ran the test, from its build folder). After a blank line comes everything the test wrote, standard output and standard error together, and last its `exit:` line (the exit code, and the time it took).
-- `summary.txt`, one per run of the runner. It starts with the same three lines (`command:` is the runner's own command line), then the folder it ran in, the host system, the build folder, and the build's own facts from `host_tests.tsv`: platform, system, compiler, game profile, when it was configured, and the tests not built for that platform. Then one line per run (`PASS`, `FAIL` with its exit code, or `TIMEOUT`), and the total.
+- `summary.txt`, one per run of the runner. It starts with the same three lines (`command:` is the runner's own command line), then the folder it ran in, the host system, the build folder, and the build's own facts from `host_tests.tsv`: platform, system, compiler, game profile, when it was configured, and the tests not built for that platform; the PowerShell runner adds the packs folder its AOT tests ran (`packs:`). Then one line per run (`PASS`, `FAIL` with its exit code, or `TIMEOUT`), and the total.
 
 ## Rules
 

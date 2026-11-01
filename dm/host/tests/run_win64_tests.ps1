@@ -1,13 +1,17 @@
 # Runs the host unit tests of a Windows build folder on this PC and records the run in the repository: one log per test and summary.txt in logs\win64\
 # (logs\README.md). The tree is cross-built in Docker with llvm-mingw (docker\README.md); this script only runs what was built. From the repository root:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File dm\host\tests\run_win64_tests.ps1 [-BuildDir build\win64] [-LogDir logs\win64] [-TimeoutSeconds 120]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File dm\host\tests\run_win64_tests.ps1 [-BuildDir build\win64] [-LogDir logs\win64] [-TimeoutSeconds 120] [-Packs build\packs\win64]
 # The runs come from <BuildDir>\host_tests.tsv (written by dm\host\CMakeLists.txt); the old *.log files and summary.txt in <LogDir> are removed first.
-# Exit status: 0 when every run passed, 1 when one did not, 2 when the build folder or its test list is missing. Windows PowerShell 5.1 (stock on Windows 10) or PowerShell 7.
-# dm/host/tests/run_host_tests.sh does the same from Git Bash (and on Linux)
+# The AOT tests (t_aot_host, t_aot_module, t_aot_hostfn, t_host_program) run the recompiled packs of NXAOT_PACKS: -Packs, else the environment's NXAOT_PACKS, else
+# build\packs\win64 when it exists (the Windows packs dm/tools/aot/tests/build_packs.sh writes into <out>\win64: docker\README.md); t_aot_host also gets the corpus of the
+# checkout (--corpus dm\tools\aot\corpus: the one compiled in is the container's path). Without packs those tests pass with a note.
+# Exit status: 0 when every run passed, 1 when one did not, 2 when the build folder or its test list (or a given packs folder) is missing. Windows PowerShell 5.1 (stock on
+# Windows 10) or PowerShell 7. dm/host/tests/run_host_tests.sh does the same from Git Bash (and on Linux), with NXAOT_PACKS from the environment
 param(
     [string]$BuildDir = '',
     [string]$LogDir = '',
-    [int]$TimeoutSeconds = 120
+    [int]$TimeoutSeconds = 120,
+    [string]$Packs = ''
 )
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
@@ -28,6 +32,21 @@ if (-not $LogDir) { $LogDir = Join-Path (Join-Path $repo 'logs') $platform }
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $LogDir = (Resolve-Path -LiteralPath $LogDir).Path
 Get-ChildItem -LiteralPath $LogDir -File | Where-Object { $_.Name -like '*.log' -or $_.Name -eq 'summary.txt' } | Remove-Item -Force
+
+# The Windows packs (DLLs of nxaot build --target windows) the AOT tests load
+if (-not $Packs) { $Packs = $env:NXAOT_PACKS }
+if (-not $Packs -and $env:OS -eq 'Windows_NT') {   # the DLLs only on Windows (PowerShell 7 elsewhere runs a Linux tree)
+    $defaultPacks = Join-Path (Join-Path (Join-Path $repo 'build') 'packs') 'win64'
+    if (Test-Path -LiteralPath $defaultPacks -PathType Container) { $Packs = $defaultPacks }
+}
+if ($Packs) {
+    if (-not (Test-Path -LiteralPath $Packs -PathType Container)) { Write-Host "no packs folder: $Packs (dm/tools/aot/tests/build_packs.sh writes <out>\win64: docker\README.md)"; exit 2 }
+    $Packs = (Resolve-Path -LiteralPath $Packs).Path
+    Write-Host "packs: $Packs (NXAOT_PACKS of the AOT tests)"
+} else {
+    Write-Host "note: no Windows packs (-Packs, NXAOT_PACKS or build\packs\win64 from dm/tools/aot/tests/build_packs.sh): the AOT tests pass with a note"
+}
+$corpus = Join-Path (Join-Path (Join-Path (Join-Path $repo 'dm') 'tools') 'aot') 'corpus'
 
 $onWindows = $env:OS -eq 'Windows_NT'
 if ($onWindows) {
@@ -63,13 +82,16 @@ foreach ($l in $lines) {
     $log = Join-Path $LogDir "$name.log"
     $exePath = Join-Path $BuildDir $exe
     $argText = ''; if ($targs -ne '-') { $argText = ' ' + $targs }
+    if ($Packs -and $name -eq 't_aot_host') { $argText += " --corpus `"$corpus`"" }   # the checkout's corpus: the compiled-in path is the container's
     # The test runs through the shell with stdout and stderr redirected to the log together, so the log keeps the order in which the test wrote them
     if ($onWindows) {
         $envText = ''; if ($needTmp) { $envText = "set TMPDIR=$tmpDir&& " }
+        if ($Packs) { $envText += "set NXAOT_PACKS=$Packs&& " }
         $cmdline = "cd /d `"$BuildDir`" && $envText`"$exePath`"$argText"
         $inner = "`"$exePath`"$argText >> `"$log`" 2>&1"
     } else {   # PowerShell 7 elsewhere: lets the runner itself be checked against a Linux tree
         $envText = ''; if ($needTmp) { $envText = "TMPDIR=$tmpDir " }
+        if ($Packs) { $envText += "NXAOT_PACKS=$Packs " }
         $cmdline = "cd $BuildDir && $envText$exePath$argText"
         $inner = "'$exePath'$argText >> '$log' 2>&1"
     }
@@ -79,6 +101,7 @@ foreach ($l in $lines) {
     $psi.UseShellExecute = $false
     $psi.WorkingDirectory = $BuildDir
     if ($needTmp) { $psi.EnvironmentVariables['TMPDIR'] = $tmpDir }
+    if ($Packs) { $psi.EnvironmentVariables['NXAOT_PACKS'] = $Packs }
     if ($onWindows) { $psi.FileName = $env:ComSpec; $psi.Arguments = "/d /s /c `"$inner`"" }
     else { $psi.FileName = '/bin/sh'; $psi.ArgumentList.Add('-c'); $psi.ArgumentList.Add($inner) }
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -106,6 +129,7 @@ if ($onWindows) { try { $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.Append("date: $started`ncommit: $commit`ncommand: $invoked`ndirectory: $startedIn`nhost: $os`nbuild folder: $BuildDir`n")
 [void]$sb.Append("PowerShell: $($PSVersionTable.PSVersion)`n")
+if ($Packs) { [void]$sb.Append("packs: $Packs`n") } else { [void]$sb.Append("packs: none (the AOT tests ran without packs)`n") }
 foreach ($l in ($lines | Select-Object -Skip 1)) { if ($l.StartsWith('# ')) { [void]$sb.Append($l.Substring(2) + "`n") } }
 [void]$sb.Append("`n")
 foreach ($r in $results) { [void]$sb.Append("$r`n") }

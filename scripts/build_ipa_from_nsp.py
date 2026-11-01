@@ -17,9 +17,10 @@
 #   <name>.image.bin, and nro.tsv (the NROs the game registers, Apple's rows). Then the shaders for the Vulkan backend: an NVN game's split and dmsh_build_vk.py into <id>_build/shader/cache/vk-<V>/
 #   (V = DMSH_CHAIN_VK; it needs the Vulkan translator built with .NET in the chain image, and is reported as not run without it), an OpenGL game's gl_shaders.py --vk into <id>_build/shader/gl-vk/,
 #   none for a guest Vulkan game (its SPIR-V goes to the driver); then <id>_build/run.sh (run.cmd on Windows) with the nxhost-run command line, its save in <NSP folder>/<id>-work/run/; last the
-#   packs: nxaot build (NXAOT / --nxaot, default build/aot/nxaot) of every module's manifest and every NRO into <name>.aot.so beside them, mode PACK_MODE / --pack-mode (balanced or max), with the
-#   per-function cache <NSP folder>/<id>-work/aot-cache/ when this nxaot has --cache. Windows stops at the packs with an error: nxaot writes ELF only, and Windows packs as DLLs are phase 5b of the
-#   port. Steps that boot the game in the Mac host (run-time shader captures, Oodle decodes, a provisional profile's heap check) are not available there: their output is reused when a Mac run
+#   packs: nxaot build (NXAOT / --nxaot, default build/aot/nxaot) of every module's manifest and every NRO into <name>.aot.so beside them (on Windows <name>.aot.dll, nxaot build --target
+#   windows: dm/tools/aot/README.md, "Windows packs"), mode PACK_MODE / --pack-mode (balanced or max), with the per-function cache <NSP folder>/<id>-work/aot-cache/ when this nxaot has --cache.
+#   nxaot is a Linux program (its Docker image): on Windows, --nxaot names a script that runs it there. Steps that boot the game in the Mac host (run-time shader captures, Oodle
+#   decodes, a provisional profile's heap check) are not available there: their output is reused when a Mac run
 #   left it in the NSP folder, else the build stops (the heap check is skipped). No Mac host, Metal shaders, Xcode project or IPA; the extracted files are kept (the game runs from them).
 # Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
@@ -54,10 +55,10 @@ PREPARE_XCODE = False                   # prepare a per-game Xcode project and a
 PLATFORM = 'ios'                        # 'ios' = the IPA (or the Xcode project); 'mac-app' = a double-clickable Mac app of the game; 'mac' = development: build only what running the game on this Mac needs (Mac shaders, the Mac host), no iOS shaders,
                                         #   Xcode project or IPA; keeps the extracted files and prints the command that runs the game (needs Apple silicon);
                                         #   'linux' / 'windows' = a pack for the x86-64 host program nxhost-run, made on that system: the recompiler's input and packs in <id>_build/aot_<version>/,
-                                        #   the Vulkan shaders and <id>_build/run.sh (run.cmd); Windows stops before the packs (phase 5b of the port)
-NXAOT = ''                              # PLATFORM 'linux': the recompiler nxaot (empty = build/aot/nxaot in the repository; dm/tools/aot/README.md builds it)
+                                        #   the Vulkan shaders and <id>_build/run.sh (run.cmd); the packs are shared objects on Linux and DLLs on Windows
+NXAOT = ''                              # PLATFORM 'linux' / 'windows': the recompiler nxaot, or a script that runs it (empty = build/aot/nxaot in the repository; dm/tools/aot/README.md builds it)
 PACK_MODE = 'balanced'                  # PLATFORM 'linux' / 'windows': nxaot's pack mode, 'balanced' (a faster pack) or 'max' (a faster game, a longer pack)
-AOT_WORKERS = 0                         # PLATFORM 'linux': nxaot's compile workers (0 = nxaot decides from the processors and the free memory)
+AOT_WORKERS = 0                         # PLATFORM 'linux' / 'windows': nxaot's compile workers (0 = nxaot decides from the processors and the free memory)
 MAC_SIGN = ''                            # PLATFORM 'mac-app': the codesign identity for the app, e.g. 'Developer ID Application: <name> (<team>)' (empty = ad-hoc); never with the hardened runtime
 TEAM_ID = ''                            # optional Apple team ID; empty = DM_TEAM_ID environment, saved Xcode selection, or select in Xcode
 XCODE_WORKSPACE = ''                    # shared .xcworkspace (empty = NxNative.xcworkspace beside the game's NSP folder)
@@ -1994,7 +1995,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
 
 # ---- Windows and Linux (PLATFORM 'linux' / 'windows'): a pack for the x86-64 host program nxhost-run ----
 PORTS = ('linux', 'windows')   # the port's platforms (docs/design/migration-status.md), each packed on its own system
-PACK_SUFFIX = '.aot.so'   # a pack's name after its module's on Linux (dm/host/aot.h DM_AOT_PACK_SUFFIX; Windows takes <name>.aot.dll, which nxaot does not write yet)
+PACK_SUFFIXES = {'linux': '.aot.so', 'windows': '.aot.dll'}   # a pack's name after its module's (dm/host/aot.h DM_AOT_PACK_SUFFIX): a shared object, a DLL (nxaot build --target windows)
 XLATE_VK_DLL = 'build/xlate_vk/bin/dmsh_xlate_vk/release/dmsh_xlate_vk.dll'   # the Vulkan translator where docker/README.md builds it (dmsh_chain_vk.py XLATE_VK; the environment's XLATE_VK names another)
 CHAIN_VK_H = 'dm/gfx/nvn/dmsh_chain_vk.h'   # the Vulkan chain version nxhost-run is compiled with (dmsh_chain_vk.py), one for every game
 CHAIN_TABLES_VK = ('c1_full_vk.tsv', 'cb_extent_vk.tsv')   # CHAIN_TABLES' Vulkan counterparts: a full dmsh_build_vk.py run writes both into the profile, naming its library's stamp (git ignores them)
@@ -2005,8 +2006,8 @@ NXAOT_DOCKER = ('docker build -t nxnative-aot -f docker/Dockerfile.aot docker &&
 def port_notes(platform, S, ro=False):
     """The survey's lines for a pack on Windows or Linux: what it does with this game there and what it cannot do. S: profile_guess.py shader_sources; ro: main imports nn::ro"""
     gfx, out = S['graphics'][0], [f'packed for {platform} (x86-64, the host program nxhost-run): the code modules go to the recompiler (patch_nso.py --aot, then nxaot build, into <id>_build/aot_<version>/)'
-                                  + ('; the packs are not built on Windows yet: nxaot writes ELF only, and Windows packs as DLLs are phase 5b of the port' if platform == 'windows' else '')]
-    if ro: out.append(f'on {platform} the registered NROs are listed in aot_<version>/nro.tsv and each NRO file is packed by nxaot (<name>.aot.so), not embedded')
+                                  + ('; the packs are DLLs (nxaot build --target windows)' if platform == 'windows' else '')]
+    if ro: out.append(f'on {platform} the registered NROs are listed in aot_<version>/nro.tsv and each NRO file is packed by nxaot (<name>{PACK_SUFFIXES[platform]}), not embedded')
     if gfx == 'vulkan': out.append(f'on {platform} the game\'s SPIR-V goes to the driver (dm/gfx/hostvk/guest_vk.c): no shader step' + (' and no run-time capture' if S['vk_capture'][0] else ''))
     elif gfx == 'gl': out.append(f'on {platform} gl_shaders.py --vk translates its GLSL for the Vulkan backend (gl-vk/)'
                                  + (f'; the run-time capture boots the game in the Mac host, which {platform} does not have: only a capture a Mac run left in the NSP folder is used' if S['gl_capture'][0] else ''))
@@ -2027,7 +2028,8 @@ def check_prereqs_port(env):   # what a pack for Windows or Linux runs up to the
 
 
 def find_nxaot(repo, given=''):
-    """The recompiler that makes the packs (PLATFORM 'linux'): given (NXAOT / --nxaot: the binary, or a script that runs it), else build/aot/nxaot in the repository, where its Docker build puts it"""
+    """The recompiler that makes the packs (PLATFORM 'linux' / 'windows'): given (NXAOT / --nxaot: the binary, or a script that runs it), else build/aot/nxaot in the repository, where its Docker
+    build puts it"""
     p = Path(os.path.expanduser(given)).resolve() if given else repo / 'build/aot/nxaot'
     if p.is_file(): return p
     if given: raise BuildError(f'--nxaot / NXAOT: no such file: {p}')
@@ -2036,15 +2038,15 @@ def find_nxaot(repo, given=''):
 
 
 def nxaot_options(nxaot, env):
-    """The options of `nxaot build` that the packs use when this nxaot has them (--cache, --workers: being added to the tool), read from its usage text (`nxaot build` with no input prints it).
-    A binary that does not start or prints no usage stops the build: built in its Docker image, nxaot links that image's libLLVM-18.so"""
+    """The options of `nxaot build` that the packs use when this nxaot has them (--cache, --workers; --target, which Windows packs need), read from its usage text (`nxaot build` with no input
+    prints it). A binary that does not start or prints no usage stops the build: built in its Docker image, nxaot links that image's libLLVM-18.so"""
     try: r = subprocess.run([str(nxaot), 'build'], env=env, capture_output=True, text=True, errors='replace', timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e: raise BuildError(f'{nxaot} does not run: {e}') from e
     text = r.stdout + r.stderr
     if 'nxaot build' not in text:
         raise BuildError(f'{nxaot} does not run as nxaot (exit code {r.returncode}): {text.strip()[-400:] or "no output"}. Built in its Docker image it links the image\'s libLLVM-18.so: run this '
                          'script where that library is installed (LLVM 18), configure nxaot with -DNXAOT_LLVM_STATIC=ON, or give --nxaot a script that runs it in the image')
-    return {o for o in ('--cache', '--workers') if re.search(r'\[' + o + r'\b', text)}
+    return {o for o in ('--cache', '--workers', '--target') if re.search(r'\[' + o + r'\b', text)}
 
 
 def chain_vk_of(repo):   # the version dm/gfx/nvn/dmsh_chain_vk.h holds (None when it has none)
@@ -2139,12 +2141,17 @@ def build_gl_vk(py, repo, roots, sh, env, logs, g, reuse=True, provisional=False
     return sh
 
 
-def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, tmp):
-    """The stage "AOT packs" (PLATFORM 'linux'): `nxaot build` of every module's manifest (<name>.aot.tsv, which names its image) and of every NRO file nro.tsv lists (nro_<version>/<name>.nro, the
-    bytes whose SHA-256 its row gives: the host maps an NRO from the game's own image) into <name>.aot.so in aot (loader.c, "The game-module path"), one after another (nxaot compiles in parallel
-    itself), each object nxaot links from in tmp, deleted after. With the per-function cache (cache: <NSP folder>/<id>-work/aot-cache/, design 13) and the workers count when this nxaot has those
-    options (opts, nxaot_options). A pack is reused when its input (the manifest, which holds its image's SHA-256; an NRO's row), nxaot and the mode are as at its last build (aot/.keys/<name>.key);
-    the packs of modules no longer listed go. Returns the number of packs built"""
+def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, tmp, platform='linux'):
+    """The stage "AOT packs" (PLATFORM 'linux' / 'windows'): `nxaot build` of every module's manifest (<name>.aot.tsv, which names its image) and of every NRO file nro.tsv lists (nro_<version>/<name>.nro,
+    the bytes whose SHA-256 its row gives: the host maps an NRO from the game's own image) into <name>.aot.so in aot (loader.c, "The game-module path"), on Windows with --target windows into
+    <name>.aot.dll (a DLL; dm/tools/aot/README.md, "Windows packs"), one after another (nxaot compiles in parallel itself), each object nxaot links from in tmp, deleted after. With the per-function
+    cache (cache: <NSP folder>/<id>-work/aot-cache/, design 13; a Windows unit has a key of its own) and the workers count when this nxaot has those options (opts, nxaot_options). A pack is reused
+    when its input (the manifest, which holds its image's SHA-256; an NRO's row), nxaot and the mode are as at its last build (aot/.keys/<name>.key; aot/.keys-windows/ for the DLLs, so that a Linux
+    and a Windows pack of one folder keep their own); the packs of modules no longer listed go. Returns the number of packs built"""
+    win = platform == 'windows'
+    suffix = PACK_SUFFIXES[platform]
+    if win and '--target' not in opts:
+        raise BuildError(f'{nxaot} writes no Windows packs (its `nxaot build` usage has no --target option): build nxaot again from this repository (dm/tools/aot/README.md)')
     PROG.stage('AOT packs', step='checking the inputs')
     nro_rows = {}
     try:
@@ -2152,12 +2159,12 @@ def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, 
             c = line.split()
             if c and not line.startswith('#') and c[0] != 'refused': nro_rows[c[0]] = c[1:3]
     except OSError: pass
-    tool = fingerprint(('files', [nxaot]), mode)   # the cache and the workers do not change a pack
+    tool = fingerprint(('files', [nxaot]), mode, *(['windows'] if win else []))   # the cache and the workers do not change a pack
     jobs = [(m, aot / f'{m}.aot.tsv', fingerprint(tool, ('files', [aot / f'{m}.aot.tsv']))) for m in mods] + [(n, nro_dir / f'{n}.nro', fingerprint(tool, n, r)) for n, r in nro_rows.items()]
-    keys, names = aot / '.keys', {n for n, _, _ in jobs}
-    for p in sorted(aot.glob('*' + PACK_SUFFIX)):
-        if p.name[:-len(PACK_SUFFIX)] not in names: p.unlink(); rmtree(keys / f'{p.name[:-len(PACK_SUFFIX)]}.key')
-    todo = [(n, s, k) for n, s, k in jobs if not ((aot / f'{n}{PACK_SUFFIX}').is_file() and reused(keys / f'{n}.key', k) is not None)]
+    keys, names = aot / ('.keys-windows' if win else '.keys'), {n for n, _, _ in jobs}
+    for p in sorted(aot.glob('*' + suffix)):
+        if p.name[:-len(suffix)] not in names: p.unlink(); rmtree(keys / f'{p.name[:-len(suffix)]}.key')
+    todo = [(n, s, k) for n, s, k in jobs if not ((aot / f'{n}{suffix}').is_file() and reused(keys / f'{n}.key', k) is not None)]
     what = f'{len(mods)} modules' + (f' and {len(nro_rows)} NROs' if nro_rows else '')
     if not todo:
         PROG.end(f'{what}, reused (inputs unchanged)'); return 0
@@ -2169,8 +2176,8 @@ def aot_packs(nxaot, opts, mode, workers, cache, aot, nro_dir, mods, env, logs, 
     for i, (n, src, k) in enumerate(todo):
         PROG.set(step=n, done=i, total=len(todo), unit='packs')
         rmtree(keys / f'{n}.key')
-        obj, so, log = tmp / f'{n}.o', tmp / f'{n}{PACK_SUFFIX}', logs / f'nxaot_{n}.log'
-        run([nxaot, 'build', src, '-o', obj, '--shared', so, '--mode', mode] + extra, log, env=env)
+        obj, so, log = tmp / f'{n}{".obj" if win else ".o"}', tmp / f'{n}{suffix}', logs / f'nxaot_{n}.log'
+        run([nxaot, 'build', src, '-o', obj, '--shared', so, '--mode', mode] + (['--target', 'windows'] if win else []) + extra, log, env=env)
         if not so.is_file(): raise BuildError(f'nxaot build wrote no {so.name} (output: {log})')
         os.replace(so, aot / so.name); rmtree(obj)
         (keys / f'{n}.key').write_text(f'{k}\n')
@@ -2238,11 +2245,12 @@ def parse_args(argv):
     ap.add_argument('--platform', choices=('ios', 'mac', 'mac-app') + PORTS, help='ios = the IPA (or the Xcode project); mac = for development: build only what running the game on this Mac needs (the Mac shaders and the Mac host, '
                     'no iOS shaders, Xcode project or IPA), keep the extracted files and print the command that runs the game; mac-app = what mac builds, then a self-contained, double-clickable '
                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another); linux / windows = a pack for the x86-64 host program nxhost-run, made on that system: '
-                    'the recompiler\'s input and packs in <id>_build/aot_<version>/, the Vulkan shaders and <id>_build/run.sh (run.cmd); windows stops before the packs, which are phase 5b of the port '
+                    'the recompiler\'s input and packs in <id>_build/aot_<version>/ (shared objects on linux, DLLs on windows), the Vulkan shaders and <id>_build/run.sh (run.cmd) '
                     '(default: the PLATFORM setting, ios)')
-    ap.add_argument('--nxaot', help='--platform linux: the recompiler nxaot, or a script that runs it (default: the NXAOT setting, else build/aot/nxaot in the repository)')
+    ap.add_argument('--nxaot', help='--platform linux / windows: the recompiler nxaot, or a script that runs it (a Linux program: on Windows a script that runs it in its Docker image) '
+                    '(default: the NXAOT setting, else build/aot/nxaot in the repository)')
     ap.add_argument('--pack-mode', choices=('balanced', 'max'), help='--platform linux / windows: nxaot\'s pack mode, balanced (a faster pack) or max (a faster game, a longer pack) (default: the PACK_MODE setting, balanced)')
-    ap.add_argument('--aot-workers', type=int, help='--platform linux: nxaot\'s compile workers, when it has the option (default: the AOT_WORKERS setting; 0 = nxaot decides from the processors and the free memory)')
+    ap.add_argument('--aot-workers', type=int, help='--platform linux / windows: nxaot\'s compile workers, when it has the option (default: the AOT_WORKERS setting; 0 = nxaot decides from the processors and the free memory)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
     ap.add_argument('--team-id', help='Apple developer team ID (default: TEAM_ID setting, DM_TEAM_ID environment, or saved Xcode selection)')
     ap.add_argument('--xcode-workspace', help='workspace collecting prepared games (default: NxNative.xcworkspace beside the NSP folder; use with --prepare-xcode)')
@@ -2357,9 +2365,12 @@ def main(args=None):
     configure_dotnet(env)
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable
-    if platform == 'linux':   # the recompiler, before the long steps: a missing or broken nxaot stops the build at once
+    if port:   # the recompiler, before the long steps: a missing or broken nxaot (or one that writes no Windows packs) stops the build at once
         nxaot = find_nxaot(repo, args.nxaot or NXAOT); nxaot_opts = nxaot_options(nxaot, env)
-        say(f'recompiler: {nxaot} (pack mode {pack_mode}' + (f'; {", ".join(sorted(nxaot_opts))}' if nxaot_opts else '; no --cache or --workers option yet') + ')')
+        if platform == 'windows' and '--target' not in nxaot_opts:
+            raise BuildError(f'{nxaot} writes no Windows packs (its `nxaot build` usage has no --target option): build nxaot again from this repository (dm/tools/aot/README.md)')
+        say(f'recompiler: {nxaot} (pack mode {pack_mode}' + (f'; {", ".join(sorted(nxaot_opts - {"--target"}))}' if nxaot_opts - {'--target'} else '; no --cache or --workers option yet')
+            + (', DLLs: --target windows' if platform == 'windows' else '') + ')')
     app, fam = scan_nsps(nsp_dir)
     fam = decompress_nsz(nsp_dir, app, fam, keys, env)
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
@@ -2546,18 +2557,12 @@ def main(args=None):
     motion = MOTION if args.motion is None else args.motion
     env_file = build_env_file(work, args.env_file or DM_ENV_FILE, motion)
     if not motion: say('motion (gyro): off, DM_MOTION=0 is built in (on the iPhone, DM_MOTION=1 in the app\'s Documents/env.txt turns it back on)')
-    if port:   # Windows / Linux: the run script, then the packs (Windows stops there: nxaot writes ELF only)
+    if port:   # Windows / Linux: the run script, then the packs (shared objects on Linux, DLLs on Windows)
         wdir = nsp_dir / f'{g.id}-work'   # the work folder beside <id>_build (AGENTS.md): the save and temporary storage, the recompiler's cache
         script = port_run_script(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, app_name or g.get('name', g.id), env_file, g.dir.parent if provisional or derived else None)
         nros = [l.split()[0] for l in ((aot / 'nro.tsv').read_text().splitlines() if (aot / 'nro.tsv').is_file() else []) if l.strip() and not l.startswith('#') and l.split()[0] != 'refused']
         say(f'recompiler\'s input: {aot} ({", ".join(g.words("modules"))}' + (f'; nro.tsv lists {len(nros)} NRO{"" if len(nros) == 1 else "s"}' if nros else '') + f'); shaders: {ios}; run script: {script}')
-        if platform == 'windows':
-            PROG.stage('AOT packs'); PROG.end('not built: phase 5b', ok=False)
-            report_profile_status(g, reg, pkg_ver, derived, provisional, 'Windows pack', patched)
-            if skipped: say(f'[RED] not run on this system: {"; ".join(skipped)}')
-            raise BuildError(f'the packs are not built: nxaot build writes ELF shared objects (<name>{PACK_SUFFIX}) only, and the Windows host loads DLLs (<name>.aot.dll); Windows packs are phase 5b '
-                             f'of the port (docs/design/migration-status.md). Everything else is written: the recompiler\'s input in {aot}, the shaders in {ios} and {script}')
-        aot_packs(nxaot, nxaot_opts, pack_mode, aot_workers, wdir / 'aot-cache', aot, work / f'nro_{pkg_ver}', g.words('modules'), env, logs, work / 'tmp/aot')
+        aot_packs(nxaot, nxaot_opts, pack_mode, aot_workers, wdir / 'aot-cache', aot, work / f'nro_{pkg_ver}', g.words('modules'), env, logs, work / 'tmp/aot', platform)
         rmtree(work / 'tmp')
         say(f'done: the {platform} pack of {app_name or g.id} ({pkg_ver}) runs with {script} (nxhost-run built for game profile {g.id}: docker/README.md); its save in {wdir / "run/save"}')
         if skipped: say(f'[RED] not run on this system: {"; ".join(skipped)}')

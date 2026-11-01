@@ -18,7 +18,7 @@
 //   nxaot build <module.nro | name.aot.tsv> [-o <object.o>] [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max] [--tier C|W|H|H+]
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
 //               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>]
-//               [--no-groups] [--no-split] [--split-above N]
+//               [--no-groups] [--no-split] [--split-above N] [--target linux|windows]
 //                                                     the pack stage (src/build): every function of the module compiled, in units of
 //                                                     neighbouring functions (a function over the split limit in parts) on --workers threads
 //                                                     (0 or none: as many as the CPUs and the free memory allow), or taken from the cache
@@ -26,8 +26,11 @@
 //                                                     by the samples it holds; with the tables' object (lookup table, function map, line table,
 //                                                     descriptor: include/nxaot/aot_module.h) linked by lld into the shared object nxaot_host
 //                                                     loads (--shared) and / or one relocatable object (-o); prints the module's numbers, the
-//                                                     seconds of each stage and the caches' hits and misses
-//   nxaot lines <pack.so> <module.nro | name.aot.tsv> the line table of a pack against its code and its module (design 3.5; CTest lines): every
+//                                                     seconds of each stage and the caches' hits and misses. --target windows: a pack for the
+//                                                     Windows host, a PE DLL (--shared <name>.dll) and / or one COFF object (-o): the same code,
+//                                                     the host's calls in its convention, its imports bound by the host (README.md, "Windows packs")
+//   nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>
+//                                                     the line table of a pack against its code and its module (design 3.5; CTest lines): every
 //                                                     entry's native address must start an x86 instruction that accesses memory, inside the
 //                                                     body of its function, and its offset must name an A64 load, store or dc zva of that
 //                                                     function's code (discovery's blocks); exit 1 on a mismatch
@@ -68,6 +71,7 @@
 #include <llvm/MC/MCSubtargetInfo.h>
 #include <llvm/MC/MCTargetOptions.h>
 #include <llvm/MC/TargetRegistry.h>
+#include <llvm/Object/COFF.h>
 #include <llvm/Object/ObjectFile.h>
 #include <llvm/Pass.h>
 #include <llvm/Support/TargetSelect.h>
@@ -92,7 +96,8 @@ int Usage() {
                  "                   [--tier C|W|H|H+] [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info]\n"
                  "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes]\n"
                  "                   [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>] [--no-groups] [--no-split] [--split-above N]\n"
-                 "       nxaot lines <pack.so> <module.nro | name.aot.tsv>\n");
+                 "                   [--target linux|windows]   (windows: a PE DLL --shared <name>.dll and / or a COFF object -o <object.obj>)\n"
+                 "       nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>\n");
     return 2;
 }
 
@@ -583,6 +588,11 @@ int Build(int argc, char** argv) {
             o.split_above = std::max<uint64_t>(8, std::strtoull(argv[++i], nullptr, 10));  // CTest split: most of the corpus in parts
         } else if (a == "--profile" && has) {
             o.profile_path = argv[++i];
+        } else if (a == "--target" && has) {
+            const std::string v = argv[++i];
+            if (v == "windows") o.windows = true;  // a PE DLL for the Windows host (README.md, "Windows packs")
+            else if (v == "linux") o.windows = false;
+            else return Usage();
         } else if (path.empty() && !a.empty() && a[0] != '-') {
             path = a;
         } else {
@@ -591,6 +601,11 @@ int Build(int argc, char** argv) {
     }
     if (path.empty() || (object.empty() && shared.empty()) || (tier_set && !o.profile_path.empty())) {
         return Usage();  // --tier sets every function's tier, --profile each function's: one or the other
+    }
+    if (!o.windows && shared.size() >= 4 && shared.compare(shared.size() - 4, 4, ".dll") == 0) {
+        std::fprintf(stderr, "nxaot build: %s is a DLL's name: a pack for the Windows host needs --target windows (README.md, \"Windows packs\")\n",
+                     shared.c_str());
+        return 2;
     }
     if (!tier_set) {
         o.tier = o.mode == "max" ? Tier::HPlus : Tier::W;  // no profile: balanced is tier W everywhere, max tier H+ (section 9.3)
@@ -607,12 +622,17 @@ int Build(int argc, char** argv) {
     std::vector<std::string> objects;
     bool ok = nxaot::build::BuildObjects(*image, o, work, &objects, &s, &error);
     const auto t_link = std::chrono::steady_clock::now();
-    if (ok && !shared.empty()) {
-        const std::string soname = shared.substr(shared.find_last_of('/') + 1);
-        ok = nxaot::build::LinkShared(objects, shared, soname, &error);
-    }
-    if (ok && !object.empty()) {
-        ok = nxaot::build::LinkRelocatable(objects, object, &error);  // one relocatable object of the whole module, as the shared object has it
+    if (ok && o.windows) {
+        // The DLL and / or the COFF object: the objects joined, converted and linked by lld-link (README.md, "Windows packs")
+        ok = nxaot::build::LinkWindows(objects, work, shared, object, o.debug_info, &s, &error);
+    } else {
+        if (ok && !shared.empty()) {
+            const std::string soname = shared.substr(shared.find_last_of('/') + 1);
+            ok = nxaot::build::LinkShared(objects, shared, soname, &error);
+        }
+        if (ok && !object.empty()) {
+            ok = nxaot::build::LinkRelocatable(objects, object, &error);  // one relocatable object of the whole module, as the shared object has it
+        }
     }
     s.t_link = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_link).count();
     llvm::sys::fs::remove_directories(work);
@@ -688,11 +708,20 @@ int Build(int argc, char** argv) {
     std::printf("\n");
     std::printf("aot: line table %llu entries; gate sites %llu (design 1.1)\n", static_cast<unsigned long long>(s.line_entries),
                 static_cast<unsigned long long>(s.gate_sites));
+    if (o.windows) {
+        std::string list;
+        for (const auto& i : s.imports) list += " " + i;
+        std::printf("aot: windows: %zu imports bound by the host (nxaot_imports):%s; COFF object %llu sections, %llu symbol records, %llu "
+                    "relocations\n",
+                    s.imports.size(), list.c_str(), static_cast<unsigned long long>(s.coff_sections), static_cast<unsigned long long>(s.coff_symbols),
+                    static_cast<unsigned long long>(s.coff_relocations));
+    }
     return s.refused ? 1 : 0;
 }
 
 // The line table of a pack (design 3.5, include/nxaot/aot_module.h) against the code it describes and the module it was compiled from (CTest
-// lines): read from the shared object's sections (.nxaot.fnmap, .nxaot.fnlines, .nxaot.lines: image-relative, so the file has them resolved), every
+// lines): read from the shared object's sections (.nxaot.fnmap, .nxaot.fnlines, .nxaot.lines: image-relative, so the file has them resolved), or
+// from a Windows pack's DLL through its exported descriptor (CTest pack_windows), every
 // entry's native address decoded by LLVM's x86 disassembler from the start of its function's body (it must start an instruction), and its guest
 // offset checked against the module: an A64 load or store (the encoding group op0 = x1x0) or dc zva, in a block of the function the body compiles
 // (discovery), or of another function (inlined into it at tiers H and H+, counted apart). The entries of one guest instruction in one body are
@@ -733,9 +762,65 @@ int Lines(int argc, char** argv) {
         secs[name->str()] = x;
         if (s.isText()) code.push_back(x);
     }
-    const Sec fnmap = secs[".nxaot.fnmap"], fnlines = secs[".nxaot.fnlines"], lines = secs[".nxaot.lines"];
+    Sec fnmap = secs[".nxaot.fnmap"], fnlines = secs[".nxaot.fnlines"], lines = secs[".nxaot.lines"];
+    if (const auto* pe = llvm::dyn_cast<llvm::object::COFFObjectFile>(&obj)) {
+        // A Windows pack (--target windows): its tables lie in .rdata, found through the exported descriptor, whose pointers the file holds
+        // relocated for the image's preferred base (as the loader maps it there): each table's virtual address, its bytes in the file
+        uint32_t rva = 0;
+        bool exported = false;
+        for (const llvm::object::ExportDirectoryEntryRef& e : pe->export_directories()) {
+            llvm::StringRef name;
+            if (llvm::Error err = e.getSymbolName(name)) {
+                llvm::consumeError(std::move(err));
+                continue;
+            }
+            if (name == "nxaot_module") {
+                if (llvm::Error err = e.getExportRVA(rva)) {
+                    llvm::consumeError(std::move(err));
+                } else {
+                    exported = true;
+                }
+            }
+        }
+        const uint64_t base = pe->getImageBase();
+        const auto bytes_at = [&](uint64_t va, uint64_t size, Sec* out) {
+            uintptr_t p = 0;
+            if (va < base || va - base > UINT32_MAX) return false;
+            if (llvm::Error err = pe->getRvaPtr(static_cast<uint32_t>(va - base), p)) {
+                llvm::consumeError(std::move(err));
+                return false;
+            }
+            const llvm::StringRef file = pe->getData();
+            const char* at = reinterpret_cast<const char*>(p);
+            if (at < file.begin() || size > static_cast<uint64_t>(file.end() - at)) return false;
+            *out = Sec{va, llvm::StringRef(at, size), true};
+            return true;
+        };
+        Sec desc_bytes;
+        nxaot_module_desc d{};
+        if (!exported || !bytes_at(base + rva, sizeof d, &desc_bytes)) {
+            std::printf("[RED] nxaot lines: %s exports no nxaot_module descriptor\n", pack.c_str());
+            return 1;
+        }
+        std::memcpy(&d, desc_bytes.data.data(), sizeof d);
+        uint64_t total = 0;
+        if (d.abi != NXAOT_MODULE_ABI || !bytes_at(reinterpret_cast<uint64_t>(d.fns), d.fn_count * sizeof(nxaot_fn_entry), &fnmap) ||
+            (d.fn_lines && !bytes_at(reinterpret_cast<uint64_t>(d.fn_lines), d.fn_count * sizeof(nxaot_fn_lines), &fnlines))) {
+            std::printf("[RED] nxaot lines: %s: its descriptor (ABI %u) names no function map or line table in the file\n", pack.c_str(), d.abi);
+            return 1;
+        }
+        for (uint64_t i = 0; d.fn_lines && i < d.fn_count; ++i) {
+            nxaot_fn_lines fl;
+            std::memcpy(&fl, fnlines.data.data() + i * sizeof fl, sizeof fl);
+            total = std::max<uint64_t>(total, static_cast<uint64_t>(fl.first) + fl.count);
+        }
+        if (d.lines && !bytes_at(reinterpret_cast<uint64_t>(d.lines), total * sizeof(nxaot_line_entry), &lines)) {
+            std::printf("[RED] nxaot lines: %s: its line table lies outside the file\n", pack.c_str());
+            return 1;
+        }
+    }
     if (!fnmap.found || !fnlines.found || !lines.found) {
-        std::printf("[RED] nxaot lines: %s has no line table (.nxaot.fnmap, .nxaot.fnlines and .nxaot.lines)\n", pack.c_str());
+        std::printf("[RED] nxaot lines: %s has no line table (.nxaot.fnmap, .nxaot.fnlines and .nxaot.lines, or a DLL's descriptor)\n", pack.c_str());
         return 1;
     }
     const size_t nfn = fnmap.data.size() / sizeof(nxaot_fn_entry), nlines = lines.data.size() / sizeof(nxaot_line_entry);

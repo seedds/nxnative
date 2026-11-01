@@ -9,7 +9,8 @@
 // Horizon's, so protections are exact (5.3).
 // Packs: the shared object (DLL on Windows) `nxaot build` makes for a module, loaded once, its identity checked against the image it was compiled from
 // (SHA-256, sizes: a mismatch is refused), the module's base written for its base-relative code (3.3), its tables indexed for the dispatcher, the JIT's stops
-// and fault reports. Its imports (dm_aot_svc, nxaot_rt_*, dm_aot_cntpct, the floating-point helpers) resolve against the host executable, which exports them
+// and fault reports. Its imports (dm_aot_svc, nxaot_rt_*, dm_aot_cntpct, the floating-point helpers) resolve against the host executable, which exports them:
+// through dlopen on Linux, through the DLL's own table nxaot_imports on Windows (lib_bind)
 #include "aot.h"
 #include "aot_hostfn.h"
 #if defined(_WIN32)
@@ -538,6 +539,12 @@ static int map_cmp(const void *a, const void *b) {
 }
 
 #if defined(_WIN32)
+// A Windows pack is a DLL (nxaot build --target windows; dm/tools/aot/README.md, "Windows packs") with no entry point and no import: LoadLibraryW maps it
+// anywhere and applies its base relocations, and nothing of it runs until the engine calls it. Where it lands does not matter (design 5.2): the arena below
+// 2^39 holds what the guest can see, and the guest never holds a native address of a pack (its return addresses and pc-built addresses are base + module
+// offset in the arena, an inline cache's {guest, native} descriptor and the slot pointing at it are host memory the guest code never reads as data, and the
+// dispatcher maps guest addresses to standard entries); the pack reaches the arena through 64-bit addresses (*base + offset) and the host through its
+// import slots, never through a 32-bit displacement. So, as the state blocks and native stacks, the packs stay outside the arena
 static void *lib_open(const char *path, char *err, size_t errn) {
     wchar_t w[1024];
     if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, w, (int)(sizeof w / sizeof *w))) { snprintf(err, errn, "%s: path not convertible", path); return NULL; }
@@ -547,6 +554,27 @@ static void *lib_open(const char *path, char *err, size_t errn) {
 }
 static void *lib_sym(void *lib, const char *name) { return (void *)GetProcAddress((HMODULE)lib, name); }
 static void lib_close(void *lib) { FreeLibrary((HMODULE)lib); }
+// The pack's imports (include/nxaot/aot_module.h nxaot_import): each run-time entry it calls, bound to the address the executable that loads it exports under
+// that name (DM_AOT_EXPORT; CMake ENABLE_EXPORTS: nxhost-run.exe and the AOT tests), as the dynamic linker binds a Linux pack's undefined symbols against the
+// executable. Before any of its code runs; a table missing, a name the executable does not export or an implausible slot refuses the pack, naming it
+static int lib_bind(void *lib, const char *path, char *err, size_t errn) {
+    const nxaot_import *imp = (const nxaot_import *)lib_sym(lib, "nxaot_imports");
+    if (!imp) { snprintf(err, errn, "%s: it exports no nxaot_imports table (a DLL of nxaot build --target windows has one)", path); return 1; }
+    HMODULE exe = GetModuleHandleW(NULL);
+    MEMORY_BASIC_INFORMATION mbi;
+    int n = 0;
+    for (; imp->name; imp++, n++) {
+        if (!VirtualQuery(imp->slot, &mbi, sizeof mbi) || mbi.AllocationBase != (void *)lib || !(mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY))) {
+            snprintf(err, errn, "%s: the slot of its import %s is not writable data of the pack", path, imp->name);
+            return 1;
+        }
+        void *f = (void *)GetProcAddress(exe, imp->name);
+        if (!f) { snprintf(err, errn, "%s: it imports %s, which this program does not export (DM_AOT_EXPORT; a pack of another nxaot?)", path, imp->name); return 1; }
+        *imp->slot = f;
+    }
+    if (!n) { snprintf(err, errn, "%s: its nxaot_imports table is empty (every pack calls the run time)", path); return 1; }
+    return 0;
+}
 #else
 static void *lib_open(const char *path, char *err, size_t errn) {
     void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
@@ -585,6 +613,9 @@ dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identi
         bad = why;
     }
     if (bad) { snprintf(err, errn, "%s: %s", path, bad); lib_close(lib); return NULL; }
+#if defined(_WIN32)
+    if (lib_bind(lib, path, err, errn)) { lib_close(lib); return NULL; }   // the run-time entries it calls, before its code runs (dlopen's RTLD_NOW binds a Linux pack's)
+#endif
     dm_aot_pack *p = calloc(1, sizeof *p);
     if (!p) die("aot: no memory for a pack");
     p->lib = lib; p->desc = d; p->mod = m;

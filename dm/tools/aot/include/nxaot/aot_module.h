@@ -51,6 +51,12 @@
 //                                                                              packs of modules with gate sites
 //   uint64_t dm_aot_cntpct(dm_guest_state *st)                                 mrs cntpct_el0 / cntvct_el0: the guest counter, 19.2 MHz ticks
 //   the floating-point helpers of src/lift/runtime.h (nxaot_rt_fp_*, nxaot_rt_aes)
+// A Linux pack (a shared object) imports them as undefined symbols, which the dynamic linker resolves against the executable that loads it. A Windows
+// pack (a DLL, nxaot build --target windows: dm/tools/aot/README.md, "Windows packs") imports from no module: a PE import names one module, and the same
+// pack is loaded by nxhost-run.exe and by the test programs that link the engine. Its code calls a thunk per entry (`jmp *slot`), and it exports the
+// table nxaot_imports, {name, slot} per entry it calls (sorted by name; a null name ends it): the host's loader writes each slot with the address the
+// loading executable exports under that name (GetProcAddress), before any of the pack's code runs, and refuses the pack when one is missing. The entries
+// keep the host's C convention there (Win64), and enter is called in it; the rest of the code is a Linux pack's
 #ifndef NXAOT_AOT_MODULE_H
 #define NXAOT_AOT_MODULE_H
 
@@ -163,6 +169,12 @@ typedef struct nxaot_module_desc {
     const nxaot_gate_site *gates;   // sorted by offset; null when gate_count is 0
     uint64_t gate_count;
 } nxaot_module_desc;
+
+// A Windows pack's import table (above): the exported array nxaot_imports. Not part of the descriptor, whose ABI it leaves unchanged: a Linux pack has none
+typedef struct nxaot_import {
+    const char *name;  // the run-time entry's name; null ends the table
+    void **slot;       // the slot the pack's thunk of that entry jumps through: the host writes the entry's address there
+} nxaot_import;
 
 // The lookup hash of a module offset: lookup_mask + 1 slots, linear probing (src/build/pack.cpp builds it, the dispatcher probes it)
 static inline uint32_t nxaot_lookup_hash(uint64_t offset, uint32_t mask) {

@@ -1,7 +1,8 @@
 // The pack stage of nxaot (docs/design/aot-recompiler.md sections 9.2 to 9.4, 10, 13: src/build): every discovered function of a module lifted in
 // function mode (src/lift/lower_calls.cpp), with the standard entries of the functions an indirect call or the host may enter, the dispatcher's
 // lookup table, the function map, the line table (!pcsections) and the module descriptor of include/nxaot/aot_module.h; optimised by the tier's
-// pipeline and written as native objects, linked by lld (as a library) into the shared object the host loads.
+// pipeline and written as native objects, linked by lld (as a library) into the shared object the host loads; for the Windows host (--target
+// windows) the same objects with the host's boundary in its convention, joined, converted to COFF (coff.h) and linked into a DLL (LinkWindows).
 //
 // Compile units (section 10's strategy): at tiers C and W a group of neighbouring functions of one tier, each optimised on its own (at H and H+,
 // whose pipelines inline, a shard of neighbouring functions; a function over the size limit of section 9.3 is split into parts, a unit each),
@@ -49,6 +50,7 @@ struct BuildOptions {
     bool split = true;                              // functions over a size limit split into parts (design 9.3); off: --no-split
     uint64_t split_above = 8'192;                   // that limit in instructions; parts of a quarter to a half of it (--split-above, tests)
     std::string profile_path;                       // sampled guest offsets (--profile, design 9.3: tier H where sampled, tier C elsewhere)
+    bool windows = false;                           // --target windows: a PE DLL for the Windows host ("Windows packs" in pack.cpp, coff.h)
 };
 
 struct BuildStats {
@@ -80,6 +82,8 @@ struct BuildStats {
     bool fpsr_flags = false;
     std::string cpu, features;
     std::vector<std::string> notes;  // [RED] lines and remarks
+    std::vector<std::string> imports;  // --target windows: the run-time entries the pack imports, sorted (imports.o: nxaot_imports)
+    uint64_t coff_sections = 0, coff_symbols = 0, coff_relocations = 0;  // --target windows: the COFF object lld-link is given (coff.h)
 };
 
 // Compiles the module into objects, in link order: the tables' object, then one per unit (from the cache when options.cache_dir names one and
@@ -97,6 +101,16 @@ bool LinkShared(const std::vector<std::string>& objects, const std::string& outp
 
 // Links objects into one relocatable object (ld.lld -r)
 bool LinkRelocatable(const std::vector<std::string>& objects, const std::string& output, std::string* error);
+
+// A Windows pack (--target windows; README.md, "Windows packs"): BuildObjects' objects (ELF, imports.o among them) joined by ld.lld -r into one,
+// converted to an AMD64 COFF object (coff.h), written to coff_object when it is not empty, and linked by lld's COFF driver (as a library:
+// lld::coff::link) into the DLL dll when that is not empty: no entry point, no import, the descriptor nxaot_module and the import table
+// nxaot_imports exported, the image deterministic (/Brepro), DWARF kept with debug_info. Work files go to work_dir. False with *error set
+bool LinkWindows(const std::vector<std::string>& objects, const std::string& work_dir, const std::string& dll, const std::string& coff_object,
+                 bool debug_info, BuildStats* stats, std::string* error);
+
+// The run-time entries a pack may import (include/nxaot/aot_module.h, src/lift/runtime.h): what dm/host and src/rt export to it
+bool IsHostImport(const std::string& name);
 
 // The workers a pack runs with --workers 0: the CPUs this process may run on, at most one per kWorkerMemory of available memory, at least one
 unsigned AutoWorkers();

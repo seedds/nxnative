@@ -2717,6 +2717,26 @@ int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n) {   // every pag
     pthread_mutex_unlock(&g_vp_mu); return ok;
 }
 void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n) { vpt_walk(pool, a, n, ~0ull, run_protect, 0); }
+// The state of [a, a+n) in tiles of tile bytes, one page-table walk (a sparse texture's host tiles, nvn_mtl.m): out[i] bit 0 = a page of tile i has memory behind it, bit 1 = a mapping in it
+// newer than gen, or a physical page behind it written since stamp. → tiles with a mapped page
+uint64_t nvn_sparse_tile_state(const void *pool, uint64_t a, uint64_t n, uint32_t tile, uint64_t gen, uint64_t stamp, uint8_t *out) {
+    uint64_t nt = (n + tile - 1) / tile, mapped = 0; memset(out, 0, nt);
+    pthread_mutex_lock(&g_vp_mu); struct vpool *v = vpool_at(pool, a);
+    if (!v) { pthread_mutex_unlock(&g_vp_mu); return 0; }
+    const uint8_t *rs = NULL, *re = NULL; uint64_t ri = 0, o = a - (uint64_t)(uintptr_t)v->base;
+    for (uint64_t at = o & ~0xFFFull; at < o + n && at < v->size; at += 0x1000) {
+        const vpte *e = vpt_get(v, at); uint64_t i = (at - o) / tile;
+        if (!e) { at |= (2u << 20) - 1; at -= 0xFFF; continue; }   // a leaf never mapped: skip its 2 MB
+        if (!e->phys) continue;
+        if (!(out[i] & 1)) mapped++;
+        out[i] |= 1; if (e->gen > gen) out[i] |= 2;
+        if (rs && e->phys == re && ri == i) { re += 0x1000; continue; }   // the run of consecutive physical pages behind one tile: one dirty check each
+        if (rs && !(out[ri] & 2) && nvn_dirty_since(rs, (uint64_t)(re - rs), stamp)) out[ri] |= 2;
+        rs = e->phys; re = rs + 0x1000; ri = i;
+    }
+    if (rs && !(out[ri] & 2) && nvn_dirty_since(rs, (uint64_t)(re - rs), stamp)) out[ri] |= 2;
+    pthread_mutex_unlock(&g_vp_mu); return mapped;
+}
 NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {
     rec_draw_idx(c, (p_draw_idx){pr, it, 0, 0, 0, 1, ib, ind});
 }

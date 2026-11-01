@@ -54,6 +54,7 @@
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
 import collections, concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys, time, zlib
+from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../games')); import game as _game
@@ -77,7 +78,7 @@ def sph_stage(code):
     return 'vs' if (w >> 10) & 0xf == 0 and w & 0x1f == 1 else SPH_STAGE.get((w >> 10) & 0xf)
 STAGE_NAME = {'vs': 'vertex', 'hs': 'hull', 'ds': 'domain', 'gs': 'geometry', 'ps': 'pixel', 'cs': 'compute'}   # shader_map.tsv column 3
 
-def red(msg): sys.exit('[RED] ' + msg)
+def red(msg) -> NoReturn: sys.exit('[RED] ' + msg)
 
 def field(d, fmt, at, where):
     """struct.unpack_from(fmt, d, at) of a field a header or table points at: red() naming where and the offset when it is not inside d (a damaged or cut file)"""
@@ -1797,7 +1798,28 @@ def ue_legacy_shaders(path, rel, names, out):
     for name in names:
         d = pk.read(name, decode=oodle)
         label = re.sub(r"^(\.\./)+", "", os.path.normpath(pk.mount + name))
-        ue_inline_shaders(d, f'/{rel}#{label}', out)
+        if name.endswith('.ushaderbytecode'): ue_archive_v1_shaders(d, f'/{rel}#{label}', out)
+        else: ue_inline_shaders(d, f'/{rel}#{label}', out)
+
+def ue_archive_v1_shaders(d, label, out):
+    """A shader code archive of the layout before version 2 in a legacy pak (uepak.archive_v1; Bloodstained: Ritual of the Night keeps all its material shaders there, bShareMaterialShaderCode on
+    with UE 4.18's pak): each shader is an LSLG record, zlib-compressed when its stored size is below its raw size; the stage is the record's tag"""
+    import zlib
+    ents = uepak.archive_v1(d)
+    if ents is None: red(f'{label}: a shader code archive of neither version 2 nor the earlier layout (uepak.archive_v1)')
+    for i, (off, size, raw) in enumerate(ents):
+        s = d[off:off + size]
+        if size != raw:
+            try: s = zlib.decompress(s)
+            except zlib.error as e: red(f'{label}: shader {i} does not inflate ({e})')
+        if len(s) != raw: red(f'{label}: shader {i} inflates to {len(s)} bytes, the table says {raw}')
+        rec = uepak.lslg(s)
+        if not rec: red(f'{label}: shader {i} is not an LSLG record')
+        tag, ctl, code = rec; st = UE_TAG.get(tag)
+        if not st: red(f'{label}: shader {i} has stage tag {tag}')
+        why = check(label, st, ctl, code)
+        if why: red(f'{label}: shader {i} ({st}): {why}')
+        out.append((f'{label}#UE{i}', st, ctl, code))
 
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 def ue_inline_shaders(d, label, out):

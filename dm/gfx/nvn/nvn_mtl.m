@@ -1652,10 +1652,12 @@ static int alias_has(id o) { return g_alias_set && o && CFSetContainsValue(g_ali
 // Also, when a pool object's address is reused, old entries would hand a texture on the old storage to the new pool's texture at the same offset and description. Evicted textures go through deferred release; if the serial table still holds one, that is just one more reference
 static void treg_drop_pool_views(const void *pool);
 static void cpu_tex_drop_pool(const void *pool);
+static void btex_drop_pool(const void *pool);   // the buffer texture view cache (below)
 void mtl_alias_drop_pool(const void *pool) {
     if (!pool) return;
     pthread_mutex_lock(&g_smu);
     image_desc_drop_pool(pool);
+    btex_drop_pool(pool);
     uint32_t n = 0; alias_key *ks = NULL;
     for (uint32_t i = 0; i < g_alias.cap; i++) {
         if (!g_alias.vals[i]) continue;
@@ -1711,6 +1713,63 @@ static void alias_take_over(const alias_key *nk) {
         if (serial_holds(&g_ghost, o)) defer_obj_unref(o); else defer_obj_release(o);
     }
     if (n) { g_ser_gen++; g_alias_taken += n; }
+}
+// Buffer texture views shared between texture objects of one description over the same storage (pool, offset, description; the IMAGE flag stays in the key, as it changes the view's usage).
+// Kept apart from the alias table: there a new entry takes over the storage of overlapping entries, and Unreal's transient pools hold render targets and buffers in the same memory, so a buffer
+// view evicted live targets (Minecraft Dungeons II: the scene and its history turned to black blocks and red and green noise from the main menu on). A view is counted by the serials resolving
+// to it; one no serial uses stays resident for reuse until BTEX_IDLE such views wait, then the oldest goes. Its membership in g_alias_set makes serial_del unref it (it stays resident).
+// Caller does not hold g_smu
+enum { BTEX_IDLE = 2048 };
+typedef struct { alias_key k; void *tex; int refs, dead; uint64_t idle; } btex_ent;
+static nvn_hmap g_btex = {.klen = sizeof(alias_key)}, g_btex_ser = {.klen = 8};
+static unsigned g_btex_nidle; static uint64_t g_btex_tick;
+static void btex_retire(btex_ent *e) {   // caller holds g_smu; out of the key table, released once the submissions that used it complete
+    nvn_hm_del(&g_btex, &e->k); e->dead = 1;
+    id o = CFBridgingRelease(e->tex); e->tex = NULL;
+    if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
+    defer_obj_release(o);
+}
+static id btex_get(const alias_key *k, uint64_t ser) {
+    pthread_mutex_lock(&g_smu);
+    btex_ent *e = nvn_hm_get(&g_btex, k); id r = nil;
+    if (e && !e->dead) {
+        if (nvn_hm_get(&g_btex_ser, &ser) != e) { if (!e->refs++) g_btex_nidle--; nvn_hm_put(&g_btex_ser, &ser, e); }
+        r = (__bridge id)e->tex;
+    }
+    pthread_mutex_unlock(&g_smu);
+    return r;
+}
+static void btex_put(const alias_key *k, uint64_t ser, id tex) {
+    btex_ent *e = calloc(1, sizeof *e); if (!e) return;
+    e->k = *k; e->tex = (void *)CFBridgingRetain(tex); e->refs = 1;
+    pthread_mutex_lock(&g_smu);
+    btex_ent *old = nvn_hm_get(&g_btex, k); if (old && !old->dead) { if (!old->refs) { g_btex_nidle--; btex_retire(old); free(old); } else btex_retire(old); }
+    nvn_hm_put(&g_btex, k, e); nvn_hm_put(&g_btex_ser, &ser, e);
+    if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
+    CFSetAddValue(g_alias_set, (__bridge const void *)tex);
+    pthread_mutex_unlock(&g_smu);
+}
+static void btex_release(uint64_t ser) {   // a texture object finalized: its serial stops counting
+    pthread_mutex_lock(&g_smu);
+    btex_ent *e = nvn_hm_del(&g_btex_ser, &ser);
+    if (e && --e->refs <= 0) {
+        if (e->dead) free(e);
+        else {
+            e->idle = ++g_btex_tick;
+            if (++g_btex_nidle > BTEX_IDLE) {   // the view idle longest goes
+                btex_ent *oldest = NULL;
+                for (uint32_t i = 0; i < g_btex.cap; i++) { btex_ent *c = g_btex.vals[i]; if (c && !c->refs && (!oldest || c->idle < oldest->idle)) oldest = c; }
+                if (oldest) { g_btex_nidle--; btex_retire(oldest); free(oldest); }
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_smu);
+}
+static void btex_drop_pool(const void *pool) {   // caller holds g_smu: views over a pool that goes
+    uint32_t n = 0; btex_ent **es = NULL;
+    for (uint32_t i = 0; i < g_btex.cap; i++) { btex_ent *c = g_btex.vals[i]; if (c && c->k.pool == (uint64_t)(uintptr_t)pool) { btex_ent **ne = realloc(es, (n + 1) * sizeof *es); if (!ne) break; es = ne; es[n++] = c; } }
+    for (uint32_t j = 0; j < n; j++) { btex_ent *c = es[j]; int idle = !c->refs; btex_retire(c); if (idle) { g_btex_nidle--; free(c); } }
+    free(es);
 }
 static __unsafe_unretained id serial_get(uint64_t k) { pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
 static void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); } hm_put_id(&g_by_serial, &k, o); g_ser_gen++; pthread_mutex_unlock(&g_smu); }
@@ -2670,6 +2729,10 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     }
     if (have) return have;
     if (t->d.target == 10) {   // Buffer texture (TARGET_BUFFER): create the texture-buffer view directly on the memory pool buffer (zero copy; the GPU reads the pool's current content at execution time, same as NVN semantics)
+        // Shared through a cache of their own (btex_get / btex_put): Unreal makes new buffer texture objects over the same storage every frame, and Minecraft Dungeons II's RHI thread spent
+        // about a quarter of its time making views (newTextureWithDescriptor:offset:bytesPerRow); frames ran 25 ms in submit while walking (47 fps windows at 1080p with GPU time to spare)
+        alias_key bk; memset(&bk, 0, sizeof bk); bk.pool = (uint64_t)(uintptr_t)t->pool; bk.off = t->off; bk.d = t->d;
+        { id bshared = t->pool ? btex_get(&bk, t->serial) : nil; if (bshared) { tex_put(t->serial, bshared); return bshared; } }
         uint32_t pf = 0; uint8_t swz[4]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
         void *mb; uint64_t mo;
         if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf || !bpb) { RED_ONCE(36, "buffer texture format %#x not mapped", t->d.format); return nil; }
@@ -2691,6 +2754,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         id<MTLTexture> mt = [b newTextureWithDescriptor:d offset:mo bytesPerRow:row];
         if (!mt) { RED_ONCE(39, "cannot create buffer texture: %u elements format %#x", t->d.width, t->d.format); return nil; }
         res_add(mt);
+        if (t->pool) btex_put(&bk, t->serial, mt);
         tex_put(t->serial, mt);
         return mt;
     }
@@ -2773,6 +2837,7 @@ void mtl_tex_release(tex_t *t) {
     pthread_mutex_unlock(&g_cpu_tex_mu);
     pthread_mutex_unlock(&g_smu);
     serial_del(t->serial);
+    btex_release(t->serial);
     mtl_vc_drop(t->serial);
     treg_retire_serial(t->serial);
 }
@@ -5497,7 +5562,11 @@ static dispatch_group_t g_arch_pending;   // periods handed over and not written
 static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_legacy, g_pb_base_ns;
 // Time by kind, all threads (the 'pipelines up to frame' line): archive lookups that found the base / found none, specializations, base compiles; predictions (submit thread)
 static _Atomic uint64_t g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pt_spec_ns, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_pp_done_n;   // bases compiled / taken from the archive / reused, specializations, MTLDevice builds
-typedef struct { const void *vf, *ff; uint32_t samples, a2c, rast, topo, amp; uint32_t va[31][3], vl[31][3]; } pbase_key;   // what a base depends on: pso_desc's descriptor less the colour attachments
+// cfmt: the colour formats its specializations take. The base's descriptor leaves them open, and an identical one is compiled (or taken from the archive) for each set, but each set gets
+// a base object of its own: specializing one base object for other colour formats (Minecraft Dungeons II: the hero's material, drawn into the inventory's preview targets) broke the pipelines
+// already specialized from it for the scene's targets (the hero, the campfire and pickups drawn with noise from then on; Metal 4 on macOS 26). A base object per format set, or no base,
+// draws them right; whether blending or write mask alone can do the same is not known (sharing across those was not seen to break)
+typedef struct { const void *vf, *ff; uint32_t samples, a2c, rast, topo, amp; uint32_t va[31][3], vl[31][3]; uint32_t cfmt[8]; } pbase_key;   // what a base depends on: pso_desc's descriptor less the colour attachments
 static nvn_hmap g_pbase = {.klen = sizeof(pbase_key)};
 // Only callers for the same base wait on this group; unrelated bases compile in parallel.
 // compiled: its owner asked the compiler (a compile 0 owner only looks in the archive, and a waiter that needs the base builds it itself when that found none).
@@ -5766,12 +5835,26 @@ static void pbase_key_of(MTLRenderPipelineDescriptor *d, pbase_key *k) {
         k->va[i][0] = (uint32_t)a.format; k->va[i][1] = (uint32_t)a.offset; k->va[i][2] = (uint32_t)a.bufferIndex;
         k->vl[i][0] = (uint32_t)l.stride; k->vl[i][1] = (uint32_t)l.stepFunction; k->vl[i][2] = (uint32_t)l.stepRate;
     }
+    for (int i = 0; d.rasterizationEnabled && i < 8; i++) k->cfmt[i] = (uint32_t)d.colorAttachments[i].pixelFormat;
 }
 // The pipeline pso_desc describes: its base (built, from the archive or already made), then specialized with its colour state. Called on several threads.
 // compile 0: nil on an archive miss (*e untouched), with no MTLDevice fallback. Prewarm compaction may still refresh a found base for serialization.
 static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, NSError **e, int compile) {
     pso4_init();
     int rast = d.rasterizationEnabled;
+    // An integer colour attachment: the pipeline is compiled whole, with its colour formats. Metal checks a fragment output's type against its attachment's format only when it compiles
+    // with the format known, not when it specializes a base whose formats were left open: a float output specialized onto an integer attachment made a pipeline Metal never checked, where the
+    // MTLDevice path refuses it (Minecraft Dungeons II: 31f5c2a62e017a2d's float4 into an R8Uint target; refused now, as on the MTLDevice path, with the fact row to add)
+    int whole = 0;
+    for (int i = 0; rast && i < 8 && !whole; i++) whole = d.colorAttachments[i].pixelFormat && pf_int_kind(d.colorAttachments[i].pixelFormat);
+    if (whole && g_comp4) {
+        if (!compile) return nil;
+        MTL4RenderPipelineDescriptor *w = pso_desc4(d, 0);
+        if (!w) { g_pb_legacy++; return [g_dev newRenderPipelineStateWithDescriptor:d error:e]; }
+        uint64_t t0 = bp_now(); id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateWithDescriptor:w compilerTaskOptions:nil error:e];
+        g_pt_comp_ns += bp_now() - t0;
+        return ps;
+    }
     MTL4RenderPipelineDescriptor *b = g_comp4 ? pso_desc4(d, rast) : nil;   // with rasterization off there is no colour state to leave open: the base is the pipeline
     if (!b) { if (!compile) return nil; g_pb_legacy++; return [g_dev newRenderPipelineStateWithDescriptor:d error:e]; }
     pbase_key bk; pbase_key_of(d, &bk);

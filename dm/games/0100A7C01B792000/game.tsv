@@ -1,0 +1,46 @@
+# Minecraft Dungeons II: Unreal Engine 5 (mobile renderer), SDK 20, NVN, Xbox Live services (XSAPI / libHttpClient); update 1.1.1.0.
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (docs/agents)
+
+# ---- Identity ----
+title_id	0100A7C01B792000
+program_id	0100A7C01B792000
+
+# ---- App ----
+name	Minecraft Dungeons II
+ipa	MinecraftDungeonsIi.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.1.1.0	main=9e9d887d59f7f7db176b35e3379258b9	subsdk0=3904a8dee6801472d56bd4921378df27	sdk=190030518b5d64e5d87b84bc54661af9
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Dungeons/Content/Paks/Dungeons-Switch.ucas
+zip_store	.cache:.headers:.mp4:.pak:.ttf:.txt:.ucas:.utoc:.metallib
+
+# ---- Memory ----
+# Unreal: nninitStartup reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it, so a 64 GB alias region for the bring-up on the Mac. An iPhone needs the allocator cut for the build and a capped region (game_args), as Octopath Traveler 0's profile (docs/reference/memory.md)
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 20 MB of system resource
+sys_resource	0x1400000
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Minecraft Dungeons II shaders (provisional profile)
+
+# address regions: 2026-10-29, no address regions (rewrite 26d60cab9a67)
+
+# ---- Shaders ----
+# Niagara particle vertex shaders (d1c8e612ec7462b6, 210d8abb3b9996c5: the campfire's flame) read a buffer texture whose handle the translator cannot trace to one slot
+tex_dyn_slots	on
+
+# ---- Frame rate ----
+# 60 fps: t.MaxFPS and rhi.SyncInterval (dm/host/hle_fpslock.c)
+fps_target	60

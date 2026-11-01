@@ -77,6 +77,10 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // Minecraft Dungeons II 1.1.1.0: Unreal Engine 5's t.MaxFPS and rhi.SyncInterval, the same TAutoConsoleVariable layout (names in UTF-16). Registered at main+0x33eaa90 (float,
+    // IConsoleManager slot 2; AsVariableFloat stored at +0x10) and main+0x147dc3c (int, slot 1; AsVariableInt at +0x10)
+    { "9e9d887d59f7f7db176b35e3379258b9", "Unreal t.MaxFPS", 0xae22500 + 0x10, 0, FPS_F32, 2 },
+    { "9e9d887d59f7f7db176b35e3379258b9", "Unreal rhi.SyncInterval", 0xac91a10 + 0x10, 0, VSYNCS_I32, 2 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
@@ -208,8 +212,37 @@ static void fb_tick(int target, const char *src) {
     }
 }
 
+// Unreal int console variables a build gets a fixed value for, whatever the FPS choice: the TAutoConsoleVariable object in main's bss (value pointer at +0x10, game- and render-thread copies).
+// Minecraft Dungeons II 1.1.1.0: r.BloomQuality (registered at main+0x7e7a4, default 5) to 0. On the Mac its bloom's last blur passes (30x34 and 60x34, fragment shaders 762a3933d873c16b and
+// 37c206…) came out as blocks of other content in some runs, from the title screen on: orange and cream rectangles over the whole picture and the HUD, the campfire green. The inputs, shaders,
+// draw state and load / store choices of those passes were the same as in runs without it; the cause is not found. Setting it to 0 in the running game removed the rectangles at once
+static const struct { const char *build, *what; uint64_t obj_off; int32_t value; } k_cvars[] = {
+    { "9e9d887d59f7f7db176b35e3379258b9", "Unreal r.BloomQuality", 0x9dc6060, 0 },
+};
+static void cvar_tick(void) {
+    static int state = -1, rows[8], nrow, nlog[8]; static uint8_t *base;
+    if (state < 0) {
+        state = 0;
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))
+            for (int k = 0; k < (int)(sizeof k_cvars / sizeof *k_cvars) && nrow < 8; k++) if (!strcmp(g_mod[i].build_id, k_cvars[k].build)) { rows[nrow++] = k; base = g_mod[i].base; }
+        const char *e = getenv("DM_GAME_CVARS"); state = nrow > 0 && !(e && *e == '0');   // DM_GAME_CVARS=0: the game's own values
+        if (nrow && !state) LOG("main: fixed console variables left as the game sets them (DM_GAME_CVARS=0)");
+    }
+    if (!state) return;
+    for (int r = 0; r < nrow; r++) {
+        int k = rows[r]; uint64_t obj;
+        if (!rd((uint64_t)(uintptr_t)(base + k_cvars[k].obj_off + 0x10), &obj, sizeof obj) || !obj) continue;   // not created yet
+        for (int c = 0; c < 2; c++) {
+            int32_t cur, *p = (int32_t *)(uintptr_t)(obj + 4 * (uint64_t)c);
+            if (!rd((uint64_t)(uintptr_t)p, &cur, sizeof cur) || cur == k_cvars[k].value) continue;
+            dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, k_cvars[k].value, __ATOMIC_RELAXED);
+            if (nlog[r] < 4) { nlog[r]++; LOG("main: %s (%s thread) %d → %d", k_cvars[k].what, c ? "render" : "game", cur, k_cvars[k].value); }
+        }
+    }
+}
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
+    cvar_tick();
     static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target, nier; static uint8_t *base; static const char *src; static uint32_t display;
     if (state == -1) return;
     if (state == -2) {

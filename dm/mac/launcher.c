@@ -6,6 +6,8 @@
 // (the previous run's kept as <title ID>.prev.log). Environment switches: one KEY=VALUE per line in <Application Support folder>/env.txt, then Resources/dm/env.txt (the first one wins; neither
 // replaces a variable already set), as the iOS app reads Documents/env.txt and dm/env.txt. Then the player's saved choices: launcher.<VAR> strings in the app's preferences domain (its bundle ID), which a
 // front end or a settings window writes, each checked against the bundle's settings (Info.plist DMSettings, from launcher.json) and used only for a variable still unset; DM_SAVED_CHOICES=0 ignores them.
+// DM_KEYMAP and DM_PAD_MAP are saved choices too (launcher.DM_KEYMAP, launcher.DM_PAD_MAP) but no launcher.json rows, so DMSettings cannot check them: the host's own parser does (dm/host/input_map.h,
+// input_map_valid), and a value it would not take whole is ignored. They are read whether or not the settings window ran, since the window does not offer them.
 // So the order is: the launch environment, the player's env.txt, the bundle's, saved choices, the host's tested defaults (docs/frontends.md, Saved choices).
 // Before the host starts, the settings window (dm/mac/Launcher.swift dm_mac_launcher, linked in by pack_app.py) runs in this process and puts the player's settings into the environment; it keeps
 // what the launch environment and the env files set (DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS). DM_LAUNCHER=0 or --no-launcher (open <app> --args --no-launcher) starts the game without the window,
@@ -26,6 +28,10 @@
 #include <unistd.h>
 #include "romfs_image.h"
 #include "save_sync.h"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"   // the header is the host's: this file uses only input_map_valid
+#include "input_map.h"
+#pragma clang diagnostic pop
 
 extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
@@ -115,12 +121,24 @@ static int rule_env(CFTypeRef rule, char *env, size_t n) {   // a rule's variabl
     return e && CFGetTypeID(e) == CFStringGetTypeID() && CFStringGetCString(e, env, (CFIndex)n, kCFStringEncodingUTF8);
 }
 
-static void saved_choices(void) {   // after the env files, before the bundle's own defaults (DM_LANG): a variable already set keeps its value
+static void saved_control(CFStringRef domain, const char *env, int pad) {   // DM_KEYMAP / DM_PAD_MAP: checked by the host's parser, not by DMSettings
+    CFStringRef key = CFStringCreateWithFormat(NULL, NULL, CFSTR("launcher.%s"), env);
+    CFPropertyListRef v = CFPreferencesCopyAppValue(key, domain); CFRelease(key);
+    if (!v) return;
+    char s[1024];
+    if (CFGetTypeID(v) != CFStringGetTypeID() || !CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8)) fprintf(stderr, "launcher: saved choice for %s ignored: not a string of at most %zu bytes\n", env, sizeof s - 1);
+    else if (!input_map_valid(s, pad)) fprintf(stderr, "launcher: saved choice %s=%s ignored: the host does not take it\n", env, s);
+    else if (getenv(env)) fprintf(stderr, "launcher: saved choice %s=%s not used: %s=%s is set (environment or env.txt)\n", env, s, env, getenv(env));
+    else { setenv(env, s, 0); fprintf(stderr, "launcher: env %s=%s (saved choice)\n", env, s); }
+    CFRelease(v);
+}
+
+static void saved_choices(int window) {   // after the env files, before the bundle's own defaults (DM_LANG): a variable already set keeps its value. window: the settings window ran and applied its own settings
     CFArrayRef rules = setting_rules(); CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
-    if (!rules || !domain) return;   // packed without launcher settings: nothing to choose
+    if (!domain) return;
     const char *off = getenv("DM_SAVED_CHOICES");
     if (off && !strcmp(off, "0")) { fprintf(stderr, "launcher: saved choices ignored (DM_SAVED_CHOICES=0)\n"); return; }
-    for (CFIndex i = 0; i < CFArrayGetCount(rules); i++) {
+    for (CFIndex i = 0; rules && !window && i < CFArrayGetCount(rules); i++) {   // packed without launcher settings: nothing of these to choose
         CFTypeRef rule = CFArrayGetValueAtIndex(rules, i); char env[128], s[256];
         if (!rule_env(rule, env, sizeof env)) continue;
         CFStringRef key = CFStringCreateWithFormat(NULL, NULL, CFSTR("launcher.%s"), env);
@@ -132,6 +150,7 @@ static void saved_choices(void) {   // after the env files, before the bundle's 
         else { setenv(env, s, 0); fprintf(stderr, "launcher: env %s=%s (saved choice)\n", env, s); }
         CFRelease(v);
     }
+    saved_control(domain, "DM_KEYMAP", 0); saved_control(domain, "DM_PAD_MAP", 1);
 }
 
 // Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesSection, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC
@@ -189,7 +208,7 @@ int main(int argc, char **argv) {
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
     int shown = window ? dm_mac_launcher() : 2;
     if (!shown) return 0;   // Quit: no game
-    if (shown == 2) saved_choices();
+    saved_choices(shown == 1);   // the window applied its settings; the controls are not among them
     cloud_saves_folder();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_SAVE", save, 0); setenv("DM_TEMP", temp, 0);
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);

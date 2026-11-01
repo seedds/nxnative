@@ -194,8 +194,9 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src
 `nxhost-run` ([dm/host/main_x86.c](../dm/host/main_x86.c); CMake option `NXHOST_PROGRAM`, on by default) is the host program on Linux and Windows, the counterpart of Apple's `dmhost`: it takes the game's recompiler input as `dmhost` takes the rewritten modules, maps the modules through the loader's game-module path, runs the SDK start (nn::init::Start's steps) and `nnMain` as guest calls on the engine's main thread, opens the SDL3 window with `DM_WINDOW` and shows the game through the Vulkan backend's window presenter, and exits with the run's status (0 when the game ended its process; [aot.h](../dm/host/aot.h) lists the others). The same `DM_*` switches mean the same as on Apple ([docs/env_switches.tsv](../docs/env_switches.tsv)); `DM_AOT_RAW=1` runs a module without the SDK from its own entry (homebrew), `DM_VK_HEADLESS=1` keeps the frames off the window, `DM_VK_PRESENT_MODE=mailbox` opts into MAILBOX. The JIT fallback is in the program when it is built with `NXHOST_JIT` (the recompiler's image); the start line says which.
 
 ```sh
-# pack the game on the system it runs on (docs/development.md, "Packing for Windows and Linux"): <id>_build/aot_<version>/, the Vulkan shaders, and <id>_build/run.sh
-# (run.cmd on Windows, whose packs are DLLs), which runs the command below with the pack's own paths; nxaot is build/aot/nxaot unless --nxaot names it (on Windows a
+# pack the game on the system it runs on (docs/development.md, "Packing for Windows and Linux"): <id>_build/aot_<version>/ (the max mode's packs in aot_<version>/max/),
+# the Vulkan shaders, <id>_build/launch-linux.tsv and <id>_build/run.sh (launch-windows.tsv and run.cmd on Windows, whose packs are DLLs): run.sh runs the command below
+# with the pack's own paths, which it reads from the launch file, as the launcher nxlauncher does; nxaot is build/aot/nxaot unless --nxaot names it (on Windows a
 # script that runs it in its Docker image: nxaot is a Linux program)
 python3 scripts/build_ipa_from_nsp.py "<NSP folder>" -k <prod.keys> --platform linux
 
@@ -209,6 +210,19 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e DM_AOT_RAW=1 -e DM_DB
 ```
 
 No game has run through it yet (no game's modules have been packed): what is open is listed under [What is not portable yet](#what-is-not-portable-yet). CTest checks it with `t_host_program` (the program as a child process on the synthetic module, with and without the window path, the SDK start's refusal of a module set without `nnMain`, the usage) and its presenter with `t_vk_present` (on lavapipe with `VK_EXT_headless_surface`: the swapchain, the picture read back from the swapchain images, the letterbox, the flip, a new window size, the vsync source; `--mailbox`, `--headless`). On a desktop with a screen, the first run of a frame-producing module should check that the window shows the picture upright and letterboxed, that resizing and F11 / Alt+Enter remake the swapchain without a `[RED] ` line, the start line's present mode and vsync source (`[hostvk] window presenter: ...`), and that the frame pacing follows the screen (`DM_NVN_TSV`'s `@presented_ms` where present wait is there).
+
+## The launcher
+
+`nxlauncher` ([dm/launcher](../dm/launcher/main.cpp); CMake option `NXHOST_LAUNCHER`, on by default) is the program a player opens to choose a packed game, its settings and its pack mode and to start it ([docs/settings.md, On Windows and Linux](../docs/settings.md#on-windows-and-linux); [docs/development.md, The launcher](../docs/development.md#the-launcher-nxlauncher)). The same tree builds it with Dear ImGui over SDL3's 2D renderer, beside `nxhost-run`; `t_launcher_model` and `t_launcher_window` (the program on SDL's dummy video driver) are among the tests:
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build sh -c \
+  'cmake -S dm/host -B build/linux -G Ninja -DGAME=010015100B514000 && cmake --build build/linux --target all nxhost-run nxlauncher && ctest --test-dir build/linux -R launcher'
+
+# Windows: build/win64/nxlauncher.exe, a GUI program (no console window; --list and --command print to the console they are run from)
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src mstorsjo/llvm-mingw:20261020 sh -c \
+  'cmake -S dm/host -B build/win64 -G Ninja -DGAME=010015100B514000 -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake && cmake --build build/win64 --target all nxhost-run nxlauncher'
+```
 
 ## Continuous integration
 

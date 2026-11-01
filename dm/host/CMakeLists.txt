@@ -648,6 +648,22 @@ endif()
 # the small layout of t_svc_memory: which SVCs commit and decommit, the ranges, and that an unmapped range was still readable when announced
 host_test(t_guest_map SOURCES t_guest_map.c INCLUDES ${TESTS}/memory_profile)
 
+# ---- The launcher: nxlauncher (dm/launcher; docs/settings.md, "On Windows and Linux") ----
+# Dear ImGui (dm/third_party/imgui) over SDL3's 2D renderer, so it opens on a PC without Vulkan: the games packed on this PC, each game's settings, its pack mode, Play. This file
+# builds Linux and Windows only, never Apple (the Apple apps keep dm/mac/Launcher.swift and dm/ios/Sources/Launcher.swift). Its tests: t_launcher_model (the model over a games
+# folder the test writes) and t_launcher_window (the program, found beside the test: one frame on SDL's dummy video driver, the starts without the window, --command, --list)
+option(NXHOST_LAUNCHER "build the launcher nxlauncher (dm/launcher: Dear ImGui over SDL3's renderer)" ON)
+if(NXHOST_LAUNCHER)
+    enable_language(CXX)
+    add_subdirectory(${REPO}/dm/launcher ${CMAKE_BINARY_DIR}/launcher)
+    foreach(t IN ITEMS t_launcher_model t_launcher_window)
+        host_test(${t} SOURCES ../../launcher/tests/${t}.cpp TMPDIR)
+        target_link_libraries(${t} PRIVATE nxlauncher_model)
+        set_target_properties(${t} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    endforeach()
+    add_dependencies(t_launcher_window nxlauncher)
+endif()
+
 # fork() death tests
 host_test(t_heap_size SOURCES t_heap_size.c PROFILE POSIX)
 host_test(t_oe SOURCES t_oe.c PROFILE POSIX DEFS DM_TEST_GUEST_C)   # hle_oe.c's native form: its event object a plain static (no arena)

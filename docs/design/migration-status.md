@@ -44,7 +44,7 @@ Play the supported Switch games on Windows 10 or later and on Linux (checked thr
 | Rejected GPU option | yuzu-style asynchronous shaders | They draw wrong or missing objects for some frames: a quality loss |
 | Pack-time balance | ThinLTO, per-function cache keyed by hash, PGO profiles recorded once per game build and shipped, "balanced" (default) and "max" pack modes | Owner rejected long waits |
 | CPU baseline | x86-64-v3 (AVX2, FMA3: Haswell / Zen 1 and later) with a possible v2 fallback | Open, see below |
-| Launcher (replaces `Launcher.swift`) | **Open.** Recommended Dear ImGui (C++, already in the project with the recompiler); alternatives C + SDL3, Python/Tk | Needed in Phase 6 only |
+| Launcher (replaces `Launcher.swift`) | **Decided and built**: Dear ImGui v1.91.9b over SDL3's renderer, `dm/launcher/` (`nxlauncher`; the model with no UI tested by `t_launcher_model`, one frame under SDL's dummy driver by `t_launcher_window`), the packer writing `launch-<platform>.tsv` and `launcher-<platform>.json` that `run.sh` / `run.cmd` and the launcher share | Phase 6 |
 
 ## Phases
 

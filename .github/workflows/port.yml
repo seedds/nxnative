@@ -1,6 +1,7 @@
 # The portable host on Linux and Windows (x86-64), Phase 0 of the port (docs/design/migration-status.md): dm/host/CMakeLists.txt built and its unit tests run with the
-# commands of docker/README.md, the host program nxhost-run (NXHOST_PROGRAM, main_x86.c) among the targets; t_host_program runs it (its usage here: the packs of a module are
-# aot.yml's). No game runs there yet. The macOS jobs are in tests.yml and do not change.
+# commands of docker/README.md, the host program nxhost-run (NXHOST_PROGRAM, main_x86.c) and the launcher nxlauncher (NXHOST_LAUNCHER, dm/launcher) among the targets;
+# t_host_program runs nxhost-run (its usage here: the packs of a module are aot.yml's), t_launcher_window runs nxlauncher on SDL's dummy video driver. No game runs there yet.
+# The macOS jobs are in tests.yml and do not change.
 name: port
 
 on:
@@ -42,7 +43,7 @@ jobs:
         id: build
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build sh -c \
-            "cmake -S dm/host -B build/linux -G Ninja -DGAME=$GAME -DNXHOST_PROGRAM=ON -DNXHOST_JIT=ON && cmake --build build/linux --target all nxhost-run"
+            "cmake -S dm/host -B build/linux -G Ninja -DGAME=$GAME -DNXHOST_PROGRAM=ON -DNXHOST_LAUNCHER=ON -DNXHOST_JIT=ON && cmake --build build/linux --target all nxhost-run nxlauncher"
       - name: CTest
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-build \
@@ -73,9 +74,9 @@ jobs:
         # The toolchain file by its absolute path in the container: CMake looks for a relative one in the build folder, then in dm/host
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src "$MINGW_IMAGE" sh -c \
-            "cmake -S dm/host -B build/win64 -G Ninja -DGAME=$GAME -DNXHOST_PROGRAM=ON -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake && cmake --build build/win64 --target all nxhost-run"
+            "cmake -S dm/host -B build/win64 -G Ninja -DGAME=$GAME -DNXHOST_PROGRAM=ON -DNXHOST_LAUNCHER=ON -DCMAKE_TOOLCHAIN_FILE=/src/dm/host/cmake/x86_64-w64-mingw32.cmake && cmake --build build/win64 --target all nxhost-run nxlauncher"
       # The .exe files are linked statically: they import only Windows' own DLLs (KERNEL32, bcrypt and the UCRT; with SDL3 also USER32, GDI32 and other system DLLs: docker/README.md), so no DLL goes with them.
-      # nxhost-run.exe goes with the tests: t_host_program looks for it beside itself
+      # nxhost-run.exe and nxlauncher.exe go with the tests: t_host_program and t_launcher_window look for them beside themselves
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: win64-tests

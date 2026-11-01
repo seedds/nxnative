@@ -1,12 +1,16 @@
 """NSP script packs for Windows and Linux (scripts/build_ipa_from_nsp.py --platform linux / windows): the recompiler's input (patch_nso.py --aot, one run beside Apple's outputs) and nro.tsv in
-<id>_build/aot_<version>/, nxaot build of every module and NRO into <name>.aot.so (Linux) or with --target windows into <name>.aot.dll (Windows), the Vulkan shader steps (dmsh_build_vk.py,
-gl_shaders.py --vk, none for a guest Vulkan game), the run script, an nxaot without --target stopping a Windows pack at the start, and the reuse of every step on a second run. Real fingerprints,
-a fake nxaot that writes its pack, mock runs of the other tools; synthetic NSO headers, a fake NRO in a fake RomFS and a synthetic control.nacp: no game files, keys, .NET, Docker or Xcode
-needed (temporary files only)."""
+<id>_build/aot_<version>/, nxaot build of every module and NRO into <name>.aot.so (Linux) or with --target windows into <name>.aot.dll (Windows), both pack modes side by side (max in
+aot_<version>/max/), the Vulkan shader steps (dmsh_build_vk.py, gl_shaders.py --vk, none for a guest Vulkan game), the launcher's settings (launcher-<platform>.json: settings.py's call; test_settings_platforms.py tests the lists),
+the launch file (launch-<platform>.tsv) and the run script that reads it: run.sh is run with a stand-in for nxhost-run and checked against the launch file's rules (the environment, then the
+player's env.txt, then the env rows), an nxaot without --target stopping a Windows pack at the start, and the reuse of every step on a second run. Real fingerprints, a fake nxaot that
+writes its pack, mock runs of the other tools; synthetic NSO headers, a fake NRO in a fake RomFS and a synthetic control.nacp: no game files, keys, .NET, Docker or Xcode needed
+(temporary files only)."""
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -54,6 +58,46 @@ def control(path, name, disp):   # control.nacp: the American English title at 0
 
 def sources(gfx):   # profile_guess.build_sources: the graphics API and no run-time shaders
     return {'graphics': (gfx, f'a {gfx} game'), **{k: (False, '') for k in ('glslc_capture', 'vk_capture', 'gl_capture', 'ue_decode', 'oodle_packs', 'ue_legacy')}}
+
+
+FAKE_HOST = '''#!{py}
+# a stand-in for nxhost-run: what it was started with, as JSON in $FAKE_OUT
+import json, os, sys
+json.dump({{'env': dict(os.environ), 'argv': sys.argv[1:], 'cwd': os.getcwd()}}, open(os.environ['FAKE_OUT'], 'w'))
+'''
+
+
+def launch_rows(path):
+    """The launch file as a reader takes it: '# nxnative launch 1' first, then (kind, name, value) rows; # lines skipped"""
+    lines = path.read_text(encoding='utf-8').splitlines()
+    assert lines[0] == '# nxnative launch 1', lines[0]
+    return [tuple(line.split('\t', 2)) for line in lines if line and not line.startswith('#')]
+
+
+def env_txt(path):
+    """The player's env.txt as dm/mac/launcher.c's env_file reads an env file (and so the launcher and run.sh's awk): blanks around the line and before the =, # comments, the value as it is
+    after the =; a name a shell cannot export is skipped"""
+    out = []
+    for line in path.read_text(encoding='utf-8').splitlines() if path.is_file() else []:
+        line = line.strip(' \t\r')
+        k, eq, v = line.partition('=')
+        k = k.rstrip(' \t')
+        if line.startswith('#') or not eq or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', k): continue
+        out.append((k, v))
+    return out
+
+
+def compose(launch, environ, nxpack=None):
+    """What a reader of the launch file starts, by its rules: (host, pack folder, working folder, the variables it sets). The environment first, then the player's env.txt unless
+    DM_SAVED_CHOICES=0, then the env rows, each only where nothing set it before"""
+    rows = launch_rows(launch)
+    paths = {n: v for k, n, v in rows if k == 'path'}
+    aot = next((v for k, n, v in rows if k == 'pack' and (not nxpack or n == nxpack)), None)
+    have, added = dict(environ), {}
+    pairs = env_txt(Path(paths['choices'])) if environ.get('DM_SAVED_CHOICES') != '0' else []
+    for k, v in pairs + [(n, v) for k, n, v in rows if k == 'env']:
+        if k not in have: have[k] = added[k] = v
+    return paths['host'], aot, paths['cwd'], added
 
 
 def loader_rows(text):
@@ -116,6 +160,11 @@ class Pack(unittest.TestCase):
         tool = Path(cmd[1] if cmd[0] == sys.executable else cmd[0]).name
         self.ran.append((tool, cmd))
         if tool == 'nxaot': return REAL_RUN(cmd, log, env=env, cwd=cwd, on_line=on_line, ok=ok)   # the fake nxaot, run for real
+        if tool == 'settings.py':   # the launcher's settings (test_settings_platforms.py tests the lists): what it was asked for, and a list of one row
+            self.settings_env = {k: env.get(k) for k in ('SETTINGS_PLATFORM', 'GFXAPI', 'DM_LANG')}
+            Path(cmd[-1]).write_text(json.dumps({'schema': 1, 'game': cmd[2], 'settings': [{'env': 'DM_RUMBLE', 'kind': 'toggle', 'section': 'Controls', 'label': 'Game rumble', 'note': '',
+                                                                                            'default': '1', 'on': '1', 'off': '0', 'level': 'basic'}]}))
+            return 0
         if tool == 'nro_collect.py':   # the registered NRO, found loose: nro.tsv as nro_collect.py writes it (a refused online SDK too)
             out = Path(cmd[3]); out.mkdir(parents=True); (out / 'nro0.nro').write_bytes(self.nro)
             (out / 'nro.tsv').write_text('# name\tsha256\tsize\tnrr\twhere\n' + f'nro0\t{hashlib.sha256(self.nro).hexdigest()}\t{len(self.nro)}\tgame.nrr\tloose a.nro\n'
@@ -148,6 +197,24 @@ class Pack(unittest.TestCase):
     @property
     def aot(self): return self.work / 'aot_v0'
 
+    def run_sh(self, *args, **env):
+        """run.sh with a stand-in for nxhost-run (NXHOST) and only PATH besides env in its environment: (exit status, stderr, what the stand-in was started with or None)"""
+        host, out = self.tmp / 'bin/nxhost-run', self.tmp / 'host.json'
+        if not host.is_file(): host.write_text(FAKE_HOST.format(py=sys.executable)); host.chmod(0o755)
+        out.unlink(missing_ok=True)
+        r = subprocess.run(['sh', str(self.work / 'run.sh'), *args], env={'PATH': os.environ['PATH'], 'NXHOST': str(host), 'FAKE_OUT': str(out), **env},
+                           capture_output=True, text=True, timeout=60)
+        return r.returncode, r.stderr, json.loads(out.read_text()) if out.is_file() else None
+
+    def check_run_sh(self, nxpack=None, **env):
+        """run.sh starts nxhost-run as the launch file's rules say (compose): the host, the pack folder, the working folder, every DM_ variable"""
+        rc, err, got = self.run_sh('main', '--', 'arg', **env, **({'NXPACK': nxpack} if nxpack else {}))
+        self.assertEqual((rc, err), (0, ''))
+        host, aot, cwd, added = compose(self.work / 'launch-linux.tsv', env, nxpack)
+        self.assertEqual((got['argv'], got['cwd']), ([aot, 'main', '--', 'arg'], cwd))
+        self.assertEqual({k: v for k, v in got['env'].items() if k.startswith('DM_')}, {**{k: v for k, v in env.items() if k.startswith('DM_')}, **added})
+        return got
+
 
 class Linux(Pack):
     def test_layout_invocations_and_reuse(self):
@@ -172,16 +239,39 @@ class Linux(Pack):
         # the NVN shaders: dmsh_build_vk.py from the split's package into the game's shader folder
         self.assertEqual(self.tools('dmsh_build_vk.py'), [[sys.executable, str(REPO / 'dm/gfx/tools/dmsh_build_vk.py'), str(self.work / 'shader/pkg'), str(self.work / 'shader/cache')]])
         self.assertEqual(self.tools('gl_shaders.py'), [])
-        # the run script
+        # the launch file: what run.sh and the launcher nxlauncher both read
+        rows = launch_rows(self.work / 'launch-linux.tsv')
+        self.assertEqual({n: v for k, n, v in rows if k == 'game'}, {'title': 'Test Game', 'title_id': ID, 'version': '1.0.0', 'package': 'v0', 'platform': 'linux', 'graphics': 'nvn'})
+        self.assertEqual({n: v for k, n, v in rows if k == 'path'}, {'host': str(REPO / 'build/linux/nxhost-run'), 'cwd': str(self.wdir / 'run'), 'choices': str(self.wdir / 'run/env.txt'),
+                                                                    'log': str(self.wdir / 'run/log.txt'), 'settings': str(self.work / 'launcher-linux.json')})
+        self.assertEqual([(n, v) for k, n, v in rows if k == 'pack'], [('balanced', str(aot))])
+        self.assertEqual([(n, v) for k, n, v in rows if k == 'env'], [
+            ('DM_ROOT', str(self.work)), ('DM_ROMFS', str(self.game / 'RomFS')), ('DM_SAVE', str(self.wdir / 'run/save')), ('DM_TEMP', str(self.wdir / 'run/temp')),
+            ('DM_MSL_DIR', str(self.work / 'shader/cache')), ('DM_NVN_SHMAP', str(self.prof / 'shader_map.tsv')), ('DM_LANG', 'en-US'), ('DM_WINDOW', '1'), ('DM_AUDIO', '1')])
+        # the launcher's settings: settings.py's list for Linux, for this game's graphics API and packed language
+        self.assertEqual(self.tools('settings.py'), [[sys.executable, str(REPO / 'dm/games/settings.py'), ID, str(self.work / 'patched_v0'), str(self.game / 'control.nacp'),
+                                                      str(self.work / 'launcher-linux.json')]])
+        self.assertEqual(self.settings_env, {'SETTINGS_PLATFORM': 'linux', 'GFXAPI': 'nvn', 'DM_LANG': 'en-US'})
+        self.assertEqual(json.loads((self.work / 'launcher-linux.json').read_text())['game'], ID)
+        # the run script reads the launch file at every start
         sh = (self.work / 'run.sh').read_text()
         self.assertTrue(os.access(self.work / 'run.sh', os.X_OK))
-        self.assertIn(f'exec "${{NXHOST:-{REPO / "build/linux/nxhost-run"}}}" {self.aot} "$@"', sh)
-        for k, v in (('DM_ROMFS', self.game / 'RomFS'), ('DM_SAVE', self.wdir / 'run/save'), ('DM_TEMP', self.wdir / 'run/temp'), ('DM_MSL_DIR', self.work / 'shader/cache'),
-                     ('DM_NVN_SHMAP', self.prof / 'shader_map.tsv'), ('DM_LANG', 'en-US'), ('DM_WINDOW', 1), ('DM_AUDIO', 1)):
-            self.assertIn(f'\nexport {k}={v}\n', sh)
+        self.assertIn(f'\nlaunch={self.work / "launch-linux.tsv"}\n', sh)
+        self.assertTrue(sh.endswith('\nexec "${NXHOST:-$host}" "$aot" "$@"\n'))
         self.assertIn(f'-DGAME={ID}', sh); self.assertNotIn('DM_GAMES_DIR', sh)   # a registered profile
         self.assertTrue((self.wdir / 'run/save').is_dir())
         self.assertFalse((self.work / 'tmp').exists())
+        got = self.check_run_sh()
+        self.assertEqual(got['env']['DM_SAVE'], str(self.wdir / 'run/save'))
+        # the player's choices (env.txt, as the launcher writes it, and as a player edits it) come before the env rows; what the environment sets stays
+        (self.wdir / 'run/env.txt').write_text('# the player\'s choices\nDM_OPMODE=0\r\n  DM_LANG = ja  \nDM_QUOTE=it\'s "$HOME" `x`\nbad name=1\n=x\nDM_RUMBLE=0\n', encoding='utf-8')
+        got = self.check_run_sh(DM_RUMBLE='1')
+        self.assertEqual({k: got['env'][k] for k in ('DM_OPMODE', 'DM_LANG', 'DM_QUOTE', 'DM_RUMBLE', 'DM_WINDOW')},
+                         {'DM_OPMODE': '0', 'DM_LANG': ' ja', 'DM_QUOTE': 'it\'s "$HOME" `x`', 'DM_RUMBLE': '1', 'DM_WINDOW': '1'})
+        self.assertNotIn('DM_OPMODE', self.check_run_sh(DM_SAVED_CHOICES='0')['env'])   # DM_SAVED_CHOICES=0: env.txt is not read
+        self.assertEqual(self.check_run_sh(DM_ROMFS='/elsewhere')['env']['DM_ROMFS'], '/elsewhere')
+        rc, err, got = self.run_sh(NXPACK='max')   # no max pack yet
+        self.assertEqual((rc, got), (1, None)); self.assertIn('[RED] run.sh: ', err); self.assertIn('--pack-mode max', err)
         # a second run reuses every step: no rewrite, no pack, no shader build
         first = {p.name: p.read_bytes() for p in aot.iterdir() if p.is_file()}
         self.pack()
@@ -193,9 +283,25 @@ class Linux(Pack):
         self.assertEqual(len(self.rewrites), 2)
         self.assertEqual([Path(c[2]).name for c in self.tools('nxaot')], ['nro0.nro'])
         self.assertEqual(loader_rows((aot / 'nro.tsv').read_text())[0][1], hashlib.sha256(self.nro).hexdigest())
-        # another pack mode packs everything again
+        # another pack mode packs everything again, into aot_v0/max/ beside links to the same input; the balanced packs stay, and both are offered, the one just packed first
+        balanced = {p.name: p.read_bytes() for p in aot.iterdir() if p.is_file()}
         self.pack('linux', '--pack-mode', 'max')
         self.assertEqual([c[c.index('--mode') + 1] for c in self.tools('nxaot')], ['max', 'max'])
+        self.assertEqual([Path(c[c.index('--shared') + 1]).name for c in self.tools('nxaot')], ['main.aot.so', 'nro0.aot.so'])
+        self.assertEqual({p.name: p.read_bytes() for p in aot.iterdir() if p.is_file()}, balanced)
+        self.assertEqual(sorted(p.name for p in (aot / 'max').iterdir()), ['.keys', 'main.aot.so', 'main.aot.tsv', 'main.image.bin', 'nro.tsv', 'nro0.aot.so'])
+        for n in ('main.aot.tsv', 'main.image.bin', 'nro.tsv'): self.assertTrue(os.path.samefile(aot / n, aot / 'max' / n), n)
+        self.assertEqual([(n, v) for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'pack'], [('max', str(aot / 'max')), ('balanced', str(aot))])
+        self.assertEqual(self.check_run_sh()['argv'][0], str(aot / 'max'))   # run.sh: the first pack row, or NXPACK
+        self.assertEqual(self.check_run_sh('balanced')['argv'][0], str(aot))
+        self.pack('linux'); self.assertEqual(self.tools('nxaot'), [])   # each mode keeps its own keys
+        self.assertEqual([n for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'pack'], ['balanced', 'max'])
+        # a new image of main: the next pack of one mode makes its packs again and the other mode is no longer offered (its packs are of the old image)
+        main = bytearray((self.game / 'ExeFS/main').read_bytes()); main[8] = 1; (self.game / 'ExeFS/main').write_bytes(bytes(main))   # same build ID, another image
+        self.pack('linux', '--pack-mode', 'max')
+        self.assertEqual([Path(c[2]).name for c in self.tools('nxaot')], ['main.aot.tsv'])
+        self.assertEqual([n for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'pack'], ['max'])
+        self.assertEqual((aot / 'max/main.image.bin').read_bytes(), (aot / 'main.image.bin').read_bytes())   # linked again to the new input
 
     def test_sample_profiles(self):   # <NSP folder>/<id>-work/profile/<module>.tsv (dm/host/aot_profile.c writes them): nxaot build --profile, part of the pack's key; --no-profile
         self.pack()
@@ -275,8 +381,10 @@ class Linux(Pack):
         self.gfx = 'gl'; self.pack()
         self.assertEqual(self.tools('gl_shaders.py'), [[sys.executable, str(REPO / 'dm/gfx/tools/gl_shaders.py'), str(self.game / 'RomFS'), str(self.game / 'ExeFS/main'), str(self.work / 'shader'), '--vk']])
         self.assertEqual(self.tools('dmsh_build_vk.py'), [])
-        sh = (self.work / 'run.sh').read_text()
-        self.assertIn(f'\nexport DM_MSL_DIR={self.work / "shader"}\n', sh); self.assertNotIn('DM_NVN_SHMAP', sh)
+        envs = {n: v for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'env'}
+        self.assertEqual(envs['DM_MSL_DIR'], str(self.work / 'shader')); self.assertNotIn('DM_NVN_SHMAP', envs)
+        self.assertEqual(self.settings_env['GFXAPI'], 'gl')
+        self.assertEqual(self.check_run_sh()['env']['DM_MSL_DIR'], str(self.work / 'shader'))
         self.pack(); self.assertEqual(self.tools('gl_shaders.py'), [])
 
     def test_vulkan_game(self):
@@ -292,9 +400,23 @@ class Linux(Pack):
         self.assertEqual(game.Game(pdir / ID).builds()['v0']['main'], BID2)
         sh = (self.work / 'run.sh').read_text()
         self.assertIn(f'with DM_GAMES_DIR={pdir} and DM_GAMES_FIRST=1', sh)
-        self.assertIn(f'\nexport DM_NVN_SHMAP={pdir / ID / "shader_map.tsv"}\n', sh)
+        self.assertIn(('env', 'DM_NVN_SHMAP', str(pdir / ID / 'shader_map.tsv')), launch_rows(self.work / 'launch-linux.tsv'))
         self.pack()
         self.assertEqual((self.rewrites, self.tools('nxaot')), ([], []))
+
+    def test_env_file_switches_in_the_launch_file(self):   # --env-file: env rows before the layout's, winning over its DM_LANG; the player's env.txt still wins over them
+        envf = self.tmp / 'switches.txt'; envf.write_text('# diagnostics\nDM_MOTION=0\nDM_LANG=ja\n')
+        self.pack('linux', '--env-file', str(envf))
+        envs = [(n, v) for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'env']
+        self.assertEqual(envs[:3], [('DM_MOTION', '0'), ('DM_LANG', 'ja'), ('DM_ROOT', str(self.work))])
+        self.assertEqual([n for n, _ in envs].count('DM_LANG'), 1)
+        self.assertEqual(self.check_run_sh()['env']['DM_LANG'], 'ja')
+        (self.wdir / 'run/env.txt').write_text('DM_MOTION=1\n')
+        self.assertEqual(self.check_run_sh()['env']['DM_MOTION'], '1')
+        envf.write_text('bad name=1\n')
+        with self.assertRaisesRegex(nsp.BuildError, "sets 'bad name', which is not a variable name"): self.pack('linux', '--env-file', str(envf))
+        envf.write_text('DM_X=a\tb\n')
+        with self.assertRaisesRegex(nsp.BuildError, 'holds a tab or a line break'): self.pack('linux', '--env-file', str(envf))
 
     def test_options_belong_to_the_port(self):
         with self.assertRaisesRegex(nsp.BuildError, '--platform linux / windows'):
@@ -320,11 +442,20 @@ class Windows(Pack):
         self.assertEqual(len(self.tools('dmsh_build_vk.py')), 1)
         self.assertTrue(any(m.startswith('recompiler: ') and m.endswith(', DLLs: --target windows)') for m in self.said))
         self.assertTrue(any(m.startswith('done: the windows pack of ') for m in self.said))
-        # run.cmd: the nxhost-run command line, CRLF lines
+        # the launch file: the Windows host program, the DLL packs' folder; settings.py's list for Windows
+        rows = launch_rows(self.work / 'launch-windows.tsv')
+        self.assertIn(('path', 'host', str(REPO / 'build/win64/nxhost-run.exe')), rows); self.assertIn(('game', 'platform', 'windows'), rows)
+        self.assertEqual([r for r in rows if r[0] == 'pack'], [('pack', 'balanced', str(aot))])
+        self.assertIn(('env', 'DM_SAVE', str(self.wdir / 'run/save')), rows)
+        self.assertEqual(self.settings_env['SETTINGS_PLATFORM'], 'windows')
+        self.assertTrue((self.work / 'launcher-windows.json').is_file())
+        # run.cmd reads it (cmd.exe does not run here: the text only), CRLF lines; for /f splits the rows at the tab
         cmd = (self.work / 'run.cmd').read_bytes().decode()
         self.assertTrue(cmd.startswith('@echo off\r\n')); self.assertNotIn('\n', cmd.replace('\r\n', ''))
-        self.assertIn(f'\r\nif not defined NXHOST set "NXHOST={REPO / "build/win64/nxhost-run.exe"}"\r\n"%NXHOST%" "{self.aot}" %*\r\n', cmd)
-        self.assertIn(f'\r\nset "DM_SAVE={self.wdir / "run/save"}"\r\n', cmd)
+        self.assertIn(f'\r\nset "NXRUN_LAUNCH={self.work / "launch-windows.tsv"}"\r\n', cmd)
+        self.assertEqual(cmd.count('for /f "usebackq eol=# tokens=1,2,* delims=\t" %%a in ("%NXRUN_LAUNCH%") do'), 2)
+        self.assertIn('\r\nif defined NXHOST set "NXRUN_host=%NXHOST%"\r\n', cmd)
+        self.assertIn('\r\n"%NXRUN_host%" "%NXRUN_AOT%" %*\r\nset "NXRUN_RC=%errorlevel%"\r\n:nxrun_end\r\nif defined NXRUN_CP chcp %NXRUN_CP% > nul\r\nexit /b %NXRUN_RC%\r\n', cmd)
         self.assertIn('x86_64-w64-mingw32.cmake', cmd)
         self.assertIn(f'\r\nrem set "DM_AOT_PROFILE={self.wdir / "profile"}"\r\n', cmd)
         # a second run reuses every step

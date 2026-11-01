@@ -1,12 +1,13 @@
 # Settings
 
-The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
+The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window), and on Windows and Linux the [launcher](#on-windows-and-linux) shows them for every game packed on the PC.
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
+- [On Windows and Linux](#on-windows-and-linux)
 - [Settings in a file](#settings-in-a-file)
 
 ## Tested defaults
@@ -49,6 +50,7 @@ Breath of the Wild renders 1280x720 in handheld mode. Docked it renders its worl
 - **When to change it:** turn it on if the picture looks soft and the device has GPU time to spare: on a Mac, or on an iPhone in handheld mode at 30 fps. For long sessions at 60 fps on an iPhone leave it at Standard.
 - **Cost:** more GPU time each frame, which can increase heat on an iPhone. [Breath of the Wild's measurements](../dm/games/01007EF00011E000/README.md#upscaling-current) cover Mac and iPhone; the matching iPhone Standard run and MetalFX's share of the thermal cost remain unmeasured. Nothing changes while the game's picture is as large as the screen. Unsupported devices and sizes use Standard scaling.
 - **On the Mac:** choose **MetalFX** under **Upscaling** in the [settings window](#the-mac-settings-window)'s Advanced settings, or set `DM_PRESENT_UPSCALE=metalfx` in its `env.txt` (off by default). It helps in a large window or on a 4K screen.
+- **On Windows and Linux:** MetalFX is Apple's; the PC offers two scalers of its own under **Upscaling** in the [launcher](#on-windows-and-linux)'s Advanced settings. **FSR 1** is AMD FidelityFX Super Resolution 1.0, which sharpens edges as it scales, as MetalFX does, and works on any GPU; its sharpness is `DM_PRESENT_SHARPEN` (0.2 by default, 0 the sharpest). **Integer** scales by the largest whole multiple that fits the window, every pixel a sharp square, centred with black borders around it (a picture larger than the window is scaled smoothly): for pixel-art games. **Standard** (the default) scales smoothly. In `env.txt`: `DM_PRESENT_UPSCALE=fsr`, `integer` or `off`; `metalfx` there means FSR 1.
 
 ### Game language
 
@@ -192,6 +194,20 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
+## On Windows and Linux
+
+On a PC, a game packed with `scripts/build_ipa_from_nsp.py --platform linux` or `--platform windows` ([Packing for Windows and Linux](development.md#packing-for-windows-and-linux)) starts from the launcher, `nxlauncher` (`nxlauncher.exe` on Windows; [The launcher](development.md#the-launcher-nxlauncher) says how it is built). Open it from the file manager, a shortcut or a terminal. Its window lists the games packed on this PC on the left, each with its version, the pack modes it has and when it was last played. The chosen game's settings are on the right, as the [Mac settings window](#the-mac-settings-window) shows them: the most used ones first, the others under **Advanced settings**, with **Reset to tested defaults**. The keyboard (arrow keys, Tab, Space, Enter) and a controller (the D-pad and the A button) move through the window too.
+
+- **Games folder**, at the top: where the launcher looks for packs, each game's `<id>_build` folder in it or one level down (the NSP folder of each game). It is the launcher's own folder until you type another and choose **Open**; the launcher remembers it.
+- **Pack**: **Balanced** (a shorter pack, the default) or **Max** (a faster game, a longer pack), among the modes the game was packed in. The packing script makes the other mode (`--pack-mode max`); both are kept side by side, so you can switch at any time.
+- **Pipeline cache**: **Keep the Vulkan pipelines on disk** (on by default) keeps the pipelines the GPU builds for the game, so later starts build fewer; the folder is shown below it (`vk_pipeline_cache`, beside the save). Off sets `DM_VK_PSO_CACHE=off`. The host keeps one file per game, driver and shader chain version, and deletes the files of another driver or chain version at start. A size limit, and a switch for that cleanup, are not there yet.
+
+Click **Play** to start the game. The launcher stays open and shows the game's last log lines at the bottom; the whole log is `<NSP folder>/<id>-work/run/log.txt`, the previous run's `log.prev.txt` beside it. **Quit** or closing the window ends the launcher; a game it started goes on. The launcher remembers your choices for that game in `<NSP folder>/<id>-work/run/env.txt`, beside its save: a `KEY=VALUE` line for each setting you changed, as in [Settings in a file](#settings-in-a-file). A setting at its default has no line, so a later pack's tested defaults reach you. The file is yours too: a line you add (a setting, or another switch of [docs/env_switches.tsv](env_switches.tsv)) applies at the next start, and the launcher keeps it. The pack's `run.sh` (`run.cmd`) reads the same file, so a game started from it gets your choices too. A setting set in the environment the launcher was started with is shown greyed out (**Set at launch**) and wins for that start. A saved value the game's pack no longer offers is shown at its default, and **Play** replaces it.
+
+Turn off **Show this window at launch** to start the game you played last at once with your choices. Run `nxlauncher --window` to see the window again. `DM_LAUNCHER=0` in the launcher's environment or in that game's `env.txt` also skips the window; your choices still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults instead: the `env.txt` is not read, and it is kept. The launcher's own settings (the games folder, its switches, each game's pack mode and last start) are in `launcher.txt` in `~/.config/nxnative/` (`$XDG_CONFIG_HOME/nxnative/` when that is set) on Linux, and in `%APPDATA%\nxnative\` on Windows.
+
+The settings are the [list](../dm/games/settings.tsv) the pack carries (`<id>_build/launcher-<platform>.json`): those of the iPhone and the Mac that the PC host reads, and **Display mode** as on the Mac (F11 or Alt+Enter changes it while you play). **Frame buffering**, **Metal 4 pipelines**, **Pipeline prebuild**, **Encode thread** and the **Performance HUD** belong to Metal and are not listed; **Upscaling** offers the PC's own scalers ([Upscaling](#upscaling)).
+
 ## Settings in a file
 
 A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under the app's name) sets a setting from the file: the settings screen shows it greyed out, and the file wins over your choice and the game's default. Fully close and reopen the app after editing the file. The variables:
@@ -208,7 +224,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
-| Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
+| Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx`; on Windows and Linux `off`, `fsr`, `integer` |
 | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
 | Metal 4 pipelines | `DM_PSO_MTL4` | `1`, `0` |
 | Pipeline prebuild | `DM_PSO_PREBUILD` | `1`, `0` |

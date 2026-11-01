@@ -28,12 +28,15 @@ on:
         description: "Flags for build_ipa_from_nsp.py; default builds a self-contained IPA (game files packed inside). Add --romfs separate only if the runner runs out of disk"
         required: false
         default: ""
+      ipa_name:
+        description: "Short slug for the IPA file and release assets; empty = derived from the manifest's game name"
+        required: false
+        default: ""
 
 env:
   # The toolchain the project supports (README: Xcode 27.1; dm/gfx/tools/dmsh_chain.lock: its Metal compiler),
   # named by path so the image's default moving to another Xcode does not move this job.
   DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-  IPA_NAME: zelda-totk
 
 permissions:
   contents: write   # the job publishes the release with the IPA parts
@@ -46,9 +49,6 @@ jobs:
   build-ipa:
     runs-on: xcode-27
     timeout-minutes: 330
-    concurrency:
-      group: build-ipa
-      cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,6 +95,15 @@ jobs:
         run: |
           set -e
           curl -fsS --retry 10 --retry-delay 5 "$MANIFEST_URL" -o manifest.json
+          # IPA/release slug: workflow input if given, else derived from the manifest's game name
+          # ("The Legend of Zelda Tears of the Kingdom [0100...].xci" -> "the-legend-of-zelda-tears-of-the-kingdom")
+          if [ -n "${{ inputs.ipa_name }}" ]; then
+            IPA_NAME="${{ inputs.ipa_name }}"
+          else
+            IPA_NAME=$(python3 -c "import json, re; g = json.load(open('manifest.json'))['game']; g = re.split(r' ?\[', g)[0]; print(re.sub(r'[^A-Za-z0-9]+', '-', g).strip('-').lower() or 'game')")
+          fi
+          echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
+          echo "IPA name: $IPA_NAME"
           python3 - <<'PY' > dl.tsv
           import json, sys
           m = json.load(open('manifest.json'))
@@ -144,6 +153,7 @@ jobs:
           ls -lh parts
           tag="ipa-${GITHUB_RUN_NUMBER}"
           gh release create "$tag" parts/"${IPA_NAME}".ipa.part-* \
+          --title "$IPA_NAME (run ${GITHUB_RUN_NUMBER})" \
             --title "IPA (run $GITHUB_RUN_NUMBER)" \
             --notes "Join the parts with join_ipa.ps1 from the kit, then follow the kit's install steps."
           echo "Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"

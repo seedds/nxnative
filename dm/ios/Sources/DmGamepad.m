@@ -128,6 +128,7 @@ static const CGFloat
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
+double mtl_present_aspect(void);   // nvn_mtl.m: width / height of the picture the last present showed
 
 @interface DmGamepad : UIView
 @end
@@ -319,7 +320,8 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 - (void)pushGame {
     CGRect b = self.bounds; CGFloat w = b.size.width, h = b.size.height;
     if (w <= 0 || h <= 0) return;
-    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
+    double pa = 16.0 / 9.0; { const char *m = getenv("DM_BAR_FILL"); if (m && (!strcmp(m, "blur") || !strcmp(m, "image")) && mtl_present_aspect() > 0) pa = mtl_present_aspect(); }   // the bars filled: the view is the whole screen and the picture is fitted in it as the present did
+    if (w / h > pa) w = h * pa; else h = w / pa;
     CGFloat x0 = (b.size.width - w) / 2, y0 = (b.size.height - h) / 2;
     dm_touch t[16]; int n = 0;
     for (int i = 0; i < 16; i++) if (_game[i]) {

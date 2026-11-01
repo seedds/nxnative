@@ -2,11 +2,24 @@
 
 A graphical app that packs games, keeps a library of them or starts them is a project of its own that builds on nxnative. [NX2Apple](https://github.com/LNPANDY/NX2Apple), [NX Play](https://github.com/varyform/nx-native-wrapper) and [NxNative Launcher](https://github.com/rennan101/nxnative_Launcher) are such apps. This page lists what such an app can rely on: how it runs a build and follows it, what a built app says about its game's settings, and how it starts a game with them. None of it needs a change to nxnative; when a front end needs more, the piece it needs is an issue or a small PR here.
 
+- [Following main](#following-main)
 - [Building: the NSP script](#building-the-nsp-script)
 - [The settings list](#the-settings-list)
 - [Starting a game](#starting-a-game)
 - [An app that hosts the engine](#an-app-that-hosts-the-engine)
 - [What a front end cannot see yet](#what-a-front-end-cannot-see-yet)
+
+## Following main
+
+Changes that matter to front ends carry `Frontends:` lines in their commit messages: compatibility and migration needs, interface changes, and new capabilities. The [contributor convention](../CONTRIBUTING.md#for-front-ends) also puts those lines in the PR so they can be reviewed before they reach `main`.
+
+After fetching upstream, compare the nxnative revision you currently use with the one you plan to adopt. Replace `OLD` and `NEW` below with those two locally available commit IDs:
+
+```sh
+git log --reverse --format='%h %s%n%b' --grep='^Frontends:' OLD..NEW
+```
+
+The output names the commits and includes their notes and links. Follow any migration or rebuild instructions and read the current interface documentation before updating. The convention applies to new changes; older commits have not been backfilled. No matching note is not proof that an update is compatible: review the full range too, especially when crossing history from before this convention.
 
 ## Building: the NSP script
 

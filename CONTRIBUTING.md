@@ -29,6 +29,18 @@ Never commit or attach game files, keys, title keys or anything extracted from a
 - **Tests.** CI runs the host tests, the CPU-only graphics tests, the tool tests and the builds ([Continuous integration](docs/development.md#continuous-integration)). GitHub's runners have no Metal 4, so run the GPU tests on an Apple-silicon Mac: `make -C dm/gfx/tests GAME=<id> run`.
 - **The PR text.** Fill in the template: what and why, what was checked (tests, games, devices), and which docs changed.
 
+## For front ends
+
+When a change matters to projects that build on nxnative, put a short note in the PR's **For front ends** section and in the commit message. Use the applicable lines below, starting each at the beginning of a line; omit categories that do not apply. If none apply, write `None.` in that PR section and omit the commit notes.
+
+- `Frontends: compatibility: ...` — a change to existing behavior, saved data, cached builds or requirements. Say what changes, who is affected, and what migration or rebuild is needed, including a shader-chain bump's effect on existing builds. If a needed migration is not provided, say so.
+- `Frontends: interface: ...` — an added, changed or removed environment variable, script argument, JSON event or field, manifest or profile field, or file/output path. Name the interface and describe its old and new behavior, defaults and compatibility as applicable.
+- `Frontends: capability: ...` — a new setting, input format, supported game class or other function a front end can offer. Say how to use or discover it and any requirements.
+
+Keep each note to one line and link the detailed documentation or issue when needed. These are notices for downstream authors, not a second copy of the implementation description. A change can need more than one category. The convention also applies to changes committed directly to `main`.
+
+When squashing or reworking a PR, carry its applicable `Frontends:` lines into the final commit message, updating them to describe what actually lands. A note only in the PR is not discoverable in `git log`. [Following main](docs/frontends.md#following-main) shows downstream authors how to find the notes; it does not replace the interface documentation.
+
 ## Large changes and other platforms
 
 - **Agree on the scope first.** Open an issue before writing a change that adds a platform or device class, adds a second implementation of an existing path (for example a rendering path for GPUs without Metal 4), or runs to more than about 1,000 lines. A large PR built on an older `main` can rarely be reviewed or merged, however well it was tested.

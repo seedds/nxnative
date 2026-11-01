@@ -4,6 +4,13 @@
 
 <!-- The symptom or the need, the cause, and the change. Link the issue (Fixes #...) and the reference entry or game note it adds. -->
 
+## For front ends
+
+<!-- Follow CONTRIBUTING.md#for-front-ends. Keep only applicable lines, or replace all three with "None.". Copy the final plain-text lines into the commit message, including when squashing or reworking the PR. -->
+Frontends: compatibility: <!-- Existing behavior/data/cache or requirements that change; affected users and migration/rebuild needed (or missing). -->
+Frontends: interface: <!-- Named environment variable, argument, JSON event/field, manifest/profile field or path; old/new behavior and defaults. -->
+Frontends: capability: <!-- New setting, input format, game class or function; how to use/discover it and its requirements. -->
+
 ## Checked
 
 <!-- Delete what does not apply. Say what was not checked too. -->

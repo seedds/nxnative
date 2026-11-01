@@ -48,7 +48,9 @@ def find_key(img, lo, hi, path, jobs=8):
 def entries(path, key):
     """→ ([(hash, stored length, data offset, length, compressed)] of the plain files, the number of records of other kinds). Only these two kinds are read: shaders.rpf has nothing else.
     The other archives also hold resources (bit 31 of the length word, in 26,892 records of 128 archives) and records with a non-zero last word; their packing is not known here"""
-    n, _ = header(path)
+    hd = header(path)
+    if not hd: sys.exit(f'[RED] {path}: not an RPF6 archive')
+    n = hd[0]
     with open(path, 'rb') as f: f.seek(16); toc = f.read((n * 20 + 15) & ~15)
     toc = decrypt(key, toc)
     out, other = [], 0

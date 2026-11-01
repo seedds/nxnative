@@ -826,6 +826,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `dm/gfx/tests/test_dmsh_tgmem.py`: the rule (over the limit: a device slice, the helpers, atomics and barriers rewritten; within it: unchanged), and on the Mac's GPU a 48 KB kernel with a barrier, rewritten, over 256 threadgroups: every output right, no threadgroup past the bound.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#shaders): 168 compute shaders of `DrivePassShaderDefault.sharcb` declare 48 KB; seven run up to the first race. With the fix their pipelines are made and no `failed to create compute pipeline` line remains on the route to the first race; every dispatch on that route fit the first 1 MB buffer (21 threadgroups), no threadgroup lay past the bound, and the picture shows no change (the rainbow bands in the sky stay).
 
+### Ampere UP2UR
+
+- **Symptom:** the shader build lists `NotSupportedException: Ampere instruction 883` in `_b_build.json`, and the log `[RED] failed to load shader <key>_b` for those keys; what the shader draws is missing.
+- **Cause:** the translator had no encoding for UP2UR (0x883), which packs uniform predicates into a uniform register: bit k of the destination (16..22) is UPk where the mask (32..64) has bit k set. Source: the Eglantine fork's `lower_to_maxwell.h:709` (commit `1dd40d8`), which decodes the same fields; Mesa NAK has no encoder for it. The game's own code agrees: each UP2UR follows uniform compares that set UP0..UP5 from bits of a uniform register.
+- **Fix:** `AUp2ur` (`InstEmitAmpereAlu.cs`) ORs `1 << k` for each selected UPk into the uniform register. Only the form the game encodes is decoded (URZ at 24..32, word 2 `0x08000000`, mask within UP0..UP6); another form fails as before. A chain change.
+- **Check:** `dm/gfx/tests/test_dmsh_ampere_alu.py` (`Up2ur`): the game's `UP2UR UR4, UPR, URZ, 0x1` translates (it failed before).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#shaders): 29 pixel shaders of `DrivePassShaderDefault.sharcb` (masks 0x1, 0x8 and 0x40 into UR4..UR6) translate since chain e4b7e4b07edb.
+
 ## Bindings and handles
 
 - **Note:** the layout of NVN's driver segments `c0` and `c2` (the handle tables, the storage and uniform buffer tables, the words the host fills) and the binding kinds of the reflection JSON have one definition, `dm/gfx/nvn/dmsh_abi.h`. The host includes it (`nvn_mtl.m`, `nvn_refl.m`, `nvn_obj.h`); `dmsh_build.py` reads it through `dm/gfx/tools/dmsh_abi.py`, which stops on any line it cannot read. Both files are part of the chain version. `dm/tools/tests/test_dmsh_abi.py` checks that the tables fit together, that the host converts every kind the build may write, that the translator's own copy of the `c2` layout (`Program.cs`) agrees, and that the values do not come back as literals in the host or the build. The entries below cite the offsets.

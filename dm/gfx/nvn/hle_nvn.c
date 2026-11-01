@@ -2038,7 +2038,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         // The display-link tick that took this frame: its target display time (same base as @pres_at_ms, so @pres_at_ms − @link_target_ms is how late the system showed it), the callback's lead
         // before that target, the callbacks since the previous frame's (1 = every tick took a frame) and the longest interval between them (33 ms on a 60 Hz link = a refresh the link skipped)
         double lt, ll, lg; int lk;
-        if (g_tsv && mtl_link_tick(n, &lt, &ll, &lk, &lg)) { trow(f - 8, "@link_target_ms", lt * 1e3 - g_t0_ns / 1e6); trow(f - 8, "@link_lead_ms", ll); trow(f - 8, "@link_ticks", lk); trow(f - 8, "@link_gap_ms", lg); } }
+        if (g_tsv && mtl_link_tick(n, &lt, &ll, &lk, &lg)) { trow(f - 8, "@link_target_ms", lt * 1e3 - g_t0_ns / 1e6); trow(f - 8, "@link_lead_ms", ll); trow(f - 8, "@link_ticks", lk); trow(f - 8, "@link_gap_ms", lg); }
+        // Where that callback spent its time (mtl_link_detail): @link_slack_ms (submission deadline minus the present call), @link_wait_ms (snapshot / producer waits), @link_alloc_ms,
+        // @link_run_ms (entry to exit), @link_idle_ms (since the previous callback exited), @link_held_ms (longest callback that took no frame since the previous present), @link_lock_ms
+        double lv[7]; static const char *ln[7] = {"@link_slack_ms", "@link_wait_ms", "@link_alloc_ms", "@link_run_ms", "@link_idle_ms", "@link_held_ms", "@link_lock_ms"};
+        if (g_tsv && mtl_link_detail(n, lv)) for (int i = 0; i < 7; i++) trow(f - 8, ln[i], lv[i]); }
     if (f >= 8 && slow_on()) slow_emit(f - 8);
     prev_out = now_ns();
 }

@@ -224,6 +224,7 @@ int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns);   // vsyncs = the game'
 int mtl_link_wait_ticks(int ticks, uint64_t timeout_ns);   // the same in the display link's own ticks
 int mtl_link_rate(void);   // the display link's rate: 120, 60 or 30 Hz
 double mtl_presented_time(uint64_t n);
+int mtl_link_detail(uint64_t n, double v[7]);   // where the callback that took the n-th present spent its time (ms): slack, wait, alloc, run, idle, held, lock (nvn_mtl.m link_ent); 0 = none
 int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms);   // the display-link tick that took the n-th present (0 = none: no display link, or not taken yet)
 int mtl_link_stalled(void);   // the display link is silent (background, occluded window, a stall) and queued frames are dropped instead of shown
 int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void);   // present snapshots (DM_PRESENT_SNAP): on, and acquire's wait for ring capacity (returns ns spent pacing)

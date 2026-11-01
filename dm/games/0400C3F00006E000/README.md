@@ -28,7 +28,7 @@ A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for
   | Opcode | Shaders | Stages | Source |
   |---|---|---|---|
   | 0x883 | 29 | pixel | `DrivePassShaderDefault.sharcb` |
-  | 0x2be | 25 | compute 13, vertex 7, domain 5 | `DrivePassShaderDefault.sharcb` |
+  | 0x2be | 25 (resolved on chain a8e15f3b482b: 13 translate, 12 still fail on another opcode) | compute 13, vertex 7, domain 5 | `DrivePassShaderDefault.sharcb` |
   | 0x927 | 14 | domain 8, vertex 6 | `DrivePassShaderDefault.sharcb` |
   | 0x992 | 10 | compute | `DrivePassShaderDefault.sharcb` |
   | 0x481 | 1 | compute | `DrivePassShaderDefault.sharcb` |
@@ -36,6 +36,7 @@ A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for
 
 - Resolved: 168 compute shaders of `DrivePassShaderDefault.sharcb` declare 48 KB of shared memory (the control section's +0x64), past an Apple GPU's 32 KB; Metal refused their pipelines and the host skipped their dispatches. Seven run up to the first race (`04dedc705a7ef88b`, `2a89b6d4df731b8d`, `7caf175d0e2ada58`, `a8310cf7c7acd0fe`, `c37db932f3076403`, `c9347f7c454a68a4`, `e2a5bd13907993e3`): 64 threads, no shared atomics, three with a barrier. Since chain a9e0bbe888ad their shared memory is a slice of a device buffer ([Compute shared memory past 32 KB](../../../docs/reference/shaders.md#compute-shared-memory-past-32-kb)): their pipelines are made, and on the route to the first race every dispatch fit a 1 MB buffer. The picture showed no change.
 - Resolved: no shader is missing from the map. A run to the first race with `DM_NVN_SHDUMP` dumped nothing and logged no `is not in the shader map` line; the 37 `failed to load shader` keys of that route are all in the map, and are the translation failures above, not runtime-only shaders.
+- Resolved: the race crash at `main+0x1a43e4` (about frame 14,700 of race 1, 4 runs in 5) and the boot crash at `main+0xd1c6e4`. With the UBREV shaders skipped, compute shader `18dd278d143adfd4` appended its records past its storage buffer into heap objects beside it ([Ampere BREV and UBREV](../../../docs/reference/shaders.md#ampere-brev-and-ubrev)). Since chain a8e15f3b482b (67 failures, 25 keys still requested on the route), one run through race 1 with driving to frame 15,900 had no out-of-range store and no crash.
 - The translator warns `Attribute offset 0x5C is not valid.` in 2,838 shaders (Donkey Kong Bananza's build has none). Open: not analysed.
 
 ## Rendering
@@ -74,7 +75,7 @@ Memory after 60 s (`run11.log`): GPU allocated 14.2 GB, footprint 12.6 GiB, 7 pl
 
 ## Open
 
-- 37 shaders the route to the first race loads do not translate (Ampere instructions 0x2be, 0x883, 0x927, 0x992, [Shaders](#shaders)); their draws and dispatches are skipped. What they draw is not known; the picture of the route shows nothing missing that is known.
+- 25 shaders the route to the first race loads do not translate (Ampere instructions 0x883, 0x927, 0x992, [Shaders](#shaders)); their draws and dispatches are skipped. What they draw is not known; a skipped compute pass can leave another one writing past its buffers, as the UBREV shaders did ([Ampere BREV and UBREV](../../../docs/reference/shaders.md#ampere-brev-and-ubrev)).
 - The NVN2 calls reported as unimplemented: `CommandBufferDrawMeshTasks` (302 times in 60 s), `CommandBufferBindShadingRateImage`, `CommandBufferShadingRateImagePalette`; unknown names `nvn*CooperativeVectorMatrix*`, `nvn*PoolWriteDescriptorTableData`.
 - The display link stalled 7 times in the first 50 s (`display link recovered: stalled … ms`), with 253 dropped frames up to frame 600; after that 2 dropped in 300 frames.
 - The camera's other commands (29 at the first frames) fail as "no camera"; their meaning is not known.
@@ -90,3 +91,4 @@ Memory after 60 s (`run11.log`): GPU allocated 14.2 GB, footprint 12.6 GiB, 7 pl
 - [Textures of an sRGB / linear pair over the same storage](../../../docs/reference/rendering.md#textures-of-an-srgb--linear-pair-over-the-same-storage)
 - [Compute shared memory past 32 KB](../../../docs/reference/shaders.md#compute-shared-memory-past-32-kb)
 - [Ampere shared memory address strides](../../../docs/reference/shaders.md#ampere-shared-memory-address-strides)
+- [Ampere BREV and UBREV](../../../docs/reference/shaders.md#ampere-brev-and-ubrev)

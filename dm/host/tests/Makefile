@@ -357,6 +357,7 @@ $(B)/t_ldn_events: t_ldn_events.c ../hle_ldn.c ../hle_ldn_protocol.c ../hle_ldn.
 .PHONY: local-network-tests
 local-network-tests: $(B)/t_hle_wait $(B)/t_net $(B)/t_net_discovery $(B)/t_discovery_protocol $(B)/t_ldn $(B)/t_ldn_events
 	$(B)/t_hle_wait
+	$(B)/t_oe_handoff
 	$(B)/t_net --no-broadcast
 	$(B)/t_net_discovery
 	$(B)/t_discovery_protocol
@@ -368,3 +369,7 @@ run: local-network-tests
 $(B)/t_friends_history: t_friends_history.c ../hle_friends_history.c ../friends_history.h ../hle_friends.c ../account_local.h memory_profile/game_profile.h | $(B)
 	$(CLANG) $(NET_FLAGS) -DDM_FRIENDS_HISTORY_TEST -Imemory_profile -o $@ t_friends_history.c ../hle_friends_history.c
 local-network-tests: $(B)/t_friends_history
+
+$(B)/t_oe_handoff: t_oe_handoff.c t_condvar_stub.c ../hle_thread.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_oe_handoff.c t_condvar_stub.c
+local-network-tests: $(B)/t_oe_handoff

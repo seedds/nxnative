@@ -48,7 +48,7 @@ static __thread int context_depth;
 static volatile sig_atomic_t sigpipe_count;
 static int resolver_abi;
 static void sigpipe(int signal) { (void)signal; sigpipe_count++; }
-#define CHECK(c, message) do { checks++; if (!(c)) { failures++; fprintf(stderr, "FAIL line %d: %s (guest errno=%d host errno=%d)\n", __LINE__, message, dm_net_errno(), errno); } } while (0)
+#define CHECK(c, message) do { checks++; if (!(c)) { failures++; fprintf(stderr, "FAIL line %d: %s (guest errno=%d host errno=%d)\n", __LINE__, message, dm_net_errno(), errno); abort(); } } while (0)
 void dm_guest_host_wait_begin(void) { atomic_fetch_add(&waits, 1); atomic_fetch_add(&wait_balance, 1); }
 void dm_guest_host_wait_end(void) { atomic_fetch_sub(&wait_balance, 1); }
 uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
@@ -160,7 +160,8 @@ static void udp(void) {
     int one = 1, value = 0; n = 4; CHECK(SETOPT(guest, 0xffff, 0x20, &one, 4) == 0 && GETOPT(guest, 0xffff, 0x20, &value, &n) == 0 && value, "broadcast option is real");
     uint64_t read[16] = {0}, write[16] = {0}; read[guest >> 6] |= 1ull << (guest & 63); write[guest >> 6] |= 1ull << (guest & 63); int64_t tv[2] = {0, 0};
     CHECK(SELECT(guest + 1, read, write, NULL, tv) == 1 && !read[guest >> 6] && write[guest >> 6], "select fd_set layout and output bits translated");
-    CHECK(CLOSE(guest) == 0 && CLOSE(guest) < 0 && dm_net_errno() == 9, "close owns guest socket only, second close EBADF");
+    int first_close = CLOSE(guest), repeated_close = CLOSE(guest);
+    CHECK(first_close == 0 && repeated_close < 0 && dm_net_errno() == 9, "close owns guest socket only, second close EBADF");
     close(native);
 }
 typedef struct { int socket; int result; int error; } blocked_call;
@@ -196,7 +197,7 @@ static void tcp(void) {
     native = accept(server, NULL, NULL); CHECK(native >= 0, "native accepts nonblocking client"); close(native); CLOSE(guest); close(server);
     int listener = SOCKET(2, 1, 6); address local = addr(htonl(0x7f000001), 0); n = 16;
     CHECK(BIND(listener, &local, 16) == 0 && NAME(listener, &local, &n) == 0 && GET(int (*)(int,int), "_ZN2nn6socket6ListenEii")(listener, 1) == 0, "guest TCP listener");
-    int client = socket(AF_INET, SOCK_STREAM, 0); a.sin_port = local.port; CHECK(connect(client, (struct sockaddr *)&a, sizeof a) == 0, "native connects guest listener");
+    int client = socket(AF_INET, SOCK_STREAM, 0); CHECK(client >= 0, "native client socket"); a.sin_port = local.port; CHECK(connect(client, (struct sockaddr *)&a, sizeof a) == 0, "native connects guest listener");
     n = 16; int accepted = GET(fn_name, "_ZN2nn6socket6AcceptEiP8sockaddrPj")(listener, &remote, &n); CHECK(accepted >= 0 && accepted != listener && remote.ip == htonl(0x7f000001), "guest accept allocates a separate owned descriptor");
     close(client); CLOSE(accepted); CLOSE(listener);
 }

@@ -11,6 +11,7 @@ import functools
 import io
 import mmap as _mmap
 import os as _os
+import re as _re
 from pathlib import Path as _Path
 import stat as _stat
 import struct
@@ -92,10 +93,10 @@ def is_image(path):
 
 def _resolve(path):
     p = _os.path.abspath(_os.fsdecode(path))
-    parts = p.split('/')
+    parts = p.split('/') if _os.altsep is None else _re.split(r'[\\/]', p)   # Windows paths hold either separator; the image's path is joined with the native one
     for i, part in enumerate(parts):
         if not part.endswith('.img'): continue
-        image = '/'.join(parts[:i + 1])
+        image = _os.sep.join(parts[:i + 1])
         try: st = _os.stat(image)
         except OSError: continue
         if not _stat.S_ISREG(st.st_mode): continue

@@ -168,6 +168,19 @@ class Images(unittest.TestCase):
                 for t in threads: t.join()
                 self.assertEqual(errors, [], 'reads of one descriptor from four threads, each seeking under the lock')
 
+    def test_resolve_windows_separators(self):
+        """romfs.py's _resolve on Windows (os.altsep set): a path with backslashes, or both separators, still names the image and the entry inside it"""
+        (self.src / 'data').mkdir(); (self.src / 'data/blob').write_bytes(b'blob')
+        image.pack(self.src, self.dst)
+        posix = str(self.dst / 'data' / 'blob')
+        with patch.object(romfs._os, 'altsep', '/'), patch.object(romfs._os.path, 'abspath', lambda p: p):
+            for form in (posix.replace('/', '\\'), posix.replace('/data/', '\\data\\')):
+                with self.subTest(form=form):
+                    resolved = romfs._resolve(form)
+                    self.assertIsNotNone(resolved, 'the image is found through either separator')
+                    self.assertEqual(resolved[1], 'data/blob')
+        self.assertEqual(romfs._resolve(posix)[1], 'data/blob')
+
     def test_size_consistent_invalid_index_is_rejected(self):
         for raw in (image.HEAD.pack(image.MAGIC, 32, 0, 0),
                     image.HEAD.pack(image.MAGIC, 32, 24, 1) + image.ENT.pack(1, 0, 0, 0, 1, 0)):

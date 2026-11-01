@@ -405,4 +405,16 @@ Counts Census(const uint8_t* data, size_t size, uint64_t base) {
     return c;
 }
 
+bool ReadsFpsr(const uint8_t* data, size_t size) {
+    // mrs xT, fpsr: op0 3, op1 3, CRn 4, CRm 4, op2 1 (SysregName's "fpsr"), counted by Classify when dynarmic's decoder names the word "MRS"
+    for (size_t i = 0; i + 4 <= size; i += 4) {
+        uint32_t w;
+        std::memcpy(&w, data + i, 4);
+        if ((w & 0xFFFFFFE0u) == 0xD53B4420u && DecoderName(w) == std::optional<std::string>("MRS")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace nxaot::analysis

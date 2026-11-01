@@ -501,44 +501,21 @@ void FunctionLifter::FnPrologue() {
     auto* base_load = B.CreateAlignedLoad(B.getInt64Ty(), plan->base, llvm::Align(8), "base");
     base_load->setMetadata(llvm::LLVMContext::MD_invariant_load, llvm::MDNode::get(C, {}));
     base = base_load;
+    init_after = base_load;  // the registers' first values go here once the body is lowered (FnInitRegisters)
     entry_lr = F->getArg(2);
     entry_lr->setName("lr");
     F->getArg(1)->setName("sp_in");
     const Convention& conv = plan->conv;
-    const bool args = !plan->correctness;  // the correctness mode takes everything from the block, which the caller filled
-    for (unsigned i = 0; i < 31; ++i) {
-        const int a = conv.ArgX(plan->self.pass, i);
-        Value* v = nullptr;
-        if (i == 30 && args) {
-            v = entry_lr;
-        } else if (args && a >= 0 && (plan->self.pass.x >> i & 1)) {
-            v = F->getArg(static_cast<unsigned>(a));
-            v->setName("x" + std::to_string(i) + "_in");
-        } else {
-            v = LoadField(B.getInt64Ty(), offsetof(dm_guest_state, x) + 8 * i);
+    if (!plan->correctness) {
+        for (unsigned i = 0; i < 31; ++i) {
+            const int a = conv.ArgX(plan->self.pass, i);
+            if (i != 30 && a >= 0 && (plan->self.pass.x >> i & 1)) F->getArg(static_cast<unsigned>(a))->setName("x" + std::to_string(i) + "_in");
         }
-        B.CreateStore(v, x[i]);
-    }
-    for (unsigned i = 0; i < 32; ++i) {
-        const int a = conv.ArgV(plan->self.pass, i);
-        Value* v = nullptr;
-        if (args && a >= 0 && (plan->self.pass.v >> i & 1)) {
-            v = F->getArg(static_cast<unsigned>(a));
-            v->setName("v" + std::to_string(i) + "_in");
-        } else {
-            v = LoadField(V128(), offsetof(dm_guest_state, v) + 16 * i);
+        for (unsigned i = 0; i < 32; ++i) {
+            const int a = conv.ArgV(plan->self.pass, i);
+            if (a >= 0 && (plan->self.pass.v >> i & 1)) F->getArg(static_cast<unsigned>(a))->setName("v" + std::to_string(i) + "_in");
         }
-        B.CreateStore(v, vreg[i]);
     }
-    B.CreateStore(args ? static_cast<Value*>(F->getArg(1)) : LoadField(B.getInt64Ty(), offsetof(dm_guest_state, sp)), sp);
-    const Flags f = UnpackNzcv(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, nzcv)));
-    B.CreateStore(f.n, flag[0]);
-    B.CreateStore(f.z, flag[1]);
-    B.CreateStore(f.c, flag[2]);
-    B.CreateStore(f.v, flag[3]);
-    B.CreateStore(B.getFalse(), check_bit);
-    B.CreateStore(B.getFalse(), qc);
-    B.CreateStore(B.getInt32(0), fpsr_bits);
     // Section 6.2: a poll at the entry of every function that calls or tail-calls (every cycle of the call graph, recursion and chains of tail
     // calls, passes through one), and at every backward branch (every loop: FnGoto). A function that does neither runs a bounded time, so the
     // polls of the code around it bound its own: no poll at its entry
@@ -555,6 +532,62 @@ void FunctionLifter::FnPrologue() {
         FnPoll(Rel(plan->entry), plan->self.pass | kSpLr);
     }
     B.CreateBr(bbs.at(plan->entry));
+}
+
+// The registers' first values, at the entry after the base: an argument, or the copy in the block. Stored once the body is lowered, and only
+// for the registers some part of the function reads (a load of its alloca): the prologue stored all 63 and the flags in every function, and
+// SROA and the dead-code passes removed the unread ones again, a fixed cost of some 250 IR instructions per function, more than most functions'
+// bodies (README.md, "Pack throughput")
+void FunctionLifter::FnInitRegisters() {
+    const auto read = [](llvm::AllocaInst* a) {
+        for (const llvm::User* u : a->users()) {
+            const auto* s = llvm::dyn_cast<llvm::StoreInst>(u);
+            if (!s || s->getValueOperand() == a) return true;  // a load, or any use but a store into it
+        }
+        return false;
+    };
+    B.SetInsertPoint(init_after->getNextNode());
+    B.SetCurrentDebugLocation(plan->debug ? llvm::DebugLoc(llvm::DILocation::get(C, static_cast<unsigned>(plan->entry), 0, plan->debug))
+                                          : llvm::DebugLoc());
+    const Convention& conv = plan->conv;
+    const bool args = !plan->correctness;  // the correctness mode takes everything from the block, which the caller filled
+    for (unsigned i = 0; i < 31; ++i) {
+        if (!read(x[i])) continue;
+        const int a = conv.ArgX(plan->self.pass, i);
+        Value* v = nullptr;
+        if (i == 30 && args) {
+            v = entry_lr;
+        } else if (args && a >= 0 && (plan->self.pass.x >> i & 1)) {
+            v = F->getArg(static_cast<unsigned>(a));
+        } else {
+            v = LoadField(B.getInt64Ty(), offsetof(dm_guest_state, x) + 8 * i);
+        }
+        B.CreateStore(v, x[i]);
+    }
+    for (unsigned i = 0; i < 32; ++i) {
+        if (!read(vreg[i])) continue;
+        const int a = conv.ArgV(plan->self.pass, i);
+        Value* v = nullptr;
+        if (args && a >= 0 && (plan->self.pass.v >> i & 1)) {
+            v = F->getArg(static_cast<unsigned>(a));
+        } else {
+            v = LoadField(V128(), offsetof(dm_guest_state, v) + 16 * i);
+        }
+        B.CreateStore(v, vreg[i]);
+    }
+    if (read(sp)) {
+        B.CreateStore(args ? static_cast<Value*>(F->getArg(1)) : LoadField(B.getInt64Ty(), offsetof(dm_guest_state, sp)), sp);
+    }
+    if (read(flag[0]) || read(flag[1]) || read(flag[2]) || read(flag[3])) {
+        const Flags f = UnpackNzcv(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, nzcv)));
+        const Value* values[4] = {f.n, f.z, f.c, f.v};
+        for (size_t i = 0; i < 4; ++i) {
+            if (read(flag[i])) B.CreateStore(const_cast<Value*>(values[i]), flag[i]);
+        }
+    }
+    if (read(check_bit)) B.CreateStore(B.getFalse(), check_bit);
+    if (read(qc)) B.CreateStore(B.getFalse(), qc);
+    if (read(fpsr_bits)) B.CreateStore(B.getInt32(0), fpsr_bits);
 }
 
 // ---- Safepoints (section 6.2) ----

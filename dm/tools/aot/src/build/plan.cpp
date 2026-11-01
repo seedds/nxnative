@@ -1,6 +1,7 @@
 #include "build/plan.h"
 
 #include <algorithm>
+#include <memory>
 #include <numeric>
 #include <unordered_map>
 
@@ -48,16 +49,14 @@ Regs ToRegs(const analysis::RegSet& r) {
 Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const lift::Convention& conv, bool all_entries) {
     Plan p;
     const auto& fns = d.functions;
-    std::unordered_map<uint64_t, analysis::RegFx> fx_cache;
-    const auto fx = [&](uint64_t pc) -> const analysis::RegFx& {
-        const auto it = fx_cache.find(pc);
-        if (it != fx_cache.end()) {
-            return it->second;
-        }
-        const auto w = image.Word(pc);
-        return fx_cache[pc] = w ? analysis::InstructionFx(pc, *w) : analysis::RegFx{};
-    };
-    const auto fxs = [&](uint64_t pc) { const auto& f = fx(pc); return std::make_pair(ToRegs(f.use), ToRegs(f.def)); };
+    // The register effects of every instruction: discovery's cache (one translation per distinct word), or one of the plan's own
+    std::unique_ptr<analysis::InsnCache> own;
+    analysis::InsnCache* insns = d.insns.get();
+    if (!insns) {
+        own = std::make_unique<analysis::InsnCache>(image);
+        insns = own.get();
+    }
+    const auto fxs = [&](uint64_t pc) { const auto& f = insns->Fx(pc); return std::make_pair(ToRegs(f.use), ToRegs(f.def)); };
 
     std::vector<uint64_t> callable;
     for (const auto& [entry, f] : fns) {
@@ -183,8 +182,10 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
         ff.pass = Regs::X(0xFu) | (ff.reads & conv.Passable());
     }
 
-    // What an indirect call may reach: reads, must-writes and writes over the standard entries
-    Regs ind_reads, ind_must = Regs::All(), ind_writes;
+    // What an indirect call may reach: reads, must-writes and writes over the standard entries, and for the writes a function outside the module
+    // too (analysis::ForeignWrites: AAPCS64's result registers), which the module's own functions' union must not narrow: the call site reloads
+    // these from the block after the call (or takes them from its return value)
+    Regs ind_reads, ind_must = Regs::All(), ind_writes = ToRegs(analysis::ForeignWrites());
     for (const uint64_t e : callable) {
         const auto& f = fns.at(e);
         ind_reads = ind_reads | ToRegs(f.summary.reads);
@@ -205,12 +206,19 @@ Plan MakePlan(const module::Image& image, const analysis::Discovery& d, const li
     for (auto& [entry, ff] : p.fns) {
         ff.live_after = ff.host_callable ? kHostReads : Regs{};
     }
+    // What a function adds to its callees' LIVE_AFTER is a function of its own LIVE_AFTER (and of facts fixed here), and LIVE_AFTER only grows
+    // by unions: a function whose LIVE_AFTER did not change since its last pass would add again what it added then, and is not passed again
+    std::map<uint64_t, Regs> passed_with;
     for (bool changed = true; changed;) {
         changed = false;
         ++p.live_after_rounds;
         std::map<uint64_t, Regs> add;
         Regs add_ind;
         for (auto& [entry, ff] : p.fns) {
+            if (const auto seen = passed_with.find(entry); seen != passed_with.end() && seen->second == ff.live_after) {
+                continue;
+            }
+            passed_with[entry] = ff.live_after;
             const analysis::Function& f = fns.at(entry);
             std::map<uint64_t, Regs> live_in;
             for (bool again = true; again;) {

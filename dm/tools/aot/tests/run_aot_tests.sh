@@ -1,8 +1,8 @@
 #!/bin/sh
 # Runs the tests of a CMake build folder of dm/tools/aot (the vector harness, the census test, the vectors-current check, discovery over the corpus,
 # the manifest test, the corpus reference run, the corpus recompiled and run natively, the per-function differential test, the JIT fallback's
-# modes, the threaded programs, the safepoint pause test, the benchmark) and records the run in the repository: one log per test and summary.txt
-# in logs/aot/ (logs/README.md).
+# modes, the threaded programs, the safepoint pause test, the per-function cache, the indirect calls' reloads, the benchmark) and records the run
+# in the repository: one log per test and summary.txt in logs/aot/ (logs/README.md).
 # In the nxnative-aot Docker image (dm/tools/aot/README.md). From anywhere:
 #   sh dm/tools/aot/tests/run_aot_tests.sh <build folder> [<log folder>]
 # <log folder> defaults to logs/aot at the repository root; its old *.log files and summary.txt are removed first. Each test gets TIMEOUT seconds
@@ -67,6 +67,8 @@ run corpus_funcdiff python3 "$aot/tests/test_funcdiff.py" --nxaot "$build/nxaot"
 run corpus_jit python3 "$aot/tests/test_corpus_jit.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/jit"
 run corpus_threads python3 "$aot/tests/test_threads.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/threads"
 run safepoints python3 "$aot/tests/test_safepoints.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/safepoints"
+run cache python3 "$aot/tests/test_cache.py" --nxaot "$build/nxaot" --work "$build/cache"
+run plan python3 "$aot/tests/test_plan.py" --nxaot "$build/nxaot" --work "$build/plan"
 run opcodes "$build/nxaot" opcodes
 run bench "$build/nxaot_bench" --iterations 200000 --work "$build/bench"
 

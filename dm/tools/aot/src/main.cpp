@@ -3,6 +3,9 @@
 //                                                     function discovery, CFGs, jump tables, exclusive windows and summaries of a module
 //                                                     (src/analysis/discover.h): one line per function and the summary; --tsv writes every
 //                                                     row kind; --symbols-as-oracle takes no symbol as a source and compares with them
+//   nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries]
+//                                                     the pack stage's convention facts (src/build/plan.h): the indirect view and per function
+//                                                     PASS, WRITES, LIVE_AFTER, RV, a standard entry, its indirect sites
 //   nxaot image <module.nro> <out dir> [<name>]       the behaviour-image form of an NRO: <name>.image.bin and its manifest <name>.aot.tsv
 //                                                     (layout and data rows), the input form patch_nso.py --aot will write for NSOs
 //   nxaot manifest <name.aot.tsv>                     parses a manifest and prints it back in canonical form (src/module/manifest.h)
@@ -12,12 +15,15 @@
 //   nxaot opcodes --reach [--samples N] [--check]     the opcodes the A64 frontend emits (src/analysis/reach.h), with the decoder entries that emit
 //                                                     them; --check exits 1 when one of them is not lowered
 //   nxaot version                                     the toolchain of nxaot.lock this build was configured with
-//   nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max] [--tier C|W|H|H+]
+//   nxaot build <module.nro | name.aot.tsv> [-o <object.o>] [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max] [--tier C|W|H|H+]
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
-//               [--no-safepoints]
-//                                                     the pack stage (src/build): every function of the module compiled into one object with
-//                                                     its lookup table, function map, line table and descriptor (include/nxaot/aot_module.h),
-//                                                     linked by lld into the shared object nxaot_host loads; prints the module's numbers
+//               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>]
+//                                                     the pack stage (src/build): every function of the module compiled, one unit each on
+//                                                     --workers threads (0 or none: as many as the CPUs and the free memory allow), or taken
+//                                                     from the per-function cache --cache; with the tables' object (lookup table, function map,
+//                                                     line table, descriptor: include/nxaot/aot_module.h) linked by lld into the shared object
+//                                                     nxaot_host loads (--shared) and / or one relocatable object (-o); prints the module's
+//                                                     numbers, the seconds of each stage and the cache's hits and misses
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -32,26 +38,34 @@
 #include "analysis/discover.h"
 #include "analysis/reach.h"
 #include "build/pack.h"
+#include "build/plan.h"
 #include "dynarmic/ir/opcodes.h"
 #include "lift/opcodes.h"
 #include "module/image.h"
 #include "module/manifest.h"
 #include "nxaot_lock.h"
 
+#include <llvm/Support/FileSystem.h>
+
+#include <llvm/IR/PassTimingInfo.h>
+#include <llvm/Pass.h>
+
 namespace {
 
 int Usage() {
     std::fprintf(stderr,
                  "usage: nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>]\n"
+                 "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries]\n"
                  "       nxaot image <module.nro> <out dir> [<name>]\n"
                  "       nxaot manifest <name.aot.tsv>\n"
                  "       nxaot module <module.nro | name.aot.tsv>\n"
                  "       nxaot census <raw ARM64 code file> --base <hex>\n"
                  "       nxaot opcodes [--reach [--samples N] [--check]]\n"
                  "       nxaot version\n"
-                 "       nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max]\n"
+                 "       nxaot build <module.nro | name.aot.tsv> [-o <object.o>] [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max]\n"
                  "                   [--tier C|W|H|H+] [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info]\n"
-                 "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints]\n");
+                 "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes]\n"
+                 "                   [--ir <file.ll>]\n");
     return 2;
 }
 
@@ -227,6 +241,49 @@ int Discover(int argc, char** argv) {
             std::fprintf(f, "%s\n", r.c_str());
         }
         std::fclose(f);
+    }
+    return 0;
+}
+
+// The convention facts of the pack stage (src/build/plan.h) as rows: the indirect view (what an indirect call passes, may find written, returns)
+// and per function PASS, WRITES, LIVE_AFTER, RV, whether it has a standard entry and its indirect sites (blr, unbounded br): CTest plan
+int PlanCmd(int argc, char** argv) {
+    std::string path;
+    nxaot::lift::Convention conv;
+    bool all_entries = false;
+    for (int i = 2; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--cc" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if (v == "swifttail") conv.cc = nxaot::lift::CallConv::SwiftTail;
+            else if (v == "ghc") conv.cc = nxaot::lift::CallConv::Ghc;
+            else return Usage();
+        } else if (a == "--all-entries") {
+            all_entries = true;
+        } else if (path.empty() && !a.empty() && a[0] != '-') {
+            path = a;
+        } else {
+            return Usage();
+        }
+    }
+    if (path.empty()) {
+        return Usage();
+    }
+    const auto image = Load(path);
+    if (!image) {
+        return 1;
+    }
+    const nxaot::analysis::Discovery d = nxaot::analysis::Discover(*image);
+    const nxaot::build::Plan plan = nxaot::build::MakePlan(*image, d, conv, all_entries);
+    const auto str = [](const nxaot::lift::Regs& r) { return nxaot::analysis::RegSet{r.x, r.v, r.sp, r.nzcv}.Str(); };
+    std::printf("# nxaot plan\t%s\t%s\n", image->name.c_str(), image->Sha256Hex().c_str());
+    std::printf("indirect\tpass\t%s\twrites\t%s\trv\t%u\n", str(plan.indirect_pass).c_str(), str(plan.indirect_writes).c_str(), plan.indirect_rv);
+    for (const auto& [entry, ff] : plan.fns) {
+        const auto& f = d.functions.at(entry);
+        size_t indirect = f.indirect.size();
+        for (const auto& [pc, target] : f.calls) indirect += target == 0;
+        std::printf("fn\t%s\tpass\t%s\twrites\t%s\tlive_after\t%s\trv\t%u\tstd\t%d\tindirect\t%zu\n", X(entry).c_str(), str(ff.pass).c_str(),
+                    str(ff.writes).c_str(), str(ff.live_after).c_str(), ff.rv, ff.host_callable ? 1 : 0, indirect);
     }
     return 0;
 }
@@ -475,42 +532,57 @@ int Build(int argc, char** argv) {
             o.line_table = false;
         } else if (a == "--no-safepoints") {
             o.safepoints = false;  // no polls (section 6.2): the poll cost measurement
+        } else if (a == "--time-passes") {
+            llvm::TimePassesIsEnabled = true;  // LLVM's pass timers, printed to stderr at the end (one worker)
+        } else if (a == "--ir" && has) {
+            o.ir_path = argv[++i];
         } else if (a == "--spills") {
             o.count_spills = true;
         } else if (a == "--asm" && has) {
             o.asm_path = argv[++i];
             o.count_spills = true;
+        } else if (a == "--workers" && has) {
+            o.workers = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (a == "--cache" && has) {
+            o.cache_dir = argv[++i];
         } else if (path.empty() && !a.empty() && a[0] != '-') {
             path = a;
         } else {
             return Usage();
         }
     }
-    if (path.empty() || object.empty()) {
+    if (path.empty() || (object.empty() && shared.empty())) {
         return Usage();
     }
     if (!tier_set) {
         o.tier = o.mode == "max" ? Tier::HPlus : Tier::W;  // no profile: balanced is tier W everywhere, max tier H+ (section 9.3)
     }
+    const auto t_start = std::chrono::steady_clock::now();
     const auto image = Load(path);
     if (!image) {
         return 1;
     }
     nxaot::build::BuildStats s;
     std::string error;
-    if (!nxaot::build::BuildObject(*image, o, object, &s, &error)) {
+    // The objects that are not the cache's (the tables' object, and every unit without a cache) go to a folder beside the output, removed again
+    const std::string work = (shared.empty() ? object : shared) + ".parts";
+    std::vector<std::string> objects;
+    bool ok = nxaot::build::BuildObjects(*image, o, work, &objects, &s, &error);
+    const auto t_link = std::chrono::steady_clock::now();
+    if (ok && !shared.empty()) {
+        const std::string soname = shared.substr(shared.find_last_of('/') + 1);
+        ok = nxaot::build::LinkShared(objects, shared, soname, &error);
+    }
+    if (ok && !object.empty()) {
+        ok = nxaot::build::LinkRelocatable(objects, object, &error);  // one relocatable object of the whole module, as the shared object has it
+    }
+    s.t_link = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_link).count();
+    llvm::sys::fs::remove_directories(work);
+    if (!ok) {
         std::printf("[RED] nxaot build: %s: %s\n", path.c_str(), error.c_str());
         return 1;
     }
-    if (!shared.empty()) {
-        const auto t0 = std::chrono::steady_clock::now();
-        std::string soname = shared.substr(shared.find_last_of('/') + 1);
-        if (!nxaot::build::LinkShared({object}, shared, soname, &error)) {
-            std::printf("[RED] nxaot build: %s\n", error.c_str());
-            return 1;
-        }
-        s.t_link = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    }
+    const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
     for (const auto& n : s.notes) {
         std::printf("%s\n", n.c_str());
     }
@@ -521,10 +593,36 @@ int Build(int argc, char** argv) {
                 static_cast<unsigned long long>(s.functions));
     std::printf("aot: tier %s (mode %s), convention %s%s, cpu %s, fpsr flags %s\n", nxaot::build::TierName(o.tier), o.mode.c_str(),
                 nxaot::lift::CallConvName(o.cc), o.correctness ? ", correctness mode" : "", s.cpu.c_str(), s.fpsr_flags ? "modelled" : "not modelled");
-    std::printf("aot: seconds discover %.3f plan %.3f lift %.3f optimise %.3f codegen %.3f link %.3f; peak memory %llu MiB\n", s.t_discover,
-                s.t_plan, s.t_lift, s.t_opt, s.t_codegen, s.t_link, static_cast<unsigned long long>(s.peak_rss_kib / 1024));
-    std::printf("aot: instructions per second: analysis %.0f, lifting %.0f, tier %s (optimise and codegen) %.0f\n", per_s(analyse), per_s(s.t_lift),
-                nxaot::build::TierName(o.tier), per_s(compile));
+    std::printf("aot: tiers C %llu W %llu H %llu H+ %llu (functions)\n", static_cast<unsigned long long>(s.tier_functions[0]),
+                static_cast<unsigned long long>(s.tier_functions[1]), static_cast<unsigned long long>(s.tier_functions[2]),
+                static_cast<unsigned long long>(s.tier_functions[3]));
+    // Lifting, verification, optimisation and code generation are CPU seconds summed over the units; the rest and "compile wall" wall clock
+    std::printf("aot: seconds discover %.3f plan %.3f lift %.3f verify %.3f optimise %.3f codegen %.3f link %.3f; compile wall %.3f with %llu "
+                "workers; total %.3f; peak memory %llu MiB\n",
+                s.t_discover, s.t_plan, s.t_lift, s.t_verify, s.t_opt, s.t_codegen, s.t_link, s.t_compile_wall,
+                static_cast<unsigned long long>(s.workers), total, static_cast<unsigned long long>(s.peak_rss_kib / 1024));
+    std::printf("aot: instructions per second: analysis %.0f, lifting %.0f, tier %s (optimise and codegen) %.0f per core; compile %.0f, whole "
+                "pack %.0f wall\n",
+                per_s(analyse), per_s(s.t_lift), nxaot::build::TierName(o.tier), per_s(compile), per_s(s.t_compile_wall), per_s(total));
+    std::printf("aot: units %llu (%s), workers %llu\n", static_cast<unsigned long long>(s.units),
+                o.tier == Tier::C || o.tier == Tier::W ? "one per function" : "shards of neighbouring functions",
+                static_cast<unsigned long long>(s.workers));
+    if (!o.cache_dir.empty()) {
+        std::printf("aot: cache %s: %llu hits, %llu misses, %llu bytes read, %llu bytes written, keys %.3f s\n", o.cache_dir.c_str(),
+                    static_cast<unsigned long long>(s.cache_hits), static_cast<unsigned long long>(s.cache_misses),
+                    static_cast<unsigned long long>(s.cache_bytes_read), static_cast<unsigned long long>(s.cache_bytes_written), s.t_key);
+    }
+    const auto& dt = s.discover_times;
+    std::printf("aot: discover seconds: classify %.3f walk %.3f tables %.3f (%llu tries, %llu skipped, %llu regions, %llu reused) summaries %.3f "
+                "(%u runs, %u skipped, %llu rounds, %llu computed, %llu reused, %llu words, %llu translations) sources %.3f windows %.3f finish %.3f "
+                "census %.3f\n",
+                dt.classify, dt.walk, dt.tables, static_cast<unsigned long long>(dt.table_tries),
+                static_cast<unsigned long long>(dt.table_tries_skipped), static_cast<unsigned long long>(dt.regions),
+                static_cast<unsigned long long>(dt.regions_reused),
+                dt.summaries, dt.summarise_runs, dt.summarise_skipped, static_cast<unsigned long long>(dt.summary_rounds),
+                static_cast<unsigned long long>(dt.summary_computes), static_cast<unsigned long long>(dt.summary_reused),
+                static_cast<unsigned long long>(dt.distinct_words),
+                static_cast<unsigned long long>(dt.translations), dt.sources, dt.windows, dt.finish, s.t_census);
     std::printf("aot: sites: calls %llu, indirect calls %llu, tail calls %llu, indirect tail calls %llu, returns %llu, svc %llu, traps %llu, "
                 "jump tables %llu, resume points %llu\n",
                 static_cast<unsigned long long>(s.calls), static_cast<unsigned long long>(s.indirect_calls),
@@ -551,6 +649,9 @@ int main(int argc, char** argv) {
     const std::string cmd = argv[1];
     if (cmd == "build") {
         return Build(argc, argv);
+    }
+    if (cmd == "plan") {
+        return PlanCmd(argc, argv);
     }
     if (cmd == "discover") {
         return Discover(argc, argv);

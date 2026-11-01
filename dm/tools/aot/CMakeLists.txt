@@ -109,10 +109,13 @@ endif()
 
 # The pack stage (src/build, aot-recompiler.md sections 9.2 to 9.4): whole modules in function mode, the tables, the descriptor
 # (include/nxaot/aot_module.h), the tier's passes, the object, and lld as a library for the shared object (section 13)
+# Compile units on worker threads, one LLVM context each, and the per-function cache of section 13 (src/cache: objects by the SHA-256 of
+# what each depends on, LLVM's SHA-256)
 find_package(LLD REQUIRED CONFIG HINTS "${LLVM_LIBRARY_DIR}/cmake/lld" "${LLVM_DIR}/../lld")
-add_library(nxaot_build STATIC src/build/plan.cpp src/build/pack.cpp)
+find_package(Threads REQUIRED)
+add_library(nxaot_build STATIC src/build/plan.cpp src/build/pack.cpp src/cache/cache.cpp)
 target_include_directories(nxaot_build SYSTEM PRIVATE ${LLD_INCLUDE_DIRS})
-target_link_libraries(nxaot_build PUBLIC nxaot_analysis nxaot_lift lldELF lldCommon)
+target_link_libraries(nxaot_build PUBLIC nxaot_analysis nxaot_lift lldELF lldCommon Threads::Threads)
 target_compile_options(nxaot_build PRIVATE ${NXAOT_WARNINGS})
 
 add_executable(nxaot src/main.cpp)
@@ -190,5 +193,13 @@ add_test(NAME corpus_threads COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURC
          --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/threads")
 add_test(NAME safepoints COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_safepoints.py" --nxaot $<TARGET_FILE:nxaot>
          --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/safepoints")
+# Phase 5 (aot-recompiler.md sections 10 and 13): the per-function cache: a cold pack of every NRO misses every function, a warm one hits every
+# function and gives the same shared object byte for byte; a changed instruction word misses its function only, a changed tier every function
+add_test(NAME cache COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cache.py" --nxaot $<TARGET_FILE:nxaot>
+         --work "${CMAKE_CURRENT_BINARY_DIR}/cache")
+# What a call site reloads after an indirect call: AAPCS64's result registers whatever the module's own functions write (a host function or
+# another pack may be the callee)
+add_test(NAME plan COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_plan.py" --nxaot $<TARGET_FILE:nxaot>
+         --work "${CMAKE_CURRENT_BINARY_DIR}/plan")
 set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census discover manifest corpus_ref corpus_native corpus_funcdiff corpus_jit
-                     corpus_threads safepoints PROPERTIES TIMEOUT 900)
+                     corpus_threads safepoints cache plan PROPERTIES TIMEOUT 900)

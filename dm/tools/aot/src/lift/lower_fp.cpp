@@ -356,8 +356,10 @@ Value* FunctionLifter::Exact(const IR::Inst* inst, std::unordered_map<const IR::
         if (node.fp_arg[i] && IsChain(a)) {
             args.push_back(Exact(a.GetInst(), memo));
         } else if (node.fp_arg[i]) {
-            const auto it = values.find(a.GetInst());
-            args.push_back(a.IsImmediate() || it == values.end() ? Get(a) : it->second);
+            // An immediate operand (a constant the block's forwarding put in place of a register read: fmov s1, #3.0; fadd s0, s0, s1) has no
+            // instruction: asking for one stopped the pack on dynarmic's assertion (README.md, "Pack throughput": found by gen_bench.py)
+            const auto it = a.IsImmediate() ? values.end() : values.find(a.GetInst());
+            args.push_back(it == values.end() ? Get(a) : it->second);
         } else {
             args.push_back(nullptr);
         }

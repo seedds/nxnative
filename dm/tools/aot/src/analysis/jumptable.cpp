@@ -26,6 +26,8 @@
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/SROA.h>
 
+#include "analysis/insn.h"
+
 namespace nxaot::analysis {
 
 namespace {
@@ -462,8 +464,91 @@ Analysed AnalyseTarget(const module::Image& image, llvm::CallInst* marker, llvm:
 
 }  // namespace
 
+// A region lifted and analysed: whether it lifted, whether it reaches the br, and the analysis of each marker of the br up to the first that
+// found no table (the targets' validity, which can change, is checked by the caller)
+struct RegionMemo::Outcome {
+    bool lifted = false;
+    std::string lift_error;
+    bool reached = false;
+    std::vector<Analysed> markers;
+};
+
+namespace {
+
+std::shared_ptr<const RegionMemo::Outcome> AnalyseRegion(const module::Image& image, const Function& fn, uint64_t br, uint64_t e,
+                                                         const std::set<uint64_t>& slice, const CallEffects& calls,
+                                                         const decode::CodeReader& read, unsigned max_table) {
+    auto out = std::make_shared<RegionMemo::Outcome>();
+    llvm::LLVMContext ctx;
+    auto module = std::make_unique<llvm::Module>("nxaot.jumptable", ctx);
+    module->setTargetTriple("x86_64-unknown-linux-gnu");
+    module->setDataLayout(kDataLayout);
+    lift::Region region;
+    region.entry = e;
+    region.lo = fn.entry;
+    region.hi = fn.limit;
+    region.max_blocks = 4 * slice.size() + 16;
+    region.follow = [&slice](uint64_t pc) { return slice.count(pc) > 0; };
+    region.calls = calls;
+    region.mark_indirect = true;
+    region.tables = [&fn](uint64_t pc) -> const std::vector<uint64_t>* {
+        const auto it = fn.tables.find(pc);
+        return it == fn.tables.end() ? nullptr : &it->second.targets;
+    };
+    lift::LiftOptions lo;
+    lo.fpsr_flags = false;
+    lo.nan_mode = lift::NaNMode::Unchecked;  // the region is analysed, never run: floating point needs no exact NaNs here
+    const lift::Lifted lifted = lift::LiftRegion(*module, "region", region, read, lo);
+    if (!lifted.function) {
+        out->lift_error = lifted.error.empty() ? "unlowered opcodes" : lifted.error;
+        return out;
+    }
+    out->lifted = true;
+    llvm::LoopAnalysisManager lam;
+    llvm::FunctionAnalysisManager fam;
+    llvm::CGSCCAnalysisManager cgam;
+    llvm::ModuleAnalysisManager mam;
+    llvm::PassBuilder pb;
+    pb.registerModuleAnalyses(mam);
+    pb.registerCGSCCAnalyses(cgam);
+    pb.registerFunctionAnalyses(fam);
+    pb.registerLoopAnalyses(lam);
+    pb.crossRegisterProxies(lam, fam, cgam, mam);
+    // SSA and common subexpressions only: InstCombine would rewrite the index's zext (trunc x) as and x, mask, a value other than the
+    // trunc x the bound check compares, and LazyValueInfo bounds a value by the conditions on that same value
+    llvm::FunctionPassManager fpm;
+    fpm.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
+    fpm.addPass(llvm::EarlyCSEPass(true));
+    fpm.run(*lifted.function, fam);
+    if (const char* dump = std::getenv("NXAOT_DUMP_REGION"); dump && std::strtoull(dump, nullptr, 16) == br) {
+        // Debugging: the optimised IR of every region lifted for this br (NXAOT_DUMP_REGION=<hex pc of the br>)
+        std::fprintf(stderr, "---- region from %#llx for the br at %#llx (%zu blocks)\n", static_cast<unsigned long long>(e),
+                     static_cast<unsigned long long>(br), slice.size());
+        lifted.function->print(llvm::errs());
+    }
+    auto& lvi = fam.getResult<llvm::LazyValueAnalysis>(*lifted.function);
+    std::vector<llvm::CallInst*> markers;
+    for (auto& bb : *lifted.function) {
+        for (auto& inst : bb) {
+            auto* call = llvm::dyn_cast<llvm::CallInst>(&inst);
+            if (!call || !call->getCalledFunction() || call->getCalledFunction()->getName() != "nxaot.indirect") continue;
+            if (auto* pc = llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(0)); pc && pc->getZExtValue() == br) markers.push_back(call);
+        }
+    }
+    out->reached = !markers.empty();
+    for (llvm::CallInst* marker : markers) {
+        Analysed a = AnalyseTarget(image, marker, lvi, module->getDataLayout(), max_table);
+        const bool none = a.targets.empty();
+        out->markers.push_back(std::move(a));
+        if (none) break;
+    }
+    return out;
+}
+
+}  // namespace
+
 TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uint64_t br, const DiscoverOptions& options,
-                             const std::function<bool(uint64_t)>& valid, const CallEffects& calls, bool optimistic) {
+                             const std::function<bool(uint64_t)>& valid, const CallEffects& calls, bool optimistic, RegionMemo* memo) {
     TableResult res;
     // NXAOT_DEBUG_REGION=1: why each region tried was not used (README.md, "Module loader and discovery")
     static const bool debug = std::getenv("NXAOT_DEBUG_REGION") != nullptr;
@@ -568,64 +653,46 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
             trace(e, shape_why);
             continue;
         }
-        llvm::LLVMContext ctx;
-        auto module = std::make_unique<llvm::Module>("nxaot.jumptable", ctx);
-        module->setTargetTriple("x86_64-unknown-linux-gnu");
-        module->setDataLayout(kDataLayout);
-        lift::Region region;
-        region.entry = e;
-        region.lo = fn.entry;
-        region.hi = fn.limit;
-        region.max_blocks = 4 * slice.size() + 16;
-        region.follow = [&slice](uint64_t pc) { return slice.count(pc) > 0; };
-        region.calls = calls;
-        region.mark_indirect = true;
-        region.tables = [&fn](uint64_t pc) -> const std::vector<uint64_t>* {
-            const auto it = fn.tables.find(pc);
-            return it == fn.tables.end() ? nullptr : &it->second.targets;
-        };
-        lift::LiftOptions lo;
-        lo.fpsr_flags = false;
-        lo.nan_mode = lift::NaNMode::Unchecked;  // the region is analysed, never run: floating point needs no exact NaNs here
-        const lift::Lifted lifted = lift::LiftRegion(*module, "region", region, read, lo);
-        ++res.regions;
-        if (!lifted.function) {
-            lifted_why = "the region could not be lifted (" + (lifted.error.empty() ? "unlowered opcodes" : lifted.error) + ")";
+        // The region's key (RegionMemo): what its lifting and analysis read. The lifter consults the call effects at the calls that end its
+        // blocks and the known tables at its brs: those of every straight line from a block of the slice to the first instruction that ends
+        // a block (a superset of what it consults: equal facts there give the same region)
+        std::vector<uint64_t> key{br, e, fn.entry, fn.limit, calls ? 1u : 0u, options.max_table, slice.size()};
+        key.insert(key.end(), slice.begin(), slice.end());
+        for (const uint64_t s : slice) {
+            for (uint64_t pc = s; pc < fn.limit; pc += 4) {
+                const auto w = read(pc);
+                if (!w) break;
+                const Insn i = ClassifyWord(*w, pc);
+                if (!i.Ends()) continue;
+                if ((i.kind == Kind::BL || i.kind == Kind::BLR) && calls) {
+                    const auto c = calls(pc);
+                    key.insert(key.end(), {pc, c ? 1u : 0u, c ? c->x : 0, c ? c->v : 0, c ? uint64_t{c->sp} : 0, c ? uint64_t{c->nzcv} : 0});
+                } else if (i.kind == Kind::BR) {
+                    const auto t = fn.tables.find(pc);
+                    key.insert(key.end(), {pc, t == fn.tables.end() ? ~0ull : t->second.targets.size()});
+                    if (t != fn.tables.end()) key.insert(key.end(), t->second.targets.begin(), t->second.targets.end());
+                }
+                break;
+            }
+        }
+        std::shared_ptr<const RegionMemo::Outcome> outcome;
+        if (memo) {
+            if (const auto it = memo->regions.find(key); it != memo->regions.end()) {
+                outcome = it->second;
+                ++res.reused;
+            }
+        }
+        if (!outcome) {
+            outcome = AnalyseRegion(image, fn, br, e, slice, calls, read, options.max_table);
+            ++res.regions;
+            if (memo) memo->regions.emplace(std::move(key), outcome);
+        }
+        if (!outcome->lifted) {
+            lifted_why = "the region could not be lifted (" + outcome->lift_error + ")";
             trace(e, lifted_why);
             continue;
         }
-        llvm::LoopAnalysisManager lam;
-        llvm::FunctionAnalysisManager fam;
-        llvm::CGSCCAnalysisManager cgam;
-        llvm::ModuleAnalysisManager mam;
-        llvm::PassBuilder pb;
-        pb.registerModuleAnalyses(mam);
-        pb.registerCGSCCAnalyses(cgam);
-        pb.registerFunctionAnalyses(fam);
-        pb.registerLoopAnalyses(lam);
-        pb.crossRegisterProxies(lam, fam, cgam, mam);
-        // SSA and common subexpressions only: InstCombine would rewrite the index's zext (trunc x) as and x, mask, a value other than the
-        // trunc x the bound check compares, and LazyValueInfo bounds a value by the conditions on that same value
-        llvm::FunctionPassManager fpm;
-        fpm.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
-        fpm.addPass(llvm::EarlyCSEPass(true));
-        fpm.run(*lifted.function, fam);
-        if (const char* dump = std::getenv("NXAOT_DUMP_REGION"); dump && std::strtoull(dump, nullptr, 16) == br) {
-            // Debugging: the optimised IR of every region tried for this br (NXAOT_DUMP_REGION=<hex pc of the br>)
-            std::fprintf(stderr, "---- region from %#llx for the br at %#llx (%zu blocks)\n", static_cast<unsigned long long>(e),
-                         static_cast<unsigned long long>(br), slice.size());
-            lifted.function->print(llvm::errs());
-        }
-        auto& lvi = fam.getResult<llvm::LazyValueAnalysis>(*lifted.function);
-        std::vector<llvm::CallInst*> markers;
-        for (auto& bb : *lifted.function) {
-            for (auto& inst : bb) {
-                auto* call = llvm::dyn_cast<llvm::CallInst>(&inst);
-                if (!call || !call->getCalledFunction() || call->getCalledFunction()->getName() != "nxaot.indirect") continue;
-                if (auto* pc = llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(0)); pc && pc->getZExtValue() == br) markers.push_back(call);
-            }
-        }
-        if (markers.empty()) {
+        if (!outcome->reached) {
             lifted_why = "the lifted region does not reach the br";
             trace(e, lifted_why);
             continue;
@@ -633,8 +700,8 @@ TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uin
         Analysed first;
         std::set<uint64_t> all;
         bool ok = true;
-        for (size_t i = 0; i < markers.size() && ok; ++i) {
-            Analysed a = AnalyseTarget(image, markers[i], lvi, module->getDataLayout(), options.max_table);
+        for (size_t i = 0; i < outcome->markers.size() && ok; ++i) {
+            Analysed a = outcome->markers[i];
             if (a.targets.empty()) {
                 lifted_why = a.why;
                 trace(e, lifted_why);

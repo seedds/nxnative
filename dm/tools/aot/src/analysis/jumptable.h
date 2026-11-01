@@ -8,8 +8,11 @@
 #pragma once
 
 #include <functional>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "analysis/discover.h"
 #include "lift/lifter.h"
@@ -23,13 +26,23 @@ struct TableResult {
     std::optional<JumpTable> table;
     std::string why;        // why not, when there is no table
     unsigned regions = 0;   // regions lifted
+    unsigned reused = 0;    // regions whose analysis came from the memo
+};
+
+// The analyses of the regions lifted so far, by everything a region's lifting and analysis read (jumptable.cpp, RegionKey): the br, the
+// region's first block and its blocks, the function's bounds, and the call effects and known tables at the region's calls and brs. A br
+// tried again after its function's walk changed somewhere else, or after the summaries were computed again, lifts only the regions whose key
+// is new; the analysis of a region is a function of its key, so the result is the one a lifting would give. One per discovery
+struct RegionMemo {
+    struct Outcome;
+    std::map<std::vector<uint64_t>, std::shared_ptr<const Outcome>> regions;
 };
 
 // fn: the function with its blocks (its known tables become switches in the regions); valid: whether an address may be a target (a decoded
 // instruction of the function); calls: empty, or the call effects a region may continue past. optimistic: ignore the blocks only the function's
 // speculative roots reach (Function::speculative), so that a switch whose cases loop back to it can be bounded before its cases are known; such
-// a result is tentative until a closed region with the cases gives it again (discover.cpp, Verify)
+// a result is tentative until a closed region with the cases gives it again (discover.cpp, Verify). memo: null, or the regions analysed so far
 TableResult ResolveJumpTable(const module::Image& image, const Function& fn, uint64_t br, const DiscoverOptions& options,
-                             const std::function<bool(uint64_t)>& valid, const CallEffects& calls, bool optimistic);
+                             const std::function<bool(uint64_t)>& valid, const CallEffects& calls, bool optimistic, RegionMemo* memo = nullptr);
 
 }  // namespace nxaot::analysis

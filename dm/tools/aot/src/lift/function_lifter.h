@@ -265,6 +265,7 @@ public:
     std::unordered_map<Value*, uint64_t> rel_values;    // the base + offset values made for relative immediates, with their offsets
     Value* base = nullptr;                              // the module's base address, loaded once at the entry
     Value* entry_lr = nullptr;                          // the lr the function was entered with (section 3.3)
+    llvm::Instruction* init_after = nullptr;            // the registers' first values are stored after it (FnInitRegisters)
     Regs cur_dirty;                                     // the block's dirty set at its end (dirty_in | gen)
     Regs restore_block;                                 // restored registers whose block copy the function changed: stored again at returns
     const IR::Inst* cur_inst = nullptr;                 // the instruction being lowered (relative immediates, line table, debug locations)
@@ -276,6 +277,7 @@ public:
     void FnRelative(uint64_t pc, IR::Block& block, const std::function<void(IR::Block&)>& passes);  // the base-relative immediates
     void FnDataflow();
     void FnPrologue();
+    void FnInitRegisters();  // after the body: the first values of the registers it reads
     void FnLowerTerminal(const IR::Terminal& t);
     void FnGoto(Value* target);
     void FnExit(Value* pc, uint32_t reason);

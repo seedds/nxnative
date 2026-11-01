@@ -17,4 +17,8 @@ using Counts = std::map<std::string, uint64_t>;
 // base: the guest address of the first byte (pc-relative forms and the reports use it). size need not be a multiple of 4; a tail is ignored
 Counts Census(const uint8_t* data, size_t size, uint64_t base);
 
+// Census(...)["answer.fpsr_read"] alone (an `mrs xN, fpsr`, as the census classifies it), without the rest of the census: the pack stage's question
+// (decision 5: model the cumulative FPSR flags only where the code reads them). A scan of the words, no translation
+bool ReadsFpsr(const uint8_t* data, size_t size);
+
 }  // namespace nxaot::analysis

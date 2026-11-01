@@ -1,17 +1,24 @@
 #include "analysis/discover.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <optional>
 #include <set>
+#include <thread>
 #include <tuple>
 #include <utility>
 
 #include "analysis/insn.h"
 #include "analysis/jumptable.h"
 #include "analysis/summary.h"
+
+#include <llvm/ADT/ArrayRef.h>
+#include <llvm/Support/SHA256.h>
 
 namespace nxaot::analysis {
 
@@ -30,7 +37,8 @@ std::string Hex(uint64_t v) {
 
 class Discoverer {
 public:
-    Discoverer(const module::Image& image, const DiscoverOptions& options) : img(image), opts(options) {
+    Discoverer(const module::Image& image, const DiscoverOptions& options) : img(image), opts(options), cache(std::make_shared<InsnCache>(image)) {
+        const Timer t{out.times.classify};
         const size_t n = img.text_size / 4;
         insns.resize(n);
         for (size_t i = 0; i < n; ++i) {
@@ -40,35 +48,71 @@ public:
     }
 
     Discovery Run() {
-        Sources();
+        DiscoverTimes& tm = out.times;
+        // Each step timed into its DiscoverTimes field (the steps that change nothing are cheap; the loop's order is the algorithm's)
+        const auto timed = [](double& into, auto&& step) {
+            const Timer t{into};
+            return step();
+        };
+        timed(tm.sources, [&] { Sources(); return true; });
         for (out.rounds = 1; out.rounds < 10000; ++out.rounds) {
-            if (WalkDirty()) continue;
-            if (Verify()) continue;
-            if (Pads()) continue;
-            if (Tables({})) continue;
-            if (Pending()) continue;
-            if (Addresses()) continue;
+            if (timed(tm.walk, [&] { return WalkDirty(); })) continue;
+            if (timed(tm.tables, [&] { return Verify(); })) continue;
+            if (timed(tm.sources, [&] { return Pads(); })) continue;
+            if (timed(tm.tables, [&] { return Tables({}); })) continue;
+            if (timed(tm.sources, [&] { return Pending(); })) continue;
+            if (timed(tm.sources, [&] { return Addresses(); })) continue;
             // The code-derived sources are exhausted. The summaries now let regions continue past calls, for the brs that a region without
             // calls did not bound; only then the gap sweep, so that cases of a table not bounded yet do not become entries of their own
-            Taken();
-            Summarise(img, fns);
-            if (CutNoreturn()) continue;
-            if (Tables([this](uint64_t pc) { return EffectOf(pc); })) continue;
-            if (Gaps()) continue;
+            timed(tm.summaries, [&] { Taken(); RunSummaries(); return true; });
+            if (timed(tm.sources, [&] { return CutNoreturn(); })) continue;
+            if (timed(tm.tables, [&] { return Tables([this](uint64_t pc) { return EffectOf(pc); }); })) continue;
+            if (timed(tm.sources, [&] { return Gaps(); })) continue;
             break;
         }
-        Taken();
-        Summarise(img, fns);
-        for (auto& [entry, f] : fns) {
-            FindWindows(img, f);
-        }
-        Names();
-        Cover();
-        Oracle();
+        timed(tm.summaries, [&] { Taken(); RunSummaries(); return true; });
+        timed(tm.windows, [&] {
+            for (auto& [entry, f] : fns) {
+                FindWindows(img, f);
+            }
+            return true;
+        });
+        timed(tm.finish, [&] { Names(); Cover(); Oracle(); return true; });
+        tm.distinct_words = cache->Distinct();
+        tm.translations = cache->Translations();
+        tm.regions = out.regions_lifted;
+        tm.table_tries = out.table_tries;
+        tm.table_tries_skipped = out.table_tries_skipped;
+        tm.regions_reused = out.regions_reused;
+        out.insns = cache;
         return std::move(out);
     }
 
 private:
+    // Adds the seconds of its scope to a DiscoverTimes field
+    struct Timer {
+        double& into;
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~Timer() { into += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); }
+    };
+
+    // The summaries are a function of every function's code as its last walk found it (blocks, roots, pads: its walk state), of its
+    // address-taken and exported flags and of the set of functions: when none of those changed since the last run (the run after the loop,
+    // often), a new run would give the same summaries, and is not made
+    void RunSummaries() {
+        std::vector<std::tuple<uint64_t, uint64_t, bool, bool>> key;
+        key.reserve(fns.size());
+        for (const auto& [entry, f] : fns) key.emplace_back(entry, walk_state[entry].changes, f.address_taken, f.summary.exported);
+        if (summarised_key && *summarised_key == key) {
+            ++out.times.summarise_skipped;
+            return;
+        }
+        ++out.times.summarise_runs;
+        Summarise(img, fns, cache.get(), &summary_memo, &out.times.summary_rounds, &out.times.summary_computes);
+        out.times.summary_reused = summary_memo.hits;
+        summarised_key = std::move(key);
+    }
+
     // ---- Helpers ----
     bool Code(uint64_t pc) const { return img.InText(pc) && !(pc & 3) && !img.InData(pc); }
     const Insn& At(uint64_t pc) const { return insns[(pc - img.text_off) / 4]; }
@@ -264,6 +308,39 @@ private:
             }
         }
         ++version[f.entry];
+        const std::array<uint8_t, 32> digest = StateDigest(f);
+        WalkState& ws = walk_state[f.entry];
+        if (ws.digest != digest) {
+            ws.digest = digest;
+            ++ws.changes;
+        }
+        f.state = ws.changes;
+    }
+
+    // What a jump-table region reads of its function (jumptable.cpp: the blocks and their edges, the known tables, the roots, the limit), as a
+    // SHA-256: a walk that gives the same state again (a function walked again because a neighbour's limit or a callee's return changed) does
+    // not make its brs be tried again
+    static std::array<uint8_t, 32> StateDigest(const Function& f) {
+        std::vector<uint64_t> w{f.entry, f.limit};
+        for (const auto& [start, b] : f.blocks) {
+            w.insert(w.end(), {b.start, b.end, static_cast<uint64_t>(b.term), b.target, b.succ.size()});
+            for (const auto& [t, kind] : b.succ) w.insert(w.end(), {t, static_cast<uint64_t>(kind)});
+        }
+        w.push_back(~0ull);
+        for (const auto& [br, jt] : f.tables) {
+            w.insert(w.end(), {br, jt.table, jt.width, jt.is_signed, jt.base, static_cast<uint64_t>(jt.scale), jt.index_lo, jt.count, jt.region,
+                               jt.across_calls, jt.writable, jt.targets.size()});
+            w.insert(w.end(), jt.targets.begin(), jt.targets.end());
+        }
+        for (const std::set<uint64_t>* s : {&f.roots, &f.speculative, &f.spec_live}) {
+            w.push_back(~0ull);
+            w.insert(w.end(), s->begin(), s->end());
+        }
+        w.push_back(~0ull);
+        for (const auto& [call, pad] : f.pads) w.insert(w.end(), {call, pad});  // the summaries read them too (RunSummaries)
+        llvm::SHA256 sha;
+        sha.update(llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t*>(w.data()), w.size() * sizeof(uint64_t)));
+        return sha.final();
     }
 
     void Finish(Function& f, Block& b, const Insn& i, uint64_t pc) {
@@ -386,45 +463,153 @@ private:
     }
 
     // ---- Jump tables on the lifted IR ----
-    bool Tables(const CallEffects& calls) {
+    // A try of a br's regions, with what it read besides the function's walk: the effects of the calls its regions went past (their callees'
+    // summaries; past calls only) and the validity of the targets it checked (a table target may be another function's entry)
+    struct Tried {
+        uint64_t version = 0;  // the function's walk
+        uint64_t state = 0;    // its walk state (WalkState::changes)
+        std::vector<std::pair<uint64_t, std::optional<lift::CallEffect>>> effects;
+        std::vector<std::pair<uint64_t, bool>> valid;
+    };
+    struct WalkState {
+        std::array<uint8_t, 32> digest{};
+        uint64_t changes = 0;  // walks that changed the digest
+    };
+    static bool SameEffect(const std::optional<lift::CallEffect>& a, const std::optional<lift::CallEffect>& b) {
+        return a.has_value() == b.has_value() && (!a || (a->x == b->x && a->v == b->v && a->sp == b->sp && a->nzcv == b->nzcv));
+    }
+    // Whether every fact the try read is the same now: ResolveJumpTable is a function of the walk and of those facts, so a try on the same
+    // ones would come out as the last did
+    bool Unchanged(const Function& f, const Tried& t) const {
+        for (const auto& [pc, e] : t.effects) {
+            if (!SameEffect(EffectOf(pc), e)) return false;
+        }
+        for (const auto& [target, v] : t.valid) {
+            if (ValidTarget(f, target) != v) return false;
+        }
+        return true;
+    }
+
+    // The brs of one function (TablesOf's results): what goes to the whole discovery once every function is done, in function order
+    struct TablesOut {
+        std::vector<uint64_t> targets_outside;  // table targets that are other functions' entries
         bool found = false;
+        uint64_t tries = 0, skipped = 0, regions = 0, reused = 0;
+    };
+
+    // Tries the unbounded brs of one function. It reads the image, the function, the set of functions and the summaries, and writes only the
+    // function's tables, its tentative set and its brs' reasons, its own tries and its own regions: functions are tried on several threads
+    // (each br's regions are lifted in an LLVM context of their own), and their results applied in function order afterwards, as they were
+    void TablesOf(Function& f, const CallEffects& calls, uint64_t walk, uint64_t state, std::map<std::pair<uint64_t, bool>, Tried>& tries,
+                  RegionMemo& memo, TablesOut& out_f) const {
         const bool across = static_cast<bool>(calls);
-        const unsigned round = across ? summary_round : 0;  // regions past calls are tried again whenever the summaries were computed again
-        for (auto& [entry, f] : fns) {
-            for (auto& [br, why] : f.indirect) {
-                const auto key = std::make_tuple(entry, br, across);
-                const auto tried_it = tried.find(key);
-                if (tried_it != tried.end() && tried_it->second == std::make_pair(version[entry], round)) continue;
-                tried[key] = {version[entry], round};
-                const auto valid = [&](uint64_t t) { return ValidTarget(f, t); };
-                TableResult r = ResolveJumpTable(img, f, br, opts, valid, calls, false);
-                out.regions_lifted += r.regions;
-                bool tentative = false;
-                if (!r.table && !f.spec_live.empty() && !f.unverified.count(br)) {
-                    // The region may need code the function's walk did not reach yet (a switch in a loop: its cases branch back to the
-                    // dispatch): a table found while ignoring that code is kept only if it verifies once its cases are walked (Verify)
-                    TableResult o = ResolveJumpTable(img, f, br, opts, valid, calls, true);
-                    out.regions_lifted += o.regions;
-                    if (o.table) {
-                        r = o;
-                        tentative = true;
-                    }
-                }
-                if (r.table) {
-                    f.tables[br] = *r.table;
-                    for (const uint64_t t : r.table->targets) {
-                        if (!Inside(f, t)) pending[t] |= kProvJumpTable;  // another function's entry: its address is taken by the table
-                    }
-                    if (tentative) f.tentative.insert(br);
-                    dirty.insert(entry);
-                    found = true;
-                } else {
-                    why = r.why;
+        for (auto& [br, why] : f.indirect) {
+            // When a br is tried again (without calls: after a walk of its function; past calls: after every computation of the summaries,
+            // which in a module with brs no region bounds, as indirect tail calls through a register are, lifted every such br's regions
+            // again in every round), the try is skipped if the walk gave the same state and every call effect and target validity the
+            // last try read is the same: ResolveJumpTable is a function of those, and would fail again as the last try did
+            const auto key = std::make_pair(br, across);
+            const auto tried_it = tries.find(key);
+            if (tried_it != tries.end()) {
+                const Tried& last = tried_it->second;
+                if (!across && last.version == walk) continue;
+                if (last.state == state && Unchanged(f, last)) {
+                    ++out_f.skipped;
+                    continue;
                 }
             }
+            Tried& rec = tries[key];
+            rec = Tried{walk, state, {}, {}};
+            const auto valid = [&](uint64_t t) {
+                const bool v = ValidTarget(f, t);
+                rec.valid.emplace_back(t, v);
+                return v;
+            };
+            CallEffects seen;
+            if (across) {
+                seen = [&](uint64_t pc) {
+                    const auto e = calls(pc);
+                    rec.effects.emplace_back(pc, e);
+                    return e;
+                };
+            }
+            ++out_f.tries;
+            TableResult r = ResolveJumpTable(img, f, br, opts, valid, seen, false, &memo);
+            out_f.regions += r.regions;
+            out_f.reused += r.reused;
+            bool tentative = false;
+            if (!r.table && !f.spec_live.empty() && !f.unverified.count(br)) {
+                // The region may need code the function's walk did not reach yet (a switch in a loop: its cases branch back to the
+                // dispatch): a table found while ignoring that code is kept only if it verifies once its cases are walked (Verify)
+                TableResult o = ResolveJumpTable(img, f, br, opts, valid, seen, true, &memo);
+                out_f.regions += o.regions;
+                out_f.reused += o.reused;
+                if (o.table) {
+                    r = o;
+                    tentative = true;
+                }
+            }
+            if (r.table) {
+                f.tables[br] = *r.table;
+                for (const uint64_t t : r.table->targets) {
+                    if (!Inside(f, t)) out_f.targets_outside.push_back(t);  // another function's entry: its address is taken by the table
+                }
+                if (tentative) f.tentative.insert(br);
+                out_f.found = true;
+            } else {
+                why = r.why;
+            }
         }
-        if (across) ++summary_round;
+    }
+
+    bool Tables(const CallEffects& calls) {
+        // Each function's containers exist before the threads start (each thread only touches the function it took)
+        struct Job {
+            Function* f;
+            uint64_t walk, state;
+            std::map<std::pair<uint64_t, bool>, Tried>* tries;
+            RegionMemo* memo;
+        };
+        std::vector<Job> jobs;
+        for (auto& [entry, f] : fns) {
+            if (!f.indirect.empty()) jobs.push_back({&f, version[entry], walk_state[entry].changes, &tried[entry], &region_memo[entry]});
+        }
+        std::vector<TablesOut> outs(jobs.size());
+        std::atomic<size_t> next{0};
+        const auto work = [&] {
+            for (size_t i; (i = next.fetch_add(1)) < jobs.size();) {
+                TablesOf(*jobs[i].f, calls, jobs[i].walk, jobs[i].state, *jobs[i].tries, *jobs[i].memo, outs[i]);
+            }
+        };
+        const unsigned threads = static_cast<unsigned>(std::min<size_t>(Threads(), jobs.size()));
+        if (threads <= 1) {
+            work();
+        } else {
+            std::vector<std::thread> pool;
+            for (unsigned i = 0; i < threads; ++i) pool.emplace_back(work);
+            for (auto& th : pool) th.join();
+        }
+        bool found = false;
+        for (size_t i = 0; i < jobs.size(); ++i) {
+            const TablesOut& o = outs[i];
+            for (const uint64_t t : o.targets_outside) pending[t] |= kProvJumpTable;
+            if (o.found) {
+                dirty.insert(jobs[i].f->entry);
+                found = true;
+            }
+            out.table_tries += o.tries;
+            out.table_tries_skipped += o.skipped;
+            out.regions_lifted += static_cast<unsigned>(o.regions);
+            out.regions_reused += o.reused;
+        }
         return found;
+    }
+
+    // The threads discovery tries jump tables on (DiscoverOptions::threads; 0: one per CPU)
+    unsigned Threads() const {
+        if (opts.threads) return opts.threads;
+        const unsigned h = std::thread::hardware_concurrency();
+        return h ? h : 1;
     }
 
     // ---- Tentative tables: with their cases walked, the table must come out of a closed region that includes them, as it went in ----
@@ -437,8 +622,9 @@ private:
                 const auto valid = [&](uint64_t t) { return ValidTarget(f, t); };
                 const CallEffects calls = tentative.across_calls ? CallEffects([this](uint64_t pc) { return EffectOf(pc); }) : CallEffects{};
                 // Derived again with every table of the function known, this one included: the region now follows its cases back to the br
-                const TableResult r = ResolveJumpTable(img, f, br, opts, valid, calls, false);
+                const TableResult r = ResolveJumpTable(img, f, br, opts, valid, calls, false, &region_memo[f.entry]);
                 out.regions_lifted += r.regions;
+                out.regions_reused += r.reused;
                 const bool same = r.table && std::all_of(r.table->targets.begin(), r.table->targets.end(), [&](uint64_t t) {
                                       return std::find(tentative.targets.begin(), tentative.targets.end(), t) != tentative.targets.end();
                                   });
@@ -625,6 +811,8 @@ private:
 
     const module::Image& img;
     DiscoverOptions opts;
+    std::shared_ptr<InsnCache> cache;  // the instruction facts the summaries read (summary.h), kept for the plan
+    std::optional<std::vector<std::tuple<uint64_t, uint64_t, bool, bool>>> summarised_key;  // RunSummaries: what the last summaries saw
     Discovery out;
     std::map<uint64_t, Function>& fns = out.functions;
     std::vector<Insn> insns;
@@ -633,8 +821,10 @@ private:
     std::map<uint64_t, uint32_t> pending;  // entries code names: bl and tail-call targets, landing pads and table targets outside
     std::map<uint64_t, uint64_t> refs;     // text addresses adr / adrp + add build, and where
     std::map<uint64_t, uint64_t> version;  // walks of each function
-    std::map<std::tuple<uint64_t, uint64_t, bool>, std::pair<uint64_t, unsigned>> tried;  // (function, br, past calls) -> (walk, summary round)
-    unsigned summary_round = 0;
+    std::map<uint64_t, std::map<std::pair<uint64_t, bool>, Tried>> tried;  // function -> (br, past calls) -> the last try
+    std::map<uint64_t, WalkState> walk_state;                     // per function: its last walk's state (StateDigest)
+    std::map<uint64_t, RegionMemo> region_memo;                   // per function: the jump-table regions analysed so far
+    SummaryMemo summary_memo;                                     // the summaries computed so far
     std::set<uint64_t> gap_tried;
     std::map<uint64_t, uint64_t> sym_end;  // symbol entries and their ends, when symbols are a source
     std::set<uint64_t> summarised;         // the functions the last summaries cover: calls to those without a return path do not fall through

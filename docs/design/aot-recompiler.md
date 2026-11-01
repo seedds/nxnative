@@ -407,12 +407,12 @@ Model: `T = T_analyse + Σ T_compile(function, tier) / workers + T_link`. The th
 
 | Step | Guest instructions per second per core |
 |---|---|
-| decoding, discovery, summaries | 38,000 (estimated at least 10 million) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
-| lifting to IR | 150,000 (estimated 2 to 5 million) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
-| tier C | 23,600 (estimated 150,000 to 300,000) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
-| tier W | 6,700 (estimated 50,000 to 100,000) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
-| tier H | 6,500 at O2 (estimated 15,000 to 30,000; H+ at O3: 6,200) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
-| linking | 0.005 s per module of the corpus with lld as a library (estimated 10 to 30 s per pack) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX] |
+| decoding, discovery, summaries | 38,000 (estimated at least 10 million) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX]; after phase 5a 64,800 over the corpus, 87,879 on the game-shaped benchmark on one thread and 143,092 with its jump tables on 8 [V: phase 5a, dm/tools/aot/README.md, "Pack throughput"] |
+| lifting to IR | 150,000 (estimated 2 to 5 million) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX]; after phase 5a 101,000 over the corpus, 146,071 per core on the benchmark [V: phase 5a, dm/tools/aot/README.md, "Pack throughput"] |
+| tier C | 23,600 (estimated 150,000 to 300,000) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX]; on the benchmark 15,650 per worker, 122,933 per second with 8 workers [V: phase 5a, dm/tools/aot/README.md, "Pack throughput"] |
+| tier W | 6,700 (estimated 50,000 to 100,000) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX]; on the benchmark 6,509 per core with one worker, 7,377 per worker and 58,403 per second with 8 workers [V: phase 5a, dm/tools/aot/README.md, "Pack throughput"] |
+| tier H | 6,500 at O2 (estimated 15,000 to 30,000; H+ at O3: 6,200) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX]; the max mode on the benchmark 6,648 per worker, 47,502 per second with 8 workers [V: phase 5a, dm/tools/aot/README.md, "Pack throughput"] |
+| linking | 0.005 s per module of the corpus with lld as a library (estimated 10 to 30 s per pack) [V: measured on lavapipe-less Linux, Intel Core i9-13950HX]; one object per function: 29 µs per unit, 0.12 s for the benchmark's 4,088 units [V: phase 5a, dm/tools/aot/README.md, "Pack throughput"] |
 
 Measured in phase 1 over the corpus (14 NROs, 86,141 guest instructions, one thread, one tier per module; dm/tools/aot/README.md, "Measurements").
 
@@ -423,9 +423,9 @@ Estimates on the reference machine: 4 cores and 8 threads (Core i3-10100 class, 
 | Mario `main` and `sdk` (about 8.5 million instructions) | about 1 min | about 1 min | about 2–3 min | under 30 s |
 | Monster Hunter Rise `main` (about 31 million) | about 3 min | about 2–3 min | about 7–9 min | under 1 min |
 
-Strategy: shards compiled in parallel (one LLVM context per worker thread), the number of workers bounded by free RAM; the per-function cache (section 13); tier H only with a profile; FDE-less gaps in tier C; huge functions split.
+Strategy: shards compiled in parallel (one LLVM context per worker thread), the number of workers bounded by free RAM; the per-function cache (section 13) [V: phase 5a, dm/tools/aot/README.md, "Pack throughput": built and measured; extrapolated, only Mario's max pack meets its target]; tier H only with a profile; FDE-less gaps in tier C; huge functions split.
 
-Measurable targets, checked in phase 5: on the reference machine, a balanced pack of at most 3 minutes for Mario and 10 minutes for Monster Hunter Rise's `main`; at most 30 minutes for any max pack; at most 1 minute for a repack with a warm cache; at most 2 seconds from host start to `nnMain`; and balanced packs reaching at least 90 % of the max pack's frame rate on the bench routes. Each pack logs `aot: <module> <instructions> <functions>`, the tier counts, the seconds per stage and the peak memory.
+Measurable targets, checked in phase 5: on the reference machine, a balanced pack of at most 3 minutes for Mario and 10 minutes for Monster Hunter Rise's `main`; at most 30 minutes for any max pack; at most 1 minute for a repack with a warm cache; at most 2 seconds from host start to `nnMain`; and balanced packs reaching at least 90 % of the max pack's frame rate on the bench routes. Each pack logs `aot: <module> <instructions> <functions>`, the tier counts, the seconds per stage and the peak memory [V: phase 5a, dm/tools/aot/README.md, "Pack throughput"].
 
 ## 11. JIT fallback
 

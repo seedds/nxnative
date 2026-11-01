@@ -6,22 +6,68 @@
 #pragma once
 
 #include <map>
+#include <memory>
 
 #include "analysis/discover.h"
 #include "module/image.h"
 
 namespace nxaot::analysis {
 
-// Fills Function::summary for every function; address_taken must be set already
-void Summarise(const module::Image& image, std::map<uint64_t, Function>& functions);
-
-// Fills Function::windows and unpaired_exclusive
-void FindWindows(const module::Image& image, Function& fn);
-
 // The effects of one instruction on the registers (uses before its own writes, writes), from dynarmic's IR of it
 struct RegFx {
     RegSet use, def;
 };
 RegFx InstructionFx(uint64_t pc, uint32_t word);
+
+// What the summaries (and the pack's plan, src/build/plan.cpp) need of every instruction, again and again over the fixed points: its register
+// effects (InstructionFx) and the preservation analysis' view of its dynarmic IR. Both are a function of the word alone, except immediates that
+// are the pc plus a constant (adr, adrp, bl's return address, literal addresses), which are kept relative: so each distinct word is translated
+// by dynarmic once (twice, to find those immediates) for the whole module, instead of once per visit. A word whose IR depends on its pc in any
+// other way is translated at each visit, as before. One per module, kept by Discovery for the plan; not thread-safe
+class InsnCache {
+public:
+    explicit InsnCache(const module::Image& image);
+    ~InsnCache();
+    InsnCache(const InsnCache&) = delete;
+    InsnCache& operator=(const InsnCache&) = delete;
+    const RegFx& Fx(uint64_t pc);  // InstructionFx of the word at pc; RegFx{} where the image has no word
+    uint64_t Distinct() const;     // distinct words seen
+    uint64_t Translations() const; // dynarmic translations made
+    struct Impl;                   // summary.cpp
+    Impl& Internal() { return *impl; }
+
+private:
+    std::unique_ptr<Impl> impl;
+};
+
+// The summaries of earlier runs, per function by everything its summary is computed from: its code as discovery's walks left it
+// (Function::state, with its exported flag) and what it reads of its callees' summaries (and of the address-taken functions' union for blr and
+// unbounded br). Each run of the fixed point starts afresh, and its rounds mostly compute what the last run computed in the same order; a
+// function's summary for inputs seen before is taken from here. One per discovery
+struct SummaryMemo {
+    std::map<uint64_t, std::vector<std::pair<std::vector<uint64_t>, Summary>>> by_function;
+    uint64_t hits = 0;
+};
+
+// Fills Function::summary for every function; address_taken must be set already. cache: the module's instruction cache (null: a cache of this
+// call's own); memo: null, or the summaries of earlier runs (Function::state must then name each function's code). rounds and computes, when
+// given, count the fixed point's rounds and the summaries it computed (DiscoverTimes)
+void Summarise(const module::Image& image, std::map<uint64_t, Function>& functions, InsnCache* cache = nullptr, SummaryMemo* memo = nullptr,
+               uint64_t* rounds = nullptr, uint64_t* computes = nullptr);
+
+// Fills Function::windows and unpaired_exclusive
+void FindWindows(const module::Image& image, Function& fn);
+
+// What an indirect call (blr, a br discovery could not bound) may find changed when the callee is not one of the module's functions: a host
+// function through the host-function page (a GOT slot the loader bound to an import), a function of another pack, code the JIT fallback runs.
+// Those follow AAPCS64 and leave their results in its result registers: x0..x7, x8 (the indirect result location) and v0..v3. The module's own
+// write set cannot stand for them: a module whose functions never write v0 had its call sites keep their own v0 after a host function returned
+// a float there (sqrtf through a GOT slot). The summaries' indirect callee and the plan's indirect view (src/build/plan.cpp) include these
+inline RegSet ForeignWrites() {
+    RegSet r;
+    r.x = 0x1FFu;
+    r.v = 0xFu;
+    return r;
+}
 
 }  // namespace nxaot::analysis

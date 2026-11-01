@@ -331,6 +331,9 @@ Lifted FunctionLifter::Run(const std::string& name) {
             break;
         }
     }
+    if (error.empty() && Fn()) {
+        FnInitRegisters();
+    }
     if (error.empty() && !Fn()) {
         Epilogue();
     }

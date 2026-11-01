@@ -2725,7 +2725,7 @@ uint64_t nvn_sparse_tile_state(const void *pool, uint64_t a, uint64_t n, uint32_
     if (!v) { pthread_mutex_unlock(&g_vp_mu); return 0; }
     const uint8_t *rs = NULL, *re = NULL; uint64_t ri = 0, o = a - (uint64_t)(uintptr_t)v->base;
     for (uint64_t at = o & ~0xFFFull; at < o + n && at < v->size; at += 0x1000) {
-        const vpte *e = vpt_get(v, at); uint64_t i = (at - o) / tile;
+        const vpte *e = vpt_get(v, at); uint64_t i = (at > o ? at - o : 0) / tile;   // the first page may start before a (not 4 KB aligned)
         if (!e) { at |= (2u << 20) - 1; at -= 0xFFF; continue; }   // a leaf never mapped: skip its 2 MB
         if (!e->phys) continue;
         if (!(out[i] & 1)) mapped++;

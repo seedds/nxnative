@@ -1689,7 +1689,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[145];
+static int g_red_once[146];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -2035,7 +2035,12 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> base, MTLTextur
     }
     id holder = tex_get(t->serial);
     if ([holder isKindOfClass:[NvPkg class]]) { id<MTLTexture> old = ((NvPkg *)holder)->tex; ((NvPkg *)holder)->tex = upgraded; defer_obj_release(old); g_ser_gen++;
-        if (((NvPkg *)holder)->view) { defer_obj_unref(((NvPkg *)holder)->view); ((NvPkg *)holder)->view = nil; ((NvPkg *)holder)->vbase = 0; } }   // a sparse texture's view of the old one: bound whole until its next upload
+        if (((NvPkg *)holder)->view) { defer_obj_unref(((NvPkg *)holder)->view); ((NvPkg *)holder)->view = nil; ((NvPkg *)holder)->vbase = 0; }   // a sparse texture's view of the old one: bound whole until its next upload
+        // A Metal placement sparse texture (sp_make) was upgraded to a whole one (the copy above read its mapped tiles, unmapped ones as 0): its tile record goes (deferred: the copy reads the
+        // tiles), and the texture is whole from here, re-uploaded through the page table as before sp_make. sp_make gives such a texture every usage it can from the start, so this is
+        // the image-use upgrade of a sampled sparse texture (mtl_reg_image), which no game has shown yet
+        if (((NvPkg *)holder)->sp) { defer_obj_release(((NvPkg *)holder)->sp); ((NvPkg *)holder)->sp = nil;
+            RED_ONCE(145, "a placement sparse texture upgraded for %s is whole from now on, with its whole memory (ser=%llu %lux%lux%lu)", add & MTLTextureUsageShaderWrite ? "image writes" : add & MTLTextureUsageRenderTarget ? "render-target use" : "format views", (unsigned long long)t->serial, (unsigned long)base.width, (unsigned long)base.height, (unsigned long)base.arrayLength); } }
     else {
         // Every name of the old texture moves to the upgraded one: other serials sharing its storage (live in g_by_serial, finalized in g_ghost) and the sharing table. Only the asking serial moved before,
         // so the others kept reading the old copy while writes went to the new one, and the old texture stayed in g_alias_set. Slots are replaced in place (no insert, so no table resize during the walk);
@@ -2732,7 +2737,9 @@ static NvSparse *sp_make(const tex_t *t, MTLTextureDescriptor *d, id<MTLTexture>
     if (@available(macOS 26.0, *)) {
         ms = [g_dev sparseTileSizeWithTextureType:d.textureType pixelFormat:d.pixelFormat sampleCount:1 sparsePageSize:g_sp_page];
         if (!ms.width || !ms.height) { RED_ONCE(143, "sparse textures: format %#x has no Metal sparse tile size: made whole (first case ser=%llu)", t->d.format, (unsigned long long)t->serial); return nil; }
-        d.placementSparsePageSize = g_sp_page; d.usage |= MTLTextureUsagePixelFormatView;   // the format-view usage from the start: tex_upgrade would make a whole texture
+        // Every usage an upgrade could ask for from the start (format views; render-target use for the formats tex_desc gives it to; image use comes with tex_desc): tex_upgrade
+        // makes a whole texture, which a placement sparse one must not become in place (see tex_upgrade)
+        d.placementSparsePageSize = g_sp_page; d.usage |= MTLTextureUsagePixelFormatView | (fmt_compressed(t->d.format) ? 0 : MTLTextureUsageRenderTarget);
         mt = [g_dev newTextureWithDescriptor:d];
         if (!mt) { RED_ONCE(144, "sparse textures: failed to make a placement sparse texture %ux%ux%u format %#x: made whole", t->d.width, t->d.height, t->d.depth, t->d.format); return nil; }
         mtail = mt.firstMipmapInTail;

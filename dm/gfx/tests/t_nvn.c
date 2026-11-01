@@ -968,6 +968,8 @@ int main(void) {
         P(nvnMemoryPoolMapVirtual)(&vp, 1, (const NVNmappingRequest *)&rq2);
         EXPECT("tile state: a later mapping marks its tile", 2, nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem, 0x40000, 0x10000, g1, now, st));
         EXPECT("tile state: tile 3 mapped and changed", 3, st[3]); EXPECT("tile state: tile 2 still unchanged", 1, st[2]);
+        EXPECT("tile state: from an address 2 KB into the pool (not 4 KB aligned) the 32 KB mapping spans two tiles", 3, nvn_sparse_tile_state(&vp, (uint64_t)(uintptr_t)vo->mem + 0x800, 0x40000 - 0x800, 0x10000, g1, now, st));
+        EXPECT("tile state: tile 1 (from 2 KB) holds the older mapping's pages, unchanged", 1, st[1]); EXPECT("tile state: tiles 2 and 3 hold the later mapping", 3, st[2] & st[3]);
         uint8_t got[0x10000]; memset(phys + 0x10000, 0x5a, 0x10000);
         EXPECT("tile state: a tile's bytes come from the physical pool", 0, nvn_sparse_copy(&vp, got, (uint64_t)(uintptr_t)vo->mem + 0x20000, 0x10000));
         EXPECT("tile state: the mapped bytes", 0x5a, got[0x1234]);

@@ -85,9 +85,13 @@ def hmma_msl(msl):
     scr = [x for x in params if x.startswith('threadgroup ')]
     plain = [x for x in params if not x.startswith('threadgroup ')]
     if len(scr) != 1 or len(plain) != 11: raise ValueError('dmsh_hmma16816_f16: unexpected parameters ' + m.group(2)[:200])
-    name = lambda x: re.search(r'(\w+)$', x).group(1)
+    def group1(pattern, text, how=re.search):   # the first group of a match the helper's signature must have
+        found = how(pattern, text)
+        if not found: raise ValueError('dmsh_hmma16816_f16: unexpected parameter ' + text[:100])
+        return found.group(1)
+    name = lambda x: group1(r'(\w+)$', x)
     names = [name(x) for x in plain]
-    dt = re.match(r'thread (\w+)&', plain[10]).group(1)
+    dt = group1(r'thread (\w+)&', plain[10], re.match)
     v = dict(zip(['lane', 'blk', 'a0', 'a1', 'a2', 'a3', 'b0', 'b1', 'acc0', 'acc1', 'd1'], names), scr=name(scr[0]), dt=dt, rt=m.group(1))
     start = m.end() - 1; depth = 0
     for i in range(start, len(msl)):

@@ -527,7 +527,7 @@ int main(void) {
     cheats_pass();
     CHECK(rd32(0x43B8) == 0xAABBCCDD && !dm_cheat_why_at(ptr)[0] && entry("Ptr")[0].fails == 1, "once the pointer is set the chase works and the note goes");
     char pv2[512]; dm_cheat_preview(fl, pv2, sizeof pv2);
-    CHECK(strstr(pv2, "read at guest address 0x10 fails") && g_cheat[fl].fails == 2, "the dry run describes a failed read and counts nothing");
+    CHECK(strstr(pv2, "read at guest address 0x10 fails") && fl >= 0 && g_cheat[fl].fails == 2, "the dry run describes a failed read and counts nothing");
 
     // ---- registers: shared by the cheats of one pass (masters first), reset between passes; the dry run replays the pass ----
     fresh("regs", "[P2]\n40010000 00000000 00000005\n"   // r1 = 5

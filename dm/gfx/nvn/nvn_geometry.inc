@@ -262,13 +262,15 @@ static int geo_color_omit(void) {
     if (g_geo_full_colors || !R.has_rt || !R.rt.depth || R.clear_d || R.clear_s) return 0;
     // The answer of the last call with the same targets (each tex_t with its serial, so another texture at the same address does not match), views, clears and color
     // mask: resolving every attachment's Metal texture a draw was about 15 % of a mesh draw's time in Donkey Kong Bananza
-    struct { p_set_rt rt; uint64_t ser[9], mask; uint8_t clear_c[8]; } key; memset(&key, 0, sizeof key);
-    key.rt = R.rt; key.mask = (uint64_t)S.chmask.mask; memcpy(key.clear_c, R.clear_c, sizeof key.clear_c);
-    for (int i = 0; i < 8; i++) key.ser[i] = R.rt.color[i] ? R.rt.color[i]->serial : 0;
-    key.ser[8] = R.rt.depth->serial;
-    static __typeof__(key) last; static int last_r = -1;
-    if (last_r >= 0 && !memcmp(&key, &last, sizeof key)) return last_r;
-    last = key; last_r = geo_color_omit_(); return last_r;
+    // A byte key: the target record's bytes as they lie (padding included: unequal padding of an equal record only costs a recompute), then the serials, mask and clears
+    enum { KEY_RT = sizeof(p_set_rt), KEY_N = KEY_RT + 10 * 8 + 8 };
+    uint8_t key[KEY_N]; uint64_t w[10];
+    for (int i = 0; i < 8; i++) w[i] = R.rt.color[i] ? R.rt.color[i]->serial : 0;
+    w[8] = R.rt.depth->serial; w[9] = (uint64_t)S.chmask.mask;
+    memcpy(key, &R.rt, KEY_RT); memcpy(key + KEY_RT, w, sizeof w); memcpy(key + KEY_RT + sizeof w, R.clear_c, 8);
+    static uint8_t last[KEY_N]; static int last_r = -1;
+    if (last_r >= 0 && !memcmp(key, last, KEY_N)) return last_r;
+    memcpy(last, key, KEY_N); last_r = geo_color_omit_(); return last_r;
 }
 static int geo_color_omit_(void) {
     // Removing an inactive color must not change raster bounds, sample count or

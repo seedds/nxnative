@@ -140,6 +140,25 @@ int main(void) {
     }
     {   uint8_t da[0x400]; memset(da, 0xab, sizeof da);   // AV1: no decoder on the host, Initialize fails and leaves no host decoder
         assert(h_cv_av1init(da) != 0 && !cv_of(da) && !h_cv_av1fin(da)); }
+    // SDK 21's names (Mario Kart World), called as the guest calls them: every argument in a 64-bit slot (AAPCS64 stack slots, 16-bit sizes not extended); the event comes back as the result
+    {   typedef Result (*tm_fn)(void *, void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+        typedef Result (*h264tm_fn)(void *, void *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, const void *, uint64_t);
+        typedef cv_pref (*pref_fn)(uint64_t, uint64_t, uint64_t, uint64_t);
+        _Alignas(16) static uint8_t d9[0x260], dh[0x260], da[0x260], p9[0x40], m9[16 * 16 * 4];
+        cv_pref p = ((pref_fn)h_cv_pref21)(0xdead0010, 0xbeef0010, 3, 1);
+        assert(p.w == 16 && p.h == 16 && p.fmt == 3);
+        assert(!h_cv_poolsize(&size, &align, &p, 1) && !h_cv_pool21(p9, m9, size, &p, 1) && pool_of(p9));
+        assert(!((tm_fn)h_cv_vp9tm)(d9, m9, sizeof m9, 0x10000, 0xdead0010, 0xbeef0010, 1, 1, 3, 1));
+        cv_dec *d9d = cv_of(d9); assert(d9d && d9d->codec == CV_VP9 && d9d->w == 16 && d9d->h == 16 && d9d->vpx_ok);
+        void *e9 = h_cv_vp9ev21(d9); assert(e9 == d9 + CV_EVENT_OFF && ev_set(e9));
+        assert(!h_cv_vp9reg(d9, 0, p9, 0) && !h_cv_vp9acq(&idx, &sync, d9));
+        h_cv_vp9rel(d9, 0, sync); assert(!h_cv_vp9submit(&id, d9, vp9, sizeof vp9, 1000, false) && h_gs_trywait(&sync));
+        assert(!h_cv_vp9fin(d9) && !cv_of(d9)); h_cv_poolfin(p9);
+        assert(!((h264tm_fn)h_cv_h264tm)(dh, m9, sizeof m9, 0x10000, 64, 64, 1, 1, 3, 1, h264, 33));   // the parameter sets: SPS and PPS, 33 bytes
+        assert(cv_of(dh) && cv_of(dh)->codec == CV_H264 && cv_of(dh)->csd_n == 33 && !memcmp(cv_of(dh)->csd, h264, 33));
+        assert(!h_cv_h264fin(dh));
+        assert(!h_cv_vp8rm(d9, 0x10000, 16, 16, 1, 1, 3, 1) && cv_of(d9) && cv_of(d9)->codec == CV_VP8 && h_cv_vp8ev21(d9) == d9 + CV_EVENT_OFF && !h_cv_vp8fin(d9));
+        memset(da, 0xab, sizeof da); assert(h_cv_av1tm(da) != 0 && !cv_of(da)); }
     printf("t_codec_video: all passed\n");
     return 0;
 }

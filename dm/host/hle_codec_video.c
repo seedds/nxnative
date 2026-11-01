@@ -346,6 +346,54 @@ HLE_FORCE("_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEPvmmttjNS0_2
 HLE_FORCE("_ZN2nn5codec20InitializeAv1DecoderEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE", "AV1: no decoder on the host",
           Result, h_cv_av1init2, void *t) { *(void **)t = NULL; return cv_av1(); }
 HLE_FORCE("_ZN2nn5codec18FinalizeAv1DecoderEPNS0_14Av1DecoderTypeE", "AV1: nothing was made", Result, h_cv_av1fin, void *t) { (void)t; return 0; }
+
+// SDK 21's names (Mario Kart World, sdk 21.4.0): Initialize…ByTransferMemory (the work memory) and Initialize…ByRemoteMemory replace the two Initialize overloads and take an output
+// mode, Get…SubmissionReadyEvent returns the event (the SDK's returns the type + 8), the image preference takes a tiling mode and the pool no codec mode. Unserved, the SDK's own
+// Initialize asked the decoder service the host does not run and aborted (Mario Kart World, sdk+0x32f998, the Grand Prix's first movie). Stack arguments sit in 8-byte slots
+// (AAPCS64) where Apple packs smaller ones, so they are declared 64-bit; 16-bit sizes are not extended by the caller, so they are taken as unsigned and truncated
+static Result cv_dec_init21(void *t, int codec, unsigned w, unsigned h, uint32_t in, uint64_t out, uint64_t mode, const void *csd, uint64_t csd_n) {
+    static int once; if (!once++) LOG("[codec] SDK 21 decoder Initialize: output mode %u", (uint32_t)mode);
+    return cv_dec_init(t, codec, (uint16_t)w, (uint16_t)h, in, (uint32_t)out, csd, csd_n);
+}
+static void *cv_dec_event21(void *t) { cv_dec *d = cv_of(t); return d ? d->event : NULL; }
+HLE_FORCE("_ZN2nn5codec25MakeDecodeImagePreferenceEttNS0_24VideoDecoderOutputFormatENS0_15ImageTilingModeE", "the preference only carries the size and format to the host's pool",
+          cv_pref, h_cv_pref21, unsigned w, unsigned h, uint32_t fmt, uint32_t tiling) {
+    return (cv_pref){(uint16_t)w, (uint16_t)h, fmt, tiling, CV_MAGIC, {0, 0}};
+}
+HLE_FORCE("_ZN2nn5codec26InitializeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeEPvmRKNS0_27VideoDecoderImagePreferenceEj", "a host pool of decoded pictures",
+          Result, h_cv_pool21, void *t, void *mem, uint64_t size, const cv_pref *p, uint32_t n) { return h_cv_pool(t, mem, size, p, n, 0); }
+#define CV_FAMILY21(tag, codec, s_tm, s_rm, s_ev) \
+    HLE_FORCE(s_tm, "decoded on the host", Result, h_cv_##tag##tm, void *t, void *work, uint64_t wsize, uint64_t bs, unsigned w, unsigned h, uint32_t refs, uint32_t in, uint64_t out, uint64_t mode) { \
+        (void)work; (void)wsize; (void)bs; (void)refs; return cv_dec_init21(t, codec, w, h, in, out, mode, NULL, 0); } \
+    HLE_FORCE(s_rm, "decoded on the host", Result, h_cv_##tag##rm, void *t, uint64_t bs, unsigned w, unsigned h, uint32_t refs, uint32_t in, uint32_t out, uint32_t mode) { \
+        (void)bs; (void)refs; return cv_dec_init21(t, codec, w, h, in, out, mode, NULL, 0); } \
+    HLE_FORCE(s_ev, "signalled while the host decoder takes packets", void *, h_cv_##tag##ev21, void *t) { return cv_dec_event21(t); }
+CV_FAMILY21(vp9, CV_VP9,
+    "_ZN2nn5codec36InitializeVp9DecoderByTransferMemoryEPNS0_14Vp9DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+    "_ZN2nn5codec34InitializeVp9DecoderByRemoteMemoryEPNS0_14Vp9DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+    "_ZN2nn5codec33GetVp9DecoderSubmissionReadyEventEPNS0_14Vp9DecoderTypeE")
+CV_FAMILY21(vp8, CV_VP8,
+    "_ZN2nn5codec36InitializeVp8DecoderByTransferMemoryEPNS0_14Vp8DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+    "_ZN2nn5codec34InitializeVp8DecoderByRemoteMemoryEPNS0_14Vp8DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+    "_ZN2nn5codec33GetVp8DecoderSubmissionReadyEventEPNS0_14Vp8DecoderTypeE")
+#undef CV_FAMILY21
+HLE_FORCE("_ZN2nn5codec37InitializeH264DecoderByTransferMemoryEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
+          "decoded with VideoToolbox on the host", Result, h_cv_h264tm, void *t, void *work, uint64_t wsize, uint64_t bs, unsigned w, unsigned h, uint32_t refs, uint32_t in, uint64_t out,
+          uint64_t mode, const void *csd, uint64_t csd_n) {
+    (void)work; (void)wsize; (void)bs; (void)refs; return cv_dec_init21(t, CV_H264, w, h, in, out, mode, csd, csd_n);
+}
+HLE_FORCE("_ZN2nn5codec35InitializeH264DecoderByRemoteMemoryEPNS0_15H264DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
+          "decoded with VideoToolbox on the host", Result, h_cv_h264rm, void *t, uint64_t bs, unsigned w, unsigned h, uint32_t refs, uint32_t in, uint32_t out, uint32_t mode,
+          const void *csd, uint64_t csd_n) {
+    (void)bs; (void)refs; return cv_dec_init21(t, CV_H264, w, h, in, out, mode, csd, csd_n);
+}
+HLE_FORCE("_ZN2nn5codec34GetH264DecoderSubmissionReadyEventEPNS0_15H264DecoderTypeE", "signalled while the host decoder takes packets", void *, h_cv_h264ev21, void *t) {
+    return cv_dec_event21(t);
+}
+HLE_FORCE("_ZN2nn5codec36InitializeAv1DecoderByTransferMemoryEPNS0_14Av1DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+          "AV1: no decoder on the host", Result, h_cv_av1tm, void *t) { *(void **)t = NULL; return cv_av1(); }
+HLE_FORCE("_ZN2nn5codec34InitializeAv1DecoderByRemoteMemoryEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE",
+          "AV1: no decoder on the host", Result, h_cv_av1rm, void *t) { *(void **)t = NULL; return cv_av1(); }
 // The host's sync handles signal when their buffer holds the picture of that release; a handle the host did not make (another nn::gs user) reads as signalled
 static bool sync_reached(const cv_sync *s) {
     if (s->magic != CV_SYNC) { static int once; if (!once++ && (s->magic || s->dec)) LOG("[RED] nn::codec: a sync handle the host did not make (%#x): signalled", s->magic); return true; }

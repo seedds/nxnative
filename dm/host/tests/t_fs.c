@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <ctype.h>
 #include <sys/clonefile.h>                // declared before the define, so only hle_fs.c's calls go to the fake
 static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off);
 static int fake_clonefile(const char *src, const char *dst, uint32_t flags);
@@ -67,6 +68,61 @@ int main(void) {
     CHECK(h_fs_OpenFile(&rh, "rom:/data/base", MODE_READ) == RES_OK && rh && !(rh & 15), "a folder file's handle is 16-byte aligned, as a Horizon FileAccessor pointer is (%#llx)", (unsigned long long)rh); h_fs_CloseFile(rh);
     g_nmnt = 0;
     unsetenv("DM_ROMFS_OVERLAY");
+    {   // mods (hle_mods.c): every layout a download comes in, name order, switched off, code patches this build lacks, built in, behind DM_ROMFS_OVERLAY
+        char m[1200], tid[17], low[17], d[1600];
+        snprintf(m, sizeof m, "%s/mods", root); snprintf(tid, sizeof tid, "%016llX", (unsigned long long)DM_GAME_PROGRAM_ID);
+        for (int k = 0; k < 17; k++) low[k] = (char)tolower((unsigned char)tid[k]);
+        mkdir(m, 0755);
+        const char *files[][2] = {
+            {"Alpha/romfs/data/same", "alpha"}, {"Beta/romfs/data/same", "beta"}, {"Beta/romfs/data/new", "beta-new"},
+            {"Code/romfs/data/code", "code"}, {"Code/exefs/speed.pchtxt", "@nsobid-00"},
+            {"Built/romfs/data/built", "built"}, {"Built/dm_code.tsv", "# patches"},
+            {"Pack/atmosphere/contents/%s/romfs/data/pack", "pack"}, {"contents/%s/Ryu/romfs/data/ryu", "ryu"},
+            {"Other/atmosphere/contents/0100000000000001/romfs/data/other", "other"}, {"Empty/romfs/.keep", ""},
+        };
+        for (unsigned i = 0; i < sizeof files / sizeof *files; i++) {
+            char rel[300]; snprintf(rel, sizeof rel, files[i][0], i == 8 ? low : tid); snprintf(d, sizeof d, "%s/%s", m, rel);
+            for (char *q = d + strlen(m) + 1; (q = strchr(q, '/')); q++) { *q = 0; mkdir(d, 0755); *q = '/'; }
+            put(d, files[i][1]);
+        }
+        setenv("DM_MODS", m, 1); unsetenv("DM_MODS_OFF");
+        int n = dm_mods_scan(), kinds[8] = {0}; char names[512] = "";
+        for (int i = 0; i < n; i++) { kinds[dm_mod_kind(i)]++; strlcat(names, dm_mod_name(i), sizeof names); strlcat(names, " ", sizeof names); }
+        CHECK(n == 7 && !strcmp(names, "Ryu Alpha Beta Built Code Empty Pack "), "mods found in every layout (the trees at the top of the folder first, then name order), another game's left out (%d: %s)", n, names);
+        CHECK(kinds[DM_MOD_FILES] == 4 && kinds[DM_MOD_BUILT_IN] == 1 && kinds[DM_MOD_NEEDS_BUILD] == 1 && kinds[DM_MOD_EMPTY] == 1, "kinds: 4 files, 1 built in, 1 needing a build, 1 empty");
+        CHECK(dm_mods_code_wanted(), "the mods with code patches are wanted while none is switched off");
+        dm_code_mods_loaded = 1;   // as the loader does when it takes the codemods copy
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount RomFS with the mods");
+        CHECK(read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "alpha"), "the first mod by name wins a file both have");
+        CHECK(read_fs("rom:/data/new", got, sizeof got) && !strcmp(got, "beta-new"), "a mod adds a file the game lacks");
+        CHECK(read_fs("rom:/data/pack", got, sizeof got) && read_fs("rom:/data/ryu", got, sizeof got) && !strcmp(got, "ryu"), "the Atmosphère and Ryujinx trees load (title ID folder in either case)");
+        CHECK(read_fs("rom:/data/built", got, sizeof got) && !strcmp(got, "built"), "a built-in mod's files load");
+        CHECK(!read_fs("rom:/data/code", got, sizeof got) && !read_fs("rom:/data/other", got, sizeof got), "a mod whose code patches this build lacks is skipped whole; another game's tree is not read");
+        CHECK(read_fs("rom:/data/base", got, sizeof got) && !strcmp(got, "only-base"), "the game's own files still read");
+        g_nmnt = 0;
+        setenv("DM_MODS_OFF", "Alpha/Built", 1); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount with DM_MODS_OFF=Alpha/Built");
+        CHECK(read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "beta"), "a switched-off mod is not read: the next one wins");
+        CHECK(!dm_mods_code_wanted(), "a switched-off mod with code patches: the loader takes the game's own code");
+        dm_code_mods_loaded = 0;
+        g_nmnt = 0; CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && !read_fs("rom:/data/built", got, sizeof got), "its files are not read either");
+        unsetenv("DM_MODS_OFF"); dm_code_mods_loaded = 0; g_nmnt = 0;
+        CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && !read_fs("rom:/data/built", got, sizeof got), "wanted, but the loaded modules lack the code patches: its files stay out");
+        {   // env.txt of a mod that is on goes into the environment, without overriding what is set
+            char e[1600]; snprintf(e, sizeof e, "%s/Beta/env.txt", m); put(e, "# comment\nNXMODTEST_SET=on\nNXMODTEST_KEEP=mod\n");
+            snprintf(e, sizeof e, "%s/Alpha/env.txt", m); put(e, "NXMODTEST_OFF=1\n");
+            setenv("NXMODTEST_KEEP", "user", 1); setenv("DM_MODS_OFF", "Alpha", 1); unsetenv("NXMODTEST_SET"); unsetenv("NXMODTEST_OFF");
+            dm_mods_env();
+            CHECK(getenv("NXMODTEST_SET") && !strcmp(getenv("NXMODTEST_SET"), "on") && !strcmp(getenv("NXMODTEST_KEEP"), "user") && !getenv("NXMODTEST_OFF"),
+                  "a mod's env.txt sets what nothing set before; a switched-off mod's does not");
+            unsetenv("NXMODTEST_SET"); unsetenv("NXMODTEST_KEEP"); unsetenv("DM_MODS_OFF");
+        }
+        g_nmnt = 0;
+        setenv("DM_ROMFS_OVERLAY", overlay, 1); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK && read_fs("rom:/data/same", got, sizeof got) && !strcmp(got, "overlay"), "DM_ROMFS_OVERLAY's folders come before the mods");
+        g_nmnt = 0;
+        unsetenv("DM_MODS"); unsetenv("DM_MODS_OFF"); unsetenv("DM_ROMFS_OVERLAY");
+        setenv("DM_ROOT", root, 1); CHECK(dm_mods_scan() == 7, "without DM_MODS the mods are <DM_ROOT>/mods"); unsetenv("DM_ROOT");
+        CHECK(dm_mods_scan() == 0, "no DM_MODS and no DM_ROOT: no mods");
+    }
     {   // game files that are neither a folder nor a file (a stale path, a fifo) stop the rom mount with a FATAL line, in a child so the abort does not end this test
         char gone[1200], fifo[1200], out[1200]; snprintf(gone, sizeof gone, "%s/RomFS", root); snprintf(fifo, sizeof fifo, "%s/fifo", root); snprintf(out, sizeof out, "%s/fatal.txt", root);
         mkfifo(fifo, 0644);

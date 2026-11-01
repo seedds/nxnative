@@ -7,6 +7,7 @@
 #include "hle.h"
 #include <mach/mach.h>
 #include "front.h"
+#include "mods.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -195,8 +196,8 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     g_mnt[g_nmnt].txn_root = -1;
     atomic_store(&g_mnt[g_nmnt].poison, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
-    if (!strcmp(name, "rom") && getenv("DM_ROMFS_OVERLAY"))
-        strlcpy(g_mnt[g_nmnt].overlay, getenv("DM_ROMFS_OVERLAY"), sizeof g_mnt[0].overlay);
+    if (!strcmp(name, "rom"))   // DM_ROMFS_OVERLAY's folders, then the romfs/ folders of the mods that are on (hle_mods.c)
+        dm_mods_overlay(g_mnt[g_nmnt].overlay, sizeof g_mnt[0].overlay);
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
     int txn_err = 0, k = 0;
@@ -435,11 +436,10 @@ HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host d
 HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) {
     (void)cache; (void)sz; char b[1024];
     Result r = mount(name, envdir("DM_ROMFS", "romfs", b, sizeof b), 1);
-    if (r == RES_OK && getenv("DM_ROMFS_OVERLAY")) {
+    if (r == RES_OK && strcmp(name, "rom")) {   // a RomFS mounted under another name: the same overlay folders and mods ("rom" got them in mount_ex)
+        char ov[sizeof g_mnt[0].overlay]; dm_mods_overlay(ov, sizeof ov);
         PATH_LOCK();
-        for (int i = 0; i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) {
-            strlcpy(g_mnt[i].overlay, getenv("DM_ROMFS_OVERLAY"), sizeof g_mnt[i].overlay); break;
-        }
+        for (int i = 0; i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) { strlcpy(g_mnt[i].overlay, ov, sizeof g_mnt[i].overlay); break; }
     }
     return r;
 }

@@ -224,7 +224,7 @@ def pack(a):
         minos = min_os(a.host)
         sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
-                  'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc) if p],
+                  'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.game_mods, str(Path(a.patched) / 'codemods')) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
                             str(sdk), run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip(),
                             str(codesign), codesign.stat().st_mode, digest(codesign), minos]}
@@ -252,6 +252,7 @@ def pack(a):
     build_launcher(mac / EXE, minos, clang, swiftc, sdk)
     shutil.copy2(a.host, mac / 'dmhost')
     copy(mods, dm, clone['mods'])
+    if (Path(a.patched) / 'codemods').is_dir(): copy([Path(a.patched) / 'codemods'], dm / 'codemods', clone['mods'])   # the modules rewritten with the mods' code patches (loader.c)
     if tables: copy(tables, dm, False)
     if pairs: shutil.copyfile(pairs, dm / 'pso_pairs.tsv')   # the split's copy, for a profile without the table
     if fonts: copy(fonts, dm / 'font', False)
@@ -259,6 +260,7 @@ def pack(a):
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
     step('shader libraries'); msl_dst = res / 'msl' / (a.msl_name or msl.name); msl_dst.mkdir(parents=True); copy(msls, msl_dst, clone['msl'])
     if aoc: step('add-on content'); copy([aoc], res / 'aoc', clone['aoc'])
+    if a.game_mods: step('mods'); copy([Path(a.game_mods)], dm / 'mods', can_clone(Path(a.game_mods), res))   # the mods the app was built with (build_ipa_from_nsp.py --mods; dm/tools/mods.py stage)
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
     step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone['romfs'])
     icon = bool(a.icon)
@@ -298,6 +300,7 @@ def parse(argv):
     ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')
     ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')
+    ap.add_argument('--game-mods', help='the mods the app is built with, staged by dm/tools/mods.py (Resources/dm/mods; the launcher passes it to the host in DM_MODS)')
     ap.add_argument('--pso', help='the pipeline archive made offline for this Mac (pso_offline.py --platform macos output: <arch>.mtl4a, prebuilt.tsv)')
     ap.add_argument('--pso-pairs', help='pso_pairs.tsv for a profile that has none (the shader split\'s copy)')
     ap.add_argument('--env-file', help='environment switches baked in (Resources/dm/env.txt)')

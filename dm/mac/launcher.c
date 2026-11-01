@@ -196,6 +196,9 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);
     snprintf(p, sizeof p, "%s/aoc", res); if (!stat(p, &st)) setenv("DM_AOC_DIR", p, 0);
+    {   // mods (dm/host/hle_mods.c): the ones the app was built with, then the player's in its Application Support folder, made here so it can be found
+        char m[2200]; snprintf(p, sizeof p, "%s/mods", sup); mkdir(p, 0755); snprintf(m, sizeof m, "%s/mods:%s", dm, p); setenv("DM_MODS", m, 0);
+    }
     snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of every shader pair: the first start builds none
     if (*lang) setenv("DM_LANG", lang, 0);
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);

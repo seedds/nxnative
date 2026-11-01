@@ -1,5 +1,6 @@
 // Bootstrap: after loading the modules, initialize the SDK runtime in the real order of nn::init::Start (sdk+0x2b0470) in the SDK, then enter nnMain.
 #include "dm.h"
+#include "mods.h"
 #include "front.h"
 #include "../gfx/nvn/dmsh_chain.h"
 #include <CoreFoundation/CoreFoundation.h>
@@ -140,6 +141,7 @@ int main(int argc, char **argv) {
         void crash_thread_init(void); crash_thread_init();   // The signal alternate stack is per thread: loading installed it on another thread, so add it for this thread
         LOG("host loading already finished early in the background (dm_host_preload_start)");
     } else host_preload(argc, argv);
+    dm_mods_env();   // the settings the mods that are on carry (their env.txt; hle_mods.c), before the frame step and the graphics read theirs
     { void dm_fps_state_apply(void); dm_fps_state_apply(); }   // frame rate and render scale into the frame step state page (loader.c): the iOS launcher sets them after the loading began
     front_run(guest_main);
     return 0;

@@ -61,6 +61,120 @@ private struct CloudSavesSection: View {
     }
 }
 
+/// Mods (dm/host/hle_mods.c): the ones the app was built with (dm/mods) and the player's in Documents/mods, as the host finds them. A mod of replacement files has a
+/// switch; the choice goes to the host in DM_MODS_OFF and is kept in UserDefaults like the settings (launcher.DM_MODS_OFF). A mod whose code patches are part of
+/// the build is always on; one with code patches the app was not built with is skipped by the host, and said so here. An env file's DM_MODS_OFF is shown, not changed
+final class ModsModel: ObservableObject {
+    struct Mod: Identifiable { let name: String; let kind: Int; let dir: String; var id: String { name } }
+    @Published var mods: [Mod] = []
+    @Published var off: Set<String>
+    let fixed: Bool
+    private let defaults: UserDefaults
+    private static let key = "launcher.DM_MODS_OFF"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let env = ProcessInfo.processInfo.environment
+        let keys = ((env["DM_ENV_FILE_KEYS"] ?? "") + " " + (env["DM_ENV_LAUNCH_KEYS"] ?? "")).split(separator: " ").map(String.init)
+        fixed = keys.contains("DM_MODS_OFF")
+        let saved = fixed ? env["DM_MODS_OFF"] : (env["DM_SAVED_CHOICES"] == "0" ? nil : defaults.string(forKey: Self.key))
+        off = Set((saved ?? "").split(separator: "/").map(String.init))
+        refresh()
+    }
+    func refresh() {
+        let n = dm_mods_scan()
+        mods = (0..<n).map { Mod(name: String(cString: dm_mod_name($0)), kind: Int(dm_mod_kind($0)), dir: String(cString: dm_mod_dir($0))) }
+    }
+    // The player's mods folder (main.m names it in DM_MODS after the built-in ones): Add a mod copies a picked folder into it, and a mod found there can be deleted
+    let userDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("mods")
+    private func topEntry(_ m: Mod) -> URL? {   // the folder under Documents/mods that holds the mod (a download's tree may hold it deeper)
+        let base = userDir.standardizedFileURL.path + "/", dir = URL(fileURLWithPath: m.dir).standardizedFileURL.path
+        guard dir.hasPrefix(base), let first = dir.dropFirst(base.count).split(separator: "/").first else { return nil }
+        return userDir.appendingPathComponent(String(first))
+    }
+    func removable(_ m: Mod) -> Bool { topEntry(m) != nil }
+    func delete(_ m: Mod) {
+        guard let d = topEntry(m) else { return }
+        do { try FileManager.default.removeItem(at: d); fputs("launcher: mod folder \(d.lastPathComponent) deleted\n", stderr) } catch { fputs("[RED] launcher: cannot delete \(d.path): \(error)\n", stderr) }
+        refresh()
+    }
+    // A folder picked in the Files app, copied into Documents/mods under its own name: a mod, a folder of mods or a download's tree, as the host reads them. One that adds no mod is taken out again
+    func add(_ url: URL) -> String {
+        let fm = FileManager.default, scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let dest = userDir.appendingPathComponent(url.lastPathComponent)
+        if fm.fileExists(atPath: dest.path) { return "There is already a mod folder named \(url.lastPathComponent)." }
+        let before = Set(mods.map(\.name))
+        do { try fm.createDirectory(at: userDir, withIntermediateDirectories: true); try fm.copyItem(at: url, to: dest) } catch { return "The folder could not be copied: \(error.localizedDescription)" }
+        refresh()
+        let added = mods.filter { !before.contains($0.name) }
+        if added.isEmpty { try? fm.removeItem(at: dest); refresh(); return "\(url.lastPathComponent) holds no mod for this game: a mod is a folder with romfs or exefs inside (or an Atmosphère, Ryujinx or yuzu folder for this game)." }
+        fputs("launcher: mod folder \(url.lastPathComponent) added (\(added.map(\.name).joined(separator: ", ")))\n", stderr)
+        return "Added: " + added.map(\.name).joined(separator: ", ") + "."
+    }
+    // The mods with code patches built in switch together: the app carries one copy of the modules with all their patches (hle_mods.c)
+    var code: [Mod] { mods.filter { $0.kind == DM_MOD_BUILT_IN } }
+    func isOn(_ m: Mod) -> Bool {
+        m.kind == DM_MOD_BUILT_IN ? !code.contains { off.contains($0.name) } : m.kind == DM_MOD_FILES && !off.contains(m.name)
+    }
+    func set(_ m: Mod, on: Bool) {
+        for x in m.kind == DM_MOD_BUILT_IN ? code : [m] { if on { off.remove(x.name) } else { off.insert(x.name) } }
+    }
+    // Before the game starts. Names of mods that are gone stay in the list, so a mod taken out and put back keeps its switch
+    func apply(save: Bool = true) {
+        if fixed { fputs("launcher: DM_MODS_OFF kept (env file or launch environment)\n", stderr); return }
+        let v = off.sorted().joined(separator: "/")
+        if save && ProcessInfo.processInfo.environment["DM_SAVED_CHOICES"] != "0" { if v.isEmpty { defaults.removeObject(forKey: Self.key) } else { defaults.set(v, forKey: Self.key) } }
+        setenv("DM_MODS_OFF", v, 1)
+        fputs("launcher: \(mods.count) mods, \(mods.filter(isOn).count) on\(v.isEmpty ? "" : " (off: \(v))")\n", stderr)
+    }
+}
+
+private struct ModsSection: View {
+    @ObservedObject var m: ModsModel
+    @State private var picking = false
+    @State private var note = ""
+
+    var body: some View {
+        Section {
+            if m.mods.isEmpty { Text("No mods").foregroundStyle(.secondary) }
+            ForEach(m.mods) { mod in
+                Group { switch mod.kind {
+                case DM_MOD_FILES:
+                    Toggle(mod.name, isOn: Binding(get: { m.isOn(mod) }, set: { m.set(mod, on: $0) })).disabled(m.fixed)
+                case DM_MOD_BUILT_IN:
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle(mod.name, isOn: Binding(get: { m.isOn(mod) }, set: { m.set(mod, on: $0) })).disabled(m.fixed)
+                        Text(m.code.count > 1 ? "Has code patches: switches on and off with the other mods that have them." : "Has code patches: off runs the game's own code.").font(.caption).foregroundStyle(.secondary)
+                    }
+                case DM_MOD_NEEDS_BUILD:
+                    row(mod.name, "Off", note: "It has code patches, which go in only when the app is built: rebuild with --mods.")
+                default:
+                    row(mod.name, "Empty", note: "No files in romfs or exefs.")
+                } }
+                .deleteDisabled(!m.removable(mod))
+            }
+            .onDelete { rows in for i in rows where m.removable(m.mods[i]) { m.delete(m.mods[i]) } }   // swipe: only the mods in Documents/mods, not the built-in ones
+            Button("Add a mod…") { picking = true }
+                .sheet(isPresented: $picking) {   // on the button, not the Section (see Cloud saves)
+                    DocumentPicker(types: [.folder]) { url in picking = false; note = m.add(url) } onCancel: { picking = false }
+                }
+        } header: {
+            Text("Mods")
+        } footer: {
+            Text(note.isEmpty ? "Pick a mod's folder (with romfs inside; unzip a download in the Files app first), or put it in this app's mods folder in the Files app. Swipe left to delete one you added. Changes apply when you press Play." : note)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in m.refresh() }   // back from the Files app
+    }
+
+    private func row(_ name: String, _ state: String, note: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack { Text(name); Spacer(); Text(state).foregroundStyle(.secondary) }
+            Text(note).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
 /// UIDocumentPickerViewController for a folder, in the two callbacks a SwiftUI sheet wants.
 private struct DocumentPicker: UIViewControllerRepresentable {
     var types: [UTType] = [.folder]
@@ -94,6 +208,7 @@ private struct DocumentPicker: UIViewControllerRepresentable {
 
 private struct LauncherView: View {
     @ObservedObject var m: LauncherModel
+    @ObservedObject var mods: ModsModel
     let play: () -> Void
     @State private var memory = os_proc_available_memory()
 
@@ -129,6 +244,7 @@ private struct LauncherView: View {
                     } footer: {
                         Text("Brings back all settings this game was tested with.")
                     }
+                    ModsSection(m: mods)
                     CloudSavesSection()
                     Section {
                         HStack {
@@ -170,14 +286,15 @@ private struct LauncherView: View {
 public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @convention(c) () -> Void) -> Bool {
     guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return false }
     guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return false }
-    if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); LauncherModel(file.settings).applySaved(); return false }
+    if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); LauncherModel(file.settings).applySaved(); ModsModel().apply(save: false); return false }
     let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
-    let model = LauncherModel(file.settings)
+    let model = LauncherModel(file.settings), mods = ModsModel()
     var host: UIViewController?
-    let view = LauncherView(m: model) {
+    let view = LauncherView(m: model, mods: mods) {
         guard let h = host else { return }
         host = nil
         model.apply()
+        mods.apply()
         h.dismiss(animated: false) { done() }
     }
     let h = UIHostingController(rootView: view)

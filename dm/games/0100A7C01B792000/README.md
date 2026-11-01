@@ -8,14 +8,14 @@ Status: brought up on the Mac and played (M1 MacBook Air, 8 GB, macOS 26, 1080p)
 
 | Setting | Where | Why |
 |---|---|---|
-| `fps_target 60` | [`game.tsv`](game.tsv), `hle_fpslock.c` | the host writes 60 into `t.MaxFPS` and 1 into `rhi.SyncInterval` (rows for `main` `9e9d887d…`); see [Frame rate](#frame-rate) |
+| `fps_target 60` | [`game.tsv`](game.tsv), `hle_fpslock.c` | the host writes 60 into `t.MaxFPS` and 1 into `rhi.SyncInterval`, which the rewriter finds by name; see [Frame rate](#frame-rate) |
 | `r.BloomQuality` 0 | `hle_fpslock.c` (`k_cvars`, `main` `9e9d887d…`) | a workaround: bloom's last passes drew blocks of other content in some runs, cause not found; see [Open](#open) |
 | 64 GB alias region: `mem_reserve 0x1028000000`, `mem_alias 0x1000000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | Unreal's `nninitStartup` reserves a 62 GB address region and its FMallocBinned3 takes 37 GB of it (as [Octopath Traveler 0](../01005270232F2000/README.md#memory)); Mac only |
 | `tex_dyn_slots on` | `game.tsv` | Niagara particle vertex shaders (`d1c8e612ec7462b6`, `210d8abb3b9996c5`: the campfire's flame) read a buffer texture whose handle the translator cannot trace to one slot |
 
 ## Frame rate
 
-- **Current:** 60 fps. `t.MaxFPS` (float, registered at `main+0x33eaa90`, object at `main+0xae22500`) and `rhi.SyncInterval` (int, `main+0x147dc3c`, object at `main+0xac91a10`) take the host's writes (`hle_fpslock.c`, profile key `fps_target 60`), as Octopath Traveler 0's.
+- **Current:** 60 fps. `t.MaxFPS` (float, registered at `main+0x33eaa90`, object at `main+0xae22500` in 1.1.1.0) and `rhi.SyncInterval` (int, `main+0x147dc3c`, object at `main+0xac91a10`) take the host's writes (`hle_fpslock.c`, profile key `fps_target 60`); the rewriter finds them by name ([Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name)).
 - Unreal's Viewport Thread waits for presented frames in the layer's frame history (`nn::vi::ListFrameHistory`); see [Found on this game](#found-on-this-game).
 - In a 4-minute session on the M1 Air: p50 16.6 ms, 4 of 51 windows with p95 above 20 ms, 9 with one frame above 100 ms (pipeline compiles of draws met for the first time).
 

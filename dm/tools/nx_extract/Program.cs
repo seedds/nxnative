@@ -1,11 +1,14 @@
 // NSP extraction: nx_extract <prod.keys> <base NSP> <update NSP or -> <output dir> [base RomFS dir to compare against] [--manifest] [--romfs-image]
 // --romfs-image streams the merged RomFS directly to <output dir>/RomFS.img (the packing script's default); only ExeFS is expanded. Without it, legacy folder extraction remains available.
 // With a base RomFS dir in legacy mode, files whose content matches it become APFS clones (no new space).
-// --manifest: the RomFS is not written, only a list <output dir>/romfs_manifest.tsv (path, size, first 32 bytes), for surveying a new game (a large game's RomFS is well over 10 GB).
+// --manifest: the RomFS is not written, only a list <output dir>/romfs_manifest.tsv (path, size, first 32 bytes), for surveying a new game (a large game's RomFS is well over 10 GB),
+//   and its NRO modules under <output dir>/romfs_nro/ (small: their imports decide the graphics API and the modules, Portal 2's 21 NROs are 60 MB).
 // A damaged NSP (a file whose data fails the NCA's hash check, e.g. a copy cut short or a broken download) stops the extraction with exit code 3 after listing every damaged file;
 //   --allow-damaged writes those files as read instead and only lists them (Super Mario Galaxy's base NSP with 147 MB zeroed: its two prologue WebM movies).
 // A sparse base program (Minecraft Dungeons II: its Program NCA leaves out data that its update carries) can be read only with its update: without one, exit code 4.
 // Add-on content: nx_extract <prod.keys> --aoc <DLC NSP> <output dir> writes the RomFS of the DLC's data NCA to <output dir> (the packing script puts it at aoc/<index>/, the host mounts it through DM_AOC_DIR).
+// Title ID of a package: nx_extract <prod.keys> --title <NSP, NSZ, XCI or XCZ> prints "title <16 hex digits>", the lowest title ID of the package's meta NCAs (the base game's, before its update's or a DLC's),
+//   read from the meta NCA's header with the keys' header_key. For a package without a ticket and without a [title ID] in its name (the NSP script's title_of); exit code 5 when it has no meta NCA.
 // Title keys come from the common tickets (.tik) inside the NSPs, so only prod.keys is needed; key values are never printed.
 // The base game may also be a cartridge dump (.xci, Monster Hunter Rise): its secure partition holds the NCAs, which carry their keys in the key area (no ticket).
 //   When the cartridge also carries an update (1G+1U), only the base game's NCAs (those its Application content meta lists) are read; the update comes from the update NSP.
@@ -34,7 +37,8 @@ static class P {
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
         bool image = Array.IndexOf(a, "--romfs-image") >= 0; a = Array.FindAll(a, s => s != "--romfs-image");
         g_allow = Array.IndexOf(a, "--allow-damaged") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged");
-        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [--romfs-image]"); return 2; }
+        if (a.Length == 3 && a[1] == "--title") return Title(ExternalKeyReader.ReadKeyFile(a[0]), a[2]);
+        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [--romfs-image]\n       nx_extract <prod.keys> --title <nsp|nsz|xci|xcz>"); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image);
         var basePkg = OpenNsp(ks, a[1], ContentMetaType.Application); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
@@ -81,6 +85,14 @@ static class P {
         else if (image) WriteImage(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS.img"));
         else Copy(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS"), cmpDir);
         return Damaged();
+    }
+
+    static int Title(KeySet ks, string path) {
+        ulong? id = null;
+        foreach (Nca n in OpenNsp(ks, path)) if (n.Header.ContentType == NcaContentType.Meta && (id == null || n.Header.TitleId < id)) id = n.Header.TitleId;
+        if (id == null) { Console.WriteLine($"[RED] no meta NCA in {Path.GetFileName(path)}"); return 5; }
+        Console.WriteLine($"title {id:x16}");
+        return 0;
     }
 
     static bool Sparse(Nca n) {
@@ -309,7 +321,7 @@ static class P {
             o.Write(buf, 0, (int)got); off += got;
         }
     }
-    // List the RomFS only (path, size, first 32 bytes) without writing game files
+    // List the RomFS only (path, size, first 32 bytes) without writing game files, except the NRO modules (code the game loads with nn::ro, read like the ExeFS)
     static void Manifest(IFileSystem fs, string path) {
         long n = 0, bytes = 0; byte[] h = new byte[32];
         Directory.CreateDirectory(Path.GetDirectoryName(path));
@@ -324,6 +336,11 @@ static class P {
             catch (HorizonResultException x) when (HashError(x)) { g_damaged.Add(e.FullPath); got = 0; }   // the survey goes on; the file is listed as damaged
             o.WriteLine($"{e.FullPath}\t{e.Size}\t{Convert.ToHexString(h, 0, (int)got).ToLowerInvariant()}");
             n++; bytes += e.Size;
+            if (got == want && e.FullPath.EndsWith(".nro", StringComparison.OrdinalIgnoreCase)) {
+                string op = Path.Combine(Path.GetDirectoryName(path), "romfs_nro", e.FullPath.TrimStart('/'));
+                Directory.CreateDirectory(Path.GetDirectoryName(op));
+                try { Write(f.Get, op, e.Size, new byte[4 << 20]); } catch (HorizonResultException x) when (HashError(x)) { g_damaged.Add(e.FullPath); File.Delete(op); }
+            }
         }
         Console.WriteLine($"{path}: RomFS {n} files {bytes / 1048576.0:F1} MB (manifest only)");
     }

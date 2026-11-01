@@ -1082,9 +1082,9 @@ NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNte
     copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv); o->sr = *sr; o->dr = *dr; o->flags = flags;
 }
 // A textured rectangle into the bound colour targets, replayed as draw_tex (nvn_mtl.m). The handle's IDs are moved to the pools this command buffer bound, as bind_handles does:
-// Streets of Rage 4 draws its movie frames into its scene target this way, from a second texture pool
+// Streets of Rage 4 draws its movie frames into its scene target this way, from a second texture pool. Only the handle's lower 32 bits reach the GPU (bind_handles)
 NVN(nvnCommandBufferDrawTexture, void, NVNcommandBuffer *c, NVNtextureHandle h, const NVNdrawTextureRegion *d, const NVNdrawTextureRegion *s) {
-    uint64_t tid = (uint64_t)h & 0xfffff, sid = (uint64_t)h >> 20;
+    uint64_t tid = (uint32_t)h & 0xfffff, sid = (uint32_t)h >> 20;
     if (tid) tid += (uint64_t)CB(c)->tex_base;
     if (sid) sid += (uint64_t)CB(c)->samp_base;
     *REC(c, OP_DRAW_TEX, p_draw_tex) = (p_draw_tex){tid | sid << 20, *d, *s};
@@ -1395,6 +1395,7 @@ static void dump_frame(void) {
             static long cap = -1; if (cap < 0) { const char *e = getenv("DM_MEM_CAP_GB"); cap = e ? atol(e) : DM_MEM_CAP_DEFAULT_GB; }
             if (cap > 0 && mb > (unsigned long long)cap * 1024) { LOG("[RED] memory watchdog: resident %llu MB over the limit of %ld GB (frame %llu), exiting", mb, cap, (unsigned long long)g_frame); _exit(86); } } }
     dm_guest_frame_tick();   // Deterministic guest clock (DM_DETCLOCK, host hle_os.c): each present advances a fixed step; a no-op when not enabled
+    dm_cheats_present();   // Atmosphère cheat files (hle_cheats.c): enabled cheats apply once per presented frame; the ~60 Hz idle thread only covers gaps
 }
 // ---------- Timing instrumentation (per-frame rows written to DM_NVN_TSV: frame / @metric / value; every 300 frames a summary of p50 / p95 / max) ----------
 #define TWIN 300
@@ -1952,7 +1953,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
 
 // Buffer object = pool + offset + size; the GPU address and the CPU mapping are both the pool's host pointer + offset (same convention as MemoryPoolGetBufferAddress)
 typedef struct { NVNdevice *dev; const pool_t *pool; int64_t off; uint64_t size; } buf_builder_t;   FITS(buf_builder_t, NVNbufferBuilder);
-typedef struct { uint32_t magic; const pool_t *pool; int64_t off; uint64_t size; } buf_t;             FITS(buf_t, NVNbuffer);
+// Guest ring allocators write offset/size directly at +0x18/+0x20 (issue #723).
+// The intervening driver bytes have no host meaning; keep them reserved.
+typedef struct { uint32_t magic; const pool_t *pool; uint8_t reserved[8]; int64_t off; uint64_t size; } buf_t; FITS(buf_t, NVNbuffer);
+_Static_assert(offsetof(buf_t, off) == 0x18, "NVNbuffer guest offset");
+_Static_assert(offsetof(buf_t, size) == 0x20, "NVNbuffer guest size");
 #define BB(b) ((buf_builder_t *)(b))
 #define BF(b) ((const buf_t *)(b))
 NVN(nvnBufferBuilderSetDefaults, void, NVNbufferBuilder *b) { NVNdevice *d = BB(b)->dev; memset(b, 0, sizeof(buf_builder_t)); BB(b)->dev = d; }
@@ -1965,7 +1970,7 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
     // in the pool's memory and reports a range that leaves the pool as its own red line). Breath of the Wild creates a 256 KB buffer over a 144 KB pool for a screen readback that feeds a
     // compressing encoder (when the pause menu opens, and near a save commit): the buffer's one use is a texture-to-buffer copy of the picture's own extent, which lies inside the pool. Not an error by itself: one line.
     if ((uint64_t)bb->off + bb->size > bb->pool->size) ONCE_LOG("BufferInitialize: a buffer reaches past the end of its pool (offset %#llx size %#llx pool %#llx); only an access that leaves the pool is an error, and it is reported where it happens", (unsigned long long)bb->off, (unsigned long long)bb->size, (unsigned long long)bb->pool->size);
-    *(buf_t *)buf = (buf_t){MAGIC('B', 'U', 'F', 0), bb->pool, bb->off, bb->size};
+    *(buf_t *)buf = (buf_t){.magic = MAGIC('B', 'U', 'F', 0), .pool = bb->pool, .off = bb->off, .size = bb->size};
     OLOG("BufferInitialize %p pool=%p off=%#llx size=%#llx", (void *)buf, (const void *)bb->pool, (unsigned long long)bb->off, (unsigned long long)bb->size);
     return 1;
 }
@@ -2323,6 +2328,11 @@ NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const sha
     for (int i = 0; i < n; i++) { plain[i].data = sd[i].data; plain[i].control = sd[i].control; if (sd[i].ext) ONCE_LOG("ProgramSetShadersExt extension field nonzero (%#llx): unused by the host", (unsigned long long)sd[i].ext); }
     return h_nvnProgramSetShaders(p, n, plain);
 }
+
+// nvnProgramSetSampleShading (NVN 53+): whether the program's fragment shader runs once per sample of a multisampled target. Metroid Prime Remastered sets it on its programs
+// (modes 0, 1 and 2, from CGraphicsDeviceContext's sample shading state). Metal has no such switch: a fragment function runs per sample when it reads the sample index ([[sample_id]],
+// what PIXLD.MYINDEX translates to) or interpolates at a sample, and once per pixel otherwise, so the mode is not applied; on the single-sample targets met so far the two agree
+NVN_NOPROTO(nvnProgramSetSampleShading, NVNboolean, NVNprogram *p, int mode) { (void)p; ONCE_LOG("nvnProgramSetSampleShading mode %d: Metal shades per sample only where the shader reads the sample index", mode); return 1; }
 
 // ---------- Commands used by newer-SDK games (SMBW): most map onto existing record formats, the replay layer is unchanged ----------
 // Singular / combined forms → plural / separate forms; state the replay layer does not have yet (conditional render, depth bounds, ...) is logged once and drawing continues (better to over-draw than to drop).

@@ -99,6 +99,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** select the header only when the whole list walks in a supported layout. Until then, return a silent frame before the sink scan; the first valid list can select both the header and its sink. `t_audren_layout` reproduces the failure and checks stereo PCM for SDK 4, 6, 16 and 21, with valid-first, empty and incomplete startup lists and SDK 21's short first list.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (SDK 4.4.0; [PR #331](https://github.com/seedds/nxnative/pull/331)).
 
+### Malformed later command lists and bounded histogram logging
+
+- **Symptom:** ASan reports a stack-buffer-overflow in `capture` while logging the first full command histogram; a malformed list can also consume sink discovery or return PCM before its invalid tail is checked.
+- **Cause:** a short valid list selected the header layout without running the histogram. A later malformed list entered the histogram scan, which stopped at its first invalid command but still logged an uninitialized string or adopted a sink from the valid prefix. Separately, accumulating `snprintf`'s untruncated return value advanced the next write past the 512-byte string.
+- **Fix:** validate the entire command list on every capture before histogram, sink discovery or PCM output. Keep discovery pending for rejected lists, initialize the histogram string, and stop appending at the last complete entry that fits.
+- **Check:** `t_audren_layout` covers malformed first, middle and trailing commands after layout selection, recovery to valid stereo PCM for SDK 4/5/6/16/21, and 64,000 synthetic commands whose histogram exceeds the log buffer. ASan reproduced both the uninitialized-string read and the truncated-append write before the fix.
+- **Found on:** synthetic command lists from the [issue #313 static-analysis audit](https://github.com/seedds/nxnative/issues/313#issuecomment-6543080671); no gameplay failure was attributed to these logging defects.
+
 ### The final mix is taken from the DeviceSink's mix buffers
 
 - **Symptom:** the CPU processor drops the final mix.
@@ -158,6 +166,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 ## AudioOut and devices
 
+### Periodic diagnostics outside the AudioUnit callback
+
+- **Symptom:** RealtimeSanitizer reports stdio locking in `au_render` at its 2,000-callback diagnostic boundary. A busy log writer can block that callback even when its PCM queue is full.
+- **Cause:** `LOG` takes `stderr`'s stream lock and formats its message on the calling thread. The callback previously called it directly for its frame-count, queue-depth and underrun statistics.
+- **Fix:** the callback publishes a bounded snapshot for the existing audio watchdog, which copies ready reports under the output-registry lock and writes them after unlocking. Its local copies own every log argument; a slow writer holds neither an output pointer nor the registry lock. The single-slot mailbox uses release/acquire ownership; a busy writer leaves the callback accumulating later windows instead of waiting or overwriting unread data. Reports retain the output ID, total callbacks, frame range, average queue depth and underrun/zero-padding counts, with the actual window length when several windows merge. The release-event notifier remains independent of diagnostics, so an event-driven game can keep refilling PCM while logging is blocked. Close stops the producer and takes any remaining snapshot under the same registry lock before freeing the output.
+- **Found on:** the [synthetic real-time audio audit in issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6523656102). No particular game's audible failure is attributed to this finding.
+- **Check:** `t_audio_stats` calls the real callback with synthetic PCM and traps callback-thread stdio, including its stream lock. With the watchdog's writer deliberately blocked, each PCM buffer still triggers its guest release event and is refilled correctly; queued and merged reports preserve their fields. Close drains a second pending snapshot while the watchdog holds only a local copy, which it logs after the output was freed. Statistics alone cause no guest event. The fixture needs no sound device or game files.
+
 ### Stopping an AudioOut releases its pending buffers
 
 - **Symptom:** FMOD waits for buffer release after stopping an AudioOut, hanging the game during a scene transition.
@@ -171,7 +187,7 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Symptom:** crackling on iOS only.
 - **Cause:** RemoteIO asks for as many frames per callback as the audio session's I/O buffer duration, about 21 ms by default (1024 frames at 48 kHz), while the renderer keeps 4 blocks × 5 ms = 20 ms in flight. Every callback came up 1.3 ms short and was padded with zeros, about 47 gaps per second. Reproduced on the Mac by forcing 1024-frame callbacks (`DM_DBG_AU_FRAMES=1024` with `DM_AUDIO=1`: 1999 underruns in 2000 callbacks).
 - **Fix:** `AVAudioSession` `setPreferredIOBufferDuration:0.005` (and 48 kHz) before the game opens audio and again on return to the foreground (`front_ios_audio_session` in `front_ios.m`); the device then calls back with 240 frames and nothing underruns.
-- **Check:** when checking a new device, read the host's `audio #N device callbacks` line, logged every 2000 callbacks: frames per callback, queued blocks, underruns.
+- **Check:** when checking a new device, read the host's `audio #N device callbacks` line, normally reported every 2000 callbacks: frames per callback, queued blocks, underruns. A busy diagnostic writer can merge windows; the line states their actual callback count.
 
 ### The Mac's default I/O buffer
 
@@ -216,7 +232,7 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 - **Symptom:** combined numbers mislead: one fully fed output plus one fed by nobody look like "every other callback underruns, 2.0 blocks queued".
 - **Cause:** a game may open several outputs. Engage opens one AudioOut from Wwise (`main+0x177d924`, no release event, the game polls); on the phone it opened a second one later, and the Mac runs never did. Unity's FMOD also has an output (`main+0x4aec0c` / `0x4aec4c`).
-- **Fix:** the host logs each output as `audio #N`: the open with its call site, Start / Stop / Close (the first 32 per output), and the callback line every 2000 of that output's callbacks.
+- **Fix:** the host logs each output as `audio #N`: the open with its call site, Start / Stop / Close (the first 32 per output), and the callback statistics normally every 2000 of that output's callbacks, through the [watchdog](#periodic-diagnostics-outside-the-audiounit-callback).
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md).
 
 ### Checking audio without listening
@@ -246,10 +262,10 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 
 ### No audio input devices
 
-- **Symptom:** SDL3's audio driver lists the input devices (AudioIn) when its audio starts.
-- **Cause:** the host has no microphone.
-- **Fix:** `ListAudioIns` reports none, both opens fail, and the calls that need an open AudioIn answer without touching the game's object (`hle_audio.c`).
-- **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2, FNA on .NET NativeAOT with SDL3; one boot each).
+- **Symptom:** SDL3's audio driver lists the input devices (AudioIn) when its audio starts. `[RED] sf: the game connects to service audren:u itself`, then `nn::diag abort: Result 0xe15` under `audio::AcquireAudioDeviceNotificationForInput` (`sdk+0x5633c`).
+- **Cause:** the host has no microphone. The input device-change notification goes through the audio device service, like the output one the host answers.
+- **Fix:** `ListAudioIns` reports none, both opens fail, and the calls that need an open AudioIn answer without touching the game's object (`hle_audio.c`). `AcquireAudioDeviceNotificationForInput` binds an event that is never signaled and returns 0x499 when acquired again, as the SDK does with a flag of its own (SDK 13.3.0 `sdk+0x56300`: `+0x851`, the output's `+0x852`; `hle_audren.c`).
+- **Found on:** [Absolum](../../dm/games/0100A83022A22000/README.md) (SDK 18.3.2, FNA on .NET NativeAOT with SDL3; one boot each); [Portal 2](../../dm/games/0100ABD01785C000/README.md) (SDK 13.3.0: its audio thread at start, `main+0x19f37c`).
 
 ### `OpenAudioOut` without a release event (SDK 22)
 

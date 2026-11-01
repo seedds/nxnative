@@ -32,6 +32,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** both forms are taken over now (`hle_movie.c`).
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0; one boot).
 
+### SDK 3's `movie::Decoder` constructor takes a type and a format only
+
+- **Symptom:** a call through a null pointer in the host's `movie::Decoder::Configure` (`pc=0 lr=h_movie_Configure+…`) when the first movie starts; with only the constructor taken over, `[RED] movie: decoder type 1 output 3 mode 1 not supported by the host`.
+- **Cause:** SDK 3.5.1's constructor is `Decoder(DecoderType, DecoderOutputFormat)` (`_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE`, `subsdk1+0x2de630`: it builds `DecoderImpl(type, format)`), a third form after [SDK 4's](#sdk-4s-moviedecoder-constructor-without-a-priority): the SDK built its own decoder, as on SDK 4. That SDK has no decoder mode: its decoders work on the CPU. And its output formats are numbered one lower than later SDKs': `DecoderImpl` keeps the format at +0xdc and the type at +0xe0, `ConvertDecoderOutputFormat` (`subsdk1+0x2dd16c`) converts format 2 to ARGB and copies format 3 out as NV12 with stride = width, the UV rows right after the Y rows, and `GetOutputBufferSize` (`subsdk1+0x2dcde8`) gives w × h × 4 for 2 and w × h × 1.5 for 3; format 1 is PCM16 as later. Its `GetOutputBufferSize` also puts 0x20, an alignment, in the second output, where SDK 4 and later put the decoder mode (Metroid Dread `subsdk0+0x11f308`: `str w8,[x2]` with the mode, 1 for the CPU).
+- **Fix:** the two-argument constructor is taken over as a CPU-mode decoder (mode 1) with format 3 as NV12 and 2 as ABGR (`h_movie_Decoder3` in `hle_movie.c`), and its decoders report 0x20 as `GetOutputBufferSize`'s second output (`out_align`). The host's NV12 already has the SDK 3 layout (`md_nv12`).
+- **Found on:** [Hyrule Warriors: Definitive Edition](../../dm/games/0100AE00096EA000/README.md) (SDK 3.5.1, H.264 MP4 movies through its own player): the title's background and the opening movie play.
+
 ### The complete-object destructor
 
 - **Cause:** the game calls the complete-object destructor `movie::Decoder::~Decoder` (`D1`); the SDK's own one destroyed the host object as a `DecoderImpl`.
@@ -78,6 +85,15 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** a released slot now goes on with a drain too, and the end-of-stream packet's own output takes the first queued picture (`jflush`), so no black picture shows before a movie's last frames (`hle_movie.c`).
 - **Found on:** [AI: THE SOMNIUM FILES](../../dm/games/010089B00D09C000/README.md) (Unity 2017.4: the 6 s Spike Chunsoft logo `StreamingAssets/Movie/al_titel_cl_sc_1k_30.mp4`, H.264 High, before the title).
 - **Note:** the audio decoder was never affected: AAC has no reorder queue.
+
+### No picture carries the end-of-stream flag
+
+- **Symptom:** an anime or story movie ends on a black screen; the pause menu still works and skipping lets the game continue.
+- **Cause:** at the end of an H.264 stream the host put the end-of-stream flag on the last picture of its reorder queue. CRI Sofdec2 drops an output flagged end-of-stream without showing it and waits for the picture it counted on: the movie never completes. Catherine's anime intro had 1,140 of its 1,141 pictures delivered, the last only with flag 4. The queue held pictures there for no reason too: `hle_movie_avc.c` held four for every non-Baseline stream, assuming B-frames, but Catherine's High-profile streams use SPS `pic_order_cnt_type = 2`, whose output order is the decode order (H.264 8.2.1.3).
+- **Fix:** the drain hands out every queued picture without the flag, then one output without a picture carries it, with the end-of-stream packet's time (`md_pump` in `hle_movie.c`), as VP9 and Baseline streams whose end-of-stream packet has no data already ended. This holds for every H.264 stream, with or without B-frames. Separately, `avc_reorder_depth` reads the SPS through `pic_order_cnt_type` (emulation-prevention bytes removed, the High-profile chroma fields and scaling lists skipped): POC type 2 needs no reorder queue in any profile; other POC types keep a depth of 4 (0 for Baseline), as does an SPS cut short. No timeout or movie skip is involved; the intro delivers all 1,141 pictures and goes on to Golden Playhouse by itself.
+- **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (1.0.1a, CRI Sofdec2, H.264 High, NV12).
+- **Check:** `t_movie_avc` (`dm/host/tests`) runs the drain through `md_pump` with synthetic pictures, with all output slots free and with two, and checks the SPS reader (POC types, scaling lists, chroma formats, truncated input). The game's `smoke.tsv` lets its intro finish without a skip press. On the Mac from a fresh save, the host before this fix never closed the intro's decoder in 180 s; the drain alone (with the old reorder depth of 4) and the drain with POC type 2's depth of 0 both had all 1,141 pictures out and the decoder closed, and the latter's screenshot shows Golden Playhouse.
+- **Open:** CRI hands the decoder zero timestamps, so the reorder queue, sorted by time, cannot reorder a CRI stream that has B-frames; none has been found yet. Catherine's later story movies and its movies on the iPhone have not been checked one by one.
 
 ## Output slots
 
@@ -164,6 +180,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Fix** (`hle_movie.c`): the host tracks which output slots the client holds (taken by `AcquireOutputBufferIndex`, returned by a release or a flush). A texture-mode `GetOutputBuffer` returns its slot after writing the texture, and a release of a slot the client does not hold changes nothing and returns 0. Before, such a second release freed a slot the decoder might have filled again.
 - **Found on:** [Super Mario Party Jamboree](../../dm/games/0100965017338000/README.md) (SDK 17.5.9: the opening movie and the mode previews). Metroid Dread (SDK 11.4.3) has the same copy-and-release and still releases each index itself, the case the second rule covers.
 
+### A native-texture movie shows a picture 16 frames ahead, then goes back
+
+- **Symptom:** a native-texture movie jumps ahead for one picture and returns: every 17 pictures, each exactly 16 ahead (one cycle of the video output slots), the picture before it never shown. Text burnt into the movie shows the line being typed half a second later for one frame.
+- **Cause:** the host returned a native-texture slot inside `GetOutputBuffer` (the entry above), and returning a slot decodes the next queued packet into it within the call and signals the output event. The player's decoder thread acquired the slot again before its output thread's own `ReleaseOutputBufferIndex` for the old picture came, and that release then freed the new picture; the slot was filled once more, a cycle ahead. The SDK returns the index there too, but its hardware decoder fills it later, so the client's release always comes first.
+- **Fix** (`hle_movie.c`, `md_rendered`): a slot written into the client's texture is kept until the client releases it, or, for a client that has never released a rendered slot itself (Super Mario Party Jamboree, Metroid Prime 4: Beyond), until its next `GetOutputBuffer`. A decoder learns which kind its client is at the client's first release of a rendered slot; the earlier slots are returned under the same lock that checks them.
+- **Found on:** TSUKIHIME -A piece of blue glass moon- (010057A01E4D4000, no profile here; [GitHub issue #700](https://github.com/seedds/nxnative/issues/700): its prologue, a 1080p H.264 movie, `type 1 output 3 mode 2`) and [Metroid Dread](../../dm/games/010093801237C000/README.md#movies), whose movies jumped the same way (15 times in 75 s on the Mac before, none after).
+
 ## Demuxers and codecs
 
 ### `movie::Extractor` runs natively
@@ -193,6 +216,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 ### Vorbis movie sound
 
 - Movie sound in [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0): the decoder is asked for type 5 (Vorbis) with output format 1 (PCM16); see the other entries in this file and `hle_movie.c`.
+
+### Vorbis sound stops for good after a Flush
+
+- **Symptom:** a movie with a Vorbis track plays its first seconds with sound; after the game flushes and restarts it (a seek, a loop, or the app losing and regaining focus) the picture goes on but the sound does not come back, for the rest of the movie. The log shows `[movie] Flush`, `Flush`, `Start`, `Start` and no more `GetOutputBuffer … → PCM` lines. With `DM_AUDIO_DUMP`, the game's mix is real audio up to the flush and exact zeros from then on, so the AudioUnit is not at fault (0 underruns).
+- **Cause:** `h_movie_Flush` called `stb_vorbis_flush_pushdata` on the Vorbis decoder, which puts it into its page search mode. The packets `md_vorbis` hands it afterwards (each wrapped as one whole Ogg page) gave no sample: in a test on a generated stream, none of the next 100 packets did, whether the stream went on or started again from its first packet.
+- **Fix:** a Flush closes the Vorbis decoder, and the next packet opens it again from the headers (`md_vorbis_open`), as at the start of a stream. `t_movie_vpx` builds a small Vorbis stream, flushes twice and checks that the same samples come again.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, iPhone: the opening movie, after the app lost focus once. [#505](https://github.com/seedds/nxnative/issues/505) reported the same silence and was closed after a reinstall, with the app having been backgrounded once in the silent session).
 
 ## Movie players
 

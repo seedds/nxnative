@@ -102,7 +102,7 @@ class Images(unittest.TestCase):
         resources.write_text('DM_RESOURCE_ROMFS=' + shlex.quote(str(self.src)) + '\n')
         bin_dir = self.root / 'bin'; bin_dir.mkdir()
         xcrun = bin_dir / 'xcrun'
-        xcrun.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ROMFS_PUSH_ARGS"\nexit "${ROMFS_PUSH_RC:-0}"\n')
+        xcrun.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >> "$ROMFS_PUSH_ARGS"\nexit "${ROMFS_PUSH_RC:-0}"\n')
         xcrun.chmod(0o755)
         args_file = self.root / 'copy-args'
         env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'], ROMFS_PUSH_ARGS=str(args_file))
@@ -153,6 +153,88 @@ class Images(unittest.TestCase):
                     off, fmt, value = change; struct.pack_into(fmt, raw, off, value)
                 else: raw = change
                 self.dst.write_bytes(raw); self.assertFalse(self.valid())
+
+
+class DlcTransfers(unittest.TestCase):
+    """Run the push helper against devicectl's directory merge/replacement semantics."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='dlc push '); self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        source = self.root / 'RomFS'; source.mkdir(); (source / 'marker').write_text('base game')
+        self.img = self.root / 'RomFS.img'; image.pack(source, self.img)
+        self.aoc = self.root / 'add-on content'; self.aoc.mkdir()
+        self.device = self.root / 'device'; self.device.mkdir()
+        self.scratch = self.root / 'scratch'; self.scratch.mkdir()
+        bin_dir = self.root / 'bin'; bin_dir.mkdir()
+        xcrun = bin_dir / 'xcrun'
+        xcrun.write_text('''#!/usr/bin/env python3
+import os, shutil, sys
+from pathlib import Path
+args = sys.argv[1:]
+assert args[:4] == ['devicectl', 'device', 'copy', 'to']
+src = Path(args[args.index('--source') + 1])
+dst = Path(os.environ['DLC_PUSH_DEVICE']) / args[args.index('--destination') + 1]
+if dst.name == 'aoc' and os.environ.get('DLC_PUSH_FAIL'): sys.exit(int(os.environ['DLC_PUSH_FAIL']))
+dst.parent.mkdir(parents=True, exist_ok=True)
+if src.is_dir():
+    # devicectl defaults to merging; only an explicit true removes old content.
+    if '--remove-existing-content' in args and args[args.index('--remove-existing-content') + 1] == 'true' and dst.exists(): shutil.rmtree(dst)
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+else: shutil.copyfile(src, dst)
+''')
+        xcrun.chmod(0o755)
+        self.env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
+                        DLC_PUSH_DEVICE=str(self.device), TMPDIR=str(self.scratch))
+
+    def push(self, aoc=None, *, image_only=False):
+        resources = self.root / 'resources.env'
+        resources.write_text('DM_RESOURCE_ROMFS=' + shlex.quote(str(self.img)) + '\n' +
+                             ('DM_RESOURCE_AOC=' + shlex.quote(str(aoc)) + '\n' if aoc is not None else ''))
+        return subprocess.run(['bash', str(REPO / 'scripts/push_romfs.sh'), 'fixture-device', 'fixture.bundle',
+                               str(self.img if image_only else resources)], env=self.env, capture_output=True, text=True)
+
+    def test_smaller_dlc_set_replaces_images_and_legacy_folders(self):
+        (self.aoc / '1.img').write_text('old')
+        (self.aoc / '2').mkdir(); (self.aoc / '2/marker').write_text('legacy DLC')
+        result = self.push(self.aoc); self.assertEqual(result.returncode, 0, result.stderr)
+        remote = self.device / 'Documents/aoc'
+        self.assertEqual({p.name for p in remote.iterdir()}, {'1.img', '2'})
+        (self.aoc / '1.img').write_text('updated'); shutil.rmtree(self.aoc / '2')
+        result = self.push(self.aoc); self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({p.name for p in remote.iterdir()}, {'1.img'})
+        self.assertEqual((remote / '1.img').read_text(), 'updated')
+
+    def test_empty_dlc_set_clears_previous_content(self):
+        for aoc in ('', None, self.aoc):
+            with self.subTest(aoc=aoc):
+                remote = self.device / 'Documents/aoc'; remote.mkdir(parents=True, exist_ok=True)
+                (remote / '1.img').write_text('stale')
+                self.env['DM_RESOURCE_AOC'] = str(self.root / 'inherited-stale-path')
+                result = self.push(aoc); self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(remote.is_dir()); self.assertEqual(list(remote.iterdir()), [])
+                self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_image_only_push_preserves_dlc(self):
+        remote = self.device / 'Documents/aoc'; remote.mkdir(parents=True)
+        (remote / '1.img').write_text('keep')
+        self.env['DM_RESOURCE_AOC'] = str(self.aoc)
+        result = self.push(image_only=True); self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((remote / '1.img').read_text(), 'keep')
+        self.assertEqual((self.device / 'Documents/romfs.img').read_bytes(), self.img.read_bytes())
+
+    def test_missing_dlc_stops_before_any_transfer(self):
+        result = self.push(self.root / 'missing')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Add-on content unavailable', result.stderr)
+        self.assertEqual(list(self.device.iterdir()), [])
+
+    def test_dlc_transfer_failure_is_reported(self):
+        self.env['DLC_PUSH_FAIL'] = '7'
+        result = self.push(self.aoc)
+        self.assertEqual(result.returncode, 7)
+        self.assertNotIn('DLC on the phone', result.stdout)
+        self.assertNotIn('game files on the phone', result.stdout)
 
 
 if __name__ == '__main__': unittest.main()

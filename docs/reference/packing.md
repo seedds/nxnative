@@ -69,6 +69,15 @@
 - **Fix:** `unzs` feeds the command the bytes it read (`input=`). No other tool hands an external command a path inside the image. Test: `test_romfs_read.py` `test_zstd_file_inside_an_image`.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md#shaders): every file of its RomFS is zstd-compressed, 13,744 left out in both versions; the first image-backed build after the folder extraction.
 
+## Add-on content
+
+### DLC in Documents is ignored or removed DLC remains installed
+
+- **Symptom:** a game's DLC works only when packed inside its IPA, although its base RomFS can be deployed separately. After pushing a smaller DLC set, removed indices can remain reported as owned and mounted.
+- **Cause:** the iOS launcher originally checked only `<App>/aoc`. Merely adding `Documents/aoc` discovery is insufficient: `devicectl device copy to` merges directories by default, retaining removed indices, and skipping a build with no DLC leaves the entire previous set behind. The host counts and mounts the numeric entries under `DM_AOC_DIR`, so those leftovers remain active.
+- **Fix:** `aoc_locate` in `dm/ios/Sources/main.m` preserves an explicit `DM_AOC_DIR` from the launch environment or `env.txt`; otherwise it selects the first directory at `Documents/aoc`, then `<App>/aoc`, and logs `boot: DLC from <path>`. `Documents/aoc` is excluded from backups. Given `resources.env`, `scripts/push_romfs.sh` transfers the complete `DM_RESOURCE_AOC` directory with `--remove-existing-content true`, replacing old `<index>.img` files and legacy `<index>/` trees. An empty or omitted value sends an empty directory, clearing previous content and explicitly selecting no external DLC rather than falling back to bundled content. A nonempty path that is unavailable stops before any transfer. A direct RomFS-image push has no DLC metadata and leaves DLC unchanged. Transfers are not atomic: rerun a failed push before launching the game. Usage: [Quick reinstalls](../development.md#quick-reinstalls).
+- **Found on:** synthetic startup and transfer fixtures while reviewing [PR #486](https://github.com/seedds/nxnative/pull/486), part of [issue #388](https://github.com/seedds/nxnative/issues/388). The Foundation fixture runs the actual iOS locator; the push-helper fixture models devicectl's documented merge and replacement behavior, including smaller and empty DLC sets and transfer failure. Applies to every game; no device gameplay validation was performed.
+
 ## Launcher metadata
 
 ### A Mac front end's default settings change Metal execution paths
@@ -110,6 +119,15 @@
 - **Fix:** `dm/tools/nso.py` decodes such segments with the [`zbic`](https://pypi.org/project/zbic/) package (Kinnay's, zstd with Atmosphère's ZBIC changes), imported only for a flag-bit-7 module, so an LZ4 title needs nothing new; every segment is still held to the header's size and SHA-256. zstd has no fixed ratio bound, so a ZBIC segment is held only to its own size, where an LZ4 one is also held to 255 bytes per stored byte. Install it with the other tools (README, step 1).
 - **Check:** Well Dweller's `main` decodes to 85,370,056 bytes with segments `0x39680d0 / 0x9f7e74 / 0x9b1930`, every SHA-256 matching; `dm/tools/tests/test_nso.py` checks that a flag-bit-7 module whose segments are not ZBIC is an Error naming ZBIC.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0).
+
+## Package identification
+
+### An NSP without a ticket or a title ID in its name stops with "no NSP with a readable title ID"
+
+- **Symptom:** `[RED] no NSP with a readable title ID in <folder>`, although the keys open the package (the launcher's key check passes). Renaming the file to `Game [0100XXXXXXXXXXXX].nsp` makes the build go on.
+- **Cause:** `title_of` took the title ID only from the ticket's file name (`<rights ID>.tik`) or from a `[title ID]` tag in the package's file name. Many NSPs carry no ticket (standard-crypto dumps, repacks), and a download's file name often has no tag.
+- **Fix:** with neither, `title_of` asks the package: `nx_extract <prod.keys> --title <package>` opens it, decrypts the header of each meta NCA with the keys' `header_key` and prints the lowest title ID (the base game's before its update's or a DLC's). It works for NSP, NSZ (the meta NCA is not compressed), XCI and XCZ, and runs only when the ticket and the tag are both missing, so the common cases stay a read of the file name table. `nx_extract` is built into a temporary folder for it, since the build folder is named after the title ID. Key values are never printed.
+- **Found on:** NX2Apple, [LNPANDY/NX2Apple#177](https://github.com/LNPANDY/NX2Apple/issues/177) ([Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), whose base NSP has no ticket). Applies to every game.
 
 ## Cartridge dumps
 

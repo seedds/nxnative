@@ -7,3 +7,7 @@ __pycache__/
 # Made from each shader build's Mac outputs (c1_guard.py, cb_extent.py; the NSP script makes them), not committed
 dm/games/*/c1_full.tsv
 dm/games/*/cb_extent.tsv
+# coverage.py data and its JSON report (pyproject.toml, [tool.coverage.run])
+.coverage
+.coverage.*
+/coverage.json

@@ -273,24 +273,36 @@ static int capture(const uint8_t *cl, size_t len, int16_t *dst) {
         }
     }
     if (!layout_done) return 0;
+    // A later list can be incomplete too. Validate every command before consuming the
+    // one-time sink scan or returning PCM from a sink that precedes a malformed tail.
+    const uint8_t *c = cl + 0x20;
+    for (uint32_t i = 0; i < ncmd; i++) {
+        if (!cmd_ok(c, cend)) { if (!logged++) LOG("[RED] audren: command %u in the command list is malformed (offset %#zx, list %#zx bytes)", i, (size_t)(c - cl), len); return 0; }
+        c += cmd_size(c);
+    }
     if (!hist_logged && ncmd > 4) {   // first full command list: command ID histogram and the sink ID check
         hist_logged = 1;
-        int hist[64] = {0}, cand = -1, ncand = 0, cand4 = -1, ncand4 = 0, sink_sz = 0x148 + sink_body(); const uint8_t *q = cl + 0x20; char line[512]; size_t o = 0;
-        for (uint32_t i = 0; i < ncmd && cmd_ok(q, cend); i++) {
+        int hist[64] = {0}, cand = -1, ncand = 0, cand4 = -1, ncand4 = 0, sink_sz = 0x148 + sink_body(); const uint8_t *q = cl + 0x20; char line[512] = {0}; size_t o = 0;
+        for (uint32_t i = 0; i < ncmd; i++) {
             int sz = cmd_size(q); hist[cmd_id(q) & 63]++;
             if (sz == sink_sz && *(const uint32_t *)(q + 0x130 + sink_body()) - 1 < 6) { cand = cmd_id(q); ncand++; }
             if (g_hdr6 && (sz == 0x130 || sz == 0x138) && *(const uint32_t *)(q + 0x120) - 1 < 6) { cand4 = cmd_id(q); ncand4++; g_sink5 = sz == 0x138; }
             q += sz;
         }
-        for (int k = 0; k < 64; k++) if (hist[k]) o += snprintf(line + o, sizeof line - o, " %d×%d", k, hist[k]);
+        for (int k = 0; k < 64; k++) if (hist[k]) {
+            int n = snprintf(line + o, sizeof line - o, " %d×%d", k, hist[k]);
+            // snprintf returns the untruncated length: keep only complete entries and
+            // never advance the next write past the available buffer.
+            if (n < 0 || (size_t)n >= sizeof line - o) { line[o] = 0; break; }
+            o += (size_t)n;
+        }
         LOG("audren: first-frame commands %u, by command ID: %s", ncmd, line);
         if (!hist[g_sink_id & 63] && ncand == 1) { LOG("audren: no command with ID %#x in the command list; the only 0x148-byte command is ID %#x, taking it as DeviceSink", g_sink_id, cand); g_sink_id = cand; }
         else if (!hist[g_sink_id & 63] && !ncand && ncand4 == 1) { LOG("audren: no command with ID %#x in the command list; the only %#x-byte command is ID %#x, taking it as the SDK %d DeviceSink", g_sink_id, g_sink5 ? 0x138 : 0x130, cand4, g_sink5 ? 5 : 4); g_sink_id = cand4; g_sink4 = 1; }
         else if (!hist[g_sink_id & 63]) LOG("[RED] audren: no DeviceSink (ID %#x) in the command list, %d commands of %#x bytes: the game will have no sound", g_sink_id, ncand, sink_sz);
     }
-    const uint8_t *c = cl + 0x20;
+    c = cl + 0x20;
     for (uint32_t i = 0; i < ncmd; i++) {
-        if (!cmd_ok(c, cend)) { if (!logged++) LOG("[RED] audren: command %u in the command list is malformed (offset %#zx, list %#zx bytes)", i, (size_t)(c - cl), len); return 0; }
         int size = cmd_size(c);
         if (cmd_id(c) == g_sink_id && cmd_on(c)) {
             const uint8_t *b = c + sink_body();
@@ -413,16 +425,17 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
 //   the execution mode and rendering device, so every render of the render thread failed with 0x40299 and played silence; only the game's updates rendered (catch-up frames, one per
 //   update at 60 Hz), heard as chopped sound. Anything not found keeps +0x60
 static size_t impl_sys_off(void) {
-    static size_t off;
-    if (off) return off;
-    off = 0x60;
+    static _Atomic size_t found;   // the offset + 1 once looked up: an `add xd, x0, #0` gives +0
+    size_t k = atomic_load(&found);
+    if (k) return k - 1;
+    size_t off = 0x60;
     const uint32_t *f = guest_sym("_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv");
     for (int i = 0; f && i < 16; i++) {
         uint32_t w = f[i];
         if ((w & 0xffc003e0u) == 0x91000000u) { off = (w >> 10) & 0xfff; break; }   // add xd, x0, #imm12
         if ((w & 0x7c000000u) == 0x14000000u) break;   // b / bl: no offset before the first branch
     }
-    LOG("audren: AudioRenderSystem at +%#zx in AudioRendererImpl", off);
+    if (!atomic_exchange(&found, off + 1)) LOG("audren: AudioRenderSystem at +%#zx in AudioRendererImpl", off);
     return off;
 }
 HLE_FORCE("_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv", "render one frame manually: SDK generates commands + CPU processing, the host takes the DeviceSink output",
@@ -485,6 +498,12 @@ HLE_FORCE("_ZN2nn5audio26GetAudioDeviceOutputVolumeEPKNS0_15AudioDeviceNameE", "
 static atomic_int g_ad_notify;
 HLE_FORCE("_ZN2nn5audio39AcquireAudioDeviceNotificationForOutputEPNS_2os11SystemEventE", "output device change notification: bound, never signaled", Result, h_ad_Notify, void *ev) {
     if (atomic_exchange(&g_ad_notify, 1)) return 0x499;
+    hle_bind_system_event(ev, 0); return RES_OK;
+}
+// The input twin (Portal 2's main+0x19f37c, on its audio thread at start): the same shape with a flag of its own (SDK 13.3.0 sdk+0x56300: +0x851, the output's +0x852)
+static atomic_int g_ad_notify_in;
+HLE_FORCE("_ZN2nn5audio38AcquireAudioDeviceNotificationForInputEPNS_2os11SystemEventE", "input device change notification: bound, never signaled (the host has no microphone)", Result, h_ad_NotifyIn, void *ev) {
+    if (atomic_exchange(&g_ad_notify_in, 1)) return 0x499;
     hle_bind_system_event(ev, 0); return RES_OK;
 }
 // SDK 7 names of the two above (Super Mario Odyssey): the device-switch event and the active channel count

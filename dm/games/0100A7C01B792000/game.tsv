@@ -42,5 +42,5 @@ shader_note	Minecraft Dungeons II shaders (provisional profile)
 tex_dyn_slots	on
 
 # ---- Frame rate ----
-# 60 fps: t.MaxFPS and rhi.SyncInterval (dm/host/hle_fpslock.c)
+# 60 fps: t.MaxFPS and rhi.SyncInterval, found by name by the rewriter (dm/tools/ue_cvar.py, dm/host/hle_fpslock.c)
 fps_target	60

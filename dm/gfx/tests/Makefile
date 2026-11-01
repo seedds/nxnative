@@ -9,12 +9,18 @@ endif
 GAME_DIR = ../../games/$(GAME)
 GAME_H = ../../host/gen/$(GAME)/game_profile.h
 
-CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H))
+# The host's shaders compiled for the Mac (host_msl_gen.h, made by the host Makefile from dm/gfx/msl; nvn/host_msl.m loads them)
+MSL_H = ../../host/gen/msl-macosx/host_msl_gen.h
+CFLAGS=-O1 -g -Wall -Wno-unused-function -I../nvn/include -I$(dir $(GAME_H)) -I$(dir $(MSL_H))
 GFX=$(filter-out ../nvn/hle_nvn.c,$(sort $(wildcard ../nvn/*.c ../nvn/*.m ../nvn/*.S ../tex/*.c ../tex/*.m)))
-GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H)
+GFX_H=$(wildcard ../nvn/*.h ../nvn/*.inc ../nvn/include/*.h ../tex/*.h) $(GAME_H) $(MSL_H)
 .DEFAULT_GOAL := t_nvn   # the profile header rule comes first, so keep the default goal as before
 $(GAME_H):
 	$(MAKE) -C ../../host game_profile GAME=$(GAME)
+$(MSL_H): $(wildcard ../msl/*.metal) ../tools/host_msl.py host_msl_force
+	$(MAKE) -C ../../host host_msl GAME=$(GAME)
+.PHONY: host_msl_force
+host_msl_force:
 FW=-framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
 # Host crash.c is linked in as well: the write-protect unit tests go through the same page-fault hook as production
 # Tests that #include nvn_mtl.m link the rest of the NVN layer beside it (hle_nvn.c: memory pools, sparse pools, serials) and the host's large stack, with weak stubs of what they need of the host (t_host_stubs.c)
@@ -49,8 +55,12 @@ t_dirty_slots: t_dirty_slots.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_
 	clang $(CFLAGS) -o $@ t_dirty_slots.c ../../host/crash.c ../nvn/nvn_dirty.c
 t_dirty_race: t_dirty_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
 	clang $(CFLAGS) -o $@ t_dirty_race.c ../../host/crash.c
-t_builtin: t_builtin.m ../nvn/nvn_builtin.h
-	clang -O1 -g -Wall -fobjc-arc -o $@ t_builtin.m -framework Metal -framework Foundation
+t_dirty_retire_race: t_dirty_retire_race.c ../nvn/nvn_dirty.c ../../host/crash.c ../nvn/nvn_dirty.h $(GAME_H)
+	clang $(CFLAGS) -o $@ t_dirty_retire_race.c ../../host/crash.c
+t_host_msl: t_host_msl.m ../nvn/host_msl.m ../nvn/host_msl.h $(MSL_H)
+	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_host_msl.m ../nvn/host_msl.m -framework Metal -framework Foundation
+t_builtin: t_builtin.m ../nvn/nvn_builtin.h ../nvn/host_msl.m $(MSL_H)
+	clang -O1 -g -Wall -I$(dir $(MSL_H)) -fobjc-arc -o $@ t_builtin.m ../nvn/host_msl.m -framework Metal -framework Foundation
 t_vin: t_vin.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_vin.m -framework Metal -framework Foundation
 t_tbuf2d: t_tbuf2d.m ../nvn/nvn_tex.c ../nvn/nvn_tex.h
@@ -59,8 +69,8 @@ t_tbuf_align: t_tbuf_align.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_tbuf_align.m -framework Metal -framework Foundation
 t_sparse_layout: t_sparse_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang $(CFLAGS) -o $@ t_sparse_layout.c ../nvn/nvn_tex.c
-t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h
-	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c -framework Metal -framework Foundation
+t_deswz_gpu: t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../tex/nvn_deswizzle.h ../tex/nvn_deswizzle_gpu.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/host_msl.m $(MSL_H)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_deswz_gpu.m ../tex/nvn_deswizzle.c ../tex/nvn_deswizzle_gpu.m ../nvn/nvn_tex.c ../nvn/host_msl.m -framework Metal -framework Foundation
 t_tex_layout: t_tex_layout.c ../nvn/nvn_tex.c ../nvn/nvn_tex.h
 	clang -O1 -Wall -o $@ t_tex_layout.c ../nvn/nvn_tex.c
 t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h ../nvn/dmsh_chain.h
@@ -131,6 +141,11 @@ t_cube_placeholder: t_cube_placeholder.m $(MTL_T_DEP)
 .PHONY: check_t_cube_placeholder
 check_t_cube_placeholder: t_cube_placeholder
 	MTL_DEBUG_LAYER=1 ./t_cube_placeholder
+t_ms_slot: t_ms_slot.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_ms_slot.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_ms_slot
+check_t_ms_slot: t_ms_slot
+	MTL_DEBUG_LAYER=1 ./t_ms_slot
 t_tex_fit_root: t_tex_fit_root.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_tex_fit_root.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_tex_fit_root
@@ -140,7 +155,8 @@ t_readback: t_readback.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_readback.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 .PHONY: check_t_readback
 check_t_readback: t_readback
-	MTL_DEBUG_LAYER=1 ./t_readback
+	DM_NVN_FAST_WAKE=1 MTL_DEBUG_LAYER=1 ./t_readback
+	DM_NVN_FAST_WAKE=0 MTL_DEBUG_LAYER=1 ./t_readback
 t_present_crop: t_present_crop.m ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_crop.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 t_present_rescue: t_present_rescue.m t_present_rescue_focus.c $(MTL_T_DEP)
@@ -161,6 +177,8 @@ check_t_present_snap: t_present_snap
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap pacing
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap copy
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap pacing
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_present_snap resize
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_present_snap resize
 t_reorder_chain: t_reorder_chain.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_reorder_chain.m $(MTL_T_SRC) $(FW)
 check_t_reorder_chain: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -253,6 +271,14 @@ t_rt_depth_ro: t_rt_depth_ro.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_rt_depth_ro.m $(MTL_T_SRC) $(FW)
 t_pso_pending: t_pso_pending.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_pending.m $(MTL_T_SRC) $(FW)
+t_pso_depth_stencil: t_pso_depth_stencil.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_depth_stencil.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_depth_stencil
+check_t_pso_depth_stencil: t_pso_depth_stencil
+	DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	DM_NVN_ENC_THREAD=1 DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
+	DM_NVN_ENC_THREAD=1 DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_depth_stencil
 t_pull: t_pull.m ../tools/dmsh_pull.metal $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pull.m $(MTL_T_SRC) $(FW)
 check_t_pull: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -282,6 +308,12 @@ t_pso_skey: t_pso_skey.m ../nvn/nvn_pso_skey.h ../nvn/nvn_obj.h
 t_view_swizzle: t_view_swizzle.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_swizzle.m $(MTL_T_SRC) $(FW)
 check_t_view_swizzle: RUN_ENV = MTL_DEBUG_LAYER=1
+t_border: t_border.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_border.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_border
+check_t_border: t_border
+	MTL_DEBUG_LAYER=1 ./t_border
+	DM_TEST_BORDER=$(CURDIR)/t_border MTL_DEBUG_LAYER=1 python3 -m unittest test_dmsh_border.py
 t_view_levels: t_view_levels.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_view_levels.m $(MTL_T_SRC) $(FW)
 check_t_view_levels: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -325,6 +357,16 @@ t_clear_tex: t_clear_tex.m $(MTL_T_DEP)
 .PHONY: check_t_clear_tex
 check_t_clear_tex: t_clear_tex
 	MTL_DEBUG_LAYER=1 ./t_clear_tex
+t_attachment_capacity: t_attachment_capacity.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_attachment_capacity.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_attachment_capacity
+check_t_attachment_capacity: t_attachment_capacity
+	@for compiler in 0 1; do for td in 0 1; do for enc in 0 1; do \
+	    DM_PSO_MTL4=$$compiler DM_NVN_TBDR=$$td DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_attachment_capacity || exit $$?; \
+	done; done; done
+t_image_attachment_store: t_image_attachment_store.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_image_attachment_store.m $(MTL_T_SRC) $(FW)
+check_t_image_attachment_store: RUN_ENV = MTL_DEBUG_LAYER=1
 t_unwritten_store: t_unwritten_store.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_unwritten_store.m $(MTL_T_SRC) $(FW)
 check_t_unwritten_store: RUN_ENV = MTL_DEBUG_LAYER=1
@@ -363,3 +405,8 @@ t_alpha: t_alpha.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_alpha.m $(MTL_T_SRC) $(FW)
 check_t_alpha: t_alpha
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_alpha.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_alpha "$$work"
+# Logic operations through the replay (t_logic.m), with its shaders from test_dmsh_logic.py
+t_logic: t_logic.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_logic.m $(MTL_T_SRC) $(FW)
+check_t_logic: t_logic
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_logic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_logic "$$work"

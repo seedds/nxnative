@@ -101,10 +101,15 @@ def header(g):
     if fh not in ('on', 'off'): sys.exit(f'{g.id}: fps_hold must be on or off: {fh}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool
     if not utp.isdigit(): sys.exit(f"{g.id}: ue_texture_pool must be megabytes (0 = the game's own pool): {utp}")
+    ufc = g.get('ue_fps_cvar', 't.MaxFPS')   # the Unreal console variable the host writes fps_target into (hle_fpslock.c; found by name by the rewriter, ue_cvar.py NAMES): a game's own frame limit its settings apply to t.MaxFPS
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.]{0,30}', ufc): sys.exit(f'{g.id}: ue_fps_cvar must be a console variable name: {ufc}')
     ps = g.get('present_snap', 'off')   # present snapshots by default (nvn_mtl.m mtl_snap_on; DM_PRESENT_SNAP and the iOS launcher's Frame buffering override it): on / off
     if ps not in ('on', 'off'): sys.exit(f'{g.id}: present_snap must be on or off: {ps}')
     p4 = g.get('pso_mtl4', 'off')   # render pipelines through MTL4Compiler on iOS by default, with the pipeline archive and hybrid pipelines (on by default on the Mac; DM_PSO_MTL4 overrides): on / off
     if p4 not in ('on', 'off'): sys.exit(f'{g.id}: pso_mtl4 must be on or off: {p4}')
+    pg = g.words('pso_gpu', '')   # GPU architectures the app gets the pipeline archive made offline for (the NSP script's --gpu, build_ipa.sh): when pso_mtl4 is on the app gets these instead of the default g18p, the A19 / A19 Pro of the iPhone 17 family (e.g. 'applegpu_g19p' for a device of the family after it); unset → the default. Whitespace-separated tokens, with or without the applegpu_ prefix
+    if pg and (len(pg) > 4 or any(w == 'none' or not re.fullmatch(r'(applegpu_)?[A-Za-z0-9]+', w) for w in pg)):
+        sys.exit(f"{g.id}: pso_gpu takes 1-4 whitespace-separated GPU architectures such as 'g18p applegpu_g19p' (each an optional applegpu_ prefix then an alphanumeric token; there is no none: omit the key for g18p with pso_mtl4 on, or no archive with pso_mtl4 off): {pg}")
     et = g.get('enc_thread', 'off')   # Metal encoding on its own thread on the Mac by default (nvn_rec.h rec_on; on iOS it is on for every game; DM_NVN_ENC_THREAD overrides): on / off
     if et not in ('on', 'off'): sys.exit(f'{g.id}: enc_thread must be on or off: {et}')
     cp = g.get('core_preempt', 'off')   # same-core preemption approximation (hle_thread.c): on / off
@@ -115,8 +120,6 @@ def header(g):
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font must be bfttf or ttf: {sf}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3),
     if pl not in ('simple', 'full', 'touch'): sys.exit(f'{g.id}: pad_layout must be simple, full or touch: {pl}')   # touch = Tap (no control: every touch goes to the game's touch screen)
-    fbs = g.words('feedback_snap', '')   # fragment shader key prefixes whose same-pass feedback sampling gets a snapshot first (nvn_mtl.m fb_prepare); none by default
-    if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in fbs): sys.exit(f'{g.id}: feedback_snap takes fragment shader keys (8-16 lowercase hex digits): {fbs}')
     sks = g.get('shader_key_skip', '')   # control-section bytes the shader keys hash as zeros, <offset>+<length> (hle_nvn.c keys_hash, shader_split.py key_ctl; Batman: Arkham Knight: GLSLC's compile information, 0x770+0x78)
     m = re.fullmatch(r'(0x[0-9a-fA-F]+|\d+)\+(0x[0-9a-fA-F]+|\d+)', sks) if sks else None
     if sks and (not m or not 0x30 <= int(m[1], 0) or not 0 < int(m[2], 0) or int(m[1], 0) + int(m[2], 0) > 0x880 or (int(m[1], 0) < 0x760 and int(m[1], 0) + int(m[2], 0) > 0x700)):   # not over +0x700..+0x75f, the code area and compute fields the tools read
@@ -171,6 +174,7 @@ def header(g):
          f'#define DM_GAME_FPS_TARGET {int(ft)}',
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
          f'#define DM_GAME_UE_TEXTURE_POOL {int(utp)}',
+         f'#define DM_GAME_UE_FPS_CVAR {q(ufc)}',
          f'#define DM_GAME_PRESENT_SNAP {int(ps == "on")}',
          f'#define DM_GAME_PSO_MTL4 {int(p4 == "on")}',
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
@@ -178,7 +182,6 @@ def header(g):
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
-         f'#define DM_GAME_FEEDBACK_SNAP {q(" ".join(fbs))}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
          f'#define DM_GAME_RENDER_COND {int(rcd == "on")}',

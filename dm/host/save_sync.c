@@ -280,10 +280,15 @@ static void write_base(const char *save, const char *hash) {   // written beside
     char p[PATH_MAX], t[PATH_MAX + 8];
     snprintf(p, sizeof p, "%s.sync", save); snprintf(t, sizeof t, "%s.tmp", p);
     FILE *f = fopen(t, "w");
-    if (!f || fprintf(f, "# save sync (dm/host/save_sync.h): the save last known to be the same here and in the cloud\nbase\t%s\n", hash) < 0 || fclose(f) || rename(t, p)) {
-        if (f) unlink(t);
-        SRED("cannot write %s (errno=%d): the next start compares with the sync before", p, errno);
+    int err = f ? 0 : errno;
+    if (f) {
+        if (fprintf(f, "# save sync (dm/host/save_sync.h): the save last known to be the same here and in the cloud\nbase\t%s\n", hash) < 0) err = errno;
+        // Close even after a write error, and keep that error if close or cleanup fails too.
+        if (fclose(f) && !err) err = errno;
+        if (!err && rename(t, p)) err = errno;
+        if (err) unlink(t);
     }
+    if (err) SRED("cannot write %s (errno=%d): the next start compares with the sync before", p, err);
 }
 
 // A backup this file made for `side`: "YYYY-MM-DD HH.MM.SS <side>", or with " <k>" after it (backup_dir); anything else in <save>-backups is the player's
@@ -363,12 +368,13 @@ static void deadline(int ms, struct timespec *ts) {
     ts->tv_sec += ms / 1000; ts->tv_nsec += (long)(ms % 1000) * 1000000;
     if (ts->tv_nsec >= 1000000000) { ts->tv_sec++; ts->tv_nsec -= 1000000000; }
 }
-static int fetch_timed(const char *cloud, const char *local, int ms) {   // front_save_sync_fetch's answer, or -1 at the time limit
+static int fetch_timed(const char *cloud, const char *local, int ms) {   // front_save_sync_fetch's answer, or -1 at the time limit (or with no thread to wait on)
     fetch_job *j = calloc(1, sizeof *j); pthread_t t;
     if (!j) return -1;
     pthread_mutex_init(&j->mu, NULL); pthread_cond_init(&j->cv, NULL);
     snprintf(j->cloud, sizeof j->cloud, "%s", cloud); snprintf(j->local, sizeof j->local, "%s", local);
-    if (pthread_create(&t, NULL, fetch_thread, j)) { pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); return front_save_sync_fetch(cloud, local); }
+    int e = pthread_create(&t, NULL, fetch_thread, j);
+    if (e) { pthread_mutex_destroy(&j->mu); pthread_cond_destroy(&j->cv); free(j); SRED("no thread to fetch the cloud's save (error %d)", e); return -1; }   // not fetched on this thread: a download that never finishes would hold the game
     pthread_detach(t);
     struct timespec ts; deadline(ms, &ts);
     pthread_mutex_lock(&j->mu);

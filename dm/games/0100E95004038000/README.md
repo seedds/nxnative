@@ -42,6 +42,74 @@ three geometry shaders. DLC gameplay remains unvalidated.
 
 ## Rendering
 
+**Current, iPadOS pipeline validation ([#702](https://github.com/seedds/nxnative/issues/702)):**
+the reported opening-sequence abort is an invalid `Invalid / Depth32Float_Stencil8`
+pipeline, not a confirmed memory kill. The general renderer correction keeps
+[combined depth-stencil formats paired](../../../docs/reference/rendering.md#combined-depth-stencil-formats-stay-paired-in-passes-and-pipeline-keys)
+in physical attachments and live, predicted and historical pipeline keys while
+preserving the unused plane. The log uses the legacy pipeline compiler with
+TBDR off; its original live pass remains unrecorded. The reporter confirms
+`b925591522f0` reaches cutscenes and normal gameplay on iPad. The subsequent
+smearing investigation below identifies another cause of malformed pipeline
+formats; playing and skipping the opening with the complete correction remain
+separate device checks.
+
+**Current, angle-dependent character smearing (2026-10-30):** on an M4 iPad
+(iPadOS 26.6.2), Rex's silhouette and body smear while stationary, change with
+the viewing angle, and can clear when another character walks nearer. The
+`b925591522f0` log uses legacy pipelines, threaded encoding and TBDR off. Frame
+2610 contains 76 var122 skinning draws: 74 execute, but passes 874367 and 874378
+skip the 319-vertex and 56-vertex updates after pipeline rejection. Their
+passes begin with eight color targets and depth/stencil `260/260`, while the
+failed keys contain depth `0x01010104` and stencil `260`.
+
+A device write watchpoint identifies `udc_note_draw`. The nine-element `g_sd`
+ends exactly where `g_pass` begins in this build. Its tenth, 56-byte stencil
+record overlaps the pass cache: write flags at offsets 34/35 change depth
+`0x00000104` to `0x01010104`. The general correction is
+[ten attachment records for eight colors and depth-stencil](../../../docs/reference/rendering.md#ten-attachment-records-for-eight-colors-and-depth-stencil).
+Disabling only the unwritten-store tracking (`g_udc_ab=0`, TBDR still off) in
+the running app clears Rex at the same camera angle; this is a diagnostic
+control, not the shipped fix. AddressSanitizer reproduces the old overflow
+without game files. The corrected ledger and lookahead arrays pass the GPU
+regression; the rebuilt permanent correction still needs iPad testing.
+
+**Resolved, hard-edged dark boxes in the indirect lighting (GitHub issue #643):**
+indoors and under decks a world-space box was much darker than the scene,
+darker with the time of day (Goldmouth Return Port), and elsewhere a lighter
+translucent rectangle. The indirect-lighting pass (`shd_lgt.wishp` var4.3,
+`468bd9c28161136f` / `93d0e7a7c14cdfb0`) reads a per-pixel list of up to four
+light probes from a 640×360 RG32Uint target (slot 7): the index bytes in x,
+then the probes' boxes from `fp_c6` and their cubes from the cube-map array at
+slot 5. The probe boxes build that list with logic operation OR (`lo=7`): the
+writers (`shd_lgt.wishp` var3: `ef07fd3d5046164f`, `aa9a0923524b7e46`,
+`2717a0aa47361bbd`, `d95874c161deb77d`, `f24b58784a33adea`) put their index into
+the next free byte and set a bit in an R32Uint image, and every other fragment
+writes 0. The host drew them with COPY, so the list was replaced fragment by
+fragment. Hand-patching the five writers to OR into their target removed the
+boxes; the general fix is [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own)
+(4,245 `_bl` libraries for this game, 101 MB on the Mac). The reporter's lead,
+3 of 21 64×64 cube-map arrays with few non-zero bytes, counts guest memory the
+CPU wrote and does not bear on it.
+
+**Resolved, stretched geometry streaks (GitHub issue #643):** for a frame, a
+character's mesh stretched into a wedge or sheet reaching another character
+(the Nopon by Bonbon in the Argentum Bazaar, the pink Nopon and the diving-suit
+NPCs at Goldmouth Return Port), and other characters missing in that frame;
+about one frame in a hundred near the crates at the spawn. Skinning runs as
+vertex-only draws (`shd_post.wishp` var122: `fa456dcb6b05c2ce`,
+`0cf988e8a8ea2aee`, `bce3419b07cb2f3d`, `3fb8ebc13eb37ad7`) that write blended
+bone matrices, 48 bytes per slot at `gl_VertexIndex`, from slot 0 of one
+384,000-byte storage buffer, which the character's draws read; each is preceded
+by ORDER_PRIMITIVES (bits `0x1`) and followed by `0x21`. One frame had 91 such
+draws, 43 in the same Metal pass as the previous character's draws. Fix:
+[Ordering barriers before a draw that writes](../../../docs/reference/rendering.md#ordering-barriers-before-a-draw-that-writes);
+with it, 104 a frame take a barrier inside the pass, none ends it, and no streak
+showed in 288 frames at the spawn. The `cb_extent.tsv` lead of the report is
+not it: the 256 shaders it counts are the `c1_full.tsv` rows, whose
+`gl_VertexIndex` reads go to the shader's own constant table (a full 64 KiB
+each), and the slot-1 extent it names is for reads at fixed indices.
+
 **Resolved, dark and inside-out geometry:** the game creates its queue before
 switching the device from the default lower-left origin to upper-left
 (`boot31properties`). Mario Wonder sets upper-left before queue creation
@@ -193,6 +261,10 @@ that diagnostic launch did not yet have a shader map configured.
 
 ## Found on this game
 
+- [Ten attachment records for eight colors and depth-stencil](../../../docs/reference/rendering.md#ten-attachment-records-for-eight-colors-and-depth-stencil): the iPad character smear and malformed skinning pipeline formats.
+- [Combined depth-stencil formats stay paired in passes and pipeline keys](../../../docs/reference/rendering.md#combined-depth-stencil-formats-stay-paired-in-passes-and-pipeline-keys): combined storage on iPadOS; see [Rendering](#rendering).
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers).
 - [Queue initialization captures the raster origin](../../../docs/reference/rendering.md#queue-initialization-captures-the-raster-origin).
+- [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own): the light probe lists; see [Rendering](#rendering).
+- [Ordering barriers before a draw that writes](../../../docs/reference/rendering.md#ordering-barriers-before-a-draw-that-writes): the skinning draws; see [Rendering](#rendering).
 - [Present thread rescues a silent display link](../../../docs/reference/frame-rate.md#present-thread-rescues-a-silent-display-link): the motion review's windowed timing comparison is confounded by repeated stalls; see [Controller motion review](#controller-motion-review).

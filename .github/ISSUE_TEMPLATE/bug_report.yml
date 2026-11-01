@@ -56,6 +56,14 @@ body:
         - The NSP script failed before anything ran
     validations:
       required: true
+  - type: checkboxes
+    id: requirements
+    attributes:
+      label: Requirements
+      description: The devices nxnative supports are listed under [Requirements](https://github.com/seedds/nxnative/blob/main/README.md#requirements). Problems on other devices (Intel Macs, iOS below 26, older iPhones and iPads) are out of scope here.
+      options:
+        - label: The device this happens on, and the Mac the game was built on, meet the requirements.
+          required: true
   - type: input
     id: device
     attributes:

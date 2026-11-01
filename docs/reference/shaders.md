@@ -755,6 +755,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `dmsh_mesh.compose` supplies the draw-wide primitive ID and rebases only capture loads to the mesh group's first record. Guest calculations and storage writes retain the original ID. A translated Maxwell fixture reads `PrimitiveID`, shifts it by five and combines it with a captured attribute to control viewport zero. Its GPU test covers 1–97 primitives, both depth conventions and non-indexed, 16-bit and 32-bit indexed draws with a negative base vertex. The original mapping fails at 33 triangles; the corrected mapping passes all 48 cases.
 - **Found on:** review of [NieR:Automata](../../dm/games/010056B015FE8000/README.md) and PR #416. Its four actual `IndexBuildIndependent_*` shaders load generic attributes only, with no `PrimitiveID` or physical attribute loads. This is a general mesh-composition defect exposed by the synthetic shader, not an observed NieR rendering failure.
 
+### Storage buffers at addresses that are not word-aligned
+
+- **Symptom:** flickering black holes and stray shards across walls and characters, worst up close, while the depth pre-pass is right; the colour pass draws with depth-equal from lists a geometry shader appended in the pre-pass.
+- **Cause:** NVN lets a game bind a storage buffer at any byte address, and GLSLC computes each access from the full address, so a 16-bit store done as a 32-bit compare-and-swap picks its half from the address's low bits. The translation counted offsets from the exact binding (`GlobalToStorage`'s default), so those bits were lost, and Metal's word accesses through a device pointer off a word boundary fell to the word below: every element of such a buffer landed one slot early.
+- **Fix:** profile key `shader_sb_unaligned`. Its jobs answer `QueryHasUnalignedStorageBuffer` (`dmsh_xlate/Program.cs`), so the translation reads the binding's address from the stage's c0 storage table and counts offsets from it rounded down to 16 bytes, and the replay binds such a buffer at that rounded address (`nvn_mtl.m`, `DM_GAME_SB_UNALIGNED`). Off by default: it adds a c0 read to every storage access.
+- **Found on:** DOOM (0100416004C00000, id Tech 6; provisional profile): geometry shader `38d8127afde928b3` culls each mesh's triangles in the pre-pass and appends the survivors' 16-bit indices (ballot, one atomic add per SIMD group, compare-and-swaps) to per-mesh lists packed at 2-byte boundaries; 19 of 40 lists in one frame started 2 mod 4, and 2,718 of the 2,724 degenerate triangles found in a memory dump of the lists were in those.
+
 ### Tessellation stages are not drawn
 
 - **Symptom:** `primitive type 14 not implemented`; patch draws skipped.

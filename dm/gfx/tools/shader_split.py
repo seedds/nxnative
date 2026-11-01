@@ -41,6 +41,7 @@
 #   · bnd2 (Criterion's Bundle 2, Need for Speed: Hot Pursuit Remastered): whole GLSLC outputs in the zlib resources of SHADERS.BNDL, see bnd2_resources and bnd2_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
 #       Mac host), each a VNVN record with one code area and control section (frostbite.py), see frostbite_jobs and frostbite_shaders
+#   · id Tech 6 (DOOM): GLSLC outputs in the renderProg entries of the resource files (raw Deflate), by their indexes (.index, .pindex), see idtech_entries and idtech_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
@@ -652,6 +653,67 @@ def zip_shaders(path, rel, names, out):
             d = z.read(nm); n = len(out)
             scan_blob(d, f'/{rel}/{nm}', out)
             if len(out) == n and d[:4] != b'MSHD' and b'\x91\x68\x86\x19' in d: out += glslc_shaders(d, f'/{rel}/{nm}', need=False)
+
+IDT = b'\x05SER'
+def idtech_entries(d, label):
+    """id Tech 6's resource index (DOOM: base/gameresources.index, and the .pindex of each patch beside it): '\\x05SER', u32 index length (big-endian), 24 bytes of 0, u32 entry
+    count (big-endian), then the entries: u32 ID (big-endian), three strings (u32 length, then the bytes) type, name and path, u64 offset, u32 length, u32 stored length (all
+    big-endian), 3 bytes of 0, u8 flags, u8 the data file's number (0 gameresources.resources, 1 gameresources.patch, k gameresources_00k.patch). A patch's index lists the
+    whole game, each entry in the newest file that holds it. A stored length below the length is a raw Deflate stream with no final block.
+    → [(type, path, data file number, offset, length, stored length)]"""
+    n, = struct.unpack_from('>I', d, 0x20); o, out = 0x24, []
+    def s():
+        nonlocal o
+        k, = struct.unpack_from('<I', d, o); o += 4 + k
+        return d[o - k:o].decode('latin-1')
+    for _ in range(n):
+        o += 4; t, _, path = s(), s(), s()
+        off, size, z = struct.unpack_from('>QII', d, o); num = d[o + 20]; o += 21
+        out.append((t, path, num, off, size, z))
+    if o != len(d): red(f'{label}: the id Tech index ends at {o:#x}, its file at {len(d):#x}: not a layout this reader knows')
+    return out
+
+def idtech_data(stem, num): return f'{stem}.resources' if not num else f'{stem}.patch' if num == 1 else f'{stem}_{num:03d}.patch'   # a data file's name by its number
+
+def idtech_jobs(files, parts=64):
+    """The render programs of every id Tech 6 resource set, by its newest index (idtech_entries: gameresources_003.pindex in DOOM 1.4), in ranges of about equal stored length, one job per data
+    file and range. DOOM 1.4's has 11,778 renderProg entries, 1,278 of them GLSLC outputs (generated/nx/*.sb, 863 distinct shaders); the others are the HLSL sources and declarations they were compiled from. Only
+    renderProg entries are read: the game's other 21.8 GB of resources hold no shaders. → ([(path, rel, (IDT, entries)), …], the index and data paths)"""
+    jobs, taken, byrel, sets = [], set(), {r: p for p, r in files}, {}
+    for p, r in files:
+        stem, ext = os.path.splitext(r)
+        if ext not in ('.index', '.pindex'): continue
+        with open(p, 'rb') as f: head = f.read(0x20)
+        if head[:4] != IDT or any(head[8:]): continue   # master.index: '\\x05SER', a count and the names of the index and its data file
+        m = re.fullmatch(r'(.*?)(?:_(\d{3}))?', stem)
+        if not m: continue
+        num = 0 if ext == '.index' else int(m[2] or 1)
+        sets.setdefault(m[1], []).append((num, p, r))
+    for stem, ixs in sets.items():
+        num, p, r = max(ixs); taken |= {q for _, q, _ in ixs}
+        with open(p, 'rb') as f: d = f.read()
+        by = collections.defaultdict(list)
+        for t, _, k, off, size, z in idtech_entries(d, '/' + r):
+            if t == 'renderProg' and size: by[idtech_data(stem, k)].append((off, size, z))
+        for dr, es in sorted(by.items()):
+            if dr not in byrel: red(f'/{r}: its entries name the data file /{dr}, which is not there')
+            taken.add(byrel[dr]); es.sort(); step, cur, size = sum(e[2] for e in es) / parts, [], 0
+            for e in es:
+                cur.append(e); size += e[2]
+                if size >= step: jobs.append((byrel[dr], dr, (IDT, tuple(cur)))); cur, size = [], 0
+            if cur: jobs.append((byrel[dr], dr, (IDT, tuple(cur))))
+        taken |= {byrel[idtech_data(stem, k)] for k in range(num + 1) if idtech_data(stem, k) in byrel}
+    return jobs, taken
+
+def idtech_shaders(path, rel, ents, out):
+    """A range of id Tech 6 render program entries (idtech_jobs), each inflated: an entry holding a GLSLC output (an 8-byte header, then the output) is read by glslc_shaders. DOOM keeps a
+    vertex and a pixel shader per material (_vs.sb, _ps.sb), or both in one output (_vsps.sb)"""
+    with open(path, 'rb') as f:
+        for off, size, z in ents:
+            f.seek(off); d = f.read(z)
+            if z < size: x = zlib.decompressobj(-15); d = x.decompress(d) + x.flush()
+            if len(d) != size: red(f'/{rel}@{off:#x}: the entry inflates to {len(d):#x} bytes, its index says {size:#x}')
+            if b'\x91\x68\x86\x19' in d: out += glslc_shaders(d, f'/{rel}@{off:#x}', need=False)
 
 def pgdat_members(d, label):
     """A PlatinumGames DAT archive: 'DAT\\0', u32 file count, then the offsets of five tables: file offsets (u32 each), extensions (4 bytes each), names (u32 name length, then one name of that
@@ -2432,6 +2494,9 @@ def scan_file_in(args):
     if len(args) > 2 and head[:8] == SMASH_ARC:   # files of Super Smash Bros. Ultimate's data.arc (smash_arc_jobs)
         smash_arc_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and args[2][0] == IDT:   # render programs of an id Tech 6 resource file (idtech_jobs)
+        idtech_shaders(path, rel, args[2][1], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == b'BDF3':   # entries of a FromSoftware dvdbnd archive (bdt_jobs)
         bdt_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -2590,8 +2655,9 @@ def main():
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs + fb_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs and p not in fbs]
+    id_jobs, ids = idtech_jobs(files)   # DOOM's id Tech 6 resource files: the render programs, by their indexes
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs + fb_jobs + id_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs and p not in fbs and p not in ids]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)

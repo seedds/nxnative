@@ -24,6 +24,8 @@ A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without
 
 Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and a few others) offer **30 fps** or **60 fps**. 60 is smoother; 30 is what the Switch ran and uses less power, so the phone stays cooler and the battery lasts longer. The game runs at real speed either way.
 
+A few other games run their own clock and only ask the Switch for every second refresh (DOOM); for those the app offers **30 fps** (as on the Switch) or **60 fps**, which shows a frame on every refresh. 60 needs about twice the GPU time: where the GPU cannot keep up, frames come late and the controls feel behind. **60 fps (30 when it does not fit)** runs at 60 while frames fit and holds a steady 30 when they stop fitting, trying 60 again once the scene is light, as the frame step does for the games above ([Hold frames when late](#hold-frames-when-late)).
+
 ### Render scale
 
 The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
@@ -64,6 +66,14 @@ Shows the frames per second at the top left.
 ### Touch feedback
 
 A light tap from the phone when you press an on-screen button.
+
+### Touchpad aiming
+
+The right half of the screen becomes a touchpad for the right stick: the faster your finger moves, the further the stick tilts, and it returns to the centre when your finger stops. There is no stick to drag away from its centre, so aiming starts with the first movement. The AIM button in the top-right corner opens a slider for its sensitivity (0.5× to 5×), which the app remembers. Off: the right side is a stick that follows your finger.
+
+### Motion as a Pro Controller
+
+When a game sees the on-screen controls as a Pro Controller, the phone's motion reaches it as that controller held flat in your hands, so turning the upright phone left and right turns the camera. DOOM needs it: it takes a Pro Controller's turning from the axis that points up out of the controller, which an upright phone barely moves. Off: the phone's own axes reach the controller unchanged. It changes nothing in handheld mode or with a real controller.
 
 ### Game rumble
 
@@ -225,6 +235,8 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
+| Touchpad aiming | `DM_TOUCH_AIM` | `1`, `0` |
+| Motion as a Pro Controller | `DM_PHONE_FLAT` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |

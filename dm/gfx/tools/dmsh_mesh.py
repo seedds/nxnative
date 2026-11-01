@@ -43,7 +43,7 @@ def _entry(src, kind, name):
 def compose(vs_src, gs_src, reads):
     """vs_src: the vertex shader's library source (<key>_b.metal); gs_src: the lean kernel
     (<geometry key>_bl3.metal) and the capture words it reads, in its record order."""
-    if 2 in reads or not reads: raise ValueError('mesh: the kernel reads clip z or nothing')
+    if not reads: raise ValueError('mesh: the kernel reads nothing')
     pulled, info = dmsh_pull.variant(vs_src)   # keeps main0 / main0_z only
     if pulled is None or not isinstance(info, dict): raise ValueError(f'mesh: no pulling entry: {info}')
     words = dmsh_geometry.output_words(pulled)
@@ -94,11 +94,14 @@ def compose(vs_src, gs_src, reads):
     if re.search(r'vertex_output|geometry_vb_output|geometry_ib_output|trb_data\[', body): raise ValueError('mesh: kernel output not understood')
     gfn = gs_src[:k.start()] + '\nstatic inline void dm_gs(' + ', '.join(fparams + ['threadgroup float* dm_rec', 'uint dm_capture_base', 'thread uint& dm_mask']) + ')\n{\n' + body
     # The words the kernel reads, from the vertex's outputs (missing ones as the capture leaves them: 0, w and point size 1)
-    def word(w):
+    # Clip z (word 2): the capture records it before the GL entry's depth rewrite (z' = (z + w) / 2, see dmsh_build.py), so that entry hands the kernel 2 z' - w; the _z entry
+    # has no rewrite. DOOM's culling kernel compares it with the depth buffer (its triangles' occlusion test)
+    def word(w, gl):
+        if w == 2 and gl and 2 in words and 3 in words: return f'(2.0f * dm_o.{words[2][4:]} - dm_o.{words[3][4:]})'
         if w in words: return 'dm_o.' + words[w][4:]
         return '0x3f800000u' if w in (3, 4) or (w >= 19 and w % 4 == 3) else '0u'
     n = len(reads)
-    stores = ' '.join(f'dm_rec[dm_t * {n}u + {i}u] = as_type<float>({word(w)});' for i, w in enumerate(reads))
+    def stores(name): return ' '.join(f'dm_rec[dm_t * {n}u + {i}u] = as_type<float>({word(w, not name.endswith("_z"))});' for i, w in enumerate(reads))
     out = ['#include <metal_stdlib>', '#include <simd/simd.h>', '#include <metal_atomic>', 'using namespace metal;',
            'namespace dm_v {', _strip_head(pulled), '}', 'namespace dm_g {', _strip_head(gfn), '}', 'using namespace dm_v;',
            'struct dm_mesh_draw { device const uchar* ib; uint itype; uint first; uint count; int base_vertex; uint base_instance; };',
@@ -117,7 +120,7 @@ def compose(vs_src, gs_src, reads):
         uint dm_vid = dm_ix + uint(dm_d.base_vertex), dm_bv = uint(dm_d.base_vertex), dm_bi = dm_d.base_instance, dm_iid = dm_bi;
         main0_out dm_o = dm_vs_{name}({', '.join(args)});
         dm_m.set_vertex(dm_t, dm_o);
-        {stores}
+        {stores(name)}
     }}
     if (dm_t == 0u) dm_m.set_primitive_count(dm_np);
     threadgroup_barrier(mem_flags::mem_threadgroup);

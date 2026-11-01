@@ -596,10 +596,10 @@ static uint64_t motion_copy(live_motion *m, motion_state *out) {   // copies a s
     pthread_mutex_unlock(&m->mu);
     return t;
 }
-static int motion_live(int p, motion_state *out) {
+static int motion_live(int p, motion_state *out) {   // 1: a controller's motion, 2: the phone's, 0: none
     if (p < 0 || p >= DM_PLAYERS) return 0;
     pthread_once(&g_motion_once, motion_env);
-    if (!p && g_phone_mode > 0) return motion_copy(&g_phone_motion, out) != 0;
+    if (!p && g_phone_mode > 0) return motion_copy(&g_phone_motion, out) ? 2 : 0;
     // Match the button path: in a one-player game, a controller in another slot also drives player 1.
     uint32_t src = p ? 1u << p : 1u | merged_players(); uint64_t newest = 0;
     for (int i = 0; i < DM_PLAYERS; i++) if (src >> i & 1) {
@@ -608,7 +608,7 @@ static int motion_live(int p, motion_state *out) {
         if (t > newest) { newest = t; *out = st; }
     }
     if (newest) return 1;
-    return !p && g_phone_mode < 0 && motion_copy(&g_phone_motion, out);
+    return !p && g_phone_mode < 0 && motion_copy(&g_phone_motion, out) ? 2 : 0;
 }
 static void six_sample_live(SixAxisState *s, int64_t samp, const motion_state *ms, int shakes) {
     memset(s, 0, sizeof *s);
@@ -636,13 +636,26 @@ static void six_sample(SixAxisState *s, int64_t samp, int shakes) {
 // two sensors, the others one. A handle reads as connected while its controller is connected in that style; otherwise its entries are zero (not connected) and the count 0.
 // Only player 1's controller shakes (DM_BTN_SHAKE comes from the keyboard, the iPhone and DM_KEYS, all player 1)
 static int six_connected(uint32_t h) { return (h & 0xff) < 32 && (style_of(h >> 8 & 0xff) >> (h & 0xff) & 1); }
+// DM_PHONE_FLAT=1: the phone's motion (the handheld frame: x right, y up the picture, z toward the player) reaches a game that sees a Pro Controller (full key style) turned a quarter
+// about x, as that controller's frame (y forward, z up), so the phone held upright reads as a Pro Controller held flat in the hands. DOOM takes its gyro yaw from z alone for a
+// Pro Controller (main+0x1d0f124) and from y + z in handheld (main+0x1d0f148): docked, turning the upright phone (about y) barely turned the view
+static void six_flat(SixAxisState *s) {
+    float a[3] = {s->acc[0], -s->acc[2], s->acc[1]}, g[3] = {s->gyro[0], -s->gyro[2], s->gyro[1]}, an[3] = {s->angle[0], -s->angle[2], s->angle[1]}, d[9];
+    for (int j = 0; j < 3; j++) { d[j] = s->dir[j]; d[3 + j] = -s->dir[6 + j]; d[6 + j] = s->dir[3 + j]; }   // rows: the controller's x, y, z axes in the world
+    memcpy(s->acc, a, sizeof a); memcpy(s->gyro, g, sizeof g); memcpy(s->angle, an, sizeof an); memcpy(s->dir, d, sizeof d);
+}
 static int six_states(SixAxisState *out, int n, uint32_t h) {
     if (n <= 0) return 0;
     if (!six_connected(h)) { memset(out, 0, sizeof *out * (size_t)n); return 0; }
     int64_t samp = (int64_t)(guest_ns() / SIX_PERIOD_NS);
     int pl = player_of(h >> 8 & 0xff), shakes = pl == 0;
     motion_state ms;
-    if (motion_live(pl, &ms)) { for (int i = 0; i < n; i++) six_sample_live(&out[i], samp - i, &ms, shakes); return n; }
+    int src = motion_live(pl, &ms);
+    if (src) {
+        static int flat = -1; if (flat < 0) { const char *e = getenv("DM_PHONE_FLAT"); flat = e && atoi(e) > 0; if (flat) LOG("[hid] the phone's motion reads as a Pro Controller held flat (DM_PHONE_FLAT)"); }
+        for (int i = 0; i < n; i++) { six_sample_live(&out[i], samp - i, &ms, shakes); if (src == 2 && flat && (h & 0xff) == 0) six_flat(&out[i]); }   // style bit 0: full key
+        return n;
+    }
     for (int i = 0; i < n; i++) six_sample(&out[i], samp - i, shakes);
     return n;
 }

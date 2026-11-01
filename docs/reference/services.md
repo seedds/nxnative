@@ -614,11 +614,12 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### Nintendo-extension glyphs for button icons
 
-- **Symptom:** controller-button icons in text show as `?`.
+- **Symptom:** controller-button icons in text show as `?`, or a crash at address 0x38 on the first frame with text, right after the shared fonts load, when a glyph cache lookup of a missing icon returns null (Nintendo Switch Sports: `CRASH sig=11 addr=0x38 pc=main+0x232b2c` for U+E06B).
 - **Cause:** those glyphs come from the system shared font's Nintendo-extension set (private-use code points; Mario's `GameMsg/Key.msbt` uses U+E0E0–E0F0 for A/B/X/Y/L/R/ZL/ZR/SL/SR/D-pad/+/−, U+E0AB–E0AE for D-pad directions, U+E090–E097 for stick arrows, U+E100/E101 for sticks).
 - **Fix:** `dm/tools/make_ext_font.py` generates a stand-in `nintendo_ext.ttf` with those icons; the host serves it for shared-font type 5 (`DM_FONT_DIR` or `DM_SHARED_FONT_EXT`) and a desktop font for the other types.
 - **Note:** to find which code points a title uses, scan the `TXT2` sections of its MSBT files for U+E000–F8FF.
-- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
+- **Also:** a game whose glyph cache asks for a code point the stand-in lacks crashes instead: Nintendo Switch Sports' cache lookup returned null for U+E06B, which no message of the game uses, and `main+0x232b2c` read through it (`CRASH sig=11 addr=0x38`, with `w1 = 0xe06b` passed to the lookup) on the first frame with text, right after the shared fonts load. The stand-in now also has the Nintendo-extension glyphs that game's messages use: U+E0CB (D-pad left and right), U+E0F5 (Capture), U+E125 / U+E126 (Joy-Con (L) / (R)), the French ordinal suffixes U+E068 "er", U+E069 "re", U+E06A "e", and an empty glyph for U+E06B.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md), Nintendo Switch Sports (0100D2F00D5C0000) 1.0.0 (no profile).
 
 ### Shared fonts on iOS
 

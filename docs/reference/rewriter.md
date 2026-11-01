@@ -175,7 +175,7 @@ To enroll a cut for any game's own module:
   - writes of the checked index, its copy, the entry, the ADR base, the table base and `x18`;
   - calls, traps and other control flow; a branch that is not a `b.hi` out of the run; entries into the run; undecodable words; and the table's extent and targets;
   - the real rewriter on a synthetic module.
-- **Found on:** Yakuza Kiwami (0100C9801FEE6000) 1.01 `main+0x91b24c` (main build `ae90fd64…`), a four-entry table whose entries 1 and 3 share a case block. A census of its modules found no other unrecognized table. It is a provisional-profile bring-up, with no game note yet.
+- **Found on:** [Yakuza Kiwami](../../dm/games/0100C9801FEE6000/README.md) 1.01 `main+0x91b24c` (main build `ae90fd64…`), a four-entry table whose entries 1 and 3 share a case block. A census of its modules found no other unrecognized table.
 - **Resolved:** `table_base`, which the older forms use, recognized a write to the base register by its 64-bit name only, so a 32-bit write between the base's `add` and the load (`mov w17, w1` after `add x17, x17, #lo`) left its answer unchanged while `copied_base` refused it. It asks `writes_reg`, which sees either width, since [Overwritten jump-table indices and bases taken as unchanged](#overwritten-jump-table-indices-and-bases-taken-as-unchanged).
 
 ### Byte tables indexed by x30 (capstone register names)

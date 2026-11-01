@@ -1,0 +1,49 @@
+# Game profile of Yakuza Kiwami (Switch, update 1.01 = v65536 over the base game). Plays on the Mac and the iPhone (boot, title, the story with its cutscenes and fights)
+# Format: see dm/games/README.md
+# Ryu Ga Gotoku Studio's engine with CRIWARE, SDK 18.3.2; subsdk0 is the movie module, and the game loads one NRO from its RomFS (data/module/nnx). Started from the provisional
+# profile of build_ipa_from_nsp.py: the keys below are its static guesses, kept because they boot and play, except the memory layout, which the address region check and an
+# iPhone measured, and depth_mode, which every run logged. Notes, what it needed and what is open: README.md. No game-specific rewriter cut: its two fixes are general (patch_nso.py, shader_split.py).
+
+# ---- Identity ----
+title_id	0100C9801FEE6000
+program_id	0100C9801FEE6000
+
+# ---- App ----
+name	Yakuza Kiwami
+ipa	YakuzaKiwami.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.01	main=ae90fd64e7b2fe1e86ac87f8b3ee4592	subsdk0=14765b1d77b12d8654ea87a61c65e2b1	sdk=f118ae1c2e7728471aaf1a0d58484968
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	data/chara.par
+zip_store	.awb:.cpk:.hca:.nro:.par:.par_r:.pb:.usm:.metallib
+
+# ---- Memory ----
+# the NPDM declares 64 MB of system resource (virtual address memory) and main never sets a heap: the game maps its memory itself, in address regions of its own.
+# It reserves a 32 GB address region (main+0x379938) and its own allocators carve 13 GB of reservations from it (a 4 GB growable heap, pools of 1, 4, 2 and 2 GB),
+# about 1.5 GB of which is used at the title: this layout holds it unchanged in a 36 GB alias region, one 36.62 GB block. An iPhone19,4 on iOS 27.2 reserves that:
+# with the Increased Memory Limit entitlement (the builds' default) its largest single block is 64 GB, extended-virtual-addressing or not; with neither, 6 GB.
+# A phone limited to about 6 GB in one block needs the 5 GB layout (mem_reserve 0x140000000, mem_alias 0x118000000) and a cut of those reservations instead (README.md, Open)
+mem_reserve	0x928000000
+mem_alias	0x900000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 64 MB of system resource
+sys_resource	0x4000000
+
+# ---- Graphics ----
+# The registered build selects near-zero NVN depth (the Mac and iPhone runs, 2026-11-02: one nvnDeviceSetDepthMode call, near = 0); offline pipeline bases use main0_z.
+depth_mode	zero
+
+# ---- Shader split ----
+# as the provisional profile wrote them: every shader_* key is in each shader's cache key
+shader_groups	/data/=data /.nrr/=nrr
+shader_note	Yakuza Kiwami shaders (provisional profile)
+
+# address regions: 2026-11-02, in its first 15 s in nnMain the game's regions reach alias +33.72 GB, within the profile's 36.00 GB alias region (what it takes later in play is not measured here) (rewrite 8526c5802d70)

@@ -155,7 +155,30 @@ No commit (nothing in the repository changes).
 - [ ] **Step 4:** Repeat until the race reaches its results screen and the screenshots match the capture. Keep one screenshot per course in the work folder for the user.
 - [ ] **Step 5:** Update the note (Rendering, Shaders, Open); reference entries for general fixes; `python3 dm/tools/docs_symptoms.py`; commit.
 
+### Task 7d: Ampere UP2UR, MEMBAR.SC and 0x927
+
+Scope change (the user's decision, 2026-11-01): the scripted route (Task 7 Steps 1–4 by script), Task 8 and Task 9 Steps 4–5 are dropped; Task 7 closes on the user's hand-driven race 1. They go to Open in the note and the PR text. Instead, the translator decodes the Ampere instructions that the 67 failing shaders of the full build stop on (0x883 29, 0x927 26, 0x992 10, 0x481 1, 0x59f 1; `dm/games/0400C3F00006E000/README.md:28-35`); 25 of them load on the route to race 1.
+
+**Files:**
+- Modify: `dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Decoders/DecoderAmpere.cs`, `Instructions/InstEmitAmpere*.cs`; `dm/gfx/nvn/dmsh_chain.h` (chain procedure); `docs/reference/shaders.md` (Ampere entries); `dm/games/0400C3F00006E000/README.md` (Shaders, Open)
+- Test: `dm/gfx/tests/test_dmsh_ampere_alu.py` / `test_dmsh_ampere_mem.py` (or a new `test_dmsh_ampere_*.py` in their style): one case per opcode with the game's instruction, red on the old translator, green on the new
+
+**Sources (facts only, no code copied):**
+- Eglantine fork "PokeDinner-a-Eglantine-Fork" (GPL-3.0), commit `1dd40d8` (2026-11-01), `src/shader_recompiler/frontend/ampere/lower_to_maxwell.h`, read-only copy in the controller's scratchpad (path in the dispatch). Facts there: 0x883 UP2UR (`:709`), 0x992 MEMBAR.SC (`:1057`), the LDS/STS stride bits 78..79 shifted by stride+1 (`:1076`), UBREV 0x2be (`:887`). Its header names Mesa NAK `sm70_encode.rs` (MIT) as the encoding reference. Read for facts; write the code anew for this translator (IR, not a Maxwell lowering).
+- Mesa NAK `src/nouveau/compiler/nak/sm70_encode.rs` (MIT), read on the web (gitlab.freedesktop.org), for 0x927 and for any field the fork does not show. Read only; nothing downloaded into the repository, nothing run.
+- Mario Kart World's SASS (the failing shaders in the build folder) for the context of each instruction.
+
+- [ ] **Step 1:** List the failing shaders by first failing opcode from the latest full build log; pick one game instruction per opcode for the tests.
+- [ ] **Step 2:** 0x883 UP2UR: decode and emit (the bits of UP0..UP6 selected by the mask into the uniform register). Test. Commit.
+- [ ] **Step 3:** 0x992 MEMBAR.SC: decode and emit a memory barrier of the scope (bits 76..78: 0 CTA, 2 GPU, 3 and 5 system). Test. Commit.
+- [ ] **Step 4:** 0x927: find it in NAK's encoder. Found: decode, emit, test, commit, with the source cited (file and line). Not found or its meaning a guess: leave it failing, record what is known under Open. 0x481 and 0x59f the same way, only if the source is clear.
+- [ ] **Step 5:** Chain procedure (Global Constraints): chain header, full shader rebuild of this profile, host rebuild. Record the failure count (from 67).
+- [ ] **Step 6:** One muted run from `save_menu` into race 1 with `keys_race_menu.txt` (`run_until.sh`): no `failed to load shader` for the decoded opcodes, no crash, no `[RED]` line new against the last run; shots of the race to the work folder.
+- [ ] **Step 7:** Docs: a reference entry per decoded instruction (Symptom, Cause, Fix, Check, Found on) citing its source; the stride entry (`docs/reference/shaders.md:806`) cites the fork as a second source beside the game's SASS; the note's Shaders table and Open; `python3 dm/tools/docs_symptoms.py`. Commit.
+
 ### Task 8: The second race
+
+Dropped (Task 7d scope change).
 
 **Files:**
 - Modify: as the root causes need; each fix its own commit

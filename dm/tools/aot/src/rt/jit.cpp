@@ -1,6 +1,7 @@
 #include "rt/jit.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -27,8 +28,43 @@ std::unique_ptr<ExclusiveMonitor> g_monitor;
 std::mutex g_ids_lock;
 std::vector<bool> g_ids;  // the monitor's processor ids in use
 
-// The guest access a memory callback is making on this thread (a fault there is reported at it: src/rt/host.cpp)
+// The code ranges (dm_jit_set_code): published whole, read by every instance at translation; a list replaced stays allocated (an instance may be
+// reading it, and lists are replaced only when modules are loaded), and g_code_gen tells instances to drop what they translated before
+struct CodeRanges {
+    std::vector<dm_jit_range> ranges;
+};
+std::atomic<const CodeRanges*> g_code{nullptr};
+std::atomic<uint64_t> g_code_gen{0};
+std::mutex g_code_lock;
+std::vector<std::unique_ptr<CodeRanges>> g_code_lists;  // every list published (under g_code_lock)
+
+bool InCode(uint64_t pc) {
+    const CodeRanges* c = g_code.load(std::memory_order_acquire);
+    if (!c) {
+        return false;
+    }
+    for (const dm_jit_range& r : c->ranges) {
+        if (pc - r.lo < r.hi - r.lo) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void SetCode(const dm_jit_range* code, unsigned count) {
+    auto c = std::make_unique<CodeRanges>();
+    if (code) {
+        c->ranges.assign(code, code + count);
+    }
+    std::lock_guard<std::mutex> guard{g_code_lock};
+    g_code.store(c.get(), std::memory_order_release);
+    g_code_lists.push_back(std::move(c));
+    g_code_gen.fetch_add(1, std::memory_order_release);
+}
+
+// The guest access a memory callback is making on this thread (a fault there is reported at it: src/rt/host.cpp, dm/host/aot_run.c)
 thread_local uint64_t t_access_pc = 0, t_access_address = 0;
+thread_local int t_access_exact = 0;
 
 constexpr HaltReason kStopped = HaltReason::UserDefined1;  // a callback stopped the run (dm_jit::Stop)
 constexpr HaltReason kHalted = HaltReason::UserDefined2;   // dm_jit_halt
@@ -62,6 +98,9 @@ struct dm_jit final : A64::UserCallbacks {
         conf.fastmem_exclusive_access = true;  // lock cmpxchg on the same memory as compiled code's exclusives (section 6.5)
         conf.recompile_on_exclusive_fastmem_failure = true;
         conf.hook_data_cache_operations = true;  // dc zva zeroes the aligned block (README.md, "Known issues", 2)
+        // A callback access (fastmem's fallback once its access faulted) halts at its exact instruction (MemoryAbort), which Run() then steps
+        // with the access made (Retry): dynarmic checks this halt only after a callback, so fastmem accesses cost nothing more
+        conf.check_halt_on_memory_access = true;
         conf.cntfrq_el0 = nxaot::lift::kCntfrq;
         conf.ctr_el0 = nxaot::lift::kCtr;
         conf.dczid_el0 = nxaot::lift::kDczid;
@@ -74,6 +113,7 @@ struct dm_jit final : A64::UserCallbacks {
         // Without A64GetSetElimination, as the reference runs (README.md, "Known issues", 1: it reads msr nzcv back wrong)
         conf.optimizations = all_safe_optimizations & ~OptimizationFlag::GetSetElimination;
         jit = std::make_unique<A64::Jit>(conf);
+        code_gen = g_code_gen.load(std::memory_order_acquire);
     }
     ~dm_jit() override {
         if (jit) {
@@ -114,13 +154,20 @@ struct dm_jit final : A64::UserCallbacks {
         st->excl_valid = 0;
     }
 
-    bool Under(uint64_t fpcr) const { return (fpcr & nxaot::lift::kFpcrModeMask) == g_host.fpcr; }
-    int StopKind(uint64_t pc) const {
-        if (pc < g_host.code_lo || pc >= g_host.code_hi || !g_host.stop_at || !Under(jit->GetFpcr())) {
+    static bool Under(uint64_t fpcr) { return (fpcr & nxaot::lift::kFpcrModeMask) == g_host.fpcr; }
+    // Where the JIT stops under FPCR fpcr: DM_JIT_ENTRY or DM_JIT_RETURN where compiled code goes on (only under the FPCR it was compiled for;
+    // it calls a gate there itself), else DM_JIT_GATE at a gate site (under any FPCR), else 0
+    static int StopKind(uint64_t pc, uint64_t fpcr) {
+        if (!g_host.stop_at || !InCode(pc)) {
             return 0;
         }
-        return g_host.stop_at(g_host.ctx, pc);
+        const int k = g_host.stop_at(g_host.ctx, pc);
+        if ((k & 0xFF) && Under(fpcr)) {
+            return k & 0xFF;
+        }
+        return (k & DM_JIT_GATE_AT) ? DM_JIT_GATE : 0;
     }
+    int StopKind(uint64_t pc) const { return StopKind(pc, jit->GetFpcr()); }
     void Stop(int why, uint64_t pc, uint32_t trap_reason = 0) {
         if (!stopped) {
             stopped = true;
@@ -131,33 +178,79 @@ struct dm_jit final : A64::UserCallbacks {
         jit->HaltExecution(kStopped);
     }
 
-    uint64_t Run(uint64_t pc) {
+    // A callback access halted with MemoryAbort (see Access): dynarmic left at its exact instruction with nothing of it written back. That
+    // instruction alone again, as a single-step block whose callback accesses are made at retry_pc: a fault there is the guest's, at that instruction
+    void Retry() {
+        const uint64_t pc = jit->GetPC();
+        ++counts.aborts;
+        retry_pc = pc;
+        allow = pc;
+        const HaltReason hr = jit->Step();
+        retry_pc = 0;
+        allow = UINT64_MAX;
+        if (Has(hr, kHalted) && !stopped) {
+            Stop(DM_JIT_HALTED, jit->GetPC());
+        }
+    }
+    // pc's one instruction as a single-step block (dynarmic caches it apart from the block that stops there), even where the code reader stops
+    void StepAt(uint64_t pc) {
+        allow = pc;
+        ++counts.steps;
+        const HaltReason hr = jit->Step();
+        allow = UINT64_MAX;
+        if (Has(hr, HaltReason::MemoryAbort) && !stopped) {
+            Retry();
+        }
+        if (Has(hr, kHalted) && !stopped) {
+            Stop(DM_JIT_HALTED, jit->GetPC());
+        }
+    }
+
+    // past < 0: dm_jit_run; 0 and 1: dm_jit_run_past (the gate at pc served), 1 returning after pc's instruction
+    uint64_t Run(uint64_t pc, int past) {
         ++counts.runs;
-        LoadFrom(pc);
         stopped = false;
         reason = 0;
-        if (!one_block && StopKind(pc)) {
-            // A stop address the host wants run: its one instruction as a single-step block (cached apart from the stopping block), then on
-            allow = pc;
-            ++counts.steps;
-            const HaltReason hr = jit->Step();
-            allow = UINT64_MAX;
-            if (Has(hr, kHalted) && !stopped) {
-                Stop(DM_JIT_HALTED, jit->GetPC());
+        // One stop_at query per run (as before gates), under the block's FPCR and before anything is copied: a gate site is served before its
+        // instruction runs, so the run returns at once with the block as the host handed it over
+        const int k = past < 0 ? StopKind(pc, st->fpcr) : 0;
+        if (k == DM_JIT_GATE) {
+            ++counts.gates;
+            reason = DM_JIT_GATE;
+            stop_pc = pc;
+            st->pc = pc;
+            return pc;
+        }
+        if (code_gen != g_code_gen.load(std::memory_order_acquire)) {
+            jit->ClearCache();  // the code ranges grew (dm_jit_set_code): a block translated before may end where there was no code then
+            code_gen = g_code_gen.load(std::memory_order_acquire);
+        }
+        LoadFrom(pc);
+        if (past >= 0 || (k && !one_block)) {
+            // A stop address the host wants run, or a gate site the host served: its instruction, then on (or back, with one)
+            StepAt(pc);
+            if (past == 1 && !stopped) {
+                Stop(DM_JIT_STEPPED, jit->GetPC());
             }
         }
         while (!stopped) {
             const HaltReason hr = jit->Run();
             ++counts.run_calls;
+            if (Has(hr, HaltReason::MemoryAbort) && !stopped) {
+                Retry();
+            }
             if (Has(hr, kHalted) && !stopped) {
                 Stop(DM_JIT_HALTED, jit->GetPC());
             }
             if (one_block && !stopped) {
                 // The alternative of design 11: one block per Run(), the next pc checked by the host (only at block boundaries)
                 const uint64_t next = jit->GetPC();
-                if (const int k = StopKind(next)) {
-                    Stop(k, next);
-                } else if (next < g_host.code_lo || next >= g_host.code_hi) {
+                if (const int sk = StopKind(next)) {
+                    if (sk == DM_JIT_GATE) {
+                        ++counts.gates;
+                    }
+                    Stop(sk, next);
+                } else if (!InCode(next)) {
                     Stop(DM_JIT_NO_CODE, next);
                 }
             }
@@ -168,11 +261,24 @@ struct dm_jit final : A64::UserCallbacks {
         return stop_pc;
     }
 
-    // ---- Memory (the fallback of fastmem: faults and addresses at or above 2^39) ----
+    // ---- Memory (the fallback of fastmem: an access that faulted there once, and addresses at or above 2^39) ----
+    // Outside Retry a callback access only halts (MemoryAbort: dynarmic leaves at the exact instruction, which Retry steps) and gives the
+    // instruction nothing it keeps; inside Retry the access is made, and a fault there is reported at retry_pc, exactly (dm_jit_access_exact)
+    bool Access(uint64_t a) {
+        if (!retry_pc) {
+            jit->HaltExecution(HaltReason::MemoryAbort);
+            return false;
+        }
+        t_access_pc = retry_pc;
+        t_access_address = a;
+        t_access_exact = 1;
+        return true;
+    }
     template<typename T>
     T Load(uint64_t a) {
-        t_access_pc = jit->GetPC();
-        t_access_address = a;
+        if (!Access(a)) {
+            return 0;
+        }
         T v;
         std::memcpy(&v, reinterpret_cast<const void*>(a), sizeof v);
         t_access_pc = 0;
@@ -180,26 +286,33 @@ struct dm_jit final : A64::UserCallbacks {
     }
     template<typename T>
     void Store(uint64_t a, T v) {
-        t_access_pc = jit->GetPC();
-        t_access_address = a;
+        if (!Access(a)) {
+            return;
+        }
         std::memcpy(reinterpret_cast<void*>(a), &v, sizeof v);
         t_access_pc = 0;
     }
     template<typename T>
     bool Cas(uint64_t a, T value, T expected) {
-        t_access_pc = jit->GetPC();
-        t_access_address = a;
+        if (!Access(a)) {
+            return false;
+        }
         const bool ok = __atomic_compare_exchange_n(reinterpret_cast<T*>(a), &expected, value, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
         t_access_pc = 0;
         return ok;
     }
 
     std::optional<std::uint32_t> MemoryReadCode(A64::VAddr vaddr) override {
-        if (vaddr < g_host.code_lo || vaddr >= g_host.code_hi || (vaddr & 3)) {
+        if ((vaddr & 3) || !InCode(vaddr)) {
             return std::nullopt;
         }
-        if (vaddr != allow && !one_block && StopKind(vaddr)) {
-            return std::nullopt;  // a compiled entry or a compiled call site's return: the block ends in NoExecuteFault there
+        if (vaddr != allow) {
+            // A compiled entry, a compiled call site's return or a gate site (also in the one-block mode, which checks the others per block):
+            // the block ends before it, and the block from it is a NoExecuteFault
+            const int k = StopKind(vaddr);
+            if (k && (!one_block || k == DM_JIT_GATE)) {
+                return std::nullopt;
+            }
         }
         uint32_t w;
         std::memcpy(&w, reinterpret_cast<const void*>(vaddr), 4);
@@ -223,8 +336,9 @@ struct dm_jit final : A64::UserCallbacks {
     bool MemoryWriteExclusive32(A64::VAddr a, std::uint32_t v, std::uint32_t e) override { return Cas<uint32_t>(a, v, e); }
     bool MemoryWriteExclusive64(A64::VAddr a, std::uint64_t v, std::uint64_t e) override { return Cas<uint64_t>(a, v, e); }
     bool MemoryWriteExclusive128(A64::VAddr a, A64::Vector v, A64::Vector e) override {
-        t_access_pc = jit->GetPC();
-        t_access_address = a;
+        if (!Access(a)) {
+            return false;
+        }
         uint64_t lo = e[0], hi = e[1];
         bool ok;
         __asm__ volatile("lock cmpxchg16b %1" : "=@ccz"(ok), "+m"(*reinterpret_cast<volatile unsigned __int128*>(a)), "+a"(lo), "+d"(hi)
@@ -275,8 +389,11 @@ struct dm_jit final : A64::UserCallbacks {
             jit->SetPC(pc + 4);
             return;
         case A64::Exception::NoExecuteFault: {
-            // No instruction at pc: a stop the code reader made (a compiled entry or a call site's return), or no code at all
+            // No instruction at pc: a stop the code reader made (a compiled entry, a call site's return, a gate site), or no code at all
             const int k = StopKind(pc);
+            if (k == DM_JIT_GATE) {
+                ++counts.gates;
+            }
             Stop(k ? k : DM_JIT_NO_CODE, pc);
             return;
         }
@@ -293,10 +410,13 @@ struct dm_jit final : A64::UserCallbacks {
     }
     void DataCacheOperationRaised(A64::DataCacheOperation op, A64::VAddr value) override {
         if (op == A64::DataCacheOperation::ZeroByVA) {
+            // Made here (no MemoryAbort check follows this hook): a fault is reported near the pc dynarmic last stored, not exactly
             const uint64_t base = value & ~(nxaot::lift::kZvaBytes - 1);
-            for (uint64_t off = 0; off < nxaot::lift::kZvaBytes; off += 8) {
-                Store<uint64_t>(base + off, 0);
-            }
+            t_access_pc = jit->GetPC();
+            t_access_address = base;
+            t_access_exact = 0;
+            std::memset(reinterpret_cast<void*>(base), 0, nxaot::lift::kZvaBytes);
+            t_access_pc = 0;
         }
     }
     void AddTicks(std::uint64_t) override {}
@@ -312,6 +432,8 @@ struct dm_jit final : A64::UserCallbacks {
     uint32_t trap = 0;
     uint64_t stop_pc = 0;
     uint64_t allow = UINT64_MAX;  // the stop address being single-stepped (MemoryReadCode hands its instruction over)
+    uint64_t retry_pc = 0;        // the instruction Retry steps: its callback accesses are made, and reported at it
+    uint64_t code_gen = 0;        // g_code_gen when this instance last dropped its translations
     dm_jit_counts counts{};
 };
 
@@ -319,11 +441,17 @@ extern "C" {
 
 void dm_jit_init(const dm_jit_host* host) {
     g_host = *host;
+    SetCode(host->code, host->code_count);
+    g_host.code = nullptr;  // the copy in g_code is the one read
     std::lock_guard<std::mutex> guard{g_ids_lock};
     if (!g_monitor || g_ids.size() != host->max_threads) {
         g_monitor = std::make_unique<ExclusiveMonitor>(host->max_threads);
         g_ids.assign(host->max_threads, false);
     }
+}
+
+void dm_jit_set_code(const dm_jit_range* code, unsigned count) {
+    SetCode(code, count);
 }
 
 dm_jit* dm_jit_create_stepping(dm_guest_state* st, int one_block_per_run) {
@@ -344,7 +472,11 @@ void dm_jit_destroy(dm_jit* j) {
 }
 
 uint64_t dm_jit_run(dm_jit* j, uint64_t pc) {
-    return j->Run(pc);
+    return j->Run(pc, -1);
+}
+
+uint64_t dm_jit_run_past(dm_jit* j, uint64_t pc, int one) {
+    return j->Run(pc, one ? 1 : 0);
 }
 
 int dm_jit_reason(const dm_jit* j) {
@@ -380,6 +512,10 @@ uint64_t dm_jit_access_pc(void) {
 
 uint64_t dm_jit_access_address(void) {
     return t_access_address;
+}
+
+int dm_jit_access_exact(void) {
+    return t_access_exact;
 }
 
 }  // extern "C"

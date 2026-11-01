@@ -460,8 +460,9 @@ uint64_t dm_jit_run(dm_jit *j, uint64_t pc);  // st -> the JIT, run from pc unti
 void     dm_jit_halt(dm_jit *j);              // from any thread: dm_jit_run returns at the next block boundary (pauses and stops)
 ```
 
-(`dm_jit_reason` says which stop: a compiled entry, a compiled call site's return, a halt, no code, an SVC that ends the thread, a trap;
-`dm_jit_init` gives once per process what the host knows: the text, the module's FPCR, the stop addresses, the SVC path, the counter.)
+(`dm_jit_reason` says which stop: a compiled entry, a compiled call site's return, a halt, no code, an SVC that ends the thread, a trap, a gate
+site; `dm_jit_init` gives once per process what the host knows: the code ranges, the module's FPCR, the stop addresses and gate sites, the SVC
+path, the counter. `dm_jit_run_past` goes on after a gate the host served, `dm_jit_set_code` gives the code ranges again when modules are loaded.)
 
 - **Configuration** (design 11): fastmem with pointer 0 and 39 address bits (the one-to-one arena; an access at or above 2^39 or a fault takes
   the memory callbacks), `fastmem_exclusive_access` with one `ExclusiveMonitor` for every instance (64 processors), `tpidr_el0` and `tpidrro_el0`
@@ -478,6 +479,20 @@ void     dm_jit_halt(dm_jit *j);              // from any thread: dm_jit_run ret
   is what the stop uses; running one block per `Run()` with cycle counting and checking the next pc in the host costs 35.6 ns more per block
   (40.2 ns against the JIT's own 4.7 ns, "Measurements") and sees block boundaries only (a block that runs into the next function's entry without a
   branch passes it). So no patch: [VENDOR.md](../../third_party/dynarmic/VENDOR.md) still describes an unchanged copy.
+- **Gates** (design 1.1 and 11). The JIT runs the guest's original code, so it stops where compiled code calls `nxaot_rt_gate`: the host's
+  `stop_at` marks a pack's gate sites (`DM_JIT_GATE_AT`, from the descriptor's `gates`), and the code reader hands over no instruction there either,
+  under any FPCR, unless compiled code takes the address itself (an entry or a return under its FPCR, whose code calls the gate). The run returns
+  `DM_JIT_GATE` with the gate's instruction not run and the whole register file in the block; the host serves the gate on the block (the
+  observer, which may change x0..x29, or the back-off as an SVC frame) and calls `dm_jit_run_past`, which runs that one instruction as a single-step
+  block without stopping there again, then goes on. A spin wait's back-edge is a branch: `dm_jit_run_past(..., 1)` returns after it, and the host
+  runs the back-off only when it went back to the head, as compiled code calls it on the taken edge only. `dm_jit_run` at a gate site returns at
+  once, before anything is copied, so a host call or a continuation that starts at an observed instruction serves its gate first. Both the block
+  that stops before the site and the step are translated once and cached (the step apart, as dynarmic keys single-step blocks), so the lookup costs
+  only at translation and code with no gate runs as before. The host's side is `dm/host/aot_run.c` (`jit_stop_at`, `run_jit`); a manifest row no
+  pack serves (no compiled code holds it: a `[RED] ` line at load) has no site, so the JIT does not serve it either. nxaot's own runner has no gates.
+- **Code ranges.** The JIT translates only inside the ranges the host gives (`dm_jit_range`): `nxaot_host` the module's text and its aux region
+  when the image has one; the host every loaded module's text and aux region (the frame-step stubs, design 1.1), and again with each NRO loaded
+  later (every instance drops its translations before its next run, as a block may end where there was no code before).
 - **The hand-over** (2.5, 11): `dm_jit_run` copies x0..x30, SP, PC, v0..v31, NZCV, FPCR and FPSR (with the cumulative flags compiled code left in
   MXCSR, which it clears) into the instance, and back into the block when it stops: 102 to 109 ns both ways. The exclusive monitor is cleared both ways,
   as an exception return clears it. At an SVC the JIT copies its state to the block, calls the host's SVC path, and takes the general registers back.
@@ -501,12 +516,15 @@ void     dm_jit_halt(dm_jit *j);              // from any thread: dm_jit_run ret
 - **Logging and counting**: every JIT entry is a discovery gap or a continuation without a native frame, logged once per address on standard error
   as `[RED] aot: <why> at 0x... (module+0x...) runs in the JIT fallback (design section 11)` and counted (`nxaot_host`'s second summary line: runs,
   distinct addresses, `Run()` calls, stepped stops, native calls, seconds). `NXAOT_JIT_TRACE=1` prints every JIT run and native call.
-- **Modes** (`nxaot_host`): mixed (the default), `--jit-all` (everything in the JIT: no stop at compiled entries, the dispatcher and the entries
+- **Modes** (`nxaot_host`; in the host `DM_AOT_JIT_ALL=1` is `--jit-all`): mixed (the default), `--jit-all` (everything in the JIT: no stop at compiled entries, the dispatcher and the entries
   never used), `--jit-none` (every case above stops the run with a [RED] line and status 3: phase 1's behaviour; nxaot_funcdiff runs so),
   `--jit-one-block` (the measurement of the alternative above).
 - **Faults**: the host's handler is installed before dynarmic's (which comes with the first instance and hands every fault outside its code cache
-  to the previous handler): a fastmem fault in JIT code takes dynarmic's fallback to the memory callbacks, and a fault there is reported as a guest
-  fault "in a memory access of the JIT fallback near guest 0x..." (dynarmic first prints its own `Unhandled SIGSEGV` line on standard error).
+  to the previous handler): a fastmem fault in JIT code takes dynarmic's fallback to the memory callbacks. With `check_halt_on_memory_access` a
+  callback does not touch memory but halts with `MemoryAbort`, so dynarmic leaves at the exact instruction (it checks that halt only after a
+  callback: fastmem accesses cost nothing more); `dm_jit_run` steps that instruction again with its callback accesses made, and a fault there is
+  reported as a guest fault at that instruction (`nxaot_host`: "in a memory access of the JIT fallback near guest 0x...", now exact; the host:
+  "a memory access of the JIT fallback, guest instruction main+0x..."; `dc zva`, whose hook has no such check, keeps "near").
 
 The corpus in the three modes (CTest `corpus_jit`, [tests/test_corpus_jit.py](tests/test_corpus_jit.py)): every NRO prints its expected lines
 mixed, with `--jit-all` and, where the mixed run needed no JIT, with `--jit-none`; fnptr's `hidden_ptr` pointed at the second instruction of

@@ -196,9 +196,8 @@ target_link_libraries(nxhost PUBLIC nxplat vpx SDL3::SDL3-static)
 # Dockerfile.aot), so it is on by default where both are found (the engine is part of every tree this file configures: x86-64, not Apple), off with a configure-time
 # message where they are not (the Windows cross-build image has no Boost): without it, guest code with no compiled entry stops the process with a [RED] line and status 3
 # (aot.h DM_AOT_JIT_NEEDED). -DNXHOST_JIT=ON makes it required (the CI's Linux job), -DNXHOST_JIT=OFF leaves it out.
-# Known gaps, declared, not fixed here: the JIT runs the guest's original code, so the observation gates and spin gates of the packs (nxaot's gate rows: the per-build
-# observation and spin-wait hooks the compiled code calls) are not called inside it; and its code range (dm_aot_code_lo / dm_aot_code_hi: the packs' guest text) leaves out
-# the aux region, so frame-step stubs placed there are not run by it
+# The JIT stops at the packs' gate sites (the observation gates and spin-wait back-edges compiled code calls nxaot_rt_gate at) and aot_run.c serves them as compiled code
+# does; its code is every module's text and aux region (the frame-step stubs). DM_AOT_JIT_ALL=1 runs everything in it (t_aot_module's JIT-forced runs)
 include(CheckLanguage)
 check_language(CXX)
 find_package(Boost 1.57 QUIET)

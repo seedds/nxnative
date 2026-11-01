@@ -402,10 +402,13 @@ std::unique_ptr<Host> Host::Create(const std::string& library, const module::Ima
     if (!g_clock_origin) {
         g_clock_origin = NowNs();
     }
-    // The JIT fallback (section 11): the module's text, its FPCR, the monitor's processors, 16 MB of code per instance
+    // The JIT fallback (section 11): the module's text (and its aux region, when a behaviour image has one), its FPCR, the monitor's
+    // processors, 16 MB of code per instance
     dm_jit_host jh{};
-    jh.code_lo = kModuleBase + image.text_off;
-    jh.code_hi = kModuleBase + image.TextEnd();
+    const dm_jit_range code[2] = {{kModuleBase + image.text_off, kModuleBase + image.TextEnd()},
+                                  {kModuleBase + image.aux_off, kModuleBase + image.aux_off + image.aux_size}};
+    jh.code = code;
+    jh.code_count = image.aux_size ? 2 : 1;
     jh.fpcr = d.fpcr & 0x07C80000u;
     jh.max_threads = kMaxThreads;
     jh.code_cache = 16u * 1024 * 1024;

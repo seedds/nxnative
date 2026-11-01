@@ -18,12 +18,20 @@
 //     line table, design 3.5) must name that guest instruction exactly
 //   a refusal: an image that is not its manifest's (one byte of data changed): the load stops with a [RED] line naming both SHA-256s
 //   a refusal: a manifest and image that agree, with the pack of the old image: dm_aot_pack_load refuses the pack with both SHA-256s
+//   with the JIT fallback (NXHOST_JIT), the run and the fault again with DM_AOT_JIT_ALL=1: every instruction in the JIT, no compiled code entered (0 dispatcher
+//     misses). The same checks hold: the JIT stops at the pack's gate sites (design 11) and the host serves them, the observer before its instruction with the
+//     same registers and its x0 taken back, the spin wait's back-off on the taken back-edge only; the frame step's stub runs from the aux region, one of the JIT's
+//     code ranges; the fault probe's load is named exactly (the JIT's memory abort, jit.h). Each run also times guest calls of three leaf functions from the host
+//     (no gate, an untaken spin back-edge, an observation gate) and the JIT's stop lookup per translated instruction, for design 11's figures
 // What this does not show: a real NSO or a real game (no game files here), a real observer's or the back-off's effect on a game
 //   t_aot_module [--module <dir>]
 //     the module's folder: --module, else <packs>/module with the packs of NXAOT_PACKS (the environment variable, else the CMake option); with none, a note and exit 0
 //   t_aot_module --run <dir>     one run (the child); --fault <dir>: the fault run
 #include "../aot.h"
 #include "../aot_hostfn.h"
+#if NXHOST_JIT
+#include "rt/jit.h"   // dm_jit_get_counts: the JIT-forced run's gate stops, steps and memory aborts
+#endif
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
@@ -56,7 +64,7 @@ enum { FLAG_VALUE = 9, SPIN_PASSES = 3 };      // aot_synth.py FLAG_VALUE; the s
 #define FAULT_WORD 0xF9400129u                 // aot_synth.py FAULT_WORD: ldr x9, [x9], the fault probe's load
 
 // ---------- The child: one run ----------
-static int g_checks, g_fails, g_status = DM_AOT_USAGE, g_fault_run;
+static int g_checks, g_fails, g_status = DM_AOT_USAGE, g_fault_run, g_jit_forced;   // g_jit_forced: DM_AOT_JIT_ALL is set (the parent's runs 5 and 6)
 static const char *g_dir;
 static void check(int ok, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -111,6 +119,24 @@ static uint64_t text_find_word(const module_t *m, uint32_t word) {
     for (uint64_t a = 0; a + 4 <= m->text_end; a += 4) { uint32_t w; memcpy(&w, m->base + a, 4); if (w == word) return a; }
     return 0;
 }
+
+// A guest call of fn(x0) from the host, n times after a warm-up: nanoseconds per call
+static double time_calls(dm_guest_state *st, uint64_t fn, uint64_t x0, int n) {
+    for (int i = 0; i < 100; i++) dm_guest_call(st, fn, 1, x0);
+    const uint64_t t0 = plat_now_ns();
+    for (int i = 0; i < n; i++) dm_guest_call(st, fn, 1, x0);
+    return (double)(plat_now_ns() - t0) / n;
+}
+
+#if NXHOST_JIT
+static dm_jit_counts jit_counts(void) {
+    dm_jit_counts c;
+    memset(&c, 0, sizeof c);
+    const dm_aot_thread *t = dm_aot_self();
+    if (t && t->jit) c = dm_jit_get_counts((const dm_jit *)t->jit);
+    return c;
+}
+#endif
 
 static void *guest_main(void *arg) {
     (void)arg;
@@ -170,8 +196,40 @@ static void *guest_main(void *arg) {
         fflush(stdout);
         g_status = dm_aot_run(base + d->entry, 0, hmain, NULL);
         check(g_status == DM_AOT_FAULT, "the fault probe's load faulted and stopped the run (status %d)", g_status);
+#if NXHOST_JIT
+        if (g_jit_forced) {
+            const dm_jit_counts c = jit_counts();
+            check(c.aborts >= 1, "JIT-forced: the probe's load reached the JIT's memory callback and halted at its exact instruction (%llu memory aborts)", (unsigned long long)c.aborts);
+        }
+#endif
         return NULL;
     }
+    // Timing (design 11's figures): guest calls from the host of synth_cut (mov; ret: no gate, the cost of a call), synth_spin with its flag set (ldr; its back-edge,
+    // a gate site, not taken; mov; ret) and synth_observed (an observation gate at its add; the observer only records outside the run); the JIT's stop lookup over
+    // the module's code (dm_aot_jit_stop_at, what its code reader asks per translated instruction)
+    {
+        uint8_t *f_cut = module_sym(m, "synth_cut");
+        uint32_t *spare = (uint32_t *)&results[15];   // a word of results no check reads: the timing's own flag, set
+        *spare = FLAG_VALUE;
+        const int n = 20000;
+        const double t_cut = f_cut ? time_calls(st, (uint64_t)(uintptr_t)f_cut, 0, n) : 0;
+        const double t_spin = time_calls(st, (uint64_t)(uintptr_t)f_spin, (uint64_t)(uintptr_t)spare, n);
+        const double t_obs = time_calls(st, (uint64_t)(uintptr_t)f_obs, 41, n);
+        *spare = 0;
+        double t_look = 0;
+        const int reps = 200;
+        uint64_t sink = 0, looks = 0;
+        const uint64_t l0 = plat_now_ns();
+        for (int r = 0; r < reps; r++)
+            for (uint64_t a = 0; a < 0x1000; a += 4, looks++) sink += (uint64_t)dm_aot_jit_stop_at(base + a);
+        t_look = (double)(plat_now_ns() - l0) / (double)looks;
+        printf("t_aot_module: timing (%s): a guest call from the host of synth_cut %.0f ns, of synth_spin through its untaken back-edge gate %.0f ns (+%.0f), "
+               "of synth_observed through its observation gate %.0f ns (+%.0f); the JIT's stop lookup %.1f ns per translated instruction (%llu)\n",
+               g_jit_forced ? "JIT-forced" : "compiled", t_cut, t_spin, t_spin - t_cut, t_obs, t_obs - t_cut, t_look, (unsigned long long)(sink & 0xF));
+        check(f_cut && t_cut > 0 && t_spin > 0 && t_obs > 0, "the timing calls returned");
+    }
+    dm_aot_stats_t s0;
+    dm_aot_stats(&s0);   // the counts before the run: the timing's observation gate calls are not the run's
     g_spin_flag = flag;
     *flag = 0;   // the spin wait spins until spin_release sets it
     pthread_t releaser;
@@ -194,9 +252,19 @@ static void *guest_main(void *arg) {
           (unsigned long long)g_obs_run_x30[0], g_obs_param, (unsigned long long)results[9], (unsigned long long)results[11]);
     dm_aot_stats_t s;
     dm_aot_stats(&s);
-    check(g_released_by_gates && g_spins_at_release >= SPIN_PASSES && s.spin_gates >= SPIN_PASSES && s.obs_gates == 2,
+    check(g_released_by_gates && g_spins_at_release >= SPIN_PASSES && s.spin_gates >= SPIN_PASSES && s.obs_gates - s0.obs_gates == 2,
           "the spin wait's back-edge reached the host's back-off %llu times before the flag was set (%llu in all; released by the gates: %d); 2 observation gate calls (%llu)",
-          (unsigned long long)g_spins_at_release, (unsigned long long)s.spin_gates, g_released_by_gates, (unsigned long long)s.obs_gates);
+          (unsigned long long)g_spins_at_release, (unsigned long long)s.spin_gates, g_released_by_gates, (unsigned long long)(s.obs_gates - s0.obs_gates));
+#if NXHOST_JIT
+    if (g_jit_forced) {
+        // Every instruction ran in the JIT: no dispatcher miss (only compiled code misses), and its gate stops served the gates checked above
+        const dm_jit_counts c = jit_counts();
+        check(s.misses == 0 && s.jit_runs > 0 && c.gates >= 2 + SPIN_PASSES,
+              "JIT-forced: no compiled code ran (%llu dispatcher misses); %llu JIT runs at %llu addresses, %llu gate stops, %llu single steps, %llu memory aborts",
+              (unsigned long long)s.misses, (unsigned long long)s.jit_runs, (unsigned long long)s.jit_addresses, (unsigned long long)c.gates,
+              (unsigned long long)c.steps, (unsigned long long)c.aborts);
+    }
+#endif
     uint32_t stepped = 0;
     if (dm_fps_state) memcpy(&stepped, dm_fps_state + 0x30, 4);
     check(results[12] == 5 && stepped == 1, "the frame step's function through its stub in the aux region: 5, and the stub's pass counted at the state page's +0x30 (%u)", stepped);
@@ -215,6 +283,8 @@ static void timeout_exit(void) {
 
 static int child(const char *dir) {
     g_dir = dir;
+    const char *forced = getenv("DM_AOT_JIT_ALL");
+    g_jit_forced = forced && *forced && strcmp(forced, "0") != 0;
     g_flag.dbg = 1;   // hle_svc.c prints svcOutputDebugString as "[guest] " lines
     crash_install();
     dm_aot_arena_init();
@@ -277,6 +347,13 @@ static void run_child_mode(const char *self, const char *mode, const char *dir, 
     if (!r->out) r->out = calloc(1, 1);
 }
 static void run_child(const char *self, const char *dir, result *r) { run_child_mode(self, "--run", dir, r); }
+static void set_env(const char *k, const char *v) {   // for the children popen starts
+#if defined(_WIN32)
+    char b[256]; snprintf(b, sizeof b, "%s=%s", k, v ? v : ""); _putenv(b);
+#else
+    if (v) setenv(k, v, 1); else unsetenv(k);
+#endif
+}
 
 static int checks, fails;
 static void verdict(int ok, const char *what) { checks++; fails += !ok; printf("%-5s %s\n", ok ? "ok" : "FAIL", what); }
@@ -380,6 +457,32 @@ int main(int argc, char **argv) {
                 "the pack of another image: refused with a [RED] line naming both SHA-256s, nothing run");
         free(r.out);
     }
+    // 5. The run and the fault again, every instruction in the JIT fallback (DM_AOT_JIT_ALL=1): the same results, gates, stub and fault report as compiled code's
+#if NXHOST_JIT
+    set_env("DM_AOT_JIT_ALL", "1");
+    run_child(argv[0], dir, &r);
+    fputs(r.out, stdout);
+    cks = 0; cfail = -1; cst = -1;
+    sum = strstr(r.out, "t_aot_module: run status ");
+    if (sum) sscanf(sum, "t_aot_module: run status %d, %d checks, %d failed", &cst, &cks, &cfail);
+    verdict(r.status == 0 && cst == 0 && cks >= 20 && cfail == 0 && strstr(r.out, "[guest] aot module: done") && strstr(r.out, "UNIMPL t_aot_mod_missing") &&
+                strstr(r.out, "DM_AOT_JIT_ALL: every guest instruction runs in the JIT fallback"),
+            "the JIT-forced run (DM_AOT_JIT_ALL=1): every check of the child passed, the same results, gates and stub as compiled code's, its OutputDebugString and UNIMPL lines");
+    free(r.out);
+    run_child_mode(argv[0], "--fault", dir, &r);
+    set_env("DM_AOT_JIT_ALL", NULL);
+    fault_at = 0;
+    at = strstr(r.out, "t_aot_module: the fault probe at main+");
+    if (at) sscanf(at, "t_aot_module: the fault probe at main+%llx", &fault_at);
+    snprintf(want, sizeof want, "guest instruction main+%#llx)", fault_at);
+    printf("      %s\n", red_line(r.out, "SIGSEGV"));
+    verdict(r.status == DM_AOT_FAULT && fault_at && strstr(r.out, "[RED] aot: SIGSEGV at address 0x1000000008 in guest code (a memory access of the JIT fallback, ") &&
+                strstr(red_line(r.out, "SIGSEGV"), want) && strstr(r.out, "check ok   JIT-forced: the probe's load"),
+            "a fault in the JIT fallback (DM_AOT_JIT_ALL=1): the report names the probe's load exactly (the JIT's memory abort)");
+    free(r.out);
+#else
+    puts("note: this build has no JIT fallback (NXHOST_JIT off): the JIT-forced run and fault are skipped");
+#endif
     printf("t_aot_module: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

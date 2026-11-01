@@ -118,7 +118,7 @@ uint64_t dm_aot_pack_base(const dm_aot_pack *p);     // the guest address of its
 void dm_aot_guest_name(uint64_t guest, char *out, size_t n);
 // A host pc in compiled code as the guest function and instruction the function map and line table give (3.5); 0 when host_pc is not in a pack (signal-safe)
 int dm_aot_where(uint64_t host_pc, char *out, size_t n);
-uint64_t dm_aot_code_lo(void), dm_aot_code_hi(void);   // the lowest and highest guest text address of the loaded packs' images (the JIT's code range)
+uint64_t dm_aot_code_lo(void), dm_aot_code_hi(void);   // the lowest and highest guest text address of the loaded packs' images (the JIT takes each module's text and aux region instead: aot_run.c)
 // A game module's pack (loader.c, "The game-module path"): <dir>/<name>.aot.so (.aot.dll on Windows), beside the manifest <name>.aot.tsv and the behaviour image <name>.image.bin
 // it was built from (nxaot build <dir>/<name>.aot.tsv -o <object> --shared <dir>/<name>.aot.so). The game's input folder is <NSP folder>/<id>_build/aot_<version>/, beside the
 // rewritten modules of Apple's patched_<version>/
@@ -337,6 +337,9 @@ DM_AOT_EXPORT void dm_aot_gate(dm_guest_state *st, uint64_t pc);
 // The lifter's call of design 1.1 (include/nxaot/aot_module.h): compiled code at the gate site at module offset site of its pack (an entry of the descriptor's gates)
 // with st holding the whole register file and st->pc; dm_aot_gate at the site's guest address, then a process stop leaves from here
 DM_AOT_EXPORT void nxaot_rt_gate(dm_guest_state *st, uint64_t site);
+// The JIT fallback's stop kind at guest address pc (rt/jit.h stop_at: DM_JIT_ENTRY or DM_JIT_RETURN, or'ed with DM_JIT_GATE_AT at a pack's gate site; only the gate under
+// DM_AOT_JIT_ALL), as its code reader asks once per translated instruction; 0 without NXHOST_JIT. For tests and measurements (t_aot_module times it)
+int dm_aot_jit_stop_at(uint64_t pc);
 
 // ---------- Faults (aot_fault.c) ----------
 void crash_install(void);                  // the fault handlers (signals on POSIX, a vectored exception handler on Windows); once

@@ -54,7 +54,7 @@ The x86-64 engine's JIT fallback (dynarmic, for guest code a pack has no compile
 | `clang-18` | 1:18.1.3-1ubuntu1 | already in the image: its `clang++-18` |
 | `libstdc++-13-dev` | 13.3.0-6ubuntu2~24.04.1 | already in the image: the C++ standard library clang++ compiles against |
 
-Known gaps of the JIT fallback, declared, not fixed: it runs the guest's original code, so the observation gates and the spin waits' back-edge gates the packs call (`nxaot_rt_gate`: the manifest's obs and spin rows) are not called while code runs in it; and its code range is the packs' guest text (`dm_aot_code_lo` / `dm_aot_code_hi`), which leaves out the aux region, so a frame-step stub reached from code the JIT runs finds no code there.
+The JIT fallback runs the guest's original code, and stops at the gate sites the packs call the host at (`nxaot_rt_gate`: the observation gates and the spin waits' back-edges the packs serve), where the host serves the gate as compiled code does and the JIT goes on ([dm/tools/aot/README.md, The JIT fallback](../dm/tools/aot/README.md#the-jit-fallback)); its code is every loaded module's text and aux region (the frame-step stubs). `DM_AOT_JIT_ALL=1` runs every guest instruction in it, which `t_aot_module` does for a second run and fault of its synthetic module.
 
 ## From a Linux host
 

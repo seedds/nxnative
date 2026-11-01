@@ -11,7 +11,8 @@
 //   nxaot_rt_trap       brk, undefined encodings, a no-return call that returned: a [RED] line and a process stop
 //   nxaot_rt_safepoint  a poll found the poll byte set (6.2): the pause of SetThreadActivity (hle_thread.c), or a process stop
 //   dm_aot_cntpct       mrs cntpct_el0 / cntvct_el0 (8): the guest clock in 19.2 MHz ticks, as svcGetSystemTick and Apple's counter gate read it
-//   nxaot_rt_gate       the lifter's call of design 1.1 at a gate site of the pack's descriptor: dm_aot_gate at its guest address
+//   nxaot_rt_gate       the lifter's call of design 1.1 at a gate site of the pack's descriptor: dm_aot_gate at its guest address. The JIT fallback stops at the
+//                       same sites (jit_stop_at) and run_jit serves them alike: an observation gate before its instruction, a spin wait's back-edge when taken
 //   dm_aot_gate         a manifest's observation gate or spin wait back-edge (loader.c registers them in hle.c's gate table): the observer, or the back-off as an SVC frame
 // dm_guest_call nests: a host function guest code called may call guest code again on the same thread (aot.h), each level a base of its own that guest code leaving
 // returns through, the host call around it leaving in turn (host_call). dm_gcall is the form the host's plain-pointer call sites use (aot.h DM_GUEST_CALL)
@@ -145,26 +146,116 @@ static void native_call(dm_aot_thread *t, const dm_aot_pack *p, const void *entr
 static int aot_svc(dm_guest_state *st, uint32_t n);
 static void safepoint(dm_aot_thread *t);
 
+// DM_AOT_JIT_ALL (docs/env_switches.tsv): every guest instruction in the JIT fallback, compiled code never entered (the JIT stops only at gate sites,
+// host calls and the host-return address): the packs' behaviour checked against the JIT's (t_aot_module's JIT-forced runs)
+static int g_jit_all;
+static pthread_once_t g_jit_all_once = PTHREAD_ONCE_INIT;
+static void jit_all_init(void) {
+    const char *e = getenv("DM_AOT_JIT_ALL");
+    g_jit_all = e && *e && strcmp(e, "0") != 0;
+    if (g_jit_all) LOG("aot: DM_AOT_JIT_ALL: every guest instruction runs in the JIT fallback, compiled code is not entered");
+}
+static int jit_all(void) { pthread_once(&g_jit_all_once, jit_all_init); return g_jit_all; }
+
+// The gate site of a pack's descriptor at guest address pc (design 1.1: the manifest's rows its code serves), NULL when none
+static const nxaot_gate_site *gate_in(const dm_aot_pack *p, uint64_t pc) {
+    if (!p) return NULL;
+    const nxaot_module_desc *d = dm_aot_pack_desc(p);
+    const uint64_t off = pc - dm_aot_pack_base(p);
+    return d->gate_count && off <= UINT32_MAX ? nxaot_gate_at(d, off) : NULL;
+}
+
+// A gate the guest reached (compiled code's nxaot_rt_gate, or the JIT stopped at its site): counted, dm_aot_gate with the block's registers, then a thread that
+// ended or a process stop leaves from here
+static void serve_gate(dm_aot_thread *t, uint64_t pc, const nxaot_gate_site *g) {
+    atomic_fetch_add_explicit(g->kind == NXAOT_GATE_OBS ? &c_obs_gates : &c_spin_gates, 1, memory_order_relaxed);
+    dm_aot_gate(&t->st, pc);
+    if (atomic_load(&t->exiting)) dm_aot_leave(DM_AOT_LEFT_EXIT);
+    check_stop(t);
+}
+
 #if NXHOST_JIT
 static pthread_once_t g_jit_once = PTHREAD_ONCE_INIT;
+// Where the JIT stops (jit.h stop_at), asked once per translated instruction: a compiled entry (continued natively), a compiled call site's return (a native
+// frame may wait there), and a gate site of a pack (its observer or back-off, served by run_jit; compiled code serves the gates it reaches itself). Under
+// DM_AOT_JIT_ALL only the gate sites. A manifest's gate row no pack serves (a [RED] line at load: no compiled code holds it) has no site here either
 static int jit_stop_at(void *ctx, uint64_t pc) {
     (void)ctx;
-    if (dm_aot_find(pc, NULL)) return DM_JIT_ENTRY;   // continued natively
-    return dm_aot_is_return(pc) ? DM_JIT_RETURN : 0;  // a native frame may wait there
+    const dm_aot_pack *p = NULL;
+    const nxaot_lookup_entry *e = dm_aot_find(pc, &p);
+    int k = 0;
+    if (!jit_all()) k = e ? DM_JIT_ENTRY : dm_aot_is_return(pc) ? DM_JIT_RETURN : 0;
+    if (gate_in(p, pc)) k |= DM_JIT_GATE_AT;
+    return k;
 }
 static int jit_svc(void *ctx, dm_guest_state *st, uint32_t n) { (void)ctx; return aot_svc(st, n); }
 DM_AOT_EXPORT uint64_t dm_aot_cntpct(dm_guest_state *st);
 static uint64_t jit_cntpct(void *ctx, dm_guest_state *st) { (void)ctx; return dm_aot_cntpct(st); }
-static void jit_init_once(void) {
-    dm_jit_host h;
-    memset(&h, 0, sizeof h);
-    h.code_lo = dm_aot_code_lo(); h.code_hi = dm_aot_code_hi();   // the loaded modules' text; the host-function page and DM_AOT_HOST_RETURN lie outside it
-    h.fpcr = dm_aot_module_fpcr() & FPCR_MODE;
-    h.max_threads = 64; h.code_cache = 16u << 20;
-    h.stop_at = jit_stop_at; h.svc = jit_svc; h.cntpct = jit_cntpct;
-    dm_jit_init(&h);
-    LOG("aot: the JIT fallback (dynarmic) for guest text %#llx..%#llx", (unsigned long long)h.code_lo, (unsigned long long)h.code_hi);
+
+// The JIT's code (jit.h dm_jit_range): every loaded module's text, and its aux region where it has one: the frame step's stubs, which patch_nso.py --aot
+// assembles into the page after the state page, up to the end of the behaviour image (patch_nso.py AOT_AUX_OFF = FS_STATE_OFF + 0x4000; module_t keeps
+// the state page's offset from the manifest's aux row, loader.c aot_map_module). The host-function page and DM_AOT_HOST_RETURN lie outside every range.
+// NROs mapped at ro::LoadModule after the JIT's first use join at the next run_jit (g_nmod grew)
+static pthread_mutex_t g_code_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_code_nmod = -1;   // g_nmod when the ranges were last given to the JIT
+#define AUX_AFTER_STATE 0x4000
+static unsigned jit_code_ranges(dm_jit_range *r, int n) {
+    unsigned k = 0;
+    for (int i = 0; i < n; i++) {
+        const module_t *m = &g_mod[i];
+        const uint64_t base = (uint64_t)(uintptr_t)m->base;
+        if (!m->base) continue;
+        r[k++] = (dm_jit_range){base, base + m->text_end};
+        if (m->fps_state_off && m->image_size > m->fps_state_off + AUX_AFTER_STATE) r[k++] = (dm_jit_range){base + m->fps_state_off + AUX_AFTER_STATE, base + m->image_size};
+    }
+    return k;
 }
+static void jit_code_log(const dm_jit_range *r, unsigned k) {
+    char s[600]; size_t o = 0;
+    s[0] = 0;
+    for (unsigned i = 0; i < k && o + 64 < sizeof s; i++) {
+        char lo[64];
+        dm_aot_guest_name(r[i].lo, lo, sizeof lo);
+        o += (size_t)snprintf(s + o, sizeof s - o, "%s%s (%#llx bytes)", i ? ", " : "", lo, (unsigned long long)(r[i].hi - r[i].lo));
+    }
+    LOG("aot: the JIT fallback's guest code: %u ranges: %s", k, s);
+}
+// Called with g_code_lock held: the ranges of the first n modules, given to the JIT (first: with its host interface)
+static void jit_code_give(int n, int first) {
+    dm_jit_range *r = calloc(2 * (size_t)(n > 0 ? n : 1), sizeof *r);
+    if (!r) die("aot: no memory for the JIT's code ranges");
+    const unsigned k = jit_code_ranges(r, n);
+    if (first) {
+        dm_jit_host h;
+        memset(&h, 0, sizeof h);
+        h.code = r; h.code_count = k;
+        h.fpcr = dm_aot_module_fpcr() & FPCR_MODE;
+        h.max_threads = 64; h.code_cache = 16u << 20;
+        h.stop_at = jit_stop_at; h.svc = jit_svc; h.cntpct = jit_cntpct;
+        dm_jit_init(&h);
+    } else {
+        dm_jit_set_code(r, k);
+    }
+    jit_code_log(r, k);
+    free(r);   // dm_jit_init and dm_jit_set_code copy them
+    g_code_nmod = n;
+}
+static void jit_init_once(void) {
+    pthread_mutex_lock(&g_code_lock);
+    jit_code_give(__atomic_load_n(&g_nmod, __ATOMIC_ACQUIRE), 1);
+    pthread_mutex_unlock(&g_code_lock);
+}
+static void jit_code_sync(void) {
+    const int n = __atomic_load_n(&g_nmod, __ATOMIC_ACQUIRE);
+    if (n == __atomic_load_n(&g_code_nmod, __ATOMIC_ACQUIRE)) return;
+    pthread_mutex_lock(&g_code_lock);
+    if (n != g_code_nmod) jit_code_give(n, 0);
+    pthread_mutex_unlock(&g_code_lock);
+}
+
+int dm_aot_jit_stop_at(uint64_t pc) { return jit_stop_at(NULL, pc); }
+#else
+int dm_aot_jit_stop_at(uint64_t pc) { (void)pc; return 0; }
 #endif
 
 // Run st->pc in the JIT until it stops; without it, the [RED] line and the process stop
@@ -187,6 +278,7 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why) {
         dm_aot_leave(DM_AOT_LEFT_STOP);
     }
     pthread_once(&g_jit_once, jit_init_once);
+    jit_code_sync();
     dm_jit *j = t->jit;
     if (!j) {
         if (!(j = dm_jit_create(&t->st))) {
@@ -197,14 +289,39 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why) {
         if (!atomic_flag_test_and_set(&faults_ordered)) dm_aot_fault_after_jit();   // dynarmic installed its fault handler with this first instance (5.4's order)
         dm_aot_thread_set_jit(j);   // halted at once when a pause or stop was requested before it existed
     }
-    if (first_time(pc)) LOG("[RED] aot: %s at %s runs in the JIT fallback (design section 11)", *why, name);
+    if (*why && first_time(pc)) LOG("[RED] aot: %s at %s runs in the JIT fallback (design section 11)", *why, name);
     atomic_fetch_add_explicit(&c_jit_runs, 1, memory_order_relaxed);
     t_jit_running = 1;
-    const uint64_t stop = dm_jit_run(j, pc);
+    uint64_t stop = dm_jit_run(j, pc);
     t_jit_running = 0;
-    *why = "a non-local transfer to a continuation with no native frame";
+    *why = jit_all() ? "the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL)" : "a non-local transfer to a continuation with no native frame";
+    // A gate site (design 1.1, as compiled code calls nxaot_rt_gate there): the JIT stopped before its instruction with the whole register file in the block
+    while (dm_jit_reason(j) == DM_JIT_GATE) {
+        const dm_aot_pack *p = NULL;
+        dm_aot_find(stop, &p);
+        const nxaot_gate_site *g = gate_in(p, stop);
+        if (!g) die("aot: the JIT fallback stopped at a gate site %#llx that no pack lists", (unsigned long long)stop);
+        if (g->kind == NXAOT_GATE_OBS) {
+            // An observation gate: the observer first (it may change x0..x29, which the JIT takes back), then its instruction and on, without stopping there again
+            serve_gate(t, stop, g);
+            t_jit_running = 1;
+            stop = dm_jit_run_past(j, stop, 0);
+            t_jit_running = 0;
+            continue;
+        }
+        // A spin wait's back-edge: the branch alone, then the back-off when it went back to the head (compiled code calls it on the taken edge only); the loop
+        // decides where to go on from there (the head, or the code after the loop), with no new reason to log
+        const uint64_t edge = stop;
+        t_jit_running = 1;
+        stop = dm_jit_run_past(j, edge, 1);
+        t_jit_running = 0;
+        if (dm_jit_reason(j) != DM_JIT_STEPPED) break;
+        if (stop == dm_aot_pack_base(p) + g->arg) serve_gate(t, edge, g);
+        *why = NULL;
+        return;
+    }
     switch (dm_jit_reason(j)) {
-    case DM_JIT_ENTRY: case DM_JIT_RETURN: return;   // st->pc = stop: the loop decides
+    case DM_JIT_ENTRY: case DM_JIT_RETURN: case DM_JIT_STEPPED: return;   // st->pc = stop: the loop decides
     case DM_JIT_HALTED: safepoint(t); return;        // a pause or a stop
     case DM_JIT_CALLBACK: dm_aot_leave(t->left != DM_AOT_LEFT_NONE ? t->left : atomic_load(&t->exiting) ? DM_AOT_LEFT_EXIT : DM_AOT_LEFT_STOP);   // the svc ended the thread or the process
     case DM_JIT_NO_CODE:
@@ -255,7 +372,7 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
         if (pc == DM_AOT_HOST_RETURN) { st->pending = pc; return; }   // the guest returned to the host while native frames wait
         if (dm_aot_hostfn_name(pc)) { host_call(t, pc); continue; }   // a host function through its guest-visible address (2.4)
         if (dm_aot_stub_index(pc) >= 0) { stub_call(t, dm_aot_stub_index(pc)); continue; }   // an unimplemented import
-        if (mode) {
+        if (mode && !jit_all()) {   // DM_AOT_JIT_ALL: no native frame, every address in the JIT
             const dm_aot_pack *p;
             const nxaot_lookup_entry *e = dm_aot_find(pc, &p);
             if (e) {
@@ -281,7 +398,7 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
 // compiled entry in the JIT. Returns when the guest returns to the host
 static void run_guest(dm_aot_thread *t, uint64_t pc) {
     dm_guest_state *st = &t->st;
-    const char *why = "a call from the host to an address with no compiled entry";
+    const char *why = jit_all() ? "the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL)" : "a call from the host to an address with no compiled entry";
     const uint64_t sp0 = st->sp;   // the SP the call was made with: a nested call's guest code stays below it
     for (;;) {
         check_stop(t);
@@ -289,7 +406,7 @@ static void run_guest(dm_aot_thread *t, uint64_t pc) {
         st->pc = pc;
         if (dm_aot_hostfn_name(pc)) { host_call(t, pc); pc = st->pc; continue; }
         if (dm_aot_stub_index(pc) >= 0) { stub_call(t, dm_aot_stub_index(pc)); pc = st->pc; continue; }
-        if (module_mode(st)) {
+        if (module_mode(st) && !jit_all()) {
             const dm_aot_pack *p;
             const nxaot_lookup_entry *e = dm_aot_find(pc, &p);
             if (e) {
@@ -313,7 +430,15 @@ static void run_guest(dm_aot_thread *t, uint64_t pc) {
 static void fault_report(dm_aot_thread *t) {
     if (!t->fault_signal) return;   // reported at a nested level already
     char where[200], msg[400];
-    if (t->fault_jit_pc) { char g[64]; dm_aot_guest_name(t->fault_jit_pc, g, sizeof g); snprintf(where, sizeof where, "a memory access of the JIT fallback near guest %s", g); }
+    int exact = 0;
+#if NXHOST_JIT
+    exact = dm_jit_access_exact();   // this thread's last JIT callback access, the one that faulted (jit.h): its exact instruction, or its block's start (dc zva)
+#endif
+    if (t->fault_jit_pc) {
+        char g[64];
+        dm_aot_guest_name(t->fault_jit_pc, g, sizeof g);
+        snprintf(where, sizeof where, exact ? "a memory access of the JIT fallback, guest instruction %s" : "a memory access of the JIT fallback near guest %s", g);
+    }
     else if (!dm_aot_where(t->fault_pc, where, sizeof where)) snprintf(where, sizeof where, "host pc %#llx", (unsigned long long)t->fault_pc);
     const char *sig = t->fault_signal == 11 ? "SIGSEGV" : t->fault_signal == 7 ? "SIGBUS" : t->fault_signal == 4 ? "SIGILL" : t->fault_signal == 8 ? "SIGFPE" : "an exception";
     snprintf(msg, sizeof msg, "[RED] aot: %s at address %#llx in guest code (%s)", sig, (unsigned long long)t->fault_address, where);
@@ -547,8 +672,5 @@ DM_AOT_EXPORT void nxaot_rt_gate(dm_guest_state *st, uint64_t site) {
     const dm_aot_pack *p = dm_aot_pack_of_code((uint64_t)(uintptr_t)__builtin_return_address(0));
     const nxaot_gate_site *g = p ? nxaot_gate_at(dm_aot_pack_desc(p), site) : NULL;
     if (!g) die("[RED] aot: a gate call at module offset %#llx that no loaded pack's gate table lists (return address %p)", (unsigned long long)site, __builtin_return_address(0));
-    atomic_fetch_add_explicit(g->kind == NXAOT_GATE_OBS ? &c_obs_gates : &c_spin_gates, 1, memory_order_relaxed);
-    dm_aot_gate(st, dm_aot_pack_base(p) + site);
-    if (atomic_load(&t->exiting)) dm_aot_leave(DM_AOT_LEFT_EXIT);
-    check_stop(t);
+    serve_gate(t, dm_aot_pack_base(p) + site, g);
 }

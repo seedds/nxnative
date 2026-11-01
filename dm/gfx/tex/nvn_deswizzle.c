@@ -45,11 +45,12 @@ int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer,
     return 0;
 }
 
-static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *bl, uint8_t *lin, size_t pitch, int to_linear) {
+static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *bl, uint8_t *lin, size_t pitch, int to_linear, int at_level) {
     uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
     if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb)) return -1;
     if (pitch < row_bytes) return -1;
-    bl += base; uint32_t lb = nvn_tex_level_gobs(d, level) * 64;   // the row as laid out (padded in a sparse texture's tiled levels)
+    if (!at_level) bl += base;   // at_level: bl is the level's own start (a level gathered on its own from a sparse pool)
+    uint32_t lb = nvn_tex_level_gobs(d, level) * 64;   // the row as laid out (padded in a sparse texture's tiled levels)
     if (lb < row_bytes) lb = row_bytes;
     // Hoist nvn_bl_offset's slice and row terms out of the segment loop. The block height and depth are powers of two,
     // so their division / remainder become shifts and masks. At x = 16*j the block column is j >> 2, and the segment
@@ -83,8 +84,24 @@ static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *b
 }
 
 int nvn_deswizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, void *dst, size_t dst_pitch) {
-    return move(d, level, layer, (uint8_t *)src, (uint8_t *)dst, dst_pitch, 1);
+    return move(d, level, layer, (uint8_t *)src, (uint8_t *)dst, dst_pitch, 1, 0);
+}
+int nvn_deswizzle_level(const nvn_texdesc *d, unsigned level, unsigned layer, const void *level_src, void *dst, size_t dst_pitch) {
+    return move(d, level, layer, (uint8_t *)level_src, (uint8_t *)dst, dst_pitch, 1, 1);
 }
 int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, size_t src_pitch, void *dst) {
-    return move(d, level, layer, (uint8_t *)dst, (uint8_t *)src, src_pitch, 0);
+    return move(d, level, layer, (uint8_t *)dst, (uint8_t *)src, src_pitch, 0, 0);
+}
+// One 64 KB tile of a sparse texture's tiled level (nvn_tex.c: one block row of gobs GOB columns, blocks of 8 << th rows): block j of the row at j * (512 << th), GOB
+// y / 8 of the block at 512 per GOB, the 16-byte pieces by gob_off. Rows of row_bytes (at most gobs * 64) for rows rows (at most 8 << th) go to dst at dst_pitch
+void nvn_deswizzle_tile(unsigned th, uint32_t gobs, uint32_t row_bytes, uint32_t rows, const void *src, void *dst, size_t dst_pitch) {
+    const uint8_t *bl = src; uint64_t block = 512ull << th;
+    if (row_bytes > gobs * 64) row_bytes = gobs * 64;
+    if (rows > 8u << th) rows = 8u << th;
+    for (uint32_t y = 0; y < rows; y++) {
+        uint8_t *row = (uint8_t *)dst + (size_t)y * dst_pitch; uint64_t yb = (uint64_t)(y >> 3) * 512;
+        uint32_t nfull = row_bytes >> 4, tail = row_bytes & 15;
+        for (uint32_t j = 0; j < nfull; j++) memcpy(row + (j << 4), bl + yb + (uint64_t)(j >> 2) * block + gob_off((j & 3) << 4, y), 16);
+        if (tail) memcpy(row + (nfull << 4), bl + yb + (uint64_t)(nfull >> 2) * block + gob_off((nfull & 3) << 4, y), tail);
+    }
 }

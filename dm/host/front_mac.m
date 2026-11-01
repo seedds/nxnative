@@ -1198,14 +1198,19 @@ void front_run(void (*guest)(void)) {
         const char *ch = getenv("DM_CURSOR_HIDE"); double idle = ch && *ch ? atof(ch) : 3.0;
         if (idle > 0) {
             win.acceptsMouseMovedEvents = YES;
-            __block double last = CACurrentMediaTime(); __block int hidden = 0;
+            __block double last = CACurrentMediaTime(); __block int hidden = 0, armed = 0;
             void (^show)(void) = ^{ if (hidden) { hidden = 0; [NSCursor unhide]; } };
+            // DM_CURSOR_HIDDEN=1: the launcher's console had the pointer hidden when it started this game, so it starts hidden here too and does not flash up until the first idle poll.
+            // The not-over rule below waits (armed) until the game window has been under the pointer once, as a new window is not key yet when the timer first runs
+            const char *hs = getenv("DM_CURSOR_HIDDEN");
+            if (hs && !strcmp(hs, "1")) { hidden = 1; armed = 1; [NSCursor hide]; }
             [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged | NSEventMaskRightMouseDragged | NSEventMaskOtherMouseDragged |
                 NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown | NSEventMaskScrollWheel handler:^NSEvent *(NSEvent *e) { last = CACurrentMediaTime(); show(); return e; }];
             [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
                 (void)t; NSView *cv = win.contentView;
                 int over = win.isKeyWindow && NSApp.isActive && NSPointInRect([cv convertPoint:win.mouseLocationOutsideOfEventStream fromView:nil], cv.bounds);
-                if (hidden && !over) show();
+                if (over) armed = 0;
+                if (hidden && !over && !armed) show();
                 else if (!hidden && over && CACurrentMediaTime() - last >= idle) { hidden = 1; [NSCursor hide]; } }];
         }
         for (NSNotificationName nm in @[GCControllerDidConnectNotification, GCControllerDidDisconnectNotification])

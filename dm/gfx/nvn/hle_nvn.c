@@ -183,10 +183,11 @@ static void nvn_api(int api[2]) {
 #ifdef DM_GAME_NVN_API_MAJOR
     api[0] = DM_GAME_NVN_API_MAJOR; api[1] = DM_GAME_NVN_API_MINOR; LOG("[nvn] device API %d.%d (game profile device_api)", api[0], api[1]);
 #else
-    // The Switch 2's NVN2 is API 231: Donkey Kong Bananza (SDK 20.5.19 Ounce) requires major == 231 and minor >= 30 (main+0x5c61a4) and creates its graphics system only then.
-    // 30 is that floor, not a value measured on hardware
+    // The Switch 2's NVN2 is API 231: games require major == 231 and a minimum minor, and create their graphics system only then: Donkey Kong Bananza (SDK 20.5.19 Ounce)
+    // minor >= 30 (main+0x5c61a4), Mario Kart World 1.8.0 (SDK 21.4.0 Ounce) minor >= 39 (main+0xdd0890). 39 is the larger floor; each game's own sdk answers its floor
+    // (DeviceGetInteger item 1: 30 in Bananza's sdk+0x5d9960, 39 in Mario Kart World's sdk+0x65b680): read from the binaries, not measured on hardware
     int m = dm_sdk_major();
-    if (dm_sdk_ounce()) { api[0] = 231; api[1] = 30; }
+    if (dm_sdk_ounce()) { api[0] = 231; api[1] = 39; }
     else { api[0] = DM_SDK_OLD(m) ? 53 : g_devinfo[0]; api[1] = DM_SDK_OLD(m) ? 313 : g_devinfo[1]; }
     LOG("[nvn] device API %d.%d (SDK %d%s)", api[0], api[1], m, dm_sdk_ounce() ? ", Switch 2" : "");
 #endif

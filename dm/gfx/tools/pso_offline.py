@@ -144,6 +144,15 @@ def library_digest(lib_dir, bases):
     return h.hexdigest()
 
 
+def space_needed(bases):   # what metal-tt is let start with, an estimate: its temporary files (TMPDIR, one .airp per base) and the archive (about 41 KB per base at 15,767 bases); Cruis'n Blast's 33,858 bases failed with 366 MB free
+    return max(2 << 30, bases * (96 << 10))
+
+
+def clear_temporaries(work):   # what a failed or killed metal-tt leaves in its TMPDIR (the work folder): translate-*, *.airp, multiple-functions-input-*.metallib
+    for f in [*work.glob('translate-*'), *work.glob('*.airp'), *work.glob('multiple-functions-input-*.metallib')]:
+        shutil.rmtree(f) if f.is_dir() else f.unlink(missing_ok=True)
+
+
 def sdk(platform):
     return 'iphoneos' if platform == 'ios' else 'macosx'
 
@@ -212,11 +221,17 @@ def main(argv=None):
         kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)
         part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
         cmd = ['xcrun', '-sdk', sdk(a.platform), 'metal-tt', '-arch', arch, f'-{a.platform}-version-min', osmin, str(js), '-o', str(part)]
+        clear_temporaries(work)
+        need, free = space_needed(len(bases)), shutil.disk_usage(work).free
+        if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free on the volume of {work}, metal-tt needs about {need / 2**30:.0f} GB for {len(bases)} bases: free some space and run again')
         t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases (minutes) ...', flush=True)
         with open(work / f'metal-tt.{arch}.log', 'w') as log:
             r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))   # its temporary files on the work folder's volume
         if r.returncode or not part.is_file():
-            sys.exit(f'[RED] pso_offline: metal-tt failed for {arch} (exit {r.returncode}): {(work / f"metal-tt.{arch}.log").read_text()[-2000:]}')
+            free = shutil.disk_usage(work).free   # metal-tt says only "applegpu-nt command failed" when the volume fills up. Read before clearing: its temporaries are what filled it
+            clear_temporaries(work); part.unlink(missing_ok=True)
+            full = f' ({free / 2**30:.1f} GB free on the volume of {work} when it failed: likely out of disk space)' if free < 1 << 30 else ''
+            sys.exit(f'[RED] pso_offline: metal-tt failed for {arch} (exit {r.returncode}){full}: {(work / f"metal-tt.{arch}.log").read_text()[-2000:]}')
         os.replace(part, dst); kf.write_text(key + '\n')
         print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s')
     for f in out.glob('*.mtl4a'):   # architectures no longer asked for

@@ -254,6 +254,34 @@ class Build(unittest.TestCase):
             po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work)])
         self.assertEqual(list(self.out.glob('*.mtl4a')), [])
 
+    def test_low_disk_space_stops_before_metal_tt(self):   # Cruis'n Blast: a full volume made metal-tt fail with only "applegpu-nt command failed"
+        self.work.mkdir(parents=True); (self.work / 'translate-0001').write_bytes(b'x'); (self.work / 'a.airp').write_bytes(b'x')
+        with mock.patch.object(po.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(1 << 40, 1 << 40, 300 << 20)), self.assertRaises(SystemExit) as e: self.main()
+        self.assertIn('GB free', str(e.exception)); self.assertEqual(self.calls, [])
+        self.assertEqual(sorted(p.name for p in self.work.iterdir()), ['bases.mtl4-json'])   # a failed run's temporaries cleared
+
+    def failed_run(self, free_with_temporaries):   # metal-tt passes the check with plenty free, then fails having written its temporaries, which take the free space down until they are cleared; the error text and what is left in the work folder
+        def fail(cmd, **kw):
+            cmd = [str(c) for c in cmd]
+            if '-version' in cmd or '--show-sdk-version' in cmd: return self.fake_run(cmd)
+            (self.work / 'translate-0001').mkdir(); (self.work / 'translate-0001/x').write_bytes(b'x'); (self.work / 'a.airp').write_bytes(b'x')
+            return subprocess.CompletedProcess(cmd, 1)
+        usage = lambda _: shutil._ntuple_diskusage(1 << 40, 1 << 40, free_with_temporaries if (self.work / 'a.airp').exists() else 100 << 30)
+        with mock.patch.object(po.subprocess, 'run', fail), mock.patch.object(po.shutil, 'disk_usage', usage), \
+                mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+            po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work)])
+        return str(e.exception), {p.name for p in self.work.iterdir()}
+
+    def test_metal_tt_failure_on_a_full_volume_says_so(self):   # the free space as it failed, not after its temporaries are cleared: clearing them brings it back above the estimate
+        text, left = self.failed_run(100 << 20)
+        self.assertIn('0.1 GB free', text); self.assertIn('likely out of disk space', text)
+        self.assertFalse({'translate-0001', 'a.airp'} & left)
+
+    def test_metal_tt_failure_with_room_does_not_blame_the_disk(self):
+        text, left = self.failed_run(10 << 30)
+        self.assertNotIn('out of disk space', text); self.assertIn('metal-tt failed', text)
+        self.assertFalse({'translate-0001', 'a.airp'} & left)
+
 
 class Default(unittest.TestCase):
     """Which games get an archive without DM_PSO_GPUS: build_ipa.sh's own lines, run with game.py's default form, so only a profile with pso_mtl4 on (the Metal 4 path, which alone

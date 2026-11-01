@@ -979,40 +979,90 @@ def tail_call_at_end(insl, j):
         return p.mnemonic == 'ldr' and bool(re.fullmatch(r'x18, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str))
     return False
 def tail_call(insl, j):
-    """Keep the existing terminal-tail rule; extend only the framed thunk with
-    a separate error call after its tail jump (Warm Snow, Unity IL2CPP).
-    The whole thunk must decode contiguously, restore its frame, and contain
-    only one forward null guard, this tail jump, and the trailing error call.
-    This deliberately does not generalize arbitrary mid-function br x18."""
+    """Keep the terminal rule, which proves no frame. A br x18 with code after it is a tail call only when the frame is provably gone: a jump inside a function needs that function's frame.
+    A wrong accept is silent, where a rejection stops at `jump table <addr>`, so anything not proven here is rejected. Two forms (Warm Snow and Ori and the Blind Forest, Unity IL2CPP):
+    a 16-byte thunk, stp x29,x30,[sp,#-0x10]!; mov x29,sp, only guards and argument moves, its error blocks after the br; or an ordinary function, sub sp,sp,#N first and add sp,sp,#N right
+    before the br, the pair saved to and restored from one slot, whose body may branch and call (lazy init, loops) and whose other paths may follow the br. Either way nothing writes sp, x29
+    or x30 on the way, no stack store touches the pair, and from the restore to the br every path runs straight"""
     if j + 1 == len(insl): return tail_call_at_end(insl, j)
     if j < 4 or any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return False
-    suffix = insl[j + 1:]
-    if suffix[0].mnemonic != 'bl' or any(p.mnemonic != 'udf' for p in suffix[1:]): return False
-    if insl[0].address <= suffix[0].operands[-1].imm <= insl[-1].address: return False
-    if insl[0].mnemonic != 'stp' or insl[0].op_str != 'x29, x30, [sp, #-0x10]!': return False
-    if insl[1].mnemonic != 'mov' or insl[1].op_str != 'x29, sp': return False
-    if insl[j - 1].mnemonic != 'ldp' or insl[j - 1].op_str != 'x29, x30, [sp], #0x10': return False
-    guard = insl[2]
-    if guard.mnemonic != 'cbz' or guard.operands[-1].imm != suffix[0].address: return False
-    load = None
-    for k in range(3, j - 1):
+    writes = lambda p: {p.reg_name(r) for r in p.regs_access()[1]}
+    cond = lambda p: p.mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.')
+    # The last write of x18 is a plain pointer load
+    load = next((k for k in range(j - 1, -1, -1) if writes(insl[k]) & {'x18', 'w18'}), None)
+    if load is None or insl[load].mnemonic not in ('ldr', 'ldp') or not re.fullmatch(r'x18, (x\d+, )?\[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', insl[load].op_str): return False
+    # The frame. disp is the saved pair's offset from sp
+    thunk = insl[0].mnemonic == 'stp' and insl[0].op_str == 'x29, x30, [sp, #-0x10]!'
+    if thunk:
+        if insl[1].mnemonic != 'mov' or insl[1].op_str != 'x29, sp': return False
+        if insl[j - 1].mnemonic != 'ldp' or insl[j - 1].op_str != 'x29, x30, [sp], #0x10': return False
+        restore, start, disp, saved, fp_set = j - 1, 2, 0, True, True
+    else:
+        sub, add = (re.fullmatch(r'sp, sp, #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == m else None for p, m in ((insl[0], 'sub'), (insl[j - 1], 'add')))
+        if not sub or not add or int(sub[1], 0) != int(add[1], 0): return False
+        restore = next((k for k in range(j - 2, 0, -1) if insl[k].mnemonic == 'ldp' and re.fullmatch(r'x29, x30, \[sp(, #(0x[0-9a-f]+|\d+))?\]', insl[k].op_str)), None)
+        if restore is None: return False
+        disp = insl[restore].operands[-1].mem.disp
+        if disp < 0 or disp + 16 > int(sub[1], 0): return False
+        start, saved, fp_set = 1, False, False
+    tail = min(load, restore)   # no call or jump from here on
+    after_br = insl[j].address
+    setup_end = insl[start].address   # no branch re-enters the frame's setup: raised as the setup is walked
+    targets = []
+    guarded = False
+    for k in range(start, j - 1):   # the body and the epilogue; j - 1 is the frame's last restore or add sp
         p = insl[k]
-        # Argument moves and memory transfers only. No hidden control flow,
-        # stack-pointer writes, or unmodelled instructions inside the new thunk form.
-        if p.mnemonic not in ('mov', 'ldr', 'ldur', 'ldp', 'str', 'stur', 'stp'): return False
-        writes = {p.reg_name(r) for r in p.regs_access()[1]}
-        if writes & {'sp', 'wsp', 'fp', 'lr', 'x29', 'w29', 'x30', 'w30'}: return False
-        if p.mnemonic in ('str', 'stur', 'stp'):
-            # regs_access does not report memory writes. Only fixed caller stack
-            # argument slots are proven clear of the saved FP/LR at sp + [0, 16).
-            # Other bases may alias that frame, and a register offset is unproven.
-            if p.writeback: return False
-            mem = p.operands[-1].mem
-            if p.reg_name(mem.base) not in ('sp', 'fp', 'x29') or mem.index or mem.disp < 16: return False
-        if writes & {'x18', 'w18'}:
-            if load is not None or p.mnemonic != 'ldr' or not re.fullmatch(r'x18, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str): return False
-            load = p
-    return load is not None
+        if k == restore: continue
+        if cond(p) or p.mnemonic == 'b':
+            t = p.operands[-1].imm
+            if not saved or k >= restore or p.mnemonic == 'b' and k >= tail: return False
+            if t > after_br: guarded = True
+            elif thunk: return False
+            targets.append(t)
+            continue
+        if p.mnemonic in ('bl', 'blr'):
+            # A saved x30, and x18 not live across the call
+            if thunk or not saved or k >= tail: return False
+            continue
+        if p.mnemonic in ('br', 'ret', 'udf', 'brk', 'hlt', 'svc', 'hvc', 'smc', 'msr', 'sys', 'dc', 'ic'): return False
+        w = writes(p)
+        if w & {'sp', 'wsp', 'lr', 'x30', 'w30'}: return False
+        if w & {'fp', 'x29', 'w29'}:
+            sets_fp = p.op_str == 'x29, sp' and not disp if p.mnemonic == 'mov' else p.mnemonic == 'add' and p.op_str.startswith('x29, sp, #') and p.operands[2].imm == disp
+            if k > restore or fp_set or not saved or not sets_fp: return False
+            fp_set = True
+            setup_end = insl[k + 1].address
+            continue
+        if not saved and p.mnemonic == 'stp' and p.op_str == insl[restore].op_str:
+            saved = True
+            setup_end = insl[k + 1].address
+            continue
+        if '[' not in p.op_str or p.mnemonic.startswith(('ldr', 'ldur', 'ldp', 'ldar', 'prfm')): continue
+        # regs_access does not report memory writes, so a stack store's bytes are checked against the saved pair. A register offset is unproven. A store through another base can
+        # alias it only through a pointer to the frame's own pair, which no compiled code holds; a function that calls out cannot prove that of its callees either, so only the thunk rejects them
+        if k > restore or p.mnemonic not in ('str', 'strb', 'strh', 'stur', 'sturb', 'sturh', 'stp') or p.writeback: return False
+        mem = p.operands[-1].mem
+        base = p.reg_name(mem.base)
+        if base not in ('sp', 'fp', 'x29'):
+            if thunk: return False
+            continue
+        if mem.index or base != 'sp' and not fp_set: return False
+        at = mem.disp + (disp if base != 'sp' else 0)
+        size = {'b': 1, 'h': 2}.get(p.mnemonic[-1]) or {'x': 8, 'w': 4, 'q': 16, 'd': 8, 's': 4, 'h': 2, 'b': 1}.get(p.reg_name(p.operands[0].reg)[0], 8)
+        if p.mnemonic == 'stp': size *= 2
+        if at < 0 or at < disp + 16 and at + size > disp: return False
+    if not saved: return False
+    # What follows the br never comes back to a place whose stack it cannot vouch for. A thunk's is error blocks entered by a guard, leaving through a call or a trap; a function's may be any of its other paths
+    suffix = insl[j + 1:]
+    leaves = False
+    for p in suffix:
+        if p.mnemonic == 'bl':
+            if insl[0].address <= p.operands[-1].imm <= insl[-1].address: return False
+            leaves = True
+        elif (cond(p) or p.mnemonic == 'b') and p.operands[-1].imm <= after_br: return False
+    if thunk and (not guarded or not leaves or suffix[-1].mnemonic not in ('bl', 'udf', 'b') or any(p.mnemonic in ('ret', 'br', 'blr') for p in suffix)): return False
+    # Nothing re-enters the frame's setup, or lands past the restore: the frame's end is what the proof rests on. A guard may skip a reload of x18 (Subnautica main+0x24f210 through x2)
+    return not any(t < setup_end or insl[restore].address < t <= after_br for t in targets)
 
 def jump_bytes_far(insl, j):
     """The byte / halfword table form with its add further back (Octopath Traveler 0 main+0x37f9bc8: adr x18,#L; ldrb w0,[x17,x15]; add x18,x18,x0,lsl #2, then 17 register moves before br x18).

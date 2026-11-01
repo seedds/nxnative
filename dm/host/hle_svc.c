@@ -93,7 +93,9 @@ void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = g_res
 enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=4, I_HeapSize=5,
        I_TotalMem=6, I_UsedMem=7, I_DebuggerAttached=8, I_ResourceLimit=9, I_IdleTick=10, I_RandomEntropy=11,
        I_AslrAddr=12, I_AslrSize=13, I_StackAddr=14, I_StackSize=15, I_SysResTotal=16, I_SysResUsed=17,
-       I_ProgramId=18, I_InitProcIdRange=19, I_UserExcAddr=20, I_TotalNonSys=21, I_UsedNonSys=22, I_IsApplication=23, I_FreeThreadCount=24 };
+       I_ProgramId=18, I_InitProcIdRange=19, I_UserExcAddr=20, I_TotalNonSys=21, I_UsedNonSys=22, I_IsApplication=23, I_FreeThreadCount=24,
+       I_ThreadTickCount=25, I_IsSvcPermitted=26, I_IoRegionHint=27, I_AliasExtraSize=28,
+       I_RemoteAddr=29, I_RemoteSize=30, I_RemoteUsage0=31, I_RemoteUsage1=32, I_PageSize=33 };
 
 static uint8_t g_seen[256];
 
@@ -654,7 +656,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (regs[0] & 0x80000000ull) return 0;   // notification only, can continue
         _exit(42);
     }
-    case 0x1E: guest_clock_read_wait(); regs[0] = 0; regs[1] = guest_ns() * 12 / 625; return 0;   // GetSystemTick
+    case 0x1E: guest_clock_read_wait(); regs[0] = 0; regs[1] = guest_ticks(); return 0;   // GetSystemTick
     case 0x27: {  // OutputDebugString(str, len)
         if (g_flag.dbg) fprintf(stderr, "[guest] %.*s\n", (int)regs[1], (char *)regs[0]);
         regs[0] = 0; return 0;
@@ -686,7 +688,17 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // left its main thread waiting at boot for a thread it never created (main+0x3e1ac4)
         case I_FreeThreadCount: { int thr_limit_used(void); int u = thr_limit_used(); v = u < 96 ? 96 - u : 0; break; }
         case I_UserExcAddr: { static _Alignas(0x1000) uint8_t ctx[0x1000]; v = (uint64_t)ctx; break; }   // user exception context area: newer SDKs' SetDyingMessageRegion writes to +0x1c0 (0 would write through a null pointer)
-        default: v = 0; break;
+        // The kernel's page size (Switch 2 SDKs): nn::ro::ProtectRelro takes it as the alignment of the RELRO bounds (value − 1 as a mask, 0 aborts), the VammManager maps that much up front.
+        // Horizon's pages are 4 KB, the alignment of every module's segments (Donkey Kong Bananza)
+        case I_PageSize: v = 0x1000; break;
+        // Horizon's other types (Atmosphère kern_svc_info.cpp), answered 0 as before they were named: no thread tick count, no SVC permission bits, no I/O region, and no extra alias
+        // region size (SDK 18 and later ask for it; only a process created with the extra-size flag has one)
+        case I_ThreadTickCount: case I_IsSvcPermitted: case I_IoRegionHint: case I_AliasExtraSize: v = 0; break;
+        // The Switch 2's remote region: nnosInitialize builds nn::os::detail::RemoteRegionManager's address space allocator over [type 29, type 29 + type 30), and
+        // nn::os::GetRemoteMemoryUsage returns types 31 and 32. The SDK's only user is the GPU driver's boot (nv::InitializeGraphics → nn::gs::sdk::BootGraphicsSystem →
+        // BootWithRemoteMemory), which the host's own nv::InitializeGraphics replaces (dm/gfx/hle_nv.c), so the process has no remote region and no remote memory (Donkey Kong Bananza)
+        case I_RemoteAddr: case I_RemoteSize: case I_RemoteUsage0: case I_RemoteUsage1: v = 0; break;
+        default: { static uint8_t seen[64]; if (id < 64 && !seen[id]) { seen[id] = 1; LOG("[RED] svc GetInfo: unknown info type %llu (answered 0)", (unsigned long long)id); } v = 0; break; }
         }
         regs[0] = 0; regs[1] = v; return 0;
     }

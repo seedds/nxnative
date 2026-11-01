@@ -210,7 +210,8 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
         const char *why = NULL;
         if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear the work directory left over from last time";
         else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear the .new left over from last time";
-        else if (dm_fs_test_fail("mountclone") || clonefile(dir, work, 0)) why = "cloning the work directory failed";
+        else if (dm_fs_test_fail("mountclone") || clonefile(dir, work, 0))   // ENOTSUP: HFS+ and exFAT can neither clone nor swap directories (RENAME_SWAP), so no transaction can work on them
+            why = errno == ENOTSUP ? "the save folder's filesystem cannot clone directories (save transactions need APFS: set DM_SAVE to a folder on an APFS volume)" : "cloning the work directory failed";
         if (why) { txn_err = errno ? errno : EIO; g_mnt[g_nmnt].ro = 1; strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
             LOG("[RED] save transaction: %s (%s, errno=%d) -- mounting the committed directory %s read-only instead: saves cannot be written this session, the committed version is unchanged", why, work, txn_err, dir); }
         else {
@@ -668,8 +669,8 @@ static Result commit_mount_locked(int i, int *notify_error) {
     }
     char neu[1100]; snprintf(neu, sizeof neu, "%s.new", g_mnt[i].commit);
     Result r = RES_OK;
-    if (!access(neu, F_OK)) rm_tree(neu);
-    if (clonefile(g_mnt[i].dir, neu, 0)) { LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
+    if (!access(neu, F_OK) && rm_tree(neu)) { LOG("[RED] save commit: cannot clear the %s left over errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
+    else if (clonefile(g_mnt[i].dir, neu, 0)) { LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
     else if (renamex_np(neu, g_mnt[i].commit, RENAME_SWAP)) { LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", errno); rm_tree(neu); r = RES_FAIL; }
     else rm_tree(neu);                                                  // the old version that was swapped out
     // Timing readouts (integer microseconds, no floating point): how long the clone + atomic swap took; how long in total from this transaction's first save write to the end of the commit (the game writing files + the commit; 0 = no save write in this transaction)
@@ -852,13 +853,20 @@ HLE_FORCE("_ZN2nn2fs15CreateDirectoryEPKc", "fsp-srv → mkdir(2)", Result, h_fs
     if (mkdir(hp, 0755)) return err_res("mkdir", hp);
     if (set_guest_name(hp, path)) { int e = errno; rmdir(hp); errno = e; return err_res("mkdir name", hp); }
     return RES_OK; }
+// Delete one directory entry: a directory with its tree, anything else (a symlink too, never followed) with unlink. lstat, not d_type: a filesystem may report DT_UNKNOWN
+static int rm_entry(const char *c) {
+    struct stat st; if (lstat(c, &st)) return -1;
+    return S_ISDIR(st.st_mode) ? rm_tree(c) : unlink(c);
+}
 static int rm_tree(const char *p) {
+    struct stat st; if (lstat(p, &st)) return -1;
+    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }   // a symlink to a directory is not entered: opendir would follow it and empty its target
     DIR *d = opendir(p); if (!d) return -1;
     struct dirent *e; char c[1024]; int rc = 0;
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         snprintf(c, sizeof c, "%s/%s", p, e->d_name);
-        rc |= e->d_type == DT_DIR ? rm_tree(c) : unlink(c);
+        rc |= rm_entry(c);
     }
     closedir(d);
     return rc | rmdir(p);
@@ -874,7 +882,7 @@ HLE_FORCE("_ZN2nn2fs25CleanDirectoryRecursivelyEPKc", "fsp-srv → recursively d
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         snprintf(c, sizeof c, "%s/%s", hp, e->d_name);
-        rc |= e->d_type == DT_DIR ? rm_tree(c) : unlink(c);
+        rc |= rm_entry(c);
     }
     closedir(d);
     return rc ? err_res("cleandir", hp) : RES_OK;

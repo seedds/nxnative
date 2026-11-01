@@ -61,6 +61,37 @@ class StorageBuffers(unittest.TestCase):
         self.assertIsNone(bindings('hs', [0x410], [1])[0]['reg'])
 
 
+class PoolTable(unittest.TestCase):
+    # Global memory traced to no storage buffer (Donkey Kong Bananza's gsys vertex shader c9a56f796ea4a4cd): the translator reserves the host's pool table as a storage buffer
+    # under the sentinel cb slot; it is not a game buffer, and it writes when one of the notes is a store or an atomic
+    def reflect(self, notes):
+        source = 'struct spvDescriptorSetBuffer0\n{\n    device uint* vp_s0 [[id(0)]];\n    device uint* vp_s1 [[id(1)]];\n};\n'
+        res = {'sbufs': [{'binding': 40, 'slot': 0, 'cb_slot': 0, 'cb_offset': 0x110 // 4, 'flags': 0},
+                         {'binding': 41, 'slot': 1, 'cb_slot': dmsh_abi.GMEM_MAP_CB_SLOT, 'cb_offset': 0, 'flags': 0}],
+               'notes': notes}
+        return REFLECT('synthetic', 'vs', source, res)
+
+    def test_stores_make_it_writable(self):
+        got = self.reflect(['Global memory operation "Store" traced to no storage buffer: it goes through the memory pool table.'])
+        self.assertEqual([(b['kind'], b.get('reg'), b['rw']) for b in got], [('sbuf', 0, False), ('gmem_map', None, True)])
+
+    def test_atomics_make_it_writable(self):
+        got = self.reflect(['Global memory operation "AtomicAdd" traced to no storage buffer: it goes through the memory pool table.'])
+        self.assertTrue(got[1]['rw'])
+
+    def test_loads_only_read(self):
+        got = self.reflect(['Global memory operation "Load" traced to no storage buffer: it goes through the memory pool table.'])
+        self.assertEqual((got[1]['kind'], got[1]['rw']), ('gmem_map', False))
+
+    def test_write_log(self):   # the stores also log their pages in a host buffer reserved at offset 1 of the sentinel slot
+        source = 'struct spvDescriptorSetBuffer0\n{\n    device uint* vp_s0 [[id(0)]];\n    device uint* vp_s1 [[id(1)]];\n};\n'
+        res = {'sbufs': [{'binding': 40, 'slot': 0, 'cb_slot': dmsh_abi.GMEM_MAP_CB_SLOT, 'cb_offset': 0, 'flags': 0},
+                         {'binding': 41, 'slot': 1, 'cb_slot': dmsh_abi.GMEM_MAP_CB_SLOT, 'cb_offset': dmsh_abi.GMEM_LOG_CB_OFFSET, 'flags': 1}],
+               'notes': ['Global memory operation "Store" traced to no storage buffer: it goes through the memory pool table.']}
+        got = REFLECT('synthetic', 'vs', source, res)
+        self.assertEqual([(b['kind'], b['rw']) for b in got], [('gmem_map', True), ('gmem_log', True)])
+
+
 class DriverTableArrays(unittest.TestCase):
     def reflect(self, members):
         source = 'struct spvDescriptorSetBuffer0\n{\n' + ''.join(f'    {t} {n} [[id({i})]];\n' for t, n, i in members) + '};\n'

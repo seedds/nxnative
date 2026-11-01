@@ -133,7 +133,7 @@ The tests in `dm/gfx/tests` compile the production code in directly and need a M
 | `t_nvn` | Interface layer: fetches addresses from `nvnBootstrapLoader` the way the game does, all the way through to presentation |
 | `t_builtin` | The 4 embedded compute shaders |
 | `t_refl`, `t_hmap`, `t_cover`, `t_pace`, `t_pso_skey`, `t_dirty_slots` | Reflection parsing, hash table, full-coverage proof, pacer, pipeline manifest key, dirty page tracking |
-| `t_pso_warm` | Historical manifest normalization and deduplication, draw-time cache reuse and GPU pixels for normal and merged passes, through MTLDevice and Metal 4 |
+| `t_pso_warm` | Historical manifest normalization and deduplication, draw-time cache reuse and GPU pixels for normal and merged passes, and one preparation per shader key across concurrent warm tasks with unrelated keys left free, through MTLDevice and Metal 4 |
 | `t_deswz_gpu` | GPU deswizzling |
 | `t_present_crop` | Presentation cropping |
 | `t_mip_extent` | Effective size when rendering to a mip level other than level 0 |

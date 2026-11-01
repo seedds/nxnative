@@ -134,6 +134,18 @@ def source_commit():   # DMCommit: the checkout that packed the app (scripts/bug
     return head + ('+dirty' if dirty else '') if head else None
 
 
+def commit_url(commit):   # DMCommitURL: the packing commit's page on GitHub, when a branch of the origin remote has it (a local or dirty commit has none there)
+    if not commit or commit.endswith('+dirty'): return None
+    repo = HERE.parent.parent
+    def git(*a): return subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, check=True).stdout.strip()
+    try:
+        sha, remote = git('rev-parse', 'HEAD'), git('remote', 'get-url', 'origin')
+        if not git('branch', '-r', '--list', 'origin/*', '--contains', sha): return None
+    except (OSError, subprocess.CalledProcessError): return None
+    m = re.match(r'(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?$', remote)
+    return f'https://github.com/{m.group(1)}/commit/{sha}' if m else None
+
+
 def sign(app, identity, codesign):   # the inner host first, then the bundle (its resources and the launcher); no --options runtime (see the top)
     host = app / 'Contents/MacOS/dmhost'
     for target in (host, app):
@@ -267,6 +279,8 @@ def pack(a):
     info['DMModuleFiles'] = [p.name for p in mods]
     commit = source_commit()
     if commit: info['DMCommit'] = commit
+    url = commit_url(commit)
+    if url: info['DMCommitURL'] = url
     if msl_dst.name.startswith('b-'): info['DMChain'] = msl_dst.name[2:]   # the library chain the app carries (a Vulkan or GL game's vk / gl has none)
     (c / 'Info.plist').write_bytes(plistlib.dumps(info))
     (c / 'PkgInfo').write_text('APPL????')

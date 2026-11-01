@@ -10,6 +10,7 @@ import os
 private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryKey: key) }
 
 
+#if !os(tvOS)   // tvOS has no Files/document picker: cloud saves and the folder pick are phone features
 /// Cloud saves: an iCloud Drive folder shared with the Mac app (chosen in its settings window's
 /// Cloud saves too). The host brings the save in from there when the game starts and
 /// sends it there after each save (dm/host/save_sync.h); the folder is a bookmark (CloudSaves.m).
@@ -91,6 +92,8 @@ private struct DocumentPicker: UIViewControllerRepresentable {
     }
 }
 
+#endif
+
 private struct LauncherView: View {
     @ObservedObject var m: LauncherModel
     let play: () -> Void
@@ -128,7 +131,9 @@ private struct LauncherView: View {
                     } footer: {
                         Text("Brings back all settings this game was tested with.")
                     }
+                    #if !os(tvOS)
                     CloudSavesSection()
+                    #endif
                     Section {
                         HStack {
                             Text("Memory available")
@@ -137,7 +142,7 @@ private struct LauncherView: View {
                         }
                     }
                 }
-                .listStyle(.insetGrouped)
+                .listStyle(.grouped)
                 .contentMargins(.horizontal, 12, for: .scrollContent)
                 .frame(width: geometry.size.width * 2 / 3)
             }

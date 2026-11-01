@@ -1,6 +1,7 @@
 // iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides) + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture);
 // with a TV connected the Metal view is on the TV and the phone shows the pad (DmTVSceneDelegate).
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
+#include <TargetConditionals.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
@@ -82,7 +83,7 @@ static void launcher_done(void) { [g_root startGame]; }
         [self.view addSubview:lb]; return;
     }
     front_ios_audio_watch();
-#if defined(__IPHONE_27_0)   // compiled only with an SDK that has the scene accessory API
+#if defined(__IPHONE_27_0) && !TARGET_OS_TV   // compiled only with an SDK that has the scene accessory API (tvOS has none)
     if (@available(iOS 27.0, *)) {   // iOS 27 offers a TV scene only to a registered scene accessory, no longer from the Info.plist entry alone (that path stays for iOS 26)
         UISceneConfiguration *c = [[UISceneConfiguration alloc] initWithName:@"TV" sessionRole:UIWindowSceneSessionRoleExternalDisplayNonInteractive];
         c.delegateClass = NSClassFromString(@"DmTVSceneDelegate");
@@ -183,8 +184,12 @@ int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled; }   // the frame step does not probe in it (hle_nvn.c fstep_cpu_slowed)
 double dm_brightness_now(void) { return g_brightness; }
 static void front_ios_power_watch(void) {
+    #if !TARGET_OS_TV
     g_brightness = UIScreen.mainScreen.brightness;
+    #endif
+#if !TARGET_OS_TV
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
+#endif
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {

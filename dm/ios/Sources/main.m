@@ -1,5 +1,6 @@
 // iOS App entry: set the environment (game files, saves, shader libraries), write the host log to Documents/log.txt, create the window (front_ios.m), then run the host's dm_main on a big-stack thread.
 // The game files (RomFS) ship inside the App at <App>/romfs; Documents/romfs.img (one image, scripts/push_romfs.sh; its name in any letter case) or a Documents/romfs folder is also accepted (lets you swap them without reinstalling).
+#include <TargetConditionals.h>
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
 #include <pthread.h>
@@ -173,7 +174,9 @@ static int g_boot_ok;
 
 static void *boot_thread(void *p) {
     (void)p;
+#if !TARGET_OS_TV
     static char alt[65536]; stack_t ss = {.ss_sp = alt, .ss_size = sizeof alt}; sigaltstack(&ss, 0);   // crash printing must work on the host thread too
+#endif
     int rc = dm_main(g_argc, g_argv);
     fprintf(stderr, "boot: dm_main returned %d\n", rc);
     return NULL;

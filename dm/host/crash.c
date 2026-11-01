@@ -184,14 +184,22 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
 }
 // The signal alternate stack is per thread: every guest thread must call this when it starts running (only then can the crash state be printed on the alternate stack on a stack overflow)
 // The alternate stack is released when the thread exits: the pthread key destructor is called at thread exit (disable the alternate stack first, then free). The game frequently starts short-lived threads, and without releasing each one leaks 64 KiB.
+#if TARGET_OS_TV
+#define DM_NO_ALTSTACK 1
+#endif
+#ifndef DM_NO_ALTSTACK
+#define DM_ALTSTACK_SET(ss) sigaltstack(&(ss), 0)
+#else
+#define DM_ALTSTACK_SET(ss) ((void)0)
+#endif
 static pthread_key_t g_altstack_key;
 static pthread_once_t g_altstack_once = PTHREAD_ONCE_INIT;
-static void altstack_free(void *p) { stack_t off = {.ss_flags = SS_DISABLE}; sigaltstack(&off, 0); free(p); }
+static void altstack_free(void *p) { stack_t off = {.ss_flags = SS_DISABLE}; DM_ALTSTACK_SET(off); free(p); }
 static void altstack_key_init(void) { if (pthread_key_create(&g_altstack_key, altstack_free)) die("altstack key"); }
 void crash_thread_init(void) {
     pthread_once(&g_altstack_once, altstack_key_init);
     if (pthread_getspecific(g_altstack_key)) return;                 // Repeated calls on the same thread do not allocate again
-    stack_t ss = {.ss_sp = malloc(65536), .ss_size = 65536}; sigaltstack(&ss, 0);
+    stack_t ss = {.ss_sp = malloc(65536), .ss_size = 65536}; DM_ALTSTACK_SET(ss);
     pthread_setspecific(g_altstack_key, ss.ss_sp);
 }
 void crash_install(void) {

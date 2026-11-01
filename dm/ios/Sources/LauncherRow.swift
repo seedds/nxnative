@@ -45,9 +45,23 @@ struct SettingRow: View {
                         Spacer()
                         Text(percentage).monospacedDigit().foregroundStyle(.secondary)
                     }
+#if os(tvOS)
+                    HStack {
+                        Button { rangeValue.wrappedValue = max((s.min ?? 0), rangeValue.wrappedValue - (s.step ?? 0.05)) } label: { Image(systemName: "minus.circle") }
+                        Button { rangeValue.wrappedValue = min((s.max ?? 1), rangeValue.wrappedValue + (s.step ?? 0.05)) } label: { Image(systemName: "plus.circle") }
+                    }
+#else
+#if os(tvOS)
+                    HStack {
+                        Button { rangeValue.wrappedValue = max((s.min ?? 0), rangeValue.wrappedValue - (s.step ?? 0.05)) } label: { Image(systemName: "minus.circle") }
+                        Button { rangeValue.wrappedValue = min((s.max ?? 1), rangeValue.wrappedValue + (s.step ?? 0.05)) } label: { Image(systemName: "plus.circle") }
+                    }
+#else
                     Slider(value: rangeValue, in: (s.min ?? 0)...(s.max ?? 1), step: s.step ?? 0.05)
                         .accessibilityLabel(s.label)
                         .accessibilityValue(percentage)
+#endif
+#endif
                 }
             default:
                 Toggle(isOn: Binding(get: { (m.values[s.env] ?? s.def) == s.onValue }, set: { m.values[s.env] = $0 ? s.onValue : s.offValue })) {

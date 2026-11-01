@@ -53,6 +53,15 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertNotIn('DM_FPS_HOLD', wonder)   # no frame step, as the Frame rate row
         self.assertIn('first start', botw['DM_PSO_PREBUILD']['note'])   # it runs once in the prepare step, before the first frame
 
+    def test_frame_rate_of_a_game_shown_every_display_tick(self):   # present_interval display without fps_target: 30 is the interval the game asks for
+        mt2, mhr, wonder = build('010051701FB46000', 'nvn'), build('0100B04011742000', 'nvn'), build(WONDER, 'nvn')
+        for s in (mt2['DM_PRESENT_INTERVAL'], build('0100F28011892000', 'nvn')['DM_PRESENT_INTERVAL']):   # Monster Train 2, Overcooked! All You Can Eat
+            self.assertEqual((s['kind'], s['section'], s['default'], s['label']), ('choice', 'Game', 'display', 'Frame rate'))
+            self.assertEqual(s['options'], [['game', '30 fps'], ['display', '60 fps']])
+        self.assertNotIn('DM_FPS_TARGET', mt2)
+        self.assertEqual(('DM_FPS_TARGET' in mhr, 'DM_PRESENT_INTERVAL' in mhr), (True, False))   # Monster Hunter Rise: present_interval display with fps_target, one Frame rate row
+        self.assertFalse({'DM_FPS_TARGET', 'DM_PRESENT_INTERVAL'} & set(wonder))
+
     def test_hold_frames_takes_on_and_off(self):   # the host reads DM_FPS_HOLD as on / off (hle_nvn.c), not 1 / 0
         s = build(BOTW, 'nvn')['DM_FPS_HOLD']
         self.assertEqual((s['on'], s['off'], s['default']), ('on', 'off', 'on'))

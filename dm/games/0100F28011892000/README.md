@@ -39,7 +39,7 @@ Update 1.0.11 (v720896) over the base game, SDK 10.4.1. Unity 2019.4.11f1 IL2CPP
 ## Frame rate
 
 - **Current:** 60 fps (30 on the Switch). The game asks for present interval 2 (Unity's 30 fps setting) and nothing else holds it at 30: `present_interval display` presents a frame every display tick. On an M1 Pro (macOS 26.7.2), over 16,200 frames: 59.9–60.0 fps, frame time p50 16.7 ms, p95 16.9–20.5 ms; GPU p50 up to 8.8 ms, p95 up to 16 ms; CPU energy about 0.86 W.
-- `DM_PRESENT_INTERVAL=game` keeps 30 and saves power: frame time p50 33.4 ms, p95 36.5 ms; GPU p50 7–9 ms, p95 11–12 ms; CPU energy about 0.15 W.
+- The launcher's **Frame rate** at 30 fps (`DM_PRESENT_INTERVAL=game`) keeps the Switch's 30 and saves power: frame time p50 33.4 ms, p95 36.5 ms; GPU p50 7–9 ms, p95 11–12 ms; CPU energy about 0.15 W.
 
 ## Audio
 

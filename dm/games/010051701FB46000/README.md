@@ -19,7 +19,7 @@ Update 1.1.1 (v131072) over the base game, SDK 18.3.5. Unity 2022.3.54f1 IL2CPP 
 
 - **Current:** 60 fps (30 on the Switch). The game asks for present interval 2 (Unity's 30 fps setting) and nothing else holds it at 30: `present_interval display` presents a frame every display tick, and the iPhone's display link runs at 60 Hz. The GPU takes about 2 ms a frame in battle and on the route map (M4 Pro).
 - Its animations follow the time that passed (Unity's `deltaTime`; the PC versions run at any refresh rate). From one save, screenshots every third of a second through the move to the merchant (its fade-in, the greeting) match at 30 and 60 fps: mean difference 3.9, against 11.0 (up to 89 in the fade) for what frame counting would show.
-- `DM_PRESENT_INTERVAL=game` (`Documents/env.txt` on the iPhone) keeps 30 and saves power.
+- The launcher's **Frame rate** at 30 fps (`DM_PRESENT_INTERVAL=game`) keeps the Switch's 30 and saves power.
 - **Resolved: `[RED] fs ReadFile into … failed at +0 (EFAULT): VM region … protection 1`, now and then at 60 fps** (two runs in three as the route map loads, never at 30 fps). The destination was texture pool memory, which the dirty-page tracker write-protects after each upload (`nvn_dirty.c`); `ReadFile` lifts the protection first, but the graphics layer can protect the pages again before `pread` writes them, and at 60 fps uploads come twice as often. On EFAULT the host now prepares the rest of the buffer again and reads on, up to eight times (`h_fs_ReadFile`; the first case is logged, `[fs] ReadFile … prepared again`). Four runs at 60 fps: one retry, no failed read.
 
 ## Memory

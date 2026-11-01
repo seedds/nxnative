@@ -22,7 +22,7 @@ A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without
 
 ### Frame rate
 
-Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and a few others) offer **30 fps** or **60 fps**. 60 is smoother; 30 is what the Switch ran and uses less power, so the phone stays cooler and the battery lasts longer. The game runs at real speed either way.
+Games whose speed the app controls (Breath of the Wild, Tears of the Kingdom and a few others) offer **30 fps** or **60 fps**. 60 is smoother; 30 is what the Switch ran and uses less power, so the phone stays cooler and the battery lasts longer. The game runs at real speed either way. Games that reach 60 by showing a new frame at every refresh, where the Switch showed each frame for two (Monster Train 2, Overcooked! All You Can Eat), offer the same choice.
 
 ### Render scale
 
@@ -218,6 +218,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Setting | Variable | Values |
 |---|---|---|
 | Frame rate | `DM_FPS_TARGET` | `30`, `60` |
+| Frame rate (a game shown at every refresh) | `DM_PRESENT_INTERVAL` | `game` 30 fps, `display` 60 fps |
 | Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |

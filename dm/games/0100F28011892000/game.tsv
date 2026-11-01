@@ -35,7 +35,7 @@ app_pool	0xCD500000
 
 # ---- Frame rate ----
 # The game asks for present interval 2 (30 fps on the Switch) and holds nothing else at 30: one frame per display tick gives 60 fps on the Mac (README.md, Frame rate).
-# DM_PRESENT_INTERVAL=game keeps 30 and saves power
+# The launcher's Frame rate at 30 fps (DM_PRESENT_INTERVAL=game) keeps 30 and saves power
 present_interval	display
 
 # ---- Shader split ----

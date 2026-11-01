@@ -45,7 +45,7 @@ pad_layout	full
 # 60 fps (30 on the Switch): the game asks for present interval 2, which display mode ignores, and nothing else in Unity holds it at 30 (about 60 fps on the Mac, the GPU at about
 # 2 ms a frame in battle and on the map). Its animations follow the time that really passed (Unity's deltaTime; the PC versions run at any refresh rate): from the same save, screenshots
 # at the same moments of the move to the merchant (its fade-in, the greeting) match at 30 and 60 fps (mean difference 3.9), while frame counting would have put 60 fps twice as far
-# (11.0, up to 89 in the fade). DM_PRESENT_INTERVAL=game (Documents/env.txt on the iPhone) keeps 30 and saves power
+# (11.0, up to 89 in the fade). The launcher's Frame rate at 30 fps (DM_PRESENT_INTERVAL=game) keeps 30 and saves power
 present_interval	display
 
 # ---- Shader split (shader_split.py; Unity Shader and ComputeShader objects, read by unityfs.py) ----

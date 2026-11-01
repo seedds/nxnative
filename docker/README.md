@@ -178,7 +178,12 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src
 `nxhost-run` ([dm/host/main_x86.c](../dm/host/main_x86.c); CMake option `NXHOST_PROGRAM`, on by default) is the host program on Linux and Windows, the counterpart of Apple's `dmhost`: it takes the game's recompiler input as `dmhost` takes the rewritten modules, maps the modules through the loader's game-module path, runs the SDK start (nn::init::Start's steps) and `nnMain` as guest calls on the engine's main thread, opens the SDL3 window with `DM_WINDOW` and shows the game through the Vulkan backend's window presenter, and exits with the run's status (0 when the game ended its process; [aot.h](../dm/host/aot.h) lists the others). The same `DM_*` switches mean the same as on Apple ([docs/env_switches.tsv](../docs/env_switches.tsv)); `DM_AOT_RAW=1` runs a module without the SDK from its own entry (homebrew), `DM_VK_HEADLESS=1` keeps the frames off the window, `DM_VK_PRESENT_MODE=mailbox` opts into MAILBOX. The JIT fallback is in the program when it is built with `NXHOST_JIT` (the recompiler's image); the start line says which.
 
 ```sh
-# <id>_build/aot_<version>/ holds, per module, <name>.aot.tsv and <name>.image.bin (patch_nso.py --aot) and <name>.aot.so (nxaot build; .aot.dll on Windows)
+# pack the game on the system it runs on (docs/development.md, "Packing for Windows and Linux"): <id>_build/aot_<version>/, the Vulkan shaders, and <id>_build/run.sh
+# (run.cmd on Windows, which stops before the packs: phase 5b), which runs the command below with the pack's own paths; nxaot is build/aot/nxaot unless --nxaot names it
+python3 scripts/build_ipa_from_nsp.py "<NSP folder>" -k <prod.keys> --platform linux
+
+# <id>_build/aot_<version>/ holds, per module, <name>.aot.tsv and <name>.image.bin (patch_nso.py --aot) and <name>.aot.so (nxaot build; .aot.dll on Windows),
+# and nro.tsv with a <name>.aot.so per NRO it lists (nxaot build of the NRO file)
 DM_WINDOW=1 DM_AUDIO=1 DM_ROMFS=<RomFS image> DM_SAVE=<save folder> DM_TEMP=<temp folder> DM_MSL_DIR=<shader cache> build/linux/nxhost-run "<NSP folder>/<id>_build/aot_<version>" [module...] [-- game arguments]
 
 # the synthetic module of t_aot_module (the packs of "The recompiled corpus in the host" above), with SDL's dummy drivers: what t_host_program runs

@@ -86,6 +86,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Found on:** [AI: THE SOMNIUM FILES](../../dm/games/010089B00D09C000/README.md) (Unity 2017.4: the 6 s Spike Chunsoft logo `StreamingAssets/Movie/al_titel_cl_sc_1k_30.mp4`, H.264 High, before the title).
 - **Note:** the audio decoder was never affected: AAC has no reorder queue.
 
+### H.264 loops retain presentation order when timestamps restart
+
+- **Symptom:** a looping tutorial loses B-frame presentation order after the first loop, without a `Flush` or end-of-stream packet.
+- **Cause:** the reorder queue sorted every picture by PTS alone. When the next loop restarted PTS at its IDR, the previous loop's high-PTS tail stayed behind the new pictures and occupied their reorder lookahead.
+- **Fix:** `hle_movie_avc.c` identifies an IDR once per access unit and tags the synchronous decode callback with its coded-sequence number. The queue sorts by sequence, then PTS; pictures from a completed sequence can leave without waiting for more lookahead. The current sequence retains its existing depth, EOS drains all pictures, and `Flush` discards the queue and resets sequence tracking. PTS values are unchanged.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md), reported with source by zatteogit in [issue #889](https://github.com/seedds/nxnative/issues/889). The synthetic `t_movie_avc` regression feeds both Annex B and length-prefixed packets through the production parser and callback wiring, checking distinct picture identities over repeated loops, short sequences, Flush and EOS. It substitutes decompression; no game media, hardware decoding, playback rate or gameplay was validated for this change. The existing fixed reorder depth and IDR `no_output_of_prior_pics_flag` handling are unchanged.
+
 ### No picture carries the end-of-stream flag
 
 - **Symptom:** an anime or story movie ends on a black screen; the pause menu still works and skipping lets the game continue.

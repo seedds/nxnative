@@ -19,6 +19,15 @@
 
 PLAT_TABLE_DEFINE(swhle)   // the import table (dm/host/hle.c defines it in a host binary)
 int dm_opmode(void) { return 0; }   // handheld: the surface's extent is 1280x720
+// The x86-64 engine's arena below 2^39 (dm/host/aot_arena.c, linked here: dm/host/CMakeLists.txt), where the layer places the memory it maps for the game as the host program
+// has it do (main_x86.c: guest_vk_set_arena), and what aot_arena.c and aot_hostfn.c take from the rest of the host: no host-call thunks, no loader
+#include "../../../host/aot.h"
+#include "../../../host/aot_hostfn.h"
+const hle_thunk_ent hle_thunks[1] = {{0}};
+const size_t hle_thunks_count = 0;
+uint64_t loader_named_stub(const char *name) { (void)name; return 0; }
+void guest_vk_set_arena(void *(*alloc)(size_t n), void (*release)(void *p, size_t n));   // guest_vk.c
+static int below_2_39(const void *p, uint64_t n) { return dm_aot_in_arena((uint64_t)(uintptr_t)p, n) && (uint64_t)(uintptr_t)p + n <= 1ull << 39; }
 Result h_vi_SetCrop(void *layer, int x, int y, int w, int h);   // dm/gfx/hle_vi.c (linked): the game's vi::SetLayerCrop, whose state the present reads
 
 // ---------- The game's function pointers ----------
@@ -130,6 +139,8 @@ static void quad(float *v, int px0, int py0, int px1, int py1, int w, int h, con
 }
 
 int main(void) {
+    dm_aot_arena_init();
+    guest_vk_set_arena(dm_guest_alloc, dm_guest_free);
     const hostvk_dev *hd = hv_up("t_vk_guest");
     const VkPhysicalDeviceLimits *hl = &hd->props.limits;
     char cap[600], name[300];
@@ -233,6 +244,9 @@ int main(void) {
     t("type 0 is not host-visible: mapping it is refused", r0 == VK_ERROR_MEMORY_MAP_FAILED && p0 == NULL);
     t("the host-visible types map", p1 && p2);
     if (!p1 || !p2) return hv_finish();
+    // The mappings are guest memory on the x86-64 engine: arena pages below 2^39 the layer imported (guest_vk.c gmem_import, VK_EXT_external_memory_host); the buffers bound
+    // to them and the linear image (below: its texels are what the CPU writes) were made with the host-allocation handle type
+    t("the mappings lie in the x86-64 engine's arena below 2^39 (arena pages imported with VK_EXT_external_memory_host)", below_2_39(p1, loff + lr.size) && below_2_39(p2, rr.size));
     static const float red[4] = {1, 0, 0, 1}, white[4] = {1, 1, 1, 1}, none[4] = {0, 0, 0, 0};
     float *v = (float *)p1;   // vertex data written through the mapping: three quads of the 64x64 target, the swapchain's quad of a 320x180 one
     quad(v, 0, 0, 16, 16, W, H, red); quad(v + 36, 16, 0, 32, 16, W, H, white); quad(v + 72, 32, 0, 48, 16, W, H, none); quad(v + 108, 40, 20, 80, 50, 320, 180, red);

@@ -5,8 +5,21 @@
 #include "../host/hle.h"
 #include <stdatomic.h>
 
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414c};
 static struct { uint32_t magic; void *layer; } g_native = {0x4e49574e, 0};
+#else
+// The x86-64 engine: the game keeps these objects' addresses (and hands the native window to the NVN or Vulkan layer), so each is guest memory, a copy made once in the
+// arena of the host's initial object (docs/design/aot-recompiler.md 5.2; aot.h, "Host memory the guest sees")
+#include "../host/aot.h"
+typedef struct { uint32_t magic; } vi_obj; typedef struct { uint32_t magic; void *layer; } vi_native;
+static const vi_obj k_display = {0x50534944}, k_layer = {0x5259414c};
+static const vi_native k_native = {0x4e49574e, 0};
+static void *_Atomic g_display_guest, *_Atomic g_layer_guest, *_Atomic g_native_guest;
+#define g_display (*DM_GSTATIC(vi_obj, g_display_guest, &k_display))
+#define g_layer (*DM_GSTATIC(vi_obj, g_layer_guest, &k_layer))
+#define g_native (*DM_GSTATIC(vi_native, g_native_guest, &k_native))
+#endif
 
 HLE_FORCE("_ZN2nn2vi10InitializeEv", "display service init; the host has no vi service", void, h_vi_Init, void) {}
 HLE_FORCE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", "open default display; the host returns a static object", Result, h_vi_OpenDisp, void **out) {

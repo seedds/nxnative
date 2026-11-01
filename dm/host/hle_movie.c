@@ -4,11 +4,24 @@
 #include "hle.h"
 // A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
 // as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+// What such a call is handed is guest memory (docs/design/aot-recompiler.md 5.2; aot.h, "Host memory the guest sees"): the input buffers the client writes its packets
+// into (GUEST_MALLOC / GUEST_FREE), the keys of the SDK's MediaData (GUEST_STR: an arena copy made once), and the key and result of a MediaData lookup (GUEST_FIND_I32,
+// GUEST_FIND_BUF: copied through the calling thread's scoped region around the call, md_find_* below). On Apple each is the plain form
 #if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 #define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#define GUEST_MALLOC(n) malloc(n)
+#define GUEST_FREE(p) free(p)
+#define GUEST_STR(s) s
+#define GUEST_FIND_I32(md, k, v) GUEST_CALL(G.find_i32, md, k, v)
+#define GUEST_FIND_BUF(md, k, b) GUEST_CALL(G.find_buf, md, k, b)
 #else
 #include "aot.h"
 #define GUEST_CALL DM_GUEST_CALL
+#define GUEST_MALLOC(n) dm_garena_malloc((n), 16)
+#define GUEST_FREE(p) dm_garena_free(p)
+#define GUEST_STR(s) dm_garena_literal(s)
+#define GUEST_FIND_I32(md, k, v) md_find_i32(md, k, v)
+#define GUEST_FIND_BUF(md, k, b) md_find_buf(md, k, b)
 #endif
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -132,6 +145,24 @@ static void md_syms(void) {
     G.size = msym("_ZNK5movie6Buffer4SizeEv");
     G.signal = msym("_ZN2nn2os11SignalEventEPNS0_9EventTypeE");
 }
+#if !DM_NATIVE_EXEC && !defined(DM_TEST_GUEST_C)
+// MediaData::FindInt32 / FindBuffer with the key and the result in the arena: the key copied into the calling thread's scoped region (a host stack array on Apple, "csd-0"),
+// the result word there too, read back after the call
+static int md_find_i32(const void *md, const char *k, int *v) {
+    const size_t kn = strlen(k) + 1;
+    DM_GLOCAL(char, gk, kn); memcpy(gk, k, kn);
+    DM_GLOCAL(int, gv, 1); *gv = *v;
+    int r = DM_GUEST_CALL(G.find_i32, md, gk, gv);
+    *v = *gv; return r;
+}
+static int md_find_buf(const void *md, const char *k, void **b) {
+    const size_t kn = strlen(k) + 1;
+    DM_GLOCAL(char, gk, kn); memcpy(gk, k, kn);
+    DM_GLOCAL(void *, gb, 1); *gb = *b;
+    int r = DM_GUEST_CALL(G.find_buf, md, gk, gb);
+    *b = *gb; return r;
+}
+#endif
 static mdec_t *md_of(void **self) { return self ? (mdec_t *)self[1] : NULL; }
 // An EventType pointer that can be signalled: 8-byte aligned and readable (vm_read_overwrite fails instead of faulting)
 static int ev_ok(const void *p) {
@@ -521,7 +552,7 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11De
     // audio behind the next video packet, whose clock the player follows, ran dry: 86 pictures in 25 s, a black screen with a loading icon. With 16 (or 32) all 1,960 play at 30 fps.
     // A video slot is allocated when first used, so the 8 more cost a greedy player 24 MB of NV12 at 1080p (64 MB as RGBA)
     d->nout = !audio ? MD_NOUT_VIDEO : type == MD_TYPE_AAC ? MD_NOUT_AAC : MD_NOUT;
-    for (int i = 0; i < MD_NIN; i++) { d->in[i] = malloc(MD_INCAP); d->infree[i] = i; }
+    for (int i = 0; i < MD_NIN; i++) { d->in[i] = GUEST_MALLOC(MD_INCAP); d->infree[i] = i; }
     d->ninfree = MD_NIN;
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1 << 20);
     if (pthread_create(&d->wk, &a, md_worker, d)) die("movie: failed to create the decoder thread");
@@ -540,7 +571,7 @@ static void md_free(void **self) {
         (unsigned long long)d->dec_n, d->dec_n ? d->dec_ns / 1e6 / d->dec_n : 0.0, d->dec_max / 1e6);
     dm_host_lock(&d->dmu); md_job(d, MDJ_QUIT); pthread_mutex_unlock(&d->dmu);
     pthread_join(d->wk, NULL);
-    for (int i = 0; i < MD_NIN; i++) free(d->in[i]);
+    for (int i = 0; i < MD_NIN; i++) GUEST_FREE(d->in[i]);
     for (int k = 0; k < MD_NOUT; k++) free(d->out[k].frm);
     free(d->vhdr[0]); free(d->vhdr[1]);
     pthread_mutex_destroy(&d->mu); pthread_mutex_destroy(&d->dmu); pthread_mutex_destroy(&d->wmu); pthread_cond_destroy(&d->wcv); free(d);
@@ -560,8 +591,8 @@ HLE_FORCE("_ZN5movie7Decoder9ConfigureEPNS_9MediaDataE", "movie decoder configur
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (MD_AUDIO(d)) {   // codec-specific data as Android's MediaCodec takes it: Vorbis csd-0 = identification header, csd-1 = setup header; AAC csd-0 = AudioSpecificConfig
         for (int k = 0; k < 2 && md; k++) { void *b = NULL; char key[8]; snprintf(key, sizeof key, "csd-%d", k);
-            if (GUEST_CALL(G.find_buf, md, key, &b) && b && GUEST_CALL(G.data, b) && GUEST_CALL(G.size, b)) { size_t n = GUEST_CALL(G.size, b); free(d->vhdr[k]); d->vhdr[k] = malloc(n); memcpy(d->vhdr[k], GUEST_CALL(G.data, b), n); d->vhdr_n[k] = (int)n; } }
-        int ch = 0, rate = 0; if (md) { GUEST_CALL(G.find_i32, md, "channel-count", &ch); GUEST_CALL(G.find_i32, md, "sample-rate", &rate); }
+            if (GUEST_FIND_BUF(md, key, &b) && b && GUEST_CALL(G.data, b) && GUEST_CALL(G.size, b)) { size_t n = GUEST_CALL(G.size, b); free(d->vhdr[k]); d->vhdr[k] = malloc(n); memcpy(d->vhdr[k], GUEST_CALL(G.data, b), n); d->vhdr_n[k] = (int)n; } }
+        int ch = 0, rate = 0; if (md) { GUEST_FIND_I32(md, "channel-count", &ch); GUEST_FIND_I32(md, "sample-rate", &rate); }
         if (ch > 0) d->ch = ch; if (rate > 0) d->rate = rate;
         MD_TRACE(d, 0, "Configure (%s): %d channels %d Hz, headers %d + %d bytes", d->type == MD_TYPE_AAC ? "AAC" : "Vorbis", ch, rate, d->vhdr_n[0], d->vhdr_n[1]);
         return 0;
@@ -569,10 +600,10 @@ HLE_FORCE("_ZN5movie7Decoder9ConfigureEPNS_9MediaDataE", "movie decoder configur
     if (d->type == MD_TYPE_AVC && md) {   // SPS / PPS: csd-0 / csd-1 (Annex B, as Android's MediaCodec takes them) or, from this SDK's MP4 demuxer (Super Mario Odyssey), "avcc" = the avcC box
         md_avc_open(d);
         void *b = NULL;
-        for (int k = 0; k < 2; k++) { char key[8]; snprintf(key, sizeof key, "csd-%d", k); if (GUEST_CALL(G.find_buf, md, key, &b) && b && GUEST_CALL(G.data, b) && GUEST_CALL(G.size, b)) mavc_param_sets(d->avc, GUEST_CALL(G.data, b), GUEST_CALL(G.size, b)); }
-        if (GUEST_CALL(G.find_buf, md, "avcc", &b) && b && GUEST_CALL(G.data, b) && GUEST_CALL(G.size, b)) mavc_avcc(d->avc, GUEST_CALL(G.data, b), GUEST_CALL(G.size, b));
+        for (int k = 0; k < 2; k++) { char key[8]; snprintf(key, sizeof key, "csd-%d", k); if (GUEST_FIND_BUF(md, key, &b) && b && GUEST_CALL(G.data, b) && GUEST_CALL(G.size, b)) mavc_param_sets(d->avc, GUEST_CALL(G.data, b), GUEST_CALL(G.size, b)); }
+        if (GUEST_FIND_BUF(md, "avcc", &b) && b && GUEST_CALL(G.data, b) && GUEST_CALL(G.size, b)) mavc_avcc(d->avc, GUEST_CALL(G.data, b), GUEST_CALL(G.size, b));
     }
-    int w = 0, h = 0; if (md) { GUEST_CALL(G.find_i32, md, "width", &w); GUEST_CALL(G.find_i32, md, "height", &h); }
+    int w = 0, h = 0; if (md) { GUEST_FIND_I32(md, "width", &w); GUEST_FIND_I32(md, "height", &h); }
     dm_host_mutex_lock(&d->mu); if (w > 0 && h > 0 && !d->fmt_sent) { d->w = w; d->h = h; } pthread_mutex_unlock(&d->mu);
     MD_TRACE(d, 0, "Configure: MediaData width %d height %d", w, h);
     return 0;
@@ -704,17 +735,17 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
     return r;
 }
 static void md_format(mdec_t *d, void *md) {
-    if (MD_AUDIO(d)) { GUEST_CALL(G.set_i32, md, "channel-count", d->ch > 0 ? d->ch : 2); GUEST_CALL(G.set_i32, md, "sample-rate", d->rate > 0 ? d->rate : 48000); return; }
+    if (MD_AUDIO(d)) { GUEST_CALL(G.set_i32, md, GUEST_STR("channel-count"), d->ch > 0 ? d->ch : 2); GUEST_CALL(G.set_i32, md, GUEST_STR("sample-rate"), d->rate > 0 ? d->rate : 48000); return; }
     int w, h, stride, slice; md_dims(d, &w, &h, &stride, &slice);
-    GUEST_CALL(G.set_i32, md, "width", w); GUEST_CALL(G.set_i32, md, "height", h);
-    GUEST_CALL(G.set_rect, md, "crop", 0, 0, w - 1, h - 1);
-    GUEST_CALL(G.set_i32, md, "stride", stride); GUEST_CALL(G.set_i32, md, "slice-height", slice);
-    GUEST_CALL(G.set_i32, md, "nv12-y-stride", stride); GUEST_CALL(G.set_i32, md, "nv12-y-offset", 0); GUEST_CALL(G.set_i32, md, "nv12-uv-offset", stride * slice);
+    GUEST_CALL(G.set_i32, md, GUEST_STR("width"), w); GUEST_CALL(G.set_i32, md, GUEST_STR("height"), h);
+    GUEST_CALL(G.set_rect, md, GUEST_STR("crop"), 0, 0, w - 1, h - 1);
+    GUEST_CALL(G.set_i32, md, GUEST_STR("stride"), stride); GUEST_CALL(G.set_i32, md, GUEST_STR("slice-height"), slice);
+    GUEST_CALL(G.set_i32, md, GUEST_STR("nv12-y-stride"), stride); GUEST_CALL(G.set_i32, md, GUEST_STR("nv12-y-offset"), 0); GUEST_CALL(G.set_i32, md, GUEST_STR("nv12-uv-offset"), stride * slice);
     // The interleaved UV plane has the luma plane's byte stride. CRI Sofdec2's player (Catherine: Full Body, main+0x34e6bc) reads it with the other three and checks none of the results:
     // without it the chroma stride was stack garbage and its NV12 → RGB conversion read far outside guest memory on the first picture (main+0x344f74); in DRAGON QUEST VII Reimagined
     // every chroma row was read from the first one (a grey movie with vertical bands). The picture size again, as the SDK's DecoderImpl::GetOutputBufferFormatFromDecoder
     // (SDK 19 subsdk0+0x121f50) also sets it
-    GUEST_CALL(G.set_i32, md, "nv12-uv-stride", stride); GUEST_CALL(G.set_i32, md, "nv12-width", w); GUEST_CALL(G.set_i32, md, "nv12-height", h);
+    GUEST_CALL(G.set_i32, md, GUEST_STR("nv12-uv-stride"), stride); GUEST_CALL(G.set_i32, md, GUEST_STR("nv12-width"), w); GUEST_CALL(G.set_i32, md, GUEST_STR("nv12-height"), h);
 }
 HLE_FORCE("_ZN5movie7Decoder15GetOutputFormatEPNS_9MediaDataE", "movie decoder: output format (NV12)", int, h_movie_OutFmt, void **self, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;

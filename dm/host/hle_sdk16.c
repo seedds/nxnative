@@ -3,11 +3,17 @@
 #include "hle.h"
 // A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
 // as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+// What the guest is handed is guest memory (docs/design/aot-recompiler.md 5.2; aot.h, "Host memory the guest sees"): the shared fonts' pages (GUEST_VM_ALLOC /
+// GUEST_VM_RELEASE: the platform layer's pages on Apple, the arena's here) and the event objects the host owns (an arena static, below)
 #if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 #define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#define GUEST_VM_ALLOC(n) plat_vm_alloc(n)
+#define GUEST_VM_RELEASE(p, n) plat_vm_release(p, n)
 #else
 #include "aot.h"
 #define GUEST_CALL DM_GUEST_CALL
+#define GUEST_VM_ALLOC(n) dm_guest_alloc(n)
+#define GUEST_VM_RELEASE(p, n) dm_guest_free(p, n)
 #endif
 #include <fcntl.h>
 #include <pthread.h>
@@ -47,7 +53,12 @@ HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "device tim
 HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "network clock (offline, unavailable)", Result, h_time_NetNow, int64_t *out) { (void)out; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4time8FinalizeEv", "pairs with Initialize; the host has no session", Result, h_time_Finalize, void) { return RES_OK; }
 // "Ensure network clock availability" async task: no request is sent; the finish event fires immediately and the result is failure. The object itself is untouched (constructor / destructor no-ops), the event lives in host static storage
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 static _Alignas(16) uint8_t g_ev_netclock[0x100];
+#else   // the x86-64 engine: the SDK's event code works on it and the game keeps its address, so it is made once in the arena (aot.h)
+static void *_Atomic g_ev_netclock_guest;
+#define g_ev_netclock ((uint8_t *)dm_garena_static(&g_ev_netclock_guest, NULL, 0x100))
+#endif
 HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTaskC1Ev", "network clock task constructor; the host opens no session", void, h_time_NcCtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTaskD1Ev", "network clock task destructor; no session to close", void, h_time_NcDtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask10InitializeENS_2os14EventClearModeE", "network clock task init (offline)", Result, h_time_NcInit, void *self, int mode) { (void)self; (void)mode; return RES_OK; }
@@ -69,11 +80,11 @@ static font_t font_map(const char *p) {
     font_t f = {0}; int fd = open(p, O_RDONLY); struct stat st;
     if (fd < 0 || fstat(fd, &st)) { if (fd >= 0) close(fd); return f; }
     size_t n = (size_t)st.st_size;
-    uint8_t *m = plat_vm_alloc(n + 8);
+    uint8_t *m = GUEST_VM_ALLOC(n + 8);
     if (!m) { LOG("[RED] shared font memory allocation failed (%zu bytes)", n + 8); close(fd); return f; }
     size_t got = 0; while (got < n) { ssize_t r = pread(fd, m + 8 + got, n - got, (off_t)got); if (r <= 0) break; got += (size_t)r; }
     close(fd);
-    if (got != n) { LOG("[RED] shared font read short: %s (%zu / %zu bytes)", p, got, n); plat_vm_release(m, n + 8); return f; }
+    if (got != n) { LOG("[RED] shared font read short: %s (%zu / %zu bytes)", p, got, n); GUEST_VM_RELEASE(m, n + 8); return f; }
     uint32_t done = 0x18029a7fu, len = __builtin_bswap32((uint32_t)n ^ 0x49621806u);
     memcpy(m, &done, 4); memcpy(m + 4, &len, 4);
     f.p = m; f.n = n + 8; return f;

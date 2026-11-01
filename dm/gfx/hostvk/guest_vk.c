@@ -14,11 +14,10 @@
 //     made at its first buffer bind, map or linear-image bind (memory that only backs optimal images never gets one, as in hle_vk.m): type 0 becomes device-local memory, types 1
 //     and 2 host-visible coherent memory (device-local too where that heap is large: resizable BAR or unified memory; cached for type 2), mapped once and handed to the game, so
 //     its CPU writes are the GPU's data and linear images alias their memory exactly as on the Switch (Super Mario Galaxy fills staging images and one sampled 4x4 image from the
-//     CPU: rendering.md, "Linear images alias their memory"). Why an allocation and not an import of host memory (vk_memory.c's way for NVN pools, design 4.2): the game reads
-//     and writes this memory only through vkMapMemory's pointer, never at an address it chose, and a buffer or linear image bound to an import needs the external-memory flag at
-//     its creation, which drivers refuse for images; so the driver's own mapping is the direct form. Open for the x86-64 engine: the mapping lies where the driver puts it, while
-//     design aot-recompiler.md 5.2 wants every host allocation handed to the guest inside the arena below 2^39; that needs imports of arena memory for buffers (and a copy path for
-//     linear images) or VK_EXT_map_memory_placed, local to gmem_ensure below.
+//     CPU: rendering.md, "Linear images alias their memory"). Without the x86-64 engine (the GPU tests) the driver's own mapping is the direct form: the game reads and writes
+//     this memory only through vkMapMemory's pointer, never at an address it chose. With it the pointer must lie in the engine's arena below 2^39 (design aot-recompiler.md 5.2):
+//     the host-visible types are then arena pages imported with VK_EXT_external_memory_host, as vk_memory.c imports NVN pools (design 4.2), every buffer and linear image made
+//     with the external-memory handle type it needs (gmem_import below; a driver that refuses imports for a linear image's format gives that image memory of its own).
 //     Optimal images are device-local whatever memory the game binds (as hle_vk.m ignores image bindings): vkBindImageMemory gives each one an allocation of its own (dedicated
 //     where the driver prefers it). They count against maxMemoryAllocationCount with the backend's allocations (hostvk_dev.allocations).
 //   · Shaders. The game's SPIR-V goes to the driver unchanged, after structural checks (guest_spirv_check) and the two documented fix-ups, as SPIR-V binary rewrites (no
@@ -602,8 +601,48 @@ typedef struct {
     _Atomic(VkDeviceMemory) mem;   // the driver allocation, made at the first buffer bind, map or linear-image bind
     uint32_t htype;            // its host memory type
     void *map;                 // its mapping (host-visible types): mapped once, for good
+    void *block; size_t block_n;   // the arena block an imported allocation is (gmem_import), given back to the arena after vkFreeMemory; NULL for the driver's own memory
 } gmem;
 static gmem *gm_of(VkDeviceMemory m) { return (gmem *)(void *)m; }
+// The memory the game maps is guest memory: on the x86-64 engine it lies in the arena below 2^39 (docs/design/aot-recompiler.md 5.2; dm/host/aot.h, "Host memory the guest
+// sees"), whose allocator the host program hands this layer (main_x86.c: dm_guest_alloc, dm_guest_free); a binary without the engine (the GPU tests but t_vk_guest) hands none
+// and keeps the driver's mappings. With it (the import mode) the host-visible types are arena blocks imported with VK_EXT_external_memory_host (design 4.2, the baseline's
+// extension: vk_device.c requires it), so the game's pointer is the arena's and the GPU reads and writes the same pages; type 0 stays a device-local allocation. An import
+// can be bound only by a buffer or image made with the host-allocation handle type, so every buffer the game makes carries it, and every linear image whose format the
+// device imports for (lavapipe: all; drivers that refuse images, design 4.2: such an image gets memory of its own, with a red line). Declared, not done:
+// VK_EXT_map_memory_placed, which would place the driver's own mapping in the arena instead (device-local host-visible memory with resizable BAR, any linear image), is not
+// offered by lavapipe 25.2.8, so no device here could run it
+static void *(*g_arena_alloc)(size_t n);
+static void (*g_arena_release)(void *p, size_t n);
+void guest_vk_set_arena(void *(*alloc)(size_t n), void (*release)(void *p, size_t n));
+void guest_vk_set_arena(void *(*alloc)(size_t n), void (*release)(void *p, size_t n)) { g_arena_alloc = alloc; g_arena_release = release; }
+static int import_mode(void) { return g_arena_alloc != NULL; }
+// gm as an import of a fresh arena block (under g_mu): *out the allocation, *type its host type among bits; a VkResult (the block given back) when the driver refuses it
+static VkResult gmem_import(gmem *gm, uint32_t bits, VkDeviceMemory *out, uint32_t *type) {
+    const size_t pg = plat_page_size(), al = hvk.dev.caps.min_import_alignment > pg ? (size_t)hvk.dev.caps.min_import_alignment : pg;
+    const size_t n = ((size_t)(gm->size ? gm->size : 1) + al - 1) / al * al, bn = n + (al > pg ? al : 0);   // room to align a block that is only page-aligned
+    uint8_t *block = g_arena_alloc(bn), *at = (uint8_t *)(((uintptr_t)block + al - 1) & ~(uintptr_t)(al - 1));
+    VkMemoryHostPointerPropertiesEXT hp = {VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+    VkResult r = vkGetMemoryHostPointerPropertiesEXT(hvk.d, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, at, &hp);
+    const uint32_t t = r ? UINT32_MAX : pick_type(gm->gtype, hp.memoryTypeBits & bits);
+    if (!r && (t == UINT32_MAX || !(hvk.dev.mem.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))) r = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+    if (!r && ++hvk.dev.allocations > hvk.dev.caps.max_allocations) { hvk.dev.allocations--; r = VK_ERROR_TOO_MANY_OBJECTS; }
+    else if (!r) {
+        VkImportMemoryHostPointerInfoEXT im = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, NULL, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, at};
+        VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &im, n, t};
+        r = vkAllocateMemory(hvk.d, &ai, NULL, out);
+        if (r) hvk.dev.allocations--;
+    }
+    if (r) {
+        g_arena_release(block, bn); *out = VK_NULL_HANDLE;
+        RED1("arena memory of %llu bytes for guest memory type %u could not be imported (VkResult %d, importable host types %#x, the object's %#x): the game gets the driver's own "
+             "mapping, outside the arena below 2^39", (unsigned long long)gm->size, gm->gtype, r, hp.memoryTypeBits, bits);
+        return r;
+    }
+    atomic_fetch_add(&g_mem_bytes, gm->size ? gm->size : 16);   // as host_alloc counts, host_free uncounts
+    gm->map = at; gm->block = block; gm->block_n = bn; *type = t;
+    return VK_SUCCESS;
+}
 // The driver allocation of gm, made now if it has none, of a type among bits; VK_ERROR_* when it cannot serve those bits
 static VkResult gmem_ensure(gmem *gm, uint32_t bits) {
     if (atomic_load_explicit(&gm->mem, memory_order_acquire)) {
@@ -616,12 +655,15 @@ static VkResult gmem_ensure(gmem *gm, uint32_t bits) {
     if (!gm->mem) {
         uint32_t t = pick_type(gm->gtype, bits);
         VkDeviceMemory m = VK_NULL_HANDLE;
-        r = host_alloc(gm->size, t, VK_NULL_HANDLE, &m);
-        if (!r && (hvk.dev.mem.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
-            r = vkMapMemory(hvk.d, m, 0, VK_WHOLE_SIZE, 0, &gm->map);
-            if (r) { host_free(m, gm->size); m = VK_NULL_HANDLE; gm->map = NULL; }
+        if (import_mode() && gm->gtype != 0 && !gmem_import(gm, bits, &m, &t)) r = VK_SUCCESS;   // the arena's pages, imported
+        else {
+            r = host_alloc(gm->size, t, VK_NULL_HANDLE, &m);
+            if (!r && (hvk.dev.mem.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                r = vkMapMemory(hvk.d, m, 0, VK_WHOLE_SIZE, 0, &gm->map);
+                if (r) { host_free(m, gm->size); m = VK_NULL_HANDLE; gm->map = NULL; }
+            }
         }
-        if (!r) { gm->htype = t; atomic_store_explicit(&gm->mem, m, memory_order_release); OLOG("memory %p: %llu bytes of host type %u (guest type %u)", (void *)gm, (unsigned long long)gm->size, t, gm->gtype); }
+        if (!r) { gm->htype = t; atomic_store_explicit(&gm->mem, m, memory_order_release); OLOG("memory %p: %llu bytes of host type %u (guest type %u)%s", (void *)gm, (unsigned long long)gm->size, t, gm->gtype, gm->block ? ", arena pages imported" : ""); }
         else LOG("[vk] [RED] no driver allocation of %llu bytes for guest memory type %u (host types %#x, VkResult %d)", (unsigned long long)gm->size, gm->gtype, bits, r);
     } else if (!(bits >> gm->htype & 1)) { RED1("memory of host type %u bound to an object that takes types %#x only", gm->htype, bits); r = VK_ERROR_OUT_OF_DEVICE_MEMORY; }
     pthread_mutex_unlock(&g_mu);
@@ -636,7 +678,9 @@ VK(vkAllocateMemory, VkResult, VkDevice d, const VkMemoryAllocateInfo *ai, const
 }
 VKB(vkFreeMemory, void, VkDevice d, VkDeviceMemory m, const VkAllocationCallbacks *a) {
     (void)d; (void)a; gmem *gm = gm_of(m); if (!gm) return;
-    host_free(gm->mem, gm->size); free(gm);
+    host_free(gm->mem, gm->size);
+    if (gm->block) g_arena_release(gm->block, gm->block_n);   // an import's pages, back to the arena once the allocation over them is gone
+    free(gm);
 }
 VKB(vkMapMemory, VkResult, VkDevice d, VkDeviceMemory m, VkDeviceSize off, VkDeviceSize size, VkMemoryMapFlags fl, void **pp) {
     (void)d; (void)size; (void)fl; gmem *gm = gm_of(m);
@@ -649,7 +693,16 @@ VK(vkUnmapMemory, void, VkDevice d, VkDeviceMemory m) { (void)d; (void)m; }   //
 VK(vkFlushMappedMemoryRanges, VkResult, VkDevice d, uint32_t n, const VkMappedMemoryRange *r) { (void)d; (void)n; (void)r; return VK_SUCCESS; }   // coherent types only
 VK(vkInvalidateMappedMemoryRanges, VkResult, VkDevice d, uint32_t n, const VkMappedMemoryRange *r) { (void)d; (void)n; (void)r; return VK_SUCCESS; }
 VK(vkGetDeviceMemoryCommitment, void, VkDevice d, VkDeviceMemory m, VkDeviceSize *bytes) { (void)d; *bytes = gm_of(m)->mem ? gm_of(m)->size : 0; }
-VK(vkCreateBuffer, VkResult, VkDevice d, const VkBufferCreateInfo *ci, const VkAllocationCallbacks *a, VkBuffer *out) { (void)d; (void)a; return vkCreateBuffer(hvk.d, ci, NULL, out); }
+// The game's create info with the host-allocation handle type in front of its chain (the import mode: any buffer may be bound to an imported allocation), unless its chain
+// already names external memory
+static int chain_has(const void *next, VkStructureType t) { for (const VkBaseInStructure *s = next; s; s = s->pNext) if (s->sType == t) return 1; return 0; }
+VK(vkCreateBuffer, VkResult, VkDevice d, const VkBufferCreateInfo *ci, const VkAllocationCallbacks *a, VkBuffer *out) {
+    (void)d; (void)a;
+    if (!import_mode() || chain_has(ci->pNext, VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO)) return vkCreateBuffer(hvk.d, ci, NULL, out);
+    VkExternalMemoryBufferCreateInfo ex = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, ci->pNext, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
+    VkBufferCreateInfo c = *ci; c.pNext = &ex;
+    return vkCreateBuffer(hvk.d, &c, NULL, out);
+}
 VK(vkDestroyBuffer, void, VkDevice d, VkBuffer b, const VkAllocationCallbacks *a) { (void)d; (void)a; vkDestroyBuffer(hvk.d, b, NULL); }
 VK(vkGetBufferMemoryRequirements, void, VkDevice d, VkBuffer b, VkMemoryRequirements *r) {
     (void)d; vkGetBufferMemoryRequirements(hvk.d, b, r); r->memoryTypeBits = guest_bits(r->memoryTypeBits);
@@ -671,7 +724,7 @@ VK(vkDestroyBufferView, void, VkDevice d, VkBufferView v, const VkAllocationCall
 
 // ---------- Images, views, samplers ----------
 // What this layer keeps per image (the driver's handle is the game's): its own allocation (optimal images, swapchain images), linear tiling, made for a swapchain
-typedef struct { VkDeviceMemory own; VkDeviceSize own_size; uint8_t linear, swapchain; } gimg;
+typedef struct { VkDeviceMemory own; VkDeviceSize own_size; uint8_t linear, swapchain, noimport; } gimg;   // noimport: a linear image the device cannot bind to an import
 static nvn_hmap g_img; static pthread_mutex_t g_img_mu = PTHREAD_MUTEX_INITIALIZER;
 static void img_table_init(void) { pthread_mutex_lock(&g_img_mu); if (!g_img.klen) nvn_hm_init(&g_img, 8); pthread_mutex_unlock(&g_img_mu); }
 static void img_put(VkImage im, gimg *g) { pthread_mutex_lock(&g_img_mu); if (!g_img.klen) nvn_hm_init(&g_img, 8); nvn_hm_put(&g_img, &im, g); pthread_mutex_unlock(&g_img_mu); }
@@ -692,10 +745,26 @@ static VkResult img_own(VkImage im, gimg *g) {
 }
 VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAllocationCallbacks *a, VkImage *out) {
     (void)d; (void)a;
-    VkResult r = vkCreateImage(hvk.d, ci, NULL, out);
+    // The import mode: a linear image may be bound to an imported allocation, so it carries the host-allocation handle type where the device imports for its format and use
+    int linear = ci->tiling == VK_IMAGE_TILING_LINEAR, ext = 0;
+    VkExternalMemoryImageCreateInfo ex = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, ci->pNext, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
+    VkImageCreateInfo c = *ci;
+    if (linear && import_mode() && !chain_has(ci->pNext, VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO)) {
+        VkPhysicalDeviceExternalImageFormatInfo ei = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO, NULL, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
+        VkPhysicalDeviceImageFormatInfo2 fi = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2, &ei, ci->format, ci->imageType, ci->tiling, ci->usage, ci->flags};
+        VkExternalImageFormatProperties ep = {VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES};
+        VkImageFormatProperties2 fp = {VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2, &ep};
+        ext = !vkGetPhysicalDeviceImageFormatProperties2(hvk.dev.phys, &fi, &fp) && (ep.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT);
+        if (ext) c.pNext = &ex;
+    }
+    // An image with external memory must start UNDEFINED (VUID-VkImageCreateInfo-pNext-01443), and a game makes its CPU-filled linear images PREINITIALIZED: in the import mode
+    // every image starts UNDEFINED and every barrier from PREINITIALIZED leaves UNDEFINED (lay below), one rule for all images. Vulkan does not promise that a transition out of
+    // UNDEFINED keeps a linear image's memory; drivers do not touch linear memory in a layout transition (lavapipe: t_vk_guest's linear texels), declared here as the assumption
+    if (import_mode() && c.initialLayout == VK_IMAGE_LAYOUT_PREINITIALIZED) c.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkResult r = vkCreateImage(hvk.d, &c, NULL, out);
     if (r) { LOG("[vk] [RED] the driver refuses image %ux%ux%u format %d levels %u layers %u tiling %d usage %#x (VkResult %d)", ci->extent.width, ci->extent.height,
                  ci->extent.depth, ci->format, ci->mipLevels, ci->arrayLayers, ci->tiling, ci->usage, r); return r; }
-    gimg *g = zalloc(sizeof *g); g->linear = ci->tiling == VK_IMAGE_TILING_LINEAR;
+    gimg *g = zalloc(sizeof *g); g->linear = (uint8_t)linear; g->noimport = (uint8_t)(linear && import_mode() && !ext);
     img_put(*out, g);
     OLOG("CreateImage %p %ux%ux%u format %d levels %u layers %u usage %#x%s", (void *)*out, ci->extent.width, ci->extent.height, ci->extent.depth, ci->format, ci->mipLevels,
          ci->arrayLayers, ci->usage, g->linear ? " linear" : "");
@@ -728,8 +797,11 @@ VKB(vkBindImageMemory, VkResult, VkDevice d, VkImage im, VkDeviceMemory m, VkDev
     if (g->linear) {
         VkMemoryRequirements req; vkGetImageMemoryRequirements(hvk.d, im, &req);
         gmem *gm = gm_of(m);
-        if (!gmem_ensure(gm, req.memoryTypeBits)) return vkBindImageMemory(hvk.d, im, gm->mem, off);
-        RED1("a linear image cannot be bound to the game's memory: it gets memory of its own, which the game's CPU writes do not reach");
+        if (!gmem_ensure(gm, req.memoryTypeBits) && !(gm->block && g->noimport)) return vkBindImageMemory(hvk.d, im, gm->mem, off);
+        if (gm->block && g->noimport)
+            RED1("a linear image whose format the device does not import host memory for is bound to the game's memory, an import of arena pages: it gets memory of its own, "
+                 "which the game's CPU writes do not reach (VK_EXT_map_memory_placed would keep the driver's memory and its mapping in the arena: not offered here)");
+        else RED1("a linear image cannot be bound to the game's memory: it gets memory of its own, which the game's CPU writes do not reach");
     }
     return img_own(im, g);
 }
@@ -767,7 +839,10 @@ VK(vkDestroyPipelineLayout, void, VkDevice d, VkPipelineLayout l, const VkAlloca
 
 // ---------- Render passes, framebuffers ----------
 // PRESENT_SRC_KHR names the layout of a real swapchain's presentable images; the game's swapchain images are ordinary images the present path copies from, in HVK_EXT_LAYOUT
-static VkImageLayout lay(VkImageLayout l) { return l == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ? HVK_EXT_LAYOUT : l; }
+// In the import mode PREINITIALIZED is UNDEFINED (every image starts UNDEFINED there: vkCreateImage)
+static VkImageLayout lay(VkImageLayout l) {
+    return l == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR ? HVK_EXT_LAYOUT : l == VK_IMAGE_LAYOUT_PREINITIALIZED && import_mode() ? VK_IMAGE_LAYOUT_UNDEFINED : l;
+}
 VK(vkCreateRenderPass, VkResult, VkDevice d, const VkRenderPassCreateInfo *ci, const VkAllocationCallbacks *a, VkRenderPass *out) {
     (void)d; (void)a;
     VkRenderPassCreateInfo c = *ci; VkAttachmentDescription at[16], *heap = NULL;

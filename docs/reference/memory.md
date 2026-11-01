@@ -13,6 +13,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Check:** measure before sizing (`DM_SVC=1`: the `SetHeapSize` request and the highest `MapPhysicalMemory` address).
 - **Note:** on iOS without the extended-virtual-addressing entitlement a single 6 GB reservation succeeds and 7 GB fails, but Metal and the rest of the process need address space too; 5 GB is the total proven on a phone (D2R).
 
+### Host memory the guest sees lies in the arena (x86-64 engine)
+
+- **Symptom:** on Linux or Windows, guest code that keeps an address the host handed it may misbehave where it relies on 39-bit pointers (Horizon's address space: an engine may use the top bits); with `DM_AOT_ARENA_CHECK=1`, a `[RED] aot: arena check:` line names the entry, the guest call or the argument that carried a host address.
+- **Cause:** on Apple the guest sees all host memory, so the take-overs hand the SDK host-stack arrays, `malloc` blocks, statics and string literals; on the x86-64 engine those lie near 2^47 (the host's stack, heap and image), outside the arena below 2^39 that holds the guest's own memory ([aot-recompiler.md](../design/aot-recompiler.md) 5.2).
+- **Fix:** one rule (`dm/host/aot.h`, "Host memory the guest sees"): such memory comes from the arena's allocator (`dm_garena_alloc`, `dm_garena_strdup`, `dm_garena_literal`, `dm_garena_static`) or the calling thread's scoped region (`DM_GLOCAL`, for Apple's stack arrays), each host file keeping Apple's text through its `GUEST_*` macros (the plain form under `DM_NATIVE_EXEC`). Unreal's heap on the host allocator (`hle_uemalloc.c`), NVN's virtual pool ranges and lent command memory, and the guest Vulkan layer's mapped memory (arena pages imported with `VK_EXT_external_memory_host`) follow it. The guard checks every host-call thunk's pointer parameters and result and every guest call's pointer arguments.
+- **Found on:** no game yet (the x86-64 engine has run none); the synthetic host-function module of `t_aot_hostfn`.
+
 ## Heap and application pool
 
 ### Provisional Unreal layout leaves no heap

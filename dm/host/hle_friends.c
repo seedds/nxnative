@@ -3,8 +3,16 @@
 // Return convention: Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
 #include "hle.h"
 
-// Notification event that never fires (GetSystemEvent-style calls return a pointer; bound on the guest thread on first use)
+// Notification event that never fires (GetSystemEvent-style calls return a pointer; bound on the guest thread on first use).
+// On the x86-64 engine they are guest memory, made once in the arena (the SDK's event code works on them and the game keeps their addresses: aot.h, "Host memory the guest sees")
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 static _Alignas(16) uint8_t g_ev_notify[0x100], g_ev_invite[0x100];
+#else
+#include "aot.h"
+static void *_Atomic g_ev_notify_guest, *_Atomic g_ev_invite_guest;
+#define g_ev_notify ((uint8_t *)dm_garena_static(&g_ev_notify_guest, NULL, 0x100))
+#define g_ev_invite ((uint8_t *)dm_garena_static(&g_ev_invite_guest, NULL, 0x100))
+#endif
 static void *quiet_event(uint8_t *ev) { hle_bind_system_event(ev, 0); return ev; }
 
 HLE_FORCE("_ZN2nn7friends10InitializeEv", "connects to the friends service (cut)", void, h_fr_Initialize, void) {}

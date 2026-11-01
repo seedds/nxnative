@@ -22,8 +22,22 @@
 #include "hle.h"
 #include <stdatomic.h>
 #include <stdbool.h>
-#if !DM_NATIVE_EXEC
-#include "aot.h"   // dm_guest_alloc, dm_guest_fnptr
+// The heap the engine allocates from is guest memory: on Apple a host malloc zone (plat_zone_*), on the x86-64 engine the arena's garena (aot.h, "Host memory the guest sees":
+// the engine's objects, thread stacks and NVN pool storage all live in it, so the guest's code reads and keeps addresses below 2^39; the garena announces the pages it commits
+// and decommits to the graphics backend, as the memory SVCs do). The zone stays a name there (g_zone: the host allocator is installed)
+#if DM_NATIVE_EXEC
+#define UE_MALLOC(z, n) plat_zone_malloc(z, n)
+#define UE_MEMALIGN(z, a, n) plat_zone_memalign(z, a, n)
+#define UE_REALLOC(z, p, n) plat_zone_realloc(z, p, n)
+#define UE_FREE(z, p) plat_zone_free(z, p)
+#define UE_SIZE(z, p) plat_zone_size(z, p)
+#else
+#include "aot.h"   // dm_guest_alloc, dm_guest_fnptr, the garena
+#define UE_MALLOC(z, n) dm_garena_malloc((n), 16)
+#define UE_MEMALIGN(z, a, n) dm_garena_malloc((n), (a))
+#define UE_REALLOC(z, p, n) dm_garena_realloc((p), (n), 16)
+#define UE_FREE(z, p) dm_garena_free(p)
+#define UE_SIZE(z, p) dm_garena_size(p)
 #endif
 
 // Slot layouts: which slots the host fills and which do nothing (up to 6; 0 ends the list); the others keep the guest's own functions
@@ -61,16 +75,16 @@ static void used(int64_t d) {
 }
 static size_t align_of(uint32_t a) { return a > 16 ? a : 16; }   // 0 = DEFAULT_ALIGNMENT, 16 bytes as Binned3 gives
 static void *alloc(size_t n, uint32_t a) {
-    void *p = align_of(a) == 16 ? plat_zone_malloc(g_zone, n ? n : 1) : plat_zone_memalign(g_zone, align_of(a), n ? n : 1);
-    if (p) used((int64_t)plat_zone_size(g_zone, p));
+    void *p = align_of(a) == 16 ? UE_MALLOC(g_zone, n ? n : 1) : UE_MEMALIGN(g_zone, align_of(a), n ? n : 1);
+    if (p) used((int64_t)UE_SIZE(g_zone, p));
     return p;
 }
-static void release(void *p) { if (p) { used(-(int64_t)plat_zone_size(g_zone, p)); plat_zone_free(g_zone, p); } }
+static void release(void *p) { if (p) { used(-(int64_t)UE_SIZE(g_zone, p)); UE_FREE(g_zone, p); } }
 static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     if (!p) return alloc(n, a);
     if (!n) { release(p); return NULL; }
-    size_t old = plat_zone_size(g_zone, p);
-    if (align_of(a) == 16) { void *q = plat_zone_realloc(g_zone, p, n); if (q) used((int64_t)plat_zone_size(g_zone, q) - (int64_t)old); return q; }
+    size_t old = UE_SIZE(g_zone, p);
+    if (align_of(a) == 16) { void *q = UE_REALLOC(g_zone, p, n); if (q) used((int64_t)UE_SIZE(g_zone, q) - (int64_t)old); return q; }
     if (!((uintptr_t)p & (align_of(a) - 1)) && old >= n) return p;
     void *q = alloc(n, a); if (!q) return NULL;
     memcpy(q, p, old < n ? old : n); release(p); return q;
@@ -90,7 +104,7 @@ HLE_LINKAGE void *m_Realloc(void *self, void *p, size_t n, uint32_t a) {
 HLE_LINKAGE void *m_TryRealloc(void *self, void *p, size_t n, uint32_t a) { (void)self; return realloc_aligned(p, n, a); }
 HLE_LINKAGE void m_Free(void *self, void *p) { (void)self; release(p); }
 HLE_LINKAGE size_t m_QuantizeSize(void *self, size_t n, uint32_t a) { (void)self; (void)a; return plat_zone_good_size(n); }
-HLE_LINKAGE bool m_GetAllocationSize(void *self, void *p, size_t *out) { (void)self; if (!p) return false; *out = plat_zone_size(g_zone, p); return true; }
+HLE_LINKAGE bool m_GetAllocationSize(void *self, void *p, size_t *out) { (void)self; if (!p) return false; *out = UE_SIZE(g_zone, p); return true; }
 HLE_LINKAGE void m_Nothing(void *self) { (void)self; }   // Trim (its bool argument is ignored), the thread-local cache setup and teardown, DumpAllocatorStats
 static void *g_vt[NSLOT];
 #if DM_NATIVE_EXEC

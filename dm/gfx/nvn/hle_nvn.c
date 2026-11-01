@@ -22,11 +22,20 @@
 #include "nvn_dirty.h"
 // A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
 // as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+// Memory the host makes for the game is guest memory (docs/design/aot-recompiler.md 5.2; aot.h, "Host memory the guest sees"): a virtual pool's own address range, whose
+// addresses the game's buffers and textures take (GUEST_VM_RESERVE / GUEST_VM_RELEASE), and the command memory the host lends a command buffer, whose addresses become the
+// handles the game keeps (GUEST_MALLOC). The platform layer's and malloc's on Apple, the arena's here
 #if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 #define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#define GUEST_VM_RESERVE(n) plat_vm_reserve(n)
+#define GUEST_VM_RELEASE(p, n) plat_vm_release(p, n)
+#define GUEST_MALLOC(n) malloc(n)
 #else
 #include "../../host/aot.h"
 #define GUEST_CALL DM_GUEST_CALL
+#define GUEST_VM_RESERVE(n) dm_guest_reserve(n)
+#define GUEST_VM_RELEASE(p, n) dm_guest_free((p), (n))
+#define GUEST_MALLOC(n) dm_garena_malloc((n), 16)
 #endif
 #include <unistd.h>
 #include <errno.h>
@@ -852,7 +861,7 @@ static uint8_t *hostseg_take(const cmd_t *o, size_t n) {
     if (!in_seg && o && o->recording && o->cur) { lo = o->recording == 1 && o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur + 16; }
     for (int i = 0; i < g_nhostseg && !m; i++)
         if (!g_hostseg[i].busy && g_hostseg[i].n == n) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, n, f, 1, lo, hi }; m = g_hostseg[i].mem; }
-    if (!m && g_hostseg_bytes + n <= HOSTSEG_CAP && (m = malloc(n))) {
+    if (!m && g_hostseg_bytes + n <= HOSTSEG_CAP && (m = GUEST_MALLOC(n))) {
         if (g_nhostseg == g_caphostseg) { g_caphostseg = g_caphostseg ? g_caphostseg * 2 : 64; g_hostseg = realloc(g_hostseg, sizeof *g_hostseg * (size_t)g_caphostseg); }
         g_hostseg[g_nhostseg++] = (hostseg_t){ m, n, f, 1, lo, hi }; g_hostseg_bytes += n;
     }
@@ -2072,7 +2081,7 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
     uint64_t len = o->size < (64ull << 30) ? o->size : 64ull << 30;
 #endif
     len = (len + (uint64_t)plat_page_size() - 1) & ~((uint64_t)plat_page_size() - 1);
-    void *a = plat_vm_reserve(len);   // plat.h: inaccessible address space (on Apple the same mmap as before)
+    void *a = GUEST_VM_RESERVE(len);   // plat.h: inaccessible address space (on Apple the same mmap as before; in the arena on the x86-64 engine)
     if (!a) { LOG("[RED] virtual pool %p: cannot reserve %#llx bytes of address space (errno %d)", (const void *)o, (unsigned long long)len, errno); return NULL; }
     struct vpool *v = calloc(1, sizeof *v);
     if (!v || !(v->pt = calloc((o->size + (2u << 20) - 1) >> 21, sizeof *v->pt))) die("sparse pool allocation failed");
@@ -2088,7 +2097,7 @@ static uint8_t *vpool_reserve(pool_t *o) {   // → the reserved range, or NULL
 static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     struct vpool *v = o->vp; if (!v) return;
     for (int k = 0; k < v->nrun; k++) be_pool_del(v->base + v->run[k].lo);
-    plat_vm_release(v->base, v->len);
+    GUEST_VM_RELEASE(v->base, v->len);
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
     free(v->pt); free(v); o->vp = NULL;

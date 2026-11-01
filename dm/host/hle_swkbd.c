@@ -185,11 +185,20 @@ HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard4CalcEv", "inline keyboard per-frame upda
     LOG("swkbd: inline keyboard %p → %s%s%s", kb, r > 0 ? "OK '" : enter ? "cancel" : "no enter callback, cancel", r > 0 ? text : "", r > 0 ? "'" : "");
     pthread_mutex_lock(&g_ikb_mu); if (g_ikb[i].kb == kb) g_ikb[i].state = 1; pthread_mutex_unlock(&g_ikb_mu);   // the keyboard closes once the text is decided or cancelled
     if (r <= 0) { if (fn) GUEST_CALL(fn); return 1; }
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
     static ikb_str_arg a; memset(&a, 0, sizeof a);   // one keyboard request at a time; static keeps 1 KB off the guest stack
     size_t n = swkbd_u8_to_u16(text, max > 0 ? (size_t)max : 500, a.str, 502);
     a.length = (int32_t)n; a.cursor = (int32_t)n;
     if (changed) GUEST_CALL(changed, &a);
     GUEST_CALL(enter, &a);
+#else   // the x86-64 engine: the argument the game's callbacks read is guest memory, the same static made once in the arena (aot.h DM_GSTATIC)
+    static void *_Atomic a_guest;
+    ikb_str_arg *a = DM_GSTATIC(ikb_str_arg, a_guest, NULL); memset(a, 0, sizeof *a);
+    size_t n = swkbd_u8_to_u16(text, max > 0 ? (size_t)max : 500, a->str, 502);
+    a->length = (int32_t)n; a->cursor = (int32_t)n;
+    if (changed) GUEST_CALL(changed, a);
+    GUEST_CALL(enter, a);
+#endif
     return 1;
 }
 HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard29SetFinishedInitializeCallbackEPFvvE", "inline keyboard: records the finished-initialize callback, called on the next Calc after Initialize", void, h_ikb_SetFinInit, void *kb, ikb_cb0 fn) {

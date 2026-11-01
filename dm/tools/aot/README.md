@@ -380,7 +380,7 @@ nxaot_host, nxaot_funcdiff and nxaot_bench share. Decision against 9.4: the pack
 and the host loads it with `dlopen`, as the design's host loads the pack's library (no LLVM in the host; the library's imports resolve against the
 executable, which exports them).
 
-- **The arena** (5.2): 8 GiB reserved at 2^36 (64 GiB, below 2^39) with `MAP_FIXED_NOREPLACE`, nothing accessible until mapped: the host-return
+- **The arena** (5.2): 256 GiB reserved at 2^36 (64 GiB to 320 GiB, below 2^39) with `MAP_FIXED_NOREPLACE`, nothing accessible until mapped: the host-return
   address `arena + 0x10` (no code), the main thread's guest stack (1 MiB at +16 MiB), its TLS block, a scratch area for nxaot_funcdiff, and the
   module's image at +256 MiB, its one-to-one guest address (5.1): text and read-only data readable and never executable (5.3: a jump into guest
   text faults), data and bss writable. State blocks and native stacks are outside it.
@@ -556,7 +556,7 @@ pauses, about 760 invariant checks, no inconsistent block, the output unchanged.
 `DM_NATIVE_EXEC` is 0), item by item against the signatures this run time defines (include/nxaot/aot_module.h, src/rt/jit.h); CTest `t_aot_host`
 (dm/host/tests/t_aot_host.c) runs the corpus through it, packed by [tests/build_packs.sh](tests/build_packs.sh):
 
-- **done**: the arena allocator (5.2; aot_arena.c `dm_guest_reserve`, `dm_guest_alloc`, `dm_guest_free`: 8 GiB at 2^36 through the platform
+- **done**: the arena allocator (5.2; aot_arena.c `dm_guest_reserve`, `dm_guest_alloc`, `dm_guest_free`: 256 GiB at 2^36 through the platform
   layer's new `plat_vm_reserve_at`, the host-function page first, then the stub page) and the module loader's mapping into it (loader.c:
   `loader_add_image` for an image as it is, an NRO, and `load_modules` for a game's modules from their manifests: "A game module in the host" below;
   text readable and never executable);

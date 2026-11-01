@@ -22,12 +22,16 @@
 #endif
 // The memory the decoder gets (its input, output and work memory): host memory where the guest's code is native; guest memory in the arena on the x86-64 engine,
 // as everything guest code is handed (docs/design/aot-recompiler.md 5.2)
+// GUEST_LOCAL0(type, name, n): Apple's zeroed stack array type name[n] = {0}, here n zeroed elements of the thread's scoped region in the arena, released when the block ends
+// (aot.h DM_GLOCAL)
 #if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 #define GBUF_ALLOC(n) malloc(n)
 #define GBUF_FREE(p, n) free(p)
+#define GUEST_LOCAL0(type, name, n) type name[n] = {0}
 #else
 #define GBUF_ALLOC(n) dm_guest_alloc(n)
 #define GBUF_FREE(p, n) dm_guest_free((p), (n))
+#define GUEST_LOCAL0 DM_GLOCAL
 #endif
 
 // OodleLZ_Decompress is found in main by the name its profiler scope passes: the one function whose code takes the address of the NUL-terminated string "OodleLZ_Decompress" (adrp + add),
@@ -128,7 +132,7 @@ static int64_t lzd_run(const void *c, int64_t cl, void *r, int64_t rl, void *scr
     if (!dec) { GBUF_FREE(own, (size_t)need + 64); return -1; }
     int64_t pos = 0, cpos = 0;
     while (pos < rl) {
-        int32_t out[4] = {0};
+        GUEST_LOCAL0(int32_t, out, 4);   // DecodeSome writes its counts there
         if (!GUEST_CALL(g_lzd.some, dec, out, r, pos, rl, rl - pos, (const uint8_t *)c + cpos, cl - cpos, 1, 0, 0, 3) || (out[0] <= 0 && out[1] <= 0)) break;   // fuzz safe, no CRC check, silent, unthreaded
         pos += out[0]; cpos += out[1];
     }

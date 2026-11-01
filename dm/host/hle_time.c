@@ -4,6 +4,33 @@
 #include "hle.h"
 #include <stdatomic.h>
 #include <time.h>
+// The C library's struct tm handed to the guest (localtime's static result, the zone name tm_zone points at, which localtime_r and mktime write into the guest's own struct) is
+// guest memory on the x86-64 engine (docs/design/aot-recompiler.md 5.2; aot.h, "Host memory the guest sees"): the result copied into a struct made once in the arena, the zone
+// name an arena copy (dm_garena_literal: the C library's zone names have static storage). On Apple, and on Windows (its struct tm has no tm_zone), the C library's as it is
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GUEST_TM(r) r
+#define GUEST_TM_ZONE(r) r
+#define GUEST_MKTIME(tm) mktime(tm)
+#else
+#include "aot.h"
+static struct tm *guest_tm_zone(struct tm *r) {
+#if !defined(_WIN32)
+    if (r && r->tm_zone) r->tm_zone = dm_garena_literal(r->tm_zone);
+#endif
+    return r;
+}
+static struct tm *guest_tm(struct tm *r) {
+    static void *_Atomic g;
+    if (!r) return NULL;
+    struct tm *t = DM_GSTATIC(struct tm, g, NULL);
+    *t = *r;
+    return guest_tm_zone(t);
+}
+static time_t guest_mktime(struct tm *tm) { time_t r = mktime(tm); guest_tm_zone(tm); return r; }
+#define GUEST_TM(r) guest_tm(r)
+#define GUEST_TM_ZONE(r) guest_tm_zone(r)
+#define GUEST_MKTIME(tm) guest_mktime(tm)
+#endif
 
 typedef struct { int16_t year; int8_t month, day, hour, minute, second; int8_t pad; } CalendarTime;
 typedef struct { uint32_t wday, yday; char tzname[8]; uint32_t dst; int32_t offset; } CalendarAdditionalInfo;
@@ -158,6 +185,6 @@ HLE_FORCE("_ZN2nn4time18ToPosixTimeFromUtcERKNS0_12CalendarTimeE", "UTC calendar
 // (a game's local timestamps were off by the time zone's offset). The SDK on a real Switch converts by the system time zone, so only following the host system time zone here is consistent;
 // the host TZ normally = the system time zone, and is pinned to UTC only for deterministic comparison with DM_FIXED_TIME (main.c). The struct tm layout is the same on both sides (9 ints, long offset, time zone name pointer).
 // gmtime / gmtime_r / timegm are UTC anyway and are not taken over. The same-named pass-through entries in hle_table.c only take effect when the symbol has no definition (the SDK defines them), hence HLE_FORCE
-HLE_FORCE("localtime", "local time → host localtime (follows the system time zone)", struct tm *, h_localtime, const int64_t *t) { time_t v = (time_t)*t; return localtime(&v); }
-HLE_FORCE("localtime_r", "local time → host localtime_r (follows the system time zone)", struct tm *, h_localtime_r, const int64_t *t, struct tm *out) { time_t v = (time_t)*t; return localtime_r(&v, out); }
-HLE_FORCE("mktime", "local calendar → absolute seconds, host mktime (follows the system time zone)", int64_t, h_mktime, struct tm *tm) { return (int64_t)mktime(tm); }
+HLE_FORCE("localtime", "local time → host localtime (follows the system time zone)", struct tm *, h_localtime, const int64_t *t) { time_t v = (time_t)*t; return GUEST_TM(localtime(&v)); }
+HLE_FORCE("localtime_r", "local time → host localtime_r (follows the system time zone)", struct tm *, h_localtime_r, const int64_t *t, struct tm *out) { time_t v = (time_t)*t; return GUEST_TM_ZONE(localtime_r(&v, out)); }
+HLE_FORCE("mktime", "local calendar → absolute seconds, host mktime (follows the system time zone)", int64_t, h_mktime, struct tm *tm) { return (int64_t)GUEST_MKTIME(tm); }

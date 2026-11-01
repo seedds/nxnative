@@ -299,10 +299,10 @@ host_test(t_gesture SOURCES t_gesture.c ../hle_touch.c PROFILE)
 host_test(t_thread_leak SOURCES t_thread_leak.c PROFILE)
 host_test(t_swkbd SOURCES t_swkbd.c ../hle_swkbd.c PROFILE DEFS DM_TEST_GUEST_C)   # its keyboard callbacks are C functions
 host_test(t_pctl SOURCES t_pctl.c PROFILE DEFS DM_TEST_GUEST_C)   # DM_TEST_GUEST_C: the host files a test includes take their native form (hle_misc.c, hle_ro.c, hle_guestthread.c, and every GUEST_CALL site)
-host_test(t_time SOURCES t_time.c PROFILE)
+host_test(t_time SOURCES t_time.c PROFILE DEFS DM_TEST_GUEST_C)   # DM_TEST_GUEST_C here and below: the included host file's native form (no arena: aot.h, "Host memory the guest sees")
 host_test(t_hid SOURCES t_hid.c ../hle_haptics.c PROFILE)
-host_test(t_audio_spsc SOURCES t_audio_spsc.c PROFILE SDL)
-host_test(t_audio_sdl SOURCES t_audio_sdl.c PROFILE SDL)
+host_test(t_audio_spsc SOURCES t_audio_spsc.c PROFILE SDL DEFS DM_TEST_GUEST_C)
+host_test(t_audio_sdl SOURCES t_audio_sdl.c PROFILE SDL DEFS DM_TEST_GUEST_C)
 host_test(t_front_sdl SOURCES t_front_sdl.c ../hle_haptics.c PROFILE SDL)
 host_test(t_audren_work SOURCES t_audren_work.c PROFILE DEFS DM_TEST_GUEST_C)
 host_test(t_nro SOURCES t_nro.c PROFILE DEFS DM_TEST_GUEST_C)
@@ -486,6 +486,12 @@ foreach(t IN ITEMS guest spirv_fix)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c ../../gfx/hle_vi.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj guest_vk nvn_vk)
 endforeach()
+# t_vk_guest takes the x86-64 engine's arena (aot_arena.c, docs/design/aot-recompiler.md 5.2): the memory the layer maps for the game is arena pages it imports (guest_vk.c
+# gmem_import, VK_EXT_external_memory_host) and the test checks the mappings lie below 2^39; hle_vi.c's objects are the arena's too. t_vk_spirv_fix maps nothing: hle_vi.c
+# takes its native form there (DM_TEST_GUEST_C)
+target_sources(t_vk_guest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/aot_arena.c ${CMAKE_CURRENT_SOURCE_DIR}/aot_hostfn.c)
+target_include_directories(t_vk_guest PRIVATE ${REPO}/dm/tools/aot/include)
+target_compile_definitions(t_vk_spirv_fix PRIVATE DM_TEST_GUEST_C)
 # The guest OpenGL layer (docs/design/vulkan-backend.md 8.2, step P9b): t_vk_guest_gl drives guest_gl.c through the EGL and GL entries a game gets (eglGetProcAddress found by
 # name in the import table, the GL names from it) on lavapipe under the validation layer, skipped without a Vulkan device as the GPU tests above. Its shader library is built
 # here from the GLSL of dm/gfx/tests/vk/shaders/gl by dm/gfx/tools/gl_shaders.py --vk, so every build checks the tool's output against the layer (glslang 15 in the
@@ -495,7 +501,7 @@ set(T_GL_LIB ${CMAKE_BINARY_DIR}/gen/gl_test)
 file(GLOB T_GL_SHADER_FILES CONFIGURE_DEPENDS ${T_GL_SHADERS}/*.vert ${T_GL_SHADERS}/*.frag)
 host_test(t_vk_guest_gl SOURCES ../../gfx/tests/vk/t_vk_guest_gl.c ../../gfx/hle_vi.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
 target_link_libraries(t_vk_guest_gl PRIVATE nvn_front_obj guest_gl nvn_vk)
-target_compile_definitions(t_vk_guest_gl PRIVATE "T_GL_SHADERS=\"${T_GL_SHADERS}\"" "T_GL_LIB=\"${T_GL_LIB}\"")
+target_compile_definitions(t_vk_guest_gl PRIVATE "T_GL_SHADERS=\"${T_GL_SHADERS}\"" "T_GL_LIB=\"${T_GL_LIB}\"" DM_TEST_GUEST_C)   # DM_TEST_GUEST_C: hle_vi.c's native form (no arena)
 find_program(GLSLANG_VALIDATOR glslangValidator)
 if(GLSLANG_VALIDATOR)
     add_custom_command(OUTPUT ${T_GL_LIB}/gl-vk/gl_shaders.tsv
@@ -532,6 +538,10 @@ add_custom_target(t_hle_thunks_gen DEPENDS ${T_HLE_THUNKS_C})
 set_source_files_properties(${TESTS}/t_hle_thunks.c PROPERTIES OBJECT_DEPENDS ${T_HLE_THUNKS_C})
 host_test(t_hle_thunks SOURCES t_hle_thunks.c t_hle_thunks_entries.c ../aot_hostfn.c PROFILE INCLUDES ${CMAKE_BINARY_DIR} ${REPO}/dm/tools/aot/include)
 add_dependencies(t_hle_thunks t_hle_thunks_gen)
+# The garena, the one rule's allocator for host memory the guest sees (aot.h, "Host memory the guest sees"; aot_arena.c), over the real arena below 2^39 with the engine's other
+# files left out: size classes and alignments, large blocks and their reuse, the commit hooks, strings and statics, the scoped region and its exhaustion, and the guest-call side
+# of the arena guard (DM_AOT_ARENA_CHECK)
+host_test(t_garena SOURCES t_garena.c ../aot_arena.c ../aot_hostfn.c PROFILE INCLUDES ${REPO}/dm/tools/aot/include)
 # The x86-64 execution engine in the host on the corpus of dm/tools/aot (t_aot_host.c): every corpus NRO mapped by the host's loader, its pack loaded, _start run
 # through dm_aot_run with the host's SVC path, its lines compared with corpus/expected; excl's threads on hle_thread.c, its pause test through SetThreadActivity
 # and GetThreadContext3; a guest call into the host-function page; a write-protected data segment resumed by a fault hook. Each run is a child process. The packs
@@ -609,7 +619,7 @@ host_test(t_guest_map SOURCES t_guest_map.c INCLUDES ${TESTS}/memory_profile)
 
 # fork() death tests
 host_test(t_heap_size SOURCES t_heap_size.c PROFILE POSIX)
-host_test(t_oe SOURCES t_oe.c PROFILE POSIX)
+host_test(t_oe SOURCES t_oe.c PROFILE POSIX DEFS DM_TEST_GUEST_C)   # hle_oe.c's native form: its event object a plain static (no arena)
 host_test(t_fpslock SOURCES t_fpslock.c PROFILE POSIX)
 host_test(t_audren_layout SOURCES t_audren_layout.c PROFILE POSIX DEFS DM_TEST_GUEST_C)
 host_test(t_shared_font SOURCES t_shared_font.c PROFILE POSIX DEFS DM_TEST_GUEST_C)

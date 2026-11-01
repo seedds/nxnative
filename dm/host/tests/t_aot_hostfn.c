@@ -18,6 +18,10 @@
 //     t_re_hostthread from a host thread that is no guest thread (its own guest context, a [RED] line); t_re_bind takes hle_thread.c's real system-event path, whose SDK
 //     functions (main's) are nested guest calls, and main then waits on the signalled event; t_re_stop holds a lock across a guest call that ends the process: the call
 //     returns, the host function releases the lock, and the run ends with ExitProcess's status
+//   then host memory the guest sees (aot.h, "Host memory the guest sees"): t_ga_buf hands main a garena buffer, which it reads; t_ga_str an arena copy of a literal, which it
+//     reads and hands to strlen; t_ga_local passes main's hf_sum2 an array of the thread's scoped region (DM_GLOCAL); each address lies in the arena below 2^39. t_ga_outside
+//     hands over host memory on purpose (a host stack array to hf_sum2, a host string returned and passed on to strlen): run again with DM_AOT_ARENA_CHECK=1 (1b), the guard
+//     flags exactly those three, once each, and nothing else the run exchanges
 //   a refusal: the same folder without sub.aot.so: ro::LoadModule fails with a [RED] line naming the pack, and the module's call through the missing symbol stops the run
 // What this does not show: a real NRO, SDK or game (no game files here); Windows (a DLL pack: not built here)
 //   t_aot_hostfn [--module <dir>]
@@ -53,6 +57,11 @@ extern _Atomic uint64_t g_t_hf_calls[3];
 struct t_re_seen { int fire_depth, leaf_depth, thread_other, host_fresh, host_ctx, signalled, stop_left, stop_depth, stop_status, stop_resumed; uint64_t stop_r; };
 extern struct t_re_seen g_re_seen;     // what the t_re_* entries saw (t_aot_hostfn_entries.c)
 extern pthread_mutex_t g_re_stop_mu;   // t_re_stop's lock
+// Host memory the guest sees (aot.h, the one rule): what the t_ga_* entries handed main (t_aot_hostfn_entries.c), and the word t_ga_buf wrote (aot_synth.py HF_GA_WORD)
+struct t_ga_seen { uint64_t buf, str, local, local_sum, outside_sum; };
+extern struct t_ga_seen g_ga_seen;
+#define T_GA_WORD 0x1122334455667788ull
+static int below_2_39(uint64_t a, uint64_t n) { return dm_aot_in_arena(a, n) && a + n <= 1ull << 39; }
 
 // aot_synth.py's HF_EXPECTED (results[12], the pointer t_hf_get handed over, is checked against the slot of t_hf_mul)
 static const uint64_t EXPECTED[12] = {19, 0x40200000, 1030, 1056, 123, 0, 42, 0, 0, 1012, 77, 0};
@@ -171,6 +180,22 @@ static void *guest_main(void *arg) {
     const int unlocked = pthread_mutex_trylock(&g_re_stop_mu) == 0;
     if (unlocked) pthread_mutex_unlock(&g_re_stop_mu);
     check(unlocked, "t_re_stop's lock was released: no host frame was skipped when guest code left");
+    // Host memory the guest sees: what the t_ga_* entries handed main lies in the arena below 2^39, and main read it (aot_synth.py HF_GA_EXPECTED in ga_results)
+    const uint64_t *ga = module_sym(m, "ga_results");
+    check(ga != NULL, "the module's ga_results");
+    if (ga) {
+        check(ga[0] && ga[0] == g_ga_seen.buf && below_2_39(ga[0], 64) && ga[1] == T_GA_WORD,
+              "t_ga_buf: a garena buffer at %#llx, in the arena below 2^39; main read the host's word from it (%#llx)", (unsigned long long)ga[0], (unsigned long long)ga[1]);
+        check(ga[2] && ga[2] == g_ga_seen.str && below_2_39(ga[2], 13) && !strcmp((const char *)(uintptr_t)ga[2], "guest string") && ga[3] == 12 && ga[4] == 'g',
+              "t_ga_str: an arena copy of the literal at %#llx; strlen through the GOT %llu, its first byte read by main %#llx", (unsigned long long)ga[2],
+              (unsigned long long)ga[3], (unsigned long long)ga[4]);
+        check(ga[5] == 1055 && g_ga_seen.local_sum == 55 && below_2_39(g_ga_seen.local, 32),
+              "t_ga_local: the scoped array at %#llx (in the arena) passed to main's hf_sum2, which read 11 + 44 (%llu)", (unsigned long long)g_ga_seen.local,
+              (unsigned long long)g_ga_seen.local_sum);
+        check(ga[6] == 7 && g_ga_seen.outside_sum == 11 && !below_2_39((uint64_t)(uintptr_t)&g_ga_seen, 1),
+              "t_ga_outside: host memory on purpose, outside the arena: main read the host stack array (5 + 6 = %llu) and strlen of the host string (%llu)",
+              (unsigned long long)g_ga_seen.outside_sum, (unsigned long long)ga[6]);
+    }
     return NULL;
 }
 
@@ -237,6 +262,15 @@ static const char *red_line(const char *out, const char *needle) {   // the firs
     }
     return "(no such [RED] line)";
 }
+static int count_of(const char *s, const char *needle) { int n = 0; for (const char *p = strstr(s, needle); p; p = strstr(p + 1, needle)) n++; return n; }
+// The arena guard's switch for the next child (DM_AOT_ARENA_CHECK, aot.h): "0", "1", or NULL to remove it
+static void guard_env(const char *v) {
+#if defined(_WIN32)
+    _putenv_s("DM_AOT_ARENA_CHECK", v ? v : "");
+#else
+    if (v) setenv("DM_AOT_ARENA_CHECK", v, 1); else unsetenv("DM_AOT_ARENA_CHECK");
+#endif
+}
 // A copy of the folder without sub's pack, in t_aot_hostfn.tmp/nopack
 static int copy_without_pack(const char *dir, char *out_dir, size_t n) {
     static const char *const files[] = {"main.image.bin", "main.aot.tsv", "main" DM_AOT_PACK_SUFFIX, "sub.nro", "nro.tsv"};
@@ -280,7 +314,8 @@ int main(int argc, char **argv) {
     fclose(pf);
     printf("t_aot_hostfn: module %s\n", dir);
     result r;
-    // 1. The run
+    // 1. The run (the arena guard off whatever the environment says: run 1b turns it on)
+    guard_env("0");
     run_child(argv[0], dir, &r);
     fputs(r.out, stdout);
     int cks = 0, cfail = -1, cst = -1;
@@ -296,7 +331,26 @@ int main(int argc, char **argv) {
     verdict(strstr(r.out, "t_aot_hostfn: the host-created guest thread") != NULL, "the host-created guest thread's line");
     verdict(strstr(r.out, "[RED] aot: guest code (main+") != NULL && strstr(r.out, "called from a host thread that is no guest thread") != NULL,
             "the host thread with no guest thread: one [RED] line naming the guest function and what it lacks");
+    verdict(!strstr(r.out, "arena check"), "the arena guard off: no arena check line");
     free(r.out);
+    // 1b. The same run with the arena guard on (DM_AOT_ARENA_CHECK=1; aot.h): every pointer the host and the module exchange lies in the arena but the three t_ga_outside hands over
+    // on purpose, each flagged once: its host stack array passed to hf_sum2 (the guest-call side, DM_GUEST_CALL), its host string returned (its thunk's result), and that
+    // string passed to strlen (the passthrough thunk's argument)
+    guard_env("1");
+    run_child(argv[0], dir, &r);
+    const int arena_lines = count_of(r.out, "[RED] aot: arena check: ");
+    printf("      %d arena check lines:\n", arena_lines);
+    for (const char *l = strstr(r.out, "[RED] aot: arena check: "); l; l = strstr(l + 1, "[RED] aot: arena check: ")) printf("      %.*s\n", (int)strcspn(l, "\n"), l);
+    sum = strstr(r.out, "t_aot_hostfn: run status ");
+    cks = 0; cfail = -1; cst = -1;
+    if (sum) sscanf(sum, "t_aot_hostfn: run status %d, %d checks, %d failed", &cst, &cks, &cfail);
+    verdict(r.status == 0 && cst == 0 && cfail == 0, "the run with DM_AOT_ARENA_CHECK=1: every check of the child passed");
+    verdict(arena_lines == 3 && strstr(r.out, "[RED] aot: arena check: guest call argument 1 at ") && strstr(r.out, "t_aot_hostfn_entries.c:") &&
+            strstr(r.out, "[RED] aot: arena check: t_ga_outside returns the guest an address outside the arena") &&
+            strstr(r.out, "[RED] aot: arena check: the guest passes libc_strlen an address outside the arena"),
+            "the guard: exactly the three host addresses handed over on purpose, each once (a guest call's argument, a thunk's result, a thunk's argument)");
+    free(r.out);
+    guard_env(NULL);
     // 2. The NRO's pack missing
     char tdir[1100];
     if (copy_without_pack(dir, tdir, sizeof tdir)) verdict(0, "a copy of the folder without sub's pack (t_aot_hostfn.tmp/nopack)");

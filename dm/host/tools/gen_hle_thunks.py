@@ -32,6 +32,11 @@ passed as that integer: AAPCS64 gives an 8-byte composite one x register, and th
 does not know (any other struct or union by value, a sub-32-bit parameter, ..., an unknown typedef), an entry inside a preprocessor conditional other than
 #if 0 / #if 1 (and #ifdef / #ifndef __cplusplus, which is never defined in these C sources), or a C name used by two entries stops the run with file:line.
 
+The arena guard (DM_AOT_ARENA_CHECK=1; dm/host/aot.h, "Host memory the guest sees"): every thunk of an entry with pointer parameters or a pointer result checks them,
+before and after the call, against the arena below 2^39 (DM_AOT_ARENA_BASE and DM_AOT_ARENA_SIZE, read from dm/host/aot.h), and logs a [RED] line once per entry
+and position for an address outside it; opaque handle types (OPAQUE: the Vulkan handles, EGL's) and function pointer results are left out. The check is self-contained
+in the generated file, so a table links without the engine.
+
   gen_hle_thunks.py -o <out.c> [-I <dir>]... <source.c>...
 Prints a summary (entries, parameter and return kinds); exit status 1 on any error, and nothing is written then.
 """
@@ -47,6 +52,12 @@ TABLES = {"HLE": "hle", "HLE_FORCE": "force", "HLE_FORCE_BIG": "force", "NVN": "
           "PASS": "hle", "HLE_LINKAGE": "hostfn"}   # the host table each entry registers in (a name is unique within one; HLE_LINKAGE functions are in none)
 API = {"NVN": "NVN", "NVN_NOPROTO": "NVN", "VK": "Vulkan", "VKB": "Vulkan", "GL": "GL", "GLB": "GL", "EGL": "EGL", "PASS": "C library"}   # a named entry's API, for its messages
 NATIVE = "DM_NATIVE_EXEC"   # plat.h: 1 where the guest's code runs natively (Apple arm64), 0 for every build the generator serves
+# The arena guard (DM_AOT_ARENA_CHECK=1, docs/env_switches.tsv; dm/host/aot.h, "Host memory the guest sees"): each thunk checks its entry's pointer parameters and
+# pointer result against the arena below 2^39 (its bounds read from aot.h) and logs a [RED] line once per entry and position for an address outside it. Parameters and
+# results of an opaque handle type are left out: the guest never reads through them, and a driver's own handles live where the driver puts them (the Vulkan handles
+# learn_vulkan_header finds, and EGL's, which dm/gfx/hostvk/guest_gl.c declares as void *)
+OPAQUE = {"EGLDisplay", "EGLConfig", "EGLContext", "EGLSurface"}
+AOT_H = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "aot.h")
 
 # Scalar types by C spelling (qualifiers removed, words joined by one space): (class, canonical C type).
 # Classes: x32 / x64 integer in an x register; f32 / f64 in a v register; small: a sub-32-bit integer (accepted as a return only)
@@ -344,6 +355,7 @@ def learn_vulkan_header(path, scope, seen):
         m = VK_HANDLE.match(line)
         if m:
             scope.typedefs[m.group(1)] = ("ptr", "void *")
+            OPAQUE.add(m.group(1))   # the arena guard leaves handles out
             continue
         m = VK_TAGGED.match(line)
         if m:
@@ -570,9 +582,19 @@ def classify(toks, typedefs, path, line, what):
     return r
 
 
+def opaque(toks, typedefs):
+    """Whether a pointer-class type given as tokens (the parameter's name may be among them) is an opaque handle type (OPAQUE): one typedef name, no * of its own"""
+    words = [v for _, v in toks if v not in QUALIFIERS]
+    if len(words) == 2 and words[0] in typedefs:
+        words = words[:1]   # the parameter's name
+    return len(words) == 1 and words[0] in OPAQUE
+
+
 def analyse(e):
     p, ln, td = e["path"], e["line"], e["typedefs"]
     e["rcls"], e["rtype"] = classify(e["ret"], td, p, ln, "return type")
+    e["check_ret"] = e["rcls"] == "ptr" and not opaque(e["ret"], td)   # the arena guard: a pointer result
+    e["checks"] = []   # the arena guard: (1-based position, register) of each pointer parameter
     params = e["params"]
     if len(params) == 1 and [v for _, v in params[0]] == ["void"]:
         params = []
@@ -586,6 +608,7 @@ def analyse(e):
             raise GenError(f"{p}:{ln}: parameter {k + 1}: void")
         if cls == "fnptr":   # a guest function's address the guest passes: as any pointer
             cls = "ptr"
+        check = cls == "ptr" and not opaque(toks, td)
         words = [v for _, v in toks]
         if e["name_arg"] is None and words[:3] in (["const", "char", "*"], ["char", "const", "*"]) and len(words) <= 4:
             e["name_arg"] = len(args)
@@ -598,6 +621,8 @@ def analyse(e):
             args.append((cls, ctype, f"x{nx}")); nx += 1
         else:   # AAPCS64: the next 8-byte slot of the stacked arguments (every accepted type is at most 8 bytes)
             args.append((cls, ctype, f"s{nsaa}")); nsaa += 8
+        if check:
+            e["checks"].append((k + 1, args[-1][2]))
     e["args"] = args
 
 
@@ -617,7 +642,20 @@ def load(reg, ctype):
 ZEXT = {"int32_t": "uint32_t", "uint32_t": "uint32_t", "int16_t": "uint16_t", "uint16_t": "uint16_t", "int8_t": "uint8_t", "uint8_t": "uint8_t"}
 
 
-def render(entries, sources):
+def arena_bounds():
+    """DM_AOT_ARENA_BASE and DM_AOT_ARENA_SIZE from dm/host/aot.h, for the arena guard"""
+    try:
+        with open(AOT_H, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as x:
+        raise GenError(f"{AOT_H}: {x.strerror} (the arena guard reads the arena's bounds there)")
+    got = [re.search(rf"^#define {n} (0x[0-9a-fA-F]+)ull\b", text, re.M) for n in ("DM_AOT_ARENA_BASE", "DM_AOT_ARENA_SIZE")]
+    if not all(got):
+        raise GenError(f"{AOT_H}: no '#define DM_AOT_ARENA_BASE 0x...ull' and '#define DM_AOT_ARENA_SIZE 0x...ull' (the arena guard's bounds)")
+    return int(got[0].group(1), 16), int(got[1].group(1), 16)
+
+
+def render(entries, sources, bounds=None):
     out = []
     w = out.append
     w("// Generated by dm/host/tools/gen_hle_thunks.py from the HLE entries of the host sources below; do not edit. One thunk per entry: the arguments from the guest state")
@@ -639,6 +677,36 @@ def render(entries, sources):
     if any(e["rcls"] == "fnptr" for e in entries):
         w("// A host function an entry hands the guest (a function pointer return): its guest-visible address (dm/host/aot_arena.c; aot.h)")
         w("void *dm_guest_fnptr_named(const void *fn, const char *name);")
+        w("")
+    if any(e["checks"] or e["check_ret"] for e in entries):
+        base, size = bounds if bounds else arena_bounds()
+        w("// The arena guard (DM_AOT_ARENA_CHECK=1, docs/env_switches.tsv; dm/host/aot.h, \"Host memory the guest sees\"): a pointer parameter or result of an entry that lies outside")
+        w("// the arena (its bounds read from aot.h by the generator) is a [RED] line, once per entry and position (0: the result). Addresses below 64 KiB are sentinels, not memory;")
+        w("// opaque handle types are not checked. Self-contained, so a table links without the engine (t_hle_thunks)")
+        w("#include <stdatomic.h>")
+        w("#include <stdio.h>")
+        w("#include <stdlib.h>")
+        w(f"#define HLE_ARENA_BASE {base:#x}ull")
+        w(f"#define HLE_ARENA_SIZE {size:#x}ull")
+        w("static _Atomic int hle_arena_on = -1;")
+        w("static int hle_arena_check(void) {")
+        w("    int v = atomic_load_explicit(&hle_arena_on, memory_order_relaxed);")
+        w("    if (v < 0) { const char *e = getenv(\"DM_AOT_ARENA_CHECK\"); v = e && *e && strcmp(e, \"0\") ? 1 : 0; atomic_store_explicit(&hle_arena_on, v, memory_order_relaxed); }")
+        w("    return v;")
+        w("}")
+        w("static void hle_arena_bad(_Atomic unsigned *seen, int pos, uint64_t v, const char *cname) {")
+        w("    const unsigned bit = 1u << (pos < 31 ? pos : 31);")
+        w("    if (atomic_fetch_or(seen, bit) & bit) return;")
+        w("    if (pos) fprintf(stderr, \"[dm] [RED] aot: arena check: the guest passes %s an address outside the arena %#llx..%#llx in argument %d: %#llx (host memory it was handed: \"")
+        w("                     \"dm/host/aot.h, \\\"Host memory the guest sees\\\")\\n\", cname, HLE_ARENA_BASE, HLE_ARENA_BASE + HLE_ARENA_SIZE, pos, (unsigned long long)v);")
+        w("    else fprintf(stderr, \"[dm] [RED] aot: arena check: %s returns the guest an address outside the arena %#llx..%#llx: %#llx (dm/host/aot.h, \\\"Host memory the guest \"")
+        w("                 \"sees\\\")\\n\", cname, HLE_ARENA_BASE, HLE_ARENA_BASE + HLE_ARENA_SIZE, (unsigned long long)v);")
+        w("}")
+        w("#define HLE_ARENA(v, seen, pos, cname)                                                                                   \\")
+        w("    do {                                                                                                                 \\")
+        w("        const uint64_t v_ = (uint64_t)(v);                                                                               \\")
+        w("        if (v_ >= 0x10000 && v_ - HLE_ARENA_BASE >= HLE_ARENA_SIZE && hle_arena_check()) hle_arena_bad(&(seen), (pos), v_, (cname)); \\")
+        w("    } while (0)")
         w("")
     for e in entries:
         params = ", ".join(t for _, t, _ in e["args"]) or "void"
@@ -666,7 +734,14 @@ def render(entries, sources):
         else:
             body = f"st_d(st, {call});"
         unused = "" if e["args"] or rc != "void" else "(void)st; "
-        w(f"static void hle_thunk_{e['cname']}(dm_guest_state *st) {{ {unused}{body} }}")
+        pre = post = ""
+        if e["checks"] or e["check_ret"]:   # the arena guard: the pointer parameters before the call, the pointer result after it
+            w(f"static _Atomic unsigned hle_seen_{e['cname']};")
+            for pos, reg in e["checks"]:
+                pre += f"HLE_ARENA({load(reg, 'uint64_t')}, hle_seen_{e['cname']}, {pos}, \"{e['cname']}\"); "
+            if e["check_ret"]:
+                post = f" HLE_ARENA(st->x[0], hle_seen_{e['cname']}, 0, \"{e['cname']}\");"
+        w(f"static void hle_thunk_{e['cname']}(dm_guest_state *st) {{ {unused}{pre}{body}{post} }}")
     w("")
     w("const hle_thunk_ent hle_thunks[] = {")
     for e in entries:
@@ -723,7 +798,12 @@ def main(argv=None):
         return 1
     # strcmp order of the mangled names; an HLE and an HLE_FORCE entry may share one (they are two tables), the forced one first
     entries.sort(key=lambda e: (e["mangled"].encode("latin-1"), e["macro"] == "HLE"))
-    text = render(entries, a.sources)
+    try:
+        bounds = arena_bounds() if any(e["checks"] or e["check_ret"] for e in entries) else None
+    except GenError as x:
+        print(f"gen_hle_thunks: error: {x}", file=sys.stderr)
+        return 1
+    text = render(entries, a.sources, bounds)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as f:
         f.write(text)
@@ -736,6 +816,8 @@ def main(argv=None):
     print(f"gen_hle_thunks: parameters: {tally(c for e in entries for c, _, _ in e['args'])}; 0 unknown types")
     print(f"gen_hle_thunks: returns: {tally(e['rcls'] for e in entries)}; 0 duplicate C names")
     print(f"gen_hle_thunks: {stacked} entries read arguments from the guest stack; {longs} entries use long (32 bits on Windows)")
+    print(f"gen_hle_thunks: arena guard (DM_AOT_ARENA_CHECK): {sum(len(e['checks']) for e in entries)} pointer parameters and {sum(1 for e in entries if e['check_ret'])} "
+          f"pointer results checked in {sum(1 for e in entries if e['checks'] or e['check_ret'])} entries")
     fn = [e for e in entries if e["rcls"] == "fnptr"]
     if fn:
         print(f"gen_hle_thunks: {len(fn)} entries return host functions, handed to the guest at their guest-visible addresses: "

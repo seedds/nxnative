@@ -143,6 +143,13 @@ static void host_preload(int argc, char **argv) {
     }
 #endif
     dm_aot_arena_init();   // the arena below 2^39 first, before anything else takes address space in it
+    // The pages the arena commits and decommits for the host's guest memory (the garena: Unreal's heap, the guest Vulkan layer's mappings, ...) reach the graphics backend as
+    // the memory SVCs' do (aot.h dm_garena_set_commit_hooks; dm/gfx/nvn/nvn_be.h), so a pool placed in them is imported, and its import released before they are decommitted
+    { void be_guest_map(void *mem, uint64_t size), be_guest_unmap(void *mem, uint64_t size); dm_garena_set_commit_hooks(be_guest_map, be_guest_unmap); }
+#if NXHOST_VULKAN
+    // The guest Vulkan layer's host-visible memory, which the game maps, is arena pages it imports (dm/gfx/hostvk/guest_vk.c gmem_import, VK_EXT_external_memory_host)
+    { void guest_vk_set_arena(void *(*alloc)(size_t n), void (*release)(void *p, size_t n)); guest_vk_set_arena(dm_guest_alloc, dm_guest_free); }
+#endif
     crash_install();       // aot_fault.c: the engine's fault handlers, the alternate signal stack, DM_WATCH / DM_WATCH_STALL
     const char *race = getenv("DM_TEST_KEYRACE");
     if (race && *race) LOG("[RED] DM_TEST_KEYRACE tests Apple's TSD thread slots (loader.c tsd_check); the x86-64 engine keeps the thread registers in its state blocks: not run");

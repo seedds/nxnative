@@ -128,3 +128,35 @@ HLE("t_re_stop", void, t_re_stop, void) {
     g_re_seen.stop_resumed = 1;
     pthread_mutex_unlock(&g_re_stop_mu);
 }
+
+// ---------- Host memory the guest sees (aot.h, the one rule: every byte the guest's code reads or keeps the address of lies in the arena below 2^39) ----------
+// What a take-over hands guest code, in the forms the host files use: a garena buffer (GUEST_MALLOC), an arena copy of a literal (GUEST_STR), an array of the thread's scoped
+// region passed to a guest function (GUEST_LOCAL); then host memory on purpose, for the arena guard (DM_AOT_ARENA_CHECK=1): a host stack array passed to a guest function and a
+// host string returned, which main hands to strlen (the passthrough's thunk sees it as its argument). main stores what it read in ga_results (aot_synth.py HF_GA_EXPECTED)
+#define T_GA_WORD 0x1122334455667788ull   // aot_synth.py HF_GA_WORD
+struct t_ga_seen { uint64_t buf, str, local, local_sum, outside_sum; };
+struct t_ga_seen g_ga_seen;
+typedef uint64_t (*t_ga_sum_fn)(const uint64_t *a);   // main's hf_sum2: a[0] + a[3]
+HLE("t_ga_buf", void *, t_ga_buf, void) {
+    uint64_t *b = dm_garena_alloc(64, 16);
+    b[0] = T_GA_WORD; g_ga_seen.buf = (uint64_t)(uintptr_t)b;
+    return b;
+}
+HLE("t_ga_str", const char *, t_ga_str, void) {
+    const char *s = dm_garena_literal("guest string");   // aot_synth.py HF_GA_STRING
+    g_ga_seen.str = (uint64_t)(uintptr_t)s;
+    return s;
+}
+HLE("t_ga_local", uint64_t, t_ga_local, void *fn) {
+    DM_GLOCAL(uint64_t, a, 4);   // Apple's uint64_t a[4] on the host stack
+    a[0] = 11; a[3] = 44; g_ga_seen.local = (uint64_t)(uintptr_t)a;
+    const uint64_t s = DM_GUEST_CALL((t_ga_sum_fn)fn, a);
+    g_ga_seen.local_sum = s;
+    return s + (dm_aot_in_arena((uint64_t)(uintptr_t)a, 32) ? 1000 : 0);
+}
+static const char t_ga_host_string[] = "outside";   // host memory, on purpose
+HLE("t_ga_outside", const char *, t_ga_outside, void *fn) {
+    uint64_t a[4] = {5, 0, 0, 6};   // a host stack array, on purpose: the guard flags this guest call's argument
+    g_ga_seen.outside_sum = DM_GUEST_CALL((t_ga_sum_fn)fn, a);
+    return t_ga_host_string;        // and this result
+}

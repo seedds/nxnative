@@ -324,7 +324,7 @@ def manifest_text(t):
 HF_DIR_NAME = 'hostfn'
 HF_BUILD_ID = 'aa08' * 8
 HF_TEXT_END, HF_RO_OFF, HF_DATA_OFF, HF_DATA_END, HF_BSS = 0x1000, 0x1000, 0x2000, 0x3000, 0x40000
-HF_MOD0, HF_DYNAMIC, HF_SYMTAB, HF_RELA, HF_JMPREL, HF_EH_HDR, HF_EH_FRAME = 0x1000, 0x1020, 0x1100, 0x1800, 0x1A00, 0x1A40, 0x1B00
+HF_MOD0, HF_DYNAMIC, HF_SYMTAB, HF_RELA, HF_JMPREL, HF_EH_HDR, HF_EH_FRAME = 0x1000, 0x1020, 0x1100, 0x1880, 0x1A80, 0x1AA0, 0x1B40   # the string table grew past 0x1800 (the t_ga_* imports)
 HF_MSG, HF_CONSTF, HF_NAME = 0x1E00, 0x1E20, 0x1E40
 HF_CBDATA, HF_EV = 0x2340, 0x2380   # hf_cb's data word (1000), the SystemEventType t_re_bind binds (write handle, read handle)
 HF_CBDATA_VALUE = 1000
@@ -334,7 +334,8 @@ HF_MESSAGE = b'hostfn module: done'
 HF_SUB_MESSAGE = b'sub nro'
 HF_GOT_SYMS = ['strlen', 'sqrtf', 't_hf_get', 't_hf_install', 't_hf_spawn', '_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi',
                '_ZN2nn2ro18LookupModuleSymbolEPmPKNS0_6ModuleEPKc', 'sub_value', '_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE',
-               't_re_register', 't_re_fire', 't_re_thread', 't_re_hostthread', 't_re_deep', 't_re_leaf', 't_re_bind', 't_re_stop']
+               't_re_register', 't_re_fire', 't_re_thread', 't_re_hostthread', 't_re_deep', 't_re_leaf', 't_re_bind', 't_re_stop',
+               't_ga_buf', 't_ga_str', 't_ga_local', 't_ga_outside']
 HF_JUMP_SLOT = {'sub_value'}   # in DT_JMPREL (rebound at the NRO's load and unload as a game's lazily bound functions); the rest GLOB_DAT
 HF_SQRT_IN, HF_SQRT_OUT = 6.25, 2.5
 # What main stores in results[i] (None: checked by the host otherwise)
@@ -342,6 +343,15 @@ HF_EXPECTED = [len(HF_MESSAGE), struct.unpack('<I', struct.pack('<f', HF_SQRT_OU
                5 + len(HF_SUB_MESSAGE) + 1000, 77, 0, None,
                HF_CBDATA_VALUE + 1 + 44, 0x1234, 3 * 5 + 100 + 1, HF_CBDATA_VALUE + 10 + 44, HF_CBDATA_VALUE + 20 + 44, None, 0]
 HF_NRESULTS = 24   # the results array's words
+# Host memory the guest sees (dm/host/aot.h; t_aot_hostfn_entries.c's t_ga_* entries): what main stores in ga_results[i] (None: checked by the host otherwise)
+#   [0] the buffer t_ga_buf hands it (garena, in the arena below 2^39); [1] the word main reads from it (the host wrote HF_GA_WORD)
+#   [2] the string t_ga_str hands it (an arena copy of a literal); [3] strlen of it through the GOT; [4] its first byte, read by main itself
+#   [5] t_ga_local(hf_sum2): the host passes hf_sum2 an array of its scoped region (11, 0, 0, 44), which main reads: 55, + 1000 when the array was in the arena
+#   [6] t_ga_outside(hf_sum2): the host passes hf_sum2 a host stack array and returns a host string on purpose (the arena guard's lines, DM_AOT_ARENA_CHECK=1); strlen of it: 7
+HF_GA_RESULTS = 0x2400
+HF_GA_WORD = 0x1122334455667788
+HF_GA_STRING = b'guest string'
+HF_GA_EXPECTED = [None, HF_GA_WORD, None, len(HF_GA_STRING), HF_GA_STRING[0], 11 + 44 + 1000, len(b'outside')]
 # The NRO: text (with the NRO header at +0x10), read-only data (MOD0 and the dynamic tables), data, bss
 SUB_CODE, SUB_TEXT_END, SUB_RO_OFF, SUB_DATA_OFF, SUB_DATA_END, SUB_BSS = 0x80, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000
 SUB_MOD0, SUB_DYNAMIC, SUB_SYMTAB, SUB_RELA, SUB_EH_HDR, SUB_EH_FRAME, SUB_MSG = 0x1000, 0x1020, 0x1100, 0x1400, 0x1500, 0x1580, 0x1900
@@ -355,6 +365,7 @@ def movn_x(rd, imm): return 0x92800000 | imm << 5 | rd                          
 def movn_w(rd, imm): return 0x12800000 | imm << 5 | rd
 def lsr_x(rd, rn, sh): return 0xD3400000 | sh << 16 | 63 << 10 | rn << 5 | rd         # ubfm xd, xn, #sh, #63
 def lsl_x(rd, rn, sh): return 0xD3400000 | (64 - sh) % 64 << 16 | (63 - sh) << 10 | rn << 5 | rd   # ubfm xd, xn, #(64-sh), #(63-sh)
+def ldrb(rt, rn, off): return 0x39400000 | off << 10 | rn << 5 | rt                    # ldrb wt, [xn, #off]
 LDP_FP_LR = 0xA8C17BFD   # ldp x29, x30, [sp], #16
 FMOV_S0_1 = 0x1E2E1000   # fmov s0, #1.0
 HF_ENCODINGS = [   # (llvm-mc's text, the word above): test_aot_manifest.py's NxaotReads checks them with llvm-mc-18 where it is installed
@@ -366,6 +377,8 @@ HF_ENCODINGS = [   # (llvm-mc's text, the word above): test_aot_manifest.py's Nx
     ('ldr x9, [sp]', ldr_x(9, 31, 0)), ('ldr x9, [sp, #8]', ldr_x(9, 31, 8)), ('ldr x0, [x0]', ldr_x(0, 0, 0)), ('add x0, x0, x7', add_xr(0, 0, 7)),
     ('str w2, [x9, #4]', str_w(2, 9, 4)), ('ldr w0, [x0]', ldr_w(0, 0, 0)), ('mov x9, x0', mov_x(9, 0)), ('svc #0x45', svc(0x45)), ('mov w0, #0', movz_w(0, 0)),
     ('mov x22, #4660', movz_x(22, 0x1234)), ('add x1, x9, #4', add_x(1, 9, 4)), ('mov x3, #0', movz_x(3, 0)), ('add x0, x0, #1', add_x(0, 0, 1)), ('brk #0x3', brk(3)),
+    ('ldrb w0, [x20]', ldrb(0, 20, 0)), ('mov x20, x0', mov_x(20, 0)), ('mov x0, x20', mov_x(0, 20)), ('ldr x1, [x0]', ldr_x(1, 0, 0)), ('ldr x2, [x0, #24]', ldr_x(2, 0, 24)),
+    ('add x0, x1, x2', add_xr(0, 1, 2)), ('str x0, [x21, #8]', str_x(0, 21, 8)),
 ]
 
 
@@ -435,6 +448,14 @@ def hf_text():
     t += got_load(15) + [(None, adrp(0, HF_EV)), (None, add_x(0, 0, lo12(HF_EV))), (None, blr(16)), (None, str_x(0, 19, r(18))),
                          (None, adrp(9, HF_EV)), (None, add_x(9, 9, lo12(HF_EV))), (None, add_x(1, 9, 4)), (None, movz_w(2, 1)), (None, movz_x(3, 0)), (None, svc(0x18)),
                          (None, str_x(0, 19, r(19)))]
+    # Host memory the guest sees (dm/host/aot.h): a buffer, a string and a scoped array the host hands main, all in the arena; then host memory on purpose (the arena guard)
+    g = lambda i: 8 * i   # ga_results[i], x21 its base
+    t += [(None, adrp(21, HF_GA_RESULTS)), (None, add_x(21, 21, lo12(HF_GA_RESULTS)))]
+    t += got_load(17) + [(None, blr(16)), (None, str_x(0, 21, g(0))), (None, ldr_x(0, 0, 0)), (None, str_x(0, 21, g(1)))]
+    t += got_load(18) + [(None, blr(16)), (None, mov_x(20, 0)), (None, str_x(0, 21, g(2)))] + got_load(0) + \
+         [(None, mov_x(0, 20)), (None, blr(16)), (None, str_x(0, 21, g(3))), (None, ldrb(0, 20, 0)), (None, str_x(0, 21, g(4)))]
+    t += got_load(19) + [(None, adr(0, 'hf_sum2')), (None, blr(16)), (None, str_x(0, 21, g(5)))]
+    t += got_load(20) + [(None, adr(0, 'hf_sum2')), (None, blr(16)), (None, mov_x(20, 0))] + got_load(0) + [(None, mov_x(0, 20)), (None, blr(16)), (None, str_x(0, 21, g(6)))]
     t += [(None, adrp(0, HF_MSG)), (None, add_x(0, 0, lo12(HF_MSG))), (None, movz_x(1, len(HF_MESSAGE))), (None, svc(0x27))]
     t += got_load(16) + [(None, blr(16)), (None, svc(0x07)), (None, brk(1))]
     # malloc(n): a bump allocator over bss, 16-byte steps (hf_heapptr starts at the heap: a relative relocation); free: nothing
@@ -462,12 +483,14 @@ def hf_text():
     # A function of the module that writes v0, which nothing calls. nxaot's indirect call sites reload after the call only what the module's own functions may write (its
     # plan.cpp, indirect_writes: the union over the standard entries), while the dispatcher may hand the call to a host function, which returns a float in v0: without
     # one, sqrtf's result would be dropped for the stale v0 (found with this module; a lifter issue, reported, not the host's). Every real module has such functions
+    # hf_sum2(a): a[0] + a[3], the array the host passes (t_ga_local, t_ga_outside)
+    t += [('hf_sum2', ldr_x(1, 0, 0)), (None, ldr_x(2, 0, 24)), (None, add_xr(0, 1, 2)), (None, RET)]
     t += [('hf_fone', FMOV_S0_1), (None, RET), ('hf_end', None)]
     functions = [('hf_start', 'hf_start'), ('malloc', 'hf_malloc'), ('free', 'hf_free'), ('_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi', 'hf_create'),
                  ('_ZN2nn2os11StartThreadEPNS0_10ThreadTypeE', 'hf_start_thread'), ('_ZN2nn2os10WaitThreadEPNS0_10ThreadTypeE', 'hf_wait'),
                  ('_ZN2nn2os13DestroyThreadEPNS0_10ThreadTypeE', 'hf_destroy'), ('hf_thread_tramp', 'hf_tramp'), ('synth_triple', 'hf_triple'),
                  ('hf_cb', 'hf_cb'), ('hf_deep', 'hf_deep'), ('_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb', 'hf_cev'),
-                 ('_ZN2nn2os30GetWritableHandleOfSystemEventEPKNS0_15SystemEventTypeE', 'hf_gwh'), ('hf_exit', 'hf_exit'), ('hf_one', 'hf_fone')]
+                 ('_ZN2nn2os30GetWritableHandleOfSystemEventEPKNS0_15SystemEventTypeE', 'hf_gwh'), ('hf_exit', 'hf_exit'), ('hf_sum2', 'hf_sum2'), ('hf_one', 'hf_fone')]
     return t, functions
 
 
@@ -482,7 +505,7 @@ def hf_image():
     ranges = [(L[order[i]], L[order[i + 1]]) for i in range(len(functions))]
     undef = [(s, 0, 0x12, 0, 0) for s in HF_GOT_SYMS]
     objects = [('results', 3, 0x11, HF_RESULTS, 8 * HF_NRESULTS), ('hf_got', 3, 0x11, HF_GOT, 8 * len(HF_GOT_SYMS)), ('hf_vt', 3, 0x11, HF_VT, 32),
-               ('hf_vt2', 3, 0x11, HF_VT2, 32), ('nro_image', 3, 0x11, HF_NROIMG, 8)]
+               ('hf_vt2', 3, 0x11, HF_VT2, 32), ('nro_image', 3, 0x11, HF_NROIMG, 8), ('ga_results', 3, 0x11, HF_GA_RESULTS, 8 * len(HF_GA_EXPECTED))]
     funcs = [(name, 1, 0x12, s, e - s) for (name, _), (s, e) in zip(functions, ranges)]
     symbols = undef + objects + funcs
     rela = [(HF_GOT + 8 * i, 1025, 1 + i, 0) for i, s in enumerate(HF_GOT_SYMS) if s not in HF_JUMP_SLOT] + [(HF_HEAPPTR, 1027, 0, HF_HEAP)]

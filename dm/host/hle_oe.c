@@ -24,7 +24,13 @@ static _Atomic int g_ntf_opmode, g_ntf_perfmode;          // only pushed after t
 // which does not clear it, then pops until the queue is empty; when the event was only ever signalled, the first focus change on iOS left it set and the thread spun on a core
 // (995 ms/s, 5-6 W on an iPhone). The count is read and the event set or cleared under g_mq_lock, so a push racing a pop cannot leave it cleared over a queued notification
 // (lock order g_mq_lock → G → g_se_lock; nothing takes g_mq_lock while holding G)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 static uint8_t g_mq_ev[0x80] __attribute__((aligned(16)));
+#else   // the x86-64 engine: guest memory, made once in the arena (the SDK's event code works on it and the game keeps its address: aot.h, "Host memory the guest sees")
+#include "aot.h"
+static void *_Atomic g_mq_ev_guest;
+#define g_mq_ev ((uint8_t *)dm_garena_static(&g_mq_ev_guest, NULL, 0x80))
+#endif
 static _Atomic int g_mq_ev_on;
 static void mq_ev_sync(void) {
     if (!atomic_load(&g_mq_ev_on)) return;

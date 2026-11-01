@@ -5,11 +5,16 @@
 #include "hle.h"
 // A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
 // as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+// The software decoder's state the host makes for such a call is guest memory too (aot.h, "Host memory the guest sees"): calloc and free on Apple, the garena here
 #if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 #define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#define GUEST_CALLOC(k, n) calloc(k, n)
+#define GUEST_FREE(p) free(p)
 #else
 #include "aot.h"
 #define GUEST_CALL DM_GUEST_CALL
+#define GUEST_CALLOC(k, n) dm_garena_alloc((size_t)(k) * (n), 16)
+#define GUEST_FREE(p) dm_garena_free(p)
 #endif
 
 HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderC1Ei", "hwopus service; replaced by the SDK software OpusDecoder (same IOpusDecoder virtual interface)",
@@ -37,12 +42,12 @@ HLE_FORCE("_ZN2nn5codec36GetHardwareOpusDecoderWorkBufferSizeEii", "hwopus servi
 HLE_FORCE("_ZN2nn5codec29InitializeHardwareOpusDecoderEPNS0_23HardwareOpusDecoderTypeEiiPvmi", "hwopus service; replaced by the software OpusDecoder", int, h_codec_HwOpusInit,
           void *hw, int rate, int ch, void *buf, size_t size, int option) {
     (void)option; int (*f)(void *, int, int, void *, size_t) = opus_fn("_ZN2nn5codec21InitializeOpusDecoderEPNS0_15OpusDecoderTypeEiiPvm");
-    void *s = objmap_get(hw); if (!s) { s = calloc(1, SOFT_OPUS_STATE); objmap_put(hw, s); }
+    void *s = objmap_get(hw); if (!s) { s = GUEST_CALLOC(1, SOFT_OPUS_STATE); objmap_put(hw, s); }
     return GUEST_CALL(f, s, rate, ch, buf, size);
 }
 HLE_FORCE("_ZN2nn5codec27FinalizeHardwareOpusDecoderEPNS0_23HardwareOpusDecoderTypeE", "hwopus service; software OpusDecoder", void, h_codec_HwOpusFini, void *hw) {
     void (*f)(void *) = opus_fn("_ZN2nn5codec19FinalizeOpusDecoderEPNS0_15OpusDecoderTypeE");
-    void *s = objmap_del(hw); if (s) { GUEST_CALL(f, s); free(s); }
+    void *s = objmap_del(hw); if (s) { GUEST_CALL(f, s); GUEST_FREE(s); }
 }
 HLE_FORCE("_ZN2nn5codec32GetHardwareOpusDecoderSampleRateEPKNS0_23HardwareOpusDecoderTypeE", "hwopus service; software OpusDecoder", int, h_codec_HwOpusRate, const void *hw) {
     int (*f)(const void *) = opus_fn("_ZN2nn5codec24GetOpusDecoderSampleRateEPKNS0_15OpusDecoderTypeE"); return GUEST_CALL(f, opus_soft(hw));
@@ -82,12 +87,12 @@ HLE_FORCE("_ZN2nn5codec47GetHardwareOpusMultiStreamDecoderWorkBufferSizeEiiiii",
 HLE_FORCE("_ZN2nn5codec40InitializeHardwareOpusMultiStreamDecoderEPNS0_34HardwareOpusMultiStreamDecoderTypeEiiiiPKhPvmi", "hwopus service; replaced by the software OpusMultiStreamDecoder",
           int, h_codec_HwOpusMsInit, void *hw, int rate, int ch, int streams, int stereo, const uint8_t *mapping, void *buf, size_t size, int option) {
     (void)option; int (*f)(void *, int, int, int, int, const uint8_t *, void *, size_t) = opus_fn("_ZN2nn5codec32InitializeOpusMultiStreamDecoderEPNS0_26OpusMultiStreamDecoderTypeEiiiiPKhPvm");
-    void *s = objmap_get(hw); if (!s) { s = calloc(1, SOFT_OPUS_STATE); objmap_put(hw, s); }
+    void *s = objmap_get(hw); if (!s) { s = GUEST_CALLOC(1, SOFT_OPUS_STATE); objmap_put(hw, s); }
     return GUEST_CALL(f, s, rate, ch, streams, stereo, mapping, buf, size);
 }
 HLE_FORCE("_ZN2nn5codec38FinalizeHardwareOpusMultiStreamDecoderEPNS0_34HardwareOpusMultiStreamDecoderTypeE", "hwopus service; software OpusMultiStreamDecoder", void, h_codec_HwOpusMsFini, void *hw) {
     void (*f)(void *) = opus_fn("_ZN2nn5codec30FinalizeOpusMultiStreamDecoderEPNS0_26OpusMultiStreamDecoderTypeE");
-    void *s = objmap_del(hw); if (s) { GUEST_CALL(f, s); free(s); }
+    void *s = objmap_del(hw); if (s) { GUEST_CALL(f, s); GUEST_FREE(s); }
 }
 HLE_FORCE("_ZN2nn5codec43GetHardwareOpusMultiStreamDecoderSampleRateEPKNS0_34HardwareOpusMultiStreamDecoderTypeE", "hwopus service; software OpusMultiStreamDecoder", int, h_codec_HwOpusMsRate, const void *hw) {
     int (*f)(const void *) = opus_fn("_ZN2nn5codec35GetOpusMultiStreamDecoderSampleRateEPKNS0_26OpusMultiStreamDecoderTypeE"); return GUEST_CALL(f, opus_soft(hw));

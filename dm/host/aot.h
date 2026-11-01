@@ -29,16 +29,71 @@
 
 // ---------- The arena (design 5.2) ----------
 // One reservation below 2^39, the Switch's 39-bit address space, taken at startup; everything the guest can see is in it (module images, the guest block of
-// hle_svc.c with its heap, alias and stack regions, TLS blocks and thread-local regions, the host-function page, the stacks the host makes for guest code).
-// State blocks and native stacks stay outside it
+// hle_svc.c with its heap, alias and stack regions, TLS blocks and thread-local regions, the host-function page, the stacks the host makes for guest code, NVN's
+// virtual pool ranges, the guest Vulkan layer's mappings, Unreal's heap on the host allocator, and every host allocation handed to the guest: the garena below).
+// State blocks and native stacks stay outside it. 256 GiB of address space (nothing is charged until taken): a game's guest block (5 GB for Unreal games, 64 GB with a
+// Switch-sized DM_ALIAS_SIZE), an RE Engine virtual pool of 64 GB (hle_nvn.c vpool_reserve), the module images and the host's guest heaps fit with room, and its end
+// (320 GiB) stays below 2^39 (512 GiB)
 #define DM_AOT_ARENA_BASE 0x1000000000ull    // 64 GiB (2^36)
-#define DM_AOT_ARENA_SIZE 0x200000000ull     // 8 GiB reserved, nothing accessible until taken
+#define DM_AOT_ARENA_SIZE 0x4000000000ull    // 256 GiB reserved, nothing accessible until taken
 #define DM_AOT_HOST_RETURN (DM_AOT_ARENA_BASE + 0x10)   // the x30 host code enters guest code with: an address no code lives at (the arena's first page stays inaccessible)
 void dm_aot_arena_init(void);              // reserve the arena and place the host-function page in it; once, later calls do nothing; dies when the range is taken
 int dm_aot_in_arena(uint64_t a, uint64_t n);
-void *dm_guest_reserve(size_t n);          // n bytes of fresh arena (whole pages), inaccessible: the owner opens them with plat_vm_protect (hle_svc.c's guest block)
+void *dm_guest_reserve(size_t n);          // n bytes of arena (whole pages, a range given back first), inaccessible: the owner opens them with plat_vm_protect (hle_svc.c's guest block)
 void *dm_guest_alloc(size_t n);            // n bytes of arena, readable, writable and zero
-void dm_guest_free(void *p, size_t n);     // a dm_guest_alloc range back to the arena (inaccessible until taken again)
+void dm_guest_free(void *p, size_t n);     // a dm_guest_alloc or dm_guest_reserve range back to the arena (inaccessible until taken again)
+
+// ---------- Host memory the guest sees: the one rule (design 5.2) ----------
+// Every byte of host memory the guest's code may read, write or keep the address of lies in the arena: on Apple the guest sees all host memory and these are the plain
+// malloc / stack array / string literal, here they are the arena's. A host file keeps Apple's text and picks the form with its own macros, as GUEST_CALL picks the call:
+// the plain C form where DM_NATIVE_EXEC (Apple) or DM_TEST_GUEST_C (a unit test that supplies the guest's functions as C functions), the dm_garena form here
+// (hle_audren.c, hle_codec.c, hle_movie.c, hle_swkbd.c, ...: GUEST_MALLOC, GUEST_FREE, GUEST_STR, GUEST_LOCAL, ...). The family:
+//   dm_garena_alloc(n, align)     n bytes, zero, aligned to align (a power of two; 0 means 16): a heap of size classes up to 16 KiB in 64 KiB slabs (each 64 KiB-aligned,
+//                                 one class per slab, kept readable and writable), whole pages above (a freed block up to 1 MiB kept for its size, at most 64 MiB of them;
+//                                 larger ones decommitted at once). Thread-safe; dies with a [RED] line when the arena is full, as the arena does
+//   dm_garena_malloc(n, align)    the same without the zeroing (a host allocator handed to the guest: hle_uemalloc.c's Unreal heap)
+//   dm_garena_realloc(p, n, align), dm_garena_free(p), dm_garena_size(p)   realloc, free (NULL: nothing) and the usable size (0: p is no garena block) of a garena block
+//   dm_garena_strdup(s)           a copy of the host string s, freed with dm_garena_free
+//   dm_garena_literal(s)          a copy of a string with static storage (a literal, a C library's zone name) made once and kept for good, found again by s's address:
+//                                 for a host string the guest only reads (a key handed to an SDK function, a name an entry returns)
+//   dm_garena_static(slot, init, n)   n bytes made once (a copy of init when given, else zero) and kept in *slot: a static the guest keeps the address of (an event
+//                                 object the host owns, a struct handed back on every call); thread-safe
+//   dm_gscope_mark / dm_gscope_alloc / dm_gscope_release   the scoped form, for the arrays Apple's text puts on the host stack and passes to guest code: a bump region of
+//                                 DM_GSCOPE_SIZE per host thread in the arena, made at the thread's first use and given back at its exit (a pthread key's destructor);
+//                                 an allocation is 16-byte aligned and zero, valid until the mark taken before it is released. One that does not fit is taken from the
+//                                 garena instead, with a [RED] line once per thread, and released with the mark as well. DM_GLOCAL(type, name, n) declares type *name over
+//                                 n zeroed elements and releases them when the enclosing block ends (GNU C's cleanup attribute, as hle_fs.c's PATH_LOCK), the scope of
+//                                 Apple's stack array; a non-local exit (longjmp) past it leaves the region's top where it was until an outer mark is released
+//   dm_garena_set_commit_hooks(map, unmap)   the graphics backend's view of the pages these functions commit and decommit (be_guest_map / be_guest_unmap, set by the
+//                                 host program, main_x86.c): a pool the game places in such memory (Unreal's heap) is imported by Vulkan like any committed guest memory
+// The guard: DM_AOT_ARENA_CHECK=1 (docs/env_switches.tsv) checks, at every host-call thunk (gen_hle_thunks.py: the pointer parameters and the pointer result of each entry,
+// opaque handle types left out) and at every pointer argument of DM_GUEST_CALL (below), that a non-null address above the first 64 KiB is in the arena, and logs a [RED]
+// line once per site for one that is not (dm_aot_arena_flag). dm_guest_call's own arguments are integers to it (their types are gone): its sites are listed in aot_arena.c
+#define DM_GSCOPE_SIZE 0x10000u              // the scoped region of a host thread: 64 KiB of arena
+void *dm_garena_alloc(size_t n, size_t align);
+void *dm_garena_malloc(size_t n, size_t align);
+void *dm_garena_realloc(void *p, size_t n, size_t align);
+void dm_garena_free(void *p);
+size_t dm_garena_size(const void *p);
+char *dm_garena_strdup(const char *s);
+const char *dm_garena_literal(const char *s);
+void *dm_garena_static(void *_Atomic *slot, const void *init, size_t n);
+void dm_garena_set_commit_hooks(void (*map)(void *mem, uint64_t size), void (*unmap)(void *mem, uint64_t size));
+typedef uint64_t dm_gscope_t;
+dm_gscope_t dm_gscope_mark(void);
+void *dm_gscope_alloc(size_t n);
+void dm_gscope_release(dm_gscope_t mark);
+static inline void dm_gscope_cleanup(dm_gscope_t *mark) { dm_gscope_release(*mark); }
+#define DM_GLOCAL(type, name, n)                                                                                                   \
+    dm_gscope_t DM_GC_CAT(name, _gscope_) __attribute__((cleanup(dm_gscope_cleanup), unused)) = dm_gscope_mark();                  \
+    type *name = (type *)dm_gscope_alloc(sizeof(type) * (size_t)(n))
+// A static the guest keeps the address of, of type type, made once in the arena (zero, or a copy of *init): DM_GSTATIC(type, slot, init) is a type * (slot: a
+// static void *_Atomic of the caller's)
+#define DM_GSTATIC(type, slot, init) ((type *)dm_garena_static(&(slot), (init), sizeof(type)))
+extern _Atomic int dm_aot_arena_check;     // DM_AOT_ARENA_CHECK: -1 until read (dm_aot_arena_init), then 0 or 1
+// An address outside the arena where a guest-visible one belongs: a [RED] line naming site (a file or entry name), line and pos (the argument, 0 for a result), once per
+// site and position
+void dm_aot_arena_flag(const char *site, unsigned line, int pos, uint64_t v, const char *what);
 // A module image at a fresh base in the arena, one to one (5.1): len bytes, then bss zero bytes; [0, ro_end) readable and never executable (3.2, 5.3: a host jump
 // into guest text faults at once), the rest readable and writable. *mapped gets the size taken (whole pages). Dies when the arena is full
 uint8_t *dm_aot_image_map(const uint8_t *bytes, size_t len, size_t bss, uint64_t ro_end, size_t *mapped);
@@ -213,31 +268,40 @@ void dm_aot_host_thread_active(int on);   // aot_thread.c: a host thread's outer
 uint64_t dm_gcall_float_argument(void);   // never defined: a float or double argument of DM_GUEST_CALL fails the link
 uint64_t dm_gcall_float_result(void);     // never defined: DM_GUEST_CALL of a function returning float or double fails the link
 #define DM_GC_ISFP(x) (__builtin_types_compatible_p(__typeof__(x), float) || __builtin_types_compatible_p(__typeof__(x), double))
-#define DM_GC_A(x) ((uint64_t)__builtin_choose_expr(DM_GC_ISFP(x), dm_gcall_float_argument(), (uint64_t)(uintptr_t)(x)))
+// A pointer argument (an array or a string literal decays to one; the argument is not evaluated) goes through the arena guard (DM_AOT_ARENA_CHECK, above), pos counting from 1
+#define DM_GC_ISPTR(x) (__builtin_classify_type(x) == 5)
+static inline uint64_t dm_gc_arg(uint64_t v, int isptr, const char *file, unsigned line, int pos) {
+    if (isptr && v >= 0x10000 && v - DM_AOT_ARENA_BASE >= DM_AOT_ARENA_SIZE && atomic_load_explicit(&dm_aot_arena_check, memory_order_relaxed) > 0)
+        dm_aot_arena_flag(file, line, pos, v, "guest call argument");
+    return v;
+}
+#define DM_GC_A(x, pos) dm_gc_arg((uint64_t)__builtin_choose_expr(DM_GC_ISFP(x), dm_gcall_float_argument(), (uint64_t)(uintptr_t)(x)), DM_GC_ISPTR(x), __FILE__, __LINE__, (pos))
 #define DM_GC_N(...) DM_GC_N_(0, ##__VA_ARGS__, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
 #define DM_GC_N_(z, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, n, ...) n
 #define DM_GC_CAT(a, b) DM_GC_CAT_(a, b)
 #define DM_GC_CAT_(a, b) a##b
-#define DM_GC_M0()
-#define DM_GC_M1(a) , DM_GC_A(a)
-#define DM_GC_M2(a, ...) , DM_GC_A(a) DM_GC_M1(__VA_ARGS__)
-#define DM_GC_M3(a, ...) , DM_GC_A(a) DM_GC_M2(__VA_ARGS__)
-#define DM_GC_M4(a, ...) , DM_GC_A(a) DM_GC_M3(__VA_ARGS__)
-#define DM_GC_M5(a, ...) , DM_GC_A(a) DM_GC_M4(__VA_ARGS__)
-#define DM_GC_M6(a, ...) , DM_GC_A(a) DM_GC_M5(__VA_ARGS__)
-#define DM_GC_M7(a, ...) , DM_GC_A(a) DM_GC_M6(__VA_ARGS__)
-#define DM_GC_M8(a, ...) , DM_GC_A(a) DM_GC_M7(__VA_ARGS__)
-#define DM_GC_M9(a, ...) , DM_GC_A(a) DM_GC_M8(__VA_ARGS__)
-#define DM_GC_M10(a, ...) , DM_GC_A(a) DM_GC_M9(__VA_ARGS__)
-#define DM_GC_M11(a, ...) , DM_GC_A(a) DM_GC_M10(__VA_ARGS__)
-#define DM_GC_M12(a, ...) , DM_GC_A(a) DM_GC_M11(__VA_ARGS__)
-#define DM_GC_M13(a, ...) , DM_GC_A(a) DM_GC_M12(__VA_ARGS__)
-#define DM_GC_M14(a, ...) , DM_GC_A(a) DM_GC_M13(__VA_ARGS__)
-#define DM_GC_M15(a, ...) , DM_GC_A(a) DM_GC_M14(__VA_ARGS__)
-#define DM_GC_M16(a, ...) , DM_GC_A(a) DM_GC_M15(__VA_ARGS__)
+// DM_GC_Mk(n, args...): the last k of the n arguments, each widened; the first of them is argument n - k + 1
+#define DM_GC_M0(n, ...)
+#define DM_GC_M1(n, a) , DM_GC_A(a, (n))
+#define DM_GC_M2(n, a, ...) , DM_GC_A(a, (n) - 1) DM_GC_M1(n, __VA_ARGS__)
+#define DM_GC_M3(n, a, ...) , DM_GC_A(a, (n) - 2) DM_GC_M2(n, __VA_ARGS__)
+#define DM_GC_M4(n, a, ...) , DM_GC_A(a, (n) - 3) DM_GC_M3(n, __VA_ARGS__)
+#define DM_GC_M5(n, a, ...) , DM_GC_A(a, (n) - 4) DM_GC_M4(n, __VA_ARGS__)
+#define DM_GC_M6(n, a, ...) , DM_GC_A(a, (n) - 5) DM_GC_M5(n, __VA_ARGS__)
+#define DM_GC_M7(n, a, ...) , DM_GC_A(a, (n) - 6) DM_GC_M6(n, __VA_ARGS__)
+#define DM_GC_M8(n, a, ...) , DM_GC_A(a, (n) - 7) DM_GC_M7(n, __VA_ARGS__)
+#define DM_GC_M9(n, a, ...) , DM_GC_A(a, (n) - 8) DM_GC_M8(n, __VA_ARGS__)
+#define DM_GC_M10(n, a, ...) , DM_GC_A(a, (n) - 9) DM_GC_M9(n, __VA_ARGS__)
+#define DM_GC_M11(n, a, ...) , DM_GC_A(a, (n) - 10) DM_GC_M10(n, __VA_ARGS__)
+#define DM_GC_M12(n, a, ...) , DM_GC_A(a, (n) - 11) DM_GC_M11(n, __VA_ARGS__)
+#define DM_GC_M13(n, a, ...) , DM_GC_A(a, (n) - 12) DM_GC_M12(n, __VA_ARGS__)
+#define DM_GC_M14(n, a, ...) , DM_GC_A(a, (n) - 13) DM_GC_M13(n, __VA_ARGS__)
+#define DM_GC_M15(n, a, ...) , DM_GC_A(a, (n) - 14) DM_GC_M14(n, __VA_ARGS__)
+#define DM_GC_M16(n, a, ...) , DM_GC_A(a, (n) - 15) DM_GC_M15(n, __VA_ARGS__)
 #define DM_GUEST_CALL(f, ...)                                                                                                         \
     ((void)__builtin_choose_expr(DM_GC_ISFP((f)(__VA_ARGS__)), dm_gcall_float_result(), 0),                                          \
-     (__typeof__((f)(__VA_ARGS__)))dm_gcall((const void *)(uintptr_t)(f), DM_GC_N(__VA_ARGS__) DM_GC_CAT(DM_GC_M, DM_GC_N(__VA_ARGS__))(__VA_ARGS__)))
+     (__typeof__((f)(__VA_ARGS__)))dm_gcall((const void *)(uintptr_t)(f), DM_GC_N(__VA_ARGS__)                                       \
+                                            DM_GC_CAT(DM_GC_M, DM_GC_N(__VA_ARGS__))(DM_GC_N(__VA_ARGS__), __VA_ARGS__)))
 
 // Counters (the engine's own; the corpus test reads them)
 typedef struct {

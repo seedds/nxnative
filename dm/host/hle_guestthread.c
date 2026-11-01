@@ -11,8 +11,13 @@
 #include <stdatomic.h>
 #include <unistd.h>
 // DM_TEST_GUEST_C: a host unit test that includes this file and supplies the SDK's functions as C functions (t_svc_memory.c) takes the native form
+// The entry's argument (spawn_arg) is handed to the SDK, which keeps it in the ThreadType and passes it to the entry: guest memory on the engine (aot.h, "Host memory the
+// guest sees"), malloc's on Apple and in such a test
 #if !DM_NATIVE_EXEC && !defined(DM_TEST_GUEST_C)
 #include "aot.h"
+#define GUEST_FREE(p) dm_garena_free(p)
+#else
+#define GUEST_FREE(p) free(p)
 #endif
 typedef int (*create_fn)(void *tt, void (*fn)(void *), void *arg, void *stack, size_t size, int prio);
 typedef void (*tt_fn)(void *tt);
@@ -21,7 +26,7 @@ static void *need(const char *n) { void *p = guest_sym(n); if (!p) die("host gue
 typedef struct { void (*fn)(void *); void *arg; } spawn_arg;
 typedef struct { _Alignas(16) uint8_t tt[0x200]; void *stack_alloc; } host_thread;
 void dm_thread_mark_host(void);
-HLE_LINKAGE void spawn_tramp(void *p) { spawn_arg a = *(spawn_arg *)p; free(p); dm_thread_mark_host(); a.fn(a.arg); }
+HLE_LINKAGE void spawn_tramp(void *p) { spawn_arg a = *(spawn_arg *)p; GUEST_FREE(p); dm_thread_mark_host(); a.fn(a.arg); }
 #if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size) {
     spawn_arg *sa = malloc(sizeof *sa); if (!sa) die("host guest thread: allocation failed"); sa->fn = fn; sa->arg = arg; fn = spawn_tramp; arg = sa;
@@ -55,7 +60,7 @@ static uint64_t gcall(const char *name, int nargs, uint64_t a0, uint64_t a1, uin
 }
 #define P(p) ((uint64_t)(uintptr_t)(p))
 void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size) {
-    spawn_arg *sa = malloc(sizeof *sa); if (!sa) die("host guest thread: allocation failed"); sa->fn = fn; sa->arg = arg;   // the host's: only spawn_tramp reads it
+    spawn_arg *sa = dm_garena_alloc(sizeof *sa, 16); sa->fn = fn; sa->arg = arg;   // only spawn_tramp reads it, but the SDK keeps its address: the garena's
     stack_size = (stack_size + 0xfff) & ~(size_t)0xfff;
     host_thread *t = dm_guest_alloc(sizeof *t);                  // ThreadType first, in guest memory: the SDK links it into its lists and waits on it
     t->stack_alloc = (void *)(uintptr_t)gcall("malloc", 1, stack_size + 0xfff, 0, 0, 0, 0, 0);   // SDK malloc, as on Apple (CreateThread maps the stack through MapMemory)

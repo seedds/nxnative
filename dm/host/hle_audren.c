@@ -18,14 +18,24 @@
 #include <unistd.h>
 // A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
 // as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+// The memory such a call gets (docs/design/aot-recompiler.md 5.2; aot.h, "Host memory the guest sees"): GUEST_LOCAL(type, name, n) is Apple's stack array type name[n], here
+// n zeroed elements of the calling thread's scoped region in the arena, released when the block ends
 #if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 #define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#define GUEST_LOCAL(type, name, n) type name[n]
 #else
 #include "aot.h"
 #define GUEST_CALL DM_GUEST_CALL
+#define GUEST_LOCAL DM_GLOCAL
 #endif
 // The local renderer work buffer (ar_open) is allocated with posix_memalign and released with work_release: free, except on Windows, whose C runtime has no posix_memalign
-// and frees its aligned blocks (_aligned_malloc) only with _aligned_free. A unit test that counts the allocations (t_audren_work.c) defines both names before including this file
+// and frees its aligned blocks (_aligned_malloc) only with _aligned_free. A unit test that counts the allocations (t_audren_work.c) defines both names before including this file.
+// On the x86-64 engine the SDK's renderer works in it, so it is guest memory: the garena's (aot.h), on Linux and Windows alike
+#if !DM_NATIVE_EXEC && !defined(DM_TEST_GUEST_C) && !defined(posix_memalign)
+static int audren_garena_memalign(void **p, size_t align, size_t n) { *p = dm_garena_malloc(n, align); return 0; }
+#define posix_memalign audren_garena_memalign
+#define work_release dm_garena_free
+#endif
 #if defined(_WIN32)
 #include <malloc.h>
 #ifndef posix_memalign
@@ -98,7 +108,7 @@ static size_t ar_service_work_size(const uint8_t *p) {
 HLE_FORCE("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE", "renderer work buffer: DSP service budget, with extra local CPU backend storage supplied by the host",
           size_t, h_ar_WorkSize, const uint8_t *param) {
     static size_t (*orig)(const uint8_t *); if (!orig) orig = gsym("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE");
-    uint8_t p[P_SIZE]; cpu_manual(p, param); size_t n = GUEST_CALL(orig, p);
+    GUEST_LOCAL(uint8_t, p, P_SIZE); cpu_manual(p, param); size_t n = GUEST_CALL(orig, p);
     size_t service = *(int32_t *)(param + P_DEVICE) == 0 ? ar_service_work_size(p) : 0;
     size_t guest_n = service ? service : n;
     { static int once; if (!once++) LOG("audren: work buffer guest %#zx, local CPU/manual renderer %#zx", guest_n, n); }
@@ -157,7 +167,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     if (!orig_ev) orig_ev = gsym("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEventERKNS0_22AudioRendererParameterEPvm");
     if (!orig) orig = gsym("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleERKNS0_22AudioRendererParameterEPvm");
     if (t_in_open) return GUEST_CALL(orig, handle, param, work, sz);
-    uint8_t p[P_SIZE]; cpu_manual(p, param);
+    GUEST_LOCAL(uint8_t, p, P_SIZE); cpu_manual(p, param);
     LOG("audren: OpenAudioRenderer%s rate %d samples per frame %d mix buffers %d submixes %d voices %d sinks %d effects %d splitters %d (original device %d mode %d → CPU / manual) work buffer %p+%#zx",
         ev ? "" : " (no event)", *(int32_t *)param, *(int32_t *)(param + 4), *(int32_t *)(param + 8), *(int32_t *)(param + 0xc), *(int32_t *)(param + 0x10), *(int32_t *)(param + 0x14),
         *(int32_t *)(param + 0x18), *(int32_t *)(param + 0x24), *(int32_t *)(param + P_DEVICE), *(int32_t *)(param + P_MODE), work, sz);
@@ -416,7 +426,11 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
     else { cl = GUEST_CALL(cbuf, sys); n = GUEST_CALL(gen, sys, cl, GUEST_CALL(cbsz, sys)); }
     GUEST_CALL(unlock, sys + mu_off);
     atomic_fetch_add(&g_renders, 1);
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
     uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor (0x58 bytes; 0x60 in SDK 21, whose Process reads +0x58)
+#else
+    GUEST_LOCAL(uint64_t, proc, 16);   // the same, in the arena: zero and 16-byte aligned
+#endif
     GUEST_CALL(tmax, proc, 0xffffffffu); GUEST_CALL(setup, proc, cl, n); GUEST_CALL(process, proc);
     if (dst) *nout = capture(cl, n, dst);
     // render time per frame (budget: 5 ms per frame): mean / max every 2000 frames

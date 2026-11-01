@@ -4,11 +4,14 @@
 #include "hle.h"
 // A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
 // as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+// A string the guest is handed (getenv's answers) is guest memory (aot.h, "Host memory the guest sees"): strdup on Apple, the garena's copy here
 #if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
 #define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#define GUEST_STRDUP(s) strdup(s)
 #else
 #include "aot.h"
 #define GUEST_CALL DM_GUEST_CALL
+#define GUEST_STRDUP(s) dm_garena_strdup(s)
 #endif
 #include <stdatomic.h>
 
@@ -126,7 +129,7 @@ static void game_env_init(void) {
     const char *e = getenv("DM_GAME_ENV"); if (!e) e = DM_GAME_ENV;
     int n = 0; for (const char *p = e; *p; p++) n += *p == '=';
     if (!(g_env_kv = calloc((size_t)n + 1, sizeof *g_env_kv))) die("game_env allocation failed");
-    char *s = strdup(e); int k = 0;
+    char *s = GUEST_STRDUP(e); int k = 0;   // the values getenv hands the guest point into it
     for (char *t = strtok(s, " "); t && k < n; t = strtok(NULL, " ")) if (strchr(t, '=')) g_env_kv[k++] = t;
     if (k) LOG("game environment (%s): %s", getenv("DM_GAME_ENV") ? "DM_GAME_ENV" : "game profile game_env", e);
 }

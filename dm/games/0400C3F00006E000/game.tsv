@@ -29,16 +29,16 @@ romfs_marker	Movie/StaffRoll_00.webm
 zip_store	.zs:.bwav:.webm:.metallib
 
 # ---- Memory ----
-# The NPDM declares 64 MB of system resource (virtual address memory) and main sets a heap: the survey's 5 GB block (profile_guess.py). The pool is the Switch 1's 3,285 MiB, not a
-# Switch 2 measurement: the game sizes its heap from the pool (nninitStartup asked for 0x6b800000 with this pool and 0x1de400000 with a 9 GB one, the pool less about 1.53 GB).
-# The heap check (as build_ipa_from_nsp.py heap_check, by hand: SetHeapSize OOM: req 0x6b800000 with the guessed 128 MB heap region) moved the split: a 1.75 GB heap region,
-# the rest of the block the alias region. With it: [mem] heap 1.68 GB, and the sdk's address region node area maps the alias region up to +1.00 GB (SDK 21.4.0's AddressRegionManager
-# matches none of sdk_patches.py's node area rules)
-# 256 MB in front + 2.75 GB alias region + 256 MB stack region + 1.75 GB heap region
-mem_reserve	0x140000000
+# The NPDM declares 64 MB of system resource (virtual address memory) and main sets a heap (profile_guess.py). The pool is the Switch 2's 9 GB, as Donkey Kong Bananza's (the Switch 2
+# leaves games 9 GB of its 12 GB; not measured here): nnMain allocates a fixed 7.04 GB memory block from the heap (main+0xca866c: 0x1c2600000, AllocateMemoryBlock at main+0xbeb454),
+# so the Switch 1 pool (3,285 MiB, a 1.68 GB heap) crashed on the null block (main+0x5dd3ac). nninitStartup sizes the heap from the pool: with 9 GB it asks for 7.47 GB (0x1de400000);
+# the rest (1.53 GB) it maps into the alias region. The heap check with the 9 GB pool: SetHeapSize OOM: req 0x1de400000 > cap 0x70000000, so an 8 GB heap region. The sdk's address
+# region node area takes the alias region's first 1 GB (SDK 21.4.0's AddressRegionManager matches none of sdk_patches.py's node area rules): 1 GB + 1.53 GB fit the 2.75 GB alias region
+# 256 MB in front + 2.75 GB alias region + 256 MB stack region + 8 GB heap region
+mem_reserve	0x2d0000000
 mem_alias	0xb0000000
 mem_stack	0x10000000
-app_pool	0xCD500000
+app_pool	0x240000000
 # the NPDM declares 64 MB of system resource (main.npdm META +0x14): IsVirtualAddressMemoryEnabled is true
 sys_resource	0x4000000
 

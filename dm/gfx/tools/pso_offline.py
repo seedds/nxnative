@@ -15,8 +15,8 @@
 #                    it matches and a probe of a few bases finds them in the archive
 #   rest_pairs.tsv   the pairs the device still builds (only when there are any)
 #   archive.tsv      what was built: architectures, OS minimum, toolchain, bases (for people and logs; the host does not read it)
-# Each archive is made again only when its key changes (key.<arch> in the work folder): this file, the chain version, the libraries' bytes and stamp (inputs.tsv), the stamp above,
-# the architecture, the platform and minimum OS, and metal-tt's version.
+# Each archive is made again only when its compiler inputs change (key.<arch> in the work folder): the complete pipeline configuration without library locations,
+# the referenced libraries' bytes, architecture, platform, minimum OS and metal-tt version. Chain/profile stamps are validated and refreshed independently.
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
 #          [--depth gl|zero] [--platform ios|macos] [--os-min 27.0] [--script-only]
 #   --game: the profile (DM_GAMES_DIR as for game.py) whose shader_pairs.tsv and pso_pairs.tsv are the pairs, and whose depth_mode key the depth mode, unless --pairs / --depth say;
@@ -153,6 +153,21 @@ def clear_temporaries(work):   # what a failed or killed metal-tt leaves in its 
         shutil.rmtree(f) if f.is_dir() else f.unlink(missing_ok=True)
 
 
+def archive_key(configuration, libraries, arch, platform, osmin, toolchain):
+    """Identity of metal-tt's inputs, independent of chain labels and library locations.
+
+    The generated configuration includes all entry points and pipeline settings; the
+    library digest covers every referenced file's name and bytes. Only absolute
+    library paths are replaced: moving identical inputs cannot change the GPU code.
+    Version this format if a future input is not represented here. Legacy keys miss
+    once; runtime stamps are rewritten even when the compiled archive is reused.
+    """
+    config = dict(configuration, libraries=[dict(lib, path=lib['label'] + '.metallib') for lib in configuration['libraries']])
+    inputs = {'format': 1, 'configuration': config, 'libraries': libraries,
+              'arch': arch, 'platform': platform, 'os_min': osmin, 'toolchain': toolchain}
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
 def sdk(platform):
     return 'iphoneos' if platform == 'ios' else 'macosx'
 
@@ -202,7 +217,8 @@ def main(argv=None):
     bases, rest, left = plan(lib_dir, chain, pairs, zero)
     work.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
     js = work / 'bases.mtl4-json'   # metal-tt takes the format from the extension: .mtl4-json is Metal 4's (.mtlp-json is the Metal 3 format)
-    body = json.dumps(script(lib_dir, bases), indent=1).encode()
+    configuration = script(lib_dir, bases)
+    body = json.dumps(configuration, indent=1).encode()
     if not js.is_file() or js.read_bytes() != body: js.write_bytes(body)
     st = stamp(chain, zero, text)
     print(f'pso_offline: {len(pairs)} pairs: {len(bases)} bases, {len(rest)} left to the device (function constants), left out as the host leaves them: '
@@ -212,10 +228,9 @@ def main(argv=None):
     if not pairs: print('pso_offline: no pairs (only a header): nothing to build, no archive')   # a profile whose split found no pair (GitHub issue #338)
     if not bases: archs = []   # no pair, or every eligible pair needs device specialization; clear old archives and still write the stamp and the remainder list
     osmin = a.os_min or os_min_default(a.platform); tv = tool_version(a.platform) if bases else 'not used (function constants only)'
-    inputs = (lib_dir / 'inputs.tsv').read_text() if (lib_dir / 'inputs.tsv').is_file() else ''
     libraries = library_digest(lib_dir, bases)
     for arch in archs:
-        key = hashlib.sha256('\0'.join([Path(__file__).read_text(), chain, inputs, libraries, st, arch, a.platform, osmin, tv, hashlib.sha256(body).hexdigest()]).encode()).hexdigest()[:16]
+        key = archive_key(configuration, libraries, arch, a.platform, osmin, tv)
         dst, kf = out / f'{arch}.mtl4a', work / f'key.{arch}'
         if dst.is_file() and kf.is_file() and kf.read_text().strip() == key: print(f'pso_offline: {arch}: reused ({dst.stat().st_size / 2**20:.0f} MB)'); continue
         kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)

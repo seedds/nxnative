@@ -1104,6 +1104,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), during review of its offline archive path with synthetic libraries and pair lists; no new gameplay or iPhone run. The empty pair list on [ANIMAL WELL](../../dm/games/010020D01AD24000/README.md#found-on-this-game).
 - **Check:** `dm/tools/tests/test_pso_offline.py` changes vertex and fragment library bytes without changing entries or stamps, and exercises the all-constant plan, the header-only pair list and pairs all left out. `t_pso_bundle` rejects bare headers, truncated archives, malformed load commands and out-of-range universal slices, accepts real offline and serialized archives, and rejects zero-probe coverage.
 
+### Offline pipeline archive rebuilt after a chain-only update
+
+- **Symptom:** rebuilding an unchanged NSP after a shader-chain update runs `metal-tt` for minutes even when all referenced Metal libraries and pipeline settings remain identical.
+- **Cause:** the offline archive key included the chain label, profile stamp, whole builder source and absolute library paths inside `b-<chain>`. These can change without changing the compiler's inputs.
+- **Fix:** `pso_offline.py` keys each archive by the complete generated pipeline configuration with library locations normalized to their labels, every referenced library's name and bytes, GPU architecture, platform, minimum OS and Metal translator version. It still validates reflection against the current chain before planning. After a cache hit it writes the current `prebuilt.tsv`, remainder list and archive metadata, so host validation remains current. macOS and iOS use the same builder with separate target keys. Legacy cache keys rebuild once; a changed shader, entry point, pipeline descriptor or compiler target still rebuilds the archive. The cache format has an explicit version for future changes not represented by these inputs.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#build-performance), while measuring repeat Mac app builds. Timings and platform-validation limits are in the game note.
+- **Check:** `dm/tools/tests/test_pso_offline.py` exercises chain relocation and metadata refresh on both platforms, changed shader bytes and pipeline settings, target and compiler changes, missing archives, stale reflection and legacy keys.
+
 ### Offline pipeline archive and profile depth disagree
 
 - **Symptom:** the host logs `pipeline archive bundled with the app: made for ... this run needs ...`, naming different depths, and pipeline bases compile during play despite a successful archive build. There need not be a `[RED]` line.

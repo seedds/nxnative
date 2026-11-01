@@ -70,7 +70,26 @@ Each item was found from a red line or a pass dump on the way through the langua
 - A save made there continues with `DM_KEYS="f300:A*3/150"` (play from about frame 600), and `LUp~12` then walks along the platform.
 - A 5-minute walk: GPU about 6 ms a frame, no crash.
 
+## Build performance
+
+- **Resolved: chain-only updates rebuilt the offline pipeline archive.** See [archive reuse across chains](../../../docs/reference/shaders.md#offline-pipeline-archive-rebuilt-after-a-chain-only-update) for the general mechanism.
+- **Measured, 2026-10-31:** Apple M2 Max, macOS 26.6, Xcode 27.0 / AIR-TT 32023.921, native arm64 Python. Isolated checkout at `8dfa9c6d8b0e` plus the cache fix; the full app build used `--allow-other-metal` because the lock requests Xcode 27.2. A temporary comment-only chain edit changed `a7dbbce711c3` to `5b1637c7f097` without changing shader behavior. Both timed archive commands consumed the same 26,029 bases and library bytes; the legacy key changed, the content key did not.
+
+| Measurement (one run each) | Time |
+|---|---:|
+| Legacy builder, archive after the chain update | 462.78 s (7m43s) |
+| Content-based cache, same post-update archive inputs | 10.10 s |
+| Archive-stage saving | 452.68 s (7m33s), 97.8% |
+| Complete Mac app rebuild after the controlled chain update | 785.62 s (13m06s) |
+
+The full rebuild spent 4m59s on shader extraction, 5m10s preparing shaders (all 28,603 restored from cache), 16s reusing the archive, and 2m02s packaging/signing. The separate archive comparison's 10s and the full build's 16s include planning and hashing. The reused 1,217 MB archive retained its SHA-256 and modification time across the chain update. Warm-up is excluded: the legacy comparison was primed with the verified warm binary and its old-format input key, and an actual legacy invocation confirmed a cache hit before the update. The temporary source edit and chain header were restored afterward. This controlled chain-only case is not a total-time comparison with the earlier accumulated-update build, which also regenerated shader outputs.
+
+- **Validation:** 112 Python test files (1,020 tests, 13 skipped) pass with the native toolchain; Python lint has zero new findings; the native pipeline-bundle test passes 52 checks. `regress.py check --games 0100F43008C44000` passes: 28,603/28,603 shaders, no changed MSL or new interface failures. This was the only discovered local Mac build; it has no `smoke.tsv`, so there was no gameplay run and other games remain unchecked. The benchmark logs, input hashes, commands and results are in `<build>/performance-research/pipeline-archive-reuse/` (`comparison.json`, `chain-update-app/`, `regression/`).
+- **iOS scope:** the shared builder is tested for both targets. A real synthetic iOS archive took 4.445s to build and 0.234s to reuse after a chain move, preserving its inode/mtime and updating the stamp. No LegendsZA IPA or device run was timed. Its current profile does not enable `pso_mtl4`, so its default iOS build does not request an offline archive and gets no timing benefit from this stage.
+
 ## Found on this game
+
+- [Offline pipeline archive reuse across chains](../../../docs/reference/shaders.md#offline-pipeline-archive-rebuilt-after-a-chain-only-update).
 
 General host changes first needed here; each applies to every game:
 

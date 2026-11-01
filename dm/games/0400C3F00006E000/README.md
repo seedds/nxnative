@@ -1,6 +1,6 @@
 # Mario Kart World (`0400C3F00006E000`)
 
-A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (C library) + `sdk`. **In bring-up**: on the Mac the game shows its title ("Press L + R to start" over a 3D drive through Mario Bros. Circuit) and its main menu (Single Player, Multiplayer, Online Play, Wireless Play); the 3D scene has rainbow bands where it is bright ([Open](#open)). The first race of the 150cc Mushroom Cup Grand Prix (Mario Bros. Circuit) loads, counts down and runs at about 60 fps, the player's kart drives and takes items; iOS is untested.
+A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (C library) + `sdk`. **In bring-up**: on the Mac the game shows its title ("Press L + R to start" over a 3D drive through Mario Bros. Circuit) and its main menu (Single Player, Multiplayer, Online Play, Wireless Play). The first race of the 150cc Mushroom Cup Grand Prix (Mario Bros. Circuit) loads, counts down and runs at about 60 fps, the player's kart drives and takes items; iOS is untested.
 
 ## What it needs
 
@@ -23,7 +23,7 @@ A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for
 ## Shaders
 
 - The split (`dm/gfx/tools/shader_split.py`, no new reader) finds 11,604 shaders (compute 730, domain 13, pixel 7,301, vertex 3,560): BNSH in the `bfsha` files, the effects and the layouts (and 40 in `main`), agl's BAHS archives (`sharcb`, in `Lib/` and in `Shader/Drive…sarc.zs`) and agl's NDSR pack (36). Groups: shader 4,252, other 4,071, effect 3,136, layout 105, main 40; 5,180 variation pairs.
-- Full Mac build (chain a9e0bbe888ad; b7cd656abd7c the same count, about 25 minutes from an empty cache): 11,524 of 11,604 translate (11,522 on chain 3c66991eb439; the two agl compute shaders with 0x593, SUATOM, translate since the chain decodes it). The 80 failures are Ampere instructions the translator does not decode ([Ampere shader code](../../../docs/reference/shaders.md#ampere-shader-code-switch-2)). Open: which of them the races need.
+- Full Mac build (chain bf7b068a0b02; a9e0bbe888ad and b7cd656abd7c the same count, about 25 minutes from an empty cache): 11,524 of 11,604 translate (11,522 on chain 3c66991eb439; the two agl compute shaders with 0x593, SUATOM, translate since the chain decodes it). The 80 failures are Ampere instructions the translator does not decode ([Ampere shader code](../../../docs/reference/shaders.md#ampere-shader-code-switch-2)). 37 of them load on the route to the first race (16 compute, 12 vertex, 7 domain, 2 pixel; `failed to load shader … cannot open …metallib`), all from `DrivePassShaderDefault.sharcb`: see [Open](#open).
 
   | Opcode | Shaders | Stages | Source |
   |---|---|---|---|
@@ -34,7 +34,8 @@ A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for
   | 0x481 | 1 | compute | `DrivePassShaderDefault.sharcb` |
   | 0x59f | 1 | compute | `DrivePassShaderDefault.sharcb` |
 
-- Resolved: 168 compute shaders of `DrivePassShaderDefault.sharcb` declare 48 KB of shared memory (the control section's +0x64), past an Apple GPU's 32 KB; Metal refused their pipelines and the host skipped their dispatches. Seven run up to the first race (`04dedc705a7ef88b`, `2a89b6d4df731b8d`, `7caf175d0e2ada58`, `a8310cf7c7acd0fe`, `c37db932f3076403`, `c9347f7c454a68a4`, `e2a5bd13907993e3`): 64 threads, no shared atomics, three with a barrier. Since chain a9e0bbe888ad their shared memory is a slice of a device buffer ([Compute shared memory past 32 KB](../../../docs/reference/shaders.md#compute-shared-memory-past-32-kb)): their pipelines are made, and on the route to the first race every dispatch fit a 1 MB buffer. The picture shows no change: the rainbow bands stay.
+- Resolved: 168 compute shaders of `DrivePassShaderDefault.sharcb` declare 48 KB of shared memory (the control section's +0x64), past an Apple GPU's 32 KB; Metal refused their pipelines and the host skipped their dispatches. Seven run up to the first race (`04dedc705a7ef88b`, `2a89b6d4df731b8d`, `7caf175d0e2ada58`, `a8310cf7c7acd0fe`, `c37db932f3076403`, `c9347f7c454a68a4`, `e2a5bd13907993e3`): 64 threads, no shared atomics, three with a barrier. Since chain a9e0bbe888ad their shared memory is a slice of a device buffer ([Compute shared memory past 32 KB](../../../docs/reference/shaders.md#compute-shared-memory-past-32-kb)): their pipelines are made, and on the route to the first race every dispatch fit a 1 MB buffer. The picture showed no change.
+- Resolved: no shader is missing from the map. A run to the first race with `DM_NVN_SHDUMP` dumped nothing and logged no `is not in the shader map` line; the 37 `failed to load shader` keys of that route are all in the map, and are the translation failures above, not runtime-only shaders.
 - The translator warns `Attribute offset 0x5C is not valid.` in 2,838 shaders (Donkey Kong Bananza's build has none). Open: not analysed.
 
 ## Rendering
@@ -48,10 +49,11 @@ On the way to the title:
 On the way to the first race:
 
 1. The Grand Prix's cup opening movie (`Movie/KinokoOp.webm`) did not show: the screen kept the last 3D frame for its 23 s while every picture was decoded and read. The YUV pass writes an `RGBA8` render target and the composite samples an `RGBA8_SRGB` texture over the same memory; the host made them two Metal textures ([Textures of an sRGB / linear pair over the same storage](../../../docs/reference/rendering.md#textures-of-an-srgb--linear-pair-over-the-same-storage)).
+2. Vertical rainbow bands in the bright parts of the 3D scene (the sky near the horizon, the water, the lit floors; in the tunnel the floor turned white with cyan bands), a dark band with rainbow streaks and a grey column in the title's sky, and large pale shapes in the flyover's sky. The bloom's bright pass (`c44cb8e46dbcfd4f`) colours what it extracts by luminance and showed them most, but they came from the volumetric fog: its compute shader `fd413f04f59c161e` writes the 68x40x256 scattering volume (`RGBA16F`, with an `R8` volume beside it) after a reduction through shared memory, and in that volume each group of four texels along x held four values rotated by x % 4 (a `DM_NVN_TEXRAW` dump at frame 9480). The translator took the address register of `LDS.128 [Ra.X16 + imm]` unscaled ([Ampere shared memory address strides](../../../docs/reference/shaders.md#ampere-shared-memory-address-strides)). Since chain bf7b068a0b02 the scene shows none of them.
 
 The title and the main menu match the game as it is known: the title drives Mario's kart through Mario Bros. Circuit (the canyon, the tunnel with the course's name) with "Press L + R to start" and "Ver. 1.8.0"; L + R opens the main menu over the same drive, with Single Player (selected, the 1P marker), Multiplayer, Online Play, Wireless Play, three round buttons and "Free Roam" on the + button. What differs is in [Open](#open).
 
-The first race matches the game as it is known: after "Start Grand Prix?" the map of the cup's courses, the Mushroom Cup movie (Mario Bros. Circuit, Crown City, Whistlestop Summit, DK Spaceport, the cup's emblem), the course flyover, the grid at the Mario Kart arch with Lakitu's lights, 3, 2, 1, GO!, the HUD (coins, lap 1/3, place, the course map, the item box). What differs: the sky has vertical light bands in the race and wavy bands in the flyover, the water rainbow bands of the menu (see [Open](#open)).
+The first race matches the game as it is known: after "Start Grand Prix?" the map of the cup's courses, the Mushroom Cup movie (Mario Bros. Circuit, Crown City, Whistlestop Summit, DK Spaceport, the cup's emblem), the course flyover, the grid at the Mario Kart arch with Lakitu's lights, 3, 2, 1, GO!, the HUD (coins, lap 1/3, place, the course map, the item box). The rainbow bands of the sky, the water and the lit floors are resolved (item 2 above).
 
 ## Boot (Mac)
 
@@ -72,9 +74,7 @@ Memory after 60 s (`run11.log`): GPU allocated 14.2 GB, footprint 12.6 GiB, 7 pl
 
 ## Open
 
-- In the title's sky, at frame 3400 of the route: a dark band with rainbow streaks over the left half and a flat grey column from the horizon to the top of the picture. Not analysed; likely the same bloom fault (below) or the sky.
-- Rainbow bands in the bright parts of the 3D scene: vertical colour bands in the sky near the horizon, on the water and on lit floors (in the tunnel the floor turns white with cyan bands). They come from the bloom: its bright pass (pixel shader `c44cb8e46dbcfd4f`, the 512x288 `RGBX16_SNORM` target, pass 876646 in the menu's pass dump) colours what it extracts by its brightness, and its output already holds the bands; the composite (`3d81a859ffbb99f5`) adds them to the scene. The scene's lit areas are much brighter than they should be (the tunnel floor is white). Suspected, not checked: the exposure, which a shader among the 16 runtime-only compute shaders that do not load (below) computes. Not the 48 KB compute shaders: they run since chain a9e0bbe888ad and the bands stay.
-- 63 shaders missing from the cache (`failed to load shader …: cannot open …/b-3c66991eb439/….metallib`, 16 compute and 2 pixel programs with no shader): none of their keys is in the full build's 11,522 libraries, so they are the runtime-only shaders (about 240 by #834) that a `DM_NVN_SHDUMP` run collects (Goal: build order). In the first race three more: `1de24686294997d8`, `6098504f5d12ea03`, `b6d76b6fc9dc926f`.
+- 37 shaders the route to the first race loads do not translate (Ampere instructions 0x2be, 0x883, 0x927, 0x992, [Shaders](#shaders)); their draws and dispatches are skipped. What they draw is not known; the picture of the route shows nothing missing that is known.
 - The NVN2 calls reported as unimplemented: `CommandBufferDrawMeshTasks` (302 times in 60 s), `CommandBufferBindShadingRateImage`, `CommandBufferShadingRateImagePalette`; unknown names `nvn*CooperativeVectorMatrix*`, `nvn*PoolWriteDescriptorTableData`.
 - The display link stalled 7 times in the first 50 s (`display link recovered: stalled … ms`), with 253 dropped frames up to frame 600; after that 2 dropped in 300 frames.
 - The camera's other commands (29 at the first frames) fail as "no camera"; their meaning is not known.
@@ -89,3 +89,4 @@ Memory after 60 s (`run11.log`): GPU allocated 14.2 GB, footprint 12.6 GiB, 7 pl
 - [SDK 21's video decoder names](../../../docs/reference/movies.md#sdk-21s-video-decoder-names)
 - [Textures of an sRGB / linear pair over the same storage](../../../docs/reference/rendering.md#textures-of-an-srgb--linear-pair-over-the-same-storage)
 - [Compute shared memory past 32 KB](../../../docs/reference/shaders.md#compute-shared-memory-past-32-kb)
+- [Ampere shared memory address strides](../../../docs/reference/shaders.md#ampere-shared-memory-address-strides)

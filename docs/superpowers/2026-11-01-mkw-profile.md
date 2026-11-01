@@ -2,7 +2,7 @@
 
 ## Goal
 
-Mario Kart World (`0400C3F00006E000`), base 1.0.0 with update 1.8.0 (917504), plays on the Mac on the `nx2` branch. The game boots, shows the title and the menus, and plays complete races with a correct picture. The game gets its profile `dm/games/0400C3F00006E000/`, its note, its row in the games table and its gallery entry. The work goes to `nx2` as one pull request.
+Mario Kart World (`0400C3F00006E000`), base 1.0.0 with update 1.8.0 (917504), plays on the Mac on the `nx2` branch. The game boots, shows the title and the menus, and plays complete races with a correct picture. The game gets its profile `dm/games/0400C3F00006E000/`, its note, its row in the games table and its gallery entry. The work goes to `main` as one pull request (upstream merged `nx2` into `main` on 2026-11-01).
 
 Why: Mario Kart World is the second Switch 2 game after Donkey Kong Bananza (`040074A01BF12000`). PR #834 brought it to free roam with code that the repository cannot take (see Anti-goals). This work does it on the Switch 2 support that `nx2` has.
 
@@ -80,7 +80,7 @@ Source: `git show origin/pr834:dm/games/0400C3F00006E000/README.md` and `game.ts
 ## Decisions
 
 - **Scope** (the user's answer): playable races on the Mac, then the games table row and the PR.
-- **Branch and PR:** the branch `feature/2026-11-01-mkw-profile` from `origin/nx2`. One PR into `nx2` at the end. Commits as `seedds` (`git -c user.name=seedds -c user.email=seedds@gmail.com commit`, AGENTS.md). Push and the PR only on the user's command.
+- **Branch and PR:** the branch `feature/2026-11-01-mkw-profile`, started from `origin/nx2` and rebased onto `origin/main` (`cd859c38`) after upstream merged `nx2` into `main` (the user's decision, 2026-11-01). One PR into `main` at the end. Commits as `seedds` (`git -c user.name=seedds -c user.email=seedds@gmail.com commit`, AGENTS.md). Push and the PR only on the user's command.
 - **Commit order:** each general fix (host, translator, tools) is its own commit, before the profile and docs commits that use it. Then a commit can be reverted alone if it regresses another game.
 - **Folders:** the build folder `/Users/lego/github/switch/mkw/0400C3F00006E000_build` (the default of `pack_dump.py`) and the work folder `/Users/lego/github/switch/mkw/0400C3F00006E000-work`, beside the dump. Donkey Kong Bananza's are under `/Users/lego/github/switch/dkb/` the same way. The game's folder is the NSP folder of AGENTS.md.
 - **NVN2 API version:** a general rule before a profile key. The task that meets the game's check reads the checks of both games in their binaries. If one answer satisfies both (major 231 and the larger minor), the host gives it for every Switch 2 SDK, with the comment at `hle_nvn.c:186-187` updated. The regression run checks Donkey Kong Bananza. `device_api` goes into the profile only if no general answer satisfies both games.

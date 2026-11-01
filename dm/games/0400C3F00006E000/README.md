@@ -23,7 +23,7 @@ A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for
 ## Shaders
 
 - The split (`dm/gfx/tools/shader_split.py`, no new reader) finds 11,604 shaders (compute 730, domain 13, pixel 7,301, vertex 3,560): BNSH in the `bfsha` files, the effects and the layouts (and 40 in `main`), agl's BAHS archives (`sharcb`, in `Lib/` and in `Shader/Drive…sarc.zs`) and agl's NDSR pack (36). Groups: shader 4,252, other 4,071, effect 3,136, layout 105, main 40; 5,180 variation pairs.
-- Full Mac build (chain 3c66991eb439, about 25 minutes from an empty cache): 11,522 of 11,604 translate. The 82 failures are Ampere instructions the translator does not decode ([Ampere shader code](../../../docs/reference/shaders.md#ampere-shader-code-switch-2)). Open: which of them the races need.
+- Full Mac build (chain b7cd656abd7c, about 25 minutes from an empty cache): 11,524 of 11,604 translate (11,522 on chain 3c66991eb439; the two agl compute shaders with 0x593, SUATOM, translate since the chain decodes it). The 80 failures are Ampere instructions the translator does not decode ([Ampere shader code](../../../docs/reference/shaders.md#ampere-shader-code-switch-2)). Open: which of them the races need.
 
   | Opcode | Shaders | Stages | Source |
   |---|---|---|---|
@@ -31,7 +31,6 @@ A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for
   | 0x2be | 25 | compute 13, vertex 7, domain 5 | `DrivePassShaderDefault.sharcb` |
   | 0x927 | 14 | domain 8, vertex 6 | `DrivePassShaderDefault.sharcb` |
   | 0x992 | 10 | compute | `DrivePassShaderDefault.sharcb` |
-  | 0x593 | 2 | compute | agl `agl_technique_pfx.sharcb` (as in Donkey Kong Bananza) |
   | 0x481 | 1 | compute | `DrivePassShaderDefault.sharcb` |
   | 0x59f | 1 | compute | `DrivePassShaderDefault.sharcb` |
 

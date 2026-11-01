@@ -1,6 +1,6 @@
 # Mario Kart World 1.8.0: handover
 
-State on 2026-11-01. Plan: `docs/superpowers/2026-11-01-mkw-profile-plan.md`. PRD: `docs/superpowers/2026-11-01-mkw-profile.md`.
+State on 2026-11-01 (evening). Plan: `docs/superpowers/2026-11-01-mkw-profile-plan.md`. PRD: `docs/superpowers/2026-11-01-mkw-profile.md`.
 
 ## Where the work is
 
@@ -14,7 +14,9 @@ State on 2026-11-01. Plan: `docs/superpowers/2026-11-01-mkw-profile-plan.md`. PR
 ## Done
 
 - Tasks 1–6, 7a and 7b are complete and reviewed. Fix rounds after review are in the ledger as "fix (unreviewed)".
-- The game boots, shows the title and the menu, loads race 1 of the 150cc Mushroom Cup and runs at about 60 fps.
+- The race crash is fixed (commits `b09b1bc6`, `4571e7a2`, `0f8e9a56`, review fix `c531bd71`, unreviewed). Cause: the translator lacked Ampere BREV / UBREV, so 25 DrivePass shaders were skipped. Compute shader `18dd278d143adfd4` then wrote past its append buffer into heap objects. The boot crash is proven; the race crash probably (report: `.superpowers/sdd/2026-11-01-mkw-profile-plan/debug-race-crash-2.md`, review: `review-crash2.md`).
+- The user drove race 1 by hand, all 3 laps, with sound (`user_check.log`): no crash, no broken textures seen. Not recorded.
+- The game boots, shows the title and the menu, and plays race 1 of the 150cc Mushroom Cup at about 60 fps.
 - Fixed:
   - the Switch 2 services the game opens (mouse, GameChat, camera, HDR metadata),
   - the 9 GB pool,
@@ -23,29 +25,38 @@ State on 2026-11-01. Plan: `docs/superpowers/2026-11-01-mkw-profile-plan.md`. PR
   - SDK 21 video decoder names,
   - sRGB / linear texture pairs,
   - compute shared memory past 32 KB in a device buffer,
-  - the Ampere shared-memory stride (the rainbow bands).
+  - the Ampere shared-memory stride (the rainbow bands),
+  - Ampere BREV / UBREV (the race crash).
 
-## Open, in order
+## Test tools in the work folder
 
-1. **Race crash** at `main+0x1a43e4`, around frame 14,700 of race 1. It is new since `93aca024` (the 48 KB compute shaders run).
-   - Findings: `.superpowers/sdd/2026-11-01-mkw-profile-plan/debug-race-crash.md`.
-   - A 3x4 bone matrix from a 48 KB DrivePass skeleton shader (for example `2a89b6d4df731b8d`) lands on a heap object.
-   - Cause (a) or (b), not yet told apart: (a) an unbounded, data-driven output index; (b) a GPU write after the pool memory was freed and reused as heap.
-   - Next step: one diagnostic run to frame ~16,000 that logs each 48 KB dispatch's storage buffer and the pool frees near the object.
-   - Uncommitted: `dm/host/probe.c` (`heap+<offset>` for `DM_PROBE_WATCH` / `DM_PROBE_POLL`).
-2. **Test runs, the new way** (the user's decision):
-   - a save after the first boot (`save_menu`, from a run stopped at about frame 4700, not the current `run/save`),
-   - `run_until.sh <log> <target frame> [keys]`, which ends a run on a crash, at the target frame or on a stall,
-   - static analysis before a run.
-3. **Race input:** after the crash fix, the user drives races 1 and 2 once with `DM_REC` (with `DM_DETCLOCK`, from the saved copy). The recording becomes the route.
-4. Task 7c (race 1 to the results screen, picture check), Task 8 (race 2), Task 9 Steps 4–6 (seed list, prebuild; no shader was missing from the map), Task 10 (note, games table, gallery), Task 11 (regression: Donkey Kong Bananza plus four games, also Monster Hunter Rise and OCTOPATH TRAVELER for the sparse change; no IPA). Then the final review and the checklist.
+- `save_menu/`: the save after the first boot, at the main menu.
+- `run_until.sh <log> <target frame> [keys]`: a fresh copy of `save_menu`, muted, ends on a crash, at the target frame or on a stall.
+- `keys_race_menu.txt`: from `save_menu` to race 1, A held 20 s after GO.
+- `rec.sh [name]`: records the user's play with `DM_REC` and `DM_DETCLOCK` (not used: the user does not record).
+- The range-check hook (storage stores against the bound size) was a local debug build only, not committed (design in `debug-race-crash-2.md`).
+
+## Open, waiting for the user's choice
+
+The user stopped the scripted-route author (Task 7c round 2, brief `task-7c2-brief.md`) before it started work: do nothing until the user chooses. The user will not record races with `DM_REC` (too long). Options given to the user:
+
+1. Scripted route through races 1 and 2: Smart Steering (and auto-accelerate) turned on in the menu, A held, built with `DM_CTL` and shots (the brief above).
+2. Skip the route: close Task 7 on the user's hand-driven race 1, go on to Tasks 9–11.
+3. Stop here.
+
+Also open:
+- 25 shaders on the route still fail to translate (opcodes 0x883, 0x927, 0x992); 67 fail in the full build.
+- `nvnCommandBufferDrawMeshTasks` and `nvnCommandBufferShadingRateImagePalette` are not implemented (thousands of calls a race).
+- Task 8 (race 2), Task 9 Steps 4–6 (seed list, prebuild), Task 10 (note, games table, gallery), Task 11 (regression: Donkey Kong Bananza plus four games, also Monster Hunter Rise and OCTOPATH TRAVELER; no IPA). Then the final review and the checklist.
 
 ## Rules agreed in this session
 
 - Boot no other game before Task 11.
 - Runs are muted.
 - Commits as `legoxz`: a plain `git commit` with the checkout's identity, not AGENTS.md's `seedds` identity.
-- Push and the PR only on the user's command.
+- Push and the PR only on the user's command. Nothing goes upstream while the work is unfinished.
+- Describe a new agent run to the user before it starts.
+- A run the user plays: add `DM_REC` (free recording).
 
 ## Known outside the code
 
@@ -53,4 +64,4 @@ The external BenQ monitor on Thunderbolt drops its link during heavy game runs (
 
 ## Resume
 
-In a new session in `/Users/lego/github/switch/nxnative`: `implementuj docs/superpowers/2026-11-01-mkw-profile-plan.md`. The ledger marks done tasks. Start with open item 1.
+In a new session in `/Users/lego/github/switch/nxnative`: `implementuj docs/superpowers/2026-11-01-mkw-profile-plan.md`. The ledger marks done tasks. Ask the user which option of "Open, waiting for the user's choice" to take.

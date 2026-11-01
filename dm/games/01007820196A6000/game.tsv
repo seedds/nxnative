@@ -1,0 +1,44 @@
+# Game profile of Red Dead Redemption (Switch, base game 1.0.1). Plays on the Mac (to the first open-world area: the Ricketts farm), not tried on the iPhone
+# Format: see dm/games/README.md
+# Rockstar's RAGE engine as Double Eleven ported it (the engine classes are in the d11 namespace; threads named [RAGE] ... and [RDR2] Render Thread), SDK 15.3.2, on NVN. Modules main and sdk.
+# RomFS: 134 RPF6 archives (.rpf; the shaders are in shaders.rpf as rgxd resources, 3,583 of them with those in main and in langselect.pkdswitch) and .bk2 videos. main holds no glslc and no NVNS / BNSH.
+# The values below began as scripts/build_ipa_from_nsp.py's guess (profile_guess.py) and are the ones the game was brought up with. The shader tables are the split's output; see README.md
+
+# ---- Identity ----
+title_id	01007820196A6000
+program_id	01007820196A6000
+
+# ---- App ----
+name	Red Dead Redemption
+ipa	RedDeadRedemption.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.1	main=90d38d285a365d9e834001b144e1d20f	sdk=8618895246b420329b77746b960a66ab
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	audio_switch.rpf
+zip_store	.bk2:.pkdswitch:.rpf:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 1207 MB of bss (counted as used memory): a 2048 MB heap region
+mem_reserve	0xb0000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+# provisional guess from the RomFS top-level folders: the game's shaders are not in files of those names (rpf resources, main, one .pkdswitch), so these groups label little. Changing it, or shader_note,
+# restamps the shader libraries (they are inputs), so both stay as they are until the shaders are next rebuilt
+shader_groups	/redemption/=redemption /cero/=cero /d11extra/=d11extra
+shader_note	Red Dead Redemption shaders (provisional profile)
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x4ca4000

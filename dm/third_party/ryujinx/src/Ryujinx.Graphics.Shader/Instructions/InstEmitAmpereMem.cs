@@ -47,6 +47,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0xb9d, InstName.Sust, ASurface, N, writesRd: false);
             x(0x593, InstName.Suatom, ASuatom, N);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
+            x(0x992, InstName.Membar, AMembar, N, writesRd: false);
         }
 
         // ---- attributes ----
@@ -404,6 +405,29 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             context.Barrier();
+        }
+
+        // MEMBAR: scope 76..79 (Mesa NAK sm70_encode.rs OpMemBar: 0 CTA, 2 GPU, 3 system; 5, which Mario Kart World encodes, is a system-wide scope after
+        // the Eglantine fork's lower_to_maxwell.h:1057), 72 .MMIO and 80 .SC clear. CTA orders the workgroup's memory; every wider scope is a device
+        // barrier, as Maxwell's MEMBAR translates (Metal has no scope beyond the device)
+        public static void AMembar(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int scope = x.Bits(76, 79);
+
+            if (x.Bits(32, 64) != 0 || x.Bits(64, 96) != scope << 12 || scope is not (0 or 2 or 3 or 5))
+            {
+                throw AFail(context, $"MEMBAR form (scope {scope})");
+            }
+
+            if (scope == 0)
+            {
+                context.GroupMemoryBarrier();
+            }
+            else
+            {
+                context.MemoryBarrier();
+            }
         }
 
         // ---- textures ----

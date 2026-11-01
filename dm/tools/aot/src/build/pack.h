@@ -3,12 +3,13 @@
 // lookup table, the function map, the line table (!pcsections) and the module descriptor of include/nxaot/aot_module.h; optimised by the tier's
 // pipeline and written as native objects, linked by lld (as a library) into the shared object the host loads.
 //
-// Compile units (section 10's strategy): at tiers C and W each guest function is a unit of its own (at H and H+, whose pipelines inline, a shard of
-// neighbouring functions), lifted, optimised and compiled in an LLVM context and module of its own on one of the compile workers, into an object
-// of its own; the tables, the descriptor and the code every unit shares (jit_entry, the slow-path wrappers, the module's base) are one more
-// object. The functions reach each other through hidden symbols that lld resolves, so a unit's object depends on its own code and on the
-// convention facts of what it calls, and not on how the units were spread over the workers: a pack is the same whatever the number of workers,
-// and a unit's object can be cached (src/cache, section 13) and reused by the next pack.
+// Compile units (section 10's strategy): at tiers C and W a group of neighbouring functions of one tier, each optimised on its own (at H and H+,
+// whose pipelines inline, a shard of neighbouring functions; a function over the size limit of section 9.3 is split into parts, a unit each),
+// lifted, optimised and compiled in an LLVM context and module of its own on one of the compile workers, into an object of its own; the tables,
+// the descriptor and the code every unit shares (jit_entry, the slow-path wrappers, the module's base) are one more object. The functions reach
+// each other through hidden symbols that lld resolves, so a unit's object depends on its own code and on the convention facts of what it calls,
+// and not on how the units were spread over the workers: a pack is the same whatever the number of workers, and a unit's object can be cached
+// (src/cache, section 13) and reused by the next pack, as can the module's analysis (analysis_cache.h).
 #pragma once
 
 #include <cstdint>
@@ -21,7 +22,8 @@
 
 namespace nxaot::build {
 
-// The tiers of section 9.3. Without a profile the pack modes map onto one tier for every function: balanced -> W, max -> H+
+// The tiers of section 9.3. Without a profile the pack modes map onto one tier for every function: balanced -> W, max -> H+; with one
+// (BuildOptions::profile_path) a sampled function is at H (max: H+) and the others at C (max: H)
 enum class Tier : uint8_t { C, W, H, HPlus };
 const char* TierName(Tier t);  // "C", "W", "H", "H+"
 
@@ -40,8 +42,13 @@ struct BuildOptions {
     bool no_inline = false;                         // keep every guest function out of line (nxaot_bench measures calls)
     bool safepoints = true;                         // polls at function entries and backward branches (section 6.2); off: --no-safepoints
     std::string ir_path;                            // also write the lifted LLVM IR, before the tier's passes (--ir)
+    bool ir_after_passes = false;                   // write it after the tier's passes instead: what code generation is given (--ir-opt <file>)
     unsigned workers = 0;                           // compile workers; 0: from the CPUs this process may run on, bounded by free memory (--workers)
     std::string cache_dir;                          // the per-function cache (--cache, section 13); empty: none
+    bool groups = true;                             // units of neighbouring functions at tiers C and W; off: one per function (--no-groups)
+    bool split = true;                              // functions over a size limit split into parts (design 9.3); off: --no-split
+    uint64_t split_above = 8'192;                   // that limit in instructions; parts of a quarter to a half of it (--split-above, tests)
+    std::string profile_path;                       // sampled guest offsets (--profile, design 9.3: tier H where sampled, tier C elsewhere)
 };
 
 struct BuildStats {
@@ -62,7 +69,13 @@ struct BuildStats {
     analysis::DiscoverTimes discover_times;   // of t_discover: discovery's steps
     uint64_t units = 0, workers = 0;
     uint64_t tier_functions[4] = {};          // functions compiled per tier (C, W, H, H+)
-    uint64_t cache_hits = 0, cache_misses = 0, cache_bytes_read = 0, cache_bytes_written = 0;
+    uint64_t split_functions = 0, split_parts = 0, splits = 0;  // functions split for size, their parts, the transfers between parts
+    double t_join = 0;                        // joining each split function's parts (ld.lld -r): wall clock
+    uint64_t profile_samples = 0, profile_offsets = 0, profile_outside = 0;  // --profile: samples read, distinct offsets, offsets in no function
+    uint64_t cache_hits = 0, cache_misses = 0, cache_bytes_read = 0, cache_bytes_written = 0;  // units
+    uint64_t cache_hit_functions = 0, cache_miss_functions = 0;  // the functions of those units
+    std::string analysis_cache;               // with --cache: "hit", or "miss (why)" (analysis_cache.h)
+    double t_analysis_cache = 0;              // reading (and on a miss writing) the analysis cache's entry: wall clock, part of discover and plan
     uint64_t peak_rss_kib = 0;
     bool fpsr_flags = false;
     std::string cpu, features;

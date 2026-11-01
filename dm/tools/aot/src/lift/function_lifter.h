@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include <llvm/Analysis/InstSimplifyFolder.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
 
@@ -157,6 +158,7 @@ public:
     void OrFpsrBits(Value* bits);                // i32 of FPSR cumulative bits (IOC 1, DZC 2, OFC 4, UFC 8, IXC 0x10, IDC 0x80)
     Value* FpsrPtr() { return Field(offsetof(dm_guest_state, fpsr)); }
     void FlushFpsr();                            // the accumulated QC and bits into st->fpsr (before a helper call, an FPSR read, an exit)
+    std::vector<llvm::StoreInst*> flushes;       // the stores to st->fpsr FlushFpsr made (FnCleanup erases them when nothing raised a bit)
     Value* MxcsrFlags();                         // the native operations' flags as FPSR bits (stmxcsr)
     void SetMxcsr(Value* fpcr, bool clear_flags);
 
@@ -186,6 +188,8 @@ public:
     Value* FlushDenormal(Value* bits);           // FPCR.FZ: a denormal becomes a zero of its sign
     Value* NaN2(Value* a, Value* b, Value* r);   // Arm's FPProcessNaNs for two operands, else r (with FPCR.DN the default NaN), on integer bits
     Value* NaN3(Value* a, Value* b, Value* c, Value* r);
+    bool cold_exact = false;                     // lowering a chain's cold recompute (Escape): NaN1 / NaN2 / NaN3 call NaNCall
+    Value* NaNCall(unsigned arity, llvm::ArrayRef<Value*> args);  // the call of NaN<arity>'s out-of-line form for the arguments' type
     // FPMulAdd's invalid case: a quiet NaN addend with infinity times zero (zero as FPCR.FZ reads it), per lane; raises IOC when the flags are
     // modelled (x86's FMA returns the quiet NaN and raises nothing)
     Value* MulAddInvalid(Value* addend_bits, Value* op1_bits, Value* op2_bits);
@@ -207,7 +211,10 @@ public:
 
     llvm::Module& M;
     llvm::LLVMContext& C;
-    llvm::IRBuilder<> B;
+    // The builder folds what InstSimplify folds as each instruction is made (an add of 0, a shift by 0, a select on a constant, a zext of a
+    // trunc of a zext...): dynarmic's IR spells every mov, address and carry-less add that way, and InstCombine, the largest optimisation pass
+    // of tier W, otherwise removes them again (README.md, "Pack throughput", phase 5b). InstCombine applies the same folds, so the code is the same
+    llvm::IRBuilder<llvm::InstSimplifyFolder> B;
     const Region& region;
     const decode::CodeReader& read;
     const LiftOptions opts;
@@ -286,6 +293,7 @@ public:
     void FnDataflow();
     void FnPrologue();
     void FnInitRegisters();  // after the body: the first values of the registers it reads
+    void FnCleanup();        // then: the FPSR flushes of a function that raises no bit, and the allocas nothing loads (lifter.cpp)
     void FnLowerTerminal(const IR::Terminal& t);
     void FnGoto(Value* target);
     void FnExit(Value* pc, uint32_t reason);
@@ -303,6 +311,7 @@ public:
     void FnTail(const CalleeView& c, llvm::FunctionType* type, Value* callee);
     void FnTailDirect(uint64_t target);
     void FnTailIndirect(Value* target, uint64_t site);
+    void FnSplit(uint64_t target, bool store);  // to a block of another part of a split function (FunctionPlan::part_of)
     void FnReturn(Value* target);
     void FnTrap(Value* pc, uint32_t reason);
     void FnSvc(Value* number, Value* next_pc);

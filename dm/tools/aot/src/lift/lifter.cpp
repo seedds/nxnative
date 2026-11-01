@@ -18,6 +18,8 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/IntrinsicsX86.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/ValueHandle.h>
+#include <llvm/Transforms/Utils/Local.h>
 
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
 #include "dynarmic/interface/A64/config.h"
@@ -66,8 +68,8 @@ namespace detail {
 using namespace Dynarmic;
 
 FunctionLifter::FunctionLifter(llvm::Module& module, const Region& region, const decode::CodeReader& read, const LiftOptions& options)
-        : M(module), C(module.getContext()), B(module.getContext()), region(region), read(read), opts(options), fpcr(options.fpcr & kFpcrModeMask),
-          plan(options.plan) {}
+        : M(module), C(module.getContext()), B(module.getContext(), llvm::InstSimplifyFolder(module.getDataLayout())), region(region), read(read),
+          opts(options), fpcr(options.fpcr & kFpcrModeMask), plan(options.plan) {}
 
 // ---- Phase 1 ----
 
@@ -333,6 +335,7 @@ Lifted FunctionLifter::Run(const std::string& name) {
     }
     if (error.empty() && Fn()) {
         FnInitRegisters();
+        FnCleanup();
     }
     if (error.empty() && !Fn()) {
         Epilogue();
@@ -761,9 +764,59 @@ void FunctionLifter::OrFpsrBits(Value* bits) {
 
 void FunctionLifter::FlushFpsr() {
     Value* add = B.CreateOr(B.CreateLoad(B.getInt32Ty(), fpsr_bits), B.CreateShl(B.CreateZExt(B.CreateLoad(B.getInt1Ty(), qc), B.getInt32Ty()), 27));
-    StoreField(B.CreateOr(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, fpsr)), add), offsetof(dm_guest_state, fpsr));
+    Value* ptr = Field(offsetof(dm_guest_state, fpsr));
+    flushes.push_back(B.CreateAlignedStore(B.CreateOr(B.CreateAlignedLoad(B.getInt32Ty(), ptr, llvm::Align(4)), add), ptr, llvm::Align(4)));
     B.CreateStore(B.getFalse(), qc);
     B.CreateStore(B.getInt32(0), fpsr_bits);
+}
+
+// Function mode, once the body is lowered: what the passes would only remove again (README.md, "Pack throughput", phase 5b). A function whose
+// lowering raised no FPSR bit and QC (uses_fpsr) flushes zero at every call, return, poll and exit (st->fpsr |= 0, some ten instructions each):
+// those flushes go. Then every register, flag and FPSR alloca the code never loads (the prologue makes all 71, FnInitRegisters stored only those
+// read), with the stores into it and what only they used
+void FunctionLifter::FnCleanup() {
+    llvm::SmallVector<llvm::WeakTrackingVH, 64> dead;
+    const auto erase = [&](llvm::Instruction* i) {
+        for (llvm::Use& op : i->operands()) {
+            if (auto* d = llvm::dyn_cast<llvm::Instruction>(op.get())) dead.emplace_back(d);
+        }
+        i->eraseFromParent();
+    };
+    if (!uses_fpsr) {
+        for (llvm::StoreInst* s : flushes) erase(s);
+        llvm::RecursivelyDeleteTriviallyDeadInstructionsPermissive(dead);
+        dead.clear();
+    }
+    flushes.clear();
+    std::vector<llvm::AllocaInst*> allocas;
+    for (llvm::Instruction& i : F->getEntryBlock()) {
+        if (auto* a = llvm::dyn_cast<llvm::AllocaInst>(&i)) allocas.push_back(a);
+    }
+    for (llvm::AllocaInst* a : allocas) {
+        std::vector<llvm::Instruction*> users;
+        bool loaded = false;
+        for (llvm::User* u : a->users()) {
+            auto* i = llvm::cast<llvm::Instruction>(u);
+            const auto* s = llvm::dyn_cast<llvm::StoreInst>(i);
+            const auto* l = llvm::dyn_cast<llvm::LoadInst>(i);
+            if (l && l->use_empty()) {
+                users.push_back(i);  // a load nobody uses
+            } else if (s && s->getPointerOperand() == a && s->getValueOperand() != a) {
+                users.push_back(i);
+            } else {
+                loaded = true;
+            }
+        }
+        if (loaded) {
+            for (llvm::Instruction* i : users) {
+                if (llvm::isa<llvm::LoadInst>(i)) i->eraseFromParent();
+            }
+            continue;
+        }
+        for (llvm::Instruction* i : users) erase(i);
+        a->eraseFromParent();
+    }
+    llvm::RecursivelyDeleteTriviallyDeadInstructionsPermissive(dead);
 }
 
 Value* FunctionLifter::MxcsrFlags() {

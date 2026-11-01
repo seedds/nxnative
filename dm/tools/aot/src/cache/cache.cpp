@@ -16,9 +16,6 @@
 
 namespace nxaot::cache {
 
-namespace {
-
-// Writes data to path through a unique temporary name in the same directory, then renames it: readers see the whole file or none
 bool WriteAtomic(const std::string& path, const std::string& data, std::string* error) {
     static std::atomic<uint64_t> serial{0};
     const std::string tmp = path + ".tmp." + std::to_string(llvm::sys::Process::getProcessId()) + "." + std::to_string(serial++);
@@ -38,8 +35,6 @@ bool WriteAtomic(const std::string& path, const std::string& data, std::string* 
     }
     return true;
 }
-
-}  // namespace
 
 KeyBuilder& KeyBuilder::Add(std::string_view name, std::string_view value) {
     const std::string head = std::string(name) + "=" + std::to_string(value.size()) + ":";

@@ -13,6 +13,8 @@
 // integers) have their own exact lowering; the estimates, the half-precision arithmetic and the conversions x86 has no instruction for call the
 // helpers of lift/runtime.h. Exception flags (7.4): the native operations raise them in MXCSR; operations lowered in integers raise none and
 // add Arm's bits explicitly (OrFpsrBits) where Arm raises some; helpers OR theirs into st->fpsr.
+#include <cctype>
+
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/FPEnv.h>
 #include <llvm/IR/Intrinsics.h>
@@ -138,9 +140,55 @@ Value* FunctionLifter::NaNResult(Value* r) {
     return B.CreateSelect(IsNaN(r), DefaultNaN(r->getType()), r);
 }
 
+// A chain's cold path (Escape: the recompute with Arm's NaN rules, section 7.3) calls the rules of FPProcessNaNs as one small function per
+// arity and type instead of spelling them out at every escape: some thirty integer operations each, in a block that runs only when a NaN
+// reached the check. They were 14 % of what code generation was given on the game-shaped benchmark, and about as much of InstCombine's work
+// (README.md, "Pack throughput", phase 5b). The function is the same rules, made by NaN1 / NaN2 / NaN3 themselves: linkonce_odr in a comdat
+// of its name, so every unit that needs it defines it and the link keeps one; noinline and cold, so the passes leave the call where it is;
+// preserve_all, so the hot path keeps its registers across it
+Value* FunctionLifter::NaNCall(unsigned arity, llvm::ArrayRef<Value*> args) {
+    llvm::Type* t = args.back()->getType();
+    std::string type;
+    llvm::raw_string_ostream type_out{type};
+    t->print(type_out);
+    for (char& ch : type) {
+        if (!std::isalnum(static_cast<unsigned char>(ch))) ch = '_';
+    }
+    const std::string name = "nxaot.nan" + std::to_string(arity) + "." + type;
+    llvm::Function* f = M.getFunction(name);
+    if (!f) {
+        std::vector<llvm::Type*> params(args.size(), t);
+        f = llvm::Function::Create(llvm::FunctionType::get(t, params, false), llvm::GlobalValue::LinkOnceODRLinkage, name, M);
+        f->setVisibility(llvm::GlobalValue::HiddenVisibility);
+        f->setComdat(M.getOrInsertComdat(name));
+        f->setCallingConv(llvm::CallingConv::PreserveAll);
+        f->addFnAttr(llvm::Attribute::NoInline);
+        f->addFnAttr(llvm::Attribute::Cold);
+        f->addFnAttr(llvm::Attribute::NoUnwind);
+        f->addFnAttr(llvm::Attribute::WillReturn);
+        f->setDoesNotAccessMemory();
+        llvm::IRBuilderBase::InsertPointGuard guard{B};  // the insertion point and the debug location
+        B.SetCurrentDebugLocation(llvm::DebugLoc());
+        B.SetInsertPoint(llvm::BasicBlock::Create(C, "entry", f));
+        const bool cold = cold_exact;
+        cold_exact = false;
+        std::vector<Value*> a;
+        for (llvm::Argument& arg : f->args()) a.push_back(&arg);
+        Value* r = arity == 1 ? NaN1(a[0], a[1]) : arity == 2 ? NaN2(a[0], a[1], a[2]) : NaN3(a[0], a[1], a[2], a[3]);
+        B.CreateRet(r);
+        cold_exact = cold;
+    }
+    llvm::CallInst* call = B.CreateCall(f, args);
+    call->setCallingConv(f->getCallingConv());
+    return call;
+}
+
 Value* FunctionLifter::NaN1(Value* a, Value* r) {
     if (DN()) {
         return NaNResult(r);
+    }
+    if (cold_exact) {
+        return NaNCall(1, {a, r});
     }
     return B.CreateSelect(IsNaN(a), Quiet(a), NaNResult(r));
 }
@@ -148,6 +196,9 @@ Value* FunctionLifter::NaN1(Value* a, Value* r) {
 Value* FunctionLifter::NaN2(Value* a, Value* b, Value* r) {
     if (DN()) {
         return B.CreateSelect(B.CreateOr(B.CreateOr(IsNaN(a), IsNaN(b)), IsNaN(r)), DefaultNaN(r->getType()), r);
+    }
+    if (cold_exact) {
+        return NaNCall(2, {a, b, r});
     }
     // FPProcessNaNs: the first signalling NaN, else the first quiet NaN, quietened; else r (the default NaN for an invalid operation)
     Value* res = NaNResult(r);
@@ -159,6 +210,9 @@ Value* FunctionLifter::NaN2(Value* a, Value* b, Value* r) {
 Value* FunctionLifter::NaN3(Value* a, Value* b, Value* c, Value* r) {
     if (DN()) {
         return B.CreateSelect(B.CreateOr(B.CreateOr(IsNaN(a), IsNaN(b)), B.CreateOr(IsNaN(c), IsNaN(r))), DefaultNaN(r->getType()), r);
+    }
+    if (cold_exact) {
+        return NaNCall(3, {a, b, c, r});
     }
     // FPProcessNaNs3: signalling NaNs first, in operand order, then quiet NaNs in operand order
     Value* res = NaNResult(r);
@@ -200,7 +254,7 @@ llvm::RoundingMode FunctionLifter::RoundingOf(unsigned arm_rounding) {
 namespace {
 
 // An FP intrinsic in its constrained form when the builder is constrained (the function is strictfp), else the plain one
-Value* FPIntrinsic(llvm::IRBuilder<>& B, llvm::Module& M, ID::ID plain, ID::ID constrained, llvm::ArrayRef<Value*> args) {
+Value* FPIntrinsic(llvm::IRBuilderBase& B, llvm::Module& M, ID::ID plain, ID::ID constrained, llvm::ArrayRef<Value*> args) {
     llvm::Type* t = args[0]->getType();
     if (B.getIsFPConstrained()) {
         return B.CreateConstrainedFPCall(ID::getDeclaration(&M, constrained, {t}), args);
@@ -333,7 +387,9 @@ Value* FunctionLifter::Escape(ChainNode& node) {
             break;
         }
     }
+    cold_exact = true;  // the NaN rules as calls (NaNCall)
     Value* exact = As(Exact(self, memo), node.fast->getType());
+    cold_exact = false;
     BasicBlock* slow_end = B.GetInsertBlock();
     B.CreateBr(cont);
     B.SetInsertPoint(cont);

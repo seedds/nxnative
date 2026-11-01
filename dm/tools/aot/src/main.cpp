@@ -17,13 +17,16 @@
 //   nxaot version                                     the toolchain of nxaot.lock this build was configured with
 //   nxaot build <module.nro | name.aot.tsv> [-o <object.o>] [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max] [--tier C|W|H|H+]
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
-//               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>]
-//                                                     the pack stage (src/build): every function of the module compiled, one unit each on
-//                                                     --workers threads (0 or none: as many as the CPUs and the free memory allow), or taken
-//                                                     from the per-function cache --cache; with the tables' object (lookup table, function map,
-//                                                     line table, descriptor: include/nxaot/aot_module.h) linked by lld into the shared object
-//                                                     nxaot_host loads (--shared) and / or one relocatable object (-o); prints the module's
-//                                                     numbers, the seconds of each stage and the cache's hits and misses
+//               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>]
+//               [--no-groups] [--no-split] [--split-above N]
+//                                                     the pack stage (src/build): every function of the module compiled, in units of
+//                                                     neighbouring functions (a function over the split limit in parts) on --workers threads
+//                                                     (0 or none: as many as the CPUs and the free memory allow), or taken from the cache
+//                                                     --cache (compiled units and the module's analysis); --profile gives each function its tier
+//                                                     by the samples it holds; with the tables' object (lookup table, function map, line table,
+//                                                     descriptor: include/nxaot/aot_module.h) linked by lld into the shared object nxaot_host
+//                                                     loads (--shared) and / or one relocatable object (-o); prints the module's numbers, the
+//                                                     seconds of each stage and the caches' hits and misses
 //   nxaot lines <pack.so> <module.nro | name.aot.tsv> the line table of a pack against its code and its module (design 3.5; CTest lines): every
 //                                                     entry's native address must start an x86 instruction that accesses memory, inside the
 //                                                     body of its function, and its offset must name an A64 load, store or dc zva of that
@@ -88,7 +91,7 @@ int Usage() {
                  "       nxaot build <module.nro | name.aot.tsv> [-o <object.o>] [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max]\n"
                  "                   [--tier C|W|H|H+] [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info]\n"
                  "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes]\n"
-                 "                   [--ir <file.ll>]\n"
+                 "                   [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>] [--no-groups] [--no-split] [--split-above N]\n"
                  "       nxaot lines <pack.so> <module.nro | name.aot.tsv>\n");
     return 2;
 }
@@ -560,6 +563,9 @@ int Build(int argc, char** argv) {
             llvm::TimePassesIsEnabled = true;  // LLVM's pass timers, printed to stderr at the end (one worker)
         } else if (a == "--ir" && has) {
             o.ir_path = argv[++i];
+        } else if (a == "--ir-opt" && has) {
+            o.ir_path = argv[++i];
+            o.ir_after_passes = true;
         } else if (a == "--spills") {
             o.count_spills = true;
         } else if (a == "--asm" && has) {
@@ -569,14 +575,22 @@ int Build(int argc, char** argv) {
             o.workers = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
         } else if (a == "--cache" && has) {
             o.cache_dir = argv[++i];
+        } else if (a == "--no-groups") {
+            o.groups = false;  // one function per unit at tiers C and W, as phase 5a compiled them (the measurement of the unit's fixed cost)
+        } else if (a == "--no-split") {
+            o.split = false;  // keep every function whole (the measurement of design 9.3's splitting)
+        } else if (a == "--split-above" && has) {
+            o.split_above = std::max<uint64_t>(8, std::strtoull(argv[++i], nullptr, 10));  // CTest split: most of the corpus in parts
+        } else if (a == "--profile" && has) {
+            o.profile_path = argv[++i];
         } else if (path.empty() && !a.empty() && a[0] != '-') {
             path = a;
         } else {
             return Usage();
         }
     }
-    if (path.empty() || (object.empty() && shared.empty())) {
-        return Usage();
+    if (path.empty() || (object.empty() && shared.empty()) || (tier_set && !o.profile_path.empty())) {
+        return Usage();  // --tier sets every function's tier, --profile each function's: one or the other
     }
     if (!tier_set) {
         o.tier = o.mode == "max" ? Tier::HPlus : Tier::W;  // no profile: balanced is tier W everywhere, max tier H+ (section 9.3)
@@ -628,13 +642,24 @@ int Build(int argc, char** argv) {
     std::printf("aot: instructions per second: analysis %.0f, lifting %.0f, tier %s (optimise and codegen) %.0f per core; compile %.0f, whole "
                 "pack %.0f wall\n",
                 per_s(analyse), per_s(s.t_lift), nxaot::build::TierName(o.tier), per_s(compile), per_s(s.t_compile_wall), per_s(total));
-    std::printf("aot: units %llu (%s), workers %llu\n", static_cast<unsigned long long>(s.units),
-                o.tier == Tier::C || o.tier == Tier::W ? "one per function" : "shards of neighbouring functions",
-                static_cast<unsigned long long>(s.workers));
+    std::printf("aot: units %llu (groups of neighbouring functions at tiers C and W, shards at H and H+, a unit per part of a split function), "
+                "workers %llu\n",
+                static_cast<unsigned long long>(s.units), static_cast<unsigned long long>(s.workers));
+    std::printf("aot: split functions %llu into %llu parts, %llu transfers between parts, joined in %.3f s (design 9.3)\n",
+                static_cast<unsigned long long>(s.split_functions), static_cast<unsigned long long>(s.split_parts),
+                static_cast<unsigned long long>(s.splits), s.t_join);
+    if (!o.profile_path.empty()) {
+        std::printf("aot: profile %s: %llu samples at %llu offsets, %llu outside every function\n", o.profile_path.c_str(),
+                    static_cast<unsigned long long>(s.profile_samples), static_cast<unsigned long long>(s.profile_offsets),
+                    static_cast<unsigned long long>(s.profile_outside));
+    }
     if (!o.cache_dir.empty()) {
-        std::printf("aot: cache %s: %llu hits, %llu misses, %llu bytes read, %llu bytes written, keys %.3f s\n", o.cache_dir.c_str(),
-                    static_cast<unsigned long long>(s.cache_hits), static_cast<unsigned long long>(s.cache_misses),
+        std::printf("aot: cache %s: %llu hits, %llu misses (units; functions %llu hit, %llu missed), %llu bytes read, %llu bytes written, keys "
+                    "%.3f s\n",
+                    o.cache_dir.c_str(), static_cast<unsigned long long>(s.cache_hits), static_cast<unsigned long long>(s.cache_misses),
+                    static_cast<unsigned long long>(s.cache_hit_functions), static_cast<unsigned long long>(s.cache_miss_functions),
                     static_cast<unsigned long long>(s.cache_bytes_read), static_cast<unsigned long long>(s.cache_bytes_written), s.t_key);
+        std::printf("aot: analysis cache: %s, %.3f s\n", s.analysis_cache.c_str(), s.t_analysis_cache);
     }
     const auto& dt = s.discover_times;
     std::printf("aot: discover seconds: classify %.3f walk %.3f tables %.3f (%llu tries, %llu skipped, %llu regions, %llu reused) summaries %.3f "

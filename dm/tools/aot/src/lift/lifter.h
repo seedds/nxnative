@@ -172,6 +172,17 @@ struct FunctionPlan {
     std::set<uint64_t> obs_gates;
     std::map<uint64_t, uint64_t> spin_gates;
     llvm::Function* rt_gate = nullptr;         // preserve_all void (ptr st, i64 site): nxaot_rt_gate (null when the module has no gate)
+    // A function split for size (design 9.3; src/build/pack.cpp, SplitParts): its code is parts, each an LLVM function of its own that the
+    // others reach by tail calls through the state block. A part is entered with the block holding the whole register file, its arguments st,
+    // the function's entry SP and lr, and in x0's argument (conv.Type(Regs{})'s fourth) the module offset of the block it starts at, one of
+    // part_entries; fn is that part. The region is the part's range [lo, hi). A transfer to a block of another part (part_of: its function,
+    // declared in this module, for the offsets that are its entries) stores the whole register file and tail-calls it, with a safepoint poll
+    // when it goes backwards (lower_calls.cpp, FnSplit). restore replaces the registers a return stores again (FnDataflow's restore_block,
+    // which one part cannot know for the whole function)
+    std::vector<uint64_t> part_entries;
+    std::function<llvm::Function*(uint64_t offset)> part_of;
+    bool split = false;   // the function is split: part_of and restore apply (the part that holds its entry is a part too)
+    Regs restore;
 };
 
 // The FPCR bits a block is specialised on: dynarmic's location descriptor keeps the same (frontend/A64/a64_location_descriptor.h, fpcr_mask)
@@ -232,6 +243,7 @@ struct Lifted {
     size_t blocks = 0;
     // Function mode: the sites lowered
     size_t calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0;
+    size_t splits = 0;                     // transfers to another part of a split function (FunctionPlan::part_of)
     std::vector<uint64_t> gates;           // the gate sites (FunctionPlan::obs_gates, spin_gates) the function's code calls, sorted, each once
 };
 

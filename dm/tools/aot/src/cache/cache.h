@@ -1,6 +1,7 @@
 // The per-function cache of the pack stage (docs/design/aot-recompiler.md section 13): a directory of compiled objects, one per compile unit
-// (one guest function; at tiers H and H+ a shard of them), each under the SHA-256 of everything its code depends on (src/build/pack.cpp, UnitKey,
-// lists those inputs). A pack takes a unit's object from here instead of lifting and compiling it when its key is there; a key that is not there
+// (a group of neighbouring guest functions; at tiers H and H+ a shard of them; a part of a split function), each under the SHA-256 of
+// everything its code depends on: its functions' keys (src/build/pack.cpp, UnitKey, lists those inputs). The module's analysis is kept beside
+// them (src/build/analysis_cache.h). A pack takes a unit's object from here instead of lifting and compiling it when its key is there; a key that is not there
 // is compiled and stored. Entries are written to a temporary name and renamed, the object before its facts, so a pack that stops half-way leaves
 // no entry that looks whole, and two packs may share one cache. For a game the directory is <NSP folder>/<id>-work/aot-cache/ (AGENTS.md: work
 // files stay in the NSP folder).
@@ -53,5 +54,9 @@ private:
 
 // The SHA-256 of a file's contents as 64 hex digits; empty when it cannot be read (the tool's own executable, part of every key)
 std::string FileSha256(const std::string& path);
+
+// Writes data to path through a unique temporary name in the same directory, then renames it: readers see the whole file or none. False with
+// *error set on failure
+bool WriteAtomic(const std::string& path, const std::string& data, std::string* error);
 
 }  // namespace nxaot::cache

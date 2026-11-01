@@ -261,8 +261,11 @@ void FunctionLifter::FnDataflow() {
         }
         gen[pc] = g;
     }
-    // At the entry the passed registers, sp and lr are newer than the block (they came in host registers)
-    dirty_in[plan->entry] = plan->self.pass | kSpLr;
+    // At the entry the passed registers, sp and lr are newer than the block (they came in host registers). A part of a split function is
+    // entered with the whole register file in the block: nothing is newer at its entries
+    if (plan->part_entries.empty()) {
+        dirty_in[plan->entry] = plan->self.pass | kSpLr;
+    }
     const auto after_call = [&](const Regs& d, const CalleeView& c) {
         // What stays newer than the block after a call: what was passed and not changed, and what the return value brought
         return ((d & (c.pass | kSpLr)) - c.writes) | Regs::X(kRetX) | Regs::V(c.rv);
@@ -314,6 +317,9 @@ void FunctionLifter::FnDataflow() {
         }
     }
     restore_block = (stored & written) - plan->self.writes;
+    if (plan->split) {
+        restore_block = plan->restore;  // the whole function's, which no part sees (FunctionPlan::restore)
+    }
 
     // Where NZCV is live (backward, over the function's blocks): a block reads it when an instruction or its terminal evaluates a condition, or
     // reads the flags, before the block sets them; a call, a return, a tail call or an svc ends the function's knowledge, so NZCV counts as live
@@ -506,6 +512,25 @@ void FunctionLifter::FnPrologue() {
     entry_lr->setName("lr");
     F->getArg(1)->setName("sp_in");
     const Convention& conv = plan->conv;
+    if (!plan->part_entries.empty()) {
+        // A part of a split function (FunctionPlan::part_entries): every register from the block, and the block to start at from x0's argument.
+        // No poll here: the stub that is the function's body polls at its entry, and a transfer between parts that goes backwards polls
+        // before it (FnSplit)
+        llvm::Argument* at = F->getArg(static_cast<unsigned>(conv.ArgX(Regs{}, 0)));
+        at->setName("part_entry");
+        if (plan->part_entries.size() == 1) {
+            B.CreateBr(bbs.at(plan->part_entries.front()));
+            return;
+        }
+        auto* none = BasicBlock::Create(C, "part_none", F);
+        auto* sw = B.CreateSwitch(at, none, static_cast<unsigned>(plan->part_entries.size()));
+        for (const uint64_t e : plan->part_entries) {
+            sw->addCase(B.getInt64(e), bbs.at(e));
+        }
+        B.SetInsertPoint(none);
+        B.CreateUnreachable();  // the parts pass only their entries' offsets (src/build/pack.cpp)
+        return;
+    }
     if (!plan->correctness) {
         for (unsigned i = 0; i < 31; ++i) {
             const int a = conv.ArgX(plan->self.pass, i);
@@ -550,7 +575,9 @@ void FunctionLifter::FnInitRegisters() {
     B.SetCurrentDebugLocation(plan->debug ? llvm::DebugLoc(llvm::DILocation::get(C, static_cast<unsigned>(plan->entry), 0, plan->debug))
                                           : llvm::DebugLoc());
     const Convention& conv = plan->conv;
-    const bool args = !plan->correctness;  // the correctness mode takes everything from the block, which the caller filled
+    // The correctness mode takes everything from the block, which the caller filled; so does a part of a split function (its arguments are
+    // the function's entry SP and lr and the block it starts at, FunctionPlan::part_entries)
+    const bool args = !plan->correctness && plan->part_entries.empty();
     for (unsigned i = 0; i < 31; ++i) {
         if (!read(x[i])) continue;
         const int a = conv.ArgX(plan->self.pass, i);
@@ -730,7 +757,21 @@ void FunctionLifter::FnCall(const CalleeView& c, llvm::FunctionType* type, Value
     if (plan->resume) {
         for (const uint64_t r : plan->resume(call_pc)) {
             const auto it = bbs.find(r);
-            if (it == bbs.end()) {
+            llvm::Function* other_part = it == bbs.end() && plan->part_of ? plan->part_of(r) : nullptr;
+            if (it == bbs.end() && !other_part) {
+                continue;
+            }
+            if (other_part) {
+                // A resume point in another part of a split function: the block holds the whole register file, the part takes it from there
+                auto* take = BasicBlock::Create(C, "resume_" + llvm::utohexstr(r), F);
+                auto* other = BasicBlock::Create(C, "pending_next", F);
+                Value* here = B.CreateAnd(B.CreateICmpEQ(pending, Rel(r)),
+                                          B.CreateICmpEQ(LoadField(B.getInt64Ty(), offsetof(dm_guest_state, sp)), frame_sp));
+                B.CreateCondBr(here, take, other);
+                B.SetInsertPoint(take);
+                StoreField(B.getInt64(0), offsetof(dm_guest_state, pending));
+                FnSplit(r, false);
+                B.SetInsertPoint(other);
                 continue;
             }
             // A resume point of this call site, entered with this frame's SP: the frame takes the transfer, with every register from the block
@@ -751,6 +792,7 @@ void FunctionLifter::FnCall(const CalleeView& c, llvm::FunctionType* type, Value
     B.SetInsertPoint(cont);
     if (plan->correctness) {
         ReloadRegs(Regs::All());
+        cur_dirty = {};
         return;
     }
     B.CreateStore(B.CreateExtractValue(ret, 0), x[0]);
@@ -761,6 +803,9 @@ void FunctionLifter::FnCall(const CalleeView& c, llvm::FunctionType* type, Value
         }
     }
     ReloadRegs(c.writes - Regs::X(kRetX) - Regs::V(c.rv));
+    // What is newer than the block from here on (FnDataflow's after_call): what a transfer that follows the call in this block stores (FnSplit
+    // into another part, a tail call into the next function). The block's end state was before the call, without x0, x1 and RV
+    cur_dirty = ((cur_dirty & (c.pass | kSpLr)) - c.writes) | Regs::X(kRetX) | Regs::V(c.rv);
 }
 
 void FunctionLifter::FnCallDirect(uint64_t target, uint64_t call_pc) {
@@ -816,6 +861,41 @@ void FunctionLifter::FnTailIndirect(Value* target, uint64_t site) {
     ++stats->indirect_tails;
     Value* fn = FnDispatch(target, site);
     FnTail(plan->indirect, plan->conv.Type(C, plan->indirect.pass), fn);
+}
+
+// A transfer to a block of another part of a split function (design 9.3: "joined by tail calls through the state block";
+// FunctionPlan::part_entries): the whole register file to the block (unless the block already holds it: store false, a resume point's path), a
+// safepoint poll when it goes backwards (a loop through parts, section 6.2), then a tail call of that part with the function's entry SP and lr
+// and the block's offset. The part returns what the function returns.
+// The whole file, not the registers newer than the block: a register this part holds unchanged need not be current in the block. SP and lr
+// travel in host registers at every call, so after a callee returns the block's copies are the last ones an inner frame stored
+// (include/nxaot/aot_module.h, NXAOT_LOOKUP_SP_KEPT); and a callee's safepoint poll, gate or JIT continuation stores its own values of
+// registers it restores before it returns, which only its inner calls and svcs make it store again (FnDataflow, restore_block). The function
+// itself holds the right values in SSA; the next part reads the block. Found by CTest split: fnptr-gcc's main resumed in its last part with the
+// SP of a callee's frame and returned to a stale lr
+void FunctionLifter::FnSplit(uint64_t target, bool store) {
+    llvm::Function* part = plan->part_of(target);
+    ++stats->splits;
+    if (store) {
+        StoreRegs(Regs::All());
+        FlushFpsr();
+    }
+    if (target <= cur_start) {
+        FnPoll(Rel(target), Regs{});
+    }
+    llvm::FunctionType* type = part->getFunctionType();
+    std::vector<Value*> args(type->getNumParams());
+    for (unsigned i = 0; i < type->getNumParams(); ++i) {
+        args[i] = llvm::PoisonValue::get(type->getParamType(i));
+    }
+    args[0] = st;
+    args[1] = F->getArg(1);
+    args[2] = entry_lr;
+    args[static_cast<size_t>(plan->conv.ArgX(Regs{}, 0))] = B.getInt64(target);
+    auto* call = B.CreateCall(type, part, args);
+    plan->conv.Apply(call);
+    call->setTailCallKind(llvm::CallInst::TCK_MustTail);
+    B.CreateRet(call);
 }
 
 // The inline cache of section 4: a slot per site that points at an immutable {guest, native} descriptor. A hit is two loads and a compare (and
@@ -904,6 +984,10 @@ void FunctionLifter::FnTrap(Value* pc, uint32_t reason) {
 
 void FunctionLifter::FnExit(Value* pc, uint32_t reason) {
     const auto off = OffsetOf(pc);
+    if (reason == DM_EXIT_NO_CODE && off && plan->part_of && plan->part_of(*off)) {
+        FnSplit(*off, true);  // the code runs into the next part of a split function
+        return;
+    }
     if (reason == DM_EXIT_NO_CODE && off && plan->callee(*off)) {
         FnTailDirect(*off);  // the code runs into the next function: a tail call to it
         return;
@@ -971,6 +1055,8 @@ void FunctionLifter::FnGoto(Value* target) {
                 FnPoll(Rel(*off), dirty);
             }
             B.CreateBr(it->second);
+        } else if (plan->part_of && plan->part_of(*off)) {
+            FnSplit(*off, true);  // to a block of another part of a split function
         } else if (plan->callee(*off)) {
             FnTailDirect(*off);  // b, b.cond, cbz, tbz to another function (section 2.3)
         } else {
@@ -995,6 +1081,12 @@ void FunctionLifter::FnGoto(Value* target) {
             const auto it = bbs.find(t);
             if (it != bbs.end()) {
                 sw->addCase(B.getInt64(t), it->second);
+            } else if (plan->part_of && plan->part_of(t)) {
+                // A case in another part of a split function
+                auto* split = BasicBlock::Create(C, "table_part_" + llvm::utohexstr(t), F);
+                sw->addCase(B.getInt64(t), split);
+                B.SetInsertPoint(split);
+                FnSplit(t, true);
             } else if (plan->callee(t)) {
                 // A case that is another function's entry: a computed tail call
                 auto* tail = BasicBlock::Create(C, "table_tail_" + llvm::utohexstr(t), F);

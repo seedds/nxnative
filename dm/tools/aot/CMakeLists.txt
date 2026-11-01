@@ -114,7 +114,7 @@ endif()
 # what each depends on, LLVM's SHA-256)
 find_package(LLD REQUIRED CONFIG HINTS "${LLVM_LIBRARY_DIR}/cmake/lld" "${LLVM_DIR}/../lld")
 find_package(Threads REQUIRED)
-add_library(nxaot_build STATIC src/build/plan.cpp src/build/pack.cpp src/cache/cache.cpp)
+add_library(nxaot_build STATIC src/build/plan.cpp src/build/pack.cpp src/build/analysis_cache.cpp src/cache/cache.cpp)
 target_include_directories(nxaot_build SYSTEM PRIVATE ${LLD_INCLUDE_DIRS})
 target_link_libraries(nxaot_build PUBLIC nxaot_analysis nxaot_lift lldELF lldCommon Threads::Threads)
 target_compile_options(nxaot_build PRIVATE ${NXAOT_WARNINGS})
@@ -206,5 +206,13 @@ add_test(NAME plan COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tes
 # function's body and the A64 load or store of that function's guest code it was lifted from (nxaot lines)
 add_test(NAME lines COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lines.py" --nxaot $<TARGET_FILE:nxaot>
          --work "${CMAKE_CURRENT_BINARY_DIR}/lines")
+# Phase 5b (aot-recompiler.md section 9.3): functions split for size, run: the corpus with the split limit lowered so that nearly every function
+# runs as parts (both conventions, the correctness mode, the line table of the parts), and switch-gcc's sw_word at the default limit
+add_test(NAME split COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_split.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/split")
+# Tiers by profile (section 9.3): a profile written by hand, sampled functions at tier H (H+ in the max mode) and the others at C (H), the tier
+# counts and the native run
+add_test(NAME profile COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_profile.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/profile")
 set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census discover manifest corpus_ref corpus_native corpus_funcdiff corpus_jit
-                     corpus_threads safepoints cache plan lines PROPERTIES TIMEOUT 900)
+                     corpus_threads safepoints cache plan lines split profile PROPERTIES TIMEOUT 900)

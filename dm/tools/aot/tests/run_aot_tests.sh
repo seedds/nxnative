@@ -1,7 +1,8 @@
 #!/bin/sh
 # Runs the tests of a CMake build folder of dm/tools/aot (the vector harness, the census test, the vectors-current check, discovery over the corpus,
 # the manifest test, the corpus reference run, the corpus recompiled and run natively, the per-function differential test, the JIT fallback's
-# modes, the threaded programs, the safepoint pause test, the per-function cache, the indirect calls' reloads, the benchmark) and records the run
+# modes, the threaded programs, the safepoint pause test, the pack caches, the indirect calls' reloads, functions split for size, tiers by profile,
+# the benchmark) and records the run
 # in the repository: one log per test and summary.txt in logs/aot/ (logs/README.md).
 # In the nxnative-aot Docker image (dm/tools/aot/README.md). From anywhere:
 #   sh dm/tools/aot/tests/run_aot_tests.sh <build folder> [<log folder>]
@@ -69,6 +70,8 @@ run corpus_threads python3 "$aot/tests/test_threads.py" --nxaot "$build/nxaot" -
 run safepoints python3 "$aot/tests/test_safepoints.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/safepoints"
 run cache python3 "$aot/tests/test_cache.py" --nxaot "$build/nxaot" --work "$build/cache"
 run plan python3 "$aot/tests/test_plan.py" --nxaot "$build/nxaot" --work "$build/plan"
+run split python3 "$aot/tests/test_split.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/split"
+run profile python3 "$aot/tests/test_profile.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/profile"
 run opcodes "$build/nxaot" opcodes
 run bench "$build/nxaot_bench" --iterations 200000 --work "$build/bench"
 
@@ -90,6 +93,9 @@ total_line="$total runs: $passed passed, $failed failed"
     grep -h '^corpus JIT run:' "$logs/corpus_jit.log" 2>/dev/null
     grep -h '^corpus threads:' "$logs/corpus_threads.log" 2>/dev/null
     grep -h '^safepoints:' "$logs/safepoints.log" 2>/dev/null
+    grep -h '^pack caches:' "$logs/cache.log" 2>/dev/null
+    grep -h '^functions split for size:' "$logs/split.log" 2>/dev/null
+    grep -h '^tiers by profile:' "$logs/profile.log" 2>/dev/null
     grep -h '^# ' "$logs/opcodes.log" 2>/dev/null | sed 's/^# /lifter opcodes: /'
     echo
     cat "$results"

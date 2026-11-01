@@ -30,6 +30,7 @@
 #include <llvm/IR/DiagnosticPrinter.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassTimingInfo.h>
@@ -60,6 +61,7 @@
 #include "analysis/census.h"
 #include "analysis/discover.h"
 #include "analysis/insn.h"
+#include "build/analysis_cache.h"
 #include "build/plan.h"
 #include "cache/cache.h"
 #include "nxaot/aot_module.h"
@@ -84,8 +86,8 @@ double Since(Clock::time_point t) {
 constexpr uint64_t kWorkerMemory = 512ull << 20;
 
 // The cache key's format: changed whenever what a key covers changes (UnitKey). 2: the gate sites and the aux region's code, the line marks'
-// section, the standard entries' fixed signature (ABI 3)
-constexpr const char* kUnitKeyFormat = "nxaot-unit 2";
+// section, the standard entries' fixed signature (ABI 3). 3: groups of functions, parts of split functions, a tier per function (phase 5b)
+constexpr const char* kUnitKeyFormat = "nxaot-unit 3";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)
@@ -194,7 +196,13 @@ void Optimise(llvm::Module& m, llvm::TargetMachine* tm, Tier tier) {
         break;
     }
     case Tier::W:
-        mpm = pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O1);
+        // Section 9.3, tier W: LLVM's O1 function pipeline, one function at a time (buildFunctionSimplificationPipeline: SROA, EarlyCSE,
+        // SimplifyCFG, InstCombine, the loop passes, SCCP, BDCE, ADCE; InstCombine four times). Phase 5a ran the whole O1 module pipeline,
+        // whose interprocedural passes have nothing to do in a unit of separately compiled functions and whose optimisation pipeline runs
+        // InstCombine four more times: a third of the optimisation's time on the game-shaped benchmark for 1.4 % more instructions after it
+        // (README.md, "Pack throughput", phase 5b)
+        mpm.addPass(llvm::createModuleToFunctionPassAdaptor(
+            pb.buildFunctionSimplificationPipeline(llvm::OptimizationLevel::O1, llvm::ThinOrFullLTOPhase::None)));
         break;
     case Tier::H:
         mpm = pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2);
@@ -257,6 +265,141 @@ std::vector<nxaot_gate_site> GateSitesOf(const analysis::Function& f, const Gate
     return out;
 }
 
+// ---- Functions split for size (design 9.3) ----
+// LLVM's compile time grows faster than linearly with a function's size, and one unit's time bounds the pack's wall time however many workers
+// there are (switch-gcc's sw_word, 44,059 instructions, was 4.5 of the corpus pack's 4.7 s with 8 workers: README.md, "Pack throughput"). A
+// function of more than kSplitAbove instructions becomes parts: its blocks in address order, cut where the fewest of its edges cross, each part
+// of kPartMin to kPartMax instructions. Each part is an LLVM function of its own and a compile unit of its own; the function's body is a stub
+// that stores what it was passed to the state block and tail-calls the part that holds its entry; a transfer between parts stores the dirty
+// registers and tail-calls the other part (lower_calls.cpp, FnSplit): the design's "LLVM functions joined by tail calls through the state
+// block". The cut points are the design's safe points: instruction boundaries outside exclusive windows (block starts, and points inside long
+// straight runs), which a transfer between parts reaches with the whole register file in the block. kSplitAbove is BuildOptions::split_above
+// (8,192 by default: parts of 2,048 to 4,096 instructions, some 0.2 to 0.5 s each at tier W); CTest split lowers it to split most of the corpus
+
+struct Part {
+    uint64_t lo = 0, hi = 0;         // its blocks start in [lo, hi)
+    std::vector<uint64_t> entries;   // sorted: the blocks entered from outside it (lo, the function's entry, the targets of edges that cross into it,
+                                     // landing pads and setjmp continuations, which a call in any part may resume at)
+    uint64_t words = 0;              // instructions of its blocks
+};
+
+std::vector<Part> SplitParts(const analysis::Function& f, const FnFacts& ff, uint64_t split_above) {
+    if (ff.words <= split_above || !ff.extra.empty()) {
+        return {};  // small, or reaching the aux region (its gate sites are checked per function: kept whole)
+    }
+    const uint64_t kPartMin = std::max<uint64_t>(8, split_above / 4), kPartMax = std::max<uint64_t>(16, split_above / 2);
+    // The cut candidates: block starts, and inside a block longer than kPiece instructions every kPiece-th instruction (a straight run: the
+    // part before it runs into the next part, FnExit; sw_word is 19 blocks of up to thousands of instructions), never inside an exclusive
+    // window (its load and store stay in one part, as the rewriter keeps them in one piece)
+    const uint64_t kPiece = std::max<uint64_t>(2, std::min<uint64_t>(256, kPartMin / 4));
+    struct Piece {
+        uint64_t start = 0, end = 0;
+        std::vector<uint64_t> succ;  // successor starts (a cut inside a block: the next piece)
+    };
+    const auto in_window = [&](uint64_t a) {
+        return std::any_of(f.windows.begin(), f.windows.end(), [a](const analysis::Window& w) { return a > w.lo && a < w.hi; });
+    };
+    std::vector<Piece> bl;
+    std::map<uint64_t, size_t> index;
+    for (const auto& [start, b] : f.blocks) {
+        if (start < f.entry || start >= ff.limit) continue;
+        uint64_t at = b.start;
+        while (true) {
+            uint64_t next = at + 4 * kPiece;
+            while (next < b.end && in_window(next)) next += 4;
+            Piece p;
+            p.start = at;
+            p.end = std::min(next, b.end);
+            if (p.end < b.end) {
+                p.succ.push_back(p.end);
+            } else {
+                for (const auto& [t, kind] : b.succ) p.succ.push_back(t);
+            }
+            index[p.start] = bl.size();
+            bl.push_back(std::move(p));
+            if (next >= b.end) break;
+            at = next;
+        }
+    }
+    const size_t n = bl.size();
+    // crossing[k]: the edges between pieces of the function that cross the cut before piece k (one end before it, the other at or after it)
+    std::vector<int64_t> crossing(n + 1, 0);
+    for (size_t i = 0; i < n; ++i) {
+        for (const uint64_t t : bl[i].succ) {
+            const auto it = index.find(t);
+            if (it == index.end() || it->second == i) continue;
+            const size_t lo = std::min(i, it->second), hi = std::max(i, it->second);
+            ++crossing[lo + 1];
+            --crossing[hi + 1];
+        }
+    }
+    for (size_t k = 1; k <= n; ++k) crossing[k] += crossing[k - 1];
+    std::vector<uint64_t> words(n);
+    uint64_t total = 0;
+    for (size_t i = 0; i < n; ++i) total += (words[i] = (bl[i].end - bl[i].start) / 4);
+    // Cuts: from each part's start, the block at which it holds at least kPartMin instructions and at most kPartMax with the fewest crossing
+    // edges (the first of equals); none that leaves less than kPartMin after it
+    std::vector<size_t> cuts{0};
+    uint64_t done = 0;
+    for (size_t s = 0; s < n;) {
+        uint64_t acc = 0;
+        size_t best = n;
+        int64_t best_cross = INT64_MAX;
+        for (size_t k = s; k < n; ++k) {
+            acc += words[k];
+            if (acc > kPartMax && best != n) break;
+            if (acc >= kPartMin && k + 1 < n && total - done - acc >= kPartMin && crossing[k + 1] < best_cross && !in_window(bl[k + 1].start)) {
+                best = k + 1;
+                best_cross = crossing[k + 1];
+            }
+        }
+        if (best == n) break;
+        for (size_t k = s; k < best; ++k) done += words[k];
+        cuts.push_back(best);
+        s = best;
+    }
+    if (cuts.size() < 2) {
+        return {};
+    }
+    std::vector<Part> parts;
+    for (size_t c = 0; c < cuts.size(); ++c) {
+        Part p;
+        p.lo = c == 0 ? f.entry : bl[cuts[c]].start;
+        p.hi = c + 1 < cuts.size() ? bl[cuts[c + 1]].start : ff.limit;
+        const size_t end = c + 1 < cuts.size() ? cuts[c + 1] : n;
+        for (size_t k = cuts[c]; k < end; ++k) p.words += words[k];
+        parts.push_back(p);
+    }
+    const auto part_of = [&](uint64_t a) -> Part* {
+        for (Part& p : parts) {
+            if (a >= p.lo && a < p.hi) return &p;
+        }
+        return nullptr;
+    };
+    for (Part& p : parts) p.entries.push_back(p.lo);
+    part_of(f.entry)->entries.push_back(f.entry);
+    for (size_t i = 0; i < n; ++i) {
+        for (const uint64_t t : bl[i].succ) {
+            Part* to = part_of(t);
+            if (to && to != part_of(bl[i].start) && index.count(t)) to->entries.push_back(t);
+        }
+    }
+    for (const uint64_t r : ff.roots) {
+        if (Part* p = part_of(r)) p->entries.push_back(r);
+    }
+    for (const uint64_t r : ff.continuations) {
+        if (Part* p = part_of(r)) p->entries.push_back(r);
+    }
+    for (const auto& [call, pad] : ff.pads) {
+        if (Part* p = part_of(pad)) p->entries.push_back(pad);
+    }
+    for (Part& p : parts) {
+        std::sort(p.entries.begin(), p.entries.end());
+        p.entries.erase(std::unique(p.entries.begin(), p.entries.end()), p.entries.end());
+    }
+    return parts;
+}
+
 // ---- What every module of a pack shares ----
 
 struct Common {
@@ -272,14 +415,32 @@ struct Common {
     std::string tool;    // the toolchain's identity for the cache keys: nxaot.lock, LLVM, this executable's SHA-256
     Gates gates;                          // the manifest's gate rows
     std::vector<nxaot_gate_site> served;  // the gate sites compiled code calls (some function's code holds them), sorted: the descriptor's table
+    std::map<uint64_t, std::vector<Part>> parts;  // the functions split for size (SplitParts), by entry
+    std::map<uint64_t, Tier> tiers;               // each function's tier when a profile chose them (TiersFromProfile); else the mode's
 
     std::vector<nxaot_gate_site> SitesOf(uint64_t entry) const { return GateSitesOf(d.functions.at(entry), gates); }
+    Tier TierOf(uint64_t entry) const {
+        const auto it = tiers.find(entry);
+        return it == tiers.end() ? o.tier : it->second;
+    }
+    // The part of the split function fn that has a block of its own at offset among its entries, or null
+    const Part* PartAt(uint64_t fn, uint64_t offset) const {
+        const auto it = parts.find(fn);
+        if (it == parts.end()) return nullptr;
+        for (const Part& p : it->second) {
+            if (offset >= p.lo && offset < p.hi) {
+                return std::binary_search(p.entries.begin(), p.entries.end(), offset) ? &p : nullptr;
+            }
+        }
+        return nullptr;
+    }
 };
 
 // The counts of one unit (or of the tables' object), which a pack sums and the cache keeps beside each unit's object
 struct UnitStats {
     uint64_t blocks = 0, calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0, refused = 0;
     uint64_t lines_lost = 0, spills = 0, reloads = 0, text_bytes = 0, object_bytes = 0, gates = 0;
+    uint64_t splits = 0;  // transfers between the parts of a split function
     double t_lift = 0, t_verify = 0, t_opt = 0, t_codegen = 0;
     std::vector<std::string> notes;
 
@@ -287,7 +448,8 @@ struct UnitStats {
         cache::Facts f;
         f.counts = {{"blocks", blocks}, {"calls", calls}, {"indirect_calls", indirect_calls}, {"tail_calls", tail_calls},
                     {"indirect_tails", indirect_tails}, {"returns", returns}, {"svcs", svcs}, {"traps", traps}, {"refused", refused},
-                    {"lines_lost", lines_lost}, {"text_bytes", text_bytes}, {"object_bytes", object_bytes}, {"gates", gates}};
+                    {"lines_lost", lines_lost}, {"text_bytes", text_bytes}, {"object_bytes", object_bytes}, {"gates", gates},
+                    {"splits", splits}};
         f.notes = notes;
         return f;
     }
@@ -310,6 +472,7 @@ struct UnitStats {
         u.text_bytes = get("text_bytes");
         u.object_bytes = get("object_bytes");
         u.gates = get("gates");
+        u.splits = get("splits");
         u.notes = f.notes;
         return u;
     }
@@ -327,16 +490,28 @@ struct UnitStats {
 struct LineRow {
     uint64_t fn = 0;              // the module offset of the function whose body holds the native address
     uint32_t native = 0, offset = 0;  // bytes from the start of that body, and the guest instruction's module offset
+    uint64_t part = kNoPart;      // a part of a split function (<body>.part<lo>): native counts from the part's start until the parts are joined
+    static constexpr uint64_t kNoPart = UINT64_MAX;
 };
 
-// The function symbols of a unit's code that are bodies (<prefix>+0x<offset>) or standard entries (<body>.std): the module offset of the body
-std::optional<uint64_t> BodyOf(llvm::StringRef name, const std::string& prefix, bool* std_entry) {
+// The function symbols of a unit's code that are bodies (<prefix>+0x<offset>), standard entries (<body>.std) or parts of split functions
+// (<body>.part<lo>, *part = lo): the module offset of the body
+std::optional<uint64_t> BodyOf(llvm::StringRef name, const std::string& prefix, bool* std_entry, uint64_t* part = nullptr) {
     const std::string head = prefix + "+0x";
     if (!name.starts_with(head)) {
         return std::nullopt;
     }
     name = name.drop_front(head.size());
     *std_entry = name.consume_back(".std");
+    if (part) *part = LineRow::kNoPart;
+    if (const size_t dot = name.find(".part"); dot != llvm::StringRef::npos) {
+        uint64_t lo = 0;
+        if (!part || name.drop_front(dot + 5).getAsInteger(16, lo)) {
+            return std::nullopt;
+        }
+        *part = lo;
+        name = name.take_front(dot);
+    }
     uint64_t v = 0;
     if (name.getAsInteger(16, v)) {
         return std::nullopt;
@@ -418,7 +593,7 @@ bool ReadLineMarks(llvm::StringRef object, const std::string& prefix, std::vecto
     }
     // The functions of that section by address: bodies (their rows) and standard entries (no guest access of their own)
     struct Fn {
-        uint64_t lo = 0, hi = 0, body = 0;
+        uint64_t lo = 0, hi = 0, body = 0, part = LineRow::kNoPart;
         bool std_entry = false;
     };
     std::vector<Fn> fns;
@@ -435,7 +610,7 @@ bool ReadLineMarks(llvm::StringRef object, const std::string& prefix, std::vecto
         }
         if (*sec == elf->section_end() || **sec != *code) continue;
         Fn f;
-        if (const auto body = BodyOf(*name, prefix, &f.std_entry)) {
+        if (const auto body = BodyOf(*name, prefix, &f.std_entry, &f.part)) {
             f.lo = *value;
             f.hi = *value + s.getSize();
             f.body = *body;
@@ -463,7 +638,7 @@ bool ReadLineMarks(llvm::StringRef object, const std::string& prefix, std::vecto
                 continue;
             }
             --f;
-            rows->push_back({f->body, static_cast<uint32_t>(native - f->lo), offset});
+            rows->push_back({f->body, static_cast<uint32_t>(native - f->lo), offset, f->part});
         }
         group.clear();
     }
@@ -556,7 +731,7 @@ void Diagnose(llvm::LLVMContext& ctx, UnitStats* st) {
         st);
 }
 
-Kit MakeKit(llvm::Module& m, const Common& c, bool tables) {
+Kit MakeKit(llvm::Module& m, const Common& c, bool tables, Tier tier) {
     llvm::LLVMContext& ctx = m.getContext();
     llvm::IRBuilder<> b{ctx};
     auto* i32 = b.getInt32Ty();
@@ -566,7 +741,7 @@ Kit MakeKit(llvm::Module& m, const Common& c, bool tables) {
     const BuildOptions& o = c.o;
     Kit k;
     k.m = &m;
-    k.optimized = o.tier != Tier::C;
+    k.optimized = tier != Tier::C;
 
     // ---- Debug information ----
     if (o.debug_info) {
@@ -715,6 +890,23 @@ llvm::Function* Body(llvm::Module& m, const Common& c, uint64_t entry, const FnF
     return f;
 }
 
+// A part of a split function (SplitParts): <body>.part<lo>, entered with the block holding every register (lift::FunctionPlan::part_entries)
+std::string PartName(const Common& c, uint64_t entry, uint64_t lo) {
+    return BodyName(c, entry) + ".part" + llvm::utohexstr(lo);
+}
+
+llvm::Function* PartFn(llvm::Module& m, const Common& c, uint64_t entry, uint64_t lo) {
+    const std::string name = PartName(c, entry, lo);
+    if (llvm::Function* f = m.getFunction(name)) {
+        return f;
+    }
+    auto* f = llvm::Function::Create(c.conv.Type(m.getContext(), lift::Regs{}), llvm::GlobalValue::ExternalLinkage, name, m);
+    Hide(f);
+    c.conv.Apply(f);
+    f->addFnAttr(llvm::Attribute::NoInline);
+    return f;
+}
+
 // Whether a function has a standard entry of its own (section 2.3); with ghccc a body that takes every passable register and returns the fixed
 // signature's v registers is its own
 bool HasStdEntry(const Common& c, const FnFacts& ff) {
@@ -789,8 +981,8 @@ llvm::Function* StdEntry(const Kit& k, const Common& c, uint64_t entry, const Fn
 }
 
 // The module's last steps: the verifier, the tier's passes, native code (and assembly for --spills / --asm) into *object
-bool Finish(llvm::Module& m, const Common& c, llvm::TargetMachine& tm, std::string* object, UnitStats* st, std::string* asm_text,
-            std::string* error) {
+bool Finish(llvm::Module& m, const Common& c, llvm::TargetMachine& tm, Tier tier, std::string* object, UnitStats* st, std::string* asm_text,
+            std::string* error, std::string* ir_text = nullptr) {
     auto t = Clock::now();
     std::string verify;
     llvm::raw_string_ostream verify_out{verify};
@@ -800,8 +992,12 @@ bool Finish(llvm::Module& m, const Common& c, llvm::TargetMachine& tm, std::stri
     }
     st->t_verify += Since(t);
     t = Clock::now();
-    Optimise(m, &tm, c.o.tier);
+    Optimise(m, &tm, tier);
     st->t_opt += Since(t);
+    if (ir_text && c.o.ir_after_passes) {
+        llvm::raw_string_ostream out{*ir_text};
+        m.print(out, nullptr);
+    }
     if (c.o.count_spills || !c.o.asm_path.empty()) {
         // The register allocator's spills and reloads, from the comments of verbose assembly of the same code
         std::unique_ptr<llvm::Module> copy = llvm::CloneModule(m);
@@ -853,25 +1049,95 @@ bool Finish(llvm::Module& m, const Common& c, llvm::TargetMachine& tm, std::stri
     return true;
 }
 
-// ---- One compile unit: guest functions (one at tiers C and W, a shard at H and H+) and their standard entries in a module of its own ----
+// ---- Compile units (design 9.3, 10) ----
+// At tiers C and W a unit is a group of neighbouring functions of one tier (Units: about kGroupMin to kGroupMax instructions, each function
+// optimised on its own: their pipelines do not inline), at H and H+ a shard of neighbouring functions that inline within it, and a function
+// split for size is one unit per part
+struct Unit {
+    Tier tier = Tier::W;
+    std::vector<uint64_t> entries;  // the functions, in address order; a part's: its function
+    int part = -1;                  // >= 0: this part of the split function entries[0] (Common::parts)
+    uint64_t words = 0;
+};
 
-bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const std::vector<uint64_t>& entries, std::string* object, UnitStats* st,
-                 std::string* ir_text, std::string* asm_text, std::string* error) {
+// The body of a split function (SplitParts): what it was passed to the state block (with sp and lr), the entry's safepoint poll, then a tail
+// call of the part that holds its entry, with the function's entry SP and lr and the entry's offset (lift::FunctionPlan::part_entries)
+void DefineSplitStub(const Kit& k, const Common& c, uint64_t entry, const FnFacts& ff, llvm::Function* body, llvm::Function* part) {
+    llvm::LLVMContext& ctx = k.m->getContext();
+    auto* i8 = llvm::Type::getInt8Ty(ctx);
+    llvm::IRBuilder<> b{llvm::BasicBlock::Create(ctx, "entry", body)};
+    if (llvm::DISubprogram* sp = k.Subprogram(body, entry)) {
+        b.SetCurrentDebugLocation(llvm::DILocation::get(ctx, static_cast<unsigned>(entry), 0, sp));
+    }
+    body->addFnAttr(llvm::Attribute::NoUnwind);
+    body->addFnAttr(llvm::Attribute::getWithUWTableKind(ctx, llvm::UWTableKind::Async));
+    body->addFnAttr("frame-pointer", "none");
+    llvm::Value* st = body->getArg(0);
+    const auto field = [&](size_t off) { return b.CreateConstInBoundsGEP1_64(i8, st, off); };
+    for (unsigned i = 0; i < 31; ++i) {
+        const int a = c.conv.ArgX(ff.pass, i);
+        if (a >= 0 && (ff.pass.x >> i & 1)) b.CreateAlignedStore(body->getArg(static_cast<unsigned>(a)), field(offsetof(dm_guest_state, x) + 8 * i), llvm::Align(8));
+    }
+    for (unsigned i = 0; i < 32; ++i) {
+        const int a = c.conv.ArgV(ff.pass, i);
+        if (a >= 0 && (ff.pass.v >> i & 1)) b.CreateAlignedStore(body->getArg(static_cast<unsigned>(a)), field(offsetof(dm_guest_state, v) + 16 * i), llvm::Align(16));
+    }
+    b.CreateAlignedStore(body->getArg(1), field(offsetof(dm_guest_state, sp)), llvm::Align(8));
+    b.CreateAlignedStore(body->getArg(2), field(offsetof(dm_guest_state, x) + 8 * 30), llvm::Align(8));
+    if (c.o.safepoints) {
+        // Section 6.2's poll at the entry: the block already holds the whole register file
+        auto* flag = b.CreateAlignedLoad(b.getInt8Ty(), field(offsetof(dm_guest_state, poll)), llvm::Align(1), "poll");
+        flag->setAtomic(llvm::AtomicOrdering::Monotonic);
+        auto* cold = llvm::BasicBlock::Create(ctx, "safepoint", body);
+        auto* cont = llvm::BasicBlock::Create(ctx, "polled", body);
+        llvm::MDBuilder md{ctx};
+        b.CreateCondBr(b.CreateICmpNE(flag, b.getInt8(0)), cold, cont, md.createBranchWeights(1, 1u << 20));
+        b.SetInsertPoint(cold);
+        llvm::Value* at = b.CreateAdd(b.CreateAlignedLoad(b.getInt64Ty(), k.base, llvm::Align(8)), b.getInt64(entry));
+        b.CreateAlignedStore(at, field(offsetof(dm_guest_state, pc)), llvm::Align(8));
+        b.CreateCall(k.safepoint, {st})->setCallingConv(k.safepoint->getCallingConv());
+        b.CreateBr(cont);
+        b.SetInsertPoint(cont);
+    }
+    llvm::FunctionType* type = part->getFunctionType();
+    std::vector<llvm::Value*> args(type->getNumParams());
+    for (unsigned i = 0; i < type->getNumParams(); ++i) args[i] = llvm::PoisonValue::get(type->getParamType(i));
+    args[0] = st;
+    args[1] = body->getArg(1);
+    args[2] = body->getArg(2);
+    args[static_cast<size_t>(c.conv.ArgX(lift::Regs{}, 0))] = b.getInt64(entry);
+    auto* call = b.CreateCall(type, part, args);
+    c.conv.Apply(call);
+    call->setTailCallKind(llvm::CallInst::TCK_MustTail);
+    b.CreateRet(call);
+}
+
+bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::string* object, UnitStats* st, std::string* ir_text,
+                 std::string* asm_text, std::string* error) {
     const BuildOptions& o = c.o;
+    const std::vector<uint64_t>& entries = u.entries;
     const auto t0 = Clock::now();
     llvm::LLVMContext ctx;
     Diagnose(ctx, st);
-    llvm::Module m{BodyName(c, entries.front()), ctx};
+    const Part* part = u.part >= 0 ? &c.parts.at(entries.front())[static_cast<size_t>(u.part)] : nullptr;
+    llvm::Module m{part ? PartName(c, entries.front(), part->lo) : BodyName(c, entries.front()), ctx};
     m.setDataLayout(tm.createDataLayout());
     m.setTargetTriple(tm.getTargetTriple().str());
-    Kit k = MakeKit(m, c, false);
+    Kit k = MakeKit(m, c, false, u.tier);
     auto* i8 = llvm::Type::getInt8Ty(ctx);
     auto* i64 = llvm::Type::getInt64Ty(ctx);
     auto* v128 = llvm::FixedVectorType::get(i64, 2);
 
-    for (const uint64_t entry : entries) {
-        const FnFacts& ff = c.plan.fns.at(entry);
-        StdEntry(k, c, entry, ff, Body(m, c, entry, ff), true);
+    if (!part || u.part == 0) {
+        for (const uint64_t entry : entries) {
+            const FnFacts& ff = c.plan.fns.at(entry);
+            llvm::Function* body = Body(m, c, entry, ff);
+            StdEntry(k, c, entry, ff, body, true);
+            if (part) {
+                // The split function's body: the stub (its first part's unit defines it)
+                DefineSplitStub(k, c, entry, ff, body, PartFn(m, c, entry, c.PartAt(entry, entry)->lo));
+            }
+        }
     }
 
     // The callees as this unit sees them: declared when the lifter first asks for one
@@ -904,7 +1170,8 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const std::vector<uin
     lo.target = c.target;
     for (const uint64_t entry : entries) {
         const FnFacts& ff = c.plan.fns.at(entry);
-        llvm::Function* body = Body(m, c, entry, ff);
+        // What is lifted: the function's body, or one part of it into the part's own function
+        llvm::Function* body = part ? PartFn(m, c, entry, part->lo) : Body(m, c, entry, ff);
         lift::FunctionPlan fp;
         fp.conv = c.conv;
         fp.fn = body;
@@ -938,11 +1205,15 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const std::vector<uin
         fp.jit_entry = k.jit_entry;
         fp.safepoints = o.safepoints;
         fp.ic_empty = k.ic_empty;
-        fp.ic_prefix = "nxaot.ic." + llvm::utohexstr(entry) + ".";
-        fp.debug = k.Subprogram(body, entry);
+        fp.ic_prefix = "nxaot.ic." + llvm::utohexstr(part ? part->lo : entry) + ".";
+        fp.debug = k.Subprogram(body, part ? part->lo : entry);
         fp.line_section = o.line_table ? kLineMarks : "";
-        // The gates its code holds (design 1.1), which its compiled code must call: checked against what the lifter emitted below
-        const std::vector<nxaot_gate_site> sites = c.SitesOf(entry);
+        // The gates its code holds (design 1.1), which its compiled code must call: checked against what the lifter emitted below (a part:
+        // those in its range; SplitParts keeps a function whose code reaches the aux region whole)
+        std::vector<nxaot_gate_site> sites = c.SitesOf(entry);
+        if (part) {
+            std::erase_if(sites, [&](const nxaot_gate_site& g) { return g.offset < part->lo || g.offset >= part->hi; });
+        }
         for (const auto& g : sites) {
             if (g.kind == NXAOT_GATE_OBS) fp.obs_gates.insert(g.offset);
             else fp.spin_gates[g.offset] = g.arg;
@@ -952,16 +1223,36 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const std::vector<uin
         region.entry = entry;
         region.lo = entry;
         region.hi = ff.limit;
+        if (part) {
+            // A part (SplitParts): its range, entered at its entries; the other parts' entries are reached through part_of
+            region.entry = part->entries.front();
+            region.lo = part->lo;
+            region.hi = part->hi;
+            fp.part_entries = part->entries;
+            fp.roots.assign(part->entries.begin() + 1, part->entries.end());
+            for (const uint64_t r : ff.roots) {
+                if (r >= part->lo && r < part->hi && !std::binary_search(part->entries.begin(), part->entries.end(), r)) fp.roots.push_back(r);
+            }
+            fp.split = true;
+            // Every x and v register outside WRITES: what a return stores again (FnDataflow's restore_block over the whole function, which
+            // no part sees; storing a restored register's value again is what the convention allows, design 2.3)
+            fp.restore = lift::Regs{0x7FFFFFFFu & ~ff.writes.x, ~ff.writes.v, false, false};
+            fp.part_of = [&m, &c, entry, self = part](uint64_t at) -> llvm::Function* {
+                const Part* p = c.PartAt(entry, at);
+                return p && p != self ? PartFn(m, c, entry, p->lo) : nullptr;
+            };
+        }
         if (c.image.aux_size) {
             region.extra.emplace_back(c.image.aux_off, c.image.aux_off + c.image.aux_size);  // the frame step's stubs (design 1.1)
         }
         region.max_blocks = size_t{1} << 20;
         lo.plan = &fp;
         const module::Image& image = c.image;
-        const uint64_t limit = ff.limit;
-        const decode::CodeReader read = [&image, entry, limit](uint64_t a) -> std::optional<uint32_t> {
-            if ((a < entry || a >= limit) && !image.InAux(a)) {
-                return std::nullopt;  // a block runs to the function's limit: the next function's entry is reached by a tail call
+        const uint64_t code_lo = region.lo, code_hi = region.hi;
+        const decode::CodeReader read = [&image, code_lo, code_hi](uint64_t a) -> std::optional<uint32_t> {
+            if ((a < code_lo || a >= code_hi) && !image.InAux(a)) {
+                return std::nullopt;  // a block runs to the function's limit: the next function's entry is reached by a tail call (or the next
+                                      // part's, FnSplit)
             }
             if (!image.InCode(a)) {
                 return std::nullopt;
@@ -993,6 +1284,7 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const std::vector<uin
         st->returns += l.returns;
         st->svcs += l.svcs;
         st->traps += l.traps;
+        st->splits += l.splits;
         if (!l.function) {
             // Refused (an opcode the lowering does not cover, an internal error): a body that hands the function to the JIT fallback (section 11,
             // case 4), so that the rest of the module still runs: what it is passed to the block, the JIT from its entry until it returns to lr,
@@ -1010,21 +1302,27 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const std::vector<uin
             }
             llvm::Value* stp = f->getArg(0);
             const auto field = [&](size_t off) { return fb.CreateConstInBoundsGEP1_64(i8, stp, off); };
-            for (unsigned i = 0; i < 31; ++i) {
-                const int a = c.conv.ArgX(ff.pass, i);
-                if (a >= 0 && (ff.pass.x >> i & 1)) {
-                    fb.CreateAlignedStore(f->getArg(static_cast<unsigned>(a)), field(offsetof(dm_guest_state, x) + 8 * i), llvm::Align(8));
+            llvm::Value* at = nullptr;
+            if (part) {
+                // A part: the block holds every register already; the JIT from the block the part was entered at
+                at = fb.CreateAdd(fb.CreateAlignedLoad(i64, k.base, llvm::Align(8)), f->getArg(static_cast<unsigned>(c.conv.ArgX(lift::Regs{}, 0))));
+            } else {
+                for (unsigned i = 0; i < 31; ++i) {
+                    const int a = c.conv.ArgX(ff.pass, i);
+                    if (a >= 0 && (ff.pass.x >> i & 1)) {
+                        fb.CreateAlignedStore(f->getArg(static_cast<unsigned>(a)), field(offsetof(dm_guest_state, x) + 8 * i), llvm::Align(8));
+                    }
                 }
-            }
-            for (unsigned i = 0; i < 32; ++i) {
-                const int a = c.conv.ArgV(ff.pass, i);
-                if (a >= 0 && (ff.pass.v >> i & 1)) {
-                    fb.CreateAlignedStore(f->getArg(static_cast<unsigned>(a)), field(offsetof(dm_guest_state, v) + 16 * i), llvm::Align(16));
+                for (unsigned i = 0; i < 32; ++i) {
+                    const int a = c.conv.ArgV(ff.pass, i);
+                    if (a >= 0 && (ff.pass.v >> i & 1)) {
+                        fb.CreateAlignedStore(f->getArg(static_cast<unsigned>(a)), field(offsetof(dm_guest_state, v) + 16 * i), llvm::Align(16));
+                    }
                 }
+                fb.CreateAlignedStore(f->getArg(1), field(offsetof(dm_guest_state, sp)), llvm::Align(8));
+                fb.CreateAlignedStore(f->getArg(2), field(offsetof(dm_guest_state, x) + 8 * 30), llvm::Align(8));
+                at = fb.CreateAdd(fb.CreateAlignedLoad(i64, k.base, llvm::Align(8)), fb.getInt64(entry));
             }
-            fb.CreateAlignedStore(f->getArg(1), field(offsetof(dm_guest_state, sp)), llvm::Align(8));
-            fb.CreateAlignedStore(f->getArg(2), field(offsetof(dm_guest_state, x) + 8 * 30), llvm::Align(8));
-            llvm::Value* at = fb.CreateAdd(fb.CreateAlignedLoad(i64, k.base, llvm::Align(8)), fb.getInt64(entry));
             fb.CreateAlignedStore(at, field(offsetof(dm_guest_state, pc)), llvm::Align(8));
             fb.CreateAlignedStore(fb.getInt32(NXAOT_TRAP_JIT_REFUSED), field(offsetof(dm_guest_state, exit_reason)), llvm::Align(4));
             fb.CreateCall(k.rt_jit, {stp, f->getArg(2), f->getArg(1)});
@@ -1043,11 +1341,11 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const std::vector<uin
         k.dib->finalize();
     }
     st->t_lift += Since(t0);
-    if (ir_text) {
+    if (ir_text && !o.ir_after_passes) {
         llvm::raw_string_ostream out{*ir_text};
         m.print(out, nullptr);
     }
-    return Finish(m, c, tm, object, st, asm_text, error);
+    return Finish(m, c, tm, u.tier, object, st, asm_text, error, ir_text);
 }
 
 // ---- The tables' object: the lookup hash, the function map, the returns, the trampoline, the descriptor, and the shared code ----
@@ -1063,7 +1361,7 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
     llvm::Module* m = &mod;
     m->setDataLayout(tm.createDataLayout());
     m->setTargetTriple(tm.getTargetTriple().str());
-    Kit k = MakeKit(*m, c, true);
+    Kit k = MakeKit(*m, c, true, c.o.tier);
     llvm::IRBuilder<> b{ctx};
     auto* i8 = b.getInt8Ty();
     auto* i32 = b.getInt32Ty();
@@ -1078,7 +1376,7 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
     for (const auto& [entry, ff] : plan.fns) {
         bodies[entry] = Body(*m, c, entry, ff);
         s->words += ff.words;
-        ++s->tier_functions[static_cast<size_t>(o.tier)];
+        ++s->tier_functions[static_cast<size_t>(c.TierOf(entry))];
     }
     s->functions = plan.fns.size();
     for (const auto& [entry, ff] : plan.fns) {
@@ -1269,11 +1567,11 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
         k.dib->finalize();
     }
     st->t_lift += Since(t0);
-    if (ir_text) {
+    if (ir_text && !o.ir_after_passes) {
         llvm::raw_string_ostream out{*ir_text};
         m->print(out, nullptr);
     }
-    return Finish(*m, c, tm, object, st, asm_text, error);
+    return Finish(*m, c, tm, c.o.tier, object, st, asm_text, error, ir_text);
 }
 
 // ---- lines.o: the line table, from every unit's line marks (ReadLineMarks), once all are compiled ----
@@ -1316,7 +1614,7 @@ bool CompileLines(const Common& c, llvm::TargetMachine& tm, const std::vector<Li
     };
     table("nxaot.fn_lines", ".nxaot.fnlines", index);
     table("nxaot.lines", ".nxaot.lines", rows);
-    return Finish(m, c, tm, object, st, nullptr, error);
+    return Finish(m, c, tm, c.o.tier, object, st, nullptr, error);
 }
 
 // ---- The cache key of a unit (design section 13) ----
@@ -1339,7 +1637,7 @@ std::string UnitKey(const Common& c, uint64_t entry) {
     const FnFacts& ff = c.plan.fns.at(entry);
     cache::KeyBuilder k;
     k.Add("format", kUnitKeyFormat).Add("tool", c.tool).Add("target", c.triple + " " + c.cpu + " " + c.features);
-    k.Add("tier", TierName(o.tier)).Add("cc", lift::CallConvName(o.cc)).Add("correctness", o.correctness).Add("debug_info", o.debug_info);
+    k.Add("tier", TierName(c.TierOf(entry))).Add("cc", lift::CallConvName(o.cc)).Add("correctness", o.correctness).Add("debug_info", o.debug_info);
     k.Add("line_table", o.line_table).Add("safepoints", o.safepoints).Add("no_inline", o.no_inline).Add("fpsr", c.fpsr).Add("fpcr", uint64_t{0});
     k.Add("prefix", c.prefix);
     AddRegs(k, "indirect_pass", c.plan.indirect_pass);
@@ -1444,50 +1742,77 @@ std::string UnitKey(const Common& c, uint64_t entry) {
     return k.Hex();
 }
 
-// The key of a unit: its one function's, or for a shard the keys of its functions in order
-std::string UnitKey(const Common& c, const std::vector<uint64_t>& entries) {
-    if (entries.size() == 1) {
-        return UnitKey(c, entries.front());
+// The key of a unit (each function's key is UnitKey above, the cache's keys stay per function): a unit of one function, its function's key; a
+// group or a shard, the keys of its functions in order; a part of a split function, its function's key with the part's range and entries
+std::string UnitKey(const Common& c, const Unit& u) {
+    if (u.part >= 0) {
+        const Part& p = c.parts.at(u.entries.front())[static_cast<size_t>(u.part)];
+        cache::KeyBuilder k;
+        k.Add("format", kUnitKeyFormat).Add("fn", UnitKey(c, u.entries.front())).Add("part", static_cast<uint64_t>(u.part));
+        k.Add("parts", c.parts.at(u.entries.front()).size()).Add("lo", p.lo).Add("hi", p.hi);
+        std::string list;
+        for (const uint64_t e : p.entries) list += std::to_string(e) + ",";
+        k.Add("entries", list);
+        return k.Hex();
+    }
+    if (u.entries.size() == 1) {
+        return UnitKey(c, u.entries.front());
     }
     cache::KeyBuilder k;
-    k.Add("format", kUnitKeyFormat).Add("shard", entries.size());
-    for (const uint64_t e : entries) {
+    k.Add("format", kUnitKeyFormat).Add("shard", u.entries.size());
+    for (const uint64_t e : u.entries) {
         k.Add("fn", UnitKey(c, e));
     }
     return k.Hex();
 }
 
-// The compile units of a module (design 9.3). At tiers C and W a function each: their pipelines optimise one function at a time, and a unit of one
-// function is what the per-function cache keys. At H and H+, whose pipelines inline, shards of neighbouring functions in address order (the
-// callees a function calls most are mostly near it): a shard ends after a function whose code's SHA-256 starts with a byte that is a multiple of
-// kShardCut once it holds kShardMin instructions, and at kShardMax, so that a change in one function moves the shards' ends near it only
-std::vector<std::vector<uint64_t>> Units(const module::Image& image, const Plan& plan, Tier tier) {
-    std::vector<std::vector<uint64_t>> units;
-    if (tier == Tier::C || tier == Tier::W) {
-        for (const auto& [entry, ff] : plan.fns) {
-            units.push_back({entry});
-        }
-        return units;
-    }
+// Whether a unit ends after this function, by its code alone: the first byte of the SHA-256 of its words a multiple of cut
+bool CutAfter(const module::Image& image, uint64_t entry, const FnFacts& ff, unsigned cut) {
+    const uint64_t end = std::min<uint64_t>(ff.limit, image.bytes.size());
+    const auto code = llvm::ArrayRef<uint8_t>(image.bytes.data() + std::min<uint64_t>(entry, end), image.bytes.data() + end);
+    return llvm::SHA256::hash(code)[0] % cut == 0;
+}
+
+// The compile units of a module (design 9.3), in address order. At tiers C and W, whose pipelines optimise one function at a time, groups of
+// neighbouring functions of one tier: a group ends after a function whose code's SHA-256 starts with a multiple of kGroupCut once it holds
+// kGroupMin instructions, and at kGroupMax, so that a change in one function moves the groups' ends near it only. One function per unit cost a
+// fixed 0.5 ms of code generation set-up and some 2.7 KiB of object, link and cache entry per unit (README.md, "Pack throughput", phase 5b):
+// over Monster Hunter Rise's estimated 600,000 functions of 52 instructions on average, minutes. At H and H+, whose pipelines inline, shards
+// of neighbouring functions (the callees a function calls most are mostly near it), cut the same way between kShardMin and kShardMax. A
+// function split for size (SplitParts) is a unit per part, and ends the group before it
+std::vector<Unit> Units(const Common& c) {
+    // A group holds up to 1,024 instructions, fewer in a module of less than 32 groups' worth (a thirty-second of it, at least 64): a small
+    // NRO's pack keeps enough units for the workers (fnptr-gcc, 1,603 instructions, was 4 units of up to 1,024 and took 0.35 s with 8 workers
+    // against 0.20 s as 61 units). Above 32,768 instructions the limits are fixed, so a game module's groups do not move with its size
+    uint64_t module_words = 0;
+    for (const auto& [entry, ff] : c.plan.fns) module_words += ff.words;
+    const uint64_t kGroupMax = std::clamp<uint64_t>(module_words / 32, 64, 1'024), kGroupMin = kGroupMax / 4;
     constexpr uint64_t kShardMin = 16'000, kShardMax = 64'000;
-    constexpr unsigned kShardCut = 8;
-    std::vector<uint64_t> shard;
-    uint64_t words = 0;
-    for (const auto& [entry, ff] : plan.fns) {
-        shard.push_back(entry);
-        words += ff.words;
-        const uint64_t end = std::min<uint64_t>(ff.limit, image.bytes.size());
-        const auto code = llvm::ArrayRef<uint8_t>(image.bytes.data() + std::min<uint64_t>(entry, end), image.bytes.data() + end);
-        const bool cut = words >= kShardMax || (words >= kShardMin && llvm::SHA256::hash(code)[0] % kShardCut == 0);
-        if (cut) {
-            units.push_back(std::move(shard));
-            shard.clear();
-            words = 0;
+    constexpr unsigned kGroupCut = 4, kShardCut = 8;
+    std::vector<Unit> units;
+    Unit cur;
+    const auto flush = [&] {
+        if (!cur.entries.empty()) units.push_back(std::move(cur));
+        cur = Unit{};
+    };
+    for (const auto& [entry, ff] : c.plan.fns) {
+        const Tier tier = c.TierOf(entry);
+        if (const auto sp = c.parts.find(entry); sp != c.parts.end()) {
+            flush();
+            for (size_t i = 0; i < sp->second.size(); ++i) {
+                units.push_back(Unit{tier, {entry}, static_cast<int>(i), sp->second[i].words});
+            }
+            continue;
         }
+        if (!cur.entries.empty() && cur.tier != tier) flush();
+        cur.tier = tier;
+        cur.entries.push_back(entry);
+        cur.words += ff.words;
+        const bool small = tier == Tier::C || tier == Tier::W;
+        const uint64_t min = small ? kGroupMin : kShardMin, max = small ? kGroupMax : kShardMax;
+        if ((small && !c.o.groups) || cur.words >= max || (cur.words >= min && CutAfter(c.image, entry, ff, small ? kGroupCut : kShardCut))) flush();
     }
-    if (!shard.empty()) {
-        units.push_back(std::move(shard));
-    }
+    flush();
     return units;
 }
 
@@ -1558,6 +1883,124 @@ unsigned AutoWorkers() {
     return std::max(1u, n);
 }
 
+namespace {
+
+// The parts of a split function joined into one relocatable object (ld.lld -r, the part holding the body's stub first): lld concatenates their
+// code sections into one, which the pack's link places whole, so every part lies after the body at an offset known now. The line rows of the
+// parts (ReadLineMarks: native from the part's start) become rows from the body's start, as the line table's runs are (ABI 3)
+bool JoinParts(const Common& c, uint64_t entry, const std::vector<std::string>& parts, const std::string& joined, std::vector<LineRow>* rows,
+               std::string* error) {
+    if (!LinkRelocatable(parts, joined, error)) {
+        return false;
+    }
+    auto buf = llvm::MemoryBuffer::getFile(joined);
+    if (!buf) {
+        *error = "cannot read " + joined + ": " + buf.getError().message();
+        return false;
+    }
+    auto file = llvm::object::ObjectFile::createObjectFile((*buf)->getMemBufferRef());
+    if (!file) {
+        *error = joined + ": " + llvm::toString(file.takeError());
+        return false;
+    }
+    const std::string body = BodyName(c, entry);
+    std::optional<llvm::object::SectionRef> code;
+    std::map<uint64_t, uint64_t> part_at;  // part lo -> its offset in the code section
+    std::optional<uint64_t> body_at;
+    for (const llvm::object::SymbolRef& s : (*file)->symbols()) {
+        auto name = s.getName();
+        auto value = s.getValue();
+        auto sec = s.getSection();
+        if (!name || !value || !sec) {
+            if (!name) llvm::consumeError(name.takeError());
+            if (!value) llvm::consumeError(value.takeError());
+            if (!sec) llvm::consumeError(sec.takeError());
+            continue;
+        }
+        bool std_entry = false;
+        uint64_t part = LineRow::kNoPart;
+        const auto fn = BodyOf(*name, c.prefix, &std_entry, &part);
+        if (!fn || *fn != entry || std_entry || *sec == (*file)->section_end()) continue;
+        if (code && **sec != *code) {
+            *error = joined + ": the parts of " + body + " lie in more than one section";
+            return false;
+        }
+        code = **sec;
+        if (part == LineRow::kNoPart) body_at = *value;
+        else part_at[part] = *value;
+    }
+    if (!body_at) {
+        *error = joined + ": no " + body;
+        return false;
+    }
+    for (LineRow& r : *rows) {
+        if (r.part == LineRow::kNoPart) continue;
+        const auto it = part_at.find(r.part);
+        if (it == part_at.end() || it->second + r.native < *body_at || it->second + r.native - *body_at > UINT32_MAX) {
+            *error = joined + ": a line mark of " + body + "'s part at " + llvm::utohexstr(r.part) + " outside the joined code";
+            return false;
+        }
+        r.native = static_cast<uint32_t>(it->second + r.native - *body_at);
+        r.part = LineRow::kNoPart;
+    }
+    return true;
+}
+
+// The tiers of section 9.3 by profile (--profile; README.md, "Tiers by profile"): in the balanced mode a function holding a sampled offset at
+// tier H and the others at tier C ("tier H only with a profile"; C for "functions the profile never sampled"), in the max mode H+ and H.
+// Without a profile every function has the mode's tier (no entries in *tiers)
+bool TiersFromProfile(const BuildOptions& o, const Plan& plan, std::map<uint64_t, Tier>* tiers, BuildStats* s, std::string* error) {
+    if (o.profile_path.empty()) {
+        return true;
+    }
+    const Tier hot = o.mode == "max" ? Tier::HPlus : Tier::H, cold = o.mode == "max" ? Tier::H : Tier::C;
+    std::ifstream in{o.profile_path};
+    if (!in) {
+        *error = "cannot read the profile " + o.profile_path;
+        return false;
+    }
+    std::map<uint64_t, uint64_t> samples;  // offset -> count
+    std::string line;
+    unsigned number = 0;
+    while (std::getline(in, line)) {
+        ++number;
+        const size_t hash = line.find('#');
+        if (hash != std::string::npos) line.resize(hash);
+        llvm::StringRef rest = llvm::StringRef(line).trim();
+        if (rest.empty()) continue;
+        const size_t gap = rest.find_first_of(" \t");
+        llvm::StringRef off_text = rest.take_front(gap).trim(), count_text = gap == llvm::StringRef::npos ? "" : rest.drop_front(gap).trim();
+        off_text.consume_front_insensitive("0x");
+        uint64_t offset = 0, count = 0;
+        if (off_text.getAsInteger(16, offset)) {
+            *error = o.profile_path + ":" + std::to_string(number) + ": the offset is no hexadecimal number";
+            return false;
+        }
+        if (count_text.getAsInteger(10, count)) {
+            *error = o.profile_path + ":" + std::to_string(number) + ": the count is no decimal number";
+            return false;
+        }
+        samples[offset] += count;
+        s->profile_samples += count;
+    }
+    s->profile_offsets = samples.size();
+    for (const auto& [entry, ff] : plan.fns) {
+        (*tiers)[entry] = cold;
+    }
+    for (const auto& [offset, count] : samples) {
+        if (count == 0) continue;
+        auto it = plan.fns.upper_bound(offset);
+        if (it == plan.fns.begin() || offset >= std::prev(it)->second.limit) {
+            ++s->profile_outside;
+            continue;
+        }
+        (*tiers)[std::prev(it)->first] = hot;
+    }
+    return true;
+}
+
+}  // namespace
+
 bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::string& work_dir, std::vector<std::string>* objects,
                   BuildStats* stats, std::string* error) {
     BuildStats& s = *stats;
@@ -1569,46 +2012,110 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         workers = 1;  // LLVM's pass timers are not thread-safe
     }
 
-    // ---- Analysis: discovery, the census's FPSR answer (decision 5), the convention facts ----
-    auto t = Clock::now();
-    analysis::DiscoverOptions dopts;
-    dopts.threads = workers;
-    const analysis::Discovery d = analysis::Discover(image, dopts);
-    s.discover_times = d.times;
-    const auto tc = Clock::now();
-    bool fpsr = o.fpsr_flags == 1;
-    if (o.fpsr_flags < 0) {
-        fpsr = analysis::ReadsFpsr(image.bytes.data() + image.text_off, image.text_size);  // the census's answer.fpsr_read
+    // ---- Analysis: discovery, the census's FPSR answer (decision 5), the convention facts; from the analysis cache when it holds this module's
+    // (analysis_cache.h: design 13, a warm repack runs neither) ----
+    lift::Convention conv;
+    conv.cc = o.cc;
+    std::optional<cache::Cache> cache;
+    // --asm, --spills and --ir want every unit compiled (the cache keeps objects, not their assembly or IR)
+    const bool use_cache = !o.cache_dir.empty() && !o.count_spills && o.asm_path.empty() && o.ir_path.empty();
+    std::string tool;
+    if (use_cache) {
+        cache.emplace(o.cache_dir);
+        if (!cache->Open(error)) {
+            return false;
+        }
+        tool = ToolIdentity();
     }
+    auto t = Clock::now();
+    CachedAnalysis cached;
+    analysis::Discovery fresh_d;
+    Plan fresh_plan;
+    bool reads_fpsr = false, warm = false;
+    std::string akey, apath;
+    if (use_cache) {
+        akey = AnalysisKey(image, conv, o.all_entries, o.split ? o.split_above : UINT64_MAX, tool);
+        apath = AnalysisPath(o.cache_dir, akey);
+        std::string why;
+        warm = LoadAnalysis(apath, akey, &cached, &why);
+        s.analysis_cache = warm ? "hit" : "miss (" + why + ")";
+        s.t_analysis_cache = Since(t);
+        reads_fpsr = cached.reads_fpsr;
+    }
+    if (!warm) {
+        analysis::DiscoverOptions dopts;
+        dopts.threads = workers;
+        fresh_d = analysis::Discover(image, dopts);
+        s.discover_times = fresh_d.times;
+        const auto tc = Clock::now();
+        reads_fpsr = analysis::ReadsFpsr(image.bytes.data() + image.text_off, image.text_size);  // the census's answer.fpsr_read
+        s.t_census = Since(tc);
+    }
+    const analysis::Discovery& d = warm ? cached.d : fresh_d;
+    const bool fpsr = o.fpsr_flags == 1 || (o.fpsr_flags < 0 && reads_fpsr);
     s.fpsr_flags = fpsr;
-    s.t_census = Since(tc);
     s.t_discover = Since(t);
     for (const auto& n : d.notes) {
         s.notes.push_back(n);
     }
-    lift::Convention conv;
-    conv.cc = o.cc;
     t = Clock::now();
-    const Plan plan = MakePlan(image, d, conv, o.all_entries);
+    if (!warm) {
+        fresh_plan = MakePlan(image, d, conv, o.all_entries);
+    }
+    const Plan& plan = warm ? cached.plan : fresh_plan;
     s.t_plan = Since(t);
-
-    // ---- The units and the workers; a target machine per worker, made here (LLVM's target registry is set up once, on this thread) ----
-    const std::vector<std::vector<uint64_t>> units = Units(image, plan, o.tier);
-    s.units = units.size();
-    workers = static_cast<unsigned>(std::max<size_t>(1, std::min<size_t>(workers, units.size() + 1)));
-    s.workers = workers;
-    std::vector<std::unique_ptr<llvm::TargetMachine>> tms;
-    for (unsigned i = 0; i < workers; ++i) {
-        auto tm = MakeTarget(o.cpu, o.tier, &s.cpu, &s.features, error);
-        if (!tm) {
-            return false;
+    if (use_cache && !warm) {
+        const auto ts = Clock::now();
+        std::string store_error;
+        if (!StoreAnalysis(apath, akey, d, plan, reads_fpsr, o.split ? o.split_above : UINT64_MAX, &store_error)) {
+            s.notes.push_back("[RED] nxaot build: the analysis cache: " + store_error);
         }
-        tms.push_back(std::move(tm));
+        s.t_analysis_cache += Since(ts);
+    }
+
+    // ---- The units and the workers; target machines per worker and tier, made here (LLVM's target registry is set up once, on this thread) ----
+    std::unique_ptr<llvm::TargetMachine> tm0 = MakeTarget(o.cpu, o.tier, &s.cpu, &s.features, error);
+    if (!tm0) {
+        return false;
     }
     // The gates (design 1.1): the manifest's obs and spin rows the functions' code holds are served (the units call them, CompileUnit checks
     // it); a row no discovered code holds is not, and the host, which checks every row against the descriptor, says so as well
-    Common c{image, o, d, plan, conv, Sanitize(image.name), fpsr, tms[0]->getTargetTriple().str(), s.cpu, s.features, TargetOf(*tms[0]), "",
-             GatesOf(image), {}};
+    Common c{image, o, d, plan, conv, Sanitize(image.name), fpsr, tm0->getTargetTriple().str(), s.cpu, s.features, TargetOf(*tm0), "",
+             GatesOf(image), {}, {}, {}};
+    if (o.split) {
+        for (const auto& [entry, ff] : plan.fns) {
+            std::vector<Part> parts = SplitParts(d.functions.at(entry), ff, o.split_above);
+            if (!parts.empty()) {
+                s.split_functions += 1;
+                s.split_parts += parts.size();
+                c.parts.emplace(entry, std::move(parts));
+            }
+        }
+    }
+    if (!TiersFromProfile(o, plan, &c.tiers, &s, error)) {
+        return false;
+    }
+    const std::vector<Unit> units = Units(c);
+    s.units = units.size();
+    workers = static_cast<unsigned>(std::max<size_t>(1, std::min<size_t>(workers, units.size() + 1)));
+    s.workers = workers;
+    std::set<Tier> used{o.tier};
+    for (const Unit& u : units) used.insert(u.tier);
+    std::vector<std::array<std::unique_ptr<llvm::TargetMachine>, 4>> tms(workers);
+    for (unsigned i = 0; i < workers; ++i) {
+        for (const Tier t : used) {
+            std::string cpu, features;
+            if (i == 0 && t == o.tier) {
+                tms[0][static_cast<size_t>(t)] = std::move(tm0);
+                continue;
+            }
+            auto tm = MakeTarget(o.cpu, t, &cpu, &features, error);
+            if (!tm) {
+                return false;
+            }
+            tms[i][static_cast<size_t>(t)] = std::move(tm);
+        }
+    }
     {
         std::map<uint64_t, nxaot_gate_site> served;
         for (const auto& [entry, f] : d.functions) {
@@ -1630,16 +2137,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         s.gate_sites = c.served.size();
     }
 
-    std::optional<cache::Cache> cache;
-    // --asm, --spills and --ir want every unit compiled (the cache keeps objects, not their assembly or IR)
-    const bool use_cache = !o.cache_dir.empty() && !o.count_spills && o.asm_path.empty() && o.ir_path.empty();
-    if (use_cache) {
-        cache.emplace(o.cache_dir);
-        if (!cache->Open(error)) {
-            return false;
-        }
-        c.tool = ToolIdentity();
-    }
+    c.tool = tool;
     if (const std::error_code ec = llvm::sys::fs::create_directories(work_dir)) {
         *error = "cannot create " + work_dir + ": " + ec.message();
         return false;
@@ -1649,11 +2147,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     // depends only on the unit, so the order and the number of workers change nothing in the pack
     std::vector<size_t> order(units.size());
     for (size_t i = 0; i < order.size(); ++i) order[i] = i;
-    std::vector<uint64_t> unit_words(units.size());
-    for (size_t i = 0; i < units.size(); ++i) {
-        for (const uint64_t e : units[i]) unit_words[i] += plan.fns.at(e).words;
-    }
-    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return unit_words[a] > unit_words[b]; });
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return units[a].words > units[b].words; });
     struct Result {
         std::string path, error, ir, asm_text;
         UnitStats st;
@@ -1672,25 +2166,26 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     std::vector<Result> results(units.size() + 1);
     std::atomic<size_t> next{0};
     static const bool trace = std::getenv("NXAOT_TRACE") != nullptr;  // each unit's entry on stderr before it is compiled
-    const auto work = [&](llvm::TargetMachine* tm) {
+    const auto work = [&](unsigned w) {
         for (size_t j; (j = next.fetch_add(1)) < results.size();) {
             const size_t r = j == 0 ? 0 : order[j - 1] + 1;
             Result& res = results[r];
             std::string object;
             if (r == 0) {
-                if (CompileTables(c, *tm, &object, &res.st, &s, o.ir_path.empty() ? nullptr : &res.ir, o.asm_path.empty() ? nullptr : &res.asm_text,
-                                  &res.error)) {
+                if (CompileTables(c, *tms[w][static_cast<size_t>(o.tier)], &object, &res.st, &s, o.ir_path.empty() ? nullptr : &res.ir,
+                                  o.asm_path.empty() ? nullptr : &res.asm_text, &res.error)) {
                     res.path = work_dir + "/tables.o";
                     WriteFile(res.path, object, &res.error);
                 }
                 continue;
             }
-            const std::vector<uint64_t>& entries = units[r - 1];
-            const uint64_t entry = entries.front();
+            const Unit& unit = units[r - 1];
+            llvm::TargetMachine* tm = tms[w][static_cast<size_t>(unit.tier)].get();
+            const uint64_t entry = unit.entries.front();
             std::string key;
             if (cache) {
                 const auto tk = Clock::now();
-                key = UnitKey(c, entries);
+                key = UnitKey(c, unit);
                 res.t_key = Since(tk);
                 cache::Facts facts;
                 uint64_t bytes = 0;
@@ -1714,7 +2209,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
             if (trace) {
                 std::fprintf(stderr, "nxaot: unit %#llx\n", static_cast<unsigned long long>(entry));
             }
-            if (!CompileUnit(c, *tm, entries, &object, &res.st, o.ir_path.empty() ? nullptr : &res.ir, o.asm_path.empty() ? nullptr : &res.asm_text,
+            if (!CompileUnit(c, *tm, unit, &object, &res.st, o.ir_path.empty() ? nullptr : &res.ir, o.asm_path.empty() ? nullptr : &res.asm_text,
                              &res.error)) {
                 continue;
             }
@@ -1727,18 +2222,18 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
                     res.written = object.size();
                 }
             } else {
-                res.path = work_dir + "/f" + llvm::utohexstr(entry) + ".o";
+                res.path = work_dir + "/f" + llvm::utohexstr(entry) + (unit.part >= 0 ? ".p" + std::to_string(unit.part) : "") + ".o";
                 WriteFile(res.path, object, &res.error);
             }
         }
     };
     t = Clock::now();
     if (workers == 1) {
-        work(tms[0].get());
+        work(0);
     } else {
         std::vector<std::thread> pool;
         for (unsigned i = 0; i < workers; ++i) {
-            pool.emplace_back(work, tms[i].get());
+            pool.emplace_back(work, i);
         }
         for (auto& th : pool) {
             th.join();
@@ -1746,17 +2241,40 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     }
     s.t_compile_wall = Since(t);
 
-    // ---- The results, in link order: the tables' object, then the units by entry, then the line table's ----
+    // ---- The results, in link order: the tables' object, then the units by entry (a split function's parts joined into one object), then
+    // the line table's ----
     std::string ir, asm_text;
     std::vector<LineRow> lines;
+    std::vector<std::string> part_objects;
+    std::vector<LineRow> part_rows;
     for (size_t r = 0; r < results.size(); ++r) {
         Result& res = results[r];
         if (!res.error.empty()) {
             *error = res.error;
             return false;
         }
-        objects->push_back(res.path);
-        lines.insert(lines.end(), res.lines.begin(), res.lines.end());
+        const Unit* unit = r ? &units[r - 1] : nullptr;
+        if (unit && unit->part >= 0) {
+            // A part of a split function: its parts' objects are joined (ld.lld -r, in part order: the body's stub first) into one object whose
+            // code is one section, so that the line table's offsets from the body hold for every part (SplitObject)
+            part_objects.push_back(res.path);
+            part_rows.insert(part_rows.end(), res.lines.begin(), res.lines.end());
+            if (static_cast<size_t>(unit->part) + 1 == c.parts.at(unit->entries.front()).size()) {
+                const std::string joined = work_dir + "/split" + llvm::utohexstr(unit->entries.front()) + ".o";
+                const auto tj = Clock::now();
+                if (!JoinParts(c, unit->entries.front(), part_objects, joined, &part_rows, error)) {
+                    return false;
+                }
+                s.t_join += Since(tj);
+                objects->push_back(joined);
+                lines.insert(lines.end(), part_rows.begin(), part_rows.end());
+                part_objects.clear();
+                part_rows.clear();
+            }
+        } else {
+            objects->push_back(res.path);
+            lines.insert(lines.end(), res.lines.begin(), res.lines.end());
+        }
         res.lines.clear();
         res.lines.shrink_to_fit();
         s.lines_lost += res.lines_outside;
@@ -1769,6 +2287,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         s.returns += u.returns;
         s.svcs += u.svcs;
         s.traps += u.traps;
+        s.splits += u.splits;
         s.refused += u.refused;
         s.lines_lost += u.lines_lost;
         s.spills += u.spills;
@@ -1785,6 +2304,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         }
         if (r) {
             s.cache_hits += res.hit;
+            (res.hit ? s.cache_hit_functions : s.cache_miss_functions) += cache && unit->part <= 0 ? unit->entries.size() : 0;
             s.cache_misses += cache && !res.hit;
             s.cache_bytes_read += res.read;
             s.cache_bytes_written += res.written;
@@ -1796,7 +2316,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         const auto tl = Clock::now();
         UnitStats ls;
         std::string object;
-        if (!CompileLines(c, *tms[0], lines, &object, &ls, &s.line_entries, error)) {
+        if (!CompileLines(c, *tms[0][static_cast<size_t>(o.tier)], lines, &object, &ls, &s.line_entries, error)) {
             return false;
         }
         const std::string path = work_dir + "/lines.o";

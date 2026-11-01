@@ -9,9 +9,13 @@
 #include <stdint.h>
 #include "dm_input.h"
 
+// A Nintendo pad by its productCategory, the way the Mac launcher tells one (ConsoleGlyphs.Family): lowercase, without '-' and spaces, it names "nintendo", "switch" or
+// "joycon". This covers "Switch Pro Controller", "Nintendo Switch Joy-Con (L/R)", "Nintendo Switch 2 Pro Controller" and a pad that spells them otherwise.
 static inline int dm_pad_labelled(GCController *c) {
     NSString *k = c.productCategory;
-    return [k isEqualToString:@"Switch Pro Controller"] || [k containsString:@"Joy-Con"];
+    if (!k.length) return 0;
+    k = [[[k lowercaseString] stringByReplacingOccurrencesOfString:@"-" withString:@""] stringByReplacingOccurrencesOfString:@" " withString:@""];
+    return [k containsString:@"nintendo"] || [k containsString:@"switch"] || [k containsString:@"joycon"];
 }
 // DM_BTN_A / B / X / Y of the pad's pressed face buttons
 static inline uint64_t dm_pad_face(GCExtendedGamepad *g) {

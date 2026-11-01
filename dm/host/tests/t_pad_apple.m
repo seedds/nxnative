@@ -30,11 +30,11 @@ static uint64_t face(NSString *category, char pressed) {
 }
 
 int main(void) { @autoreleasepool {
-    for (NSString *k in @[@"Xbox One", @"DualSense", @"HID"]) {   // by position: buttonA bottom (B), buttonB right (A), buttonX left (Y), buttonY top (X)
+    for (NSString *k in @[@"Xbox One", @"DualSense", @"HID", @"Xbox Wireless Controller", @"DualSense Wireless Controller", @"Extended Gamepad"]) {   // by position: buttonA bottom (B), buttonB right (A), buttonX left (Y), buttonY top (X)
         assert(face(k, 'A') == DM_BTN_B); assert(face(k, 'B') == DM_BTN_A); assert(face(k, 'X') == DM_BTN_Y); assert(face(k, 'Y') == DM_BTN_X);
     }
     assert(face(nil, 'B') == DM_BTN_A);   // no category: by position
-    for (NSString *k in @[@"Switch Pro Controller", @"Nintendo Switch Joy-Con (L/R)", @"Nintendo Switch Joy-Con (R)"]) {   // by label
+    for (NSString *k in @[@"Switch Pro Controller", @"Nintendo Switch Joy-Con (L/R)", @"Nintendo Switch Joy-Con (R)", @"JoyCon", @"nintendo switch pro controller", @"Nintendo Switch 2 Pro Controller"]) {   // by label
         assert(face(k, 'A') == DM_BTN_A); assert(face(k, 'B') == DM_BTN_B); assert(face(k, 'X') == DM_BTN_X); assert(face(k, 'Y') == DM_BTN_Y);
     }
     TestPad *g = [TestPad new];   // nothing pressed, buttons nil: none

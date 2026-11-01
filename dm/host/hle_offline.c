@@ -162,6 +162,16 @@ typedef struct {
 static ConnectedClient g_connected_clients[MAX_CONNECTED_CLIENTS];
 static _Atomic int g_connected_client_count = 0;
 
+// State change event
+static void *g_state_change_event = NULL;
+
+// Signal state change event
+static void ldn_signal_state_change(void) {
+    if (g_state_change_event) {
+        hle_signal_system_event(g_state_change_event);
+    }
+}
+
 // Socket and network utilities
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -387,9 +397,40 @@ static void ldn_remove_client(const char *ip) {
     }
 }
 
+// Check for stale clients (timeout = 5 seconds)
+static void ldn_check_client_timeouts(void) {
+    uint64_t now = now_ns();
+    uint64_t timeout_ns = 5ULL * 1000 * 1000 * 1000; // 5 seconds
+
+    int count = atomic_load(&g_connected_client_count);
+    for (int i = count - 1; i >= 0; i--) {
+        if (now - g_connected_clients[i].last_seen_ns > timeout_ns) {
+            int8_t node_id = g_connected_clients[i].node_id;
+            char ip[16];
+            strncpy(ip, g_connected_clients[i].ip, 15);
+            ip[15] = 0;
+
+            // Remove client
+            ldn_remove_client(ip);
+
+            // Update network info
+            g_network_info.ldn.nodes[node_id].is_connected = 0;
+            g_network_info.ldn.node_count--;
+
+            // Broadcast updated state
+            int remaining = atomic_load(&g_connected_client_count);
+            for (int j = 0; j < remaining; j++) {
+                ldn_send_packet(LDN_PACKET_SYNC, &g_network_info,
+                              sizeof(g_network_info), g_connected_clients[j].ip);
+            }
+        }
+    }
+}
+
 // Background listener thread for auto-responding to packets
 static void* ldn_listener_thread(void* arg) {
     (void)arg;
+    uint64_t last_timeout_check = 0;
 
     while (atomic_load(&g_listener_running)) {
         uint8_t type;
@@ -431,6 +472,8 @@ static void* ldn_listener_thread(void* arg) {
                                 ldn_send_packet(LDN_PACKET_SYNC, &g_network_info,
                                               sizeof(g_network_info), g_connected_clients[i].ip);
                             }
+
+                            ldn_signal_state_change();  // Notify game of new node
                         }
                     }
                     break;
@@ -453,6 +496,8 @@ static void* ldn_listener_thread(void* arg) {
                                 ldn_send_packet(LDN_PACKET_SYNC, &g_network_info,
                                               sizeof(g_network_info), g_connected_clients[i].ip);
                             }
+
+                            ldn_signal_state_change();  // Notify game of client disconnect
                         }
                     }
                     break;
@@ -464,6 +509,7 @@ static void* ldn_listener_thread(void* arg) {
                         memcpy(&g_network_info, &data.network_info, sizeof(LdnFullNetworkInfo));
                         if (state == LDN_STATE_STATION) {
                             atomic_store(&g_ldn_state, LDN_STATE_STATION_CONNECTED);
+                            ldn_signal_state_change();  // Notify game of connection
                         }
                     }
                     break;
@@ -472,8 +518,19 @@ static void* ldn_listener_thread(void* arg) {
                     // Host destroyed network
                     if (state == LDN_STATE_STATION_CONNECTED) {
                         atomic_store(&g_ldn_state, LDN_STATE_STATION);
+                        ldn_signal_state_change();  // Notify game of disconnect
                     }
                     break;
+            }
+        }
+
+        // Check for stale clients every 1 second
+        uint64_t now = now_ns();
+        if (now - last_timeout_check > 1000000000ULL) {
+            last_timeout_check = now;
+            int state = atomic_load(&g_ldn_state);
+            if (state == LDN_STATE_ACCESS_POINT_CREATED) {
+                ldn_check_client_timeouts();
             }
         }
 
@@ -547,6 +604,7 @@ HLE_FORCE("_ZN2nn3ldn8GetStateEv", "local wireless: returns current state", int,
 
 HLE_FORCE("_ZN2nn3ldn22AttachStateChangeEventEPNS_2os15SystemEventTypeE", "local wireless state event", void, h_ldn_Attach, void *ev) {
     hle_bind_system_event(ev, 0);
+    g_state_change_event = ev;  // Store for signaling
     (void)g_ev_ldn;
 }
 

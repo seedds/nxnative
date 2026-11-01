@@ -1,0 +1,278 @@
+// Every way a function address crosses between the host and recompiled guest code on the x86-64 engine (docs/design/aot-recompiler.md 2.4; aot.h, "Host functions handed
+// to the guest"), with no game files: the host-function module of dm/tools/tests/aot_synth.py (--hostfn; a module named main of hand-assembled AArch64 code, its behaviour
+// image and manifest as patch_nso.py --aot writes them, and an NRO named sub with its nro.tsv row), packed by nxaot (dm/tools/aot/tests/build_packs.sh, into <packs>/hostfn:
+// main.aot.so from the manifest, sub.aot.so from the NRO). Each run is a child process (this program with --run), as a game is a process:
+//   the run: load_modules binds main's imports into its GOT: strlen and sqrtf, the C library passthrough (dm/host/libc_pass.c's PASS entries), at their host-call thunks'
+//     slots; the test's entries (t_aot_hostfn_entries.c) and nn::ro's forced take-overs (hle_ro.c) at theirs; sub_value, which nothing defines yet, at a stub slot. The host
+//     puts sub.nro's bytes in guest memory (nro_image) and runs main from its entry (dm_aot_run). main calls the passthrough functions and checks nothing itself; it stores
+//     what each step returned in results[], which this test checks against aot_synth.py's HF_EXPECTED: strlen and sqrtf through the GOT; a host function an entry returns
+//     (t_hf_get: its thunk hands over the guest-visible slot, gen_hle_thunks.py's function pointer return) called with blr, then stored in a vtable-like table and called
+//     from there; host functions the host writes into guest memory (t_hf_install: dm_guest_fnptr), one with a thunk, one without (its stub answers 0, with a [RED] line when
+//     handed over and an UNIMPL line when called); a guest thread the host creates through hle_guestthread.c (the module's own nn::os functions and malloc, its thread entry
+//     the slot of spawn_tramp), whose host body calls the module's synth_triple on the new thread; an NRO loaded at run time through hle_ro.c (loader.c loader_nro_map:
+//     its nro.tsv row, its image mapped from the game's bytes, its pack loaded, its strlen import bound, its DT_INIT a guest call), a symbol looked up in it and called
+//     (a call into another pack), main's own import of it rebound at the load and again at UnloadModule
+//   a refusal: the same folder without sub.aot.so: ro::LoadModule fails with a [RED] line naming the pack, and the module's call through the missing symbol stops the run
+// What this does not show: a real NRO, SDK or game (no game files here); Windows (a DLL pack: not built here)
+//   t_aot_hostfn [--module <dir>]
+//     the module's folder: --module, else <packs>/hostfn with the packs of NXAOT_PACKS (the environment variable, else the CMake option); with none, a note and exit 0
+//   t_aot_hostfn --run <dir>     one run (the child)
+#include "../hle.h"
+#include "../aot.h"
+#include "../aot_hostfn.h"
+#include <stdarg.h>
+#include <stdatomic.h>
+#include <sys/stat.h>
+#if defined(_WIN32)
+#define popen _popen
+#define pclose _pclose
+#else
+#include <sys/wait.h>
+#endif
+
+#ifndef T_AOT_PACKS
+#define T_AOT_PACKS ""
+#endif
+
+void guest_thread_init(void);          // thread.c
+uint32_t svc_thread_main_init(void);   // hle_thread.c
+// The host functions the module reaches (t_aot_hostfn_entries.c, libc_pass.c, hle_ro.c) and the entries' counters
+uint64_t t_hf_mul(uint64_t a, uint64_t b), t_hf_add(uint64_t a, uint64_t b);
+void *t_hf_get(void); void t_hf_install(void **vt); uint64_t t_hf_spawn(uint64_t x);
+size_t libc_strlen(const char *s); float libc_sqrtf(float x);
+Result h_ro_LoadModule(void *mod, const void *image, void *buf, size_t size, int flag);
+Result h_ro_LookupModuleSymbol(uintptr_t *out, const void *mod, const char *name);
+void h_ro_UnloadModule(void *mod);
+extern _Atomic uint64_t g_t_hf_calls[3];
+
+// aot_synth.py's HF_EXPECTED (results[12], the pointer t_hf_get handed over, is checked against the slot of t_hf_mul)
+static const uint64_t EXPECTED[12] = {19, 0x40200000, 1030, 1056, 123, 0, 42, 0, 0, 1012, 77, 0};
+static const char *const STEP[12] = {"strlen through the GOT (the C library passthrough)", "sqrtf(6.25f) through the GOT, the float's bits",
+                                     "the host function t_hf_get returned, called with blr", "the same, from the module's table hf_vt[1]",
+                                     "hf_vt2[0], written by the host through dm_guest_fnptr (t_hf_add)", "hf_vt2[1], a host function with no thunk: its stub answers 0",
+                                     "t_hf_spawn: a guest thread made through hle_guestthread.c ran synth_triple(14)", "nn::ro::LoadModule of sub.nro",
+                                     "nn::ro::LookupModuleSymbol(sub_fn)", "sub_fn(5) in the NRO's pack: 5 + strlen + the flag its DT_INIT set",
+                                     "sub_value through main's GOT, bound to the NRO at its load", "sub_value through main's GOT after UnloadModule: the stub again"};
+enum { HF_GOT_STRLEN, HF_GOT_SQRTF, HF_GOT_GET, HF_GOT_INSTALL, HF_GOT_SPAWN, HF_GOT_LOAD, HF_GOT_LOOKUP, HF_GOT_SUB_VALUE, HF_GOT_UNLOAD };   // aot_synth.py HF_GOT_SYMS
+enum { SUB_GOT = 0x2000, SUB_FLAG = 0x2008 };   // aot_synth.py: the NRO's GOT slot (strlen) and the word its DT_INIT sets
+
+// ---------- The child: one run ----------
+static int g_checks, g_fails, g_status = DM_AOT_USAGE;
+static const char *g_dir;
+static void check(int ok, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    g_checks++; g_fails += !ok;
+    printf("check %s ", ok ? "ok  " : "FAIL");
+    vprintf(fmt, ap); putchar('\n');
+    va_end(ap);
+}
+static uint8_t *slurp(const char *path, size_t *n) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long len = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *p = malloc(len > 0 ? (size_t)len + 1 : 1);
+    if (!p || fread(p, 1, (size_t)len, f) != (size_t)len) { fclose(f); free(p); return NULL; }
+    fclose(f); p[len] = 0; *n = (size_t)len;
+    return p;
+}
+static uint64_t slot(const void *fn) { return dm_aot_hostfn_find(fn); }
+static int is_slot_of(uint64_t v, const void *fn, const char *cname) {
+    const char *n = dm_aot_hostfn_name(v);
+    return v && v == slot(fn) && n && !strcmp(n, cname);
+}
+
+static void *guest_main(void *arg) {
+    (void)arg;
+    guest_thread_init();                             // thread.c: TLS block and thread-local region in the arena
+    const uint32_t hmain = svc_thread_main_init();   // hle_thread.c: this thread is the main guest thread
+    const char *names[] = {"main"};
+    load_modules(g_dir, names, 1);                   // dies with a [RED] line when the module or its pack is refused
+    module_t *m = &g_mod[0];
+    const uint64_t base = (uint64_t)(uintptr_t)m->base;
+    uint64_t *got = module_sym(m, "hf_got"), *results = module_sym(m, "results"), *vt = module_sym(m, "hf_vt"), *vt2 = module_sym(m, "hf_vt2");
+    uint64_t *nro_image = module_sym(m, "nro_image");
+    check(got && results && vt && vt2 && nro_image, "the module's symbols (hf_got, results, hf_vt, hf_vt2, nro_image)");
+    if (!got || !results || !vt || !vt2 || !nro_image) return NULL;
+    // The imports in the GOT (design 2.4): the passthrough's, the entries', the forced take-overs', and a stub
+    check(is_slot_of(got[HF_GOT_STRLEN], (const void *)libc_strlen, "libc_strlen") && is_slot_of(got[HF_GOT_SQRTF], (const void *)libc_sqrtf, "libc_sqrtf"),
+          "GOT: strlen and sqrtf at the slots of the passthrough's libc_strlen and libc_sqrtf (%#llx, %#llx)", (unsigned long long)got[HF_GOT_STRLEN],
+          (unsigned long long)got[HF_GOT_SQRTF]);
+    check(is_slot_of(got[HF_GOT_GET], (const void *)t_hf_get, "t_hf_get") && is_slot_of(got[HF_GOT_INSTALL], (const void *)t_hf_install, "t_hf_install") &&
+          is_slot_of(got[HF_GOT_SPAWN], (const void *)t_hf_spawn, "t_hf_spawn"), "GOT: the test's entries at their slots");
+    check(is_slot_of(got[HF_GOT_LOAD], (const void *)h_ro_LoadModule, "h_ro_LoadModule") && is_slot_of(got[HF_GOT_LOOKUP], (const void *)h_ro_LookupModuleSymbol, "h_ro_LookupModuleSymbol") &&
+          is_slot_of(got[HF_GOT_UNLOAD], (const void *)h_ro_UnloadModule, "h_ro_UnloadModule"), "GOT: nn::ro's forced take-overs (hle_ro.c) at their slots");
+    check(dm_aot_stub_index(got[HF_GOT_SUB_VALUE]) >= 0, "GOT: sub_value, which no loaded module defines yet, at stub slot %ld", dm_aot_stub_index(got[HF_GOT_SUB_VALUE]));
+    // The NRO the module loads: its bytes in guest memory, as a game reads a file into its heap
+    char path[1200]; size_t nn = 0;
+    snprintf(path, sizeof path, "%s/sub.nro", g_dir);
+    uint8_t *nro = slurp(path, &nn);
+    check(nro != NULL && nn >= 0x80, "sub.nro read (%zu bytes)", nn);
+    if (!nro) return NULL;
+    uint8_t *gnro = dm_guest_alloc(nn);
+    memcpy(gnro, nro, nn); free(nro);
+    *nro_image = (uint64_t)(uintptr_t)gnro;
+    // The run
+    const dm_aot_pack *p = NULL;
+    dm_aot_find(base, &p);
+    check(p != NULL, "main's pack is loaded");
+    if (!p) return NULL;
+    g_status = dm_aot_run(base + dm_aot_pack_desc(p)->entry, 0, hmain, NULL);
+    check(g_status == DM_AOT_EXITED, "the run ended with ExitProcess (status %d)", g_status);
+    for (int i = 0; i < 12; i++)
+        check(results[i] == EXPECTED[i], "results[%d] = %#llx (expected %#llx): %s", i, (unsigned long long)results[i], (unsigned long long)EXPECTED[i], STEP[i]);
+    const uint64_t mul = slot((const void *)t_hf_mul);
+    check(mul && results[12] == mul && vt[1] == mul, "t_hf_get's thunk handed over t_hf_mul's slot %#llx (the guest kept %#llx in hf_vt[1])", (unsigned long long)results[12],
+          (unsigned long long)vt[1]);
+    check(is_slot_of(vt2[0], (const void *)t_hf_add, "t_hf_add") && dm_aot_stub_index(vt2[1]) >= 0,
+          "dm_guest_fnptr: hf_vt2[0] the slot of t_hf_add, hf_vt2[1] a stub slot (%ld) for the function with no thunk", dm_aot_stub_index(vt2[1]));
+    check(g_t_hf_calls[0] == 2 && g_t_hf_calls[1] == 1 && g_t_hf_calls[2] == 1, "the host functions ran: t_hf_mul %llu times, t_hf_add %llu, the thread's body %llu",
+          (unsigned long long)g_t_hf_calls[0], (unsigned long long)g_t_hf_calls[1], (unsigned long long)g_t_hf_calls[2]);
+    module_t *sub = NULL;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sub")) sub = &g_mod[i];
+    check(sub && sub->nro && !sub->loaded && sub->loads == 1 && dm_aot_in_arena((uint64_t)(uintptr_t)sub->base, sub->size),
+          "the NRO sub: an NRO module in the arena at %p, loaded once and unloaded", sub ? (void *)sub->base : NULL);
+    if (sub) {
+        const dm_aot_pack *sp = NULL;
+        dm_aot_find((uint64_t)(uintptr_t)sub->base + 0x80, &sp);
+        uint64_t sg, sf; memcpy(&sg, sub->base + SUB_GOT, 8); memcpy(&sf, sub->base + SUB_FLAG, 8);
+        check(sp != NULL && sp != p && is_slot_of(sg, (const void *)libc_strlen, "libc_strlen") && sf == 1000,
+              "the NRO's pack sub.aot.so is loaded, its strlen import at the passthrough's slot, its DT_INIT ran (sub_flag %llu)", (unsigned long long)sf);
+    }
+    check(dm_aot_stub_index(got[HF_GOT_SUB_VALUE]) >= 0, "GOT: sub_value at its stub slot again after UnloadModule");
+    return NULL;
+}
+
+static void timeout_exit(void) {
+    fprintf(stderr, "[RED] t_aot_hostfn: the run did not end within 120 s\n");
+    fflush(NULL);
+    _exit(DM_AOT_STUCK);
+}
+
+static int child(const char *dir) {
+    g_dir = dir;
+    g_flag.dbg = 1;   // hle_svc.c prints svcOutputDebugString as "[guest] " lines
+    crash_install();
+    dm_aot_arena_init();
+    plat_after_ms(120000, timeout_exit);
+    pthread_attr_t attr; pthread_t th;
+    pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, 8u << 20);
+    if (pthread_create(&th, &attr, guest_main, NULL)) { fprintf(stderr, "t_aot_hostfn: pthread_create failed\n"); return DM_AOT_USAGE; }
+    pthread_join(th, NULL);
+    dm_aot_stats_t s;
+    dm_aot_stats(&s);
+    printf("t_aot_hostfn: run status %d, %d checks, %d failed; %llu SVCs, %llu host calls, %llu dispatcher misses, %llu cross-pack calls, %llu threads\n", g_status,
+           g_checks, g_fails, (unsigned long long)s.svcs, (unsigned long long)s.host_calls, (unsigned long long)s.misses, (unsigned long long)s.cross_pack,
+           (unsigned long long)s.threads);
+    fflush(NULL);
+    _exit(g_fails ? 1 : g_status);
+}
+
+// ---------- The parent ----------
+typedef struct { int status; char *out; size_t n; } result;
+static void run_child(const char *self, const char *dir, result *r) {
+    char cmd[4096];
+#if defined(_WIN32)
+    snprintf(cmd, sizeof cmd, "\"\"%s\" --run \"%s\" 2>&1\"", self, dir);
+#else
+    snprintf(cmd, sizeof cmd, "'%s' --run '%s' 2>&1", self, dir);
+#endif
+    memset(r, 0, sizeof *r);
+    FILE *f = popen(cmd, "r");
+    if (!f) { r->status = -1; r->out = calloc(1, 1); return; }
+    size_t cap = 0; char line[8192];
+    while (fgets(line, sizeof line, f)) {
+        size_t len = strlen(line);
+        if (r->n + len + 1 > cap) { cap = (r->n + len + 1) * 2; r->out = realloc(r->out, cap); if (!r->out) abort(); }
+        memcpy(r->out + r->n, line, len + 1); r->n += len;
+    }
+    int st = pclose(f);
+#if defined(_WIN32)
+    r->status = st;
+#else
+    r->status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+#endif
+    if (!r->out) r->out = calloc(1, 1);
+}
+
+static int checks, fails;
+static void verdict(int ok, const char *what) { checks++; fails += !ok; printf("%-5s %s\n", ok ? "ok" : "FAIL", what); }
+static const char *red_line(const char *out, const char *needle) {   // the first [RED] line that holds needle, for the table
+    static char buf[1600];
+    for (const char *r = strstr(out, "[RED]"); r; r = strstr(r + 1, "[RED]")) {
+        const int n = (int)strcspn(r, "\n");
+        snprintf(buf, sizeof buf, "%.*s", n, r);
+        if (strstr(buf, needle)) return buf;
+    }
+    return "(no such [RED] line)";
+}
+// A copy of the folder without sub's pack, in t_aot_hostfn.tmp/nopack
+static int copy_without_pack(const char *dir, char *out_dir, size_t n) {
+    static const char *const files[] = {"main.image.bin", "main.aot.tsv", "main" DM_AOT_PACK_SUFFIX, "sub.nro", "nro.tsv"};
+    mkdir("t_aot_hostfn.tmp", 0755);
+    snprintf(out_dir, n, "t_aot_hostfn.tmp/nopack");
+    mkdir(out_dir, 0755);
+    char src[1200], dst[1200];
+    snprintf(dst, sizeof dst, "%s/sub" DM_AOT_PACK_SUFFIX, out_dir); remove(dst);
+    for (unsigned i = 0; i < sizeof files / sizeof *files; i++) {
+        size_t len = 0;
+        snprintf(src, sizeof src, "%s/%s", dir, files[i]);
+        uint8_t *b = slurp(src, &len);
+        if (!b) return 1;
+        snprintf(dst, sizeof dst, "%s/%s", out_dir, files[i]);
+        FILE *f = fopen(dst, "wb");
+        int bad = !f || fwrite(b, 1, len, f) != len;
+        if (f && fclose(f)) bad = 1;
+        free(b);
+        if (bad) return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--run")) return child(argv[2]);
+    char dir[1024] = "";
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--module") && i + 1 < argc) snprintf(dir, sizeof dir, "%s", argv[++i]);
+        else { fprintf(stderr, "usage: t_aot_hostfn [--module <dir>]\n"); return 2; }
+    }
+    if (!dir[0]) {
+        const char *packs = getenv("NXAOT_PACKS");
+        if (!packs || !*packs) packs = T_AOT_PACKS;
+        if (!*packs) { puts("note: no packs (NXAOT_PACKS unset; dm/tools/aot/tests/build_packs.sh makes them, with the host-function module's, in the nxnative-aot image): skipped"); return 0; }
+        snprintf(dir, sizeof dir, "%s/hostfn", packs);
+    }
+    char probe[1100];
+    snprintf(probe, sizeof probe, "%s/sub" DM_AOT_PACK_SUFFIX, dir);
+    FILE *pf = fopen(probe, "rb");
+    if (!pf) { printf("FAIL: no %s (dm/tools/aot/tests/build_packs.sh writes it)\n", probe); return 1; }
+    fclose(pf);
+    printf("t_aot_hostfn: module %s\n", dir);
+    result r;
+    // 1. The run
+    run_child(argv[0], dir, &r);
+    fputs(r.out, stdout);
+    int cks = 0, cfail = -1, cst = -1;
+    const char *sum = strstr(r.out, "t_aot_hostfn: run status ");
+    if (sum) sscanf(sum, "t_aot_hostfn: run status %d, %d checks, %d failed", &cst, &cks, &cfail);
+    verdict(r.status == 0 && cst == 0 && cks >= 25 && cfail == 0, "the run: every check of the child passed and the module ended with ExitProcess");
+    verdict(strstr(r.out, "[guest] hostfn module: done") != NULL, "the module's OutputDebugString line");
+    verdict(strstr(r.out, "[RED] aot: the host hands the guest the host function") != NULL && strstr(r.out, "UNIMPL host function") != NULL,
+            "the host function with no thunk: a [RED] line when handed over, an UNIMPL line when called");
+    verdict(strstr(r.out, "NRO sub mapped from the game's image") != NULL && strstr(r.out, "ro::LoadModule sub") != NULL && strstr(r.out, "NRO sub unloaded") != NULL,
+            "the NRO: mapped from the game's image, loaded and unloaded through hle_ro.c");
+    verdict(strstr(r.out, "UNIMPL sub_value") != NULL, "sub_value after the unload: its stub (an UNIMPL line)");
+    verdict(strstr(r.out, "t_aot_hostfn: the host-created guest thread") != NULL, "the host-created guest thread's line");
+    free(r.out);
+    // 2. The NRO's pack missing
+    char tdir[1100];
+    if (copy_without_pack(dir, tdir, sizeof tdir)) verdict(0, "a copy of the folder without sub's pack (t_aot_hostfn.tmp/nopack)");
+    else {
+        run_child(argv[0], tdir, &r);
+        printf("      %s\n", red_line(r.out, "ro::LoadModule"));
+        verdict(r.status != 0 && strstr(r.out, "[RED] ro::LoadModule: ") && strstr(r.out, "sub" DM_AOT_PACK_SUFFIX) && strstr(r.out, "nxaot build"),
+                "sub's pack missing: ro::LoadModule fails with a [RED] line naming the pack and how to make it, and the run stops");
+        free(r.out);
+    }
+    printf("t_aot_hostfn: %d checks, %d failed\n", checks, fails);
+    return fails != 0;
+}

@@ -149,12 +149,55 @@ uint64_t dm_aot_bind(const module_t *m, const char *name, uint64_t v) {
     if (!v || module_of((const void *)(uintptr_t)v) || dm_aot_in_arena(v, 1)) return v;      // undefined weak (0), a loaded module's definition, guest memory
     const uint64_t s0 = (uint64_t)(uintptr_t)unimpl_stubs;
     if (v >= s0 && v < s0 + sizeof unimpl_stubs) return dm_aot_stub_addr((unsigned)((v - s0) / sizeof *unimpl_stubs));   // hle.c's named stub k
-    for (size_t i = 0; i < hle_thunks_count; i++)
-        if ((uint64_t)(uintptr_t)hle_thunks[i].fn == v) return dm_guest_fn(hle_thunks[i].fn);   // an HLE / HLE_FORCE / NVN entry: its slot
+    const uint64_t slot = dm_aot_hostfn_find((const void *)(uintptr_t)v);
+    if (slot) return slot;   // an entry's C function (HLE, HLE_FORCE, NVN, VK, GL, EGL, PASS): its slot
     const char *sym = plat_addr_symbol((const void *)(uintptr_t)v, NULL);
     die("[RED] aot: %s imports %s, which binds to the host function at %#llx (%s), and that function has no host-call thunk (dm/host/tools/gen_hle_thunks.py makes one per "
-        "HLE, HLE_FORCE and NVN entry; hle_table.c's libc passthrough has none): compiled code could not call it", m->name, name, (unsigned long long)v, sym ? sym : "no symbol");
+        "entry of the import tables and per HLE_LINKAGE function of the sources nxhost compiles): compiled code could not call it", m->name, name, (unsigned long long)v,
+        sym ? sym : "no symbol");
 }
+
+// ---------- Host functions handed to the guest (aot.h) ----------
+uint64_t loader_named_stub(const char *name);   // loader.c: hle.c's named stub for name (resolve_import under the loader's lock), as &unimpl_stubs[k]
+
+// A stub slot for name: hle.c's named stub (the one an import of that name nothing implements would bind to), at its slot of the stub page
+static uint64_t stub_slot(const char *name) {
+    const uint64_t v = loader_named_stub(name), s0 = (uint64_t)(uintptr_t)unimpl_stubs;
+    if (v >= s0 && v < s0 + sizeof unimpl_stubs) return dm_aot_stub_addr((unsigned)((v - s0) / sizeof *unimpl_stubs));
+    const uint64_t slot = dm_aot_hostfn_find((const void *)(uintptr_t)v);   // the import table implements the name: that entry
+    if (slot) return slot;
+    die("[RED] aot: the stub for %s is the host function at %#llx, which has no host-call thunk", name, (unsigned long long)v);
+}
+
+static void *fnptr(const void *fn, const char *name) {
+    const uint64_t v = (uint64_t)(uintptr_t)fn;
+    if (!v || dm_aot_in_arena(v, 1) || module_of(fn)) return (void *)fn;   // nothing, or already the guest's: guest memory, a loaded module, a slot or a stub slot
+    const uint64_t s0 = (uint64_t)(uintptr_t)unimpl_stubs;
+    if (v >= s0 && v < s0 + sizeof unimpl_stubs) return (void *)(uintptr_t)dm_aot_stub_addr((unsigned)((v - s0) / sizeof *unimpl_stubs));   // hle.c's named stub k
+    const uint64_t slot = dm_aot_hostfn_find(fn);
+    if (slot) return (void *)(uintptr_t)slot;
+    if (name) return (void *)(uintptr_t)stub_slot(strdup(name));   // a lookup by name the host does not implement: that name's stub, quietly (its first call reports
+                                                                   // it); hle.c keeps the name, and the guest's string may not live as long
+    // A host function with no thunk: a site that hands the guest a function no generator rule covers. Loud, once per function, and a stub that answers 0
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static const void *seen[64]; static int nseen;
+    const char *sym = plat_addr_symbol(fn, NULL);
+    char buf[160];
+    snprintf(buf, sizeof buf, "host function %s", sym ? sym : "?");
+    pthread_mutex_lock(&mu);
+    int first = 1;
+    for (int i = 0; i < nseen; i++) if (seen[i] == fn) { first = 0; break; }
+    if (first && nseen < 64) seen[nseen++] = fn;
+    pthread_mutex_unlock(&mu);
+    if (first)
+        LOG("[RED] aot: the host hands the guest the host function at %p (%s), which has no host-call thunk (gen_hle_thunks.py: an import-table entry or an HLE_LINKAGE "
+            "function): the guest gets a stub that answers 0", fn, sym ? sym : "no symbol");
+    return (void *)(uintptr_t)stub_slot(strdup(buf));   // hle.c keeps the name
+}
+
+void *dm_guest_fnptr(const void *fn) { return fnptr(fn, NULL); }
+
+void *dm_guest_fnptr_named(const void *fn, const char *name) { return fnptr(fn, name); }
 
 // ---------- Packs ----------
 typedef struct { uint64_t native; uint64_t off; } map_t;   // a native address and the module offset of its guest function or instruction
@@ -269,8 +312,9 @@ int dm_aot_load_module_pack(module_t *m, const char *dir, const uint8_t sha256[3
     dm_aot_identity id;
     memcpy(id.sha256, sha256, 32); id.image_size = image_size; id.text_end = text_end; id.bss_size = bss;
     if (dm_aot_pack_load(path, m, &id, err, errn)) return 0;
-    size_t k = strlen(err);   // how to make it, after the reason
-    snprintf(err + k, errn > k ? errn - k : 0, " (nxaot build %s/%s.aot.tsv -o <object> --shared %s makes the pack of this image)", dir, m->name, path);
+    size_t k = strlen(err);   // how to make it, after the reason: from the manifest beside it, or for an NRO (loader.c loader_nro_map) from the NRO file the game loads
+    if (m->nro) snprintf(err + k, errn > k ? errn - k : 0, " (nxaot build <the NRO file, %s.nro> -o <object> --shared %s makes the pack of this NRO)", m->name, path);
+    else snprintf(err + k, errn > k ? errn - k : 0, " (nxaot build %s/%s.aot.tsv -o <object> --shared %s makes the pack of this image)", dir, m->name, path);
     return 1;
 }
 

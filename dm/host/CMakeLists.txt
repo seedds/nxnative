@@ -115,12 +115,16 @@ endif()
 # ---- The portable host sources ----
 # Not here: the parts tied to native ARM64 execution (entry.S, hle_bigstack.c, crash.c, probe.c; the x86-64 execution engine replaces them: aot_*.c below, aot_fault.c
 # for crash.c's fault hooks and watchdog), the program entries (Apple's main.c; main_x86.c is the program nxhost-run below), and the Apple frontend files (*.m).
-# front_sdl.c is the front end here. hle_fdstat.c compiles to nothing on Windows
+# front_sdl.c is the front end here. hle_fdstat.c compiles to nothing on Windows. hle_table.c, Apple's C library passthrough (guest calls go straight into libc there), is
+# replaced by libc_pass.c: the same functions as PASS entries with the guest's types, which get host-call thunks like the other entries.
+# The HLE files of dm/gfx (hle_vi.c: nn::vi's display, layer, crop and frame number; hle_nv.c: nv::'s graphics allocator and driver start), which the Makefile takes with
+# dm/gfx's wildcard on Apple: plain C, part of nxhost as of every Apple host (the guest Vulkan and GL layers read the layer crop and size from hle_vi.c)
 file(GLOB HLE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hle_*.c)
-list(FILTER HLE_SRC EXCLUDE REGEX "/hle_bigstack\\.c$")
-set(NXHOST_SRC hle.c loader.c thread.c front_sdl.c)
+list(FILTER HLE_SRC EXCLUDE REGEX "/hle_(bigstack|table)\\.c$")
+file(GLOB GFX_HLE_SRC CONFIGURE_DEPENDS ${REPO}/dm/gfx/hle_*.c)
+set(NXHOST_SRC hle.c loader.c thread.c front_sdl.c libc_pass.c)
 list(TRANSFORM NXHOST_SRC PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
-list(APPEND NXHOST_SRC ${HLE_SRC})
+list(APPEND NXHOST_SRC ${HLE_SRC} ${GFX_HLE_SRC})
 # The host-call thunks of the x86-64 execution engine (docs/design/aot-recompiler.md 2.4): generated from the HLE entries of exactly the sources nxhost compiles,
 # so an entry in a file that is not built here gets no thunk. The generator also reads the quoted headers beside them (typedefs, wrapper macros). aot_hostfn.c is the
 # host-function page that gives each thunk its guest-visible address
@@ -294,14 +298,14 @@ host_test(t_touch SOURCES t_touch.c ../hle_touch.c PROFILE)
 host_test(t_gesture SOURCES t_gesture.c ../hle_touch.c PROFILE)
 host_test(t_thread_leak SOURCES t_thread_leak.c PROFILE)
 host_test(t_swkbd SOURCES t_swkbd.c ../hle_swkbd.c PROFILE)
-host_test(t_pctl SOURCES t_pctl.c PROFILE)
+host_test(t_pctl SOURCES t_pctl.c PROFILE DEFS DM_TEST_GUEST_C)   # DM_TEST_GUEST_C: the host files a test includes take their native form (hle_misc.c, hle_ro.c, hle_guestthread.c)
 host_test(t_time SOURCES t_time.c PROFILE)
 host_test(t_hid SOURCES t_hid.c ../hle_haptics.c PROFILE)
 host_test(t_audio_spsc SOURCES t_audio_spsc.c PROFILE SDL)
 host_test(t_audio_sdl SOURCES t_audio_sdl.c PROFILE SDL)
 host_test(t_front_sdl SOURCES t_front_sdl.c ../hle_haptics.c PROFILE SDL)
 host_test(t_audren_work SOURCES t_audren_work.c PROFILE)
-host_test(t_nro SOURCES t_nro.c PROFILE)
+host_test(t_nro SOURCES t_nro.c PROFILE DEFS DM_TEST_GUEST_C)
 host_test(t_fs SOURCES t_fs.c t_fs_stub.c PROFILE TMPDIR)
 host_test(t_fs_commit_list SOURCES t_fs_commit_list.c t_fs_stub.c PROFILE TMPDIR)
 host_test(t_fs_case SOURCES t_fs_case.c PROFILE TMPDIR)
@@ -475,9 +479,10 @@ endforeach()
 # The guest Vulkan layer (docs/design/vulkan-backend.md 8.1, step P9a): t_vk_guest drives guest_vk.c through the entry points a game gets from its vkGetInstanceProcAddr (found by
 # name in the import table, as the loader binds them) on lavapipe under the validation layer, skipped without a Vulkan device as the GPU tests above: the Tegra shape, memory,
 # buffers and images, render passes, pipelines (the two SPIR-V fix-ups among them), draws read back, queries, and a swapchain presented with a layer crop through the backend's
-# headless presenter; t_vk_spirv_fix runs the SPIR-V checks and fix-ups on hand-written modules (no device; spirv-val checks what they produce where it is installed)
+# headless presenter; t_vk_spirv_fix runs the SPIR-V checks and fix-ups on hand-written modules (no device; spirv-val checks what they produce where it is installed). The
+# shim reads the layer crop from dm/gfx/hle_vi.c, as in nxhost: both link it, and t_vk_guest crops through its vi::SetLayerCrop
 foreach(t IN ITEMS guest spirv_fix)
-    host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
+    host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c ../../gfx/hle_vi.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj guest_vk nvn_vk)
 endforeach()
 # The guest OpenGL layer (docs/design/vulkan-backend.md 8.2, step P9b): t_vk_guest_gl drives guest_gl.c through the EGL and GL entries a game gets (eglGetProcAddress found by
@@ -487,7 +492,7 @@ endforeach()
 set(T_GL_SHADERS ${REPO}/dm/gfx/tests/vk/shaders/gl)
 set(T_GL_LIB ${CMAKE_BINARY_DIR}/gen/gl_test)
 file(GLOB T_GL_SHADER_FILES CONFIGURE_DEPENDS ${T_GL_SHADERS}/*.vert ${T_GL_SHADERS}/*.frag)
-host_test(t_vk_guest_gl SOURCES ../../gfx/tests/vk/t_vk_guest_gl.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
+host_test(t_vk_guest_gl SOURCES ../../gfx/tests/vk/t_vk_guest_gl.c ../../gfx/hle_vi.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
 target_link_libraries(t_vk_guest_gl PRIVATE nvn_front_obj guest_gl nvn_vk)
 target_compile_definitions(t_vk_guest_gl PRIVATE "T_GL_SHADERS=\"${T_GL_SHADERS}\"" "T_GL_LIB=\"${T_GL_LIB}\"")
 find_program(GLSLANG_VALIDATOR glslangValidator)
@@ -568,6 +573,26 @@ if(NXHOST_JIT)
     target_link_libraries(t_aot_module PRIVATE nxhost_jit)
 endif()
 set_tests_properties(t_aot_module PROPERTIES TIMEOUT 300)
+# Every way a function address crosses between the host and recompiled code (t_aot_hostfn.c): the host-function module of aot_synth.py --hostfn, packed by build_packs.sh into
+# <packs>/hostfn with its NRO's pack. Its imports bind to the C library passthrough (libc_pass.c), to its entries (t_aot_hostfn_entries.c) and to nn::ro (hle_ro.c); it calls a
+# host function an entry returns, host functions the host wrote into its tables (dm_guest_fnptr), a guest thread the host makes (hle_guestthread.c), and an NRO it loads at
+# run time. The generator reads those four sources for the test's thunk table, as it reads nxhost's. The same packs as t_aot_host (without them, a note and a pass)
+set(T_AOT_HOSTFN_THUNKS_C ${CMAKE_BINARY_DIR}/gen/t_aot_hostfn_thunks.c)
+set(T_AOT_HOSTFN_GEN_SRC ${TESTS}/t_aot_hostfn_entries.c ${CMAKE_CURRENT_SOURCE_DIR}/libc_pass.c ${CMAKE_CURRENT_SOURCE_DIR}/hle_ro.c ${CMAKE_CURRENT_SOURCE_DIR}/hle_guestthread.c)
+add_custom_command(OUTPUT ${T_AOT_HOSTFN_THUNKS_C}
+    COMMAND ${Python3_EXECUTABLE} ${GEN_HLE_THUNKS} -o ${T_AOT_HOSTFN_THUNKS_C} ${T_AOT_HOSTFN_GEN_SRC}
+    DEPENDS ${GEN_HLE_THUNKS} ${T_AOT_HOSTFN_GEN_SRC} ${HOST_H}
+    COMMENT "host-call thunks of t_aot_hostfn's entries" VERBATIM)
+host_test(t_aot_hostfn SOURCES t_aot_hostfn.c t_aot_hostfn_entries.c t_aot_module_stub.c ../libc_pass.c ../hle_ro.c ../hle_guestthread.c ${AOT_TEST_SRC} ../hle.c
+          PROFILE INCLUDES ${REPO}/dm/tools/aot/include)
+target_sources(t_aot_hostfn PRIVATE ${T_AOT_HOSTFN_THUNKS_C})
+target_compile_definitions(t_aot_hostfn PRIVATE "T_AOT_PACKS=\"${NXAOT_PACKS}\"")
+set_target_properties(t_aot_hostfn PROPERTIES ENABLE_EXPORTS ON)   # the packs' imports resolve against it, as against nxhost
+if(NXHOST_JIT)
+    target_compile_definitions(t_aot_hostfn PRIVATE NXHOST_JIT=1)
+    target_link_libraries(t_aot_hostfn PRIVATE nxhost_jit)
+endif()
+set_tests_properties(t_aot_hostfn PROPERTIES TIMEOUT 300)
 # The host program itself (t_host_program.c): nxhost-run, found beside the test, run as a child process on t_aot_module's synthetic module (DM_AOT_RAW=1: it has no SDK) with
 # SDL's dummy drivers and the headless Vulkan presenter, through its window path (DM_WINDOW=1) and its windowless one; its exit status and its log lines checked; the SDK start's
 # refusal of a module set without nnMain; the usage. Without the packs only the usage and the refusal run (a note says so), as on the Windows runner
@@ -588,9 +613,9 @@ host_test(t_audren_layout SOURCES t_audren_layout.c PROFILE POSIX)
 host_test(t_shared_font SOURCES t_shared_font.c PROFILE POSIX)
 host_test(t_system_event SOURCES t_system_event.c PROFILE POSIX INCLUDES ${REPO}/dm/tools/aot/include)
 host_test(t_symbols SOURCES t_symbols.c PROFILE POSIX)
-host_test(t_svc_memory SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile)
-host_test(t_svc_memory_unlimited SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile DEFS DM_GAME_MEM_MAP_LIMIT=0)
-host_test(t_svc_memory_16k SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile DEFS TEST_PAGE_16K)
+host_test(t_svc_memory SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile DEFS DM_TEST_GUEST_C)
+host_test(t_svc_memory_unlimited SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile DEFS DM_GAME_MEM_MAP_LIMIT=0 DM_TEST_GUEST_C)
+host_test(t_svc_memory_16k SOURCES t_svc_memory.c POSIX INCLUDES ${TESTS}/memory_profile DEFS TEST_PAGE_16K DM_TEST_GUEST_C)
 # Not portable yet (Apple only, dm/host/tests/Makefile): t_altstack (crash.c's signal stack: native execution), t_audio and t_audio_device (the Core Audio render callback,
 # device and AudioUnit watchdog; t_audio_sdl checks the SDL3 output here), t_motion_apple, t_motion_pro_mac and t_haptics_apple (Apple frontends: GameController, IOKit,
 # Core Haptics; t_front_sdl checks the SDL3 front end here), t_svc_memory_dirty (the dirty-page tracker, dm/gfx/nvn/nvn_dirty.c, under real faults: it needs host pages larger than the guest's 4 KB, as Apple's 16 KB)

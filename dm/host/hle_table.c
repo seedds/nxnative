@@ -1,6 +1,7 @@
 // libc passthrough table: C library functions consistent with AAPCS64 and with no struct layout dependency, connected directly to Apple libc. Goes into the swhle section.
-// Elsewhere the entries name the host C library's functions too, but guest code reaches them only through the execution engine (Phase 2), which owns the calling convention
-// (Windows' long is 32 bits: strtol / strtoul return 32-bit values there, and its struct tm has no tm_gmtoff / tm_zone)
+// Apple only: the Linux and Windows host (dm/host/CMakeLists.txt) builds libc_pass.c in its place, the same functions as PASS entries declared with the guest's types,
+// which the x86-64 execution engine calls through their host-call thunks (Windows' long is 32 bits, so strtol / strtoul / lroundf answer there with the 64-bit functions,
+// and its struct tm has no tm_gmtoff / tm_zone). A function added here goes into libc_pass.c too
 #include "dm.h"
 #include <math.h>
 #include <ctype.h>

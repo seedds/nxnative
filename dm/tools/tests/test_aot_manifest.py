@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -235,6 +236,83 @@ class NxaotReads(unittest.TestCase):
     def test_build(self):
         self.nxaot('build', str(self.tsv), '-o', str(self.tmp / 'main.o'), '--shared', str(self.tmp / 'main.aot.so'))
         self.assertGreater((self.tmp / 'main.aot.so').stat().st_size, 0)
+
+
+class HostFnModule(unittest.TestCase):
+    """aot_synth.py --hostfn (CTest t_aot_hostfn): main's manifest through patch_nso.py's writer against its image, the NRO sub's header, symbols and relocations against
+    its bytes, and nro.tsv's row against the NRO; with NXAOT, nxaot reads both, covers every word and packs both; with llvm-mc-18, the module's own encoders"""
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+        S.write_hostfn(cls.tmp)
+        cls.image = (cls.tmp / 'main.image.bin').read_bytes()
+        cls.sub = (cls.tmp / 'sub.nro').read_bytes()
+
+    @classmethod
+    def tearDownClass(cls): shutil.rmtree(cls.tmp)
+
+    def test_manifest(self):
+        head, rows = rows_of((self.tmp / 'main.aot.tsv').read_text())
+        self.assertEqual(head, ['# nxaot-manifest 1', 'main', S.HF_BUILD_ID, hashlib.sha256(self.image).hexdigest()])
+        self.assertEqual(rows[0], ('layout', ['text_end', '0x1000', 'ro_off', '0x1000', 'data_off', '0x2000', 'bss', f'{S.HF_BSS:#x}', 'image_size', f'{len(self.image):#x}']))
+        data = [(int(f[0], 16), int(f[1], 16)) for k, f in rows if k == 'data']
+        self.assertEqual(data[0], (4, 8), 'the MOD0 offset word')
+        self.assertEqual(data[1][1], S.HF_TEXT_END)
+        self.assertEqual(set(self.image[data[1][0]:S.HF_TEXT_END]), {0}, 'the gap after the last function: zeros, no instruction')
+        self.assertEqual({k for k, _ in rows}, {'layout', 'data'}, 'no cut, gate, frame step or oracle row: the module has no patch file')
+
+    def test_main_imports_and_tables(self):
+        """main's GOT relocations name HF_GOT_SYMS in order; sub_value is the one jump slot; the heap pointer is a relative relocation to bss"""
+        dyn = {}
+        for o in range(S.HF_DYNAMIC, S.HF_DYNAMIC + 16 * 16, 16):
+            tag, v = struct.unpack_from('<qQ', self.image, o)
+            if not tag: break
+            dyn[tag] = v
+        symtab, strtab = dyn[6], dyn[5]
+        name = lambda i: self.image[strtab + u32(self.image, symtab + 24 * i):].split(b'\0')[0].decode()
+        rela = [struct.unpack_from('<QQq', self.image, dyn[7] + 24 * i) for i in range(dyn[8] // 24)]
+        jmp = [struct.unpack_from('<QQq', self.image, dyn[23] + 24 * i) for i in range(dyn[2] // 24)]
+        got = {off: (info & 0xFFFFFFFF, name(info >> 32)) for off, info, _ in rela + jmp if info & 0xFFFFFFFF != 1027}
+        self.assertEqual([got[S.HF_GOT + 8 * i][1] for i in range(len(S.HF_GOT_SYMS))], S.HF_GOT_SYMS)
+        self.assertEqual([s for _, (t, s) in got.items() if t == 1026], ['sub_value'])
+        self.assertIn((S.HF_HEAPPTR, 1027, S.HF_HEAP), rela)
+
+    def test_nro(self):
+        b = self.sub
+        self.assertEqual(b[0x10:0x14], b'NRO0')
+        size, flags, text_off, text_size, ro_off, ro_size, data_off, data_size, bss = struct.unpack_from('<9I', b, 0x18)
+        self.assertEqual((size, text_off, text_size, ro_off, data_off, data_off + data_size, bss), (len(b), 0, 0x1000, 0x1000, 0x2000, len(b), S.SUB_BSS))
+        self.assertEqual(u32(b, 4), S.SUB_MOD0)
+        self.assertEqual(b[S.SUB_MOD0:S.SUB_MOD0 + 4], b'MOD0')
+        self.assertEqual(branch_target(u32(b, 0), 0), 0xD0, 'the entry branch: to sub_value')
+        rows = [ln.split('\t') for ln in (self.tmp / 'nro.tsv').read_text().splitlines() if ln and ln[0] != '#']
+        self.assertEqual(rows, [['sub', hashlib.sha256(b).hexdigest(), str(len(b))]])
+
+    def test_expected_results(self):
+        self.assertEqual(S.HF_EXPECTED[:12], [19, 0x40200000, 1030, 1056, 123, 0, 42, 0, 0, 1012, 77, 0], 't_aot_hostfn.c EXPECTED holds these numbers')
+
+    @unittest.skipUnless(shutil.which('llvm-mc-18'), 'llvm-mc-18 is not installed (the nxnative-aot image has it)')
+    def test_encoders(self):
+        src = self.tmp / 'enc.s'
+        src.write_text(''.join(t + '\n' for t, _ in S.HF_ENCODINGS))
+        r = subprocess.run(['llvm-mc-18', '-triple=aarch64', '-show-encoding', str(src)], capture_output=True, text=True, check=True)
+        got = [int(''.join(reversed(m.split(','))).replace('0x', ''), 16) for m in re.findall(r'encoding: \[([^\]]+)\]', r.stdout)]
+        self.assertEqual(got, [w for _, w in S.HF_ENCODINGS])
+
+    @unittest.skipUnless(NXAOT and os.access(NXAOT, os.X_OK), 'NXAOT names no nxaot executable')
+    def test_nxaot_reads_and_packs(self):
+        def nxaot(*args):
+            r = subprocess.run([NXAOT, *args], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            return r.stdout
+        tsv = self.tmp / 'main.aot.tsv'
+        self.assertEqual(nxaot('manifest', str(tsv)), tsv.read_text())
+        for mod in (tsv, self.tmp / 'sub.nro'):
+            out = self.tmp / f'{mod.stem}.discover.tsv'
+            nxaot('discover', str(mod), '--tsv', str(out))
+            summary = next(ln.split('\t') for ln in out.read_text().splitlines() if ln.startswith('summary\tcoverage'))
+            self.assertEqual(summary[summary.index('uncovered') + 1], '0', mod.name)
+            nxaot('build', str(mod), '-o', str(self.tmp / f'{mod.stem}.o'), '--shared', str(self.tmp / f'{mod.stem}.aot.so'))
 
 
 if __name__ == '__main__':

@@ -87,6 +87,24 @@ uint64_t dm_aot_bind(const module_t *m, const char *name, uint64_t v);
 extern uint64_t unimpl_stubs[DM_AOT_STUBS];
 uint64_t dm_aot_stub_addr(unsigned k);     // the guest address of stub k's slot
 long dm_aot_stub_index(uint64_t guest);    // the stub whose slot starts at guest, -1 for any other address
+uint64_t dm_aot_hostfn_find(const void *host_fn);   // aot_hostfn.c: host_fn's slot in the host-function page, 0 when it is no entry's C function (dm_guest_fn dies there)
+
+// ---------- Host functions handed to the guest (design 2.4) ----------
+// A host function's address means nothing to recompiled code: whatever the host hands the guest as a function (a vtable slot it writes into guest memory, a thread
+// entry or callback it passes to a guest function, a get-proc-address result) must be the function's guest-visible address. The one rule, for every such place:
+//   dm_guest_fnptr(fn)               the slot of fn's host-call thunk in the host-function page. NULL stays NULL, and an address the guest can already reach (guest
+//                                    memory, a loaded module, a slot) is returned as it is, so a table that mixes the guest's functions and the host's goes through it
+//                                    whole. A host function with no thunk gets a [RED] line (once per function) and a stub slot named after it, which answers a call
+//                                    as an unimplemented import's does (hle.c unimpl_c: an UNIMPL line, 0). On Apple the address is the guest's: no form is needed there
+//                                    (the sites keep Apple's text under DM_NATIVE_EXEC)
+//   dm_guest_fnptr_named(fn, name)   the same for a lookup by name (vkGetInstanceProcAddr, eglGetProcAddress, nvnDeviceGetProcAddress: the thunk of every entry that
+//                                    returns a function pointer calls it, gen_hle_thunks.py), quietly: a result with no thunk (an NVN function the host does not
+//                                    implement, DM_GL_STUBS's stubs) becomes the stub named name, whose first call says UNIMPL <name>, as Apple's stubs report theirs
+// Which host functions have thunks: the entries of the import tables (HLE, HLE_FORCE, NVN, VK, GL, EGL, PASS) and every function defined with HLE_LINKAGE outside a
+// macro (hle.h: static on Apple, external here), the form for a host function the guest reaches only through a pointer (hle_uemalloc.c's FMalloc slots, hle_misc.c's
+// ProfanityFilter vtable, hle_guestthread.c's thread entry). Safe on any thread
+void *dm_guest_fnptr(const void *fn);
+void *dm_guest_fnptr_named(const void *fn, const char *name);
 
 // ---------- Guest threads (design 6.1) ----------
 // A guest thread's engine state: the state block (64-byte aligned, outside the arena, at offset 0 so that a block names its thread), the base its guest code
@@ -128,6 +146,10 @@ void dm_aot_thread_exiting(void);              // ExitThread was answered on the
 void dm_aot_set_tls(uint64_t tpidr_el0, uint64_t tpidrro_el0);   // thread.c: the TLS registers' initial values, for the calling thread's block (now or when made)
 // loader.c: a module image as it is (an NRO), mapped one to one in the arena, parsed, relocated and bound as load_modules does, loaded (design 9.4)
 module_t *loader_add_image(const char *name, const uint8_t *bytes, size_t len, size_t bss, uint64_t text_end, uint64_t ro_off, uint64_t data_off);
+// loader.c: the NRO the game hands ro::LoadModule (hle_ro.c), n bytes with that SHA-256, at its first load: its row in load_modules' nro.tsv names it, its image is mapped
+// one to one in the arena and its pack <folder>/<name>.aot.so loaded with the image's identity; an NRO module then (m->nro), not yet loaded (nro_load relocates it). NULL
+// with the reason in err when it has no row, is no NRO, or its pack is missing or of another image. The caller serializes loads (hle_ro.c's lock)
+module_t *loader_nro_map(const uint8_t *image, uint32_t n, const uint8_t sha256[32], char *err, size_t errn);
 void dm_aot_thread_set_jit(void *jit);         // the calling thread's JIT instance, halted at once when a pause or stop was requested before it existed
 // Every live guest thread poked (process stop); returns how many other than the caller are live
 int dm_aot_threads_poke_all(void);

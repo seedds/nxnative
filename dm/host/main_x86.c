@@ -37,8 +37,8 @@ static int g_status = DM_AOT_EXITED;
 
 static int left(void) { return dm_aot_main_left() != DM_AOT_LEFT_NONE; }   // the guest call ended the process (or the thread): the start goes no further
 static void call0(dm_guest_state *st, const char *name) { dm_guest_call(st, (uint64_t)(uintptr_t)req(name), 0); }
-// A tool mode of main.c that runs the game's own code as a C function from the host (hle_oodle.c, hle_guestthread.c): on this engine such a call needs the function's
-// host-function slot and a guest call (dm/tools/aot/README.md: "the other places the host calls guest code as a C function" are open), so it is refused rather than crashing
+// A tool mode of main.c that runs the game's own code as a C function from the host (hle_oodle.c's): on this engine such a call needs a guest call (dm_guest_call), which
+// hle_oodle.c does not make yet (dm/tools/aot/README.md: "the other places the host calls guest code as a C function"), so it is refused rather than crashing
 static void refuse_tool(const char *sw, int fatal) {
     if (!getenv(sw)) return;
     LOG("[RED] %s: this mode calls the game's code from the host as a C function, which the x86-64 engine does not do yet (dm/tools/aot/README.md, the host calling guest code): %s",
@@ -85,7 +85,8 @@ static void guest_main(void) {
         LOG(">>> nninitStartup"); call0(st, "nninitStartup"); if (left()) goto end;
         call0(st, "_init_libc2"); if (left()) goto end;
         run_module_inits(); if (left()) goto end;   // each module's DT_INIT, each a guest call (loader.c)
-        refuse_tool("DM_GUEST_SPAWN_TEST", 0);
+        { void dm_guest_spawn_selftest(void); dm_guest_spawn_selftest(); }   // DM_GUEST_SPAWN_TEST (main.c): a host-created guest thread, its SDK calls guest calls (hle_guestthread.c)
+        if (left()) goto end;
         LOG(">>> nnMain"); call0(st, "nnMain");
         if (!left()) LOG("nnMain returned");
     end:
@@ -174,8 +175,8 @@ static void host_preload(int argc, char **argv) {
     hid_keys_init();   // DM_KEYS scripted input
     stubs_report();
     { void loader_hash_log(void); loader_hash_log(); }   // DM_LOADHASH=1
-    // Unreal's allocator on a host zone, for the builds whose constructor call is cut (hle_uemalloc.c). Open on this engine: it writes host function pointers into a guest vtable,
-    // which a recompiled call reaches only through host-function slots (dm/tools/aot/README.md); no build the engine has run so far is one of them
+    // Unreal's allocator on a host zone, for the builds whose constructor call is cut (hle_uemalloc.c): its vtable's host functions at their guest-visible addresses
+    // (dm_guest_fnptr), the vtable in the arena
     { void dm_ue_malloc_install(void); dm_ue_malloc_install(); }
 }
 static struct { int argc; char **argv; pthread_t th; _Atomic int started; } g_pre;

@@ -6,7 +6,13 @@
 // SHA-256 is the image's (what the NRR registers), relocates it against the modules loaded now and calls its DT_INIT, as the SDK does. The image and buffer the game passes stay unused
 // (on Horizon they become the module's memory; the game keeps them until UnloadModule).
 // Only success matters for the failures: the game checks IsSuccess only, so a failure code is a non-zero value under the ro module number 22.
+// The x86-64 execution engine (Linux and Windows): an NRO is mapped at its first load from the image the game hands over, with its pack beside the modules (loader.c
+// loader_nro_map: nro.tsv names it, <name>.aot.so is its code), and its init and fini are guest calls (dm_guest_call) on the calling thread
 #include "hle.h"
+// DM_TEST_GUEST_C: a host unit test that includes this file and supplies the modules' init and fini as C functions (t_nro.c) takes the native form
+#if !DM_NATIVE_EXEC && !defined(DM_TEST_GUEST_C)
+#include "aot.h"
+#endif
 
 #define RO_FAIL ((Result)(22 | (1 << 9)))   // a failure under ro module 22
 #define RO_NOT_NRO ((Result)0x816)           // the SDK's result for an image without NRO0 (sdk+0x3471e8)
@@ -62,6 +68,10 @@ HLE_FORCE("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "load an NRO rewritten o
     if (nro_refused(sha)) { LOG("ro::LoadModule: refused %s… (%u bytes): an online SDK (Epic Online Services), not loaded; the game plays offline", hx, n); return RO_FAIL; }
     pthread_mutex_lock(&g_ro_mu);
     module_t *m = nro_find(sha);
+#if !DM_NATIVE_EXEC && !defined(DM_TEST_GUEST_C)
+    char err[1400];   // its first load: mapped from the game's image, with its pack (or the reason it has none)
+    if (!m && !(m = loader_nro_map(h, n, sha, err, sizeof err))) { pthread_mutex_unlock(&g_ro_mu); LOG("[RED] ro::LoadModule: %s", err); return RO_FAIL; }
+#endif
     if (!m) { pthread_mutex_unlock(&g_ro_mu); LOG("[RED] ro::LoadModule: no rewritten NRO with SHA-256 %s… (%u bytes): it is not in the patched modules' nro.tsv", hx, n); return RO_FAIL; }
     if (module_sym(m, "EOS_Platform_Create")) { pthread_mutex_unlock(&g_ro_mu); LOG("ro::LoadModule: refused %s (%s…): an online SDK (Epic Online Services), not loaded; the game plays offline", m->name, hx); return RO_FAIL; }
     if (m->loaded) { pthread_mutex_unlock(&g_ro_mu); LOG("[RED] ro::LoadModule: %s (%s…) is loaded already", m->name, hx); return RO_FAIL; }
@@ -71,7 +81,11 @@ HLE_FORCE("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "load an NRO rewritten o
     if (rm) { rm->module = m; rm->state = 1; rm->image = image; rm->buffer = buf; }
     pthread_mutex_unlock(&g_ro_mu);
     LOG("ro::LoadModule %s (SHA-256 %s…, %u bytes, buffer %#zx, bind %s): init %s", m->name, hx, n, size, flag & 1 ? "now" : "lazy", m->init ? "called" : "none");
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
     if (m->init) ((void (*)(void))(m->base + m->init))();   // as RoModule::CallInit: the module's _init (registers it and runs its init_array)
+#else
+    if (m->init) dm_guest_call(dm_aot_self_state(), (uint64_t)(uintptr_t)(m->base + m->init), 0);   // the same as a guest call on this guest thread (design 2.4)
+#endif
     return 0;
 }
 
@@ -85,7 +99,11 @@ HLE_FORCE("_ZN2nn2ro8FinalizeEv", "Initialize opened no ldr:ro session", void, h
 HLE_FORCE("_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE", "unload an NRO: its fini, then out of the symbol lookups", void, h_ro_UnloadModule, void *mod) {
     module_t *m = module_from(mod);
     if (!m || !m->loaded) { LOG("[RED] ro::UnloadModule: not a loaded module (%p)", mod); return; }
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
     if (m->fini) ((void (*)(void))(m->base + m->fini))();   // as RoModule::CallFini
+#else
+    if (m->fini) dm_guest_call(dm_aot_self_state(), (uint64_t)(uintptr_t)(m->base + m->fini), 0);   // as RoModule::CallFini, a guest call
+#endif
     pthread_mutex_lock(&g_ro_mu);
     nro_unload(m);
     ((ro_module *)mod)->state = 0; ((ro_module *)mod)->module = NULL;

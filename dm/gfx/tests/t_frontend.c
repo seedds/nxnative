@@ -21,7 +21,7 @@ DECL(nvnMemoryPoolInitialize); DECL(nvnMemoryPoolFinalize); DECL(nvnMemoryPoolGe
 DECL(nvnCommandBufferInitialize); DECL(nvnCommandBufferAddCommandMemory); DECL(nvnCommandBufferBeginRecording); DECL(nvnCommandBufferEndRecording);
 DECL(nvnCommandBufferSetScissor); DECL(nvnCommandBufferClearColor); DECL(nvnCommandBufferDrawArrays); DECL(nvnCommandBufferSignalEvent); DECL(nvnCommandBufferFinalize);
 DECL(nvnEventBuilderSetDefaults); DECL(nvnEventBuilderSetStorage); DECL(nvnEventInitialize); DECL(nvnEventGetValue);
-DECL(nvnSyncInitialize); DECL(nvnSyncWait);
+DECL(nvnSyncInitialize); DECL(nvnSyncWait); DECL(nvnDeviceGetProcAddress);
 void *h_nvnBootstrapLoader(const char *name);   // hle_nvn.c's HLE_FORCE entry
 const void *plat_table_swnvn(size_t *bytes);    // hle_nvn.c's registration table (PLAT_TABLE_DEFINE)
 // What the null backend was asked to do (nvn_null.c)
@@ -59,7 +59,8 @@ int main(void) {
     check("registration table holds whole entries", 0, (long long)(tb % (2 * sizeof(void *))));
     check("registration table: more than 400 implementations", 1, tb / (2 * sizeof(void *)) > 400);
     printf("NVN implementations registered: %zu\n", tb / (2 * sizeof(void *)));
-    check("no guest entry points without native execution: nvnBootstrapLoader answers NULL", 1, h_nvnBootstrapLoader("nvnDeviceGetProcAddress") == NULL);
+    // Without native execution a lookup answers the implementation's C function (the x86-64 engine's thunk of the entry hands the guest its guest-visible address)
+    check("nvnBootstrapLoader answers the implementation's C function", 1, h_nvnBootstrapLoader("nvnDeviceGetProcAddress") == (void *)h_nvnDeviceGetProcAddress);
 
     // Device and queue
     NVNdeviceBuilder db; NVNdevice dev; h_nvnDeviceBuilderSetDefaults(&db); h_nvnDeviceBuilderSetFlags(&db, 0);

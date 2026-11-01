@@ -16,7 +16,7 @@
 
 PLAT_TABLE_DEFINE(swhle)   // the import table (dm/host/hle.c defines it in a host binary)
 enum { WW = 64, WH = 48 };
-void dm_vi_layer_size(int *w, int *h) { *w = WW; *h = WH; }   // hle_vi.c's: the size of the game's vi::CreateLayer
+Result h_vi_CreateLayerWH(void **out, void *disp, int w, int h);   // dm/gfx/hle_vi.c (linked): the game's vi::CreateLayer of a given size, which the window surface takes
 
 typedef uint32_t GLenum, GLuint, GLbitfield; typedef int32_t GLint, GLsizei; typedef float GLfloat; typedef intptr_t GLsizeiptr, GLintptr; typedef char GLchar;
 enum {
@@ -142,6 +142,7 @@ int main(int argc, char **argv) {
     }
     fclose(lf);
     setenv("DM_MSL_DIR", T_GL_LIB, 1);   // the layer finds <DM_MSL_DIR>/gl-vk at its start (the backend has already found its own library)
+    void *layer = NULL; h_vi_CreateLayerWH(&layer, NULL, WW, WH);   // the layer's size, as the game sets it before its window surface (hle_vi.c's state, which the layer reads)
     guest_gl_stats st0; guest_gl_stats_get(&st0);   // a reference to the layer's object links it, with its entries, from its static library
 
     // ---------- EGL, as SDL and MVGL bring it up ----------

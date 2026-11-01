@@ -36,8 +36,9 @@
 //     (dm_vi_layer_crop, hle_vi.c; rendering.md, "Swapchain pre-transform and layer crop"); the frame tick (dm_guest_frame_tick) follows. The backend's presenter is headless until
 //     phase P4 (vk_backend.c): it copies the shown region, which hvk_present_last reads back.
 // Declared with a red line: sparse binding; features the game enables that the shared device does not have (robustBufferAccess is not enabled: it costs NVN games performance);
-// vertex formats the host cannot fetch; the game destroying a swapchain image; a vi layer crop without hle_vi.c in the host build. Open: vkGet*ProcAddr return the host function's
-// address, which the x86-64 engine must turn into the entry's guest-visible slot (dm_guest_fn) when the loader binds host functions (aot_hostfn.c: a later step of the port).
+// vertex formats the host cannot fetch; the game destroying a swapchain image. vkGet*ProcAddr return the host function (PFN_vkVoidFunction); the x86-64 engine's thunk of the
+// two entries hands the guest its guest-visible address (dm/host/tools/gen_hle_thunks.py: a function pointer return; dm/host/aot.h dm_guest_fnptr_named), as the loader binds
+// a direct import to it.
 // Environment: DM_VK_LOG=1 logs object creation; DM_VK_CAPTURE=<dir> (above).
 #include "../../host/hle.h"
 #include "vk_backend.h"
@@ -55,7 +56,7 @@
 #include <unistd.h>
 #endif
 
-void dm_vi_layer_crop(int c[4]) __attribute__((weak));   // dm/gfx/hle_vi.c: x, y, w, h the game last cropped its layer to (all 0 = none); not part of every host build
+void dm_vi_layer_crop(int c[4]);                         // dm/gfx/hle_vi.c (part of nxhost): x, y, w, h the game last cropped its layer to (all 0 = none)
 const void *plat_table_swhle(size_t *bytes);              // dm/host/hle.c (PLAT_TABLE_DEFINE): the swhle entries of every object file
 
 #define VLOG(...) LOG("[vk] " __VA_ARGS__)
@@ -1154,8 +1155,7 @@ static void frame_end(void) {
 VKB(vkQueuePresentKHR, VkResult, VkQueue q, const VkPresentInfoKHR *pi) {
     (void)q; dm_gfx_enter();
     int crop[4] = {0, 0, 0, 0};   // the vi layer crop: Super Mario Galaxy shows the top-left 1280x720 of its 1920x1080 swapchain in handheld mode
-    if (dm_vi_layer_crop) dm_vi_layer_crop(crop);
-    else RED1("vi layer crop: dm/gfx/hle_vi.c is not part of this host build, so presents show the whole swapchain image");
+    dm_vi_layer_crop(crop);
     pthread_mutex_lock(&g_pres_mu);
     // The game's semaphores waited for in a submission that signals this layer's timeline: the present path waits for that value
     uint64_t v = ++g_tl_val;

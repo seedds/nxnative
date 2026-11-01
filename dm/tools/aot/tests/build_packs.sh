@@ -46,3 +46,16 @@ if ! { python3 "$here/../../tests/aot_synth.py" "$out/module" &&
 fi
 rm -f "$out/module/main.o"
 echo "build_packs.sh: $n packs and the synthetic module's in $out ($(($(date +%s) - start)) s)"
+# The host-function module of CTest t_aot_hostfn (dm/host/tests/t_aot_hostfn.c) into <out>/hostfn: aot_synth.py --hostfn writes its image and manifest (main) and the NRO it
+# loads at run time (sub.nro, with nro.tsv); nxaot packs main from its manifest and sub from the NRO file, as a game's NROs are packed beside its modules; its log is
+# <out>/hostfn.log
+rm -rf "$out/hostfn"
+if ! { python3 "$here/../../tests/aot_synth.py" --hostfn "$out/hostfn" &&
+       "$nxaot" build "$out/hostfn/main.aot.tsv" -o "$out/hostfn/main.o" --shared "$out/hostfn/main.aot.so" &&
+       "$nxaot" build "$out/hostfn/sub.nro" -o "$out/hostfn/sub.o" --shared "$out/hostfn/sub.aot.so"; } > "$out/hostfn.log" 2>&1; then
+    cat "$out/hostfn.log" >&2
+    echo "build_packs.sh: the host-function module's packs failed" >&2
+    exit 1
+fi
+rm -f "$out/hostfn/main.o" "$out/hostfn/sub.o"
+echo "build_packs.sh: the host-function module's two packs in $out/hostfn"

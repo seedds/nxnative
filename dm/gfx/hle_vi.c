@@ -1,5 +1,7 @@
 // nn::vi (display layer): on a real device, the vi service is used to open the display, create a layer and get the native window handle; the handle is passed to NVN's window builder.
 // Host: returns host static objects; when hooking up Metal, the native window corresponds to the front end's CAMetalLayer (front_metal_layer()).
+// Plain C, part of every host: the Apple one (dm/host/Makefile's dm/gfx wildcard) and the Linux and Windows one (dm/host/CMakeLists.txt, nxhost), whose guest Vulkan and GL
+// layers (dm/gfx/hostvk/guest_vk.c, guest_gl.c) read the layer crop and size from here as hle_vk.m and hle_gl.m do on Apple
 #include "../host/hle.h"
 #include <stdatomic.h>
 
@@ -27,7 +29,7 @@ HLE_FORCE("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", "native window handle, p
     (void)layer; *out = &g_native; return RES_OK;
 }
 // Link's Awakening also crops its layer and tears the display down on exit; the SDK's versions dereference the vi service objects the host never made (SetLayerCrop: SIGSEGV at +0x64).
-// The crop is kept for the Vulkan present (hle_vk.m): Super Mario Galaxy keeps a 1920x1080 swapchain in handheld mode, draws into its top-left 1280x720 and crops the layer
+// The crop is kept for the Vulkan present (hle_vk.m; guest_vk.c on Linux and Windows): Super Mario Galaxy keeps a 1920x1080 swapchain in handheld mode, draws into its top-left 1280x720 and crops the layer
 // to that every frame. NVN games crop through their window instead (nvnWindowSetCrop), so their present does not read it. Logged only when it changes
 static _Atomic uint64_t g_crop;   // x | y << 16 | w << 32 | h << 48, 0 = none
 void dm_vi_layer_crop(int c[4]) { uint64_t v = g_crop; c[0] = (int)(v & 0xffff); c[1] = (int)(v >> 16 & 0xffff); c[2] = (int)(v >> 32 & 0xffff); c[3] = (int)(v >> 48); }

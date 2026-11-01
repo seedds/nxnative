@@ -28,6 +28,11 @@ struct dm_guest_state *dm_aot_self_state(void);
 uint64_t dm_guest_call(struct dm_guest_state *st, uint64_t addr, int nargs, ...);
 // What an import of a module the engine mapped binds to: a host function's guest-visible slot, an unimplemented import's stub slot (aot_arena.c, design 2.4)
 uint64_t dm_aot_bind(const module_t *m, const char *name, uint64_t v);
+#if defined(_WIN32)   // aot.h's DM_AOT_PACK_SUFFIX (this file declares what it needs of the engine instead of including aot.h: its unit test t_nro.c links no engine)
+#define AOT_PACK_SUFFIX ".aot.dll"
+#else
+#define AOT_PACK_SUFFIX ".aot.so"
+#endif
 #endif
 
 static pthread_key_t key_value(unsigned i) {
@@ -712,6 +717,16 @@ module_t *loader_add_image(const char *name, const uint8_t *bytes, size_t len, s
     return m;
 }
 
+// hle.c's named stub for name, as resolve_import makes one for an import nothing implements (&unimpl_stubs[k], or the import table's function when it has the name),
+// for a host function handed to the guest at run time (aot_arena.c dm_guest_fnptr): under the module lock, which every other stub allocation after the start holds too
+// (an NRO's relocation). name must live as long as the process
+uint64_t loader_named_stub(const char *name) {
+    pthread_rwlock_wrlock(&g_modules_mu);
+    const uint64_t v = resolve_import(NULL, name);
+    pthread_rwlock_unlock(&g_modules_mu);
+    return v;
+}
+
 // ---- The game-module path of the x86-64 execution engine (docs/design/aot-recompiler.md 1.1, 1.2, 9.4) ----
 // load_modules' folder holds the recompiler's input, as it holds the rewritten modules on Apple (dm/tools/aot/README.md, "A game module in the host"). Per module:
 //   <name>.aot.tsv    the manifest patch_nso.py --aot wrote: the module, the NSO build ID and the SHA-256 of the image; layout, aux, data, obs, spin, cut and oracle rows
@@ -891,10 +906,85 @@ static int aot_map_module(module_t *m, const char *dir, aot_manifest_t *t, char 
     return 0;
 }
 
+// ---- NROs on the game-module path (nn::ro, hle_ro.c) ----
+// The folder's nro.tsv has Apple's rows (name, SHA-256, size; "refused" rows for the online SDKs the pack leaves out: nro_refused). The NRO itself is the image the game
+// hands ro::LoadModule (as Horizon makes the game's buffer the module): at its first load it is mapped one to one in the arena from those bytes, as loader_add_image maps
+// an image, and its pack <dir>/<name>.aot.so loaded with their identity (nxaot build <name>.nro -o <object> --shared <dir>/<name>.aot.so: the pack of the NRO file,
+// whose SHA-256 is the one nro.tsv lists). From then on it is an NRO module as on Apple: nro_load relocates it and binds the earlier modules' imports, nro_unload undoes
+// that, a later load restores its data. g_mod has room for every row (allocate_modules counts them), so module pointers never move
+typedef struct { char name[16]; uint8_t sha[32]; uint32_t size; int no_pack; } aot_nro_t;   // no_pack: its pack failed to load once (reported then; later loads fail at once)
+static aot_nro_t *g_aot_nro; static int g_aot_nnro;
+static char *g_aot_dir;   // load_modules' folder: the packs of the NROs lie there
+static void aot_read_nros(const char *dir, FILE *f) {
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == '#' || line[0] == '\n') continue;
+        char name[16], hex[65]; unsigned size;
+        if (sscanf(line, "%15s %64s %u", name, hex, &size) != 3 || strlen(hex) != 64) die("[RED] aot: %s/nro.tsv: bad row %s", dir, line);
+        uint8_t sha[32];
+        for (int k = 0; k < 32; k++) sscanf(hex + 2 * k, "%2hhx", &sha[k]);
+        if (!strcmp(name, "refused")) {   // an online SDK the pack left out (dm/tools/nro_collect.py ONLINE_SDKS): LoadModule refuses its hash
+            if (g_nrefused < (int)(sizeof g_refused / sizeof *g_refused)) memcpy(g_refused[g_nrefused], sha, 32);
+            g_nrefused++; continue;
+        }
+        aot_nro_t *r = realloc(g_aot_nro, (size_t)(g_aot_nnro + 1) * sizeof *r);
+        if (!r) die("aot: no memory for nro.tsv");
+        g_aot_nro = r;
+        snprintf(r[g_aot_nnro].name, sizeof r[g_aot_nnro].name, "%s", name); memcpy(r[g_aot_nnro].sha, sha, 32); r[g_aot_nnro].size = size;
+        g_aot_nnro++;
+    }
+    fclose(f);
+    LOG("aot: %s/nro.tsv lists %d NROs (mapped from the game's image at their first ro::LoadModule, each with its pack <name>" AOT_PACK_SUFFIX "), %d refused", dir, g_aot_nnro,
+        g_nrefused);
+}
+
+module_t *loader_nro_map(const uint8_t *image, uint32_t n, const uint8_t sha[32], char *err, size_t errn) {
+    char hx[65];
+    aot_hexstr(sha, 32, hx);
+    aot_nro_t *row = NULL;
+    for (int i = 0; i < g_aot_nnro; i++) if (!memcmp(g_aot_nro[i].sha, sha, 32)) { row = &g_aot_nro[i]; break; }
+    if (!row) {
+        snprintf(err, errn, "the NRO with SHA-256 %s (%u bytes) has no row in %s/nro.tsv, so it has no pack: list it there (<name> <SHA-256> <size>) and pack it beside it "
+                 "(nxaot build <name>.nro -o <object> --shared %s/<name>" AOT_PACK_SUFFIX ")", hx, n, g_aot_dir ? g_aot_dir : "the modules' folder", g_aot_dir ? g_aot_dir : "<folder>");
+        return NULL;
+    }
+    if (row->no_pack) { snprintf(err, errn, "%s (SHA-256 %s): its pack did not load (the reason is above)", row->name, hx); return NULL; }
+    uint32_t hdr[8];   // the NRO header from +0x18: size, flags, text, read-only data and data (offset, size), bss size
+    if (n < 0x80 || memcmp(image + 0x10, "NRO0", 4)) { snprintf(err, errn, "%s (SHA-256 %s): not an NRO", row->name, hx); return NULL; }
+    memcpy(hdr, image + 0x18, sizeof hdr);
+    const uint64_t text_end = hdr[3], ro_off = hdr[4], data_off = hdr[6], data_size = hdr[7];
+    uint32_t bss; memcpy(&bss, image + 0x38, 4);
+    if (hdr[2] || text_end > ro_off || ro_off > data_off || data_off + data_size > n || hdr[0] != n) {
+        snprintf(err, errn, "%s (SHA-256 %s): the NRO header's segments do not fit its %u bytes", row->name, hx, n); return NULL;
+    }
+    pthread_rwlock_wrlock(&g_modules_mu);
+    if (g_nmod >= g_mod_capacity) die("[RED] aot: no module slot for NRO %s (%d)", row->name, g_mod_capacity);
+    module_t *m = &g_mod[g_nmod];   // filled here, counted (g_nmod) once its pack loaded
+    memset(m, 0, sizeof *m);
+    strlcpy(m->name, row->name, sizeof m->name);
+    m->nro = 1; m->nro_size = n; memcpy(m->sha256, sha, 32);
+    aot_place(m, image, n, bss, text_end, ro_off, data_off);
+    parse_dynamic(m);
+    m->pristine_len = data_size;   // initialized data (nro_load keeps a copy at the first load, restores it at the next)
+    pthread_rwlock_unlock(&g_modules_mu);
+    if (dm_aot_load_module_pack(m, g_aot_dir, sha, n, text_end, bss, err, errn)) {   // the slot stays unused; the image stays mapped, once (no_pack)
+        row->no_pack = 1;
+        free(m->symh); memset(m, 0, sizeof *m);
+        return NULL;
+    }
+    pthread_rwlock_wrlock(&g_modules_mu);
+    g_nmod++;
+    pthread_rwlock_unlock(&g_modules_mu);
+    LOG("NRO %s mapped from the game's image at %p (%u bytes, bss %#x; x86-64 engine)", m->name, (void *)m->base, n, bss);
+    return m;
+}
+
 void load_modules(const char *dir, const char **names, int n) {
     const uint64_t t0 = now_ns();
     char err[1200];
-    allocate_modules(n, NULL);
+    FILE *nros = open_nros(dir);
+    allocate_modules(n, nros);   // room for the NROs nro.tsv lists too
+    g_aot_dir = strdup(dir);
     aot_manifest_t *man = calloc((size_t)n, sizeof *man);
     if (!man) die("aot: no memory for %d manifests", n);
     for (int i = 0; i < n; i++) {   // every module mapped and parsed first, then relocated (cross-module symbols must all be in place), as on Apple
@@ -906,11 +996,7 @@ void load_modules(const char *dir, const char **names, int n) {
     force_init();
     for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]);
     force_check();
-    FILE *nros = open_nros(dir);
-    if (nros) {   // NROs (nn::ro) on this path: patch_nso.py --aot and nxaot build per NRO, and nro.tsv rows for them, are not done yet
-        fclose(nros);
-        LOG("[RED] aot: %s/nro.tsv lists NROs, which the x86-64 engine does not map yet: ro::LoadModule finds none of them", dir);
-    }
+    if (nros) aot_read_nros(dir, nros);   // mapped when the game loads them (hle_ro.c, loader_nro_map)
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         if (dm_aot_load_module_pack(m, dir, man[i].sha, man[i].image_size, man[i].text_end, man[i].bss, err, sizeof err)) die("[RED] aot: %s", err);

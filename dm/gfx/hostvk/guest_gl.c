@@ -48,7 +48,7 @@
 #include <unistd.h>
 #endif
 
-void dm_vi_layer_size(int *w, int *h) __attribute__((weak));   // dm/gfx/hle_vi.c: the size of the last sized vi::CreateLayer; not part of every host build
+void dm_vi_layer_size(int *w, int *h);                          // dm/gfx/hle_vi.c (part of nxhost): the size of the last sized vi::CreateLayer, 0 x 0 for none
 const void *plat_table_swhle(size_t *bytes);                    // dm/host/hle.c (PLAT_TABLE_DEFINE): the swhle entries of every object file
 
 #define GLOG(...) LOG("[gl] " __VA_ARGS__)
@@ -58,6 +58,7 @@ static int g_log;
 
 typedef uint32_t GLenum, GLuint, GLbitfield; typedef int32_t GLint, GLsizei; typedef float GLfloat; typedef double GLdouble; typedef char GLchar; typedef intptr_t GLsizeiptr, GLintptr;
 typedef void *EGLDisplay, *EGLConfig, *EGLContext, *EGLSurface; typedef int32_t EGLint; typedef uint32_t EGLBoolean, EGLenum;
+typedef void (*__eglMustCastToProperFunctionPointerType)(void);   // eglGetProcAddress's return type (EGL 1.5): a function, so its thunk hands the guest a guest-visible address
 
 // GL: one GL function, registered in the host's import table (PLAT_TABLE_ENTRY(swhle), plat.h) for both direct imports and eglGetProcAddress. Its C function h_<name> has
 // HLE_LINKAGE (hle.h): external here, so the host-call thunks generated from these entries can call it (dm/host/tools/gen_hle_thunks.py reads GL( and EGL( as entries named
@@ -776,8 +777,7 @@ static void win_make(uint32_t w, uint32_t h) {
 }
 static void win_size(int *w, int *h) {
     *w = *h = 0;
-    if (dm_vi_layer_size) dm_vi_layer_size(w, h);
-    else RED1("vi layer size: dm/gfx/hle_vi.c is not part of this host build: the window surface is 1280x720");
+    dm_vi_layer_size(w, h);
     if (*w <= 0 || *h <= 0) { *w = 1280; *h = 720; }
 }
 static void win_ensure(void) { if (!g_win.made) { int w, h; win_size(&w, &h); win_make((uint32_t)w, (uint32_t)h); } }
@@ -2476,7 +2476,9 @@ EGL(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface s) {
     frame_end();
     return EGL_TRUE;
 }
-// eglGetProcAddress: GL names from the same table as direct imports; anything else is null (the game's loader asks for every GL name it knows)
+// eglGetProcAddress: GL names from the same table as direct imports; anything else is null (the game's loader asks for every GL name it knows). It returns the host function,
+// declared with EGL's function pointer type: the x86-64 engine's thunk of the entry hands the guest the function's guest-visible address, and a DM_GL_STUBS stub, which has
+// no host-call thunk, becomes the engine's stub of that name (dm/host/tools/gen_hle_thunks.py, dm/host/aot.h dm_guest_fnptr_named), whose first call says UNIMPL <name>
 static void *gl_lookup(const char *name) {
     size_t sz = 0; const hle_ent *t = plat_table_swhle(&sz);
     for (size_t i = 0; t && i < sz / sizeof *t; i++) if (t[i].name && !strcmp(t[i].name, name)) return t[i].fn;
@@ -2508,7 +2510,7 @@ static void *gl_stub(const char *name) {   // under eglGetProcAddress's lock
     g_stub_name[g_nstub] = name;   // the game's own string (its loader's name table)
     return g_stubs[g_nstub++];
 }
-EGL(eglGetProcAddress, void *, const char *name) {
+EGL(eglGetProcAddress, __eglMustCastToProperFunctionPointerType, const char *name) {
     static int asked, found; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     void *fn = name && !strncmp(name, "gl", 2) ? gl_lookup(name) : NULL;
     pthread_mutex_lock(&mu);
@@ -2516,7 +2518,7 @@ EGL(eglGetProcAddress, void *, const char *name) {
     if (asked % 500 == 0 || (fn && g_log)) GLOG("eglGetProcAddress: %d names asked, %d implemented (last %s)", asked, found, name);
     if (!fn && name && !strncmp(name, "gl", 2)) fn = gl_stub(name);
     pthread_mutex_unlock(&mu);
-    return fn;
+    return (__eglMustCastToProperFunctionPointerType)fn;
 }
 
 // ---------- The layer's end (guest_gl.h) ----------

@@ -8,14 +8,22 @@ its command line, finds every HLE(, HLE_FORCE( and HLE_FORCE_BIG( entry (hle.h),
 (hle_fs.c's #define HLE_FORCE HLE_FORCE_BIG), the NVN interface layer's NVN( and NVN_NOPROTO( entries (dm/gfx/nvn/hle_nvn.c: NVN(name, ret, params...), the
 entry named by the NVN function's name, its C function h_<name>), the guest Vulkan layer's VK( and VKB( entries of the same form (dm/gfx/hostvk/guest_vk.c: named
 by the Vulkan function's name, registered in the HLE table) and the guest OpenGL layer's GL(, GLB( and EGL( entries, also of that form (dm/gfx/hostvk/guest_gl.c: named
-by the GL or EGL function's name, in the HLE table; their GL types are the layer's own typedefs), and writes one thunk per entry, the table hle_thunks[] sorted by mangled
-name (an NVN, Vulkan, GL or EGL entry's name stands for it), and an extern declaration of each entry's C function (external on non-native builds: HLE_LINKAGE in hle.h).
+by the GL or EGL function's name, in the HLE table; their GL types are the layer's own typedefs), the C library passthrough's PASS( entries of the same form
+(dm/host/libc_pass.c: named by the C library function the guest imports, C function libc_<name>), and every function defined with HLE_LINKAGE outside a macro (a host
+function the guest reaches only through a pointer the host hands it: a vtable slot, a thread entry; no import-table entry, its C name stands for it), and writes one thunk
+per entry, the table hle_thunks[] sorted by mangled name (an NVN, Vulkan, GL, EGL or C library entry's name, or an HLE_LINKAGE function's C name, stands for it), and
+an extern declaration of each entry's C function (external on non-native builds: HLE_LINKAGE in hle.h).
+The generator runs for builds without native execution only (DM_NATIVE_EXEC 0, plat.h), so it knows #if DM_NATIVE_EXEC (not compiled) and #if !DM_NATIVE_EXEC (compiled).
 
 Argument rules (AAPCS64): integer and pointer parameters take the next x register (x0..x7), float and double the next v register (v0..v7, its low 32 or 64
 bits); a 32-bit parameter is the low half of its register, as a w register reads it. A parameter past the eighth of its class is read from the guest stack
 (the 8-byte slot at st->sp + 8 * n, in parameter order): the thunk reads guest memory there, it never runs on the guest stack.
 Returns: integers and pointers in x0, a 32-bit or smaller value zero-extended (AAPCS64 leaves the upper bits unspecified, so guest code cannot depend on them;
-zero is the deterministic choice), long as its value (sign-extended), float and double in v0 with the rest of q0 cleared, void nothing.
+zero is the deterministic choice), long as its value (sign-extended), float and double in v0 with the rest of q0 cleared, void nothing. A function pointer (a typedef
+of a pointer to a function: PFN_vkVoidFunction, PFNNVNGENERICFUNCPTRPROC, EGL's __eglMustCastToProperFunctionPointerType) is a host function handed to the guest
+(the get-proc-address entries): x0 gets its guest-visible address, dm_guest_fnptr_named(result, name) (dm/host/aot_arena.c), with name the entry's const char *
+parameter when it has one (a lookup by name: a result with no host-call thunk becomes the stub of that name, as an unimplemented import's). As a parameter it is a
+guest function's address, passed on as it is.
 Parameter types come from the C spelling, the pointers, and the typedefs of the source and of the headers it includes with quotes (found beside the including
 file, then in the -I directories, as the compiler finds them); a Khronos Vulkan header (<vulkan/...>, in angle brackets or quotes) found in the -I directories
 is read by rules of its own (learn_vulkan_header: its include guard and platform conditionals would hide every typedef from the C reader). A struct whose one
@@ -32,10 +40,13 @@ import os
 import re
 import sys
 
-MACROS = {"HLE": 3, "HLE_FORCE": 4, "HLE_FORCE_BIG": 4, "NVN": 2, "NVN_NOPROTO": 2, "VK": 2, "VKB": 2, "GL": 2, "GLB": 2, "EGL": 2}   # macro -> index of the first parameter argument (mangled, [why,] ret, cname, params...; name, ret, params...)
-NAMED = {"NVN", "NVN_NOPROTO", "VK", "VKB", "GL", "GLB", "EGL"}   # entries named by an identifier, the API function's name, whose C function is h_<name> (dm/gfx/nvn/hle_nvn.c, dm/gfx/hostvk/guest_vk.c, guest_gl.c)
-TABLES = {"HLE": "hle", "HLE_FORCE": "force", "HLE_FORCE_BIG": "force", "NVN": "nvn", "NVN_NOPROTO": "nvn", "VK": "hle", "VKB": "hle", "GL": "hle", "GLB": "hle", "EGL": "hle"}   # the host table each entry registers in (a name is unique within one)
-API = {"NVN": "NVN", "NVN_NOPROTO": "NVN", "VK": "Vulkan", "VKB": "Vulkan", "GL": "GL", "GLB": "GL", "EGL": "EGL"}   # a named entry's API, for its messages
+MACROS = {"HLE": 3, "HLE_FORCE": 4, "HLE_FORCE_BIG": 4, "NVN": 2, "NVN_NOPROTO": 2, "VK": 2, "VKB": 2, "GL": 2, "GLB": 2, "EGL": 2, "PASS": 2}   # macro -> index of the first parameter argument (mangled, [why,] ret, cname, params...; name, ret, params...)
+NAMED = {"NVN", "NVN_NOPROTO", "VK", "VKB", "GL", "GLB", "EGL", "PASS"}   # entries named by an identifier, the API function's name, whose C function is <prefix><name> (dm/gfx/nvn/hle_nvn.c, dm/gfx/hostvk/guest_vk.c, guest_gl.c, dm/host/libc_pass.c)
+PREFIX = {"PASS": "libc_"}   # a named entry's C function prefix, h_ when not listed
+TABLES = {"HLE": "hle", "HLE_FORCE": "force", "HLE_FORCE_BIG": "force", "NVN": "nvn", "NVN_NOPROTO": "nvn", "VK": "hle", "VKB": "hle", "GL": "hle", "GLB": "hle", "EGL": "hle",
+          "PASS": "hle", "HLE_LINKAGE": "hostfn"}   # the host table each entry registers in (a name is unique within one; HLE_LINKAGE functions are in none)
+API = {"NVN": "NVN", "NVN_NOPROTO": "NVN", "VK": "Vulkan", "VKB": "Vulkan", "GL": "GL", "GLB": "GL", "EGL": "EGL", "PASS": "C library"}   # a named entry's API, for its messages
+NATIVE = "DM_NATIVE_EXEC"   # plat.h: 1 where the guest's code runs natively (Apple arm64), 0 for every build the generator serves
 
 # Scalar types by C spelling (qualifiers removed, words joined by one space): (class, canonical C type).
 # Classes: x32 / x64 integer in an x register; f32 / f64 in a v register; small: a sub-32-bit integer (accepted as a return only)
@@ -239,11 +250,11 @@ def resolve_words(words, typedefs):
 
 
 def learn_typedef(scope, decl):
-    """Record the names 'typedef <decl>;' declares with their class: ptr, a scalar's (class, type), ('struct', tag) or ('unknown', spelling)"""
+    """Record the names 'typedef <decl>;' declares with their class: ptr, fnptr (a pointer to a function), a scalar's (class, type), ('struct', tag) or ('unknown', spelling)"""
     vals = [v for _, v, _ in decl]
     for k in range(len(decl) - 3):   # a function pointer: typedef ret (*name)(...)
         if vals[k] == "(" and vals[k + 1] == "*" and decl[k + 2][0] == "id" and vals[k + 3] == ")":
-            scope.typedefs[vals[k + 2]] = ("ptr", "void *")
+            scope.typedefs[vals[k + 2]] = ("fnptr", "void *")
             return
     depth, parts, cur = 0, [], []   # the declarators, split at top-level commas
     for t in decl:
@@ -319,7 +330,7 @@ VK_TYPEDEF = re.compile(r"^\s*typedef\s+([\w\s*]+?)\s*\b(\w+)\s*;")
 
 def learn_vulkan_header(path, scope, seen):
     """The typedef names a Khronos Vulkan header declares, with their class: a handle a pointer (VK_DEFINE_HANDLE, and VK_DEFINE_NON_DISPATCHABLE_HANDLE on 64-bit hosts:
-    a pointer there, and an 8-byte integer in one x register on the guest either way), an enum 32 bits, a function pointer type a pointer, a struct or union by value
+    a pointer there, and an 8-byte integer in one x register on the guest either way), an enum 32 bits, a function pointer type fnptr, a struct or union by value
     unsupported (entries take them by pointer), any other typedef its type's class. Read line by line, not as C: the header's include guard and platform conditionals
     would hide every typedef from parse_file. Its own include (vk_platform.h) declares no Vulkan type"""
     real = os.path.realpath(path)
@@ -340,7 +351,7 @@ def learn_vulkan_header(path, scope, seen):
             continue
         m = VK_PFN.match(line)
         if m:
-            scope.typedefs[m.group(1)] = ("ptr", "void *")
+            scope.typedefs[m.group(1)] = ("fnptr", "void *")
             continue
         m = VK_TYPEDEF.match(line)
         if not m or "(" in line:
@@ -368,16 +379,21 @@ def parse_file(path, scope=None, entries=None, seen=None, incs=()):
     seen.add(real)
     with open(path, encoding="utf-8") as f:
         toks = tokens(f.read(), path)
-    conds = []   # [directive, line, state]: 1 = compiled, 0 = not compiled, None = unknown to the generator
+    conds = []   # [directive, line, state, taken]: state 1 = compiled, 0 = not compiled, None = unknown to the generator; taken: an earlier branch was compiled (None: unknown)
 
     def active():
         return all(c[2] for c in conds)
 
-    def state(dname, arg):   # what the generator knows of a condition: #if 0 / #if 1, and __cplusplus, which a C source never has
-        if dname == "if" and arg in ("0", "1"):
-            return int(arg)
-        if dname in ("ifdef", "ifndef") and arg == "__cplusplus":
+    def state(dname, arg):   # what the generator knows of a condition: #if 0 / #if 1, __cplusplus, which a C source never has, and DM_NATIVE_EXEC, 0 for every build it serves
+        a = re.sub(r"\s+", "", arg)
+        if dname in ("if", "elif") and a in ("0", "1"):
+            return int(a)
+        if dname in ("ifdef", "ifndef") and a == "__cplusplus":
             return 0 if dname == "ifdef" else 1
+        if dname in ("if", "elif") and (a == NATIVE or a.startswith(NATIVE + "&&")):
+            return 0
+        if dname in ("if", "elif") and a == "!" + NATIVE:
+            return 1
         return None
 
     i, brace = 0, 0
@@ -387,15 +403,17 @@ def parse_file(path, scope=None, entries=None, seen=None, incs=()):
             d = re.match(r"#\s*(\w+)\s*(.*)", val, re.S)
             dname, arg = (d.group(1), d.group(2).strip()) if d else ("", "")
             if dname in ("if", "ifdef", "ifndef"):
-                conds.append([val, line, state(dname, arg)])
+                st = state(dname, arg)
+                conds.append([val, line, st, None if st is None else st == 1])
             elif dname in ("elif", "elifdef", "elifndef", "else"):
                 if not conds:
                     raise GenError(f"{path}:{line}: #{dname} without #if")
-                st = conds[-1][2]
+                taken = conds[-1][3]
                 if dname == "else":
-                    conds[-1] = [conds[-1][0] + " ... #else", line, None if st is None else 1 - st]
-                else:
-                    conds[-1] = [val, line, 0 if st == 1 else None]
+                    conds[-1] = [conds[-1][0] + " ... #else", line, None if taken is None else int(not taken), True if taken is not None else None]
+                else:   # compiled only when no earlier branch was and its own condition holds
+                    st = 0 if taken else state(dname, arg) if taken is not None else None
+                    conds[-1] = [val, line, st, True if taken or st == 1 else None if st is None else False]
             elif dname == "endif":
                 if not conds:
                     raise GenError(f"{path}:{line}: #endif without #if")
@@ -445,6 +463,9 @@ def parse_file(path, scope=None, entries=None, seen=None, incs=()):
                 learn_typedef(scope, toks[i + 1:j])
             i = j + 1
             continue
+        if kind == "id" and val == "HLE_LINKAGE" and brace == 0:   # a host function the guest calls through a pointer the host hands it: ret cname(params) {
+            i = take_linkage(scope, toks, i, conds, path, line, entries)
+            continue
         base = scope.entry_macro(val) if kind == "id" else None
         wrap = kind == "id" and not base and scope.wrapper(val)
         if (base or wrap) and i + 1 < len(toks) and toks[i + 1][1] == "(" and not (i > 0 and toks[i - 1][1] in (".", "->")):
@@ -473,12 +494,12 @@ def take_entry(scope, base, name, args, path, line, entries):
     first = MACROS[base]
     if len(args) < first + 1 or not args[first - 1]:
         raise GenError(f"{path}:{line}: {name}( with {len(args)} arguments")
-    if base in NAMED:   # NVN(name, ret, params...), VK(name, ret, params...), GL / EGL(name, ret, params...): the entry is the API function, its C function h_<name>
+    if base in NAMED:   # NVN(name, ret, params...), VK(name, ret, params...), GL / EGL(name, ret, params...), PASS(...): the entry is the API function, its C function h_<name> (libc_<name>)
         nm = args[0]
         if len(nm) != 1 or nm[0][0] != "id":
             raise GenError(f"{path}:{line}: {name}: the {API[base]} function's name is not one identifier")
         entries.append({
-            "macro": base, "path": path, "line": line, "mangled_lit": f'"{nm[0][1]}"', "mangled": nm[0][1], "cname": "h_" + nm[0][1],
+            "macro": base, "path": path, "line": line, "mangled_lit": f'"{nm[0][1]}"', "mangled": nm[0][1], "cname": PREFIX.get(base, "h_") + nm[0][1],
             "typedefs": dict(scope.typedefs), "ret": [(k, v) for k, v, _ in args[1]], "params": [[(k, v) for k, v, _ in p] for p in args[first:]],
         })
         return
@@ -493,6 +514,34 @@ def take_entry(scope, base, name, args, path, line, entries):
         "mangled": "".join(unescape(v) for _, v, _ in mangled), "cname": cname[0][1], "typedefs": dict(scope.typedefs),
         "ret": [(k, v) for k, v, _ in ret], "params": [[(k, v) for k, v, _ in p] for p in args[first:]],
     })
+
+
+def take_linkage(scope, toks, i, conds, path, line, entries):
+    """HLE_LINKAGE <ret> <cname>(<params>) at toks[i] outside a macro: static on native builds, external elsewhere (hle.h). A definition is an entry of its own, a host
+    function the guest reaches only through a pointer the host hands it (dm_guest_fnptr: a vtable slot, a thread entry); a declaration (;) is not. Returns the index after
+    the parameter list"""
+    j = i + 1
+    while j < len(toks) and toks[j][1] not in ("(", ";", "{", "}"):
+        j += 1
+    if j >= len(toks) or toks[j][1] != "(" or j - i < 3 or toks[j - 1][0] != "id":
+        raise GenError(f"{path}:{line}: HLE_LINKAGE not followed by '<return type> <name>(<parameters>)'")
+    args, nxt = split_args(toks, j, path)
+    if any(c[2] == 0 for c in conds):   # not compiled
+        return nxt
+    if nxt >= len(toks) or toks[nxt][1] not in ("{", ";"):
+        raise GenError(f"{path}:{line}: HLE_LINKAGE {toks[j - 1][1]}(...) is followed by '{toks[nxt][1] if nxt < len(toks) else 'the end of the file'}', not a body or ';'")
+    if toks[nxt][1] == ";":   # a declaration: the definition is the entry
+        return nxt
+    unknown = next((c for c in conds if c[2] is None), None)
+    if unknown:
+        raise GenError(f"{path}:{line}: HLE_LINKAGE function {toks[j - 1][1]} inside '{unknown[0]}' (line {unknown[1]}): the generator cannot tell whether it is compiled; "
+                       "move it out of the conditional or teach the generator the condition")
+    cname = toks[j - 1][1]
+    entries.append({
+        "macro": "HLE_LINKAGE", "path": path, "line": line, "mangled_lit": f'"{cname}"', "mangled": cname, "cname": cname, "typedefs": dict(scope.typedefs),
+        "ret": [(k, v) for k, v, _ in toks[i + 1:j - 1]], "params": [[(k, v) for k, v, _ in p] for p in args],
+    })
+    return nxt
 
 
 def classify(toks, typedefs, path, line, what):
@@ -528,12 +577,18 @@ def analyse(e):
     if len(params) == 1 and [v for _, v in params[0]] == ["void"]:
         params = []
     args, nx, nv, nsaa = [], 0, 0, 0
+    e["name_arg"] = None   # a function pointer return's lookup name: the first parameter spelled const char *
     for k, toks in enumerate(params):
         if not toks:
             raise GenError(f"{p}:{ln}: parameter {k + 1} is empty")
         cls, ctype = classify(toks, td, p, ln, f"parameter {k + 1}")
         if cls == "void":
             raise GenError(f"{p}:{ln}: parameter {k + 1}: void")
+        if cls == "fnptr":   # a guest function's address the guest passes: as any pointer
+            cls = "ptr"
+        words = [v for _, v in toks]
+        if e["name_arg"] is None and words[:3] in (["const", "char", "*"], ["char", "const", "*"]) and len(words) <= 4:
+            e["name_arg"] = len(args)
         if cls == "small":
             raise GenError(f"{p}:{ln}: parameter {k + 1} '{' '.join(v for _, v in toks)}': a sub-32-bit parameter (the Switch caller does not extend it; "
                            "hle.h: declare it as int or unsigned)")
@@ -581,6 +636,10 @@ def render(entries, sources):
     w("static inline void st_f(dm_guest_state *st, float f) { memset(st->v[0], 0, sizeof st->v[0]); memcpy(st->v[0], &f, sizeof f); }")
     w("static inline void st_d(dm_guest_state *st, double d) { memset(st->v[0], 0, sizeof st->v[0]); memcpy(st->v[0], &d, sizeof d); }")
     w("")
+    if any(e["rcls"] == "fnptr" for e in entries):
+        w("// A host function an entry hands the guest (a function pointer return): its guest-visible address (dm/host/aot_arena.c; aot.h)")
+        w("void *dm_guest_fnptr_named(const void *fn, const char *name);")
+        w("")
     for e in entries:
         params = ", ".join(t for _, t, _ in e["args"]) or "void"
         w(f"extern {e['rtype']} {e['cname']}({params});   // {e['path']}:{e['line']}")
@@ -592,6 +651,10 @@ def render(entries, sources):
             body = f"{call};"
         elif rc == "ptr":
             body = f"st->x[0] = (uint64_t)(uintptr_t){call};"
+        elif rc == "fnptr":
+            k = e["name_arg"]
+            name = f"(const char *){load(e['args'][k][2], 'void *')}" if k is not None else "0"
+            body = f"st->x[0] = (uint64_t)(uintptr_t)dm_guest_fnptr_named((const void *){call}, {name});"
         elif rc in ("x64", "xul"):
             body = f"st->x[0] = (uint64_t){call};"
         elif rc == "xl":
@@ -615,8 +678,8 @@ def render(entries, sources):
     return "\n".join(out) + "\n"
 
 
-NAMES = {"ptr": "pointer", "x64": "64-bit integer", "x32": "32-bit integer", "xl": "long", "xul": "unsigned long", "small": "sub-32-bit integer",
-         "f32": "float", "f64": "double", "void": "void"}
+NAMES = {"ptr": "pointer", "fnptr": "host function pointer", "x64": "64-bit integer", "x32": "32-bit integer", "xl": "long", "xul": "unsigned long",
+         "small": "sub-32-bit integer", "f32": "float", "f64": "double", "void": "void"}
 
 
 def tally(items):
@@ -673,6 +736,10 @@ def main(argv=None):
     print(f"gen_hle_thunks: parameters: {tally(c for e in entries for c, _, _ in e['args'])}; 0 unknown types")
     print(f"gen_hle_thunks: returns: {tally(e['rcls'] for e in entries)}; 0 duplicate C names")
     print(f"gen_hle_thunks: {stacked} entries read arguments from the guest stack; {longs} entries use long (32 bits on Windows)")
+    fn = [e for e in entries if e["rcls"] == "fnptr"]
+    if fn:
+        print(f"gen_hle_thunks: {len(fn)} entries return host functions, handed to the guest at their guest-visible addresses: "
+              + ", ".join(e["mangled"] + ("" if e["name_arg"] is not None else " (no lookup name)") for e in fn))
     return 0
 
 

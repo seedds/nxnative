@@ -57,7 +57,8 @@ static void ensure(void) {
 uint64_t dm_aot_hostfn_base(void) { ensure(); return g_base; }
 size_t dm_aot_hostfn_size(void) { return hle_thunks_count * DM_AOT_HOSTFN_SLOT; }
 
-uint64_t dm_guest_fn(const void *host_fn) {
+// The slot of host_fn, 0 when it is no entry's C function (aot.h: aot_arena.c's dm_guest_fnptr then gives the guest a stub)
+uint64_t dm_aot_hostfn_find(const void *host_fn) {
     ensure();
     size_t lo = 0, hi = hle_thunks_count;
     while (lo < hi) {
@@ -66,7 +67,13 @@ uint64_t dm_guest_fn(const void *host_fn) {
         if (f == (uintptr_t)host_fn) return g_base + (uint64_t)(g_by_fn[mid] - hle_thunks) * DM_AOT_HOSTFN_SLOT;
         if (f < (uintptr_t)host_fn) lo = mid + 1; else hi = mid;
     }
-    die("aot: dm_guest_fn(%p): not a host function the guest can call (no HLE entry; gen_hle_thunks.py makes a slot only for entries)", host_fn);
+    return 0;
+}
+
+uint64_t dm_guest_fn(const void *host_fn) {
+    const uint64_t a = dm_aot_hostfn_find(host_fn);
+    if (!a) die("aot: dm_guest_fn(%p): not a host function the guest can call (no HLE entry; gen_hle_thunks.py makes a slot only for entries)", host_fn);
+    return a;
 }
 
 // The index of the slot holding guest_addr, or -1 outside the page

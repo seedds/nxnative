@@ -120,15 +120,23 @@ static void *nvn_lookup(const char *name) {
 #if DM_NATIVE_EXEC
         if (!strcmp(nvn_names[i], name)) return nvn_thunk[i];
 #else
-        if (!strcmp(nvn_names[i], name)) { APPLE_ONLY_RED("NVN: no guest entry points without native execution yet (the x86-64 engine's NVN thunks, Phase 2): %s and every later name resolve to NULL", name); return NULL; }
+        // Without native execution: the slot's C function, an implementation (an NVN entry, or nvn_nop) or the unimplemented stand-in. The x86-64 engine's thunks of the two
+        // lookups below hand the guest its guest-visible address (their function pointer return: dm/host/tools/gen_hle_thunks.py, aot.h dm_guest_fnptr_named), and
+        // the stand-in, which has no thunk, becomes the stub of the name, which reports its first call as Apple's counting thunk reports an unimplemented function
+        if (!strcmp(nvn_names[i], name)) return nvn_slot[i].fn;
 #endif
     LOG("[RED] NVN address lookup of an unknown name: %s", name ? name : "(null)");
     return NULL;
 }
 
 // nvnBootstrapLoader is imported by main (defined in sdk); after it is forcibly taken over, the NVN driver in sdk is no longer referenced
+#if DM_NATIVE_EXEC
 HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with a host null device (Metal behind it); the SDK's NVN driver does not run",
           void *, h_nvnBootstrapLoader, const char *name) { return nvn_lookup(name); }
+#else   // the same, declared with NVN's own return type: a function pointer, which the host-call thunk hands the guest at its guest-visible address
+HLE_FORCE("nvnBootstrapLoader", "the NVN graphics API is replaced wholesale with a host null device (Vulkan behind it); the SDK's NVN driver does not run",
+          PFNNVNGENERICFUNCPTRPROC, h_nvnBootstrapLoader, const char *name) { return (PFNNVNGENERICFUNCPTRPROC)nvn_lookup(name); }
+#endif
 
 // ---------- Boolean parameters: Switch callers do not extend them, only look at the low 8 bits ----------
 #define B(x) ((x) & 0xff)
@@ -1256,7 +1264,7 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
 }
 
 // Commands that only affect GPU state / only execute on the GPU: the null device only counts them (the thunk has already counted)
-static void nvn_nop(void) {}
+HLE_LINKAGE void nvn_nop(void) {}   // HLE_LINKAGE: static on Apple; elsewhere external, with a host-call thunk, so a lookup hands the guest its guest-visible address
 static const char *const g_nops[] = {
     "nvnCommandBufferSetPatchSize",
     "nvnCommandBufferSetDepthBounds",

@@ -2,6 +2,9 @@
 // On the real device each goes through IPC or a system applet; the host gives results as single-player offline. Pure-computation SDK parts (hash, util, software Opus) are not taken over, the original implementation is used directly.
 #include "hle.h"
 #include <dirent.h>
+#if !DM_NATIVE_EXEC && !defined(DM_TEST_GUEST_C)   // DM_TEST_GUEST_C: a host unit test that includes this file and calls its entries as C functions (t_pctl.c)
+#include "aot.h"   // dm_guest_alloc, dm_guest_fnptr: the ProfanityFilter vtable for the x86-64 engine
+#endif
 
 // ---------- aoc add-on content (the DLC NSPs in the player's folder) / ec shop (excluded) ----------
 // Owned add-on content indices (ascending), fixed at the first query:
@@ -108,10 +111,10 @@ HLE_FORCE("_ZN2nn3err9ShowErrorENS_6ResultE", "error display applet; the host pr
 // The class is polymorphic, and games call it through its vtable too: Monster Hunter Rise checks the hunter's name with slot 8, MaskProfanityWordsInText(int *, char16_t *, uint32_t)
 // (main+0x6bca160). The constructor used to do nothing, the object kept what the heap held there, and that call jumped into the heap. It now gets a host vtable: each slot of the SDK's
 // (_ZTVN2nn3ngc15ProfanityFilterE) is matched by address with the class's methods and given the host's version (no word list: nothing is profanity, nothing is masked); others return 0
-static Result ngc_v_zero(void) { return RES_OK; }
-static void ngc_v_none(void *self) { (void)self; }
-static Result ngc_v_check(void *self, uint32_t *masks, uint32_t pat, const void **words, uint64_t n) { (void)self; (void)pat; (void)words; for (uint64_t i = 0; masks && i < n; i++) masks[i] = 0; return RES_OK; }
-static Result ngc_v_mask(void *self, int *masked, void *text, uint32_t region) { (void)self; (void)text; (void)region; if (masked) *masked = 0; return RES_OK; }
+HLE_LINKAGE Result ngc_v_zero(void) { return RES_OK; }
+HLE_LINKAGE void ngc_v_none(void *self) { (void)self; }
+HLE_LINKAGE Result ngc_v_check(void *self, uint32_t *masks, uint32_t pat, const void **words, uint64_t n) { (void)self; (void)pat; (void)words; for (uint64_t i = 0; masks && i < n; i++) masks[i] = 0; return RES_OK; }
+HLE_LINKAGE Result ngc_v_mask(void *self, int *masked, void *text, uint32_t region) { (void)self; (void)text; (void)region; if (masked) *masked = 0; return RES_OK; }
 static void *ngc_vtable(void) {
     enum { NV = 40 }; static void *vt[NV + 2]; static int built;
     if (built) return built > 0 ? &vt[2] : NULL;
@@ -137,8 +140,31 @@ static void *ngc_vtable(void) {
     built = 1; LOG("ngc: ProfanityFilter host vtable of %d slots (%d matched to the class's methods)", n, named);
     return &vt[2];
 }
+#if !DM_NATIVE_EXEC && !defined(DM_TEST_GUEST_C)
+// The x86-64 engine: the vtable the guest reads is a copy in the arena (design 5.2), each method of the host's (the ngc_v_* functions, HLE_LINKAGE: each has a host-call
+// thunk) at its guest-visible address (dm_guest_fnptr); the offset to top, the type info, the SDK's own slots and the take-overs the loader bound (already slots) stay as
+// they are, as does any other word the table copied. ngc_vtable's table holds at most 40 slots, zero after the last
+static void *ngc_guest_vtable(void *host_vt) {
+    enum { WORDS = 2 + 40 };
+    static void **g; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    if (!host_vt) return NULL;
+    pthread_mutex_lock(&mu);
+    if (!g) {
+        void **h = (void **)host_vt - 2, **t = dm_guest_alloc(WORDS * sizeof *t);
+        t[0] = h[0]; t[1] = h[1];
+        for (int i = 2; i < WORDS; i++) t[i] = dm_aot_hostfn_find(h[i]) ? dm_guest_fnptr(h[i]) : h[i];
+        g = t;
+    }
+    pthread_mutex_unlock(&mu);
+    return &g[2];
+}
+#endif
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilterC1Ev", "profanity filter, the word list is in a system save; the host builds none and gives the object a host vtable", void, h_ngc_Ctor, void *self) {
-    void *vt = ngc_vtable(); if (vt && self) memcpy(self, &vt, sizeof vt);
+    void *vt = ngc_vtable();
+#if !DM_NATIVE_EXEC && !defined(DM_TEST_GUEST_C)
+    vt = ngc_guest_vtable(vt);
+#endif
+    if (vt && self) memcpy(self, &vt, sizeof vt);
 }
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilterD1Ev", "profanity filter", void, h_ngc_Dtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilter10InitializeEPvm", "profanity filter init; the host has no word list", Result, h_ngc_Init, void *self, void *work, uint64_t sz) { (void)self; (void)work; (void)sz; return RES_OK; }

@@ -19,8 +19,7 @@
 
 PLAT_TABLE_DEFINE(swhle)   // the import table (dm/host/hle.c defines it in a host binary)
 int dm_opmode(void) { return 0; }   // handheld: the surface's extent is 1280x720
-static int g_crop[4];
-void dm_vi_layer_crop(int c[4]) { memcpy(c, g_crop, sizeof g_crop); }   // hle_vi.c's, as vi::SetLayerCrop left it
+Result h_vi_SetCrop(void *layer, int x, int y, int w, int h);   // dm/gfx/hle_vi.c (linked): the game's vi::SetLayerCrop, whose state the present reads
 
 // ---------- The game's function pointers ----------
 #define GLOBAL_FNS(X) X(CreateInstance) X(EnumerateInstanceExtensionProperties) X(EnumerateInstanceVersion)
@@ -371,7 +370,7 @@ int main(void) {
     int presented_ok = 1;
     for (int k = 0; k < 4; k++) {
         static const int crops[4][4] = {{32, 16, 160, 90}, {32, 16, 160, 90}, {32, 16, 160, 90}, {0, 0, 0, 0}};
-        memcpy(g_crop, crops[k], sizeof g_crop);
+        h_vi_SetCrop(NULL, crops[k][0], crops[k][1], crops[k][2], crops[k][3]);   // through hle_vi.c, as the game crops its layer (0 x 0: none)
         uint32_t idx = 99; ck("vkAcquireNextImageKHR", G.AcquireNextImageKHR(dev, swc, UINT64_MAX, sem_a, VK_NULL_HANDLE, &idx));
         if (k) { ck("vkWaitForFences", G.WaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX)); ck("vkResetFences", G.ResetFences(dev, 1, &fence)); G.ResetCommandBuffer(cb, 0); }
         presented_ok &= idx == (uint32_t)k % nsi;

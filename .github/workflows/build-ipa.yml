@@ -37,6 +37,8 @@ env:
   # The toolchain the project supports (README: Xcode 27.1; dm/gfx/tools/dmsh_chain.lock: its Metal compiler),
   # named by path so the image's default moving to another Xcode does not move this job.
   DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  # Allow building with different Metal compiler version
+  DM_ALLOW_OTHER_METAL: 1
 
 permissions:
   contents: write   # the job publishes the release with the IPA parts

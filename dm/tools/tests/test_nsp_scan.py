@@ -96,5 +96,94 @@ class TitleFromPackage(unittest.TestCase):
             with self.assertRaisesRegex(nsp.BuildError, r'needs dotnet .* add the title ID to the name'): read(self.tmp / 'Game.nsp')
 
 
+
+def xci(path, names):   # an XCI whose root HFS0 holds a secure partition holding empty files with these names
+    def hfs0(entries):   # [(name, data bytes)]
+        strs = b''.join(n.encode() + b'\0' for n, _ in entries); ent, o, so, data = b'', 0, 0, b''
+        for n, d in entries:   # entry: offset, size, name, hashed size, reserved, hash
+            ent += struct.pack('<QQIIQ', o, len(d), so, 0, 0) + bytes(0x20); o += len(d); so += len(n) + 1; data += d
+        return b'HFS0' + struct.pack('<III', len(entries), len(strs), 0) + ent + strs + data
+    head = bytearray(0x200); head[0x100:0x104] = b'HEAD'; struct.pack_into('<Q', head, 0x130, 0x200)
+    path.write_bytes(bytes(head) + hfs0([('update', b''), ('secure', hfs0([(n, b'') for n in names]))]))
+
+
+class Merged(unittest.TestCase):
+    """A merged package: base game + update + DLC in one NSP (\"[Base eShop + Update 4.0.1 - v1507328 + 1 DLC].nsp\"), or a cartridge dump with its update. Its tickets name every
+    title, the first one in any order, and nx_extract opened it as the base game alone (Mario Kart 8 Deluxe 1.0.0's main is 32-bit: the build stopped). It is asked for its content
+    metas and counts as each of them"""
+    CONTENTS = [('Application', APP, 0), ('Patch', APP | 0x800, 1507328), ('AddOnContent', APP + 0x1001, 65536)]
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
+        self.said = []
+        cm = mock.patch.object(nsp, 'say', self.said.append); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def merged_nsp(self, name='Game [Base + Update + 1 DLC].nsp', first=APP | 0x800):   # first: the title of the first ticket, the one title_of reads
+        p = self.tmp / name; tiks = [f'{t:016x}{0:016x}.tik' for t in sorted({APP, APP | 0x800}, key=lambda t: t != first)]
+        pfs0(p, tiks + ['a.cnmt.nca', 'b.nca', 'c.cnmt.nca', 'd.nca', 'e.cnmt.nca'])
+        return p
+
+    def test_detection(self):
+        m = self.merged_nsp(); self.assertTrue(nsp.is_merged(m))
+        one = self.tmp / 'one.nsp'; pfs0(one, [f'{APP:016x}0000000000000000.tik', 'a.cnmt.nca', 'b.nca']); self.assertFalse(nsp.is_merged(one))
+        cart = self.tmp / 'cart.xci'; xci(cart, ['a.cnmt.nca', 'b.nca', 'c.cnmt.nca']); self.assertTrue(nsp.is_merged(cart))
+        self.assertEqual(nsp.package_names(cart), ['a.cnmt.nca', 'b.nca', 'c.cnmt.nca'])
+        bare = self.tmp / 'bare.xci'; bare.write_bytes(bytes(0x100) + b'HEAD' + bytes(0x100)); self.assertFalse(nsp.is_merged(bare))
+
+    def test_one_file_is_base_update_and_dlc(self):
+        m = self.merged_nsp()
+        app, fam = nsp.scan_nsps(self.tmp, lambda p: None, lambda p: self.CONTENTS if p == m else None)
+        self.assertEqual(app, APP)
+        self.assertEqual(fam, {'base': m, 'updates': [(1507328, m)], 'dlc': [(APP + 0x1001, 65536, m)]})
+        self.assertEqual(nsp.nsp_versions(fam, ['v0', 'v1507328']), {'v0': None, 'v1507328': m})
+        self.assertTrue(any('holds several titles' in s for s in self.said))
+
+    def test_merged_beside_separate_files(self):   # a newer update beside the merged package: both are listed, nsp_versions keeps each by its version
+        m = self.merged_nsp(); upd = self.tmp / f'Update [{APP | 0x800:016X}][v1572864].nsp'; pfs0(upd, [f'{APP | 0x800:016x}0000000000000005.tik'])
+        app, fam = nsp.scan_nsps(self.tmp, None, lambda p: self.CONTENTS)
+        self.assertEqual(sorted(fam['updates']), [(1507328, m), (1572864, upd)])
+
+    def test_without_a_reader_the_old_way(self):   # no contents reader (or an unreadable package): its first ticket names it, as before
+        m = self.merged_nsp(first=APP)
+        for reader in (None, lambda p: None):
+            app, fam = nsp.scan_nsps(self.tmp, None, reader)
+            self.assertEqual((app, fam['base'], fam['updates']), (APP, m, []))
+
+    def test_extraction_estimate_counts_the_file_once(self):
+        m = self.merged_nsp(); size = m.stat().st_size
+        self.assertEqual(nsp.extract_bytes({'v1507328': (m, m)}, clones=False), size)
+
+    def test_two_games_on_one_cartridge(self):   # Super Mario Galaxy + Super Mario Galaxy 2 on one XCI: two Application content metas, two games; --title-id names the one to pack
+        GAME2 = 0x0100FD8022DAA000
+        cart = self.tmp / 'Galaxy 1 + 2.xci'; xci(cart, ['a.cnmt.nca', 'b.nca', 'c.cnmt.nca', 'd.nca'])
+        contents = lambda p: [('Application', APP, 0), ('Application', GAME2, 0)]
+        with self.assertRaisesRegex(nsp.BuildError, r'more than one game .*--title-id'): nsp.scan_nsps(self.tmp, None, contents)
+        app, fam = nsp.scan_nsps(self.tmp, None, contents, GAME2)
+        self.assertEqual((app, fam), (GAME2, {'base': cart, 'updates': [], 'dlc': []}))
+        with self.assertRaisesRegex(nsp.BuildError, r'no game 0100FD8022DAB000 .* which holds'): nsp.scan_nsps(self.tmp, None, contents, GAME2 + 0x1000)
+
+    def test_extraction_names_the_application(self):   # nx_extract reads the scanned game's own content metas (--app), whichever package holds them
+        m = self.merged_nsp(); calls = []
+        def fake_run(cmd, log, **k): calls.append(cmd); (Path(cmd[4]) / 'ExeFS').mkdir(parents=True)
+        with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'swap_in'), mock.patch.object(nsp, 'extracted', return_value=None), \
+             mock.patch.object(nsp, 'PROG', mock.MagicMock()):
+            nsp.extract('nx', 'k', self.tmp / 'ex', 'v1507328', m, m, None, self.tmp / 'logs', mock.MagicMock(), APP)
+        self.assertEqual(calls[0][calls[0].index('--app') + 1], f'{APP:016x}')
+
+    def test_unreadable_contents_are_said(self):   # a merged package whose content metas cannot be read counts as its first ticket's title, in red
+        self.merged_nsp(first=APP)
+        app, fam = nsp.scan_nsps(self.tmp, None, lambda p: None)
+        self.assertEqual(app, APP); self.assertTrue(any(s.startswith('[RED]') and 'could not be read' in s for s in self.said))
+
+    def test_reader_runs_nx_extract_contents_mode(self):
+        keys, calls = self.tmp / 'prod.keys', []
+        def fake_run(cmd, log, env=None, cwd=None, on_line=None, ok=()):
+            calls.append(cmd); log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(f'content Application {APP:016x} 0\ncontent Patch {APP | 0x800:016x} 1507328\ncontent AddOnContent {APP + 0x1001:016x} 65536\n')
+        with mock.patch.object(nsp, 'build_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run), nsp.package_title_reader(REPO, keys, {}) as read:
+            self.assertEqual(read.contents(self.tmp / 'm.nsp'), self.CONTENTS)
+            self.assertEqual(calls, [['nx', keys, '--contents', self.tmp / 'm.nsp']])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -10,7 +10,7 @@ import os, re, sys, runpy, subprocess
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE); import dmsh_chain, tool_lock
 OWN = re.compile(r'(metal_macosx|metal_iphoneos): lock (.*) / actual (?!missing$)(.*)')   # a missing compiler still stops the build
 ALLOW = 'DM_ALLOW_OTHER_METAL'
-XCODE_VERSION = '27.1'   # the Xcode whose Metal compiler dmsh_chain.lock records; README.md names it too
+XCODE_VERSION = '27.2'   # the Xcode whose Metal compiler dmsh_chain.lock records; README.md names it too
 XCODE = f'Xcode {XCODE_VERSION} (macOS 26.6 or later)'
 XCODE_APP = f'/Applications/Xcode-{XCODE_VERSION}.app'   # the name the message suggests for it beside a newer Xcode.app
 strict = tool_lock.check_tools

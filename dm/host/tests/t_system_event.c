@@ -122,11 +122,23 @@ static void host_signal(void) {
     // Guest callers retain lazy creation for service events not yet bound.
     hle_signal_system_event(&ev); assert(signalled(&ev)); destroy_event(&ev);
 }
+static void copied_read_end(void) {
+    // The audio renderer keeps its own event and hands the game a copy of the read end (hle_audren.c): a signal reaches the copy, and the copy outlives the renderer's ends
+    test_event ev = {0}; hle_bind_system_event(&ev, 1);
+    uint32_t copy = hle_dup_readable_handle(ev.rh);
+    assert(copy && copy != ev.rh && copy != ev.wh && !hle_dup_readable_handle(ev.wh));   // only a read end is copied
+    assert(hle_signal_system_event_binding(hle_system_event_binding(&ev)));
+    pthread_mutex_lock(&G); event_t *e = h_get(copy, O_EVENT_R); assert(e && e->signaled && e == h_get(ev.rh, O_EVENT_R) && e->refs == 3); pthread_mutex_unlock(&G);
+    destroy_event(&ev); assert(g_nse == 0);
+    pthread_mutex_lock(&G); assert(h_peek(copy, O_EVENT_R) == e && e->refs == 1); pthread_mutex_unlock(&G);
+    uint64_t r[32] = {copy}; assert(svc_thread(0x16, r) && !r[0]);
+    pthread_mutex_lock(&G); assert(!h_peek(copy, O_EVENT_R)); pthread_mutex_unlock(&G);
+}
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     struct rlimit lim = {0, 0}; setrlimit(RLIMIT_CORE, &lim);
-    void (*tests[])(void) = {duplicate, capacity, reuse, rebind, host_signal};
-    const char *names[] = {"duplicate vi registration", "rapid vi event replacement", "storage and handle reuse by another service", "vi rebind at reused storage", "host skip and guest lazy binding"};
+    void (*tests[])(void) = {duplicate, capacity, reuse, rebind, host_signal, copied_read_end};
+    const char *names[] = {"duplicate vi registration", "rapid vi event replacement", "storage and handle reuse by another service", "vi rebind at reused storage", "host skip and guest lazy binding", "copied read end of a bound event"};
     int failed = 0;
     for (unsigned i = 0; i < sizeof tests / sizeof *tests; i++) {
         pid_t pid = fork(); assert(pid >= 0);

@@ -27,6 +27,14 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 - **Check:** to find such writes, put the field you suspect behind a guard value and log when it changes outside the host's own code, or force overflows on the Mac by shrinking the command memory the game gets.
 
+### Guest ring allocators write `NVNbuffer` offset and size directly
+
+- **Symptom:** a running game with sound draws a black screen; every uniform buffer returns the same initialized address, with its allocation offset reported as its size.
+- **Cause:** an engine can retarget an initialized buffer with direct 64-bit stores to `NVNbuffer` +0x18 (offset) and +0x20 (size), then bind `nvnBufferGetAddress` and `nvnBufferGetSize`. The host previously stored offset at +0x10 and size at +0x18: the guest's offset overwrote the host's size while its address stayed unchanged.
+- **Fix:** `buf_t` reserves the bytes before +0x18 and puts offset and size at the guest-written offsets, with compile-time assertions. Initialization and every buffer query use that record; CPU mapping still respects the pool's CPU-access flags. The record fits the existing 0x30-byte `NVNbuffer`; the builder layout and recorded command layouts are unchanged. No meaning is assigned to the reserved driver bytes.
+- **Found on:** [LEGO Star Wars: The Skywalker Saga, issue #723](https://github.com/seedds/nxnative/issues/723), 1.10.0, SDK 12.3.6, main build `ec593a5f9552100a9fe95c4ca9e34873` (reporter's trace). This is a general object ABI correction; no game profile is needed.
+- **Check:** `t_nvn.c` initializes a buffer through the public API, retargets it repeatedly with raw byte writes, and checks address, size, mapping, pool and offset queries, builder independence and neighbouring-object guards. It also retargets a CPU-inaccessible buffer. Validation uses synthetic memory only; the reported game's rendering has not been retested.
+
 ### Sizes the hardware never reports as 0 (ZCull save area)
 
 - **Symptom:** sprites broke apart in some runs only, depending on the allocation order; buffers overlapped.

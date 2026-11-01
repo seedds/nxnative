@@ -33,6 +33,8 @@ app_pool	0xCD500000
 sys_resource	0x1000000
 
 # ---- Rendering ----
+# The registered build selects near-zero NVN depth; offline pipeline bases use main0_z.
+depth_mode	zero
 # The native clock measures elapsed time; dynamic-resolution thresholds target 60 fps in patches.py.
 present_interval	display
 fps_target	60

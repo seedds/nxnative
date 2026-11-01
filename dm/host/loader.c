@@ -615,7 +615,11 @@ static void map_image(module_t *m, const char *dir) {
 }
 #endif
 
+static char g_module_dir[1024];   // the folder the modules were loaded from (dm_module_dir)
+const char *dm_module_dir(void) { return g_module_dir; }
+
 void load_modules(const char *dir, const char **names, int n) {
+    strlcpy(g_module_dir, dir, sizeof g_module_dir);
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;

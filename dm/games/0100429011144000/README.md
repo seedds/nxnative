@@ -6,6 +6,7 @@ Update 1.23.83358 (v458752) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 
 | Setting | Where | Why |
 |---|---|---|
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth; offline pipeline bases must use the matching vertex entry |
 | `sys_resource 0x800000` | [`game.tsv`](game.tsv) | the NPDM's 8 MB of system resource: virtual address memory |
 | 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | Below Zero's layout (a 1 GB pool); see [Memory](#memory) |
 | Node area cut 1 GB → 62 MB, region alignment 4 MB / 32 MB / 1 GB → 2 MB | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `3644a676…` | nirvanA Initiative's and Below Zero's build |
@@ -22,6 +23,7 @@ Update 1.23.83358 (v458752) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 
 ## Files and shaders
 
+- **Resolved: offline depth metadata.** Update 1.23.83358 selects near-zero NVN depth in `run/b3.log` (through frame 27,900), with no later GL switch. A short isolated boot reproduced the call with matching registered module IDs; evidence is in `0100429011144000-work/depth-mode-audit/boot-20261031/` beside the NSPs. The profile now declares `depth_mode zero` for the [shared archive mechanism](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). This confirms the input; rebuilt archive acceptance and performance were not retested.
 - RomFS: 15,570 files, 3.9 GB: 5,467 UnityFS bundles (Addressables, `Data/StreamingAssets/aa/Switch`), 20 FMOD banks, 5,416 `.optoctrees` and 4,582 `.bin` world-streaming files (`SNUnmanagedData/Build18`).
 - 17,956 shaders: 8,972 vertex, 8,957 pixel, 2 geometry and 25 compute, read with Unity 2019.4's layouts; 11 are the player's GLSLC outputs in `main`. All of them build for the Mac (8 minutes with an empty cache); the first boot prebuilds 16,548 pipeline pairs in about 45 s, and no run met a shader missing from the map.
 - **Current, cause unknown:** `[RED] texture type mismatch: shader … declares slot 135 (or 136) as Metal type 2, texture ID 800 is type 7 (NVN target 2, format 0x38, Metal format 71); bound as is`, 5 to 8 times a run in two pixel shaders: a 3D RGBA8 texture in a slot the translated shader declares 2D, the reverse of [A 2D texture in a 3D slot binds the zero 3D texture](../../../docs/reference/rendering.md#a-2d-texture-in-a-3d-slot-binds-the-zero-3d-texture). Every Below Zero run logs the same lines. Nothing wrong was seen on screen; which pass and texture these are is not found.
@@ -49,4 +51,5 @@ Update 1.23.83358 (v458752) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 
 ## Found on this game
 
-- Nothing new: the `sdk` cuts and the ALLOC_BUCKET cut are Below Zero's.
+- The `sdk` cuts and the ALLOC_BUCKET cut are Below Zero's.
+- **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).

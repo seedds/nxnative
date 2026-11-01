@@ -83,8 +83,8 @@ def entries(cwd, line, sysroot):
     return [{'directory': str(cwd), 'file': str((cwd / s).resolve()), 'arguments': ['clang', *flags, '-c', str((cwd / s).resolve())]} for s in srcs]
 
 def compdb(game):
-    # the profile header and dmsh_chain.h must exist for the sources to parse: make writes the first (game_profile), the second is committed
-    subprocess.run(['make', '-s', '-C', str(REPO / 'dm/host'), f'GAME={game}', 'game_profile'], check=True)
+    # the profile header, the host's shaders (host_msl_gen.h) and dmsh_chain.h must exist for the sources to parse: make writes the first two (game_profile, host_msl), the third is committed
+    subprocess.run(['make', '-s', '-C', str(REPO / 'dm/host'), f'GAME={game}', 'game_profile', 'host_msl'], check=True)
     sysroot = subprocess.run(['xcrun', '--show-sdk-path'], capture_output=True, text=True).stdout.strip() if sys.platform == 'darwin' else ''
     runs = [('dm/host', ['dmhost']), ('dm/gfx/tex/tests', make_targets('dm/gfx/tex/tests')), ('dm/gfx/tests', make_targets('dm/gfx/tests')),
             ('dm/host/tests', make_targets('dm/host/tests')), ('dm/gfx/metal', ['all'])]

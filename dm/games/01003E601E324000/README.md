@@ -8,6 +8,7 @@ Status: brought up on the Mac on 2026-10-31: the logos and the opening movie, th
 
 | Setting | Where | Why |
 |---|---|---|
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth; offline pipeline bases must use the matching vertex entry |
 | `fps_target 60` | [`game.tsv`](game.tsv), `hle_fpslock.c` | the host writes 1 into `rhi.SyncInterval`; see [Frame rate](#frame-rate) |
 | FMallocBinned3 constructor call cut, with gate `OBS_UE_MALLOC` | the rewriter's engine-wide rule (`dm/tools/ue_malloc.py`), no build ID | its pools take 37 GB of the engine region; the host's allocator runs Unreal's heap (`hle_uemalloc.c`); see [Memory](#memory) |
 | Engine region given what the alias region has room for, 2.81 GB: gate `OBS_UE_REGION` on the store of its size | the rewriter's engine-wide rule (`dm/tools/ue_region.py`), no build ID; the host's room (`hle_svc.c`) | Unreal's `nninitStartup` reserves 62 GB by default |
@@ -30,6 +31,7 @@ Status: brought up on the Mac on 2026-10-31: the logos and the opening movie, th
 
 ## Files and shaders
 
+- **Resolved: offline depth metadata.** Update 1.1.2 selects near-zero NVN depth in `run/final.log` (through frame 4,500), with no later GL switch. A short isolated boot reproduced the call with matching registered module IDs; evidence is in `01003E601E324000-work/depth-mode-audit/boot-20261031/` beside the NSPs. The profile now declares `depth_mode zero` for the [shared archive mechanism](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). This confirms the input; rebuilt archive acceptance and performance were not retested.
 - One pak, `Nicola/Content/Paks/Nicola-Switch_0_P.pak` (7.4 GB, 172,665 files, version 11 with the magic 0xcc from the end, Oodle and Zlib blocks; the profile's `romfs_marker`): the cooked packages, CRIWARE `.awb` banks (BGM, English and Japanese voices) and `.usm` movies, and the two shader code archives. The index is AES-256 encrypted, and so are 41 config files.
 - **Resolved: no window of `main` holds the pak key.** The callback that hands the key to the engine loads two 16-byte literals from separate places and stores them as one; `uepak.py` now reads such keys from the code: [An Unreal pak key split into two 16-byte literals](../../../docs/reference/shaders.md#an-unreal-pak-key-split-into-two-16-byte-literals).
 - Shaders: `ShaderArchive-Global-SF_GLSL_SWITCH.ushaderbytecode` (1,554 shaders) and `ShaderArchive-Nicola-SF_GLSL_SWITCH.ushaderbytecode` (46,743), stored in the pak, every shader an LZ4 block (`uepak.py` `lz4_shaders`, no host run). 47,298 unique shaders (3,823 vertex, 40,605 pixel, 2,831 compute, 39 geometry); the Mac libraries took 2 h 12 min to compile on the first build.
@@ -45,9 +47,10 @@ Status: brought up on the Mac on 2026-10-31: the logos and the opening movie, th
 
 ## Found on this game
 
-General changes first needed here; each applies to every game:
+General mechanisms used here:
 
 - **An Unreal pak key split into two 16-byte literals in `main`'s code** (`uepak.py` `code_keys`): [An Unreal pak key split into two 16-byte literals](../../../docs/reference/shaders.md#an-unreal-pak-key-split-into-two-16-byte-literals), [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).
+- **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
 
 ## Open
 

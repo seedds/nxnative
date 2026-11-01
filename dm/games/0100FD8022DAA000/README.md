@@ -63,6 +63,7 @@ General host changes first needed here; each applies to every game:
 - **Vulkan acquire and the vsync event thread follow the display link** (`mtl_link_wait_tick`, `mtl_link_wait_vsync`): [Vulkan acquire and vsync event follow the display link](../../../docs/reference/frame-rate.md#vulkan-acquire-and-vsync-event-follow-the-display-link).
 - **Focus message 15 only under focus handling modes 1 and 2** (`hle_oe.c`) and **the guest clock waits in the background** (`guest_clock_read_wait`): [Focus handling mode decides whether focus changes are notified](../../../docs/reference/services.md#focus-handling-mode-decides-whether-focus-changes-are-notified), [Guest clock reads wait while the app is in the background](../../../docs/reference/services.md#guest-clock-reads-wait-while-the-app-is-in-the-background).
 - **A yield whose callee-saved registers moved counts as progress** (`thr_yield`; this game's poll keeps them): [Yields that make progress return at once](../../../docs/reference/threads.md#yields-that-make-progress-return-at-once-thr_yield).
+- **`--title-id` picks one game of a two-game XCI** (this game shares a cartridge dump with Super Mario Galaxy): [A cartridge dump that holds two games packs only the first](../../../docs/reference/packing.md#a-cartridge-dump-that-holds-two-games-packs-only-the-first).
 
 ## Open
 

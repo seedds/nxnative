@@ -71,6 +71,10 @@ Game-specific findings; the general host changes they led to are listed under [F
 - Pairs: 331 of 9,043 vertex / pixel pairs failed to link before `vs_pad` (the opening course used none of them; later levels did, about 11,500 failed builds in one 11-minute session). The offline link check: 8,712 linked / 331 failed before, 9,043 / 0 after, 14,603 / 0 for the v0 + 1.2.1 tables.
 - Vertex format `RGB10A2SN` (0x69) → `MTLVertexFormatInt1010102Normalized`.
 
+### Offline pipeline archive probe
+
+**Current: Mac build evidence; device acceptance open.** [PR #653](https://github.com/seedds/nxnative/pull/653) reports a `pso_offline.py --gpu g19p` probe of the contributor's Wonder shader build on an Apple M2 Pro with toolchain `metalfe-32023.922`: 3,698 pairs gave 3,697 bases in a 67 MB archive, built in 113 s including 27.5 s of planning. One layer-writing pair was left to the device; no pair declared function constants. Opening the archive on an iPhone, hybrid rendering, cold preparation time, steady GPU time and peak device memory remain unmeasured. Wonder's `pso_mtl4` default remains off pending device acceptance.
+
 ## Audio
 
 - The `sdk` carries the audio renderer (SDK 16): the host switches it to CPU rendering with manual execution and drives it from a guest thread, no IPC ([Running the SDK's own renderer on the CPU](../../../docs/reference/audio.md#running-the-sdks-own-renderer-on-the-cpu)).
@@ -96,6 +100,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 
 ## Found on this game
 
+- [Offline pipeline archive missing for the device GPU](../../../docs/reference/shaders.md#offline-pipeline-archive-missing-for-the-device-gpu): archive targets can follow profile metadata while iOS Metal 4 remains opt-in; [the probe above](#offline-pipeline-archive-probe) records the build evidence and open device checks.
 General host changes first needed here; each applies to every game:
 
 - **Resolved: Mac launcher metadata matches native defaults**: [A Mac front end's default settings change Metal execution paths](../../../docs/reference/packing.md#a-mac-front-ends-default-settings-change-metal-execution-paths), found by metadata generation and source inspection; no gameplay measurement.

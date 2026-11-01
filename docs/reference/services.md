@@ -80,6 +80,13 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ## File system and save data
 
+### Directory handle allocation failure
+
+- **Symptom:** the host crashes in `h_fs_OpenDirectory` when its folder-backed directory handle allocation fails.
+- **Cause:** `opendir` succeeded, but the following `calloc` of `dirh_t` was dereferenced without a null check. Returning early without cleanup would also leak the already-open `DIR`.
+- **Fix:** close the directory on allocation failure, preserve `errno` across cleanup, and return the existing filesystem failure through `err_res` before publishing a handle. The caller's output stays untouched, as on the other failed-open paths. `t_fs_directory.c` injects allocation failure in the real handler, checks the descriptor is closed and the output unchanged, then exercises successful open, count, read and close.
+- **Found on:** the [GCC audit in issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6523656102), reproduced with a synthetic directory and allocation fault injection; no game-specific failure was reported.
+
 ### The SDK's own `fs::IsMounted` reads an empty mount table
 
 - **Symptom:** IL2CPP "Could not open …/global-metadata.dat" (then a crash in its logger).
@@ -189,6 +196,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** firmware content is not the host's to ship, so the host writes a stand-in of the same layout with every part empty (`dm_mii_standin` in `hle_mii.c`, mounted by `hle_fs.c` `MountSystemData`; any other system data answers "target not found"). Heads build and draw nothing; bodies and favourite colours show.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (4.0.0, SDK 4.4.0; one boot).
 - **Note:** the layout as the code reads it: texture file +0xc the largest decompressed size of each of 11 part kinds, +0x38 their alignments, from +0x64 one 0x1c-byte entry per part (offset, size, stored size, 4 zlib parameters, then width, height, format, mips); shape file +0xc / +0x3c the same for 12 kinds, from +0x6c one 0x58-byte entry per part (offset, size, stored size, parameters, five vertex attribute offsets and sizes, index offset and byte size, bounding box), then hair (132 × 0x48, +0x12704) and faceline (12 × 0x24, +0x14c24) transforms. A texture of size 0 is skipped (`main+0x8faaf4`); shapes cannot all be absent, because the faceline is drawn without a check (a null buffer read at `main+0xa690d0` under `main+0x8286c4`), so every shape entry points at one shared mesh of one vertex and the triangle (0, 0, 0), 32 bytes of zeros in a stored zlib block. The largest sizes must not be 0: they size the model's memory pool (`main+0x8f2e6c`), whose alignment is the first one. The Mii database itself: [Mii database answered by the host](#mii-database-answered-by-the-host).
+
+### Save-sync metadata errors close the temporary file
+
+- **Symptom:** a failed write of `<DM_SAVE>.sync.tmp` leaks its stream, and the diagnostic can report a cleanup error instead of the write error.
+- **Cause:** `write_base` short-circuited `fprintf`, `fclose` and `rename` in one condition. A failed write skipped the close; `unlink` could then replace `errno` before logging.
+- **Fix:** always close an opened stream, preserve the first write/close/rename error, and rename the temporary file only after both writing and closing succeed. Cleanup leaves the previous sync metadata in place.
+- **Found on:** static analysis reported in [issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6543080671); reproduced without game files.
+- **Check:** `t_save_sync_metadata` injects open, write, close and rename failures into the production writer, including simultaneous write/close failures and cleanup changing `errno`. It checks descriptor closure, preservation of existing metadata, diagnostics and a successful replacement. No cloud service or gameplay validation is claimed.
 
 ## Add-on content
 

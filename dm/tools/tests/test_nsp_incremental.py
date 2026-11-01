@@ -122,6 +122,20 @@ class DeriveProfile(Base):
         nsp.derive_profile(g, self.pdir, 'v65536', self.ex, ['main'], shader_only=True)
         self.assertEqual(derived.table('shader_map.tsv').read_text(), 'generated DLC shader rows\n')
 
+    def test_derived_main_without_frame_step_stubs_keeps_the_games_step(self):
+        source = self.src / 'game.tsv'; source.write_text(source.read_text() + 'fps_target\t60\n')
+        (self.src / 'patches.py').write_text(f'def frame_step(ctx): pass\nFRAME_STEP = {{"{BID}": frame_step}}\n')   # stubs for the registered main only, never run
+        self.derive()
+        self.assertEqual(game.Game(self.pdir).get('fps_target'), '0')
+        self.assertIn('frame step stubs for other builds only', (self.pdir / 'game.tsv').read_text())
+        (self.src / 'patches.py').write_text(f'FRAME_STEP = {{"{BID}": 1, "{BID2}": 2}}\n')   # the derived main has stubs too
+        self.derive(); self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
+        (self.src / 'patches.py').write_text('CUTS = {}\n'); self.derive()   # no frame step in the profile
+        self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
+        (self.src / 'patches.py').write_text(f'FRAME_STEP = {{"{BID}": 1}}\n'); self.derive()
+        nsp.derive_profile(game.Game(self.src), self.pdir, 'v65536', self.ex, ['main'], shader_only=True)   # shader tables only: the settings stay
+        self.assertEqual(game.Game(self.pdir).get('fps_target'), '60')
+
     def test_missing_corrupt_and_duplicate_override_rows_derive_again(self):
         for change in ('missing', 'corrupt', 'override', 'indented override', 'truncated'):
             with self.subTest(change):
@@ -606,6 +620,29 @@ class SplitShaders(Base):
         g = self.own(); g = nsp.set_keys(g, {'mem_used': ('0x4800000', '')}, 'After the rewrite'); k = self.go(g)
         g = self.own(); self.assertEqual(g.get('mem_used'), '0x4800000')
         self.assertEqual(self.go(g), k); self.assertEqual(self.splits, 1)
+
+
+class RewriteWorkers(Base):
+    def test_explicit_workers_override_the_automatic_module_budget(self):
+        g = game.Game(self.src)
+        for value, expected in (('1', '1'), ('3', '3'), ('', '14')):
+            with self.subTest(value=value):
+                out = self.tmp / f'patched-{value or "auto"}'
+                env = {'DM_GAME': str(self.src), 'DM_REWRITE_J': value}
+                with mock.patch.object(nsp, 'collect_nros', return_value={}), mock.patch.object(nsp, 'patch_files', return_value=[]), \
+                     mock.patch.object(nsp.os, 'cpu_count', return_value=14), mock.patch.object(nsp.time, 'sleep'), \
+                     mock.patch.object(nsp.subprocess, 'Popen', return_value=mock.Mock(returncode=0, poll=lambda: 0)) as popen:
+                    nsp.rewrite(Path(sys.executable), REPO, self.ex / 'ExeFS', out, env, self.tmp / 'logs', g)
+                self.assertEqual(popen.call_args.kwargs['env']['DM_REWRITE_J'], expected)
+                self.assertEqual(env['DM_REWRITE_J'], value)
+
+    def test_invalid_workers_fail_before_collecting_modules(self):
+        for value in ('0', '-1', 'many'):
+            with self.subTest(value=value), mock.patch.object(nsp, 'collect_nros') as collect:
+                with self.assertRaisesRegex(nsp.BuildError, 'DM_REWRITE_J must be a positive integer'):
+                    nsp.rewrite(Path(sys.executable), REPO, self.ex / 'ExeFS', self.tmp / 'patched',
+                                {'DM_REWRITE_J': value}, self.tmp / 'logs', game.Game(self.src))
+                collect.assert_not_called()
 
 
 class LayerShaders(Base):

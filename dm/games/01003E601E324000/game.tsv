@@ -25,6 +25,8 @@ romfs_marker	Nicola/Content/Paks/Nicola-Switch_0_P.pak
 zip_store	.pak:.metallib
 
 # ---- Graphics ----
+# The registered build selects near-zero NVN depth; offline pipeline bases use main0_z.
+depth_mode	zero
 # 60 fps (30 on the Switch): the game's Switch device profile (Nicola/Config/Switch/SwitchDeviceProfiles.ini) sets rhi.syncinterval=2, the present interval 2 it asks for while
 # BaseSwitchEngine.ini's r.VSync=1 locks presents to vsync; no config sets FrameRateLimit or t.MaxFPS. The host writes 1 into rhi.SyncInterval (hle_fpslock.c), so the game asks for
 # present interval 1 itself. Unreal steps the game by the time that really passed (the same stick press moves the scene as far at 30 and at 60 fps).

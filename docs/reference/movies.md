@@ -32,6 +32,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** both forms are taken over now (`hle_movie.c`).
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0; one boot).
 
+### SDK 3's `movie::Decoder` constructor takes a type and a format only
+
+- **Symptom:** a call through a null pointer in the host's `movie::Decoder::Configure` (`pc=0 lr=h_movie_Configure+…`) when the first movie starts; with only the constructor taken over, `[RED] movie: decoder type 1 output 3 mode 1 not supported by the host`.
+- **Cause:** SDK 3.5.1's constructor is `Decoder(DecoderType, DecoderOutputFormat)` (`_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatE`, `subsdk1+0x2de630`: it builds `DecoderImpl(type, format)`), a third form after [SDK 4's](#sdk-4s-moviedecoder-constructor-without-a-priority): the SDK built its own decoder, as on SDK 4. That SDK has no decoder mode: its decoders work on the CPU. And its output formats are numbered one lower than later SDKs': `DecoderImpl` keeps the format at +0xdc and the type at +0xe0, `ConvertDecoderOutputFormat` (`subsdk1+0x2dd16c`) converts format 2 to ARGB and copies format 3 out as NV12 with stride = width, the UV rows right after the Y rows, and `GetOutputBufferSize` (`subsdk1+0x2dcde8`) gives w × h × 4 for 2 and w × h × 1.5 for 3; format 1 is PCM16 as later. Its `GetOutputBufferSize` also puts 0x20, an alignment, in the second output, where SDK 4 and later put the decoder mode (Metroid Dread `subsdk0+0x11f308`: `str w8,[x2]` with the mode, 1 for the CPU).
+- **Fix:** the two-argument constructor is taken over as a CPU-mode decoder (mode 1) with format 3 as NV12 and 2 as ABGR (`h_movie_Decoder3` in `hle_movie.c`), and its decoders report 0x20 as `GetOutputBufferSize`'s second output (`out_align`). The host's NV12 already has the SDK 3 layout (`md_nv12`).
+- **Found on:** [Hyrule Warriors: Definitive Edition](../../dm/games/0100AE00096EA000/README.md) (SDK 3.5.1, H.264 MP4 movies through its own player): the title's background and the opening movie play.
+
 ### The complete-object destructor
 
 - **Cause:** the game calls the complete-object destructor `movie::Decoder::~Decoder` (`D1`); the SDK's own one destroyed the host object as a `DecoderImpl`.
@@ -209,6 +216,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 ### Vorbis movie sound
 
 - Movie sound in [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0): the decoder is asked for type 5 (Vorbis) with output format 1 (PCM16); see the other entries in this file and `hle_movie.c`.
+
+### Vorbis sound stops for good after a Flush
+
+- **Symptom:** a movie with a Vorbis track plays its first seconds with sound; after the game flushes and restarts it (a seek, a loop, or the app losing and regaining focus) the picture goes on but the sound does not come back, for the rest of the movie. The log shows `[movie] Flush`, `Flush`, `Start`, `Start` and no more `GetOutputBuffer … → PCM` lines. With `DM_AUDIO_DUMP`, the game's mix is real audio up to the flush and exact zeros from then on, so the AudioUnit is not at fault (0 underruns).
+- **Cause:** `h_movie_Flush` called `stb_vorbis_flush_pushdata` on the Vorbis decoder, which puts it into its page search mode. The packets `md_vorbis` hands it afterwards (each wrapped as one whole Ogg page) gave no sample: in a test on a generated stream, none of the next 100 packets did, whether the stream went on or started again from its first packet.
+- **Fix:** a Flush closes the Vorbis decoder, and the next packet opens it again from the headers (`md_vorbis_open`), as at the start of a stream. `t_movie_vpx` builds a small Vorbis stream, flushes twice and checks that the same samples come again.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, iPhone: the opening movie, after the app lost focus once. [#505](https://github.com/seedds/nxnative/issues/505) reported the same silence and was closed after a reinstall, with the app having been backgrounded once in the silent session).
 
 ## Movie players
 

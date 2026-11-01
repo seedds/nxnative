@@ -33,7 +33,7 @@ def size_store(img, call, start, md):
     vals, stores, x1_at = {}, [], None   # register → ('c', constant) | ('page',) | ('lo', the low 12 bits of an address)
     for ins in md.disasm(img[a:call], a):
         ops, m = ins.operands, ins.mnemonic
-        reg = lambda o: ins.reg_name(o.reg)
+        reg = lambda o, ins=ins: ins.reg_name(o.reg)
         if m == 'str' and reg(ops[0]).startswith('x') and ops[1].type == ARM64_OP_MEM and not ins.writeback and ops[1].mem.index == 0:   # str xS, [xB, #o]
             stores.append((ins.address, int(reg(ops[0])[1:]) if reg(ops[0]) != 'xzr' else None, ops[1].mem.disp, vals.get(reg(ops[0]))))
             continue

@@ -76,6 +76,7 @@ run profile python3 "$aot/tests/test_profile.py" --nxaot "$build/nxaot" --nxaot-
 llvm_bin=/usr/lib/llvm-18/bin
 run pack_windows python3 "$aot/tests/test_pack_windows.py" --nxaot "$build/nxaot" --readobj "$llvm_bin/llvm-readobj" --objdump "$llvm_bin/llvm-objdump" --work "$build/pack_windows"
 run analysis_threads python3 "$aot/tests/test_analysis_threads.py" --nxaot "$build/nxaot" --work "$build/analysis_threads"
+run corpus_funcdiff_c python3 "$aot/tests/test_funcdiff.py" --nxaot "$build/nxaot" --nxaot-funcdiff "$build/nxaot_funcdiff" --tier C --work "$build/funcdiff_c"
 run opcodes "$build/nxaot" opcodes
 run bench "$build/nxaot_bench" --iterations 200000 --work "$build/bench"
 
@@ -94,6 +95,7 @@ total_line="$total runs: $passed passed, $failed failed"
     grep -h '^corpus reference run:' "$logs/corpus_ref.log" 2>/dev/null
     grep -h '^corpus native run:' "$logs/corpus_native.log" 2>/dev/null
     grep -h '^corpus per-function differential test' "$logs/corpus_funcdiff.log" 2>/dev/null
+    grep -h '^corpus per-function differential test' "$logs/corpus_funcdiff_c.log" 2>/dev/null
     grep -h '^corpus JIT run:' "$logs/corpus_jit.log" 2>/dev/null
     grep -h '^corpus threads:' "$logs/corpus_threads.log" 2>/dev/null
     grep -h '^safepoints:' "$logs/safepoints.log" 2>/dev/null

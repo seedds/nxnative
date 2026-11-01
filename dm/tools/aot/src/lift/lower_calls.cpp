@@ -385,6 +385,15 @@ void FunctionLifter::FnDataflow() {
             nzcv_live.insert(pc);
         }
     }
+    for (auto& [pc, block] : blocks) {
+        bool out = out_unknown[pc];
+        for (const uint64_t n : succs[pc]) {
+            out = out || (blocks.count(n) && live_in[n]);
+        }
+        if (out) {
+            nzcv_live_out.insert(pc);
+        }
+    }
 }
 
 // ---- Values ----
@@ -460,6 +469,12 @@ void FunctionLifter::ReloadRegs(const Regs& r) {
         }
     }
     if (r.nzcv) {
+        if (deferred_nzcv && in_terminator) {
+            error = "internal: NZCV reloaded on one path of a terminator while its flags are deferred";  // never so: a deferred NZCV
+                                                                                                     // reaches the terminator only
+                                                                                                     // where nothing after it reads it
+        }
+        deferred_nzcv = nullptr;  // the block's copy replaces them
         const Flags f = UnpackNzcv(LoadField(B.getInt32Ty(), offsetof(dm_guest_state, nzcv)));
         B.CreateStore(f.n, flag[0]);
         B.CreateStore(f.z, flag[1]);

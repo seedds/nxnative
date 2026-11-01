@@ -61,7 +61,8 @@ docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 # configure, build, CTest (the vectors, the crypto vectors for x86-64-v3, the per-operation NaN mode, the reach check, the census, the vectors-current
 # check, discovery over the corpus, the manifest test, the corpus reference run, the fp cases current, the corpus run natively, the per-function
 # differential test, the JIT fallback's three modes, the threaded programs, the safepoint pause test, the pack caches, the indirect calls'
-# reloads and the standard entries' signature, the line tables, functions split for size, tiers by profile, Windows packs, the analysis on threads); --tmpfs
+# reloads and the standard entries' signature, the line tables, functions split for size, tiers by profile, Windows packs, the analysis on threads,
+# the differential test at tier C); --tmpfs
 # /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on a machine short of disk
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
@@ -84,7 +85,7 @@ packs"). The build tree takes about 74 MB, and the tests' objects and shared obj
 machine (8 vCPUs) the CTest run takes about 11 minutes (639 s with ABI 3, 18 tests): the vectors 4 of them, corpus_native 1.4 and corpus_funcdiff
 1.7, corpus_jit, corpus_threads and safepoints 33 s together, cache 20 s, plan 2 s and lines 25 s. Phase 5b's two (20 tests): split 43 s and
 profile 7 s; with `ctest -j2` the whole run took 342 s. Phase 5c's `analysis_threads` (21 tests): 42 s; the whole run 681 s on a machine other
-builds were loading (cache 16 s).
+builds were loading (cache 16 s). Phase 5d's `corpus_funcdiff_c` (23 tests): 94 s; the whole run with `ctest -j2` 394 s.
 
 ## Running the harness and the census
 
@@ -1030,12 +1031,13 @@ CTest's new tests take about 33 s (`corpus_jit`), 11 s (`corpus_threads`) and 7 
 
 Phase 5 (design sections 9.3, 10 and 13): where the pack stage's time went, the causes fixed, the units compiled on worker threads and the
 per-function cache (phase 5a, the first sections below), then the compile stage's rate, functions split for size, units of several functions,
-the analysis cache and tiers by profile (phase 5b, "Phase 5b" below), then the analysis on the workers (phase 5c, "Phase 5c" below). No game
-module is on the development machine, so the corpus and a
+the analysis cache and tiers by profile (phase 5b, "Phase 5b" below), then the analysis on the workers (phase 5c, "Phase 5c" below), then the
+compile stage's rate per core at tiers C and W (phase 5d, "Phase 5d" below). No game module is on the development machine, so the corpus and a
 game-shaped benchmark are measured and the rest is extrapolated per instruction.
 
 ```sh
 build/aot/nxaot build <module> --shared <lib.so> [-o <object.o>] [--workers N] [--cache <dir>] [--profile <file>] [--time-passes] [--ir <file.ll>]
+                      [--isel-misses]
 python3 dm/tools/aot/tests/gen_bench.py --functions 4000 /tmp/bench          # the game-shaped benchmark, in the nxnative-aot image
 NXAOT_ARGS='--cache /tmp/aot-cache' sh dm/tools/aot/tests/build_packs.sh build/aot /tmp/packs   # the corpus packs, cached
 ```
@@ -1788,6 +1790,265 @@ both warm repacks, and now Monster Hunter Rise's max pack at r = 0.7.
   import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5b left them.
 - The runner [tests/run_aot_tests.sh](tests/run_aot_tests.sh) lists its tests by hand and does not run `analysis_threads` yet.
 
+### Phase 5d
+
+The compile stage's rate per core at tiers C and W, the two that the balanced packs compile: with a profile 90 % of the functions are at tier C,
+without one every function is at tier W. In this order: where tier C's time went, FastISel's coverage, fewer IR instructions per
+guest instruction, tier W's passes, the loader's data blocks, and gap code (not done, 6). Measured as phase 5c was, on the same machine and
+benchmarks, with phase 5c's binary (55d53ad) built beside this one and measured in the same sessions; other agents' builds loaded the machine
+at times (the one-minute load average of the runs is given where it mattered; best of 3 unless said). Checked by CTest 23 of 23
+(`corpus_funcdiff_c` new: the per-function differential test with every function at tier C; `corpus_native` runs the corpus at tier C too): the
+vectors at 0 mismatches (179,296; the x86-64-v3 crypto set 9,600; the per-operation NaN mode 20,856), the per-function differential test at 0
+failures of 3,724 runs at tier W and of 3,724 at tier C, every corpus NRO printing its expected output natively in all five configurations,
+`analysis_threads` and `pack_windows` green, and the analysis's outputs byte for byte phase 5c's (5 below).
+
+```sh
+build/aot/nxaot build <module> --shared <lib.so> --tier C --isel-misses   # FastISel's misses by kind and the IR they hand to SelectionDAG
+python3 dm/tools/aot/tests/test_funcdiff.py --nxaot build/aot/nxaot --nxaot-funcdiff build/aot/nxaot_funcdiff --work /tmp/fd --tier C
+python3 dm/tools/aot/tests/gen_bench.py --functions 4000 --data-rows 5000 --nxaot build/aot/nxaot /tmp/bench   # rows/: 5,000 more data rows
+```
+
+`--isel-misses` (no cache: every unit is compiled) logs `aot: fastisel misses <n>, IR instructions to SelectionDAG <m>` and a line per kind
+of miss: `aot: fastisel miss <count> <IR instructions> <kind>`, the kind being the remark's (a call, which SelectionDAG compiles alone; a
+terminator, for which it compiles the whole block; another instruction, for which it compiles the block up to it; a function's arguments)
+and the IR it names without its operands. `--time-passes` now also prints LLVM's other timer groups (SelectionDAG's phases, the
+AsmPrinter's handlers).
+
+#### 1. Where tier C's time went
+
+LLVM's pass timers are no measure of code generation here: with `--time-passes` the 4,000-function benchmark's code generation at tier C took
+32.8 s on one worker, against 16.1 s summed over eight without them, because SelectionDAG times each of its phases per DAG and the
+AsmPrinter each of its handlers per machine instruction, each timer a `getrusage` (the AsmPrinter came out at 33 % of the passes' time, the
+DWARF handlers at half of it, mostly the timers' own system time). The shares below are from a sampling profiler instead (`SIGPROF` every
+millisecond of CPU time, each sample's backtrace symbolised against libLLVM's exported symbols and nxaot's own; a measurement tool, not in the
+repository), each sample counted for the most specific stage its stack names; the passes' timers ordered the IR passes. Phase 5c's binary, the
+4,000-function benchmark, every function at tier C, 8 workers; the compile is everything but the analysis (12,484 samples):
+
+| Stage | Share of the compile | |
+|---|---:|---|
+| SelectionDAG for FastISel's misses | 35.3 % | building, combining, legalising, selecting and scheduling DAGs |
+| FastISel | 1.1 % | |
+| instruction selection's own set-up, arguments | 1.8 % | |
+| InstCombine | 16.1 % | |
+| SROA | 7.7 % | |
+| SimplifyCFG, DCE | 0.8 % | |
+| machine passes (the fast register allocator, frame lowering, the FP stackifier, vzeroupper, ...) | 10.1 % | |
+| AsmPrinter: instructions | 3.4 % | MC encoding |
+| AsmPrinter: DWARF | 1.9 % | line rows, one per guest instruction (`--no-debug-info`: 11 % less compile CPU, 22.92 against 20.38 s) |
+| MC layout and the object | 0.9 % | relaxation, the ELF writer |
+| lifting | 13.3 % | |
+| the verifier | 2.9 % | |
+| the unit's fixed cost | 4.6 % | the code generation pass manager's set-up 2.2 %, the kit and entries 0.6 %, cache keys and line marks 0.7 %, the rest of `CompileUnit` 1.1 % |
+| other | 1.0 % | |
+
+Of the optimisation and code generation, the part the rate per core counts, SelectionDAG was 43 %: tier C was mostly not compiled by FastISel.
+FastISel missed 54,661 times and handed 960,035 of the 1,429,166 IR instructions (67 %) to SelectionDAG; by the IR instructions each kind of
+miss handed over (measured by the instrumented binary with phase 5c's tier C pipeline and no preparation, which gives phase 5c's counts):
+
+| Miss | Count | IR to SelectionDAG | Cause |
+|---|---:|---:|---|
+| terminator: `br i1` | 9,258 | 481,453 | a vector NaN check's compare of `<4 x i1>` as an `i4` (the code generator's ExpandReductions makes it of `vector.reduce.or`), or the next |
+| terminator: `br label` | 6,237 | 142,291 | the returned struct's phi: SimplifyCFG's tail merging joins the returns into `common.ret`, a phi of `{x0, x1, v0..v3}`, which FastISel has no register for; every block that ends in a guest call branches there (its pending check) |
+| terminator: `ret {...}` | 5,334 | 123,615 | a swifttailcc return (X86FastISel takes the C conventions): the block before it went with it |
+| `fptoui double` | 768 | 45,754 | to i64: no x86 instruction before AVX-512 |
+| `load atomic` | 1,673 | 44,604 | the inline caches' slot (unordered): X86FastISel selects no atomic load |
+| `fmul <4 x float>` | 2,077 | 27,755 | a vector constant operand, which FastISel cannot materialise |
+| terminator: `ret i32`, `ret <4 x i32>` | 970, 448 | 16,039, 11,200 | the NaN helpers' bodies (preserve_all), a copy in every unit that used them |
+| `extractelement`, `insertelement`, `store <2 x i64>` (a constant), `switch` | 2,619 | about 40,000 | no selection for vector elements; a constant vector; no switch lowering |
+| calls: the NaN helpers 13,069, the safepoint 3,168, the dispatcher 1,673, `fshl` 1,333 | 19,243 | 19,243 | SelectionDAG compiles the call alone |
+| arguments | 6,014 | 6,014 | swifttailcc arguments (X86FastISel lowers the C convention's only) |
+
+#### 2. FastISel's coverage
+
+After the tier's passes, tier C's IR is rewritten into what FastISel selects ([src/build/pack.cpp](src/build/pack.cpp), "Tier C's code for
+FastISel"), each rewrite the same operation (the same machine code, or SelectionDAG's own expansion of it):
+
+- **The returns split again** (`SplitCommonReturns`): each predecessor of `common.ret` returns its own value; **struct phis scalarised**
+  (`ScalarizeStructPhis`: InstCombine's fold of the same field of two calls' results into a phi of the results; 194 such phis); **a return
+  block split** before its `insertvalue` chain and return, or before a `musttail` call and its return (`SplitReturnBlocks`), so that
+  SelectionDAG compiles those alone and FastISel the stores before them.
+- **The NaN checks' lane masks** (`LaneMasks`): `vector.reduce.or` of `fcmp uno` becomes `cmpunordps` / `cmpunordpd` and `movmskps` /
+  `movmskpd` (the instructions SelectionDAG makes of it; two calls SelectionDAG compiles alone) and a scalar compare; of IsNaN's
+  `icmp ugt (and x, ~sign), c` an add of `SMAX - c`, whose lanes' sign bits are the compare's (the and leaves at most SMAX), then the mask.
+- **`fptoui` to i64** (`ExpandFPToUI`) as SelectionDAG expands it: below 2^63 a signed conversion, else the signed conversion of x - 2^63 (exact
+  there) with the top bit set; to i32 the signed conversion to i64, truncated.
+- **The inline caches' slot and the safepoint flag** (`PlainAtomicLoads`): an unordered or monotonic load of at most 8 naturally aligned bytes
+  becomes a volatile load, one mov either way; neither is removed or moved across another volatile access after the passes. Acquire loads stay.
+- **Vector constants** (`LoadVectorConstants`) loaded from a constant of the unit (SelectionDAG's constant-pool load), in front of the
+  instructions FastISel selects; a mask of `i1` lanes stays a constant.
+- **The NaN helpers once per pack** ([src/lift/lower_fp.cpp](src/lift/lower_fp.cpp), `NaNCall`, `DefineNaNHelpers`): the units declare them
+  and the tables' object defines all 18 (arity 1 to 3; half, single and double precision, scalar and 128-bit vectors); they depend on nothing
+  else. 1,418 copies over the benchmark's 688 units are gone, at every tier (the units' objects 0.78 MB smaller at tier W); a region (the
+  vector harness, the JIT of nxaot_bench) still defines its own.
+- **Rotates and `extr` by a constant as shifts** ([src/lift/lifter.cpp](src/lift/lifter.cpp), `FunnelRight`): dynarmic's `ubfm`, `sbfm` and
+  `bfm` are a rotate by an immediate and a mask, and the `fshr` intrinsic is a call FastISel hands to SelectionDAG (32,304 of them on the
+  benchmark once InstCombine no longer turned them into shifts, 4); InstCombine turns the shifts back into the intrinsic where it is a
+  rotate, so tier W's code is the same (the pack the same size).
+
+Left to SelectionDAG, as single calls or small blocks: swifttailcc calls, returns and arguments (X86FastISel's `fastLowerCall` refuses
+tail-callable conventions, `X86SelectRet` SwiftTail, `fastLowerArguments` takes the C convention only), the preserve_all calls (the NaN
+helpers, the safepoint, the dispatcher), the vector element operations (FastISel has no selection for `insertelement`, `extractelement`,
+`shufflevector`, a select or compare of vectors) and `switch`. On the benchmark at tier C with this phase's binary:
+
+| | phase 5c | phase 5d |
+|---|---:|---:|
+| FastISel's misses | 54,661 | 57,377 (30,688 calls, each compiled alone; 16,733 returns with their `insertvalue` chains; 4,596 functions' arguments) |
+| IR instructions handed to SelectionDAG | 960,035 of 1,429,166 (67 %) | 206,119 of 1,646,552 (12.5 %) |
+| the largest left | `br i1`, 481,453 | `insertelement <4 x i32>` 73,104, returns 38,218, `extractelement` 25,982, vector selects 14,436, `switch` 7,444 |
+| SelectionDAG's share of the compile (the profiler) | 35.3 % | 21.8 % |
+
+#### 3. Fewer IR instructions per guest instruction
+
+| 4,000-function benchmark (533,160 instructions) | phase 5c | phase 5d |
+|---|---:|---:|
+| IR instructions before the passes (`--ir`) | 4,047,934 (7.59 per instruction) | 3,055,859 (5.73) |
+| after tier C's passes (`--ir-opt`) | 1,429,166 (2.68) | 1,646,552 (3.09: InstSimplify in place of InstCombine, and 2's loads) |
+| after tier W's passes | 1,262,033 (2.37) | 1,237,360 (2.32) |
+
+- **The general registers forwarded within a block** ([src/lift/lifter.cpp](src/lift/lifter.cpp), `ForwardGeneralRegisters`, beside the
+  lifter's `ForwardVectorRegisters`): a GetX after a SetX of the register (GetW after SetW, GetSP after SetSP) takes the value written, and a set
+  the block overwrites before reading the register is dead. svc and the exceptions that leave end their block, so nothing inside a block
+  reads the registers' allocas but the gets. Measured on the same binary with and without it: 4,085,375 IR instructions before the passes to
+  3,107,972 (-24 %; loads of the allocas 1,126,641 to 671,511, stores 928,197 to 631,317); after the passes the same (mem2reg did the same
+  forwarding). NZCV is not forwarded ("Known issues", 1).
+- **NZCV made lazily** (`MaterializeNzcv`): a flag-setting operation's flags reach the allocas only when something reads them there (a raw
+  read, a condition its origin does not give, a store of NZCV to the block) or when NZCV is live after its block; a compare that only its own
+  branch or select reads (through its origin) makes none. The 19,750 flag-setting operations made 107,687 instructions and 4 stores each;
+  lazily, 52,113 instructions fewer before the passes (-1.7 %; phase 5b had estimated the unused flags at 3 % of InstCombine's input). Most
+  flags are live after their block: the function's NZCV liveness counts every call, return and exit as a reader (a call stores a dirty NZCV
+  to the block, which holds the whole register file for the callee's safepoints: design 2.3, 6.2).
+- **The polls**: unchanged in what they do (design 6.2: a poll at every function entry that calls and at every backward branch). The hot path is
+  one load (volatile at tier C, 2), a compare and a branch; the cold path stores the registers newer than the block and calls the safepoint
+  through a preserve_all wrapper, which the block's invariant needs. They are 10 % of tier C's text (12.92 MB, 11.68 with `--no-safepoints`);
+  their compile time was not separable from the noise of these runs (load 4 to 7).
+- **The stores at calls and returns**: checked against the summaries. A return stores `dirty & LIVE_AFTER & WRITES` less what it returns
+  (`FnReturn`); after a call only `WRITES(callee)` is reloaded; before a call every dirty register the callee is not passed is stored, which is
+  the block's invariant of design 2.3 (a callee's safepoint, gate or JIT continuation must find the caller's registers there), not something
+  a summary may narrow.
+- **The 32-bit forms**: a GetW after a SetW is forwarded (above); what the builder folds (a truncation of an extension) is never made.
+- **The NaN chains**: the hot path's inline part is the check (2); the cold path calls the pack's helpers (2).
+
+#### 4. Tier W's pipeline
+
+Phase 5b's tier W ran LLVM 18's O1 function simplification pipeline whole. Its passes on this IR, one at a time (the 4,000-function
+benchmark; the passes' seconds from `--time-passes` on one worker, with this phase's lowering; the text of the pack without the pass; int_ops'
+run time natively without it, fastest of 5 runs in each of 3 interleaved rounds, the O1 pipeline 74.42 ms):
+
+| Pass (O1's order) | Seconds | Text without it | int_ops without it |
+|---|---:|---:|---:|
+| SROA (the first) | 2.21 for both | mem2reg in its place: -2,627 bytes | 73.85 ms with mem2reg |
+| EarlyCSE | 1.46 | +55,946 bytes (+0.9 %) | 72.18 ms |
+| SimplifyCFG (four times) | 0.61 for the four | | |
+| InstCombine (four times) | 9.05 for the four | | |
+| LibCallsShrinkWrap, MemCpyOpt, CoroElide, ADCE, the second SROA | 0.45 and the SROA's share | the same pack, byte for byte | 74.29 ms |
+| Reassociate | 0.42 | -30,010 bytes (-0.5 %) | 72.35 ms |
+| the loop passes (LICM twice, LoopRotate, SimpleLoopUnswitch, LoopInstSimplify, LoopSimplifyCFG; LoopIdiomRecognize, IndVarSimplify, LoopDeletion, LoopFullUnroll) | about 1.6 with MemorySSA | -1,275 bytes | 72.40 ms |
+| the second InstCombine | with the third and fourth 5.3 (the first alone 3.75: below) | +80 bytes | 75.41 ms |
+| SCCP, BDCE | 0.91 | +2,204 bytes | 75.57 ms |
+| the third and fourth InstCombine | | +340 bytes | 75.30 ms |
+
+int_ops' run times vary by about 3 % between the rounds; none of the passes left out is outside that, and the loop passes cost it 8 % more
+code (60,159 bytes without them, 65,837 with). The guest's memory accesses are volatile, so LICM, the loop idiom pass and loop deletion move or
+remove nothing that matters. Tier W is now ([src/build/pack.cpp](src/build/pack.cpp), `Optimise`): mem2reg, EarlyCSE (with MemorySSA),
+SimplifyCFG, InstCombine, SimplifyCFG, SCCP, BDCE, SimplifyCFG (O1's SimplifyCFG options). Its passes on the same measure: InstCombine 3.75 s,
+EarlyCSE 1.33, mem2reg 0.70, SCCP 0.54, SimplifyCFG 0.53, BDCE 0.35: 7.2 s and 0.3 s of analyses, against the O1 pipeline's 16.3 s and 0.6 s.
+Measured against O1 on the same lowering:
+
+| 4,000-function benchmark, tier W, 8 workers | O1 function pipeline | phase 5d's |
+|---|---:|---:|
+| optimisation, CPU seconds | 14.34 | 6.54 |
+| code generation, CPU seconds | 34.27 | 34.57 |
+| text | 5,963,951 | 5,936,703 (-0.5 %) |
+| int_ops natively (fastest, 5 rounds of 5) | 75.00 ms | 72.56 ms |
+| the benchmark natively (fastest, 2 rounds of 3; most of it is its 7,818 runs in the JIT fallback) | 1,591.7 ms | 1,575.8 ms |
+| the calls programs (`nxaot_bench --sections calls`, tier W rows) | | within their noise (about 10 %) of each other |
+
+The register allocator's spills and reloads (`--spills`) on five corpus NROs, O1 against phase 5d: fnptr-gcc 372 / 912 against 381 / 1,072,
+switch-gcc 1,385 / 3,110 against 1,309 / 3,011, int_ops-gcc 440 / 1,456 against 390 / 1,427, fp-gcc 447 / 1,289 against 444 / 1,450, simd-gcc
+670 / 3,345 against 564 / 2,467; the text 0.4 to 19 % smaller in each.
+
+Tier C, by the same measure: mem2reg in place of SROA (its optimisation's CPU 3.07 against 1.41 s, the text within 0.2 %), and InstSimplify in
+place of InstCombine (InstCombine was a fifth of tier C's compile, 18.53 against 14.86 s of CPU, for 9 % less code; the builder folds what
+InstSimplify folds already: phase 5b). Tier C's code is code the profile never sampled.
+
+#### 5. The loader's data blocks
+
+[src/module/image.cpp](src/module/image.cpp) (`Image::IndexData`, `InData`): the data blocks are merged into disjoint spans sorted by start
+when the module is loaded, and `InData`, which discovery's `TextCode` and the lifter's code reader ask per word, is a binary search over them
+(it scans the blocks themselves if they changed since). Discovery of the 4,000-function benchmark's behaviour image with 5,000 more data rows
+(`gen_bench.py --data-rows 5000`, 8 threads, fastest of 3): 9.78 s wall and 38.5 s CPU with phase 5c's binary, 2.15 s and 5.7 s now, the TSV
+byte for byte the same; without the rows 2.80 and 2.63 s, the same TSV. `test_analysis_threads.py --baseline` with phase 5c's binary: the
+corpus's 18 NROs, the synthetic modules and the 4,000-function benchmark with packs, the 16,000-function benchmark without (`--no-build`):
+every `discover` and `plan` output the same, which covers the data blocks, the general registers' forwarding (the jump tables' regions are
+lifted) and the rotates.
+
+#### 6. Gap code at tier C: not done
+
+As phases 5b and 5c left it: no module here has gap code (the benchmarks and the corpus have an FDE for every function), and a test input
+without FDEs (an NRO whose `.eh_frame_hdr` drops a function's entry) needs the corpus's toolchain to write; the change belongs to `Units`'
+tiers. Games without FDEs (FINAL FANTASY RESONANCE's 94 MB, 95 % without them) are where it matters.
+
+#### The packs after phase 5d
+
+Phase 5c's binary and this one measured in the same sessions (best of 3; the one-worker runs and the 16,000-function benchmark best of 1 and
+2); seconds; "compile CPU" is optimisation and code generation summed over the units, the rate guest instructions per second per core of it:
+
+| Pack | phase 5c: compile wall | compile CPU | rate per core | phase 5d: compile wall | compile CPU | rate per core | peak memory (5c, 5d) | text (5c, 5d) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| benchmark (4,000), tier C, 8 workers | 3.42 | 22.53 | 23,664 | 1.99 | 11.52 | 46,277 | 210..215, 212..216 MiB | 11.45, 12.92 MB |
+| benchmark (4,000), tier C, 1 worker | 29.42 | 24.30 | 21,936 | 17.84 | 12.94 | 41,190 | 127, 127 MiB | |
+| benchmark (4,000), tier W, 8 workers | 6.87 | 49.93 | 10,678 | 5.67 | 40.83 | 13,057 | 242..245, 233..245 MiB | 5.97, 5.94 MB |
+| benchmark (4,000), tier W, 1 worker | 59.88 | 54.45 | 9,791 | 50.91 | 45.75 | 11,652 | 127, 127 MiB | |
+| benchmark (4,000), a profile of 10 % (H 409, C 3,679), 8 workers | 4.03 | 27.32 | 19,518 | 2.62 | 16.49 | 32,328 | 223..230, 220..230 MiB | |
+| benchmark (4,000), the max mode (H+), 8 workers | 10.06 | 66.39 | 8,031 | 9.78 | 65.28 | 8,168 | 478..488, 448..453 MiB | 5.95, 5.95 MB |
+| benchmark (16,000), tier W, 8 workers (load 6 to 8) | 28.18 | 204.70 | 10,570 | 23.20 | 166.56 | 12,991 | 394..419, 379..380 MiB | |
+| benchmark (16,000), a profile of 10 %, 8 workers (load 8) | 16.92 | 114.00 | 18,980 | 11.26 | 70.56 | 30,664 | 369..380, 366..380 MiB | |
+| benchmark (16,000), tier C, 8 workers (load 8) | 14.22 | 93.22 | 23,213 | 8.55 | 48.98 | 44,174 | 364..386, 361..382 MiB | |
+| switch-gcc, tier W, 8 workers | 0.50 | 2.32 | 22,034 | 0.41 | 2.00 | 25,523 | 138..141, 128..129 MiB | |
+| switch-gcc, tier C, 8 workers | 0.20 | 0.98 | 52,300 | 0.15 | 0.50 | 101,383 | | |
+
+Tier C's rate per core doubled (1.96 times with 8 workers, 1.88 with one), tier W's rose by a fifth (1.22 and 1.19); with a profile the
+compile stage is 1.54 times as fast. Tier C's code is 13 % larger and runs slower (int_ops-gcc natively at tier C: 163.6 ms with phase 5c's
+binary, 171.7 ms now; the benchmark, mostly the JIT fallback, 1,477 and 1,615 ms): code the profile never sampled. Tier W's runs as fast (int_ops
+75.3 and 72.1 ms; the benchmark 1,472 and 1,476 ms); the max mode's unchanged within the noise (int_ops 65.1 and 66.7 ms). The profile's samples
+of where tier C's compile goes now (4,000-function benchmark, 8 workers): SelectionDAG 21.8 %, lifting 21.8 %, the machine passes 19.4 %, the
+AsmPrinter 11.3 % (DWARF 3.6 %), the IR passes 7.3 %, the verifier 4.1 %, FastISel 4.3 %, the code generation pass manager's set-up 3.1 %.
+
+#### Extrapolation to the games after phase 5d
+
+Phase 5c's model and assumptions, with phase 5c's analysis (S = 3.6 s and P = 24.0 s per 2,163,759 instructions: this phase changed neither its
+work nor its results) and the compile stage's rates of this phase on the 4,000-function benchmark with 8 workers (the instructions over the
+compile's wall time, as phase 5b and 5c took them): 94,000 instructions per second at tier W (phase 5c's binary in these sessions 77,600),
+203,500 with a profile of 10 % (132,300) and 54,500 in the max mode (53,000). Extrapolations, not measurements:
+
+| Pack | Mode | This machine, 8 workers | Reference machine (r = 0.7 .. 0.5) | after phase 5c | Target |
+|---|---|---:|---:|---:|---:|
+| Mario `main` and `sdk` | balanced, no profile (tier W) | 1.9 min | 4.2 .. 5.9 min | 5.0 .. 6.9 min | at most 3 min |
+| Mario `main` and `sdk` | balanced with a profile (10 % H, the rest C) | 1.1 min | 2.4 .. 3.3 min | 3.2 .. 4.5 min | at most 3 min |
+| Mario `main` and `sdk` | max (H+) | 3.0 min | 6.7 .. 9.4 min | 6.9 .. 9.7 min | at most 30 min |
+| Monster Hunter Rise `main` | balanced, no profile (tier W) | 7.1 min | 15.4 .. 21.6 min | 18.1 .. 25.3 min | at most 10 min |
+| Monster Hunter Rise `main` | balanced with a profile (10 % H, the rest C) | 4.1 min | 8.7 .. 12.1 min | 11.8 .. 16.5 min | at most 10 min |
+| Monster Hunter Rise `main` | max (H+) | 11.1 min | 24.5 .. 34.3 min | 25.2 .. 35.3 min | at most 30 min |
+
+With a profile both balanced packs meet their targets at r = 0.7 (Mario 2.4 minutes against 3, Monster Hunter Rise 8.7 against 10) and miss
+them by a tenth to a fifth at r = 0.5; the analysis is now a third of them (Mario's 47 of 144 s at r = 0.7). Without a profile the balanced
+packs stay 1.4 to 2.2 times their targets: tier W is code generation now (85 % of its compile). The max packs and the warm repacks are as
+phase 5c left them.
+
+#### What is left
+
+- **Tier C's vector element operations** (`insertelement`, `extractelement`, `shufflevector`, selects and compares of vectors: 125,000 of
+  the 206,119 IR instructions SelectionDAG still compiles at tier C on the benchmark, more in games, whose code has more floating point and
+  SIMD). FastISel selects none of them; splitting a block before its first and after its last such operation would leave SelectionDAG only
+  that span (estimated on the IR at an earlier step of this phase: 43 % fewer instructions handed over), at the cost of the fast register
+  allocator's spills at the new block boundaries.
+- **The calling convention at tier C**: swifttailcc's calls, returns and arguments are SelectionDAG's, one at a time (52,017 of tier C's
+  57,377 misses); LLVM 19's preserve_none is the convention to measure again when nxaot.lock moves (phase 1).
+- **Lifting** is now a fifth of tier C's compile, the machine passes another fifth, and the verifier 4 %.
+- **Code generation at tier W** (85 % of its compile): SelectionDAG and the greedy register allocator, as design 9.3 has it.
+- **The analysis** is a third of a balanced pack with a profile; **gap code at tier C**, **the cache across game updates**, **one process
+  per module**, **ThinLTO import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5c left them.
+
 ## The lock file
 
 [nxaot.lock](nxaot.lock) names the LLVM release (`18.1.3`) and the dynarmic commit. The configure step stops when the LLVM package differs, or when
@@ -1836,7 +2097,8 @@ vendored copy.
    (`ir/opt/a64_get_set_elimination_pass.cpp:67`), where NZCV bits 27:0 read as 0. Encoding: `d51b4200 d53b4201` (`msr nzcv, x0; mrs x1, nzcv`):
    with the pass, 56 of the 300 `msr_mrs` vectors differed (x1 = 0xfe947a5a from the reference, 0xf0000000 lifted, for x0 = 0xfe947a5a).
    The reference runs without that pass (`src/vec/reference.cpp`); the JIT fallback (design section 11) must too, or the pass be fixed upstream.
-   The lifter forwards vector registers only, in a pass of its own (`ForwardVectorRegisters`).
+   The lifter forwards the vector and the general registers and SP, not NZCV, in passes of its own (`ForwardVectorRegisters`,
+   `ForwardGeneralRegisters`).
 2. **`dc zva` at an unaligned address.** With `hook_data_cache_operations` off, dynarmic's `A64CallbackConfigPass` zeroes 64 bytes from the address
    itself (`ir/opt/a64_callback_config_pass.cpp:32`), not from the aligned block that holds it (read in the code, not run). Encoding: `d50b7420`
    with an unaligned `x0`. The reference takes the hook and zeroes the aligned block, as the Arm ARM's `dc zva` does.

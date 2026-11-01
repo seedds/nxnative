@@ -141,9 +141,18 @@ public:
     Value* OverflowOf(const IR::Inst& producer);
     Value* PackNzcv(const Flags& f);
     Flags UnpackNzcv(Value* packed);
+    Origin OriginOf(const IR::Inst& producer);  // FlagsFromOp's origin, no instruction made
+    // Function mode: the GetNZCVFromOp whose flags A64SetNZCV set last in the block and the allocas do not hold yet (lazily materialised NZCV,
+    // README.md, "Phase 5d"); MaterializeNzcv computes and stores them, before anything reads the allocas (CurrentFlags, GetCFlag), and at the
+    // block's end when NZCV is live after it (nzcv_live_out). While the terminator is lowered (in_terminator) a path that needs them makes
+    // them on that path and leaves them deferred for the others
+    const IR::Inst* deferred_nzcv = nullptr;
+    bool in_terminator = false;
+    void MaterializeNzcv();
 
     // ---- Integer helpers ----
     Value* Shift(IR::Opcode op, Value* v, Value* amount);
+    Value* FunnelRight(Value* hi, Value* lo, Value* amount);  // fshr; shifts and an or by a constant amount
     Value* Div(bool is_signed, Value* a, Value* b);
     Value* Crc32Iso(Value* crc, Value* data, unsigned bytes);
     Value* Crc32c(Value* crc, Value* data, unsigned bits);
@@ -190,6 +199,9 @@ public:
     Value* NaN3(Value* a, Value* b, Value* c, Value* r);
     bool cold_exact = false;                     // lowering a chain's cold recompute (Escape): NaN1 / NaN2 / NaN3 call NaNCall
     Value* NaNCall(unsigned arity, llvm::ArrayRef<Value*> args);  // the call of NaN<arity>'s out-of-line form for the arguments' type
+    // That form: nxaot.nan<arity>.<type>, a unit's own linkonce_odr copy, or a pack's shared one (declared, or defined: DefineNaNHelpers)
+    llvm::Function* NaNFunction(unsigned arity, llvm::Type* t, bool shared, bool define);
+    void DefineNaNHelpers();  // every shared form (lifter.h, DefineNaNHelpers)
     // FPMulAdd's invalid case: a quiet NaN addend with infinity times zero (zero as FPCR.FZ reads it), per lane; raises IOC when the flags are
     // modelled (x86's FMA returns the quiet NaN and raises nothing)
     Value* MulAddInvalid(Value* addend_bits, Value* op1_bits, Value* op2_bits);
@@ -275,6 +287,8 @@ public:
     std::set<uint64_t> svc_blocks;                      // blocks that end in svc (it stores the whole register file)
     std::set<uint64_t> nzcv_live;                       // block starts where NZCV is live (some path reads it before writing it): a poll there
                                                         // stores it, elsewhere it is dead and a poll leaves its block copy as it was
+    std::set<uint64_t> nzcv_live_out;                   // block starts whose block may have NZCV read after its end (a successor's live-in, a
+                                                        // call, return, svc or anything leaving the function)
     std::set<std::pair<const IR::Inst*, size_t>> relative;  // immediate arguments that are module offsets (base-relative addresses)
     decode::InstPcs inst_pcs;                           // the guest offset each IR instruction came from
     std::unordered_map<Value*, uint64_t> rel_values;    // the base + offset values made for relative immediates, with their offsets

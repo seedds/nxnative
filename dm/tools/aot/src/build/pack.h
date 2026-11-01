@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,7 @@ struct BuildOptions {
     uint64_t split_above = 8'192;                   // that limit in instructions; parts of a quarter to a half of it (--split-above, tests)
     std::string profile_path;                       // sampled guest offsets (--profile, design 9.3: tier H where sampled, tier C elsewhere)
     bool windows = false;                           // --target windows: a PE DLL for the Windows host ("Windows packs" in pack.cpp, coff.h)
+    bool isel_misses = false;                       // count FastISel's misses by kind (--isel-misses; no cache: every unit compiled)
 };
 
 struct BuildStats {
@@ -84,6 +86,8 @@ struct BuildStats {
     std::vector<std::string> notes;  // [RED] lines and remarks
     std::vector<std::string> imports;  // --target windows: the run-time entries the pack imports, sorted (imports.o: nxaot_imports)
     uint64_t coff_sections = 0, coff_symbols = 0, coff_relocations = 0;  // --target windows: the COFF object lld-link is given (coff.h)
+    // --isel-misses: FastISel's misses by kind, summed over the units: how many, and the IR instructions they handed to SelectionDAG
+    std::map<std::string, std::pair<uint64_t, uint64_t>> isel_misses;
 };
 
 // Compiles the module into objects, in link order: the tables' object, then one per unit (from the cache when options.cache_dir names one and

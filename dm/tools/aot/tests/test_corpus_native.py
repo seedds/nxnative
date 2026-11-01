@@ -9,7 +9,8 @@ test_corpus_jit.py's (CTest corpus_jit).
   test_corpus_native.py --nxaot <nxaot> --nxaot-host <nxaot_host> --nxaot-run <nxaot_run> --work <dir> [--configs a,b,...] [--nro <name>]...
 
 Configurations: swifttail and ghc in the balanced mode (tier W), the default convention (swifttail) in the correctness mode (every register through
-the state block at every call), and the default convention in the max mode (tier H+). Prints one line per NRO, convention and mode (the result, the
+the state block at every call), the default convention in the max mode (tier H+), and every function at tier C (FastISel, and the code it is
+given: README.md, "Phase 5d"). Prints one line per NRO, convention and mode (the result, the
 lines, the guest run time natively and under dynarmic; the dynarmic time includes its JIT's compilation, the native one does not: that is the pack's)
 and the totals. Exit 0 when everything matched.
 """
@@ -28,6 +29,7 @@ CONFIGS = {
     'ghc': ('ghc', 'balanced', ['--cc', 'ghc']),
     'correctness': ('swifttail', 'correctness', ['--correctness']),
     'max': ('swifttail', 'max', ['--mode', 'max']),
+    'tierc': ('swifttail', 'tier C', ['--tier', 'C']),
 }
 
 
@@ -64,7 +66,7 @@ def main():
     ap.add_argument('--nxaot-host', required=True)
     ap.add_argument('--nxaot-run', required=True)
     ap.add_argument('--work', required=True)
-    ap.add_argument('--configs', default='swifttail,ghc,correctness,max')
+    ap.add_argument('--configs', default='swifttail,ghc,correctness,max,tierc')
     ap.add_argument('--nro', action='append', default=[])
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)

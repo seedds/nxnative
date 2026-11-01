@@ -4,7 +4,11 @@ corpus.tsv built with --all-entries (every function gets a standard entry) in th
 summary-driven mode, where what the convention hands a caller is compared; nxaot_funcdiff runs every function from the same register and memory
 snapshot under the recompiled code and under dynarmic.
 
-  test_funcdiff.py --nxaot <nxaot> --nxaot-funcdiff <nxaot_funcdiff> --work <dir> [--seeds N] [--cc swifttail|ghc] [--nro <name>]...
+  test_funcdiff.py --nxaot <nxaot> --nxaot-funcdiff <nxaot_funcdiff> --work <dir> [--seeds N] [--cc swifttail|ghc] [--tier C|W|H|H+]
+                   [--nro <name>]...
+
+--tier builds every function at that tier (CTest corpus_funcdiff_c: tier C, whose code FastISel selects: README.md, "Phase 5d"); without it
+the balanced mode's tier W.
 
 Exit 0 when no run differs.
 """
@@ -25,6 +29,7 @@ def main():
     ap.add_argument('--work', required=True)
     ap.add_argument('--seeds', default='3')
     ap.add_argument('--cc', default='swifttail')
+    ap.add_argument('--tier', default='')
     ap.add_argument('--nro', action='append', default=[])
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)
@@ -42,7 +47,8 @@ def main():
         path = os.path.join(CORPUS, 'nro', nro)
         for mode, flags in (('correctness', ['--correctness']), ('summary', [])):
             so = os.path.join(a.work, f'{nro[:-4]}.{mode}.all.so')
-            b = subprocess.run([a.nxaot, 'build', path, '-o', so[:-3] + '.o', '--shared', so, '--all-entries', '--cc', a.cc] + flags,
+            tier = ['--tier', a.tier] if a.tier else []
+            b = subprocess.run([a.nxaot, 'build', path, '-o', so[:-3] + '.o', '--shared', so, '--all-entries', '--cc', a.cc] + tier + flags,
                                capture_output=True, text=True)
             if b.returncode != 0:
                 bad += 1
@@ -60,7 +66,8 @@ def main():
                 continue
             total_compared += int(m.group(2))
             print(f'{nro:<20} {mode:<12} {m.group(1):>9} {m.group(2):>9} {m.group(3):>10}  {other}')
-    print(f'corpus per-function differential test ({a.cc}): {len(nros)} NROs x 2 modes, {total_compared} runs compared, {bad} failures')
+    print(f'corpus per-function differential test ({a.cc}{", tier " + a.tier if a.tier else ""}): {len(nros)} NROs x 2 modes, '
+          f'{total_compared} runs compared, {bad} failures')
     return 1 if bad else 0
 
 

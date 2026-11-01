@@ -501,13 +501,35 @@ std::optional<uint64_t> Image::U64(uint64_t off) const {
     return v;
 }
 
-bool Image::InData(uint64_t off) const {
+void Image::IndexData() {
+    std::vector<std::pair<uint64_t, uint64_t>> blocks;
     for (const auto& b : data_blocks) {
-        if (off >= b.lo && off < b.hi) {
-            return true;
+        if (b.lo < b.hi) blocks.emplace_back(b.lo, b.hi);
+    }
+    std::sort(blocks.begin(), blocks.end());
+    data_spans.clear();
+    for (const auto& [lo, hi] : blocks) {
+        if (!data_spans.empty() && lo <= data_spans.back().second) {
+            data_spans.back().second = std::max(data_spans.back().second, hi);  // overlapping or adjacent: one span
+        } else {
+            data_spans.emplace_back(lo, hi);
         }
     }
-    return false;
+    data_spans_of = data_blocks.size();
+}
+
+bool Image::InData(uint64_t off) const {
+    if (data_spans_of != data_blocks.size()) {
+        for (const auto& b : data_blocks) {
+            if (off >= b.lo && off < b.hi) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // The last span starting at or before off
+    auto it = std::upper_bound(data_spans.begin(), data_spans.end(), off, [](uint64_t v, const auto& span) { return v < span.first; });
+    return it != data_spans.begin() && off < std::prev(it)->second;
 }
 
 std::string Image::Sha256Hex() const {
@@ -612,6 +634,7 @@ std::optional<Image> LoadModule(const std::string& path, std::string* error) {
         NroDataBlocks(m);
     }
     std::sort(m.data_blocks.begin(), m.data_blocks.end(), [](const DataBlock& a, const DataBlock& b) { return a.lo < b.lo; });
+    m.IndexData();
     return m;
 }
 

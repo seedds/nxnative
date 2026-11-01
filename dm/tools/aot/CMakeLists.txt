@@ -228,3 +228,8 @@ set_tests_properties(vectors vectors_v3 vectors_perop opcodes_reach census disco
 add_test(NAME analysis_threads COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_analysis_threads.py"
          --nxaot $<TARGET_FILE:nxaot> --work "${CMAKE_CURRENT_BINARY_DIR}/analysis_threads")
 set_tests_properties(analysis_threads PROPERTIES TIMEOUT 900)
+# Phase 5d (aot-recompiler.md section 9.3): every function of every NRO at tier C against dynarmic from the same snapshot (the code FastISel
+# selects, with the IR tier C prepares for it: README.md, "Phase 5d"); corpus_native runs the corpus at tier C too
+add_test(NAME corpus_funcdiff_c COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_funcdiff.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-funcdiff $<TARGET_FILE:nxaot_funcdiff> --tier C --work "${CMAKE_CURRENT_BINARY_DIR}/funcdiff_c")
+set_tests_properties(corpus_funcdiff_c PROPERTIES TIMEOUT 900)

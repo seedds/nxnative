@@ -12,6 +12,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "module/manifest.h"
@@ -74,6 +75,12 @@ struct Image {
     std::map<uint64_t, uint64_t> slot_targets;  // relocated 8-byte slots and the module offset each holds once relocated
     std::vector<Fde> fdes;        // sorted by start
     std::vector<DataBlock> data_blocks;  // sorted, in text
+    // The data blocks merged into disjoint spans sorted by start, for InData's binary search (IndexData; LoadModule builds it). InData asks
+    // per word whether it is code (the analysis's TextCode, the lifter's reads), so a game manifest's thousands of data rows made a linear scan
+    // per word (README.md, "Phase 5d"). Built for data_blocks as they were: InData scans data_blocks itself when their number changed since
+    std::vector<std::pair<uint64_t, uint64_t>> data_spans;
+    size_t data_spans_of = 0;  // data_blocks.size() when data_spans was built
+    void IndexData();
     std::optional<Manifest> manifest;
     std::vector<std::string> warnings;
 

@@ -183,6 +183,9 @@ struct FunctionPlan {
     std::function<llvm::Function*(uint64_t offset)> part_of;
     bool split = false;   // the function is split: part_of and restore apply (the part that holds its entry is a part too)
     Regs restore;
+    // The NaN chains' helpers (lower_fp.cpp, NaNCall) are the pack's, defined once in its tables' object (DefineNaNHelpers): the unit
+    // declares them. False: the module defines its own copies (linkonce_odr), as a region does
+    bool shared_nan_helpers = false;
 };
 
 // The FPCR bits a block is specialised on: dynarmic's location descriptor keeps the same (frontend/A64/a64_location_descriptor.h, fpcr_mask)
@@ -249,6 +252,11 @@ struct Lifted {
 
 // Lifts the region into module as a function called name. The module's data layout should be the target's (lift/jit.h sets it)
 Lifted LiftRegion(llvm::Module& module, const std::string& name, const Region& region, const decode::CodeReader& read, const LiftOptions& options = {});
+
+// The NaN chains' helpers of a pack (FunctionPlan::shared_nan_helpers), defined in module: nxaot.nan<1|2|3>.<type> for the integer bits of
+// half, single and double precision values, scalar and 128-bit vectors; hidden, preserve_all. They depend on nothing else (the default NaN
+// mode, FPCR.DN, makes no calls)
+void DefineNaNHelpers(llvm::Module& module, const LiftOptions& options);
 
 // dynarmic's text dump of the region's IR blocks, as the lifter sees them (nxaot_vec --dump)
 std::string DumpRegion(const Region& region, const decode::CodeReader& read, uint32_t fpcr = 0);

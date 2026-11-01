@@ -20,7 +20,7 @@
 //   nxaot build <module.nro | name.aot.tsv> [-o <object.o>] [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max] [--tier C|W|H|H+]
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
 //               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>]
-//               [--no-groups] [--no-split] [--split-above N] [--target linux|windows]
+//               [--no-groups] [--no-split] [--split-above N] [--target linux|windows] [--isel-misses]
 //                                                     the pack stage (src/build): every function of the module compiled, in units of
 //                                                     neighbouring functions (a function over the split limit in parts) on --workers threads
 //                                                     (0 or none: as many as the CPUs and the free memory allow), or taken from the cache
@@ -48,6 +48,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "analysis/census.h"
@@ -99,6 +100,7 @@ int Usage() {
                  "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes]\n"
                  "                   [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>] [--no-groups] [--no-split] [--split-above N]\n"
                  "                   [--target linux|windows]   (windows: a PE DLL --shared <name>.dll and / or a COFF object -o <object.obj>)\n"
+                 "                   [--isel-misses]\n"
                  "       nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>\n");
     return 2;
 }
@@ -603,6 +605,8 @@ int Build(int argc, char** argv) {
             o.split_above = std::max<uint64_t>(8, std::strtoull(argv[++i], nullptr, 10));  // CTest split: most of the corpus in parts
         } else if (a == "--profile" && has) {
             o.profile_path = argv[++i];
+        } else if (a == "--isel-misses") {
+            o.isel_misses = true;  // FastISel's misses by kind (tier C's instruction selection; README.md, "Phase 5d")
         } else if (a == "--target" && has) {
             const std::string v = argv[++i];
             if (v == "windows") o.windows = true;  // a PE DLL for the Windows host (README.md, "Windows packs")
@@ -723,6 +727,23 @@ int Build(int argc, char** argv) {
     std::printf("\n");
     std::printf("aot: line table %llu entries; gate sites %llu (design 1.1)\n", static_cast<unsigned long long>(s.line_entries),
                 static_cast<unsigned long long>(s.gate_sites));
+    if (o.isel_misses) {
+        // Each miss sends work to SelectionDAG: a call alone, else the block up to the instruction, or a function's arguments; by the IR
+        // instructions it sent there
+        uint64_t total = 0, to_dag = 0;
+        for (const auto& [kind, n] : s.isel_misses) {
+            total += n.first;
+            to_dag += n.second;
+        }
+        std::printf("aot: fastisel misses %llu, IR instructions to SelectionDAG %llu\n", static_cast<unsigned long long>(total),
+                    static_cast<unsigned long long>(to_dag));
+        std::vector<std::tuple<uint64_t, uint64_t, std::string>> rows;
+        for (const auto& [kind, n] : s.isel_misses) rows.emplace_back(n.second, n.first, kind);
+        std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a > b; });
+        for (const auto& [w, n, kind] : rows) {
+            std::printf("aot: fastisel miss %8llu %9llu  %s\n", static_cast<unsigned long long>(n), static_cast<unsigned long long>(w), kind.c_str());
+        }
+    }
     if (o.windows) {
         std::string list;
         for (const auto& i : s.imports) list += " " + i;

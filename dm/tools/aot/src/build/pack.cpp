@@ -29,9 +29,12 @@
 #include <llvm/IR/DiagnosticInfo.h>
 #include <llvm/IR/DiagnosticPrinter.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/IntrinsicsX86.h>
 #include <llvm/IR/LLVMContext.h>
-#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassTimingInfo.h>
 #include <llvm/IR/Verifier.h>
@@ -47,16 +50,21 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Path.h>
 #include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/Timer.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/SubtargetFeature.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Scalar/BDCE.h>
 #include <llvm/Transforms/Scalar/DCE.h>
-#include <llvm/Transforms/Scalar/SROA.h>
+#include <llvm/Transforms/Scalar/EarlyCSE.h>
+#include <llvm/Transforms/Scalar/InstSimplifyPass.h>
+#include <llvm/Transforms/Scalar/SCCP.h>
 #include <llvm/Transforms/Scalar/SimplifyCFG.h>
 #include <llvm/Transforms/Utils/Cloning.h>
+#include <llvm/Transforms/Utils/Mem2Reg.h>
 
 #include "analysis/census.h"
 #include "analysis/discover.h"
@@ -87,9 +95,12 @@ double Since(Clock::time_point t) {
 // functions and shards
 constexpr uint64_t kWorkerMemory = 512ull << 20;
 
-// The cache key's format: changed whenever what a key covers changes (UnitKey). 2: the gate sites and the aux region's code, the line marks'
-// section, the standard entries' fixed signature (ABI 3). 3: groups of functions, parts of split functions, a tier per function (phase 5b)
-constexpr const char* kUnitKeyFormat = "nxaot-unit 3";
+// The cache key's format: changed whenever what a key covers changes (UnitKey), or what a unit's object holds for the same key. 2: the gate
+// sites and the aux region's code, the line marks' section, the standard entries' fixed signature (ABI 3). 3: groups of functions, parts of
+// split functions, a tier per function (phase 5b). 4: phase 5d's units: the NaN helpers declared (the tables' object defines them), the
+// registers forwarded within blocks and NZCV made lazily, rotates by a constant as shifts, the tier pipelines of 5d and tier C's code for
+// FastISel (an object of format 3 under the same key would hold its own helpers, which the tables' object now defines too)
+constexpr const char* kUnitKeyFormat = "nxaot-unit 4";
 
 // The section each unit's !pcsections marks go to (the line table, "The line table" below): read back after code generation and kept out of
 // the link (SHF_EXCLUDE)
@@ -167,6 +178,275 @@ lift::Target TargetOf(const llvm::TargetMachine& tm) {
     return t;
 }
 
+// ---- Tier C's code for FastISel (README.md, "Phase 5d") ----
+// Tier C selects instructions with FastISel (CodeGenOptLevel::None), which hands to SelectionDAG what it cannot select: a call alone, but for
+// any other instruction, and for a terminator, the whole block up to it, built, combined, legalised and scheduled as a DAG. Measured on the
+// 4,000-function benchmark at tier C, SelectionDAG was 43 % of the optimisation and code generation (FastISel itself 1 %), and it compiled
+// two thirds of the IR (--isel-misses counts the misses and what they handed over). The functions below rewrite, after the tier's passes,
+// the shapes of IR that missed most into ones FastISel selects, each the same operation (the same machine code, or SelectionDAG's own
+// expansion of it); run by Optimise in this order.
+//
+// SimplifyCFG's tail merging (tailMergeBlocksWithSimilarFunctionTerminators) joins a function's returns into one block, `common.ret`, that
+// returns a phi of the returned values. The returned value is the convention's struct ({x0, x1, v0..v3}), a type FastISel has no register for,
+// so the terminator of every block that branches there missed (handlePHINodesInSuccessorBlocks), and those blocks are every block that ends in
+// a guest call (its pending check, design 3.3, leaves through a return) and every return: most of the code. The returns are split again here,
+// each predecessor returning its own value (a swifttailcc return is SelectionDAG's either way, as one block)
+void SplitCommonReturns(llvm::Function& f) {
+    std::vector<llvm::BasicBlock*> merged;
+    for (llvm::BasicBlock& bb : f) {
+        auto* ret = llvm::dyn_cast<llvm::ReturnInst>(bb.getTerminator());
+        auto* phi = ret ? llvm::dyn_cast_or_null<llvm::PHINode>(ret->getReturnValue()) : nullptr;
+        if (phi && phi->getParent() == &bb && &bb.front() == phi && phi->getNextNode() == ret && phi->hasOneUse()) merged.push_back(&bb);
+    }
+    for (llvm::BasicBlock* bb : merged) {
+        auto* phi = llvm::cast<llvm::PHINode>(&bb->front());
+        const llvm::DebugLoc loc = bb->getTerminator()->getDebugLoc();
+        std::vector<llvm::BasicBlock*> preds;
+        for (llvm::BasicBlock* p : phi->blocks()) {
+            if (std::find(preds.begin(), preds.end(), p) == preds.end()) preds.push_back(p);
+        }
+        for (llvm::BasicBlock* p : preds) {
+            llvm::Value* v = phi->getIncomingValueForBlock(p);
+            auto* br = llvm::dyn_cast<llvm::BranchInst>(p->getTerminator());
+            if (br && br->isUnconditional()) {
+                // The predecessor returns itself
+                llvm::ReturnInst::Create(f.getContext(), v, br)->setDebugLoc(loc);
+                br->eraseFromParent();
+                continue;
+            }
+            auto* nb = llvm::BasicBlock::Create(f.getContext(), bb->getName() + ".split", &f, bb);
+            llvm::ReturnInst::Create(f.getContext(), v, nb)->setDebugLoc(loc);
+            p->getTerminator()->replaceSuccessorWith(bb, nb);
+        }
+        phi->replaceAllUsesWith(llvm::PoisonValue::get(phi->getType()));
+        bb->eraseFromParent();
+    }
+}
+
+// InstCombine folds the same field taken from two calls' results into one extractvalue of a phi of the results (foldPHIArgExtractValue...):
+// the same struct-typed phi, whose predecessors' terminators then miss. Each field taken from it becomes a phi of that field again
+void ScalarizeStructPhis(llvm::Function& f) {
+    std::vector<llvm::PHINode*> phis;
+    for (llvm::BasicBlock& bb : f) {
+        for (llvm::PHINode& phi : bb.phis()) {
+            if (!phi.getType()->isStructTy()) continue;
+            const bool fields = std::all_of(phi.user_begin(), phi.user_end(), [](const llvm::User* u) {
+                const auto* ev = llvm::dyn_cast<llvm::ExtractValueInst>(u);
+                return ev && ev->getNumIndices() == 1;
+            });
+            if (fields) phis.push_back(&phi);
+        }
+    }
+    for (llvm::PHINode* phi : phis) {
+        std::map<unsigned, llvm::PHINode*> per_field;
+        std::map<std::pair<llvm::BasicBlock*, unsigned>, llvm::Value*> taken;  // a predecessor's entries take one value
+        const auto field = [&](unsigned k) {
+            llvm::PHINode*& p = per_field[k];
+            if (p) return p;
+            llvm::Type* ty = llvm::cast<llvm::StructType>(phi->getType())->getElementType(k);
+            p = llvm::PHINode::Create(ty, phi->getNumIncomingValues(), phi->getName() + "." + llvm::Twine(k), phi);
+            p->setDebugLoc(phi->getDebugLoc());
+            for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
+                llvm::BasicBlock* b = phi->getIncomingBlock(i);
+                llvm::Value*& v = taken[{b, k}];
+                if (!v) {
+                    llvm::Value* agg = phi->getIncomingValue(i);
+                    if (auto* c = llvm::dyn_cast<llvm::Constant>(agg)) {
+                        v = c->getAggregateElement(k);
+                    } else {
+                        auto* ev = llvm::ExtractValueInst::Create(agg, {k}, "", b->getTerminator());
+                        ev->setDebugLoc(b->getTerminator()->getDebugLoc());
+                        v = ev;
+                    }
+                }
+                p->addIncoming(v, b);
+            }
+            return p;
+        };
+        for (llvm::User* u : llvm::make_early_inc_range(phi->users())) {
+            auto* ev = llvm::cast<llvm::ExtractValueInst>(u);
+            ev->replaceAllUsesWith(field(ev->getIndices()[0]));
+            ev->eraseFromParent();
+        }
+        phi->eraseFromParent();
+    }
+}
+
+// A return of the convention (swifttailcc, preserve_all) is SelectionDAG's (X86FastISel::X86SelectRet takes the C conventions), and so is a
+// musttail call: the terminator misses, and the whole block before it with it, which is the whole body of a function without branches and
+// the code since the last branch of any other. Each such block is split before what FastISel cannot select at its end: the return's
+// insertvalue chain and the return, or the musttail call and the return
+void SplitReturnBlocks(llvm::Function& f) {
+    if (f.getCallingConv() == llvm::CallingConv::C) return;
+    std::vector<llvm::Instruction*> at;
+    for (llvm::BasicBlock& bb : f) {
+        auto* ret = llvm::dyn_cast<llvm::ReturnInst>(bb.getTerminator());
+        if (!ret) continue;
+        llvm::Instruction* first = ret;
+        if (llvm::CallInst* tail = bb.getTerminatingMustTailCall()) {
+            first = tail;
+        } else {
+            while (first->getPrevNode() && llvm::isa<llvm::InsertValueInst>(first->getPrevNode())) first = first->getPrevNode();
+        }
+        if (first != bb.getFirstNonPHIOrDbg()) at.push_back(first);
+    }
+    for (llvm::Instruction* i : at) {
+        i->getParent()->splitBasicBlock(i, i->getParent()->getName() + ".ret");
+    }
+}
+
+// The NaN chains' checks (lower_fp.cpp, Escape) ask whether any lane of a vector is a NaN: vector.reduce.or of a vector compare, which the
+// code generator's IR passes expand to a compare of the <N x i1> bits as an iN (ExpandReductions): FastISel selects no vector compare and no
+// i4, so the terminator missed and the block, the whole computation the check guards, went to SelectionDAG. The check becomes the sign mask of
+// the lanes instead (movmskps / movmskpd, as SelectionDAG makes it), a call FastISel hands to SelectionDAG alone, and a scalar compare:
+//   fcmp uno a, b (the chains' quiet check)       cmpunordps / cmpunordpd, then the mask
+//   icmp ugt (and x, ~sign), c (IsNaN of the bits)  add (SMAX - c): the lane's sign bit is set exactly when it is above c (the and leaves at
+//                                                   most SMAX, so the sum stays below 2^width), then the mask
+void LaneMasks(llvm::Function& f) {
+    llvm::Module& m = *f.getParent();
+    std::vector<llvm::IntrinsicInst*> reduces;
+    for (llvm::BasicBlock& bb : f) {
+        for (llvm::Instruction& i : bb) {
+            if (auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(&i); ii && ii->getIntrinsicID() == llvm::Intrinsic::vector_reduce_or) reduces.push_back(ii);
+        }
+    }
+    for (llvm::IntrinsicInst* red : reduces) {
+        auto* vt = llvm::cast<llvm::FixedVectorType>(red->getArgOperand(0)->getType());
+        const unsigned lanes = vt->getNumElements();
+        if (lanes != 4 && lanes != 2) continue;
+        const bool single = lanes == 4;
+        llvm::IRBuilder<> b{red};
+        b.SetCurrentDebugLocation(red->getDebugLoc());
+        llvm::Type* fvec = llvm::FixedVectorType::get(single ? b.getFloatTy() : b.getDoubleTy(), lanes);
+        llvm::Value* signs = nullptr;  // a vector whose lanes' sign bits are the answer
+        if (auto* fc = llvm::dyn_cast<llvm::FCmpInst>(red->getArgOperand(0));
+            fc && fc->getPredicate() == llvm::CmpInst::FCMP_UNO && fc->getOperand(0)->getType() == fvec) {
+            const auto id = single ? llvm::Intrinsic::x86_sse_cmp_ps : llvm::Intrinsic::x86_sse2_cmp_pd;
+            signs = b.CreateCall(llvm::Intrinsic::getDeclaration(&m, id), {fc->getOperand(0), fc->getOperand(1), b.getInt8(3)});  // UNORD_Q
+        } else if (auto* ic = llvm::dyn_cast<llvm::ICmpInst>(red->getArgOperand(0)); ic && ic->getPredicate() == llvm::CmpInst::ICMP_UGT) {
+            auto* masked = llvm::dyn_cast<llvm::BinaryOperator>(ic->getOperand(0));
+            auto* bound = llvm::dyn_cast_or_null<llvm::ConstantInt>(llvm::isa<llvm::Constant>(ic->getOperand(1))
+                                                                         ? llvm::cast<llvm::Constant>(ic->getOperand(1))->getSplatValue()
+                                                                         : nullptr);
+            auto* keep = masked && masked->getOpcode() == llvm::Instruction::And && llvm::isa<llvm::Constant>(masked->getOperand(1))
+                             ? llvm::dyn_cast_or_null<llvm::ConstantInt>(llvm::cast<llvm::Constant>(masked->getOperand(1))->getSplatValue())
+                             : nullptr;
+            const unsigned width = masked ? masked->getType()->getScalarSizeInBits() : 0;
+            if (!bound || !keep || width * lanes != 128 || !keep->getValue().isMaxSignedValue() || bound->getValue().isNegative()) continue;
+            llvm::Value* sum = b.CreateAdd(masked, llvm::ConstantInt::get(masked->getType(), llvm::APInt::getSignedMaxValue(width) - bound->getValue()));
+            signs = b.CreateBitCast(sum, fvec);
+        }
+        if (!signs) continue;
+        const auto id = single ? llvm::Intrinsic::x86_sse_movmsk_ps : llvm::Intrinsic::x86_sse2_movmsk_pd;
+        llvm::Value* mask = b.CreateCall(llvm::Intrinsic::getDeclaration(&m, id), {signs});
+        llvm::Value* any = b.CreateICmpNE(mask, b.getInt32(0));
+        llvm::Instruction* cmp = llvm::cast<llvm::Instruction>(red->getArgOperand(0));
+        red->replaceAllUsesWith(any);
+        red->eraseFromParent();
+        if (cmp->use_empty()) cmp->eraseFromParent();
+    }
+}
+
+// fptoui to i64 is no x86 instruction before AVX-512, nor one FastISel selects (to i32 neither): the scalar ones, which the FPToFixed
+// lowering makes of a value already in range (lower_fp.cpp, ToFixed), become what SelectionDAG expands them to: below 2^63 a signed
+// conversion; at or above it the signed conversion of x - 2^63 (exact: x is an integer there) with the top bit set. To i32 the signed
+// conversion to i64, truncated
+void ExpandFPToUI(llvm::Function& f) {
+    std::vector<llvm::FPToUIInst*> convs;
+    for (llvm::BasicBlock& bb : f) {
+        for (llvm::Instruction& i : bb) {
+            if (auto* c = llvm::dyn_cast<llvm::FPToUIInst>(&i); c && !c->getType()->isVectorTy()) convs.push_back(c);
+        }
+    }
+    for (llvm::FPToUIInst* c : convs) {
+        llvm::IRBuilder<> b{c};
+        b.SetCurrentDebugLocation(c->getDebugLoc());
+        llvm::Value* x = c->getOperand(0);
+        llvm::Type* it = c->getType();
+        llvm::Value* r = nullptr;
+        if (it->isIntegerTy(64)) {
+            llvm::Value* two63 = llvm::ConstantFP::get(x->getType(), 9223372036854775808.0);
+            llvm::Value* high = b.CreateFCmpOGE(x, two63);
+            llvm::Value* low = b.CreateFPToSI(x, it);
+            llvm::Value* upper = b.CreateXor(b.CreateFPToSI(b.CreateFSub(x, two63), it), b.getInt64(1ull << 63));
+            r = b.CreateSelect(high, upper, low);
+        } else if (it->getIntegerBitWidth() <= 32) {
+            r = b.CreateTrunc(b.CreateFPToSI(x, b.getInt64Ty()), it);
+        } else {
+            continue;
+        }
+        c->replaceAllUsesWith(r);
+        c->eraseFromParent();
+    }
+}
+
+// FastISel selects no atomic load (X86FastISel::X86SelectLoad): an inline cache's slot (unordered, lower_calls.cpp FnDispatch) and the
+// safepoint flag (monotonic, FnPoll) missed, and the block before them went to SelectionDAG. A naturally aligned load of at most 8 bytes is
+// one mov on x86-64 as an unordered, a monotonic or a volatile load, and none of them is removed, merged or moved across another volatile
+// access: after the passes, at tier C, those two become volatile loads. Acquire loads (guest ldar) stay
+void PlainAtomicLoads(llvm::Function& f) {
+    for (llvm::BasicBlock& bb : f) {
+        for (llvm::Instruction& i : bb) {
+            auto* l = llvm::dyn_cast<llvm::LoadInst>(&i);
+            if (!l || !l->isAtomic()) continue;
+            const llvm::AtomicOrdering o = l->getOrdering();
+            if (o != llvm::AtomicOrdering::Unordered && o != llvm::AtomicOrdering::Monotonic) continue;
+            const uint64_t bytes = f.getParent()->getDataLayout().getTypeStoreSize(l->getType());
+            if (bytes > 8 || l->getAlign().value() < bytes) continue;
+            l->setAtomic(llvm::AtomicOrdering::NotAtomic);
+            l->setVolatile(true);
+        }
+    }
+}
+
+// A vector constant (a splat of 0.5, a zero vector) is no value FastISel can materialise (X86FastISel::fastMaterializeConstant takes
+// integers, floating-point scalars and addresses), so an instruction with one as an operand missed, and its block went to SelectionDAG,
+// which loads it from the constant pool. Here it is loaded from a constant of the unit's own (the same load), in front of the instructions
+// FastISel selects; a phi's incoming constant is loaded at the end of its predecessor
+void LoadVectorConstants(llvm::Function& f, std::map<llvm::Constant*, llvm::GlobalVariable*>& pool) {
+    llvm::Module& m = *f.getParent();
+    const auto global = [&](llvm::Constant* c) {
+        llvm::GlobalVariable*& g = pool[c];
+        if (!g) {
+            g = new llvm::GlobalVariable(m, c->getType(), true, llvm::GlobalValue::PrivateLinkage, c, "nxaot.vconst");
+            g->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+            g->setAlignment(llvm::Align(16));
+        }
+        return g;
+    };
+    const auto is_vector_constant = [](llvm::Value* v) {
+        auto* c = llvm::dyn_cast<llvm::Constant>(v);
+        return c && v->getType()->isVectorTy() && !v->getType()->getScalarType()->isIntegerTy(1) && !llvm::isa<llvm::UndefValue>(c) &&
+               !llvm::isa<llvm::ConstantExpr>(c);  // a mask of i1 lanes stays a constant: FastISel selects no vector of i1 either way
+    };
+    for (llvm::BasicBlock& bb : f) {
+        for (llvm::Instruction& i : bb) {
+            const bool selectable = llvm::isa<llvm::BinaryOperator>(i) || llvm::isa<llvm::UnaryOperator>(i) || llvm::isa<llvm::StoreInst>(i) ||
+                                    llvm::isa<llvm::SelectInst>(i) || llvm::isa<llvm::CastInst>(i) || llvm::isa<llvm::PHINode>(i);
+            if (!selectable) continue;
+            std::map<llvm::BasicBlock*, llvm::LoadInst*> per_pred;  // a phi's entries for one predecessor take one value
+            for (unsigned k = 0; k < i.getNumOperands(); ++k) {
+                llvm::Value* v = i.getOperand(k);
+                if (!is_vector_constant(v)) continue;
+                auto* c = llvm::cast<llvm::Constant>(v);
+                llvm::Instruction* at = &i;
+                llvm::LoadInst** shared = nullptr;
+                if (auto* phi = llvm::dyn_cast<llvm::PHINode>(&i)) {
+                    shared = &per_pred[phi->getIncomingBlock(k)];
+                    at = phi->getIncomingBlock(k)->getTerminator();
+                }
+                llvm::LoadInst* load = shared && *shared ? *shared : nullptr;
+                if (!load) {
+                    load = new llvm::LoadInst(c->getType(), global(c), "vconst", false, llvm::Align(16), at);
+                    load->setDebugLoc(llvm::isa<llvm::PHINode>(i) ? at->getDebugLoc() : i.getDebugLoc());
+                    if (shared) *shared = load;
+                }
+                i.setOperand(k, load);
+            }
+        }
+    }
+}
+
 void Optimise(llvm::Module& m, llvm::TargetMachine* tm, Tier tier) {
     llvm::LoopAnalysisManager lam;
     llvm::FunctionAnalysisManager fam;
@@ -188,24 +468,41 @@ void Optimise(llvm::Module& m, llvm::TargetMachine* tm, Tier tier) {
     llvm::ModulePassManager mpm;
     switch (tier) {
     case Tier::C: {
-        // Section 9.3, tier C: SROA, instcombine, simplifycfg, dead-code elimination; FastISel and the fast register allocator
+        // Section 9.3, tier C: promotion of the registers' allocas, simplification, simplifycfg, dead-code elimination; FastISel and the fast
+        // register allocator. Measured on the 4,000-function benchmark (README.md, "Phase 5d"): mem2reg in place of SROA (the lowering's
+        // allocas are whole registers loaded and stored as their own type, which mem2reg promotes as SROA did: the same code, a fifth of
+        // the passes' time), and InstSimplify in place of InstCombine (the builder folds as InstSimplify does already; InstCombine was a
+        // fifth of tier C's compile for 9 % less code, which is code the profile never sampled)
         llvm::FunctionPassManager fpm;
-        fpm.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
-        fpm.addPass(llvm::InstCombinePass());
+        fpm.addPass(llvm::PromotePass());
+        fpm.addPass(llvm::InstSimplifyPass());
         fpm.addPass(llvm::SimplifyCFGPass());
         fpm.addPass(llvm::DCEPass());
         mpm.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(fpm)));
         break;
     }
-    case Tier::W:
-        // Section 9.3, tier W: LLVM's O1 function pipeline, one function at a time (buildFunctionSimplificationPipeline: SROA, EarlyCSE,
-        // SimplifyCFG, InstCombine, the loop passes, SCCP, BDCE, ADCE; InstCombine four times). Phase 5a ran the whole O1 module pipeline,
-        // whose interprocedural passes have nothing to do in a unit of separately compiled functions and whose optimisation pipeline runs
-        // InstCombine four more times: a third of the optimisation's time on the game-shaped benchmark for 1.4 % more instructions after it
-        // (README.md, "Pack throughput", phase 5b)
-        mpm.addPass(llvm::createModuleToFunctionPassAdaptor(
-            pb.buildFunctionSimplificationPipeline(llvm::OptimizationLevel::O1, llvm::ThinOrFullLTOPhase::None)));
+    case Tier::W: {
+        // Section 9.3, tier W: LLVM's O1 function pipeline, one function at a time, without the passes that do not pay for themselves on this
+        // IR (README.md, "Phase 5d", measured pass by pass on the 4,000-function benchmark, its text and the run time of int_ops, the calls
+        // programs and the benchmark's native run): mem2reg in place of SROA (whole-register allocas); EarlyCSE, SimplifyCFG, one InstCombine,
+        // SimplifyCFG, SCCP, BDCE, SimplifyCFG. Left out: the second SROA, MemCpyOpt, LibCallsShrinkWrap, CoroElide and ADCE (nothing to do:
+        // the pack the same byte for byte), the other three InstCombines (0.01 % of the text, four tenths of the passes' time), Reassociate
+        // and the loop passes (LICM, LoopRotate, SimpleLoopUnswitch, LoopIdiomRecognize, IndVarSimplify, LoopDeletion, LoopFullUnroll: the
+        // guest's memory accesses are volatile, so they move nothing that matters; without them the text is 0.6 % smaller and int_ops as
+        // fast). Phase 5b ran the O1 function pipeline whole, phase 5a the O1 module pipeline
+        const auto cfg = llvm::SimplifyCFGOptions().convertSwitchRangeToICmp(true);  // as O1's
+        llvm::FunctionPassManager fpm;
+        fpm.addPass(llvm::PromotePass());
+        fpm.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+        fpm.addPass(llvm::SimplifyCFGPass(cfg));
+        fpm.addPass(llvm::InstCombinePass());
+        fpm.addPass(llvm::SimplifyCFGPass(cfg));
+        fpm.addPass(llvm::SCCPPass());
+        fpm.addPass(llvm::BDCEPass());
+        fpm.addPass(llvm::SimplifyCFGPass(cfg));
+        mpm.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(fpm)));
         break;
+    }
     case Tier::H:
         mpm = pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2);
         break;
@@ -214,6 +511,20 @@ void Optimise(llvm::Module& m, llvm::TargetMachine* tm, Tier tier) {
         break;
     }
     mpm.run(m, mam);
+    if (tier == Tier::C) {
+        // What FastISel then selects itself (README.md, "Phase 5d")
+        std::map<llvm::Constant*, llvm::GlobalVariable*> pool;
+        for (llvm::Function& f : m) {
+            if (f.isDeclaration()) continue;
+            SplitCommonReturns(f);
+            ScalarizeStructPhis(f);
+            SplitReturnBlocks(f);
+            LaneMasks(f);
+            ExpandFPToUI(f);
+            PlainAtomicLoads(f);
+            LoadVectorConstants(f, pool);
+        }
+    }
 }
 
 // The module descriptor's layout (include/nxaot/aot_module.h), field by field
@@ -445,6 +756,8 @@ struct UnitStats {
     uint64_t splits = 0;  // transfers between the parts of a split function
     double t_lift = 0, t_verify = 0, t_opt = 0, t_codegen = 0;
     std::vector<std::string> notes;
+    // --isel-misses: FastISel's misses by kind (IselMissKind): how many, and the IR instructions they handed to SelectionDAG; not cached
+    std::map<std::string, std::pair<uint64_t, uint64_t>> isel_misses;
 
     cache::Facts ToFacts() const {
         cache::Facts f;
@@ -714,23 +1027,145 @@ void Hide(llvm::GlobalValue* g) {
     g->setDSOLocal(true);
 }
 
-// The diagnostics of an LLVM context: a guest memory access folded into another instruction keeps no !pcsections entry ("loosing !pcsections
-// metadata"); those are counted (the line table then maps that native address through its function), anything else is kept as a note
-void Diagnose(llvm::LLVMContext& ctx, UnitStats* st) {
-    ctx.setDiagnosticHandlerCallBack(
-        [](const llvm::DiagnosticInfo& di, void* context) {
-            auto* s = static_cast<UnitStats*>(context);
-            std::string text;
-            llvm::raw_string_ostream out{text};
-            llvm::DiagnosticPrinterRawOStream printer{out};
-            di.print(printer);
-            if (out.str().find("pcsections") != std::string::npos) {
-                ++s->lines_lost;
-            } else if (di.getSeverity() == llvm::DS_Error || di.getSeverity() == llvm::DS_Warning) {
-                s->notes.push_back(std::string(di.getSeverity() == llvm::DS_Error ? "[RED] " : "") + "nxaot build: llvm: " + out.str());
+// What a FastISel miss was (--isel-misses; README.md, "Phase 5d"): the remark's kind and the IR it names, without the operands. SelectionDAGISel
+// reports "FastISel missed call: <call>" (the call alone goes to SelectionDAG), "FastISel missed terminator: <terminator>" and "FastISel missed:
+// <instruction>" (the block up to and including it goes to SelectionDAG), and "FastISel didn't lower all arguments: <prototype>" (the
+// arguments through SelectionDAG)
+std::string IselMissKind(llvm::StringRef msg) {
+    std::string kind;
+    if (msg.consume_front("FastISel missed call")) {
+        kind = "call";
+    } else if (msg.consume_front("FastISel missed terminator")) {
+        kind = "terminator";
+    } else if (msg.consume_front("FastISel missed")) {
+        kind = "instruction";
+    } else if (msg.consume_front("FastISel didn't lower all arguments")) {
+        return "arguments";
+    } else {
+        return "";
+    }
+    msg = msg.ltrim(": ");
+    if (const size_t in = msg.find(" (in function:"); in != llvm::StringRef::npos) msg = msg.take_front(in);
+    if (const size_t eq = msg.find(" = "); eq != llvm::StringRef::npos) msg = msg.drop_front(eq + 3);
+    msg = msg.trim();
+    // The opcode and its qualifiers, then for a call its convention and callee, for the others the type of the result or first operand
+    llvm::SmallVector<llvm::StringRef, 16> words;
+    msg.split(words, ' ', -1, false);
+    std::string what;
+    size_t i = 0;
+    for (; i < words.size(); ++i) {
+        const llvm::StringRef w = words[i];
+        if (w == "tail" || w == "musttail" || w == "notail" || w == "atomic" || w == "volatile" || w == "call" || w == "ret" ||
+            w == "fast" || w == "nnan" || w == "nuw" || w == "nsw" || w == "exact") {
+            what += (what.empty() ? "" : " ") + w.str();
+            continue;
+        }
+        break;
+    }
+    if (what.empty() && i < words.size()) what = words[i++].str();
+    if (what.find("call") != std::string::npos) {
+        for (; i < words.size(); ++i) {
+            const llvm::StringRef w = words[i];
+            if (w.ends_with("cc") || w.starts_with("cc")) what += " " + w.str();
+            if (const size_t at = w.find('@'); at != llvm::StringRef::npos) {
+                llvm::StringRef callee = w.drop_front(at).take_until([](char c) { return c == '('; });
+                if (callee.starts_with("@llvm.")) {
+                    // An intrinsic without its type suffixes (llvm.fshr.i64 -> llvm.fshr)
+                    llvm::SmallVector<llvm::StringRef, 4> parts;
+                    callee.drop_front(1).split(parts, '.');
+                    std::string name;
+                    for (const llvm::StringRef p : parts) {
+                        if (!name.empty() && (p.starts_with("i") || p.starts_with("v") || p.starts_with("f") || p.starts_with("p")) &&
+                            p.size() > 1 && std::isdigit(static_cast<unsigned char>(p[1]))) {
+                            break;
+                        }
+                        name += (name.empty() ? "" : ".") + p.str();
+                    }
+                    what += " @" + name;
+                } else if (callee.starts_with("@nxaot.")) {
+                    what += " " + callee.str();
+                } else {
+                    what += " @<guest function>";
+                }
+                break;
             }
-        },
-        st);
+            if (w.starts_with("%")) {
+                what += " <indirect>";
+                break;
+            }
+        }
+    } else if (i < words.size()) {
+        // The type: a vector type spans several words (<2 x i64>)
+        std::string type = words[i].str();
+        if (type.starts_with("<")) {
+            for (size_t j = i + 1; j < words.size() && type.back() != '>' && type.find(">,") == std::string::npos; ++j) type += " " + words[j].str();
+        }
+        while (!type.empty() && type.back() == ',') type.pop_back();
+        what += " " + type;
+    }
+    return kind + ": " + what;
+}
+
+// The diagnostics of an LLVM context: a guest memory access folded into another instruction keeps no !pcsections entry ("loosing !pcsections
+// metadata"); those are counted (the line table then maps that native address through its function), any other warning or error is kept as a
+// note. Remarks are ignored (SelectionDAGISel emits one for every FastISel miss) unless --isel-misses counts them (IselMissKind)
+struct UnitDiagnostics final : llvm::DiagnosticHandler {
+    UnitStats* st;
+    bool isel;
+    UnitDiagnostics(UnitStats* s, bool isel_misses) : st{s}, isel{isel_misses} {}
+    bool isMissedOptRemarkEnabled(llvm::StringRef pass) const override { return isel && pass == "sdagisel"; }
+    bool handleDiagnostics(const llvm::DiagnosticInfo& di) override {
+        const llvm::DiagnosticSeverity sev = di.getSeverity();
+        if (const auto* r = llvm::dyn_cast<llvm::DiagnosticInfoOptimizationBase>(&di)) {
+            if (isel && r->getPassName() == "sdagisel") {
+                const std::string msg = r->getMsg();
+                const std::string kind = IselMissKind(msg);
+                if (!kind.empty()) {
+                    // The IR instructions the miss hands to SelectionDAG: a call alone; a terminator its whole block; another instruction the
+                    // block up to it (the remark names it by its text, the bottom-most one of that text, as FastISel works bottom-up); the
+                    // arguments as one
+                    const auto* ir = llvm::dyn_cast<llvm::DiagnosticInfoIROptimization>(r);
+                    const auto* bb = ir ? llvm::dyn_cast_or_null<llvm::BasicBlock>(ir->getCodeRegion()) : nullptr;
+                    uint64_t weight = 1;
+                    if (bb && llvm::StringRef(kind).starts_with("terminator")) {
+                        weight = bb->size();
+                    } else if (bb && llvm::StringRef(kind).starts_with("instruction")) {
+                        llvm::StringRef want = msg;
+                        want.consume_front("FastISel missed: ");
+                        if (const size_t in = want.find(" (in function:"); in != llvm::StringRef::npos) want = want.take_front(in);
+                        want = want.trim();
+                        uint64_t pos = 0, found = 0;
+                        for (const llvm::Instruction& i : *bb) {
+                            ++pos;
+                            std::string text;
+                            llvm::raw_string_ostream out{text};
+                            i.print(out);
+                            if (llvm::StringRef(out.str()).trim() == want) found = pos;
+                        }
+                        weight = found ? found : bb->size();
+                    }
+                    auto& [count, to_dag] = st->isel_misses[kind];
+                    ++count;
+                    to_dag += weight;
+                }
+            }
+            return true;
+        }
+        std::string text;
+        llvm::raw_string_ostream out{text};
+        llvm::DiagnosticPrinterRawOStream printer{out};
+        di.print(printer);
+        if (out.str().find("pcsections") != std::string::npos) {
+            ++st->lines_lost;
+        } else if (sev == llvm::DS_Error || sev == llvm::DS_Warning) {
+            st->notes.push_back(std::string(sev == llvm::DS_Error ? "[RED] " : "") + "nxaot build: llvm: " + out.str());
+        }
+        return true;
+    }
+};
+
+void Diagnose(llvm::LLVMContext& ctx, UnitStats* st, bool isel_misses = false) {
+    ctx.setDiagnosticHandler(std::make_unique<UnitDiagnostics>(st, isel_misses));
 }
 
 Kit MakeKit(llvm::Module& m, const Common& c, bool tables, Tier tier) {
@@ -1180,7 +1615,7 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
     const std::vector<uint64_t>& entries = u.entries;
     const auto t0 = Clock::now();
     llvm::LLVMContext ctx;
-    Diagnose(ctx, st);
+    Diagnose(ctx, st, o.isel_misses);
     const Part* part = u.part >= 0 ? &c.parts.at(entries.front())[static_cast<size_t>(u.part)] : nullptr;
     llvm::Module m{part ? PartName(c, entries.front(), part->lo) : BodyName(c, entries.front()), ctx};
     m.setDataLayout(tm.createDataLayout());
@@ -1281,6 +1716,7 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
             else fp.spin_gates[g.offset] = g.arg;
         }
         fp.rt_gate = k.gate;
+        fp.shared_nan_helpers = true;  // the tables' object defines them (CompileTables)
         lift::Region region;
         region.entry = entry;
         region.lo = entry;
@@ -1432,6 +1868,15 @@ bool CompileTables(const Common& c, llvm::TargetMachine& tm, std::string* object
     auto* v128 = llvm::FixedVectorType::get(i64, 2);
     const lift::Convention& conv = c.conv;
     const lift::Regs std_pass = plan.indirect_pass;
+
+    // The NaN chains' helpers the units call (lift::FunctionPlan::shared_nan_helpers), once for the whole pack
+    {
+        lift::LiftOptions lo;
+        lo.fpcr = 0;
+        lo.fpsr_flags = c.fpsr;
+        lo.target = c.target;
+        lift::DefineNaNHelpers(*m, lo);
+    }
 
     // Every body and standard entry, declared: the units define them
     std::map<uint64_t, llvm::Function*> bodies, std_entries;
@@ -2161,7 +2606,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     conv.cc = o.cc;
     std::optional<cache::Cache> cache;
     // --asm, --spills and --ir want every unit compiled (the cache keeps objects, not their assembly or IR)
-    const bool use_cache = !o.cache_dir.empty() && !o.count_spills && o.asm_path.empty() && o.ir_path.empty();
+    const bool use_cache = !o.cache_dir.empty() && !o.count_spills && o.asm_path.empty() && o.ir_path.empty() && !o.isel_misses;
     std::string tool;
     if (use_cache) {
         cache.emplace(o.cache_dir);
@@ -2461,6 +2906,10 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         for (const auto& n : u.notes) {
             s.notes.push_back(n);
         }
+        for (const auto& [kind, n] : u.isel_misses) {
+            s.isel_misses[kind].first += n.first;
+            s.isel_misses[kind].second += n.second;
+        }
         if (r) {
             s.cache_hits += res.hit;
             (res.hit ? s.cache_hit_functions : s.cache_miss_functions) += cache && unit->part <= 0 ? unit->entries.size() : 0;
@@ -2518,6 +2967,9 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     s.peak_rss_kib = static_cast<uint64_t>(ru.ru_maxrss);
     if (llvm::TimePassesIsEnabled) {
         llvm::reportAndResetTimings(&llvm::errs());
+        // The timers inside passes (SelectionDAG's phases, the AsmPrinter's handlers: DWARF, the line marks' metadata), which
+        // reportAndResetTimings leaves to the end of the process
+        llvm::TimerGroup::printAll(llvm::errs());
     }
     return true;
 }

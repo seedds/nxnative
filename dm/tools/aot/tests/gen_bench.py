@@ -9,8 +9,10 @@ costs or to show what grows faster than the module.
 The program runs: main calls every function through drivers, a bounded call depth keeps recursion finite, and it prints one checksum line, so a
 pack of it can be checked against dynarmic (nxaot_run) as the corpus is.
 
-  gen_bench.py --functions N [--seed S] [--unbounded-switches] <out dir>
-      writes <out dir>/bench.c, bench.elf, bench.nro (in the nxnative-aot image: clang-18, ld.lld-18)
+  gen_bench.py --functions N [--seed S] [--unbounded-switches] [--data-rows R --nxaot <nxaot>] <out dir>
+      writes <out dir>/bench.c, bench.elf, bench.nro (in the nxnative-aot image: clang-18, ld.lld-18); with --data-rows also the behaviour
+      image <out dir>/rows/bench.image.bin (`nxaot image`) with R more data rows in its manifest bench.aot.tsv: one word each, evenly spaced
+      over the text (they cut the code they cover: a stress case of the loader's data blocks, Image::InData, not a program that runs)
 """
 import argparse
 import os
@@ -135,6 +137,8 @@ def main():
     ap.add_argument('--functions', type=int, default=4000)
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--unbounded-switches', action='store_true', help='switches over a remainder, with no range check (discovery stress)')
+    ap.add_argument('--data-rows', type=int, default=0, help='also a behaviour image with this many more data rows (rows/)')
+    ap.add_argument('--nxaot', help='the nxaot that writes the behaviour image (--data-rows)')
     ap.add_argument('--cc', default='clang-18')
     ap.add_argument('--ld', default='ld.lld-18')
     a = ap.parse_args()
@@ -151,6 +155,27 @@ def main():
     subprocess.run([a.ld] + LDFLAGS + ['-o', elf] + objs, check=True)
     subprocess.run([sys.executable, ELF2NRO, elf, os.path.join(a.out, 'bench.nro')], check=True)
     print(f'gen_bench.py: {a.functions} functions (seed {a.seed}) in {os.path.join(a.out, "bench.nro")}')
+    if a.data_rows:
+        if not a.nxaot:
+            sys.exit('gen_bench.py: --data-rows needs --nxaot')
+        rows = os.path.join(a.out, 'rows')
+        os.makedirs(rows, exist_ok=True)
+        subprocess.run([a.nxaot, 'image', os.path.join(a.out, 'bench.nro'), rows, 'bench'], check=True, capture_output=True)
+        manifest = os.path.join(rows, 'bench.aot.tsv')
+        text_end = None
+        with open(manifest) as f:
+            for line in f:
+                cols = line.rstrip('\n').split('\t')
+                if cols[0] == 'layout':
+                    text_end = int(cols[cols.index('text_end') + 1], 16)
+        step = max(4, ((text_end - 0x100) // a.data_rows) & ~3)
+        with open(manifest, 'a') as f:
+            for i in range(a.data_rows):
+                lo = 0x100 + i * step
+                if lo + 4 > text_end:
+                    break
+                f.write(f'data\t{lo:#x}\t{lo + 4:#x}\n')
+        print(f'gen_bench.py: the behaviour image {manifest} with {a.data_rows} more data rows')
 
 
 if __name__ == '__main__':

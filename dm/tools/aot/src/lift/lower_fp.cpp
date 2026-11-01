@@ -143,44 +143,85 @@ Value* FunctionLifter::NaNResult(Value* r) {
 // A chain's cold path (Escape: the recompute with Arm's NaN rules, section 7.3) calls the rules of FPProcessNaNs as one small function per
 // arity and type instead of spelling them out at every escape: some thirty integer operations each, in a block that runs only when a NaN
 // reached the check. They were 14 % of what code generation was given on the game-shaped benchmark, and about as much of InstCombine's work
-// (README.md, "Pack throughput", phase 5b). The function is the same rules, made by NaN1 / NaN2 / NaN3 themselves: linkonce_odr in a comdat
-// of its name, so every unit that needs it defines it and the link keeps one; noinline and cold, so the passes leave the call where it is;
-// preserve_all, so the hot path keeps its registers across it
-Value* FunctionLifter::NaNCall(unsigned arity, llvm::ArrayRef<Value*> args) {
-    llvm::Type* t = args.back()->getType();
+// (README.md, "Pack throughput", phase 5b). The function is the same rules, made by NaN1 / NaN2 / NaN3 themselves; noinline and cold, so the
+// passes leave the call where it is; preserve_all, so the hot path keeps its registers across it. A pack's units call one copy, its tables'
+// object's (since phase 5d: every unit compiled its own, linkonce_odr in a comdat of its name, and the link kept one); a region, which has no
+// tables' object, still defines its own
+namespace {
+
+// The types a pack's NaN helpers are made for once, in its tables' object (DefineNaNHelpers): the integer bits of a half, single or double
+// precision value, scalar or a whole 128-bit vector of them
+bool SharedNaNType(llvm::Type* t) {
+    const unsigned bits = t->getScalarSizeInBits();
+    if (!t->getScalarType()->isIntegerTy() || (bits != 16 && bits != 32 && bits != 64)) return false;
+    auto* vt = llvm::dyn_cast<llvm::FixedVectorType>(t);
+    return !vt || vt->getNumElements() * bits == 128;
+}
+
+std::string NaNName(unsigned arity, llvm::Type* t) {
     std::string type;
     llvm::raw_string_ostream type_out{type};
     t->print(type_out);
     for (char& ch : type) {
         if (!std::isalnum(static_cast<unsigned char>(ch))) ch = '_';
     }
-    const std::string name = "nxaot.nan" + std::to_string(arity) + "." + type;
-    llvm::Function* f = M.getFunction(name);
-    if (!f) {
-        std::vector<llvm::Type*> params(args.size(), t);
-        f = llvm::Function::Create(llvm::FunctionType::get(t, params, false), llvm::GlobalValue::LinkOnceODRLinkage, name, M);
-        f->setVisibility(llvm::GlobalValue::HiddenVisibility);
-        f->setComdat(M.getOrInsertComdat(name));
-        f->setCallingConv(llvm::CallingConv::PreserveAll);
-        f->addFnAttr(llvm::Attribute::NoInline);
-        f->addFnAttr(llvm::Attribute::Cold);
-        f->addFnAttr(llvm::Attribute::NoUnwind);
-        f->addFnAttr(llvm::Attribute::WillReturn);
-        f->setDoesNotAccessMemory();
-        llvm::IRBuilderBase::InsertPointGuard guard{B};  // the insertion point and the debug location
-        B.SetCurrentDebugLocation(llvm::DebugLoc());
-        B.SetInsertPoint(llvm::BasicBlock::Create(C, "entry", f));
-        const bool cold = cold_exact;
-        cold_exact = false;
-        std::vector<Value*> a;
-        for (llvm::Argument& arg : f->args()) a.push_back(&arg);
-        Value* r = arity == 1 ? NaN1(a[0], a[1]) : arity == 2 ? NaN2(a[0], a[1], a[2]) : NaN3(a[0], a[1], a[2], a[3]);
-        B.CreateRet(r);
-        cold_exact = cold;
+    return "nxaot.nan" + std::to_string(arity) + "." + type;
+}
+
+}  // namespace
+
+llvm::Function* FunctionLifter::NaNFunction(unsigned arity, llvm::Type* t, bool shared, bool define) {
+    const std::string name = NaNName(arity, t);
+    if (llvm::Function* f = M.getFunction(name)) {
+        return f;
     }
+    std::vector<llvm::Type*> params(arity + 1, t);
+    // A unit's own copy: linkonce_odr in a comdat of its name, so the link keeps one. A pack's units declare the shared ones, which its
+    // tables' object defines (DefineNaNHelpers)
+    auto* f = llvm::Function::Create(llvm::FunctionType::get(t, params, false),
+                                     shared ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::LinkOnceODRLinkage, name, M);
+    f->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    if (!shared) f->setComdat(M.getOrInsertComdat(name));
+    f->setCallingConv(llvm::CallingConv::PreserveAll);
+    f->addFnAttr(llvm::Attribute::NoInline);
+    f->addFnAttr(llvm::Attribute::Cold);
+    f->addFnAttr(llvm::Attribute::NoUnwind);
+    f->addFnAttr(llvm::Attribute::WillReturn);
+    f->setDoesNotAccessMemory();
+    if (!define) {
+        return f;
+    }
+    llvm::IRBuilderBase::InsertPointGuard guard{B};  // the insertion point and the debug location
+    B.SetCurrentDebugLocation(llvm::DebugLoc());
+    B.SetInsertPoint(llvm::BasicBlock::Create(C, "entry", f));
+    const bool cold = cold_exact;
+    cold_exact = false;
+    std::vector<Value*> a;
+    for (llvm::Argument& arg : f->args()) a.push_back(&arg);
+    Value* r = arity == 1 ? NaN1(a[0], a[1]) : arity == 2 ? NaN2(a[0], a[1], a[2]) : NaN3(a[0], a[1], a[2], a[3]);
+    B.CreateRet(r);
+    cold_exact = cold;
+    return f;
+}
+
+Value* FunctionLifter::NaNCall(unsigned arity, llvm::ArrayRef<Value*> args) {
+    llvm::Type* t = args.back()->getType();
+    // A pack's units call the helpers of its tables' object: each unit compiled its own copy of every helper it used (in the 4,000-function
+    // benchmark, 1,418 copies over 688 units, each compiled by SelectionDAG at every tier: README.md, "Phase 5d")
+    const bool shared = plan && plan->shared_nan_helpers && SharedNaNType(t);
+    llvm::Function* f = NaNFunction(arity, t, shared, !shared);
     llvm::CallInst* call = B.CreateCall(f, args);
     call->setCallingConv(f->getCallingConv());
     return call;
+}
+
+void FunctionLifter::DefineNaNHelpers() {
+    for (const unsigned bits : {16u, 32u, 64u}) {
+        llvm::Type* scalar = B.getIntNTy(bits);
+        for (llvm::Type* t : {scalar, static_cast<llvm::Type*>(llvm::FixedVectorType::get(scalar, 128 / bits))}) {
+            for (unsigned arity = 1; arity <= 3; ++arity) NaNFunction(arity, t, true, true);
+        }
+    }
 }
 
 Value* FunctionLifter::NaN1(Value* a, Value* r) {

@@ -181,6 +181,49 @@ static void ForwardVectorRegisters(IR::Block& block) {
     }
 }
 
+// Forwards the general registers and SP within a block, as ForwardVectorRegisters does the vector registers: a GetX after a SetX of the
+// register (GetW after SetW, GetSP after SetSP) takes the value written, and a set the block overwrites before reading the register is dead.
+// What it removes is the lowering's own work (a load of the register's alloca that mem2reg would have replaced by the stored value, a store it
+// would have dropped: README.md, "Phase 5d"). A read of the other width is not forwarded (it would need a new truncation or extension); svc and
+// the exceptions that leave the block end it (the translator ends a block there), so no instruction inside a block reads the registers' allocas
+// besides the gets
+static void ForwardGeneralRegisters(IR::Block& block) {
+    struct Last {
+        IR::Inst* set = nullptr;  // the last SetW / SetX (SetSP) of the register in the block
+        bool read = false;        // the register was read (not forwarded) since
+    };
+    std::array<Last, 32> last{};  // x0..x30, then SP
+    for (auto& inst : block) {
+        const IR::Opcode op = inst.GetOpcode();
+        switch (op) {
+        case IR::Opcode::A64SetW:
+        case IR::Opcode::A64SetX:
+        case IR::Opcode::A64SetSP: {
+            Last& l = last[op == IR::Opcode::A64SetSP ? 31 : static_cast<size_t>(inst.GetArg(0).GetA64RegRef())];
+            if (l.set && !l.read) {
+                l.set->Invalidate();
+            }
+            l = {&inst, false};
+            break;
+        }
+        case IR::Opcode::A64GetW:
+        case IR::Opcode::A64GetX:
+        case IR::Opcode::A64GetSP: {
+            Last& l = last[op == IR::Opcode::A64GetSP ? 31 : static_cast<size_t>(inst.GetArg(0).GetA64RegRef())];
+            const IR::Opcode same = op == IR::Opcode::A64GetW ? IR::Opcode::A64SetW : op == IR::Opcode::A64GetX ? IR::Opcode::A64SetX : IR::Opcode::A64SetSP;
+            if (l.set && l.set->GetOpcode() == same) {
+                inst.ReplaceUsesWith(l.set->GetArg(op == IR::Opcode::A64GetSP ? 0 : 1));
+            } else {
+                l.read = true;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+}
+
 void FunctionLifter::Discover(Lifted& out) {
     std::deque<uint64_t> work{region.entry};
     if (Fn()) {
@@ -194,6 +237,7 @@ void FunctionLifter::Discover(Lifted& out) {
             Optimization::PolyfillPass(block, Optimization::PolyfillOptions{.sha256 = true, .vector_multiply_widen = false});
         }
         ForwardVectorRegisters(block);
+        ForwardGeneralRegisters(block);
         Optimization::IdentityRemovalPass(block);
         Optimization::DeadCodeElimination(block);
     };
@@ -429,6 +473,8 @@ void FunctionLifter::LowerBlock(IR::Block& block) {
         }
     }
     cur_origin = {};
+    deferred_nzcv = nullptr;
+    in_terminator = false;
     last_pc = nullptr;
     new_fpcr = nullptr;
     terminated = false;
@@ -474,7 +520,14 @@ void FunctionLifter::LowerBlock(IR::Block& block) {
     }
     if (!terminated) {
         if (Fn()) {
+            // The deferred flags reach the allocas before the terminator when a successor, or what the terminator leaves to, may read them
+            // (FnDataflow); otherwise only a path of the terminator that stores NZCV makes them (MaterializeNzcv, on that path)
+            if (deferred_nzcv && nzcv_live_out.count(cur_start)) {
+                MaterializeNzcv();
+            }
+            in_terminator = true;
             FnLowerTerminal(block.GetTerminal());
+            in_terminator = false;
         } else {
             LowerTerminal(block.GetTerminal());
         }
@@ -720,7 +773,12 @@ Value* FunctionLifter::ArgAs(const IR::Inst& inst, size_t i, llvm::Type* t) {
 const Flags& FunctionLifter::FlagsArg(const IR::Inst& inst, size_t i) {
     static const Flags none{};
     const IR::Value v = inst.GetArg(i);
-    const auto it = v.IsImmediate() ? flag_values.end() : flag_values.find(v.GetInst());
+    auto it = v.IsImmediate() ? flag_values.end() : flag_values.find(v.GetInst());
+    if (it == flag_values.end() && !v.IsImmediate() && v.GetInst()->GetOpcode() == IR::Opcode::GetNZCVFromOp && origins.count(v.GetInst())) {
+        // A GetNZCVFromOp of function mode, made now (its operation's values are the block's, earlier than any of its readers)
+        Origin unused;
+        it = flag_values.emplace(v.GetInst(), FlagsFromOp(*v.GetInst()->GetArg(0).GetInst(), &unused)).first;
+    }
     if (it == flag_values.end()) {
         error = "an NZCV operand the lowering did not define";
         return none;
@@ -857,11 +915,13 @@ void FunctionLifter::SetMxcsr(Value* new_fpcr_value, bool clear_flags) {
 // ---- Flags ----
 
 Flags FunctionLifter::CurrentFlags() {
+    MaterializeNzcv();
     return {B.CreateLoad(B.getInt1Ty(), flag[0]), B.CreateLoad(B.getInt1Ty(), flag[1]), B.CreateLoad(B.getInt1Ty(), flag[2]),
             B.CreateLoad(B.getInt1Ty(), flag[3])};
 }
 
 void FunctionLifter::SetFlags(const Flags& f, const Origin& origin) {
+    deferred_nzcv = nullptr;  // these replace what was deferred
     B.CreateStore(f.n, flag[0]);
     B.CreateStore(f.z, flag[1]);
     B.CreateStore(f.c, flag[2]);
@@ -1057,9 +1117,60 @@ Flags FunctionLifter::FlagsFromOp(const IR::Inst& producer, Origin* origin) {
     return f;
 }
 
+// The origin FlagsFromOp gives, without making the flags
+Origin FunctionLifter::OriginOf(const IR::Inst& producer) {
+    const auto it = values.find(&producer);
+    if (it == values.end()) {
+        return {};
+    }
+    switch (producer.GetOpcode()) {
+    case IR::Opcode::Add32:
+    case IR::Opcode::Add64:
+        return {};
+    case IR::Opcode::Sub32:
+    case IR::Opcode::Sub64: {
+        const IR::Value cin = producer.GetArg(2);
+        if (cin.IsImmediate() && cin.GetU1()) {
+            return {OriginKind::Sub, Arg(producer, 0), Arg(producer, 1), it->second};
+        }
+        return {};
+    }
+    default:
+        return {OriginKind::Logic, nullptr, nullptr, it->second};
+    }
+}
+
+void FunctionLifter::MaterializeNzcv() {
+    if (!deferred_nzcv) {
+        return;
+    }
+    const IR::Inst* d = deferred_nzcv;
+    Flags f;
+    if (const auto it = flag_values.find(d); it != flag_values.end()) {
+        f = it->second;
+    } else {
+        Origin unused;
+        f = FlagsFromOp(*d->GetArg(0).GetInst(), &unused);
+        // Made on one path of the terminator only (not on the block's own path): another path may make them again
+        if (!in_terminator) flag_values[d] = f;
+    }
+    B.CreateStore(f.n, flag[0]);
+    B.CreateStore(f.z, flag[1]);
+    B.CreateStore(f.c, flag[2]);
+    B.CreateStore(f.v, flag[3]);
+    if (!in_terminator) {
+        deferred_nzcv = nullptr;
+    }
+}
+
 bool FunctionLifter::LowerFlags(IR::Inst& inst) {
     switch (inst.GetOpcode()) {
     case IR::Opcode::GetNZCVFromOp: {
+        if (Fn()) {
+            // Function mode: the flags are made when something reads them (FlagsArg, MaterializeNzcv); the origin needs no instruction
+            origins[&inst] = OriginOf(*inst.GetArg(0).GetInst());
+            return true;
+        }
         Origin origin;
         flag_values[&inst] = FlagsFromOp(*inst.GetArg(0).GetInst(), &origin);
         origins[&inst] = origin;
@@ -1098,6 +1209,7 @@ bool FunctionLifter::LowerContext(IR::Inst& inst) {
         B.CreateStore(Arg(inst, 0), check_bit);
         return true;
     case Opcode::A64GetCFlag:
+        MaterializeNzcv();
         Def(inst, B.CreateLoad(B.getInt1Ty(), flag[2]));
         return true;
     case Opcode::A64GetNZCVRaw:
@@ -1107,9 +1219,19 @@ bool FunctionLifter::LowerContext(IR::Inst& inst) {
         SetFlags(UnpackNzcv(Arg(inst, 0)), {});
         return true;
     case Opcode::A64SetNZCV: {
-        const Flags f = FlagsArg(inst, 0);
         const IR::Value v = inst.GetArg(0);
         const auto o = v.IsImmediate() ? origins.end() : origins.find(v.GetInst());
+        if (Fn() && !v.IsImmediate() && v.GetInst()->GetOpcode() == IR::Opcode::GetNZCVFromOp && !flag_values.count(v.GetInst()) &&
+            o != origins.end()) {
+            // Function mode: the flags of a flag-setting operation reach the allocas only when something reads them there (MaterializeNzcv:
+            // a raw read, a condition its origin does not give, a store of NZCV to the block, the block's end when NZCV is live after it). A
+            // compare whose flags only its own branch or select reads (through the origin) makes none of them (README.md, "Phase 5d")
+            deferred_nzcv = v.GetInst();
+            cur_origin = o->second;
+            wrote_nzcv = true;
+            return true;
+        }
+        const Flags f = FlagsArg(inst, 0);
         SetFlags(f, o == origins.end() ? Origin{} : o->second);
         return true;
     }
@@ -1287,14 +1409,26 @@ Value* FunctionLifter::Shift(IR::Opcode op, Value* v, Value* amount) {
         // The width or more: every bit is the sign
         return B.CreateAShr(v, B.CreateSelect(in_range, s, ConstantInt::get(v->getType(), n - 1)));
     case Opcode::RotateRight32:
-    case Opcode::RotateRight64: {
-        llvm::Function* fshr = llvm::Intrinsic::getDeclaration(&M, llvm::Intrinsic::fshr, {v->getType()});
-        return B.CreateCall(fshr, {v, v, s});  // fshr takes the amount modulo the width
-    }
+    case Opcode::RotateRight64:
+        return FunnelRight(v, v, s);
     default:
         error = std::string("Shift of ") + OpcodeName(op);
         return v;
     }
+}
+
+// fshr(hi, lo, amount): (hi:lo) >> (amount modulo the width), the low half. By a constant amount (dynarmic's ubfm, sbfm and bfm are a rotate
+// by an immediate and a mask; extr by an immediate) the two shifts and the or: what InstCombine makes of the intrinsic with the mask, and what
+// FastISel selects (tier C), where the intrinsic is a call it hands to SelectionDAG alone (README.md, "Phase 5d"). InstCombine turns the
+// shifts back into the intrinsic where it is the better form (a rotate), so tiers W and H get the same code
+Value* FunctionLifter::FunnelRight(Value* hi, Value* lo, Value* amount) {
+    const unsigned n = Bits(lo);
+    if (auto* k = llvm::dyn_cast<ConstantInt>(amount)) {
+        const uint64_t c = k->getZExtValue() % n;
+        if (c == 0) return lo;
+        return B.CreateOr(B.CreateLShr(lo, c), B.CreateShl(hi, n - c));
+    }
+    return B.CreateCall(llvm::Intrinsic::getDeclaration(&M, llvm::Intrinsic::fshr, {lo->getType()}), {hi, lo, amount});
 }
 
 Value* FunctionLifter::Div(bool is_signed, Value* a, Value* b) {
@@ -1424,7 +1558,7 @@ bool FunctionLifter::LowerInteger(IR::Inst& inst) {
         } else if (op == Opcode::ArithmeticShiftRightMasked32 || op == Opcode::ArithmeticShiftRightMasked64) {
             r = B.CreateAShr(v, s);
         } else {
-            r = B.CreateCall(llvm::Intrinsic::getDeclaration(&M, llvm::Intrinsic::fshr, {v->getType()}), {v, v, s});
+            r = FunnelRight(v, v, s);
         }
         Def(inst, r);
         return true;
@@ -1520,7 +1654,7 @@ bool FunctionLifter::LowerInteger(IR::Inst& inst) {
         Value* lo = Arg(inst, 0);
         Value* hi = Arg(inst, 1);
         Value* lsb = B.CreateZExt(Arg(inst, 2), lo->getType());
-        Def(inst, B.CreateCall(llvm::Intrinsic::getDeclaration(&M, llvm::Intrinsic::fshr, {lo->getType()}), {hi, lo, lsb}));
+        Def(inst, FunnelRight(hi, lo, lsb));
         return true;
     }
     case Opcode::ReplicateBit32:
@@ -1768,6 +1902,13 @@ bool FunctionLifter::LowerVectorRegisters(IR::Inst& inst) {
 Lifted LiftRegion(llvm::Module& module, const std::string& name, const Region& region, const decode::CodeReader& read, const LiftOptions& options) {
     detail::FunctionLifter lifter{module, region, read, options};
     return lifter.Run(name);
+}
+
+void DefineNaNHelpers(llvm::Module& module, const LiftOptions& options) {
+    const Region region;
+    const decode::CodeReader read = [](uint64_t) -> std::optional<uint32_t> { return std::nullopt; };
+    detail::FunctionLifter lifter{module, region, read, options};
+    lifter.DefineNaNHelpers();
 }
 
 std::string DumpRegion(const Region& region, const decode::CodeReader& read, uint32_t fpcr) {

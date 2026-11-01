@@ -1,14 +1,14 @@
 # Mario Kart World (`0400C3F00006E000`)
 
-A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (C library) + `sdk`. **In bring-up**: the profile and the rewritten modules exist; the game does not reach its frame loop yet. iOS is untested.
+A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for the Switch 2 (`sdk` names its spec `Ounce`), NVN2. Nintendo EPD's engine (sead / agl / gsys, Phive), modules `main` + `subsdk0` (NintendoSDK movie) + `subsdk1` (C library) + `sdk`. **In bring-up**: the game reaches its frame loop on the Mac (about 90 frames), then stalls when the GPU runs out of memory ([Open](#open)). iOS is untested.
 
 ## What it needs
 
 | Setting | Where | Why |
 |---|---|---|
 | `sys_resource 0x4000000` | [`game.tsv`](game.tsv) | the NPDM declares 64 MB of system resource: virtual address memory on, and `main` sets a heap |
-| `mem_alias 0xb0000000` (with `mem_reserve 0x140000000`) | `game.tsv` | the heap check: `nninitStartup` asks for a 1.68 GB heap (`0x6b800000`), which the guessed 128 MB heap region refused; a 1.75 GB heap region holds it, and the alias region gets the rest of the 5 GB block |
-| `app_pool 0xCD500000` | `game.tsv` | the Switch 1 pool, not a Switch 2 measurement. The game sizes its heap from the pool (the pool less about 1.53 GB: with a 9 GB pool it asks for 7.47 GB), so the pool decides how much memory the game gets. Open |
+| `app_pool 0x240000000` | `game.tsv` | the Switch 2's 9 GB, as Donkey Kong Bananza's (not measured). `nnMain` allocates a fixed 7.04 GB memory block from its heap (`main+0xca866c`); with the Switch 1 pool (3,285 MiB) the heap was 1.68 GB, the block null, and the game crashed at `main+0x5dd3ac`. `nninitStartup` sizes the heap as the pool less about 1.53 GB: 7.47 GB |
+| `mem_reserve 0x2d0000000`, `mem_alias 0xb0000000`, `mem_stack 0x10000000` | `game.tsv` | the heap check with the 9 GB pool (`SetHeapSize OOM: req 0x1de400000`): an 8 GB heap region. The alias region keeps 2.75 GB: the sdk's address region node area takes its first 1 GB |
 | `romfs_marker Movie/StaffRoll_00.webm` | `game.tsv` | a file of the 1.8.0 RomFS |
 | NVN2 API 231.39 | `hle_nvn.c` `nvn_api` | the game requires major 231 and minor ≥ 39 (`main+0xdd0890`, after `nvnDeviceGetInteger` items 0 and 1); its own `sdk` answers 231.39 (`DeviceGetInteger` at `sdk+0x65b680`; Donkey Kong Bananza's sdk answers 231.30). The host gives 231.39 to every Switch 2 SDK, which also meets Donkey Kong Bananza's minor ≥ 30 |
 
@@ -35,3 +35,24 @@ A Switch 2 game: update 1.8.0 (v917504) over the base game, SDK 21.4.0 built for
   | 0x59f | 1 | compute | `DrivePassShaderDefault.sharcb` |
 
 - The translator warns `Attribute offset 0x5C is not valid.` in 2,838 shaders (Donkey Kong Bananza's build has none). Open: not analysed.
+
+## Boot (Mac)
+
+Each step below stopped the boot before its fix:
+
+1. A null memory block in `nnMain` (`CRASH sig=11 addr=0x10 pc=main+0x5dd3ac`): the game allocates a fixed 7.04 GB block from its heap, which the Switch 1 pool could not hold. The Switch 2 pool, 9 GB (`app_pool`, [What it needs](#what-it-needs)).
+2. `nn::diag abort: Result 0xe15` in `hid::InitializeNmouse`, then in `chat::Initialize` (GameChat), then `CheckGraphicsSystemInitialized` before the camera context: Switch 2 services the host does not serve. Answered with nothing connected ([Switch 2 mouse, GameChat and camera with nothing connected](../../../docs/reference/services.md#switch-2-mouse-gamechat-and-camera-with-nothing-connected)). The chat camera storage needed NVN2 native images ([NVN2 native images](../../../docs/reference/nvn-objects.md#nvn2-native-images)); the camera session fails "open camera" with the result the game takes as "no camera".
+3. `CRASH pc=0` after `vi::SetLayerNextHdrAdjustableBezierMetadata` (`main+0x959ae4`), in the first frames ([Switch 2 HDR metadata on a layer the host never made](../../../docs/reference/services.md#switch-2-hdr-metadata-on-a-layer-the-host-never-made)).
+
+## Open
+
+- **GPU out of memory after about 90 frames** (`[RED] upload command buffer execution error: … Insufficient Memory`, then `[RED] watchdog: no progress … stage present frame`; "GPU allocated" 21 to 24 GB on a 36 GB Mac). Six sparse texture arrays (flag 0x20) of 8192x8192x68 with 12 levels, two of 5.67 GB and four of 1.42 GB (17 GB), in virtual pools the game maps only in part: the host makes each a full private Metal texture. Needs a decision: Metal sparse textures, or another way to give a sparse texture only its mapped tiles.
+- The NVN2 calls reported as unimplemented in the first frames: `CommandBufferDrawMeshTasks`, `CommandBufferBindShadingRateImage`, `CommandBufferShadingRateImagePalette`; unknown names `nvn*CooperativeVectorMatrix*`, `nvn*PoolWriteDescriptorTableData`.
+- The camera's other commands (29 at the first frames) fail as "no camera"; their meaning is not known.
+- `pad_layout` and `app_category` are judgement, not measured.
+
+## Found on this game
+
+- [Switch 2 mouse, GameChat and camera with nothing connected](../../../docs/reference/services.md#switch-2-mouse-gamechat-and-camera-with-nothing-connected)
+- [Switch 2 HDR metadata on a layer the host never made](../../../docs/reference/services.md#switch-2-hdr-metadata-on-a-layer-the-host-never-made)
+- [NVN2 native images](../../../docs/reference/nvn-objects.md#nvn2-native-images)

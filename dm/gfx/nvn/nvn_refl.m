@@ -166,6 +166,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         }
         NSArray *tg = j[@"threadgroup_size"];
         if ([tg isKindOfClass:[NSArray class]] && tg.count == 3) for (int i = 0; i < 3; i++) o->tg[i] = (uint16_t)[tg[i] intValue];
+        o->tgmem = (uint32_t)[j[@"tgmem"] unsignedIntValue];
         return 0;
     }
     #undef FAIL

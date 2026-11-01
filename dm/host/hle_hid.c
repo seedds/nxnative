@@ -292,6 +292,11 @@ static void note_merged(void) {   // logs the players whose npad the game does n
         else LOG("hid: player %d's controller is not used: the game supports no npad %d", p + 1, p);
     }
 }
+// The one place a front end's controller connect / disconnect becomes an event (docs/frontends.md, Runtime events): the Mac (front_mac.m) and the iPhone (DmGamepad.m) both end up here, each
+// with the controller's own player. The host reports a controller as a full-key one (a Pro Controller) except on Handheld, which is player 1's npad in handheld mode
+void dm_pad_event(int connected, int player, const char *name, const char *kind) {
+    dm_event_controller(connected, player + 1, name ? name : "", kind ? kind : "", dm_player_npad(player) == NPAD_HANDHELD ? "handheld" : "pro");
+}
 void dm_pad_players(uint32_t mask) {
     mask = (mask | 1u) & ((1u << DM_PLAYERS) - 1);
     uint32_t old = atomic_exchange(&g_players, mask);

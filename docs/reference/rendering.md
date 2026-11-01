@@ -19,6 +19,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Note:** the first red lines name the call site and the object's first bytes. In Engage those bytes were 32-bit triangle indices, i.e. another write had already overrun into the texture object; that stopped once the alias region had address space left ([Size-aligned regions exhaust the alias address space](memory.md#size-aligned-regions-exhaust-the-alias-address-space)).
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md).
 
+### Linear textures beyond Metal's 2D limit
+
+- **Symptom:** `failed assertion 'Texture Descriptor Validation … MTLTextureDescriptor has height (32768) greater than the maximum allowed size of 16384'`, then `CRASH sig=6`, with `tex_linear` → `newTextureWithDescriptor:offset:bytesPerRow:` in the backtrace.
+- **Cause:** a linear texture is made as a view of its memory pool's buffer (`tex_linear` in `nvn_mtl.m`), before `tex_desc`, which holds the check for Metal's limits. Nintendo Switch Sports creates a 1024×32768 R8 linear texture about 5 s into its first scene, and Metal aborts the process on it.
+- **Fix:** `tex_linear` leaves a texture beyond 16384 in either dimension to `tex_desc`, which logs `[RED] texture size exceeds Metal limits: 1024×32768×1 levels 1 format 0x1 target 1` and makes no texture, so the game goes on.
+- **Open:** the texture is missing, so what the game draws from it is missing too. R8 and linear, it is likely a CPU-written glyph cache, like Super Mario Bros. Wonder's 2048×8192 one, which would leave text blank. Making it would take two Metal textures and a change to the shaders that sample it.
+- **Found on:** Nintendo Switch Sports (0100D2F00D5C0000) 1.0.0 (no profile).
+
 ### New textures start as zero
 
 - **Symptom:** a decoded movie stays black even though its YUV textures contain the picture; disabling its depth test makes it visible.

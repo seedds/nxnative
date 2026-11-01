@@ -2508,6 +2508,9 @@ static id<MTLTexture> tex_linear(const tex_t *t) {
     //   its storage held at creation (see tex_init_fill): Rhythm Heaven Groove's 228 linear R8 textures (sprite masks), read from files into CPU_NO_ACCESS pools, were private textures of zeros
     if (!(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) || !t->mem || !t->pool) return nil;
     if (t->d.target != NVN_TEXTURE_TARGET_2D || t->d.levels > 1 || t->d.samples > 1) return nil;
+    // Beyond Metal's 2D limit newTextureWithDescriptor:offset:bytesPerRow: aborts the process on an assertion; tex_desc's check names the texture instead (Nintendo Switch Sports: a linear
+    //   texture 32768 high, 5 s into the first scene)
+    if (t->d.width > 16384 || t->d.height > 16384) return nil;
     uint32_t pf = 0; uint8_t swz[4]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf || !bpb || bw != 1 || bh != 1) return nil;
     size_t row = t->L.layer_size / (t->d.height ? t->d.height : 1);   // same explicit or aligned stride as GetStorageSize

@@ -48,6 +48,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x593, InstName.Suatom, ASuatom, N);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
             x(0x992, InstName.Membar, AMembar, N, writesRd: false);
+            x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
         }
 
         // ---- attributes ----
@@ -428,6 +429,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 context.MemoryBarrier();
             }
+        }
+
+        // ERRBAR (0x9ab; the name from Eden-NS2's ampere_isa_table.h:401, no encoder in Mesa NAK) with words 1 and 2 zero: a device memory barrier, as the
+        // Eglantine fork's lower_to_maxwell.h:1061 lowers it. A conservative stand-in: what ERRBAR waits for (prior memory errors) has no public
+        // description, and a device barrier orders at least as much
+        public static void AErrbar(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(32, 96) != 0)
+            {
+                throw AFail(context, "ERRBAR form");
+            }
+
+            context.MemoryBarrier();
         }
 
         // ---- textures ----

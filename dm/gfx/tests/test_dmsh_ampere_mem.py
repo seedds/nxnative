@@ -63,6 +63,8 @@ class SharedStride(unittest.TestCase):
 
 # MEMBAR.SC with scope 5 (76..79) as Mario Kart World's DrivePass compute shader 0f31fb64c991a12b encodes it (opcode 0x992), between its STS and BAR.SYNC
 MEMBAR = (0x000fec0000005000, 0x0000000000007992)
+# ERRBAR right after that MEMBAR in the same shader (opcode 0x9ab)
+ERRBAR = (0x000fc00000000000, 0x00000000000079ab)
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
@@ -71,6 +73,9 @@ class Membar(unittest.TestCase):
 
     def test_membar_orders_device_memory(self):
         self.assertIn('threadgroup_barrier(mem_flags::mem_device', self.translate(inst(*MEMBAR) + inst(*EXIT)))
+
+    def test_errbar_orders_device_memory(self):
+        self.assertIn('threadgroup_barrier(mem_flags::mem_device', self.translate(inst(*ERRBAR) + inst(*EXIT)))
 
 
 if __name__ == '__main__':

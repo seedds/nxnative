@@ -157,6 +157,8 @@ int main(void) {
         assert(!((h264tm_fn)h_cv_h264tm)(dh, m9, sizeof m9, 0x10000, 64, 64, 1, 1, 3, 1, h264, 33));   // the parameter sets: SPS and PPS, 33 bytes
         assert(cv_of(dh) && cv_of(dh)->codec == CV_H264 && cv_of(dh)->csd_n == 33 && !memcmp(cv_of(dh)->csd, h264, 33));
         assert(!h_cv_h264fin(dh));
+        assert(!((h264tm_fn)h_cv_h264init3)(dh, m9, sizeof m9, 0x10000, 64, 64, 1, 1, 3, 1, h264, 33));   // SDK 20's overload with an output mode: the same stack slots
+        assert(cv_of(dh) && cv_of(dh)->csd_n == 33 && !memcmp(cv_of(dh)->csd, h264, 33) && !h_cv_h264fin(dh));
         assert(!h_cv_vp8rm(d9, 0x10000, 16, 16, 1, 1, 3, 1) && cv_of(d9) && cv_of(d9)->codec == CV_VP8 && h_cv_vp8ev21(d9) == d9 + CV_EVENT_OFF && !h_cv_vp8fin(d9));
         memset(da, 0xab, sizeof da); assert(h_cv_av1tm(da) != 0 && !cv_of(da)); }
     printf("t_codec_video: all passed\n");

@@ -332,9 +332,9 @@ CV_FAMILY(h264, CV_H264, "_ZN2nn5codec30CalculateH264DecoderWorkBufferEPmS1_mtt"
     "_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj")
 #undef CV_FAMILY
 HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
-          "decoded with VideoToolbox on the host", Result, h_cv_h264init3, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out,
-          uint32_t mode, const void *csd, uint64_t csd_n) {
-    (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, w, h, in, out, csd, csd_n);
+          "decoded with VideoToolbox on the host", Result, h_cv_h264init3, void *t, void *work, uint64_t wsize, uint64_t bs, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint64_t out,
+          uint64_t mode, const void *csd, uint64_t csd_n) {   // out and mode in 64-bit stack slots as the guest passes them: declared 32-bit, Apple read the parameter sets from mode's slot
+    (void)work; (void)wsize; (void)bs; (void)refs; (void)mode; return cv_dec_init(t, CV_H264, w, h, in, (uint32_t)out, csd, csd_n);
 }
 // AV1: no decoder on the host; Initialize fails (the client's error path) instead of reaching the decoder service. Open
 static Result cv_av1(void) { static int once; if (!once++) LOG("[RED] nn::codec AV1 decoder: no AV1 decoder on the host, Initialize fails"); return CV_R(2004); }

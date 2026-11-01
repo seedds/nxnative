@@ -2254,6 +2254,59 @@ NVN(nvnTextureGetStorageClass, NVNstorageClass, const NVNtexture *t) { (void)t; 
 NVN(nvnTextureBuilderGetZCullStorageSize, size_t, const NVNtextureBuilder *b) { return zcull_size(&TB(b)->d); }   // as for the texture (zcull_size)
 // Packaged texture data in CPU memory (not written into the pool by the game): NVN copies it into the texture storage at TextureInitialize (the CPU cannot write a compressible pool; the driver copies). 13 Sentinels creates all its textures this way
 NVN(nvnTextureBuilderSetPackagedTextureData, void, NVNtextureBuilder *b, const void *data) { TB(b)->pkg_data = data; }
+
+// ---------- Native images (NVN2): textures on an image the system allocated (nn::gs NativeImageHandle) ----------
+// The sdk exports these as C++ functions (not through nvnBootstrapLoader). Mario Kart World makes textures on its GameChat camera images in nnMain (main+0xd322d4: three local camera images,
+// NativeImageInitialize then TextureInitializeFromNativeImage, an abort when either fails). The host's handles come from nvn_native_image_new (hle_misc.c, the chat camera video storage):
+// a size, no picture. NativeImageInitialize gives the image host storage, zeroed (no camera picture), and TextureInitializeFromNativeImage a 2D texture of the builder's format on it.
+// The builder is the SDK's, its setters stay in the sdk (sdk 21.4.0 +0x6bb070..0x6bb0f0): device at +0, handle +8, memory permission +0xc, format +0x10. NVNnativeImage is 0x1a0 bytes
+typedef struct { NVNdevice *dev; uint32_t handle, perm, format; } nimg_builder_t;
+typedef struct { uint32_t magic, format, w, h; pool_t pool; uint8_t *mem; size_t size; } nimg_t;
+_Static_assert(sizeof(nimg_t) <= 0x1a0, "nimg_t exceeds NVNnativeImage (0x1a0 bytes)");
+static struct { uint32_t handle, w, h; } g_nimg[64];
+static uint32_t g_nimg_next;
+static pthread_mutex_t g_nimg_mu = PTHREAD_MUTEX_INITIALIZER;
+uint32_t nvn_native_image_new(uint32_t w, uint32_t h) {   // a host native image handle of that size; 0 when the table is full
+    uint32_t r = 0;
+    pthread_mutex_lock(&g_nimg_mu);
+    for (size_t i = 0; i < sizeof g_nimg / sizeof *g_nimg; i++)
+        if (!g_nimg[i].handle) { r = 0x4e490000u | (++g_nimg_next & 0xffff); g_nimg[i].handle = r; g_nimg[i].w = w; g_nimg[i].h = h; break; }
+    pthread_mutex_unlock(&g_nimg_mu);
+    if (!r) LOG("[RED] native images: more than %zu at once", sizeof g_nimg / sizeof *g_nimg);
+    return r;
+}
+void nvn_native_image_free(uint32_t handle) {
+    pthread_mutex_lock(&g_nimg_mu);
+    for (size_t i = 0; i < sizeof g_nimg / sizeof *g_nimg; i++) if (handle && g_nimg[i].handle == handle) g_nimg[i].handle = 0;
+    pthread_mutex_unlock(&g_nimg_mu);
+}
+HLE_FORCE("_Z24nvnNativeImageInitializeP14NVNnativeImagePK21NVNnativeImageBuilder", "NVN2 native image: host storage for a host-made image handle (zeroed)", NVNboolean, h_nvnNativeImageInitialize,
+          void *img, const void *builder) {
+    const nimg_builder_t *b = builder; nimg_t *o = img; uint32_t w = 0, h = 0;
+    pthread_mutex_lock(&g_nimg_mu);
+    for (size_t i = 0; i < sizeof g_nimg / sizeof *g_nimg; i++) if (b->handle && g_nimg[i].handle == b->handle) { w = g_nimg[i].w; h = g_nimg[i].h; }
+    pthread_mutex_unlock(&g_nimg_mu);
+    if (!w) { LOG("[RED] NativeImageInitialize: handle %#x is not an image the host made", b->handle); return 0; }
+    nvn_texdesc d = {.target = NVN_TEXTURE_TARGET_2D, .format = (int)b->format, .width = w, .height = h, .depth = 1, .levels = 1}; nvn_texlayout L; nvn_tex_layout(&d, &L);
+    size_t pg = 0x4000, size = (L.size + pg - 1) & ~(pg - 1);
+    uint8_t *mem = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (mem == MAP_FAILED) { LOG("[RED] NativeImageInitialize: no memory for %ux%u", w, h); return 0; }
+    memset(o, 0, sizeof *o); o->magic = MAGIC('N', 'I', 'M', 'G'); o->format = b->format; o->w = w; o->h = h; o->mem = mem; o->size = size;
+    pool_builder_t pb = {b->dev, mem, size, NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    h_nvnMemoryPoolInitialize((NVNmemoryPool *)&o->pool, (const NVNmemoryPoolBuilder *)&pb);
+    return 1;
+}
+HLE_FORCE("_Z22nvnNativeImageFinalizeP14NVNnativeImage", "NVN2 native image: release the host storage", void, h_nvnNativeImageFinalize, void *img) {
+    nimg_t *o = img; if (o->magic != MAGIC('N', 'I', 'M', 'G')) return;
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&o->pool); munmap(o->mem, o->size); o->magic = 0;
+}
+HLE_FORCE("_Z35nvnTextureInitializeFromNativeImageP10NVNtextureP14NVNnativeImage", "NVN2 texture on a native image: 2D, one level, the image's format and storage", NVNboolean,
+          h_nvnTextureInitializeFromNativeImage, NVNtexture *t, void *img) {
+    nimg_t *o = img; if (o->magic != MAGIC('N', 'I', 'M', 'G')) return 0;
+    tex_builder_t b; memset(&b, 0, sizeof b);
+    b.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = (int)o->format, .width = o->w, .height = o->h, .depth = 1, .levels = 1}; b.pool = &o->pool;
+    return h_nvnTextureInitialize(t, (const NVNtextureBuilder *)&b);
+}
 NVN(nvnTextureGetFormat, NVNformat, const NVNtexture *t) { return (NVNformat)CTX(t)->d.format; }
 NVN(nvnTextureGetTarget, NVNtextureTarget, const NVNtexture *t) { return (NVNtextureTarget)CTX(t)->d.target; }
 NVN(nvnTextureSetDebugLabel, void, NVNtexture *t, const char *s) { (void)t; (void)s; }

@@ -926,6 +926,21 @@ int main(void) {
         EXPECT("several rows whose alignment would break the wrapped address: refused", 0, nvn_tbuf_rows(20000, 4, 3, &w, &h, &row));
     }
 
+    // 9. NVN2 native images (Mario Kart World's GameChat camera textures aborted the boot): the SDK's builder layout (device +0, handle +8, permission +0xc, format +0x10), a texture of the
+    //    image's size and format on host storage, and a handle the host did not make refused
+    {
+        struct { NVNdevice *dev; uint32_t handle, perm, format; } nb = {&dev, nvn_native_image_new(384, 216), 1, NVN_FORMAT_RGBA8_SRGB};
+        _Alignas(16) uint8_t img[0x1a0]; NVNtexture t;
+        EXPECT("native image: the host's handle initializes", 1, h_nvnNativeImageInitialize(img, &nb));
+        EXPECT("texture from a native image succeeds", 1, h_nvnTextureInitializeFromNativeImage(&t, img));
+        EXPECT("native image texture width", 384, P(nvnTextureGetWidth)(&t));
+        EXPECT("native image texture height", 216, P(nvnTextureGetHeight)(&t));
+        EXPECT("native image texture format", NVN_FORMAT_RGBA8_SRGB, P(nvnTextureGetFormat)(&t));
+        P(nvnTextureFinalize)(&t); h_nvnNativeImageFinalize(img); nvn_native_image_free(nb.handle);
+        nb.handle = 0x1234;
+        EXPECT("native image: a handle the host did not make fails", 0, h_nvnNativeImageInitialize(img, &nb));
+    }
+
     printf("== %d checks, %d failed ==\n", g_n, g_fail);
     return g_fail != 0;
 }

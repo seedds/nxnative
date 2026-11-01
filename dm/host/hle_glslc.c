@@ -5,6 +5,14 @@
 // The compile object's first word points at its last results {GLSLCcompilationStatus *, GLSLCoutput *}; the status has "success" at +0xc and "allocation error" at +0xd, which is what the
 // game itself reads after the call (main+0x9c8a04)
 #include "hle.h"
+// A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
+// as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#else
+#include "aot.h"
+#define GUEST_CALL DM_GUEST_CALL
+#endif
 #include <sys/stat.h>
 
 static void capture(const void *obj) {
@@ -31,7 +39,17 @@ int dm_glslc_gpu_code(int *major, int *minor) {
         typedef struct { uint32_t w[16]; } glslc_version_t;
         glslc_version_t (*get)(void) = (glslc_version_t (*)(void))guest_sym("glslcGetVersion");
         v[0] = v[1] = 0;
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
         if (get) { glslc_version_t r = get(); v[0] = (int)r.w[2]; v[1] = (int)r.w[3]; LOG("glslc: GLSLC API %u.%u, GPU code version %d.%d", r.w[0], r.w[1], v[0], v[1]); }
+#else   // the struct comes back through x8, an indirect result address (AAPCS64): guest memory for it, x8 set before the guest call, which leaves it as it is
+        if (get) {
+            glslc_version_t *rp = dm_guest_alloc(sizeof *rp);   // zero: a call that left reads as version 0
+            dm_aot_host_thread_begin((uint64_t)(uintptr_t)get)->x[8] = (uint64_t)(uintptr_t)rp;   // the calling thread's block (made for a host thread, as dm_gcall makes it)
+            dm_gcall((const void *)get, 0);
+            glslc_version_t r = *rp; dm_guest_free(rp, sizeof *rp);
+            v[0] = (int)r.w[2]; v[1] = (int)r.w[3]; LOG("glslc: GLSLC API %u.%u, GPU code version %d.%d", r.w[0], r.w[1], v[0], v[1]);
+        }
+#endif
     }
     *major = v[0]; *minor = v[1];
     return v[0] > 0;
@@ -40,7 +58,7 @@ int dm_glslc_gpu_code(int *major, int *minor) {
 HLE_FORCE("glslcCompile", "run-time GLSL compile (the game's own GLSLC compiles as usual; with DM_GLSLC_CAPTURE the outputs are saved to disk for offline translation)", uint8_t, h_glslc_Compile, void *obj) {
     static uint8_t (*orig)(void *);
     if (!orig && !(orig = guest_sym("glslcCompile"))) die("glslcCompile missing");
-    uint8_t ok = orig(obj);
+    uint8_t ok = GUEST_CALL(orig, obj);
     if (ok) capture(obj);
     return ok;
 }

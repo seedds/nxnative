@@ -20,6 +20,14 @@
 #include "nvn_timestamp.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
+// A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
+// as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#else
+#include "../../host/aot.h"
+#define GUEST_CALL DM_GUEST_CALL
+#endif
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
@@ -883,7 +891,7 @@ static uint8_t *cmd_alloc_keep(cmd_t *o, uint32_t size, uint32_t keep) {
         if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.cbs++; pthread_mutex_unlock(&g_cs_mu); }
         { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ncb;
           if (cblog && (++ncb <= 40 || ncb % 1000 == 0)) LOG("[nvn] command memory callback #%llu cmd=%p need %u (used in this segment %ld)", (unsigned long long)ncb, (void *)o, size + keep, o->cur && o->end ? (long)(o->cur - (o->end - 1)) : -1L); }
-        o->cb((NVNcommandBuffer *)o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY, size + keep, o->cb_data);
+        GUEST_CALL(o->cb, (NVNcommandBuffer *)o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY, size + keep, o->cb_data);   // the game's callback, on its thread
     }
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.bytes += size; g_cs.recs++; pthread_mutex_unlock(&g_cs_mu); }
     uint8_t *p = o->cur; o->cur += size; o->used += size; put_hdr(p, 0, size);

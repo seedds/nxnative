@@ -121,7 +121,7 @@ typedef sigjmp_buf dm_aot_jmp_buf;
 enum { DM_AOT_LEFT_NONE, DM_AOT_LEFT_EXIT, DM_AOT_LEFT_STOP, DM_AOT_LEFT_FAULT };   // why a thread's guest code left (dm_aot_thread.left)
 typedef struct dm_aot_thread {
     dm_guest_state st;                 // first: (dm_aot_thread *)st is its thread
-    dm_aot_jmp_buf base;               // the outermost dm_guest_call on this thread
+    dm_aot_jmp_buf base;               // the innermost dm_guest_call on this thread: each level keeps the one around it and puts it back when it returns
     int depth;                         // dm_guest_call nesting: 0 while no guest code runs on the thread
     volatile int left;                 // DM_AOT_LEFT_*: set before the jump to base
     _Atomic int exiting;               // ExitThread was answered (hle_thread.c thread_exit): the thread leaves when the SVC returns
@@ -132,6 +132,7 @@ typedef struct dm_aot_thread {
     uint64_t fault_address, fault_pc, fault_jit_pc;
     struct dm_aot_thread *next;        // the live threads (process stop)
     void *mem;                         // the allocation that holds this struct
+    int host;                          // a host thread that is no guest thread, given a guest context by dm_gcall (counted live only while it runs guest code)
 } dm_aot_thread;
 dm_aot_thread *dm_aot_self(void);          // the calling thread's, NULL when it never ran guest code
 dm_guest_state *dm_aot_thread_begin(void); // the calling thread's state block, made at its first call (x30 the host-return address, FPCR the packs')
@@ -160,9 +161,17 @@ int dm_aot_main_stack(uint64_t *lo, uint64_t *size);   // the guest stack the ho
 // ---------- The run time (aot_run.c) ----------
 // Exit statuses of a run (the same numbers as dm/tools/aot's nxaot_host, rt::Status)
 enum { DM_AOT_EXITED = 0, DM_AOT_TRAP = 1, DM_AOT_USAGE = 2, DM_AOT_JIT_NEEDED = 3, DM_AOT_FAULT = 4, DM_AOT_RETURNED = 6, DM_AOT_STUCK = 7 };
-// Call guest code at addr from the host (design 2.4): x0.. from the arguments (at most 8), x30 = the host-return address, the module's MXCSR, then the native
-// entry, the host-function page or the JIT. Returns x0 when the guest returns; the callee-saved registers, x30, SP and pc of the guest code around the call
-// are kept. The outermost call on a thread is the base the thread leaves through: it returns 0 then, with dm_aot_self()->left saying why
+// Call guest code at addr from the host (design 2.4): x0..x7 from the arguments, the 9th to the 16th in the guest stack's 8-byte slots below SP (AAPCS64's stacked
+// arguments, each one 64 bits wide), x30 = the host-return address, the module's MXCSR, then the native entry, the host-function page or the JIT. The registers
+// it does not set (x8, v0..v7) go in as the block holds them, so a caller with an indirect result or floating-point arguments sets them first; x1 and v0 hold the
+// rest of a result after it. Returns x0 when the guest returns; the callee-saved registers, x30, SP and pc of the guest code around the call are kept.
+// Nested re-entry: a host function that guest code called (its host-call thunk on this thread's native stack) may call guest code again on the same block; the
+// guest goes on below the SP of the host call, the thunk gets its block back as it left it but for the argument registers, and every level is a base of its own.
+// When guest code leaves (ExitThread, a process stop, a trap, a fault), the innermost call returns 0 with dm_aot_self()->left saying why, so the host function
+// around it runs to its end (its locks released), and the host call that made it leaves in turn when it returns (aot_run.c host_call), level by level to the outermost
+// call; a further guest call before that returns 0 at once. A fault is reported at the level that catches it. Limits: a non-local transfer (longjmp, a C++ exception)
+// out of nested guest code past the host function that called it stops the process with a [RED] line (the host's frames between cannot be unwound); a nested call made
+// while the thread's JIT instance runs (an SVC answered inside the JIT fallback) cannot use the JIT and stops the same way
 uint64_t dm_guest_call(dm_guest_state *st, uint64_t addr, int nargs, ...);
 // The process's main guest thread: entry with x0, x1, on a guest stack the host makes (8 MiB in the arena), until the process stops (svcExitProcess, a trap,
 // the JIT fallback needed and not built in, a fault, guest code returning to the host); then every other guest thread is stopped (6.2's polls, SVCs, waits)
@@ -180,7 +189,56 @@ int dm_aot_main_end(const char *returned);
 // line, logged once (NULL for none)
 void dm_aot_stop(int status, const char *why);
 int dm_aot_stop_status(void);              // -1 while running
-_Noreturn void dm_aot_leave(int why);      // the calling guest thread leaves its guest code (to its outermost dm_guest_call)
+_Noreturn void dm_aot_leave(int why);      // the calling guest thread leaves its guest code (to its innermost dm_guest_call, which returns 0)
+// ---------- Guest functions the host calls (design 2.4) ----------
+// Apple's host calls guest code through plain C function pointers: an SDK function from guest_sym (the original of a forced take-over, the audio renderer's and the
+// movie decoder's SDK functions, nn::os's system events), a callback the game registered (NVN's command-memory callback, the inline keyboard's), a module's DT_INIT.
+// Here each such call is a guest call:
+//   dm_gcall(fn, nargs, ...)      fn's guest address called with nargs integer or pointer arguments (each passed as uint64_t), on the calling thread's state block:
+//                                 nested inside the host call the thread is answering (the usual case: every such site runs on a guest thread, inside an HLE entry or
+//                                 the body of a host-created guest thread, hle_guestthread.c), or as an outermost call (the main thread between its start's steps).
+//                                 A host thread that is no guest thread gets a guest context of its own at its first call (aot_thread.c dm_aot_host_thread_begin: a state
+//                                 block, a 1 MiB guest stack in the arena and thread.c's TLS block and thread-local region, all freed when the thread ends), with a
+//                                 [RED] line once per thread: it has no SDK thread, so guest code that asks nn::os for its current thread or makes a thread SVC fails
+//                                 there (hle_thread.c dies: "thread SVC called from a non-guest thread"), as such a call has no meaning on Apple either
+//   DM_GUEST_CALL(f, args...)     the call site's form, where Apple writes f(args...): the arguments widened to 64 bits (pointers and integers; a float or double
+//                                 argument stops the link at dm_gcall_float_argument), at most 16, the result converted to the type f returns from x0 (an integer
+//                                 narrower than 64 bits keeps x0's low bits, which AAPCS64 defines; a float or double result stops the link at
+//                                 dm_gcall_float_result, and a struct result does not compile: such a site reads x1 / v0 or passes x8 itself, with dm_guest_call)
+// The host files keep Apple's text: each defines GUEST_CALL as the plain call where the guest's code is native (DM_NATIVE_EXEC) or where a unit test supplies the
+// guest's functions as C functions (DM_TEST_GUEST_C), and as DM_GUEST_CALL here
+uint64_t dm_gcall(const void *fn, int nargs, ...);
+dm_guest_state *dm_aot_host_thread_begin(uint64_t why_addr);   // aot_thread.c: the calling host thread's guest context (dm_gcall above); the block when it has one
+void dm_aot_host_thread_active(int on);   // aot_thread.c: a host thread's outermost guest call starts (1) or ends (0): it counts as a live guest thread meanwhile
+uint64_t dm_gcall_float_argument(void);   // never defined: a float or double argument of DM_GUEST_CALL fails the link
+uint64_t dm_gcall_float_result(void);     // never defined: DM_GUEST_CALL of a function returning float or double fails the link
+#define DM_GC_ISFP(x) (__builtin_types_compatible_p(__typeof__(x), float) || __builtin_types_compatible_p(__typeof__(x), double))
+#define DM_GC_A(x) ((uint64_t)__builtin_choose_expr(DM_GC_ISFP(x), dm_gcall_float_argument(), (uint64_t)(uintptr_t)(x)))
+#define DM_GC_N(...) DM_GC_N_(0, ##__VA_ARGS__, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+#define DM_GC_N_(z, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, n, ...) n
+#define DM_GC_CAT(a, b) DM_GC_CAT_(a, b)
+#define DM_GC_CAT_(a, b) a##b
+#define DM_GC_M0()
+#define DM_GC_M1(a) , DM_GC_A(a)
+#define DM_GC_M2(a, ...) , DM_GC_A(a) DM_GC_M1(__VA_ARGS__)
+#define DM_GC_M3(a, ...) , DM_GC_A(a) DM_GC_M2(__VA_ARGS__)
+#define DM_GC_M4(a, ...) , DM_GC_A(a) DM_GC_M3(__VA_ARGS__)
+#define DM_GC_M5(a, ...) , DM_GC_A(a) DM_GC_M4(__VA_ARGS__)
+#define DM_GC_M6(a, ...) , DM_GC_A(a) DM_GC_M5(__VA_ARGS__)
+#define DM_GC_M7(a, ...) , DM_GC_A(a) DM_GC_M6(__VA_ARGS__)
+#define DM_GC_M8(a, ...) , DM_GC_A(a) DM_GC_M7(__VA_ARGS__)
+#define DM_GC_M9(a, ...) , DM_GC_A(a) DM_GC_M8(__VA_ARGS__)
+#define DM_GC_M10(a, ...) , DM_GC_A(a) DM_GC_M9(__VA_ARGS__)
+#define DM_GC_M11(a, ...) , DM_GC_A(a) DM_GC_M10(__VA_ARGS__)
+#define DM_GC_M12(a, ...) , DM_GC_A(a) DM_GC_M11(__VA_ARGS__)
+#define DM_GC_M13(a, ...) , DM_GC_A(a) DM_GC_M12(__VA_ARGS__)
+#define DM_GC_M14(a, ...) , DM_GC_A(a) DM_GC_M13(__VA_ARGS__)
+#define DM_GC_M15(a, ...) , DM_GC_A(a) DM_GC_M14(__VA_ARGS__)
+#define DM_GC_M16(a, ...) , DM_GC_A(a) DM_GC_M15(__VA_ARGS__)
+#define DM_GUEST_CALL(f, ...)                                                                                                         \
+    ((void)__builtin_choose_expr(DM_GC_ISFP((f)(__VA_ARGS__)), dm_gcall_float_result(), 0),                                          \
+     (__typeof__((f)(__VA_ARGS__)))dm_gcall((const void *)(uintptr_t)(f), DM_GC_N(__VA_ARGS__) DM_GC_CAT(DM_GC_M, DM_GC_N(__VA_ARGS__))(__VA_ARGS__)))
+
 // Counters (the engine's own; the corpus test reads them)
 typedef struct {
     uint64_t svcs, host_calls, misses, cross_pack, safepoints, jit_runs, jit_addresses, threads;

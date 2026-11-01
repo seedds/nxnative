@@ -2,6 +2,14 @@
 // The host has no nvdrv: the SDK aborts when the decoder thread opens the device. Extractor::SetDataSource returns 0x1000 (the same code the SDK returns when it has no implementation object); Engage's Unity demuxes WebM itself and does not use it.
 // The host takes over Decoder (below; VP8 / VP9 are decoded with libvpx, H.264 with VideoToolbox in hle_movie_avc.c, Vorbis audio with stb_vorbis): Engage's movies are 103 VP9 WebM files under RomFS/Data/StreamingAssets/Movie (2.7 GB, no audio track), and the game does not go on until the opening movie S01F has played.
 #include "hle.h"
+// A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
+// as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#else
+#include "aot.h"
+#define GUEST_CALL DM_GUEST_CALL
+#endif
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
 #endif
@@ -139,7 +147,7 @@ static void md_event(mdec_t *d, int i) {   // 0 input 1 output 2 format 3 error
     if (d->evc && (plat_mem_read((uint64_t)(uintptr_t)&d->evc[i], &p, sizeof p, &got) || got != sizeof p)) p = NULL;
     void *live = p;
     if (!p || !ev_ok(p)) p = d->ev[i];
-    if (p) G.signal(p);
+    if (p) GUEST_CALL(G.signal, p);
     else if (live) { static _Atomic int red; if (red++ < 8) LOG("[RED] movie: decoder %p event %d not delivered: the client's entry %p is not an event", (void *)d, i, live); }
 }
 // Deferred events: "input available" after Start / Flush. The SDK's decoder signals it asynchronously from its own codec thread; Metroid Dread calls InitializeMultiWaitHolder before RegisterClientEvents
@@ -545,15 +553,15 @@ HLE_FORCE("_ZN5movie7DecoderD1Ev", "movie decoder destructor (complete object): 
 HLE_FORCE("_ZN5movie7DecoderD0Ev", "movie decoder deleting destructor: frees the host object, then the object with operator delete", void, h_movie_DecD0, void **self) {
     md_free(self);
     static void (*del)(void *); if (!del) del = (void (*)(void *))guest_sym("_ZdlPv");
-    if (del) del(self); else LOG("[RED] movie: no operator delete in the game; the decoder object is not freed");
+    if (del) GUEST_CALL(del, self); else LOG("[RED] movie: no operator delete in the game; the decoder object is not freed");
 }
 
 HLE_FORCE("_ZN5movie7Decoder9ConfigureEPNS_9MediaDataE", "movie decoder configure", int, h_movie_Configure, void **self, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (MD_AUDIO(d)) {   // codec-specific data as Android's MediaCodec takes it: Vorbis csd-0 = identification header, csd-1 = setup header; AAC csd-0 = AudioSpecificConfig
         for (int k = 0; k < 2 && md; k++) { void *b = NULL; char key[8]; snprintf(key, sizeof key, "csd-%d", k);
-            if (G.find_buf(md, key, &b) && b && G.data(b) && G.size(b)) { size_t n = G.size(b); free(d->vhdr[k]); d->vhdr[k] = malloc(n); memcpy(d->vhdr[k], G.data(b), n); d->vhdr_n[k] = (int)n; } }
-        int ch = 0, rate = 0; if (md) { G.find_i32(md, "channel-count", &ch); G.find_i32(md, "sample-rate", &rate); }
+            if (GUEST_CALL(G.find_buf, md, key, &b) && b && GUEST_CALL(G.data, b) && GUEST_CALL(G.size, b)) { size_t n = GUEST_CALL(G.size, b); free(d->vhdr[k]); d->vhdr[k] = malloc(n); memcpy(d->vhdr[k], GUEST_CALL(G.data, b), n); d->vhdr_n[k] = (int)n; } }
+        int ch = 0, rate = 0; if (md) { GUEST_CALL(G.find_i32, md, "channel-count", &ch); GUEST_CALL(G.find_i32, md, "sample-rate", &rate); }
         if (ch > 0) d->ch = ch; if (rate > 0) d->rate = rate;
         MD_TRACE(d, 0, "Configure (%s): %d channels %d Hz, headers %d + %d bytes", d->type == MD_TYPE_AAC ? "AAC" : "Vorbis", ch, rate, d->vhdr_n[0], d->vhdr_n[1]);
         return 0;
@@ -561,10 +569,10 @@ HLE_FORCE("_ZN5movie7Decoder9ConfigureEPNS_9MediaDataE", "movie decoder configur
     if (d->type == MD_TYPE_AVC && md) {   // SPS / PPS: csd-0 / csd-1 (Annex B, as Android's MediaCodec takes them) or, from this SDK's MP4 demuxer (Super Mario Odyssey), "avcc" = the avcC box
         md_avc_open(d);
         void *b = NULL;
-        for (int k = 0; k < 2; k++) { char key[8]; snprintf(key, sizeof key, "csd-%d", k); if (G.find_buf(md, key, &b) && b && G.data(b) && G.size(b)) mavc_param_sets(d->avc, G.data(b), G.size(b)); }
-        if (G.find_buf(md, "avcc", &b) && b && G.data(b) && G.size(b)) mavc_avcc(d->avc, G.data(b), G.size(b));
+        for (int k = 0; k < 2; k++) { char key[8]; snprintf(key, sizeof key, "csd-%d", k); if (GUEST_CALL(G.find_buf, md, key, &b) && b && GUEST_CALL(G.data, b) && GUEST_CALL(G.size, b)) mavc_param_sets(d->avc, GUEST_CALL(G.data, b), GUEST_CALL(G.size, b)); }
+        if (GUEST_CALL(G.find_buf, md, "avcc", &b) && b && GUEST_CALL(G.data, b) && GUEST_CALL(G.size, b)) mavc_avcc(d->avc, GUEST_CALL(G.data, b), GUEST_CALL(G.size, b));
     }
-    int w = 0, h = 0; if (md) { G.find_i32(md, "width", &w); G.find_i32(md, "height", &h); }
+    int w = 0, h = 0; if (md) { GUEST_CALL(G.find_i32, md, "width", &w); GUEST_CALL(G.find_i32, md, "height", &h); }
     dm_host_mutex_lock(&d->mu); if (w > 0 && h > 0 && !d->fmt_sent) { d->w = w; d->h = h; } pthread_mutex_unlock(&d->mu);
     MD_TRACE(d, 0, "Configure: MediaData width %d height %d", w, h);
     return 0;
@@ -648,7 +656,7 @@ HLE_FORCE("_ZN5movie7Decoder23AcquireInputBufferIndexEPiS1_", "movie decoder: ac
 HLE_FORCE("_ZN5movie7Decoder14GetInputBufferEiPNS_6BufferE", "movie decoder: hand out an input buffer", int, h_movie_GetIn, void **self, int i, void *buf) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     if (!buf || i < 0 || i >= MD_NIN) return 0x100b;
-    G.set_data(buf, d->in[i], MD_INCAP); G.set_range(buf, 0, (int)MD_INCAP);
+    GUEST_CALL(G.set_data, buf, d->in[i], MD_INCAP); GUEST_CALL(G.set_range, buf, 0, (int)MD_INCAP);
     return 0;
 }
 HLE_FORCE("_ZN5movie7Decoder24SendInputBufferForDecodeEiiilj", "movie decoder: send a packet for decoding (VP8 / VP9 with libvpx, AVC with VideoToolbox)", int, h_movie_SendIn,
@@ -696,17 +704,17 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
     return r;
 }
 static void md_format(mdec_t *d, void *md) {
-    if (MD_AUDIO(d)) { G.set_i32(md, "channel-count", d->ch > 0 ? d->ch : 2); G.set_i32(md, "sample-rate", d->rate > 0 ? d->rate : 48000); return; }
+    if (MD_AUDIO(d)) { GUEST_CALL(G.set_i32, md, "channel-count", d->ch > 0 ? d->ch : 2); GUEST_CALL(G.set_i32, md, "sample-rate", d->rate > 0 ? d->rate : 48000); return; }
     int w, h, stride, slice; md_dims(d, &w, &h, &stride, &slice);
-    G.set_i32(md, "width", w); G.set_i32(md, "height", h);
-    G.set_rect(md, "crop", 0, 0, w - 1, h - 1);
-    G.set_i32(md, "stride", stride); G.set_i32(md, "slice-height", slice);
-    G.set_i32(md, "nv12-y-stride", stride); G.set_i32(md, "nv12-y-offset", 0); G.set_i32(md, "nv12-uv-offset", stride * slice);
+    GUEST_CALL(G.set_i32, md, "width", w); GUEST_CALL(G.set_i32, md, "height", h);
+    GUEST_CALL(G.set_rect, md, "crop", 0, 0, w - 1, h - 1);
+    GUEST_CALL(G.set_i32, md, "stride", stride); GUEST_CALL(G.set_i32, md, "slice-height", slice);
+    GUEST_CALL(G.set_i32, md, "nv12-y-stride", stride); GUEST_CALL(G.set_i32, md, "nv12-y-offset", 0); GUEST_CALL(G.set_i32, md, "nv12-uv-offset", stride * slice);
     // The interleaved UV plane has the luma plane's byte stride. CRI Sofdec2's player (Catherine: Full Body, main+0x34e6bc) reads it with the other three and checks none of the results:
     // without it the chroma stride was stack garbage and its NV12 → RGB conversion read far outside guest memory on the first picture (main+0x344f74); in DRAGON QUEST VII Reimagined
     // every chroma row was read from the first one (a grey movie with vertical bands). The picture size again, as the SDK's DecoderImpl::GetOutputBufferFormatFromDecoder
     // (SDK 19 subsdk0+0x121f50) also sets it
-    G.set_i32(md, "nv12-uv-stride", stride); G.set_i32(md, "nv12-width", w); G.set_i32(md, "nv12-height", h);
+    GUEST_CALL(G.set_i32, md, "nv12-uv-stride", stride); GUEST_CALL(G.set_i32, md, "nv12-width", w); GUEST_CALL(G.set_i32, md, "nv12-height", h);
 }
 HLE_FORCE("_ZN5movie7Decoder15GetOutputFormatEPNS_9MediaDataE", "movie decoder: output format (NV12)", int, h_movie_OutFmt, void **self, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
@@ -745,7 +753,7 @@ int nvn_host_signal_sync(void *nvnsync);
 static int md_out_tex(mdec_t *d, int i, void *buf) {
     // SDK 4's Buffer has no sync object (Dark Souls Remastered's subsdk0 exports no GetNvnSync): the game reads the texture once GetOutputBuffer returns, which the CPU write already satisfies
     static int sync_looked; if (!sync_looked) { G.nvn_sync = guest_sym("_ZNK5movie6Buffer10GetNvnSyncEv"); sync_looked = 1; }
-    uint8_t *p = G.data(buf); size_t cap = G.cap(buf);
+    uint8_t *p = GUEST_CALL(G.data, buf); size_t cap = GUEST_CALL(G.cap, buf);
     if (!p || cap < 8) { LOG("[RED] movie: client buffer in native-texture mode is %zu bytes, needs 8 (a texture object)", cap); return 0x100b; }
     void *tex = p; int tw = 0, th = 0, f = nvn_host_write_texture(tex, NULL, 0, 0, 0, &tw, &th);
     if (f < 0) { LOG("[RED] movie: buffer data %p in native-texture mode is not a texture object", tex); return 0x100b; }
@@ -754,7 +762,7 @@ static int md_out_tex(mdec_t *d, int i, void *buf) {
     // No picture (an end-of-stream output): nothing is drawn and the texture keeps the last frame, as the SDK's consumer has no frame to draw. A black frame here flashed at the
     // end of every loop of Big Brain Academy: Brain vs. Brain's activity previews, which read the end-of-stream output's buffer
     if (d->out[i].pic && d->out[i].frm) nvn_host_write_texture(tex, d->out[i].frm, w, h, (size_t)d->w * 4, NULL, NULL);
-    void *sy = G.nvn_sync ? G.nvn_sync(buf) : NULL; if (sy && nvn_host_signal_sync(sy) && !d->red_dec++) LOG("[RED] movie: the buffer's sync object %p is not an NVNsync", sy);
+    void *sy = G.nvn_sync ? GUEST_CALL(G.nvn_sync, buf) : NULL; if (sy && nvn_host_signal_sync(sy) && !d->red_dec++) LOG("[RED] movie: the buffer's sync object %p is not an NVNsync", sy);
     MD_TRACE(d, 12, "GetOutputBuffer index %d → texture %p (%d×%d format %#x)%s", i, tex, tw, th, f, d->out[i].pic ? "" : " (no picture: the texture keeps its last frame)");
     return 0;
 }
@@ -765,22 +773,22 @@ HLE_FORCE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferE", "movie decoder: ge
     // The decoder writes from the start of the client's buffer. movie::Buffer::Data() is Base() + Offset() and Capacity() the whole buffer (STEINS;GATE RE:BOOT's subsdk0), so a buffer whose
     // read offset the client advanced was written past its end, over the guest heap (from PR #36): the range is reset first. Not in native-texture mode (md_out_tex),
     // where Data() is the texture object the client points it at and nothing is written through it
-    G.set_range(buf, 0, 0);
+    GUEST_CALL(G.set_range, buf, 0, 0);
     if (MD_AUDIO(d)) {   // PCM16 interleaved; an output without samples (end of stream) is empty
-        size_t n = d->out[i].pic ? d->out[i].bytes : 0, cap = G.cap(buf); uint8_t *p = G.data(buf);
-        if (!p || cap < n) { LOG("[RED] movie: client audio output buffer is %zu bytes, this packet needs %zu", cap, n); G.set_range(buf, 0, 0); return 0x100b; }
+        size_t n = d->out[i].pic ? d->out[i].bytes : 0, cap = GUEST_CALL(G.cap, buf); uint8_t *p = GUEST_CALL(G.data, buf);
+        if (!p || cap < n) { LOG("[RED] movie: client audio output buffer is %zu bytes, this packet needs %zu", cap, n); GUEST_CALL(G.set_range, buf, 0, 0); return 0x100b; }
         if (n) memcpy(p, d->out[i].frm, n);
-        G.set_range(buf, 0, (int)n);
+        GUEST_CALL(G.set_range, buf, 0, (int)n);
         MD_TRACE(d, 12, "GetOutputBuffer index %d → PCM %zu bytes", i, n);
         return 0;
     }
     int w, h, stride, slice; md_dims(d, &w, &h, &stride, &slice);
-    size_t need = (size_t)stride * slice * 3 / 2, cap = G.cap(buf);
-    uint8_t *p = G.data(buf);
-    if (!p || cap < need) { LOG("[RED] movie: client output buffer is %zu bytes, a frame needs %zu", cap, need); G.set_range(buf, 0, 0); return 0x100b; }
+    size_t need = (size_t)stride * slice * 3 / 2, cap = GUEST_CALL(G.cap, buf);
+    uint8_t *p = GUEST_CALL(G.data, buf);
+    if (!p || cap < need) { LOG("[RED] movie: client output buffer is %zu bytes, a frame needs %zu", cap, need); GUEST_CALL(G.set_range, buf, 0, 0); return 0x100b; }
     if (d->out[i].pic && d->out[i].frm) memcpy(p, d->out[i].frm, need);
     else { memset(p, 16, (size_t)stride * slice); memset(p + (size_t)stride * slice, 128, need - (size_t)stride * slice); }
-    G.set_range(buf, 0, (int)need);
+    GUEST_CALL(G.set_range, buf, 0, (int)need);
     MD_TRACE(d, 12, "GetOutputBuffer index %d → %zu bytes%s", i, need, d->out[i].pic ? "" : " (black frame)");
     return 0;
 }

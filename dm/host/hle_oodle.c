@@ -12,6 +12,23 @@
 // (0 = failed) and the decoded bytes.
 #include "hle.h"
 #include <unistd.h>
+// A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
+// as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#else
+#include "aot.h"
+#define GUEST_CALL DM_GUEST_CALL
+#endif
+// The memory the decoder gets (its input, output and work memory): host memory where the guest's code is native; guest memory in the arena on the x86-64 engine,
+// as everything guest code is handed (docs/design/aot-recompiler.md 5.2)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GBUF_ALLOC(n) malloc(n)
+#define GBUF_FREE(p, n) free(p)
+#else
+#define GBUF_ALLOC(n) dm_guest_alloc(n)
+#define GBUF_FREE(p, n) dm_guest_free((p), (n))
+#endif
 
 // OodleLZ_Decompress is found in main by the name its profiler scope passes: the one function whose code takes the address of the NUL-terminated string "OodleLZ_Decompress" (adrp + add),
 // with its start from the module's .eh_frame_hdr. The string belongs to the Oodle library itself, so the rule holds whatever the engine: Octopath Traveler 0 1.0.5 (Unreal) main+0x4f77e10,
@@ -104,18 +121,18 @@ static int32_t lzd_compressor(const uint8_t *c, int64_t cl) {
 }
 static int64_t lzd_run(const void *c, int64_t cl, void *r, int64_t rl, void *scratch, int64_t scratch_n) {
     int32_t comp = lzd_compressor(c, cl); if (comp < 0) return -1;
-    int64_t need = g_lzd.size(comp, rl); void *mem = scratch, *own = NULL;
+    int64_t need = GUEST_CALL(g_lzd.size, comp, rl); void *mem = scratch, *own = NULL;
     if (need <= 0) return -1;
-    if (need + 64 > scratch_n) { if (!(own = malloc((size_t)need + 64))) return -1; mem = own; }
-    void *dec = g_lzd.create(comp, rl, mem, need + 64);   // Create keeps 16 bytes for its own alignment
-    if (!dec) { free(own); return -1; }
+    if (need + 64 > scratch_n) { if (!(own = GBUF_ALLOC((size_t)need + 64))) return -1; mem = own; }
+    void *dec = GUEST_CALL(g_lzd.create, comp, rl, mem, need + 64);   // Create keeps 16 bytes for its own alignment
+    if (!dec) { GBUF_FREE(own, (size_t)need + 64); return -1; }
     int64_t pos = 0, cpos = 0;
     while (pos < rl) {
         int32_t out[4] = {0};
-        if (!g_lzd.some(dec, out, r, pos, rl, rl - pos, (const uint8_t *)c + cpos, cl - cpos, 1, 0, 0, 3) || (out[0] <= 0 && out[1] <= 0)) break;   // fuzz safe, no CRC check, silent, unthreaded
+        if (!GUEST_CALL(g_lzd.some, dec, out, r, pos, rl, rl - pos, (const uint8_t *)c + cpos, cl - cpos, 1, 0, 0, 3) || (out[0] <= 0 && out[1] <= 0)) break;   // fuzz safe, no CRC check, silent, unthreaded
         pos += out[0]; cpos += out[1];
     }
-    g_lzd.destroy(dec); free(own);
+    GUEST_CALL(g_lzd.destroy, dec); GBUF_FREE(own, (size_t)need + 64);
     return pos;
 }
 
@@ -138,9 +155,9 @@ static void dec_find(const char *mode) {
     die("%s: no main module", mode);
 }
 static int64_t dec_run(const void *c, int64_t cl, void *r, int64_t rl, void *scratch, int64_t scratch_n) {
-    if (g_dec.lz5) return cl > INT32_MAX || rl > INT32_MAX ? -1 : g_dec.lz5(c, r, (int32_t)cl, (int32_t)rl);
+    if (g_dec.lz5) return cl > INT32_MAX || rl > INT32_MAX ? -1 : GUEST_CALL(g_dec.lz5, c, r, (int32_t)cl, (int32_t)rl);
     if (!g_dec.oodle) return lzd_run(c, cl, r, rl, scratch, scratch_n);
-    return g_dec.oodle(c, cl, r, rl, 1, 0, 0, NULL, 0, NULL, NULL, scratch, scratch_n, 3);   // fuzz safe, no CRC check, silent, unthreaded
+    return GUEST_CALL(g_dec.oodle, c, cl, r, rl, 1, 0, 0, NULL, 0, NULL, NULL, scratch, scratch_n, 3);   // fuzz safe, no CRC check, silent, unthreaded
 }
 
 static uint32_t rd32(FILE *f) { uint32_t v = 0; if (fread(&v, 4, 1, f) != 1) die("DM_OODLE_JOB: the job file ends early"); return v; }
@@ -156,19 +173,19 @@ void dm_oodle_job_maybe(void) {
     char outp[1024]; snprintf(outp, sizeof outp, "%s.out", job);
     FILE *out = fopen(outp, "wb"); if (!out) die("DM_OODLE_JOB: cannot write %s", outp);
     uint32_t hdr[2] = {0x524f4d44, n}; fwrite(hdr, 4, 2, out);
-    size_t scratch_n = 16u << 20; void *scratch = malloc(scratch_n);   // the decoder's work memory, so Oodle never calls its allocator
+    size_t scratch_n = 16u << 20; void *scratch = GBUF_ALLOC(scratch_n);   // the decoder's work memory, so Oodle never calls its allocator
     uint32_t bad = 0; uint64_t raw_total = 0;
     for (uint32_t i = 0; i < n; i++) {
         uint32_t cl = rd32(in), rl = rd32(in);
-        uint8_t *c = malloc(cl ? cl : 1), *r = malloc(rl ? rl : 1);
+        uint8_t *c = GBUF_ALLOC(cl ? cl : 1), *r = GBUF_ALLOC(rl ? rl : 1);
         if (fread(c, 1, cl, in) != cl) die("DM_OODLE_JOB: record %u ends early", i);
         int64_t got = dec_run(c, cl, r, rl, scratch, (int64_t)scratch_n);
         uint32_t ol = got == (int64_t)rl ? rl : 0;
         if (!ol && bad++ < 8) LOG("[RED] DM_OODLE_JOB: record %u (%u → %u bytes) failed (decoder returned %lld)", i, cl, rl, (long long)got);
         fwrite(&ol, 4, 1, out); if (ol) fwrite(r, 1, ol, out);
-        raw_total += ol; free(c); free(r);
+        raw_total += ol; GBUF_FREE(c, cl ? cl : 1); GBUF_FREE(r, rl ? rl : 1);
     }
-    fclose(in); fclose(out); free(scratch);
+    fclose(in); fclose(out); GBUF_FREE(scratch, scratch_n);
     LOG("DM_OODLE_JOB: %u records decoded with the game's %s (%u failed, %.1f MB out) → %s", n - bad, g_dec.name, bad, raw_total / 1048576.0, outp);
     fflush(stderr); _exit(bad ? 1 : 0);
 }
@@ -188,15 +205,15 @@ void dm_oodle_serve_maybe(int late) {
     dec_find("DM_OODLE_SERVE");
     if (late != (g_dec.lz5 != NULL)) return;
     enum { SLACK = 0x10000 };
-    size_t scratch_n = 16u << 20; uint8_t *scratch = malloc(scratch_n), *comp = NULL, *raw = NULL; size_t comp_cap = 0, raw_cap = 0; uint64_t n = 0, bad = 0;   // the decoder's work memory, as for a job
+    size_t scratch_n = 16u << 20; uint8_t *scratch = GBUF_ALLOC(scratch_n), *comp = NULL, *raw = NULL; size_t comp_cap = 0, raw_cap = 0; uint64_t n = 0, bad = 0;   // the decoder's work memory, as for a job
     if (!scratch) die("DM_OODLE_SERVE: decoder memory");
     LOG("DM_OODLE_SERVE: %s at main+%#llx, requests on stdin", g_dec.name, (unsigned long long)g_dec.off);
     for (;;) {
         uint64_t hdr[2];
         if (!read_all(0, hdr, sizeof hdr)) break;
         if (hdr[0] > (1ull << 32) || hdr[1] > (1ull << 32)) die("DM_OODLE_SERVE: request too large (%#llx → %#llx)", (unsigned long long)hdr[0], (unsigned long long)hdr[1]);
-        if (hdr[0] > comp_cap) { free(comp); comp_cap = hdr[0]; if (!(comp = malloc(comp_cap))) die("DM_OODLE_SERVE: input buffer"); }
-        if (hdr[1] + SLACK > raw_cap) { free(raw); raw_cap = hdr[1] + SLACK; if (!(raw = malloc(raw_cap))) die("DM_OODLE_SERVE: output buffer"); }
+        if (hdr[0] > comp_cap) { GBUF_FREE(comp, comp_cap); comp_cap = hdr[0]; if (!(comp = GBUF_ALLOC(comp_cap))) die("DM_OODLE_SERVE: input buffer"); }
+        if (hdr[1] + SLACK > raw_cap) { GBUF_FREE(raw, raw_cap); raw_cap = hdr[1] + SLACK; if (!(raw = GBUF_ALLOC(raw_cap))) die("DM_OODLE_SERVE: output buffer"); }
         if (!read_all(0, comp, hdr[0])) die("DM_OODLE_SERVE: request cut short");
         int64_t got = dec_run(comp, (int64_t)hdr[0], raw, (int64_t)hdr[1], scratch, (int64_t)scratch_n);
         uint64_t out = got == (int64_t)hdr[1] ? (uint64_t)got : 0;

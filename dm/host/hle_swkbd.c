@@ -10,6 +10,14 @@
 // A game that sets isUseUtf8 = 1 after MakePreset reads the result back as a C string; UTF-16 output is supported as well per the original convention.
 // No window and DM_KBD unset: return as cancel (no popup, no hang). DM_KBD="text": no popup, return that text directly as OK (windowless testing / lockstep comparison).
 #include "hle.h"
+// A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
+// as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#else
+#include "aot.h"
+#define GUEST_CALL DM_GUEST_CALL
+#endif
 #include <stddef.h>
 #include <unistd.h>
 #include "front.h"
@@ -164,9 +172,9 @@ HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard4CalcEv", "inline keyboard per-frame upda
     if (i >= 0 && g_ikb[i].finished_due) { g_ikb[i].finished_due = 0; fin = g_ikb[i].finished; }
     if (i >= 0 && g_ikb[i].pending) { g_ikb[i].pending = 0; ask = 1; fn = g_ikb[i].cancel; enter = g_ikb[i].enter; changed = g_ikb[i].changed; max = g_ikb[i].max_len; }
     pthread_mutex_unlock(&g_ikb_mu);
-    if (init) init();   // guest code, called on the guest thread that called Calc (as on hardware)
-    if (rel) rel();
-    if (fin) fin();
+    if (init) GUEST_CALL(init);   // guest code, called on the guest thread that called Calc (as on hardware)
+    if (rel) GUEST_CALL(rel);
+    if (fin) GUEST_CALL(fin);
     if (!ask) return i >= 0 ? g_ikb[i].state : 0;
     char text[502 * 3 + 1]; int r = 0;
     if (enter) {   // as swkbd_show: DM_KBD answers without a box; the guest clock stands still while the box is up
@@ -176,12 +184,12 @@ HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard4CalcEv", "inline keyboard per-frame upda
     }
     LOG("swkbd: inline keyboard %p → %s%s%s", kb, r > 0 ? "OK '" : enter ? "cancel" : "no enter callback, cancel", r > 0 ? text : "", r > 0 ? "'" : "");
     pthread_mutex_lock(&g_ikb_mu); if (g_ikb[i].kb == kb) g_ikb[i].state = 1; pthread_mutex_unlock(&g_ikb_mu);   // the keyboard closes once the text is decided or cancelled
-    if (r <= 0) { if (fn) fn(); return 1; }
+    if (r <= 0) { if (fn) GUEST_CALL(fn); return 1; }
     static ikb_str_arg a; memset(&a, 0, sizeof a);   // one keyboard request at a time; static keeps 1 KB off the guest stack
     size_t n = swkbd_u8_to_u16(text, max > 0 ? (size_t)max : 500, a.str, 502);
     a.length = (int32_t)n; a.cursor = (int32_t)n;
-    if (changed) changed(&a);
-    enter(&a);
+    if (changed) GUEST_CALL(changed, &a);
+    GUEST_CALL(enter, &a);
     return 1;
 }
 HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard29SetFinishedInitializeCallbackEPFvvE", "inline keyboard: records the finished-initialize callback, called on the next Calc after Initialize", void, h_ikb_SetFinInit, void *kb, ikb_cb0 fn) {

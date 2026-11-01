@@ -310,23 +310,38 @@ def manifest_text(t):
 #   [7]  nn::ro::LoadModule of the NRO the host put in guest memory (nro_image): hle_ro.c maps it through nro.tsv, loads sub.aot.so, relocates it (its strlen import
 #        at the passthrough's slot) and runs its DT_INIT (sub_flag = 1000) as a guest call: 0; [8] LookupModuleSymbol(sub_fn): 0; [9] sub_fn(5) = 5 + strlen("sub nro")
 #        + sub_flag = 1012; [10] sub_value through main's own GOT, a stub until the load bound it to the NRO: 77; [11] after UnloadModule, the GOT is the stub again: 0
-# then OutputDebugString and ExitProcess
+# then the host calling guest code back (aot.h dm_gcall, DM_GUEST_CALL: the plain-pointer calls of Apple's text), main having registered its callback hf_cb with t_re_register:
+#   [13] t_re_fire(1): the host calls hf_cb(data, 1, 2, ..., 9) from inside that host call, on this thread (nested re-entry), ten arguments, the 9th and 10th on the guest stack:
+#        *data (1000) + 1 + 2 + ... + 9 = 1045; [14] x22, set to 0x1234 before the call and stored after it (a callee-saved register across the nested call)
+#   [15] t_re_deep(5): the host calls hf_deep(5), which calls the host's t_re_leaf(5), which calls synth_triple(5): 15 + 100, + 1 in hf_deep = 116 (two levels of nesting)
+#   [16] t_re_thread(10): hf_cb(data, 10, 2..9) from a guest thread the host creates (hle_guestthread.c, as the audio renderer's render thread): 1054
+#   [17] t_re_hostthread(20): hf_cb(data, 20, 2..9) from a host thread that is no guest thread (a context of its own, with a [RED] line): 1064
+#   [18] t_re_bind(hf_ev): hle_thread.c's hle_bind_system_event, the real path, calls main's nn::os::CreateSystemEvent and GetWritableHandleOfSystemEvent (svcCreateEvent)
+#        as nested guest calls, then the host signals the event through its binding (hle_signal_system_event_binding): the binding, non-zero; [19] svcWaitSynchronization on
+#        the event's readable handle with timeout 0: 0, signalled
+# then OutputDebugString, and t_re_stop: the host, holding a lock, calls hf_exit (svcExitProcess) as a guest call; the process stop leaves that nested call, the host
+# function runs on to its end (it releases the lock, notes what it saw) and its host call leaves in turn: the run ends with ExitProcess's status
 HF_DIR_NAME = 'hostfn'
 HF_BUILD_ID = 'aa08' * 8
 HF_TEXT_END, HF_RO_OFF, HF_DATA_OFF, HF_DATA_END, HF_BSS = 0x1000, 0x1000, 0x2000, 0x3000, 0x40000
-HF_MOD0, HF_DYNAMIC, HF_SYMTAB, HF_RELA, HF_JMPREL, HF_EH_HDR, HF_EH_FRAME = 0x1000, 0x1020, 0x1100, 0x1800, 0x1900, 0x1A00, 0x1A80
+HF_MOD0, HF_DYNAMIC, HF_SYMTAB, HF_RELA, HF_JMPREL, HF_EH_HDR, HF_EH_FRAME = 0x1000, 0x1020, 0x1100, 0x1800, 0x1A00, 0x1A40, 0x1B00
 HF_MSG, HF_CONSTF, HF_NAME = 0x1E00, 0x1E20, 0x1E40
+HF_CBDATA, HF_EV = 0x2340, 0x2380   # hf_cb's data word (1000), the SystemEventType t_re_bind binds (write handle, read handle)
+HF_CBDATA_VALUE = 1000
 HF_GOT, HF_RESULTS, HF_VT, HF_VT2, HF_NROIMG, HF_HEAPPTR, HF_ROMOD, HF_OUT = 0x2000, 0x2100, 0x2200, 0x2240, 0x2280, 0x2288, 0x22C0, 0x2300
 HF_HEAP = HF_DATA_END   # bss: the bump allocator's memory
 HF_MESSAGE = b'hostfn module: done'
 HF_SUB_MESSAGE = b'sub nro'
 HF_GOT_SYMS = ['strlen', 'sqrtf', 't_hf_get', 't_hf_install', 't_hf_spawn', '_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi',
-               '_ZN2nn2ro18LookupModuleSymbolEPmPKNS0_6ModuleEPKc', 'sub_value', '_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE']
+               '_ZN2nn2ro18LookupModuleSymbolEPmPKNS0_6ModuleEPKc', 'sub_value', '_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE',
+               't_re_register', 't_re_fire', 't_re_thread', 't_re_hostthread', 't_re_deep', 't_re_leaf', 't_re_bind', 't_re_stop']
 HF_JUMP_SLOT = {'sub_value'}   # in DT_JMPREL (rebound at the NRO's load and unload as a game's lazily bound functions); the rest GLOB_DAT
 HF_SQRT_IN, HF_SQRT_OUT = 6.25, 2.5
 # What main stores in results[i] (None: checked by the host otherwise)
 HF_EXPECTED = [len(HF_MESSAGE), struct.unpack('<I', struct.pack('<f', HF_SQRT_OUT))[0], 5 * 6 + 1000, 7 * 8 + 1000, 123, 0, 42, 0, 0,
-               5 + len(HF_SUB_MESSAGE) + 1000, 77, 0, None]
+               5 + len(HF_SUB_MESSAGE) + 1000, 77, 0, None,
+               HF_CBDATA_VALUE + 1 + 44, 0x1234, 3 * 5 + 100 + 1, HF_CBDATA_VALUE + 10 + 44, HF_CBDATA_VALUE + 20 + 44, None, 0]
+HF_NRESULTS = 24   # the results array's words
 # The NRO: text (with the NRO header at +0x10), read-only data (MOD0 and the dynamic tables), data, bss
 SUB_CODE, SUB_TEXT_END, SUB_RO_OFF, SUB_DATA_OFF, SUB_DATA_END, SUB_BSS = 0x80, 0x1000, 0x1000, 0x2000, 0x3000, 0x1000
 SUB_MOD0, SUB_DYNAMIC, SUB_SYMTAB, SUB_RELA, SUB_EH_HDR, SUB_EH_FRAME, SUB_MSG = 0x1000, 0x1020, 0x1100, 0x1400, 0x1500, 0x1580, 0x1900
@@ -348,6 +363,9 @@ HF_ENCODINGS = [   # (llvm-mc's text, the word above): test_aot_manifest.py's Nx
     ('ldp x29, x30, [sp], #16', LDP_FP_LR), ('stp x29, x30, [sp, #-32]!', STP_PRE(29, 30, 31, -32)), ('ldp x29, x30, [sp], #32', LDP_POST(29, 30, 31, 32)),
     ('fmov s0, #1.0', FMOV_S0_1), ('str x19, [sp, #16]', str_x(19, 31, 16)), ('ldr x19, [sp, #16]', ldr_x(19, 31, 16)), ('mov x19, x0', mov_x(19, 0)), ('add x0, x0, x19', add_xr(0, 0, 19)),
     ('mov w4, w5', mov_w(4, 5)), ('add x1, x0, #16', add_x(1, 0, 16)), ('ldr w0, [x0, #16]', ldr_w(0, 0, 16)), ('svc #0x18', svc(0x18)), ('brk #0x2', brk(2)),
+    ('ldr x9, [sp]', ldr_x(9, 31, 0)), ('ldr x9, [sp, #8]', ldr_x(9, 31, 8)), ('ldr x0, [x0]', ldr_x(0, 0, 0)), ('add x0, x0, x7', add_xr(0, 0, 7)),
+    ('str w2, [x9, #4]', str_w(2, 9, 4)), ('ldr w0, [x0]', ldr_w(0, 0, 0)), ('mov x9, x0', mov_x(9, 0)), ('svc #0x45', svc(0x45)), ('mov w0, #0', movz_w(0, 0)),
+    ('mov x22, #4660', movz_x(22, 0x1234)), ('add x1, x9, #4', add_x(1, 9, 4)), ('mov x3, #0', movz_x(3, 0)), ('add x0, x0, #1', add_x(0, 0, 1)), ('brk #0x3', brk(3)),
 ]
 
 
@@ -408,7 +426,17 @@ def hf_text():
     t += got_load(7) + [(None, blr(16)), (None, str_x(0, 19, r(10)))]
     t += got_load(8) + [(None, adrp(0, HF_ROMOD)), (None, add_x(0, 0, lo12(HF_ROMOD))), (None, blr(16))]
     t += got_load(7) + [(None, blr(16)), (None, str_x(0, 19, r(11)))]
-    t += [(None, adrp(0, HF_MSG)), (None, add_x(0, 0, lo12(HF_MSG))), (None, movz_x(1, len(HF_MESSAGE))), (None, svc(0x27)), (None, svc(0x07)), (None, brk(1))]
+    # The host calling guest code back: the callback registered, then called from the host in each context
+    t += got_load(9) + [(None, adr(0, 'hf_cb')), (None, adrp(1, HF_CBDATA)), (None, add_x(1, 1, lo12(HF_CBDATA))), (None, blr(16))]
+    t += [(None, movz_x(22, 0x1234))] + got_load(10) + [(None, movz_x(0, 1)), (None, blr(16)), (None, str_x(0, 19, r(13))), (None, str_x(22, 19, r(14)))]
+    t += got_load(13) + [(None, movz_x(0, 5)), (None, blr(16)), (None, str_x(0, 19, r(15)))]
+    t += got_load(11) + [(None, movz_x(0, 10)), (None, blr(16)), (None, str_x(0, 19, r(16)))]
+    t += got_load(12) + [(None, movz_x(0, 20)), (None, blr(16)), (None, str_x(0, 19, r(17)))]
+    t += got_load(15) + [(None, adrp(0, HF_EV)), (None, add_x(0, 0, lo12(HF_EV))), (None, blr(16)), (None, str_x(0, 19, r(18))),
+                         (None, adrp(9, HF_EV)), (None, add_x(9, 9, lo12(HF_EV))), (None, add_x(1, 9, 4)), (None, movz_w(2, 1)), (None, movz_x(3, 0)), (None, svc(0x18)),
+                         (None, str_x(0, 19, r(19)))]
+    t += [(None, adrp(0, HF_MSG)), (None, add_x(0, 0, lo12(HF_MSG))), (None, movz_x(1, len(HF_MESSAGE))), (None, svc(0x27))]
+    t += got_load(16) + [(None, blr(16)), (None, svc(0x07)), (None, brk(1))]
     # malloc(n): a bump allocator over bss, 16-byte steps (hf_heapptr starts at the heap: a relative relocation); free: nothing
     t += [('hf_malloc', adrp(9, HF_HEAPPTR)), (None, add_x(9, 9, lo12(HF_HEAPPTR))), (None, ldr_x(10, 9, 0)), (None, add_x(11, 0, 15)), (None, lsr_x(11, 11, 4)),
           (None, lsl_x(11, 11, 4)), (None, mov_x(0, 10)), (None, add_xr(10, 10, 11)), (None, str_x(10, 9, 0)), (None, RET)]
@@ -421,13 +449,25 @@ def hf_text():
     t += [('hf_destroy', ldr_w(0, 0, 16)), (None, svc(0x16)), (None, RET)]                                                     # svcCloseHandle(handle)
     t += [('hf_tramp', ldr_x(16, 0, 0)), (None, ldr_x(0, 0, 8)), (None, blr(16)), (None, svc(0x0A)), (None, brk(2))]           # fn(arg), then svcExitThread
     t += [('hf_triple', add_xr(1, 0, 0)), (None, add_xr(0, 1, 0)), (None, RET)]
+    # hf_cb(data, a1, ..., a9): *data + a1 + ... + a9, a8 and a9 the stacked arguments at [sp] and [sp, #8]
+    t += [('hf_cb', ldr_x(0, 0, 0))] + [(None, add_xr(0, 0, k)) for k in range(1, 8)] + \
+         [(None, ldr_x(9, 31, 0)), (None, add_xr(0, 0, 9)), (None, ldr_x(9, 31, 8)), (None, add_xr(0, 0, 9)), (None, RET)]
+    # hf_deep(x): t_re_leaf(x) + 1, t_re_leaf a host function that calls synth_triple back
+    t += [('hf_deep', STP_FP_LR), (None, MOV_FP_SP)] + got_load(14) + [(None, blr(16)), (None, add_x(0, 0, 1)), (None, LDP_FP_LR), (None, RET)]
+    # nn::os::CreateSystemEvent(ev, mode, interprocess): svcCreateEvent, the write handle at ev, the read handle at ev + 4, 0; GetWritableHandleOfSystemEvent(ev): the write handle
+    t += [('hf_cev', mov_x(9, 0)), (None, svc(0x45)), (None, str_w(1, 9, 0)), (None, str_w(2, 9, 4)), (None, movz_w(0, 0)), (None, RET)]
+    t += [('hf_gwh', ldr_w(0, 0, 0)), (None, RET)]
+    # hf_exit: svcExitProcess, from a guest call the host makes inside t_re_stop
+    t += [('hf_exit', svc(0x07)), (None, brk(3))]
     # A function of the module that writes v0, which nothing calls. nxaot's indirect call sites reload after the call only what the module's own functions may write (its
     # plan.cpp, indirect_writes: the union over the standard entries), while the dispatcher may hand the call to a host function, which returns a float in v0: without
     # one, sqrtf's result would be dropped for the stale v0 (found with this module; a lifter issue, reported, not the host's). Every real module has such functions
     t += [('hf_fone', FMOV_S0_1), (None, RET), ('hf_end', None)]
     functions = [('hf_start', 'hf_start'), ('malloc', 'hf_malloc'), ('free', 'hf_free'), ('_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi', 'hf_create'),
                  ('_ZN2nn2os11StartThreadEPNS0_10ThreadTypeE', 'hf_start_thread'), ('_ZN2nn2os10WaitThreadEPNS0_10ThreadTypeE', 'hf_wait'),
-                 ('_ZN2nn2os13DestroyThreadEPNS0_10ThreadTypeE', 'hf_destroy'), ('hf_thread_tramp', 'hf_tramp'), ('synth_triple', 'hf_triple'), ('hf_one', 'hf_fone')]
+                 ('_ZN2nn2os13DestroyThreadEPNS0_10ThreadTypeE', 'hf_destroy'), ('hf_thread_tramp', 'hf_tramp'), ('synth_triple', 'hf_triple'),
+                 ('hf_cb', 'hf_cb'), ('hf_deep', 'hf_deep'), ('_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb', 'hf_cev'),
+                 ('_ZN2nn2os30GetWritableHandleOfSystemEventEPKNS0_15SystemEventTypeE', 'hf_gwh'), ('hf_exit', 'hf_exit'), ('hf_one', 'hf_fone')]
     return t, functions
 
 
@@ -441,7 +481,7 @@ def hf_image():
     order = [lab for _, lab in functions] + ['hf_end']
     ranges = [(L[order[i]], L[order[i + 1]]) for i in range(len(functions))]
     undef = [(s, 0, 0x12, 0, 0) for s in HF_GOT_SYMS]
-    objects = [('results', 3, 0x11, HF_RESULTS, 8 * 16), ('hf_got', 3, 0x11, HF_GOT, 8 * len(HF_GOT_SYMS)), ('hf_vt', 3, 0x11, HF_VT, 32),
+    objects = [('results', 3, 0x11, HF_RESULTS, 8 * HF_NRESULTS), ('hf_got', 3, 0x11, HF_GOT, 8 * len(HF_GOT_SYMS)), ('hf_vt', 3, 0x11, HF_VT, 32),
                ('hf_vt2', 3, 0x11, HF_VT2, 32), ('nro_image', 3, 0x11, HF_NROIMG, 8)]
     funcs = [(name, 1, 0x12, s, e - s) for (name, _), (s, e) in zip(functions, ranges)]
     symbols = undef + objects + funcs
@@ -450,11 +490,12 @@ def hf_image():
     hdr, frame = eh_frame_at(HF_EH_FRAME, HF_EH_HDR, ranges)
     end = dynamic_tables(img, HF_MOD0, HF_DYNAMIC, HF_SYMTAB, HF_RELA, symbols, rela, HF_JMPREL, jmprel,
                          mod0_fields=(HF_DYNAMIC, HF_DATA_END, HF_DATA_END + HF_BSS, HF_EH_HDR, HF_EH_FRAME))
-    assert end <= HF_RELA and HF_JMPREL + 24 * len(jmprel) <= HF_EH_HDR and HF_EH_HDR + len(hdr) <= HF_EH_FRAME and HF_EH_FRAME + len(frame) <= HF_MSG
+    assert end <= HF_RELA and HF_RELA + 24 * len(rela) <= HF_JMPREL and HF_JMPREL + 24 * len(jmprel) <= HF_EH_HDR and HF_EH_HDR + len(hdr) <= HF_EH_FRAME and HF_EH_FRAME + len(frame) <= HF_MSG
     img[HF_EH_HDR:HF_EH_HDR + len(hdr)] = hdr
     img[HF_EH_FRAME:HF_EH_FRAME + len(frame)] = frame
     img[HF_MSG:HF_MSG + len(HF_MESSAGE)] = HF_MESSAGE
     struct.pack_into('<f', img, HF_CONSTF, HF_SQRT_IN)
+    struct.pack_into('<Q', img, HF_CBDATA, HF_CBDATA_VALUE)
     img[HF_NAME:HF_NAME + 7] = b'sub_fn\0'
     return img, L['hf_end']
 

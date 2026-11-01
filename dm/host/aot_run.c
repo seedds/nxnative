@@ -12,6 +12,8 @@
 //   dm_aot_cntpct       mrs cntpct_el0 / cntvct_el0 (8): the guest clock in 19.2 MHz ticks, as svcGetSystemTick and Apple's counter gate read it
 //   dm_aot_gate         a manifest's observation gate or spin wait back-edge (loader.c registers them in hle.c's gate table): the lifter's call of design 1.1, which no
 //                       pack makes yet
+// dm_guest_call nests: a host function guest code called may call guest code again on the same thread (aot.h), each level a base of its own that guest code leaving
+// returns through, the host call around it leaving in turn (host_call). dm_gcall is the form the host's plain-pointer call sites use (aot.h DM_GUEST_CALL)
 // A call to the stub page (aot.h: an import nothing implements) is answered as a host call is, by hle.c's unimpl_c
 // Guest code runs with the MXCSR of the module's FPCR (7.1), set at every entry into compiled code from the host; host calls run with the guest thread's MXCSR,
 // as host calls run with the guest's FPCR on Apple
@@ -116,6 +118,7 @@ static _Noreturn void trap(dm_aot_thread *t, uint64_t guest, uint32_t reason) {
 static void host_call(dm_aot_thread *t, uint64_t pc) {
     atomic_fetch_add_explicit(&c_host_calls, 1, memory_order_relaxed);
     dm_aot_hostcall(&t->st, pc);   // the slot's thunk: arguments from the block, the result into x0 / v0, on this thread's native stack (2.4)
+    if (t->left != DM_AOT_LEFT_NONE) dm_aot_leave(t->left);         // a guest call the host function made left its guest code (nested re-entry): this level leaves too
     if (atomic_load(&t->exiting)) dm_aot_leave(DM_AOT_LEFT_EXIT);   // the host function answered ExitThread for this thread
     check_stop(t);
     t->st.pc = t->st.x[30];   // the guest goes on at its return address
@@ -175,6 +178,13 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why) {
     dm_aot_stop(DM_AOT_JIT_NEEDED, first_time(pc) ? msg : NULL);
     dm_aot_leave(DM_AOT_LEFT_STOP);
 #else
+    static _Thread_local int t_jit_running;   // dm_jit_run is on this thread's stack: an SVC answered inside the JIT made a nested guest call (aot.h, the limits of nesting)
+    if (t_jit_running) {
+        char msg[320];
+        snprintf(msg, sizeof msg, "[RED] aot: %s at %s needs the JIT fallback inside a guest call the host made while this thread's JIT instance runs (an SVC answered inside the JIT): one instance per thread, not re-entrant", *why, name);
+        dm_aot_stop(DM_AOT_JIT_NEEDED, msg);
+        dm_aot_leave(DM_AOT_LEFT_STOP);
+    }
     pthread_once(&g_jit_once, jit_init_once);
     dm_jit *j = t->jit;
     if (!j) {
@@ -188,12 +198,14 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why) {
     }
     if (first_time(pc)) LOG("[RED] aot: %s at %s runs in the JIT fallback (design section 11)", *why, name);
     atomic_fetch_add_explicit(&c_jit_runs, 1, memory_order_relaxed);
+    t_jit_running = 1;
     const uint64_t stop = dm_jit_run(j, pc);
+    t_jit_running = 0;
     *why = "a non-local transfer to a continuation with no native frame";
     switch (dm_jit_reason(j)) {
     case DM_JIT_ENTRY: case DM_JIT_RETURN: return;   // st->pc = stop: the loop decides
     case DM_JIT_HALTED: safepoint(t); return;        // a pause or a stop
-    case DM_JIT_CALLBACK: dm_aot_leave(atomic_load(&t->exiting) ? DM_AOT_LEFT_EXIT : DM_AOT_LEFT_STOP);   // the svc ended the thread or the process
+    case DM_JIT_CALLBACK: dm_aot_leave(t->left != DM_AOT_LEFT_NONE ? t->left : atomic_load(&t->exiting) ? DM_AOT_LEFT_EXIT : DM_AOT_LEFT_STOP);   // the svc ended the thread or the process
     case DM_JIT_NO_CODE:
         if (stop == DM_AOT_HOST_RETURN || stop == lr || dm_aot_hostfn_name(stop) || dm_aot_stub_index(stop) >= 0) return;
         {
@@ -211,11 +223,23 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why) {
 #endif
 }
 
+// A non-local transfer (3.3) to a return address of compiled code with an SP above the one a nested guest call was made with: its target frame lies beyond the host
+// function that made the call (a callback that longjmps or throws past it), whose native frames cannot be unwound
+static _Noreturn void nonlocal_out(dm_aot_thread *t, uint64_t pc) {
+    (void)t;
+    char at[64], msg[300];
+    dm_aot_guest_name(pc, at, sizeof at);
+    snprintf(msg, sizeof msg, "[RED] aot: a non-local transfer (longjmp or a C++ exception) to %s leaves guest code the host called from inside a host call, past the host function that called it: its frames cannot be unwound (design 3.3)", at);
+    dm_aot_stop(DM_AOT_TRAP, msg);
+    dm_aot_leave(DM_AOT_LEFT_STOP);
+}
+
 // The JIT driver (the reference is dm/tools/aot/src/rt/host.cpp Host::JitLoop): st->pc is where the guest continues, st holds the whole register file. Runs
 // until the guest returns to lr (the native frame that handed over the continuation; DM_AOT_HOST_RETURN at a thread's outermost level), taking host calls and
 // compiled entries natively on the way (their normal return continues at the lr they were called with, x30). A return address of compiled code reached
 // with an SP above the one this frame was entered with is a non-local transfer (3.3): nested, it is propagated to the native frames further out
-// (st->pending); at the outermost level nothing can own it and the JIT runs it
+// (st->pending); at the outermost level of a guest call nothing can own it and the JIT runs it, unless that guest call is nested in a host call and the transfer
+// leaves it (sp is then the SP the call was made with: nonlocal_out)
 static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, const char *why) {
     dm_guest_state *st = &t->st;
     for (;;) {
@@ -245,6 +269,7 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
                 continue;
             }
             if (!outermost && st->sp > sp && dm_aot_is_return(pc)) { st->pending = pc; return; }   // a native frame further out may wait there
+            if (outermost && t->depth > 1 && st->sp > sp && dm_aot_is_return(pc)) nonlocal_out(t, pc);
         }
         run_jit(t, lr, &why);
     }
@@ -256,6 +281,7 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
 static void run_guest(dm_aot_thread *t, uint64_t pc) {
     dm_guest_state *st = &t->st;
     const char *why = "a call from the host to an address with no compiled entry";
+    const uint64_t sp0 = st->sp;   // the SP the call was made with: a nested call's guest code stays below it
     for (;;) {
         check_stop(t);
         if (pc == DM_AOT_HOST_RETURN) return;
@@ -271,11 +297,12 @@ static void run_guest(dm_aot_thread *t, uint64_t pc) {
                 dm_aot_pack_desc(p)->enter(st, dm_aot_entry_of(e));
                 if (!st->pending) return;
                 pc = st->pending; st->pending = 0;
+                if (t->depth > 1 && st->sp > sp0) nonlocal_out(t, pc);
                 why = "a non-local transfer to a continuation with no native frame";
                 continue;
             }
         }
-        jit_loop(t, DM_AOT_HOST_RETURN, 0, 1, why);
+        jit_loop(t, DM_AOT_HOST_RETURN, sp0, 1, why);
         st->pending = 0;
         return;
     }
@@ -283,37 +310,47 @@ static void run_guest(dm_aot_thread *t, uint64_t pc) {
 
 // A fault in guest code (aot_fault.c jumped to the thread's base with the facts): the report and the process stop
 static void fault_report(dm_aot_thread *t) {
+    if (!t->fault_signal) return;   // reported at a nested level already
     char where[200], msg[400];
     if (t->fault_jit_pc) { char g[64]; dm_aot_guest_name(t->fault_jit_pc, g, sizeof g); snprintf(where, sizeof where, "a memory access of the JIT fallback near guest %s", g); }
     else if (!dm_aot_where(t->fault_pc, where, sizeof where)) snprintf(where, sizeof where, "host pc %#llx", (unsigned long long)t->fault_pc);
     const char *sig = t->fault_signal == 11 ? "SIGSEGV" : t->fault_signal == 7 ? "SIGBUS" : t->fault_signal == 4 ? "SIGILL" : t->fault_signal == 8 ? "SIGFPE" : "an exception";
     snprintf(msg, sizeof msg, "[RED] aot: %s at address %#llx in guest code (%s)", sig, (unsigned long long)t->fault_address, where);
     dm_aot_stop(DM_AOT_FAULT, msg);
+    t->fault_signal = 0;
 }
 
-uint64_t dm_guest_call(dm_guest_state *st, uint64_t addr, int nargs, ...) {
+// dm_guest_call's arguments from a va_list (dm_gcall's too)
+static uint64_t guest_vcall(dm_guest_state *st, uint64_t addr, int nargs, va_list ap) {
     dm_aot_thread *t = dm_aot_self();
     if (!t || &t->st != st) die("aot: dm_guest_call(%#llx) with a state block that is not the calling thread's", (unsigned long long)addr);
-    if (nargs < 0 || nargs > 8) die("aot: dm_guest_call(%#llx) with %d arguments (x0..x7 at most)", (unsigned long long)addr, nargs);
-    uint64_t a[8] = {0};
-    va_list ap; va_start(ap, nargs);
+    if (nargs < 0 || nargs > 16) die("aot: dm_guest_call(%#llx) with %d arguments (x0..x7 and 8 stacked at most)", (unsigned long long)addr, nargs);
+    uint64_t a[16] = {0};
     for (int i = 0; i < nargs; i++) a[i] = va_arg(ap, uint64_t);
-    va_end(ap);
+    // A nested call after one that left (aot.h): the host frames unwind to the next level first, and no guest code runs meanwhile
+    if (t->depth && t->left != DM_AOT_LEFT_NONE) return 0;
     // What the guest code around this call keeps (AAPCS64 lets the callee change the rest): x19..x30, SP, pc, a pending transfer
     uint64_t keep[12], keep_sp = st->sp, keep_pc = st->pc, keep_pending = st->pending;
     const uint32_t keep_reason = st->exit_reason, host_mxcsr = _mm_getcsr();
     memcpy(keep, &st->x[19], sizeof keep);
-    if (t->depth == 0) {
-        if (dm_aot_setjmp(t->base)) {
-            // The thread left its guest code: ExitThread, a process stop, a trap or a fault
-            t->depth = 0;
-            _mm_setcsr(host_mxcsr);
-            if (t->left == DM_AOT_LEFT_FAULT) fault_report(t);
-            return 0;
-        }
+    // Each level is a base: the one around it (a nested call's) is kept here and put back when this one returns or is left
+    dm_aot_jmp_buf outer;
+    const int depth0 = t->depth;
+    if (depth0) memcpy(&outer, &t->base, sizeof outer);
+    if (dm_aot_setjmp(t->base)) {
+        // The thread left its guest code: ExitThread, a process stop, a trap or a fault (reported once, at the level that caught it)
+        t->depth = depth0;
+        if (depth0) memcpy(&t->base, &outer, sizeof outer);
+        _mm_setcsr(host_mxcsr);
+        if (t->left == DM_AOT_LEFT_FAULT) fault_report(t);
+        return 0;
     }
     t->depth++;
-    for (int i = 0; i < nargs; i++) st->x[i] = a[i];
+    for (int i = 0; i < nargs && i < 8; i++) st->x[i] = a[i];
+    if (nargs > 8) {   // the stacked arguments in 8-byte slots from the callee's SP up, which stays 16-byte aligned
+        st->sp = (st->sp - 8 * (uint64_t)(nargs - 8)) & ~(uint64_t)15;
+        memcpy((void *)(uintptr_t)st->sp, &a[8], 8 * (size_t)(nargs - 8));
+    }
     st->x[30] = DM_AOT_HOST_RETURN;
     st->pending = 0;
     _mm_setcsr(dm_aot_guest_mxcsr(st->fpcr));
@@ -322,7 +359,35 @@ uint64_t dm_guest_call(dm_guest_state *st, uint64_t addr, int nargs, ...) {
     memcpy(&st->x[19], keep, sizeof keep);
     st->sp = keep_sp; st->pc = keep_pc; st->pending = keep_pending; st->exit_reason = keep_reason;
     t->depth--;
+    if (depth0) memcpy(&t->base, &outer, sizeof outer);
     _mm_setcsr(host_mxcsr);
+    return r;
+}
+
+uint64_t dm_guest_call(dm_guest_state *st, uint64_t addr, int nargs, ...) {
+    va_list ap; va_start(ap, nargs);
+    const uint64_t r = guest_vcall(st, addr, nargs, ap);
+    va_end(ap);
+    return r;
+}
+
+// A plain-pointer call site of the host (aot.h DM_GUEST_CALL): on the calling thread's block, nested or outermost. A host thread with no guest thread gets a guest
+// context of its own (aot_thread.c), which counts as a live guest thread while its outermost call runs, so that a process stop waits for it to leave
+uint64_t dm_gcall(const void *fn, int nargs, ...) {
+    const uint64_t addr = (uint64_t)(uintptr_t)fn;
+    if (!addr) die("aot: a guest call of a null function from the host");
+    dm_guest_state *st = dm_aot_self() ? &dm_aot_self()->st : dm_aot_host_thread_begin(addr);
+    dm_aot_thread *t = dm_aot_self();
+    const int host_outer = t->host && !t->depth;
+    if (host_outer) {
+        st->sp = t->stack_lo + t->stack_size;   // each outermost call from the top of its guest stack (a call that left kept no SP)
+        t->left = DM_AOT_LEFT_NONE;
+        dm_aot_host_thread_active(1);
+    }
+    va_list ap; va_start(ap, nargs);
+    const uint64_t r = guest_vcall(st, addr, nargs, ap);
+    va_end(ap);
+    if (host_outer) dm_aot_host_thread_active(0);
     return r;
 }
 
@@ -388,11 +453,12 @@ static int aot_svc(dm_guest_state *st, uint32_t n) {
     thr_svc_enter(st->x, at);         // the block is complete here: a thread paused inside the SVC has its context there (GetThreadContext3)
     svc_dispatch((int)n, st->x, m ? at - (uint64_t)(uintptr_t)m->base : at);
     thr_svc_leave();                  // waits here while SetThreadActivity pauses the thread
-    return atomic_load(&t->exiting) || dm_aot_stop_status() >= 0;
+    return t->left != DM_AOT_LEFT_NONE || atomic_load(&t->exiting) || dm_aot_stop_status() >= 0;   // left: a guest call the SVC's host code made left (nested)
 }
 
 DM_AOT_EXPORT void dm_aot_svc(dm_guest_state *st, uint32_t n) {
-    if (aot_svc(st, n)) dm_aot_leave(atomic_load(&((dm_aot_thread *)st)->exiting) ? DM_AOT_LEFT_EXIT : DM_AOT_LEFT_STOP);
+    dm_aot_thread *t = (dm_aot_thread *)st;
+    if (aot_svc(st, n)) dm_aot_leave(t->left != DM_AOT_LEFT_NONE ? t->left : atomic_load(&t->exiting) ? DM_AOT_LEFT_EXIT : DM_AOT_LEFT_STOP);
 }
 
 // The descriptors the inline caches point at (4): one per guest address, immutable once published, never freed

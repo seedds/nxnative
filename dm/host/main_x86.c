@@ -37,14 +37,6 @@ static int g_status = DM_AOT_EXITED;
 
 static int left(void) { return dm_aot_main_left() != DM_AOT_LEFT_NONE; }   // the guest call ended the process (or the thread): the start goes no further
 static void call0(dm_guest_state *st, const char *name) { dm_guest_call(st, (uint64_t)(uintptr_t)req(name), 0); }
-// A tool mode of main.c that runs the game's own code as a C function from the host (hle_oodle.c's): on this engine such a call needs a guest call (dm_guest_call), which
-// hle_oodle.c does not make yet (dm/tools/aot/README.md: "the other places the host calls guest code as a C function"), so it is refused rather than crashing
-static void refuse_tool(const char *sw, int fatal) {
-    if (!getenv(sw)) return;
-    LOG("[RED] %s: this mode calls the game's code from the host as a C function, which the x86-64 engine does not do yet (dm/tools/aot/README.md, the host calling guest code): %s",
-        sw, fatal ? "stopped" : "not run");
-    if (fatal) { fflush(NULL); exit(DM_AOT_USAGE); }
-}
 static char **guest_argv(void) {   // g_argv in the arena: the pointer array and the strings, guest addresses being host addresses there
     size_t bytes = sizeof(char *) * 64;
     for (int i = 0; i < g_argc; i++) bytes += strlen(g_argv[i]) + 1;
@@ -55,10 +47,11 @@ static char **guest_argv(void) {   // g_argv in the arena: the pointer array and
 
 static void guest_main(void) {
     guest_thread_init();                // the TLS block and thread-local region in the arena (thread.c), into this thread's state block
-    refuse_tool("DM_OODLE_SERVE", 1); refuse_tool("DM_OODLE_JOB", 1);
     uint32_t hmain = svc_thread_main_init();   // the main thread's handle (x0 of nnosInitialize); its engine state block (hle_thread.c)
-    dm_guest_state *st = dm_aot_main_begin();   // the main guest stack (8 MiB in the arena) and the packs' FPCR
     const char *raw = getenv("DM_AOT_RAW");
+    dm_guest_state *st = dm_aot_main_begin();   // the main guest stack (8 MiB in the arena) and the packs' FPCR
+    // main.c's tool modes run the game's own decoder from the host (hle_oodle.c): here each call is a guest call on this thread, from its guest stack
+    if (!(raw && atoi(raw))) { void dm_oodle_serve_maybe(int); dm_oodle_serve_maybe(0); }   // DM_OODLE_SERVE (exits when the input ends)
     if (raw && atoi(raw)) {
         const module_t *m = &g_mod[0];
         const dm_aot_pack *p = NULL;
@@ -87,6 +80,8 @@ static void guest_main(void) {
         run_module_inits(); if (left()) goto end;   // each module's DT_INIT, each a guest call (loader.c)
         { void dm_guest_spawn_selftest(void); dm_guest_spawn_selftest(); }   // DM_GUEST_SPAWN_TEST (main.c): a host-created guest thread, its SDK calls guest calls (hle_guestthread.c)
         if (left()) goto end;
+        { void dm_oodle_serve_maybe(int); dm_oodle_serve_maybe(1); }   // DM_OODLE_SERVE with a decoder that needs the game's malloc (LZ5, hle_oodle.c)
+        { void dm_oodle_job_maybe(void); dm_oodle_job_maybe(); }       // DM_OODLE_JOB: a job file decoded with the game's own decoder, then exit (hle_oodle.c)
         LOG(">>> nnMain"); call0(st, "nnMain");
         if (!left()) LOG("nnMain returned");
     end:

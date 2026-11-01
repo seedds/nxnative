@@ -16,6 +16,14 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
+// A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
+// as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#else
+#include "aot.h"
+#define GUEST_CALL DM_GUEST_CALL
+#endif
 // The local renderer work buffer (ar_open) is allocated with posix_memalign and released with work_release: free, except on Windows, whose C runtime has no posix_memalign
 // and frees its aligned blocks (_aligned_malloc) only with _aligned_free. A unit test that counts the allocations (t_audren_work.c) defines both names before including this file
 #if defined(_WIN32)
@@ -90,7 +98,7 @@ static size_t ar_service_work_size(const uint8_t *p) {
 HLE_FORCE("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE", "renderer work buffer: DSP service budget, with extra local CPU backend storage supplied by the host",
           size_t, h_ar_WorkSize, const uint8_t *param) {
     static size_t (*orig)(const uint8_t *); if (!orig) orig = gsym("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE");
-    uint8_t p[P_SIZE]; cpu_manual(p, param); size_t n = orig(p);
+    uint8_t p[P_SIZE]; cpu_manual(p, param); size_t n = GUEST_CALL(orig, p);
     size_t service = *(int32_t *)(param + P_DEVICE) == 0 ? ar_service_work_size(p) : 0;
     size_t guest_n = service ? service : n;
     { static int once; if (!once++) LOG("audren: work buffer guest %#zx, local CPU/manual renderer %#zx", guest_n, n); }
@@ -126,7 +134,7 @@ static void render_main(void *arg) {
         const int16_t *src; int got;
         uint32_t h = atomic_load(&g_cq_head);
         if (h != atomic_load(&g_cq_tail)) { src = g_cq[h % CQ]; got = g_cq_n[h % CQ]; atomic_store(&g_cq_head, h + 1); cq_popped(); }   // play queued catch-up output first
-        else { g_frame_n = 0; exec(g_handle[0], g_handle[1]); src = g_frame; got = g_frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
+        else { g_frame_n = 0; GUEST_CALL(exec, g_handle[0], g_handle[1]); src = g_frame; got = g_frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
         int n = got ? got : 240;
         gbuf *b = free_list[--nfree];
         if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
@@ -148,7 +156,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     static Result (*orig_ev)(void **, void *, const uint8_t *, void *, size_t), (*orig)(void **, const uint8_t *, void *, size_t);
     if (!orig_ev) orig_ev = gsym("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEventERKNS0_22AudioRendererParameterEPvm");
     if (!orig) orig = gsym("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleERKNS0_22AudioRendererParameterEPvm");
-    if (t_in_open) return orig(handle, param, work, sz);
+    if (t_in_open) return GUEST_CALL(orig, handle, param, work, sz);
     uint8_t p[P_SIZE]; cpu_manual(p, param);
     LOG("audren: OpenAudioRenderer%s rate %d samples per frame %d mix buffers %d submixes %d voices %d sinks %d effects %d splitters %d (original device %d mode %d → CPU / manual) work buffer %p+%#zx",
         ev ? "" : " (no event)", *(int32_t *)param, *(int32_t *)(param + 4), *(int32_t *)(param + 8), *(int32_t *)(param + 0xc), *(int32_t *)(param + 0x10), *(int32_t *)(param + 0x14),
@@ -158,7 +166,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     void *owned = NULL;
     if (*(int32_t *)(param + P_DEVICE) == 0 && work && !((uintptr_t)work & (WORK_PAGE - 1)) && sz >= WORK_PAGE && !(sz & (WORK_PAGE - 1))) {
         size_t (*size)(const uint8_t *) = gsym("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE");
-        size_t need = size(p);
+        size_t need = GUEST_CALL(size, p);
         size_t service = ar_service_work_size(p), guest_need = service ? service : need;
         if (sz < guest_need) { LOG("[RED] audren: work buffer %#zx is smaller than the service requirement %#zx", sz, guest_need); return RES_FAIL; }
         if (need > sz) {
@@ -167,7 +175,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
             LOG("audren: host backs local renderer work buffer %p+%#zx", work, sz);
         }
     }
-    t_in_open = 1; Result r = ev ? orig_ev(handle, ev, p, work, sz) : orig(handle, p, work, sz); t_in_open = 0;
+    t_in_open = 1; Result r = ev ? GUEST_CALL(orig_ev, handle, ev, p, work, sz) : GUEST_CALL(orig, handle, p, work, sz); t_in_open = 0;
     if (r) { work_release(owned); LOG("[RED] audren: SDK OpenAudioRenderer failed %#x", r); return r; }
     if (owned) objmap_put(handle[0], owned);   // Close releases it only after the render thread and the SDK have finished with it
     // The renderer event as the service gives it. With the DSP service (device 0, what the game asked for) OpenAudioRenderer attaches the service's kernel event (auto-clear,
@@ -177,7 +185,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     // thread took every wake and the main thread waited forever. The renderer signals the event through os::SignalSystemEvent, which takes either kind
     if (ev && *(int32_t *)(param + P_DEVICE) == 0) {
         static void (*destroy)(void *); if (!destroy) destroy = gsym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE");
-        destroy(ev); hle_bind_system_event(ev, 1);
+        GUEST_CALL(destroy, ev); hle_bind_system_event(ev, 1);
     }
     if (atomic_load(&g_open)) { LOG("[RED] audren: a second renderer (the host drives only one)"); return r; }
     g_handle[0] = handle[0]; g_handle[1] = handle[1]; atomic_store(&g_open, 1);
@@ -194,7 +202,7 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "close 
     // A fixed 20 ms sleep used to stand in for this, and a renderer reopened inside that window ran a second thread over the first one's static buffers
     if (obj == g_handle[0] && g_render_tt) { atomic_store(&g_open, 0); dm_guest_thread_join(g_render_tt); g_render_tt = NULL; }
     void *owned = objmap_del(obj);
-    orig(obj, state);
+    GUEST_CALL(orig, obj, state);
     work_release(owned);
 }
 
@@ -236,7 +244,7 @@ static int cmd_walks(const uint8_t *cl, uint32_t ncmd, const uint8_t *end) {
 HLE_FORCE("_ZN2nn5audio6server16UpsamplerManager8AllocateEv", "upsampler for a DeviceSink below 48 kHz: none with CPU rendering (no manager), the host resamples its output",
           void *, h_up_Allocate, void *mgr) {
     static void *(*orig)(void *); if (!orig) orig = gsym("_ZN2nn5audio6server16UpsamplerManager8AllocateEv");
-    return mgr ? orig(mgr) : NULL;
+    return mgr ? GUEST_CALL(orig, mgr) : NULL;
 }
 enum { RS_T = 16 };
 static uint32_t up_3_2(const int32_t *in, uint32_t n, int32_t *out) {
@@ -392,19 +400,24 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
         tmax = gsym("_ZN2nn5audio3dsp20CommandListProcessor17SetProcessTimeMaxEj"); setup = gsym("_ZN2nn5audio3dsp20CommandListProcessor5SetupEPKvm");
         process = gsym("_ZN2nn5audio3dsp20CommandListProcessor7ProcessEv");
     }
-    int md = gen20 ? *(int32_t *)(sys + 0x4c) : mode(sys), dv = gen20 ? *(int32_t *)(sys + 0x48) : device(sys);
+    int md = gen20 ? *(int32_t *)(sys + 0x4c) : GUEST_CALL(mode, sys), dv = gen20 ? *(int32_t *)(sys + 0x48) : GUEST_CALL(device, sys);
     if (md != 1 || dv != 1) return 0x40299;   // same as the original: manual rendering needs CPU + manual mode
     pthread_mutex_lock(&g_render_mu);
     uint64_t t0 = now_ns();
     // Command generation must exclude the game thread's RequestUpdate (AudioRenderSystem::Update, which holds the mutex at mu_off): the original system thread (SendCommandToDsp) generates under the same lock. Processing (the CPU DSP) stays outside the lock, as in the original.
     uint8_t *cl; size_t n;
-    lock(sys + mu_off);
+    GUEST_CALL(lock, sys + mu_off);
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
     if (gen20) { span_t sp = gen20(sys, *(uint8_t **)(sys + 0xf8), *(size_t *)(sys + 0x100)); cl = sp.p; n = sp.n; }
-    else { cl = cbuf(sys); n = gen(sys, cl, cbsz(sys)); }
-    unlock(sys + mu_off);
+#else   // the Span the guest call returns is two words, x0 and x1 (AAPCS64), and the block keeps x1 after it (aot.h dm_guest_call)
+    if (gen20) { cl = (uint8_t *)(uintptr_t)dm_gcall((const void *)gen20, 3, (uint64_t)(uintptr_t)sys, (uint64_t)(uintptr_t)*(uint8_t **)(sys + 0xf8), (uint64_t)*(size_t *)(sys + 0x100));
+                 n = cl ? (size_t)dm_aot_self_state()->x[1] : 0; }   // none when the call left guest code (it returns 0 then: aot.h)
+#endif
+    else { cl = GUEST_CALL(cbuf, sys); n = GUEST_CALL(gen, sys, cl, GUEST_CALL(cbsz, sys)); }
+    GUEST_CALL(unlock, sys + mu_off);
     atomic_fetch_add(&g_renders, 1);
     uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor (0x58 bytes; 0x60 in SDK 21, whose Process reads +0x58)
-    tmax(proc, 0xffffffffu); setup(proc, cl, n); process(proc);
+    GUEST_CALL(tmax, proc, 0xffffffffu); GUEST_CALL(setup, proc, cl, n); GUEST_CALL(process, proc);
     if (dst) *nout = capture(cl, n, dst);
     // render time per frame (budget: 5 ms per frame): mean / max every 2000 frames
     static uint64_t sum, mx, cnt; uint64_t d = now_ns() - t0; sum += d; if (d > mx) mx = d;
@@ -450,7 +463,7 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
     }
     static int tr = -1; if (tr < 0) tr = getenv("DM_AUDREN_TRACE") != NULL;
     if (tr && u < 200) LOG("audren update #%llu t=%.3f ms, %llu frames rendered since the last update", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&g_renders) - (last_r == ~0ull ? 0 : last_r)));
-    Result res = orig(sys, o, on, p, pn, in, inn);
+    Result res = GUEST_CALL(orig, sys, o, on, p, pn, in, inn);
     last_r = atomic_load(&g_renders);
     return res;
 }

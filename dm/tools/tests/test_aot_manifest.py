@@ -290,6 +290,10 @@ class HostFnModule(unittest.TestCase):
 
     def test_expected_results(self):
         self.assertEqual(S.HF_EXPECTED[:12], [19, 0x40200000, 1030, 1056, 123, 0, 42, 0, 0, 1012, 77, 0], 't_aot_hostfn.c EXPECTED holds these numbers')
+        # the host calling guest code back (t_aot_hostfn.c RE_EXPECTED): nested with ten arguments, x22 kept, two levels deep, from a host-created guest thread,
+        # from a plain host thread, the system event's binding (any non-zero value), the wait on its readable handle
+        self.assertEqual(S.HF_EXPECTED[13:], [1045, 0x1234, 116, 1054, 1064, None, 0], 't_aot_hostfn.c RE_EXPECTED holds these numbers')
+        self.assertLessEqual(len(S.HF_EXPECTED), S.HF_NRESULTS)
 
     @unittest.skipUnless(shutil.which('llvm-mc-18'), 'llvm-mc-18 is not installed (the nxnative-aot image has it)')
     def test_encoders(self):

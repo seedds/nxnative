@@ -25,6 +25,14 @@
 #if !DM_NATIVE_EXEC
 #include "aot.h"   // the x86-64 execution engine (aot_*.c): a guest thread's state block, its safepoints, process stop
 #endif
+// A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
+// as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#else
+#include "aot.h"
+#define GUEST_CALL DM_GUEST_CALL
+#endif
 
 #define R_TIMEOUT     0xEA01u   // Kernel module 1, description 117
 #define R_CANCELLED   0xEC01u   // 118
@@ -1171,9 +1179,9 @@ void hle_bind_system_event(void *ev, int autoclear) {      // Must be called on 
     static uint32_t (*create)(void *, int, int); static uint32_t (*getw)(const void *);
     if (!create) { create = guest_sym("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb");
                    getw = guest_sym("_ZN2nn2os30GetWritableHandleOfSystemEventEPKNS0_15SystemEventTypeE"); }
-    uint32_t r = create(ev, autoclear, 1);
+    uint32_t r = GUEST_CALL(create, ev, autoclear, 1);
     if (r) die("CreateSystemEvent failed %#x", r);
-    wh = getw(ev);
+    wh = GUEST_CALL(getw, ev);
     pthread_mutex_lock(&g_se_lock);
     if (g_nse >= (int)(sizeof g_se / sizeof g_se[0])) die("SystemEvent binding table full");
     g_se[g_nse].ev = ev; g_se[g_nse].wh = wh; g_se[g_nse++].id = g_next_se_id++;

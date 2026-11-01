@@ -1,6 +1,14 @@
 // System service interfaces used by games on newer SDKs (16.x): oe / time / pl (shared font) / vi vsync / diag.
 // On the real device all of these go through Horizon system services (IPC); the host gives values directly or makes them "unavailable".
 #include "hle.h"
+// A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
+// as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#else
+#include "aot.h"
+#define GUEST_CALL DM_GUEST_CALL
+#endif
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -109,7 +117,7 @@ static void font_load_init(void) {
 }
 HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj", "shared font BFTTF allocation base → TTF payload; parsing and errors stay in the SDK", uint32_t, h_font_LoadFont, void *self, char *name, const void *data, unsigned index, unsigned capacity) {
     pthread_once(&font_load_once, font_load_init);
-    return font_load(self, name, font_payload(data), index, capacity);
+    return GUEST_CALL(font_load, self, name, font_payload(data), index, capacity);
 }
 // The address points straight at the TTF (past the 8-byte header) and the size excludes the header, except for a game on SDK 11 or later whose main imports ScalableFontEngineHelper::Decode
 //   (dm_sdk_major, dm_main_imports; the profile's shared_font overrides). Super Mario 3D World + Bowser's Fury (SDK 10) records shared fonts as type 0 (main+0x975658), calls no Decode and hands the address

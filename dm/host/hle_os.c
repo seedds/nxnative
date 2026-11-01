@@ -2,6 +2,14 @@
 // (The former 136 HLE entries for nn::os/mem/lmem/C++ ABI have been deleted: the SDK brings its own nn::os, and at load time not one of these entries was resolved and used.)
 #include <pthread.h>
 #include "hle.h"
+// A guest function this file calls (docs/design/aot-recompiler.md 2.4): the plain call where the guest's code runs natively (Apple), or where a unit test supplies it
+// as a C function (DM_TEST_GUEST_C); on the x86-64 engine a guest call on the calling thread (aot.h DM_GUEST_CALL: nested inside the host call it is answering)
+#if DM_NATIVE_EXEC || defined(DM_TEST_GUEST_C)
+#define GUEST_CALL(f, ...) f(__VA_ARGS__)
+#else
+#include "aot.h"
+#define GUEST_CALL DM_GUEST_CALL
+#endif
 #include <stdatomic.h>
 
 // ---------- Side table ----------
@@ -128,7 +136,7 @@ HLE_FORCE("getenv", "the game profile's game_env answers its names; the SDK's ow
     size_t n = name ? strlen(name) : 0;
     for (const char *const *p = game_env(); n && *p; p++) if (!strncmp(*p, name, n) && (*p)[n] == '=') return (char *)*p + n + 1;
     if (!orig && !(orig = guest_sym("getenv"))) return NULL;
-    return orig(name);
+    return GUEST_CALL(orig, name);
 }
 
 // ---------- nn::mem::StandardAllocator::Allocate(size): Vanillaware's large blocks aligned to 64 KB (profile key alloc_big_align) ----------
@@ -152,5 +160,5 @@ static void sa_init(void) {
 }
 HLE_FORCE("_ZN2nn3mem17StandardAllocator8AllocateEm", "passed straight to the SDK; with the profile's alloc_big_align (13 Sentinels, Unicorn Overlord) allocations ≥ 64 KB are 64 KB aligned (memory pool start)", void *, h_mem_SAAllocate, void *self, size_t size) {
     pthread_once(&g_sa_once, sa_init);
-    return g_sa_big_align && size >= 0x10000 ? g_sa_alloc_al(self, size, 0x10000) : g_sa_alloc(self, size);
+    return g_sa_big_align && size >= 0x10000 ? GUEST_CALL(g_sa_alloc_al, self, size, 0x10000) : GUEST_CALL(g_sa_alloc, self, size);
 }

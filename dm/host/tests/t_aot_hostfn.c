@@ -12,6 +12,12 @@
 //     the slot of spawn_tramp), whose host body calls the module's synth_triple on the new thread; an NRO loaded at run time through hle_ro.c (loader.c loader_nro_map:
 //     its nro.tsv row, its image mapped from the game's bytes, its pack loaded, its strlen import bound, its DT_INIT a guest call), a symbol looked up in it and called
 //     (a call into another pack), main's own import of it rebound at the load and again at UnloadModule
+//   then the host calling the module's code back (aot.h dm_gcall, DM_GUEST_CALL: the form of the host's plain-pointer call sites): main registers its callback hf_cb with
+//     t_re_register; t_re_fire calls it from inside that host call on the same thread (nested re-entry), with ten arguments (two on the guest stack) and x22 kept around it;
+//     t_re_deep nests two levels (host, guest, host, guest); t_re_thread calls it from a guest thread the host creates (the audio renderer's render thread is one);
+//     t_re_hostthread from a host thread that is no guest thread (its own guest context, a [RED] line); t_re_bind takes hle_thread.c's real system-event path, whose SDK
+//     functions (main's) are nested guest calls, and main then waits on the signalled event; t_re_stop holds a lock across a guest call that ends the process: the call
+//     returns, the host function releases the lock, and the run ends with ExitProcess's status
 //   a refusal: the same folder without sub.aot.so: ro::LoadModule fails with a [RED] line naming the pack, and the module's call through the missing symbol stops the run
 // What this does not show: a real NRO, SDK or game (no game files here); Windows (a DLL pack: not built here)
 //   t_aot_hostfn [--module <dir>]
@@ -44,6 +50,9 @@ Result h_ro_LoadModule(void *mod, const void *image, void *buf, size_t size, int
 Result h_ro_LookupModuleSymbol(uintptr_t *out, const void *mod, const char *name);
 void h_ro_UnloadModule(void *mod);
 extern _Atomic uint64_t g_t_hf_calls[3];
+struct t_re_seen { int fire_depth, leaf_depth, thread_other, host_fresh, host_ctx, signalled, stop_left, stop_depth, stop_status, stop_resumed; uint64_t stop_r; };
+extern struct t_re_seen g_re_seen;     // what the t_re_* entries saw (t_aot_hostfn_entries.c)
+extern pthread_mutex_t g_re_stop_mu;   // t_re_stop's lock
 
 // aot_synth.py's HF_EXPECTED (results[12], the pointer t_hf_get handed over, is checked against the slot of t_hf_mul)
 static const uint64_t EXPECTED[12] = {19, 0x40200000, 1030, 1056, 123, 0, 42, 0, 0, 1012, 77, 0};
@@ -53,6 +62,13 @@ static const char *const STEP[12] = {"strlen through the GOT (the C library pass
                                      "t_hf_spawn: a guest thread made through hle_guestthread.c ran synth_triple(14)", "nn::ro::LoadModule of sub.nro",
                                      "nn::ro::LookupModuleSymbol(sub_fn)", "sub_fn(5) in the NRO's pack: 5 + strlen + the flag its DT_INIT set",
                                      "sub_value through main's GOT, bound to the NRO at its load", "sub_value through main's GOT after UnloadModule: the stub again"};
+// aot_synth.py HF_EXPECTED[13..19]: the host calling guest code back (results[18], the event's binding, is any non-zero value)
+static const uint64_t RE_EXPECTED[7] = {1045, 0x1234, 116, 1054, 1064, 0, 0};
+static const char *const RE_STEP[7] = {"t_re_fire(1): hf_cb(data, 1, 2..9) called by the host inside that host call, on main's thread (nested re-entry, two stacked arguments)",
+                                       "x22 across t_re_fire's nested guest call (callee-saved)", "t_re_deep(5): host, hf_deep, host (t_re_leaf), synth_triple: 15 + 100 + 1",
+                                       "t_re_thread(10): hf_cb from a guest thread the host created (hle_guestthread.c)",
+                                       "t_re_hostthread(20): hf_cb from a host thread that is no guest thread (a guest context of its own)", "(the binding)",
+                                       "svcWaitSynchronization(timeout 0) on the readable handle of the event t_re_bind bound and signalled"};
 enum { HF_GOT_STRLEN, HF_GOT_SQRTF, HF_GOT_GET, HF_GOT_INSTALL, HF_GOT_SPAWN, HF_GOT_LOAD, HF_GOT_LOOKUP, HF_GOT_SUB_VALUE, HF_GOT_UNLOAD };   // aot_synth.py HF_GOT_SYMS
 enum { SUB_GOT = 0x2000, SUB_FLAG = 0x2008 };   // aot_synth.py: the NRO's GOT slot (strlen) and the word its DT_INIT sets
 
@@ -139,6 +155,22 @@ static void *guest_main(void *arg) {
               "the NRO's pack sub.aot.so is loaded, its strlen import at the passthrough's slot, its DT_INIT ran (sub_flag %llu)", (unsigned long long)sf);
     }
     check(dm_aot_stub_index(got[HF_GOT_SUB_VALUE]) >= 0, "GOT: sub_value at its stub slot again after UnloadModule");
+    // The host calling guest code back
+    for (int i = 0; i < 7; i++)
+        if (i != 5) check(results[13 + i] == RE_EXPECTED[i], "results[%d] = %#llx (expected %#llx): %s", 13 + i, (unsigned long long)results[13 + i], (unsigned long long)RE_EXPECTED[i], RE_STEP[i]);
+    check(results[18] != 0 && g_re_seen.signalled == 1, "t_re_bind: hle_bind_system_event made the event through main's CreateSystemEvent and GetWritableHandleOfSystemEvent "
+          "(nested guest calls), binding %llu, signalled through it %d", (unsigned long long)results[18], g_re_seen.signalled);
+    check(g_re_seen.fire_depth == 1 && g_re_seen.leaf_depth == 2, "nesting depth seen by the host functions: t_re_fire %d (expected 1), t_re_leaf %d (expected 2)",
+          g_re_seen.fire_depth, g_re_seen.leaf_depth);
+    check(g_re_seen.thread_other, "t_re_thread's callback ran on another guest thread than main's");
+    check(g_re_seen.host_fresh && g_re_seen.host_ctx, "t_re_hostthread: the host thread had no state block before its call (%d) and a host thread's context after it (%d)",
+          g_re_seen.host_fresh, g_re_seen.host_ctx);
+    check(g_re_seen.stop_resumed && g_re_seen.stop_r == 0 && g_re_seen.stop_left == DM_AOT_LEFT_STOP && g_re_seen.stop_depth == 1 && g_re_seen.stop_status == DM_AOT_EXITED,
+          "t_re_stop: its nested guest call ended the process and returned 0 to it (left %d, depth %d, stop status %d), and the host function ran on to its end",
+          g_re_seen.stop_left, g_re_seen.stop_depth, g_re_seen.stop_status);
+    const int unlocked = pthread_mutex_trylock(&g_re_stop_mu) == 0;
+    if (unlocked) pthread_mutex_unlock(&g_re_stop_mu);
+    check(unlocked, "t_re_stop's lock was released: no host frame was skipped when guest code left");
     return NULL;
 }
 
@@ -262,6 +294,8 @@ int main(int argc, char **argv) {
             "the NRO: mapped from the game's image, loaded and unloaded through hle_ro.c");
     verdict(strstr(r.out, "UNIMPL sub_value") != NULL, "sub_value after the unload: its stub (an UNIMPL line)");
     verdict(strstr(r.out, "t_aot_hostfn: the host-created guest thread") != NULL, "the host-created guest thread's line");
+    verdict(strstr(r.out, "[RED] aot: guest code (main+") != NULL && strstr(r.out, "called from a host thread that is no guest thread") != NULL,
+            "the host thread with no guest thread: one [RED] line naming the guest function and what it lacks");
     free(r.out);
     // 2. The NRO's pack missing
     char tdir[1100];

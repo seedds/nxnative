@@ -2262,6 +2262,10 @@ NVN(nvnTextureBuilderGetZCullStorageSize, size_t, const NVNtextureBuilder *b) { 
 // Packaged texture data in CPU memory (not written into the pool by the game): NVN copies it into the texture storage at TextureInitialize (the CPU cannot write a compressible pool; the driver copies). 13 Sentinels creates all its textures this way
 NVN(nvnTextureBuilderSetPackagedTextureData, void, NVNtextureBuilder *b, const void *data) { TB(b)->pkg_data = data; }
 
+// The graphics system (nn::gs) is the host's: the SDK's check that it was booted (gs::sdk::BootGraphicsSystem, which the SDK's NVN driver runs) passes. Mario Kart World checks it before it
+// opens its camera (main+0xcdebf4)
+HLE_FORCE("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "graphics system booted: the host's graphics layer stands in for it", void, h_gs_Check, const char *who, size_t n) { (void)who; (void)n; }
+
 // ---------- Native images the host makes (NVN2): the GameChat camera's pictures ----------
 // Mario Kart World makes textures on its GameChat camera images in nnMain (main+0xd322d4: three local camera images, NativeImageInitialize then TextureInitializeFromNativeImage, an abort when
 // either fails). The host makes those handles itself (nvn_native_image_new, hle_misc.c, the chat camera video storage): a size, no picture. The entry points are those of "Native images"

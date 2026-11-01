@@ -27,6 +27,14 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 - **Check:** to find such writes, put the field you suspect behind a guard value and log when it changes outside the host's own code, or force overflows on the Mac by shrinking the command memory the game gets.
 
+### Guest ring allocators write `NVNbuffer` offset and size directly
+
+- **Symptom:** a running game with sound draws a black screen; every uniform buffer returns the same initialized address, with its allocation offset reported as its size.
+- **Cause:** an engine can retarget an initialized buffer with direct 64-bit stores to `NVNbuffer` +0x18 (offset) and +0x20 (size), then bind `nvnBufferGetAddress` and `nvnBufferGetSize`. The host previously stored offset at +0x10 and size at +0x18: the guest's offset overwrote the host's size while its address stayed unchanged.
+- **Fix:** `buf_t` reserves the bytes before +0x18 and puts offset and size at the guest-written offsets, with compile-time assertions. Initialization and every buffer query use that record; CPU mapping still respects the pool's CPU-access flags. The record fits the existing 0x30-byte `NVNbuffer`; the builder layout and recorded command layouts are unchanged. No meaning is assigned to the reserved driver bytes.
+- **Found on:** [LEGO Star Wars: The Skywalker Saga, issue #723](https://github.com/seedds/nxnative/issues/723), 1.10.0, SDK 12.3.6, main build `ec593a5f9552100a9fe95c4ca9e34873` (reporter's trace). This is a general object ABI correction; no game profile is needed.
+- **Check:** `t_nvn.c` initializes a buffer through the public API, retargets it repeatedly with raw byte writes, and checks address, size, mapping, pool and offset queries, builder independence and neighbouring-object guards. It also retargets a CPU-inaccessible buffer. Validation uses synthetic memory only; the reported game's rendering has not been retested.
+
 ### Sizes the hardware never reports as 0 (ZCull save area)
 
 - **Symptom:** sprites broke apart in some runs only, depending on the allocation order; buffers overlapped.
@@ -153,12 +161,19 @@ The game may also write into an NVN object directly, without an NVN call, throug
 
 ## Command memory
 
+### Control memory capacity queries
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferGetControlMemoryFree` (or `…GetControlMemorySize`) once, after the game gives a command buffer control memory.
+- **Cause:** `AddControlMemory` was a no-op, and the size and free getters reached the unimplemented stub, which returns 0, so a game that checks the free space sees none left. The host writes its records only to command memory and uses no byte of the game's control memory, so in NVN's terms (size = used + free) the whole block stays free.
+- **Fix:** `cmd_t` records the size of the last `AddControlMemory` block and returns it from both `GetControlMemoryFree` and `GetControlMemorySize`; `GetControlMemoryUsed` stays 0. `t_nvn` checks the values before any block, after one, after a recording and after a smaller block replaces it.
+- **Found on:** South Park: The Fractured But Whole 1.05, whose port is [PR #662](https://github.com/seedds/nxnative/pull/662) (not yet in the games table). With the getters implemented it reached the title, menu, a save and character customization on the Mac; with them returning 0 it also progressed, but submitted commands at a different rate.
+
 ### Host-lent command memory segments
 
 - **Symptom:** `FATAL NVN command memory: the game's pool is empty…`.
 - **Cause:** our command records are larger than real NVN commands, so command buffers the game sizes for hardware overflow; when the game's out-of-memory callback declines to add memory, the host lends a segment. Many small command buffers each overflowing once per frame exhausted a fixed pool of 64 × 1 MB.
-- **Fix** (`hle_nvn.c`): the pool now grows on demand (256 KB segments, abort only beyond 1 GB; `hostseg_take`). A segment is released only when the game re-grants memory overlapping the guest bytes of the recording that jumped into it (`hostseg_release` in `AddCommandMemory`): the game records setup blocks once and keeps `CallCommands`-ing them for many frames, so recycling segments after a fixed number of frames would overwrite live recordings. An empty-pool grant of at most 4 KB outside a recording gets a 4 KB segment, a record larger than 256 KB gets a segment that holds it, and the cap counts every segment's bytes (`hostseg_size`).
-- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (the many small command buffers: its opening course, per the comment at `HOSTSEG_SZ` in `hle_nvn.c`), [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (it hands out many 512-byte grants before recording, and with no recording to reclaim them by, 256 KB each reached the cap entering the Wooded Kingdom: the 4 KB segments).
+- **Fix** (`hle_nvn.c`): the pool now grows on demand (256 KB segments, abort only beyond 1 GB; `hostseg_take`). A segment is released only when the game re-grants memory overlapping the guest bytes of the recording that jumped into it (`hostseg_release` in `AddCommandMemory`): the game records setup blocks once and keeps `CallCommands`-ing them for many frames, so recycling segments after a fixed number of frames would overwrite live recordings. An empty-pool grant of at most 4 KB outside a recording gets a 4 KB segment, a record larger than 256 KB gets a segment that holds it, and the cap counts every segment's bytes (`hostseg_size`). Such a grant has no guest range, so its segment is never reclaimed. On hardware a null pool cannot be written to, so a game that grants one has run out of the command memory it measured for itself: the host's records were larger than the driver's ([Model heaps sized by the host's command record sizes](memory.md#model-heaps-sized-by-the-hosts-command-record-sizes)). That is fixed in the record sizes; the host does not try to recycle these segments by guessing which recording a grant replaces.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (the many small command buffers: its opening course, per the comment at `HOSTSEG_SZ` in `hle_nvn.c`), [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (it hands out many 512-byte grants before recording, and with no recording to reclaim them by, 256 KB each reached the cap entering the Wooded Kingdom: the 4 KB segments; 1.4.1 still reached it after 11 minutes of play, about 260,000 4 KB segments, because its display-list heap was full and each re-recording took a new one; fixed by the cause, [Model heaps sized by the host's command record sizes](memory.md#model-heaps-sized-by-the-hosts-command-record-sizes)).
 
 ### What `GetCommandMemoryUsed` counts
 

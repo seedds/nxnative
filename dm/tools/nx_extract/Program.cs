@@ -37,11 +37,18 @@ static class P {
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
         bool image = Array.IndexOf(a, "--romfs-image") >= 0; a = Array.FindAll(a, s => s != "--romfs-image");
         g_allow = Array.IndexOf(a, "--allow-damaged") >= 0; a = Array.FindAll(a, s => s != "--allow-damaged");
+        // --app <title ID>: the application to read from a package that holds several (Super Mario Galaxy + Super Mario Galaxy 2 on one cartridge dump); build_ipa_from_nsp.py
+        // always names the one it packs. Without it every Application content meta's NCAs are kept and the lowest Program NCA is the game
+        ulong? app = null; int ai = Array.IndexOf(a, "--app");
+        if (ai >= 0 && ai + 1 < a.Length) { app = Convert.ToUInt64(a[ai + 1], 16); var rest = new List<string>(a); rest.RemoveRange(ai, 2); a = rest.ToArray(); }
         if (a.Length == 3 && a[1] == "--title") return Title(ExternalKeyReader.ReadKeyFile(a[0]), a[2]);
-        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [--romfs-image]\n       nx_extract <prod.keys> --title <nsp|nsz|xci|xcz>"); return 2; }
+        if (a.Length == 3 && a[1] == "--contents") return Contents(ExternalKeyReader.ReadKeyFile(a[0]), a[2]);
+        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--app <title ID>] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [<DLC title ID>] [--romfs-image]\n       nx_extract <prod.keys> --title <nsp|nsz|xci|xcz>\n       nx_extract <prod.keys> --contents <nsp|nsz|xci|xcz>"); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
-        if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image);
-        var basePkg = OpenNsp(ks, a[1], ContentMetaType.Application); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
+        if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image, a.Length > 4 ? Convert.ToUInt64(a[4], 16) : null);
+        // each by its own content meta: a merged package (base game + update + DLC in one NSP, a cartridge dump with its update) is given as both the base game and the update,
+        // and the base game's Program NCA and the update's have the same title ID, so without the filter the update would be layered on itself or on the wrong base
+        var basePkg = OpenNsp(ks, a[1], ContentMetaType.Application, app); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2], ContentMetaType.Patch, app | 0x800);
         Nca baseProg = Pick(basePkg, NcaContentType.Program) ?? throw new Exception("no Program NCA in the base NSP");
         Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, baseProg.Header.TitleId) ?? throw new Exception("no Program NCA of the base game's program in the update NSP");
         Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, baseProg.Header.TitleId);
@@ -95,6 +102,15 @@ static class P {
         return 0;
     }
 
+    // Every content meta of a package, one line each: "content <type> <title ID> <version>". A merged package (base game + update + DLC in one NSP, or a cartridge dump with its
+    // update) lists several; build_ipa_from_nsp.py then takes the one file as the base game, the update and the DLC
+    static int Contents(KeySet ks, string path) {
+        int n = 0;
+        foreach (Cnmt c in Metas(OpenNsp(ks, path))) { Console.WriteLine($"content {c.Type} {c.TitleId:x16} {c.TitleVersion.Version}"); n++; }
+        if (n == 0) { Console.WriteLine($"[RED] no content meta in {Path.GetFileName(path)}"); return 5; }
+        return 0;
+    }
+
     static bool Sparse(Nca n) {
         for (int i = 0; i < 4; i++) if (n.Header.IsSectionEnabled(i) && n.Header.GetFsHeader(i).ExistsSparseLayer()) return true;
         return false;
@@ -113,9 +129,10 @@ static class P {
     }
 
     // DLC NSP: one data NCA (content type PublicData / Data) + a meta NCA + the ticket; only the data NCA's RomFS is written
-    static int Aoc(KeySet ks, string nsp, string outDir, bool image) {
-        var pkg = OpenNsp(ks, nsp);
-        Nca data = Pick(pkg, NcaContentType.PublicData) ?? Pick(pkg, NcaContentType.Data) ?? throw new Exception("no data NCA in the DLC NSP");
+    // id: the DLC's title ID, for a merged package that holds several add-on contents (and the base game)
+    static int Aoc(KeySet ks, string nsp, string outDir, bool image, ulong? id = null) {
+        var pkg = OpenNsp(ks, nsp);   // every NCA: Pick takes the DLC's own data NCA by its title ID
+        Nca data = Pick(pkg, NcaContentType.PublicData, id) ?? Pick(pkg, NcaContentType.Data, id) ?? throw new Exception(id == null ? "no data NCA in the DLC NSP" : $"no data NCA of add-on content {id:x16} in {Path.GetFileName(nsp)}");
         Console.WriteLine($"add-on content {data.Header.TitleId:x16}");
         Directory.CreateDirectory(image ? Path.GetDirectoryName(outDir) : outDir);
         var fs = new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid));
@@ -124,9 +141,23 @@ static class P {
         return Damaged();
     }
 
+    // The content metas (*.cnmt in the Meta NCAs) of a package's NCAs
+    static IEnumerable<Cnmt> Metas(List<Nca> ncas) {
+        foreach (Nca n in ncas) {
+            if (n.Header.ContentType != NcaContentType.Meta) continue;
+            IFileSystem mfs = n.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+            foreach (DirectoryEntryEx e in mfs.EnumerateEntries("*.cnmt", SearchOptions.Default)) {
+                using var f = new UniqueRef<IFile>();
+                mfs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                yield return new Cnmt(f.Release().AsStream());
+            }
+        }
+    }
+
     // Open an NSP (PFS0) or the secure partition of an XCI, import the common tickets, list all NCAs. With a content meta type, only the NCAs that the package's content metas of
-    // that type list (when it has one): a cartridge dump with its update on it (1G+1U) holds the update's NCAs beside the base game's, its Program NCA under the same title ID
-    static List<Nca> OpenNsp(KeySet ks, string path, ContentMetaType? only = null) {
+    // that type list (when it has one), and with a title ID only that title's: a cartridge dump with its update on it (1G+1U) or a merged NSP holds the update's NCAs beside the
+    // base game's, its Program NCA under the same title ID; a cartridge with two games holds two Application content metas
+    static List<Nca> OpenNsp(KeySet ks, string path, ContentMetaType? only = null, ulong? id = null) {
         IFileSystem pfs; var st0 = new LocalStorage(path, FileAccess.Read);
         byte[] magic = new byte[4]; st0.Read(0x100, magic).ThrowIfFailure();
         if (System.Text.Encoding.ASCII.GetString(magic) == "HEAD") {   // XCI: the card header's magic at 0x100
@@ -148,17 +179,14 @@ static class P {
             } else if (e.Name.EndsWith(".nca", StringComparison.OrdinalIgnoreCase)) { ncas.Add(new Nca(ks, st)); ids.Add(e.Name[..e.Name.IndexOf('.')].ToLowerInvariant()); }
         }
         if (only == null) return ncas;
-        var listed = new HashSet<string>();
-        foreach (Nca n in ncas) {
-            if (n.Header.ContentType != NcaContentType.Meta) continue;
-            IFileSystem mfs = n.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
-            foreach (DirectoryEntryEx e in mfs.EnumerateEntries("*.cnmt", SearchOptions.Default)) {
-                using var f = new UniqueRef<IFile>();
-                mfs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
-                var cnmt = new Cnmt(f.Release().AsStream());
-                if (cnmt.Type == only) foreach (CnmtContentEntry c in cnmt.ContentEntries) listed.Add(Convert.ToHexString(c.NcaId).ToLowerInvariant());
-            }
+        var listed = new HashSet<string>(); var titles = new List<ulong>();   // titles: every content meta of that type, to name them when none is the one asked for
+        foreach (Cnmt cnmt in Metas(ncas)) {
+            if (cnmt.Type != only) continue;
+            titles.Add(cnmt.TitleId);
+            if (id == null || cnmt.TitleId == id) foreach (CnmtContentEntry c in cnmt.ContentEntries) listed.Add(Convert.ToHexString(c.NcaId).ToLowerInvariant());
         }
+        if (id != null && titles.Count > 0 && !titles.Contains(id.Value))
+            throw new Exception($"{Path.GetFileName(path)} has no {only} content meta of title {id:x16}; it has {string.Join(", ", titles.ConvertAll(t => t.ToString("x16")))}");
         if (listed.Count == 0) return ncas;
         var kept = new List<Nca>(); int other = 0;   // the meta NCAs list the others, not themselves
         for (int i = 0; i < ncas.Count; i++) if (listed.Contains(ids[i])) kept.Add(ncas[i]); else if (ncas[i].Header.ContentType != NcaContentType.Meta) other++;
@@ -166,7 +194,7 @@ static class P {
             Console.WriteLine($"[RED] no NCA of {Path.GetFileName(path)} matches its {only} content meta by name (renamed NCA files?); reading all {ncas.Count}");
             return ncas;
         }
-        if (other > 0) Console.WriteLine($"leaving out {other} NCAs of {Path.GetFileName(path)} that its {only} content meta does not list (an update on the cartridge)");
+        if (other > 0) Console.WriteLine($"leaving out {other} NCAs of {Path.GetFileName(path)} that its {only} content meta does not list (another title in the package: an update on the cartridge, or a merged NSP)");
         return kept;
     }
     // A multi-program application has a Program and a Control NCA per program index (ROMANCE OF THE THREE KINGDOMS 8 REMAKE: its update 1.1.3 adds a whole second program,

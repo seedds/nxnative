@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "nvn_obj.h"
+#include "nvn_pso_ds.h"
 
 typedef struct {
     const void *vs, *fs; uint32_t cfmt[8], dfmt, sfmt, samples, blend_en, chmask, a2c; blend_st blend[8];
@@ -19,9 +20,10 @@ typedef struct {
 typedef struct { char vs[24], fs[24]; uint8_t vs_stage, fs_stage, merged, fz; pso_fz_desc fz_desc; pso_key k; } pso_skey;
 
 // Drop blend factors when blending is disabled, and blend / mask bits for absent normal-pass attachments. Merged passes index logical blend / mask state through lmap,
-// so physical formats cannot decide which logical targets to drop. Depth / stencil formats stay for MTLDevice pipelines. Normalize both live keys and old prewarm rows.
+// so physical formats cannot decide which logical targets to drop. Depth / stencil formats stay for MTLDevice pipelines, paired for combined storage (nvn_pso_ds.h). Normalize both live keys and old prewarm rows.
 // See docs/reference/shaders.md, Pipeline keys omit unused colour state; measurements belong to the linked game notes.
 static inline void pso_key_norm(pso_key *k, int merged) {
+    pso_ds_pair(&k->dfmt, &k->sfmt);
     for (int i = 0; i < 8; i++) {
         if (!merged && !k->cfmt[i]) { k->blend_en &= ~(1u << i); k->chmask &= ~(0xfu << (4 * i)); }
         if (!(k->blend_en >> i & 1)) memset(&k->blend[i], 0, sizeof k->blend[i]);

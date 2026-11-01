@@ -6,6 +6,7 @@ Update 1.23.55063 (v655360) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 
 | Setting | Where | Why |
 |---|---|---|
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth; offline pipeline bases must use the matching vertex entry |
 | `sys_resource 0x800000` | [`game.tsv`](game.tsv) | the NPDM's 8 MB of system resource: virtual address memory |
 | 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | nirvanA Initiative's layout; the NSP script's heap check set the 1 GB pool; see [Memory](#memory) |
 | Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `3644a676…` | nirvanA Initiative's build |
@@ -24,6 +25,7 @@ Update 1.23.55063 (v655360) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 
 ## Files and shaders
 
+- **Resolved: offline depth metadata.** Update 1.23.55063 selects near-zero NVN depth in `run/f3.log` (through frame 8,400), with no later GL switch. A short isolated boot reproduced the call with matching registered module IDs; evidence is in `010014C011146000-work/depth-mode-audit/boot-20261031/` beside the NSPs. The profile now declares `depth_mode zero` for the [shared archive mechanism](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). This confirms the input; rebuilt archive acceptance and performance were not retested.
 - RomFS: 21,861 files, 4.0 GB: 14,633 UnityFS bundles (Addressables, `Data/StreamingAssets/aa/Switch`), 24 FMOD banks, 4,823 `.optoctrees` and 2,306 `.bin` world-streaming files.
 - 10,840 shaders: 5,413 vertex, 5,400 pixel, 2 geometry and 25 compute, read with Unity 2019.4's layouts (Pokémon Brilliant Diamond's); the compute kernels are the player's skinning and blend shapes, the ocean's FFT (`FFT512x512`), `UpdateSpectrum`, `DetermineVisibility` and the eye histogram. 11 are the player's GLSLC outputs in `main`. All of them build for the Mac; no run met a shader missing from the map.
 - **Current, cause unknown:** every run logs 1 to 8 `[RED] texture type mismatch: … declares slot 135 (or 136) as Metal type 2, texture ID 800 is type 7 (NVN target 2, …)` lines, a 3D texture in a slot the shader declares 2D; Subnautica's player logs the same ([its note](../0100429011144000/README.md#files-and-shaders)). Nothing wrong was seen on screen.
@@ -51,4 +53,5 @@ Update 1.23.55063 (v655360) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 
 ## Found on this game
 
+- **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
 - The SDK 13.3.5 instance of [Size-class alignment doubles Unity's regions](../../../docs/reference/memory.md#size-class-alignment-doubles-unitys-regions).

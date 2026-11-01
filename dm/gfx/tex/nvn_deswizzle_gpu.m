@@ -1,33 +1,15 @@
 #import "nvn_deswizzle_gpu.h"
+#import "../nvn/host_msl.h"
 
 static id<MTLComputePipelineState> g_nvn_deswz_pipeline, g_nvn_deswz_direct;
 
-static const char *const k_nvn_deswz_msl =
-    "#include <metal_stdlib>\n"
-    "using namespace metal;\n"
-    "struct P { ulong src_off, dst_off, base, pitch; uint row_bytes, rows, slices, th, td, gobs_x; };\n"
-    "kernel void deswz(device const uchar *src [[buffer(0)]], device uchar *dst [[buffer(1)]], constant P& p [[buffer(2)]], uint3 id [[thread_position_in_grid]]) {\n"
-    " uint bh = 1u << p.th, bd = 1u << p.td, gobs_x = p.gobs_x, blocks_y = (p.rows + (8u * bh) - 1u) >> (3u + p.th);\n"
-    " uint tid = id.x & 31u, gob_x = id.x >> 5, gob_y = id.y, z = id.z; uint xseg = ((tid >> 4) << 1) | ((tid >> 1) & 1u), y = (gob_y << 3) | (((tid >> 2) & 3u) << 1) | (tid & 1u), x = (gob_x << 6) | (xseg << 4);\n"
-    " if (x >= p.row_bytes || y >= p.rows || z >= p.slices) return;\n"
-    " uint n = min(16u, p.row_bytes - x); ulong block = 512ul * bh * bd; ulong gob_in_block = ((ulong)(z & (bd - 1u)) << p.th) + (gob_y & (bh - 1u)); ulong so = p.src_off + p.base + ((ulong)(z >> p.td) * gobs_x * blocks_y + (gob_y >> p.th) * gobs_x + gob_x) * block + gob_in_block * 512ul + (ulong)tid * 16ul; ulong doff = p.dst_off + ((ulong)z * p.rows + y) * p.pitch + x;\n"
-    " if (n == 16u && ((so | doff) & 15ul) == 0ul) *(device uint4 *)(dst + doff) = *(device const uint4 *)(src + so);\n"
-    " else for (uint i = 0; i < n; i++) dst[doff + i] = src[so + i];\n"
-    "}\n"
-    "struct D { ulong src_off, base, layer_stride; uint width,height,layers,level,th,gobs_x; };\n"
-    "kernel void deswz_direct(device const uchar *src [[buffer(0)]], constant D& p [[buffer(2)]], texture2d_array<uint, access::write> dst [[texture(0)]], uint3 id [[thread_position_in_grid]]) {\n"
-    " if(id.x>=p.width||id.y>=p.height||id.z>=p.layers)return;\n"
-    " uint x=id.x*8u,y=id.y,bh=1u<<p.th,gy=y>>3;\n"
-    " ulong off=p.src_off+p.base+ulong(id.z)*p.layer_stride+((ulong)(gy>>p.th)*p.gobs_x+(x>>6))*(512ul*bh)+(ulong)(gy&(bh-1u))*512ul;\n"
-    " off+=((x&63u)>>5)*256u+((y&7u)>>1)*64u+((x&31u)>>4)*32u+(y&1u)*16u+(x&15u);\n"
-    " dst.write(uint4(*(device const ushort4*)(src+off)),id.xy,id.z,p.level);\n"
-    "}\n";
+// The kernels deswz and deswz_direct: dm/gfx/msl/deswz.metal
 
 int nvn_deswz_gpu_init(id<MTLDevice> dev) {
     if (g_nvn_deswz_pipeline) return 0;
     if (!dev) return -1;
     NSError *error = nil;
-    id<MTLLibrary> library = [dev newLibraryWithSource:@(k_nvn_deswz_msl) options:nil error:&error];
+    id<MTLLibrary> library = host_msl_lib(dev, nil, "deswz", &error);   // compiled when the host is built (dm/gfx/msl/deswz.metal)
     if (!library) return -1;
     id<MTLFunction> function = [library newFunctionWithName:@"deswz"];
     if (!function) return -1;

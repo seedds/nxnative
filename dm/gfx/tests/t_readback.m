@@ -21,14 +21,69 @@ static int cases, failed;
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, weak) id<MTLBuffer> lastBuffer;
 @property(nonatomic) NSUInteger allocations;
+@property(nonatomic) NSUInteger observedLength;   // 0 observes every buffer; otherwise only the readback's exact size.
 @end
 @implementation ReadbackDevice
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options {
     id<MTLBuffer> buffer = [_device newBufferWithLength:length options:options];
-    _lastBuffer = buffer; _allocations++; return buffer;
+    if (!_observedLength || length == _observedLength) { _lastBuffer = buffer; _allocations++; }
+    return buffer;
 }
 - (id)forwardingTargetForSelector:(SEL)selector { (void)selector; return _device; }
 @end
+
+@interface ReadbackCompletion : NSObject {
+@public
+    const NVNsync *sync;
+    const NVNtexture *texture;
+    const NVNevent *event;
+    NVNcopyRegion region;
+    dispatch_semaphore_t feedbackEntered, feedbackRelease, waiterStarted, waiterDone, poolRelease, waiterExited;
+    _Atomic int gateTimedOut;
+    NVNsyncWaitResult waitResult;
+    int badPixels;
+    uint32_t eventValue;
+}
+@end
+@implementation ReadbackCompletion @end
+
+static void readback_wait_for(const char *name, dispatch_semaphore_t semaphore) {
+    int ok = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 5000000000ll)) == 0;
+    EXPECT(name, 1, ok);
+    if (!ok) exit(1);   // Never join a stuck waiter or leave a failed gate hanging the test process.
+}
+static void readback_feedback_idle(void) {
+    dispatch_semaphore_t idle = dispatch_semaphore_create(0);
+    dispatch_async(g_feedback_q, ^{ dispatch_semaphore_signal(idle); });
+    readback_wait_for("readback feedback queue reached its bounded checkpoint", idle);
+}
+static int readback_buffer_gone(ReadbackDevice *device) { @autoreleasepool {
+    // A weak property's getter can itself autorelease the object; do not prolong a live observation in the test's outer pool.
+    return device.lastBuffer == nil;
+} }
+static void *readback_guest_waiter(void *arg) {
+    ReadbackCompletion *c = (__bridge ReadbackCompletion *)arg;
+    @autoreleasepool {
+        dispatch_semaphore_signal(c->waiterStarted);
+        c->waitResult = h_nvnSyncWait(c->sync, 5000000000ull);
+        c->badPixels = 32; c->eventValue = 0;
+        if (c->waitResult == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || c->waitResult == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED) {
+            static const uint8_t expected[] = {51, 102, 153, 255};
+            uint8_t cpu[128]; memset(cpu, 0xEE, sizeof cpu);
+            h_nvnTextureReadTexels(c->texture, NULL, &c->region, cpu);
+            c->badPixels = 0;
+            for (int i = 0; i < 32; i++) c->badPixels += memcmp(cpu + i * 4, expected, 4) != 0;
+            c->eventValue = h_nvnEventGetValue(c->event);
+        }
+        dispatch_semaphore_signal(c->waiterDone);
+        // Keep this same guest pool alive through callback delivery, deferred retirement and the weak observation.
+        if (dispatch_semaphore_wait(c->poolRelease, dispatch_time(DISPATCH_TIME_NOW, 20000000000ll))) {
+            fprintf(stderr, "readback guest pool was not released within 20 seconds\n"); _Exit(1);
+        }
+    }
+    dispatch_semaphore_signal(c->waiterExited);
+    return NULL;
+}
 
 // A texture in a sparse virtual pool takes its content from what the pool's page table maps (nvn_sparse_copy), unmapped pages as 0. ReadTexels reads it there on whatever thread asks:
 // Tears of the Kingdom reads such textures on its own threads (bake::ModuleMgr), and resolving the host texture there uploaded it outside the submit thread (up_owner_check aborted, #471)
@@ -124,7 +179,90 @@ static void packed_copies(int format, int tid) {
     h_nvnTextureFinalize(&cleared); h_nvnTextureFinalize(&copied); nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
 }
 
+// A real GPU copy into packaged storage retires its shared readback buffer on whichever completion owner wins.
+// Gate the submission's feedback, not its GPU event: FAST_WAKE=1 must do the CPU effects on the guest waiter before
+// feedback can run; FAST_WAKE=0 exercises the real callback owner instead. Neither path drains the guest's outer pool.
+static void mirror_completion(void) {
+    int early = fast_wake();
+    printf("mirror completion: %s wins\n", early ? "guest waiter" : "GPU feedback");
+    readback_feedback_idle();
+    void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 262144)) abort(); memset(mem, 0, 262144);
+    pool_t pool = {.mem=mem, .size=262144}; mtl_pool_add(mem, 262144); nvn_dirty_add_range(mem, 262144);
+    NVNtextureBuilder tb; NVNtexture source, packaged; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, 8); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 131072);
+    EXPECT("completion source texture init", 1, h_nvnTextureInitialize(&source, &tb));
+    NVNpackagedTextureLayout layout = {{1, 0, 0, 0, 7, 0, 1, 0}};
+    h_nvnTextureBuilderSetPackagedTextureLayout(&tb, &layout);
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 163840);
+    EXPECT("completion packaged texture init", 1, h_nvnTextureInitialize(&packaged, &tb));
+    memset((uint8_t *)mem + 163840, 0xEE, h_nvnTextureGetStorageSize(&packaged));
+    NVNeventBuilder eb; NVNevent event; h_nvnEventBuilderSetDefaults(&eb);
+    h_nvnEventBuilderSetStorage(&eb, (const NVNmemoryPool *)&pool, 196608);
+    EXPECT("completion event init", 1, h_nvnEventInitialize(&event, &eb));
+    NVNsync sync; h_nvnSyncInitialize(&sync, NULL);
+    NVNcommandBuffer cmd; EXPECT("completion command init", 1, h_nvnCommandBufferInitialize(&cmd, NULL));
+    h_nvnCommandBufferAddCommandMemory(&cmd, (const NVNmemoryPool *)&pool, 0, 65536); h_nvnCommandBufferBeginRecording(&cmd);
+    NVNcopyRegion region = {0, 0, 0, 8, 4, 1}; float color[] = {0.2f, 0.4f, 0.6f, 1.f};
+    h_nvnCommandBufferClearTexture(&cmd, &source, NULL, &region, color, 15);
+    h_nvnCommandBufferCopyTextureToTexture(&cmd, &source, NULL, &region, &packaged, NULL, &region, 0);
+    h_nvnCommandBufferSignalEvent(&cmd, &event, NVN_EVENT_SIGNAL_MODE_ADD, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 47);
+    h_nvnCommandBufferFenceSync(&cmd, &sync, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+    NVNcommandHandle handle = h_nvnCommandBufferEndRecording(&cmd);
+    ReadbackCompletion *c = [ReadbackCompletion new]; c->sync = &sync; c->texture = &packaged; c->event = &event; c->region = region;
+    c->feedbackEntered = dispatch_semaphore_create(0); c->feedbackRelease = dispatch_semaphore_create(0);
+    c->waiterStarted = dispatch_semaphore_create(0); c->waiterDone = dispatch_semaphore_create(0);
+    c->poolRelease = dispatch_semaphore_create(0); c->waiterExited = dispatch_semaphore_create(0);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    ReadbackDevice *device = [ReadbackDevice new]; device.device = g_dev; device.observedLength = 128; g_dev = (id)device;
+    mtl_exec((const uint8_t *)handle);
+    g_dev = device.device;
+    [g_commit_blocks addObject:^{
+        dispatch_semaphore_signal(c->feedbackEntered);
+        if (dispatch_semaphore_wait(c->feedbackRelease, dispatch_time(DISPATCH_TIME_NOW, 10000000000ll))) atomic_store(&c->gateTimedOut, 1);
+    }];
+    mtl_sub_commit();
+    readback_wait_for("real mirror feedback reached its gate", c->feedbackEntered);
+    EXPECT("mirror copy allocated one real 128-byte readback buffer", 1, device.allocations);
+    EXPECT("GPU completion alone does not publish the pending fence", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, h_nvnSyncWait(&sync, 0));
+    EXPECT("pending fence has not applied its event effect", 0, h_nvnEventGetValue(&event));
+    int changed = 0;
+    for (int i = 0; i < h_nvnTextureGetStorageSize(&packaged); i++) changed += ((uint8_t *)mem)[163840 + i] != 0xEE;
+    EXPECT("pending fence has not landed mirror bytes in guest storage", 0, changed);
+    pthread_t thread; int created = pthread_create(&thread, NULL, readback_guest_waiter, (__bridge void *)c) == 0;
+    EXPECT("long-lived readback guest waiter started", 1, created);
+    if (!created) { dispatch_semaphore_signal(c->feedbackRelease); exit(1); }
+    readback_wait_for("guest waiter entered SyncWait", c->waiterStarted);
+    int completed = 0;
+    if (!early) {
+        completed = dispatch_semaphore_wait(c->waiterDone, dispatch_time(DISPATCH_TIME_NOW, 50000000ll)) == 0;
+        EXPECT("callback-owned waiter cannot return while feedback is gated", 0, completed);
+        dispatch_semaphore_signal(c->feedbackRelease);
+    }
+    if (!completed) readback_wait_for(early ? "fast-wake guest completed before feedback was released" : "callback-owned guest completed after feedback was released", c->waiterDone);
+    EXPECT("mirror completion guest fence wait succeeded", 1, c->waitResult == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || c->waitResult == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+    EXPECT("mirror bytes are in guest storage at successful wait return, 32 literal pixels", 0, c->badPixels);
+    EXPECT("event effect is visible at successful guest wait return", 47, c->eventValue);
+    if (early) dispatch_semaphore_signal(c->feedbackRelease);
+    readback_feedback_idle();
+    EXPECT("mirror feedback gate did not time out", 0, atomic_load(&c->gateTimedOut));
+    EXPECT("late feedback does not apply the event effect twice", 47, h_nvnEventGetValue(&event));
+    // A subsequent real submission drains completed retirements and resets the command allocator that held the copy.
+    mtl_sub_begin(); uint64_t retirement = mtl_sub_commit();
+    EXPECT("mirror retirement submission completed", 1, mtl_wait_at(retirement, 5000000000ull, WS_FINISH));
+    readback_feedback_idle();
+    EXPECT("mirror retirement GPU success", 0, mtl_last_commit_error());
+    EXPECT("mirror completion releases its readback buffer before the guest caller's pool drains", 1, readback_buffer_gone(device));
+    dispatch_semaphore_signal(c->poolRelease);
+    readback_wait_for("guest waiter drained its outer pool and exited", c->waiterExited); pthread_join(thread, NULL);
+    EXPECT("mirror readback buffer is gone after the guest outer pool drains", 1, readback_buffer_gone(device));
+    h_nvnCommandBufferFinalize(&cmd); h_nvnSyncFinalize(&sync); h_nvnEventFinalize(&event);
+    h_nvnTextureFinalize(&packaged); h_nvnTextureFinalize(&source);
+    nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
+}
+
 int main(void) { @autoreleasepool {
+    alarm(60); if (setvbuf(stdout, NULL, _IONBF, 0)) abort();   // GPU, callback and pthread failures must not leave the check target hanging.
     mtl_init();
     void *mem = NULL; if (posix_memalign(&mem, getpagesize(), 524288)) abort(); memset(mem, 0, 524288);
     // Registered with the dirty tracker as nvnMemoryPoolInitialize does: a packaged texture in an untracked pool is re-uploaded from its storage at every use, which would discard what the GPU wrote into it
@@ -222,5 +360,6 @@ int main(void) { @autoreleasepool {
     h_nvnTextureFinalize(&pk); h_nvnTextureFinalize(&tex); nvn_dirty_remove_range(mem); mtl_pool_del(mem); free(mem);
     sparse_reads(&region, expected);
     packed_copies(NVN_FORMAT_RGB565, 500); packed_copies(NVN_FORMAT_RGB5A1, 501); packed_copies(NVN_FORMAT_RGB5, 502);
+    mirror_completion();
     printf("READBACK cases=%d failed=%d\n", cases, failed); return failed != 0;
 } }

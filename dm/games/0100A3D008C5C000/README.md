@@ -11,6 +11,8 @@ When the NSP folder also contains updates, build the supported version with
 `--platform mac` for a Mac build). The builder otherwise selects the newest
 supplied version. The supplied 4.0.0 update is damaged and remains unsupported
 (see [Files and builds](#files-and-builds)).
+[Pokémon Violet](../01008F6008C5E000/README.md) is its twin: the same `sdk`
+and `subsdk0` builds and the same shader tables, with a `main` of its own.
 
 ## Memory
 

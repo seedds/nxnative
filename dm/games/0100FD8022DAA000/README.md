@@ -6,7 +6,7 @@ Update 1.4.0 (v393216) over the base game, SDK 18.3.5. NERD's Hagi Wii layer, as
 
 | Setting | Where | Why |
 |---|---|---|
-| Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py`, `sdk` build `6075151627016eef…` (shared with Galaxy) | the movie player's 384 MB allocator aborted the game at boot; see [Memory](#memory) |
+| Node area cut 1 GB → 62 MB, and regions of 4 MB and more aligned to 2 MB as SDK 20 | `dm/tools/sdk_patches.py`, the SDK-wide rules (`MATCH_CUTS`) on `sdk` build `6075151627016eef…` (shared with Galaxy; its row, the node area cut alone, was removed on 2026-10-30 after a run on Monster Train 2, the same build) | the movie player's 384 MB allocator aborted the game at boot; see [Memory](#memory) |
 | 1.25 GB block: `mem_reserve 0x50000000`, `mem_alias 0x20000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | a 512 MB alias region for that allocator; the guessed 256 MB held nothing after the node area |
 | `op_mode handheld` | `game.tsv` | the pointer (star bits, menus, the file select) is the touch screen in handheld mode; docked it is the Joy-Con gyro, which the host does not have |
 | `pad_layout full` | `game.tsv` | the 3D gamepad layout |
@@ -63,6 +63,7 @@ General host changes first needed here; each applies to every game:
 - **Vulkan acquire and the vsync event thread follow the display link** (`mtl_link_wait_tick`, `mtl_link_wait_vsync`): [Vulkan acquire and vsync event follow the display link](../../../docs/reference/frame-rate.md#vulkan-acquire-and-vsync-event-follow-the-display-link).
 - **Focus message 15 only under focus handling modes 1 and 2** (`hle_oe.c`) and **the guest clock waits in the background** (`guest_clock_read_wait`): [Focus handling mode decides whether focus changes are notified](../../../docs/reference/services.md#focus-handling-mode-decides-whether-focus-changes-are-notified), [Guest clock reads wait while the app is in the background](../../../docs/reference/services.md#guest-clock-reads-wait-while-the-app-is-in-the-background).
 - **A yield whose callee-saved registers moved counts as progress** (`thr_yield`; this game's poll keeps them): [Yields that make progress return at once](../../../docs/reference/threads.md#yields-that-make-progress-return-at-once-thr_yield).
+- **`--title-id` picks one game of a two-game XCI** (this game shares a cartridge dump with Super Mario Galaxy): [A cartridge dump that holds two games packs only the first](../../../docs/reference/packing.md#a-cartridge-dump-that-holds-two-games-packs-only-the-first).
 
 ## Open
 

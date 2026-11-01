@@ -8,6 +8,7 @@ Update 1.0.3 (`v196608`) over the base game, SDK 13.3.0. Valve's Source engine a
 
 | Setting | Where | Why |
 |---|---|---|
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth; offline pipeline bases must use the matching vertex entry |
 | `modules main subsdk0 subsdk2 sdk` | [`game.tsv`](game.tsv) | `main` imports from no subsdk; the NROs do: `video_nx.nro` plays the movies through the movie module and both it and `materialsystem.nro` call GLSLC ([Modules only the NROs import from](../../../docs/reference/services.md#modules-only-the-nros-import-from)) |
 | 4 GB layout: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `sys_resource 0x0` | `game.tsv` | no system resource, so no virtual address memory; the game sets a heap in the 4 GB layout. The rewritten modules fit the default 64 MB of used memory |
 | `pad_layout full` | `game.tsv` | first-person: move with the left stick, look with the right |
@@ -15,6 +16,7 @@ Update 1.0.3 (`v196608`) over the base game, SDK 13.3.0. Valve's Source engine a
 
 ## Rendering
 
+- **Resolved: offline depth metadata.** Update 1.0.3 selects near-zero NVN depth in `regress/runs/20261028-172622-candidate-full-1/log.txt` (through frame 5,400), with no later GL switch. A short isolated boot reproduced the call with matching registered module IDs; evidence is in `01007BB017812000-work/depth-mode-audit/boot-20261031/` beside the NSPs. The profile now declares `depth_mode zero` for the [shared archive mechanism](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). This confirms the input; rebuilt archive acceptance and performance were not retested.
 - **Resolved: the NSP script took it for an OpenGL game.** `main` imports 20 EGL functions and names `glShaderSource` (SDL's EGL backend and GL renderer), but draws nothing; `materialsystem.nro` and `video_nx.nro` import `nvnBootstrapLoader`. The first capture boot stopped with `[nvn-mtl] FATAL cannot read the shader map` from an NVN submit in `nro8` ([NVN in NROs under an SDL main that names GL](../../../docs/reference/rendering.md#nvn-in-nros-under-an-sdl-main-that-names-gl)).
 - About 140 draws a frame at the title and in chamber 00; GPU p50 about 6 ms on an M4 Pro, NVN submit and present under 3 ms.
 
@@ -41,6 +43,7 @@ Update 1.0.3 (`v196608`) over the base game, SDK 13.3.0. Valve's Source engine a
 
 ## Found on this game
 
+- **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
 - [Modules only the NROs import from](../../../docs/reference/services.md#modules-only-the-nros-import-from): the provisional profile adds the subsdks the NROs need.
 - [NVN in NROs under an SDL main that names GL](../../../docs/reference/rendering.md#nvn-in-nros-under-an-sdl-main-that-names-gl): the graphics API follows the NROs' imports.
 - [GLSLC outputs in a zip archive, and those NROs compile at run time](../../../docs/reference/shaders.md#glslc-outputs-in-a-zip-archive-and-those-nros-compile-at-run-time): the split reads zip members; the run-time capture also runs for NROs that call `glslcCompile`.

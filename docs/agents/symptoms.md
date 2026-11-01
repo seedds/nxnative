@@ -256,6 +256,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - an abort connecting to `pl:u` at boot; a failed `nn::audio` call at boot. → [Built-in fonts and the audio device notification of SDK 21](../reference/services.md#built-in-fonts-and-the-audio-device-notification-of-sdk-21)
 - an abort in `nn::hid` at boot, in a Switch 2 game that sets up the Joy-Con's mouse mode. → [The Joy-Con mouse pointer](../reference/services.md#the-joy-con-mouse-pointer)
 - a Switch 2 game presents at 720p, with its upscaler at the matching low size. → [The display's largest buffer](../reference/services.md#the-displays-largest-buffer)
+- a native port cannot create or join a game's LAN or local-wireless room because its socket and LDN service hooks always return unavailable. → [Opt-in native LAN sockets and LDN over IP](../reference/services.md#opt-in-native-lan-sockets-and-ldn-over-ip)
 
 ## Movies
 

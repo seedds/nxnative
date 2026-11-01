@@ -18,6 +18,10 @@ void *objmap_get(const void *guest);
 void objmap_put(const void *guest, void *host);
 void *objmap_del(const void *guest);
 uint64_t now_ns(void);
+// A host hook implementing a blocking guest call gives up its guest core while actually waiting.
+// Balanced and nestable; unrelated to GPU ownership or graphics suspension.
+void dm_guest_host_wait_begin(void);
+void dm_guest_host_wait_end(void);
 // A blocking native HLE wait releases the guest core. With the condition mutex
 // held, enter with 1 before waiting and balance with 0 after reacquiring it.
 void dm_thread_native_wait(int entering);
@@ -49,6 +53,17 @@ typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
     static ret cname(__VA_ARGS__)
 // The game's call site inside a HLE_FORCE_BIG implementation: pass __builtin_return_address(0), which after a stack switch is the entry's own (hle_bigstack.c)
 void *dm_bigstack_caller(void *ra);
+
+// A blocking host takeover must publish the guest's real register context before waiting: a pause signal cannot stop host code safely.
+// The static stub saves a full dm_gate frame, registers it with thr_svc_enter, runs the implementation on the big host stack, and waits for resume at thr_svc_leave before returning.
+// Only <=8 integer/pointer arguments and an integer/pointer return in x0; no floating-point or stack arguments, variadics, or callbacks into guest code while the frame is published.
+#define HLE_FORCE_WAIT(mangled, why, ret, cname, ...)                                              \
+    static ret cname(__VA_ARGS__) __attribute__((used));                                          \
+    extern const char cname##_wait[];                                                             \
+    __asm__(".text\n.p2align 2\n.globl _" #cname "_wait\n.private_extern _" #cname "_wait\n_" #cname "_wait:\n" \
+            "    stp x16, x17, [sp, #-32]!\n    str x30, [sp, #16]\n    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n    b _dm_hle_wait_enter\n"); \
+    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_wait, why}; \
+    static ret cname(__VA_ARGS__)
 
 // Operation mode (0 handheld / 1 docked): owned by hle_oe.c, and the hid controller style follows it; the front end can switch it at runtime
 int dm_opmode(void);

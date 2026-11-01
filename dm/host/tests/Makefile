@@ -335,3 +335,36 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+# Local transport fixtures use only synthetic packets and loopback peers.
+NET_SOURCES = ../hle_net_backend.c
+NET_HEADERS = ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h
+NET_FLAGS = -O1 -g -Wall -Wextra -Werror -Wno-unused-function
+$(B)/t_hle_wait: t_hle_wait.c t_hle_wait.S ../hle.h ../entry.S ../hle_bigstack.c $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_hle_wait.c t_hle_wait.S ../entry.S ../hle_bigstack.c
+$(B)/t_net: t_net.c ../hle_net.c ../hle_offline.c ../hle.h ../entry.S ../hle_bigstack.c $(NET_SOURCES) $(NET_HEADERS) $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net.c ../hle_net.c ../hle_offline.c $(NET_SOURCES) ../entry.S ../hle_bigstack.c
+$(B)/t_net_discovery: t_net_discovery.c $(NET_SOURCES) $(NET_HEADERS) | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_NET_TEST -o $@ t_net_discovery.c $(NET_SOURCES)
+$(B)/t_discovery_protocol: t_discovery_protocol.c ../discovery_protocol.h | $(B)
+	$(CLANG) -std=c11 -O2 -Wall -Wextra -Werror -pedantic -o $@ t_discovery_protocol.c
+LDN_SOURCES = ../hle_ldn.c ../hle_ldn_protocol.c
+LDN_HEADERS = ../hle_ldn.h $(NET_HEADERS)
+$(B)/t_ldn: t_ldn.c $(LDN_SOURCES) $(LDN_HEADERS) $(NET_SOURCES) | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_NET_TEST -DDM_LDN_TEST -DDM_LDN_NET_TEST -o $@ t_ldn.c $(LDN_SOURCES) $(NET_SOURCES)
+$(B)/t_ldn_events: t_ldn_events.c ../hle_ldn.c ../hle_ldn_protocol.c ../hle_ldn.h $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_ldn_events.c ../hle_ldn_protocol.c
+.PHONY: local-network-tests
+local-network-tests: $(B)/t_hle_wait $(B)/t_net $(B)/t_net_discovery $(B)/t_discovery_protocol $(B)/t_ldn $(B)/t_ldn_events
+	$(B)/t_hle_wait
+	$(B)/t_net --no-broadcast
+	$(B)/t_net_discovery
+	$(B)/t_discovery_protocol
+	$(B)/t_ldn
+	$(B)/t_ldn_events
+	$(B)/t_friends_history
+run: local-network-tests
+
+$(B)/t_friends_history: t_friends_history.c ../hle_friends_history.c ../friends_history.h ../hle_friends.c ../account_local.h memory_profile/game_profile.h | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_FRIENDS_HISTORY_TEST -Imemory_profile -o $@ t_friends_history.c ../hle_friends_history.c
+local-network-tests: $(B)/t_friends_history

@@ -113,6 +113,7 @@ _dm_gate:
     ldr x0, [sp, #240]        // Return point = gate identifier
     mov x1, sp                // regs
     bl _gate_dispatch
+Ldm_gate_restore:
     ldr x9, [sp, #784]
     msr fpcr, x9
     ldr x9, [sp, #776]
@@ -156,6 +157,147 @@ _dm_gate:
     ldr x30, [sp, #240]
     ldr x29, [sp, #792]
     mov sp, x29
+    ret
+
+// A blocking import is a guest pause boundary too. Its 32-byte stub holds x16,
+// x17 and LR while this entry reaches the same per-thread gate stack as an SVC.
+// The full frame and native work never overwrite the guest stack below the stub.
+    .globl _dm_hle_wait_enter
+    .private_extern _dm_hle_wait_enter
+    .p2align 2
+_dm_hle_wait_enter:
+    adrp x17, _g_keygate@PAGE
+    ldr x17, [x17, _g_keygate@PAGEOFF]
+    mrs x30, TPIDRRO_EL0
+    ldr x17, [x30, x17, lsl #3]
+    adrp x30, _dm_gate_stubs@PAGE
+    add x30, x30, _dm_gate_stubs@PAGEOFF
+    sub x17, x17, x30
+    lsr x17, x17, #4
+    adrp x30, _dm_gate_top@PAGE
+    add x30, x30, _dm_gate_top@PAGEOFF
+    ldr x17, [x30, x17, lsl #3]
+    sub x17, x17, #800
+    stp x0, x1, [x17, #0]
+    stp x2, x3, [x17, #16]
+    stp x4, x5, [x17, #32]
+    stp x6, x7, [x17, #48]
+    stp x8, x9, [x17, #64]
+    stp x10, x11, [x17, #80]
+    stp x12, x13, [x17, #96]
+    stp x14, x15, [x17, #112]
+    str x16, [x17, #248]
+    stp x18, x19, [x17, #144]
+    stp x20, x21, [x17, #160]
+    stp x22, x23, [x17, #176]
+    stp x24, x25, [x17, #192]
+    stp x26, x27, [x17, #208]
+    stp x28, x29, [x17, #224]
+    ldr x16, [sp]
+    str x16, [x17, #128]
+    ldr x16, [sp, #8]
+    str x16, [x17, #136]
+    ldr x16, [sp, #16]
+    str x16, [x17, #240]
+    mov x16, sp
+    add x16, x16, #32
+    str x16, [x17, #792]
+    stp q0, q1, [x17, #256]
+    stp q2, q3, [x17, #288]
+    stp q4, q5, [x17, #320]
+    stp q6, q7, [x17, #352]
+    stp q8, q9, [x17, #384]
+    stp q10, q11, [x17, #416]
+    stp q12, q13, [x17, #448]
+    stp q14, q15, [x17, #480]
+    stp q16, q17, [x17, #512]
+    stp q18, q19, [x17, #544]
+    stp q20, q21, [x17, #576]
+    stp q22, q23, [x17, #608]
+    stp q24, q25, [x17, #640]
+    stp q26, q27, [x17, #672]
+    stp q28, q29, [x17, #704]
+    stp q30, q31, [x17, #736]
+    mrs x16, nzcv
+    str x16, [x17, #768]
+    mrs x16, fpsr
+    str x16, [x17, #776]
+    mrs x16, fpcr
+    str x16, [x17, #784]
+    // A host callback into guest code must not reuse an active gate frame.
+    mov x9, sp
+    add x10, x17, #800
+    cmp x9, x10
+    b.hs 1f
+    sub x10, x10, #0x100000
+    cmp x9, x10
+    b.lo 1f
+    mov sp, x17
+    mov x0, x9
+    bl _dm_gate_nested
+1:  mov sp, x17
+    ldr x19, [sp, #248]
+    mov x0, sp
+    ldr x1, [sp, #240]
+    bl _thr_svc_enter
+    ldp x0, x1, [sp, #0]
+    ldp x2, x3, [sp, #16]
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
+    mov x16, x19
+    bl _dm_bigstack_enter
+    mov x20, x0
+    bl _thr_svc_leave
+    str x20, [sp, #0]
+    b Ldm_hle_wait_restore
+
+Ldm_hle_wait_restore:
+    ldr x9, [sp, #784]
+    msr fpcr, x9
+    ldr x9, [sp, #776]
+    msr fpsr, x9
+    ldr x9, [sp, #768]
+    msr nzcv, x9
+    ldp q0, q1, [sp, #256]
+    ldp q2, q3, [sp, #288]
+    ldp q4, q5, [sp, #320]
+    ldp q6, q7, [sp, #352]
+    ldp q8, q9, [sp, #384]
+    ldp q10, q11, [sp, #416]
+    ldp q12, q13, [sp, #448]
+    ldp q14, q15, [sp, #480]
+    ldp q16, q17, [sp, #512]
+    ldp q18, q19, [sp, #544]
+    ldp q20, q21, [sp, #576]
+    ldp q22, q23, [sp, #608]
+    ldp q24, q25, [sp, #640]
+    ldp q26, q27, [sp, #672]
+    ldp q28, q29, [sp, #704]
+    ldp q30, q31, [sp, #736]
+    // A gate may modify any general-purpose register: svc out-parameters are in x0..x8, and the target of mrs cntpct can be any xN (14 of the 33 sites in sdk are x19..x23)
+    // ⇒ read back all of x0..x28 (x18 is the Apple platform register; the guest's x18 has been rewritten to the thread slot, so skip it and leave it alone).
+    // x29 / x30 are the gate block's to restore (from the words it pushed): here they carry the block's sp and the return point
+    ldp x0, x1, [sp, #0]
+    ldp x2, x3, [sp, #16]
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
+    ldp x8, x9, [sp, #64]
+    ldp x10, x11, [sp, #80]
+    ldp x12, x13, [sp, #96]
+    ldp x14, x15, [sp, #112]
+    ldp x16, x17, [sp, #128]
+    ldr x19, [sp, #152]
+    ldp x20, x21, [sp, #160]
+    ldp x22, x23, [sp, #176]
+    ldp x24, x25, [sp, #192]
+    ldp x26, x27, [sp, #208]
+    ldp x28, x29, [sp, #224]
+    ldr x30, [sp, #240]
+    ldr x17, [sp, #792]
+    sub x17, x17, #32
+    mov sp, x17
+    ldp x16, x17, [sp]
+    add sp, sp, #32
     ret
 
 // 3) dm_thread_enter(entry, arg, sp): guest thread start. Switch to the guest stack given by the SDK and call entry with x0 = argument;

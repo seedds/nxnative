@@ -231,6 +231,14 @@ static void *force_lookup(const char *name) {
     }
     return NULL;
 }
+// Validate the complete linked production table without loading game data,
+// creating a window or reading credentials. Component-only fixtures cannot
+// detect duplicate hooks registered in a different translation unit.
+void dm_validate_hle_registry(void) {
+    if (!g_fmask) force_init();
+    (void)hle_implements("__dm_registry_validation__");
+    LOG("HLE registry validated: %u unique forced takeovers",g_nforce);
+}
 // Generic host: the list serves several games, so entries a game does not reference are only noted; with DM_FORCE_STRICT=1 it still fails loudly (for checking a mistyped list)
 static void force_check(void) {
     unsigned unused = 0; int strict = getenv("DM_FORCE_STRICT") != NULL;

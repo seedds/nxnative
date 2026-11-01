@@ -63,6 +63,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x0bf, InstName.Popc, APopc, uniform: true);
             alu(0x100, InstName.Flo, AFlo);
             alu(0x0bd, InstName.Flo, AFlo, uniform: true);
+            alu(0x101, InstName.Bfe, ABrev);
+            alu(0x0be, InstName.Bfe, ABrev, uniform: true);
             alu(0x01a, InstName.Bfe, ASgxt);
             alu(0x09a, InstName.Bfe, ASgxt, uniform: true);
 
@@ -1039,6 +1041,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             ASet(context, x, context.BitCount(src), u);
+        }
+
+        // BREV Rd, b: the bits of b in reverse order (Mesa NAK OpBrev; UBREV on the uniform datapath)
+        public static void ABrev(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            bool u = AUniform(context);
+            ASet(context, x, context.BitfieldReverse(AGet(context, AOne(context, x, u, neg: false, abs: false))), u);
         }
 
         // FLO Rd, b: the index of the most significant set bit (signed 73: of the first bit unlike the sign), .SH (74) as a shift amount; 63 negates the input

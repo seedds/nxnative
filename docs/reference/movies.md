@@ -217,6 +217,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 
 - Movie sound in [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0): the decoder is asked for type 5 (Vorbis) with output format 1 (PCM16); see the other entries in this file and `hle_movie.c`.
 
+### Vorbis output lengths at a window change
+
+- **Symptom:** a movie with a Vorbis track starts clean, then crackles and stutters. The log has no underrun and no red line, and with `DM_AUDIO_DUMP` the game's mix has exact zeros in whole 512-sample blocks (mostly one or two at a time, 11 to 21 ms).
+- **Cause:** at a change of window size `stb_vorbis` splits the samples differently from the specification. With blocksizes 256 / 2048, a long window before a short one gave 1,472 samples instead of 1,024, and the short one 128 instead of 576. The total is the same, but those outputs did not match the distance to the next packet's time. Of about 7,300 packets in the first movie, some 420 were affected.
+- **Fix:** `md_vorbis` keeps the decoded samples and each packet leaves with (previous blocksize + its blocksize) / 4 of them, the rest going with the next. Handing out longer merged outputs instead was tried and made the sound much worse: the game's buffers are 8,192 bytes, and the outputs no longer matched the packets' times.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, Mac: [#768](https://github.com/seedds/nxnative/issues/768)).
+
 ### Vorbis sound stops for good after a Flush
 
 - **Symptom:** a movie with a Vorbis track plays its first seconds with sound; after the game flushes and restarts it (a seek, a loop, or the app losing and regaining focus) the picture goes on but the sound does not come back, for the rest of the movie. The log shows `[movie] Flush`, `Flush`, `Start`, `Start` and no more `GetOutputBuffer … → PCM` lines. With `DM_AUDIO_DUMP`, the game's mix is real audio up to the flush and exact zeros from then on, so the AudioUnit is not at fault (0 underruns).

@@ -90,9 +90,21 @@ static void vorbis_flush(void) {
     assert(vorbis_samples(&d, audio, 8) == before);
     puts("Vorbis movie sound: the samples come again after a Flush");
 }
+// An output takes the values asked for and leaves the rest for the next one; at most what is kept
+static void vorbis_split(void) {
+    static mdec_t d = { .type = MD_TYPE_VORBIS, .nout = MD_NOUT, .started = 1 };
+    d.hold_cap = 1472 + 128; d.hold = malloc(d.hold_cap * sizeof *d.hold); d.hold_n = d.hold_cap;
+    for (size_t i = 0; i < d.hold_n; i++) d.hold[i] = (int16_t)i;
+    assert(md_vorbis_emit(&d, 0, 1024) && d.out[0].bytes == 1024 * sizeof *d.hold && d.hold_n == 576);
+    assert(((int16_t *)d.out[0].frm)[1023] == 1023 && d.hold[0] == 1024);
+    assert(md_vorbis_emit(&d, 0, 1024) && d.out[0].bytes == 576 * sizeof *d.hold && !d.hold_n);
+    assert(!md_vorbis_emit(&d, 0, 1024));
+    puts("Vorbis movie sound: an output takes the length asked for and leaves the rest");
+}
 int main(void) {
     playing();
     vorbis_flush();
+    vorbis_split();
     int w = 0, h = 0;
     assert(!vp8_size(vp8, 9, &w, &h));
     assert(vp8_size(vp8, sizeof vp8, &w, &h) && w == 16 && h == 16);

@@ -2590,6 +2590,17 @@ bool LinkWindows(const std::vector<std::string>& objects, const std::string& wor
     stats->coff_sections = cs.sections;
     stats->coff_symbols = cs.symbols;
     stats->coff_relocations = cs.relocations;
+    {  // The unwind information translated from the CFI (coff.cpp, "Unwind information"): what Windows debuggers, profilers and RtlVirtualUnwind see
+        const CoffStats::UnwindCounts& u = cs.unwind;
+        std::string note = "aot: windows: unwind info for " + std::to_string(u.described) + " of " + std::to_string(u.functions) + " functions, " +
+                           std::to_string(u.not_described) + " not describable: " + (u.not_described ? u.why_not : "none");
+        if (u.without_cfi) {
+            note += "; " + std::to_string(u.without_cfi) + " without CFI, which Windows unwinds as leaf functions: " + u.without_cfi_names;
+        }
+        note += "; " + std::to_string(u.entries) + " RUNTIME_FUNCTION entries";
+        if (u.split) note += ", " + std::to_string(u.split) + " functions in several (a stretch with a frame of its own): " + u.split_why;
+        stats->notes.push_back(note);
+    }
     const std::string obj = coff_object.empty() ? work_dir + "/whole.obj" : coff_object;
     if (!WriteFile(obj, coff, error)) {
         return false;

@@ -4,7 +4,7 @@
 // converts that object here into an AMD64 COFF object for lld's COFF driver, which links the DLL. Only what such an object holds is converted:
 //   sections   code (SHF_EXECINSTR) -> .text, read-only data and the data that only relocation writes (.data.rel.ro) -> .rdata, other writable data
 //              -> .data, SHT_NOBITS -> .bss, each with its alignment; the DWARF sections (.debug_*) under their own names, discardable, when debug
-//              information is kept; dropped: .eh_frame (ELF's unwind information: Windows unwinds through .pdata, which the pack does not have),
+//              information is kept; dropped: .eh_frame (ELF's unwind information, translated into .pdata and .xdata below),
 //              SHF_EXCLUDE sections (the line marks, read before), comments, notes, group and address-significance sections (ld.lld -r kept
 //              one copy of each comdat group, so its members are plain sections here). A TLS section, an initializer array or a section of
 //              another kind fails the conversion
@@ -16,6 +16,10 @@
 //              relocations have none). Any other relocation (a GOT or TLS one, an absolute 32-bit address in loaded data) fails the
 //              conversion, naming its section, offset and symbol. More than 65,535 relocations in a section use COFF's
 //              IMAGE_SCN_LNK_NRELOC_OVFL form
+//   unwinding  .eh_frame's CFI and the code's prologues as Win64's unwind information: .xdata (UNWIND_INFOs: a prologue's UWOP_PUSH_NONVOL,
+//              UWOP_ALLOC_SMALL / _LARGE, UWOP_SET_FPREG, UWOP_SAVE_NONVOL, UWOP_SAVE_XMM128) and .pdata (RUNTIME_FUNCTIONs, IMAGE_REL_AMD64_ADDR32NB
+//              relocations): one per function, or one per stretch with a frame of its own where SysV's code has shapes one UNWIND_INFO cannot
+//              express; a function without a description has none, counted by reason (coff.cpp, "Unwind information"; CoffStats::unwind)
 // The output is deterministic: no time stamp, the input's order kept.
 #pragma once
 
@@ -29,6 +33,14 @@ namespace nxaot::build {
 struct CoffStats {
     uint64_t sections = 0, symbols = 0, relocations = 0;  // the COFF object's (symbols: records, auxiliary ones included)
     uint64_t dropped_sections = 0;                         // ELF sections not converted (.eh_frame, the line marks, notes, ...)
+    // The unwind information (.pdata, .xdata) translated from .eh_frame's CFI: functions are the FDEs' and the function symbols without one
+    struct UnwindCounts {
+        uint64_t functions = 0, described = 0, not_described = 0, without_cfi = 0;
+        uint64_t entries = 0, split = 0;  // RUNTIME_FUNCTIONs; described functions that took more than one
+        std::string why_not;              // the reasons, "reason (count), ...", sorted
+        std::string split_why;            // why the split ones took more, as above (a function may count under several)
+        std::string without_cfi_names;    // the function symbols without an FDE (the first ones)
+    } unwind;
 };
 
 // The ELF64 x86-64 relocatable object elf as an AMD64 COFF object in *coff; keep_debug: the DWARF sections too. False with *error set

@@ -2,20 +2,40 @@
 // at DM_AOT_PROFILE_HZ (1000 by default) per second of its own CPU time and writes, at process exit, the profile `nxaot build --profile` reads: <folder>/<module>.tsv per module with
 // samples, one line `<module offset of a function's entry> <samples>` per sampled function. The packer (scripts/build_ipa_from_nsp.py --platform linux / windows) takes
 // <NSP folder>/<id>-work/profile/<module>.tsv for the module's next pack: its functions with samples at tier H, the others at tier C (balanced mode).
-// Linux: each thread arms a timer on its own CPU-time clock (timer_create with CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID) when it makes its state block (aot_thread.c thread_make),
-// and disarms it before the block goes. Its SIGPROF runs on the thread's alternate signal stack (aot_fault.c crash_thread_init) and reads the interrupted rip:
+// A sample is counted by count_pc, the same on both systems, from the thread's interrupted rip:
 //   in a pack's function       that function (aot_arena.c dm_aot_fn_of_code: the function map, a split function's parts and a group's functions each to their own entry)
 //   elsewhere, in a host call  the guest function that called it (dm_aot_thread.prof_at: the call's return address, an SVC's instruction; aot_run.c sets it)
 //   in the JIT fallback        counted as such per thread (dynarmic keeps the guest pc in host registers while a block runs: not readable from here)
 //   anything else              the host (the run time, a host call for code no pack holds, a thread between guest calls)
+// count_pc allocates nothing and takes no lock: a function's count is a relaxed atomic add into its pack's array (made at the pack's load, aot_arena.c), a thread's totals are
+// fields of its own record, which is never freed.
+// Linux: each thread arms a timer on its own CPU-time clock (timer_create with CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID) when it makes its state block (aot_thread.c thread_make),
+// and disarms it before the block goes. Its SIGPROF runs on the thread's alternate signal stack (aot_fault.c crash_thread_init) and reads the interrupted rip from the signal context.
 // The weight of a sample is 1 + the timer's overrun: the kernel checks CPU-time timers at its ticks (HZ 250 gives 4 expirations a check), so the counts stay in milliseconds of CPU time.
-// The handler allocates nothing and takes no lock: a function's count is a relaxed atomic add into its pack's array (made at the pack's load, aot_arena.c), a thread's totals are
-// fields of its own record, which is never freed. Windows: not yet (a sampler thread with SuspendThread / GetThreadContext would do it): a [RED] line when the switch is set
+// Windows has no per-thread CPU-time timer that interrupts the thread, so one sampler thread does it from outside. A guest thread registers itself (dm_aot_profile_thread_begin, from
+// thread_make: only threads the engine made state blocks for are ever suspended) with a handle of its own (OpenThread: suspend, get context, query) and its CPU time so far. Every
+// 1 / DM_AOT_PROFILE_HZ seconds of wall time the sampler, under the registry's lock, reads each registered thread's CPU time (QueryThreadCycleTime: the thread's cycles in units of
+// the invariant TSC, which the sampler measures against QueryPerformanceCounter at its start; GetThreadTimes is charged at the scheduler's tick, 15.6 ms, too coarse) and adds what
+// it ran since the last look to the thread's credit. A thread whose credit holds a whole period (1 / DM_AOT_PROFILE_HZ s of CPU time) and that ran since the last look is sampled
+// once, with the weight of the whole periods in its credit (the rest is kept): SuspendThread, GetThreadContext with CONTEXT_CONTROL (which also waits until the suspension took
+// effect), Rip to count_pc, ResumeThread. A thread that sleeps accrues no credit and is never suspended, as no Linux timer fires on it; the counts stay in periods of CPU time
+// however late the sampler wakes. The difference from Linux: the sample lands where the thread is when the sampler looks, not where its CPU time ran out (a thread that ran and
+// then blocked within the last period is sampled in its wait, counted as the host).
+// While a thread is suspended the sampler only calls the kernel (GetThreadContext, ResumeThread) and count_pc: no allocation, no lock, no C library and nothing of the loader, so a
+// thread suspended while it holds the heap's lock, a stdio lock or the loader lock (a host thread's key destructor runs under it at the thread's end, before it unregisters)
+// cannot stop the sampler. The registry's lock is held around each pass and taken by a thread to register or unregister, never while that thread is suspended (it is not
+// suspended while it waits for the lock, and the sampler holds it); unregistering closes the handle under it, so the sampler never touches a thread whose block is gone.
+// Overhead (reasoned, not measured: no Windows machine here): per pass one QueryThreadCycleTime per registered thread (a system call, about a microsecond); per sample a
+// suspension, a context read and a resume (three system calls and, when the thread runs on another core, an interrupt to stop it: some tens of microseconds the sampled thread
+// stands still). At 1000 Hz that is a few percent of a busy thread's time, about what Linux's signal delivery and handler cost, and nothing for an idle one
 #include "aot.h"
-#if !defined(_WIN32)
 #include <errno.h>
-#include <signal.h>
 #include <sys/stat.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <x86intrin.h>   // __rdtsc
+#else
+#include <signal.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <ucontext.h>
@@ -31,31 +51,28 @@ static void init_once(void);
 void dm_aot_profile_init(void) { pthread_once(&g_once, init_once); }
 int dm_aot_profile_on(void) { dm_aot_profile_init(); return g_on; }
 
-#if defined(_WIN32)
-static void init_once(void) {
-    const char *dir = getenv("DM_AOT_PROFILE");
-    if (dir && *dir) LOG("[RED] aot: DM_AOT_PROFILE=%s: the sampler is Linux-only for now (no profile is written on Windows; a profile recorded on Linux serves the Windows pack too)", dir);
-}
-void dm_aot_profile_thread_begin(void) {}
-void dm_aot_profile_thread_end(void) {}
-int dm_aot_profile_write(void) { return -1; }
-#else
 static char g_dir[1024];
 static unsigned g_hz = PROF_HZ_DEFAULT;
 
-// A thread's record: its totals, written by its own handler only; kept to the end (the handler may run on it until its timer is gone, and the writer reads it)
+// A thread's record: its totals, written by whoever samples it only (its own handler on Linux, the sampler thread under g_lock on Windows); kept to the end (the writer reads it)
 typedef struct prof_thread {
     struct prof_thread *next;   // every thread sampled (g_lock)
     long tid;
     uint64_t samples, code, hostcall, jit, host;   // all, in a pack's function, in a host call or SVC of one, in the JIT fallback, in the host
+#if defined(_WIN32)
+    HANDLE h;                   // the thread, while it is registered (g_lock); NULL once it unregistered
+    const dm_aot_thread *t;     // its state block, while h is set (prof_at and depth are read from it while the thread is suspended)
+    uint64_t cycles, credit;    // its CPU time (QueryThreadCycleTime) at the last look; TSC cycles of CPU time not sampled yet
+#else
     timer_t timer;
     int armed;
+#endif
 } prof_thread;
-static _Thread_local prof_thread *t_prof;   // the calling thread's record while its timer runs, NULL otherwise (the handler then does nothing)
+static _Thread_local prof_thread *t_prof;   // the calling thread's record while it is sampled, NULL otherwise (the Linux handler then does nothing)
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static prof_thread *g_threads;
 static int g_nthreads;
-static _Atomic int g_sampling;              // 0 once the files are being written: the handler counts nothing more
+static _Atomic int g_sampling;              // 0 once the files are being written: nothing more is counted
 static _Atomic int g_written;
 
 static void count(int pack, long fn, uint64_t w) {
@@ -64,35 +81,30 @@ static void count(int pack, long fn, uint64_t w) {
     if (c) atomic_fetch_add_explicit(&c[fn], w, memory_order_relaxed);
 }
 
-static void on_prof(int sig, siginfo_t *si, void *ucv) {
-    (void)sig;
-    prof_thread *r = t_prof;
-    if (!r || !atomic_load_explicit(&g_sampling, memory_order_relaxed)) return;
-    const int saved_errno = errno;
-    const uint64_t w = 1 + (uint64_t)(si && si->si_code == SI_TIMER && si->si_overrun > 0 ? si->si_overrun : 0);
-    const uint64_t pc = (uint64_t)((const ucontext_t *)ucv)->uc_mcontext.gregs[REG_RIP];
+// One sample of weight w at native pc on the thread r records, whose state block is t (NULL when it has none): the rules at the top of this file. Async-signal-safe (Linux runs
+// it in the thread's own SIGPROF handler) and safe while the thread is suspended (Windows runs it on the sampler thread): no allocation, no lock
+static void count_pc(prof_thread *r, const dm_aot_thread *t, uint64_t pc, uint64_t w) {
     r->samples += w;
     int pack = -1;
     long fn = dm_aot_fn_of_code(pc, &pack);
     if (fn >= 0) {
         count(pack, fn, w);
         r->code += w;
-    } else {
-        const dm_aot_thread *t = fn == -2 ? NULL : dm_aot_self();   // -2: the pack's run-time code (enter, jit_entry, the slow-path wrappers)
-        const uint64_t at = t && t->depth ? t->prof_at : 0;
-        if (at == DM_AOT_PROF_JIT) r->jit += w;
-        else if (at > DM_AOT_PROF_JIT && (fn = dm_aot_fn_of_guest(at, &pack)) >= 0) { count(pack, fn, w); r->hostcall += w; }
-        else r->host += w;
+        return;
     }
-    errno = saved_errno;
+    const uint64_t at = fn != -2 && t && t->depth ? t->prof_at : 0;   // -2: the pack's run-time code (enter, jit_entry, the slow-path wrappers)
+    if (at == DM_AOT_PROF_JIT) r->jit += w;
+    else if (at > DM_AOT_PROF_JIT && (fn = dm_aot_fn_of_guest(at, &pack)) >= 0) { count(pack, fn, w); r->hostcall += w; }
+    else r->host += w;
 }
 
 static void write_at_exit(void) { dm_aot_profile_write(); }
 
-static void init_once(void) {
+// The switches; 0 when the sampler may start
+static int read_switches(void) {
     const char *dir = getenv("DM_AOT_PROFILE");
-    if (!dir || !*dir) return;
-    if (strlen(dir) >= sizeof g_dir - 32) { LOG("[RED] aot: DM_AOT_PROFILE: the folder's path is too long: no profile"); return; }
+    if (!dir || !*dir) return -1;
+    if (strlen(dir) >= sizeof g_dir - 32) { LOG("[RED] aot: DM_AOT_PROFILE: the folder's path is too long: no profile"); return -1; }
     snprintf(g_dir, sizeof g_dir, "%s", dir);
     const char *hz = getenv("DM_AOT_PROFILE_HZ");
     if (hz && *hz) {
@@ -100,6 +112,121 @@ static void init_once(void) {
         if (v >= 1 && v <= PROF_HZ_MAX) g_hz = (unsigned)v;
         else LOG("[RED] aot: DM_AOT_PROFILE_HZ=%s is not 1 .. %d: %d", hz, PROF_HZ_MAX, PROF_HZ_DEFAULT);
     }
+    return 0;
+}
+
+#if defined(_WIN32)
+// The TSC's rate against QueryPerformanceCounter over about 50 ms (QueryThreadCycleTime counts in the TSC's cycles, which Windows 10 on x86-64 keeps invariant)
+static uint64_t tsc_hz(void) {
+    LARGE_INTEGER f, q0, q1;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&q0);
+    const uint64_t c0 = __rdtsc();
+    plat_sleep_ns(50000000ull);
+    QueryPerformanceCounter(&q1);
+    const uint64_t c1 = __rdtsc();
+    const uint64_t dq = (uint64_t)(q1.QuadPart - q0.QuadPart);
+    return dq && f.QuadPart > 0 && c1 > c0 ? (uint64_t)((unsigned __int128)(c1 - c0) * (uint64_t)f.QuadPart / dq) : 0;
+}
+
+static void *sampler_main(void *arg) {
+    (void)arg;
+    plat_thread_set_name("aot profile");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);   // wakes on time while the guest threads keep every core busy
+    const uint64_t hz = tsc_hz();   // about 50 ms, which the guest threads' credit does not count (below)
+    if (hz < 1000000ull) {
+        LOG("[RED] aot: DM_AOT_PROFILE: the TSC's rate could not be measured (%llu Hz): no samples, the profile stays empty", (unsigned long long)hz);
+        return NULL;
+    }
+    const uint64_t period = hz / g_hz, wait_ns = 1000000000ull / g_hz;
+    for (int started = 0;; started = 1) {
+        plat_sleep_ns(wait_ns);   // a high-resolution waitable timer (plat_win32.c): about 0.5 ms at best; a late wake only makes the weights larger
+        pthread_mutex_lock(&g_lock);
+        if (!atomic_load(&g_sampling)) { pthread_mutex_unlock(&g_lock); break; }
+        for (prof_thread *r = g_threads; r; r = r->next) {
+            if (!r->h) continue;
+            ULONG64 c = 0;
+            if (!QueryThreadCycleTime(r->h, &c)) continue;
+            // The first pass only takes the threads' CPU time: what they ran while the TSC was measured is not put on wherever they are now
+            const uint64_t ran = c > r->cycles && started ? c - r->cycles : 0;
+            r->cycles = c;
+            r->credit += ran;
+            if (!ran || r->credit < period) continue;   // asleep since the last look, or less than a period of CPU time: not stopped
+            const uint64_t w = r->credit / period;
+            r->credit -= w * period;
+            if (SuspendThread(r->h) == (DWORD)-1) continue;
+            // Suspended: kernel calls and count_pc only (top of this file)
+            CONTEXT ctx;
+            memset(&ctx, 0, sizeof ctx);
+            ctx.ContextFlags = CONTEXT_CONTROL;
+            if (GetThreadContext(r->h, &ctx)) count_pc(r, r->t, (uint64_t)ctx.Rip, w);
+            ResumeThread(r->h);
+        }
+        pthread_mutex_unlock(&g_lock);
+    }
+    return NULL;
+}
+
+static void init_once(void) {
+    if (read_switches()) return;
+    atomic_store(&g_sampling, 1);
+    pthread_t th;
+    if (pthread_create(&th, NULL, sampler_main, NULL)) { atomic_store(&g_sampling, 0); LOG("[RED] aot: DM_AOT_PROFILE: no sampler thread: no profile"); return; }
+    pthread_detach(th);
+    atexit(write_at_exit);
+    g_on = 1;
+    LOG("aot: DM_AOT_PROFILE: every guest thread sampled %u times per second of its CPU time; the profile goes to %s/<module>.tsv at exit (nxaot build --profile)", g_hz, g_dir);
+}
+
+void dm_aot_profile_thread_begin(void) {
+    if (!dm_aot_profile_on() || t_prof || !atomic_load(&g_sampling)) return;
+    prof_thread *r = calloc(1, sizeof *r);
+    if (!r) { LOG("[RED] aot: DM_AOT_PROFILE: no memory for a thread's record: the thread is not sampled"); return; }
+    r->tid = (long)GetCurrentThreadId();
+    r->h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentThreadId());
+    ULONG64 c = 0;
+    if (!r->h || !QueryThreadCycleTime(r->h, &c)) {
+        static atomic_flag said = ATOMIC_FLAG_INIT;
+        if (!atomic_flag_test_and_set(&said)) LOG("[RED] aot: DM_AOT_PROFILE: no handle or CPU time for a guest thread (error %lu): it is not sampled", (unsigned long)GetLastError());
+        if (r->h) CloseHandle(r->h);
+        free(r);
+        return;
+    }
+    r->cycles = c;   // its CPU time counts from here, as a Linux timer counts from its arming
+    r->t = dm_aot_self();
+    pthread_mutex_lock(&g_lock);
+    r->next = g_threads; g_threads = r; g_nthreads++;
+    pthread_mutex_unlock(&g_lock);
+    t_prof = r;
+}
+
+// A host thread's context ends in a key destructor, where the thread's own variables may be gone (aot_thread.c host_end): then t_prof reads NULL and the
+// record stays registered, which is harmless: an ended thread's CPU time no longer grows, so the sampler never suspends it nor reads its block again
+void dm_aot_profile_thread_end(void) {
+    prof_thread *r = t_prof;
+    if (!r) return;
+    t_prof = NULL;
+    pthread_mutex_lock(&g_lock);   // never inside a pass: the sampler holds the lock for the whole of one and resumed every thread it stopped before it lets go
+    CloseHandle(r->h);
+    r->h = NULL; r->t = NULL;
+    pthread_mutex_unlock(&g_lock);
+}
+
+// Windows' rename does not replace an existing file; the C runtime's paths are UTF-8 (plat_win32.c)
+static int replace_file(const char *from, const char *to) { return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING) ? 0 : -1; }
+#else
+static void on_prof(int sig, siginfo_t *si, void *ucv) {
+    (void)sig;
+    prof_thread *r = t_prof;
+    if (!r || !atomic_load_explicit(&g_sampling, memory_order_relaxed)) return;
+    const int saved_errno = errno;
+    const uint64_t w = 1 + (uint64_t)(si && si->si_code == SI_TIMER && si->si_overrun > 0 ? si->si_overrun : 0);
+    count_pc(r, dm_aot_self(), (uint64_t)((const ucontext_t *)ucv)->uc_mcontext.gregs[REG_RIP], w);
+    errno = saved_errno;
+}
+
+static void init_once(void) {
+    if (read_switches()) return;
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = on_prof;
@@ -151,6 +278,9 @@ void dm_aot_profile_thread_end(void) {
     r->armed = 0;
 }
 
+static int replace_file(const char *from, const char *to) { return rename(from, to); }
+#endif
+
 // The writer: one file per module with samples, most samples first
 typedef struct { uint64_t off, n; } row_t;
 static int row_cmp(const void *a, const void *b) {
@@ -158,8 +288,14 @@ static int row_cmp(const void *a, const void *b) {
     if (x->n != y->n) return x->n > y->n ? -1 : 1;
     return x->off < y->off ? -1 : x->off > y->off;
 }
+static int is_sep(char c) {
+#if defined(_WIN32)
+    if (c == '\\') return 1;   // a Windows path may use either separator
+#endif
+    return c == '/';
+}
 static void mkdirs(char *path) {   // mkdir -p
-    for (char *s = path + 1; *s; s++) if (*s == '/') { *s = 0; mkdir(path, 0755); *s = '/'; }
+    for (char *s = path + 1; *s; s++) if (is_sep(*s)) { const char c = *s; *s = 0; mkdir(path, 0755); *s = c; }
     mkdir(path, 0755);
 }
 
@@ -216,7 +352,7 @@ int dm_aot_profile_write(void) {
         snprintf(tmp, sizeof tmp, "%s.tmp", path);
         const uint8_t *h = dm_aot_pack_desc(p)->sha256;
         for (int b = 0; b < 32; b++) snprintf(sha + 2 * b, 3, "%02x", h[b]);
-        FILE *f = fopen(tmp, "w");
+        FILE *f = fopen(tmp, "wb");   // binary: the same bytes on Windows (no \r before each \n)
         if (!f) { LOG("[RED] aot: profile: cannot write %s", tmp); free(rows); bad++; continue; }
         fprintf(f, "# nxaot profile: guest functions sampled by the x86-64 engine (dm/host/aot_profile.c, DM_AOT_PROFILE); nxaot build --profile <this file>\n");
         fprintf(f, "# module %s, build ID %s, image SHA-256 %s\n", m->name, m->build_id[0] ? m->build_id : "none", sha);
@@ -225,11 +361,10 @@ int dm_aot_profile_write(void) {
         fprintf(f, "# <module offset of a function's entry> <samples>\n");
         for (size_t j = 0; j < k; j++) fprintf(f, "%#llx %llu\n", (unsigned long long)rows[j].off, (unsigned long long)rows[j].n);
         free(rows);
-        if (fclose(f) || rename(tmp, path)) { LOG("[RED] aot: profile: cannot write %s", path); bad++; continue; }
+        if (fclose(f) || replace_file(tmp, path)) { LOG("[RED] aot: profile: cannot write %s", path); bad++; continue; }
         LOG("aot: profile: %s: %llu samples in %zu functions (%s)", path, (unsigned long long)sum, k, m->name);
         files++;
     }
     if (!files && !bad) LOG("aot: profile: no samples in any pack's code: nothing written to %s", dir);
     return bad ? -1 : 0;
 }
-#endif

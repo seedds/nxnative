@@ -563,10 +563,7 @@ int main(int argc, char **argv) {
 #else
     puts("note: this build has no JIT fallback (NXHOST_JIT off): the JIT-forced run and fault are skipped");
 #endif
-    // 6. The sampler (DM_AOT_PROFILE, aot_profile.c): the profile run with the switch and without it
-#if defined(_WIN32)
-    puts("note: the sampler is Linux-only for now (aot_profile.c): the profile run is skipped");
-#else
+    // 6. The sampler (DM_AOT_PROFILE, aot_profile.c): the profile run with the switch and without it (Linux through SIGPROF timers, Windows through the sampler thread)
     {
         const char *pdir = "t_aot_module.tmp/profile", *pfile = "t_aot_module.tmp/profile/main.tsv";
         mkdir("t_aot_module.tmp", 0755);
@@ -613,7 +610,6 @@ int main(int argc, char **argv) {
                off_ns > 0 ? 100.0 * (on_ns - off_ns) / off_ns : 0.0);
         free(r.out);
     }
-#endif
     printf("t_aot_module: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

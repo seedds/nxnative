@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Windows packs (CTest `pack_windows`; README.md "Windows packs", docs/design/aot-recompiler.md 9.4): two corpus NROs (switch-gcc: jump tables and
-sw_word split into parts at the default limit; fp-gcc: the floating-point helpers and the shared NaN helpers of comdat groups), the synthetic game module
-(gate sites, the aux region) and the host-function module's two (dm/tools/tests/aot_synth.py), each packed twice by `nxaot build`: as the Linux shared
+"""Windows packs (CTest `pack_windows`; README.md "Windows packs", docs/design/aot-recompiler.md 9.4): three corpus NROs (switch-gcc: jump tables and
+sw_word split into parts at the default limit; fp-gcc: the floating-point helpers and the shared NaN helpers of comdat groups; sjlj-gcc: tail calls
+that pop their own stack arguments), the synthetic game module (gate sites, the aux region) and the host-function module's two
+(dm/tools/tests/aot_synth.py), each packed twice by `nxaot build`: as the Linux shared
 object and with `--target windows` as a DLL. Each DLL is checked with llvm-readobj and llvm-objdump and with the small PE and ELF readers below:
 
   - a PE32+ DLL for x86-64 (AMD64, IMAGE_FILE_DLL, dynamic base, NX), no entry point, no import descriptor or delay import (it names no module);
@@ -16,15 +17,22 @@ object and with `--target windows` as a DLL. Each DLL is checked with llvm-reado
     the operands that depend on the layout (rip-relative displacements, branch targets outside the function) normalized and the raw bytes compared
     where no such operand is: every function that does not call a run-time entry directly is identical; the ones that differ are listed with
     their first difference;
+  - the unwind information (.pdata, .xdata; src/build/coff.cpp, "Unwind information"): `llvm-readobj --unwind` reads every RUNTIME_FUNCTION
+    without a warning, as many as the exception directory holds and nxaot's log counts; every UNWIND_INFO parses (version 1, no handler, each
+    code's slots inside CountOfCodes, CodeOffsets in order inside SizeOfProlog); the entries are sorted and disjoint and tile every function
+    nxaot described from its start to its last instruction's end, the function map's bodies among them; and at every call of a function whose
+    code is the shared object's, the codes of the entry holding the return address, run as RtlVirtualUnwind runs them, give the return address
+    and the saved registers the shared object's CFI gives at the call;
   - the DLL is deterministic: the same bytes with one worker and with eight;
 and a pack that would call something else than the run time fails: fp-gcc for the baseline x86-64 CPU (no SSE4.1) calls libm's ceil and floor, which
 the build must refuse, naming them.
 
-  test_pack_windows.py --nxaot <nxaot> --readobj <llvm-readobj> --objdump <llvm-objdump> --work <dir>
+  test_pack_windows.py --nxaot <nxaot> --readobj <llvm-readobj> --objdump <llvm-objdump> [--dwarfdump <llvm-dwarfdump>] --work <dir>
 
 Exit 0 when every check holds.
 """
 import argparse
+import bisect
 import os
 import re
 import shutil
@@ -233,6 +241,193 @@ def compare_code(objdump, so, dll, imports, tag):
     return same, ours
 
 
+# ---- Unwind information (.pdata, .xdata; Microsoft's "x64 exception handling") ----
+UWOP = {0: 'PUSH_NONVOL', 1: 'ALLOC_LARGE', 2: 'ALLOC_SMALL', 3: 'SET_FPREG', 4: 'SAVE_NONVOL', 5: 'SAVE_NONVOL_FAR', 8: 'SAVE_XMM128', 9: 'SAVE_XMM128_FAR'}
+GPR = ['RAX', 'RCX', 'RDX', 'RBX', 'RSP', 'RBP', 'RSI', 'RDI'] + [f'R{i}' for i in range(8, 16)]
+
+
+def parse_unwind_info(pe, rva):
+    """An UNWIND_INFO: (SizeOfProlog, FrameRegister, [(CodeOffset, operation, register, operand)] in array order); ValueError when it does not
+    parse as version 1 without handler or chained information, with every code's slots inside CountOfCodes and the offsets in order"""
+    head = pe.at(rva, 4)
+    version, flags, prolog, count, frame = head[0] & 7, head[0] >> 3, head[1], head[2], head[3]
+    if version != 1 or flags:
+        raise ValueError(f'version {version}, flags {flags:#x}')
+    raw = pe.at(rva + 4, 2 * count)
+    slot = lambda k: struct.unpack_from('<H', raw, 2 * k)[0]
+    codes, k, last = [], 0, 255
+    while k < count:
+        off, op, info = raw[2 * k], raw[2 * k + 1] & 15, raw[2 * k + 1] >> 4
+        if op not in UWOP or (op == 1 and info > 1):
+            raise ValueError(f'operation {op} info {info}')
+        size = {1: 2 + info, 4: 2, 5: 3, 8: 2, 9: 3}.get(op, 1)
+        if k + size > count:
+            raise ValueError(f'{UWOP[op]} past CountOfCodes')
+        if off > prolog or off > last:
+            raise ValueError(f'CodeOffset {off:#x} after SizeOfProlog {prolog:#x} or out of order')
+        last = off
+        if op in (0, 3):
+            operand = None
+        elif op == 2:
+            operand = info * 8 + 8
+        elif size == 3:   # ALLOC_LARGE with info 1, the _FAR saves: 32 bits, unscaled
+            operand = slot(k + 1) | slot(k + 2) << 16
+        else:             # ALLOC_LARGE with info 0, SAVE_NONVOL: scaled by 8; SAVE_XMM128: by 16
+            operand = slot(k + 1) * (16 if op == 8 else 8)
+        codes.append((off, op, f'XMM{info}' if op in (8, 9) else GPR[info], operand))
+        k += size
+    if (frame & 15) != 0 and not any(op == 3 for _, op, _, _ in codes):
+        raise ValueError('a frame register without UWOP_SET_FPREG')
+    return prolog, frame & 15, codes
+
+
+def win_unwind(codes, pc_off):
+    """What RtlVirtualUnwind does with an entry's codes at pc_off from its start (outside an epilogue, no frame register): the return address's
+    distance above rsp, and each restored register's slot as a distance above rsp"""
+    delta, saves = 0, {}
+    for off, op, reg, operand in codes:
+        if off > pc_off:   # inside the prologue: not done yet
+            continue
+        if op == 0:
+            saves[reg] = delta
+            delta += 8
+        elif op in (1, 2):
+            delta += operand
+        elif op in (4, 5, 8, 9):
+            saves[reg] = operand   # from the frame's base: rsp where the unwinding starts
+        else:
+            return None, None
+    return delta, saves
+
+
+def code_map(objdump, path):
+    """Every function's start and instructions [(address, length, text)], padding after it dropped"""
+    out = subprocess.run([objdump, '-d', path], capture_output=True, text=True, check=True).stdout
+    fns, cur = {}, None
+    for line in out.splitlines():
+        m = re.match(r'^([0-9a-f]+) <(.+)>:$', line)
+        if m:
+            cur = m.group(2)
+            fns[cur] = (int(m.group(1), 16), [])
+            continue
+        m = re.match(r'^\s*([0-9a-f]+):((?: [0-9a-f]{2})+)\s*(?:\t(.*))?$', line)
+        if cur is None or not m:
+            continue
+        addr, n, text = int(m.group(1), 16), len(m.group(2).split()), (m.group(3) or '').strip()
+        insns = fns[cur][1]
+        if not text and insns:   # the rest of a long instruction's bytes
+            a0, n0, t0 = insns[-1]
+            insns[-1] = (a0, n0 + n, t0)
+        else:
+            insns.append((addr, n, text))
+    for name, (_, insns) in fns.items():
+        while insns and (insns[-1][2] == 'int3' or insns[-1][2].startswith('nop')):
+            insns.pop()
+    return fns
+
+
+def unwind_checks(a, tag, pe, dll, so, d, fn_d, same, log):
+    """The DLL's .pdata and .xdata: llvm-readobj --unwind reads every entry; each parses; the entries are sorted, disjoint and tile each function
+    with unwind information from its start to its end (the bodies of the function map among them); nxaot's log counts them; and at every call of
+    a function whose code is the shared object's, what RtlVirtualUnwind does with the codes (return address and saved registers) is what the
+    shared object's CFI says"""
+    m = re.search(r'aot: windows: unwind info for (\d+) of (\d+) functions, (\d+) not describable: ([^;]*)(?:; (\d+) without CFI[^;]*)?; (\d+) RUNTIME_FUNCTION entries', log)
+    if not check(m is not None, 'nxaot build logs the unwind information (aot: windows: unwind info for N of M functions, ...)'):
+        return
+    described, total, missing, entries_logged = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(6))
+    print('    ' + next(line for line in log.splitlines() if line.startswith('aot: windows: unwind info')))
+    rva, size = pe.dirs[3]
+    pdata = [struct.unpack('<III', pe.at(rva + 12 * k, 12)) for k in range(size // 12)]
+    ro = subprocess.run([a.readobj, '--unwind', dll], capture_output=True, text=True)
+    n_ro = ro.stdout.count('RuntimeFunction {')
+    check(ro.returncode == 0 and 'warning' not in (ro.stdout + ro.stderr).lower() and 'error' not in (ro.stdout + ro.stderr).lower()
+          and n_ro == len(pdata) == entries_logged and size == 12 * len(pdata),
+          f'llvm-readobj --unwind reads {n_ro} RUNTIME_FUNCTIONs, without a warning: the exception directory\'s {len(pdata)}, the log\'s {entries_logged}')
+    infos, bad = {}, []
+    for b, e, u in pdata:
+        try:
+            infos[u] = infos.get(u) or parse_unwind_info(pe, u)
+        except ValueError as ex:
+            bad.append(f'{b:#x}: {ex}')
+    check(not bad, f'every UNWIND_INFO parses ({len(infos)} distinct, version 1, codes inside their count and in order)' + (f': {bad[:3]}' if bad else ''))
+    ordered = all(b < e for b, e, _ in pdata) and all(pdata[k][1] <= pdata[k + 1][0] for k in range(len(pdata) - 1))
+    check(ordered, 'the entries are sorted and disjoint')
+    # Each function's entries: contiguous from its start to its last instruction's end
+    fns = code_map(a.objdump, dll)
+    by_begin = {b: (e, u) for b, e, u in pdata}
+    covered, partial = 0, []
+    starts = {}
+    for name, (start, insns) in fns.items():
+        if not insns:
+            continue
+        rs, end = start - pe.image_base, insns[-1][0] + insns[-1][1] - pe.image_base
+        starts[rs] = (name, end)
+        if rs not in by_begin:
+            continue
+        at = rs
+        while at in by_begin and at < end:
+            at = by_begin[at][0]
+        if at == end:
+            covered += 1
+        else:
+            partial.append(f'{name} [{rs:#x}, {end:#x}): entries end at {at:#x}')
+    check(not partial and covered == described, f'{covered} functions covered by their entries from their start to their last instruction\'s end, '
+                                               f'as many as nxaot described ({described} of {total})' + (f': {partial[:3]}' if partial else ''))
+    bodies = [d['fns'] + 16 * k + 8 + body - pe.image_base for k, (_, body, _) in enumerate(fn_d)]
+    without = [hex(b) for b in bodies if b not in by_begin]
+    check(len(without) <= missing and all(b in starts for b in bodies),
+          f'the function map\'s {len(bodies)} bodies: each a function, each with its entries but for at most the {missing} nxaot could not describe'
+          + (f' (without: {without[:5]})' if without else ''))
+    # The calls of the functions whose code is the shared object's: the codes against the CFI
+    rows = []   # (address, CFA offset, {register: slot})
+    dump = subprocess.run([a.dwarfdump, '--eh-frame', so], capture_output=True, text=True, check=True).stdout
+    for line in dump.splitlines():
+        r = re.match(r'^\s+0x([0-9a-f]+): CFA=RSP\+(\d+): ?(.*)$', line)
+        if r:
+            saves = {reg: -int(o) for reg, o in re.findall(r'(\w+)=\[CFA-(\d+)\]', r.group(3))}
+            rows.append((int(r.group(1), 16), int(r.group(2)), saves))
+    rows.sort(key=lambda x: x[0])
+    keys = [x[0] for x in rows]
+    elf_fns = code_map(a.objdump, so)
+    ordered_b = sorted(by_begin)
+    calls = agree = last_calls = 0
+    wrong = []
+    for name in sorted(same):
+        if name not in elf_fns or name not in fns:
+            continue
+        e_start, e_insns = elf_fns[name]
+        w_start, w_insns = fns[name]
+        for (ea, en, et), (wa, wn, wt) in zip(e_insns, w_insns):
+            if not et.startswith('call'):
+                continue
+            # The CFI's row at the call (the state while the callee runs: a callee that pops its arguments has not yet), and the entry that holds
+            # the return address, where RtlVirtualUnwind continues from the callee
+            ret_w = wa + wn - pe.image_base
+            k = bisect.bisect_right(keys, ea) - 1
+            if k < 0:
+                continue
+            cfa, saves = rows[k][1], rows[k][2]
+            j = bisect.bisect_right(ordered_b, ret_w) - 1
+            if j < 0 or not (ordered_b[j] <= ret_w < by_begin[ordered_b[j]][0]):
+                if ret_w == w_insns[-1][0] + w_insns[-1][1] - pe.image_base:
+                    last_calls += 1   # a call that does not return, the function's last instruction: its return address is the next function's
+                else:
+                    wrong.append(f'{name}+{ret_w - (w_start - pe.image_base):#x}: no entry')
+                continue
+            _, _, codes = infos[by_begin[ordered_b[j]][1]]
+            delta, wsaves = win_unwind(codes, ret_w - ordered_b[j])
+            calls += 1
+            want = {reg: s for reg, s in saves.items() if reg != 'RIP' and s >= -cfa and not reg.startswith('XMM')}
+            got = {reg: pos - (delta + 8) for reg, pos in (wsaves or {}).items() if not reg.startswith('XMM')}
+            if delta is not None and delta + 8 == cfa and want == got:
+                agree += 1
+            else:
+                wrong.append(f'{name}+{ret_w - (w_start - pe.image_base):#x}: CFI CFA rsp+{cfa} {want}, codes rsp+{None if delta is None else delta + 8} {got}')
+    check(calls > 0 and agree == calls, f'at each of the {calls} calls of the {len(same)} functions the shared object has the same code, the codes at the '
+                                        f'return address give the CFI\'s return address and saved registers at the call'
+                                        + (f' ({last_calls} more end their function: no return)' if last_calls else '') + (f': {wrong[:3]}' if wrong else ''))
+
+
 def sanitize(name):   # src/build/pack.cpp Sanitize: the module's symbol prefix
     if len(name) > 4 and name.endswith('.nro'):
         name = name[:-4]
@@ -333,6 +528,7 @@ def one(a, tag, module, exports):
     re_, ne, be = lines_of(a.nxaot, so, module)
     check(rd == 0 and bd == 0 and nd > 0 and re_ == 0 and be == 0, f'nxaot lines on the DLL: {nd} entries, {bd} bad (the ELF pack: {ne}, {be} bad)')
     same, all_fns = compare_code(a.objdump, so, dll, names, tag)
+    unwind_checks(a, tag, pe, dll, so, d, fn_d, same, log)
     fl_d = pe.va(d['fn_lines'], 8 * d['fn_count'])
     total = max([first + count for first, count in (struct.unpack_from('<II', fl_d, 8 * k) for k in range(d['fn_count']))] + [0])
     runs_d = line_runs(fn_d, fl_d, pe.va(d['lines'], 8 * total))
@@ -351,8 +547,10 @@ def main():
     ap.add_argument('--nxaot', required=True)
     ap.add_argument('--readobj', required=True)
     ap.add_argument('--objdump', required=True)
+    ap.add_argument('--dwarfdump', help='llvm-dwarfdump (default: the one beside --readobj)')
     ap.add_argument('--work', required=True)
     a = ap.parse_args()
+    a.dwarfdump = a.dwarfdump or os.path.join(os.path.dirname(a.readobj), os.path.basename(a.readobj).replace('readobj', 'dwarfdump'))
     shutil.rmtree(a.work, ignore_errors=True)
     os.makedirs(a.work)
     sys.path.insert(0, TOOLS_TESTS)
@@ -363,7 +561,7 @@ def main():
     print(f'the host exports {len(exports)} run-time entries to packs: {" ".join(sorted(exports))}')
     inputs = [('switch-gcc', os.path.join(CORPUS, 'switch-gcc.nro')), ('fp-gcc', os.path.join(CORPUS, 'fp-gcc.nro')),
               ('module', os.path.join(a.work, 'module', 'main.aot.tsv')), ('hostfn-main', os.path.join(a.work, 'hostfn', 'main.aot.tsv')),
-              ('hostfn-sub', os.path.join(a.work, 'hostfn', 'sub.nro'))]
+              ('hostfn-sub', os.path.join(a.work, 'hostfn', 'sub.nro')), ('sjlj-gcc', os.path.join(CORPUS, 'sjlj-gcc.nro'))]
     for tag, module in inputs:
         dll = one(a, tag, module, exports)
         if dll and tag in ('switch-gcc', 'fp-gcc'):

@@ -5,7 +5,7 @@ The logs of host unit test runs, kept in the repository on purpose: when a run f
 | Folder | Written by |
 |---|---|
 | `logs/linux/` | `sh dm/host/tests/run_host_tests.sh build/linux`, in the `nxnative-build` Docker image |
-| `logs/win64/` | `dm\host\tests\run_win64_tests.ps1` (PowerShell) or `sh dm/host/tests/run_host_tests.sh build/win64` (Git Bash), on a Windows PC, for the tree cross-built in Docker; the AOT tests with the Windows packs of `build\packs\win64` when it exists ([docker/README.md](../docker/README.md#the-recompiled-corpus-in-the-host)) |
+| `logs/win64/` | `dm\host\tests\run_win64_tests.ps1` (PowerShell) or `sh dm/host/tests/run_host_tests.sh build/win64` (Git Bash), on a Windows PC, for the tree cross-built in Docker; the AOT tests with the Windows packs of `build\packs\win64` when it exists ([docker/README.md](../docker/README.md#the-recompiled-corpus-in-the-host)): built there by `build_packs.sh`, or the artifact `win64-packs` of CI's `aot` workflow for the same commit unzipped there |
 | `logs/aot/` | `sh dm/tools/aot/tests/run_aot_tests.sh build/aot`, in the `nxnative-aot` Docker image: the recompiler's vector harness, census test, vectors-current check, discovery over the corpus, manifest test, corpus reference run, the corpus recompiled and run natively, the per-function differential test, the JIT fallback's modes, the threaded programs, the safepoint pause test and the benchmarks ([dm/tools/aot/README.md](../dm/tools/aot/README.md)) |
 
 ## Files

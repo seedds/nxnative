@@ -733,7 +733,9 @@ build/aot/nxaot lines /tmp/x/fnptr-gcc.dll dm/tools/aot/corpus/nro/fnptr-gcc.nro
 `--target windows` ([src/build/pack.cpp](src/build/pack.cpp), "Windows packs"; [src/build/coff.cpp](src/build/coff.cpp)) makes the pack of the
 Windows host: a DLL, `<name>.aot.dll` beside a game's manifest (dm/host/aot.h `DM_AOT_PACK_SUFFIX`), which dm/host's loader opens with `LoadLibraryW`
 (aot_arena.c). `--target linux` is the default; a `--shared` name ending in `.dll` without `--target windows` is a usage error. `nxaot build` logs
-`aot: windows: <n> imports bound by the host (nxaot_imports): <names>; COFF object <s> sections, <y> symbol records, <r> relocations`.
+`aot: windows: <n> imports bound by the host (nxaot_imports): <names>; COFF object <s> sections, <y> symbol records, <r> relocations` and
+`aot: windows: unwind info for <N> of <M> functions, <K> not describable: <reasons>; <L> without CFI, which Windows unwinds as leaf functions:
+<names>; <E> RUNTIME_FUNCTION entries, <S> functions in several (a stretch with a frame of its own): <why> (<count>), ...`.
 
 - **The code is a Linux pack's.** The units are compiled as a Linux pack's are, for the Linux triple into ELF objects, with the same conventions
   (swifttailcc or ghccc), state block, inline caches, line marks, gate sites, split parts and groups of phase 5b. The Windows triple
@@ -750,7 +752,8 @@ Windows host: a DLL, `<name>.aot.dll` beside a game's manifest (dm/host/aot.h `D
   (phase 5b's NaN helpers: six in fp-gcc's DLL, six in its shared object), converted into one AMD64 COFF object by coff.cpp (code to `.text`; read-only
   data and `.data.rel.ro`, which only relocation writes, to `.rdata`; `.data`; `.bss`; the DWARF sections under their names, discardable;
   `.eh_frame`, the line marks, notes and groups dropped; R_X86_64_PC32 and PLT32 to REL32 with the addend + 4 written in place, R_X86_64_64 to
-  ADDR64, DWARF's R_X86_64_32 to SECREL; any other relocation, a TLS section or an initializer array fails the build, naming it), and linked by
+  ADDR64, DWARF's R_X86_64_32 to SECREL; any other relocation, a TLS section or an initializer array fails the build, naming it; the unwind
+  information below as `.xdata` and `.pdata`), and linked by
   lld's COFF driver as a library (`lld-link /dll /noentry /nodefaultlib /noimplib /Brepro /opt:noref /opt:noicf /debug:dwarf`, the export of
   `nxaot_module` and `nxaot_imports` as data): a PE32+ DLL for x86-64 with no entry point and no import, a base relocation for every absolute
   pointer (the descriptor's, the inline caches' first descriptor, the import table's), the DWARF line table as a MinGW program keeps it (the line =
@@ -768,37 +771,61 @@ Windows host: a DLL, `<name>.aot.dll` beside a game's manifest (dm/host/aot.h `D
   native address of a pack: return and pc-built addresses are `*base` + module offset, inline caches and their descriptors are not guest data, the
   dispatcher maps guest addresses to entries; the pack reaches the arena through 64-bit addresses and the host through its slots, never through a
   32-bit displacement.
-- **Not there yet**: native unwind information (`.pdata`). ELF's `.eh_frame` is dropped, so a Windows debugger or profiler does not walk through a
-  pack's frames and SEH unwinding cannot cross them; the host needs neither (it leaves guest code with `__builtin_longjmp`, which unwinds nothing,
-  and handles faults in a vectored handler, which runs before any unwinding). Translating the CFI into UNWIND_INFO is the way to them.
+- **Unwind information** (coff.cpp, "Unwind information"): `.eh_frame`'s CFI and the code's prologues become Win64's `.pdata` and `.xdata`
+  (Microsoft's "x64 exception handling"), so that Windows debuggers, profilers and `RtlVirtualUnwind` walk through a pack's frames; the host needs
+  none of it (it leaves guest code with `__builtin_longjmp` and handles faults in a vectored handler, which runs before any unwinding). Each
+  function's instructions are decoded (LLVM's x86 disassembler): its prologue's push, sub of rsp, frame pointer set from rsp and saves of
+  general and xmm registers give its UNWIND_INFO (`UWOP_PUSH_NONVOL`, `UWOP_ALLOC_SMALL` / `_LARGE`, `UWOP_SET_FPREG`, `UWOP_SAVE_NONVOL`,
+  `UWOP_SAVE_XMM128`), checked against the CFI where the prologue ends; past it the CFI and the instructions give each instruction's frame. The
+  SysV code compiled here has shapes Win64's compilers never emit, which one UNWIND_INFO cannot express, and those functions get one
+  RUNTIME_FUNCTION per stretch with a frame of its own, each describing its stretch exactly (no chained information is needed: phase 5b's split
+  parts have prologues of their own, and no FDE starts inside a frame). On the corpus's 18 packs and the synthetic modules' three every function
+  with CFI is described, none is left out: 1,684 of the corpus's 1,798 functions (4,948 RUNTIME_FUNCTIONs) and 80 of the synthetic modules' 97
+  (387); the others, 114 and 17, have no CFI: the import thunks (`jmp *` through a slot, which Windows unwinds as the leaf functions they are). 13
+  to 24 functions a corpus pack (4 to 7 a synthetic one) take several entries, for: a
+  frame set up after the function's start (shrink-wrapping); arguments pushed for a call in the body; a callee that pops its arguments
+  (swifttailcc: the CFI's row at the return address is the state after the pop, while Windows unwinds through the call with the arguments still
+  on the stack, so the instruction there takes the call's description); epilogues `RtlVirtualUnwind` does not recognise by their bytes
+  (`vzeroupper` after the pops, swifttailcc's add of its tail-call area after them, a store before a tail call, an indirect tail jump without
+  REX.W, a jmp to an address inside the function), whose states are followed instruction by instruction (swifttailcc's epilogue frees its
+  tail-call area after its pops, which LLVM's CFI does not say). Left out, counted by reason, would be a CFA on another register than rsp or rbp,
+  a CFI rule other than "saved at CFA + n", a frame pointer set before the frame's last push (SysV's `push %rbp; mov %rsp, %rbp`; Win64 sets it
+  last) and a function whose CFI starts inside a frame: none occurs here. The one inexact place is the instruction right after a call whose
+  callee popped its arguments, when a sample interrupts it there (described for unwinding through the call).
 - **Deterministic**: the same DLL with one worker and with eight, through a cache, in another folder; a DLL of another file name differs in its
   export directory's name and the hash `/Brepro` derives its time stamp from (71 bytes for fp-gcc), as a shared object's soname differs.
 
 CTest `pack_windows` ([tests/test_pack_windows.py](tests/test_pack_windows.py)) packs switch-gcc (its jump tables, `sw_word` in 21 parts at the
-default limit), fp-gcc (the floating-point helpers, the NaN helpers' comdat groups), the synthetic module (gate sites, the aux region) and the
-host-function module's two, each as a shared object and as a DLL, and checks each DLL with llvm-readobj, llvm-objdump and small PE and ELF readers: a
+default limit), fp-gcc (the floating-point helpers, the NaN helpers' comdat groups), sjlj-gcc (tail calls that pop their own stack arguments), the
+synthetic module (gate sites, the aux region) and the host-function module's two, each as a shared object and as a DLL, and checks each DLL with
+llvm-readobj, llvm-objdump, llvm-dwarfdump and small PE and ELF readers: a
 PE32+ DLL for AMD64 with dynamic base and NX, no entry point, no import descriptor or delay import; exactly the two exports; the descriptor (ABI,
 flags, name, SHA-256, sizes, entry, FPCR, the standard entries' signature, every count) and the module-side columns of its tables (function map,
 lookup table, returns, gate sites) equal to the shared object's; `nxaot_imports` naming exactly the shared object's undefined symbols, each a
 `DM_AOT_EXPORT` or `FPEXPORT` entry of dm/host, each slot 8 zero bytes of writable data and each thunk a `jmp` through its slot; a base relocation at
 every pointer of the descriptor and of the import table; `nxaot lines` with no bad entry; every function of both packs disassembled and compared
 instruction by instruction (rip-relative displacements and branch targets out of the function normalized, the raw bytes compared elsewhere) and the
-line table's run of every function whose code is the same equal; the same DLL with one worker in another folder; fp-gcc for `--cpu x86-64`
-refused naming libm's functions; a `.dll` without `--target windows` a usage error. What differs, by the test's comparison:
+line table's run of every function whose code is the same equal; the unwind information: `llvm-readobj --unwind` reading every
+RUNTIME_FUNCTION without a warning (as many as the exception directory and nxaot's log count), every UNWIND_INFO parsing, the entries sorted,
+disjoint and tiling every described function from its start to its last instruction's end (the function map's bodies among them), and at every call
+of the functions whose code is the shared object's (330 in switch-gcc, 203 in fp-gcc, 157 in sjlj-gcc, 20 in the synthetic modules) the codes of
+the entry holding the return address, run as `RtlVirtualUnwind` runs them, giving the return address and saved registers the shared object's CFI
+gives at the call; the same DLL with one worker in another folder; fp-gcc for `--cpu x86-64` refused naming libm's functions; a `.dll` without
+`--target windows` a usage error. What differs, by the test's comparison:
 
 | Module | Functions (bodies, entries, parts, the tables' code) | Identical | At the host's boundary | By the red zone | DLL / shared object bytes |
 |---|---:|---:|---:|---:|---:|
-| switch-gcc | 149 | 118 (24,489 instructions) | 11 | 20 (`sw_word`'s parts, leaves) | 667,136 / 673,760 |
-| fp-gcc | 69 | 54 (9,342 instructions) | 15 | 0 | 103,424 / 106,744 |
+| switch-gcc | 149 | 118 (24,489 instructions) | 11 | 20 (`sw_word`'s parts, leaves) | 673,792 / 673,760 |
+| fp-gcc | 69 | 54 (9,342 instructions) | 15 | 0 | 108,032 / 106,744 |
 | synthetic module | 24 | 17 | 7 | 0 | |
 | host-function module, main / sub | 39 / 15 | 26 / 10 | 13 / 5 | 0 | |
 
 At the host's boundary: the wrappers of the slow paths and `jit_entry` (their calls of the run time), `enter`, and the functions that call `dm_aot_svc`,
 `nxaot_rt_trap`, `nxaot_rt_jit` or a floating-point helper directly: the arguments in rcx and rdx instead of rdi and rsi, the home area in the frame
 (`subq $0x28, %rsp` for a `pushq %rax`), and what follows from it (branch offsets, a register chosen otherwise). By the red zone: leaf functions whose
-frame grows by the 128 bytes they kept below rsp (`sw_word`'s parts: `subq $0x1c8, %rsp` for `subq $0x148, %rsp`). The DLLs are smaller than the
-shared objects: no `.eh_frame`, dynamic symbol table, PLT or GOT; their code is larger by the home areas, the red zones' frames and the thunks
-(switch-gcc: `.text` 370,886 bytes against 369,308). Nothing here has loaded a DLL: there is no Windows (or Wine) on the development machine. The
+frame grows by the 128 bytes they kept below rsp (`sw_word`'s parts: `subq $0x1c8, %rsp` for `subq $0x148, %rsp`). The DLLs are about the size
+of the shared objects: no `.eh_frame`, dynamic symbol table, PLT or GOT, but `.pdata` and `.xdata` (switch-gcc: 426 RUNTIME_FUNCTIONs, 5,112 bytes
+of `.pdata`); their code is larger by the home areas, the red zones' frames and the thunks (switch-gcc: `.text` 370,886 bytes against 369,308). Nothing here has loaded a DLL: there is no Windows (or Wine) on the development machine. The
 owner's Windows runner (dm/host/tests/run_win64_tests.ps1) runs `t_aot_host`, `t_aot_module`, `t_aot_hostfn` and `t_host_program` on the DLLs
 [tests/build_packs.sh](tests/build_packs.sh) writes into `<out>/win64` ([docker/README.md](../../../docker/README.md#the-recompiled-corpus-in-the-host)).
 

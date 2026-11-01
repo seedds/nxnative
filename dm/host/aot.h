@@ -351,14 +351,17 @@ int dm_aot_jit_stop_at(uint64_t pc);
 // exit (atexit, or dm_aot_profile_write before it) <folder>/<module>.tsv is written for every module with samples: the profile `nxaot build --profile` reads (one module per file), one
 // line `<module offset of a function's entry> <samples>` per sampled function, most samples first, under '#' lines naming the module, its build ID, its image's SHA-256 and its pack.
 // A sample in a pack's code counts for the function the pack's function map gives (a split function's parts and a group's functions each map to their own entry); one in a host call
-// or an SVC for the guest function that made it (dm_aot_thread.prof_at); one in the JIT fallback or elsewhere in the host only in the totals. Linux: a CPU-time timer per thread
-// (timer_create, CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID) and a SIGPROF handler on the thread's alternate stack that reads the interrupted rip; the counts are per function and
-// pack (relaxed atomic adds), the totals per thread, nothing allocated or locked in the handler. Windows: not yet, a [RED] line when the switch is set
+// or an SVC for the guest function that made it (dm_aot_thread.prof_at); one in the JIT fallback or elsewhere in the host only in the totals (aot_profile.c count_pc, the same on
+// both systems). Linux: a CPU-time timer per thread (timer_create, CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID) and a SIGPROF handler on the thread's alternate stack that reads the
+// interrupted rip. Windows: a sampler thread that, for each registered guest thread whose CPU time (QueryThreadCycleTime) has grown by a period, suspends it, reads its Rip
+// (GetThreadContext, CONTEXT_CONTROL) and resumes it. The counts are per function and pack (relaxed atomic adds), the totals per thread, nothing allocated or locked while a
+// sample is taken; the files are the same on both
 #define DM_AOT_PROF_JIT 1
-void dm_aot_profile_init(void);            // the switches read, the handler installed and the writer registered with atexit; once (the first thread to run guest code makes it too)
+void dm_aot_profile_init(void);            // the switches read, the handler (Windows: the sampler thread) installed and the writer registered with atexit; once (the first thread to
+                                           // run guest code makes it too)
 int dm_aot_profile_on(void);               // DM_AOT_PROFILE is set and the sampler runs
-void dm_aot_profile_thread_begin(void);    // aot_thread.c: the calling thread made its state block (its timer starts)
-void dm_aot_profile_thread_end(void);      // aot_thread.c: the calling thread's block goes (its timer stops; its totals are kept)
+void dm_aot_profile_thread_begin(void);    // aot_thread.c: the calling thread made its state block (its timer starts; Windows: the sampler may suspend it from now on)
+void dm_aot_profile_thread_end(void);      // aot_thread.c: the calling thread's block goes (its timer stops, or the sampler lets it go; its totals are kept)
 int dm_aot_profile_write(void);            // the files now, sampling stopped (once: later calls and the atexit writer do nothing); 0 when written
 // The sampler's lookups (aot_arena.c): async-signal-safe (no lock, no allocation: a pack's tables are complete before it is published and never change)
 int dm_aot_pack_count(void);

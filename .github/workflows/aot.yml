@@ -79,6 +79,17 @@ jobs:
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot \
             sh dm/tools/aot/tests/build_packs.sh build/aot build/packs
+      # The Windows packs build_packs.sh wrote into build/packs/win64 (DLLs of nxaot build --target windows: <name>.dll per corpus NRO, module/ and hostfn/
+      # with their inputs and main.aot.dll, sub.aot.dll, the build logs beside them), for the Windows runner of the owner's PC: unzipped into
+      # build\packs\win64 of a checkout of the same commit, dm/host/tests/run_win64_tests.ps1 finds them there (or through -Packs / NXAOT_PACKS;
+      # docker/README.md, "The recompiled corpus in the host"). port.yml's Windows job, a separate workflow, runs without them
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && steps.packs.outcome == 'success' }}
+        with:
+          name: win64-packs
+          path: build/packs/win64
+          if-no-files-found: error
+          retention-days: 7
       - name: Build the host image
         if: ${{ !cancelled() && steps.packs.outcome == 'success' }}
         run: docker build -t nxnative-build -f docker/Dockerfile.build docker

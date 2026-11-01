@@ -15,7 +15,7 @@
 // module list that lacks its sdk module would otherwise run main's rtld entry as homebrew: without it a module set with no nnMain stops with a [RED] line that names the switch.
 // DM_VK_HEADLESS=1 keeps the Vulkan backend's frames off the window (dm/gfx/hostvk/vk_present.c).
 // The engine's sampler: DM_AOT_PROFILE=<folder> (DM_AOT_PROFILE_HZ) writes the profile of the run, <folder>/<module>.tsv, when the process exits (aot.h, "The sampler"); the packer reads it
-// from <NSP folder>/<id>-work/profile/ for the next packs (nxaot build --profile; docs/development.md). Linux only for now.
+// from <NSP folder>/<id>-work/profile/ for the next packs (nxaot build --profile; docs/development.md). Linux through per-thread timers, Windows through a sampler thread.
 #include "aot.h"
 #include "front.h"
 #include <stdatomic.h>

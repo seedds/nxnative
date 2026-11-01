@@ -280,12 +280,32 @@ static void pads_start(void) {
     hidpad_start();
 }
 
+// The pointer in fullscreen, as in video players and other fullscreen apps: hidden after CURSOR_IDLE seconds without a mouse move, click or drag (never while the button is down: the mouse is the
+// touchscreen), shown again by AppKit on the next move (setHiddenUntilMouseMoves). A window keeps the pointer; losing focus or leaving fullscreen stops the timer
+#define CURSOR_IDLE 2.0
+static NSTimer *g_cursor_timer;
+static void cursor_idle_stop(void) { [g_cursor_timer invalidate]; g_cursor_timer = nil; }
+static void cursor_active(void) {   // main thread: the pointer was used; (re)start the countdown
+    cursor_idle_stop();
+    if (!g_win || !(g_win.styleMask & NSWindowStyleMaskFullScreen) || !g_win.keyWindow) return;
+    g_cursor_timer = [NSTimer scheduledTimerWithTimeInterval:CURSOR_IDLE repeats:NO block:^(NSTimer *t) { (void)t; g_cursor_timer = nil;
+        if (g_mouse_down || !(g_win.styleMask & NSWindowStyleMaskFullScreen) || !g_win.keyWindow || !NSPointInRect(NSEvent.mouseLocation, g_win.frame)) return;
+        [NSCursor setHiddenUntilMouseMoves:YES]; LOG("front end: pointer hidden after %.0f s without moving (fullscreen)", CURSOR_IDLE); }];
+}
+
 // Mouse as a single-point touchscreen (front.h dm_touch_set): left button down / drag = finger 0, release = lifted. The content view takes the clicks,
 // not a window-wide event monitor, so clicks on the title bar, the window buttons and the resize edges still reach AppKit.
 @interface DmGameView : NSView @end
 @implementation DmGameView
 - (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
+- (void)mouseMoved:(NSEvent *)e { (void)e; cursor_active(); }
+- (void)updateTrackingAreas {   // mouse moves over the picture (the drag and click events already arrive)
+    [super updateTrackingAreas];
+    for (NSTrackingArea *a in self.trackingAreas) if (a.owner == self) [self removeTrackingArea:a];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:self.bounds options:NSTrackingMouseMoved | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect owner:self userInfo:nil]];
+}
 - (void)mouseDragged:(NSEvent *)e {
+    cursor_active();
     if (!g_input_on) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
@@ -295,7 +315,7 @@ static void pads_start(void) {
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
-- (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+- (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } cursor_active(); }
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -1271,10 +1291,10 @@ void front_run(void (*guest)(void)) {
         [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); }];
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
-        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized) dm_focus_set(2); }];
-        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
+        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); cursor_active(); }];
+        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); cursor_idle_stop(); }];
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; cursor_idle_stop(); input_release(); if (!win.miniaturized) dm_focus_set(2); }];
+        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; cursor_active(); input_resume(); dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
         display_awake(win.isKeyWindow);   // the window may have become key (makeKeyAndOrderFront above) before these observers were installed

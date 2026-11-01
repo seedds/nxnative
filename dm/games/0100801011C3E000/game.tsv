@@ -1,0 +1,37 @@
+# Persona 5 Strikers 1.0.0, SDK 8.3.2, NVN. Mac validation and limitations: README.md.
+# ---- Identity ----
+title_id	0100801011C3E000
+program_id	0100801011C3E000
+
+# ---- App ----
+name	Persona 5 Strikers
+ipa	Persona5Strikers.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=c4df04f647bdc727926348bd9a9918c8	subsdk0=721b196b95fde7248f270bdbcad7ac53	sdk=0444aea83c4abc8f12a7ac7ba5c0dd3a
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	data/motor_rsc/FieldEditor4.rdb.bin_0
+zip_store	.bin:.bin_0:.file:.mp4:.rdb:.webm:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/data/=data
+shader_note	Persona 5 Strikers shaders
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x4600000

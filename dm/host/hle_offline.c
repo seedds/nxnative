@@ -159,6 +159,13 @@ HLE_FORCE("_ZN2nn3pdm30QueryApplicationPlayStatisticsEPNS0_25ApplicationPlayStat
     return RES_OK;
 }
 
+// SDK 8 also exposes the system-wide overload without a user ID (Persona 5 Strikers 1.0.0 asks about another application at boot).
+// It reports the same empty host play log, with the argument positions of this overload; the SDK's service object is not available on the host.
+HLE_FORCE("_ZN2nn3pdm30QueryApplicationPlayStatisticsEPNS0_25ApplicationPlayStatisticsEPKNS_13ApplicationIdEi", "system-wide play statistics: no host play log",
+          Result, h_pdm_QueryStatsGlobal, uint64_t *out, const uint64_t *ids, int n) {
+    return h_pdm_QueryStats(out, NULL, ids, n);
+}
+
 // ---------- web: web page applet (online lobby). Unavailable ----------
 HLE_FORCE("_ZN2nn3web13ShowLobbyPageEPNS0_20LobbyPageReturnValueERKNS0_16ShowLobbyPageArgE", "online lobby web applet (cut)", Result, h_web_Lobby, void *rv, const void *arg) { (void)rv; (void)arg; LOG("web::ShowLobbyPage (cut)"); return RES_FAIL; }
 // Tears of the Kingdom imports the general web page applet too (the game constructs the return value itself, so it stays as constructed)

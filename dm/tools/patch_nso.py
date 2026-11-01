@@ -730,6 +730,89 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     if page is None: return None
     tb = page + lo
     return [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
+def jump_carried_offsets(insl, j):
+    """A signed-offset dispatch computed early and carried unchanged through straight-line initialization.
+
+    The load and add can use different copies of the constant table base. Prove both bases,
+    the index's unsigned bound, the live offset/target registers, and every table destination.
+    Existing recognizers run first; this is only a fallback for an otherwise unresolved br x18.
+    """
+    def canonical(r: str) -> str:
+        return {'lr': 'x30', 'fp': 'x29'}.get(r, r).replace('w', 'x', 1)
+
+    def writes(p, reg):
+        if p.mnemonic in ('cmp', 'cmn', 'tst'):
+            return False
+        for written in p.regs_access()[1]:
+            name = p.reg_name(written)
+            if name is None or canonical(name) == canonical(reg):
+                return True
+        return False
+
+    def control(p):
+        return p.mnemonic in ('b', 'br', 'bl', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'eret', 'drps') or p.mnemonic.startswith('b.')
+
+    if insl[j].mnemonic != 'br' or insl[j].op_str != 'x18':
+        return None
+    k = j - 1
+    while k >= 0 and not writes(insl[k], 'x18'):
+        if control(insl[k]):
+            return None
+        k -= 1
+    if k < 0 or insl[k].mnemonic != 'add':
+        return None
+    match = re.fullmatch(r'x18, (x\d+), (x\d+)', insl[k].op_str)
+    if not match:
+        return None
+    entry, base = match.groups()
+    load = k - 1
+    while load >= 0 and not writes(insl[load], entry):
+        if control(insl[load]):
+            return None
+        load -= 1
+    if load < 0 or insl[load].mnemonic != 'ldrsw':
+        return None
+    match = re.fullmatch(rf'{entry}, \[(x\d+), (x\d+), lsl #2\]', insl[load].op_str)
+    if not match:
+        return None
+    load_base, index = match.groups()
+    table = copied_base(insl, load, load_base)
+    if table is None or copied_base(insl, k, base) != table:
+        return None
+    count = None
+    for q in range(load - 1, -1, -1):
+        p = insl[q]
+        if p.mnemonic == 'b.hi' and q > 0:
+            cmp = insl[q - 1]
+            match = re.fullmatch(rf'[wx]{index[1:]}, #(0x[0-9a-f]+|\d+)', cmp.op_str) if cmp.mnemonic == 'cmp' else None
+            if not match or cmp.address + 4 != p.address:
+                return None
+            if cmp.address <= p.operands[0].imm <= insl[j].address:
+                return None
+            count = int(match.group(1), 0) + 1
+            guard = q - 1
+            break
+        if control(p) or writes(p, index):
+            return None
+    if count is None or table < 0 or table + 4 * count > len(IMG):
+        return None
+    run = insl[guard:j + 1]
+    if any(b.address != a.address + 4 for a, b in zip(run, run[1:])):
+        return None
+    head, end = insl[guard].address, insl[j].address
+    for p in insl:
+        if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
+            if head < p.operands[-1].imm <= end:
+                return None
+    if any(head < target <= end for targets in tabjumps.values() for target in targets):
+        return None
+    if any(base <= end and base + 4 * width > head + 4 for base, width in jumps.values()):
+        return None
+    targets = [table + struct.unpack_from('<i', IMG, table + 4 * i)[0] for i in range(count)]
+    addresses = {p.address for p in insl}
+    return targets if all(target in addresses and not head < target <= end for target in targets) else None
+
+
 def jump_zero_extended(insl, j):
     """cmp wS,#N; b.hi exit; and xI,xS,#0xffffffff; ldrsw xE,[xB,xI,lsl #2]; add x18,xE,xB; br x18.
     Mario Tennis Aces 1.0.0 main+0x35837c zero-extends the checked value rather than checking another masked copy. Require straight-line data flow from the guard to the br,
@@ -1190,6 +1273,7 @@ for fa, fb in funcs:
                 if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
                 if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
                 if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
+                if not tgt: tgt = jump_carried_offsets(insl, j)   # target computed before straight-line initialization; prove its load, bases and bound
                 assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)

@@ -368,3 +368,10 @@ To enroll a cut for any game's own module:
 ## Checking a rewriter change
 
 Rewrite every extracted module of every title with the old and the new `patch_nso.py` and compare all outputs; only `build_src.sha256` (the rewriter's own hash) may differ for titles the change is not meant for.
+
+## Carried signed-offset jump-table targets
+
+- **Symptom:** rewriting stops at `jump table 496f20` even though the indirect target comes from a bounded signed-offset table.
+- **Cause:** the target is computed earlier than the existing recognizers' short search window, using a copied constant table base, and carried unchanged in `x18` through unrelated initialization.
+- **Fix:** `jump_carried_offsets` runs only after the existing recognizers fail. It proves the constant bases, unsigned index bound, preserved offset and target, contiguous straight-line dispatch path, absence of bypass edges, and decoded destinations outside the protected dispatch. Ambiguous data flow or control flow is rejected. Synthetic fixtures cover accepted copies and rejected clobbers, bad guards, intervening transfers and invalid targets.
+- **Found on:** [Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md), 1.0.0 `main+0x496f20`. The recognizer contains no per-game addresses.

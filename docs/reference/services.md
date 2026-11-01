@@ -820,3 +820,10 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** code that calls fixed module addresses. d2r-mobile's 3D render scale read a renderer pointer at `main+0x31e0848` and called `main+0x8582f0`; in Mario v0 that is the middle of a static initializer and only did nothing because the pointer happened to read 0.
 - **Fix:** such code checks `module_t.build_id` now (written into `fixups.tsv` by the rewriter) and stays off on other builds.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (v0, code inherited from d2r-mobile).
+
+## System-wide application play statistics
+
+- **Symptom:** startup reads a null SDK service object at `sdk+0x2a4fc0` while querying another application's play history.
+- **Cause:** the host intercepted the user-ID overload of `pdm::QueryApplicationPlayStatistics`, but not the overload taking only an output array, application-ID array and count. The latter reached the SDK's unavailable service.
+- **Fix:** `hle_offline.c` intercepts the system-wide three-argument overload and delegates to the existing empty-play-log handler with no user ID. It preserves the existing per-application output semantics and does not claim to have a host play-history database.
+- **Found on:** [Persona 5 Strikers](../../dm/games/0100801011C3E000/README.md), 1.0.0 / SDK 8.3.2.

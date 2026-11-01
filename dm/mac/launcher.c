@@ -26,6 +26,8 @@
 #include <unistd.h>
 #include "romfs_image.h"
 #include "save_sync.h"
+#define DM_EVENTS_MANUAL
+#include "dm_events.c"   // runtime events (docs/frontends.md): the launcher writes the `exit` event in the host's own envelope; the module is self-contained
 
 extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
@@ -182,6 +184,7 @@ int main(int argc, char **argv) {
     for (CFIndex i = 0; rules && i < CFArrayGetCount(rules); i++) { char env[128]; if (rule_env(CFArrayGetValueAtIndex(rules, i), env, sizeof env) && getenv(env)) add_key(&g_launch_keys, env); }
     snprintf(p, sizeof p, "%s/env.txt", sup); env_file(p);
     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
+    dm_events_configure(getenv("DM_EVENTS"));   // the launch environment or an env.txt names the stream; a bad value is logged in the log opened above
     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
     free(g_file_keys); free(g_launch_keys);
     int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
@@ -205,13 +208,15 @@ int main(int argc, char **argv) {
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
     char *host_argv[] = {host, dm, NULL};
     int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
-    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
+    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); dm_event_exit(1, 0, "spawn_failed"); dm_events_flush(500); return 1; }
     int status;
-    while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;
+    while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) { dm_event_exit(1, 0, "wait_failed"); dm_events_flush(500); return 1; }
     // Cloud saves (DM_SAVE_SYNC, dm/host/save_sync.h): what the host committed and had not sent yet goes now, after a crash too (the committed save is whole whatever the host was doing)
     // DM_SAVE as the host had it: an env file or the launch environment may have set another folder than this app's own
     if (!save_sync_after_exit(getenv("DM_SAVE"), id)) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");
-    if (WIFSIGNALED(status)) { fprintf(stderr, "launcher: the host stopped on signal %d\n", WTERMSIG(status)); return 128 + WTERMSIG(status); }
+    // A crashed host cannot say how it ended, so this is the one reliable final event; the host's own `end` (why it chose to stop, if it did) comes before it
+    if (WIFSIGNALED(status)) { fprintf(stderr, "launcher: the host stopped on signal %d\n", WTERMSIG(status)); dm_event_exit(-1, WTERMSIG(status), "signal"); dm_events_flush(500); return 128 + WTERMSIG(status); }
     fprintf(stderr, "launcher: the host exited with %d\n", WEXITSTATUS(status));
+    dm_event_exit(WEXITSTATUS(status), 0, "exited"); dm_events_flush(500);
     return WEXITSTATUS(status);
 }

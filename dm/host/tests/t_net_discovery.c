@@ -74,8 +74,11 @@ static void traffic(void) {
     CHECK(peer.ip==htonl(INADDR_LOOPBACK) && peer.port==htons(port));
     // Directed subnet broadcast enters exactly the same unicast route.
     destination.ip=htonl(0x7f000003);
-    CHECK(dm_net_send(guest,query,sizeof query,0,&destination,sizeof destination)==sizeof query);
-    CHECK(read_packet(native,bytes,sizeof bytes,&from)==sizeof query && !memcmp(bytes,query,sizeof query));
+    // A distinct nonce tests this route independently: an identical outstanding
+    // query may legitimately be coalesced with the first subnet sweep.
+    unsigned char directed[sizeof query]; memcpy(directed,query,sizeof directed); directed[sizeof directed-1]^=1;
+    CHECK(dm_net_send(guest,directed,sizeof directed,0,&destination,sizeof destination)==sizeof directed);
+    CHECK(read_packet(native,bytes,sizeof bytes,&from)==sizeof directed && !memcmp(bytes,directed,sizeof directed));
     // A broken optional override cannot interfere with ordinary peer traffic.
     setenv("DM_NET_DISCOVERY_PEER","invalid",1); destination.ip=htonl(INADDR_LOOPBACK);
     CHECK(dm_net_send(guest,"ordinary",8,0,&destination,sizeof destination)==8);

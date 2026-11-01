@@ -1,5 +1,5 @@
 // Only synthetic signing keys. This fixture neither reads the user's firmware
-// nor creates a online provider online identity.
+// nor creates an online identity.
 #include "../hle.h"
 #undef HLE_FORCE
 #undef HLE_FORCE_WAIT
@@ -102,8 +102,8 @@ int main(void) {
             close(pipefd[1]); _exit(0);
         }
     }
-    close(pipefd[1]); uint8_t results[8][64]; size_t have = 0;
-    while (have < sizeof results) { ssize_t n = read(pipefd[0], (char *)results+have, sizeof results-have); assert(n > 0); have += (size_t)n; }
+    close(pipefd[1]); uint8_t results[8][64]; const size_t capacity = sizeof results; size_t have = 0;
+    while (have < capacity) { ssize_t n = read(pipefd[0], (char *)results+have, capacity-have); assert(n > 0); have += (size_t)n; }
     close(pipefd[0]);
     for (unsigned i = 0; i < 8; ++i) { int status; CHECK(waitpid(children[i], &status, 0) == children[i] && WIFEXITED(status) && !WEXITSTATUS(status)); CHECK(!memcmp(results[0]+16, results[i]+16, 16)); }
     CHECK(!chmod(path, 0644)); CHECK(h_fr_GetPHKey(output+1, local_uid, 1) != 0 && all_zero(output+1, 64)); CHECK(!chmod(path, 0600));

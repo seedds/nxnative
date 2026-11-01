@@ -3030,6 +3030,24 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
     if (shared) { tex_put(t->serial, shared); return shared; }
+    {   // NVN textures over the same storage share its bytes. One that differs from a shared texture only by the other format of an sRGB / linear pair is a view of it: as its own Metal
+        // texture, Mario Kart World's Grand Prix movie (an RGBA8 render target the YUV pass writes, sampled by the composite through an RGBA8_SRGB texture) showed a frozen frame
+        MTLTextureDescriptor *d = tex_desc(t, 0); id<MTLTexture> v = nil;
+        if (d && d.sampleCount <= 1 && (d.textureType == MTLTextureType2D || d.textureType == MTLTextureType2DArray)) {
+            pthread_mutex_lock(&g_smu);
+            for (uint32_t i = 0; i < g_alias.cap && !v; i++) if (g_alias.vals[i]) {
+                alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+                if (k.pool != ak.pool || k.off != ak.off || k.d.format == ak.d.format) continue;
+                k.d.format = ak.d.format; if (memcmp(&k.d, &ak.d, sizeof k.d)) continue;
+                id<MTLTexture> b = (__bridge id)g_alias.vals[i];
+                if (b.pixelFormat == d.pixelFormat || tex_need_pfv(b.pixelFormat, d.pixelFormat) || b.textureType != d.textureType) continue;
+                v = [b newTextureViewWithPixelFormat:d.pixelFormat textureType:b.textureType levels:NSMakeRange(0, b.mipmapLevelCount) slices:NSMakeRange(0, b.arrayLength) swizzle:b.swizzle];
+                if (v) { memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k); nvn_hm_put(&g_alias_seen, &k, (void *)(uintptr_t)(g_fence + 1)); }
+            }
+            pthread_mutex_unlock(&g_smu);
+        }
+        if (v) { tex_put(t->serial, v); return v; }
+    }
     id<MTLTexture> mt = tex_linear(t);
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);

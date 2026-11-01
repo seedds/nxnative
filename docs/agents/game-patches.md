@@ -554,7 +554,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **`build` → `game`**, address space, gap, judgement: malloc region 60 GB → 4 GB and its first arena. Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit
 
-- **2.2.1 `main`** `82d187fe…` ([patches.py:15](../../dm/games/010074F013262000/patches.py#L15))
+- **2.2.1 `main`** `82d187fe…` ([patches.py:16](../../dm/games/010074F013262000/patches.py#L16))
   - cut `+0x128e58c`: malloc address region: 60 GB to 4 GB
   - cut `+0x1241870`: first arena bump size, low part: mov x9,#0xffff
   - cut `+0x1241880`: first arena bump size: 512 MB + 128 KB + 64 KB - 1

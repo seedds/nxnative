@@ -333,10 +333,30 @@ int main(void) {
         size_t at = P(nvnCommandBufferGetCommandMemoryUsed)(&c2);
         P(nvnCommandBufferBindTexture)(&c2, NVN_SHADER_STAGE_FRAGMENT, 3, (NVNtextureHandle)(0x1ff00000u | 1234));
         P(nvnCommandBufferEndRecording)(&c2);
-        EXPECT("single texture bind recording: 0x20 + END", 0x28, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        EXPECT("single texture bind recording, first pools: 0x18 + END", 0x20, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
         uint32_t patched = 0x1ff00000u | 1235; memcpy(m + at + 0x10, &patched, 4);
         memcpy(&rh, m, sizeof rh); p_bind_handles bt; const p_bind_handles *bh = bind_rec(rh.op, m + 8, &bt);
         EXPECT("the bind reads the handle patched at its start + 0x10: slot 3, texture 1235, sampler 511", 1, rh.op == OP_BIND_TEX1 && bh->n == 1 && bh->first == 3 && bh->stage == NVN_SHADER_STAGE_FRAGMENT && bh->h[0] == patched);
+        // With another pool bound the record keeps the pool bases after the handle, and the read adds them
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        ((cmd_t *)&c2)->tex_base = 7; ((cmd_t *)&c2)->samp_base = 3;
+        P(nvnCommandBufferBindTexture)(&c2, NVN_SHADER_STAGE_VERTEX, 2, (NVNtextureHandle)(5u << 20 | 1234));
+        P(nvnCommandBufferEndRecording)(&c2); ((cmd_t *)&c2)->tex_base = ((cmd_t *)&c2)->samp_base = 0;
+        EXPECT("single texture bind recording, other pools: 0x20 + END", 0x28, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        memcpy(&rh, m, sizeof rh); bh = bind_rec(rh.op, m + 8, &bt);
+        EXPECT("the bind adds the pool bases: stage, slot 2, texture 1241, sampler 8", 1, bh->stage == NVN_SHADER_STAGE_VERTEX && bh->first == 2 && bh->h[0] == (8u << 20 | 1241));
+        // State binds carry only the state object's bytes: 16 bytes for a 4-byte state, 24 for an 8-byte one or the multisample state
+        P(nvnCommandBufferAddCommandMemory)(&c2, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&c2);
+        NVNpolygonState ps; P(nvnPolygonStateSetDefaults)(&ps); P(nvnPolygonStateSetCullFace)(&ps, NVN_FACE_BACK); P(nvnCommandBufferBindPolygonState)(&c2, &ps);
+        NVNdepthStencilState dss; P(nvnDepthStencilStateSetDefaults)(&dss); P(nvnDepthStencilStateSetDepthFunc)(&dss, NVN_DEPTH_FUNC_GREATER); P(nvnCommandBufferBindDepthStencilState)(&c2, &dss);
+        NVNmultisampleState mss; P(nvnMultisampleStateSetDefaults)(&mss); P(nvnMultisampleStateSetSamples)(&mss, 4); P(nvnCommandBufferBindMultisampleState)(&c2, &mss);
+        P(nvnCommandBufferEndRecording)(&c2);
+        EXPECT("polygon, depth-stencil and multisample binds: 16 + 24 + 24 + END", 72, P(nvnCommandBufferGetCommandMemoryUsed)(&c2));
+        {   op_hdr h1, h2, h3; memcpy(&h1, m, 8); memcpy(&h2, m + 16, 8); memcpy(&h3, m + 40, 8);
+            const p_bind_state *s1 = (const p_bind_state *)(m + 8), *s2 = (const p_bind_state *)(m + 24), *s3 = (const p_bind_state *)(m + 48);
+            poly_st pr; ds_st dr; ms_st mr; memcpy(&pr, s1->bytes, sizeof pr); memcpy(&dr, s2->bytes, sizeof dr); memcpy(&mr, s3->bytes, sizeof mr);
+            EXPECT("the state records read back: kinds, cull, depth function, samples", 1, h1.op == OP_BIND_STATE && h1.size == 16 && s1->kind == 4 && pr.cull == NVN_FACE_BACK
+                   && h2.op == OP_BIND_STATE && h2.size == 24 && s2->kind == 5 && dr.df == NVN_DEPTH_FUNC_GREATER && h3.op == OP_BIND_STATE && h3.size == 24 && s3->kind == 3 && mr.samples == 4); }
         P(nvnCommandBufferFinalize)(&c2); P(nvnMemoryPoolFinalize)(&mp);
     }
     // Uniform bindings are measured into resource budgets too. A bounded binding needs
@@ -514,6 +534,36 @@ int main(void) {
         uint64_t sum = 0; for (int i = 0; i < g_nhostseg; i++) sum += g_hostseg[i].n;
         EXPECT("the cap counts every segment's bytes", sum, g_hostseg_bytes);
         P(nvnCommandBufferFinalize)(&c4); P(nvnCommandBufferFinalize)(&c5); P(nvnMemoryPoolFinalize)(&dp);
+    }
+    // 5b'''. Empty-pool grants outside a recording with callback data (hostseg_owned), as Odyssey re-records a display list whose block its full heap could not give: the owner's next
+    //        grant gets the same segment, so the handle stays the same as on hardware, the segments its last recording overflowed into are released, and re-recording takes nothing new
+    {
+        static uint8_t dst[8192] __attribute__((aligned(4096))), big[HOSTSEG_SMALL + 256]; memset(big, 0x5C, sizeof big);
+        NVNmemoryPoolBuilder db; NVNmemoryPool dp; P(nvnMemoryPoolBuilderSetDefaults)(&db); P(nvnMemoryPoolBuilderSetStorage)(&db, dst, sizeof dst); P(nvnMemoryPoolInitialize)(&dp, &db);
+        NVNcommandBuffer c6; P(nvnCommandBufferInitialize)(&c6, &dev);
+        int owner_a, owner_b; uint8_t *first = NULL; int same = 1, chain_free = 1, n0 = 0, busy0 = 0;
+        for (int k = 0; k < 6; k++) {
+            P(nvnCommandBufferSetMemoryCallbackData)(&c6, &owner_a); P(nvnCommandBufferAddCommandMemory)(&c6, NULL, 0, 512);
+            uint8_t *seg = CB(&c6)->cur; if (!first) first = seg; same &= seg == first;
+            P(nvnCommandBufferBeginRecording)(&c6);
+            P(nvnCommandBufferUpdateUniformBuffer)(&c6, (uintptr_t)dst, sizeof dst, 0, 32, big);   // the handle: the owned segment's start
+            P(nvnCommandBufferUpdateUniformBuffer)(&c6, (uintptr_t)dst, sizeof dst, 64, sizeof big, big);   // larger than the rest: JUMPs into a full segment
+            uint8_t *over = CB(&c6)->cur; NVNcommandHandle h = P(nvnCommandBufferEndRecording)(&c6);
+            same &= (uint8_t *)h == first;
+            pthread_mutex_lock(&g_hostseg_mu); int busy = 0; for (int i = 0; i < g_nhostseg; i++) busy += g_hostseg[i].busy;
+            if (k == 0) { n0 = g_nhostseg; busy0 = busy; } else chain_free &= g_nhostseg == n0 && busy == busy0;
+            for (int i = 0; i < g_nhostseg; i++) if (over > g_hostseg[i].mem && over <= g_hostseg[i].mem + g_hostseg[i].n) chain_free &= g_hostseg[i].busy && g_hostseg[i].org_lo == (uintptr_t)first;
+            pthread_mutex_unlock(&g_hostseg_mu);
+        }
+        EXPECT("the same owner gets its segment back: one handle across six re-recordings", 1, same);
+        EXPECT("the overflow segment hangs off the owned one and is released and taken again each time: no new segments", 1, chain_free);
+        P(nvnCommandBufferSetMemoryCallbackData)(&c6, &owner_b); P(nvnCommandBufferAddCommandMemory)(&c6, NULL, 0, 512);
+        EXPECT("another owner gets another segment", 1, CB(&c6)->cur != first);
+        P(nvnCommandBufferSetMemoryCallbackData)(&c6, &owner_a); P(nvnCommandBufferAddCommandMemory)(&c6, NULL, 0, 512);
+        EXPECT("and the first owner still has its own", 1, CB(&c6)->cur == first);
+        P(nvnCommandBufferSetMemoryCallbackData)(&c6, NULL); P(nvnCommandBufferAddCommandMemory)(&c6, NULL, 0, 512);
+        EXPECT("without callback data a grant gets a segment of its own", 1, CB(&c6)->cur != first);
+        P(nvnCommandBufferFinalize)(&c6); P(nvnMemoryPoolFinalize)(&dp);
     }
 
     // 5b. Sync must hold the CPU back: first queue 24 copies of 64 MiB to keep the GPU busy, with the last one copying src to dst;

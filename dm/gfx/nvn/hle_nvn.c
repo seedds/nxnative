@@ -782,13 +782,13 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 // overlapping it; segments overflowing from a host segment keep the same range.
 // The segment pool grows on demand (SMBW opening course: many small command buffers each overflow once per frame, and the old fixed 64 segments × 1 MB ran out within 8 frames); abort only beyond HOSTSEG_CAP in total.
 // A segment is HOSTSEG_SZ, with two exceptions (hostseg_size): an empty pool with a length of at most HOSTSEG_SMALL outside a recording gets that much rounded up to HOSTSEG_SMALL
-// (Super Mario Odyssey hands out many such 512-byte grants before recording; at 256 KB each, and with no recording to reclaim them by, they reached the cap entering the Wooded
-// Kingdom), and a record larger than HOSTSEG_SZ gets a segment that holds it. A free segment is taken again only for a request of its own size; the cap counts every segment's bytes
+// (Super Mario Odyssey hands out many such 512-byte grants before recording; at 256 KB each they reached the cap entering the Wooded Kingdom; such a grant's segment belongs
+// to the command buffer's callback data, hostseg_owned), and a record larger than HOSTSEG_SZ gets a segment that holds it. A free segment is taken again only for a request of its own size; the cap counts every segment's bytes
 #define HOSTSEG_SZ (256u << 10)
 #define HOSTSEG_SMALL (4u << 10)
 #define HOSTSEG_CAP (1u << 30)
 uint64_t dm_nvn_frame_count(void);
-typedef struct { uint8_t *mem; size_t n; uint64_t frame; int busy; uintptr_t org_lo, org_hi; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed)
+typedef struct { uint8_t *mem; size_t n; uint64_t frame; int busy; uintptr_t org_lo, org_hi; const void *owner; ptrdiff_t owner_off; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed); owner: hostseg_owned
 static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg; static uint64_t g_hostseg_bytes;
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
 static size_t hostseg_size(const cmd_t *o, int empty_pool, size_t want) {
@@ -816,14 +816,37 @@ static uint8_t *hostseg_take(const cmd_t *o, size_t n) {
     return m;
 }
 // The game gives out [lo, hi): segments whose recording's guest bytes overlap it are dead, reclaim them
-static void hostseg_release(uintptr_t lo, uintptr_t hi) {
+static void hostseg_release_locked(uintptr_t lo, uintptr_t hi) { for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].org_hi > lo && g_hostseg[i].org_lo < hi) g_hostseg[i].busy = 0; }
+static void hostseg_release(uintptr_t lo, uintptr_t hi) { pthread_mutex_lock(&g_hostseg_mu); hostseg_release_locked(lo, hi); pthread_mutex_unlock(&g_hostseg_mu); }
+// An empty-pool grant outside a recording stands for memory the game could not allocate: Super Mario Odyssey's display lists once its "DisplayList" GPU heap is full (main+0x5e8280
+// returns a null block, main+0x983760 clears its size, and AddCommandMemory gets the null pool with max(size, 512)). Such a grant has no guest range to be reclaimed by, and the game
+// re-records the list by adding the same block again with the list as the command buffer's callback data (main+0x983590); on hardware the new recording overwrites the old one in the
+// same memory, under the same handle. So the segment belongs to (callback data, offset): the owner's next such grant gets it back, and the segments its last recording overflowed into
+// (their origin is the owned segment's own bytes, which no guest grant overlaps) are released. Each re-recording used to take a new segment that nothing reclaimed: the 1 GB cap
+// after 11 minutes of Odyssey. An owner that is gone keeps its segment until the game puts another owner at its address
+static uint8_t *hostseg_owned(const cmd_t *o, size_t n, const void *owner, ptrdiff_t off) {
     pthread_mutex_lock(&g_hostseg_mu);
-    for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].org_hi > lo && g_hostseg[i].org_lo < hi) g_hostseg[i].busy = 0;
+    for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].owner == owner && g_hostseg[i].owner_off == off) {
+        uint8_t *m = g_hostseg[i].mem; hostseg_release_locked((uintptr_t)m, (uintptr_t)m + g_hostseg[i].n);
+        if (g_hostseg[i].n != n) { g_hostseg[i].owner = NULL; break; }   // another size: released, and the owner gets a segment of the new size
+        g_hostseg[i].busy = 1; g_hostseg[i].frame = dm_nvn_frame_count();
+        pthread_mutex_unlock(&g_hostseg_mu); return m;
+    }
     pthread_mutex_unlock(&g_hostseg_mu);
+    uint8_t *m = hostseg_take(o, n);   // a free segment that is not owned (taking one clears its owner), or a new one
+    pthread_mutex_lock(&g_hostseg_mu);
+    for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].mem == m) { g_hostseg[i].owner = owner; g_hostseg[i].owner_off = off; g_hostseg[i].org_lo = (uintptr_t)m; g_hostseg[i].org_hi = (uintptr_t)m + n; break; }
+    pthread_mutex_unlock(&g_hostseg_mu);
+    return m;
 }
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
     const pool_t *pl = (const pool_t *)p;
-    if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } size_t sz = hostseg_size(CB(c), !pl, n); cmd_new_segment(CB(c), hostseg_take(CB(c), sz), sz); return; }
+    if (!pl || n < 64) {
+        if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); }
+        size_t sz = hostseg_size(CB(c), !pl, n);
+        cmd_new_segment(CB(c), !pl && !CB(c)->recording && CB(c)->cb_data ? hostseg_owned(CB(c), sz, CB(c)->cb_data, off) : hostseg_take(CB(c), sz), sz);
+        return;
+    }
     if (!pl->mem) { LOG("[RED] AddCommandMemory: pool has no CPU storage"); return; }
     hostseg_release((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
@@ -967,7 +990,7 @@ NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) 
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
 }
-static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { p_bind_state *r = REC(c, OP_BIND_STATE, p_bind_state); r->kind = kind; memcpy(r->bytes, st, n); }
+static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) { p_bind_state *r = rec(c, OP_BIND_STATE, offsetof(p_bind_state, bytes) + n); r->kind = kind; memcpy(r->bytes, st, n); }   // only the state's own bytes (nvn_obj.h p_bind_state)
 NVN(nvnCommandBufferBindBlendState, void, NVNcommandBuffer *c, const NVNblendState *st) { bind_state(c, 0, st, sizeof(blend_st)); }
 NVN(nvnCommandBufferBindColorState, void, NVNcommandBuffer *c, const NVNcolorState *st) { bind_state(c, 1, st, sizeof(color_st)); }
 NVN(nvnCommandBufferBindChannelMaskState, void, NVNcommandBuffer *c, const NVNchannelMaskState *st) { bind_state(c, 2, st, sizeof(chmask_st)); }
@@ -2341,7 +2364,9 @@ NVN(nvnCommandBufferCallCommands, void, NVNcommandBuffer *c, int n, const NVNcom
 // Combined texture handle (texture id | sampler id << 20) is recorded into the texture slot as is: the replay layer takes the texture from the low 20 bits and the sampler from the high bits (nvn_mtl.m NVN_RB_SAMPT)
 // One combined handle: recorded as the hardware lays the command out, the handle 16 bytes in, where Luigi's Mansion 3 patches it after recording (nvn_obj.h p_bind_tex1)
 NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) {
-    p_bind_tex1 *r = REC(c, OP_BIND_TEX1, p_bind_tex1); *r = (p_bind_tex1){st, i, (uint64_t)h, CB(c)->tex_base, CB(c)->samp_base};
+    int32_t tb = CB(c)->tex_base, sb = CB(c)->samp_base;
+    if (tb || sb) { *REC(c, OP_BIND_TEX1, p_bind_tex1) = (p_bind_tex1){st, i, (uint64_t)h, tb, sb}; return; }
+    p_bind_tex1 *r = rec(c, OP_BIND_TEX1, offsetof(p_bind_tex1, tbase)); r->stage = st | BIND_TEX1_NOBASE; r->slot = i; r->h = (uint64_t)h;   // no bases: the record ends after h
 }
 _Static_assert(offsetof(p_bind_tex1, h) == 8, "a single texture bind keeps its handle 16 bytes into the record (8 of header)");
 NVN(nvnCommandBufferBindTextures, void, NVNcommandBuffer *c, NVNshaderStage st, int first, int n, const NVNtextureHandle *h) { bind_handles(c, OP_BIND_TEX, st, first, n, (const uint64_t *)h); }

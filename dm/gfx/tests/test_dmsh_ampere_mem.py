@@ -15,11 +15,11 @@ def inst(hi, lo): return struct.pack('<QQ', lo, hi)
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
 class Suatom(unittest.TestCase):
-    def translate(self, code):
+    def translate(self, code, shared=0):
         with tempfile.TemporaryDirectory(prefix='ampere_mem_') as d:
             work = Path(d); (work / 'k.bin').write_bytes(code)
             # c0 layout (QueryAmpereComputeC0Layout): no uniform or storage buffers, 3 texture handles from 0x10, image handles from 0x28 (word 12 = image slot 1), 0x40 bytes
-            job = [dict(key='k', stage='cs', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], debug=True, nvn2_cs=[0, 0, 3, 0x40, 0])]
+            job = [dict(key='k', stage='cs', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], debug=True, nvn2_cs=[0, 0, 3, 0x40, 0], shared=shared)]
             (work / 'jobs.json').write_text(json.dumps(job))
             r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -39,6 +39,25 @@ class Suatom(unittest.TestCase):
     def test_result_kept(self):   # the old value is the shader's (it shuffles it to the warp): the atomic's result is used, not discarded
         msl = self.translate(inst(*SUATOM) + inst(*EXIT))
         self.assertRegex(msl, r'uint \w+ = [^;]*atomic_fetch_add')
+
+
+# S2R R40, SR_TID.X; STS.128 [R40.X16 + 0x500], R24 as Mario Kart World's froxel compute shader fd413f04f59c161e encodes it (stride 78..80 = 3, X16); EXIT
+S2R_TID = (0x000fe20000002100, 0x0000000000287919)
+STS128_X16 = (0x000fe2000000cc00, 0x0005001828007388)
+
+
+@unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
+class SharedStride(unittest.TestCase):
+    translate = Suatom.translate
+
+    def store(self, hi):
+        return self.translate(inst(*S2R_TID) + inst(hi, STS128_X16[1]) + inst(*EXIT), shared=2304)
+
+    def test_x16_scales_the_register(self):   # thread n stores its vec4 at byte 0x500 + 16 n: the register is shifted left by 4
+        self.assertRegex(self.store(STS128_X16[0]), r'<< (uint\()?4')
+
+    def test_x1_keeps_the_register(self):
+        self.assertNotRegex(self.store(STS128_X16[0] & ~(3 << 14)), r'<< (uint\()?4')
 
 
 if __name__ == '__main__':

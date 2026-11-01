@@ -310,10 +310,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // ---- local and shared memory ----
 
-        // The 32-bit address of a local / shared access: Ra plus the uniform register (at urLo in the uniform form, bit 91)
-        private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo)
+        // The 32-bit address of a local / shared access: Ra plus the uniform register (at urLo in the uniform form, bit 91). A shared access scales Ra by
+        // the stride at 78..80 (X1, X4, X8, X16; NAK's OffsetStride): Mario Kart World's froxel compute shaders index vec4 slots as LDS.128 [Ra.X16 + imm]
+        private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo, bool shared)
         {
             Operand addr = Register(x.Ra, RegisterType.Gpr);
+            int stride = shared ? x.Bits(78, 80) : 0;
+
+            if (stride != 0 && x.Ra != RegisterConsts.RegisterZeroIndex)
+            {
+                addr = context.ShiftLeft(addr, Const(stride + 1));
+            }
 
             if (x.Bit(91) && x.Bits(urLo, urLo + 6) != RegisterConsts.UniformZeroIndex)
             {
@@ -329,7 +336,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             StorageKind kind = x.Opcode == AmpereOpcodes.Ldl ? StorageKind.LocalMemory : StorageKind.SharedMemory;
 
-            EmitLoad(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 32), x.Rd, (int)x.SignedField(40, 64));
+            EmitLoad(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 32, kind == StorageKind.SharedMemory), x.Rd, (int)x.SignedField(40, 64));
         }
 
         // STL / STS [Ra + UR + offset], Rb: UR at 64
@@ -338,7 +345,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             StorageKind kind = x.Opcode is 0x387 or 0x987 ? StorageKind.LocalMemory : StorageKind.SharedMemory;
 
-            EmitStore(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 64), x.Rb, (int)x.SignedField(40, 64));
+            EmitStore(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 64, kind == StorageKind.SharedMemory), x.Rb, (int)x.SignedField(40, 64));
         }
 
         // ---- surfaces ----

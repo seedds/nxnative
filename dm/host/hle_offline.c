@@ -227,10 +227,10 @@ static int ldn_get_local_ip(uint32_t *ip_out, uint32_t *mask_out) {
 
     if (getifaddrs(&ifaddr) == -1) return 0;
 
+    // First pass: prefer WiFi interfaces (en0 iOS, en1 some Macs)
     for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
         if (ifa->ifa_addr == NULL) continue;
 
-        // Look for IPv4 on WiFi (en0 iOS, en1 some Macs)
         if (ifa->ifa_addr->sa_family == AF_INET &&
             (strncmp(ifa->ifa_name, "en0", 3) == 0 || strncmp(ifa->ifa_name, "en1", 3) == 0)) {
             struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
@@ -245,6 +245,53 @@ static int ldn_get_local_ip(uint32_t *ip_out, uint32_t *mask_out) {
 
             freeifaddrs(ifaddr);
             return 1;
+        }
+    }
+
+    // Second pass: Tailscale/virtual interfaces (utun, tailscale*, etc.)
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) continue;
+
+        if (ifa->ifa_addr->sa_family == AF_INET &&
+            (strncmp(ifa->ifa_name, "utun", 4) == 0 ||
+             strncmp(ifa->ifa_name, "tailscale", 9) == 0 ||
+             strncmp(ifa->ifa_name, "wg", 2) == 0)) {
+            struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+            *ip_out = ntohl(sa->sin_addr.s_addr);
+
+            if (ifa->ifa_netmask) {
+                struct sockaddr_in *sm = (struct sockaddr_in *)ifa->ifa_netmask;
+                *mask_out = ntohl(sm->sin_addr.s_addr);
+            } else {
+                *mask_out = 0xFFFFFF00; // Default /24
+            }
+
+            freeifaddrs(ifaddr);
+            return 1;
+        }
+    }
+
+    // Third pass: any IPv4 interface as fallback (non-loopback)
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) continue;
+
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+            uint32_t ip = ntohl(sa->sin_addr.s_addr);
+            // Skip loopback (127.x.x.x)
+            if ((ip & 0xFF000000) != 0x7F000000) {
+                *ip_out = ip;
+
+                if (ifa->ifa_netmask) {
+                    struct sockaddr_in *sm = (struct sockaddr_in *)ifa->ifa_netmask;
+                    *mask_out = ntohl(sm->sin_addr.s_addr);
+                } else {
+                    *mask_out = 0xFFFFFF00; // Default /24
+                }
+
+                freeifaddrs(ifaddr);
+                return 1;
+            }
         }
     }
 
@@ -444,6 +491,9 @@ static void* ldn_listener_thread(void* arg) {
 
         if (ldn_receive_packet_with_sender(&type, &data, &len, sizeof(data), sender_ip)) {
             int state = atomic_load(&g_ldn_state);
+
+            // Debug: log packet source IP when in different network context
+            LOG("LDN listener: packet type %d from %s", type, sender_ip);
 
             switch(type) {
                 case LDN_PACKET_SCAN:

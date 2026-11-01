@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Ampere ALU instructions through the offline translator (dmsh_xlate, arch sm86). Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
-import os, unittest
-import test_dmsh_ampere_mem as mem
+import os, pathlib, sys, unittest
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))   # its sibling test module, also when the file runs alone (python -m unittest <file>, as CI does)
+import test_dmsh_ampere_mem as mem   # noqa: E402
 
 # UBREV UR4, UR4 as Mario Kart World's DrivePass compute shader 0f682a395b9c31aa encodes it (opcode 0x2be); untranslated, its dispatches were skipped
 UBREV = (0x000fc80008000000, 0x00000004000472be)

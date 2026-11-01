@@ -160,6 +160,24 @@ To enroll a cut for any game's own module:
 - **Found on:** reading the code while fixing [Vector registers read as writes of the jump-table index](#vector-registers-read-as-writes-of-the-jump-table-index). Of the 51 `main`s that rewrote in a comparison of old and new, only [Absolum](../../dm/games/0100A83022A22000/README.md)'s changed: its four tables at `main+0x1ed2dc`, `+0x1ed4fc`, `+0x1ed71c` and `+0x1ed8cc`, based in x30, went from 65,536 pads to 445, 373, 301 and 257, each its table's largest entry + 1, and the patch area from 3.7 MB to 570 KB.
 - **Check:** `dm/tools/tests/test_jump_copies.py` `CopyAfterCheck`, `IndexChangedAfterCheck`, `HalfCount`, `test_table_base_sees_every_write_of_the_register` and `test_a_32_bit_write_after_the_adr_replaces_its_value`.
 
+### ADR-relative jump table whose bounds check is scheduled far before its branch
+
+- **Symptom:** `AssertionError: jump table 91b24c` from `patch_nso.py` on `main`, at an ADR-relative dispatch (`b.hi; mov w16, w21; adrp x17` + `add x17, x17, #0xa7c; adr x18, #L; ldrsw x0, [x17, x16, lsl #2]; add x18, x18, x0; br x18`) whose `cmp w21, #3` is not among the 16 instructions before the `br`.
+- **Cause:** the compiler scheduled 23 floating-point and bitfield instructions between `cmp w21, #3` and its `b.hi`, which puts the compare 31 instructions before the `br`. `jump_adr_offsets` looks 16 back for the compare, and the other forms expect the compare right before its `b.hi`. A wider window alone would not prove that the flags the `b.hi` reads come from that compare.
+- **Fix:** `jump_adr_far_check`, tried after every other form, so the tables they recognized keep their targets. It finds the check by the flags its `b.hi` reads, not by a distance. Back from the load through straight-line code, following index copies, the first control flow must be the `b.hi`. Before it, the first instruction that writes the flags (compares, flag-setting arithmetic, `fcmp`, `ccmp`, `msr nzcv` and the rest) must be a `cmp` of the index with an immediate.
+  - From that compare to the `br` there may be no call, branch, system call, trap or undecodable word, and no write of the checked index.
+  - The loaded entry stays unchanged up to the `add`, and `x18` up to the `br`.
+  - No branch or known jump table of the function may enter the run past the compare, and the `b.hi` must leave the run.
+  - The table base comes from its register's writer chain (`copied_base`, which counts a 32-bit write as a clobber), and every target must be a decoded instruction of the function outside the run.
+- **Check:** `dm/tools/tests/test_jump_copies.py` `AdrFarCheck` covers:
+  - the far check, and a near one that stays with `jump_adr_offsets` with the same targets;
+  - a nearer compare of the index that sets the bound, and every other kind of flag writer between the check and its branch;
+  - writes of the checked index, its copy, the entry, the ADR base, the table base and `x18`;
+  - calls, traps and other control flow; a branch that is not a `b.hi` out of the run; entries into the run; undecodable words; and the table's extent and targets;
+  - the real rewriter on a synthetic module.
+- **Found on:** Yakuza Kiwami (0100C9801FEE6000) 1.01 `main+0x91b24c` (main build `ae90fd64…`), a four-entry table whose entries 1 and 3 share a case block. A census of its modules found no other unrecognized table. It is a provisional-profile bring-up, with no game note yet.
+- **Resolved:** `table_base`, which the older forms use, recognized a write to the base register by its 64-bit name only, so a 32-bit write between the base's `add` and the load (`mov w17, w1` after `add x17, x17, #lo`) left its answer unchanged while `copied_base` refused it. It asks `writes_reg`, which sees either width, since [Overwritten jump-table indices and bases taken as unchanged](#overwritten-jump-table-indices-and-bases-taken-as-unchanged).
+
 ### Byte tables indexed by x30 (capstone register names)
 
 - **Symptom:** `jump table <addr>` assertion on a byte table indexed by x30 (`adr x18, #L; ldrb w30, [x14, x12]; add x18, x18, x30, lsl #2; br x18`).

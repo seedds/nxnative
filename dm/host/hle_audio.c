@@ -74,7 +74,10 @@ static void *event_notify(void *p) {
         dispatch_semaphore_wait(a->notify_sem, DISPATCH_TIME_FOREVER);
         if (atomic_exchange_explicit(&a->notify_pending, 0, memory_order_acq_rel) && a->event)
             hle_signal_system_event(a->event);
-        atomic_store_explicit(&a->notify_armed, 0, memory_order_release);
+        // Acquire a producer that saw the old armed=1, so the pending recheck
+        // cannot miss its release. Otherwise the producer or our re-arm posts.
+        // A release-only store permits pending=1/armed=0 with both sides asleep.
+        atomic_exchange_explicit(&a->notify_armed, 0, memory_order_acq_rel);
         if (!atomic_load_explicit(&a->notify_run, memory_order_acquire)) break;
         if (atomic_load_explicit(&a->notify_pending, memory_order_acquire) &&
             atomic_exchange_explicit(&a->notify_armed, 1, memory_order_acq_rel) == 0)

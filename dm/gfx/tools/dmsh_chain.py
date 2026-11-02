@@ -67,6 +67,9 @@ def inputs(g):
         p = g.table(f)
         h.update(f'game/{f}'.encode() + b'\0' + (p.read_bytes() if p.exists() else b'missing') + b'\0')
     h.update(profile_rows(g))
+    # DMSH_ALPHA=0 / DMSH_LOGIC=0 (dmsh_build.py: no <key>_ba / <key>_bl libraries) count only when set, so a default build keeps its digest and a folder built without them is not taken for a full one
+    for name in ('DMSH_ALPHA', 'DMSH_LOGIC'):
+        if os.environ.get(name) == '0': h.update(b'\0' + name.encode() + b'=0')
     return h.hexdigest()[:12]
 
 def read_stamp(lib):   # {'game': title ID, 'inputs': digest} of a library directory; {} when it has none

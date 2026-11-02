@@ -14,7 +14,7 @@ TABLE = REPO / 'docs/env_switches.tsv'
 HEAD = 'name\tclass\tmeaning\n'
 CLASSES = ('player', 'path', 'switch', 'diagnostic', 'test')
 CODE = ('.c', '.m', '.h', '.inc', '.swift', '.py', '.sh', '.S')
-NAME = r'DM_[A-Z0-9_]*[A-Z0-9]'
+NAME = r'(?:DM_[A-Z0-9_]*[A-Z0-9]|DMSH_(?:ALPHA|LOGIC))'
 READ = r'(?:getenv\(|environ(?:\.get\(|\[))\s*["\'](' + NAME + r')["\']'   # a literal name in getenv(…), os.environ.get(…) or os.environ[…]
 
 
@@ -62,7 +62,7 @@ def rows():
     if TABLE.exists():
         for l in TABLE.read_text().split('\n'):
             f = l.split('\t')
-            if len(f) == 3 and f[0].startswith('DM_'): kept[f[0]] = f[1:]
+            if len(f) == 3 and re.fullmatch(NAME, f[0]): kept[f[0]] = f[1:]
     out, bad = [], []
     for n in sorted(reads):
         cls, meaning = kept.get(n, [guess(n, reads[n], player), ''])

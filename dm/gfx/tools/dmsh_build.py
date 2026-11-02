@@ -8,7 +8,7 @@
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately)
-import inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, concurrent.futures as cf
+import inspect, os, re, sys, json, struct, hashlib, shutil, subprocess, tempfile, collections, threading, time, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
@@ -20,6 +20,10 @@ CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
 GAME = dmsh_chain.load_game()   # the current game profile (DM_GAME): the tables come from here
 if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'[RED] {dmsh_chain.HEADER} does not hold the current translation chain version {CHAIN}: run dmsh_chain.py --header first and commit it (otherwise the host cannot find these libraries)')
 INPUTS = dmsh_chain.inputs(GAME)   # the digest of the profile's inputs, which a full build stamps on its libraries (b-<V>/inputs.tsv)
+ALPHA = os.environ.get('DMSH_ALPHA') != '0'   # DMSH_ALPHA=0 / DMSH_LOGIC=0: no alpha test (<key>_ba) / logic operation (<key>_bl) libraries; dmsh_chain.inputs stamps the choice
+LOGIC = os.environ.get('DMSH_LOGIC') != '0'
+if not ALPHA: print('DMSH_ALPHA=0: skipping alpha test libraries (_ba); host draws go without the alpha test, with a [RED] line naming the shader', flush=True)
+if not LOGIC: print('DMSH_LOGIC=0: skipping logic operation libraries (_bl); host draws use COPY, with a [RED] line naming the shader', flush=True)
 XLATE = os.environ.get('XLATE', os.path.join(dmsh_chain.XLATE_DIR, 'dmsh_xlate'))
 SPIRV_CROSS = dmsh_chain.SPIRV_CROSS   # the in-repo build the lock records
 FACTS = dmsh_facts.load()
@@ -199,6 +203,17 @@ def atomic_json(path, value):
     with open(tmp, 'w') as f: json.dump(value, f, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
 
+class BuildMetalCache(dmsh_mtlcache.Cache):
+    """The MSL-keyed Metal cache that also writes the libraries compiled and reused so far (every target, base and side libraries) to _b_progress.json in the temporary folder,
+    at most twice a second, for the NSP script's progress line (ShaderWatch), which counts shaders"""
+    def count(self, what, n=1):
+        with self.lock:
+            self.stats[what] += n
+            now = time.monotonic()
+            if now - getattr(self, 'last_progress', 0) < 0.5: return
+            self.last_progress = now
+            atomic_json(os.path.join(w, '_b_progress.json'), {s: sum(self.stats[t, s] for t in self.targets) for s in ('compiled', 'reused')})
+
 def source_without_rule_bodies():   # this file's code form (dmsh_chain.code_form): no comments, docstrings or formatting, and the rule functions' bodies blanked
     return dmsh_chain.code_form(open(__file__, 'r').read(), {f.__name__ for f, _ in RULES})
 
@@ -343,11 +358,13 @@ def fetch_finish(key, src, refl):
                         tmp_flib = flib + '.tmp-' + str(os.getpid())
                         mac_compile(fmsl, fair, tmp_flib)
                         os.replace(tmp_flib, flib)
+                        MTL.count(('mac', 'compiled'))
                     ilib = None
                     if IOSOUT:
                         ilib = os.path.join(IOSOUT, key + '_bf.metallib')
                         ios_metal.compile(fmsl, fmsl[:-6] + '.ios.air', ilib + '.tmp')
                         os.replace(ilib + '.tmp', ilib)
+                        MTL.count(('ios', 'compiled'))
                 except subprocess.CalledProcessError:
                     return refl
                 BF_STATS['compile'] += 1
@@ -424,7 +441,7 @@ def vin_finish(key, full, refl):
     VIN_STATS['inputs'] += len(shadows); VIN_STATS['float only'] += sum(1 for s in shadows if 'sint' not in s and 'uint' not in s)
     return refl
 
-def ps_side_finish(key, full, refl, mod, sfx, field, stats, what):
+def ps_side_finish(key, full, refl, mod, sfx, field, stats, what, enabled=True):
     """A pixel shader's side library <key>_<sfx> (mod.variant: dmsh_alpha.py, dmsh_logic.py), from the source with every entry point, compiled through the MSL-keyed Metal cache;
     reflection <field> names its entry points. A shader the variant does not apply to gets none (stale libraries removed): the host draws it without. Changes refl; the caller writes it"""
     if refl['stage'] != 'ps': return refl
@@ -434,6 +451,7 @@ def ps_side_finish(key, full, refl, mod, sfx, field, stats, what):
         for p in libs:
             try: os.unlink(p)
             except FileNotFoundError: pass
+    if not enabled: stats['skipped'] += 1; drop(); return refl
     v, info = mod.variant(full)
     if not v: stats['not generated'] += 1; drop(); return refl
     msl = os.path.join(w, f'{key}_{sfx}.metal'); open(msl, 'w').write(v)
@@ -451,10 +469,10 @@ def ps_side_finish(key, full, refl, mod, sfx, field, stats, what):
     return refl
 
 def alpha_finish(key, full, refl):   # the alpha test library <key>_ba (dmsh_alpha.py): none for a shader whose colour 0 has no float alpha
-    return ps_side_finish(key, full, refl, dmsh_alpha, 'ba', 'alpha', ALPHA_STATS, 'alpha test')
+    return ps_side_finish(key, full, refl, dmsh_alpha, 'ba', 'alpha', ALPHA_STATS, 'alpha test', ALPHA)
 
 def logic_finish(key, full, refl):   # the logic operation library <key>_bl (dmsh_logic.py): none for a shader without integer colour outputs
-    return ps_side_finish(key, full, refl, dmsh_logic, 'bl', 'logic', LOGIC_STATS, 'logic operation')
+    return ps_side_finish(key, full, refl, dmsh_logic, 'bl', 'logic', LOGIC_STATS, 'logic operation', LOGIC)
 
 pc_of, loc = {}, {}
 MAP_ROWS, MAP_CONFLICT_ROWS = {}, {}
@@ -1282,7 +1300,7 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):
         if _m and (not want or _m.group(1) in want): os.unlink(os.path.join(_d, _n))
     if (not want or STAMP_BEFORE != INPUTS) and os.path.exists(os.path.join(_d, dmsh_chain.STAMP)): os.unlink(os.path.join(_d, dmsh_chain.STAMP))
 w = tempfile.mkdtemp(prefix='dmsh_', dir=os.environ.get('WORK'))
-MTL = dmsh_mtlcache.Cache(os.path.join(CAS, 'metallib'), {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
+MTL = BuildMetalCache(os.path.join(CAS, 'metallib'), {'mac': ('macosx', MAC_RECORD, mac_compile), **({'ios': ('iphoneos', ios_metal.RECORD, ios_metal.compile)} if IOSOUT else {})}, w)
 # first take the libraries earlier chain versions left on disk: the b-*/ beside the output (iOS: the folder of the same name) and the roots DMSH_PREFILL lists
 for _spec in [cache_root + ('=' + os.path.dirname(IOSOUT) if IOSOUT else '')] + [x for x in os.environ.get('DMSH_PREFILL', '').split(os.pathsep) if x]:
     _mac, _, _ios = _spec.partition('=')
@@ -1359,8 +1377,8 @@ for reason in ('new key', 'rule changed', 'code fingerprint changed: all rebuilt
 print(f'variant cache: generated {BF_STATS["generated"]}, hit {BF_STATS["hit"]}, rebuilt {BF_STATS["miss"]}, compiled {BF_STATS["compile"]}')
 print(f'shadow-input libraries (<key>_bv, dmsh_vin.py): {VIN_STATS["generated"]} generated, {VIN_STATS["failed"]} failed to compile, {VIN_STATS["not generated"]} not generated; '
       f'{VIN_STATS["inputs"]} integer inputs shadowed, {VIN_STATS["float only"]} of them with no other-sign shadow (attribute indices ran out)')
-print(f'alpha test libraries (<key>_ba, dmsh_alpha.py): {ALPHA_STATS["generated"]} generated, {ALPHA_STATS["failed"]} failed to compile, {ALPHA_STATS["not generated"]} pixel shaders without a float colour 0 alpha')
-print(f'logic operation libraries (<key>_bl, dmsh_logic.py): {LOGIC_STATS["generated"]} generated, {LOGIC_STATS["failed"]} failed to compile, {LOGIC_STATS["not generated"]} pixel shaders without integer colour outputs')
+print('alpha test libraries (<key>_ba, dmsh_alpha.py): ' + (f'{ALPHA_STATS["generated"]} generated, {ALPHA_STATS["failed"]} failed to compile, {ALPHA_STATS["not generated"]} pixel shaders without a float colour 0 alpha' if ALPHA else 'skipped by DMSH_ALPHA=0'))
+print('logic operation libraries (<key>_bl, dmsh_logic.py): ' + (f'{LOGIC_STATS["generated"]} generated, {LOGIC_STATS["failed"]} failed to compile, {LOGIC_STATS["not generated"]} pixel shaders without integer colour outputs' if LOGIC else 'skipped by DMSH_LOGIC=0'))
 print(f'pulling libraries (<key>_bp, dmsh_pull.py): {PULL_STATS["generated"]} generated, {PULL_STATS["failed"]} failed to compile, {PULL_STATS["not generated"]} not generated, '
       f'{PULL_STATS["no stage input"]} vertex shaders without stage inputs (none needed)')
 print('mesh libraries (<vertex>_<geometry>_m3, dmsh_mesh.py): ' + (', '.join(f'{k} {v}' for k, v in MESH_STATS.items()) or 'none'))

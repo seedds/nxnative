@@ -83,9 +83,17 @@ class Nvn(Base):
         for cm in (mock.patch.object(nsp, 'fingerprint', lambda *a, **k: 'K'), mock.patch.object(nsp, 'chain_of', lambda repo: CHAIN)):   # one chain version for every game
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
-    def build(self, mac):
+    def build(self, mac, switches=None):
         self.ran.clear()
-        return nsp.build_shaders(sys.executable, REPO, self.sh, REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate', {'WORK': str(self.tmp), 'IOSOUT': '/elsewhere'}, self.logs, self.g, pkg_key='P', mac=mac)
+        return nsp.build_shaders(sys.executable, REPO, self.sh, REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate', {'WORK': str(self.tmp), 'IOSOUT': '/elsewhere', **(switches or {})}, self.logs, self.g, pkg_key='P', mac=mac)
+
+    def test_side_library_switches_invalidate_whole_stage_reuse(self):
+        def key(*args, **kwargs): return repr([a for a in args if isinstance(a, str) and a.startswith('DMSH_')])
+        with mock.patch.object(nsp, 'fingerprint', side_effect=key):
+            for env in ({}, {'DMSH_ALPHA': '0'}, {'DMSH_LOGIC': '0'}, {'DMSH_ALPHA': '0', 'DMSH_LOGIC': '0'}, {}):
+                self.build(True, env); self.assertEqual(len(self.ran), 1)
+                self.build(True, env); self.assertEqual(self.ran, [])
+            self.build(True, {'DMSH_ALPHA': '1', 'DMSH_LOGIC': 'false'}); self.assertEqual(self.ran, [])
 
     def test_mac_only(self):   # no IOSOUT (not even the caller's), the Mac key beside the cache folder, not in it
         self.assertEqual(self.build(True), self.sh / 'cache')
@@ -200,6 +208,19 @@ class Nvn(Base):
         pso = self.tmp / 'pso_pairs.tsv'; pso.write_text('a\tb\n')
         watch = nsp.ShaderWatch(self.g, self.tmp, self.tmp, pso)
         self.assertEqual(list(watch.pos), ['b', 'a', 'c'])
+
+    def test_shader_watch_reports_libraries_without_changing_shader_counts(self):
+        (self.tmp / 'shader_map.tsv').write_text('p.bin\t0\tps\ta\tsrc\n')
+        work = self.tmp / 'dmsh_work'; work.mkdir()
+        watch = nsp.ShaderWatch(self.g, self.tmp, self.tmp)
+        watch.t1, watch.w = watch.t0, work
+        (self.tmp / 'a_b.json').write_text('{}')
+        (work / '_b_progress.json').write_text('{"compiled": 3, "reused": 2}')
+        event = watch()
+        self.assertEqual((event['done'], event['total'], event['unit']), (1, 1, 'shaders'))
+        self.assertEqual(event['note'], '3 libraries compiled, 2 reused from Metal cache')
+        (work / '_b_progress.json').write_text('incomplete')
+        self.assertEqual(watch()['note'], '')
 
 
 class EnvFile(Base):

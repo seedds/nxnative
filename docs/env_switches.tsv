@@ -1,4 +1,6 @@
 name	class	meaning
+DMSH_ALPHA	switch	`0` skips pixel shader alpha test libraries (`_ba`) in `dmsh_build.py`; the host draws without the alpha test and logs a `[RED]` line naming the shader. Unset or any other value builds them
+DMSH_LOGIC	switch	`0` skips pixel shader logic operation libraries (`_bl`) in `dmsh_build.py`; the host uses COPY and logs a `[RED]` line naming the shader. Unset or any other value builds them
 DM_AB	diagnostic	`=<frames>` splits the run into phases of that many frames and alternates every switch set to `ab` (on in the odd phases); logs an `[ab]` line per phase with GPU and frame time and attachment traffic
 DM_ALIAS_SIZE	diagnostic	`=<bytes>` gives the guest an alias region of that size instead of the profile's (at least 256 MB, whole host pages; the heap and stacks stay as they are): `0x1000000000`, the Switch's 64 GB, holds what a game reserves unchanged; the NSP script's address region check sets it (Mac only: an iPhone has no room)
 DM_ALIAS_WINDOWS	diagnostic	`=<MB>` logs every 30 s how much of each window of that size in the alias region is mapped (windows aligned to their size in absolute addresses)

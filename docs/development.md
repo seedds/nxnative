@@ -600,6 +600,8 @@ Each game has a profile in `dm/games/<id>/`:
 
 The shader translation chain has one version for every game, in `dm/gfx/nvn/dmsh_chain.h`. What the shader libraries and the host must agree on, the NVN driver segment layout and the binding kinds of the reflection, is written once in `dm/gfx/nvn/dmsh_abi.h`: the host includes it, the build reads it through `dm/gfx/tools/dmsh_abi.py`, and `dm/tools/tests/test_dmsh_abi.py` guards it ([Shaders, Bindings and handles](reference/shaders.md#bindings-and-handles)).
 
+`DMSH_ALPHA=0` / `DMSH_LOGIC=0` skip the pixel shader side libraries `_ba` (alpha test) / `_bl` (logic operation). The host then draws without the alpha test / with COPY and logs a `[RED]` line naming the shader. Other values keep both enabled. Opt-outs change the inputs stamp; progress counts shaders and also reports libraries compiled and reused from the Metal cache.
+
 The shader tools pick a profile with `DM_GAME=<id>`; `make -C dm/host` and `build_ipa.sh` pick it with `GAME=<id>`. Profiles are named after the base game's title ID. There is no default game: without `GAME` / `DM_GAME` the tools stop and list the profiles. `python3 dm/games/game.py list` lists the profiles. Host code that relies on one build's fixed addresses checks that build's ID.
 
 To add a game:

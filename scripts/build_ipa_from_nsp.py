@@ -1874,7 +1874,7 @@ def shader_keys(g):   # the base shaders dmsh_build.py builds, shared by progres
 
 
 class ShaderWatch:
-    """Progress of dmsh_build.py, read from the files it writes (it prints nothing until it ends). It works in three phases:
+    """Progress of dmsh_build.py, read from the files it writes (its own counts of the libraries compiled: _b_progress.json in the temporary folder). It works in three phases:
     the cache check (a hit restores <key>_b.json into the library directory b-<chain>/: the iOS one, or the Mac's for a Mac-only build; a miss writes <key>.bin into its temporary folder dmsh_* under WORK),
     the translation of the misses (<key>.spv in the temporary folder), and the compile, which takes the keys in a fixed order (sorted, the vertex shaders with pixel pairs last)
     and writes <key>_b.json again for every miss and every pixel shader: the furthest key written so far tells how far it got"""
@@ -1912,8 +1912,13 @@ class ShaderWatch:
             return {'step': 'translating', 'done': ext['.spv'], 'total': ext['.bin'], 'unit': 'shaders'}
         new = self.written(self.pos.keys() - self.fin, self.t1)
         self.fin |= new; self.top = max([self.top] + [self.pos[k] for k in new])
+        note = [f'{ext[".bin"]:,} not cached'] if ext['.bin'] else []
+        try:   # the libraries (base and side, every target) compiled and taken from the Metal cache so far: more than one per shader
+            counts = json.loads((self.w / '_b_progress.json').read_text()) if self.w else None
+            if counts: note.append(f'{counts["compiled"]:,} libraries compiled, {counts["reused"]:,} reused from Metal cache')
+        except (OSError, ValueError, KeyError, TypeError): pass
         return {'step': 'compiling' if ext['.bin'] else 'finishing', 'done': max(len(self.fin), self.top + 1), 'total': self.n, 'unit': 'shaders',
-                'note': f'{ext[".bin"]:,} not cached' if ext['.bin'] else ''}
+                'note': ', '.join(note)}
 
 
 def spirv_cross(repo, env=None):   # resolve the same selection the shader tools run, including an executable name on PATH
@@ -1988,7 +1993,8 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     if pkg_key:
         PROG.set(step='checking the inputs')
         key = fingerprint(pkg_key, ('files', chain_files(repo)), ('stat', xlate.parent), ('files', profile_files(g)), ('files', [pso_pairs]), *toolchain(repo, env), str(xlate),
-                          {k: env.get(k) for k in ('XLATE_DEBUG', 'XLATE_REDUCED')}, env=env)
+                          {k: env.get(k) for k in ('XLATE_DEBUG', 'XLATE_REDUCED')},
+                          *([f'{k}=0' for k in ('DMSH_ALPHA', 'DMSH_LOGIC') if env.get(k) == '0']), env=env)
         note = next((n for k in ((kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None)
         # the libraries are the last build's, so are tables that name their stamp; a missing or stale one is made from that build's Mac outputs, and without them the step runs again
         if next(libs.glob('*_b.metallib'), None) and note is not None and chain_tables(py, repo, sh, env, logs, g, chain):

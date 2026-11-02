@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 from typing import Any
 import unittest
@@ -85,6 +86,19 @@ class ShaderCache(unittest.TestCase):
 
     def test_unchanged_compiler_reuses_key(self):
         self.assertEqual(self.digest(), self.digest())
+
+    def test_base_cache_is_shared_but_side_reflection_is_never_restored(self):
+        out = Path(self.ns['out'])
+        (out / 'key_b.metal').write_text('base MSL')
+        (out / 'key_b.metallib').write_bytes(b'base library')
+        (out / 'key_b.json').write_text(json.dumps({'stage': 'ps', 'alpha': {'entries': ['alpha']}, 'logic': {'entries': ['logic']}}))
+        digest = self.digest()
+        self.ns['publish_cache']('key', digest, 'rule', 'source')
+        for env in ({'DMSH_ALPHA': '0', 'DMSH_LOGIC': '0'}, {}):
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(self.digest(), digest)
+                self.assertTrue(self.ns['restore_cache']('key', digest))
+                self.assertEqual(json.loads((out / 'key_b.json').read_text()), {'stage': 'ps'})
 
     def test_ios_cache_restores_analysis_files_and_geometry_without_mac_libraries(self):
         self.ns.update(TARGETS={'ios'}, IOSOUT=str(Path(self.tmp.name) / 'ios'))
@@ -205,6 +219,71 @@ class ShaderCache(unittest.TestCase):
             self.assertTrue(self.ns['restore_cache'](key, key + '-digest'))
         self.assertEqual({p.name: json.loads(p.read_text()) if p.suffix == '.json' else p.read_bytes() for p in out.iterdir()}, expected)
         self.assertEqual(json.loads((out / (vertex + '_b.json')).read_text())['vs_pad'], [7])
+
+
+class SideLibraries(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
+
+    def test_switches_preserve_default_digest_and_stamp(self):
+        game = types.SimpleNamespace(rows=[('shader_test', ['value'])], table=lambda f: self.root / f)
+        h = hashlib.sha256()
+        for f in dmsh_chain.INPUT_TABLES: h.update(f'game/{f}'.encode() + b'\0missing\0')
+        h.update(dmsh_chain.profile_rows(game))
+        with mock.patch.dict(os.environ, {}, clear=True):
+            default = dmsh_chain.inputs(game)
+            self.assertEqual(default, h.hexdigest()[:12])
+            dmsh_chain.write_stamp(str(self.root), 'game', default)
+            stamp = (self.root / 'inputs.tsv').read_bytes()
+        digests = {default}
+        for env in ({'DMSH_ALPHA': '0'}, {'DMSH_LOGIC': '0'}, {'DMSH_ALPHA': '0', 'DMSH_LOGIC': '0'}):
+            with mock.patch.dict(os.environ, env, clear=True): digests.add(dmsh_chain.inputs(game))
+        self.assertEqual(len(digests), 4)
+        for value in ('', '1', 'false', '00'):
+            with mock.patch.dict(os.environ, {'DMSH_ALPHA': value, 'DMSH_LOGIC': value}, clear=True):
+                self.assertEqual(dmsh_chain.inputs(game), default)
+                dmsh_chain.write_stamp(str(self.root), 'game', dmsh_chain.inputs(game))
+                self.assertEqual((self.root / 'inputs.tsv').read_bytes(), stamp)
+
+    def test_full_off_full_regenerates_sides_and_cleans_both_targets(self):
+        ios = self.root / 'ios'; ios.mkdir()
+        def compile_target(target, src, dst): Path(dst).write_bytes(Path(src).read_bytes())
+        alpha, logic = mock.Mock(), mock.Mock()
+        alpha.variant.return_value = ('alpha MSL', ['alpha_entry'])
+        logic.variant.return_value = ('logic MSL', ['logic_entry'])
+        ns: dict[str, Any] = dict(os=os, subprocess=subprocess, out=str(self.root), IOSOUT=str(ios), w=str(self.root), TARGETS={'mac', 'ios'},
+                  MTL=types.SimpleNamespace(compile=mock.Mock(side_effect=compile_target)),
+                  ALPHA_STATS=collections.Counter(), LOGIC_STATS=collections.Counter(), dmsh_alpha=alpha, dmsh_logic=logic)
+        functions = [n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name in ('ps_side_finish', 'alpha_finish', 'logic_finish')]
+        exec(compile(ast.Module(body=functions, type_ignores=[]), '<side libraries>', 'exec'), ns)
+        refl = {'stage': 'ps'}
+        for enabled in (True, False, True):
+            ns.update(ALPHA=enabled, LOGIC=enabled)
+            before = ns['MTL'].compile.call_count
+            for field, suffix in (('alpha', 'ba'), ('logic', 'bl')):
+                self.assertIs(ns[field + '_finish']('key', 'base MSL', refl), refl)
+                self.assertEqual(field in refl, enabled)
+                for d in (self.root, ios): self.assertEqual((d / f'key_{suffix}.metallib').exists(), enabled)
+            self.assertEqual(ns['MTL'].compile.call_count - before, 4 if enabled else 0)
+        self.assertEqual(alpha.variant.call_count, 2)
+        self.assertEqual(logic.variant.call_count, 2)
+
+    def test_progress_counts_actual_compiles_and_metal_cache_reuse(self):
+        nodes = [n for n in self.tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in ('atomic_json', 'BuildMetalCache')]
+        ns: dict[str, Any] = dict(os=os, json=json, threading=threading, time=time, dmsh_mtlcache=dmsh_mtlcache, w=str(self.root))
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), '<library progress>', 'exec'), ns)
+        compiler = mock.Mock(side_effect=lambda src, air, lib: Path(lib).write_bytes(Path(src).read_bytes()))
+        with mock.patch.object(dmsh_mtlcache, 'compiler_id', return_value='test compiler'):
+            cache = ns['BuildMetalCache'](str(self.root / 'cas'), {t: (t, 'flags', compiler) for t in ('mac', 'ios')}, str(self.root))
+        msl = self.root / 'shader.metal'; msl.write_text('MSL')
+        for t in ('mac', 'ios'):
+            cache.compile(t, str(msl), str(self.root / (t + '.metallib')))
+            cache.compile(t, str(msl), str(self.root / (t + '-copy.metallib')))
+        self.assertEqual(compiler.call_count, 2)
+        cache.last_progress = 0; cache.count(('mac', 'reused'), 0)
+        self.assertEqual(json.loads((self.root / '_b_progress.json').read_text()), {'compiled': 2, 'reused': 2})
 
 
 class TargetSelection(unittest.TestCase):

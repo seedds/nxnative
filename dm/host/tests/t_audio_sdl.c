@@ -23,14 +23,29 @@ void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 module_t *module_of(const void *p) { (void)p; return NULL; }   // call sites in the log: no guest modules in the unit test
 void dm_host_helper_qos(plat_qos_t q) { (void)q; }
 
-static int threads(void) {   // this process's threads; -1 where they cannot be counted here
+// This process's threads: their count, and their thread IDs in ids (at most TMAX); -1 where they cannot be listed here (Linux only, from /proc/self/task)
+enum { TMAX = 64 };
+static int threads(int *ids) {
 #if defined(__linux__)
     DIR *d = opendir("/proc/self/task"); if (!d) return -1;
-    int n = 0; struct dirent *e; while ((e = readdir(d))) if (e->d_name[0] != '.') n++;
+    int n = 0; struct dirent *e; while ((e = readdir(d))) if (e->d_name[0] != '.') { if (ids && n < TMAX) ids[n] = atoi(e->d_name); n++; }
     closedir(d); return n;
 #else
-    return -1;
+    (void)ids; return -1;
 #endif
+}
+// The threads in now[] that are not in before[]: their count, and their IDs and names (SDL names its device threads SDLAudioP<n>) in desc
+static int new_threads(const int *now, int n, const int *before, int nb, char *desc, size_t dn) {
+    int k = 0; size_t o = 0; desc[0] = 0;
+    for (int i = 0; i < n && i < TMAX; i++) {
+        int seen = 0; for (int j = 0; j < nb && j < TMAX; j++) seen |= now[i] == before[j];
+        if (seen) continue;
+        k++;
+        char path[64], name[32] = "?"; snprintf(path, sizeof path, "/proc/self/task/%d/comm", now[i]);
+        FILE *f = fopen(path, "r"); if (f) { if (fgets(name, sizeof name, f)) name[strcspn(name, "\n")] = 0; fclose(f); }
+        if (o < dn) o += (size_t)snprintf(desc + o, dn - o, "%s%d %s", k > 1 ? ", " : "", now[i], name);
+    }
+    return k;
 }
 static void sleep_ms(int ms) { plat_sleep_ns((uint64_t)ms * 1000000); }
 
@@ -83,22 +98,27 @@ static void cycle(int ch, int real, const char *what) {
 int main(void) {
     SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");   // before hle_audio.c starts SDL's audio
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES"); unsetenv("DM_AUDIO_MUTE");
-    int t0 = threads();
+    int t0 = threads(NULL);
     cycle(2, 1, "a stereo output opens on the default device");
     CHECK(g_sdl_audio && !strcmp(SDL_GetCurrentAudioDriver(), "dummy"), "SDL's audio runs on the dummy driver");
     { SDL_AudioSpec dev; int fr = 0; SDL_AudioDeviceID id = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, NULL);
       CHECK(id && SDL_GetAudioDeviceFormat(id, &dev, &fr) && fr == RATE / 200, "the device buffer is 5 ms of frames, not SDL's 1024-frame default");
       if (id) SDL_CloseAudioDevice(id); }
-    int t1 = threads();
+    // The leak check compares thread IDs, not counts. A joined thread is not gone yet: pthread_join (SDL_WaitThread) returns when the kernel clears the thread's ID, early in its exit,
+    // and its /proc/self/task entry stays until the exit ends a moment later, longer on a loaded machine. So a read right after a Close or the SDL_CloseAudioDevice above can list
+    // a thread on its way out. Under ctest -j6 load the baseline read here held SDL's device thread (SDLAudioP<n>) in about one run in four, 3 threads against the 2 the cycles
+    // settle to, and the count check failed although nothing leaked (25 of 100 runs). So the baseline may hold an exiting thread (it is just not seen again), and a thread the next
+    // two cycles start that is still listed after a second is a leak: the wait covers the exit of one they joined (CI run 8 on f8ac96d read one such thread right after the third Close)
+    int base[TMAX], t1 = threads(base); char before[256] = "";
+    if (t1 >= 0) new_threads(base, t1, base, 0, before, sizeof before);   // their names now, while an exiting one is still listed
     cycle(6, 1, "a six-channel output opens");
     cycle(2, 1, "and a stereo one again");
-    // A thread that is exiting still has its /proc/self/task entry for a moment after the join (or after SDL's device thread was told to stop): the count is read until it settles,
-    // up to a second. A thread that is still there after that is a leak (CI run 8 on f8ac96d read 3 right after Close and failed on one exiting thread)
-    int t2 = threads();
-    for (int ms = 0; t2 != t1 && ms < 1000; ms += 10) { sleep_ms(10); t2 = threads(); }
-    if (t0 >= 0) CHECK(t2 == t1, "a second and third open / play / close cycle leave no thread behind");
+    int now[TMAX], t2 = threads(now); char born[256];
+    int nb = t0 >= 0 ? new_threads(now, t2, base, t1, born, sizeof born) : 0;
+    for (int ms = 0; nb && ms < 1000; ms += 10) { sleep_ms(10); t2 = threads(now); nb = new_threads(now, t2, base, t1, born, sizeof born); }
+    if (t0 >= 0) { CHECK(nb == 0, "a second and third open / play / close cycle leave no thread behind"); if (nb) printf("threads left by the second and third cycle: %s\n", born); }
     else printf("note: thread counting is Linux-only; the leak check did not run here\n");
-    printf("threads: %d at start, %d after the first output (its watchdog and SDL's own), %d after two more\n", t0, t1, t2);
+    printf("threads: %d at start, %d after the first output (%s), %d after two more\n", t0, t1, before, t2);
     setenv("DM_AUDIO", "0", 1);
     cycle(2, 0, "DM_AUDIO=0 opens an output too");
     printf("== audio_sdl: %d checks, %d failed ==\n", checks, fails);

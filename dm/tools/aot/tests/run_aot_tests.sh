@@ -70,6 +70,7 @@ run corpus_threads python3 "$aot/tests/test_threads.py" --nxaot "$build/nxaot" -
 run safepoints python3 "$aot/tests/test_safepoints.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/safepoints"
 run cache python3 "$aot/tests/test_cache.py" --nxaot "$build/nxaot" --work "$build/cache"
 run plan python3 "$aot/tests/test_plan.py" --nxaot "$build/nxaot" --work "$build/plan"
+run lines python3 "$aot/tests/test_lines.py" --nxaot "$build/nxaot" --work "$build/lines"
 run split python3 "$aot/tests/test_split.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/split"
 run profile python3 "$aot/tests/test_profile.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/profile"
 # Windows packs: LLVM's llvm-readobj and llvm-objdump of the image's LLVM 18 (the Ubuntu package's folder)

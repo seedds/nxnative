@@ -25,8 +25,11 @@ int main(void) { @autoreleasepool {
     char dir[] = "/tmp/t_image_primitive_id.XXXXXX"; if (!mkdtemp(dir)) return 1;
     NSString *ms = [NSString stringWithFormat:@"%s/p.metal", dir], *air = [NSString stringWithFormat:@"%s/p.air", dir], *ml = [NSString stringWithFormat:@"%s/p.metallib", dir];
     [@(src) writeToFile:ms atomically:NO encoding:NSUTF8StringEncoding error:nil];
-    char cmd[1024]; snprintf(cmd, sizeof cmd, "xcrun -sdk macosx metal -c '%s' -o '%s' && xcrun -sdk macosx metallib '%s' -o '%s'", ms.UTF8String, air.UTF8String, air.UTF8String, ml.UTF8String);
-    if (system(cmd)) { fprintf(stderr, "metal compile failed\n"); return 1; }
+    for (NSArray *args in @[@[@"-sdk", @"macosx", @"metal", @"-c", ms, @"-o", air], @[@"-sdk", @"macosx", @"metallib", air, @"-o", ml]]) {   // the compiler with its arguments, no shell
+        NSTask *t = [NSTask new]; t.executableURL = [NSURL fileURLWithPath:@"/usr/bin/xcrun"]; t.arguments = args;
+        if (![t launchAndReturnError:&error]) { fprintf(stderr, "metal compile: %s\n", error.localizedDescription.UTF8String); return 1; }
+        [t waitUntilExit]; if (t.terminationStatus) { fprintf(stderr, "metal compile failed\n"); return 1; }
+    }
     id<MTLLibrary> lib = lib_from_file(ml, &error);
     if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
     NvProg *pr = [NvProg new]; pr->sh[0] = [NvShader new]; pr->sh[0]->fn = fn_spec(lib, @"v", nil, &error);   // through the Metal 4 bases, as the host loads shaders

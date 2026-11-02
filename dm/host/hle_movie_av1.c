@@ -137,7 +137,7 @@ static vpx_image_t *from_nv12(CVPixelBufferRef pb, const av1_seq *s) {   // Vide
     unsigned w = (unsigned)CVPixelBufferGetWidthOfPlane(pb, 0), h = (unsigned)CVPixelBufferGetHeightOfPlane(pb, 0);
     const uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(pb, 0), *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
     size_t ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
-    vpx_image_t *c = vpx_img_alloc(NULL, VPX_IMG_FMT_I420, w, h, 1);
+    vpx_image_t *c = y && uv ? vpx_img_alloc(NULL, VPX_IMG_FMT_I420, w, h, 1) : NULL;   // no plane address (the lock failed): no picture, as when the allocation fails
     if (c) {
         for (unsigned r = 0; r < h; r++) memcpy(c->planes[0] + (size_t)r * c->stride[0], y + r * ys, w);
         for (unsigned r = 0; r < (h + 1) / 2; r++) for (unsigned x = 0; x < (w + 1) / 2; x++) {

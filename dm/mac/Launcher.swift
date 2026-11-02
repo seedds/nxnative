@@ -23,24 +23,29 @@ struct LauncherView: View {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(info("CFBundleName") ?? "Game").font(.title2.weight(.semibold))
-                    Text("Version \(info("CFBundleShortVersionString") ?? "1.0")").foregroundStyle(.secondary)
+                    Text(version).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 Spacer()
             }
-            .padding([.horizontal, .top], 20)
+            .padding(.horizontal, 20).padding(.top, 8)
             Form {
                 settingSections(basic: true)
                 CloudSavesSection()
                 Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
-                }
-                if advanced {
-                    settingSections(basic: false)
-                    Section {
-                        Button("Reset to tested defaults") { m.reset() }
-                            .disabled(!m.changed)
-                    } footer: {
-                        Text("Brings back all settings this game was tested with.")
+                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {
+                        ForEach(m.sections(basic: false), id: \.self) { section in
+                            let rows = m.rows(in: section, basic: false)
+                            if !rows.isEmpty {
+                                Text(section).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                                ForEach(rows) { SettingRow(s: $0, m: m) }
+                            }
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Button("Reset to tested defaults") { m.reset() }
+                                .disabled(!m.changed)
+                            Text("Brings back all settings this game was tested with.").font(.caption).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
@@ -59,6 +64,12 @@ struct LauncherView: View {
             .padding(20)
         }
         .frame(minWidth: 520, idealWidth: 560)
+    }
+
+    /// The app's version and the commit that packed it (DMCommit), which a bug report needs
+    private var version: String {
+        let v = "Version \(info("CFBundleShortVersionString") ?? "1.0")"
+        return info("DMCommit").map { "\(v) (\($0))" } ?? v
     }
 
     @ViewBuilder private func settingSections(basic: Bool) -> some View {
@@ -133,6 +144,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
+        w.titleVisibility = .hidden; w.titlebarAppearsTransparent = true   // the header below names the game; the Dock and Mission Control still read the title
         w.contentMinSize = NSSize(width: 520, height: 0)
         window = w
         if let screen = w.screen ?? NSScreen.main {

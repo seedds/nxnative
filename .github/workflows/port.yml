@@ -106,16 +106,19 @@ jobs:
           persist-credentials: false
       - name: Build the image
         run: docker build -t nxnative-aot -f docker/Dockerfile.aot docker
-      - name: Build nxaot (build/aot) and copy its LLVM licence (build/aot/licenses/LLVM.txt)
+      # Statically linked (NXAOT_LLVM_STATIC: no libLLVM on the player's PC; dm/tools/aot/README.md), with the licences of what is linked into it: LLVM and lld, libxml2 and ICU
+      - name: Build nxaot (build/aot) and copy its licences (build/aot/licenses/LLVM.txt, libxml2.txt, ICU.txt)
         run: |
           docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
-            "cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot --target nxaot && mkdir -p build/aot/licenses && cp /usr/share/doc/libllvm18/copyright build/aot/licenses/LLVM.txt"
+            "cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release -DNXAOT_LLVM_STATIC=ON && cmake --build build/aot --target nxaot && mkdir -p build/aot/licenses && cp /usr/share/doc/libllvm18/copyright build/aot/licenses/LLVM.txt && cp /usr/share/doc/libxml2/copyright build/aot/licenses/libxml2.txt && cp /usr/share/doc/libicu74/copyright build/aot/licenses/ICU.txt"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nxaot-linux
           path: |
             build/aot/nxaot
             build/aot/licenses/LLVM.txt
+            build/aot/licenses/libxml2.txt
+            build/aot/licenses/ICU.txt
           if-no-files-found: error
           retention-days: 1
 
@@ -140,10 +143,9 @@ jobs:
         with:
           name: nxaot-linux
           path: build/aot
-      - name: LLVM 18's shared library (what a player installs to pack, README.txt)
+      - name: No LLVM on the runner (the bundle's nxaot is linked statically, and the check below proves it runs without one)
         run: |
-          if ! ldconfig -p | grep -q 'libLLVM.so.18.1 '; then sudo apt-get update && sudo apt-get install -y --no-install-recommends libllvm18; fi
-          ldconfig -p | grep 'libLLVM.so.18.1 '
+          if ldconfig -p | grep -q 'libLLVM.so.18.1 '; then echo 'libLLVM 18 is installed on this runner: the check cannot prove the bundle needs none'; fi
       - name: Assemble, archive and check the bundle
         run: python3 scripts/package_port.py --platform linux --build build/linux --aot build/aot --out build/bundle/nxnative-linux-x86_64 --archive --check
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

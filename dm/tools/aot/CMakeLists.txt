@@ -27,7 +27,23 @@ if (NOT NXAOT_LOCK_llvm OR NOT NXAOT_LOCK_dynarmic)
     message(FATAL_ERROR "nxaot.lock: the llvm and dynarmic rows are required")
 endif()
 
+# NXAOT_LLVM_STATIC=ON: LLVM's and lld's static libraries instead of libLLVM, the nxaot of the port's bundle (README.md, "Building"). The system libraries
+# LLVM's archives name stay shared where every distribution keeps their soname (libz.so.1, libzstd.so.1, libtinfo.so.6) but libxml2, which
+# LLVMWindowsManifest (lld's COFF driver merges manifests with it) needs: its soname changed (libxml2.so.2, libxml2.so.16 from 2.14) and its ICU's
+# changes with every release, so its archive is linked with ICU's (libicuuc.a, libicudata.a) and liblzma.so.5. LLVM's config finds libxml2
+# itself (LLVM_ENABLE_LIBXML2), hence the archive set before find_package(LLVM)
+option(NXAOT_LLVM_STATIC "Link the LLVM and lld libraries statically instead of libLLVM" OFF)
+if (NXAOT_LLVM_STATIC)
+    find_library(NXAOT_LIBXML2_STATIC NAMES libxml2.a REQUIRED)
+    set(LIBXML2_LIBRARY "${NXAOT_LIBXML2_STATIC}" CACHE FILEPATH "libxml2 (static: NXAOT_LLVM_STATIC)" FORCE)
+endif()
 find_package(LLVM ${NXAOT_LOCK_llvm} EXACT REQUIRED CONFIG)
+if (NXAOT_LLVM_STATIC AND TARGET LibXml2::LibXml2)
+    find_library(NXAOT_ICUUC_STATIC NAMES libicuuc.a REQUIRED)
+    find_library(NXAOT_ICUDATA_STATIC NAMES libicudata.a REQUIRED)
+    find_library(NXAOT_LZMA NAMES lzma liblzma.so.5 REQUIRED)   # the runtime package only: liblzma5, without liblzma-dev
+    set_property(TARGET LibXml2::LibXml2 APPEND PROPERTY INTERFACE_LINK_LIBRARIES "${NXAOT_ICUUC_STATIC};${NXAOT_ICUDATA_STATIC};${NXAOT_LZMA};ZLIB::ZLIB;${CMAKE_DL_LIBS}")
+endif()
 if (NOT LLVM_PACKAGE_VERSION VERSION_EQUAL NXAOT_LOCK_llvm)
     message(FATAL_ERROR "LLVM ${LLVM_PACKAGE_VERSION} found at ${LLVM_DIR}, nxaot.lock pins ${NXAOT_LOCK_llvm}: use the image of docker/Dockerfile.aot")
 endif()
@@ -41,8 +57,7 @@ endif()
 configure_file(src/nxaot_lock.h.in "${CMAKE_CURRENT_BINARY_DIR}/gen/nxaot_lock.h" @ONLY)
 
 # LLVM: the shared libLLVM where the package was built with one (the Ubuntu packages of the image are), else the static component libraries.
-# NXAOT_LLVM_STATIC=ON links the components statically, as the distributed nxaot will be (aot-recompiler.md section 13)
-option(NXAOT_LLVM_STATIC "Link the LLVM component libraries statically instead of libLLVM" OFF)
+# NXAOT_LLVM_STATIC=ON (above) links the components statically, as the distributed nxaot is (aot-recompiler.md section 13; README.md, "Building")
 set(NXAOT_LLVM_COMPONENTS core support orcjit native nativecodegen asmparser asmprinter passes analysis mc transformutils mcdisassembler
     ${LLVM_NATIVE_ARCH}disassembler object)
 
@@ -113,6 +128,23 @@ endif()
 # Compile units on worker threads, one LLVM context each, and the per-function cache of section 13 (src/cache: objects by the SHA-256 of
 # what each depends on, LLVM's SHA-256)
 find_package(LLD REQUIRED CONFIG HINTS "${LLVM_LIBRARY_DIR}/cmake/lld" "${LLVM_DIR}/../lld")
+# lld's libraries are static archives in every package, but a package built with LLVM_LINK_LLVM_DYLIB (Ubuntu's) gives their imported targets the
+# shared LLVM target as an interface library. Linked as they are with NXAOT_LLVM_STATIC, the binary would hold LLVM twice, the static components and
+# libLLVM.so, and stop at its start with "Option '...' registered more than once!". In that mode their interfaces name LLVM's static component
+# libraries instead: the LINK_COMPONENTS of lld's own lld/Common, lld/ELF and lld/COFF. Those include every target LLVM was built with, as lld's do:
+# lld's ELF driver calls InitializeAllTargets for bitcode inputs (LTO), which nxaot never gives it but which its archive member holds all the same
+if (NXAOT_LLVM_STATIC)
+    llvm_map_components_to_libnames(_lld_llvm_lldCommon codegen core debuginfodwarf demangle mc option support target targetparser)
+    llvm_map_components_to_libnames(_lld_llvm_lldELF ${LLVM_TARGETS_TO_BUILD} binaryformat bitwriter core debuginfodwarf demangle lto mc object option
+                                    passes support targetparser)
+    llvm_map_components_to_libnames(_lld_llvm_lldCOFF ${LLVM_TARGETS_TO_BUILD} binaryformat bitwriter core debuginfocodeview debuginfodwarf debuginfomsf
+                                    debuginfopdb demangle libdriver lto mc object option passes support targetparser windowsdriver windowsmanifest)
+    foreach(_lld IN ITEMS lldCommon lldELF lldCOFF)
+        get_target_property(_lld_iface ${_lld} INTERFACE_LINK_LIBRARIES)
+        list(REMOVE_ITEM _lld_iface LLVM)
+        set_target_properties(${_lld} PROPERTIES INTERFACE_LINK_LIBRARIES "${_lld_iface};${_lld_llvm_${_lld}}")
+    endforeach()
+endif()
 find_package(Threads REQUIRED)
 # A Windows pack (--target windows, README.md "Windows packs"): the same ELF objects joined, converted to COFF (src/build/coff.cpp) and linked by lld's
 # COFF driver into a DLL

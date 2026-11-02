@@ -173,6 +173,19 @@ class Bundle(unittest.TestCase):
         self.assertTrue(any(f.startswith('nxlauncher: exit 1') for f in fails), fails)
         self.assertTrue(any(f.startswith('dm/gfx/tools/dmsh_chain_vk.py: exit 1') for f in fails), fails)   # it hashes a file the bundle lacks
 
+    @unittest.skipUnless(sys.platform == 'linux', 'the Linux bundle\'s check runs its programs')
+    def test_check_dynamic_nxaot(self):   # an nxaot linked with the shared LLVM (its DT_NEEDED names libLLVM, and libxml2 through it) fails the check; the static one passes
+        rc, err, out = self.package()
+        self.assertEqual((rc, err), (0, ''))
+        def check(needed):
+            dyn = {'bin/nxaot': (needed, [])}
+            with mock.patch.object(pp, 'elf_dynamic', lambda p: dyn.get(Path(p).relative_to(out).as_posix())), mock.patch.object(pp, 'say', lambda m: None):
+                return pp.check('linux', out, [self.build, self.aot])
+        self.assertEqual(check(['liblzma.so.5', 'libm.so.6', 'libz.so.1', 'libzstd.so.1', 'libtinfo.so.6', 'libstdc++.so.6', 'libgcc_s.so.1', 'libc.so.6']), [])
+        self.assertEqual(check(['libLLVM.so.18.1', 'libxml2.so.2', 'libstdc++.so.6', 'libc.so.6']),
+                         ['bin/nxaot needs libLLVM.so.18.1 libxml2.so.2, which a player\'s PC need not have: it was linked with the shared LLVM; build nxaot with '
+                          '-DNXAOT_LLVM_STATIC=ON (dm/tools/aot/README.md)'])
+
     def test_check_windows(self):   # the executables are not run; the packer and the chain versions are
         win = self.tmp / 'build/win64'; self.fake_tree(win, '.exe')
         rc, err, out = self.package('--check', platform='windows', build=win, aot=False)

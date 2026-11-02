@@ -78,8 +78,14 @@ its local image ID changes with every rebuild (the build attaches a new attestat
 registry first (`docker push`, then the digest it prints), as the llvm-mingw image of the host build is pinned. Its base image is pinned by digest
 already, and its packages are the Ubuntu 24.04 versions of the day it is built: `nxaot.lock` and the configure check keep LLVM at 18.1.3.
 
-Linking: `libLLVM-18.so` from the image (the Ubuntu package is built with `LLVM_LINK_LLVM_DYLIB`); `-DNXAOT_LLVM_STATIC=ON` links the component
-libraries statically instead, as the distributed `nxaot` will be (design section 13). zlib (which LLVM itself links) reads the `.tsv.gz` vectors; lld's
+Linking: `libLLVM-18.so` from the image (the Ubuntu package is built with `LLVM_LINK_LLVM_DYLIB`); `-DNXAOT_LLVM_STATIC=ON` links LLVM's and lld's
+static libraries instead, as the `nxaot` of the port's bundle is (design section 13; the CI's `nxaot-bundle` job). That mode replaces the shared
+LLVM that Ubuntu's lld targets name with LLVM's component archives (every target LLVM was built with: lld's ELF driver initializes them all for LTO),
+needs Polly's archives (the image's `libpolly-18-dev`: Ubuntu's LTO library calls into Polly) and links libxml2 with ICU from their archives, since
+their sonames change between distributions' releases (`libxml2.so.2` is `libxml2.so.16` on Ubuntu 26.04). The binary, about 163 MB, needs only
+`libc`, `libm`, `libstdc++` (GCC 13), `libgcc_s`, `libz`, `libzstd`, `libtinfo` and `liblzma`, and glibc 2.38; its packs are byte-identical to the
+shared build's (checked on an Ubuntu 26.04 without LLVM), and its CTest run passes as the shared build's does (27 tests, 940 s). Its own link
+takes about 4 s; configure a separate tree for it (`build/aot-static`). zlib (which LLVM itself links) reads the `.tsv.gz` vectors; lld's
 ELF driver (`liblldELF.a`, the image's `liblld-18-dev`) links the packs, and its COFF driver (`liblldCOFF.a`) the Windows packs' DLLs ("Windows
 packs"). The build tree takes about 74 MB, and the tests' objects and shared objects
 (corpus_native, corpus_funcdiff, corpus_jit, corpus_threads, safepoints, the benchmark) about 30 to 60 MB more. On this repository's development

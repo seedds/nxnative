@@ -16,6 +16,12 @@ RUN apt-get update \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libboost-dev \
  && rm -rf /var/lib/apt/lists/*
+# Polly's static archives (libPolly.a, libPollyISL.a), for nxaot's static mode (-DNXAOT_LLVM_STATIC=ON, dm/tools/aot/README.md): Ubuntu's LLVM links Polly
+# into its tools, so LLVM's LTO library, which lld's archives pull in, calls getPollyPluginInfo, and a static link of it needs Polly. A layer of its own, so
+# that the layers above stay cached
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libpolly-18-dev \
+ && rm -rf /var/lib/apt/lists/*
 ENV CC=clang CXX=clang++
 # The worktree is mounted at /src; git refuses repositories owned by another user without this (the container runs as the caller's user, HOME=/tmp)
 RUN git config --system --add safe.directory '*'

@@ -13,8 +13,8 @@ when something is not there.
             /usr/share/doc/libllvm18/copyright there). Required on Linux; on Windows there is no nxaot for Windows yet, and without --aot the bundle has none
   --out     the bundle folder, created (or replaced when it holds an earlier bundle: a VERSION file); its name is the archive's top folder
   --archive <out>.tar.gz (Linux: executable bits kept) or <out>.zip (Windows) beside it; the same inputs give the same bytes (sorted entries, the commit's time on every entry)
-  --check   the bundle's own smoke test: no symlink, no file naming the build trees or this checkout and no ELF run path outside the bundle, the launcher's --list on an empty games
-            folder and nxaot version (Linux only: a Windows bundle's executables are not run here), the packer's --help through the bundle's path, the shader chain versions the
+  --check   the bundle's own smoke test: no symlink, no file naming the build trees or this checkout, no ELF run path outside the bundle and no ELF that needs a shared library
+            of NOT_NEEDED (a dynamic nxaot: build it with -DNXAOT_LLVM_STATIC=ON), the launcher's --list on an empty games folder and nxaot version (Linux only: a Windows bundle's executables are not run here), the packer's --help through the bundle's path, the shader chain versions the
             bundle's sources give against its headers, a profile for every host
 Exit status 0 when done, 1 on an error (the message says which file or check), 2 on a usage error."""
 import argparse
@@ -43,6 +43,10 @@ PACKER_TREES = ('scripts/build_ipa_from_nsp.py', 'dm/tools', 'dm/games', 'dm/gfx
 PACKER_SKIP = ('dm/tools/aot/', 'dm/tools/tests/', 'dm/host/tests/', 'dm/gfx/tests/', 'dm/ios/tests/')   # the recompiler's C++ sources (bin/nxaot is built) and the tests
 TEXT_SUFFIXES = {'.sh', '.cmd', '.txt', '.md', '.tsv', '.json', '.py'}   # scanned by --check for the paths of the build trees and this checkout
 MARKER = 'VERSION'
+# Shared libraries no program of the bundle may need (--check): LLVM's, which a player's PC does not have (Ubuntu's libllvm18), and the ones a shared LLVM brings whose sonames
+# change between the distributions' releases (libxml2.so.2 is libxml2.so.16 from libxml2 2.14; ICU's carry its version). The bundle's nxaot is linked statically
+# (-DNXAOT_LLVM_STATIC=ON: dm/tools/aot/README.md, "Building and testing in Docker") and needs only libc, libm, libstdc++, libgcc_s, libz, libzstd, libtinfo and liblzma
+NOT_NEEDED = ('libLLVM', 'libclang', 'liblld', 'libxml2', 'libicu', 'libffi', 'libedit')
 
 
 class PackError(Exception):
@@ -146,7 +150,6 @@ def readme(platform, sha, date, hosts):
               '',
               'What this PC needs',
               f'  - {"Windows 10 or later" if win else "Linux with glibc 2.38 and the C++ library of GCC 13 or later (Ubuntu 24.04 or later, Debian 13)"} and a GPU driver with Vulkan 1.3.']
-    if not win: lines += ['  - To pack a game: LLVM 18\'s shared library, which bin/nxaot loads from /usr/lib/llvm-18/lib (sudo apt install libllvm18).']
     lines += [
               f'  - To pack a game: Python 3.12 or later with lz4, capstone and backports.zstd ({py} -m pip install lz4 capstone backports.zstd; backports.zstd only before',
               '    Python 3.14), and the .NET SDK 10 (the packer builds its extraction tool, nx_extract, with it on the first pack; NVN games also need the Vulkan shader',
@@ -333,11 +336,14 @@ def check(platform, out, inputs):
         dyn = elf_dynamic(p) if p.stat().st_size >= 64 else None
         if dyn:
             needed, rpaths = dyn
-            # a run path inside the bundle ($ORIGIN) or a system folder (nxaot's /usr/lib/llvm-18/lib, where Ubuntu's libllvm18 is) is what a player's PC can have; one that
-            # names a build tree, this checkout or a relative folder (taken from wherever the program is started) is not
+            # a run path inside the bundle ($ORIGIN) or a system folder is what a player's PC can have; one that names a build tree, this checkout or a relative folder (taken
+            # from wherever the program is started) is not
             bad = [part for r in rpaths for part in r.split(':') if part and not part.startswith('$ORIGIN')
                    and (not part.startswith(('/usr/', '/lib', '/opt/')) or any(part.startswith(x) for x in leaks))]
             if bad: fails.append(f'{rel} has the run path {":".join(bad)}, outside the bundle and the system\'s folders')
+            banned = [n for n in needed if n.startswith(NOT_NEEDED)]
+            if banned: fails.append(f'{rel} needs {" ".join(banned)}, which a player\'s PC need not have' + (': it was linked with the shared LLVM; build nxaot with '
+                                    '-DNXAOT_LLVM_STATIC=ON (dm/tools/aot/README.md)' if rel.startswith('bin/nxaot') else ''))
             say(f'check: {rel}: needs {" ".join(needed) or "no shared library"}' + (f'; run path {":".join(rpaths)}' if rpaths else ''))
     say(f'check: {len(rows)} files, no symbolic link, no path of the build trees or this checkout in the text files it wrote or copied from them' if not fails else f'check: {len(fails)} file problem(s)')
 

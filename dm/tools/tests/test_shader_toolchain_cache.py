@@ -292,7 +292,7 @@ class SideLibraries(unittest.TestCase):
         ns: dict[str, Any] = dict(os=os, subprocess=subprocess, out=str(self.root), IOSOUT=str(ios), w=str(self.root), TARGETS={'mac', 'ios'},
                   MTL=types.SimpleNamespace(compile=mock.Mock(side_effect=compile_target)),
                   ALPHA_STATS=collections.Counter(), LOGIC_STATS=collections.Counter(), dmsh_alpha=alpha, dmsh_logic=logic)
-        functions = [n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name in ('ps_side_finish', 'alpha_finish', 'logic_finish')]
+        functions: list[ast.stmt] = [n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name in ('ps_side_finish', 'alpha_finish', 'logic_finish')]
         exec(compile(ast.Module(body=functions, type_ignores=[]), '<side libraries>', 'exec'), ns)
         refl = {'stage': 'ps'}
         for enabled in (True, False, True):
@@ -307,7 +307,7 @@ class SideLibraries(unittest.TestCase):
         self.assertEqual(logic.variant.call_count, 2)
 
     def test_progress_counts_actual_compiles_and_metal_cache_reuse(self):
-        nodes = [n for n in self.tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in ('atomic_json', 'BuildMetalCache')]
+        nodes: list[ast.stmt] = [n for n in self.tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in ('atomic_json', 'BuildMetalCache')]
         ns: dict[str, Any] = dict(os=os, json=json, threading=threading, time=time, dmsh_mtlcache=dmsh_mtlcache, w=str(self.root))
         exec(compile(ast.Module(body=nodes, type_ignores=[]), '<library progress>', 'exec'), ns)
         compiler = mock.Mock(side_effect=lambda src, air, lib: Path(lib).write_bytes(Path(src).read_bytes()))

@@ -94,7 +94,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
-| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 41 | 0 | 0 | `build` → `game` ×2 |
+| [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -514,7 +514,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x1126794`: stepping down stops at < 3 → at < 2: cmp w9,#3 → cmp w9,#2
   - cut `+0x112691c`: interval controller always takes the GPU time path (CPU span timing): cbz x0,#0x1126934 → b #0x1126928
   - cut `+0x1126974`: interval controller always takes the GPU time path (takes max(CPU span, GPU time)): cbz x0,#0x112698c → b #0x1126980
-  <details><summary>41 frame-step sites</summary>
+  <details><summary>43 frame-step sites</summary>
 
   - frame step `+0x27ae0`: Pane::Calculate: a HUD widget at the edge moved to the taller screen's edge with its children, full-screen backgrounds stretched (duo_anchor.c)
   - frame step `+0x2df28`: projected texture fitted to the layout: a pane as tall as the taller screen maps its whole height
@@ -536,6 +536,8 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0xf5a0dc`: capture: the screen's layout height instead of the layout file's 720 (texture size, copied rect)
   - frame step `+0xf5a4b8`: capture: the screen's layout height instead of the layout file's 720 (texture size, copied rect)
   - frame step `+0xf60cc0`: capture pane Calculate: a full-screen capture made as tall as the screen (duo_anchor.c)
+  - frame step `+0xf66118`: capture: the screen's layout height instead of the layout file's 720 (texture size, copied rect)
+  - frame step `+0xf66334`: capture: the screen's layout height instead of the layout file's 720 (texture size, copied rect)
   - frame step `+0xf6e798`: 720.0 with 1280.0 (screen position)
   - frame step `+0xf75ba4`: screen copy into a 16:9 picture (camera photo): the screen's middle 16:9 band, not the whole taller screen squashed into it
   - frame step `+0x100817c`: 720.0 with 1280.0 passed as a layout size

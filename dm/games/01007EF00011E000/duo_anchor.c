@@ -96,9 +96,11 @@ void duo_calc(char *pane, const float *st, const void *vt_cut, const void *vt_ca
     //   circle's edge, P_CameraPointerL / R_00, 320 x 608; the cold screen's frost; the adventure log's watermark) is scaled about the screen's centre, as wide as it
     //   is tall, so the circle stays round and reaches the moved rows as at 16:9 (an iPhone Duo: the scope's black masks stopped 88 short of the title and guide
     //   rows, the view uncovered above and below); a full-height panel in the middle is stretched (the shop list's capture masks), an illustration scaled too. Not
-    //   the map's slides (P_CaptureSlideL / R, 110 x 720 beyond the screen's sides: copies of the 720 rows they slide over)
+    //   the map's slides (P_CaptureSlideL / R, 110 x 720 beyond the screen's sides: copies of the 720 rows they slide over). The title's menu backing, two 480 x 720
+    //   halves side by side (FBLayout_00 / 01 from -320 to 160, FBLayout_02 / 03 from 160 to the right edge), is stretched as a middle panel though one half is
+    //   against the side: scaled, that half's inner edge had moved out to 199 and left a band 39 wide without the backing (an iPhone Duo, the title screen)
     if (pic && gw < st[4] && fab(g[7]) < 20 && gh >= 600 && gh <= 730 && !has4(pane + 0xb8, 0x64696c53u) && !in_cut(pane, st, vt_cut)) {   // "Slid"
-        int side = fab(g[3]) + gw / 2 >= 630;
+        int side = fab(g[3]) + gw / 2 >= 630 && !has4(pane + 0xb8, 0x614c4246u);   // "FBLa"
         if (side || gh >= 700) {
             float k = gh < 720 ? (gh + 2 * d) / gh : st[1];
             if (side || has4(pane + 0xb8, 0x756c6c49u)) for (int i = 0; i < 8; i++) g[i] *= k;   // "Illu"

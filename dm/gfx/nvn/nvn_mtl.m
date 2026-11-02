@@ -10293,7 +10293,7 @@ static void dispatch(const p_dispatch *dp) {
             MLOG("embedded compute kernel %s first dispatch: call site %s+%#llx, threadgroups %dx%dx%d, element count (current CPU-side value) %u", cs->builtin, m ? m->name : "?",
                  m ? (unsigned long long)(dp->caller - (uint64_t)m->base) : (unsigned long long)dp->caller, dp->x, dp->y, dp->z, *(uint32_t *)u->addr);
         }
-        rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+        rp_flush(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // pending clears land first (below)
         id<MTLComputeCommandEncoder> ce = pg_compute();
         enc_c_pso(ce, ps);
         enc_c_args(ce, ((__bridge id<MTLBuffer>)ub).gpuAddress + uo, 0); enc_c_args(ce, ((__bridge id<MTLBuffer>)sb).gpuAddress + so, 1); enc_c_args(ce, ((__bridge id<MTLBuffer>)db).gpuAddress + dof, 2);   // Built-in compute kernel: cold path, take the addresses directly
@@ -10306,7 +10306,10 @@ static void dispatch(const p_dispatch *dp) {
     // A store the shader makes on its very first invocation only, before the others run on the Switch: the build takes it out of the shader (dmsh_build.py first_store), as Apple's GPUs start workgroups in no order
     if (dp->ind || (dp->x && dp->y && dp->z)) for (int i = 0; i < cs->rf.nfirst; i++) { const p_bind_buf *u = &S.ssbo[5][cs->rf.first[i].reg]; if (u->addr) mtl_sub_fill(u->addr + 4ull * cs->rf.first[i].word, 4, cs->rf.first[i].value); }
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
-    rp_end();
+    // Clears still pending on the current targets land before the dispatch, as before a copy (copy_t2t): the game cleared them first, and the next pass that would carry them as
+    // its load action begins after it. Fire Emblem Fortune's Weave clears its exposure image (a 3x1 render target, to 1,0,0,0) before the dispatch that reads and writes it as an
+    // image: landed after it, the clear overwrote the new exposure, and a scene began with the last scene's (a washed-out picture fading in)
+    rp_flush();
     image_prepare(prog_get(S.cprog), 0x20);
     int own = dispatch_own();
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }

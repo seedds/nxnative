@@ -380,6 +380,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** lazy clears (`DM_NVN_LAZY_CLEAR`) fold clear-only passes into the pass that follows.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): the four clear-only passes before the G-buffer fold into its first pass (about 30 MB less loaded and stored a frame at 1600x900).
 
+### Pending clears land before a compute dispatch
+
+- **Symptom:** a scene starts washed out, near white, and fades to its normal exposure over a second or more (Fire Emblem Fortune's Weave's battle map after the title: mean brightness 233 on its first frames, 155 once settled).
+- **Cause:** a full clear with no draw after it waits on the current targets (`R.clear_c`) for the next pass that attaches them, which takes it as its load action. Copies (`copy_t2t`, `copy_t2b`, buffer to texture) and the DLSS evaluation landed such clears first (`rp_flush`); a compute dispatch only ended the open pass. Fire Emblem Fortune's Weave resets its auto exposure on a scene change by clearing the exposure image (a 3x1 render target, serial 1296) to (1, 0, 0, 0) and then dispatches the histogram (`6d0f6db3f0d396a3`) and exposure (`a0c632d8b5fa925b`) shaders, which read and write that image. The clear landed in a pass after them: the exposure shader started from the last scene's value (the dark title's), and the reset overwrote what it had just written.
+- **Fix:** `dispatch` lands pending clears (`rp_flush`) before the dispatch, as the copies do. A dispatch moved ahead of a pass (`cs_hoist_try`) already waits for no pending clear and never writes images. One clear-only pass more where a game clears targets and dispatches before drawing to them.
+- **Found on:** Fire Emblem Fortune's Weave (Switch 2; no profile yet): found with `DM_NVN_PASSDUMP` and `DM_NVN_PASSDUMP_ALL` over the scene change (the clear recorded in pass 148710 before both dispatches, landed in pass 148711). On the same save and input, the battle map's first frames went from mean brightness 230–233 to 172–176 of 255 (the rest is the game's movement overlay), with normal colours from its first frame; from frame 1640 on the two runs match within 0.4.
+
 ### A channel mask that covers every channel is a whole clear
 
 - **Symptom:** `texture clear case not implemented … mask 0x1`.

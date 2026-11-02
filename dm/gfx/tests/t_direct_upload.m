@@ -15,7 +15,7 @@ static void run(int target,unsigned width,unsigned height,unsigned layers,unsign
     t.d=(nvn_texdesc){.target=target,.format=NVN_FORMAT_RGBA16F,.width=width,.height=height,.depth=layers,.levels=levels,.samples=1};nvn_tex_layout(&t.d,&t.L);
     size_t bytes=0;for(unsigned l=0;l<levels;l++)bytes+=(size_t)MAX(width>>l,1u)*MAX(height>>l,1u)*8*layers;
     size_t source_offset=4096+(width==19?4:0),poolsize=(t.L.size+source_offset+getpagesize()-1)&~(size_t)(getpagesize()-1);void *mem=NULL;if(posix_memalign(&mem,getpagesize(),poolsize))abort();memset(mem,0,poolsize);
-    pool_t pool={.mem=mem,.size=poolsize,.flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED};t.pool=&pool;t.mem=(uint8_t*)mem+source_offset;
+    pool_t pool={.magic=MAGIC('P','O','O','L'),.mem=mem,.size=poolsize,.flags=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED};t.pool=&pool;t.mem=(uint8_t*)mem+source_offset;
     mtl_pool_add(mem,poolsize);nvn_dirty_add_range(mem,poolsize);
     uint8_t *expected=malloc(bytes);id<MTLBuffer> readback=[g_dev newBufferWithLength:bytes+512 options:MTLResourceStorageModeShared];id<MTLTexture> first=nil,previous=nil;
     for(unsigned round=0;round<3;round++) {

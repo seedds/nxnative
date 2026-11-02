@@ -651,23 +651,27 @@ def own_tree():
 
 
 def heavy_jobs():   # other builds now running: not this process's, not stopped, not another regress.py's (whose builds pause while the measuring lock is held)
-    r = sh(['ps', '-axo', 'pid=,ppid=,stat=,command=']); out = []; rows = {}
+    r = sh(['ps', '-axo', 'pid=,ppid=,stat=,%cpu=,command=']); out = []; rows = {}
     for ln in r.stdout.splitlines():
-        pid, ppid, stat, cmd = (ln.split(None, 3) + ['', '', ''])[:4]
-        if pid.isdigit() and ppid.isdigit(): rows[int(pid)] = (int(ppid), stat, cmd)
+        pid, ppid, stat, cpu, cmd = (ln.split(None, 4) + ['', '', '', ''])[:5]
+        try: usage = float(cpu)
+        except ValueError: usage = None
+        if pid.isdigit() and ppid.isdigit(): rows[int(pid)] = (int(ppid), stat, usage, cmd)
     def managed(pid):
         seen, cooperative = set(), False
         while pid in rows and pid not in seen:
             seen.add(pid)
-            parent, _, command = rows[pid]
+            parent, _, _, command = rows[pid]
             if pid == os.getpid(): return True
             if re.search(r'(?:dmsh_build|own_compilers|vk_shaders)\.py', command): cooperative = True
             if re.search(r'(?:^|[/\s])regress\.py(?:\s|$)', command): return cooperative
             pid = parent
         return False
-    for pid, (_, stat, cmd) in rows.items():
-        exe = os.path.basename(cmd.split(' ')[0]) if cmd else ''
+    for pid, (parent, stat, cpu, cmd) in rows.items():
+        words = cmd.split(); exe = os.path.basename(words[0]) if words else ''
         if managed(pid) or stat.startswith('T') or not (exe in HEAVY_EXE or re.search(HEAVY_PY, cmd)): continue
+        # MSBuild reuse workers outlive their build. A sleeping, zero-CPU orphan is idle; active or I/O-blocked workers and build commands still count.
+        if exe == 'dotnet' and parent == 1 and stat.startswith('S') and cpu == 0 and any(w.endswith('/MSBuild.dll') for w in words[1:]) and '/nodemode:1' in words and '/nodeReuse:true' in words: continue
         out.append(f'{pid} {cmd}')
     return out
 

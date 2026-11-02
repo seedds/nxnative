@@ -332,7 +332,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int srcC,
             bool useComponents,
             bool byteAddress,
-            bool isBindless)
+            bool isBindless,
+            int cbufSlot = TextureOperation.DefaultCbufSlot)
         {
             if (srcB == RegisterConsts.RegisterZeroIndex)
             {
@@ -423,7 +424,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     type,
                     format,
                     flags,
-                    TextureOperation.DefaultCbufSlot,
+                    cbufSlot,
                     handle);
 
                 context.ImageLoad(type, format, flags, setAndBinding, (int)componentMask, dests, sources);
@@ -466,7 +467,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     type,
                     format,
                     flags,
-                    TextureOperation.DefaultCbufSlot,
+                    cbufSlot,
                     handle);
 
                 context.ImageLoad(type, format, flags, setAndBinding, compMask, dests, sources);
@@ -619,7 +620,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int srcC,
             bool useComponents,
             bool byteAddress,
-            bool isBindless)
+            bool isBindless,
+            int cbufSlot = TextureOperation.DefaultCbufSlot)
         {
             SamplerType type = ConvertSamplerType(dimensions);
 
@@ -728,7 +730,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 type,
                 format,
                 flags,
-                TextureOperation.DefaultCbufSlot,
+                cbufSlot,
                 handle);
 
             context.ImageStore(type, format, flags, setAndBinding, sources);

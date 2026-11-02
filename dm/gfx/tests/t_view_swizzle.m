@@ -98,7 +98,7 @@ static void image_case(int tid) {
 // leaves the rest as uploaded (GitHub issue #183: Tears of the Kingdom's Depths walls). The guest storage keeps the guest's bits
 static void init_fill_case(int tid, int format, int pool_flags) {
     tex_t t = {.magic=MAGIC('T','E','X',0), .serial=98000+(unsigned)tid};
-    pool_t pool = {.flags=pool_flags | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    pool_t pool = {.magic=MAGIC('P','O','O','L'), .flags=pool_flags | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
     t.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=format, .width=2, .height=1, .depth=1, .levels=1, .samples=1};
     nvn_tex_layout(&t.d, &t.L); t.mem = calloc(1, t.L.size); t.pool = &pool; pool.mem = t.mem; pool.size = t.L.size;
     int b565 = format == NVN_FORMAT_RGB565 || format == NVN_FORMAT_BGR565;

@@ -67,20 +67,30 @@ static void vcodebook(vpkt *p, int lookup) {
 static int vorbis_samples(mdec_t *d, vpkt *packets, int n) {
     int got = 0; for (int i = 0; i < n; i++) got += md_vorbis(d, packets[i].data, (packets[i].bits + 7) / 8, 0); return got;
 }
+// One channel, blocksizes as in the identification header (0x66: both 64; 0x86: 64 and 256), one mode per window size in use; packets as vaudio makes them
+static void vstream(mdec_t *d, vpkt *id, vpkt *setup, int blocksizes, int modes) {
+    vhead(id, 1); vbits(id, 0, 32); vbits(id, 1, 8); vbits(id, 48000, 32); for (int i = 0; i < 3; i++) vbits(id, 0, 32); vbits(id, blocksizes, 8); vbits(id, 1, 8);
+    vhead(setup, 5); vbits(setup, 1, 8); vcodebook(setup, 0); vcodebook(setup, 1);
+    vbits(setup, 0, 6); vbits(setup, 0, 16);                                          // one time configuration
+    vbits(setup, 0, 6); vbits(setup, 1, 16); vbits(setup, 0, 5); vbits(setup, 0, 2); vbits(setup, 5, 4); vbits(setup, 0, 6);   // one floor 1, no partitions
+    vbits(setup, 0, 16); vbits(setup, 0, 24); vbits(setup, 32, 24); vbits(setup, 31, 24); vbits(setup, 0, 6); vbits(setup, 0, 8);   // residue 0: partition size 32, classbook 0
+    vbits(setup, 1, 3); vbits(setup, 0, 1); vbits(setup, 1, 8);                       // pass 0 uses vector codebook 1
+    vbits(setup, 0, 6); vbits(setup, 0, 16); vbits(setup, 0, 1); vbits(setup, 0, 1); vbits(setup, 0, 2);   // one mapping, no coupling, reserved bits
+    vbits(setup, 0, 8); vbits(setup, 0, 8); vbits(setup, 0, 8);
+    vbits(setup, modes - 1, 6); for (int m = 0; m < modes; m++) { vbits(setup, m, 1); vbits(setup, 0, 16); vbits(setup, 0, 16); vbits(setup, 0, 8); }   // mode m: short (0) or long (1) window
+    vbits(setup, 1, 1);
+    d->vhdr[0] = id->data; d->vhdr_n[0] = (id->bits + 7) / 8; d->vhdr[1] = setup->data; d->vhdr_n[1] = (setup->bits + 7) / 8;
+    pthread_mutex_init(&d->mu, NULL); pthread_mutex_init(&d->dmu, NULL);
+}
+static void vaudio(vpkt *p, int modes, int blockflag, int prev_long, int next_long) {   // the window flags are only in a long window's packet
+    vbits(p, 0, 1);
+    if (modes > 1) { vbits(p, blockflag, 1); if (blockflag) { vbits(p, prev_long, 1); vbits(p, next_long, 1); } }
+    vbits(p, 1, 1); vbits(p, 255, 8); vbits(p, 255, 8); vbits(p, 0, 1); vbits(p, 0, 32);
+}
 static void vorbis_flush(void) {
     static vpkt id, setup, audio[8]; static mdec_t d = { .type = MD_TYPE_VORBIS, .nout = MD_NOUT, .started = 1 };
-    vhead(&id, 1); vbits(&id, 0, 32); vbits(&id, 1, 8); vbits(&id, 48000, 32); for (int i = 0; i < 3; i++) vbits(&id, 0, 32); vbits(&id, 0x66, 8); vbits(&id, 1, 8);
-    vhead(&setup, 5); vbits(&setup, 1, 8); vcodebook(&setup, 0); vcodebook(&setup, 1);
-    vbits(&setup, 0, 6); vbits(&setup, 0, 16);                                          // one time configuration
-    vbits(&setup, 0, 6); vbits(&setup, 1, 16); vbits(&setup, 0, 5); vbits(&setup, 0, 2); vbits(&setup, 5, 4); vbits(&setup, 0, 6);   // one floor 1, no partitions
-    vbits(&setup, 0, 16); vbits(&setup, 0, 24); vbits(&setup, 32, 24); vbits(&setup, 31, 24); vbits(&setup, 0, 6); vbits(&setup, 0, 8);   // residue 0: partition size 32, classbook 0
-    vbits(&setup, 1, 3); vbits(&setup, 0, 1); vbits(&setup, 1, 8);                       // pass 0 uses vector codebook 1
-    vbits(&setup, 0, 6); vbits(&setup, 0, 16); vbits(&setup, 0, 1); vbits(&setup, 0, 1); vbits(&setup, 0, 2);   // one mapping, no coupling, reserved bits
-    vbits(&setup, 0, 8); vbits(&setup, 0, 8); vbits(&setup, 0, 8);
-    vbits(&setup, 0, 6); vbits(&setup, 0, 1); vbits(&setup, 0, 16); vbits(&setup, 0, 16); vbits(&setup, 0, 8); vbits(&setup, 1, 1);   // one mode
-    for (int i = 0; i < 8; i++) { vbits(&audio[i], 0, 1); vbits(&audio[i], 1, 1); vbits(&audio[i], 255, 8); vbits(&audio[i], 255, 8); vbits(&audio[i], 0, 1); vbits(&audio[i], 0, 32); }
-    d.vhdr[0] = id.data; d.vhdr_n[0] = (id.bits + 7) / 8; d.vhdr[1] = setup.data; d.vhdr_n[1] = (setup.bits + 7) / 8;
-    pthread_mutex_init(&d.mu, NULL); pthread_mutex_init(&d.dmu, NULL);
+    vstream(&d, &id, &setup, 0x66, 1);
+    for (int i = 0; i < 8; i++) vaudio(&audio[i], 1, 0, 0, 0);
     int before = vorbis_samples(&d, audio, 8);
     assert(before > 0);
     void *self[2] = { NULL, &d };
@@ -90,9 +100,44 @@ static void vorbis_flush(void) {
     assert(vorbis_samples(&d, audio, 8) == before);
     puts("Vorbis movie sound: the samples come again after a Flush");
 }
+// At a window change each packet leaves with (previous blocksize + its blocksize) / 4 samples. With blocksizes 64 / 256, stb_vorbis gives 176 and 32 for a long window before a short one and the short one,
+// where the specification has 128 and 80. Samples kept across a change do not survive a Flush
+static void vorbis_window_change(void) {
+    static vpkt id, setup, audio[11]; static mdec_t d = { .type = MD_TYPE_VORBIS, .nout = MD_NOUT, .started = 1 };
+    static const int window[11] = { 256, 256, 256, 64, 64, 256, 256, 64, 256, 64, 256 };
+    vstream(&d, &id, &setup, 0x86, 2);
+    for (int i = 0; i < 11; i++) vaudio(&audio[i], 2, window[i] == 256, i && window[i - 1] == 256, i == 10 || window[i + 1] == 256);
+    void *self[2] = { NULL, &d };
+    for (int run = 0; run < 2; run++) {
+        assert(!md_vorbis(&d, audio[0].data, (audio[0].bits + 7) / 8, 0));   // the first packet only primes the overlap
+        for (int i = 1; i < 11; i++) {
+            assert(md_vorbis(&d, audio[i].data, (audio[i].bits + 7) / 8, 0));
+            assert(d.out[0].bytes == (size_t)(window[i - 1] + window[i]) / 4 * sizeof(int16_t));
+        }
+        assert(!d.hold_n);   // the last window has a long one after it: nothing lies past its centre
+        assert(h_movie_Flush(self) == 0);
+        for (int i = 0; i < 3; i++) md_vorbis(&d, audio[i].data, (audio[i].bits + 7) / 8, 0);
+        assert(d.hold_n);    // the long window before a short one left samples behind
+        assert(h_movie_Flush(self) == 0 && !d.hold_n && !d.vb_prev);
+    }
+    puts("Vorbis movie sound: outputs as long as the specification says at a window change");
+}
+// An output takes the values asked for and leaves the rest for the next one; at most what is kept
+static void vorbis_split(void) {
+    static mdec_t d = { .type = MD_TYPE_VORBIS, .nout = MD_NOUT, .started = 1 };
+    d.hold_cap = 1472 + 128; d.hold = malloc(d.hold_cap * sizeof *d.hold); d.hold_n = d.hold_cap;
+    for (size_t i = 0; i < d.hold_n; i++) d.hold[i] = (int16_t)i;
+    assert(md_vorbis_emit(&d, 0, 1024) && d.out[0].bytes == 1024 * sizeof *d.hold && d.hold_n == 576);
+    assert(((int16_t *)d.out[0].frm)[1023] == 1023 && d.hold[0] == 1024);
+    assert(md_vorbis_emit(&d, 0, 1024) && d.out[0].bytes == 576 * sizeof *d.hold && !d.hold_n);
+    assert(!md_vorbis_emit(&d, 0, 1024));
+    puts("Vorbis movie sound: an output takes the length asked for and leaves the rest");
+}
 int main(void) {
     playing();
     vorbis_flush();
+    vorbis_window_change();
+    vorbis_split();
     int w = 0, h = 0;
     assert(!vp8_size(vp8, 9, &w, &h));
     assert(vp8_size(vp8, sizeof vp8, &w, &h) && w == 16 && h == 16);

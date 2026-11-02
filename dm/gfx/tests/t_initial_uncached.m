@@ -32,7 +32,7 @@ static void expect(id<MTLTexture> image,int first,const char *label){
 }
 static void run(int format, uint64_t serial, uint32_t pool_flags, int c0) {   // c0: the first fill's colour (distinct per run: a run's pool and storage may reuse an earlier run's addresses)
     void *mem=NULL; if(posix_memalign(&mem,getpagesize(),65536))abort(); memset(mem,0,65536);
-    pool_t pool={.mem=mem,.size=65536,.flags=pool_flags};
+    pool_t pool={.magic=MAGIC('P','O','O','L'),.mem=mem,.size=65536,.flags=pool_flags};
     mtl_pool_add(mem,65536);
     tex_t t={.magic=MAGIC('T','E','X',0),.serial=serial,.pool=&pool,.mem=mem};
     t.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=format,.width=12,.height=12,.depth=1,.levels=3,.samples=1};

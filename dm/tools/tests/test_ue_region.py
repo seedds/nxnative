@@ -53,7 +53,9 @@ def image(engine, option=True, called=False):
     return img
 
 
-def find(img): return ue_region.find(bytes(img), TEXT, RO, DATA)
+def find(img):
+    off, reg, _, why = ue_region.find(bytes(img), TEXT, RO, DATA)
+    return off, reg, why
 
 
 class FindTest(unittest.TestCase):
@@ -77,12 +79,30 @@ class FindTest(unittest.TestCase):
         self.assertIsNone(off)
         self.assertFalse(why.startswith('[RED] '), why)
 
+    def test_same_constant_set_after_the_store(self):
+        # TRIANGLE STRATEGY (Unreal Engine 4.27): str x8 of the default, then mov x1 of the same constant: the instruction the rewriter makes mov x1, x8
+        words = flag()
+        words[6:8] = [words[7], words[6]]
+        off, reg, x1_mov, why = ue_region.find(bytes(image(words)), TEXT, RO, DATA)
+        self.assertEqual((off, reg, x1_mov), (ENGINE + 24, 8, ENGINE + 28), why)
+
+    def test_flag_and_csel_forms_rewrite_nothing(self):
+        for words in (flag(), csel()):
+            self.assertIsNone(ue_region.find(bytes(image(words)), TEXT, RO, DATA)[2])
+
     def test_x1_written_after_the_store_is_red(self):
         words = flag()
-        words[6:8] = [words[7], words[6]]   # mov x1 after the str: the request would not take the size
+        words[6:8] = [words[7], 0xb25e03e1]   # another constant after the str (mov x1, #0x400000000): the request would not take the size
         off, _, why = find(image(words))
         self.assertIsNone(off)
         self.assertTrue(why.startswith('[RED] ') and 'x1 written after' in why, why)
+
+    def test_size_register_written_after_the_store_is_red(self):
+        words = flag()
+        words[6:8] = [words[7], MOV_X8_62GB, MOV_X1_62GB]   # x8 set again after the str: mov x1, x8 would miss the gate's size
+        off, _, why = find(image(words))
+        self.assertIsNone(off)
+        self.assertTrue(why.startswith('[RED] '), why)
 
     def test_store_not_beside_the_base_is_red(self):
         words = csel()

@@ -8,13 +8,39 @@ threads run the kernel body on them and cull their triangle when viewport 0's ma
 clear. No capture pass, no compute pass, no index compaction, no render pass break.
 
 The kernel's own storage writes (and the subgroup operations that order them) run as in the
-compute kernel: one triangle per thread, 32 consecutive triangles per SIMD group.
+compute kernel: one triangle per thread, PRIMS consecutive triangles per SIMD group. When the
+vertices of PRIMS triangles exceed the mesh output limit (MESH_BYTES), a threadgroup takes 16,
+8, ... (prims_for) and its SIMD group runs with the rest of its lanes inactive, which subgroup
+operations of the guest's own (ballots, scans over active lanes) already allow.
 """
 import re
 import dmsh_geometry, dmsh_pull
 
-PRIMS = 32
+PRIMS = 32   # triangles a threadgroup takes, fewer when their vertices exceed the mesh output limit (prims_for); the entry names any other count (dm_mesh_p16)
+MESH_BYTES = 32768   # Metal's limit on a mesh threadgroup's output: vertices and primitives
 DRAW_SLOT, GS_SLOT = 12, 13   # argument-table slots the vertex stage leaves free in a pulling pipeline
+_SCALAR = {'float': 4, 'int': 4, 'uint': 4, 'half': 2, 'short': 2, 'ushort': 2}
+
+
+def out_bytes(src):
+    """The bytes of one vertex the mesh writes: the members of main0_out, packed as Metal counts
+    the mesh output (Donkey Kong Bananza: 24 float4 and the position, 388 bytes, with the point size)."""
+    m = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
+    if not m: raise ValueError('mesh: no main0_out')
+    n = 0
+    for ln in m[1].split(';'):
+        a = re.fullmatch(r'\s*(\w+?)([234]?) \w+(?: \[(\d+)\])?(?: \[\[.*\]\])?\s*', ln)
+        if not ln.strip(): continue
+        if not a or a[1] not in _SCALAR: raise ValueError('mesh: vertex output member ' + ln.strip())
+        n += _SCALAR[a[1]] * int(a[2] or 1) * int(a[3] or 1)
+    return n
+
+
+def prims_for(vbytes):
+    """The most triangles (32, 16, ... 1) whose vertices and primitives fit one mesh threadgroup."""
+    for p in (32, 16, 8, 4, 2, 1):
+        if 3 * p * vbytes + 4 * p <= MESH_BYTES: return p
+    raise ValueError(f'mesh: one triangle of {vbytes}-byte vertices exceeds the mesh output limit')
 _BUILTIN_V = {'vertex_id': 'dm_vid', 'instance_id': 'dm_iid', 'base_instance': 'dm_bi', 'base_vertex': 'dm_bv'}
 _BUILTIN_G = {'thread_position_in_grid': 'uint3(dm_p0 + dm_t, 0u, 0u)', 'thread_index_in_simdgroup': 'dm_sg'}
 
@@ -48,6 +74,7 @@ def compose(vs_src, gs_src, reads):
     if pulled is None or not isinstance(info, dict): raise ValueError(f'mesh: no pulling entry: {info}')
     words = dmsh_geometry.output_words(pulled)
     pulled = pulled.replace(' [[point_size]];', ';')   # a triangle mesh has no point size
+    P = prims_for(out_bytes(pulled))
     # The vertex entries as functions; their resource parameters become the mesh entry's
     entries, res = {}, None
     for name in [info['entry']] + ([info['entry_z']] if info.get('entry_z') else []):
@@ -105,12 +132,12 @@ def compose(vs_src, gs_src, reads):
            'struct dm_mesh_prim { bool culled [[primitive_culled]]; };']
     if res is None: raise ValueError('mesh: no vertex entries')
     for name, args in entries.items():
-        out.append(f'''[[mesh]] void dm_mesh{name[5:]}(metal::mesh<main0_out, dm_mesh_prim, {3 * PRIMS}, {PRIMS}, metal::topology::triangle> dm_m, {', '.join(res)},
+        out.append(f'''[[mesh]] void dm_mesh{name[5:]}{'' if P == PRIMS else f'_p{P}'}(metal::mesh<main0_out, dm_mesh_prim, {3 * P}, {P}, metal::topology::triangle> dm_m, {', '.join(res)},
     constant dm_mesh_draw& dm_d [[buffer({DRAW_SLOT})]], constant dm_g::spvDescriptorSetBuffer0& dm_gset [[buffer({GS_SLOT})]],
     uint dm_t [[thread_index_in_threadgroup]], uint dm_tg [[threadgroup_position_in_grid]], uint dm_sg [[thread_index_in_simdgroup]])
 {{
-    threadgroup float dm_rec[{3 * PRIMS * n}];
-    uint dm_p0 = dm_tg * {PRIMS}u, dm_np = min({PRIMS}u, dm_d.count / 3u - dm_p0);
+    threadgroup float dm_rec[{3 * P * n}];
+    uint dm_p0 = dm_tg * {P}u, dm_np = min({P}u, dm_d.count / 3u - dm_p0);
     if (dm_t < dm_np * 3u) {{
         uint dm_i = dm_d.first + dm_p0 * 3u + dm_t;
         uint dm_ix = dm_d.itype == 0u ? dm_i : dm_d.itype == 1u ? uint(dm_d.ib[dm_i]) : dm_d.itype == 2u ? uint(((device const ushort*)dm_d.ib)[dm_i]) : ((device const uint*)dm_d.ib)[dm_i];

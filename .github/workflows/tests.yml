@@ -17,10 +17,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # The toolchain the project supports (README: Xcode 27.1; dm/gfx/tools/dmsh_chain.lock: its Metal compiler), on GitHub's xcode-27 image (macOS 27, a preview image),
+  # The toolchain the project supports (README: Xcode 27.2; dm/gfx/tools/dmsh_chain.lock: its Metal compiler), on GitHub's xcode-27 image (macOS 27, a preview image),
   # named by path so the image's default moving to another Xcode does not move CI. The build check checks the Metal compiler against the lock first.
   # dm/tools/tests/test_ci_toolchain.py keeps this version, the image and README's in step
-  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
   GAME: 010015100B514000   # Super Mario Bros. Wonder: the profile the host and gfx tests are built for (any profile does; the tests are about code, not the game)
 
 defaults:
@@ -169,6 +169,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install the selected Xcode's Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain   # a separate component, not included in the xcode-27 image
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.14'
@@ -214,6 +216,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install the selected Xcode's Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
       - name: Toolchain (Xcode and the Metal compiler of dmsh_chain.lock)
         run: |
           xcodebuild -version

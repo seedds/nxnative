@@ -337,8 +337,8 @@ coverage:
 	@$(call cov_export,$(B)/cov)
 
 # Local transport fixtures use only synthetic packets and loopback peers.
-NET_SOURCES = ../hle_net_backend.c t_net_write_stub.c
-NET_HEADERS = ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h
+NET_SOURCES = ../hle_net_backend.c ../hle_nsd_backend.c t_net_write_stub.c
+NET_HEADERS = ../nsd.h ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h
 NET_FLAGS = -O1 -g -Wall -Wextra -Werror -Wno-unused-function
 $(B)/t_hle_wait: t_hle_wait.c t_hle_wait.S ../hle.h ../entry.S ../hle_bigstack.c $(GAME_H) | $(B)
 	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_hle_wait.c t_hle_wait.S ../entry.S ../hle_bigstack.c
@@ -403,8 +403,8 @@ DM_OPENSSL_ROOT ?= $(shell python3 ../../tools/apple_crypto.py macos)
 PRIVATE_PKI_FLAGS = -DDM_OPENSSL_X509 "-I$(DM_OPENSSL_ROOT)/include"
 PRIVATE_PKI_LIB = "$(DM_OPENSSL_ROOT)/lib/libcrypto.a"
 OPENSSL_TOOL ?= $(shell command -v openssl)
-SSL_SOURCES = t_ssl.m ../hle_ssl.c ../hle_ssl_apple.m ../hle_nextendo_x509.c ../hle_net_backend.c ../hle_bigstack.c ../entry.S
-SSL_DEPS = t_gate_fixture.h $(SSL_SOURCES) ../ssl_backend.h ../net_socket.h ../hle.h $(GAME_H) test_ssl_transport.py
+SSL_SOURCES = t_ssl.m ../hle_ssl.c ../hle_ssl_apple.m ../hle_nextendo_x509.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_bigstack.c ../entry.S
+SSL_DEPS = t_gate_fixture.h ../nsd.h $(SSL_SOURCES) ../ssl_backend.h ../net_socket.h ../hle.h $(GAME_H) test_ssl_transport.py
 SSL_FLAGS = -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror -Wno-unused-function $(GINC)
 $(B)/t_ssl $(B)/t_ssl_asan $(B)/t_nextendo_routes $(B)/t_nextendo_routes_asan: ../ssl_trace.h
 $(B)/t_ssl_trace: t_ssl_trace.c ../ssl_trace.h | $(B)
@@ -423,6 +423,18 @@ ssl-sanitize: $(B)/t_ssl_asan $(B)/t_ssl_trace_asan
 	$(B)/t_ssl_trace_asan
 	$(PYTHON) test_ssl_transport.py $(B)/t_ssl_asan
 
+ROUTE_SOURCES = t_nextendo_routes.c ../hle_nextendo_routes.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_ssl_apple.m ../hle_nextendo_x509.c
+ROUTE_DEPS = ../nsd.h $(ROUTE_SOURCES) ../nextendo_routes.h ../net_socket.h ../ssl_backend.h test_nextendo_routes.py test_ssl_transport.py Makefile
+$(B)/t_nextendo_routes: $(ROUTE_DEPS) | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
+$(B)/t_nextendo_routes_asan: $(ROUTE_DEPS) | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
+.PHONY: nextendo-routes nextendo-routes-sanitize
+nextendo-routes: $(B)/t_nextendo_routes
+	$(PYTHON) test_nextendo_routes.py $(B)/t_nextendo_routes
+nextendo-routes-sanitize: $(B)/t_nextendo_routes_asan
+	$(PYTHON) test_nextendo_routes.py $(B)/t_nextendo_routes_asan
+
 $(B)/t_nextendo_x509: t_nextendo_x509.c ../hle_nextendo_x509.c ../nextendo_x509.h | $(B)
 	$(CLANG) -O1 -g -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -o $@ t_nextendo_x509.c ../hle_nextendo_x509.c $(PRIVATE_PKI_LIB)
 $(B)/t_nextendo_x509_asan: t_nextendo_x509.c ../hle_nextendo_x509.c ../nextendo_x509.h | $(B)
@@ -433,4 +445,24 @@ nextendo-x509: $(B)/t_nextendo_x509
 nextendo-x509-sanitize: $(B)/t_nextendo_x509_asan
 	$(PYTHON) test_nextendo_x509.py $(B)/t_nextendo_x509_asan "$(OPENSSL_TOOL)"
 
-run: ssl nextendo-x509
+$(B)/t_nsd: t_nsd.c ../hle_nsd_backend.c ../nsd.h ../net_socket.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_nsd.c ../hle_nsd_backend.c
+$(B)/t_nsd_asan: t_nsd.c ../hle_nsd_backend.c ../nsd.h ../net_socket.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_nsd.c ../hle_nsd_backend.c
+.PHONY: nsd nsd-sanitize
+nsd: $(B)/t_nsd
+	$(B)/t_nsd
+nsd-sanitize: $(B)/t_nsd_asan
+	$(B)/t_nsd_asan
+run: ssl nextendo-routes nextendo-x509 nsd
+
+$(B)/t_online_policy: t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c
+$(B)/t_online_policy_asan: t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c
+.PHONY: online-policy online-policy-sanitize
+online-policy: $(B)/t_online_policy
+	$(B)/t_online_policy
+online-policy-sanitize: $(B)/t_online_policy_asan
+	$(B)/t_online_policy_asan
+run: online-policy

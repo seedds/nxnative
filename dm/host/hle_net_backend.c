@@ -4,6 +4,7 @@
 // Modern nn::socket::AddrInfo has addr before canonname; SDK 4's plain addrinfo has
 // the opposite order (verified in MK8 3.0.5's DNSSerializer at sdk+0xafa94). Never cast guest structs to Darwin structs.
 #include "net_socket.h"
+#include "nsd.h"
 #include "discovery_protocol.h"
 #include <TargetConditionals.h>
 #include <arpa/inet.h>
@@ -46,6 +47,8 @@ _Static_assert(sizeof(dm_net_pollfd) == 8, "Horizon pollfd");
 typedef struct { int native, used, nonblock, type; uint64_t generation; int64_t send_ms, recv_ms; } net_slot;
 typedef struct { int fd, guest, nonblock, type; uint64_t generation; int64_t send_ms, recv_ms; } net_ref;
 static net_slot g_sockets[NET_MAX];
+static _Atomic(dm_net_dns_provider) g_dns_provider;
+void dm_net_set_dns_provider(dm_net_dns_provider provider) { atomic_store(&g_dns_provider, provider); }
 static pthread_mutex_t g_net_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_net_multicast_allowed = TARGET_OS_OSX;
 static _Atomic uint32_t g_net_broadcast;
@@ -69,6 +72,7 @@ dm_net_mode_t dm_net_mode(void) {
     const char *s = getenv("DM_NETWORK");
     if (s && !strcmp(s, "lan")) return DM_NET_LAN;
     if (s && !strcmp(s, "ldn")) return DM_NET_LDN;
+    if (s && !strcmp(s, "nextendo")) return DM_NET_NEXTENDO;
     if (s && !strcmp(s, "auto")) return DM_NET_AUTO;
     return DM_NET_OFFLINE;
 #else
@@ -565,6 +569,25 @@ static int net_gai_error(int e) {
     }
 }
 static void net_ai_destroy(net_ai_allocation *p) { if (p) { for (size_t i = 0; i < p->count; i++) free(p->owned[i]); free(p->owned); free(p); } }
+// Shared admission: both resolver ABIs must expand NSD before consulting the
+// same scoped provider. Service policy does not alter ordinary LAN or offline resolution.
+static int net_resolver_name(const char *host, int flags, char expanded[DM_NSD_FQDN_CAPACITY],
+                             char redirected[INET_ADDRSTRLEN], const char **lookup) {
+    *lookup = host;
+    if (dm_net_nextendo_enabled() && host) {
+        struct in_addr literal; int numeric = inet_pton(AF_INET, host, &literal) == 1;
+        if (!numeric && (flags & 4)) return 8;
+        if (!numeric && strchr(host, '%')) {
+            if (dm_nsd_resolve(expanded, host)) return 8;
+            *lookup = expanded;
+        }
+        dm_net_dns_provider provider = atomic_load(&g_dns_provider);
+        int policy = provider ? provider(*lookup, redirected, INET_ADDRSTRLEN) : numeric ? 0 : -1;
+        if (policy < 0 || policy > 1 || (policy > 0 && (!memchr(redirected, 0, INET_ADDRSTRLEN) || inet_pton(AF_INET, redirected, &literal) != 1))) return 8;
+        if (policy > 0) *lookup = redirected;
+    }
+    return 0;
+}
 static int net_getaddrinfo(const char *host, const char *service, const void *hints, void **result, int legacy) {
     if (!result) { net_error(14); return 11; }
     *result = NULL;
@@ -579,7 +602,10 @@ static int net_getaddrinfo(const char *host, const char *service, const void *hi
     if (input.flags & 1) h.ai_flags |= AI_PASSIVE; if (input.flags & 2) h.ai_flags |= AI_CANONNAME;
     if (input.flags & 4) h.ai_flags |= AI_NUMERICHOST; if (input.flags & 8) h.ai_flags |= AI_NUMERICSERV;
     if (input.flags & 1024) h.ai_flags |= AI_ADDRCONFIG;
-    dm_guest_host_wait_begin(); int code = getaddrinfo(host, service, &h, &native), err = errno; dm_guest_host_wait_end();
+    char redirected[INET_ADDRSTRLEN] = {0}, expanded[DM_NSD_FQDN_CAPACITY]; const char *lookup = host;
+    int admission = net_resolver_name(host, input.flags, expanded, redirected, &lookup);
+    if (admission) return admission;
+    dm_guest_host_wait_begin(); int code = getaddrinfo(lookup, service, &h, &native), err = errno; dm_guest_host_wait_end();
     if (code) { if (code == EAI_SYSTEM) net_error(net_errno(err)); return net_gai_error(code); }
     net_ai_allocation *allocation = calloc(1, sizeof *allocation);
     if (!allocation) { freeaddrinfo(native); return 6; }
@@ -590,7 +616,7 @@ static int net_getaddrinfo(const char *host, const char *service, const void *hi
     dm_net_addrinfo *first = NULL, **tail = &first;
     for (struct addrinfo *p = native; p; p = p->ai_next) {
         if (p->ai_family != AF_INET || p->ai_addrlen < sizeof(struct sockaddr_in)) continue;
-        const char *canonical = p->ai_canonname;
+        const char *canonical = lookup != host && (input.flags & 2) ? host : p->ai_canonname;
         size_t name_size = canonical ? strlen(canonical) + 1 : 0;
         dm_net_addrinfo *node = calloc(1, sizeof *node + sizeof(nx_addr) + name_size);
         if (!node) { net_ai_destroy(allocation); freeaddrinfo(native); return 6; }
@@ -757,7 +783,8 @@ void *dm_net_gethostbyname_cancel(const char *name, uint32_t id) {
     if (!net_gate()) return NULL;
     if (!name) { net_error(22); return NULL; } // SDK resolver's null-name EINVAL.
     if (strnlen(name, NI_MAXHOST) == NI_MAXHOST) { net_error(22); return NULL; }
-    const char *lookup = name;
+    char expanded[DM_NSD_FQDN_CAPACITY], redirected[INET_ADDRSTRLEN] = {0}; const char *lookup = name;
+    if (net_resolver_name(name, 0, expanded, redirected, &lookup)) return NULL;
     struct in_addr literal;
     if (inet_pton(AF_INET, lookup, &literal) == 1) return net_hostent(name, &literal.s_addr, 1);
     dispatch_queue_t queue = net_resolver_queue();

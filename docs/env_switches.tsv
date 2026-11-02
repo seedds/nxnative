@@ -88,10 +88,11 @@ DM_MOTION_HID	switch	On the Mac, `0` disables the passive Switch Pro Controller 
 DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second per source (phone / GameController / controller HID; acceleration in G, gyro in revolutions/s), for checking the axes: flat and still reads acc 0 0 -1
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
-DM_NETWORK	player	auto routes LAN, LDN and configured online calls by service; offline, lan, ldn and nextendo are explicit overrides
+DM_NETWORK	switch	Offline by default; explicit lan,ldn,auto enable local transport. nextendo enables scoped online services; auto adds them only with an explicit service profile.
 DM_NETWORK_INTERFACE	player	IPv4 interface name for local sockets; otherwise use the actual default route
 DM_NET_DISCOVERY_PEER	player	Optional discovery relay IPv4 endpoint; automatic local discovery requires no entered address
 DM_NET_TRACE	diagnostic	Log native socket and local-network translation details
+DM_NEXTENDO_ROUTES	path	Explicit local public service policy TSV; AUTO enables online services only when nonempty, and configured invalid policies fail closed.
 DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage)
@@ -291,7 +292,7 @@ DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps w
 DM_SSL_TRACE	diagnostic	1 logs at most 128 numeric TLS state events; no hosts, pointers, credentials or stream data.
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
-DM_SYSTEM_DATA_DIR	path	Private imported firmware resources; never console keys or resources in the public source tree
+DM_SYSTEM_DATA_DIR	path	Private original system resources, including the certificate store; no resources are bundled by the online backend.
 DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment for buffer textures when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset
 DM_TEMP	path	Temporary storage folder (default `$DM_ROOT/run/platform/temp`); stand-in system data goes in `<DM_TEMP>_sysdata`; the Mac launcher, the iOS app and the NSP script set it

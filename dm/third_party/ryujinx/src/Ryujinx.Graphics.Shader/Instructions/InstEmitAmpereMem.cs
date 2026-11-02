@@ -34,13 +34,27 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x987, InstName.Stl, AStLocalShared, N, writesRd: false);
             x(0x388, InstName.Sts, AStLocalShared, N, writesRd: false);
             x(0x988, InstName.Sts, AStLocalShared, N, writesRd: false);
+            x(0x38c, InstName.Atoms, AAtoms, N);
+            x(0x98c, InstName.Atoms, AAtoms, N);
+            x(0x38d, InstName.AtomsCas, AAtoms, N);
+            x(0x992, InstName.Membar, AMembar, N, writesRd: false);
 
             x(0xb60, InstName.Tex, ATex, InstProps.Tex);
             x(0xb66, InstName.Tld, ATex, InstProps.Tex);
             x(0xb63, InstName.Tld4, ATex, InstProps.Tex);
             x(0xb69, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb6c, InstName.Txd, ATex, InstProps.Tex);
+            // Bindless forms (operand form 1, NAK's encodings): the handle in the first register of the second source block (.B, 59). TXD's (0x36d) puts it in the first
+            // block and is not taken
+            x(0x361, InstName.Tex, ATex, InstProps.Tex);
+            x(0x367, InstName.Tld, ATex, InstProps.Tex);
+            x(0x364, InstName.Tld4, ATex, InstProps.Tex);
+            x(0x36a, InstName.Tmml, ATex, InstProps.Tex);
+            // TEX with the handle in a uniform register (operand form 7, UR at 40..45; Fire Emblem Fortune's Weave's material shaders): not in NAK's SM70 to SM86 encoder, read as
+            // its form-5 twin with the handle where Blackwell's bindless forms (NAK, sm >= 100) keep theirs
+            x(0xf60, InstName.Tex, ATex, InstProps.Tex);
             x(0xb6f, InstName.Txq, ATxq, InstProps.Tex);
+            x(0x370, InstName.Txq, ATxq, InstProps.Tex);   // bindless (.B, 59): the handle in Ra, the LOD in Ra + 1 (NAK build_txq)
             x(0xb97, InstName.Suld, ASurface, N);
             x(0xb99, InstName.Suld, ASurface, N);
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
@@ -310,10 +324,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // ---- local and shared memory ----
 
-        // The 32-bit address of a local / shared access: Ra plus the uniform register (at urLo in the uniform form, bit 91)
-        private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo)
+        // The 32-bit address of a local / shared access: Ra plus the uniform register (at urLo in the uniform form, bit 91). A shared access scales Ra by its stride at 78..80
+        // (x1, x4, x8, x16; NAK's LDS / STS / ATOMS): Fire Emblem Fortune's Weave's auto-exposure clears its histogram with STS [R2.X4] and reads it back with LDS [R2.X4], which
+        // unscaled cleared and read a quarter of the bins
+        private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo, bool shared = false)
         {
             Operand addr = Register(x.Ra, RegisterType.Gpr);
+            int stride = shared ? x.Bits(78, 80) : 0;
+
+            if (stride != 0)
+            {
+                addr = context.ShiftLeft(addr, Const(stride + 1));
+            }
 
             if (x.Bit(91) && x.Bits(urLo, urLo + 6) != RegisterConsts.UniformZeroIndex)
             {
@@ -329,7 +351,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             StorageKind kind = x.Opcode == AmpereOpcodes.Ldl ? StorageKind.LocalMemory : StorageKind.SharedMemory;
 
-            EmitLoad(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 32), x.Rd, (int)x.SignedField(40, 64));
+            EmitLoad(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 32, kind == StorageKind.SharedMemory), x.Rd, (int)x.SignedField(40, 64));
         }
 
         // STL / STS [Ra + UR + offset], Rb: UR at 64
@@ -338,7 +360,52 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             StorageKind kind = x.Opcode is 0x387 or 0x987 ? StorageKind.LocalMemory : StorageKind.SharedMemory;
 
-            EmitStore(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 64), x.Rb, (int)x.SignedField(40, 64));
+            EmitStore(context, kind, (LsSize2)x.Bits(73, 76), ALocalAddress(context, x, 64, kind == StorageKind.SharedMemory), x.Rb, (int)x.SignedField(40, 64));
+        }
+
+        // ATOMS Rd, [Ra + UR + offset], Rb (0x38c; 0x98c with UR at 64, bit 91) and ATOMS.CAS Rd, [Ra + offset], Rb, Rc (0x38d: the compare value at 32, the new one at 64), as
+        // NAK encodes them: the operation at 87..91 and the size at 73..76 as ATOMG's, the byte offset at 40..64, Ra scaled by the stride at 78..80 (x1, x4, x8, x16). Shared
+        // memory is indexed in words, as Maxwell's ATOMS gives it
+        public static void AAtoms(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            Operand addr = ALocalAddress(context, x, 64, shared: true);   // the uniform register only in 0x98c's form (bit 91)
+
+            Operand word = context.ShiftRightU32(context.IAdd(addr, Const((int)x.SignedField(40, 64))), Const(2));
+            Operand id = Const(context.ResourceManager.SharedMemoryId);
+            AtomSize size = (AtomSize)x.Bits(73, 76);
+            Operand res;
+
+            if (x.Opcode == 0x38d)
+            {
+                if (size is not AtomSize.U32 and not AtomSize.S32)
+                {
+                    throw AFail(context, $"ATOMS.CAS size {size}");
+                }
+
+                res = context.AtomicCompareAndSwap(StorageKind.SharedMemory, id, word, Register(x.Rb, RegisterType.Gpr), Register(x.Bits(64, 72), RegisterType.Gpr));
+            }
+            else
+            {
+                res = EmitAtomicOp(context, StorageKind.SharedMemory, (AtomOp)x.Bits(87, 91), size, id, word, Register(x.Rb, RegisterType.Gpr));
+            }
+
+            ASet(context, x, res);
+        }
+
+        // MEMBAR (0x992): the scope at 76..79 (0 CTA, 2 GPU, 3 system; NAK), as Maxwell's MEMBAR
+        public static void AMembar(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+
+            if (x.Bits(76, 79) == 0)
+            {
+                context.GroupMemoryBarrier();
+            }
+            else
+            {
+                context.MemoryBarrier();
+            }
         }
 
         // ---- surfaces ----
@@ -509,7 +576,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
         public static void ATex(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            int opcode = x.Opcode;
+            int raw = x.Opcode;
+            bool bindlessR = raw is 0x361 or 0x364 or 0x367 or 0x36a, bindlessU = raw == 0xf60;
+            int opcode = bindlessR ? raw + 0x7ff : bindlessU ? raw - 0x400 : raw;   // the constant-buffer form whose fields these share
 
             TexDim dim = ATexDim(context, x.Bits(61, 64));
             SamplerType type = ConvertSamplerType(dim);
@@ -572,7 +641,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     break;
             }
 
-            (int handle, int cbufSlot) = ATexHandle(context, x);
+            (int handle, int cbufSlot) = bindlessR || bindlessU ? (0, TextureOperation.DefaultCbufSlot) : ATexHandle(context, x);
+            n1 += bindlessR ? 1 : 0;
             List<Operand> sources = [];
             Operand arrayIndex = null;
 
@@ -609,7 +679,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 int n0 = coords + (isArray ? 1 : 0);
                 (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0, n1);
-                int ia = 0, ib = 0;
+                int ia = 0, ib = bindlessR ? 1 : 0;
+
+                if (bindlessR || bindlessU)
+                {
+                    // the handle goes first, as the Maxwell bindless forms give it: BindlessElimination traces it back to the constant buffer it was loaded from
+                    sources.Add(bindlessR ? b[0] : context.Copy(Register(x.Bits(40, 46), RegisterType.Uniform)));
+                    flags |= TextureFlags.Bindless;
+                }
 
                 if (isArray)
                 {
@@ -690,7 +767,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     sources.Add(Const(x.Bits(87, 89)));
                 }
 
-                if (opcode == 0xb66 && type == SamplerType.Texture1D && lod == 1 && !offset)
+                if (opcode == 0xb66 && type == SamplerType.Texture1D && lod == 1 && !offset && !flags.HasFlag(TextureFlags.Bindless))
                 {
                     if (context.TranslatorContext.GpuAccessor.QuerySamplerType(handle) == SamplerType.TextureBuffer)
                     {
@@ -715,7 +792,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             else
             {
-                SetBindingPair setAndBinding = context.ResourceManager.GetTextureOrImageBinding(
+                SetBindingPair setAndBinding = flags.HasFlag(TextureFlags.Bindless) ? default : context.ResourceManager.GetTextureOrImageBinding(
                     Instruction.TextureSample,
                     type,
                     TextureFormat.Unknown,
@@ -732,7 +809,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // TMML: the LOD a sample would use, x and y in 8.8 fixed point (as Maxwell's)
         private static void ATmml(EmitterContext context, SamplerType type, TextureFlags flags, int handle, int cbufSlot, int mask, Operand[] results, Operand[] sources)
         {
-            SetBindingPair setAndBinding = context.ResourceManager.GetTextureOrImageBinding(Instruction.Lod, type, TextureFormat.Unknown, flags, cbufSlot, handle);
+            SetBindingPair setAndBinding = flags.HasFlag(TextureFlags.Bindless) ? default : context.ResourceManager.GetTextureOrImageBinding(Instruction.Lod, type, TextureFormat.Unknown, flags, cbufSlot, handle);
             int r = 0;
 
             for (int comp = 0; comp < 4; comp++)
@@ -759,8 +836,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             int query = x.Bits(62, 64);
             int mask = x.Bits(72, 76);
-            (int handle, int cbufSlot) = ATexHandle(context, x);
-            SamplerType type = context.TranslatorContext.GpuAccessor.QuerySamplerType(handle);
+            bool bindless = x.Opcode == 0x370;
+            (int handle, int cbufSlot) = bindless ? (0, TextureOperation.DefaultCbufSlot) : ATexHandle(context, x);
+            // A bindless handle names no texture the accessor knows: the type as Maxwell's bindless TXQ takes it (3D when the third size is asked for)
+            SamplerType type = !bindless ? context.TranslatorContext.GpuAccessor.QuerySamplerType(handle) :
+                query == 1 ? SamplerType.Texture2D | SamplerType.Multisample : (mask & 4) != 0 ? SamplerType.Texture3D : SamplerType.Texture2D;
+            TextureFlags tflags = bindless ? TextureFlags.Bindless : TextureFlags.None;
 
             int count = BitOperations.PopCount((uint)mask);
             Operand[] results = new Operand[count];
@@ -770,11 +851,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 results[i] = Local();
             }
 
-            Operand[] sources = [x.Ra >= RegisterConsts.RegisterZeroIndex ? Const(0) : context.Copy(Register(x.Ra, RegisterType.Gpr))];
+            Operand Ra(int k) => x.Ra + k >= RegisterConsts.RegisterZeroIndex ? Const(0) : context.Copy(Register(x.Ra + k, RegisterType.Gpr));
+            Operand[] sources = bindless ? [Ra(0), Ra(1)] : [Ra(0)];
 
             if (query == 0)
             {
-                SetBindingPair setAndBinding = context.ResourceManager.GetTextureOrImageBinding(
+                SetBindingPair setAndBinding = bindless ? default : context.ResourceManager.GetTextureOrImageBinding(
                     Instruction.TextureQuerySize, type, TextureFormat.Unknown, TextureFlags.None, cbufSlot, handle);
                 int r = 0;
 
@@ -782,13 +864,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     if ((mask & (1 << comp)) != 0)
                     {
-                        context.Copy(results[r++], context.TextureQuerySize(type, TextureFlags.None, setAndBinding, comp, sources));
+                        context.Copy(results[r++], context.TextureQuerySize(type, tflags, setAndBinding, comp, sources));
                     }
                 }
             }
             else if (query == 1)
             {
-                SetBindingPair setAndBinding = context.ResourceManager.GetTextureOrImageBinding(
+                SetBindingPair setAndBinding = bindless ? default : context.ResourceManager.GetTextureOrImageBinding(
                     Instruction.TextureQuerySamples, type, TextureFormat.Unknown, TextureFlags.None, cbufSlot, handle);
                 int r = 0;
 
@@ -796,7 +878,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     if ((mask & (1 << comp)) != 0)
                     {
-                        context.Copy(results[r++], comp == 2 ? context.TextureQuerySamples(type, TextureFlags.None, setAndBinding, sources) : Const(0));
+                        context.Copy(results[r++], comp == 2 ? context.TextureQuerySamples(type, tflags, setAndBinding, sources) : Const(0));
                     }
                 }
             }

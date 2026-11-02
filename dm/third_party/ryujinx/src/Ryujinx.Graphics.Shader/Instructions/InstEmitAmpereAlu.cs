@@ -28,6 +28,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x008, InstName.Sel, AFsel);
             alu(0x108, InstName.Mufu, AMufu);
             alu(0x105, InstName.F2i, AF2i);
+            alu(0x111, InstName.F2i, AF2i);
+            alu(0x112, InstName.I2f, AI2f);   // I2F with a 64-bit side (NAK); only the 64-bit integer source to a 32-bit float is taken   // F2I with a 64-bit side (NAK); only the 32-bit float source is taken
             alu(0x106, InstName.I2f, AI2f);
             alu(0x045, InstName.I2f, AI2fp);
             alu(0x107, InstName.F2f, AFrnd);
@@ -61,6 +63,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x096, InstName.Prmt, APrmt, uniform: true);
             alu(0x109, InstName.Popc, APopc);
             alu(0x0bf, InstName.Popc, APopc, uniform: true);
+            alu(0x101, InstName.Bfe, ABrev);   // BREV (no Maxwell instruction of its own: Maxwell reversed in BFE)
+            alu(0x0be, InstName.Bfe, ABrev, uniform: true);
             alu(0x100, InstName.Flo, AFlo);
             alu(0x0bd, InstName.Flo, AFlo, uniform: true);
             alu(0x01a, InstName.Bfe, ASgxt);
@@ -246,9 +250,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int size = x.Bits(75, 77);
             bool signed = x.Bit(72);
 
-            if (size > 2)
+            if (size == 3)
             {
-                throw AFail(context, $"F2I to a {8 << size}-bit integer");
+                AF2i64(context, x, s, signed);
+                return;
             }
 
             IDstFmt dst = (IDstFmt)((signed ? 4 : 0) | System.Math.Max(size, 1));
@@ -263,12 +268,63 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
+        // F2I to a 64-bit integer from a 32-bit float (opcode 0x111 with the 32-bit source; NAK picks it when either side is 64-bit): Rd, Rd + 1. Fire Emblem Fortune's Weave's
+        // F2I.U64.F32. From 2^32 up a float is a multiple of 512, so hi = floor(|f| / 2^32) and lo = |f| - hi * 2^32 are exact and convert to 32 bits each; a negative signed
+        // value is the pair negated. Out of range saturates as each 32-bit conversion does
+        private static void AF2i64(EmitterContext context, AmpereOp x, ASrc s, bool signed)
+        {
+            Operand f = context.FPAbsNeg(AGet(context, s), s.Abs, s.Neg);
+
+            f = (RoundMode2)x.Bits(78, 80) switch
+            {
+                RoundMode2.Round => context.FPRound(f),
+                RoundMode2.Floor => context.FPFloor(f),
+                RoundMode2.Ceil => context.FPCeiling(f),
+                _ => context.FPTruncate(f),
+            };
+
+            if (!signed)
+            {
+                f = context.FPMaximum(f, ConstF(0));
+            }
+
+            Operand m = context.FPAbsolute(f);
+            Operand hiF = context.FPFloor(context.FPMultiply(m, ConstF(1f / 4294967296f)));
+            Operand lo = context.FP32ConvertToU32(context.FPSubtract(m, context.FPMultiply(hiF, ConstF(4294967296f))));
+            Operand hi = context.FP32ConvertToU32(hiF);
+
+            if (signed)
+            {
+                Operand neg = context.FPCompareLess(f, ConstF(0));
+                Operand nlo = context.IAdd(context.BitwiseNot(lo), Const(1));
+                Operand nhi = context.IAdd(context.BitwiseNot(hi), context.ConditionalSelect(context.ICompareEqual(lo, Const(0)), Const(1), Const(0)));
+                lo = context.ConditionalSelect(neg, nlo, lo);
+                hi = context.ConditionalSelect(neg, nhi, hi);
+            }
+
+            if (x.Rd < RegisterConsts.RegisterZeroIndex)
+            {
+                context.Copy(Register(x.Rd, RegisterType.Gpr), lo);
+            }
+
+            if (x.Rd + 1 < RegisterConsts.RegisterZeroIndex)
+            {
+                context.Copy(Register(x.Rd + 1, RegisterType.Gpr), hi);
+            }
+        }
+
         // I2F: source signed (74) and size (84..86), destination size (75..77), byte / half select of a narrow source (60..62)
         public static void AI2f(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             int srcSize = x.Bits(84, 86);
             int dstSize = x.Bits(75, 77);
+
+            if (srcSize == 3 && dstSize == 2)
+            {
+                AI2f64(context, x);
+                return;
+            }
 
             if (srcSize > 2 || dstSize is not 1 and not 2)
             {
@@ -285,6 +341,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ISrcFmt src = (ISrcFmt)((x.Bit(74) ? 4 : 0) | srcSize);
 
             EmitI2F(context, src, (DstFmt)dstSize, AGet(context, AOne(context, x, neg: false, abs: false)), (ByteSel)(select * (srcSize == 1 ? 2 : 1)), x.Rd, false, false);
+        }
+
+        // I2F to a 32-bit float from a 64-bit integer pair (opcode 0x112, NAK's when either side is 64-bit; Fire Emblem Fortune's Weave's I2F.F32.U64 after its F2I.U64): hi * 2^32 + lo
+        // in float arithmetic, Metal having no double. Exact up to 2^24, beyond that rounded twice (at most one unit in the last place from the correctly rounded value); a
+        // negative signed pair is converted negated
+        private static void AI2f64(EmitterContext context, AmpereOp x)
+        {
+            ASrc s = AOne(context, x, neg: false, abs: false);
+            Operand lo = AGet(context, s), hi = AGetHigh(context, s);
+            Operand neg = x.Bit(74) ? context.ICompareLess(hi, Const(0)) : null;
+
+            if (neg != null)
+            {
+                Operand nlo = context.IAdd(context.BitwiseNot(lo), Const(1));
+                Operand nhi = context.IAdd(context.BitwiseNot(hi), context.ConditionalSelect(context.ICompareEqual(lo, Const(0)), Const(1), Const(0)));
+                lo = context.ConditionalSelect(neg, nlo, lo);
+                hi = context.ConditionalSelect(neg, nhi, hi);
+            }
+
+            Operand f = context.FPAdd(context.FPMultiply(context.IConvertU32ToFP32(hi), ConstF(4294967296f)), context.IConvertU32ToFP32(lo));
+
+            ASet(context, x, neg != null ? context.ConditionalSelect(neg, context.FPNegate(f), f) : f);
         }
 
         // I2FP.F32.S32 / .U32: signed at 74
@@ -711,7 +789,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // IMAD Rd, a, b, c: the low word of a * b + c (B and C may be negated)
+        // IMAD Rd, a, b, c: the low word of a * b + c (B and C may be negated). With .X (74) a negated C is its bitwise not and the carry predicate (87..90) is added,
+        // as IADD3.X: the high word of 64-bit arithmetic (IMAD.X Rd, Rhi, 1, Rc, P after an IMAD.WIDE or IMAD.HI with a carry out)
         public static void AImad(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
@@ -727,22 +806,42 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (!c.IsZeroReg)
             {
-                res = context.IAdd(res, AInt(context, c));
+                res = context.IAdd(res, AAddend(context, x, c, u));
+            }
+
+            if (x.Bit(74))
+            {
+                res = context.IAdd(res, ACarryIn(context, x, u));
             }
 
             ASet(context, x, res, u);
         }
 
-        // IMAD.WIDE Rd, a, b, c: the 64-bit a * b (signed 73) + the pair {c + 1:c}, to the pair {Rd + 1:Rd}
+        // The addend of a multiply-add: negated, its two's complement, or with .X (74) its bitwise not (the carry in completes it)
+        private static Operand AAddend(EmitterContext context, AmpereOp x, ASrc c, bool u)
+        {
+            return c.Neg && x.Bit(74) ? context.BitwiseNot(AGet(context, c)) : AInt(context, c);
+        }
+
+        // The carry in of a multiply-add with .X (74): the predicate at 87..90, as 0 or 1
+        private static Operand ACarryIn(EmitterContext context, AmpereOp x, bool u)
+        {
+            return context.ConditionalSelect(APred(context, x, 87, 90, u), Const(1), Const(0));
+        }
+
+        // IMAD.WIDE Rd, Pu, a, b, c: the 64-bit a * b (signed 73) + the pair {c + 1:c} (+ the carry predicate 87..90 with .X, 74), to the pair {Rd + 1:Rd}; Pu (81..84)
+        // the carry out of the 64-bit sum, as IADD3's
+        // outputs (NAK writes none; Fire Emblem Fortune's Weave's unsigned ones do, for wider arithmetic). A signed one with Pu, or a negated operand, is not met: refused
         public static void AImadWide(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             bool u = AUniform(context);
             (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, u, abs: false);
+            int pu = x.Bits(81, 84);
 
-            if (x.Bits(81, 84) != RegisterConsts.PredicateTrueIndex || b.Neg || c.Neg)
+            if ((pu != RegisterConsts.PredicateTrueIndex && x.Bit(73)) || b.Neg || c.Neg)
             {
-                throw AFail(context, "IMAD.WIDE predicate output or negation");
+                throw AFail(context, "IMAD.WIDE signed with a predicate output, or negation");
             }
 
             Operand srcA = AGet(context, a);
@@ -752,14 +851,34 @@ namespace Ryujinx.Graphics.Shader.Instructions
             Operand lo = context.IMultiply(srcA, srcB);
             Operand hi = signed ? context.MultiplyHighS32(srcA, srcB) : context.MultiplyHighU32(srcA, srcB);
 
+            Operand carryOut = Const(0);
+
+            if (x.Bit(74))
+            {
+                Operand cin = ACarryIn(context, x, u);
+                Operand lo1 = context.IAdd(lo, cin);
+
+                hi = context.IAdd(hi, context.ConditionalSelect(context.ICompareLessUnsigned(lo1, lo), Const(1), Const(0)));
+                lo = lo1;   // the product is at most (2^32 - 1)^2, so a carry into its high word never carries out
+            }
+
             if (!c.IsZeroReg)
             {
                 Operand cLo = AGet(context, c);
                 Operand sum = context.IAdd(lo, cLo);
                 Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(sum, lo), Const(1), Const(0));
+                Operand hi1 = context.IAdd(hi, AGetHigh(context, c));
+                Operand hi2 = context.IAdd(hi1, carry);
 
-                hi = context.IAdd(context.IAdd(hi, AGetHigh(context, c)), carry);
+                carryOut = context.BitwiseOr(context.ConditionalSelect(context.ICompareLessUnsigned(hi1, hi), Const(1), Const(0)),
+                                             context.ConditionalSelect(context.ICompareLessUnsigned(hi2, hi1), Const(1), Const(0)));
+                hi = hi2;
                 lo = sum;
+            }
+
+            if (pu != RegisterConsts.PredicateTrueIndex)
+            {
+                ASetPred(context, pu, context.ICompareNotEqual(carryOut, Const(0)), u);
             }
 
             int rd = ARd(x, u);
@@ -776,27 +895,69 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // IMAD.HI Rd, a, b, c: the high word of a * b (signed 73), plus c
+        // IMAD.HI Rd, Pu, a, b, c: the high word of the 64-bit a * b (signed 73) + the pair {c + 1:c} (+ the carry predicate 87..90 with .X, 74), the high half of
+        // IMAD.WIDE's sum; Pu (81..84) its carry out. The C register is a pair, as IMAD.WIDE's: compilers chain IMAD.WIDE Rd, a, b, Rd then IMAD.HI Rd, a', b', Rd to sum
+        // 32-bit-shifted partial products of a 64-bit multiply (Fire Emblem Fortune's Weave's u64 division in its auto exposure). A negated C is the pair's two's
+        // complement (its bitwise not with .X). A signed one with Pu is not met: refused
         public static void AImadHi(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
             (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, abs: false);
+            int pu = x.Bits(81, 84);
 
-            if (x.Bits(81, 84) != RegisterConsts.PredicateTrueIndex)
+            if (pu != RegisterConsts.PredicateTrueIndex && x.Bit(73))
             {
-                throw AFail(context, "IMAD.HI predicate output");
+                throw AFail(context, "IMAD.HI signed with a predicate output");
             }
 
             Operand srcA = AGet(context, a);
             Operand srcB = AInt(context, b);
-            Operand res = x.Bit(73) ? context.MultiplyHighS32(srcA, srcB) : context.MultiplyHighU32(srcA, srcB);
+            Operand lo = context.IMultiply(srcA, srcB);
+            Operand hi = x.Bit(73) ? context.MultiplyHighS32(srcA, srcB) : context.MultiplyHighU32(srcA, srcB);
+            Operand carry = Const(0);
+
+            void Add(Operand addLo, Operand addHi)
+            {
+                Operand lo1 = context.IAdd(lo, addLo);
+                Operand hi1 = context.IAdd(hi, addHi);
+                Operand hi2 = context.IAdd(hi1, context.ConditionalSelect(context.ICompareLessUnsigned(lo1, lo), Const(1), Const(0)));
+
+                carry = context.BitwiseOr(carry, context.BitwiseOr(context.ConditionalSelect(context.ICompareLessUnsigned(hi1, hi), Const(1), Const(0)),
+                                                                   context.ConditionalSelect(context.ICompareLessUnsigned(hi2, hi1), Const(1), Const(0))));
+                lo = lo1;
+                hi = hi2;
+            }
 
             if (!c.IsZeroReg)
             {
-                res = context.IAdd(res, AInt(context, c));
+                Operand cLo = AGet(context, c);
+                Operand cHi = AGetHigh(context, c);
+
+                if (c.Neg)
+                {
+                    cLo = context.BitwiseNot(cLo);
+                    cHi = context.BitwiseNot(cHi);
+                }
+
+                Add(cLo, cHi);
+
+                if (c.Neg && !x.Bit(74))
+                {
+                    Add(Const(1), Const(0));
+                }
             }
 
-            ASet(context, x, res);
+            if (x.Bit(74))
+            {
+                Add(ACarryIn(context, x, false), Const(0));
+            }
+
+            if (pu != RegisterConsts.PredicateTrueIndex)
+            {
+                ASetPred(context, pu, context.ICompareNotEqual(carry, Const(0)), false);
+            }
+
+            ASet(context, x, hi);
         }
 
         // LOP3 Rd, Pd, a, b, c, lut (72..80): Pd = (result != 0) OR P (87..90), AND with .PAND (80)
@@ -1046,6 +1207,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
         }
 
         // FLO Rd, b: the index of the most significant set bit (signed 73: of the first bit unlike the sign), .SH (74) as a shift amount; 63 negates the input
+        // BREV Rd, Rb: the bits of the operand in reverse order (NAK OpBRev: encode_alu(0x101 / UBREV 0x0be, dst, -, src, -), the operand where POPC has it)
+        public static void ABrev(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            bool u = AUniform(context);
+            ASet(context, x, context.BitfieldReverse(AGet(context, AOne(context, x, u, neg: false, abs: false))), u);
+        }
+
         public static void AFlo(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);

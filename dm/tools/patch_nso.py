@@ -210,6 +210,9 @@ def written_w(p):
 def writes_reg(p, reg):
     """Whether p changes the general-purpose register reg (xN or wN): a write of wN clears the upper half of xN too, and a compare only sets the flags"""
     return p.mnemonic not in ('cmp', 'cmn', 'tst') and 'w' + reg[1:] in written_w(p)
+def writes_reg_any(p, regs):
+    """writes_reg for a set of wN names"""
+    return p.mnemonic not in ('cmp', 'cmn', 'tst') and bool(written_w(p) & regs)
 def has18(ins): return re.search(r'\b[xw]18\b', ins.op_str) is not None
 def regs_in(ins):
     s = {int(n) for n in re.findall(r'\b[xw](\d+)\b', ins.op_str)}
@@ -700,7 +703,7 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     # GLSLC subsdk0+0x2f403c checks a masked copy instead: and w16,w18,#0x3f; cmp w16,#0xe; b.hi; ...; and x18,x18,#0x3f; ldrsw x18,[x15,x18,lsl #2]
     idx = {'w' + re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', ld.op_str).group(1)}   # pyright: ignore[reportOptionalMemberAccess]  # ld was chosen by this match
     masked = None   # (source, mask, position) when the index is "source & mask"
-    k0 = ctx.index(ld); cmp = None; copies = set()
+    k0 = ctx.index(ld); cmp = None; copies = set(); changed = False
     def wname(r): return 'w' + r[1:]
     for i in range(k0 - 1, -1, -1):   # walk back from the load: follow register copies into the index, stop at the bounds check
         p = ctx[i]
@@ -711,7 +714,10 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
         # A 64-bit check of the index bounds it as well (OCTOPATH TRAVELER 1.0.5 main+0x1676f30: cmp x22,#0x10; ...; b.hi; adrp x18 + add x18; mov x0,x18; ldrsw x18,[x0,x22,lsl #2];
         # add x18,x18,x0, the base copied, so only far_base reads it); taken only in the last attempt, so sites that rewrote before come out the same
         m = re.fullmatch(r'([wx]\d+), #(0x[0-9a-f]+|\d+)' if far_base else r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
-        if not m: continue
+        if not m:
+            # Capstone lists only x30 as a call's write, so a call counts for the caller-saved registers
+            if writes_reg_any(p, idx) or (p.mnemonic in ('bl', 'blr') and any(int(r[1:]) <= 18 for r in idx)): changed = True
+            continue
         if wname(m.group(1)) in idx: cmp = p; break
         if masked:   # the checked register must be "the same source & the same mask", with the source unchanged up to the index's and
             for q in range(i - 1, -1, -1):
@@ -722,6 +728,7 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
                     cmp = p
                 break
             if cmp: break
+    if cmp and changed: return None   # the index changes after the check. Before a check it does not matter, so this waits for the walk to find one
     if not cmp and copy_first: cmp = check_before_copy(insl, ctx, ld, idx | copies)
     if not cmp: return None
     n = int(cmp.op_str.split('#')[1], 0) + 1

@@ -337,7 +337,7 @@ coverage:
 	@$(call cov_export,$(B)/cov)
 
 # Local transport fixtures use only synthetic packets and loopback peers.
-NET_SOURCES = ../hle_net_backend.c
+NET_SOURCES = ../hle_net_backend.c t_net_write_stub.c
 NET_HEADERS = ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h
 NET_FLAGS = -O1 -g -Wall -Wextra -Werror -Wno-unused-function
 $(B)/t_hle_wait: t_hle_wait.c t_hle_wait.S ../hle.h ../entry.S ../hle_bigstack.c $(GAME_H) | $(B)
@@ -373,3 +373,14 @@ local-network-tests: $(B)/t_friends_history
 $(B)/t_oe_handoff: t_oe_handoff.c t_condvar_stub.c ../hle_thread.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_oe_handoff.c t_condvar_stub.c
 local-network-tests: $(B)/t_oe_handoff
+
+# A kernel socket receive must prepare tracked guest pages, including after waits.
+$(B)/t_net_write_prepare: t_net_write_prepare.c ../hle_net_backend.c ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_dirty.h $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net_write_prepare.c ../../gfx/nvn/nvn_dirty.c
+.PHONY: net-write net-write-sanitize
+net-write: $(B)/t_net_write_prepare
+	$(B)/t_net_write_prepare
+net-write-sanitize:
+	$(call san_fresh,build/net-write-asan,$(ASAN_FLAGS))
+	$(ASAN_ENV) $(MAKE) B=build/net-write-asan SAN="$(ASAN_FLAGS)" net-write
+run: net-write

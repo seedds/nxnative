@@ -30,6 +30,7 @@
 #include <time.h>
 #include <unistd.h>
 
+void dm_guest_write_prepare(void *addr, size_t len);
 void dm_guest_host_wait_begin(void);
 void dm_guest_host_wait_end(void);
 
@@ -337,6 +338,9 @@ long dm_net_recv(int guest, void *buf, unsigned long len, int flags, void *addr,
     uint64_t start = net_ms(); long result = -1; size_t total = 0;
     struct sockaddr_in a;
     for (;;) {
+        // Kernel copyout cannot fault into the dirty-page signal hook. A wait or
+        // partial stream read may allow the renderer to protect this span again.
+        dm_guest_write_prepare(buf ? (char *)buf + total : NULL, len - total);
         socklen_t n = sizeof a; ssize_t got = recvfrom(r.fd, buf ? (char *)buf + total : NULL, len - total, hostflags, addr ? (struct sockaddr *)&a : NULL, addr ? &n : NULL); int err = errno;
         if (got >= 0) {
             total += (size_t)got; result = (long)total;

@@ -605,6 +605,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** 12 of 12 boots with four hosts at once reached the title, with both fixes; a host that answers at once hung 1 of 4 in the same test.
 - **Note:** how it was found: the hung boots' logs diverged from good ones at the save probe (`DM_FS=1`), the thread dumps showed nothing but idle waits, and `DM_PROBE` on the state machine, then `peek` lines in a hung run's `DM_CTL` file, followed the pointers to the status word (a probe on the hot path slowed the boot enough to hide the race: 8 of 8 good).
 
+### Socket receive into write-protected tracked guest pages
+
+- **Symptom:** a real UDP/TCP receive returns guest `EFAULT` (14) when its otherwise valid destination belongs to a graphics-tracked read-only page.
+- **Cause:** kernel `recvfrom` copyout does not execute the host's write-fault signal hook. Unlike file reads, the socket path did not invoke `dm_guest_write_prepare`. Preparing only on entry is insufficient: readiness waits and partial `WAITALL` reads let the renderer protect the pending destination again.
+- **Fix:** `dm_net_recv` prepares only its remaining destination immediately before every native receive attempt. The existing dirty tracker admits only its registered ranges, unprotects them and advances their generation; it does not make an unrelated read-only/invalid mapping writable. UDP/TCP, address/flag/errno and descriptor behavior are unchanged. An `EFAULT` is not blindly retried, because a datagram might already have been consumed.
+- **Check:** I reproduced the failure with the production backend and real `nvn_dirty.c`, no GPU/game: already protected TCP/UDP destinations fail without preparation; an entry-only control still fails after protection during a readiness wait. `make -C dm/host/tests GAME=010015100B514000 net-write net-write-sanitize` also checks partial stream offsets, dirty generations, preserved guest errno, unrelated read-only/`PROT_NONE`/invalid destinations, flags, closed descriptors and zero-length datagrams. Other ordinary-buffer socket fixtures provide an explicit no-tracker hook; production keeps its required registered dispatcher.
+- **Limits:** this synthetic result does not establish an observed game disconnect's cause. It does not make preparation atomic with a concurrent re-protection between the hook and kernel copyout; that narrow race remains separate from the demonstrated missing preparation and wait boundary.
+
 ### Socket `Poll` and `Select` with nothing to wait on
 
 - **Symptom:** one thread at 100% CPU from boot, with one SVC in 99 s (`NexusRevolution Socket`, `main+0x92c7c4`, the game's network thread).

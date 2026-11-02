@@ -129,7 +129,7 @@ static void dependency(int mode) {
       "struct G{device float*in[[id(0)]];device float4*out[[id(1)]];device uint*ix[[id(2)]];constant uint4*info[[id(3)]];device uint*map[[id(4)]];device uint*p[[id(5)]];};\n"
       "kernel void geometry(constant G&g[[buffer(0)]],uint3 t[[thread_position_in_grid]]){if(t.x||t.y||t.z)return;float x=g.in[0]*.8-.8;g.p[0]=uint(g.in[0])+1;g.out[0]=float4(x,-.5,0,1);g.out[1]=float4(x+.6,-.5,0,1);g.out[2]=float4(x,.5,0,1);g.ix[0]=0;g.ix[1]=1;g.ix[2]=2;g.ix[3]=0xffffffffu;}\n"
       "struct V{device float4*p[[id(0)]];};vertex float4 reader(uint v[[vertex_id]],constant V&a[[buffer(0)]]){return a.p[v];}\nfragment float4 red(){return float4(1,0,0,1);}\n");
-    int helpers[]={0,1,2,3,4},rh[]={1};NvProg *pr=[NvProg new]; // NOLINT(clang-analyzer-osx.cocoa.RetainCount): serial_put below hands pr to g_by_serial (its CFBridgingRetain), which owns it
+    int helpers[]={0,1,2,3,4},rh[]={1};NvProg *pr=[NvProg new];
     pr->sh[0]=shader(l,@"unused",0,NULL,0);NvShader *vs=pr->sh[0];vs->geo_fn=[l newFunctionWithName:@"capture"];
     vs->rf.nb=1;vs->rf.b[0]=(nvn_rbind){.kind=uniform?NVN_RB_CBUF:NVN_RB_SBUFP,.reg=0,.aid=0};
     vs->ae=[vs->geo_fn newArgumentEncoderWithBufferIndex:0];vs->arg_len=vs->ae.encodedLength;
@@ -138,7 +138,7 @@ static void dependency(int mode) {
     strcpy(gs->key,"fedcba9876543210_b");gs->geo_vertices=3;gs->geo_invocations=1;gs->geo_output=7;gs->geo_stride=4;gs->geo_index_stride=4;
     g_shcache=[NSMutableDictionary dictionary];g_shcache[@"fedcba9876543210_bg0"]=gs;g_shcache[@"fedcba9876543210_bgv"]=shader(l,@"reader",0,rh,1);
     prog_t cp={.serial=9700+mode};serial_put(cp.serial,pr);
-    uint8_t *cmd;posix_memalign((void**)&cmd,getpagesize(),65536);memset(cmd,0,65536);mtl_pool_add(cmd,65536);size_t used=0;
+    uint8_t *cmd;posix_memalign((void**)&cmd,getpagesize(),65536);memset(cmd,0,65536);mtl_pool_add(cmd,65536);size_t used=0; // NOLINT(clang-analyzer-osx.cocoa.RetainCount): serial_put above handed pr to g_by_serial (its CFBridgingRetain), which owns it
     #define EMIT(OP,X) do{size_t z=(8+sizeof(X)+7)&~7ull;op_hdr h={OP,(uint32_t)z};memcpy(cmd+used,&h,8);memcpy(cmd+used+8,&(X),sizeof(X));used+=z;}while(0)
     tex_t target={.magic=MAGIC('T','E','X',0),.serial=9800+mode,.d={.target=NVN_TEXTURE_TARGET_2D,.format=NVN_FORMAT_RGBA8,.width=32,.height=32,.depth=1,.levels=1,.samples=1}};
     p_set_rt rt={.n=1};rt.color[0]=&target;EMIT(OP_SET_RT,rt);p_viewports vp={.n=1};vp.v[0][2]=vp.v[0][3]=32;EMIT(OP_VIEWPORTS,vp);

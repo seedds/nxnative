@@ -1539,17 +1539,19 @@ at tier H and the others at tier C; in the max mode at H+ and H. Without a profi
 
 Separated by spaces or a tab; an offset may repeat (the counts add up); a count of 0 does not make its function hot; an offset in no function
 is counted (`aot: profile <file>: <s> samples at <o> offsets, <x> outside every function`) and ignored; a malformed line stops the build with
-its file and line number. The x86-64 host writes this file: `DM_AOT_PROFILE=<folder>` (`dm/host/aot_profile.c`, Linux for now) samples
-every thread that runs guest code about 1,000 times per second of its CPU time (a CPU-time timer per thread and `SIGPROF`; the interrupted
-pc through the pack's function map, a host call or SVC counted for the guest function that made it) and at exit writes `<folder>/<module>.tsv`,
-one line per sampled function at its entry offset under `#` lines naming the module, its build ID, its image's SHA-256 and the pack; the NSP
+its file and line number. The x86-64 host writes this file: `DM_AOT_PROFILE=<folder>` (`dm/host/aot_profile.c`, Linux and Windows) samples
+every thread that runs guest code about 1,000 times per second of its CPU time (a CPU-time timer per thread and `SIGPROF`; Windows: a sampler
+thread; the interrupted pc through the pack's function map, a host call or SVC counted for the guest function that made it) and at exit writes
+`<folder>/<module>.tsv` under `#` lines naming the module, its build ID, its image's SHA-256 and the pack: one line per sampled guest
+instruction, the pc mapped through the pack's positions ("The sample profile at tier H", "The sampler's positions"), and one at its entry for
+a function with samples at no instruction (its host calls and SVCs, or a pack without positions: the form it wrote before positions); the NSP
 script passes `<NSP folder>/<id>-work/profile/<module>.tsv` to the module's next pack (docs/development.md, the x86 packing section;
 `--no-profile` ignores it); beside it the host writes the JIT fallback's misses, `<module>.misses.tsv`, which `--misses` takes ("JIT
-misses"). Design 12's form (`dm/games/<id>/aot_profile/<build ID>.tsv` with instruction offsets) is not what it writes:
-function entries are what the tiers need. CTest `t_aot_module` (dm/host) checks a written profile's hot function, and `profile` below builds
-the synthetic module with a profile in the host's form. Here the counts only chose the tier; since, the samples' positions inside a function
-weigh its code at H and H+ (the design's "the sample profile" of tier H: "The sample profile at tier H" below), which the host's form, every
-sample at its function's entry, does not have: with it the counts still only choose the tier. A function's tier is part of its cache key;
+misses"). Design 12's path (`dm/games/<id>/aot_profile/<build ID>.tsv`) is not where it writes, its rows are design 12's sampled instruction
+offsets. CTest `t_aot_module` (dm/host) checks a written profile's hot function, and `profile` below builds the synthetic module with a
+profile in the host's earlier form. Here the counts only chose the tier; since, the samples' positions inside a function weigh its code at H
+and H+ (the design's "the sample profile" of tier H: "The sample profile at tier H" below); a function sampled at its entry only still has
+its tier and nothing more. A function's tier is part of its cache key;
 units are of one tier each. CTest `profile` ([tests/test_profile.py](tests/test_profile.py)): a profile written by hand for fnptr-gcc,
 fp-clang, except-gcc and switch-gcc (three functions sampled at their entries, last instructions and a second offset, a sample outside every
 function, a count of 0): the logged tiers are C n-3 and H 3 in the balanced mode, H n-3 and H+ 3 in the max mode (fnptr-gcc: `aot: tiers C 58
@@ -1630,7 +1632,7 @@ of it).
 - **The cache across game updates**: unchanged (the lowering writes module offsets into the code).
 - **One process per module**: unchanged.
 - **ThinLTO import, devirtualisation, function ordering**: open (6 above). **The sample profile at tier H**: done since ("The sample
-  profile at tier H"), for profiles with positions, which the host's sampler does not record yet.
+  profile at tier H"), for profiles with positions, which the host's sampler records since ("The sampler's positions").
 
 ### Phase 5c
 
@@ -2813,8 +2815,9 @@ before the tier's pipeline ([src/build/pack.cpp](src/build/pack.cpp), "The sampl
   and a split function's parts must lie in one section (`JoinParts`); ordering functions by heat stays H+'s open item ("Phase 5b", 6). No `hot`
   or `cold` attribute is set: the entry counts and the summary already class the functions, and an attribute on another unit's declaration
   would make that unit's code depend on this one's samples.
-- **What is not weighed.** A function whose samples are all at its entry: that is the form the host's sampler writes
-  ([dm/host/aot_profile.c](../../host/aot_profile.c) counts per function and writes `<entry offset> <samples>`), which has no positions. Given
+- **What is not weighed.** A function whose samples are all at its entry: the form the host's sampler wrote before it had positions, and
+  still writes for a function with samples at none of its instructions (all of them in its host calls and SVCs, or a pack without positions:
+  [dm/host/aot_profile.c](../../host/aot_profile.c), "The sampler's positions" below), which has no positions. Given
   to profi, its other blocks known to have no samples, the whole flow goes along the cheapest path out of the function and the branch weights
   are guesses that override LLVM's own (switch-gcc 149 µs without them, 150 to 151 with); an entry count with the blocks' counts spread by
   LLVM's static estimate (BlockFrequencyInfo) measured no gain either (switch-gcc 149 and 149 µs, switch-clang 109 and 111; both measured
@@ -2823,9 +2826,10 @@ before the tier's pipeline ([src/build/pack.cpp](src/build/pack.cpp), "The sampl
   pipeline reads no weights), nor do those at H in the max mode (the profile did not sample them).
 
 The log: `aot: profile weights: <f> functions, <b> branches weighted, <e> entry counts, <c> call counts; <x> functions sampled at their entry
-only, not weighed; <z> with samples profi found no flow for, not weighed` (int_ops-gcc with the fixture below: `28 functions, 53 branches
-weighted, 28 entry counts, 160 call counts; 3 functions sampled at their entry only, not weighed; 0 with samples profi found no flow for`; a
-part of a split function counts as one); with the test switch `NXAOT_PROFILE_WEIGHTS=0`, `aot: profile weights: off (NXAOT_PROFILE_WEIGHTS=0):
+only, not weighed; <z> with samples profi found no flow for, not weighed` (int_ops-gcc with the fixture below: `26 functions, 55 branches
+weighted, 26 entry counts, 160 call counts; 4 functions sampled at their entry only, not weighed; 0 with samples profi found no flow for`; with
+the interim fixture the measurements below used, `28 functions, 53 branches weighted, 28 entry counts, 160 call counts; 3 functions sampled at
+their entry only`; a part of a split function counts as one); with the test switch `NXAOT_PROFILE_WEIGHTS=0`, `aot: profile weights: off (NXAOT_PROFILE_WEIGHTS=0):
 the profile chooses the tiers only`, and the pack is the one the tiers alone give, byte for byte HEAD's.
 
 **The cache key.** A unit's object depends on its own functions' samples only (the summary is the unit's, not the pack's), so a weighed
@@ -2834,13 +2838,20 @@ weighed (no profile, `NXAOT_PROFILE_WEIGHTS=0`, tier C, sampled at its entry onl
 key format stays `nxaot-unit 4`. A shard's key holds its functions' keys: a profile that changes outside a unit's functions keeps the unit,
 one that changes a sample inside them misses it (CTest `profile_weights`).
 
-**Recording profiles with positions.** The host's sampler does not record them yet (it maps the interrupted pc to its function through the
-pack's function map). The profiles measured here, and the fixture of CTest `profile_weights` ([tests/profile_weights.tsv](tests/profile_weights.tsv)),
-were recorded natively on the corpus's tier W packs (HEAD's binary, no profile) run by `nxaot_host`, with a sampler preloaded into it (not part
-of the repository): a `CLOCK_MONOTONIC` timer signal 10,000 times per second on the thread that runs the guest, the interrupted rip stored when
-it lies in the pack's code, and at exit each address mapped to its guest offset through the pack's DWARF line table (line = guest offset, the
-innermost inlined frame's; `llvm-symbolizer`); 3 to 16 % of the samples land on line 0 and are dropped. int_ops-gcc with `int_ops_rounds = 2000`
-(0.82 s): 7,214 samples in the pack's code, 6,966 kept at 296 offsets in 31 functions.
+**Recording profiles with positions.** The host's sampler records them ("The sampler's positions" below). The fixture of CTest
+`profile_weights` ([tests/profile_weights.tsv](tests/profile_weights.tsv)) is a profile it wrote: int_ops-gcc on its tier W pack
+([tests/build_packs.sh](tests/build_packs.sh)) run by dm/host's `t_aot_host --run <packs>/int_ops-gcc.so int_ops-gcc.nro --set
+int_ops_rounds=20000 --positions` with `DM_AOT_PROFILE` (1,000 Hz of CPU time, 7.2 s): 7,193 samples, 6,938 at 284 guest instructions in 30
+functions, 1 at the entry of a function with none at an instruction, 254 in code with no instruction (line 0) left out; its hottest rows
+`0x2268 988`, `0x2258 980`, `0x2264 647`, `0x2260 398` (ref_crc's inner loop). The profiles measured below, and the fixture before it, were
+recorded natively on the corpus's tier W packs (ffa2f80's binary, no profile) run by `nxaot_host`, with an interim sampler preloaded into it
+(not part of the repository): a `CLOCK_MONOTONIC` timer signal 10,000 times per second on the thread that runs the guest, the interrupted rip
+stored when it lies in the pack's code, and at exit each address mapped to its guest offset through the pack's DWARF line table (line = guest
+offset, the innermost inlined frame's; `llvm-symbolizer`); 3 to 16 % of the samples land on line 0 and are dropped. int_ops-gcc with
+`int_ops_rounds = 2000` (0.82 s): 7,214 samples in the pack's code, 6,966 kept at 296 offsets in 31 functions (`0x2268 994`, `0x2258 936`,
+`0x2264 711`, `0x2260 417`: the host's sampler finds the same instructions in the same proportions). The host's fixture is a run ten times as
+long at 1,000 Hz rather than `DM_AOT_PROFILE_HZ=10000`: a Linux CPU-time timer is checked at the kernel's tick and a late expiry comes as one
+signal weighing its overrun (aot_profile.c), so 10,000 Hz over `int_ops_rounds = 2000` (0.73 s) gave 7,276 samples at only 143 instructions.
 
 **Measured.** HEAD's binary (ffa2f80, built in the same image) and this one; the packs at tier H with a profile recorded as above, weights off
 (`NXAOT_PROFILE_WEIGHTS=0`, byte for byte HEAD's pack with the same profile in every case) and on; each run pinned to one CPU (`taskset -c 3`),
@@ -2893,8 +2904,8 @@ pack 5.92 → 5.96 s (+0.7 %); switch-gcc (31 functions at H) 0.99 → 1.02 s. T
 [tests/build_packs.sh](tests/build_packs.sh) (18 NROs, the synthetic game module and the host-function module's two, for Linux and in `win64`)
 42 of 42 the same bytes; the 18 NROs in the max mode (tier H+) 18 of 18; the 16,000-function `--direct` module (seed 2) at tier W (20,230,360
 bytes), at tier C (37,466,832) and as a DLL (20,095,488) the same bytes. With a profile: `NXAOT_PROFILE_WEIGHTS=0` gives HEAD's pack for every
-program measured above; the profiles t_aot_module's runs wrote through the host's sampler (`0x1ec 399` in one, `0x1ec 398` and `0x1dc 1` in
-another: synth_hot and synth_cut) give the synthetic module's pack HEAD's binary gives, with the weights on (`2 functions sampled at their
+program measured above; the profiles t_aot_module's runs wrote through the host's sampler, in its form before positions (`0x1ec 399` in one,
+`0x1ec 398` and `0x1dc 1` in another: synth_hot and synth_cut) give the synthetic module's pack HEAD's binary gives, with the weights on (`2 functions sampled at their
 entry only, not weighed`); and the unit objects of the benchmark
 and of switch-gcc with their profiles, packed into a cache by HEAD's binary and this one (the line marks' section aside, which LLVM writes in an
 order of its own: "The tables' object through MC"): every object at tier C the same bytes (836 of 931 objects the same, the 95 that differ
@@ -2910,11 +2921,7 @@ its unit only), and the packs' output. dm/host's tests with this binary's corpus
 
 **What is left.**
 
-- **Positions from the host's sampler.** The x86 host's sampler (dm/host/aot_profile.c) writes each function's samples at its entry, which
-  weigh nothing; a profile recorded in a game with it gives the tiers' pack, as before. Design 12's form (sampled instruction offsets) needs
-  the sampler to map the interrupted pc to its guest offset through the pack's line table (its `.nxaot.lines` runs name only the guest memory
-  accesses, so the nearest preceding row; or the DWARF line table, as the recording above did) and to write `<offset> <samples>` rows, which
-  `--profile` reads as they are.
+- **Positions from the host's sampler**: done since ("The sampler's positions" below).
 - **LLVM's sample loader** (`SampleProfileLoaderPass` with a profile file, design 12's "an LLVM sample profile"): not taken, as the direct
   metadata measured a gain where the code branches and none to lose elsewhere; it would add a profile file per unit, guest offsets as line
   offsets from each function's line, and its inline replay, which a profile of guest code has no inline frames for.
@@ -2923,6 +2930,67 @@ its unit only), and the packs' output. dm/host's tests with this binary's corpus
 - **The entry block's samples** include those of the prologue (its instructions carry the entry's line): a short function's entry block
   looks hotter than its body; small, and left.
 - **Function ordering by heat** (`.text.hot`): every function stays in `.text` (above), H+'s open item.
+
+#### The sampler's positions
+
+The catch above, resolved: the host's sampler records design 12's sampled instruction offsets. Each sample's interrupted pc in compiled code
+counts for its function, as before, and at the guest instruction whose code holds it ([dm/host/aot_profile.c](../../host/aot_profile.c)
+`count_pc`, [dm/host/aot_arena.c](../../host/aot_arena.c) `dm_aot_offset_of_code`), through a table the pack carries:
+
+- **The table.** `nxaot_positions`, exported beside the descriptor and outside it ([include/nxaot/aot_module.h](include/nxaot/aot_module.h),
+  "The sampler's positions"), so the descriptor's ABI (3) is unchanged: a pack without it (`--no-debug-info`, an nxaot before it) loads and its
+  samples count per function at their entries, with a `[RED]` line when `DM_AOT_PROFILE` is set; one of another version is used for nothing,
+  with the same line. Per function of the descriptor's map, a run of rows `{native address from the body, guest offset}`, each holding to the
+  next row; every 64 rows a mark in full (12 bytes), the rows between as deltas from the row before: one byte for a native step of 1 to 16 and
+  an offset step of −4 to +3 instructions, two bytes for up to 256 and −24 to +37, LEB128 beyond; a run's first 64 rows have no mark, its
+  first row counts from the function's entry. The host's lookup (`nxaot_position_at`, the header's own code, the same in nxaot's check) is a
+  binary search of the run's marks and at most 63 rows decoded: no allocation, no lock, safe in the signal handler and while the Windows
+  sampler holds a thread suspended. The host reads the table where the library maps it (no copy, nothing at the load but a pointer and a
+  check that the function map is in module-offset order, which the runs' index needs).
+- **What a row names.** nxaot writes the rows (positions.o: `ReadPositions`, `EncodeRun`, `CompilePositions` in
+  [src/build/pack.cpp](src/build/pack.cpp)) from each unit's DWARF line table (line = guest offset), from a fresh or a cached object alike, on
+  the workers: a range's guest instruction is its line; in code inlined into the function (tiers H and H+) the line of the call the inlining
+  replaced (the top-level `DW_TAG_inlined_subroutine`'s `DW_AT_call_line`), so that a sample never counts at another function's instruction;
+  none for line 0 (code LLVM merged from several instructions, or gave no location), for a standard entry's code and for what follows a body's
+  or a part's end (a terminator row), and none, counted, for a line outside the function's `[entry, entry + size)` (none seen). The log:
+  `aot: positions: <r> rows for <f> functions in <b> bytes (<b/r> per row), from <d> DWARF ranges: <i> in inlined code (the call's line), <z>
+  with no line, <x> outside their function (none); encoded in <s> s` (switch-gcc in the max mode: 51,122 rows from 51,196 ranges, 74 inlined,
+  587 with no line, 3 outside). Checked against `llvm-symbolizer`: every row of int_ops-gcc, switch-gcc and simd-clang at W, int_ops-gcc at H
+  with the fixture and switch-gcc in the max mode (inlining), decoded by an independent reader at its first address and its middle, names the
+  outermost frame's line the symbolizer gives, but for 2 ranges of switch-gcc's split function 0x6e20 that are its standard entry's (none by
+  design).
+- **Why this table.** (a) The line table `.nxaot.lines` for every instruction: its rows are 8 bytes and name the innermost frame (a fault
+  report needs the faulting access's own instruction; the sampler needs the outermost, or a sample in inlined code counts for another
+  function); with a row per change of location, switch-gcc's 50,497 rows would be 404 KB (+60 % of its pack) and the benchmark's 628,539 rows
+  5.0 MB (+25 %), and marking every instruction with `!pcsections` asks code generation to keep a node per instruction it drops at will
+  ("loosing !pcsections metadata"). (c) The pack's DWARF read by the host: no pack bytes, but DWARF 5's line program and, for the inlined
+  ranges, `.debug_info`, `.debug_abbrev`, `.debug_addr` and `.debug_rnglists` parsed in C at every load (on Windows from the DLL's sections),
+  and either a decoded table kept (8 bytes a row: 5 MB for the benchmark, hundreds of MB for a large game) or a unit's whole line program
+  decoded at every sample. (b), taken: a table for the sampler alone, 1.4 to 1.8 bytes a row.
+- **The cost.** The corpus packs ([tests/build_packs.sh](tests/build_packs.sh)): 21 shared objects 2,689,816 → 2,845,472 bytes (+5.8 %),
+  21 DLLs 2,744,832 → 2,892,800 (+5.4 %); int_ops-gcc 109,040 → 114,232 (+4.8 %), switch-gcc 670,392 → 733,024 (+9.3 %: 50,497 rows of its
+  jump-table code in 72 KB). The 16,000-function benchmark (`gen_bench.py --direct --functions 16000 --seed 2`, tier W): 20,230,360 →
+  21,341,456 bytes (+5.5 %), its table 628,539 rows in 1,110,466 bytes (1.77 a row: runs 195,072, marks 51,876, rows 863,518; 387,603 rows in
+  one byte, 155,170 in two, 24,821 longer, 56,622 without a position). Pack time, the benchmark with 8 workers, 3 rounds alternating HEAD's
+  binary and this one: whole pack 14.77, 14.47, 14.89 s and 14.48, 14.89, 14.54 s, compile wall 12.04, 11.67, 12.00 and 11.76, 12.01, 11.65 s:
+  within the noise (the DWARF read and the rows encoded on the workers, 0.06 s of CPU in all); peak memory 161 to 166 MiB and 163 to 165 MiB
+  (a unit's rows are encoded as soon as it is compiled: kept whole to the end as read, 24 bytes each, they made it 193 to 204 MiB). The host,
+  with `DM_AOT_PROFILE` only: a 32-bit count per guest instruction of a pack's text (calloc'd at the load; only the pages of sampled code are
+  touched).
+- **The file.** A row per sampled instruction, and a row at its entry only for a function with samples at none of its instructions (all in its
+  host calls and SVCs, or in code with no position, or in a pack without positions): its tier, as before. A function with samples at its
+  instructions has no entry row with its total: with one, the entry block weighs as much as the whole function, and int_ops-gcc's ref_crc
+  (the fixture plus each function's total at its entry) gets its inner back edge at 70 % instead of 97 % and its outer one at 1.2 % instead of
+  46 % (`!prof` of its `b.ne`s in `--ir`). nxaot's tiers need no entry row: `TiersFromProfile` makes a function hot for a sample anywhere in
+  `[entry, limit)` (before 471bf37 too), and the launcher and the packer count offsets and samples as before (more offsets per function). The
+  samples of host calls and SVCs stay at no instruction: their time says nothing of how often their block runs. The header counts what is
+  left out.
+- **Tests.** dm/host's `t_aot_host` (int_ops-gcc and int_ops-clang, `int_ops_rounds = 2000` under `DM_AOT_PROFILE`): every byte of the pack's
+  compiled code through the positions (none outside its function), every sampled function with a row inside it, ref_crc the hottest function
+  with most of its samples inside its loops and away from its entry (int_ops-gcc: `0x2268 107; 0x2258 95; 0x2264 72; 0x2260 50`), and with
+  `--nxaot` / `NXAOT` the round trip (`nxaot build --profile` weighs functions, `NXAOT_PROFILE_WEIGHTS=0` gives the pack of the entry form);
+  `t_aot_module`: synth_hot's samples in its loop. Windows: the sampler thread's path calls the same lookup on the suspended thread's `Rip`
+  and the DLL exports the table (`/export:nxaot_positions`); not run here.
 
 ## The lock file
 

@@ -2,8 +2,9 @@
 """The sample profile at tier H (CTest `profile_weights`; docs/design/aot-recompiler.md 9.3 and 12, README.md "The sample profile at tier H"):
 with a profile whose samples have positions inside the functions, `nxaot build --profile` weighs the lifted code of the functions at tiers H
 and H+ before the tier's pipeline: branch weights between guest blocks from the flow profi infers from the blocks' samples, the function's
-entry count, each call's count and a ProfileSummary (kind sample) per unit. The fixture is a profile recorded natively on int_ops-gcc
-(tests/profile_weights.tsv: its header names the module, its build ID and image SHA-256, which must still be the committed NRO's). Checks:
+entry count, each call's count and a ProfileSummary (kind sample) per unit. The fixture is a profile of int_ops-gcc the host's sampler wrote
+(tests/profile_weights.tsv, dm/host/aot_profile.c through dm/host/tests/t_aot_host.c: its header names the module, its build ID and image
+SHA-256, which must still be the committed NRO's). Checks:
 
 - the log's `aot: profile weights: <f> functions, <b> branches weighted, <e> entry counts, <c> call counts; <x> functions sampled at their
   entry only, not weighed; <z> with samples profi found no flow for, not weighed` holds what the profile and the lifted IR (--ir) hold: x the
@@ -179,12 +180,14 @@ def main():
     os.makedirs(a.work)
     w = lambda *p: os.path.join(a.work, *p)
 
-    # The fixture names the committed NRO: its image SHA-256 (an NRO's image is the file) and its build ID (the NRO header's, at 0x40)
+    # The fixture names the committed NRO: its image SHA-256 (an NRO's image is the file), and its name and build ID as the host's sampler wrote them
+    # (dm/host/tests/t_aot_host.c names an NRO it maps after its file and keeps no build ID: `int_ops-gcc`, `none`; a game's NRO has the NRO
+    # header's build ID, at 0x40)
     nro = open(NRO, 'rb').read()
     head = open(FIXTURE).read()
-    m = re.search(r'^# module (\S+), build ID ([0-9a-f]+), image SHA-256 ([0-9a-f]{64})$', head, re.M)
-    check(m and m.group(1) == 'int_ops-gcc.nro' and m.group(3) == hashlib.sha256(nro).hexdigest() and
-          nro[0x40:0x60].rstrip(b'\0').hex() == m.group(2), 'the fixture names int_ops-gcc.nro, its build ID and its image SHA-256')
+    m = re.search(r'^# module (\S+), build ID (\S+), image SHA-256 ([0-9a-f]{64})$', head, re.M)
+    check(m and m.group(1) in ('int_ops-gcc', 'int_ops-gcc.nro') and m.group(3) == hashlib.sha256(nro).hexdigest() and
+          m.group(2) in ('none', nro[0x40:0x60].rstrip(b'\0').hex()), 'the fixture names int_ops-gcc.nro, its build ID and its image SHA-256')
     profile = read_profile(FIXTURE)
     fns = functions(a, a.work)
     starts = [e for e, _ in fns]

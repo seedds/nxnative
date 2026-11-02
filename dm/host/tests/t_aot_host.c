@@ -21,10 +21,18 @@
 //   int_ops and excl (with the JIT built in, fiber too) with their data and bss write-protected again every 0.5 ms and a page-fault hook that unprotects a page at
 //     its first write (5.4: the hook first, then the guest store runs again; excl's threads fault on their own stacks; fiber's JIT code must reach the hook before
 //     dynarmic's fastmem handler, so no fault may happen inside the JIT's memory callbacks)
-//   t_aot_host [--packs <dir>] [--corpus <dir>] [--nro <name>]...
+//   int_ops with the sampler (DM_AOT_PROFILE, aot_profile.c; design 12's sampled instruction offsets) and int_ops_rounds raised to about a second of CPU time: the child
+//     maps every byte of the pack's compiled code through the pack's positions (aot_arena.c dm_aot_offset_of_code; include/nxaot/aot_module.h nxaot_position_at) and
+//     counts the bytes whose instruction lies outside the function holding them (none may), writes the profile, checks that every function the sampler counted has a
+//     row inside it (its tier: nxaot makes a function with a sample anywhere in it hot) and writes the same samples in the form the sampler wrote before positions
+//     (each function's at its entry). The parent checks the profile: every row `0x<offset> <samples>` under the module's header, the hottest function ref_crc (by
+//     corpus/nro/<name>.syms.tsv), most of its samples inside its loops (the range of its backward branches, read from the NRO's words) and away from its entry, at
+//     several instructions. With nxaot (--nxaot or the environment variable NXAOT; the aot image), the profile round-trips: `nxaot build --profile` weighs functions
+//     (its `aot: profile weights:` line), NXAOT_PROFILE_WEIGHTS=0 gives another pack, the same bytes as the entry form's (the tiers alone)
+//   t_aot_host [--packs <dir>] [--corpus <dir>] [--nro <name>]... [--nxaot <nxaot>]
 //     the packs: --packs, else the environment variable NXAOT_PACKS, else the CMake option NXAOT_PACKS; with none, a note and exit 0 (CTest stays green where
 //     no packs exist: the Windows runner, a build without the aot image)
-//   t_aot_host --run <pack> <nro> [--set <symbol>=<value>]... [--hidden-host] [--dirty] [--pause N --seed S]      one run (the child)
+//   t_aot_host --run <pack> <nro> [--set <symbol>=<value>]... [--hidden-host] [--dirty] [--pause N --seed S] [--positions]      one run (the child)
 //   t_aot_host --log-race N      N log lines and N guest lines from two threads (the child of the log-lines row)
 #include "../aot.h"
 #include "../aot_hostfn.h"
@@ -33,6 +41,7 @@
 #endif
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <sys/stat.h>
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -157,7 +166,10 @@ static void *dirty_rearm(void *p) {
     return NULL;
 }
 
-typedef struct { const char *pack, *nro; int nsets; const char *sets[8]; int hidden, dirty; unsigned pause, seed; int status; double secs; } run_args;
+typedef struct {
+    const char *pack, *nro; int nsets; const char *sets[8]; int hidden, dirty, positions; unsigned pause, seed; int status; double secs;
+    const dm_aot_pack *loaded; const module_t *m;   // the pack and module the run loaded (the positions' check)
+} run_args;
 
 static uint8_t *slurp(const char *path, size_t *n) {
     FILE *f = fopen(path, "rb");
@@ -194,6 +206,7 @@ static void *guest_main(void *p) {
     char err[600];
     dm_aot_pack *pack = dm_aot_pack_load(a->pack, m, &id, err, sizeof err);
     if (!pack) { printf("[RED] t_aot_host: %s\n", err); return NULL; }
+    a->loaded = pack; a->m = m;
     for (int i = 0; i < a->nsets; i++) {   // symbol=value: a 64-bit value written over a variable of the program before it runs (after relocation)
         char sym[64]; const char *eq = strchr(a->sets[i], '=');
         snprintf(sym, sizeof sym, "%.*s", eq ? (int)(eq - a->sets[i]) : 0, a->sets[i]);
@@ -238,6 +251,82 @@ static void timeout_exit(void) {
     _exit(DM_AOT_STUCK);
 }
 
+typedef struct { uint64_t off, n; } prow;
+static int prow_cmp(const void *a, const void *b) { const prow *x = a, *y = b; return x->off < y->off ? -1 : x->off > y->off; }
+
+// The sampler's run (--positions, with DM_AOT_PROFILE set by the parent): the pack's positions over every byte of its functions' code, through the host's reader and through
+// nxaot_position_at directly (an instruction outside the function holding the byte would be counted at another function: none may be), then the profile written, read back and
+// checked against the per-function counts (every sampled function keeps a row inside it), and the same samples written per function at the entries (<dir>/<module>.entries.tsv)
+static void positions_check(const run_args *a) {
+    const dm_aot_pack *p = a->loaded;
+    const char *dir = getenv("DM_AOT_PROFILE");
+    if (!p || !dir || !dm_aot_profile_on()) { printf("[RED] t_aot_host: --positions: no pack, or the sampler is off (DM_AOT_PROFILE)\n"); return; }
+    const nxaot_module_desc *d = dm_aot_pack_desc(p);
+    const nxaot_positions *t = dm_aot_pack_pos(p);
+    uint64_t lo = UINT64_MAX, bytes = 0, placed = 0, none = 0, crossed = 0, mismatched = 0;
+    for (uint64_t i = 0; i < d->fn_count; i++) {
+        const uint64_t body = (uint64_t)(uintptr_t)&d->fns[i].body + (uint64_t)(int64_t)d->fns[i].body;
+        if (body < lo) lo = body;
+    }
+    // Every byte from the first body to the end of the pack's code: the function the map gives, the instruction the positions give
+    for (uint64_t pc = lo; t && lo != UINT64_MAX && dm_aot_pack_of_code(pc) == p; pc++) {
+        int pk = -1;
+        const long fn = dm_aot_fn_of_code(pc, &pk);
+        if (fn < 0) continue;
+        bytes++;
+        const nxaot_fn_entry *f = &d->fns[fn];
+        const uint64_t body = (uint64_t)(uintptr_t)&f->body + (uint64_t)(int64_t)f->body;
+        const uint32_t raw = nxaot_position_at(t, (uint64_t)fn, f->offset, pc - body);
+        const int64_t off = dm_aot_offset_of_code(pc, pk, fn);
+        int64_t want;   // what the host's reader must give
+        if (raw == NXAOT_POS_NONE) { none++; want = -1; }
+        else if (raw < f->offset || raw - f->offset >= f->size) { crossed++; want = -2; }
+        else { placed++; want = (int64_t)raw; }
+        mismatched += off != want;
+    }
+    dm_aot_profile_write();   // _exit runs no atexit writer
+    char name[64], path[1200];
+    snprintf(name, sizeof name, "%s", a->m->name);
+    for (char *s = name; *s; s++) if (*s == '/' || *s == '\\') *s = '_';
+    snprintf(path, sizeof path, "%s/%s.tsv", dir, name);
+    size_t len = 0;
+    char *text = (char *)slurp(path, &len);
+    if (text && !(text = realloc(text, len + 1))) abort();
+    if (text) text[len] = 0;
+    size_t nrows = 0, cap = 0, sampled = 0, kept = 0;
+    prow *rows = NULL;
+    for (char *line = text, *next; line && line < text + len && *line; line = next) {
+        next = memchr(line, '\n', (size_t)(text + len - line));
+        if (next) *next++ = 0;
+        else next = text + len;
+        unsigned long long off, cnt;
+        if (line[0] == '#' || sscanf(line, "%llx %llu", &off, &cnt) != 2) continue;
+        if (nrows == cap && !(rows = realloc(rows, (cap = cap ? 2 * cap : 256) * sizeof *rows))) abort();
+        rows[nrows++] = (prow){off, cnt};
+    }
+    qsort(rows, nrows, sizeof *rows, prow_cmp);
+    _Atomic uint64_t *c = dm_aot_pack_samples(p);
+    snprintf(path, sizeof path, "%s/%s.entries.tsv", dir, name);
+    FILE *f = fopen(path, "wb");
+    if (f) fprintf(f, "# the samples of %s.tsv per function at its entry, the form the sampler wrote before positions (t_aot_host --positions)\n", name);
+    for (size_t j = 0; c && j < dm_aot_pack_fn_count(p); j++) {
+        const uint64_t v = atomic_load(&c[j]), e = dm_aot_pack_fn(p, j), end = dm_aot_pack_fn_end(p, j);
+        if (!v) continue;
+        sampled++;
+        size_t k = 0, hi = nrows;   // the first row at or after the entry
+        while (k < hi) { const size_t mid = k + (hi - k) / 2; if (rows[mid].off < e) k = mid + 1; else hi = mid; }
+        kept += k < nrows && rows[k].off < end;
+        if (f) fprintf(f, "0x%llx %llu\n", (unsigned long long)e, (unsigned long long)v);
+    }
+    if (f) fclose(f);
+    printf("t_aot_host: positions: %llu code bytes of %llu functions: %llu at an instruction, %llu at none, %llu at one outside their function, %llu read otherwise by the host; "
+           "profile: %zu rows, %zu sampled functions, %zu with a row inside them; %s; module %s, profile %s/%s.tsv\n", (unsigned long long)bytes, (unsigned long long)d->fn_count,
+           (unsigned long long)placed, (unsigned long long)none, (unsigned long long)crossed, (unsigned long long)mismatched, nrows, sampled, kept,
+           t ? "the pack has positions" : "the pack has no positions", a->m->name, dir, name);
+    free(rows);
+    free(text);
+}
+
 static int child(int argc, char **argv) {
     run_args a;
     memset(&a, 0, sizeof a);
@@ -246,6 +335,7 @@ static int child(int argc, char **argv) {
         if (!strcmp(argv[i], "--set") && i + 1 < argc && a.nsets < 8) a.sets[a.nsets++] = argv[++i];
         else if (!strcmp(argv[i], "--hidden-host")) a.hidden = 1;
         else if (!strcmp(argv[i], "--dirty")) a.dirty = 1;
+        else if (!strcmp(argv[i], "--positions")) a.positions = 1;
         else if (!strcmp(argv[i], "--pause") && i + 1 < argc) a.pause = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) a.seed = (unsigned)atoi(argv[++i]);
         else { fprintf(stderr, "t_aot_host: unknown option %s\n", argv[i]); return DM_AOT_USAGE; }
@@ -259,6 +349,7 @@ static int child(int argc, char **argv) {
     pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, 8u << 20);
     if (pthread_create(&th, &attr, guest_main, &a)) { fprintf(stderr, "t_aot_host: pthread_create failed\n"); return DM_AOT_USAGE; }
     pthread_join(th, NULL);
+    if (a.positions) positions_check(&a);
     dm_aot_stats_t s;
     dm_aot_stats(&s);
     printf("t_aot_host: status %d after %.6f s: %llu threads, %llu SVCs, %llu host calls, %llu dispatcher misses, %llu calls into another pack, "
@@ -303,6 +394,7 @@ static int log_race(unsigned n) {
 typedef struct {
     int status; char *guest; size_t nguest; char red[400]; double secs; unsigned long long stat[12]; int have_stat; unsigned pt[5]; int have_pt;
     unsigned ndm, spliced; char splice[300];   // "[dm] " lines; lines holding a "[guest] " line after their start (the first of them)
+    char pos[700], prof[900];                  // the positions' check of the child (--positions), the sampler's summary line (aot_profile.c)
 } result;
 
 static void append(char **buf, size_t *n, size_t *cap, const char *s, size_t len) {
@@ -331,6 +423,9 @@ static int run_cmd(const char *cmd, result *r) {
         if (!strncmp(line, "t_aot_host: pause test: ", 24))
             r->have_pt = sscanf(line, "t_aot_host: pause test: %u pauses (%u with more than one thread running), %u register-invariant checks, %u inconsistent, %u exited",
                                 &r->pt[0], &r->pt[1], &r->pt[2], &r->pt[3], &r->pt[4]) == 5;
+        const char *pl = strstr(line, "t_aot_host: positions: "), *sl = strstr(line, "aot: profile: ");
+        if (pl && !r->pos[0]) { snprintf(r->pos, sizeof r->pos, "%s", pl); r->pos[strcspn(r->pos, "\n")] = 0; }
+        if (sl && strstr(sl, " Hz of each guest thread's CPU time") && !r->prof[0]) { snprintf(r->prof, sizeof r->prof, "%s", sl); r->prof[strcspn(r->prof, "\n")] = 0; }
     }
     int st = pclose(f);
 #if defined(_WIN32)
@@ -393,16 +488,207 @@ static void row(const char *name, const char *mode, int ok, const result *r, con
     printf("%-14s %-9s %-4s %3d %9.3f %6zu  %s\n", name, mode, ok ? "ok" : "FAIL", r->status, r->secs * 1e3, count_lines(r->guest), note);
 }
 
+// ---------- The sampler's positions (int_ops; the header's list) ----------
+#define POS_ROUNDS "2000"   // int_ops_rounds: about a second of CPU time
+static void set_env(const char *k, const char *v) {   // for the children popen starts
+#if defined(_WIN32)
+    char b[1100]; snprintf(b, sizeof b, "%s=%s", k, v ? v : ""); _putenv(b);
+#else
+    if (v) setenv(k, v, 1); else unsetenv(k);
+#endif
+}
+static char *without_digests(const char *s) {   // int_ops with int_ops_rounds raised: its digests cover the rounds, its checks and the rest stay as expected
+    char *out = calloc(strlen(s) + 1, 1);
+    if (!out) abort();
+    for (size_t o = 0; *s;) {
+        const size_t n = strcspn(s, "\n") + (s[strcspn(s, "\n")] == '\n');
+        int digest = 0;
+        for (size_t i = 0; i + 8 <= n && !digest; i++) digest = !memcmp(s + i, ".digest ", 8);
+        if (!digest) { memcpy(out + o, s, n); o += n; }
+        s += n;
+    }
+    return out;
+}
+typedef struct { uint64_t lo, hi; char name[64]; } sym_fn;
+// The functions of corpus/nro/<name>.syms.tsv (`offset size type binding name`, hexadecimal): their number, into fns[0 .. max)
+static int corpus_functions(const char *corpus, const char *name, sym_fn *fns, int max) {
+    char path[1100];
+    snprintf(path, sizeof path, "%s/nro/%s.syms.tsv", corpus, name);
+    char *text = read_text(path);
+    int n = 0;
+    for (char *line = text, *next; line && *line && n < max; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        unsigned long long off, size; char type[16], bind[16], sym[64];
+        if (sscanf(line, "%llx\t%llx\t%15s\t%15s\t%63s", &off, &size, type, bind, sym) == 5 && !strcmp(type, "func") && size) {
+            fns[n].lo = off; fns[n].hi = off + size;
+            snprintf(fns[n].name, sizeof fns[n].name, "%s", sym);
+            n++;
+        }
+    }
+    free(text);
+    return n;
+}
+// The loops of the code [lo, hi) of an NRO (module offsets are file offsets): from the lowest target of a backward branch inside it to the highest such branch; 0 when none
+static int loop_range(const uint8_t *img, size_t len, uint64_t lo, uint64_t hi, uint64_t *llo, uint64_t *lhi) {
+    *llo = UINT64_MAX; *lhi = 0;
+    for (uint64_t pc = lo; pc + 4 <= hi && pc + 4 <= len; pc += 4) {
+        const uint32_t w = rd32(img + pc);
+        int64_t d = 0;
+        if ((w & 0xFF000010u) == 0x54000000u || (w & 0x7E000000u) == 0x34000000u) d = (int64_t)((int32_t)(w << 8) >> 13) * 4;   // b.cond, cbz / cbnz: imm19
+        else if ((w & 0x7E000000u) == 0x36000000u) d = (int64_t)((int32_t)(w << 13) >> 18) * 4;                                  // tbz / tbnz: imm14
+        else if ((w & 0xFC000000u) == 0x14000000u) d = (int64_t)((int32_t)(w << 6) >> 6) * 4;                                    // b: imm26
+        if (d >= 0 || pc + (uint64_t)d < lo) continue;
+        if (pc + (uint64_t)d < *llo) *llo = pc + (uint64_t)d;
+        if (pc > *lhi) *lhi = pc;
+    }
+    return *lhi != 0;
+}
+// nxaot build <nro> --shared <out> --profile <profile> (NXAOT_PROFILE_WEIGHTS=0 when off): its exit status, its `aot: profile weights:` line into line
+static int nxaot_build(const char *nxaot, const char *nro, const char *out, const char *profile, int off, char *line, size_t n) {
+    char cmd[4096], buf[4096];
+#if defined(_WIN32)
+    snprintf(cmd, sizeof cmd, "\"\"%s\" build \"%s\" --shared \"%s\" --profile \"%s\" 2>&1\"", nxaot, nro, out, profile);
+#else
+    snprintf(cmd, sizeof cmd, "'%s' build '%s' --shared '%s' --profile '%s' 2>&1", nxaot, nro, out, profile);
+#endif
+    set_env("NXAOT_PROFILE_WEIGHTS", off ? "0" : NULL);
+    line[0] = 0;
+    FILE *f = popen(cmd, "r");
+    if (!f) { set_env("NXAOT_PROFILE_WEIGHTS", NULL); return -1; }
+    while (fgets(buf, sizeof buf, f)) if (!strncmp(buf, "aot: profile weights:", 21)) { snprintf(line, n, "%s", buf); line[strcspn(line, "\n")] = 0; }
+    const int st = pclose(f);
+    set_env("NXAOT_PROFILE_WEIGHTS", NULL);
+    return st;
+}
+static int same_file(const char *a, const char *b) {
+    size_t na = 0, nb = 0;
+    uint8_t *x = slurp(a, &na), *y = slurp(b, &nb);
+    const int same = x && y && na == nb && !memcmp(x, y, na);
+    free(x); free(y);
+    return same;
+}
+
+// int_ops under the sampler: the child's run and checks (--positions), the profile's rows of the hot function, and with nxaot the round trip (the header's list)
+static void positions_rows(const char *self, const char *name, const char *pack, const char *nrop, const char *corpus, const char *expected, const char *nxaot) {
+    char dir[300], prof[400] = "", entries[400] = "", module[64] = "", note[2000];
+    mkdir("t_aot_host.tmp", 0755);
+    snprintf(dir, sizeof dir, "t_aot_host.tmp/%s", name);
+    mkdir(dir, 0755);
+    {   // an earlier run's files go first (the module's name as guest_main makes it)
+        char cut[16], old[400];
+        snprintf(cut, sizeof cut, "%s.nro", name);
+        if (strstr(cut, ".nro")) *strstr(cut, ".nro") = 0;
+        snprintf(old, sizeof old, "%s/%s.tsv", dir, cut); remove(old);
+        snprintf(old, sizeof old, "%s/%s.entries.tsv", dir, cut); remove(old);
+    }
+    set_env("DM_AOT_PROFILE", dir);
+    result r;
+    run_child(self, pack, nrop, "--positions --set int_ops_rounds=" POS_ROUNDS, &r);
+    set_env("DM_AOT_PROFILE", NULL);
+    // The profile's file and module as the child named them (the module's name is the NRO's file name, cut to 15 characters)
+    const char *pm = strstr(r.pos, "; module ");
+    if (pm) sscanf(pm, "; module %63[^,], profile %399s", module, prof);
+    if (prof[0] && strlen(prof) > 4) snprintf(entries, sizeof entries, "%.*s.entries.tsv", (int)(strlen(prof) - 4), prof);
+    char *want = without_digests(expected), *got = without_digests(r.guest);
+    const int run_ok = r.status == 0 && !strcmp(want, got);
+    free(want); free(got);
+    // The child's walk of the code and its check of the profile against its counts
+    unsigned long long bytes = 0, nfns = 0, placed = 0, none = 0, crossed = 1, mism = 1;
+    size_t nrows = 0, sampled = 0, kept = 0;
+    const int walked = r.pos[0] && sscanf(r.pos, "t_aot_host: positions: %llu code bytes of %llu functions: %llu at an instruction, %llu at none, %llu at one outside their function, "
+                                                 "%llu read otherwise by the host; profile: %zu rows, %zu sampled functions, %zu with a row inside them", &bytes, &nfns, &placed, &none,
+                                          &crossed, &mism, &nrows, &sampled, &kept) == 9;
+    unsigned long long all = 0, code = 0, at_ins = 0, outside = 1;
+    const char *am = strstr(r.prof, "all modules: ");
+    const int summed = am && sscanf(am, "all modules: %llu samples, %llu in compiled code (%llu at a guest instruction, %llu at one outside their function", &all, &code, &at_ins,
+                                    &outside) == 4;
+    // The profile: its header, its rows; the samples per function of the corpus's symbols, ref_crc's inside its loops and at its entry
+    char *text = prof[0] ? read_text(prof) : NULL;
+    char head[96];
+    snprintf(head, sizeof head, "# module %s, build ID ", module);
+    int header = 0, bad_lines = 0;
+    sym_fn fns[256];
+    const int nf = corpus_functions(corpus, name, fns, 256);
+    int crc = -1;
+    for (int i = 0; i < nf; i++) if (!strcmp(fns[i].name, "ref_crc")) crc = i;
+    unsigned long long per[256] = {0}, total = 0, in_loop = 0, at_entry = 0;
+    uint64_t llo = 0, lhi = 0;
+    size_t img_len = 0;
+    uint8_t *img = slurp(nrop, &img_len);
+    const int loops = crc >= 0 && img && loop_range(img, img_len, fns[crc].lo, fns[crc].hi, &llo, &lhi);
+    free(img);
+    int offsets_in = 0;
+    struct { unsigned long long off, n; } top[6] = {{0, 0}};
+    for (char *line = text, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        if (line[0] == '#') { header += !strncmp(line, head, strlen(head)); continue; }
+        unsigned long long off = 0, n = 0; char extra = 0;
+        if (sscanf(line, "%llx %llu %c", &off, &n, &extra) != 2 || strncmp(line, "0x", 2)) { bad_lines++; continue; }
+        total += n;
+        for (int i = 0; i < nf; i++) if (off >= fns[i].lo && off < fns[i].hi) per[i] += n;
+        if (crc >= 0 && off >= fns[crc].lo && off < fns[crc].hi) {
+            offsets_in++;
+            at_entry += off == fns[crc].lo ? n : 0;
+            in_loop += loops && off >= llo && off <= lhi ? n : 0;
+            for (int k = 0; k < 6; k++) if (n > top[k].n) { memmove(&top[k + 1], &top[k], (size_t)(5 - k) * sizeof top[0]); top[k].off = off; top[k].n = n; break; }
+        }
+    }
+    free(text);
+    int hottest = -1;
+    for (int i = 0; i < nf; i++) if (hottest < 0 || per[i] > per[hottest]) hottest = i;
+    const unsigned long long in_fn = crc >= 0 ? per[crc] : 0;
+    const int ok = run_ok && walked && summed && crossed == 0 && mism == 0 && placed > 0 && outside == 0 && at_ins > 0 && sampled > 0 && kept == sampled && header == 1 && !bad_lines &&
+                   nrows > 0 && crc >= 0 && hottest == crc && loops && in_loop * 2 > in_fn && (in_fn - at_entry) * 2 > in_fn && offsets_in >= 3;
+    snprintf(note, sizeof note, "%zu rows, %llu samples (%llu of %llu in compiled code at an instruction); ref_crc [%#llx, %#llx) %llu: %llu in its loops [%#llx, %#llx], %llu at its entry, "
+             "%d offsets, the hottest of %d functions%s; %llu code bytes of %llu functions: %llu at an instruction, %llu at none, %llu outside their function (%llu read otherwise "
+             "by the host); %zu of %zu sampled functions with a row inside them%s%s", nrows, total, at_ins, code, crc >= 0 ? (unsigned long long)fns[crc].lo : 0ull,
+             crc >= 0 ? (unsigned long long)fns[crc].hi : 0ull, in_fn, in_loop, (unsigned long long)llo, (unsigned long long)lhi, at_entry, offsets_in, nf,
+             hottest == crc ? "" : " (not the hottest)", bytes, nfns, placed, none, crossed, mism, kept, sampled, run_ok ? "" : "; the run's lines or status differ", r.red[0] ? "; " : "");
+    if (r.red[0]) strncat(note, r.red, sizeof note - strlen(note) - 1);
+    row(name, "positions", ok, &r, note);
+    printf("%-14s %-9s      ref_crc's rows with the most samples:", "", "");
+    for (int k = 0; k < 6 && top[k].n; k++) printf(" 0x%llx %llu;", top[k].off, top[k].n);
+    printf("\n");
+    free(r.guest);
+    // The round trip through nxaot (the aot image): weighed functions, and the weights off giving the entry form's pack (the tiers alone)
+    if (!nxaot || !*nxaot) {
+        printf("%-14s %-9s note: no nxaot (--nxaot, NXAOT): the profile's round trip through nxaot build --profile is not checked here\n", name, "roundtrip");
+        return;
+    }
+    char w_so[400], off_so[400], e_so[400], wl[400], ol[400], el[400];   // one file name in three folders: the name is the pack's soname, part of its bytes
+    snprintf(w_so, sizeof w_so, "%s/weighted", dir); mkdir(w_so, 0755); snprintf(w_so, sizeof w_so, "%s/weighted/x%s", dir, PACK_EXT);
+    snprintf(off_so, sizeof off_so, "%s/off", dir); mkdir(off_so, 0755); snprintf(off_so, sizeof off_so, "%s/off/x%s", dir, PACK_EXT);
+    snprintf(e_so, sizeof e_so, "%s/entries", dir); mkdir(e_so, 0755); snprintf(e_so, sizeof e_so, "%s/entries/x%s", dir, PACK_EXT);
+    const int s1 = nxaot_build(nxaot, nrop, w_so, prof, 0, wl, sizeof wl), s2 = nxaot_build(nxaot, nrop, off_so, prof, 1, ol, sizeof ol),
+              s3 = nxaot_build(nxaot, nrop, e_so, entries, 0, el, sizeof el);
+    unsigned long long weighed = 0, entry_only = 0;
+    sscanf(wl, "aot: profile weights: %llu functions", &weighed);
+    const char *eo = strstr(el, "; ");
+    if (eo) sscanf(eo, "; %llu functions sampled at their entry only", &entry_only);
+    static char no_lines[1];
+    result r2;
+    memset(&r2, 0, sizeof r2);
+    r2.guest = no_lines;
+    r2.status = s1 | s2 | s3;
+    const int same_off = same_file(off_so, e_so), differs = !same_file(w_so, off_so);
+    snprintf(note, sizeof note, "%s; NXAOT_PROFILE_WEIGHTS=0: %s, the entry form's pack %s; the weighted pack %s it (%s)", wl[0] ? wl : "no profile weights line", ol[0] ? "off" : "no line",
+             same_off ? "the same bytes" : "differs", differs ? "differs from" : "is the same as", el[0] ? el : "no line for the entry form");
+    row(name, "roundtrip", !s1 && !s2 && !s3 && weighed > 0 && strstr(ol, "off (NXAOT_PROFILE_WEIGHTS=0)") && same_off && differs && entry_only > 0, &r2, note);
+}
+
 int main(int argc, char **argv) {
     if (argc >= 4 && !strcmp(argv[1], "--run")) return child(argc, argv);
     if (argc == 3 && !strcmp(argv[1], "--log-race")) return log_race((unsigned)atoi(argv[2]));
-    const char *packs = NULL, *corpus = T_AOT_CORPUS;
+    const char *packs = NULL, *corpus = T_AOT_CORPUS, *nxaot = getenv("NXAOT");
     const char *only[32]; int nonly = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--packs") && i + 1 < argc) packs = argv[++i];
         else if (!strcmp(argv[i], "--corpus") && i + 1 < argc) corpus = argv[++i];
         else if (!strcmp(argv[i], "--nro") && i + 1 < argc && nonly < 32) only[nonly++] = argv[++i];
-        else { fprintf(stderr, "usage: t_aot_host [--packs <dir>] [--corpus <dir>] [--nro <name>]...\n"); return 2; }
+        else if (!strcmp(argv[i], "--nxaot") && i + 1 < argc) nxaot = argv[++i];
+        else { fprintf(stderr, "usage: t_aot_host [--packs <dir>] [--corpus <dir>] [--nro <name>]... [--nxaot <nxaot>]\n"); return 2; }
     }
     if (!packs) packs = getenv("NXAOT_PACKS");
     if (!packs || !*packs) packs = T_AOT_PACKS;
@@ -516,6 +802,10 @@ int main(int argc, char **argv) {
                      r.stat[8], r.stat[9], r.stat[8] - r.stat[9], r.stat[10], diff, r.red[0] ? "; " : "", r.red);
             row(name, "dirty", ok, &r, note);
             free(r.guest);
+        }
+        if (!strcmp(program, "int_ops")) {
+            // 6. The sampler's positions: the profile of a run with a hot loop names offsets inside it (design 12), and with nxaot it weighs the pack's code
+            positions_rows(argv[0], name, pack, nrop, corpus, expected, nxaot);
         }
         free(expected);
     }

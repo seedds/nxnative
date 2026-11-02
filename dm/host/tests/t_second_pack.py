@@ -20,14 +20,7 @@ and the game runs again from the new pack without the JIT fallback. In a games f
   5. --list: better_pack - (the packs took the misses)
   6. nxlauncher --play again: the hidden function runs from the new pack, its gate served by it ("0 not"), 0 JIT addresses (its call through a pointer now binds an inline cache to
      its standard entry: one dispatcher miss more than the first session's), no misses file written and the old one unchanged; --list: still -
-Both plays run with DM_AOT_PROFILE_HZ=1 (PIN_HZ below): at the default rate nxhost-run dies with SIGSEGV at exit in about 60 % of the sessions in which the JIT fallback ran, after
-the profile writer, because dynarmic's fault handler made the alternate signal stack of the thread that created the first JIT instance its own 2 MiB block
-(dm/third_party/dynarmic/src/dynarmic/backend/exception_handler_posix.cpp SigHandler::SigHandler) and frees it in its static destructor at exit (~SigHandler), while the sampler's
-CPU-time timer of that thread is still armed (dm/host/aot_profile.c dm_aot_profile_write stops counting, not the timer): the next SIGPROF cannot be delivered. At 1 Hz no
-SIGPROF comes in these short sessions; the misses do not depend on the rate
-  t_second_pack.py --build <CMake build folder> [--nxaot <nxaot>]
-nxaot: --nxaot, else NXAOT in the environment. Without it, or when it does not run (built in the nxnative-aot image it links that image's libLLVM.so.18.1, which the
-nxnative-build image has too), the test is skipped: exit 77 (CTest's SKIP_RETURN_CODE) with a line saying why. Exit 0 when every check holds, 1 otherwise"""
+"""
 import argparse
 import hashlib
 import os
@@ -45,7 +38,6 @@ PACKER = REPO / 'dm/host/tests/second_pack/packer.py'
 sys.path.insert(0, str(REPO / 'dm/tools/tests'))
 sys.path.insert(0, str(REPO / 'dm/tools'))
 SKIP = 77
-PIN_HZ = '1'   # DM_AOT_PROFILE_HZ for both plays: the docstring says why; drop it once the host's exit no longer runs on a freed alternate stack
 ID = '0100AA0700000000'   # a title ID no game has (aot_synth.py's build ID is aa07...)
 TITLE = 'Synthetic Game'
 
@@ -188,9 +180,6 @@ def main():
     pack1 = (aot / 'main.aot.so').read_bytes()
 
     # 2. Play: the host on the pack, recording
-    env = dict(env, DM_AOT_PROFILE_HZ=PIN_HZ)
-    print(f'note: DM_AOT_PROFILE_HZ={PIN_HZ} for both plays: at the default rate nxhost-run dies with SIGSEGV at exit after a session that used the JIT fallback (dynarmic frees '
-          'the alternate signal stack it installed while the sampler\'s timer still runs; t_second_pack.py\'s docstring)')
     r = run([launcher, '--games', games, '--play', ID], env)
     print(r.stderr, end='')
     log = (rd / 'log.txt').read_text(errors='replace') if (rd / 'log.txt').is_file() else ''

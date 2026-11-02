@@ -31,12 +31,16 @@
 //     the module's folder: --module, else <packs>/module with the packs of NXAOT_PACKS (the environment variable, else the CMake option); with none, a note and exit 0
 //   the sampler (Linux; aot_profile.c, DM_AOT_PROFILE): a run of about 0.4 s in synth_hot (aot_synth.py's hot loop) and 0.04 s of guest calls of synth_cut from the host, with
 //     DM_AOT_PROFILE set: the profile the process writes at exit, <folder>/main.tsv, names the module, its build ID and its image's SHA-256, every line of it is
-//     `<offset> <samples>` as nxaot build --profile reads it, and synth_hot's entry has the most samples (more than half); the same run without the switch writes nothing,
+//     `<offset> <samples>` as nxaot build --profile reads it, and synth_hot has the most samples (more than half of them at its instructions, the row with the most in
+//     its loop, not at its entry: the pack's positions, design 12; all at its entry for a pack without positions); the same run without the switch writes nothing,
 //     and the time per pass of synth_hot with and without it is the sampler's overhead on compiled code
 //   the JIT fallback's misses (with the JIT fallback; aot.h, "The JIT fallback's misses"): the run with DM_AOT_PROFILE set writes <folder>/main.misses.tsv beside the profile, whose
 //     one row is the hidden function's (`<offset> indirect 1`: the dispatcher's miss at an address with no compiled entry), under the profile's header; a second run adds its entry
 //     to the row, and a file of another image is replaced (dm/tools/aot/tests/test_misses.py packs the module with such a file: the hidden function becomes compiled code)
-//   t_aot_module --run <dir>     one run (the child); --fault <dir>: the fault run; --profile <dir>: the sampler's run
+//   a recorded session's end (with the JIT fallback): the run with DM_AOT_PROFILE at 1000 Hz, ended by exit() on its guest thread (the one that made the first JIT instance,
+//     its sampling timer armed), 20 times: every run exits 0 (dynarmic's first instance replaced that thread's alternate signal stack with its own, which its static
+//     destructor frees at exit: aot_fault.c dm_aot_fault_after_jit puts the thread's own back, aot_profile.c dm_aot_profile_write ignores SIGPROF once it wrote)
+//   t_aot_module --run <dir>     one run (the child); --fault <dir>: the fault run; --profile <dir>: the sampler's run; --exit <dir>: the run ended by exit()
 #include "../aot.h"
 #include "../aot_hostfn.h"
 #if NXHOST_JIT
@@ -50,6 +54,7 @@
 #define pclose _pclose
 #else
 #include <sys/wait.h>
+#include <time.h>
 #endif
 
 #ifndef T_AOT_PACKS
@@ -77,6 +82,8 @@ enum { HIDDEN_PARAMETER = 6, HIDDEN_X0 = 7, HIDDEN_KEY = 0xA5A5 };   // aot_synt
 
 // ---------- The child: one run ----------
 static int g_checks, g_fails, g_status = DM_AOT_USAGE, g_fault_run, g_jit_forced, g_profile_run;   // g_jit_forced: DM_AOT_JIT_ALL is set (the parent's runs 5 and 6)
+static int g_exit_run;            // --exit: the run ends with exit() on the guest thread (the parent's step 8)
+static pthread_t g_exit_thread;
 static const char *g_dir;
 static void check(int ok, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -180,6 +187,11 @@ static void profile_run(module_t *m) {
     while (plat_now_ns() - t1 < 40000000ull) for (int i = 0; i < 1000; i++, cuts++) dm_guest_call(st, (uint64_t)(uintptr_t)f_cut, 0);
     printf("t_aot_profile: synth_hot at main+%#llx, synth_cut at main+%#llx: %llu calls of synth_hot (%llu passes each, %.4f ns per pass), %llu calls of synth_cut\n",
            (unsigned long long)(f_hot - m->base), (unsigned long long)(f_cut - m->base), (unsigned long long)calls, (unsigned long long)n, per_pass, (unsigned long long)cuts);
+    int pk = -1;   // synth_hot's guest code by the pack's function map, for the parent's sums of its rows (the profile names its instructions: design 12)
+    const long fn = dm_aot_fn_of_guest((uint64_t)(uintptr_t)f_hot, &pk);
+    printf("t_aot_profile: synth_hot's guest code main+%#llx to main+%#llx, %s\n", (unsigned long long)(f_hot - m->base),
+           fn >= 0 ? (unsigned long long)dm_aot_pack_fn_end(dm_aot_pack_at(pk), (size_t)fn) : 0ull,
+           fn >= 0 && dm_aot_pack_pos(dm_aot_pack_at(pk)) ? "the pack has positions" : "the pack has no positions");
     check(sums && calls > 0, "synth_hot's sums (n (n + 1) / 2 for n = %llu, %llu calls)", (unsigned long long)n, (unsigned long long)calls);
     g_status = DM_AOT_EXITED;
 }
@@ -341,8 +353,33 @@ static void *guest_main(void *arg) {
           "SetHeapSize (2 MiB at %#llx) reached be_guest_map(%#llx, %#llx): %llu calls, %llu be_guest_unmap", (unsigned long long)results[3],
           (unsigned long long)g_t_guest_map_a, (unsigned long long)g_t_guest_map_n, (unsigned long long)g_t_guest_maps, (unsigned long long)g_t_guest_unmaps);
     check(g_t_aot_mod_calls == 1, "the host function ran once (%llu)", (unsigned long long)g_t_aot_mod_calls);
+    if (g_exit_run) {
+        // The recorded session's end as a game's (--exit): this guest thread, which made the first JIT instance and whose sampling timer is still armed, ends the
+        // process with exit(): the sampler's writer (atexit), the C++ destructors (dynarmic's SigHandler frees the alternate stack it installed), then exit_burn below
+        dm_aot_stats_t s;
+        dm_aot_stats(&s);
+        printf("t_aot_module: exit run status %d, %d checks, %d failed; %llu JIT addresses, %llu JIT runs\n", g_status, g_checks, g_fails, (unsigned long long)s.jit_addresses,
+               (unsigned long long)s.jit_runs);
+        fflush(NULL);
+        g_exit_thread = pthread_self();
+        exit(g_fails ? 1 : g_status);
+    }
     return NULL;
 }
+
+#if !defined(_WIN32)
+// --exit: after the C++ destructors (a destructor of the executable runs from _dl_fini, the first exit handler registered and so the last to run), some CPU time on the
+// exiting thread, so that its sampling timer fires once the process's own exit code has run: the signal must land on an alternate stack the host owns (aot_fault.c
+// dm_aot_fault_after_jit), not on dynarmic's freed one, or be ignored (aot_profile.c dm_aot_profile_write). T_AOT_EXIT_BURN_MS (default 20) sets how much
+__attribute__((destructor)) static void exit_burn(void) {
+    if (!g_exit_run || !pthread_equal(pthread_self(), g_exit_thread)) return;
+    const char *e = getenv("T_AOT_EXIT_BURN_MS");
+    const long long ns = (e && *e ? atoll(e) : 20) * 1000000LL;
+    struct timespec a, b;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &a);
+    do clock_gettime(CLOCK_THREAD_CPUTIME_ID, &b); while ((b.tv_sec - a.tv_sec) * 1000000000LL + (b.tv_nsec - a.tv_nsec) < ns);
+}
+#endif
 
 static void timeout_exit(void) {
     fprintf(stderr, "[RED] t_aot_module: the run did not end within 120 s\n");
@@ -468,6 +505,7 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--run")) return child(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--fault")) { g_fault_run = 1; return child(argv[2]); }
     if (argc == 3 && !strcmp(argv[1], "--profile")) { g_profile_run = 1; return child(argv[2]); }
+    if (argc == 3 && !strcmp(argv[1], "--exit")) { g_exit_run = 1; return child(argv[2]); }
     char dir[1024] = "";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--module") && i + 1 < argc) snprintf(dir, sizeof dir, "%s", argv[++i]);
@@ -580,9 +618,15 @@ int main(int argc, char **argv) {
         double on_ns = 0, off_ns = 0;
         const char *h = strstr(r.out, "t_aot_profile: synth_hot at main+");
         if (h) sscanf(h, "t_aot_profile: synth_hot at main+%llx, synth_cut at main+%llx: %llu calls of synth_hot (%llu passes each, %lf ns per pass)", &hot, &cut, &calls, &passes, &on_ns);
+        unsigned long long hot_lo = 0, hot_end = 0;
+        const char *he = strstr(r.out, "t_aot_profile: synth_hot's guest code main+");
+        char hel[200] = "";
+        if (he) { snprintf(hel, sizeof hel, "%s", he); hel[strcspn(hel, "\n")] = 0; }
+        sscanf(hel, "t_aot_profile: synth_hot's guest code main+%llx to main+%llx", &hot_lo, &hot_end);
+        const int positions = strstr(hel, "the pack has positions") != NULL;
         size_t n = 0;
         char *text = (char *)slurp(pfile, &n);
-        int rows = 0, bad_lines = 0, shown = 0, header = 0;
+        int rows = 0, bad_lines = 0, shown = 0, header = 0, hot_rows = 0;
         unsigned long long top = 0, top_n = 0, hot_n = 0, total = 0;
         char want_head[160];
         snprintf(want_head, sizeof want_head, "# module main, build ID %s, image SHA-256 ", BUILD_ID);
@@ -595,12 +639,15 @@ int main(int argc, char **argv) {
             if (sscanf(line, "%llx %llu %c", &off, &cnt, &extra) != 2 || strncmp(line, "0x", 2)) { bad_lines++; continue; }
             rows++; total += cnt;
             if (cnt > top_n) { top_n = cnt; top = off; }
-            if (off == hot) hot_n = cnt;
+            if (off >= hot && off < hot_end) { hot_n += cnt; hot_rows++; }
         }
-        printf("      %d functions sampled, %llu samples; the most at main+%#llx (%llu), synth_hot main+%#llx (%llu)\n", rows, total, top, top_n, hot, hot_n);
-        verdict(r.status == 0 && strstr(r.out, "check ok   synth_hot's sums") && text && header == 1 && !bad_lines && rows >= 1 && hot && top == hot && hot_n * 2 > total &&
-                    strstr(r.out, "aot: profile: t_aot_module.tmp/profile/main.tsv: "),
-                "the sampler (DM_AOT_PROFILE): the profile written at exit names the module, its build ID and image, every line is <offset> <samples>, and synth_hot has the most");
+        // With positions (aot.h, "The sampler") synth_hot's samples are at its instructions, the most in its loop after the entry's movz; without, all at its entry
+        printf("      %d rows, %llu samples; the most at main+%#llx (%llu), synth_hot [main+%#llx, main+%#llx) %llu at %d rows%s\n", rows, total, top, top_n, hot, hot_end, hot_n,
+               hot_rows, positions ? "" : " (the pack has no positions)");
+        verdict(r.status == 0 && strstr(r.out, "check ok   synth_hot's sums") && text && header == 1 && !bad_lines && rows >= 1 && hot && hot_lo == hot && hot_end > hot &&
+                    top >= hot && top < hot_end && hot_n * 2 > total && (positions ? top != hot : top == hot) && strstr(r.out, "aot: profile: t_aot_module.tmp/profile/main.tsv: "),
+                "the sampler (DM_AOT_PROFILE): the profile written at exit names the module, its build ID and image, every line is <offset> <samples>, and synth_hot has the most, "
+                "in its loop (the pack's positions)");
         free(text);
         free(r.out);
         remove(pfile);
@@ -666,6 +713,39 @@ int main(int argc, char **argv) {
     }
 #else
     puts("note: this build has no JIT fallback (NXHOST_JIT off): the run calls no hidden function, so it has no misses; the misses file is not checked");
+#endif
+    // 8. A recorded session with JIT entries that ends as a game's does (--exit: exit() on the guest thread that made the first JIT instance, its sampling timer armed,
+    //    DM_AOT_PROFILE at the default 1000 Hz), EXIT_RUNS times: every run exits 0, none killed by a signal. dynarmic's first instance installs an alternate signal
+    //    stack of its own on that thread and its static SigHandler frees it at exit; a SIGPROF after that was delivered onto unmapped memory and the kernel killed the
+    //    process with SIGSEGV (aot_fault.c dm_aot_fault_after_jit puts the thread's own stack back; aot_profile.c dm_aot_profile_write ignores SIGPROF once written)
+#if NXHOST_JIT
+    {
+        enum { EXIT_RUNS = 20 };
+        const char *edir = "t_aot_module.tmp/exit";
+        mkdir("t_aot_module.tmp", 0755);
+        mkdir(edir, 0755);
+        set_env("DM_AOT_PROFILE", edir);
+        set_env("DM_AOT_PROFILE_HZ", NULL);
+        int ok = 0, signalled = 0, jit = 0;
+        char first_bad[300] = "";
+        for (int i = 0; i < EXIT_RUNS; i++) {
+            run_child_mode(argv[0], "--exit", dir, &r);
+            unsigned long long ja = 0, jr = 0;
+            const char *x = strstr(r.out, "t_aot_module: exit run status ");
+            int st = -1, cks = 0, cf = -1;
+            if (x) sscanf(x, "t_aot_module: exit run status %d, %d checks, %d failed; %llu JIT addresses, %llu JIT runs", &st, &cks, &cf, &ja, &jr);
+            const int good = r.status == 0 && st == 0 && cf == 0 && jr > 0 && strstr(r.out, "aot: misses: t_aot_module.tmp/exit/main.misses.tsv: ");   // the writer ran at exit (a run this short may have no sample in compiled code)
+            ok += good; signalled += r.status > 128; jit += jr > 0;
+            if (!good && !first_bad[0]) snprintf(first_bad, sizeof first_bad, "run %d: status %d%s", i + 1, r.status, r.status > 128 ? " (a signal)" : "");
+            free(r.out);
+        }
+        set_env("DM_AOT_PROFILE", NULL);
+        printf("      %d of %d runs exited 0 after the sampler wrote its files, %d killed by a signal, %d with JIT runs%s%s\n", ok, EXIT_RUNS, signalled, jit, first_bad[0] ? "; first: " : "",
+               first_bad);
+        verdict(ok == EXIT_RUNS, "a recorded session with JIT entries ending with exit() on its guest thread (DM_AOT_PROFILE, 1000 Hz): every run exits 0 after the sampler wrote its files");
+    }
+#else
+    puts("note: this build has no JIT fallback (NXHOST_JIT off): the exit runs with JIT entries are skipped");
 #endif
     printf("t_aot_module: %d checks, %d failed\n", checks, fails);
     return fails != 0;

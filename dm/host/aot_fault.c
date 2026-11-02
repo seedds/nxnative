@@ -205,8 +205,13 @@ void crash_install(void) {
     crash_thread_init();
 }
 
+static void alt_own(void);
 // dynarmic installs its handler with its first instance, keeping the one it replaced (this one) for faults outside its code cache: install this one again
-// in front of it, so that the hooks see a write to a tracked page first even when JIT code makes it
+// in front of it, so that the hooks see a write to a tracked page first even when JIT code makes it. Called once, on the thread that made that instance
+// (aot_run.c), whose alternate signal stack dynarmic's SigHandler replaced with a 2 MiB block of its own (third_party/dynarmic exception_handler_posix.cpp
+// SigHandler::SigHandler), which its static destructor frees at exit without taking it off the thread: a signal after that (the sampler's SIGPROF, while
+// exit's handlers run on that thread) was delivered onto unmapped memory, and the kernel killed the process with SIGSEGV. The thread gets its own stack
+// back (alt_own), so the host never runs a handler on a stack it does not own; every other thread never had dynarmic's (its constructor runs once)
 void dm_aot_fault_after_jit(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -216,9 +221,11 @@ void dm_aot_fault_after_jit(void) {
     sigaction(SIGSEGV, &sa, &g_next_segv);
     sigaction(SIGBUS, &sa, &g_next_bus);
     if ((g_next_segv.sa_flags & SA_SIGINFO) && g_next_segv.sa_sigaction != on_fault) atomic_store(&g_have_next, 1);
+    alt_own();
 }
 
 // The alternate signal stack is per thread (a native stack overflow from deep guest recursion still reaches the handler); freed when the thread exits
+#define ALT_STACK_SIZE 65536
 static pthread_key_t g_alt_key;
 static pthread_once_t g_alt_once = PTHREAD_ONCE_INIT;
 static void alt_free(void *p) { stack_t off; memset(&off, 0, sizeof off); off.ss_flags = SS_DISABLE; sigaltstack(&off, NULL); free(p); }
@@ -228,10 +235,21 @@ void crash_thread_init(void) {
     if (pthread_getspecific(g_alt_key)) return;
     stack_t ss;
     memset(&ss, 0, sizeof ss);
-    ss.ss_size = 65536;
+    ss.ss_size = ALT_STACK_SIZE;
     if (!(ss.ss_sp = malloc(ss.ss_size))) die("aot: alternate stack");
     sigaltstack(&ss, NULL);
     pthread_setspecific(g_alt_key, ss.ss_sp);
+}
+// The calling thread's own alternate stack installed again (made first when it has none), in place of one something else installed (dynarmic's: above)
+static void alt_own(void) {
+    pthread_once(&g_alt_once, alt_key_init);
+    void *sp = pthread_getspecific(g_alt_key);
+    if (!sp) { crash_thread_init(); return; }
+    stack_t ss;
+    memset(&ss, 0, sizeof ss);
+    ss.ss_sp = sp;
+    ss.ss_size = ALT_STACK_SIZE;
+    if (sigaltstack(&ss, NULL)) LOG("[RED] aot: the thread's own alternate signal stack could not be installed again after the JIT's (errno %d)", errno);
 }
 
 #else

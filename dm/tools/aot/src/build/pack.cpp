@@ -33,6 +33,11 @@
 #include <llvm/ADT/StringMap.h>
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Config/llvm-config.h>
+#include <llvm/DebugInfo/DWARF/DWARFContext.h>
+#include <llvm/DebugInfo/DWARF/DWARFDebugLine.h>
+#include <llvm/DebugInfo/DWARF/DWARFDie.h>
+#include <llvm/DebugInfo/DWARF/DWARFFormValue.h>
+#include <llvm/DebugInfo/DWARF/DWARFUnit.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/CallingConv.h>
 #include <llvm/IR/Constants.h>
@@ -781,7 +786,8 @@ struct Common {
         return it == tiers.end() ? o.tier : it->second;
     }
     // Whether the samples weigh a function's code (WeighFunction): at tier H or H+, with samples in [entry, limit) somewhere else than at the
-    // entry. A function whose samples are all at its entry, as the host's sampler writes them (it counts per function: dm/host/aot_profile.c),
+    // entry. A function whose samples are all at its entry, as the host's sampler writes those of a function it sampled at none of its
+    // instructions (in host calls and SVCs, or a pack without positions: dm/host/aot_profile.c; before positions, every function's),
     // has no position to weigh its code by (SampledAtEntryOnly): branch weights would be profi's guesses (all the flow along the cheapest path
     // out of the function), which override LLVM's own estimate, and an entry count with the blocks' counts spread by that estimate measured no
     // gain (README.md, "The sample profile at tier H"); its code and its cache key are the tiers' alone, so that a new profile of the host's
@@ -1075,9 +1081,162 @@ bool MarkExcluded(std::string* object, std::string* error) {
     return true;
 }
 
+// ---- The positions (design 12; include/nxaot/aot_module.h, "The sampler's positions"; README.md, "The sample profile at tier H") ----
+// The host's sampler maps the interrupted pc to the guest instruction it ran for through the pack's table nxaot_positions, written here from
+// each unit's DWARF line table (line = guest offset, section 9.2) after code generation, from a fresh or a cached object alike. The line marks
+// name the guest memory accesses only (a few rows per block), DWARF names every instruction LLVM kept a location for: a row per change of
+// location, each holding to the next. Where code was inlined (tiers H and H+: a shard's functions inline within it), the innermost frame's
+// line is the callee's instruction, which lies in another function; the position is then the line of the call the inlining replaced in the
+// function whose code holds the address (the top-level DW_TAG_inlined_subroutine's DW_AT_call_line), so that a sample never counts for
+// another function. Line 0 (code LLVM merged from instructions of several lines) has no position, nor has the code past a body's or a
+// part's end (a terminator row at each), so that a pc of a standard entry or of the run time after a body maps to none
+struct PosStats {
+    uint64_t dwarf_rows = 0;  // the line tables' rows inside the units' bodies
+    uint64_t inlined = 0;     // of them, ranges in inlined code: the call site's line
+    uint64_t line0 = 0;       // ranges with no line (line 0), or in inlined code whose call has none
+    uint64_t outside = 0;     // positions outside their function's guest range [entry, entry + size), made none (EncodeRun)
+};
+
+bool ReadPositions(llvm::StringRef object, const std::string& prefix, std::vector<LineRow>* rows, PosStats* ps, std::string* error) {
+    auto file = llvm::object::ObjectFile::createObjectFile(llvm::MemoryBufferRef(object, "unit"));
+    if (!file) {
+        *error = "the positions: " + llvm::toString(file.takeError());
+        return false;
+    }
+    const auto* elf = llvm::dyn_cast<llvm::object::ELF64LEObjectFile>(file->get());
+    if (!elf) {
+        *error = "the positions: the unit's object is not ELF64";
+        return false;
+    }
+    // The bodies, parts and standard entries by section and address (a standard entry's code has no position: it is no body's)
+    struct Fn {
+        uint64_t sec = 0, lo = 0, hi = 0, body = 0, part = LineRow::kNoPart;
+        bool std_entry = false, rows = false;
+    };
+    std::vector<Fn> fns;
+    for (const llvm::object::ELFSymbolRef s : elf->symbols()) {
+        if (s.getELFType() != llvm::ELF::STT_FUNC) continue;
+        auto sec = s.getSection();
+        auto name = s.getName();
+        auto value = s.getValue();
+        if (!sec || !name || !value) {
+            if (!sec) llvm::consumeError(sec.takeError());
+            if (!name) llvm::consumeError(name.takeError());
+            if (!value) llvm::consumeError(value.takeError());
+            continue;
+        }
+        if (*sec == elf->section_end()) continue;
+        Fn f;
+        if (const auto body = BodyOf(*name, prefix, &f.std_entry, &f.part)) {
+            f.sec = (*sec)->getIndex();
+            f.lo = *value;
+            f.hi = *value + s.getSize();
+            f.body = *body;
+            if (f.hi > f.lo) fns.push_back(f);
+        }
+    }
+    if (fns.empty()) return true;
+    const auto before = [](const Fn& a, const Fn& b) { return a.sec != b.sec ? a.sec < b.sec : a.lo < b.lo; };
+    std::sort(fns.begin(), fns.end(), before);
+    std::string first_error;
+    auto dc = llvm::DWARFContext::create(
+        **file, llvm::DWARFContext::ProcessDebugRelocations::Process, nullptr, "",
+        [&](llvm::Error e) { const std::string m = llvm::toString(std::move(e)); if (first_error.empty()) first_error = m; },
+        [](llvm::Error w) { llvm::consumeError(std::move(w)); });
+    // A range [lo, hi) of a section with a guest offset: the line tables' rows, and the top-level inlined code with its call's line
+    struct Range {
+        uint64_t sec = 0, lo = 0, hi = 0;
+        uint32_t line = 0;
+    };
+    std::vector<Range> lines, inlined;
+    for (const auto& cu : dc->compile_units()) {
+        if (const llvm::DWARFDebugLine::LineTable* lt = dc->getLineTableForUnit(cu.get())) {
+            for (const auto& seq : lt->Sequences) {
+                for (size_t i = seq.FirstRowIndex; i + 1 < seq.LastRowIndex && i + 1 < lt->Rows.size(); ++i) {
+                    const auto &r = lt->Rows[i], &n = lt->Rows[i + 1];
+                    if (n.Address.Address > r.Address.Address) {
+                        lines.push_back({r.Address.SectionIndex, r.Address.Address, n.Address.Address, r.Line});
+                    }
+                }
+            }
+        }
+        // Each subprogram's inlined subroutines that no other inlined subroutine holds (their nested ones lie inside them)
+        std::function<void(const llvm::DWARFDie&, bool)> walk = [&](const llvm::DWARFDie& d, bool in_subprogram) {
+            for (const llvm::DWARFDie& ch : d.children()) {
+                const llvm::dwarf::Tag tag = ch.getTag();
+                if (tag == llvm::dwarf::DW_TAG_subprogram) {
+                    walk(ch, true);
+                } else if (tag == llvm::dwarf::DW_TAG_lexical_block) {
+                    walk(ch, in_subprogram);
+                } else if (tag == llvm::dwarf::DW_TAG_inlined_subroutine && in_subprogram) {
+                    const uint32_t call = static_cast<uint32_t>(llvm::dwarf::toUnsigned(ch.find(llvm::dwarf::DW_AT_call_line), 0));
+                    auto ranges = ch.getAddressRanges();
+                    if (!ranges) {
+                        const std::string m = llvm::toString(ranges.takeError());
+                        if (first_error.empty()) first_error = m;
+                        continue;
+                    }
+                    for (const llvm::DWARFAddressRange& r : *ranges) {
+                        if (r.HighPC > r.LowPC) inlined.push_back({r.SectionIndex, r.LowPC, r.HighPC, call});
+                    }
+                }
+            }
+        };
+        walk(cu->getUnitDIE(false), false);
+    }
+    if (!first_error.empty()) {
+        *error = "the positions: the unit's DWARF: " + first_error;
+        return false;
+    }
+    const auto range_before = [](const Range& a, const Range& b) { return a.sec != b.sec ? a.sec < b.sec : a.lo < b.lo; };
+    std::sort(inlined.begin(), inlined.end(), range_before);
+    // The first element of v (sorted by section and lo) whose [lo, hi) holds or follows (sec, p): its index, v.size() when none
+    const auto at_or_after = [](const auto& v, uint64_t sec, uint64_t p) {
+        size_t lo = 0, hi = v.size();
+        while (lo < hi) {
+            const size_t mid = lo + (hi - lo) / 2;
+            if (v[mid].sec < sec || (v[mid].sec == sec && v[mid].hi <= p)) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    };
+    for (const Range& l : lines) {
+        // Split at the functions' and the inlined ranges' bounds: each piece one function's, in or out of inlined code
+        for (uint64_t p = l.lo; p < l.hi;) {
+            uint64_t q = l.hi;
+            const size_t fi = at_or_after(fns, l.sec, p);
+            const Fn* f = nullptr;
+            if (fi < fns.size() && fns[fi].sec == l.sec) {
+                if (fns[fi].lo <= p) f = &fns[fi], q = std::min(q, fns[fi].hi);
+                else q = std::min(q, fns[fi].lo);
+            }
+            const size_t ii = at_or_after(inlined, l.sec, p);
+            const Range* in = nullptr;
+            if (ii < inlined.size() && inlined[ii].sec == l.sec) {
+                if (inlined[ii].lo <= p) in = &inlined[ii], q = std::min(q, inlined[ii].hi);
+                else q = std::min(q, inlined[ii].lo);
+            }
+            if (f && !f->std_entry) {
+                const uint32_t line = in ? in->line : l.line;
+                ++ps->dwarf_rows;
+                ps->inlined += in != nullptr;
+                ps->line0 += line == 0;
+                rows->push_back({f->body, static_cast<uint32_t>(p - f->lo), line ? line : NXAOT_POS_NONE, f->part});
+                fns[fi].rows = true;
+            }
+            p = q;
+        }
+    }
+    // A terminator at the end of every body and part with rows: what follows it (a standard entry, the next function's code) has no position
+    for (const Fn& f : fns) {
+        if (f.rows) rows->push_back({f.body, static_cast<uint32_t>(f.hi - f.lo), NXAOT_POS_NONE, f.part});
+    }
+    return true;
+}
+
 // What a module (the tables' object or a unit) holds of the run time and of the code every unit shares. The tables' object defines the
 // module's base, the empty inline-cache descriptor, the slow-path wrappers and jit_entry; a unit declares them. Every name is hidden: lld
-// resolves them inside the pack's shared object, which exports only the descriptor
+// resolves them inside the pack's shared object, which exports only the descriptor (and the sampler's positions, positions.o)
 struct Kit {
     llvm::Module* m = nullptr;
     llvm::GlobalVariable* base = nullptr;
@@ -1700,13 +1859,13 @@ void DefineSplitStub(const Kit& k, const Common& c, uint64_t entry, const FnFact
 }
 
 // ---- The sample profile at tiers H and H+ (design 9.3, 12; README.md, "The sample profile at tier H") ----
-// A profile's samples are guest offsets (the host's sampler, dm/host/aot_profile.c, counts them at the entry of the function they fell in; a
-// profile may name any instruction). At tiers H and H+ they weigh each sampled function's lifted code before the tier's pipeline, so that its
+// A profile's samples are guest offsets (the host's sampler, dm/host/aot_profile.c, counts them at the guest instruction the pack's positions
+// give, "The positions" above; a profile may name any instruction). At tiers H and H+ they weigh each sampled function's lifted code before the tier's pipeline, so that its
 // passes (block placement, the inliner's thresholds, register allocation's spill weights, loop rotation and unrolling, if-conversion) work from
 // where the time went rather than from LLVM's static guesses:
 // - a guest block's count is its samples per instruction (the samples at offsets in its own range over that range's length, times
-//   kSampleScale; its own range ends where the next block starts: WeighFunction); a function whose samples are all at its entry, as the
-//   host's sampler writes them, has no positions and is not weighed (Common::Weighted);
+//   kSampleScale; its own range ends where the next block starts: WeighFunction); a function whose samples are all at its entry (the
+//   host's sampler's form for a function it sampled at none of its instructions) has no positions and is not weighed (Common::Weighted);
 // - profi, the profile inference of LLVM's own sample loader (llvm::applyFlowInference, Transforms/Utils/SampleProfileInference.h, with its
 //   tuned costs), makes of these counts at the guest blocks' heads a flow over every basic block of the function, consistent at every branch
 //   and join: the blocks the lowering adds (the if_then / if_else of a conditional branch, safepoint polls, call sequences, slow paths) have
@@ -2548,6 +2707,195 @@ bool CompileLines(const Common& c, llvm::TargetMachine& tm, LineRuns& by_fn, std
     return Finish(m, c, tm, c.o.tier, object, st, nullptr, error);
 }
 
+// ---- positions.o: the sampler's positions, from every unit's DWARF (ReadPositions), once all are compiled ----
+// Each function's run is encoded as soon as its rows are complete (its unit's, on the worker that compiled or read it, or its parts' once joined:
+// EncodeRun), a few bytes per row, so that the rows of a large module are not kept whole until the end (README.md, "Memory at scale");
+// CompilePositions joins the runs in the function map's order into nxaot_positions (include/nxaot/aot_module.h)
+constexpr uint32_t kPosStride = 64;  // rows per mark: a lookup decodes at most 63 rows after its binary search
+struct PosRun {
+    std::vector<nxaot_pos_mark> marks;  // `at` from the start of bytes
+    std::string bytes;
+    uint32_t rows = 0;
+};
+using PosRuns = std::map<uint64_t, PosRun>;
+
+void PutUleb(std::string* out, uint64_t v) {
+    do {
+        uint8_t b = v & 0x7F;
+        v >>= 7;
+        if (v) b |= 0x80;
+        out->push_back(static_cast<char>(b));
+    } while (v);
+}
+void PutSleb(std::string* out, int64_t v) {
+    for (bool more = true; more;) {
+        uint8_t b = v & 0x7F;
+        v >>= 7;  // arithmetic
+        more = !((v == 0 && !(b & 0x40)) || (v == -1 && (b & 0x40)));
+        if (more) b |= 0x80;
+        out->push_back(static_cast<char>(b));
+    }
+}
+
+// The run of function `entry` (its guest range [entry, entry + size)) from its rows {native from the body, offset} in any order: a position
+// outside the range becomes none (counted), a row the same as the one before it goes, the rows before the first position go; the rest coded
+// as nxaot_positions holds them (include/nxaot/aot_module.h) and checked through nxaot_position_at, the host's reader. False with *error when
+// the check fails
+bool EncodeRun(uint64_t entry, uint64_t size, std::vector<std::pair<uint32_t, uint32_t>> raw, PosRun* run, PosStats* ps, std::string* error) {
+    // By native address; of rows at one address the last given (the next part's first row over the terminator of the part before it)
+    std::stable_sort(raw.begin(), raw.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<std::pair<uint32_t, uint32_t>> rows;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        if (i + 1 < raw.size() && raw[i + 1].first == raw[i].first) continue;
+        uint32_t off = raw[i].second;
+        if (off != NXAOT_POS_NONE && (off < entry || off - entry >= size || off % 4)) {
+            ++ps->outside;
+            off = NXAOT_POS_NONE;
+        }
+        if (rows.empty() ? off == NXAOT_POS_NONE : rows.back().second == off) continue;
+        rows.emplace_back(raw[i].first, off);
+    }
+    *run = PosRun{};
+    run->rows = static_cast<uint32_t>(rows.size());
+    uint64_t pos = 0;  // the row before's native address + 1
+    uint32_t last = static_cast<uint32_t>(entry);
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const auto [native, off] = rows[i];
+        if (i && i % kPosStride == 0) {
+            run->marks.push_back({native, off, static_cast<uint32_t>(run->bytes.size())});
+            last = off != NXAOT_POS_NONE ? off : static_cast<uint32_t>(entry);
+            pos = static_cast<uint64_t>(native) + 1;
+            continue;
+        }
+        const uint64_t d = native + 1 - pos;
+        if (off == NXAOT_POS_NONE) {
+            if (d <= 64) {
+                run->bytes.push_back(static_cast<char>(0xC0 | (d - 1)));
+            } else {
+                run->bytes.push_back(static_cast<char>(0x81));
+                PutUleb(&run->bytes, d);
+            }
+        } else {
+            const int64_t e = (static_cast<int64_t>(off) - static_cast<int64_t>(last)) / 4;
+            if (d <= 16 && e >= -4 && e <= 3) {
+                run->bytes.push_back(static_cast<char>((d - 1) | static_cast<uint64_t>(e + 4) << 4));
+            } else if (d <= 256 && e >= -24 && e <= 37) {
+                run->bytes.push_back(static_cast<char>(0x82 + (e + 24)));
+                run->bytes.push_back(static_cast<char>(d - 1));
+            } else {
+                run->bytes.push_back(static_cast<char>(0x80));
+                PutUleb(&run->bytes, d);
+                PutSleb(&run->bytes, e);
+            }
+            last = off;
+        }
+        pos = static_cast<uint64_t>(native) + 1;
+    }
+    // The check: the reader at the first row of each stretch (a mark's, or the run's first), at its last row and at its last row with a
+    // position (an offset's delta counts from it, so a wrong one shows there), which decode the stretch's rows on the way
+    if (!rows.empty()) {
+        const nxaot_pos_run r{0, run->rows, 0};
+        const nxaot_positions t{NXAOT_POSITIONS_VERSION, kPosStride, 1, &r, run->marks.data(),
+                                reinterpret_cast<const uint8_t*>(run->bytes.data()), run->rows, run->marks.size(), run->bytes.size()};
+        for (size_t k = 0; k < rows.size(); k += kPosStride) {
+            const size_t end = std::min(rows.size(), k + kPosStride);
+            size_t with = k;
+            for (size_t i = k; i < end; ++i) if (rows[i].second != NXAOT_POS_NONE) with = i;
+            for (const size_t i : {k, end - 1, with}) {
+                if (nxaot_position_at(&t, 0, entry, rows[i].first) != rows[i].second) {
+                    *error = "the positions of the function at " + llvm::utohexstr(entry) + ": row " + std::to_string(i) + " does not decode";
+                    return false;
+                }
+            }
+        }
+        if (rows.front().first && nxaot_position_at(&t, 0, entry, rows.front().first - 1) != NXAOT_POS_NONE) {
+            *error = "the positions of the function at " + llvm::utohexstr(entry) + ": an address before its first row decodes";
+            return false;
+        }
+    }
+    return true;
+}
+
+// Each function's rows of a unit's (or a split function's joined parts') position rows, encoded into runs
+bool AddPositionRows(const Common& c, PosRuns& runs, const std::vector<LineRow>& rows, PosStats* ps, std::string* error) {
+    std::map<uint64_t, std::vector<std::pair<uint32_t, uint32_t>>> by_fn;
+    for (const LineRow& r : rows) by_fn[r.fn].emplace_back(r.native, r.offset);
+    for (auto& [fn, raw] : by_fn) {
+        const auto f = c.plan.fns.find(fn);
+        if (f == c.plan.fns.end()) {
+            *error = "the positions name the function at " + llvm::utohexstr(fn) + ", which the plan has not";
+            return false;
+        }
+        if (!EncodeRun(fn, f->second.size, std::move(raw), &runs[fn], ps, error)) return false;
+    }
+    return true;
+}
+
+bool CompilePositions(const Common& c, llvm::TargetMachine& tm, PosRuns& runs, std::string* object, UnitStats* st, uint64_t* rows_out,
+                      uint64_t* bytes_out, std::string* error) {
+    llvm::LLVMContext ctx;
+    Diagnose(ctx, st);
+    llvm::Module m{c.prefix + ".positions", ctx};
+    m.setDataLayout(tm.createDataLayout());
+    m.setTargetTriple(tm.getTargetTriple().str());
+    std::vector<uint32_t> index, marks;
+    std::string bytes;
+    uint64_t rows = 0;
+    for (const auto& [entry, ff] : c.plan.fns) {
+        auto it = runs.find(entry);
+        index.push_back(static_cast<uint32_t>(bytes.size()));
+        index.push_back(it == runs.end() ? 0 : it->second.rows);
+        index.push_back(static_cast<uint32_t>(marks.size() / 3));
+        if (it == runs.end()) {
+            continue;
+        }
+        PosRun& run = it->second;
+        rows += run.rows;
+        for (const nxaot_pos_mark& k : run.marks) {
+            marks.push_back(k.native);
+            marks.push_back(k.offset);
+            marks.push_back(static_cast<uint32_t>(bytes.size() + k.at));
+        }
+        bytes += run.bytes;
+        run = PosRun{};
+    }
+    if (bytes.size() > UINT32_MAX) {
+        *error = "the positions' rows hold more than 4 GiB";
+        return false;
+    }
+    llvm::IRBuilder<> b{ctx};
+    const auto table = [&](const char* name, const char* section, llvm::Constant* init) {
+        auto* g = new llvm::GlobalVariable(m, init->getType(), true, llvm::GlobalValue::ExternalLinkage, init, name);
+        Hide(g);
+        g->setSection(section);
+        g->setAlignment(llvm::Align(8));
+        return g;
+    };
+    auto* g_runs = table("nxaot.pos_runs", ".nxaot.posruns", llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint32_t>(index)));
+    auto* g_marks = table("nxaot.pos_marks", ".nxaot.posmarks", llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint32_t>(marks)));
+    auto* g_bytes = table("nxaot.pos_bytes", ".nxaot.posbytes",
+                          llvm::ConstantDataArray::get(ctx, llvm::ArrayRef<uint8_t>(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size())));
+    auto* i32 = b.getInt32Ty();
+    auto* i64 = b.getInt64Ty();
+    auto* ptr = b.getPtrTy();
+    auto* ty = llvm::StructType::get(ctx, {i32, i32, i64, ptr, ptr, ptr, i64, i64, i64});
+    const llvm::StructLayout* layout = m.getDataLayout().getStructLayout(ty);
+    if (layout->getSizeInBytes() != sizeof(nxaot_positions) || layout->getElementOffset(3) != offsetof(nxaot_positions, runs) ||
+        layout->getElementOffset(5) != offsetof(nxaot_positions, bytes) || layout->getElementOffset(8) != offsetof(nxaot_positions, byte_count)) {
+        *error = "nxaot_positions' LLVM layout differs from include/nxaot/aot_module.h";
+        return false;
+    }
+    auto* g = new llvm::GlobalVariable(
+        m, ty, true, llvm::GlobalValue::ExternalLinkage,
+        llvm::ConstantStruct::get(ty, {b.getInt32(NXAOT_POSITIONS_VERSION), b.getInt32(kPosStride), b.getInt64(c.plan.fns.size()), g_runs, g_marks,
+                                       g_bytes, b.getInt64(rows), b.getInt64(marks.size() / 3), b.getInt64(bytes.size())}),
+        "nxaot_positions");
+    g->setAlignment(llvm::Align(8));
+    *rows_out = rows;
+    *bytes_out = 4 * (index.size() + marks.size()) + bytes.size();
+    return Finish(m, c, tm, c.o.tier, object, st, nullptr, error);
+}
+
 // ---- imports.o of a Windows pack ("Windows packs" above) ----
 // Every symbol the other objects call and none of them defines must be a run-time entry of the host (IsHostImport), else the pack fails, naming
 // it. Per entry: a hidden thunk of its name, `jmp *nxaot.imp.<name>(%rip)` (the code calls it as a Linux pack's code calls its PLT entry), and
@@ -2954,10 +3302,11 @@ uint64_t AnalysisPeak(const module::Image& image) {
 namespace {
 
 // The parts of a split function joined into one relocatable object (ld.lld -r, the part holding the body's stub first): lld concatenates their
-// code sections into one, which the pack's link places whole, so every part lies after the body at an offset known now. The line rows of the
-// parts (ReadLineMarks: native from the part's start) become rows from the body's start, as the line table's runs are (ABI 3)
+// code sections into one, which the pack's link places whole, so every part lies after the body at an offset known now. The line rows and the
+// positions of the parts (ReadLineMarks, ReadPositions: native from the part's start) become rows from the body's start, as the line table's
+// and the positions' runs are (ABI 3)
 bool JoinParts(const Common& c, uint64_t entry, const std::vector<std::string>& parts, const std::string& joined, std::vector<LineRow>* rows,
-               std::string* error) {
+               std::vector<LineRow>* positions, std::string* error) {
     if (!LinkRelocatable(parts, joined, error)) {
         return false;
     }
@@ -3001,15 +3350,18 @@ bool JoinParts(const Common& c, uint64_t entry, const std::vector<std::string>& 
         *error = joined + ": no " + body;
         return false;
     }
-    for (LineRow& r : *rows) {
-        if (r.part == LineRow::kNoPart) continue;
-        const auto it = part_at.find(r.part);
-        if (it == part_at.end() || it->second + r.native < *body_at || it->second + r.native - *body_at > UINT32_MAX) {
-            *error = joined + ": a line mark of " + body + "'s part at " + llvm::utohexstr(r.part) + " outside the joined code";
-            return false;
+    for (std::vector<LineRow>* v : {rows, positions}) {
+        for (LineRow& r : *v) {
+            if (r.part == LineRow::kNoPart) continue;
+            const auto it = part_at.find(r.part);
+            if (it == part_at.end() || it->second + r.native < *body_at || it->second + r.native - *body_at > UINT32_MAX) {
+                *error = joined + ": a " + (v == rows ? "line mark" : "position") + " of " + body + "'s part at " + llvm::utohexstr(r.part) +
+                         " outside the joined code";
+                return false;
+            }
+            r.native = static_cast<uint32_t>(it->second + r.native - *body_at);
+            r.part = LineRow::kNoPart;
         }
-        r.native = static_cast<uint32_t>(it->second + r.native - *body_at);
-        r.part = LineRow::kNoPart;
     }
     return true;
 }
@@ -3424,12 +3776,29 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         double t_key = 0;
         std::vector<LineRow> lines;  // the unit's line marks (ReadLineMarks)
         uint64_t lines_outside = 0;  // marks in no body
+        std::vector<LineRow> positions;  // a part's positions from its DWARF (ReadPositions), until its function's parts are joined
+        PosRuns runs;                    // a whole function's, encoded on the worker (EncodeRun)
+        PosStats pos;
+        double t_pos = 0;                // encoding them
     };
-    // A unit's object: its line marks read back and its marks' section kept out of the link (in the cache too: a hit is read the same way)
-    const auto line_marks = [&](std::string* object, Result& res, bool fresh) {
-        if (!o.line_table) return true;
-        if (fresh && !MarkExcluded(object, &res.error)) return false;
-        return ReadLineMarks(*object, c.prefix, &res.lines, &res.lines_outside, &res.error);
+    // A unit's object: its line marks read back and its marks' section kept out of the link, and its positions read from its DWARF (in the cache
+    // too: a hit is read the same way). A unit of whole functions has every row of them: they are encoded here, on the worker, and only their
+    // bytes kept to the end (a row read is 24 bytes, a row encoded about 2: README.md, "Memory at scale"); a part's wait for its function's
+    // other parts (JoinParts, in link order below)
+    const auto line_marks = [&](std::string* object, Result& res, bool fresh, const Unit& unit) {
+        if (o.line_table) {
+            if (fresh && !MarkExcluded(object, &res.error)) return false;
+            if (!ReadLineMarks(*object, c.prefix, &res.lines, &res.lines_outside, &res.error)) return false;
+        }
+        if (!o.debug_info) return true;
+        if (!ReadPositions(*object, c.prefix, &res.positions, &res.pos, &res.error)) return false;
+        if (unit.part >= 0) return true;
+        const auto te = Clock::now();
+        const bool ok = AddPositionRows(c, res.runs, res.positions, &res.pos, &res.error);
+        res.positions.clear();
+        res.positions.shrink_to_fit();
+        res.t_pos = Since(te);
+        return ok;
     };
     std::vector<Result> results(units.size() + 1);
     std::atomic<size_t> next{0};
@@ -3467,14 +3836,14 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
                     res.read = bytes;
                     res.st = UnitStats::FromFacts(facts);
                     res.path = cache->ObjectPath(key);
-                    if (o.line_table) {
+                    if (o.line_table || o.debug_info) {
                         auto buf = llvm::MemoryBuffer::getFile(res.path);
                         if (!buf) {
                             res.error = "cannot read " + res.path + ": " + buf.getError().message();
                             continue;
                         }
                         std::string cached = (*buf)->getBuffer().str();
-                        line_marks(&cached, res, false);
+                        line_marks(&cached, res, false, unit);
                     }
                     continue;
                 }
@@ -3486,7 +3855,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
                              &res.error)) {
                 continue;
             }
-            if (!line_marks(&object, res, true)) {
+            if (!line_marks(&object, res, true, unit)) {
                 continue;
             }
             if (cache) {
@@ -3524,11 +3893,14 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     }
 
     // ---- The results, in link order: the tables' object, then the units by entry (a split function's parts joined into one object), then
-    // the line table's ----
+    // the line table's, then the positions' ----
     std::string ir, asm_text;
     LineRuns lines;
+    PosRuns positions;
+    PosStats pos;
     std::vector<std::string> part_objects;
-    std::vector<LineRow> part_rows;
+    std::vector<LineRow> part_rows, part_positions;
+    double t_positions = 0;  // encoding the runs (CPU: the workers' and the split functions' here; reading the units' DWARF is in their jobs)
     for (size_t r = 0; r < results.size(); ++r) {
         Result& res = results[r];
         if (!res.error.empty()) {
@@ -3541,24 +3913,40 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
             // code is one section, so that the line table's offsets from the body hold for every part (SplitObject)
             part_objects.push_back(res.path);
             part_rows.insert(part_rows.end(), res.lines.begin(), res.lines.end());
+            part_positions.insert(part_positions.end(), res.positions.begin(), res.positions.end());
             if (static_cast<size_t>(unit->part) + 1 == c.parts.at(unit->entries.front()).size()) {
                 const std::string joined = work_dir + "/split" + llvm::utohexstr(unit->entries.front()) + ".o";
                 const auto tj = Clock::now();
-                if (!JoinParts(c, unit->entries.front(), part_objects, joined, &part_rows, error)) {
+                if (!JoinParts(c, unit->entries.front(), part_objects, joined, &part_rows, &part_positions, error)) {
                     return false;
                 }
                 s.t_join += Since(tj);
                 objects->push_back(joined);
                 AddLineRows(lines, part_rows);
+                const auto te = Clock::now();
+                if (!AddPositionRows(c, positions, part_positions, &pos, error)) {
+                    return false;
+                }
+                t_positions += Since(te);
                 part_objects.clear();
                 part_rows.clear();
+                part_positions.clear();
             }
         } else {
             objects->push_back(res.path);
             AddLineRows(lines, res.lines);
+            for (auto& [fn, run] : res.runs) positions[fn] = std::move(run);   // a function's rows come from one unit
+            res.runs.clear();
         }
         res.lines.clear();
         res.lines.shrink_to_fit();
+        res.positions.clear();
+        res.positions.shrink_to_fit();
+        pos.dwarf_rows += res.pos.dwarf_rows;
+        pos.inlined += res.pos.inlined;
+        pos.line0 += res.pos.line0;
+        pos.outside += res.pos.outside;
+        t_positions += res.t_pos;
         s.lines_lost += res.lines_outside;
         const UnitStats& u = res.st;
         s.blocks += u.blocks;
@@ -3623,6 +4011,35 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         s.object_bytes += ls.object_bytes;
         s.t_compile_wall += Since(tl);
         memory::Rss("after the line table");
+    }
+    if (o.debug_info) {
+        // positions.o: the sampler's positions (nxaot_positions; none without DWARF: the host then counts the samples per function)
+        const auto tl = Clock::now();
+        UnitStats ps;
+        std::string object;
+        uint64_t rows = 0, bytes = 0;
+        if (!CompilePositions(c, *tms[0][static_cast<size_t>(o.tier)], positions, &object, &ps, &rows, &bytes, error)) {
+            return false;
+        }
+        const std::string path = work_dir + "/positions.o";
+        if (!WriteFile(path, object, error)) {
+            return false;
+        }
+        objects->push_back(path);
+        s.object_bytes += ps.object_bytes;
+        s.t_compile_wall += Since(tl);
+        char line[400];
+        std::snprintf(line, sizeof line,
+                      "aot: positions: %llu rows for %llu functions in %llu bytes (%.2f per row), from %llu DWARF ranges: %llu in inlined code (the "
+                      "call's line), %llu with no line, %llu outside their function (none); encoded in %.3f s",
+                      static_cast<unsigned long long>(rows), static_cast<unsigned long long>(c.plan.fns.size()), static_cast<unsigned long long>(bytes),
+                      rows ? static_cast<double>(bytes) / static_cast<double>(rows) : 0.0, static_cast<unsigned long long>(pos.dwarf_rows),
+                      static_cast<unsigned long long>(pos.inlined), static_cast<unsigned long long>(pos.line0),
+                      static_cast<unsigned long long>(pos.outside), t_positions + Since(tl));
+        s.notes.push_back(line);
+        memory::Rss("after the positions");
+    } else {
+        s.notes.push_back("aot: positions: none (--no-debug-info: no DWARF to read them from; the host's sampler counts per function)");
     }
     if (o.windows) {
         // imports.o: the run-time entries the objects call, their thunks and slots, and the table the host binds ("Windows packs")
@@ -3756,12 +4173,14 @@ bool LinkWindows(const std::vector<std::string>& objects, const std::string& wor
     // The DLL: lld's COFF driver as a library. No entry point and no C library: the DLL runs nothing when it is loaded and imports from no
     // module (its run-time entries are bound by the host: "Windows packs"); every section kept (/opt:noref: as the ELF link keeps them, and
     // the descriptor reaches what it needs anyway); the time stamp from the contents (/Brepro), so a pack is the same from build to build;
-    // the export table holds the descriptor and the import table; DWARF kept as a MinGW program keeps it (/debug:dwarf), no PDB
+    // the export table holds the descriptor and the import table, and with DWARF the sampler's positions (positions.o: nxaot_positions);
+    // DWARF kept as a MinGW program keeps it (/debug:dwarf), no PDB
     const std::string out = "/out:" + dll;
     std::vector<const char*> args{"lld-link",     "/nologo",     "/dll",     "/noentry",       "/nodefaultlib",
                                   "/machine:x64", "/noimplib",   "/Brepro",  "/incremental:no", "/opt:noref",
                                   "/opt:noicf",   "/export:nxaot_module,DATA", "/export:nxaot_imports,DATA", out.c_str()};
     if (debug_info) {
+        args.push_back("/export:nxaot_positions,DATA");
         args.push_back("/debug:dwarf");
     }
     args.push_back(obj.c_str());

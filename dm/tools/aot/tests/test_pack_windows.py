@@ -6,12 +6,12 @@ that pop their own stack arguments), the synthetic game module (gate sites, the 
 object and with `--target windows` as a DLL. Each DLL is checked with llvm-readobj and llvm-objdump and with the small PE and ELF readers below:
 
   - a PE32+ DLL for x86-64 (AMD64, IMAGE_FILE_DLL, dynamic base, NX), no entry point, no import descriptor or delay import (it names no module);
-  - its exports are exactly nxaot_module and nxaot_imports;
+  - its exports are exactly nxaot_module, nxaot_imports and nxaot_positions (the sampler's positions: the ELF pack's tables, read through the export);
   - its descriptor (read through the export: ABI, flags, name, SHA-256, sizes, entry, FPCR, the standard entries' signature, the counts) is the ELF
     pack's, and so are its tables' module-side columns (function map: offsets and sizes; lookup table: offsets and flags; returns; gate sites);
   - nxaot_imports names exactly the ELF pack's undefined symbols, each a run-time entry the host exports (DM_AOT_EXPORT in dm/host/aot_run.c,
     FPEXPORT in aot_fp.c), each slot 8 zero bytes in a writable section, each entry's thunk in the code a `jmp *` through its slot;
-  - every pointer of the descriptor and of nxaot_imports has a base relocation (DIR64), so the DLL loads at any base;
+  - every pointer of the descriptor, of nxaot_imports and of nxaot_positions has a base relocation (DIR64), so the DLL loads at any base;
   - `nxaot lines` on the DLL: no bad entry, as many entries as on the ELF pack;
   - the code: every function (bodies, standard entries, parts, the tables' code) disassembled in both packs and compared instruction by instruction,
     the operands that depend on the layout (rip-relative displacements, branch targets outside the function) normalized and the raw bytes compared
@@ -161,6 +161,62 @@ class Elf:
 
 def desc_of(raw):
     return dict(zip(DESC_FIELDS, DESC.unpack(raw)))
+
+
+def positions_bad(runs, marks, data, stride, fns, rows):
+    """The sampler's positions (include/nxaot/aot_module.h, "The sampler's positions") decoded independently of the host's reader: runs [(at, rows,
+    first)], parallel to fns [(entry, size)]. What is wrong, or '' when every run's rows decode from its bytes up to the next run's, its marks are its own,
+    its native addresses rise, every offset is none or an instruction of its function, and the rows add up to rows"""
+    NONE, total, ends = 0xFFFFFFFF, 0, [at for at, _, _ in runs[1:]] + [len(data)]
+
+    def leb(i, signed):
+        v = s = 0
+        while True:
+            c = data[i]
+            i += 1
+            v |= (c & 0x7F) << s
+            s += 7
+            if not c & 0x80:
+                return (v - (1 << s) if signed and c & 0x40 else v), i
+    for k, ((at, n, first), (entry, size)) in enumerate(zip(runs, fns)):
+        total += n
+        i, pos, last, prev = at, 0, entry, -1
+        try:
+            for r in range(n):
+                if r and r % stride == 0:
+                    native, off, mat = struct.unpack_from('<III', marks, 12 * (first + r // stride - 1))
+                    if mat != i:
+                        return f'function {entry:#x}: mark {r // stride} at byte {mat}, its rows end at {i}'
+                    pos, last = native + 1, off if off != NONE else entry
+                else:
+                    c = data[i]
+                    i += 1
+                    if c < 0x80:
+                        d, off = (c & 15) + 1, last + 4 * ((c >> 4) - 4)
+                    elif c >= 0xC0:
+                        d, off = (c & 0x3F) + 1, NONE
+                    elif c >= 0x82:
+                        d, off = data[i] + 1, last + 4 * (c - 0x82 - 24)
+                        i += 1
+                    elif c == 0x80:
+                        d, i = leb(i, False)
+                        e, i = leb(i, True)
+                        off = last + 4 * e
+                    else:
+                        d, i = leb(i, False)
+                        off = NONE
+                    pos += d
+                native = pos - 1
+                if native <= prev or (off != NONE and not entry <= off < entry + size):
+                    return f'function {entry:#x}: row {r} at +{native:#x}, offset {off:#x}'
+                prev = native
+                if off != NONE:
+                    last = off
+        except (IndexError, struct.error):
+            return f'function {entry:#x}: its rows run past the table'
+        if i != ends[k]:
+            return f'function {entry:#x}: its rows end at byte {i}, the next run starts at {ends[k]}'
+    return '' if total == rows else f'{total} rows in the runs, {rows} in the header'
 
 
 # ---- The code, instruction by instruction ----
@@ -475,8 +531,8 @@ def one(a, tag, module, exports):
     check(pe.dirs[1] == (0, 0) and pe.dirs[13] == (0, 0) and 'Import {' not in ro and 'DelayImport' not in ro,
           'no import descriptor and no delay import (llvm-readobj --coff-imports lists none)')
     ex = pe.exports()
-    check(sorted(ex) == ['nxaot_imports', 'nxaot_module'] and re.findall(r'Name: (\S+)', ro) == sorted(ex),
-          f'exports exactly nxaot_imports and nxaot_module (llvm-readobj: {re.findall(r"Name: (\S+)", ro)})')
+    check(sorted(ex) == ['nxaot_imports', 'nxaot_module', 'nxaot_positions'] and re.findall(r'Name: (\S+)', ro) == sorted(ex),
+          f'exports exactly nxaot_imports, nxaot_module and nxaot_positions (llvm-readobj: {re.findall(r"Name: (\S+)", ro)})')
     # The descriptor and its tables against the ELF pack's
     d = desc_of(pe.at(ex['nxaot_module'], DESC.size))
     sym = {n: (v, i) for n, v, i in elf.symbols('.dynsym')}
@@ -497,6 +553,14 @@ def one(a, tag, module, exports):
     gates = pe.va(d['gates'], 16 * d['gate_count']) if d['gate_count'] else b''
     check(gates == elf.data('.nxaot.gates') and (d['gates'] == 0) == (d['gate_count'] == 0), f'the gate sites: {d["gate_count"]}, the same rows')
     check(pe.va(d['tool'], 6) == b'nxaot ', 'the tool string')
+    # The sampler's positions (include/nxaot/aot_module.h nxaot_positions), read through their export: whole and in range (the DLL's code is not the ELF pack's
+    # everywhere, below, so neither are its positions)
+    pv, pst, pfn, p_runs, p_marks, p_bytes, p_rows, p_nm, p_nb = struct.unpack('<IIQQQQQQQ', pe.at(ex['nxaot_positions'], 64))
+    runs = pe.va(p_runs, 12 * pfn)
+    bad = positions_bad([struct.unpack_from('<III', runs, 12 * k) for k in range(pfn)], pe.va(p_marks, 12 * p_nm) if p_nm else b'',
+                        pe.va(p_bytes, p_nb) if p_nb else b'', pst, [(o, s) for o, _, s in fn_d], p_rows) if pv == 1 and pst and pfn == d['fn_count'] else 'its header'
+    check(not bad, f'nxaot_positions (version {pv}, {p_rows} rows for {pfn} functions, {p_nm} marks, {p_nb} bytes): every run decodes, its rows in order, every '
+                   f'offset in its function' + (f': {bad}' if bad else ''))
     # The imports: the ELF pack's undefined symbols, each exported by the host, slots writable and zero, thunks through them
     undefined = sorted(n for n, v, i in elf.symbols('.dynsym') if n and i == 0)
     imports, k = [], 0
@@ -521,8 +585,9 @@ def one(a, tag, module, exports):
     relocs = pe.base_relocs()
     offsets = {'base': 120, 'lookup': 128, 'fns': 136, 'fn_lines': 152, 'lines': 160, 'enter': 168, 'tool': 176, 'returns': 184, 'jit_entry': 200, 'gates': 216}
     want = [ex['nxaot_module'] + o for f, o in offsets.items() if d[f]] + [ex['nxaot_imports'] + 16 * i + j for i in range(len(imports)) for j in (0, 8)]
-    check(all(w in relocs for w in want), f'a base relocation (DIR64) at each of the {len(want)} pointers of the descriptor and of nxaot_imports '
-                                           f'({len(relocs)} in all)')
+    want += [ex['nxaot_positions'] + o for o in (16, 24, 32)]   # runs, marks, bytes
+    check(all(w in relocs for w in want), f'a base relocation (DIR64) at each of the {len(want)} pointers of the descriptor, of nxaot_imports and of '
+                                           f'nxaot_positions ({len(relocs)} in all)')
     # The line table: nxaot's own reader on both, then per function: the same run wherever the code is the same
     rd, nd, bd = lines_of(a.nxaot, dll, module)
     re_, ne, be = lines_of(a.nxaot, so, module)

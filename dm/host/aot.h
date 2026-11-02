@@ -346,17 +346,20 @@ DM_AOT_EXPORT void nxaot_rt_gate(dm_guest_state *st, uint64_t site);
 // DM_AOT_JIT_ALL), as its code reader asks once per translated instruction; 0 without NXHOST_JIT. For tests and measurements (t_aot_module times it)
 int dm_aot_jit_stop_at(uint64_t pc);
 
-// ---------- The sampler (aot_profile.c; dm/tools/aot/README.md, "Tiers by profile") ----------
+// ---------- The sampler (aot_profile.c; dm/tools/aot/README.md, "Tiers by profile" and "The sample profile at tier H") ----------
 // DM_AOT_PROFILE=<folder> (docs/env_switches.tsv): every thread that runs guest code is sampled DM_AOT_PROFILE_HZ times (1000 by default) per second of its own CPU time, and at process
 // exit (atexit, or dm_aot_profile_write before it) <folder>/<module>.tsv is written for every module with samples: the profile `nxaot build --profile` reads (one module per file), one
-// line `<module offset of a function's entry> <samples>` per sampled function, most samples first, under '#' lines naming the module, its build ID, its image's SHA-256 and its pack
+// line `<module offset> <samples>` per sampled guest instruction (design 12), most samples first, under '#' lines naming the module, its build ID, its image's SHA-256 and its pack
 // (and beside it <module>.misses.tsv, the JIT fallback's misses: below).
-// A sample in a pack's code counts for the function the pack's function map gives (a split function's parts and a group's functions each map to their own entry); one in a host call
-// or an SVC for the guest function that made it (dm_aot_thread.prof_at); one in the JIT fallback or elsewhere in the host only in the totals (aot_profile.c count_pc, the same on
-// both systems). Linux: a CPU-time timer per thread (timer_create, CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID) and a SIGPROF handler on the thread's alternate stack that reads the
-// interrupted rip. Windows: a sampler thread that, for each registered guest thread whose CPU time (QueryThreadCycleTime) has grown by a period, suspends it, reads its Rip
-// (GetThreadContext, CONTEXT_CONTROL) and resumes it. The counts are per function and pack (relaxed atomic adds), the totals per thread, nothing allocated or locked while a
-// sample is taken; the files are the same on both
+// A sample in a pack's code counts for the function the pack's function map gives (a split function's parts and a group's functions each map to their own entry), and at the guest
+// instruction the pack's positions give for the interrupted pc (include/nxaot/aot_module.h, "The sampler's positions": the instruction whose code holds it, in inlined code the call
+// the inlining replaced, never outside the function); one in a host call or an SVC for the guest function that made it (dm_aot_thread.prof_at), at no instruction; one in the JIT
+// fallback or elsewhere in the host only in the totals (aot_profile.c count_pc, the same on both systems). The file has a row per instruction with samples, and a row at its entry for
+// a function with samples at no instruction (only in host calls and SVCs, in code the positions name none for, or in a pack without positions), as the sampler wrote before positions:
+// what makes a function sampled for nxaot's tiers is a sample anywhere in it, what weighs its code at tier H the samples at its instructions. Linux: a CPU-time timer per thread
+// (timer_create, CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID) and a SIGPROF handler on the thread's alternate stack that reads the interrupted rip. Windows: a sampler thread that, for
+// each registered guest thread whose CPU time (QueryThreadCycleTime) has grown by a period, suspends it, reads its Rip (GetThreadContext, CONTEXT_CONTROL) and resumes it. The counts
+// are per function and per guest instruction of a pack (relaxed atomic adds), the totals per thread, nothing allocated or locked while a sample is taken; the files are the same on both
 #define DM_AOT_PROF_JIT 1
 void dm_aot_profile_init(void);            // the switches read, the handler (Windows: the sampler thread) installed and the writer registered with atexit; once (the first thread to
                                            // run guest code makes it too)
@@ -370,10 +373,17 @@ const dm_aot_pack *dm_aot_pack_at(int i);
 // The function of compiled code at host_pc, as its index in pack *pack's functions by module offset (dm_aot_pack_fn): >= 0; -1 when host_pc is in no pack's code; -2 in a pack's code
 // but in none of its functions (the tables' object: enter, jit_entry, the slow-path wrappers)
 long dm_aot_fn_of_code(uint64_t host_pc, int *pack);
+// The guest instruction whose code holds host_pc, a pc in function fn of pack `pack` (what dm_aot_fn_of_code gave): its module offset (>= 0) by the pack's positions; -1 when the pack has
+// none or they name no instruction there; -2 when they name one outside [entry, entry + size) of fn (never counted: the sampler's totals keep how many, none expected)
+int64_t dm_aot_offset_of_code(uint64_t host_pc, int pack, long fn);
 long dm_aot_fn_of_guest(uint64_t guest, int *pack);   // the function whose guest code [entry, entry + size) holds guest, as above; -1 when none
 size_t dm_aot_pack_fn_count(const dm_aot_pack *p);
-uint64_t dm_aot_pack_fn(const dm_aot_pack *p, size_t i);   // the module offset of the entry of its i-th function by module offset
+uint64_t dm_aot_pack_fn(const dm_aot_pack *p, size_t i);       // the module offset of the entry of its i-th function by module offset
+uint64_t dm_aot_pack_fn_end(const dm_aot_pack *p, size_t i);   // and of the end of its guest code (entry + size)
+const nxaot_positions *dm_aot_pack_pos(const dm_aot_pack *p);  // its positions (aot_module.h), NULL when it has none the sampler can use
 _Atomic uint64_t *dm_aot_pack_samples(const dm_aot_pack *p);   // the sampler's count per function (index as dm_aot_pack_fn), made at the load when DM_AOT_PROFILE is set; else NULL
+// The sampler's count per guest instruction of the text (index: module offset / 4; *words entries), made at the load when DM_AOT_PROFILE is set and the pack has positions; else NULL
+_Atomic uint32_t *dm_aot_pack_pos_samples(const dm_aot_pack *p, uint64_t *words);
 const module_t *dm_aot_pack_module(const dm_aot_pack *p);
 const char *dm_aot_pack_path(const dm_aot_pack *p);
 
@@ -399,7 +409,8 @@ const char *dm_aot_miss_word(uint32_t reason);   // a reason's word in the misse
 // ---------- Faults (aot_fault.c) ----------
 void crash_install(void);                  // the fault handlers (signals on POSIX, a vectored exception handler on Windows); once
 void crash_thread_init(void);              // the calling thread's alternate signal stack (POSIX) or stack guarantee (Windows)
-void dm_aot_fault_after_jit(void);         // after the first JIT instance: the host's handler again in front of dynarmic's (5.4's order)
+void dm_aot_fault_after_jit(void);         // after the first JIT instance, on its thread: the host's handler again in front of dynarmic's (5.4's order), and the thread's
+                                           // own alternate stack again in place of the one dynarmic installed and frees at exit (docs/reference/threads.md)
 
 // ---------- The thread layer's side (hle_thread.c, x86-64 only) ----------
 int thr_safepoint(void);                   // a poll found the poll byte set: wait here while SetThreadActivity pauses this thread; 1 when it waited

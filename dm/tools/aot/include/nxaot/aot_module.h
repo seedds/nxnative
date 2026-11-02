@@ -176,6 +176,120 @@ typedef struct nxaot_import {
     void **slot;       // the slot the pack's thunk of that entry jumps through: the host writes the entry's address there
 } nxaot_import;
 
+// The sampler's positions (design 12; dm/host/aot_profile.c, dm/tools/aot/README.md "The sample profile at tier H"): the exported table
+// nxaot_positions, the guest instruction every native address of a compiled function's code runs for, so that a sample of the host's sampler
+// counts at an instruction offset and not only for its function. Not part of the descriptor, whose ABI it leaves unchanged: a pack without it
+// (built with --no-debug-info, or by an nxaot before it) loads as before and its samples count per function. nxaot writes it from each unit's
+// DWARF line table after code generation (src/build/pack.cpp, "The positions"): a native range's guest instruction is its line, or, in code
+// inlined into the function, the line of the call site the inlining replaced (the outermost frame's), so that a position never leaves the
+// function whose code holds it; a range with no line (line 0: code LLVM merged from several instructions or gave no location) and every byte
+// past a body's or a part's code have none (NXAOT_POS_NONE), as has a line outside [offset, offset + size) of the function's fns entry.
+//   runs    parallel to the descriptor's fns: a function's rows, by native address from the start of its body (as the line table's), coded in
+//           bytes[at ..]; a row holds from its native address to the next row's (the run's last: to the end of the function's code)
+//   marks   every `stride` rows of a run after its first stride: the row in full, {native, offset, at}, its next rows (at most stride - 1)
+//           coded in bytes[at ..]; a run's marks are marks[first .. first + (rows - 1) / stride)
+//   bytes   each row as a delta from the row before it: the native delta d >= 1 (the run's first row from native -1, so 1 for a row at the
+//           body's start) and the offset's delta e in instructions from the last row before it with an offset (from the function's entry
+//           before any; from a mark's offset, when it has one, after it). A byte b below 0x80 is d = (b & 15) + 1, e = (b >> 4) - 4; 0x82 to
+//           0xBF is e = b - 0x82 - 24 with d = the next byte + 1; 0xC0 | n is d = n + 1 with no offset; 0x80 is followed by d (ULEB128) and e
+//           (SLEB128), 0x81 by d (ULEB128) with no offset
+// Read by nxaot_position_at (below), a binary search of the run's marks and at most stride - 1 rows decoded: no allocation, no lock (a signal
+// handler's lookup)
+#define NXAOT_POSITIONS_VERSION 1u
+#define NXAOT_POS_NONE UINT32_MAX
+typedef struct nxaot_pos_run {
+    uint32_t at;     // its first row's byte in bytes
+    uint32_t rows;   // its rows
+    uint32_t first;  // its first mark: (rows - 1) / stride of them
+} nxaot_pos_run;
+typedef struct nxaot_pos_mark {
+    uint32_t native;  // bytes from the start of the function's body
+    uint32_t offset;  // the module offset of the guest instruction, NXAOT_POS_NONE for none
+    uint32_t at;      // bytes[at ..]: the rows after it
+} nxaot_pos_mark;
+typedef struct nxaot_positions {
+    uint32_t version;   // NXAOT_POSITIONS_VERSION
+    uint32_t stride;    // rows per mark
+    uint64_t fn_count;  // the descriptor's fn_count
+    const nxaot_pos_run *runs;
+    const nxaot_pos_mark *marks;
+    const uint8_t *bytes;
+    uint64_t rows, mark_count, byte_count;  // for the logs
+} nxaot_positions;
+
+// The guest instruction of the positions t at the native address `native` bytes from the start of the body of function fn (its index in the
+// descriptor's fns, whose module offset is entry): its module offset, NXAOT_POS_NONE when no row names one. Async-signal-safe
+static inline uint32_t nxaot_position_at(const nxaot_positions *t, uint64_t fn, uint64_t entry, uint64_t native) {
+    if (fn >= t->fn_count || !t->stride) return NXAOT_POS_NONE;
+    const nxaot_pos_run *r = &t->runs[fn];
+    if (!r->rows) return NXAOT_POS_NONE;
+    const uint32_t marks = (r->rows - 1) / t->stride;
+    uint32_t lo = 0, hi = marks;  // the marks at or before native: [0, lo)
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        if (t->marks[r->first + mid].native <= native) lo = mid + 1;
+        else hi = mid;
+    }
+    uint64_t pos;  // the current row's native address + 1 (0 before the run's first row)
+    uint32_t off, last, n;
+    const uint8_t *b;
+    if (lo) {
+        const nxaot_pos_mark *m = &t->marks[r->first + lo - 1];
+        pos = (uint64_t)m->native + 1;
+        off = m->offset;
+        last = m->offset != NXAOT_POS_NONE ? m->offset : (uint32_t)entry;
+        b = t->bytes + m->at;
+        n = (lo < marks ? t->stride : r->rows - lo * t->stride) - 1;
+    } else {
+        pos = 0;
+        off = NXAOT_POS_NONE;
+        last = (uint32_t)entry;
+        b = t->bytes + r->at;
+        n = r->rows < t->stride ? r->rows : t->stride;
+    }
+    for (; n; n--) {
+        uint64_t d;
+        uint32_t next;
+        const uint8_t c = *b++;
+        if (c < 0x80) {
+            d = (uint64_t)(c & 15) + 1;
+            next = last + 4u * (uint32_t)(c >> 4) - 16u;  // last + 4 * ((c >> 4) - 4), modulo 2^32
+        } else if (c >= 0xC0) {
+            d = (uint64_t)(c & 0x3F) + 1;
+            next = NXAOT_POS_NONE;
+        } else if (c >= 0x82) {
+            d = (uint64_t)*b++ + 1;
+            next = last + 4u * (uint32_t)(c - 0x82) - 96u;  // last + 4 * (c - 0x82 - 24)
+        } else {
+            d = 0;
+            for (unsigned s = 0;; s += 7) {
+                const uint8_t v = *b++;
+                d |= (uint64_t)(v & 0x7F) << s;
+                if (!(v & 0x80) || s >= 56) break;
+            }
+            if (c == 0x80) {
+                uint64_t e = 0;
+                unsigned s = 0;
+                uint8_t v;
+                do {
+                    v = *b++;
+                    e |= (uint64_t)(v & 0x7F) << s;
+                    s += 7;
+                } while ((v & 0x80) && s < 64);
+                if (s < 64 && (v & 0x40)) e |= ~(uint64_t)0 << s;
+                next = last + 4u * (uint32_t)e;  // modulo 2^32: the delta's sign comes with it
+            } else {
+                next = NXAOT_POS_NONE;
+            }
+        }
+        if (pos + d > native + 1) break;
+        pos += d;
+        off = next;
+        if (off != NXAOT_POS_NONE) last = off;
+    }
+    return off;
+}
+
 // The lookup hash of a module offset: lookup_mask + 1 slots, linear probing (src/build/pack.cpp builds it, the dispatcher probes it)
 static inline uint32_t nxaot_lookup_hash(uint64_t offset, uint32_t mask) {
     return (uint32_t)(((offset >> 2) * 0x9E3779B97F4A7C15ull) >> 32) & mask;

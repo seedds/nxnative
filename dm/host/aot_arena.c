@@ -535,6 +535,13 @@ struct dm_aot_pack {
     uint64_t tables_lo;
     _Atomic uint64_t *samples;       // parallel to by_off; NULL without DM_AOT_PROFILE
     char *path;
+    // The pack's positions (aot_module.h, "The sampler's positions"): the guest instruction of a native address of a function's code; NULL when the pack has none (packed
+    // without DWARF or by an nxaot before them) or they cannot be used (another version, a function map not in module-offset order). Its runs are parallel to the
+    // descriptor's fns, which is by_off's order (checked at the load). pos_samples: the sampler's count per guest instruction of the text (index offset / 4), made at the
+    // load when DM_AOT_PROFILE is set and the pack has positions
+    const nxaot_positions *pos;
+    _Atomic uint32_t *pos_samples;
+    uint64_t pos_words;              // pos_samples' entries: the text's instructions
 };
 #define MAX_PACKS 4096   // FINAL FANTASY X/X-2 registers 1,432 NROs (services.md); one pack per module for now
 static dm_aot_pack *g_packs[MAX_PACKS];
@@ -549,6 +556,7 @@ static int range_cmp(const void *a, const void *b) {
     uint64_t x = ((const fn_range_t *)a)->off, y = ((const fn_range_t *)b)->off;
     return x < y ? -1 : x > y;
 }
+static void *lib_sym(void *lib, const char *name);
 // The sampler's tables (aot.h, "The sampler"), made before the pack is published
 static void sampler_tables(dm_aot_pack *p, const char *path) {
     const nxaot_module_desc *d = p->desc;
@@ -566,7 +574,24 @@ static void sampler_tables(dm_aot_pack *p, const char *path) {
     const uint64_t enter = (uint64_t)(uintptr_t)d->enter, jit = (uint64_t)(uintptr_t)d->jit_entry;
     p->tables_lo = enter < jit ? enter : jit;
     const char *prof = getenv("DM_AOT_PROFILE");   // read here too: a test links the arena without the sampler
-    if (prof && *prof && !(p->samples = calloc(p->nfns ? p->nfns : 1, sizeof *p->samples))) die("aot: no memory for a pack's sample counts");
+    const int profiling = prof && *prof;
+    if (profiling && !(p->samples = calloc(p->nfns ? p->nfns : 1, sizeof *p->samples))) die("aot: no memory for a pack's sample counts");
+    // The positions: an exported table beside the descriptor, read through the descriptor's fns order (each run is the function's of the same index)
+    const nxaot_positions *pos = lib_sym(p->lib, "nxaot_positions");
+    char why[160] = "";
+    if (!pos) snprintf(why, sizeof why, "it has none: packed with --no-debug-info, or by an nxaot before them");
+    else if (pos->version != NXAOT_POSITIONS_VERSION) snprintf(why, sizeof why, "they are of version %u, this host reads %u: pack it again", pos->version, NXAOT_POSITIONS_VERSION);
+    else if (pos->fn_count != d->fn_count || !pos->stride) snprintf(why, sizeof why, "they do not match its function map");
+    for (size_t i = 1; !why[0] && i < p->nfns; i++) if (d->fns[i].offset <= d->fns[i - 1].offset) snprintf(why, sizeof why, "its function map is not in module-offset order");
+    if (why[0]) {
+        if (profiling) LOG("[RED] aot: %s: no positions for the sampler (%s): its samples count per function only, at their entries (DM_AOT_PROFILE)", path, why);
+        return;
+    }
+    p->pos = pos;
+    if (profiling) {
+        p->pos_words = p->text_end / 4 + 1;
+        if (!(p->pos_samples = calloc(p->pos_words, sizeof *p->pos_samples))) die("aot: no memory for a pack's sample counts per instruction");
+    }
 }
 
 #if defined(_WIN32)
@@ -682,9 +707,9 @@ dm_aot_pack *dm_aot_pack_load(const char *path, module_t *m, const dm_aot_identi
     g_packs[n] = p;
     atomic_store_explicit(&g_npacks, n + 1, memory_order_release);
     pthread_mutex_unlock(&g_pack_lock);
-    LOG("aot: pack %s for %s at %p: %llu functions, %u lookup slots, %zu line entries, %llu returns, %llu gate sites, code %#llx..%#llx; %s", path, m->name,
-        (void *)m->base, (unsigned long long)d->fn_count, d->lookup_mask + 1, p->nlines, (unsigned long long)d->return_count, (unsigned long long)d->gate_count,
-        (unsigned long long)p->code_lo, (unsigned long long)p->code_hi, d->tool ? d->tool : "");
+    LOG("aot: pack %s for %s at %p: %llu functions, %u lookup slots, %zu line entries, %llu positions, %llu returns, %llu gate sites, code %#llx..%#llx; %s", path,
+        m->name, (void *)m->base, (unsigned long long)d->fn_count, d->lookup_mask + 1, p->nlines, p->pos ? (unsigned long long)p->pos->rows : 0ull,
+        (unsigned long long)d->return_count, (unsigned long long)d->gate_count, (unsigned long long)p->code_lo, (unsigned long long)p->code_hi, d->tool ? d->tool : "");
     return p;
 }
 
@@ -816,6 +841,9 @@ const dm_aot_pack *dm_aot_pack_at(int i) { return i >= 0 && i < dm_aot_pack_coun
 size_t dm_aot_pack_fn_count(const dm_aot_pack *p) { return p->nfns; }
 uint64_t dm_aot_pack_fn(const dm_aot_pack *p, size_t i) { return p->by_off[i].off; }
 _Atomic uint64_t *dm_aot_pack_samples(const dm_aot_pack *p) { return p->samples; }
+_Atomic uint32_t *dm_aot_pack_pos_samples(const dm_aot_pack *p, uint64_t *words) { *words = p->pos_words; return p->pos_samples; }
+uint64_t dm_aot_pack_fn_end(const dm_aot_pack *p, size_t i) { return p->by_off[i].end; }
+const nxaot_positions *dm_aot_pack_pos(const dm_aot_pack *p) { return p->pos; }
 const module_t *dm_aot_pack_module(const dm_aot_pack *p) { return p->mod; }
 const char *dm_aot_pack_path(const dm_aot_pack *p) { return p->path; }
 
@@ -832,6 +860,19 @@ long dm_aot_fn_of_code(uint64_t host_pc, int *pack) {
         return (long)p->fn_rank[f - p->fns];
     }
     return -1;
+}
+
+int64_t dm_aot_offset_of_code(uint64_t host_pc, int pack, long fn) {
+    const int n = atomic_load_explicit(&g_npacks, memory_order_acquire);
+    if (pack < 0 || pack >= n) return -1;
+    const dm_aot_pack *p = g_packs[pack];
+    if (!p->pos || fn < 0 || (size_t)fn >= p->nfns) return -1;
+    const nxaot_fn_entry *f = &p->desc->fns[fn];   // by_off's order is the descriptor's (sampler_tables)
+    const uint64_t body = (uint64_t)(uintptr_t)&f->body + (uint64_t)(int64_t)f->body;
+    if (host_pc < body) return -1;
+    const uint32_t off = nxaot_position_at(p->pos, (uint64_t)fn, f->offset, host_pc - body);
+    if (off == NXAOT_POS_NONE) return -1;
+    return off >= p->by_off[fn].off && off < p->by_off[fn].end ? (int64_t)off : -2;
 }
 
 long dm_aot_fn_of_guest(uint64_t guest, int *pack) {

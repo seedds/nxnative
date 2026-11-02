@@ -1,15 +1,25 @@
-// The sampler of the x86-64 execution engine (aot.h, "The sampler"; dm/tools/aot/README.md, "Tiers by profile"): DM_AOT_PROFILE=<folder> samples every thread that runs guest code
-// at DM_AOT_PROFILE_HZ (1000 by default) per second of its own CPU time and writes, at process exit, the profile `nxaot build --profile` reads: <folder>/<module>.tsv per module with
-// samples, one line `<module offset of a function's entry> <samples>` per sampled function. The packer (scripts/build_ipa_from_nsp.py --platform linux / windows) takes
-// <NSP folder>/<id>-work/profile/<module>.tsv for the module's next pack: its functions with samples at tier H, the others at tier C (balanced mode). Beside each profile the writer
-// puts the JIT fallback's misses, <folder>/<module>.misses.tsv (write_misses; aot.h, "The JIT fallback's misses"), which the packer gives nxaot build --misses.
+// The sampler of the x86-64 execution engine (aot.h, "The sampler"; dm/tools/aot/README.md, "Tiers by profile" and "The sample profile at tier H"): DM_AOT_PROFILE=<folder> samples
+// every thread that runs guest code at DM_AOT_PROFILE_HZ (1000 by default) per second of its own CPU time and writes, at process exit, the profile `nxaot build --profile` reads:
+// <folder>/<module>.tsv per module with samples, one line `<module offset> <samples>` per sampled guest instruction (design 12's sampled instruction offsets). The packer
+// (scripts/build_ipa_from_nsp.py --platform linux / windows) takes <NSP folder>/<id>-work/profile/<module>.tsv for the module's next pack: its functions with samples at tier H, the
+// others at tier C (balanced mode), and the samples' positions inside each function at H weigh its code (branch weights, entry and call counts). Beside each profile the writer puts
+// the JIT fallback's misses, <folder>/<module>.misses.tsv (write_misses; aot.h, "The JIT fallback's misses"), which the packer gives nxaot build --misses.
 // A sample is counted by count_pc, the same on both systems, from the thread's interrupted rip:
-//   in a pack's function       that function (aot_arena.c dm_aot_fn_of_code: the function map, a split function's parts and a group's functions each to their own entry)
-//   elsewhere, in a host call  the guest function that called it (dm_aot_thread.prof_at: the call's return address, an SVC's instruction; aot_run.c sets it)
+//   in a pack's function       that function (aot_arena.c dm_aot_fn_of_code: the function map, a split function's parts and a group's functions each to their own entry), and the guest
+//                              instruction the pack's positions give for the pc (dm_aot_offset_of_code: the instruction whose code holds it, in code inlined into the function the call
+//                              the inlining replaced; include/nxaot/aot_module.h, "The sampler's positions"): none in code they name no instruction for (line 0, a standard entry), in
+//                              a pack without positions, or when they would name one outside the function (counted apart: none expected)
+//   elsewhere, in a host call  the guest function that called it (dm_aot_thread.prof_at: the call's return address, an SVC's instruction; aot_run.c sets it), at no instruction: the
+//                              time a host call takes is no measure of how often its block runs, which is what the positions weigh
 //   in the JIT fallback        counted as such per thread (dynarmic keeps the guest pc in host registers while a block runs: not readable from here)
 //   anything else              the host (the run time, a host call for code no pack holds, a thread between guest calls)
-// count_pc allocates nothing and takes no lock: a function's count is a relaxed atomic add into its pack's array (made at the pack's load, aot_arena.c), a thread's totals are
-// fields of its own record, which is never freed.
+// count_pc allocates nothing and takes no lock: a function's count and an instruction's are relaxed atomic adds into their pack's arrays (made at the pack's load, aot_arena.c: one per
+// function, one per guest instruction of the text), the lookup a binary search of the pack's function map and of the function's positions; a thread's totals are fields of its own
+// record, which is never freed.
+// The file: a row per guest instruction with samples, and a row at its entry for a function with samples at none of its instructions (all of them in host calls and SVCs, in code
+// the positions name none for, or in a pack without positions), the form the sampler wrote before positions: nxaot makes a function with a sample anywhere in it hot (tier H), so
+// such a function keeps its tier, and does not weigh a function sampled only at its entry. A function with samples at its instructions has no other row: the rest of its samples
+// (its host calls, its code with no instruction) would make its entry block look hotter than its loops (the header counts them)
 // Linux: each thread arms a timer on its own CPU-time clock (timer_create with CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID) when it makes its state block (aot_thread.c thread_make),
 // and disarms it before the block goes. Its SIGPROF runs on the thread's alternate signal stack (aot_fault.c crash_thread_init) and reads the interrupted rip from the signal context.
 // The weight of a sample is 1 + the timer's overrun: the kernel checks CPU-time timers at its ticks (HZ 250 gives 4 expirations a check), so the counts stay in milliseconds of CPU time.
@@ -60,6 +70,7 @@ typedef struct prof_thread {
     struct prof_thread *next;   // every thread sampled (g_lock)
     long tid;
     uint64_t samples, code, hostcall, jit, host;   // all, in a pack's function, in a host call or SVC of one, in the JIT fallback, in the host
+    uint64_t placed, crossed;   // of code: at a guest instruction of the pack's positions; at one outside its function (not counted at it: none expected)
 #if defined(_WIN32)
     HANDLE h;                   // the thread, while it is registered (g_lock); NULL once it unregistered
     const dm_aot_thread *t;     // its state block, while h is set (prof_at and depth are read from it while the thread is suspended)
@@ -82,6 +93,15 @@ static void count(int pack, long fn, uint64_t w) {
     if (c) atomic_fetch_add_explicit(&c[fn], w, memory_order_relaxed);
 }
 
+static int count_at(int pack, uint64_t off, uint64_t w) {   // a sample at the guest instruction at module offset off: 1 when counted
+    const dm_aot_pack *p = dm_aot_pack_at(pack);
+    uint64_t words = 0;
+    _Atomic uint32_t *c = p ? dm_aot_pack_pos_samples(p, &words) : NULL;
+    if (!c || off / 4 >= words) return 0;
+    atomic_fetch_add_explicit(&c[off / 4], (uint32_t)w, memory_order_relaxed);
+    return 1;
+}
+
 // One sample of weight w at native pc on the thread r records, whose state block is t (NULL when it has none): the rules at the top of this file. Async-signal-safe (Linux runs
 // it in the thread's own SIGPROF handler) and safe while the thread is suspended (Windows runs it on the sampler thread): no allocation, no lock
 static void count_pc(prof_thread *r, const dm_aot_thread *t, uint64_t pc, uint64_t w) {
@@ -91,6 +111,9 @@ static void count_pc(prof_thread *r, const dm_aot_thread *t, uint64_t pc, uint64
     if (fn >= 0) {
         count(pack, fn, w);
         r->code += w;
+        const int64_t off = dm_aot_offset_of_code(pc, pack, fn);
+        if (off >= 0 && count_at(pack, (uint64_t)off, w)) r->placed += w;
+        else if (off == -2) r->crossed += w;
         return;
     }
     const uint64_t at = fn != -2 && t && t->depth ? t->prof_at : 0;   // -2: the pack's run-time code (enter, jit_entry, the slow-path wrappers)
@@ -422,23 +445,32 @@ static int write_misses(const char *dir, int *bad) {
 int dm_aot_profile_write(void) {
     if (!dm_aot_profile_on() || atomic_exchange(&g_written, 1)) return -1;
     atomic_store(&g_sampling, 0);   // the handler counts nothing more; a sample on its way may still add one
-    uint64_t all = 0, code = 0, hostcall = 0, jit = 0, host = 0;
+#if !defined(_WIN32)
+    // And no SIGPROF is delivered any more, on any thread: a sample after the files is of no use, and the threads' timers stay armed through exit's handlers (a running
+    // thread's timer goes only with its block, dm_aot_profile_thread_end), which free what a signal might run on (dynarmic's alternate stack: aot_fault.c
+    // dm_aot_fault_after_jit takes it off its thread). An ignored signal is discarded where it is generated
+    signal(SIGPROF, SIG_IGN);
+#endif
+    uint64_t all = 0, code = 0, hostcall = 0, jit = 0, host = 0, placed = 0, crossed = 0;
     int threads = 0;
     pthread_mutex_lock(&g_lock);
     for (const prof_thread *r = g_threads; r; r = r->next) {
-        all += r->samples; code += r->code; hostcall += r->hostcall; jit += r->jit; host += r->host;
+        all += r->samples; code += r->code; hostcall += r->hostcall; jit += r->jit; host += r->host; placed += r->placed; crossed += r->crossed;
         threads += r->samples > 0;
     }
-    char summary[400];
-    snprintf(summary, sizeof summary, "%u Hz of each guest thread's CPU time, %d of %d threads sampled; all modules: %llu samples, %llu in compiled code, %llu in host calls and SVCs "
-             "of compiled functions, %llu in the JIT fallback, %llu elsewhere in the host", g_hz, threads, g_nthreads, (unsigned long long)all, (unsigned long long)code,
-             (unsigned long long)hostcall, (unsigned long long)jit, (unsigned long long)host);
+    char summary[600];
+    snprintf(summary, sizeof summary, "%u Hz of each guest thread's CPU time, %d of %d threads sampled; all modules: %llu samples, %llu in compiled code (%llu at a guest instruction, "
+             "%llu at one outside their function: not counted there), %llu in host calls and SVCs of compiled functions, %llu in the JIT fallback, %llu elsewhere in the host", g_hz,
+             threads, g_nthreads, (unsigned long long)all, (unsigned long long)code, (unsigned long long)placed, (unsigned long long)crossed, (unsigned long long)hostcall,
+             (unsigned long long)jit, (unsigned long long)host);
     LOG("aot: profile: %s", summary);
+    if (crossed) LOG("[RED] aot: profile: %llu samples whose pack's positions named a guest instruction outside the function holding the pc: counted for the function only",
+                     (unsigned long long)crossed);
     int shown = 0;
     for (const prof_thread *r = g_threads; r && shown < 16; r = r->next) {
         if (!r->samples) continue;
-        LOG("aot: profile: thread %ld: %llu samples: %llu compiled, %llu host calls and SVCs, %llu JIT, %llu host", r->tid, (unsigned long long)r->samples,
-            (unsigned long long)r->code, (unsigned long long)r->hostcall, (unsigned long long)r->jit, (unsigned long long)r->host);
+        LOG("aot: profile: thread %ld: %llu samples: %llu compiled (%llu at an instruction), %llu host calls and SVCs, %llu JIT, %llu host", r->tid, (unsigned long long)r->samples,
+            (unsigned long long)r->code, (unsigned long long)r->placed, (unsigned long long)r->hostcall, (unsigned long long)r->jit, (unsigned long long)r->host);
         shown++;
     }
     pthread_mutex_unlock(&g_lock);
@@ -452,16 +484,28 @@ int dm_aot_profile_write(void) {
         _Atomic uint64_t *c = dm_aot_pack_samples(p);
         const size_t n = dm_aot_pack_fn_count(p);
         if (!c) continue;
-        size_t k = 0;
-        uint64_t sum = 0;
-        for (size_t j = 0; j < n; j++) if (atomic_load_explicit(&c[j], memory_order_relaxed)) k++;
-        if (!k) continue;
-        row_t *rows = malloc(k * sizeof *rows);
+        uint64_t words = 0;
+        _Atomic uint32_t *at = dm_aot_pack_pos_samples(p, &words);
+        // The rows: each guest instruction with samples, then the entry of each sampled function with none at an instruction (the file's header at the top of this file)
+        size_t fns = 0, k = 0, offsets = 0, entries = 0;
+        for (size_t j = 0; j < n; j++) fns += atomic_load_explicit(&c[j], memory_order_relaxed) != 0;
+        if (!fns) continue;
+        for (uint64_t w = 0; at && w < words; w++) offsets += atomic_load_explicit(&at[w], memory_order_relaxed) != 0;
+        const size_t cap = offsets + fns;   // a sample on its way may still add one after the counts above: no row past it
+        row_t *rows = malloc(cap * sizeof *rows);
         if (!rows) { bad++; continue; }
-        k = 0;
+        uint64_t sum = 0, sum_at = 0, sum_entries = 0;
+        for (uint64_t w = 0; at && w < words && k < offsets; w++) {
+            const uint32_t v = atomic_load_explicit(&at[w], memory_order_relaxed);
+            if (v) { rows[k++] = (row_t){4 * w, v}; sum_at += v; }
+        }
         for (size_t j = 0; j < n; j++) {
             const uint64_t v = atomic_load_explicit(&c[j], memory_order_relaxed);
-            if (v) { rows[k++] = (row_t){dm_aot_pack_fn(p, j), v}; sum += v; }
+            if (!v) continue;
+            sum += v;
+            uint64_t in = 0;   // its samples at its instructions
+            for (uint64_t o = dm_aot_pack_fn(p, j); at && o < dm_aot_pack_fn_end(p, j) && o / 4 < words && !in; o += 4) in = atomic_load_explicit(&at[o / 4], memory_order_relaxed);
+            if (!in && k < cap) { rows[k++] = (row_t){dm_aot_pack_fn(p, j), v}; sum_entries += v; entries++; }
         }
         qsort(rows, k, sizeof *rows, row_cmp);
         const module_t *m = dm_aot_pack_module(p);
@@ -472,15 +516,19 @@ int dm_aot_profile_write(void) {
         sha_hex(p, sha);
         FILE *f = fopen(tmp, "wb");   // binary: the same bytes on Windows (no \r before each \n)
         if (!f) { LOG("[RED] aot: profile: cannot write %s", tmp); free(rows); bad++; continue; }
-        fprintf(f, "# nxaot profile: guest functions sampled by the x86-64 engine (dm/host/aot_profile.c, DM_AOT_PROFILE); nxaot build --profile <this file>\n");
+        fprintf(f, "# nxaot profile: guest instructions sampled by the x86-64 engine (dm/host/aot_profile.c, DM_AOT_PROFILE); nxaot build --profile <this file>\n");
         fprintf(f, "# module %s, build ID %s, image SHA-256 %s\n", m->name, m->build_id[0] ? m->build_id : "none", sha);
-        fprintf(f, "# pack %s\n", dm_aot_pack_path(p));
-        fprintf(f, "# %llu samples in %zu of its %zu functions; %s\n", (unsigned long long)sum, k, n, summary);
-        fprintf(f, "# <module offset of a function's entry> <samples>\n");
-        for (size_t j = 0; j < k; j++) fprintf(f, "%#llx %llu\n", (unsigned long long)rows[j].off, (unsigned long long)rows[j].n);
+        fprintf(f, "# pack %s (%s)\n", dm_aot_pack_path(p), at ? "its positions give each sample's instruction" : "no positions: every function's samples at its entry");
+        fprintf(f, "# %llu samples in %zu of its %zu functions: %llu at %zu guest instructions, %llu at the entries of the %zu functions with none at an instruction, %llu not "
+                   "written (host calls, SVCs and code with no instruction of functions with samples at their instructions); %s\n", (unsigned long long)sum, fns, n,
+                (unsigned long long)sum_at, offsets, (unsigned long long)sum_entries, entries,
+                (unsigned long long)(sum > sum_at + sum_entries ? sum - sum_at - sum_entries : 0), summary);
+        fprintf(f, "# <module offset> <samples>: a guest instruction's, or a function's at its entry when it has none at an instruction\n");
+        for (size_t j = 0; j < k; j++) fprintf(f, "0x%llx %llu\n", (unsigned long long)rows[j].off, (unsigned long long)rows[j].n);
         free(rows);
         if (fclose(f) || replace_file(tmp, path)) { LOG("[RED] aot: profile: cannot write %s", path); bad++; continue; }
-        LOG("aot: profile: %s: %llu samples in %zu functions (%s)", path, (unsigned long long)sum, k, m->name);
+        LOG("aot: profile: %s: %llu samples in %zu functions: %llu at %zu guest instructions, %llu at %zu entries (%s)", path, (unsigned long long)sum, fns,
+            (unsigned long long)sum_at, offsets, (unsigned long long)sum_entries, entries, m->name);
         files++;
     }
     if (!files && !bad) LOG("aot: profile: no samples in any pack's code: nothing written to %s", dir);

@@ -88,6 +88,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** on Linux and Windows `LOG` is one `fprintf` with the newline in its format: one call under stderr's lock, one `write`. `t_aot_host`'s log-lines row checks it (20,000 lines from each of two threads). **Open:** Apple keeps the two calls (`DM_NATIVE_EXEC`) until a Mac test, and `nvn_state.c`'s `SLOG`, `nvn_mtl.m`'s `MLOG` and `PD`, and the lines `crash.c` and `probe.c` print in pieces have the same shape.
 - **Found on:** the host's corpus test on Linux (`t_aot_host`, [dm/tools/aot/README.md](../../dm/tools/aot/README.md#threads-and-safepoints)); any host log.
 
+### SIGSEGV at exit after a recorded session with the JIT fallback
+
+- **Symptom:** on the x86-64 engine (Linux), a session recorded with `DM_AOT_PROFILE` in which the JIT fallback ran ends with SIGSEGV after the profile and misses files were written: about 60 % of `nxhost-run`'s exits at 1,000 and 10,000 Hz, none at 1 Hz or without the sampler.
+- **Cause:** dynarmic's first JIT instance builds its fault handler (`third_party/dynarmic` `exception_handler_posix.cpp`, `SigHandler::SigHandler`), which replaces the calling thread's alternate signal stack with a 2 MiB `malloc` block of its own; the static `SigHandler`'s destructor frees that block at exit (unmapping it) without taking it off the thread. That thread's CPU-time sampling timer was still armed (a running thread's timer goes only with its state block, `dm_aot_profile_thread_end`), so a `SIGPROF` during exit's last handlers found no stack to run on and the kernel killed the process with SIGSEGV.
+- **Fix:** `dm_aot_fault_after_jit` (`aot_fault.c`), called once on the thread that made the first instance, puts that thread's own alternate stack back, so no handler of the host runs on a stack the host does not own (dynarmic stays as vendored; every other thread never had its stack). And `dm_aot_profile_write` ignores `SIGPROF` once it has written the files (`aot_profile.c`): a sample after them is of no use.
+- **Check:** `t_aot_module`'s step 8: the synthetic module's run with JIT entries ended by `exit()` on its guest thread at 1,000 Hz, with 20 ms of CPU time spent after the C++ destructors, 20 times. Before the fix 20 of 20 died with SIGSEGV (19 of 20 exited 0 without the 20 ms); with either half of the fix alone, and with both, 20 of 20 exit 0 (also at 10,000 Hz).
+- **Found on:** the end-to-end test of a second pack (the synthetic game module run with `DM_AOT_PROFILE`); no game.
+
 ## Synchronization and address arbitration
 
 ### `SignalToAddress` type 2 with count ≤ 0

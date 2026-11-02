@@ -406,6 +406,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Reader:** `shader_split.py` `ue3_package` / `ue3_body` decode a package's chunks (Zlib in Python, Oodle with the game's own decoder through the Mac host's tool mode, `DM_OODLE_SERVE`), and `ue3_shaders` finds each record by its control section's magic, its code area length (+0x704) back to the code area's magic, and the two lengths in front. `profile_guess.py` counts the packages whose first block is Oodle, so the NSP script gives the split the host. All of the game's 4,058 packages are decoded (the whole split took about a minute); none of 68 packages sampled besides the combined cache holds a shader.
 - **Found on:** [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md): 1,847 records in the global cache and 22,874 in the combined one, 21,923 shaders with the profile's [`shader_key_skip`](#control-sections-shared-among-shaders-that-differ-only-in-their-compile-information). Vertex and pixel shaders are paired as single-stage programs.
 
+### The NDSR pack's record start
+
+- **Symptom:** `draw skipped: no render pipeline (vertex - fragment -)` in a game's final passes; shaders "not in the shader map", all from `agl_ndsr.pck`.
+- **Cause:** the pack's records start at +0x10 in one SDK's version and +0x14 in another's, by the words in its header (Donkey Kong Bananza 0x300, 0x6efeff, 0xc0000; [Splatoon Raiders](../../dm/games/0400380020056000/README.md) 0x40100, 0x80300, 0x90, 0x20c00).
+- **Fix:** `ndsr_shaders` in `shader_split.py` takes the start at which more of the first 16 records point at an NVN2 control section.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
+
 ## Control sections and code
 
 ### Code area and control section layout
@@ -797,6 +804,38 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 ## Bindings and handles
 
 - **Note:** the layout of NVN's driver segments `c0` and `c2` (the handle tables, the storage and uniform buffer tables, the words the host fills) and the binding kinds of the reflection JSON have one definition, `dm/gfx/nvn/dmsh_abi.h`. The host includes it (`nvn_mtl.m`, `nvn_refl.m`, `nvn_obj.h`); `dmsh_build.py` reads it through `dm/gfx/tools/dmsh_abi.py`, which stops on any line it cannot read. Both files are part of the chain version. `dm/tools/tests/test_dmsh_abi.py` checks that the tables fit together, that the host converts every kind the build may write, that the translator's own copy of the `c2` layout (`Program.cs`) agrees, and that the values do not come back as literals in the host or the build. The entries below cite the offsets.
+
+### A store only a dispatch's first invocation makes
+
+- **Symptom:** objects from a compute-built list flicker: each is in one of two states, on and off irregularly and independently of the others, while the draws are the same frame to frame and the camera is still. Shots of consecutive frames show the change per frame jumping between two levels.
+- **Cause:** a compute shader's preamble `if (-local.x == workgroup.x << log2(local size)) buffer[k] = 0` resets an append counter on the dispatch's first invocation, while the others add to it hundreds of instructions later. Nothing orders them in the API; it works where the first workgroup starts ahead of the rest. Apple's GPUs start workgroups in no order, so a workgroup that appended before the reset lost its entries to the next one's.
+- **Fix:** `first_store` in `dmsh_build.py` recognises exactly that condition, for a flat local size and constant values, and takes the store out of the shader; the reflection's `first_store` has the host make it in order before the dispatch (`nvn_mtl.m`).
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): `029d9c3ec1fcb39f` (`Hoian_Proc`), the plants' instance lists, the only one of the game's 9 compute shaders with atomics that has it. The change per frame over the plants: 1.1, 2.4 or 4.5 at random, to a flat 1.0-1.3; pixels that jumped and returned the next frame: up to 88 % of them, to at most 21 %. The buffers the shader reads alternate frame by frame, which turned out unrelated.
+- **Check:** `python3 dm/gfx/tests/test_dmsh_first_store.py`.
+
+### Goto elimination forcing loops around a whole program
+
+- **Symptom:** `metal` runs for hours on a shader of about 100 MB of MSL, mostly indentation, stuck in LICM (`hoistRegion` → `ScalarEvolution::forgetValue`), then the GPU compiler's connection breaks; even `-O0` and finished libraries crash it. Hundreds of forced one-pass loops nest around the program.
+- **Cause:** `MoveOutward` in `GotoElimination.cs` encloses what follows an if in an else when it moves a goto out. When another goto jumps into that range, it needs a loop of its own, and each one encloses the others.
+- **Fix:** the else is skipped when a goto would have to jump into it (`HasGotoInto`, the goto's own label included). Only shaders that got a forced loop change.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 26 such loops around the whole program in its uber shaders: the mid-size shader went from 176 loops to 0, the largest from 364 to 5, and 8 workers stalled for 5 h 40 before that. Three test shaders then compile in 89 s.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py`.
+
+### Ampere jump tables read past their end
+
+- **Symptom:** `BRX with no target`, or code about 20 % larger than it should be.
+- **Cause:** a BRX's table in c1 stores no length. The decoder read entries until one failed, so a table ran on into the next one; a target of 0 counted as a jump to the start of the program; and it looked only on one path for the `LDC` that loads the table's base, so a base loaded before an if / else join was not found.
+- **Fix:** `FindBrxTargetsAmpere` reads a table one new target per pass, so the next table is known before this one overruns it, and stops at the next known base; an entry of 0 is filler for unused cases. `FindBrxTableAmpere` walks every predecessor and takes the base only when all paths reach the same `LDC`.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 18 `Hoian_UBER` vertex shaders, 5 of them used at boot.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_control_flow.py`.
+
+### MUFU.F16
+
+- **Symptom:** `Ampere instruction 308` refused; a neural upscaler's programs missing, so the frame never reaches the window (a black 3D scene).
+- **Cause:** MUFU has an F16 form (bit 73): the source is the half that bits 60..61 select (bit 62 its abs, as in every B slot), and the result goes back as the low half of the register, the high half zero. MUFU is the multi-function unit (op 2 EXP2, 3 LOG2, …), not a multiply.
+- **Fix:** `AMufu` in `InstEmitAmpereAlu.cs`.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 10 compute shaders of `agl_ndsr.pck`.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
 ### Ampere HMMA through simdgroup_matrix
 

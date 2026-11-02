@@ -160,6 +160,45 @@ int dm_sdk_ounce(void) {
     return ounce;
 }
 
+// The constants NVN2's own nvnDeviceGetInteger answers: the driver is compiled into the game's sdk, and its API and GPU code versions move with the SDK (20.5.19: API 231.30, GPU code minor 17;
+// 21.4.4: 231.39 and 20). Games check them: Splatoon Raiders requires minor >= 39 and otherwise creates no graphics system (main+0x31b86b0). The driver's switch over the items loads w0 with the
+// major first, then jumps through a byte table: mov w0, #231 / adr / adrp + add (the table) / ldrb / add, lsl #2 / br, with cmp wN, #<last item> before it. A case that is a constant is mov w0, #v; b.
+// Returns 1 with *out set when item has such a case; 0 for a case that reads something else (most items go through the driver's table lookup or read the GPU's description), or no such switch
+int dm_sdk_nvn2_item(unsigned item, int *out) {
+    static const uint8_t *table; static const uint32_t *cases; static unsigned last; static int found = -1;
+    if (found < 0) {
+        found = 0;
+        for (int i = 0; i < g_nmod && !found; i++) if (!strcmp(g_mod[i].name, "sdk")) {
+            const uint32_t *t = (const uint32_t *)g_mod[i].base; size_t n = g_mod[i].ro_off / 4;
+            for (size_t p = 8; p + 9 < n && !found; p++) if (t[p] == 0x52801CE0) {   // mov w0, #231
+                const uint8_t *tb = NULL; const uint32_t *adr = NULL; int lim = -1, ldrb = 0, br = 0;
+                for (size_t q = p - 8; q <= p + 8; q++) {
+                    uint32_t w = t[q];
+                    if ((w & 0xFFC0001F) == 0x7100001F) lim = (w >> 10) & 0xFFF;   // cmp wN, #imm
+                    else if ((w & 0x9F000000) == 0x90000000 && (t[q + 1] & 0xFFC00000) == 0x91000000) {   // adrp + add
+                        int64_t pg = (int64_t)(((w >> 3) & 0x1FFFFC) | ((w >> 29) & 3)); if (pg & 0x100000) pg -= 0x200000;
+                        tb = (const uint8_t *)(((uintptr_t)&t[q] & ~(uintptr_t)0xFFF) + (uintptr_t)(pg * 4096) + ((t[q + 1] >> 10) & 0xFFF));
+                    } else if ((w & 0x9F000000) == 0x10000000) {   // adr
+                        int64_t off = (int64_t)(((w >> 3) & 0x1FFFFC) | ((w >> 29) & 3)); if (off & 0x100000) off -= 0x200000;
+                        adr = (const uint32_t *)((const char *)&t[q] + off);
+                    } else if ((w & 0xFFE0FC00) == 0x38606800) ldrb = 1;   // ldrb wK, [xT, xI]
+                    else if ((w & 0xFFFFFC1F) == 0xD61F0000) br = 1;       // br
+                }
+                if (!tb || !adr || lim <= 1 || !ldrb || !br) continue;
+                const char *ro = (const char *)g_mod[i].base + g_mod[i].ro_off, *ro_end = (const char *)g_mod[i].base + g_mod[i].key_page_off;
+                if ((const char *)tb < ro || (const char *)tb + lim >= ro_end) continue;
+                table = tb; cases = adr; last = (unsigned)lim; found = 1;
+            }
+        }
+        if (dm_sdk_ounce() && !found) LOG("[RED] sdk: NVN2's nvnDeviceGetInteger switch not found; the device answers the newest versions known");
+    }
+    if (!found || item > last) return 0;
+    const uint32_t *c = cases + table[item];
+    if ((c[0] & 0xFFE0001F) != 0x52800000 || (c[1] & 0xFC000000) != 0x14000000) return 0;   // mov w0, #imm16; b
+    *out = (int)((c[0] >> 5) & 0xFFFF);
+    return 1;
+}
+
 // Cross-module symbol resolution: first look for a definition in the loaded modules, and only if not found hand over to HLE / stubs
 static uint64_t resolve_sym(module_t *m, const char *name) {
     void *p = loaded_sym(name); if (p) return (uint64_t)p;

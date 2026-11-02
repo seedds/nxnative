@@ -820,3 +820,10 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** code that calls fixed module addresses. d2r-mobile's 3D render scale read a renderer pointer at `main+0x31e0848` and called `main+0x8582f0`; in Mario v0 that is the middle of a static initializer and only did nothing because the pointer happened to read 0.
 - **Fix:** such code checks `module_t.build_id` now (written into `fixups.tsv` by the rewriter) and stays off on other builds.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (v0, code inherited from d2r-mobile).
+
+### Built-in fonts and the audio device notification of SDK 21
+
+- **Symptom:** an abort connecting to `pl:u` at boot; a failed `nn::audio` call at boot.
+- **Cause:** SDK 21 has new names: `nn::pl::GetBuiltInFontData` (a Switch 1 and a Switch 2 overload, each filling type, address and size, and returning whether the font is loaded) and `nn::audio::AcquireAudioOutputDeviceNotification`. Unhooked, they reach the services the host does not have.
+- **Fix:** both hooked (`hle_sdk16.c`, `hle_audren.c`), with the same stand-in fonts and the same never-signaled event as their older names.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md).

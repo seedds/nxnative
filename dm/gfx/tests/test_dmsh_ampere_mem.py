@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ampere memory instructions through the offline translator (dmsh_xlate, arch sm86): SUATOM (0x593), the image atomic Donkey Kong Bananza's agl
 technique compute shaders (agl_technique_pfx) take an append counter with. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
-import json, os, struct, subprocess, sys, tempfile, unittest
+import json, os, re, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
@@ -14,7 +14,7 @@ def inst(hi, lo): return struct.pack('<QQ', lo, hi)
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
-class Suatom(unittest.TestCase):
+class Translated(unittest.TestCase):
     def translate(self, code):
         with tempfile.TemporaryDirectory(prefix='ampere_mem_') as d:
             work = Path(d); (work / 'k.bin').write_bytes(code)
@@ -31,6 +31,8 @@ class Suatom(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             return r.stdout
 
+
+class Suatom(Translated):
     def test_add_u32_on_a_1d_image(self):
         msl = self.translate(inst(*SUATOM) + inst(*EXIT))
         self.assertIn('atomic_fetch_add', msl)   # native (the build's options) or through spirv-cross's buffer alias (these defaults)
@@ -39,6 +41,26 @@ class Suatom(unittest.TestCase):
     def test_result_kept(self):   # the old value is the shader's (it shuffles it to the warp): the atomic's result is used, not discarded
         msl = self.translate(inst(*SUATOM) + inst(*EXIT))
         self.assertRegex(msl, r'uint \w+ = [^;]*atomic_fetch_add')
+
+
+class MufuF16(Translated):
+    """MUFU.F16 (Splatoon Raiders' upscaler network): the source is the half bits 60..61 select (bit 62 its abs, as in every B slot), the result the low half"""
+    LOG2_HIGH = (0x000fe60000000e00, 0x5000000c000c7308)   # MUFU.F16.LOG2 R12, |R12.H1|: the game's encoding (c1b8edc09e3313b1 +0x5970) on the register the atomic reads
+    LOG2_LOW = (0x0002a20000000e00, 0x4000000c000c7308)    # MUFU.F16.LOG2 R12, |R12.H0| (+0x59a0)
+
+    def msl(self, mufu):
+        return self.translate(inst(*mufu) + inst(*SUATOM) + inst(*EXIT))
+
+    def test_high_half(self):
+        msl = self.msl(self.LOG2_HIGH)
+        self.assertRegex(msl, r'as_type<half2>\(.*\)\)\.y;')
+        self.assertIn('log2(abs', re.sub(r'float _\d+ = abs\((_\d+)\);\s*float _\d+ = log2\(_\d+\);', 'log2(abs', msl))
+
+    def test_result_is_the_low_half(self):   # the bits of a half pair, its high half zero: not the float's own bits
+        self.assertRegex(self.msl(self.LOG2_HIGH), r'as_type<uint>\(half2\(float2\(\w+, 0\.0\)\)\)')
+
+    def test_low_half_translates_apart(self):   # R12 is a constant here, so the low half folds away; what is left must not read the high one
+        self.assertNotRegex(self.msl(self.LOG2_LOW), r'as_type<half2>\(.*\)\)\.y;')
 
 
 if __name__ == '__main__':

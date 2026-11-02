@@ -49,6 +49,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
         private static DecodedProgram DecodeAmpere(ShaderDefinitions definitions, IGpuAccessor gpuAccessor, ulong startAddress, HashSet<ulong> jumps)
         {
             Context context = new(gpuAccessor);
+            Dictionary<ulong, BrxTableAmpere> brxTables = new();
             Queue<DecodedFunction> functionsQueue = new();
             Dictionary<ulong, DecodedFunction> functionsVisited = new();
 
@@ -165,7 +166,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
                         }
                     }
 
-                    hasNewTarget = FindBrxTargetsAmpere(context, gpuAccessor, startAddress, blocks, GetBlock);
+                    hasNewTarget = FindBrxTargetsAmpere(context, gpuAccessor, startAddress, blocks, GetBlock, brxTables);
                 }
                 while (hasNewTarget);
 
@@ -293,79 +294,93 @@ namespace Ryujinx.Graphics.Shader.Decoders
             block.EndAddress = address;
         }
 
+        // A BRX's jump table as far as the decoder has read it
+        private sealed class BrxTableAmpere
+        {
+            public int Base;
+            public int Entry;
+            public bool Ended;
+            public readonly HashSet<ulong> Targets = [];
+        }
+
         // BRX Ra, imm: to the next instruction + Ra + imm. Ra comes from a jump table in the c1 constant segment, loaded by an LDC c[0x1][Rx + base] before the
         // BRX; the table's entries that land on an instruction inside the program are the targets, up to the first that does not, and up to the next table another
         // BRX of the program reads. The compiler lays a shader's switch tables out back to back in c1 (Donkey Kong Bananza's SilverStarMaterial vertex shaders: tables
-        // of 8, 6, ... entries from c1 0x0, each index clamped by IMNMX first), and their entries are all code offsets: read on to the end, the first table took
-        // every later switch's targets as its own, 400 and more, whose nested comparisons went past the Metal compiler's 256 nested brackets
-        private static bool FindBrxTargetsAmpere(Context context, IGpuAccessor gpuAccessor, ulong startAddress, IEnumerable<Block> blocks, Func<ulong, Block> getBlock)
+        // of 8, 6, ... entries from c1 0x0, each index clamped by IMNMX first), and their entries are all code offsets, so nothing in a table says where it ends. The
+        // next BRX is usually reached only through this one's targets, so a table is read one new target per pass: the code that target leads to is decoded before
+        // the table goes on, and meets the next table in time. Read whole at once, the first table took every later switch's targets as its own (320 entries in
+        // Splatoon Raiders' uber shaders, 400 and more in Bananza's): their nested comparisons went past the Metal compiler's 256 nested brackets, or the jumps
+        // between the switches made a nest of loops around the whole program, which Metal's compilers cannot finish.
+        // An entry for program start is no target: it fills a table's unused cases (the last table of those uber shaders: 8 cases, then 28 of these), and taking it
+        // puts the whole program in a loop.
+        private static bool FindBrxTargetsAmpere(Context context, IGpuAccessor gpuAccessor, ulong startAddress, IEnumerable<Block> blocks, Func<ulong, Block> getBlock, Dictionary<ulong, BrxTableAmpere> tables)
         {
             bool hasNewTarget = false;
-            SortedSet<int> tableBases = [];
 
             foreach (Block block in blocks)
             {
-                AmpereOp op = new(block.GetLastOp());
+                InstOp lastOp = block.GetLastOp();
+                AmpereOp op = new(lastOp);
 
-                if (op.Opcode is AmpereOpcodes.Brx or AmpereOpcodes.Brxu)
+                if (op.Opcode is AmpereOpcodes.Brx or AmpereOpcodes.Brxu && !tables.ContainsKey(lastOp.Address))
                 {
                     int b = FindBrxTableAmpere(block, op.Ra, op.Opcode == AmpereOpcodes.Brxu);
 
                     if (b >= 0)
                     {
-                        tableBases.Add(b);
+                        tables.Add(lastOp.Address, new BrxTableAmpere { Base = b });
                     }
                 }
             }
+
+            SortedSet<int> tableBases = new(tables.Values.Select(t => t.Base));
 
             foreach (Block block in blocks)
             {
                 InstOp lastOp = block.GetLastOp();
                 AmpereOp brx = new(lastOp);
-                bool hasNext = block.HasNext();
 
-                if (brx.Opcode is not (AmpereOpcodes.Brx or AmpereOpcodes.Brxu) || block.Successors.Count != (hasNext ? 1 : 0))
+                if (brx.Opcode is not (AmpereOpcodes.Brx or AmpereOpcodes.Brxu) || !tables.TryGetValue(lastOp.Address, out BrxTableAmpere table) || table.Ended)
                 {
                     continue;
                 }
 
-                int baseOffset = FindBrxTableAmpere(block, brx.Ra, brx.Opcode == AmpereOpcodes.Brxu);
-
-                if (baseOffset < 0)
-                {
-                    continue;
-                }
-
-                HashSet<ulong> seen = [];
                 long next = (long)lastOp.Address + AmpereInstSize + brx.BranchOffset;
-
                 int tableEnd = gpuAccessor.QueryConstantBuffer1Size();
 
                 foreach (int b in tableBases)
                 {
-                    if (b > baseOffset)
+                    if (b > table.Base)
                     {
                         tableEnd = Math.Min(tableEnd, b);
                         break;
                     }
                 }
 
-                for (int k = 0; baseOffset + k * 4 + 4 <= tableEnd; k++)
+                while (table.Base + table.Entry * 4 + 4 <= tableEnd)
                 {
-                    int value = (int)context.ConstantBuffer1Read(baseOffset + k * 4);
-                    long target = next + value;
+                    long target = next + (int)context.ConstantBuffer1Read(table.Base + table.Entry * 4);
+
+                    table.Entry++;
+
+                    if (target == 0)
+                    {
+                        continue;
+                    }
 
                     if (target < 0 || (target % AmpereInstSize) != 0 || gpuAccessor.GetCode(startAddress + (ulong)target, AmpereInstSize).Length < 2)
                     {
+                        table.Ended = true;
                         break;
                     }
 
-                    if (seen.Add((ulong)target))
+                    if (table.Targets.Add((ulong)target))
                     {
                         Block t = getBlock((ulong)target);
                         t.Predecessors.Add(block);
                         block.Successors.Add(t);
                         hasNewTarget = true;
+                        break;
                     }
                 }
             }
@@ -373,33 +388,61 @@ namespace Ryujinx.Graphics.Shader.Decoders
             return hasNewTarget;
         }
 
-        // The c[0x1] byte offset of the LDC that last wrote reg in this block (or a predecessor chain of single blocks), or -1. BRXU's register is a uniform one,
-        // loaded by the uniform LDC with a uniform index (ULDC 0xabb); a write to the register of the same number in the other file does not count.
+        // The c[0x1] byte offset of the LDC that last wrote reg before this block ends, on every path to it, or -1 when paths differ or something else wrote it. The load may lie before a join:
+        // Splatoon Raiders' Hoian_UBER vertex shaders load the register, then branch around their skinning, and only then jump. BRXU's register is a uniform one, loaded by the uniform LDC with a
+        // uniform index (ULDC 0xabb); a write to the register of the same number in the other file does not count.
         private static int FindBrxTableAmpere(Block block, int reg, bool uniform)
         {
-            HashSet<Block> visitedBlocks = [];
+            HashSet<Block> visitedBlocks = [block];
+            Stack<Block> pending = new();
+            int table = -1;
 
-            while (block != null && visitedBlocks.Add(block))
+            pending.Push(block);
+
+            while (pending.TryPop(out Block current))
             {
-                for (int i = block.OpCodes.Count - 1; i >= 0; i--)
+                bool written = false;
+
+                for (int i = current.OpCodes.Count - 1; i >= 0 && !written; i--)
                 {
-                    AmpereOp op = new(block.OpCodes[i]);
+                    AmpereOp op = new(current.OpCodes[i]);
 
                     if (op.Opcode == (uniform ? 0xabb : AmpereOpcodes.Ldc) && op.Rd == reg)
                     {
-                        return op.Bits(54, 59) == 1 && op.Bits(78, 80) == 0 ? (int)op.SignedField(38, 54) : -1;
-                    }
+                        int offset = op.Bits(54, 59) == 1 && op.Bits(78, 80) == 0 ? (int)op.SignedField(38, 54) : -1;
 
-                    if (op.Rd == reg && AmpereTable.WritesRd(op.Opcode) && AmpereTable.HasUniformGuard(op.Opcode) == uniform)
+                        if (offset < 0 || (table >= 0 && table != offset))
+                        {
+                            return -1;
+                        }
+
+                        table = offset;
+                        written = true;
+                    }
+                    else if (op.Rd == reg && AmpereTable.WritesRd(op.Opcode) && AmpereTable.HasUniformGuard(op.Opcode) == uniform)
                     {
                         return -1;
                     }
                 }
 
-                block = block.Predecessors.Count == 1 ? block.Predecessors[0] : null;
+                if (!written)
+                {
+                    if (current.Predecessors.Count == 0)
+                    {
+                        return -1;
+                    }
+
+                    foreach (Block predecessor in current.Predecessors)
+                    {
+                        if (visitedBlocks.Add(predecessor))
+                        {
+                            pending.Push(predecessor);
+                        }
+                    }
+                }
             }
 
-            return -1;
+            return table;
         }
     }
 }

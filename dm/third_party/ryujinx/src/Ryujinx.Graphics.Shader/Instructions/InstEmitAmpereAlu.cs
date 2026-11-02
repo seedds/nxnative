@@ -204,12 +204,16 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
 
-            if (x.Bit(73))
-            {
-                throw AFail(context, "MUFU.F16");
-            }
+            // .F16 (73): the source is the half 60..62 selects, and the result lands in the low 16 bits, as F2F's (the operation itself is computed in 32 bits, and the pack rounds it).
+            // Splatoon Raiders' upscaler network (agl_ndsr.pck) takes powers of its packed halves with LOG2 and EXP2, then joins the results with PRMT 0x5410
+            bool half = x.Bit(73);
+            ASrc s = AOne(context, x);
+            Operand res = half ? AHalfLanes(context, s, x.Bits(60, 62))[0] : AFloat(context, s);
 
-            Operand res = AFloat(context, AOne(context, x));
+            if (half && x.Bits(74, 80) is 6 or 7)
+            {
+                throw AFail(context, "MUFU.F16 RCP64H / RSQ64H");
+            }
 
             res = x.Bits(74, 80) switch
             {
@@ -225,7 +229,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 int op => throw AFail(context, $"MUFU op {op}"),
             };
 
-            ASet(context, x, res);
+            ASet(context, x, half ? context.PackHalf2x16(res, ConstF(0f)) : res);
         }
 
         // F2I: destination signed (72) and size (75..77, log2 bytes), rounding (78..80), source size (84..86)

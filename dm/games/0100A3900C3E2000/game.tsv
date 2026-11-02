@@ -36,6 +36,10 @@ app_pool	0xCD500000
 # the NPDM declares 8 MB of system resource
 sys_resource	0x800000
 
+# ---- Graphics ----
+# The registered build selects near-zero NVN depth (the NSP script's region check, 2026-10-28: one nvnDeviceSetDepthMode call, near = 0); offline pipeline bases use main0_z.
+depth_mode	zero
+
 # ---- Shader split (shader_split.py: BNSH in the zstd .bfsha and .ptcl files) ----
 shader_groups	/shaders/=shaders /effect/=effect
 shader_note	Paper Mario: The Origami King shaders

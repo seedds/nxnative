@@ -44,7 +44,8 @@ static void run(int mode, int store_all) {
         pd.colorAttachments[0].texture=tex_mtl(&color); pd.colorAttachments[0].loadAction=MTLLoadActionDontCare;
         pd.colorAttachments[0].storeAction=MTLStoreActionUnknown; g_enc=enc_r_begin(pd);
         g_sd[0]=(sd_att){.ser=color.serial,.idx=0,.bytes=256,.load=0}; g_nsd=1;
-        NvProg *tail=prog_get(&programs[2]); NvShader *fs=tail->sh[1];
+        NvProg *tail=prog_get(&programs[2]); NvShader *fs=tail?tail->sh[1]:nil;
+        if(!fs||!tail->sh[0]) { CHECK(0,"DontCare-load image program resolves its two stages"); rp_end(); return; } // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the NvProg prog_get returned (serial_put's CFBridgingRetain)
         MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new]; d.vertexFunction=tail->sh[0]->fn; d.fragmentFunction=fs->fn;
         d.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA8Unorm; d.colorAttachments[0].writeMask=MTLColorWriteMaskNone;
         NSError *error=nil; id<MTLRenderPipelineState> ps=[g_dev newRenderPipelineStateWithDescriptor:d error:&error];
@@ -55,7 +56,7 @@ static void run(int mode, int store_all) {
     } else mtl_exec(mode==8 ? (const uint8_t *)&code.ph : (const uint8_t *)&code); // Keep mode 8's pending clear for the first draw; another SetRenderTargets would land it alone.
     if(mode==4) { code.pr=(p_bind_program){&programs[2],3}; mtl_exec((const uint8_t *)&code.ph); }
     if(mode==6) pr->sh[1]->rf.color_known=1;
-    if(mode==3) clear_color_tri(&(p_clear_color){.index=0,.mask=15,.rgba={0,1,0,1}});
+    if(mode==3) clear_color_tri(&(p_clear_color){.index=0,.mask=15,.rgba={0,1,0,1}}); // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns the NvProg prog_get returned into pr (serial_put's CFBridgingRetain)
     rp_end();
     if(mode==7) CHECK(g_sd_n_dead==discarded,"DontCare-load attachment keeps its store");
     if(mode==8) CHECK(g_sd_n_dead==discarded+1,"a clear landed before the draw pass does not store stale tiles over image writes");

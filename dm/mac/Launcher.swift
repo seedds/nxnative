@@ -5,6 +5,7 @@
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
+import QuartzCore
 import SwiftUI
 
 private func info(_ key: String) -> String? { Bundle.main.object(forInfoDictionaryKey: key) as? String }
@@ -160,6 +161,9 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate 
     func finish(_ play: Bool) {
         guard let w = window else { return }
         window = nil; self.play = play
+        // The main thread blocks in launcher.c's waitpid once run() returns, so the window must leave the screen now: no fade-out (it runs on later run-loop passes),
+        // and dmMacLauncher flushes the order-out (AppKit commits it at the end of a pass). Without both, the window stayed on screen, not responding, until the game ended
+        w.animationBehavior = .none
         w.delegate = nil; w.orderOut(nil)
         NSApp.stop(nil)
         NSApp.postEvent(NSEvent.otherEvent(with: .applicationDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0)!, atStart: true)   // run returns at the next event
@@ -189,6 +193,7 @@ public func dmMacLauncher() -> Int32 {
     app.delegate = launcher
     fputs("launcher: \(file.settings.count) settings shown\n", stderr)
     app.run()
+    CATransaction.flush()   // finish's order-out
     app.setActivationPolicy(.prohibited)   // the host is the game's app from here on
     guard launcher.play else { fputs("launcher: quit without starting the game\n", stderr); return 0 }
     model.apply()

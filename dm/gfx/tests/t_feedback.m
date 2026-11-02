@@ -110,6 +110,21 @@ static void reuse_case(NvProg *pr) {
     fb_prepare(pr);
     CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 2, "a game barrier makes the next writing draw take a fresh snapshot");
     rp_end();
+    // The depth attachment read, then written in the same pass (only serials matter to the rule: the attachment is named after the pass opens)
+    { tex_t output, depth; target(&output, 99791); target(&depth, 99792); mtl_reg_tex(651, &depth, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns both textures (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
+      R.rt.color[0] = &output; R.rt.depth = NULL; S.tex[1][0] = 651; S.chmask.mask = 0xffffffffu; S.ds.dt = 1; S.ds.dw = 0;
+      clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;
+      fb_prepare(pr);
+      CHECK(g_enc != nil, "a draw that reads the depth attachment stays in its pass");
+      fb_prepare(pr);
+      CHECK(g_enc != nil, "so does the next one, which writes no depth");
+      S.ds.dw = 1; fb_prepare(pr);
+      CHECK(!g_enc, "a draw writing depth after a read of it ends the pass");
+      R.rt.depth = NULL; clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();   // that draw read it too, and began the pass it would open: the next pass is a clean one
+      clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth; S.tex[1][0] = 0;
+      fb_prepare(pr);
+      CHECK(g_enc != nil, "a draw writing depth with no read of it in its pass stays");
+      R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; rp_end(); mtl_tex_release(&output); mtl_tex_release(&depth); }
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");
     printf("feedback reuse: %s\n", before == failed ? "PASS" : "FAIL");

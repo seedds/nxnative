@@ -43,7 +43,7 @@ class CheckTools(unittest.TestCase):
             with self.assertRaises(SystemExit) as e: self.check([mismatch(key, OTHER)])
             msg = str(e.exception.code)
             self.assertTrue(msg.startswith('[RED] '), msg)
-            for want in (key, OTHER, LOCKED[key], 'Xcode 27.2', 'macOS 26.6', 'xcodebuild -downloadComponent MetalToolchain', 'DM_ALLOW_OTHER_METAL=1', '#242'): self.assertIn(want, msg)
+            for want in (key, OTHER, LOCKED[key], f'Xcode {own_compilers.XCODE_VERSION}', 'macOS 26.6', 'xcodebuild -downloadComponent MetalToolchain', 'DM_ALLOW_OTHER_METAL=1', '#242'): self.assertIn(want, msg)
 
     def test_other_metal_says_to_select_the_tested_xcode(self):   # a newer Xcode selected downloads its own toolchain again (GitHub issue #717)
         sel = ' (selected: Xcode 27.3 in /Applications/Xcode.app/Contents/Developer)'
@@ -103,7 +103,7 @@ class NspScript(unittest.TestCase):
             nsp.check_metal(sys.executable, REPO, {})
         self.assertIn('--check-metal', run.call_args[0][0])
         text = str(e.exception)
-        self.assertIn('Xcode 27.2', text); self.assertIn('ALLOW_OTHER_METAL = True (--allow-other-metal)', text); self.assertFalse(text.startswith('[RED]'))
+        self.assertIn(f'Xcode {own_compilers.XCODE_VERSION}', text); self.assertIn('ALLOW_OTHER_METAL = True (--allow-other-metal)', text); self.assertFalse(text.startswith('[RED]'))
 
     def test_tested_metal_or_override_goes_on(self):
         with mock.patch.object(nsp, 'ALLOW_OTHER_METAL', False), mock.patch.object(nsp.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
@@ -116,7 +116,7 @@ class NspScript(unittest.TestCase):
         r = subprocess.run([sys.executable, str(REPO / 'dm/gfx/tools/own_compilers.py'), '--check-metal'], capture_output=True, text=True,
                            env={k: v for k, v in os.environ.items() if k != own_compilers.ALLOW})
         self.assertIn(r.returncode, (0, 1), r.stderr)
-        if r.returncode: self.assertIn('Xcode 27.2', r.stdout)
+        if r.returncode: self.assertIn(f'Xcode {own_compilers.XCODE_VERSION}', r.stdout)
 
     def test_flag(self):
         self.assertTrue(nsp.parse_args(['x', '--allow-other-metal']).allow_other_metal)

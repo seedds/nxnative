@@ -437,6 +437,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
   - [Paper Mario: The Origami King](../../dm/games/0100A3900C3E2000/README.md#rendering): magenta 16×16 blocks on the Mac (Apple M6) from its anti-aliasing pass `8dc20835c07cd7ff` (`shaders/aa.bfsha`) on the 1920×1080 RGB10A2 scene, the only shader `DM_NVN_FB_SNAP=all` snapshotted; about one block a frame at Peach's castle before, none with it listed.
 - **Note:** the cost. Breath of the Wild's G-buffer decals write and sample their own targets (`4d3d5a4408c2e8d9`, `753d0169ae3ce4f0` and others on the 1600×900 G-buffer), about 460 such draws a frame outdoors on the Great Plateau; a fresh snapshot for each (`DM_NVN_FB_SNAP=all`) takes the Mac's GPU time from about 4 to 28 ms a frame (frame time 16.6 → 36.6 ms before). Between the game's barriers they need about ten snapshots a frame, and about 50 draws reuse each: GPU time p50 3.5–4.1 ms with `DM_NVN_FB_SNAP=0` and 3.7–4.5 ms with the rule over four runs each (2026-10-30, Apple M6, the outdoor save looking around, frames 4,800–6,900; the frame time stays at its 30 fps budget). The decals had shown no blocks on the iPhone; the snapshot makes them read what the Switch guarantees rather than what the tile happened to hold. `DM_NVN_FB_SNAP=all` with a screenshot detector shows whether blocks come from such a draw at all, and a pass dump (`N … same-pass feedback sampling` lines after the draw's `K` keys) names the shaders.
 
+### Mip-chain pass sampling the level it renders
+
+- **Symptom:** NaN texels in the upper levels of a texture the game fills level by level (each level drawn from the one above), and from there NaN wherever the texture is read: black speckles in whole 2×2 quads, white blotches once bloom spreads them, and a dark frame from the eye adaptation.
+- **Cause:** a mip-chain pass renders level n while its fragment shader samples level n − 1 through a view that covers the whole chain (explicit level, linear mip filter). On NVIDIA that reads level n − 1 only. On Metal the fetch can also touch level n, at weight 0 but still fetched, and an attached level read through a texture holds no defined data on Apple's GPUs; 0 × NaN is NaN. The same-pass feedback rule ([above](#same-pass-feedback-read-through-a-snapshot)) left such passes as they were.
+- **Fix:** `fb_prepare` in `nvn_mtl.m`, for every game: when the sampled view's levels include the attachment's level and start below it, the draw samples a view of the same texture limited to the levels below the attachment (same base, so the shader's level numbers keep their meaning). A pass rendering the view's base level while sampling higher ones, and layer passes, are still left as they are.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#rendering): its environment cube (128×128, 8 levels, R11G11B10F, levels 1–7 drawn by `d1a506c1a94ffdfa` and `89dfaeb53f85920a`) got NaN texels; copied into the sources of the prefiltered cube (`62dc9b15931e0290`) and fed back through reflections and the cube capture every frame, they reached 59,592 NaN pixels of the first gameplay frame's scene (0 with the fix).
+
 ### Lower-left window origin
 
 - **Symptom:** text a game renders into textures for the title and the menus comes out upside down, while the scene looks right.
@@ -491,6 +498,22 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the NVN present shows the window's own crop when the game set one, else the vi layer crop (`present_crop` in `hle_nvn.c`); on the Switch both become the crop of the buffer queued to the layer. A layer crop that does not fit the window texture is reported once in red and the whole texture is shown, as before.
 - **Check:** `t_present_crop`: the window's crop wins, the layer crop is used without one, one larger than the texture is ignored, and a real `nvnQueuePresentTexture` queues the layer crop (that check fails with the old call). On an iPhone 15 Pro in handheld mode Link's Awakening's picture fills the screen's height.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#rendering) (1.1.0, handheld mode on the iPhone).
+
+### Setting the same targets again continues the pass
+
+- **Symptom:** one-draw passes on one target, hundreds of times a frame, with the same attachments each time (a `DM_NVN_GPUPROF` frame: `load` and `store` of the whole target in every line); a low frame rate that follows the target's size.
+- **Cause:** `nvnCommandBufferSetRenderTargets` ended the host's pass even when it named the targets of the open pass. On the Switch the call costs nothing; on a tile-based GPU each pass stores its attachments, and the next one starts again.
+- **Fix:** the call goes on in the open pass when the targets are the same (`rt_same`, `rtc_on` in `nvn_mtl.m`; `DM_NVN_RT_CONTINUE=0` ends every pass as before). What a pass end gave the draws around it is covered: a colour attachment sampled by [the same-pass feedback rule](#same-pass-feedback-read-through-a-snapshot), a game barrier by `barrier_game`. Depth has two rules of its own: a draw that samples the depth attachment after the call ends the pass there, as its memory holds nothing of this pass until then, and a draw writing depth or stencil after a draw of the pass read that attachment ends it too, as the GPU stores the pass tile by tile, so the earlier reads would see the later writes in the tiles already done. A pass with no colour attachment ends as before.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): its ink map (6400x6400 RG8 with a Depth32F-S8) got about 150 one-draw occlusion queries a frame, each after setting the map again: 150 passes of about 1 ms, 42 GB of attachment loads a frame, about 6 fps. Without the depth rules its water came out in grey blocks of tiles: the water reads the scene's depth, then the next draw writes the water's own.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_feedback` (the depth attachment read, then written).
+
+### A render area for passes on very large targets
+
+- **Symptom:** a pass on a very large target costs about the same however little it draws; `DM_NVN_GPUPROF` shows time proportional to the target's area.
+- **Cause:** a pass with no render area covers its whole attachments. A synthetic pass on a flat 6400x6400 target cost about 0.1 ms, so the cost depends on what the target holds or how the host creates it; which of the two was not found.
+- **Fix:** a draw pass on a target of 16 M pixels or more that loads what it keeps stops at the far corner of its scissor when that is at most half the target (`renderTargetWidth` / `renderTargetHeight`, `g_rp_aw` in `nvn_mtl.m`; `DM_NVN_RP_AREA=0` turns it off). Only the draw path opens such a pass. A draw whose scissor leaves the area ends it, and so does anything else that needs the pass (`rp_begin`).
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): each ink stamp's pass, scissored to 1952x2940 at (0, 3460), about 0.95 → 0.32 ms. Metal keeps what lies outside the area (a 6400x6400 target checked texel by texel on an M4 Pro, with API validation on).
+- **Note:** the same stamps sample the map they write, with a game barrier each, so each still takes a whole snapshot of it ([Same-pass feedback read through a snapshot](#same-pass-feedback-read-through-a-snapshot)), about 0.76 ms; a copy of the stamp's rectangle takes 0.09 ms, but nothing proves a stamp samples only inside it. **Open.**
 
 ## Blend, depth and stencil
 
@@ -569,7 +592,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** `[nvn] SetConservativeRasterEnable on: ignored by host for now`, followed by `[RED] NVN unimplemented function called: nvnCommandBufferSetConservativeRasterDilate`.
 - **Cause:** `hle_nvn.c` ignores the enable setter and has no implementation for the dilation setter. The requested raster coverage state never reaches Metal.
 - **Fix:** **Open.** Neither setter has been implemented. The opening indoor scene renders and accepts input, but the visual contribution of the missing coverage state has not been isolated. The diagnostic remains visible.
-- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#open) (1.0.0, the first playable bedroom).
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#open) (1.0.0, the first playable bedroom). [Super Mario RPG](../../dm/games/0100BC0018138000/README.md) calls the dilation setter and `nvnCommandBufferSetSubpixelPrecisionBias` repeatedly and did not turn the enable on along the route tested, so the dilation has nothing to act on there.
 
 ## Vertex input and draws
 
@@ -711,6 +734,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md).
 - **Note:** the replay used to commit its work and wait for the GPU before the first such draw after each GPU write, then read the count on the CPU (`mdi_wait`, now only for quads, fans and 8-bit indices). In Kamura Village that wait held the submitting thread 14 of its 20 ms a frame on an iPhone (36–54 fps). On the Mac the same scene's submit took 20 ms of wall time for 6.1 ms of work, and now 5.1 ms, all of it work.
 
+### CPU reads after a drain wait only for later writes
+
+- **Symptom:** a hitch of a second or more as a level opens: a few frames of 330–540 ms whose submission takes 2–3 times its CPU time, and the wait ledger (`DM_NVN_WAITS=1`) shows thousands of indirect-count multi-draw waits for those frames only.
+- **Cause:** a draw with a geometry stage cannot be masked on the GPU (`mdx_run`): the geometry path reads its count, its indirect record and its indices on the CPU, after a drain (`mdi_wait`: commit, wait for the GPU) when the GPU may have written them. Which writes required one was decided too coarsely. `mdi_live` drained after any `g_wr_epoch` bump since the last drain, and the draw before had bumped it by dispatching its own geometry kernel. `geo_cpu_hazard` looked at every GPU write of the submission, including those the drain had completed. So each geometry draw of such a multi-draw drained the GPU once or twice: about 1,900 drains a frame in Donkey Kong Bananza's level build (35,775 draws in one frame).
+- **Fix:** a drain completes every GPU write encoded before it, so until the submission ends only writes encoded after it can make a CPU read stale. Those are kept in a short list of ranges from the same sources the submission-wide sets have: storage writes and global-memory writes (`sbw_note`), and copies, updates and fills (`pend_add`). The drain also marks all argument buffers dirty, because `encode_args` notes storage writes only when it encodes a binding, not when it reuses one. The list is trusted only in the drain's submission, until it overflows or a write of unknown size arrives, and while every `g_wr_epoch` bump since the drain came from a geometry kernel, compute or mesh (`g_wr_geo`), whose storage writes are noted as its arguments are encoded. Transform feedback's writes are not, so it falls back to the old rule. `mdi_live` and `geo_cpu_hazard` read without draining when nothing on the list overlaps the bytes read (`drw_valid`, `drw_hits` in `nvn_mtl.m`).
+- **Check:** `t_geometry_hazards` covers the rule: earlier writes stop counting after a drain, later storage writes and copies count byte for byte, a geometry kernel keeps the list, another epoch bump, an unknown size or an overflow drops it, adjacent writes merge, and a new submission starts without one. That is 39 checks, passing with early submission on and off; the 1,920-check geometry suite also passes. On Donkey Kong Bananza's scripted route the level opening went from 540 + 433 + 337 ms to one frame of 195–280 ms (the CPU-bound build), and the indirect-count waits from 18.85 to 0.10 a frame in that window. Frames through the opening and the first gameplay show the terrain, rocks, vines and props as before.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game).
+
 ### `nvnCommandBufferDrawTexture`
 
 - **Symptom:** a black screen while the frame loop runs at full rate, with `[RED] NVN unimplemented function called: nvnCommandBufferDrawTexture`; once drawn, the picture alternates frame by frame between the right image and another texture's (a solid colour, a still image).
@@ -835,6 +866,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (GitHub issues #534 and #598, shrines, MacBook Air M2 and M3). The Shrine of Resurrection save shows the load burst: the 300 frames around the world load had 1,200 refusals and 107 load-all store-all passes, now 0 and 47; `DM_NVN_UBP_CHECK=1` found 146,000 shadows equal to the GPU's memory, 0 different. The reporter's log shows the same burst at each load, and 240 refusals a frame in its slow stretches.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sbw` (16 checks: the size-0 outputs of that dispatch do not hit the uniform block's pool, a write of no known size still stops the tracking, the interval list's limit, and the next submission's view through `gw_live`).
 
+### Inline updates of a running submission refused uniform shadows
+
+- **Symptom:** the `residency set` line shows `passes ended to land them for a read` in the tens of thousands, every one `refused … earlier submission running`. The slower the GPU, the more passes, and each pass makes it slower: a scene stays at a very low frame rate once it falls in.
+- **Cause:** a partly covered uniform shadow ([Partial-cover uniform shadows keep passes open](#partial-cover-uniform-shadows-keep-passes-open)) takes the rest from memory, which refused it while a running submission could still write those pages. Two kinds of write counted. The inline updates of the frame before: a game that updates a block every frame refused it for as long as that frame ran, though the CPU knows those bytes. And any write of 16 MB or more, which counted as a write anywhere.
+- **Fix:** inline updates of running submissions are remembered by byte, each with its fence, and laid over memory in the shadow (`um_put`, `um_overlay`; `DM_NVN_UBP_RUNNING=0` refuses as before); a slot a running page holds leaves the other page refused as before. A byte counts only while its fence runs, so what the game writes later is not overwritten. Writes of 16 MB or more are kept whole, by range (`gww_put`, 32 of them; beyond that a write anywhere).
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): its ink query block is updated at 0x00..0x14 and 0x18..0x70 while the shader reads 0x00..0x70, so one unused word leaves it partly covered, before each of about 150 queries a frame; `7866f36373e7` writes a 56 MB buffer each frame. 90,000 refusals every 300 frames became none. `DM_NVN_UBP_CHECK=1` on the first level: 592,000 shadows equal to the GPU's memory, 0 different.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_ubp_running` and `check_t_sbw` (fails with `DM_NVN_UBP_RUNNING=0`).
+
 ### An unbound uniform slot reads the zero bank
 
 - **Symptom:** `stage 0 cb5 has no uniform buffer bound` (or another stage and slot, such as `stage 0 cb0`), once per run.
@@ -912,6 +951,21 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
   - [Mario vs. Donkey Kong](../../dm/games/0100B99019412000/README.md) (it skips clears under render conditions, as Tears of the Kingdom and Animal Crossing: New Horizons do).
   - Drawn unconditionally with no `render_cond`, nothing looked wrong in [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (no screen played looked wrong) or [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (nothing seen).
   - [Portal 2](../../dm/games/0100ABD01785C000/README.md) needs no `render_cond` and must not get it: NVIDIA's occlusion culling in its D3D9 layer (`IDirect3DDevice9::SetOcclusionShape`, `materialsystem.nro+0xc1130`) puts a mesh under `SetRenderEnableConditional(RENDER_IF_NOT_EQUAL, pair)` when its shape has a query, else `SetRenderEnable(true)`, so drawing everything only costs GPU time. With the key on, those conditions read 0 / 0 at replay (no report in the submission writes the pairs; memory later held `0xffff` / 0) and visible furniture vanished. **Open:** who writes those pairs and when.
+
+### Report tables that dropped entries
+
+- **Symptom:** with `render_cond`, a 3D scene black or missing behind the HUD, only in scenes with many occlusion queries; a pass dump shows conditions reading `values 1 / 0` on a record a report of the same submission has just written, and clear-only passes on targets just drawn to. Scenes with fewer queries are fine.
+- **Cause:** the reports of a submission were kept in a table of 256, queries and timestamps alike. Once full, a timestamp report was forgotten, its condition read the 1 the CPU wrote, and the clear ran ([Conditional rendering evaluated at replay](#conditional-rendering-evaluated-at-replay)).
+- **Fix:** only timestamp reports are kept per submission, and the query addresses, which are kept apart, are enough for those; both tables grow (`rc_note`, `rc_occ_add`).
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 285 ink queries a frame in its dialogue scene came before the conditional clears, and the lit scene was wiped: a black screen with only the text on it. The opening cutscene has no such queries, and the pier about 160.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sbw`.
+
+### Query slots running out inside a pass
+
+- **Symptom:** `[RED] visibility slots exhausted`.
+- **Cause:** the visibility buffer holds 8,192 slots and is bound for a whole pass. A new one came only when a pass began, so a single pass with more queries than were left counted nothing for the rest.
+- **Fix:** the draw that needs a slot when none is left ends the pass, and the next begins with a new buffer.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): at the first level's load, one submission with about 9,000 draws.
 
 ## Vulkan layer
 

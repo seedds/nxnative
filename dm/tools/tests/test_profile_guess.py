@@ -8,6 +8,40 @@ sys.path.insert(0, str(REPO / 'dm/games'))
 import profile_guess as pg
 
 
+class DepthSignal(unittest.TestCase):
+    ZERO, GL = '[dm] [nvn] depth mode near=0 (as D3D / Metal)\n', '[dm] [nvn] depth mode near=-w (GL)\n'
+    RESET = '[dm] [nvn-mtl] depth mode: near=-w (GL), vertex shaders use the main0 entry\n'   # the host's own reset at device init, also printed for a game that never calls the setter
+
+    def profile(self, **keys):
+        return type('Profile', (), {'get': staticmethod(lambda k, d='': keys.get(k, d))})
+
+    def seen(self, log, **keys):
+        return pg.depth_signal(log, self.profile(**keys)).get('depth_mode', (None,))[0]
+
+    def test_the_game_sets_near_zero(self):
+        self.assertEqual(self.seen(self.ZERO), 'zero')
+
+    def test_no_call_is_unknown_not_gl(self):
+        self.assertIsNone(self.seen('>>> nnMain\n'))
+        self.assertIsNone(self.seen('>>> nnMain\n', depth_mode='zero'))   # a boot that stopped before the call says nothing against the key
+
+    def test_the_host_reset_is_not_the_game_calling(self):
+        self.assertIsNone(self.seen(self.RESET, depth_mode='zero'))
+        self.assertEqual(self.seen(self.ZERO + self.RESET), 'zero')   # a second device's reset does not undo the game's call
+
+    def test_a_profile_that_agrees_gets_no_change(self):
+        self.assertIsNone(self.seen(self.ZERO, depth_mode='zero'))
+        self.assertIsNone(self.seen(self.GL))
+
+    def test_the_last_call_counts(self):
+        self.assertEqual(self.seen(self.GL + self.ZERO), 'zero')
+        self.assertEqual(self.seen(self.ZERO + self.GL, depth_mode='zero'), 'gl')
+
+    def test_the_reason_is_one_comment_line(self):
+        value, why = pg.depth_signal(self.ZERO, self.profile())['depth_mode']
+        self.assertEqual(value, 'zero'); self.assertIn('near = 0', why); self.assertNotIn('\n', why)
+
+
 class GlslSources(unittest.TestCase):
     def test_language_preamble_is_not_a_shader(self):
         self.assertEqual(pg.glsl_sources(b'#version 450 core\n#define float4 vec4\n\0void main() {}\0'), 0)

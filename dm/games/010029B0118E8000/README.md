@@ -2,7 +2,12 @@
 
 Update 1.0.3 (v196608) over the base game (v0), SDK 10.4.1. Criterion's engine (ported by Stellar Entertainment) on NVN, with Bink movies and Criterion's Bundle 2 (`.BNDL`) files. Modules `main`, `subsdk0` (GLSLC, NVN's runtime shader compiler; not loaded, nothing calls it), `subsdk1` (NintendoSDK_movie) and `sdk`.
 
-Status: plays on the Mac (Apple M4, 2026-10-28): boot, the Autolog connection screen (offline, it goes on by itself), the career map, car select and whole races (Grand Ocean Road, Mystic Lake Road, South Face Drive, First Offence with the gold medal), at 60 fps with sound, a Switch Pro Controller and saves. In two sessions of 7 and 11 minutes: no crash, no new red line; at 60 fps 81% of the 300-frame windows held 16.7 ms (the others, menus and loading screens, 18 ms), 0.37% of the frames dropped, GPU 6.3 ms a frame (p50), the main thread about 4 ms. iOS has not been tested.
+Status: plays on the Mac (Apple M4, 2026-10-28): boot, the Autolog connection screen (offline, it goes on by itself), the career map, car select and whole races (Grand Ocean Road, Mystic Lake Road, South Face Drive, First Offence with the gold medal), at 60 fps with sound, a Switch Pro Controller and saves. In two sessions of 7 and 11 minutes: no crash, no new red line; at 60 fps 81% of the 300-frame windows held 16.7 ms (the others, menus and loading screens, 18 ms), 0.37% of the frames dropped, GPU 6.3 ms a frame (p50), the main thread about 4 ms.
+
+A contributor's tests on 1.0.3 (routes and durations not recorded):
+
+- **iPhone 18 Pro Max** (`iPhone19,3`, iOS 27.0.1, 2026-10-30; Xcode 27.1, a free Personal Team, `com.apple.developer.kernel.increased-memory-limit`): works and looks good. The log passed 6,000 frames with no crash and no missing shader; sampled windows held about 16.7 ms, which does not measure whole races. Some audio underruns; the same `nvnDeviceGetInteger` and format 0x27 lines as on the Mac.
+- **Mac** (Apple M4, macOS 26.6.2, Xcode 27.1, 2026-10-29): reaches the menu at 30 fps, before the 60 fps profile. 55 seconds under Metal API validation: 1,200 frames and the startup logos, no crash or missing shader, all 2,154 shaders compiled.
 
 ## What it needs
 
@@ -14,6 +19,8 @@ Status: plays on the Mac (Apple M4, 2026-10-28): boot, the Autolog connection sc
 | `enc_thread on` | `game.tsv`, `nvn_rec.h` | the game waits on its fence every frame; see [Frame rate](#frame-rate) |
 
 The rest of the profile is what `profile_guess.py` made of the survey: the 3.25 GB heap of the hardware pool, no virtual address memory.
+
+The reader's [resource checks](../../../docs/reference/shaders.md#glslc-outputs-in-criterions-bundle-2-resources) change nothing on 1.0.3: over all 3,370 bundles (161 of them stored, the rest compressed; 518,261 blocks) the output is byte for byte that of the unchecked reader, nothing is rejected, and `SHADERS.BNDL` gives the same 2,112 GLSLC outputs.
 
 ## Frame rate
 

@@ -35,8 +35,8 @@ int nvn_deswz_gpu_direct_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTa
     uint32_t row,rows,slices,bpb;uint64_t base;unsigned th,td;
     if (nvn_deswizzle_geom(d,level,0,&row,&rows,&slices,&base,&th,&td,&bpb) || bpb != 8 || slices != 1 || td ||
         layout.size > src.length || src_off > src.length-layout.size || layout.layers != view.arrayLength) return -1;
-    struct {uint64_t src_off,base,layer_stride;uint32_t width,height,layers,level,th,gobs_x;} p = {
-        src_off,base,layout.layer_size,MAX(d->width>>level,1u),MAX(d->height>>level,1u),layout.layers,level,th,MAX(nvn_tex_level_gobs(d,level),(row+63u)/64u)};
+    struct {uint64_t src_off,base,layer_stride;uint32_t width,height,layers,level,th,gobs_x,gob2;} p = {
+        src_off,base,layout.layer_size,MAX(d->width>>level,1u),MAX(d->height>>level,1u),layout.layers,level,th,MAX(nvn_tex_level_gobs(d,level),(row+63u)/64u),(uint32_t)nvn_gob_switch2};
     memcpy((uint8_t*)params.contents+params_off,&p,sizeof p);
     [enc setArgumentTable:table];[enc setComputePipelineState:g_nvn_deswz_direct];
     [table setAddress:src.gpuAddress atIndex:0];[table setAddress:params.gpuAddress+params_off atIndex:2];[table setTexture:view.gpuResourceID atIndex:0];
@@ -52,8 +52,8 @@ int nvn_deswz_gpu_encode(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> src, ui
     uint64_t base;
     unsigned th, td;
     if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb) || dst_pitch < row_bytes) return -1;
-    struct { uint64_t src_off, dst_off, base, pitch; uint32_t row_bytes, rows, slices, th, td, gobs_x; } p = {
-        src_off, dst_off, base, dst_pitch, row_bytes, rows, slices, th, td, MAX(nvn_tex_level_gobs(d, level), (row_bytes + 63u) >> 6)   // GOB columns as laid out (nvn_tex_level_gobs)
+    struct { uint64_t src_off, dst_off, base, pitch; uint32_t row_bytes, rows, slices, th, td, gobs_x, gob2; } p = {
+        src_off, dst_off, base, dst_pitch, row_bytes, rows, slices, th, td, MAX(nvn_tex_level_gobs(d, level), (row_bytes + 63u) >> 6), (uint32_t)nvn_gob_switch2   // GOB columns as laid out (nvn_tex_level_gobs)
     };
     [enc setComputePipelineState:g_nvn_deswz_pipeline];
     [enc setBuffer:src offset:0 atIndex:0];
@@ -74,8 +74,8 @@ int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTa
     uint64_t base;
     unsigned th, td;
     if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb) || dst_pitch < row_bytes) return -1;
-    struct { uint64_t src_off, dst_off, base, pitch; uint32_t row_bytes, rows, slices, th, td, gobs_x; } p = {
-        src_off, dst_off, base, dst_pitch, row_bytes, rows, slices, th, td, MAX(nvn_tex_level_gobs(d, level), (row_bytes + 63u) >> 6)   // GOB columns as laid out (nvn_tex_level_gobs)
+    struct { uint64_t src_off, dst_off, base, pitch; uint32_t row_bytes, rows, slices, th, td, gobs_x, gob2; } p = {
+        src_off, dst_off, base, dst_pitch, row_bytes, rows, slices, th, td, MAX(nvn_tex_level_gobs(d, level), (row_bytes + 63u) >> 6), (uint32_t)nvn_gob_switch2   // GOB columns as laid out (nvn_tex_level_gobs)
     };
     memcpy((uint8_t *)params.contents + params_off, &p, sizeof p);
     [enc setArgumentTable:table];

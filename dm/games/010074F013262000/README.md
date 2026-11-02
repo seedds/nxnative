@@ -28,7 +28,8 @@ integrated into the base/update shader census, so DLC rendering is unvalidated.
   Its first arena reserves 4 GB + 128 KB (`main+0x1241860`), so reducing only the
   containing region cannot work. [patches.py](patches.py) changes that arena's
   bump increment, subtraction and capacity together, to 512 MB + 128 KB, and its
-  containing region to 4 GB. All changes are gated by the 2.2.1 main build ID.
+  containing region to 4 GB. All changes are gated by main build ID `82d187fe9ef9be921b8e1b1cddf7bd28`,
+  also reported for 2.2.0 below.
   The SDK build takes the existing node-area and large-region alignment cuts.
 - A 40-second diagnostic run with the original arenas had 2,092.4 MB committed:
   about 203 MB in the first arena, about 1.8 GB in subsequent windows, and a 64 MB
@@ -38,6 +39,29 @@ integrated into the base/update shader census, so DLC rendering is unvalidated.
 - Compact runs stayed at the title for over ten minutes without an allocator
   failure. This validates the title allocation pattern, not later gameplay peaks.
 - `pad_layout full` supplies both sticks and the D-pad.
+
+### Update 2.2.0 and address-space evidence
+
+[Issue #847](https://github.com/seedds/nxnative/issues/847) reports update 2.2.0
+(`v655360`) with the same main build ID `82d187fe9ef9be921b8e1b1cddf7bd28`
+and matching original bytes at all six allocator cut sites. Its running title
+screen says 2.2.1. The existing build-ID gate therefore covers that main too;
+the package version alone does not select these cuts. The report supplies no
+SDK or movie-module build IDs, so the registered package and shader version in
+`game.tsv` remain 2.2.1 pending a complete build survey.
+
+The same reporter tested `mmap(PROT_NONE)` in a minimal app on an iPad mini
+(A17 Pro, iPadOS 27.2), with no extended virtual-address entitlement: 60 GiB
+failed with `ENOMEM`, while 5, 4 and 3 GiB reservations succeeded. Sizes between
+5 and 60 GiB were not probed. This supports the address-space adaptation; the
+full game's compact layout has not been tested on that iPad.
+
+On an M2 Mac with 8 GB RAM and macOS 27.2, the reporter restored the original
+six instructions and used `DM_ALIAS_SIZE=0x1000000000` (64 GiB). Title, opening,
+first battle, character/camera movement and Expansion Pass menus ran for
+1,173.6 seconds without an allocation failure (2,690 MB footprint, 2,734 MB peak).
+This extends the evidence for the original layout on Mac. Later-game peaks,
+iPad gameplay and DLC content beyond those menus remain unvalidated.
 
 ## Files and shaders
 

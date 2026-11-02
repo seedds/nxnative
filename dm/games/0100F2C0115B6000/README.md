@@ -82,6 +82,7 @@ Game-specific findings. The general host changes they led to are listed under [F
 ## Found on this game
 
 - [Benchmark captures perturb the measured frame pacing](../../../docs/reference/frame-rate.md#benchmark-captures-perturb-the-measured-frame-pacing).
+- [Unmapped guest memory stays resident](../../../docs/reference/memory.md#unmapped-guest-memory-stays-resident).
 - **Resolved: 1.4.2 at double speed** (packed from a derived profile; its main has none of 1.4.3's frame step stubs): [A derived profile drops the frame step its build lacks](../../../docs/reference/frame-rate.md#a-derived-profile-drops-the-frame-step-its-build-lacks). Measured by fredchu at 30 fps and real speed on 1.4.2; not run here. `DM_FPS_TARGET=60` no longer brings the double speed back on such a build: [A present cap applies only with a frame step or an engine limit the host writes](../../../docs/reference/frame-rate.md#a-present-cap-applies-only-with-a-frame-step-or-an-engine-limit-the-host-writes).
 
 General host changes first needed here; each applies to every game:
@@ -111,6 +112,7 @@ General host changes first needed here; each applies to every game:
 - **Resolved in the host: dirty-page writes missed during upload**, with both unprotect paths covered by regression tests; the glyph-cache symptom remains unconfirmed here: [Dirty-page writes missed during upload](../../../docs/reference/nvn-objects.md#dirty-page-writes-missed-during-upload).
 - **Depth16 load-clears match fragment writes:** [Depth16 load-clears match fragment writes](../../../docs/reference/rendering.md#depth16-load-clears-match-fragment-writes).
 - **Pipeline keys omit absent-target blend and mask state**, and old prewarm rows are normalized and deduplicated: [Pipeline keys omit unused colour state](../../../docs/reference/shaders.md#pipeline-keys-omit-unused-colour-state).
+- **Concurrent warm tasks prepare each shader once:** [Concurrent warm tasks prepare each shader once](../../../docs/reference/shaders.md#concurrent-warm-tasks-prepare-each-shader-once). Avoids duplicate startup work; no measured wall-time or steady-FPS gain is claimed.
 - **Bounded upload staging and retirement on upload completion:** [Upload staging grows within one rendering submission](../../../docs/reference/memory.md#upload-staging-grows-within-one-rendering-submission).
 - **Completed readbacks retained by a guest waiter's outer pool:** [Completion readbacks survive a guest waiter's pool](../../../docs/reference/memory.md#completion-readbacks-survive-a-guest-waiters-pool). Reproduced and corrected on the stationary Mac cave route; iPhone termination resolution remains unverified.
 - **Resolved: registry lock priority inversion** (`g_rmu`): [Registry lock priority inheritance](../../../docs/reference/frame-rate.md#registry-lock-priority-inheritance). Ported from MacNativeGames; checked here through the Metal registry view tests, without a new gameplay contention measurement.

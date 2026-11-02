@@ -383,6 +383,28 @@ class MeshPassthrough(unittest.TestCase):
                 r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fmodules-cache-path=' + d + '/modules', str(Path(d, 'm.metal')), '-o', str(Path(d, 'm.air'))], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr[-2000:])
 
+    def test_large_vertices_take_fewer_triangles(self):
+        # Donkey Kong Bananza's vertex output: 24 float4 and the point size, 388 bytes; 32 triangles (37,248 bytes) exceed Metal's 32 KB
+        self.assertEqual(dmsh_mesh.out_bytes('struct main0_out\n{\n' + ''.join(f'    float4 m_{i} [[user(locn{i})]];\n' for i in range(23)) +
+                                             '    float4 gl_Position [[position, invariant]];\n    float gl_PointSize;\n};'), 388)
+        self.assertEqual(dmsh_mesh.prims_for(388), 16)
+        self.assertEqual(dmsh_mesh.prims_for(dmsh_mesh.out_bytes(MESH_VS)), 32)
+        self.assertEqual(dmsh_mesh.out_bytes('struct main0_out\n{\n    float gl_ClipDistance [8] [[clip_distance]];\n    half2 h;\n};'), 36)
+        with self.assertRaisesRegex(ValueError, 'member'): dmsh_mesh.out_bytes('struct main0_out\n{\n    float3x3 m;\n};')
+        with self.assertRaisesRegex(ValueError, 'limit'): dmsh_mesh.prims_for(11000)
+        lean, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
+        wide = MESH_VS.replace('    float4 m_1 [[user(locn5)]];\n', '    float4 m_1 [[user(locn5)]];\n' + ''.join(f'    float4 m_x{i} [[user(locn{i})]];\n' for i in [l for l in range(32) if l != 5][:23]), 1)
+        self.assertNotEqual(wide, MESH_VS)
+        src = dmsh_mesh.compose(wide, MESH_HEAD + '\n' + lean, reads)
+        self.assertIn('[[mesh]] void dm_mesh_p16(metal::mesh<main0_out, dm_mesh_prim, 48, 16,', src)
+        self.assertIn('[[mesh]] void dm_mesh_z_p16(', src)
+        self.assertIn('uint dm_p0 = dm_tg * 16u, dm_np = min(16u,', src)
+        if shutil.which('xcrun') and sys.platform == 'darwin':
+            with tempfile.TemporaryDirectory() as d:
+                Path(d, 'm.metal').write_text(src)
+                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fmodules-cache-path=' + d + '/modules', str(Path(d, 'm.metal')), '-o', str(Path(d, 'm.air'))], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+
     def test_compose_rejects_clip_z(self):
         lean, _ = dmsh_geometry.lean(LEAN_KERNEL, 134)
         with self.assertRaisesRegex(ValueError, 'clip z'):

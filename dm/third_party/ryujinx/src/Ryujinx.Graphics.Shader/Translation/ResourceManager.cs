@@ -66,8 +66,10 @@ namespace Ryujinx.Graphics.Shader.Translation
             _stage = stage;
             _stagePrefix = GetShaderStagePrefix(stage);
 
-            _cbSlotToBindingMap = new SetBindingPair[18];
-            _sbSlotToBindingMap = new SetBindingPair[16];
+            // Constant buffer banks 0-17 (Maxwell's), and 24: NVN2's push constants (c[24])
+            _cbSlotToBindingMap = new SetBindingPair[25];
+            // Storage buffers the global-to-storage pass found: the stage's storage buffer table and, for compute, its uniform buffer address table (NVN 16 + 16 slots)
+            _sbSlotToBindingMap = new SetBindingPair[32];
             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
             _sbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
 
@@ -121,6 +123,20 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 SharedMemoryId = -1;
             }
+        }
+
+        // nxnative: the scratch of Ampere HMMA (InstEmitAmpereTensor.AHmma, helper dmsh_hmma16816_f16): a shared memory of its own, 256 words for each subgroup of the
+        // workgroup, made the first time an HMMA needs it
+        public int HmmaScratchMemoryId { get; private set; } = -1;
+
+        public int GetHmmaScratchMemoryId(int subgroups)
+        {
+            if (HmmaScratchMemoryId < 0)
+            {
+                HmmaScratchMemoryId = Properties.AddSharedMemory(new MemoryDefinition("hmma_scratch", AggregateType.Array | AggregateType.U32, 256 * subgroups));
+            }
+
+            return HmmaScratchMemoryId;
         }
 
         public void SetVertexAsComputeLocalMemories(ShaderStage stage, InputTopology inputTopology)

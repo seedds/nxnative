@@ -9,6 +9,7 @@ Update 1.0.1 (v65536), SDK 8.3.1. Intelligent Systems' engine on NintendoWare (G
 | Node area 1 GB → 62 MB, regions of 4 MB and more aligned to 2 MB (SDK 20's) | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `86a2afd8…` (`sdk+0xc96f0` / `+0xc9790`, `+0xc98f4` / `+0xc98fc` / `+0xc9900`) | the SDK-wide rules' cuts (implementation 1 of each), which the provisional profile was booted with (before 2026-10-29 also a row of this build, as the rules skipped builds a profile names). [Blasphemous](../0100698009C6E000/README.md) 1.0.8 ships the same `sdk`; with no virtual address memory it never reaches them. See [Memory](#memory) |
 | 5 GB block: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | Engage's block, as the provisional profile guessed: 256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region (never used) |
 | `sys_resource 0x800000` | `game.tsv` | the NPDM declares 8 MB of system resource |
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth (the NSP script's region check on the registered build); offline pipeline bases must use the matching vertex entry |
 
 Everything else is the provisional profile's guess, unchanged.
 
@@ -34,6 +35,7 @@ Everything else is the provisional profile's guess, unchanged.
 
 ## Found on this game
 
+- **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). The key was missing until the check boots began reading it; the archive at this mode has not been rebuilt or measured here.
 Nothing new: every mechanism it needed was there. It is listed under [Same-pass feedback read through a snapshot](../../../docs/reference/rendering.md#same-pass-feedback-read-through-a-snapshot).
 
 ## Open

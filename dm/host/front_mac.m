@@ -35,6 +35,11 @@ static int g_input_on = 1;   // main thread: the game window is key, so its keyb
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
 int front_screen_max_fps(void) { return g_screen_fps; }
+int front_display_pixels(int *w, int *h) {
+    CGDisplayModeRef m = CGDisplayCopyDisplayMode(CGMainDisplayID()); if (!m) return 0;
+    *w = (int)CGDisplayModeGetPixelWidth(m); *h = (int)CGDisplayModeGetPixelHeight(m); CGDisplayModeRelease(m);
+    return *w > 0 && *h > 0;
+}
 static _Atomic int g_screen_variable_refresh;
 int front_screen_variable_refresh(void) { return g_screen_variable_refresh; }
 static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabilities of the current screen and mode, including a mode change without moving the window

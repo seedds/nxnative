@@ -243,6 +243,11 @@ void front_progress(const char *title, long done, long total) {
     });
 }
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
+int front_display_pixels(int *w, int *h) {   // the screen in pixels, landscape (nativeBounds is portrait); UIScreen's sizes may be read from any thread
+    CGRect b = UIScreen.mainScreen.nativeBounds; int a = (int)b.size.width, c = (int)b.size.height;
+    if (a <= 0 || c <= 0) return 0;
+    *w = a > c ? a : c; *h = a > c ? c : a; return 1;
+}
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 
 // Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result

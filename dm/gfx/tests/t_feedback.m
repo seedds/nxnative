@@ -111,7 +111,7 @@ static void reuse_case(NvProg *pr) {
     CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 2, "a game barrier makes the next writing draw take a fresh snapshot");
     rp_end();
     // The depth attachment read, then written in the same pass (only serials matter to the rule: the attachment is named after the pass opens)
-    { tex_t output, depth; target(&output, 99791); target(&depth, 99792); mtl_reg_tex(651, &depth, NULL);
+    { tex_t output, depth; target(&output, 99791); target(&depth, 99792); mtl_reg_tex(651, &depth, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns both textures (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
       R.rt.color[0] = &output; R.rt.depth = NULL; S.tex[1][0] = 651; S.chmask.mask = 0xffffffffu; S.ds.dt = 1; S.ds.dw = 0;
       clear(MTLClearColorMake(0, 0, 0, 1)); R.rt.depth = &depth;
       fb_prepare(pr);

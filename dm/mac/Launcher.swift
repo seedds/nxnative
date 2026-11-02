@@ -1,7 +1,7 @@
 // Mac app launcher: the settings window shown before the game starts, in the launcher's own process (launcher.c calls dm_mac_launcher before it starts the host). Its settings come from the
 // app's Resources/dm/launcher.json (dm/games/settings.py with SETTINGS_PLATFORM=mac); the model and the rows are the iOS launcher's (dm/ios/Sources/LauncherSettings.swift, LauncherRow.swift),
 // and so is the store: launcher.<VAR> in the app's preferences, which launcher.c reads when the window is not shown (docs/frontends.md, Saved choices). Basic settings (level basic) come
-// first, the others under Advanced settings, each in the list's sections. Play puts the settings into this process's environment, which the host inherits; Quit and closing the window end the
+// first, the others under Advanced settings, each in the list's sections. An Input tab beside them edits the controls profile (LauncherControls.swift). Play puts the settings into this process's environment, which the host inherits; Quit and closing the window end the
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
@@ -123,6 +123,8 @@ struct LauncherView: View {
     let fit: (CGFloat) -> Void
     @AppStorage("window.show") private var show = true
     @AppStorage("window.advanced") private var advanced = false
+    @AppStorage("window.tab") private var tab = 0
+    @StateObject private var controls = ControlsModel()
     @State private var checking = false
     @State private var check = 0   // which Play the running check is for: one the player went on from without it is dropped
 
@@ -145,7 +147,12 @@ struct LauncherView: View {
                 Spacer()
             }
             .padding(.horizontal, 20).padding(.top, 2)   // the title bar's safe area already keeps it below the traffic lights
-            Form { settings }
+            TabBar(tab: $tab, titles: ["Settings", "Input"])
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 20).padding(.top, 10)
+            Form {
+                if tab == 1 { ControlsTab(c: controls) } else { settings }
+            }
             .formStyle(.grouped)
             .contentMargins(.top, 6, for: .scrollContent)
             .background(OverlayScrollers())
@@ -288,6 +295,27 @@ struct OverlayScrollers: NSViewRepresentable {
     }
     func makeNSView(context: Context) -> Probe { Probe() }
     func updateNSView(_ v: Probe, context: Context) { v.apply() }
+}
+
+/// The window's tabs, across its whole width: SwiftUI's segmented Picker keeps its own width on the Mac, AppKit's control can fill the row
+struct TabBar: NSViewRepresentable {
+    @Binding var tab: Int
+    let titles: [String]
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let c = NSSegmentedControl(labels: titles, trackingMode: .selectOne, target: context.coordinator, action: #selector(Coordinator.changed(_:)))
+        c.segmentDistribution = .fillEqually; c.controlSize = .large
+        c.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return c
+    }
+    func updateNSView(_ c: NSSegmentedControl, context: Context) { c.selectedSegment = tab; context.coordinator.tab = $tab }
+    func makeCoordinator() -> Coordinator { Coordinator(tab: $tab) }
+
+    final class Coordinator: NSObject {
+        var tab: Binding<Int>
+        init(tab: Binding<Int>) { self.tab = tab }
+        @objc func changed(_ c: NSSegmentedControl) { tab.wrappedValue = c.selectedSegment }
+    }
 }
 
 /// Cloud saves: a folder the save is synced through (dm/host/save_sync.h), the one the iPhone app picks in its launcher's Cloud saves section. It is kept in this app's

@@ -7,7 +7,7 @@
 // replaces a variable already set), as the iOS app reads Documents/env.txt and dm/env.txt. Then the player's saved choices: launcher.<VAR> strings in the app's preferences domain (its bundle ID), which a
 // front end or a settings window writes, each checked against the bundle's settings (Info.plist DMSettings, from launcher.json) and used only for a variable still unset; DM_SAVED_CHOICES=0 ignores them.
 // DM_KEYMAP and DM_PAD_MAP are saved choices too (launcher.DM_KEYMAP, launcher.DM_PAD_MAP) but no launcher.json rows, so DMSettings cannot check them: the host's own parser does (dm/host/input_map.h,
-// input_map_valid), and a value it would not take whole is ignored. They are read whether or not the settings window ran, since the window does not offer them.
+// input_map_valid), and a value it would not take whole is ignored. They are read whether or not the settings window ran, and so is the controls profile (controls_profile below) the window's Input tab edits.
 // So the order is: the launch environment, the player's env.txt, the bundle's, saved choices, the host's tested defaults (docs/frontends.md, Saved choices).
 // Before the host starts, the settings window (dm/mac/Launcher.swift dm_mac_launcher, linked in by pack_app.py) runs in this process and puts the player's settings into the environment; it keeps
 // what the launch environment and the env files set (DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS). DM_LAUNCHER=0 or --no-launcher (open <app> --args --no-launcher) starts the game without the window,
@@ -29,7 +29,7 @@
 #include "romfs_image.h"
 #include "save_sync.h"
 #pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-function"   // the header is the host's: this file uses only input_map_valid
+#pragma clang diagnostic ignored "-Wunused-function"   // the header is the host's: this file uses only its checks (input_map_valid, stick_*_valid)
 #include "input_map.h"
 #pragma clang diagnostic pop
 
@@ -133,6 +133,35 @@ static void saved_control(CFStringRef domain, const char *env, int pad) {   // D
     CFRelease(v);
 }
 
+// The controls profile: ~/Library/Application Support/nxnative/controls/<name>.txt, the one this game picked in the settings window's Input tab (controls.profile in the app's
+// preferences), else Default.txt, which every game shares. KEY=VALUE lines of DM_KEYMAP, DM_PAD_MAP, DM_PAD_ABXY, DM_PAD_STICK_DZ, DM_PAD_STICK_SENS, each checked by the host's parser (input_map.h);
+// a variable already set (the environment, an env file, a launcher.<VAR> saved choice) keeps its value. No file: the host's own mapping
+static void controls_profile(CFStringRef domain, const char *home) {
+    char name[128] = "Default", path[PATH_MAX];
+    CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("controls.profile"), domain);
+    if (v && CFGetTypeID(v) == CFStringGetTypeID()) CFStringGetCString(v, name, sizeof name, kCFStringEncodingUTF8);
+    if (v) CFRelease(v);
+    if (!*name || strchr(name, '/') || *name == '.') { fprintf(stderr, "launcher: controls profile name '%s' ignored, Default used\n", name); snprintf(name, sizeof name, "Default"); }
+    snprintf(path, sizeof path, "%s/Library/Application Support/nxnative/controls/%s.txt", home, name);
+    FILE *f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "launcher: no controls profile %s (%s): the host's own mapping\n", name, path); return; }
+    static const char *const keys[] = {"DM_KEYMAP", "DM_PAD_MAP", "DM_PAD_STICK_DZ", "DM_PAD_STICK_SENS", "DM_PAD_ABXY"};
+    enum { NKEYS = sizeof keys / sizeof *keys };
+    char ln[2048];
+    while (fgets(ln, sizeof ln, f)) {
+        ln[strcspn(ln, "\r\n")] = 0;
+        char *eq = strchr(ln, '='); if (*ln == '#' || !eq) continue;
+        *eq = 0; const char *k = ln, *s = eq + 1; int i = 0;
+        while (i < NKEYS && strcmp(k, keys[i])) i++;
+        if (i == NKEYS) { fprintf(stderr, "launcher: controls profile %s: %s is not a control, ignored\n", name, k); continue; }
+        int ok = i == 0 ? input_map_valid(s, 0) : i == 1 ? input_map_valid(s, 1) : i == 2 ? stick_dz_valid(s) : i == 3 ? stick_sens_valid(s) : pad_abxy_valid(s);
+        if (!ok) fprintf(stderr, "launcher: controls profile %s: %s=%s ignored: the host does not take it\n", name, k, s);
+        else if (getenv(k)) fprintf(stderr, "launcher: controls profile %s: %s=%s not used: %s=%s is set\n", name, k, s, k, getenv(k));
+        else { setenv(k, s, 0); fprintf(stderr, "launcher: env %s=%s (controls profile %s)\n", k, s, name); }
+    }
+    fclose(f);
+}
+
 static void saved_choices(int window) {   // after the env files, before the bundle's own defaults (DM_LANG): a variable already set keeps its value. window: the settings window ran and applied its own settings
     CFArrayRef rules = setting_rules(); CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
     if (!domain) return;
@@ -151,6 +180,7 @@ static void saved_choices(int window) {   // after the env files, before the bun
         CFRelease(v);
     }
     saved_control(domain, "DM_KEYMAP", 0); saved_control(domain, "DM_PAD_MAP", 1);
+    const char *home = getenv("HOME"); if (home && *home) controls_profile(domain, home);
 }
 
 // Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesSection, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC

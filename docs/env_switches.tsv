@@ -72,6 +72,7 @@ DM_LAUNCHER	switch	`0` skips the iOS settings screen or the Mac settings window 
 DM_LINK_VTICK	switch	`0` keeps the system's display-link rate on 144 or 165 Hz Mac screens; by default the link counts only the refreshes nearest a steady 1/60 s clock
 DM_LOADHASH	diagnostic	`=1` logs an address-independent SHA-256 per module after loading
 DM_LONGFRAME	diagnostic	`0` turns off the long-frame log (on by default), a line for a frame over 20 ms or with GPU time over 16.7 ms that is clearly above recent frames
+DM_MAC_RESTORE_DIR	path	Private per-run restore request folder, created and replaced by the Mac launcher; the game stages a checked backup here and the launcher restores it only after the host exits; not a player setting
 DM_MEASURE_LOCK	path	`=<file>`: `scripts/regress.py`'s default `--lock`, the measuring lock `scripts/bench.py --lock` shares: held only while a game runs, and the harness's shader builds pause while another process holds it
 DM_MEMSTAT	diagnostic	`=<tsv>` writes one line per second of memory accounting: footprint, Metal allocation and resident and charged memory by region class (guest, code, malloc, gpu, …)
 DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second writes every VM region of 1 MiB or more to `<tsv>.regions`

@@ -131,6 +131,17 @@ fs-tsan: $(B)/t_fs_commit_list_tsan
 $(B)/t_fs_case: t_fs_case.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs_case.c ../hle_bigstack.c ../save_sync.c
 run: $(B)/t_save_sync $(B)/t_save_sync_metadata
+run: $(B)/t_mac_backup $(B)/t_mac_menus
+	$(B)/t_mac_backup
+	$(B)/t_mac_menus
+$(B)/t_mac_backup: t_mac_backup.c ../save_backup_mac.c ../save_backup_mac.h ../save_sync.c ../save_sync.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Wno-deprecated-declarations -I.. -o $@ t_mac_backup.c ../save_sync.c
+$(B)/t_mac_menus: t_mac_menus.m ../menus_mac.m ../menus_mac.h ../save_backup_mac.c ../save_backup_mac.h ../save_sync.c ../save_sync.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Wno-unused-function -Wno-deprecated-declarations -fobjc-arc -I.. $(GINC) -o $@ t_mac_menus.m ../save_backup_mac.c ../save_sync.c -framework Cocoa -framework UniformTypeIdentifiers
+.PHONY: mac-menus
+mac-menus: $(B)/t_mac_backup $(B)/t_mac_menus
+	$(B)/t_mac_backup
+	$(B)/t_mac_menus
 $(B)/t_save_sync: t_save_sync.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_save_sync.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
 $(B)/t_save_sync_metadata: t_save_sync_metadata.c ../save_sync.c ../save_sync.h | $(B)

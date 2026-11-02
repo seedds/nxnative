@@ -78,7 +78,24 @@ static int test_output_lifetime(void) {
     printf("AudioOut fields and lifetime (%s): %d guarded open / close / unmap / resume cycles, no consumer left\n", real_audio() ? "real output" : "silent sink", CYCLES);
     return 0;
 }
+static int test_mute_output(void) {
+    const int levels[] = {-10, 0, 25, 37, 50, 75, 100, 110};
+    for (int muted = 0; muted <= 1; muted++) for (size_t level = 0; level < sizeof levels / sizeof levels[0]; level++) {
+        int gain = levels[level] < 0 ? 0 : levels[level] > 100 ? 100 : levels[level];
+        int16_t pcm[32], out[32];
+        for (int i = 0; i < 32; i++) pcm[i] = i % 2 ? -12345 : 12345;
+        gbuf b = {pcm, sizeof pcm, sizeof pcm}; aout a = {.ch = 2};
+        atomic_init(&a.state, STATE_STARTED); atomic_init(&a.vol, 0x3f800000u);
+        a.q[0] = &b; atomic_init(&a.q_tail, 1);
+        AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof out, out}}};
+        dm_audio_volume(levels[level]); dm_audio_mute(muted); au_render(&a, NULL, NULL, 0, 16, &bl);
+        for (int i = 0; i < 32; i++) if (out[i] != (muted ? 0 : pcm[i] * gain / 100)) { puts("FAIL volume/mute output"); return 1; }
+        if (atomic_load(&a.q_head) != 1 || atomic_load(&a.rel_tail) != 1 || a.rel[0] != &b) { puts("FAIL muted buffer release"); return 1; }
+    }
+    dm_audio_mute(0); dm_audio_volume(100); puts("volume and mute: output gain, bounds and buffer consumption/release verified"); return 0;
+}
 int main(void) {
+    if (test_mute_output()) return 1;
     if (test_surround_output() || test_output_lifetime()) return 1;
     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);

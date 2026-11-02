@@ -11,6 +11,10 @@
 
 enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
 enum { BK_NONE, BK_AU, BK_NULL };   // what is consuming an output's queue right now (aout.backend)
+static _Atomic int g_output_muted;
+static _Atomic int g_output_percent = 100;
+void dm_audio_mute(int on) { atomic_store_explicit(&g_output_muted, !!on, memory_order_relaxed); }
+void dm_audio_volume(int percent) { atomic_store_explicit(&g_output_percent, percent < 0 ? 0 : percent > 100 ? 100 : percent, memory_order_relaxed); }
 
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;     // The first 24 bytes written into the guest AudioOutBuffer
 #define QMAX 64
@@ -166,7 +170,12 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
         } }
     pull_device(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
     { static int mute = -1; if (mute < 0) { const char *e = getenv("DM_AUDIO_MUTE"); mute = e && atoi(e); }   // diagnostic: the whole real-output path (AudioUnit callback pacing, background take-over) but with the output silenced (lifecycle tests on the Mac without noise)
-      if (mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize); }
+      int percent = mute || atomic_load_explicit(&g_output_muted, memory_order_relaxed) ? 0 : atomic_load_explicit(&g_output_percent, memory_order_relaxed);
+      if (!percent) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
+      else if (percent < 100) {
+          int16_t *samples = bl->mBuffers[0].mData;
+          for (size_t i = 0; i < bl->mBuffers[0].mDataByteSize / sizeof *samples; i++) samples[i] = (int16_t)((int32_t)samples[i] * percent / 100);
+      } }
     return noErr;
 }
 #if !TARGET_OS_IPHONE

@@ -41,6 +41,17 @@ int main(int argc, char **argv) {
     for (int i = 0; i < argc; i++) fprintf(f, "argv%d=%s\n", i, argv[i]);
     char cwd[1024]; fprintf(f, "cwd=%s\n", getcwd(cwd, sizeof cwd)); fclose(f);
     printf("standin host output\n"); fflush(stdout);
+    if (getenv("STANDIN_RESTORE")) {
+        char to[1024], ready[1024];
+        snprintf(to, sizeof to, "%s/backup.dmsync", getenv("DM_MAC_RESTORE_DIR"));
+        FILE *in = fopen(getenv("STANDIN_RESTORE"), "rb"), *out = fopen(to, "wb");
+        if (!in || !out) return 9;
+        int c; while ((c = fgetc(in)) != EOF) fputc(c, out);
+        fclose(in); fclose(out);
+        snprintf(ready, sizeof ready, "%s/ready", getenv("DM_MAC_RESTORE_DIR"));
+        out = fopen(ready, "w"); if (!out) return 9; fclose(out);
+        return 0;
+    }
     if (getenv("STANDIN_WAIT")) { signal(SIGTERM, term); for (;;) pause(); }
     return 7;
 }
@@ -117,7 +128,8 @@ class PackReuse(unittest.TestCase):
             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
+            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api',
+            'host/save_backup_mac.c': b'backup', 'host/save_backup_mac.h': b'backup api', 'tools/romfs.py': b'reader',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -541,6 +553,66 @@ class App(unittest.TestCase):
         p = self.launch(); p.communicate(timeout=30)
         self.assertIn('standin host output', (logs / f'{TID}.prev.log').read_text())
         self.assertEqual(self.host_run()['DM_LANG'], 'fr')   # Info.plist DMLanguage
+
+    def test_restore_after_exit_and_cloud_send(self):
+        save = self.tmp / 'restore-valid'; save.mkdir(exist_ok=True)
+        (save / 'progress').write_text('archived progress')
+        tool = self.tmp / 'backup-tool'
+        source = self.tmp / 'backup-tool.c'
+        source.write_text('#include "save_backup_mac.h"\nint main(int n, char **v) { return n != 4 || mac_save_export(v[1], v[2], v[3]); }\n')
+        subprocess.run(['clang', '-O1', '-Wno-deprecated-declarations', '-I', str(REPO / 'dm/host'), source,
+                        REPO / 'dm/host/save_backup_mac.c', REPO / 'dm/host/save_sync.c', '-o', tool], check=True, capture_output=True)
+        archive = self.tmp / 'valid.dmsync'
+        subprocess.run([tool, save, TID, archive], check=True)
+        (save / 'progress').write_text('current progress')
+        cloud = self.tmp / 'restore-cloud'; cloud.mkdir(exist_ok=True)
+        p = self.launch(DM_SAVE=str(save), DM_SAVE_SYNC=str(cloud), STANDIN_RESTORE=str(archive))
+        p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual((save / 'progress').read_text(), 'archived progress')
+        recovery = list(self.tmp.glob('restore-valid.before-restore-*/save/progress'))
+        self.assertTrue(recovery)
+        self.assertEqual(recovery[-1].read_text(), 'current progress')
+        self.assertIn(b'archived progress', (cloud / TID / 'save.dmsync').read_bytes())
+        self.assertIn('Save restored', (self.tmp / 'home/alert.txt').read_text())
+        self.assertFalse(Path(self.host_run()['DM_MAC_RESTORE_DIR']).exists())
+
+    def test_relative_save_lease(self):
+        p = self.launch(DM_SAVE='relative-menu-save'); p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 7)
+        parent = Path(self.host_run()['cwd'])
+        self.assertTrue((parent / 'relative-menu-save').is_dir())
+        self.assertTrue((parent / 'relative-menu-save.mac-lock').is_file())
+
+    def test_save_lease(self):
+        # A second instance cannot touch saves held by a live supervising launcher.
+        save = self.tmp / 'lease-save'; save.mkdir(exist_ok=True)
+        p = self.launch(wait=True, DM_SAVE=str(save))
+        try:
+            for _ in range(100):
+                if (save.with_name(save.name + '.mac-lock')).exists(): break
+                time.sleep(0.05)
+            other = self.launch(DM_SAVE=str(save))
+            other.communicate(timeout=30)
+            self.assertEqual(other.returncode, 1)
+            self.assertIn('Another game instance', (self.tmp / 'home/alert.txt').read_text())
+        finally:
+            p.send_signal(signal.SIGTERM); p.communicate(timeout=30)
+        again = self.launch(DM_SAVE=str(save)); again.communicate(timeout=30)
+        self.assertEqual(again.returncode, 7)
+
+    def test_restore_handoff_rejects_invalid_archive(self):
+        # The child requests a restore and exits; only the parent then validates/replaces anything.
+        save = self.tmp / 'restore-save'; save.mkdir(exist_ok=True)
+        (save / 'progress').write_text('keep me')
+        archive = self.tmp / 'invalid.dmsync'; archive.write_bytes(b'DMSYNC1\ntruncated')
+        p = self.launch(DM_SAVE=str(save), STANDIN_RESTORE=str(archive))
+        p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual((save / 'progress').read_text(), 'keep me')
+        self.assertIn('restore failed', (self.tmp / 'home/alert.txt').read_text())
+        request = Path(self.host_run()['DM_MAC_RESTORE_DIR'])
+        self.assertFalse(request.exists())
 
     def test_sigterm(self):   # forwarded to the host, whose exit code comes back
         p = self.launch(wait=True)

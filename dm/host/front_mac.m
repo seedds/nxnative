@@ -15,6 +15,7 @@
 #include "dm.h"
 #include "dm_input.h"
 #include "front.h"
+#include "menus_mac.h"
 #include "hle.h"
 #include "pad_slots.h"
 #include "haptics_apple.h"
@@ -490,7 +491,7 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
     sh.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;   // ⌘⇧C (the plain "c" already maps ZR)
     NSMenuItem *ms = [menu addItemWithTitle:@"Cheats On" action:@selector(toggleMaster:) keyEquivalent:@""];
     ms.target = self; ms.state = dm_cheats_master() ? NSControlStateValueOn : NSControlStateValueOff;
-    if (dm_cheats_safe()) [menu addItemWithTitle:@"Restore Saved Cheats (safe mode)" action:@selector(restoreSafe:) keyEquivalent:@""].target = self;
+    if (dm_cheats_safe()) [menu addItemWithTitle:@"Restore Saved Cheats (Safe Mode)" action:@selector(restoreSafe:) keyEquivalent:@""].target = self;
     [menu addItem:NSMenuItem.separatorItem];
     const char *sec = "";
     for (int i = 0, n = dm_cheats_ncheats(); i < n; i++) {
@@ -514,10 +515,10 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
     if (!dm_cheats_found())
         [menu addItemWithTitle:[NSString stringWithFormat:@"No cheats for %@", build_label(dm_cheats_build(), dm_cheats_version())] action:nil keyEquivalent:@""].enabled = NO;
     [menu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *re = [menu addItemWithTitle:@"Reload cheats" action:@selector(reloadCheats:) keyEquivalent:@"r"];
+    NSMenuItem *re = [menu addItemWithTitle:@"Reload Cheats" action:@selector(reloadCheats:) keyEquivalent:@"r"];
     re.target = self;
     const char *dir = dm_cheats_dir_path();
-    NSMenuItem *op = [menu addItemWithTitle:@"Open cheats folder" action:dir && *dir ? @selector(openCheatsFolder:) : nil keyEquivalent:@""];
+    NSMenuItem *op = [menu addItemWithTitle:@"Open Cheats Folder" action:dir && *dir ? @selector(openCheatsFolder:) : nil keyEquivalent:@""];
     op.target = self;
     op.enabled = dir && *dir != 0;
 }
@@ -1183,11 +1184,13 @@ void front_run(void (*guest)(void)) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        NSWindow.allowsAutomaticWindowTabbing = NO;
         NSRect r = NSMakeRect(0, 0, 1280, 720);
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
+        win.tabbingMode = NSWindowTabbingModeDisallowed;
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
@@ -1216,7 +1219,14 @@ void front_run(void (*guest)(void)) {
         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
         NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:@"Window"];
         [[bar addItemWithTitle:@"" action:nil keyEquivalent:@""] setSubmenu:app];
+        [app addItemWithTitle:@"About " DM_GAME_NAME action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+        [app addItem:NSMenuItem.separatorItem];
+        [app addItemWithTitle:@"Hide " DM_GAME_NAME action:@selector(hide:) keyEquivalent:@"h"];
+        [app addItemWithTitle:@"Hide Others" action:@selector(hideOtherApplications:) keyEquivalent:@"h"].keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+        [app addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
+        [app addItem:NSMenuItem.separatorItem];
         [app addItemWithTitle:@"Quit " DM_GAME_NAME action:@selector(terminate:) keyEquivalent:@"q"];
+        mac_menus_install(win, bar);
         // Cheats (hle_cheats.c): the rows rebuild on every open through the delegate, the same rows the file reload changes
         g_cheats_menu = [DmCheatsMenuDelegate new];
         NSMenu *cm = [[NSMenu alloc] initWithTitle:@"Cheats"];
@@ -1230,8 +1240,14 @@ void front_run(void (*guest)(void)) {
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
+        [wm addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+        [wm addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
+        [wm addItem:NSMenuItem.separatorItem];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        [wm addItem:NSMenuItem.separatorItem];
+        [wm addItemWithTitle:@"Bring All to Front" action:@selector(arrangeInFront:) keyEquivalent:@""];
         NSApp.mainMenu = bar;
+        NSApp.windowsMenu = wm;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {
             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen
@@ -1266,6 +1282,7 @@ void front_run(void (*guest)(void)) {
         pads_start();
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
+            if (e.type == NSEventTypeKeyDown && e.keyCode == 111 && [NSApp.mainMenu performKeyEquivalent:e]) return nil;   // F12 screenshot, before the game swallows function keys
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
@@ -1281,11 +1298,12 @@ void front_run(void (*guest)(void)) {
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
         [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
         [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized) dm_focus_set(2); }];
-        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); mac_menus_focus(0); if (!win.miniaturized) dm_focus_set(2); }];
+        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); mac_menus_focus(1); dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
         display_awake(win.isKeyWindow);   // the window may have become key (makeKeyAndOrderFront above) before these observers were installed
+        mac_menus_focus(win.isKeyWindow);
         // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
         static guest_arg ga; ga.fn = guest;
         pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);

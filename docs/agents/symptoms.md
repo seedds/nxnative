@@ -4,6 +4,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 
 ## Packing
 
+- the Mac menu contribution in PR #104 includes its own packaging, settings window and save paths, which predate the current launcher. Copying its restore action would unpack over a running game's save and report success even when file operations fail. → [In-game menus use the launcher's choices and committed saves](../reference/packing.md#in-game-menus-use-the-launchers-choices-and-committed-saves)
 - the first extraction stops with `nx_extract exit code 131` and `.NET location: Not found`, even though `dotnet` is on `PATH`. The shader translator can fail the same way. → [Homebrew .NET is on PATH but apphosts cannot find the runtime](../reference/packing.md#homebrew-net-is-on-path-but-apphosts-cannot-find-the-runtime)
 - the extraction and captures succeed, then the shader step stops with `translation chain tools do not match the lock file: xlate_source: lock … / actual` and nothing after `actual`, which reads like a stale translator. → [The shader step stops with an empty `xlate_source`](../reference/packing.md#the-shader-step-stops-with-an-empty-xlate_source)
 - packing succeeds, but `unzip -t` or Python's `ZipFile.testzip()` reports a bad CRC for a large deflated file. → [A streamed file changes size and the IPA fails its CRC check](../reference/packing.md#a-streamed-file-changes-size-and-the-ipa-fails-its-crc-check)

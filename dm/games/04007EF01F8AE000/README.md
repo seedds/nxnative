@@ -27,7 +27,7 @@ All 16,888 translate. The Ampere instructions its shaders brought to the transla
 - The scene renders below the screen's size and NVN2's DLSS upscales it, served through MetalFX's temporal scaler ([NVN2's DLSS evaluation through MetalFX's temporal scaler](../../../docs/reference/rendering.md#nvn2s-dlss-evaluation-through-metalfxs-temporal-scaler)). The game sizes both from the display it is told it has ([The Switch 2's largest display buffer](../../../docs/reference/services.md#the-switch-2s-largest-display-buffer)): docked on a 3456x2234 MacBook Pro screen, 2560x1440, so it renders at 1024x576 into a 2048x1152 DLSS output (640x360 into 1280x720 before the host answered the query). It creates a 3840x2160 network too and has not evaluated it so far.
 - The auto exposure averages a luminance histogram with an inlined u64 division; a scene change clears the exposure image before that runs ([Pending clears land before a compute dispatch](../../../docs/reference/rendering.md#pending-clears-land-before-a-compute-dispatch)).
 - The battle maps hold the game's 30 fps on the M3 Pro (p95 33.8 ms over 300 frames).
-- Movies decode through VideoToolbox on chips with an AV1 decoder (M3 and A17 Pro on) and through dav1d on the others ([SDK 22's video decoders: AV1 and the GPU route](../../../docs/reference/movies.md#sdk-22s-video-decoders-av1-and-the-gpu-route)).
+- Movies decode through VideoToolbox on chips with an AV1 decoder (M3 and A17 Pro on) and through dav1d on the others, checked on an M1 Pro by a tester ([SDK 22's video decoders: AV1 and the GPU route](../../../docs/reference/movies.md#sdk-22s-video-decoders-av1-and-the-gpu-route)).
 
 ## Driving it on the Mac
 
@@ -35,7 +35,7 @@ All 16,888 translate. The Ampere instructions its shaders brought to the transla
 
 ## Open
 
-- **AV1 decoding through dav1d**, for Macs and iPads before M3: checked here with `DM_AV1_DAV1D=1` only. A tester with an M1 Pro is trying it ([seedds/nxnative#927](https://github.com/seedds/nxnative/issues/927), where the AV1 change's scope is being settled).
+- **Frame rate on older Macs:** on an M1 Pro (a tester's, [seedds/nxnative#927](https://github.com/seedds/nxnative/issues/927#issuecomment-6575966220)) the busy scenes take 36-38 ms of GPU a frame at 640x360 → 1280x720, at the edge of the game's 30 fps, before the host answered the display size; with it the game renders more on a 1440p-class screen, not measured there yet. The movies played through dav1d on that Mac, both of the first two smooth and in sync.
 - **iOS:** the 10.25 GB block is more than an iPhone allows without the extended-virtual-addressing entitlement; no IPA has been built.
 - **Prewarm list:** [`pso_manifest.tsv`](pso_manifest.tsv) is empty, so the first visit to each scene compiles its pipelines.
 - **DLSS:** the exposure texture, the network's method and preset, and its flag bit `0x20000000` are kept but unused; the 3840x2160 network has never run.

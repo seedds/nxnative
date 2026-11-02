@@ -87,6 +87,13 @@
 - **Fix:** a setting's default may be `<ios>|<mac>`, selected before resolving a profile macro or build variable. Metal 4 uses `DM_GAME_PSO_MTL4|1`, the encode thread `1|0`. The generator validates the platform and the pair. Tests cover a profile with Metal 4 on and one with it off, and both platforms; the host and shader chain are unchanged.
 - **Found on:** synthetic metadata generation for [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) while reviewing [PR #352](https://github.com/seedds/nxnative/pull/352); checked against the native defaults, without a gameplay run.
 
+### The Mac settings window stays on screen after Play
+
+- **Symptom:** in a Mac app, the settings window stays on screen after **Play**, not responding (a spinning cursor over it), until the game ends.
+- **Cause:** the window runs in the launcher's process (`dm/mac/Launcher.swift`). `finish` ordered the window out and stopped `NSApp.run`; then `launcher.c` started the host and blocked in `waitpid`, so the main thread never ran another run-loop pass. A window's order-out is committed only at the end of such a pass, and its default fade-out runs over several passes, so the window never left the screen. With the run loop kept running, the same order-out took effect at once.
+- **Fix:** `finish` sets the window's `animationBehavior` to `.none` before the order-out, and `dm_mac_launcher` calls `CATransaction.flush()` after `run()` returns, before it hands back to `launcher.c`. Neither alone was enough. Check: a copy of the window with a timed Play and a `CGWindowListCopyWindowInfo` probe while the thread then blocks; the window was still listed 2 and 4 s after Play before the fix, and gone 3 times in 3 after it. `test_launcher_storage.py` and `test_nsp_mac_app.py` pass.
+- **Found on:** the Mac app of [Breath of the Wild](../../dm/games/01007EF00011E000/README.md); applies to every Mac app.
+
 ## External drives
 
 ### A game folder on an exFAT drive reads one update as two, or fails to remove a folder
@@ -151,6 +158,22 @@
 - **Cause:** the scan took one title ID per file (the file name tags both games, and the first tag won), and `nx_extract` kept the NCAs of every Application content meta and took the Program NCA of the lowest title ID. Nothing could name the other application.
 - **Fix:** the XCI's content metas make it [count as each title it holds](#a-merged-nsp-base-game-update-and-dlc-in-one-file-packs-as-one-title), so the scan finds two games and stops with `more than one game in the folder`, naming both. `--title-id <title ID>` (`TITLE_ID` in Spyder) picks the game to pack from them; the script passes its title ID to every base extraction (`nx_extract … --app <title ID>`), and `OpenNsp` keeps only that title's Application and Patch content metas' NCAs (an `--app` the package has no content meta of stops with the ones it has). Each game gets its own `<title ID>_build/` folder and app.
 - **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md), on the same XCI as [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md) ([PR #701](https://github.com/seedds/nxnative/pull/701), which packed both from the XCI with an earlier form of the option). This form is checked with a test XCI's file table and with Balatro's packages (`--app` of a title the package does not hold stops, naming the one it has); no two-game XCI is on hand.
+
+## Damaged packages
+
+### Extraction of a damaged NSP ends in "The LinkedList is empty"
+
+- **Symptom:** `nx_extract` stops with exit code 134 and `Unhandled exception. System.InvalidOperationException: The LinkedList is empty.` from `LibHac.Tools.FsSystem.CachedStorage.GetBlock`, with no `[RED] hash check failed` list, with or without `--allow-damaged`.
+- **Cause:** a damaged NSP with more than a few damaged files used up LibHac 0.19's hash cache. `CachedStorage.GetBlock` takes a block off its list before reading into it and does not put it back when the read fails, so the 4 blocks of a filesystem last for 4 failed reads and the next read that misses the cache throws. That exception is no hash error, so `nx_extract` did not catch it. A copy of SteamWorld Dig with 2 flipped bytes listed its 2 files; with 40 it crashed.
+- **Fix:** each hash error gets a new checked filesystem (`Failed` in `dm/tools/nx_extract/Program.cs`, on the image, folder and manifest paths), so a damaged NSP lists every damaged file and stops with exit code 3, or goes on with `--allow-damaged`. The same copy with 40 flipped bytes lists all 36 files. `test_every_damaged_file_is_listed_past_the_hash_cache` in `dm/tools/tests/test_romfs_read.py` puts a real RomFS behind a real `CachedStorage` on all three paths, with no NSP or keys.
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) ([issue #810](https://github.com/seedds/nxnative/issues/810), whose reporter diagnosed the lost cache blocks and carried a local patch that reopens the filesystem). Applies to any game.
+
+### A crash from a damaged NSP's file looks like a host bug
+
+- **Symptom:** a build packed with `--allow-damaged` crashes or draws wrongly in game code, the same way on each run, at a place unrelated to the host's last work. The log gave no sign of damage; the build log's list (`logs/extract_<version>.log`) is the only record, and it is not part of a bug report's run log.
+- **Cause:** `--allow-damaged` writes files that failed the NCA's hash check as they were read, and nothing told the running host. A wrong byte in a compressed pack decodes to wrong data far from where the game then fails. A hash block also spans neighbouring small files, so a listed file's bytes may still be right.
+- **Fix:** the entry's last byte in a `DMROMFS1` index ([format](../../dm/tools/romfs_image.py)) is 1 on a file that failed the check (`img_ent.flags`, `romfs_image.h`; `nx_extract` sets it, and every reader refuses another value, or a flag on a directory). The mark stays with the image in an IPA, a Mac app or a hand-copied `romfs.img`. The host logs `[RED] fs RomFS image <path>: damaged files <N>: ...` at the mount and `[RED] fs rom:/<file> failed the NCA's hash check ...` at each damaged file's first open. A clean image is byte-identical to one from before this mark (checked on SteamWorld Dig), so its identity does not change. Not marked: an image extracted before this change, and folder extraction, which has no index (the NSP script writes images). Search a crash's log for `hash check` before looking for a cause in the host.
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) ([issue #810](https://github.com/seedds/nxnative/issues/810)). `dm/host/tests/t_fs.c` checks the count, the single report at first open and the refused flags; a boot of SteamWorld Dig on a deliberately damaged image logged the count and the files it opened.
 
 ## Sparse base games
 

@@ -5,6 +5,7 @@ import struct
 import sys
 import unittest
 import zlib
+from unittest import mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -49,6 +50,87 @@ class Bnd2(unittest.TestCase):
 
     def test_no_glslc_output_finds_nothing(self):
         self.assertEqual(ss.bnd2_shaders(bundle([(1, 8, [b'', b'no shader here'])]), '/C.BNDL'), [])
+
+    def test_truncated_header_is_named(self):
+        with self.assertRaisesRegex(SystemExit, '/bad: bnd2 header'):
+            ss.bnd2_resources(b'bnd2', '/bad')
+
+    def test_table_cannot_start_inside_the_header(self):
+        d = bytearray(bundle([(1, 8, [b'x'])]))
+        struct.pack_into('<I', d, 0x14, 0x20)
+        with self.assertRaisesRegex(SystemExit, 'entries at 0x20 is not a layout'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_table_cannot_end_past_the_file(self):
+        d = bytearray(bundle([(1, 8, [b'x'])]))
+        struct.pack_into('<I', d, 0x10, 0xffffffff)
+        with self.assertRaisesRegex(SystemExit, '4294967295 entries at 0x30 is not a layout'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_stored_range_cannot_be_silently_truncated(self):
+        d = bundle([(1, 8, [b'raw block'])], compressed=False)
+        with self.assertRaisesRegex(SystemExit, 'block 0: .* lie outside'):
+            ss.bnd2_resources(d[:-1], '/bad')
+
+    def test_offsets_cannot_point_into_the_table(self):
+        d = bytearray(bundle([(1, 8, [b'x'])], compressed=False))
+        struct.pack_into('<I', d, 0x18, 0x30)
+        with self.assertRaisesRegex(SystemExit, 'inside the resource table'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_declared_block_with_nothing_stored_is_named(self):
+        d = bytearray(bundle([(1, 8, [b'x'])], compressed=False))
+        struct.pack_into('<I', d, 0x30 + 0x20, 0)
+        with self.assertRaisesRegex(SystemExit, 'declares 1 bytes and has none stored'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_damaged_zlib_stream_names_the_resource(self):
+        d = bytearray(bundle([(1, 8, [b'x' * 100])]))
+        d[-3] ^= 0xff
+        with self.assertRaisesRegex(SystemExit, 'resource 0000000000000001 block 0: damaged zlib stream'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_inflation_stops_at_declared_size(self):
+        d = bytearray(bundle([(1, 8, [b'x' * 10000])]))
+        struct.pack_into('<I', d, 0x30 + 0x10, 1)
+        with self.assertRaisesRegex(SystemExit, 'decompressed size differs'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_inflation_asks_for_no_more_than_the_declared_size(self):
+        real = zlib.decompressobj(); asked = []
+        class Spy:
+            eof = property(lambda self: real.eof)
+            def decompress(self, data, n):
+                asked.append(n)
+                return real.decompress(data, n)
+        d = bundle([(1, 8, [b'x' * 100])])
+        with mock.patch.object(ss.zlib, 'decompressobj', Spy):
+            ss.bnd2_resources(d, '/ok')
+        self.assertEqual(asked, [101])
+
+    def test_stream_shorter_than_declared_is_rejected(self):
+        d = bytearray(bundle([(1, 8, [b'x' * 100])]))
+        struct.pack_into('<I', d, 0x30 + 0x10, 101)
+        with self.assertRaisesRegex(SystemExit, 'decompressed size differs'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_incomplete_zlib_stream_is_rejected(self):
+        d = bytearray(bundle([(1, 8, [b'x' * 100])]))
+        n = struct.unpack_from('<I', d, 0x30 + 0x20)[0]
+        struct.pack_into('<I', d, 0x30 + 0x20, n - 1)
+        with self.assertRaisesRegex(SystemExit, 'incomplete zlib stream'):
+            ss.bnd2_resources(d, '/bad')
+
+    def test_unpacked_size_alignment_nibble_is_not_length(self):
+        d = bytearray(bundle([(1, 8, [b'content'])]))
+        struct.pack_into('<I', d, 0x30 + 0x10, 0x40000007)
+        self.assertEqual(ss.bnd2_resources(d, '/ok'), [(1, 8, 0, b'content')])
+
+    def test_uncompressed_size_must_match(self):
+        d = bytearray(bundle([(1, 8, [b'x'])], compressed=False))
+        struct.pack_into('<I', d, 0x30 + 0x10, 2)
+        with self.assertRaisesRegex(SystemExit, 'stored size differs'):
+            ss.bnd2_resources(d, '/bad')
 
 
 if __name__ == '__main__':

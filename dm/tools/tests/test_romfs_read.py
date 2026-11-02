@@ -95,9 +95,94 @@ class ReadImage(unittest.TestCase):
                 self.assertEqual(z.namelist(), ['Payload/', 'Payload/Game.app/', 'Payload/Game.app/romfs.img'])
                 self.assertEqual(z.read('Payload/Game.app/romfs.img'), self.image.read_bytes())
 
+    def test_damaged_flag_is_read_on_files_only(self):
+        with open(self.image, 'rb') as f: _, ioff, _, _ = romfs_image.HEAD.unpack(f.read(romfs_image.HEAD.size))
+        loaded = romfs.Image(self.image); file_k, dir_k = loaded.find('a'), loaded.find('data')
+        def flagged(k, flags):
+            raw = bytearray(self.image.read_bytes()); raw[ioff + k * romfs.ENT.size + romfs.ENT.size - 1] = flags
+            out = self.root / 'flagged.img'; out.write_bytes(raw); return out
+        self.assertEqual(romfs.Image(flagged(file_k, 1)).entry(file_k)[5], 1)
+        with self.assertRaises(ValueError): romfs.Image(flagged(file_k, 2))
+        with self.assertRaises(ValueError): romfs.Image(flagged(dir_k, 1))
+        self.assertEqual(romfs_image.read_index(flagged(file_k, 1)), romfs_image.read_index(self.image))
+
+
+# Reflection fixture for the extractor's damaged paths: a real RomFS (LibHac's builder) behind a real CachedStorage of 4 blocks, as the NCA's hash layers put it, over a storage
+# that fails each block holding MAGIC with an integrity result. Prints one line per path: "<path name> <Damaged() exit code> <damaged files, comma-separated>".
+DAMAGED_FIXTURE = r'''
+using System; using System.Collections.Generic; using System.IO; using System.Reflection;
+using LibHac; using LibHac.Fs; using LibHac.Fs.Fsa; using LibHac.FsSystem; using LibHac.Tools.FsSystem; using LibHac.Tools.FsSystem.RomFs; using Path = System.IO.Path;
+class Failing : IStorage {
+    readonly IStorage b; public Failing(IStorage s) { b = s; }
+    public override Result Read(long o, Span<byte> d) { var r = b.Read(o, d); if (r.IsFailure()) return r; return d.IndexOf("HASHFAILED!!"u8) >= 0 ? new Result(2, 4602) : Result.Success; }
+    public override Result Write(long o, ReadOnlySpan<byte> s) => b.Write(o, s);
+    public override Result Flush() => b.Flush();
+    public override Result SetSize(long s) => b.SetSize(s);
+    public override Result GetSize(out long s) => b.GetSize(out s);
+    public override Result OperateRange(Span<byte> o, OperationId i, long a, long c, ReadOnlySpan<byte> d) => b.OperateRange(o, i, a, c, d);
+}
+class Fixture {
+    const BindingFlags S = BindingFlags.NonPublic | BindingFlags.Static;
+    static object F(string n) => typeof(P).GetField(n, S).GetValue(null);
+    static void Run(string name, bool allow, string method, params object[] args) {
+        var list = (List<string>)F("g_damaged"); list.Clear();
+        typeof(P).GetField("g_allow", S).SetValue(null, allow);
+        typeof(P).GetMethod(method, S).Invoke(null, args);
+        var paths = new List<string>(list); paths.Sort(StringComparer.Ordinal);
+        int code = (int)typeof(P).GetMethod("Damaged", S).Invoke(null, null);
+        Console.WriteLine($"RESULT {name} {code} {string.Join(",", paths)}");
+    }
+    static void Main(string[] a) {
+        IStorage rom = new RomFsBuilder(new LocalFileSystem(a[0])).Build();
+        Func<IFileSystem> open = () => new RomFsFileSystem(new CachedStorage(new Failing(rom), 0x4000, 4, true));
+        typeof(P).GetField("g_lenient", S).SetValue(null, (Func<IFileSystem>)(() => new RomFsFileSystem(rom)));
+        string o = a[1];
+        Run("image-strict", false, "WriteImage", open, Path.Combine(o, "strict.img"));
+        Run("image-allow", true, "WriteImage", open, Path.Combine(o, "allow.img"));
+        Run("copy-strict", false, "Copy", open, Path.Combine(o, "strict"), null);
+        Run("copy-allow", true, "Copy", open, Path.Combine(o, "allow"), null);
+        Run("manifest", false, "Manifest", open, Path.Combine(o, "manifest", "romfs_manifest.tsv"));
+    }
+}
+'''
+
 
 @unittest.skipUnless(shutil.which('dotnet'), '.NET SDK required')
 class ExtractImage(unittest.TestCase):
+    def test_every_damaged_file_is_listed_past_the_hash_cache(self):
+        # 8 damaged files use up CachedStorage's 4 blocks: a filesystem kept after its failures throws "The LinkedList is empty" and no list comes out (issue #810).
+        # MAGIC sits in the middle of a 64 KB file, so the 16 KB block that fails holds only that file; .nro makes the manifest read the whole file.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); src = root / 'files'; src.mkdir(); out = root / 'out'; out.mkdir()
+            bad, good = {}, {}
+            for i in range(8):
+                body = bytearray(bytes([0x40 + i]) * 0x10000); body[0x8000:0x800c] = b'HASHFAILED!!'
+                bad[f'bad{i}.nro'] = bytes(body); good[f'good{i}'] = bytes([0x60 + i]) * 0x10000
+            for name, data in {**bad, **good}.items(): (src / name).write_bytes(data)
+            project = root / 'fixture.csproj'
+            project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>'
+                               '<StartupObject>Fixture</StartupObject><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup><ItemGroup>'
+                               f'<Compile Include="{REPO}/dm/tools/nx_extract/Program.cs" Link="Extractor.cs" />'
+                               '<PackageReference Include="LibHac" Version="0.19.0" /></ItemGroup></Project>')
+            (root / 'Fixture.cs').write_text(DAMAGED_FIXTURE)
+            result = subprocess.run(['dotnet', 'run', '--project', str(project), '--', str(src), str(out)], capture_output=True, text=True, timeout=240)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            rows = {r[1]: r[2:] for r in (line.split(' ') for line in result.stdout.splitlines() if line.startswith('RESULT '))}
+            listed = ','.join(f'/{name}' for name in sorted(bad))
+            self.assertEqual(rows, {'image-strict': ['3', listed], 'image-allow': ['0', listed], 'copy-strict': ['3', listed], 'copy-allow': ['0', listed], 'manifest': ['3', listed]})
+            self.assertEqual(result.stdout.count('[RED] hash check failed: /bad0.nro'), 5)   # the list itself, on each of the five paths
+
+            self.assertFalse((out / 'strict.img').exists()); self.assertFalse(Path(str(out / 'strict.img') + '.part').exists())
+            image = romfs.Image(out / 'allow.img'); virtual = romfs.Path(out / 'allow.img')
+            for name, data in {**bad, **good}.items():
+                self.assertEqual((virtual / name).read_bytes(), data, name)
+                self.assertEqual(image.entry(image.find(name))[5], 1 if name in bad else 0, name)
+
+            self.assertEqual(sorted(p.name for p in (out / 'strict').iterdir()), sorted(good))
+            self.assertEqual({p.name: p.read_bytes() for p in (out / 'allow').iterdir()}, {**bad, **good})
+            self.assertEqual(len((out / 'manifest/romfs_manifest.tsv').read_text().splitlines()), 17)   # its header and each file, damaged ones too
+
+
     def test_extractor_streams_populated_and_empty_filesystems(self):
         # Exercise the actual LibHac writer without an NSP or keys, including empty
         # directories and a file larger than its streaming buffer.
@@ -112,13 +197,14 @@ class ExtractImage(unittest.TestCase):
                                '<PackageReference Include="LibHac" Version="0.19.0" /></ItemGroup></Project>')
             (root / 'Fixture.cs').write_text('using System.Reflection; using LibHac.FsSystem; class Fixture { static void Main(string[] a) {'
                 'var write = typeof(P).GetMethod("WriteImage", BindingFlags.NonPublic | BindingFlags.Static);'
-                'using var fs = new LocalFileSystem(a[0]); write.Invoke(null, new object[]{fs, a[1]});'
+                'using var fs = new LocalFileSystem(a[0]); write.Invoke(null, new object[]{(System.Func<LibHac.Fs.Fsa.IFileSystem>)(() => fs), a[1]});'
                 'write.Invoke(null, new object[]{null, a[2]}); }}')
             image, empty = root / 'RomFS.img', root / 'empty.img'
             result = subprocess.run(['dotnet', 'run', '--project', str(project), '--', str(src), str(image), str(empty)], capture_output=True, text=True, timeout=120)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             shutil.rmtree(src)
             virtual = romfs.Path(image)
+            loaded = romfs.Image(image); self.assertEqual({loaded.entry(k)[5] for k in range(loaded.count)}, {0})   # no flag without a failed file: a clean image's identity stays as it was
             self.assertEqual((virtual / 'data/large').read_bytes(), data)
             self.assertTrue((virtual / 'data/empty').is_dir()); self.assertEqual((virtual / 'zero').read_bytes(), b'')
             self.assertEqual(list(romfs.Path(empty).iterdir()), [])

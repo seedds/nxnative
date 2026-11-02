@@ -4,7 +4,7 @@
 // --manifest: the RomFS is not written, only a list <output dir>/romfs_manifest.tsv (path, size, first 32 bytes), for surveying a new game (a large game's RomFS is well over 10 GB),
 //   and its NRO modules under <output dir>/romfs_nro/ (small: their imports decide the graphics API and the modules, Portal 2's 21 NROs are 60 MB).
 // A damaged NSP (a file whose data fails the NCA's hash check, e.g. a copy cut short or a broken download) stops the extraction with exit code 3 after listing every damaged file;
-//   --allow-damaged writes those files as read instead and only lists them (Super Mario Galaxy's base NSP with 147 MB zeroed: its two prologue WebM movies).
+//   --allow-damaged writes those files as read instead and only lists them (Super Mario Galaxy's base NSP with 147 MB zeroed: its two prologue WebM movies). A RomFS image marks them in its index, and the host names them in its log.
 // A sparse base program (Minecraft Dungeons II: its Program NCA leaves out data that its update carries) can be read only with its update: without one, exit code 4.
 // Add-on content: nx_extract <prod.keys> --aoc <DLC NSP> <output dir> writes the RomFS of the DLC's data NCA to <output dir> (the packing script puts it at aoc/<index>/, the host mounts it through DM_AOC_DIR).
 // Title ID of a package: nx_extract <prod.keys> --title <NSP, NSZ, XCI or XCZ> prints "title <16 hex digits>", the lowest title ID of the package's meta NCAs (the base game's, before its update's or a DLC's),
@@ -68,8 +68,7 @@ static class P {
             return 4;
         }
         // Code section: the update's ExeFS is complete; opening it layered over the base gives the same result
-        IFileSystem exefs = updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);
-        Copy(exefs, Path.Combine(outDir, "ExeFS"), null);
+        Copy(() => updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(outDir, "ExeFS"), null);
         string[] mods = Directory.GetFiles(Path.Combine(outDir, "ExeFS")); Array.Sort(mods, StringComparer.Ordinal);
         foreach (string p in mods) {   // build ID of every NSO module (main, sdk, subsdk*, rtld...)
             if (new FileInfo(p).Length < 0x50) continue;
@@ -85,12 +84,13 @@ static class P {
             Console.WriteLine("program has no data section: empty RomFS");
             return Damaged();
         }
-        IStorage romfs = updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        IFileSystem Romfs(IntegrityCheckLevel level) => new RomFsFileSystem(updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, level) : baseProg.OpenStorage(NcaSectionType.Data, level));
+        Func<IFileSystem> romfs = () => Romfs(IntegrityCheckLevel.ErrorOnInvalid);
         // the same RomFS without hash checks, for reading damaged files as they are (--allow-damaged)
-        g_lenient = () => new RomFsFileSystem(updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid));
-        if (manifest) Manifest(new RomFsFileSystem(romfs), Path.Combine(outDir, "romfs_manifest.tsv"));
-        else if (image) WriteImage(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS.img"));
-        else Copy(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS"), cmpDir);
+        g_lenient = () => Romfs(IntegrityCheckLevel.IgnoreOnInvalid);
+        if (manifest) Manifest(romfs, Path.Combine(outDir, "romfs_manifest.tsv"));
+        else if (image) WriteImage(romfs, Path.Combine(outDir, "RomFS.img"));
+        else Copy(romfs, Path.Combine(outDir, "RomFS"), cmpDir);
         return Damaged();
     }
 
@@ -119,6 +119,9 @@ static class P {
     // Files whose data failed the hash check: listed at the end; exit code 3 unless --allow-damaged
     static readonly List<string> g_damaged = new List<string>(); static bool g_allow; static Func<IFileSystem> g_lenient; static IFileSystem g_lenientFs;
     static bool HashError(HorizonResultException e) => e.ResultValue.Module == 2 && e.ResultValue.Description >= 4600 && e.ResultValue.Description < 4700;   // fs: integrity verification failures (2002-46xx)
+    // Lists a file that failed the hash check and returns a new checked filesystem to read on with. LibHac's CachedStorage takes a block off its list before reading into it and
+    // does not put it back when the read fails, so after a few failures its 4 blocks are gone and the next read throws "The LinkedList is empty", which is no hash error.
+    static IFileSystem Failed(string path, Func<IFileSystem> open) { g_damaged.Add(path); return open(); }
     static int Damaged() {
         if (g_damaged.Count == 0) return 0;
         foreach (string p in g_damaged) Console.WriteLine($"[RED] hash check failed: {p}");
@@ -135,7 +138,7 @@ static class P {
         Nca data = Pick(pkg, NcaContentType.PublicData, id) ?? Pick(pkg, NcaContentType.Data, id) ?? throw new Exception(id == null ? "no data NCA in the DLC NSP" : $"no data NCA of add-on content {id:x16} in {Path.GetFileName(nsp)}");
         Console.WriteLine($"add-on content {data.Header.TitleId:x16}");
         Directory.CreateDirectory(image ? Path.GetDirectoryName(outDir) : outDir);
-        var fs = new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid));
+        Func<IFileSystem> fs = () => new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid));
         g_lenient = () => new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.IgnoreOnInvalid));
         if (image) WriteImage(fs, outDir); else Copy(fs, outDir, null);
         return Damaged();
@@ -244,11 +247,12 @@ static class P {
     }
 
     sealed class ImageEntry {
-        public string Path; public byte[] Name; public bool Directory; public long Size; public ulong A, B;
+        public string Path; public byte[] Name; public bool Directory, Damaged; public long Size; public ulong A, B;
         public List<ImageEntry> Children = new List<ImageEntry>();
     }
     // Stream the merged, integrity-checked filesystem directly into DMROMFS1. No RomFS directories or per-resource host files are created.
-    static void WriteImage(IFileSystem fs, string dst) {
+    static void WriteImage(Func<IFileSystem> open, string dst) {
+        IFileSystem fs = open?.Invoke();
         var root = new ImageEntry { Path = "/", Name = Array.Empty<byte>(), Directory = true };
         var byPath = new Dictionary<string, ImageEntry>(StringComparer.Ordinal) { ["/"] = root };
         if (fs != null) foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
@@ -279,8 +283,9 @@ static class P {
                     fs.OpenFile(ref f.Ref, e.Path.ToU8Span(), OpenMode.Read).ThrowIfFailure();
                     try { WriteStream(f.Get, output, e.Size, buffer); }
                     catch (HorizonResultException x) when (HashError(x)) {
-                        g_damaged.Add(e.Path);
+                        fs = Failed(e.Path, open);
                         if (!g_allow) continue;
+                        e.Damaged = true;
                         g_lenientFs ??= g_lenient();
                         using var lf = new UniqueRef<IFile>();
                         g_lenientFs.OpenFile(ref lf.Ref, e.Path.ToU8Span(), OpenMode.Read).ThrowIfFailure();
@@ -292,7 +297,7 @@ static class P {
                     long index = output.Position; using var names = new MemoryStream();
                     foreach (var e in entries) {
                         writer.Write(e.A); writer.Write(e.B); writer.Write(checked((uint)names.Position));
-                        writer.Write(checked((ushort)e.Name.Length)); writer.Write((byte)(e.Directory ? 0 : 1)); writer.Write((byte)0);
+                        writer.Write(checked((ushort)e.Name.Length)); writer.Write((byte)(e.Directory ? 0 : 1)); writer.Write((byte)(e.Damaged ? 1 : 0));
                         names.Write(e.Name);
                     }
                     names.Position = 0; names.CopyTo(output); long size = output.Position - index;
@@ -314,7 +319,8 @@ static class P {
     }
 
     // Copy out file by file; files identical to the same path in the compare dir become APFS clones instead
-    static void Copy(IFileSystem fs, string dst, string cmpDir) {
+    static void Copy(Func<IFileSystem> open, string dst, string cmpDir) {
+        IFileSystem fs = open();
         long n = 0, cloned = 0, bytes = 0, written = 0; byte[] buf = new byte[4 << 20], cb = new byte[4 << 20];
         foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
             string rel = e.FullPath.TrimStart('/'), op = Path.Combine(dst, rel);
@@ -323,14 +329,16 @@ static class P {
             using var f = new UniqueRef<IFile>();
             fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
             string cp = cmpDir == null ? null : Path.Combine(cmpDir, rel);
-            if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
-                if (File.Exists(op)) File.Delete(op);
-                if (clonefile(cp, op, 0) != 0) throw new IOException($"clonefile {cp} → {op} failed: errno {Marshal.GetLastWin32Error()}");
-                cloned++; continue;
+            try {
+                if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
+                    if (File.Exists(op)) File.Delete(op);
+                    if (clonefile(cp, op, 0) != 0) throw new IOException($"clonefile {cp} → {op} failed: errno {Marshal.GetLastWin32Error()}");
+                    cloned++; continue;
+                }
+                Write(f.Get, op, e.Size, buf);
             }
-            try { Write(f.Get, op, e.Size, buf); }
             catch (HorizonResultException x) when (HashError(x)) {
-                g_damaged.Add(e.FullPath);
+                fs = Failed(e.FullPath, open);
                 if (!g_allow || g_lenient == null) { File.Delete(op); continue; }
                 g_lenientFs ??= g_lenient();
                 using var lf = new UniqueRef<IFile>();
@@ -350,7 +358,8 @@ static class P {
         }
     }
     // List the RomFS only (path, size, first 32 bytes) without writing game files, except the NRO modules (code the game loads with nn::ro, read like the ExeFS)
-    static void Manifest(IFileSystem fs, string path) {
+    static void Manifest(Func<IFileSystem> open, string path) {
+        IFileSystem fs = open();
         long n = 0, bytes = 0; byte[] h = new byte[32];
         Directory.CreateDirectory(Path.GetDirectoryName(path));
         using var o = new StreamWriter(path);
@@ -361,13 +370,13 @@ static class P {
             fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
             long got = 0; int want = (int)Math.Min(h.Length, e.Size);
             try { if (want > 0) f.Get.Read(out got, 0, h.AsSpan(0, want), ReadOption.None).ThrowIfFailure(); }
-            catch (HorizonResultException x) when (HashError(x)) { g_damaged.Add(e.FullPath); got = 0; }   // the survey goes on; the file is listed as damaged
+            catch (HorizonResultException x) when (HashError(x)) { fs = Failed(e.FullPath, open); got = 0; }   // the survey goes on; the file is listed as damaged
             o.WriteLine($"{e.FullPath}\t{e.Size}\t{Convert.ToHexString(h, 0, (int)got).ToLowerInvariant()}");
             n++; bytes += e.Size;
             if (got == want && e.FullPath.EndsWith(".nro", StringComparison.OrdinalIgnoreCase)) {
                 string op = Path.Combine(Path.GetDirectoryName(path), "romfs_nro", e.FullPath.TrimStart('/'));
                 Directory.CreateDirectory(Path.GetDirectoryName(op));
-                try { Write(f.Get, op, e.Size, new byte[4 << 20]); } catch (HorizonResultException x) when (HashError(x)) { g_damaged.Add(e.FullPath); File.Delete(op); }
+                try { Write(f.Get, op, e.Size, new byte[4 << 20]); } catch (HorizonResultException x) when (HashError(x)) { fs = Failed(e.FullPath, open); File.Delete(op); }
             }
         }
         Console.WriteLine($"{path}: RomFS {n} files {bytes / 1048576.0:F1} MB (manifest only)");

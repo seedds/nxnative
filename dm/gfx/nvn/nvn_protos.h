@@ -738,3 +738,12 @@ typedef void (*NVNT_nvnCommandBufferSignalEvent)(NVNcommandBuffer*, const NVNeve
 //   nvnWindowGetHdrDisplayMetadata
 //   nvnWindowSetHdrContentMetadata
 //   nvnWindowSetHdrDisplayMetadata
+//   nvnTexturePoolWriteDescriptorTableData
+//   nvnSamplerPoolWriteDescriptorTableData
+//   nvnCommandBufferConvertCooperativeVectorMatrix
+//   nvnDeviceGetCooperativeVectorMatrixSize
+//   nvnDeviceConvertCooperativeVectorMatrix
+//   nvnWindowBuilderSetAcquireTimeout
+//   nvnWindowBuilderGetAcquireTimeout
+//   nvnWindowSetAcquireTimeout
+//   nvnWindowGetAcquireTimeout

@@ -430,6 +430,17 @@ def mem_used(patched, modules):
 
 
 # ---- The heap check (scripts/build_ipa_from_nsp.py heap_check): host log lines → profile keys ----
+def depth_signal(log, g):
+    """{'depth_mode': (value, reason)} when a check boot's host log shows the game setting a depth mode the profile does not say; g is the profile the run used. Only the game's own calls count
+    (hle_nvn.c nvnDeviceSetDepthMode, the last one): the [nvn-mtl] lines also report the host's reset to GL at device init. No call means unknown, not GL: the boot may have stopped before the
+    game's NVN setup, so the profile stays as it is. Super Mario RPG sets near = 0 within seconds, and its 24 minute prebuild at the default mode gave an archive where 0 of 34 lookups hit"""
+    calls = re.findall(r'\[nvn\] depth mode near=(0|-w)(?![\w-])', log)
+    if not calls: return {}
+    seen = 'zero' if calls[-1] == '0' else 'gl'
+    if seen == g.get('depth_mode', 'gl'): return {}
+    return {'depth_mode': (seen, f'the game calls nvnDeviceSetDepthMode with near = {"0" if seen == "zero" else "-w"} in the check boot: the pipeline bases made before it runs are made for that mode')}
+
+
 def heap_signals(log, g):
     """{key: (value, reason)} from a heap-check run's host log (hle_svc.c SetHeapSize); g is the profile the run used"""
     out = {}

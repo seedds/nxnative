@@ -499,6 +499,22 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `t_present_crop`: the window's crop wins, the layer crop is used without one, one larger than the texture is ignored, and a real `nvnQueuePresentTexture` queues the layer crop (that check fails with the old call). On an iPhone 15 Pro in handheld mode Link's Awakening's picture fills the screen's height.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md#rendering) (1.1.0, handheld mode on the iPhone).
 
+### Setting the same targets again continues the pass
+
+- **Symptom:** one-draw passes on one target, hundreds of times a frame, with the same attachments each time (a `DM_NVN_GPUPROF` frame: `load` and `store` of the whole target in every line); a low frame rate that follows the target's size.
+- **Cause:** `nvnCommandBufferSetRenderTargets` ended the host's pass even when it named the targets of the open pass. On the Switch the call costs nothing; on a tile-based GPU each pass stores its attachments, and the next one starts again.
+- **Fix:** the call goes on in the open pass when the targets are the same (`rt_same`, `rtc_on` in `nvn_mtl.m`; `DM_NVN_RT_CONTINUE=0` ends every pass as before). What a pass end gave the draws around it is covered: a colour attachment sampled by [the same-pass feedback rule](#same-pass-feedback-read-through-a-snapshot), a game barrier by `barrier_game`. Depth has two rules of its own: a draw that samples the depth attachment after the call ends the pass there, as its memory holds nothing of this pass until then, and a draw writing depth or stencil after a draw of the pass read that attachment ends it too, as the GPU stores the pass tile by tile, so the earlier reads would see the later writes in the tiles already done. A pass with no colour attachment ends as before.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): its ink map (6400x6400 RG8 with a Depth32F-S8) got about 150 one-draw occlusion queries a frame, each after setting the map again: 150 passes of about 1 ms, 42 GB of attachment loads a frame, about 6 fps. Without the depth rules its water came out in grey blocks of tiles: the water reads the scene's depth, then the next draw writes the water's own.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_feedback` (the depth attachment read, then written).
+
+### A render area for passes on very large targets
+
+- **Symptom:** a pass on a very large target costs about the same however little it draws; `DM_NVN_GPUPROF` shows time proportional to the target's area.
+- **Cause:** a pass with no render area covers its whole attachments. A synthetic pass on a flat 6400x6400 target cost about 0.1 ms, so the cost depends on what the target holds or how the host creates it; which of the two was not found.
+- **Fix:** a draw pass on a target of 16 M pixels or more that loads what it keeps stops at the far corner of its scissor when that is at most half the target (`renderTargetWidth` / `renderTargetHeight`, `g_rp_aw` in `nvn_mtl.m`; `DM_NVN_RP_AREA=0` turns it off). Only the draw path opens such a pass. A draw whose scissor leaves the area ends it, and so does anything else that needs the pass (`rp_begin`).
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): each ink stamp's pass, scissored to 1952x2940 at (0, 3460), about 0.95 → 0.32 ms. Metal keeps what lies outside the area (a 6400x6400 target checked texel by texel on an M4 Pro, with API validation on).
+- **Note:** the same stamps sample the map they write, with a game barrier each, so each still takes a whole snapshot of it ([Same-pass feedback read through a snapshot](#same-pass-feedback-read-through-a-snapshot)), about 0.76 ms; a copy of the stamp's rectangle takes 0.09 ms, but nothing proves a stamp samples only inside it. **Open.**
+
 ## Blend, depth and stencil
 
 ### Ten attachment records for eight colors and depth-stencil
@@ -576,7 +592,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** `[nvn] SetConservativeRasterEnable on: ignored by host for now`, followed by `[RED] NVN unimplemented function called: nvnCommandBufferSetConservativeRasterDilate`.
 - **Cause:** `hle_nvn.c` ignores the enable setter and has no implementation for the dilation setter. The requested raster coverage state never reaches Metal.
 - **Fix:** **Open.** Neither setter has been implemented. The opening indoor scene renders and accepts input, but the visual contribution of the missing coverage state has not been isolated. The diagnostic remains visible.
-- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#open) (1.0.0, the first playable bedroom).
+- **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md#open) (1.0.0, the first playable bedroom). [Super Mario RPG](../../dm/games/0100BC0018138000/README.md) calls the dilation setter and `nvnCommandBufferSetSubpixelPrecisionBias` repeatedly and did not turn the enable on along the route tested, so the dilation has nothing to act on there.
 
 ## Vertex input and draws
 
@@ -810,6 +826,30 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** inline uniform updates (`CommandBufferUpdateUniformBuffer`) are replayed as in-order GPU copies (their order inside one encoder: [Metal 4 does not order operations inside one encoder](#metal-4-does-not-order-operations-inside-one-encoder); inside a pass: [Inline uniform updates inside a render pass](#inline-uniform-updates-inside-a-render-pass)). They are snapshotted at encode time (`mtl_sub_update`): the data is copied into a host-owned ring instead of being read from command memory when the GPU runs.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 
+### Pending clears land before a compute dispatch
+
+- **Symptom:** a scene opens near white and fades to its normal colours over several seconds, at each scene change, while the settled picture is right.
+- **Cause:** a full clear with no draw after it waits on the current targets for the next pass that attaches them, as its load action. Copies land such clears first, but a dispatch only ended the open pass. So a clear before a dispatch landed after it. The game resets its auto exposure by clearing the exposure image to 1 and dispatching the shaders that read and write it as an image: the late clear overwrote the exposure they had just written, and adaptation then climbed back from 1.
+- **Fix:** `dispatch` calls `rp_flush` as `copy_t2t` does. A dispatch moved ahead of a pass (`cs_hoist_try`) already waits for no pending clear. The cost is one clear-only pass where a game clears targets and dispatches before drawing to them.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 7 s after boot on the same route, exposure 3.035 and still climbing with 63 % of the frame near white, then 5.555 and settled with 0.1 %. The user's battle scenes, blown white before, look right after it.
+
+### `[[primitive_id]]` in a specialized Metal 4 pipeline
+
+- **Symptom:** a regular lattice of dots over the ground, and the light wrong: three of four layers of an interleaved ambient occlusion array stay empty, while the draws and their bindings look right.
+- **Cause:** a Metal 4 pipeline specialized from a base with unspecialized colour state gives the fragment shader `[[primitive_id]]` 0 for every primitive. The same shader built whole counts properly. Measured in small test programs (16384 0 0 0 pixels per layer, against 4096 each), M6, macOS 27.2. The game writes the layer from the primitive ID, drawing four triangles. Ruled out: `gl_Layer`, view layers, clears, and the classic and Metal 4 API alone. This is a platform behaviour the host cannot change.
+- **Fix:** the reflection records `reads_prim_id` (`raster.primitive_id`, `dmsh_build.py`), and `pso_build_ex` builds such a pipeline whole. Such pipelines give up the specialization's compile time, for these shaders only.
+- **Prebuild:** `pre_desc` (the prebuild of a game's shader pairs) and `pso_offline.py` (the offline archive) leave pairs with such a fragment shader out, as no draw uses their base.
+- **Check:** `t_image_primitive_id` draws four full-screen triangles that store into the layer of their primitive ID through the host's draw path (an attachment-less pass, a metallib loaded as game shaders are). Each of the four layers holds its own primitive's value; without the flag, layers 1 to 3 stay empty (macOS 27.0.1, M3 Pro). `test_pso_offline.py` checks that such a pair is left out.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `b6726be4afc44691`.
+
+### NVN2's DLSS on MetalFX
+
+- **Symptom:** a Switch 2 game calls `nvnCommandBufferEvaluateDlss` and its builder functions, which the host did not have.
+- **Cause:** NVN2 has DLSS as a part of the API, a neural network that runs on NVIDIA's GPU, with no counterpart on the Mac.
+- **Fix:** `hle_nvn.c` takes the builder, the network and the parameters (the network's texture IDs and storage are the driver's own needs and are dropped), and answers `GetOptimalSettings` from the method (0: 2x, 1: 3x, 2: 1x). The replay's `OP_DLSS` runs MetalFX's temporal scaler (`dlss_eval`, `nvn_mtl.m`) over colour, depth and motion vectors, with the jitter and a history reset, falling back to a bilinear draw when there is no scaler. This replaces the upscaler, so the picture is close to the game's, not the same.
+- **Open:** the jitter's sign has not been checked and the bias mask is only logged; no ghosting has been seen.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `gfxa::TaskDLSS`, 1024x576 to 2048x1152.
+
 ### Metal 4 does not order operations inside one encoder
 
 - **Symptom:** tall blue / textured panels that flickered frame to frame: the fountain's vertex shader pushed the water surface to the top of the screen.
@@ -849,6 +889,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** such a binding now counts as the rest of the Metal buffer its address falls in (`sbw_len`): a device pointer that runs past its buffer is out of bounds on Metal, and the host could not give it the Switch's meaning anyway. A write over 64 pages is kept as an interval (up to 64 a submission, overlapping ones merged; the next submissions see them through `gw_commit`), not by page. A write of no known size still stops the tracking.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (GitHub issues #534 and #598, shrines, MacBook Air M2 and M3). The Shrine of Resurrection save shows the load burst: the 300 frames around the world load had 1,200 refusals and 107 load-all store-all passes, now 0 and 47; `DM_NVN_UBP_CHECK=1` found 146,000 shadows equal to the GPU's memory, 0 different. The reporter's log shows the same burst at each load, and 240 refusals a frame in its slow stretches.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sbw` (16 checks: the size-0 outputs of that dispatch do not hit the uniform block's pool, a write of no known size still stops the tracking, the interval list's limit, and the next submission's view through `gw_live`).
+
+### Inline updates of a running submission refused uniform shadows
+
+- **Symptom:** the `residency set` line shows `passes ended to land them for a read` in the tens of thousands, every one `refused … earlier submission running`. The slower the GPU, the more passes, and each pass makes it slower: a scene stays at a very low frame rate once it falls in.
+- **Cause:** a partly covered uniform shadow ([Partial-cover uniform shadows keep passes open](#partial-cover-uniform-shadows-keep-passes-open)) takes the rest from memory, which refused it while a running submission could still write those pages. Two kinds of write counted. The inline updates of the frame before: a game that updates a block every frame refused it for as long as that frame ran, though the CPU knows those bytes. And any write of 16 MB or more, which counted as a write anywhere.
+- **Fix:** inline updates of running submissions are remembered by byte, each with its fence, and laid over memory in the shadow (`um_put`, `um_overlay`; `DM_NVN_UBP_RUNNING=0` refuses as before); a slot a running page holds leaves the other page refused as before. A byte counts only while its fence runs, so what the game writes later is not overwritten. Writes of 16 MB or more are kept whole, by range (`gww_put`, 32 of them; beyond that a write anywhere).
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): its ink query block is updated at 0x00..0x14 and 0x18..0x70 while the shader reads 0x00..0x70, so one unused word leaves it partly covered, before each of about 150 queries a frame; `7866f36373e7` writes a 56 MB buffer each frame. 90,000 refusals every 300 frames became none. `DM_NVN_UBP_CHECK=1` on the first level: 592,000 shadows equal to the GPU's memory, 0 different.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_ubp_running` and `check_t_sbw` (fails with `DM_NVN_UBP_RUNNING=0`).
 
 ### An unbound uniform slot reads the zero bank
 
@@ -928,6 +976,21 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
   - Drawn unconditionally with no `render_cond`, nothing looked wrong in [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (no screen played looked wrong) or [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (nothing seen).
   - [Portal 2](../../dm/games/0100ABD01785C000/README.md) needs no `render_cond` and must not get it: NVIDIA's occlusion culling in its D3D9 layer (`IDirect3DDevice9::SetOcclusionShape`, `materialsystem.nro+0xc1130`) puts a mesh under `SetRenderEnableConditional(RENDER_IF_NOT_EQUAL, pair)` when its shape has a query, else `SetRenderEnable(true)`, so drawing everything only costs GPU time. With the key on, those conditions read 0 / 0 at replay (no report in the submission writes the pairs; memory later held `0xffff` / 0) and visible furniture vanished. **Open:** who writes those pairs and when.
 
+### Report tables that dropped entries
+
+- **Symptom:** with `render_cond`, a 3D scene black or missing behind the HUD, only in scenes with many occlusion queries; a pass dump shows conditions reading `values 1 / 0` on a record a report of the same submission has just written, and clear-only passes on targets just drawn to. Scenes with fewer queries are fine.
+- **Cause:** the reports of a submission were kept in a table of 256, queries and timestamps alike. Once full, a timestamp report was forgotten, its condition read the 1 the CPU wrote, and the clear ran ([Conditional rendering evaluated at replay](#conditional-rendering-evaluated-at-replay)).
+- **Fix:** only timestamp reports are kept per submission, and the query addresses, which are kept apart, are enough for those; both tables grow (`rc_note`, `rc_occ_add`).
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 285 ink queries a frame in its dialogue scene came before the conditional clears, and the lit scene was wiped: a black screen with only the text on it. The opening cutscene has no such queries, and the pier about 160.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_sbw`.
+
+### Query slots running out inside a pass
+
+- **Symptom:** `[RED] visibility slots exhausted`.
+- **Cause:** the visibility buffer holds 8,192 slots and is bound for a whole pass. A new one came only when a pass began, so a single pass with more queries than were left counted nothing for the rest.
+- **Fix:** the draw that needs a slot when none is left ends the pass, and the next begins with a new buffer.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): at the first level's load, one submission with about 9,000 draws.
+
 ## Vulkan layer
 
 The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galaxy needed the additions below, each found from a red line or a screenshot on the route to the Star Festival.
@@ -972,6 +1035,13 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** target 0 blends with a `SRC1` factor and the pixel shader writes outputs 0 and 1. NVN, as Maxwell, takes output 1 as target 0's second source; the translator declares it `[[color(1)]]`, and Metal reads a second source only from `[[color(0), index(1)]]`. With no such output, Metal 4's blend compiler crashes building the pipeline's colour state ([An unwritten secondary blend source](#an-unwritten-secondary-blend-source) left a written output 1 alone).
 - **Fix:** `dmsh_build.py` `fs_dual` gives a pixel shader listed in the profile's `dual_want.tsv` that writes exactly colours 0 and 1 a second entry point, `main0_d`, the same body with output 1 as `[[color(0), index(1)]]` (`entry_d` in its reflection). `pso_desc` takes it for a pipeline whose output-0 target blends with a `SRC1` factor (`pso_reads_src1`); output 1's attachment, if the pass has one, is then left unwritten, as on Maxwell. A shader without the entry point blends with zero for the second source, as an unwritten one, with a red line naming it, and `DM_NVN_DUAL_WANT=<file>` appends every such key to a file for the profile's list. Only listed shaders get the entry point: 5,474 of Arceus's 6,156 pixel shaders write exactly colours 0 and 1, nearly all for a second render target. `t_missing_src1` checks both Metal pipeline paths with the entry point.
 - **Found on:** [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md): `f4f36a03b0c6691d` (`system_resource/gfx2/shader/env/system/ha_post_effects.bnsh`, variation 4: RGBA16Float, destination factor `SRC1_ALPHA`) and `ff45da02e225f961`, in the first minute.
+
+### A shader added to `dual_want.tsv` keeps its cached build
+
+- **Symptom:** adding a pixel shader to the profile's `dual_want.tsv` leaves the build reporting cache hits, the reflection without `entry_d`, and the host logging `[RED] shader ... has no dual-source entry point`.
+- **Cause:** `dmsh_build.py` selects the extra `main0_d` entry point through `DUAL_WANT`, but the per-shader cache key did not include membership in that set. The packing script noticed the table change and reran the builder, which restored the old variant.
+- **Fix:** `shader_key` includes the shader's membership in `DUAL_WANT`. Adding or removing a key invalidates that shader's cached variant; unrelated entries leave its key unchanged. The existing paired-pixel dependency also updates paired vertex keys. No cache deletion is required.
+- **Found on:** [The Legend of Zelda: Skyward Sword HD, issue #928](https://github.com/seedds/nxnative/issues/928), `01002DA013484000`, provisional profile: Link's eye shader and three other dual-source shaders. The reported cinematic fog remains open and has a different, unresolved cause.
 
 ### Dual-source blending from output location 1
 

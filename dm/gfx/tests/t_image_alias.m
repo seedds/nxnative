@@ -180,7 +180,7 @@ int main(void) { @autoreleasepool {
     CHECK(g_image_heap_n==0,"every family heap is released after its textures and views go");
     uint64_t settled=g_dev.currentAllocatedSize;
     for (int i=0;i<8;i++) { @autoreleasepool {
-        pool_t pool={.flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE,.mem=mem,.size=16<<20};
+        pool_t pool={.magic=MAGIC('P','O','O','L'),.flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE,.mem=mem,.size=16<<20};
         tex_t a=image(&pool,993000+i*2,512,512), b=image(&pool,993001+i*2,1024,512);
         mtl_tex_init(&a); mtl_tex_init(&b); mtl_sub_begin();
         CHECK(tex_mtl(&a).heap!=nil,"a recreated family allocates its backing");

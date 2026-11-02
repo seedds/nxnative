@@ -12,8 +12,8 @@ The chain, each link unique or nothing is gated:
   is that size (S = 1, or x1 and xS set from one constant), and nothing after the store writes x1. The gate goes on the store, the register S passed in the gate number's upper bits.
 The forms found: a csel of the default and the option's size rounded up to 4 KB, then str x1 (Unreal Engine 4.27 and 5: DRAGON QUEST VII Reimagined, OCTOPATH TRAVELER 0,
 FINAL FANTASY RESONANCE, SHIN MEGAMI TENSEI V: Vengeance); the default stored only when the variable is 0, then rounded up into x1 and stored again (OCTOPATH TRAVELER II, 4.27);
-str x8 of the default with x1 set from the same constant, reached only when the variable is 0 (Pikmin 4, 4.26); str x1 of the 16 GB default, reached only when the variable is 0
-(DRAGON QUEST XI S, 4.18). OCTOPATH TRAVELER (4.18 without virtual address memory) has the same code; its nninitStartup never reaches it.
+str x8 of the default with x1 set from the same constant, reached only when the variable is 0 (Pikmin 4, 4.26), the constant set before the store or after it (TRIANGLE STRATEGY, 4.27:
+the rewriter then makes that mov x1, x8, so the request takes the gate's size); str x1 of the 16 GB default, reached only when the variable is 0 (DRAGON QUEST XI S, 4.18). OCTOPATH TRAVELER (4.18 without virtual address memory) has the same code; its nninitStartup never reaches it.
 Usage on its own: ue_region.py <module>... (what the chain finds in each)"""
 import bisect, re, struct, sys, os
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
@@ -25,12 +25,12 @@ def branch(ins):
     return ins.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or ins.mnemonic.startswith('b.')
 
 def size_store(img, call, start, md):
-    """(offset of the size store, its register S) for the bl at call, or a reason it is not the engine region's reservation"""
+    """(offset of the size store, its register S, the offset of a later instruction that sets x1 to the same constant, or None) for the bl at call, or a reason it is not the engine region's reservation"""
     a = call
     while a - 4 >= start and a - call > -64:
         if branch(next(md.disasm(img[a - 4:a], a - 4))): break
         a -= 4
-    vals, stores, x1_at = {}, [], None   # register → ('c', constant) | ('page',) | ('lo', the low 12 bits of an address)
+    vals, stores, last = {}, [], {}   # vals: register → ('c', constant) | ('page',) | ('lo', the low 12 bits of an address); last: register → where it was last written
     for ins in md.disasm(img[a:call], a):
         ops, m = ins.operands, ins.mnemonic
         reg = lambda o, ins=ins: ins.reg_name(o.reg)
@@ -45,8 +45,7 @@ def size_store(img, call, start, md):
         elif m == 'adrp': v = ('page',)
         elif m == 'add' and len(ops) == 3 and ops[2].type == ARM64_OP_IMM and vals.get(reg(ops[1])) == ('page',): v = ('lo', ops[2].imm)
         written = {ins.reg_name(w).replace('w', 'x', 1) for w in ins.regs_access()[1]}
-        for x in written: vals.pop(x, None)
-        if 'x1' in written: x1_at = ins.address
+        for x in written: vals.pop(x, None); last[x] = ins.address
         if v: vals[d] = v
     x0 = vals.get('x0')
     if not x0 or x0[0] != 'lo': return None, 'x0 is no base variable'
@@ -54,9 +53,13 @@ def size_store(img, call, start, md):
     if not stores: return None, 'no store of the size beside the base variable'
     off, s, _, val = stores[-1]
     if s is None: return None, 'the size stored is xzr'
-    if x1_at is not None and x1_at > off: return None, f'x1 written after the size store at {off:#x}'
+    x1_at = last.get('x1')
+    if x1_at is not None and x1_at > off:
+        # The same constant set again after the store, with S still holding it: patch_nso.py makes that instruction mov x1, xS, so the request takes what the gate gave S
+        if val and val[0] == 'c' and vals.get('x1') == val and last.get(f'x{s}', off) <= off: return (off, s, x1_at), None
+        return None, f'x1 written after the size store at {off:#x}'
     if s != 1 and (not val or val[0] != 'c' or vals.get('x1') != val): return None, f'x1 is not the x{s} stored at {off:#x}'
-    return (off, s), None
+    return (off, s, None), None
 
 def plt_stubs(img, text_end, name):
     """Offsets of the PLT stubs of the import name: adrp x16, ldr x17, [x16, #lo], add x16, x16, #lo, br x17 through a GOT slot its R_AARCH64_JUMP_SLOT relocation (DT_JMPREL) names"""
@@ -90,18 +93,18 @@ def plt_stubs(img, text_end, name):
     return out
 
 def find(img, text_end, ro_off, data_off):
-    """(gate site, size register, reason) when the chain holds; (None, None, why not) otherwise, with why starting '[RED] ' when the option is there but the reservation is not
-    found (the engine would ask for its whole default)"""
-    if img.find(OPTION, ro_off, data_off) < 0: return None, None, 'no engine region option'
+    """(gate site, size register, the instruction to make mov x1, xS or None, reason) when the chain holds; (None, None, None, why not) otherwise, with why starting '[RED] ' when the
+    option is there but the reservation is not found (the engine would ask for its whole default)"""
+    if img.find(OPTION, ro_off, data_off) < 0: return None, None, None, 'no engine region option'
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from nso_syms import defined
     from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
     md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
     syms = defined(img)
     sym = syms.get('nninitStartup')
-    if not sym: return None, None, '[RED] Unreal\'s engine region option but no nninitStartup symbol'
+    if not sym: return None, None, None, '[RED] Unreal\'s engine region option but no nninitStartup symbol'
     stubs = plt_stubs(img, text_end, ALLOCATE)
-    if not stubs: return None, None, '[RED] Unreal\'s engine region option but no nn::os::AllocateAddressRegion import'
+    if not stubs: return None, None, None, '[RED] Unreal\'s engine region option but no nn::os::AllocateAddressRegion import'
     word = lambda a: struct.unpack_from('<I', img, a)[0]
     target = lambda a: a + (((word(a) & 0x3FFFFFF) ^ 0x2000000) - 0x2000000) * 4
     # Function starts: the targets of every bl and the defined symbols. A function here runs from its start to the next one (many have no FDE: DRAGON QUEST VII Reimagined's
@@ -123,9 +126,9 @@ def find(img, text_end, ro_off, data_off):
             if got: found.append((p, start, *got))
             else: why.append(f'{p:#x}: {no}')
     if len(found) != 1:
-        return None, None, f'[RED] Unreal\'s engine region: {len(found)} reservations in nninitStartup ({", ".join(f"{f:#x}" for f in fns)})' + ''.join(f'; {x}' for x in why)
-    call, start, off, s = found[0]
-    return off, s, f'Unreal\'s engine region: reserved at {call:#x} in nninitStartup\'s {start:#x}, its size stored from x{s} at {off:#x}'
+        return None, None, None, f'[RED] Unreal\'s engine region: {len(found)} reservations in nninitStartup ({", ".join(f"{f:#x}" for f in fns)})' + ''.join(f'; {x}' for x in why)
+    call, start, off, s, x1_mov = found[0]
+    return off, s, x1_mov, f'Unreal\'s engine region: reserved at {call:#x} in nninitStartup\'s {start:#x}, its size stored from x{s} at {off:#x}' + (f', x1 set from it at {x1_mov:#x}' if x1_mov is not None else '')
 
 if __name__ == '__main__':
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -133,5 +136,5 @@ if __name__ == '__main__':
     for path in sys.argv[1:]:
         try: m = nso.read(path)
         except nso.Error as e: print(f'{path}\t-\t{e}'); continue
-        off, s, why = find(bytes(m.image), m.text_end, m.segments[1][0], m.segments[2][0])
+        off, s, x1_mov, why = find(bytes(m.image), m.text_end, m.segments[1][0], m.segments[2][0])
         print(f'{path}\t{m.build_id[:16].hex()}\t{why}')

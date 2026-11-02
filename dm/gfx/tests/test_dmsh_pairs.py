@@ -107,13 +107,16 @@ class Pairing(unittest.TestCase):
 
     def test_vertex_cache_depends_on_extra_pairs_and_pixel_code(self):
         self.ns.update(FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, TOOL_FP=b'tools', CODE_FP='code',
-                       PROFILE_ROWS=b'', shader_rule_source=lambda name: b'')
+                       PROFILE_ROWS=b'', DUAL_WANT=set(), shader_rule_source=lambda name: b'')
         key = self.ns['shader_key']
         v1 = key('v', 'pkg.bin', b'vertex')
         self.ns['PAIRS']['v'].remove('f6')
         self.assertNotEqual(v1, key('v', 'pkg.bin', b'vertex'))
         f1, f2 = key('f1', 'pkg.bin', b'pixel'), key('f1', 'pkg.bin', b'changed pixel')
         self.assertNotEqual(self.ns['pair_keyed'](v1, [f1]), self.ns['pair_keyed'](v1, [f2]))
+        self.ns['DUAL_WANT'].add('f1')
+        dual = key('f1', 'pkg.bin', b'pixel')
+        self.assertNotEqual(self.ns['pair_keyed'](v1, [f1]), self.ns['pair_keyed'](v1, [dual]))
 
     @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
     def test_metal_archive_with_padded_regular_and_pulling_entries(self):

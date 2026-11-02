@@ -1,5 +1,14 @@
 # Packing
 
+## Mac game actions
+
+### In-game menus use the launcher's choices and committed saves
+
+- **Symptom:** the Mac menu contribution in [PR #104](https://github.com/seedds/nxnative/pull/104) includes its own packaging, settings window and save paths, which predate the current launcher. Copying its restore action would unpack over a running game's save and report success even when file operations fail.
+- **Cause:** the launcher now owns the bundle, paths, validated saved choices and cloud synchronization; the host writes transactional working saves and commits them separately. Menu UI cannot recreate that state independently.
+- **Fix:** `menus_mac.m` adds actions to the existing menu bar. Console mode writes the shared string choice and removes the tested default; explicit overrides stay fixed. `dm_audio_mute` silences output after consuming audio, independently of lifecycle suspension. Manual backups use `save_backup_mac.c` and the existing checked `.dmsync` format. Export clones committed normal/device saves through the filesystem's locking hook, packs off the main thread and replaces the archive only on success. Restore stages and checks the archive, then terminates the host. The supervising launcher holds a per-save lease, waits for the host, finishes its cloud send, preserves recovery copies, replaces the directories with rollback on failure and sends the restored save. A raw developer host is outside that lease and must be stopped first. [Playing](../playing.md#mac-menus) describes the actions.
+- **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md#found-on-this-game), the original #104 game. The extracted implementation has asset-free AppKit, audio-callback and save tests; the game note records the opening/title run and its toolchain limits.
+
 ## Build tools
 
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime

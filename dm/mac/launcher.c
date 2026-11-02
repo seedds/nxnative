@@ -22,10 +22,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "romfs_image.h"
 #include "save_sync.h"
+#include "save_backup_mac.h"
+#include <removefile.h>
 
 extern char **environ;
 int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
@@ -47,12 +50,13 @@ static int info_string(const char *key, char *out, size_t n) {   // a string key
     return v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, out, (CFIndex)n, kCFStringEncodingUTF8) && *out;
 }
 
-static void alert(const char *title, const char *msg) {   // a dialog (the app has no window of its own), and the same line on stderr
-    fprintf(stderr, "[RED] %s\n", msg);
+static void notice(const char *title, const char *msg) {   // a dialog (the app has no window of its own), and the same line on stderr
+    fprintf(stderr, "launcher: %s\n", msg);
     char *script = "on run argv\ndisplay alert (item 1 of argv) message (item 2 of argv) as critical\nend run";
     char *argv[] = {"osascript", "-e", script, (char *)title, (char *)msg, NULL}; pid_t pid; int st;
     if (!posix_spawnp(&pid, "osascript", NULL, NULL, argv, environ)) while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
 }
+static void alert(const char *title, const char *msg) { fprintf(stderr, "[RED] %s\n", msg); notice(title, msg); }
 
 static int modules_present(const char *dm) {   // the packer's inventory detects even a missing binary/table pair
     CFBundleRef b = CFBundleGetMainBundle(); if (!b) return 0;
@@ -199,18 +203,48 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of every shader pair: the first start builds none
     if (*lang) setenv("DM_LANG", lang, 0);
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
+    // Resolve relative save paths in the same working folder the host will inherit.
     if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", sup); return 1; }
+    // Keep two app instances from using the same save while one restores it. CLOEXEC keeps the lease in this supervising process.
+    char effective[PATH_MAX], lease[PATH_MAX], restore[PATH_MAX] = "";
+    mkdirs(getenv("DM_SAVE"));
+    if (!realpath(getenv("DM_SAVE"), effective) || snprintf(lease, sizeof lease, "%s.mac-lock", effective) >= (int)sizeof lease) {
+        alert(name, "The save folder is unavailable. The game was not started."); return 1;
+    }
+    int lock = open(lease, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB)) { if (lock >= 0) close(lock); alert(name, "Another game instance is using this save folder, or it cannot be locked. Close that instance before starting this one."); return 1; }
+    // A private per-run folder carries one checked restore request from the host to its parent. Never trust an inherited path.
+    unsetenv("DM_MAC_RESTORE_DIR");
+    if (snprintf(restore, sizeof restore, "%s/restore-XXXXXX", temp) < (int)sizeof restore && mkdtemp(restore)) setenv("DM_MAC_RESTORE_DIR", restore, 1);
+    else *restore = 0;
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
     char *host_argv[] = {host, dm, NULL};
     int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
-    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
+    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); if (*restore) removefile(restore, NULL, REMOVEFILE_RECURSIVE); close(lock); return 1; }
     int status;
     while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;
     // Cloud saves (DM_SAVE_SYNC, dm/host/save_sync.h): what the host committed and had not sent yet goes now, after a crash too (the committed save is whole whatever the host was doing)
     // DM_SAVE as the host had it: an env file or the launch environment may have set another folder than this app's own
-    if (!save_sync_after_exit(getenv("DM_SAVE"), id)) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");
+    int synced = save_sync_after_exit(getenv("DM_SAVE"), id);
+    if (!synced) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");
+    if (*restore) {
+        char ready[PATH_MAX], archive[PATH_MAX], kept[PATH_MAX], result[PATH_MAX + 256];
+        snprintf(ready, sizeof ready, "%s/ready", restore); snprintf(archive, sizeof archive, "%s/backup.dmsync", restore);
+        if (!access(ready, F_OK)) {
+            if (!synced || !WIFEXITED(status) || WEXITSTATUS(status)) alert(name, "The restore was cancelled because the game did not close cleanly or its current save could not reach the cloud. Your current save was kept.");
+            else if (mac_save_restore(getenv("DM_SAVE"), id, archive, kept, sizeof kept)) {
+                snprintf(result, sizeof result, "The restore failed: %s. Recovery folder: %s", strerror(errno), *kept ? kept : "no replacement was made"); alert(name, result);
+            } else {
+                int sent = save_sync_after_exit(effective, id);
+                snprintf(result, sizeof result, "Save restored. Start the game again to use it. Your previous save is in %s.%s", kept, sent ? "" : " The restored save has not reached the cloud yet; retry before playing on another device.");
+                notice(name, result);
+            }
+        }
+        removefile(restore, NULL, REMOVEFILE_RECURSIVE);
+    }
+    close(lock);
     if (WIFSIGNALED(status)) { fprintf(stderr, "launcher: the host stopped on signal %d\n", WTERMSIG(status)); return 128 + WTERMSIG(status); }
     fprintf(stderr, "launcher: the host exited with %d\n", WEXITSTATUS(status));
     return WEXITSTATUS(status);

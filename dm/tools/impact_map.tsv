@@ -118,6 +118,8 @@ dm/host/romfs_identity.h	*:*	RomFS identity checks at iOS startup for every game
 dm/host/hle_fs.c	hle:*fs*	filesystem mounts, paths and file operations
 dm/host/hle_audio.c:(notify_release|event_notify)	hle:*AudioOutE*	guest AudioOut buffer-release notifications; the host renderer uses rel_sem
 dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit (hle_fs.c)
+dm/host/save_backup_mac.*	hle:*fs*	manual Mac backups snapshot and replace committed normal and device saves
+dm/host/hle.h	*:*	shared host service interfaces
 dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization
 dm/host/hle_svc.c	svc:*	SVCs
@@ -126,6 +128,7 @@ dm/host/main.c	*:*	the host's start
 dm/host/loader.c	*:*	module loading
 dm/host/hle.c	hle:*	the HLE tables
 dm/host/front_mac.m	present:*	the Mac front end
+dm/host/menus_mac.*	present:*	Mac in-game menu actions and focus-dependent mute
 dm/host/dm_input.h	hle:*hid*	the shared input interface
 dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
 dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController

@@ -2,6 +2,21 @@
 
 How to build and install a game: [README](../README.md#how-to-play).
 
+## Mac menus
+
+Inside a running Mac game:
+
+- **File** opens the effective save folder, reveals the current log, and exports or restores a save backup. For NVN games, **Take Screenshot** (⌘S or F12) saves the next frame to `~/Pictures/nxnative/<title ID>/`.
+- **Game → Console Mode** changes between Docked and Handheld and remembers the choice in the same store as the launch window. A launch environment or `env.txt` override disables these items. With `DM_SAVED_CHOICES=0`, a menu change lasts for this run only.
+- **Audio** offers Mute Audio and Mute When Unfocused. These are session choices; returning from the background does not undo an explicit mute.
+- **View → Window Scale** chooses 1×, 1.5×, 2× or 3× a 1280×720 picture in display pixels, fitting within the screen. This changes the window's size, not the game's render resolution. The presets are disabled in fullscreen. The existing Window, Cheats and system Metal HUD menus keep their actions.
+
+Backups are `.dmsync` files, using the same checked format as cloud saves. They include the committed normal and device saves and their guest-name metadata. Export leaves an existing archive intact if it fails. Restore checks the archive and title ID first, then asks to close the game. After the game exits, the launcher keeps the current save in a sibling `save.before-restore-…` recovery folder and replaces the save directories. Start the game again after the result dialog. A damaged, empty or different game's backup is refused. A restore is cancelled if the current save could not be sent to an enabled cloud folder; a restored save is sent there too.
+
+Restore is available only in a packaged app supervised by the current launcher. A second app instance using the same save folder is refused. Direct developer runs of `dmhost` must be stopped before restoring that save from an app.
+
+## iPhone and iPad
+
 - **Settings:** a screen before the game starts sets frame rate, resolution, docked or handheld mode, language, rumble and more. Tap **Play**; your choices are remembered. What each one does: [Settings](settings.md).
 - **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`.
 - **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. Copy `save/` and `pso_user.tsv` over from the old one to keep your progress.

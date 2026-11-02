@@ -38,8 +38,10 @@ int main(void) {
         [m mute:nil]; assert(!test_muted);
         [m muteUnfocused:nil]; assert(!test_muted);
         mac_menus_focus(0); assert(test_muted); mac_menus_focus(1); assert(!test_muted);
-        m.busy = YES; assert(![m validateMenuItem:[file itemWithTitle:@"Export Save Backup…"]]);
-        m.busy = NO; unsetenv("DM_MAC_RESTORE_DIR"); assert(![m validateMenuItem:[file itemWithTitle:@"Restore Save from Backup…"]]);
+        NSMenuItem *export = [file itemWithTitle:@"Export Save Backup…"], *restore = [file itemWithTitle:@"Restore Save from Backup…"];
+        assert(export && restore);
+        m.busy = YES; assert(![m validateMenuItem:export]);
+        m.busy = NO; unsetenv("DM_MAC_RESTORE_DIR"); assert(![m validateMenuItem:restore]);
         assert(![bar itemWithTitle:@"Controllers"]); assert(![bar itemWithTitle:@"Metal HUD"]);
         [w close];
         puts("Mac menus: existing menus, shared preferences/default removal, override precedence, session mute/focus and unavailable restore pass");

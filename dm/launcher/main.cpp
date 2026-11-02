@@ -52,6 +52,11 @@ static void attach_console() {}
 
 static std::string played(const Config &c, const Game &g) { return now_text(std::atoll(c.get("played." + g.launch.title_id, "0").c_str())); }
 
+// A program taken from the bundle because the launch file's is gone (find_host, find_nxaot, find_packer): said in the log; the Problem column says only that none is there
+static void say_notes(const Command &c) {
+    for (const auto &n : c.notes) std::fprintf(stderr, "nxlauncher: %s\n", n.c_str());
+}
+
 static std::string join(const std::vector<std::string> &v, const char *sep) {
     std::string s;
     for (const auto &x : v) { if (!s.empty()) s += sep; s += x; }
@@ -83,6 +88,7 @@ static int print_command(const Config &cfg, const Env &env, const Game &g, const
     std::string mode = mode_in.empty() ? chosen_mode(g, cfg) : mode_in;
     Command c = compose(g, mode, env, record_profile(cfg, g));
     if (!c.error.empty()) { std::fprintf(stderr, "[RED] nxlauncher: %s\n", c.error.c_str()); return 1; }
+    say_notes(c);
     std::printf("# %s (%s), the %s pack\n# cwd %s\n# log %s\n", g.launch.title.c_str(), g.launch.title_id.c_str(), c.mode.c_str(), c.cwd.c_str(), c.log.c_str());
     for (const auto &e : c.set) std::printf("%s=%s\n", e.key.c_str(), e.value.c_str());
     std::printf("\n");
@@ -104,6 +110,7 @@ static int play_now(Config &cfg, const Env &env, const Game &g, const std::strin
     std::string mode = mode_in.empty() ? chosen_mode(g, cfg) : mode_in, err;
     Command c = compose(g, mode, env, record_profile(cfg, g));
     if (!c.error.empty()) { std::fprintf(stderr, "[RED] nxlauncher: %s\n", c.error.c_str()); return 1; }
+    say_notes(c);
     remember_start(cfg, g, c.mode);
     Child ch;
     if (!spawn(c, &ch, &err)) { std::fprintf(stderr, "[RED] nxlauncher: %s\n", err.c_str()); return 1; }
@@ -124,6 +131,7 @@ static int repack_now(const Config &cfg, const Game &g, const std::string &mode_
     std::string mode = mode_in.empty() ? chosen_mode(g, cfg) : mode_in, err;
     Command c = repack_command(g, mode);
     if (!c.error.empty()) { std::fprintf(stderr, "[RED] nxlauncher: %s\n", c.error.c_str()); return 1; }
+    say_notes(c);
     Child ch;
     if (!spawn(c, &ch, &err)) { std::fprintf(stderr, "[RED] nxlauncher: %s\n", err.c_str()); return 1; }
     std::fprintf(stderr, "nxlauncher: %s (%s): the packer started for the %s pack, its output in %s\n", g.launch.title.c_str(), g.launch.title_id.c_str(), c.mode.c_str(), c.log.c_str());
@@ -181,6 +189,7 @@ static void start_repack(App &a, const Game &g) {
     std::string err, mode = chosen_mode(g, a.cfg);
     Command c = repack_command(g, mode);
     if (!c.error.empty()) { a.status = "[RED] " + c.error; return; }
+    say_notes(c);
     if (!spawn(c, &a.repack, &err)) { a.status = "[RED] " + err; return; }
     a.repacking = g.launch.title_id; a.repack_title = g.launch.title;
     a.log = c.log; a.lines.clear(); a.seen = 0; a.tail_at = 0;
@@ -376,6 +385,7 @@ static void start_game(App &a) {
     if (!save_choices(*g, st, &err)) { a.status = "[RED] " + err; return; }
     Command c = compose(*g, mode, a.env, record_profile(a.cfg, *g));   // Play records the profile unless "Record a profile while playing" is off
     if (!c.error.empty()) { a.status = "[RED] " + c.error; return; }
+    say_notes(c);
     remember_start(a.cfg, *g, c.mode);
     if (!spawn(c, &a.child, &err)) { a.status = "[RED] " + err; return; }
     a.running = g->launch.title; a.log = c.log; a.lines.clear(); a.seen = 0;

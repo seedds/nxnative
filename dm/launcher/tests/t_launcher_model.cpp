@@ -1,7 +1,8 @@
 // nxlauncher's model (dm/launcher/launcher_model.cpp) over a games folder this test writes (fake_games.h): the games found and their pack modes, the settings rows and their effective
 // values (saved choices, a value the pack does not offer, the pack's own defaults, what the environment fixes), what starts a game (the pack, the host, the environment in the order
 // run.sh gives it, DM_SAVED_CHOICES=0, NXHOST), the saved-choice round trip through the player's env.txt, the second pack (the profile folder, "Record a profile while playing",
-// whether the recorded profile and JIT misses make a better pack possible against what the launch file says the packs took, the repack's command), the launcher's own settings,
+// whether the recorded profile and JIT misses make a better pack possible against what the launch file says the packs took, the repack's command), a moved bundle (the host, packer
+// and nxaot taken from the launcher's folder when the launch file's are gone; NXHOST over both; the problem when none is there), the launcher's own settings,
 // DM_LAUNCHER and "Show this window at launch", and a child process with its environment,
 // working folder, log and exit status (this program, which acts as nxhost-run and as the packer with NXL_FAKE_HOST=1).
 #include "launcher_model.h"
@@ -354,6 +355,72 @@ static void second_pack(const fake::Folder &f) {
     CHECK(log.find("fake host: argv " + r.argv[1] + "|" + fake::str(f.games) + "|--platform|" + kPlatform + "|--pack-mode|max|-k|") != std::string::npos, "its arguments: " + log);
 }
 
+// A bundle moved or replaced (launcher_model.h, "The programs a launch file names"): the launch file's host, packer and nxaot are gone, and the launcher takes the bundle's (its own
+// folder's hosts/<title ID>/nxhost-run, scripts/build_ipa_from_nsp.py, bin/nxaot) when they are there; NXHOST wins over both; the problem only when none is there
+static void moved_bundle(const fs::path &root) {
+    const std::string id = "0100EEEE00000000";
+    const fs::path games = root / "moved/games", build = games / (id + "_build"), run = games / (id + "-work/run"), old = root / "moved/old bundle", bundle = root / "moved/bundle";
+    const std::string row = fake::str(old / "hosts" / id / (std::string("nxhost-run") + kExeSuffix)), own = fake::str(bundle / "hosts" / id / (std::string("nxhost-run") + kExeSuffix));
+    const std::string row_packer = fake::str(old / "scripts/build_ipa_from_nsp.py"), row_nxaot = fake::str(old / "bin" / (std::string("nxaot") + kExeSuffix));
+    const std::string own_packer = fake::str(bundle / "scripts/build_ipa_from_nsp.py"), own_nxaot = fake::str(bundle / "bin" / (std::string("nxaot") + kExeSuffix));
+    fake::packs(build / "aot_v0", false);
+    const std::string repack = "path\tpackage\t" + fake::str(games) + "\npath\tpacker\t" + row_packer + "\npath\tpython\t/usr/bin/python3\npath\tnxaot\t" + row_nxaot + "\n";
+    const fs::path launch = build / ("launch-" + std::string(kPlatform) + ".tsv");
+    fake::write(launch, fake::launch("Epsilon Game", id, build, run, row, false, {{"balanced", build / "aot_v0"}}, repack));
+    fs::create_directories(bundle);
+    MapEnv none, nxhost; nxhost.vars = {{"NXHOST", "/opt/other/nxhost-run"}};
+    const std::string missing = "the host " + row + " is missing: pack the game again or set NXHOST";
+    auto game = [&](const Env &env) { auto g = find_games(fake::str(games), kPlatform, fake::str(bundle), env); return g.size() == 1 ? g[0] : Game(); };
+
+    // neither the row's host nor the bundle's: the problem, in the list and when it starts
+    CHECK_EQ(game(none).problem, missing, "neither host is there: the Problem column says so");
+    CHECK_EQ(compose(game(none), "", none, false, fake::str(bundle)).error, missing, "... and Play says so");
+    CHECK(game(nxhost).problem.empty(), "NXHOST set: no problem, whatever the launch file names");
+    Command c = compose(game(nxhost), "", nxhost, false, fake::str(bundle));
+    CHECK(c.error.empty() && c.argv[0] == "/opt/other/nxhost-run" && c.notes.empty(), "NXHOST names the host when neither is there");
+
+    // the bundle's host when the row's is gone
+    fake::write(own, "bundle host");
+    Game g = game(none);
+    CHECK(g.problem.empty(), "the row's host is gone and the bundle's is there: no problem: " + g.problem);
+    c = compose(g, "", none, false, fake::str(bundle));
+    CHECK(c.error.empty() && c.argv == (std::vector<std::string>{own, fake::str(build / "aot_v0")}), "the bundle's hosts/<title ID>/nxhost-run is started: " + c.error);
+    CHECK_EQ(c.notes, (std::vector<std::string>{"host: the bundle's " + own + " (the launch file's " + row + " is missing)"}), "... and the log says which host and why");
+    Found h = find_host(g.launch, none, fake::str(bundle));
+    CHECK(h.path == own && h.problem.empty(), "find_host: the bundle's");
+    c = compose(g, "", nxhost, false, fake::str(bundle));
+    CHECK(c.argv[0] == "/opt/other/nxhost-run" && c.notes.empty(), "NXHOST wins over the bundle's host");
+    CHECK(compose(g, "", none, false, fake::str(root / "moved/elsewhere")).error == missing, "another launcher's folder without the host: the problem");
+
+    // the row's host, there again, wins over the bundle's
+    fake::write(row, "old host");
+    c = compose(game(none), "", none, false, fake::str(bundle));
+    CHECK(c.argv[0] == row && c.notes.empty(), "the launch file's host when it is there, nothing logged");
+    CHECK(compose(game(nxhost), "", nxhost, false, fake::str(bundle)).argv[0] == "/opt/other/nxhost-run", "NXHOST wins over the launch file's host too");
+    fs::remove(row);
+
+    // the repack: the packer row's script, else the bundle's scripts/build_ipa_from_nsp.py; the nxaot row's, else the bundle's bin/nxaot
+    g = game(none);
+    Command r = repack_command(g, "balanced", fake::str(bundle));
+    CHECK_EQ(r.error, "the packer " + row_packer + " is missing: pack the game once more by hand with the bundle's " + (std::string(kPlatform) == "windows" ? "pack.cmd" : "pack.sh"),
+             "neither packer is there: said");
+    fake::write(own_packer, "# the bundle's packer\n");
+    r = repack_command(g, "balanced", fake::str(bundle));
+    CHECK_EQ(r.error, "the recompiler " + row_nxaot + " is missing: pack the game once more by hand with --nxaot <the recompiler>", "neither nxaot is there: said");
+    fake::write(own_nxaot, "nxaot");
+    r = repack_command(g, "balanced", fake::str(bundle));
+    CHECK(r.error.empty() && r.argv == (std::vector<std::string>{"/usr/bin/python3", own_packer, fake::str(games), "--platform", kPlatform, "--pack-mode", "balanced", "--nxaot", own_nxaot}),
+          "the bundle's packer and nxaot: " + r.error);
+    CHECK_EQ(r.notes, (std::vector<std::string>{"packer: the bundle's " + own_packer + " (the launch file's " + row_packer + " is missing)",
+                                                "recompiler: the bundle's " + own_nxaot + " (the launch file's " + row_nxaot + " is missing)"}), "... both logged");
+    fake::write(row_packer, "# the old packer\n"); fake::write(row_nxaot, "old nxaot");
+    r = repack_command(g, "balanced", fake::str(bundle));
+    CHECK(r.argv[1] == row_packer && r.argv.back() == row_nxaot && r.notes.empty(), "the rows' packer and nxaot when they are there");
+    g.launch.nxaot.clear();
+    r = repack_command(g, "balanced", fake::str(bundle));
+    CHECK(r.error.empty() && std::find(r.argv.begin(), r.argv.end(), "--nxaot") == r.argv.end(), "no nxaot row: no --nxaot (the packer finds its own), the bundle's not taken");
+}
+
 static void config(const fs::path &root) {
     MapEnv env;
 #if defined(_WIN32)
@@ -423,12 +490,15 @@ int main(int argc, char **argv) {
     if (std::getenv("NXL_FAKE_HOST")) return fake_host(argc, argv);
     fs::path root = fake::tmp_root("t_launcher_model");
     fake::Folder f = fake::make(root, self_path());
+    fake::write(root / "scripts" / "build_ipa_from_nsp.py", "# the packer the launch files name\n");   // their packer and nxaot rows name files that are there
+    fake::write(root / "nxaot", "nxaot");
     env_file_rules(root);
     games(f);
     settings(f);
     command(f);
     round_trip(f);
     second_pack(f);
+    moved_bundle(root);
     config(root);
     start(f);
     child(root);

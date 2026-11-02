@@ -2458,7 +2458,8 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
             f'{"run.cmd" if win else "run.sh"} and the launcher nxlauncher (dm/launcher) both read it, so both start nxhost-run the same way (docs/settings.md, On Windows and Linux).',
             '# Tab-separated rows <kind> <name> <value>; a reader skips # lines and the kinds it does not know.',
             '#   game  title, title_id, version (the display version), package (the version tag), platform, graphics',
-            '#   path  host (nxhost-run; NXHOST in the environment names another), cwd (its working folder), choices (the player\'s env.txt: KEY=VALUE lines, read unless DM_SAVED_CHOICES=0),',
+            '#   path  host (nxhost-run; NXHOST in the environment names another; when it is gone, a bundle\'s hosts/<title ID>/nxhost-run: the launcher\'s folder\'s, or one above the run script),',
+            '#         cwd (its working folder), choices (the player\'s env.txt: KEY=VALUE lines, read unless DM_SAVED_CHOICES=0),',
             '#         log (the launcher\'s copy of the output), settings (the settings the launcher shows), profile (DM_AOT_PROFILE\'s folder: the sample profiles and JIT misses the next pack takes),',
             '#         package, packer, python, keys, nxaot (what packs the game again: the NSP folder, this script, its Python, the prod.keys file\'s path, the recompiler)',
             '#   made  profile yes|no|unused (the sample profiles taken; no: --no-profile, which a repack takes them without; unused: not taken by AOT_PROFILE or this nxaot), misses yes|unused',
@@ -2475,12 +2476,16 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
 # The run scripts read the launch file at every start. sh: the first pass takes the path and pack rows, the player's env.txt is turned into commands by awk (KEY=VALUE lines read as
 # dm/mac/launcher.c's env_file reads them: blanks around the line and before the =, # comments, CR line ends; names a shell cannot export skipped) and run through eval with each value
 # single-quoted, so no value is expanded; the second pass sets the env rows. run.cmd does the same with for /f (UTF-8 through chcp 65001, the code page restored at the end).
+# The host: NXHOST if set; else the host row if that file exists; else hosts/<title ID>/nxhost-run of the first folder above the script that has one (the launcher's rule, which
+# looks in its own folder: dm/launcher/launcher_model.h find_host). The scripts walk up rather than keep a bundle path relative to <id>_build: the launch file's other rows (cwd,
+# pack, env) are absolute, so a pack only runs while its NSP folder stays where it was packed, and from there a path fixed at pack time names the place the host row names.
 RUN_SH = r'''launch=@LAUNCH@
 if [ ! -f "$launch" ]; then echo "[RED] run.sh: no launch file $launch: pack the game again (scripts/build_ipa_from_nsp.py --platform linux)" >&2; exit 1; fi
 tab=$(printf '\t')
-host= cwd= choices= aot=
+host= cwd= choices= aot= id=
 while IFS=$tab read -r kind name value; do
     case $kind in
+        game) if [ "$name" = title_id ]; then id=$value; fi ;;
         path) case $name in host) host=$value ;; cwd) cwd=$value ;; choices) choices=$value ;; esac ;;
         pack) if [ -z "$aot" ] && { [ -z "${NXPACK:-}" ] || [ "$NXPACK" = "$name" ]; }; then aot=$value; fi ;;
     esac
@@ -2493,6 +2498,15 @@ while IFS=$tab read -r kind name value; do
 done < "$launch"
 if [ -z "$host" ] || [ -z "$cwd" ] || [ -z "$aot" ]; then
     echo "[RED] run.sh: $launch names no host, working folder or pack${NXPACK:+ of the mode $NXPACK}: pack the game again (scripts/build_ipa_from_nsp.py --platform linux${NXPACK:+ --pack-mode $NXPACK})" >&2; exit 1
+fi
+if [ -z "${NXHOST:-}" ] && [ ! -f "$host" ]; then
+    dir=$(cd "$(dirname "$0")" && pwd) || exit 1
+    while [ ! -f "$dir/hosts/$id/nxhost-run" ]; do
+        if [ "$dir" = / ]; then echo "[RED] run.sh: the host $host is missing: pack the game again or set NXHOST" >&2; exit 1; fi
+        dir=$(dirname "$dir")
+    done
+    echo "run.sh: host: the bundle's $dir/hosts/$id/nxhost-run (the launch file's $host is missing)" >&2
+    host=$dir/hosts/$id/nxhost-run
 fi
 for d in "$cwd" "${DM_SAVE:-}" "${DM_TEMP:-}"; do if [ -n "$d" ]; then mkdir -p "$d" || exit 1; fi; done
 cd "$cwd" || exit 1'''
@@ -2513,6 +2527,7 @@ if not exist "%NXRUN_LAUNCH%" (
 )
 for /f "usebackq eol=# tokens=1,2,* delims=\t" %%a in ("%NXRUN_LAUNCH%") do (
     if "%%a"=="path" set "NXRUN_%%b=%%c"
+    if "%%a"=="game" if "%%b"=="title_id" set "NXRUN_ID=%%c"
     if "%%a"=="pack" if not defined NXRUN_AOT if "%NXPACK%"=="" (set "NXRUN_AOT=%%c") else if "%NXPACK%"=="%%b" set "NXRUN_AOT=%%c"
 )
 if not "%DM_SAVED_CHOICES%"=="0" if defined NXRUN_choices if exist "%NXRUN_choices%" (
@@ -2524,6 +2539,23 @@ if not defined NXRUN_AOT (
     goto nxrun_end
 )
 if defined NXHOST set "NXRUN_host=%NXHOST%"
+if defined NXHOST goto nxrun_host_ok
+if exist "%NXRUN_host%" goto nxrun_host_ok
+set "NXRUN_DIR=%~dp0"
+:nxrun_up
+if exist "%NXRUN_DIR%hosts\\%NXRUN_ID%\\nxhost-run.exe" goto nxrun_bundle_host
+for %%d in ("%NXRUN_DIR%..") do set "NXRUN_UP=%%~fd"
+if not "%NXRUN_UP:~-1%"=="\\" set "NXRUN_UP=%NXRUN_UP%\\"
+if /i "%NXRUN_UP%"=="%NXRUN_DIR%" goto nxrun_no_host
+set "NXRUN_DIR=%NXRUN_UP%"
+goto nxrun_up
+:nxrun_no_host
+echo [RED] run.cmd: the host "%NXRUN_host%" is missing: pack the game again or set NXHOST 1>&2
+goto nxrun_end
+:nxrun_bundle_host
+echo run.cmd: host: the bundle's "%NXRUN_DIR%hosts\\%NXRUN_ID%\\nxhost-run.exe" ^(the launch file's "%NXRUN_host%" is missing^) 1>&2
+set "NXRUN_host=%NXRUN_DIR%hosts\\%NXRUN_ID%\\nxhost-run.exe"
+:nxrun_host_ok
 if not exist "%NXRUN_cwd%" mkdir "%NXRUN_cwd%"
 if defined DM_SAVE if not exist "%DM_SAVE%" mkdir "%DM_SAVE%"
 if defined DM_TEMP if not exist "%DM_TEMP%" mkdir "%DM_TEMP%"
@@ -2545,7 +2577,9 @@ def port_run_script(platform, repo, work, wdir, g, name, launch, profile_dir=Non
     about += [f'What it starts comes from {launch.name} beside this script, which the launcher nxlauncher (dm/launcher) reads too, so both start the game the same way: the pack (the first',
               'pack row, or NXPACK=balanced / max), and the environment: what is already set stays, then the player\'s saved choices (the choices row: env.txt, KEY=VALUE lines, # comments;',
               'not read with DM_SAVED_CHOICES=0), then the env rows, each only where nothing set it before.',
-              f'NXHOST=<path> runs another build; the arguments go to nxhost-run: [module...] [-- game arguments]. The save stays in {rd / "save"} from run to run.']
+              f'NXHOST=<path> runs another build; the arguments go to nxhost-run: [module...] [-- game arguments]. The save stays in {rd / "save"} from run to run.',
+              'When the launch file\'s host is gone (a bundle moved or replaced) and NXHOST is not set, it takes hosts/<title ID>/nxhost-run' + ('.exe' if win else '')
+              + ' of the first folder above this script that has one (a bundle that holds this NSP folder), and says so.']
     prof = wdir / 'profile'   # aot_packs reads it on the next pack (the AOT_PROFILE setting, --no-profile)
     record = [f'A sample profile for the next pack (nxaot build --profile: the functions the game runs at tier H, the rest at tier C, a shorter pack): set DM_AOT_PROFILE as below, play,',
               f'quit the game by closing its window; nxhost-run writes {prof}/<module>.tsv and <module>.misses.tsv (the addresses its JIT fallback ran, entries of the next pack), and the',

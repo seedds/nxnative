@@ -61,7 +61,9 @@ int main(int argc, char **argv) {
     if (std::getenv("NXL_FAKE_HOST")) return fake_host(argc, argv);
     g_root = fake::tmp_root("t_launcher_window"); g_cfg = g_root / "config";
     fake::Folder f = fake::make(g_root, self_path());
-    g_nx = fake::str(fs::u8path(self_path()).parent_path() / (std::string("nxlauncher") + kExeSuffix));
+    fake::write(g_root / "scripts" / "build_ipa_from_nsp.py", "# the packer Alpha's launch file names\n");   // --repack runs the packer and nxaot rows' files when they are there
+    fake::write(g_root / "nxaot", "nxaot");
+    g_nx =fake::str(fs::u8path(self_path()).parent_path() / (std::string("nxlauncher") + kExeSuffix));
     if (!fs::is_regular_file(fs::u8path(g_nx))) { std::fprintf(stderr, "FAIL: no %s beside this test (it is built with it)\n", g_nx.c_str()); return 1; }
     std::string games = fake::str(f.games), a_aot = fake::str(f.a / "aot_v131072"), a_log = fake::str(f.a_run / "log.txt");
     // Alpha has a profile newer than its balanced packs (the second pack: launcher_model.h): the window says "a better pack is possible" and offers the repack

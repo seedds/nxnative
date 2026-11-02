@@ -5,7 +5,7 @@
 // which run.sh / run.cmd read too (build_ipa_from_nsp.py port_launch_file: game, path, pack and env rows), and launcher-<platform>.json, the game's settings (dm/games/settings.py, the
 // rows of dm/games/settings.tsv listed for the platform, docs/launcher.schema.json). The games folder holds such <id>_build folders, directly or one level down (an NSP folder per game).
 //
-// What starts the game, as run.sh composes it: nxhost-run (the path host row; NXHOST in the environment names another) with the pack folder of the chosen mode (a pack row) as its
+// What starts the game, as run.sh composes it: nxhost-run (the path host row; NXHOST in the environment names another; the bundle's when the row's is gone: find_host) with the pack folder of the chosen mode (a pack row) as its
 // argument, in the working folder (path cwd), with the environment: what is already set stays; then the player's env.txt (path choices: KEY=VALUE lines, # comments, read as
 // dm/mac/launcher.c reads an env file; not read with DM_SAVED_CHOICES=0 in the environment); then the env rows; each only where nothing set it before. The window writes the player's
 // choices into that env.txt before it starts the game: a setting's line only while its value differs from the pack's default (the env row's value, else the list's default), the other
@@ -84,6 +84,25 @@ struct LaunchFile {
 bool load_launch(const std::string &path, LaunchFile *out, std::string *err);
 bool packs_complete(const std::string &folder);   // per manifest <name>.aot.tsv its <name><kPackSuffix>, and one per NRO nro.tsv lists (not the refused ones)
 
+// ---- The programs a launch file names, found again when they are gone ----
+// The launch file's path rows are absolute (build_ipa_from_nsp.py port_launch_file), so a bundle moved or replaced by a newer one elsewhere (docs/development.md, "The port's bundles")
+// leaves them naming programs that are gone. The launcher then takes the same program from its own folder, which a bundle lays out as nxlauncher beside hosts/<title ID>/nxhost-run,
+// bin/nxaot and scripts/build_ipa_from_nsp.py (the script pack.sh / pack.cmd run). The host's rule is run.sh's and run.cmd's too (they look for hosts/<title ID>/ in their own
+// folder and the folders above it, since they live in the NSP folder, not in the bundle):
+//   host    NXHOST from the environment if set; else the host row if that file exists; else <bundle>/hosts/<title ID>/nxhost-run[.exe] if it exists; else the problem "the host
+//           <row> is missing: pack the game again or set NXHOST"
+//   nxaot   the nxaot row if that file exists (no row: no --nxaot, the packer finds its own); else <bundle>/bin/nxaot[.exe] if it exists; else a problem
+//   packer  the packer row if that file exists; else <bundle>/scripts/build_ipa_from_nsp.py if it exists; else a problem
+std::string bundle_dir();   // the launcher's own folder (this program's; '.' when it cannot be told)
+struct Found {
+    std::string path;      // what to run ('' with a problem, and for an nxaot row the launch file does not have)
+    std::string note;      // why it is not the launch file's ('' when it is): the launcher logs it
+    std::string problem;   // why nothing can run ('' when something can)
+};
+Found find_host(const LaunchFile &l, const Env &env, const std::string &bundle);
+Found find_nxaot(const LaunchFile &l, const std::string &bundle);
+Found find_packer(const LaunchFile &l, const std::string &bundle);
+
 struct Game {
     std::string dir, launch_path;   // <id>_build and its launch file
     LaunchFile launch;
@@ -92,8 +111,9 @@ struct Game {
     std::string settings_error;     // why its settings list cannot be shown ('' when it can, or when the pack has none)
     std::vector<std::string> modes() const;   // the pack modes with complete packs, the launch file's order
 };
-// The games under dir: <dir>/<x>_build/ and <dir>/<y>/<x>_build/ with a launch file of this platform, sorted by title then folder
-std::vector<Game> find_games(const std::string &dir, const std::string &platform = kPlatform);
+// The games under dir: <dir>/<x>_build/ and <dir>/<y>/<x>_build/ with a launch file of this platform, sorted by title then folder. A game whose host find_host finds nowhere has that
+// as its problem (bundle and env as find_host takes them)
+std::vector<Game> find_games(const std::string &dir, const std::string &platform = kPlatform, const std::string &bundle = bundle_dir(), const Env &env = ProcessEnv());
 const Game *find_game(const std::vector<Game> &games, const std::string &id, std::string *err);   // by title ID (any case) or folder; err when none or several
 
 // ---- The launcher's own settings (launcher.txt) ----
@@ -135,6 +155,7 @@ bool save_choices(const Game &g, const SettingsState &st, std::string *err);
 // ---- What starts the game ----
 struct Command {
     std::vector<std::string> argv;
+    std::vector<std::string> notes;   // what the launcher logs: a program taken from the bundle instead of the launch file's (find_host, find_nxaot, find_packer)
     std::vector<KV> set;   // the variables the launcher sets, in the order it sets them
     std::string cwd, log, mode;
     std::string error;     // why it cannot start ('' when it can)
@@ -142,7 +163,8 @@ struct Command {
 std::string chosen_mode(const Game &g, const Config &c);   // the player's pack mode when it has complete packs, else the first that has
 // record: "Record a profile while playing" (record_profile): DM_AOT_PROFILE set to the game's profile folder after everything else, so the environment, env.txt or an env row
 // that sets it wins (the host writes the sample profile and the JIT misses there at exit: dm/host/aot.h)
-Command compose(const Game &g, const std::string &mode, const Env &env, bool record = false);
+// bundle: where find_host looks when the launch file's host is gone (the launcher's own folder)
+Command compose(const Game &g, const std::string &mode, const Env &env, bool record = false, const std::string &bundle = bundle_dir());
 
 // ---- The child process ----
 struct Child {
@@ -195,7 +217,7 @@ struct ProfileState {
 ProfileState profile_state(const Game &g, const std::string &mode);
 // The repack ("Repack with profile", nxlauncher --repack): <python> <packer> <package_dir> --platform <this system> --pack-mode <mode> [-k <keys>] [--nxaot <nxaot>], in the NSP
 // folder, its output in repack.txt beside the game's log (PYTHONUNBUFFERED=1: the log pane follows it as it goes); error when the launch file names no package, packer or python
-// (a pack made before those rows: pack the game once more by hand, which writes them)
-Command repack_command(const Game &g, const std::string &mode);
+// (a pack made before those rows: pack the game once more by hand, which writes them). The packer and nxaot as find_packer and find_nxaot find them in bundle
+Command repack_command(const Game &g, const std::string &mode, const std::string &bundle = bundle_dir());
 
 }   // namespace nxl

@@ -239,7 +239,36 @@ std::vector<std::string> Game::modes() const {
     return out;
 }
 
-static void add_game(const fs::path &build, const std::string &platform, std::vector<Game> *out) {
+// ---- The programs a launch file names, found again when they are gone (launcher_model.h) ----
+static bool is_file(const std::string &path) { std::error_code ec; return !path.empty() && fs::is_regular_file(P(path), ec); }
+
+// The row's program when it is there, else the bundle's (rel: its place in a bundle), else what to do
+static Found find_in_bundle(const std::string &what, const std::string &row, const std::string &rel, const std::string &bundle, const std::string &fix) {
+    Found f;
+    if (is_file(row)) { f.path = row; return f; }
+    const std::string own = bundle.empty() ? std::string() : S(P(bundle) / P(rel));
+    if (is_file(own)) { f.path = own; f.note = what + ": the bundle's " + own + " (the launch file's " + row + " is missing)"; return f; }
+    f.problem = "the " + what + " " + row + " is missing: " + fix;
+    return f;
+}
+
+Found find_host(const LaunchFile &l, const Env &env, const std::string &bundle) {
+    std::string v;
+    if (env.get("NXHOST", &v) && !v.empty()) { Found f; f.path = v; return f; }
+    return find_in_bundle("host", l.host, "hosts/" + l.title_id + "/nxhost-run" + kExeSuffix, bundle, "pack the game again or set NXHOST");
+}
+
+Found find_nxaot(const LaunchFile &l, const std::string &bundle) {
+    if (l.nxaot.empty()) return Found();   // a launch file without the row: no --nxaot, the packer finds its own
+    return find_in_bundle("recompiler", l.nxaot, std::string("bin/nxaot") + kExeSuffix, bundle, "pack the game once more by hand with --nxaot <the recompiler>");
+}
+
+Found find_packer(const LaunchFile &l, const std::string &bundle) {
+    return find_in_bundle("packer", l.packer, "scripts/build_ipa_from_nsp.py", bundle,
+                          std::string("pack the game once more by hand with the bundle's ") + (std::string(kPlatform) == "windows" ? "pack.cmd" : "pack.sh"));
+}
+
+static void add_game(const fs::path &build, const std::string &platform, const std::string &bundle, const Env &env, std::vector<Game> *out) {
     std::error_code ec;
     fs::path launch = build / P("launch-" + platform + ".tsv");
     if (!fs::is_regular_file(launch, ec)) return;
@@ -252,6 +281,7 @@ static void add_game(const fs::path &build, const std::string &platform, std::ve
     for (auto &p : g.launch.packs) p.complete = packs_complete(p.folder);
     if (g.launch.packs.empty()) g.problem = "no pack in " + g.launch_path + ": pack the game with scripts/build_ipa_from_nsp.py --platform " + platform;
     else if (g.modes().empty()) g.problem = "the packs in " + g.launch.packs[0].folder + " are incomplete: pack the game again";
+    else g.problem = find_host(g.launch, env, bundle).problem;   // shown only when neither the row's host nor the bundle's is there
     if (!g.launch.settings.empty() && !load_settings(g.launch.settings, &g.settings, &err)) g.settings_error = err;
     out->push_back(std::move(g));
 }
@@ -261,13 +291,13 @@ static bool is_build_dir(const fs::directory_entry &e) {
     return e.is_directory(ec) && n.size() > 6 && n.compare(n.size() - 6, 6, "_build") == 0;
 }
 
-std::vector<Game> find_games(const std::string &dir, const std::string &platform) {
+std::vector<Game> find_games(const std::string &dir, const std::string &platform, const std::string &bundle, const Env &env) {
     std::vector<Game> out; std::error_code ec;
     for (const auto &e : fs::directory_iterator(P(dir), ec)) {
-        if (is_build_dir(e)) { add_game(e.path(), platform, &out); continue; }
+        if (is_build_dir(e)) { add_game(e.path(), platform, bundle, env, &out); continue; }
         if (!e.is_directory(ec)) continue;
         std::error_code ec2;
-        for (const auto &f : fs::directory_iterator(e.path(), ec2)) if (is_build_dir(f)) add_game(f.path(), platform, &out);
+        for (const auto &f : fs::directory_iterator(e.path(), ec2)) if (is_build_dir(f)) add_game(f.path(), platform, bundle, env, &out);
     }
     std::sort(out.begin(), out.end(), [](const Game &a, const Game &b) {
         std::string x = lower(a.launch.title), y = lower(b.launch.title);
@@ -355,6 +385,8 @@ std::string default_games_dir() {
     std::string self = self_path();
     return self.empty() ? std::string(".") : S(P(self).parent_path());
 }
+
+std::string bundle_dir() { return default_games_dir(); }   // a bundle's nxlauncher sits at its root
 
 std::string games_dir(const Config &c) { return c.get("games", default_games_dir()); }
 
@@ -474,7 +506,7 @@ std::string chosen_mode(const Game &g, const Config &c) {
     return modes.empty() ? "" : modes[0];
 }
 
-Command compose(const Game &g, const std::string &mode, const Env &env, bool record) {
+Command compose(const Game &g, const std::string &mode, const Env &env, bool record, const std::string &bundle) {
     Command c; c.cwd = g.launch.cwd; c.log = g.launch.log;
     const Pack *pack = nullptr;
     for (const auto &p : g.launch.packs) if (mode.empty() || p.mode == mode) { pack = &p; break; }   // as run.sh: the first pack row, or the one NXPACK names
@@ -482,9 +514,11 @@ Command compose(const Game &g, const std::string &mode, const Env &env, bool rec
                                                   : "no " + mode + " pack in " + g.launch_path + ": pack the game with --pack-mode " + mode; return c; }
     c.mode = pack->mode;
     if (!pack->complete) { c.error = "the " + pack->mode + " packs in " + pack->folder + " are incomplete: pack the game again (--pack-mode " + pack->mode + ")"; return c; }
-    std::string host = g.launch.host, v;
-    if (env.get("NXHOST", &v) && !v.empty()) host = v;
-    c.argv = {host, pack->folder};
+    const Found host = find_host(g.launch, env, bundle);   // NXHOST, the host row, the bundle's
+    if (!host.problem.empty()) { c.error = host.problem; return c; }
+    if (!host.note.empty()) c.notes.push_back(host.note);
+    c.argv = {host.path, pack->folder};
+    std::string v;
     std::set<std::string> have;
     auto add = [&](const KV &e) {
         if (env.get(e.key) || have.count(name_key(e.key))) return;
@@ -890,7 +924,7 @@ ProfileState profile_state(const Game &g, const std::string &mode) {
     return s;
 }
 
-Command repack_command(const Game &g, const std::string &mode) {
+Command repack_command(const Game &g, const std::string &mode, const std::string &bundle) {
     Command c; c.mode = mode.empty() ? "balanced" : mode;
     const LaunchFile &l = g.launch;
     if (l.package_dir.empty() || l.packer.empty() || l.python.empty()) {
@@ -898,9 +932,14 @@ Command repack_command(const Game &g, const std::string &mode) {
                   "scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform " + std::string(kPlatform) + ", which writes them";
         return c;
     }
-    c.argv = {l.python, l.packer, l.package_dir, "--platform", kPlatform, "--pack-mode", c.mode};
+    const Found packer = find_packer(l, bundle), nxaot = find_nxaot(l, bundle);   // the rows', else the bundle's
+    for (const Found *f : {&packer, &nxaot}) {
+        if (!f->problem.empty()) { c.error = f->problem; return c; }
+        if (!f->note.empty()) c.notes.push_back(f->note);
+    }
+    c.argv = {l.python, packer.path, l.package_dir, "--platform", kPlatform, "--pack-mode", c.mode};
     if (!l.keys.empty()) { c.argv.push_back("-k"); c.argv.push_back(l.keys); }
-    if (!l.nxaot.empty()) { c.argv.push_back("--nxaot"); c.argv.push_back(l.nxaot); }
+    if (!nxaot.path.empty()) { c.argv.push_back("--nxaot"); c.argv.push_back(nxaot.path); }
     c.cwd = l.package_dir;
     c.log = S(P(l.log.empty() ? S(P(l.cwd) / "log.txt") : l.log).parent_path() / "repack.txt");
     c.set = {{"PYTHONUNBUFFERED", "1"}};   // its lines reach repack.txt as they are said, for the log pane

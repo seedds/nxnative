@@ -61,9 +61,9 @@ def sources(gfx):   # profile_guess.build_sources: the graphics API and no run-t
 
 
 FAKE_HOST = '''#!{py}
-# a stand-in for nxhost-run: what it was started with, as JSON in $FAKE_OUT
+# a stand-in for nxhost-run: what it was started with, as JSON in $FAKE_OUT (self: the program path it was started as)
 import json, os, sys
-json.dump({{'env': dict(os.environ), 'argv': sys.argv[1:], 'cwd': os.getcwd()}}, open(os.environ['FAKE_OUT'], 'w'))
+json.dump({{'env': dict(os.environ), 'argv': sys.argv[1:], 'cwd': os.getcwd(), 'self': sys.argv[0]}}, open(os.environ['FAKE_OUT'], 'w'))
 '''
 
 
@@ -470,6 +470,38 @@ class Linux(Pack):
             self.assertIn(('path', 'host', str(bundle / 'build/linux/nxhost-run')), launch_rows(self.work / 'launch-linux.tsv'))
             self.assertIn(f'nxhost-run is built for game profile {ID}: cmake', (self.work / 'run.sh').read_text())
 
+    def test_moved_bundle_host(self):   # the launch file's host is gone (a bundle moved or replaced): run.sh takes hosts/<title ID>/nxhost-run of the first folder above it that has one
+        old, real = self.tmp / 'old bundle', nsp.port_host
+        with mock.patch.object(nsp, 'port_host', side_effect=lambda repo, platform, gid, bundled=True: real(old, platform, gid, bundled)):
+            row = old / 'hosts' / ID / 'nxhost-run'; row.parent.mkdir(parents=True); row.write_text('')
+            self.pack()   # packed from a bundle in 'old bundle', which is then removed
+        self.assertIn(('path', 'host', str(row)), launch_rows(self.work / 'launch-linux.tsv'))
+        shutil.rmtree(old)
+        sh = (self.work / 'run.sh').read_text()
+        self.assertIn('a bundle that holds this NSP folder', sh)
+        # the NSP folder sits in the new bundle (self.tmp, two folders above run.sh): its host is the one started, and run.sh says so
+        own = self.tmp / 'hosts' / ID / 'nxhost-run'; own.parent.mkdir(parents=True); own.write_text(FAKE_HOST.format(py=sys.executable)); own.chmod(0o755)
+        out = self.tmp / 'host.json'
+        def run(**env):
+            out.unlink(missing_ok=True)
+            r = subprocess.run(['sh', str(self.work / 'run.sh'), 'main'], env={'PATH': os.environ['PATH'], 'FAKE_OUT': str(out), **env}, capture_output=True, text=True, timeout=60)
+            return r.returncode, r.stderr, json.loads(out.read_text()) if out.is_file() else None
+        rc, err, got = run()
+        self.assertEqual((rc, err), (0, f"run.sh: host: the bundle's {own} (the launch file's {row} is missing)\n"))
+        self.assertEqual((got['self'], got['argv']), (str(own), [str(self.aot), 'main']))
+        # NXHOST wins over the bundle's
+        rc, err, got = self.run_sh('main')
+        self.assertEqual((rc, err, got['self']), (0, '', str(self.tmp / 'bin/nxhost-run')))
+        # the row's host, there again, wins over the bundle's: nothing said
+        row.parent.mkdir(parents=True); shutil.copy(own, row)
+        rc, err, got = run()
+        self.assertEqual((rc, err, got['self']), (0, '', str(row)))
+        shutil.rmtree(old)
+        # neither: the red line, and nothing started
+        shutil.rmtree(self.tmp / 'hosts')
+        rc, err, got = run()
+        self.assertEqual((rc, err, got), (1, f'[RED] run.sh: the host {row} is missing: pack the game again or set NXHOST\n', None))
+
     def test_derived_profile(self):   # files of another build under the registered tag: packed from a derived profile, which nxhost-run must be configured with
         nso(self.game / 'ExeFS/main', BID2); self.pack()
         pdir = self.work / 'profile'
@@ -531,6 +563,12 @@ class Windows(Pack):
         self.assertIn(f'\r\nset "NXRUN_LAUNCH={self.work / "launch-windows.tsv"}"\r\n', cmd)
         self.assertEqual(cmd.count('for /f "usebackq eol=# tokens=1,2,* delims=\t" %%a in ("%NXRUN_LAUNCH%") do'), 2)
         self.assertIn('\r\nif defined NXHOST set "NXRUN_host=%NXHOST%"\r\n', cmd)
+        # the launch file's host gone and no NXHOST: hosts\<title ID>\nxhost-run.exe of the first folder above run.cmd that has one, as run.sh walks up (cmd.exe is not run here)
+        self.assertIn('\r\nif defined NXHOST goto nxrun_host_ok\r\nif exist "%NXRUN_host%" goto nxrun_host_ok\r\nset "NXRUN_DIR=%~dp0"\r\n:nxrun_up\r\n'
+                      'if exist "%NXRUN_DIR%hosts\\%NXRUN_ID%\\nxhost-run.exe" goto nxrun_bundle_host\r\n', cmd)
+        self.assertIn('\r\n    if "%%a"=="game" if "%%b"=="title_id" set "NXRUN_ID=%%c"\r\n', cmd)
+        self.assertIn('\r\necho [RED] run.cmd: the host "%NXRUN_host%" is missing: pack the game again or set NXHOST 1>&2\r\ngoto nxrun_end\r\n', cmd)
+        self.assertLess(cmd.index(':nxrun_host_ok\r\n'), cmd.index('\r\n"%NXRUN_host%" "%NXRUN_AOT%" %*\r\n'))
         self.assertIn('\r\n"%NXRUN_host%" "%NXRUN_AOT%" %*\r\nset "NXRUN_RC=%errorlevel%"\r\n:nxrun_end\r\nif defined NXRUN_CP chcp %NXRUN_CP% > nul\r\nexit /b %NXRUN_RC%\r\n', cmd)
         self.assertIn('x86_64-w64-mingw32.cmake', cmd)
         self.assertIn(f'\r\nrem set "DM_AOT_PROFILE={self.wdir / "profile"}"\r\n', cmd)

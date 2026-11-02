@@ -14,6 +14,7 @@ Two pull requests brought this game up before this profile, separately: [#339](h
 | `shader_key_skip 0x770+0x78` | [`game.tsv`](game.tsv) | the engine shares one control section among shaders that differ only in GLSLC's compile information; see [Files and shaders](#files-and-shaders) |
 | A 2 GB block: `mem_reserve 0x80000000`, `mem_alias 0x58000000` | `game.tsv` | the host heap lies outside the block; see [Memory](#memory) |
 | `sys_resource 0x2000000` | `game.tsv` | the NPDM's 32 MB of system resource: virtual address memory |
+| `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth (the NSP script's region check on the registered build); offline pipeline bases must use the matching vertex entry |
 
 No frame-rate key: the game asks for present interval 2 and runs at 30 fps, as on the Switch.
 
@@ -59,6 +60,7 @@ No frame-rate key: the game asks for present interval 2 and runs at 30 fps, as o
 
 ## Found on this game
 
+- **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree). The key was missing until the check boots began reading it; the archive at this mode has not been rebuilt or measured here.
 - [Unreal Engine 3 shader caches (Oodle packages)](../../../docs/reference/shaders.md#unreal-engine-3-shader-caches-oodle-packages) and [Control sections shared among shaders that differ only in their compile information](../../../docs/reference/shaders.md#control-sections-shared-among-shaders-that-differ-only-in-their-compile-information) (the profile key `shader_key_skip`).
 - The `UE3` layout of [Unreal's FMallocBinned3 replaced by the host allocator](../../../docs/reference/memory.md#unreals-fmallocbinned3-replaced-by-the-host-allocator), and an SDK 14.3.0 instance of [the SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area).
 - [A 2D texture in a 3D slot binds the zero 3D texture](../../../docs/reference/rendering.md#a-2d-texture-in-a-3d-slot-binds-the-zero-3d-texture) and [An unbound uniform slot reads the zero bank](../../../docs/reference/rendering.md#an-unbound-uniform-slot-reads-the-zero-bank) (`stage 0 cb0` at boot).

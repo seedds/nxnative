@@ -23,10 +23,12 @@ typedef struct {
 
 static const char *const pad_hid_names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
 
-// DM_HID_MAP: comma-separated NAME=usage entries over the default map (an unknown name or a usage past 32 is skipped)
-static void pad_hid_init(pad_hid *h, const char *map) {
+// DM_HID_MAP: comma-separated NAME=usage entries over the default map (an unknown name or a usage past 32 is skipped); ab_xbox (DM_PAD_AB=xbox) swaps the default A and B
+// (A at the bottom, usage 1, B on the right, usage 2) before those entries apply
+static void pad_hid_init(pad_hid *h, const char *map, int ab_xbox) {
     static const uint8_t def[16] = {2, 1, 5, 4, 14, 15, 7, 8, 9, 10, 12, 11};
     memset(h, 0, sizeof *h); h->hat = -1; memcpy(h->map, def, sizeof def);
+    if (ab_xbox) { h->map[0] = def[1]; h->map[1] = def[0]; }
     for (int a = 0; a < PH_AXES; a++) h->axis[a] = a >= PH_BRAKE ? -1 : 0;
     for (const char *s = map; s && *s; s = strchr(s, ',') ? strchr(s, ',') + 1 : "") {
         const char *eq = strchr(s, '='), *end = strchr(s, ','); if (!eq || (end && eq > end)) continue;

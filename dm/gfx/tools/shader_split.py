@@ -2117,7 +2117,8 @@ def sarc_members(d, label='SARC'):
     for i in range(n):
         h, attr, s, e = struct.unpack_from('<IIII', d, hl + 12 + 16 * i)
         if not s <= e <= len(d) - doff: red(f'{label}: SARC member {i} at {s:#x}..{e:#x} of the data lies outside its {len(d) - doff:#x} bytes')
-        nm = d[names + (attr & 0xffffff) * 4:].split(b'\0')[0].decode('utf-8', 'replace') if attr >> 24 else f'#{i}'
+        o = names + (attr & 0xffffff) * 4; z = d.find(b'\0', o)   # up to the name's own NUL: splitting the rest of the archive per member was quadratic (Fire Emblem Fortune's Weave's Layout/Common.arc.zst: 6 minutes)
+        nm = d[o:z if z >= 0 else len(d)].decode('utf-8', 'replace') if attr >> 24 else f'#{i}'
         yield nm, d[doff + s:doff + e]
 
 NV_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # NVN stage order

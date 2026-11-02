@@ -97,7 +97,7 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Symptom:** a null pointer in the game's resource code (`main+0x15a69b0`, null + 0x78, thread `BaseProcCreateAndDeleteThread`): a model's load returned null, its status 9, written hundreds of times by a loader thread. The `[mem]` lines end near the top of the alias region.
 - **Cause:** the alias region ran out. An SDK 21 game keeps the SDK's 1 GB node area, as the sdk patches that cut it do not match this SDK, and maps past 4.25 GB of it at the first level.
 - **Fix:** the profile's `mem_alias`: 16 GB ([Splatoon Raiders](../../dm/games/0400380020056000/README.md): `0x400000000`, with `mem_reserve 0x550000000`). The peak then is about +8.5 GB.
-- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md). **Open:** 16 GB is over iOS's reservation limit, so an IPA needs the SDK 21 node-area and alignment cuts first.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md). [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) (SDK 22.2.0) takes the same split, and its SDK has its node-area cut (`dm/tools/sdk_patches.py`), from 1 GB to 62 MB, because `alias_room` aborted in `StandardAllocator::Initialize` without one. **Open:** 16 GB is over iOS's reservation limit, so an IPA needs the SDK 21 node-area and alignment cuts first.
 
 ## Virtual address memory and the alias region
 

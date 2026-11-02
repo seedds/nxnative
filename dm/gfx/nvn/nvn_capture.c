@@ -30,7 +30,7 @@ CAP_SIZE(p_clear_buf, 24); CAP_OFF(p_clear_buf, addr, 0); CAP_OFF(p_clear_buf, s
 CAP_SIZE(p_tf_bind, 24); CAP_OFF(p_tf_bind, addr, 8); CAP_OFF(p_tf_bind, size, 16);
 CAP_SIZE(p_tf_state, 16); CAP_OFF(p_tf_state, ctl, 8);
 CAP_SIZE(p_render_cond, 16); CAP_OFF(p_render_cond, mode, 0); CAP_OFF(p_render_cond, addr, 8);
-_Static_assert(OP_COUNT_ == 54, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
+_Static_assert(OP_COUNT_ == 55, "nvn_capture.c: a record op was added or removed: give it a case in cap_rec_fields");
 
 const char *cap_layout(void) {
     // sizes and pointer offsets as the walk knows them (the asserts above hold them to nvn_obj.h); bump this text with any change to the walk
@@ -98,6 +98,7 @@ int cap_rec_fields(uint32_t op, uint8_t *payload, uint32_t size, const cap_ops *
         }
         case OP_COPY_T2T: if (!HAS(8)) return 0; return ops->obj(ctx, CAP_K_TEX, F(0), payload, (uint32_t)plen) & ops->obj(ctx, CAP_K_TEX, F(8), payload, (uint32_t)plen);
         case OP_CLEAR_TEX: return HAS(0) && ops->obj(ctx, CAP_K_TEX, F(0), payload, (uint32_t)plen);
+        case OP_DLSS: if (!HAS(offsetof(p_dlss, net))) return 0; for (int k = 0; k < DLSS_TEXTURES; k++) ok &= ops->obj(ctx, CAP_K_TEX, F(offsetof(p_dlss, tex) + 8 * (size_t)k), payload, (uint32_t)plen); return ok;
         case OP_CLEAR_BUF: return HAS(8) && ops->addr(ctx, F(0), u64_at(payload + 8), 1);
         case OP_TF_BIND: return HAS(16) && ops->addr(ctx, F(8), u64_at(payload + 16), 1);
         case OP_TF_STATE: return HAS(8) && ops->addr(ctx, F(8), 32, 1);

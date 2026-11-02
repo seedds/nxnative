@@ -34,13 +34,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x987, InstName.Stl, AStLocalShared, N, writesRd: false);
             x(0x388, InstName.Sts, AStLocalShared, N, writesRd: false);
             x(0x988, InstName.Sts, AStLocalShared, N, writesRd: false);
+            x(0x38c, InstName.Atoms, AAtoms, N);
+            x(0x38d, InstName.Atoms, AAtomsCas, N);
+            x(0x992, InstName.Membar, AMembar, N, writesRd: false);
+            x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
 
             x(0xb60, InstName.Tex, ATex, InstProps.Tex);
+            x(0x361, InstName.Tex, ATex, InstProps.Tex);
+            x(0xf60, InstName.Tex, ATex, InstProps.Tex);
             x(0xb66, InstName.Tld, ATex, InstProps.Tex);
             x(0xb63, InstName.Tld4, ATex, InstProps.Tex);
             x(0xb69, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb6c, InstName.Txd, ATex, InstProps.Tex);
             x(0xb6f, InstName.Txq, ATxq, InstProps.Tex);
+            x(0x370, InstName.Txq, ATxq, InstProps.Tex);
             x(0xb97, InstName.Suld, ASurface, N);
             x(0xb99, InstName.Suld, ASurface, N);
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
@@ -308,12 +315,58 @@ namespace Ryujinx.Graphics.Shader.Instructions
             ASet(context, x, res);
         }
 
+        // ATOMS Rd, [Ra + offset], Rb: as ATOMG (operation 87..91, size 73..76) on shared memory, the byte offset at 40..64 as LDS's. Compute only
+        public static void AAtoms(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            Operand ra = x.Ra >= RegisterConsts.RegisterZeroIndex ? Const(0) : AStride(context, x, Register(x.Ra, RegisterType.Gpr));
+            Operand offset = context.ShiftRightU32(context.IAdd(ra, Const((int)x.SignedField(40, 64))), Const(2));
+            Operand value = x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr);
+            Operand res = EmitAtomicOp(context, StorageKind.SharedMemory, (AtomOp)x.Bits(87, 91), (AtomSize)x.Bits(73, 76), Const(context.ResourceManager.SharedMemoryId), offset, value);
+
+            ASet(context, x, res);
+        }
+
+        // MEMBAR: the order of this thread's memory operations
+        public static void AMembar(EmitterContext context)
+        {
+            context.MemoryBarrier();
+        }
+
+        // ERRBAR, after a MEMBAR: waits for errors of earlier memory operations to be reported, which here is nothing to do
+        public static void AErrbar(EmitterContext context)
+        {
+        }
+
+        // ATOMS.CAS Rd, [Ra + offset], Rb (expected), Rc (new value): Rd = 1 when the swap happened, not the old value (Fire Emblem Fortune's Weave's only use is a retry loop for a float add that repeats until Rd == 1).
+        // Only the 32-bit form (operation 3 at 87..91, size 0) occurs
+        public static void AAtomsCas(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            Operand ra = x.Ra >= RegisterConsts.RegisterZeroIndex ? Const(0) : AStride(context, x, Register(x.Ra, RegisterType.Gpr));
+            Operand offset = context.ShiftRightU32(context.IAdd(ra, Const((int)x.SignedField(40, 64))), Const(2));
+            Operand expected = context.Copy(x.Rb >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rb, RegisterType.Gpr));
+            Operand value = x.Rc >= RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Rc, RegisterType.Gpr);
+            Operand old = context.AtomicCompareAndSwap(StorageKind.SharedMemory, Const(context.ResourceManager.SharedMemoryId), offset, expected, value);
+
+            ASet(context, x, context.ConditionalSelect(context.ICompareEqual(old, expected), Const(1), Const(0)));
+        }
+
         // ---- local and shared memory ----
 
-        // The 32-bit address of a local / shared access: Ra plus the uniform register (at urLo in the uniform form, bit 91)
+        // A shared or local address register's stride, bits 78..79: it counts elements of 1, 4, 8 or 16 bytes (Fire Emblem Fortune's Weave has 1 on all its 32-bit and 2 on all its 64-bit accesses with a
+        // register, whose code bounds that register by the element count; 3 by the pattern, not seen)
+        private static Operand AStride(EmitterContext context, AmpereOp x, Operand ra)
+        {
+            int stride = x.Bits(78, 80);
+
+            return stride == 0 ? ra : context.ShiftLeft(ra, Const(stride + 1));
+        }
+
+        // The 32-bit address of a local / shared access: Ra by its stride, plus the uniform register (at urLo in the uniform form, bit 91)
         private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo)
         {
-            Operand addr = Register(x.Ra, RegisterType.Gpr);
+            Operand addr = x.Ra == RegisterConsts.RegisterZeroIndex ? Const(0) : AStride(context, x, Register(x.Ra, RegisterType.Gpr));
 
             if (x.Bit(91) && x.Bits(urLo, urLo + 6) != RegisterConsts.UniformZeroIndex)
             {
@@ -511,6 +564,25 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             int opcode = x.Opcode;
 
+            // TEX through a handle in a register, not named by its offset: the compiler's form for a handle it read itself, usually from a table at a computed offset. BindlessElimination takes the
+            // handle from there, as for Maxwell's TEX.B. The other fields are 0xb60's. 0xf60: a uniform register at 40..46. 0x361 (bit 59 set): a register, the first of the second source block,
+            // before the LOD (a census of Fire Emblem Fortune's Weave's 3,327: of the sources that an LDC just wrote, always that place, with and without .SCR). Rc stays the second destination in both
+            Operand boundHandle = null;
+            bool handleInB = opcode == 0x361;
+            bool bindless = handleInB || opcode == 0xf60;
+
+            if (opcode == 0xf60)
+            {
+                int ur = x.Bits(40, 46);
+
+                boundHandle = ur == RegisterConsts.UniformZeroIndex ? Const(0) : context.Copy(Register(ur, RegisterType.Uniform));
+            }
+
+            if (bindless)
+            {
+                opcode = 0xb60;
+            }
+
             TexDim dim = ATexDim(context, x.Bits(61, 64));
             SamplerType type = ConvertSamplerType(dim);
             bool isArray = type.HasFlag(SamplerType.Array);
@@ -572,9 +644,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     break;
             }
 
-            (int handle, int cbufSlot) = ATexHandle(context, x);
+            (int handle, int cbufSlot) = bindless ? (0, TextureOperation.DefaultCbufSlot) : ATexHandle(context, x);
             List<Operand> sources = [];
             Operand arrayIndex = null;
+
+            if (bindless)
+            {
+                flags |= TextureFlags.Bindless;
+            }
 
             if (opcode == 0xb6c)
             {
@@ -608,8 +685,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
             else
             {
                 int n0 = coords + (isArray ? 1 : 0);
-                (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0, n1);
+                (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0, n1 + (handleInB ? 1 : 0));
                 int ia = 0, ib = 0;
+
+                if (handleInB)
+                {
+                    boundHandle = b[ib++];
+                }
+
+                if (bindless)
+                {
+                    sources.Add(boundHandle);
+                }
 
                 if (isArray)
                 {
@@ -715,7 +802,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
             else
             {
-                SetBindingPair setAndBinding = context.ResourceManager.GetTextureOrImageBinding(
+                SetBindingPair setAndBinding = bindless ? default : context.ResourceManager.GetTextureOrImageBinding(
                     Instruction.TextureSample,
                     type,
                     TextureFormat.Unknown,
@@ -759,8 +846,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
             AmpereOp x = new(context.CurrOp);
             int query = x.Bits(62, 64);
             int mask = x.Bits(72, 76);
-            (int handle, int cbufSlot) = ATexHandle(context, x);
-            SamplerType type = context.TranslatorContext.GpuAccessor.QuerySamplerType(handle);
+            // 0x370 is to 0xb6f as 0x361 to 0xb60: the handle in a register, Ra, with the LOD after it (Fire Emblem Fortune's Weave's lighting: MOV R1c, R64; MOV R1d, RZ; TXQ R1d, R1c). The shape
+            // has no field here and the size query does not depend on it, so 2D, as Maxwell's bindless TXQ
+            bool bindless = x.Opcode == 0x370;
+            (int handle, int cbufSlot) = bindless ? (0, TextureOperation.DefaultCbufSlot) : ATexHandle(context, x);
+            SamplerType type = bindless ? SamplerType.Texture2D : context.TranslatorContext.GpuAccessor.QuerySamplerType(handle);
+            TextureFlags flags = bindless ? TextureFlags.Bindless : TextureFlags.None;
 
             int count = BitOperations.PopCount((uint)mask);
             Operand[] results = new Operand[count];
@@ -770,11 +861,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 results[i] = Local();
             }
 
-            Operand[] sources = [x.Ra >= RegisterConsts.RegisterZeroIndex ? Const(0) : context.Copy(Register(x.Ra, RegisterType.Gpr))];
+            Operand Src(int reg) => reg >= RegisterConsts.RegisterZeroIndex ? Const(0) : context.Copy(Register(reg, RegisterType.Gpr));
+
+            Operand[] sources = bindless ? [Src(x.Ra), Src(x.Ra + 1)] : [Src(x.Ra)];
 
             if (query == 0)
             {
-                SetBindingPair setAndBinding = context.ResourceManager.GetTextureOrImageBinding(
+                SetBindingPair setAndBinding = bindless ? default : context.ResourceManager.GetTextureOrImageBinding(
                     Instruction.TextureQuerySize, type, TextureFormat.Unknown, TextureFlags.None, cbufSlot, handle);
                 int r = 0;
 
@@ -782,13 +875,13 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     if ((mask & (1 << comp)) != 0)
                     {
-                        context.Copy(results[r++], context.TextureQuerySize(type, TextureFlags.None, setAndBinding, comp, sources));
+                        context.Copy(results[r++], context.TextureQuerySize(type, flags, setAndBinding, comp, sources));
                     }
                 }
             }
             else if (query == 1)
             {
-                SetBindingPair setAndBinding = context.ResourceManager.GetTextureOrImageBinding(
+                SetBindingPair setAndBinding = bindless ? default : context.ResourceManager.GetTextureOrImageBinding(
                     Instruction.TextureQuerySamples, type, TextureFormat.Unknown, TextureFlags.None, cbufSlot, handle);
                 int r = 0;
 
@@ -796,7 +889,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 {
                     if ((mask & (1 << comp)) != 0)
                     {
-                        context.Copy(results[r++], comp == 2 ? context.TextureQuerySamples(type, TextureFlags.None, setAndBinding, sources) : Const(0));
+                        context.Copy(results[r++], comp == 2 ? context.TextureQuerySamples(type, flags, setAndBinding, sources) : Const(0));
                     }
                 }
             }

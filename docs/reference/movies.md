@@ -256,6 +256,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): 101 guide movies (`Movie/*.webm`, VP9 960×540, no sound); its player reads the pictures as NV12 (`ReadDecoderOutputImageNv12`, output format 3).
 - **Open:** AV1 (no decoder on the host: Initialize fails with a red line, so a client takes its error path instead of reaching the service), encrypted input, native image handles (the GPU route of decoded pictures), alias pools and the readback of part of a picture are not served (each prints a red line once). No game here plays VP8 or H.264 through this API yet: those paths are checked by the test only. Donkey Kong Bananza's player imports all four decoders; its movies are VP9.
 
+### AV1 movies through SDK 22's decoder
+
+- **Symptom:** a crash in `nn::codec::video::InitializeAv1DecoderByTransferMemory` when a movie starts.
+- **Cause:** SDK 22 initializes its decoders by transfer or remote memory, with stack arguments, and the game's movies are AV1 decoded into native images: linear textures it makes over the output pool's memory with `nvnNativeImage*` and `nvnTextureInitializeFromNativeImage`.
+- **Fix:** `hle_codec_video.c` takes the SDK 22 forms and the native images (16 KB aligned, 64-byte stride); `hle_movie_av1.c` decodes on VideoToolbox, building the av1C record from the stream's sequence header. The hardware decoder is on M3 and A17 Pro and later: anywhere else the pictures are black with a red line, a platform limit.
+- **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_codec_video` (AddressSanitizer and UBSan), which covers the AV1 and SDK 22 forms, native images and the av1C record.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 82 movies in WebM at 2560x1440; the opening's 3,301 pictures play.
+
 ## Movie players
 
 ### Unity's video planes and checking the movie path

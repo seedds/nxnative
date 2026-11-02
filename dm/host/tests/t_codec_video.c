@@ -6,6 +6,7 @@
 #include "../hle_movie.c"
 #include "../hle_codec_video.c"
 #include "../hle_movie_avc.c"
+#include "../hle_movie_av1.c"
 #include <assert.h>
 
 uint64_t now_ns(void) { return 1; }
@@ -42,7 +43,7 @@ int main(void) {
 
     // Pools: one picture each, NV12 (format 3, as Bananza asks)
     cv_pref pref = h_cv_pref(16, 16, 3, 0);
-    assert(!h_cv_poolsize(&size, &align, &pref, 1) && size >= 16 * 16 * 4 && align == 0x1000);
+    assert(!h_cv_poolsize(&size, &align, &pref, 1) && size >= 16 * 16 * 4 && align == CV_NATIVE_ALIGN);
     for (int i = 0; i < 3; i++) assert(!h_cv_pool(pool[i], mem, size, &pref, 1, 0) && pool_of(pool[i]));
 
     // Decoder: the submission-ready event is bound in its type and signalled
@@ -138,8 +139,46 @@ int main(void) {
         for (int i = 4096; i < 6144; i += 2) { assert(abs(yuv[i] - 90) <= 6); assert(abs(yuv[i + 1] - 240) <= 6); }
         assert(!h_cv_h264fin(dh) && !cv_of(dh)); h_cv_poolfin(ph);
     }
-    {   uint8_t da[0x400]; memset(da, 0xab, sizeof da);   // AV1: no decoder on the host, Initialize fails and leaves no host decoder
-        assert(h_cv_av1init(da) != 0 && !cv_of(da) && !h_cv_av1fin(da)); }
+    {   // AV1: a decoder of its own codec through SDK 22's entry point, whose last two arguments lie on the stack (the guest's 8-byte slots), and a packet with no sequence header yet gives no picture
+        uint8_t da[0x400]; memset(da, 0, sizeof da);
+        assert(!h_cv_av1tm(da, NULL, 0, 0x10000, 0xabcd0080, 0xabcd0040, 1, 3, 2, 2) && cv_of(da) && cv_of(da)->codec == CV_AV1 && cv_of(da)->w == 0x80 && cv_of(da)->h == 0x40);
+        assert(h_cv_av1ev22(da) == da + CV_EVENT_OFF && ev_set(da + CV_EVENT_OFF));
+        static const uint8_t delimiter[] = {0x12, 0x00};   // a temporal delimiter OBU alone
+        uint64_t n; assert(!h_cv_av1submit(&n, da, delimiter, sizeof delimiter, 0, false) && !cv_of(da)->nheld);
+        assert(!h_cv_av1fin(da) && !cv_of(da));
+        // The av1C record from a sequence header: profile 0, one operating point at level 12 (tier 0), 2560x1440, 8-bit 4:2:0 with chroma position 0, written field by field
+        uint8_t obu[32] = {0x0a, 0}; size_t bit = 16;
+        #define PUT(v, nb) do { for (int k_ = (nb) - 1; k_ >= 0; k_--, bit++) if (((uint32_t)(v) >> k_) & 1) obu[bit / 8] |= (uint8_t)(0x80 >> (bit % 8)); } while (0)
+        PUT(0, 3); PUT(0, 1); PUT(0, 1);            // profile, still picture, reduced header
+        PUT(0, 1); PUT(0, 1); PUT(0, 5);            // no timing info, no display delay, one operating point
+        PUT(0, 12); PUT(12, 5); PUT(0, 1);          // idc, level 12, tier
+        PUT(11, 4); PUT(10, 4); PUT(2559, 12); PUT(1439, 11);   // frame size bits and frame size
+        PUT(0, 1); PUT(0, 3); PUT(0, 4);            // no frame ids, block tools, inter tools
+        PUT(1, 1); PUT(0, 2);                       // order hint, jnt_comp and ref_frame_mvs
+        PUT(1, 1); PUT(1, 1);                       // screen content tools: choose; integer mv: choose
+        PUT(6, 3); PUT(0, 3);                       // order hint bits, superres / cdef / restoration
+        PUT(0, 1); PUT(0, 1); PUT(0, 1);            // not high bit depth, not monochrome, no colour description
+        PUT(0, 1); PUT(0, 2); PUT(0, 1);            // colour range, chroma position, separate delta q
+        #undef PUT
+        obu[1] = (uint8_t)((bit + 7) / 8 - 2);
+        uint8_t c[4]; int aw = 0, ah = 0;
+        assert(mav1_av1c(obu, (bit + 7) / 8, c, &aw, &ah) && aw == 2560 && ah == 1440);
+        assert(c[0] == 0x81 && c[1] == 12 && c[2] == 0x0c && c[3] == 0);
+        size_t seqn = 0; assert(find_seq(obu, (bit + 7) / 8, &seqn) == obu && seqn == (bit + 7) / 8);
+        assert(!mav1_av1c(delimiter, sizeof delimiter, c, &aw, &ah) && !find_seq(delimiter, sizeof delimiter, &seqn));
+    }
+    {   // A native image: SDK 22's preference and pool, the handle names the pool's memory, and a picture lands there as RGBA in NVN's linear layout
+        cv_pref p = h_cv_pref22(0xffff0020, 0xffff0010, 2, 2); assert(p.w == 32 && p.h == 16);
+        uint64_t sz, al; assert(!h_cv_poolsize(&sz, &al, &p, 2) && al == CV_NATIVE_ALIGN && sz == 2 * CV_NATIVE_ALIGN);
+        uint8_t pt[0x40] = {0}; void *m; assert(!posix_memalign(&m, al, sz)); memset(m, 0, sz);
+        assert(!h_cv_pool22(pt, m, sz, &p, 2));
+        uint32_t ha = h_cv_native(pt, 1), nw, nh, ns; uint8_t *nm = NULL; uint64_t nz;
+        assert(ha && dm_native_image(ha, &nm, &nz, &nw, &nh, &ns) && nm == (uint8_t *)m + CV_NATIVE_ALIGN && nz == CV_NATIVE_ALIGN && nw == 32 && nh == 16 && ns == 128);
+        vpx_image_t *im = black_i420(32, 16); im->range = VPX_CR_STUDIO_RANGE;
+        pool_native_write(pool_of(pt), 1, im); vpx_img_free(im);
+        assert(nm[0] == 0 && nm[3] == 255 && nm[ns * 15 + 31 * 4 + 3] == 255);
+        h_cv_poolfin(pt); assert(!dm_native_image(ha, &nm, &nz, &nw, &nh, &ns)); free(m);
+    }
     printf("t_codec_video: all passed\n");
     return 0;
 }

@@ -3,6 +3,7 @@
 // Basis: both are implementations of nn::codec::IOpusDecoder, with the 10 vtable slots identical one by one in order and signature (destructor×2, GetWorkBufferSize, IsInitialized,
 // Initialize, Finalize, GetSampleRate, GetChannelCount, Reset, DecodeInterleaved); the game allocates 0x40 bytes and the software object is 0x30 bytes.
 #include "hle.h"
+#include <stdatomic.h>
 
 HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderC1Ei", "hwopus service; replaced by the SDK software OpusDecoder (same IOpusDecoder virtual interface)",
           void, h_codec_HwOpusCtor, void *self, int option) {
@@ -15,9 +16,12 @@ HLE_FORCE("_ZN2nn5codec19HardwareOpusDecoderC1Ei", "hwopus service; replaced by 
 // The C interface to the same hardware decoder (Tears of the Kingdom, SDK 20.5.22: GetHardwareOpusDecoderWorkBufferSize opens hwopus and aborts in sm::Initialize).
 // Each call goes to the sdk's software C interface instead. The software decoder state lives in a host block kept per game decoder object (objmap), so the size of the
 // game's HardwareOpusDecoderType does not matter; the game's work buffer is sized by GetOpusDecoderWorkBufferSize and handed to the software decoder as is.
+// The sdk's libopus has to be this decoder's own, as the hwopus service's is: loader.c bind_private_opus (Hogwarts Legacy's voices, decoded through this path while the sdk's
+// libopus read the game's own libopus tables, came out muffled and garbled).
 #define SOFT_OPUS_STATE 0x200   // bytes for the software OpusDecoderType (larger than the SDK's)
+typedef struct { uint8_t sdk[SOFT_OPUS_STATE]; int index, ch; FILE *dump; } soft_opus;   // index: creation order (the log and dump names); dump: the DM_OPUS_DUMP file, once open
 static void *opus_fn(const char *name) { void *f = guest_sym(name); if (!f) die("sdk lacks %s", name); return f; }
-static void *opus_soft(const void *hw) { void *s = objmap_get(hw); if (!s) die("Opus decoder %p was not initialized by the host", hw); return s; }
+static soft_opus *opus_soft(const void *hw) { soft_opus *s = objmap_get(hw); if (!s) die("Opus decoder %p was not initialized by the host", hw); return s; }
 HLE_FORCE("_ZN2nn5codec36GetHardwareOpusDecoderWorkBufferSizeEiii", "hwopus service; work buffer computed for the software decoder", size_t, h_codec_HwOpusWorkSize, int rate, int ch, int option) {
     (void)option; size_t (*f)(int, int) = opus_fn("_ZN2nn5codec28GetOpusDecoderWorkBufferSizeEii"); return f(rate, ch);
 }
@@ -28,27 +32,41 @@ HLE_FORCE("_ZN2nn5codec36GetHardwareOpusDecoderWorkBufferSizeEii", "hwopus servi
 }
 HLE_FORCE("_ZN2nn5codec29InitializeHardwareOpusDecoderEPNS0_23HardwareOpusDecoderTypeEiiPvmi", "hwopus service; replaced by the software OpusDecoder", int, h_codec_HwOpusInit,
           void *hw, int rate, int ch, void *buf, size_t size, int option) {
-    (void)option; int (*f)(void *, int, int, void *, size_t) = opus_fn("_ZN2nn5codec21InitializeOpusDecoderEPNS0_15OpusDecoderTypeEiiPvm");
-    void *s = objmap_get(hw); if (!s) { s = calloc(1, SOFT_OPUS_STATE); objmap_put(hw, s); }
-    return f(s, rate, ch, buf, size);
+    int (*f)(void *, int, int, void *, size_t) = opus_fn("_ZN2nn5codec21InitializeOpusDecoderEPNS0_15OpusDecoderTypeEiiPvm");
+    soft_opus *s = objmap_get(hw);
+    if (!s) { static _Atomic int n; s = calloc(1, sizeof *s); s->index = atomic_fetch_add(&n, 1); objmap_put(hw, s); }
+    s->ch = ch;
+    int r = f(s->sdk, rate, ch, buf, size);
+    if (s->index < 8) LOG("codec: hardware Opus decoder #%d: %d Hz, %d channel(s), option %d, work buffer %zu bytes → %#x", s->index, rate, ch, option, size, (unsigned)r);   // the first few: what the game decodes (Hogwarts Legacy: 24 kHz mono voices)
+    return r;
 }
 HLE_FORCE("_ZN2nn5codec27FinalizeHardwareOpusDecoderEPNS0_23HardwareOpusDecoderTypeE", "hwopus service; software OpusDecoder", void, h_codec_HwOpusFini, void *hw) {
     void (*f)(void *) = opus_fn("_ZN2nn5codec19FinalizeOpusDecoderEPNS0_15OpusDecoderTypeE");
-    void *s = objmap_del(hw); if (s) { f(s); free(s); }
+    soft_opus *s = objmap_del(hw); if (s) { f(s->sdk); if (s->dump) fclose(s->dump); free(s); }
 }
 HLE_FORCE("_ZN2nn5codec32GetHardwareOpusDecoderSampleRateEPKNS0_23HardwareOpusDecoderTypeE", "hwopus service; software OpusDecoder", int, h_codec_HwOpusRate, const void *hw) {
-    int (*f)(const void *) = opus_fn("_ZN2nn5codec24GetOpusDecoderSampleRateEPKNS0_15OpusDecoderTypeE"); return f(opus_soft(hw));
+    int (*f)(const void *) = opus_fn("_ZN2nn5codec24GetOpusDecoderSampleRateEPKNS0_15OpusDecoderTypeE"); return f(opus_soft(hw)->sdk);
 }
 HLE_FORCE("_ZN2nn5codec34GetHardwareOpusDecoderChannelCountEPKNS0_23HardwareOpusDecoderTypeE", "hwopus service; software OpusDecoder", int, h_codec_HwOpusCh, const void *hw) {
-    int (*f)(const void *) = opus_fn("_ZN2nn5codec26GetOpusDecoderChannelCountEPKNS0_15OpusDecoderTypeE"); return f(opus_soft(hw));
+    int (*f)(const void *) = opus_fn("_ZN2nn5codec26GetOpusDecoderChannelCountEPKNS0_15OpusDecoderTypeE"); return f(opus_soft(hw)->sdk);
 }
 HLE_FORCE("_ZN2nn5codec24ResetHardwareOpusDecoderEPNS0_23HardwareOpusDecoderTypeE", "hwopus service; software OpusDecoder", void, h_codec_HwOpusReset, void *hw) {
-    void (*f)(void *) = opus_fn("_ZN2nn5codec16ResetOpusDecoderEPNS0_15OpusDecoderTypeE"); f(opus_soft(hw));
+    void (*f)(void *) = opus_fn("_ZN2nn5codec16ResetOpusDecoderEPNS0_15OpusDecoderTypeE"); f(opus_soft(hw)->sdk);
 }
 HLE_FORCE("_ZN2nn5codec33DecodeOpusInterleavedWithHardwareEPNS0_23HardwareOpusDecoderTypeEPmPiPsmPKvm", "hwopus service; software OpusDecoder", int, h_codec_HwOpusDecode,
           void *hw, size_t *consumed, int *samples, int16_t *out, size_t out_size, const void *in, size_t in_size) {
     int (*f)(void *, size_t *, int *, int16_t *, size_t, const void *, size_t) = opus_fn("_ZN2nn5codec21DecodeOpusInterleavedEPNS0_15OpusDecoderTypeEPmPiPsmPKvm");
-    return f(opus_soft(hw), consumed, samples, out, out_size, in, in_size);
+    soft_opus *s = opus_soft(hw);
+    int r = f(s->sdk, consumed, samples, out, out_size, in, in_size);
+    // DM_OPUS_DUMP=<file> (diagnostics): the decoded PCM of the first 8 decoders, each to <file>.<index> as decoded (16-bit interleaved, the rate and channel count of its init line).
+    // Decoded output that already sounds wrong puts the fault in the decoder, not in the renderer's mixing or the output path (how Hogwarts Legacy's voices were told apart)
+    static const char *dump; static int on = -1;
+    if (on < 0) { dump = getenv("DM_OPUS_DUMP"); on = dump != NULL; }
+    if (on && s->index < 8 && r == 0 && samples && *samples > 0) {
+        if (!s->dump) { char path[1024]; snprintf(path, sizeof path, "%s.%d", dump, s->index); if (!(s->dump = fopen(path, "wb"))) LOG("[RED] DM_OPUS_DUMP: cannot open %s", path); }
+        if (s->dump) { fwrite(out, 2, (size_t)*samples * (size_t)(s->ch > 0 ? s->ch : 1), s->dump); fflush(s->dump); }
+    }
+    return r;
 }
 
 // nn::codec::HardwareOpusMultiStreamDecoder (Hyrule Warriors: Age of Calamity, SDK 9.6.0: its sound streams are multi-stream Opus): the same swap as HardwareOpusDecoder above.

@@ -61,7 +61,9 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 r->n = (uint8_t)n; o->dyn = 1; o->nb++; continue;
             }
             if ([k isEqualToString:@DMSH_KIND_CBUF]) r->kind = NVN_RB_CBUF;
-            else if ([k isEqualToString:@DMSH_KIND_SAMP]) r->kind = NVN_RB_SAMP;
+            // An array of them: every element the one separate sampler of slot reg, beside an array of texture handles in a uniform buffer (dmsh_build.py decode_ubo_tex 'sep': Hogwarts
+            // Legacy's volumetric lightmap bricks, array<texture3d<float>, 32> cp_t3d_cb196612_10568000 with array<sampler, 32> ...Smplr, handle type 1 with the sampler word in c2)
+            else if ([k isEqualToString:@DMSH_KIND_SAMP]) { r->kind = NVN_RB_SAMP; if (n) { if (n > 32) FAIL("B binding %s: array of %d", nm.UTF8String, n); r->n = (uint16_t)n; } }
             else if ([k isEqualToString:@DMSH_KIND_SAMP_TEX]) r->kind = NVN_RB_SAMPT;
             else if ([k isEqualToString:@DMSH_KIND_TEX]) { r->kind = NVN_RB_TEX; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf); r->f1d = [b[@"fetch1d"] boolValue]; }
             // An array of them (array<element, n>): the handles of a uniform buffer the shader indexes at run time (Ryujinx's texture array from a buffer, handle 0: the index is the handle's

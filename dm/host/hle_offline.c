@@ -120,6 +120,13 @@ HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEPNS_6socket6InAddrES3_S3_S3_S3_",
 HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", "offline: no IP (SDK 10 overload)", Result, h_nifm_GetIp10, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
 // EnvironmentIdentifier = char[8]: retail environment "lp1"
 HLE_FORCE("_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", "server environment name: retail lp1", void, h_nsd_EnvId, char *out) { memset(out, 0, 8); memcpy(out, "lp1", 3); }
+// ServerEnvironmentType (nn::oe), the environment as a number: Hogwarts Legacy 1.0.5 decodes it with a 5-entry table and a switch (main+0x42e6c20 / +0x42e6c50): 0 dd1, 1 lp1, 2 sd1, 3 sp1, 4 dp1,
+// anything above 4 "unknown". The SDK's nn::oe::GetServerEnvironmentType (SDK 17) is a tail call into nn::nsd::GetApplicationServerEnvironmentType, whose IPC goes to nsd:a; without the service
+// the game aborted at boot (nn::diag abort, Result 0xe8d, under sdk+0x3a1748). Both answered here with retail lp1 (1), the environment GetEnvironmentIdentifier above reports; the SDK's own
+// tail call goes through a relocation slot too, so the nsd entry covers the oe wrapper on a game that imports only one of them
+enum { DM_SERVER_ENV_LP1 = 1 };
+HLE_FORCE("_ZN2nn2oe24GetServerEnvironmentTypeEv", "server environment type: retail lp1 (1); the original asks the nsd service (Hogwarts Legacy)", int, h_oe_ServerEnv, void) { return DM_SERVER_ENV_LP1; }
+HLE_FORCE("_ZN2nn3nsd35GetApplicationServerEnvironmentTypeEv", "server environment type: retail lp1 (1); the original asks the nsd service", int, h_nsd_AppServerEnv, void) { return DM_SERVER_ENV_LP1; }
 
 // ---------- friends: newer SDK overloads ----------
 HLE_FORCE("_ZN2nn7friends12SetAllocatorEPFPvmEPFvS1_mE", "friends library allocator; no session is created, ignored", void, h_fr_SetAlloc, void *a, void *f) { (void)a; (void)f; }

@@ -520,7 +520,10 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
 
 // Output device: one built-in speaker, stereo (the audio device service still goes through IPC; the host answers directly)
 enum { DEVNAME = 0x100 };
-static void out_devname(char *out) { memset(out, 0, DEVNAME); strlcpy(out, "AudioBuiltInSpeakerOutput", DEVNAME); }
+// DM_AUDIO_DEVICE=<name> (diagnostics) names another active output device (AudioTvOutput, a docked console on HDMI; AudioStereoJackOutput, headphones), for a game that may pick
+// a speaker-specific processing chain from the name. Hogwarts Legacy asks GetActiveAudioOutputDeviceName at boot; AudioTvOutput changed nothing about its muffled voices, which
+// were the Opus decoder's (loader.c bind_private_opus), so the name is not a suspect for that symptom
+static void out_devname(char *out) { const char *e = getenv("DM_AUDIO_DEVICE"); memset(out, 0, DEVNAME); strlcpy(out, e && *e ? e : "AudioBuiltInSpeakerOutput", DEVNAME); }
 HLE_FORCE("_ZN2nn5audio25ListAudioOutputDeviceNameEPNS0_15AudioDeviceNameEi", "output device list: 1 built-in speaker", int, h_ad_List, char *names, int n) { if (n <= 0 || !names) return 0; out_devname(names); return 1; }
 HLE_FORCE("_ZN2nn5audio30GetActiveAudioOutputDeviceNameEPNS0_15AudioDeviceNameE", "active output device: built-in speaker", void, h_ad_Active, char *name) { out_devname(name); }
 // The SDK 12 names (Engage): the same service, the same answers

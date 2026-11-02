@@ -1,0 +1,49 @@
+# Hogwarts Legacy: Avalanche Software (Warner Bros. Games), Unreal Engine 4 (version 11 paks with IoStore containers and shader code archives), SDK 17.5.4, NVN, Wwise sound, Bink 2 movies; update 1.0.5.
+# Started from the NSP script's provisional profile (dm/games/profile_guess.py) and brought up on the Mac (docs/agents): see README.md beside this file
+
+# ---- Identity ----
+title_id	0100F7E00C70E000
+program_id	0100F7E00C70E000
+
+# ---- App ----
+name	Hogwarts Legacy
+ipa	HogwartsLegacy.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	1.0.5	main=0c00fc37b0610fbdb2cf73aed0cc73e7	subsdk0=d0c48eef6dc2f1e7ac8b8dd5b5b03a60	sdk=1ea0b9fe6cd6867b18e374a5d53d7950
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# subsdk0 is NintendoSDK_movie (main imports from it)
+modules	main subsdk0 sdk
+romfs_marker	Phoenix/Content/Paks/pakchunk10-Switch.ucas
+zip_store	.bk2:.pak:.png:.ttf:.ucas:.utoc:.metallib
+
+# ---- Memory ----
+# Unreal: nninitStartup reserves a 62 GB address region and its allocator takes 37 GB of it, so a 64 GB alias region for the Mac (address space, not memory: 3.2 GB resident after 600 frames).
+# The rewriter's engine region gate applies (main+0x19ed298: the region gets what the alias region has room for, dm/tools/ue_region.py), but its FMallocBinned3 cut (dm/tools/ue_malloc.py) does not
+# recognize this build (main.cuts.tsv is empty, the alias region maps up to +37.25 GB), so the block is too large for an iPhone until it does (README.md, Open)
+mem_reserve	0x1028000000
+mem_alias	0x1000000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- NVN ----
+# the NVN depth mode the game sets (nvnDeviceSetDepthMode near = 0): the pipeline archive made offline holds the main0_z vertex entries (dm/gfx/tools/pso_offline.py); without the key the
+# host rejected the bundled archive ("made for … depth near=-w … this run needs … depth near=0") and compiled the bases on the Mac itself
+depth_mode	zero
+
+# ---- Shader split ----
+# The decoded shader code archives in the IoStore containers: the engine's global shaders and the game's material shaders (65,047 shaders), each one Oodle-compressed; the NSP script decodes
+# them on the Mac with the game's own Oodle (uepak.py, DM_OODLE_JOB), as for any game with Unreal paks
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+# the note is a shader_* key and so part of the library inputs digest (dmsh_chain.py inputs): changing its wording rebuilds the libraries, so the provisional wording stays until the next full rebuild
+shader_note	Hogwarts Legacy shaders (provisional profile)
+
+# heap check: 2026-10-31, heap 0.01 GB
+
+# address regions: 2026-10-31, in its first 15 s in nnMain the game's regions reach alias +62.06 GB, within the profile's 64.00 GB alias region (what it takes later in play is not measured here) (rewrite 77a997f15078)

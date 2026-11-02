@@ -87,8 +87,30 @@ The full rebuild spent 4m59s on shader extraction, 5m10s preparing shaders (all 
 - **Validation:** 112 Python test files (1,020 tests, 13 skipped) pass with the native toolchain; Python lint has zero new findings; the native pipeline-bundle test passes 52 checks. `regress.py check --games 0100F43008C44000` passes: 28,603/28,603 shaders, no changed MSL or new interface failures. This was the only discovered local Mac build; it has no `smoke.tsv`, so there was no gameplay run and other games remain unchecked. The benchmark logs, input hashes, commands and results are in `<build>/performance-research/pipeline-archive-reuse/` (`comparison.json`, `chain-update-app/`, `regression/`).
 - **iOS scope:** the shared builder is tested for both targets. A real synthetic iOS archive took 4.445s to build and 0.234s to reuse after a chain move, preserving its inode/mtime and updating the stamp. No LegendsZA IPA or device run was timed. Its current profile does not enable `pso_mtl4`, so its default iOS build does not request an offline archive and gets no timing benefit from this stage.
 
+### Shader extraction reuse
+
+- **Resolved: translation-only updates repeated shader extraction.** See [shader extraction reuse](../../../docs/reference/shaders.md#shader-extraction-reruns-after-translation-only-updates) for the shared Mac/iOS mechanism and its conservative decoder invalidation.
+- **Measured, 2026-11-01:** Apple M2 Max, macOS 26.6, Xcode 27.0 / AIR-TT 32023.921, native arm64 Python. Baseline `b4880a9d83bf` includes pipeline archive reuse; the candidate adds extraction caching. LegendsZA 2.0.2 (`v393216`) and its DLC NSPs stayed unchanged. The full Mac app used `--allow-other-metal`. A temporary comment-only chain edit changed `b7cd656abd7c` to `1dafa92e1dbe`, preserving shader behavior.
+
+| Measurement (one run each) | Time |
+|---|---:|
+| Legacy extraction invocation after the chain update | 276.04 s (4m36s) |
+| Cached extraction invocation, same post-update inputs | 0.64 s |
+| Extraction saving | 275.40 s (4m35s), 99.8% |
+| Complete Mac app rebuild after the controlled chain update | 505.75 s (8m26s) |
+| iOS CLI through extraction, stopping before translation | 2.33 s |
+
+The direct extraction comparison includes Python startup and uses the same already-built decoder host, modules and game data. The legacy cache was cloned from an actual successful baseline build, and a real pre-update invocation confirmed its cache hit. The new cache was warmed once. Warm-up and regression finished before the timed comparison. The old extractor then reran after the chain update; its fresh package was byte-identical to the cached one. Cached package hashes and modification times, profile tables, decoder input identity and NSP file stats stayed unchanged across the update, while the host executable hash changed.
+
+The full Mac rebuild spent 16s in the extraction stage including the required host compilation, 4m46s preparing shaders (all 28,603 restored from cache), 40s pruning the old chain libraries, 16s reusing the pipeline archive and 2m24s packaging the 9.1 GB app. There is no paired legacy full-app timing in this experiment; the extraction-stage saving is the direct comparison. The temporary chain source/header and the original warm libraries, host and runtime stamps were restored afterward. Changes that alter translated shaders can cost more in shader preparation; decoder or other host changes still invalidate extraction conservatively. Existing extraction caches require one warm-up.
+
+- **Validation:** 116 Python test files (1,070 tests, 13 skipped), zero failures; Python lint has zero new or stale findings; the native pipeline-bundle test passes 52 checks. `regress.py check --baseline b4880a9d83bfc17379af8dd3c9e00c7ab87ff2c0 --games 0100F43008C44000` passes: 28,603/28,603 shaders, no changed MSL or new interface failures. LegendsZA was the only discovered local Mac build and directly exercises the decoder-backed extraction path. It has no `smoke.tsv`, so gameplay and other games remain unchecked.
+- **iOS scope:** the real `--platform ios` entry point reused the same extracted package after the chain update; a benchmark hook stopped at `build_shaders`, before target-specific translation, Xcode compilation and packaging. No full IPA or device run was timed. Mac/iOS orchestration tests cover their separate translation outputs.
+- **Evidence:** `<build>/performance-research/shader-extraction-cache/` holds `comparison.json`, before/after identities, `chain-update-app/`, `ios-entry-extraction/`, direct extraction logs, frozen baseline and benchmark drivers, and `regression/report.md`.
+
 ## Found on this game
 
+- [Shader extraction reuse after translation-only updates](../../../docs/reference/shaders.md#shader-extraction-reruns-after-translation-only-updates).
 - [Offline pipeline archive reuse across chains](../../../docs/reference/shaders.md#offline-pipeline-archive-rebuilt-after-a-chain-only-update).
 
 General host changes first needed here; each applies to every game:

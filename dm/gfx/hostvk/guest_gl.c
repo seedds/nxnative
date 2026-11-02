@@ -183,11 +183,11 @@ typedef struct { int kind; uint64_t serial, a, b, c; } defer_t;
 static defer_t *g_def; static int g_ndef, g_capdef;
 static void slab_put(void *slab, uint32_t idx);
 static void own_free(void *own);
-static void mem_free(VkDeviceMemory m, VkDeviceSize size) { if (m) { vkFreeMemory(hvk.d, m, NULL); hvk.dev.allocations--; g_mem_tex -= (int64_t)size; } }
+static void mem_free(hvk_mem *m, VkDeviceSize size) { if (m) { hvk_mem_free(m); g_mem_tex -= (int64_t)size; } }   // an image's memory, the allocator's (vk_alloc.h)
 static void release(const defer_t *d) {
     switch (d->kind) {
         case D_BUF: own_free((void *)(uintptr_t)d->a); g_mem_buf -= (int64_t)d->c; break;
-        case D_IMG: vkDestroyImage(hvk.d, (VkImage)(uintptr_t)d->a, NULL); mem_free((VkDeviceMemory)(uintptr_t)d->b, d->c); g_n_tex_img--; break;
+        case D_IMG: vkDestroyImage(hvk.d, (VkImage)(uintptr_t)d->a, NULL); mem_free((hvk_mem *)(uintptr_t)d->b, d->c); g_n_tex_img--; break;
         case D_VIEW: vkDestroyImageView(hvk.d, (VkImageView)(uintptr_t)d->a, NULL); break;
         case D_PIPE: vkDestroyPipeline(hvk.d, (VkPipeline)(uintptr_t)d->a, NULL); break;
         case D_MOD: vkDestroyShaderModule(hvk.d, (VkShaderModule)(uintptr_t)d->a, NULL); break;
@@ -211,9 +211,10 @@ static void defer_run(void) {
 
 // ---------- Transient memory: staging for uploads, the uniform blocks of draws, converted indices, the values of disabled attributes ----------
 // Bump allocation in 4 MiB host-visible coherent buffers, each reused once the submission that last used it completed (hle_gl.m's arena). The layer's own: the game never
-// sees an address in it (the layer copies the game's data in), so it stays the driver's mapping, outside the x86-64 engine's arena
+// sees an address in it (the layer copies the game's data in), so it stays the driver's mapping, outside the x86-64 engine's arena; each buffer a range of the backend's
+// allocator (vk_alloc.h, decision D2)
 #define ARENA_BYTES (4u << 20)
-typedef struct { VkBuffer buf; VkDeviceMemory mem; uint8_t *map; VkDeviceSize size, used; uint64_t serial; } arena_t;
+typedef struct { VkBuffer buf; hvk_mem *mem; uint8_t *map; VkDeviceSize size, used; uint64_t serial; } arena_t;
 static arena_t *g_arena; static int g_narena, g_caparena, g_cur_arena = -1;
 typedef struct { VkBuffer buf; VkDeviceSize off; uint8_t *cpu; } galloc;
 static VkBufferUsageFlags buf_usage(void) {
@@ -230,7 +231,7 @@ static int arena_alloc(VkDeviceSize n, VkDeviceSize align, galloc *out) {
     if (k < 0) {
         if (g_narena == g_caparena) { g_caparena = g_caparena ? 2 * g_caparena : 16; g_arena = realloc(g_arena, (size_t)g_caparena * sizeof *g_arena); if (!g_arena) die("[gl] out of memory"); }
         arena_t *a = &g_arena[g_narena]; memset(a, 0, sizeof *a); void *map = NULL;
-        if (hvk_buffer_make(sz, buf_usage(), 1, &a->buf, &a->mem, &map)) { RED1("transient memory: a block of %llu bytes could not be made", (unsigned long long)sz); return 0; }
+        if (hvk_mem_buffer(sz, buf_usage(), HVK_MEM_HOST, &a->buf, &a->mem, &map)) { RED1("transient memory: a block of %llu bytes could not be made", (unsigned long long)sz); return 0; }
         a->map = map; a->size = sz; k = g_narena++;
         if (g_narena > 64) RED1("transient memory: over 64 blocks of 4 MiB in flight");
     }
@@ -248,8 +249,9 @@ static int arena_alloc(VkDeviceSize n, VkDeviceSize align, galloc *out) {
 // at which to copy (the game writes while earlier parts of the buffer are read by the GPU, fenced by glFenceSync alone; glFlushMappedBufferRange is optional for a coherent
 // map), so a copy at each draw or submission would cost the whole buffer each time. The import's memory type must be HOST_COHERENT, as the driver memory it replaces: the
 // layer flushes nothing. A refused import, or one of a type that is not coherent, gets the driver's own mapping with a red line: outside the arena, so a game on such a
-// device reads a pointer above 2^39 (open: no device here refuses; lavapipe imports as one coherent type, dm/gfx/hostvk/README.md)
-typedef struct { VkBuffer buf; VkDeviceMemory mem; uint8_t *map; hostvk_import_t im; void *block; size_t block_n; } hmem_t;   // block: the arena pages of an import, else NULL
+// device reads a pointer above 2^39 (open: no device here refuses; lavapipe imports as one coherent type, dm/gfx/hostvk/README.md). The imports stay one allocation each (they
+// are the game's pages: the allocator's device memory cannot stand for them); the slabs below keep their count low; the driver's own mapping is a range of the allocator's
+typedef struct { VkBuffer buf; hvk_mem *mem; uint8_t *map; hostvk_import_t im; void *block; size_t block_n; } hmem_t;   // block: the arena pages of an import, else NULL
 static int hmem_make(VkDeviceSize n, hmem_t *h) {
     memset(h, 0, sizeof *h);
     const size_t pg = plat_page_size(), al = hvk.dev.caps.min_import_alignment > pg ? (size_t)hvk.dev.caps.min_import_alignment : pg;
@@ -263,13 +265,13 @@ static int hmem_make(VkDeviceSize n, hmem_t *h) {
     RED1("buffer memory the game maps (%llu bytes) is not arena pages: %s; the driver's own mapping, outside the arena below 2^39", (unsigned long long)n,
          incoherent ? "the import's memory type is not HOST_COHERENT, which the layer's unflushed writes need" : "the import was refused");
     void *map = NULL;
-    if (hvk_buffer_make(n, buf_usage(), 1, &h->buf, &h->mem, &map)) { memset(h, 0, sizeof *h); return 0; }
+    if (hvk_mem_buffer(n, buf_usage(), HVK_MEM_HOST, &h->buf, &h->mem, &map)) { memset(h, 0, sizeof *h); return 0; }
     h->map = map;
     return 1;
 }
 static void hmem_free(hmem_t *h) {   // the GPU is done with it
     if (h->block) { hostvk_import_release(&hvk.dev, &h->im); dm_guest_free(h->block, h->block_n); }   // the import first, then its pages back to the arena
-    else hvk_buffer_free(h->buf, h->mem);
+    else hvk_mem_buffer_free(h->buf, h->mem);
     memset(h, 0, sizeof *h);
 }
 
@@ -658,8 +660,9 @@ static gbuf_t *buf_of(GLuint n) { return n && n < g_nbufs ? g_bufs[n] : NULL; }
 
 // An image of the layer (a texture's, a renderbuffer's, the window's): device-local, in GENERAL from its first command on, with the attachment views made of it so far
 typedef struct { uint16_t level, layer; VkFormat f; VkImageView v; } attv_t;
-typedef struct { VkImage img; VkDeviceMemory mem; VkDeviceSize size; VkFormat vf; uint32_t w, h, depth, layers, levels; uint8_t vol; attv_t att[8]; int natt; } gimg_t;
-// Make an image: its memory (an allocation of its own, dedicated where the driver prefers it), and its first layout change (UNDEFINED → layout) at the start of cb
+typedef struct { VkImage img; hvk_mem *mem; VkDeviceSize size; VkFormat vf; uint32_t w, h, depth, layers, levels; uint8_t vol; attv_t att[8]; int natt; } gimg_t;
+// Make an image: its memory (device-local, from the backend's allocator, vk_alloc.h: a range of a block, an allocation of its own where it is large or the driver prefers one),
+// and its first layout change (UNDEFINED → layout) at the start of cb
 static int gimg_make(gimg_t *g, VkCommandBuffer cb, VkImageLayout layout, VkImageType type, VkFormat f, uint32_t w, uint32_t h, uint32_t depth, uint32_t layers, uint32_t levels,
                      VkImageUsageFlags usage, VkImageCreateFlags flags) {
     memset(g, 0, sizeof *g);
@@ -667,25 +670,12 @@ static int gimg_make(gimg_t *g, VkCommandBuffer cb, VkImageLayout layout, VkImag
                             VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
     VkResult r = vkCreateImage(hvk.d, &ci, NULL, &g->img);
     if (r) { LOG("[gl] [RED] the driver refuses an image %ux%ux%u format %d, %u levels, %u layers, usage %#x (VkResult %d)", w, h, depth, f, levels, layers, usage, r); g->img = VK_NULL_HANDLE; return 0; }
-    VkImageMemoryRequirementsInfo2 ri = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, NULL, g->img};
-    VkMemoryDedicatedRequirements dr = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
-    VkMemoryRequirements2 req = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
-    vkGetImageMemoryRequirements2(hvk.d, &ri, &req);
-    uint32_t t = hvk_mem_type(req.memoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
-    if (t == UINT32_MAX || ++hvk.dev.allocations > hvk.dev.caps.max_allocations) {
-        if (t != UINT32_MAX) hvk.dev.allocations--;
-        RED1("an image could not get memory (no device-local type, or over maxMemoryAllocationCount)"); vkDestroyImage(hvk.d, g->img, NULL); g->img = VK_NULL_HANDLE; return 0;
+    if ((r = hvk_mem_image(g->img, 0, 0, &g->mem))) {   // a refusal for the count is also said by the allocator, with the counts
+        VkMemoryRequirements req; vkGetImageMemoryRequirements(hvk.d, g->img, &req);
+        LOG("[gl] [RED] no device-local memory of %llu bytes for an image (VkResult %d)", (unsigned long long)req.size, r);
+        vkDestroyImage(hvk.d, g->img, NULL); g->img = VK_NULL_HANDLE; g->mem = NULL; return 0;
     }
-    VkMemoryDedicatedAllocateInfo di = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, NULL, g->img, VK_NULL_HANDLE};
-    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, dr.prefersDedicatedAllocation || dr.requiresDedicatedAllocation ? &di : NULL, req.memoryRequirements.size, t};
-    r = vkAllocateMemory(hvk.d, &ai, NULL, &g->mem);
-    if (!r) r = vkBindImageMemory(hvk.d, g->img, g->mem, 0);
-    if (r) {
-        LOG("[gl] [RED] no device-local memory of %llu bytes for an image (VkResult %d)", (unsigned long long)req.memoryRequirements.size, r);
-        if (g->mem) vkFreeMemory(hvk.d, g->mem, NULL);
-        hvk.dev.allocations--; vkDestroyImage(hvk.d, g->img, NULL); g->img = VK_NULL_HANDLE; g->mem = VK_NULL_HANDLE; return 0;
-    }
-    g->size = req.memoryRequirements.size; g->vf = f; g->w = w; g->h = h; g->depth = depth; g->layers = layers; g->levels = levels; g->vol = type == VK_IMAGE_TYPE_3D;
+    g->size = hvk_mem_size(g->mem); g->vf = f; g->w = w; g->h = h; g->depth = depth; g->layers = layers; g->levels = levels; g->vol = type == VK_IMAGE_TYPE_3D;
     g_mem_tex += (int64_t)g->size; g_n_tex_img++;
     img_barrier(cb, g->img, aspects_of(f), VK_IMAGE_LAYOUT_UNDEFINED, layout);
     return 1;
@@ -2102,8 +2092,8 @@ GL(glReadPixels, void, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GL
     if ((f != VK_FORMAT_R8G8B8A8_UNORM && f != VK_FORMAT_R8G8B8A8_SRGB && !bgra) || format != GL_RGBA || type != GL_UNSIGNED_BYTE) {
         RED1("glReadPixels(%#x, %#x) of a format-%d image not implemented", format, type, f); return;
     }
-    size_t pitch = (size_t)w * 4; VkBuffer ob; VkDeviceMemory om; void *map = NULL;
-    if (hvk_buffer_make(pitch * (size_t)h, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 1, &ob, &om, &map)) { RED1("glReadPixels: no buffer for the copy"); return; }
+    size_t pitch = (size_t)w * 4; VkBuffer ob; hvk_mem *om; void *map = NULL;
+    if (hvk_mem_buffer(pitch * (size_t)h, VK_BUFFER_USAGE_TRANSFER_DST_BIT, HVK_MEM_HOST, &ob, &om, &map)) { RED1("glReadPixels: no buffer for the copy"); return; }
     hvk_full_barrier(cb);
     VkBufferImageCopy r = {0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)s.level, (uint32_t)s.layer, 1}, {x, y, 0}, {(uint32_t)w, (uint32_t)h, 1}};
     vkCmdCopyImageToBuffer(cb, s.im->img, VK_IMAGE_LAYOUT_GENERAL, ob, 1, &r);
@@ -2118,7 +2108,7 @@ GL(glReadPixels, void, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GL
         if (!bgra) memcpy(d, sp, pitch);
         else for (GLsizei i = 0; i < w; i++) { d[4 * i] = sp[4 * i + 2]; d[4 * i + 1] = sp[4 * i + 1]; d[4 * i + 2] = sp[4 * i]; d[4 * i + 3] = sp[4 * i + 3]; }
     }
-    hvk_buffer_free(ob, om);
+    hvk_mem_buffer_free(ob, om);
     g_st.readpixels++;
 }
 
@@ -2597,7 +2587,7 @@ void guest_gl_shutdown(void) {
     for (int i = 0; i < 5; i++) { defer(D_VIEW, 0, H(g_dummy_view[i]), 0, 0); g_dummy_view[i] = VK_NULL_HANDLE; gimg_drop(&g_dummy[i], 0); }
     defer_run();
     for (int c = 0; c <= SLAB_MAX - SLAB_MIN; c++) for (slab_t *s = g_slabs[c], *nx; s; s = nx) { nx = s->next; hmem_free(&s->h); free(s->fl); free(s); g_slabs[c] = NULL; }
-    for (int i = 0; i < g_narena; i++) hvk_buffer_free(g_arena[i].buf, g_arena[i].mem);
+    for (int i = 0; i < g_narena; i++) hvk_mem_buffer_free(g_arena[i].buf, g_arena[i].mem);
     free(g_arena); g_arena = NULL; g_narena = g_caparena = 0; g_cur_arena = -1;
     for (int i = 0; i < g_nsmp; i++) vkDestroySampler(hvk.d, g_smp[i].s, NULL);
     g_nsmp = 0;

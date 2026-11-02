@@ -58,11 +58,16 @@ static int g_cur = -1, g_next;
 static VkSemaphore g_timeline;
 _Atomic uint64_t hvk_last_fence;           // the last fence committed
 static _Atomic uint64_t g_done;            // the last fence whose CPU work has run
-static uint64_t g_open;                    // the open submission's fence (0 = none)
+// The open submission's fence (0 = none). Written by the submit thread only: hvk_sub_begin sets it before the submission looks up any pool, texture or buffer, and
+// hvk_sub_commit clears it only after hvk_last_fence holds that fence. Read by any thread (hvk_defer, the allocator's empty-block stamp, be_fence_sync) to learn which submission
+// may still use an object it has just unpublished. A releaser stores (unpublishes: hvk_pool.imp, an atomic) then loads g_open; the submit thread stores g_open then loads (looks
+// the object up): sequentially consistent on both sides, so either the releaser sees the open fence or the submit thread does not see the object. A releaser that loads 0 then
+// loads hvk_last_fence, which already holds the fence of the submission just committed
+static _Atomic uint64_t g_open;
 static pthread_mutex_t g_done_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER, g_work_cv = PTHREAD_COND_INITIALIZER;
 static pthread_t g_thread; static int g_thread_on, g_quit;
 static int g_need_barrier;
-uint64_t hvk_open_fence(void) { return g_open; }
+uint64_t hvk_open_fence(void) { return atomic_load(&g_open); }
 uint64_t hvk_done_fence(void) { return atomic_load(&g_done); }
 int hvk_slot_index(void) { return g_cur < 0 ? 0 : g_cur; }
 void hvk_need_barrier(void) { g_need_barrier = 1; }
@@ -166,7 +171,7 @@ int hvk_oneoff_end(VkCommandBuffer cb) {
 // segment of the open submission it has not folded in yet (first), and reads as 0 until a report stores into it (valid). The NVN types map onto a query kind and a field of its
 // results; the ones Vulkan has no counter for are written on the CPU with a zero count, said once (k_ctr kind -1)
 enum { NCTR = 17 };
-static VkBuffer g_acc; static VkDeviceMemory g_acc_mem; static VkDeviceAddress g_acc_dev;
+static VkBuffer g_acc; static hvk_mem *g_acc_mem; static VkDeviceAddress g_acc_dev;
 static int g_qk_on[QK_N];                  // that kind is counted: each pass segment opens one of its queries
 static struct { uint8_t on, valid; uint32_t first; } g_ct[NCTR];
 static const struct { int8_t kind, field; const char *name; } k_ctr[NCTR] = {
@@ -185,7 +190,7 @@ static const struct { int8_t kind, field; const char *name; } k_ctr[NCTR] = {
 };
 static uint64_t g_cal_mul, g_cal_g0, g_cal_n0;   // NVN ticks = n0 + ((gpu ticks - g0) * mul >> 32)
 // Transform feedback's state (the section below): the capture's byte counters between pass segments, whether a capture is begun, the control buffers it was saved into
-static VkBuffer g_tfc; static VkDeviceMemory g_tfc_mem;
+static VkBuffer g_tfc; static hvk_mem *g_tfc_mem;
 static int g_tf_active;
 typedef struct { uint64_t ctl; uint32_t stride; uint8_t buf; } tf_ctl_ent;
 static tf_ctl_ent g_tf_tab[64]; static int g_tf_ntab, g_tf_next;
@@ -415,7 +420,7 @@ void hvk_sub_begin(void) {
     if (!hvk.dev.x.host_query_reset) { VkCommandBuffer pre = hvk_pre(); for (int k = 0; k < QK_N; k++) if (s->qp[k]) vkCmdResetQueryPool(pre, s->qp[k], 0, NSEG); vkCmdResetQueryPool(pre, s->ts, 0, NTS); }
     s->nseg = s->nts = 0;
     for (int t = 0; t < NCTR; t++) g_ct[t].first = 0;   // the counters' segments of this submission start at its slot's first query
-    g_open = atomic_load(&hvk_last_fence) + 1;
+    atomic_store(&g_open, atomic_load(&hvk_last_fence) + 1);   // before any lookup of this submission (above: g_open)
     g_need_barrier = 1; g_rc_skip = 0; g_cond_on = 0; g_nrep = 0;
     memset(&P, 0, sizeof P); g_bound.valid = 0; g_dyn.valid = 0;
     nvn_gw_reset();
@@ -429,7 +434,7 @@ uint64_t hvk_sub_commit(void) {
     ctr_fold();
     if (s->pre_begun) { hvk_full_barrier(s->pre); vkEndCommandBuffer(s->pre); }
     vkEndCommandBuffer(s->main);
-    uint64_t f = g_open;
+    uint64_t f = atomic_load(&g_open);
     VkCommandBufferSubmitInfo cbi[2]; uint32_t n = 0;
     if (s->pre_begun) cbi[n++] = (VkCommandBufferSubmitInfo){VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, NULL, s->pre, 0};
     cbi[n++] = (VkCommandBufferSubmitInfo){VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, NULL, s->main, 0};
@@ -442,8 +447,9 @@ uint64_t hvk_sub_commit(void) {
         VkSemaphoreSignalInfo ss = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, NULL, g_timeline, f}; vkSignalSemaphore(hvk.d, &ss);
     }
     nvn_gw_commit(f, atomic_load(&g_done));
-    g_open = 0; g_cur = -1; hvk_ring_bind(NULL);
+    g_cur = -1; hvk_ring_bind(NULL);
     pthread_mutex_lock(&g_done_mu); atomic_store(&hvk_last_fence, f); pthread_cond_signal(&g_work_cv); pthread_mutex_unlock(&g_done_mu);
+    atomic_store(&g_open, 0);   // after hvk_last_fence holds f: a releaser that reads 0 here defers to f, never to an earlier fence (above: g_open)
     return f;
 }
 uint64_t hvk_last(void);
@@ -479,11 +485,11 @@ int hvk_commands_init(void) {
     VkFenceCreateInfo fi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateCommandPool(hvk.d, &pi, NULL, &g_oneoff_pool) || vkCreateFence(hvk.d, &fi, NULL, &g_oneoff_fence)) return 0;
     void *map;
-    if (hvk_buffer_make(8 * NCTR, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 1, &g_acc, &g_acc_mem, &map)) return 0;
+    if (hvk_mem_buffer(8 * NCTR, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, HVK_MEM_HOST, &g_acc, &g_acc_mem, &map)) return 0;
     memset(map, 0, 8 * NCTR);
     // the capture's byte counters between pass segments (transform feedback, design 6): the backend's own, so a pause at a pass end never writes the game's control buffer
-    if (hvk.dev.caps.xfb && hvk_buffer_make(16, VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 1,
-                                            &g_tfc, &g_tfc_mem, &map)) return 0;
+    if (hvk.dev.caps.xfb && hvk_mem_buffer(16, VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                           HVK_MEM_HOST, &g_tfc, &g_tfc_mem, &map)) return 0;
     if (g_tfc) memset(map, 0, 16);
     if (hvk.dev.caps.buffer_device_address) { VkBufferDeviceAddressInfo ba = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, NULL, g_acc}; g_acc_dev = vkGetBufferDeviceAddress(hvk.d, &ba); }
     calibrate();
@@ -509,9 +515,9 @@ void hvk_commands_shutdown(void) {
     if (g_oneoff_pool) vkDestroyCommandPool(hvk.d, g_oneoff_pool, NULL);
     if (g_oneoff_fence) vkDestroyFence(hvk.d, g_oneoff_fence, NULL);
     if (g_timeline) vkDestroySemaphore(hvk.d, g_timeline, NULL);
-    if (g_acc) { vkDestroyBuffer(hvk.d, g_acc, NULL); vkFreeMemory(hvk.d, g_acc_mem, NULL); hvk.dev.allocations--; }
-    if (g_tfc) { vkDestroyBuffer(hvk.d, g_tfc, NULL); vkFreeMemory(hvk.d, g_tfc_mem, NULL); hvk.dev.allocations--; }
-    g_tfc = VK_NULL_HANDLE; g_tf_active = 0; g_tf_ntab = 0;
+    if (g_acc) hvk_mem_buffer_free(g_acc, g_acc_mem);
+    if (g_tfc) hvk_mem_buffer_free(g_tfc, g_tfc_mem);
+    g_tfc = VK_NULL_HANDLE; g_acc_mem = g_tfc_mem = NULL; g_tf_active = 0; g_tf_ntab = 0;
     static_draw_buffers_free();
     g_oneoff_pool = VK_NULL_HANDLE; g_oneoff_fence = VK_NULL_HANDLE; g_timeline = VK_NULL_HANDLE; g_acc = VK_NULL_HANDLE;
     g_cur = -1; g_next = 0; atomic_store(&g_done, 0); atomic_store(&hvk_last_fence, 0); memset(g_qk_on, 0, sizeof g_qk_on); memset(g_ct, 0, sizeof g_ct);
@@ -757,23 +763,23 @@ static int is_strip(VkPrimitiveTopology t) {
 }
 static VkStencilOp sop(uint32_t o) { return o >= 1 && o <= 8 ? (VkStencilOp)(o - 1) : VK_STENCIL_OP_KEEP; }
 static VkCompareOp cop(uint32_t f) { return f >= 1 && f <= 8 ? (VkCompareOp)(f - 1) : VK_COMPARE_OP_ALWAYS; }
-static VkBuffer g_zero_vb; static VkDeviceMemory g_zero_vb_mem;
-static VkBuffer g_quad_ib; static VkDeviceMemory g_quad_ib_mem; enum { QUAD_N = 65536 };
+static VkBuffer g_zero_vb; static hvk_mem *g_zero_vb_mem;
+static VkBuffer g_quad_ib; static hvk_mem *g_quad_ib_mem; enum { QUAD_N = 65536 };
 static int static_draw_buffers(void) {
     if (g_quad_ib) return 1;
     void *map;
     if (!g_zero_vb) {
-        if (hvk_buffer_make(256, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, 1, &g_zero_vb, &g_zero_vb_mem, &map)) return 0;
+        if (hvk_mem_buffer(256, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, HVK_MEM_HOST, &g_zero_vb, &g_zero_vb_mem, &map)) return 0;
         memset(map, 0, 256);
     }
-    if (hvk_buffer_make((VkDeviceSize)QUAD_N * 24, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, 1, &g_quad_ib, &g_quad_ib_mem, &map)) return 0;
+    if (hvk_mem_buffer((VkDeviceSize)QUAD_N * 24, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, HVK_MEM_HOST, &g_quad_ib, &g_quad_ib_mem, &map)) return 0;
     uint32_t *ix = map; static const uint32_t pat[6] = {0, 1, 2, 0, 2, 3};
     for (uint32_t q = 0; q < QUAD_N; q++) for (int k = 0; k < 6; k++) ix[q * 6 + (uint32_t)k] = 4 * q + pat[k];
     return 1;
 }
 static void static_draw_buffers_free(void) {
-    hvk_buffer_free(g_zero_vb, g_zero_vb_mem); hvk_buffer_free(g_quad_ib, g_quad_ib_mem);
-    g_zero_vb = g_quad_ib = VK_NULL_HANDLE; g_zero_vb_mem = g_quad_ib_mem = VK_NULL_HANDLE;
+    hvk_mem_buffer_free(g_zero_vb, g_zero_vb_mem); hvk_mem_buffer_free(g_quad_ib, g_quad_ib_mem);
+    g_zero_vb = g_quad_ib = VK_NULL_HANDLE; g_zero_vb_mem = g_quad_ib_mem = NULL;
 }
 // Indices converted on the CPU into the ring: quads and fans into triangles (nvn_primitive.h, restart-aware), restart with an index Vulkan cannot (other than all ones),
 // lists with restart (Vulkan restarts strips and fans only), 8-bit indices on a device without them. 0 when the source cannot be read on the CPU now (written by the GPU in this submission)

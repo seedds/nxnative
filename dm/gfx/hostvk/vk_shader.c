@@ -258,10 +258,13 @@ out:
 // ---------- Loading ----------
 static nvn_hmap g_sh;     // 24-byte key → hvk_shader (NULL entries are never stored: a failed key is in g_fail)
 static nvn_hmap g_fail;   // 24-byte key → (void *)1
-static int c1_make(hvk_shader *sh) {   // the shader's constants as a uniform buffer: 64 KiB, as the Metal backend gives a c1 whose indices are not proven bounded (c1_full.tsv, phase P4)
+// The shader's constants as a uniform buffer: 64 KiB, as the Metal backend gives a c1 whose indices are not proven bounded (c1_full.tsv, phase P4): the reflection's c1 bytes
+// (rf.c1_len: 256 to 768 bytes in the libraries so far, 6 KiB at most), zeros after them. A range of a host-visible block of the allocator (step D2): a game loads thousands of
+// shaders, and one VkDeviceMemory each would pass maxMemoryAllocationCount (4,096 on NVIDIA and AMD under Windows)
+static int c1_make(hvk_shader *sh) {
     if (!sh->rf.has_c1) return 1;
     void *map;
-    if (hvk_buffer_make(65536, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 1, &sh->c1buf, &sh->c1mem, &map)) return 0;
+    if (hvk_mem_buffer(65536, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, HVK_MEM_HOST, &sh->c1buf, &sh->c1mem, &map)) return 0;
     memset(map, 0, 65536); memcpy(map, sh->rf.c1, sh->rf.c1_len);
     return 1;
 }
@@ -394,7 +397,7 @@ void hvk_shader_shutdown(void) {
     for (uint32_t i = 0; i < g_sh.cap; i++) if (g_sh.vals && g_sh.vals[i]) {
         hvk_shader *sh = g_sh.vals[i];
         if (sh->module) vkDestroyShaderModule(hvk.d, sh->module, NULL);
-        if (sh->c1buf) { vkDestroyBuffer(hvk.d, sh->c1buf, NULL); vkFreeMemory(hvk.d, sh->c1mem, NULL); hvk.dev.allocations--; }
+        if (sh->c1buf) hvk_mem_buffer_free(sh->c1buf, sh->c1mem);
         free(sh->rf.c1); free(sh);
     }
     nvn_hm_clear(&g_sh, NULL); nvn_hm_clear(&g_fail, NULL);

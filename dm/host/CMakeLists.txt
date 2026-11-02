@@ -370,7 +370,8 @@ host_test(t_vk_import SOURCES ../../gfx/hostvk/tests/t_vk_import.c ${HOSTVK_SRC}
 # The Vulkan backend behind dm/gfx/nvn/nvn_be.h (dm/gfx/hostvk; docs/design/vulkan-backend.md, step P3): a library of its own beside nvn_null, so that a binary links exactly one
 # backend (nxhost links it: NXHOST_VULKAN below). Its own shaders are SPIR-V arrays in committed headers (dm/gfx/hostvk/shaders/gen/, written by shaders/gen_spirv.sh), so building needs no glslang
 set(HOSTVK_BACKEND_SRC vk_backend.c vk_memory.c vk_texture.c vk_shader.c vk_pipeline.c vk_commands.c vk_device.c vk_import.c vk_gpl.c vk_cache.c vk_prewarm.c   # vk_gpl, vk_cache, vk_prewarm: phase P5
-    vk_present.c)   # the window presenter and the vsync source (step P4a)
+    vk_present.c   # the window presenter and the vsync source (step P4a)
+    vk_alloc.c)    # the device memory allocator (decision D2, step D2)
 list(TRANSFORM HOSTVK_BACKEND_SRC PREPEND ${REPO}/dm/gfx/hostvk/)
 list(APPEND HOSTVK_BACKEND_SRC ${REPO}/dm/gfx/tex/nvn_fmt_vk.c ${REPO}/dm/gfx/tex/astc_decode.c ${REPO}/dm/third_party/volk/volk.c)   # astc_decode.c: the CPU fallback of the ASTC decode (P7)
 add_library(nvn_vk STATIC ${HOSTVK_BACKEND_SRC})
@@ -504,6 +505,12 @@ foreach(t IN ITEMS transform_feedback geometry tessellation feedback raster)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
 endforeach()
+# The device memory allocator (dm/gfx/hostvk/vk_alloc.c, decision D2) and the pools' shared imports (vk_memory.c; docs/design/vulkan-backend.md 4.2, step D2), on lavapipe under the
+# validation layer as the GPU tests above, skipped without a Vulkan device: the test lowers the allocation limit to 64 (DM_VK_MAX_ALLOCATIONS, set before the device comes up) and
+# makes hundreds of buffers, images and memory pools under it; alignment and bufferImageGranularity, release and reuse, empty blocks returned after their grace, allocations of
+# their own, a host-visible range written through its pointer and read back through GPU copies, pools moved off a shared import by a decommit beside them
+host_test(t_vk_alloc SOURCES ../../gfx/hostvk/tests/t_vk_alloc.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
+target_link_libraries(t_vk_alloc PRIVATE nvn_front_obj nvn_vk)
 # The guest Vulkan layer (docs/design/vulkan-backend.md 8.1, step P9a): t_vk_guest drives guest_vk.c through the entry points a game gets from its vkGetInstanceProcAddr (found by
 # name in the import table, as the loader binds them) on lavapipe under the validation layer, skipped without a Vulkan device as the GPU tests above: the Tegra shape, memory,
 # buffers and images, render passes, pipelines (the two SPIR-V fix-ups among them), draws read back, queries, and a swapchain presented with a layer crop through the backend's

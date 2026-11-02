@@ -40,7 +40,7 @@ struct hvk_tex {
     uint64_t serial;
     tex_t t;                   // the descriptor as the texture was made (storage, swizzle, flags)
     int live, made, failed, wants_storage;
-    VkImage img; VkDeviceMemory mem;
+    VkImage img; hvk_mem *mem;   // its memory (vk_alloc.h: a range of a block, or its own where it is large or the driver prefers that)
     nvn_vk_fmt f; int how, use_alt; uint8_t alt_swz[4];
     VkFormat fmt; VkImageAspectFlags aspect; VkImageType type; VkImageCreateFlags flags; VkImageUsageFlags usage;
     uint32_t w, h, d, layers, levels; VkSampleCountFlagBits samples;
@@ -49,6 +49,7 @@ struct hvk_tex {
     uint64_t stamp, seen; const void *span;
     struct { view_key k; VkImageView v; } views[NVIEW]; int nviews;
     VkBufferView bview[2]; uint8_t bcls;   // a buffer texture's texel buffer views (sampled, storage)
+    uint64_t bview_imp[2];     // the import each was made over (hvk_buf_import): a pool's import can change (vk_memory.c), and its view with it
 };
 static nvn_hmap g_tex;   // serial → hvk_tex, under hvk.tex_mu
 
@@ -352,17 +353,14 @@ static int tex_make(hvk_tex *x) {
         }
     }
     if (vkCreateImage(hvk.d, &ci, NULL, &x->img)) { hostvk_log("[RED] [hostvk] vkCreateImage failed for texture ser=%llu", (unsigned long long)x->serial); x->img = VK_NULL_HANDLE; x->failed = 1; return 0; }
-    VkMemoryRequirements req; vkGetImageMemoryRequirements(hvk.d, x->img, &req);
-    uint32_t mt = hvk_mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
-    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, mt};
-    if (mt == UINT32_MAX || ++hvk.dev.allocations > hvk.dev.caps.max_allocations || vkAllocateMemory(hvk.d, &ai, NULL, &x->mem)) {
-        if (mt != UINT32_MAX) hvk.dev.allocations--;
-        hostvk_log("[RED] [hostvk] texture ser=%llu: no memory for %llu bytes", (unsigned long long)x->serial, (unsigned long long)req.size);
-        vkDestroyImage(hvk.d, x->img, NULL); x->img = VK_NULL_HANDLE; x->mem = VK_NULL_HANDLE; x->failed = 1; return 0;
+    VkResult mr = hvk_mem_image(x->img, 0, 0, &x->mem);
+    if (mr) {
+        VkMemoryRequirements req; vkGetImageMemoryRequirements(hvk.d, x->img, &req);
+        hostvk_log("[RED] [hostvk] texture ser=%llu: no memory for %llu bytes (VkResult %d)", (unsigned long long)x->serial, (unsigned long long)req.size, mr);
+        vkDestroyImage(hvk.d, x->img, NULL); x->img = VK_NULL_HANDLE; x->mem = NULL; x->failed = 1; return 0;
     }
-    vkBindImageMemory(hvk.d, x->img, x->mem, 0);
     x->type = type; x->flags = ci.flags; x->usage = usage; x->w = w; x->h = h; x->d = dz; x->layers = layers; x->levels = levels; x->samples = samples; x->made = 1;
-    x->mem_bytes = (int64_t)req.size; x->astc_block_bytes = x->astc_dec ? astc_blocks(x) : 0; mem_count(x, 1);
+    x->mem_bytes = (int64_t)hvk_mem_size(x->mem); x->astc_block_bytes = x->astc_dec ? astc_blocks(x) : 0; mem_count(x, 1);
     VkCommandBuffer cb = hvk_pre();
     image_barrier_undefined(cb, x->img, x->aspect);
     // a texture the CPU fills is uploaded instead (its whole storage); a linear texture's storage is its content too
@@ -789,7 +787,10 @@ int hvk_tex_view(hvk_tex *t, const view_t *v, int kind, hvk_view *out) { return 
 VkBufferView hvk_tex_buffer_view(const tex_t *t, int storage, uint8_t *cls) {
     pthread_mutex_lock(&hvk.tex_mu);
     hvk_tex *x = tex_entry(t); VkBufferView r = VK_NULL_HANDLE;
-    if (x && x->bview[storage]) { r = x->bview[storage]; if (cls) *cls = x->bcls; pthread_mutex_unlock(&hvk.tex_mu); return r; }
+    if (x && x->bview[storage]) {
+        if (t->mem && x->bview_imp[storage] == hvk_buf_import((uint64_t)(uintptr_t)t->mem, 1)) { r = x->bview[storage]; if (cls) *cls = x->bcls; pthread_mutex_unlock(&hvk.tex_mu); return r; }
+        hvk_defer(HVK_DEL_BUFVIEW, x->bview[storage], 0, 0); x->bview[storage] = VK_NULL_HANDLE;   // over an import its pool has left: remade below
+    }
     pthread_mutex_unlock(&hvk.tex_mu);
     if (!x || !t->mem) return VK_NULL_HANDLE;
     nvn_vk_fmt row; nvn_fmt_to_vk(t->d.format, &row);
@@ -798,7 +799,7 @@ VkBufferView hvk_tex_buffer_view(const tex_t *t, int storage, uint8_t *cls) {
     if (!f || !(fmt_features_buf(f) & need)) { HVK_RED_ONCE("buffer texture in NVN %s: no Vulkan texel buffer format for it on this device (first case)", nvn_fmt_name(t->d.format)); return VK_NULL_HANDLE; }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     uint64_t n = (uint64_t)t->d.width * (uint64_t)(bpb ? bpb : 1);
-    VkBuffer buf; VkDeviceSize off;
+    VkBuffer buf; VkDeviceSize off; uint64_t imp = hvk_buf_import((uint64_t)(uintptr_t)t->mem, n);
     if (!hvk_buf((uint64_t)(uintptr_t)t->mem, n, &buf, &off, NULL)) { HVK_RED_ONCE("buffer texture storage %p is in no imported memory pool (first case)", (void *)t->mem); return VK_NULL_HANDLE; }
     VkDeviceSize align = hvk.lim.minTexelBufferOffsetAlignment ? hvk.lim.minTexelBufferOffsetAlignment : 16;
     if (off % align) { HVK_RED_ONCE("buffer texture at offset %llu, not a multiple of the device's %llu (first case): not bound", (unsigned long long)off, (unsigned long long)align); return VK_NULL_HANDLE; }
@@ -807,7 +808,7 @@ VkBufferView hvk_tex_buffer_view(const tex_t *t, int storage, uint8_t *cls) {
     VkBufferViewCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, buf, f, off, n};
     if (vkCreateBufferView(hvk.d, &bi, NULL, &r)) { HVK_RED_ONCE("vkCreateBufferView failed (first case)"); return VK_NULL_HANDLE; }
     pthread_mutex_lock(&hvk.tex_mu);
-    if (x->bview[storage]) { vkDestroyBufferView(hvk.d, r, NULL); r = x->bview[storage]; } else { x->bview[storage] = r; x->bcls = fmt_cls(f); }
+    if (x->bview[storage]) { vkDestroyBufferView(hvk.d, r, NULL); r = x->bview[storage]; } else { x->bview[storage] = r; x->bview_imp[storage] = imp; x->bcls = fmt_cls(f); }
     if (cls) *cls = x->bcls;
     pthread_mutex_unlock(&hvk.tex_mu);
     return r;
@@ -939,8 +940,8 @@ VkSampler hvk_reg_sampler(int sid, uint8_t cls) {
 }
 
 // ---------- Dummies ----------
-static struct { VkImage img; VkDeviceMemory mem; VkImageView view; } g_dummy[8][4][2];   // [enum nvn_dtt][NVN_DPF_*][storage]
-static struct { VkBuffer buf; VkDeviceMemory mem; VkBufferView view[4][2]; } g_dbuf;
+static struct { VkImage img; hvk_mem *mem; VkImageView view; } g_dummy[8][4][2];   // [enum nvn_dtt][NVN_DPF_*][storage]
+static struct { VkBuffer buf; hvk_mem *mem; VkBufferView view[4][2]; } g_dbuf;
 VkImageView hvk_dummy_view(int dtt, int dpf, int storage) {
     dtt &= 7; dpf &= 3; storage = !!storage;
     if (g_dummy[dtt][dpf][storage].view) return g_dummy[dtt][dpf][storage].view;
@@ -956,11 +957,7 @@ VkImageView hvk_dummy_view(int dtt, int dpf, int storage) {
                             VK_IMAGE_TILING_OPTIMAL, (storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT) | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
     if (vkCreateImage(hvk.d, &ci, NULL, &g_dummy[dtt][dpf][storage].img)) return VK_NULL_HANDLE;
     VkImage img = g_dummy[dtt][dpf][storage].img;
-    VkMemoryRequirements req; vkGetImageMemoryRequirements(hvk.d, img, &req);
-    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, hvk_mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)};
-    hvk.dev.allocations++;
-    if (vkAllocateMemory(hvk.d, &ai, NULL, &g_dummy[dtt][dpf][storage].mem)) { hvk.dev.allocations--; return VK_NULL_HANDLE; }
-    vkBindImageMemory(hvk.d, img, g_dummy[dtt][dpf][storage].mem, 0);
+    if (hvk_mem_image(img, 0, 0, &g_dummy[dtt][dpf][storage].mem)) { vkDestroyImage(hvk.d, img, NULL); g_dummy[dtt][dpf][storage].img = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
     VkImageAspectFlags asp = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
     VkCommandBuffer cb = hvk_pre();
     image_barrier_undefined(cb, img, asp);
@@ -977,7 +974,7 @@ VkBufferView hvk_dummy_texel_buffer(int dpf, int storage) {
     if (g_dbuf.view[dpf][storage]) return g_dbuf.view[dpf][storage];
     if (!g_dbuf.buf) {
         void *map;
-        if (hvk_buffer_make(256, VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT, 1, &g_dbuf.buf, &g_dbuf.mem, &map)) return VK_NULL_HANDLE;
+        if (hvk_mem_buffer(256, VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT, HVK_MEM_HOST, &g_dbuf.buf, &g_dbuf.mem, &map)) return VK_NULL_HANDLE;
         memset(map, 0, 256);
     }
     VkFormat f = dpf == NVN_DPF_UINT ? VK_FORMAT_R32_UINT : dpf == NVN_DPF_SINT ? VK_FORMAT_R32_SINT : VK_FORMAT_R32_SFLOAT;
@@ -1025,8 +1022,8 @@ void hvk_tex_read(const tex_t *t, unsigned level, unsigned layer0, const NVNcopy
     }
     if (alt) { HVK_RED_ONCE("ReadTexels of a GPU-written texture held in a substitute format (first case): its bytes are not in the NVN format's layout"); }
     size_t texels = (size_t)r->width * (size_t)r->height, dplane = dsk != DS_NONE ? (texels * 4 + 15) & ~(size_t)15 : wb * hb, splane = dsk != DS_NONE && dsk != DS_D24_F ? texels : 0;
-    VkBuffer sb; VkDeviceMemory sm; void *map; size_t per = (dplane + splane + 15) & ~(size_t)15, n = per * (size_t)nz;   // each copy's offset 16-byte aligned
-    if (hvk_buffer_make(n, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 1, &sb, &sm, &map)) { HVK_RED_ONCE("ReadTexels: no staging buffer"); return; }
+    VkBuffer sb; hvk_mem *sm; void *map; size_t per = (dplane + splane + 15) & ~(size_t)15, n = per * (size_t)nz;   // each copy's offset 16-byte aligned
+    if (hvk_mem_buffer(n, VK_BUFFER_USAGE_TRANSFER_DST_BIT, HVK_MEM_HOST, &sb, &sm, &map)) { HVK_RED_ONCE("ReadTexels: no staging buffer"); return; }
     VkCommandBuffer cb;
     if (hvk_oneoff_begin(&cb)) {
         hvk_full_barrier(cb);
@@ -1050,7 +1047,7 @@ void hvk_tex_read(const tex_t *t, unsigned level, unsigned layer0, const NVNcopy
                     ds_join(dsk, (const uint32_t *)(const void *)(base + y * (size_t)r->width * 4), splane ? base + dplane + y * (size_t)r->width : NULL, (size_t)r->width, dst + (size_t)z * img + y * row);
             }
     }
-    vkDestroyBuffer(hvk.d, sb, NULL); vkFreeMemory(hvk.d, sm, NULL); hvk.dev.allocations--;
+    hvk_mem_buffer_free(sb, sm);
 }
 
 // ---------- Buffer copies the image's texels cannot take as they are (vk_backend.h hvk_tex_copy_special) ----------
@@ -1132,11 +1129,11 @@ void hvk_tex_shutdown(void) {
     for (int a = 0; a < 8; a++) for (int b = 0; b < 4; b++) for (int c = 0; c < 2; c++) {
         if (g_dummy[a][b][c].view) vkDestroyImageView(hvk.d, g_dummy[a][b][c].view, NULL);
         if (g_dummy[a][b][c].img) vkDestroyImage(hvk.d, g_dummy[a][b][c].img, NULL);
-        if (g_dummy[a][b][c].mem) { vkFreeMemory(hvk.d, g_dummy[a][b][c].mem, NULL); hvk.dev.allocations--; }
+        hvk_mem_free(g_dummy[a][b][c].mem);
     }
     memset(g_dummy, 0, sizeof g_dummy);
     for (int b = 0; b < 4; b++) for (int c = 0; c < 2; c++) if (g_dbuf.view[b][c]) vkDestroyBufferView(hvk.d, g_dbuf.view[b][c], NULL);
-    if (g_dbuf.buf) { vkDestroyBuffer(hvk.d, g_dbuf.buf, NULL); vkFreeMemory(hvk.d, g_dbuf.mem, NULL); hvk.dev.allocations--; }
+    if (g_dbuf.buf) hvk_mem_buffer_free(g_dbuf.buf, g_dbuf.mem);
     memset(&g_dbuf, 0, sizeof g_dbuf);
     free(g_treg); g_treg = NULL; g_ntreg = 0; free(g_sreg); g_sreg = NULL; g_nsreg = 0;
     pthread_mutex_unlock(&hvk.tex_mu);

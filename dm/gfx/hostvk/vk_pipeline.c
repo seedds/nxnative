@@ -195,14 +195,14 @@ static hvk_layout *layout_for(hvk_shader *const sh[6]) {
 VkPipelineLayout hvk_layout_vk(const hvk_layout *l) { return l ? l->pl : VK_NULL_HANDLE; }
 
 // ---------- Static buffers: the support buffer, the zero bank ----------
-static VkBuffer g_support, g_zero; static VkDeviceMemory g_support_mem, g_zero_mem;
+static VkBuffer g_support, g_zero; static hvk_mem *g_support_mem, *g_zero_mem;   // ranges of the allocator's (vk_alloc.h)
 static int static_buffers(void) {
     if (g_support) return 1;
     void *map;
     // the translator's support buffer (Ryujinx SupportBuffer.cs): render scale 1.0 at 192 + 16 i (73 entries), the rest zero: no BGRA swap, the alpha test off, as the Metal backend's support_buf
-    if (hvk_buffer_make(65536, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 1, &g_support, &g_support_mem, &map)) return 0;
+    if (hvk_mem_buffer(65536, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, HVK_MEM_HOST, &g_support, &g_support_mem, &map)) return 0;
     memset(map, 0, 65536); for (int i = 0; i < 73; i++) { float one = 1; memcpy((uint8_t *)map + 192 + 16 * i, &one, 4); }
-    if (hvk_buffer_make(65536, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 1, &g_zero, &g_zero_mem, &map)) return 0;
+    if (hvk_mem_buffer(65536, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, HVK_MEM_HOST, &g_zero, &g_zero_mem, &map)) return 0;
     memset(map, 0, 65536);
     return 1;
 }
@@ -746,7 +746,7 @@ void hvk_pipeline_shutdown(void) {
     nvn_hm_clear(&g_layouts, NULL); memset(g_univ, 0, sizeof g_univ);
     for (uint32_t i = 0; i < g_dsl.cap; i++) if (g_dsl.vals && g_dsl.vals[i]) { vkDestroyDescriptorSetLayout(hvk.d, *(VkDescriptorSetLayout *)g_dsl.vals[i], NULL); free(g_dsl.vals[i]); }
     nvn_hm_clear(&g_dsl, NULL);
-    if (g_support) { vkDestroyBuffer(hvk.d, g_support, NULL); vkFreeMemory(hvk.d, g_support_mem, NULL); hvk.dev.allocations--; }
-    if (g_zero) { vkDestroyBuffer(hvk.d, g_zero, NULL); vkFreeMemory(hvk.d, g_zero_mem, NULL); hvk.dev.allocations--; }
-    g_support = g_zero = VK_NULL_HANDLE;
+    if (g_support) hvk_mem_buffer_free(g_support, g_support_mem);
+    if (g_zero) hvk_mem_buffer_free(g_zero, g_zero_mem);
+    g_support = g_zero = VK_NULL_HANDLE; g_support_mem = g_zero_mem = NULL;
 }

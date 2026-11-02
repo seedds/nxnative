@@ -30,7 +30,8 @@ typedef struct {
     uint32_t buffer_device_address : 1; // bufferDeviceAddress: enabled; imports then get a VkDeviceAddress
     uint64_t min_import_alignment;      // minImportedHostPointerAlignment: an import's address and size are multiples of it (design 4.2)
     uint64_t max_buffer_size;           // maxBufferSize (Vulkan 1.3): the largest import one VkBuffer covers
-    uint32_t max_allocations;           // maxMemoryAllocationCount: imports count against it with every other allocation (design 4.2)
+    uint32_t max_allocations;           // maxMemoryAllocationCount: imports count against it with every other allocation (design 4.2); lower when hostvk_opts.max_allocations asks
+    uint32_t device_max_allocations;    // the device's own maxMemoryAllocationCount
     uint32_t import_type_bits;          // the memory types a page of host memory can be imported as (vkGetMemoryHostPointerPropertiesEXT of a probe page at hostvk_init)
     uint32_t import_type;               // the one hostvk_import prefers among them (HOST_VISIBLE and HOST_COHERENT first)
     char level;                         // 'A' to 'D', design 3.6 (rules in hostvk_init below); a level forced lower by hostvk_opts.force_level is this one
@@ -78,6 +79,7 @@ typedef struct {
     char force_level;   // 'B', 'C' or 'D': the device is made as one of that level would be (design 3.6; DM_VK_LEVEL, for tests and measurements on one machine): the pipeline
                         // libraries (C, D), the dynamic states of HOSTVK_EDS_* (B, D) and dynamic vertex input (D) are not enabled; 0 or 'A': what the device offers. A level above
                         // the device's is refused with a red line (nothing can be added)
+    uint32_t max_allocations;   // > 0: caps.max_allocations is at most this (DM_VK_MAX_ALLOCATIONS, a test switch: lavapipe stands for a driver with a low maxMemoryAllocationCount)
 } hostvk_opts;
 
 // hostvk_init's results: 0, or one of these (err says what in words)

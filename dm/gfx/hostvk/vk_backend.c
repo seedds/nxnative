@@ -2,8 +2,10 @@
 // the frontend's state, handle and pool code calls in its backend (nvn_state.h, nvn_resolve.h, nvn_pools.h), and be_get_caps / be_guest_map / be_guest_unmap of design 1.5.
 // The device comes up on the first call that needs it (as the Metal backend's mtl_init), through hostvk_init: DM_VK_DEVICE=<index> picks the physical device (design 10 item 4),
 // DM_VK_VALIDATION=1 turns the Khronos validation layer on with synchronization validation (design 10 item 7), DM_VK_LEVEL=A|B|C|D makes the device as one of that level of design
-// 3.6 would be (for tests and measurements of levels C and D on one machine; phase P5). With a Vulkan window registered by the host program (vk_present.h), the device is made with
-// VK_KHR_swapchain and frames go to the window presenter (vk_present.c, step P4a); otherwise, or with DM_VK_HEADLESS=1, to the headless presenter below.
+// 3.6 would be (for tests and measurements of levels C and D on one machine; phase P5), DM_VK_MAX_ALLOCATIONS=<n> keeps the backend under n live device memory allocations
+// instead of the device's maxMemoryAllocationCount (a test switch, so lavapipe stands for a driver with a low limit; step D2, vk_alloc.h). With a Vulkan window registered by
+// the host program (vk_present.h), the device is made with VK_KHR_swapchain and frames go to the window presenter (vk_present.c, step P4a); otherwise, or with
+// DM_VK_HEADLESS=1, to the headless presenter below.
 // Fallback: when no Vulkan device meets the baseline (no loader, no driver, a device below design 9.1), every function takes the null backend's form instead (dm/gfx/nvn/nvn_null.c:
 // one [RED] line per function on its first call, a GPU that has finished everything, events and syncs written at once, the pool table kept), so a host without Vulkan still runs
 // its CPU side. The two forms live in this one library: a host binary links exactly one backend (dm/host/CMakeLists.txt: nxhost links hostvk; nvn_null.c stays the backend of the
@@ -79,6 +81,12 @@ static void up_once(void) {
     o.validation = e && *e && strcmp(e, "0") != 0;
     e = getenv("DM_VK_LEVEL");
     if (e && *e) { if ((e[0] >= 'A' && e[0] <= 'D') && !e[1]) o.force_level = e[0]; else hostvk_log("[RED] [hostvk] DM_VK_LEVEL=%s is not A, B, C or D: the device's level is used", e); }
+    e = getenv("DM_VK_MAX_ALLOCATIONS");
+    if (e && *e) {
+        char *end; unsigned long v = strtoul(e, &end, 10);
+        if (*end || !v || v > UINT32_MAX) hostvk_log("[RED] [hostvk] DM_VK_MAX_ALLOCATIONS=%s is not a count from 1: the device's maxMemoryAllocationCount is used", e);
+        else o.max_allocations = (uint32_t)v;
+    }
     o.want_surface = hvk_win_wanted();   // a Vulkan window: VK_KHR_swapchain and the surface's instance extensions (vk_present.c makes the surface at the first present)
     int rc = hostvk_init(&o, &hvk.dev, g_why, sizeof g_why);
     if (rc && o.want_surface) {   // a device without what a window needs (VK_KHR_swapchain, the surface's instance extensions): headless rather than none
@@ -89,8 +97,9 @@ static void up_once(void) {
     if (rc) { hostvk_log("[RED] [hostvk] no Vulkan device for the NVN backend (%s): the null backend's forms answer, nothing is drawn", g_why); return; }
     hvk_win_device_up(o.want_surface);
     hvk.d = hvk.dev.device; hvk.lim = hvk.dev.props.limits;
+    hvk_alloc_init();   // the device memory allocator of decision D2 (vk_alloc.c): its block sizes, logged
     if (!hvk.dev.caps.buffer_device_address) hostvk_log("[RED] [hostvk] the device has no buffer device address: counter reports and conditional rendering are not written by the GPU");
-    if (!hvk_commands_init()) { hostvk_log("[RED] [hostvk] the command layer could not be made: the null backend's forms answer"); hostvk_destroy(&hvk.dev); hvk.d = VK_NULL_HANDLE; return; }
+    if (!hvk_commands_init()) { hostvk_log("[RED] [hostvk] the command layer could not be made: the null backend's forms answer"); hvk_alloc_shutdown(); hostvk_destroy(&hvk.dev); hvk.d = VK_NULL_HANDLE; return; }
     hvk.on = 1;
     hvk_cache_init(); hvk_pso_init();   // the pipeline cache on disk is read now; the prewarm starts at the first submission (vk_prewarm.c)
     hostvk_log("[hostvk] NVN backend on Vulkan: library %s%s", hvk_shader_dir(), o.validation ? ", validation on (DM_VK_VALIDATION)" : "");
@@ -157,11 +166,16 @@ int be_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     pthread_mutex_unlock(&g_null_mu);
     return ok;
 }
-// Guest memory committed / about to be decommitted (design 1.5, 1.6; hle_svc.c is to call them with the CPU port): imports are per pool in phase P3, so a commit needs nothing;
-// a decommit under a live pool releases its import first (vk_memory.c). Before the device's bring-up was asked for (a game sizes its heap before it makes an NVN device; the host
-// program's first guest memory SVCs) there is no import to release and nothing missing: the null forms' red line is for a device that could not be made
-void be_guest_map(void *mem, uint64_t size) { (void)mem; (void)size; if (!hvk.on && atomic_load(&g_tried)) NULLRED(); }
-void be_guest_unmap(void *mem, uint64_t size) { if (hvk.on) hvk_guest_unmap(mem, size); else if (atomic_load(&g_tried)) NULLRED(); }
+// Guest memory committed / about to be decommitted (design 1.5, 1.6; hle_svc.c's memory SVCs and the x86-64 engine's arena call them): the committed ranges are recorded from the
+// first call, device or not (a game sizes its heap before it makes an NVN device), for the imports pools share where the allocation count nears the device's limit (vk_memory.c,
+// step D2); a decommit under an import releases or moves it first. Before the device's bring-up was asked for (the host program's first guest memory SVCs) nothing is missing: the
+// null forms' red line is for a device that could not be made
+void be_guest_map(void *mem, uint64_t size) { hvk_region_map(mem, size, 1); if (!hvk.on && atomic_load(&g_tried)) NULLRED(); }
+void be_guest_unmap(void *mem, uint64_t size) {
+    if (hvk.on) { hvk_guest_unmap(mem, size); return; }
+    hvk_region_map(mem, size, 0);
+    if (atomic_load(&g_tried)) NULLRED();
+}
 void nvn_pool_hook_use(nvn_pool *p) { if (hvk.on) hvk_pool_hook_use(p); }   // nothing to make resident
 void nvn_pool_hook_del(nvn_pool *p) { if (hvk.on) hvk_pool_hook_del(p); }   // the import goes when the GPU is done with it
 
@@ -276,7 +290,7 @@ static pthread_mutex_t g_ext_mu = PTHREAD_MUTEX_INITIALIZER;   // the registry a
 static ext_ent *g_ext; static uint32_t g_n_ext, g_cap_ext;      // serial s names g_ext[s - 1]; a dropped one has no image
 static VkCommandPool g_pres_pool; static VkCommandBuffer g_pres_cb[PRES_N]; static uint64_t g_pres_at[PRES_N];
 static VkSemaphore g_pres_tl; static uint64_t g_pres_n;         // the presenter's timeline and the last value submitted
-static VkBuffer g_screen; static VkDeviceMemory g_screen_mem; static void *g_screen_map; static VkDeviceSize g_screen_size;
+static VkBuffer g_screen; static hvk_mem *g_screen_mem; static void *g_screen_map; static VkDeviceSize g_screen_size;
 static hvk_present_info g_last;
 uint64_t be_ext_tex(void *tex) {
     if (!hvk_up()) { NULLRED(); return 0; }
@@ -356,9 +370,9 @@ static uint64_t pres_headless(uint64_t serial, VkImage image, VkFormat format, V
     if (!pres_make()) { pthread_mutex_unlock(&g_ext_mu); HVK_RED_ONCE("the headless presenter's command pool or timeline could not be made: frames are not shown"); return 0; }
     if (need > g_screen_size) {   // a larger picture: the copies in flight write the old buffer
         pres_wait(g_pres_n);
-        if (g_screen) hvk_buffer_free(g_screen, g_screen_mem);
-        g_screen = VK_NULL_HANDLE; g_screen_mem = VK_NULL_HANDLE; g_screen_map = NULL; g_screen_size = 0;
-        if (hvk_buffer_make(need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 1, &g_screen, &g_screen_mem, &g_screen_map)) {
+        if (g_screen) hvk_mem_buffer_free(g_screen, g_screen_mem);
+        g_screen = VK_NULL_HANDLE; g_screen_mem = NULL; g_screen_map = NULL; g_screen_size = 0;
+        if (hvk_mem_buffer(need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, HVK_MEM_HOST, &g_screen, &g_screen_mem, &g_screen_map)) {
             pthread_mutex_unlock(&g_ext_mu); HVK_RED_ONCE("the headless presenter's buffer of %llu bytes could not be made: frames are not shown", (unsigned long long)need); return 0;
         }
         g_screen_size = need;
@@ -418,8 +432,8 @@ static void pres_shutdown(void) {   // hvk_shutdown: every present finished, the
     pres_wait(g_pres_n);
     if (g_pres_tl) vkDestroySemaphore(hvk.d, g_pres_tl, NULL);
     if (g_pres_pool) vkDestroyCommandPool(hvk.d, g_pres_pool, NULL);
-    if (g_screen) hvk_buffer_free(g_screen, g_screen_mem);
-    g_pres_tl = VK_NULL_HANDLE; g_pres_pool = VK_NULL_HANDLE; g_screen = VK_NULL_HANDLE; g_screen_mem = VK_NULL_HANDLE; g_screen_map = NULL; g_screen_size = 0;
+    if (g_screen) hvk_mem_buffer_free(g_screen, g_screen_mem);
+    g_pres_tl = VK_NULL_HANDLE; g_pres_pool = VK_NULL_HANDLE; g_screen = VK_NULL_HANDLE; g_screen_mem = NULL; g_screen_map = NULL; g_screen_size = 0;
     g_pres_n = 0; memset(g_pres_at, 0, sizeof g_pres_at); memset(&g_last, 0, sizeof g_last);
     free(g_ext); g_ext = NULL; g_n_ext = g_cap_ext = 0;
     pthread_mutex_unlock(&g_ext_mu);

@@ -307,7 +307,8 @@ static int assess(VkPhysicalDevice p, const devq *q, const hostvk_opts *o, uint3
     c->buffer_device_address = q->f12.bufferDeviceAddress != 0;
     c->min_import_alignment = q->host_mem ? q->phost.minImportedHostPointerAlignment : 0;
     c->max_buffer_size = q->p13.maxBufferSize;
-    c->max_allocations = l->maxMemoryAllocationCount;
+    c->max_allocations = c->device_max_allocations = l->maxMemoryAllocationCount;
+    if (o->max_allocations && o->max_allocations < c->max_allocations) c->max_allocations = o->max_allocations;   // a test's lower limit (DM_VK_MAX_ALLOCATIONS)
     c->gpl_fast_link = c->gpl && q->pgpl.graphicsPipelineLibraryFastLinking;
     c->gpl_indep_interp = c->gpl && q->pgpl.graphicsPipelineLibraryIndependentInterpolationDecoration;
     int some_dynamic = c->vertex_input_dynamic || d->eds_present != 0;

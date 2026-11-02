@@ -1,5 +1,5 @@
 // The Vulkan backend of the NVN frontend (docs/design/vulkan-backend.md, phase P3): what its files share. The entry points are the functions of dm/gfx/nvn/nvn_be.h, all defined in
-// vk_backend.c; each concern has a file of its own (memory and pools vk_memory.c, textures and samplers vk_texture.c, shader libraries vk_shader.c, pipelines and descriptors
+// vk_backend.c; each concern has a file of its own (memory and pools vk_memory.c, device memory vk_alloc.c, textures and samplers vk_texture.c, shader libraries vk_shader.c, pipelines and descriptors
 // vk_pipeline.c, the command stream vk_commands.c) and is reached through the hvk_* functions below. Plain C11 over volk, no window: headless until the presenter (phase P4).
 //
 // Threads. The replay (every per-operation function of nvn_be.h and the submission calls) runs on the submit thread under hle_nvn.c's submission lock. Game threads also call in:
@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include "vk_device.h"
 #include "vk_import.h"
+#include "vk_alloc.h"
 #include "../nvn/nvn_obj.h"
 #include "../nvn/nvn_refl.h"
 #include "../nvn/nvn_hmap.h"
@@ -23,26 +24,32 @@
 #define HVK_RED_ONCE(...) do { static _Atomic int once_; if (!atomic_exchange(&once_, 1)) hostvk_log("[RED] [hostvk] " __VA_ARGS__); } while (0)
 #define HVK_NOTE_ONCE(...) do { static _Atomic int once_; if (!atomic_exchange(&once_, 1)) hostvk_log("[hostvk] " __VA_ARGS__); } while (0)
 
-// ---------- Memory (vk_memory.c; design 4.2, 4.3) ----------
-// A memory pool: the guest storage imported (vk_import.c), rounded out to the import alignment, with one VkBuffer over it. nvn_pool.backend points at it
+// ---------- Memory (vk_memory.c; design 4.2, 4.3; the allocator of decision D2 is vk_alloc.h's) ----------
+// A memory pool: the guest storage imported (vk_import.c) with one VkBuffer over the import: its own, rounded out to the import alignment, or one it shares with the pools of its
+// granule of committed guest memory where the allocation count nears the device's limit (vk_memory.c, "Pools"). nvn_pool.backend points at it
+typedef struct hvk_imp hvk_imp;
 typedef struct hvk_pool {
-    hostvk_import_t im;
+    _Atomic(hvk_imp *) imp;    // its import (read without the lock: it changes when memory beside it under a shared import is decommitted); NULL: none
     uintptr_t lo, hi;          // the pool as the game gave it, [mem, mem + size)
     uint32_t nvn_flags;
 } hvk_pool;
 // Guest address → (buffer, offset); also its device address (0 without buffer device address). 0 when no pool holds [addr, addr + len)
 int hvk_buf(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off, VkDeviceAddress *dev);
+uint64_t hvk_buf_import(uint64_t addr, uint64_t len);   // the serial of the import hvk_buf answers from (never reused), 0 for none: a view over its buffer is made for that one
+void hvk_import_counts(uint32_t *own, uint32_t *shared, uint32_t *pools_shared);   // live pool imports: a pool's own, shared ones and the pools on those
+void hvk_region_map(void *mem, uint64_t size, int committed);   // guest memory committed (be_guest_map) or, with no device up, decommitted (be_guest_unmap)
 // A ring allocation of the open submission (staging, driver banks, query results, converted indices): host-visible and coherent, alive until the submission completes
 typedef struct { VkBuffer buf; VkDeviceSize off; uint8_t *cpu; VkDeviceAddress dev; } hvk_alloc;
 int hvk_ring_alloc(VkDeviceSize n, VkDeviceSize align, hvk_alloc *out);   // 0 = out of memory (logged)
-// A buffer of the backend's own with memory: host_visible maps it (and *map is set)
+// A buffer with a VkDeviceMemory of its own: host_visible maps it (and *map is set). For the GPU tests, which declare it themselves (t_vk_harness.h); the backend's own buffers
+// and the guest layers' take hvk_mem_buffer (vk_alloc.h), a range of a block
 VkResult hvk_buffer_make(VkDeviceSize n, VkBufferUsageFlags usage, int host_visible, VkBuffer *buf, VkDeviceMemory *mem, void **map);
 void hvk_buffer_free(VkBuffer buf, VkDeviceMemory mem);
 uint32_t hvk_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags fallback);   // UINT32_MAX for none
 VkBufferUsageFlags hvk_ring_usage(void);
 // The objects the GPU may still use: released when every submission up to the fence that may use them has completed (hvk_deferred_run)
 typedef enum { HVK_DEL_IMPORT, HVK_DEL_BUFFER, HVK_DEL_IMAGE, HVK_DEL_VIEW, HVK_DEL_BUFVIEW, HVK_DEL_FREE, HVK_DEL_PIPELINE } hvk_del_kind;
-void hvk_defer(hvk_del_kind kind, void *obj, uint64_t a, uint64_t b);   // a, b: the second and third handles (an image's memory) or a pointer to free
+void hvk_defer(hvk_del_kind kind, void *obj, uint64_t a, uint64_t b);   // a: a buffer's or an image's hvk_mem (vk_alloc.h), released with it; IMPORT: obj is an hvk_imp
 void hvk_deferred_run(uint64_t done);   // release what the fences up to done let go
 void hvk_mem_shutdown(void);
 // The upload scratch (step P7): a device-local buffer with a device address that the GPU deswizzle and ASTC decode write and the image copies read, band after band, the caller
@@ -125,7 +132,7 @@ typedef struct hvk_shader {
     uint8_t mask_m;            // the colour outputs main_m writes as unsigned integers
     nvn_refl rf;               // the neutral reflection (nvn_refl_from_json_text)
     int nb; hvk_binding b[HVK_MAXB];
-    VkBuffer c1buf; VkDeviceMemory c1mem;   // the shader's own constants (c1), VK_NULL_HANDLE when it has none
+    VkBuffer c1buf; hvk_mem *c1mem;   // the shader's own constants (c1) in a range of the allocator's (vk_alloc.h), VK_NULL_HANDLE / NULL when it has none
     uint32_t vin_types[32];    // per vertex input location: NVN_CT_* + 1 (0 = not read)
     uint8_t writes_storage;    // a writable storage buffer or image binding
     uint8_t builtin;           // one of the backend's own kernels (nvn_builtin.h's counter kernels)

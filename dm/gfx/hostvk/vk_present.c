@@ -26,7 +26,7 @@ enum { UP_OFF, UP_FSR, UP_INTEGER };       // DM_PRESENT_UPSCALE
 enum { SCALE_BLIT, SCALE_FSR_DIRECT, SCALE_FSR_COPY, SCALE_INTEGER };   // how one frame is scaled (hvk_win_info.upscale)
 
 typedef struct {
-    VkImage img; VkDeviceMemory mem; VkFormat fmt; uint32_t w, h;   // the snapshot: the frame's region in the frame's raw format (an sRGB format's UNORM twin)
+    VkImage img; hvk_mem *mem; VkFormat fmt; uint32_t w, h;   // the snapshot: the frame's region in the frame's raw format (an sRGB format's UNORM twin)
     int sampled; VkImageView view; // made with SAMPLED usage (its format filters linearly); the view FSR's EASU samples, made by the present thread at its first use
     VkCommandBuffer cb;            // its copy's command buffer, free once `copied` is reached
     uint64_t copied, read;         // the timeline values of its copy and of the last blit that read it (the image is remade only once that is reached)
@@ -53,14 +53,14 @@ static struct {
     VkSemaphore acq[FRAME_N]; VkCommandBuffer fcb[FRAME_N]; uint64_t fval[FRAME_N], frame;
     int recreate, extent_free; uint64_t swapchains, shown;   // extent_free: the surface takes the swapchain's size (no current extent): the front end's size decides
     // readback (tests)
-    int readback; VkBuffer rb; VkDeviceMemory rb_mem; void *rb_map; VkDeviceSize rb_size;
+    int readback; VkBuffer rb; hvk_mem *rb_mem; void *rb_map; VkDeviceSize rb_size;
     hvk_win_info last; uint64_t last_val;
     // the upscaler (design 7.4, decision D4): its settings (start, or hvk_win_upscale under g_sc_mu) and the present thread's objects
     int up, up_no_direct, up_failed; float sharpen;
     int sc_storage; VkImageView sc_view[IMG_MAX];  // the swapchain's images take RCAS's storage writes: their views
     int fsr_easu_ok, fsr_rcas_ok;                  // R8G8B8A8_UNORM has the features of the EASU image (sampled, storage) and of the second intermediate image (storage, blit source)
     VkSampler smp; VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkPipeline easu, rcas[2]; VkDescriptorPool dpool; VkDescriptorSet ds[FRAME_N][2];
-    VkImage easu_img, rcas_img; VkDeviceMemory easu_mem, rcas_mem; VkImageView easu_view, rcas_view; uint32_t easu_w, easu_h, rcas_w, rcas_h;
+    VkImage easu_img, rcas_img; hvk_mem *easu_mem, *rcas_mem; VkImageView easu_view, rcas_view; uint32_t easu_w, easu_h, rcas_w, rcas_h;
     // when presents reached the screen (be_presented_time)
     pres_ent ring[PRES_RING];
     uint64_t pw_q[PW_RING]; uint64_t pw_qgen[PW_RING]; uint64_t pw_wr, pw_rd;   // present ids for the waiter, with the swapchain generation they were presented on
@@ -101,24 +101,18 @@ static void tl_wait(uint64_t v) {
     while (vkWaitSemaphores(hvk.d, &wi, 1000000000ull) == VK_TIMEOUT)
         if (plat_now_ns() - t0 > 5000000000ull) HVK_RED_ONCE("the window presenter has waited over 5 s for its own copy or blit (value %llu): the GPU is stuck?", (unsigned long long)v);
 }
-static int image_make(VkFormat fmt, uint32_t w, uint32_t h, VkImageUsageFlags usage, VkImage *img, VkDeviceMemory *mem) {
+static int image_make(VkFormat fmt, uint32_t w, uint32_t h, VkImageUsageFlags usage, VkImage *img, hvk_mem **mem) {   // its memory from the allocator (vk_alloc.h)
     VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0, VK_IMAGE_TYPE_2D, fmt, {w, h, 1}, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
                             usage, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED};
-    *img = VK_NULL_HANDLE; *mem = VK_NULL_HANDLE;
+    *img = VK_NULL_HANDLE; *mem = NULL;
     if (vkCreateImage(hvk.d, &ci, NULL, img)) { *img = VK_NULL_HANDLE; return 0; }
-    VkMemoryRequirements r; vkGetImageMemoryRequirements(hvk.d, *img, &r);
-    uint32_t t = hvk_mem_type(r.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
-    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, r.size, t};
-    if (t == UINT32_MAX) { vkDestroyImage(hvk.d, *img, NULL); *img = VK_NULL_HANDLE; return 0; }
-    hvk.dev.allocations++;
-    if (vkAllocateMemory(hvk.d, &ai, NULL, mem)) { hvk.dev.allocations--; *mem = VK_NULL_HANDLE; vkDestroyImage(hvk.d, *img, NULL); *img = VK_NULL_HANDLE; return 0; }
-    if (vkBindImageMemory(hvk.d, *img, *mem, 0)) { vkFreeMemory(hvk.d, *mem, NULL); hvk.dev.allocations--; vkDestroyImage(hvk.d, *img, NULL); *img = VK_NULL_HANDLE; *mem = VK_NULL_HANDLE; return 0; }
+    if (hvk_mem_image(*img, 0, 0, mem)) { vkDestroyImage(hvk.d, *img, NULL); *img = VK_NULL_HANDLE; *mem = NULL; return 0; }
     return 1;
 }
-static void image_free(VkImage *img, VkDeviceMemory *mem) {
+static void image_free(VkImage *img, hvk_mem **mem) {
     if (*img) vkDestroyImage(hvk.d, *img, NULL);
-    if (*mem) { vkFreeMemory(hvk.d, *mem, NULL); hvk.dev.allocations--; }
-    *img = VK_NULL_HANDLE; *mem = VK_NULL_HANDLE;
+    hvk_mem_free(*mem);
+    *img = VK_NULL_HANDLE; *mem = NULL;
 }
 static VkImageView view_make(VkImage img, VkFormat fmt) {
     VkImageViewCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, img, VK_IMAGE_VIEW_TYPE_2D, fmt, {0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
@@ -578,9 +572,9 @@ static int show(snap_t *s) {
         VkDeviceSize need = (VkDeviceSize)W.ext.width * W.ext.height * 4;
         if (need > W.rb_size) {
             tl_wait(W.last_val);
-            if (W.rb) hvk_buffer_free(W.rb, W.rb_mem);
-            W.rb = VK_NULL_HANDLE; W.rb_mem = VK_NULL_HANDLE; W.rb_map = NULL; W.rb_size = 0;
-            if (!hvk_buffer_make(need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 1, &W.rb, &W.rb_mem, &W.rb_map)) W.rb_size = need;
+            if (W.rb) hvk_mem_buffer_free(W.rb, W.rb_mem);
+            W.rb = VK_NULL_HANDLE; W.rb_mem = NULL; W.rb_map = NULL; W.rb_size = 0;
+            if (!hvk_mem_buffer(need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, HVK_MEM_HOST, &W.rb, &W.rb_mem, &W.rb_map)) W.rb_size = need;
         }
         rb = W.rb_size >= need;
     }
@@ -841,7 +835,7 @@ void hvk_win_shutdown(void) {
     for (int i = 0; i < SNAP_N; i++) snap_free(&W.snap[i]);
     fsr_free();
     for (int i = 0; i < FRAME_N; i++) if (W.acq[i]) { vkDestroySemaphore(hvk.d, W.acq[i], NULL); W.acq[i] = VK_NULL_HANDLE; }
-    if (W.rb) hvk_buffer_free(W.rb, W.rb_mem);
+    if (W.rb) hvk_mem_buffer_free(W.rb, W.rb_mem);
     if (W.fpool) vkDestroyCommandPool(hvk.d, W.fpool, NULL);
     if (W.pool) vkDestroyCommandPool(hvk.d, W.pool, NULL);
     if (W.tl) vkDestroySemaphore(hvk.d, W.tl, NULL);

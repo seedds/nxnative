@@ -25,7 +25,7 @@ VkBufferUsageFlags hostvk_pool_usage(const hostvk_dev *d);
 //     is called: the Vulkan calls require it, VUID-VkImportMemoryHostPointerInfoEXT-pHostPointer-01749 and VUID-VkMemoryAllocateInfo-allocationSize-01745), or when the driver
 //     refuses the range (vkGetMemoryHostPointerPropertiesEXT or vkAllocateMemory);
 //   VK_ERROR_TOO_MANY_OBJECTS when caps.max_allocations allocations are live (VUID-vkAllocateMemory-maxMemoryAllocationCount-04101: the backend must not exceed it; design 4.2's
-//     coalesced imports are the answer);
+//     coalesced imports are the answer: from half the limit on, the backend's pools share imports, vk_memory.c, step D2);
 //   another VkResult from the driver. A refused import logs a [RED] line and leaves *out zeroed. Thread-safe as far as Vulkan allows (one device; no shared state but the counter)
 VkResult hostvk_import(hostvk_dev *d, void *base, size_t bytes, hostvk_import_t *out);
 // Destroy the buffer and free the memory: the GPU must be done with them (design 4.2: after the last submission that uses the import completes). The host range stays the caller's

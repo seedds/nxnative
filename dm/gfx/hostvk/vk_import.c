@@ -52,7 +52,7 @@ VkResult hostvk_import(hostvk_dev *d, void *base, size_t bytes, hostvk_import_t 
     uint32_t live = ++d->allocations;
     if (live > d->caps.max_allocations) {
         d->allocations--;
-        hostvk_log("[RED] [hostvk] import of %p + 0x%zx refused: %u device memory allocations are live, the device's limit (maxMemoryAllocationCount): pools need coalesced imports",
+        hostvk_log("[RED] [hostvk] import of %p + 0x%zx refused: %u device memory allocations are live, the device's limit (maxMemoryAllocationCount; the backend's pools share imports from half of it on)",
                    base, bytes, d->caps.max_allocations);
         return VK_ERROR_TOO_MANY_OBJECTS;
     }

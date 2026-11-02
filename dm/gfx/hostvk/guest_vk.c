@@ -18,8 +18,9 @@
 //     this memory only through vkMapMemory's pointer, never at an address it chose. With it the pointer must lie in the engine's arena below 2^39 (design aot-recompiler.md 5.2):
 //     the host-visible types are then arena pages imported with VK_EXT_external_memory_host, as vk_memory.c imports NVN pools (design 4.2), every buffer and linear image made
 //     with the external-memory handle type it needs (gmem_import below; a driver that refuses imports for a linear image's format gives that image memory of its own).
-//     Optimal images are device-local whatever memory the game binds (as hle_vk.m ignores image bindings): vkBindImageMemory gives each one an allocation of its own (dedicated
-//     where the driver prefers it). They count against maxMemoryAllocationCount with the backend's allocations (hostvk_dev.allocations).
+//     Optimal images are device-local whatever memory the game binds (as hle_vk.m ignores image bindings): vkBindImageMemory gives each one memory from the backend's allocator
+//     (vk_alloc.h, decision D2: a range of a block, an allocation of its own where it is large or the driver prefers one), so a game's many images do not each take one of
+//     maxMemoryAllocationCount; the game's own allocations stay one driver allocation each (hostvk_dev.allocations counts both).
 //   · Shaders. The game's SPIR-V goes to the driver unchanged, after structural checks (guest_spirv_check) and the two documented fix-ups, as SPIR-V binary rewrites (no
 //     SPIRV-Tools at run time): ArrayStride on struct members moved onto the array types (Super Mario Galaxy's run-time SPIR-V; rendering.md, "Vulkan shaders generated at run
 //     time"), and the second blend source written at output Location 1 without an Index, which a pipeline that blends with a SRC1 factor gets as Location 0, Index 1 (rendering.md,
@@ -724,25 +725,22 @@ VK(vkDestroyBufferView, void, VkDevice d, VkBufferView v, const VkAllocationCall
 
 // ---------- Images, views, samplers ----------
 // What this layer keeps per image (the driver's handle is the game's): its own allocation (optimal images, swapchain images), linear tiling, made for a swapchain
-typedef struct { VkDeviceMemory own; VkDeviceSize own_size; uint8_t linear, swapchain, noimport; } gimg;   // noimport: a linear image the device cannot bind to an import
+typedef struct { hvk_mem *own; VkDeviceSize own_size; uint8_t linear, swapchain, noimport; } gimg;   // own: from the allocator; noimport: a linear image the device cannot bind to an import
 static nvn_hmap g_img; static pthread_mutex_t g_img_mu = PTHREAD_MUTEX_INITIALIZER;
 static void img_table_init(void) { pthread_mutex_lock(&g_img_mu); if (!g_img.klen) nvn_hm_init(&g_img, 8); pthread_mutex_unlock(&g_img_mu); }
 static void img_put(VkImage im, gimg *g) { pthread_mutex_lock(&g_img_mu); if (!g_img.klen) nvn_hm_init(&g_img, 8); nvn_hm_put(&g_img, &im, g); pthread_mutex_unlock(&g_img_mu); }
 static gimg *img_get(VkImage im) { pthread_mutex_lock(&g_img_mu); gimg *g = g_img.klen ? nvn_hm_get(&g_img, &im) : NULL; pthread_mutex_unlock(&g_img_mu); return g; }
 static gimg *img_del(VkImage im) { pthread_mutex_lock(&g_img_mu); gimg *g = g_img.klen ? nvn_hm_del(&g_img, &im) : NULL; pthread_mutex_unlock(&g_img_mu); return g; }
-// An allocation of the image's own: device-local, dedicated where the driver prefers it
+// The image's memory, which the game's binding does not give it: device-local memory from the backend's allocator (vk_alloc.h: a range of a block; an allocation of its own
+// where it is large or the driver prefers one), bound
 static VkResult img_own(VkImage im, gimg *g) {
-    VkImageMemoryRequirementsInfo2 ri = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2, NULL, im};
-    VkMemoryDedicatedRequirements dr = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
-    VkMemoryRequirements2 req = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
-    vkGetImageMemoryRequirements2(hvk.d, &ri, &req);
-    VkDeviceMemory m;
-    VkResult r = host_alloc(req.memoryRequirements.size, pick_type(0, req.memoryRequirements.memoryTypeBits), dr.prefersDedicatedAllocation || dr.requiresDedicatedAllocation ? im : VK_NULL_HANDLE, &m);
-    if (!r) r = vkBindImageMemory(hvk.d, im, m, 0);
-    if (r) { LOG("[vk] [RED] no device-local memory of %llu bytes for an image (VkResult %d)", (unsigned long long)req.memoryRequirements.size, r); return r; }
-    g->own = m; g->own_size = req.memoryRequirements.size;
+    VkMemoryRequirements req; vkGetImageMemoryRequirements(hvk.d, im, &req);
+    VkResult r = hvk_mem_image(im, g->linear, 0, &g->own);
+    if (r) { LOG("[vk] [RED] no device-local memory of %llu bytes for an image (VkResult %d)", (unsigned long long)req.size, r); return r; }
+    g->own_size = hvk_mem_size(g->own); atomic_fetch_add(&g_mem_bytes, g->own_size);
     return VK_SUCCESS;
 }
+static void img_own_free(gimg *g) { if (g->own) { hvk_mem_free(g->own); atomic_fetch_sub(&g_mem_bytes, g->own_size); g->own = NULL; } }   // the image destroyed, the GPU done with it
 VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAllocationCallbacks *a, VkImage *out) {
     (void)d; (void)a;
     // The import mode: a linear image may be bound to an imported allocation, so it carries the host-allocation handle type where the device imports for its format and use
@@ -775,7 +773,7 @@ VKB(vkDestroyImage, void, VkDevice d, VkImage im, const VkAllocationCallbacks *a
     gimg *g = img_del(im);
     if (g && g->swapchain) { img_put(im, g); RED1("the game destroys a swapchain image: ignored (vkDestroySwapchainKHR releases it)"); return; }
     vkDestroyImage(hvk.d, im, NULL);
-    if (g) { host_free(g->own, g->own_size); free(g); }
+    if (g) { img_own_free(g); free(g); }
 }
 VK(vkGetImageMemoryRequirements, void, VkDevice d, VkImage im, VkMemoryRequirements *r) {
     (void)d; vkGetImageMemoryRequirements(hvk.d, im, r);
@@ -1163,7 +1161,7 @@ static void sw_free(gswap *sc) {
         be_present_wait(sc->ticket[i]); hvk_ext_tex_drop(sc->serial[i]);
         gimg *g = img_del(sc->img[i]);
         vkDestroyImage(hvk.d, sc->img[i], NULL);
-        if (g) { host_free(g->own, g->own_size); free(g); }
+        if (g) { img_own_free(g); free(g); }
     }
     free(sc);
 }

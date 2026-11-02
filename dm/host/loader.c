@@ -387,11 +387,11 @@ static void bind_private_opus(void) {
     // the software decoder entry points hle_codec.c forwards to; a game's sdk keeps only the ones it links (Hogwarts Legacy: the C interface, no OpusDecoder class)
     static const char *const entry[] = { "_ZN2nn5codec21InitializeOpusDecoderEPNS0_15OpusDecoderTypeEiiPvm", "_ZN2nn5codec11OpusDecoderC1Ev",
                                          "_ZN2nn5codec32InitializeOpusMultiStreamDecoderEPNS0_26OpusMultiStreamDecoderTypeEiiiiPKhPvm", "_ZN2nn5codec22OpusMultiStreamDecoderC1Ev" };
-    module_t *om = NULL;
-    for (int i = 0; i < g_nmod && !om; i++)
-        for (unsigned k = 0; k < sizeof entry / sizeof *entry && !om; k++) if (module_sym(&g_mod[i], entry[k])) om = &g_mod[i];
+    module_t *om = NULL; int found = 0;   // the loaded modules in load order, as loaded_sym walks them; a flag ends the search (a loop on !om had clang-tidy's analyzer pass the module it took for null to module_sym again)
+    for (int i = 0; i < g_nloaded && !found; i++)
+        for (unsigned k = 0; k < sizeof entry / sizeof *entry && !found; k++) if (module_sym(g_loaded[i], entry[k])) { om = g_loaded[i]; found = 1; }
     if (!om) { LOG("no SDK software Opus decoder in any module: nothing to bind privately"); return; }
-    if (om == &g_mod[0]) return;   // in the first module, whose definitions win anyway
+    if (om == g_loaded[0]) return;   // in the first loaded module, whose definitions win anyway
     relocs_t rl = relocs_of(om); unsigned n = 0; char first[256] = "";
     for (int t = 0; t < 2; t++)
         for (uint64_t i = 0; i < rl.n[t]; i++) {

@@ -150,7 +150,9 @@ static void dependency(int mode) {
     EMIT(OP_DRAW,d);op_hdr end={OP_END,8};memcpy(cmd+used,&end,8);
     #undef EMIT
     state_reset();memset(&R,0,sizeof R);mtl_set_frame(100+mode);mtl_sub_begin();uint64_t cuts=g_cuts,h=(uint64_t)cmd;mtl_sub_index(&h,1);mtl_exec(cmd);
-    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];[blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
+    id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+    if (!rb) { fprintf(stderr,"could not allocate the geometry readback buffer\n"); abort(); }
+    [blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
     uint8_t *px=rb.contents;
     if(independent) {
         EXPECT("first draw wrote its own storage",1,*(uint32_t*)(cmd+32768));EXPECT("second draw wrote its own storage",1,*(uint32_t*)(cmd+32768+16));
@@ -162,6 +164,9 @@ static void dependency(int mode) {
         EXPECT("dependent geometry does not join earlier run",1,g_geo_nrun);
         EXPECT("geometry boundary submits early only when enabled",cut_draws()==1&&geo_cut_on(),g_cuts>cuts);
     }
+    EXPECT("replay retains the fixture program",1,serial_get(cp.serial)==pr);
+    mtl_prog_release(&cp);
+    EXPECT("released fixture program leaves the serial table",1,serial_get(cp.serial)==nil);
     mtl_tex_release(&target);mtl_pool_del(cmd);mtl_drain();free(cmd);
 }
 int main(int argc,char **argv){@autoreleasepool{

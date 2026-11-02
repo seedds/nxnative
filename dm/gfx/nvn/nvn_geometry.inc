@@ -522,7 +522,7 @@ static void mesh_tasks_draw(const p_draw *dw) {
     NvShader *ts = pr ? pr->sh[3] : nil, *ms = pr ? pr->sh[4] : nil;
     if (ts && ts->mesh_kind != 1) ts = nil;   // a mesh shader with no task stage draws its groups itself (mesh_notask)
     if (!ms || ms->mesh_kind != 2 || !ms->fn || (!ts && !ms->mesh_notask) || (ts && !ts->fn)) {
-        RED_ONCE(145, "DrawMeshTasks with a program without a task and a mesh shader (task %s mesh %s): draw skipped", ts ? ts->key : "-", ms ? ms->key : "-"); return; }
+        RED_ONCE(151, "DrawMeshTasks with a program without a task and a mesh shader (task %s mesh %s): draw skipped", ts ? ts->key : "-", ms ? ms->key : "-"); return; }
     NvProg *raster = pr->geo_lean_raster;   // the pixel stage alone (draw() binds its arguments; mtk_encode the task and mesh stages')
     if (!raster || raster->sh[1] != pr->sh[1] || raster->sh[0]) { raster = [NvProg new]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
     g_mtk.on = 1; g_mtk.miss = 0; g_mtk.ts = ts; g_mtk.ms = ms; g_mtk.first = (uint32_t)dw->first; g_mtk.count = (uint32_t)dw->count;

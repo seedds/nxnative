@@ -1196,6 +1196,14 @@ void front_run(void (*guest)(void)) {
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        int mtl_hdr_on(void); void mtl_hdr_headroom(float h);
+        if (mtl_hdr_on()) {   // HDR output (nvn_mtl.m, HDR output): an extended-range layer, 1.0 = SDR white, and the screen's headroom for the tone mapping's peak, read four times a second
+            g_layer.pixelFormat = MTLPixelFormatRGBA16Float; g_layer.wantsExtendedDynamicRangeContent = YES;
+            CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB); g_layer.colorspace = cs; CGColorSpaceRelease(cs);
+            NSScreen *sc = win.screen ?: NSScreen.mainScreen;
+            LOG("front end: HDR layer (RGBA16Float, extended linear sRGB); screen headroom now %.2f, at most %.2f", sc.maximumExtendedDynamicRangeColorComponentValue, sc.maximumPotentialExtendedDynamicRangeColorComponentValue);
+            [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm) { (void)tm; mtl_hdr_headroom((float)(win.screen ?: NSScreen.mainScreen).maximumExtendedDynamicRangeColorComponentValue); }];
+        }
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen

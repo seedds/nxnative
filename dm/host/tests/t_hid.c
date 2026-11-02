@@ -46,6 +46,8 @@ void dm_ctl_cvar_i32(uint64_t off, int32_t v) { (void)off; (void)v; }
 void dm_ctl_cvar_f32(uint64_t off, float v) { (void)off; (void)v; }
 void dm_gfx_texdump_next(const char *path) { (void)path; }
 void dm_gfx_passdump_next(long n) { (void)n; }
+void mtl_hdr_set_peak(float p) { (void)p; }
+void mtl_hdr_set_knee(float k) { (void)k; }
 static int applet_depth, applet_opens, applet_closes_at_depth0;   // hle_oe.c: the applet stand-ins open and close their applet around the answer
 void dm_applet_enter(const char *name) { (void)name; applet_depth++; applet_opens++; }
 void dm_applet_leave(void) { applet_closes_at_depth0 += --applet_depth == 0; }

@@ -207,6 +207,7 @@ void hid_keys_init(void) {
 //   saves a host texture's level 0 raw, every slice (a cube's six faces) (nvn_mtl.m dm_gfx_texraw), "drag <x0> <y0> <x1> <y1> [seconds=0.3]" moves one finger in a straight line between the two normalized picture
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
 //   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "#…" is ignored.
+//   "hdrpeak <n>" sets the HDR peak in SDR whites (nvn_mtl.m mtl_hdr_set_peak; 1 = the game's own picture, 0 = the screen's headroom again), "hdrknee <v>" the SDR value its curve leaves the game's at,
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
@@ -229,6 +230,8 @@ static void *ctl_main(void *arg) {
                 if (!strncmp(line, "env ", 4)) { char *eq = strchr(line + 4, '='); if (eq) { *eq = 0; setenv(line + 4, eq + 1, 1); LOG("DM_CTL: env %s=%s", line + 4, eq + 1); } continue; }
                 if (!strncmp(line, "texdump ", 8)) { void dm_gfx_texdump_next(const char *path); dm_gfx_texdump_next(line + 8); LOG("DM_CTL: colour targets of the next frame → %s (as DM_NVN_TEXDUMP)", line + 8); continue; }
                 if (!strncmp(line, "passdump ", 9)) { void dm_gfx_passdump_next(long n); dm_gfx_passdump_next(atol(line + 9)); LOG("DM_CTL: passes of the next %ld frames (as DM_NVN_PASSDUMP)", atol(line + 9)); continue; }
+                if (!strncmp(line, "hdrpeak ", 8)) { void mtl_hdr_set_peak(float p); mtl_hdr_set_peak(strtof(line + 8, NULL)); LOG("DM_CTL: HDR peak %s", line + 8); continue; }
+                if (!strncmp(line, "hdrknee ", 8)) { void mtl_hdr_set_knee(float k); mtl_hdr_set_knee(strtof(line + 8, NULL)); LOG("DM_CTL: HDR knee %s", line + 8); continue; }
                 if (!strncmp(line, "drag ", 5)) {   // one finger, a step every 8 ms
                     float x0, y0, x1, y1, s = 0.3f; if (sscanf(line + 5, "%f %f %f %f %f", &x0, &y0, &x1, &y1, &s) < 4) { LOG("[RED] DM_CTL drag wants x0 y0 x1 y1 [seconds]"); continue; }
                     int n = (int)(s / 0.008f); if (n < 2) n = 2;

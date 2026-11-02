@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter), [HDR](#hdr)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -58,6 +58,14 @@ The game's own languages. The app was packed with one of them; pick another here
 ### Frame-rate counter
 
 Shows the frames per second at the top left.
+
+### HDR
+
+On a screen with HDR (an iPhone, or a Mac with an XDR or HDR display), a game whose profile supports it (Breath of the Wild) shows its brightest parts, the sun, the sky around it, sunlit grass, fire and reflections, brighter than normal white, up to what the screen can show at its current brightness. Everything darker, the HUD, the menus and the map look as before. On by default where it is offered; the app turns it off by itself on a screen without HDR.
+
+- **When to change it:** turn it off to compare with the game's own picture, or to save a little power.
+- **Cost:** the game's picture is copied with its highlights each frame and they are added when it is shown: a little GPU time and about 40 MB of memory. It needs [Frame buffering](#frame-buffering): the highlights travel with its copy of each frame, so with Frame buffering off the picture is the game's own. Bright highlights also make an OLED screen draw more power.
+- **How bright:** the highlights follow the headroom the screen reports, which grows as the screen's brightness is turned down; `DM_HDR_MAX` (8 by default) caps it and `DM_HDR_PEAK` fixes it, in multiples of normal white ([Settings in a file](#settings-in-a-file)).
 
 ## Controls
 

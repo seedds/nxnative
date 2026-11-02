@@ -621,6 +621,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 |---|---|---|---|
 | `enc_thread on` | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | `game` → `host`, gap | what iOS does for every game: a default for every game after `regress.py check` on the games |
 | `game_env DOTNET_GCRegionRange=60000000` | [Absolum](../../dm/games/0100A83022A22000/README.md) | `game`, at goal | measured for the game's regions |
+| `hdr f7ee6fe10b925543 hdr_tonemap.metal` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game`, at goal | the presenting, the layer and the screen's headroom are the host's, but where a game tone maps and how its curve is raised are its own shader's |
 | `present_snap on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with: a default for every game after `regress.py check` on the games |
 | `pso_mtl4 on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with on an iPhone: a default for every game after `regress.py check` on the games |
 | `shader_key_skip 0x770+0x78` | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | `game`, at goal | the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key |

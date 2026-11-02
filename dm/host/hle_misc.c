@@ -215,3 +215,23 @@ HLE_FORCE("_ZN2nn10streamplay27GetGuestVibrationDeviceInfoEPNS_3hid19VibrationDe
 HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsHandleERKNS0_10GuestPadIdERKNS_3hid8JcmsTypeE", "guest Joy-Con mouse handle: none (no guest)", uint32_t, h_stpl_JcmsHandle, const void *id, const void *type) { (void)id; (void)type; return 0; }
 HLE_FORCE("_ZN2nn10streamplay18GetGuestJcmsStatesEPNS0_14GuestJcmsStateEiRKNS0_15GuestJcmsHandleE", "guest Joy-Con mouse states: none (no guest)",
           int, h_stpl_JcmsStates, void *out, int n, const void *h) { (void)out; (void)n; (void)h; return 0; }
+
+// ---------- nn::bluetooth: the Bluetooth Low Energy GATT client ----------
+// Pokemon Scarlet / Violet 4.0.0 scan for a smart device over BLE and talk GATT to it (StartBleScanSmartDevice, ConnectToGattServer, the Gatt* classes: 34 imports its 1.0.0 main
+// does not have). The SDK's client reaches the bt and btm:u services, which the host does not serve, so sm refuses them and the game aborts in nn::diag at startup
+// (InitializeBle from main+0xa0b02c on 4.0.0, then AcquireBleScanEvent from main+0xa0b05c). A Mac cannot present itself as that peripheral through this host, so the library
+// initializes and reports that nothing is ever there: its events are host-owned SystemEvents, bound on first use and never signaled, and no scan finds a device. This is the
+// answer a game gets for a Poke Ball Plus that is not connected ([Poke Ball Plus (Palma)](../../docs/reference/services.md#poké-ball-plus-palma), hle_hid.c).
+HLE_FORCE("_ZN2nn9bluetooth13InitializeBleEv", "BLE: the library is ready, with no adapter behind it", Result, h_bt_InitBle, void) { return RES_OK; }
+// The five event sources of the BLE client, never signaled (no scan result, no connection change, no discovery, no GATT completion, no MTU change). Each binds the
+// SystemEvent the game passes, as nn::aoc's event does above: the real function initializes the caller's own object, which the game then puts in a MultiWaitHolder
+// (nn::os::InitializeMultiWaitHolder from main+0xa0b0c8 on 4.0.0, which aborts on an event that was never initialized)
+#define BT_EVENT(mangled, why, cname)                                                                   \
+    HLE_FORCE(mangled, why, Result, cname, void *ev) {                                                  \
+        hle_bind_system_event(ev, 0); return RES_OK;                                                    \
+    }
+BT_EVENT("_ZN2nn9bluetooth19AcquireBleScanEventEPNS_2os15SystemEventTypeE", "BLE scan event: bound, never signaled (no device is ever found)", h_bt_ScanEv)
+BT_EVENT("_ZN2nn9bluetooth37AcquireBleConnectionStateChangedEventEPNS_2os15SystemEventTypeE", "BLE connection state event: bound, never signaled (nothing connects)", h_bt_ConnEv)
+BT_EVENT("_ZN2nn9bluetooth31AcquireBleServiceDiscoveryEventEPNS_2os15SystemEventTypeE", "BLE service discovery event: bound, never signaled", h_bt_DiscEv)
+BT_EVENT("_ZN2nn9bluetooth28AcquireBleGattOperationEventEPNS_2os15SystemEventTypeE", "BLE GATT operation event: bound, never signaled", h_bt_GattEv)
+BT_EVENT("_ZN2nn9bluetooth24AcquireBleMtuConfigEventEPNS_2os15SystemEventTypeE", "BLE MTU configuration event: bound, never signaled", h_bt_MtuEv)

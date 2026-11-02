@@ -6,11 +6,12 @@ the native Bink movie, getting up in the bedroom, walking downstairs and
 through the living room and kitchen, camera control, dialogue and save/reload.
 The unsigned 1.0.0 IPA is built (~7.0 GB); iPhone testing is pending.
 Only 1.0.0 is registered, and the profile's shader tables come from v0.
-When the NSP folder also contains updates, build the supported version with
+When the NSP folder also contains updates, build a chosen version with
 `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> -p v0` (add
 `--platform mac` for a Mac build). The builder otherwise selects the newest
-supplied version. The supplied 4.0.0 update is damaged and remains unsupported
-(see [Files and builds](#files-and-builds)).
+supplied version. 4.0.0 (v786432) builds from a derived profile and reaches its
+frame loop on the Mac from an intact copy of the update; the copy of it first
+supplied here was damaged (see [Files and builds](#files-and-builds)).
 [Pokémon Violet](../01008F6008C5E000/README.md) is its twin: the same `sdk`
 and `subsdk0` builds and the same shader tables, with a `main` of its own.
 
@@ -64,10 +65,11 @@ game's own Oodle decoder extract them. Chain `157e1b96c8da`, profile inputs
 bindings. The complete build supplies the stamped `c1_full.tsv` and
 `cb_extent.tsv`; no shader override is needed.
 
-The 4.0.0 split aborts on 195 malformed active Trinity packs in the damaged
-input described [below](#files-and-builds). Full 4.0.0 shader coverage and an
-update IPA have not been produced. Its partial startup used the base shader
-libraries and reported missing update shader keys.
+From an intact 4.0.0 copy the split completes: 35,937 shaders (17,864 vertex,
+17,978 pixel, 95 compute) and 28,299 variation pairs, from `arc` 31,573,
+`system` 4,324 and 40 in `main`. On the damaged copy described
+[below](#files-and-builds) it aborted on 195 malformed active Trinity packs
+instead, which is how that damage first showed.
 
 ### Pipeline preparation depth
 
@@ -182,9 +184,21 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
 - **Current:** the base NSP passes extraction integrity checks: 24 RomFS files,
   6,369.2 MB. Modules are `main` (`ca44e7dd…`) and `sdk` (`3644a676…`).
   The host supplies the imports from Nintendo's movie module `subsdk0`.
-- The complete, CRC-checked 1.0.0 IPA remains preserved at
-  `<NSP folder>/PokemonScarlet-1.0.0.ipa`.
-- **Blocked: supplied update 4.0.0 (v786432) has erased payload bytes.**
+- **Current: 4.0.0 (v786432) builds and reaches its frame loop.** An intact
+  copy of the update (program NCA SHA-256 `7e5b9bbf…`, matching its signed
+  CNMT; no all-zero 16 KB block anywhere in the NSP) packs from a profile
+  derived from this one, with its own shader tables; nothing is registered for
+  it here and it needs no `patches.py`. Its code builds are `main`
+  `421c5411…` and `sdk` `bb560bdf…` (SDK 13.3.13). Its `main` imports 34
+  `nn::bluetooth` functions and 2 vtables that 1.0.0's does not, and without
+  them the game aborted in `nn::diag` at startup; the host now takes the
+  library over ([The Bluetooth Low Energy GATT client](../../../docs/reference/services.md#the-bluetooth-low-energy-gatt-client)).
+  Checked headless on 2026-11-01: 3,300 frames, no `[RED]` line. The profile's
+  memory, depth-mode and pipeline findings carry over unchanged, since they are
+  host behaviour and profile keys rather than fixed addresses. **Open:** a Mac
+  gameplay test of 4.0.0, and whether its DLC shaders change the derived
+  profile; the 60 fps and route measurements below were taken on 1.0.0.
+- **The copy of update 4.0.0 first supplied here had erased payload bytes.**
   Independent checks trace 2,633 invalid 16 KB data blocks to three all-zero
   ciphertext ranges in the original NSP: 2,629 blocks in `arc/data.trpfs`
   and four in `audio/wwise/bin/Switch/DEMO.bnk`. The ranges below use absolute
@@ -249,3 +263,4 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
 - [A capture refused after a change to the reflection structs](../../../docs/reference/nvn-objects.md#a-capture-refused-after-a-change-to-the-reflection-structs).
 - [Conservative rasterization remains unimplemented](../../../docs/reference/rendering.md#conservative-rasterization-remains-unimplemented).
 - [Metal's build folders left by pipeline archive flushes](../../../docs/reference/shaders.md#metals-build-folders-left-by-pipeline-archive-flushes).
+- [The Bluetooth Low Energy GATT client](../../../docs/reference/services.md#the-bluetooth-low-energy-gatt-client) (4.0.0 only).

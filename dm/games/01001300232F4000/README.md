@@ -2,7 +2,7 @@
 
 Update 1.0.5 (v327680) over the base XCI, SDK 19.3.13. Square Enix, Unreal Engine 5 on its mobile renderer (`SF_GLSL_SWITCH_MOBILE`), NVN, CRIWARE sound and movies. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`. This ASIA version has its own title and program ID; `main` is build `e3e401c28d9fd3b1f9e033bb7bb31d42`, while `sdk` (`7bba185a35ee9b4d0af66a4df910a823`) and `subsdk0` (`ca7f78a09c547c54beac3a33ed6bf364`) match the [western release](../01005270232F2000/README.md).
 
-Status: runs successfully on iOS, confirmed by the user on 2026-11-02 with the 1.0.5 test IPA and its separate RomFS image. All 10,324 iOS shaders compiled. The profile targets 60 fps; no device model, measured frame rate, memory figures or detailed gameplay route was supplied. Mac gameplay has not been tested.
+Status: runs normally on an iPhone 15 Pro with iOS 27.0, reported by the user on 2026-11-02 with the 1.0.5 test IPA and its separate RomFS image. All 10,324 iOS shaders compiled. The profile targets 60 fps; no measured frame rate, memory figures or detailed gameplay route was supplied. Mac gameplay has not been tested.
 
 ## What it needs
 
@@ -41,7 +41,7 @@ Status: runs successfully on iOS, confirmed by the user on 2026-11-02 with the 1
 
 ## iOS testing
 
-- **Confirmed:** the user reports that the ASIA 1.0.5 build runs on iOS (2026-11-02).
+- **User-tested:** iPhone 15 Pro, iOS 27.0, ASIA 1.0.5 (2026-11-02). The user reports that the game runs normally. No specific scene, test duration, frame-rate measurement or separate audio, input, save/load, battle or DLC checks were provided.
 - The test build uses `scripts/build_ipa_from_nsp.py --platform ios --romfs separate`, bundle ID `org.nxnative.01001300232f4000`. The IPA contains the rewritten code, iOS shaders and two DLC images; the matching `romfs.img` is copied into the app's Documents directory.
 - IPA ZIP CRC validation passed. Its `romfs.id` matches the delivered image (`size=4161860131 index=a3e1685f04afcc3e`). File Sharing is enabled; the executable carries the Increased Memory Limit entitlement for the sideloading tool to preserve.
 
@@ -52,5 +52,5 @@ No new general host or translator fix was needed. The existing engine-wide rewri
 ## Open
 
 - Mac shader compilation and gameplay testing remain incomplete; the partial Mac cache was retained when switching to the iOS build.
-- Record the device model, measured frame rate, memory use and a gameplay route, including battles, audio, input, saving and loading.
+- Record measured frame rate, memory use and a gameplay route, including battles, audio, input, saving and loading.
 - Check the two DLC packages' in-game effects and the base game without update 1.0.5.

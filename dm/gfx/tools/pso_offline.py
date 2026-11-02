@@ -6,7 +6,8 @@
 #   · the vertex shader's pulling library <key>_bp (a vertex shader without stage inputs: its own <key>_b), entry `entry`, or `entry_z` for the near = 0 depth mode, from its reflection
 #     <key>_b.json; the pixel shader's <key>_b, entry `entry` (main0); no vertex descriptor, one sample, every colour attachment unspecialized
 #   · left out as the host leaves them out (to the draws): a reflection of another chain version or none, a vertex shader with stage inputs and no pulling library, a vertex library that
-#     writes the layer (render_target_array_index), a missing library or entry point
+#     writes the layer (render_target_array_index), a pixel shader that reads the primitive ID (its reflection's raster.primitive_id: the host builds its pipelines whole, since
+#     through a base every primitive reads 0), a missing library or entry point
 #   · a pair whose functions declare function constants is left to the device (rest_pairs.tsv): the host specializes such functions with an empty set of values, and metal-tt makes
 #     no specialized function from a library (applegpu-nt: "cannot find private metadata"), nor the function unspecialized ("cannot lower module with unresolved function constants")
 # Output folder (what the app bundles as pso/, the host's DM_PSO_BUNDLE):
@@ -99,13 +100,14 @@ def plan(lib_dir, chain, pairs, zero):
     def writes_layer(lib):
         if lib not in layer: layer[lib] = LAYER in (lib_dir / f'{lib}.metallib').read_bytes()
         return layer[lib]
-    bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'stage inputs', 'library', 'layer', 'entry'), 0)
+    bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'stage inputs', 'library', 'layer', 'primitive ID', 'entry'), 0)
     for vk, fk in pairs:
         vj, fj = refl(vk), refl(fk)
         if not vj or not fj or vj.get('chain') != chain or fj.get('chain') != chain: left['reflection'] += 1; continue
         ventry = vj['entry_z'] if zero and vj.get('entry_z') else vj.get('entry'); fentry = fj.get('entry') or 'main0'
         pull = isinstance(vj.get('pull'), dict)
         if not pull and vj.get('vertex_inputs'): left['stage inputs'] += 1; continue
+        if (fj.get('raster') or {}).get('primitive_id'): left['primitive ID'] += 1; continue
         vl, fl = vk + ('_bp' if pull else '_b'), fk + '_b'
         vf, ff = fn(vl), fn(fl)
         if vf is None or ff is None: left['library'] += 1; continue

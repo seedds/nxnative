@@ -838,6 +838,8 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Symptom:** a regular lattice of dots over the ground, and the light wrong: three of four layers of an interleaved ambient occlusion array stay empty, while the draws and their bindings look right.
 - **Cause:** a Metal 4 pipeline specialized from a base with unspecialized colour state gives the fragment shader `[[primitive_id]]` 0 for every primitive. The same shader built whole counts properly. Measured in small test programs (16384 0 0 0 pixels per layer, against 4096 each), M6, macOS 27.2. The game writes the layer from the primitive ID, drawing four triangles. Ruled out: `gl_Layer`, view layers, clears, and the classic and Metal 4 API alone. This is a platform behaviour the host cannot change.
 - **Fix:** the reflection records `reads_prim_id` (`raster.primitive_id`, `dmsh_build.py`), and `pso_build_ex` builds such a pipeline whole. Such pipelines give up the specialization's compile time, for these shaders only.
+- **Prebuild:** `pre_desc` (the prebuild of a game's shader pairs) and `pso_offline.py` (the offline archive) leave pairs with such a fragment shader out, as no draw uses their base.
+- **Check:** `t_image_primitive_id` draws four full-screen triangles that store into the layer of their primitive ID through the host's draw path (an attachment-less pass, a metallib loaded as game shaders are). Each of the four layers holds its own primitive's value; without the flag, layers 1 to 3 stay empty (macOS 27.0.1, M3 Pro). `test_pso_offline.py` checks that such a pair is left out.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `b6726be4afc44691`.
 
 ### NVN2's DLSS on MetalFX

@@ -106,11 +106,13 @@ class Plan(unittest.TestCase):
         self.shader('fs', {}, {'_b': [('main0', False)]})
         self.shader('fsc', {}, {'_b': [('main0', True)]})
         self.shader('fsx', {'entry': 'main1'}, {'_b': [('main0', False)]})
-        pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs')]
+        self.shader('fsp', {'raster': {'primitive_id': 1}}, {'_b': [('main0', False)]})   # reads the primitive ID: no base
+        pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs'),
+                 ('plain', 'fsp')]
         bases, rest, left = po.plan(self.d, CHAIN, pairs, False)
         self.assertEqual(bases, [('pull_bp', 'main0', 'fs_b', 'main0'), ('plain_b', 'main0', 'fs_b', 'main0')])
         self.assertEqual(rest, [('pull', 'fsc')])
-        self.assertEqual(left, {'reflection': 2, 'stage inputs': 1, 'library': 1, 'layer': 1, 'entry': 1})
+        self.assertEqual(left, {'reflection': 2, 'stage inputs': 1, 'library': 1, 'layer': 1, 'primitive ID': 1, 'entry': 1})
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
 

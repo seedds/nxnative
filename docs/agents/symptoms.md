@@ -263,6 +263,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 ## Movies
 
 - abort in NVIDIA's video path (`NvRmChannelOpen` → `NvOsDrvOpen`). → [The SDK's hardware decoder opens nvdrv](../reference/movies.md#the-sdks-hardware-decoder-opens-nvdrv)
+- constructing a movie decoder aborts with `FATAL movie: missing SDK symbol _ZNK5movie6Buffer4DataEv`. → [SDK 1 movie buffer getters](../reference/movies.md#sdk-1-movie-buffer-getters)
 - the game waits forever at a movie (Engage's 94 s opening `S01F.webm`; frames keep presenting, nothing happens). → [`movie::Decoder` taken over as a MediaCodec-style protocol](../reference/movies.md#moviedecoder-taken-over-as-a-mediacodec-style-protocol)
 - a movie in grey with vertical bands of colour, its luma sharp; or a read far outside guest memory at `main+0x344f74` on the first movie picture (CRI Sofdec2's NV12 → RGB conversion). → [Output format keys (`md_format`)](../reference/movies.md#output-format-keys-md_format)
 - a call through a null pointer in the host's `movie::Decoder::Configure` right after `nnMain` starts the logos. → [SDK 4's `movie::Decoder` constructor without a priority](../reference/movies.md#sdk-4s-moviedecoder-constructor-without-a-priority)

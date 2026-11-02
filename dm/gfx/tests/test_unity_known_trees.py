@@ -13,7 +13,8 @@ SHADER_HASHES = {'2017.4': '266d53113fa30d2b858f2768f92eaa14', '2018.3': '8db760
                  '2021.2': 'd8236c9bd87d85edb203acf352348124', '2022.3': 'ea424a5fc1e48db62144df956f9e1005',
                  '6000.0': '2ec7223dce3af4232b14ae1441bd7999'}
 COMPUTE_HASHES = {'2017.4': '20291e020d10074c35d8286f5191593f', '2019.4': '1a95529ac2eb1a97cd9d2a4356bd722f',
-                  '2021.3': 'abd9135b8ce83d043fef4e9ec7f53366', '2022.3': 'bfdf63ab0ce84d5a2c765ee560d90fe7'}
+                  '2021.3': 'abd9135b8ce83d043fef4e9ec7f53366', '2022.3': 'bfdf63ab0ce84d5a2c765ee560d90fe7',
+                  '6000.3': '43a0948a3f403068c0b31bff90ba0c9a'}
 
 
 class KnownTreeTests(unittest.TestCase):

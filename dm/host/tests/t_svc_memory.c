@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 static int memory_mprotect(void *addr, size_t size, int prot);
+static void *memory_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset);
 static _Noreturn void memory_abort(void);
 static int memory_getpagesize(void) {
 #ifdef TEST_PAGE_16K
@@ -21,10 +22,12 @@ static int memory_getpagesize(void) {
 }
 #define getpagesize memory_getpagesize
 #define mprotect memory_mprotect
+#define mmap memory_mmap
 #define abort memory_abort
 #include "../hle_svc.c"
 #undef abort
 #undef mprotect
+#undef mmap
 #undef getpagesize
 
 static module_t test_modules[2];
@@ -77,7 +80,7 @@ void dm_guest_write_prepare(void *addr, size_t size) {
     }
 }
 
-static int fail_protect;
+static int fail_protect, fail_mmap;
 static uint64_t *failure_regs, failure_input[3];
 static int64_t failure_mapped;
 static size_t failure_heap;
@@ -89,6 +92,10 @@ static int memory_mprotect(void *addr, size_t size, int prot) {
     atomic_fetch_add(&protects, 1);
     if (fail_protect) { errno = EACCES; return -1; }
     return mprotect(addr, size, prot);
+}
+static void *memory_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset) {
+    if (fail_mmap) { errno = ENOMEM; return MAP_FAILED; }
+    return mmap(addr, size, prot, flags, fd, offset);
 }
 static _Noreturn void memory_abort(void) {
     // Only the production fatal path reaches this wrapper; assertion failures
@@ -132,7 +139,9 @@ static void fatal(unsigned svc, uint64_t x0, uint64_t x1, uint64_t x2) {
         uint64_t r[31] = {x0, x1, x2}; failure_regs = r;
         memcpy(failure_input, r, sizeof failure_input);
         failure_mapped = g_alias_mapped; failure_heap = g_heap_cur;
-        failure_nmap = g_nmap; failure_prepares = prepares; fail_protect = 1;
+        // Releases first replace the mapping, then fall back to mprotect. Both
+        // must fail to exercise the fatal path without publishing metadata.
+        failure_nmap = g_nmap; failure_prepares = prepares; fail_protect = fail_mmap = 1;
         svc_dispatch(svc, r, 0); _exit(79);
     }
     int status; assert(waitpid(pid, &status, 0) == pid);
@@ -433,6 +442,24 @@ static void failures(void) {
     fatal(1, 0, 0x200000, 0);
     assert(!resize(0x200000)); fatal(1, 0, 0, 0); assert(!resize(0));
 }
+static void release_fallback(void) {
+    size_t pg = memory_getpagesize();
+    assert(!pages(1, alias, pg));
+    memset((void *)alias, 0x53, pg);
+    fail_mmap = 1;
+    assert(!pages(0, alias, pg));
+    assert(!g_alias_mapped);
+    expect(alias, (uintptr_t)g_as, heap - (uintptr_t)g_as, 0, 0, 0);
+    fail_mmap = 0;
+    // The fallback retained the old backing: recommit must still clear it.
+    assert(!pages(1, alias, pg));
+    for (size_t i = 0; i < pg; ++i) assert(((uint8_t *)alias)[i] == 0);
+    assert(!pages(0, alias, pg));
+    assert(!resize(0x200000));
+    fail_mmap = 1;
+    assert(!resize(0) && !g_heap_cur);
+    fail_mmap = 0;
+}
 // Exercise the real host helper through SDK-shaped test entry points. Its stack
 // allocation must reach MapMemory as guest backing and outlive SDK copyback.
 #include "../hle_guestthread.c"
@@ -489,7 +516,7 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
-    lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); concurrency(); fragmented_queries();
     guest_helper();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY

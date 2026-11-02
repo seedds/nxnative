@@ -86,6 +86,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Found on:** [AI: THE SOMNIUM FILES](../../dm/games/010089B00D09C000/README.md) (Unity 2017.4: the 6 s Spike Chunsoft logo `StreamingAssets/Movie/al_titel_cl_sc_1k_30.mp4`, H.264 High, before the title).
 - **Note:** the audio decoder was never affected: AAC has no reorder queue.
 
+### H.264 loops retain presentation order when timestamps restart
+
+- **Symptom:** a looping tutorial loses B-frame presentation order after the first loop, without a `Flush` or end-of-stream packet.
+- **Cause:** the reorder queue sorted every picture by PTS alone. When the next loop restarted PTS at its IDR, the previous loop's high-PTS tail stayed behind the new pictures and occupied their reorder lookahead.
+- **Fix:** `hle_movie_avc.c` identifies an IDR once per access unit and tags the synchronous decode callback with its coded-sequence number. The queue sorts by sequence, then PTS; pictures from a completed sequence can leave without waiting for more lookahead. The current sequence retains its existing depth, EOS drains all pictures, and `Flush` discards the queue and resets sequence tracking. PTS values are unchanged.
+- **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md), reported with source by zatteogit in [issue #889](https://github.com/seedds/nxnative/issues/889). The synthetic `t_movie_avc` regression feeds both Annex B and length-prefixed packets through the production parser and callback wiring, checking distinct picture identities over repeated loops, short sequences, Flush and EOS. It substitutes decompression. Separately, x264 B-frame clips (a single IDR with 3 or 1 B-frames, and 12-frame GOPs) looped three times through real VideoToolbox had 123 of 180 pictures in the wrong position before the fix and none after. Gameplay and playback rate were not checked on this code; the reporter's replay of the game's tracks and gameplay test ran on a modified local checkout. The existing fixed reorder depth and IDR `no_output_of_prior_pics_flag` handling are unchanged.
+
 ### No picture carries the end-of-stream flag
 
 - **Symptom:** an anime or story movie ends on a black screen; the pause menu still works and skipping lets the game continue.
@@ -187,6 +194,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Fix** (`hle_movie.c`, `md_rendered`): a slot written into the client's texture is kept until the client releases it, or, for a client that has never released a rendered slot itself (Super Mario Party Jamboree, Metroid Prime 4: Beyond), until its next `GetOutputBuffer`. A decoder learns which kind its client is at the client's first release of a rendered slot; the earlier slots are returned under the same lock that checks them.
 - **Found on:** TSUKIHIME -A piece of blue glass moon- (010057A01E4D4000, no profile here; [GitHub issue #700](https://github.com/seedds/nxnative/issues/700): its prologue, a 1080p H.264 movie, `type 1 output 3 mode 2`) and [Metroid Dread](../../dm/games/010093801237C000/README.md#movies), whose movies jumped the same way (15 times in 75 s on the Mac before, none after).
 
+### A BGRA8 client texture gets its movie with red and blue swapped
+
+- **Symptom:** `[RED] movie: client texture format 0x9a is not RGBA8 / RGBX8 (sRGB included), writing in RGBA byte order`; a native-texture movie plays in the wrong colours, warm lamps blue.
+- **Cause:** the SDK's consumer draws the decoded picture into the client's texture on the GPU, so it comes out right in any colour format. The host writes the bytes on the CPU, and wrote them in RGBA order whatever the texture's format was.
+- **Fix** (`hle_movie.c`, `md_out_tex`): for BGRX8, BGRA8 and their sRGB forms (NVN formats 0x99 to 0x9C), the picture goes through a per-decoder copy with red and blue swapped. The slot's own picture stays RGBA, as a slot can be read twice.
+- **Found on:** [TRIANGLE STRATEGY](../../dm/games/0100CC80140F8000/README.md) (the title screen's background movies; BGRA8).
+
 ## Demuxers and codecs
 
 ### `movie::Extractor` runs natively
@@ -216,6 +230,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 ### Vorbis movie sound
 
 - Movie sound in [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0): the decoder is asked for type 5 (Vorbis) with output format 1 (PCM16); see the other entries in this file and `hle_movie.c`.
+
+### Vorbis output lengths at a window change
+
+- **Symptom:** a movie with a Vorbis track starts clean, then crackles and stutters. The log has no underrun and no red line, and with `DM_AUDIO_DUMP` the game's mix has exact zeros in whole 512-sample blocks (mostly one or two at a time, 11 to 21 ms).
+- **Cause:** at a change of window size `stb_vorbis` splits the samples differently from the specification: it ends a packet's samples at its window's `right_start`, which depends on the next window, not at the window's centre. With blocksizes 256 / 2048, a long window before a short one gave 1,472 samples instead of 1,024, and the short one 128 instead of 576. The total is the same, but those outputs did not match the distance to the next packet's time.
+- **Fix:** `md_vorbis` keeps the decoded samples and each packet leaves with (previous blocksize + its blocksize) / 4 of them, the rest going with the next. The blocksizes come from the packets' mode numbers. Samples still kept after the last packet lie past the centre of its window, where the specification has none, so they are dropped. Handing out longer merged outputs instead was tried and made the sound much worse: the game's buffers are 8,192 bytes, and the outputs no longer matched the packets' times.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, Mac: [#768](https://github.com/seedds/nxnative/issues/768)).
 
 ### Vorbis sound stops for good after a Flush
 

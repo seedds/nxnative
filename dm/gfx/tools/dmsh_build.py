@@ -157,6 +157,29 @@ def border_emu(msl):
         twin = f'spvDescriptorSet0.{m.group(2)}{abi.BORDER_TWIN}'
         msl = msl[:m.start()] + f'dm_bs({msl[m.start():i]}, spvDescriptorSet0.{abi.BORDER_MEMBER}, {bit[m.group(2)]}u, spvDescriptorSet0.{m.group(1)}, {twin}, {args})' + msl[i:]
     return msl.replace('using namespace metal;\n', 'using namespace metal;\n' + BORDER_HELPERS, 1)
+
+def border_plain(msl):
+    """The source without its border corrections (border_emu): every dm_bs(sample, …) back to the sample, the twin samplers and the block still declared, so the argument
+    buffer is the one the host encodes either way. The correction is a branch that is almost never taken (no draw of Donkey Kong Bananza's heavy areas sets a bit), but the
+    compiler gives its twin sample registers in every pixel: the material shader 6f9fd9cb5fbc873b spilled 336 bytes a thread with it and 160 without, and the scene pass took
+    5.1 ms with it and 3.2 ms without on an M1. The pixel shader's main library is this source; the correcting one is its side library <key>_bb (border_finish), which the host
+    takes only for a draw whose border mask is not zero"""
+    at = msl.find(BORDER_HELPERS)
+    if at < 0: return msl
+    at += len(BORDER_HELPERS)
+    def strip(text):
+        out, i = [], 0
+        while (j := text.find('dm_bs(', i)) >= 0:
+            depth, k, first = 1, j + 6, None
+            while depth:
+                c = text[k]
+                if c == '(': depth += 1
+                elif c == ')': depth -= 1
+                elif c == ',' and depth == 1 and first is None: first = k
+                k += 1
+            out.append(text[i:j] + '(' + strip(text[j + 6:first]).strip() + ')'); i = k   # a sample inside the first argument is unwrapped too
+        return ''.join(out) + text[i:]
+    return msl[:at] + strip(msl[at:])
 CAS =os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
@@ -365,6 +388,7 @@ VIN_STATS = collections.Counter()
 PULL_STATS = collections.Counter()
 ALPHA_STATS = collections.Counter()
 LOGIC_STATS = collections.Counter()
+BORDER_STATS = collections.Counter()
 
 def pull_finish(key, full, refl):
     """The pulling library <key>_bp of a vertex shader with stage inputs (dmsh_pull.py: no [[stage_in]], the inputs read through the per-draw layout block), compiled through the
@@ -456,6 +480,15 @@ def alpha_finish(key, full, refl):   # the alpha test library <key>_ba (dmsh_alp
 
 def logic_finish(key, full, refl):   # the logic operation library <key>_bl (dmsh_logic.py): none for a shader without colour outputs
     return ps_side_finish(key, full, refl, dmsh_logic, 'bl', 'logic', LOGIC_STATS, 'logic operation')
+
+class border_side:   # ps_side_finish's variant for border_finish: the correcting source as it is, with every fragment entry point
+    @staticmethod
+    def variant(full):
+        if 'dm_bs(' not in full: return None, None
+        return full, re.findall(r'^\s*fragment\s+\S+\s+(\w+)\s*\(', full, re.M)
+
+def border_finish(key, full, refl):   # the border correcting library <key>_bb (border_emu), from the source with the corrections; none for a shader that samples through no sampler member
+    return ps_side_finish(key, full, refl, border_side, 'bb', 'border', BORDER_STATS, 'border colour')
 
 pc_of, loc = {}, {}
 MAP_ROWS, MAP_CONFLICT_ROWS = {}, {}
@@ -1239,13 +1272,19 @@ def finish(key, w, j, c1):
     fu, fmask = fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0
     if fu or fd: plain = src; open(msl, 'w').write((fu or src) + (fd or ''))
+    emu = None   # a pixel shader's source with the border corrections, for its side libraries; its main library is built without them (see border_plain)
+    if j['stage'] == 'ps':
+        emu = open(msl).read(); pl = border_plain(emu)
+        if pl != emu: open(msl, 'w').write(pl)
+        else: emu = None
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
         if 'mac' in TARGETS: MTL.compile('mac', msl, lib)
         if 'ios' in TARGETS and IOSOUT: MTL.compile('ios', msl, os.path.join(IOSOUT, key + '_b.metallib'))
     try: compile_targets()
     except subprocess.CalledProcessError as e:
         if not lay and not fu and not fd: return 'metal failed', str(e)[:160], None
-        open(msl, 'w').write(plain); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
+        if emu is not None: emu = plain
+        open(msl, 'w').write(border_plain(plain) if emu is not None else plain); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
         try: compile_targets()
         except subprocess.CalledProcessError as e: return 'metal failed', str(e)[:160], None
     clone(msl, os.path.join(out, key + '_b.metal'))
@@ -1264,7 +1303,7 @@ def finish(key, w, j, c1):
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
             'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
     if j['stage'] == 'vs': full = open(msl).read(); vin_finish(key, full, refl); pull_finish(key, full, refl)   # the shadow-input and pulling libraries (dmsh_vin.py, dmsh_pull.py), from the source with every entry point
-    if j['stage'] == 'ps': full = open(msl).read(); alpha_finish(key, full, refl); logic_finish(key, full, refl)   # the alpha test and logic operation libraries (dmsh_alpha.py, dmsh_logic.py), from the source with every entry point
+    if j['stage'] == 'ps': full = emu if emu is not None else open(msl).read(); alpha_finish(key, full, refl); logic_finish(key, full, refl); border_finish(key, full, refl)   # the alpha test and logic operation libraries (dmsh_alpha.py, dmsh_logic.py), from the source with every entry point
     write_refl(key, refl)
     fetch_finish(key, src, refl)
     return 'ok', '', refl
@@ -1362,6 +1401,7 @@ print(f'variant cache: generated {BF_STATS["generated"]}, hit {BF_STATS["hit"]},
 print(f'shadow-input libraries (<key>_bv, dmsh_vin.py): {VIN_STATS["generated"]} generated, {VIN_STATS["failed"]} failed to compile, {VIN_STATS["not generated"]} not generated; '
       f'{VIN_STATS["inputs"]} integer inputs shadowed, {VIN_STATS["float only"]} of them with no other-sign shadow (attribute indices ran out)')
 print(f'alpha test libraries (<key>_ba, dmsh_alpha.py): {ALPHA_STATS["generated"]} generated, {ALPHA_STATS["failed"]} failed to compile, {ALPHA_STATS["not generated"]} pixel shaders without a float colour 0 alpha')
+print(f'border correcting libraries (<key>_bb, border_plain): {BORDER_STATS["generated"]} generated, {BORDER_STATS["failed"]} failed to compile', flush=True)
 print(f'logic operation libraries (<key>_bl, dmsh_logic.py): {LOGIC_STATS["generated"]} generated, {LOGIC_STATS["failed"]} failed to compile, {LOGIC_STATS["not generated"]} pixel shaders without colour outputs')
 print(f'pulling libraries (<key>_bp, dmsh_pull.py): {PULL_STATS["generated"]} generated, {PULL_STATS["failed"]} failed to compile, {PULL_STATS["not generated"]} not generated, '
       f'{PULL_STATS["no stage input"]} vertex shaders without stage inputs (none needed)')

@@ -6,7 +6,8 @@
 #   · the vertex shader's pulling library <key>_bp (a vertex shader without stage inputs: its own <key>_b), entry `entry`, or `entry_z` for the near = 0 depth mode, from its reflection
 #     <key>_b.json; the pixel shader's <key>_b, entry `entry` (main0); no vertex descriptor, one sample, every colour attachment unspecialized
 #   · left out as the host leaves them out (to the draws): a reflection of another chain version or none, a vertex shader with stage inputs and no pulling library, a vertex library that
-#     writes the layer (render_target_array_index), a missing library or entry point
+#     writes the layer (render_target_array_index), a pixel library that reads the primitive ID (air.primitive_id: the host builds its pipelines whole, since through a base
+#     every primitive reads 0), a missing library or entry point
 #   · a pair whose functions declare function constants is left to the device (rest_pairs.tsv): the host specializes such functions with an empty set of values, and metal-tt makes
 #     no specialized function from a library (applegpu-nt: "cannot find private metadata"), nor the function unspecialized ("cannot lower module with unresolved function constants")
 # Output folder (what the app bundles as pso/, the host's DM_PSO_BUNDLE):
@@ -29,6 +30,7 @@ import argparse, hashlib, json, os, shutil, struct, subprocess, sys, time
 from pathlib import Path
 
 LAYER = b'render_target_array_index'
+PRIMITIVE_ID = b'air.primitive_id'
 COLOUR = ('pixel_format', 'write_mask', 'blending_state', 'alpha_blend_operation', 'rgb_blend_operation', 'destination_alpha_blend_factor', 'destination_rgb_blend_factor',
           'source_alpha_blend_factor', 'source_rgb_blend_factor')
 
@@ -96,10 +98,10 @@ def plan(lib_dir, chain, pairs, zero):
             try: fns[lib] = functions(lib_dir / f'{lib}.metallib')
             except (OSError, ValueError): fns[lib] = None
         return fns[lib]
-    def writes_layer(lib):
-        if lib not in layer: layer[lib] = LAYER in (lib_dir / f'{lib}.metallib').read_bytes()
-        return layer[lib]
-    bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'stage inputs', 'library', 'layer', 'entry'), 0)
+    def has(lib, what):   # the library's bytes name it
+        if (lib, what) not in layer: layer[lib, what] = what in (lib_dir / f'{lib}.metallib').read_bytes()
+        return layer[lib, what]
+    bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'stage inputs', 'library', 'layer', 'primitive ID', 'entry'), 0)
     for vk, fk in pairs:
         vj, fj = refl(vk), refl(fk)
         if not vj or not fj or vj.get('chain') != chain or fj.get('chain') != chain: left['reflection'] += 1; continue
@@ -109,7 +111,8 @@ def plan(lib_dir, chain, pairs, zero):
         vl, fl = vk + ('_bp' if pull else '_b'), fk + '_b'
         vf, ff = fn(vl), fn(fl)
         if vf is None or ff is None: left['library'] += 1; continue
-        if writes_layer(vl): left['layer'] += 1; continue
+        if has(vl, LAYER): left['layer'] += 1; continue
+        if has(fl, PRIMITIVE_ID): left['primitive ID'] += 1; continue
         if ventry not in vf or fentry not in ff: left['entry'] += 1; continue
         if vf[ventry] or ff[fentry]: rest.append((vk, fk)); continue
         b = (vl, ventry, fl, fentry)

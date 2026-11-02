@@ -27,7 +27,7 @@ CHAIN = '0123456789ab'
 def tag(name, data): return name + struct.pack('<H', len(data)) + data
 
 
-def metallib(funcs, layer=False):
+def metallib(funcs, layer=False, pid=False):
     """A .metallib header as the Metal compiler writes it: the function list (count, then per function its size counting the size field, NAME, ENDT) and the public metadata
     (per function its size not counting the size field, a CNST tag for a function with constants, ENDT); funcs: [(name, has constants)]"""
     fl = struct.pack('<I', len(funcs))
@@ -41,7 +41,7 @@ def metallib(funcs, layer=False):
     fo = 0x58; po_ = fo + len(fl)
     head = b'MTLB' + b'\0' * 0x14 + struct.pack('<QQQQ', fo, len(fl), po_, len(pm))
     head += b'\0' * (fo - len(head))
-    return head + fl + pm + (b'render_target_array_index' if layer else b'') + b'BC\xc0\xde'
+    return head + fl + pm + (b'render_target_array_index' if layer else b'') + (b'air.primitive_id' if pid else b'') + b'BC\xc0\xde'
 
 
 class Pairs(unittest.TestCase):
@@ -89,11 +89,11 @@ class Plan(unittest.TestCase):
     def setUp(self):
         self.d = Path(tempfile.mkdtemp()) / f'b-{CHAIN}'; self.d.mkdir(); self.addCleanup(shutil.rmtree, self.d.parent)
 
-    def shader(self, key, j, libs):   # reflection <key>_b.json and libraries {suffix: funcs or (funcs, layer)}
+    def shader(self, key, j, libs):   # reflection <key>_b.json and libraries {suffix: funcs or (funcs, layer) or (funcs, layer, primitive ID)}
         (self.d / f'{key}_b.json').write_text(json.dumps(dict({'chain': CHAIN, 'entry': 'main0'}, **j)))
         for suf, f in libs.items():
-            funcs, layer = f if isinstance(f, tuple) else (f, False)
-            (self.d / f'{key}{suf}.metallib').write_bytes(metallib(funcs, layer))
+            funcs, layer, pid = (f + (False,))[:3] if isinstance(f, tuple) else (f, False, False)
+            (self.d / f'{key}{suf}.metallib').write_bytes(metallib(funcs, layer, pid))
 
     def test_bases_rest_and_left_out(self):
         vz = [('main0', False), ('main0_z', False)]
@@ -106,11 +106,13 @@ class Plan(unittest.TestCase):
         self.shader('fs', {}, {'_b': [('main0', False)]})
         self.shader('fsc', {}, {'_b': [('main0', True)]})
         self.shader('fsx', {'entry': 'main1'}, {'_b': [('main0', False)]})
-        pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs')]
+        self.shader('fsp', {}, {'_b': ([('main0', False)], False, True)})   # reads the primitive ID: no base
+        pairs = [('pull', 'fs'), ('plain', 'fs'), ('inputs', 'fs'), ('layer', 'fs'), ('other', 'fs'), ('nolib', 'fs'), ('pull', 'fsc'), ('pull', 'fsx'), ('pull', 'gone'), ('pull', 'fs'),
+                 ('plain', 'fsp')]
         bases, rest, left = po.plan(self.d, CHAIN, pairs, False)
         self.assertEqual(bases, [('pull_bp', 'main0', 'fs_b', 'main0'), ('plain_b', 'main0', 'fs_b', 'main0')])
         self.assertEqual(rest, [('pull', 'fsc')])
-        self.assertEqual(left, {'reflection': 2, 'stage inputs': 1, 'library': 1, 'layer': 1, 'entry': 1})
+        self.assertEqual(left, {'reflection': 2, 'stage inputs': 1, 'library': 1, 'layer': 1, 'primitive ID': 1, 'entry': 1})
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
 

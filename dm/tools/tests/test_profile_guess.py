@@ -94,6 +94,13 @@ class Switch2(unittest.TestCase):
         self.assertEqual((keys['app_pool'][0], keys['mem_reserve'][0]), ('0x240000000', '0x270000000'))
         self.assertEqual(pg.guess(self.FACTS, hooks=set())['app_pool'][0], '0xCD500000')
 
+    def test_virtual_address_memory(self):   # an alias region that holds the 9 GB pool (Fire Emblem Fortune's Weave: StandardAllocator over 36 GB, more than 4 GB mapped by its second movie)
+        keys = pg.guess(dict(self.FACTS, ounce=True, sysres=0x4000000), hooks=set())
+        alias, reserve = int(keys['mem_alias'][0], 16), int(keys['mem_reserve'][0], 16)
+        self.assertGreater(alias, int(keys['app_pool'][0], 16) + 62 * pg.MiB)
+        self.assertEqual(reserve, 0x10000000 + alias + 0x10000000 + 0x10000000)
+        self.assertEqual(pg.guess(dict(self.FACTS, sysres=0x4000000), hooks=set())['mem_alias'][0], '0x118000000')   # Switch 1: Engage's block, unchanged
+
     def test_sdk_variant(self):   # nnSdk-Generic_22_2_0 (Fire Emblem Fortune's Weave)
         self.assertEqual(pg.SDK_VERSION.findall(b'NintendoSdk_nnSdk-Generic_22_2_0\0NintendoSDK_nnSdk-16_2_0\0'), [b'22_2_0', b'16_2_0'])
 

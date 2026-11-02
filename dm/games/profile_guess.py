@@ -152,7 +152,12 @@ def guess(F, hooks=None):
     giant = sum(m['bss'] for n, m in mods.items() if n in keep and m['far'])
     heap_api = HEAP_API in imp
     pool = OUNCE_POOL if F.get('ounce') else APP_POOL
-    if F['sysres']:   # virtual address memory: Engage's 5 GB block. With a heap, the heap check moves the alias / heap split once it sees the heap the game asks for (Wonder, Tears of the Kingdom);
+    if F['sysres'] and F.get('ounce'):   # virtual address memory on the Switch 2: an alias region that holds the 9 GB pool. The host gives StandardAllocator what the alias region has room for, and
+        # Fire Emblem Fortune's Weave's (Initialize(nullptr, 36 GB), no heap) maps over 4 GB by its second movie, whose 200 MB buffer failed in Engage's 4.375 GB region
+        alias = pool + 0x20000000   # the pool, the 62 MB node area and the regions made after the allocator
+        mem = (0x30000000 + alias, alias, pool, f'the NPDM declares {F["sysres"] // MiB} MB of system resource (virtual address memory) on the Switch 2: a {alias / (1 << 30):g} GB alias region, ' +
+               'which holds the pool, in a block with 256 MB stack and heap regions' + ('; the heap check sizes the heap region from the heap the game asks for' if heap_api else ''))
+    elif F['sysres']:   # virtual address memory: Engage's 5 GB block. With a heap, the heap check moves the alias / heap split once it sees the heap the game asks for (Wonder, Tears of the Kingdom);
         # without one the game maps everything in the alias region itself (Hollow Knight: Silksong's Unity 6 through AllocateAddressRegion / AllocateMemoryPages, 1.5 GB in its first room;
         # Absolum's and Pokémon Legends: Z-A's StandardAllocator), which a 256 MB alias region cannot hold
         mem = (0x140000000, 0x118000000, pool, f'the NPDM declares {F["sysres"] // MiB} MB of system resource (virtual address memory) and main ' +

@@ -25,6 +25,31 @@ Update 1.4.3 (v720896) over the base game, SDK 20.5.22. Nintendo EPD's engine (s
 - The spin-wait rewrite finds 843 loops in `main`; 701 of them are one inlined atomic decrement (a compare-and-swap retried after another thread changed the count), which yields only on a second retry in a row.
 - **Outdoor benchmark:** `python3 scripts/bench.py <build> --route sky-island-stand --save <outdoor-save>` loads a preserved manual save on Great Sky Island, leaves the camera stationary and measures a 60-second window from 75–135 seconds after startup. The source save is copied for each run. This is an outdoor steady-state workload, not a traversal/streaming benchmark; `cave-stand` remains available only for cave-specific diagnostics.
 
+### Vertex-conversion submit cost
+
+The general [decode-once i2f loop](../../../docs/reference/rendering.md#repeated-classification-during-integer-to-float-vertex-conversion) reduced submit work in two opposite-order native Mac comparisons:
+
+| Run order | Control → patched submit CPU, median ms | Submit instructions/draw change | Control → patched FPS |
+|---|---:|---:|---:|
+| Control, patched | 9.44 → 8.14 | −17.3% | 23.6 → 27.7 |
+| Patched, control | 9.54 → 7.97 | −18.3% | 24.1 → 27.8 |
+
+These are stationary Great Sky Island measurements at render scale 1, with the same old-chain `b7cd656abd7c` host, bloom correction and conversion-only backport to base `5dd62c7e`. Per-call census clocks were disabled. Both pairs had actual foreground ownership, accepted outdoor images, positive presentations, normal game speed and no red diagnostics. The initial four-run attempt lacked the third run's final screenshot: that run is excluded; this is not a completed ABBA result. The first individually admitted pair is followed by an independent reverse-order pair.
+
+The production loop is carried into this upstream-based branch unchanged; this measurement is not a fresh-upstream whole-build comparison. GPU spans also changed, but shader work was unchanged and feed/overlap/clocks were not isolated. No iPhone, power, thermal, traversal or five-title acceptance claim follows.
+
+### Native i2f fetch follow-on
+
+An outdoor counts-only capture joins format `0x64` to attribute 1 of four float-input vertex shaders: `6022dd02baa1e8b3_b`, `b5093cca3e6a51c4_b`, `8b5d4f2c13cb2fe3_b` and `d3895071382b5064_b`. They therefore qualify for [native integer-to-float fetch](../../../docs/reference/rendering.md#native-integer-to-float-vertex-fetch) without shadow libraries. The old route generated 140,880 converted vertices and 2,254,080 staging bytes/frame in that diagnostic window; this is conversion traffic, not retained RAM or a measured power reduction.
+
+A completed control/native/native/control invocation compares the native-fetch-only increment against the decode-once/bloom baseline:
+
+| Run order | Control → native submit CPU, median ms | Submit instructions/draw change | Control → native FPS |
+|---|---:|---:|---:|
+| Control, native | 8.29 → 7.64 | −12.5% | 23.8 → 25.9 |
+| Native, control | 7.88 → 7.90 | −12.1% | 26.0 → 26.8 |
+
+All four runs completed with real foreground ownership, accepted outdoor images, normal game speed, positive presentations and no red diagnostics. Instructions/draw fell in both orders; submit CPU and GPU time did not consistently improve. These are same-base `5dd62c7e`, chain `b7cd656abd7c`, scale-1 stationary measurements, not a new whole-upstream runtime, traversal or iPhone benchmark. Do not add these percentages to the earlier conversion-loop result. The measured baseline includes a separate bloom correction that is not part of this native-fetch change.
 
 ## Memory
 
@@ -121,6 +146,8 @@ General host changes first needed here; each applies to every game:
 - **Depth16 load-clears match fragment writes:** [Depth16 load-clears match fragment writes](../../../docs/reference/rendering.md#depth16-load-clears-match-fragment-writes).
 - **Pipeline keys omit absent-target blend and mask state**, and old prewarm rows are normalized and deduplicated: [Pipeline keys omit unused colour state](../../../docs/reference/shaders.md#pipeline-keys-omit-unused-colour-state).
 - **Concurrent warm tasks prepare each shader once:** [Concurrent warm tasks prepare each shader once](../../../docs/reference/shaders.md#concurrent-warm-tasks-prepare-each-shader-once). Avoids duplicate startup work; no measured wall-time or steady-FPS gain is claimed.
+- **Decode-once integer-to-float vertex conversion:** [general mechanism](../../../docs/reference/rendering.md#repeated-classification-during-integer-to-float-vertex-conversion), with [paired outdoor Mac results](#vertex-conversion-submit-cost). No phone or thermal measurement.
+- **Native integer-to-float vertex fetch:** [general routing and fallbacks](../../../docs/reference/rendering.md#native-integer-to-float-vertex-fetch), with [live shader attribution and paired Mac results](#native-i2f-fetch-follow-on). No iPhone or thermal measurement.
 - **Bounded upload staging and retirement on upload completion:** [Upload staging grows within one rendering submission](../../../docs/reference/memory.md#upload-staging-grows-within-one-rendering-submission).
 - **Completed readbacks retained by a guest waiter's outer pool:** [Completion readbacks survive a guest waiter's pool](../../../docs/reference/memory.md#completion-readbacks-survive-a-guest-waiters-pool). Reproduced and corrected on the stationary Mac cave route; iPhone termination resolution remains unverified.
 - **Resolved: registry lock priority inversion** (`g_rmu`): [Registry lock priority inheritance](../../../docs/reference/frame-rate.md#registry-lock-priority-inheritance). Ported from MacNativeGames; checked here through the Metal registry view tests, without a new gameplay contention measurement.

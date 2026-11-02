@@ -714,8 +714,24 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 ### Vertex formats Metal lacks
 
 - **Symptom:** `vertex attribute format … not mapped` (printed once).
-- **Cause / Fix:** Mario uses `RGB10A2SN` (0x69) → `MTLVertexFormatInt1010102Normalized`. Unmapped formats fall back to a 4-component read and print the line once. The integer-read-as-float formats (`*_UI2F` / `*_I2F`, 0x51–0x68), which Metal has no vertex format for, are converted on the CPU at replay like the other conversions (`vconv_i2f`).
+- **Cause / Fix:** Mario uses `RGB10A2SN` (0x69) → `MTLVertexFormatInt1010102Normalized`. Unmapped formats fall back to a 4-component read and print the line once. Integer-read-as-float formats (`*_UI2F` / `*_I2F`, 0x51–0x68) now use [native integer-to-float vertex fetch](#native-integer-to-float-vertex-fetch) when eligible, with CPU conversion retained for unsupported routes.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (`RGB10A2SN`); [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) has an `RG8_UI2F` attribute.
+
+### Repeated classification during integer-to-float vertex conversion
+
+- **Symptom:** submit-thread samples concentrate in `vconv_fill` while replay converts integer-to-float vertex attributes; the image itself is correct.
+- **Cause:** formats `0x51`–`0x68` fell through to the generic per-element decoder, repeating the integer-format search and i2f classification for every vertex.
+- **Fix:** classify i2f once per `vconv_fill` call, following the existing integer/half loops. Preserve signed and unsigned casts, unaligned 16/32-bit reads through `memcpy`, float rounding and missing-component defaults `(0, 0, 0, 1)`. No extra allocation, cache, shader change or game-specific condition.
+- **Check:** `t_pull` compares all 24 formats with an independent GPU decoder, including odd strides, unaligned sources, zero stride and signedness/rounding boundaries. A separate native equivalence probe covers exhaustive 8/16-bit values, selected 32-bit boundaries, zero count and output canaries.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#vertex-conversion-submit-cost), with paired native Mac gameplay measurements. This optimizes the CPU fallback; it does not establish that every use requires CPU conversion.
+
+### Native integer-to-float vertex fetch
+
+- **Symptom:** CPU conversion and temporary float staging for 8/16-bit integer-read-as-float attributes, despite Metal supporting the required numeric fetch.
+- **Cause:** `vconv_wanted` unconditionally selected CPU conversion for all i2f formats. Ordinary integer fetch and i2f have different register semantics: integer words must not be mistaken for float32 bits.
+- **Fix:** shared route flags keep `pso_desc` and `vconv_bind` consistent. Signed/unsigned 8/16-bit i2f formats feed declared float inputs directly, or a usable existing float shadow of an integer input. No new shader generation, ABI, cache or game branch. Retain CPU conversion for 32-bit formats, `DM_NVN_VCONV_CPU=1`, absent/unusable required shadows and special transform-feedback/geometry/discard entry points. Normalized/ordinary integer formats retain their previous behavior.
+- **Check:** `t_pull` exercises production descriptors and binding in 264 GPU-readback scenarios with all 24 i2f formats, float/uint/int declarations, vertex/constant/divisor stepping, mixed native/CPU attributes, fallback states and ordinary-integer controls; GPU readback verifies register words, padding and mixed conversion slots. Separate Metal-validation probes cover native value ranges and odd 16-bit attribute offsets/strides. Native 32-bit integer-to-float pipelines were rejected on the tested Mac; they are not promoted.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#native-i2f-fetch-follow-on) (paired outdoor measurements) and [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game) (Mac smoke, not a measured improvement).
 
 ### Vertex streams 14 and 15 at Metal slots 14 and 15
 

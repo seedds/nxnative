@@ -490,7 +490,8 @@ hvk_prog *hvk_prog_get(const prog_t *p) {
     if (!(o = calloc(1, sizeof *o))) return NULL;
     o->serial = p->serial;
     if (c) {   // a combined program: each stage from the program bound there
-        for (int st = 0; st < 5; st++) if (c->bst[st]) { hvk_prog *s = prog_load(c->bst[st]); if (s) o->sh[st] = s->sh[st]; }
+        // prog_load hands back a copy of its own (malloc), freed once its stage is taken: it leaked one hvk_prog per stage of every combined program made (found at step P5)
+        for (int st = 0; st < 5; st++) if (c->bst[st]) { hvk_prog *s = prog_load(c->bst[st]); if (s) { o->sh[st] = s->sh[st]; free(s); } }
     } else {
         hvk_prog *s = prog_load(p);
         if (s) { memcpy(o->sh, s->sh, sizeof o->sh); free(s); }

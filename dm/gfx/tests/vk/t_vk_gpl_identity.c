@@ -2,7 +2,8 @@
 // a set of scenes, each with its own targets (blending with constants and channel masks, depth and stencil with a depth bias, two integer attachments, culling, wireframe,
 // scissor, viewport, lines, a logic op, per-instance vertex input), drawn five times over on one device: fast-linked pipelines of level A (no optimized relink), the optimized
 // relinks of level A (drawn once, the background relinks waited for, drawn again: every draw then binds an optimized pipeline), libraries with the blend and raster state baked
-// (level B), monolithic pipelines with the state dynamic (level C) and monolithic pipelines with every state baked (level D). Each run's targets are read back and compared with
+// (level B), monolithic pipelines with the state dynamic (level C) and monolithic pipelines with every state baked (level D), with the look-ahead over the rest of a submission on as a
+// player has it (vk_predict.c: a pipeline it made ahead is ready at its draw, which then does not wait). Each run's targets are read back and compared with
 // the fast-linked run's. A difference is a quirk of the driver: it passes only where the backend's quirk table (vk_gpl.c) has a row for the device that turns that pipeline kind
 // off, and the test prints which kind and scene differ. On a device without pipeline libraries only C and D are compared. Under the validation layer, 0 messages
 #include "t_vk_harness.h"
@@ -178,6 +179,7 @@ int main(void) {
         scenes();
         if (modes[m].twice) { hvk_work_drain(HVK_Q_N); hvk_pso_stats_get(&s0); g_draws = 0; scenes(); }
         uint64_t t1 = plat_now_ns();
+        hvk_work_drain(HVK_Q_PRED);   // the look-ahead's builds whose draws took them over have run (they make nothing then)
         hvk_pso_stats_get(&s1); total_draws += g_draws * (modes[m].twice ? 2 : 1);
         uint64_t waits = 0, wait_ns = 0; for (int i = 0; i < HVK_W_N; i++) { waits += s1.wait_n[i] - s0.wait_n[i]; wait_ns += s1.wait_ns[i] - s0.wait_ns[i]; }
         printf("%s: %d draws in %.1f ms; pipelines bound: %llu fast-linked, %llu optimized, %llu monolithic; made: %llu fast links, %llu optimized links (%llu swapped in), %llu monolithic, "
@@ -187,7 +189,14 @@ int main(void) {
                (unsigned long long)(s1.lib[0] + s1.lib[1] + s1.lib[2] + s1.lib[3] - s0.lib[0] - s0.lib[1] - s0.lib[2] - s0.lib[3]), (unsigned long long)waits, wait_ns / 1e6);
         int kind_ok = modes[m].level >= 'C' ? s1.draws_mono - s0.draws_mono == (uint64_t)g_draws : modes[m].opt ? s1.draws_opt - s0.draws_opt == (uint64_t)g_draws : s1.draws_fast - s0.draws_fast == (uint64_t)g_draws;
         snprintf(name, sizeof name, "%s: every draw bound a pipeline of that kind", modes[m].name); t(name, kind_ok);
-        if (modes[m].level >= 'C') { snprintf(name, sizeof name, "%s: each pipeline a draw was the first to use was waited for and counted", modes[m].name); t(name, waits == s1.mono - s0.mono && waits > 0); }
+        // every monolithic pipeline made was first drawn either after a wait (made by its draw, or by a worker the draw waited for) or ready from the look-ahead, so the waits
+        // and the look-ahead's ready ones add up to the pipelines made (one the look-ahead made and no draw used would break it)
+        uint64_t ready = s1.pred_ready - s0.pred_ready;
+        if (modes[m].level >= 'C') {
+            snprintf(name, sizeof name, "%s: each pipeline a draw was the first to use was waited for and counted, or ready from the look-ahead (%llu waits + %llu ready = %llu made)",
+                     modes[m].name, (unsigned long long)waits, (unsigned long long)ready, (unsigned long long)(s1.mono - s0.mono));
+            t(name, waits + ready == s1.mono - s0.mono && waits > 0);
+        }
         snprintf(name, sizeof name, "%s: no draw failed", modes[m].name); t(name, s1.failed == s0.failed);
         snprintf(name, sizeof name, "%s: the targets read back", modes[m].name); t(name, read_all(&res[m]));
         ran[m] = 1; if (ref < 0) ref = m;

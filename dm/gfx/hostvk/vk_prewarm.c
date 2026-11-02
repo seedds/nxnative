@@ -16,8 +16,8 @@
 // Background (the default): the first submission reads the lists on a background worker and queues the tasks in list order; the game does not wait. Prediction (from the rows
 // alone): when a draw first uses a pipeline a row named, the tasks of the rows recorded after it are built next, ahead of the list order; when a draw misses, the task of its
 // shader pair (the pair's other rows: the same shaders with other formats) and the task after it; at most two speculative builds outstanding (the Metal backend's budget,
-// development.md "Prewarm lists"). The look-ahead over the rest of a live submission (pso_predict_rest_ in nvn_mtl.m: replaying the state of the draws
-// still to come after a miss, with the frontend's state save and restore) needs the command lists a game submits: declared, with a red line at the first miss.
+// development.md "Prewarm lists"). The look-ahead over the rest of the live submission after a miss (the Metal backend's pso_predict_rest_) is vk_predict.c's: its builds go
+// first on the workers; a pipeline it made that no list named gets its P row in the device's list at its first draw, as one the draw made would (vk_gpl.c).
 // Prebuild (decision D3, DM_VK_PREBUILD=1): the first submission waits until every row is built, and on levels A and B the libraries of every shader in the shader map too
 // (the counterpart of the Metal prebuild's bases of every pair), on one worker per hardware thread less one at normal priority, with the progress reported through the front
 // end's front_progress ("Preparing shaders", shown past 0.5 s when 0.3 s or more is left, as the Metal prepare step); then the disk cache is written. On levels C and D the
@@ -281,9 +281,6 @@ void hvk_prewarm_predict_pair(const char *vs, const char *fs) {   // a miss: its
     if (spec_task((int)ti - 1) && (int)ti < g_nt) spec_task((int)ti);
 }
 void hvk_prewarm_user_row(const nvn_pipe_desc *d) {
-    static _Atomic int noted;
-    if (!atomic_exchange(&noted, 1))
-        hostvk_log("[RED] [hostvk] pipeline prediction: the look-ahead over the rest of the submission after a miss (design 3.3, nvn_mtl.m pso_predict_rest_) is not done: it needs the frontend's state save over live command lists; misses build on demand");
     char line[NVN_PIPE_ROW_MAX];
     if (nvn_pipe_write_row(d, line, sizeof line) < 0) return;
     pthread_mutex_lock(&g_user_mu);

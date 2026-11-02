@@ -1,7 +1,8 @@
 // The pipeline cache on disk (docs/design/vulkan-backend.md 3.4; phase P5), over four starts of the backend, each a child process (t_vk_harness.h hv_spawn) on one cache folder and
 // one device list:
-//   write    a first start: 12 draws of 12 pipelines (two shader pairs, six colour formats), each waits once; at the end the cache file is written (its framing, length and
-//            SHA-256 are checked by the parent) and the device's list holds the 12 pipelines as P rows
+//   write    a first start: 12 draws of 12 pipelines (two shader pairs, six colour formats) in one submission, each made once: by its draw, which waits, or ahead by the
+//            look-ahead over the rest of the submission (vk_predict.c), whose draw finds it ready or waits for the rest of it; at the end the cache file is written (its framing,
+//            length and SHA-256 are checked by the parent) and the device's list holds the 12 pipelines as P rows
 //   reload   a second start, after the parent planted a file of the same device under another chain version and two of another device, one of this chain version and one of
 //            another: the cleanup (on by default) deletes the first and the third at start and keeps the second; the file's driver data is read; the prewarm builds the 12 pipelines from the device's list, so the same 12 draws make no pipeline and wait 0 times;
 //            the creations and the creations the driver answered from its cache are counted (lavapipe keeps none: its cache data is the 32-byte header)
@@ -70,13 +71,16 @@ static int child(const char *phase, const char *res) {
         for (int p = 0; p < NP; p++) { hv_bind(&cmds, &prog[p], 3); hv_draw(&cmds, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3, 1); }
     }
     hv_submit(&queue, &cmds);
+    hvk_work_drain(HVK_Q_PRED);   // the look-ahead's builds whose draws took them over have run (they make nothing then)
     uint64_t w1 = waits();
     hvk_pso_stats ps1; hvk_pso_stats_get(&ps1); hvk_prewarm_stats pw; hvk_prewarm_stats_get(&pw); hvk_cache_stats cs1; hvk_cache_stats_get(&cs1);
-    uint64_t made = ps1.draw_made - ps0.draw_made;
+    uint64_t made = ps1.draw_made - ps0.draw_made, ahead = ps1.pred_built - ps0.pred_built, ready = ps1.pred_ready - ps0.pred_ready;
     int first = !strcmp(phase, "write");
-    snprintf(check, sizeof check, "%s: the %d draws waited %llu times and made %llu pipelines (%s)", phase, NK, (unsigned long long)(w1 - w0), (unsigned long long)made,
-             first ? "a first start: each once" : "the device's list prewarmed them: none");
-    t(check, first ? (w1 - w0 == NK && made == NK) : (w1 == w0 && made == 0));
+    // a first start: each pipeline made once, by its draw or ahead by the look-ahead (made + ahead == 12), and each first draw either waited or found the look-ahead's ready
+    // (waits + ready == 12; the first draw always waits)
+    snprintf(check, sizeof check, "%s: the %d draws waited %llu times and made %llu pipelines, the look-ahead %llu (%llu ready at their draw) (%s)", phase, NK, (unsigned long long)(w1 - w0),
+             (unsigned long long)made, (unsigned long long)ahead, (unsigned long long)ready, first ? "a first start: each once" : "the device's list prewarmed them: none");
+    t(check, first ? (w1 - w0 + ready == NK && made + ahead == NK && w1 > w0) : (w1 == w0 && made == 0));
     if (!first) {
         snprintf(check, sizeof check, "%s: the prewarm built the %d pipelines of the device's list (%llu rows, %llu built)", phase, NK, (unsigned long long)pw.rows, (unsigned long long)pw.built);
         t(check, pw.rows == NK && pw.built == NK);

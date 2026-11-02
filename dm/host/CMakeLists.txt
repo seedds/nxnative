@@ -370,6 +370,7 @@ host_test(t_vk_import SOURCES ../../gfx/hostvk/tests/t_vk_import.c ${HOSTVK_SRC}
 # The Vulkan backend behind dm/gfx/nvn/nvn_be.h (dm/gfx/hostvk; docs/design/vulkan-backend.md, step P3): a library of its own beside nvn_null, so that a binary links exactly one
 # backend (nxhost links it: NXHOST_VULKAN below). Its own shaders are SPIR-V arrays in committed headers (dm/gfx/hostvk/shaders/gen/, written by shaders/gen_spirv.sh), so building needs no glslang
 set(HOSTVK_BACKEND_SRC vk_backend.c vk_memory.c vk_texture.c vk_shader.c vk_pipeline.c vk_commands.c vk_device.c vk_import.c vk_gpl.c vk_cache.c vk_prewarm.c   # vk_gpl, vk_cache, vk_prewarm: phase P5
+    vk_predict.c   # the look-ahead over the rest of a submission (P5, design 3.3)
     vk_present.c   # the window presenter and the vsync source (step P4a)
     vk_alloc.c)    # the device memory allocator (decision D2, step D2)
 list(TRANSFORM HOSTVK_BACKEND_SRC PREPEND ${REPO}/dm/gfx/hostvk/)
@@ -461,11 +462,12 @@ if(NOT WIN32)
     set_tests_properties(t_vk_spirv PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     string(APPEND MANIFEST "# CTest only: t_vk_spirv (dm/gfx/hostvk/shaders/gen_spirv.sh --check)\n")
 endif()
-# Pipelines without stutter (dm/gfx/hostvk vk_gpl.c, vk_cache.c, vk_prewarm.c; docs/design/vulkan-backend.md section 3, step P5), on lavapipe under the validation layer as the
+# Pipelines without stutter (dm/gfx/hostvk vk_gpl.c, vk_cache.c, vk_prewarm.c, vk_predict.c; docs/design/vulkan-backend.md section 3, step P5), on lavapipe under the validation layer as the
 # GPU tests above, skipped without a Vulkan device: t_vk_gpl_identity (the same draws through fast-linked, optimized, level-B, level-C and level-D pipelines, bit for bit),
 # t_vk_pipeline_cache (the cache file written, read back at a second start, invalidated, a corrupt file ignored) and t_vk_prewarm (a manifest of about 200 rows prewarmed in the
-# background and with the prebuild, cold and warm). The last two run themselves again as child processes for each start (t_vk_harness.h hv_spawn)
-foreach(t IN ITEMS gpl_identity pipeline_cache prewarm)
+# background and with the prebuild, cold and warm). The last two run themselves again as child processes for each start (t_vk_harness.h hv_spawn). t_vk_predict: the look-ahead
+# over the rest of a submission (vk_predict.c) on levels A, B, C and D, on and off, through called lists and later handles, its budget, and the same pictures either way
+foreach(t IN ITEMS gpl_identity pipeline_cache prewarm predict)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
 endforeach()

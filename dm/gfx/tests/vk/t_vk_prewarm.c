@@ -4,7 +4,8 @@
 // depth, R32F with a depth-stencil attachment, RGB10A2 alone), 192 render pipeline rows, and the 14 shaders' S rows. Each phase is a new start of the backend, a child process
 // (t_vk_harness.h hv_spawn):
 //   background  the default: the prewarm runs on the background workers; once it is done, a draw of every listed pipeline waits 0 times, and 6 draws of pipelines outside the
-//               list wait once each (then 0 times when drawn again); the backend appends their P rows to the device's list
+//               list (one submission) each wait once or find their pipeline ready from the look-ahead over the rest of the submission (vk_predict.c), the first always waiting
+//               (then 0 times when drawn again); the backend appends their P rows to the device's list, those the look-ahead made included
 //   warm        the same with the pipeline cache and the device's list the first start wrote: the list's 6 new rows are prewarmed too (0 waits for them now)
 //   predict     the background prewarm with draws started at once, from the 41st pair on: a miss builds its pair's other rows and the next pair's ahead of the list order (counted:
 //               on a fast machine the workers may be through the list before the draws come)
@@ -86,6 +87,7 @@ static void target(hv_cmds *c, int ci, int di) {
 }
 static void draw_pair(hv_cmds *c, int v, int f) { hv_bind(c, &prog[v][f], 3); hv_draw(c, NVN_DRAW_PRIMITIVE_TRIANGLES, 0, 3, 1); }
 static uint64_t waits(void) { hvk_pso_stats s; hvk_pso_stats_get(&s); uint64_t n = 0; for (int i = 0; i < HVK_W_N; i++) n += s.wait_n[i]; return n; }
+static uint64_t pred_ready(void) { hvk_work_drain(HVK_Q_PRED); hvk_pso_stats s; hvk_pso_stats_get(&s); return s.pred_ready; }   // pipelines the look-ahead made, ready at their first draw
 static void wait_prewarm(void) { uint64_t t0 = plat_now_ns(); while (!hvk_prewarm_done() && plat_now_ns() - t0 < 60000000000ull) plat_sleep_ns(2000000); hvk_work_drain(HVK_Q_BG); }
 static void draw_listed(int from) {   // every listed pipeline once, pair by pair from pair `from` on (then the ones before it), a submission per pair
     for (int k = 0; k < NPAIR; k++) {
@@ -136,9 +138,10 @@ static int child(const char *phase, const char *res) {
     int outside = !strcmp(phase, "background") || !strcmp(phase, "level_d");
     uint64_t w2 = w1, w3 = w1;
     if (outside) {
-        draw_outside(); w2 = waits(); draw_outside(); w3 = waits();
-        snprintf(name, sizeof name, "%s: the %d draws of pipelines outside the list waited once each (%llu), and not when drawn again (%llu)", phase, NOUT, (unsigned long long)(w2 - w1), (unsigned long long)(w3 - w2));
-        t(name, w2 - w1 == NOUT && w3 == w2);
+        uint64_t r1 = pred_ready(); draw_outside(); w2 = waits(); uint64_t r2 = pred_ready(); draw_outside(); w3 = waits();
+        snprintf(name, sizeof name, "%s: the %d draws of pipelines outside the list waited once each (%llu) or were ready from the look-ahead (%llu), and not when drawn again (%llu)", phase, NOUT,
+                 (unsigned long long)(w2 - w1), (unsigned long long)(r2 - r1), (unsigned long long)(w3 - w2));
+        t(name, w2 - w1 + (r2 - r1) == NOUT && w2 > w1 && w3 == w2);
     }
     if (!strcmp(phase, "warm")) { snprintf(name, sizeof name, "warm: the device's list from the first start was prewarmed too (%llu render rows read)", (unsigned long long)pw.rows); t(name, pw.rows == NROWS + NOUT); draw_outside(); w2 = waits(); t("warm: the pipelines the first start built on the spot did not wait now", w2 == w1); }
     hvk_pso_stats_get(&ps); hvk_cache_stats_get(&cs);

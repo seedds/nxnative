@@ -18,6 +18,13 @@
 // the disk cache make those waits rare. D bakes the blend, raster and vertex input state into the key as the Metal key does. A draw is always made with its own shaders and its
 // own state: nothing is skipped or drawn with a stand-in while a pipeline compiles.
 //
+// The look-ahead (3.3, vk_predict.c). After a draw waited, the rest of its submission is walked once and the keys of the draws ahead that are not ready are queued here
+// (hvk_pso_predict) on HVK_Q_PRED, the first queue the background workers take, in draw order. A queued key is in g_pred, not in the table of pipelines: the worker that takes it
+// enters it there (pso_ent.pred) and makes it as a draw would, so a draw that comes while it is being made waits only for the rest of it; a draw that comes before any worker took
+// it takes it out of the queue and makes it itself, as on a miss, so no draw waits behind the queue (the Metal backend's pso_pend_take). At its first draw a predicted pipeline is
+// counted ready in time, still being made, or not started (hvk_pso_stats.pred_*; be_pso_line and the shutdown line "[hostvk] prediction: ..."), and one no list named gets its
+// P row in the device's list then, as one the draw made does (the miss callback), so the next start prewarms it.
+//
 // Waits. A draw whose pipeline is not ready waits for it at the bind: the time (plat_now_ns) per reason (a fast link, a library compile, a monolithic compile, a build a worker had
 // under way), the count, the longest and those over the 2 ms budget of the P5 acceptance go into be_pso_line; DM_VK_PSO_TRACE=1 logs each one with its key.
 //
@@ -288,6 +295,7 @@ typedef struct pso_ent {
     VkPipeline cur;              // what draws bind (written by the maker before state 1, then by the submit thread when it swaps)
     _Atomic(VkPipeline) opt;     // the optimized relink, waiting to be swapped in
     uint8_t kind, used;          // K_*; the submit thread has drawn with it (the prediction's first use)
+    uint8_t pred;                // made by a worker for the look-ahead (hvk_pso_predict)
     int row;                     // the list row that named it (-1: none)
     lib_ent *lib[L_N];
     hvk_shader *sh[6]; hvk_layout *l; hvk_gfx_key k;
@@ -296,6 +304,10 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g
 static nvn_hmap g_lib[L_N], g_ents;
 static _Atomic uint64_t s_lib[L_N], s_lib_ns[L_N], s_fast, s_fast_ns, s_opt, s_opt_ns, s_mono, s_mono_ns, s_swapped, s_opt_dropped, s_draw_made, s_failed;
 static _Atomic uint64_t s_wait_n[HVK_W_N], s_wait_ns[HVK_W_N], s_wait_max, s_wait_max_win, s_over, s_draws_kind[3], s_pending;
+static _Atomic uint64_t s_pred_queued, s_pred_built, s_pred_found, s_pred_failed, s_pred_ready, s_pred_inflight, s_pred_made;
+static int g_waited;                 // the last draw waited for its pipeline (submit thread; hvk_pso_take_waited)
+// Test hooks: the look-ahead's builds held at their start; the digests of the keys queued and waited for
+static int g_pred_hold; static int g_tk_on, g_tk_n[2]; static uint64_t g_tk[2][1024];
 static void stat_max(_Atomic uint64_t *m, uint64_t v) { uint64_t o = atomic_load(m); while (v > o && !atomic_compare_exchange_weak(m, &o, v)) {} }
 static void key_of(gpl_key *key, hvk_shader *const sh[6], hvk_layout *l, const hvk_gfx_key *k) {
     memset(key, 0, sizeof *key);
@@ -490,14 +502,81 @@ static void trace_wait(int why, uint64_t ns, const pso_ent *e) {
                ns / 1e6, hvk_wait_why[why], e->sh[0] ? e->sh[0]->key : "-", e->sh[1] ? e->sh[1]->key : "-", o ? f : "-", (unsigned)e->k.depth, (unsigned)e->k.stencil,
                (unsigned)e->k.samples, (unsigned)e->k.topology_class, (unsigned)e->k.entry[0], g_level);
 }
+// ---------- The look-ahead's builds (3.3, vk_predict.c) ----------
+// A key the look-ahead queued: in g_pred until a worker takes it (or a draw does, taken), in g_pred_all until the job has run (the workers drop queued jobs at shutdown)
+typedef struct pred_job { gpl_key key; hvk_shader *sh[6]; hvk_layout *l; int taken; struct pred_job *prev, *next; } pred_job;
+static nvn_hmap g_pred; static pred_job *g_pred_all;   // under g_mu
+static void pred_unlink(pred_job *j) { if (j->prev) j->prev->next = j->next; else g_pred_all = j->next; if (j->next) j->next->prev = j->prev; j->prev = j->next = NULL; }
+static void pred_run(void *arg) {   // a worker (HVK_Q_PRED): the key entered in the table and made, unless a draw took it or something made it meanwhile
+    pred_job *j = arg; pso_ent *e = NULL;
+    pthread_mutex_lock(&g_mu);
+    for (uint64_t t0 = plat_now_ns(); g_pred_hold && !j->taken && plat_now_ns() - t0 < 30000000000ull;) {   // test hook: held before it takes its key
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 20000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&g_cv, &g_mu, &ts);
+    }
+    pred_unlink(j);
+    int skip = j->taken;
+    if (!skip) { nvn_hm_del(&g_pred, &j->key); if (nvn_hm_get(&g_ents, &j->key)) { skip = 1; atomic_fetch_add(&s_pred_found, 1); } }
+    if (!skip && (e = ent_new(j->sh, j->l, &j->key.k, -1))) { e->pred = 1; nvn_hm_put(&g_ents, &j->key, e); }
+    pthread_mutex_unlock(&g_mu);
+    free(j);
+    if (!e) { if (!skip) atomic_fetch_add(&s_pred_failed, 1); return; }
+    int why; ent_make(e, &why);
+    atomic_fetch_add(atomic_load(&e->state) == 1 ? &s_pred_built : &s_pred_failed, 1);
+}
+static void work_submit_n(int q, void (*fn)(void *), void *const *args, int n);
+int hvk_pso_predict(const hvk_pred_key *keys, int n) {
+    enum { CHUNK = 64 };
+    pred_job *jobs[CHUNK]; int queued = 0;
+    for (int at = 0; at < n; at += CHUNK) {
+        int m = 0, c = n - at < CHUNK ? n - at : CHUNK;
+        for (int i = 0; i < c; i++) {   // the jobs made outside the lock
+            const hvk_pred_key *p = &keys[at + i];
+            if (!(jobs[m] = malloc(sizeof *jobs[m]))) continue;
+            key_of(&jobs[m]->key, p->sh, p->l, &p->k); memcpy(jobs[m]->sh, p->sh, sizeof jobs[m]->sh); jobs[m]->l = p->l; jobs[m]->taken = 0;
+            m++;
+        }
+        int k = 0;
+        pthread_mutex_lock(&g_mu);
+        if (!g_ents.klen) nvn_hm_init(&g_ents, sizeof(gpl_key));
+        if (!g_pred.klen) nvn_hm_init(&g_pred, sizeof(gpl_key));
+        for (int i = 0; i < m; i++) {
+            pred_job *j = jobs[i];
+            if (nvn_hm_get(&g_ents, &j->key) || nvn_hm_get(&g_pred, &j->key)) { free(j); continue; }   // ready, being made or queued already (an earlier key of the walk too)
+            nvn_hm_put(&g_pred, &j->key, j);
+            j->prev = NULL; j->next = g_pred_all; if (g_pred_all) g_pred_all->prev = j; g_pred_all = j;
+            if (g_tk_on && g_tk_n[0] < 1024) g_tk[0][g_tk_n[0]++] = nvn_hm_hash(&j->key, sizeof j->key);
+            jobs[k++] = j;
+        }
+        pthread_mutex_unlock(&g_mu);
+        if (k) { atomic_fetch_add(&s_pred_queued, (uint64_t)k); work_submit_n(HVK_Q_PRED, pred_run, (void *const *)jobs, k); }
+        queued += k;
+    }
+    return queued;
+}
+int hvk_pso_take_waited(void) { int w = g_waited; g_waited = 0; return w; }
+void hvk_pso_test_pred_hold(int on) { pthread_mutex_lock(&g_mu); g_pred_hold = on != 0; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu); }
+void hvk_pso_test_keys(int on) { pthread_mutex_lock(&g_mu); g_tk_on = on != 0; g_tk_n[0] = g_tk_n[1] = 0; pthread_mutex_unlock(&g_mu); }
+int hvk_pso_test_keys_get(int which, uint64_t *out, int max) {
+    pthread_mutex_lock(&g_mu);
+    int n = g_tk_n[which & 1]; for (int i = 0; i < n && i < max; i++) out[i] = g_tk[which & 1][i];
+    pthread_mutex_unlock(&g_mu);
+    return n;
+}
+
 VkPipeline hvk_gfx_pipeline(hvk_shader *const sh[6], hvk_layout *l, const hvk_gfx_key *k, void (*miss)(void)) {
     gpl_key key; key_of(&key, sh, l, k);
     pthread_mutex_lock(&g_mu);
     if (!g_ents.klen) nvn_hm_init(&g_ents, sizeof key);
     pso_ent *e = nvn_hm_get(&g_ents, &key);
-    if (!e || atomic_load(&e->state) == 0) {   // not ready: the draw waits for it, made here or by the worker that has it
+    int ready = e && atomic_load(&e->state) != 0;
+    if (!ready) {   // not ready: the draw waits for it, made here or by the worker that has it
         uint64_t t0 = plat_now_ns(); int why = HVK_W_INFLIGHT, fresh = 0;
+        g_waited = 1;
+        if (g_tk_on && g_tk_n[1] < 1024) g_tk[1][g_tk_n[1]++] = nvn_hm_hash(&key, sizeof key);
         if (!e) {
+            pred_job *j = g_pred.n ? nvn_hm_del(&g_pred, &key) : NULL;   // queued by the look-ahead and not taken by a worker: made here, as on a miss (the job finds it taken)
+            if (j) { j->taken = 1; atomic_fetch_add(&s_pred_made, 1); }
             if (!(e = ent_new(sh, l, k, -1))) { pthread_mutex_unlock(&g_mu); return VK_NULL_HANDLE; }
             nvn_hm_put(&g_ents, &key, e); fresh = 1;
             pthread_mutex_unlock(&g_mu);
@@ -520,7 +599,11 @@ VkPipeline hvk_gfx_pipeline(hvk_shader *const sh[6], hvk_layout *l, const hvk_gf
         e->cur = o; e->kind = K_OPT; atomic_store(&e->opt, VK_NULL_HANDLE);
         atomic_fetch_add(&s_swapped, 1);
     }
-    if (!e->used) { e->used = 1; if (e->row >= 0) hvk_prewarm_predict(e->row); }
+    if (!e->used) {   // its first draw: a pipeline the look-ahead had made is counted, and one no list named goes to the device's list as one this draw made would (miss)
+        e->used = 1;
+        if (e->pred) { atomic_fetch_add(ready ? &s_pred_ready : &s_pred_inflight, 1); if (e->row < 0 && miss) miss(); }
+        if (e->row >= 0) hvk_prewarm_predict(e->row);
+    }
     atomic_fetch_add(&s_draws_kind[e->kind], 1);
     return e->cur;
 }
@@ -565,6 +648,8 @@ void hvk_pso_stats_get(hvk_pso_stats *s) {
     for (int i = 0; i < HVK_W_N; i++) { s->wait_n[i] = s_wait_n[i]; s->wait_ns[i] = s_wait_ns[i]; }
     s->wait_max_ns = s_wait_max; s->over_budget = s_over;
     s->draws_fast = s_draws_kind[K_FAST]; s->draws_opt = s_draws_kind[K_OPT]; s->draws_mono = s_draws_kind[K_MONO]; s->failed = s_failed; s->pending = s_pending;
+    s->pred_queued = s_pred_queued; s->pred_built = s_pred_built; s->pred_found = s_pred_found; s->pred_failed = s_pred_failed;
+    s->pred_ready = s_pred_ready; s->pred_inflight = s_pred_inflight; s->pred_made = s_pred_made;
 }
 
 // ---------- Worker threads (3.5) ----------
@@ -573,20 +658,20 @@ static struct { job *head, *tail; int n, running; } g_q[HVK_Q_N];
 static pthread_mutex_t g_wmu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_wcv = PTHREAD_COND_INITIALIZER, g_wdone = PTHREAD_COND_INITIALIZER;
 enum { MAXW = 64 };
 static pthread_t g_bg[2], g_optw, g_prep[MAXW]; static int g_nbg, g_nprep, g_started, g_wquit, g_prep_stop, g_opt_started;
-static int bg_ready(void) { return g_q[HVK_Q_SPEC].n || g_q[HVK_Q_BG].n; }
+static int bg_ready(void) { return g_q[HVK_Q_PRED].n || g_q[HVK_Q_SPEC].n || g_q[HVK_Q_BG].n; }
 static job *take(int q) { job *j = g_q[q].head; if (j) { g_q[q].head = j->next; if (!g_q[q].head) g_q[q].tail = NULL; g_q[q].n--; g_q[q].running++; } return j; }
 static void run(int q, job *j) {
     j->fn(j->arg); free(j);
     pthread_mutex_lock(&g_wmu); g_q[q].running--; pthread_cond_broadcast(&g_wdone); pthread_mutex_unlock(&g_wmu);
 }
-static void *bg_main(void *arg) {   // the prewarm and the speculative builds; a prepare worker too (arg non-NULL), until the prepare step ends
+static void *bg_main(void *arg) {   // the look-ahead's builds, the speculative builds and the prewarm, in that order; a prepare worker too (arg non-NULL), until the prepare step ends
     int prep = arg != NULL;
     plat_thread_set_name(prep ? "dm-vk-prepare" : "dm-vk-pso");
     plat_qos_set_self(prep ? PLAT_QOS_USER_INITIATED : PLAT_QOS_UTILITY);
     pthread_mutex_lock(&g_wmu);
     for (;;) {
         if (g_wquit || (prep && g_prep_stop)) break;
-        int q = g_q[HVK_Q_SPEC].n ? HVK_Q_SPEC : g_q[HVK_Q_BG].n ? HVK_Q_BG : -1;
+        int q = g_q[HVK_Q_PRED].n ? HVK_Q_PRED : g_q[HVK_Q_SPEC].n ? HVK_Q_SPEC : g_q[HVK_Q_BG].n ? HVK_Q_BG : -1;
         if (q < 0) { pthread_cond_wait(&g_wcv, &g_wmu); continue; }
         job *j = take(q);
         pthread_mutex_unlock(&g_wmu);
@@ -604,7 +689,7 @@ static void *opt_main(void *arg) {   // the optimized relinks, only while the ot
     pthread_mutex_lock(&g_wmu);
     for (;;) {
         if (g_wquit) break;
-        int idle = !bg_ready() && !g_q[HVK_Q_SPEC].running && !g_q[HVK_Q_BG].running && !atomic_load(&s_pending);
+        int idle = !bg_ready() && !g_q[HVK_Q_PRED].running && !g_q[HVK_Q_SPEC].running && !g_q[HVK_Q_BG].running && !atomic_load(&s_pending);
         if (g_q[HVK_Q_OPT].n && idle) {
             job *j = take(HVK_Q_OPT);
             pthread_mutex_unlock(&g_wmu);
@@ -631,17 +716,24 @@ static void workers_start(void) {   // under g_wmu
     if (!g_opt_started) hostvk_log("[RED] [hostvk] the optimizing worker could not be started: no optimized relinks, no periodic cache write");
     hostvk_log("[hostvk] pipeline workers: %d background, 1 optimizing (%d hardware threads)", g_nbg, cpu);
 }
-void hvk_work_submit(int q, void (*fn)(void *), void *arg) {
-    job *j = calloc(1, sizeof *j);
-    if (!j) { fn(arg); return; }
-    j->fn = fn; j->arg = arg;
+static void work_submit_n(int q, void (*fn)(void *), void *const *args, int n) {   // n jobs in order, with one lock and one wake (a job that cannot be allocated runs here)
+    job *head = NULL, *tail = NULL; int k = 0;
+    for (int i = 0; i < n; i++) {
+        job *j = calloc(1, sizeof *j);
+        if (!j) { fn(args[i]); continue; }
+        j->fn = fn; j->arg = args[i];
+        if (tail) tail->next = j; else head = j;
+        tail = j; k++;
+    }
+    if (!k) return;
     pthread_mutex_lock(&g_wmu);
     workers_start();
-    if (g_q[q].tail) g_q[q].tail->next = j; else g_q[q].head = j;
-    g_q[q].tail = j; g_q[q].n++;
-    pthread_cond_broadcast(&g_wcv);
+    if (g_q[q].tail) g_q[q].tail->next = head; else g_q[q].head = head;
+    g_q[q].tail = tail; g_q[q].n += k;
     pthread_mutex_unlock(&g_wmu);
+    pthread_cond_broadcast(&g_wcv);   // after the unlock: the workers it wakes do not block on the mutex the submitter still holds
 }
+void hvk_work_submit(int q, void (*fn)(void *), void *arg) { work_submit_n(q, fn, &arg, 1); }
 int hvk_work_pending(int q) { pthread_mutex_lock(&g_wmu); int n = g_q[q].n + g_q[q].running; pthread_mutex_unlock(&g_wmu); return n; }
 void hvk_work_drain(int q) {
     pthread_mutex_lock(&g_wmu);
@@ -653,7 +745,7 @@ void hvk_work_drain(int q) {
     }
     pthread_mutex_unlock(&g_wmu);
 }
-int hvk_work_prepare_begin(int total) {   // total: the workers wanted with the background ones (3.5: one per hardware thread less one); the prepare workers made
+int hvk_work_prepare_begin(int total) {   // total: the workers wanted with the background ones (3.5: one per hardware thread less one); the prepare workers made (they take every queue but HVK_Q_OPT)
     pthread_mutex_lock(&g_wmu);
     workers_start();
     g_prep_stop = 0;
@@ -722,6 +814,20 @@ void hvk_pso_test_level(char level) {
 }
 void hvk_pso_shutdown(void) {
     workers_stop();
+    // the look-ahead's jobs the workers dropped, and its line
+    pthread_mutex_lock(&g_mu);
+    while (g_pred_all) { pred_job *j = g_pred_all; pred_unlink(j); free(j); }
+    nvn_hm_clear(&g_pred, NULL); memset(&g_pred, 0, sizeof g_pred);
+    pthread_mutex_unlock(&g_mu);
+    hvk_predict_stats w; hvk_predict_stats_get(&w);
+    uint64_t built = s_pred_built, ready = s_pred_ready, infl = s_pred_inflight;
+    hostvk_log("[hostvk] prediction: %s%llu walks of the rest of a submission after a draw waited (%llu records, %.2f ms on the submit thread, the longest %.3f ms; %llu stopped at the budget, "
+               "%llu at a call deeper than the return stack), %llu draws walked, %llu keys made; %llu pipelines queued: %llu made ahead by the workers (%llu found made already, %llu failed); "
+               "at their draw %llu ready in time, %llu still being made (the draw waited for the rest), %llu not started (made by the draw), %llu made ahead and not drawn",
+               w.on ? "" : "off (DM_NVN_PREDICT=0), ", (unsigned long long)w.walks, (unsigned long long)w.records, w.ns / 1e6, w.max_ns / 1e6, (unsigned long long)w.budget_stops,
+               (unsigned long long)w.depth_stops, (unsigned long long)w.draws, (unsigned long long)w.keys, (unsigned long long)s_pred_queued, (unsigned long long)built,
+               (unsigned long long)s_pred_found, (unsigned long long)s_pred_failed, (unsigned long long)ready, (unsigned long long)infl, (unsigned long long)s_pred_made,
+               (unsigned long long)(built > ready + infl ? built - ready - infl : 0));
     drop_all();
     for (int p = 0; p < L_N; p++) memset(&g_lib[p], 0, sizeof g_lib[p]);
     memset(&g_ents, 0, sizeof g_ents);

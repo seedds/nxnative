@@ -212,7 +212,7 @@ void be_queue_activate(uint64_t serial) { (void)nvn_state_queue_activate(serial)
 void be_queue_forget(uint64_t serial) { (void)nvn_state_queue_forget(serial); if (!hvk.on) NULLRED(); }
 void be_sub_begin(void) { if (hvk_up()) hvk_sub_begin(); else NULLRED(); }
 void be_sub_index(const uint64_t *h, int n) { (void)h; (void)n; }   // the Metal backend's store look-ahead index: not used on Vulkan (design 1.5)
-void be_exec_rest(const uint64_t *h, int n) { (void)h; (void)n; }   // the Metal look-ahead's handles still to come: not used
+void be_exec_rest(const uint64_t *h, int n) { hvk_predict_rest_handles(h, n); }   // the handles still to come in the submission: the look-ahead goes on into them (vk_predict.c)
 void be_exec(const uint8_t *handle) { if (!hvk.on) NULLRED(); nvn_replay_exec(handle); }   // the frontend's decoder hands every record to the functions below
 uint64_t be_sub_commit(void) { if (hvk.on) return hvk_sub_commit(); NULLRED(); return atomic_fetch_add(&g_null_fence, 1) + 1; }
 uint64_t be_last_fence(void) { if (hvk.on) return hvk_last(); NULLRED(); return atomic_load(&g_null_fence); }
@@ -507,24 +507,29 @@ void be_ubp_why(uint64_t w[5]) { memset(w, 0, 5 * sizeof *w); }
 void be_lc_stats(uint64_t *taken, uint64_t *landed) { *taken = *landed = 0; }
 void be_sm_stats(uint64_t *np, uint64_t *nc, uint64_t *nw) { *np = *nc = *nw = 0; }
 void be_cshoist_stats(uint64_t *moved, uint64_t *depth, uint64_t *stops) { *moved = *depth = 0; memset(stops, 0, 8 * sizeof *stops); }   // stops: 8 counters, as hle_nvn.c reads them
-// The pipeline line of hle_nvn.c's timing summary, the differences since the last call, in the shape of the Metal backend's (mtl_pso_line): what the submit thread spent, what
-// every thread made, the background builds, and the draws that waited, per reason, with the longest wait of the window and the waits over the 2 ms budget (phase P5)
+// The pipeline line of hle_nvn.c's timing summary, the differences since the last call, in the shape of the Metal backend's (mtl_pso_line): what the submit thread spent (the
+// look-ahead's walks as the Metal line's predictions), what every thread made, the background builds (the look-ahead's: queued, and at their draw ready, still being made or
+// made by the draw; the speculative builds from the prewarm rows), and the draws that waited, per reason, with the longest wait of the window and the waits over the 2 ms budget
+// (phase P5)
 void be_pso_line(char *o, size_t n) {
     if (!n) return;
     if (!hvk.on) { snprintf(o, n, "vulkan: no device"); return; }
-    hvk_pso_stats a; hvk_pso_stats_get(&a); hvk_prewarm_stats pw; hvk_prewarm_stats_get(&pw); hvk_cache_stats cs; hvk_cache_stats_get(&cs);
-    enum { V = 20 + 2 * HVK_W_N };
+    hvk_pso_stats a; hvk_pso_stats_get(&a); hvk_prewarm_stats pw; hvk_prewarm_stats_get(&pw); hvk_cache_stats cs; hvk_cache_stats_get(&cs); hvk_predict_stats pr; hvk_predict_stats_get(&pr);
+    enum { NV = 26, V = NV + 2 * HVK_W_N };
     uint64_t v[V] = {a.draw_ns, a.wait_ns[HVK_W_LIB], pw.speculative, a.lib[0] + a.lib[1] + a.lib[2] + a.lib[3], a.lib_ns[0] + a.lib_ns[1] + a.lib_ns[2] + a.lib_ns[3],
-                     a.fast, a.fast_ns, a.opt, a.opt_ns, a.swapped, a.mono, a.mono_ns, pw.built, pw.failed, a.draw_made, a.over_budget, cs.created, cs.hits, a.opt_dropped, pw.stale};
-    for (int i = 0; i < HVK_W_N; i++) { v[20 + i] = a.wait_n[i]; v[20 + HVK_W_N + i] = a.wait_ns[i]; }
+                     a.fast, a.fast_ns, a.opt, a.opt_ns, a.swapped, a.mono, a.mono_ns, pw.built, pw.failed, a.draw_made, a.over_budget, cs.created, cs.hits, a.opt_dropped, pw.stale,
+                     pr.walks, pr.ns, a.pred_queued, a.pred_ready, a.pred_inflight, a.pred_made};
+    for (int i = 0; i < HVK_W_N; i++) { v[NV + i] = a.wait_n[i]; v[NV + HVK_W_N + i] = a.wait_ns[i]; }
     static uint64_t p[V]; uint64_t d[V]; for (int i = 0; i < V; i++) d[i] = v[i] - p[i];
-    size_t k = (size_t)snprintf(o, n, "on the submit thread pipelines %.1f ms, shader libraries %.1f ms, predictions %llu / 0.0 ms; all threads (level %c): pipeline libraries %llu / %.1f ms, "
+    size_t k = (size_t)snprintf(o, n, "on the submit thread pipelines %.1f ms, shader libraries %.1f ms, predictions %llu / %.1f ms; all threads (level %c): pipeline libraries %llu / %.1f ms, "
         "fast links %llu / %.1f ms, optimized links %llu / %.1f ms (swapped in %llu, dropped %llu), monolithic %llu / %.1f ms, driver cache hits %llu of %llu creations; "
-        "background builds done %llu, failed %llu, made by the draw %llu, in flight %llu; draws that waited:",
-        d[0] / 1e6, d[1] / 1e6, (unsigned long long)d[2], hvk_pso_level(), (unsigned long long)d[3], d[4] / 1e6, (unsigned long long)d[5], d[6] / 1e6, (unsigned long long)d[7], d[8] / 1e6,
+        "background builds done %llu, failed %llu, made by the draw %llu, in flight %llu; look-ahead pipelines queued %llu (at their draw ready %llu, still being made %llu, "
+        "made by the draw %llu), speculative from the rows %llu; draws that waited:",
+        d[0] / 1e6, d[1] / 1e6, (unsigned long long)d[20], d[21] / 1e6, hvk_pso_level(), (unsigned long long)d[3], d[4] / 1e6, (unsigned long long)d[5], d[6] / 1e6, (unsigned long long)d[7], d[8] / 1e6,
         (unsigned long long)d[9], (unsigned long long)d[18], (unsigned long long)d[10], d[11] / 1e6, (unsigned long long)d[17], (unsigned long long)d[16], (unsigned long long)d[12],
-        (unsigned long long)d[13], (unsigned long long)d[14], (unsigned long long)a.pending);
-    for (int i = 0; i < HVK_W_N; i++) if (d[20 + i] && k < n) k += (size_t)snprintf(o + k, n - k, " %s %llu / %.1f ms,", hvk_wait_why[i], (unsigned long long)d[20 + i], d[20 + HVK_W_N + i] / 1e6);
+        (unsigned long long)d[13], (unsigned long long)d[14], (unsigned long long)a.pending, (unsigned long long)d[22], (unsigned long long)d[23], (unsigned long long)d[24],
+        (unsigned long long)d[25], (unsigned long long)d[2]);
+    for (int i = 0; i < HVK_W_N; i++) if (d[NV + i] && k < n) k += (size_t)snprintf(o + k, n - k, " %s %llu / %.1f ms,", hvk_wait_why[i], (unsigned long long)d[NV + i], d[NV + HVK_W_N + i] / 1e6);
     if (k < n) snprintf(o + k, n - k, " longest %.2f ms, over 2 ms %llu", hvk_pso_take_window_max() / 1e6, (unsigned long long)d[15]);
     memcpy(p, v, sizeof p);
 }

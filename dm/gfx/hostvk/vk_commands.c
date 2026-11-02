@@ -20,8 +20,9 @@
 // indices without the device's support or line loops; the counter types Vulkan has no counter for (TESS_EVALUATION_SHADER_PRIMITIVES, ZCULL_STATS); the alpha test (its
 // reference is not recorded); advanced blend modes other than the Porter-Duff ones (VK_EXT_blend_operation_advanced is not used); viewport swizzles other than a negated y
 // without VK_NV_viewport_swizzle; tessellation without a control shader; presentation (phase P4).
-// Pipelines (phase P5): the draw fills its key through vk_gpl.c's hvk_key_fill and takes its pipeline from hvk_gfx_pipeline, which counts the time a draw waits for it; the first
-// submission starts the prewarm (vk_prewarm.c), as the Metal backend's does, since the vertex stage's depth mode is the game's by then.
+// Pipelines (phase P5): the draw fills its key through vk_gpl.c's hvk_key_fill and takes its pipeline from hvk_gfx_pipeline, which counts the time a draw waits for it; after
+// a draw that waited, the look-ahead (vk_predict.c) queues the pipelines of the draws still to come in the submission; the first submission starts the prewarm (vk_prewarm.c),
+// as the Metal backend's does, since the vertex stage's depth mode is the game's by then.
 #include "plat/plat.h"
 #include "vk_backend.h"
 #include "vk_pso.h"
@@ -1129,7 +1130,9 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
         hvk_key_fill(&k, sh, klass, &src);
         if (!(l = hvk_layout_for(sh))) return;
         memcpy(g_miss_sh, sh, sizeof g_miss_sh);
-        if (!(pipe = hvk_gfx_pipeline(sh, l, &k, user_row))) return;   // a pipeline not ready yet is made or waited for here: the wait is counted (vk_gpl.c)
+        pipe = hvk_gfx_pipeline(sh, l, &k, user_row);   // a pipeline not ready yet is made or waited for here: the wait is counted (vk_gpl.c)
+        hvk_predict_after_draw(rec + size);   // after a wait, once a submission: the pipelines of the draws still to come queued on the workers (vk_predict.c)
+        if (!pipe) return;
         if (!g_bound.valid || g_bound.pipe != pipe) {
             xfb_end(cb);   // no pipeline is bound while a capture is active: the capture pauses into its counters and resumes below
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe); g_bound.pipe = pipe; g_bound.valid = 1;

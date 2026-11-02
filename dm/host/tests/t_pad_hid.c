@@ -7,17 +7,22 @@ static int checks, fails;
 
 int main(void) {
     pad_hid h; int32_t s[4];
-    pad_hid_init(&h, NULL);
+    pad_hid_init(&h, NULL, 0);
     CHECK(pad_hid_buttons(&h) == 0);
     h.buttons = 1u << 1; CHECK(pad_hid_buttons(&h) == DM_BTN_A);             // usage 2 (right) is A
     h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_B);             // usage 1 (bottom) is B
     h.buttons = 1u << 11 | 1u << 9; CHECK(pad_hid_buttons(&h) == (DM_BTN_PLUS | DM_BTN_ZR));
-    pad_hid_init(&h, "a=1,B=2,bogus=3,ZR=99,X=,MINUS=13");
+    pad_hid_init(&h, "a=1,B=2,bogus=3,ZR=99,X=,MINUS=13", 0);
     h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);
     h.buttons = 1u << 12; CHECK(pad_hid_buttons(&h) == DM_BTN_MINUS);
     h.buttons = 1u << 9; CHECK(pad_hid_buttons(&h) == DM_BTN_ZR);           // 99 skipped: the default stays
     h.buttons = 1u << 4; CHECK(pad_hid_buttons(&h) == 0);                    // X= maps X to nothing
-    pad_hid_init(&h, NULL);
+    pad_hid_init(&h, NULL, 1);
+    h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);             // DM_PAD_AB=xbox: usage 1 (bottom) is A
+    h.buttons = 1u << 1; CHECK(pad_hid_buttons(&h) == DM_BTN_B);             // usage 2 (right) is B
+    pad_hid_init(&h, "A=2", 1);
+    h.buttons = 1u << 1; CHECK(pad_hid_buttons(&h) == (DM_BTN_A | DM_BTN_B)); // DM_HID_MAP entries still apply over the swapped default
+    pad_hid_init(&h, NULL, 0);
     CHECK(pad_hid_hat(1, 1, 8) == 0 && pad_hid_hat(0, 1, 8) == -1 && pad_hid_hat(8, 0, 7) == -1 && pad_hid_hat(15, 0, 15) == -1);
     h.hat = pad_hid_hat(4, 1, 8); CHECK(pad_hid_buttons(&h) == (DM_BTN_DOWN | DM_BTN_RIGHT));
     CHECK(pad_hid_axis_of(1, 0x30) == PH_X && pad_hid_axis_of(1, 0x35) == PH_RZ && pad_hid_axis_of(2, 0xC5) == PH_BRAKE && pad_hid_axis_of(1, 0x39) == -1);

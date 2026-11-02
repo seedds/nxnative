@@ -260,6 +260,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a Switch 2 game presents at 720p, with its upscaler at the matching low size. → [The display's largest buffer](../reference/services.md#the-displays-largest-buffer)
 - a native port cannot create or join a game's LAN or local-wireless room because its socket and LDN service hooks always return unavailable. → [Opt-in native LAN sockets and LDN over IP](../reference/services.md#opt-in-native-lan-sockets-and-ldn-over-ip)
 - the SDK's cancellable `GetHostByName` path reaches an unavailable resolver service or cannot retire its pending lookup when canceled or finalized. → [SDK DNS cancellation cannot retire an in-flight lookup](../reference/services.md#sdk-dns-cancellation-cannot-retire-an-in-flight-lookup)
+- a calendar-dependent title can boot with no delivery data or read an older snapshot before an asynchronous refresh finishes. → [Optional calendar data is stale or absent at the first guest read](../reference/services.md#optional-calendar-data-is-stale-or-absent-at-the-first-guest-read)
 
 ## Optional online-service backend
 

@@ -11,6 +11,7 @@ DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_AV1_DAV1D	switch	`=1` decodes AV1 movies with dav1d even where VideoToolbox decodes AV1 (Apple M3 and A17 Pro on), to compare the two or to check the path older chips take (`hle_movie_av1.c`)
+DM_BCAT_TEST_SANITIZE	test	1 builds the synthetic BCAT launch fixture with AddressSanitizer and UndefinedBehaviorSanitizer; not a runtime game switch
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
 DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
 DM_CHEATS	path	Folder of Atmosphère cheat files: `<folder>/<build ID>.txt` or an SD-card layout (`atmosphere/contents/<title ID>/cheats/`) under it (default `<DM_ROOT>/cheats`); the Mac menu lists and toggles them
@@ -92,6 +93,7 @@ DM_NETWORK	switch	Offline by default; explicit lan,ldn,auto enable local transpo
 DM_NETWORK_INTERFACE	player	IPv4 interface name for local sockets; otherwise use the actual default route
 DM_NET_DISCOVERY_PEER	player	Optional discovery relay IPv4 endpoint; automatic local discovery requires no entered address
 DM_NET_TRACE	diagnostic	Log native socket and local-network translation details
+DM_NEXTENDO_BCAT_DIR	path	Private exact-title/version calendar recipe and optional validated seed; absent or invalid recipes never query the network
 DM_NEXTENDO_ROUTES	path	Explicit local public service policy TSV; AUTO enables online services only when nonempty, and configured invalid policies fail closed.
 DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
@@ -205,6 +207,7 @@ DM_OODLE_HOST	path	The Mac host binary that `shader_split.py` runs in its Oodle 
 DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on every record of the job file right before `nnMain`, writes `<job file>.out` and exits (Unreal shader archives)
 DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads when `shader_split.py` decodes Trinity packs; set by the NSP script
 DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
+DM_OPENSSL_ROOT	path	Reviewed static OpenSSL prefix for optional online/BCAT helper compilation; no crypto dependency is downloaded by BCAT
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
 DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs

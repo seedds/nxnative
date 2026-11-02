@@ -12,6 +12,33 @@ QUIET = $(if $(findstring -fsanitize,$(SAN)),,2>/dev/null)
 GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 GAME_H = ../gen/$(GAME)/game_profile.h
+.PHONY: bcat bcat-sanitize bcat-fixtures bcat-launch bcat-tools
+# The optional static crypto prefix belongs to the online-provider series. A
+# standalone source fixture supplies its reviewed prefix explicitly; this
+# Makefile does not download or build a second cryptography dependency.
+BCAT_CRYPTO_FLAGS = -DDM_OPENSSL_X509 "-I$(DM_OPENSSL_ROOT)/include"
+BCAT_CRYPTO_LIB = "$(DM_OPENSSL_ROOT)/lib/libcrypto.a"
+BCAT_WARN = -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-parameter -Wno-deprecated-declarations
+$(B)/t_bcat_store: t_bcat_store.m ../hle_bcat_apple.m ../nextendo_bcat.h | $(B)
+	test -n "$(DM_OPENSSL_ROOT)"
+	$(CLANG) $(BCAT_WARN) -fobjc-arc $(BCAT_CRYPTO_FLAGS) -o $@ t_bcat_store.m $(BCAT_CRYPTO_LIB) -lz -framework Foundation
+$(B)/t_bcat_sdk: t_bcat_sdk.c t_bcat_guest.S ../hle_bcat.c ../nextendo_bcat.h ../hle_bigstack.c $(GAME_H) | $(B)
+	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_sdk.c t_bcat_guest.S ../hle_bigstack.c
+$(B)/t_bcat_fs: t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_fs.c ../nextendo_bcat.h ../hle_bigstack.c ../save_sync.c $(GAME_H) | $(B)
+	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_fs $(B)/t_fs_directory $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan $(B)/t_save_sync $(B)/t_bcat_fs: bcat_absent.h
+bcat-fixtures: $(B)/t_bcat_store $(B)/t_bcat_sdk $(B)/t_bcat_fs
+	$(B)/t_bcat_store
+	$(PYTHON) test_bcat_zip.py $(abspath $(B))/t_bcat_store
+	$(B)/t_bcat_sdk
+	$(B)/t_bcat_fs
+bcat-launch:
+	DM_OPENSSL_ROOT="$(DM_OPENSSL_ROOT)" $(PYTHON) test_bcat_launch.py
+bcat-tools:
+	DM_OPENSSL_ROOT="$(DM_OPENSSL_ROOT)" $(PYTHON) -m unittest discover -s ../../tools/tests -p test_nextendo_bcat.py
+bcat: bcat-fixtures bcat-launch bcat-tools
+bcat-sanitize:
+	$(MAKE) B=build/bcat-asan SAN="-fsanitize=address,undefined -fno-omit-frame-pointer" bcat
 run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_pctl $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid
 	$(B)/t_language
 	$(B)/t_heap_size
@@ -386,15 +413,15 @@ net-write-sanitize:
 run: net-write
 
 # Original synthetic DNSService callbacks exercise ownership/cancellation offline.
-$(B)/t_resolver_cancel: t_resolver_cancel.c t_net_write_stub.c ../hle_net_backend.c ../net_socket.h | $(B)
-	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -o $@ t_resolver_cancel.c t_net_write_stub.c
+$(B)/t_resolver_cancel: t_resolver_cancel.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -o $@ t_resolver_cancel.c t_net_write_stub.c ../hle_nsd_backend.c
 .PHONY: resolver
 resolver: $(B)/t_resolver_cancel
 	$(B)/t_resolver_cancel
 run: resolver
 # Optional system API smoke uses only localhost and is not part of CI.
-$(B)/t_resolver_live: t_resolver_live.c t_net_write_stub.c ../hle_net_backend.c ../net_socket.h | $(B)
-	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_resolver_live.c ../hle_net_backend.c t_net_write_stub.c
+$(B)/t_resolver_live: t_resolver_live.c $(NET_SOURCES) $(NET_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_resolver_live.c $(NET_SOURCES)
 .PHONY: resolver-live
 resolver-live: $(B)/t_resolver_live
 	$(B)/t_resolver_live

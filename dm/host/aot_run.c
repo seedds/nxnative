@@ -7,7 +7,8 @@
 //                       st->pc: the host-function page (a host call), another pack of another signature (its enter), or the JIT fallback
 //   nxaot_rt_jit        what compiled code hands over (jit_entry's call, msr fpcr, untranslated encodings, refused functions): host calls, compiled entries
 //                       called natively through the pack's enter trampoline, non-local transfers propagated (3.3), the rest in the JIT (dynarmic, NXHOST_JIT)
-//                       or, without it, a [RED] line per address and a process stop with status DM_AOT_JIT_NEEDED
+//                       or, without it, a [RED] line per address and a process stop with status DM_AOT_JIT_NEEDED; every entry into the JIT counted per address
+//                       and reason (note_jit), the misses DM_AOT_PROFILE's writer puts beside the profile for the next pack (aot.h, "The JIT fallback's misses")
 //   nxaot_rt_trap       brk, undefined encodings, a no-return call that returned: a [RED] line and a process stop
 //   nxaot_rt_safepoint  a poll found the poll byte set (6.2): the pause of SetThreadActivity (hle_thread.c), or a process stop
 //   dm_aot_cntpct       mrs cntpct_el0 / cntvct_el0 (8): the guest clock in 19.2 MHz ticks, as svcGetSystemTick and Apple's counter gate read it
@@ -32,8 +33,11 @@ void thr_svc_enter(uint64_t *regs, uint64_t pc);                       // hle_th
 void thr_svc_leave(void);
 
 #define FPCR_MODE 0x07C80000u   // the FPCR bits code is specialised on (AHP, DN, FZ, RMode, FZ16: dynarmic's location descriptor keeps these)
-// Why compiled code handed a continuation to nxaot_rt_jit, besides the NXAOT_TRAP_* reasons: host-private values of st->exit_reason
-enum { REASON_HOSTCALL = 0x100, REASON_CROSS = 0x101 };
+// Why the JIT fallback runs at an address (run_jit's reason), besides the NXAOT_TRAP_* reasons compiled code hands over: host-private values. REASON_HOSTCALL and
+// REASON_CROSS are st->exit_reason's (the dispatcher's hand-overs, which need no JIT); REASON_HOST, a guest call from the host; REASON_NONLOCAL, a non-local transfer no
+// native frame took; REASON_FORCED, DM_AOT_JIT_ALL. 0: the JIT goes on with the guest code it was already running (a compiled entry it called natively returned into
+// it, a host call did, a pause ended): no new miss
+enum { REASON_HOSTCALL = 0x100, REASON_CROSS = 0x101, REASON_HOST = 0x102, REASON_NONLOCAL = 0x103, REASON_FORCED = 0x104 };
 
 static _Atomic uint64_t c_svcs, c_host_calls, c_misses, c_cross, c_safepoints, c_jit_runs, c_cross_handovers, c_obs_gates, c_spin_gates;
 static _Atomic int g_stop = -1;   // the status of the process stop, -1 while running
@@ -69,20 +73,6 @@ uint32_t dm_aot_guest_mxcsr(uint32_t fpcr) {
 }
 static int module_mode(const dm_guest_state *st) { return (st->fpcr & FPCR_MODE) == (dm_aot_module_fpcr() & FPCR_MODE); }
 
-// Addresses the JIT fallback ran from (or would have): the [RED] line once per address, and their count
-#define MAX_SEEN 4096
-static uint64_t g_seen[MAX_SEEN];
-static int g_nseen;
-static pthread_mutex_t g_seen_lock = PTHREAD_MUTEX_INITIALIZER;
-static int first_time(uint64_t pc) {
-    pthread_mutex_lock(&g_seen_lock);
-    int first = 1;
-    for (int i = 0; i < g_nseen; i++) if (g_seen[i] == pc) { first = 0; break; }
-    if (first && g_nseen < MAX_SEEN) g_seen[g_nseen++] = pc;
-    pthread_mutex_unlock(&g_seen_lock);
-    return first;
-}
-
 static const char *jit_why(uint32_t reason) {
     switch (reason) {
     case NXAOT_TRAP_JIT_MISS: return "an indirect branch to an address with no compiled entry";
@@ -93,8 +83,82 @@ static const char *jit_why(uint32_t reason) {
     case NXAOT_TRAP_UNTRANSLATED: return "an encoding the lifter does not translate";
     case REASON_HOSTCALL: return "a host call";
     case REASON_CROSS: return "a call into another pack";
+    case REASON_HOST: return "a call from the host to an address with no compiled entry";
+    case REASON_NONLOCAL: return "a non-local transfer to a continuation with no native frame";
+    case REASON_FORCED: return "the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL)";
     default: return "a continuation compiled code handed over";
     }
+}
+
+// The misses file's word for a reason (aot.h, "The JIT fallback's misses"): what nxaot build --misses makes of the address. NULL for a run that is no miss of a pack
+const char *dm_aot_miss_word(uint32_t reason) {
+    switch (reason) {
+    case NXAOT_TRAP_JIT_MISS: return "indirect";
+    case NXAOT_TRAP_JIT_TARGET: return "call";
+    case REASON_HOST: return "host";
+    case NXAOT_TRAP_NO_CODE: return "nocode";
+    case REASON_NONLOCAL: return "nonlocal";
+    case NXAOT_TRAP_JIT_FPCR: return "fpcr";
+    case NXAOT_TRAP_JIT_REFUSED: return "refused";
+    case NXAOT_TRAP_UNTRANSLATED: return "untranslated";
+    case 0: case REASON_FORCED: return NULL;
+    default: return "other";
+    }
+}
+
+// The addresses the JIT fallback ran from (or would have, without it): their number (dm_aot_stats jit_addresses), the [RED] line once per address and reason, and per
+// address and reason the entries there, which DM_AOT_PROFILE's writer puts in each module's misses file (aot_profile.c; nxaot build --misses). Two open-addressing tables in
+// static memory under one lock: run_jit runs on a guest thread, never in a signal handler, and a JIT entry costs a hand-over of the whole register file (about 100 ns)
+// besides its run, so the lock and a probe or two per entry do not show. Full tables keep what they hold and count the rest (dm_aot_jit_misses' dropped)
+#define MAX_SEEN 8192                  // distinct addresses, and distinct (address, reason) pairs
+#define SEEN_SLOTS (2 * MAX_SEEN)      // a power of two: each table at most half full
+typedef struct { uint64_t pc, n; uint32_t reason, used; } seen_pair;
+typedef struct { uint64_t pc; uint32_t used; } seen_addr;
+static seen_pair g_pairs[SEEN_SLOTS];
+static seen_addr g_addrs[SEEN_SLOTS];
+static int g_nseen, g_npairs;
+static uint64_t g_dropped;
+static pthread_mutex_t g_seen_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned seen_hash(uint64_t pc, uint32_t reason) { return (unsigned)((((pc >> 2) ^ ((uint64_t)reason << 44)) * 0x9E3779B97F4A7C15ull) >> 50) & (SEEN_SLOTS - 1); }
+
+// An entry into the JIT fallback at pc for reason (0: a run going on, kept as an address only): 1 when it is new, its [RED] line's cue: the (address, reason) pair for a
+// miss, the address for a run that is none (DM_AOT_JIT_ALL's)
+static int note_jit(uint64_t pc, uint32_t reason) {
+    int first_addr = 0, first_pair = 0;
+    pthread_mutex_lock(&g_seen_lock);
+    for (unsigned h = seen_hash(pc, 0), k = 0; k < SEEN_SLOTS; h = (h + 1) & (SEEN_SLOTS - 1), k++) {
+        seen_addr *a = &g_addrs[h];
+        if (a->used) { if (a->pc == pc) break; continue; }
+        if (g_nseen < MAX_SEEN) { a->pc = pc; a->used = 1; g_nseen++; first_addr = 1; }
+        else g_dropped++;
+        break;
+    }
+    const int miss = dm_aot_miss_word(reason) != NULL;
+    if (miss) {
+        for (unsigned h = seen_hash(pc, reason), k = 0; k < SEEN_SLOTS; h = (h + 1) & (SEEN_SLOTS - 1), k++) {
+            seen_pair *s = &g_pairs[h];
+            if (s->used) { if (s->pc == pc && s->reason == reason) { s->n++; break; } continue; }
+            if (g_npairs < MAX_SEEN) { s->pc = pc; s->reason = reason; s->n = 1; s->used = 1; g_npairs++; first_pair = 1; }
+            else g_dropped++;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_seen_lock);
+    return miss ? first_pair : first_addr;
+}
+
+size_t dm_aot_jit_misses(dm_aot_miss *out, size_t max, uint64_t *dropped) {
+    size_t n = 0;
+    pthread_mutex_lock(&g_seen_lock);
+    for (unsigned h = 0; h < SEEN_SLOTS; h++) {
+        const seen_pair *s = &g_pairs[h];
+        if (!s->used) continue;
+        if (out) { if (n == max) break; out[n] = (dm_aot_miss){s->pc, s->n, s->reason}; }
+        n++;
+    }
+    if (dropped) *dropped = g_dropped;
+    pthread_mutex_unlock(&g_seen_lock);
+    return n;
 }
 
 // ---------- Traps ----------
@@ -287,22 +351,24 @@ int dm_aot_jit_stop_at(uint64_t pc) { (void)pc; return 0; }
 #endif
 
 // Run st->pc in the JIT until it stops; without it, the [RED] line and the process stop. past: compiled code served the observation gate at st->pc already
-// (nxaot_rt_jit), so its instruction runs at once
-static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why, int past) {
+// (nxaot_rt_jit), so its instruction runs at once. *why: why the JIT runs there (a miss of the pack, note_jit; 0 for a run going on), and on return why its next
+// run in the loop would: a non-local transfer after a stop at a compiled call site's return address (jit_loop runs that only when no native frame takes it), else
+// the same run going on (it stopped at a compiled entry, which returns into its code, at a gate, or for a pause)
+static void run_jit(dm_aot_thread *t, uint64_t lr, uint32_t *why, int past) {
     const uint64_t pc = t->st.pc;
     char name[64];
     dm_aot_guest_name(pc, name, sizeof name);
 #if !NXHOST_JIT
     (void)lr;
     char msg[320];
-    snprintf(msg, sizeof msg, "[RED] aot: %s at %s needs the JIT fallback (design section 11), which this host is built without (CMake option NXHOST_JIT)", *why, name);
-    dm_aot_stop(DM_AOT_JIT_NEEDED, first_time(pc) ? msg : NULL);
+    snprintf(msg, sizeof msg, "[RED] aot: %s at %s needs the JIT fallback (design section 11), which this host is built without (CMake option NXHOST_JIT)", jit_why(*why), name);
+    dm_aot_stop(DM_AOT_JIT_NEEDED, note_jit(pc, *why) ? msg : NULL);
     dm_aot_leave(DM_AOT_LEFT_STOP);
 #else
     static _Thread_local int t_jit_running;   // dm_jit_run is on this thread's stack: an SVC answered inside the JIT made a nested guest call (aot.h, the limits of nesting)
     if (t_jit_running) {
         char msg[320];
-        snprintf(msg, sizeof msg, "[RED] aot: %s at %s needs the JIT fallback inside a guest call the host made while this thread's JIT instance runs (an SVC answered inside the JIT): one instance per thread, not re-entrant", *why, name);
+        snprintf(msg, sizeof msg, "[RED] aot: %s at %s needs the JIT fallback inside a guest call the host made while this thread's JIT instance runs (an SVC answered inside the JIT): one instance per thread, not re-entrant", jit_why(*why), name);
         dm_aot_stop(DM_AOT_JIT_NEEDED, msg);
         dm_aot_leave(DM_AOT_LEFT_STOP);
     }
@@ -318,12 +384,11 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why, int past) {
         if (!atomic_flag_test_and_set(&faults_ordered)) dm_aot_fault_after_jit();   // dynarmic installed its fault handler with this first instance (5.4's order)
         dm_aot_thread_set_jit(j);   // halted at once when a pause or stop was requested before it existed
     }
-    if (*why && first_time(pc)) LOG("[RED] aot: %s at %s runs in the JIT fallback (design section 11)", *why, name);
+    if (note_jit(pc, *why) && *why) LOG("[RED] aot: %s at %s runs in the JIT fallback (design section 11)", jit_why(*why), name);   // a run going on: counted, not said
     atomic_fetch_add_explicit(&c_jit_runs, 1, memory_order_relaxed);
     t_jit_running = 1; t->prof_at = DM_AOT_PROF_JIT;   // prof_at: the sampler's (aot_profile.c), the JIT fallback's samples
     uint64_t stop = past ? dm_jit_run_past(j, pc, 0) : dm_jit_run(j, pc);
     t_jit_running = 0; t->prof_at = 0;
-    *why = jit_all() ? "the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL)" : "a non-local transfer to a continuation with no native frame";
     // A gate site (design 1.1, as compiled code calls nxaot_rt_gate there): the JIT stopped before its instruction with the whole register file in the block
     while (dm_jit_reason(j) == DM_JIT_GATE) {
         const gate_row *g = gate_row_at(stop);
@@ -344,9 +409,10 @@ static void run_jit(dm_aot_thread *t, uint64_t lr, const char **why, int past) {
         t_jit_running = 0; t->prof_at = 0;
         if (dm_jit_reason(j) != DM_JIT_STEPPED) break;
         if (stop == g->head) serve_gate(t, edge, g->kind);
-        *why = NULL;
+        *why = jit_all() ? REASON_FORCED : 0;
         return;
     }
+    *why = jit_all() ? REASON_FORCED : dm_jit_reason(j) == DM_JIT_RETURN ? REASON_NONLOCAL : 0;
     switch (dm_jit_reason(j)) {
     case DM_JIT_ENTRY: case DM_JIT_RETURN: case DM_JIT_STEPPED: return;   // st->pc = stop: the loop decides
     case DM_JIT_HALTED: safepoint(t); return;        // a pause or a stop
@@ -385,8 +451,9 @@ static _Noreturn void nonlocal_out(dm_aot_thread *t, uint64_t pc) {
 // with an SP above the one this frame was entered with is a non-local transfer (3.3): nested, it is propagated to the native frames further out
 // (st->pending); at the outermost level of a guest call nothing can own it and the JIT runs it, unless that guest call is nested in a host call and the transfer
 // leaves it (sp is then the SP the call was made with: nonlocal_out). first: a continuation compiled code cannot run itself (an encoding it does not translate),
-// run in the JIT even at a compiled entry (which would hand it over again); with served, at an observation gate compiled code has just served
-static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, const char *why, uint64_t first, int served) {
+// run in the JIT even at a compiled entry (which would hand it over again); with served, at an observation gate compiled code has just served. why: the reason of
+// the first JIT run (run_jit), the miss that made the loop
+static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, uint32_t why, uint64_t first, int served) {
     dm_guest_state *st = &t->st;
     for (;;) {
         check_stop(t);
@@ -412,7 +479,7 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
             if (e) {
                 const uint64_t ret = st->x[30], sp_at_call = st->sp;
                 native_call(t, p, dm_aot_entry_of(e));
-                if (st->pending) { st->pc = st->pending; st->pending = 0; }   // a non-local transfer: the block holds the whole register file
+                if (st->pending) { st->pc = st->pending; st->pending = 0; why = REASON_NONLOCAL; }   // a non-local transfer: the block holds the whole register file
                 else {
                     // a normal return is a ret to the lr the entry was called with; SP is the call's unless the function may change it (NXAOT_LOOKUP_SP_KEPT)
                     st->pc = ret; st->x[30] = ret;
@@ -432,7 +499,7 @@ static void jit_loop(dm_aot_thread *t, uint64_t lr, uint64_t sp, int outermost, 
 // compiled entry in the JIT. Returns when the guest returns to the host
 static void run_guest(dm_aot_thread *t, uint64_t pc) {
     dm_guest_state *st = &t->st;
-    const char *why = jit_all() ? "the JIT fallback forced for every guest instruction (DM_AOT_JIT_ALL)" : "a call from the host to an address with no compiled entry";
+    uint32_t why = jit_all() ? REASON_FORCED : REASON_HOST;
     const uint64_t sp0 = st->sp;   // the SP the call was made with: a nested call's guest code stays below it
     for (;;) {
         check_stop(t);
@@ -450,7 +517,7 @@ static void run_guest(dm_aot_thread *t, uint64_t pc) {
                 if (!st->pending) return;
                 pc = st->pending; st->pending = 0;
                 if (t->depth > 1 && st->sp > sp0) nonlocal_out(t, pc);
-                why = "a non-local transfer to a continuation with no native frame";
+                why = REASON_NONLOCAL;
                 continue;
             }
         }
@@ -691,7 +758,7 @@ DM_AOT_EXPORT void nxaot_rt_jit(dm_guest_state *st, uint64_t lr, uint64_t sp) {
         first = st->pc;
         served = g && g->kind == NXAOT_GATE_OBS;
     }
-    jit_loop(t, lr, sp, 0, jit_why(reason), first, served);
+    jit_loop(t, lr, sp, 0, reason, first, served);
     _mm_setcsr(dm_aot_guest_mxcsr(dm_aot_module_fpcr()));   // back to compiled code under its specialisation (jit_loop returns pending otherwise)
 }
 

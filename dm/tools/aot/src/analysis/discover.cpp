@@ -27,7 +27,7 @@ namespace nxaot::analysis {
 namespace {
 
 constexpr const char* kProvNames[kProvCount] = {"start", "fde", "sym", "init", "fini", "init_array", "fini_array",
-                                                "reloc", "adr", "call", "tail", "lsda", "jt", "gap"};
+                                                "reloc", "adr", "call", "tail", "lsda", "jt", "gap", "miss"};
 constexpr uint32_t kNop = 0xD503201Fu;
 constexpr uint32_t kTakenProv = kProvReloc | kProvAdr | kProvInit | kProvFini | kProvInitArray | kProvFiniArray | kProvJumpTable;
 
@@ -75,6 +75,7 @@ public:
             if (timed(tm.tables, [&] { return Tables({}); })) continue;
             if (timed(tm.sources, [&] { return Pending(); })) continue;
             if (timed(tm.sources, [&] { return Addresses(); })) continue;
+            if (timed(tm.sources, [&] { return MissRoots(); })) continue;
             // The code-derived sources are exhausted. The summaries now let regions continue past calls, for the brs that a region without
             // calls did not bound; only then the gap sweep, so that cases of a table not bounded yet do not become entries of their own
             timed(tm.summaries, [&] { Taken(); RunSummaries(); return true; });
@@ -91,7 +92,7 @@ public:
             pool->For(all.size(), [&](size_t k) { FindWindows(img, *all[k]); }, 64);
             return true;
         });
-        timed(tm.finish, [&] { Names(); Cover(); Oracle(); return true; });
+        timed(tm.finish, [&] { Names(); Cover(); Oracle(); MissReport(); return true; });
         tm.distinct_words = cache->Distinct();
         tm.translations = cache->Translations();
         tm.regions = out.regions_lifted;
@@ -145,11 +146,15 @@ private:
         if (!TextCode(pc)) {
             return false;  // the aux region's code is part of the functions that reach it
         }
+        if (!(prov & kProvMiss) && opts.no_roots.count(pc)) {
+            return false;  // a test's --no-root: none of discovery's own sources makes it an entry (a miss does)
+        }
         auto [it, inserted] = fns.try_emplace(pc);
         it->second.entry = pc;
         it->second.prov |= prov;
         if (inserted) {
             limits_stale = true;
+            if (const auto f = fde_start.find(pc); f != fde_start.end()) it->second.fde = f->second;  // an FDE's function a miss brought back
         }
         return inserted;
     }
@@ -178,8 +183,9 @@ private:
                 out.notes.push_back("[RED] discover: the FDE at " + Hex(fde.offset) + " starts at " + Hex(fde.start) + ", not an instruction of the text");
                 continue;
             }
+            fde_start[fde.start] = static_cast<int>(i);
             AddEntry(fde.start, kProvFde);
-            fns[fde.start].fde = static_cast<int>(i);
+            if (const auto it = fns.find(fde.start); it != fns.end()) it->second.fde = static_cast<int>(i);
         }
         if (opts.symbols) {
             for (const auto& s : img.symbols) {
@@ -197,7 +203,50 @@ private:
         for (const auto& r : img.relocs) {
             if (r.has_target && img.InText(r.target)) AddEntry(r.target, kProvReloc);
         }
+        // The host's misses (DiscoverOptions::misses, design 1.3: the JIT feedback): the entries now; the resume points once the functions around them
+        // are known (MissRoots); the others are only reported (MissReport)
+        for (const Miss& m : opts.misses) {
+            switch (MissKindOf(m.reason)) {
+            case MissKind::Entry:
+                AddEntry(m.offset, kProvMiss);
+                if (MissNeedsStdEntry(m.reason)) miss_std.insert(m.offset);
+                break;
+            case MissKind::Resume:
+                miss_resume.insert(m.offset);
+                break;
+            case MissKind::Unserved:
+                break;
+            }
+        }
         Limits();
+    }
+
+    // ---- The misses' resume points (nonlocal, design 3.3): a root of the function whose range holds one, so that its walk reaches it as a block of
+    // its own, where the pending check after each of its calls can resume; at a function's entry, or in no function's range, an entry the dispatcher
+    // enters (a standard entry) ----
+    bool MissRoots() {
+        bool changed = false;
+        for (const uint64_t a : miss_resume) {
+            if (!TextCode(a)) continue;  // not code: reported (MissReport)
+            if (const auto e = fns.find(a); e != fns.end()) {
+                e->second.prov |= kProvMiss;
+                miss_std.insert(a);
+                continue;
+            }
+            const auto it = fns.upper_bound(a);
+            Function* f = it == fns.begin() ? nullptr : &std::prev(it)->second;
+            if (!f || a >= f->limit) {
+                if (AddEntry(a, kProvMiss)) changed = true;
+                miss_std.insert(a);
+                continue;
+            }
+            if (f->roots.insert(a).second) {
+                dirty.insert(f->entry);
+                changed = true;
+            }
+        }
+        if (changed) Limits();
+        return changed;
     }
 
     // ---- The walk: a function's instructions from its entry and roots, by the direct branches, inside [entry, limit) ----
@@ -821,7 +870,7 @@ private:
 
     void Taken() {
         for (auto& [entry, f] : fns) {
-            f.address_taken = (f.prov & kTakenProv) != 0;
+            f.address_taken = (f.prov & kTakenProv) != 0 || miss_std.count(entry);  // a miss the dispatcher or the host entered by its address
             f.summary.exported = false;
         }
         for (const auto& s : img.symbols) {
@@ -878,6 +927,75 @@ private:
         }
     }
 
+    // ---- What became of the misses (Discovery::misses, miss_resumes), and the summary line and the [RED] lines of the ones a pack cannot serve ----
+    void MissReport() {
+        if (opts.misses.empty()) return;
+        std::map<uint64_t, std::set<std::string>> by;  // address -> its reasons
+        for (const Miss& m : opts.misses) by[m.offset].insert(m.reason);
+        std::set<uint64_t> resumed;
+        for (const uint64_t a : miss_resume) {
+            if (fns.count(a)) continue;  // an entry
+            const auto it = fns.upper_bound(a);
+            if (it == fns.begin()) continue;
+            const Function& f = std::prev(it)->second;
+            if (a < f.limit && Reached(f, a)) {
+                out.miss_resumes[f.entry].push_back(a);  // miss_resume is ordered: each function's list is sorted
+                resumed.insert(a);
+            }
+        }
+        size_t entries = 0, resumes = 0, unserved = 0;
+        std::map<std::string, size_t> unserved_by;
+        std::vector<std::string> red;
+        for (const auto& [a, reasons] : by) {
+            MissResult r;
+            r.offset = a;
+            bool code = false;  // a reason that asks for an entry or a resume point
+            for (const std::string& w : reasons) {
+                r.reasons += (r.reasons.empty() ? "" : ",") + w;
+                code |= MissKindOf(w) != MissKind::Unserved;
+            }
+            const auto f = fns.find(a);
+            if (code && f != fns.end()) {
+                // Discovery's own sources: an entry they make (not one only a miss made, nor one a test's --no-root held back), with a standard entry when they
+                // give it one (address taken, exported, the module's entry)
+                const bool own = (f->second.prov & ~kProvMiss) != 0 && !opts.no_roots.count(a);
+                const bool own_std = own && ((f->second.prov & kTakenProv) || f->second.summary.exported || a == img.text_off);
+                r.result = !own ? "entry" : miss_std.count(a) && !own_std ? "std" : "known";
+                entries += r.result != "known";
+            } else if (resumed.count(a)) {
+                r.result = "resume";
+                resumes++;
+            } else {
+                r.result = "unserved";
+                std::string word;
+                for (const std::string& w : reasons) {
+                    if (MissKindOf(w) == MissKind::Unserved) { word = w; break; }
+                }
+                if (code) {
+                    word = *reasons.begin();
+                    r.why = !img.InText(a) || (a & 3) ? "not an instruction of the text"
+                          : img.InData(a)            ? "in a data block, where its control flow reaches no instruction"
+                                                     : "in no function's code";
+                } else {
+                    r.why = word == "fpcr"           ? "msr fpcr left the FPCR the module is compiled for (design 7.1)"
+                          : word == "refused"        ? "a function the lifter refused"
+                          : word == "untranslated"   ? "an encoding the lifter does not translate"
+                                                     : "a reason this nxaot does not know";
+                }
+                unserved++;
+                unserved_by[word]++;
+                if (red.size() < 32) red.push_back("[RED] discover: the JIT miss at " + Hex(a) + " (" + r.reasons + ") stays in the JIT fallback: " + r.why);
+            }
+            out.misses.push_back(std::move(r));
+        }
+        std::string why;
+        for (const auto& [w, n] : unserved_by) why += (why.empty() ? "" : ", ") + w + " " + std::to_string(n);
+        if (unserved > red.size()) red.push_back("[RED] discover: and " + std::to_string(unserved - red.size()) + " more misses the pack does not serve");
+        red.insert(red.begin(), "aot: misses: " + std::to_string(by.size()) + " addresses, " + std::to_string(entries) + " new entries, " + std::to_string(resumes) +
+                                    " resume points, " + std::to_string(unserved) + " still unserved (" + (why.empty() ? "none" : why) + ")");
+        out.notes.insert(out.notes.begin(), red.begin(), red.end());
+    }
+
     const module::Image& img;
     DiscoverOptions opts;
     std::shared_ptr<InsnCache> cache;  // the instruction facts the summaries read (summary.h), kept for the plan
@@ -898,11 +1016,76 @@ private:
     SummaryMemo summary_memo;                                     // the summaries computed so far
     std::set<uint64_t> gap_tried;
     std::map<uint64_t, uint64_t> sym_end;  // symbol entries and their ends, when symbols are a source
+    std::map<uint64_t, int> fde_start;     // the FDE that starts at each address (an entry made after Sources, by a miss, gets it)
+    std::set<uint64_t> miss_std;           // misses the dispatcher or the host enters by their address: a standard entry (Taken)
+    std::set<uint64_t> miss_resume;        // the misses' resume points (MissRoots)
     std::vector<uint64_t> summarised;      // the functions the last summaries cover, in address order: calls to those without a return path
     std::vector<uint8_t> summarised_returns;  // do not fall through (Returns)
 };
 
 }  // namespace
+
+MissKind MissKindOf(const std::string& reason) {
+    if (reason == "indirect" || reason == "call" || reason == "host" || reason == "nocode") return MissKind::Entry;
+    if (reason == "nonlocal") return MissKind::Resume;
+    return MissKind::Unserved;
+}
+
+bool MissNeedsStdEntry(const std::string& reason) {
+    return reason == "indirect" || reason == "host" || reason == "nonlocal";
+}
+
+std::vector<std::pair<uint64_t, uint64_t>> CarveMisses(module::Image& image, const std::vector<Miss>& misses) {
+    const auto in_data = [&](uint64_t pc) { return image.InText(pc) && !(pc & 3) && image.InData(pc); };
+    std::set<uint64_t> words;
+    std::deque<uint64_t> work;
+    for (const Miss& m : misses) {
+        if (MissKindOf(m.reason) != MissKind::Unserved && in_data(m.offset)) work.push_back(m.offset);
+    }
+    constexpr size_t kMax = size_t{1} << 16;  // words in all: a walk that ran into real data (whose words rarely decode for long) stops here
+    while (!work.empty() && words.size() < kMax) {
+        uint64_t pc = work.front();
+        work.pop_front();
+        while (in_data(pc) && !words.count(pc) && words.size() < kMax) {
+            const auto w = image.Word(pc);
+            if (!w) break;
+            const Insn i = ClassifyWord(*w, pc);
+            if (i.kind == Kind::Undefined) break;
+            words.insert(pc);
+            if (i.kind == Kind::Normal || i.kind == Kind::BLR || i.kind == Kind::SVC) {
+                pc += 4;
+                continue;
+            }
+            if (i.kind == Kind::BCond || i.kind == Kind::BL) {
+                work.push_back(i.target);
+                pc += 4;
+                continue;
+            }
+            if (i.kind == Kind::B) work.push_back(i.target);
+            break;  // b, br, ret, a trap
+        }
+    }
+    std::vector<std::pair<uint64_t, uint64_t>> runs;
+    for (const uint64_t pc : words) {
+        if (!runs.empty() && runs.back().second == pc) runs.back().second = pc + 4;
+        else runs.emplace_back(pc, pc + 4);
+    }
+    if (runs.empty()) return runs;
+    // Each data block without them (blocks may overlap: each is cut on its own)
+    std::vector<module::DataBlock> blocks;
+    for (const auto& b : image.data_blocks) {
+        uint64_t lo = b.lo;
+        for (const auto& [rlo, rhi] : runs) {
+            if (rhi <= lo || rlo >= b.hi) continue;
+            if (rlo > lo) blocks.push_back({lo, rlo, b.why});
+            lo = std::max(lo, rhi);
+        }
+        if (lo < b.hi) blocks.push_back({lo, b.hi, b.why});
+    }
+    image.data_blocks = std::move(blocks);
+    image.IndexData();
+    return runs;
+}
 
 const char* ProvName(unsigned bit) {
     return bit < kProvCount ? kProvNames[bit] : "?";

@@ -62,7 +62,7 @@ docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 # check, discovery over the corpus, the manifest test, the corpus reference run, the fp cases current, the corpus run natively, the per-function
 # differential test, the JIT fallback's three modes, the threaded programs, the safepoint pause test, the pack caches, the indirect calls'
 # reloads and the standard entries' signature, the line tables, functions split for size, tiers by profile, Windows packs, the analysis on threads,
-# the differential test at tier C); --tmpfs
+# the differential test at tier C, the host's JIT misses as discovery's input); --tmpfs
 # /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on a machine short of disk
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
@@ -552,6 +552,75 @@ caller's frame record (fiber's last check looped through `rt_finish`); the drive
 function keeps SP, and `kHostReads` (what the host and the JIT read after a call) includes SP, so that a function that may change it stores it. The
 return check compared SP too, which a `br` through `jit_entry` from the middle of a function (an unbounded br, SP of the body) never matched at its
 return (SP of the entry); lr alone decides now.
+
+## JIT misses
+
+Design 1.3 names "the census and the JIT feedback" as a source of discovery and section 11 says each miss "is recorded per build for the next
+pack". The x86-64 host counts every entry into its JIT fallback per guest address and reason (`dm/host/aot_run.c` `note_jit`; `dm/host/aot.h`,
+"The JIT fallback's misses") and, with `DM_AOT_PROFILE=<folder>`, writes them at exit beside the sample profile as `<folder>/<module>.misses.tsv`
+(`dm/host/aot_profile.c` `write_misses`), in the profile's form:
+
+```
+# nxaot misses: guest addresses the x86-64 engine's JIT fallback ran because the pack had no compiled code there (dm/host/aot_run.c, DM_AOT_PROFILE); nxaot build --misses <this file>
+# module main, build ID aa07aa07aa07aa07aa07aa07aa07aa07, image SHA-256 9528170af64ad4b9bbc935825b1fcff8b02e227cf3b9d9bca6a87ce222ba2d7b
+# pack t_aot_module.tmp/... /main.aot.so
+# 1 addresses, 1 entries into the JIT fallback; 1 of the addresses this session, the rest from earlier sessions of this image
+# <module offset> <reason> <entries>: indirect, call, host, nocode (an entry of the next pack), nonlocal (a resume point), fpcr, refused, untranslated, other (no pack serves them)
+0x208 indirect 1
+```
+
+One row per address and reason, by offset. A file an earlier session of the same image wrote is merged in (its entries added up), so what one
+pack's misses taught stays for the next pack (which no longer misses there); a file of another image is replaced. The reasons are the
+hand-overs of section 11: `indirect` (the dispatcher's miss: `blr` / `br` to an address with no compiled entry), `call` (a `b` or `bl` to
+an address that is no compiled function's entry), `host` (`dm_guest_call` to an address with no compiled entry), `nocode` (compiled code ran
+on into no entry), `nonlocal` (a non-local transfer no native frame took, 3.3), and `fpcr`, `refused`, `untranslated`. A run of the JIT that
+goes on with code it was already running (after a compiled entry it called returned into it, a host call, a pause) is no miss: the host
+labelled those "a non-local transfer" before, and logged a `[RED]` line for each such return address; it now records and logs only the cause.
+Nothing is recorded under `DM_AOT_JIT_ALL`.
+
+`nxaot build --misses <file>` (and `nxaot discover --misses <file>`) takes them as roots of discovery:
+
+- The file must name this module's image (its header's SHA-256): another image's, or one that names none, is a `[RED]` line and the file is
+  ignored. A line that does not parse stops the build, naming it.
+- **Entries**: `indirect`, `call`, `host` and `nocode` make the address a function entry (provenance `miss`); `indirect` and `host` (and a
+  `nonlocal` at a function's entry or in no function) also give it a standard entry and a lookup slot, as an address-taken function has, since
+  the dispatcher or the host enters it by its address. A known function the dispatcher missed for want of a standard entry gets one.
+- **Resume points**: `nonlocal` inside a function's range becomes a root of that function (its walk reaches it as a block) and a resume point
+  of each of its call sites, as a setjmp's continuation is (`FnFacts::continuations`: the pending check after each call resumes there with every
+  register from the block when the SP is the frame's).
+- **Unserved**: `fpcr`, `refused`, `untranslated` and words this nxaot does not know stay misses, each reported as a `[RED] discover:` line.
+- **Code in data blocks**: an address of an entry or resume point that lies in a data block (a stretch the manifest or the loader took for data,
+  as `nso_code.data_blocks` takes one where more than a quarter of the words decode as nothing) is code the game ran: the words its control
+  flow reaches there (falling through, both ways of a conditional branch, `b` and `bl` targets) up to a `ret`, `br`, trap or undefined word
+  leave the data blocks before discovery (`analysis::CarveMisses`), so that discovery, the lifter and the cache keys all see them as code.
+- The log: `aot: misses: N addresses, M new entries, K resume points, J still unserved (<reason> <count>, ... | none)`; a new entry is an
+  address discovery's own sources do not make an entry, or a known function that gets a standard entry; addresses the pack serves without the
+  file (an earlier pack's misses) are counted in N only. `nxaot discover --tsv` writes a `miss` row per address (`entry`, `std`, `resume`,
+  `known`, `unserved` and why).
+- **Caches**: the analysis cache's key takes the misses' addresses and reasons (not their counts, which every session changes), so a new
+  misses file misses the analysis cache, as a changed manifest does, and only the units whose functions change are compiled again (their code,
+  bounds and facts are in their keys); a later session's file with the same addresses hits both. Without `--misses` every key is what it was,
+  and the packs are the same bytes (fnptr-gcc, switch-clang and the synthetic module, checked against the base commit's nxaot).
+- `--no-root <hex>` (tests): none of discovery's own sources may make that address an entry; a miss still does.
+
+The NSP script passes `<NSP folder>/<id>-work/profile/<module>.misses.tsv` beside `--profile` when it parses and names the module's image
+(`--no-profile` leaves the misses in use: they are a discovery input, not a tier choice); their addresses and reasons are in the pack's key.
+The launcher (dm/launcher) records them on every Play and offers "Repack with profile" (docs/settings.md, "On Windows and Linux").
+
+CTest `misses` ([tests/test_misses.py](tests/test_misses.py)): the synthetic game module's hidden function (two words in its data block, no
+symbol, no FDE, reached at run time through a pointer, with an observation gate in the manifest) packed with a misses file in the host's exact
+form naming it `indirect`: `aot: misses: 1 addresses, 1 new entries, 0 resume points, 0 still unserved (none)`, its two words taken out of
+the data block, its gate served (gate sites 2 -> 3, the build's "is in no discovered function's code" line gone), the analysis cache missed
+and 1 of 3 units compiled again, the same addresses with other counts hitting both caches and giving the same pack; another image's file
+ignored with a `[RED]` line; a malformed line stopping the build; a `nonlocal` at the return address of the call of the hidden function and an
+`untranslated` beside it (1 new entry, 1 resume point, the pack's resume points 0 -> 1, 1 unserved with its `[RED]` line). Then fnptr-gcc with
+`rt_check` held from discovery's roots (`--no-root`): its pack runs `rt_check` in the JIT fallback (48 runs from 3 addresses in `nxaot_host`'s
+mixed run, the expected output), and with a misses file naming it (`call`) it is discovered again (provenance `call,miss`), compiled, and the
+run needs no JIT at all. The host side: `t_aot_module`'s step 7 runs the module with `DM_AOT_PROFILE` and reads back `main.misses.tsv` (the
+hidden function's row, `indirect`, 1 entry; 2 after a second run; another image's file replaced).
+
+Not verified: a game (no game files here), the Windows host's writer (written, not run), and a JIT miss of the kinds the test modules do not
+have (`nocode`, `fpcr`, `refused`, `untranslated` from a real run, a `nonlocal` from a real longjmp the analysis missed).
 
 ## Threads and safepoints
 
@@ -1452,7 +1521,8 @@ every thread that runs guest code about 1,000 times per second of its CPU time (
 pc through the pack's function map, a host call or SVC counted for the guest function that made it) and at exit writes `<folder>/<module>.tsv`,
 one line per sampled function at its entry offset under `#` lines naming the module, its build ID, its image's SHA-256 and the pack; the NSP
 script passes `<NSP folder>/<id>-work/profile/<module>.tsv` to the module's next pack (docs/development.md, the x86 packing section;
-`--no-profile` ignores it). Design 12's form (`dm/games/<id>/aot_profile/<build ID>.tsv` with instruction offsets) is not what it writes:
+`--no-profile` ignores it); beside it the host writes the JIT fallback's misses, `<module>.misses.tsv`, which `--misses` takes ("JIT
+misses"). Design 12's form (`dm/games/<id>/aot_profile/<build ID>.tsv` with instruction offsets) is not what it writes:
 function entries are what the tiers need. CTest `t_aot_module` (dm/host) checks a written profile's hot function, and `profile` below builds
 the synthetic module with a profile in the host's form. The counts only choose the tier:
 LLVM's sample profile (the design's "the sample profile" of tier H) is not fed from them yet. A function's tier is part of its cache key;

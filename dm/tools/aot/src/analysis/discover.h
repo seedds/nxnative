@@ -1,8 +1,9 @@
 // Function discovery over a whole module (docs/design/aot-recompiler.md section 1.3): the entries from every source the design lists, in its order
 // (FDEs, symbols, DT_INIT / DT_FINI and the init and fini arrays, relocation targets in text, adr and adrp + add, bl targets and b targets that
-// leave their function, LSDA landing pads, jump-table targets, the gap sweep), the provenance of each, a CFG per function from dynarmic's decoder
-// table and the direct branches, jump tables recovered on the lifted IR (src/analysis/jumptable.h), exclusive windows, the interprocedural
-// summaries of section 2.3 (src/analysis/summary.h) and the coverage of the text. `nxaot discover` prints it (src/main.cpp).
+// leave their function, LSDA landing pads, jump-table targets, the gap sweep; then the host's JIT feedback, the misses, when it is given), the
+// provenance of each, a CFG per function from dynarmic's decoder table and the direct branches, jump tables recovered on the lifted IR
+// (src/analysis/jumptable.h), exclusive windows, the interprocedural summaries of section 2.3 (src/analysis/summary.h) and the coverage of the
+// text. `nxaot discover` prints it (src/main.cpp).
 #pragma once
 
 #include <cstdint>
@@ -32,10 +33,39 @@ enum Prov : uint32_t {
     kProvLsda = 1u << 11,       // an LSDA landing pad outside its function
     kProvJumpTable = 1u << 12,  // a jump-table target outside the function of the br
     kProvGap = 1u << 13,        // the gap sweep: code after a ret, b or br that nothing else named
+    kProvMiss = 1u << 14,       // a miss of the host's JIT fallback (DiscoverOptions::misses): an address the game ran with no compiled entry there
 };
-constexpr uint32_t kProvCount = 14;
+constexpr uint32_t kProvCount = 15;
 const char* ProvName(unsigned bit);   // "start", "fde", ...
 std::string ProvList(uint32_t mask);  // "fde,sym,call", in source order; "-" when empty
+
+// ---- The host's JIT feedback (design 1.3 and 11; README.md, "JIT misses") ----
+// A miss: a guest address the x86-64 engine's JIT fallback ran because the pack had no compiled code there, with why and how often (dm/host/aot.h, "The JIT
+// fallback's misses": DM_AOT_PROFILE writes <folder>/<module>.misses.tsv, `<module offset> <reason> <entries>` lines; nxaot build / discover --misses)
+struct Miss {
+    uint64_t offset = 0;
+    std::string reason;   // the host's word: indirect, call, host, nocode, nonlocal, fpcr, refused, untranslated, other
+    uint64_t count = 0;   // entries into the JIT fallback there (informative: neither discovery nor a cache key reads it)
+};
+// What discovery makes of a miss, by its reason: a function entry (indirect, call, host, nocode: a call, a branch or the host reached it), a resume point of the function
+// whose code holds it (nonlocal: a non-local transfer no native frame took, design 3.3 and 3.4; an entry when no function holds it), nothing (fpcr, refused, untranslated
+// and any other word: msr fpcr, a function the lifter refused, an encoding it does not translate: a pack cannot serve them, the JIT keeps them)
+enum class MissKind : uint8_t { Entry, Resume, Unserved };
+MissKind MissKindOf(const std::string& reason);
+bool MissNeedsStdEntry(const std::string& reason);   // indirect, host, nonlocal: the dispatcher or the host enters it by its address (a standard entry, a lookup slot)
+// The code a miss proves in a data block: the host ran it, so from each miss's address of kind Entry or Resume that lies in a data block (a stretch the manifest or the
+// loader took for data, as nso_code.data_blocks takes one where more than a quarter of the words decode as nothing), the words its control flow reaches there (falling
+// through, both ways of a conditional branch, b and bl targets, the return after a call) up to a ret, br, trap or undefined word leave the data blocks, and discovery,
+// the lifter and the cache keys see them as code. Returns those words as [lo, hi) runs, in address order
+std::vector<std::pair<uint64_t, uint64_t>> CarveMisses(module::Image& image, const std::vector<Miss>& misses);
+// What discovery made of one miss address (Discovery::misses): "entry" (a function entry discovery's own sources do not give), "std" (a known function that gets a
+// standard entry, which the dispatcher or the host needed), "resume" (a resume point of the function holding it), "known" (the pack serves it without the misses: an
+// earlier pack's), "unserved" (with why)
+struct MissResult {
+    uint64_t offset = 0;
+    std::string reasons;   // its reasons, comma-separated
+    std::string result, why;
+};
 
 // A set of guest registers: x0..x30, SP, v0..v31 (whole registers), NZCV
 struct RegSet {
@@ -157,6 +187,8 @@ struct DiscoverOptions {
     unsigned region_depth = 12;   // the dominators of a br block a jump-table region may start at
     unsigned threads = 0;         // the analysis's threads: walks, jump tables, summaries, windows, scans (the result is the same with any
                                   // number: README.md, "Phase 5c"); 0: one per CPU
+    std::vector<Miss> misses;     // the host's JIT feedback (--misses): roots of discovery by their MissKind (the image carved first, CarveMisses)
+    std::set<uint64_t> no_roots;  // a test's option (--no-root): addresses none of discovery's own sources makes an entry (a miss still does)
 };
 
 // Where discovery's time goes (seconds of each step over all rounds; `nxaot build` and `nxaot discover --times` print them)
@@ -195,6 +227,11 @@ struct Discovery {
     uint64_t regions_reused = 0;       // regions whose analysis came from the memo (jumptable.h, RegionMemo) instead of a lifting
     DiscoverTimes times;
     std::shared_ptr<InsnCache> insns;  // the per-instruction facts discovery computed, for the pack's plan (src/build/plan.cpp)
+    // With misses (DiscoverOptions::misses): what became of each address, by offset, and the resume points they give each function (function entry -> the
+    // addresses, sorted), which the pack makes continuations of the function's call sites (design 3.3, as a setjmp's; src/build/pack.cpp). The summary line
+    // `aot: misses: ...` is the first of the notes
+    std::vector<MissResult> misses;
+    std::map<uint64_t, std::vector<uint64_t>> miss_resumes;
 };
 
 Discovery Discover(const module::Image& image, const DiscoverOptions& options = {});

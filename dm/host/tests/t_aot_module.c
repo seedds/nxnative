@@ -33,6 +33,9 @@
 //     DM_AOT_PROFILE set: the profile the process writes at exit, <folder>/main.tsv, names the module, its build ID and its image's SHA-256, every line of it is
 //     `<offset> <samples>` as nxaot build --profile reads it, and synth_hot's entry has the most samples (more than half); the same run without the switch writes nothing,
 //     and the time per pass of synth_hot with and without it is the sampler's overhead on compiled code
+//   the JIT fallback's misses (with the JIT fallback; aot.h, "The JIT fallback's misses"): the run with DM_AOT_PROFILE set writes <folder>/main.misses.tsv beside the profile, whose
+//     one row is the hidden function's (`<offset> indirect 1`: the dispatcher's miss at an address with no compiled entry), under the profile's header; a second run adds its entry
+//     to the row, and a file of another image is replaced (dm/tools/aot/tests/test_misses.py packs the module with such a file: the hidden function becomes compiled code)
 //   t_aot_module --run <dir>     one run (the child); --fault <dir>: the fault run; --profile <dir>: the sampler's run
 #include "../aot.h"
 #include "../aot_hostfn.h"
@@ -365,6 +368,7 @@ static int child(const char *dir) {
     printf("t_aot_module: run status %d, %d checks, %d failed; %llu SVCs, %llu host calls, %llu dispatcher misses, %llu JIT addresses, %llu observation gate calls, "
            "%llu spin gate calls\n", g_status, g_checks, g_fails, (unsigned long long)s.svcs, (unsigned long long)s.host_calls, (unsigned long long)s.misses,
            (unsigned long long)s.jit_addresses, (unsigned long long)s.obs_gates, (unsigned long long)s.spin_gates);
+    if (!g_profile_run && dm_aot_profile_on()) dm_aot_profile_write();   // DM_AOT_PROFILE on a run (the parent's step 7): the profile and the misses now, as _exit runs no atexit
     fflush(NULL);
     if (g_profile_run) exit(g_fails ? 1 : g_status);   // exit: the sampler's writer runs (atexit)
     _exit(g_fails ? 1 : g_status);
@@ -610,6 +614,59 @@ int main(int argc, char **argv) {
                off_ns > 0 ? 100.0 * (on_ns - off_ns) / off_ns : 0.0);
         free(r.out);
     }
+    // 7. The JIT fallback's misses (aot.h, "The JIT fallback's misses"; aot_profile.c write_misses): the run with DM_AOT_PROFILE writes <folder>/main.misses.tsv beside the
+    //    profile. The hidden function, called through the dispatcher (blr) at an address with no compiled entry, is its one row: `<offset> indirect 1`, under the header that
+    //    names the module, its build ID and image as the profile's does (dm/tools/aot/tests/test_misses.py packs the module with a file of this form: the hidden function is
+    //    then compiled code). A second run adds its entry to that row (the same image); a file of another image is replaced, its rows dropped
+#if NXHOST_JIT
+    {
+        const char *mdir = "t_aot_module.tmp/misses", *mfile = "t_aot_module.tmp/misses/main.misses.tsv";
+        mkdir("t_aot_module.tmp", 0755);
+        mkdir(mdir, 0755);
+        remove(mfile);
+        set_env("DM_AOT_PROFILE", mdir);
+        static const char *const what[3] = {
+            "the JIT fallback's misses (DM_AOT_PROFILE): main.misses.tsv names the module, its build ID and image, and has one row, the hidden function's: indirect, 1 entry",
+            "a second run: its entry added to the same row (2), the file of the same image merged",
+            "a file of another image (its header's SHA-256 changed, a row of its own): replaced, only this run's row (1)"};
+        for (int pass = 0; pass < 3; pass++) {
+            if (pass == 2) {   // another image's misses: a header with another SHA-256 and a row that must not survive
+                const char *other = "# nxaot misses: another image's\n# module main, build ID aa07aa07aa07aa07aa07aa07aa07aa07, image SHA-256 "
+                                    "0000000000000000000000000000000000000000000000000000000000000000\n0x10 call 5\n";
+                if (spit(mfile, other, strlen(other))) verdict(0, "a misses file of another image");
+            }
+            run_child(argv[0], dir, &r);
+            unsigned long long hidden_at = 0;
+            const char *h = strstr(r.out, "check ok   the hidden function at main+");
+            if (h) sscanf(h, "check ok   the hidden function at main+%llx", &hidden_at);
+            size_t n = 0;
+            char *text = (char *)slurp(mfile, &n);
+            int rows = 0, bad_lines = 0, shown = 0, header = 0;
+            unsigned long long hidden_n = 0;
+            char want_head[160];
+            snprintf(want_head, sizeof want_head, "# module main, build ID %s, image SHA-256 ", BUILD_ID);
+            for (char *line = text, *next; line && *line; line = next) {
+                next = strchr(line, '\n');
+                if (next) *next++ = 0;
+                if (shown++ < 8 && pass == 0) printf("      | %s\n", line);
+                if (line[0] == '#') { header += !strncmp(line, want_head, strlen(want_head)) && strlen(line) == strlen(want_head) + 64; continue; }
+                unsigned long long off = 0, cnt = 0; char word[32], extra = 0;
+                if (sscanf(line, "%llx %31s %llu %c", &off, word, &cnt, &extra) != 3 || strncmp(line, "0x", 2)) { bad_lines++; continue; }
+                rows++;
+                if (off == hidden_at && !strcmp(word, "indirect")) hidden_n = cnt;
+            }
+            const char *note = pass == 0 ? "aot: misses: t_aot_module.tmp/misses/main.misses.tsv: 1 addresses, 1 entries into the JIT fallback, 1 of the addresses this session (main)"
+                             : pass == 1 ? "; merged with an earlier session's" : "; the file held another image's misses: replaced";
+            printf("      pass %d: %d rows, the hidden function main+%#llx: %llu entries\n", pass + 1, rows, hidden_at, hidden_n);
+            verdict(r.status == 0 && text && header == 1 && !bad_lines && rows == 1 && hidden_at && hidden_n == (pass == 1 ? 2u : 1u) && strstr(r.out, note), what[pass]);
+            free(text);
+            free(r.out);
+        }
+        set_env("DM_AOT_PROFILE", NULL);
+    }
+#else
+    puts("note: this build has no JIT fallback (NXHOST_JIT off): the run calls no hidden function, so it has no misses; the misses file is not checked");
+#endif
     printf("t_aot_module: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

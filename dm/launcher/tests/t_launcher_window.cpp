@@ -1,10 +1,12 @@
 // The launcher program itself (nxlauncher, found beside this test) over the games folder fake_games.h writes, with SDL's dummy video driver: the window draws one frame and exits
 // (--frames 1); "Show this window at launch" off and DM_LAUNCHER=0 start the last game at once (nxhost-run's stand-in is this test, NXL_FAKE_HOST=1), --window shows the window anyway;
-// --command prints what the model composes (launcher_model.cpp compose, in this process); --list prints the games as TSV. The launcher's own settings go to a folder of the test's
+// --command prints what the model composes (launcher_model.cpp compose, in this process, recording the profile as Play does); --list prints the games as TSV; with Alpha's profile
+// newer than its packs the frame says a better pack is possible, and --repack runs the packer (this test again) and waits. The launcher's own settings go to a folder of the test's
 // (XDG_CONFIG_HOME, APPDATA). No screen, GPU or game needed: the dummy driver's window has a software framebuffer, which SDL's 2D renderer draws into.
 #include "launcher_model.h"
 #include "fake_games.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -62,11 +64,28 @@ int main(int argc, char **argv) {
     g_nx = fake::str(fs::u8path(self_path()).parent_path() / (std::string("nxlauncher") + kExeSuffix));
     if (!fs::is_regular_file(fs::u8path(g_nx))) { std::fprintf(stderr, "FAIL: no %s beside this test (it is built with it)\n", g_nx.c_str()); return 1; }
     std::string games = fake::str(f.games), a_aot = fake::str(f.a / "aot_v131072"), a_log = fake::str(f.a_run / "log.txt");
+    // Alpha has a profile newer than its balanced packs (the second pack: launcher_model.h): the window says "a better pack is possible" and offers the repack
+    const fs::path prof = f.a_run.parent_path() / "profile";
+    fake::write(prof / "main.tsv", "# nxaot profile\n0x100 40\n");
+    fake::write(prof / "main.misses.tsv", "# nxaot misses\n0x208 indirect 1\n");
+    const auto t0 = fs::file_time_type::clock::now();
+    for (const char *n : {"main", "nro0"}) fs::last_write_time(f.a / "aot_v131072" / (std::string(n) + kPackSuffix), t0 - std::chrono::hours(1));
 
     Run r = run({"--frames", "1", "--games", games}, {}, "window");
     CHECK(r.status == 0, "the window drew its frame and closed");
     CHECK(has(r.out, "nxlauncher: 1 frame drawn, 3 games listed"), "one frame, the three games");
     CHECK(!fs::exists(g_root / "imgui.ini"), "no imgui.ini written");
+    CHECK(has(r.out, "nxlauncher: Alpha Game: Profile recorded: a better pack is possible (2 files in " + fake::str(prof) + "; Repack with profile)") &&
+              !has(r.out, "Beta Game: Profile recorded"), "the frame with Alpha's profile newer than its packs: a better pack is possible, for Alpha only");
+
+    // --repack: the packer without the window (the launch file's python row is this test, which acts as the packer), waited for, its status returned
+    r = run({"--games", games, "--pack", "max", "--repack", "0100AAAA00000000"}, {}, "repack");
+    std::string repack_log = fake::read(f.a_run / "repack.txt");
+    CHECK(r.status == 5 && has(r.out, "the packer started for the max pack") && has(r.out, "nxlauncher: the packer exited with status 5") &&
+              has(repack_log, "fake host: argv " + fake::str(g_root / "scripts" / "build_ipa_from_nsp.py") + "|" + games + "|--platform|" + kPlatform + "|--pack-mode|max|-k|"),
+          "--repack runs the packer on the NSP folder with the mode and waits: " + repack_log);
+    r = run({"--games", games, "--repack", "0100BBBB00000000"}, {}, "repack-none");
+    CHECK(r.status == 1 && has(r.out, "[RED] nxlauncher: ") && has(r.out, "pack it once more"), "--repack of a pack without the repack's rows: a red line, status 1");
 
     config("show_window=0\nlast=0100AAAA00000000\n");
     r = run({"--frames", "2", "--games", games}, {}, "show-off");
@@ -85,7 +104,7 @@ int main(int argc, char **argv) {
     CHECK(has(fake::read(f.a_run / "log.prev.txt"), "fake host: DM_OPMODE=0\n"), "the previous run's log kept");
 
     r = run({"--games", games, "--pack", "max", "--command", "0100aaaa00000000"}, {}, "command");
-    Command want = compose(*find_game(find_games(games), "0100AAAA00000000", nullptr), "max", ProcessEnv());
+    Command want = compose(*find_game(find_games(games), "0100AAAA00000000", nullptr), "max", ProcessEnv(), true);   // Play records by default
     std::string expect = "# Alpha Game (0100AAAA00000000), the max pack\n# cwd " + want.cwd + "\n# log " + want.log + "\n";
     for (const auto &e : want.set) expect += e.key + "=" + e.value + "\n";
     expect += "\n";

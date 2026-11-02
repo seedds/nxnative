@@ -233,3 +233,8 @@ set_tests_properties(analysis_threads PROPERTIES TIMEOUT 900)
 add_test(NAME corpus_funcdiff_c COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_funcdiff.py" --nxaot $<TARGET_FILE:nxaot>
          --nxaot-funcdiff $<TARGET_FILE:nxaot_funcdiff> --tier C --work "${CMAKE_CURRENT_BINARY_DIR}/funcdiff_c")
 set_tests_properties(corpus_funcdiff_c PROPERTIES TIMEOUT 900)
+# The host's JIT misses as discovery's input (aot-recompiler.md 1.3, 3.3 and 11; README.md, "JIT misses"): the synthetic module's hidden function, in a data block,
+# compiled when a misses file in the host's form names it (its gate served, the caches' keys), and a corpus function held from discovery's roots brought back
+add_test(NAME misses COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_misses.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/misses")
+set_tests_properties(misses PROPERTIES TIMEOUT 900)

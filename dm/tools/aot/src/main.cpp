@@ -1,10 +1,10 @@
 // nxaot: the ahead-of-time ARM64 -> x86-64 recompiler (docs/design/aot-recompiler.md). Subcommands today:
-//   nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times]
+//   nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>] [--no-root <hex>]...
 //                                                     function discovery, CFGs, jump tables, exclusive windows and summaries of a module
 //                                                     (src/analysis/discover.h): one line per function and the summary; --tsv writes every
 //                                                     row kind; --symbols-as-oracle takes no symbol as a source and compares with them;
 //                                                     --threads: the analysis's threads (0 or none: one per CPU; the result is the same);
-//                                                     --times: the seconds of its steps on standard error
+//                                                     --times: the seconds of its steps on standard error; --misses and --no-root as for build
 //   nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N]
 //                                                     the pack stage's convention facts (src/build/plan.h): the indirect view and per function
 //                                                     PASS, WRITES, LIVE_AFTER, RV, a standard entry, its indirect sites
@@ -20,7 +20,7 @@
 //   nxaot build <module.nro | name.aot.tsv> [-o <object.o>] [--shared <lib.so>] [--cc swifttail|ghc] [--mode balanced|max] [--tier C|W|H|H+]
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
 //               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>]
-//               [--no-groups] [--no-split] [--split-above N] [--target linux|windows] [--isel-misses]
+//               [--no-groups] [--no-split] [--split-above N] [--target linux|windows] [--isel-misses] [--misses <file>] [--no-root <hex>]...
 //                                                     the pack stage (src/build): every function of the module compiled, in units of
 //                                                     neighbouring functions (a function over the split limit in parts) on --workers threads
 //                                                     (0 or none: as many as the CPUs and the free memory allow), or taken from the cache
@@ -30,7 +30,11 @@
 //                                                     loads (--shared) and / or one relocatable object (-o); prints the module's numbers, the
 //                                                     seconds of each stage and the caches' hits and misses. --target windows: a pack for the
 //                                                     Windows host, a PE DLL (--shared <name>.dll) and / or one COFF object (-o): the same code,
-//                                                     the host's calls in its convention, its imports bound by the host (README.md, "Windows packs")
+//                                                     the host's calls in its convention, its imports bound by the host (README.md, "Windows packs").
+//                                                     --misses: the host's JIT feedback for this module (dm/host/aot.h, "The JIT fallback's misses":
+//                                                     DM_AOT_PROFILE's <module>.misses.tsv), roots of discovery (README.md, "JIT misses"), used when its
+//                                                     image SHA-256 is the module's (else a [RED] line and it is ignored); --no-root (tests): an address
+//                                                     none of discovery's own sources may make an entry, so that a miss naming it brings it back
 //   nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>
 //                                                     the line table of a pack against its code and its module (design 3.5; CTest lines): every
 //                                                     entry's native address must start an x86 instruction that accesses memory, inside the
@@ -62,6 +66,7 @@
 #include "module/manifest.h"
 #include "nxaot_lock.h"
 
+#include <llvm/ADT/StringRef.h>
 #include <llvm/Support/FileSystem.h>
 
 #include <llvm/IR/PassTimingInfo.h>
@@ -87,7 +92,8 @@ namespace {
 
 int Usage() {
     std::fprintf(stderr,
-                 "usage: nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times]\n"
+                 "usage: nxaot discover <module.nro | name.aot.tsv> [--symbols-as-oracle] [--tsv <out>] [--threads N] [--times] [--misses <file>]\n"
+                 "                      [--no-root <hex>]...\n"
                  "       nxaot plan <module.nro | name.aot.tsv> [--cc swifttail|ghc] [--all-entries] [--threads N]\n"
                  "       nxaot image <module.nro> <out dir> [<name>]\n"
                  "       nxaot manifest <name.aot.tsv>\n"
@@ -100,9 +106,18 @@ int Usage() {
                  "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes]\n"
                  "                   [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>] [--no-groups] [--no-split] [--split-above N]\n"
                  "                   [--target linux|windows]   (windows: a PE DLL --shared <name>.dll and / or a COFF object -o <object.obj>)\n"
-                 "                   [--isel-misses]\n"
+                 "                   [--isel-misses] [--misses <file>] [--no-root <hex>]...\n"
                  "       nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>\n");
     return 2;
+}
+
+// --no-root's address (hexadecimal, 0x optional)
+bool ParseHex(const std::string& s, uint64_t* v) {
+    const char* p = s.c_str();
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) p += 2;
+    char* end = nullptr;
+    *v = std::strtoull(p, &end, 16);
+    return *p && end && !*end;
 }
 
 std::string X(uint64_t v) {
@@ -124,13 +139,41 @@ const char* ClassOf(const nxaot::analysis::Function& f) {
     return !f.summary.returns ? "noreturn" : f.summary.preserving ? "preserving" : "open";
 }
 
+// --misses (README.md, "JIT misses"): the host's file of this module's JIT misses, taken when its header names this image's SHA-256 (another image's, or none: a
+// [RED] line, and the file is ignored), the code they prove in the image's data blocks taken out of them first (analysis::CarveMisses), as discovery, the lifter and
+// the cache keys must all see it. False when the file cannot be read or a line does not parse (*error says which)
+bool UseMisses(const std::string& path, nxaot::module::Image* image, std::vector<nxaot::analysis::Miss>* out, std::string* error) {
+    std::string sha;
+    std::vector<nxaot::analysis::Miss> rows;
+    out->clear();
+    if (!nxaot::build::ReadMisses(path, &rows, &sha, error)) {
+        return false;
+    }
+    const std::string own = llvm::StringRef(image->Sha256Hex()).lower();
+    if (sha != own) {
+        std::printf("[RED] nxaot: the misses %s were recorded on %s (image SHA-256 %s), not on this module's image (%s): ignored\n", path.c_str(),
+                    sha.empty() ? "an image the file does not name" : "another image", sha.empty() ? "none" : sha.c_str(), own.c_str());
+        return true;
+    }
+    const auto runs = nxaot::analysis::CarveMisses(*image, rows);
+    uint64_t words = 0;
+    for (const auto& [lo, hi] : runs) words += (hi - lo) / 4;
+    if (!runs.empty()) {
+        std::printf("aot: misses %s: %llu words of data blocks are code the game ran there (%zu runs from %s): decoded as code\n", path.c_str(),
+                    static_cast<unsigned long long>(words), runs.size(), X(runs.front().first).c_str());
+    }
+    *out = std::move(rows);
+    return true;
+}
+
 int Discover(int argc, char** argv) {
     using namespace nxaot::analysis;
-    std::string path, tsv;
+    std::string path, tsv, misses;
     DiscoverOptions opts;
     bool times = false;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
+        uint64_t held = 0;
         if (a == "--symbols-as-oracle") {
             opts.symbols = false;
         } else if (a == "--tsv" && i + 1 < argc) {
@@ -139,6 +182,11 @@ int Discover(int argc, char** argv) {
             opts.threads = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
         } else if (a == "--times") {
             times = true;
+        } else if (a == "--misses" && i + 1 < argc) {
+            misses = argv[++i];
+        } else if (a == "--no-root" && i + 1 < argc && ParseHex(argv[i + 1], &held)) {
+            opts.no_roots.insert(held);
+            ++i;
         } else if (path.empty() && !a.empty() && a[0] != '-') {
             path = a;
         } else {
@@ -148,9 +196,16 @@ int Discover(int argc, char** argv) {
     if (path.empty()) {
         return Usage();
     }
-    const auto image = Load(path);
+    auto image = Load(path);
     if (!image) {
         return 1;
+    }
+    if (!misses.empty()) {
+        std::string error;
+        if (!UseMisses(misses, &*image, &opts.misses, &error)) {
+            std::fprintf(stderr, "nxaot discover: %s\n", error.c_str());
+            return 1;
+        }
     }
     const Discovery d = Discover(*image, opts);
     if (times) {
@@ -234,8 +289,12 @@ int Discover(int argc, char** argv) {
     for (const auto& [lo, hi] : c.uncovered_ranges) {
         rows.push_back("gap\t" + X(lo) + "\t" + X(hi) + "\tuncovered");
     }
+    for (const auto& m : d.misses) {  // --misses: what became of each address (entry, std, resume, known, unserved and why)
+        rows.push_back("miss\t" + X(m.offset) + "\t" + m.reasons + "\t" + m.result + (m.why.empty() ? "" : "\t" + m.why));
+    }
     std::string prov_line = "summary\tprovenance";
     for (unsigned b = 0; b < kProvCount; ++b) {
+        if ((1u << b) == kProvMiss && !any[b]) continue;  // only when misses made an entry (the line is as before without them)
         prov_line += "\t" + std::string(ProvName(b)) + "\t" + std::to_string(primary[b]) + "/" + std::to_string(any[b]);
     }
     std::vector<std::string> summary = {
@@ -540,12 +599,13 @@ int Opcodes(int argc, char** argv) {
 
 int Build(int argc, char** argv) {
     using nxaot::build::Tier;
-    std::string path, object, shared;
+    std::string path, object, shared, misses;
     nxaot::build::BuildOptions o;
     bool tier_set = false;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         const bool has = i + 1 < argc;
+        uint64_t held = 0;
         if (a == "-o" && has) {
             object = argv[++i];
         } else if (a == "--shared" && has) {
@@ -605,6 +665,11 @@ int Build(int argc, char** argv) {
             o.split_above = std::max<uint64_t>(8, std::strtoull(argv[++i], nullptr, 10));  // CTest split: most of the corpus in parts
         } else if (a == "--profile" && has) {
             o.profile_path = argv[++i];
+        } else if (a == "--misses" && has) {
+            misses = argv[++i];  // the host's JIT feedback (README.md, "JIT misses")
+        } else if (a == "--no-root" && has && ParseHex(argv[i + 1], &held)) {
+            o.no_roots.insert(held);  // tests: discovery's own sources do not make it an entry
+            ++i;
         } else if (a == "--isel-misses") {
             o.isel_misses = true;  // FastISel's misses by kind (tier C's instruction selection; README.md, "Phase 5d")
         } else if (a == "--target" && has) {
@@ -630,12 +695,16 @@ int Build(int argc, char** argv) {
         o.tier = o.mode == "max" ? Tier::HPlus : Tier::W;  // no profile: balanced is tier W everywhere, max tier H+ (section 9.3)
     }
     const auto t_start = std::chrono::steady_clock::now();
-    const auto image = Load(path);
+    auto image = Load(path);
     if (!image) {
         return 1;
     }
     nxaot::build::BuildStats s;
     std::string error;
+    if (!misses.empty() && !UseMisses(misses, &*image, &o.misses, &error)) {
+        std::printf("[RED] nxaot build: %s: %s\n", path.c_str(), error.c_str());
+        return 1;
+    }
     // The objects that are not the cache's (the tables' object, and every unit without a cache) go to a folder beside the output, removed again
     const std::string work = (shared.empty() ? object : shared) + ".parts";
     std::vector<std::string> objects;

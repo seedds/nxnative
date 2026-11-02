@@ -1,7 +1,8 @@
 // The sampler of the x86-64 execution engine (aot.h, "The sampler"; dm/tools/aot/README.md, "Tiers by profile"): DM_AOT_PROFILE=<folder> samples every thread that runs guest code
 // at DM_AOT_PROFILE_HZ (1000 by default) per second of its own CPU time and writes, at process exit, the profile `nxaot build --profile` reads: <folder>/<module>.tsv per module with
 // samples, one line `<module offset of a function's entry> <samples>` per sampled function. The packer (scripts/build_ipa_from_nsp.py --platform linux / windows) takes
-// <NSP folder>/<id>-work/profile/<module>.tsv for the module's next pack: its functions with samples at tier H, the others at tier C (balanced mode).
+// <NSP folder>/<id>-work/profile/<module>.tsv for the module's next pack: its functions with samples at tier H, the others at tier C (balanced mode). Beside each profile the writer
+// puts the JIT fallback's misses, <folder>/<module>.misses.tsv (write_misses; aot.h, "The JIT fallback's misses"), which the packer gives nxaot build --misses.
 // A sample is counted by count_pc, the same on both systems, from the thread's interrupted rip:
 //   in a pack's function       that function (aot_arena.c dm_aot_fn_of_code: the function map, a split function's parts and a group's functions each to their own entry)
 //   elsewhere, in a host call  the guest function that called it (dm_aot_thread.prof_at: the call's return address, an SVC's instruction; aot_run.c sets it)
@@ -298,6 +299,125 @@ static void mkdirs(char *path) {   // mkdir -p
     for (char *s = path + 1; *s; s++) if (is_sep(*s)) { const char c = *s; *s = 0; mkdir(path, 0755); *s = c; }
     mkdir(path, 0755);
 }
+static void file_name(const module_t *m, char *out, size_t n) {   // a module's name as a file name
+    snprintf(out, n, "%s", m->name);
+    for (char *s = out; *s; s++) if (*s == '/' || *s == '\\') *s = '_';
+}
+static void sha_hex(const dm_aot_pack *p, char out[65]) {   // the image the pack was compiled from (its descriptor's SHA-256: the image's, as the loader checked it)
+    const uint8_t *h = dm_aot_pack_desc(p)->sha256;
+    for (int b = 0; b < 32; b++) snprintf(out + 2 * b, 3, "%02x", h[b]);
+}
+
+// The JIT fallback's misses (aot.h, "The JIT fallback's misses"): per module with a pack and misses this session, <dir>/<module>.misses.tsv, this session's (address, reason)
+// pairs and the rows the file holds when an earlier session of the same image wrote it (their entries added up), by module offset, then reason. At exit, outside any signal
+// handler: the pairs are a copy taken under the table's lock (dm_aot_jit_misses), the files written as the profile's are (a temporary name, then renamed over the old one)
+typedef struct { uint64_t off, n; char word[16]; int now; } miss_row;
+static int miss_cmp(const void *a, const void *b) {
+    const miss_row *x = a, *y = b;
+    if (x->off != y->off) return x->off < y->off ? -1 : 1;
+    return strcmp(x->word, y->word);
+}
+static int miss_add(miss_row **rows, size_t *n, size_t *cap, uint64_t off, const char *word, uint64_t count, int now) {
+    if (*n == *cap) {
+        const size_t c = *cap ? 2 * *cap : 64;
+        miss_row *r = realloc(*rows, c * sizeof *r);
+        if (!r) return -1;
+        *rows = r; *cap = c;
+    }
+    miss_row *r = &(*rows)[(*n)++];
+    r->off = off; r->n = count; r->now = now;
+    snprintf(r->word, sizeof r->word, "%s", word);
+    return 0;
+}
+// The rows of the misses file at path when its header names image sha (an earlier session of this image wrote it), appended to rows: their number. *other: the file names another
+// image (its rows are not taken: the file is replaced)
+static size_t miss_earlier(const char *path, const char *sha, miss_row **rows, size_t *n, size_t *cap, int *other) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    char line[512], mod[64], bid[80], hex[80], word[32];
+    int same = 0;
+    const size_t first = *n;
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == '#') {
+            if (sscanf(line, "# module %63[^,], build ID %79[^,], image SHA-256 %79s", mod, bid, hex) == 3) { same = !strcmp(hex, sha); *other = !same; }
+            continue;
+        }
+        unsigned long long off, cnt;
+        if (same && sscanf(line, "%llx %31s %llu", &off, word, &cnt) == 3 && miss_add(rows, n, cap, off, word, cnt, 0)) break;
+    }
+    fclose(f);
+    return *n - first;
+}
+
+static int write_misses(const char *dir, int *bad) {
+    uint64_t dropped = 0;
+    const size_t total = dm_aot_jit_misses(NULL, 0, &dropped);
+    if (!total) {
+        LOG("aot: misses: the JIT fallback ran for no pack this session: no misses file written to %s", dir);
+        return 0;
+    }
+    dm_aot_miss *all = calloc(total, sizeof *all);
+    uint8_t *taken = calloc(total, 1);
+    if (!all || !taken) { LOG("[RED] aot: misses: no memory for %zu misses: none written", total); free(all); free(taken); (*bad)++; return 0; }
+    const size_t got = dm_aot_jit_misses(all, total, &dropped);
+    int files = 0;
+    const int npacks = dm_aot_pack_count();
+    for (int i = 0; i < npacks; i++) {
+        const dm_aot_pack *p = dm_aot_pack_at(i);
+        const module_t *m = dm_aot_pack_module(p);
+        const uint64_t base = (uint64_t)(uintptr_t)m->base;
+        miss_row *rows = NULL;
+        size_t n = 0, cap = 0, now = 0;
+        for (size_t k = 0; k < got; k++) {
+            if (taken[k] || all[k].pc - base >= m->size) continue;
+            taken[k] = 1;
+            const char *word = dm_aot_miss_word(all[k].reason);
+            if (word && !miss_add(&rows, &n, &cap, all[k].pc - base, word, all[k].count, 1)) now++;
+        }
+        if (!now) { free(rows); continue; }
+        char name[64], path[sizeof g_dir + 96], tmp[sizeof path + 8], sha[65];
+        file_name(m, name, sizeof name);
+        snprintf(path, sizeof path, "%s/%s.misses.tsv", dir, name);
+        snprintf(tmp, sizeof tmp, "%s.tmp", path);
+        sha_hex(p, sha);
+        int other = 0;
+        const size_t earlier = miss_earlier(path, sha, &rows, &n, &cap, &other);
+        qsort(rows, n, sizeof *rows, miss_cmp);
+        size_t k = 0, addrs = 0, addrs_now = 0;
+        uint64_t entries = 0;
+        for (size_t j = 0; j < n; j++) {   // one row per address and reason: an earlier session's row and this one's added up
+            if (k && rows[k - 1].off == rows[j].off && !strcmp(rows[k - 1].word, rows[j].word)) { rows[k - 1].n += rows[j].n; rows[k - 1].now |= rows[j].now; continue; }
+            rows[k++] = rows[j];
+        }
+        for (size_t j = 0, e; j < k; j = e) {   // per address (its rows are adjacent)
+            int seen_now = 0;
+            for (e = j; e < k && rows[e].off == rows[j].off; e++) { entries += rows[e].n; seen_now |= rows[e].now; }
+            addrs++; addrs_now += seen_now != 0;
+        }
+        FILE *f = fopen(tmp, "wb");   // binary: the same bytes on Windows
+        if (!f) { LOG("[RED] aot: misses: cannot write %s", tmp); free(rows); (*bad)++; continue; }
+        fprintf(f, "# nxaot misses: guest addresses the x86-64 engine's JIT fallback ran because the pack had no compiled code there (dm/host/aot_run.c, DM_AOT_PROFILE); "
+                   "nxaot build --misses <this file>\n");
+        fprintf(f, "# module %s, build ID %s, image SHA-256 %s\n", m->name, m->build_id[0] ? m->build_id : "none", sha);
+        fprintf(f, "# pack %s\n", dm_aot_pack_path(p));
+        fprintf(f, "# %zu addresses, %llu entries into the JIT fallback; %zu of the addresses this session, the rest from earlier sessions of this image\n", addrs,
+                (unsigned long long)entries, addrs_now);
+        fprintf(f, "# <module offset> <reason> <entries>: indirect, call, host, nocode (an entry of the next pack), nonlocal (a resume point), fpcr, refused, untranslated, "
+                   "other (no pack serves them)\n");
+        for (size_t j = 0; j < k; j++) fprintf(f, "0x%llx %s %llu\n", (unsigned long long)rows[j].off, rows[j].word, (unsigned long long)rows[j].n);
+        free(rows);
+        if (fclose(f) || replace_file(tmp, path)) { LOG("[RED] aot: misses: cannot write %s", path); (*bad)++; continue; }
+        LOG("aot: misses: %s: %zu addresses, %llu entries into the JIT fallback, %zu of the addresses this session (%s%s)", path, addrs, (unsigned long long)entries, addrs_now,
+            m->name, other ? "; the file held another image's misses: replaced" : earlier ? "; merged with an earlier session's" : "");
+        files++;
+    }
+    size_t outside = 0;
+    for (size_t k = 0; k < got; k++) outside += !taken[k];
+    if (outside || dropped)
+        LOG("aot: misses: %zu outside every pack's module (not written), %llu entries the full tables did not keep (aot_run.c MAX_SEEN)", outside, (unsigned long long)dropped);
+    free(all); free(taken);
+    return files;
+}
 
 int dm_aot_profile_write(void) {
     if (!dm_aot_profile_on() || atomic_exchange(&g_written, 1)) return -1;
@@ -346,12 +466,10 @@ int dm_aot_profile_write(void) {
         qsort(rows, k, sizeof *rows, row_cmp);
         const module_t *m = dm_aot_pack_module(p);
         char name[64], path[sizeof g_dir + 96], tmp[sizeof path + 8], sha[65];
-        snprintf(name, sizeof name, "%s", m->name);
-        for (char *s = name; *s; s++) if (*s == '/' || *s == '\\') *s = '_';
+        file_name(m, name, sizeof name);
         snprintf(path, sizeof path, "%s/%s.tsv", dir, name);
         snprintf(tmp, sizeof tmp, "%s.tmp", path);
-        const uint8_t *h = dm_aot_pack_desc(p)->sha256;
-        for (int b = 0; b < 32; b++) snprintf(sha + 2 * b, 3, "%02x", h[b]);
+        sha_hex(p, sha);
         FILE *f = fopen(tmp, "wb");   // binary: the same bytes on Windows (no \r before each \n)
         if (!f) { LOG("[RED] aot: profile: cannot write %s", tmp); free(rows); bad++; continue; }
         fprintf(f, "# nxaot profile: guest functions sampled by the x86-64 engine (dm/host/aot_profile.c, DM_AOT_PROFILE); nxaot build --profile <this file>\n");
@@ -366,5 +484,6 @@ int dm_aot_profile_write(void) {
         files++;
     }
     if (!files && !bad) LOG("aot: profile: no samples in any pack's code: nothing written to %s", dir);
+    write_misses(dir, &bad);   // beside the profile (aot.h, "The JIT fallback's misses")
     return bad ? -1 : 0;
 }

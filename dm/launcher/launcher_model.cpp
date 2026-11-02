@@ -195,6 +195,8 @@ bool load_launch(const std::string &path, LaunchFile *out, std::string *err) {
         } else if (kind == "path") {
             if (name == "host") out->host = value; else if (name == "cwd") out->cwd = value; else if (name == "choices") out->choices = value;
             else if (name == "log") out->log = value; else if (name == "settings") out->settings = value;
+            else if (name == "profile") out->profile = value; else if (name == "package") out->package_dir = value; else if (name == "packer") out->packer = value;
+            else if (name == "python") out->python = value; else if (name == "keys") out->keys = value; else if (name == "nxaot") out->nxaot = value;
         } else if (kind == "pack") out->packs.push_back({name, value, false});
         else if (kind == "env") out->env.push_back({name, value});
     }
@@ -465,7 +467,7 @@ std::string chosen_mode(const Game &g, const Config &c) {
     return modes.empty() ? "" : modes[0];
 }
 
-Command compose(const Game &g, const std::string &mode, const Env &env) {
+Command compose(const Game &g, const std::string &mode, const Env &env, bool record) {
     Command c; c.cwd = g.launch.cwd; c.log = g.launch.log;
     const Pack *pack = nullptr;
     for (const auto &p : g.launch.packs) if (mode.empty() || p.mode == mode) { pack = &p; break; }   // as run.sh: the first pack row, or the one NXPACK names
@@ -483,6 +485,7 @@ Command compose(const Game &g, const std::string &mode, const Env &env) {
     };
     if (!(env.get("DM_SAVED_CHOICES", &v) && v == "0")) for (const auto &e : read_env_file(g.launch.choices)) add(e);
     for (const auto &e : g.launch.env) add(e);
+    if (record) add({"DM_AOT_PROFILE", profile_folder(g)});   // the launcher's own: last, so that what the player or the pack set wins
     return c;
 }
 
@@ -684,6 +687,60 @@ std::string now_text(int64_t t) {
 #endif
     char buf[32]; std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", &tm);
     return buf;
+}
+
+// ---- The second pack ----
+std::string profile_folder(const Game &g) {
+    if (!g.launch.profile.empty()) return g.launch.profile;
+    return S(P(g.launch.cwd).parent_path() / "profile");   // <id>-work/run -> <id>-work/profile, where the packer looks (build_ipa_from_nsp.py: wdir / 'profile')
+}
+
+bool record_profile(const Config &c, const Game &g) { return c.get("record." + g.launch.title_id, "1") != "0"; }
+
+static int64_t ticks(const fs::path &p) {   // a file's modification time on the file clock (only compared with another's)
+    std::error_code ec;
+    auto t = fs::last_write_time(p, ec);
+    return ec ? 0 : (int64_t)t.time_since_epoch().count();
+}
+
+ProfileState profile_state(const Game &g, const std::string &mode) {
+    ProfileState s; s.folder = profile_folder(g);
+    std::error_code ec;
+    for (const auto &e : fs::directory_iterator(P(s.folder), ec)) {   // <module>.tsv and <module>.misses.tsv (dm/host/aot_profile.c), not the writer's .tmp files
+        std::string n = S(e.path().filename());
+        if (!e.is_regular_file(ec) || n.size() < 5 || n.compare(n.size() - 4, 4, ".tsv")) continue;
+        const int64_t t = ticks(e.path());
+        s.newest = s.files++ ? std::max(s.newest, t) : t;
+    }
+    const std::string suffix = kPackSuffix;
+    for (const auto &p : g.launch.packs) {
+        if (!mode.empty() && p.mode != mode) continue;
+        for (const auto &e : fs::directory_iterator(P(p.folder), ec)) {
+            std::string n = S(e.path().filename());
+            if (n.size() <= suffix.size() || n.compare(n.size() - suffix.size(), suffix.size(), suffix)) continue;
+            const int64_t t = ticks(e.path());
+            s.packs = s.pack_files++ ? std::max(s.packs, t) : t;
+        }
+        if (!mode.empty()) break;
+    }
+    return s;
+}
+
+Command repack_command(const Game &g, const std::string &mode) {
+    Command c; c.mode = mode.empty() ? "balanced" : mode;
+    const LaunchFile &l = g.launch;
+    if (l.package_dir.empty() || l.packer.empty() || l.python.empty()) {
+        c.error = g.launch_path + " names no package folder, packer or Python to pack " + l.title + " again with (a pack made before those rows): pack it once more with "
+                  "scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform " + std::string(kPlatform) + ", which writes them";
+        return c;
+    }
+    c.argv = {l.python, l.packer, l.package_dir, "--platform", kPlatform, "--pack-mode", c.mode};
+    if (!l.keys.empty()) { c.argv.push_back("-k"); c.argv.push_back(l.keys); }
+    if (!l.nxaot.empty()) { c.argv.push_back("--nxaot"); c.argv.push_back(l.nxaot); }
+    c.cwd = l.package_dir;
+    c.log = S(P(l.log.empty() ? S(P(l.cwd) / "log.txt") : l.log).parent_path() / "repack.txt");
+    c.set = {{"PYTHONUNBUFFERED", "1"}};   // its lines reach repack.txt as they are said, for the log pane
+    return c;
 }
 
 }   // namespace nxl

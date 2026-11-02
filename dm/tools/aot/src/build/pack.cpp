@@ -2587,7 +2587,73 @@ bool TiersFromProfile(const BuildOptions& o, const Plan& plan, std::map<uint64_t
     return true;
 }
 
+// The analysis cache's key with the misses (--misses; README.md, "JIT misses"): the module's key (AnalysisKey) and what discovery reads of them, each address with
+// its reasons (the entries' counts are not read: a later session's file with the same addresses keeps the analysis), and a test's --no-root addresses. Without
+// either it is the module's key as it is, so the inputs of packs without misses keep their entries
+std::string MissesKey(const std::string& akey, const BuildOptions& o) {
+    if (o.misses.empty() && o.no_roots.empty()) return akey;
+    std::set<std::pair<uint64_t, std::string>> rows;
+    for (const auto& m : o.misses) rows.emplace(m.offset, m.reason);
+    std::string list;
+    for (const auto& [off, reason] : rows) list += std::to_string(off) + ":" + reason + ",";
+    std::string held;
+    for (const uint64_t a : o.no_roots) held += std::to_string(a) + ",";
+    cache::KeyBuilder k;
+    k.Add("analysis", akey).Add("misses", list).Add("no_roots", held);
+    return k.Hex();
+}
+
+// The misses' resume points (design 3.3: analysis::Discovery::miss_resumes) as continuations of their function's call sites, as a setjmp's continuation is
+// (FnFacts::continuations: the pending check after each call resumes there with every register from the block, when the SP is the frame's)
+void AddMissResumes(const analysis::Discovery& d, Plan* plan) {
+    for (const auto& [entry, points] : d.miss_resumes) {
+        const auto it = plan->fns.find(entry);
+        if (it == plan->fns.end()) continue;
+        std::vector<uint64_t>& c = it->second.continuations;
+        for (const uint64_t r : points) {
+            if (std::find(c.begin(), c.end(), r) == c.end()) c.push_back(r);
+        }
+        std::sort(c.begin(), c.end());
+    }
+}
+
 }  // namespace
+
+bool ReadMisses(const std::string& path, std::vector<analysis::Miss>* out, std::string* sha256, std::string* error) {
+    std::ifstream in{path};
+    if (!in) {
+        *error = "cannot read the misses " + path;
+        return false;
+    }
+    out->clear();
+    sha256->clear();
+    std::string line;
+    unsigned number = 0;
+    while (std::getline(in, line)) {
+        ++number;
+        llvm::StringRef rest = llvm::StringRef(line).trim();
+        if (rest.consume_front("#")) {
+            // The header the host writes (as the profile's): # module <name>, build ID <id>, image SHA-256 <hex>
+            const size_t at = rest.find("image SHA-256 ");
+            if (rest.trim().starts_with("module ") && at != llvm::StringRef::npos) *sha256 = rest.drop_front(at + 14).trim().lower();
+            continue;
+        }
+        if (rest.empty()) continue;
+        llvm::SmallVector<llvm::StringRef, 4> f;
+        rest.split(f, ' ', -1, false);
+        if (f.size() == 1) rest.split(f, '\t', -1, false);
+        llvm::StringRef off_text = f.empty() ? "" : f[0];
+        off_text.consume_front_insensitive("0x");
+        analysis::Miss m;
+        if (f.size() != 3 || off_text.getAsInteger(16, m.offset) || f[2].getAsInteger(10, m.count) || f[1].empty()) {
+            *error = path + ":" + std::to_string(number) + ": not `<module offset in hex> <reason> <entries>`";
+            return false;
+        }
+        m.reason = f[1].str();
+        out->push_back(std::move(m));
+    }
+    return true;
+}
 
 bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::string& work_dir, std::vector<std::string>* objects,
                   BuildStats* stats, std::string* error) {
@@ -2622,7 +2688,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     bool reads_fpsr = false, warm = false;
     std::string akey, apath;
     if (use_cache) {
-        akey = AnalysisKey(image, conv, o.all_entries, o.split ? o.split_above : UINT64_MAX, tool);
+        akey = MissesKey(AnalysisKey(image, conv, o.all_entries, o.split ? o.split_above : UINT64_MAX, tool), o);
         apath = AnalysisPath(o.cache_dir, akey);
         std::string why;
         warm = LoadAnalysis(apath, akey, &cached, &why);
@@ -2633,6 +2699,8 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     if (!warm) {
         analysis::DiscoverOptions dopts;
         dopts.threads = workers;
+        dopts.misses = o.misses;      // the host's JIT feedback: roots of discovery (README.md, "JIT misses")
+        dopts.no_roots = o.no_roots;
         fresh_d = analysis::Discover(image, dopts);
         s.discover_times = fresh_d.times;
         const auto tc = Clock::now();
@@ -2658,6 +2726,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         };
         const double c0 = cpu();
         fresh_plan = MakePlan(image, d, conv, o.all_entries, workers);
+        AddMissResumes(d, &fresh_plan);   // kept with the plan in the analysis cache
         const auto& dt = d.times;
         char line[256];
         std::snprintf(line, sizeof line,

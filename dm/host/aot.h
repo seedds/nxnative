@@ -349,7 +349,8 @@ int dm_aot_jit_stop_at(uint64_t pc);
 // ---------- The sampler (aot_profile.c; dm/tools/aot/README.md, "Tiers by profile") ----------
 // DM_AOT_PROFILE=<folder> (docs/env_switches.tsv): every thread that runs guest code is sampled DM_AOT_PROFILE_HZ times (1000 by default) per second of its own CPU time, and at process
 // exit (atexit, or dm_aot_profile_write before it) <folder>/<module>.tsv is written for every module with samples: the profile `nxaot build --profile` reads (one module per file), one
-// line `<module offset of a function's entry> <samples>` per sampled function, most samples first, under '#' lines naming the module, its build ID, its image's SHA-256 and its pack.
+// line `<module offset of a function's entry> <samples>` per sampled function, most samples first, under '#' lines naming the module, its build ID, its image's SHA-256 and its pack
+// (and beside it <module>.misses.tsv, the JIT fallback's misses: below).
 // A sample in a pack's code counts for the function the pack's function map gives (a split function's parts and a group's functions each map to their own entry); one in a host call
 // or an SVC for the guest function that made it (dm_aot_thread.prof_at); one in the JIT fallback or elsewhere in the host only in the totals (aot_profile.c count_pc, the same on
 // both systems). Linux: a CPU-time timer per thread (timer_create, CLOCK_THREAD_CPUTIME_ID, SIGEV_THREAD_ID) and a SIGPROF handler on the thread's alternate stack that reads the
@@ -375,6 +376,25 @@ uint64_t dm_aot_pack_fn(const dm_aot_pack *p, size_t i);   // the module offset 
 _Atomic uint64_t *dm_aot_pack_samples(const dm_aot_pack *p);   // the sampler's count per function (index as dm_aot_pack_fn), made at the load when DM_AOT_PROFILE is set; else NULL
 const module_t *dm_aot_pack_module(const dm_aot_pack *p);
 const char *dm_aot_pack_path(const dm_aot_pack *p);
+
+// ---------- The JIT fallback's misses (aot_run.c counts them, aot_profile.c writes them; design 1.3 and 11, dm/tools/aot/README.md "JIT misses") ----------
+// Every entry into the JIT fallback is counted per guest address and reason (aot_run.c note_jit): why the pack had no compiled code there. With DM_AOT_PROFILE=<folder> the
+// profile's writer puts them, per module with a pack, in <folder>/<module>.misses.tsv beside its profile: '#' lines naming the module, its build ID, its image's SHA-256 and
+// its pack (as the profile's), then one line `<module offset> <reason> <entries>` per address and reason, by offset. An earlier session's file of the same image is merged
+// in (its entries added), so what one pack's misses taught stays for the next; another image's is replaced. `nxaot build --misses <file>` takes them as roots of discovery.
+// The reasons, and what nxaot makes of the address:
+//   indirect      an indirect branch (blr, br: the dispatcher's miss) to an address with no compiled entry        an entry with a standard entry and a lookup slot
+//   call          a direct branch or call (b, bl) to an address that is no compiled function's entry            an entry
+//   host          a call from the host (dm_guest_call) to an address with no compiled entry                     an entry with a standard entry and a lookup slot
+//   nocode        compiled code that ran on into an address that is no compiled function's entry               an entry
+//   nonlocal      a non-local transfer (longjmp, an exception, 3.3) to a continuation no native frame took       a resume point of the function holding it (else an entry)
+//   fpcr, refused, untranslated, other: msr fpcr left the module's FPCR, a function the lifter refused, an encoding it does not translate: misses no pack serves
+// A run of the JIT that goes on with code it was already running (after a compiled entry it called returned into it, a host call, a pause) is no miss (its address still counts
+// in dm_aot_stats' jit_addresses), and no miss is recorded under DM_AOT_JIT_ALL. The [RED] line comes once per address and reason
+typedef struct { uint64_t pc, count; uint32_t reason; } dm_aot_miss;
+// The (address, reason) pairs so far into out[0..max) (a copy, under the table's lock): their number (with out NULL, all of them); *dropped: entries the full tables did not keep
+size_t dm_aot_jit_misses(dm_aot_miss *out, size_t max, uint64_t *dropped);
+const char *dm_aot_miss_word(uint32_t reason);   // a reason's word in the misses file; NULL for none of a pack
 
 // ---------- Faults (aot_fault.c) ----------
 void crash_install(void);                  // the fault handlers (signals on POSIX, a vectored exception handler on Windows); once

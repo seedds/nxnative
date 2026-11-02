@@ -1,8 +1,9 @@
 // The games folder the launcher's tests write (t_launcher_model.cpp, t_launcher_window.cpp): three packs as scripts/build_ipa_from_nsp.py --platform linux / windows writes them
 // (port_launch_file, port_settings, aot_packs), with fake packs and no game files.
 //   Alpha Game (0100AAAA00000000): both pack modes (max in aot_v131072/max/), an NRO with its pack, a refused one, the settings list, a pack environment file's switch (DM_MOTION=0),
-//     and the player's env.txt: a saved choice (Handheld), a value the pack does not offer (metalfx), a render scale, a diagnostic switch and a comment
-//   Beta Game (0100BBBB00000000), one level down in its NSP folder: the balanced pack only, no settings list
+//     and the player's env.txt: a saved choice (Handheld), a value the pack does not offer (metalfx), a render scale, a diagnostic switch and a comment; the rows of a repack
+//     (package: the games folder, its NSP folder; packer, keys, nxaot: names only; python: host, so that the test acts as the packer too) and no profile row (the folder beside run/)
+//   Beta Game (0100BBBB00000000), one level down in its NSP folder: the balanced pack only, no settings list, a profile row of its own and no repack rows
 //   Gamma Game (0100CCCC00000000): a max pack row whose folder lacks main's pack: no complete pack
 // host: the program the launch files name as nxhost-run (the test itself, which acts as one with NXL_FAKE_HOST=1 in its environment)
 #pragma once
@@ -96,11 +97,14 @@ inline Folder make(const fs::path &root, const std::string &host) {
     std::string p = nxl::kPlatform;
     fs::path a_aot = f.a / "aot_v131072";
     packs(a_aot, true); packs(a_aot / "max", true);
-    write(f.a / ("launch-" + p + ".tsv"), launch("Alpha Game", "0100AAAA00000000", f.a, f.a_run, host, true, {{"balanced", a_aot}, {"max", a_aot / "max"}}, "env\tDM_MOTION\t0\n"));
+    const std::string repack = "path\tpackage\t" + str(f.games) + "\npath\tpacker\t" + str(root / "scripts" / "build_ipa_from_nsp.py") + "\npath\tpython\t" + host +
+                               "\npath\tkeys\t" + str(root / "keys" / "prod.keys") + "\npath\tnxaot\t" + str(root / "nxaot") + "\n";
+    write(f.a / ("launch-" + p + ".tsv"), launch("Alpha Game", "0100AAAA00000000", f.a, f.a_run, host, true, {{"balanced", a_aot}, {"max", a_aot / "max"}}, "env\tDM_MOTION\t0\n" + repack));
     write(f.a / ("launcher-" + p + ".json"), kSettings);
     write(f.a_run / "env.txt", kChoices);
     packs(f.b / "aot_v0", false);
-    write(f.b / ("launch-" + p + ".tsv"), launch("Beta Game", "0100BBBB00000000", f.b, f.b_run, host, false, {{"balanced", f.b / "aot_v0"}}));
+    write(f.b / ("launch-" + p + ".tsv"), launch("Beta Game", "0100BBBB00000000", f.b, f.b_run, host, false, {{"balanced", f.b / "aot_v0"}},
+                                                 "path\tprofile\t" + str(f.games / "Beta NSPs" / "recorded") + "\n"));
     packs(f.c / "aot_v0/max", false, false);
     write(f.c / ("launch-" + p + ".tsv"), launch("Gamma Game", "0100CCCC00000000", f.c, f.games / "0100CCCC00000000-work/run", host, false, {{"max", f.c / "aot_v0/max"}}));
     write(f.games / "notes/readme.txt", "not a pack\n");   // a folder without packs is skipped

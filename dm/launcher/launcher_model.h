@@ -65,6 +65,10 @@ struct Pack { std::string mode, folder; bool complete = false; };   // complete:
 struct LaunchFile {
     std::string title, title_id, version, package, platform, graphics;
     std::string host, cwd, choices, log, settings;
+    // What a session records and what packs the game again (path rows of build_ipa_from_nsp.py port_launch_file; empty in a launch file written before them): profile, the folder
+    // DM_AOT_PROFILE writes the sample profiles and JIT misses to; package_dir, the NSP folder (the package row); packer and python, the script and its Python; keys, prod.keys's
+    // path; nxaot, the recompiler the pack was made with
+    std::string profile, package_dir, packer, python, keys, nxaot;
     std::vector<Pack> packs;   // the first is the default
     std::vector<KV> env;
 };
@@ -127,7 +131,9 @@ struct Command {
     std::string error;     // why it cannot start ('' when it can)
 };
 std::string chosen_mode(const Game &g, const Config &c);   // the player's pack mode when it has complete packs, else the first that has
-Command compose(const Game &g, const std::string &mode, const Env &env);
+// record: "Record a profile while playing" (record_profile): DM_AOT_PROFILE set to the game's profile folder after everything else, so the environment, env.txt or an env row
+// that sets it wins (the host writes the sample profile and the JIT misses there at exit: dm/host/aot.h)
+Command compose(const Game &g, const std::string &mode, const Env &env, bool record = false);
 
 // ---- The child process ----
 struct Child {
@@ -149,5 +155,25 @@ Start decide_start(const Config &c, const Env &env, const std::vector<Game> &gam
 
 std::string now_text(int64_t unix_seconds);   // "2026-11-01 14:05" in local time, "never" for 0
 int64_t unix_now();
+
+// ---- The second pack: what a session teaches the next pack (docs/settings.md, "On Windows and Linux"; dm/tools/aot/README.md, "Tiers by profile" and "JIT misses") ----
+// Play records by default: nxhost-run gets DM_AOT_PROFILE=<the profile folder> (compose's record) unless the player turned "Record a profile while playing" off (record.<title ID>=0
+// in launcher.txt) or the environment sets it. At exit the host writes <module>.tsv (the functions it sampled) and <module>.misses.tsv (the addresses its JIT fallback ran) there;
+// when those are newer than the game's packs the list says "Profile recorded: a better pack is possible" and "Repack with profile" runs the packer in the background
+std::string profile_folder(const Game &g);                  // the profile row, else <id>-work/profile beside the working folder (a launch file before that row)
+bool record_profile(const Config &c, const Game &g);        // "Record a profile while playing" (on unless record.<title ID>=0)
+struct ProfileState {
+    std::string folder;
+    int files = 0;         // profile and misses files there (<module>.tsv, <module>.misses.tsv)
+    int pack_files = 0;    // packs (<name><kPackSuffix>) in the mode's folder
+    int64_t newest = 0;    // the newest of those files, the newest pack: file clock ticks (only compared; libstdc++'s file clock counts from 2174, so they are negative)
+    int64_t packs = 0;
+    bool better() const { return files > 0 && (pack_files == 0 || newest > packs); }   // "Profile recorded: a better pack is possible"
+};
+ProfileState profile_state(const Game &g, const std::string &mode);
+// The repack ("Repack with profile", nxlauncher --repack): <python> <packer> <package_dir> --platform <this system> --pack-mode <mode> [-k <keys>] [--nxaot <nxaot>], in the NSP
+// folder, its output in repack.txt beside the game's log (PYTHONUNBUFFERED=1: the log pane follows it as it goes); error when the launch file names no package, packer or python
+// (a pack made before those rows: pack the game once more by hand, which writes them)
+Command repack_command(const Game &g, const std::string &mode);
 
 }   // namespace nxl

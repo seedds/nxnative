@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,9 @@ struct BuildOptions {
     bool split = true;                              // functions over a size limit split into parts (design 9.3); off: --no-split
     uint64_t split_above = 8'192;                   // that limit in instructions; parts of a quarter to a half of it (--split-above, tests)
     std::string profile_path;                       // sampled guest offsets (--profile, design 9.3: tier H where sampled, tier C elsewhere)
+    std::vector<analysis::Miss> misses;             // the host's JIT feedback (--misses, ReadMisses; the image carved with analysis::CarveMisses before):
+                                                    // discovery's roots, and with them in the analysis cache's key
+    std::set<uint64_t> no_roots;                    // a test's --no-root (analysis::DiscoverOptions::no_roots), in the analysis cache's key too
     bool windows = false;                           // --target windows: a PE DLL for the Windows host ("Windows packs" in pack.cpp, coff.h)
     bool isel_misses = false;                       // count FastISel's misses by kind (--isel-misses; no cache: every unit compiled)
 };
@@ -99,6 +103,11 @@ bool BuildObjects(const module::Image& image, const BuildOptions& options, const
 // One relocatable object of the whole module: BuildObjects, then lld's relocatable link of the objects into object_path (a work directory
 // beside it is removed again)
 bool BuildObject(const module::Image& image, const BuildOptions& options, const std::string& object_path, BuildStats* stats, std::string* error);
+
+// A misses file of the host (dm/host/aot.h, "The JIT fallback's misses": DM_AOT_PROFILE writes <folder>/<module>.misses.tsv): '#' comment lines, among them the
+// header `# module <name>, build ID <id>, image SHA-256 <hex>`, whose SHA-256 goes to *sha256 ('' when the file has none), and one line `<module offset in hex>
+// <reason> <entries>` per address and reason. False with *error naming the line that does not parse, or a file that cannot be read
+bool ReadMisses(const std::string& path, std::vector<analysis::Miss>* out, std::string* sha256, std::string* error);
 
 // Links objects into a shared object with lld (as a library: lld::elf::link). False with *error set on failure
 bool LinkShared(const std::vector<std::string>& objects, const std::string& output, const std::string& soname, std::string* error);

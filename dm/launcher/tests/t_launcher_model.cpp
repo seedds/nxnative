@@ -1,10 +1,12 @@
 // nxlauncher's model (dm/launcher/launcher_model.cpp) over a games folder this test writes (fake_games.h): the games found and their pack modes, the settings rows and their effective
 // values (saved choices, a value the pack does not offer, the pack's own defaults, what the environment fixes), what starts a game (the pack, the host, the environment in the order
-// run.sh gives it, DM_SAVED_CHOICES=0, NXHOST), the saved-choice round trip through the player's env.txt, the launcher's own settings, DM_LAUNCHER and "Show this window at launch",
-// and a child process with its environment, working folder, log and exit status (this program, which acts as nxhost-run with NXL_FAKE_HOST=1).
+// run.sh gives it, DM_SAVED_CHOICES=0, NXHOST), the saved-choice round trip through the player's env.txt, the second pack (the profile folder, "Record a profile while playing",
+// a profile newer than the packs, the repack's command), the launcher's own settings, DM_LAUNCHER and "Show this window at launch", and a child process with its environment,
+// working folder, log and exit status (this program, which acts as nxhost-run and as the packer with NXL_FAKE_HOST=1).
 #include "launcher_model.h"
 #include "fake_games.h"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -179,6 +181,61 @@ static void round_trip(const fake::Folder &f) {
     fake::write(f.a_run / "env.txt", fake::kChoices);
 }
 
+// The second pack (launcher_model.h): the profile folder, "Record a profile while playing" and DM_AOT_PROFILE in what starts the game, a profile newer than the packs, and the
+// packer's command for the repack, run (this program acts as the packer: the launch file's python row names it)
+static void second_pack(const fake::Folder &f) {
+    auto g = find_games(fake::str(f.games));
+    const Game &a = g[0], &b = g[1];
+    MapEnv none;
+    const std::string a_prof = fake::str(f.a_run.parent_path() / "profile");
+    CHECK_EQ(profile_folder(a), a_prof, "no profile row: <id>-work/profile beside run/, where the packer looks");
+    CHECK_EQ(profile_folder(b), fake::str(f.games / "Beta NSPs" / "recorded"), "the profile row");
+    Config c;
+    CHECK(record_profile(c, a) && record_profile(c, b), "\"Record a profile while playing\" is on by default");
+    c.set("record.0100AAAA00000000", "0");
+    CHECK(!record_profile(c, a) && record_profile(c, b), "... and off per game");
+    Command on = compose(a, "", none, true);
+    CHECK(!on.set.empty() && on.set.back().key == "DM_AOT_PROFILE" && on.set.back().value == a_prof, "recording: DM_AOT_PROFILE, last, the profile folder");
+    CHECK_EQ(keys(compose(a, "", none).set).size() + 1, on.set.size(), "... and nothing else changes");
+    CHECK_EQ(value(compose(a, "", none, false).set, "DM_AOT_PROFILE"), std::string("<unset>"), "not recording: no DM_AOT_PROFILE");
+    MapEnv set; set.vars = {{"DM_AOT_PROFILE", "/elsewhere"}};
+    CHECK_EQ(value(compose(a, "", set, true).set, "DM_AOT_PROFILE"), std::string("<unset>"), "the environment's DM_AOT_PROFILE stays");
+    fake::write(f.a_run / "env.txt", std::string(fake::kChoices) + "DM_AOT_PROFILE=/saved/profile\n");
+    CHECK_EQ(value(compose(a, "", none, true).set, "DM_AOT_PROFILE"), std::string("/saved/profile"), "a DM_AOT_PROFILE line of env.txt wins over the launcher's");
+    fake::write(f.a_run / "env.txt", fake::kChoices);
+    // A profile newer than the packs of one mode and older than the other's
+    ProfileState s0 = profile_state(a, "balanced");
+    CHECK(s0.folder == a_prof && s0.files == 0 && s0.pack_files == 2 && !s0.better(), "no profile yet: nothing better (the balanced folder's two packs)");
+    const fs::path prof = fs::u8path(a_prof);
+    fake::write(prof / "main.tsv", "# nxaot profile\n0x100 40\n");
+    fake::write(prof / "main.misses.tsv", "# nxaot misses\n0x208 indirect 1\n");
+    fake::write(prof / "main.tsv.tmp", "being written\n");   // the host's temporary name: not counted
+    const auto t0 = fs::file_time_type::clock::now();
+    for (const char *n : {"main", "nro0"}) {
+        fs::last_write_time(f.a / "aot_v131072" / (std::string(n) + kPackSuffix), t0 - std::chrono::hours(1));
+        fs::last_write_time(f.a / "aot_v131072" / "max" / (std::string(n) + kPackSuffix), t0 + std::chrono::hours(1));
+    }
+    for (const char *n : {"main.tsv", "main.misses.tsv", "main.tsv.tmp"}) fs::last_write_time(prof / n, t0);
+    ProfileState sb = profile_state(a, "balanced"), sm = profile_state(a, "max");
+    CHECK(sb.files == 2 && sb.better(), "a profile and misses newer than the balanced packs: \"Profile recorded: a better pack is possible\"");
+    CHECK(sm.files == 2 && !sm.better(), "... and older than the max packs: nothing to say for max");
+    // The repack: the packer on the NSP folder with this system, the mode and what the pack was made with
+    Command r = repack_command(a, "max");
+    CHECK(r.error.empty(), "the repack's command: " + r.error);
+    CHECK_EQ(r.argv, (std::vector<std::string>{a.launch.host, fake::str(f.games.parent_path() / "scripts" / "build_ipa_from_nsp.py"), fake::str(f.games), "--platform", kPlatform,
+                                                "--pack-mode", "max", "-k", fake::str(f.games.parent_path() / "keys" / "prod.keys"), "--nxaot", fake::str(f.games.parent_path() / "nxaot")}),
+             "python, packer, the NSP folder, --platform, --pack-mode, -k, --nxaot");
+    CHECK(r.cwd == fake::str(f.games) && r.log == fake::str(f.a_run / "repack.txt") && value(r.set, "PYTHONUNBUFFERED") == "1",
+          "in the NSP folder, its output in repack.txt beside the game's log, unbuffered");
+    CHECK(repack_command(b, "balanced").error.find("pack it once more") != std::string::npos, "a launch file without the repack's rows: said");
+    r.set.push_back({"NXL_FAKE_HOST", "1"});
+    Child ch; std::string err;
+    CHECK(spawn(r, &ch, &err) && wait(&ch) == 0, "the packer ran: " + err);
+    std::string log = fake::read(f.a_run / "repack.txt");
+    CHECK(log.find("fake host: argv " + r.argv[1] + "|" + fake::str(f.games) + "|--platform|" + kPlatform + "|--pack-mode|max|-k|") != std::string::npos, "its arguments: " + log);
+    for (const char *n : {"main.tsv", "main.misses.tsv", "main.tsv.tmp"}) fs::remove(prof / n);
+}
+
 static void config(const fs::path &root) {
     MapEnv env;
 #if defined(_WIN32)
@@ -253,6 +310,7 @@ int main(int argc, char **argv) {
     settings(f);
     command(f);
     round_trip(f);
+    second_pack(f);
     config(root);
     start(f);
     child(root);

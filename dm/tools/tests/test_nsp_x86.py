@@ -35,7 +35,7 @@ NXAOT ='''#!{py}
 import os, sys
 a = sys.argv[1:]
 usage = ('usage: nxaot build <module.nro | name.aot.tsv> -o <object.o> [--shared <lib.so>] [--mode balanced|max]'
-         + ('' if os.environ.get('FAKE_NXAOT_OLD') else ' [--workers N] [--cache <dir>] [--target linux|windows] [--profile <file>]'))
+         + ('' if os.environ.get('FAKE_NXAOT_OLD') else ' [--workers N] [--cache <dir>] [--target linux|windows] [--profile <file>] [--misses <file>]'))
 if a[:1] != ['build'] or len(a) < 2: sys.stderr.write(usage + '\\n'); sys.exit(2)
 src, obj, so = a[1], a[a.index('-o') + 1], a[a.index('--shared') + 1]
 windows = '--target' in a and a[a.index('--target') + 1] == 'windows'
@@ -243,7 +243,10 @@ class Linux(Pack):
         rows = launch_rows(self.work / 'launch-linux.tsv')
         self.assertEqual({n: v for k, n, v in rows if k == 'game'}, {'title': 'Test Game', 'title_id': ID, 'version': '1.0.0', 'package': 'v0', 'platform': 'linux', 'graphics': 'nvn'})
         self.assertEqual({n: v for k, n, v in rows if k == 'path'}, {'host': str(REPO / 'build/linux/nxhost-run'), 'cwd': str(self.wdir / 'run'), 'choices': str(self.wdir / 'run/env.txt'),
-                                                                    'log': str(self.wdir / 'run/log.txt'), 'settings': str(self.work / 'launcher-linux.json')})
+                                                                    'log': str(self.wdir / 'run/log.txt'), 'settings': str(self.work / 'launcher-linux.json'),
+                                                                    'profile': str(self.wdir / 'profile'),   # DM_AOT_PROFILE's folder, and what packs the game again (the launcher's repack)
+                                                                    'package': str(self.nsp_dir), 'packer': str(REPO / 'scripts/build_ipa_from_nsp.py'), 'python': sys.executable,
+                                                                    'keys': str(self.keys), 'nxaot': str(self.nxaot)})
         self.assertEqual([(n, v) for k, n, v in rows if k == 'pack'], [('balanced', str(aot))])
         self.assertEqual([(n, v) for k, n, v in rows if k == 'env'], [
             ('DM_ROOT', str(self.work)), ('DM_ROMFS', str(self.game / 'RomFS')), ('DM_SAVE', str(self.wdir / 'run/save')), ('DM_TEMP', str(self.wdir / 'run/temp')),
@@ -332,6 +335,36 @@ class Linux(Pack):
         with self.assertRaisesRegex(nsp.BuildError, '--no-profile make the packs'):
             nsp.main(nsp.parse_args([str(self.nsp_dir), '-k', str(self.keys), '--platform', 'ios', '--no-profile']))
 
+    def test_jit_misses(self):   # <NSP folder>/<id>-work/profile/<module>.misses.tsv (dm/host/aot_profile.c writes them beside the profile): nxaot build --misses, their addresses in the pack's key
+        self.pack()
+        sha = (self.aot / 'main.aot.tsv').read_text().split('\n', 1)[0].split('\t')[3]
+        prof = self.wdir / 'profile'; prof.mkdir(parents=True)
+        head = ('# nxaot misses: guest addresses the x86-64 engine\'s JIT fallback ran because the pack had no compiled code there (dm/host/aot_run.c, DM_AOT_PROFILE); '
+                'nxaot build --misses <this file>\n')
+        def misses(name, image, rows):   # the host's form (t_aot_module's step 7 reads it back)
+            (prof / f'{name}.misses.tsv').write_text(head + f'# module {name}, build ID {BID}, image SHA-256 {image}\n# pack x\n# <module offset> <reason> <entries>\n'
+                                                     + ''.join(f'{o:#x} {r} {n}\n' for o, r, n in rows))
+        misses('main', sha, [(0x208, 'indirect', 1), (0x100, 'nonlocal', 2)])
+        misses('nro0', '00' * 32, [(0x10, 'call', 1)])   # recorded on another image: not used
+        self.pack()
+        tmp = self.work / 'tmp/aot'
+        self.assertEqual(self.tools('nxaot'), [   # main's key changed with its misses; nro0's did not
+            [str(self.nxaot), 'build', str(self.aot / 'main.aot.tsv'), '-o', str(tmp / 'main.o'), '--shared', str(tmp / 'main.aot.so'), '--mode', 'balanced', '--cache', str(self.wdir / 'aot-cache'),
+             '--misses', str(prof / 'main.misses.tsv')]])
+        self.assertIn(f'main: JIT misses {prof / "main.misses.tsv"} (2 addresses the game ran in the JIT fallback): roots of discovery for its pack', self.said)
+        self.assertTrue(any(m.startswith(f'the JIT misses {prof / "nro0.misses.tsv"} were recorded on another image of nro0') for m in self.said), self.said)
+        self.assertEqual([n for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'pack'], ['balanced'])   # complete with them
+        misses('main', sha, [(0x208, 'indirect', 9), (0x100, 'nonlocal', 4)])   # a later session: the same addresses, other counts
+        self.pack(); self.assertEqual(self.tools('nxaot'), [])                      # the counts are in no key
+        misses('main', sha, [(0x208, 'indirect', 9), (0x100, 'nonlocal', 4), (0x300, 'host', 1)])   # a new address: packed again
+        self.pack(); self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--misses', str(prof / 'main.misses.tsv')]])
+        self.pack('linux', '--no-profile'); self.assertEqual(self.tools('nxaot'), [])   # --no-profile leaves the misses in use: the same key
+        (prof / 'main.tsv').write_text(head.replace('misses', 'profile') + f'# module main, build ID {BID}, image SHA-256 {sha}\n0x100 40\n')   # beside a profile: both
+        self.pack(); self.assertEqual([c[-4:] for c in self.tools('nxaot')], [['--profile', str(prof / 'main.tsv'), '--misses', str(prof / 'main.misses.tsv')]])
+        (prof / 'main.misses.tsv').write_text('0x208 indirect many\n')   # one that does not parse: packed without it, said
+        self.pack(); self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--profile', str(prof / 'main.tsv')]])
+        self.assertTrue(any(m.startswith(f'[RED] the JIT misses {prof / "main.misses.tsv"} do not parse') for m in self.said), self.said)
+
     def test_removed_module_and_nros_leave_no_stale_input(self):
         self.pack()
         (self.game / 'RomFS/.nrr/game.nrr').unlink()   # an update without NRRs
@@ -344,7 +377,7 @@ class Linux(Pack):
             self.pack('linux', '--aot-workers', '3')
         for c in self.tools('nxaot'): self.assertNotIn('--cache', c); self.assertNotIn('--workers', c)
         self.assertIn('this nxaot has no --cache option: every function is compiled again on each pack', self.said)
-        self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), {'--cache', '--workers', '--target', '--profile'})
+        self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), {'--cache', '--workers', '--target', '--profile', '--misses'})
         (self.aot / 'main.aot.so').unlink(); self.pack('linux', '--aot-workers', '3')
         self.assertEqual(self.tools('nxaot')[0][-4:], ['--cache', str(self.wdir / 'aot-cache'), '--workers', '3'])
 

@@ -101,6 +101,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the guest gets the host's handle shifted left by 4, 16-byte aligned like an AArch64 heap block (`FH_OUT` / `FH_IN`). Each guest path resolver (`img_path`, `host_path_ex`, `set_guest_name`, `dir_snapshot`) turns backslashes into slashes first, so overlays, `..` and guest names see the same path (`hle_fs.c`; `dm/host/tests/t_fs.c`).
 - **Found on:** Metroid Prime 4: Beyond (SDK 19; bring-up in [issue #229](https://github.com/seedds/nxnative/issues/229), from [PR #513](https://github.com/seedds/nxnative/pull/513)); not in the games table yet.
 
+### An unhooked `fs::ReadFile` overload falls through to the SDK's own
+
+- **Symptom:** a null-pointer fault inside `sdk` at boot, right after the save data is mounted: `ldr w8, [x0, #0x24]` with `x0` holding a synthesized handle (SD GUNDAM G GENERATION CROSS RAYS: `sdk+0x62a78`, `x0 = 0x4000000000000390`). The file system itself is fine — `GetFileSize` on the same handle answered correctly just before.
+- **Cause:** the game imports `nn::fs::ReadFile(FileHandle, s64, void*, size_t, const ReadOption&)` — the overload with a `ReadOption` and no bytes-read output. The host hooked its `<size_t*, …>` twin and the cache-less `MountRom`, but not this one, so the call resolved to the SDK's own implementation in the `sdk` module. That one dereferences the handle as a real `FileAccessor*`, and the host's handle is a synthesized image-entry id (`1<<58 | mount<<32 | index`, shifted left by 4 for the guest) — [as above](#file-handles-with-low-bits-set-and-backslash-paths).
+- **Fix:** `HLE_FORCE` for `_ZN2nn2fs8ReadFileENS0_10FileHandleElPvmRKNS0_10ReadOptionE` in `hle_fs.c`, the same contract as its twin: the options are ignored and the read must be complete.
+- **Found on:** [SD GUNDAM G GENERATION CROSS RAYS](../../dm/games/010055700CEA8000/README.md) (SDK 9.4.1): the fault was the only thing between the boot and its frame loop; the game runs at 60 fps with the hook in place.
+- **Check:** list the game's `nn::fs` imports (`nso_syms.py`) against the host's `HLE_FORCE` names; a missing overload is visible as a symbol with no hook whose mangled name differs only in its parameters.
+
 ### C library path checks ask the file system's limits
 
 - **Symptom:** Addressables never start (no `StreamingAssets/aa/settings.json` in the `DM_FS=1` output at all), then a null asset crash (`main+0x31100ec`).

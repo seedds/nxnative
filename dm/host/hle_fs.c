@@ -1037,7 +1037,13 @@ HLE_FORCE("_ZN2nn2fs8ReadFileENS0_10FileHandleElPvm", "fsp-srv → pread(2), mus
 }
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE", "fsp-srv → pread(2) (overload with read options, which the host ignores)", Result, h_fs_ReadFileOpt,
           size_t *out, uint64_t h, int64_t off, void *buf, size_t sz, const void *opt) { (void)opt; return h_fs_ReadFile(out, h, off, buf, sz); }
-HLE_FORCE("_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", "fsp-srv; directory entry count (filtered by the mode given at open, read position untouched)", Result, h_fs_DirCount, int64_t *out, uint64_t hh) {
+
+// ReadFile with neither the bytes-read output nor a ReadOption (SD GUNDAM G GENERATION CROSS RAYS, SDK 9.4.1: main's JUMP_SLOT at 0x156a460).
+// The SDK's own nn::fs::ReadFile in `sdk` dereferences the FileHandle as a FileAccessor pointer, and the host's handle is a synthesised
+// image-entry id (1<<58 | mount<<32 | index, shifted left by 4 for the guest), so without this hook the guest faulted at sdk+0x62a78
+// reading [x0 + 0x24] from 0x4000000000000390 while GetFileSize (hooked) had answered correctly. Same contract as its twin above.
+HLE_FORCE("_ZN2nn2fs8ReadFileENS0_10FileHandleElPvmRKNS0_10ReadOptionE", "fsp-srv → pread(2) (overload with read options and no bytes-read output, which the host ignores)", Result, h_fs_ReadFileOpt2,
+          uint64_t h, int64_t off, void *buf, size_t sz, const void *opt) { (void)opt; size_t got = 0; return h_fs_ReadFile(&got, h, off, buf, sz); }HLE_FORCE("_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", "fsp-srv; directory entry count (filtered by the mode given at open, read position untouched)", Result, h_fs_DirCount, int64_t *out, uint64_t hh) {
     PATH_LOCK(); dirh_t *h = (dirh_t *)hh; int64_t n = 0;
     if (h->snap) { for (int64_t i = 0; i < h->nsnap; i++) if (h->mode & (h->snap[i].type == ENT_DIR ? DIRMODE_DIR : DIRMODE_FILE)) n++; *out = n; return RES_OK; }
     DIR *d = opendir(h->path); if (!d) return err_res("opendir", h->path);

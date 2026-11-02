@@ -595,6 +595,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked (`hle_net.c`, `hle_offline.c`): the `nifm` IP queries with SDK 10's `socket::InAddr` / `in_addr` mangling; `prepo::AddSessionId` / `AddInternetConnectionStatus`; `ldn::GetNetworkConfig`; SDK 11's socket overloads with plain `sockaddr` / `int` arguments (`Connect`, `Accept`, `GetSockName`, `Get` / `SetSockOpt`, `Fcntl`, `Recv`, `Send`).
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `nifm`, `prepo`); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: LDN, sockets).
 
+### Server environment type asked of nsd
+
+- **Symptom:** `[RED] sf: the game connects to service nsd:a itself, which the host does not serve` (and `nsd:u`), then an `nn::diag` abort at boot with Result `0xe8d` under `sdk+0x3a1748`, before the first frame.
+- **Cause:** the game asks `nn::oe::GetServerEnvironmentType()` early in `nnMain` and decodes the answer with a 5-entry table and a switch (0 `dd1`, 1 `lp1`, 2 `sd1`, 3 `sp1`, 4 `dp1`, anything above 4 "unknown"; `main+0x42e6c20` / `+0x42e6c50`). In SDK 17 the call is a tail call into `nn::nsd::GetApplicationServerEnvironmentType()`, an IPC to the network service discovery service `nsd:a`, which the host does not serve; the SDK aborted on the failed connection. The host answered only the environment's name (`nsd::GetEnvironmentIdentifier`, `lp1`).
+- **Fix:** both calls answered with 1, retail `lp1`, the environment the name already reported (`hle_offline.c`). The SDK's own tail call goes through a relocation slot, so the `nsd` hook also covers the `oe` wrapper on a game that imports only one of the two.
+- **Found on:** [Hogwarts Legacy](../../dm/games/0100F7E00C70E000/README.md) (SDK 17.5.4, the first boot of the provisional profile; its online imports then needed nothing else).
+
 ### Network requests stay on hold before they settle
 
 - **Symptom:** the boot sits at a black loading screen for good, CPU nearly idle, every thread waiting, about 1 boot in 6 (3 in 4 with four Mac hosts at once); the title movie is never opened, and the save files are never probed.
@@ -747,6 +754,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** a library's `free` rejects a pointer (`CentralHeap::Free` → `NotNMallocPtrError`).
 - **Cause:** the game's `main` defines its own `operator new` / `delete` (Unity's memory manager) and `sdk` has a copy forwarding to `malloc` / `free`.
 - **Fix:** symbols are resolved globally in load order (the first module's definition wins, also for a module's references to its own exports); only local / non-default-visibility symbols bind to the module itself (`loader.c`). The loader logs how many references bind to an earlier module.
+- **Note:** one exception, made after relocation: the libopus symbols of the module holding the SDK's software Opus decoder bind to that module's own definitions, since the host runs that decoder in place of the hwopus service, which has a private libopus in its own process ([Two libopus copies: the SDK's software decoder read the game's](audio.md#two-libopus-copies-the-sdks-software-decoder-read-the-games)).
 
 ### Undefined weak imports bind to 0
 

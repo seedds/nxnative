@@ -669,6 +669,16 @@ def decode_ubo_tex(name):
     slots, h = int(m.group(1)), int(m.group(2), 16)
     tb = slots & 0xffff; sb = (slots >> 16) - 1 if slots >> 16 else tb
     o0, o1, ty = h & 0x3fff, (h >> 14) & 0x3fff, h >> 28
+    if ty == 1:
+        # One word in a game uniform buffer and the other in c2's separate sampler table (Hogwarts Legacy 1.0.5, Unreal 4 on SDK 17: 46,782 of 65,047 shaders; fp_t_cb196612_10568002 =
+        # c[4] word 2 | c2 word 0x15A, separate sampler slot 0): the uniform word holds the texture handle (the game keeps its material textures' 64-bit handles in its own uniform
+        # buffers, 8 bytes apart, and binds a few samplers with BindSeparateSampler), whichever field it is in. The translator canonicalizes the two masked sources only when a mask
+        # is an immediate; with both masks from a constant buffer it keeps the OR's order (BindlessElimination.cs GetSourceForMaskedHandle), so 12,000 of these names carry the
+        # c2 word in the texture field (fp_t_cb589826_1002015A: c2 0x15A | c[8] word 8). The sampler part is then ('sep', separate sampler slot)
+        f = ((tb, o0), (sb, o1))
+        ub = [(c, o) for c, o in f if 3 <= c <= 16]
+        sp = [(c, o) for c, o in f if c == 2 and SAMP_BASE <= o * 4 < SAMP_BASE + abi.C2_ROW * abi.C2_SEP_SLOTS and (o * 4 - SAMP_BASE) % abi.C2_ROW == 0]
+        if len(ub) == 1 and len(sp) == 1: return (ub[0][0] - 3, ub[0][1] * 4), ('sep', (sp[0][1] * 4 - SAMP_BASE) // abi.C2_ROW)
     if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and not 3 <= sb <= 16): return None
     return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
@@ -756,7 +766,7 @@ def reflect(key, stage, msl, res):
             e.update(kind=abi.KIND_SBUF, index=int(re.fullmatch(r'[a-z]+_s(\d+)', nm).group(1)))
         elif decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)
             ut, us = decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm)
-            if nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1])
+            if nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP, reg=us[1]) if us[0] == 'sep' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1])
             elif 'texture_buffer' in ty: e.update(kind=abi.KIND_UNKNOWN)   # bindless typed buffer: not implemented in the replay layer
             else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1])
         elif c2_array(nm, ty) is not None:   # an array of the driver table's handles (c2_array): the replay fills element k from the slot whose c2 word is at off + 8k

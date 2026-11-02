@@ -367,6 +367,48 @@ static void relocate(module_t *m) {
     if (nint > 8) LOG("%s: %d bound to an earlier module's definition in all", m->name, nint);
 }
 
+// The SDK's libopus is a private copy: the module holding the SDK's software OpusDecoder binds the libopus symbols it defines to its own definitions.
+// The hardware Opus decoder runs in the hwopus service, another process with its own libopus; the host stands in for it with the sdk's software OpusDecoder (hle_codec.c), so that
+// decoder's libopus has to be as self-contained as the service's. Nintendo renamed most of it (nncodecLibopus_*), but the SILK tables, _celt_lpc / _celt_autocorr, eMeans and
+// tf_select_table kept libopus's names, and a game whose main bundles its own libopus exports some of them too: by load order (bind_sym) the sdk's GOT then points at main's.
+// Hogwarts Legacy (Unreal, an older float libopus in main): main's eMeans is 25 floats, the sdk's (fixed point, newer) 25 signed chars; main's silk_NLSF_CB_NB_MB / silk_NLSF_CB_WB
+// structs are 64 bytes against the sdk's 72; main's _celt_lpc / _celt_autocorr take floats where the sdk's take integers. Every voice line and cutscene track decoded through them
+// came out muffled and garbled (the SDK's AudioRenderer mixed them correctly: the decoder's own output was already wrong). On the console the same binding happens and does not
+// matter, since the game never runs the sdk's software decoder; main's own libopus and the subsdks' keep binding by load order, as on the console.
+static int opus_name(const char *n) {
+    static const char *const pre[] = { "silk_", "celt_", "_celt_", "opus_", "ec_", "clt_", "kiss_", "nncodecLibopus_" };
+    static const char *const names[] = { "eMeans", "eBands", "tf_select_table", "cache_bits50", "cache_index50", "logN400", "spread_icdf", "tapset_icdf", "trim_icdf", "small_energy_icdf",
+                                         "fft_twiddles48000_960", "window120", "layer0", "layer1", "layer2", "tansig_table", "downmix_int", "downmix_float" };
+    for (unsigned i = 0; i < sizeof pre / sizeof *pre; i++) if (!strncmp(n, pre[i], strlen(pre[i]))) return 1;
+    for (unsigned i = 0; i < sizeof names / sizeof *names; i++) if (!strcmp(n, names[i])) return 1;
+    return 0;
+}
+static void bind_private_opus(void) {
+    // the software decoder entry points hle_codec.c forwards to; a game's sdk keeps only the ones it links (Hogwarts Legacy: the C interface, no OpusDecoder class)
+    static const char *const entry[] = { "_ZN2nn5codec21InitializeOpusDecoderEPNS0_15OpusDecoderTypeEiiPvm", "_ZN2nn5codec11OpusDecoderC1Ev",
+                                         "_ZN2nn5codec32InitializeOpusMultiStreamDecoderEPNS0_26OpusMultiStreamDecoderTypeEiiiiPKhPvm", "_ZN2nn5codec22OpusMultiStreamDecoderC1Ev" };
+    module_t *om = NULL; int found = 0;   // the loaded modules in load order, as loaded_sym walks them; a flag ends the search (a loop on !om had clang-tidy's analyzer pass the module it took for null to module_sym again)
+    for (int i = 0; i < g_nloaded && !found; i++)
+        for (unsigned k = 0; k < sizeof entry / sizeof *entry && !found; k++) if (module_sym(g_loaded[i], entry[k])) { om = g_loaded[i]; found = 1; }
+    if (!om) { LOG("no SDK software Opus decoder in any module: nothing to bind privately"); return; }
+    if (om == g_loaded[0]) return;   // in the first loaded module, whose definitions win anyway
+    relocs_t rl = relocs_of(om); unsigned n = 0; char first[256] = "";
+    for (int t = 0; t < 2; t++)
+        for (uint64_t i = 0; i < rl.n[t]; i++) {
+            const Elf64_Rela *r = &rl.tab[t][i];
+            unsigned type = ELF64_R_TYPE(r->r_info);
+            if (type == R_AARCH64_RELATIVE) continue;
+            const Elf64_Sym *s = &om->symtab[ELF64_R_SYM(r->r_info)]; const char *nm = om->strtab + s->st_name;
+            if (!s->st_shndx || !opus_name(nm) || force_lookup(nm)) continue;   // undefined here, not libopus, or a host take-over (which bind_sym put first)
+            uint64_t self = (uint64_t)om->base + s->st_value + (type == R_AARCH64_JUMP_SLOT ? 0 : (uint64_t)r->r_addend);
+            uint64_t *where = (uint64_t *)(om->base + r->r_offset);
+            if (*where == self) continue;
+            if (n < 6) { size_t l = strlen(first); snprintf(first + l, sizeof first - l, "%s%s", l ? ", " : "", nm); }
+            *where = self; n++;
+        }
+    if (n) LOG("%s: %u libopus relocations bound back to its own definitions (%s%s): the SDK software Opus decoder stands in for the hwopus service, with a private libopus like the service's", om->name, n, first, n > 6 ? ", …" : "");
+}
+
 // ---- NRO modules (nn::ro, hle_ro.c) ----
 // A game may load modules at run time: nn::ro::LoadModule hands over an NRO image it read from its files (Super Smash Bros. Ultimate: the fighters' code, 98 NROs in data.arc, whose
 // exports main imports: 1,045 lua2cpp::create_agent_* functions). iOS runs no code loaded at run time, so the NROs are rewritten offline like the other modules (dm/tools/nro_collect.py,
@@ -660,7 +702,7 @@ void load_modules(const char *dir, const char **names, int n) {
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }
     force_init();
-    t = now_ns(); for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]); tr = now_ns() - t;
+    t = now_ns(); for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]); bind_private_opus(); tr = now_ns() - t;
     force_check();
     preload_nros(dir, nros);   // mapped now, relocated when the game loads them (hle_ro.c)
     { void hlecount_seal(void); hlecount_seal(); }   // DM_HLECOUNT: relocation done, seal the counting stub pages as read-only executable

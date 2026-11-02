@@ -116,6 +116,9 @@ void dm_guest_write_prepare(void *addr, size_t len) { for (int i = 0; i < g_nwri
 // The diagnostics module (the probes in diag.c) and the thread state dump (hle_thread.c) each register themselves here: a unit test that links only this file does not depend on them
 static int (*g_trap_hook)(ucontext_t *uc);
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc)) { g_trap_hook = fn; }
+// After the fault hooks, before the crash report: a fault in guest code goes to the game's user exception handler when it set one (hle_userexc.c), as Horizon's kernel delivers it
+static int (*g_exc_hook)(int sig, siginfo_t *si, void *uc);
+void crash_set_exc_hook(int (*fn)(int sig, siginfo_t *si, void *uc)) { g_exc_hook = fn; }
 void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
 void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
 // Dump the current state on demand (without exiting): the iOS app has no no-progress watchdog, so when the smoke test fails it sends dump through DM_LOG_PORT to trigger this -- what each guest thread is waiting on + the graphics-side wait points, the same thing the watchdog prints
@@ -136,6 +139,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         int is_write = (int)((uc->uc_mcontext->__es.__esr >> 6) & 1);   // The WnR bit of ESR
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
     }
+    if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGILL) && g_exc_hook && g_exc_hook(sig, si, uc)) return;
     crash_gate(sig);
     // The stderr lock may be held by another thread (stuck or suspended): the fprintf below would hang with it, the time limit's SIGALRM could not end the run, and the log would get nothing.
     // If it still cannot be taken after 1 s, write a single line with write() (pc / lr as module offsets) and exit. When this thread itself holds the lock, ftrylockfile still succeeds (file locks are recursive), unaffected

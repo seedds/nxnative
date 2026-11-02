@@ -671,6 +671,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         _exit(42);
     }
     case 0x1E: guest_clock_read_wait(); regs[0] = 0; regs[1] = guest_ticks(); return 0;   // GetSystemTick
+    case 0x28: dm_user_exc_return(regs[0]); return 0;   // ReturnFromException(result): the end of a user exception the host delivered (hle_userexc.c)
     case 0x27: {  // OutputDebugString(str, len)
         if (g_flag.dbg) fprintf(stderr, "[guest] %.*s\n", (int)regs[1], (char *)regs[0]);
         regs[0] = 0; return 0;
@@ -701,7 +702,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // 96 threads (pm_spec.cpp BaseApplicationThreads; a boost raises it to 256). Monster Train 2's Unity 2022.3 player creates a thread only when this is at least 1: the 0 it got here
         // left its main thread waiting at boot for a thread it never created (main+0x3e1ac4)
         case I_FreeThreadCount: { int thr_limit_used(void); int u = thr_limit_used(); v = u < 96 ? 96 - u : 0; break; }
-        case I_UserExcAddr: { static _Alignas(0x1000) uint8_t ctx[0x1000]; v = (uint64_t)ctx; break; }   // user exception context area: newer SDKs' SetDyingMessageRegion writes to +0x1c0 (0 would write through a null pointer)
+        case I_UserExcAddr: v = (uint64_t)dm_user_exc_ctx(); break;   // user exception context area (hle_userexc.c): the faulting context at +0; newer SDKs' SetDyingMessageRegion writes to +0x1c0 (0 would write through a null pointer)
         // The kernel's page size (Switch 2 SDKs): nn::ro::ProtectRelro takes it as the alignment of the RELRO bounds (value − 1 as a mask, 0 aborts), the VammManager maps that much up front.
         // Horizon's pages are 4 KB, the alignment of every module's segments (Donkey Kong Bananza)
         case I_PageSize: v = 0x1000; break;

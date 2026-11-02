@@ -52,7 +52,7 @@ def variant(msl):
     if f'[[buffer({dmsh_abi.LOGIC_BUFFER})]]' in msl: return None, f'fragment buffer {dmsh_abi.LOGIC_BUFFER} is taken'
     if re.search(r'\[\[color\(\d+\)\]\]\s*[,)]', msl): return None, 'an entry point already reads an attachment'
     pieces, at, names, targets = [], 0, [], set()
-    for m in re.finditer(r'^[^\n]*?\bfragment\s+(main0_out_[um])\s+(main0_[um])\s*\(', msl, re.M):
+    for m in re.finditer(r'^[^\n]*?\bfragment\s+(main0_out_(?:u|m(?:c[0-9a-f]{2})?))\s+(main0_(?:u|m(?:c[0-9a-f]{2})?))\s*\(', msl, re.M):
         struct, name = m.groups()
         st = re.search(r'struct %s\s*\{(.*?)\};' % struct, msl, re.S)
         if not st: return None, f'no struct {struct}'

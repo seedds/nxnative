@@ -37,6 +37,23 @@ def glslc_output():
     return bytes(d)
 
 
+def glslc_compute_with_gap():
+    """One compute output whose section header places GPU code after 0x180 bytes of constants."""
+    c, reported, actual, ncode = 0x100, 0x850, 0x9d0, 0x80
+    d = bytearray(c + actual + ncode)
+    d[:4] = GLSLC_MAGIC
+    struct.pack_into('<I', d, 0x44, len(d))
+    struct.pack_into('<I', d, 0x4c, 1)
+    struct.pack_into('<III', d, 0x90, actual + ncode, c, 0)
+    struct.pack_into('<4I', d, 0x90 + 0x30, 0, actual, ncode, actual)
+    d[c:c + 4] = ss.CTL_MAGIC
+    struct.pack_into('<I', d, c + 0x20, reported)
+    struct.pack_into('<I', d, c + 0x704, ncode)
+    struct.pack_into('<3I', d, c + 0x748, 8, 8, 1)
+    d[c + actual:c + actual + 4] = ss.CS_MAGIC
+    return bytes(d)
+
+
 def serialized_file(assets):
     """A synthetic serialized file (format 17, no type tree) whose objects are TextAssets. assets: [(name, script bytes)].
     The layout unityfs._tables reads: a 16-byte big-endian header + endianness byte, then little-endian metadata (version string, platform, no type tree,
@@ -91,6 +108,13 @@ class TextAssets(unittest.TestCase):
 
 
 class UnityTextGlslc(unittest.TestCase):
+    def test_compute_code_uses_section_offset_after_constants(self):
+        out = ss.glslc_shaders(glslc_compute_with_gap(), 'main')
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][1], 'cs')
+        self.assertEqual(out[0][3][:4], ss.CS_MAGIC)
+        self.assertEqual(len(out[0][2]), 0x9d0)
+
     def test_reads_only_the_textasset_that_holds_the_magic(self):
         d = serialized_file([('vfxsb', glslc_output()), ('notes', b'hello world')])
         out = ss.unity_text_glslc(d, 'resources.assets')

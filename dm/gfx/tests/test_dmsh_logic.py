@@ -73,6 +73,12 @@ class LogicVariant(unittest.TestCase):
         self.assertEqual(v.count('if (dm_lfb1) dm_r.m_1 = uint4(dm_logic(uint4(dm_r.m_1), dm_fb1, dm_lop, 1u));'), 2)
         self.assertIn('if (gl_FragCoord.y < 0.0)\n        { main0_out_u dm_r = main0_out_u{', v)   # a single-statement if keeps its return
 
+    def test_constant_output_mixed_entry(self):
+        extra = BASE[BASE.index('struct main0_out_m'):].replace('main0_out_m', 'main0_out_mc03').replace('main0_m(', 'main0_mc03(')
+        v, entries = dmsh_logic.variant(BASE + extra)
+        self.assertIn('main0_mc03', entries)
+        self.assertIn('fragment main0_out_mc03 main0_mc03(', v)
+
     def test_only_the_integer_entry_points(self):   # the host takes nothing else from the library
         v, _ = dmsh_logic.variant(BASE.replace('fragment main0_out main0(', '[[ early_fragment_tests ]] fragment main0_out main0('))
         self.assertNotIn('main0_out main0(', v); self.assertNotIn('early_fragment_tests', v)

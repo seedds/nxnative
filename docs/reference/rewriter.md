@@ -222,6 +222,14 @@ To enroll a cut for any game's own module:
 - **Fix:** the retry block gets a copy of its own: the retry block and the window's tail from the store on, under one prologue (`retry_block` / `site_retry_window`).
 - **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) 1.4.3 `main`, 8 sites.
 
+### Branches within an exclusive window
+
+- **Symptom:** `retry block overlaps a window` while rewriting `main`; after bypassing that check, `site_window` asserts on a `b` instruction.
+- **Cause:** an atomic update uses `ldaxrb; cbz <stlxrb>; clrex; b <after window>; stlxrb; cbz`. The conditional branch stays inside its own exclusive window, but the retry-block check treated it as an entry from outside. The window copier also handled conditional branches but not the unconditional branch past the store.
+- **Fix:** leave branches within their own window to `site_window`, which copies them with their original exclusive sequence. Relocate unconditional `b` instructions to the copied target or an exit stub in both exclusive-window copiers.
+- **Check:** update 1.0.7's `main` rewrites successfully; the sequence is at `main+0x2cdeb4`.
+- **Found on:** [Trails in the Sky 1st Chapter](../../dm/games/01002C9022770000/README.md#found-on-this-game) update 1.0.7.
+
 ### A window never spans a second exclusive load
 
 - **Symptom:** branches to an `ldxr … stxr` loop's head landed mid-window.

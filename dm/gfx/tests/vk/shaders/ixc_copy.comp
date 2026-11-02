@@ -1,0 +1,7 @@
+// t_vk_index_convert: a dispatch that writes what an indirect draw reads (its records, multi-draw count and indices) earlier in the submission: the words of storage buffer 0
+// after its first (the count of words) copied into storage buffer 1, one invocation a word over a stride of 64
+#version 450
+layout(local_size_x = 64) in;
+layout(set = 1, binding = 0, std430) readonly buffer S { uint n; uint w[]; } s;
+layout(set = 1, binding = 1, std430) writeonly buffer D { uint w[]; } d;
+void main() { for (uint i = gl_LocalInvocationID.x; i < s.n; i += 64u) d.w[i] = s.w[i]; }

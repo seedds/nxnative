@@ -1,18 +1,36 @@
-// Index conversions with a restart index (docs/design/vulkan-backend.md 2.7; vk_index.c, whose rules table this follows): a restart index ends a segment and drops the vertices of
-// a primitive it cuts short, so where a primitive lands depends on every segment before it. One workgroup: each of its 128 threads takes a contiguous chunk of the indices and
-// sums it up (has a restart, its first and last position, the indices drawn by the segments wholly inside it); a scan of the summaries gives each chunk the start of the segment
-// open at its entry and where that segment's indices go; then each thread writes its chunk's primitives, and the first writes the indexed indirect record {count, instances, 0,
-// base vertex, base instance} that the draw reads. Modes: 1 quads, 2 quad strips, 3 triangle fans and polygons, 4 line loops (as a line list), 5 lists of group vertices (points,
-// lines, triangles, the adjacency lists, patches). Push constants: the source's device address (aligned down to 4 bytes), the destination, the record, the byte offset, the index
-// size (1, 2 or 4), the index count, the mode, the group, the restart index, the destination's size in indices (cap), the record's instances, base vertex and base instance
+// Index conversions with a restart index, and every conversion of a draw whose count the GPU holds (docs/design/vulkan-backend.md 2.7; vk_index.c, whose rules table this
+// follows): a restart index ends a segment and drops the vertices of a primitive it cuts short, so where a primitive lands depends on every segment before it. One workgroup a
+// draw: each of its 128 threads takes a contiguous chunk of the indices and sums it up (has a restart, its first and last position, the indices drawn by the segments wholly
+// inside it); a scan of the summaries gives each chunk the start of the segment open at its entry and where that segment's indices go; then each thread writes its chunk's
+// primitives, and the first writes the indexed indirect record {count, instances, first index, base vertex, base instance} that the draw reads. Modes: 0 the indices as they are
+// (widened to 32 bits, the restart index made all ones), 1 quads, 2 quad strips, 3 triangle fans and polygons, 4 line loops (as a line list), 5 lists of group vertices (points,
+// lines, triangles, the adjacency lists, patches), 6 quads without indices over the backend's shared quad list (the record only). Without restart (flags bit 0 off, and always
+// for a draw without indices, whose implicit indices are 0 .. n-1) the stream is one segment.
+// A direct draw (rec 0): its count n, the list's size cap and the record's instances, base vertex and base instance are the push constants; the list starts at dst.
+// A draw whose count the GPU holds (rec != 0; 2026-11-02): workgroup d reads record d of the game's, rec + d * stride (kind 0 DrawArraysIndirect {count, instances, first, base
+// instance}: first becomes the base vertex; kind 1 DrawElementsIndirect {count, instances, first index, base vertex, base instance}; kind 2 DrawTransformFeedback: the byte count
+// the capture saved over the capture's vertex size, stride, with the push constants' instances and base instance), record d is the multi-draw's record mdi + d and draws nothing
+// at or past its count (the u32 at cnt; a word holding all ones for a single draw: every address a draw's form does not use points at valid memory, since lavapipe was seen
+// to load through a null one in a branch not taken);
+// its indices stop at the end of their memory pool (avail indices from src: counted in stat word 2) and at n (the per-draw limit: stat word 1, as quads past cap over the shared
+// list); its list takes its place in the submission's arena (dst, cap indices; heap: the indices taken so far, by compare-and-swap) and is cut to what is left when the rest is
+// smaller (stat word 0), and record d of args gets the list's place as its first index. Push constants: the source's device address (aligned down to 4 bytes; none without
+// indices), the destination, the records written (20 bytes apart), the game's first record, the multi-draw count, the arena's header and the statistics words (0 for a direct
+// draw), the byte offset at src, the index size (0 none, 1, 2 or 4), n, the mode, the group, the restart index, cap, instances, base vertex, base instance, flags (bit 0 restart,
+// bits 1-2 the kind), the records' stride (kind 2: the vertex size), avail, mdi
 #version 460
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 layout(local_size_x = 128) in;   // the workgroup size every Vulkan device has
 layout(buffer_reference, std430, buffer_reference_align = 4) buffer W { uint v[]; };
-layout(push_constant) uniform P { uvec2 src, dst, args; uint shift, isz, n, mode, group, ri, cap, instances, base_vertex, base_instance; } p;
+layout(push_constant) uniform P { uvec2 src, dst, args, rec, cnt, heap, stat; uint shift, isz, n, mode, group, ri, cap, instances, base_vertex, base_instance, flags, stride, avail, mdi; } p;
 shared uint s_has[128], s_first[128], s_last[128], s_inner[128];
-uint fetch(uint k) {
+shared uint s_n, s_from, s_inst, s_bv, s_bi, s_skip, s_at, s_total;   // the draw (its index count, first index, instances, base vertex and instance), nothing to write; its list's place
+uint g_from;   // the draw's first index in the source
+uvec2 at_(uvec2 a, uint b) { uint c; uint lo = uaddCarry(a.x, b, c); return uvec2(lo, a.y + c); }
+uint fetch(uint k) {   // index k of the draw (k + g_from < 2^30: its bytes may straddle two words)
+    if (p.isz == 0u) return k;
+    k += g_from;
     uint b = p.shift + (k & 3u) * p.isz, w = (k >> 2) * p.isz + (b >> 2), s = (b & 3u) * 8u;
     uint v = W(p.src).v[w] >> s;
     if (s + p.isz * 8u > 32u) v |= W(p.src).v[w + 1u] << (32u - s);
@@ -23,21 +41,53 @@ uint segc(uint n) {   // the indices a segment of n vertices draws
     if (p.mode == 2u) return n >= 4u ? (n - 2u) / 2u * 6u : 0u;
     if (p.mode == 3u) return n >= 3u ? 3u * (n - 2u) : 0u;
     if (p.mode == 4u) return n >= 2u ? 2u * n : 0u;
-    return n / p.group * p.group;
+    if (p.mode == 5u) return n / p.group * p.group;
+    return n;
 }
-void put(uint o, uint v) { if (o < p.cap) W(p.dst).v[o] = v; }
+void put(uint o, uint v) { if (o < s_total) W(p.dst).v[s_at + o] = v; }
+void record(uint d, uint count, uint first) { W a = W(at_(p.args, d * 20u)); a.v[0] = count; a.v[1] = s_inst; a.v[2] = first; a.v[3] = s_bv; a.v[4] = s_bi; }
 void main() {
-    uint t = gl_LocalInvocationID.x, chunk = (p.n + 127u) / 128u, a = min(t * chunk, p.n), b = min(a + chunk, p.n);
+    uint t = gl_LocalInvocationID.x, d = gl_WorkGroupID.x;
+    bool ind = p.rec != uvec2(0u);
+    if (t == 0u) {   // the draw
+        uint n = p.n, from = 0u, skip = 0u;
+        s_inst = p.instances; s_bv = p.base_vertex; s_bi = p.base_instance;
+        if (ind) {
+            uint kind = (p.flags >> 1) & 3u;
+            if (p.mdi + d >= W(p.cnt).v[0]) { n = 0u; s_inst = 0u; s_bv = 0u; s_bi = 0u; skip = 1u; record(d, 0u, 0u); }   // past the multi-draw's count: not drawn
+            else {
+                if (kind == 2u) { n = W(p.rec).v[0] / p.stride; s_bv = 0u; }   // DrawTransformFeedback: the vertices captured
+                else {
+                    W r = W(at_(p.rec, d * p.stride));
+                    n = r.v[0]; s_inst = r.v[1];
+                    if (kind == 0u) { s_bv = r.v[2]; s_bi = r.v[3]; } else { from = r.v[2]; s_bv = r.v[3]; s_bi = r.v[4]; }
+                }
+                if (p.isz != 0u) { uint room = from < p.avail ? p.avail - from : 0u; if (n > room) { n = room; atomicAdd(W(p.stat).v[2], 1u); } }   // past the pool's end
+                if (n > p.n) { n = p.n; atomicAdd(W(p.stat).v[1], 1u); }                                                                   // past the per-draw limit
+                if (p.mode == 6u) {   // quads over the shared list: the record only, at most cap indices
+                    uint q = n / 4u;
+                    if (q > p.cap / 6u) { q = p.cap / 6u; atomicAdd(W(p.stat).v[1], 1u); }
+                    record(d, 6u * q, 0u); skip = 1u;
+                }
+            }
+        }
+        s_n = n; s_from = from; s_skip = skip;
+    }
+    barrier();
+    if (s_skip != 0u) return;
+    uint n = s_n; g_from = s_from;
+    bool scan = (p.flags & 1u) != 0u && p.isz != 0u && p.mode != 0u;   // segments: restart on (indexed draws only)
+    uint chunk = (n + 127u) / 128u, a = min(t * chunk, n), b = min(a + chunk, n);
     // the chunk's summary: its restart indices (the first, the last) and the indices of the segments between them
     uint has = 0u, first = 0u, last = 0u, inner = 0u;
-    for (uint i = a; i < b; i++) if (fetch(i) == p.ri) { if (has == 0u) { has = 1u; first = i; } else inner += segc(i - last - 1u); last = i; }
+    if (scan) for (uint i = a; i < b; i++) if (fetch(i) == p.ri) { if (has == 0u) { has = 1u; first = i; } else inner += segc(i - last - 1u); last = i; }
     s_has[t] = has; s_first[t] = first; s_last[t] = last; s_inner[t] = inner;
     barrier();
     // an inclusive scan of the summaries: chunk A then chunk B is B when A has no restart, A when B has none, else A's first, B's last, and the segment between A's last and B's
     // first added to both inners
-    for (uint d = 1u; d < 128u; d <<= 1) {
+    for (uint e = 1u; e < 128u; e <<= 1) {
         uint h = 0u, f = 0u, l = 0u, in0 = 0u;
-        if (t >= d) { h = s_has[t - d]; f = s_first[t - d]; l = s_last[t - d]; in0 = s_inner[t - d]; }
+        if (t >= e) { h = s_has[t - e]; f = s_first[t - e]; l = s_last[t - e]; in0 = s_inner[t - e]; }
         barrier();
         if (h != 0u) {
             if (s_has[t] == 0u) { s_has[t] = 1u; s_first[t] = f; s_last[t] = l; s_inner[t] = in0; }
@@ -48,13 +98,27 @@ void main() {
     // the segment open at the chunk's entry starts after the last restart before it (the stream's start counts as one at -1), its indices after those of every segment before
     uint s = 0u, off = 0u;
     if (t > 0u && s_has[t - 1u] != 0u) { s = s_last[t - 1u] + 1u; off = segc(s_first[t - 1u]) + s_inner[t - 1u]; }
-    if (t == 0u) {
-        uint total = s_has[127] != 0u ? segc(s_first[127]) + s_inner[127] + segc(p.n - s_last[127] - 1u) : segc(p.n);
-        W(p.args).v[0] = min(total, p.cap); W(p.args).v[1] = p.instances; W(p.args).v[2] = 0u; W(p.args).v[3] = p.base_vertex; W(p.args).v[4] = p.base_instance;
+    if (t == 0u) {   // the list's length, its place and the record
+        uint total = s_has[127] != 0u ? segc(s_first[127]) + s_inner[127] + segc(n - s_last[127] - 1u) : segc(n), place = 0u;
+        if (ind) {   // taken from the arena: what is left when the rest is smaller (cut, counted)
+            uint used = atomicAdd(W(p.heap).v[0], 0u);
+            for (;;) {
+                uint take = min(total, p.cap - min(used, p.cap)), seen = atomicCompSwap(W(p.heap).v[0], used, used + take);
+                if (seen == used) { if (take < total) { atomicAdd(W(p.stat).v[0], 1u); total = take; } place = used; break; }
+                used = seen;
+            }
+        } else total = min(total, p.cap);
+        s_at = place; s_total = total;
+        record(d, total, place);
+    }
+    barrier();
+    if (p.mode == 0u) {   // the indices as they are, the restart index made all ones
+        for (uint i = a; i < b; i++) { uint v = fetch(i); put(i, (p.flags & 1u) != 0u && v == p.ri ? 0xffffffffu : v); }
+        return;
     }
     for (uint i = a; i < b; i++) {
         uint v = fetch(i);
-        if (v == p.ri) {
+        if (scan && v == p.ri) {
             if (p.mode == 4u && i - s >= 2u) { uint o = off + 2u * (i - s - 1u); put(o, fetch(i - 1u)); put(o + 1u, fetch(s)); }   // the loop's closing line
             off += segc(i - s); s = i + 1u;
             continue;
@@ -73,5 +137,5 @@ void main() {
             for (uint c = 0u; c < p.group; c++) put(o + c, fetch(i + 1u - p.group + c));
         }
     }
-    if (p.mode == 4u && b == p.n && b > a && p.n - s >= 2u) { uint o = off + 2u * (p.n - s - 1u); put(o, fetch(p.n - 1u)); put(o + 1u, fetch(s)); }   // the last segment's closing line
+    if (p.mode == 4u && b == n && b > a && n - s >= 2u) { uint o = off + 2u * (n - s - 1u); put(o, fetch(n - 1u)); put(o + 1u, fetch(s)); }   // the last segment's closing line
 }

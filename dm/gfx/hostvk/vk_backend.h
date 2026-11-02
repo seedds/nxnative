@@ -203,7 +203,7 @@ int hvk_bind_resources(VkCommandBuffer cb, hvk_layout *l, hvk_shader *const sh[6
 void hvk_pipeline_slot_reset(int slot);            // the slot's descriptor pools and set cache (its submission completed)
 void hvk_pipeline_shutdown(void);
 // The backend's own pipelines (vk_pipeline.c): one compute shader with push constants and buffer device addresses
-typedef enum { HVK_K_REPORT, HVK_K_PREDICATE, HVK_K_IX_EXPAND, HVK_K_ASTC, HVK_K_DESWIZZLE, HVK_K_DSPACK, HVK_K_QUAD_IND, HVK_K_IX_RESTART, HVK_K_N } hvk_kernel;   // ASTC decode, deswizzle, depth-stencil packing: P7; indirect quads: P8; index conversions (vk_index.c)
+typedef enum { HVK_K_REPORT, HVK_K_PREDICATE, HVK_K_IX_EXPAND, HVK_K_ASTC, HVK_K_DESWIZZLE, HVK_K_DSPACK, HVK_K_IX_RESTART, HVK_K_N } hvk_kernel;   // ASTC decode, deswizzle, depth-stencil packing: P7; index conversions (vk_index.c; IX_RESTART also every conversion of a draw whose count the GPU holds)
 int hvk_kernel_dispatch(VkCommandBuffer cb, hvk_kernel k, const void *push, uint32_t push_bytes, uint32_t groups);
 int hvk_kernel_dispatch3(VkCommandBuffer cb, hvk_kernel k, const void *push, uint32_t push_bytes, uint32_t gx, uint32_t gy, uint32_t gz);
 // The clear triangle (2.7): writes value into colour attachment slot (mask: channels) or the depth / stencil (slot -1), inside the open render pass with the pass's formats
@@ -247,9 +247,9 @@ typedef struct {
     // statistics (be_stats and the like)
     _Atomic uint64_t st_passes, st_draws, st_dispatches, st_pipelines, st_pipeline_ns, st_uploads, st_reuploads, st_upload_bytes, st_upload_ns;   // st_pipelines: made on the submit thread
     _Atomic uint64_t st_shaders, st_barriers, st_pass_splits;
-    _Atomic uint64_t st_feedback_splits, st_xfb_draws, st_quad_ind, st_copy_draws;   // step P8: passes split before a feedback draw, DrawTransformFeedback draws, indirect quads converted on the GPU, draw-based copies
+    _Atomic uint64_t st_feedback_splits, st_xfb_draws, st_copy_draws;   // step P8: passes split before a feedback draw, DrawTransformFeedback draws, draw-based copies
     _Atomic uint64_t st_vcopies_gpu;   // unaligned vertex streams copied on the GPU (their source not readable on the CPU at encode time)
-    _Atomic uint64_t st_index_gpu, st_index_cpu;   // draws whose indices were converted on the GPU and on the CPU (vk_index.c)
+    _Atomic uint64_t st_index_gpu, st_index_cpu, st_index_ind;   // draws whose indices were converted on the GPU and on the CPU, and of draws whose count the GPU holds (vk_index.c)
     // texture memory (step P7): every image's allocation, and of those the ASTC images held compressed and the RGBA8 decodes with the bytes their blocks take (decision D1)
     _Atomic int64_t st_tex_bytes, st_astc_native_bytes, st_astc_decoded_bytes, st_astc_block_bytes;
     _Atomic uint64_t st_up_gpu, st_up_cpu, st_astc_decodes;   // subresources uploaded through the GPU kernels and through the CPU, ASTC subresources decoded

@@ -10,23 +10,34 @@
 // with restart both ways, natively where the device restarts lists (VK_EXT_primitive_topology_list_restart: lavapipe does) and converted with that taken as absent; indices a
 // GPU copy writes earlier in the submission (converted at the draw's place, not in the prologue); 0 to 5 indices and a stream of restart indices only; the GPU path's limit
 // lowered to 2,400 bytes, a list of exactly that many and one past it (converted on the CPU, counted), then every short stream with the limit at 4 bytes (the CPU's list must be
-// the GPU's); 400 conversions of six forms in one submission, three submissions in a row (the ring's growth and reuse); and the conversion counters (where each ran). Checks: one
-// per draw and the counters, and the validation check.
+// the GPU's); 400 conversions of six forms in one submission, three submissions in a row (the ring's growth and reuse); and the conversion counters (where each ran).
+// Draws whose count the GPU holds (section 7, 2026-11-02; vk_index.c hvk_ix_ind_gpu): the whole matrix again through an indirect record (first index 3, the base vertex,
+// instances and a base instance in the record) that the CPU writes before the submission (converted in the prologue) and that a dispatch writes earlier in the submission
+// (shaders/ixc_copy.comp; the region holds 0xEE bytes when the draw is encoded, so a conversion that reads it too early draws garbage), the native forms through
+// vkCmdDraw*Indirect; fans, 8-bit indices and list restart taken as absent; indirect-count multi-draws of five records with the count 3, 0 and 9; a count and an instance count
+// of 0; the cuts on the GPU, counted (the arena lowered to 600 indices: filled by one draw, the next cut to nothing, one draw cut to what is left; a draw's input lowered to 100
+// indices; 65,537 quads without indices over the shared list of 65,536, under rasterizer discard; a record past its index buffer's pool); DrawTransformFeedback of 69 captured
+// points as every primitive, the capture in the same submission and in the one before, and fans and polygons with the device's fans taken as absent (only buffer 0 is bound and
+// captured: lavapipe crashes on a counter buffer for an unbound buffer, the README's P8 finding). Checks: one per draw and the counters, and the validation check.
 // With the argument "bench" (not a CTest run; validation off): the submit thread's time per converted draw on the CPU path and on the GPU path, for a 10,000-quad draw, a
 // 100,000-index fan with restart and a 6-quad draw, three runs.
 #include "t_vk_harness.h"
 #include "shaders/gen/ixc_vert.h"
 #include "shaders/gen/ixc_frag.h"
+#include "shaders/gen/ixc_copy_comp.h"
+#include "shaders/gen/xfb5_vert.h"
 #include <time.h>
 
 void hvk_test_index_opts(int no_fans, int no_uint8, int no_list_restart, int64_t limit);   // vk_index.c: -1 keeps an option; limit 0 is the default
-void hvk_test_index_stats(uint64_t s[12]);
-enum { ST_GPU, ST_GPU_PRE, ST_GPU_RESTART, ST_GPU_IN, ST_GPU_OUT, ST_GPU_NS, ST_CPU, ST_CPU_OVER, ST_CPU_NOADDR, ST_CPU_IN, ST_CPU_OUT, ST_CPU_NS, ST_N };
+void hvk_test_index_ind(int64_t arena_bytes, int64_t in_max);                              // the arena's bytes, the indices a draw whose count the GPU holds reads (0 the defaults)
+void hvk_test_index_stats(uint64_t s[21]);
+enum { ST_GPU, ST_GPU_PRE, ST_GPU_RESTART, ST_GPU_IN, ST_GPU_OUT, ST_GPU_NS, ST_CPU, ST_CPU_OVER, ST_CPU_NOADDR, ST_CPU_IN, ST_CPU_OUT, ST_CPU_NS,
+       ST_IND, ST_IND_PRE, ST_IND_REC, ST_IND_XFB, ST_IND_MDI, ST_IND_NS, ST_CUT_ARENA, ST_CUT_LIMIT, ST_CUT_POOL, ST_N };
 
 enum { W = 64, H = 64, MAXN = 120000 };
 static NVNqueue g_q; static hv_pool g_mp; static hv_cmds g_c; static NVNprogram g_prog;
 static uint8_t *g_ib, *g_stage, *g_ref;              // index streams (one region per draw of a submission), a copy's source, the references' lists
-static size_t g_ib_used, g_ref_used;
+static size_t g_ib_used, g_ref_used, g_stage_used;   // g_stage_used: the staging of the dispatches that write what indirect draws read (gpu_write)
 static tex_t g_t[4];                                 // the draw's two targets, the reference's two
 static uint32_t g_v[MAXN], g_list[3 * MAXN];
 static unsigned g_seed = 12345;
@@ -173,7 +184,7 @@ static int compare(uint32_t prims, const char *name) {
     }
     return ok;
 }
-static void submit(void) { hv_submit(&g_q, &g_c); g_ib_used = g_ref_used = 0; }
+static void submit(void) { hv_submit(&g_q, &g_c); g_ib_used = g_ref_used = g_stage_used = 0; }
 static uint32_t all_ones(int isz) { return isz == 1 ? 0xffu : isz == 2 ? 0xffffu : 0xffffffffu; }
 static void stats(uint64_t s[ST_N]) { hvk_test_index_stats(s); }
 
@@ -192,6 +203,91 @@ static int one(int prim, int isz, int kind, int longer, int gpu_written, const c
     t(name, ok);
     return ok;
 }
+
+// ---------- Draws whose count the GPU holds ----------
+// The frontend's records (hle_nvn.c): DrawElementsIndirect (isz 1, 2, 4: count 0, one instance, the index buffer and the record's address) or DrawArraysIndirect (isz 0), and
+// record i of an indirect-count multi-draw (cnt: its count's address); the GPU reads {count, instances, first index, base vertex, base instance} or {count, instances, first,
+// base instance} there
+static void ind_rec(int prim, int isz, const void *ibuf, const void *rec, const void *cnt, int i) {
+    if (isz) {
+        p_draw_idx d; memset(&d, 0, sizeof d); d.prim = prim; d.itype = isz == 1 ? 0 : isz == 2 ? 1 : 2; d.instances = 1; d.ibuf = (uint64_t)(uintptr_t)ibuf;
+        d.ind = (uint64_t)(uintptr_t)rec; d.mdi_cnt = (uint64_t)(uintptr_t)cnt; d.mdi_i = i; hv_emit(&g_c, OP_DRAW_IDX, &d, sizeof d);
+    } else { p_draw d; memset(&d, 0, sizeof d); d.prim = prim; d.instances = 1; d.ind = (uint64_t)(uintptr_t)rec; d.mdi_cnt = (uint64_t)(uintptr_t)cnt; d.mdi_i = i; hv_emit(&g_c, OP_DRAW, &d, sizeof d); }
+}
+// What a dispatch writes earlier in the submission (shaders/ixc_copy.comp): bytes at dst copied from the staging area, dst holding 0xEE bytes when the draw is encoded
+static NVNprogram g_copy;
+static void gpu_write(uint8_t *dst, const void *src, uint32_t bytes) {
+    uint32_t words = (bytes + 3) / 4;
+    uint8_t *st = g_stage + g_stage_used; g_stage_used += ((size_t)words * 4 + 4 + 255) & ~(size_t)255;
+    if (g_stage_used > (2u << 20)) { fprintf(stderr, "staging full\n"); exit(2); }
+    memcpy(st, &words, 4); memset(st + 4, 0, (size_t)words * 4); memcpy(st + 4, src, bytes);
+    memset(dst, 0xEE, (size_t)words * 4);
+    hv_bind(&g_c, &g_copy, NVN_SHADER_STAGE_COMPUTE_BIT);
+    hv_buf(&g_c, OP_BIND_SSBO, 5, 0, st, 4 + (uint64_t)words * 4); hv_buf(&g_c, OP_BIND_SSBO, 5, 1, dst, (uint64_t)words * 4);
+    p_dispatch d = {1, 1, 1, 0, 0}; hv_emit(&g_c, OP_DISPATCH, &d, sizeof d);
+}
+static uint8_t g_img[1u << 20];   // a block as the draw must read it, built on the CPU
+static void ref_list(int prim, uint32_t k, uint32_t inst) {   // the oracle's list in g_list (k indices) drawn directly into the bound targets, restart off
+    uint32_t cls = (uint32_t)cls_of(prim);
+    restart_rec(0, 0);
+    uint8_t *rb = ref_take((size_t)k * 4 + 4); memcpy(rb, g_list, (size_t)k * 4);
+    hv_draw_idx(&g_c, cls == 1 ? NVN_DRAW_PRIMITIVE_POINTS : cls == 2 ? NVN_DRAW_PRIMITIVE_LINES : NVN_DRAW_PRIMITIVE_TRIANGLES, 2, (int)k, rb, 0, (int)inst);
+}
+// An indirect draw of a stream into the draw's targets and its reference (the oracle's plain list drawn directly) into the reference's: one block holds the record and, 32 bytes
+// on, the stream after IND_FIRST indices of padding (0x5a bytes: the record's first index skips them); written by the CPU before the submission (writer 0) or by a dispatch
+// earlier in the submission (1). Base instance 5 (the shaders read no instance). Returns the primitives
+enum { IND_FIRST = 3 };
+static uint32_t ind_pair(int prim, int isz, int restart, uint32_t ri, const uint32_t *v, uint32_t n, int32_t base, uint32_t inst, int writer) {
+    uint32_t k = oracle(prim, isz ? v : NULL, n, isz && restart, ri, base, g_list);
+    size_t bytes = 32 + (isz ? (size_t)(IND_FIRST + n) * (size_t)isz : 0);
+    uint8_t *blk = ib_take(bytes + 4);
+    memset(g_img, 0x5a, bytes);
+    uint32_t rec[5] = {n, inst, isz ? (uint32_t)IND_FIRST : (uint32_t)base, isz ? (uint32_t)base : 5u, 5u};
+    memcpy(g_img, rec, isz ? 20 : 16);
+    if (isz) put_stream(g_img + 32 + IND_FIRST * isz, v, n, isz);
+    targets(0);
+    restart_rec(restart, ri);
+    if (writer) gpu_write(blk, g_img, (uint32_t)bytes); else memcpy(blk, g_img, bytes);
+    ind_rec(prim, isz, blk + 32, blk, NULL, 0);
+    targets(1);
+    ref_list(prim, k, inst);
+    return k / (uint32_t)cls_of(prim);
+}
+// Whether an indirect draw of the form converts (vk_index.c's plan): the primitives Vulkan has not, fans without the device's, 8-bit indices without its support, a restart index
+// other than all ones (widened), lists with restart where the device does not restart lists
+static int ind_converts(int prim, int isz, int kind, int no_fans, int no_uint8, int no_lr) {
+    if (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP || prim == NVN_DRAW_PRIMITIVE_QUADS || prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP) return 1;
+    if ((prim == NVN_DRAW_PRIMITIVE_TRIANGLE_FAN || prim == NVN_DRAW_PRIMITIVE_POLYGON) && no_fans) return 1;
+    if (!isz) return 0;
+    return (isz == 1 && no_uint8) || kind == 2 || (kind && is_list(prim) && no_lr);
+}
+static int ind_one(int prim, int isz, int kind, int longer, int writer, const char *tag) {
+    uint32_t ri = kind == 2 ? 13u : all_ones(isz ? isz : 4), rv = ri;
+    uint32_t n = isz ? stream(g_v, longer, rv, 13u) : (longer ? 1040u : 69u);
+    int32_t base = isz == 4 ? 0 : isz ? 7 : 3;
+    uint32_t inst = longer ? 2 : 1;
+    uint32_t prims = ind_pair(prim, isz, kind != 0, ri, g_v, n, base, inst, writer);
+    submit();
+    char name[220];
+    snprintf(name, sizeof name, "%s%s, %s, restart %s, %u %s, %u instance%s: the picture of the reference's %u primitives", tag, k_name[prim],
+             isz ? (isz == 1 ? "1-byte indices" : isz == 2 ? "2-byte indices" : "4-byte indices") : "no indices", kind == 0 ? "off" : kind == 1 ? "at all ones" : "at 13", n,
+             isz ? "indices" : "vertices", inst, inst > 1 ? "s" : "", prims);
+    int ok = compare(prims, name);
+    t(name, ok);
+    return ok;
+}
+// Transform feedback (t_vk_transform_feedback's records): xfb5.vert captures 20 bytes a vertex into buffer 0; DrawTransformFeedback is an indirect array draw at the control
+// buffer + 16 (hle_nvn.c)
+static NVNprogram g_xfb;
+static void tf_bind(int i, void *addr, uint64_t size) { p_tf_bind b = {i, 0, (uint64_t)(uintptr_t)addr, size}; hv_emit(&g_c, OP_TF_BIND, &b, sizeof b); }
+static void tf_state(int what, void *ctl) { p_tf_state s = {what, 0, (uint64_t)(uintptr_t)ctl}; hv_emit(&g_c, OP_TF_STATE, &s, sizeof s); }   // 0 begin, 1 end
+static void rast_discard(int on) { p_rast_discard d = {on}; hv_emit(&g_c, OP_RAST_DISCARD, &d, sizeof d); }
+static void capture(void *out, void *ctl, uint32_t n) {   // n vertices captured, the byte offset saved into ctl
+    hv_bind(&g_c, &g_xfb, 0x1f); rast_discard(1); tf_bind(0, out, 4096);
+    tf_state(0, ctl); hv_draw(&g_c, NVN_DRAW_PRIMITIVE_POINTS, 0, (int)n, 1); tf_state(1, ctl);
+    rast_discard(0); tf_bind(0, NULL, 0);
+}
+static void draw_tf(int prim, void *ctl) { p_draw d; memset(&d, 0, sizeof d); d.prim = prim; d.instances = 1; d.ind = (uint64_t)(uintptr_t)ctl + 16; hv_emit(&g_c, OP_DRAW, &d, sizeof d); }
 
 // ---------- The measurement (argument "bench") ----------
 static uint64_t thread_ns(void) {
@@ -250,6 +346,10 @@ int main(int argc, char **argv) {
     g_stage = g_mp.mem + (2u << 20); g_ib = g_mp.mem + (4u << 20); g_ref = g_mp.mem + (9u << 20);
     const hv_shader sh[2] = {{"ixc_vert", 0, HV_SPV(ixc_vert_spv), NULL, NULL}, {"ixc_frag", 1, HV_SPV(ixc_frag_spv), NULL, NULL}};
     hv_program(&g_prog, &g_mp, 0, sh, 2);
+    static const char k_copy[] = "[{\"kind\":\"sbuf\",\"reg\":0,\"name\":\"S\",\"class\":\"ssbo\",\"set\":1,\"binding\":0,\"rw\":false},"
+                                 "{\"kind\":\"sbuf\",\"reg\":1,\"name\":\"D\",\"class\":\"ssbo\",\"set\":1,\"binding\":1,\"rw\":true}]";
+    const hv_shader shc[1] = {{"ixc_copy", 5, HV_SPV(ixc_copy_comp_spv), k_copy, NULL}}, shx[1] = {{"xfb5", 0, HV_SPV(xfb5_vert_spv), NULL, NULL}};
+    hv_program(&g_copy, &g_mp, 1024, shc, 1); hv_program(&g_xfb, &g_mp, 2048, shx, 1);
     for (int i = 0; i < 4; i++) g_t[i] = hv_tex(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, W, H, 1, 1, 0);
     if (bench_mode) { bench(); hv_pool_free(&g_mp); return hv_finish(); }
     uint64_t s0[ST_N], s1[ST_N]; char name[200];
@@ -384,6 +484,208 @@ int main(int argc, char **argv) {
         int ok = compare(prims, name) && s1[ST_GPU_PRE] - s0[ST_GPU_PRE] == 400 && s1[ST_GPU] - s0[ST_GPU] == 400 && s1[ST_CPU] == s0[ST_CPU];
         t(name, ok); bad += !ok;
     }
+    // 7. Draws whose count the GPU holds (2026-11-02): every primitive, index size and restart form, the short and the long stream, through an indirect record (first index 3,
+    // the record's base vertex, instances and base instance) written by the CPU before the submission (converted in the prologue) and by a dispatch earlier in the submission
+    // (converted at the draw's place); the native forms go through vkCmdDraw*Indirect as before
+    hvk_test_index_opts(0, 0, 0, 0); hvk_test_index_ind(0, 0);
+    stats(s0);
+    uint64_t want_ind = 0, want_pre = 0;
+    for (int p = 0; p < NPRIM; p++) for (int isz = 0; isz <= 4; isz = isz ? isz * 2 : 1) for (int kind = 0; kind < 3; kind++) for (int longer = 0; longer < 2; longer++)
+        for (int writer = 0; writer < 2; writer++) {
+            if (!isz && kind == 2) continue;
+            bad += !ind_one(k_prims[p], isz, kind, longer, writer, writer ? "indirect, written by a dispatch: " : "indirect, written by the CPU: ");
+            int c = ind_converts(k_prims[p], isz, kind, 0, 0, !lr);
+            want_ind += (uint64_t)c; want_pre += (uint64_t)(c && !writer);
+        }
+    stats(s1);
+    snprintf(name, sizeof name, "indirect matrix: %llu conversions from the record (%llu by the rules), %llu in the prologue (%llu: those the CPU wrote), %llu direct ones, %llu on the CPU",
+             (unsigned long long)(s1[ST_IND] - s0[ST_IND]), (unsigned long long)want_ind, (unsigned long long)(s1[ST_IND_PRE] - s0[ST_IND_PRE]), (unsigned long long)want_pre,
+             (unsigned long long)(s1[ST_GPU] - s0[ST_GPU]), (unsigned long long)(s1[ST_CPU] - s0[ST_CPU]));
+    t(name, s1[ST_IND] - s0[ST_IND] == want_ind && s1[ST_IND_PRE] - s0[ST_IND_PRE] == want_pre && s1[ST_IND_REC] - s0[ST_IND_REC] == want_ind && s1[ST_GPU] == s0[ST_GPU] &&
+            s1[ST_CPU] == s0[ST_CPU] && s1[ST_CUT_ARENA] == s0[ST_CUT_ARENA] && s1[ST_CUT_LIMIT] == s0[ST_CUT_LIMIT] && s1[ST_CUT_POOL] == s0[ST_CUT_POOL]);
+
+    // 7b. The device's triangle fans, 8-bit indices and restart on lists taken as absent: fans and polygons, 8-bit indices and lists with restart converted from the record
+    hvk_test_index_opts(1, 1, 1, -1);
+    stats(s0);
+    want_ind = 0;
+    for (int p = 0; p < NPRIM; p++) for (int isz = 0; isz <= 4; isz = isz ? isz * 2 : 1) for (int kind = 0; kind < 3; kind++) for (int writer = 0; writer < 2; writer++) {
+        int pr = k_prims[p], fan = pr == NVN_DRAW_PRIMITIVE_TRIANGLE_FAN || pr == NVN_DRAW_PRIMITIVE_POLYGON;
+        if ((!isz && kind == 2) || !(fan || isz == 1 || (isz && kind && is_list(pr)))) continue;
+        bad += !ind_one(pr, isz, kind, 0, writer, writer ? "indirect without fans, 8-bit indices and list restart, by a dispatch: " : "indirect without fans, 8-bit indices and list restart, by the CPU: ");
+        want_ind += (uint64_t)ind_converts(pr, isz, kind, 1, 1, 1);
+    }
+    stats(s1);
+    snprintf(name, sizeof name, "indirect without fans, 8-bit indices and list restart: %llu conversions from the record (%llu by the rules)", (unsigned long long)(s1[ST_IND] - s0[ST_IND]),
+             (unsigned long long)want_ind);
+    t(name, s1[ST_IND] - s0[ST_IND] == want_ind && s1[ST_GPU] == s0[ST_GPU] && s1[ST_CPU] == s0[ST_CPU]);
+    hvk_test_index_opts(0, 0, 0, -1);
+
+    // 7c. Indirect-count multi-draws: five records 48 bytes apart over one index buffer (each its own stream and first index) or none (each its own first vertex), the count 3,
+    // 0 and 9 (records 3 and 4 hold draws that must not be made under 3; 9 draws all five), written by the CPU and by a dispatch: one dispatch and one draw call a group,
+    // each record its own draw (its primitive IDs from 0), against the records drawn one by one
+    static const struct { int prim, isz, kind; } md[] = {{NVN_DRAW_PRIMITIVE_QUADS, 2, 2}, {NVN_DRAW_PRIMITIVE_LINE_LOOP, 0, 0}, {NVN_DRAW_PRIMITIVE_QUAD_STRIP, 1, 1}};
+    for (unsigned f = 0; f < sizeof md / sizeof *md; f++) for (int writer = 0; writer < 2; writer++) for (int ci = 0; ci < 3; ci++) {
+        static const uint32_t counts[3] = {3, 0, 9};
+        int pr = md[f].prim, isz = md[f].isz; uint32_t cnt = counts[ci], ri = md[f].kind == 2 ? 13u : all_ones(isz ? isz : 4);
+        uint32_t at5[6], used = 0;
+        for (int i = 0; i < 5; i++) { at5[i] = used; used += isz ? stream(g_v + used, 0, ri, 13u) : 21u + 6u * (uint32_t)i; }
+        at5[5] = used;
+        size_t bytes = 5 * 48 + 16 + (isz ? (size_t)used * (size_t)isz : 0);
+        uint8_t *blk = ib_take(bytes + 4);
+        memset(g_img, 0x5a, bytes);
+        for (int i = 0; i < 5; i++) {
+            uint32_t rec[5] = {at5[i + 1] - at5[i], 1, at5[i], 7, 0};
+            if (!isz) { rec[2] = 3 + 40 * (uint32_t)i; rec[3] = 0; }   // arrays: {count, instances, first, base instance}
+            memcpy(g_img + 48 * i, rec, sizeof rec);
+        }
+        memcpy(g_img + 5 * 48, &cnt, 4);
+        if (isz) put_stream(g_img + 5 * 48 + 16, g_v, used, isz);
+        stats(s0);
+        targets(0);
+        restart_rec(md[f].kind != 0, ri);
+        if (writer) gpu_write(blk, g_img, (uint32_t)bytes); else memcpy(blk, g_img, bytes);
+        for (int i = 0; i < 5; i++) ind_rec(pr, isz, blk + 5 * 48 + 16, blk + 48 * i, blk + 5 * 48, i);
+        targets(1);
+        uint32_t prims = 0;
+        for (uint32_t i = 0; i < 5 && i < cnt; i++) {
+            uint32_t k = isz ? oracle(pr, g_v + at5[i], at5[i + 1] - at5[i], md[f].kind != 0, ri, 7, g_list) : oracle(pr, NULL, at5[i + 1] - at5[i], 0, 0, 3 + 40 * (int64_t)i, g_list);
+            ref_list(pr, k, 1); prims += k / (uint32_t)cls_of(pr);
+        }
+        submit();
+        stats(s1);
+        snprintf(name, sizeof name, "multi-draw of 5 %s records (%s), count %u, written by %s: one conversion of %llu records, the picture of the reference's %u primitives", k_name[pr],
+                 isz == 2 ? "2-byte indices, restart at 13" : isz ? "1-byte indices, restart at all ones" : "no indices", cnt, writer ? "a dispatch" : "the CPU",
+                 (unsigned long long)(s1[ST_IND_REC] - s0[ST_IND_REC]), prims);
+        int ok = compare(prims, name) && s1[ST_IND] - s0[ST_IND] == 1 && s1[ST_IND_MDI] - s0[ST_IND_MDI] == 1 && s1[ST_IND_REC] - s0[ST_IND_REC] == 5 &&
+                 s1[ST_IND_PRE] - s0[ST_IND_PRE] == (uint64_t)!writer;
+        t(name, ok); bad += !ok;
+    }
+
+    // 7d. Records that draw nothing: a count of 0, an instance count of 0 (indexed quads, converted)
+    for (int c = 0; c < 2; c++) for (int writer = 0; writer < 2; writer++) {
+        for (uint32_t i = 0; i < 40; i++) g_v[i] = 30 + 5 * i;
+        uint8_t *blk = ib_take(32 + 44 * 2 + 4);
+        memset(g_img, 0x5a, 32 + 44 * 2);
+        uint32_t rec[5] = {c == 0 ? 0u : 40u, c == 0 ? 1u : 0u, 0, 7, 0};
+        memcpy(g_img, rec, sizeof rec); put_stream(g_img + 32, g_v, 40, 2);
+        targets(0); restart_rec(0, 0);
+        if (writer) gpu_write(blk, g_img, 32 + 40 * 2); else memcpy(blk, g_img, 32 + 40 * 2);
+        ind_rec(NVN_DRAW_PRIMITIVE_QUADS, 2, blk + 32, blk, NULL, 0);
+        targets(1);
+        submit();
+        snprintf(name, sizeof name, "indirect quads with %s, written by %s: nothing drawn", c == 0 ? "a count of 0" : "40 indices and an instance count of 0", writer ? "a dispatch" : "the CPU");
+        int ok = compare(0, name); t(name, ok); bad += !ok;
+    }
+
+    // 7e. The limits: the arena lowered to 2,400 bytes (600 indices): a draw of 100 quads takes it all (converted in the prologue), the next draw of the submission (converted at its
+    // place, after the first) is cut to nothing; a draw of 101 quads alone is cut to 100. A draw's input lowered to 100 indices: 101 quads are cut to 25. Quads without indices past
+    // the shared quad list (65,537 quads under rasterizer discard: counted only). A record naming indices past its pool's end: the count stops at the pool's end
+    hvk_test_index_ind(2400, -1);
+    for (uint32_t k = 0; k < 808; k++) g_v[k] = 30 + (k * 7) % 200;
+    stats(s0);
+    {
+        uint32_t prims = 0, k;
+        uint8_t *a = ib_take(32 + 400 * 2 + 4), *b = ib_take(32 + 404 * 2 + 4);
+        uint32_t ra[5] = {400, 1, 0, 7, 0}, rb[5] = {404, 1, 0, 7, 0};
+        memcpy(g_img, rb, sizeof rb); put_stream(g_img + 32, g_v + 400, 404, 2);
+        targets(0); restart_rec(0, 0);
+        memcpy(a, ra, sizeof ra); put_stream(a + 32, g_v, 400, 2);
+        ind_rec(NVN_DRAW_PRIMITIVE_QUADS, 2, a + 32, a, NULL, 0);
+        gpu_write(b, g_img, 32 + 404 * 2);
+        ind_rec(NVN_DRAW_PRIMITIVE_QUADS, 2, b + 32, b, NULL, 0);
+        targets(1);
+        k = oracle(NVN_DRAW_PRIMITIVE_QUADS, g_v, 400, 0, 0, 7, g_list); ref_list(NVN_DRAW_PRIMITIVE_QUADS, k, 1); prims += k / 3;
+        submit();
+        stats(s1);
+        snprintf(name, sizeof name, "arena of 600 indices: 100 quads take it, the next draw of the submission is cut to nothing (%llu cut): the picture of the first's %u primitives",
+                 (unsigned long long)(s1[ST_CUT_ARENA] - s0[ST_CUT_ARENA]), prims);
+        int ok = compare(prims, name) && s1[ST_CUT_ARENA] - s0[ST_CUT_ARENA] == 1; t(name, ok); bad += !ok;
+    }
+    for (int writer = 0; writer < 2; writer++) {
+        stats(s0);
+        uint32_t prims = ind_pair(NVN_DRAW_PRIMITIVE_QUADS, 2, 0, 0, g_v, 404, 7, 1, writer);
+        uint32_t k = oracle(NVN_DRAW_PRIMITIVE_QUADS, g_v, 400, 0, 0, 7, g_list);   // the reference: the first 100 quads
+        targets(1); ref_list(NVN_DRAW_PRIMITIVE_QUADS, k, 1); prims = k / 3;
+        submit();
+        stats(s1);
+        snprintf(name, sizeof name, "arena of 600 indices, written by %s: 101 quads cut to 100 (%llu cut): the picture of the reference's %u primitives", writer ? "a dispatch" : "the CPU",
+                 (unsigned long long)(s1[ST_CUT_ARENA] - s0[ST_CUT_ARENA]), prims);
+        int ok = compare(prims, name) && s1[ST_CUT_ARENA] - s0[ST_CUT_ARENA] == 1; t(name, ok); bad += !ok;
+    }
+    hvk_test_index_ind(0, 100);
+    {
+        stats(s0);
+        uint32_t prims = ind_pair(NVN_DRAW_PRIMITIVE_QUADS, 2, 0, 0, g_v, 404, 7, 1, 0);
+        uint32_t k = oracle(NVN_DRAW_PRIMITIVE_QUADS, g_v, 100, 0, 0, 7, g_list);
+        targets(1); ref_list(NVN_DRAW_PRIMITIVE_QUADS, k, 1); prims = k / 3;
+        submit();
+        stats(s1);
+        snprintf(name, sizeof name, "a draw's input lowered to 100 indices: 101 quads cut to 25 (%llu cut): the picture of the reference's %u primitives",
+                 (unsigned long long)(s1[ST_CUT_LIMIT] - s0[ST_CUT_LIMIT]), prims);
+        int ok = compare(prims, name) && s1[ST_CUT_LIMIT] - s0[ST_CUT_LIMIT] == 1; t(name, ok); bad += !ok;
+    }
+    hvk_test_index_ind(0, 0);
+    {
+        stats(s0);
+        uint8_t *a = ib_take(16 + 4);
+        uint32_t ra[4] = {65537u * 4u, 1, 0, 0};
+        memcpy(a, ra, sizeof ra);
+        targets(0); restart_rec(0, 0); rast_discard(1);
+        ind_rec(NVN_DRAW_PRIMITIVE_QUADS, 0, NULL, a, NULL, 0);
+        rast_discard(0);
+        submit();
+        stats(s1);
+        snprintf(name, sizeof name, "65,537 quads without indices over the shared list of 65,536: cut there, counted (%llu)", (unsigned long long)(s1[ST_CUT_LIMIT] - s0[ST_CUT_LIMIT]));
+        t(name, s1[ST_CUT_LIMIT] - s0[ST_CUT_LIMIT] == 1 && s1[ST_IND] - s0[ST_IND] == 1);
+    }
+    for (int writer = 0; writer < 2; writer++) {   // the stream ends at the pool's end; the record asks for 40 more indices
+        stats(s0);
+        uint32_t n = 400;
+        uint8_t *end = g_mp.mem + g_mp.size, *ib = end - n * 2, *blk = ib_take(32);
+        put_stream(ib, g_v, n, 2);
+        uint32_t rec[5] = {n + 40, 1, 0, 7, 0};
+        targets(0); restart_rec(0, 0);
+        if (writer) gpu_write(blk, rec, sizeof rec); else memcpy(blk, rec, sizeof rec);
+        ind_rec(NVN_DRAW_PRIMITIVE_QUADS, 2, ib, blk, NULL, 0);
+        targets(1);
+        uint32_t k = oracle(NVN_DRAW_PRIMITIVE_QUADS, g_v, n, 0, 0, 7, g_list); ref_list(NVN_DRAW_PRIMITIVE_QUADS, k, 1);
+        submit();
+        stats(s1);
+        snprintf(name, sizeof name, "a record past its index buffer's pool, written by %s: the count stops at the pool's end (%llu counted), the picture of the reference's %u primitives",
+                 writer ? "a dispatch" : "the CPU", (unsigned long long)(s1[ST_CUT_POOL] - s0[ST_CUT_POOL]), k / 3);
+        int ok = compare(k / 3, name) && s1[ST_CUT_POOL] - s0[ST_CUT_POOL] == 1; t(name, ok); bad += !ok;
+    }
+
+    // 7f. DrawTransformFeedback: 69 points captured (20 bytes each), drawn from the capture's count as every primitive, the capture in the same submission (the counter read at the
+    // draw's place) and in the one before (in the prologue); the primitives Vulkan has (and fans, polygons on a device with fans) through vkCmdDrawIndirectByteCountEXT, the rest
+    // converted from the counter; then fans and polygons with the device's fans taken as absent
+    {
+        uint8_t *out = g_mp.mem + (15u << 20), *ctl = out + 8192;
+        uint64_t want_xfb = 0;
+        stats(s0);
+        for (int pass = 0; pass < 2; pass++) for (int p = 0; p < NPRIM; p++) for (int same = 0; same < 2; same++) {
+            int pr = k_prims[p], fan = pr == NVN_DRAW_PRIMITIVE_TRIANGLE_FAN || pr == NVN_DRAW_PRIMITIVE_POLYGON;
+            if (pass && !fan) continue;
+            hvk_test_index_opts(pass, -1, -1, -1);
+            memset(ctl, 0, 32);
+            if (!same) { targets(0); capture(out, ctl, 69); submit(); }
+            targets(0);
+            if (same) { capture(out, ctl, 69); hv_bind(&g_c, &g_prog, 3); }
+            draw_tf(pr, ctl);
+            targets(1);
+            uint32_t k = oracle(pr, NULL, 69, 0, 0, 0, g_list); ref_list(pr, k, 1);
+            submit();
+            want_xfb += (uint64_t)ind_converts(pr, 0, 0, pass, 0, 0);
+            snprintf(name, sizeof name, "DrawTransformFeedback as %s%s of 69 captured vertices (%u bytes saved), the capture %s: the picture of the reference's %u primitives", k_name[pr],
+                     pass ? " (fans taken as absent)" : "", *(uint32_t *)(void *)ctl, same ? "in the same submission" : "in the one before", k / (uint32_t)cls_of(pr));
+            int ok = compare(k / (uint32_t)cls_of(pr), name) && *(uint32_t *)(void *)ctl == 69 * 20; t(name, ok); bad += !ok;
+        }
+        hvk_test_index_opts(0, -1, -1, -1);
+        stats(s1);
+        snprintf(name, sizeof name, "DrawTransformFeedback: %llu converted from the counter (%llu by the rules)", (unsigned long long)(s1[ST_IND_XFB] - s0[ST_IND_XFB]), (unsigned long long)want_xfb);
+        t(name, s1[ST_IND_XFB] - s0[ST_IND_XFB] == want_xfb && s1[ST_IND] - s0[ST_IND] == want_xfb);
+    }
+
     printf("note: %d draws differed from their reference\n", bad);
     hv_pool_free(&g_mp);
     return hv_finish();

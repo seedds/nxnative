@@ -25,7 +25,6 @@
 #include "shaders/gen/astc_decode_comp.h"
 #include "shaders/gen/deswizzle_comp.h"
 #include "shaders/gen/ds_pack_comp.h"
-#include "shaders/gen/quad_ind_comp.h"
 #include "shaders/gen/index_restart_comp.h"
 #include "shaders/gen/copy_vert.h"
 #include "shaders/gen/copy_frag.h"
@@ -536,7 +535,7 @@ static int kernels_init(void) {
 static VkPipeline kernel_get(hvk_kernel k) {
     static const struct { const uint32_t *c; size_t n; } src[HVK_K_N] = {{report_comp_spv, sizeof report_comp_spv}, {predicate_comp_spv, sizeof predicate_comp_spv},
         {index_expand_comp_spv, sizeof index_expand_comp_spv}, {astc_decode_comp_spv, sizeof astc_decode_comp_spv}, {deswizzle_comp_spv, sizeof deswizzle_comp_spv},
-        {ds_pack_comp_spv, sizeof ds_pack_comp_spv}, {quad_ind_comp_spv, sizeof quad_ind_comp_spv}, {index_restart_comp_spv, sizeof index_restart_comp_spv}};
+        {ds_pack_comp_spv, sizeof ds_pack_comp_spv}, {index_restart_comp_spv, sizeof index_restart_comp_spv}};
     if (!kernels_init()) return VK_NULL_HANDLE;
     pthread_mutex_lock(&g_kernel_mu);
     if (!g_kernel[k]) {

@@ -480,17 +480,17 @@ static int mem_budget(double *budget_mib, double *usage_mib) {
         if (p.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) { *budget_mib += b.heapBudget[i] / 1048576.0; *usage_mib += b.heapUsage[i] / 1048576.0; }
     return 1;
 }
-// The backend's resource line (hle_nvn.c gives it 400 bytes, so it stays short): commands (draws whose indices were converted on the GPU and on the CPU, vk_index.c; step P8:
-// passes split before feedback draws, indirect quads converted on the GPU, DrawTransformFeedback draws, draw-based copies), and texture memory (step P7, decision D1): every image,
+// The backend's resource line (hle_nvn.c gives it 400 bytes, so it stays short): commands (draws whose indices were converted on the GPU and on the CPU, and those of draws whose
+// count the GPU holds, vk_index.c; step P8: passes split before feedback draws, DrawTransformFeedback draws, draw-based copies), and texture memory (step P7, decision D1): every image,
 // ASTC held compressed against ASTC decoded into RGBA8 (with what its blocks take), the uploads by path, and the device-local budget where VK_EXT_memory_budget gives it
 void be_res_stats(char *out, size_t n) {
     if (!n) return;
     double mib = 1048576.0, bud, use;
-    int k = snprintf(out, n, "vulkan: passes %llu draws %llu dispatches %llu pipelines %llu shaders %llu barriers %llu pass splits %llu GPU vertex copies %llu index conversions GPU %llu CPU %llu fb splits %llu ind quads %llu xfb draws %llu copy draws %llu; "
+    int k = snprintf(out, n, "vulkan: passes %llu draws %llu dispatches %llu pipelines %llu shaders %llu barriers %llu pass splits %llu GPU vertex copies %llu index conversions GPU %llu CPU %llu indirect %llu fb splits %llu xfb draws %llu copy draws %llu; "
                      "textures %.1f MiB (ASTC %.1f native, %.1f decoded from %.1f of blocks), uploads GPU %llu CPU %llu, ASTC decodes %llu",
                      (unsigned long long)hvk.st_passes, (unsigned long long)hvk.st_draws, (unsigned long long)hvk.st_dispatches, (unsigned long long)hvk.st_pipelines,
                      (unsigned long long)hvk.st_shaders, (unsigned long long)hvk.st_barriers, (unsigned long long)hvk.st_pass_splits, (unsigned long long)hvk.st_vcopies_gpu,
-                     (unsigned long long)hvk.st_index_gpu, (unsigned long long)atomic_load(&hvk.st_index_cpu), (unsigned long long)atomic_load(&hvk.st_feedback_splits), (unsigned long long)atomic_load(&hvk.st_quad_ind),
+                     (unsigned long long)hvk.st_index_gpu, (unsigned long long)atomic_load(&hvk.st_index_cpu), (unsigned long long)atomic_load(&hvk.st_index_ind), (unsigned long long)atomic_load(&hvk.st_feedback_splits),
                      (unsigned long long)atomic_load(&hvk.st_xfb_draws), (unsigned long long)atomic_load(&hvk.st_copy_draws), (double)atomic_load(&hvk.st_tex_bytes) / mib, (double)atomic_load(&hvk.st_astc_native_bytes) / mib,
                      (double)atomic_load(&hvk.st_astc_decoded_bytes) / mib, (double)atomic_load(&hvk.st_astc_block_bytes) / mib, (unsigned long long)atomic_load(&hvk.st_up_gpu),
                      (unsigned long long)atomic_load(&hvk.st_up_cpu), (unsigned long long)atomic_load(&hvk.st_astc_decodes));

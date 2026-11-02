@@ -15,10 +15,10 @@
 // CPU reports cannot). Conditional rendering (4.7): a one-thread kernel compares the two counters into a predicate word that the following passes test
 // (VK_EXT_conditional_rendering). Transform feedback (design 6, step P8): native, its counters between segments the backend's own, DrawTransformFeedback through
 // vkCmdDrawIndirectByteCountEXT. Feedback draws (5.5, step P8): a draw that reads an attachment of its pass splits the pass when the pass wrote it, and a pass that only reads
-// an attachment does not store it. Indirect quads (step P8): converted on the GPU. Index conversions (vk_index.c, its rules table; 2026-11-02): every one on the GPU, in the
-// submission's prologue or, for indices the GPU writes earlier in the submission, before the draw's pass; the CPU only past the GPU path's limit.
-// Declared with a red line: draws whose count the GPU holds (indirect, DrawTransformFeedback) that need a conversion other than indirect quads without restart (quad strips and
-// line loops of arrays drawn as Vulkan's strips; the rest skipped: gpu_counted); the counter types Vulkan has no counter for (TESS_EVALUATION_SHADER_PRIMITIVES, ZCULL_STATS);
+// an attachment does not store it. Index conversions (vk_index.c, its rules table; 2026-11-02): every one on the GPU, in the submission's prologue or, for indices the GPU
+// writes earlier in the submission, before the draw's pass; the CPU only past the GPU path's limit. Draws whose count the GPU holds (indirect draws, indirect-count multi-draws,
+// DrawTransformFeedback; 2026-11-02): converted on the GPU from their records by the same rules and placement (convert_indirect), drawn from the indexed indirect records written.
+// Declared with a red line: the counter types Vulkan has no counter for (TESS_EVALUATION_SHADER_PRIMITIVES, ZCULL_STATS);
 // the alpha test (its reference is not recorded); advanced blend modes other than the Porter-Duff ones (VK_EXT_blend_operation_advanced is not used); viewport swizzles other
 // than a negated y without VK_NV_viewport_swizzle; tessellation without a control shader; presentation (phase P4).
 // Pipelines (phase P5): the draw fills its key through vk_gpl.c's hvk_key_fill and takes its pipeline from hvk_gfx_pipeline, which counts the time a draw waits for it; after
@@ -761,10 +761,6 @@ static VkPrimitiveTopology topology(int prim, int *klass) {
         default: *klass = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     }
 }
-static int is_strip(VkPrimitiveTopology t) {
-    return t == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP || t == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || t == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN ||
-           t == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY || t == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY;
-}
 static VkStencilOp sop(uint32_t o) { return o >= 1 && o <= 8 ? (VkStencilOp)(o - 1) : VK_STENCIL_OP_KEEP; }
 static VkCompareOp cop(uint32_t f) { return f >= 1 && f <= 8 ? (VkCompareOp)(f - 1) : VK_COMPARE_OP_ALWAYS; }
 static VkBuffer g_zero_vb; static hvk_mem *g_zero_vb_mem;
@@ -985,48 +981,35 @@ static void user_row(void) {
     if (nvn_pipe_from_state(&d, &S, vk, 0, inputs, fs ? fk : NULL, 1, cf, df, sf, (uint32_t)P.samples) == 0) hvk_prewarm_user_row(&d);
 }
 static int sh_xfb(const hvk_shader *s) { return s && s->xfb; }   // the module declares the Xfb execution mode: it captures
-// Indirect quads (step P8; the Metal backend's ixc_run): the record, which the GPU may write earlier in the submission, is read by the quad helper (shaders/quad_ind.comp) on the
-// GPU, outside the pass, into an indexed indirect record in the ring. Arrays (di NULL) index the shared quad list with first as the vertex offset; indexed ones get a 32-bit list of at
-// most QIND_CAP indices expanded from theirs (as the Metal backend's IXC_CAP). 1 done (*args, and *ix for the indexed list), 0 failed or not possible (said once)
-enum { QIND_CAP = 3 * 16384 };
-static int quads_ind_gpu(const p_draw *dw, const p_draw_idx *di, hvk_alloc *args, hvk_alloc *ix) {
-    VkBuffer b; VkDeviceSize o; VkDeviceAddress rec = 0, src = 0;
-    uint64_t ind = dw ? dw->ind : di->ind;
-    if (!hvk.dev.caps.buffer_device_address || !hvk_buf(ind, dw ? 16 : 20, &b, &o, &rec) || !rec || (rec & 3)) { HVK_RED_ONCE("indirect quads whose record is in no memory pool with a device address: skipped"); return 0; }
-    int isz = di ? (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4) : 0; uint64_t ilen = 0;
-    if (di) {   // what of the index buffer the pool holds from its start: the indices the record may name
-        uint64_t lo = di->ibuf & ~3ull, n = 1u << 20;
-        while (n >= 4 && !hvk_buf(lo, n, &b, &o, &src)) n >>= 1;
-        if (n < 4 || !src) { HVK_RED_ONCE("indirect indexed quads whose indices are in no memory pool with a device address: skipped"); return 0; }
-        ilen = n;
-    }
-    if (!hvk_ring_alloc(20, 16, args) || !args->dev) return 0;
-    if (di && (!hvk_ring_alloc((VkDeviceSize)QIND_CAP * 4, 16, ix) || !ix->dev)) return 0;
-    struct { uint32_t rec[2], args[2], out[2], ib[2], shift, isz, cap, mode, ilen, pad[3]; } p = {{(uint32_t)rec, (uint32_t)(rec >> 32)}, {(uint32_t)args->dev, (uint32_t)(args->dev >> 32)},
-        {di ? (uint32_t)ix->dev : 0, di ? (uint32_t)(ix->dev >> 32) : 0}, {(uint32_t)src, (uint32_t)(src >> 32)}, (uint32_t)(di ? di->ibuf & 3 : 0), (uint32_t)isz,
-        di ? (uint32_t)QIND_CAP : (uint32_t)QUAD_N * 6, di ? 1u : 0u, (uint32_t)ilen, {0, 0, 0}};
-    VkCommandBuffer cb = outside();
-    hvk_full_barrier(cb);   // after the writes the helper reads
-    if (!hvk_kernel_dispatch(cb, HVK_K_QUAD_IND, &p, sizeof p, di ? QIND_CAP / 64 : 1)) return 0;
-    g_need_barrier = 1; g_bound.valid = 0;   // the draw's index and indirect reads after the helper's writes
-    atomic_fetch_add(&hvk.st_quad_ind, 1);
-    return 1;
+// A draw whose count the GPU holds (an indirect draw, an indirect-count multi-draw, DrawTransformFeedback) and whose primitive vk_index.c converts: converted on the GPU from its
+// record by the direct path's rules (vk_index.c hvk_ix_ind_gpu, shaders/index_restart.comp) into indexed indirect records, in the submission's prologue when nothing of this
+// submission or of one still running writes what the conversion reads (the records, the multi-draw count, the capture's counter, the indices from the index buffer to its
+// pool's end: cpu_readable), else at the draw's place outside the pass after a barrier, as convert_draw places a direct conversion. 1 done, 0 not possible (said once) or failed
+static int convert_indirect(const hvk_ix_in *xi, const hvk_ix_plan *xp, hvk_ix_ind *ii, hvk_ix_out *xo) {
+    if (!hvk_ix_ind_prepare(xi, xp, ii)) return 0;
+    int readable = cpu_readable(ii->rd_lo, ii->rd_hi - ii->rd_lo) && (!ii->cnt || cpu_readable(ii->cnt, 4)) && (!ii->ib_bytes || cpu_readable(xi->src, ii->ib_bytes));
+    VkCommandBuffer cb = readable ? hvk_pre() : outside();
+    if (!readable) hvk_full_barrier(cb);   // after the writes the kernel reads
+    int ok = hvk_ix_ind_gpu(cb, readable, xi, xp, ii, xo);
+    if (!readable) { g_need_barrier = 1; g_bound.valid = 0; }   // the draw's index and indirect reads after the kernel's writes
+    return ok;
 }
-// A draw whose count the GPU holds (an indirect draw, DrawTransformFeedback) and whose primitive vk_index.c converts for a direct draw: quads become an indexed indirect record on
-// the GPU (quads_ind_gpu); quad strips, and line loops without indices, are drawn with Vulkan's triangle and line strips as before (an odd last vertex draws a triangle and the
-// quads' diagonal is the strip's; the loop's closing line is missing); the rest is skipped. Declared at step P8 (README). 2: indirect quads converted, 1: drawn with the nearest
-// topology, 0: skipped (said once)
-static int gpu_counted(const p_draw *dw, const p_draw_idx *di, const tf_ctl_ent *tfa, const hvk_ix_in *xi, const hvk_ix_plan *xp, uint64_t mdi_cnt, hvk_alloc *qargs, hvk_alloc *qix) {
-    int prim = xi->prim, qstrip = prim == NVN_DRAW_PRIMITIVE_QUAD_STRIP;
-    if (prim == NVN_DRAW_PRIMITIVE_QUADS && !tfa && !xi->restart && !mdi_cnt) return quads_ind_gpu(dw, di, qargs, di ? qix : NULL) ? 2 : 0;
-    if (xp->form == HVK_IX_EXPAND && (qstrip || (prim == NVN_DRAW_PRIMITIVE_LINE_LOOP && !di && !tfa)) && !(xi->isz == 1 && !hvk.dev.x.index_uint8)) {
-        HVK_RED_ONCE("%s whose count the GPU holds (an indirect draw or DrawTransformFeedback): drawn as a %s, %s (declared, step P8)", qstrip ? "quad strips" : "line loops",
-                     qstrip ? "triangle strip" : "line strip", qstrip ? "an odd last vertex draws a triangle and the quads' diagonal is the strip's" : "the closing line missing");
-        return 1;
+// An indirect-count multi-draw's group (4.8): the records hle_nvn.c recorded in a row after rec (draws mdi_i + 1, + 2, ... of the same count, i0 the first's index), how many
+// (*stride: the bytes between their arguments; the record size when there is one)
+static uint32_t mdi_group(const uint8_t *rec, uint32_t size, int idx, uint64_t mdi_cnt, uint64_t ind, int i0, uint64_t *stride) {
+    uint32_t maxn = 1; *stride = idx ? 20 : 16;
+    const uint8_t *q = rec + size;
+    for (;;) {
+        op_hdr h; memcpy(&h, q, sizeof h);
+        if (h.op != (idx ? OP_DRAW_IDX : OP_DRAW)) break;
+        uint64_t c2; int i2; uint64_t ind2;
+        if (!idx) { p_draw t; const p_draw *x = draw_rec(q + 8, h.size, &t); c2 = x->mdi_cnt; i2 = x->mdi_i; ind2 = x->ind; }
+        else { p_draw_idx t; const p_draw_idx *x = draw_idx_rec(q + 8, h.size, &t); c2 = x->mdi_cnt; i2 = x->mdi_i; ind2 = x->ind; }
+        if (c2 != mdi_cnt || i2 != i0 + (int)maxn) break;
+        if (maxn == 1) *stride = ind2 - ind;
+        maxn++; q += h.size;
     }
-    HVK_RED_ONCE("%s of primitive %d whose count the GPU holds%s%s%s: no GPU conversion for it, skipped (declared, step P8)", tfa ? "a DrawTransformFeedback" : di ? "an indirect indexed draw" : "an indirect draw",
-                 prim, xi->restart ? ", with restart" : "", xi->isz == 1 ? ", 8-bit indices" : "", mdi_cnt ? ", a multi-draw" : "");
-    return 0;
+    return maxn;
 }
 // What a draw writes of the pass's attachments (P.written; design 5.5): colour slots with a channel mask, depth with the test and writes on, stencil with the test on
 static uint32_t draw_writes(void) {
@@ -1072,7 +1055,8 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
     uint64_t ind = dw ? dw->ind : di->ind;
     const tf_ctl_ent *tfa = tf_auto_of(dw);   // DrawTransformFeedback
     // Indices (vk_index.c, its rules table): the game's, or the vertices as they are; a 32-bit list converted on the GPU into the ring (convert_draw); non-indexed quads over the
-    // shared quad list; for a count the GPU holds (indirect draws, DrawTransformFeedback), indirect quads converted on the GPU (quads_ind_gpu) and the rest as gpu_counted says
+    // shared quad list; for a count the GPU holds (indirect draws, multi-draws, DrawTransformFeedback), converted on the GPU from the record into indexed indirect records
+    // (convert_indirect; quads without indices over the shared quad list)
     int isz = di ? (di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4) : 0, count = dw ? dw->count : di->count;
     hvk_ix_in xi = {prim, isz, di ? di->ibuf : 0, (uint32_t)(count > 0 ? count : 0), di && S.restart.on, S.restart.index, sh[3] && sh[3]->tcs_vertices ? sh[3]->tcs_vertices : 3};
     hvk_ix_plan xp; hvk_ix_plan_make(&xi, topo, &xp);
@@ -1080,18 +1064,30 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
     int ixconv = xp.form >= HVK_IX_MAP;   // drawn from a converted list (or not at all when the list is empty)
     int restart_on = xp.restart;   // primitive restart enable for the draw's topology
     VkBuffer ib = VK_NULL_HANDLE; VkDeviceSize ioff = 0; VkIndexType itype = VK_INDEX_TYPE_UINT32;
-    hvk_alloc qargs = {0}, qix = {0}; int qind = 0;
     if ((ind || tfa) && xp.form != HVK_IX_NATIVE) {
-        int r = gpu_counted(dw, di, tfa, &xi, &xp, mdi_cnt, &qargs, &qix);
-        if (r == 0) return;
-        if (r == 2) { qind = 1; ib = di ? qix.buf : g_quad_ib; ioff = di ? qix.off : 0; itype = VK_INDEX_TYPE_UINT32; topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; }
-        ixconv = 0;   // r == 1: drawn with Vulkan's nearest topology (topo) from the game's indices, as declared
-        restart_on = r == 1 && xi.restart && is_strip(topo);
+        hvk_ix_ind ii; memset(&ii, 0, sizeof ii);
+        ii.records = 1;
+        if (tfa) {   // the capture's byte count over its vertex size, as vkCmdDrawIndirectByteCountEXT would draw it
+            if (!tfa->stride) { HVK_RED_ONCE("DrawTransformFeedback of primitive %d to convert, of a capture whose shader declares no XfbStride: skipped", prim); return; }
+            ii.kind = 2; ii.rec = tfa->ctl + 4 * (uint64_t)tfa->buf; ii.stride = tfa->stride; ii.instances = inst; ii.base_instance = binst;
+        } else {
+            ii.kind = di ? 1 : 0; ii.rec = ind; ii.stride = di ? 20 : 16;
+            if (mdi_cnt) {   // the group's records in one dispatch and one draw call; the records after this one are skipped (above)
+                uint64_t stride;
+                ii.records = mdi_group(rec, size, di != NULL, mdi_cnt, ind, mdi_i, &stride);
+                if (stride < (di ? 20u : 16u) || (stride & 3) || stride > 1u << 20) { HVK_RED_ONCE("multi-draw stride %llu to convert: drawn one record at a time", (unsigned long long)stride); ii.records = 1; stride = di ? 20 : 16; }
+                ii.stride = (uint32_t)stride; ii.cnt = mdi_cnt; ii.first = (uint32_t)mdi_i;
+                g_mdi_cnt = mdi_cnt; g_mdi_skip_n = mdi_i + (int)ii.records;
+            }
+        }
+        if (!convert_indirect(&xi, &xp, &ii, &xo)) return;
+        if (xp.form == HVK_IX_SHARED) { xo.buf = g_quad_ib; xo.off = 0; }
+        topo = xp.topo; ixconv = 1;
     } else if (xp.form != HVK_IX_NATIVE) {
         topo = xp.topo;
         if (ixconv && xp.nout && !convert_draw(&xi, &xp, inst, di ? di->base_vertex : dw->first, binst, &xo)) return;
     }
-    if (di && !qind && !ixconv) {   // the game's indices
+    if (di && !ixconv) {   // the game's indices
         if (!hvk_buf(di->ibuf, 1, &ib, &ioff, NULL)) { HVK_RED_ONCE("index buffer %#llx is in no memory pool: the draw is skipped", (unsigned long long)di->ibuf); return; }
         itype = isz == 1 ? VK_INDEX_TYPE_UINT8 : isz == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
         if (ioff % (VkDeviceSize)isz) { HVK_RED_ONCE("index buffer at an address not aligned to its index size: skipped"); return; }
@@ -1139,19 +1135,14 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
     else if (P.xfb_open) xfb_end(cb);   // the last stage before rasterization must capture while a capture is active
     P.written |= draw_writes();
     atomic_fetch_add(&hvk.st_draws, 1);
-    if (qind) {   // indirect quads: the helper's record (and list) are read by the GPU
-        vkCmdBindIndexBuffer(cb, ib, ioff, itype);
-        vkCmdDrawIndexedIndirect(cb, qargs.buf, qargs.off, 1, 20);
-        return;
-    }
-    if (tfa) { tf_draw_auto(cb, tfa, dw, inst); return; }
-    if (ixconv) {   // the converted list (none when it draws nothing): its count, or the record the GPU wrote with it (the restart form)
+    if (ixconv) {   // the converted list (none when it draws nothing): its count, or the records the GPU wrote with it (the restart form, a count the GPU holds)
         if (!xo.buf) return;
         vkCmdBindIndexBuffer(cb, xo.buf, xo.off, VK_INDEX_TYPE_UINT32);
-        if (xo.indirect) vkCmdDrawIndexedIndirect(cb, xo.abuf, xo.aoff, 1, 20);
+        if (xo.indirect) vkCmdDrawIndexedIndirect(cb, xo.abuf, xo.aoff, xo.records ? xo.records : 1, 20);
         else if (xo.count) vkCmdDrawIndexed(cb, xo.count, inst, 0, di ? di->base_vertex : dw->first, binst);
         return;
     }
+    if (tfa) { tf_draw_auto(cb, tfa, dw, inst); return; }
     if (dw && !ind) {
         if (xp.form == HVK_IX_SHARED) { if (xp.nout) { vkCmdBindIndexBuffer(cb, g_quad_ib, 0, VK_INDEX_TYPE_UINT32); vkCmdDrawIndexed(cb, xp.nout, inst, 0, dw->first, binst); } }
         else if (dw->count > 0) vkCmdDraw(cb, (uint32_t)dw->count, inst, (uint32_t)dw->first, binst);
@@ -1164,18 +1155,8 @@ void hvk_draw(const p_draw *dw, const p_draw_idx *di, const uint8_t *rec, uint32
     if (mdi_cnt) {   // an indirect-count multi-draw (4.8): its records are consecutive, drawn as one vkCmdDraw*IndirectCount from the first
         VkBuffer cbuf; VkDeviceSize coff;
         if (!hvk_buf(mdi_cnt, 4, &cbuf, &coff, NULL) || (coff & 3)) { HVK_RED_ONCE("multi-draw count at %#llx in no memory pool: skipped", (unsigned long long)mdi_cnt); return; }
-        uint32_t maxn = 1; uint64_t stride = dw ? 16 : 20;
-        const uint8_t *q = rec + size;
-        for (;;) {   // the group's other records follow this one (hle_nvn.c records max of them in a row)
-            op_hdr h; memcpy(&h, q, sizeof h);
-            if (h.op != (dw ? OP_DRAW : OP_DRAW_IDX)) break;
-            uint64_t c2; int i2; uint64_t ind2;
-            if (dw) { p_draw t; const p_draw *x = draw_rec(q + 8, h.size, &t); c2 = x->mdi_cnt; i2 = x->mdi_i; ind2 = x->ind; }
-            else { p_draw_idx t; const p_draw_idx *x = draw_idx_rec(q + 8, h.size, &t); c2 = x->mdi_cnt; i2 = x->mdi_i; ind2 = x->ind; }
-            if (c2 != mdi_cnt || i2 != (int)maxn) break;
-            if (maxn == 1) stride = ind2 - ind;
-            maxn++; q += h.size;
-        }
+        uint64_t stride;
+        uint32_t maxn = mdi_group(rec, size, di != NULL, mdi_cnt, ind, 0, &stride);   // the group's other records follow this one (hle_nvn.c records max of them in a row)
         if (stride < (dw ? 16u : 20u) || (stride & 3)) { HVK_RED_ONCE("multi-draw stride %llu below the record size: drawn one record at a time", (unsigned long long)stride); maxn = 1; stride = dw ? 16 : 20; }
         g_mdi_cnt = mdi_cnt; g_mdi_skip_n = (int)maxn;
         if (dw) vkCmdDrawIndirectCount(cb, ab, aoff, cbuf, coff, maxn, (uint32_t)stride);

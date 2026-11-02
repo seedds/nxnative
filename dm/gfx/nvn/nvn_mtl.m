@@ -2485,8 +2485,13 @@ static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     // the storage, so the compression tags may really be there and the memory means nothing without them (Rhythm Heaven
     // Groove's render targets). In a pool the CPU writes (CPU_UNCACHED) the texels are plain: SD GUNDAM G GENERATION CROSS
     // RAYS (SDK 9.4.1) sets COMPRESSIBLE on every texture it creates in 0xa2 pools and writes ordinary texels into them, so
+<<<<<<< Updated upstream
     // skipping the fill left all 74 of them with content 0 — the screen black but for text, `packaged textures: first
     // uploads 0`. The check below therefore runs after the pool is known.
+=======
+    // skipping the fill left all 74 of them with content 0 — the screen black but for text. The check therefore runs after
+    // the pool is known.
+>>>>>>> Stashed changes
     if (t->d.samples > 1 || ((int)mt.pixelFormat >= 250 && (int)mt.pixelFormat <= 262)) return 0;   // 250..262: Depth16Unorm … X24_Stencil8 (some names are macOS-only)
     int no_cpu = (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) != 0, uncached = (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED) != 0;
     if (no_cpu && (t->d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE)) return 0;   // a pool the CPU cannot write: see above
@@ -11467,8 +11472,15 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
 // The rectangle of the canvas (dw x dh) the picture (cw x ch) is drawn into: the picture's aspect ratio kept and centred, black bars in the rest (no stretching when the screen's ratio
 // differs from the game's, e.g. iPhone about 19.5:9 against the game's 16:9); when the ratios differ by under 1 % (the remainder from a game width that is a multiple of 8 in the
 // full-screen setup, e.g. 1952x900 against 2868x1320 differs by 0.17 %) the whole canvas, leaving no border of a few pixels
+//
+// FILL: a phone screen is wider than a 16:9 game (iPhone 16 Pro 2622x1206, 2.174 against 1.778), so filling it means either stretching the picture 22% sideways or throwing
+// away the top and bottom. DM_PRESENT_FILL=crop scales to the canvas width and lets the excess height fall outside the viewport (a 16:9 game loses 9% of its height at each edge,
+// 98 px of the original 1080), which keeps every pixel's shape — the quality-preserving way to fill. DM_PRESENT_FILL=stretch maps the picture onto the whole canvas, which
+// distorts it. Unset keeps the bars: the picture as the game drew it, complete and undistorted.
 static MTLViewport present_viewport(double cw, double ch, double dw, double dh) {
-    double s = fmin(dw / cw, dh / ch);
+    static int fill = -1; if (fill < 0) { const char *e = getenv("DM_PRESENT_FILL"); if (!e || !*e) e = DM_GAME_PRESENT_FILL; fill = !e || !*e ? 0 : !strcmp(e, "crop") ? 1 : !strcmp(e, "stretch") ? 2 : 0; MLOG("present fill mode %d (env %s / profile \"%s\", picture %gx%g canvas %gx%g)", fill, getenv("DM_PRESENT_FILL") ? getenv("DM_PRESENT_FILL") : "(unset)", DM_GAME_PRESENT_FILL, cw, ch, dw, dh); }
+    if (fill == 2) return (MTLViewport){0, 0, dw, dh, 0, 1};
+    double s = fill == 1 ? fmax(dw / cw, dh / ch) : fmin(dw / cw, dh / ch);
     MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
     if (fabs((dw / dh) / (cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
     return vp;
@@ -11494,6 +11506,8 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     double dw = dst.width, dh = dst.height;
     MTLViewport vp = present_viewport(cw, ch, dw, dh);
+    { static double lv[4]; if (memcmp(lv, &vp, sizeof lv)) { memcpy(lv, &vp, sizeof lv);
+        MLOG("present viewport now %.0f,%.0f %.0fx%.0f / canvas %.0fx%.0f (picture %lux%lu)", vp.originX, vp.originY, vp.width, vp.height, dw, dh, (unsigned long)cw, (unsigned long)ch); } }
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
@@ -11586,6 +11600,8 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height;
     MTLViewport vp = present_viewport(r[2], r[3], dw, dh);
+    { static double lv4[4]; if (memcmp(lv4, &vp, sizeof lv4)) { memcpy(lv4, &vp, sizeof lv4);
+        MLOG("present viewport (M4) %.0f,%.0f %.0fx%.0f / canvas %.0fx%.0f (picture %lux%lu)", vp.originX, vp.originY, vp.width, vp.height, dw, dh, (unsigned long)r[2], (unsigned long)r[3]); } }
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     id<MTLTexture> tex = present_raw_src(src), up = fx ? fx_encode(fx, cb, tex, r, vp, dst.pixelFormat, fx == &g_fx_present) : nil;
     if (up) { tex = up; r[0] = r[1] = 0; r[2] = up.width; r[3] = up.height; }   // the scaled picture, the viewport's size: drawn 1:1

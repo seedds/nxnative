@@ -5,6 +5,7 @@ Update 1.0.1 (`v65536`), Unity 2018.3.9f1 IL2CPP with FMOD and NintendoSDK_movie
 ## Validation
 
 - **Current, 2026-11-02:** built the registered profile on chain `e047be1b6829`, on an Apple M1 Pro (MacBookPro18,3), macOS 27.2 (26B5091g), Xcode 27.2 (27B52), with the pinned Metal compiler 32023.922. All 614 shaders compiled for both Mac and iOS; Mac pipeline prebuild succeeded. The unsigned IPA is about 1.3 GB and passed ZIP integrity, display-version, and profile/library stamp checks.
+- **iPhone, 2026-11-02:** the owner tested the updated 1.0.1 IPA built from `047f474c` on TF4-iPhone (iPhone 16 Pro, iOS 27.2, build 24B5089g) and reported that the game works correctly, including local multiplayer. This is owner-reported device validation; no iOS log, test duration or detailed mode coverage was supplied.
 - Played the intro, menus and a complete ten-question training set on the Mac: answer selection, correct/incorrect feedback, score changes and the 8/10 result screen. The save contains all ten answers and the score; restarting with that save restored the training progress and showed the next level unlocked. The run lasted about six minutes, with no crash or shader-load errors; logged resident memory peaked at 879 MB and Metal allocations at 545 MB. This is a functional check, not a before/after performance comparison.
 - Sound uses the real AudioUnit output and produces nonzero PCM. The owner confirmed it sounded normal after restoring the system volume. One 216 ms device-callback interruption triggered the host's existing AudioUnit restart; later reports showed zero underruns. The interruption did not recur during the completed set.
 - Python 3.14.7 tool-suite discovery passed 902 tests with 16 optional skips. Those skipped checks then passed separately: seven compiler-backed image-atomic checks (13 tests including portable checks) with the committed translator, and nine ARM64 timing checks with Unicorn. Documentation/profile tests pass, and `docs_symptoms.py` regenerated the symptom index without changes.
@@ -38,6 +39,5 @@ The supplied combined XCI lists the update before the base. The original extract
 
 ## Open
 
-- iPhone testing requires the owner to sideload the unsigned IPA; no device installation or signing was performed.
-- Local multiplayer still did not pass in the `f6bf0d9b` retest: two physical Pro Controllers were registered separately by the rebuilt windowed host, and the controller applet reported two connected, but neither A nor B on controller 2 joined a second player. The cause is not established.
+- **macOS local multiplayer** still did not pass in the `f6bf0d9b` retest: two physical Pro Controllers were registered separately by the rebuilt windowed host, and the controller applet reported two connected, but neither A nor B on controller 2 joined a second player. The cause is not established; the owner subsequently confirmed local multiplayer works on iOS.
 - This is sampled mode coverage, not an exhaustive pass through every question, lesson, training level or normal unlock path.

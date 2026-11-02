@@ -347,17 +347,24 @@ static void configure(int p, GCController *controller) {
                 dm_haptics_route(p, 1);
                 fprintf(stderr, "haptics: player %d retrying with the default controller locality\n", p + 1);
             };
-            // A server without advanced players gets one engine for both handles (see apply)
-            for (DmRumbleChannel *c in channels[p]) c.merge = ^{
-                if (!route || channels[p] != route) return;
-                for (DmRumbleChannel *old in channels[p]) [old stop];
-                channels[p] = [NSMutableArray new];
-                GCHapticsLocality both = [localities containsObject:GCHapticsLocalityHandles] ? GCHapticsLocalityHandles : GCHapticsLocalityDefault;
-                add_engine(p, -1, @"controller handles", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:both]; });
-                channels[p].lastObject.simple = YES;
-                dm_haptics_route(p, 1);
-                fprintf(stderr, "haptics: player %d plays both motors on one engine (%s)\n", p + 1, both.UTF8String);
-            };
+            BOOL is_dualsense = [controller.productCategory isEqualToString:GCProductCategoryDualSense];
+            if (is_dualsense) {
+                // DualSense voice-coil actuators are physically independent: plain players on LeftHandle and RightHandle
+                // do not override each other, so keep the stereo handle channels instead of merging into one mono engine.
+                for (DmRumbleChannel *c in channels[p]) c.simple = YES;
+            } else {
+                // A server without advanced players gets one engine for both handles (see apply)
+                for (DmRumbleChannel *c in channels[p]) c.merge = ^{
+                    if (!route || channels[p] != route) return;
+                    for (DmRumbleChannel *old in channels[p]) [old stop];
+                    channels[p] = [NSMutableArray new];
+                    GCHapticsLocality both = [localities containsObject:GCHapticsLocalityHandles] ? GCHapticsLocalityHandles : GCHapticsLocalityDefault;
+                    add_engine(p, -1, @"controller handles", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:both]; });
+                    channels[p].lastObject.simple = YES;
+                    dm_haptics_route(p, 1);
+                    fprintf(stderr, "haptics: player %d plays both motors on one engine (%s)\n", p + 1, both.UTF8String);
+                };
+            }
         }
         else if (localities.count) default_controller(p, h, 0);
         fprintf(stderr, "haptics: player %d controller %s, localities %s, %lu channels\n", p + 1,

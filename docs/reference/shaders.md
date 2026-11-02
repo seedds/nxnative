@@ -854,6 +854,37 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md): 10 compute shaders of `agl_ndsr.pck`.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
 
+### Scaled shared memory addresses
+
+- **Symptom:** a compute shader's results in shared memory land in the wrong elements, or only part of its memory is cleared. An exposure histogram came back with its bins at about four times their index, the scene several stops too dark.
+- **Cause:** LDS and STS with a register carry a stride at 78..79: 1 on all the game's 32-bit accesses, 2 on all its 64-bit ones, so the register counts elements of 4 or 8 bytes, not bytes. The decoder ignored it. Its ATOMS take byte offsets and have the field at 0.
+- **Fix:** `AStride` in `InstEmitAmpereMem.cs`, for LDL, LDS, STL, STS and ATOMS. A stride of 3, 16 bytes, is inferred from the pattern and does not occur in the game, and neither does a stride on ATOMS.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 2 LDS and 2 STS with a register in its 16,888 shaders, all in the Lighting compute shaders; `d5bc99ffd183fa20` bounds its register by the element count (0x20) before `[R2 * 8]`. Other Switch 2 games share the decoder and have not been rebuilt with this.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### IMAD.HI adds a register pair, and IMAD.X its carry
+
+- **Symptom:** 64-bit arithmetic in a shader gives wild results: the 64-bit division behind an exposure average returned 893011 for 218, so the exposure stayed at the end of its range. With only the pair fixed it still gave 2 for 340 / 1.
+- **Cause:** IMAD.HI is the high word of `a * b + {c + 1:c}`, the same 64-bit addition as IMAD.WIDE, with the carry out on the predicate at 81..84. The decoder took the high word of `a * b` and added `c` alone, losing the upper word of the pair and the low word's carry. The compiler's 64-bit multiply chains the two: `R9:R8 = R6 * R13 + {R9:R8}`, then `R8 = high(R7 * R11 + {R9:R8})`. Separately, all three IMAD forms have .X (bit 74, the carry predicate at 87..90), which the decoder dropped; as with IADD3.X, a negated addend is then its bitwise not.
+- **Fix:** `AImadHi` and `AImadCarryIn` in `InstEmitAmpereAlu.cs`.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): the Lighting compute shaders' division, run line by line from its translated MSL on 208 known inputs, with dividends up to 2^44: 26 wrong with only the pair fixed, none with both. Other Switch 2 games share the decoder and have not been rebuilt with this.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
+### NVN2 compute reads its workgroup counts at c0 + 4
+
+- **Symptom:** a scene lit by many small lights comes out too dark, with its clustered light lists empty for most clusters.
+- **Cause:** a light culling shader computes its cluster as `(z * c0[8] + y) * c0[4] + x`. NVN2 compute keeps the dispatch's workgroup counts at the start of its driver segment, below the per-shader layout at 0x10, and the host wrote them only at c0 + 0x200, Maxwell's place. At zero, every cluster of a column wrote the same entry.
+- **Fix:** with a Switch 2 `sdk` (`dm_sdk_ounce`), `encode_args_` also writes them at `DMSH_C0_DISPATCH_NVN2`, and an indirect dispatch copies its GPU-written counts there too. x and y are read by the shader; z at c0 + 12 follows their order and has not been seen read.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `35d12d6f98fa05e2`, read from its translated MSL. The picture's change has not been measured on its own.
+
+### Texture handles of SDK 22's Ampere code
+
+- **Symptom:** `Ampere instruction 361` (or `f60`, `370`, `38d` and others) refused, or hundreds of `Failed to find handle source for bindless access of type "textureCube"` when the handle was taken from the wrong register: units drawn white, the rest of the scene right.
+- **Cause:** the bindless form of a texture instruction is the bound opcode + 1 with 0x300: 0xb60 becomes 0x361 and 0xb6f becomes 0x370. 0x361 takes its handle first in the second source block (bit 59), 0xf60 in a uniform register at 40..46, and 0x370 (TXQ) in Ra with the level in Ra + 1. A census of all the game's instructions gave the position.
+- **Fix:** `ATex` and `ATxq` in `InstEmitAmpereMem.cs`. The same bring-up adds, from their encodings in the game: 0x301 BREV and 0x2be its uniform form, 0x311 F2I.U64, 0x312 I2F of a 64-bit pair, 0x38c ATOMS, 0x38d ATOMS.CAS (Rd is 1 when it swapped, not the old value: the game's only use is a retry loop until Rd == 1), 0x992 MEMBAR, 0x9ab ERRBAR, and the carry out of IMAD.WIDE.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 902 shaders had the wrong register at first; all 16,888 translate now. [Splatoon Raiders](../../dm/games/0400380020056000/README.md) lists 0x2be, 0x301 and 0x38c among its refused instructions; it has not been rebuilt with this.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py`.
+
 ### Ampere HMMA through simdgroup_matrix
 
 - **Symptom:** a Switch 2 game's frame rate swings between 60 and 30 fps (Donkey Kong Bananza's own controller, `main+0x204a18`, drops to 30 after two frames of 20 ms from their start to the GPU's end, and comes back after six), and the GPU profile (`DM_NVN_GPUPROF`) shows one compute dispatch of 2-6.5 ms a frame: agl's upscaler network (`agl_ndsr.pck`, shader `7629d857a0a93833`).
@@ -1026,6 +1057,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** a loop reads one handle per light from the game's uniform buffer at a computed offset; Ryujinx's texture array from a buffer indexes it by the handle's byte offset ÷ 8 (an NVN handle is 64-bit, the shader computes `(word >> 2) << 1 | (word & 3) >> 1`). The build reads the name as one bindless texture (`tex_ubo`, offset 0), so the argument buffer was 32 entries longer than the reflection said.
 - **Fix:** the host's reflection reader takes the array length from the MSL type, and the replay fills element k from the handle at byte 8k of that uniform slot (`NVN_RB_TEXU` / `SAMPU` with `n`); elements whose bytes are not a registered texture or sampler ID read the dummy, silently. No chain change: the build already wrote the array type.
 - **Found on:** [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md): the reflection shaders (`reflection.bfsha`: `array<texture2d<float>, 32> fp_t2d_cb14_0` and its samplers), c14 (uniform slot 11). The first run showed elements 0–3, 6 and 8–12 holding textures, among them the shader's fixed handles at +8, +16 and +24 and the lights' from +64.
+
+### A table of handles past the array's length
+
+- **Symptom:** characters shaded black; a shader indexes a table of cube maps, and every element it reads clamps to the array's last one, which holds no handle.
+- **Cause:** the shader reads `c[14][8 * i + 0x340]`. `BindlessToArray` starts an array of handles at the buffer's start, so with a base past the array's length (32) each index ran off its end.
+- **Fix:** `TryArrayBase` finds an index plus a constant base; when the base is past the length, the array starts at the base and the index is the handle's place in the table. `nvn_mtl.m` fills element k from the array's offset + 8k (`NVN_RB_TEXU`, `NVN_RB_SAMPU`). A base inside the array keeps the array at 0, as before.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `e496014da6497fad` and the character shaders.
 
 ### An array of handles from the driver table c2
 

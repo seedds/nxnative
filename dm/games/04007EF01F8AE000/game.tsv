@@ -1,0 +1,36 @@
+# Fire Emblem Fortune's Weave (Switch 2, v131072). Plays on the Mac: see README.md
+# Intelligent Systems' engine on NintendoWare (G3d / Ui2d / Vfx / Atk), PhysX 5.6, SDK 22.2.0, NVN2 (Ampere shaders); modules main + subsdk2 (movie) + sdk. subsdk0 (DLSS) and subsdk1 (CUDA) are not loaded: main imports nothing from them.
+# Packed from a dump folder with scripts/pack_dump.py. Shaders: Shaders/*.bfsha.zst (zstd of FSHA).
+
+# ---- Identity ----
+title_id	04007EF01F8AE000
+program_id	04007EF01F8AE000
+
+# ---- App ----
+name	Fire Emblem Fortune's Weave
+ipa	FireEmblemFortunesWeave.ipa
+app_category	public.app-category.role-playing-games
+pad_layout	full
+
+# ---- Versions ----
+build	v131072	v131072	main=db93b0125f4850601d61c3edde012f8e	subsdk2=7d73f8e808341683306a4425a4989ed5	sdk=5b1602f3a2965f44ab13124cadbdf148
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+modules	main subsdk2 sdk
+romfs_marker	Fs.bin.zst
+zip_store	.zst:.mp4:.webm:.metallib
+
+# ---- Memory ----
+# The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure, not measured here). The NPDM declares 64 MB of system resource, so virtual address memory is on.
+# 256 MB in front + alias region + 256 MB stack region + heap region: Splatoon Raiders' split as a starting point, to be measured
+mem_reserve	0x550000000
+mem_alias	0x400000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x4000000
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/Shaders/=shader /Effect/=effect /Layout/=layout
+shader_note	Fire Emblem Fortune's Weave shaders

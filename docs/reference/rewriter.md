@@ -144,6 +144,22 @@ To enroll a cut for any game's own module:
 - **Check:** `dm/tools/tests/test_jump_copies.py` exercises both comparison widths, unrelated checks, overwritten indices and a bounds check on the copied source with real AArch64 instructions.
 - **Open:** as in the existing 32-bit form, this recognizer assumes the comparison has an effective unsigned bounds guard; it does not prove guard/flag validity or that every incoming path passes the check. This game's actual dispatch has `b.hi` with unchanged flags. Validating those branches remains separate from this fix.
 
+### Vector registers read as writes of the jump-table index
+
+- **Symptom:** `AssertionError: jump table 3ce6c` while rewriting `main`, on an ADR-relative dispatch that the existing form describes: `ldrb w0, [x18, #5]; cmp w0, #5; b.hi; ldr s0, [sp, #8]; ldr s1, [x18, #0xc]; adr x18, #L; ldrsw x1, [x17, x0, lsl #2]; add x18, x18, x1; br x18`.
+- **Cause:** the backward walk from the load to the bounds check refuses the site when an instruction writes the index. It named each written register `'w' + name[1:]`, so `ldr s0` became a write of `w0`, the index, and `jump_adr_offsets` gave up. `half_count`, `check_before_copy` and the masked form of `jump_offsets` had the same test. It also failed the other way: capstone's `reg_name` calls x30 `lr` and x29 `fp`, so a real write of an index in either went unseen. `jump_masked_not` missed those writes too.
+- **Fix:** all of them ask `written_w`, which names only general-purpose registers, with `lr` and `fp` as w30 and w29. A vector or floating-point register (`s`, `d`, `q`, `b`, `h`, `v`) never changes the index.
+- **Found on:** Tomodachi Life: Living the Dream (`010051F0207B2000`) 1.0.0, `main+0x3ce6c` (six targets, table at `main+0x2a5967c`), by the pull request's author: with the fix the game rewrites, packs as a Mac app from a provisional profile and boots to its first screen. The other forms were found by reading the code and shown on synthetic sites.
+- **Check:** `dm/tools/tests/test_jump_copies.py` puts vector loads and x29 / x30 writes between the check and the load in each form, including `half_count`.
+
+### Overwritten jump-table indices and bases taken as unchanged
+
+- **Symptom:** no failure seen on a game. The rewriter could read a jump table with the wrong size or base, so a case's target or landing pad would be missing or wrong. In the other direction, a halfword table whose base is in x30 got all 65,536 landing pads (`J` rows with 65536 in `main.sites.tsv`), which only makes the patch area larger.
+- **Cause:** `jump_offsets` and `half_count` followed `mov w9,w0` as a copy into the index but kept `w9` as the index too, so `cmp w9,#4` before the copy counted as its check. The table-base writer chains and `jump_adr_offsets`' search for the `adr` compared written names with `xN`, so a write of `wN`, which replaces the register as well, went unseen, as did `lr` and `fp`. A compare of `xN` counted as a write there.
+- **Fix:** a copy replaces the index, as `jump_adr_offsets` already did. Those searches ask `writes_reg`, which sees either width and the `lr` / `fp` names and leaves compares out. `jump_offsets` also refuses a site whose index is written after its check, such as `add w18,w18,#1`, or a caller-saved index across a call. A write that keeps the value, such as `sxtw x0,w0`, is refused too: no game on the drive has one, and a refusal stops the rewrite with a `jump table` assertion instead of reading the table wrongly.
+- **Found on:** reading the code while fixing [Vector registers read as writes of the jump-table index](#vector-registers-read-as-writes-of-the-jump-table-index). Of the 51 `main`s that rewrote in a comparison of old and new, only [Absolum](../../dm/games/0100A83022A22000/README.md)'s changed: its four tables at `main+0x1ed2dc`, `+0x1ed4fc`, `+0x1ed71c` and `+0x1ed8cc`, based in x30, went from 65,536 pads to 445, 373, 301 and 257, each its table's largest entry + 1, and the patch area from 3.7 MB to 570 KB.
+- **Check:** `dm/tools/tests/test_jump_copies.py` `CopyAfterCheck`, `IndexChangedAfterCheck`, `HalfCount`, `test_table_base_sees_every_write_of_the_register` and `test_a_32_bit_write_after_the_adr_replaces_its_value`.
+
 ### Byte tables indexed by x30 (capstone register names)
 
 - **Symptom:** `jump table <addr>` assertion on a byte table indexed by x30 (`adr x18, #L; ldrb w30, [x14, x12]; add x18, x18, x30, lsl #2; br x18`).

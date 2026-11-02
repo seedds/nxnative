@@ -826,6 +826,28 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** inline uniform updates (`CommandBufferUpdateUniformBuffer`) are replayed as in-order GPU copies (their order inside one encoder: [Metal 4 does not order operations inside one encoder](#metal-4-does-not-order-operations-inside-one-encoder); inside a pass: [Inline uniform updates inside a render pass](#inline-uniform-updates-inside-a-render-pass)). They are snapshotted at encode time (`mtl_sub_update`): the data is copied into a host-owned ring instead of being read from command memory when the GPU runs.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md).
 
+### Pending clears land before a compute dispatch
+
+- **Symptom:** a scene opens near white and fades to its normal colours over several seconds, at each scene change, while the settled picture is right.
+- **Cause:** a full clear with no draw after it waits on the current targets for the next pass that attaches them, as its load action. Copies land such clears first, but a dispatch only ended the open pass. So a clear before a dispatch landed after it. The game resets its auto exposure by clearing the exposure image to 1 and dispatching the shaders that read and write it as an image: the late clear overwrote the exposure they had just written, and adaptation then climbed back from 1.
+- **Fix:** `dispatch` calls `rp_flush` as `copy_t2t` does. A dispatch moved ahead of a pass (`cs_hoist_try`) already waits for no pending clear. The cost is one clear-only pass where a game clears targets and dispatches before drawing to them.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 7 s after boot on the same route, exposure 3.035 and still climbing with 63 % of the frame near white, then 5.555 and settled with 0.1 %. The user's battle scenes, blown white before, look right after it.
+
+### `[[primitive_id]]` in a specialized Metal 4 pipeline
+
+- **Symptom:** a regular lattice of dots over the ground, and the light wrong: three of four layers of an interleaved ambient occlusion array stay empty, while the draws and their bindings look right.
+- **Cause:** a Metal 4 pipeline specialized from a base with unspecialized colour state gives the fragment shader `[[primitive_id]]` 0 for every primitive. The same shader built whole counts properly. Measured in small test programs (16384 0 0 0 pixels per layer, against 4096 each), M6, macOS 27.2. The game writes the layer from the primitive ID, drawing four triangles. Ruled out: `gl_Layer`, view layers, clears, and the classic and Metal 4 API alone. This is a platform behaviour the host cannot change.
+- **Fix:** the reflection records `reads_prim_id` (`raster.primitive_id`, `dmsh_build.py`), and `pso_build_ex` builds such a pipeline whole. Such pipelines give up the specialization's compile time, for these shaders only.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `b6726be4afc44691`.
+
+### NVN2's DLSS on MetalFX
+
+- **Symptom:** a Switch 2 game calls `nvnCommandBufferEvaluateDlss` and its builder functions, which the host did not have.
+- **Cause:** NVN2 has DLSS as a part of the API, a neural network that runs on NVIDIA's GPU, with no counterpart on the Mac.
+- **Fix:** `hle_nvn.c` takes the builder, the network and the parameters (the network's texture IDs and storage are the driver's own needs and are dropped), and answers `GetOptimalSettings` from the method (0: 2x, 1: 3x, 2: 1x). The replay's `OP_DLSS` runs MetalFX's temporal scaler (`dlss_eval`, `nvn_mtl.m`) over colour, depth and motion vectors, with the jitter and a history reset, falling back to a bilinear draw when there is no scaler. This replaces the upscaler, so the picture is close to the game's, not the same.
+- **Open:** the jitter's sign has not been checked and the bias mask is only logged; no ghosting has been seen.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): `gfxa::TaskDLSS`, 1024x576 to 2048x1152.
+
 ### Metal 4 does not order operations inside one encoder
 
 - **Symptom:** tall blue / textured panels that flickered frame to frame: the fountain's vertex shader pushed the water surface to the top of the screen.

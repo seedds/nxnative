@@ -74,5 +74,15 @@ class Nesting(unittest.TestCase):
         self.assertEqual(dec.call_count, 0)
 
 
+class MemberNames(unittest.TestCase):
+    def test_names_and_time(self):   # each name ends at its own NUL; splitting the rest of the archive per member made Fire Emblem Fortune's Weave's 9.8 MB layout SARC take 6 minutes
+        members = [(b'tex%04d.bntx' % i, bytes(0x4000)) for i in range(800)]
+        import time
+        archive = fz.sarc(members)   # built outside the timing: only the member reading is measured (about 1 ms here, 47 s with the per-member split)
+        t = time.monotonic(); got = list(ss.sarc_members(archive)); took = time.monotonic() - t
+        self.assertEqual(got, [(n.decode(), m) for n, m in members])
+        self.assertLess(took, 1.0)
+
+
 if __name__ == '__main__':
     unittest.main()

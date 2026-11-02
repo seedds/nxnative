@@ -1,7 +1,8 @@
 // nxlauncher's model (dm/launcher/launcher_model.cpp) over a games folder this test writes (fake_games.h): the games found and their pack modes, the settings rows and their effective
 // values (saved choices, a value the pack does not offer, the pack's own defaults, what the environment fixes), what starts a game (the pack, the host, the environment in the order
 // run.sh gives it, DM_SAVED_CHOICES=0, NXHOST), the saved-choice round trip through the player's env.txt, the second pack (the profile folder, "Record a profile while playing",
-// a profile newer than the packs, the repack's command), the launcher's own settings, DM_LAUNCHER and "Show this window at launch", and a child process with its environment,
+// whether the recorded profile and JIT misses make a better pack possible against what the launch file says the packs took, the repack's command), the launcher's own settings,
+// DM_LAUNCHER and "Show this window at launch", and a child process with its environment,
 // working folder, log and exit status (this program, which acts as nxhost-run and as the packer with NXL_FAKE_HOST=1).
 #include "launcher_model.h"
 #include "fake_games.h"
@@ -181,8 +182,44 @@ static void round_trip(const fake::Folder &f) {
     fake::write(f.a_run / "env.txt", fake::kChoices);
 }
 
-// The second pack (launcher_model.h): the profile folder, "Record a profile while playing" and DM_AOT_PROFILE in what starts the game, a profile newer than the packs, and the
-// packer's command for the repack, run (this program acts as the packer: the launch file's python row names it)
+// The host's files (dm/host/aot_profile.c dm_aot_profile_write and write_misses: their header lines, then one row per function or per address and reason)
+static void profile_file(const fs::path &dir, const std::string &name, const std::string &sha, const std::vector<std::pair<uint64_t, uint64_t>> &rows) {
+    uint64_t sum = 0;
+    for (const auto &r : rows) sum += r.second;
+    std::string t = "# nxaot profile: guest functions sampled by the x86-64 engine (dm/host/aot_profile.c, DM_AOT_PROFILE); nxaot build --profile <this file>\n";
+    t += "# module " + name + ", build ID " + std::string(32, 'a') + ", image SHA-256 " + sha + "\n# pack /packs/" + name + kPackSuffix + "\n";
+    t += "# " + std::to_string(sum) + " samples in " + std::to_string(rows.size()) + " of its " + std::to_string(rows.size() + 7) + " functions; 1000 Hz of each guest thread's CPU time, "
+         "1 of 1 threads sampled; all modules: " + std::to_string(sum) + " samples, " + std::to_string(sum) + " in compiled code, 0 in host calls and SVCs of compiled functions, "
+         "0 in the JIT fallback, 0 elsewhere in the host\n";
+    t += "# <module offset of a function's entry> <samples>\n";
+    for (const auto &r : rows) { char b[64]; std::snprintf(b, sizeof b, "%#llx %llu\n", (unsigned long long)r.first, (unsigned long long)r.second); t += b; }
+    fake::write(dir / (name + ".tsv"), t);
+}
+
+struct Miss { uint64_t off; std::string reason; uint64_t n; };
+static void misses_file(const fs::path &dir, const std::string &name, const std::string &sha, const std::vector<Miss> &rows) {
+    uint64_t entries = 0; std::vector<uint64_t> addrs;
+    for (const auto &r : rows) { entries += r.n; if (std::find(addrs.begin(), addrs.end(), r.off) == addrs.end()) addrs.push_back(r.off); }
+    std::string t = "# nxaot misses: guest addresses the x86-64 engine's JIT fallback ran because the pack had no compiled code there (dm/host/aot_run.c, DM_AOT_PROFILE); "
+                    "nxaot build --misses <this file>\n";
+    if (!sha.empty()) t += "# module " + name + ", build ID " + std::string(32, 'a') + ", image SHA-256 " + sha + "\n";
+    t += "# pack /packs/" + name + kPackSuffix + "\n";
+    t += "# " + std::to_string(addrs.size()) + " addresses, " + std::to_string(entries) + " entries into the JIT fallback; " + std::to_string(addrs.size()) +
+         " of the addresses this session, the rest from earlier sessions of this image\n";
+    t += "# <module offset> <reason> <entries>: indirect, call, host, nocode (an entry of the next pack), nonlocal (a resume point), fpcr, refused, untranslated, other (no pack serves them)\n";
+    for (const auto &r : rows) { char b[96]; std::snprintf(b, sizeof b, "0x%llx %s %llu\n", (unsigned long long)r.off, r.reason.c_str(), (unsigned long long)r.n); t += b; }
+    fake::write(dir / (name + ".misses.tsv"), t);
+}
+
+static std::vector<std::pair<uint64_t, uint64_t>> sampled(uint64_t offsets, uint64_t samples) {   // offsets functions sampled, samples in all
+    std::vector<std::pair<uint64_t, uint64_t>> rows;
+    for (uint64_t i = 0; i < offsets; i++) rows.push_back({0x1000 + 0x40 * i, samples / offsets + (i == 0 ? samples % offsets : 0)});
+    return rows;
+}
+
+// The second pack (launcher_model.h): the profile folder, "Record a profile while playing" and DM_AOT_PROFILE in what starts the game, whether a better pack is possible (what the
+// profile folder holds against the launch file's made rows, the files written in the host's exact form), and the packer's command for the repack, run (this program acts as the
+// packer: the launch file's python row names it)
 static void second_pack(const fake::Folder &f) {
     auto g = find_games(fake::str(f.games));
     const Game &a = g[0], &b = g[1];
@@ -203,22 +240,104 @@ static void second_pack(const fake::Folder &f) {
     fake::write(f.a_run / "env.txt", std::string(fake::kChoices) + "DM_AOT_PROFILE=/saved/profile\n");
     CHECK_EQ(value(compose(a, "", none, true).set, "DM_AOT_PROFILE"), std::string("/saved/profile"), "a DM_AOT_PROFILE line of env.txt wins over the launcher's");
     fake::write(f.a_run / "env.txt", fake::kChoices);
-    // A profile newer than the packs of one mode and older than the other's
+    // A better pack: what the profile folder holds against what the launch file says the packs took (its made rows), not the files' times
     ProfileState s0 = profile_state(a, "balanced");
-    CHECK(s0.folder == a_prof && s0.files == 0 && s0.pack_files == 2 && !s0.better(), "no profile yet: nothing better (the balanced folder's two packs)");
+    CHECK(s0.folder == a_prof && s0.files == 0 && s0.pack_files == 2 && !s0.better() && s0.reason().empty(), "no profile yet: nothing better (the balanced folder's two packs)");
     const fs::path prof = fs::u8path(a_prof);
-    fake::write(prof / "main.tsv", "# nxaot profile\n0x100 40\n");
-    fake::write(prof / "main.misses.tsv", "# nxaot misses\n0x208 indirect 1\n");
+    const std::string main_sha(64, '1'), nro_sha(64, '2'), other_sha(64, 'e');   // fake_games.h: main's manifest and nro0's row of nro.tsv
+    // the packer's digests of these files (dm/tools/tests/test_nsp_x86.py DIGEST_OFFSETS, DIGEST_MISSES: build_ipa_from_nsp.py fnv64)
+    const std::string d_offsets = "ce9643fb137f8dce", d_misses = "b3c6eacf4fcf4a0e";
+    profile_file(prof, "main", main_sha, {{0x100, 40}, {0x200, 2}});
+    misses_file(prof, "main", main_sha, {{0x100, "nonlocal", 2}, {0x208, "indirect", 1}});
     fake::write(prof / "main.tsv.tmp", "being written\n");   // the host's temporary name: not counted
     const auto t0 = fs::file_time_type::clock::now();
-    for (const char *n : {"main", "nro0"}) {
+    for (const char *n : {"main", "nro0"}) {   // the balanced packs older than the files, the max packs newer: the rule does not look at times
         fs::last_write_time(f.a / "aot_v131072" / (std::string(n) + kPackSuffix), t0 - std::chrono::hours(1));
         fs::last_write_time(f.a / "aot_v131072" / "max" / (std::string(n) + kPackSuffix), t0 + std::chrono::hours(1));
     }
-    for (const char *n : {"main.tsv", "main.misses.tsv", "main.tsv.tmp"}) fs::last_write_time(prof / n, t0);
     ProfileState sb = profile_state(a, "balanced"), sm = profile_state(a, "max");
-    CHECK(sb.files == 2 && sb.better(), "a profile and misses newer than the balanced packs: \"Profile recorded: a better pack is possible\"");
-    CHECK(sm.files == 2 && !sm.better(), "... and older than the max packs: nothing to say for max");
+    CHECK(sb.files == 2 && !sb.known && sb.better() && sm.better(), "a launch file without made rows: packs made without a profile or misses, so both modes may be better, whatever the times");
+    CHECK_EQ(sb.reason(), std::string("2 new JIT misses; 2 sampled offsets the packs were made without; the packs were made before the launch file recorded what they took"), "... and why");
+    CHECK(sb.samples["main"].count == 2 && sb.samples["main"].samples == 42 && sb.samples["main"].digest == d_offsets, "main.tsv as the packer reads it, with the packer's digest");
+    CHECK(sb.misses["main"].count == 2 && sb.misses["main"].digest == d_misses, "main.misses.tsv as the packer reads it, with the packer's digest");
+
+    // The launch file with made rows (build_ipa_from_nsp.py made_rows)
+    const fs::path launch = f.a / ("launch-" + std::string(kPlatform) + ".tsv");
+    const std::string launch0 = fake::read(launch);
+    auto state = [&](const std::string &rows, const std::string &mode = "balanced") {
+        fake::write(launch, launch0 + rows);
+        auto gs = find_games(fake::str(f.games));
+        return profile_state(gs[0], mode);
+    };
+    const std::string yes = "made\tprofile\tyes\nmade\tmisses\tyes\n", same = "samples\tmain\t2 42 " + d_offsets + "\nmisses\tmain\t2 " + d_misses + "\n";
+    {
+        fake::write(launch, launch0 + yes + same);
+        auto gs = find_games(fake::str(f.games));
+        const LaunchFile &l = gs[0].launch;
+        CHECK(l.made_profile == "yes" && l.made_misses == "yes" && l.made_samples.at("main").count == 2 && l.made_samples.at("main").samples == 42 &&
+                  l.made_samples.at("main").digest == d_offsets && l.made_miss.at("main").count == 2 && l.made_miss.at("main").digest == d_misses && gs[0].problem.empty(),
+              "the made, samples and misses rows read (and the launch file still starts the game)");
+    }
+    ProfileState s = state(yes + same);
+    CHECK(s.known && !s.better() && s.reason().empty(), "the packs took what the folder holds: nothing better");
+    CHECK(!state(yes + same, "max").better(), "... for the max packs too (the rows hold for every pack row)");
+    // JIT misses
+    misses_file(prof, "main", main_sha, {{0x100, "nonlocal", 3}, {0x208, "indirect", 9}});
+    CHECK(!state(yes + same).better(), "the same misses with other counts (a later session merged in): nothing better");
+    misses_file(prof, "main", main_sha, {{0x100, "nonlocal", 3}, {0x208, "indirect", 9}, {0x300, "host", 1}});
+    s = state(yes + same);
+    CHECK(s.better() && s.reason() == "1 new JIT miss", "a new miss address: better: " + s.reason());
+    CHECK(!state(yes + same.substr(0, same.find("misses\t")) + "misses\tmain\t3 " + s.misses["main"].digest + "\n").better(), "... and not once the packs took it");
+    misses_file(prof, "main", main_sha, {{0x100, "nonlocal", 3}, {0x400, "call", 1}});
+    s = state(yes + same);
+    CHECK(s.better() && s.reason() == "JIT misses the packs did not take", "as many addresses, other ones (another digest): better: " + s.reason());
+    misses_file(prof, "main", main_sha, {{0x100, "nonlocal", 3}, {0x208, "indirect", 9}, {0x300, "host", 1}});
+    CHECK(!state("made\tprofile\tyes\nmade\tmisses\tunused\n" + same).better(), "made misses unused (this nxaot has no --misses): a repack would not take them either");
+    misses_file(prof, "main", other_sha, {{0x100, "nonlocal", 3}, {0x208, "indirect", 9}, {0x300, "host", 1}});
+    s = state(yes + same);
+    CHECK(!s.better() && s.misses.empty(), "misses recorded on another image: the packer would not take them");
+    misses_file(prof, "main", "", {{0x300, "host", 1}});
+    s = state("");
+    CHECK(s.misses.empty() && s.reason() == "2 sampled offsets the packs were made without; the packs were made before the launch file recorded what they took",
+          "misses that name no image: the packer would not take them (unknown rows: the profile alone)");
+    misses_file(prof, "main", main_sha, {{0x100, "nonlocal", 2}, {0x208, "indirect", 1}});
+    // The sample profile: nxaot puts every function holding a sampled offset at tier H, so the offsets are the hot set
+    const std::string hundred = yes + "samples\tmain\t100 10000 0000000000000000\nmisses\tmain\t2 " + d_misses + "\n";
+    profile_file(prof, "main", main_sha, sampled(105, 12000));
+    s = state(hundred);
+    CHECK(s.samples["main"].count == 105 && s.samples["main"].samples == 12000 && !s.better(), "5 % more offsets, 20 % more samples: below the thresholds, nothing better");
+    profile_file(prof, "main", main_sha, sampled(110, 11000));
+    s = state(hundred);
+    CHECK(s.better() && s.reason() == "10 new sampled offsets", "10 % more offsets: better: " + s.reason());
+    profile_file(prof, "main", main_sha, sampled(3500, 90000));
+    s = state(hundred);
+    CHECK(s.reason() == "3,400 new sampled offsets", "the count written with thousands separators: " + s.reason());
+    profile_file(prof, "main", main_sha, sampled(100, 12500));
+    s = state(hundred);
+    CHECK(s.better() && s.reason() == "a longer session's profile (+25 % samples)", "as many offsets, other ones, from a session with 25 % more samples: better: " + s.reason());
+    CHECK(!state(yes + "samples\tmain\t100 10000 " + s.samples["main"].digest + "\nmisses\tmain\t2 " + d_misses + "\n").better(),
+          "25 % more samples on the same offsets: the same hot set, the same pack: nothing better");
+    profile_file(prof, "main", main_sha, sampled(100, 12400));
+    CHECK(!state(hundred).better(), "other offsets with 24 % more samples: nothing better");
+    profile_file(prof, "main", main_sha, sampled(95, 20000));
+    CHECK(!state(hundred).better(), "fewer offsets (a shorter session's hot set) even with more samples: never better, a pack from it would put functions back at tier C");
+    profile_file(prof, "main", main_sha, sampled(100, 10000));
+    s = state("made\tprofile\tno\nmade\tmisses\tyes\nmisses\tmain\t2 " + d_misses + "\n");
+    CHECK(s.better() && s.reason() == "100 sampled offsets the packs were made without", "made profile no (--no-profile; a repack takes it): better: " + s.reason());
+    CHECK(!state("made\tprofile\tunused\nmade\tmisses\tyes\nmisses\tmain\t2 " + d_misses + "\n").better(), "made profile unused (AOT_PROFILE off or an nxaot without --profile): nothing better");
+    s = state(yes + "misses\tmain\t2 " + d_misses + "\n");
+    CHECK(s.better() && s.reason() == "100 sampled offsets the packs were made without", "made profile yes but no samples row of main (no profile of it then): better: " + s.reason());
+    const std::string main_same = yes + "samples\tmain\t100 10000 " + s.samples["main"].digest + "\nmisses\tmain\t2 " + d_misses + "\n";
+    profile_file(prof, "nro0", nro_sha, {{0x10, 5}});
+    s = state(main_same);
+    CHECK(s.better() && s.reason() == "1 sampled offset the packs were made without", "an NRO's profile (nro.tsv's image) that its pack did not take: better: " + s.reason());
+    profile_file(prof, "nro0", other_sha, {{0x10, 5}});
+    profile_file(prof, "other", main_sha, {{0x10, 5}});   // no module of the packs
+    fake::write(prof / "main.tsv", "0x100 many\n");          // one that does not parse: the packer packs without it
+    s = state(yes + same);
+    CHECK(!s.better() && s.samples.empty() && s.files == 4, "a profile of another image, of no module of the packs, or one that does not parse: not taken");
+    fake::write(launch, launch0);
+    fs::remove_all(prof);
     // The repack: the packer on the NSP folder with this system, the mode and what the pack was made with
     Command r = repack_command(a, "max");
     CHECK(r.error.empty(), "the repack's command: " + r.error);
@@ -233,7 +352,6 @@ static void second_pack(const fake::Folder &f) {
     CHECK(spawn(r, &ch, &err) && wait(&ch) == 0, "the packer ran: " + err);
     std::string log = fake::read(f.a_run / "repack.txt");
     CHECK(log.find("fake host: argv " + r.argv[1] + "|" + fake::str(f.games) + "|--platform|" + kPlatform + "|--pack-mode|max|-k|") != std::string::npos, "its arguments: " + log);
-    for (const char *n : {"main.tsv", "main.misses.tsv", "main.tsv.tmp"}) fs::remove(prof / n);
 }
 
 static void config(const fs::path &root) {

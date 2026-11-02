@@ -3,8 +3,9 @@
 // window shows them (dm/mac/Launcher.swift: the basic settings first, the others under Advanced settings, Reset to tested defaults), its pack mode and the Vulkan pipeline cache's
 // switch, the log of the running game below, "Show this window at launch", Quit and Play. launcher_model.h has what it reads, writes and starts. Plain ImGui style and font; keyboard
 // and controller navigation (ImGuiConfigFlags_NavEnableKeyboard / NavEnableGamepad).
-// The second pack (launcher_model.h, "The second pack"): Play records a sample profile and the JIT misses unless "Record a profile while playing" is off; once they are newer than the
-// game's packs the list says so and "Repack with profile" runs the packer in the background, its output in the log pane, Play disabled for that game until it ends.
+// The second pack (launcher_model.h, "The second pack"): Play records a sample profile and the JIT misses unless "Record a profile while playing" is off; once they hold what a pack
+// made now would take and the game's packs did not (new JIT misses, more sampled functions: the launch file's made rows say what the packs took), the list says so, with the reason in
+// a tooltip, the log and --list, and "Repack with profile" runs the packer in the background, its output in the log pane, Play disabled for that game until it ends.
 // Without a window (tests and scripts): --list <games folder> (TSV), --command <id> (what it would start), --play <id>, --repack <id> (the packer, waited for); --frames <n> draws n
 // frames and exits (SDL_VIDEODRIVER=dummy), --shot <file.bmp> keeps the last of them as a picture.
 #include "launcher_model.h"
@@ -32,7 +33,7 @@ using namespace nxl;
 static const char *kUsage =
     "usage: nxlauncher [--games <folder>] [--window] [--frames <n> [--shot <file.bmp>]]   the window (or the last game at once: \"Show this window at launch\" off, DM_LAUNCHER=0);\n"
     "                                                                 --frames: draw n frames and exit, --shot: the last one as a BMP\n"
-    "       nxlauncher --list <games folder>                         the games packed there, as TSV\n"
+    "       nxlauncher --list <games folder>                         the games packed there, as TSV (better_pack: why a repack with the profile would be better, or -)\n"
     "       nxlauncher [--games <folder>] [--pack balanced|max] --command <title ID or folder>   what it would start: KEY=value lines, a blank line, the argv\n"
     "       nxlauncher [--games <folder>] [--pack balanced|max] --play <title ID or folder>      start it without the window and wait (its output in its log.txt)\n"
     "       nxlauncher [--games <folder>] [--pack balanced|max] --repack <title ID or folder>    pack it again with what its sessions recorded (the packer's output in repack.txt)\n";
@@ -57,15 +58,22 @@ static std::string join(const std::vector<std::string> &v, const char *sep) {
     return s;
 }
 
+// "a better pack is possible": why, for the chosen mode's packs ('' when it is not)
+static std::string better_reason(const Config &cfg, const Game &g) {
+    if (!g.problem.empty()) return "";
+    return profile_state(g, chosen_mode(g, cfg)).reason();
+}
+
 static int list_games(const Config &cfg, const std::string &dir) {
     std::error_code ec;
     if (!std::filesystem::is_directory(std::filesystem::u8path(dir), ec)) { std::fprintf(stderr, "[RED] nxlauncher: no games folder %s\n", dir.c_str()); return 1; }
     auto games = find_games(dir);
-    std::printf("# title_id\ttitle\tversion\tpacks\tlast_played\tfolder\tproblem\n");
+    std::printf("# title_id\ttitle\tversion\tpacks\tlast_played\tfolder\tproblem\tbetter_pack\n");
     for (const auto &g : games) {
         auto modes = g.modes();
-        std::printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\n", g.launch.title_id.empty() ? "-" : g.launch.title_id.c_str(), g.launch.title.c_str(), g.launch.version.empty() ? "-" : g.launch.version.c_str(),
-                    modes.empty() ? "none" : join(modes, ",").c_str(), played(cfg, g).c_str(), g.dir.c_str(), g.problem.empty() ? "-" : g.problem.c_str());
+        const std::string why = better_reason(cfg, g);
+        std::printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", g.launch.title_id.empty() ? "-" : g.launch.title_id.c_str(), g.launch.title.c_str(), g.launch.version.empty() ? "-" : g.launch.version.c_str(),
+                    modes.empty() ? "none" : join(modes, ",").c_str(), played(cfg, g).c_str(), g.dir.c_str(), g.problem.empty() ? "-" : g.problem.c_str(), why.empty() ? "-" : why.c_str());
     }
     std::fprintf(stderr, "nxlauncher: %zu game%s in %s\n", games.size(), games.size() == 1 ? "" : "s", dir.c_str());
     return 0;
@@ -79,6 +87,9 @@ static int print_command(const Config &cfg, const Env &env, const Game &g, const
     for (const auto &e : c.set) std::printf("%s=%s\n", e.key.c_str(), e.value.c_str());
     std::printf("\n");
     for (const auto &a : c.argv) std::printf("%s\n", a.c_str());
+    std::fflush(stdout);
+    const std::string why = profile_state(g, c.mode).reason();
+    if (!why.empty()) std::fprintf(stderr, "nxlauncher: %s: Profile recorded: a better pack is possible: %s\n", g.launch.title.c_str(), why.c_str());
     return 0;
 }
 
@@ -105,7 +116,7 @@ static int play_now(Config &cfg, const Env &env, const Game &g, const std::strin
 // "a better pack is possible": a line for the log, '' when there is none to say
 static std::string profile_line(const Game &g, const ProfileState &p) {
     if (!p.better()) return "";
-    return g.launch.title + ": Profile recorded: a better pack is possible (" + std::to_string(p.files) + " files in " + p.folder + "; Repack with profile)";
+    return g.launch.title + ": Profile recorded: a better pack is possible (" + std::to_string(p.files) + " files in " + p.folder + "; Repack with profile): " + p.reason();
 }
 
 // --repack: the packer for the game's mode, waited for (its output in repack.txt)
@@ -193,6 +204,7 @@ static void profile_section(App &a, const Game &g) {
     if (fixed) ImGui::TextDisabled("Set at launch (DM_AOT_PROFILE=%s)", v.c_str());
     if (p.better()) {
         ImGui::TextColored(ImVec4(.95f, .8f, .35f, 1.f), "Profile recorded: a better pack is possible");
+        ImGui::TextDisabled("%s.", p.reason().c_str());
         ImGui::BeginDisabled(a.repack.running || a.child.running);
         if (ImGui::Button("Repack with profile")) start_repack(a, g);
         ImGui::EndDisabled();
@@ -202,7 +214,7 @@ static void profile_section(App &a, const Game &g) {
     } else if (repacking(a, g)) {
         ImGui::TextDisabled("Repacking with the profile...");
     } else {
-        ImGui::TextDisabled(p.files ? "The packs are newer than the recorded profile (%s)." : "No profile recorded yet (%s).", p.folder.c_str());
+        ImGui::TextDisabled(p.files ? "The packs already took what the recorded profile holds, or it adds too little to change them (%s)." : "No profile recorded yet (%s).", p.folder.c_str());
     }
     ImGui::PopTextWrapPos();
 }
@@ -343,7 +355,10 @@ static void games_list(App &a) {
         ImGui::TableNextColumn();
         if (ImGui::Selectable(g.launch.title.c_str(), g.launch.title_id == a.selected, ImGuiSelectableFlags_SpanAllColumns)) a.selected = g.launch.title_id;
         if (repacking(a, g)) ImGui::TextDisabled("Repacking with the profile...");
-        else if (profile_of(a, g).better()) ImGui::TextColored(ImVec4(.95f, .8f, .35f, 1.f), "Profile recorded: a better pack is possible");   // the second pack
+        else if (profile_of(a, g).better()) {   // the second pack, and why
+            ImGui::TextColored(ImVec4(.95f, .8f, .35f, 1.f), "Profile recorded: a better pack is possible");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", profile_of(a, g).reason().c_str());
+        }
         ImGui::TableNextColumn(); ImGui::TextUnformatted(g.launch.version.c_str());
         auto modes = g.modes();
         ImGui::TableNextColumn(); ImGui::TextUnformatted(modes.empty() ? "none" : join(modes, ", ").c_str());

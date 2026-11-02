@@ -74,6 +74,16 @@ def launch_rows(path):
     return [tuple(line.split('\t', 2)) for line in lines if line and not line.startswith('#')]
 
 
+def made(path):
+    """The launch file's rows of what the packs were made with (made, samples, misses: made_rows), which the launcher compares with the profile folder"""
+    return [r for r in launch_rows(path) if r[0] in ('made', 'samples', 'misses')]
+
+
+# The digests the launcher checks too (dm/launcher/tests/t_launcher_model.cpp holds the same constants): FNV-1a 64 of main.tsv's offsets 0x100 and 0x200 ('100\n200\n'), and of the
+# misses' pairs (0x100 nonlocal) and (0x208 indirect) ('100 nonlocal\n208 indirect\n')
+DIGEST_OFFSETS, DIGEST_MISSES = 'ce9643fb137f8dce', 'b3c6eacf4fcf4a0e'
+
+
 def env_txt(path):
     """The player's env.txt as dm/mac/launcher.c's env_file reads an env file (and so the launcher and run.sh's awk): blanks around the line and before the =, # comments, the value as it is
     after the =; a name a shell cannot export is skipped"""
@@ -309,6 +319,9 @@ class Linux(Pack):
     def test_sample_profiles(self):   # <NSP folder>/<id>-work/profile/<module>.tsv (dm/host/aot_profile.c writes them): nxaot build --profile, part of the pack's key; --no-profile
         self.pack()
         sha = (self.aot / 'main.aot.tsv').read_text().split('\n', 1)[0].split('\t')[3]
+        launch = self.work / 'launch-linux.tsv'
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes')])   # no profile yet: no module's row
+        self.assertEqual(nsp.fnv64(''), 'cbf29ce484222325'); self.assertEqual(nsp.fnv64('a'), 'af63dc4c8601ec8c')   # FNV-1a 64's offset basis and its test vector
         prof = self.wdir / 'profile'; prof.mkdir(parents=True)
         self.assertIn(f'\n# export DM_AOT_PROFILE={prof}\nexec ', (self.work / 'run.sh').read_text())   # run.sh shows how to record one
         head = '# nxaot profile: guest functions sampled by the x86-64 engine (dm/host/aot_profile.c, DM_AOT_PROFILE); nxaot build --profile <this file>\n'
@@ -321,6 +334,8 @@ class Linux(Pack):
              '--profile', str(prof / 'main.tsv')]])
         self.assertIn(f'main: sample profile {prof / "main.tsv"} (42 samples at 2 functions): those at tier H, the others at C', self.said)
         self.assertTrue(any(m.startswith(f'the sample profile {prof / "nro0.tsv"} was recorded on another image of nro0') for m in self.said), self.said)
+        # the launch file records what main's packs took (nro0's profile of another image: none), for the launcher's "a better pack is possible"
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', f'2 42 {DIGEST_OFFSETS}')])
         self.pack(); self.assertEqual(self.tools('nxaot'), [])   # reused while it is unchanged
         self.pack('linux', '--pack-mode', 'max')
         self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--profile', str(prof / 'main.tsv')], ['--cache', str(self.wdir / 'aot-cache')]])
@@ -329,9 +344,18 @@ class Linux(Pack):
         self.assertEqual([Path(c[2]).name for c in self.tools('nxaot')], ['main.aot.tsv'])
         self.assertEqual([c for c in self.tools('nxaot') if '--profile' in c], [])
         self.assertIn(f'--no-profile: the sample profiles in {prof} are not used', self.said)
+        self.assertEqual(made(launch), [('made', 'profile', 'no'), ('made', 'misses', 'yes')])   # a repack (no --no-profile) takes the profile: the launcher says so
+        with mock.patch.object(nsp, 'AOT_PROFILE', False):   # the setting off: a repack would not take it either
+            self.pack('linux', '--pack-mode', 'max'); self.assertEqual(self.tools('nxaot'), [])
+        self.assertEqual(made(launch), [('made', 'profile', 'unused'), ('made', 'misses', 'yes')])
         (prof / 'main.tsv').write_text('0x100 many\n')   # one that does not parse: packed without it, said
         self.pack('linux', '--pack-mode', 'max'); self.assertEqual(self.tools('nxaot'), [])
         self.assertTrue(any(m.startswith(f'[RED] the sample profile {prof / "main.tsv"} does not parse') for m in self.said), self.said)
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes')])   # packed without it: no row of main
+        # an offset repeated (nxaot adds the counts up) and one with no samples (no function hot): the same hot set, so the same digest
+        (prof / 'main.tsv').write_text(head + f'# module main, build ID {BID}, image SHA-256 {sha}\n0x100 40\n0x200 2\n0x100 1\n0x300 0\n')
+        self.pack('linux', '--pack-mode', 'max')
+        self.assertEqual(made(launch), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('samples', 'main', f'2 43 {DIGEST_OFFSETS}')])
         with self.assertRaisesRegex(nsp.BuildError, '--no-profile make the packs'):
             nsp.main(nsp.parse_args([str(self.nsp_dir), '-k', str(self.keys), '--platform', 'ios', '--no-profile']))
 
@@ -354,10 +378,12 @@ class Linux(Pack):
         self.assertIn(f'main: JIT misses {prof / "main.misses.tsv"} (2 addresses the game ran in the JIT fallback): roots of discovery for its pack', self.said)
         self.assertTrue(any(m.startswith(f'the JIT misses {prof / "nro0.misses.tsv"} were recorded on another image of nro0') for m in self.said), self.said)
         self.assertEqual([n for k, n, v in launch_rows(self.work / 'launch-linux.tsv') if k == 'pack'], ['balanced'])   # complete with them
+        self.assertEqual(made(self.work / 'launch-linux.tsv'), [('made', 'profile', 'yes'), ('made', 'misses', 'yes'), ('misses', 'main', f'2 {DIGEST_MISSES}')])
         misses('main', sha, [(0x208, 'indirect', 9), (0x100, 'nonlocal', 4)])   # a later session: the same addresses, other counts
         self.pack(); self.assertEqual(self.tools('nxaot'), [])                      # the counts are in no key
         misses('main', sha, [(0x208, 'indirect', 9), (0x100, 'nonlocal', 4), (0x300, 'host', 1)])   # a new address: packed again
         self.pack(); self.assertEqual([c[-2:] for c in self.tools('nxaot')], [['--misses', str(prof / 'main.misses.tsv')]])
+        self.assertEqual(made(self.work / 'launch-linux.tsv')[2:], [('misses', 'main', '3 ' + nsp.fnv64('100 nonlocal\n208 indirect\n300 host\n'))])
         self.pack('linux', '--no-profile'); self.assertEqual(self.tools('nxaot'), [])   # --no-profile leaves the misses in use: the same key
         (prof / 'main.tsv').write_text(head.replace('misses', 'profile') + f'# module main, build ID {BID}, image SHA-256 {sha}\n0x100 40\n')   # beside a profile: both
         self.pack(); self.assertEqual([c[-4:] for c in self.tools('nxaot')], [['--profile', str(prof / 'main.tsv'), '--misses', str(prof / 'main.misses.tsv')]])
@@ -376,6 +402,7 @@ class Linux(Pack):
             self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), set())
             self.pack('linux', '--aot-workers', '3')
         for c in self.tools('nxaot'): self.assertNotIn('--cache', c); self.assertNotIn('--workers', c)
+        self.assertEqual(made(self.work / 'launch-linux.tsv'), [('made', 'profile', 'unused'), ('made', 'misses', 'unused')])   # a repack with it would take neither
         self.assertIn('this nxaot has no --cache option: every function is compiled again on each pack', self.said)
         self.assertEqual(nsp.nxaot_options(self.nxaot, dict(os.environ)), {'--cache', '--workers', '--target', '--profile', '--misses'})
         (self.aot / 'main.aot.so').unlink(); self.pack('linux', '--aot-workers', '3')

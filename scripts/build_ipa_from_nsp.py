@@ -2281,6 +2281,44 @@ def pack_misses(opts, aot, mods, nro_rows, folder, mode=None):
     return miss
 
 
+def fnv64(text):   # FNV-1a, 64 bits, over UTF-8 text, as 16 hex digits: the digests of the launch file's samples and misses rows (dm/launcher/launcher_model.cpp computes the same)
+    h = 0xcbf29ce484222325
+    for b in text.encode():
+        h = ((h ^ b) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return f'{h:016x}'
+
+
+def made_rows(opts, aot, mods, profiles, misses, no_profile):
+    """What the packs are made with, for the launch file (port_launch_file), so that the launcher says "a better pack is possible" only when the profile folder holds something a pack
+    made now would take and these packs did not (dm/launcher/launcher_model.h, "The second pack"). Rows (kind, name, value):
+      made profile  yes (the sample profiles are taken), no (--no-profile: a repack, which does not pass it, takes them) or unused (the AOT_PROFILE setting is off or this nxaot has
+                    no --profile: a repack would not take them either)
+      made misses   yes, or unused (this nxaot has no --misses)
+      samples <module>  '<offsets> <samples> <digest>': the sample profile its packs took (aot_profile): the offsets with samples (nxaot's tier rule: a function holding one is at tier H,
+                        whatever its count), their samples, and fnv64 of the offsets in hexadecimal, one per line, ascending
+      misses <module>   '<addresses> <digest>': the JIT misses its packs took (aot_misses): their addresses, and fnv64 of the (address, reason) pairs the pack's key takes ('<hex> <reason>' lines,
+                        sorted)
+    The same rows hold for every pack row of the file: a mode is offered only while its packs' keys, which take the profile's bytes and the misses' pairs, are those of a pack made now
+    (packs_ready). A module has rows only for the files its packs took (parsed, recorded on its image)"""
+    nro_rows = nro_pack_rows(aot)
+    prof, miss = pack_profiles(opts, aot, mods, nro_rows, profiles), pack_misses(opts, aot, mods, nro_rows, misses)
+    rows = [('made', 'profile', 'unused' if not AOT_PROFILE or '--profile' not in opts else 'no' if no_profile else 'yes'),
+            ('made', 'misses', 'yes' if '--misses' in opts else 'unused')]
+    for n in sorted(prof):
+        counts = {}
+        for line in prof[n].read_text().splitlines():   # aot_profile parsed it: '<offset> <count>' lines, '#' comments; an offset may repeat (nxaot adds the counts up)
+            body = line.split('#', 1)[0].split()
+            if body: counts[int(body[0], 16)] = counts.get(int(body[0], 16), 0) + int(body[1])
+        hot = sorted(o for o, c in counts.items() if c > 0)   # a count of 0 makes no function hot (dm/tools/aot/README.md, "Tiers by profile")
+        digest = fnv64(''.join('%x\n' % o for o in hot))
+        rows.append(('samples', n, f'{len(hot)} {sum(counts.values())} {digest}'))
+    for n in sorted(miss):
+        pairs = miss[n][1]
+        digest = fnv64(''.join('%x %s\n' % (o, r) for o, r in pairs))
+        rows.append(('misses', n, f'{len({o for o, _ in pairs})} {digest}'))
+    return rows
+
+
 def pack_jobs(nxaot, mode, aot, nro_dir, mods, nro_rows, prof, win, miss=None):
     """The packs of a mode: (name, the input nxaot builds it from, the key of a pack built now: the input, nxaot, the mode, the target, the sample profile and the JIT misses' addresses
     and reasons; a pack without misses keeps the key it had before they existed)"""
@@ -2373,13 +2411,14 @@ def port_settings(py, repo, work, game, patched, gfx, lang, g, platform, env, lo
     return out
 
 
-def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang, g, name, version, pkg_ver, modes, env_file='', settings=None, repack=None):
+def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang, g, name, version, pkg_ver, modes, env_file='', settings=None, repack=None, made=()):
     """<id>_build/launch-<platform>.tsv: what starts this pack, the one source that run.sh (run.cmd) and the launcher nxlauncher (dm/launcher) both read (docs/settings.md, On Windows and Linux).
     Tab-separated rows <kind> <name> <value> under '#' lines: game (title, title_id, version, package, platform, graphics), path (host: the nxhost-run built for the game's profile; cwd: its
     working folder <NSP folder>/<id>-work/run/, kept from run to run; choices: the player's env.txt there, KEY=VALUE lines the launcher writes; log: where the launcher keeps nxhost-run's
     output; settings: launcher-<platform>.json; profile: <NSP folder>/<id>-work/profile/, where DM_AOT_PROFILE records the sample profiles and JIT misses the next pack takes; and, from
     repack, what packs the game again as this run did, for the launcher's "Repack with profile": package, the NSP folder; packer and python, this script and the Python running it; keys,
-    the prod.keys file it read (its path only); nxaot, the recompiler), pack (one row per mode in modes, whose packs are complete: the folder nxhost-run is given, the first the default) and env (the environment
+    the prod.keys file it read (its path only); nxaot, the recompiler), made, samples and misses (made: what the packs were made with, made_rows: the launcher compares them with what
+    the profile folder holds now), pack (one row per mode in modes, whose packs are complete: the folder nxhost-run is given, the first the default) and env (the environment
     nxhost-run gets: an environment file's switches (DM_ENV_FILE / --env-file), then the pack's layout as mac_run gives the Mac host: the recompiler's input, the RomFS image, the save and
     temporary storage, the shader libraries (msl, DM_MSL_DIR), the DLC, an NVN game's shader map, the game language, a window and sound). A reader sets each env row only when the
     environment and the player's env.txt have not set it, first row first. Returns its path"""
@@ -2399,6 +2438,7 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
     if settings: rows.append(('path', 'settings', settings))
     rows.append(('path', 'profile', wdir / 'profile'))
     rows += [('path', k, v) for k, v in (repack or {}).items() if v]
+    rows += list(made)
     rows += [('pack', m, pack_dir(aot, m)) for m in modes] + [('env', k, v) for k, v in envs.items()]
     head = [LAUNCH_HEAD,
             f'# {launch_field(name, "the game name")} ({g.id}), the {platform} pack of {pkg_ver}: written by scripts/build_ipa_from_nsp.py --platform {platform}. '
@@ -2408,6 +2448,9 @@ def port_launch_file(platform, repo, work, wdir, aot, game, msl, aoc, gfx, lang,
             '#   path  host (nxhost-run; NXHOST in the environment names another), cwd (its working folder), choices (the player\'s env.txt: KEY=VALUE lines, read unless DM_SAVED_CHOICES=0),',
             '#         log (the launcher\'s copy of the output), settings (the settings the launcher shows), profile (DM_AOT_PROFILE\'s folder: the sample profiles and JIT misses the next pack takes),',
             '#         package, packer, python, keys, nxaot (what packs the game again: the NSP folder, this script, its Python, the prod.keys file\'s path, the recompiler)',
+            '#   made  profile yes|no|unused (the sample profiles taken; no: --no-profile, which a repack takes them without; unused: not taken by AOT_PROFILE or this nxaot), misses yes|unused',
+            '#   samples <module> <offsets with samples> <samples> <digest of the offsets>; misses <module> <addresses> <digest of the address and reason pairs>: what each module\'s packs took',
+            '#         (every pack row\'s packs took the same; the launcher compares them with the profile folder to say whether a better pack is possible)',
             '#   pack  <mode> <folder>: the folder nxhost-run is given, one row per pack mode with complete packs; the first is the default, NXPACK=<mode> picks another',
             '#   env   <VAR> <value>: set when neither the environment nor the player\'s env.txt sets it, first row first']
     path = work / f'launch-{platform}.tsv'
@@ -2539,7 +2582,8 @@ def parse_args(argv):
     ap.add_argument('--pack-mode', choices=('balanced', 'max'), help='--platform linux / windows: nxaot\'s pack mode, balanced (a faster pack) or max (a faster game, a longer pack) (default: the PACK_MODE setting, balanced)')
     ap.add_argument('--no-profile', action='store_true', help='--platform linux / windows: ignore the sample profiles of the game\'s modules (<NSP folder>/<id>-work/profile/<module>.tsv, '
                     'recorded by nxhost-run with DM_AOT_PROFILE) and pack every function at the mode\'s one tier (default: the AOT_PROFILE setting, use them); the JIT misses recorded beside them '
-                    '(<module>.misses.tsv: addresses the game ran in the JIT fallback, entries of the next pack) are used either way')
+                    '(<module>.misses.tsv: addresses the game ran in the JIT fallback, entries of the next pack) are used either way. The launch file records what the packs took '
+                    '(its made, samples and misses rows), which the launcher compares with the profile folder before it says a better pack is possible')
     ap.add_argument('--aot-workers', type=int, help='--platform linux / windows: nxaot\'s compile workers, when it has the option (default: the AOT_WORKERS setting; 0 = nxaot decides from the processors and the free memory)')
     ap.add_argument('--mac-sign', help='--platform mac-app: the codesign identity for the app, e.g. "Developer ID Application: <name> (<team>)" (default: the MAC_SIGN setting, else ad-hoc)')
     ap.add_argument('--team-id', help='Apple developer team ID (default: TEAM_ID setting, DM_TEAM_ID environment, or saved Xcode selection)')
@@ -2858,8 +2902,9 @@ def main(args=None):
         settings = port_settings(py, repo, work, game, patched, gfx, lang, g, platform, env, logs)
         # what packs the game again as this run does, for the launcher's "Repack with profile" (dm/launcher): the NSP folder, this script and its Python, the keys' path, the recompiler
         repack = {'package': nsp_dir, 'packer': here, 'python': sys.executable, 'keys': keys, 'nxaot': nxaot}
+        made = made_rows(nxaot_opts, aot, mods, profiles, misses, args.no_profile)   # what the packs are made with: the launcher's "a better pack is possible" compares the profile folder with it
         def launch_file(modes):   # the launch file offering those pack modes
-            return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack)
+            return port_launch_file(platform, repo, work, wdir, aot, game, ios, aoc, gfx, lang, g, title, app_version, pkg_ver, modes, env_file, settings, repack, made)
         # the mode about to be packed is not offered while its packs are made (an interrupted pack leaves a mix); the other mode's complete packs stay offered
         launch = launch_file([m for m in packs_ready(nxaot, nxaot_opts, aot, nro_dir, mods, platform, profiles, misses) if m != pack_mode])
         script = port_run_script(platform, repo, work, wdir, g, title, launch, g.dir.parent if provisional or derived else None)

@@ -11,6 +11,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 #if defined(_WIN32)
 #include <windows.h>
@@ -197,6 +198,12 @@ bool load_launch(const std::string &path, LaunchFile *out, std::string *err) {
             else if (name == "log") out->log = value; else if (name == "settings") out->settings = value;
             else if (name == "profile") out->profile = value; else if (name == "package") out->package_dir = value; else if (name == "packer") out->packer = value;
             else if (name == "python") out->python = value; else if (name == "keys") out->keys = value; else if (name == "nxaot") out->nxaot = value;
+        } else if (kind == "made") {
+            if (name == "profile") out->made_profile = value; else if (name == "misses") out->made_misses = value;
+        } else if (kind == "samples" || kind == "misses") {   // '<offsets> <samples> <digest>', '<addresses> <digest>' (build_ipa_from_nsp.py made_rows)
+            std::istringstream ss(value); Recorded r;
+            if (kind == "samples" ? !(ss >> r.count >> r.samples >> r.digest) : !(ss >> r.count >> r.digest)) continue;
+            (kind == "samples" ? out->made_samples : out->made_miss)[name] = r;
         } else if (kind == "pack") out->packs.push_back({name, value, false});
         else if (kind == "env") out->env.push_back({name, value});
     }
@@ -697,32 +704,189 @@ std::string profile_folder(const Game &g) {
 
 bool record_profile(const Config &c, const Game &g) { return c.get("record." + g.launch.title_id, "1") != "0"; }
 
-static int64_t ticks(const fs::path &p) {   // a file's modification time on the file clock (only compared with another's)
-    std::error_code ec;
-    auto t = fs::last_write_time(p, ec);
-    return ec ? 0 : (int64_t)t.time_since_epoch().count();
+// FNV-1a, 64 bits, as 16 hex digits: the digests of the made rows (build_ipa_from_nsp.py fnv64)
+static std::string fnv64(const std::string &text) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (unsigned char ch : text) { h ^= ch; h *= 0x100000001b3ULL; }
+    char buf[17]; std::snprintf(buf, sizeof buf, "%016llx", (unsigned long long)h);
+    return buf;
+}
+
+static bool hex_word(const std::string &w, uint64_t *v) {   // hexadecimal, 0x optional (Python's int(w, 16))
+    size_t i = w.size() > 2 && w[0] == '0' && (w[1] == 'x' || w[1] == 'X') ? 2 : 0;
+    if (i == w.size() || w.size() - i > 16) return false;
+    for (size_t j = i; j < w.size(); j++) if (!std::isxdigit((unsigned char)w[j])) return false;
+    *v = std::strtoull(w.c_str() + i, nullptr, 16);
+    return true;
+}
+
+static bool dec_word(const std::string &w, uint64_t *v) {
+    if (w.empty() || w.size() > 19) return false;
+    for (char ch : w) if (!std::isdigit((unsigned char)ch)) return false;
+    *v = std::strtoull(w.c_str(), nullptr, 10);
+    return true;
+}
+
+static std::vector<std::string> words(const std::string &s) { std::istringstream ss(s); std::vector<std::string> out; std::string w; while (ss >> w) out.push_back(w); return out; }
+
+// The image a profile or misses file was recorded on: its '# module <name>, build ID <id>, image SHA-256 <64 hex>' line (dm/host/aot_profile.c; the packer's PROFILE_HEAD), '' when none
+static std::string image_of(const std::string &line) {
+    static const std::string key = ", image SHA-256 ";
+    if (line.rfind("# module ", 0) != 0) return "";
+    size_t at = line.find(key);
+    if (at == std::string::npos) return "";
+    std::string sha = line.substr(at + key.size());
+    if (!sha.empty() && sha.back() == '\r') sha.pop_back();
+    if (sha.size() != 64) return "";
+    for (char ch : sha) if (!std::isdigit((unsigned char)ch) && (ch < 'a' || ch > 'f')) return "";
+    return sha;
+}
+
+// The images of the modules a pack folder holds packs for, as the packer checks a profile against them (manifest_sha, nro_pack_rows): per manifest <name>.aot.tsv the SHA-256 of
+// its first line (# nxaot-manifest 1 <name> <build ID> <SHA-256>), per NRO row of nro.tsv (not the refused ones) its SHA-256; '' where none is written
+static std::map<std::string, std::string> pack_images(const std::string &folder) {
+    std::map<std::string, std::string> out; std::error_code ec;
+    for (const auto &e : fs::directory_iterator(P(folder), ec)) {
+        std::string n = S(e.path().filename());
+        const std::string m = ".aot.tsv";
+        if (n.size() <= m.size() || n.compare(n.size() - m.size(), m.size(), m)) continue;
+        std::string text, head, sha;
+        if (read_file(S(e.path()), &text)) head = text.substr(0, text.find('\n'));
+        std::istringstream ss(head);
+        for (int i = 0; i < 4 && std::getline(ss, sha, '\t'); i++) {}
+        out[n.substr(0, n.size() - m.size())] = sha.size() == 64 ? lower(sha) : "";
+    }
+    std::string nros;
+    if (read_file(S(P(folder) / "nro.tsv"), &nros)) {
+        for (const auto &line : lines_of(nros)) {
+            auto w = words(line);
+            if (line.empty() || line[0] == '#' || w.empty() || w[0] == "refused") continue;
+            out[w[0]] = w.size() > 1 ? lower(w[1]) : "";
+        }
+    }
+    return out;
+}
+
+// <module>.tsv as nxaot and the packer read it (aot_profile): '<offset> <count>' lines, '#' to the end of a line a comment; an offset may repeat (the counts add up), a count of 0
+// makes no function hot. Taken when it parses and its image line names sha or no image (the packer's rule); r: the offsets with samples, the samples, their digest
+static bool read_profile(const std::string &path, const std::string &sha, Recorded *r) {
+    std::string text, image;
+    if (!read_file(path, &text)) return false;
+    std::map<uint64_t, uint64_t> counts;
+    for (const auto &line : lines_of(text)) {
+        if (image.empty()) image = image_of(line);
+        auto w = words(line.substr(0, line.find('#')));
+        if (w.empty()) continue;
+        uint64_t off, n;
+        if (w.size() != 2 || !hex_word(w[0], &off) || !dec_word(w[1], &n)) return false;   // the packer packs without a file that does not parse
+        counts[off] += n;
+    }
+    if (!image.empty() && !sha.empty() && image != sha) return false;   // recorded on another image
+    std::string list;
+    *r = Recorded();
+    for (const auto &c : counts) {
+        r->samples += c.second;
+        if (!c.second) continue;
+        char buf[24]; std::snprintf(buf, sizeof buf, "%llx\n", (unsigned long long)c.first);
+        list += buf; r->count++;
+    }
+    r->digest = fnv64(list);
+    return true;
+}
+
+// <module>.misses.tsv as the packer reads it (aot_misses): '<module offset> <reason> <entries>' lines, '#' lines; taken when it parses and its image line names sha (nxaot refuses a
+// file that names none or another). r: the addresses, the digest of the (address, reason) pairs
+static bool read_misses(const std::string &path, const std::string &sha, Recorded *r) {
+    std::string text, image;
+    if (!read_file(path, &text)) return false;
+    std::set<std::pair<uint64_t, std::string>> pairs;
+    std::set<uint64_t> addrs;
+    for (const auto &line : lines_of(text)) {
+        if (image.empty()) image = image_of(line);
+        auto w = words(line);
+        if (w.empty() || w[0][0] == '#') continue;
+        uint64_t off, n;
+        if (w.size() != 3 || !hex_word(w[0], &off) || !dec_word(w[2], &n)) return false;
+        pairs.insert({off, w[1]}); addrs.insert(off);
+    }
+    if (image.empty() || (!sha.empty() && image != sha)) return false;
+    std::string list;
+    for (const auto &p : pairs) {
+        char buf[24]; std::snprintf(buf, sizeof buf, "%llx ", (unsigned long long)p.first);
+        list += buf + p.second + "\n";
+    }
+    *r = Recorded{(uint64_t)addrs.size(), 0, fnv64(list)};
+    return true;
+}
+
+static std::string count_text(uint64_t n) {   // 3400 -> "3,400"
+    std::string d = std::to_string(n), out;
+    for (size_t i = 0; i < d.size(); i++) { if (i && (d.size() - i) % 3 == 0) out += ','; out += d[i]; }
+    return out;
+}
+
+static std::string counted(uint64_t n, const char *one, const char *many) { return count_text(n) + " " + (n == 1 ? one : many); }
+
+std::string ProfileState::reason() const {
+    std::string s;
+    for (const auto &r : reasons) { if (!s.empty()) s += "; "; s += r; }
+    return s;
 }
 
 ProfileState profile_state(const Game &g, const std::string &mode) {
     ProfileState s; s.folder = profile_folder(g);
+    const LaunchFile &l = g.launch;
     std::error_code ec;
     for (const auto &e : fs::directory_iterator(P(s.folder), ec)) {   // <module>.tsv and <module>.misses.tsv (dm/host/aot_profile.c), not the writer's .tmp files
         std::string n = S(e.path().filename());
-        if (!e.is_regular_file(ec) || n.size() < 5 || n.compare(n.size() - 4, 4, ".tsv")) continue;
-        const int64_t t = ticks(e.path());
-        s.newest = s.files++ ? std::max(s.newest, t) : t;
+        if (e.is_regular_file(ec) && n.size() >= 5 && !n.compare(n.size() - 4, 4, ".tsv")) s.files++;
     }
     const std::string suffix = kPackSuffix;
-    for (const auto &p : g.launch.packs) {
+    const Pack *pack = nullptr;
+    for (const auto &p : l.packs) {
         if (!mode.empty() && p.mode != mode) continue;
+        if (!pack) pack = &p;
         for (const auto &e : fs::directory_iterator(P(p.folder), ec)) {
             std::string n = S(e.path().filename());
-            if (n.size() <= suffix.size() || n.compare(n.size() - suffix.size(), suffix.size(), suffix)) continue;
-            const int64_t t = ticks(e.path());
-            s.packs = s.pack_files++ ? std::max(s.packs, t) : t;
+            if (n.size() > suffix.size() && !n.compare(n.size() - suffix.size(), suffix.size(), suffix)) s.pack_files++;
         }
         if (!mode.empty()) break;
     }
+    if (!pack || !s.files) return s;
+    // What the packer would take now: per module of the packs, its files of its image
+    for (const auto &m : pack_images(pack->folder)) {
+        Recorded r;
+        if (read_profile(S(P(s.folder) / P(m.first + ".tsv")), m.second, &r) && r.count) s.samples[m.first] = r;
+        if (read_misses(S(P(s.folder) / P(m.first + ".misses.tsv")), m.second, &r) && r.count) s.misses[m.first] = r;
+    }
+    // Against what the packs took (the made rows); without them, as packs made without either
+    s.known = !l.made_profile.empty() || !l.made_misses.empty();
+    uint64_t new_misses = 0, without = 0, new_offsets = 0, longer = 0;
+    bool other_misses = false;
+    if (!s.known || l.made_misses == "yes") {
+        for (const auto &m : s.misses) {
+            auto it = l.made_miss.find(m.first);
+            const Recorded had = it == l.made_miss.end() ? Recorded() : it->second;
+            if (m.second.count > had.count) new_misses += m.second.count - had.count;
+            else if (m.second.digest != had.digest) other_misses = true;
+        }
+    }
+    if (!s.known || l.made_profile == "yes" || l.made_profile == "no") {
+        for (const auto &m : s.samples) {
+            auto it = l.made_samples.find(m.first);
+            if (l.made_profile != "yes" || it == l.made_samples.end()) { without += m.second.count; continue; }   // no profile of the module in its packs
+            const Recorded &had = it->second, &now = m.second;
+            if (now.count > had.count && now.count * 100 >= had.count * (100 + kMoreOffsetsPercent)) new_offsets += now.count - had.count;
+            else if (now.digest != had.digest && now.count >= had.count && now.samples > had.samples && now.samples * 100 >= had.samples * (100 + kMoreSamplesPercent))
+                longer = std::max(longer, had.samples ? (now.samples - had.samples) * 100 / had.samples : 100);
+        }
+    }
+    if (new_misses) s.reasons.push_back(counted(new_misses, "new JIT miss", "new JIT misses"));
+    else if (other_misses) s.reasons.push_back("JIT misses the packs did not take");
+    if (new_offsets) s.reasons.push_back(counted(new_offsets, "new sampled offset", "new sampled offsets"));
+    if (without) s.reasons.push_back(counted(without, "sampled offset", "sampled offsets") + " the packs were made without");
+    if (longer) s.reasons.push_back("a longer session's profile (+" + std::to_string(longer) + " % samples)");
+    if (!s.known && !s.reasons.empty()) s.reasons.push_back("the packs were made before the launch file recorded what they took");
     return s;
 }
 

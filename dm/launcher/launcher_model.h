@@ -62,6 +62,10 @@ bool load_settings(const std::string &path, std::vector<Setting> *out, std::stri
 
 // ---- The launch file (launch-<platform>.tsv) ----
 struct Pack { std::string mode, folder; bool complete = false; };   // complete: every pack its manifests and nro.tsv need is in the folder
+// A module's sample profile or JIT misses, summed up as build_ipa_from_nsp.py made_rows writes them and profile_state reads the profile folder: count, the offsets with samples (the
+// functions nxaot puts at tier H) or the miss addresses; samples, the profile's samples (0 for misses); digest, FNV-1a 64 (16 hex digits) of the offsets in hexadecimal one per line
+// ascending, or of the '<address in hexadecimal> <reason>' pairs one per line sorted
+struct Recorded { uint64_t count = 0, samples = 0; std::string digest; };
 struct LaunchFile {
     std::string title, title_id, version, package, platform, graphics;
     std::string host, cwd, choices, log, settings;
@@ -69,6 +73,11 @@ struct LaunchFile {
     // DM_AOT_PROFILE writes the sample profiles and JIT misses to; package_dir, the NSP folder (the package row); packer and python, the script and its Python; keys, prod.keys's
     // path; nxaot, the recompiler the pack was made with
     std::string profile, package_dir, packer, python, keys, nxaot;
+    // What the packs were made with (made, samples and misses rows of build_ipa_from_nsp.py made_rows; the same for every pack row): made_profile yes (the sample profiles taken), no
+    // (--no-profile: a repack takes them) or unused (the packer's AOT_PROFILE setting or its nxaot does not take them, a repack neither); made_misses yes or unused; per module what its
+    // packs took. All empty in a launch file written before those rows: then what the packs took is unknown
+    std::string made_profile, made_misses;
+    std::map<std::string, Recorded> made_samples, made_miss;
     std::vector<Pack> packs;   // the first is the default
     std::vector<KV> env;
 };
@@ -158,17 +167,30 @@ int64_t unix_now();
 
 // ---- The second pack: what a session teaches the next pack (docs/settings.md, "On Windows and Linux"; dm/tools/aot/README.md, "Tiers by profile" and "JIT misses") ----
 // Play records by default: nxhost-run gets DM_AOT_PROFILE=<the profile folder> (compose's record) unless the player turned "Record a profile while playing" off (record.<title ID>=0
-// in launcher.txt) or the environment sets it. At exit the host writes <module>.tsv (the functions it sampled) and <module>.misses.tsv (the addresses its JIT fallback ran) there;
-// when those are newer than the game's packs the list says "Profile recorded: a better pack is possible" and "Repack with profile" runs the packer in the background
+// in launcher.txt) or the environment sets it. At exit the host writes <module>.tsv (the functions it sampled this session) and <module>.misses.tsv (the addresses its JIT
+// fallback ran, merged over the sessions of one image) there. The list says "Profile recorded: a better pack is possible", and "Repack with profile" runs the packer in the background,
+// when the folder holds what a pack made now would take and the packs did not: profile_state compares the files, as the packer would take them (of a module of the mode's packs,
+// recorded on its image: the manifest's or nro.tsv's SHA-256), with the launch file's made rows. A pack made now differs when, for a module:
+//   misses   the misses file has addresses the packs did not take (more of them, or another digest): each is an entry into the JIT fallback (a stutter) that the next pack compiles
+//   profile  the packs took no profile of the module (made profile no, or no samples row) and the file has samples; or the offsets with samples grew by at least 10 % (each is a
+//            function at tier H instead of C: nxaot's rule has no share or count threshold, any sampled function is hot, so the offsets are the hot set; the profile is this session's
+//            only, and the 10 % keeps the cold tail that comes and goes between sessions of the same play from offering a repack after every session); or another hot set (digest)
+//            from a session with at least 25 % more samples (CPU time measured) and no fewer offsets. A profile with fewer offsets is a shorter session's: a pack from it would
+//            put functions back at tier C, so it is never "better"
+// A launch file without made rows (packs made before them) is compared as packs made without a profile or misses: any file the packer would take makes the line show once; the
+// repack writes the rows, and from then on the comparison is exact
 std::string profile_folder(const Game &g);                  // the profile row, else <id>-work/profile beside the working folder (a launch file before that row)
 bool record_profile(const Config &c, const Game &g);        // "Record a profile while playing" (on unless record.<title ID>=0)
+inline constexpr int kMoreOffsetsPercent = 10, kMoreSamplesPercent = 25;   // the profile's thresholds (above)
 struct ProfileState {
     std::string folder;
     int files = 0;         // profile and misses files there (<module>.tsv, <module>.misses.tsv)
     int pack_files = 0;    // packs (<name><kPackSuffix>) in the mode's folder
-    int64_t newest = 0;    // the newest of those files, the newest pack: file clock ticks (only compared; libstdc++'s file clock counts from 2174, so they are negative)
-    int64_t packs = 0;
-    bool better() const { return files > 0 && (pack_files == 0 || newest > packs); }   // "Profile recorded: a better pack is possible"
+    bool known = false;    // the launch file says what the packs took (its made rows)
+    std::map<std::string, Recorded> samples, misses;   // per module of the packs, its files there that the packer would take (they parse and were recorded on its image)
+    std::vector<std::string> reasons;                  // why a pack made now would be better ("12 new JIT misses", "3,400 new sampled offsets", ...); empty when it would not be
+    bool better() const { return !reasons.empty(); }   // "Profile recorded: a better pack is possible"
+    std::string reason() const;                        // the reasons joined with "; "
 };
 ProfileState profile_state(const Game &g, const std::string &mode);
 // The repack ("Repack with profile", nxlauncher --repack): <python> <packer> <package_dir> --platform <this system> --pack-mode <mode> [-k <keys>] [--nxaot <nxaot>], in the NSP

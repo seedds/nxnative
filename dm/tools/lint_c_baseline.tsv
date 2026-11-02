@@ -111,7 +111,6 @@ dm/host/hle_fs.c	bugprone-suspicious-realloc-usage	4
 dm/host/hle_fs.c	clang-analyzer-unix.Errno	2
 dm/host/hle_fs.c	clang-analyzer-unix.cstring.NullArg	1
 dm/host/hle_haptics.c	bugprone-suspicious-memory-comparison	1
-dm/host/hle_hid.c	bugprone-signed-char-misuse	1
 dm/host/hle_hid.c	clang-analyzer-unix.Stream	2
 dm/host/hle_movie_avc.c	bugprone-suspicious-realloc-usage	1
 dm/host/hle_movie_avc.c	clang-analyzer-nullability.NullableDereferenced	1

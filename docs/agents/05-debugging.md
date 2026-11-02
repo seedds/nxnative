@@ -19,7 +19,7 @@ x0=… x28=…
 
 ## Pipeline compile waits
 
-Render-pipeline lookahead runs after the demanded pipeline is available and cached. It admits at most two predictions per scan and at most two scheduled or running predictions overall, so speculative attachment variants cannot create an unbounded compiler backlog ahead of real draws. Exact-key results are still recorded only when used; a full pending table may discard completed unused results, never running jobs. The independent startup warmer is not subject to this limit. A new pipeline can still stall on its intrinsic first-use compilation cost; compare pipeline-miss timings and live stacks with asset reads before attributing a hitch to loading. `dm/gfx/tests/t_pso_pending.m` exercises the queue and demand-before-prediction ordering with a gated fake compiler.
+Render-pipeline lookahead runs after the demanded pipeline is available and cached. It admits every later draw's pipeline and at most two guesses with other attachments ([A frame's new pipelines compiled two at a time](../reference/shaders.md#a-frames-new-pipelines-compiled-two-at-a-time); cold comparisons need `MTL_SHADER_CACHE_SIZE=0`). Exact-key results are still recorded only when used; a full pending table may discard completed unused results, never running jobs. The independent startup warmer is not subject to this limit. A new pipeline can still stall on its intrinsic first-use compilation cost; compare pipeline-miss timings and live stacks with asset reads before attributing a hitch to loading. `dm/gfx/tests/t_pso_pending.m` exercises the queue and demand-before-prediction ordering with a gated fake compiler.
 
 ## Ghidra / objdump
 

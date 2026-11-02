@@ -1,6 +1,7 @@
 """Unreal console variables found by their registered names (dm/tools/ue_cvar.py) on synthetic code, no game files: UE 4.18's constructor form with the object loaded before the
 name, UE 4.2x / 5's register call with the value pointer stored after it (and a base constructor between), a lookup that only reads the name, a name registered twice, UTF-32 names,
 the next variable's registration not taken for this one's; and every profile's ue_fps_cvar is a name the rewriter looks for."""
+import re
 import struct
 import sys
 import unittest
@@ -91,11 +92,25 @@ class FindTest(unittest.TestCase):
         self.assertEqual(len(why), len(ue_cvar.NAMES) - 1)
 
 
+class HostLimitTest(unittest.TestCase):
+    def test_names_fit_the_host(self):
+        """The loader reads every fixups row before it looks at the key: a UE_CVAR key its sscanf cuts short stops every game that registers the variable at boot"""
+        host = Path(__file__).resolve().parents[2] / 'host'
+        width = int(re.search(r'sscanf\(line, "# %(\d+)s %lx"', (host / 'loader.c').read_text())[1])
+        name, count = map(int, re.search(r'char name\[(\d+)\]; uint64_t off; \} ue_cvar\[(\d+)\]', (host / 'dm.h').read_text()).groups())
+        self.assertLessEqual(len(ue_cvar.NAMES), count)
+        for n in ue_cvar.NAMES:
+            self.assertLess(len(n), name, n)
+            self.assertLessEqual(len('UE_CVAR:' + n), width, n)
+
+
 class ProfileTest(unittest.TestCase):
     def test_profiles_name_known_variables(self):
         for g in game.all_games():
             v = g.get('ue_fps_cvar', '')
             if v: self.assertIn(v, ue_cvar.NAMES, f'{g.id}: ue_fps_cvar {v} is not in ue_cvar.py NAMES, so the rewriter does not look for it')
+            for kv in g.get('ue_quality', '').split():
+                self.assertIn(kv.split(':')[-1].split('=')[0], ue_cvar.NAMES, f'{g.id}: ue_quality {kv} is not in ue_cvar.py NAMES, so the rewriter does not look for it')
 
 
 if __name__ == '__main__':

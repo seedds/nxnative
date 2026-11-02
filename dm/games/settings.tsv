@@ -17,6 +17,10 @@
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120&platform:mac	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
 DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Adjusts resolution between 70% and 100% under load. Turn off to keep full resolution for the selected console mode.
 DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
+DM_UE_QUALITY	toggle	-	0|1	DM_GAME_UE_QUALITY_N!=0	Game	High quality	Renders the 3D at full resolution with more shadow and scene detail than the Switch. Uses more GPU time; turn it off if a scene struggles.	level=basic
+DM_UE_RES	choice	1=Full,0=Switch	1	DM_GAME_UE_QUALITY_RES_N!=0	Game	3D resolution		needs=DM_UE_QUALITY=1
+DM_UE_SHADOWS	choice	1=High,0=Switch	1	DM_GAME_UE_QUALITY_SHADOWS_N!=0	Game	Shadows		needs=DM_UE_QUALITY=1
+DM_UE_DETAIL	choice	1=High,0=Switch	1	DM_GAME_UE_QUALITY_DETAIL_N!=0	Game	Scene detail		needs=DM_UE_QUALITY=1
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler

@@ -846,14 +846,19 @@ private:
         return added;
     }
 
-    // The function whose own range holds pc: its FDE's range, or its symbol's size when symbols are a source; never past its limit
+    // The function whose own range holds pc: its FDE's range, or its symbol's size when symbols are a source; for a function with neither (no
+    // unwind entry, no symbol: a game's FDE-less code, README.md "Gap code at tier C"), the span its walk reached, [entry, end): code between
+    // instructions its walk reached that no edge reaches (the cases of a table not bounded yet, the label an adr names among them) is that
+    // function's, as the same code is a function's own with an FDE, not entries of their own that cut it in pieces; never past its limit
     Function* Owner(uint64_t pc) {
         auto it = fns.upper_bound(pc);
         if (it == fns.begin()) return nullptr;
         Function& f = std::prev(it)->second;
         if (pc >= f.limit) return nullptr;
         if (f.fde >= 0 && pc < img.fdes[static_cast<size_t>(f.fde)].end) return &f;
-        if (const auto e = sym_end.find(f.entry); e != sym_end.end() && pc < e->second) return &f;
+        const auto e = sym_end.find(f.entry);
+        if (e != sym_end.end() && pc < e->second) return &f;
+        if (f.fde < 0 && e == sym_end.end() && pc < f.end) return &f;
         return nullptr;
     }
 

@@ -37,7 +37,7 @@ with no JIT, and print what dynarmic prints. No game runs through it yet, and no
 | Function mode | [src/lift/lower_calls.cpp](src/lift/lower_calls.cpp), [lifter.h](src/lift/lifter.h) (`FunctionPlan`, `Convention`) | one guest function as one LLVM function of the convention of design 2.3, swifttailcc or ghccc: calls, returns checked against lr, tail calls, the inline caches, svc as a host call, the stores and reloads the summaries allow ("Calls and returns") |
 | Pack stage | [src/build/](src/build/) (`nxaot build`) | the convention facts of a module (PASS, WRITES, LIVE_AFTER, RV, resume points: [plan.h](src/build/plan.h)); compile units of neighbouring functions (groups at tiers C and W, shards at H and H+; a function over the size limit split into parts joined through the state block), lifted, optimised and compiled on a pool of workers, one LLVM context each; the tables' object (the lookup table, the function map, the line table's bounds, the descriptor of [include/nxaot/aot_module.h](include/nxaot/aot_module.h), jit_entry and the slow-path wrappers); the tiers of design 9.3, by profile with `--profile`; a shared object (and a relocatable object) by lld as a library ("Pack throughput"); with `--target windows` a DLL (and a COFF object): the same code, joined, converted to COFF by [coff.cpp](src/build/coff.cpp) and linked by lld's COFF driver ("Windows packs") |
 | Caches | [src/cache/](src/cache/), [src/build/analysis_cache.cpp](src/build/analysis_cache.cpp) (`nxaot build --cache`) | design 13: each unit's object under the SHA-256 of everything its functions' code depends on, and the module's analysis (discovery's view and the plan) under the module's, its manifest's and the tool's; a warm repack neither analyses nor compiles ("Pack throughput") |
-| Game-shaped benchmark | [tests/gen_bench.py](tests/gen_bench.py) | a generated program of thousands of functions of the kinds and sizes game code has, built as an NRO with the corpus's run time: the pack stage's throughput measured where the corpus is too small ("Pack throughput") |
+| Game-shaped benchmark | [tests/gen_bench.py](tests/gen_bench.py) | a generated program of thousands of functions of the kinds and sizes game code has, built as an NRO with the corpus's run time: the pack stage's throughput measured where the corpus is too small ("Pack throughput"); `--direct` writes the words of a module of any size ("Memory at scale"), `--no-fde-percent` with a share of its functions without FDEs ("Gap code at tier C") |
 | Native run time | [src/rt/](src/rt/) (`nxaot_host`) | the arena below 2^39, the image at its one-to-one address, the library by `dlopen` with its identity checked, the state blocks, the SVC path, the dispatcher's miss path, traps and faults through the line table, the counter ("The native run time") |
 | JIT fallback | [src/rt/jit.h](src/rt/jit.h), [jit.cpp](src/rt/jit.cpp), the driver in [host.cpp](src/rt/host.cpp) | design 11: dynarmic's A64 JIT per guest thread behind `dm_jit_create` / `dm_jit_run` / `dm_jit_halt`, stopping at compiled entries and compiled call sites' returns with dynarmic unmodified, the hand-over of the register file both ways, the driver that takes compiled entries natively from it and propagates non-local transfers ("The JIT fallback") |
 | Threads and safepoints | [src/rt/host.cpp](src/rt/host.cpp), the polls in [lower_calls.cpp](src/lift/lower_calls.cpp) | design 6.1 to 6.5: guest threads on host threads with a state block and a native stack each, Horizon's thread and synchronization SVCs, the shared exclusive monitor; the polls of 6.2 and the pause protocol of dm/host's `SetThreadActivity`, with a pause test (`nxaot_host --pause-test`) ("Threads and safepoints") |
@@ -62,7 +62,7 @@ docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 # check, discovery over the corpus, the manifest test, the corpus reference run, the fp cases current, the corpus run natively, the per-function
 # differential test, the JIT fallback's three modes, the threaded programs, the safepoint pause test, the pack caches, the indirect calls'
 # reloads and the standard entries' signature, the line tables, functions split for size, tiers by profile, Windows packs, the analysis on threads,
-# the differential test at tier C, the host's JIT misses as discovery's input); --tmpfs
+# the differential test at tier C, the host's JIT misses as discovery's input, the workers bounded by memory, gap code at tier C); --tmpfs
 # /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on a machine short of disk
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
@@ -85,7 +85,9 @@ packs"). The build tree takes about 74 MB, and the tests' objects and shared obj
 machine (8 vCPUs) the CTest run takes about 11 minutes (639 s with ABI 3, 18 tests): the vectors 4 of them, corpus_native 1.4 and corpus_funcdiff
 1.7, corpus_jit, corpus_threads and safepoints 33 s together, cache 20 s, plan 2 s and lines 25 s. Phase 5b's two (20 tests): split 43 s and
 profile 7 s; with `ctest -j2` the whole run took 342 s. Phase 5c's `analysis_threads` (21 tests): 42 s; the whole run 681 s on a machine other
-builds were loading (cache 16 s). Phase 5d's `corpus_funcdiff_c` (23 tests): 94 s; the whole run with `ctest -j2` 394 s.
+builds were loading (cache 16 s). Phase 5d's `corpus_funcdiff_c` (23 tests): 94 s; the whole run with `ctest -j2` 394 s. "Gap code at tier
+C"'s `gaps` (26 tests): 48 s with the tier rule alone, 84 s since it builds the module both ways (the default and `--gap-tier C`); the whole
+run 811 s, one test at a time, with another agent's builds loading the machine at times.
 
 ## Running the harness and the census
 
@@ -1509,8 +1511,8 @@ Hunter Rise's size); extrapolated, 27 to 37 s for Monster Hunter Rise's `main` o
 #### 5. Tiers by profile
 
 `nxaot build --profile <file>` (design 9.3: "tier H only with a profile"): in the balanced mode a function holding a sampled offset is compiled
-at tier H and the others at tier C; in the max mode at H+ and H. Without a profile nothing changes (W, or H+ in the max mode); `--tier` and
-`--profile` exclude each other. The format, one sample per line:
+at tier H and the others at tier C; in the max mode at H+ and H. Without a profile nothing changes (W, or H+ in the max mode; with
+`--gap-tier C`, "Gap code at tier C", gap code at C in the balanced mode); `--tier` and `--profile` exclude each other. The format, one sample per line:
 
 ```
 # comment (from '#' to the end of a line); blank lines are ignored
@@ -1617,7 +1619,8 @@ of it).
 The analysis (discovery and the plan) on the workers, with every result byte for byte the one-thread result and phase 5b's. Measured as
 phase 5b was, on the same machine, which other agents' builds and tests shared during these runs (best of 3; each table says the one-minute
 load average its runs saw where it mattered); checked by CTest (21 of 21, `analysis_threads` new) and the identity checks below. Gap code at
-tier C (design section 10) was not done (6 below).
+tier C (design section 10) was not done (6 below; done since: "Phase 5d", 6, "Gap code at tier C": a discovery fix for functions without
+an FDE, and the tier as the option `--gap-tier C`, off by default).
 
 ```sh
 build/aot/nxaot discover <module> [--threads N] [--times]   # the analysis's threads (0 or none: one per CPU); its steps' seconds on stderr
@@ -1774,7 +1777,9 @@ module).
 Left as phase 5b left it, with what this phase found: the game-shaped benchmark has no gap code (all 16,276 functions of the 16,000-function
 one have an FDE; `summary provenance ... gap 0/0`), and neither has the corpus, so nothing here measures it; the change belongs to the units'
 tiers in pack.cpp (`Units`, the tiers by profile), which another change was editing during this phase. Games without FDEs (FINAL FANTASY
-RESONANCE's 94 MB, 95 % without them) are where it matters.
+RESONANCE's 94 MB, 95 % without them) are where it matters. Done since: "Phase 5d", 6, "Gap code at tier C" (`gen_bench.py --direct
+--no-fde-percent` as its input, a fix to discovery for functions without an FDE, and the tier measured and made an option, `--gap-tier C`,
+off by default).
 
 #### The analysis and the packs after phase 5c
 
@@ -1861,15 +1866,17 @@ both warm repacks, and now Monster Hunter Rise's max pack at r = 0.7.
 - **The memo's memory**: per function up to 8 sets of inputs (2 + 7 words per callee) with their summaries, and now the inputs of each
   function's last computation; at Monster Hunter Rise's estimated 600,000 functions that is some hundreds of MiB, not measured on a module of
   that size.
-- **Gap code at tier C** (6 above), **code generation** at tier W, **the cache across game updates**, **one process per module**, **ThinLTO
-  import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5b left them.
+- **Gap code at tier C** (6 above; done since, "Phase 5d", 6: `--gap-tier C`, off by default), **code generation** at tier W, **the cache across game updates**, **one
+  process per module**, **ThinLTO import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5b left them.
 - The runner [tests/run_aot_tests.sh](tests/run_aot_tests.sh) lists its tests by hand and does not run `analysis_threads` yet.
 
 ### Phase 5d
 
 The compile stage's rate per core at tiers C and W, the two that the balanced packs compile: with a profile 90 % of the functions are at tier C,
 without one every function is at tier W. In this order: where tier C's time went, FastISel's coverage, fewer IR instructions per
-guest instruction, tier W's passes, the loader's data blocks, and gap code (not done, 6). Measured as phase 5c was, on the same machine and
+guest instruction, tier W's passes, the loader's data blocks, and gap code (6: not done in this phase; after "Memory at scale" the discovery
+fix and the option `--gap-tier C`, off by default). Measured
+as phase 5c was, on the same machine and
 benchmarks, with phase 5c's binary (55d53ad) built beside this one and measured in the same sessions; other agents' builds loaded the machine
 at times (the one-minute load average of the runs is given where it mattered; best of 3 unless said). Checked by CTest 23 of 23
 (`corpus_funcdiff_c` new: the per-function differential test with every function at tier C; `corpus_native` runs the corpus at tier C too): the
@@ -2057,11 +2064,167 @@ corpus's 18 NROs, the synthetic modules and the 4,000-function benchmark with pa
 every `discover` and `plan` output the same, which covers the data blocks, the general registers' forwarding (the jump tables' regions are
 lifted) and the rotates.
 
-#### 6. Gap code at tier C: not done
+#### 6. Gap code at tier C
 
-As phases 5b and 5c left it: no module here has gap code (the benchmarks and the corpus have an FDE for every function), and a test input
-without FDEs (an NRO whose `.eh_frame_hdr` drops a function's entry) needs the corpus's toolchain to write; the change belongs to `Units`'
-tiers. Games without FDEs (FINAL FANTASY RESONANCE's 94 MB, 95 % without them) are where it matters.
+Not done in this phase (no module here had gap code: the benchmarks and the corpus have an FDE for every function); done after "Memory at
+scale" (below). The step's main result is discovery's: on a test input the generator now writes, functions without an FDE were cut in pieces,
+and a fix in discovery's own rule finds every one with its exact bounds and makes the packs of such modules 7 to 10 % faster. Design 9.3's
+"gap code at tier C" was measured and is not taken by default: it is the option `--gap-tier C` (below, "The rule"), because on these modules
+it bought 2 % of a pack's time for a pack 13 to 15 % larger and code that runs slower than tier W's (phase 5d: int_ops-gcc natively 171.7
+ms at tier C, 72.1 at W), and in the games it is for (FINAL
+FANTASY RESONANCE's `main`: 94 MB of text, 95 % of it without FDEs) most of the game would run at tier C in a balanced pack without a profile.
+
+```sh
+python3 dm/tools/aot/tests/gen_bench.py --direct --functions 16000 --seed 2 --no-fde-percent 20 /tmp/d16k   # main.nofde.tsv: their true ranges
+build/aot/nxaot build /tmp/d16k/main.aot.tsv --shared /tmp/d16k.so --tier W --tiers-tsv /tmp/d16k.tiers       # <entry> <tier> <instructions> <gap code>
+build/aot/nxaot build /tmp/d16k/main.aot.tsv --shared /tmp/d16k.so --gap-tier C                               # gap code at tier C (balanced mode)
+```
+
+**The test input.** `gen_bench.py --direct --no-fde-percent Q` ([tests/gen_bench.py](tests/gen_bench.py)): Q % of the statement functions,
+chosen by a generator of their own seeded from `--seed`, have no FDE (`.eh_frame_hdr`'s count and sorted table and `.eh_frame` hold the
+others' only; the drivers and `main` keep theirs) and no symbol (`main` is the module's only one), and no driver calls them: with every
+function called by a driver every one of them would be found by its call and none by the gap sweep. So only the statements' own `bl` (about
+4 per 1,000 instructions, to functions chosen at random), the table of function pointers (DT_RELR) or the gap sweep can find them, as a game's
+code without unwind entries that nothing names; their true ranges go to `main.nofde.tsv`. With Q = 0 (the default) the generator writes
+what it wrote before, byte for byte: the 16,000-function (seed 2) and 150,000-function (seed 4) modules with and without `--no-fde-percent 0`,
+and the 16,000-function one with `--profile-percent 10` (its profile and printed line too), against the base commit's generator.
+
+**What discovery made of them.** Every function without an FDE was found at its entry (none merged into the function before it, none
+missed, coverage 0 uncovered words), but some were cut in pieces: the base commit's nxaot against this one (`nxaot discover --tsv`, 8
+threads; the functions with an FDE were found with their exact bounds by both):
+
+| `--direct` module | functions (without an FDE) | base: functions discovered | base: FDE-less functions in pieces (pieces) | base: `gap` (primary / any) | now: functions discovered | now: exact bounds | now: `gap` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 16,000, seed 2, Q = 20 | 16,205 (3,200) | 19,092 | 165 (2,886) | 4,355 / 4,706 | 16,206 | 3,200 | 2,288 / 2,351 |
+| 16,000, seed 2, Q = 50 | 16,128 (8,000) | 22,213 | 357 (6,084) | 10,025 / 10,974 | 16,129 | 8,000 | 5,657 / 6,024 |
+| 150,000, seed 4, Q = 20 | 151,906 (30,000) | 176,614 | 1,424 (24,707) | 36,568 / 39,861 | 151,907 | 30,000 | 19,292 / 19,807 |
+| 150,000, seed 4, Q = 50 | 151,192 (75,000) | 214,656 | 3,604 (63,463) | 91,785 / 102,444 | 151,193 | 75,000 | 47,875 / 50,849 |
+
+(One function more than the module's: the module entry's branch, provenance `start`.) The pieces of the 16,000-function module at Q = 20 by
+their provenance: 2,067 `gap`, 354 `tail`, 288 `jt,gap`, 154 `adr`, 23 `adr,jt`. The cause: the function "whose own range holds" an address
+(`Owner`, [src/analysis/discover.cpp](src/analysis/discover.cpp)) was the one whose FDE's range or symbol's size held it, and a function with
+neither had no range. So code inside such a function that no known edge reached, the cases of a switch discovery does not bound (half the
+switches here: "the entry address depends on more than one value"), became an entry of its own: first the label the switch's `adr` names at
+its cases' base (`adr`), then at the gap sweep each case (`gap`); each new entry cut the function's limit, so the code after the cases became
+a tail call's target (`tail`) and a bounded table further on had targets outside the cut function (`jt`). With an FDE the same code is a
+speculative root of its function. The fix, in discovery's own rule: a function with neither an FDE nor a symbol owns the span its walk
+reached, `[entry, end)`; code its walk did not reach between instructions it did reach is a speculative root of it, as with an FDE, and code
+past the last instruction it reached is not, so the next function without an FDE is still an entry of its own. Every FDE-less function is
+now found with its exact bounds, and the gap sweep's entries are exactly the functions nothing names. Discovery is faster for it (fewer
+functions to walk and summarise: 2.7 against 4.0 s at 16,000 functions and Q = 20, 23 to 25 against 36 s at 150,000; different loads). The
+inputs with an FDE for every function are unchanged: `test_analysis_threads.py --baseline <the base commit's nxaot>` over the corpus's 18
+NROs, the synthetic modules and the 16,000-function `--direct` module (Q = 0), 22 modules, 220 outputs (`nxaot discover --tsv` with symbols
+as a source and as the oracle, `nxaot plan`, 1 and 8 threads; `nxaot build --cache` with 1 and 8 workers: the analysis cache's payload and the
+pack the same as the base commit's), every one the same; `build_packs.sh` by both binaries, 42 packs (the corpus's, the synthetic modules',
+and all of them as Windows DLLs) the same bytes, and the 16,000-function module's pack at tier W; and with gap code the analysis on threads
+is the one-thread analysis (`test_analysis_threads.py --no-corpus` on CTest `gaps`' module and the 16,000-function one at Q = 20: 10 outputs
+the same). In the oracle mode
+(`--symbols-as-oracle`) the corpus's int_ops-gcc, built without unwind tables, has 7 gap functions of 69, the same before and after; a pack
+takes the symbols as a source, which name them.
+
+By provenance, the functions without an FDE (now):
+
+| `--direct` module | `call` | `reloc` (the table) | `reloc,call` | `gap` (gap code) | `call,gap` |
+|---|---:|---:|---:|---:|---:|
+| 16,000, Q = 20 (3,200) | 463 | 312 | 74 | 2,288 | 63 |
+| 16,000, Q = 50 (8,000) | 1,049 | 728 | 199 | 5,657 | 367 |
+| 150,000, Q = 20 (30,000) | 4,240 | 4,707 | 1,246 | 19,292 | 515 |
+| 150,000, Q = 50 (75,000) | 9,467 | 11,729 | 2,955 | 47,875 | 2,974 |
+
+`call,gap` are functions the gap sweep found in the same round as their only callers, which are gap code themselves (checked on the
+4,000-function module of CTest `gaps`: the callers of its 21 are 20 `gap` functions and one `call,gap`). No jump table here names a function
+(`jt` 0/0 now). The summary line `summary provenance ... gap N/M` counts the sweep's entries, primary and any: the functions found by calls or
+the table are counted there under `call` and `reloc`, never under `gap`.
+
+**The rule** ([src/build/pack.cpp](src/build/pack.cpp), `GapTiers`; [src/analysis/discover.h](src/analysis/discover.h), `IsGapCode`): gap
+code is a function whose provenance is exactly `gap`: no FDE, no symbol, not the module's entry, nothing of the dynamic section, no
+relocation, no `adr`, not a `bl` or `b` target, no landing pad, no jump-table target, no JIT miss. A function the sweep found that another
+source names too (`call,gap`, a `gap,miss` the host ran) is not gap code. By default gap code takes its mode's tier as any other function;
+with `nxaot build --gap-tier C` (`--gap-tier mode` states the default) it is compiled at tier C in the balanced mode whatever `--tier` says, a
+function the profile sampled keeps the profile's tier (H: it ran, so it is hot), and the max mode (`--mode max`, the NSP script's and the
+launcher's max pack) still compiles every function at its mode's tier (H+, or H+ and H with a profile). Neither the NSP script nor the
+launcher passes the option. The tier is the function's entry in the pack's tier map, which `TierOf`, `Units` and each unit's cache key read:
+the unit key ("nxaot-unit 4") holds each function's tier already, and the option changes nothing but the tiers of gap functions, so a
+function whose tier it changes misses the cache and no key version changes; the analysis does not depend on it (the analysis cache's key is
+the same with and without it). A warm repack takes the analysis from the cache, which did not keep discovery's provenance: the analysis
+cache's entry now keeps a gap-code flag per function in the flags word it had (format "nxaot-analysis 2",
+[src/build/analysis_cache.cpp](src/build/analysis_cache.cpp); for a module without gap code the payload's bytes are format 1's). The log,
+always, among the build's notes: `aot: gap code: <n> functions, <i> instructions`, `0 functions` for a module without gap code; with the
+option in the balanced mode ` at tier C` follows (and `; <k> functions, <j> instructions sampled by the profile at tier H` when the profile
+sampled some). `--tiers-tsv <file>` writes each function's tier (`<entry> <tier> <instructions> <gap code: gap or ->`); nothing in a pack
+shows a function's tier.
+
+**Measurements: why the option is off.** The 16,000-function module at Q = 20 (seed 2: 827,122 instructions in functions), tier W, 8
+workers, the rule (what `--gap-tier C` does) against the same binary without it and the base commit's nxaot (which discovers the pieces
+above), interleaved run by run, two runs each, the one-minute load 1.6 to 5.8 (these runs' own); seconds, bytes, MiB:
+
+| 16,000 functions, Q = 20, tier W, 8 workers | `--gap-tier C` | the default | the base commit |
+|---|---:|---:|---:|
+| `aot: tiers` | C 2288 W 13918 H 0 H+ 0 | C 0 W 16206 H 0 H+ 0 | C 0 W 19092 H 0 H+ 0 |
+| whole pack | 14.37, 14.67 | 14.83, 14.91 | 16.01, 16.59 |
+| compile wall | 10.84, 11.15 | 11.53, 11.63 | 11.96, 12.48 |
+| optimise and code generation, CPU | 77.1, 79.4 | 83.2, 83.9 | 86.4, 89.8 |
+| units | 4,709 | 1,704 | 1,763 |
+| text | 14,857,874 | 12,917,471 | 13,407,154 |
+| pack | 23,179,136 | 20,148,160 | 21,316,168 |
+| peak memory | 186 .. 196 | 181 .. 189 | 199 .. 201 |
+
+`aot: gap code: 2288 functions, 108634 instructions at tier C`: 14.1 % of the functions and 13.1 % of the instructions at tier C. The rule
+takes 6 % off the compile's CPU and 2 % off the whole pack (only that 13 % moves to tier C, which compiles 3.5 times as many instructions
+per core as tier W: phase 5d), and makes the pack 15 % larger: tier C's code is about twice tier W's (17.9 bytes of text more
+per gap instruction; phase 5d's 4,000-function benchmark: 12.92 against 5.94 MB). The units take some of it back: a group holds functions of
+one tier, so every change of tier between neighbours ends one, and gap code scattered among the other functions (a fifth of them, chosen at
+random) makes 4,709 units of 1,704. Groups kept per tier across the other tier's functions (an experiment, not kept: below) made 1,703
+units; in the same session, interleaved, the compile's CPU was 77.5 and 77.0 s against the rule's 78.1 and 80.6, the compile's wall 10.86 and
+10.77 against 10.98 and 11.34, the pack 22,340,320 bytes against 23,179,136: a fifth of the CPU the rule saves, and most of what it adds to
+the pack besides its code (the units' own sections). The discovery fix alone (no rule against the base commit) takes 7 to 10 % off the pack's
+time and 1.2 MB off it (the pieces' standard entries and lookup slots: 2,390 and 8,192 against 1,925 and 4,096). The 150,000-function module
+at Q = 20 (7,845,773 instructions), tier W, 8 workers:
+
+| 150,000 functions, Q = 20, tier W, 8 workers | `--gap-tier C`, run 1 (load 1.9) | run 2 (load 7.1: another agent's build) | the default (load 0.9) |
+|---|---:|---:|---:|
+| `aot: tiers` | C 19292 W 132615 H 0 H+ 0 | the same | C 0 W 151907 H 0 H+ 0 |
+| whole pack (analysis) | 132.35 (22.5) | 141.26 (22.5) | 136.66 (22.2) |
+| compile wall | 106.51 | 115.33 | 112.11 |
+| optimise and code generation, CPU | 758.6 | 820.8 | 808.7 |
+| units | 41,994 | 41,994 | 16,276 |
+| text | 140,193,851 | 140,193,851 | 123,439,972 |
+| pack | 220,466,840 | 220,466,840 | 194,239,808 |
+| peak memory | 1,189 | 1,189 | 936 |
+
+`aot: gap code: 19292 functions, 930023 instructions at tier C` (12.7 % of the functions, 11.9 % of the instructions). Within these runs'
+noise the pack takes the same time with and without the rule (a fourth run, without the rule at a load of 10, took 156.41 s), and it is 13.5
+% larger, its peak 27 % higher (the link's objects: 476 against 382 MB).
+
+**CTest `gaps`** ([tests/test_gaps.py](tests/test_gaps.py), 84 s): a 4,000-function module at Q = 25 (seed 1: 1,000 functions
+without an FDE, 3,048 FDEs, `.eh_frame_hdr` sorted and none at a stripped function); discovery finds every function, with and without an FDE,
+with its exact bounds, the FDE-less ones by provenance 138 `call`, 97 `reloc`, 25 `reloc,call`, 719 `gap`, 21 `call,gap`, and the summary
+says `gap 719/740`. `--tier W` logs `aot: gap code: 719 functions, 34372 instructions` (the whole line) and `aot: tiers C 0 W 4049 H 0 H+ 0`,
+and `--tiers-tsv` has every function at W; with `--gap-tier C` the log says `aot: gap code: 719 functions, 34372 instructions at tier C`
+and `aot: tiers C 719 W 3330 H 0 H+ 0`, and `--tiers-tsv` has every gap function at C and every other at W; both mark exactly discovery's
+`gap` functions, and each pack and its tiers are the same with 1 and 4 workers and from a warm cache (the analysis and every unit hit). With
+`--gap-tier C`, a profile sampling one gap function puts it at H and every other function at C (`C 4048 W 0 H 1 H+ 0`), the log counting it
+apart; `--mode max --gap-tier C` puts all 4,049 at H+, its gap line without "at tier C".
+
+**What is open.**
+
+- **Gap code's tier** stays an option until a game measures otherwise: whether a game's gap code is cold (tier C pays) or runs (W keeps its
+  speed) is what a profile answers per function, and the balanced mode with a profile does that already (its unsampled functions are at C,
+  gap code or not).
+- **Units across tiers** (with `--gap-tier C`, or a profile): a group ends where the tier changes, so scattered gap code multiplies the units
+  (4,709 against 1,704 here). Groups per tier, each collecting its tier's functions in address order past the other tier's (measured above:
+  1,703 units, a fifth of the rule's saving back, the pack 3.6 % smaller), are not taken: a group would hold functions that are not
+  neighbours, the code's order in the pack would change, and every pack with a profile, whose C and H functions interleave the same way, would
+  change its units.
+- **Code only gap code calls** (`call,gap`: 63 of 2,351 sweep entries at 16,000 functions and Q = 20, 2,974 of 50,849 at 150,000 and Q = 50)
+  is not gap code; a transitive rule (every caller gap code) is an open question, and would need the callers on a warm repack, which the
+  analysis cache keeps for `bl` only.
+- **FDE-less code** is compiled as code with an FDE is, at the mode's tier or by the profile (gap code too, without the option).
+- **Not measured on a game**: no game module is here; FINAL FANTASY RESONANCE's FDE-less 94 MB is the case to measure, where the share of gap
+  code, its layout (contiguous stretches, not a random fifth) and so the units are the questions. The `--direct` modules do not run, so the
+  FDE-less functions' code with the fix (an unbounded switch's cases compiled as part of their function, as with an FDE) is checked by the
+  analysis's outputs and the packs' building only, not at run time; the corpus, which runs, has no FDE-less function a pack's discovery
+  splits (its packs are the same bytes).
 
 #### The packs after phase 5d
 
@@ -2121,8 +2284,9 @@ phase 5c left them.
   57,377 misses); LLVM 19's preserve_none is the convention to measure again when nxaot.lock moves (phase 1).
 - **Lifting** is now a fifth of tier C's compile, the machine passes another fifth, and the verifier 4 %.
 - **Code generation at tier W** (85 % of its compile): SelectionDAG and the greedy register allocator, as design 9.3 has it.
-- **The analysis** is a third of a balanced pack with a profile; **gap code at tier C**, **the cache across game updates**, **one process
-  per module**, **ThinLTO import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5c left them.
+- **The analysis** is a third of a balanced pack with a profile; **the cache across game updates**, **one process per module**, **ThinLTO
+  import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5c left them. Gap code: done since (6 above: the
+  discovery fix; tier C as the option `--gap-tier C`, off by default), with what it leaves open there.
 
 ### Memory at scale
 

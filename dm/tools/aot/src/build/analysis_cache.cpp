@@ -15,8 +15,9 @@ namespace nxaot::build {
 
 namespace {
 
-// The entry's format: changed whenever what it holds or how it is written changes
-constexpr const char* kFormat = "nxaot-analysis 1\n";
+// The entry's format: changed whenever what it holds or how it is written changes. 2: a function's gap-code flag (the tier rule's: README.md,
+// "Gap code at tier C"; an entry of format 1 has the same bytes for a module without gap code)
+constexpr const char* kFormat = "nxaot-analysis 2\n";
 
 class Writer {
 public:
@@ -138,7 +139,7 @@ bool StoreAnalysis(const std::string& path, const std::string& key, const analys
         w.R(ff.raw);
         w.R(ff.live_after);
         w.U(ff.rv);
-        w.U((ff.returns ? 1u : 0u) | (ff.host_callable ? 2u : 0u));
+        w.U((ff.returns ? 1u : 0u) | (ff.host_callable ? 2u : 0u) | (analysis::IsGapCode(f.prov) ? 4u : 0u));
         w.S(ff.component);
         w.U(ff.continuations.size());
         for (const uint64_t c : ff.continuations) w.S(rel(c));
@@ -248,6 +249,7 @@ bool LoadAnalysis(const std::string& path, const std::string& key, CachedAnalysi
         const uint64_t flags = r.U();
         ff.returns = flags & 1;
         ff.host_callable = flags & 2;
+        f.prov = flags & 4 ? analysis::kProvGap : 0;  // discovery's provenance is kept for gap code only (the tier rule reads it)
         ff.component = static_cast<int>(r.S());
         for (uint64_t k = r.Count(); k-- && r.ok;) ff.continuations.push_back(abs());
         for (uint64_t k = r.Count(); k-- && r.ok;) {

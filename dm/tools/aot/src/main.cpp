@@ -24,7 +24,7 @@
 //               [--correctness] [--all-entries] [--cpu <llvm cpu>] [--fpsr-flags on|off] [--no-debug-info] [--no-line-table] [--spills] [--asm <file.s>]
 //               [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes] [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>]
 //               [--no-groups] [--no-split] [--split-above N] [--target linux|windows] [--isel-misses] [--misses <file>] [--no-root <hex>]...
-//               [--memory]
+//               [--memory] [--tiers-tsv <file>] [--gap-tier C|mode]
 //                                                     the pack stage (src/build): every function of the module compiled, in units of
 //                                                     neighbouring functions (a function over the split limit in parts) on --workers threads
 //                                                     (0 or none: the analysis on one per CPU, then as many compile workers as the CPUs and
@@ -32,7 +32,8 @@
 //                                                     NXAOT_MEM_AVAILABLE_MIB, a test switch, stands for the available memory), or taken from
 //                                                     the cache
 //                                                     --cache (compiled units and the module's analysis); --profile gives each function its tier
-//                                                     by the samples it holds; with the tables' object (lookup table, function map, line table,
+//                                                     by the samples it holds (--gap-tier C: gap code at tier C in the balanced mode; --tiers-tsv
+//                                                     writes each function's tier); with the tables' object (lookup table, function map, line table,
 //                                                     descriptor: include/nxaot/aot_module.h) linked by lld into the shared object nxaot_host
 //                                                     loads (--shared) and / or one relocatable object (-o); prints the module's numbers, the
 //                                                     seconds of each stage and the caches' hits and misses. --target windows: a pack for the
@@ -116,7 +117,7 @@ int Usage() {
                  "                   [--no-line-table] [--spills] [--asm <file.s>] [--no-safepoints] [--workers N] [--cache <dir>] [--time-passes]\n"
                  "                   [--ir <file.ll>] [--ir-opt <file.ll>] [--profile <file>] [--no-groups] [--no-split] [--split-above N]\n"
                  "                   [--target linux|windows]   (windows: a PE DLL --shared <name>.dll and / or a COFF object -o <object.obj>)\n"
-                 "                   [--isel-misses] [--misses <file>] [--no-root <hex>]... [--memory]\n"
+                 "                   [--isel-misses] [--misses <file>] [--no-root <hex>]... [--memory] [--tiers-tsv <file>] [--gap-tier C|mode]\n"
                  "       nxaot lines <pack.so | pack.dll> <module.nro | name.aot.tsv>\n");
     return 2;
 }
@@ -691,6 +692,13 @@ int Build(int argc, char** argv) {
         } else if (a == "--no-root" && has && ParseHex(argv[i + 1], &held)) {
             o.no_roots.insert(held);  // tests: discovery's own sources do not make it an entry
             ++i;
+        } else if (a == "--tiers-tsv" && has) {
+            o.tiers_path = argv[++i];  // each function's tier, gap code marked (README.md, "Gap code at tier C")
+        } else if (a == "--gap-tier" && has) {
+            const std::string v = argv[++i];  // gap code at tier C in the balanced mode, or at the mode's tier (the default: README.md, "Gap code at tier C")
+            if (v == "C") o.gap_tier_c = true;
+            else if (v == "mode") o.gap_tier_c = false;
+            else return Usage();
         } else if (a == "--isel-misses") {
             o.isel_misses = true;  // FastISel's misses by kind (tier C's instruction selection; README.md, "Phase 5d")
         } else if (a == "--target" && has) {

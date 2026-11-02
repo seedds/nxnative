@@ -743,7 +743,8 @@ struct Common {
     Gates gates;                          // the manifest's gate rows
     std::vector<nxaot_gate_site> served;  // the gate sites compiled code calls (some function's code holds them), sorted: the descriptor's table
     std::map<uint64_t, std::vector<Part>> parts;  // the functions split for size (SplitParts), by entry
-    std::map<uint64_t, Tier> tiers;               // each function's tier when a profile chose them (TiersFromProfile); else the mode's
+    std::map<uint64_t, Tier> tiers;               // each function's tier when a profile chose them (TiersFromProfile) or --gap-tier C
+                                                  // (GapTiers: gap code at C); else the mode's
     // What the compile reads of discovery's functions, taken before it starts (BuildObjects), after which they are freed (README.md, "Memory at
     // scale"): the gate sites of the functions that have some (GateSitesOf), and the return addresses of every call site, sorted, each once
     std::map<uint64_t, std::vector<nxaot_gate_site>> sites;
@@ -2658,6 +2659,57 @@ bool TiersFromProfile(const BuildOptions& o, const Plan& plan, std::map<uint64_t
     return true;
 }
 
+// Gap code (design 1.3 "Coverage" and 9.3, whose tier C is for "gap code, and functions the profile never sampled"; README.md, "Gap code at
+// tier C"): a function whose only source is discovery's gap sweep (analysis::IsGapCode: provenance exactly `gap`) is code nothing names. By
+// default it takes its mode's tier as any other function: measured, tier C for it bought 2 % of a pack's time for a pack 13 to 15 % larger and
+// slower code, and in a game whose code mostly lacks FDEs most of the game would run at C. With --gap-tier C (BuildOptions::gap_tier_c) it is
+// compiled at tier C whatever --tier says, but in the max mode, which compiles every function at its mode's tier (H+, or H+ and H by the
+// profile), and a function the profile sampled keeps the profile's tier (it ran: a sampled gap function is hot). The tier is the function's in
+// *tiers, which TierOf, the units and the units' cache keys read (the unit key holds each function's tier: the option changes nothing else).
+// The log's line, always: `aot: gap code: <n> functions, <i> instructions`, with ` at tier C` (and the sampled ones beside) when the option
+// moved them there
+void GapTiers(const BuildOptions& o, const analysis::Discovery& d, const Plan& plan, std::map<uint64_t, Tier>* tiers, BuildStats* s) {
+    const bool demote = o.gap_tier_c && o.mode != "max";
+    uint64_t functions = 0, words = 0, sampled = 0, sampled_words = 0;
+    for (const auto& [entry, ff] : plan.fns) {
+        const auto f = d.functions.find(entry);
+        if (f == d.functions.end() || !analysis::IsGapCode(f->second.prov)) continue;
+        const auto t = tiers->find(entry);
+        if (demote && !o.profile_path.empty() && t != tiers->end() && t->second == Tier::H) {
+            ++sampled;
+            sampled_words += ff.words;
+            continue;
+        }
+        ++functions;
+        words += ff.words;
+        if (demote) (*tiers)[entry] = Tier::C;
+    }
+    std::string line = "aot: gap code: " + std::to_string(functions) + " functions, " + std::to_string(words) + " instructions";
+    if (demote) line += " at tier C";
+    if (sampled) {
+        line += "; " + std::to_string(sampled) + " functions, " + std::to_string(sampled_words) + " instructions sampled by the profile at tier H";
+    }
+    s->notes.push_back(line);
+}
+
+// --tiers-tsv: each function's tier as the units compile it, a line per function in address order, `<entry> <tier> <instructions> <gap code:
+// gap, else ->` separated by tabs, under `#` lines naming the module, the mode, the tier, --gap-tier C and the profile (README.md, "Gap code at
+// tier C"; CTest gaps)
+bool WriteTiers(const std::string& path, const Common& c, std::string* error) {
+    std::string out = "# nxaot tiers\t" + c.image.name + "\tmode " + c.o.mode + "\ttier " + TierName(c.o.tier) +
+                      (c.o.gap_tier_c ? "\tgap-tier C" : "") + (c.o.profile_path.empty() ? std::string() : "\tprofile " + c.o.profile_path) +
+                      "\n# <entry>\t<tier>\t<instructions>\t<gap code>\n";
+    char row[96];
+    for (const auto& [entry, ff] : c.plan.fns) {
+        const auto f = c.d.functions.find(entry);
+        const bool gap = f != c.d.functions.end() && analysis::IsGapCode(f->second.prov);
+        std::snprintf(row, sizeof row, "%#llx\t%s\t%llu\t%s\n", static_cast<unsigned long long>(entry), TierName(c.TierOf(entry)),
+                      static_cast<unsigned long long>(ff.words), gap ? "gap" : "-");
+        out += row;
+    }
+    return WriteFile(path, out, error);
+}
+
 // The analysis cache's key with the misses (--misses; README.md, "JIT misses"): the module's key (AnalysisKey) and what discovery reads of them, each address with
 // its reasons (the entries' counts are not read: a later session's file with the same addresses keeps the analysis), and a test's --no-root addresses. Without
 // either it is the module's key as it is, so the inputs of packs without misses keep their entries
@@ -2848,6 +2900,10 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         }
     }
     if (!TiersFromProfile(o, plan, &c.tiers, &s, error)) {
+        return false;
+    }
+    GapTiers(o, d, plan, &c.tiers, &s);
+    if (!o.tiers_path.empty() && !WriteTiers(o.tiers_path, c, error)) {
         return false;
     }
     const std::vector<Unit> units = Units(c);

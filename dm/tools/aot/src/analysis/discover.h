@@ -39,6 +39,11 @@ enum Prov : uint32_t {
 constexpr uint32_t kProvCount = 15;
 const char* ProvName(unsigned bit);   // "start", "fde", ...
 std::string ProvList(uint32_t mask);  // "fde,sym,call", in source order; "-" when empty
+// Gap code (design 1.3 "Coverage", 9.3: tier C is for "gap code"; README.md, "Gap code at tier C"): a function whose only source is the gap
+// sweep, provenance exactly `gap`: no FDE, no symbol, not the module's entry, nothing of the dynamic section, no relocation, no adr, not a bl or
+// b target, no landing pad, no jump-table target, no JIT miss. Code nothing names; a function the sweep found that a source names as well (a
+// call from other gap code, a miss the host ran) is not
+inline bool IsGapCode(uint32_t prov) { return prov == kProvGap; }
 
 // ---- The host's JIT feedback (design 1.3 and 11; README.md, "JIT misses") ----
 // A miss: a guest address the x86-64 engine's JIT fallback ran because the pack had no compiled code there, with why and how often (dm/host/aot.h, "The JIT

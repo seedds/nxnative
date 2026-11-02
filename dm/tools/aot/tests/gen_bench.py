@@ -13,11 +13,14 @@ pack of it can be checked against dynarmic (nxaot_run) as the corpus is.
       writes <out dir>/bench.c, bench.elf, bench.nro (in the nxnative-aot image: clang-18, ld.lld-18); with --data-rows also the behaviour
       image <out dir>/rows/bench.image.bin (`nxaot image`) with R more data rows in its manifest bench.aot.tsv: one word each, evenly spaced
       over the text (they cut the code they cover: a stress case of the loader's data blocks, Image::InData, not a program that runs)
-  gen_bench.py --direct --functions N [--instructions M] [--seed S] [--profile-percent P] <out dir>
+  gen_bench.py --direct --functions N [--instructions M] [--seed S] [--profile-percent P] [--no-fde-percent Q] <out dir>
       writes the words of the same kinds of statements directly, without clang, at any size (README.md, "Memory at scale"): the behaviour image
       <out dir>/main.image.bin and its manifest main.aot.tsv, as patch_nso.py --aot writes them for a game's NSO, about M instructions in all
       (default 52 per function: Monster Hunter Rise's `main` is about 31 million in about 600,000 functions); with --profile-percent also
-      main.profile, one sample at the entry of P % of the functions (nxaot build --profile). Not a program that runs (below, "--direct")
+      main.profile, one sample at the entry of P % of the functions (nxaot build --profile). With --no-fde-percent, Q % of the statement
+      functions (chosen by the seed) have no FDE and no driver calls them: gap code, which only the statements' own calls, the table of function
+      pointers or discovery's gap sweep can find (README.md, "Gap code at tier C"); their ranges go to main.nofde.tsv. Not a program that runs
+      (below, "--direct")
 """
 import argparse
 import array
@@ -149,7 +152,11 @@ class Gen:
 # (discovery bounds their tables) and the others compute their index from two values in the block before (discovery leaves most of their brs
 # to the dispatcher, "the entry address depends on more than one value", as it does for half of the C program's switches). Functions are 16-byte
 # aligned (nop padding) with an FDE each; a non-leaf function saves x19 to x22 and x29 / x30 and keeps its arguments there, as clang's do;
-# drivers call every function, 64 per driver, and main every driver of the level below. The image is what patch_nso.py --aot writes for an NSO:
+# drivers call every function, 64 per driver, and main every driver of the level below. --no-fde-percent Q: Q % of the statement functions, chosen
+# by a generator of their own seeded from the seed (the main generator draws what it drew without the option), get no FDE (.eh_frame_hdr's count and
+# sorted table and .eh_frame hold the others' only), and the drivers do not call them, as code with no unwind entry that nothing names (a game's
+# FDE-less stretches: README.md, "Gap code at tier C"): only the statements' calls, the table of function pointers or discovery's gap sweep can
+# find them; Q = 0 writes what the generator wrote before the option. The image is what patch_nso.py --aot writes for an NSO:
 # <out>/main.image.bin (text with the entry branch and the MOD0 offset word, read-only data with MOD0, the dynamic section, the symbol `main`,
 # DT_RELR, .eh_frame_hdr, .eh_frame and the jump tables, data with the table of function pointers; bss after it) and its manifest
 # <out>/main.aot.tsv, written by patch_nso.py's own aot_data_rows and aot_manifest. The program is not run (no run time, no checksum): it is
@@ -248,8 +255,9 @@ def patch_nso_functions(*names):
 class Direct:
     """The words of a module of n statement functions (f0 .. f(n-1)), its drivers and main, about `instructions` instructions in all"""
 
-    def __init__(self, n, instructions, seed):
+    def __init__(self, n, instructions, seed, no_fde=frozenset()):
         self.n = n
+        self.no_fde = no_fde                                    # statement functions without an FDE, which no driver calls (--no-fde-percent)
         self.r = random.Random(seed)
         self.table = 1 << max(4, (n // 4).bit_length() - 1)   # the table of function pointers, as Gen's
         self.w = array.array('I', [0, 0])                       # the entry branch and the MOD0 offset word (+4), patched in image()
@@ -258,11 +266,11 @@ class Direct:
         self.starts, self.ends = array.array('I'), array.array('I')   # per function (f0 .. f(n-1), the drivers, main): word indices
         self.fn_words = 0                                       # the statement functions' words so far
         # Drivers: 64 calls each, over the functions, then over the drivers of the level below, up to main's level
-        self.levels, count = [], n
+        self.levels, count = [], n - len(no_fde)
         while count > 64:
             count = (count + 63) // 64
             self.levels.append(count)
-        driver_words = sum(self.levels) * 8 + sum(5 * c for c in [n] + self.levels) + 8
+        driver_words = sum(self.levels) * 8 + sum(5 * c for c in [n - len(no_fde)] + self.levels) + 8
         self.budget = max(8.0, (instructions - driver_words) / n)  # the statement functions' words each, on average
 
     # ---- emission ----
@@ -469,7 +477,7 @@ class Direct:
             if (i + 1) % step == 0:  # keep the functions' average size at the budget
                 want = self.budget * (i + 1)
                 scale = min(4.0, max(0.25, scale * min(1.25, max(0.8, want / self.fn_words))))
-        level = list(range(self.n))
+        level = [i for i in range(self.n) if i not in self.no_fde]   # the drivers call the functions with an FDE
         while len(level) > 64:
             level = [self.driver(level[k:k + 64]) for k in range(0, len(level), 64)]
         self.main = self.driver(level)
@@ -487,7 +495,8 @@ class Direct:
         relr = (strtab + len(names) + 7) & ~7
         relr_words = 1 + (self.table - 1 + 62) // 63
         eh_hdr = relr + 8 * relr_words
-        nfn = len(self.starts)
+        with_fde = [k for k in range(len(self.starts)) if k not in self.no_fde]   # every function but those without an FDE
+        nfn = len(with_fde)
         eh_frame = eh_hdr + 12 + 8 * nfn
         jt_off = eh_frame + 20 + 20 * nfn + 4
         data_off = page(jt_off + len(self.jt))
@@ -533,13 +542,12 @@ class Direct:
         cie = bytes([0, 0, 0, 0, 1]) + b'zR\0' + bytes([1, 0x78, 30, 1, 0x1B, 0x0C, 31, 0])
         img[eh_frame:eh_frame + 20] = struct.pack('<I', 16) + cie
         struct.pack_into('<BBBBiI', img, eh_hdr, 1, 0x1B, 0x03, 0x3B, eh_frame - (eh_hdr + 4), nfn)
-        ranges = []
-        for k in range(nfn):
-            at = eh_frame + 20 + 20 * k
-            s, e = starts[k] * 4, self.ends[k] * 4
-            ranges.append((s, e))
+        ranges = [(starts[k] * 4, self.ends[k] * 4) for k in range(len(self.starts))]
+        for j, k in enumerate(with_fde):
+            at = eh_frame + 20 + 20 * j
+            s, e = ranges[k]
             struct.pack_into('<IIiiB', img, at, 16, at + 4 - eh_frame, s - (at + 8), e - s, 0)
-            struct.pack_into('<ii', img, eh_hdr + 12 + 8 * k, s - eh_hdr, at - eh_hdr)
+            struct.pack_into('<ii', img, eh_hdr + 12 + 8 * j, s - eh_hdr, at - eh_hdr)
         img[jt_off:jt_off + len(self.jt)] = self.jt
         profile = []
         if profile_percent:
@@ -553,7 +561,14 @@ def direct(a):
     import time
     t0 = time.monotonic()
     instructions = a.instructions or 52 * a.functions
-    d = Direct(a.functions, instructions, a.seed)
+    # --no-fde-percent: which statement functions have no FDE, from a generator of their own (the main generator's draws are not taken for it)
+    no_fde = frozenset()
+    if a.no_fde_percent:
+        if not 0 < a.no_fde_percent < 100:
+            sys.exit('gen_bench.py: --no-fde-percent must be above 0 and below 100')
+        no_fde = frozenset(random.Random(f'gen_bench --no-fde-percent {a.seed}').sample(range(a.functions),
+                                                                                         round(a.functions * a.no_fde_percent / 100)))
+    d = Direct(a.functions, instructions, a.seed, no_fde)
     d.generate()
     img, layout, ranges, profile = d.image(a.profile_percent)
     words = sum(e - s for s, e in ranges) // 4
@@ -567,9 +582,16 @@ def direct(a):
     if profile:
         with open(os.path.join(a.out, 'main.profile'), 'w') as f:
             f.write(f'# gen_bench.py --direct: one sample at the entry of {a.profile_percent} % of the functions\n' + '\n'.join(profile) + '\n')
+    if no_fde:
+        # The functions without an FDE: their true ranges, for what discovery finds of them (tests/test_gaps.py)
+        with open(os.path.join(a.out, 'main.nofde.tsv'), 'w') as f:
+            f.write(f'# gen_bench.py --direct --no-fde-percent {a.no_fde_percent}: {len(no_fde)} of {a.functions} statement functions without an '
+                    f'FDE, called by no driver\n# <entry> <end> (module offsets, hexadecimal)\n')
+            f.write(''.join(f'{ranges[k][0]:#x}\t{ranges[k][1]:#x}\n' for k in sorted(no_fde)))
     print(f'gen_bench.py --direct: {len(ranges)} functions ({a.functions} and {len(ranges) - a.functions} drivers), {words} instructions in '
           f'functions, {layout[0] // 4} text words, {len(d.jt)} jump-table bytes, image {len(img)} bytes, in {time.monotonic() - t0:.1f} s: '
-          f'{os.path.join(a.out, "main.aot.tsv")}' + (f', profile of {len(profile)} functions' if profile else ''))
+          f'{os.path.join(a.out, "main.aot.tsv")}' + (f', profile of {len(profile)} functions' if profile else '') +
+          (f', {len(no_fde)} functions without an FDE ({len(ranges) - len(no_fde)} FDEs): main.nofde.tsv' if no_fde else ''))
 
 
 def main():
@@ -586,6 +608,9 @@ def main():
     ap.add_argument('--instructions', type=int, default=0,
                     help='--direct: about this many instructions in all (default 52 per function; followed over thousands of functions)')
     ap.add_argument('--profile-percent', type=float, default=0, help='--direct: also main.profile, one sample in this share of the functions')
+    ap.add_argument('--no-fde-percent', type=float, default=0,
+                    help='--direct: this share of the statement functions (by the seed) without an FDE and called by no driver: gap code '
+                         '(their ranges in main.nofde.tsv)')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     if a.direct:

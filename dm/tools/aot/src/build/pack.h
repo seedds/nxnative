@@ -26,7 +26,9 @@
 namespace nxaot::build {
 
 // The tiers of section 9.3. Without a profile the pack modes map onto one tier for every function: balanced -> W, max -> H+; with one
-// (BuildOptions::profile_path) a sampled function is at H (max: H+) and the others at C (max: H)
+// (BuildOptions::profile_path) a sampled function is at H (max: H+) and the others at C (max: H). Gap code (a function only discovery's gap
+// sweep found, analysis::IsGapCode) takes its mode's tier as any other function; with --gap-tier C (BuildOptions::gap_tier_c) it is at C in
+// the balanced mode whatever --tier says, unless the profile sampled it (README.md, "Gap code at tier C")
 enum class Tier : uint8_t { C, W, H, HPlus };
 const char* TierName(Tier t);  // "C", "W", "H", "H+"
 
@@ -57,6 +59,9 @@ struct BuildOptions {
     std::set<uint64_t> no_roots;                    // a test's --no-root (analysis::DiscoverOptions::no_roots), in the analysis cache's key too
     bool windows = false;                           // --target windows: a PE DLL for the Windows host ("Windows packs" in pack.cpp, coff.h)
     bool isel_misses = false;                       // count FastISel's misses by kind (--isel-misses; no cache: every unit compiled)
+    std::string tiers_path;                         // also write each function's tier here (--tiers-tsv: README.md, "Gap code at tier C")
+    bool gap_tier_c = false;                        // --gap-tier C: gap code at tier C in the balanced mode (off: the mode's tier, measured
+                                                    // in README.md, "Gap code at tier C")
 };
 
 struct BuildStats {

@@ -4,11 +4,11 @@
 // SHA-256: the chain version until AOT_CHAIN exists); the convention and the options the plan reads. A warm repack with nothing changed then
 // runs neither discovery nor the plan: phase 5a measured them as most of a warm repack (3.89 of the benchmark's 4.32 s).
 //
-// What is kept: per function its entry, limit, the bounds of its blocks (the gate sites and the returns' table read them) and its calls'
-// sites, and for a function the pack may split (more than split_above instructions) its blocks' successors and exclusive windows too; the
-// census's FPSR answer; discovery's notes; the whole plan. An entry is one file, <dir>/analysis/<key>.bin, written through a temporary name and
-// renamed, its payload followed by its own SHA-256: a file that is short, does not parse, names another key or fails its checksum is ignored
-// (and replaced), never trusted.
+// What is kept: per function its entry, limit, the bounds of its blocks (the gate sites and the returns' table read them), its calls' sites and
+// whether it is gap code (analysis::IsGapCode: the tier rule's, README.md "Gap code at tier C"), and for a function the pack may split (more
+// than split_above instructions) its blocks' successors and exclusive windows too; the census's FPSR answer; discovery's notes; the whole plan.
+// An entry is one file, <dir>/analysis/<key>.bin, written through a temporary name and renamed, its payload followed by its own SHA-256: a
+// file that is short, does not parse, names another key or fails its checksum is ignored (and replaced), never trusted.
 #pragma once
 
 #include <cstdint>
@@ -22,7 +22,8 @@
 namespace nxaot::build {
 
 struct CachedAnalysis {
-    analysis::Discovery d;  // functions: entry, limit, end, name, blocks (bounds; successors where kept), calls, windows (where kept)
+    analysis::Discovery d;  // functions: entry, limit, end, name, blocks (bounds; successors where kept), calls, windows (where kept), and a
+                            // provenance of kProvGap for gap code (0 for the others: their provenance is not kept)
     Plan plan;
     bool reads_fpsr = false;  // the census's answer (analysis::ReadsFpsr)
 };

@@ -243,3 +243,10 @@ set_tests_properties(misses PROPERTIES TIMEOUT 900)
 add_test(NAME workers COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_workers.py" --nxaot $<TARGET_FILE:nxaot>
          --work "${CMAKE_CURRENT_BINARY_DIR}/workers")
 set_tests_properties(workers PROPERTIES TIMEOUT 900)
+# Gap code (aot-recompiler.md 1.3 "Coverage" and 9.3; README.md, "Gap code at tier C"): a game-shaped module with a quarter of its functions
+# without an FDE (gen_bench.py --direct --no-fde-percent 25), each found with its exact bounds; the functions only the gap sweep found at the
+# mode's tier by default and at tier C with --gap-tier C (--tiers-tsv), the same packs with 1 and 4 workers and warm, a sampled one at the
+# profile's tier, none at C in the max mode
+add_test(NAME gaps COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gaps.py" --nxaot $<TARGET_FILE:nxaot>
+         --work "${CMAKE_CURRENT_BINARY_DIR}/gaps")
+set_tests_properties(gaps PROPERTIES TIMEOUT 900)

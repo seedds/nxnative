@@ -310,7 +310,7 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the Switch) wit
 <tr>
 <td align="center" valign="top" width="33%"><img src="docs/images/super-robot-wars-y.jpg" width="256" alt="SUPER ROBOT WARS Y"><br><small><b><a href="dm/games/010063301BD50000/README.md">SUPER ROBOT WARS Y</a></b></small></td>
 <td align="center" valign="top" width="33%"><img src="docs/images/super-mario-rpg.jpg" width="256" alt="Super Mario RPG"><br><small><b><a href="dm/games/0100BC0018138000/README.md">Super Mario RPG</a></b></small></td>
-<td></td>
+<td align="center" valign="top" width="33%"><img src="docs/images/reussir-code-de-la-route.png" width="256" alt="Reussir: Code de la route"><br><small><b><a href="dm/games/0100EA300DE6E000/README.md">Reussir: Code de la route</a></b></small></td>
 </tr>
 </table>
 <!-- end of gallery -->

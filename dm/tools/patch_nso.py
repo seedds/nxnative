@@ -207,6 +207,9 @@ def written_w(p):
     Capstone lists a compare's first operand as written too, so a caller that only wants real writes leaves compares out"""
     names = ({'lr': 'x30', 'fp': 'x29'}.get(n, n) for n in map(p.reg_name, p.regs_access()[1]))
     return {f'w{num(n)}' for n in names if num(n) is not None}
+def writes_reg(p, reg):
+    """Whether p changes the general-purpose register reg (xN or wN): a write of wN clears the upper half of xN too, and a compare only sets the flags"""
+    return p.mnemonic not in ('cmp', 'cmn', 'tst') and 'w' + reg[1:] in written_w(p)
 def has18(ins): return re.search(r'\b[xw]18\b', ins.op_str) is not None
 def regs_in(ins):
     s = {int(n) for n in re.findall(r'\b[xw](\d+)\b', ins.op_str)}
@@ -697,12 +700,12 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
     # GLSLC subsdk0+0x2f403c checks a masked copy instead: and w16,w18,#0x3f; cmp w16,#0xe; b.hi; ...; and x18,x18,#0x3f; ldrsw x18,[x15,x18,lsl #2]
     idx = {'w' + re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', ld.op_str).group(1)}   # pyright: ignore[reportOptionalMemberAccess]  # ld was chosen by this match
     masked = None   # (source, mask, position) when the index is "source & mask"
-    k0 = ctx.index(ld); cmp = None
+    k0 = ctx.index(ld); cmp = None; copies = set()
     def wname(r): return 'w' + r[1:]
     for i in range(k0 - 1, -1, -1):   # walk back from the load: follow register copies into the index, stop at the bounds check
         p = ctx[i]
         m = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
-        if m and m.group(1) in idx: idx.add(m.group(2)); continue
+        if m and m.group(1) in idx: idx.remove(m.group(1)); idx.add(m.group(2)); copies.add(m.group(1)); continue   # a copy replaces the index: a check of its old value bounds nothing
         m = re.fullmatch(r'([wx]\d+), ([wx]\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'and' else None
         if m and wname(m.group(1)) in idx and masked is None: masked = (wname(m.group(2)), int(m.group(3), 0), i); continue
         # A 64-bit check of the index bounds it as well (OCTOPATH TRAVELER 1.0.5 main+0x1676f30: cmp x22,#0x10; ...; b.hi; adrp x18 + add x18; mov x0,x18; ldrsw x18,[x0,x22,lsl #2];
@@ -719,13 +722,12 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
                     cmp = p
                 break
             if cmp: break
-    if not cmp and copy_first: cmp = check_before_copy(insl, ctx, ld, idx)
+    if not cmp and copy_first: cmp = check_before_copy(insl, ctx, ld, idx | copies)
     if not cmp: return None
     n = int(cmp.op_str.split('#')[1], 0) + 1
     k = insl.index(ld); lo = page = None
     for p in reversed(insl[max(0, k - 256):k]):   # the writer chain of the table base
-        _, w = p.regs_access()
-        if not any(p.reg_name(r) == rb for r in w): continue
+        if not writes_reg(p, rb): continue
         if lo is None and p.mnemonic == 'add' and re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str): lo = int(p.op_str.split('#')[1], 0); continue
         if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): page = p.operands[1].imm
         break
@@ -829,8 +831,7 @@ def table_base(insl, k, rb, far=False):
     lo = None
     for p in reversed(insl[0 if far else max(0, k - 256):k]):
         if far and p.mnemonic in ('bl', 'blr') and num(rb) <= 18: return None   # pyright: ignore[reportOptionalOperand]  # a table base register, always xN
-        _, w = p.regs_access()
-        if not any(p.reg_name(r) == rb for r in w): continue
+        if not writes_reg(p, rb): continue
         if lo is None and p.mnemonic == 'add' and re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str): lo = int(p.op_str.split('#')[1], 0); continue
         if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): return p.operands[1].imm + lo
         return None
@@ -877,9 +878,8 @@ def jump_masked_not(insl, j):
     head, end = test.address, insl[j].address
     if head <= branch.operands[0].imm <= end: return None
     def writes(p, reg):
-        if p.mnemonic in ('cmp', 'cmn', 'tst'): return False
         if p.mnemonic in ('bl', 'blr') and int(reg[1:]) <= 18: return True
-        return 'w' + reg[1:] in written_w(p)
+        return writes_reg(p, reg)
     if any(writes(p, idx) for p in ctx[km + 1:kl]) or any(writes(p, ent) for p in ctx[kl + 1:ka]) or \
        any(writes(p, base) for p in ctx[kl + 1:ka + 1]) or any(writes(p, 'x18') for p in ctx[ka + 1:-1]): return None
     if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.') for p in ctx[km + 1:-1]): return None
@@ -902,7 +902,7 @@ def jump_adr_offsets(insl, j):
     ka = ctx.index(add); ops = add.op_str.split(', ')[1:]
     for e, a in (ops, ops[::-1]):   # e = the loaded entry, a = the adr base
         ld = next((p for p in reversed(ctx[:ka]) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{e}, \[x\d+, x\d+, lsl #2\]', p.op_str)), None)
-        wa = next((p for p in reversed(ctx[:ka]) if any(p.reg_name(r) == a for r in p.regs_access()[1])), None)   # the nearest writer of a
+        wa = next((p for p in reversed(ctx[:ka]) if writes_reg(p, a)), None)   # the nearest writer of a
         if not ld or not wa or wa.mnemonic != 'adr': continue
         tb_reg, ix = re.fullmatch(rf'{e}, \[(x\d+), x(\d+), lsl #2\]', ld.op_str).groups()
         idx, cmp = {'w' + ix}, None   # the index and the registers copied into it (main+0x596d30: cmp w15,#8; b.hi; mov w16,w15; ...; ldrsw x0,[x17,x16,lsl #2])
@@ -929,7 +929,7 @@ def table_cands(insl, rb):
     cands = set()
     for k, p in enumerate(insl):
         if p.mnemonic != 'adrp' or not p.op_str.startswith(rb + ','): continue
-        q = next((x for x in insl[k + 1:k + 9] if any(x.reg_name(r) == rb for r in x.regs_access()[1])), None)
+        q = next((x for x in insl[k + 1:k + 9] if writes_reg(x, rb)), None)
         m = re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', q.op_str) if q is not None and q.mnemonic == 'add' else None
         if m: cands.add(p.operands[1].imm + int(m.group(1), 0))
     return sorted(cands)
@@ -1092,7 +1092,7 @@ def jump_bytes_far(insl, j):
     for k in range(len(ctx) - 1, -1, -1):
         p = ctx[k]
         if p.mnemonic == 'add' and p.op_str.startswith('x18, x18,') and 'lsl #2' in p.op_str: break
-        if any(p.reg_name(r) == 'x18' for r in p.regs_access()[1]): return None
+        if writes_reg(p, 'x18'): return None
     else: return None
     rn = p.reg_name(p.operands[2].reg); idx = {'lr': 30, 'fp': 29}.get(rn, num(rn))
     base = next((q.operands[1].imm for q in reversed(ctx[:k]) if q.mnemonic == 'adr' and q.op_str.startswith('x18,')), None)
@@ -1111,7 +1111,7 @@ def half_count(insl, ld, base):
     idx, cmp = {'w' + m.group(2)}, None
     for p in reversed(insl[max(0, k - 32):k]):   # walk back from the load to the bounds check
         mm = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
-        if mm and mm.group(1) in idx: idx.add(mm.group(2)); continue
+        if mm and mm.group(1) in idx: idx.remove(mm.group(1)); idx.add(mm.group(2)); continue   # a copy replaces the index: a check of its old value bounds nothing
         mm = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
         if mm and mm.group(1) in idx: cmp = p; break
         if written_w(p) & idx: return None   # the index changes after the check

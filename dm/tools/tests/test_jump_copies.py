@@ -21,7 +21,7 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'writes_reg', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
@@ -52,6 +52,19 @@ class CopiedBase(unittest.TestCase):
             self.assertIsNone(self.follow(self.base() + [mov(30, 7), call, mov(7, 30)]))
             self.assertEqual(self.follow(self.base(19) + [call, mov(7, 19)]), 0x440c)
 
+    def base_at_load(self, words, reg='x7'):
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(len(ins), len(words))
+        return scope['table_base'](ins, len(ins), reg)
+
+    def test_table_base_sees_every_write_of_the_register(self):
+        self.assertEqual(self.base_at_load(self.base()), 0x440c)
+        self.assertIsNone(self.base_at_load(self.base() + [mov(7, 0, False)]))   # mov w7,w0 replaces the base too
+        self.assertEqual(self.base_at_load(self.base(30), 'x30'), 0x440c)   # capstone names the writes lr
+        self.assertEqual(self.base_at_load(self.base() + [0x710004ff]), 0x440c)   # cmp w7,#1 only sets the flags
+        self.assertEqual(self.base_at_load(self.base() + [0xf10004ff]), 0x440c)   # cmp x7,#1
+
     def test_aliases_and_unrelated_writes(self):
         self.assertEqual(self.follow(self.base(29) + [mov(7, 29)]), 0x440c)
         self.assertEqual(self.follow(self.base(30), 'lr'), 0x440c)
@@ -78,17 +91,20 @@ class AdrOffsetBounds(unittest.TestCase):
     TABLE = 0x4040
     TARGETS = [0, 8, 36, 40, 44]
 
-    def run_site(self, wide=True, index=9, clobber=NOP, loaded=9):
+    def run_site(self, wide=True, index=9, clobber=NOP, loaded=9, after_adr=NOP):
         # adrp/add x15; cmp x9,#4; b.hi; adr x18,.; ldrsw x0,[x15,x9,lsl #2]; add x18,x18,x0; br x18.
         # The compare and ADR bases are independent, as in DRAGON QUEST I & II's copy dispatch.
         words = [ADRP(15, 0, self.TABLE), ADDI(15, 15, self.TABLE & 0xfff),
                  (0xf100001f if wide else 0x7100001f) | 4 << 10 | index << 5, bhi(12, 44), clobber,
-                 0x10000012, 0xb8a07800 | loaded << 16 | 15 << 5, ADDR(18, 18, 0), BR(18), RET, RET, RET]
+                 0x10000012, after_adr, 0xb8a07800 | loaded << 16 | 15 << 5, ADDR(18, 18, 0), BR(18), RET, RET, RET]
         for i, target in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - 20)
         md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
         ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
         self.assertEqual(len(ins), len(words))
-        return scope['jump_adr_offsets'](ins, 8)
+        return scope['jump_adr_offsets'](ins, 9)
+
+    def test_a_32_bit_write_after_the_adr_replaces_its_value(self):
+        self.assertIsNone(self.run_site(after_adr=mov(18, 0, False)))
 
     def test_64_bit_comparison_bounds_the_table(self):
         self.assertEqual(self.run_site(), self.TARGETS)
@@ -121,10 +137,11 @@ class HalfCount(unittest.TestCase):
     """The pads a halfword table needs: the check's bound, or None when the index may have changed after it."""
     TABLE = 0x4100
 
-    def run_site(self, index=9, clobber=NOP):
+    def run_site(self, index=9, clobber=NOP, loaded=None):
+        loaded = index if loaded is None else loaded
         # adrp/add x15; cmp w9,#4; b.hi; <clobber>; ldrh w0,[x15,x9,lsl #1]; adr x18,.; add x18,x18,x0,lsl #2; br x18
         words = [ADRP(15, 0, self.TABLE), ADDI(15, 15, self.TABLE & 0xfff), 0x7100001f | 4 << 10 | index << 5, bhi(12, 36), clobber,
-                 0x78607800 | index << 16 | 15 << 5, 0x10000012, 0x8b000a52, BR(18), RET]
+                 0x78607800 | loaded << 16 | 15 << 5, 0x10000012, 0x8b000a52, BR(18), RET]
         struct.pack_into('<5H', IMG, self.TABLE, 0, 1, 2, 3, 4)
         md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
         ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
@@ -142,6 +159,28 @@ class HalfCount(unittest.TestCase):
             with self.subTest(reg=reg):
                 self.assertEqual(self.run_site(index=reg), 5)
                 self.assertIsNone(self.run_site(index=reg, clobber=mov(reg, 0)))
+
+    def test_a_copy_replaces_the_index(self):
+        self.assertIsNone(self.run_site(clobber=mov(9, 0, False)))   # cmp w9; mov w9,w0: the check says nothing of w0
+        self.assertEqual(self.run_site(index=0, loaded=9, clobber=mov(9, 0, False)), 5)   # cmp w0; mov w9,w0
+
+
+class CopyAfterCheck(unittest.TestCase):
+    TABLE = 0x4040
+    TARGETS = [32 + i * 4 for i in range(5)]
+
+    def run_site(self, checked):
+        # adrp/add x4; cmp wN,#4; b.hi; mov w18,w21; ldrsw x18,[x4,x18,lsl #2]; add x18,x18,x4; br x18 (Link's Awakening's movie module checks w21)
+        words = [ADRP(4, 0, self.TABLE), ADDI(4, 4, self.TABLE & 0xfff), 0x7100001f | 4 << 10 | checked << 5, bhi(12, 32),
+                 mov(18, 21, False), 0xb8a07800 | 18 << 16 | 4 << 5 | 18, ADDR(18, 18, 4), BR(18)] + [RET] * 5
+        for i, target in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - self.TABLE)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        return scope['jump_offsets'](ins, 7)
+
+    def test_the_check_must_be_of_the_source(self):
+        self.assertEqual(self.run_site(21), self.TARGETS)
+        self.assertIsNone(self.run_site(18))
 
 
 class ForwardBase(unittest.TestCase):

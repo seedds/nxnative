@@ -144,6 +144,14 @@ To enroll a cut for any game's own module:
 - **Check:** `dm/tools/tests/test_jump_copies.py` exercises both comparison widths, unrelated checks, overwritten indices and a bounds check on the copied source with real AArch64 instructions.
 - **Open:** as in the existing 32-bit form, this recognizer assumes the comparison has an effective unsigned bounds guard; it does not prove guard/flag validity or that every incoming path passes the check. This game's actual dispatch has `b.hi` with unchanged flags. Validating those branches remains separate from this fix.
 
+### Vector registers read as writes of the jump-table index
+
+- **Symptom:** `AssertionError: jump table 3ce6c` while rewriting `main`, on an ADR-relative dispatch that the existing form describes: `ldrb w0, [x18, #5]; cmp w0, #5; b.hi; ldr s0, [sp, #8]; ldr s1, [x18, #0xc]; adr x18, #L; ldrsw x1, [x17, x0, lsl #2]; add x18, x18, x1; br x18`.
+- **Cause:** the backward walk from the load to the bounds check refuses the site when an instruction writes the index. It named each written register `'w' + name[1:]`, so `ldr s0` became a write of `w0`, the index, and `jump_adr_offsets` gave up. `half_count`, `check_before_copy` and the masked form of `jump_offsets` had the same test. It also failed the other way: capstone's `reg_name` calls x30 `lr` and x29 `fp`, so a real write of an index in either went unseen. `jump_masked_not` missed those writes too.
+- **Fix:** all of them ask `written_w`, which names only general-purpose registers, with `lr` and `fp` as w30 and w29. A vector or floating-point register (`s`, `d`, `q`, `b`, `h`, `v`) never changes the index.
+- **Found on:** Tomodachi Life: Living the Dream (`010051F0207B2000`) 1.0.0, `main+0x3ce6c` (six targets, table at `main+0x2a5967c`), by the pull request's author: with the fix the game rewrites, packs as a Mac app from a provisional profile and boots to its first screen. The other forms were found by reading the code and shown on synthetic sites.
+- **Check:** `dm/tools/tests/test_jump_copies.py` puts vector loads and x29 / x30 writes between the check and the load in each form, including `half_count`.
+
 ### Byte tables indexed by x30 (capstone register names)
 
 - **Symptom:** `jump table <addr>` assertion on a byte table indexed by x30 (`adr x18, #L; ldrb w30, [x14, x12]; add x18, x18, x30, lsl #2; br x18`).

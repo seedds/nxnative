@@ -202,6 +202,11 @@ def regset(ins):
     return {ins.reg_name(x) for x in r}, {ins.reg_name(x) for x in w}
 def num(name):
     m = re.fullmatch(r'[xw](\d+)', name or ''); return int(m.group(1)) if m else None
+def written_w(p):
+    """The general-purpose registers p writes, as wN names, since a write of wN or xN changes the same register. Capstone's reg_name calls x30 lr and x29 fp; s0, d0, q0 and the like are not w0.
+    Capstone lists a compare's first operand as written too, so a caller that only wants real writes leaves compares out"""
+    names = ({'lr': 'x30', 'fp': 'x29'}.get(n, n) for n in map(p.reg_name, p.regs_access()[1]))
+    return {f'w{num(n)}' for n in names if num(n) is not None}
 def has18(ins): return re.search(r'\b[xw]18\b', ins.op_str) is not None
 def regs_in(ins):
     s = {int(n) for n in re.findall(r'\b[xw](\d+)\b', ins.op_str)}
@@ -663,7 +668,7 @@ def check_before_copy(insl, ctx, ld, idx):
     if not m: return None
     src, kl = m.group(1), insl.index(ld)
     def writes(p):   # capstone lists a compare's first operand as written (cmp w18,#4 at main+0x2dd8c30); it only sets the flags
-        return set() if p.mnemonic in ('cmp', 'cmn', 'tst') else {'w' + p.reg_name(r)[1:] for r in p.regs_access()[1]}
+        return set() if p.mnemonic in ('cmp', 'cmn', 'tst') else written_w(p)
     for q in range(kl - 3, -1, -1):
         p = insl[q]
         if p.address + 4 != insl[q + 1].address: return None
@@ -707,11 +712,10 @@ def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
         if wname(m.group(1)) in idx: cmp = p; break
         if masked:   # the checked register must be "the same source & the same mask", with the source unchanged up to the index's and
             for q in range(i - 1, -1, -1):
-                w = [wname(ctx[q].reg_name(r)) for r in ctx[q].regs_access()[1]]
-                if wname(m.group(1)) not in w: continue
+                if wname(m.group(1)) not in written_w(ctx[q]): continue
                 mm = re.fullmatch(r'([wx]\d+), ([wx]\d+), #(0x[0-9a-f]+|\d+)', ctx[q].op_str) if ctx[q].mnemonic == 'and' else None
                 if mm and wname(mm.group(2)) == masked[0] and int(mm.group(3), 0) == masked[1] and \
-                   not any(masked[0] in [wname(ctx[z].reg_name(r)) for r in ctx[z].regs_access()[1]] for z in range(q + 1, masked[2])):
+                   not any(masked[0] in written_w(ctx[z]) for z in range(q + 1, masked[2])):
                     cmp = p
                 break
             if cmp: break
@@ -875,7 +879,7 @@ def jump_masked_not(insl, j):
     def writes(p, reg):
         if p.mnemonic in ('cmp', 'cmn', 'tst'): return False
         if p.mnemonic in ('bl', 'blr') and int(reg[1:]) <= 18: return True
-        return any(p.reg_name(r).replace('w', 'x', 1) == reg for r in p.regs_access()[1])
+        return 'w' + reg[1:] in written_w(p)
     if any(writes(p, idx) for p in ctx[km + 1:kl]) or any(writes(p, ent) for p in ctx[kl + 1:ka]) or \
        any(writes(p, base) for p in ctx[kl + 1:ka + 1]) or any(writes(p, 'x18') for p in ctx[ka + 1:-1]): return None
     if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.') for p in ctx[km + 1:-1]): return None
@@ -908,7 +912,7 @@ def jump_adr_offsets(insl, j):
             # A check of the full xN index bounds the same table (DRAGON QUEST I & II main+0x30ee50c: cmp x9,#4).
             m = re.fullmatch(r'([wx]\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
             if m and 'w' + m.group(1)[1:] in idx: cmp = p; break
-            if any('w' + p.reg_name(r)[1:] in idx for r in p.regs_access()[1]): return None   # the index changes after the check
+            if written_w(p) & idx: return None   # the index changes after the check
         if cmp is None: return None
         n, at = int(cmp.op_str.split('#')[1], 0) + 1, wa.operands[1].imm
         def targets(tb): return [at + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)] if 0 <= tb and tb + 4 * n <= len(IMG) else None
@@ -1110,7 +1114,7 @@ def half_count(insl, ld, base):
         if mm and mm.group(1) in idx: idx.add(mm.group(2)); continue
         mm = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
         if mm and mm.group(1) in idx: cmp = p; break
-        if any('w' + p.reg_name(r)[1:] in idx for r in p.regs_access()[1]): return None   # the index changes after the check
+        if written_w(p) & idx: return None   # the index changes after the check
     kc = insl.index(cmp) if cmp is not None else -1
     if kc < 0 or insl[kc + 1].mnemonic not in ('b.hi', 'b.hs', 'b.cs'): return None   # only a compare that guards the dispatch bounds the index (b.hs: one entry more than needed)
     n = int(cmp.op_str.split('#')[1], 0) + 1

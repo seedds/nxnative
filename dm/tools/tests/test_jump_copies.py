@@ -21,10 +21,11 @@ from nso_asm import ADRP, ADDI, ADDR, B, BEQ, BLR, BR, NOP
 tree = ast.parse((TOOLS / 'patch_nso.py').read_text())
 IMG = bytearray(0x5000); tabjumps = {}; jumps = {}   # the globals the recognizers read: the module image and the jump tables resolved so far in the function
 scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'IMG': IMG, 'tabjumps': tabjumps, 'jumps': jumps}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
+exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('num', 'written_w', 'half_count', 'copied_base', 'table_base', 'table_cands', 'forward_table_base', 'check_before_copy', 'jump_offsets', 'jump_adr_offsets', 'jump_zero_extended', 'jump_masked_pred', 'jump_masked_not')], type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
 
 
 def mov(dst, src, wide=True): return (0xaa0003e0 if wide else 0x2a0003e0) | src << 16 | dst
+def ldr_s(reg): return 0xbd400000 | 2 << 10 | 31 << 5 | reg   # ldr sN, [sp, #8]
 
 
 class CopiedBase(unittest.TestCase):
@@ -77,12 +78,12 @@ class AdrOffsetBounds(unittest.TestCase):
     TABLE = 0x4040
     TARGETS = [0, 8, 36, 40, 44]
 
-    def run_site(self, wide=True, index=9, clobber=NOP):
+    def run_site(self, wide=True, index=9, clobber=NOP, loaded=9):
         # adrp/add x15; cmp x9,#4; b.hi; adr x18,.; ldrsw x0,[x15,x9,lsl #2]; add x18,x18,x0; br x18.
         # The compare and ADR bases are independent, as in DRAGON QUEST I & II's copy dispatch.
         words = [ADRP(15, 0, self.TABLE), ADDI(15, 15, self.TABLE & 0xfff),
                  (0xf100001f if wide else 0x7100001f) | 4 << 10 | index << 5, bhi(12, 44), clobber,
-                 0x10000012, 0xb8a07800 | 9 << 16 | 15 << 5, ADDR(18, 18, 0), BR(18), RET, RET, RET]
+                 0x10000012, 0xb8a07800 | loaded << 16 | 15 << 5, ADDR(18, 18, 0), BR(18), RET, RET, RET]
         for i, target in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - 20)
         md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
         ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
@@ -103,6 +104,44 @@ class AdrOffsetBounds(unittest.TestCase):
 
     def test_a_copy_must_be_bounded_by_its_source(self):
         self.assertEqual(self.run_site(index=0, clobber=mov(9, 0, False)), self.TARGETS)
+
+    def test_a_vector_load_does_not_change_the_index(self):
+        # ldr s9,[sp,#8] between the check and the load, as Tomodachi Life: Living the Dream 1.0.0 main+0x3ce58 loads s0 with the index in w0
+        self.assertEqual(self.run_site(clobber=ldr_s(9)), self.TARGETS)
+
+    def test_writes_of_x29_and_x30_change_the_index(self):
+        # Capstone's reg_name calls them fp and lr
+        for reg in (29, 30):
+            with self.subTest(reg=reg):
+                self.assertEqual(self.run_site(index=reg, loaded=reg), self.TARGETS)
+                self.assertIsNone(self.run_site(index=reg, loaded=reg, clobber=mov(reg, 0)))
+
+
+class HalfCount(unittest.TestCase):
+    """The pads a halfword table needs: the check's bound, or None when the index may have changed after it."""
+    TABLE = 0x4100
+
+    def run_site(self, index=9, clobber=NOP):
+        # adrp/add x15; cmp w9,#4; b.hi; <clobber>; ldrh w0,[x15,x9,lsl #1]; adr x18,.; add x18,x18,x0,lsl #2; br x18
+        words = [ADRP(15, 0, self.TABLE), ADDI(15, 15, self.TABLE & 0xfff), 0x7100001f | 4 << 10 | index << 5, bhi(12, 36), clobber,
+                 0x78607800 | index << 16 | 15 << 5, 0x10000012, 0x8b000a52, BR(18), RET]
+        struct.pack_into('<5H', IMG, self.TABLE, 0, 1, 2, 3, 4)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(len(ins), len(words))
+        return scope['half_count'](ins, ins[5], 0)
+
+    def test_bound_from_the_check(self):
+        self.assertEqual(self.run_site(), 5)
+
+    def test_a_vector_load_does_not_change_the_index(self):
+        self.assertEqual(self.run_site(clobber=ldr_s(9)), 5)
+
+    def test_general_purpose_writes_change_the_index(self):
+        for reg in (9, 29, 30):
+            with self.subTest(reg=reg):
+                self.assertEqual(self.run_site(index=reg), 5)
+                self.assertIsNone(self.run_site(index=reg, clobber=mov(reg, 0)))
 
 
 class ForwardBase(unittest.TestCase):
@@ -184,6 +223,12 @@ class IndexCopiedBeforeCheck(unittest.TestCase):
         for reg in (17, 18):
             with self.subTest(reg=reg):
                 self.assertIsNone(self.run_site([NOP] * 65 + [mov(reg, 0, False)])[0])
+
+    def test_a_vector_load_changes_neither(self):
+        for reg in (17, 18):
+            with self.subTest(reg=reg):
+                actual, expected = self.run_site([NOP] * 65 + [ldr_s(reg)])
+                self.assertEqual(actual, expected)
 
     def test_calls_and_undecodable_gaps_break_the_chain(self):
         for word in (0x94000000, BLR(0), 0xe7ffdefe):
@@ -413,6 +458,32 @@ class MaskedPredecessor(unittest.TestCase):
         self.assertIsNone(self.run_site(self.words(w0=NOP, w1=NOP)))
 
 
+class MaskedCopyCheck(unittest.TestCase):
+    TABLE = 0x4040
+    TARGETS = [40 + i * 4 for i in range(5)]
+
+    def run_site(self, between=NOP):
+        # and w16,w18,#0x3f; <between>; cmp w16,#4; b.hi; and x18,x18,#0x3f; ldrsw x18,[x15,x18,lsl #2]; add x18,x18,x15; br x18
+        words = [ADRP(15, 0, self.TABLE), ADDI(15, 15, self.TABLE & 0xfff), 0x12001650, between, 0x7100121f, bhi(20, 40),
+                 0x92401652, 0xb8b279f2, ADDR(18, 18, 15), BR(18)] + [RET] * 5
+        for i, target in enumerate(self.TARGETS): struct.pack_into('<i', IMG, self.TABLE + 4 * i, target - self.TABLE)
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
+        ins = list(md.disasm(struct.pack('<' + 'I' * len(words), *words), 0))
+        self.assertEqual(len(ins), len(words))
+        return scope['jump_offsets'](ins, 9)
+
+    def test_a_vector_load_changes_neither_the_checked_register_nor_the_source(self):
+        self.assertEqual(self.run_site(), self.TARGETS)
+        for reg in (16, 18):
+            with self.subTest(reg=reg):
+                self.assertEqual(self.run_site(ldr_s(reg)), self.TARGETS)
+
+    def test_a_general_purpose_write_of_either_is_refused(self):
+        for reg in (16, 18):
+            with self.subTest(reg=reg):
+                self.assertIsNone(self.run_site(mov(reg, 0, False)))
+
+
 class MaskedComplement(unittest.TestCase):
     TABLE = 0x4040
     TARGETS = [0x30 + i * 4 for i in range(7)]
@@ -448,6 +519,13 @@ class MaskedComplement(unittest.TestCase):
         for slot, word in ((6, mov(15, 0)), (6, mov(11, 0, False)), (6, BLR(0)), (6, B(24, 28)), (6, 0xe7ffdefe), (9, mov(18, 0))):
             with self.subTest(slot=slot, word=hex(word)):
                 self.assertIsNone(self.run_site(self.words(**{f'w{slot}': word})))
+
+    def test_a_vector_load_is_not_a_write_and_x30_is(self):
+        self.assertEqual(self.run_site(self.words(w6=ldr_s(15))), self.TARGETS)
+        # the index in x30: and x30,x15,#7; <slot 6>; ldrsw x15,[x11,x30,lsl #2]
+        index_x30 = {'w5': 0x924009fe, 'w7': 0xb8be796f}
+        self.assertEqual(self.run_site(self.words(**index_x30)), self.TARGETS)
+        self.assertIsNone(self.run_site(self.words(**index_x30, w6=mov(30, 0))))
 
     def test_incoming_edges_cannot_bypass_the_guard(self):
         for target in (12, 16, 20, 24, 28, 32, 36, 40):

@@ -66,6 +66,15 @@ class Scan(Base):
         shutil.rmtree(d / f'updates/{VER}/romfs')
         self.assertFalse(pack_dump.is_dump(d))
 
+    def test_update_alone(self):   # an update's folder is the whole game, so a dump may have no base/ (Fire Emblem Fortune's Weave)
+        d = self.dump.parent / 'update'; version(d / f'updates/{VER}')
+        self.assertTrue(nsp.dump_folder(d))
+        self.assertEqual(pack_dump.scan(d), (TID, {VER: d / f'updates/{VER}'}, {}))
+        app, fam = nsp.scan_dump(d)
+        self.assertIsNone(fam['base'])
+        self.assertEqual(nsp.nsp_versions(fam, {}), {f'v{VER}': d / f'updates/{VER}'})
+        self.assertEqual(nsp.dump_source(fam), d / f'updates/{VER}')
+
     def test_refuses(self):
         (self.dump / 'dlc/0100000000000000/romfs').mkdir(parents=True)
         with self.assertRaisesRegex(pack_dump.Error, 'is not a DLC of'): pack_dump.scan(self.dump)
@@ -140,10 +149,11 @@ class Main(Base):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'which holds'):
             nsp.main(nsp.parse_args([str(self.dump), '--title-id', '0100000000010000']))
 
-    def test_no_profile_refused(self):
-        d = self.dump.parent / 'unknown'; version(d / 'base', tid=0x0400000000000000)
-        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, 'has none'):
+    def test_no_profile_surveyed(self):   # the survey reads the dump's own modules: this one's NPDM is a 32-bit program's, which stops it there
+        d = self.dump.parent / 'unknown'; version(d / 'updates/65536', tid=0x0400000000000000)
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'configure_dotnet'), self.assertRaisesRegex(nsp.BuildError, r'unknown \(0400000000000000\) is a 32-bit'):
             nsp.main(nsp.parse_args([str(d)]))
+        self.assertTrue((d / '0400000000000000_survey/extract/ExeFS/main').is_file())
 
 
 if __name__ == '__main__':

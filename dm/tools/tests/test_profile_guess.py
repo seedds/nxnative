@@ -98,6 +98,18 @@ class UnrealMemory(unittest.TestCase):
         self.assertGreaterEqual(heap, 128 * pg.MiB)
 
 
+class Switch2(unittest.TestCase):
+    FACTS = {'mods': {'main': {'imports': {pg.HEAP_API}, 'bss': 0, 'far': False}}, 'romfs': {'root': set(), 'exts': {}}, 'sysres': 0}
+
+    def test_pool(self):   # Donkey Kong Bananza's profile: a 9 GB pool, and a heap region that holds it
+        keys = pg.guess(dict(self.FACTS, ounce=True), hooks=set())
+        self.assertEqual((keys['app_pool'][0], keys['mem_reserve'][0]), ('0x240000000', '0x270000000'))
+        self.assertEqual(pg.guess(self.FACTS, hooks=set())['app_pool'][0], '0xCD500000')
+
+    def test_sdk_variant(self):   # nnSdk-Generic_22_2_0 (Fire Emblem Fortune's Weave)
+        self.assertEqual(pg.SDK_VERSION.findall(b'NintendoSdk_nnSdk-Generic_22_2_0\0NintendoSDK_nnSdk-16_2_0\0'), [b'22_2_0', b'16_2_0'])
+
+
 
 class AddressRegions(unittest.TestCase):
     """region_findings: the host's region table (DM_REGIONS) of a run with a Switch-sized alias region against the profile's alias region"""

@@ -275,6 +275,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (SDK 19.3.1, Unreal Engine 4.27: `GetAudioDeviceOutputVolume`); [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11: `GetAudioOutName`).
 - **Note:** older SDKs name some device calls differently (`ListAudioDeviceName` / `GetActiveAudioDeviceName`, `OpenDefaultAudioOut` in SDK 12; [Older SDK names for the same calls](services.md#older-sdk-names-for-the-same-calls)), and [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (SDK 7) aborted in `audio::AcquireAudioDeviceSwitchNotification` ([SDK calls that open a system service through sm](services.md#sdk-calls-that-open-a-system-service-through-sm)).
 
+### The output device notification under its SDK 22 name
+
+- **Symptom:** an `nn::diag` abort with Result 0xe15 on an audio thread at start, in `audio::CreateUserClientSessionByHipc` under `audio::AcquireAudioOutputDeviceNotification`, after the line `sf: the game connects to service aud:u itself`.
+- **Cause:** SDK 22 names the output device notification `AcquireAudioOutputDeviceNotification` (older SDKs: `AcquireAudioDeviceNotificationForOutput`, and SDK 7's `AcquireAudioDeviceSwitchNotification`). It opens a user session with `aud:u`, which the host does not serve, asks it for a read end and attaches it AutoClear (`sdk+0x1f1e00`). It keeps no per-process flag (each acquire is keyed by its event in the service) and returns a Result.
+- **Fix:** taken over in `hle_audren.c`, with the takeover of the same name the host has for SDK 21 (Splatoon Raiders): the event is bound and never signaled, and the Result is 0. That takeover keeps the older names' once-per-process flag, so a second acquire returns 0x499 where SDK 22's code would bind again; no game has been seen to acquire twice. `ReleaseAudioOutputDeviceNotification` (which destroys the event once the service lets it go) is not taken over: no game seen imports it.
+- **Found on:** Fire Emblem Fortune's Weave (Switch 2, SDK 22.2.0, `main+0xe7b9c`; no profile yet).
+
 ### No audio input devices
 
 - **Symptom:** SDL3's audio driver lists the input devices (AudioIn) when its audio starts. `[RED] sf: the game connects to service audren:u itself`, then `nn::diag abort: Result 0xe15` under `audio::AcquireAudioDeviceNotificationForInput` (`sdk+0x5633c`).

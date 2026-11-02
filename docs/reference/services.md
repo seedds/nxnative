@@ -392,6 +392,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** hooked: `hid::GetMouseState`, `hid::GetKeyboardStates`, and `kpr::GetKeyCodeMap`, which asks the settings service (`settings::detail::GetKeyCodeMap`) for the keyboard layout's map; the host leaves the map zero.
 - **Found on:** [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11, `GetMouseState`); [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11, `GetKeyboardStates`); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (`kpr::GetKeyCodeMap`: the game zeroes a 0x1000-byte map and fetches it only once a keyboard reports keys, `main+0x1f0eb4`).
 
+### The Switch 2's mouse pointer (Nmouse) with no mouse
+
+- **Symptom:** an `nn::diag` abort with Result 0xe15 in `hid::InitializeNmouse` (`sdk+0x6d5344`) at boot, after the line `sf: the game connects to service hid itself`.
+- **Cause:** SDK 22's Nmouse API (the pointer of a Joy-Con 2 used as a mouse, or of a USB mouse) maps the hid service's transfer memory in `InitializeNmouse`, and the host does not serve hid.
+- **Fix:** the application API is taken over (`hle_hid.c`) and answers as with no mouse attached: `GetNmouseHandles` lists none, and every call given a handle returns false and leaves its output untouched, as the SDK does for a handle it does not know (`NmouseTransferMemoryAccessor::GetIndexFromHandle`). A handle is 8 bytes, passed by value; an `NmouseState` is 0x70 bytes. The pointer ranges (`InitializeNmouse`'s width and height, `SetNmousePointerRanges`) are read back by `GetNmousePointerRanges`. The `system` overlay calls are not taken over (no game seen imports them).
+- **Found on:** Fire Emblem Fortune's Weave (Switch 2, SDK 22.2.0; no profile yet): `main` imports seven of the calls. The Joy-Con 2 mouse sensor of SDK 20 (`InitializeJcms`, Donkey Kong Bananza) is taken over the same way.
+
 ### Poké Ball Plus (Palma)
 
 - **Symptom:** the first boot crashed in `hid::detail::SetPalmaBoostMode`, a null read at `sdk+0x238eb0` (the hid service never opened).

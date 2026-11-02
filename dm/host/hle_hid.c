@@ -9,6 +9,7 @@
 #include "dm_input.h"
 #include "front.h"
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <strings.h>
 #include <pthread.h>
@@ -664,6 +665,37 @@ HLE_FORCE("_ZN2nn3hid9StartJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse sensor: no 
 HLE_FORCE("_ZN2nn3hid8StopJcmsERKNS0_10JcmsHandleE", "Joy-Con mouse sensor: no sensor on the host", void, h_hid_JcmsStop, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", "Joy-Con mouse sensor states: none (no sensor on the host)",
           int, h_hid_JcmsStates, void *out, int n, const uint32_t *h) { (void)out; (void)n; (void)h; return 0; }
+// Nmouse (Switch 2 SDKs; Fire Emblem Fortune's Weave): the pointer of a Joy-Con 2 used as a mouse, or of a USB mouse. InitializeNmouse maps the hid service's transfer memory, which
+// the host does not serve, and aborts (Result 0xe15) when it cannot. With no mouse there is no handle: GetNmouseHandles lists none, and every call given a handle returns false
+// with its output untouched, as the SDK does for a handle it does not know (NmouseTransferMemoryAccessor::GetIndexFromHandle). A handle is 8 bytes, passed by value; a
+// NmouseState is 0x70 bytes. The pointer ranges (InitializeNmouse's width and height, SetNmousePointerRanges) are kept for GetNmousePointerRanges
+static int g_nmouse_w, g_nmouse_h;
+HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Nmouse: no hid service; no mouse on the host", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) {
+    (void)work; (void)size; g_nmouse_w = w; g_nmouse_h = h;
+}
+HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmiiNS0_17NmousePointerTypeE", "Nmouse: no hid service; no mouse on the host", void, h_hid_NmouseInitType, void *work, uint64_t size, int w, int h, int type) {
+    (void)work; (void)size; (void)type; g_nmouse_w = w; g_nmouse_h = h;
+}
+HLE_FORCE("_ZN2nn3hid14FinalizeNmouseEv", "Nmouse: nothing to release", void, h_hid_NmouseFini, void) {}
+HLE_FORCE("_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij", "Nmouse handles: none (no mouse on the host)", int, h_hid_NmouseHandles, uint64_t *out, int n, uint32_t id) { (void)out; (void)n; (void)id; return 0; }
+HLE_FORCE("_ZN2nn3hid21GetMergedNmouseHandleEPNS0_12NmouseHandleE", "Nmouse merged handle: none", bool, h_hid_NmouseMerged, uint64_t *out) { (void)out; return false; }
+HLE_FORCE("_ZN2nn3hid28GetStandardMouseNmouseHandleEPNS0_12NmouseHandleE", "Nmouse standard mouse handle: none", bool, h_hid_NmouseStdMouse, uint64_t *out) { (void)out; return false; }
+HLE_FORCE("_ZN2nn3hid16GetNmouseTypeSetEPNS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEENS0_12NmouseHandleE", "Nmouse type set: no such handle", bool, h_hid_NmouseTypes, uint32_t *out, uint64_t h) { (void)out; (void)h; return false; }
+HLE_FORCE("_ZN2nn3hid13GetNpadIdTypeEPjNS0_12NmouseHandleE", "Nmouse npad id: no such handle", bool, h_hid_NmouseNpad, uint32_t *out, uint64_t h) { (void)out; (void)h; return false; }
+HLE_FORCE("_ZN2nn3hid14GetNmouseStateEPNS0_11NmouseStateENS0_12NmouseHandleE", "Nmouse state: no such handle", bool, h_hid_NmouseState, void *out, uint64_t h) { (void)out; (void)h; return false; }
+HLE_FORCE("_ZN2nn3hid15GetNmouseStatesEPiPNS0_11NmouseStateEiNS0_12NmouseHandleE", "Nmouse states: no such handle", bool, h_hid_NmouseStates, int *count, void *out, int n, uint64_t h) {
+    (void)out; (void)n; (void)h; if (count) *count = 0; return false;
+}
+HLE_FORCE("_ZN2nn3hid19EnableNmousePointerENS0_12NmouseHandleEb", "Nmouse pointer: no such handle", bool, h_hid_NmouseEnable, uint64_t h, bool on) { (void)h; (void)on; return false; }
+HLE_FORCE("_ZN2nn3hid24SetNmousePointerPositionENS0_12NmouseHandleEii", "Nmouse pointer position: no such handle", bool, h_hid_NmouseSetPos, uint64_t h, int x, int y) { (void)h; (void)x; (void)y; return false; }
+HLE_FORCE("_ZN2nn3hid22SetNmousePointerRangesEii", "Nmouse pointer ranges: kept for GetNmousePointerRanges", void, h_hid_NmouseSetRanges, int w, int h) { g_nmouse_w = w; g_nmouse_h = h; }
+HLE_FORCE("_ZN2nn3hid22GetNmousePointerRangesEPiS1_", "Nmouse pointer ranges: as the game set them", void, h_hid_NmouseGetRanges, int *w, int *h) { if (w) *w = g_nmouse_w; if (h) *h = g_nmouse_h; }
+HLE_FORCE("_ZN2nn3hid28SetNmousePointerMovementAreaEiiii", "Nmouse pointer area: no mouse on the host", void, h_hid_NmouseArea, int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
+HLE_FORCE("_ZN2nn3hid21RestrictNmousePointerEffff", "Nmouse pointer restriction: no mouse on the host", void, h_hid_NmouseRestrict, float a, float b, float c, float d) { (void)a; (void)b; (void)c; (void)d; }
+HLE_FORCE("_ZN2nn3hid26SetMergedNmouseSourceTypesENS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEE", "Nmouse merged sources: no mouse on the host", void, h_hid_NmouseSources, uint32_t types) { (void)types; }
+HLE_FORCE("_ZN2nn3hid32SetNmouseButtonConfigJoyLeftJcmsERKNS0_29NmouseButtonConfigJoyLeftJcmsE", "Nmouse button config: no mouse on the host", void, h_hid_NmouseCfgL, const void *c) { (void)c; }
+HLE_FORCE("_ZN2nn3hid33SetNmouseButtonConfigJoyRightJcmsERKNS0_30NmouseButtonConfigJoyRightJcmsE", "Nmouse button config: no mouse on the host", void, h_hid_NmouseCfgR, const void *c) { (void)c; }
+HLE_FORCE("_ZN2nn3hid34SetNmouseButtonConfigStandardMouseERKNS0_31NmouseButtonConfigStandardMouseE", "Nmouse button config: no mouse on the host", void, h_hid_NmouseCfgStd, const void *c) { (void)c; }
 HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", "six-axis sensor states: every requested entry, newest first",
           int, h_hid_SixStates, SixAxisState *out, int n, const uint32_t *h) { return six_states(out, n, *h); }
 // Vibration handles: byte 0 = SDK style index (FullKey 3, Handheld 4), byte 1 = npad id, byte 2 = motor.

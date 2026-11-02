@@ -408,8 +408,8 @@ $(B)/t_oe_handoff: t_oe_handoff.c t_condvar_stub.c ../hle_thread.c ../hle_oe.c .
 local-network-tests: $(B)/t_oe_handoff
 
 # A kernel socket receive must prepare tracked guest pages, including after waits.
-$(B)/t_net_write_prepare: t_net_write_prepare.c ../hle_net_backend.c ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_dirty.h $(GAME_H) | $(B)
-	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net_write_prepare.c ../../gfx/nvn/nvn_dirty.c
+$(B)/t_net_write_prepare: t_net_write_prepare.c ../hle_net_backend.c ../hle_nsd_backend.c ../nsd.h ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_dirty.h $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net_write_prepare.c ../hle_nsd_backend.c ../../gfx/nvn/nvn_dirty.c
 .PHONY: net-write net-write-sanitize
 net-write: $(B)/t_net_write_prepare
 	$(B)/t_net_write_prepare
@@ -436,7 +436,7 @@ DM_OPENSSL_ROOT ?= $(shell python3 ../../tools/apple_crypto.py macos)
 PRIVATE_PKI_FLAGS = -DDM_OPENSSL_X509 "-I$(DM_OPENSSL_ROOT)/include"
 PRIVATE_PKI_LIB = "$(DM_OPENSSL_ROOT)/lib/libcrypto.a"
 OPENSSL_TOOL ?= $(shell command -v openssl)
-SSL_SOURCES = t_ssl.m ../hle_ssl.c ../hle_ssl_apple.m ../hle_nextendo_x509.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_bigstack.c ../entry.S
+SSL_SOURCES = t_ssl.m t_net_write_stub.c ../hle_ssl.c ../hle_ssl_apple.m ../hle_nextendo_x509.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_bigstack.c ../entry.S
 SSL_DEPS = t_gate_fixture.h ../nsd.h $(SSL_SOURCES) ../ssl_backend.h ../net_socket.h ../hle.h $(GAME_H) test_ssl_transport.py
 SSL_FLAGS = -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror -Wno-unused-function $(GINC)
 $(B)/t_ssl $(B)/t_ssl_asan $(B)/t_nextendo_routes $(B)/t_nextendo_routes_asan: ../ssl_trace.h
@@ -456,7 +456,7 @@ ssl-sanitize: $(B)/t_ssl_asan $(B)/t_ssl_trace_asan
 	$(B)/t_ssl_trace_asan
 	$(PYTHON) test_ssl_transport.py $(B)/t_ssl_asan
 
-ROUTE_SOURCES = t_nextendo_routes.c ../hle_nextendo_routes.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_ssl_apple.m ../hle_nextendo_x509.c
+ROUTE_SOURCES = t_nextendo_routes.c t_net_write_stub.c ../hle_nextendo_routes.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_ssl_apple.m ../hle_nextendo_x509.c
 ROUTE_DEPS = ../nsd.h $(ROUTE_SOURCES) ../nextendo_routes.h ../net_socket.h ../ssl_backend.h test_nextendo_routes.py test_ssl_transport.py Makefile
 $(B)/t_nextendo_routes: $(ROUTE_DEPS) | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
@@ -522,10 +522,10 @@ nextendo-social: $(B)/t_nextendo_social
 nextendo-social-sanitize: $(B)/t_nextendo_social_asan
 	$(B)/t_nextendo_social_asan
 run: nextendo-account nextendo-api nextendo-social
-$(B)/t_online_policy: t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
-	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c
-$(B)/t_online_policy_asan: t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
-	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_online_policy.c ../hle_net_backend.c ../hle_nsd_backend.c
+$(B)/t_online_policy: t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c
+$(B)/t_online_policy_asan: t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c
 .PHONY: online-policy online-policy-sanitize
 online-policy: $(B)/t_online_policy
 	$(B)/t_online_policy

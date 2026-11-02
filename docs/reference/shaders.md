@@ -832,7 +832,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** the translator had no encoding for UP2UR (0x883), which packs uniform predicates into a uniform register: bit k of the destination (16..22) is UPk where the mask (32..64) has bit k set. Source: the Eglantine fork's `lower_to_maxwell.h:709` (commit `1dd40d8`), which decodes the same fields; Mesa NAK has no encoder for it. The game's own code agrees: each UP2UR follows uniform compares that set UP0..UP5 from bits of a uniform register.
 - **Fix:** `AUp2ur` (`InstEmitAmpereAlu.cs`) ORs `1 << k` for each selected UPk into the uniform register. Only the form the game encodes is decoded (URZ at 24..32, word 2 `0x08000000`, mask within UP0..UP6); another form fails as before. A chain change.
 - **Check:** `dm/gfx/tests/test_dmsh_ampere_alu.py` (`Up2ur`): the game's `UP2UR UR4, UPR, URZ, 0x1` translates (it failed before).
-- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#shaders): 29 pixel shaders of `DrivePassShaderDefault.sharcb` (masks 0x1, 0x8 and 0x40 into UR4..UR6) translate since chain e4b7e4b07edb.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#shaders): 29 pixel shaders of `DrivePassShaderDefault.sharcb` (masks 0x1, 0x8 and 0x40 into UR4..UR6) translate since chain 0bc3cb6d96b3 (e4b7e4b07edb before main's Ampere decodes of BREV, MEMBAR, ERRBAR and the stride).
 
 ## Bindings and handles
 

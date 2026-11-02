@@ -264,6 +264,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Check:** `make -C dm/host/tests GAME=<id> run` runs `t_codec_video` (AddressSanitizer and UBSan), which covers the AV1 and SDK 22 forms, native images and the av1C record, and decodes a 64x64 AV1 key frame (SVT-AV1) on each backend the Mac has, read back as NV12.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): 82 movies in WebM at 2560x1440; the opening's 3,301 pictures play. On #957's branch, VideoToolbox and dav1d gave the same pictures, bit for bit, over the opening's first 600 (about 450 pictures a second each on an M3 Pro), and a tester's M1 Pro played the first two movies through dav1d, smooth and in sync ([seedds/nxnative#927](https://github.com/seedds/nxnative/issues/927)).
 
+### SDK 19's `nn::codec` forms and `TryWaitSyncPointEvent`
+
+- **Symptom:** Mario Kart World crashes (pc 0) as its first movie starts; with that fixed, `game called nn::diag abort` as its first course movie (VP9, 2560×1440) begins.
+- **Cause:** SDK 19 (19.3.3 Ounce) has other forms of the decoder calls: `Initialize…Decoder` with two sizes and no work buffer, `Get…DecoderOutputBufferProperties` with an `nn::movie::ColorSpace`, and `sdk::MakeDecodeImagePreferenceForCompat`. Without them the SDK's own code ran on the host decoder (an IPC request on the `DmCV` magic as its session handle). Its VP9 player also polls its sync point event with `nn::syncpt::TryWaitSyncPointEvent`, whose import stayed null. And it aborts on any failure of the properties call, where Donkey Kong Bananza's player polls through 3604: a buffer whose picture is not there yet (a release racing the decode on another thread, once a boot) ended the game.
+- **Fix:** `hle_codec_video.c`: the VP8, VP9 and H.264 forms of both calls (`CV_SDK19`) and the ForCompat preference. The colour space is BT.709 when the stream says so, or says nothing and the picture is at least 720 lines high, else BT.601. A buffer asked for before its picture is waited for up to 100 ms, then reported with the stream's size (`cv_dec_props_cs`). `TryWaitSyncPointEvent` answers whether an armed event's buffer is filled, and for a fired one whether its SystemEvent is signalled. `DM_CV_TRACE=<n>` logs the first n decoder calls.
+- **Check:** `make -C dm/host/tests GAME=<id> run` (`t_codec_video`: the SDK 19 forms, a buffer asked for before its picture, and a polled sync point event).
+- **Found on:** Mario Kart World (`0400C3F00006E000`, no profile yet), 1.0.0: its attract movies and course previews play.
+
 ## Movie players
 
 ### Unity's video planes and checking the movie path

@@ -16,6 +16,7 @@
 // nvnNativeImage to an RGBA texture (hle_nvn.c "Native images"), so a pool whose handle was asked for keeps each picture as RGBA in the pool's own memory, which the texture is made over
 #include "hle.h"
 #include <pthread.h>
+#include <unistd.h>
 #include <stdbool.h>
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
@@ -32,6 +33,9 @@
 #define CV_BUSY CV_R(3603)          // the decoder cannot take the packet now
 #define CV_NONE CV_R(3604)          // no buffer to acquire / no picture in the buffer yet
 
+// Diagnostic DM_CV_TRACE=<n>: the first n decoder calls (register, submit, acquire, release, properties, sync point requests and polls)
+static int cv_trace(void) { static int n = -1; if (n < 0) { const char *e = getenv("DM_CV_TRACE"); n = e ? atoi(e) : 0; } return n > 0 ? n-- : 0; }
+#define CVT(...) do { if (cv_trace()) LOG("[cv] " __VA_ARGS__); } while (0)
 typedef struct { uint16_t w, h; uint32_t fmt, mode, magic; uint32_t pad[2]; } cv_pref;   // VideoDecoderImagePreference as the host fills it (returned in x8)
 typedef struct { uint32_t magic; uint16_t w, h; uint32_t fmt, count; vpx_image_t **img; uint8_t *mem; uint64_t size; int slot; _Atomic int native; } cv_pool;   // mem, size: the game's pool memory; native: a handle was asked for (RGBA kept in mem); slot: its place in g_cv_pools + 1
 typedef struct { uint32_t magic, dec, idx, gen; } cv_sync;   // nn::gs::NativeSyncHandle (16 bytes)
@@ -41,7 +45,7 @@ typedef struct {
     uint32_t magic, id; pthread_mutex_t mu; vpx_codec_ctx_t vpx; int vpx_ok; void *event; uint64_t submits, pictures;
     int codec; uint16_t w, h; mavc *avc; uint8_t *csd; size_t csd_n;   // H.264: VideoToolbox and the parameter sets Initialize gave
     mav1 *av1;   // AV1: VideoToolbox, or dav1d where the chip has no AV1 decoder (hle_movie_av1.c)
-    struct { cv_pool *pool; uint32_t pidx; int reg, filled; uint32_t gen, filled_gen; uint16_t w, h; int64_t ts; uint8_t eos; } buf[CV_BUFS];
+    struct { cv_pool *pool; uint32_t pidx; int reg, filled; uint32_t gen, filled_gen; uint16_t w, h; int64_t ts; uint8_t eos, cs; } buf[CV_BUFS];   // cs: libvpx's colour space (vpx_color_space_t)
     uint32_t fifo[8], fhead, fcount;          // acquirable indices
     uint32_t pend[CV_BUFS], phead, pcount;    // released, waiting for a picture
     vpx_image_t *held[CV_HOLD]; int64_t held_ts[CV_HOLD]; uint8_t held_eos[CV_HOLD]; int nheld;
@@ -105,7 +109,7 @@ static void drain(cv_dec *d) {
             vpx_image_t *im = d->held[0]; int64_t ts = d->held_ts[0]; uint8_t eos = d->held_eos[0];
             memmove(d->held, d->held + 1, sizeof d->held[0] * (CV_HOLD - 1)); memmove(d->held_ts, d->held_ts + 1, sizeof d->held_ts[0] * (CV_HOLD - 1));
             memmove(d->held_eos, d->held_eos + 1, CV_HOLD - 1); d->nheld--;
-            b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos;
+            b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos; b->cs = (uint8_t)im->cs;
             if (b->pool && b->pidx < b->pool->count) { pool_native_write(b->pool, b->pidx, im); if (b->pool->img[b->pidx]) vpx_img_free(b->pool->img[b->pidx]); b->pool->img[b->pidx] = im; } else vpx_img_free(im);
             if (!d->pictures++) LOG("[codec] %s decoder %u: first picture %ux%u into buffer %u", k_cv_name[d->codec], d->id, b->w, b->h, i);
         } else { b->w = b->h = 0; b->ts = 0; b->eos = 1; d->eos_pending = 0; }
@@ -244,6 +248,7 @@ static Result cv_dec_fin(void *t) {
     return 0;
 }
 static Result cv_dec_reg(void *t, uint32_t i, void *pool, uint32_t pidx) {
+    CVT("register buffer %u (pool image %u)", i, pidx);
     cv_dec *d = cv_of(t); if (!d || i >= CV_BUFS) { LOG("[RED] nn::codec::Register…DecoderBuffer index %u", i); return CV_R(2004); }
     pthread_mutex_lock(&d->mu);
     d->buf[i].pool = pool_of(pool); d->buf[i].pidx = pidx; d->buf[i].reg = 1; d->buf[i].filled = 0; d->buf[i].gen = 0; d->buf[i].filled_gen = 0;
@@ -301,6 +306,7 @@ static vpx_image_t *av1_to_i420(const mav1_picture *p) {   // the decoder's NV12
 }
 // One packet: decoded at once; its pictures wait for released buffers (end of stream marks the last one, or comes as a buffer of its own)
 static Result cv_dec_submit(uint64_t *out, void *t, const void *data, uint64_t size, int64_t ts, bool eos) {
+    CVT("submit %llu bytes eos %d", (unsigned long long)size, eos);
     cv_dec *d = cv_of(t); if (!d) return CV_R(2004);
     pthread_mutex_lock(&d->mu);
     if (d->nheld >= CV_HOLD) { if (d->event) hle_clear_system_event(d->event); pthread_mutex_unlock(&d->mu); return CV_BUSY; }
@@ -332,10 +338,12 @@ static Result cv_dec_acq(uint32_t *idx, cv_sync *sync, void *t) {
     if (!d->fcount) { pthread_mutex_unlock(&d->mu); return CV_NONE; }
     uint32_t i = d->fifo[d->fhead]; d->fhead = (d->fhead + 1) % 8; d->fcount--;
     *idx = i; *sync = (cv_sync){CV_SYNC, d->id, i, d->buf[i].gen};
+    CVT("acquire → buffer %u gen %u filled %d", i, d->buf[i].gen, d->buf[i].filled);
     pthread_mutex_unlock(&d->mu);
     return 0;
 }
 static void cv_dec_rel(void *t, uint32_t i, cv_sync sync) {
+    CVT("release buffer %u (sync gen %u)", i, sync.gen);
     (void)sync; cv_dec *d = cv_of(t); if (!d || i >= CV_BUFS || !d->buf[i].reg) { LOG("[RED] nn::codec::Release…DecoderOutputBuffer index %u", i); return; }
     pthread_mutex_lock(&d->mu);
     d->buf[i].gen++; d->buf[i].filled = 0;
@@ -346,11 +354,26 @@ static void cv_dec_rel(void *t, uint32_t i, cv_sync sync) {
 }
 static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, int64_t *ts, bool *eos, void *t, uint32_t i) {
     cv_dec *d = cv_of(t); if (!d || i >= CV_BUFS) return CV_R(2004);
+    CVT("properties of buffer %u: filled %d gen %u", i, d->buf[i].filled, d->buf[i].gen);
     pthread_mutex_lock(&d->mu);
     int ok = d->buf[i].filled;
     if (ok) { *w = *cw = d->buf[i].w; *h = *ch = d->buf[i].h; *ts = d->buf[i].ts; *eos = d->buf[i].eos != 0; }
     pthread_mutex_unlock(&d->mu);
     return ok ? 0 : CV_NONE;
+}
+// The SDK 19 form also reports the picture's colour space (nn::movie::ColorSpace, taken here as 0 BT.601, 1 BT.709): BT.709 when the stream says so, or says nothing and the
+// picture is HD. Mario Kart World calls only this form; without it the SDK's own code ran on the host decoder (an IPC request on the 'DmCV' magic as its session handle) and
+// nn::diag aborted as its first course movie (VP9, 2560x1440) began
+// Mario Kart World aborts on any failure here (main+0x19e818c), where Donkey Kong Bananza's player polls through 3604: a buffer not filled yet (a release racing the decode on
+// another thread; once in a boot, as its first title movie began) is waited for briefly, then reported with the stream's size, as a picture the decoder has not shown
+static Result cv_dec_props_cs(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos, void *t, uint32_t i) {
+    Result r = cv_dec_props(w, h, cw, ch, ts, eos, t, i);
+    for (int k = 0; r == CV_NONE && k < 50; k++) { usleep(2000); r = cv_dec_props(w, h, cw, ch, ts, eos, t, i); }
+    cv_dec *d = cv_of(t);
+    if (r == CV_NONE && d) { static int n; if (n++ < 4) LOG("[codec] %s decoder %u: properties of buffer %u before its picture: reported with the stream's size", k_cv_name[d->codec], d->id, i);
+        *w = *cw = d->w; *h = *ch = d->h; *ts = 0; *eos = false; if (cs) *cs = 0; return 0; }
+    if (!r && d && cs) { uint8_t c = d->buf[i].cs; *cs = c == VPX_CS_BT_709 || (c == VPX_CS_UNKNOWN && *h >= 720) ? 1 : 0; }
+    return r;
 }
 static Result cv_dec_encrypted(void) { static int once; if (!once++) LOG("[RED] nn::codec: an encrypted input buffer: protected streams are not served"); return CV_R(2004); }
 // Each decoder type's entry points, by their names in the SDK (the work buffer, the two Initialize overloads without the H.264 parameter sets, …)
@@ -412,6 +435,25 @@ CV_FAMILY(av1, CV_AV1, "_ZN2nn5codec29CalculateAv1DecoderWorkBufferEPmS1_mtt",
     "_ZN2nn5codec29AcquireAv1DecoderOutputBufferEPjPNS_2gs16NativeSyncHandleEPNS0_14Av1DecoderTypeE", "_ZN2nn5codec29ReleaseAv1DecoderOutputBufferEPNS0_14Av1DecoderTypeEjNS_2gs16NativeSyncHandleE",
     "_ZN2nn5codec35GetAv1DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_14Av1DecoderTypeEj")
 #undef CV_FAMILY
+// SDK 19's other forms (Mario Kart World): Initialize with two sizes and no work buffer, and the output properties with the colour space (cv_dec_props_cs)
+#define CV_SDK19(tag, codec, s_init3, s_props2) \
+    HLE_FORCE(s_init3, "decoded on the host", Result, h_cv_##tag##init4, void *t, uint64_t bs, uint64_t bs2, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out) { (void)bs; (void)bs2; (void)refs; return cv_dec_init(t, codec, w, h, in, out, NULL, 0); } \
+    HLE_FORCE(s_props2, "the filled buffer's picture size, colour space, time and end of stream", Result, h_cv_##tag##props2, uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos, void *t, uint32_t i) { return cv_dec_props_cs(w, h, cw, ch, cs, ts, eos, t, i); }
+CV_SDK19(vp9, CV_VP9, "_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj")
+CV_SDK19(vp8, CV_VP8, "_ZN2nn5codec20InitializeVp8DecoderEPNS0_14Vp8DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatE",
+    "_ZN2nn5codec35GetVp8DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_14Vp8DecoderTypeEj")
+#undef CV_SDK19
+HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatEPKvm", "decoded with VideoToolbox on the host",
+          Result, h_cv_h264init4, void *t, uint64_t bs, uint64_t bs2, uint16_t w, uint16_t h, uint32_t refs, uint32_t in, uint32_t out, const void *csd, uint64_t csd_n) {
+    (void)bs; (void)bs2; (void)refs; return cv_dec_init(t, CV_H264, w, h, in, out, csd, csd_n);
+}
+HLE_FORCE("_ZN2nn5codec36GetH264DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_5movie10ColorSpaceEPNS_8TimeSpanEPbPNS0_15H264DecoderTypeEj", "the filled buffer's picture size, colour space, time and end of stream",
+          Result, h_cv_h264props2, uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, uint32_t *cs, int64_t *ts, bool *eos, void *t, uint32_t i) { return cv_dec_props_cs(w, h, cw, ch, cs, ts, eos, t, i); }
+HLE_FORCE("_ZN2nn5codec3sdk34MakeDecodeImagePreferenceForCompatEttNS0_24VideoDecoderOutputFormatENS0_9CodecModeE", "the preference only carries the size and format to the host's pool",
+          cv_pref, h_cv_pref_compat, uint16_t w, uint16_t h, uint32_t fmt, uint32_t mode) {
+    return (cv_pref){w, h, fmt, mode, CV_MAGIC, {0, 0}};
+}
 HLE_FORCE("_ZN2nn5codec21InitializeH264DecoderEPNS0_15H264DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeEPKvm",
           "decoded with VideoToolbox on the host", Result, h_cv_h264init3, void *t, void *work, uint64_t wsize, uint64_t bs, uint64_t w, uint64_t h, uint32_t refs, uint32_t in, uint64_t out,
           uint64_t mode, const void *csd, uint64_t csd_n) {   // past the registers: 8-byte slots, as the SDK 22 forms below
@@ -466,6 +508,7 @@ HLE_FORCE("_ZN2nn6syncpt3sdk25InitializeMultiWaitHolderEPNS_2os19MultiWaitHolder
 }
 HLE_FORCE("_ZN2nn6syncpt3sdk21RequestSyncPointEventEPNS1_18SyncPointEventTypeERKNS1_15SyncPointHandleE", "signalled when the decoder fills the awaited buffer",
           Result, h_spt_request, void *e, const cv_sync *s) {
+    CVT("request event %p for buffer %u gen %u (reached %d)", e, s->idx, s->gen, (int)sync_reached(s));
     spt_unarm(e); hle_clear_system_event(e);
     SPT(e)->want = *s; SPT(e)->armed = 1;
     pthread_mutex_lock(&g_spt_mu); int k = 0; while (k < 64 && g_spt[k]) k++; if (k < 64) g_spt[k] = e; pthread_mutex_unlock(&g_spt_mu);
@@ -474,6 +517,15 @@ HLE_FORCE("_ZN2nn6syncpt3sdk21RequestSyncPointEventEPNS1_18SyncPointEventTypeERK
     return 0;
 }
 HLE_FORCE("_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE", "disarms the event", void, h_spt_cancel, void *e) { spt_unarm(e); hle_clear_system_event(e); }
+// Mario Kart World polls its event as well (its VP9 player, main+0x19e779c): an armed one is reached when its buffer is filled, a fired one stays signalled. Missing, the import
+// stayed null and the call crashed the game (pc 0) as its first movie began
+HLE_FORCE("_ZN2nn6syncpt3sdk21TryWaitSyncPointEventEPKNS1_18SyncPointEventTypeE", "whether the awaited buffer is filled", bool, h_spt_trywait, const void *e) {
+    const cv_spt *t = SPT(e);
+    CVT("trywait event %p armed %d (buffer %u gen %u)", e, t->armed, t->want.idx, t->want.gen);
+    if (t->armed) return sync_reached(&t->want);
+    static bool (*trywait)(const void *); if (!trywait && !(trywait = guest_sym("_ZN2nn2os18TryWaitSystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::TryWaitSystemEvent missing");
+    return trywait(e);
+}
 HLE_FORCE("_ZN2nn6syncpt3sdk21DestroySyncPointEventEPNS1_18SyncPointEventTypeE", "destroys the event's SystemEvent", void, h_spt_destroy, void *e) {
     spt_unarm(e);
     static void (*destroy)(void *); if (!destroy && !(destroy = guest_sym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE"))) die("nn::os::DestroySystemEvent missing");

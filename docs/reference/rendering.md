@@ -784,6 +784,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** recorded as `OP_DRAW_TEX` with the handle moved to the bound pools, as `bind_handles` does (`hle_nvn.c`), and replayed by `draw_tex` (`nvn_mtl.m`): its own render pass per bound colour target after the pass in progress, the pending clears landed first, with the scissor and channel mask; the replay's analyses (pass fusion, deferral, clear hoisting, the store lookahead) treat it as a texture copy. Region coordinates map to the targets' rows directly in either window origin, since the host keeps the Switch's memory layout. Blending is not applied (`[RED] DrawTexture with blending on`), and integer, depth and compressed targets are not drawn.
 - **Found on:** [Streets of Rage 4](../../dm/games/0100EC9010258000/README.md): its scene target gets the movie frame this way (the intro, the title's flames), from movie textures registered at IDs 256 and 257 of a second texture pool.
 
+### Variable rate shading ignored
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferShadingRateImagePalette` (and `BindShadingRateImage`, `SetShadingRatePaletteMode`), dozens a run.
+- **Cause:** NVN2's variable rate shading: a shading rate image and its palette lower the pixel shader's rate over parts of the target.
+- **Fix:** the three calls do nothing (`hle_nvn.c`): Metal keeps one pixel shader invocation a pixel, so the picture is the same or sharper, at the cost of the shading the game saved.
+- **Found on:** Mario Kart World (`0400C3F00006E000`, no profile yet), every frame; [Splatoon Raiders](../../dm/games/0400380020056000/README.md) calls the palette.
+
 ### Rasterizer discard preserves vertex storage writes
 
 - **Symptom:** the HUD and sky render but the battle's characters and terrain are absent; the replay logs `draw skipped: rasterizer discard` between model draws.

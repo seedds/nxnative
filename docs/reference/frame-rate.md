@@ -133,6 +133,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** before cutting a game's frame limiter, find what sets its target and whether anything else holds those frames. A limiter that also enforces a slower mode (here N = 2) has to keep it.
 - **Found on:** [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md), in its menus and town; its movies, paced by their own player, ran at 60.
 
+### A target frame rate the game steps by
+
+- **Symptom:** a Switch 2 game runs its title and menus at 60 fps and its gameplay at 30, asking for present interval 2, with the GPU mostly idle.
+- **Cause:** the game's choice. Its graphics object (a global pointer) holds the display rate, a target frame rate and the longest interval; the present asks for interval min(longest, display / min(display, target)). Three stores set the target, 60 for menus and 30 for gameplay, and about 40 readers step the game by 60 / target, so a frame advances it 2.0 at 30 and 1.0 at 60.
+- **Fix:** `hle_fpslock.c` writes `fps_target` into the target (an integer frame rate at a fixed pointer, build-gated); the game then asks for interval 1 itself, and its step follows. At `DM_FPS_TARGET=30` the host writes 30 everywhere, menus included, where the game itself chose 60.
+- **Check:** find the target's stores and readers before writing it: a target the game only presents by, with logic that counts frames, would run the game fast. Here the readers divide 60 by it.
+- **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) v131072: gameplay at 60 fps, frame time p50 16.7 ms on an M4 Pro.
+
 ### Unreal's frame limit and present interval, found by name
 
 - **Symptom:** an Unreal Engine game holds 30 fps with spare CPU and GPU time and asks for present interval 2; `present_interval display` alone does not help, as the engine's game thread sleeps out its own frame limit.

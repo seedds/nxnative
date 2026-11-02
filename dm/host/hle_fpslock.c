@@ -49,6 +49,11 @@ static const lock_t k_locks[] = {
     // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
     // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
     { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
+    // Fire Emblem Fortune's Weave v131072 (Intelligent Systems' engine): the game's graphics object, a global at [main+0x21e60d8], holds the display rate at +0x1d8 (60), the target frame
+    // rate at +0x1dc and the longest present interval at +0x1e0 (5). The present (main+0x648da0, through gxc::NvnDevice's present, vtable slot 3, main+0x5d170) asks for interval
+    // min([+0x1e0], [+0x1d8] / min([+0x1d8], [+0x1dc])). Three stores set the target: 60 at main+0x652960 and main+0x66af3c, 30 at main+0x7bf1c0 (the game then asks for interval 2).
+    // About 40 readers step the game by 60 / [+0x1dc] (main+0x770d5c, main+0x11e6310, main+0x13a6c94: 2.0 a frame at 30, 1.0 at 60), so at 60 the game asks for interval 1 itself
+    { "db93b0125f4850601d61c3edde012f8e", "Intelligent Systems target frame rate", 0x21e60d8, 0x1dc, FPS_I32, 1, 0 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 

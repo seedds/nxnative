@@ -17,6 +17,11 @@ build	v131072	v131072	main=db93b0125f4850601d61c3edde012f8e	subsdk2=7d73f8e80834
 package	v131072
 shader_versions	v131072
 
+# ---- Frame rate ----
+# 60 fps (30 in gameplay as shipped): the game's graphics object holds its target frame rate (60 in some scenes, 30 set at main+0x7bf1c0) and steps the game by 60 / target, so the
+# host writes the target (hle_fpslock.c, "Intelligent Systems target frame rate") and the game asks for present interval 1 itself. DM_FPS_TARGET=30 keeps the game's own 30
+fps_target	60
+
 # ---- Files ----
 modules	main subsdk2 sdk
 romfs_marker	Fs.bin.zst

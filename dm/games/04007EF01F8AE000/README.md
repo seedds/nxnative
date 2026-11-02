@@ -10,6 +10,7 @@ A Switch 2 game: v131072, SDK 22.2.0 built for the Switch 2 (`Ounce`), NVN2 API 
 | `sys_resource 0x4000000` | `game.tsv` | the NPDM declares 64 MB, so virtual address memory is on |
 | `pad_layout full` | `game.tsv` | the game asks for most of the controller at once |
 | `zip_store .zst:.mp4:.webm:.metallib` | `game.tsv` | the RomFS's files are compressed already |
+| `fps_target 60` | `game.tsv`, `hle_fpslock.c` | the host writes 60 into the game's target frame rate; see [Frame rate](#frame-rate) |
 
 No `render_cond`: not tried, and nothing has called for it so far.
 
@@ -29,7 +30,15 @@ All 16,888 translate (current). One shader has 10 texture handles the translator
 - Auto exposure does not meter the scene. `5372c7e7cb7bbda2` writes one luminance into a 16x16 RGBA16F target (134.4 on the first map, log2 7.07), `6d0f6db3f0d396a3` makes a 256-bin histogram of it (the single bin 218), and `a0c632d8b5fa925b` averages its 10th to 90th percentile with a 64-bit division, takes the average through two 256x4 curves and moves a 3x1 R16F image towards the result. The tonemap reads `2^-(image[0] + 3) × 1.44`. On the first map `image` holds 8.96, 18.89, 9.46 with neither of the translator fixes below, and 5.555, 15.195, 6.055 with them, when the picture matches the footage. At a scene change the game clears the image to 1 and dispatches these shaders ([Pending clears land before a compute dispatch](../../../docs/reference/rendering.md#pending-clears-land-before-a-compute-dispatch)).
 - Ambient occlusion is interleaved: depth into a 4-layer 512x288 array, four triangles picking the layer by primitive ID, then back together at 1024x576 ([`[[primitive_id]]` in a specialized Metal 4 pipeline](../../../docs/reference/rendering.md#primitive_id-in-a-specialized-metal-4-pipeline)).
 - The enemy's checkered look and the pale squares over the ground are in the published footage too: both are the game's.
-- Frame time: 33 ms with the window on screen, and GPU about 12 ms. A covered window reads 80-180 ms, the host's display-link fallback (`front end: window covered`), which measures nothing.
+- Frame time: 33 ms with the window on screen at the game's own 30 fps (16.7 ms at `fps_target 60`, [Frame rate](#frame-rate)), and GPU about 12 ms. A covered window reads 80-180 ms, the host's display-link fallback (`front end: window covered`), which measures nothing.
+
+## Frame rate
+
+- **Current:** 60 fps (30 in gameplay as shipped). The game's graphics object, a global at `[main+0x21e60d8]`, holds the display rate at +0x1d8 (60), the target frame rate at +0x1dc and the longest present interval at +0x1e0 (5). The present (`main+0x648da0`, through `gxc::NvnDevice`'s present, its vtable's slot 3 at `main+0x5d170`) asks for interval min(+0x1e0, +0x1d8 / min(+0x1d8, +0x1dc)).
+- The game sets the target to 60 at `main+0x652960` and `main+0x66af3c` (the title and menus run at 60) and to 30 at `main+0x7bf1c0`, where gameplay starts, which makes it interval 2. About 40 readers step the game by 60 / target (`main+0x770d5c`, `main+0x11e6310`, `main+0x13a6c94`): 2.0 a frame at 30, 1.0 at 60.
+- The host writes the profile's `fps_target` into the target on every present where it differs (`hle_fpslock.c`, "Intelligent Systems target frame rate"), and the game asks for interval 1 itself. On an M4 Pro the battle map holds frame time p50 16.7 ms, p95 17.1 ms, about 2 frames of 300 dropped, in a window.
+- `DM_FPS_TARGET=30` (the settings window's Frame rate) writes 30, menus included, where the game itself chose 60.
+- Not measured: game speed at 60 against 30 over the same route (the player saw battles at 60 with nothing reported fast).
 
 ## Driving it on the Mac
 

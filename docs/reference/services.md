@@ -588,6 +588,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (SDK 7.3.2: the game then runs its opening movie at 30 fps); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (SDK 19.3.1: `FinalizeForShopServiceAccessors`, `Cancel`, `GetErrorCode`, `ShowShopSubscriptionDetails`, found by the import list).
 - **Note:** the shop's `Show…` pages are under [System applets opened by `Show…` calls](#system-applets-opened-by-show-calls).
 
+### Offline purchased-item notifications
+
+- **Symptom:** a purchase watcher crashes in `nn::ec::InitializePurchasedEvent` after account selection, before it can wait for a notification.
+- **Cause:** the guest SDK initializer uses an add-on-content service object that the offline host never opened.
+- **Fix:** the purchased-item queue is empty offline. Its notification is a persistent, unsignalled system event that guest threads can wait on. Popping either form of purchased-item info returns false without writing a record.
+- **Found on:** [Super Kirby Clash 1.0.1 (#987)](https://github.com/seedds/nxnative/issues/987), SDK 7.4.0.
+
 ### Parental controls and free communication
 
 - **Symptom:** abort in `nn::sm::Initialize` under `nn::pctl::IsFreeCommunicationAvailable` (Engage, entering its first battle map).

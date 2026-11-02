@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Ampere instructions Fire Emblem Fortune's Weave's shaders brought to the offline translator (dmsh_xlate, arch sm86): BREV, shared-memory atomics (ATOMS), MEMBAR, F2I to and I2F
-from a 64-bit integer, IMAD.WIDE / IMAD.HI with a carry out, IMAD.HI's pair addend, IMAD.X's carry in, and the stride of shared-memory addresses. The encodings are NAK's (Mesa) fields, the operands chosen here; each result goes into a shared-memory atomic, so
+from a 64-bit integer, IMAD.WIDE / IMAD.HI with a carry out, IMAD.HI's pair addend, IMAD.X's carry in, ERRBAR, and the stride of shared-memory addresses. The encodings are NAK's (Mesa) fields, the operands chosen here; each result goes into a shared-memory atomic, so
 none is dropped as dead. Every instruction waits on every scoreboard (116..122): the translator gives a variable-latency result (S2R, the conversions) only to an instruction
 that waits for it, as the hardware does. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
 import json, os, re, struct, subprocess, sys, tempfile, unittest
@@ -21,6 +21,8 @@ WIDE_NO_C = (0x000fc800078e00ff, 0x0000000000087225)       # IMAD.WIDE.U32 R8, R
 HI_PAIR = (0x000fc800078e0008, 0x00000000000a7227)         # IMAD.HI.U32 R10, R0, R0, R8: C is the pair R9:R8
 IMAD_X = (0x000fc800000e0409, 0x00000000000b7224)          # IMAD.X R11, R0, R0, R9, P0: .X (74), the carry predicate at 87..90
 MEMBAR = (0x000fec0000000000, 0x0000000000007992)          # MEMBAR.CTA
+MEMBAR_GPU = (0x000fec0000002000, 0x0000000000007992)      # MEMBAR.GPU (scope 2 at 76..79)
+ERRBAR = (0x000fc00000000000, 0x00000000000079ab)          # ERRBAR: no operands, after a device-scope MEMBAR
 STS_X4 = (0x000fe80000004800, 0x0000000000007388)          # STS [R0.X4], R0: 32-bit (4 at 73..76), stride x4 (1 at 78..80), the game's auto-exposure clear
 LDS_X4 = (0x000e280000004800, 0x0000000000057984)          # LDS R5, [R0.X4]
 
@@ -84,6 +86,11 @@ class AmpereOps(unittest.TestCase):
         p0 = re.search(r'bool (_\d+) = _\d+ != 0;', msl).group(1)   # IMAD.WIDE's carry out
         cin = re.search(rf'int (_\d+) = int\({p0}\);', msl).group(1)
         self.assertRegex(msl, rf'int (_\d+) = _\d+ \+ {cin};\n.*uint\(\1\), memory_order')
+
+    def test_errbar_after_a_fence(self):   # MEMBAR.GPU then ERRBAR, the compiler's device fence: a barrier, and nothing for the error barrier
+        msl = self.translate(S2R_TID, BREV, MEMBAR_GPU, ERRBAR, atoms(2, 1, 0))
+        self.assertIn('threadgroup_barrier', msl.replace('simdgroup_barrier', 'threadgroup_barrier'))
+        self.assertRegex(msl, r'reverse_bits\(as_type<int>\(_\d+\)\)')
 
 
 if __name__ == '__main__':

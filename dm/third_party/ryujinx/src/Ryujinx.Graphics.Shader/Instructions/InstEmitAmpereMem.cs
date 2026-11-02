@@ -38,6 +38,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
             x(0x98c, InstName.Atoms, AAtoms, N);
             x(0x38d, InstName.AtomsCas, AAtoms, N);
             x(0x992, InstName.Membar, AMembar, N, writesRd: false);
+            // ERRBAR (0x9ab, no operands): the error barrier the compiler puts after a device-scope MEMBAR (MEMBAR.SC.GPU; ERRBAR, a fence); it waits for earlier memory
+            // errors to be reported, which a translation has none of (Fire Emblem Fortune's Weave's 35d12d6f98fa05e2, after its BAR and MEMBAR)
+            x(0x9ab, InstName.Nop, ANop, N, writesRd: false);
 
             x(0xb60, InstName.Tex, ATex, InstProps.Tex);
             x(0xb66, InstName.Tld, ATex, InstProps.Tex);

@@ -1106,6 +1106,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), during review of its offline archive path with synthetic libraries and pair lists; no new gameplay or iPhone run. The empty pair list on [ANIMAL WELL](../../dm/games/010020D01AD24000/README.md#found-on-this-game).
 - **Check:** `dm/tools/tests/test_pso_offline.py` changes vertex and fragment library bytes without changing entries or stamps, and exercises the all-constant plan, the header-only pair list and pairs all left out. `t_pso_bundle` rejects bare headers, truncated archives, malformed load commands and out-of-range universal slices, accepts real offline and serialized archives, and rejects zero-probe coverage.
 
+### Shader extraction reruns after translation-only updates
+
+- **Symptom:** an unchanged NSP spends minutes in `shader split` after a shader-chain update, on both Mac and iOS builds, although the extracted package is identical.
+- **Cause:** the split key included all graphics Python tools, every profile file and the whole decoder host executable. Translation tools, profile notes and the host's compiled `DMSH_CHAIN` label therefore invalidated extraction.
+- **Fix:** the NSP script follows the extractor's transitive repository Python imports and fingerprints its profile settings, manual facts, checked/generated tables, modules, RomFS/DLC identities and capture directories. A managed decoder host records its build inputs with only the chain label normalized, bound to its executable's bytes; unknown or replaced binaries use their binary identity. All other host build inputs and rewritten module contents still invalidate conservatively. Package and supplemental-pair digests reject damaged cached outputs. The common split serves Mac and iOS, while translation keeps its own target-specific keys. Existing split caches require one warm-up.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#build-performance).
+- **Check:** `test_nsp_incremental.py` covers translation-only hits, transitive readers, extraction settings, auxiliary modules, explicit captures, decoder changes, corrupt outputs and the existing registered/derived, DLC and damaged-input paths. `test_host_msl.py` verifies executable-bound provenance, chain-only reuse and invalidation for decoder/profile/compiler/header changes. `test_nsp_mac.py` checks separate Mac/iOS translation outputs.
+
 ### Offline pipeline archive rebuilt after a chain-only update
 
 - **Symptom:** rebuilding an unchanged NSP after a shader-chain update runs `metal-tt` for minutes even when all referenced Metal libraries and pipeline settings remain identical.

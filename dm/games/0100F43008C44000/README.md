@@ -83,10 +83,24 @@ Each item was found from a red line or a pass dump on the way through the langua
 
 - **Current:** this game's profile does not set `pso_mtl4`, so its default iOS build makes no offline archive and gains nothing from this stage. No gameplay run used the reused archive; `regress.py check` compared its 28,603 shaders only, since the game has no `smoke.tsv`.
 
+### Shader extraction reuse
+
+- **Resolved: a translation-only update repeated the shader split.** The mechanism: [shader extraction reuse](../../../docs/reference/shaders.md#shader-extraction-reruns-after-translation-only-updates).
+- **Measured, 2026-11-01, one run each:** same machine and toolchain, with this game's 2.0.2 NSPs and DLC unchanged and the same comment-only kind of chain edit. The old extractor's fresh package was byte-identical to the reused one.
+
+| Split after the chain update | Time |
+|---|---:|
+| Old key: the split ran again | 276.04 s (4m36s) |
+| New key: package reused | 0.64 s |
+| Saved | 275.40 s (4m35s), 99.8% |
+
+- **Current:** this game's packs go through its own Oodle decoder in the Mac host, so an update that also changes another host source still splits again. The host itself is rebuilt for each chain, about 16 s of that stage in a full build.
+
 ## Found on this game
 
 General host changes first needed here; each applies to every game:
 
+- **Shader extraction reuse after translation-only updates:** [Shader extraction reruns after translation-only updates](../../../docs/reference/shaders.md#shader-extraction-reruns-after-translation-only-updates).
 - **Offline pipeline archive reuse across chains:** [Offline pipeline archive rebuilt after a chain-only update](../../../docs/reference/shaders.md#offline-pipeline-archive-rebuilt-after-a-chain-only-update).
 - **The pool enforced as on Horizon** (`mem_map_limit`, `hle_svc.c`): [the profile keys](../README.md#keys), [Maps past the application pool fail as on Horizon](../../../docs/reference/memory.md#maps-past-the-application-pool-fail-as-on-horizon).
 - **Trinity packs decoded with the game's own Oodle** (`trpfs_jobs` / `trinity_shaders`, `hle_oodle.c`, `DM_OODLE_HOST` / `DM_OODLE_MODULES`, set by the NSP script for any game with `ONEPACK` files): [BNSH in Trinity packs](../../../docs/reference/shaders.md#bnsh-in-trinity-packs), [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).

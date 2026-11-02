@@ -982,8 +982,8 @@ def tool_files(repo):   # what the shader stages run: dm/gfx/tools' scripts and 
     return sorted((repo / 'dm/gfx/tools').glob('*.py')) + [repo / p for p in ('dm/gfx/tools/dmsh_chain.lock', 'dm/games/game.py', 'dm/ios/tools/ios_metal.py', 'dm/tools/romfs.py', 'dm/tools/nso.py')]
 
 
-def chain_files(repo):   # what the iOS shaders run: dmsh_build.py and every repository module it imports, at any depth (dmsh_*.py, ios_metal.py, game.py), and the translator's lock; not the split's readers (shader_split.py, unityfs.py, uepak.py)
-    dirs, todo, seen = [repo / d for d in ('dm/gfx/tools', 'dm/ios/tools', 'dm/games')], [repo / 'dm/gfx/tools/dmsh_build.py'], set()
+def python_tool_files(repo, entry, roots):   # transitive repository imports, including imports inside reader functions; unrelated tools are not inputs
+    dirs, todo, seen = [repo / d for d in roots], [repo / entry], set()
     while todo:
         p = todo.pop()
         if p in seen or not p.is_file(): continue
@@ -991,7 +991,21 @@ def chain_files(repo):   # what the iOS shaders run: dmsh_build.py and every rep
         for n in ast.walk(ast.parse(p.read_bytes())):
             mods = [a.name for a in n.names] if isinstance(n, ast.Import) else [n.module] if isinstance(n, ast.ImportFrom) and n.module else []
             todo += [d / f'{m.split(".")[0]}.py' for m in mods for d in dirs]
-    return sorted(seen) + [repo / 'dm/gfx/tools/dmsh_chain.lock']
+    return sorted(seen)
+
+
+def chain_files(repo):   # what the iOS shaders run: not the split's readers (shader_split.py, unityfs.py, uepak.py)
+    return python_tool_files(repo, 'dm/gfx/tools/dmsh_build.py', ('dm/gfx/tools', 'dm/ios/tools', 'dm/games')) + [repo / 'dm/gfx/tools/dmsh_chain.lock']
+
+
+def split_profile_inputs(g):   # shader_split.py's GAME reads, plus the tables the packer checks or writes; renderer settings, notes and translation tables are not extraction inputs
+    settings = [(name, g.get(name, '')) for name in ('modules', 'shader_groups', 'shader_note', 'shader_key_skip')]
+    tables = [g.table(n) for n in ('shader_facts_manual.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')]
+    return [g.id, settings, ('files', tables)]
+
+
+def split_output_key(pkg, g):   # detect deleted/edited packages and supplemental pairs before reusing a successful split
+    return fingerprint(package_key(pkg), ('files', [pkg.with_name('pso_pairs.tsv')] if not g.table('pso_pairs.tsv').is_file() else []))
 
 
 def package_key(pkg):   # the shader package's content (file names and bytes): what the iOS shaders are built from
@@ -1271,6 +1285,17 @@ def apple_silicon():   # hw.optional.arm64 is 1 on Apple silicon (for a Python u
 HOST_DIRS = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/nvn/include', 'dm/gfx/tex', 'dm/gfx/vk', 'dm/gfx/gl')   # the folders the host's compile line takes its sources and headers from (dm/host/Makefile SRC, GFX, GFX_H)
 
 
+def decoder_host_key(host):
+    """A managed host's decoder build identity, only while its recorded executable bytes still match. Unknown/replaced hosts use their binary identity instead."""
+    host = Path(host)
+    try: record = json.loads(host.with_name(host.name + '.decoder.json').read_text())
+    except (OSError, ValueError): return None
+    if (isinstance(record, dict) and record.get('format') == 1 and isinstance(record.get('inputs'), str)
+            and re.fullmatch(r'[0-9a-f]{64}', record['inputs']) and host.is_file() and record.get('binary') == fingerprint(('files', [host]))):
+        return record['inputs']
+    return None
+
+
 def build_mac_host(repo, out, env, logs, g):
     """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's.
     Reused when the compile line and its inputs (the source files of HOST_DIRS, the chain header dm/gfx/nvn/dmsh_chain.h among them, the profile header make generates, libvpx and the third-party headers, the compiler
@@ -1284,11 +1309,21 @@ def build_mac_host(repo, out, env, logs, g):
     cmd = shlex.split(line); cmd[cmd.index('-o') + 1] = out
     kf, tp = out.with_name(out.name + '.key'), repo / 'dm/third_party'
     srcs = [p for d in HOST_DIRS for p in sorted((repo / d).iterdir()) if p.is_file() and p.suffix in ('.c', '.m', '.h', '.S', '.inc')]
-    key = fingerprint(cmd, ('files', srcs + [host / f'gen/{g.id}/game_profile.h', host / 'gen/msl-macosx/host_msl_gen.h', host / 'gen/vpx/libvpx.a', tp / 'stb_vorbis/stb_vorbis.c']),
-                      ('tree', tp / 'vulkan-headers/include'), ('tree', tp / 'libvpx/vpx'), ('cmd', ['clang', '--version']), ('cmd', ['xcrun', '--show-sdk-build-version']), env=env)
-    if out.is_file() and reused(kf, key) is not None: return out
+    common = fingerprint(cmd, ('files', [host / f'gen/{g.id}/game_profile.h', host / 'gen/msl-macosx/host_msl_gen.h', host / 'gen/vpx/libvpx.a', tp / 'stb_vorbis/stb_vorbis.c']),
+                         ('tree', tp / 'vulkan-headers/include'), ('tree', tp / 'libvpx/vpx'), ('cmd', ['clang', '--version']), ('cmd', ['xcrun', '--show-sdk-build-version']), env=env)
+    key = fingerprint(common, ('files', srcs))
+    chain = repo / CHAIN_H
+    # The decoder serves game bytes before rendering. DMSH_CHAIN selects translated shader libraries and appears in the startup log; it cannot change decompression.
+    # Retain every other host build input, including any other header content. Bind the identity to the built binary so a replaced/custom host cannot inherit it.
+    chain_text = re.sub(r'(?m)^#define DMSH_CHAIN "[^"]*"$', '#define DMSH_CHAIN "<chain>"', chain.read_text()) if chain.is_file() else None
+    decoder = fingerprint('oodle-host-v1', common, ('files', [p for p in srcs if p != chain]), chain_text)
+    if out.is_file() and reused(kf, key) is not None and decoder_host_key(out) == decoder: return out
     rmtree(kf); out.parent.mkdir(parents=True, exist_ok=True)
     run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)
+    record = out.with_name(out.name + '.decoder.json')
+    part = record.with_suffix('.json.partial')
+    part.write_text(json.dumps({'format': 1, 'binary': fingerprint(('files', [out])), 'inputs': decoder}) + '\n')
+    os.replace(part, record)
     kf.write_text(f'{key}\n')
     return out
 
@@ -1749,22 +1784,26 @@ def compute_reader_additions(g, tables, split_log):
 
 
 def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, oodle=None, dlc_roms=(), derive_dlc=None, derive_compute=None):
-    """The shader split into pkg, checked against the profile's tables. The package is reused when the tools, the profile, the DLC RomFS roots and each version's main, RomFS (paths and sizes) and run-time capture
-    are as at the last successful split. Returns the package's content key, the shader build's input (None for damaged files, which never reuse them): a split that runs
+    """The shader split into pkg, checked against the profile's tables. The package is reused when the extractor and the modules it imports, the profile settings and tables it reads or is checked against,
+    the DLC RomFS roots, each version's modules, RomFS (paths and sizes) and run-time capture, and the package's own contents are as at the last successful split. Returns the package's content key, the shader build's input (None for damaged files, which never reuse them): a split that runs
     again because a reader of another engine changed writes the same package, and the iOS shaders stay reused.
-    oodle: for decoder-backed packs, builds or reuses the Mac host and returns DM_OODLE_HOST / DM_OODLE_MODULES; their current files are split inputs too"""
+    oodle: for decoder-backed packs, builds or reuses the Mac host and returns DM_OODLE_HOST / DM_OODLE_MODULES. Verified host provenance ignores only its chain label;
+    unknown hosts use their bytes, and rewritten modules are always content inputs. Both macOS and iOS builds share this extraction cache."""
     names = ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv')
     PROG.stage('shader split', step='checking the inputs')   # then the count of files and archive ranges scanned (shader_split.py's progress lines); the package and tables come at the end
-    kf = pkg.with_name(pkg.name + '.key')
-    inputs = [('files', tool_files(repo)), bool(provisional)] + [x for r, m in zip(roms, mains) for x in
-        (('files', [m]), ('stat' if provisional else 'tree', r),
-         ('stat', r.parent / 'glslc_capture') if provisional else ('files', sorted((r.parent / 'glslc_capture').glob('*.glslc'))),
-         ('stat', r.parent / 'ue_shaders') if provisional else ('files', sorted((r.parent / 'ue_shaders').glob('*.ushaderbytecode'))))]
+    kf, outputkf = pkg.with_name(pkg.name + '.key'), pkg.with_name(pkg.name + '.outputs.key')
+    inputs = [('files', python_tool_files(repo, 'dm/gfx/tools/shader_split.py', ('dm/gfx/tools', 'dm/tools', 'dm/games'))), bool(provisional), 'split-v2']
+    for r, m in zip(roms, mains):
+        inputs += [('files', [m] + [m.parent / n for n in g.words('modules', 'main') if n != 'main']), ('stat' if provisional else 'tree', r)]
+        for setting, folder, pattern in (('DM_GLSLC_CAPTURE', 'glslc_capture', '*.glslc'), ('DM_UE_SHADERS', 'ue_shaders', '*.ushaderbytecode')):
+            capture = Path(env.get(setting) or r.parent / folder)
+            inputs += [('stat', capture) if provisional else ('files', sorted(capture.glob(pattern)))]   # its files, not where it is: the same build reached through a moved folder or a link keeps its split
     inputs += [item for r in dlc_roms for item in (('dlc', Path(r).name), ('stat', r))]   # DLC has no registered module build to pin its contents: include its index and re-extraction times, even when file sizes stay the same
     if oodle:   # a host or rewriter fix can change what the game's decoder produces
         PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
-        inputs += [('files', [env['DM_OODLE_HOST']]), ('stat', Path(env['DM_OODLE_MODULES']))]
-    key = None if ALLOW_DAMAGED else fingerprint(*inputs, ('files', profile_files(g)))
+        host = Path(env['DM_OODLE_HOST'])
+        inputs += [('decoder', decoder_host_key(host) or fingerprint(('files', [host]))), ('modules', package_key(Path(env['DM_OODLE_MODULES'])))]
+    key = None if ALLOW_DAMAGED else fingerprint(*inputs, *split_profile_inputs(g))
     dlckf, dlckey = pkg.with_name(pkg.name + '.dlc.key'), None
     cskf, cskey, promoted = pkg.with_name(pkg.name + '.compute.key'), None, None
     def promote(derive, kind):
@@ -1775,14 +1814,14 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         dlckey = fingerprint(key, ('files', [Path(__file__)])) if key else None   # proof pins the comparison code as well as the registered tables and every split input
         if dlckey and reused(dlckf, dlckey) is not None:
             promote(derive_dlc, 'dlc')
-            key = fingerprint(*inputs, ('files', profile_files(g)))
+            key = fingerprint(*inputs, *split_profile_inputs(g))
     if not provisional and derive_compute:
         cskey = fingerprint(key, ('files', [Path(__file__)])) if key else None
         if cskey and reused(cskf, cskey) is not None:
             promote(derive_compute, 'compute')
-            key = fingerprint(*inputs, ('files', profile_files(g)))
+            key = fingerprint(*inputs, *split_profile_inputs(g))
     have_pairs = g.table('pso_pairs.tsv').is_file() or pkg.with_name('pso_pairs.tsv').is_file()
-    if key and pkg.is_dir() and have_pairs and (note := reused(kf, key)) is not None:
+    if key and pkg.is_dir() and have_pairs and (note := reused(kf, key)) is not None and reused(outputkf, split_output_key(pkg, g)) is not None:
         PROG.end(f'{note}, reused (inputs unchanged)'); return package_key(pkg)
     PROG.set(step='splitting')
     tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
@@ -1812,10 +1851,11 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         # Data rows byte-identical to the profile's = the same game files the tables were built from; if not, stop (the profile's tables are left alone). Only data rows are compared: the header of Engage's profile tables was written by an older shader_split
         diff = [n for n in names if data_rows((tmp / 'tables' / n).read_bytes()) != data_rows(g.table(n).read_bytes())]
         if diff: raise BuildError(f'the split shader tables differ from game profile {g.id}\'s: {", ".join(diff)} (game files not the versions the profile registers?)')
-    rmtree(kf); swap_in(tmp / 'pkg', pkg); rmtree(tmp)
+    rmtree(kf); rmtree(outputkf); swap_in(tmp / 'pkg', pkg); rmtree(tmp)
     note = (f'{int(m.group(1)):,} shaders' if m else '') + (f', {bad.group(1)} file(s) unreadable' if bad else '')
     if key:   # an own profile's tables are outputs too; the next split checks the profile after they were written
-        key = fingerprint(*inputs, ('files', profile_files(g)))
+        key = fingerprint(*inputs, *split_profile_inputs(g))
+        outputkf.write_text(split_output_key(pkg, g) + '\n')
         kf.write_text(f'{key}\n{note}\n')
     if promoted == 'dlc' and dlckey: dlckf.write_text(f'{dlckey}\nDLC-only shader content\n')
     else: rmtree(dlckf)

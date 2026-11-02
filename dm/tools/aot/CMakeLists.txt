@@ -290,3 +290,10 @@ set_tests_properties(gaps PROPERTIES TIMEOUT 900)
 add_test(NAME tables COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_tables.py" --nxaot $<TARGET_FILE:nxaot>
          --work "${CMAKE_CURRENT_BINARY_DIR}/tables")
 set_tests_properties(tables PROPERTIES TIMEOUT 900)
+# The sample profile at tier H (aot-recompiler.md 9.3 and 12; README.md, "The sample profile at tier H"): a profile recorded natively on
+# int_ops-gcc (tests/profile_weights.tsv) weighs the functions at H (branch weights, entry counts, call counts, a summary per unit) and none
+# at C, the same pack with 1 and 4 workers and twice, NXAOT_PROFILE_WEIGHTS=0 and the host sampler's form of the profile the tiers' pack, the
+# cache missing only the units whose functions' samples changed, the packs printing the expected output
+add_test(NAME profile_weights COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_profile_weights.py" --nxaot $<TARGET_FILE:nxaot>
+         --nxaot-host $<TARGET_FILE:nxaot_host> --work "${CMAKE_CURRENT_BINARY_DIR}/profile_weights")
+set_tests_properties(profile_weights PROPERTIES TIMEOUT 900)

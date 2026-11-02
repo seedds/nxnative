@@ -3,7 +3,8 @@
 # the manifest test, the corpus reference run, the corpus recompiled and run natively, the per-function differential test, the JIT fallback's
 # modes, the threaded programs, the safepoint pause test, the pack caches, the indirect calls' reloads, functions split for size, tiers by profile,
 # Windows packs, the analysis on threads, the host's JIT misses as discovery's input, the workers bounded by memory, gap code at tier C, the
-# tables' object through MC, the benchmark) and records the run in the repository: one log per test and summary.txt in logs/aot/ (logs/README.md).
+# tables' object through MC, the sample profile at tier H, the benchmark) and records the run in the repository: one log per test and summary.txt
+# in logs/aot/ (logs/README.md).
 # In the nxnative-aot Docker image (dm/tools/aot/README.md). From anywhere:
 #   sh dm/tools/aot/tests/run_aot_tests.sh <build folder> [<log folder>]
 # <log folder> defaults to logs/aot at the repository root; its old *.log files and summary.txt are removed first. Each test gets TIMEOUT seconds
@@ -82,6 +83,7 @@ run misses python3 "$aot/tests/test_misses.py" --nxaot "$build/nxaot" --nxaot-ho
 run workers python3 "$aot/tests/test_workers.py" --nxaot "$build/nxaot" --work "$build/workers"
 run gaps python3 "$aot/tests/test_gaps.py" --nxaot "$build/nxaot" --work "$build/gaps"
 run tables python3 "$aot/tests/test_tables.py" --nxaot "$build/nxaot" --work "$build/tables"
+run profile_weights python3 "$aot/tests/test_profile_weights.py" --nxaot "$build/nxaot" --nxaot-host "$build/nxaot_host" --work "$build/profile_weights"
 run opcodes "$build/nxaot" opcodes
 run bench "$build/nxaot_bench" --iterations 200000 --work "$build/bench"
 
@@ -112,6 +114,7 @@ total_line="$total runs: $passed passed, $failed failed"
     grep -h '^JIT misses:' "$logs/misses.log" 2>/dev/null
     grep -h '^gap code:' "$logs/gaps.log" 2>/dev/null
     grep -h "^tables' object through MC:" "$logs/tables.log" 2>/dev/null
+    grep -h '^profile weights:' "$logs/profile_weights.log" 2>/dev/null
     grep -h '^# ' "$logs/opcodes.log" 2>/dev/null | sed 's/^# /lifter opcodes: /'
     echo
     cat "$results"

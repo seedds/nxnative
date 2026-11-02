@@ -7,10 +7,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <string_view>
 #include <thread>
 
 #include <sched.h>
@@ -24,10 +26,14 @@
 #include <unistd.h>
 
 #include <lld/Common/Driver.h>
+#include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/DepthFirstIterator.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/StringExtras.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Config/llvm-config.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/CallingConv.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DIBuilder.h>
@@ -43,6 +49,8 @@
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassTimingInfo.h>
+#include <llvm/IR/ProfDataUtils.h>
+#include <llvm/IR/ProfileSummary.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/MC/MCSubtargetInfo.h>
 #include <llvm/MC/TargetRegistry.h>
@@ -71,6 +79,7 @@
 #include <llvm/Transforms/Scalar/SimplifyCFG.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/Mem2Reg.h>
+#include <llvm/Transforms/Utils/SampleProfileInference.h>
 
 #include "analysis/census.h"
 #include "analysis/discover.h"
@@ -476,7 +485,13 @@ void Optimise(llvm::Module& m, llvm::TargetMachine* tm, Tier tier) {
         si.emplace(m.getContext(), false);
         si->registerCallbacks(pic, &mam);
     }
-    llvm::PassBuilder pb{tm, llvm::PipelineTuningOptions(), std::nullopt, &pic};
+    // No call-graph profile: with the sample profile's entry counts (README.md, "The sample profile at tier H") the O2 / O3 module pipelines'
+    // CGProfilePass would write a .llvm.call-graph-profile section, by which lld orders the units' code (measured: within 1 µs of the units'
+    // order on switch-gcc and switch-clang, 0.2 % on int_ops-gcc) and which a Windows pack's COFF conversion cannot carry (a REL section).
+    // Without entry counts the pass writes nothing, so a pack without a profile is as before
+    llvm::PipelineTuningOptions pto;
+    pto.CallGraphProfile = false;
+    llvm::PassBuilder pb{tm, pto, std::nullopt, &pic};
     pb.registerModuleAnalyses(mam);
     pb.registerCGSCCAnalyses(cgam);
     pb.registerFunctionAnalyses(fam);
@@ -752,6 +767,10 @@ struct Common {
     // scale"): the gate sites of the functions that have some (GateSitesOf), and the return addresses of every call site, sorted, each once
     std::map<uint64_t, std::vector<nxaot_gate_site>> sites;
     std::vector<uint32_t> returns;
+    // The sample profile at tiers H and H+ (README.md, "The sample profile at tier H"): the profile's samples by guest offset (TiersFromProfile),
+    // and whether they weigh the code of the functions at H and H+ (with a profile, unless the test switch NXAOT_PROFILE_WEIGHTS=0 says not)
+    std::map<uint64_t, uint64_t> samples;
+    bool weights = false;
 
     std::vector<nxaot_gate_site> SitesOf(uint64_t entry) const {
         const auto it = sites.find(entry);
@@ -760,6 +779,25 @@ struct Common {
     Tier TierOf(uint64_t entry) const {
         const auto it = tiers.find(entry);
         return it == tiers.end() ? o.tier : it->second;
+    }
+    // Whether the samples weigh a function's code (WeighFunction): at tier H or H+, with samples in [entry, limit) somewhere else than at the
+    // entry. A function whose samples are all at its entry, as the host's sampler writes them (it counts per function: dm/host/aot_profile.c),
+    // has no position to weigh its code by (SampledAtEntryOnly): branch weights would be profi's guesses (all the flow along the cheapest path
+    // out of the function), which override LLVM's own estimate, and an entry count with the blocks' counts spread by that estimate measured no
+    // gain (README.md, "The sample profile at tier H"); its code and its cache key are the tiers' alone, so that a new profile of the host's
+    // keeps its units cached
+    bool Weighted(uint64_t entry) const { return SampledIn(entry) == 2; }
+    bool SampledAtEntryOnly(uint64_t entry) const { return SampledIn(entry) == 1; }
+    int SampledIn(uint64_t entry) const {  // 0: not weighed (no profile, another tier, no sample), 1: at its entry only, 2: elsewhere too
+        const Tier t = TierOf(entry);
+        if (!weights || (t != Tier::H && t != Tier::HPlus)) return 0;
+        const uint64_t limit = plan.fns.at(entry).limit;
+        int at = 0;
+        for (auto it = samples.lower_bound(entry); it != samples.end() && it->first < limit; ++it) {
+            if (it->first != entry) return 2;
+            at = 1;
+        }
+        return at;
     }
     // The part of the split function fn that has a block of its own at offset among its entries, or null
     const Part* PartAt(uint64_t fn, uint64_t offset) const {
@@ -779,6 +817,9 @@ struct UnitStats {
     uint64_t blocks = 0, calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0, refused = 0;
     uint64_t lines_lost = 0, spills = 0, reloads = 0, text_bytes = 0, object_bytes = 0, gates = 0;
     uint64_t splits = 0;  // transfers between the parts of a split function
+    // The sample profile's weights (WeighFunction): the functions weighed, their branches, entry counts and call sites given counts; the
+    // functions (or parts) with samples profi found no flow for
+    uint64_t weighted = 0, weighted_branches = 0, entry_counts = 0, weighted_calls = 0, no_flow = 0;
     double t_lift = 0, t_verify = 0, t_opt = 0, t_codegen = 0;
     std::vector<std::string> notes;
     // --isel-misses: FastISel's misses by kind (IselMissKind): how many, and the IR instructions they handed to SelectionDAG; not cached
@@ -790,6 +831,10 @@ struct UnitStats {
                     {"indirect_tails", indirect_tails}, {"returns", returns}, {"svcs", svcs}, {"traps", traps}, {"refused", refused},
                     {"lines_lost", lines_lost}, {"text_bytes", text_bytes}, {"object_bytes", object_bytes}, {"gates", gates},
                     {"splits", splits}};
+        if (weighted || no_flow) {  // a unit with samples to weigh by only: the facts of the others are as before
+            f.counts.insert({{"weighted", weighted}, {"weighted_branches", weighted_branches}, {"entry_counts", entry_counts},
+                             {"weighted_calls", weighted_calls}, {"no_flow", no_flow}});
+        }
         f.notes = notes;
         return f;
     }
@@ -813,6 +858,11 @@ struct UnitStats {
         u.object_bytes = get("object_bytes");
         u.gates = get("gates");
         u.splits = get("splits");
+        u.weighted = get("weighted");
+        u.weighted_branches = get("weighted_branches");
+        u.entry_counts = get("entry_counts");
+        u.weighted_calls = get("weighted_calls");
+        u.no_flow = get("no_flow");
         u.notes = f.notes;
         return u;
     }
@@ -1649,6 +1699,259 @@ void DefineSplitStub(const Kit& k, const Common& c, uint64_t entry, const FnFact
     b.CreateRet(call);
 }
 
+// ---- The sample profile at tiers H and H+ (design 9.3, 12; README.md, "The sample profile at tier H") ----
+// A profile's samples are guest offsets (the host's sampler, dm/host/aot_profile.c, counts them at the entry of the function they fell in; a
+// profile may name any instruction). At tiers H and H+ they weigh each sampled function's lifted code before the tier's pipeline, so that its
+// passes (block placement, the inliner's thresholds, register allocation's spill weights, loop rotation and unrolling, if-conversion) work from
+// where the time went rather than from LLVM's static guesses:
+// - a guest block's count is its samples per instruction (the samples at offsets in its own range over that range's length, times
+//   kSampleScale; its own range ends where the next block starts: WeighFunction); a function whose samples are all at its entry, as the
+//   host's sampler writes them, has no positions and is not weighed (Common::Weighted);
+// - profi, the profile inference of LLVM's own sample loader (llvm::applyFlowInference, Transforms/Utils/SampleProfileInference.h, with its
+//   tuned costs), makes of these counts at the guest blocks' heads a flow over every basic block of the function, consistent at every branch
+//   and join: the blocks the lowering adds (the if_then / if_else of a conditional branch, safepoint polls, call sequences, slow paths) have
+//   unknown counts, the light side of a branch the lowering weighed itself (a poll's call, an inline cache's miss, a call's pending check)
+//   and a block that ends in unreachable are kept out of the flow unless nothing else can carry it;
+// - every branch and switch between guest blocks gets `!prof branch_weights` from the flow along its edges, plus 1 so that no edge is zero:
+//   a branch is between guest blocks when its successors, followed through unconditional branches and the likely side of the lowering's
+//   weighted ones, reach different guest blocks (or leave the function); the lowering's own branches within an instruction, and those it
+//   weighed itself, keep what they have (a switch's cases to one block share the edge's flow);
+// - the function gets an entry count (the flow at its entry) and every call a count (its block's flow): LLVM's ProfileSummaryInfo
+//   reads a call's count for hot and cold call sites (with a sampled profile it takes a call without one, in a function with an entry count,
+//   for a cold one);
+// - the unit gets a ProfileSummary of kind sample over the counts of its weighed functions' guest instructions (each instruction its block's
+//   flow), from which ProfileSummaryInfo takes its hot and cold thresholds. The summary is the unit's, not the pack's, so that a unit's object
+//   depends on its own functions' samples only: the unit's cache key holds those (UnitKey) and a profile that changes elsewhere keeps it.
+// Branches with no flow on any edge, functions whose blocks drew no sample and those profi finds no flow for (a few samples on blocks that
+// only paths through blocks with none reach) are left as they are. The tier C functions of a profile get nothing (their pipeline does not
+// read weights), nor do the H functions of the max mode, which the profile did not sample. Optimise turns LLVM's call-graph profile off
+constexpr uint64_t kSampleScale = 1024;  // a guest block's count: its samples per guest instruction times this
+constexpr uint64_t kWeightMax = 1ull << 30;  // a branch's weights are shifted right until the largest is under this (they are 32-bit)
+
+// What a unit's weighed functions gave: the stats, and the counts its profile summary is made of
+struct UnitWeights {
+    uint64_t functions = 0, branches = 0, entries = 0, calls = 0, max_entry = 0;
+    uint64_t no_flow = 0;  // functions (or parts) with samples profi found no flow for: not weighed
+    std::map<uint64_t, uint64_t, std::greater<uint64_t>> counts;  // a guest instruction's count (its block's flow) -> how many instructions
+};
+
+// Where a successor of a branch leads (WeighFunction): the guest block it reaches through unconditional branches and the likely side of the
+// lowering's weighted ones, kLeaves when the path leaves the function first (a return, a tail call, a trap), kOpen when another branch decides
+constexpr int64_t kLeaves = -1, kOpen = -2;
+int64_t LeadsTo(const llvm::BasicBlock* bb, const llvm::DenseMap<const llvm::BasicBlock*, uint32_t>& heads) {
+    for (int steps = 0; steps < 64 && bb; ++steps) {
+        if (const auto it = heads.find(bb); it != heads.end()) return it->second;
+        const llvm::Instruction* t = bb->getTerminator();
+        if (!t) return kOpen;
+        if (llvm::isa<llvm::ReturnInst>(t) || llvm::isa<llvm::UnreachableInst>(t)) return kLeaves;
+        const auto* br = llvm::dyn_cast<llvm::BranchInst>(t);
+        if (!br) return kOpen;
+        if (br->isUnconditional()) {
+            bb = br->getSuccessor(0);
+            continue;
+        }
+        llvm::SmallVector<uint32_t, 2> w;
+        if (!llvm::extractBranchWeights(*br, w) || w.size() != 2 || w[0] == w[1]) return kOpen;
+        bb = br->getSuccessor(w[0] > w[1] ? 0 : 1);
+    }
+    return kOpen;
+}
+
+// The flow of a function whose samples have positions (WeighFunction): its basic blocks reachable from the entry that reach an exit, in the
+// function's order (the entry first), the guest blocks' heads with their counts and the rest unknown, through profi. *blocks gets each block's
+// flow, *edges each edge's; the result is the entry's flow (0: none: no sampled block in the flow)
+using EdgeFlows = llvm::DenseMap<std::pair<const llvm::BasicBlock*, const llvm::BasicBlock*>, uint64_t>;
+uint64_t FlowCounts(llvm::Function& f, const llvm::DenseMap<const llvm::BasicBlock*, uint32_t>& heads, const std::vector<uint64_t>& count,
+                    llvm::DenseMap<const llvm::BasicBlock*, uint64_t>* blocks, EdgeFlows* edges) {
+    llvm::df_iterator_default_set<llvm::BasicBlock*> fwd, back;
+    for (llvm::BasicBlock* bb : llvm::depth_first_ext(&f, fwd)) (void)bb;
+    for (llvm::BasicBlock& bb : f) {
+        if (llvm::succ_empty(&bb)) {
+            for (llvm::BasicBlock* p : llvm::inverse_depth_first_ext(&bb, back)) (void)p;
+        }
+    }
+    std::vector<llvm::BasicBlock*> order;
+    llvm::DenseMap<const llvm::BasicBlock*, uint32_t> index;
+    for (llvm::BasicBlock& bb : f) {
+        if (fwd.count(&bb) && back.count(&bb)) {
+            index[&bb] = static_cast<uint32_t>(order.size());
+            order.push_back(&bb);
+        }
+    }
+    if (order.size() < 2 || order.front() != &f.getEntryBlock()) return 0;
+    llvm::FlowFunction flow;
+    flow.Blocks.resize(order.size());
+    for (size_t i = 0; i < order.size(); ++i) {
+        llvm::FlowBlock& b = flow.Blocks[i];
+        b.Index = i;
+        if (const auto h = heads.find(order[i]); h != heads.end()) {
+            b.Weight = count[h->second];
+            b.HasUnknownWeight = false;
+        }
+    }
+    for (size_t i = 0; i < order.size(); ++i) {
+        const llvm::Instruction* t = order[i]->getTerminator();
+        llvm::SmallVector<uint32_t, 2> w;
+        const bool lowered = llvm::isa<llvm::BranchInst>(t) && llvm::extractBranchWeights(*t, w) && w.size() == 2;
+        llvm::SmallPtrSet<const llvm::BasicBlock*, 8> seen;
+        for (unsigned k = 0; k < t->getNumSuccessors(); ++k) {
+            const llvm::BasicBlock* s = t->getSuccessor(k);
+            const auto j = index.find(s);
+            if (j == index.end() || !seen.insert(s).second) continue;
+            llvm::FlowJump jump;
+            jump.Source = i;
+            jump.Target = j->second;
+            // The light side of a branch the lowering weighed (1 to 2^16 or 2^20), and a block that ends in unreachable (a trap)
+            jump.IsUnlikely = (lowered && w[k] < w[1 - k] / 1024) || llvm::isa<llvm::UnreachableInst>(s->getTerminator());
+            flow.Jumps.push_back(jump);
+        }
+    }
+    for (llvm::FlowJump& j : flow.Jumps) {
+        flow.Blocks[j.Source].SuccJumps.push_back(&j);
+        flow.Blocks[j.Target].PredJumps.push_back(&j);
+    }
+    flow.Entry = 0;
+    llvm::applyFlowInference(flow);
+    for (size_t i = 0; i < order.size(); ++i) (*blocks)[order[i]] = flow.Blocks[i].Flow;
+    for (const llvm::FlowJump& j : flow.Jumps) (*edges)[{order[j.Source], order[j.Target]}] = j.Flow;
+    return flow.Blocks.front().Flow;
+}
+
+// The branches between guest blocks given the flow's weights (WeighFunction): their number
+uint64_t WeighBranches(llvm::Function& f, const llvm::DenseMap<const llvm::BasicBlock*, uint32_t>& heads, const EdgeFlows& edges) {
+    llvm::MDBuilder md{f.getContext()};
+    uint64_t branches = 0;
+    for (llvm::BasicBlock& bb : f) {
+        llvm::Instruction* t = bb.getTerminator();
+        const unsigned n = t ? t->getNumSuccessors() : 0;
+        if (n < 2 || t->hasMetadata(llvm::LLVMContext::MD_prof) || !(llvm::isa<llvm::BranchInst>(t) || llvm::isa<llvm::SwitchInst>(t))) continue;
+        bool open = false, guest = false, same = true;
+        int64_t first = 0;
+        for (unsigned k = 0; k < n; ++k) {
+            const int64_t to = LeadsTo(t->getSuccessor(k), heads);
+            if (k == 0) first = to;
+            open = open || to == kOpen;
+            guest = guest || to >= 0;
+            same = same && to == first;
+        }
+        if (open || !guest || same) continue;
+        llvm::SmallDenseMap<const llvm::BasicBlock*, unsigned, 8> times;
+        for (unsigned k = 0; k < n; ++k) ++times[t->getSuccessor(k)];
+        llvm::SmallVector<uint64_t, 4> e(n);
+        uint64_t total = 0, top = 0;
+        for (unsigned k = 0; k < n; ++k) {
+            const llvm::BasicBlock* s = t->getSuccessor(k);
+            const auto it = edges.find({&bb, s});
+            e[k] = it == edges.end() ? 0 : it->second / times[s];  // a switch's cases to one block share the edge's flow
+            total += e[k];
+            top = std::max(top, e[k]);
+        }
+        if (!total) continue;
+        unsigned shift = 0;
+        while ((top >> shift) >= kWeightMax) ++shift;
+        llvm::SmallVector<uint32_t, 4> w(n);
+        for (unsigned k = 0; k < n; ++k) w[k] = static_cast<uint32_t>(e[k] >> shift) + 1;
+        t->setMetadata(llvm::LLVMContext::MD_prof, md.createBranchWeights(w));
+        ++branches;
+    }
+    return branches;
+}
+
+// The weights of one lifted function (or part) from the samples in [lo, hi) (above); entry_pc is the offset its code starts at
+void WeighFunction(llvm::Function& f, const lift::Lifted& l, const std::map<uint64_t, uint64_t>& samples, uint64_t entry_pc, uint64_t lo,
+                   uint64_t hi, UnitWeights* uw) {
+    const auto& gbs = l.guest_blocks;
+    if (gbs.empty() || f.empty()) return;
+    uint64_t all = 0;
+    bool entry_only = true;
+    for (auto it = samples.lower_bound(lo); it != samples.end() && it->first < hi; ++it) {
+        all += it->second;
+        entry_only = entry_only && it->first == entry_pc;
+    }
+    if (!all || entry_only) return;  // a part whose samples are all at its first entry (Common::Weighted, for whole functions)
+    // A guest block's own instructions: from its start to its end or the next block's start. The translation runs a block on to its terminal
+    // whatever starts inside it (a loop's head in the middle of a straight run starts a block of its own, which the run's block holds a copy
+    // of), so the ranges overlap; a sample counts for the block that starts last before it, the one whose code runs each time the instruction
+    // does (counted for every block that holds it, a function's first block would hold the whole of a loop that follows it)
+    std::vector<uint64_t> count(gbs.size()), words(gbs.size());
+    std::vector<size_t> by_start(gbs.size());
+    for (size_t i = 0; i < gbs.size(); ++i) by_start[i] = i;
+    std::sort(by_start.begin(), by_start.end(), [&](size_t x, size_t y) { return gbs[x].start < gbs[y].start; });
+    for (size_t k = 0; k < by_start.size(); ++k) {
+        const size_t i = by_start[k];
+        const uint64_t end = k + 1 < by_start.size() ? std::min(gbs[i].end, gbs[by_start[k + 1]].start) : gbs[i].end;
+        const uint64_t a = std::max(gbs[i].start, lo), b = std::min(end, hi);
+        uint64_t n = 0;
+        for (auto it = samples.lower_bound(a); it != samples.end() && it->first < b; ++it) n += it->second;
+        words[i] = std::max<uint64_t>(1, (end - gbs[i].start) / 4);
+        count[i] = n * kSampleScale / words[i];
+    }
+    llvm::DenseMap<const llvm::BasicBlock*, uint32_t> heads;
+    for (size_t i = 0; i < gbs.size(); ++i) heads.try_emplace(gbs[i].head, static_cast<uint32_t>(i));
+    llvm::DenseMap<const llvm::BasicBlock*, uint64_t> block_count;  // each basic block's count (runs per instruction, scaled)
+    EdgeFlows edges;
+    const uint64_t entry = FlowCounts(f, heads, count, &block_count, &edges);
+    if (!entry) {
+        // profi carried no flow: a few samples (1 to 10 in the measured profiles, 38 at most) on blocks that only paths through blocks with
+        // none reach, which it takes for noise (keeping a block that drew no sample at zero costs less than raising a path to it)
+        ++uw->no_flow;
+        return;
+    }
+    uw->branches += WeighBranches(f, heads, edges);
+    llvm::MDBuilder md{f.getContext()};
+    for (llvm::BasicBlock& bb : f) {
+        const uint64_t fl = block_count.lookup(&bb);
+        for (llvm::Instruction& i : bb) {
+            auto* call = llvm::dyn_cast<llvm::CallBase>(&i);
+            const llvm::Function* callee = call ? call->getCalledFunction() : nullptr;
+            if (!callee || callee->isIntrinsic() || call->hasMetadata(llvm::LLVMContext::MD_prof)) continue;
+            call->setMetadata(llvm::LLVMContext::MD_prof, md.createBranchWeights({static_cast<uint32_t>(std::min<uint64_t>(fl, UINT32_MAX))}));
+            ++uw->calls;
+        }
+    }
+    f.setEntryCount(llvm::Function::ProfileCount(entry, llvm::Function::PCT_Real));
+    // In .text, as every other function: with a profile summary, CodeGenPrepare would put a function its ProfileSummaryInfo finds hot or cold
+    // in .text.hot. or .text.unlikely. (its profile-guided section prefix), and the parts of a split function must lie in one section
+    // (JoinParts); the pack's layout stays the units' order (ordering functions by heat is H+'s open item, README.md "Phase 5b")
+    f.setSection(".text");
+    for (size_t i = 0; i < gbs.size(); ++i) {
+        const uint64_t c = block_count.lookup(gbs[i].head);
+        if (c) uw->counts[c] += words[i];
+    }
+    ++uw->functions;
+    ++uw->entries;
+    uw->max_entry = std::max(uw->max_entry, entry);
+}
+
+// The unit's ProfileSummary (kind sample) over its weighed functions' counts, with LLVM's default cutoffs (ProfileSummaryBuilder's
+// DefaultCutoffs, its computeDetailedSummary), from which ProfileSummaryInfo takes the hot (99 %) and cold (99.9999 %) thresholds
+void SetSummary(llvm::Module& m, const UnitWeights& w) {
+    static constexpr uint32_t kCutoffs[] = {10000, 100000, 200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000, 950000, 990000,
+                                            999000, 999900, 999990, 999999};
+    uint64_t total = 0, num = 0;
+    for (const auto& [count, n] : w.counts) {
+        total += count * n;
+        num += n;
+    }
+    if (!total) return;
+    llvm::SummaryEntryVector detailed;
+    auto it = w.counts.begin();
+    uint64_t sum = 0, seen = 0, at = 0;
+    for (const uint32_t cutoff : kCutoffs) {
+        const auto want = static_cast<uint64_t>(static_cast<unsigned __int128>(total) * cutoff / llvm::ProfileSummary::Scale);
+        for (; sum < want && it != w.counts.end(); ++it) {
+            at = it->first;
+            sum += it->first * it->second;
+            seen += it->second;
+        }
+        detailed.emplace_back(cutoff, at, seen);
+    }
+    const uint64_t top = w.counts.begin()->first;
+    llvm::ProfileSummary ps(llvm::ProfileSummary::PSK_Sample, detailed, total, top, top, w.max_entry,
+                            static_cast<uint32_t>(std::min<uint64_t>(num, UINT32_MAX)), static_cast<uint32_t>(w.functions));
+    m.setProfileSummary(ps.getMD(m.getContext()), llvm::ProfileSummary::PSK_Sample);
+}
+
 bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::string* object, UnitStats* st, std::string* ir_text,
                  std::string* asm_text, std::string* error) {
     const BuildOptions& o = c.o;
@@ -1705,6 +2008,7 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
     lo.fpcr = 0;
     lo.fpsr_flags = c.fpsr;
     lo.target = c.target;
+    UnitWeights weights;  // the sample profile's, at H and H+ (WeighFunction)
     for (const uint64_t entry : entries) {
         const FnFacts& ff = c.plan.fns.at(entry);
         // What is lifted: the function's body, or one part of it into the part's own function
@@ -1798,6 +2102,10 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
             return image.Word(a);
         };
         const lift::Lifted l = lift::LiftRegion(m, body->getName().str(), region, read, lo);
+        if (l.function && c.Weighted(entry)) {
+            // The samples of its range (a part's: the part's)
+            WeighFunction(*l.function, l, c.samples, region.entry, region.lo, region.hi, &weights);
+        }
         if (l.function) {
             std::vector<uint64_t> want;
             for (const auto& g : sites) want.push_back(g.offset);
@@ -1875,6 +2183,14 @@ bool CompileUnit(const Common& c, llvm::TargetMachine& tm, const Unit& u, std::s
             fb.CreateRet(r);
         }
     }
+    if (weights.functions) {
+        SetSummary(m, weights);
+        st->weighted += weights.functions;
+        st->weighted_branches += weights.branches;
+        st->entry_counts += weights.entries;
+        st->weighted_calls += weights.calls;
+    }
+    st->no_flow += weights.no_flow;
     if (k.dib) {
         k.dib->finalize();
     }
@@ -2435,6 +2751,17 @@ std::string UnitKey(const Common& c, uint64_t entry) {
                 std::to_string(cf.writes.nzcv) + "/" + std::to_string(cf.rv) + "/" + std::to_string(cf.returns) + ";";
     }
     k.Add("callees", list);
+    // The samples that weigh its code at H and H+ (WeighFunction; README.md, "The sample profile at tier H"): its (offset, count) pairs, and only
+    // when they weigh it, so that the keys of a pack without a profile (or with NXAOT_PROFILE_WEIGHTS=0), and of the functions at C, are as before.
+    // A shard's key holds its functions' keys, so its summary (the counts of its functions) is covered too; samples outside the unit's functions
+    // change nothing in it
+    if (c.Weighted(entry)) {
+        list.clear();
+        for (auto it = c.samples.lower_bound(entry); it != c.samples.end() && it->first < ff.limit; ++it) {
+            list += std::to_string(it->first) + ":" + std::to_string(it->second) + ",";
+        }
+        k.Add("samples", list);
+    }
     return k.Hex();
 }
 
@@ -2689,8 +3016,10 @@ bool JoinParts(const Common& c, uint64_t entry, const std::vector<std::string>& 
 
 // The tiers of section 9.3 by profile (--profile; README.md, "Tiers by profile"): in the balanced mode a function holding a sampled offset at
 // tier H and the others at tier C ("tier H only with a profile"; C for "functions the profile never sampled"), in the max mode H+ and H.
-// Without a profile every function has the mode's tier (no entries in *tiers)
-bool TiersFromProfile(const BuildOptions& o, const Plan& plan, std::map<uint64_t, Tier>* tiers, BuildStats* s, std::string* error) {
+// Without a profile every function has the mode's tier (no entries in *tiers). The samples with a count inside a function, by offset, go to
+// *kept: what weighs the code of the functions at H and H+ (WeighFunction)
+bool TiersFromProfile(const BuildOptions& o, const Plan& plan, std::map<uint64_t, Tier>* tiers, std::map<uint64_t, uint64_t>* kept, BuildStats* s,
+                      std::string* error) {
     if (o.profile_path.empty()) {
         return true;
     }
@@ -2736,6 +3065,7 @@ bool TiersFromProfile(const BuildOptions& o, const Plan& plan, std::map<uint64_t
             continue;
         }
         (*tiers)[std::prev(it)->first] = hot;
+        kept->emplace(offset, count);
     }
     return true;
 }
@@ -2969,7 +3299,7 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
     // The gates (design 1.1): the manifest's obs and spin rows the functions' code holds are served (the units call them, CompileUnit checks
     // it); a row no discovered code holds is not, and the host, which checks every row against the descriptor, says so as well
     Common c{image, o, d, plan, conv, Sanitize(image.name), fpsr, tm0->getTargetTriple().str(), s.cpu, s.features, TargetOf(*tm0), "",
-             GatesOf(image), {}, {}, {}};
+             GatesOf(image), {}, {}, {}, {}, {}, {}, false};
     if (o.split) {
         for (const auto& [entry, ff] : plan.fns) {
             std::vector<Part> parts = SplitParts(d.functions.at(entry), ff, o.split_above);
@@ -2980,10 +3310,18 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
             }
         }
     }
-    if (!TiersFromProfile(o, plan, &c.tiers, &s, error)) {
+    if (!TiersFromProfile(o, plan, &c.tiers, &c.samples, &s, error)) {
         return false;
     }
+    // The samples weigh the code at H and H+ (README.md, "The sample profile at tier H") unless the test switch NXAOT_PROFILE_WEIGHTS=0 says
+    // not (then the pack is the one the tiers alone give)
+    if (!o.profile_path.empty()) {
+        const char* sw = std::getenv("NXAOT_PROFILE_WEIGHTS");
+        c.weights = !(sw && std::string_view(sw) == "0");
+        s.profile_weights = c.weights;
+    }
     GapTiers(o, d, plan, &c.tiers, &s);
+    for (const auto& [entry, ff] : plan.fns) s.entry_only_functions += c.SampledAtEntryOnly(entry);
     if (!o.tiers_path.empty() && !WriteTiers(o.tiers_path, c, error)) {
         return false;
     }
@@ -3232,6 +3570,11 @@ bool BuildObjects(const module::Image& image, const BuildOptions& o, const std::
         s.svcs += u.svcs;
         s.traps += u.traps;
         s.splits += u.splits;
+        s.weighted_functions += u.weighted;
+        s.weighted_branches += u.weighted_branches;
+        s.entry_counts += u.entry_counts;
+        s.weighted_calls += u.weighted_calls;
+        s.no_flow_functions += u.no_flow;
         s.refused += u.refused;
         s.lines_lost += u.lines_lost;
         s.spills += u.spills;

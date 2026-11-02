@@ -85,6 +85,13 @@ struct BuildStats {
     uint64_t split_functions = 0, split_parts = 0, splits = 0;  // functions split for size, their parts, the transfers between parts
     double t_join = 0;                        // joining each split function's parts (ld.lld -r): wall clock
     uint64_t profile_samples = 0, profile_offsets = 0, profile_outside = 0;  // --profile: samples read, distinct offsets, offsets in no function
+    // --profile: the samples' weights at tiers H and H+ (README.md, "The sample profile at tier H"): on (off with the test switch
+    // NXAOT_PROFILE_WEIGHTS=0); the functions weighed, the branches given weights, the entry counts and the call sites given counts; and,
+    // not weighed, the functions at H and H+ whose samples are all at their entry (the host's sampler's form) and those (or parts) with
+    // samples profi found no flow for
+    bool profile_weights = false;
+    uint64_t weighted_functions = 0, weighted_branches = 0, entry_counts = 0, weighted_calls = 0, entry_only_functions = 0;
+    uint64_t no_flow_functions = 0;
     uint64_t cache_hits = 0, cache_misses = 0, cache_bytes_read = 0, cache_bytes_written = 0;  // units
     uint64_t cache_hit_functions = 0, cache_miss_functions = 0;  // the functions of those units
     std::string analysis_cache;               // with --cache: "hit", or "miss (why)" (analysis_cache.h)

@@ -796,6 +796,16 @@ int Build(int argc, char** argv) {
         std::printf("aot: profile %s: %llu samples at %llu offsets, %llu outside every function\n", o.profile_path.c_str(),
                     static_cast<unsigned long long>(s.profile_samples), static_cast<unsigned long long>(s.profile_offsets),
                     static_cast<unsigned long long>(s.profile_outside));
+        // The samples' weights at tiers H and H+ (README.md, "The sample profile at tier H"); off with the test switch NXAOT_PROFILE_WEIGHTS=0
+        if (s.profile_weights) {
+            std::printf("aot: profile weights: %llu functions, %llu branches weighted, %llu entry counts, %llu call counts; %llu functions "
+                        "sampled at their entry only, not weighed; %llu with samples profi found no flow for, not weighed\n",
+                        static_cast<unsigned long long>(s.weighted_functions), static_cast<unsigned long long>(s.weighted_branches),
+                        static_cast<unsigned long long>(s.entry_counts), static_cast<unsigned long long>(s.weighted_calls),
+                        static_cast<unsigned long long>(s.entry_only_functions), static_cast<unsigned long long>(s.no_flow_functions));
+        } else {
+            std::printf("aot: profile weights: off (NXAOT_PROFILE_WEIGHTS=0): the profile chooses the tiers only\n");
+        }
     }
     if (!o.cache_dir.empty()) {
         std::printf("aot: cache %s: %llu hits, %llu misses (units; functions %llu hit, %llu missed), %llu bytes read, %llu bytes written, keys "

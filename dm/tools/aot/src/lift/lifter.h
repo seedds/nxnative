@@ -29,6 +29,7 @@
 #include "dynarmic/ir/opcodes.h"
 
 namespace llvm {
+class BasicBlock;
 class CallInst;
 class DISubprogram;
 class Function;
@@ -248,6 +249,15 @@ struct Lifted {
     size_t calls = 0, indirect_calls = 0, tail_calls = 0, indirect_tails = 0, returns = 0, svcs = 0, traps = 0;
     size_t splits = 0;                     // transfers to another part of a split function (FunctionPlan::part_of)
     std::vector<uint64_t> gates;           // the gate sites (FunctionPlan::obs_gates, spin_gates) the function's code calls, sorted, each once
+    // The guest blocks the function was lowered from (the sample profile at tier H, src/build/pack.cpp: samples at guest offsets become the
+    // counts of these blocks), in address order: each [start, end) of guest offsets (the translation runs a block on to its terminal, so the
+    // ranges of blocks that start inside another overlap) and the basic block its code starts in (a branch to start lands there). Empty when
+    // the region was refused; valid until the function is changed
+    struct GuestBlock {
+        uint64_t start = 0, end = 0;
+        llvm::BasicBlock* head = nullptr;
+    };
+    std::vector<GuestBlock> guest_blocks;
 };
 
 // Lifts the region into module as a function called name. The module's data layout should be the target's (lift/jit.h sets it)

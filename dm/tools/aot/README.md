@@ -35,7 +35,7 @@ with no JIT, and print what dynarmic prints. No game runs through it yet, and no
 | Reference runner | [src/run/main.cpp](src/run/main.cpp) (`nxaot_run`) | a corpus NRO under dynarmic's A64 JIT with the corpus's SVCs (output, exit, the thread and synchronization SVCs, its guest threads as contexts switched round robin on one JIT: a deterministic interleaving): the corpus's reference output on x86; `--set` writes a symbol before the run, `--fastmem` gives dynarmic direct memory access (the throughput comparison) |
 | Corpus | [corpus/](corpus/) | nine self-checking programs (eight in C, one in C++) with a crt0 of their own, built with devkitA64 and with clang into eighteen committed NROs ("The corpus") |
 | Function mode | [src/lift/lower_calls.cpp](src/lift/lower_calls.cpp), [lifter.h](src/lift/lifter.h) (`FunctionPlan`, `Convention`) | one guest function as one LLVM function of the convention of design 2.3, swifttailcc or ghccc: calls, returns checked against lr, tail calls, the inline caches, svc as a host call, the stores and reloads the summaries allow ("Calls and returns") |
-| Pack stage | [src/build/](src/build/) (`nxaot build`) | the convention facts of a module (PASS, WRITES, LIVE_AFTER, RV, resume points: [plan.h](src/build/plan.h)); compile units of neighbouring functions (groups at tiers C and W, shards at H and H+; a function over the size limit split into parts joined through the state block), lifted, optimised and compiled on a pool of workers, one LLVM context each; the tables' object (the lookup table, the function map, the line table's bounds, the descriptor of [include/nxaot/aot_module.h](include/nxaot/aot_module.h), jit_entry and the slow-path wrappers); the tiers of design 9.3, by profile with `--profile`; a shared object (and a relocatable object) by lld as a library ("Pack throughput"); with `--target windows` a DLL (and a COFF object): the same code, joined, converted to COFF by [coff.cpp](src/build/coff.cpp) and linked by lld's COFF driver ("Windows packs") |
+| Pack stage | [src/build/](src/build/) (`nxaot build`) | the convention facts of a module (PASS, WRITES, LIVE_AFTER, RV, resume points: [plan.h](src/build/plan.h)); compile units of neighbouring functions (groups at tiers C and W, shards at H and H+; a function over the size limit split into parts joined through the state block), lifted, optimised and compiled on a pool of workers, one LLVM context each; the tables' object (the lookup table, the function map, the line table's bounds, the descriptor of [include/nxaot/aot_module.h](include/nxaot/aot_module.h), jit_entry and the slow-path wrappers); the tiers of design 9.3, by profile with `--profile`, whose samples' positions weigh the code at tiers H and H+ ("The sample profile at tier H"); a shared object (and a relocatable object) by lld as a library ("Pack throughput"); with `--target windows` a DLL (and a COFF object): the same code, joined, converted to COFF by [coff.cpp](src/build/coff.cpp) and linked by lld's COFF driver ("Windows packs") |
 | Caches | [src/cache/](src/cache/), [src/build/analysis_cache.cpp](src/build/analysis_cache.cpp) (`nxaot build --cache`) | design 13: each unit's object under the SHA-256 of everything its functions' code depends on, and the module's analysis (discovery's view and the plan) under the module's, its manifest's and the tool's; a warm repack neither analyses nor compiles ("Pack throughput") |
 | Game-shaped benchmark | [tests/gen_bench.py](tests/gen_bench.py) | a generated program of thousands of functions of the kinds and sizes game code has, built as an NRO with the corpus's run time: the pack stage's throughput measured where the corpus is too small ("Pack throughput"); `--direct` writes the words of a module of any size ("Memory at scale"), `--no-fde-percent` with a share of its functions without FDEs ("Gap code at tier C") |
 | Native run time | [src/rt/](src/rt/) (`nxaot_host`) | the arena below 2^39, the image at its one-to-one address, the library by `dlopen` with its identity checked, the state blocks, the SVC path, the dispatcher's miss path, traps and faults through the line table, the counter ("The native run time") |
@@ -63,7 +63,7 @@ docker build -t nxnative-aot -f docker/Dockerfile.aot docker
 # differential test, the JIT fallback's three modes, the threaded programs, the safepoint pause test, the pack caches, the indirect calls'
 # reloads and the standard entries' signature, the line tables, functions split for size, tiers by profile, Windows packs, the analysis on threads,
 # the differential test at tier C, the host's JIT misses as discovery's input, the workers bounded by memory, gap code at tier C, the tables'
-# object through MC); --tmpfs
+# object through MC, the sample profile at tier H); --tmpfs
 # /src/build:exec,uid=$(id -u),gid=$(id -g) keeps the build tree in memory on a machine short of disk
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$(pwd):/src" -w /src nxnative-aot sh -c \
   'cmake -S dm/tools/aot -B build/aot -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/aot && ctest --test-dir build/aot --output-on-failure'
@@ -95,7 +95,8 @@ profile 7 s; with `ctest -j2` the whole run took 342 s. Phase 5c's `analysis_thr
 builds were loading (cache 16 s). Phase 5d's `corpus_funcdiff_c` (23 tests): 94 s; the whole run with `ctest -j2` 394 s. "Gap code at tier
 C"'s `gaps` (26 tests): 48 s with the tier rule alone, 84 s since it builds the module both ways (the default and `--gap-tier C`); the whole
 run 811 s, one test at a time, with another agent's builds loading the machine at times. "The tables' object through MC"'s `tables` (27
-tests): 33 s; the whole run 948 s, the machine loaded by other builds.
+tests): 33 s; the whole run 948 s, the machine loaded by other builds. "The sample profile at tier H"'s `profile_weights` (28 tests): 5 s;
+the whole run 888 s, one test at a time.
 
 ## Running the harness and the census
 
@@ -1546,8 +1547,9 @@ script passes `<NSP folder>/<id>-work/profile/<module>.tsv` to the module's next
 `--no-profile` ignores it); beside it the host writes the JIT fallback's misses, `<module>.misses.tsv`, which `--misses` takes ("JIT
 misses"). Design 12's form (`dm/games/<id>/aot_profile/<build ID>.tsv` with instruction offsets) is not what it writes:
 function entries are what the tiers need. CTest `t_aot_module` (dm/host) checks a written profile's hot function, and `profile` below builds
-the synthetic module with a profile in the host's form. The counts only choose the tier:
-LLVM's sample profile (the design's "the sample profile" of tier H) is not fed from them yet. A function's tier is part of its cache key;
+the synthetic module with a profile in the host's form. Here the counts only chose the tier; since, the samples' positions inside a function
+weigh its code at H and H+ (the design's "the sample profile" of tier H: "The sample profile at tier H" below), which the host's form, every
+sample at its function's entry, does not have: with it the counts still only choose the tier. A function's tier is part of its cache key;
 units are of one tier each. CTest `profile` ([tests/test_profile.py](tests/test_profile.py)): a profile written by hand for fnptr-gcc,
 fp-clang, except-gcc and switch-gcc (three functions sampled at their entries, last instructions and a second offset, a sample outside every
 function, a count of 0): the logged tiers are C n-3 and H 3 in the balanced mode, H n-3 and H+ 3 in the max mode (fnptr-gcc: `aot: tiers C 58
@@ -1627,7 +1629,8 @@ of it).
   profile never samples is the lever; the host's sampler now writes the profiles (`DM_AOT_PROFILE`, "Tiers by profile"), and no game has been profiled yet.
 - **The cache across game updates**: unchanged (the lowering writes module offsets into the code).
 - **One process per module**: unchanged.
-- **ThinLTO import, devirtualisation, function ordering, LLVM's sample profile at tier H**: open (5 and 6 above).
+- **ThinLTO import, devirtualisation, function ordering**: open (6 above). **The sample profile at tier H**: done since ("The sample
+  profile at tier H"), for profiles with positions, which the host's sampler does not record yet.
 
 ### Phase 5c
 
@@ -1882,7 +1885,8 @@ both warm repacks, and now Monster Hunter Rise's max pack at r = 0.7.
   function's last computation; at Monster Hunter Rise's estimated 600,000 functions that is some hundreds of MiB, not measured on a module of
   that size.
 - **Gap code at tier C** (6 above; done since, "Phase 5d", 6: `--gap-tier C`, off by default), **code generation** at tier W, **the cache across game updates**, **one
-  process per module**, **ThinLTO import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5b left them.
+  process per module**, **ThinLTO import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5b left them (the
+  sample profile done since: "The sample profile at tier H").
 - The runner [tests/run_aot_tests.sh](tests/run_aot_tests.sh) lists its tests by hand and does not run `analysis_threads` yet.
 
 ### Phase 5d
@@ -2301,7 +2305,8 @@ phase 5c left them.
 - **Code generation at tier W** (85 % of its compile): SelectionDAG and the greedy register allocator, as design 9.3 has it.
 - **The analysis** is a third of a balanced pack with a profile; **the cache across game updates**, **one process per module**, **ThinLTO
   import, devirtualisation, function ordering, LLVM's sample profile at tier H**: as phase 5c left them. Gap code: done since (6 above: the
-  discovery fix; tier C as the option `--gap-tier C`, off by default), with what it leaves open there.
+  discovery fix; tier C as the option `--gap-tier C`, off by default), with what it leaves open there; the sample profile at tier H too ("The
+  sample profile at tier H"), with what it leaves open.
 
 ### Memory at scale
 
@@ -2779,6 +2784,145 @@ path) that risk was not taken: the units' objects and the analysis stay the cach
   (`.nxaot_pcs`: the same words in another order, and its relocations), because LLVM's `AsmPrinter::emitPCSections` walks a DenseMap keyed by
   the metadata nodes' addresses. The shared objects and DLLs, which drop that section, and the line table, which nxaot builds from the marks'
   relocations, are deterministic; CTest `tables` compares a relocatable object's other sections.
+
+### The sample profile at tier H
+
+Design 9.3's tier H is "O2, inlining within the shard, the sample profile". Until this, a profile chose the tiers only ("Tiers by profile"): a
+function holding a sample at H (H+ in the max mode), the others at C, and the O2 / O3 pipelines ran on the sampled functions with LLVM's static
+guesses of which branches are taken. Now, with `--profile`, the samples' positions inside each function at H and H+ weigh its lifted code
+before the tier's pipeline ([src/build/pack.cpp](src/build/pack.cpp), "The sample profile at tiers H and H+", `WeighFunction`):
+
+- **The blocks' counts.** The lifter tells which basic block each guest block of the function starts in, and its guest range
+  (`lift::Lifted::guest_blocks`). A guest block's count is its samples per instruction (times 1,024): the samples at offsets in its own range
+  over that range's length, its own range ending where the next block starts. dynarmic translates a block on to its terminal whatever starts
+  inside it, so a loop whose head is in the middle of a straight run is a block of its own and a copy inside the run's block: counting a
+  sample for every block that holds it made a function's first block as hot as the loop after it (int_ops-gcc's CRC loop, below).
+- **The flow.** profi, the profile inference of LLVM's own sample loader (`llvm::applyFlowInference`, `Transforms/Utils/SampleProfileInference.h`,
+  with its tuned costs), makes of these counts at the guest blocks' heads a flow over every basic block of the function, consistent at every
+  branch and join: the blocks the lowering adds (a conditional branch's `if_then` / `if_else`, safepoint polls, call sequences, slow paths)
+  are unknown; the light side of a branch the lowering weighed itself (a poll's call, an inline cache's miss, a call's pending check) and a
+  block that ends in `unreachable` are kept out of the flow unless nothing else can carry it.
+- **What LLVM is given.** Every branch and switch between guest blocks gets `!prof branch_weights` from the flow along its edges, plus 1 so
+  that no edge is zero (a branch is between guest blocks when its successors, followed through unconditional branches and the likely side of
+  the lowering's weighted ones, reach different guest blocks or leave the function; the lowering's own branches inside an instruction, and those
+  it weighed, keep what they have). The function gets its entry count (the flow at its entry) and every call its block's flow as its count:
+  with a sampled profile, LLVM's ProfileSummaryInfo reads a call site's hotness from its own count and takes a call without one, in a function
+  with an entry count, for a cold one. The unit gets a ProfileSummary of kind sample over its weighed functions' guest instructions (each its
+  block's flow), from which ProfileSummaryInfo takes its hot and cold thresholds (99 % and 99.9999 % of the counts). The weighed functions are
+  placed in `.text` explicitly: with a summary, CodeGenPrepare would move a function it finds hot or cold to `.text.hot.` or `.text.unlikely.`,
+  and a split function's parts must lie in one section (`JoinParts`); ordering functions by heat stays H+'s open item ("Phase 5b", 6). No `hot`
+  or `cold` attribute is set: the entry counts and the summary already class the functions, and an attribute on another unit's declaration
+  would make that unit's code depend on this one's samples.
+- **What is not weighed.** A function whose samples are all at its entry: that is the form the host's sampler writes
+  ([dm/host/aot_profile.c](../../host/aot_profile.c) counts per function and writes `<entry offset> <samples>`), which has no positions. Given
+  to profi, its other blocks known to have no samples, the whole flow goes along the cheapest path out of the function and the branch weights
+  are guesses that override LLVM's own (switch-gcc 149 µs without them, 150 to 151 with); an entry count with the blocks' counts spread by
+  LLVM's static estimate (BlockFrequencyInfo) measured no gain either (switch-gcc 149 and 149 µs, switch-clang 109 and 111; both measured
+  unpinned beside another agent's builds, fastest of 2,000), so such a function keeps the
+  tiers' code and the tiers' cache key, and a new profile of the host's keeps its units cached. The functions at C get nothing (their
+  pipeline reads no weights), nor do those at H in the max mode (the profile did not sample them).
+
+The log: `aot: profile weights: <f> functions, <b> branches weighted, <e> entry counts, <c> call counts; <x> functions sampled at their entry
+only, not weighed; <z> with samples profi found no flow for, not weighed` (int_ops-gcc with the fixture below: `28 functions, 53 branches
+weighted, 28 entry counts, 160 call counts; 3 functions sampled at their entry only, not weighed; 0 with samples profi found no flow for`; a
+part of a split function counts as one); with the test switch `NXAOT_PROFILE_WEIGHTS=0`, `aot: profile weights: off (NXAOT_PROFILE_WEIGHTS=0):
+the profile chooses the tiers only`, and the pack is the one the tiers alone give, byte for byte HEAD's.
+
+**The cache key.** A unit's object depends on its own functions' samples only (the summary is the unit's, not the pack's), so a weighed
+function's key (`UnitKey`) holds its samples, the `(offset, count)` pairs in `[entry, limit)`, as a field `samples`; a function that is not
+weighed (no profile, `NXAOT_PROFILE_WEIGHTS=0`, tier C, sampled at its entry only) has no such field, so its key's content is as before and the
+key format stays `nxaot-unit 4`. A shard's key holds its functions' keys: a profile that changes outside a unit's functions keeps the unit,
+one that changes a sample inside them misses it (CTest `profile_weights`).
+
+**Recording profiles with positions.** The host's sampler does not record them yet (it maps the interrupted pc to its function through the
+pack's function map). The profiles measured here, and the fixture of CTest `profile_weights` ([tests/profile_weights.tsv](tests/profile_weights.tsv)),
+were recorded natively on the corpus's tier W packs (HEAD's binary, no profile) run by `nxaot_host`, with a sampler preloaded into it (not part
+of the repository): a `CLOCK_MONOTONIC` timer signal 10,000 times per second on the thread that runs the guest, the interrupted rip stored when
+it lies in the pack's code, and at exit each address mapped to its guest offset through the pack's DWARF line table (line = guest offset, the
+innermost inlined frame's; `llvm-symbolizer`); 3 to 16 % of the samples land on line 0 and are dropped. int_ops-gcc with `int_ops_rounds = 2000`
+(0.82 s): 7,214 samples in the pack's code, 6,966 kept at 296 offsets in 31 functions.
+
+**Measured.** HEAD's binary (ffa2f80, built in the same image) and this one; the packs at tier H with a profile recorded as above, weights off
+(`NXAOT_PROFILE_WEIGHTS=0`, byte for byte HEAD's pack with the same profile in every case) and on; each run pinned to one CPU (`taskset -c 3`),
+the fastest of N runs of `nxaot_host --repeat N`, 6 rounds alternating the two packs (the median, and the minimum to maximum of the 6 in
+parentheses), the machine's one-minute load 5 to 7 (another agent's tests); text is the units' `.text`:
+
+| Program (fastest of N) | profile: samples, offsets | weights off | weights on | change | text off → on (bytes) |
+|---|---:|---:|---:|---:|---:|
+| int_ops-gcc, `int_ops_rounds = 200` (10) | 6,966, 296 | 68.07 ms (67.72 .. 69.62) | 68.40 ms (68.10 .. 68.76) | +0.5 % | 130,154 → 130,513 |
+| int_ops-clang, `int_ops_rounds = 200` (10) | 6,831, 383 | 71.13 ms (70.92 .. 75.29) | 71.68 ms (71.37 .. 72.66) | +0.8 % | 106,169 → 106,584 |
+| switch-gcc (2,000) | 7,571, 1,863 | 149 µs (149 .. 149) | 133 µs (133 .. 133) | −10.7 % | 394,957 → 394,309 |
+| switch-clang (2,000) | 5,281, 678 | 109 µs (109 .. 110) | 99 µs (99 .. 99) | −9.2 % | 99,217 → 111,697 |
+| simd-gcc (5,000) | 4,519, 854 | 42 µs (42 .. 42) | 41 µs (41 .. 42) | −2.4 % (1 µs resolution) | 154,931 → 156,953 |
+| except-gcc (50) | 29,061, 474 | 25.12 ms (24.82 .. 25.96) | 25.03 ms (24.79 .. 25.40) | −0.4 % (most of it outside the pack) | 102,344 → 105,374 |
+| fnptr-gcc (20,000) | 646, 142 | 6 µs (6 .. 6) | 6 µs (4 .. 6) | 0 (1 µs resolution) | 79,815 → 79,901 |
+| benchmark, 4,000 functions (3; 3 rounds) | 1,068, 761 | 1,512.8 ms (1,505.1 .. 1,551.7) | 1,505.6 ms (1,502.0 .. 1,510.0) | −0.5 % (98 % of it is the JIT fallback) | 11,488,155 → 11,496,212 |
+
+An earlier session, at a load of 1.4 to 2.4 and with the call-graph profile still on (below), gave int_ops-gcc 70.04 and 70.10 ms, int_ops-clang
+73.56 and 73.01, switch-gcc 149 and 133 µs, switch-clang 109 and 98, simd-gcc 42 and 41, except-gcc 25.07 and 24.95 ms, the benchmark 1,502.6
+and 1,494.3. The layout moves int_ops by itself: the same pack under eight file names (the soname's length shifts the code by a few bytes),
+3 rounds each, int_ops-gcc's medians run 69.7 to 70.7 ms with the weights off and 69.6 to 70.5 on (means 70.05 and 69.93, −0.2 %),
+int_ops-clang's 72.3 to 73.9 and 72.1 to 73.3 (means 72.88 and 72.69, −0.3 %); switch-gcc's 148 to 149 µs off and 133 to 136 µs on, a gain
+in every layout (means −9.1 %). So int_ops, simd, except and fnptr are within the noise and switch gains 9 to 11 %. Where it comes from
+(switch, `NXAOT_PROFILE_WEIGHTS` variants of a measurement build): the branch weights alone 136 µs (gcc) and 106 µs (clang), the entry and
+call counts with the summary alone 150 and 105 µs, both 133 and 98 µs: block placement from the weights, and with the counts block placement's
+and the inliner's profile mode (a function with an entry count is laid out with the profile's thresholds; switch-clang's text grows by 13 %,
+8 more of the 112 guest call sites its optimised IR keeps without weights inlined; switch-gcc's keeps its 144).
+
+What was found on the way:
+
+- **Overlapping blocks.** With every sample counted for every block that holds it (above), int_ops-gcc's CRC function had its entry block as
+  hot as the loop after it, profi carried the loop's flow through the function's entry and out of the loop at each pass (the inner loop's back
+  edge at 49 %), and int_ops-gcc ran 1.1 % slower on average over the eight layouts and up to 3.5 % in three of them; with each block's own
+  range the back edge is at 96.6 % (its true share seven in eight) and int_ops is within the noise.
+- **The call-graph profile.** With entry counts, the O2 / O3 module pipelines' CGProfilePass writes a `.llvm.call-graph-profile` section, by
+  which lld orders the units' code; a Windows pack's conversion to COFF stopped on it (`ELF to COFF: a REL section`). Measured without it:
+  switch-gcc 133 µs either way, switch-clang 98 and 99, int_ops-gcc 68.97 and 69.14 ms; so it is off (`PipelineTuningOptions::CallGraphProfile`,
+  which writes nothing without entry counts), the units keep their order, and a Windows pack with a profile builds.
+- **Functions profi gives no flow.** 54 of the benchmark's 223 functions sampled away from their entry (2 of switch-gcc's, 5 of except-gcc's),
+  with 1 to 10 samples each (38 at most): their sampled blocks are reached only through blocks with none, and keeping a block that drew no
+  sample at zero costs profi less than raising a path to it, so it takes them for noise. They are not weighed (logged: `<z> with samples profi
+  found no flow for, not weighed`).
+
+**Pack time.** The benchmark (4,088 functions: 438 at H, 3,650 at C), 8 workers, the median of 3 alternated runs, a load of 4.5 to 8: lifting
+3.63 → 3.70 s (CPU, profi included), optimisation 5.76 → 5.88 s, code generation 15.87 → 16.19 s, the compile's wall 3.32 → 3.37 s, the whole
+pack 5.92 → 5.96 s (+0.7 %); switch-gcc (31 functions at H) 0.99 → 1.02 s. The compile's CPU grows by 2 %, all of it in the units at H
+(profi, and more code inlined at hot call sites): the C units are the same objects as HEAD's (below).
+
+**Identity.** HEAD's binary is ffa2f80's, built from a clean checkout in the same image. Without a profile: the corpus packs of
+[tests/build_packs.sh](tests/build_packs.sh) (18 NROs, the synthetic game module and the host-function module's two, for Linux and in `win64`)
+42 of 42 the same bytes; the 18 NROs in the max mode (tier H+) 18 of 18; the 16,000-function `--direct` module (seed 2) at tier W (20,230,360
+bytes), at tier C (37,466,832) and as a DLL (20,095,488) the same bytes. With a profile: `NXAOT_PROFILE_WEIGHTS=0` gives HEAD's pack for every
+program measured above; the profiles t_aot_module's runs wrote through the host's sampler (`0x1ec 399` in one, `0x1ec 398` and `0x1dc 1` in
+another: synth_hot and synth_cut) give the synthetic module's pack HEAD's binary gives, with the weights on (`2 functions sampled at their
+entry only, not weighed`); and the unit objects of the benchmark
+and of switch-gcc with their profiles, packed into a cache by HEAD's binary and this one (the line marks' section aside, which LLVM writes in an
+order of its own: "The tables' object through MC"): every object at tier C the same bytes (836 of 931 objects the same, the 95 that differ
+each holding functions at H only; switch-gcc 14 of 43, the 29 others at H). The weighted packs are the same bytes with 1, 4 and 8 workers and
+in two runs (the benchmark, switch-gcc, switch-clang, int_ops-gcc), and print their expected output natively in the balanced and the max mode
+(int_ops, switch, simd, except, fnptr). CTest `profile_weights` ([tests/test_profile_weights.py](tests/test_profile_weights.py)) checks
+int_ops-gcc's fixture: the log against the IR (entry counts on the functions sampled away from their entry, the branch weights besides the
+lowering's own, a summary of kind sample in each unit with an entry count, nothing on the functions at C), the same pack with 1 and 4
+workers and twice, `NXAOT_PROFILE_WEIGHTS=0` adding no metadata and giving the pack of the host sampler's form of the same profile, the
+cache (a sample outside every function, or at an entry-only function's entry, hits every unit; a sample changed in a weighed function misses
+its unit only), and the packs' output. dm/host's tests with this binary's corpus packs (the Linux build, `-DNXAOT_PACKS`):
+`t_aot_host` 45 checks, `t_aot_module` 33 / 34 / 3 + 14, `t_aot_hostfn` 50 + 11, `t_host_program` 17 and `t_garena` 32, 5 of 5 passed.
+
+**What is left.**
+
+- **Positions from the host's sampler.** The x86 host's sampler (dm/host/aot_profile.c) writes each function's samples at its entry, which
+  weigh nothing; a profile recorded in a game with it gives the tiers' pack, as before. Design 12's form (sampled instruction offsets) needs
+  the sampler to map the interrupted pc to its guest offset through the pack's line table (its `.nxaot.lines` runs name only the guest memory
+  accesses, so the nearest preceding row; or the DWARF line table, as the recording above did) and to write `<offset> <samples>` rows, which
+  `--profile` reads as they are.
+- **LLVM's sample loader** (`SampleProfileLoaderPass` with a profile file, design 12's "an LLVM sample profile"): not taken, as the direct
+  metadata measured a gain where the code branches and none to lose elsewhere; it would add a profile file per unit, guest offsets as line
+  offsets from each function's line, and its inline replay, which a profile of guest code has no inline frames for.
+- **The hot indirect targets** of design 12 (an inline cache's misses per call site with their targets): not recorded, so no value profile on
+  indirect calls and no devirtualisation.
+- **The entry block's samples** include those of the prologue (its instructions carry the entry's line): a short function's entry block
+  looks hotter than its body; small, and left.
+- **Function ordering by heat** (`.text.hot`): every function stays in `.text` (above), H+'s open item.
 
 ## The lock file
 

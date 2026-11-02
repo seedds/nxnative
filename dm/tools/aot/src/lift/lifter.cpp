@@ -371,6 +371,7 @@ Lifted FunctionLifter::Run(const std::string& name) {
         Prologue();
     }
     for (auto& [pc, block] : blocks) {
+        out.guest_blocks.push_back({pc, A64::LocationDescriptor{block.EndLocation()}.PC(), bbs[pc]});  // Lifted::guest_blocks
         B.SetInsertPoint(bbs[pc]);
         LowerBlock(block);
         if (!error.empty()) {
@@ -390,6 +391,7 @@ Lifted FunctionLifter::Run(const std::string& name) {
         } else {
             F->eraseFromParent();
         }
+        out.guest_blocks.clear();  // their basic blocks are gone
         out.error = error;
         return out;
     }

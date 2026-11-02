@@ -13,10 +13,12 @@ Update 1.0.1 (`v65536`), Unity 2018.3.9f1 IL2CPP with FMOD and NintendoSDK_movie
 ## Extended checks (2026-11-02)
 
 - The complete native graphics suite passed (`make -C dm/gfx/tests GAME=0100EA300DE6E000 run`), including its separately invoked pipeline-archive test. Graphics Python discovery passed 200 tests with the compiler, Metal, GPU and native fixtures enabled; the one discovery skip is that separately invoked archive test. The geometry fixture exercised 40 PrimitiveID GPU cases. All 13 image-atomic tests passed with Metal/GPU checks enabled, and all 42 iOS Python tests passed.
-- Host unit tests were run through the end, including after a failure: `t_codec_video.c:147` assumes AV1 submission succeeds, but this M1 Pro has no hardware AV1 decoder. The same assertion is the only failure in the host ASan/UBSan run; no sanitizer findings were reported. The test and AV1 implementation are unchanged from `main`. Host `tsan`, `memory-tsan`, and `tsan-threads` passed. Graphics `thermal-tsan`, `perf-order-tsan`, and `gl-imports` passed. Texture tests and their ASan run passed (5,344 CPU checks).
+- The earlier host and ASan/UBSan runs completed with one AV1 assertion failure on this M1 Pro. After updating to `f6bf0d9b`, the upstream dav1d software decoder resolved it: `t_codec_video` passed under ASan/UBSan, including actual AV1 frame decoding. No sanitizer findings were reported. The focused retest also passed 147 HID checks, Apple controller mapping and 19 raw-HID checks; the entire suite was not rerun after the update. Host `tsan`, `memory-tsan`, and `tsan-threads` passed. Graphics `thermal-tsan`, `perf-order-tsan`, and `gl-imports` passed. Texture tests and their ASan run passed (5,344 CPU checks).
 - Further gameplay covered all ten sign-building rounds (2/10), the result and answer-review screens; Survival's question video, wrong-answer feedback and result; lesson text/images and page/chapter navigation; progression tabs and history; changing/restoring the voice slider; and changing the avatar. History lists the completed training, sign-building and Survival sessions. The Survival leaderboard connection reported failure and online play is disabled in the menu.
 - A separate synthetic save unlocked the mock exam for validation: all 40 questions completed, the result was 5/40, and answer review worked. The same fixture completed the twenty-question timed training level 130 (0/20), including countdown, timeout, feedback and result handling. These checks do not validate the normal unlock paths; the original progression-test save was not modified.
 - The extended headless gameplay overlapped synthetic audio-device tests and logged two recovered AudioUnit interruptions. It had no crash or shader-load errors; this overlap is not used as an audio-stability measurement.
+
+- The `f6bf0d9b` Mac rebuild passed with all 614 shader libraries and pipeline prebuild; the intro and menus rendered correctly. Two audio callback interruptions (214 and 236 ms) recovered through AudioUnit restarts. This focused retest did not rebuild the IPA or test an iPhone.
 
 ## What it needs
 
@@ -37,5 +39,5 @@ The supplied combined XCI lists the update before the base. The original extract
 ## Open
 
 - iPhone testing requires the owner to sideload the unsigned IPA; no device installation or signing was performed.
-- Local multiplayer did not pass: two physical Pro Controllers were registered separately by the windowed host, and the controller applet reported two connected, but the owner reported that pressing A on controller 2 did not join a second player. The player-selection screen showed only player 1. The cause is not established.
+- Local multiplayer still did not pass in the `f6bf0d9b` retest: two physical Pro Controllers were registered separately by the rebuilt windowed host, and the controller applet reported two connected, but neither A nor B on controller 2 joined a second player. The cause is not established.
 - This is sampled mode coverage, not an exhaustive pass through every question, lesson, training level or normal unlock path.

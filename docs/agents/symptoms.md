@@ -261,6 +261,10 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a native port cannot create or join a game's LAN or local-wireless room because its socket and LDN service hooks always return unavailable. → [Opt-in native LAN sockets and LDN over IP](../reference/services.md#opt-in-native-lan-sockets-and-ldn-over-ip)
 - the SDK's cancellable `GetHostByName` path reaches an unavailable resolver service or cannot retire its pending lookup when canceled or finalized. → [SDK DNS cancellation cannot retire an in-flight lookup](../reference/services.md#sdk-dns-cancellation-cannot-retire-an-in-flight-lookup)
 
+## Optional online-service backend
+
+- an enabled native socket connects, but the SDK's TLS context is still an unavailable-service cut. → [Native client TLS](../reference/online-services.md#native-client-tls)
+
 ## Movies
 
 - abort in NVIDIA's video path (`NvRmChannelOpen` → `NvOsDrvOpen`). → [The SDK's hardware decoder opens nvdrv](../reference/movies.md#the-sdks-hardware-decoder-opens-nvdrv)

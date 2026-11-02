@@ -398,3 +398,39 @@ $(B)/t_resolver_live: t_resolver_live.c t_net_write_stub.c ../hle_net_backend.c 
 .PHONY: resolver-live
 resolver-live: $(B)/t_resolver_live
 	$(B)/t_resolver_live
+# Native TLS and explicit provider policy; all certificates are ephemeral fixtures.
+DM_OPENSSL_ROOT ?= $(shell python3 ../../tools/apple_crypto.py macos)
+PRIVATE_PKI_FLAGS = -DDM_OPENSSL_X509 "-I$(DM_OPENSSL_ROOT)/include"
+PRIVATE_PKI_LIB = "$(DM_OPENSSL_ROOT)/lib/libcrypto.a"
+OPENSSL_TOOL ?= $(shell command -v openssl)
+SSL_SOURCES = t_ssl.m ../hle_ssl.c ../hle_ssl_apple.m ../hle_nextendo_x509.c ../hle_net_backend.c ../hle_bigstack.c ../entry.S
+SSL_DEPS = t_gate_fixture.h $(SSL_SOURCES) ../ssl_backend.h ../net_socket.h ../hle.h $(GAME_H) test_ssl_transport.py
+SSL_FLAGS = -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror -Wno-unused-function $(GINC)
+$(B)/t_ssl $(B)/t_ssl_asan $(B)/t_nextendo_routes $(B)/t_nextendo_routes_asan: ../ssl_trace.h
+$(B)/t_ssl_trace: t_ssl_trace.c ../ssl_trace.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_ssl_trace.c
+$(B)/t_ssl_trace_asan: t_ssl_trace.c ../ssl_trace.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_ssl_trace.c
+$(B)/t_ssl: $(SSL_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -o $@ $(SSL_SOURCES) -framework Foundation -framework Security
+$(B)/t_ssl_asan: $(SSL_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -fsanitize=address,undefined -mllvm -asan-globals=0 -fno-omit-frame-pointer -o $@ $(SSL_SOURCES) -framework Foundation -framework Security
+.PHONY: ssl ssl-sanitize
+ssl: $(B)/t_ssl $(B)/t_ssl_trace
+	$(B)/t_ssl_trace
+	$(PYTHON) test_ssl_transport.py $(B)/t_ssl
+ssl-sanitize: $(B)/t_ssl_asan $(B)/t_ssl_trace_asan
+	$(B)/t_ssl_trace_asan
+	$(PYTHON) test_ssl_transport.py $(B)/t_ssl_asan
+
+$(B)/t_nextendo_x509: t_nextendo_x509.c ../hle_nextendo_x509.c ../nextendo_x509.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -o $@ t_nextendo_x509.c ../hle_nextendo_x509.c $(PRIVATE_PKI_LIB)
+$(B)/t_nextendo_x509_asan: t_nextendo_x509.c ../hle_nextendo_x509.c ../nextendo_x509.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_nextendo_x509.c ../hle_nextendo_x509.c $(PRIVATE_PKI_LIB)
+.PHONY: nextendo-x509 nextendo-x509-sanitize
+nextendo-x509: $(B)/t_nextendo_x509
+	$(PYTHON) test_nextendo_x509.py $(B)/t_nextendo_x509 "$(OPENSSL_TOOL)"
+nextendo-x509-sanitize: $(B)/t_nextendo_x509_asan
+	$(PYTHON) test_nextendo_x509.py $(B)/t_nextendo_x509_asan "$(OPENSSL_TOOL)"
+
+run: ssl nextendo-x509

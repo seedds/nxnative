@@ -1,0 +1,31 @@
+// Index conversions without a restart index (docs/design/vulkan-backend.md 2.7; vk_index.c, whose rules table this follows): the 32-bit index list a draw is made with, one
+// output index per thread over a grid stride, from the game's indices (1, 2 or 4 bytes at any byte offset) or, for a draw without indices, the implicit 0 .. n-1 (the draw adds
+// first as its vertex offset). Modes: 0 the indices widened as they are (with restart on, the restart index becomes all ones, the one Vulkan restarts at), 1 quads, 2 quad
+// strips, 3 triangle fans and polygons, 4 line loops. vk_index.c records it in the submission's prologue, or before the draw's pass when the GPU writes the indices earlier in the
+// submission. Push constants: the source's device address (aligned down to 4 bytes) and the byte offset there, the destination, the index size (0: none), the input count, the
+// output count, the mode, restart on and its index, the grid stride (the threads dispatched)
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 64) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer W { uint v[]; };
+layout(push_constant) uniform P { uvec2 src, dst; uint shift, isz, n, nout, mode, restart, ri, stride; } p;
+uint fetch(uint k) {   // index k: its bytes may straddle two words (k * isz is never formed, so k may reach 2^32 / isz)
+    if (p.isz == 0u) return k;
+    uint b = p.shift + (k & 3u) * p.isz, w = (k >> 2) * p.isz + (b >> 2), s = (b & 3u) * 8u;
+    uint v = W(p.src).v[w] >> s;
+    if (s + p.isz * 8u > 32u) v |= W(p.src).v[w + 1u] << (32u - s);
+    return p.isz == 4u ? v : p.isz == 2u ? v & 0xffffu : v & 0xffu;
+}
+void main() {
+    for (uint j = gl_GlobalInvocationID.x; j < p.nout; j += p.stride) {
+        uint k = j, t, c;
+        if (p.mode == 1u) { t = j / 6u; c = j - 6u * t; k = 4u * t + (c == 0u || c == 3u ? 0u : c == 1u ? 1u : c == 2u || c == 4u ? 2u : 3u); }        // quad t: (0 1 2) (0 2 3)
+        else if (p.mode == 2u) { t = j / 6u; c = j - 6u * t; k = 2u * t + (c == 0u || c == 3u ? 0u : c == 1u ? 1u : c == 2u || c == 4u ? 3u : 2u); }   // quad t = (2t, 2t+1, 2t+3, 2t+2), as quads
+        else if (p.mode == 3u) { t = j / 3u; c = j - 3u * t; k = c == 0u ? 0u : t + c; }                                                                 // triangle t: (0, t+1, t+2)
+        else if (p.mode == 4u) { t = j >> 1; k = (j & 1u) == 0u ? t : t + 1u == p.n ? 0u : t + 1u; }                                                     // line t: (t, t+1), the last (n-1, 0)
+        uint v = fetch(k);
+        if (p.mode == 0u && p.restart != 0u && v == p.ri) v = 0xffffffffu;
+        W(p.dst).v[j] = v;
+    }
+}

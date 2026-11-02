@@ -40,12 +40,13 @@ typedef struct {
     uint32_t gpl_indep_interp : 1;      // graphicsPipelineLibraryIndependentInterpolationDecoration: a vertex library need not match its fragment partner's Flat / NoPerspective
 } hostvk_caps;
 
-// The optional extensions of design 9.1's second list (Vulkan 1.4 and ASTC are reported beside them). A bit of hostvk_dev.opt_present per entry
+// The optional extensions of design 9.1's second list (Vulkan 1.4 and ASTC are reported beside them). A bit of hostvk_dev.opt_present per entry; the device line names the ones
+// the device lacks
 enum {
     HOSTVK_OPT_GPL, HOSTVK_OPT_EDS3, HOSTVK_OPT_VERTEX_INPUT, HOSTVK_OPT_DESCRIPTOR_BUFFER, HOSTVK_OPT_PRESENT_ID, HOSTVK_OPT_PRESENT_WAIT, HOSTVK_OPT_COND_RENDER,
     HOSTVK_OPT_DEPTH_CLIP_CONTROL, HOSTVK_OPT_FEEDBACK_LOOP, HOSTVK_OPT_CUSTOM_BORDER, HOSTVK_OPT_PROVOKING_VERTEX, HOSTVK_OPT_CONSERVATIVE, HOSTVK_OPT_SAMPLE_LOCATIONS,
     HOSTVK_OPT_BLEND_ADVANCED, HOSTVK_OPT_DEPTH_BIAS_CONTROL, HOSTVK_OPT_MEMORY_BUDGET, HOSTVK_OPT_CALIBRATED_TIMESTAMPS, HOSTVK_OPT_HOST_IMAGE_COPY, HOSTVK_OPT_PIPELINE_BINARY,
-    HOSTVK_OPT_SHADER_OBJECT, HOSTVK_OPT_N
+    HOSTVK_OPT_SHADER_OBJECT, HOSTVK_OPT_LIST_RESTART, HOSTVK_OPT_N   // LIST_RESTART: VK_EXT_primitive_topology_list_restart (the index conversions, 2026-11-02)
 };
 extern const char *const hostvk_opt_names[HOSTVK_OPT_N];   // the extension names, in that order
 
@@ -148,6 +149,8 @@ typedef struct hostvk_dev {
         uint32_t prim_gen : 1, prim_gen_discard : 1;   // VK_EXT_primitives_generated_query (and WithRasterizerDiscard): NVN's PRIMITIVES_GENERATED counter
         uint32_t stencil_export : 1;          // VK_EXT_shader_stencil_export: a fragment shader writes stencil (draw-based depth-stencil copies)
         uint32_t vp_swizzle_nv : 1;           // VK_NV_viewport_swizzle with extendedDynamicState3ViewportSwizzle: NVN's viewport swizzles in fixed function (NVIDIA)
+        // The index conversions (2026-11-02, vk_index.c): primitive restart on point, line and triangle lists and their adjacency forms drawn natively (else converted on the GPU)
+        uint32_t list_restart : 1;            // VK_EXT_primitive_topology_list_restart with primitiveTopologyListRestart (primitiveTopologyPatchListRestart is not enabled: patch lists with restart stay converted)
         // Step P4a (design 7.3): the window presenter's vsync source, enabled only with a surface wanted (want_surface)
         uint32_t present_wait : 1;            // VK_KHR_present_id and VK_KHR_present_wait with presentId and presentWait: when each present reached the screen
         uint32_t display_timing : 1;          // VK_GOOGLE_display_timing: the refresh duration and the actual present times

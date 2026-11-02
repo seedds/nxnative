@@ -59,6 +59,7 @@ const char *const hostvk_opt_names[HOSTVK_OPT_N] = {
     [HOSTVK_OPT_HOST_IMAGE_COPY] = VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME,
     [HOSTVK_OPT_PIPELINE_BINARY] = VK_KHR_PIPELINE_BINARY_EXTENSION_NAME,
     [HOSTVK_OPT_SHADER_OBJECT] = VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
+    [HOSTVK_OPT_LIST_RESTART] = VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME,
 };
 const char *const hostvk_eds_names[HOSTVK_EDS_N] = {
     [HOSTVK_EDS_LOGIC_OP] = "extendedDynamicState2LogicOp",
@@ -100,6 +101,8 @@ typedef struct {
     VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT ffbl;
     VkPhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT ffbld;
     VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT fpgq;
+    int list_restart;   // VK_EXT_primitive_topology_list_restart (the index conversions)
+    VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT flr;
     VkPhysicalDeviceTransformFeedbackPropertiesEXT pxfb;
     VkPhysicalDeviceFeatures2 f;
     VkPhysicalDeviceVulkan12Features f12;
@@ -165,6 +168,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     q->present_id = has_ext(q, VK_KHR_PRESENT_ID_EXTENSION_NAME);
     q->present_wait = has_ext(q, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
     q->display_timing = has_ext(q, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+    q->list_restart = has_ext(q, VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME);
     vkGetPhysicalDeviceProperties(p, &q->p.properties);
     if (q->p.properties.apiVersion < VK_API_VERSION_1_3) return;   // below the baseline: the 1.2 / 1.3 structures may not be chained
     void **next = &q->f.pNext;
@@ -188,6 +192,7 @@ static void devq_query(VkPhysicalDevice p, devq *q) {
     if (q->fbl_dyn) { q->ffbld.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_FEATURES_EXT; *next = &q->ffbld; next = &q->ffbld.pNext; }
     if (q->pgq) { q->fpgq.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT; *next = &q->fpgq; next = &q->fpgq.pNext; }
     if (q->present_id) { q->fpid.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR; *next = &q->fpid; next = &q->fpid.pNext; }
+    if (q->list_restart) { q->flr.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT; *next = &q->flr; next = &q->flr.pNext; }
     if (q->present_wait) { q->fpw.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR; *next = &q->fpw; next = &q->fpw.pNext; }
     vkGetPhysicalDeviceFeatures2(p, &q->f);
     next = &q->p.pNext;
@@ -512,6 +517,10 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (d->x.present_wait) { ext[ne++] = VK_KHR_PRESENT_ID_EXTENSION_NAME; ext[ne++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME; }
     d->x.display_timing = o->want_surface && q->display_timing;
     if (d->x.display_timing) ext[ne++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
+    // The index conversions (2026-11-02, vk_index.c): restart on lists drawn natively, the vertices of a list primitive a restart index cuts short dropped as NVN drops them
+    // (the restart index restarts primitive assembly); patch lists keep their conversion (primitiveTopologyPatchListRestart is not enabled)
+    d->x.list_restart = q->list_restart && q->flr.primitiveTopologyListRestart;
+    if (d->x.list_restart) ext[ne++] = VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME;
     d->x.float64 = cf->shaderFloat64 != 0; d->x.int64 = cf->shaderInt64 != 0; d->x.int16 = cf->shaderInt16 != 0;
     d->x.storage_without_format = cf->shaderStorageImageReadWithoutFormat && cf->shaderStorageImageWriteWithoutFormat;
     d->x.multi_viewport = cf->multiViewport != 0; d->x.depth_bounds = cf->depthBounds != 0;
@@ -567,6 +576,7 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     VkPhysicalDeviceDepthBiasControlFeaturesEXT fdbc = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT, NULL, VK_TRUE, d->x.dbc_force_unorm, d->x.dbc_float, d->x.dbc_exact};
     VkPhysicalDeviceLineRasterizationFeaturesEXT fline = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT, NULL, d->x.line_rect, d->x.line_bresenham};
     VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT fpgq = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT, NULL, VK_TRUE, d->x.prim_gen_discard, VK_FALSE};
+    VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT flr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT, NULL, VK_TRUE, VK_FALSE};
     void **next = &f.pNext;
     *next = &f12; next = &f12.pNext;
     *next = &f13; next = &f13.pNext;
@@ -584,6 +594,7 @@ static int make_device(const hostvk_opts *o, const devq *q, hostvk_dev *d, char 
     if (d->x.depth_bias_control) { *next = &fdbc; next = &fdbc.pNext; }
     if (d->x.line_raster) { *next = &fline; next = &fline.pNext; }
     if (d->x.prim_gen) { *next = &fpgq; next = &fpgq.pNext; }
+    if (d->x.list_restart) { *next = &flr; next = &flr.pNext; }
     VkPhysicalDevicePresentIdFeaturesKHR fpid = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, NULL, VK_TRUE};
     VkPhysicalDevicePresentWaitFeaturesKHR fpw = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR, NULL, VK_TRUE};
     if (d->x.present_wait) { *next = &fpid; next = &fpid.pNext; *next = &fpw; next = &fpw.pNext; }

@@ -1,8 +1,9 @@
 // Indexed fans and quads keep restart-separated polygons apart: the Vulkan port of dm/gfx/tests/t_primitive_restart.m, its twelve cases (1-, 2- and 4-byte indices, the all-ones
 // restart index or a custom one, triangle fans and quads) over the same index list, two rectangles lit and the gap and outside untouched. Vulkan restarts strips and fans at the
-// all-ones index only and has no quads, so most cases go through the backend's index conversion (nvn_primitive.h). Added for the Vulkan backend: quads whose indices a GPU copy
-// writes earlier in the same submission, which the CPU cannot read when the draw is encoded: the backend's GPU index helper (shaders/quad_index.comp) expands them, for each
-// index size. Checks: per case the pixels, and the validation check
+// all-ones index only and has no quads, so most cases go through the backend's index conversion on the GPU (vk_index.c: quads expanded with restart, a fan's custom restart index
+// widened to all ones). Added for the Vulkan backend: quads whose indices a GPU copy writes earlier in the same submission, which the CPU cannot read when the draw is encoded:
+// converted on the GPU at the draw's place (shaders/index_expand.comp), for each index size. Every primitive, index size and restart form: t_vk_index_convert. Checks: per case
+// the pixels, and the validation check
 #include "t_vk_harness.h"
 #include "shaders/gen/restart_vert.h"
 #include "shaders/gen/red_frag.h"

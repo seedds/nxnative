@@ -372,7 +372,8 @@ host_test(t_vk_import SOURCES ../../gfx/hostvk/tests/t_vk_import.c ${HOSTVK_SRC}
 set(HOSTVK_BACKEND_SRC vk_backend.c vk_memory.c vk_texture.c vk_shader.c vk_pipeline.c vk_commands.c vk_device.c vk_import.c vk_gpl.c vk_cache.c vk_prewarm.c   # vk_gpl, vk_cache, vk_prewarm: phase P5
     vk_predict.c   # the look-ahead over the rest of a submission (P5, design 3.3)
     vk_present.c   # the window presenter and the vsync source (step P4a)
-    vk_alloc.c)    # the device memory allocator (decision D2, step D2)
+    vk_alloc.c     # the device memory allocator (decision D2, step D2)
+    vk_index.c)    # the index conversions on the GPU (design 2.7)
 list(TRANSFORM HOSTVK_BACKEND_SRC PREPEND ${REPO}/dm/gfx/hostvk/)
 list(APPEND HOSTVK_BACKEND_SRC ${REPO}/dm/gfx/tex/nvn_fmt_vk.c ${REPO}/dm/gfx/tex/astc_decode.c ${REPO}/dm/third_party/volk/volk.c)   # astc_decode.c: the CPU fallback of the ASTC decode (P7)
 add_library(nvn_vk STATIC ${HOSTVK_BACKEND_SRC})
@@ -442,7 +443,7 @@ target_compile_options(nvn_front_obj PRIVATE ${HOST_FLAGS})
 target_include_directories(nvn_front_obj PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${GEN} ${PROFILE_DIR} ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include)
 target_link_libraries(nvn_front_obj PUBLIC nxplat)
 target_compile_definitions(nvn_front_obj PRIVATE DM_TEST_GUEST_C)   # these tests call the frontend as C functions and link no execution engine: its guest call (the command-memory callback) takes the plain form
-foreach(t IN ITEMS queue_origin clear_ds clear_tex depth16_clear integer_blend primitive_restart rast_discard vbuf readback view_swizzle queries cond_render copy_alias)
+foreach(t IN ITEMS queue_origin clear_ds clear_tex depth16_clear integer_blend primitive_restart rast_discard vbuf readback view_swizzle queries cond_render copy_alias index_convert)
     host_test(t_vk_${t} SOURCES ../../gfx/tests/vk/t_vk_${t}.c PROFILE INCLUDES ${REPO}/dm/gfx/nvn ${REPO}/dm/gfx/nvn/include ${REPO}/dm/gfx/tests/vk TMPDIR ENV ${HOSTVK_ENV})
     target_link_libraries(t_vk_${t} PRIVATE nvn_front_obj nvn_vk)
 endforeach()
